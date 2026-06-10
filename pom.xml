@@ -67,8 +67,12 @@
         <module>dist</module>
         <module>integration_tests</module>
         <module>shuffle-plugin</module>
-        <module>sql-plugin</module>
         <module>sql-plugin-api</module>
+        <module>sql-plugin-format</module>
+        <module>sql-plugin-fileio</module>
+        <module>sql-plugin-columnar</module>
+        <module>sql-plugin-shims</module>
+        <module>sql-plugin</module>
         <module>tests</module>
         <module>tools</module>
         <module>udf-compiler</module>
@@ -977,6 +981,8 @@
         <rapids.module>.</rapids.module>
         <rapids.secondaryCacheDir>${spark.rapids.project.basedir}/target/${spark.version.classifier}/.sbt/1.0/zinc/org.scala-sbt</rapids.secondaryCacheDir>
         <allowConventionalDistJar>false</allowConventionalDistJar>
+        <rapids.shimplify.skip>false</rapids.shimplify.skip>
+        <rapids.build.info.skip>false</rapids.build.info.skip>
         <buildver>330</buildver>
         <maven.compiler.source>1.8</maven.compiler.source>
         <java.major.version>8</java.major.version>
@@ -1370,6 +1376,7 @@
                         <goals><goal>run</goal></goals>
                         <phase>generate-sources</phase>
                         <configuration>
+                            <skip>${rapids.shimplify.skip}</skip>
                             <target xmlns:ac="antlib:net.sf.antcontrib">
                                 <property name="dyn.shim.buildver" value="all.buildvers"/>
                                 <script language="jython" src="${spark.rapids.source.basedir}/build/dyn_shim_detection.py"/>
@@ -1395,6 +1402,7 @@
                         <id>generate-build-info</id>
                         <phase>generate-resources</phase>
                         <configuration>
+                            <skip>${rapids.build.info.skip}</skip>
                             <!-- Execute the shell script to generate the plugin build information. -->
                             <target name="build-info">
                                 <taskdef resource="net/sf/antcontrib/antcontrib.properties"/>
