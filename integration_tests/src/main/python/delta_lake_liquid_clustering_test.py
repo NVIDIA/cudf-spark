@@ -31,7 +31,7 @@ import pytest
 from typing import Callable, Dict
 from pyspark.sql.types import StringType, IntegerType
 
-from asserts import assert_gpu_fallback_write, assert_gpu_and_cpu_writes_are_equal_collect
+from asserts import assert_gpu_and_cpu_writes_are_equal_collect
 from conftest import is_databricks_runtime
 from data_gen import unary_op_df, int_gen, copy_and_update, SetValuesGen, string_gen, long_gen, \
     gen_df, append_unique_int_col_to_df
@@ -362,8 +362,10 @@ def test_delta_update_sql_liquid_clustering(spark_tmp_path,
         lambda table_name: f"UPDATE {table_name} SET e = e+1 WHERE a > 0")
 
 
-@allow_non_gpu(delta_write_fallback_allow, *delta_meta_allow)
+@allow_non_gpu(*delta_meta_allow)
 @allow_non_gpu_conditional(is_spark_400_or_later(), "HashAggregateExec")
+@allow_non_gpu_conditional(is_databricks173_or_later(),
+                           "FileSourceScanExec,ColumnarToRowExec")
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(is_databricks_runtime() and not is_databricks133_or_later(),
@@ -383,18 +385,23 @@ def test_delta_merge_sql_liquid_clustering(spark_tmp_path, spark_tmp_table_facto
     gpu_target_path = f"{base_target_path}/GPU"
     gpu_target_name = spark_tmp_table_factory.get()
 
+    enable_deletion_vectors = False if is_databricks173_or_later() else None
     with_cpu_session(lambda spark: setup_clustered_table_sql(spark, cpu_source_path,
                                                              cpu_source_name,
-                                                             spark_tmp_table_factory.get()))
+                                                             spark_tmp_table_factory.get(),
+                                                             enable_deletion_vectors))
     with_cpu_session(lambda spark: setup_clustered_table_sql(spark, gpu_source_path,
                                                              gpu_source_name,
-                                                             spark_tmp_table_factory.get()))
+                                                             spark_tmp_table_factory.get(),
+                                                             enable_deletion_vectors))
     with_cpu_session(lambda spark: setup_clustered_table_sql(spark, cpu_target_path,
                                                              cpu_target_name,
-                                                             spark_tmp_table_factory.get()))
+                                                             spark_tmp_table_factory.get(),
+                                                             enable_deletion_vectors))
     with_cpu_session(lambda spark: setup_clustered_table_sql(spark, gpu_target_path,
                                                              gpu_target_name,
-                                                             spark_tmp_table_factory.get()))
+                                                             spark_tmp_table_factory.get(),
+                                                             enable_deletion_vectors))
 
     def merge_table(spark, path):
         type = "cpu" if path == cpu_target_path else "gpu"
@@ -412,19 +419,11 @@ def test_delta_merge_sql_liquid_clustering(spark_tmp_path, spark_tmp_table_facto
         spark.sql(sql).collect()
 
     read_table = lambda spark, path: spark.read.format("delta").load(path)
-    if is_databricks173_or_later():
-        assert_gpu_fallback_write(
-            merge_table,
-            read_table,
-            base_target_path,
-            "ExecutedCommandExec",
-            conf=delta_merge_enabled_conf)
-    else:
-        assert_gpu_and_cpu_writes_are_equal_collect(
-            merge_table,
-            read_table,
-            base_target_path,
-            conf=delta_merge_enabled_conf)
+    assert_gpu_and_cpu_writes_are_equal_collect(
+        merge_table,
+        read_table,
+        base_target_path,
+        conf=delta_merge_enabled_conf)
 
 
 def create_clustered_delta_table_df(table_name, table_path):
