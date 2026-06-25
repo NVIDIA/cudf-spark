@@ -89,7 +89,11 @@ def test_delta_ctas_sql_liquid_clustering(spark_tmp_path, spark_tmp_table_factor
 
 
 
-def create_clustered_table_sql(spark, table_name, path):
+def create_clustered_table_sql(spark, table_name, path, enable_deletion_vectors=None):
+    table_properties = ""
+    if enable_deletion_vectors is not None:
+        table_properties = f"""
+            TBLPROPERTIES ('delta.enableDeletionVectors' = '{str(enable_deletion_vectors).lower()}')"""
     spark.sql(f"""
             CREATE TABLE {table_name}
             (a long, 
@@ -101,6 +105,7 @@ def create_clustered_table_sql(spark, table_name, path):
             USING DELTA
             LOCATION '{path}'
             CLUSTER BY (a, b, d)
+            {table_properties}
         """)
 
 
@@ -115,8 +120,9 @@ def gen_df_and_replace_view(spark, view_name):
     df.coalesce(1).createOrReplaceTempView(view_name)
 
 
-def setup_clustered_table_sql(spark, path, table_name, view_name):
-    create_clustered_table_sql(spark, table_name, path)
+def setup_clustered_table_sql(spark, path, table_name, view_name,
+                              enable_deletion_vectors=None):
+    create_clustered_table_sql(spark, table_name, path, enable_deletion_vectors)
     gen_df_and_replace_view(spark, view_name)
     spark.sql(f"""
             INSERT INTO {table_name}
@@ -301,12 +307,17 @@ def do_test_delta_dml_sql_liquid_clustering(spark_tmp_path,
     gpu_data_path = f"{base_data_path}/GPU"
     gpu_table_name = spark_tmp_table_factory.get()
 
+    # DBR 17.3 liquid clustered tables otherwise default into persistent DV writes,
+    # which are covered by the existing Delta DML DV fallback tests.
+    enable_deletion_vectors = False if is_databricks173_or_later() else None
     with_cpu_session(lambda spark: setup_clustered_table_sql(spark, cpu_data_path,
                                                              cpu_table_name,
-                                                             spark_tmp_table_factory.get()))
+                                                             spark_tmp_table_factory.get(),
+                                                             enable_deletion_vectors))
     with_cpu_session(lambda spark: setup_clustered_table_sql(spark, gpu_data_path,
                                                              gpu_table_name,
-                                                             spark_tmp_table_factory.get()))
+                                                             spark_tmp_table_factory.get(),
+                                                             enable_deletion_vectors))
 
     def modify_table(spark, path):
         table_name = cpu_table_name if path == cpu_data_path else gpu_table_name
@@ -318,10 +329,9 @@ def do_test_delta_dml_sql_liquid_clustering(spark_tmp_path,
         base_data_path,
         conf=conf)
 
-@allow_non_gpu(*delta_meta_allow, delta_write_fallback_allow)
-@allow_non_gpu_delta_write_if(
-    is_databricks173_or_later(),
-    reason="DBR 17.3 liquid clustering DML may use CPU Delta write commands")
+@allow_non_gpu(*delta_meta_allow)
+@allow_non_gpu_conditional(is_databricks173_or_later(),
+                           "FileSourceScanExec,ColumnarToRowExec")
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(is_databricks_runtime() and not is_databricks133_or_later(),
@@ -334,11 +344,9 @@ def test_delta_delete_sql_liquid_clustering(spark_tmp_path, spark_tmp_table_fact
         spark_tmp_path, spark_tmp_table_factory, delta_delete_enabled_conf,
         lambda table_name: f"DELETE FROM {table_name} WHERE a > 0")
 
-@allow_non_gpu(*delta_meta_allow, delta_write_fallback_allow, "CreateTableExec",
-               "AppendDataExecV1")
-@allow_non_gpu_delta_write_if(
-    is_databricks173_or_later(),
-    reason="DBR 17.3 liquid clustering DML may use CPU Delta write commands")
+@allow_non_gpu(*delta_meta_allow, "CreateTableExec", "AppendDataExecV1")
+@allow_non_gpu_conditional(is_databricks173_or_later(),
+                           "FileSourceScanExec,ColumnarToRowExec")
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(is_databricks_runtime() and not is_databricks133_or_later(),
