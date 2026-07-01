@@ -4,6 +4,7 @@
 """Copy shared eval resources into each skill's evals/ directory"""
 
 import shutil
+from collections import Counter
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -47,7 +48,12 @@ def main() -> None:
     for skill, files in MANIFEST.items():
         dest = SKILLS_DIR / skill / DEST_TAIL
         dest.mkdir(parents=True, exist_ok=True)
-        wanted = {Path(f).name for f in files}
+        basenames = [Path(f).name for f in files]
+        dupes = [n for n, c in Counter(basenames).items() if c > 1]
+        if dupes:
+            raise ValueError(f"{skill}: duplicate basenames in manifest: {dupes}")
+
+        wanted = set(basenames)
         # drop anything in the destination that is no longer in the manifest
         for p in dest.glob("*"):
             if p.is_file() and p.name not in wanted:
@@ -63,6 +69,7 @@ def main() -> None:
         print(f"  synced {skill}:")
         print("    " + "\n    ".join(files))
         print("    " + "environment/Dockerfile")
+
 
 if __name__ == "__main__":
     main()
