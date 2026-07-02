@@ -25,7 +25,7 @@ import pyspark.sql.functions as f
 from timezones import all_timezones, fixed_offset_timezones, fixed_offset_timezones_iana, variable_offset_timezones, variable_offset_timezones_iana
 
 # Some operations only work in UTC specifically
-non_utc_tz_allow = ['ProjectExec'] if not is_utc() else []
+non_utc_tz_allow = ['TruncTimestamp', 'MonthsBetween'] if not is_utc() else []
 # Others work in all supported time zones
 
 # the last time that is configured to be supported by the GPU transition rules
@@ -441,7 +441,7 @@ def test_from_utc_timestamp_dst_leap_year(time_zone):
         lambda spark: unary_op_df(spark, TimestampGen(start=start_time,end=end_time))\
             .select(f.from_utc_timestamp(f.col('a'), time_zone)))
 
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('FromUTCTimestamp')
 def test_unsupported_fallback_from_utc_timestamp():
     time_zone_gen = StringGen(pattern="UTC")
     assert_gpu_fallback_collect(
@@ -493,7 +493,7 @@ def test_comprehensive_to_utc_timestamp(time_zone, end_timestamp):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: unary_op_df(spark, tz_timestamp_gen).selectExpr(f'to_utc_timestamp(a, "{time_zone}")'))
 
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('ToUTCTimestamp')
 def test_unsupported_fallback_to_utc_timestamp():
     time_zone_gen = StringGen(pattern="UTC")
     assert_gpu_fallback_collect(
@@ -501,7 +501,7 @@ def test_unsupported_fallback_to_utc_timestamp():
             "to_utc_timestamp(a, tzone)"),
         'ToUTCTimestamp')
 
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('FromUnixTime')
 @pytest.mark.parametrize('data_gen', [long_gen], ids=idfn)
 def test_unsupported_fallback_from_unixtime(data_gen):
     fmt_gen = StringGen(pattern="[M]")
@@ -678,23 +678,49 @@ def test_to_timestamp_tz_rules(parser_policy):
             .select(f.col("a"), f.to_timestamp(f.col("a"), "yyyy-MM-dd HH:mm:ss")),
         { "spark.sql.legacy.timeParserPolicy": parser_policy})
 
+legacy_formats_for_legacy_mode = [
+    pytest.param('yyyyMMdd', 'yyyyMMdd', id='yyyyMMdd'),
+    pytest.param('yyyymmdd', 'yyyymmdd', id='yyyymmdd'),
+    pytest.param('yyyy-mm-dd', 'yyyy-mm-dd', id='yyyy-mm-dd'),
+    pytest.param('yyyyMMdd', 'yyyy-MM-dd HH:mm:ss.SSS', id='yyyyMMdd-to-millis')
+]
+
 # mm: minute; MM: month
 @disable_ansi_mode
-@pytest.mark.parametrize("format", ['yyyyMMdd', 'yyyymmdd', 'yyyy-mm-dd'], ids=idfn)
+@pytest.mark.parametrize("input_format, output_format", legacy_formats_for_legacy_mode)
 # Test years after 1900, refer to issues: https://github.com/NVIDIA/spark-rapids/issues/11543, https://github.com/NVIDIA/spark-rapids/issues/11539
 @pytest.mark.skipif(get_test_tz() != "Asia/Shanghai" and get_test_tz() != "UTC", reason="https://github.com/NVIDIA/spark-rapids/issues/11562")
-def test_formats_for_legacy_mode(format):
+def test_formats_for_legacy_mode(input_format, output_format):
     gen = StringGen('(19[0-9]{2}|[2-9][0-9]{3})([0-9]{4})')
     assert_gpu_and_cpu_are_equal_sql(
         lambda spark : unary_op_df(spark, gen),
         "tab",
-        '''select unix_timestamp(a, '{}'),
-                  from_unixtime(unix_timestamp(a, '{}'), '{}'),
-                  date_format(to_timestamp(a, '{}'), '{}')
+        '''select unix_timestamp(a, '{input_format}'),
+                  from_unixtime(unix_timestamp(a, '{input_format}'), '{output_format}'),
+                  date_format(to_timestamp(a, '{input_format}'), '{output_format}')
            from tab
-        '''.format(format, format, format, format, format),
+        '''.format(input_format=input_format, output_format=output_format),
         {'spark.sql.legacy.timeParserPolicy': 'LEGACY',
          'spark.rapids.sql.incompatibleDateFormats.enabled': True})
+
+
+@disable_ansi_mode
+def test_date_format_timestamp_millis_legacy_prc():
+    seconds_gen = LongGen(
+        min_val=0,
+        max_val=int(last_supported_tz_time.timestamp()),
+        nullable=False,
+        special_cases=[])
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: unary_op_df(spark, seconds_gen).selectExpr(*[
+            "date_format(timestamp_millis(a * 1000 + {}), "
+            "'yyyy-MM-dd HH:mm:ss.SSS')".format(offset)
+            for offset in [1, 123, 999]
+        ]),
+        {'spark.sql.legacy.timeParserPolicy': 'LEGACY',
+         'spark.rapids.sql.incompatibleDateFormats.enabled': True,
+         'spark.sql.session.timeZone': 'PRC'})
+
 
 # mm: minute; MM: month
 @disable_ansi_mode
@@ -733,6 +759,21 @@ def test_formats_for_legacy_mode_other_formats_tz_rules():
         '''.format(format, format, format, format, format),
         {'spark.sql.legacy.timeParserPolicy': 'LEGACY',
          'spark.rapids.sql.incompatibleDateFormats.enabled': True})
+
+@disable_ansi_mode
+@allow_non_gpu('ProjectExec')
+def test_to_timestamp_legacy_millisecond_format_fallback():
+    conf = {
+        'spark.sql.legacy.timeParserPolicy': 'LEGACY',
+        'spark.rapids.sql.incompatibleDateFormats.enabled': True,
+        'spark.rapids.sql.expression.cpuBridge.enabled': False
+    }
+    assert_gpu_fallback_collect(
+        lambda spark: spark.createDataFrame(
+            [('2024-01-01 00:00:00.123',)], 'a string')
+            .selectExpr("to_timestamp(a, 'yyyy-MM-dd HH:mm:ss.SSS')"),
+        'GetTimestamp',
+        conf)
 
 @disable_ansi_mode
 @tz_sensitive_test
@@ -851,7 +892,7 @@ supported_date_formats = ['yyyy-MM-dd', 'yyyy-MM', 'yyyy/MM/dd', 'yyyy/MM', 'dd/
                           'MM-dd', 'MM/dd', 'dd-MM', 'dd/MM']
 @pytest.mark.parametrize('date_format', supported_date_formats, ids=idfn)
 @pytest.mark.parametrize('data_gen', [date_gen], ids=idfn)
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('DateFormatClass', 'Cast')
 def test_date_format_for_date_runtime_fallback(data_gen, date_format):
     # We will do a CPU fallback during runtime for timezones with transitions during 
     # years > 2200 as described in https://github.com/NVIDIA/spark-rapids/issues/6840
@@ -900,7 +941,7 @@ def test_from_unixtime_runtime_fallback(data_gen, date_format):
 unsupported_date_formats = ['F']
 @pytest.mark.parametrize('date_format', unsupported_date_formats, ids=idfn)
 @pytest.mark.parametrize('data_gen', date_n_time_gens, ids=idfn)
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('DateFormatClass', 'Cast')
 def test_date_format_f(data_gen, date_format):
     assert_gpu_fallback_collect(
         lambda spark : unary_op_df(spark, data_gen).selectExpr("date_format(a, '{}')".format(date_format)),
@@ -908,7 +949,7 @@ def test_date_format_f(data_gen, date_format):
 
 @pytest.mark.parametrize('date_format', unsupported_date_formats, ids=idfn)
 @pytest.mark.parametrize('data_gen', date_n_time_gens, ids=idfn)
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('DateFormatClass', 'Cast')
 def test_date_format_f_incompat(data_gen, date_format):
     # note that we can't support it even with incompatibleDateFormats enabled
     conf = {"spark.rapids.sql.incompatibleDateFormats.enabled": "true"}
@@ -919,7 +960,7 @@ def test_date_format_f_incompat(data_gen, date_format):
 maybe_supported_date_formats = ['dd-MM-yyyy', 'yyyy-MM-dd HH:mm:ss.SSS', 'yyyy-MM-dd HH:mm:ss.SSSSSS']
 @pytest.mark.parametrize('date_format', maybe_supported_date_formats, ids=idfn)
 @pytest.mark.parametrize('data_gen', date_n_time_gens, ids=idfn)
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('DateFormatClass', 'Cast')
 def test_date_format_maybe(data_gen, date_format):
     assert_gpu_fallback_collect(
         lambda spark : unary_op_df(spark, data_gen).selectExpr("date_format(a, '{}')".format(date_format)),
@@ -974,7 +1015,7 @@ def test_date_format_mmyyyy_cast_canonicalization(spark_tmp_path):
     assert_gpu_and_cpu_are_equal_collect(do_join_cast)
 
 
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('DateFormatClass', 'Cast')
 @pytest.mark.parametrize('data_gen', date_n_time_gens, ids=idfn)
 def test_unsupported_fallback_date_format(data_gen):
     conf = {"spark.rapids.sql.incompatibleDateFormats.enabled": "true"}
@@ -986,7 +1027,7 @@ def test_unsupported_fallback_date_format(data_gen):
 
 
 @disable_ansi_mode  # Failure cases for ANSI mode are tested separately.
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('GetTimestamp')
 def test_unsupported_fallback_to_date():
     date_gen = StringGen(pattern="2023-08-01")
     pattern_gen = StringGen(pattern="[M]")

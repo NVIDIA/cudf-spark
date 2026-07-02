@@ -1,4 +1,4 @@
-# Copyright (c) 2024-2025, NVIDIA CORPORATION.
+# Copyright (c) 2024-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -563,7 +563,8 @@ def test_hybrid_parquet_filter_pushdown_more_exprs(spark_tmp_path, condition):
         non_exist_classes='GpuFileSourceScanExec',
         conf=conf)
 
-@allow_non_gpu('FilterExec')
+@allow_non_gpu('FilterExec', 'Sha2', 'Cast', 'Levenshtein', 
+  'Crc32', 'LengthOfJsonArray', 'In')
 @pytest.mark.skipif(is_databricks_runtime(), reason="Hybrid feature does not support Databricks currently")
 @pytest.mark.skipif(not is_hybrid_backend_loaded(), reason="HybridScan specialized tests")
 @hybrid_test

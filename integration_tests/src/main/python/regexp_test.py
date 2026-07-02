@@ -197,7 +197,12 @@ def test_split_optimized_no_re_combined():
 @allow_non_gpu('ProjectExec', 'StringSplit')
 def test_split_unsupported_fallback():
     data_gen = mk_str_gen('([bf]o{0,2}:){1,7}') \
-        .with_special_case('boo:and:foo')
+        .with_special_case('boo:and:foo') \
+        .with_special_case('foo bar') \
+        .with_special_case('hello world') \
+        .with_special_case('a') \
+        .with_special_case(' leading') \
+        .with_special_case('trailing ')
     assert_gpu_sql_fallback_collect(
         lambda spark : unary_op_df(spark, data_gen),
         'StringSplit',
@@ -205,6 +210,11 @@ def test_split_unsupported_fallback():
         'select ' +
         'split(a, "o*"),' +
         'split(a, "o?") from string_split_table')
+    assert_gpu_sql_fallback_collect(
+        lambda spark : unary_op_df(spark, data_gen),
+        'StringSplit',
+        'string_split_table',
+        'select split(a, "\\\\b") from string_split_table')
 
 def test_split_regexp_disabled_no_fallback():
     conf = { 'spark.rapids.sql.regexp.enabled': 'false' }
@@ -968,7 +978,7 @@ def test_regexp_replace_fallback_configured_off():
     )
 
 
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('RegExpExtract')
 def test_unsupported_fallback_regexp_extract():
     gen = mk_str_gen('[abcdef]{0,2}')
     regex_gen = StringGen(r'\[a-z\]\+')
@@ -990,7 +1000,7 @@ def test_unsupported_fallback_regexp_extract():
     assert_gpu_did_fallback('REGEXP_EXTRACT("PROD", reg_ex, num)')
 
 
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('RegExpExtractAll')
 def test_unsupported_fallback_regexp_extract_all():
     gen = mk_str_gen('[abcdef]{0,2}')
     regex_gen = StringGen(r'\[a-z\]\+')

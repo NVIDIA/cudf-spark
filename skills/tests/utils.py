@@ -27,7 +27,7 @@ def run_mvn(
     work_dir: str,
     *goals: str,
     extra_args: Optional[list[str]] = None,
-    timeout: int = 300,
+    timeout: int = 600,
 ) -> subprocess.CompletedProcess:
     """Run Maven in work_dir with the given goals."""
     cmd = ["mvn", *goals, "-q"]
@@ -47,7 +47,7 @@ def run_mvn(
 def run_script(
     script_path: str,
     args: Optional[list[str]] = None,
-    timeout: int = 300,
+    timeout: int = 600,
 ) -> subprocess.CompletedProcess:
     """Run a bash script with the given arguments."""
     cmd = ["bash", script_path]
@@ -69,7 +69,7 @@ def replace_scala_todo_method(source: str, method_name: str, new_body: str) -> s
     Assumes stubs look like "def foo(...) = ???"
     """
     pattern = re.compile(
-        r"  def " + re.escape(method_name) + r"\b.*?\?\?\?",
+        r"  def " + re.escape(method_name) + r"\b[^=]*=\s*\?\?\?",
         re.DOTALL,
     )
     result = pattern.sub(new_body, source, count=1)

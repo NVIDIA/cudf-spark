@@ -22,7 +22,8 @@ import org.apache.parquet.schema.MessageType
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{SparkSession => SqlSparkSession}
 import org.apache.spark.sql.catalyst.{InternalRow, TableIdentifier}
-import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Expression}
+import org.apache.spark.sql.catalyst.expressions.{AttributeReference, CreateMap, Expression,
+  MapConcat, MapFromArrays, MapFromEntries, ScalaUDF, StringToMap}
 import org.apache.spark.sql.catalyst.plans.physical.{BroadcastMode, Partitioning}
 import org.apache.spark.sql.catalyst.trees.TreeNode
 import org.apache.spark.sql.catalyst.util.DateFormatter
@@ -49,6 +50,16 @@ trait SparkShims {
   def int96ParquetRebaseReadKey: String
   def int96ParquetRebaseWriteKey: String
   def isCastingStringToNegDecimalScaleSupported: Boolean = true
+
+  // These expressions are stateful only because they reuse mutable scratch buffers. Bridge
+  // projection cloning gives every worker its own expression tree and therefore its own buffers.
+  protected def isBridgeCloneSafeStatefulExpression(expr: Expression): Boolean = expr match {
+    case _: ScalaUDF | _: CreateMap | _: MapFromArrays | _: MapConcat |
+        _: MapFromEntries | _: StringToMap => true
+    case _ => false
+  }
+
+  def isExpressionStateful(expr: Expression): Boolean = false
 
   def getParquetFilters(
     schema: MessageType,

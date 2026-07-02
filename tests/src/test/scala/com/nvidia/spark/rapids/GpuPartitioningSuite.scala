@@ -153,6 +153,10 @@ class GpuPartitioningSuite extends AnyFunSuite with BeforeAndAfterEach {
     testGpuPartitionWithCompression("zstd")
   }
 
+  test("GPU partition with copy compression") {
+    testGpuPartitionWithCompression("copy")
+  }
+
   test("GPU kudo partitioning with serialization") {
     TrampolineUtil.cleanupAnyExistingSession()
     val conf = new SparkConf()

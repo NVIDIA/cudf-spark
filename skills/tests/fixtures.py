@@ -109,7 +109,7 @@ BENCH_GENERATE = """\
     val baseDF = spark.range(0, numRows, 1, numPartitions)
     baseDF.select(
       col("id"),
-      (rand() * 1000).cast(IntegerType).alias("value")
+      (rand(42) * 1000).cast(IntegerType).alias("value")
     )
   }"""
 

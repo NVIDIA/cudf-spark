@@ -17,7 +17,8 @@ import pytest
 from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, assert_gpu_and_cpu_are_equal_collect
 from data_gen import *
 from marks import approximate_float, datagen_overrides, ignore_order, disable_ansi_mode
-from spark_session import with_cpu_session, is_before_spark_330, is_spark_412_or_later
+from spark_session import with_cpu_session, is_before_spark_330, is_spark_403, \
+    is_spark_412_or_later
 import pyspark.sql.functions as f
 
 # Each descriptor contains a list of data generators and a corresponding boolean
@@ -60,8 +61,9 @@ ast_descrs = [
 
 ast_boolean_descr = [(boolean_gen, True)]
 ast_double_descr = [(double_gen, True)]
-# AST is not expressive enough to support the ACOSH Spark emulation expression in Spark 4.1.2+
-ast_acosh_descr = [(double_gen, not is_spark_412_or_later())]
+# AST is not expressive enough to support the ACOSH Spark emulation expression in Spark 4.0.3
+# and Spark 4.1.2+.
+ast_acosh_descr = [(double_gen, not (is_spark_403() or is_spark_412_or_later()))]
 
 _project_ast_enabled_conf = {"spark.rapids.sql.projectAstEnabled": "true"}
 

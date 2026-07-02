@@ -34,7 +34,11 @@ def test_skill_frontmatter_loads(skill_file: Path) -> None:
     parsed = yaml.safe_load(frontmatter)
 
     assert isinstance(parsed, dict), f"{skill_file} frontmatter must parse to a map"
-    assert isinstance(parsed.get("name"), str), f"{skill_file} must define name"
-    assert isinstance(
-        parsed.get("description"), str
-    ), f"{skill_file} must define description"
+    name = parsed.get("name")
+    description = parsed.get("description")
+    assert (
+        isinstance(name, str) and name.strip()
+    ), f"{skill_file} must define a non-empty name"
+    assert (
+        isinstance(description, str) and description.strip()
+    ), f"{skill_file} must define a non-empty description"

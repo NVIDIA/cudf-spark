@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -315,7 +315,7 @@ def read_hive_text_table_partitions(spark, text_table_name, partition):
                     reason="Hive text reads are disabled on CDH, as per "
                            "https://github.com/NVIDIA/spark-rapids/pull/7628")
 @approximate_float
-@allow_non_gpu("EqualTo,IsNotNull,Literal", *non_utc_allow_for_test_basic_hive_text_read)  # Accounts for partition predicate: `WHERE dt='1'`
+@allow_non_gpu("EqualTo", "IsNotNull", *non_utc_allow_for_test_basic_hive_text_read)  # Accounts for partition predicate: `WHERE dt='1'`
 @pytest.mark.parametrize('data_gen', hive_text_supported_gens, ids=idfn)
 def test_hive_text_round_trip_partitioned(spark_tmp_path, data_gen, spark_tmp_table_factory):
     gen = StructGen([('my_field', data_gen)], nullable=False)
@@ -333,7 +333,7 @@ def test_hive_text_round_trip_partitioned(spark_tmp_path, data_gen, spark_tmp_ta
                     reason="Hive text reads are disabled on CDH, as per "
                            "https://github.com/NVIDIA/spark-rapids/pull/7628")
 @approximate_float
-@allow_non_gpu("EqualTo,IsNotNull,Literal", *non_utc_allow_for_test_basic_hive_text_read)  # Accounts for partition predicate: `WHERE dt='1'`
+@allow_non_gpu("EqualTo", "IsNotNull", *non_utc_allow_for_test_basic_hive_text_read)  # Accounts for partition predicate: `WHERE dt='1'`
 @pytest.mark.parametrize('data_gen', [boolean_gen], ids=idfn)
 def test_hive_text_round_trip_partitioned_case_insensitive(spark_tmp_path, data_gen, spark_tmp_table_factory):
     gen = StructGen([('my_field', data_gen)], nullable=False)
@@ -351,7 +351,7 @@ def test_hive_text_round_trip_partitioned_case_insensitive(spark_tmp_path, data_
                     reason="Hive text reads are disabled on CDH, as per "
                            "https://github.com/NVIDIA/spark-rapids/pull/7628")
 @approximate_float
-@allow_non_gpu("EqualTo,IsNotNull,Literal,Or", *non_utc_allow_for_test_basic_hive_text_read)  # Accounts for partition predicate
+@allow_non_gpu("EqualTo", "IsNotNull", "Or", *non_utc_allow_for_test_basic_hive_text_read)  # Accounts for partition predicate
 @pytest.mark.parametrize('data_gen', hive_text_supported_gens, ids=idfn)
 def test_hive_text_round_trip_two_partitions(spark_tmp_path, data_gen, spark_tmp_table_factory):
     """

@@ -164,9 +164,8 @@ def test_constraint_char_varchar_preserve_enabled_fallback(spark_tmp_path, char_
 
 
 # Test `preserveCharVarcharTypeInfo` is false(default value); char type
-# The CPU plan is: Contains(static_invoke(CharVarcharCodegenUtils.readSidePadding(char_col#8, 5)), a)
-# Spark scan treats char as StringType.
-# Contains falls back because the child `static_invoke` is not supported by GPU.
+# Spark scan treats char as StringType and injects read-side padding in ProjectExec.
+# `static_invoke` (readSidePadding) has no GPU implementation, so ProjectExec falls back.
 @pytest.mark.skipif(is_before_spark_400(),
                     reason="Spark 32x, 33x do not support char/varchar type; Spark 34x, 35x throw exception")
 @allow_non_gpu_conditional(not is_databricks173_or_later(), "ProjectExec")
@@ -193,7 +192,7 @@ def test_constraint_char_preserve_disabled_fallback(spark_tmp_path):
         assert_gpu_and_cpu_are_equal_collect(read_func)
     else:
         assert_gpu_fallback_collect(read_func,
-            cpu_fallback_class_name="StaticInvoke")
+            cpu_fallback_class_name="ProjectExec")
 
 
 # Test `preserveCharVarcharTypeInfo` is false(default value); varchar type

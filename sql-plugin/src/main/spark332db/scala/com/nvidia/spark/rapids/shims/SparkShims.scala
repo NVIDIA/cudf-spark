@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,10 +22,16 @@ package com.nvidia.spark.rapids.shims
 import com.nvidia.spark.rapids._
 
 import org.apache.spark.sql.catalyst.expressions._
+import org.apache.spark.sql.catalyst.expressions.objects.{ExternalMapToCatalyst, InvokeLike}
 import org.apache.spark.sql.execution.datasources.V1WritesUtils.Empty2Null
 import org.apache.spark.sql.rapids.GpuV1WriteUtils.GpuEmpty2Null
 
 object SparkShimImpl extends Spark332PlusDBShims {
+  override def isExpressionStateful(expr: Expression): Boolean = expr match {
+    case _: Stateful | _: InvokeLike | _: ExternalMapToCatalyst => true
+    case _ => false
+  }
+
   override def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
     val shimExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = Seq(
       // Empty2Null is pulled out of FileFormatWriter by default since Spark 3.4.0,

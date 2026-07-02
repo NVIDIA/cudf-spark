@@ -32,6 +32,7 @@
 {"spark": "400"}
 {"spark": "401"}
 {"spark": "402"}
+{"spark": "403"}
 {"spark": "411"}
 {"spark": "412"}
 spark-rapids-shim-json-lines ***/
@@ -41,7 +42,9 @@ import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.GpuOverrides.{exec, pluginSupportedOrderableSig}
 
 import org.apache.spark.rapids.shims.GpuShuffleExchangeExec
-import org.apache.spark.sql.catalyst.expressions.{Empty2Null, Expression, KnownNullable, NamedExpression, SortOrder}
+import org.apache.spark.sql.catalyst.expressions.{Empty2Null, Expression, KnownNullable,
+  NamedExpression, SortOrder}
+import org.apache.spark.sql.catalyst.expressions.objects.{ExternalMapToCatalyst, InvokeLike}
 import org.apache.spark.sql.catalyst.plans.physical.SinglePartition
 import org.apache.spark.sql.execution.{CollectLimitExec, GlobalLimitExec, SparkPlan, TakeOrderedAndProjectExec}
 import org.apache.spark.sql.execution.command.{CreateDataSourceTableAsSelectCommand, DataWritingCommand, RunnableCommand}
@@ -51,6 +54,10 @@ import org.apache.spark.sql.rapids.GpuElementAtMeta
 import org.apache.spark.sql.rapids.GpuV1WriteUtils.GpuEmpty2Null
 
 trait Spark340PlusNonDBShims extends Spark331PlusNonDBShims {
+  override def isExpressionStateful(expr: Expression): Boolean = expr match {
+    case _: InvokeLike | _: ExternalMapToCatalyst => true
+    case _ => expr.stateful && !isBridgeCloneSafeStatefulExpression(expr)
+  }
 
   private val shimExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = Seq(
     GpuOverrides.exec[GlobalLimitExec](

@@ -32,11 +32,24 @@ def test_iceberg_version_detection():
     if expected is None:
         pytest.skip("EXPECTED_ICEBERG_VERSION env var not set")
 
+    # Shim sub-package selected per Iceberg major.minor, e.g. 1.11.x -> iceberg111x.
+    # Mirrors IcebergProbeImpl.icebergVersionToShim.
+    major_minor = ".".join(expected.split(".")[:2])
+    expected_shim_package = \
+        "com.nvidia.spark.rapids.iceberg.iceberg{}x".format(major_minor.replace(".", ""))
+
     def check(spark):
-        jvm = spark.sparkContext._jvm
-        actual = jvm.com.nvidia.spark.rapids.iceberg.IcebergProviderAccess.detectedVersion()
+        access = spark.sparkContext._jvm.com.nvidia.spark.rapids.iceberg.IcebergProviderAccess
+        actual = access.detectedVersion()
         assert actual == expected, \
             "Iceberg version detection mismatch: expected '{}' on Spark {}, got '{}'".format(
                 expected, spark_version(), actual)
+        # Assert the shim package too: a correct detectedVersion() paired with a wrong
+        # version -> shim mapping (e.g. the 1.11 -> iceberg111x row) would otherwise
+        # still pass.
+        actual_shim_package = access.shimPackage()
+        assert actual_shim_package == expected_shim_package, \
+            "Iceberg shim package mismatch for {} on Spark {}: expected '{}', got '{}'".format(
+                expected, spark_version(), expected_shim_package, actual_shim_package)
 
     with_gpu_session(check)

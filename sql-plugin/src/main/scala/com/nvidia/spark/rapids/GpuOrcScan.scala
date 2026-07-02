@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -116,7 +116,9 @@ case class GpuOrcScan(
   override def equals(obj: Any): Boolean = obj match {
     case o: GpuOrcScan =>
       super.equals(o) && dataSchema == o.dataSchema && options == o.options &&
-          equivalentFilters(pushedFilters, o.pushedFilters) && rapidsConf == o.rapidsConf &&
+          equivalentFilters(pushedFilters, o.pushedFilters) &&
+          rapidsConf.isOrcFloatTypesToStringEnable ==
+              o.rapidsConf.isOrcFloatTypesToStringEnable &&
           queryUsesInputFile == o.queryUsesInputFile
     case _ => false
   }
@@ -652,19 +654,28 @@ case class GpuOrcMultiFilePartitionReaderFactory(
 
     metrics.getOrElse(FILTER_TIME, NoopMetric).ns {
       metrics.getOrElse(SCAN_TIME, NoopMetric).ns {
-        files.map { file =>
-          val orcPartitionReaderContext = filterHandler.filterStripes(file, dataSchema,
-            readDataSchema, partitionSchema)
-          compressionAndStripes.getOrElseUpdate(orcPartitionReaderContext.compressionKind,
-            new ArrayBuffer[OrcSingleStripeMeta]) ++=
-            orcPartitionReaderContext.blockIterator.map(block =>
-              OrcSingleStripeMeta(
-                orcPartitionReaderContext.filePath,
-                OrcDataStripe(OrcStripeWithMeta(block, orcPartitionReaderContext)),
-                file.partitionValues,
-                OrcSchemaWrapper(orcPartitionReaderContext.updatedReadSchema),
-                readDataSchema,
-                OrcExtraInfo(orcPartitionReaderContext.requestedMapping)))
+        files.foreach { file =>
+          try {
+            val orcPartitionReaderContext = filterHandler.filterStripes(file, dataSchema,
+              readDataSchema, partitionSchema)
+            // filterStripes returns null for an empty ORC file; it has no stripes to
+            // contribute, so skip it (the single-file path uses an EmptyPartitionReader).
+            if (orcPartitionReaderContext != null) {
+              compressionAndStripes.getOrElseUpdate(orcPartitionReaderContext.compressionKind,
+                new ArrayBuffer[OrcSingleStripeMeta]) ++=
+                orcPartitionReaderContext.blockIterator.map(block =>
+                  OrcSingleStripeMeta(
+                    orcPartitionReaderContext.filePath,
+                    OrcDataStripe(OrcStripeWithMeta(block, orcPartitionReaderContext)),
+                    file.partitionValues,
+                    OrcSchemaWrapper(orcPartitionReaderContext.updatedReadSchema),
+                    readDataSchema,
+                    OrcExtraInfo(orcPartitionReaderContext.requestedMapping)))
+            }
+          } catch {
+            case e: FileNotFoundException if ignoreMissingFiles =>
+              logWarning(s"Skipped missing file: ${file.filePath}", e)
+          }
         }
       }
     }

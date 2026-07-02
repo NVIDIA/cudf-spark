@@ -742,6 +742,11 @@ LEGACY timeParserPolicy support has the following limitations when running on th
 When formatting dates and timestamps as strings using functions such as `from_unixtime`, only a
 subset of valid format strings are supported on the GPU.
 
+With timeParserPolicy set to `LEGACY`, `date_format` and `from_unixtime` additionally support
+`yyyy-MM-dd HH:mm:ss.SSS` when
+[`spark.rapids.sql.incompatibleDateFormats.enabled`](additional-functionality/advanced_configs.md#sql.incompatibleDateFormats.enabled)
+is set to `true`. Parsing strings with this format remains unsupported in `LEGACY` mode.
+
 Formats that contain any of the following characters are unsupported and will fall back to CPU:
 
 ```

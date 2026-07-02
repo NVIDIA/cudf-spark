@@ -245,12 +245,21 @@ def test_hash_repartition_exact_fallback(gen, num_parts):
         conf = {'spark.rapids.sql.partitioning.hashFunction.enabled': False,
                 'spark.sql.adaptive.enabled': 'false'})
 
+@allow_non_gpu("Murmur3Hash")
+@pytest.mark.parametrize('data_gen', [ArrayGen(StructGen([('b1', long_gen)]))], ids=idfn)
+def test_hash_fallback_bridge(data_gen):
+    assert_gpu_fallback_collect(
+        lambda spark : unary_op_df(spark, data_gen, length=1024) \
+            .selectExpr('*', 'hash(a) as h'), "Murmur3Hash",
+        conf = {"spark.rapids.sql.expression.cpuBridge.enabled": True})
+
 @allow_non_gpu("ProjectExec")
 @pytest.mark.parametrize('data_gen', [ArrayGen(StructGen([('b1', long_gen)]))], ids=idfn)
 def test_hash_fallback(data_gen):
     assert_gpu_fallback_collect(
         lambda spark : unary_op_df(spark, data_gen, length=1024) \
-            .selectExpr('*', 'hash(a) as h'), "ProjectExec")
+            .selectExpr('*', 'hash(a) as h'), "Murmur3Hash",
+        conf = {"spark.rapids.sql.expression.cpuBridge.enabled": False})
 
 @ignore_order(local=True) # To avoid extra data shuffle by 'sort on Spark' for this repartition test.
 @pytest.mark.parametrize('num_parts', [1, 2, 10, 17, 19, 32], ids=idfn)

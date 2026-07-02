@@ -127,6 +127,11 @@ case class GpuBroadcastHashJoinExec(
       case reused: ReusedExchangeExec => reused.child.asInstanceOf[GpuShuffleExchangeExec]
       case GpuShuffleCoalesceExec(GpuCustomShuffleReaderExec(sqse: ShuffleQueryStageExec, _), _) =>
         from(sqse)
+      // A GpuProjectExec for a bridged/split join condition (extractNonAstFromJoinCond) on the
+      // executor-broadcast build side is peeled off by getBroadcastPlan, leaving the coalesce
+      // directly over the shuffle query stage with no custom shuffle reader in between. The
+      // nested-loop-join path already handles this same shape (added with split-condition
+      // support in #9702); mirror it here.
       case GpuShuffleCoalesceExec(sqse: ShuffleQueryStageExec, _) => from(sqse)
       case GpuCustomShuffleReaderExec(sqse: ShuffleQueryStageExec, _) => from(sqse)
       case other => throw new IllegalStateException(

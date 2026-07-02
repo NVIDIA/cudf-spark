@@ -1,4 +1,4 @@
-# Copyright (c) 2024-2025, NVIDIA CORPORATION.
+# Copyright (c) 2024-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -75,7 +75,7 @@ def test_scan_json_allow_comments_on(std_input_path, read_func, spark_tmp_table_
         'FileSourceScanExec',
         conf=_enable_all_types_json_scan_conf)
 
-@allow_non_gpu(TEXT_INPUT_EXEC, 'ProjectExec')
+@allow_non_gpu(TEXT_INPUT_EXEC, 'JsonToStructs')
 def test_from_json_allow_comments_on(std_input_path):
     schema = WITH_COMMENTS_SCHEMA
     assert_gpu_fallback_collect(
@@ -83,7 +83,7 @@ def test_from_json_allow_comments_on(std_input_path):
         'JsonToStructs',
         conf =_enable_json_to_structs_conf)
 
-@allow_non_gpu(TEXT_INPUT_EXEC, 'ProjectExec')
+@allow_non_gpu(TEXT_INPUT_EXEC, 'JsonToStructs')
 def test_from_json_allow_comments_on_map(std_input_path):
     schema = WITH_COMMENTS_MAP_SCHEMA
     assert_gpu_fallback_collect(
@@ -143,14 +143,14 @@ def test_scan_json_allow_single_quotes_off(std_input_path, read_func, spark_tmp_
         {"allowSingleQuotes": "false"}),
         conf=_enable_all_types_json_scan_conf)
 
-@allow_non_gpu('ProjectExec', TEXT_INPUT_EXEC)
+@allow_non_gpu(TEXT_INPUT_EXEC, 'JsonToStructs')
 def test_from_json_allow_single_quotes_off(std_input_path):
     schema = WITH_SQ_SCHEMA
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark : read_json_as_text(spark, std_input_path + '/' + WITH_SQ_FILE, "json").select(f.col('json'), f.from_json(f.col('json'), schema, {'allowSingleQuotes': "false"})),
         conf =_enable_json_to_structs_conf)
 
-@allow_non_gpu('ProjectExec', TEXT_INPUT_EXEC)
+@allow_non_gpu(TEXT_INPUT_EXEC, 'JsonToStructs')
 def test_from_json_allow_single_quotes_off_map(std_input_path):
     schema = WITH_SQ_MAP_SCHEMA
     assert_gpu_and_cpu_are_equal_collect(
@@ -210,7 +210,7 @@ def test_scan_json_allow_unquoted_field_names_on(std_input_path, read_func, spar
         'FileSourceScanExec',
         conf=_enable_all_types_json_scan_conf)
 
-@allow_non_gpu('ProjectExec', TEXT_INPUT_EXEC)
+@allow_non_gpu('JsonToStructs', TEXT_INPUT_EXEC)
 def test_from_json_allow_unquoted_field_names_on(std_input_path):
     schema = WITH_UNQUOTE_FIELD_NAMES_SCHEMA
     assert_gpu_fallback_collect(
@@ -218,7 +218,7 @@ def test_from_json_allow_unquoted_field_names_on(std_input_path):
         'JsonToStructs',
         conf =_enable_json_to_structs_conf)
 
-@allow_non_gpu('ProjectExec', TEXT_INPUT_EXEC)
+@allow_non_gpu('JsonToStructs', TEXT_INPUT_EXEC)
 def test_from_json_allow_unquoted_field_names_on_map(std_input_path):
     schema = WITH_UNQUOTE_FIELD_NAMES_MAP_SCHEMA
     assert_gpu_fallback_collect(
@@ -457,7 +457,7 @@ def test_scan_json_allow_backslash_escape_any_on(std_input_path, read_func, spar
         'FileSourceScanExec',
         conf=_enable_all_types_json_scan_conf)
 
-@allow_non_gpu(TEXT_INPUT_EXEC, 'ProjectExec')
+@allow_non_gpu(TEXT_INPUT_EXEC, 'JsonToStructs')
 def test_from_json_allow_backslash_escape_any_on(std_input_path):
     schema = WITH_BS_ESC_SCHEMA
     assert_gpu_fallback_collect(
@@ -465,7 +465,7 @@ def test_from_json_allow_backslash_escape_any_on(std_input_path):
         'JsonToStructs',
         conf =_enable_json_to_structs_conf)
 
-@allow_non_gpu(TEXT_INPUT_EXEC, 'ProjectExec')
+@allow_non_gpu(TEXT_INPUT_EXEC, 'JsonToStructs')
 def test_from_json_allow_backslash_escape_any_on_map(std_input_path):
     schema = WITH_BS_ESC_MAP_SCHEMA
     assert_gpu_fallback_collect(
@@ -588,7 +588,7 @@ def test_from_json_dec_locale_US(std_input_path):
         lambda spark : read_json_as_text(spark, std_input_path + '/' + WITH_DEC_LOCALE_FILE, "json").select(f.col('json'), f.from_json(f.col('json'), schema)),
         conf =_enable_json_to_structs_conf)
 
-@allow_non_gpu(TEXT_INPUT_EXEC, 'ProjectExec', *non_utc_allow) # https://github.com/NVIDIA/spark-rapids/issues/10453
+@allow_non_gpu(TEXT_INPUT_EXEC, 'JsonToStructs', *non_utc_allow) # https://github.com/NVIDIA/spark-rapids/issues/10453
 @pytest.mark.parametrize('locale', NON_US_DEC_LOCALES)
 def test_from_json_dec_locale(std_input_path, locale):
     schema = WITH_DEC_LOCALE_SCHEMA
@@ -662,7 +662,7 @@ def test_from_json_dec_locale_US_non_aribic(std_input_path):
         lambda spark : read_json_as_text(spark, std_input_path + '/' + WITH_DEC_LOCALE_NON_ARIBIC_FILE, "json").select(f.col('json'), f.from_json(f.col('json'), schema)),
         conf =_enable_json_to_structs_conf)
 
-@allow_non_gpu(TEXT_INPUT_EXEC, 'ProjectExec', *non_utc_allow) # https://github.com/NVIDIA/spark-rapids/issues/10453
+@allow_non_gpu(TEXT_INPUT_EXEC, 'JsonToStructs', *non_utc_allow) # https://github.com/NVIDIA/spark-rapids/issues/10453
 @pytest.mark.parametrize('locale', NON_US_DEC_LOCALES)
 def test_from_json_dec_locale_non_aribic(std_input_path, locale):
     schema = WITH_DEC_LOCALE_SCHEMA

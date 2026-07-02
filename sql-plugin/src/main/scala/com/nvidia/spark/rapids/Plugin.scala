@@ -436,6 +436,25 @@ object RapidsPluginUtils extends Logging {
         s"Binaries available for architectures $supportedMajorArchStr.")
     }
   }
+
+  /**
+   * Runs each shutdown step even if prior steps fail. The first exception is primary; later
+   * exceptions are added as suppressed. Rethrows the primary exception if any step failed.
+   */
+  def safeShutdown(steps: Seq[() => Unit]): Unit = {
+    var shutdownException: Throwable = null
+    steps.foreach { step =>
+      try {
+        step()
+      } catch {
+        case e: Throwable if shutdownException == null => shutdownException = e
+        case e: Throwable => shutdownException.addSuppressed(e)
+      }
+    }
+    if (shutdownException != null) {
+      throw shutdownException
+    }
+  }
 }
 
 /**
@@ -549,11 +568,13 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
   }
 
   override def shutdown(): Unit = {
-    extraDriverPlugins.foreach(_.shutdown())
-    FileCacheLocalityManager.shutdown()
-    // Shutdown listener first to trigger cleanup for any remaining jobs
-    Option(shuffleCleanupListener).foreach(_.shutdown())
-    ShuffleCleanupManager.shutdown()
+    RapidsPluginUtils.safeShutdown(
+      extraDriverPlugins.map(plugin => () => plugin.shutdown()) ++
+        Seq(
+          () => FileCacheLocalityManager.shutdown(),
+          // Shutdown listener first to trigger cleanup for any remaining jobs
+          () => Option(shuffleCleanupListener).foreach(_.shutdown()),
+          () => ShuffleCleanupManager.shutdown()))
   }
 }
 
@@ -804,20 +825,23 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
   }
 
   override def shutdown(): Unit = {
-    GpuTimeZoneDB.shutdown()
-    GpuSemaphore.shutdown()
-    PythonWorkerSemaphore.shutdown()
-    GpuDeviceManager.shutdown()
-    ProfilerOnExecutor.shutdown()
-    if (isAsyncProfilerEnabled) {
-      AsyncProfilerOnExecutor.shutdown()
-    }
-    Option(rapidsShuffleHeartbeatEndpoint).foreach(_.close())
-    Option(shuffleCleanupEndpoint).foreach(_.close())
-    extraExecutorPlugins.foreach(_.shutdown())
-    FileCache.shutdown()
-    GpuCoreDumpHandler.shutdown()
-    TrafficController.shutdown()
+    RapidsPluginUtils.safeShutdown(
+      Seq(
+        () => GpuTimeZoneDB.shutdown(),
+        () => GpuSemaphore.shutdown(),
+        () => PythonWorkerSemaphore.shutdown(),
+        () => GpuDeviceManager.shutdown(),
+        () => ProfilerOnExecutor.shutdown(),
+        () => if (isAsyncProfilerEnabled) {
+          AsyncProfilerOnExecutor.shutdown()
+        },
+        () => Option(rapidsShuffleHeartbeatEndpoint).foreach(_.close()),
+        () => Option(shuffleCleanupEndpoint).foreach(_.close())) ++
+        extraExecutorPlugins.map(plugin => () => plugin.shutdown()) ++
+        Seq(
+          () => FileCache.shutdown(),
+          () => GpuCoreDumpHandler.shutdown(),
+          () => TrafficController.shutdown()))
   }
 
   override def onTaskFailed(failureReason: TaskFailedReason): Unit = {

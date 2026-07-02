@@ -257,18 +257,6 @@ def project_with_broken_gpu(request):
     lang = "scala"
     tmp_dir, proj = _build_project_dir()
 
-    def _break_gpu_source(source: str) -> str:
-        # Change multiplier from 2 to 3
-        return source.replace("fromInt(2)", "fromInt(3)").replace("* 2", "* 3")
-
-    def _insert_memory_leak(source: str) -> str:
-        # Inject an unclosed Scalar.
-        idx = source.index("evaluateColumnar")
-        brace = source.index("{", idx)
-        return (
-            source[: brace + 1] + '\nScalar.fromString("LEAKED");' + source[brace + 1 :]
-        )
-
     try:
         _fill_stubs(proj, lang, target)
 
@@ -294,9 +282,26 @@ def project_with_broken_gpu(request):
 
         with open(path, "r") as f:
             content = f.read()
-        broken = _break_gpu_source(content)
+
         if target == "cudf":
+
+            def _insert_memory_leak(source: str) -> str:
+                # Inject an unclosed Scalar.
+                idx = source.index("evaluateColumnar")
+                brace = source.index("{", idx)
+                return (
+                    source[: brace + 1]
+                    + '\nScalar.fromString("LEAKED");'
+                    + source[brace + 1 :]
+                )
+
+            # change multiplier from 2 to 3 and insert memory leak
+            broken = content.replace("fromInt(2)", "fromInt(3)")
             broken = _insert_memory_leak(broken)
+        else:
+            # change multiplier from 2 to 3
+            broken = content.replace("* 2", "* 3")
+
         with open(path, "w") as f:
             f.write(broken)
 

@@ -16,22 +16,189 @@
 
 package org.apache.spark.sql.rapids
 
+import java.util.concurrent.ConcurrentLinkedQueue
+
 import ai.rapids.cudf.{DType, HostColumnVector}
 import com.nvidia.spark.rapids.{GpuColumnVector, RapidsHostColumnBuilder}
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.shims.{GpuScalarSubqueryShims, ShimExpression}
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.{BoundReference, Expression, Literal}
+import org.apache.spark.sql.catalyst.expressions.{BoundReference, Expression, ExprId, LeafExpression,
+  Literal, NamedExpression, NamedLambdaVariable, ScalaUDF}
+import org.apache.spark.sql.catalyst.expressions.codegen.CodegenFallback
+import org.apache.spark.sql.catalyst.trees.LeafLike
 import org.apache.spark.sql.catalyst.util.{ArrayBasedMapData, GenericArrayData}
+import org.apache.spark.sql.execution.{BaseSubqueryExec, ExecSubqueryExpression}
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.UTF8String
 
+private case class IdentityTrackingExpression(seenIds: ConcurrentLinkedQueue[Int])
+    extends LeafExpression with CodegenFallback {
+  override def nullable: Boolean = false
+  override def dataType: DataType = IntegerType
+
+  override def eval(input: InternalRow): Any = {
+    seenIds.add(System.identityHashCode(this))
+    7
+  }
+}
+
+private object ScalaUDFCloneTracker {
+  val seenIds = new ConcurrentLinkedQueue[Int]()
+}
+
+private class IdentityTrackingUDF extends (Any => Any) with Serializable {
+  override def apply(value: Any): Any = {
+    ScalaUDFCloneTracker.seenIds.add(System.identityHashCode(this))
+    value.asInstanceOf[Long] + 1L
+  }
+}
+
+private case class PreparedSubqueryExpression(
+    override val exprId: ExprId,
+    value: Int,
+    override val plan: BaseSubqueryExec = null)
+    extends ExecSubqueryExpression with LeafLike[Expression] with CodegenFallback
+    with GpuScalarSubqueryShims {
+  @volatile protected var updated = false
+
+  override def nullable: Boolean = false
+  override def dataType: DataType = IntegerType
+
+  override def updateResult(): Unit = updated = true
+
+  override def eval(input: InternalRow): Any = {
+    require(updated, s"$this has not finished")
+    value
+  }
+
+  override def withNewPlan(query: BaseSubqueryExec): PreparedSubqueryExpression =
+    copy(plan = query)
+
+  override def toString: String = s"prepared-subquery#$exprId"
+}
+
+private case class ConstructorSubqueryExpression(subquery: ExecSubqueryExpression)
+    extends LeafExpression with CodegenFallback {
+  override def nullable: Boolean = false
+  override def dataType: DataType = IntegerType
+
+  override def eval(input: InternalRow): Any = subquery.eval(input)
+}
+
+private case class LambdaVariableReferenceTrackingExpression(
+    first: NamedLambdaVariable,
+    second: NamedLambdaVariable,
+    seenValueIds: ConcurrentLinkedQueue[Int])
+    extends ShimExpression with CodegenFallback {
+  override def nullable: Boolean = false
+  override def dataType: DataType = IntegerType
+  override def children: Seq[Expression] = Seq(first, second)
+
+  override def eval(input: InternalRow): Any = {
+    seenValueIds.add(System.identityHashCode(first.value))
+    seenValueIds.add(System.identityHashCode(second.value))
+    11
+  }
+}
+
 /**
- * Test suite for BridgeUnsafeProjection to verify it correctly writes
+ * Test suite for BridgeHostColumnProjection to verify it correctly writes
  * various data types directly to RapidsHostColumnBuilder.
  */
-class BridgeUnsafeProjectionSuite extends AnyFunSuite {
+class BridgeHostColumnProjectionSuite extends AnyFunSuite {
+
+  test("projection owns a cloned expression tree") {
+    val seenIds = new ConcurrentLinkedQueue[Int]()
+    val expr = IdentityTrackingExpression(seenIds)
+    val originalId = System.identityHashCode(expr)
+    val projection = BridgeHostColumnProjection.create(Seq(expr))
+
+    val resultType = GpuColumnVector.convertFrom(IntegerType, false)
+    withResource(new RapidsHostColumnBuilder(resultType, 1)) { builder =>
+      projection.apply(Iterator(InternalRow.empty), Array(builder))
+      withResource(builder.build()) { result =>
+        assert(result.getInt(0) == 7)
+      }
+    }
+
+    assert(seenIds.size() == 1)
+    assert(seenIds.peek() != originalId)
+  }
+
+  test("projection refreshes lambda variable references") {
+    val seenIds = new ConcurrentLinkedQueue[Int]()
+    val variable = NamedLambdaVariable("x", IntegerType, nullable = false,
+      exprId = NamedExpression.newExprId)
+    val sameExprIdReference = variable.copy()
+    val originalValueId = System.identityHashCode(variable.value)
+    val expr = LambdaVariableReferenceTrackingExpression(variable, sameExprIdReference, seenIds)
+    val projection = BridgeHostColumnProjection.create(Seq(expr))
+
+    val resultType = GpuColumnVector.convertFrom(IntegerType, false)
+    withResource(new RapidsHostColumnBuilder(resultType, 1)) { builder =>
+      projection.apply(Iterator(InternalRow.empty), Array(builder))
+      withResource(builder.build()) { result =>
+        assert(result.getInt(0) == 11)
+      }
+    }
+
+    assert(seenIds.size() == 2)
+    val seen = seenIds.iterator()
+    val firstValueId = seen.next()
+    val secondValueId = seen.next()
+    assert(firstValueId == secondValueId)
+    assert(firstValueId != originalValueId)
+  }
+
+  test("projection preserves prepared subquery state") {
+    val subquery = PreparedSubqueryExpression(ExprId(1), 9)
+    subquery.updateResult()
+    val projection = BridgeHostColumnProjection.create(Seq(subquery))
+
+    val resultType = GpuColumnVector.convertFrom(IntegerType, false)
+    withResource(new RapidsHostColumnBuilder(resultType, 1)) { builder =>
+      projection.apply(Iterator(InternalRow.empty), Array(builder))
+      withResource(builder.build()) { result =>
+        assert(result.getInt(0) == 9)
+      }
+    }
+  }
+
+  test("projection preserves prepared subqueries in constructor fields") {
+    val subquery = PreparedSubqueryExpression(ExprId(1), 9)
+    subquery.updateResult()
+    val projection = BridgeHostColumnProjection.create(Seq(ConstructorSubqueryExpression(subquery)))
+
+    val resultType = GpuColumnVector.convertFrom(IntegerType, false)
+    withResource(new RapidsHostColumnBuilder(resultType, 1)) { builder =>
+      projection.apply(Iterator(InternalRow.empty), Array(builder))
+      withResource(builder.build()) { result =>
+        assert(result.getInt(0) == 9)
+      }
+    }
+  }
+
+  test("projection owns a cloned ScalaUDF function") {
+    ScalaUDFCloneTracker.seenIds.clear()
+    val function = new IdentityTrackingUDF()
+    val originalId = System.identityHashCode(function)
+    val expr = ScalaUDF(function, LongType, Seq(Literal(1L)))
+    val projection = BridgeHostColumnProjection.create(Seq(expr))
+
+    val resultType = GpuColumnVector.convertFrom(LongType, true)
+    withResource(new RapidsHostColumnBuilder(resultType, 1)) { builder =>
+      projection.apply(Iterator(InternalRow.empty), Array(builder))
+      withResource(builder.build()) { result =>
+        assert(result.getLong(0) == 2L)
+      }
+    }
+
+    assert(ScalaUDFCloneTracker.seenIds.size() == 1)
+    assert(ScalaUDFCloneTracker.seenIds.peek() != originalId)
+  }
 
   /**
    * Helper function to create test data and verify projection results.
@@ -43,7 +210,7 @@ class BridgeUnsafeProjectionSuite extends AnyFunSuite {
       verifyFunction: (HostColumnVector, Int, T, Boolean) => Unit): Unit = {
     
     val expr = buildExpression
-    val projection = BridgeUnsafeProjection.create(Seq(expr))
+    val projection = BridgeHostColumnProjection.create(Seq(expr))
     
     // Convert test data to InternalRow format
     val rows = testData.map { case (value, isNull) =>
@@ -469,7 +636,7 @@ class BridgeUnsafeProjectionSuite extends AnyFunSuite {
       BoundReference(1, StringType, false)
     )
     
-    val projection = BridgeUnsafeProjection.create(exprs)
+    val projection = BridgeHostColumnProjection.create(exprs)
     
     val intType = GpuColumnVector.convertFrom(IntegerType, false)
     val stringType = GpuColumnVector.convertFrom(StringType, false)
@@ -555,7 +722,7 @@ class BridgeUnsafeProjectionSuite extends AnyFunSuite {
       Literal(UTF8String.fromString("constant"), StringType)
     )
     
-    val projection = BridgeUnsafeProjection.create(exprs)
+    val projection = BridgeHostColumnProjection.create(exprs)
     
     val intType = GpuColumnVector.convertFrom(IntegerType, false)
     val stringType = GpuColumnVector.convertFrom(StringType, false)
@@ -584,7 +751,7 @@ class BridgeUnsafeProjectionSuite extends AnyFunSuite {
     // Test with zero rows
     val rows = Seq.empty[InternalRow]
     val expr = BoundReference(0, IntegerType, true)
-    val projection = BridgeUnsafeProjection.create(Seq(expr))
+    val projection = BridgeHostColumnProjection.create(Seq(expr))
     
     val intType = GpuColumnVector.convertFrom(IntegerType, true)
     withResource(new RapidsHostColumnBuilder(intType, 0)) { builder =>
@@ -602,7 +769,7 @@ class BridgeUnsafeProjectionSuite extends AnyFunSuite {
     val rows = (0 until numRows).map(_ => InternalRow(null))
     
     val expr = BoundReference(0, NullType, true)
-    val projection = BridgeUnsafeProjection.create(Seq(expr))
+    val projection = BridgeHostColumnProjection.create(Seq(expr))
     
     val nullType = GpuColumnVector.convertFrom(NullType, true)
     withResource(new RapidsHostColumnBuilder(nullType, numRows)) { builder =>
@@ -638,7 +805,7 @@ class BridgeUnsafeProjectionSuite extends AnyFunSuite {
     }
     
     val expr = BoundReference(0, arrayType, true)
-    val projection = BridgeUnsafeProjection.create(Seq(expr))
+    val projection = BridgeHostColumnProjection.create(Seq(expr))
     
     val resultType = GpuColumnVector.convertFrom(arrayType, true)
     withResource(new RapidsHostColumnBuilder(resultType, rows.length)) { builder =>
@@ -688,7 +855,7 @@ class BridgeUnsafeProjectionSuite extends AnyFunSuite {
     }
     
     val expr = BoundReference(0, structType, true)
-    val projection = BridgeUnsafeProjection.create(Seq(expr))
+    val projection = BridgeHostColumnProjection.create(Seq(expr))
     
     val resultType = GpuColumnVector.convertFrom(structType, true)
     withResource(new RapidsHostColumnBuilder(resultType, rows.length)) { builder =>
@@ -744,7 +911,7 @@ class BridgeUnsafeProjectionSuite extends AnyFunSuite {
     }
     
     val expr = BoundReference(0, mapType, true)
-    val projection = BridgeUnsafeProjection.create(Seq(expr))
+    val projection = BridgeHostColumnProjection.create(Seq(expr))
     
     val resultType = GpuColumnVector.convertFrom(mapType, true)
     withResource(new RapidsHostColumnBuilder(resultType, rows.length)) { builder =>
@@ -839,7 +1006,7 @@ class BridgeUnsafeProjectionSuite extends AnyFunSuite {
     }
     
     val expr = BoundReference(0, arrayType, true)
-    val projection = BridgeUnsafeProjection.create(Seq(expr))
+    val projection = BridgeHostColumnProjection.create(Seq(expr))
     
     val resultType = GpuColumnVector.convertFrom(arrayType, true)
     withResource(new RapidsHostColumnBuilder(resultType, rows.length)) { builder =>
@@ -901,7 +1068,7 @@ class BridgeUnsafeProjectionSuite extends AnyFunSuite {
     }
     
     val expr = BoundReference(0, outerStructType, true)
-    val projection = BridgeUnsafeProjection.create(Seq(expr))
+    val projection = BridgeHostColumnProjection.create(Seq(expr))
     
     val resultType = GpuColumnVector.convertFrom(outerStructType, true)
     withResource(new RapidsHostColumnBuilder(resultType, rows.length)) { builder =>
@@ -963,7 +1130,7 @@ class BridgeUnsafeProjectionSuite extends AnyFunSuite {
     }
     
     val expr = BoundReference(0, arrayType, true)
-    val projection = BridgeUnsafeProjection.create(Seq(expr))
+    val projection = BridgeHostColumnProjection.create(Seq(expr))
     
     val resultType = GpuColumnVector.convertFrom(arrayType, true)
     withResource(new RapidsHostColumnBuilder(resultType, rows.length)) { builder =>
@@ -1014,7 +1181,7 @@ class BridgeUnsafeProjectionSuite extends AnyFunSuite {
     }
     
     val expr = BoundReference(0, structType, true)
-    val projection = BridgeUnsafeProjection.create(Seq(expr))
+    val projection = BridgeHostColumnProjection.create(Seq(expr))
     
     val resultType = GpuColumnVector.convertFrom(structType, true)
     withResource(new RapidsHostColumnBuilder(resultType, rows.length)) { builder =>
@@ -1184,7 +1351,7 @@ class BridgeUnsafeProjectionSuite extends AnyFunSuite {
     }
     
     val expr = BoundReference(0, arrayType, true)
-    val projection = BridgeUnsafeProjection.create(Seq(expr))
+    val projection = BridgeHostColumnProjection.create(Seq(expr))
     
     val resultType = GpuColumnVector.convertFrom(arrayType, true)
     withResource(new RapidsHostColumnBuilder(resultType, rows.length)) { builder =>
@@ -1280,7 +1447,7 @@ class BridgeUnsafeProjectionSuite extends AnyFunSuite {
     }
     
     val expr = BoundReference(0, structType, true)
-    val projection = BridgeUnsafeProjection.create(Seq(expr))
+    val projection = BridgeHostColumnProjection.create(Seq(expr))
     
     val resultType = GpuColumnVector.convertFrom(structType, true)
     withResource(new RapidsHostColumnBuilder(resultType, rows.length)) { builder =>
@@ -1375,7 +1542,7 @@ class BridgeUnsafeProjectionSuite extends AnyFunSuite {
     }
     
     val expr = BoundReference(0, structType, true)
-    val projection = BridgeUnsafeProjection.create(Seq(expr))
+    val projection = BridgeHostColumnProjection.create(Seq(expr))
     
     val resultType = GpuColumnVector.convertFrom(structType, true)
     withResource(new RapidsHostColumnBuilder(resultType, rows.length)) { builder =>
@@ -1447,4 +1614,3 @@ class BridgeUnsafeProjectionSuite extends AnyFunSuite {
     }
   }
 }
-
