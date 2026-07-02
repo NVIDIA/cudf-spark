@@ -3805,7 +3805,8 @@ object GpuOverrides extends Logging {
         }
 
         override def convertToGpu(childExprs: Seq[Expression]): GpuExpression =
-          GpuCollectList(childExprs.head, c.mutableAggBufferOffset, c.inputAggBufferOffset)
+          GpuCollectList(childExprs.head, c.mutableAggBufferOffset, c.inputAggBufferOffset,
+            TypeUtilsShims.collectListIgnoreNulls(c))
 
         override def aggBufferAttribute: AttributeReference = {
           val aggBuffer = c.aggBufferAttributes.head
@@ -3813,7 +3814,8 @@ object GpuOverrides extends Logging {
         }
 
         override def createCpuToGpuBufferConverter(): CpuToGpuAggregateBufferConverter =
-          new CpuToGpuCollectBufferConverter(c.child.dataType)
+          new CpuToGpuCollectBufferConverter(c.child.dataType,
+            !TypeUtilsShims.collectListIgnoreNulls(c))
 
         override def createGpuToCpuBufferConverter(): GpuToCpuAggregateBufferConverter =
           new GpuToCpuCollectBufferConverter()
