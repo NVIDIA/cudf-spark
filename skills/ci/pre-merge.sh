@@ -50,8 +50,6 @@ run_integration_tests() {
 }
 
 main() {
-    trap 'handle_error "Unknown step"' ERR
-
     setup_python           || handle_error "Python setup"
     run_unit_tests         || handle_error "Fast tests"
     run_integration_tests  || handle_error "Integration tests"
