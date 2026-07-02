@@ -147,12 +147,16 @@ else
     fi
 
     INCLUDE_SPARK_PROTOBUF_JAR_REQUESTED=$(echo "${INCLUDE_SPARK_PROTOBUF_JAR}" | tr '[:upper:]' '[:lower:]')
+    PROTOBUF_JAR_COUNT=$(readlink -e $PROTOBUF_JARS 2>/dev/null | wc -l)
     if [[ "$INCLUDE_SPARK_PROTOBUF_JAR_REQUESTED" != "false" \
-          && $(readlink -e $PROTOBUF_JARS 2>/dev/null | wc -l) -eq 1 ]];
+          && "$PROTOBUF_JAR_COUNT" -eq 1 ]];
     then
         export INCLUDE_SPARK_PROTOBUF_JAR=true
     else
-        if [[ "$INCLUDE_SPARK_PROTOBUF_JAR_REQUESTED" == "true" ]]; then
+        if [[ "$INCLUDE_SPARK_PROTOBUF_JAR_REQUESTED" != "false" \
+              && "$PROTOBUF_JAR_COUNT" -gt 1 ]]; then
+            >&2 echo "WARNING: Multiple spark-protobuf jars were found (matched: $PROTOBUF_JARS); disabling protobuf tests."
+        elif [[ "$INCLUDE_SPARK_PROTOBUF_JAR_REQUESTED" == "true" ]]; then
             >&2 echo "WARNING: INCLUDE_SPARK_PROTOBUF_JAR=true was requested but a spark-protobuf jar was not found (searched: $PROTOBUF_JARS); disabling protobuf tests."
         fi
         export INCLUDE_SPARK_PROTOBUF_JAR=false
