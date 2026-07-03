@@ -127,6 +127,78 @@ def test_array_aggregate_count_if_int():
             'aggregate(a, 0L, (acc, x) -> acc + CAST(CASE WHEN x IS NULL THEN 1 ELSE 0 END as BIGINT)) as null_cnt'))
 
 
+@disable_ansi_mode
+def test_array_heterogeneous_elementwise_hof_mixed_project():
+    data_gen = ArrayGen(IntegerGen(min_val=-10, max_val=10), max_length=8)
+    def do_it(spark):
+        outer_gen = IntegerGen(min_val=-5, max_val=5)
+        return three_col_df(spark, data_gen, outer_gen, outer_gen).selectExpr(
+            'a',
+            'b',
+            'c',
+            'transform(a, item -> item + b) as plus_b',
+            'transform(a, item -> item + c) as plus_c',
+            'filter(a, item -> item is not null and item + b >= c) as filtered_b_ge_c',
+            'exists(a, item -> item is not null and item + c < b) as has_c_less_b')
+
+    assert_gpu_and_cpu_are_equal_collect(do_it)
+
+
+@disable_ansi_mode
+def test_array_hof_project_with_disjoint_outer_column_groups():
+    data_gen = ArrayGen(IntegerGen(min_val=-10, max_val=10), max_length=8)
+    def do_it(spark):
+        outer_gen = IntegerGen(min_val=-5, max_val=5)
+        return three_col_df(spark, data_gen, outer_gen, outer_gen).selectExpr(
+            'transform(a, item -> item + b) as plus_b',
+            'transform(a, item -> item + c) as plus_c',
+            'filter(a, item -> item is not null and item + b >= 0) as non_negative_b',
+            'exists(a, item -> item is not null and item + c < 0) as has_negative_c')
+
+    assert_gpu_and_cpu_are_equal_collect(do_it)
+
+
+@disable_ansi_mode
+def test_array_hof_mixed_project_with_aggregate():
+    data_gen = ArrayGen(IntegerGen(min_val=-10, max_val=10), max_length=8)
+    def do_it(spark):
+        return unary_op_df(spark, data_gen).selectExpr(
+            'transform(a, x -> x + 1) as plus_one',
+            'filter(a, x -> x is not null and x >= 0) as non_negative',
+            'exists(a, x -> x is not null and x < 0) as has_negative',
+            '''aggregate(a, 0L,
+                 (acc, x) -> acc + CAST(CASE WHEN x IS NULL THEN 0 ELSE x END AS BIGINT))
+               as sum_or_zero''')
+
+    assert_gpu_and_cpu_are_equal_collect(do_it)
+
+
+@disable_ansi_mode
+def test_array_hof_mixed_project_with_aggregate_outer_state():
+    data_gen = ArrayGen(IntegerGen(min_val=-10, max_val=10), max_length=8)
+    outer_gen = LongGen(min_val=-3, max_val=3, nullable=False)
+    def do_it(spark):
+        return two_col_df(spark, data_gen, outer_gen).selectExpr(
+            'transform(a, x -> coalesce(x, 0) + CAST(b AS INT)) as plus_b',
+            '''aggregate(a, b, (acc, x) -> acc +
+                 CAST(coalesce(x, 0) + CAST(b AS INT) AS BIGINT)) as sum_plus_b''')
+
+    assert_gpu_and_cpu_are_equal_collect(do_it)
+
+
+@disable_ansi_mode
+def test_array_hof_mixed_project_with_indexed_lambdas():
+    data_gen = ArrayGen(IntegerGen(min_val=-10, max_val=10), max_length=8)
+    outer_gen = IntegerGen(min_val=-3, max_val=3, nullable=False)
+    def do_it(spark):
+        return two_col_df(spark, data_gen, outer_gen).selectExpr(
+            'transform(a, (x, i) -> coalesce(x, 0) + i + b) as indexed_add',
+            'filter(a, (x, i) -> x is not null and x + i + b >= 0) as indexed_filter',
+            'transform(a, (x, i) -> i - coalesce(x, 0)) as index_minus_value')
+
+    assert_gpu_and_cpu_are_equal_collect(do_it)
+
+
 # `if(cond, acc + t, acc)` shape — branches lifted via op identity. Same count-if
 # pattern as above but written naturally instead of using `CASE WHEN ... THEN 1 ELSE 0`.
 @disable_ansi_mode
