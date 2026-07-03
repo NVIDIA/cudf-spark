@@ -16,6 +16,48 @@
 
 package com.nvidia.spark.rapids.iceberg.iceberg111x
 
-import com.nvidia.spark.rapids.iceberg.IcebergProviderBase
+import scala.reflect.ClassTag
+import scala.util.Try
 
-class IcebergProviderImpl extends IcebergProviderBase
+import com.nvidia.spark.rapids.{GpuScan, ScanMeta, ScanRule, ShimReflectionUtils}
+import com.nvidia.spark.rapids.iceberg.IcebergProviderBase
+import org.apache.iceberg.spark.source.{GpuSparkIncrementalAppendScan, GpuSparkScan}
+
+import org.apache.spark.sql.connector.read.{Scan, SupportsRuntimeV2Filtering}
+
+class IcebergProviderImpl extends IcebergProviderBase {
+
+  /**
+   * Adds a {@code SparkIncrementalAppendScan} rule on top of the base provider's two rules
+   * ({@code SparkBatchQueryScan}, {@code SparkCopyOnWriteScan}). The incremental-append scan
+   * is a 1.11-only class — before 1.11 the same query path went through
+   * {@code SparkBatchQueryScan} and was matched by the base rule. The CPU class is loaded
+   * by string here because it is package-private and not directly referenceable from
+   * outside {@code org.apache.iceberg.spark.source}.
+   */
+  override def getScans: Map[Class[_ <: Scan], ScanRule[_ <: Scan]] = {
+    val cpuIncrementalAppendScanClass = ShimReflectionUtils.loadClass(
+      "org.apache.iceberg.spark.source.SparkIncrementalAppendScan")
+
+    val incrementalRule = new ScanRule[Scan](
+      (a, conf, p, r) => new ScanMeta[Scan](a, conf, p, r) {
+        private lazy val convertedScan: Try[GpuSparkScan] = Try(
+          GpuSparkIncrementalAppendScan.create(a, this.conf, false))
+
+        override def supportsRuntimeFilters: Boolean =
+          a.isInstanceOf[SupportsRuntimeV2Filtering]
+
+        override def tagSelfForGpu(): Unit = {
+          GpuSparkScan.tagForGpu(this, convertedScan)
+        }
+
+        override def convertToGpu(): GpuScan = convertedScan.get
+      },
+      "Iceberg incremental append scan",
+      ClassTag(cpuIncrementalAppendScanClass)
+    )
+
+    super.getScans + (
+      cpuIncrementalAppendScanClass.asSubclass(classOf[Scan]) -> incrementalRule)
+  }
+}

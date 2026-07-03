@@ -167,11 +167,10 @@ run_iceberg_version_detect_tests() {
         return 0
     fi
 
-    # Supported Iceberg versions per Spark version — must stay in sync with
-    # run_iceberg_tests() in spark-tests.sh. Note: the Spark 4.1 -> 1.11.0 row is
-    # listed here, but ci_scala213() currently uses SPARK_VER=4.0.1 so the 4.1 branch
-    # is not exercised in pre-merge CI. The full 4.1 integration suite is added in the
-    # stacked follow-up PR; until then, the 1.11.0 commit-ID mapping is nightly-only.
+    # Supported Iceberg versions per Spark version. The 3.5.x / 4.0.x rows mirror
+    # run_iceberg_tests() in spark-tests.sh. The Spark 4.1 -> 1.11.0 row is kept here
+    # for callers that explicitly test Spark 4.1, while the regular pre-merge job
+    # below runs on Spark 4.0.1. Spark 4.1 is covered by nightly run_iceberg_tests().
     local iceberg_versions
     if [[ "$iceberg_spark_ver" == "4.1" ]]; then
         iceberg_versions="1.11.0"
@@ -269,6 +268,7 @@ ci_scala213() {
     # Moved out of spark-tests.sh DEFAULT mode where JDK 8 causes
     # UnsupportedClassVersionError for Iceberg 1.9+ runtime JARs.
     run_iceberg_version_detect_tests $SPARK_VER 2.13
+
 }
 
 prepare_spark() {

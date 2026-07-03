@@ -142,7 +142,7 @@ case class GpuParquetScan(
   override def equals(obj: Any): Boolean = obj match {
     case p: GpuParquetScan =>
       super.equals(p) && dataSchema == p.dataSchema && options == p.options &&
-          equivalentFilters(pushedFilters, p.pushedFilters) && rapidsConf == p.rapidsConf &&
+          equivalentFilters(pushedFilters, p.pushedFilters) &&
           queryUsesInputFile == p.queryUsesInputFile
     case _ => false
   }

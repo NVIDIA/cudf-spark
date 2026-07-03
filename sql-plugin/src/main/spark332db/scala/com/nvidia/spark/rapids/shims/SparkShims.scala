@@ -26,7 +26,7 @@ import org.apache.spark.sql.catalyst.expressions.objects.{ExternalMapToCatalyst,
 import org.apache.spark.sql.execution.datasources.V1WritesUtils.Empty2Null
 import org.apache.spark.sql.rapids.GpuV1WriteUtils.GpuEmpty2Null
 
-object SparkShimImpl extends Spark332PlusDBShims {
+object SparkShimImpl extends Spark332PlusDBShims with SparkCatalogPartitionShims {
   override def isExpressionStateful(expr: Expression): Boolean = expr match {
     case _: Stateful | _: InvokeLike | _: ExternalMapToCatalyst => true
     case _ => false

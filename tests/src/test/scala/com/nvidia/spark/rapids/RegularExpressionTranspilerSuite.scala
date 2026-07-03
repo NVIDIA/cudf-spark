@@ -766,6 +766,10 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     }
   }
 
+  test("issue-14748: word boundaries are not literal split delimiters") {
+    assertNoTranspileToSplittableString(Set(raw"\b", raw"\B"))
+  }
+
   test("regexp_split - character class repetition - ? and *") {
     val patterns = Set(raw"[a-z][0-9]?", raw"[a-z][0-9]*")
     val data = Seq("a", "aa", "a1a1", "a1b2", "a1b")

@@ -762,6 +762,7 @@ class CudfRegexTranspiler(mode: RegexMode) {
 
   def transpileToSplittableString(e: RegexAST): Option[String] = {
     e match {
+      case RegexEscaped('b') | RegexEscaped('B') => None
       case RegexEscaped(ch) if escapeChars.contains(ch) => Some(escapeChars(ch).toString)
       case RegexEscaped(ch) if regexPunct.contains(ch) => Some(ch.toString)
       case RegexChar(ch) if !regexMetaChars.contains(ch) => Some(ch.toString)
