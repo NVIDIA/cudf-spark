@@ -891,9 +891,11 @@ case class GpuProjectExec(
       // only when this project is allowed to change batch boundaries.
       // Wrap next() so lazy projection work is counted in the project metric.
       maybeSplitIter.flatMap { split =>
-        val sb = SpillableColumnarBatch(split, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
-        val pieces = boundProjectList.projectAndCloseStreamingWithSplitRetry(
-          sb, allowMultipleOutputBatches = localEnablePreSplit)
+        val pieces = NvtxIdWithMetrics(NvtxRegistry.PROJECT_EXEC, opTime) {
+          val sb = SpillableColumnarBatch(split, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+          boundProjectList.projectAndCloseStreamingWithSplitRetry(
+            sb, allowMultipleOutputBatches = localEnablePreSplit)
+        }
         new Iterator[ColumnarBatch] {
           override def hasNext: Boolean = pieces.hasNext
           override def next(): ColumnarBatch = {
