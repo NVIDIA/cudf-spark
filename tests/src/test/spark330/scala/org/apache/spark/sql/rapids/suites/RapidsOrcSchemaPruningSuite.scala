@@ -24,60 +24,43 @@ import com.nvidia.spark.rapids.shims.GpuBatchScanExec
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.DataFrame
-import org.apache.spark.sql.catalyst.parser.CatalystSqlParser
 import org.apache.spark.sql.execution.FileSourceScanExec
 import org.apache.spark.sql.execution.datasources.orc.{OrcV1SchemaPruningSuite, OrcV2SchemaPruningSuite}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.GpuFileSourceScanExec
-import org.apache.spark.sql.rapids.utils.RapidsSQLTestsBaseTrait
+import org.apache.spark.sql.rapids.utils.{RapidsSchemaPruningTestUtils, RapidsSQLTestsBaseTrait}
 
 class RapidsOrcV1SchemaPruningSuite
   extends OrcV1SchemaPruningSuite
-  with RapidsSQLTestsBaseTrait {
+  with RapidsSQLTestsBaseTrait
+  with RapidsSchemaPruningTestUtils {
 
-  override protected def checkScanSchemata(
+  override protected def checkScan(
       df: DataFrame,
       expectedSchemaCatalogStrings: String*): Unit = {
-    val fileSourceScanSchemata =
-      getExecutedPlan(df).collect {
-        case scan: FileSourceScanExec => scan.requiredSchema
-        case scan: GpuFileSourceScanExec => scan.requiredSchema
-      }
-    assert(fileSourceScanSchemata.size === expectedSchemaCatalogStrings.size,
-      s"Found ${fileSourceScanSchemata.size} file sources in dataframe, " +
-        s"but expected $expectedSchemaCatalogStrings")
-    fileSourceScanSchemata.zip(expectedSchemaCatalogStrings).foreach {
-      case (scanSchema, expectedScanSchemaCatalogString) =>
-        val expectedScanSchema = CatalystSqlParser.parseDataType(expectedScanSchemaCatalogString)
-        implicit val equality = schemaEquality
-        assert(scanSchema === expectedScanSchema)
+    checkScanSchema(df, expectedSchemaCatalogStrings: _*) {
+      case scan: FileSourceScanExec => scan.requiredSchema
+      case scan: GpuFileSourceScanExec => scan.requiredSchema
     }
+    df.collect()
   }
 }
 
 class RapidsOrcV2SchemaPruningSuite
   extends OrcV2SchemaPruningSuite
-  with RapidsSQLTestsBaseTrait {
+  with RapidsSQLTestsBaseTrait
+  with RapidsSchemaPruningTestUtils {
 
   override def sparkConf: SparkConf =
     super.sparkConf.set(SQLConf.ADAPTIVE_EXECUTION_ENABLED.key, "false")
 
-  override def checkScanSchemata(
+  override protected def checkScan(
       df: DataFrame,
       expectedSchemaCatalogStrings: String*): Unit = {
-    val fileSourceScanSchemata =
-      getExecutedPlan(df).collect {
-        case scan: GpuBatchScanExec if scan.scan.isInstanceOf[GpuOrcScan] =>
-          scan.scan.asInstanceOf[GpuOrcScan].readDataSchema
-      }
-    assert(fileSourceScanSchemata.size === expectedSchemaCatalogStrings.size,
-      s"Found ${fileSourceScanSchemata.size} file sources in dataframe, " +
-        s"but expected $expectedSchemaCatalogStrings")
-    fileSourceScanSchemata.zip(expectedSchemaCatalogStrings).foreach {
-      case (scanSchema, expectedScanSchemaCatalogString) =>
-        val expectedScanSchema = CatalystSqlParser.parseDataType(expectedScanSchemaCatalogString)
-        implicit val equality = schemaEquality
-        assert(scanSchema === expectedScanSchema)
+    checkScanSchema(df, expectedSchemaCatalogStrings: _*) {
+      case scan: GpuBatchScanExec if scan.scan.isInstanceOf[GpuOrcScan] =>
+        scan.scan.asInstanceOf[GpuOrcScan].readDataSchema
     }
+    df.collect()
   }
 }

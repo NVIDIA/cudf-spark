@@ -17,12 +17,15 @@
 /*** spark-rapids-shim-json-lines
 {"spark": "330"}
 spark-rapids-shim-json-lines ***/
-package org.apache.spark.sql.rapids.suites
+package org.apache.spark.sql.rapids.utils
 
-import org.apache.spark.sql.execution.datasources.parquet.ParquetIOSuite
-import org.apache.spark.sql.rapids.utils.{RapidsParquetResourceTest, RapidsSQLTestsBaseTrait}
+import org.apache.spark.sql.DataFrame
+import org.apache.spark.sql.execution.datasources.parquet.ParquetTest
 
-class RapidsParquetIOSuite
-  extends ParquetIOSuite
-  with RapidsSQLTestsBaseTrait
-  with RapidsParquetResourceTest
+trait RapidsParquetResourceTest extends ParquetTest {
+  this: RapidsSQLTestsBaseTrait =>
+
+  override protected def readResourceParquetFile(name: String): DataFrame = {
+    spark.read.parquet(testFile(name))
+  }
+}

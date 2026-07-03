@@ -19,7 +19,7 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.suites
 
-import com.nvidia.spark.rapids.{GpuSortExec, GpuTopN}
+import com.nvidia.spark.rapids.GpuSortExec
 
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.execution.SortSuite
@@ -50,10 +50,7 @@ class RapidsSortSuite extends SortSuite with RapidsSQLTestsBaseTrait {
       val df = (1 to 100).map(Tuple1(_)).toDF("a").sort($"a".desc).limit(10)
       assert(df.collect().toSeq === (100 to 91 by -1).map(v => Row(v)))
 
-      val gpuTopNs = getExecutedPlan(df).collect {
-        case topN: GpuTopN => topN
-      }
-      assert(gpuTopNs.nonEmpty, s"Expected GpuTopN in plan:\n${df.queryExecution.executedPlan}")
+      RapidsTakeOrderedAndProjectSuite.assertTopN(df, getExecutedPlan(df))
     }
   }
 }

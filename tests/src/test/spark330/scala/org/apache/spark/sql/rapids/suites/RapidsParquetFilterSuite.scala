@@ -33,7 +33,7 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.internal.SQLConf.ParquetOutputTimestampType.{
   TIMESTAMP_MICROS, TIMESTAMP_MILLIS}
 import org.apache.spark.sql.rapids.GpuFileSourceScanExec
-import org.apache.spark.sql.rapids.utils.RapidsSQLTestsBaseTrait
+import org.apache.spark.sql.rapids.utils.{RapidsParquetResourceTest, RapidsSQLTestsBaseTrait}
 
 trait RapidsParquetFilterCorrectnessTests extends RapidsSQLTestsBaseTrait {
   this: ParquetFilterSuite =>
@@ -196,17 +196,11 @@ trait RapidsParquetFilterCorrectnessTests extends RapidsSQLTestsBaseTrait {
 class RapidsParquetV1FilterSuite
   extends ParquetV1FilterSuite
   with RapidsSQLTestsBaseTrait
-  with RapidsParquetFilterCorrectnessTests {
-  override protected def readResourceParquetFile(name: String): DataFrame = {
-    spark.read.parquet(testFile(name))
-  }
-}
+  with RapidsParquetResourceTest
+  with RapidsParquetFilterCorrectnessTests
 
 class RapidsParquetV2FilterSuite
   extends ParquetV2FilterSuite
   with RapidsSQLTestsBaseTrait
-  with RapidsParquetFilterCorrectnessTests {
-  override protected def readResourceParquetFile(name: String): DataFrame = {
-    spark.read.parquet(testFile(name))
-  }
-}
+  with RapidsParquetResourceTest
+  with RapidsParquetFilterCorrectnessTests

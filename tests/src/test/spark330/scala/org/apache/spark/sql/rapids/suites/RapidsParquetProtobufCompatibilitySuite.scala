@@ -19,14 +19,10 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.suites
 
-import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.execution.datasources.parquet.ParquetProtobufCompatibilitySuite
-import org.apache.spark.sql.rapids.utils.RapidsSQLTestsBaseTrait
+import org.apache.spark.sql.rapids.utils.{RapidsParquetResourceTest, RapidsSQLTestsBaseTrait}
 
 class RapidsParquetProtobufCompatibilitySuite
   extends ParquetProtobufCompatibilitySuite
-  with RapidsSQLTestsBaseTrait {
-    override protected def readResourceParquetFile(name: String): DataFrame = {
-      spark.read.parquet(testFile(name))
-    }
-}
+  with RapidsSQLTestsBaseTrait
+  with RapidsParquetResourceTest

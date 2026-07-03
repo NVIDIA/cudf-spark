@@ -19,15 +19,13 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.suites
 
-import com.nvidia.spark.rapids.{GpuCSVScan, GpuOrcScan}
-import com.nvidia.spark.rapids.parquet.GpuParquetScan
 import com.nvidia.spark.rapids.shims.GpuBatchScanExec
 
 import org.apache.spark.sql.catalyst.expressions.Expression
-import org.apache.spark.sql.catalyst.json.rapids.GpuJsonScan
-import org.apache.spark.sql.execution.{FileSourceScanExec, SparkPlan}
+import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.datasources.PruneFileSourcePartitionsSuite
-import org.apache.spark.sql.rapids.{GpuAvroScan, GpuFileSourceScanExec}
+import org.apache.spark.sql.execution.datasources.v2.FileScan
+import org.apache.spark.sql.rapids.GpuFileSourceScanExec
 import org.apache.spark.sql.rapids.utils.RapidsSQLTestsTrait
 
 class RapidsPruneFileSourcePartitionsSuite
@@ -36,25 +34,19 @@ class RapidsPruneFileSourcePartitionsSuite
 
   override protected def collectPartitionFiltersFn()
       : PartialFunction[SparkPlan, Seq[Expression]] = {
-    case scan: FileSourceScanExec => scan.partitionFilters
-    case scan: GpuFileSourceScanExec => scan.partitionFilters
-    case scan: GpuBatchScanExec if gpuPartitionFilters(scan.scan).isDefined =>
-      gpuPartitionFilters(scan.scan).get
+    super.collectPartitionFiltersFn().orElse {
+      case scan: GpuFileSourceScanExec =>
+        scan.partitionFilters
+      case scan: GpuBatchScanExec if scan.scan.isInstanceOf[FileScan] =>
+        scan.scan.asInstanceOf[FileScan].partitionFilters
+    }
   }
 
   override def getScanExecPartitionSize(plan: SparkPlan): Long = {
     plan.collectFirst {
       case scan: GpuFileSourceScanExec => scan.selectedPartitions.length.toLong
-      case scan: GpuBatchScanExec => scan.inputPartitions.size.toLong
+      case scan: GpuBatchScanExec if scan.scan.isInstanceOf[FileScan] =>
+        scan.partitions.size.toLong
     }.getOrElse(super.getScanExecPartitionSize(plan))
-  }
-
-  private def gpuPartitionFilters(scan: Any): Option[Seq[Expression]] = scan match {
-    case parquetScan: GpuParquetScan => Some(parquetScan.partitionFilters)
-    case orcScan: GpuOrcScan => Some(orcScan.partitionFilters)
-    case csvScan: GpuCSVScan => Some(csvScan.partitionFilters)
-    case jsonScan: GpuJsonScan => Some(jsonScan.partitionFilters)
-    case avroScan: GpuAvroScan => Some(avroScan.partitionFilters)
-    case _ => None
   }
 }

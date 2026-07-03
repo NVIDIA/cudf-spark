@@ -20,11 +20,22 @@ spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.suites
 
 import com.nvidia.spark.rapids.GpuTopN
+import org.scalatest.Assertions
 
-import org.apache.spark.sql.Row
+import org.apache.spark.sql.{DataFrame, Row}
+import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.TakeOrderedAndProjectSuite
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.utils.RapidsSQLTestsBaseTrait
+
+object RapidsTakeOrderedAndProjectSuite extends Assertions {
+  def assertTopN(df: DataFrame, executedPlan: Seq[SparkPlan]): Unit = {
+    val gpuTopNs = executedPlan.collect {
+      case topN: GpuTopN => topN
+    }
+    assert(gpuTopNs.nonEmpty, s"Expected GpuTopN in plan:\n${df.queryExecution.executedPlan}")
+  }
+}
 
 class RapidsTakeOrderedAndProjectSuite
   extends TakeOrderedAndProjectSuite
@@ -38,7 +49,7 @@ class RapidsTakeOrderedAndProjectSuite
         .limit(2)
 
       assert(df.collect().toSeq === Seq(Row(4, 40), Row(3, 10)))
-      assertGpuTopN(df)
+      RapidsTakeOrderedAndProjectSuite.assertTopN(df, getExecutedPlan(df))
     }
   }
 
@@ -50,14 +61,7 @@ class RapidsTakeOrderedAndProjectSuite
         .select($"b")
 
       assert(df.collect().toSeq === Seq(Row(40), Row(10)))
-      assertGpuTopN(df)
+      RapidsTakeOrderedAndProjectSuite.assertTopN(df, getExecutedPlan(df))
     }
-  }
-
-  private def assertGpuTopN(df: org.apache.spark.sql.DataFrame): Unit = {
-    val gpuTopNs = getExecutedPlan(df).collect {
-      case topN: GpuTopN => topN
-    }
-    assert(gpuTopNs.nonEmpty, s"Expected GpuTopN in plan:\n${df.queryExecution.executedPlan}")
   }
 }
