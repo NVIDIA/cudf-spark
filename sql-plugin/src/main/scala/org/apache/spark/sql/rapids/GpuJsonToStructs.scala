@@ -52,7 +52,8 @@ case class GpuJsonToStructs(
         case _: MapType =>
           (JSONUtils.extractRawMapFromJsonString(input.getBase, cudfOptions):
             @scala.annotation.nowarn(
-              "cat=deprecation&msg=method extractRawMapFromJsonString in class JSONUtils is deprecated"))
+              "cat=deprecation&msg=method extractRawMapFromJsonString in class " +
+                "JSONUtils is deprecated"))
         case struct: StructType =>
           val parsedStructs = JSONUtils.fromJSONToStructs(input.getBase, makeSchema(struct),
             cudfOptions, parsedOptions.locale == Locale.US)
