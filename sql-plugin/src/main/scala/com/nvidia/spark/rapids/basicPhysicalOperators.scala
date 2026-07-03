@@ -131,8 +131,10 @@ object GpuProjectExec {
         // different vector length, thus not able to reuse cached vectors.
         GpuExpressionsUtils.cachedNullVectors.get.clear()
 
-        val newColumns = boundExprs.safeMap(_.columnarEval(cb)).toArray[ColumnVector]
-        new ColumnarBatch(newColumns, cb.numRows())
+        GpuArrayHofFusion.project(cb, boundExprs).getOrElse {
+          val newColumns = boundExprs.safeMap(_.columnarEval(cb)).toArray[ColumnVector]
+          new ColumnarBatch(newColumns, cb.numRows())
+        }
       } finally {
         GpuExpressionsUtils.cachedNullVectors.get.clear()
       }
@@ -162,7 +164,6 @@ object GpuProjectExec {
    */
   def projectWithRetrySingleBatch(sb: SpillableColumnarBatch,
       boundExprs: Seq[Expression]): ColumnarBatch = {
-
     // For retryable expressions, use split-retry: on GPU OOM, halve the input
     // batch by rows and re-run on each half. This recovers from cuDF-internal
     // scratch allocations that the pre-split estimator cannot see (e.g. regex
@@ -1114,7 +1115,8 @@ case class GpuProjectAstExec(
       }
     } else {
       @tailrec
-      def recurse(boundExprs: Seq[Seq[GpuExpression]],
+      def recurse(
+          boundExprs: Seq[Seq[GpuExpression]],
           sb: SpillableColumnarBatch,
           recurseCloseInputBatch: Boolean): SpillableColumnarBatch = boundExprs match {
         case Nil => sb
@@ -1151,7 +1153,8 @@ case class GpuProjectAstExec(
 
   def project(batch: ColumnarBatch): ColumnarBatch = {
     @tailrec
-    def recurse(boundExprs: Seq[Seq[GpuExpression]],
+    def recurse(
+        boundExprs: Seq[Seq[GpuExpression]],
         cb: ColumnarBatch,
         isFirst: Boolean): ColumnarBatch = {
       boundExprs match {

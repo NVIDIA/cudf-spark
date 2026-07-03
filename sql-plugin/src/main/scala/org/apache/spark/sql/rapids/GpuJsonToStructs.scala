@@ -50,8 +50,10 @@ case class GpuJsonToStructs(
     NvtxRegistry.JSON_TO_STRUCTS {
       schema match {
         case _: MapType =>
-          JSONUtils.extractRawMapFromJsonString(input.getBase, cudfOptions):
-            @scala.annotation.nowarn("cat=deprecation")
+          (JSONUtils.extractRawMapFromJsonString(input.getBase, cudfOptions):
+            @scala.annotation.nowarn(
+              "cat=deprecation&msg=method extractRawMapFromJsonString in class " +
+                "JSONUtils is deprecated"))
         case struct: StructType =>
           val parsedStructs = JSONUtils.fromJSONToStructs(input.getBase, makeSchema(struct),
             cudfOptions, parsedOptions.locale == Locale.US)
