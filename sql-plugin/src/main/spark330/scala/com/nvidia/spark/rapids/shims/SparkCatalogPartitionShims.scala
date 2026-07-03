@@ -13,45 +13,56 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 /*** spark-rapids-shim-json-lines
-{"spark": "400db173"}
+{"spark": "330"}
+{"spark": "330db"}
+{"spark": "331"}
+{"spark": "332"}
+{"spark": "332db"}
+{"spark": "333"}
+{"spark": "334"}
+{"spark": "340"}
+{"spark": "341"}
+{"spark": "341db"}
+{"spark": "342"}
+{"spark": "343"}
+{"spark": "344"}
+{"spark": "350"}
+{"spark": "350db143"}
+{"spark": "351"}
+{"spark": "352"}
+{"spark": "353"}
+{"spark": "354"}
+{"spark": "355"}
+{"spark": "356"}
+{"spark": "357"}
+{"spark": "358"}
+{"spark": "400"}
+{"spark": "401"}
+{"spark": "402"}
+{"spark": "403"}
+{"spark": "411"}
+{"spark": "412"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
-import com.nvidia.spark.rapids._
+import com.nvidia.spark.rapids.SparkShims
 
 import org.apache.spark.sql.{SparkSession => SqlSparkSession}
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.catalog.{CatalogTable, CatalogTablePartition}
 import org.apache.spark.sql.catalyst.catalog.CatalogTypes.TablePartitionSpec
 import org.apache.spark.sql.catalyst.expressions.Expression
-import org.apache.spark.sql.catalyst.expressions.objects.Invoke
-import org.apache.spark.sql.execution.datasources.{FilePartition, PartitionedFile}
-import org.apache.spark.sql.rapids.shims.InvokeExprMeta
 
-trait Spark400PlusDBShims extends Spark341PlusDBShims {
-  override def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
-    val shimExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = Seq(
-      GpuOverrides.expr[Invoke](
-        "Calls the specified function on an object. This is a wrapper to other expressions, so " +
-          "can not know the details in advance. E.g.: between is replaced by " +
-          "And(GreaterThanOrEqual(ref, lower), LessThanOrEqual(ref, upper);  StructToJson is " +
-          "replaced by Invoke(Literal(StructsToJsonEvaluator), evaluate, string_type, arguments)",
-        InvokeCheck,
-        InvokeExprMeta)
-        .note("The supported types are not deterministic since it's a dynamic expression")
-    ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
-    super.getExprs ++ shimExprs
-  }
-
+trait SparkCatalogPartitionShims extends SparkShims {
   override def listPartitionsByFilter(
       sparkSession: SqlSparkSession,
       tableName: TableIdentifier,
       predicates: Seq[Expression],
       resolvedCatalogTable: Option[CatalogTable]): Seq[CatalogTablePartition] = {
-    sparkSession.sessionState.catalog.listPartitionsByFilter(
-      tableName, predicates, resolvedCatalogTable)
+    // DBR 17.3 needs this shared shim parameter; legacy SessionCatalog APIs do not.
+    val _ = resolvedCatalogTable
+    sparkSession.sessionState.catalog.listPartitionsByFilter(tableName, predicates)
   }
 
   override def listPartitions(
@@ -59,11 +70,8 @@ trait Spark400PlusDBShims extends Spark341PlusDBShims {
       tableName: TableIdentifier,
       partialSpec: Option[TablePartitionSpec],
       resolvedCatalogTable: Option[CatalogTable]): Seq[CatalogTablePartition] = {
-    sparkSession.sessionState.catalog.listPartitions(
-      tableName, partialSpec, resolvedCatalogTable = resolvedCatalogTable)
-  }
-
-  override def getPartitionFiles(partition: FilePartition): Seq[PartitionedFile] = {
-    partition.filesWithAbsolutePaths.toSeq
+    // DBR 17.3 needs this shared shim parameter; legacy SessionCatalog APIs do not.
+    val _ = resolvedCatalogTable
+    sparkSession.sessionState.catalog.listPartitions(tableName, partialSpec)
   }
 }
