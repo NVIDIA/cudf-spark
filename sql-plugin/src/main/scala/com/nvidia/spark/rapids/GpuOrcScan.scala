@@ -116,7 +116,9 @@ case class GpuOrcScan(
   override def equals(obj: Any): Boolean = obj match {
     case o: GpuOrcScan =>
       super.equals(o) && dataSchema == o.dataSchema && options == o.options &&
-          equivalentFilters(pushedFilters, o.pushedFilters) && rapidsConf == o.rapidsConf &&
+          equivalentFilters(pushedFilters, o.pushedFilters) &&
+          rapidsConf.isOrcFloatTypesToStringEnable ==
+              o.rapidsConf.isOrcFloatTypesToStringEnable &&
           queryUsesInputFile == o.queryUsesInputFile
     case _ => false
   }
