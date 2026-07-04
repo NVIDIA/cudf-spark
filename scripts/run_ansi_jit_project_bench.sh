@@ -48,6 +48,7 @@ BENCH_CUDA_HOME="${BENCH_CUDA_HOME:-${CUDA_HOME:-/usr/local/cuda}}"
 BENCH_NSYS_BIN="${BENCH_NSYS_BIN:-${BENCH_CUDA_HOME}/bin/nsys}"
 BENCH_NCU_BIN="${BENCH_NCU_BIN:-${BENCH_CUDA_HOME}/bin/ncu}"
 BENCH_NCU_SET="${BENCH_NCU_SET:-detailed}"
+BENCH_NCU_KERNEL_NAME_BASE="${BENCH_NCU_KERNEL_NAME_BASE:-function}"
 BENCH_NCU_KERNEL_NAME="${BENCH_NCU_KERNEL_NAME:-regex:^cudf_kernel_entry$}"
 BENCH_NCU_LAUNCH_SKIP="${BENCH_NCU_LAUNCH_SKIP:-0}"
 BENCH_NCU_LAUNCH_COUNT="${BENCH_NCU_LAUNCH_COUNT:-1}"
@@ -135,7 +136,7 @@ postprocess_profile() {
   local run_log="$2"
   local run_cache="$3"
 
-  if [[ "${BENCH_PROFILE_POSTPROCESS}" != "true" ]]; then
+  if [[ "${BENCH_PROFILE_TOOL}" == "none" || "${BENCH_PROFILE_POSTPROCESS}" != "true" ]]; then
     return
   fi
 
@@ -295,7 +296,7 @@ else
                   "${BENCH_NCU_BIN}"
                   --target-processes all
                   --set "${BENCH_NCU_SET}"
-                  --kernel-name-base function
+                  --kernel-name-base "${BENCH_NCU_KERNEL_NAME_BASE}"
                   --kernel-name "${BENCH_NCU_KERNEL_NAME}"
                   --launch-skip "${BENCH_NCU_LAUNCH_SKIP}"
                   --launch-count "${BENCH_NCU_LAUNCH_COUNT}"
