@@ -1521,10 +1521,18 @@ object GpuOverrides extends Logging {
       }),
     expr[ShiftRightUnsigned](
       "Bitwise unsigned shift right (>>>)",
-      ExprChecks.binaryProject(TypeSig.INT + TypeSig.LONG, TypeSig.INT + TypeSig.LONG,
+      ExprChecks.binaryProjectAndAst(
+        TypeSig.INT + TypeSig.LONG,
+        TypeSig.INT + TypeSig.LONG, TypeSig.INT + TypeSig.LONG,
         ("value", TypeSig.INT + TypeSig.LONG, TypeSig.INT + TypeSig.LONG),
         ("amount", TypeSig.INT, TypeSig.INT)),
       (a, conf, p, r) => new BinaryExprMeta[ShiftRightUnsigned](a, conf, p, r) {
+        override def tagSelfForAst(): Unit = {
+          if (!this.conf.isProjectAstAnsiArithmeticEnabled) {
+            willNotWorkInAst("AST shift requires row IR JIT support.")
+          }
+        }
+
         override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression =
           GpuShiftRightUnsigned(lhs, rhs)
       }),

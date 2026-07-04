@@ -95,15 +95,19 @@ trait GpuShiftBase extends GpuBinaryExpression with ImplicitCastInputTypes {
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
     astShiftOp match {
       case Some(op) =>
-        new ast.JitOperation(op,
-          left.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns),
-          astShiftDistance(numFirstTableColumns))
+        astShiftResult(new ast.JitOperation(op,
+          astShiftValue(numFirstTableColumns), astShiftDistance(numFirstTableColumns)))
       case None =>
         throw new IllegalStateException(s"${this.getClass.getSimpleName} is not supported by AST")
     }
   }
 
-  private def astShiftDistance(numFirstTableColumns: Int): ast.AstExpression = {
+  protected def astShiftValue(numFirstTableColumns: Int): ast.AstExpression =
+    left.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns)
+
+  protected def astShiftResult(shifted: ast.AstExpression): ast.AstExpression = shifted
+
+  protected def astShiftDistance(numFirstTableColumns: Int): ast.AstExpression = {
     val mask = left.dataType match {
       case IntegerType => 0x1F
       case LongType => 0x3F
@@ -147,6 +151,29 @@ case class GpuShiftRightUnsigned(left: Expression, right: Expression) extends Gp
     Seq(TypeCollection(IntegerType, LongType), IntegerType)
 
   override def shiftOp: BinaryOp = BinaryOp.SHIFT_RIGHT_UNSIGNED
+  override def astShiftOp: Option[ast.JitOperator] = Some(ast.JitOperator.BITWISE_SHIFT_RIGHT)
+
+  private def astCast(intCast: ast.JitOperator, longCast: ast.JitOperator): ast.JitOperator =
+    left.dataType match {
+      case IntegerType => intCast
+      case LongType => longCast
+      case t => throw new IllegalArgumentException(
+        s"$t is not a supported type for java bit shifts")
+    }
+
+  override protected def astShiftValue(numFirstTableColumns: Int): ast.AstExpression =
+    new ast.JitOperation(
+      astCast(ast.JitOperator.CAST_TO_UINT32, ast.JitOperator.CAST_TO_UINT64),
+      super.astShiftValue(numFirstTableColumns))
+
+  override protected def astShiftDistance(numFirstTableColumns: Int): ast.AstExpression =
+    new ast.JitOperation(
+      astCast(ast.JitOperator.CAST_TO_UINT32, ast.JitOperator.CAST_TO_UINT64),
+      super.astShiftDistance(numFirstTableColumns))
+
+  override protected def astShiftResult(shifted: ast.AstExpression): ast.AstExpression =
+    new ast.JitOperation(
+      astCast(ast.JitOperator.CAST_TO_INT32, ast.JitOperator.CAST_TO_INT64), shifted)
 
   override def dataType: DataType = left.dataType
 }
