@@ -23,8 +23,8 @@ import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.shims.ShimExpression
 
-import org.apache.spark.sql.catalyst.expressions.{ComplexTypeMergingExpression, Expression, Predicate}
-import org.apache.spark.sql.types.{DataType, DoubleType, FloatType}
+import org.apache.spark.sql.catalyst.expressions.{AttributeReference, ComplexTypeMergingExpression, Expression, Predicate}
+import org.apache.spark.sql.types.{BooleanType, DataType, DoubleType, FloatType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 object GpuNvl {
@@ -55,7 +55,26 @@ object GpuNvl {
 case class GpuCoalesce(children: Seq[Expression]) extends GpuExpression
     with ShimExpression with ComplexTypeMergingExpression {
 
+  import GpuExpressionWithSideEffectUtils._
+
+  private def childHasSideEffects(expr: Expression): Boolean = expr match {
+    case gpuExpr: GpuExpression => gpuExpr.hasSideEffects
+    case _: AttributeReference => false
+    case _ => true
+  }
+
+  private[rapids] lazy val hasSideEffectingFallback: Boolean =
+    children.drop(1).exists(childHasSideEffects)
+
   override def columnarEval(batch: ColumnarBatch): GpuColumnVector = {
+    if (hasSideEffectingFallback) {
+      columnarEvalWithSideEffects(batch)
+    } else {
+      columnarEvalEager(batch)
+    }
+  }
+
+  private def columnarEvalEager(batch: ColumnarBatch): GpuColumnVector = {
     // runningResult has precedence over runningScalar
     var runningResult: ColumnVector = null
     var runningScalar: GpuScalar = null
@@ -110,6 +129,67 @@ case class GpuCoalesce(children: Seq[Expression]) extends GpuExpression
       }
       if (runningScalar != null) {
         runningScalar.close()
+      }
+    }
+  }
+
+  private def columnarEvalWithSideEffects(batch: ColumnarBatch): GpuColumnVector = {
+    if (batch.numRows() == 0) {
+      return GpuExpressionsUtils.resolveColumnVector(GpuScalar(null, dataType), 0)
+    }
+
+    var current: ColumnVector = null
+
+    def merge(next: ColumnVector): Unit = {
+      if (current == null) {
+        current = next.incRefCount()
+      } else {
+        val result = GpuNvl(current, next)
+        current.close()
+        current = result
+      }
+    }
+
+    try {
+      val colTypes = GpuColumnVector.extractTypes(batch)
+      withResource(GpuColumnVector.from(batch)) { table =>
+        children.foreach { child =>
+          if (current == null) {
+            withResource(child.columnarEval(batch)) { value =>
+              merge(value.getBase)
+            }
+          } else {
+            withResource(GpuColumnVector.from(current.isNull, BooleanType)) { unresolved =>
+              if (isAllFalse(unresolved)) {
+                return GpuColumnVector.from(current.incRefCount(), dataType)
+              }
+
+              if (!childHasSideEffects(child) || isAllTrue(unresolved)) {
+                withResource(child.columnarEval(batch)) { value =>
+                  merge(value.getBase)
+                }
+              } else {
+                withResource(filterBatch(table, unresolved.getBase, colTypes)) { filteredBatch =>
+                  withResource(child.columnarEval(filteredBatch)) { filteredValue =>
+                    withResource(gather(unresolved.getBase, filteredValue)) { fullLengthValue =>
+                      merge(fullLengthValue)
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      if (current == null) {
+        GpuExpressionsUtils.resolveColumnVector(GpuScalar(null, dataType), batch.numRows())
+      } else {
+        GpuColumnVector.from(current.incRefCount(), dataType)
+      }
+    } finally {
+      if (current != null) {
+        current.close()
       }
     }
   }

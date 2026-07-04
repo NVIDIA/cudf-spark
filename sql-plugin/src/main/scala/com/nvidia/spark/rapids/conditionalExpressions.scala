@@ -25,7 +25,8 @@ import com.nvidia.spark.rapids.jni.CaseWhen
 import com.nvidia.spark.rapids.shims.ShimExpression
 
 import org.apache.spark.sql.catalyst.analysis.{TypeCheckResult, TypeCoercion}
-import org.apache.spark.sql.catalyst.expressions.{ComplexTypeMergingExpression, Expression}
+import org.apache.spark.sql.catalyst.expressions.{AttributeReference, ComplexTypeMergingExpression,
+  Expression}
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.unsafe.types.UTF8String
@@ -354,9 +355,19 @@ case class GpuCaseWhen(
     branches.map(_._2.dataType) ++ elseValue.map(_.dataType)
   }
 
+  private def childHasSideEffects(expr: Expression): Boolean = expr match {
+    case gpuExpr: GpuExpression => gpuExpr.hasSideEffects
+    case _: AttributeReference => false
+    case _ => true
+  }
+
   private lazy val haveSideEffects =
-    branches.exists(_._2.asInstanceOf[GpuExpression].hasSideEffects) ||
-      elseValue.exists(_.asInstanceOf[GpuExpression].hasSideEffects)
+    branches.exists(branch => childHasSideEffects(branch._2)) ||
+      elseValue.exists(childHasSideEffects) ||
+      branches.drop(1).exists(branch => childHasSideEffects(branch._1))
+
+  private[rapids] lazy val hasSideEffectingLazyChildren: Boolean =
+    haveSideEffects
 
   override def nullable: Boolean = {
     // Result is nullable if any of the branch is nullable, or if the else value is nullable
@@ -444,8 +455,8 @@ case class GpuCaseWhen(
   }
 
   /**
-   * Perform lazy evaluation of each branch so that we only evaluate the THEN expressions
-   * against rows where the WHEN expression is true.
+   * Perform lazy evaluation so that side-effecting later predicates only see unresolved rows and
+   * THEN expressions only see rows where the WHEN expression is true.
    */
   private def columnarEvalWithSideEffects(batch: ColumnarBatch): GpuColumnVector = {
     val colTypes = GpuColumnVector.extractTypes(batch)
@@ -465,7 +476,8 @@ case class GpuCaseWhen(
         branches.foreach {
           case (whenExpr, thenExpr) =>
             // evaluate the WHEN predicate
-            withResource(whenExpr.columnarEval(batch)) { whenBool =>
+            withResource(evaluateWhenPredicate(
+                batch, colTypes, tbl, cumulativePred, whenExpr)) { whenBool =>
               // we only want to evaluate where this WHEN is true and no previous WHEN has been true
               val firstTrueWhen = isFirstTrueWhen(cumulativePred, whenBool)
 
@@ -523,6 +535,26 @@ case class GpuCaseWhen(
     } finally {
       currentValue.foreach(_.safeClose())
       cumulativePred.foreach(_.safeClose())
+    }
+  }
+
+  private def evaluateWhenPredicate(
+      batch: ColumnarBatch,
+      colTypes: Array[DataType],
+      tbl: Table,
+      cumulativePred: Option[GpuColumnVector],
+      whenExpr: Expression): GpuColumnVector = {
+    cumulativePred match {
+      case Some(previous) if childHasSideEffects(whenExpr) =>
+        withResource(boolInverted(previous.getBase)) { unresolved =>
+          withResource(filterBatch(tbl, unresolved, colTypes)) { unresolvedBatch =>
+            withResource(whenExpr.columnarEval(unresolvedBatch)) { whenValues =>
+              GpuColumnVector.from(gather(unresolved, whenValues), BooleanType)
+            }
+          }
+        }
+      case _ =>
+        whenExpr.columnarEval(batch)
     }
   }
 

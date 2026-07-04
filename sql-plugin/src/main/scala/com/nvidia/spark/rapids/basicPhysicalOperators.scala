@@ -42,7 +42,7 @@ import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, PartitioningC
 import org.apache.spark.sql.catalyst.util.{ArrayData, MapData}
 import org.apache.spark.sql.execution.{FilterExec, ProjectExec, SampleExec, SparkPlan}
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.rapids.{GpuCreateArray, GpuCreateMap, GpuCreateNamedStruct, GpuPartitionwiseSampledRDD, GpuPoissonSampler}
+import org.apache.spark.sql.rapids.{CudfBinaryPredicateWithSideEffect, GpuCreateArray, GpuCreateMap, GpuCreateNamedStruct, GpuPartitionwiseSampledRDD, GpuPoissonSampler}
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.rapids.shims.RapidsErrorUtils
 import org.apache.spark.sql.types._
@@ -56,6 +56,30 @@ class GpuProjectExecMeta(
     p: Option[RapidsMeta[_, _, _]],
     r: DataFromReplacementRule) extends SparkPlanMeta[ProjectExec](proj, conf, p, r)
     with Logging {
+  private def hasSideEffects(expr: Expression): Boolean = expr match {
+    case gpuExpr: GpuExpression => gpuExpr.hasSideEffects
+    case _: AttributeReference => false
+    case _ => true
+  }
+
+  private def tagUnsupportedAstSideEffects(gpuExprs: Seq[NamedExpression]): Unit = {
+    childExprs.zip(gpuExprs).foreach { case (meta, gpuExpr) =>
+      val hasUnsupportedSideEffects = gpuExpr.find {
+        case logical: CudfBinaryPredicateWithSideEffect =>
+          hasSideEffects(logical.right)
+        case coalesce: GpuCoalesce => coalesce.hasSideEffectingFallback
+        case ifExpr: GpuIf =>
+          hasSideEffects(ifExpr.trueExpr) || hasSideEffects(ifExpr.falseExpr)
+        case caseWhen: GpuCaseWhen => caseWhen.hasSideEffectingLazyChildren
+        case _ => false
+      }.isDefined
+      if (hasUnsupportedSideEffects) {
+        meta.willNotWorkInAst(
+          "AST short-circuit expressions do not support lazy children with side effects.")
+      }
+    }
+  }
+
   private def tagAndCollectAstJitErrorSites(
       gpuExprs: Seq[NamedExpression]): List[Option[AstJitErrorSite]] = {
     childExprs.zip(gpuExprs).map { case (meta, gpuExpr) =>
@@ -81,6 +105,7 @@ class GpuProjectExecMeta(
     val gpuExprs = childExprs.map(_.convertToGpu().asInstanceOf[NamedExpression]).toList
     val gpuChild = childPlans.head.convertIfNeeded()
     if (conf.isProjectAstEnabled) {
+      tagUnsupportedAstSideEffects(gpuExprs)
       val astJitErrorSites = tagAndCollectAstJitErrorSites(gpuExprs)
       val canUseAnsiJitAst =
         !conf.isProjectAstAnsiArithmeticEnabled || conf.isLibcudfJitConfigured
