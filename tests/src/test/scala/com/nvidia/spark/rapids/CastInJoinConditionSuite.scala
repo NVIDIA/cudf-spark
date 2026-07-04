@@ -16,15 +16,19 @@
 
 package com.nvidia.spark.rapids
 
+import java.math.{BigDecimal => JBigDecimal}
+
 import scala.reflect.ClassTag
 
 import org.apache.spark.SparkConf
+import org.apache.spark.sql.Row
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.joins.{ShuffledHashJoinExec, SortMergeJoinExec}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.execution.{GpuBroadcastHashJoinExec,
   GpuBroadcastNestedLoopJoinExec}
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims._
+import org.apache.spark.sql.types.{DecimalType, StringType, StructField, StructType}
 
 /**
  * Test suite for equi-join conditions with non-AST child expressions. These expressions
@@ -76,6 +80,13 @@ class CastInJoinConditionSuite extends SparkQueryCompareTestSuite {
   private def rangeJoinConf: SparkConf = new SparkConf()
     .set("spark.sql.autoBroadcastJoinThreshold", "10MB")
     .set(SQLConf.ADAPTIVE_EXECUTION_ENABLED.key, "false")
+
+  private def rowIrJitRangeJoinConf: SparkConf = rangeJoinConf
+    .set(RapidsConf.ENABLE_PROJECT_AST.key, "true")
+    .set(RapidsConf.ENABLE_PROJECT_AST_ANSI_ARITHMETIC.key, "true")
+
+  private def ansiRowIrJitRangeJoinConf: SparkConf = rowIrJitRangeJoinConf
+    .set(SQLConf.ANSI_ENABLED.key, "true")
 
   private def rangeJoinSql(
       hint: String = BroadcastHint,
@@ -158,6 +169,40 @@ class CastInJoinConditionSuite extends SparkQueryCompareTestSuite {
     stableNonAstTableBDf(spark).createOrReplaceTempView("stable_non_ast_b")
   }
 
+  private def registerAnsiArithmeticTables(spark: SparkSession): Unit = {
+    assert(spark.sessionState.conf.ansiEnabled,
+      "ANSI arithmetic tables must be registered in an ANSI-enabled session")
+    import spark.implicits._
+    Seq(("match", 10)).toDF("category", "range_start")
+      .createOrReplaceTempView("ansi_ast_a")
+    Seq(("match", 1), ("unmatched", Int.MaxValue)).toDF("category", "value")
+      .createOrReplaceTempView("ansi_ast_b")
+  }
+
+  private def registerDecimalCastTables(spark: SparkSession): Unit = {
+    val leftSchema = StructType(Seq(
+      StructField("category", StringType, nullable = false),
+      StructField("value", DecimalType(9, 2), nullable = true)))
+    val rightSchema = StructType(Seq(
+      StructField("category", StringType, nullable = false),
+      StructField("value", DecimalType(7, 2), nullable = true)))
+    val leftRows = Seq(
+      Row("cat1", new JBigDecimal("2.00")),
+      Row("cat1", new JBigDecimal("5.00")),
+      Row("cat2", new JBigDecimal("-1.50")),
+      Row("cat3", null))
+    val rightRows = Seq(
+      Row("cat1", new JBigDecimal("1.25")),
+      Row("cat1", new JBigDecimal("6.00")),
+      Row("cat2", new JBigDecimal("-2.00")),
+      Row("cat3", new JBigDecimal("0.00")))
+
+    spark.createDataFrame(spark.sparkContext.parallelize(leftRows), leftSchema)
+      .createOrReplaceTempView("decimal_ast_a")
+    spark.createDataFrame(spark.sparkContext.parallelize(rightRows), rightSchema)
+      .createOrReplaceTempView("decimal_ast_b")
+  }
+
   private def withDefaultTables[T](spark: SparkSession)(body: => T): T = {
     registerDefaultTables(spark)
     body
@@ -206,12 +251,13 @@ class CastInJoinConditionSuite extends SparkQueryCompareTestSuite {
   }
 
   private def collectCpuResult(
+      conf: SparkConf,
       sqlText: String,
       registerTables: SparkSession => Unit) = {
     withCpuSparkSession(spark => {
       registerTables(spark)
       collectResult(spark, sqlText)
-    })
+    }, conf)
   }
 
   private def assertGpuCpuResultsMatch(
@@ -220,7 +266,7 @@ class CastInJoinConditionSuite extends SparkQueryCompareTestSuite {
       message: String,
       registerTables: SparkSession => Unit = registerDefaultTables): Unit = {
     val gpuResult = collectGpuResult(conf, sqlText, registerTables)
-    val cpuResult = collectCpuResult(sqlText, registerTables)
+    val cpuResult = collectCpuResult(conf, sqlText, registerTables)
 
     assert(gpuResult == cpuResult, s"$message\nGPU: $gpuResult\nCPU: $cpuResult")
   }
@@ -330,6 +376,17 @@ class CastInJoinConditionSuite extends SparkQueryCompareTestSuite {
       "GPU and CPU results should match.")
   }
 
+  test("BNLJ extracts row IR JIT-only cast from join condition") {
+    withGpuQuery(rowIrJitRangeJoinConf, rangeJoinSql(includeEquality = false)) { df =>
+      val plan = df.queryExecution.executedPlan
+      val bnlj = broadcastNestedLoopJoin(plan)
+      assert(bnlj.children.exists(_.isInstanceOf[GpuProjectExec]),
+        "BNLJ should pre-compute row IR JIT-only CAST with GpuProjectExec")
+      assert(!bnlj.condition.exists(_.find(_.isInstanceOf[GpuCast]).isDefined),
+        s"BNLJ condition should not contain row IR JIT-only CAST: ${bnlj.condition}")
+    }
+  }
+
   // ============================================================================
   // SECTION 2: BroadcastHashJoin extraction behavior
   // ============================================================================
@@ -364,6 +421,59 @@ class CastInJoinConditionSuite extends SparkQueryCompareTestSuite {
         "BroadcastHashJoin should have GpuProjectExec wrapping a child " +
           "to pre-compute CAST (extraction pattern from BNLJ)")
     }
+  }
+
+  test("BHJ extracts row IR JIT-only cast from join condition") {
+    withGpuQuery(rowIrJitRangeJoinConf, rangeJoinSql()) { df =>
+      val plan = df.queryExecution.executedPlan
+      val bhj = assertBroadcastHashJoinKeepsCondition(plan, "row IR JIT-only CAST condition")
+      assert(hasPreJoinProject(plan),
+        "BroadcastHashJoin should pre-compute row IR JIT-only CAST with GpuProjectExec")
+      assert(!bhj.condition.exists(_.find(_.isInstanceOf[GpuCast]).isDefined),
+        s"BroadcastHashJoin condition should not contain row IR JIT-only CAST: ${bhj.condition}")
+    }
+  }
+
+  test("BHJ keeps no-op decimal widening cast in legacy AST") {
+    val query =
+      """SELECT /*+ BROADCAST(b) */ a.category, a.value, b.value
+        |FROM decimal_ast_a a
+        |INNER JOIN decimal_ast_b b
+        |  ON a.category = b.category
+        |    AND a.value > CAST(b.value AS DECIMAL(9, 2))
+        |""".stripMargin
+    withGpuPlan(rowIrJitRangeJoinConf, query, registerDecimalCastTables) { plan =>
+      val bhj = assertBroadcastHashJoinKeepsCondition(plan, "no-op decimal CAST condition")
+      assert(!hasPreJoinProject(plan),
+        "BroadcastHashJoin should not pre-compute a no-op decimal CAST")
+      assert(bhj.condition.exists(_.find(_.isInstanceOf[GpuCast]).isDefined),
+        s"BroadcastHashJoin condition should retain the no-op decimal CAST: ${bhj.condition}")
+    }
+    assertGpuCpuResultsMatch(
+      rowIrJitRangeJoinConf,
+      query,
+      "GPU and CPU results should match for a no-op decimal CAST condition.",
+      registerDecimalCastTables)
+  }
+
+  test("BHJ does not pre-project fallible row IR JIT expression") {
+    val query =
+      """SELECT /*+ BROADCAST(b) */ a.category, a.range_start, b.value
+        |FROM ansi_ast_a a
+        |INNER JOIN ansi_ast_b b
+        |  ON a.category = b.category AND a.range_start > b.value + 1
+        |""".stripMargin
+    withGpuPlan(ansiRowIrJitRangeJoinConf, query, registerAnsiArithmeticTables) { plan =>
+      assert(hasPostJoinFilter(plan),
+        "Fallible row IR JIT expression should be evaluated only after join key matching")
+      assert(!hasPreJoinProject(plan),
+        "Fallible row IR JIT expression should not be evaluated in a pre-join project")
+    }
+    assertGpuCpuResultsMatch(
+      ansiRowIrJitRangeJoinConf,
+      query,
+      "Unmatched overflowing rows should not fail the join.",
+      registerAnsiArithmeticTables)
   }
 
   test("BHJ with cast keeps output schema clean (no leaked attributes)") {
