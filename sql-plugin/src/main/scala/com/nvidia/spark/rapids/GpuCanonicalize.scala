@@ -33,8 +33,8 @@ import org.apache.spark.sql.rapids.execution.TrampolineUtil
  *  - Names and nullability hints for `org.apache.spark.sql.types.DataTypes` are stripped.
  *  - Names for `GetStructField` are stripped.
  *  - TimeZoneId for `Cast` and `AnsiCast` are stripped if `needsTimeZone` is false.
- *  - Commutative and associative operations (`Add` and `Multiply`) have their children ordered
- *    by `hashCode`.
+ *  - Unchecked `Add` and `Multiply` trees are reordered associatively and commutatively by
+ *    `hashCode`; checked variants only reorder their direct children.
  *  - `EqualTo` and `EqualNullSafe` are reordered by hashCode.
  *  - Other comparisons (`GreaterThan`, `LessThan`) are reversed by `hashCode`.
  *  - Elements in `In` are reordered by `hashCode`.
@@ -78,12 +78,16 @@ object GpuCanonicalize {
 
   /** Rearrange expressions that are commutative or associative. */
   private def expressionReorder(e: Expression): Expression = e match {
-    case a @ GpuAdd(_, _, f) =>
-      orderCommutative(a, { case GpuAdd(l, r, _) => Seq(l, r) })
-        .reduce((l, r) => GpuAdd(l, r, f)(a.origin))
-    case m @ GpuMultiply(_, _, f) =>
-      orderCommutative(m, { case GpuMultiply(l, r, _) => Seq(l, r) })
-        .reduce((l, r) => GpuMultiply(l, r, f)(m.origin))
+    case a @ GpuAdd(l, r, true) =>
+      if (l.hashCode() > r.hashCode()) GpuAdd(r, l, failOnError = true)(a.origin) else a
+    case a @ GpuAdd(_, _, false) =>
+      orderCommutative(a, { case GpuAdd(l, r, false) => Seq(l, r) })
+        .reduce((l, r) => GpuAdd(l, r, failOnError = false)(a.origin))
+    case m @ GpuMultiply(l, r, true) =>
+      if (l.hashCode() > r.hashCode()) GpuMultiply(r, l, failOnError = true)(m.origin) else m
+    case m @ GpuMultiply(_, _, false) =>
+      orderCommutative(m, { case GpuMultiply(l, r, false) => Seq(l, r) })
+        .reduce((l, r) => GpuMultiply(l, r, failOnError = false)(m.origin))
     case o: GpuOr =>
       orderCommutative(o, { case GpuOr(l, r) if l.deterministic && r.deterministic => Seq(l, r) })
           .reduce(GpuOr)

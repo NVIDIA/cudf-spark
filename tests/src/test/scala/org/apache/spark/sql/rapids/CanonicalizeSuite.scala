@@ -19,7 +19,8 @@ package org.apache.spark.sql.rapids
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.catalyst.dsl.expressions._
-import org.apache.spark.sql.catalyst.expressions.Literal
+import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Expression, Literal}
+import org.apache.spark.sql.types.IntegerType
 
 class CanonicalizeSuite extends AnyFunSuite {
   /* In the future, if we decide to implement the Spark 3.3 algorithm to perform canonicalization
@@ -33,5 +34,31 @@ class CanonicalizeSuite extends AnyFunSuite {
         assert(bc(GpuAdd($"a", $"b", true)(), Literal(10))
             .semanticEquals(bc(GpuAdd($"b", $"a", true)(), Literal(10))))
       })
+  }
+
+  test("checked arithmetic canonicalization preserves grouping") {
+    val a = AttributeReference("a", IntegerType)()
+    val b = AttributeReference("b", IntegerType)()
+    val c = AttributeReference("c", IntegerType)()
+    def add(
+        left: Expression,
+        right: Expression,
+        failOnError: Boolean = false): GpuAdd =
+      GpuAdd(left, right, failOnError = failOnError)()
+    def multiply(
+        left: Expression,
+        right: Expression,
+        failOnError: Boolean = false): GpuMultiply =
+      GpuMultiply(left, right, failOnError = failOnError)()
+
+    assert(!add(add(a, b, failOnError = true), c, failOnError = true)
+      .semanticEquals(add(a, add(b, c, failOnError = true), failOnError = true)))
+    assert(!multiply(multiply(a, b, failOnError = true), c, failOnError = true)
+      .semanticEquals(multiply(a, multiply(b, c, failOnError = true), failOnError = true)))
+    assert(add(a, b, failOnError = true).semanticEquals(add(b, a, failOnError = true)))
+    assert(multiply(a, b, failOnError = true)
+      .semanticEquals(multiply(b, a, failOnError = true)))
+    assert(add(add(a, b), c).semanticEquals(add(a, add(b, c))))
+    assert(multiply(multiply(a, b), c).semanticEquals(multiply(a, multiply(b, c))))
   }
 }
