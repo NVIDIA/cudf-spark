@@ -669,8 +669,8 @@ object GpuHashJoin {
       joinType: JoinType,
       left: SparkPlan,
       right: SparkPlan): ExtractedJoinCondition = {
-    val condition = conditionMeta.map(_.convertToGpu())
-    if (conditionMeta.forall(_.canThisBeAst)) {
+    lazy val condition = conditionMeta.map(_.convertToGpu())
+    if (conditionMeta.forall(_.canThisBeLegacyAst)) {
       ExtractedJoinCondition(condition, None, left, right, None)
     } else if (canConditionBeRewrittenAsAst(conditionMeta, left.output, right.output)) {
       val (remains, leftExpr, rightExpr) =
@@ -757,11 +757,11 @@ object GpuHashJoin {
       case _: InnerLike =>
       case RightOuter | LeftOuter | LeftSemi | LeftAnti | ExistenceJoin(_) =>
         if (!canConditionBeRewrittenAsAst) {
-          conditionMeta.foreach(meta.requireAstForGpuOn)
+          conditionMeta.foreach(meta.requireLegacyAstForGpuOn)
         }
       case FullOuter =>
         if (!canConditionBeRewrittenAsAst) {
-          conditionMeta.foreach(meta.requireAstForGpuOn)
+          conditionMeta.foreach(meta.requireLegacyAstForGpuOn)
         }
         // FullOuter join cannot support with struct keys as two issues below
         //  * https://github.com/NVIDIA/spark-rapids/issues/2126

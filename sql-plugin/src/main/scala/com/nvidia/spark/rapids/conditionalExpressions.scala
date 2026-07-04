@@ -196,6 +196,7 @@ case class GpuIf(
 
   override def children: Seq[Expression] = predicateExpr :: trueExpr :: falseExpr :: Nil
   override def nullable: Boolean = trueExpr.nullable || falseExpr.nullable
+  override def selfUsesRowIrJitAst: Boolean = true
 
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
     val predicateAst = new ast.JitOperation(ast.JitOperator.PREDICATE,

@@ -17,6 +17,7 @@
 package com.nvidia.spark.rapids
 
 import java.time.ZoneId
+import java.util.IdentityHashMap
 
 import scala.collection.mutable
 
@@ -673,7 +674,9 @@ abstract class SparkPlanMeta[INPUT <: SparkPlan](plan: INPUT,
     GpuCpuBridgeOptimizer.checkAndOptimizeExpressionMetas(childExprs)
   }
 
-  def requireAstForGpuOn(exprMeta: BaseExprMeta[_]): Unit = {
+  private def requireAstForGpuOnInternal(
+      exprMeta: BaseExprMeta[_],
+      requireAst: BaseExprMeta[_] => Unit): Unit = {
     // willNotWorkOnGpu does not deduplicate reasons. Most of the time that is fine
     // but here we want to avoid adding the reason twice, because this method can be
     // called multiple times, and also the reason can automatically be added in if
@@ -681,13 +684,19 @@ abstract class SparkPlanMeta[INPUT <: SparkPlan](plan: INPUT,
     // So only add it if canExprTreeBeReplaced changed after requiring that the
     // given expression is AST-able.
     val previousExprReplaceVal = canExprTreeBeReplaced
-    exprMeta.requireAstForGpu()
+    requireAst(exprMeta)
     val newExprReplaceVal = canExprTreeBeReplaced
     if (previousExprReplaceVal != newExprReplaceVal &&
         !newExprReplaceVal) {
       willNotWorkOnGpu("not all expressions can be replaced")
     }
   }
+
+  def requireAstForGpuOn(exprMeta: BaseExprMeta[_]): Unit =
+    requireAstForGpuOnInternal(exprMeta, _.requireAstForGpu())
+
+  def requireLegacyAstForGpuOn(exprMeta: BaseExprMeta[_]): Unit =
+    requireAstForGpuOnInternal(exprMeta, _.requireLegacyAstForGpu())
 
   override val childPlans: Seq[SparkPlanMeta[SparkPlan]] =
     plan.children.map(GpuOverrides.wrapPlan(_, conf, Some(this)))
@@ -1106,6 +1115,59 @@ object DataTypeMeta {
   }
 }
 
+private object LegacyAstConversionContext {
+  private val active = new ThreadLocal[Boolean] {
+    override def initialValue(): Boolean = false
+  }
+  private val rewrittenExpressions =
+    new ThreadLocal[IdentityHashMap[BaseExprMeta[_], Expression]]
+
+  def isActive: Boolean = active.get()
+
+  def rewrittenExpression(meta: BaseExprMeta[_]): Option[Expression] = {
+    val expressions = rewrittenExpressions.get()
+    if (expressions != null && expressions.containsKey(meta)) {
+      Some(expressions.get(meta))
+    } else {
+      None
+    }
+  }
+
+  def withActive[T](body: => T): T = {
+    val wasActive = active.get()
+    active.set(true)
+    try {
+      body
+    } finally {
+      if (wasActive) {
+        active.set(true)
+      } else {
+        active.remove()
+      }
+    }
+  }
+
+  def withRewrittenChildren[T](
+      children: Seq[(BaseExprMeta[_], Expression)])(body: => T): T = {
+    val previous = rewrittenExpressions.get()
+    val current = new IdentityHashMap[BaseExprMeta[_], Expression]()
+    if (previous != null) {
+      current.putAll(previous)
+    }
+    children.foreach { case (meta, expression) => current.put(meta, expression) }
+    rewrittenExpressions.set(current)
+    try {
+      body
+    } finally {
+      if (previous == null) {
+        rewrittenExpressions.remove()
+      } else {
+        rewrittenExpressions.set(previous)
+      }
+    }
+  }
+}
+
 /**
  * Base class for metadata around `Expression`.
  */
@@ -1299,6 +1361,44 @@ abstract class BaseExprMeta[INPUT <: Expression](
       childExprs.forall(_.canThisBeAst) && cannotBeAstReasons.isEmpty
   }
 
+  private lazy val legacyAstConvertedExpression: Expression =
+    CurrentOrigin.withOrigin(wrapped.origin) {
+      LegacyAstConversionContext.withActive {
+        convertToGpuNow()
+      }
+    }
+
+  private lazy val convertedGpuExpression: Option[GpuExpression] =
+    legacyAstConvertedExpression match {
+      case expr: GpuExpression => Some(expr)
+      case _ => None
+    }
+
+  private[rapids] final def convertToGpuForLegacyAst(): Expression =
+    legacyAstConvertedExpression
+
+  private[rapids] final def convertToGpuForLegacyAstRewrite(
+      rewrittenChildren: Seq[Expression]): Expression = {
+    require(rewrittenChildren.size == childExprs.size,
+      "Rewritten legacy AST children must match the expression metadata")
+    LegacyAstConversionContext.withRewrittenChildren(childExprs.zip(rewrittenChildren)) {
+      convertToGpuNow()
+    }
+  }
+
+  // Conversion includes descendants; AstUtil checks an unreplaced descendant during recursion.
+  private def selfUsesRowIrJitAst: Boolean =
+    canExprTreeBeReplaced && convertedGpuExpression.exists(_.selfUsesRowIrJitAst)
+
+  final def canBePrecomputedForJoin: Boolean =
+    canExprTreeBeReplaced && convertedGpuExpression.forall(!_.hasSideEffects)
+
+  final def canThisBeLegacyAst: Boolean = {
+    tagForAst()
+    canThisBeReplaced && !willUseGpuCpuBridge && cannotBeAstReasons.isEmpty &&
+      childExprs.forall(_.canThisBeLegacyAst) && !selfUsesRowIrJitAst
+  }
+
   /**
    * Check whether this node itself can be converted to AST. It will not recursively check its
    * children. It's used to check join condition AST-ability in top-down fashion.
@@ -1308,6 +1408,12 @@ abstract class BaseExprMeta[INPUT <: Expression](
     // An expression cannot be AST if it cannot be replaced (disabled) or if it has
     // AST-specific issues
     canThisBeReplaced && cannotBeAstReasons.isEmpty
+  }
+
+  lazy val canSelfBeLegacyAst: Boolean = {
+    tagForAst()
+    canThisBeReplaced && !willUseGpuCpuBridge &&
+      cannotBeAstReasons.isEmpty && !selfUsesRowIrJitAst
   }
 
   final def requireAstForGpu(): Unit = {
@@ -1322,6 +1428,20 @@ abstract class BaseExprMeta[INPUT <: Expression](
       willNotWorkOnGpu(s"AST is required and $reason")
     }
     childExprs.foreach(_.requireAstForGpu())
+  }
+
+  final def requireLegacyAstForGpu(): Unit = {
+    undoBridgeOptimization()
+    requiresAstConversion()
+
+    tagForAst()
+    cannotBeAstReasons.foreach { reason =>
+      willNotWorkOnGpu(s"AST is required and $reason")
+    }
+    if (canExprTreeBeReplaced && cannotBeAstReasons.isEmpty && selfUsesRowIrJitAst) {
+      willNotWorkOnGpu("legacy AST is required but this expression requires row IR JIT")
+    }
+    childExprs.foreach(_.requireLegacyAstForGpu())
   }
 
   private var taggedForAst = false
@@ -1408,7 +1528,7 @@ abstract class BaseExprMeta[INPUT <: Expression](
    * the future it may provide other types of optimizations.
    * @return a GPU expression
    */
-  final override def convertToGpu(): Expression = {
+  private def convertToGpuNow(): Expression = {
     if (willUseGpuCpuBridge) {
       convertForGpuCpuBridge()
     } else {
@@ -1417,6 +1537,14 @@ abstract class BaseExprMeta[INPUT <: Expression](
       CurrentOrigin.withOrigin(wrapped.origin) {
         convertToGpuImpl()
       }
+    }
+  }
+
+  final override def convertToGpu(): Expression = {
+    LegacyAstConversionContext.rewrittenExpression(this) match {
+      case Some(expression) => expression
+      case None if LegacyAstConversionContext.isActive => legacyAstConvertedExpression
+      case None => convertToGpuNow()
     }
   }
 

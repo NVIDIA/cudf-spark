@@ -16,14 +16,28 @@
 
 package com.nvidia.spark.rapids
 
-import org.mockito.Mockito.{mock, when}
+import org.mockito.ArgumentMatchers.any
+import org.mockito.Mockito.{mock, never, verify, when}
 
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, AttributeSet, Expression}
+import org.apache.spark.sql.catalyst.plans.Inner
+import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.rapids.{GpuAnd, GpuGreaterThan, GpuLength, GpuLessThan, GpuStringTrim}
+import org.apache.spark.sql.rapids.execution.GpuHashJoin
 import org.apache.spark.sql.types.{BooleanType, DataType, IntegerType, LongType, StringType}
 
 
 class AstUtilSuite extends GpuUnitTests {
+
+  private[this] def stubLegacyAstConversions(
+      meta: BaseExprMeta[Expression], expression: Expression): Unit = {
+    when(meta.convertToGpu).thenReturn(expression)
+    when(meta.convertToGpuForLegacyAst()).thenReturn(expression)
+    when(meta.convertToGpuForLegacyAstRewrite(any[Seq[Expression]]())).thenAnswer { invocation =>
+      val rewrittenChildren = invocation.getArgument[Seq[Expression]](0)
+      if (rewrittenChildren.isEmpty) expression else expression.withNewChildren(rewrittenChildren)
+    }
+  }
 
   private[this] def testSingleNode(containsNonAstAble: Boolean, crossMultiChildPlan: Boolean)
   : Boolean = {
@@ -42,7 +56,8 @@ class AstUtilSuite extends GpuUnitTests {
 
     val exprMeta = mock(classOf[BaseExprMeta[Expression]])
     when(exprMeta.childExprs).thenReturn(Seq.empty)
-    when(exprMeta.canSelfBeAst).thenReturn(!containsNonAstAble)
+    when(exprMeta.canSelfBeLegacyAst).thenReturn(!containsNonAstAble)
+    when(exprMeta.canBePrecomputedForJoin).thenReturn(true)
     when(exprMeta.wrapped).thenReturn(expr)
 
     AstUtil.canExtractNonAstConditionIfNeed(exprMeta, Seq(l1, l2).map(_.exprId), Seq(r1, r2).map
@@ -65,12 +80,14 @@ class AstUtilSuite extends GpuUnitTests {
 
     val rightExprMeta = mock(classOf[BaseExprMeta[Expression]])
     when(rightExprMeta.childExprs).thenReturn(Seq.empty)
-    when(rightExprMeta.canSelfBeAst).thenReturn(true)
+    when(rightExprMeta.canSelfBeLegacyAst).thenReturn(true)
+    when(rightExprMeta.canBePrecomputedForJoin).thenReturn(true)
 
     val rootExprMeta = mock(classOf[BaseExprMeta[Expression]])
     when(rootExprMeta.childExprs).thenReturn(Seq(leftExprMeta, rightExprMeta))
 
-    when(rootExprMeta.canSelfBeAst).thenReturn(true)
+    when(rootExprMeta.canSelfBeLegacyAst).thenReturn(true)
+    when(rootExprMeta.canBePrecomputedForJoin).thenReturn(true)
 
     AstUtil.canExtractNonAstConditionIfNeed(rootExprMeta, Seq(l1, l2).map(_.exprId), Seq(r1, r2)
         .map(_.exprId))
@@ -81,7 +98,8 @@ class AstUtilSuite extends GpuUnitTests {
     val expr = mock(classOf[Expression])
     val exprMeta = mock(classOf[BaseExprMeta[Expression]])
     when(exprMeta.childExprs).thenReturn(Seq.empty)
-    when(exprMeta.canSelfBeAst).thenReturn(!containsNonAstAble)
+    when(exprMeta.canSelfBeLegacyAst).thenReturn(!containsNonAstAble)
+    when(exprMeta.canBePrecomputedForJoin).thenReturn(true)
 
     when(expr.references).thenReturn(attributeSet)
     when(exprMeta.wrapped).thenReturn(expr)
@@ -114,7 +132,8 @@ class AstUtilSuite extends GpuUnitTests {
     // Build root
     val rootExprMeta = mock(classOf[BaseExprMeta[Expression]])
     when(rootExprMeta.childExprs).thenReturn(Seq(leftExprMeta, rightExprMeta))
-    when(rootExprMeta.canSelfBeAst).thenReturn(true)
+    when(rootExprMeta.canSelfBeLegacyAst).thenReturn(true)
+    when(rootExprMeta.canBePrecomputedForJoin).thenReturn(true)
 
     AstUtil.canExtractNonAstConditionIfNeed(rootExprMeta, Seq(l1, l2).map(_.exprId), Seq(r1, r2)
         .map(_.exprId))
@@ -152,8 +171,9 @@ class AstUtilSuite extends GpuUnitTests {
     val expr = GpuStringTrim(attSet)
     val rootMeta = mock(classOf[BaseExprMeta[Expression]])
     when(rootMeta.childExprs).thenReturn(Seq.empty)
-    when(rootMeta.canSelfBeAst).thenReturn(astAble)
-    when(rootMeta.convertToGpu).thenReturn(expr)
+    when(rootMeta.canSelfBeLegacyAst).thenReturn(astAble)
+    when(rootMeta.canBePrecomputedForJoin).thenReturn(true)
+    stubLegacyAstConversions(rootMeta, expr)
     when(rootMeta.wrapped).thenReturn(expr)
     rootMeta
   }
@@ -166,8 +186,9 @@ class AstUtilSuite extends GpuUnitTests {
     val rootMeta = mock(classOf[BaseExprMeta[Expression]])
     val childExprs = Seq(buildTree1(attSet, astAble))
     when(rootMeta.childExprs).thenReturn(childExprs)
-    when(rootMeta.canSelfBeAst).thenReturn(astAble)
-    when(rootMeta.convertToGpu).thenReturn(expr)
+    when(rootMeta.canSelfBeLegacyAst).thenReturn(astAble)
+    when(rootMeta.canBePrecomputedForJoin).thenReturn(true)
+    stubLegacyAstConversions(rootMeta, expr)
     when(rootMeta.wrapped).thenReturn(expr)
     rootMeta
   }
@@ -181,8 +202,9 @@ class AstUtilSuite extends GpuUnitTests {
     val rootMeta = mock(classOf[BaseExprMeta[Expression]])
     val childExprs = Seq(buildTree2(attSet1, astAble), buildTree2(attSet2, astAble))
     when(rootMeta.childExprs).thenReturn(childExprs)
-    when(rootMeta.canSelfBeAst).thenReturn(true)
-    when(rootMeta.convertToGpu).thenReturn(expr)
+    when(rootMeta.canSelfBeLegacyAst).thenReturn(true)
+    when(rootMeta.canBePrecomputedForJoin).thenReturn(true)
+    stubLegacyAstConversions(rootMeta, expr)
     when(rootMeta.wrapped).thenReturn(expr)
     rootMeta
   }
@@ -253,8 +275,9 @@ class AstUtilSuite extends GpuUnitTests {
     
     val castMeta = mock(classOf[BaseExprMeta[Expression]])
     when(castMeta.childExprs).thenReturn(Seq.empty)
-    when(castMeta.canSelfBeAst).thenReturn(false) // Cast cannot be AST
-    when(castMeta.convertToGpu).thenReturn(castExpr)
+    when(castMeta.canSelfBeLegacyAst).thenReturn(false) // Cast cannot be legacy AST
+    when(castMeta.canBePrecomputedForJoin).thenReturn(true)
+    stubLegacyAstConversions(castMeta, castExpr)
     when(castMeta.wrapped).thenReturn(castExpr)
     castMeta
   }
@@ -321,13 +344,16 @@ class AstUtilSuite extends GpuUnitTests {
 
   private[this] def expressionMeta(
       wrapped: Expression,
-      canSelfBeAst: Boolean,
+      canSelfBeLegacyAst: Boolean,
+      canBePrecomputedForJoin: Boolean,
       convertToGpu: Option[Expression] = None,
       childExprs: Seq[BaseExprMeta[_]] = Seq.empty): BaseExprMeta[Expression] = {
     val exprMeta = mock(classOf[BaseExprMeta[Expression]])
     when(exprMeta.childExprs).thenReturn(childExprs)
-    when(exprMeta.canSelfBeAst).thenReturn(canSelfBeAst)
-    when(exprMeta.convertToGpu).thenReturn(convertToGpu.getOrElse(wrapped))
+    when(exprMeta.canSelfBeLegacyAst).thenReturn(canSelfBeLegacyAst)
+    when(exprMeta.canBePrecomputedForJoin).thenReturn(canBePrecomputedForJoin)
+    val gpuExpr = convertToGpu.getOrElse(wrapped)
+    stubLegacyAstConversions(exprMeta, gpuExpr)
     when(exprMeta.wrapped).thenReturn(wrapped)
     exprMeta
   }
@@ -335,7 +361,8 @@ class AstUtilSuite extends GpuUnitTests {
   private[this] def attrMeta(attr: AttributeReference): BaseExprMeta[Expression] = {
     expressionMeta(
       expressionWithReferences(attr.dataType, attr),
-      canSelfBeAst = true,
+      canSelfBeLegacyAst = true,
+      canBePrecomputedForJoin = true,
       convertToGpu = Some(attr))
   }
 
@@ -344,7 +371,8 @@ class AstUtilSuite extends GpuUnitTests {
       refs: AttributeReference*): BaseExprMeta[Expression] = {
     expressionMeta(
       expressionWithReferences(dataType, refs: _*),
-      canSelfBeAst = false)
+      canSelfBeLegacyAst = false,
+      canBePrecomputedForJoin = true)
   }
 
   /**
@@ -360,7 +388,8 @@ class AstUtilSuite extends GpuUnitTests {
     val comparisonExpr = comparison(leftAttr, rightNonAstMeta.convertToGpu)
     expressionMeta(
       comparisonExpr,
-      canSelfBeAst = true,
+      canSelfBeLegacyAst = true,
+      canBePrecomputedForJoin = true,
       childExprs = Seq(attrMeta(leftAttr), rightNonAstMeta))
   }
 
@@ -377,7 +406,8 @@ class AstUtilSuite extends GpuUnitTests {
     val gtMeta = buildComparisonWithRightNonAstExpr(leftEnd, rightStart, GpuGreaterThan)
     expressionMeta(
       GpuAnd(ltMeta.convertToGpu, gtMeta.convertToGpu),
-      canSelfBeAst = true,
+      canSelfBeLegacyAst = true,
+      canBePrecomputedForJoin = true,
       childExprs = Seq(ltMeta, gtMeta))
   }
 
@@ -464,6 +494,18 @@ class AstUtilSuite extends GpuUnitTests {
     assertResult(false)(bothSidesNonAstInput().canExtract)
   }
 
+  test("Equi-join pattern: non-legacy-AST expression must be precomputable") {
+    val l1 = AttributeReference("l1", IntegerType)()
+    val r1 = AttributeReference("r1", IntegerType)()
+    val conditionMeta = expressionMeta(
+      expressionWithReferences(LongType, l1),
+      canSelfBeLegacyAst = false,
+      canBePrecomputedForJoin = false)
+
+    val input = JoinConditionTestInput(conditionMeta, Seq(l1), Seq(r1))
+    assertResult(false)(input.canExtract)
+  }
+
   test("Equi-join pattern: fully AST-able condition needs no extraction") {
     // When all expressions are AST-able, canExtractNonAstConditionIfNeed returns true
     // but extractNonAstFromJoinCond should produce empty left/right lists
@@ -476,5 +518,30 @@ class AstUtilSuite extends GpuUnitTests {
     assertResult(0)(l.size)
     assertResult(0)(r.size)
     assertResult(true)(e.isDefined)
+  }
+
+  test("Join-condition extraction does not convert a condition that will be rewritten") {
+    val leftAttr = AttributeReference("l1", LongType)()
+    val rightAttr = AttributeReference("r1", LongType)()
+    val condition = GpuLessThan(leftAttr, GpuLiteral(1L, LongType))
+    val conditionMeta = expressionMeta(
+      condition,
+      canSelfBeLegacyAst = false,
+      canBePrecomputedForJoin = true)
+    when(conditionMeta.canThisBeLegacyAst).thenReturn(false)
+
+    val left = mock(classOf[SparkPlan])
+    val right = mock(classOf[SparkPlan])
+    when(left.output).thenReturn(Seq(leftAttr))
+    when(right.output).thenReturn(Seq(rightAttr))
+
+    val extracted = GpuHashJoin.extractJoinConditionIfNeeded(
+      Some(conditionMeta), Inner, left, right)
+
+    assert(extracted.joinCondition.nonEmpty)
+    assert(extracted.filterCondition.isEmpty)
+    assert(extracted.left.isInstanceOf[GpuProjectExec])
+    verify(conditionMeta, never()).convertToGpu()
+    verify(conditionMeta).convertToGpuForLegacyAst()
   }
 }

@@ -85,7 +85,7 @@ abstract class GpuBroadcastNestedLoopJoinMetaBase(
       case LeftOuter | RightOuter | LeftSemi | LeftAnti | ExistenceJoin(_) =>
         // First to check whether can be split if not ast-able. If false, then check requireAst to
         // send not-work-on-GPU reason if not replace-able.
-        conditionMeta.foreach(cond => if (!canJoinCondAstAble()) requireAstForGpuOn(cond))
+        conditionMeta.foreach(cond => if (!canJoinCondAstAble()) requireLegacyAstForGpuOn(cond))
       case _ => willNotWorkOnGpu(s"${join.joinType} currently is not supported")
     }
     join.joinType match {
@@ -328,6 +328,14 @@ class ConditionalNestedLoopJoinIterator(
 }
 
 object GpuBroadcastNestedLoopJoinExecBase {
+  private def compileLegacyAstCondition(
+      condition: GpuExpression,
+      numFirstTableColumns: Int): CompiledExpression = {
+    require(!condition.usesRowIrJitAst,
+      "Join condition contains a row IR JIT-only AST expression")
+    condition.convertToAst(numFirstTableColumns).compile()
+  }
+
   def nestedLoopJoin(
       joinType: JoinType,
       buildSide: GpuBuildSide,
@@ -353,7 +361,7 @@ object GpuBroadcastNestedLoopJoinExecBase {
         if (builtBatch.numCols == 0) {
           degenerateExistsJoinIterator(stream, builtBatch, boundCondition.get)
         } else {
-          val compiledAst = boundCondition.get.convertToAst(numFirstTableColumns).compile()
+          val compiledAst = compileLegacyAstCondition(boundCondition.get, numFirstTableColumns)
           new ConditionalNestedLoopExistenceJoinIterator(
             builtBatch, stream, compiledAst, opTime, joinTime)
         }
@@ -362,7 +370,7 @@ object GpuBroadcastNestedLoopJoinExecBase {
           degenerateLeftOuterJoinIterator(stream, streamAttributes, builtBatch,
             boundCondition.get)
         } else {
-          val compiledAst = boundCondition.get.convertToAst(numFirstTableColumns).compile()
+          val compiledAst = compileLegacyAstCondition(boundCondition.get, numFirstTableColumns)
           new ConditionalNestedLoopJoinIterator(joinType, buildSide, builtBatch,
             stream, streamAttributes, targetSize, sizeEstimateThreshold, compiledAst,
             opTime = opTime, joinTime = joinTime)

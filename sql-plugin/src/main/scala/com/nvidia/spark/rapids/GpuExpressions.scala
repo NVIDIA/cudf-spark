@@ -197,6 +197,14 @@ trait GpuExpression extends Expression {
   def convertToAst(numFirstTableColumns: Int): ast.AstExpression =
     throw new IllegalStateException(s"Cannot convert ${this.getClass.getSimpleName} to AST")
 
+  /** True when this node emits row IR that the legacy AST parser cannot consume. */
+  def selfUsesRowIrJitAst: Boolean = false
+
+  final def usesRowIrJitAst: Boolean = selfUsesRowIrJitAst || children.exists {
+    case child: GpuExpression => child.usesRowIrJitAst
+    case _ => false
+  }
+
   /** Could evaluating this expression cause side-effects, such as throwing an exception? */
   def hasSideEffects: Boolean =
     children.exists {

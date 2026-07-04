@@ -61,6 +61,7 @@ object ShiftHelper {
 trait GpuShiftBase extends GpuBinaryExpression with ImplicitCastInputTypes {
   def shiftOp: BinaryOp
   def astShiftOp: Option[ast.JitOperator] = None
+  override def selfUsesRowIrJitAst: Boolean = astShiftOp.isDefined
 
   private def unsupportedShiftType(t: DataType): Nothing =
     throw new IllegalArgumentException(s"$t is not a supported type for java bit shifts")

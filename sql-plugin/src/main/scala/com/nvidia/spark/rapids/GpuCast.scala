@@ -294,10 +294,12 @@ object GpuCast {
 
   val OVERFLOW_MESSAGE: String = "overflow occurred"
 
+  def decimalCastNeedsPrecisionCheck(from: DecimalType, to: DecimalType): Boolean =
+    from.precision - from.scale > to.precision - to.scale
+
   def canDecimalCastToAst(from: DecimalType, to: DecimalType): Boolean = {
     val scaleDelta = to.scale - from.scale
-    val needsPrecisionCheck =
-      from.precision - from.scale > to.precision - to.scale
+    val needsPrecisionCheck = decimalCastNeedsPrecisionCheck(from, to)
     scaleDelta >= 0 && !(scaleDelta > 0 && needsPrecisionCheck)
   }
 
@@ -315,6 +317,16 @@ object GpuCast {
     } else {
       128
     }
+  }
+
+  private def castUsesRowIrJitAst(from: DataType, to: DataType): Boolean = (from, to) match {
+    case (fromDec: DecimalType, toDec: DecimalType) =>
+      canDecimalCastToAst(fromDec, toDec) &&
+        (decimalStorageWidth(fromDec) != decimalStorageWidth(toDec) ||
+          fromDec.scale != toDec.scale ||
+          decimalCastNeedsPrecisionCheck(fromDec, toDec))
+    case (IntegerType, LongType) => true
+    case _ => false
   }
 
   private def decimalCastStorageOp(width: Int): ast.JitOperator = width match {
@@ -347,9 +359,7 @@ object GpuCast {
     require(canDecimalCastToAst(from, to),
       s"AST decimal cast from $from to $to is not supported")
 
-    val fromWholeNumPrecision = from.precision - from.scale
-    val toWholeNumPrecision = to.precision - to.scale
-    val needsPrecisionCheck = fromWholeNumPrecision > toWholeNumPrecision
+    val needsPrecisionCheck = decimalCastNeedsPrecisionCheck(from, to)
     val scaleDelta = to.scale - from.scale
     val fromWidth = decimalStorageWidth(from)
     val toWidth = decimalStorageWidth(to)
@@ -1749,6 +1759,8 @@ case class GpuCast(
   private val options: CastOptions =
     new CastOptions(legacyCastComplexTypesToString, ansiMode, stringToDateAnsiModeEnabled,
         timeZoneId = timeZoneId)
+
+  override def selfUsesRowIrJitAst: Boolean = castUsesRowIrJitAst(child.dataType, dataType)
 
   // when ansi mode is enabled, some cast expressions can throw exceptions on invalid inputs
   override def hasSideEffects: Boolean = super.hasSideEffects || {

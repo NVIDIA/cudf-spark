@@ -216,6 +216,9 @@ case class GpuUnaryMinus(child: Expression, failOnError: Boolean) extends GpuUna
   override def hasSideEffects: Boolean = super.hasSideEffects ||
     (failOnError && GpuAnsi.needBasicOpOverflowCheck(dataType))
 
+  override def selfUsesRowIrJitAst: Boolean =
+    GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)
+
   override def doColumnar(input: GpuColumnVector) : ColumnVector = {
     if (failOnError && GpuAnsi.needBasicOpOverflowCheck(dataType)) {
       // Because of 2s compliment we need to only worry about the min value for integer types.
@@ -297,6 +300,9 @@ case class GpuAbs(child: Expression, failOnError: Boolean) extends CudfUnaryExpr
   override def hasSideEffects: Boolean = super.hasSideEffects ||
     (failOnError && GpuAnsi.needBasicOpOverflowCheck(dataType))
 
+  override def selfUsesRowIrJitAst: Boolean =
+    GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)
+
   override def doColumnar(input: GpuColumnVector) : ColumnVector = {
     if (failOnError && GpuAnsi.needBasicOpOverflowCheck(dataType)) {
       // Because of 2s compliment we need to only worry about the min value for integer types.
@@ -341,6 +347,9 @@ abstract class GpuAddBase extends CudfBinaryArithmetic with Serializable {
   override def hasSideEffects: Boolean =
     (failOnError && GpuAnsi.needBasicOpOverflowCheck(dataType)) || super.hasSideEffects
 
+  override def selfUsesRowIrJitAst: Boolean =
+    GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)
+
   override def doColumnar(lhs: BinaryOperable, rhs: BinaryOperable): ColumnVector = {
     val ret = super.doColumnar(lhs, rhs)
     withResource(ret) { ret =>
@@ -379,6 +388,9 @@ abstract class GpuSubtractBase extends CudfBinaryArithmetic with Serializable {
 
   override def binaryOp: BinaryOp = BinaryOp.SUB
   override def astOperator: Option[BinaryOperator] = Some(ast.BinaryOperator.SUB)
+
+  override def selfUsesRowIrJitAst: Boolean =
+    GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)
 
   private[this] def decimalOpOverflowCheck(
       lhs: BinaryOperable,
@@ -812,6 +824,9 @@ case class GpuMultiply(
   override def binaryOp: BinaryOp = BinaryOp.MUL
   override def astOperator: Option[BinaryOperator] = Some(ast.BinaryOperator.MUL)
 
+  override def selfUsesRowIrJitAst: Boolean =
+    GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)
+
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
     if (GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)) {
       new ast.JitOperation(ast.JitOperator.MUL, ast.JitComplianceMode.ANSI,
@@ -1218,6 +1233,9 @@ abstract class GpuIntegralDivideParent(
 
   override def sqlOperator: String = "div"
 
+  override def selfUsesRowIrJitAst: Boolean =
+    GpuAnsi.shouldUseAnsiDivModAst(failOnError, left.dataType, right.dataType)
+
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
     if (GpuAnsi.shouldUseAnsiDivModAst(failOnError, left.dataType, right.dataType)) {
       new ast.JitOperation(ast.JitOperator.DIV, ast.JitComplianceMode.ANSI,
@@ -1236,6 +1254,9 @@ abstract class GpuRemainderBase(left: Expression, right: Expression)
   override def symbol: String = "%"
 
   override def binaryOp: BinaryOp = BinaryOp.MOD
+
+  override def selfUsesRowIrJitAst: Boolean =
+    GpuAnsi.shouldUseAnsiDivModAst(failOnError, left.dataType, right.dataType)
 
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
     if (GpuAnsi.shouldUseAnsiDivModAst(failOnError, left.dataType, right.dataType)) {

@@ -116,6 +116,7 @@ case class GpuCoalesce(children: Seq[Expression]) extends GpuExpression
 
   // Coalesce is nullable if all of its children are nullable, or there are no children
   override def nullable: Boolean = children.forall(_.nullable)
+  override def selfUsesRowIrJitAst: Boolean = true
 
   // Coalesce is foldable if all children are foldable.
   override def foldable: Boolean = children.forall(_.foldable)

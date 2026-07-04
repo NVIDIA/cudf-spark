@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,14 +34,14 @@ object AstUtil {
    */
   def canExtractNonAstConditionIfNeed(expr: BaseExprMeta[_], left: Seq[ExprId],
       right: Seq[ExprId]): Boolean = {
-    if (!expr.canSelfBeAst) {
+    if (!expr.canSelfBeLegacyAst) {
       // This expression cannot be AST. We will extract the entire sub-tree (this expression
       // and all its children). Check if this entire sub-tree only uses one side of the join.
       val exprRef = expr.wrapped.asInstanceOf[Expression]
       val hasLeft = exprRef.references.exists(r => left.contains(r.exprId))
       val hasRight = exprRef.references.exists(r => right.contains(r.exprId))
       // Can extract if it doesn't use both sides (entire sub-tree will be extracted)
-      !(hasLeft && hasRight)
+      expr.canBePrecomputedForJoin && !(hasLeft && hasRight)
     } else {
       // This node is AST-able, so recursively check all children
       expr.childExprs.isEmpty || expr.childExprs.forall(
@@ -79,7 +79,7 @@ object AstUtil {
         val rightExprIds = right.attrs.map(_.exprId).toSet
 
         // Extract and convert in a single pass
-        val updatedCondition = extractAndConvert(cond, leftExprIds, rightExprIds,
+        val (updatedCondition, _) = extractAndConvert(cond, leftExprIds, rightExprIds,
           leftExprs, rightExprs, processed)
 
         (Some(updatedCondition), leftExprs.toList, rightExprs.toList)
@@ -95,7 +95,7 @@ object AstUtil {
    * @param leftExprs buffer to collect expressions for left child
    * @param rightExprs buffer to collect expressions for right child
    * @param processed map to avoid processing duplicates
-   * @return the converted GPU expression with non-AST sub-trees replaced
+   * @return the converted GPU expression and whether its children were rewritten
    */
   private[this] def extractAndConvert(
       expr: BaseExprMeta[_],
@@ -103,16 +103,16 @@ object AstUtil {
       rightExprIds: Set[ExprId],
       leftExprs: ListBuffer[NamedExpression],
       rightExprs: ListBuffer[NamedExpression],
-      processed: mutable.HashMap[GpuExpressionEquals, Expression]): Expression = {
-    if (!expr.canSelfBeAst) {
+      processed: mutable.HashMap[GpuExpressionEquals, Expression]): (Expression, Boolean) = {
+    if (!expr.canSelfBeLegacyAst) {
       // This expression cannot be converted to AST - extract the entire sub-tree
       val exprRef = expr.wrapped.asInstanceOf[Expression]
-      val gpuExpr = expr.convertToGpu()
+      val gpuExpr = expr.convertToGpuForLegacyAst()
       
       // Check if we've already processed this expression (for deduplication)
       processed.get(GpuExpressionEquals(gpuExpr)) match {
         case Some(replacement) => 
-          replacement
+          (replacement, true)
         case None =>
           // Determine which side this expression belongs to based on its references
           val referencedExprIds = exprRef.references.map(_.exprId).toSet
@@ -136,7 +136,7 @@ object AstUtil {
           val attributeRef = AttributeReference(alias.name, gpuExpr.dataType, 
             gpuExpr.nullable, alias.metadata)(alias.exprId, alias.qualifier)
           processed.put(GpuExpressionEquals(gpuExpr), attributeRef)
-          attributeRef
+          (attributeRef, true)
       }
     } else {
       // This expression can be converted to AST
@@ -144,13 +144,13 @@ object AstUtil {
       val convertedChildren = expr.childExprs.map { child =>
         extractAndConvert(child, leftExprIds, rightExprIds, leftExprs, rightExprs, processed)
       }
-      
-      // Convert to GPU and replace children with the processed versions
-      val gpuExpr = expr.convertToGpu()
-      if (convertedChildren.isEmpty) {
-        gpuExpr
+
+      val childrenChanged = convertedChildren.exists(_._2)
+      if (childrenChanged) {
+        val rewrittenChildren = convertedChildren.map(_._1)
+        (expr.convertToGpuForLegacyAstRewrite(rewrittenChildren), true)
       } else {
-        gpuExpr.withNewChildren(convertedChildren)
+        (expr.convertToGpuForLegacyAst(), false)
       }
     }
   }
