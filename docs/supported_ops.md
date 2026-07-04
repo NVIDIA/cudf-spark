@@ -1703,8 +1703,8 @@ are limited.
 <td rowSpan="2">AST</td>
 <td>input</td>
 <td> </td>
-<td><b>NS</b></td>
-<td><b>NS</b></td>
+<td>S</td>
+<td>S</td>
 <td>S</td>
 <td>S</td>
 <td>S</td>
@@ -1712,7 +1712,7 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-<td><b>NS</b></td>
+<td>S</td>
 <td> </td>
 <td> </td>
 <td> </td>
@@ -1726,8 +1726,8 @@ are limited.
 <tr>
 <td>result</td>
 <td> </td>
-<td><b>NS</b></td>
-<td><b>NS</b></td>
+<td>S</td>
+<td>S</td>
 <td>S</td>
 <td>S</td>
 <td>S</td>
@@ -1735,7 +1735,7 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-<td><b>NS</b></td>
+<td>S</td>
 <td> </td>
 <td> </td>
 <td> </td>
@@ -2020,8 +2020,8 @@ are limited.
 <td rowSpan="3">AST</td>
 <td>lhs</td>
 <td> </td>
-<td><b>NS</b></td>
-<td><b>NS</b></td>
+<td>S</td>
+<td>S</td>
 <td>S</td>
 <td>S</td>
 <td>S</td>
@@ -2029,7 +2029,7 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-<td><b>NS</b></td>
+<td>S</td>
 <td> </td>
 <td> </td>
 <td><b>NS</b></td>
@@ -2043,8 +2043,8 @@ are limited.
 <tr>
 <td>rhs</td>
 <td> </td>
-<td><b>NS</b></td>
-<td><b>NS</b></td>
+<td>S</td>
+<td>S</td>
 <td>S</td>
 <td>S</td>
 <td>S</td>
@@ -2052,7 +2052,7 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-<td><b>NS</b></td>
+<td>S</td>
 <td> </td>
 <td> </td>
 <td><b>NS</b></td>
@@ -2066,8 +2066,8 @@ are limited.
 <tr>
 <td>result</td>
 <td> </td>
-<td><b>NS</b></td>
-<td><b>NS</b></td>
+<td>S</td>
+<td>S</td>
 <td>S</td>
 <td>S</td>
 <td>S</td>
@@ -2075,7 +2075,7 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-<td><b>NS</b></td>
+<td>S</td>
 <td> </td>
 <td> </td>
 <td><b>NS</b></td>
@@ -2178,7 +2178,7 @@ are limited.
 <td>S</td>
 <td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
 <td>S</td>
-<td><b>NS</b></td>
+<td>S</td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
@@ -2201,7 +2201,7 @@ are limited.
 <td>S</td>
 <td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
 <td>S</td>
-<td><b>NS</b></td>
+<td>S</td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
@@ -4238,7 +4238,7 @@ are limited.
 <td>S</td>
 <td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
 <td>S</td>
-<td><b>NS</b></td>
+<td>S</td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
@@ -5205,7 +5205,7 @@ are limited.
 <td>S</td>
 <td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
 <td>S</td>
-<td><b>NS</b></td>
+<td>S</td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
@@ -5217,10 +5217,10 @@ are limited.
 <td>S</td>
 </tr>
 <tr>
-<td rowSpan="3">CaseWhen</td>
-<td rowSpan="3">`when`</td>
-<td rowSpan="3">CASE WHEN expression</td>
-<td rowSpan="3">None</td>
+<td rowSpan="6">CaseWhen</td>
+<td rowSpan="6">`when`</td>
+<td rowSpan="6">CASE WHEN expression</td>
+<td rowSpan="6">None</td>
 <td rowSpan="3">project</td>
 <td>predicate</td>
 <td>S</td>
@@ -5286,6 +5286,76 @@ are limited.
 <td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types CALENDAR, UDT, DAYTIME, YEARMONTH</em></td>
 <td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types CALENDAR, UDT, DAYTIME, YEARMONTH</em></td>
 <td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types CALENDAR, UDT, DAYTIME, YEARMONTH</em></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+</tr>
+<tr>
+<td rowSpan="3">AST</td>
+<td>predicate</td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
+<td>value</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+</tr>
+<tr>
+<td>result</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
@@ -5387,6 +5457,34 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
+</tr>
+<tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="2">Ceil</td>
@@ -5491,38 +5589,10 @@ are limited.
 <td> </td>
 </tr>
 <tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
-</tr>
-<tr>
-<td rowSpan="2">Coalesce</td>
-<td rowSpan="2">`coalesce`</td>
-<td rowSpan="2">Returns the first non-null argument if exists. Otherwise, null</td>
-<td rowSpan="2">None</td>
+<td rowSpan="4">Coalesce</td>
+<td rowSpan="4">`coalesce`</td>
+<td rowSpan="4">Returns the first non-null argument if exists. Otherwise, null</td>
+<td rowSpan="4">None</td>
 <td rowSpan="2">project</td>
 <td>param</td>
 <td>S</td>
@@ -5568,6 +5638,53 @@ are limited.
 <td><b>NS</b></td>
 <td>S</td>
 <td>S</td>
+</tr>
+<tr>
+<td rowSpan="2">AST</td>
+<td>param</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
+<td><b>NS</b></td>
+<td>S</td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+</tr>
+<tr>
+<td>result</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
+<td><b>NS</b></td>
+<td>S</td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
 </tr>
 <tr>
 <td rowSpan="2">Concat</td>
@@ -5744,6 +5861,34 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
+</tr>
+<tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="4">Conv</td>
@@ -5939,34 +6084,6 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-</tr>
-<tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="4">Cosh</td>
@@ -6165,6 +6282,34 @@ are limited.
 <td> </td>
 </tr>
 <tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
+</tr>
+<tr>
 <td rowSpan="2">CreateArray</td>
 <td rowSpan="2">`array`</td>
 <td rowSpan="2">Returns an array with the given elements</td>
@@ -6339,34 +6484,6 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-</tr>
-<tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="1">CurrentRow$</td>
@@ -6619,6 +6736,34 @@ are limited.
 <td> </td>
 </tr>
 <tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
+</tr>
+<tr>
 <td rowSpan="3">DateFormatClass</td>
 <td rowSpan="3">`date_format`</td>
 <td rowSpan="3">Converts timestamp to a value of string in the format specified by the date format</td>
@@ -6765,34 +6910,6 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-</tr>
-<tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="2">DayOfMonth</td>
@@ -6999,10 +7116,10 @@ are limited.
 <td> </td>
 </tr>
 <tr>
-<td rowSpan="3">Divide</td>
-<td rowSpan="3">`/`</td>
-<td rowSpan="3">Division</td>
-<td rowSpan="3">None</td>
+<td rowSpan="6">Divide</td>
+<td rowSpan="6">`/`</td>
+<td rowSpan="6">Division</td>
+<td rowSpan="6">None</td>
 <td rowSpan="3">project</td>
 <td>lhs</td>
 <td> </td>
@@ -7071,6 +7188,104 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
+</tr>
+<tr>
+<td rowSpan="3">AST</td>
+<td>lhs</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td><b>NS</b></td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
+<td>rhs</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td><b>NS</b></td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
+<td>result</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td><b>NS</b></td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="3">DivideDTInterval</td>
@@ -7219,34 +7434,6 @@ are limited.
 <td> </td>
 <td> </td>
 <td>S</td>
-</tr>
-<tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="2">DynamicPruningExpression</td>
@@ -7448,10 +7635,10 @@ are limited.
 <td> </td>
 </tr>
 <tr>
-<td rowSpan="3">EqualNullSafe</td>
-<td rowSpan="3">`<=>`</td>
-<td rowSpan="3">Check if the values are equal including nulls <=></td>
-<td rowSpan="3">None</td>
+<td rowSpan="6">EqualNullSafe</td>
+<td rowSpan="6">`<=>`</td>
+<td rowSpan="6">Check if the values are equal including nulls <=></td>
+<td rowSpan="6">None</td>
 <td rowSpan="3">project</td>
 <td>lhs</td>
 <td>S</td>
@@ -7520,6 +7707,104 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
+</tr>
+<tr>
+<td rowSpan="3">AST</td>
+<td>lhs</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td>S</td>
+<td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
+<td>S</td>
+<td>S</td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td> </td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
+<td>rhs</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td>S</td>
+<td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
+<td>S</td>
+<td>S</td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td> </td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
+<td>result</td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="6">EqualTo</td>
@@ -7608,7 +7893,7 @@ are limited.
 <td>S</td>
 <td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
 <td>S</td>
-<td><b>NS</b></td>
+<td>S</td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
@@ -7631,7 +7916,7 @@ are limited.
 <td>S</td>
 <td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
 <td>S</td>
-<td><b>NS</b></td>
+<td>S</td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
@@ -7664,34 +7949,6 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-</tr>
-<tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="4">Exp</td>
@@ -7941,6 +8198,34 @@ are limited.
 <td> </td>
 </tr>
 <tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
+</tr>
+<tr>
 <td rowSpan="2">Flatten</td>
 <td rowSpan="2">`flatten`</td>
 <td rowSpan="2">Creates a single array from an array of arrays</td>
@@ -8115,34 +8400,6 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-</tr>
-<tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="3">FromUTCTimestamp</td>
@@ -8367,6 +8624,34 @@ are limited.
 <td><b>NS</b></td>
 </tr>
 <tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
+</tr>
+<tr>
 <td rowSpan="2">GetArrayStructFields</td>
 <td rowSpan="2"> </td>
 <td rowSpan="2">Extracts the `ordinal`-th fields of all array elements for the data with the type of array of struct</td>
@@ -8564,34 +8849,6 @@ are limited.
 <td><b>NS</b></td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
-</tr>
-<tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="2">GetStructField</td>
@@ -8805,7 +9062,7 @@ are limited.
 <td>S</td>
 <td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
 <td>S</td>
-<td><b>NS</b></td>
+<td>S</td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
@@ -8828,7 +9085,7 @@ are limited.
 <td>S</td>
 <td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
 <td>S</td>
-<td><b>NS</b></td>
+<td>S</td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
@@ -8861,6 +9118,34 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
+</tr>
+<tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="6">GreaterThanOrEqual</td>
@@ -8949,7 +9234,7 @@ are limited.
 <td>S</td>
 <td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
 <td>S</td>
-<td><b>NS</b></td>
+<td>S</td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
@@ -8972,7 +9257,7 @@ are limited.
 <td>S</td>
 <td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
 <td>S</td>
-<td><b>NS</b></td>
+<td>S</td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
@@ -9005,34 +9290,6 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-</tr>
-<tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="2">Greatest</td>
@@ -9313,10 +9570,38 @@ are limited.
 <td> </td>
 </tr>
 <tr>
-<td rowSpan="4">If</td>
-<td rowSpan="4">`if`</td>
-<td rowSpan="4">IF expression</td>
-<td rowSpan="4">None</td>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
+</tr>
+<tr>
+<td rowSpan="8">If</td>
+<td rowSpan="8">`if`</td>
+<td rowSpan="8">IF expression</td>
+<td rowSpan="8">None</td>
 <td rowSpan="4">project</td>
 <td>predicate</td>
 <td>S</td>
@@ -9410,32 +9695,97 @@ are limited.
 <td>S</td>
 </tr>
 <tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
+<td rowSpan="4">AST</td>
+<td>predicate</td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
+<td>trueValue</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
+<td><b>NS</b></td>
+<td>S</td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+</tr>
+<tr>
+<td>falseValue</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
+<td><b>NS</b></td>
+<td>S</td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+</tr>
+<tr>
+<td>result</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
+<td><b>NS</b></td>
+<td>S</td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
 </tr>
 <tr>
 <td rowSpan="3">In</td>
@@ -9614,6 +9964,34 @@ are limited.
 <td> </td>
 </tr>
 <tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
+</tr>
+<tr>
 <td rowSpan="1">InputFileBlockLength</td>
 <td rowSpan="1">`input_file_block_length`</td>
 <td rowSpan="1">Returns the length of the block being read, or -1 if not available</td>
@@ -9698,10 +10076,10 @@ are limited.
 <td> </td>
 </tr>
 <tr>
-<td rowSpan="3">IntegralDivide</td>
-<td rowSpan="3">`div`</td>
-<td rowSpan="3">Division with a integer result</td>
-<td rowSpan="3">None</td>
+<td rowSpan="6">IntegralDivide</td>
+<td rowSpan="6">`div`</td>
+<td rowSpan="6">Division with a integer result</td>
+<td rowSpan="6">None</td>
 <td rowSpan="3">project</td>
 <td>lhs</td>
 <td> </td>
@@ -9738,6 +10116,76 @@ are limited.
 <td> </td>
 <td> </td>
 <td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
+<td>result</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
+<td rowSpan="3">AST</td>
+<td>lhs</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td><b>NS</b></td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
+<td>rhs</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td><b>NS</b></td>
 <td> </td>
 <td> </td>
 <td> </td>
@@ -9821,34 +10269,6 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-</tr>
-<tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="4">IsNotNull</td>
@@ -9947,6 +10367,34 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
+</tr>
+<tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="4">IsNull</td>
@@ -10223,34 +10671,6 @@ are limited.
 <td>S</td>
 </tr>
 <tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
-</tr>
-<tr>
 <td rowSpan="2">KnownNotNull</td>
 <td rowSpan="2"> </td>
 <td rowSpan="2">Tag an expression as known to not be null</td>
@@ -10397,6 +10817,34 @@ are limited.
 <td><b>NS</b></td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
+</tr>
+<tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="3">LambdaFunction</td>
@@ -10621,34 +11069,6 @@ are limited.
 <td><b>NS</b></td>
 </tr>
 <tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
-</tr>
-<tr>
 <td rowSpan="2">Least</td>
 <td rowSpan="2">`least`</td>
 <td rowSpan="2">Returns the least value of all parameters, skipping null values</td>
@@ -10837,7 +11257,7 @@ are limited.
 <td>S</td>
 <td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
 <td>S</td>
-<td><b>NS</b></td>
+<td>S</td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
@@ -10860,7 +11280,7 @@ are limited.
 <td>S</td>
 <td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
 <td>S</td>
-<td><b>NS</b></td>
+<td>S</td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
@@ -10893,6 +11313,34 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
+</tr>
+<tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="6">LessThanOrEqual</td>
@@ -10981,7 +11429,7 @@ are limited.
 <td>S</td>
 <td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
 <td>S</td>
-<td><b>NS</b></td>
+<td>S</td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
@@ -11004,7 +11452,7 @@ are limited.
 <td>S</td>
 <td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
 <td>S</td>
-<td><b>NS</b></td>
+<td>S</td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
@@ -11037,34 +11485,6 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-</tr>
-<tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="3">Like</td>
@@ -11181,7 +11601,7 @@ are limited.
 <td>S</td>
 <td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
 <td>S</td>
-<td><b>NS</b></td>
+<td>S</td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
@@ -11293,6 +11713,34 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
+</tr>
+<tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="2">Log1p</td>
@@ -11469,34 +11917,6 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-</tr>
-<tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="2">Lower</td>
@@ -11703,6 +12123,34 @@ are limited.
 <td> </td>
 </tr>
 <tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
+</tr>
+<tr>
 <td rowSpan="3">MapFilter</td>
 <td rowSpan="3">`map_filter`</td>
 <td rowSpan="3">Filters entries in a map using the function</td>
@@ -11902,34 +12350,6 @@ are limited.
 <td> </td>
 </tr>
 <tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
-</tr>
-<tr>
 <td rowSpan="2">MapKeys</td>
 <td rowSpan="2">`map_keys`</td>
 <td rowSpan="2">Returns an unordered array containing the keys of the map</td>
@@ -12127,6 +12547,34 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
+</tr>
+<tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="2">Md5</td>
@@ -12333,34 +12781,6 @@ are limited.
 <td> </td>
 </tr>
 <tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
-</tr>
-<tr>
 <td rowSpan="1">MonotonicallyIncreasingID</td>
 <td rowSpan="1">`monotonically_increasing_id`</td>
 <td rowSpan="1">Returns monotonically increasing 64-bit integers</td>
@@ -12537,6 +12957,34 @@ are limited.
 <td> </td>
 </tr>
 <tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
+</tr>
+<tr>
 <td rowSpan="6">Multiply</td>
 <td rowSpan="6">`*`</td>
 <td rowSpan="6">Multiplication</td>
@@ -12614,8 +13062,8 @@ are limited.
 <td rowSpan="3">AST</td>
 <td>lhs</td>
 <td> </td>
-<td><b>NS</b></td>
-<td><b>NS</b></td>
+<td>S</td>
+<td>S</td>
 <td>S</td>
 <td>S</td>
 <td>S</td>
@@ -12637,8 +13085,8 @@ are limited.
 <tr>
 <td>rhs</td>
 <td> </td>
-<td><b>NS</b></td>
-<td><b>NS</b></td>
+<td>S</td>
+<td>S</td>
 <td>S</td>
 <td>S</td>
 <td>S</td>
@@ -12660,8 +13108,8 @@ are limited.
 <tr>
 <td>result</td>
 <td> </td>
-<td><b>NS</b></td>
-<td><b>NS</b></td>
+<td>S</td>
+<td>S</td>
 <td>S</td>
 <td>S</td>
 <td>S</td>
@@ -12753,34 +13201,6 @@ are limited.
 <td> </td>
 <td>S</td>
 <td> </td>
-</tr>
-<tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="3">MultiplyYMInterval</td>
@@ -12980,6 +13400,34 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
+</tr>
+<tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="1">NamedLambdaVariable</td>
@@ -13182,34 +13630,6 @@ are limited.
 <td><b>NS</b></td>
 </tr>
 <tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
-</tr>
-<tr>
 <td rowSpan="2">OctetLength</td>
 <td rowSpan="2">`octet_length`</td>
 <td rowSpan="2">The byte length of string data</td>
@@ -13403,6 +13823,34 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
+</tr>
+<tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="4">ParseUrl</td>
@@ -13627,34 +14075,6 @@ are limited.
 <td> </td>
 </tr>
 <tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
-</tr>
-<tr>
 <td rowSpan="2">PosExplode</td>
 <td rowSpan="2">`posexplode_outer`, `posexplode`</td>
 <td rowSpan="2">Given an input array produces a sequence of rows for each value in the array</td>
@@ -13848,6 +14268,34 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
+</tr>
+<tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="2">PreciseTimestampConversion</td>
@@ -14144,34 +14592,6 @@ are limited.
 <td> </td>
 </tr>
 <tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
-</tr>
-<tr>
 <td rowSpan="2">Quarter</td>
 <td rowSpan="2">`quarter`</td>
 <td rowSpan="2">Returns the quarter of the year for date, in the range 1 to 4</td>
@@ -14295,6 +14715,34 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
+</tr>
+<tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="2">RaiseError</td>
@@ -14547,34 +14995,6 @@ are limited.
 <td> </td>
 </tr>
 <tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
-</tr>
-<tr>
 <td rowSpan="4">RegExpExtractAll</td>
 <td rowSpan="4">`regexp_extract_all`</td>
 <td rowSpan="4">Extract all strings matching a regular expression corresponding to the regex group index</td>
@@ -14792,10 +15212,38 @@ are limited.
 <td> </td>
 </tr>
 <tr>
-<td rowSpan="3">Remainder</td>
-<td rowSpan="3">`%`, `mod`</td>
-<td rowSpan="3">Remainder or modulo</td>
-<td rowSpan="3">None</td>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
+</tr>
+<tr>
+<td rowSpan="6">Remainder</td>
+<td rowSpan="6">`%`, `mod`</td>
+<td rowSpan="6">Remainder or modulo</td>
+<td rowSpan="6">None</td>
 <td rowSpan="3">project</td>
 <td>lhs</td>
 <td> </td>
@@ -14855,6 +15303,76 @@ are limited.
 <td> </td>
 <td> </td>
 <td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
+<td rowSpan="3">AST</td>
+<td>lhs</td>
+<td> </td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td><b>NS</b></td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
+<td>rhs</td>
+<td> </td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td><b>NS</b></td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
+<td>result</td>
+<td> </td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td><b>NS</b></td>
 <td> </td>
 <td> </td>
 <td> </td>
@@ -14966,34 +15484,6 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-</tr>
-<tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="4">Rint</td>
@@ -15166,6 +15656,34 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
+</tr>
+<tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="3">RoundCeil</td>
@@ -15365,34 +15883,6 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-</tr>
-<tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="2">ScalaUDF</td>
@@ -15645,6 +16135,34 @@ are limited.
 <td> </td>
 </tr>
 <tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
+</tr>
+<tr>
 <td rowSpan="2">Sha1</td>
 <td rowSpan="2">`sha1`, `sha`</td>
 <td rowSpan="2">Sha1 hash operator</td>
@@ -15770,6 +16288,294 @@ are limited.
 <td> </td>
 </tr>
 <tr>
+<td rowSpan="6">ShiftLeft</td>
+<td rowSpan="6">`shiftleft`</td>
+<td rowSpan="6">Bitwise shift left (<<)</td>
+<td rowSpan="6">None</td>
+<td rowSpan="3">project</td>
+<td>value</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td>S</td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
+<td>amount</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
+<td>result</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td>S</td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
+<td rowSpan="3">AST</td>
+<td>value</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td>S</td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
+<td>amount</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
+<td>result</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td>S</td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
+<td rowSpan="6">ShiftRight</td>
+<td rowSpan="6">`shiftright`</td>
+<td rowSpan="6">Bitwise shift right (>>)</td>
+<td rowSpan="6">None</td>
+<td rowSpan="3">project</td>
+<td>value</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td>S</td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
+<td>amount</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
+<td>result</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td>S</td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
+<td rowSpan="3">AST</td>
+<td>value</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td>S</td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
+<td>amount</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
+<td>result</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td>S</td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
 <th>Expression</th>
 <th>SQL Functions(s)</th>
 <th>Description</th>
@@ -15798,10 +16604,10 @@ are limited.
 <th>YEARMONTH</th>
 </tr>
 <tr>
-<td rowSpan="3">ShiftLeft</td>
-<td rowSpan="3">`shiftleft`</td>
-<td rowSpan="3">Bitwise shift left (<<)</td>
-<td rowSpan="3">None</td>
+<td rowSpan="6">ShiftRightUnsigned</td>
+<td rowSpan="6">`shiftrightunsigned`</td>
+<td rowSpan="6">Bitwise unsigned shift right (>>>)</td>
+<td rowSpan="6">None</td>
 <td rowSpan="3">project</td>
 <td>value</td>
 <td> </td>
@@ -15872,85 +16678,7 @@ are limited.
 <td> </td>
 </tr>
 <tr>
-<td rowSpan="3">ShiftRight</td>
-<td rowSpan="3">`shiftright`</td>
-<td rowSpan="3">Bitwise shift right (>>)</td>
-<td rowSpan="3">None</td>
-<td rowSpan="3">project</td>
-<td>value</td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td>S</td>
-<td>S</td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-</tr>
-<tr>
-<td>amount</td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td>S</td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-</tr>
-<tr>
-<td>result</td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td>S</td>
-<td>S</td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-</tr>
-<tr>
-<td rowSpan="3">ShiftRightUnsigned</td>
-<td rowSpan="3">`shiftrightunsigned`</td>
-<td rowSpan="3">Bitwise unsigned shift right (>>>)</td>
-<td rowSpan="3">None</td>
-<td rowSpan="3">project</td>
+<td rowSpan="3">AST</td>
 <td>value</td>
 <td> </td>
 <td> </td>
@@ -16169,34 +16897,6 @@ are limited.
 <td> </td>
 </tr>
 <tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
-</tr>
-<tr>
 <td rowSpan="4">Sinh</td>
 <td rowSpan="4">`sinh`</td>
 <td rowSpan="4">Hyperbolic sine</td>
@@ -16293,6 +16993,34 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
+</tr>
+<tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="2">Size</td>
@@ -16568,34 +17296,6 @@ are limited.
 <td> </td>
 </tr>
 <tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
-</tr>
-<tr>
 <td rowSpan="1">SparkPartitionID</td>
 <td rowSpan="1">`spark_partition_id`</td>
 <td rowSpan="1">Returns the current partition id</td>
@@ -16696,6 +17396,34 @@ are limited.
 <td> </td>
 <td>S</td>
 <td><b>NS</b></td>
+</tr>
+<tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="4">Sqrt</td>
@@ -17018,34 +17746,6 @@ are limited.
 <td> </td>
 </tr>
 <tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
-</tr>
-<tr>
 <td rowSpan="3">StringInstr</td>
 <td rowSpan="3">`instr`</td>
 <td rowSpan="3">Instr string operator</td>
@@ -17118,6 +17818,34 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
+</tr>
+<tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="4">StringLPad</td>
@@ -17411,34 +18139,6 @@ are limited.
 <td> </td>
 </tr>
 <tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
-</tr>
-<tr>
 <td rowSpan="3">StringRepeat</td>
 <td rowSpan="3">`repeat`</td>
 <td rowSpan="3">StringRepeat operator that repeats the given strings with numbers of times given by repeatTimes</td>
@@ -17511,6 +18211,34 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
+</tr>
+<tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="4">StringReplace</td>
@@ -17804,34 +18532,6 @@ are limited.
 <td> </td>
 </tr>
 <tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
-</tr>
-<tr>
 <td rowSpan="4">StringTranslate</td>
 <td rowSpan="4">`translate`</td>
 <td rowSpan="4">StringTranslate operator</td>
@@ -17927,6 +18627,34 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
+</tr>
+<tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="3">StringTrim</td>
@@ -18202,34 +18930,6 @@ are limited.
 <td> </td>
 </tr>
 <tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
-</tr>
-<tr>
 <td rowSpan="4">Substring</td>
 <td rowSpan="4">`substr`, `substring`</td>
 <td rowSpan="4">Substring operator</td>
@@ -18325,6 +19025,34 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
+</tr>
+<tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="4">SubstringIndex</td>
@@ -18501,8 +19229,8 @@ are limited.
 <td rowSpan="3">AST</td>
 <td>lhs</td>
 <td> </td>
-<td><b>NS</b></td>
-<td><b>NS</b></td>
+<td>S</td>
+<td>S</td>
 <td>S</td>
 <td>S</td>
 <td>S</td>
@@ -18510,7 +19238,7 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-<td><b>NS</b></td>
+<td>S</td>
 <td> </td>
 <td> </td>
 <td><b>NS</b></td>
@@ -18524,8 +19252,8 @@ are limited.
 <tr>
 <td>rhs</td>
 <td> </td>
-<td><b>NS</b></td>
-<td><b>NS</b></td>
+<td>S</td>
+<td>S</td>
 <td>S</td>
 <td>S</td>
 <td>S</td>
@@ -18533,7 +19261,7 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-<td><b>NS</b></td>
+<td>S</td>
 <td> </td>
 <td> </td>
 <td><b>NS</b></td>
@@ -18547,8 +19275,8 @@ are limited.
 <tr>
 <td>result</td>
 <td> </td>
-<td><b>NS</b></td>
-<td><b>NS</b></td>
+<td>S</td>
+<td>S</td>
 <td>S</td>
 <td>S</td>
 <td>S</td>
@@ -18556,7 +19284,7 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-<td><b>NS</b></td>
+<td>S</td>
 <td> </td>
 <td> </td>
 <td><b>NS</b></td>
@@ -18571,6 +19299,104 @@ are limited.
 <td rowSpan="4">Tan</td>
 <td rowSpan="4">`tan`</td>
 <td rowSpan="4">Tangent</td>
+<td rowSpan="4">None</td>
+<td rowSpan="2">project</td>
+<td>input</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
+<td>result</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
+<td rowSpan="2">AST</td>
+<td>input</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
+<td>result</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
+<td rowSpan="4">Tanh</td>
+<td rowSpan="4">`tanh`</td>
+<td rowSpan="4">Hyperbolic tangent</td>
 <td rowSpan="4">None</td>
 <td rowSpan="2">project</td>
 <td>input</td>
@@ -18692,104 +19518,6 @@ are limited.
 <th>UDT</th>
 <th>DAYTIME</th>
 <th>YEARMONTH</th>
-</tr>
-<tr>
-<td rowSpan="4">Tanh</td>
-<td rowSpan="4">`tanh`</td>
-<td rowSpan="4">Hyperbolic tangent</td>
-<td rowSpan="4">None</td>
-<td rowSpan="2">project</td>
-<td>input</td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td>S</td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-</tr>
-<tr>
-<td>result</td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td>S</td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-</tr>
-<tr>
-<td rowSpan="2">AST</td>
-<td>input</td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td>S</td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-</tr>
-<tr>
-<td>result</td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td>S</td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
-<td> </td>
 </tr>
 <tr>
 <td rowSpan="3">TimeAdd</td>
@@ -19116,34 +19844,6 @@ are limited.
 <td> </td>
 </tr>
 <tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
-</tr>
-<tr>
 <td rowSpan="3">TransformKeys</td>
 <td rowSpan="3">`transform_keys`</td>
 <td rowSpan="3">Transform keys in a map using a transform function</td>
@@ -19216,6 +19916,34 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
+</tr>
+<tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="3">TransformValues</td>
@@ -19440,6 +20168,104 @@ are limited.
 <td> </td>
 </tr>
 <tr>
+<td rowSpan="4">TryEval</td>
+<td rowSpan="4"> </td>
+<td rowSpan="4">TRY integral arithmetic and floating-point division</td>
+<td rowSpan="4">None</td>
+<td rowSpan="2">project</td>
+<td>input</td>
+<td> </td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><b>NS</b></td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td><b>NS</b></td>
+<td> </td>
+<td> </td>
+<td><b>NS</b></td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+</tr>
+<tr>
+<td>result</td>
+<td> </td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><b>NS</b></td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td><b>NS</b></td>
+<td> </td>
+<td> </td>
+<td><b>NS</b></td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+</tr>
+<tr>
+<td rowSpan="2">AST</td>
+<td>input</td>
+<td> </td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><b>NS</b></td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td><b>NS</b></td>
+<td> </td>
+<td> </td>
+<td><b>NS</b></td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+</tr>
+<tr>
+<td>result</td>
+<td> </td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><b>NS</b></td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td><b>NS</b></td>
+<td> </td>
+<td> </td>
+<td><b>NS</b></td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td><b>NS</b></td>
+<td><b>NS</b></td>
+</tr>
+<tr>
 <td rowSpan="4">UnaryMinus</td>
 <td rowSpan="4">`negative`</td>
 <td rowSpan="4">Negate a numeric value</td>
@@ -19494,8 +20320,8 @@ are limited.
 <td rowSpan="2">AST</td>
 <td>input</td>
 <td> </td>
-<td><b>NS</b></td>
-<td><b>NS</b></td>
+<td>S</td>
+<td>S</td>
 <td>S</td>
 <td>S</td>
 <td>S</td>
@@ -19503,7 +20329,7 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-<td><b>NS</b></td>
+<td>S</td>
 <td> </td>
 <td> </td>
 <td><b>NS</b></td>
@@ -19517,8 +20343,8 @@ are limited.
 <tr>
 <td>result</td>
 <td> </td>
-<td><b>NS</b></td>
-<td><b>NS</b></td>
+<td>S</td>
+<td>S</td>
 <td>S</td>
 <td>S</td>
 <td>S</td>
@@ -19526,7 +20352,7 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-<td><b>NS</b></td>
+<td>S</td>
 <td> </td>
 <td> </td>
 <td><b>NS</b></td>

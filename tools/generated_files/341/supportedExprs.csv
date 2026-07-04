@@ -1,8 +1,8 @@
 Expression,Supported,SQL Func,Notes,Context,Params,BOOLEAN,BYTE,SHORT,INT,LONG,FLOAT,DOUBLE,DATE,TIMESTAMP,STRING,DECIMAL,NULL,BINARY,CALENDAR,ARRAY,MAP,STRUCT,UDT,DAYTIME,YEARMONTH
 Abs,S,`abs`,None,project,input,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,S,S
 Abs,S,`abs`,None,project,result,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,S,S
-Abs,S,`abs`,None,AST,input,NA,NS,NS,S,S,S,S,NA,NA,NA,NS,NA,NA,NA,NA,NA,NA,NA,NS,NS
-Abs,S,`abs`,None,AST,result,NA,NS,NS,S,S,S,S,NA,NA,NA,NS,NA,NA,NA,NA,NA,NA,NA,NS,NS
+Abs,S,`abs`,None,AST,input,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NS,NS
+Abs,S,`abs`,None,AST,result,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NS,NS
 Acos,S,`acos`,None,project,input,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 Acos,S,`acos`,None,project,result,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 Acos,S,`acos`,None,AST,input,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
@@ -14,13 +14,13 @@ Acosh,S,`acosh`,None,AST,result,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,N
 Add,S,`+`,None,project,lhs,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NS,NA,NA,NA,NA,S,S
 Add,S,`+`,None,project,rhs,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NS,NA,NA,NA,NA,S,S
 Add,S,`+`,None,project,result,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NS,NA,NA,NA,NA,S,S
-Add,S,`+`,None,AST,lhs,NA,NS,NS,S,S,S,S,NA,NA,NA,NS,NA,NA,NS,NA,NA,NA,NA,NS,NS
-Add,S,`+`,None,AST,rhs,NA,NS,NS,S,S,S,S,NA,NA,NA,NS,NA,NA,NS,NA,NA,NA,NA,NS,NS
-Add,S,`+`,None,AST,result,NA,NS,NS,S,S,S,S,NA,NA,NA,NS,NA,NA,NS,NA,NA,NA,NA,NS,NS
+Add,S,`+`,None,AST,lhs,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NS,NA,NA,NA,NA,NS,NS
+Add,S,`+`,None,AST,rhs,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NS,NA,NA,NA,NA,NS,NS
+Add,S,`+`,None,AST,result,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NS,NA,NA,NA,NA,NS,NS
 Alias,S, ,None,project,input,S,S,S,S,S,S,S,S,PS,S,S,S,S,NS,PS,PS,PS,NS,S,S
 Alias,S, ,None,project,result,S,S,S,S,S,S,S,S,PS,S,S,S,S,NS,PS,PS,PS,NS,S,S
-Alias,S, ,None,AST,input,S,S,S,S,S,S,S,S,PS,S,NS,NS,NS,NS,NS,NS,NS,NS,S,S
-Alias,S, ,None,AST,result,S,S,S,S,S,S,S,S,PS,S,NS,NS,NS,NS,NS,NS,NS,NS,S,S
+Alias,S, ,None,AST,input,S,S,S,S,S,S,S,S,PS,S,S,NS,NS,NS,NS,NS,NS,NS,S,S
+Alias,S, ,None,AST,result,S,S,S,S,S,S,S,S,PS,S,S,NS,NS,NS,NS,NS,NS,NS,S,S
 And,S,`and`,None,project,lhs,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 And,S,`and`,None,project,rhs,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 And,S,`and`,None,project,result,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
@@ -98,7 +98,7 @@ Atanh,S,`atanh`,None,project,result,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,
 Atanh,S,`atanh`,None,AST,input,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 Atanh,S,`atanh`,None,AST,result,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 AttributeReference,S, ,None,project,result,S,S,S,S,S,S,S,S,PS,S,S,S,S,NS,PS,PS,PS,NS,S,S
-AttributeReference,S, ,None,AST,result,S,S,S,S,S,S,S,S,PS,S,NS,NS,NS,NS,NS,NS,NS,NS,S,S
+AttributeReference,S, ,None,AST,result,S,S,S,S,S,S,S,S,PS,S,S,NS,NS,NS,NS,NS,NS,NS,S,S
 BRound,S,`bround`,None,project,value,NA,S,S,S,S,PS,PS,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA
 BRound,S,`bround`,None,project,scale,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 BRound,S,`bround`,None,project,result,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA
@@ -134,10 +134,13 @@ BloomFilterMightContain,S, ,None,project,lhs,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,S,
 BloomFilterMightContain,S, ,None,project,rhs,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA
 BloomFilterMightContain,S, ,None,project,result,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 BoundReference,S, ,None,project,result,S,S,S,S,S,S,S,S,PS,S,S,S,S,NS,PS,PS,PS,NS,S,S
-BoundReference,S, ,None,AST,result,S,S,S,S,S,S,S,S,PS,S,NS,NS,NS,NS,NS,NS,NS,NS,S,S
+BoundReference,S, ,None,AST,result,S,S,S,S,S,S,S,S,PS,S,S,NS,NS,NS,NS,NS,NS,NS,S,S
 CaseWhen,S,`when`,None,project,predicate,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 CaseWhen,S,`when`,None,project,value,S,S,S,S,S,S,S,S,PS,S,S,S,S,NS,PS,PS,PS,NS,NS,NS
 CaseWhen,S,`when`,None,project,result,S,S,S,S,S,S,S,S,PS,S,S,S,S,NS,PS,PS,PS,NS,NS,NS
+CaseWhen,S,`when`,None,AST,predicate,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
+CaseWhen,S,`when`,None,AST,value,S,S,S,S,S,S,S,S,PS,NS,NS,NS,NS,NS,NS,NS,NS,NS,NS,NS
+CaseWhen,S,`when`,None,AST,result,S,S,S,S,S,S,S,S,PS,NS,NS,NS,NS,NS,NS,NS,NS,NS,NS,NS
 Cbrt,S,`cbrt`,None,project,input,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 Cbrt,S,`cbrt`,None,project,result,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 Cbrt,S,`cbrt`,None,AST,input,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
@@ -148,6 +151,8 @@ CheckOverflowInTableInsert,S, ,None,project,input,S,S,S,S,S,S,S,S,PS,S,S,S,S,S,P
 CheckOverflowInTableInsert,S, ,None,project,result,S,S,S,S,S,S,S,S,PS,S,S,S,S,S,PS,PS,PS,S,S,S
 Coalesce,S,`coalesce`,None,project,param,S,S,S,S,S,S,S,S,PS,S,S,S,S,NS,PS,PS,PS,NS,S,S
 Coalesce,S,`coalesce`,None,project,result,S,S,S,S,S,S,S,S,PS,S,S,S,S,NS,PS,PS,PS,NS,S,S
+Coalesce,S,`coalesce`,None,AST,param,S,S,S,S,S,S,S,S,PS,NS,S,NS,NS,NS,NS,NS,NS,NS,NS,NS
+Coalesce,S,`coalesce`,None,AST,result,S,S,S,S,S,S,S,S,PS,NS,S,NS,NS,NS,NS,NS,NS,NS,NS,NS
 Concat,S,`concat`,None,project,input,NA,NA,NA,NA,NA,NA,NA,NA,NA,S,NA,NA,NS,NA,PS,NA,NA,NA,NA,NA
 Concat,S,`concat`,None,project,result,NA,NA,NA,NA,NA,NA,NA,NA,NA,S,NA,NA,NS,NA,PS,NA,NA,NA,NA,NA
 ConcatWs,S,`concat_ws`,None,project,input,NA,NA,NA,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,S,NA,NA,NA,NA,NA
@@ -205,6 +210,9 @@ DenseRank,S,`dense_rank`,None,window,result,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,N
 Divide,S,`/`,None,project,lhs,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA
 Divide,S,`/`,None,project,rhs,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA
 Divide,S,`/`,None,project,result,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA
+Divide,S,`/`,None,AST,lhs,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NS,NA,NA,NA,NA,NA,NA,NA,NA,NA
+Divide,S,`/`,None,AST,rhs,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NS,NA,NA,NA,NA,NA,NA,NA,NA,NA
+Divide,S,`/`,None,AST,result,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NS,NA,NA,NA,NA,NA,NA,NA,NA,NA
 DivideDTInterval,S, ,None,project,lhs,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,S,NA
 DivideDTInterval,S, ,None,project,rhs,NA,S,S,S,S,S,S,NA,NA,NA,NS,NA,NA,NA,NA,NA,NA,NA,NA,NA
 DivideDTInterval,S, ,None,project,result,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,S,NA
@@ -224,11 +232,14 @@ EndsWith,S, ,None,project,result,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,
 EqualNullSafe,S,`<=>`,None,project,lhs,S,S,S,S,S,S,S,S,PS,S,S,S,NS,NS,NS,NA,PS,NS,NA,NA
 EqualNullSafe,S,`<=>`,None,project,rhs,S,S,S,S,S,S,S,S,PS,S,S,S,NS,NS,NS,NA,PS,NS,NA,NA
 EqualNullSafe,S,`<=>`,None,project,result,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
+EqualNullSafe,S,`<=>`,None,AST,lhs,S,S,S,S,S,NS,NS,S,PS,S,S,NS,NS,NS,NS,NA,NS,NS,NA,NA
+EqualNullSafe,S,`<=>`,None,AST,rhs,S,S,S,S,S,NS,NS,S,PS,S,S,NS,NS,NS,NS,NA,NS,NS,NA,NA
+EqualNullSafe,S,`<=>`,None,AST,result,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 EqualTo,S,`==`; `=`,None,project,lhs,S,S,S,S,S,S,S,S,PS,S,S,S,NS,NS,NS,NA,PS,NS,NA,NA
 EqualTo,S,`==`; `=`,None,project,rhs,S,S,S,S,S,S,S,S,PS,S,S,S,NS,NS,NS,NA,PS,NS,NA,NA
 EqualTo,S,`==`; `=`,None,project,result,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
-EqualTo,S,`==`; `=`,None,AST,lhs,S,S,S,S,S,NS,NS,S,PS,S,NS,NS,NS,NS,NS,NA,NS,NS,NA,NA
-EqualTo,S,`==`; `=`,None,AST,rhs,S,S,S,S,S,NS,NS,S,PS,S,NS,NS,NS,NS,NS,NA,NS,NS,NA,NA
+EqualTo,S,`==`; `=`,None,AST,lhs,S,S,S,S,S,NS,NS,S,PS,S,S,NS,NS,NS,NS,NA,NS,NS,NA,NA
+EqualTo,S,`==`; `=`,None,AST,rhs,S,S,S,S,S,NS,NS,S,PS,S,S,NS,NS,NS,NS,NA,NS,NS,NA,NA
 EqualTo,S,`==`; `=`,None,AST,result,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 Exp,S,`exp`,None,project,input,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 Exp,S,`exp`,None,project,result,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
@@ -272,14 +283,14 @@ GetTimestamp,S, ,None,project,result,NA,NA,NA,NA,NA,NA,NA,NA,PS,NA,NA,NA,NA,NA,N
 GreaterThan,S,`>`,None,project,lhs,S,S,S,S,S,S,S,S,PS,S,S,S,NS,NS,NS,NA,PS,NS,NA,NA
 GreaterThan,S,`>`,None,project,rhs,S,S,S,S,S,S,S,S,PS,S,S,S,NS,NS,NS,NA,PS,NS,NA,NA
 GreaterThan,S,`>`,None,project,result,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
-GreaterThan,S,`>`,None,AST,lhs,S,S,S,S,S,NS,NS,S,PS,S,NS,NS,NS,NS,NS,NA,NS,NS,NA,NA
-GreaterThan,S,`>`,None,AST,rhs,S,S,S,S,S,NS,NS,S,PS,S,NS,NS,NS,NS,NS,NA,NS,NS,NA,NA
+GreaterThan,S,`>`,None,AST,lhs,S,S,S,S,S,NS,NS,S,PS,S,S,NS,NS,NS,NS,NA,NS,NS,NA,NA
+GreaterThan,S,`>`,None,AST,rhs,S,S,S,S,S,NS,NS,S,PS,S,S,NS,NS,NS,NS,NA,NS,NS,NA,NA
 GreaterThan,S,`>`,None,AST,result,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 GreaterThanOrEqual,S,`>=`,None,project,lhs,S,S,S,S,S,S,S,S,PS,S,S,S,NS,NS,NS,NA,PS,NS,NA,NA
 GreaterThanOrEqual,S,`>=`,None,project,rhs,S,S,S,S,S,S,S,S,PS,S,S,S,NS,NS,NS,NA,PS,NS,NA,NA
 GreaterThanOrEqual,S,`>=`,None,project,result,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
-GreaterThanOrEqual,S,`>=`,None,AST,lhs,S,S,S,S,S,NS,NS,S,PS,S,NS,NS,NS,NS,NS,NA,NS,NS,NA,NA
-GreaterThanOrEqual,S,`>=`,None,AST,rhs,S,S,S,S,S,NS,NS,S,PS,S,NS,NS,NS,NS,NS,NA,NS,NS,NA,NA
+GreaterThanOrEqual,S,`>=`,None,AST,lhs,S,S,S,S,S,NS,NS,S,PS,S,S,NS,NS,NS,NS,NA,NS,NS,NA,NA
+GreaterThanOrEqual,S,`>=`,None,AST,rhs,S,S,S,S,S,NS,NS,S,PS,S,S,NS,NS,NS,NS,NA,NS,NS,NA,NA
 GreaterThanOrEqual,S,`>=`,None,AST,result,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 Greatest,S,`greatest`,None,project,param,S,S,S,S,S,S,S,S,PS,S,S,S,NS,NS,NS,NA,NS,NS,NA,NA
 Greatest,S,`greatest`,None,project,result,S,S,S,S,S,S,S,S,PS,S,S,S,NS,NS,NS,NA,NS,NS,NA,NA
@@ -296,6 +307,10 @@ If,S,`if`,None,project,predicate,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,
 If,S,`if`,None,project,trueValue,S,S,S,S,S,S,S,S,PS,S,S,S,S,NS,PS,PS,PS,NS,S,S
 If,S,`if`,None,project,falseValue,S,S,S,S,S,S,S,S,PS,S,S,S,S,NS,PS,PS,PS,NS,S,S
 If,S,`if`,None,project,result,S,S,S,S,S,S,S,S,PS,S,S,S,S,NS,PS,PS,PS,NS,S,S
+If,S,`if`,None,AST,predicate,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
+If,S,`if`,None,AST,trueValue,S,S,S,S,S,S,S,S,PS,NS,S,NS,NS,NS,NS,NS,NS,NS,NS,NS
+If,S,`if`,None,AST,falseValue,S,S,S,S,S,S,S,S,PS,NS,S,NS,NS,NS,NS,NS,NS,NS,NS,NS
+If,S,`if`,None,AST,result,S,S,S,S,S,S,S,S,PS,NS,S,NS,NS,NS,NS,NS,NS,NS,NS,NS
 In,S,`in`,None,project,value,S,S,S,S,S,S,S,S,PS,S,S,S,NS,NS,NS,NA,NS,NS,NA,NA
 In,S,`in`,None,project,list,PS,PS,PS,PS,PS,PS,PS,PS,PS,PS,PS,NS,NS,NS,NS,NA,NS,NS,NA,NA
 In,S,`in`,None,project,result,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
@@ -309,6 +324,9 @@ InputFileName,S,`input_file_name`,None,project,result,NA,NA,NA,NA,NA,NA,NA,NA,NA
 IntegralDivide,S,`div`,None,project,lhs,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA
 IntegralDivide,S,`div`,None,project,rhs,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA
 IntegralDivide,S,`div`,None,project,result,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
+IntegralDivide,S,`div`,None,AST,lhs,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA
+IntegralDivide,S,`div`,None,AST,rhs,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA
+IntegralDivide,S,`div`,None,AST,result,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 IsNaN,S,`isnan`,None,project,input,NA,NA,NA,NA,NA,S,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 IsNaN,S,`isnan`,None,project,result,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 IsNotNull,S,`isnotnull`,None,project,input,S,S,S,S,S,S,S,S,PS,S,S,S,S,NS,PS,PS,PS,NS,S,NS
@@ -350,20 +368,20 @@ Length,S,`char_length`; `character_length`; `len`; `length`,None,project,result,
 LessThan,S,`<`,None,project,lhs,S,S,S,S,S,S,S,S,PS,S,S,S,NS,NS,NS,NA,PS,NS,NA,NA
 LessThan,S,`<`,None,project,rhs,S,S,S,S,S,S,S,S,PS,S,S,S,NS,NS,NS,NA,PS,NS,NA,NA
 LessThan,S,`<`,None,project,result,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
-LessThan,S,`<`,None,AST,lhs,S,S,S,S,S,NS,NS,S,PS,S,NS,NS,NS,NS,NS,NA,NS,NS,NA,NA
-LessThan,S,`<`,None,AST,rhs,S,S,S,S,S,NS,NS,S,PS,S,NS,NS,NS,NS,NS,NA,NS,NS,NA,NA
+LessThan,S,`<`,None,AST,lhs,S,S,S,S,S,NS,NS,S,PS,S,S,NS,NS,NS,NS,NA,NS,NS,NA,NA
+LessThan,S,`<`,None,AST,rhs,S,S,S,S,S,NS,NS,S,PS,S,S,NS,NS,NS,NS,NA,NS,NS,NA,NA
 LessThan,S,`<`,None,AST,result,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 LessThanOrEqual,S,`<=`,None,project,lhs,S,S,S,S,S,S,S,S,PS,S,S,S,NS,NS,NS,NA,PS,NS,NA,NA
 LessThanOrEqual,S,`<=`,None,project,rhs,S,S,S,S,S,S,S,S,PS,S,S,S,NS,NS,NS,NA,PS,NS,NA,NA
 LessThanOrEqual,S,`<=`,None,project,result,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
-LessThanOrEqual,S,`<=`,None,AST,lhs,S,S,S,S,S,NS,NS,S,PS,S,NS,NS,NS,NS,NS,NA,NS,NS,NA,NA
-LessThanOrEqual,S,`<=`,None,AST,rhs,S,S,S,S,S,NS,NS,S,PS,S,NS,NS,NS,NS,NS,NA,NS,NS,NA,NA
+LessThanOrEqual,S,`<=`,None,AST,lhs,S,S,S,S,S,NS,NS,S,PS,S,S,NS,NS,NS,NS,NA,NS,NS,NA,NA
+LessThanOrEqual,S,`<=`,None,AST,rhs,S,S,S,S,S,NS,NS,S,PS,S,S,NS,NS,NS,NS,NA,NS,NS,NA,NA
 LessThanOrEqual,S,`<=`,None,AST,result,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 Like,S,`like`,None,project,src,NA,NA,NA,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 Like,S,`like`,None,project,search,NA,NA,NA,NA,NA,NA,NA,NA,NA,PS,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 Like,S,`like`,None,project,result,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 Literal,S, ,None,project,result,S,S,S,S,S,S,S,S,PS,S,S,S,S,S,PS,PS,PS,NS,S,S
-Literal,S, ,None,AST,result,S,S,S,S,S,S,S,S,PS,S,NS,NS,NS,NS,NS,NS,NS,NS,NS,NS
+Literal,S, ,None,AST,result,S,S,S,S,S,S,S,S,PS,S,S,NS,NS,NS,NS,NS,NS,NS,NS,NS
 Log,S,`ln`,None,project,input,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 Log,S,`ln`,None,project,result,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 Log10,S,`log10`,None,project,input,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
@@ -417,9 +435,9 @@ MonthsBetween,S,`months_between`,None,project,result,NA,NA,NA,NA,NA,NA,S,NA,NA,N
 Multiply,S,`*`,None,project,lhs,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA
 Multiply,S,`*`,None,project,rhs,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA
 Multiply,S,`*`,None,project,result,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA
-Multiply,S,`*`,None,AST,lhs,NA,NS,NS,S,S,S,S,NA,NA,NA,NS,NA,NA,NA,NA,NA,NA,NA,NA,NA
-Multiply,S,`*`,None,AST,rhs,NA,NS,NS,S,S,S,S,NA,NA,NA,NS,NA,NA,NA,NA,NA,NA,NA,NA,NA
-Multiply,S,`*`,None,AST,result,NA,NS,NS,S,S,S,S,NA,NA,NA,NS,NA,NA,NA,NA,NA,NA,NA,NA,NA
+Multiply,S,`*`,None,AST,lhs,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA
+Multiply,S,`*`,None,AST,rhs,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA
+Multiply,S,`*`,None,AST,result,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA
 MultiplyDTInterval,S, ,None,project,lhs,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,S,NA
 MultiplyDTInterval,S, ,None,project,rhs,NA,S,S,S,S,S,S,NA,NA,NA,NS,NA,NA,NA,NA,NA,NA,NA,NA,NA
 MultiplyDTInterval,S, ,None,project,result,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,S,NA
@@ -501,6 +519,9 @@ RegExpReplace,S,`regexp_replace`,None,project,rep,NA,NA,NA,NA,NA,NA,NA,NA,NA,PS,
 Remainder,S,`%`; `mod`,None,project,lhs,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA
 Remainder,S,`%`; `mod`,None,project,rhs,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA
 Remainder,S,`%`; `mod`,None,project,result,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA
+Remainder,S,`%`; `mod`,None,AST,lhs,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA
+Remainder,S,`%`; `mod`,None,AST,rhs,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA
+Remainder,S,`%`; `mod`,None,AST,result,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA
 ReplicateRows,S, ,None,project,input,S,S,S,S,S,S,S,S,PS,S,S,S,NS,NS,PS,NS,PS,NS,NS,NS
 ReplicateRows,S, ,None,project,result,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,PS,NA,NA,NA,NA,NA
 Reverse,S,`reverse`,None,project,input,NA,NA,NA,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,PS,NA,NA,NA,NA,NA
@@ -538,12 +559,21 @@ Sha2,S,`sha2`,None,project,result,NA,NA,NA,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA
 ShiftLeft,S,`shiftleft`,None,project,value,NA,NA,NA,S,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 ShiftLeft,S,`shiftleft`,None,project,amount,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 ShiftLeft,S,`shiftleft`,None,project,result,NA,NA,NA,S,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
+ShiftLeft,S,`shiftleft`,None,AST,value,NA,NA,NA,S,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
+ShiftLeft,S,`shiftleft`,None,AST,amount,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
+ShiftLeft,S,`shiftleft`,None,AST,result,NA,NA,NA,S,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 ShiftRight,S,`shiftright`,None,project,value,NA,NA,NA,S,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 ShiftRight,S,`shiftright`,None,project,amount,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 ShiftRight,S,`shiftright`,None,project,result,NA,NA,NA,S,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
+ShiftRight,S,`shiftright`,None,AST,value,NA,NA,NA,S,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
+ShiftRight,S,`shiftright`,None,AST,amount,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
+ShiftRight,S,`shiftright`,None,AST,result,NA,NA,NA,S,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 ShiftRightUnsigned,S,`shiftrightunsigned`,None,project,value,NA,NA,NA,S,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 ShiftRightUnsigned,S,`shiftrightunsigned`,None,project,amount,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 ShiftRightUnsigned,S,`shiftrightunsigned`,None,project,result,NA,NA,NA,S,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
+ShiftRightUnsigned,S,`shiftrightunsigned`,None,AST,value,NA,NA,NA,S,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
+ShiftRightUnsigned,S,`shiftrightunsigned`,None,AST,amount,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
+ShiftRightUnsigned,S,`shiftrightunsigned`,None,AST,result,NA,NA,NA,S,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 Signum,S,`sign`; `signum`,None,project,input,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 Signum,S,`sign`; `signum`,None,project,result,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 Sin,S,`sin`,None,project,input,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
@@ -638,9 +668,9 @@ SubstringIndex,S,`substring_index`,None,project,result,NA,NA,NA,NA,NA,NA,NA,NA,N
 Subtract,S,`-`,None,project,lhs,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NS,NA,NA,NA,NA,S,S
 Subtract,S,`-`,None,project,rhs,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NS,NA,NA,NA,NA,S,S
 Subtract,S,`-`,None,project,result,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NS,NA,NA,NA,NA,S,S
-Subtract,S,`-`,None,AST,lhs,NA,NS,NS,S,S,S,S,NA,NA,NA,NS,NA,NA,NS,NA,NA,NA,NA,NS,NS
-Subtract,S,`-`,None,AST,rhs,NA,NS,NS,S,S,S,S,NA,NA,NA,NS,NA,NA,NS,NA,NA,NA,NA,NS,NS
-Subtract,S,`-`,None,AST,result,NA,NS,NS,S,S,S,S,NA,NA,NA,NS,NA,NA,NS,NA,NA,NA,NA,NS,NS
+Subtract,S,`-`,None,AST,lhs,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NS,NA,NA,NA,NA,NS,NS
+Subtract,S,`-`,None,AST,rhs,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NS,NA,NA,NA,NA,NS,NS
+Subtract,S,`-`,None,AST,result,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NS,NA,NA,NA,NA,NS,NS
 Tan,S,`tan`,None,project,input,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 Tan,S,`tan`,None,project,result,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 Tan,S,`tan`,None,AST,input,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
@@ -676,8 +706,8 @@ TruncTimestamp,S,`date_trunc`,None,project,date,NA,NA,NA,NA,NA,NA,NA,NA,PS,NA,NA
 TruncTimestamp,S,`date_trunc`,None,project,result,NA,NA,NA,NA,NA,NA,NA,NA,PS,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 UnaryMinus,S,`negative`,None,project,input,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NS,NA,NA,NA,NA,S,S
 UnaryMinus,S,`negative`,None,project,result,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NS,NA,NA,NA,NA,S,S
-UnaryMinus,S,`negative`,None,AST,input,NA,NS,NS,S,S,S,S,NA,NA,NA,NS,NA,NA,NS,NA,NA,NA,NA,NS,NS
-UnaryMinus,S,`negative`,None,AST,result,NA,NS,NS,S,S,S,S,NA,NA,NA,NS,NA,NA,NS,NA,NA,NA,NA,NS,NS
+UnaryMinus,S,`negative`,None,AST,input,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NS,NA,NA,NA,NA,NS,NS
+UnaryMinus,S,`negative`,None,AST,result,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NS,NA,NA,NA,NA,NS,NS
 UnaryPositive,S,`positive`,None,project,input,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NS,NA,NA,NA,NA,S,S
 UnaryPositive,S,`positive`,None,project,result,NA,S,S,S,S,S,S,NA,NA,NA,S,NA,NA,NS,NA,NA,NA,NA,S,S
 UnaryPositive,S,`positive`,None,AST,input,NA,S,S,S,S,S,S,NA,NA,NA,NS,NA,NA,NS,NA,NA,NA,NA,S,S

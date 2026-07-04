@@ -179,6 +179,7 @@ probe left|Probing the left side of a join input iterator to get the data size f
 spill map|Spilling join map
 Async Shuffle Read|Asynchronous shuffle read operation
 Client.handleMeta|Handling metadata from shuffle server
+Compute ASTs|Computing abstract syntax tree expressions for projection
 Serialize Batch|Serializing columnar batch
 json convert table|Converting JSON table to desired schema type
 RapidsCachingWriter.close|Closing Rapids caching writer and finalizing shuffle output
