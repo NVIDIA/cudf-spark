@@ -34,10 +34,13 @@ non_utc_file_source_scan_allow = ['FileSourceScanExec'] if is_not_utc() else []
 non_utc_project_allow = ['StructsToJson', 'JsonToStructs'] if is_not_utc() else []
 
 # Spark 4.0+ lowers some to_json fallbacks through ProjectExec + evaluator invocation
-# instead of exposing StructsToJson directly as the non-GPU plan node.
+# instead of exposing StructsToJson directly as the non-GPU plan node. Databricks
+# keeps the Project on GPU and bridges only the StructsToJson expression to CPU.
+structs_to_json_uses_project_fallback = is_spark_400_or_later() and not is_databricks_runtime()
 structs_to_json_fallback_allow = ['StructsToJson'] + \
-    (['ProjectExec'] if is_spark_400_or_later() else [])
-structs_to_json_fallback_class = 'ProjectExec' if is_spark_400_or_later() else 'StructsToJson'
+    (['ProjectExec'] if structs_to_json_uses_project_fallback else [])
+structs_to_json_fallback_class = \
+    'ProjectExec' if structs_to_json_uses_project_fallback else 'StructsToJson'
 
 
 json_supported_gens = [
