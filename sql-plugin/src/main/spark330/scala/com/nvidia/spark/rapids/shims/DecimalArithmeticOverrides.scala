@@ -24,7 +24,7 @@ spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
 import ai.rapids.cudf.DType
-import com.nvidia.spark.rapids.{BaseExprMeta, BinaryAstExprMeta, BinaryExprMeta, CastExprMeta, DecimalUtil, ExprChecks, ExprMeta, ExprRule, GpuCheckOverflow, GpuExpression, GpuPromotePrecision, LiteralExprMeta, TypeSig, UnaryExprMeta}
+import com.nvidia.spark.rapids.{BaseExprMeta, BinaryAstExprMeta, CastExprMeta, DecimalUtil, ExprChecks, ExprMeta, ExprRule, GpuCheckOverflow, GpuExpression, GpuPromotePrecision, LiteralExprMeta, TypeSig, UnaryExprMeta}
 import com.nvidia.spark.rapids.GpuOverrides.expr
 
 import org.apache.spark.sql.catalyst.expressions.{CastBase, CheckOverflow, Divide, Expression, IntegralDivide, Literal, Multiply, PromotePrecision, Remainder}
@@ -180,20 +180,38 @@ object DecimalArithmeticOverrides {
       }),
     expr[Divide](
       "Division",
-      ExprChecks.binaryProject(
+      ExprChecks.binaryProjectAndAst(
+        TypeSig.DOUBLE,
         TypeSig.DOUBLE + TypeSig.DECIMAL_128,
         TypeSig.DOUBLE + TypeSig.DECIMAL_128,
         ("lhs", TypeSig.DOUBLE + TypeSig.DECIMAL_128,
             TypeSig.DOUBLE + TypeSig.DECIMAL_128),
         ("rhs", TypeSig.DOUBLE + TypeSig.DECIMAL_128,
             TypeSig.DOUBLE + TypeSig.DECIMAL_128)),
-      (a, conf, p, r) => new BinaryExprMeta[Divide](a, conf, p, r) {
+      (a, conf, p, r) => new BinaryAstExprMeta[Divide](a, conf, p, r) {
+        private val ansiEnabled = SQLConf.get.ansiEnabled
+        private def leftInputIsSafe: Boolean =
+          childExprs.head.canBePrecomputedForJoin
+
         // Division of Decimal types is a little odd. To work around some issues with
         // what Spark does the tagging/checks are in CheckOverflow instead of here.
         override def tagExprForGpu(): Unit = {
-          // Check if this Divide expression is in TRY mode context
-          if (TryModeShim.isTryMode(a)) {
-            willNotWorkOnGpu("try_divide is not supported on GPU")
+          if (!ansiEnabled && !leftInputIsSafe) {
+            willNotWorkOnGpu(
+              "non-ANSI division cannot eagerly evaluate a side-effecting left operand")
+          }
+        }
+
+        override def tagSelfForAst(): Unit = {
+          super.tagSelfForAst()
+          if (!conf.isProjectAstAnsiArithmeticEnabled ||
+              !GpuAnsi.supportsTrueDivideAst(
+                ansiEnabled, a.left.dataType, a.right.dataType)) {
+            willNotWorkInAst(
+              "AST true division supports non-ANSI DOUBLE inputs with row IR JIT support.")
+          } else if (!leftInputIsSafe) {
+            willNotWorkInAst(
+              "AST true division cannot eagerly evaluate a side-effecting left operand.")
           }
         }
 
@@ -203,7 +221,7 @@ object DecimalArithmeticOverrides {
               throw new IllegalStateException("Internal Error: Decimal Divide operations " +
                   "should be converted to the GPU in the CheckOverflow rule")
             case _ =>
-              GpuDivide(lhs, rhs)(a.origin)
+              GpuDivide(lhs, rhs, ansiEnabled)(a.origin)
           }
       }),
     expr[IntegralDivide](
@@ -214,25 +232,30 @@ object DecimalArithmeticOverrides {
         ("lhs", TypeSig.LONG + TypeSig.DECIMAL_128, TypeSig.LONG + TypeSig.DECIMAL_128),
         ("rhs", TypeSig.LONG + TypeSig.DECIMAL_128, TypeSig.LONG + TypeSig.DECIMAL_128)),
       (a, conf, p, r) => new BinaryAstExprMeta[IntegralDivide](a, conf, p, r) {
+        private val ansiEnabled = SQLConf.get.ansiEnabled
+
         override def tagSelfForAst(): Unit = {
           super.tagSelfForAst()
-          if (!SQLConf.get.ansiEnabled || !conf.isProjectAstAnsiArithmeticEnabled ||
-              !GpuAnsi.supportsAnsiArithmeticAst(a.dataType)) {
-            willNotWorkInAst("AST integral divide requires ANSI row IR JIT support.")
+          if (!conf.isProjectAstAnsiArithmeticEnabled ||
+              !GpuAnsi.supportsIntegralDivideAst(a.left.dataType, a.right.dataType)) {
+            willNotWorkInAst("AST integral divide requires row IR JIT support.")
           }
         }
 
         override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression =
-          GpuIntegralDivide(lhs, rhs)(a.origin)
+          GpuIntegralDivide(lhs, rhs, ansiEnabled)(a.origin)
       }),
     expr[Remainder](
       "Remainder or modulo",
       ExprChecks.binaryProjectAndAst(
-        TypeSig.INT + TypeSig.LONG,
+        TypeSig.BYTE + TypeSig.SHORT + TypeSig.INT + TypeSig.LONG +
+          TypeSig.FLOAT + TypeSig.DOUBLE,
         TypeSig.gpuNumeric, TypeSig.cpuNumeric,
         ("lhs", TypeSig.gpuNumeric, TypeSig.cpuNumeric),
         ("rhs", TypeSig.gpuNumeric, TypeSig.cpuNumeric)),
       (a, conf, p, r) => new BinaryAstExprMeta[Remainder](a, conf, p, r) {
+        private val ansiEnabled = SQLConf.get.ansiEnabled
+
         override def tagExprForGpu(): Unit = {
           // Check if this Remainder expression is in TRY mode context
           if (TryModeShim.isTryMode(a)) {
@@ -242,14 +265,14 @@ object DecimalArithmeticOverrides {
 
         override def tagSelfForAst(): Unit = {
           super.tagSelfForAst()
-          if (!SQLConf.get.ansiEnabled || !conf.isProjectAstAnsiArithmeticEnabled ||
-              !GpuAnsi.supportsAnsiArithmeticAst(a.dataType)) {
-            willNotWorkInAst("AST remainder requires ANSI row IR JIT support.")
+          if (!conf.isProjectAstAnsiArithmeticEnabled ||
+              !GpuAnsi.supportsRemainderAst(a.left.dataType, a.right.dataType)) {
+            willNotWorkInAst("AST remainder requires row IR JIT support.")
           }
         }
 
         override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression =
-          GpuRemainder(lhs, rhs)
+          GpuRemainder(lhs, rhs, ansiEnabled)
       })
   ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
 }

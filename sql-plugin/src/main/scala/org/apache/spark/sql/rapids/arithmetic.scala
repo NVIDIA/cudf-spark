@@ -203,8 +203,23 @@ object GpuAnsi {
   def shouldUseAnsiArithmeticAst(failOnError: Boolean, dt: DataType): Boolean =
     failOnError && supportsAnsiArithmeticAst(dt)
 
-  def shouldUseAnsiDivModAst(failOnError: Boolean, lhs: DataType, rhs: DataType): Boolean =
-    failOnError && lhs == rhs && supportsAnsiArithmeticAst(lhs)
+  def supportsIntegralDivideAst(lhs: DataType, rhs: DataType): Boolean =
+    lhs == rhs && (lhs == IntegerType || lhs == LongType)
+
+  def supportsRemainderAst(lhs: DataType, rhs: DataType): Boolean =
+    lhs == rhs && (lhs match {
+      case ByteType | ShortType | IntegerType | LongType | FloatType | DoubleType => true
+      case _ => false
+    })
+
+  def supportsTrueDivideAst(failOnError: Boolean, lhs: DataType, rhs: DataType): Boolean =
+    !failOnError && lhs == DoubleType && rhs == DoubleType
+
+  def shouldUseAnsiDivideAst(failOnError: Boolean, lhs: DataType, rhs: DataType): Boolean =
+    failOnError && supportsIntegralDivideAst(lhs, rhs)
+
+  def shouldUseAnsiRemainderAst(failOnError: Boolean, lhs: DataType, rhs: DataType): Boolean =
+    failOnError && supportsRemainderAst(lhs, rhs)
 
   def minValueScalar(dt: DataType): Scalar = dt match {
     case ByteType => Scalar.fromByte(Byte.MinValue)
@@ -1342,6 +1357,24 @@ case class GpuDivide(left: Expression, right: Expression,
   override def binaryOp: BinaryOp = BinaryOp.TRUE_DIV
 
   override def outputTypeOverride: DType = GpuColumnVector.getNonNestedRapidsType(dataType)
+
+  override def selfUsesRowIrJitAst: Boolean =
+    GpuAnsi.supportsTrueDivideAst(failOnError, left.dataType, right.dataType)
+
+  override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
+    if (GpuAnsi.supportsTrueDivideAst(failOnError, left.dataType, right.dataType)) {
+      val leftAst = left.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns)
+      val rightAst = right.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns)
+      val divide = new ast.BinaryOperation(ast.BinaryOperator.TRUE_DIV, leftAst, rightAst)
+      val rhsIsZero = new ast.BinaryOperation(
+        ast.BinaryOperator.NULL_EQUAL, rightAst, ast.Literal.ofDouble(0.0))
+      val predicate = new ast.JitOperation(ast.JitOperator.PREDICATE, rhsIsZero)
+      new ast.JitOperation(
+        ast.JitOperator.IF_ELSE, ast.Literal.ofNull(DType.FLOAT64), divide, predicate)
+    } else {
+      super.convertToAst(numFirstTableColumns)
+    }
+  }
 }
 
 abstract class GpuIntegralDivideParent(
@@ -1371,7 +1404,7 @@ abstract class GpuIntegralDivideParent(
   override def sqlOperator: String = "div"
 
   override def selfAstJitErrorSite: Option[AstJitErrorSite] = {
-    if (GpuAnsi.shouldUseAnsiDivModAst(failOnError, left.dataType, right.dataType)) {
+    if (GpuAnsi.shouldUseAnsiDivideAst(failOnError, left.dataType, right.dataType)) {
       Some(AstJitErrorSite(AstJitErrorKind.IntegralDivide, origin))
     } else {
       None
@@ -1379,13 +1412,31 @@ abstract class GpuIntegralDivideParent(
   }
 
   override def selfUsesRowIrJitAst: Boolean =
-    GpuAnsi.shouldUseAnsiDivModAst(failOnError, left.dataType, right.dataType)
+    GpuAnsi.supportsIntegralDivideAst(left.dataType, right.dataType)
 
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
-    if (GpuAnsi.shouldUseAnsiDivModAst(failOnError, left.dataType, right.dataType)) {
-      new ast.JitOperation(ast.JitOperator.DIV, ast.JitComplianceMode.ANSI,
-        left.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns),
-        right.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns))
+    if (GpuAnsi.supportsIntegralDivideAst(left.dataType, right.dataType)) {
+      val leftAst = left.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns)
+      val rightAst = right.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns)
+      val mode = if (failOnError) {
+        ast.JitComplianceMode.ANSI
+      } else {
+        ast.JitComplianceMode.ANSI_TRY
+      }
+      val divide = new ast.JitOperation(ast.JitOperator.DIV, mode, leftAst, rightAst)
+      if (!failOnError && left.dataType == LongType) {
+        val minValue = ast.Literal.ofLong(Long.MinValue)
+        val lhsIsMin = new ast.BinaryOperation(
+          ast.BinaryOperator.NULL_EQUAL, leftAst, minValue)
+        val rhsIsNegOne = new ast.BinaryOperation(
+          ast.BinaryOperator.NULL_EQUAL, rightAst, ast.Literal.ofLong(-1L))
+        val overflow = new ast.BinaryOperation(
+          ast.BinaryOperator.LOGICAL_AND, lhsIsMin, rhsIsNegOne)
+        val predicate = new ast.JitOperation(ast.JitOperator.PREDICATE, overflow)
+        new ast.JitOperation(ast.JitOperator.IF_ELSE, minValue, divide, predicate)
+      } else {
+        divide
+      }
     } else {
       super.convertToAst(numFirstTableColumns)
     }
@@ -1401,7 +1452,7 @@ abstract class GpuRemainderBase(left: Expression, right: Expression)
   override def binaryOp: BinaryOp = BinaryOp.MOD
 
   override def selfAstJitErrorSite: Option[AstJitErrorSite] = {
-    if (GpuAnsi.shouldUseAnsiDivModAst(failOnError, left.dataType, right.dataType)) {
+    if (GpuAnsi.shouldUseAnsiRemainderAst(failOnError, left.dataType, right.dataType)) {
       Some(AstJitErrorSite(AstJitErrorKind.IntegralRemainder, origin))
     } else {
       None
@@ -1409,11 +1460,16 @@ abstract class GpuRemainderBase(left: Expression, right: Expression)
   }
 
   override def selfUsesRowIrJitAst: Boolean =
-    GpuAnsi.shouldUseAnsiDivModAst(failOnError, left.dataType, right.dataType)
+    GpuAnsi.supportsRemainderAst(left.dataType, right.dataType)
 
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
-    if (GpuAnsi.shouldUseAnsiDivModAst(failOnError, left.dataType, right.dataType)) {
-      new ast.JitOperation(ast.JitOperator.MOD, ast.JitComplianceMode.ANSI,
+    if (GpuAnsi.supportsRemainderAst(left.dataType, right.dataType)) {
+      val mode = if (failOnError) {
+        ast.JitComplianceMode.ANSI
+      } else {
+        ast.JitComplianceMode.ANSI_TRY
+      }
+      new ast.JitOperation(ast.JitOperator.MOD, mode,
         left.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns),
         right.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns))
     } else {

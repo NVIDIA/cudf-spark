@@ -42,7 +42,7 @@ spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
 import ai.rapids.cudf.DType
-import com.nvidia.spark.rapids.{BinaryAstExprMeta, BinaryExprMeta, DecimalUtil, ExprChecks, ExprRule, GpuExpression, TypeSig}
+import com.nvidia.spark.rapids.{BinaryAstExprMeta, DecimalUtil, ExprChecks, ExprRule, GpuExpression, TypeSig}
 import com.nvidia.spark.rapids.GpuOverrides.expr
 
 import org.apache.spark.sql.catalyst.expressions.{Divide, Expression, IntegralDivide, Multiply, Remainder}
@@ -114,18 +114,38 @@ object DecimalArithmeticOverrides {
         }),
       expr[Divide](
         "Division",
-        ExprChecks.binaryProject(
+        ExprChecks.binaryProjectAndAst(
+          TypeSig.DOUBLE,
           TypeSig.DOUBLE + TypeSig.DECIMAL_128,
           TypeSig.DOUBLE + TypeSig.DECIMAL_128,
           ("lhs", TypeSig.DOUBLE + TypeSig.DECIMAL_128,
               TypeSig.DOUBLE + TypeSig.DECIMAL_128),
           ("rhs", TypeSig.DOUBLE + TypeSig.DECIMAL_128,
               TypeSig.DOUBLE + TypeSig.DECIMAL_128)),
-        (a, conf, p, r) => new BinaryExprMeta[Divide](a, conf, p, r) {
+        (a, conf, p, r) => new BinaryAstExprMeta[Divide](a, conf, p, r) {
+          private val ansiEnabled = SQLConf.get.ansiEnabled
+          private def leftInputIsSafe: Boolean =
+            childExprs.head.canBePrecomputedForJoin
+
           override def tagExprForGpu(): Unit = {
-            // Check if this Divide expression is in TRY mode context
             if (TryModeShim.isTryMode(a)) {
               willNotWorkOnGpu("try_divide is not supported on GPU")
+            } else if (!ansiEnabled && !leftInputIsSafe) {
+              willNotWorkOnGpu(
+                "non-ANSI division cannot eagerly evaluate a side-effecting left operand")
+            }
+          }
+
+          override def tagSelfForAst(): Unit = {
+            super.tagSelfForAst()
+            if (!conf.isProjectAstAnsiArithmeticEnabled ||
+                !GpuAnsi.supportsTrueDivideAst(
+                  ansiEnabled, a.left.dataType, a.right.dataType)) {
+              willNotWorkInAst(
+                "AST true division supports non-ANSI DOUBLE inputs with row IR JIT support.")
+            } else if (!leftInputIsSafe) {
+              willNotWorkInAst(
+                "AST true division cannot eagerly evaluate a side-effecting left operand.")
             }
           }
 
@@ -134,7 +154,7 @@ object DecimalArithmeticOverrides {
               case d: DecimalType =>
                 GpuDecimalDivide(lhs, rhs, d)
               case _ =>
-                GpuDivide(lhs, rhs)(a.origin)
+                GpuDivide(lhs, rhs, ansiEnabled)(a.origin)
             }
         }),
       expr[IntegralDivide](
@@ -145,6 +165,8 @@ object DecimalArithmeticOverrides {
           ("lhs", TypeSig.LONG + TypeSig.DECIMAL_128, TypeSig.LONG + TypeSig.DECIMAL_128),
           ("rhs", TypeSig.LONG + TypeSig.DECIMAL_128, TypeSig.LONG + TypeSig.DECIMAL_128)),
         (a, conf, p, r) => new BinaryAstExprMeta[IntegralDivide](a, conf, p, r) {
+          private val ansiEnabled = SQLConf.get.ansiEnabled
+
           override def tagSelfForAst(): Unit = {
             super.tagSelfForAst()
             if (!conf.isProjectAstAnsiArithmeticEnabled) {
@@ -155,10 +177,9 @@ object DecimalArithmeticOverrides {
                 willNotWorkInAst(
                   "AST decimal integral divide requires identical inputs with precision at most 18.")
               }
-            } else if (!SQLConf.get.ansiEnabled ||
-                !GpuAnsi.shouldUseAnsiDivModAst(
-                  SQLConf.get.ansiEnabled, a.left.dataType, a.right.dataType)) {
-              willNotWorkInAst("AST integral divide requires ANSI row IR JIT support.")
+            } else if (!GpuAnsi.supportsIntegralDivideAst(
+                a.left.dataType, a.right.dataType)) {
+              willNotWorkInAst("AST integral divide requires matching INT or LONG inputs.")
             }
           }
 
@@ -166,18 +187,21 @@ object DecimalArithmeticOverrides {
             if (lhs.dataType.isInstanceOf[DecimalType] && rhs.dataType.isInstanceOf[DecimalType]) {
               GpuIntegralDecimalDivide(lhs, rhs)
             } else {
-              GpuIntegralDivide(lhs, rhs)(a.origin)
+              GpuIntegralDivide(lhs, rhs, ansiEnabled)(a.origin)
             }
         }),
 
       expr[Remainder](
         "Remainder or modulo",
         ExprChecks.binaryProjectAndAst(
-          TypeSig.INT + TypeSig.LONG + TypeSig.DECIMAL_128,
+          TypeSig.BYTE + TypeSig.SHORT + TypeSig.INT + TypeSig.LONG +
+            TypeSig.FLOAT + TypeSig.DOUBLE + TypeSig.DECIMAL_128,
           TypeSig.gpuNumeric, TypeSig.cpuNumeric,
           ("lhs", TypeSig.gpuNumeric, TypeSig.cpuNumeric),
           ("rhs", TypeSig.gpuNumeric, TypeSig.cpuNumeric)),
         (a, conf, p, r) => new BinaryAstExprMeta[Remainder](a, conf, p, r) {
+          private val ansiEnabled = SQLConf.get.ansiEnabled
+
           override def tagExprForGpu(): Unit = {
             // Check if this Remainder expression is in TRY mode context
             if (TryModeShim.isTryMode(a)) {
@@ -197,9 +221,9 @@ object DecimalArithmeticOverrides {
                     "AST decimal remainder requires identical input and output types.")
                 }
               case _ =>
-                if (!SQLConf.get.ansiEnabled || !conf.isProjectAstAnsiArithmeticEnabled ||
-                    !GpuAnsi.supportsAnsiArithmeticAst(a.dataType)) {
-                  willNotWorkInAst("AST remainder requires ANSI row IR JIT support.")
+                if (!conf.isProjectAstAnsiArithmeticEnabled ||
+                    !GpuAnsi.supportsRemainderAst(a.left.dataType, a.right.dataType)) {
+                  willNotWorkInAst("AST remainder requires row IR JIT support.")
                 }
             }
           }
@@ -208,7 +232,7 @@ object DecimalArithmeticOverrides {
             if (lhs.dataType.isInstanceOf[DecimalType] && rhs.dataType.isInstanceOf[DecimalType]) {
               GpuDecimalRemainder(lhs, rhs)
             } else {
-              GpuRemainder(lhs, rhs)
+              GpuRemainder(lhs, rhs, ansiEnabled)
             }
         })
     ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
