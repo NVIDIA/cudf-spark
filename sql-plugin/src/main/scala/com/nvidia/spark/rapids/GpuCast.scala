@@ -303,10 +303,29 @@ object GpuCast {
     scaleDelta >= 0 && !(scaleDelta > 0 && needsPrecisionCheck)
   }
 
+  private def safePrimitiveCastToAstOperator(
+      from: DataType,
+      to: DataType): Option[ast.JitOperator] = (from, to) match {
+    case (ByteType | ShortType | IntegerType | LongType | FloatType | DoubleType,
+        BooleanType) => Some(ast.JitOperator.CAST_TO_BOOL8)
+    case (BooleanType, ByteType) => Some(ast.JitOperator.CAST_TO_INT8)
+    case (BooleanType, ShortType) => Some(ast.JitOperator.CAST_TO_INT16)
+    case (BooleanType, IntegerType) => Some(ast.JitOperator.CAST_TO_INT32)
+    case (BooleanType, LongType) => Some(ast.JitOperator.CAST_TO_INT64)
+    case (BooleanType, FloatType) => Some(ast.JitOperator.CAST_TO_FLOAT32)
+    case (BooleanType, DoubleType) => Some(ast.JitOperator.CAST_TO_FLOAT64)
+    case (ByteType, ShortType) => Some(ast.JitOperator.CAST_TO_INT16)
+    case (ByteType | ShortType, IntegerType) => Some(ast.JitOperator.CAST_TO_INT32)
+    case (ByteType | ShortType | IntegerType, LongType) =>
+      Some(ast.JitOperator.CAST_TO_INT64)
+    case (DoubleType, FloatType) => Some(ast.JitOperator.CAST_TO_FLOAT32)
+    case (FloatType, DoubleType) => Some(ast.JitOperator.CAST_TO_FLOAT64)
+    case _ => None
+  }
+
   def canCastToAst(from: DataType, to: DataType): Boolean = (from, to) match {
     case (fromDec: DecimalType, toDec: DecimalType) => canDecimalCastToAst(fromDec, toDec)
-    case (IntegerType, LongType) => true
-    case _ => false
+    case _ => safePrimitiveCastToAstOperator(from, to).isDefined
   }
 
   private def decimalStorageWidth(dt: DecimalType): Int = {
@@ -325,8 +344,7 @@ object GpuCast {
         (decimalStorageWidth(fromDec) != decimalStorageWidth(toDec) ||
           fromDec.scale != toDec.scale ||
           decimalCastNeedsPrecisionCheck(fromDec, toDec))
-    case (IntegerType, LongType) => true
-    case _ => false
+    case _ => safePrimitiveCastToAstOperator(from, to).isDefined
   }
 
   private def decimalCastStorageOp(width: Int): ast.JitOperator = width match {
@@ -1842,11 +1860,12 @@ case class GpuCast(
     (child.dataType, dataType) match {
       case (from: DecimalType, to: DecimalType) if canDecimalCastToAst(from, to) =>
         decimalCastToAst(childAst, from, to, ansiMode)
-      case (IntegerType, LongType) =>
-        new ast.JitOperation(ast.JitOperator.CAST_TO_INT64, childAst)
-      case _ =>
-        throw new IllegalStateException(
-          s"Cast from ${child.dataType} to $dataType is not supported by AST")
+      case (from, to) => safePrimitiveCastToAstOperator(from, to) match {
+        case Some(op) => new ast.JitOperation(op, childAst)
+        case None =>
+          throw new IllegalStateException(
+            s"Cast from ${child.dataType} to $dataType is not supported by AST")
+      }
     }
   }
 
