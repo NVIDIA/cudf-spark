@@ -1200,13 +1200,18 @@ object GpuOverrides extends Logging {
     expr[UnaryMinus](
       "Negate a numeric value",
       ExprChecks.unaryProjectAndAstInputMatchesOutput(
-        TypeSig.implicitCastsAstTypes,
+        TypeSig.implicitCastsAstTypes + TypeSig.DECIMAL_128,
         TypeSig.gpuNumeric + GpuTypeShims.additionalArithmeticSupportedTypes,
         TypeSig.numericAndInterval),
       (a, conf, p, r) => new UnaryAstExprMeta[UnaryMinus](a, conf, p, r) {
         val ansiEnabled = SQLConf.get.ansiEnabled
 
         override def tagSelfForAst(): Unit = {
+          super.tagSelfForAst()
+          if (a.dataType.isInstanceOf[DecimalType] &&
+              !conf.isProjectAstAnsiArithmeticEnabled) {
+            willNotWorkInAst("AST decimal unary minus requires row IR JIT support.")
+          }
           if (ansiEnabled && GpuAnsi.needBasicOpOverflowCheck(a.dataType) &&
               (!conf.isProjectAstAnsiArithmeticEnabled ||
                   !GpuAnsi.supportsAnsiArithmeticAst(a.dataType))) {
@@ -1985,7 +1990,7 @@ object GpuOverrides extends Logging {
     expr[Add](
       "Addition",
       ExprChecks.binaryProjectAndAst(
-        TypeSig.implicitCastsAstTypes,
+        TypeSig.implicitCastsAstTypes + TypeSig.DECIMAL_128,
         TypeSig.gpuNumeric + GpuTypeShims.additionalArithmeticSupportedTypes,
         TypeSig.numericAndInterval,
         ("lhs", TypeSig.gpuNumeric + GpuTypeShims.additionalArithmeticSupportedTypes,
@@ -2003,6 +2008,17 @@ object GpuOverrides extends Logging {
         }
 
         override def tagSelfForAst(): Unit = {
+          a.dataType match {
+            case _: DecimalType =>
+              if (!conf.isProjectAstAnsiArithmeticEnabled) {
+                willNotWorkInAst("AST decimal addition requires row IR JIT support.")
+              } else if (!DecimalAddSubChecks.canUseAst(
+                  a.left.dataType, a.right.dataType, a.dataType)) {
+                willNotWorkInAst(
+                  "AST decimal addition requires an exact result without rounding or overflow.")
+              }
+            case _ => super.tagSelfForAst()
+          }
           if (ansiEnabled && GpuAnsi.needBasicOpOverflowCheck(a.dataType) &&
               (!conf.isProjectAstAnsiArithmeticEnabled ||
                   !GpuAnsi.supportsAnsiArithmeticAst(a.dataType))) {
@@ -2016,7 +2032,7 @@ object GpuOverrides extends Logging {
     expr[Subtract](
       "Subtraction",
       ExprChecks.binaryProjectAndAst(
-        TypeSig.implicitCastsAstTypes,
+        TypeSig.implicitCastsAstTypes + TypeSig.DECIMAL_128,
         TypeSig.gpuNumeric + GpuTypeShims.additionalArithmeticSupportedTypes,
         TypeSig.numericAndInterval,
         ("lhs", TypeSig.gpuNumeric + GpuTypeShims.additionalArithmeticSupportedTypes,
@@ -2034,6 +2050,17 @@ object GpuOverrides extends Logging {
         }
 
         override def tagSelfForAst(): Unit = {
+          a.dataType match {
+            case _: DecimalType =>
+              if (!conf.isProjectAstAnsiArithmeticEnabled) {
+                willNotWorkInAst("AST decimal subtraction requires row IR JIT support.")
+              } else if (!DecimalAddSubChecks.canUseAst(
+                  a.left.dataType, a.right.dataType, a.dataType)) {
+                willNotWorkInAst(
+                  "AST decimal subtraction requires an exact result without rounding or overflow.")
+              }
+            case _ => super.tagSelfForAst()
+          }
           if (ansiEnabled && GpuAnsi.needBasicOpOverflowCheck(a.dataType) &&
               (!conf.isProjectAstAnsiArithmeticEnabled ||
                   !GpuAnsi.supportsAnsiArithmeticAst(a.dataType))) {

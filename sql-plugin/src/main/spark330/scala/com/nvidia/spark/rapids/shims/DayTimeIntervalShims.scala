@@ -50,6 +50,7 @@ import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids._
 import org.apache.spark.sql.rapids.shims.{GpuDivideDTInterval, GpuMultiplyDTInterval}
+import org.apache.spark.sql.types.DecimalType
 
 object DayTimeIntervalShims {
   def exprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = 
@@ -58,13 +59,18 @@ object DayTimeIntervalShims {
     GpuOverrides.expr[Abs](
       "Absolute value",
       ExprChecks.unaryProjectAndAstInputMatchesOutput(
-        TypeSig.implicitCastsAstTypes,
+        TypeSig.implicitCastsAstTypes + TypeSig.DECIMAL_128,
         TypeSig.gpuNumeric + GpuTypeShims.additionalArithmeticSupportedTypes,
         TypeSig.cpuNumeric + GpuTypeShims.additionalArithmeticSupportedTypes),
       (a, conf, p, r) => new UnaryAstExprMeta[Abs](a, conf, p, r) {
         val ansiEnabled = SQLConf.get.ansiEnabled
 
         override def tagSelfForAst(): Unit = {
+          super.tagSelfForAst()
+          if (a.dataType.isInstanceOf[DecimalType] &&
+              !conf.isProjectAstAnsiArithmeticEnabled) {
+            willNotWorkInAst("AST decimal abs requires row IR JIT support.")
+          }
           if (ansiEnabled && GpuAnsi.needBasicOpOverflowCheck(a.dataType) &&
               (!conf.isProjectAstAnsiArithmeticEnabled ||
                   !GpuAnsi.supportsAnsiArithmeticAst(a.dataType))) {

@@ -35,6 +35,38 @@ import org.apache.spark.sql.rapids.shims.RapidsErrorUtils
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
+object DecimalAddSubChecks {
+  def canUseAst(lhs: DataType, rhs: DataType, output: DataType): Boolean =
+    (lhs, rhs, output) match {
+      case (l: DecimalType, r: DecimalType, out: DecimalType) =>
+        val unboundedScale = math.max(l.scale, r.scale)
+        val unboundedPrecision =
+          math.max(l.precision - l.scale, r.precision - r.scale) + unboundedScale + 1
+        unboundedPrecision <= DType.DECIMAL128_MAX_PRECISION &&
+          out == DecimalType(unboundedPrecision, unboundedScale) &&
+          GpuCast.canDecimalCastToAst(l, out) &&
+          GpuCast.canDecimalCastToAst(r, out)
+      case _ => false
+    }
+
+  def convertToAst(
+      operator: ast.JitOperator,
+      lhs: Expression,
+      rhs: Expression,
+      output: DecimalType,
+      numFirstTableColumns: Int): ast.AstExpression = {
+    require(canUseAst(lhs.dataType, rhs.dataType, output),
+      s"Decimal $operator does not have an exact AST result type")
+    val lhsAst = GpuCast.decimalCastToAst(
+      lhs.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns),
+      lhs.dataType.asInstanceOf[DecimalType], output, ansiMode = false)
+    val rhsAst = GpuCast.decimalCastToAst(
+      rhs.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns),
+      rhs.dataType.asInstanceOf[DecimalType], output, ansiMode = false)
+    new ast.JitOperation(operator, lhsAst, rhsAst)
+  }
+}
+
 object AddOverflowChecks {
   def basicOpOverflowCheck(
       lhs: BinaryOperable,
@@ -225,7 +257,8 @@ case class GpuUnaryMinus(child: Expression, failOnError: Boolean) extends GpuUna
   }
 
   override def selfUsesRowIrJitAst: Boolean =
-    GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)
+    dataType.isInstanceOf[DecimalType] ||
+      GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)
 
   override def doColumnar(input: GpuColumnVector) : ColumnVector = {
     if (failOnError && GpuAnsi.needBasicOpOverflowCheck(dataType)) {
@@ -266,7 +299,9 @@ case class GpuUnaryMinus(child: Expression, failOnError: Boolean) extends GpuUna
 
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
     val childAst = child.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns)
-    if (GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)) {
+    if (dataType.isInstanceOf[DecimalType]) {
+      new ast.JitOperation(ast.JitOperator.NEG, childAst)
+    } else if (GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)) {
       new ast.JitOperation(ast.JitOperator.NEG, ast.JitComplianceMode.ANSI, childAst)
     } else {
       val literalZero = dataType match {
@@ -317,7 +352,8 @@ case class GpuAbs(child: Expression, failOnError: Boolean) extends CudfUnaryExpr
   }
 
   override def selfUsesRowIrJitAst: Boolean =
-    GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)
+    dataType.isInstanceOf[DecimalType] ||
+      GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)
 
   override def doColumnar(input: GpuColumnVector) : ColumnVector = {
     if (failOnError && GpuAnsi.needBasicOpOverflowCheck(dataType)) {
@@ -344,7 +380,9 @@ case class GpuAbs(child: Expression, failOnError: Boolean) extends CudfUnaryExpr
 
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
     val childAst = child.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns)
-    if (GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)) {
+    if (dataType.isInstanceOf[DecimalType]) {
+      new ast.JitOperation(ast.JitOperator.ABS, childAst)
+    } else if (GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)) {
       new ast.JitOperation(ast.JitOperator.ABS, ast.JitComplianceMode.ANSI, childAst)
     } else {
       super.convertToAst(numFirstTableColumns)
@@ -372,7 +410,8 @@ abstract class GpuAddBase extends CudfBinaryArithmetic with Serializable {
   }
 
   override def selfUsesRowIrJitAst: Boolean =
-    GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)
+    dataType.isInstanceOf[DecimalType] ||
+      GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)
 
   override def doColumnar(lhs: BinaryOperable, rhs: BinaryOperable): ColumnVector = {
     val ret = super.doColumnar(lhs, rhs)
@@ -395,7 +434,11 @@ abstract class GpuAddBase extends CudfBinaryArithmetic with Serializable {
   }
 
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
-    if (GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)) {
+    if (dataType.isInstanceOf[DecimalType]) {
+      DecimalAddSubChecks.convertToAst(
+        ast.JitOperator.ADD, left, right, dataType.asInstanceOf[DecimalType],
+        numFirstTableColumns)
+    } else if (GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)) {
       new ast.JitOperation(ast.JitOperator.ADD, ast.JitComplianceMode.ANSI,
         left.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns),
         right.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns))
@@ -422,7 +465,8 @@ abstract class GpuSubtractBase extends CudfBinaryArithmetic with Serializable {
   }
 
   override def selfUsesRowIrJitAst: Boolean =
-    GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)
+    dataType.isInstanceOf[DecimalType] ||
+      GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)
 
   private[this] def decimalOpOverflowCheck(
       lhs: BinaryOperable,
@@ -486,7 +530,11 @@ abstract class GpuSubtractBase extends CudfBinaryArithmetic with Serializable {
   }
 
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
-    if (GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)) {
+    if (dataType.isInstanceOf[DecimalType]) {
+      DecimalAddSubChecks.convertToAst(
+        ast.JitOperator.SUB, left, right, dataType.asInstanceOf[DecimalType],
+        numFirstTableColumns)
+    } else if (GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)) {
       new ast.JitOperation(ast.JitOperator.SUB, ast.JitComplianceMode.ANSI,
         left.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns),
         right.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns))

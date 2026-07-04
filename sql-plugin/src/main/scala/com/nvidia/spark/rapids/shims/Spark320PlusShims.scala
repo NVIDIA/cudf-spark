@@ -46,6 +46,7 @@ import org.apache.spark.sql.rapids.aggregate._
 import org.apache.spark.sql.rapids.execution._
 import org.apache.spark.sql.rapids.shims.SparkSessionUtils
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.SparkSession
+import org.apache.spark.sql.types.DecimalType
 
 /**
  * Shim base class that can be compiled with every supported 3.2.0+
@@ -159,12 +160,17 @@ trait Spark320PlusShims extends SparkShims with RebaseShims
     GpuOverrides.expr[Abs](
       "Absolute value",
       ExprChecks.unaryProjectAndAstInputMatchesOutput(
-        TypeSig.implicitCastsAstTypes, TypeSig.gpuNumeric,
+        TypeSig.implicitCastsAstTypes + TypeSig.DECIMAL_128, TypeSig.gpuNumeric,
         TypeSig.cpuNumeric),
       (a, conf, p, r) => new UnaryAstExprMeta[Abs](a, conf, p, r) {
         val ansiEnabled = SQLConf.get.ansiEnabled
 
         override def tagSelfForAst(): Unit = {
+          super.tagSelfForAst()
+          if (a.dataType.isInstanceOf[DecimalType] &&
+              !conf.isProjectAstAnsiArithmeticEnabled) {
+            willNotWorkInAst("AST decimal abs requires row IR JIT support.")
+          }
           if (ansiEnabled && GpuAnsi.needBasicOpOverflowCheck(a.dataType) &&
               (!conf.isProjectAstAnsiArithmeticEnabled ||
                   !GpuAnsi.supportsAnsiArithmeticAst(a.dataType))) {
