@@ -184,15 +184,13 @@ object DecimalArithmeticOverrides {
             super.tagSelfForAst()
             if (!this.conf.isProjectAstAnsiArithmeticEnabled) {
               willNotWorkInAst("AST integral divide requires row IR JIT support.")
-            } else if (a.left.dataType.isInstanceOf[DecimalType]) {
-              if (!DecimalIntegralDivideChecks.canUseAst(
-                  a.left.dataType, a.right.dataType, a.dataType)) {
-                willNotWorkInAst(
-                  "AST decimal integral divide requires identical inputs with precision at most 18.")
-              }
-            } else if (!GpuAnsi.supportsIntegralDivideAst(
-                a.left.dataType, a.right.dataType)) {
-              willNotWorkInAst("AST integral divide requires matching INT or LONG inputs.")
+            } else if (!(GpuAnsi.supportsIntegralDivideAst(
+                a.left.dataType, a.right.dataType) ||
+                DecimalIntegralDivideChecks.canUseAst(
+                  a.left.dataType, a.right.dataType, a.dataType))) {
+              willNotWorkInAst(
+                "AST integral divide supports matching INT/LONG or identical decimal inputs " +
+                  "with precision at most 18.")
             }
           }
 
