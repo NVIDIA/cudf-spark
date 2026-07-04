@@ -63,19 +63,19 @@ object DayTimeIntervalShims {
         TypeSig.gpuNumeric + GpuTypeShims.additionalArithmeticSupportedTypes,
         TypeSig.cpuNumeric + GpuTypeShims.additionalArithmeticSupportedTypes),
       (a, conf, p, r) => new UnaryAstExprMeta[Abs](a, conf, p, r) {
-        val ansiEnabled = SQLConf.get.ansiEnabled
+        private val ansiEnabled = SQLConf.get.ansiEnabled
 
         override def tagSelfForAst(): Unit = {
           super.tagSelfForAst()
           if (a.dataType.isInstanceOf[DecimalType] &&
-              !conf.isProjectAstAnsiArithmeticEnabled) {
+              !this.conf.isProjectAstAnsiArithmeticEnabled) {
             willNotWorkInAst("AST decimal abs requires row IR JIT support.")
           }
           if (!ansiEnabled && GpuAnsi.requiresRowIrArithmeticAst(a.dataType)) {
             willNotWorkInAst("AST Byte/Short abs requires ANSI row IR JIT support.")
           }
           if (ansiEnabled && GpuAnsi.needBasicOpOverflowCheck(a.dataType) &&
-              (!conf.isProjectAstAnsiArithmeticEnabled ||
+              (!this.conf.isProjectAstAnsiArithmeticEnabled ||
                   !GpuAnsi.supportsAnsiArithmeticAst(a.dataType))) {
             willNotWorkInAst("AST abs does not support ANSI mode.")
           }

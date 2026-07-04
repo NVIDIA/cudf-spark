@@ -67,7 +67,7 @@ object DecimalArithmeticOverrides {
           private val tryMode = TryModeShim.isTryMode(a)
 
           override def tagExprForGpu(): Unit = {
-            if (tryMode && (!conf.isProjectAstAnsiArithmeticEnabled ||
+            if (tryMode && (!this.conf.isProjectAstAnsiArithmeticEnabled ||
                 !GpuAnsi.supportsAnsiArithmeticAst(a.dataType))) {
               willNotWorkOnGpu(
                 "try_multiply supports integral types only when row IR JIT support is enabled")
@@ -77,7 +77,7 @@ object DecimalArithmeticOverrides {
           override def tagSelfForAst(): Unit = {
             a.dataType match {
               case _: DecimalType =>
-                if (!conf.isProjectAstAnsiArithmeticEnabled) {
+                if (!this.conf.isProjectAstAnsiArithmeticEnabled) {
                   willNotWorkInAst("AST decimal multiplication requires row IR JIT support.")
                 } else if (!DecimalMultiplyChecks.canUseAst(
                     a.left.dataType, a.right.dataType, a.dataType)) {
@@ -87,7 +87,7 @@ object DecimalArithmeticOverrides {
                 }
               case _ => super.tagSelfForAst()
             }
-            if (tryMode && (!conf.isProjectAstAnsiArithmeticEnabled ||
+            if (tryMode && (!this.conf.isProjectAstAnsiArithmeticEnabled ||
                 !GpuAnsi.supportsAnsiArithmeticAst(a.dataType))) {
               willNotWorkInAst("AST try_multiply requires integral row IR JIT support.")
             } else if (!tryMode && !ansiEnabled &&
@@ -96,7 +96,7 @@ object DecimalArithmeticOverrides {
                 "AST Byte/Short multiplication requires ANSI row IR JIT support.")
             }
             if (!tryMode && ansiEnabled && GpuAnsi.needBasicOpOverflowCheck(a.dataType) &&
-                (!conf.isProjectAstAnsiArithmeticEnabled ||
+                (!this.conf.isProjectAstAnsiArithmeticEnabled ||
                     !GpuAnsi.supportsAnsiArithmeticAst(a.dataType))) {
               willNotWorkInAst("GPU AST multiplication does not support ANSI mode")
             }
@@ -138,7 +138,7 @@ object DecimalArithmeticOverrides {
             childExprs.head.canBePrecomputedForJoin
 
           override def tagExprForGpu(): Unit = {
-            if (tryMode && (!conf.isProjectAstAnsiArithmeticEnabled ||
+            if (tryMode && (!this.conf.isProjectAstAnsiArithmeticEnabled ||
                 !GpuAnsi.supportsTrueDivideAst(
                   false, a.left.dataType, a.right.dataType))) {
               willNotWorkOnGpu(
@@ -151,8 +151,8 @@ object DecimalArithmeticOverrides {
 
           override def tagSelfForAst(): Unit = {
             super.tagSelfForAst()
-            if (!conf.isProjectAstAnsiArithmeticEnabled ||
-              !GpuAnsi.supportsTrueDivideAst(
+            if (!this.conf.isProjectAstAnsiArithmeticEnabled ||
+                !GpuAnsi.supportsTrueDivideAst(
                   failOnError, a.left.dataType, a.right.dataType)) {
               willNotWorkInAst(
                 "AST true division supports non-ANSI DOUBLE inputs with row IR JIT support.")
@@ -182,7 +182,7 @@ object DecimalArithmeticOverrides {
 
           override def tagSelfForAst(): Unit = {
             super.tagSelfForAst()
-            if (!conf.isProjectAstAnsiArithmeticEnabled) {
+            if (!this.conf.isProjectAstAnsiArithmeticEnabled) {
               willNotWorkInAst("AST integral divide requires row IR JIT support.")
             } else if (a.left.dataType.isInstanceOf[DecimalType]) {
               if (!DecimalIntegralDivideChecks.canUseAst(
@@ -219,7 +219,7 @@ object DecimalArithmeticOverrides {
             childExprs.head.canBePrecomputedForJoin
 
           override def tagExprForGpu(): Unit = {
-            if (tryMode && (!conf.isProjectAstAnsiArithmeticEnabled ||
+            if (tryMode && (!this.conf.isProjectAstAnsiArithmeticEnabled ||
                 !GpuAnsi.supportsRemainderAst(a.left.dataType, a.right.dataType))) {
               willNotWorkOnGpu(
                 "try_mod supports primitive numeric types only when row IR JIT support is enabled")
@@ -234,7 +234,7 @@ object DecimalArithmeticOverrides {
               case _: DecimalType =>
                 if (tryMode) {
                   willNotWorkInAst("AST decimal try_mod is not supported.")
-                } else if (!conf.isProjectAstAnsiArithmeticEnabled) {
+                } else if (!this.conf.isProjectAstAnsiArithmeticEnabled) {
                   willNotWorkInAst("AST decimal remainder requires row IR JIT support.")
                 } else if (!DecimalRemainderChecks.canUseAst(
                     a.left.dataType, a.right.dataType, a.dataType)) {
@@ -242,7 +242,7 @@ object DecimalArithmeticOverrides {
                     "AST decimal remainder requires identical input and output types.")
                 }
               case _ =>
-                if (!conf.isProjectAstAnsiArithmeticEnabled ||
+                if (!this.conf.isProjectAstAnsiArithmeticEnabled ||
                     !GpuAnsi.supportsRemainderAst(a.left.dataType, a.right.dataType)) {
                   willNotWorkInAst("AST remainder requires row IR JIT support.")
                 } else if (tryMode && !leftInputIsSafe) {
