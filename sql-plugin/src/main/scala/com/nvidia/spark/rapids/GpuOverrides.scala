@@ -930,7 +930,7 @@ object GpuOverrides extends Logging {
     expr[Literal](
       "Holds a static value from the query",
       ExprChecks.projectAndAst(
-        TypeSig.astTypes,
+        TypeSig.astTypes + TypeSig.DECIMAL_128,
         (TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128 + TypeSig.CALENDAR
           + TypeSig.BINARY + TypeSig.ARRAY + TypeSig.MAP + TypeSig.STRUCT + TypeSig.ansiIntervals)
           .nested(TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128 + TypeSig.BINARY +
@@ -938,8 +938,9 @@ object GpuOverrides extends Logging {
         TypeSig.all),
       (lit, conf, p, r) => new LiteralExprMeta(lit, conf, p, r) {
         override def tagSelfForAst(): Unit = {
-          if (lit.dataType.isInstanceOf[DecimalType]) {
-            willNotWorkInAst("AST decimal literals are not supported.")
+          if (lit.dataType.isInstanceOf[DecimalType] &&
+              !this.conf.isProjectAstAnsiArithmeticEnabled) {
+            willNotWorkInAst("AST decimal literals require row IR JIT support.")
           }
         }
       }),
@@ -1607,7 +1608,7 @@ object GpuOverrides extends Logging {
     expr[Coalesce] (
       "Returns the first non-null argument if exists. Otherwise, null",
       ExprChecks.projectAndAst(
-        TypeSig.astTypes - TypeSig.STRING,
+        (TypeSig.astTypes - TypeSig.STRING) + TypeSig.DECIMAL_128,
         (gpuCommonTypes + TypeSig.ARRAY + TypeSig.STRUCT + TypeSig.BINARY +
           TypeSig.MAP + GpuTypeShims.additionalArithmeticSupportedTypes).nested(),
         TypeSig.all,
@@ -2197,7 +2198,7 @@ object GpuOverrides extends Logging {
     expr[If](
       "IF expression",
       ExprChecks.projectAndAst(
-        TypeSig.astTypes - TypeSig.STRING,
+        (TypeSig.astTypes - TypeSig.STRING) + TypeSig.DECIMAL_128,
         (gpuCommonTypes + TypeSig.ARRAY + TypeSig.STRUCT + TypeSig.MAP +
             TypeSig.BINARY + GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
         TypeSig.all,
