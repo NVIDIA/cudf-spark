@@ -19,7 +19,8 @@ package com.nvidia.spark.rapids
 import ai.rapids.cudf.{Rmm, RmmAllocationMode, RmmEventHandler, Table}
 import com.nvidia.spark.Retryable
 import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{splitTargetSizeInHalfGpu, withRestoreOnRetry, withRetry, withRetryNoSplit}
+import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{splitSpillableInHalfByRows,
+  splitTargetSizeInHalfGpu, withRestoreOnRetry, withRetry, withRetryNoSplit}
 import com.nvidia.spark.rapids.jni.{GpuRetryOOM, GpuSplitAndRetryOOM, RmmSpark}
 import com.nvidia.spark.rapids.spill.SpillFramework
 import org.mockito.Mockito._
@@ -262,6 +263,17 @@ class WithRetrySuite
     } finally {
       assert(lastSplitSize >= minValue)
       assert(lastSplitSize == (initialValue / (2 * numSplits)))
+    }
+  }
+
+  test("splitSpillableInHalfByRows splits rows-only batches") {
+    val splits = splitSpillableInHalfByRows(new JustRowsColumnarBatch(5))
+    try {
+      assertResult(Seq(2, 3))(splits.map(_.numRows()))
+      assert(splits.forall(_.dataTypes.isEmpty))
+      assert(splits.forall(_.isInstanceOf[JustRowsColumnarBatch]))
+    } finally {
+      splits.foreach(_.close())
     }
   }
 

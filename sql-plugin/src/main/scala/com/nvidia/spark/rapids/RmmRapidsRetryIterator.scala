@@ -835,29 +835,36 @@ object RmmRapidsRetryIterator extends Logging {
           throw new GpuSplitAndRetryOOM(
             s"GPU OutOfMemory: a batch of $toSplitRows cannot be split!")
         }
-        val (firstHalf, secondHalf) = withResource(spillable.getColumnarBatch()) { src =>
-          withResource(GpuColumnVector.from(src)) { tbl =>
-            val splitIx = (tbl.getRowCount / 2).toInt
-            withResource(tbl.contiguousSplit(splitIx)) { cts =>
-              val tables = cts.map(_.getTable)
-              withResource(tables.safeMap(GpuColumnVector.from(_, spillable.dataTypes))) {
-                batches =>
-                  val spillables = batches.safeMap { b =>
-                    SpillableColumnarBatch(
-                      GpuColumnVector.incRefCounts(b),
-                      SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+        if (spillable.dataTypes.isEmpty) {
+          val splitIx = toSplitRows / 2
+          Seq(
+            new JustRowsColumnarBatch(splitIx),
+            new JustRowsColumnarBatch(toSplitRows - splitIx))
+        } else {
+          val (firstHalf, secondHalf) = withResource(spillable.getColumnarBatch()) { src =>
+            withResource(GpuColumnVector.from(src)) { tbl =>
+              val splitIx = (tbl.getRowCount / 2).toInt
+              withResource(tbl.contiguousSplit(splitIx)) { cts =>
+                val tables = cts.map(_.getTable)
+                withResource(tables.safeMap(GpuColumnVector.from(_, spillable.dataTypes))) {
+                  batches =>
+                    val spillables = batches.safeMap { b =>
+                      SpillableColumnarBatch(
+                        GpuColumnVector.incRefCounts(b),
+                        SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+                    }
+                    closeOnExcept(spillables) { _ =>
+                      require(spillables.length == 2,
+                        s"Contiguous split returned ${spillables.length} tables but two were " +
+                            s"expected!")
+                    }
+                    (spillables.head, spillables.last)
                   }
-                  closeOnExcept(spillables) { _ =>
-                    require(spillables.length == 2,
-                      s"Contiguous split returned ${spillables.length} tables but two were " +
-                          s"expected!")
-                  }
-                  (spillables.head, spillables.last)
+                }
               }
             }
-          }
+          Seq(firstHalf, secondHalf)
         }
-        Seq(firstHalf, secondHalf)
       }
     }
   }
