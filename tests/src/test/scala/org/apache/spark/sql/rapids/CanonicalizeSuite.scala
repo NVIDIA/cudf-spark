@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,25 +36,39 @@ class CanonicalizeSuite extends AnyFunSuite {
       })
   }
 
-  test("checked arithmetic canonicalization preserves grouping") {
+  test("checked arithmetic canonicalization preserves grouping and mode") {
     val a = AttributeReference("a", IntegerType)()
     val b = AttributeReference("b", IntegerType)()
     val c = AttributeReference("c", IntegerType)()
     def add(
         left: Expression,
         right: Expression,
-        failOnError: Boolean = false): GpuAdd =
-      GpuAdd(left, right, failOnError = failOnError)()
+        failOnError: Boolean = false,
+        tryMode: Boolean = false): GpuAdd =
+      GpuAdd(left, right, failOnError = failOnError, tryMode = tryMode)()
     def multiply(
         left: Expression,
         right: Expression,
-        failOnError: Boolean = false): GpuMultiply =
-      GpuMultiply(left, right, failOnError = failOnError)()
+        failOnError: Boolean = false,
+        tryMode: Boolean = false): GpuMultiply =
+      GpuMultiply(left, right, failOnError = failOnError, tryMode = tryMode)()
 
     assert(!add(add(a, b, failOnError = true), c, failOnError = true)
       .semanticEquals(add(a, add(b, c, failOnError = true), failOnError = true)))
     assert(!multiply(multiply(a, b, failOnError = true), c, failOnError = true)
       .semanticEquals(multiply(a, multiply(b, c, failOnError = true), failOnError = true)))
+
+    assert(!add(add(a, b, tryMode = true), c, tryMode = true)
+      .semanticEquals(add(a, add(b, c, tryMode = true), tryMode = true)))
+    assert(!multiply(multiply(a, b, tryMode = true), c, tryMode = true)
+      .semanticEquals(multiply(a, multiply(b, c, tryMode = true), tryMode = true)))
+
+    assert(!add(add(a, b, tryMode = true), c).semanticEquals(add(add(a, b), c)))
+    assert(!multiply(multiply(a, b, tryMode = true), c)
+      .semanticEquals(multiply(multiply(a, b), c)))
+
+    assert(add(a, b, tryMode = true).semanticEquals(add(b, a, tryMode = true)))
+    assert(multiply(a, b, tryMode = true).semanticEquals(multiply(b, a, tryMode = true)))
     assert(add(a, b, failOnError = true).semanticEquals(add(b, a, failOnError = true)))
     assert(multiply(a, b, failOnError = true)
       .semanticEquals(multiply(b, a, failOnError = true)))

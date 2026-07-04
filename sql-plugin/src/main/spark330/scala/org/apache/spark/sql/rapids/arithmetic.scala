@@ -94,18 +94,28 @@ case class GpuDecimalMultiply(
 case class GpuAdd(
     left: Expression,
     right: Expression,
-    failOnError: Boolean)(
+    failOnError: Boolean,
+    tryMode: Boolean = false)(
     override val origin: Origin = CurrentOrigin.get)
     extends GpuAddBase {
+  require(!(failOnError && tryMode), "ANSI and TRY modes are mutually exclusive")
+
+  override protected def isTryMode: Boolean = tryMode
+
   override def otherCopyArgs: Seq[AnyRef] = origin :: Nil
 }
 
 case class GpuSubtract(
     left: Expression,
     right: Expression,
-    failOnError: Boolean)(
+    failOnError: Boolean,
+    tryMode: Boolean = false)(
     override val origin: Origin = CurrentOrigin.get)
     extends GpuSubtractBase {
+  require(!(failOnError && tryMode), "ANSI and TRY modes are mutually exclusive")
+
+  override protected def isTryMode: Boolean = tryMode
+
   override def otherCopyArgs: Seq[AnyRef] = origin :: Nil
 }
 

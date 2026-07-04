@@ -68,12 +68,11 @@ object DecimalAddSubChecks {
 }
 
 object AddOverflowChecks {
-  def basicOpOverflowCheck(
+  def didOverflow(
       lhs: BinaryOperable,
       rhs: BinaryOperable,
       ret: ColumnVector,
-      origin: Origin = CurrentOrigin.get,
-      mask: Option[ColumnVector] = None): Unit = {
+      mask: Option[ColumnVector] = None): ColumnVector = {
     // Check overflow. It is true if the arguments have different signs and
     // the sign of the result is different from the sign of x.
     // Which is equal to "((x ^ r) & (y ^ r)) < 0" in the form of arithmetic.
@@ -87,20 +86,28 @@ object AddOverflowChecks {
         sign.lessThan(zero)
       }
     }
-    withResource(signDiffCV) { tmpSignDiff =>
-      val signDiff = if (mask.isDefined) {
+    withResource(signDiffCV) { signDiff =>
+      if (mask.isDefined) {
         // If a mask is passed in we only want to look for overflow within the mask
-        mask.get.and(tmpSignDiff)
+        mask.get.and(signDiff)
       } else {
-        tmpSignDiff.incRefCount()
+        signDiff.incRefCount()
       }
-      withResource(signDiff) { signDiff =>
-        withResource(signDiff.any()) { any =>
-          if (any.isValid && any.getBoolean) {
-            throw RapidsErrorUtils.arithmeticOverflowError(
-              "One or more rows overflow for Add operation.",
-              origin)
-          }
+    }
+  }
+
+  def basicOpOverflowCheck(
+      lhs: BinaryOperable,
+      rhs: BinaryOperable,
+      ret: ColumnVector,
+      origin: Origin = CurrentOrigin.get,
+      mask: Option[ColumnVector] = None): Unit = {
+    withResource(didOverflow(lhs, rhs, ret, mask)) { overflow =>
+      withResource(overflow.any()) { any =>
+        if (any.isValid && any.getBoolean) {
+          throw RapidsErrorUtils.arithmeticOverflowError(
+            "One or more rows overflow for Add operation.",
+            origin)
         }
       }
     }
@@ -157,11 +164,10 @@ object AddOverflowChecks {
 }
 
 object SubtractOverflowChecks {
-  def basicOpOverflowCheck(
+  def didOverflow(
       lhs: BinaryOperable,
       rhs: BinaryOperable,
-      ret: ColumnVector,
-      origin: Origin = CurrentOrigin.get): Unit = {
+      ret: ColumnVector): ColumnVector = {
     // Check overflow. It is true if the arguments have different signs and
     // the sign of the result is different from the sign of x.
     // Which is equal to "((x ^ y) & (x ^ r)) < 0" in the form of arithmetic.
@@ -175,8 +181,16 @@ object SubtractOverflowChecks {
         sign.lessThan(zero)
       }
     }
-    withResource(signDiffCV) { signDiff =>
-      withResource(signDiff.any()) { any =>
+    signDiffCV
+  }
+
+  def basicOpOverflowCheck(
+      lhs: BinaryOperable,
+      rhs: BinaryOperable,
+      ret: ColumnVector,
+      origin: Origin = CurrentOrigin.get): Unit = {
+    withResource(didOverflow(lhs, rhs, ret)) { overflow =>
+      withResource(overflow.any()) { any =>
         if (any.isValid && any.getBoolean) {
           throw RapidsErrorUtils.arithmeticOverflowError(
             "One or more rows overflow for Subtract operation.", origin)
@@ -190,18 +204,24 @@ object GpuAnsi {
   def needBasicOpOverflowCheck(dt: DataType): Boolean =
     dt.isInstanceOf[IntegralType]
 
-  def requiresRowIrArithmeticAst(dt: DataType): Boolean = dt match {
-    case ByteType | ShortType => true
-    case _ => false
-  }
-
   def supportsAnsiArithmeticAst(dt: DataType): Boolean = dt match {
     case ByteType | ShortType | IntegerType | LongType => true
     case _ => false
   }
 
+  def requiresRowIrArithmeticAst(dt: DataType): Boolean = dt match {
+    case ByteType | ShortType => true
+    case _ => false
+  }
+
   def shouldUseAnsiArithmeticAst(failOnError: Boolean, dt: DataType): Boolean =
     failOnError && supportsAnsiArithmeticAst(dt)
+
+  def shouldUseCheckedArithmeticAst(
+      failOnError: Boolean,
+      tryMode: Boolean,
+      dt: DataType): Boolean =
+    (failOnError || tryMode) && supportsAnsiArithmeticAst(dt)
 
   def supportsIntegralDivideAst(lhs: DataType, rhs: DataType): Boolean =
     lhs == rhs && (lhs == IntegerType || lhs == LongType)
@@ -411,7 +431,11 @@ case class GpuAbs(child: Expression, failOnError: Boolean) extends CudfUnaryExpr
 }
 
 abstract class GpuAddBase extends CudfBinaryArithmetic with Serializable {
+  protected def isTryMode: Boolean = false
+
   override def inputType: AbstractDataType = TypeCollection.NumericAndInterval
+
+  override def nullable: Boolean = isTryMode || super.nullable
 
   override def symbol: String = "+"
 
@@ -431,24 +455,32 @@ abstract class GpuAddBase extends CudfBinaryArithmetic with Serializable {
 
   override def selfUsesRowIrJitAst: Boolean =
     dataType.isInstanceOf[DecimalType] ||
-      GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)
+      GpuAnsi.shouldUseCheckedArithmeticAst(failOnError, isTryMode, dataType)
 
   override def doColumnar(lhs: BinaryOperable, rhs: BinaryOperable): ColumnVector = {
     val ret = super.doColumnar(lhs, rhs)
     withResource(ret) { ret =>
-      // No shims are needed, because it actually supports ANSI mode from Spark v3.0.1.
-      if (failOnError && GpuAnsi.needBasicOpOverflowCheck(dataType) ||
-          GpuTypeShims.isSupportedDayTimeType(dataType) ||
-          GpuTypeShims.isSupportedYearMonthType(dataType)) {
-        // For day time interval, Spark throws an exception when overflow,
-        // regardless of whether `SQLConf.get.ansiEnabled` is true or false
-        AddOverflowChecks.basicOpOverflowCheck(lhs, rhs, ret, origin)
-      }
-
-      if (dataType.isInstanceOf[DecimalType]) {
-        AddOverflowChecks.decimalOpOverflowCheck(lhs, rhs, ret, failOnError, origin)
+      if (isTryMode && GpuAnsi.needBasicOpOverflowCheck(dataType)) {
+        withResource(AddOverflowChecks.didOverflow(lhs, rhs, ret)) { overflow =>
+          withResource(GpuScalar.from(null, dataType)) { nullVal =>
+            overflow.ifElse(nullVal, ret)
+          }
+        }
       } else {
-        ret.incRefCount()
+        // No shims are needed, because it actually supports ANSI mode from Spark v3.0.1.
+        if (failOnError && GpuAnsi.needBasicOpOverflowCheck(dataType) ||
+            GpuTypeShims.isSupportedDayTimeType(dataType) ||
+            GpuTypeShims.isSupportedYearMonthType(dataType)) {
+          // For day time interval, Spark throws an exception when overflow,
+          // regardless of whether `SQLConf.get.ansiEnabled` is true or false
+          AddOverflowChecks.basicOpOverflowCheck(lhs, rhs, ret, origin)
+        }
+
+        if (dataType.isInstanceOf[DecimalType]) {
+          AddOverflowChecks.decimalOpOverflowCheck(lhs, rhs, ret, failOnError, origin)
+        } else {
+          ret.incRefCount()
+        }
       }
     }
   }
@@ -458,8 +490,10 @@ abstract class GpuAddBase extends CudfBinaryArithmetic with Serializable {
       DecimalAddSubChecks.convertToAst(
         ast.JitOperator.ADD, left, right, dataType.asInstanceOf[DecimalType],
         numFirstTableColumns)
-    } else if (GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)) {
-      new ast.JitOperation(ast.JitOperator.ADD, ast.JitComplianceMode.ANSI,
+    } else if (GpuAnsi.shouldUseCheckedArithmeticAst(failOnError, isTryMode, dataType)) {
+      val mode = if (isTryMode) ast.JitComplianceMode.ANSI_TRY
+        else ast.JitComplianceMode.ANSI
+      new ast.JitOperation(ast.JitOperator.ADD, mode,
         left.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns),
         right.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns))
     } else {
@@ -469,7 +503,11 @@ abstract class GpuAddBase extends CudfBinaryArithmetic with Serializable {
 }
 
 abstract class GpuSubtractBase extends CudfBinaryArithmetic with Serializable {
+  protected def isTryMode: Boolean = false
+
   override def inputType: AbstractDataType = TypeCollection.NumericAndInterval
+
+  override def nullable: Boolean = isTryMode || super.nullable
 
   override def symbol: String = "-"
 
@@ -486,7 +524,7 @@ abstract class GpuSubtractBase extends CudfBinaryArithmetic with Serializable {
 
   override def selfUsesRowIrJitAst: Boolean =
     dataType.isInstanceOf[DecimalType] ||
-      GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)
+      GpuAnsi.shouldUseCheckedArithmeticAst(failOnError, isTryMode, dataType)
 
   private[this] def decimalOpOverflowCheck(
       lhs: BinaryOperable,
@@ -532,19 +570,27 @@ abstract class GpuSubtractBase extends CudfBinaryArithmetic with Serializable {
   override def doColumnar(lhs: BinaryOperable, rhs: BinaryOperable): ColumnVector = {
     val ret = super.doColumnar(lhs, rhs)
     withResource(ret) { ret =>
-      // No shims are needed, because it actually supports ANSI mode from Spark v3.0.1.
-      if (failOnError && GpuAnsi.needBasicOpOverflowCheck(dataType) ||
-          GpuTypeShims.isSupportedDayTimeType(dataType) ||
-          GpuTypeShims.isSupportedYearMonthType(dataType)) {
-        // For day time interval, Spark throws an exception when overflow,
-        // regardless of whether `SQLConf.get.ansiEnabled` is true or false
-        SubtractOverflowChecks.basicOpOverflowCheck(lhs, rhs, ret, origin)
-      }
-
-      if (dataType.isInstanceOf[DecimalType]) {
-        decimalOpOverflowCheck(lhs, rhs, ret)
+      if (isTryMode && GpuAnsi.needBasicOpOverflowCheck(dataType)) {
+        withResource(SubtractOverflowChecks.didOverflow(lhs, rhs, ret)) { overflow =>
+          withResource(GpuScalar.from(null, dataType)) { nullVal =>
+            overflow.ifElse(nullVal, ret)
+          }
+        }
       } else {
-        ret.incRefCount()
+        // No shims are needed, because it actually supports ANSI mode from Spark v3.0.1.
+        if (failOnError && GpuAnsi.needBasicOpOverflowCheck(dataType) ||
+            GpuTypeShims.isSupportedDayTimeType(dataType) ||
+            GpuTypeShims.isSupportedYearMonthType(dataType)) {
+          // For day time interval, Spark throws an exception when overflow,
+          // regardless of whether `SQLConf.get.ansiEnabled` is true or false
+          SubtractOverflowChecks.basicOpOverflowCheck(lhs, rhs, ret, origin)
+        }
+
+        if (dataType.isInstanceOf[DecimalType]) {
+          decimalOpOverflowCheck(lhs, rhs, ret)
+        } else {
+          ret.incRefCount()
+        }
       }
     }
   }
@@ -554,8 +600,10 @@ abstract class GpuSubtractBase extends CudfBinaryArithmetic with Serializable {
       DecimalAddSubChecks.convertToAst(
         ast.JitOperator.SUB, left, right, dataType.asInstanceOf[DecimalType],
         numFirstTableColumns)
-    } else if (GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)) {
-      new ast.JitOperation(ast.JitOperator.SUB, ast.JitComplianceMode.ANSI,
+    } else if (GpuAnsi.shouldUseCheckedArithmeticAst(failOnError, isTryMode, dataType)) {
+      val mode = if (isTryMode) ast.JitComplianceMode.ANSI_TRY
+        else ast.JitComplianceMode.ANSI
+      new ast.JitOperation(ast.JitOperator.SUB, mode,
         left.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns),
         right.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns))
     } else {
@@ -953,15 +1001,20 @@ object GpuDivModLike {
 case class GpuMultiply(
     left: Expression,
     right: Expression,
-    failOnError: Boolean = SQLConf.get.ansiEnabled)(
+    failOnError: Boolean = SQLConf.get.ansiEnabled,
+    tryMode: Boolean = false)(
     override val origin: Origin = CurrentOrigin.get)
     extends CudfBinaryArithmetic {
+  require(!(failOnError && tryMode), "ANSI and TRY modes are mutually exclusive")
+
   override def otherCopyArgs: Seq[AnyRef] = origin :: Nil
 
   assert(!left.dataType.isInstanceOf[DecimalType],
     "DecimalType multiplies need to be handled by GpuDecimalMultiply")
 
   override def inputType: AbstractDataType = NumericType
+
+  override def nullable: Boolean = tryMode || super.nullable
 
   override def symbol: String = "*"
 
@@ -977,11 +1030,13 @@ case class GpuMultiply(
   }
 
   override def selfUsesRowIrJitAst: Boolean =
-    GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)
+    GpuAnsi.shouldUseCheckedArithmeticAst(failOnError, tryMode, dataType)
 
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
-    if (GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)) {
-      new ast.JitOperation(ast.JitOperator.MUL, ast.JitComplianceMode.ANSI,
+    if (GpuAnsi.shouldUseCheckedArithmeticAst(failOnError, tryMode, dataType)) {
+      val mode = if (tryMode) ast.JitComplianceMode.ANSI_TRY
+        else ast.JitComplianceMode.ANSI
+      new ast.JitOperation(ast.JitOperator.MUL, mode,
         left.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns),
         right.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns))
     } else {
@@ -995,7 +1050,7 @@ case class GpuMultiply(
 
   override def doColumnar(lhs: GpuColumnVector, rhs: GpuColumnVector): ColumnVector = {
     try {
-      Arithmetic.multiply(lhs.getBase, rhs.getBase, /* ansi */ failOnError, /* try_mode */ false)
+      Arithmetic.multiply(lhs.getBase, rhs.getBase, /* ansi */ failOnError, tryMode)
     } catch {
       case rowException: ExceptionWithRowIndex =>
         val errorRowIndex = rowException.getRowIndex
@@ -1008,7 +1063,7 @@ case class GpuMultiply(
 
   override def doColumnar(lhs: GpuScalar, rhs: GpuColumnVector): ColumnVector = {
     try {
-      Arithmetic.multiply(lhs.getBase, rhs.getBase, /* ansi */ failOnError, /* try_mode */ false)
+      Arithmetic.multiply(lhs.getBase, rhs.getBase, /* ansi */ failOnError, tryMode)
     } catch {
       case rowException: ExceptionWithRowIndex =>
         val errorRowIndex = rowException.getRowIndex
@@ -1020,7 +1075,7 @@ case class GpuMultiply(
 
   override def doColumnar(lhs: GpuColumnVector, rhs: GpuScalar): ColumnVector = {
     try {
-      Arithmetic.multiply(lhs.getBase, rhs.getBase, /* ansi */ failOnError, /* try_mode */ false)
+      Arithmetic.multiply(lhs.getBase, rhs.getBase, /* ansi */ failOnError, tryMode)
     } catch {
       case rowException: ExceptionWithRowIndex =>
         val errorRowIndex = rowException.getRowIndex

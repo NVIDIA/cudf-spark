@@ -150,19 +150,27 @@ object DecimalArithmeticOverrides {
         ("lhs", TypeSig.gpuNumeric, TypeSig.cpuNumeric),
         ("rhs", TypeSig.gpuNumeric, TypeSig.cpuNumeric)),
       (a, conf, p, r) => new BinaryAstExprMeta[Multiply](a, conf, p, r) {
+        private val ansiEnabled = SQLConf.get.ansiEnabled
+        private val tryMode = TryModeShim.isTryMode(a)
+
         override def tagExprForGpu(): Unit = {
-          // Check if this Multiply expression is in TRY mode context
-          if (TryModeShim.isTryMode(a)) {
-            willNotWorkOnGpu("try_multiply is not supported on GPU")
+          if (tryMode && (!conf.isProjectAstAnsiArithmeticEnabled ||
+              !GpuAnsi.supportsAnsiArithmeticAst(a.dataType))) {
+            willNotWorkOnGpu(
+              "try_multiply supports integral types only when row IR JIT support is enabled")
           }
         }
 
         override def tagSelfForAst(): Unit = {
           super.tagSelfForAst()
-          if (!SQLConf.get.ansiEnabled && GpuAnsi.requiresRowIrArithmeticAst(a.dataType)) {
+          if (tryMode && (!conf.isProjectAstAnsiArithmeticEnabled ||
+              !GpuAnsi.supportsAnsiArithmeticAst(a.dataType))) {
+            willNotWorkInAst("AST try_multiply requires integral row IR JIT support.")
+          } else if (!tryMode && !ansiEnabled &&
+              GpuAnsi.requiresRowIrArithmeticAst(a.dataType)) {
             willNotWorkInAst("AST Byte/Short multiplication requires ANSI row IR JIT support.")
           }
-          if (SQLConf.get.ansiEnabled && GpuAnsi.needBasicOpOverflowCheck(a.dataType) &&
+          if (!tryMode && ansiEnabled && GpuAnsi.needBasicOpOverflowCheck(a.dataType) &&
               (!conf.isProjectAstAnsiArithmeticEnabled ||
                   !GpuAnsi.supportsAnsiArithmeticAst(a.dataType))) {
             willNotWorkInAst("GPU AST multiplication does not support ANSI mode")
@@ -174,7 +182,7 @@ object DecimalArithmeticOverrides {
             case _: DecimalType => throw new IllegalStateException(
               "Decimal Multiply should be converted in CheckOverflow")
             case _ =>
-              GpuMultiply(lhs, rhs)(a.origin)
+              GpuMultiply(lhs, rhs, ansiEnabled && !tryMode, tryMode)(a.origin)
           }
         }
       }),

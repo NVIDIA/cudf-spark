@@ -211,9 +211,14 @@ trait GpuAddSub extends CudfBinaryArithmetic {
 case class GpuAdd(
     left: Expression,
     right: Expression,
-    failOnError: Boolean)(
+    failOnError: Boolean,
+    tryMode: Boolean = false)(
     override val origin: Origin = CurrentOrigin.get)
     extends GpuAddBase with GpuAddSub {
+  require(!(failOnError && tryMode), "ANSI and TRY modes are mutually exclusive")
+
+  override protected def isTryMode: Boolean = tryMode
+
   override def otherCopyArgs: Seq[AnyRef] = origin :: Nil
 
   def do128BitOperation(
@@ -227,9 +232,14 @@ case class GpuAdd(
 case class GpuSubtract(
     left: Expression,
     right: Expression,
-    failOnError: Boolean)(
+    failOnError: Boolean,
+    tryMode: Boolean = false)(
     override val origin: Origin = CurrentOrigin.get)
     extends GpuSubtractBase with GpuAddSub {
+  require(!(failOnError && tryMode), "ANSI and TRY modes are mutually exclusive")
+
+  override protected def isTryMode: Boolean = tryMode
+
   override def otherCopyArgs: Seq[AnyRef] = origin :: Nil
 
   def do128BitOperation(

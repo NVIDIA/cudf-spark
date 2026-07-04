@@ -2002,11 +2002,13 @@ object GpuOverrides extends Logging {
             TypeSig.numericAndInterval)),
       (a, conf, p, r) => new BinaryAstExprMeta[Add](a, conf, p, r) {
         private val ansiEnabled = SQLConf.get.ansiEnabled
+        private val tryMode = TryModeShim.isTryMode(a)
 
         override def tagExprForGpu(): Unit = {
-          // Check if this Add expression is in TRY mode context
-          if (TryModeShim.isTryMode(a)) {
-            willNotWorkOnGpu("try_add is not supported on GPU")
+          if (tryMode && (!conf.isProjectAstAnsiArithmeticEnabled ||
+              !GpuAnsi.supportsAnsiArithmeticAst(a.dataType))) {
+            willNotWorkOnGpu(
+              "try_add supports integral types only when row IR JIT support is enabled")
           }
         }
 
@@ -2022,10 +2024,14 @@ object GpuOverrides extends Logging {
               }
             case _ => super.tagSelfForAst()
           }
-          if (!ansiEnabled && GpuAnsi.requiresRowIrArithmeticAst(a.dataType)) {
+          if (tryMode && (!conf.isProjectAstAnsiArithmeticEnabled ||
+              !GpuAnsi.supportsAnsiArithmeticAst(a.dataType))) {
+            willNotWorkInAst("AST try_add requires integral row IR JIT support.")
+          } else if (!tryMode && !ansiEnabled &&
+              GpuAnsi.requiresRowIrArithmeticAst(a.dataType)) {
             willNotWorkInAst("AST Byte/Short addition requires ANSI row IR JIT support.")
           }
-          if (ansiEnabled && GpuAnsi.needBasicOpOverflowCheck(a.dataType) &&
+          if (!tryMode && ansiEnabled && GpuAnsi.needBasicOpOverflowCheck(a.dataType) &&
               (!conf.isProjectAstAnsiArithmeticEnabled ||
                   !GpuAnsi.supportsAnsiArithmeticAst(a.dataType))) {
             willNotWorkInAst("AST Addition does not support ANSI mode.")
@@ -2033,7 +2039,7 @@ object GpuOverrides extends Logging {
         }
 
         override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression =
-          GpuAdd(lhs, rhs, ansiEnabled)(a.origin)
+          GpuAdd(lhs, rhs, ansiEnabled && !tryMode, tryMode)(a.origin)
       }),
     expr[Subtract](
       "Subtraction",
@@ -2047,11 +2053,13 @@ object GpuOverrides extends Logging {
             TypeSig.numericAndInterval)),
       (a, conf, p, r) => new BinaryAstExprMeta[Subtract](a, conf, p, r) {
         private val ansiEnabled = SQLConf.get.ansiEnabled
+        private val tryMode = TryModeShim.isTryMode(a)
 
         override def tagExprForGpu(): Unit = {
-          // Check if this Subtract expression is in TRY mode context
-          if (TryModeShim.isTryMode(a)) {
-            willNotWorkOnGpu("try_subtract is not supported on GPU")
+          if (tryMode && (!conf.isProjectAstAnsiArithmeticEnabled ||
+              !GpuAnsi.supportsAnsiArithmeticAst(a.dataType))) {
+            willNotWorkOnGpu(
+              "try_subtract supports integral types only when row IR JIT support is enabled")
           }
         }
 
@@ -2067,10 +2075,14 @@ object GpuOverrides extends Logging {
               }
             case _ => super.tagSelfForAst()
           }
-          if (!ansiEnabled && GpuAnsi.requiresRowIrArithmeticAst(a.dataType)) {
+          if (tryMode && (!conf.isProjectAstAnsiArithmeticEnabled ||
+              !GpuAnsi.supportsAnsiArithmeticAst(a.dataType))) {
+            willNotWorkInAst("AST try_subtract requires integral row IR JIT support.")
+          } else if (!tryMode && !ansiEnabled &&
+              GpuAnsi.requiresRowIrArithmeticAst(a.dataType)) {
             willNotWorkInAst("AST Byte/Short subtraction requires ANSI row IR JIT support.")
           }
-          if (ansiEnabled && GpuAnsi.needBasicOpOverflowCheck(a.dataType) &&
+          if (!tryMode && ansiEnabled && GpuAnsi.needBasicOpOverflowCheck(a.dataType) &&
               (!conf.isProjectAstAnsiArithmeticEnabled ||
                   !GpuAnsi.supportsAnsiArithmeticAst(a.dataType))) {
             willNotWorkInAst("AST Subtraction does not support ANSI mode.")
@@ -2078,7 +2090,7 @@ object GpuOverrides extends Logging {
         }
 
         override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression =
-          GpuSubtract(lhs, rhs, ansiEnabled)(a.origin)
+          GpuSubtract(lhs, rhs, ansiEnabled && !tryMode, tryMode)(a.origin)
       }),
     expr[And](
       "Logical AND",
