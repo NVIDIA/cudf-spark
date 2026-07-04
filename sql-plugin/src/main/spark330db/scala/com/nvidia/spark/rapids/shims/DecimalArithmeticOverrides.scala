@@ -47,7 +47,7 @@ import com.nvidia.spark.rapids.GpuOverrides.expr
 
 import org.apache.spark.sql.catalyst.expressions.{Divide, Expression, IntegralDivide, Multiply, Remainder}
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.rapids.{DecimalMultiplyChecks, GpuAnsi, GpuDecimalDivide, GpuDecimalMultiply, GpuDecimalRemainder, GpuDivide, GpuIntegralDecimalDivide, GpuIntegralDivide, GpuMultiply, GpuRemainder}
+import org.apache.spark.sql.rapids.{DecimalIntegralDivideChecks, DecimalMultiplyChecks, DecimalRemainderChecks, GpuAnsi, GpuDecimalDivide, GpuDecimalMultiply, GpuDecimalRemainder, GpuDivide, GpuIntegralDecimalDivide, GpuIntegralDivide, GpuMultiply, GpuRemainder}
 import org.apache.spark.sql.types.DecimalType
 
 object DecimalArithmeticOverrides {
@@ -136,16 +136,24 @@ object DecimalArithmeticOverrides {
       expr[IntegralDivide](
         "Division with a integer result",
         ExprChecks.binaryProjectAndAst(
-          TypeSig.LONG,
+          TypeSig.LONG + TypeSig.DECIMAL_64,
           TypeSig.LONG, TypeSig.LONG,
           ("lhs", TypeSig.LONG + TypeSig.DECIMAL_128, TypeSig.LONG + TypeSig.DECIMAL_128),
           ("rhs", TypeSig.LONG + TypeSig.DECIMAL_128, TypeSig.LONG + TypeSig.DECIMAL_128)),
         (a, conf, p, r) => new BinaryAstExprMeta[IntegralDivide](a, conf, p, r) {
           override def tagSelfForAst(): Unit = {
             super.tagSelfForAst()
-            if (!SQLConf.get.ansiEnabled || !conf.isProjectAstAnsiArithmeticEnabled ||
-                !GpuAnsi.shouldUseAnsiDivModAst(SQLConf.get.ansiEnabled,
-                  a.left.dataType, a.right.dataType)) {
+            if (!conf.isProjectAstAnsiArithmeticEnabled) {
+              willNotWorkInAst("AST integral divide requires row IR JIT support.")
+            } else if (a.left.dataType.isInstanceOf[DecimalType]) {
+              if (!DecimalIntegralDivideChecks.canUseAst(
+                  a.left.dataType, a.right.dataType, a.dataType)) {
+                willNotWorkInAst(
+                  "AST decimal integral divide requires identical inputs with precision at most 18.")
+              }
+            } else if (!SQLConf.get.ansiEnabled ||
+                !GpuAnsi.shouldUseAnsiDivModAst(
+                  SQLConf.get.ansiEnabled, a.left.dataType, a.right.dataType)) {
               willNotWorkInAst("AST integral divide requires ANSI row IR JIT support.")
             }
           }
@@ -161,7 +169,7 @@ object DecimalArithmeticOverrides {
       expr[Remainder](
         "Remainder or modulo",
         ExprChecks.binaryProjectAndAst(
-          TypeSig.INT + TypeSig.LONG,
+          TypeSig.INT + TypeSig.LONG + TypeSig.DECIMAL_128,
           TypeSig.gpuNumeric, TypeSig.cpuNumeric,
           ("lhs", TypeSig.gpuNumeric, TypeSig.cpuNumeric),
           ("rhs", TypeSig.gpuNumeric, TypeSig.cpuNumeric)),
@@ -175,9 +183,20 @@ object DecimalArithmeticOverrides {
 
           override def tagSelfForAst(): Unit = {
             super.tagSelfForAst()
-            if (!SQLConf.get.ansiEnabled || !conf.isProjectAstAnsiArithmeticEnabled ||
-                !GpuAnsi.supportsAnsiArithmeticAst(a.dataType)) {
-              willNotWorkInAst("AST remainder requires ANSI row IR JIT support.")
+            a.dataType match {
+              case _: DecimalType =>
+                if (!conf.isProjectAstAnsiArithmeticEnabled) {
+                  willNotWorkInAst("AST decimal remainder requires row IR JIT support.")
+                } else if (!DecimalRemainderChecks.canUseAst(
+                    a.left.dataType, a.right.dataType, a.dataType)) {
+                  willNotWorkInAst(
+                    "AST decimal remainder requires identical input and output types.")
+                }
+              case _ =>
+                if (!SQLConf.get.ansiEnabled || !conf.isProjectAstAnsiArithmeticEnabled ||
+                    !GpuAnsi.supportsAnsiArithmeticAst(a.dataType)) {
+                  willNotWorkInAst("AST remainder requires ANSI row IR JIT support.")
+                }
             }
           }
 

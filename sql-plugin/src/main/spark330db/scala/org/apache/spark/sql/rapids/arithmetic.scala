@@ -250,6 +250,30 @@ case class GpuRemainder(
 }
 
 object DecimalRemainderChecks {
+  def canUseAst(lhs: DataType, rhs: DataType, output: DataType): Boolean =
+    (lhs, rhs, output) match {
+      case (l: DecimalType, r: DecimalType, out: DecimalType) => l == r && out == l
+      case _ => false
+    }
+
+  def convertToAst(
+      lhs: Expression,
+      rhs: Expression,
+      output: DataType,
+      failOnError: Boolean,
+      numFirstTableColumns: Int): ast.AstExpression = {
+    require(canUseAst(lhs.dataType, rhs.dataType, output),
+      "Decimal remainder AST requires identical input and output types")
+    val mode = if (failOnError) {
+      ast.JitComplianceMode.ANSI
+    } else {
+      ast.JitComplianceMode.ANSI_TRY
+    }
+    new ast.JitOperation(ast.JitOperator.MOD, mode,
+      lhs.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns),
+      rhs.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns))
+  }
+
   def neededScale(lhs: DecimalType, rhs: DecimalType): Int =
     math.max(lhs.scale, rhs.scale)
 
@@ -305,6 +329,21 @@ case class GpuDecimalRemainder(
 
   private[this] lazy val lhsType: DecimalType = DecimalUtil.asDecimalType(left.dataType)
   private[this] lazy val rhsType: DecimalType = DecimalUtil.asDecimalType(right.dataType)
+
+  override def selfAstJitErrorSite: Option[AstJitErrorSite] = {
+    if (failOnError && DecimalRemainderChecks.canUseAst(lhsType, rhsType, dataType)) {
+      Some(AstJitErrorSite(AstJitErrorKind.IntegralRemainder, origin))
+    } else {
+      None
+    }
+  }
+
+  override def selfUsesRowIrJitAst: Boolean =
+    DecimalRemainderChecks.canUseAst(lhsType, rhsType, dataType)
+
+  override def convertToAst(numFirstTableColumns: Int): ast.AstExpression =
+    DecimalRemainderChecks.convertToAst(
+      left, right, dataType, failOnError, numFirstTableColumns)
 
   // We should only use the long remainder algorithm when 
   // the intermedite precision required will overflow one of the operands
@@ -534,6 +573,34 @@ case class GpuIntegralDivide(
     "DecimalType integral divides need to be handled by GpuIntegralDecimalDivide")
 }
 
+object DecimalIntegralDivideChecks {
+  def canUseAst(lhs: DataType, rhs: DataType, output: DataType): Boolean =
+    (lhs, rhs, output) match {
+      case (l: DecimalType, r: DecimalType, LongType) =>
+        l == r && l.precision <= Decimal.MAX_LONG_DIGITS
+      case _ => false
+    }
+
+  def convertToAst(
+      lhs: Expression,
+      rhs: Expression,
+      output: DataType,
+      failOnError: Boolean,
+      numFirstTableColumns: Int): ast.AstExpression = {
+    require(canUseAst(lhs.dataType, rhs.dataType, output),
+      "Decimal integral divide AST requires identical inputs with precision at most 18")
+    val mode = if (failOnError) {
+      ast.JitComplianceMode.ANSI
+    } else {
+      ast.JitComplianceMode.ANSI_TRY
+    }
+    val divide = new ast.JitOperation(ast.JitOperator.DIV, mode,
+      lhs.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns),
+      rhs.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns))
+    new ast.JitOperation(ast.JitOperator.CAST_TO_INT64, divide)
+  }
+}
+
 case class GpuIntegralDecimalDivide(
     left: Expression,
     right: Expression,
@@ -552,6 +619,27 @@ case class GpuIntegralDecimalDivide(
   override def binaryOp: BinaryOp = BinaryOp.DIV
 
   override def sqlOperator: String = "div"
+
+  override def selfAstJitErrorSite: Option[AstJitErrorSite] = {
+    if (failOnError &&
+        DecimalIntegralDivideChecks.canUseAst(left.dataType, right.dataType, dataType)) {
+      Some(AstJitErrorSite(AstJitErrorKind.IntegralDivide, origin))
+    } else {
+      None
+    }
+  }
+
+  override def selfUsesRowIrJitAst: Boolean =
+    DecimalIntegralDivideChecks.canUseAst(left.dataType, right.dataType, dataType)
+
+  override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
+    if (DecimalIntegralDivideChecks.canUseAst(left.dataType, right.dataType, dataType)) {
+      DecimalIntegralDivideChecks.convertToAst(
+        left, right, dataType, failOnError, numFirstTableColumns)
+    } else {
+      super.convertToAst(numFirstTableColumns)
+    }
+  }
 
   override def columnarEval(batch: ColumnarBatch): GpuColumnVector = {
     super.columnarEval(batch)
