@@ -41,7 +41,7 @@
  *   BENCH_PARTITIONS=16
  *   BENCH_EXPR_COUNTS=8
  *   BENCH_EXPR_DEPTHS=1,2,4,8,16,32
- *   BENCH_EXPR_SUITES=mixed
+ *   BENCH_EXPR_SUITES=try_arithmetic
  *   BENCH_WARMUPS=1
  *   BENCH_ITERS=3
  *   BENCH_MODES=CPU,GPU_PROJECT,GPU_AST_JIT_COLD,GPU_AST_JIT_DISK_WARM,GPU_AST_JIT_PCH_WARM_KERNEL_COLD,GPU_AST_JIT_HOT
@@ -377,6 +377,24 @@ object AnsiJitProjectBench {
     expr(sql).as(s"p_$idx")
   }
 
+  def makeTryArithmeticExpr(idx: Int, depth: Int): Column = {
+    val useLong = (idx & 1) == 1
+    val names = intOrLongNames(useLong)
+    val sqlType = if (useLong) "BIGINT" else "INT"
+    var sql = names(idx & 3)
+    var d = 0
+    while (d < depth) {
+      val rhs = names((idx + d + 1) & 3)
+      sql = (idx + d) % 3 match {
+        case 0 => s"try_add($sql, $rhs)"
+        case 1 => s"try_subtract($sql, $rhs)"
+        case _ => s"try_multiply($sql, cast(2 as $sqlType))"
+      }
+      d += 1
+    }
+    expr(sql).as(s"p_$idx")
+  }
+
   def makeConditionalExpr(idx: Int, depth: Int): Column = {
     var sql = idx % 4 match {
       case 0 => "coalesce(ni0, ni1, cast(17 as INT))"
@@ -451,6 +469,7 @@ object AnsiJitProjectBench {
   def makeExpr(exprSuite: String, idx: Int, depth: Int): Column = exprSuite match {
     case "mixed" | "all" => makeMixedExpr(idx, depth)
     case "arithmetic" => makeArithmeticExpr(idx, depth)
+    case "try_arithmetic" => makeTryArithmeticExpr(idx, depth)
     case "div_mod" => makeDivModExpr(idx, depth)
     case "conditionals" => makeConditionalExpr(idx, depth)
     case "casts" | "decimal_cast" => makeCastExpr(idx, depth)
@@ -458,8 +477,9 @@ object AnsiJitProjectBench {
     case "pass_through" => makePassThroughExpr(idx)
     case "mixed_pass_through" => makeMixedPassThroughExpr(idx, depth)
     case other => throw new IllegalArgumentException(
-      s"Unknown BENCH_EXPR_SUITES entry $other. Expected mixed, arithmetic, div_mod, " +
-        "conditionals, casts, decimal_cast, shifts, pass_through, or mixed_pass_through.")
+      s"Unknown BENCH_EXPR_SUITES entry $other. Expected mixed, arithmetic, try_arithmetic, " +
+        "div_mod, conditionals, casts, decimal_cast, shifts, pass_through, or " +
+        "mixed_pass_through.")
   }
 
   def makeQuery(exprSuite: String, exprCount: Int, exprDepth: Int): DataFrame = {
