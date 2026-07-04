@@ -610,16 +610,6 @@ object GpuOverrides extends Logging {
 
   def isLit(exp: Expression): Boolean = extractLit(exp).isDefined
 
-  private def isSimpleAstIfValue(exp: Expression): Boolean = exp match {
-    case _: AttributeReference | _: Literal => true
-    case a: Alias => isSimpleAstIfValue(a.child)
-    case _ => false
-  }
-
-  private def isSimpleAstIfPattern(exp: If): Boolean = {
-    isSimpleAstIfValue(exp.trueValue) && isSimpleAstIfValue(exp.falseValue)
-  }
-
   def isSupportedStringReplacePattern(strLit: String): Boolean = {
     // check for regex special characters, except for \u0000, \n, \r, and \t which we can support
     val supported = Seq("\u0000", "\n", "\r", "\t")
@@ -2185,6 +2175,12 @@ object GpuOverrides extends Logging {
       "CASE WHEN expression",
       CaseWhenCheck,
       (a, conf, p, r) => new ExprMeta[CaseWhen](a, conf, p, r) {
+        override def tagSelfForAst(): Unit = {
+          if (!this.conf.isProjectAstAnsiArithmeticEnabled) {
+            willNotWorkInAst("AST CASE WHEN requires row IR JIT support.")
+          }
+        }
+
         override def convertToGpuImpl(): GpuExpression = {
           val branches = childExprs.grouped(2).flatMap {
             case Seq(cond, value) => Some((cond.convertToGpu(), value.convertToGpu()))
@@ -2218,10 +2214,6 @@ object GpuOverrides extends Logging {
         override def tagSelfForAst(): Unit = {
           if (!conf.isProjectAstAnsiArithmeticEnabled) {
             willNotWorkInAst("AST IF requires row IR JIT support.")
-          }
-          if (!isSimpleAstIfPattern(a)) {
-            willNotWorkInAst(
-              "AST IF currently supports only simple value branches.")
           }
         }
 

@@ -378,6 +378,15 @@ case class GpuCaseWhen(
     isCaseWhenFusionSupportedType(inputTypesForMerging.head) &&
     (branches.map(_._2) ++ elseValue).forall(_.isInstanceOf[GpuLiteral])
 
+  override def selfUsesRowIrJitAst: Boolean = true
+
+  override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
+    val fallback: Expression = elseValue.getOrElse(GpuLiteral(null, dataType))
+    branches.foldRight(fallback) { case ((predicate, value), falseValue) =>
+      GpuIf(predicate, value, falseValue)
+    }.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns)
+  }
+
   override def checkInputDataTypes(): TypeCheckResult = {
     if (TypeCoercion.haveSameType(inputTypesForMerging)) {
       // Make sure all branch conditions are boolean types.

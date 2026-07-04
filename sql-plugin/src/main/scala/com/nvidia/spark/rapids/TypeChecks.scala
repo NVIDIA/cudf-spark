@@ -1058,11 +1058,12 @@ object CaseWhenCheck extends ExprChecks {
   val check: TypeSig = (TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128 +
     TypeSig.ARRAY + TypeSig.STRUCT + TypeSig.MAP + TypeSig.BINARY).nested()
 
+  val astCheck: TypeSig = TypeSig.astTypes - TypeSig.STRING
+
   val sparkSig: TypeSig = TypeSig.all
 
   override def tagAst(meta: BaseExprMeta[_]): Unit = {
-    meta.willNotWorkInAst(AstExprContext.notSupportedMsg)
-    // when this supports AST tagBase(exprMeta, meta.willNotWorkInAst)
+    tagBase(meta, meta.willNotWorkInAst, astCheck)
   }
 
   override def tag(meta: RapidsMeta[_, _, _]): Unit = {
@@ -1071,11 +1072,14 @@ object CaseWhenCheck extends ExprChecks {
     if (context != ProjectExprContext) {
       meta.willNotWorkOnGpu(s"this is not supported in the $context context")
     } else {
-      tagBase(exprMeta, meta.willNotWorkOnGpu)
+      tagBase(exprMeta, meta.willNotWorkOnGpu, check)
     }
   }
 
-  private[this] def tagBase(exprMeta: BaseExprMeta[_], willNotWork: String => Unit): Unit = {
+  private[this] def tagBase(
+      exprMeta: BaseExprMeta[_],
+      willNotWork: String => Unit,
+      valueCheck: TypeSig): Unit = {
     // children of CaseWhen: branches.flatMap(b => b._1 :: b._2 :: Nil) ++ elseValue (Optional)
     //
     // The length of children will be odd if elseValue is not None, which means we can detect
@@ -1083,21 +1087,26 @@ object CaseWhenCheck extends ExprChecks {
     exprMeta.childExprs.grouped(2).foreach {
       case Seq(pred, value) =>
         TypeSig.BOOLEAN.tagExprParam(exprMeta, pred, "predicate", willNotWork)
-        check.tagExprParam(exprMeta, value, "value", willNotWork)
+        valueCheck.tagExprParam(exprMeta, value, "value", willNotWork)
       case Seq(elseValue) =>
-        check.tagExprParam(exprMeta, elseValue, "else", willNotWork)
+        valueCheck.tagExprParam(exprMeta, elseValue, "else", willNotWork)
     }
   }
 
   override def support(dataType: TypeEnum.Value):
     Map[ExpressionContext, Map[String, SupportLevel]] = {
     val projectSupport = check.getSupportLevel(dataType, sparkSig)
-    val projectPredSupport = TypeSig.BOOLEAN.getSupportLevel(dataType, TypeSig.BOOLEAN)
-    Map((ProjectExprContext,
-        Map(
-          ("predicate", projectPredSupport),
-          ("value", projectSupport),
-          ("result", projectSupport))))
+    val astSupport = astCheck.getSupportLevel(dataType, sparkSig)
+    val predicateSupport = TypeSig.BOOLEAN.getSupportLevel(dataType, TypeSig.BOOLEAN)
+    Map(
+      ProjectExprContext -> Map(
+        "predicate" -> predicateSupport,
+        "value" -> projectSupport,
+        "result" -> projectSupport),
+      AstExprContext -> Map(
+        "predicate" -> predicateSupport,
+        "value" -> astSupport,
+        "result" -> astSupport))
   }
 }
 
