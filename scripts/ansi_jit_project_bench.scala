@@ -44,7 +44,7 @@
  *   BENCH_EXPR_SUITES=mixed
  *   BENCH_WARMUPS=1
  *   BENCH_ITERS=3
- *   BENCH_MODES=CPU,GPU_PROJECT,GPU_AST_JIT_COLD,GPU_AST_JIT_PCH_WARM_KERNEL_COLD,GPU_AST_JIT_HOT
+ *   BENCH_MODES=CPU,GPU_PROJECT,GPU_AST_JIT_COLD,GPU_AST_JIT_DISK_WARM,GPU_AST_JIT_PCH_WARM_KERNEL_COLD,GPU_AST_JIT_HOT
  *   BENCH_BASE_PATH=/tmp/ansi_jit_project_bench
  *   BENCH_DATA_PATH=/tmp/ansi_jit_project_bench/parquet_v2_rows_100000000_parts_16
  *   BENCH_RESULT_CSV_PATH=/tmp/ansi_jit_project_bench/results.csv
@@ -133,6 +133,7 @@ object AnsiJitProjectBench {
       "spark.rapids.sql.projectAstEnabled" -> "false",
       "spark.rapids.sql.projectAstAnsiArithmeticEnabled" -> "false")),
     Mode("GPU_AST_JIT_COLD", astJitConfs, "cold"),
+    Mode("GPU_AST_JIT_DISK_WARM", astJitConfs, "disk_warm"),
     Mode("GPU_AST_JIT_PCH_WARM_KERNEL_COLD", astJitConfs, "pch_warm_kernel_cold"),
     Mode("GPU_AST_JIT_HOT", astJitConfs, "hot")
   )
@@ -243,7 +244,8 @@ object AnsiJitProjectBench {
   def isPchWarmKernelCold(mode: Mode): Boolean =
     mode.jitCacheState == "pch_warm_kernel_cold"
 
-  def isColdMeasured(mode: Mode): Boolean = isFullCold(mode) || isPchWarmKernelCold(mode)
+  def isProcessColdMeasured(mode: Mode): Boolean =
+    isFullCold(mode) || mode.jitCacheState == "disk_warm" || isPchWarmKernelCold(mode)
 
   var warnedColdCacheNotCleared = false
 
@@ -705,6 +707,8 @@ object AnsiJitProjectBench {
     println("  GPU_AST_JIT_HOT uses warmups to prime the JIT cache before measured runs.")
     println("  GPU_AST_JIT_COLD clears LIBCUDF_KERNEL_CACHE_PATH, skips warmups, and runs one " +
       "measured iteration per expression shape.")
+    println("  GPU_AST_JIT_DISK_WARM reuses the matching GPU_AST_JIT_COLD disk cache in a fresh " +
+      "process, skips warmups, and runs one measured iteration per expression shape.")
     println("  GPU_AST_JIT_PCH_WARM_KERNEL_COLD runs a distinct one-row AST probe in the same " +
       "process, then measures target expressions with warm automatic PCH and cold kernel keys.")
     println("  With BENCH_CONSUME_MODE=aggregate, CPU and GPU run the same SQL query end to end.")
@@ -770,21 +774,21 @@ object AnsiJitProjectBench {
     if (sys.env.get("LIBCUDF_JIT_ENABLED") != Some("1")) {
       println("WARNING: LIBCUDF_JIT_ENABLED is not 1. GPU_AST_JIT_* modes are expected to fail.")
     }
-    if (modes.exists(isColdMeasured) && kernelCachePath.isEmpty) {
+    if (modes.exists(isProcessColdMeasured) && kernelCachePath.isEmpty) {
       println("WARNING: GPU_AST_JIT_* cold modes cannot force a cold disk cache without " +
         "LIBCUDF_KERNEL_CACHE_PATH.")
     }
-    if (modes.exists(isColdMeasured) &&
+    if (modes.exists(isProcessColdMeasured) &&
         !getConf("spark.master").exists(_.startsWith("local"))) {
       println("WARNING: GPU_AST_JIT_* cold cache clearing only deletes the driver-local path.")
     }
     val hotIndex = modes.indexWhere(_.jitCacheState == "hot")
-    val coldIndex = modes.indexWhere(isColdMeasured)
+    val coldIndex = modes.indexWhere(isProcessColdMeasured)
     if (hotIndex >= 0 && coldIndex >= 0 && hotIndex < coldIndex) {
       println("WARNING: GPU_AST_JIT_HOT appears before GPU_AST_JIT_* cold modes; executor process " +
         "cache may already be warm for cold runs.")
     }
-    if (modes.exists(isColdMeasured) && !freshAppMode) {
+    if (modes.exists(isProcessColdMeasured) && !freshAppMode) {
       println("WARNING: GPU_AST_JIT_* cold modes cannot clear libcudf's in-process JIT cache from " +
         "Scala. Use a fresh Spark app for repeated process-cold samples.")
     }
@@ -810,15 +814,15 @@ object AnsiJitProjectBench {
               prewarmPch(mode, exprSuite, exprCount, exprDepth)
             }
             val modeWarmups = mode.jitCacheState match {
-              case "cold" | "pch_warm_kernel_cold" => 0
+              case "cold" | "disk_warm" | "pch_warm_kernel_cold" => 0
               case "hot" if warmups == 0 => 1
               case _ => warmups
             }
-            val modeIters = if (isColdMeasured(mode)) 1 else iters
-            if (isColdMeasured(mode) && warmups != 0) {
+            val modeIters = if (isProcessColdMeasured(mode)) 1 else iters
+            if (isProcessColdMeasured(mode) && warmups != 0) {
               println(s"Skipping warmups for ${mode.name}.")
             }
-            if (isColdMeasured(mode) && iters != 1) {
+            if (isProcessColdMeasured(mode) && iters != 1) {
               println(s"Using one measured iteration for ${mode.name}. " +
                 "Rerun in a fresh Spark app for repeated cold samples.")
             }

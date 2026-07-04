@@ -25,7 +25,7 @@ BENCH_DATA_PATH="${BENCH_DATA_PATH:-}"
 BENCH_EXPR_SUITES="${BENCH_EXPR_SUITES:-mixed}"
 BENCH_EXPR_COUNTS="${BENCH_EXPR_COUNTS:-8}"
 BENCH_EXPR_DEPTHS="${BENCH_EXPR_DEPTHS:-1,4,8}"
-BENCH_MODES="${BENCH_MODES:-CPU,GPU_PROJECT,GPU_AST_JIT_COLD,GPU_AST_JIT_PCH_WARM_KERNEL_COLD,GPU_AST_JIT_HOT}"
+BENCH_MODES="${BENCH_MODES:-CPU,GPU_PROJECT,GPU_AST_JIT_COLD,GPU_AST_JIT_DISK_WARM,GPU_AST_JIT_PCH_WARM_KERNEL_COLD,GPU_AST_JIT_HOT}"
 BENCH_APP_REPEATS="${BENCH_APP_REPEATS:-1}"
 BENCH_WARMUPS="${BENCH_WARMUPS:-1}"
 BENCH_ITERS="${BENCH_ITERS:-3}"
@@ -239,8 +239,18 @@ else
             run_name="${run_index}_${safe_suite}_c${count}_d${depth}_${safe_mode}_r${repeat}"
             run_csv="${BENCH_RESULTS_DIR}/${run_name}.csv"
             run_log="${BENCH_RESULTS_DIR}/${run_name}.log"
-            run_cache="${BENCH_KERNEL_CACHE_BASE}/${run_name}"
             profile_base="${BENCH_PROFILE_OUTPUT_DIR}/${run_name}"
+            cache_pair_name="${safe_suite}_c${count}_d${depth}_r${repeat}"
+            if [[ "${mode}" == "GPU_AST_JIT_COLD" ]]; then
+              run_cache="${BENCH_KERNEL_CACHE_BASE}/${cache_pair_name}"
+              reset_run_cache=true
+            elif [[ "${mode}" == "GPU_AST_JIT_DISK_WARM" ]]; then
+              run_cache="${BENCH_KERNEL_CACHE_BASE}/${cache_pair_name}"
+              reset_run_cache=false
+            else
+              run_cache="${BENCH_KERNEL_CACHE_BASE}/${run_name}"
+              reset_run_cache=true
+            fi
 
             if [[ "${BENCH_SKIP_EXISTING}" == "true" && -s "${run_csv}" ]]; then
               echo "[$run_index] skip existing suite=${suite} count=${count} depth=${depth} " \
@@ -258,8 +268,15 @@ else
                   exit 1
                   ;;
               esac
-              rm -rf "${run_cache}"
-              mkdir -p "${run_cache}"
+              if [[ "${reset_run_cache}" == "true" ]]; then
+                rm -rf "${run_cache}"
+                mkdir -p "${run_cache}"
+              elif [[ ! -d "${run_cache}" ||
+                  -z "$(find "${run_cache}" -mindepth 1 -print -quit)" ]]; then
+                echo "Disk-warm mode requires a populated matching cold cache: ${run_cache}" >&2
+                echo "Run GPU_AST_JIT_COLD before GPU_AST_JIT_DISK_WARM with the same shape and repeat." >&2
+                exit 1
+              fi
             fi
 
             run_spark_args=("${spark_args[@]}")
@@ -372,9 +389,10 @@ mode_order = {
     "CPU": 0,
     "GPU_PROJECT": 1,
     "GPU_AST_JIT_COLD": 2,
-    "GPU_AST_JIT_PCH_WARM_KERNEL_COLD": 3,
-    "GPU_AST_JIT_HOT": 4,
-    "GPU_AST_JIT": 4,
+    "GPU_AST_JIT_DISK_WARM": 3,
+    "GPU_AST_JIT_PCH_WARM_KERNEL_COLD": 4,
+    "GPU_AST_JIT_HOT": 5,
+    "GPU_AST_JIT": 5,
 }
 suite_order = {
     ("mixed" if suite.strip().lower() == "all"
