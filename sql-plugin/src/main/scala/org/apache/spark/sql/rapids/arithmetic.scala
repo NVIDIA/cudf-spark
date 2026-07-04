@@ -563,6 +563,12 @@ trait GpuDecimalMultiplyBase extends GpuExpression {
   private[this] lazy val intermediateResultType =
     DecimalMultiplyChecks.intermediateResultType(lhsType, rhsType, dataType)
 
+  override def selfUsesRowIrJitAst: Boolean =
+    DecimalMultiplyChecks.canUseAst(lhsType, rhsType, dataType)
+
+  override def convertToAst(numFirstTableColumns: Int): ast.AstExpression =
+    DecimalMultiplyChecks.convertToAst(left, right, dataType, numFirstTableColumns)
+
   def regularMultiply(batch: ColumnarBatch): GpuColumnVector = {
     val castLhs = withResource(left.columnarEval(batch)) { lhs =>
       GpuCast.doCast(
@@ -647,6 +653,44 @@ trait GpuDecimalMultiplyBase extends GpuExpression {
 }
 
 object DecimalMultiplyChecks {
+  private def astInputTypes(
+      lhs: DecimalType,
+      rhs: DecimalType,
+      output: DecimalType): (DecimalType, DecimalType) =
+    (DecimalType(output.precision, lhs.scale), DecimalType(output.precision, rhs.scale))
+
+  def canUseAst(lhs: DataType, rhs: DataType, output: DataType): Boolean =
+    (lhs, rhs, output) match {
+      case (l: DecimalType, r: DecimalType, out: DecimalType) =>
+        val rawPrecision = l.precision + r.precision + 1
+        val rawScale = l.scale + r.scale
+        val (astLhsType, astRhsType) = astInputTypes(l, r, out)
+        rawPrecision <= DType.DECIMAL128_MAX_PRECISION &&
+          out == DecimalType(rawPrecision, rawScale) &&
+          GpuCast.canDecimalCastToAst(l, astLhsType) &&
+          GpuCast.canDecimalCastToAst(r, astRhsType)
+      case _ => false
+    }
+
+  def convertToAst(
+      lhs: Expression,
+      rhs: Expression,
+      output: DecimalType,
+      numFirstTableColumns: Int): ast.AstExpression = {
+    require(canUseAst(lhs.dataType, rhs.dataType, output),
+      "Decimal multiplication does not have an exact AST result type")
+    val lhsType = lhs.dataType.asInstanceOf[DecimalType]
+    val rhsType = rhs.dataType.asInstanceOf[DecimalType]
+    val (astLhsType, astRhsType) = astInputTypes(lhsType, rhsType, output)
+    val lhsAst = GpuCast.decimalCastToAst(
+      lhs.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns),
+      lhsType, astLhsType, ansiMode = false)
+    val rhsAst = GpuCast.decimalCastToAst(
+      rhs.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns),
+      rhsType, astRhsType, ansiMode = false)
+    new ast.JitOperation(ast.JitOperator.MUL, lhsAst, rhsAst)
+  }
+
   // For Spark the final desired output is
   // new_scale = lhs.scale + rhs.scale
   // new_precision = lhs.precision + rhs.precision + 1
