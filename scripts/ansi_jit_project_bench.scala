@@ -473,6 +473,16 @@ object AnsiJitProjectBench {
     }
   }
 
+  def makeLiteralExpr(idx: Int): Column =
+    typedLit(104729L + idx, LongType).as(s"p_$idx")
+
+  def makeDuplicateLiteralExpr(idx: Int): Column =
+    typedLit(104729L, LongType).as(s"p_$idx")
+
+  def makeMixedLiteralExpr(idx: Int, depth: Int): Column = {
+    if ((idx & 1) == 0) makeTryArithmeticExpr(idx, depth) else makeLiteralExpr(idx)
+  }
+
   val mixedExprSuites: Seq[String] = Seq("arithmetic", "div_mod", "conditionals", "casts",
     "shifts")
 
@@ -491,10 +501,14 @@ object AnsiJitProjectBench {
     case "pass_through" => makePassThroughExpr(idx)
     case "mixed_pass_through" => makeMixedPassThroughExpr(idx, depth)
     case "duplicate_try_pass_through" => makeDuplicateTryPassThroughExpr(idx, depth)
+    case "literal" => makeLiteralExpr(idx)
+    case "duplicate_literal" => makeDuplicateLiteralExpr(idx)
+    case "mixed_literal" => makeMixedLiteralExpr(idx, depth)
     case other => throw new IllegalArgumentException(
       s"Unknown BENCH_EXPR_SUITES entry $other. Expected mixed, arithmetic, try_arithmetic, " +
         "div_mod, conditionals, casts, decimal_cast, shifts, pass_through, " +
-        "mixed_pass_through, or duplicate_try_pass_through.")
+        "mixed_pass_through, duplicate_try_pass_through, literal, duplicate_literal, " +
+        "or mixed_literal.")
   }
 
   def makeQuery(exprSuite: String, exprCount: Int, exprDepth: Int): DataFrame = {
