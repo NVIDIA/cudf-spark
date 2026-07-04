@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -49,7 +49,11 @@ case class GpuJsonToStructs(
   override protected def doColumnar(input: GpuColumnVector): cudf.ColumnVector = {
     NvtxRegistry.JSON_TO_STRUCTS {
       schema match {
-        case _: MapType => JSONUtils.extractRawMapFromJsonString(input.getBase, cudfOptions)
+        case _: MapType =>
+          (JSONUtils.extractRawMapFromJsonString(input.getBase, cudfOptions):
+            @scala.annotation.nowarn(
+              "cat=deprecation&msg=method extractRawMapFromJsonString in class " +
+                "JSONUtils is deprecated"))
         case struct: StructType =>
           val parsedStructs = JSONUtils.fromJSONToStructs(input.getBase, makeSchema(struct),
             cudfOptions, parsedOptions.locale == Locale.US)
