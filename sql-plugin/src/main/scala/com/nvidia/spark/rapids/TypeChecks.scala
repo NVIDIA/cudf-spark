@@ -699,7 +699,7 @@ object TypeSig {
   val astTypes: TypeSig = BOOLEAN + integral + fp + TIMESTAMP + DATE + STRING
 
   /** All AST types that work for comparisons */
-  val comparisonAstTypes: TypeSig = astTypes - fp
+  val comparisonAstTypes: TypeSig = astTypes - fp + DECIMAL_128
 
   /** All types that can appear in an implicit cast AST expression */
   val implicitCastsAstTypes: TypeSig = astTypes - BYTE - SHORT

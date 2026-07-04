@@ -241,6 +241,7 @@ case class GpuEqualNullSafe(left: Expression, right: Expression) extends CudfBin
   override def nullable: Boolean = false
   override def outputTypeOverride: DType = DType.BOOL8
   override def binaryOp: BinaryOp = BinaryOp.NULL_EQUALS
+  override def astOperator: Option[BinaryOperator] = Some(ast.BinaryOperator.NULL_EQUAL)
 
   override def doColumnar(lhs: GpuColumnVector, rhs: GpuColumnVector): ColumnVector = {
     evaluateAndFixFloatingPointResult(super.doColumnar(lhs, rhs), lhs.getBase.isNan,
