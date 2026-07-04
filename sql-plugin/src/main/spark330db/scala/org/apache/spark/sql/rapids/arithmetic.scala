@@ -324,11 +324,13 @@ case class GpuDecimalRemainder(
   private[this] lazy val intermediateRhsType =
     DecimalRemainderChecks.intermediateLhsRhsType(lhsType, rhsType)
 
-  private[this] def divByZeroFixes(rhs: ColumnVector): ColumnVector = {
+  private[this] def divByZeroFixes(lhs: ColumnView, rhs: ColumnVector): ColumnVector = {
     if (failOnError) {
-      withResource(GpuDivModLike.makeZeroScalar(rhs.getType)) { zeroScalar =>
-        if (rhs.contains(zeroScalar)) {
-          throw RapidsErrorUtils.divByZeroError(origin)
+      withResource(NullUtilities.mergeNulls(rhs, lhs)) { nullMergedRhs =>
+        withResource(GpuDivModLike.makeZeroScalar(rhs.getType)) { zeroScalar =>
+          if (nullMergedRhs.contains(zeroScalar)) {
+            throw RapidsErrorUtils.divByZeroError(origin)
+          }
         }
       }
       rhs.incRefCount()
@@ -352,7 +354,7 @@ case class GpuDecimalRemainder(
     }
     val retTab = withResource(castLhs) { castLhs =>
       val castRhs = withResource(right.columnarEval(batch)) { rhs =>
-        withResource(divByZeroFixes(rhs.getBase)) { fixed =>
+        withResource(divByZeroFixes(castLhs, rhs.getBase)) { fixed =>
           fixed.castTo(DType.create(DType.DTypeEnum.DECIMAL128, fixed.getType.getScale))
         }
       }
@@ -391,7 +393,7 @@ case class GpuDecimalRemainder(
     }
     withResource(castLhs) { castLhs =>
       val castRhs = withResource(right.columnarEval(batch)) { rhs =>
-        withResource(divByZeroFixes(rhs.getBase)) { fixed =>
+        withResource(divByZeroFixes(castLhs, rhs.getBase)) { fixed =>
           GpuCast.doCast(fixed, rhs.dataType(), intermediateRhsType,
             CastOptions.getArithmeticCastOptions(failOnError))
         }
