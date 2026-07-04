@@ -142,7 +142,8 @@ def test_jit_project_mixed_pass_through_and_computed_outputs():
         is_supported=True,
         func=lambda spark: spark.createDataFrame(
             [(1, 2), (None, 3), (4, None)], 'a INT, b INT').selectExpr(
-                'b AS x', 'a + 1 AS sum', 'a AS y', 'a * b AS product', 'b AS z'),
+                'b AS x', 'try_add(a, 1) AS sum', 'a AS y', 'a * b AS product',
+                'try_add(1, a) AS sum_again', 'b AS z'),
         conf=_ansi_jit_ast_enabled_conf)
 
 

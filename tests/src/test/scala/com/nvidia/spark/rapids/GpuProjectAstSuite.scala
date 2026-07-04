@@ -38,10 +38,63 @@ class GpuProjectAstSuite extends AnyFunSuite {
     val plan = GpuProjectAstExec.planOutputs(
       expressions, Seq(None, Some(sumErrorSite), None, Some(productErrorSite), None))
 
-    assert(plan.passThroughInputIndices == Seq(Some(1), None, Some(0), None, Some(1)))
+    assert(plan.outputSources == Seq(
+      GpuProjectAstExec.AstInputColumn(1),
+      GpuProjectAstExec.AstComputedColumn(0),
+      GpuProjectAstExec.AstInputColumn(0),
+      GpuProjectAstExec.AstComputedColumn(1),
+      GpuProjectAstExec.AstInputColumn(1)))
     assert(plan.expressionsToCompute == Seq(sum, product))
     assert(plan.errorSitesToCompute == Seq(Some(sumErrorSite), Some(productErrorSite)))
     assert(!plan.allPassThrough)
+  }
+
+  test("AST output planning reuses equivalent computed expressions") {
+    val a = GpuBoundReference(0, LongType, nullable = true)(NamedExpression.newExprId, "a")
+    val b = GpuBoundReference(1, LongType, nullable = true)(NamedExpression.newExprId, "b")
+    val sum = GpuAlias(GpuAdd(a, b, failOnError = false)(), "sum")()
+    val product = GpuAlias(GpuMultiply(a, b, failOnError = false)(), "product")()
+    val reversedSum = GpuAlias(GpuAdd(b, a, failOnError = false)(), "reversed_sum")()
+    val duplicateSum = GpuAlias(GpuAdd(a, b, failOnError = false)(), "duplicate_sum")()
+    val passB = GpuAlias(b, "pass_b")()
+    val expressions = Seq(sum, passB, product, reversedSum, duplicateSum)
+
+    val plan = GpuProjectAstExec.planOutputs(expressions, Seq.fill(expressions.size)(None))
+
+    assert(plan.outputSources == Seq(
+      GpuProjectAstExec.AstComputedColumn(0),
+      GpuProjectAstExec.AstInputColumn(1),
+      GpuProjectAstExec.AstComputedColumn(1),
+      GpuProjectAstExec.AstComputedColumn(0),
+      GpuProjectAstExec.AstComputedColumn(0)))
+    assert(plan.expressionsToCompute == Seq(sum, product))
+    assert(plan.errorSitesToCompute == Seq(None, None))
+  }
+
+  test("AST output planning does not reuse fallible or nondeterministic expressions") {
+    val a = GpuBoundReference(0, LongType, nullable = true)(NamedExpression.newExprId, "a")
+    val b = GpuBoundReference(1, LongType, nullable = true)(NamedExpression.newExprId, "b")
+    val checkedSum = GpuAlias(GpuAdd(a, b, failOnError = true)(), "checked_sum")()
+    val duplicateCheckedSum =
+      GpuAlias(GpuAdd(a, b, failOnError = true)(), "duplicate_checked_sum")()
+    val firstErrorSite = AstJitErrorSite(AstJitErrorKind.Add, checkedSum.origin)
+    val secondErrorSite = AstJitErrorSite(AstJitErrorKind.Add, duplicateCheckedSum.origin)
+    val nondeterministic = GpuAlias(GpuMonotonicallyIncreasingID(), "id")()
+    val duplicateNondeterministic = GpuAlias(GpuMonotonicallyIncreasingID(), "duplicate_id")()
+    val expressions =
+      Seq(checkedSum, duplicateCheckedSum, nondeterministic, duplicateNondeterministic)
+
+    val plan = GpuProjectAstExec.planOutputs(
+      expressions, Seq(Some(firstErrorSite), Some(secondErrorSite), None, None))
+
+    assert(plan.outputSources == expressions.indices.map(GpuProjectAstExec.AstComputedColumn))
+    assert(plan.expressionsToCompute == expressions)
+    assert(plan.errorSitesToCompute ==
+      Seq(Some(firstErrorSite), Some(secondErrorSite), None, None))
+
+    val uncheckedPlan = GpuProjectAstExec.planOutputs(
+      Seq(checkedSum, duplicateCheckedSum), Seq(None, None))
+    assert(uncheckedPlan.expressionsToCompute == Seq(checkedSum, duplicateCheckedSum))
   }
 
   test("AST output planning rejects error sites on pass-through expressions") {
@@ -64,6 +117,10 @@ class GpuProjectAstSuite extends AnyFunSuite {
     val plan = GpuProjectAstExec.planOutputs(expressions, Seq.fill(expressions.size)(None))
 
     assert(plan.allPassThrough)
+    assert(plan.outputSources == Seq(
+      GpuProjectAstExec.AstInputColumn(1),
+      GpuProjectAstExec.AstInputColumn(0),
+      GpuProjectAstExec.AstInputColumn(1)))
     assert(plan.expressionsToCompute.isEmpty)
     assert(plan.errorSitesToCompute.isEmpty)
   }

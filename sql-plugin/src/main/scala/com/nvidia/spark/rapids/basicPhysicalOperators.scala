@@ -17,6 +17,7 @@
 package com.nvidia.spark.rapids
 
 import scala.annotation.tailrec
+import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 import scala.util.control.NonFatal
 
@@ -43,6 +44,7 @@ import org.apache.spark.sql.catalyst.util.{ArrayData, MapData}
 import org.apache.spark.sql.execution.{FilterExec, ProjectExec, SampleExec, SparkPlan}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.{CudfBinaryPredicateWithSideEffect, GpuCreateArray, GpuCreateMap, GpuCreateNamedStruct, GpuPartitionwiseSampledRDD, GpuPoissonSampler}
+import org.apache.spark.sql.rapids.catalyst.expressions.GpuExpressionEquals
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.rapids.shims.RapidsErrorUtils
 import org.apache.spark.sql.types._
@@ -958,14 +960,24 @@ object GpuProjectAstExec {
   val LIBCUDF_JIT_ENV_KEY = "LIBCUDF_JIT_ENABLED"
   val LIBCUDF_JIT_EXECUTOR_ENV_KEY = s"spark.executorEnv.$LIBCUDF_JIT_ENV_KEY"
 
+  private[rapids] sealed trait AstProjectOutputSource
+  private[rapids] case class AstInputColumn(inputIndex: Int) extends AstProjectOutputSource
+  private[rapids] case class AstComputedColumn(computedIndex: Int) extends AstProjectOutputSource
+
   private[rapids] case class AstProjectOutputPlan(
-      passThroughInputIndices: Seq[Option[Int]],
+      outputSources: Seq[AstProjectOutputSource],
       expressionsToCompute: Seq[GpuExpression],
       errorSitesToCompute: Seq[Option[AstJitErrorSite]]) {
     require(expressionsToCompute.size == errorSitesToCompute.size,
       "AST expressions and error sites must have the same size")
 
     def allPassThrough: Boolean = expressionsToCompute.isEmpty
+  }
+
+  @tailrec
+  private def stripTopLevelAliases(expression: GpuExpression): GpuExpression = expression match {
+    case GpuAlias(child: GpuExpression, _) => stripTopLevelAliases(child)
+    case _ => expression
   }
 
   private[rapids] def planOutputs(
@@ -978,13 +990,38 @@ object GpuProjectAstExec {
       case (Some(_), site) => site.isEmpty
       case _ => true
     }, "Pass-through AST outputs cannot have error sites")
-    val computedOutputIndices = passThroughInputIndices.zipWithIndex.collect {
-      case (None, index) => index
+
+    val outputSources = ArrayBuffer.empty[AstProjectOutputSource]
+    val expressionsToCompute = ArrayBuffer.empty[GpuExpression]
+    val errorSitesToCompute = ArrayBuffer.empty[Option[AstJitErrorSite]]
+    val reusableExpressions = mutable.HashMap.empty[GpuExpressionEquals, Int]
+
+    expressions.indices.foreach { outputIndex =>
+      passThroughInputIndices(outputIndex) match {
+        case Some(inputIndex) =>
+          outputSources += AstInputColumn(inputIndex)
+        case None =>
+          val expression = expressions(outputIndex)
+          val errorSite = errorSites(outputIndex)
+          val valueExpression = stripTopLevelAliases(expression)
+          // Error sites carry output-specific QueryContext that semantic equality does not retain.
+          val canReuse = valueExpression.deterministic &&
+            !valueExpression.hasSideEffects && errorSite.isEmpty
+          val reuseKey = if (canReuse) Some(GpuExpressionEquals(valueExpression)) else None
+          val computedIndex = reuseKey.flatMap(reusableExpressions.get)
+          outputSources += AstComputedColumn(computedIndex.getOrElse {
+            val newIndex = expressionsToCompute.size
+            expressionsToCompute += expression
+            errorSitesToCompute += errorSite
+            reuseKey.foreach(reusableExpressions.put(_, newIndex))
+            newIndex
+          })
+      }
     }
     AstProjectOutputPlan(
-      passThroughInputIndices,
-      computedOutputIndices.map(expressions(_)),
-      computedOutputIndices.map(errorSites(_)))
+      outputSources.toSeq,
+      expressionsToCompute.toSeq,
+      errorSitesToCompute.toSeq)
   }
 
   private def isJitRuntimeRequired(conf: RapidsConf): Boolean =
@@ -1191,12 +1228,12 @@ case class GpuProjectAstExec(
           computedColumns: Seq[cudf.ColumnVector]): Table = {
         require(computedColumns.size == outputPlan.expressionsToCompute.size,
           "Computed AST columns must match the output plan")
-        val computedIterator = computedColumns.iterator
-        withResource(outputPlan.passThroughInputIndices.safeMap {
-          case Some(inputIndex) => inputTable.getColumn(inputIndex).incRefCount()
-          case None => computedIterator.next().incRefCount()
+        withResource(outputPlan.outputSources.safeMap {
+          case GpuProjectAstExec.AstInputColumn(inputIndex) =>
+            inputTable.getColumn(inputIndex).incRefCount()
+          case GpuProjectAstExec.AstComputedColumn(computedIndex) =>
+            computedColumns(computedIndex).incRefCount()
         }) { projectedColumns =>
-          require(!computedIterator.hasNext, "Computed AST columns must match the output plan")
           new Table(projectedColumns: _*)
         }
       }

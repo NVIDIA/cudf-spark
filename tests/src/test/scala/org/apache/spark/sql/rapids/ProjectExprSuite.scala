@@ -250,6 +250,7 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
         GpuAlias(GpuAdd(boundA, boundB, false)(), "sum")(),
         GpuAlias(boundA, "y")(),
         GpuAlias(GpuMultiply(boundA, boundB, failOnError = false)(), "product")(),
+        GpuAlias(GpuAdd(boundB, boundA, false)(), "sum_again")(),
         GpuAlias(boundB, "z")())
       val mockPlan = mock(classOf[SparkPlan])
       when(mockPlan.output).thenReturn(Seq(a, b))
@@ -260,12 +261,13 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
         withResource(ast.buildRetryableAstIterator(Seq(sb.getColumnarBatch).iterator)) { result =>
           withResource(result.next()) { cb =>
             assertResult(4)(cb.numRows)
-            assertResult(5)(cb.numCols)
+            assertResult(6)(cb.numCols)
             assertLongColumn(cb, 0, Seq(Some(6L), Some(7L), Some(8L), Some(9L)))
             assertLongColumn(cb, 1, Seq(Some(11L), None, Some(11L), Some(10L)))
             assertLongColumn(cb, 2, Seq(Some(5L), None, Some(3L), Some(1L)))
             assertLongColumn(cb, 3, Seq(Some(30L), None, Some(24L), Some(9L)))
-            assertLongColumn(cb, 4, Seq(Some(6L), Some(7L), Some(8L), Some(9L)))
+            assertLongColumn(cb, 4, Seq(Some(11L), None, Some(11L), Some(10L)))
+            assertLongColumn(cb, 5, Seq(Some(6L), Some(7L), Some(8L), Some(9L)))
           }
           assert(!result.hasNext)
         }
