@@ -201,7 +201,7 @@ ci_2() {
 
     # Download a Scala 2.12 build of spark
     prepare_spark $SPARK_VER 2.12
-    ./integration_tests/run_pyspark_from_build.sh
+    ./integration_tests/run_pyspark_from_build.sh --libcudf_jit_mode=required
 
     # enable avro test separately
     INCLUDE_SPARK_AVRO_JAR=true TEST='avro_test.py' ./integration_tests/run_pyspark_from_build.sh
