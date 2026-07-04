@@ -67,6 +67,18 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
     }
   }
 
+  private def buildFromBufferProjectBatch(): org.apache.spark.sql.vectorized.ColumnarBatch = {
+    withResource(new Table.TestBuilder()
+        .column(5L, null.asInstanceOf[java.lang.Long], 3L, 1L)
+        .column(6L.asInstanceOf[java.lang.Long], 7L, 8L, 9L)
+        .build()) { table =>
+      withResource(table.contiguousSplit()) { contiguousTables =>
+        GpuColumnVectorFromBuffer.from(
+          contiguousTables.head, Array[DataType](LongType, LongType))
+      }
+    }
+  }
+
   private def assertLongColumn(
       batch: org.apache.spark.sql.vectorized.ColumnarBatch,
       columnIndex: Int,
@@ -236,6 +248,80 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
     }
   }
 
+  test("AST literal project avoids JIT for rows-only input") {
+    RmmSpark.currentThreadIsDedicatedToTask(0)
+    try {
+      RmmSpark.getAndResetNumSplitRetryThrow(0)
+      withDebugMetrics {
+        val exprs = List(
+          GpuAlias(GpuLiteral(7L, LongType), "literal")(),
+          GpuAlias(GpuLiteral(null, LongType), "null_literal")(),
+          GpuAlias(GpuLiteral(7L, LongType), "duplicate_literal")())
+        val mockPlan = mock(classOf[SparkPlan])
+        when(mockPlan.output).thenReturn(Seq.empty)
+        val ast = GpuProjectAstExec(exprs.map(_.asInstanceOf[Expression]), mockPlan)()
+        val input = new org.apache.spark.sql.vectorized.ColumnarBatch(
+          Array.empty[org.apache.spark.sql.vectorized.ColumnVector], 5)
+        RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
+          RmmSpark.OomInjectionType.GPU.ordinal, 0)
+
+        withResource(ast.buildRetryableAstIterator(Seq(input).iterator)) { result =>
+          withResource(result.next()) { cb =>
+            assertResult(5)(cb.numRows)
+            assertResult(3)(cb.numCols)
+            assertLongColumn(cb, 0, Seq.fill(5)(Some(7L)))
+            assertLongColumn(cb, 1, Seq.fill(5)(None))
+            assertLongColumn(cb, 2, Seq.fill(5)(Some(7L)))
+          }
+          assert(!result.hasNext)
+        }
+        assertResult(0)(ast.metrics(GpuProjectAstExec.COMPILE_ASTS_TIME).value)
+        assertResult(0)(ast.metrics(GpuProjectAstExec.COMPUTE_ASTS_TIME).value)
+      }
+      assert(RmmSpark.getAndResetNumSplitRetryThrow(0) > 0,
+        "expected a split OOM during literal projection")
+    } finally {
+      RmmSpark.getAndResetNumSplitRetryThrow(0)
+      RmmSpark.removeCurrentDedicatedThreadAssociation(0)
+    }
+  }
+
+  test("AST pass-through and literal project converts from-buffer columns") {
+    withDebugMetrics {
+      val a = AttributeReference("a", LongType)()
+      val b = AttributeReference("b", LongType)()
+      val boundB = GpuBoundReference(1, LongType, true)(NamedExpression.newExprId, "b")
+      val exprs = List(
+        GpuAlias(GpuLiteral(7L, LongType), "literal")(),
+        GpuAlias(boundB, "b")(),
+        GpuAlias(GpuLiteral(7L, LongType), "duplicate_literal")(),
+        GpuAlias(GpuLiteral(null, LongType), "null_literal")())
+      val mockPlan = mock(classOf[SparkPlan])
+      when(mockPlan.output).thenReturn(Seq(a, b))
+      val ast = GpuProjectAstExec(exprs.map(_.asInstanceOf[Expression]), mockPlan)()
+
+      withResource(SpillableColumnarBatch(
+          buildFromBufferProjectBatch(), SpillPriorities.ACTIVE_ON_DECK_PRIORITY)) { sb =>
+        val input = sb.getColumnarBatch()
+        assert(input.column(1).isInstanceOf[GpuColumnVectorFromBuffer])
+        withResource(ast.buildRetryableAstIterator(Seq(input).iterator)) { result =>
+          withResource(result.next()) { cb =>
+            assertResult(4)(cb.numRows)
+            assertResult(4)(cb.numCols)
+            assertLongColumn(cb, 0, Seq.fill(4)(Some(7L)))
+            assertLongColumn(cb, 1, Seq(Some(6L), Some(7L), Some(8L), Some(9L)))
+            assertLongColumn(cb, 2, Seq.fill(4)(Some(7L)))
+            assertLongColumn(cb, 3, Seq.fill(4)(None))
+            assert(!cb.column(1).isInstanceOf[GpuColumnVectorFromBuffer])
+          }
+          assert(!result.hasNext)
+        }
+      }
+      assertResult(0)(ast.metrics(GpuProjectAstExec.COMPILE_ASTS_TIME).value)
+      assertResult(0)(ast.metrics(GpuProjectAstExec.COMPUTE_ASTS_TIME).value)
+    }
+  }
+
   test("AST mixed pass-through project retries with split") {
     RmmSpark.currentThreadIsDedicatedToTask(0)
     try {
@@ -249,6 +335,8 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
         GpuAlias(boundB, "x")(),
         GpuAlias(GpuAdd(boundA, boundB, false)(), "sum")(),
         GpuAlias(boundA, "y")(),
+        GpuAlias(GpuLiteral(7L, LongType), "literal")(),
+        GpuAlias(GpuLiteral(7L, LongType), "duplicate_literal")(),
         GpuAlias(GpuMultiply(boundA, boundB, failOnError = false)(), "product")(),
         GpuAlias(GpuAdd(boundB, boundA, false)(), "sum_again")(),
         GpuAlias(boundB, "z")())
@@ -261,13 +349,15 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
         withResource(ast.buildRetryableAstIterator(Seq(sb.getColumnarBatch).iterator)) { result =>
           withResource(result.next()) { cb =>
             assertResult(4)(cb.numRows)
-            assertResult(6)(cb.numCols)
+            assertResult(8)(cb.numCols)
             assertLongColumn(cb, 0, Seq(Some(6L), Some(7L), Some(8L), Some(9L)))
             assertLongColumn(cb, 1, Seq(Some(11L), None, Some(11L), Some(10L)))
             assertLongColumn(cb, 2, Seq(Some(5L), None, Some(3L), Some(1L)))
-            assertLongColumn(cb, 3, Seq(Some(30L), None, Some(24L), Some(9L)))
-            assertLongColumn(cb, 4, Seq(Some(11L), None, Some(11L), Some(10L)))
-            assertLongColumn(cb, 5, Seq(Some(6L), Some(7L), Some(8L), Some(9L)))
+            assertLongColumn(cb, 3, Seq.fill(4)(Some(7L)))
+            assertLongColumn(cb, 4, Seq.fill(4)(Some(7L)))
+            assertLongColumn(cb, 5, Seq(Some(30L), None, Some(24L), Some(9L)))
+            assertLongColumn(cb, 6, Seq(Some(11L), None, Some(11L), Some(10L)))
+            assertLongColumn(cb, 7, Seq(Some(6L), Some(7L), Some(8L), Some(9L)))
           }
           assert(!result.hasNext)
         }

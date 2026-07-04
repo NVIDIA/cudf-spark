@@ -71,6 +71,31 @@ class GpuProjectAstSuite extends AnyFunSuite {
     assert(plan.errorSitesToCompute == Seq(None, None))
   }
 
+  test("AST output planning projects top-level literals without JIT") {
+    val a = GpuBoundReference(0, LongType, nullable = true)(NamedExpression.newExprId, "a")
+    val literal = GpuAlias(GpuLiteral(7L, LongType), "literal")()
+    val duplicateLiteral = GpuAlias(GpuLiteral(7L, LongType), "duplicate_literal")()
+    val nestedLiteral = GpuAlias(
+      GpuAdd(a, GpuLiteral(1L, LongType), failOnError = false)(), "nested_literal")()
+    val forcedErrorLiteral = GpuAlias(GpuLiteral(9L, LongType), "error_literal")()
+    val errorSite = AstJitErrorSite(AstJitErrorKind.Add, forcedErrorLiteral.origin)
+    val expressions = Seq(a, literal, duplicateLiteral, nestedLiteral, forcedErrorLiteral)
+
+    val plan = GpuProjectAstExec.planOutputs(
+      expressions, Seq(None, None, None, None, Some(errorSite)))
+
+    assert(plan.outputSources == Seq(
+      GpuProjectAstExec.AstInputColumn(0),
+      GpuProjectAstExec.AstLiteralColumn(0),
+      GpuProjectAstExec.AstLiteralColumn(0),
+      GpuProjectAstExec.AstComputedColumn(0),
+      GpuProjectAstExec.AstComputedColumn(1)))
+    assert(plan.literalsToProject == Seq(literal))
+    assert(plan.expressionsToCompute == Seq(nestedLiteral, forcedErrorLiteral))
+    assert(plan.errorSitesToCompute == Seq(None, Some(errorSite)))
+    assert(!plan.allPassThrough)
+  }
+
   test("AST output planning does not reuse fallible or nondeterministic expressions") {
     val a = GpuBoundReference(0, LongType, nullable = true)(NamedExpression.newExprId, "a")
     val b = GpuBoundReference(1, LongType, nullable = true)(NamedExpression.newExprId, "b")
@@ -123,5 +148,6 @@ class GpuProjectAstSuite extends AnyFunSuite {
       GpuProjectAstExec.AstInputColumn(1)))
     assert(plan.expressionsToCompute.isEmpty)
     assert(plan.errorSitesToCompute.isEmpty)
+    assert(plan.literalsToProject.isEmpty)
   }
 }

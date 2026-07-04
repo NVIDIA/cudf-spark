@@ -962,16 +962,18 @@ object GpuProjectAstExec {
 
   private[rapids] sealed trait AstProjectOutputSource
   private[rapids] case class AstInputColumn(inputIndex: Int) extends AstProjectOutputSource
+  private[rapids] case class AstLiteralColumn(literalIndex: Int) extends AstProjectOutputSource
   private[rapids] case class AstComputedColumn(computedIndex: Int) extends AstProjectOutputSource
 
   private[rapids] case class AstProjectOutputPlan(
       outputSources: Seq[AstProjectOutputSource],
+      literalsToProject: Seq[GpuExpression],
       expressionsToCompute: Seq[GpuExpression],
       errorSitesToCompute: Seq[Option[AstJitErrorSite]]) {
     require(expressionsToCompute.size == errorSitesToCompute.size,
       "AST expressions and error sites must have the same size")
 
-    def allPassThrough: Boolean = expressionsToCompute.isEmpty
+    def allPassThrough: Boolean = literalsToProject.isEmpty && expressionsToCompute.isEmpty
   }
 
   @tailrec
@@ -992,8 +994,10 @@ object GpuProjectAstExec {
     }, "Pass-through AST outputs cannot have error sites")
 
     val outputSources = ArrayBuffer.empty[AstProjectOutputSource]
+    val literalsToProject = ArrayBuffer.empty[GpuExpression]
     val expressionsToCompute = ArrayBuffer.empty[GpuExpression]
     val errorSitesToCompute = ArrayBuffer.empty[Option[AstJitErrorSite]]
+    val reusableLiterals = mutable.HashMap.empty[GpuExpressionEquals, Int]
     val reusableExpressions = mutable.HashMap.empty[GpuExpressionEquals, Int]
 
     expressions.indices.foreach { outputIndex =>
@@ -1004,22 +1008,33 @@ object GpuProjectAstExec {
           val expression = expressions(outputIndex)
           val errorSite = errorSites(outputIndex)
           val valueExpression = stripTopLevelAliases(expression)
-          // Error sites carry output-specific QueryContext that semantic equality does not retain.
-          val canReuse = valueExpression.deterministic &&
-            !valueExpression.hasSideEffects && errorSite.isEmpty
-          val reuseKey = if (canReuse) Some(GpuExpressionEquals(valueExpression)) else None
-          val computedIndex = reuseKey.flatMap(reusableExpressions.get)
-          outputSources += AstComputedColumn(computedIndex.getOrElse {
-            val newIndex = expressionsToCompute.size
-            expressionsToCompute += expression
-            errorSitesToCompute += errorSite
-            reuseKey.foreach(reusableExpressions.put(_, newIndex))
-            newIndex
-          })
+          if (GpuExpressionsUtils.extractGpuLit(valueExpression).isDefined && errorSite.isEmpty) {
+            val reuseKey = GpuExpressionEquals(valueExpression)
+            outputSources += AstLiteralColumn(reusableLiterals.getOrElseUpdate(reuseKey, {
+              val newIndex = literalsToProject.size
+              literalsToProject += expression
+              newIndex
+            }))
+          } else {
+            // Error sites carry output-specific QueryContext that semantic equality does not
+            // retain.
+            val canReuse = valueExpression.deterministic &&
+              !valueExpression.hasSideEffects && errorSite.isEmpty
+            val reuseKey = if (canReuse) Some(GpuExpressionEquals(valueExpression)) else None
+            val computedIndex = reuseKey.flatMap(reusableExpressions.get)
+            outputSources += AstComputedColumn(computedIndex.getOrElse {
+              val newIndex = expressionsToCompute.size
+              expressionsToCompute += expression
+              errorSitesToCompute += errorSite
+              reuseKey.foreach(reusableExpressions.put(_, newIndex))
+              newIndex
+            })
+          }
       }
     }
     AstProjectOutputPlan(
       outputSources.toSeq,
+      literalsToProject.toSeq,
       expressionsToCompute.toSeq,
       errorSitesToCompute.toSeq)
   }
@@ -1178,6 +1193,17 @@ case class GpuProjectAstExec(
                 cb.close()
               }
             })
+          } else if (outputPlan.expressionsToCompute.isEmpty) {
+            val spillable = SpillableColumnarBatch(
+              input.next(), SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+            maybeSplittedItr = Iterator(GpuProjectExec.runWithSplitRetry(
+              spillable, Seq.empty, { cb =>
+                NvtxIdWithMetrics(NvtxRegistry.PROJECT_AST, opTime) {
+                  withResource(GpuProjectExec.project(cb, outputPlan.literalsToProject)) {
+                    literalColumns => makeProjectedBatch(cb, literalColumns)
+                  }
+                }
+              }))
           } else {
             val spillable = SpillableColumnarBatch(
               input.next(), SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
@@ -1186,11 +1212,21 @@ case class GpuProjectAstExec(
             maybeSplittedItr = Iterator(GpuProjectExec.runWithSplitRetry(
               spillable, Seq(compiledAstExprs), { cb =>
                 NvtxIdWithMetrics(NvtxRegistry.PROJECT_AST, opTime) {
-                  val projectedTable = withResource(tableFromBatch(cb)) { table =>
-                    withResource(compiledAstExprs.computeColumns(table)) { computedColumns =>
-                      makeProjectedTable(table, computedColumns)
-                    }
+                  val literalColumns = if (outputPlan.literalsToProject.isEmpty) {
+                    None
+                  } else {
+                    Some(GpuProjectExec.project(cb, outputPlan.literalsToProject))
                   }
+                  val projectedTable =
+                    withResource(literalColumns) {
+                      literalColumns =>
+                        withResource(tableFromBatch(cb)) { table =>
+                          withResource(compiledAstExprs.computeColumns(table)) {
+                            computedColumns =>
+                              makeProjectedTable(table, literalColumns, computedColumns)
+                          }
+                        }
+                    }
                   withResource(projectedTable) { _ =>
                     GpuColumnVector.from(projectedTable, outputTypes)
                   }
@@ -1209,6 +1245,24 @@ case class GpuProjectAstExec(
         compiledAstExprs.safeClose()
       }
 
+      private def makeProjectedBatch(
+          inputBatch: ColumnarBatch,
+          literalColumns: ColumnarBatch): ColumnarBatch = {
+        require(literalColumns.numCols() == outputPlan.literalsToProject.size,
+          "Literal columns must match the output plan")
+        val outputColumns = outputPlan.outputSources.zipWithIndex.safeMap {
+          case (GpuProjectAstExec.AstInputColumn(_), outputIndex) =>
+            boundProjectList(outputIndex).columnarEval(inputBatch).asInstanceOf[ColumnVector]
+          case (GpuProjectAstExec.AstLiteralColumn(literalIndex), _) =>
+            literalColumns.column(literalIndex).asInstanceOf[GpuColumnVector].incRefCount()
+          case (_: GpuProjectAstExec.AstComputedColumn, _) =>
+            throw new IllegalStateException("Computed AST columns require JIT evaluation")
+        }
+        closeOnExcept(outputColumns) { _ =>
+          new ColumnarBatch(outputColumns.toArray, inputBatch.numRows())
+        }
+      }
+
       private def tableFromBatch(cb: ColumnarBatch): Table = {
         if (cb.numCols != 0) {
           GpuColumnVector.from(cb)
@@ -1225,12 +1279,18 @@ case class GpuProjectAstExec(
 
       private def makeProjectedTable(
           inputTable: Table,
+          literalColumns: Option[ColumnarBatch],
           computedColumns: Seq[cudf.ColumnVector]): Table = {
+        require(literalColumns.map(_.numCols()).getOrElse(0) ==
+          outputPlan.literalsToProject.size, "Literal columns must match the output plan")
         require(computedColumns.size == outputPlan.expressionsToCompute.size,
           "Computed AST columns must match the output plan")
         withResource(outputPlan.outputSources.safeMap {
           case GpuProjectAstExec.AstInputColumn(inputIndex) =>
             inputTable.getColumn(inputIndex).incRefCount()
+          case GpuProjectAstExec.AstLiteralColumn(literalIndex) =>
+            literalColumns.get.column(literalIndex)
+              .asInstanceOf[GpuColumnVector].getBase.incRefCount()
           case GpuProjectAstExec.AstComputedColumn(computedIndex) =>
             computedColumns(computedIndex).incRefCount()
         }) { projectedColumns =>
