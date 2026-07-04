@@ -704,6 +704,8 @@ object TypeSig {
   /** All types that can appear in an implicit cast AST expression */
   val implicitCastsAstTypes: TypeSig = astTypes - BYTE - SHORT
 
+  val checkedArithmeticAstTypes: TypeSig = implicitCastsAstTypes + BYTE + SHORT
+
   def getDataType(expr: Expression): Option[DataType] = {
     try {
       Some(expr.dataType)

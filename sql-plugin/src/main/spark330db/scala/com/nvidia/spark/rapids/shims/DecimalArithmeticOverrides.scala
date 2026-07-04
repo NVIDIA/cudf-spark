@@ -57,7 +57,7 @@ object DecimalArithmeticOverrides {
       expr[Multiply](
         "Multiplication",
         ExprChecks.binaryProjectAndAst(
-          TypeSig.implicitCastsAstTypes + TypeSig.DECIMAL_128,
+          TypeSig.checkedArithmeticAstTypes + TypeSig.DECIMAL_128,
           TypeSig.gpuNumeric,
           TypeSig.cpuNumeric,
           ("lhs", TypeSig.gpuNumeric, TypeSig.cpuNumeric),
@@ -82,6 +82,10 @@ object DecimalArithmeticOverrides {
                       "overflow.")
                 }
               case _ => super.tagSelfForAst()
+            }
+            if (!SQLConf.get.ansiEnabled && GpuAnsi.requiresRowIrArithmeticAst(a.dataType)) {
+              willNotWorkInAst(
+                "AST Byte/Short multiplication requires ANSI row IR JIT support.")
             }
             if (SQLConf.get.ansiEnabled && GpuAnsi.needBasicOpOverflowCheck(a.dataType) &&
                 (!conf.isProjectAstAnsiArithmeticEnabled ||

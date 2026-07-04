@@ -190,8 +190,13 @@ object GpuAnsi {
   def needBasicOpOverflowCheck(dt: DataType): Boolean =
     dt.isInstanceOf[IntegralType]
 
+  def requiresRowIrArithmeticAst(dt: DataType): Boolean = dt match {
+    case ByteType | ShortType => true
+    case _ => false
+  }
+
   def supportsAnsiArithmeticAst(dt: DataType): Boolean = dt match {
-    case IntegerType | LongType => true
+    case ByteType | ShortType | IntegerType | LongType => true
     case _ => false
   }
 

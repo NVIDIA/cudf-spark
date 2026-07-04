@@ -59,7 +59,7 @@ object DayTimeIntervalShims {
     GpuOverrides.expr[Abs](
       "Absolute value",
       ExprChecks.unaryProjectAndAstInputMatchesOutput(
-        TypeSig.implicitCastsAstTypes + TypeSig.DECIMAL_128,
+        TypeSig.checkedArithmeticAstTypes + TypeSig.DECIMAL_128,
         TypeSig.gpuNumeric + GpuTypeShims.additionalArithmeticSupportedTypes,
         TypeSig.cpuNumeric + GpuTypeShims.additionalArithmeticSupportedTypes),
       (a, conf, p, r) => new UnaryAstExprMeta[Abs](a, conf, p, r) {
@@ -70,6 +70,9 @@ object DayTimeIntervalShims {
           if (a.dataType.isInstanceOf[DecimalType] &&
               !conf.isProjectAstAnsiArithmeticEnabled) {
             willNotWorkInAst("AST decimal abs requires row IR JIT support.")
+          }
+          if (!ansiEnabled && GpuAnsi.requiresRowIrArithmeticAst(a.dataType)) {
+            willNotWorkInAst("AST Byte/Short abs requires ANSI row IR JIT support.")
           }
           if (ansiEnabled && GpuAnsi.needBasicOpOverflowCheck(a.dataType) &&
               (!conf.isProjectAstAnsiArithmeticEnabled ||

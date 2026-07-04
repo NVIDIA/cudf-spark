@@ -144,7 +144,7 @@ object DecimalArithmeticOverrides {
     expr[Multiply](
       "Multiplication",
       ExprChecks.binaryProjectAndAst(
-        TypeSig.implicitCastsAstTypes,
+        TypeSig.checkedArithmeticAstTypes,
         TypeSig.gpuNumeric,
         TypeSig.cpuNumeric,
         ("lhs", TypeSig.gpuNumeric, TypeSig.cpuNumeric),
@@ -158,7 +158,10 @@ object DecimalArithmeticOverrides {
         }
 
         override def tagSelfForAst(): Unit = {
-          super.tagSelfForAst();
+          super.tagSelfForAst()
+          if (!SQLConf.get.ansiEnabled && GpuAnsi.requiresRowIrArithmeticAst(a.dataType)) {
+            willNotWorkInAst("AST Byte/Short multiplication requires ANSI row IR JIT support.")
+          }
           if (SQLConf.get.ansiEnabled && GpuAnsi.needBasicOpOverflowCheck(a.dataType) &&
               (!conf.isProjectAstAnsiArithmeticEnabled ||
                   !GpuAnsi.supportsAnsiArithmeticAst(a.dataType))) {

@@ -1200,7 +1200,7 @@ object GpuOverrides extends Logging {
     expr[UnaryMinus](
       "Negate a numeric value",
       ExprChecks.unaryProjectAndAstInputMatchesOutput(
-        TypeSig.implicitCastsAstTypes + TypeSig.DECIMAL_128,
+        TypeSig.checkedArithmeticAstTypes + TypeSig.DECIMAL_128,
         TypeSig.gpuNumeric + GpuTypeShims.additionalArithmeticSupportedTypes,
         TypeSig.numericAndInterval),
       (a, conf, p, r) => new UnaryAstExprMeta[UnaryMinus](a, conf, p, r) {
@@ -1211,6 +1211,9 @@ object GpuOverrides extends Logging {
           if (a.dataType.isInstanceOf[DecimalType] &&
               !conf.isProjectAstAnsiArithmeticEnabled) {
             willNotWorkInAst("AST decimal unary minus requires row IR JIT support.")
+          }
+          if (!ansiEnabled && GpuAnsi.requiresRowIrArithmeticAst(a.dataType)) {
+            willNotWorkInAst("AST Byte/Short unary minus requires ANSI row IR JIT support.")
           }
           if (ansiEnabled && GpuAnsi.needBasicOpOverflowCheck(a.dataType) &&
               (!conf.isProjectAstAnsiArithmeticEnabled ||
@@ -1990,7 +1993,7 @@ object GpuOverrides extends Logging {
     expr[Add](
       "Addition",
       ExprChecks.binaryProjectAndAst(
-        TypeSig.implicitCastsAstTypes + TypeSig.DECIMAL_128,
+        TypeSig.checkedArithmeticAstTypes + TypeSig.DECIMAL_128,
         TypeSig.gpuNumeric + GpuTypeShims.additionalArithmeticSupportedTypes,
         TypeSig.numericAndInterval,
         ("lhs", TypeSig.gpuNumeric + GpuTypeShims.additionalArithmeticSupportedTypes,
@@ -2019,6 +2022,9 @@ object GpuOverrides extends Logging {
               }
             case _ => super.tagSelfForAst()
           }
+          if (!ansiEnabled && GpuAnsi.requiresRowIrArithmeticAst(a.dataType)) {
+            willNotWorkInAst("AST Byte/Short addition requires ANSI row IR JIT support.")
+          }
           if (ansiEnabled && GpuAnsi.needBasicOpOverflowCheck(a.dataType) &&
               (!conf.isProjectAstAnsiArithmeticEnabled ||
                   !GpuAnsi.supportsAnsiArithmeticAst(a.dataType))) {
@@ -2032,7 +2038,7 @@ object GpuOverrides extends Logging {
     expr[Subtract](
       "Subtraction",
       ExprChecks.binaryProjectAndAst(
-        TypeSig.implicitCastsAstTypes + TypeSig.DECIMAL_128,
+        TypeSig.checkedArithmeticAstTypes + TypeSig.DECIMAL_128,
         TypeSig.gpuNumeric + GpuTypeShims.additionalArithmeticSupportedTypes,
         TypeSig.numericAndInterval,
         ("lhs", TypeSig.gpuNumeric + GpuTypeShims.additionalArithmeticSupportedTypes,
@@ -2060,6 +2066,9 @@ object GpuOverrides extends Logging {
                   "AST decimal subtraction requires an exact result without rounding or overflow.")
               }
             case _ => super.tagSelfForAst()
+          }
+          if (!ansiEnabled && GpuAnsi.requiresRowIrArithmeticAst(a.dataType)) {
+            willNotWorkInAst("AST Byte/Short subtraction requires ANSI row IR JIT support.")
           }
           if (ansiEnabled && GpuAnsi.needBasicOpOverflowCheck(a.dataType) &&
               (!conf.isProjectAstAnsiArithmeticEnabled ||
