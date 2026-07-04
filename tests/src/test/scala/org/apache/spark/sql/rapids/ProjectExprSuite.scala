@@ -144,7 +144,7 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
         "ret")()
       val mockPlan = mock(classOf[SparkPlan])
       when(mockPlan.output).thenReturn(Seq(a, b))
-      val ast = GpuProjectAstExec(List(expr.asInstanceOf[Expression]), mockPlan)
+      val ast = GpuProjectAstExec(List(expr.asInstanceOf[Expression]), mockPlan)()
       RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
         RmmSpark.OomInjectionType.GPU.ordinal, 0)
       withResource(sb) { sb =>
@@ -187,7 +187,7 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
         "ret")()
       val mockPlan = mock(classOf[SparkPlan])
       when(mockPlan.output).thenReturn(Seq(a, b))
-      val ast = GpuProjectAstExec(List(expr.asInstanceOf[Expression]), mockPlan)
+      val ast = GpuProjectAstExec(List(expr.asInstanceOf[Expression]), mockPlan)()
       withResource(sb) { sb =>
         val input = sb.getColumnarBatch
         RmmSpark.forceRetryOOM(RmmSpark.getCurrentThreadId, 1,
@@ -230,7 +230,7 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
         GpuLiteral(1L, LongType), false)(), "ret")()
       val mockPlan = mock(classOf[SparkPlan])
       when(mockPlan.output).thenReturn(Seq(a, b))
-      val ast = GpuProjectAstExec(List(expr.asInstanceOf[Expression]), mockPlan)
+      val ast = GpuProjectAstExec(List(expr.asInstanceOf[Expression]), mockPlan)()
       withResource(sb) { sb =>
         val input = sb.getColumnarBatch
         RmmSpark.forceRetryOOM(RmmSpark.getCurrentThreadId, 1,

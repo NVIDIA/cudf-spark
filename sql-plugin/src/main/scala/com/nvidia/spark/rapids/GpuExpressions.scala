@@ -25,6 +25,7 @@ import com.nvidia.spark.rapids.shims.{ShimBinaryExpression, ShimExpression, Shim
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.codegen.{CodegenContext, ExprCode}
+import org.apache.spark.sql.catalyst.trees.Origin
 import org.apache.spark.sql.types.{DataType, StringType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.unsafe.types.UTF8String
@@ -132,6 +133,21 @@ object GpuExpressionsUtils {
   }
 }
 
+sealed trait AstJitErrorKind extends Serializable
+
+object AstJitErrorKind {
+  case object Add extends AstJitErrorKind
+  case object Subtract extends AstJitErrorKind
+  case object Multiply extends AstJitErrorKind
+  case object Negate extends AstJitErrorKind
+  case object Abs extends AstJitErrorKind
+  case object IntegralDivide extends AstJitErrorKind
+  case object IntegralRemainder extends AstJitErrorKind
+  case object DecimalPrecision extends AstJitErrorKind
+}
+
+case class AstJitErrorSite(kind: AstJitErrorKind, origin: Origin)
+
 /**
  * An Expression that cannot be evaluated in the traditional row-by-row sense (hence Unevaluable)
  * but instead can be evaluated on an entire column batch at once.
@@ -211,6 +227,8 @@ trait GpuExpression extends Expression {
       case c: GpuExpression => c.hasSideEffects
       case _ => false // This path should never really happen
     }
+
+  def selfAstJitErrorSite: Option[AstJitErrorSite] = None
 
   /**
    * If this returns true then tiered project will stop looking to combine expressions when

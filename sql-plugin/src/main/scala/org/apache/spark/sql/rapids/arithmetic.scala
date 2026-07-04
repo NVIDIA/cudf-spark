@@ -216,6 +216,14 @@ case class GpuUnaryMinus(child: Expression, failOnError: Boolean) extends GpuUna
   override def hasSideEffects: Boolean = super.hasSideEffects ||
     (failOnError && GpuAnsi.needBasicOpOverflowCheck(dataType))
 
+  override def selfAstJitErrorSite: Option[AstJitErrorSite] = {
+    if (GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)) {
+      Some(AstJitErrorSite(AstJitErrorKind.Negate, origin))
+    } else {
+      None
+    }
+  }
+
   override def selfUsesRowIrJitAst: Boolean =
     GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)
 
@@ -300,6 +308,14 @@ case class GpuAbs(child: Expression, failOnError: Boolean) extends CudfUnaryExpr
   override def hasSideEffects: Boolean = super.hasSideEffects ||
     (failOnError && GpuAnsi.needBasicOpOverflowCheck(dataType))
 
+  override def selfAstJitErrorSite: Option[AstJitErrorSite] = {
+    if (GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)) {
+      Some(AstJitErrorSite(AstJitErrorKind.Abs, origin))
+    } else {
+      None
+    }
+  }
+
   override def selfUsesRowIrJitAst: Boolean =
     GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)
 
@@ -347,6 +363,14 @@ abstract class GpuAddBase extends CudfBinaryArithmetic with Serializable {
   override def hasSideEffects: Boolean =
     (failOnError && GpuAnsi.needBasicOpOverflowCheck(dataType)) || super.hasSideEffects
 
+  override def selfAstJitErrorSite: Option[AstJitErrorSite] = {
+    if (GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)) {
+      Some(AstJitErrorSite(AstJitErrorKind.Add, origin))
+    } else {
+      None
+    }
+  }
+
   override def selfUsesRowIrJitAst: Boolean =
     GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)
 
@@ -388,6 +412,14 @@ abstract class GpuSubtractBase extends CudfBinaryArithmetic with Serializable {
 
   override def binaryOp: BinaryOp = BinaryOp.SUB
   override def astOperator: Option[BinaryOperator] = Some(ast.BinaryOperator.SUB)
+
+  override def selfAstJitErrorSite: Option[AstJitErrorSite] = {
+    if (GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)) {
+      Some(AstJitErrorSite(AstJitErrorKind.Subtract, origin))
+    } else {
+      None
+    }
+  }
 
   override def selfUsesRowIrJitAst: Boolean =
     GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)
@@ -824,6 +856,14 @@ case class GpuMultiply(
   override def binaryOp: BinaryOp = BinaryOp.MUL
   override def astOperator: Option[BinaryOperator] = Some(ast.BinaryOperator.MUL)
 
+  override def selfAstJitErrorSite: Option[AstJitErrorSite] = {
+    if (GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)) {
+      Some(AstJitErrorSite(AstJitErrorKind.Multiply, origin))
+    } else {
+      None
+    }
+  }
+
   override def selfUsesRowIrJitAst: Boolean =
     GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)
 
@@ -1233,6 +1273,14 @@ abstract class GpuIntegralDivideParent(
 
   override def sqlOperator: String = "div"
 
+  override def selfAstJitErrorSite: Option[AstJitErrorSite] = {
+    if (GpuAnsi.shouldUseAnsiDivModAst(failOnError, left.dataType, right.dataType)) {
+      Some(AstJitErrorSite(AstJitErrorKind.IntegralDivide, origin))
+    } else {
+      None
+    }
+  }
+
   override def selfUsesRowIrJitAst: Boolean =
     GpuAnsi.shouldUseAnsiDivModAst(failOnError, left.dataType, right.dataType)
 
@@ -1254,6 +1302,14 @@ abstract class GpuRemainderBase(left: Expression, right: Expression)
   override def symbol: String = "%"
 
   override def binaryOp: BinaryOp = BinaryOp.MOD
+
+  override def selfAstJitErrorSite: Option[AstJitErrorSite] = {
+    if (GpuAnsi.shouldUseAnsiDivModAst(failOnError, left.dataType, right.dataType)) {
+      Some(AstJitErrorSite(AstJitErrorKind.IntegralRemainder, origin))
+    } else {
+      None
+    }
+  }
 
   override def selfUsesRowIrJitAst: Boolean =
     GpuAnsi.shouldUseAnsiDivModAst(failOnError, left.dataType, right.dataType)

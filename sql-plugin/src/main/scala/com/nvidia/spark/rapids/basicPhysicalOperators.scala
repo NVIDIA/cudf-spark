@@ -39,7 +39,6 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, PartitioningCollection, RangePartitioning, SinglePartition, UnknownPartitioning}
-import org.apache.spark.sql.catalyst.trees.CurrentOrigin
 import org.apache.spark.sql.catalyst.util.{ArrayData, MapData}
 import org.apache.spark.sql.execution.{FilterExec, ProjectExec, SampleExec, SparkPlan}
 import org.apache.spark.sql.internal.SQLConf
@@ -57,17 +56,38 @@ class GpuProjectExecMeta(
     p: Option[RapidsMeta[_, _, _]],
     r: DataFromReplacementRule) extends SparkPlanMeta[ProjectExec](proj, conf, p, r)
     with Logging {
+  private def tagAndCollectAstJitErrorSites(
+      gpuExprs: Seq[NamedExpression]): List[Option[AstJitErrorSite]] = {
+    childExprs.zip(gpuExprs).map { case (meta, gpuExpr) =>
+      val sites = gpuExpr.collect {
+        case expr: GpuExpression => expr.selfAstJitErrorSite
+      }.flatten
+      if (sites.exists(_.kind == AstJitErrorKind.DecimalPrecision)) {
+        meta.willNotWorkInAst(
+          "AST JIT decimal precision errors do not include the value required by Spark.")
+        None
+      } else if (sites.size > 1) {
+        meta.willNotWorkInAst(
+          "AST JIT cannot identify which fallible expression produced an evaluation error.")
+        None
+      } else {
+        sites.headOption
+      }
+    }.toList
+  }
+
   override def convertToGpu(): GpuExec = {
     // Force list to avoid recursive Java serialization of lazy list Seq implementation
     val gpuExprs = childExprs.map(_.convertToGpu().asInstanceOf[NamedExpression]).toList
     val gpuChild = childPlans.head.convertIfNeeded()
     if (conf.isProjectAstEnabled) {
+      val astJitErrorSites = tagAndCollectAstJitErrorSites(gpuExprs)
       val canUseAnsiJitAst =
         !conf.isProjectAstAnsiArithmeticEnabled || conf.isLibcudfJitConfigured
       // cuDF requires return column is fixed width
       val allReturnTypesFixedWidth = gpuExprs.forall(e => GpuBatchUtils.isFixedWidth(e.dataType))
       if (canUseAnsiJitAst && allReturnTypesFixedWidth && childExprs.forall(_.canThisBeAst)) {
-        return GpuProjectAstExec(gpuExprs, gpuChild)
+        return GpuProjectAstExec(gpuExprs, gpuChild)(astJitErrorSites)
       }
       // explain AST because this is optional and it is sometimes hard to debug
       if (conf.shouldExplain) {
@@ -952,14 +972,41 @@ object GpuProjectAstExec {
     }
   }
 
-  private def translateAstJitError(error: CudfException): Throwable = {
-    val message = Option(error.getMessage).getOrElse("")
-    if (message.contains("DIVISION_BY_ZERO")) {
-      RapidsErrorUtils.divByZeroError(CurrentOrigin.get)
-    } else if (message.contains("OVERFLOW")) {
-      RapidsErrorUtils.divOverflowError(CurrentOrigin.get)
-    } else {
-      error
+  private val JIT_OVERFLOW_MESSAGE = "Transform UDF evaluation failed with error `OVERFLOW`"
+  private val JIT_DIVISION_BY_ZERO_MESSAGE =
+    "Transform UDF evaluation failed with error `DIVISION_BY_ZERO`"
+
+  private def translateAstJitError(
+      error: CudfException,
+      site: Option[AstJitErrorSite]): Throwable = {
+    (Option(error.getMessage), site) match {
+      case (Some(JIT_DIVISION_BY_ZERO_MESSAGE),
+          Some(AstJitErrorSite(
+            AstJitErrorKind.IntegralDivide | AstJitErrorKind.IntegralRemainder, origin))) =>
+        RapidsErrorUtils.divByZeroError(origin)
+      case (Some(JIT_OVERFLOW_MESSAGE),
+          Some(AstJitErrorSite(AstJitErrorKind.IntegralDivide, origin))) =>
+        RapidsErrorUtils.divOverflowError(origin)
+      case (Some(JIT_OVERFLOW_MESSAGE), Some(AstJitErrorSite(kind, origin))) =>
+        kind match {
+          case AstJitErrorKind.Add =>
+            RapidsErrorUtils.arithmeticOverflowError(
+              "One or more rows overflow for Add operation.", origin)
+          case AstJitErrorKind.Subtract =>
+            RapidsErrorUtils.arithmeticOverflowError(
+              "One or more rows overflow for Subtract operation.", origin)
+          case AstJitErrorKind.Multiply =>
+            RapidsErrorUtils.arithmeticOverflowError(
+              "One or more rows overflow for Multiply operation.", origin)
+          case AstJitErrorKind.Negate =>
+            RapidsErrorUtils.arithmeticOverflowError(
+              "One or more rows overflow for minus operation", origin)
+          case AstJitErrorKind.Abs =>
+            RapidsErrorUtils.arithmeticOverflowError(
+              "One or more rows overflow for abs operation", origin)
+          case _ => error
+        }
+      case _ => error
     }
   }
 }
@@ -974,8 +1021,11 @@ case class GpuProjectAstExec(
     // serde: https://github.com/scala/scala/blob/2.12.x/src/library/scala/collection/
     //   immutable/List.scala#L516
     projectList: List[Expression],
-    child: SparkPlan
+    child: SparkPlan)(
+    val astJitErrorSites: List[Option[AstJitErrorSite]] = Nil
 ) extends GpuProjectExecLike {
+
+  override def otherCopyArgs: Seq[AnyRef] = astJitErrorSites :: Nil
 
   override lazy val additionalMetrics: Map[String, GpuMetric] = Map(
     OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY),
@@ -1001,12 +1051,19 @@ case class GpuProjectAstExec(
     val computeAstsTime = gpuLongMetric(GpuProjectAstExec.COMPUTE_ASTS_TIME)
     val boundProjectList = GpuBindReferences.bindGpuReferences(projectList, child.output,
       allMetrics)
+    val outputErrorSites = if (astJitErrorSites.isEmpty) {
+      List.fill(boundProjectList.size)(None)
+    } else {
+      require(astJitErrorSites.size == boundProjectList.size,
+        "AST JIT error sites must match the project expressions")
+      astJitErrorSites
+    }
     val outputTypes = output.map(_.dataType).toArray
     new GpuColumnarBatchIterator(true) {
       private[this] var maybeSplittedItr: Iterator[ColumnarBatch] = Iterator.empty
       private[this] val compiledAstExprs =
-        new RetryableCompiledAstExpressions(boundProjectList, opTime, compileAstsTime,
-          computeAstsTime)
+        new RetryableCompiledAstExpressions(boundProjectList, outputErrorSites, opTime,
+          compileAstsTime, computeAstsTime)
 
       override def hasNext: Boolean = maybeSplittedItr.hasNext || {
         if (input.hasNext) {
@@ -1066,6 +1123,7 @@ case class GpuProjectAstExec(
 
   private class RetryableCompiledAstExpressions(
       boundProjectList: Seq[GpuExpression],
+      errorSites: Seq[Option[AstJitErrorSite]],
       opTime: GpuMetric,
       compileAstsTime: GpuMetric,
       computeAstsTime: GpuMetric) extends Retryable with AutoCloseable {
@@ -1086,11 +1144,11 @@ case class GpuProjectAstExec(
       val expressions = compiledAstExprs.getOrElse(
         throw new IllegalStateException("AST expressions were not compiled before evaluation"))
       NvtxIdWithMetrics(NvtxRegistry.COMPUTE_ASTS, computeAstsTime) {
-        expressions.safeMap { expr =>
+        expressions.zip(errorSites).safeMap { case (expr, site) =>
           try {
             expr.computeColumn(table)
           } catch {
-            case e: CudfException => throw GpuProjectAstExec.translateAstJitError(e)
+            case e: CudfException => throw GpuProjectAstExec.translateAstJitError(e, site)
           }
         }
       }

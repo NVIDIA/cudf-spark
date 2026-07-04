@@ -1762,6 +1762,16 @@ case class GpuCast(
 
   override def selfUsesRowIrJitAst: Boolean = castUsesRowIrJitAst(child.dataType, dataType)
 
+  override def selfAstJitErrorSite: Option[AstJitErrorSite] = {
+    (child.dataType, dataType) match {
+      case (from: DecimalType, to: DecimalType)
+          if ansiMode && canDecimalCastToAst(from, to) &&
+            decimalCastNeedsPrecisionCheck(from, to) =>
+        Some(AstJitErrorSite(AstJitErrorKind.DecimalPrecision, origin))
+      case _ => None
+    }
+  }
+
   // when ansi mode is enabled, some cast expressions can throw exceptions on invalid inputs
   override def hasSideEffects: Boolean = super.hasSideEffects || {
     (child.dataType, dataType) match {
