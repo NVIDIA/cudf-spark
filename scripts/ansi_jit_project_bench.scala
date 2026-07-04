@@ -431,6 +431,16 @@ object AnsiJitProjectBench {
     expr(sql).as(s"p_$idx")
   }
 
+  val passThroughNames: Array[String] = Array(
+    "i0", "i1", "i2", "i3", "l0", "l1", "l2", "l3", "ni0", "ni1", "nl0")
+
+  def makePassThroughExpr(idx: Int): Column =
+    col(passThroughNames((idx * 5 + 1) % passThroughNames.length)).as(s"p_$idx")
+
+  def makeMixedPassThroughExpr(idx: Int, depth: Int): Column = {
+    if ((idx & 1) == 0) makePassThroughExpr(idx) else makeArithmeticExpr(idx, depth)
+  }
+
   val mixedExprSuites: Seq[String] = Seq("arithmetic", "div_mod", "conditionals", "casts",
     "shifts")
 
@@ -445,9 +455,11 @@ object AnsiJitProjectBench {
     case "conditionals" => makeConditionalExpr(idx, depth)
     case "casts" | "decimal_cast" => makeCastExpr(idx, depth)
     case "shifts" => makeShiftExpr(idx, depth)
+    case "pass_through" => makePassThroughExpr(idx)
+    case "mixed_pass_through" => makeMixedPassThroughExpr(idx, depth)
     case other => throw new IllegalArgumentException(
       s"Unknown BENCH_EXPR_SUITES entry $other. Expected mixed, arithmetic, div_mod, " +
-        "conditionals, casts, decimal_cast, or shifts.")
+        "conditionals, casts, decimal_cast, shifts, pass_through, or mixed_pass_through.")
   }
 
   def makeQuery(exprSuite: String, exprCount: Int, exprDepth: Int): DataFrame = {
