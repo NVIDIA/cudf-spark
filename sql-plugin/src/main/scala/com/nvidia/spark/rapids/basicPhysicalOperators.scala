@@ -1069,20 +1069,24 @@ case class GpuProjectAstExec(
       opTime: GpuMetric,
       compileAstsTime: GpuMetric,
       computeAstsTime: GpuMetric) extends Retryable with AutoCloseable {
-    private[this] var compiledAstExprs: Seq[cudf.ast.CompiledExpression] = compile()
+    private[this] var compiledAstExprs: Option[Seq[cudf.ast.CompiledExpression]] = None
 
-    override def checkpoint(): Unit = {}
-
-    override def restore(): Unit = {
-      val oldCompiledAstExprs = compiledAstExprs
-      compiledAstExprs = Nil
-      oldCompiledAstExprs.safeClose()
-      compiledAstExprs = compile()
+    override def checkpoint(): Unit = {
+      if (compiledAstExprs.isEmpty) {
+        val compiled = compile()
+        compiledAstExprs = Some(compiled)
+      }
     }
 
-    def computeColumns(table: Table): Seq[cudf.ColumnVector] =
+    override def restore(): Unit = {
+      closeCompiledAstExprs()
+    }
+
+    def computeColumns(table: Table): Seq[cudf.ColumnVector] = {
+      val expressions = compiledAstExprs.getOrElse(
+        throw new IllegalStateException("AST expressions were not compiled before evaluation"))
       NvtxIdWithMetrics(NvtxRegistry.COMPUTE_ASTS, computeAstsTime) {
-        compiledAstExprs.safeMap { expr =>
+        expressions.safeMap { expr =>
           try {
             expr.computeColumn(table)
           } catch {
@@ -1090,11 +1094,16 @@ case class GpuProjectAstExec(
           }
         }
       }
+    }
 
     override def close(): Unit = {
+      closeCompiledAstExprs()
+    }
+
+    private def closeCompiledAstExprs(): Unit = {
       val oldCompiledAstExprs = compiledAstExprs
-      compiledAstExprs = Nil
-      oldCompiledAstExprs.safeClose()
+      compiledAstExprs = None
+      oldCompiledAstExprs.foreach(_.safeClose())
     }
 
     private def compile(): Seq[cudf.ast.CompiledExpression] =

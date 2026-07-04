@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -134,6 +134,7 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
   test("AST retry with split") {
     RmmSpark.currentThreadIsDedicatedToTask(0)
     try {
+      RmmSpark.getAndResetNumSplitRetryThrow(0)
       val a = AttributeReference("a", LongType)()
       val b = AttributeReference("b", LongType)()
       val sb = buildProjectBatch()
@@ -165,7 +166,97 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
           assert(!result.hasNext)
         }
       }
+      assert(RmmSpark.getAndResetNumSplitRetryThrow(0) > 0,
+        "expected a split OOM during AST evaluation")
     } finally {
+      RmmSpark.getAndResetNumSplitRetryThrow(0)
+      RmmSpark.removeCurrentDedicatedThreadAssociation(0)
+    }
+  }
+
+  test("AST compute retry recompiles expressions") {
+    RmmSpark.currentThreadIsDedicatedToTask(0)
+    try {
+      RmmSpark.getAndResetNumRetryThrow(0)
+      val a = AttributeReference("a", LongType)()
+      val b = AttributeReference("b", LongType)()
+      val sb = buildProjectBatch()
+      val expr = GpuAlias(GpuAdd(
+        GpuBoundReference(0, LongType, true)(NamedExpression.newExprId, "a"),
+        GpuBoundReference(1, LongType, true)(NamedExpression.newExprId, "b"), false)(),
+        "ret")()
+      val mockPlan = mock(classOf[SparkPlan])
+      when(mockPlan.output).thenReturn(Seq(a, b))
+      val ast = GpuProjectAstExec(List(expr.asInstanceOf[Expression]), mockPlan)
+      withResource(sb) { sb =>
+        val input = sb.getColumnarBatch
+        RmmSpark.forceRetryOOM(RmmSpark.getCurrentThreadId, 1,
+          RmmSpark.OomInjectionType.GPU.ordinal, 0)
+        withResource(ast.buildRetryableAstIterator(Seq(input).iterator)) { result =>
+          withResource(result.next()) { cb =>
+            assertResult(4)(cb.numRows)
+            assertResult(1)(cb.numCols)
+            val gcv = cb.column(0).asInstanceOf[GpuColumnVector]
+            withResource(gcv.getBase.copyToHost()) { hcv =>
+              assert(!hcv.isNull(0))
+              assertResult(11L)(hcv.getLong(0))
+              assert(hcv.isNull(1))
+              assert(!hcv.isNull(2))
+              assertResult(11L)(hcv.getLong(2))
+              assert(!hcv.isNull(3))
+              assertResult(10L)(hcv.getLong(3))
+            }
+          }
+          assert(!result.hasNext)
+        }
+      }
+      assert(RmmSpark.getAndResetNumRetryThrow(0) > 0,
+        "expected an OOM during AST evaluation")
+    } finally {
+      RmmSpark.getAndResetNumRetryThrow(0)
+      RmmSpark.removeCurrentDedicatedThreadAssociation(0)
+    }
+  }
+
+  test("AST compile retry with literal") {
+    RmmSpark.currentThreadIsDedicatedToTask(0)
+    try {
+      RmmSpark.getAndResetNumRetryThrow(0)
+      val a = AttributeReference("a", LongType)()
+      val b = AttributeReference("b", LongType)()
+      val sb = buildProjectBatch()
+      val expr = GpuAlias(GpuAdd(
+        GpuBoundReference(0, LongType, true)(NamedExpression.newExprId, "a"),
+        GpuLiteral(1L, LongType), false)(), "ret")()
+      val mockPlan = mock(classOf[SparkPlan])
+      when(mockPlan.output).thenReturn(Seq(a, b))
+      val ast = GpuProjectAstExec(List(expr.asInstanceOf[Expression]), mockPlan)
+      withResource(sb) { sb =>
+        val input = sb.getColumnarBatch
+        RmmSpark.forceRetryOOM(RmmSpark.getCurrentThreadId, 1,
+          RmmSpark.OomInjectionType.GPU.ordinal, 0)
+        withResource(ast.buildRetryableAstIterator(Seq(input).iterator)) { result =>
+          withResource(result.next()) { cb =>
+            assertResult(4)(cb.numRows)
+            assertResult(1)(cb.numCols)
+            val gcv = cb.column(0).asInstanceOf[GpuColumnVector]
+            withResource(gcv.getBase.copyToHost()) { hcv =>
+              assert(!hcv.isNull(0))
+              assertResult(6L)(hcv.getLong(0))
+              assert(hcv.isNull(1))
+              assert(!hcv.isNull(2))
+              assertResult(4L)(hcv.getLong(2))
+              assert(!hcv.isNull(3))
+              assertResult(2L)(hcv.getLong(3))
+            }
+          }
+          assert(!result.hasNext)
+        }
+      }
+      assert(RmmSpark.getAndResetNumRetryThrow(0) > 0,
+        "expected an OOM during AST compilation")
+    } finally {
+      RmmSpark.getAndResetNumRetryThrow(0)
       RmmSpark.removeCurrentDedicatedThreadAssociation(0)
     }
   }
