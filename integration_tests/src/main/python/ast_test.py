@@ -127,6 +127,25 @@ def test_null_literal(spark_tmp_path, data_gen):
     assert_gpu_ast(is_supported=True,
                    func=lambda spark: spark.read.parquet(data_path).select(f.lit(None).cast(data_type)))
 
+
+def test_ast_project_pass_through_reorder_and_duplicates():
+    assert_gpu_ast(
+        is_supported=True,
+        func=lambda spark: spark.createDataFrame(
+            [(1, 2), (None, 3), (4, None)], 'a INT, b INT').selectExpr(
+                'b AS x', 'a AS y', 'b AS z'))
+
+
+@_requires_libcudf_jit
+def test_jit_project_mixed_pass_through_and_computed_outputs():
+    assert_gpu_ast(
+        is_supported=True,
+        func=lambda spark: spark.createDataFrame(
+            [(1, 2), (None, 3), (4, None)], 'a INT, b INT').selectExpr(
+                'b AS x', 'a + 1 AS sum', 'a AS y', 'a * b AS product', 'b AS z'),
+        conf=_ansi_jit_ast_enabled_conf)
+
+
 @_requires_libcudf_jit
 def test_jit_decimal_literals(spark_tmp_path):
     data_path = spark_tmp_path + '/AST_TEST_DATA'

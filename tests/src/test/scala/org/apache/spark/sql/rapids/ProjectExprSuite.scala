@@ -67,6 +67,27 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
     }
   }
 
+  private def assertLongColumn(
+      batch: org.apache.spark.sql.vectorized.ColumnarBatch,
+      columnIndex: Int,
+      expected: Seq[Option[Long]]): Unit = {
+    val gcv = batch.column(columnIndex).asInstanceOf[GpuColumnVector]
+    withResource(gcv.getBase.copyToHost()) { hcv =>
+      expected.zipWithIndex.foreach {
+        case (Some(value), rowIndex) =>
+          assert(!hcv.isNull(rowIndex))
+          assertResult(value)(hcv.getLong(rowIndex))
+        case (None, rowIndex) =>
+          assert(hcv.isNull(rowIndex))
+      }
+    }
+  }
+
+  private def withDebugMetrics[T](body: => T): T = {
+    withGpuSparkSession(_ => body,
+      new SparkConf().set(RapidsConf.METRICS_LEVEL.key, "DEBUG"))
+  }
+
   test("basic retry") {
     RmmSpark.currentThreadIsDedicatedToTask(0)
     try {
@@ -131,37 +152,120 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
     }
   }
 
-  test("AST retry with split") {
+  test("AST pass-through project reorders and duplicates columns") {
+    withDebugMetrics {
+      val a = AttributeReference("a", LongType)()
+      val b = AttributeReference("b", LongType)()
+      val sb = buildProjectBatch()
+      val boundA = GpuBoundReference(0, LongType, true)(NamedExpression.newExprId, "a")
+      val boundB = GpuBoundReference(1, LongType, true)(NamedExpression.newExprId, "b")
+      val exprs = List(
+        GpuAlias(boundB, "x")(),
+        GpuAlias(boundA, "y")(),
+        GpuAlias(boundB, "z")())
+      val mockPlan = mock(classOf[SparkPlan])
+      when(mockPlan.output).thenReturn(Seq(a, b))
+      val ast = GpuProjectAstExec(exprs.map(_.asInstanceOf[Expression]), mockPlan)()
+
+      withResource(sb) { sb =>
+        withResource(ast.buildRetryableAstIterator(Seq(sb.getColumnarBatch).iterator)) { result =>
+          withResource(result.next()) { cb =>
+            assertResult(4)(cb.numRows)
+            assertResult(3)(cb.numCols)
+            assertLongColumn(cb, 0, Seq(Some(6L), Some(7L), Some(8L), Some(9L)))
+            assertLongColumn(cb, 1, Seq(Some(5L), None, Some(3L), Some(1L)))
+            assertLongColumn(cb, 2, Seq(Some(6L), Some(7L), Some(8L), Some(9L)))
+          }
+          assert(!result.hasNext)
+        }
+      }
+      assertResult(0)(ast.metrics(GpuProjectAstExec.COMPILE_ASTS_TIME).value)
+      assertResult(0)(ast.metrics(GpuProjectAstExec.COMPUTE_ASTS_TIME).value)
+    }
+  }
+
+  test("AST pass-through no-op keeps the returned batch alive") {
+    withDebugMetrics {
+      val a = AttributeReference("a", LongType)()
+      val b = AttributeReference("b", LongType)()
+      val sb = buildProjectBatch()
+      val exprs = List(
+        GpuAlias(GpuBoundReference(0, LongType, true)(NamedExpression.newExprId, "a"), "a")(),
+        GpuAlias(GpuBoundReference(1, LongType, true)(NamedExpression.newExprId, "b"), "b")())
+      val mockPlan = mock(classOf[SparkPlan])
+      when(mockPlan.output).thenReturn(Seq(a, b))
+      val ast = GpuProjectAstExec(exprs.map(_.asInstanceOf[Expression]), mockPlan)()
+
+      withResource(sb) { sb =>
+        val input = sb.getColumnarBatch
+        withResource(ast.buildRetryableAstIterator(Seq(input).iterator)) { result =>
+          val output = result.next()
+          assert(output eq input)
+          withResource(output) { cb =>
+            assertLongColumn(cb, 0, Seq(Some(5L), None, Some(3L), Some(1L)))
+            assertLongColumn(cb, 1, Seq(Some(6L), Some(7L), Some(8L), Some(9L)))
+          }
+          assert(!result.hasNext)
+        }
+      }
+      assertResult(0)(ast.metrics(GpuProjectAstExec.COMPILE_ASTS_TIME).value)
+      assertResult(0)(ast.metrics(GpuProjectAstExec.COMPUTE_ASTS_TIME).value)
+    }
+  }
+
+  test("AST empty project preserves row count") {
+    withDebugMetrics {
+      val a = AttributeReference("a", LongType)()
+      val b = AttributeReference("b", LongType)()
+      val sb = buildProjectBatch()
+      val mockPlan = mock(classOf[SparkPlan])
+      when(mockPlan.output).thenReturn(Seq(a, b))
+      val ast = GpuProjectAstExec(Nil, mockPlan)()
+
+      withResource(sb) { sb =>
+        withResource(ast.buildRetryableAstIterator(Seq(sb.getColumnarBatch).iterator)) { result =>
+          withResource(result.next()) { cb =>
+            assertResult(4)(cb.numRows)
+            assertResult(0)(cb.numCols)
+          }
+          assert(!result.hasNext)
+        }
+      }
+      assertResult(0)(ast.metrics(GpuProjectAstExec.COMPILE_ASTS_TIME).value)
+      assertResult(0)(ast.metrics(GpuProjectAstExec.COMPUTE_ASTS_TIME).value)
+    }
+  }
+
+  test("AST mixed pass-through project retries with split") {
     RmmSpark.currentThreadIsDedicatedToTask(0)
     try {
       RmmSpark.getAndResetNumSplitRetryThrow(0)
       val a = AttributeReference("a", LongType)()
       val b = AttributeReference("b", LongType)()
       val sb = buildProjectBatch()
-      val expr = GpuAlias(GpuAdd(
-        GpuBoundReference(0, LongType, true)(NamedExpression.newExprId, "a"),
-        GpuBoundReference(1, LongType, true)(NamedExpression.newExprId, "b"), false)(),
-        "ret")()
+      val boundA = GpuBoundReference(0, LongType, true)(NamedExpression.newExprId, "a")
+      val boundB = GpuBoundReference(1, LongType, true)(NamedExpression.newExprId, "b")
+      val exprs = List(
+        GpuAlias(boundB, "x")(),
+        GpuAlias(GpuAdd(boundA, boundB, false)(), "sum")(),
+        GpuAlias(boundA, "y")(),
+        GpuAlias(GpuMultiply(boundA, boundB, failOnError = false)(), "product")(),
+        GpuAlias(boundB, "z")())
       val mockPlan = mock(classOf[SparkPlan])
       when(mockPlan.output).thenReturn(Seq(a, b))
-      val ast = GpuProjectAstExec(List(expr.asInstanceOf[Expression]), mockPlan)()
+      val ast = GpuProjectAstExec(exprs.map(_.asInstanceOf[Expression]), mockPlan)()
       RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
         RmmSpark.OomInjectionType.GPU.ordinal, 0)
       withResource(sb) { sb =>
         withResource(ast.buildRetryableAstIterator(Seq(sb.getColumnarBatch).iterator)) { result =>
           withResource(result.next()) { cb =>
             assertResult(4)(cb.numRows)
-            assertResult(1)(cb.numCols)
-            val gcv = cb.column(0).asInstanceOf[GpuColumnVector]
-            withResource(gcv.getBase.copyToHost()) { hcv =>
-              assert(!hcv.isNull(0))
-              assertResult(11L)(hcv.getLong(0))
-              assert(hcv.isNull(1))
-              assert(!hcv.isNull(2))
-              assertResult(11L)(hcv.getLong(2))
-              assert(!hcv.isNull(3))
-              assertResult(10L)(hcv.getLong(3))
-            }
+            assertResult(5)(cb.numCols)
+            assertLongColumn(cb, 0, Seq(Some(6L), Some(7L), Some(8L), Some(9L)))
+            assertLongColumn(cb, 1, Seq(Some(11L), None, Some(11L), Some(10L)))
+            assertLongColumn(cb, 2, Seq(Some(5L), None, Some(3L), Some(1L)))
+            assertLongColumn(cb, 3, Seq(Some(30L), None, Some(24L), Some(9L)))
+            assertLongColumn(cb, 4, Seq(Some(6L), Some(7L), Some(8L), Some(9L)))
           }
           assert(!result.hasNext)
         }

@@ -958,6 +958,35 @@ object GpuProjectAstExec {
   val LIBCUDF_JIT_ENV_KEY = "LIBCUDF_JIT_ENABLED"
   val LIBCUDF_JIT_EXECUTOR_ENV_KEY = s"spark.executorEnv.$LIBCUDF_JIT_ENV_KEY"
 
+  private[rapids] case class AstProjectOutputPlan(
+      passThroughInputIndices: Seq[Option[Int]],
+      expressionsToCompute: Seq[GpuExpression],
+      errorSitesToCompute: Seq[Option[AstJitErrorSite]]) {
+    require(expressionsToCompute.size == errorSitesToCompute.size,
+      "AST expressions and error sites must have the same size")
+
+    def allPassThrough: Boolean = expressionsToCompute.isEmpty
+  }
+
+  private[rapids] def planOutputs(
+      expressions: Seq[GpuExpression],
+      errorSites: Seq[Option[AstJitErrorSite]]): AstProjectOutputPlan = {
+    require(expressions.size == errorSites.size,
+      "AST expressions and error sites must have the same size")
+    val passThroughInputIndices = GpuProjectExec.extractSingleBoundIndex(expressions)
+    require(passThroughInputIndices.zip(errorSites).forall {
+      case (Some(_), site) => site.isEmpty
+      case _ => true
+    }, "Pass-through AST outputs cannot have error sites")
+    val computedOutputIndices = passThroughInputIndices.zipWithIndex.collect {
+      case (None, index) => index
+    }
+    AstProjectOutputPlan(
+      passThroughInputIndices,
+      computedOutputIndices.map(expressions(_)),
+      computedOutputIndices.map(errorSites(_)))
+  }
+
   private def isJitRuntimeRequired(conf: RapidsConf): Boolean =
     conf.isSqlExecuteOnGPU && conf.isProjectAstEnabled &&
       conf.isProjectAstAnsiArithmeticEnabled
@@ -1083,11 +1112,13 @@ case class GpuProjectAstExec(
         "AST JIT error sites must match the project expressions")
       astJitErrorSites
     }
+    val outputPlan = GpuProjectAstExec.planOutputs(boundProjectList, outputErrorSites)
     val outputTypes = output.map(_.dataType).toArray
     new GpuColumnarBatchIterator(true) {
       private[this] var maybeSplittedItr: Iterator[ColumnarBatch] = Iterator.empty
       private[this] val compiledAstExprs =
-        new RetryableCompiledAstExpressions(boundProjectList, outputErrorSites, opTime,
+        new RetryableCompiledAstExpressions(outputPlan.expressionsToCompute,
+          outputPlan.errorSitesToCompute, opTime,
           compileAstsTime, computeAstsTime)
 
       override def hasNext: Boolean = maybeSplittedItr.hasNext || {
@@ -1101,23 +1132,34 @@ case class GpuProjectAstExec(
 
       override def next(): ColumnarBatch = {
         if (!maybeSplittedItr.hasNext) {
-          val spillable = SpillableColumnarBatch(
-            input.next(), SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
-          // JIT can initialize native state lazily during computeColumn, so rebuild compiled
-          // expressions after retry instead of reusing state from a failed attempt.
-          maybeSplittedItr = Iterator(GpuProjectExec.runWithSplitRetry(
-            spillable, Seq(compiledAstExprs), { cb =>
-              NvtxIdWithMetrics(NvtxRegistry.PROJECT_AST, opTime) {
-                val projectedTable = withResource(tableFromBatch(cb)) { table =>
-                  withResource(compiledAstExprs.computeColumns(table)) { projectedColumns =>
-                    new Table(projectedColumns: _*)
+          if (outputPlan.allPassThrough) {
+            val cb = input.next()
+            maybeSplittedItr = Iterator(NvtxIdWithMetrics(NvtxRegistry.PROJECT_AST, opTime) {
+              try {
+                GpuProjectExec.project(cb, boundProjectList)
+              } finally {
+                cb.close()
+              }
+            })
+          } else {
+            val spillable = SpillableColumnarBatch(
+              input.next(), SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+            // JIT can initialize native state lazily during computeColumn, so rebuild compiled
+            // expressions after retry instead of reusing state from a failed attempt.
+            maybeSplittedItr = Iterator(GpuProjectExec.runWithSplitRetry(
+              spillable, Seq(compiledAstExprs), { cb =>
+                NvtxIdWithMetrics(NvtxRegistry.PROJECT_AST, opTime) {
+                  val projectedTable = withResource(tableFromBatch(cb)) { table =>
+                    withResource(compiledAstExprs.computeColumns(table)) { computedColumns =>
+                      makeProjectedTable(table, computedColumns)
+                    }
+                  }
+                  withResource(projectedTable) { _ =>
+                    GpuColumnVector.from(projectedTable, outputTypes)
                   }
                 }
-                withResource(projectedTable) { _ =>
-                  GpuColumnVector.from(projectedTable, outputTypes)
-                }
-              }
-            }))
+              }))
+          }
         }
 
         val ret = maybeSplittedItr.next()
@@ -1141,6 +1183,21 @@ case class GpuProjectAstExec(
               new Table(falseColumn)
             }
           }
+        }
+      }
+
+      private def makeProjectedTable(
+          inputTable: Table,
+          computedColumns: Seq[cudf.ColumnVector]): Table = {
+        require(computedColumns.size == outputPlan.expressionsToCompute.size,
+          "Computed AST columns must match the output plan")
+        val computedIterator = computedColumns.iterator
+        withResource(outputPlan.passThroughInputIndices.safeMap {
+          case Some(inputIndex) => inputTable.getColumn(inputIndex).incRefCount()
+          case None => computedIterator.next().incRefCount()
+        }) { projectedColumns =>
+          require(!computedIterator.hasNext, "Computed AST columns must match the output plan")
+          new Table(projectedColumns: _*)
         }
       }
     }
