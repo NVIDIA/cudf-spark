@@ -489,6 +489,7 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
     val sparkConf = pluginContext.conf
     RapidsPluginUtils.fixupConfigsOnDriver(sparkConf)
     val conf = new RapidsConf(sparkConf)
+    GpuProjectAstExec.requireJitRuntimeConfigured(conf)
     RapidsPluginUtils.detectMultipleJars(conf)
     RapidsPluginUtils.logPluginMode(conf)
     GpuCoreDumpHandler.driverInit(sc, conf)
@@ -606,6 +607,7 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
       val sparkConf = pluginContext.conf()
       val numCores = RapidsPluginUtils.estimateCoresOnExec(sparkConf)
       val conf = new RapidsConf(extraConf.asScala.toMap)
+      GpuProjectAstExec.requireJitExecutorEnvironment(conf)
 
       isAsyncProfilerEnabled = conf.asyncProfilerPathPrefix.nonEmpty
 

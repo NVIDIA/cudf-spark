@@ -18,6 +18,7 @@ package com.nvidia.spark.rapids
 
 import scala.annotation.tailrec
 import scala.collection.mutable.ArrayBuffer
+import scala.util.control.NonFatal
 
 import ai.rapids.cudf
 import ai.rapids.cudf._
@@ -61,7 +62,8 @@ class GpuProjectExecMeta(
     val gpuExprs = childExprs.map(_.convertToGpu().asInstanceOf[NamedExpression]).toList
     val gpuChild = childPlans.head.convertIfNeeded()
     if (conf.isProjectAstEnabled) {
-      val canUseAnsiJitAst = !conf.isProjectAstAnsiArithmeticEnabled || conf.isLibcudfJitEnabled
+      val canUseAnsiJitAst =
+        !conf.isProjectAstAnsiArithmeticEnabled || conf.isLibcudfJitConfigured
       // cuDF requires return column is fixed width
       val allReturnTypesFixedWidth = gpuExprs.forall(e => GpuBatchUtils.isFixedWidth(e.dataType))
       if (canUseAnsiJitAst && allReturnTypesFixedWidth && childExprs.forall(_.canThisBeAst)) {
@@ -908,6 +910,47 @@ case class GpuProjectExec(
 object GpuProjectAstExec {
   val COMPILE_ASTS_TIME = "compileAstsTime"
   val COMPUTE_ASTS_TIME = "computeAstsTime"
+  val LIBCUDF_JIT_ENV_KEY = "LIBCUDF_JIT_ENABLED"
+  val LIBCUDF_JIT_EXECUTOR_ENV_KEY = s"spark.executorEnv.$LIBCUDF_JIT_ENV_KEY"
+
+  private def isJitRuntimeRequired(conf: RapidsConf): Boolean =
+    conf.isSqlExecuteOnGPU && conf.isProjectAstEnabled &&
+      conf.isProjectAstAnsiArithmeticEnabled
+
+  private[rapids] def requireJitRuntimeConfigured(conf: RapidsConf): Unit = {
+    if (isJitRuntimeRequired(conf) && !conf.isLibcudfJitConfigured) {
+      throw new IllegalArgumentException(
+        s"${RapidsConf.ENABLE_PROJECT_AST_ANSI_ARITHMETIC.key}=true requires " +
+          s"$LIBCUDF_JIT_EXECUTOR_ENV_KEY=1")
+    }
+  }
+
+  private[rapids] def requireJitExecutorEnvironment(
+      conf: RapidsConf,
+      environment: Map[String, String] = sys.env): Unit = {
+    if (isJitRuntimeRequired(conf) &&
+        !environment.get(LIBCUDF_JIT_ENV_KEY).contains("1")) {
+      throw new IllegalStateException(
+        s"$LIBCUDF_JIT_ENV_KEY=1 is not set in the executor process environment, " +
+          s"but ${RapidsConf.ENABLE_PROJECT_AST_ANSI_ARITHMETIC.key}=true")
+    }
+  }
+
+  private[rapids] def initializeJitRuntime(
+      conf: RapidsConf,
+      initialize: () => Unit = () => Cudf.initializeJitRuntime()): Unit = {
+    if (isJitRuntimeRequired(conf)) {
+      try {
+        initialize()
+      } catch {
+        case NonFatal(error) =>
+          throw new IllegalStateException(
+            "Failed to initialize the libcudf JIT runtime on the executor. " +
+              "Ensure CUDA-compatible libnvrtc and libnvJitLink libraries are available.",
+            error)
+      }
+    }
+  }
 
   private def translateAstJitError(error: CudfException): Throwable = {
     val message = Option(error.getMessage).getOrElse("")

@@ -668,6 +668,7 @@ object GpuDeviceManager extends Logging {
           val conf = rapidsConf.getOrElse(new RapidsConf(sparkConf))
           initializePinnedPoolAndOffHeapLimits(gpu, conf, sparkConf)
           initializeRmmGpuPool(gpu, conf)
+          GpuProjectAstExec.initializeJitRuntime(conf)
           // we want to initialize this last because we want to take advantage
           // of pinned memory if it is configured
           initializeSpillAndMemoryEvents(conf)

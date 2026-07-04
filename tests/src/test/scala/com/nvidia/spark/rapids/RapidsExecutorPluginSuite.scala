@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,45 @@ package com.nvidia.spark.rapids
 import org.scalatest.funsuite.AnyFunSuite
 
 class RapidsExecutorPluginSuite extends AnyFunSuite {
+  private val jitFeatureConf = Map(
+    RapidsConf.ENABLE_PROJECT_AST.key -> "true",
+    RapidsConf.ENABLE_PROJECT_AST_ANSI_ARITHMETIC.key -> "true")
+
+  test("project AST JIT requires executor deployment configuration") {
+    val configured = new RapidsConf(jitFeatureConf +
+      (GpuProjectAstExec.LIBCUDF_JIT_EXECUTOR_ENV_KEY -> "1"))
+    GpuProjectAstExec.requireJitRuntimeConfigured(configured)
+
+    val error = intercept[IllegalArgumentException] {
+      GpuProjectAstExec.requireJitRuntimeConfigured(new RapidsConf(jitFeatureConf))
+    }
+    assert(error.getMessage.contains(
+      "spark.executorEnv.LIBCUDF_JIT_ENABLED=1"))
+  }
+
+  test("project AST JIT requires executor process environment") {
+    val conf = new RapidsConf(jitFeatureConf)
+    GpuProjectAstExec.requireJitExecutorEnvironment(
+      conf, Map(GpuProjectAstExec.LIBCUDF_JIT_ENV_KEY -> "1"))
+
+    val error = intercept[IllegalStateException] {
+      GpuProjectAstExec.requireJitExecutorEnvironment(conf, Map.empty)
+    }
+    assert(error.getMessage.contains(
+      "LIBCUDF_JIT_ENABLED=1 is not set in the executor process environment"))
+  }
+
+  test("project AST JIT runtime preflight preserves the cause") {
+    val conf = new RapidsConf(jitFeatureConf)
+    val cause = new RuntimeException("missing nvJitLinkCreate")
+    val error = intercept[IllegalStateException] {
+      GpuProjectAstExec.initializeJitRuntime(conf, () => throw cause)
+    }
+    assert(error.getMessage.contains("libnvrtc"))
+    assert(error.getMessage.contains("libnvJitLink"))
+    assert(error.getCause eq cause)
+  }
+
   test("cudf version check") {
     assert(RapidsExecutorPlugin.cudfVersionSatisfied("7", "7"))
     assert(!RapidsExecutorPlugin.cudfVersionSatisfied("7", "8"))

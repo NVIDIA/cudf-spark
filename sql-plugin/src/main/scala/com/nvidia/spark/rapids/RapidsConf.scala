@@ -3607,9 +3607,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val isProjectAstAnsiArithmeticEnabled: Boolean = get(ENABLE_PROJECT_AST_ANSI_ARITHMETIC)
 
-  lazy val isLibcudfJitEnabled: Boolean =
-    sys.env.get("LIBCUDF_JIT_ENABLED").contains("1") ||
-      getStr("spark.executorEnv.LIBCUDF_JIT_ENABLED").contains("1")
+  lazy val isLibcudfJitConfigured: Boolean =
+    getStr("spark.executorEnv.LIBCUDF_JIT_ENABLED").contains("1")
 
   lazy val isTieredProjectEnabled: Boolean = get(ENABLE_TIERED_PROJECT)
 
