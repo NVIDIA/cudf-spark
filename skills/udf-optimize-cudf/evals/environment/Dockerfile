@@ -20,6 +20,7 @@ ARG CMAKE_VERSION=4.0.3
 ARG CMAKE_ARCH=x86_64
 ARG CCACHE_VERSION=4.11.2
 ARG MAVEN_VERSION=3.9.9
+ARG MAVEN_BASE_URL=https://archive.apache.org/dist/maven/maven-3
 ARG PARALLEL_LEVEL=10
 ARG PYTHON_VERSION=3.11
 
@@ -54,7 +55,7 @@ RUN cd /usr/local && \
 # The rockylinux8 maven package is too old for the template build plugins.
 # Install a modern Maven binary on PATH instead.
 RUN cd /usr/local && \
-  wget --quiet https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz && \
+  wget --quiet ${MAVEN_BASE_URL}/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz && \
   tar zxf apache-maven-${MAVEN_VERSION}-bin.tar.gz && \
   rm apache-maven-${MAVEN_VERSION}-bin.tar.gz
 
