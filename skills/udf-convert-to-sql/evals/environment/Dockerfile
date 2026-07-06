@@ -2,6 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ###
+# AUTO-GENERATED from skills/ci/Dockerfile.pre-merge by skills/scripts/sync_eval_resources.py.
+# Do not edit this copy directly. Edit the source and re-run the sync script.
+###
+
+###
 #
 # Pre-merge CI image for the UDF skills integration tests and evals.
 # This is a mirror of `skills/udf-convert-to-cuda/templates/cuda/Dockerfile`,
