@@ -1864,59 +1864,16 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       .booleanConf
       .createWithDefault(false)
 
-  val ICEBERG_STAGED_READ_FOOTER_THREADS =
-    conf("spark.rapids.sql.format.iceberg.stagedRead.footerThreads")
-      .doc("Number of executor-wide threads used by the staged Iceberg reader for footer " +
-        "loading and row-group filtering. If unset, this defaults to " +
-        s"${MULTITHREAD_READ_NUM_THREADS.key} so the footer barrier retains the concurrency of " +
-        "the existing fused footer/data reader.")
+  val ICEBERG_STAGED_READ_CPU_THREADS =
+    conf("spark.rapids.sql.format.iceberg.stagedRead.cpuThreads")
+      .doc("Number of executor-wide CPU threads used by the staged Iceberg reader for footer " +
+        "loading, row-group filtering, and synthetic Parquet finalization. If unset, this " +
+        "defaults to the configured executor core count, capped at 16.")
       .startupOnly()
       .internal()
       .integerConf
-      .checkValue(v => v > 0, "The footer thread count must be greater than zero.")
+      .checkValue(v => v > 0, "The CPU thread count must be greater than zero.")
       .createOptional
-
-  val ICEBERG_STAGED_READ_COMBINE_THREADS =
-    conf("spark.rapids.sql.format.iceberg.stagedRead.combineThreads")
-      .doc("Number of executor-wide threads used by the staged Iceberg reader to assemble " +
-        "synthetic Parquet inputs after I/O. If unset, this defaults to the configured " +
-        "executor core count, capped at 16.")
-      .startupOnly()
-      .internal()
-      .integerConf
-      .checkValue(v => v > 0, "The combine thread count must be greater than zero.")
-      .createOptional
-
-  val ICEBERG_STAGED_READ_MAX_IN_FLIGHT_SUBTASKS =
-    conf("spark.rapids.sql.format.iceberg.stagedRead.maxInFlightSubtasks")
-      .doc("Maximum number of staged decode subtasks admitted concurrently by one Spark task. " +
-        "This bounds completed outputs waiting for serial GPU decode.")
-      .startupOnly()
-      .internal()
-      .integerConf
-      .checkValue(v => v > 0, "The in-flight subtask count must be greater than zero.")
-      .createWithDefault(2)
-
-  val ICEBERG_STAGED_READ_MAX_IN_FLIGHT_BYTES =
-    conf("spark.rapids.sql.format.iceberg.stagedRead.maxInFlightBytes")
-      .doc("Maximum planned synthetic Parquet bytes admitted concurrently by one Spark task. " +
-        "One oversized subtask may run alone so the limit cannot deadlock progress.")
-      .startupOnly()
-      .internal()
-      .bytesConf(ByteUnit.BYTE)
-      .checkValue(v => v > 0, "The in-flight byte count must be greater than zero.")
-      .createWithDefault(512L * 1024L * 1024L)
-
-  val ICEBERG_STAGED_READ_MAX_CONCURRENT_SOURCE_READS =
-    conf("spark.rapids.sql.format.iceberg.stagedRead.maxConcurrentSourceReads")
-      .doc("Maximum number of source files read concurrently by one Spark task across all " +
-        "admitted staged subtasks. Each source read still submits every selected Parquet column " +
-        "chunk as a distinct range so PerfIO can execute the chunk requests concurrently.")
-      .startupOnly()
-      .internal()
-      .integerConf
-      .checkValue(v => v > 0, "The concurrent source-read count must be greater than zero.")
-      .createWithDefault(4)
 
   val ICEBERG_S3_ASYNC_MAX_CONCURRENCY =
     conf("spark.rapids.iceberg.s3.async.max-concurrency")
@@ -3873,28 +3830,14 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val isIcebergStagedReadEnabled: Boolean = get(ICEBERG_STAGED_READ_ENABLED)
 
-  lazy val icebergStagedReadFooterThreads: Int =
-    get(ICEBERG_STAGED_READ_FOOTER_THREADS)
-      .map(_.toInt)
-      .getOrElse(multiThreadReadNumThreads)
-
-  lazy val icebergStagedReadCombineThreads: Int = {
+  lazy val icebergStagedReadCpuThreads: Int = {
     val defaultThreads = getStr("spark.executor.cores")
       .map(_.toInt)
       .getOrElse(1)
-    get(ICEBERG_STAGED_READ_COMBINE_THREADS)
+    get(ICEBERG_STAGED_READ_CPU_THREADS)
       .map(_.toInt)
       .getOrElse(math.max(1, math.min(16, defaultThreads)))
   }
-
-  lazy val icebergStagedReadMaxInFlightSubtasks: Int =
-    get(ICEBERG_STAGED_READ_MAX_IN_FLIGHT_SUBTASKS)
-
-  lazy val icebergStagedReadMaxInFlightBytes: Long =
-    get(ICEBERG_STAGED_READ_MAX_IN_FLIGHT_BYTES)
-
-  lazy val icebergStagedReadMaxConcurrentSourceReads: Int =
-    get(ICEBERG_STAGED_READ_MAX_CONCURRENT_SOURCE_READS)
 
   lazy val isHiveDelimitedTextEnabled: Boolean = get(ENABLE_HIVE_TEXT)
 

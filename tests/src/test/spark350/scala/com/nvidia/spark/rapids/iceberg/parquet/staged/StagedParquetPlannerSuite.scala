@@ -36,7 +36,7 @@ import java.util.concurrent.{
   Semaphore,
   TimeUnit
 }
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicReference}
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
@@ -70,13 +70,22 @@ import org.apache.parquet.hadoop.metadata.{
 }
 import org.apache.parquet.schema.{MessageType, Types}
 import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT32
+import org.scalatest.BeforeAndAfterEach
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.types.{IntegerType, StructField, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
-class StagedParquetPlannerSuite extends AnyFunSuite {
+class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
+
+  override protected def afterEach(): Unit = {
+    try {
+      StagedScanThreadPools.resetForTesting()
+    } finally {
+      super.afterEach()
+    }
+  }
 
   private case class ColumnSpec(
       name: String,
@@ -242,6 +251,9 @@ class StagedParquetPlannerSuite extends AnyFunSuite {
     val firstTwoStarted = new CountDownLatch(2)
     val thirdStarted = new CountDownLatch(1)
     val allStarted = new CountDownLatch(expectedSources)
+    val firstFinished = new CountDownLatch(1)
+    val allFinished = new CountDownLatch(expectedSources)
+    val writeFailures = new ConcurrentLinkedQueue[Throwable]()
     private val releases = new Semaphore(0)
 
     def start(sourceOrdinal: Int, ranges: JList[RapidsInputFile.CopyRange]): Unit = {
@@ -262,7 +274,11 @@ class StagedParquetPlannerSuite extends AnyFunSuite {
 
     def block(): Unit = releases.acquire()
 
-    def finish(): Unit = activeCalls.decrementAndGet()
+    def finish(): Unit = {
+      activeCalls.decrementAndGet()
+      firstFinished.countDown()
+      allFinished.countDown()
+    }
 
     def release(count: Int): Unit = releases.release(count)
 
@@ -286,6 +302,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite {
         copyRanges: JList[RapidsInputFile.CopyRange]): Unit = {
       tracker.start(sourceOrdinal, copyRanges)
       try {
+        tracker.block()
         copyRanges.asScala.foreach { range =>
           output.setBytes(
             range.getOutputOffset,
@@ -293,7 +310,10 @@ class StagedParquetPlannerSuite extends AnyFunSuite {
             range.getInputOffset,
             range.getLength)
         }
-        tracker.block()
+      } catch {
+        case error: Throwable =>
+          tracker.writeFailures.add(error)
+          throw error
       } finally {
         tracker.finish()
       }
@@ -559,7 +579,59 @@ class StagedParquetPlannerSuite extends AnyFunSuite {
     assert(!Files.exists(path))
   }
 
-  test("reader caps concurrent source reads without merging column-chunk ranges") {
+  test("memory output accepts concurrent source writes into disjoint ranges") {
+    val sourceBytes = Array.tabulate[Byte](64)(index => (index + 10).toByte)
+    val tracker = new SourceReadTracker(2)
+    val inputs = Seq(
+      new BlockingVectoredInput(0, sourceBytes, tracker),
+      new BlockingVectoredInput(1, sourceBytes, tracker))
+    val sources = Seq(
+      footer(20, oneColumnParquetSchema, oneColumnReadSchema, Seq.empty).getSource,
+      footer(21, oneColumnParquetSchema, oneColumnReadSchema, Seq.empty).getSource)
+    val ranges = Seq(
+      Seq(
+        new PlannedReadRange(sources(0), 1L, 4L, 2L),
+        new PlannedReadRange(sources(0), 8L, 3L, 6L)),
+      Seq(
+        new PlannedReadRange(sources(1), 20L, 5L, 12L),
+        new PlannedReadRange(sources(1), 30L, 2L, 20L)))
+    val writableBuffer = HostMemoryBuffer.allocate(32L)
+    val output = new MemoryStagedParquetOutput(writableBuffer, 32L)
+    val observer = new StagedParquetOutput.RangeCopyObserver {
+      override def rangeCopied(range: PlannedReadRange, data: HostMemoryBuffer): Unit = data.close()
+    }
+    val workers = Executors.newFixedThreadPool(2)
+
+    try {
+      val writes = inputs.indices.map { index =>
+        workers.submit(new Runnable {
+          override def run(): Unit =
+            output.copyRanges(inputs(index), ranges(index).asJava, 1, observer)
+        })
+      }
+
+      assert(tracker.firstTwoStarted.await(10, TimeUnit.SECONDS))
+      assert(tracker.activeCalls.get() === 2)
+      assert(tracker.maximumActiveCalls.get() === 2)
+      tracker.release(2)
+      writes.foreach(_.get(10, TimeUnit.SECONDS))
+
+      ranges.flatten.foreach { range =>
+        val actual = new Array[Byte](Math.toIntExact(range.getLength))
+        writableBuffer.getBytes(actual, 0L, range.getOutputOffset, actual.length)
+        val expected = sourceBytes.slice(
+          Math.toIntExact(range.getInputOffset),
+          Math.toIntExact(range.getInputOffset + range.getLength))
+        assert(actual.toIndexedSeq === expected.toIndexedSeq)
+      }
+    } finally {
+      tracker.release(4)
+      workers.shutdownNow()
+      output.close()
+    }
+  }
+
+  test("I/O pool bounds concurrent source reads without merging column-chunk ranges") {
     val sourceCount = 4
     val tracker = new SourceReadTracker(sourceCount)
     val sourceBytes = Array.tabulate[Byte](2048)(index => (index & 0xff).toByte)
@@ -611,12 +683,8 @@ class StagedParquetPlannerSuite extends AnyFunSuite {
       Long.MaxValue,
       0L,
       sourceCount,
-      sourceCount,
       2,
       5,
-      sourceCount,
-      Long.MaxValue,
-      2,
       null)
     val caller = Executors.newSingleThreadExecutor()
     try {
@@ -627,7 +695,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite {
       assert(tracker.firstTwoStarted.await(10, TimeUnit.SECONDS))
       assert(tracker.activeCalls.get() === 2)
       assert(tracker.startedCalls.get() === 2)
-      // Both permitted calls are blocked, so neither queued source may start.
+      // Both I/O workers are blocked, so the executor cannot start another source job.
       assert(!tracker.thirdStarted.await(500, TimeUnit.MILLISECONDS))
       assert(tracker.maximumActiveCalls.get() === 2)
 
@@ -652,6 +720,198 @@ class StagedParquetPlannerSuite extends AnyFunSuite {
           (baseOffset, 4L, 4L),
           (baseOffset + 100L, 5L, 8L)))
       }
+    } finally {
+      tracker.release(sourceCount * 2)
+      reader.close()
+      caller.shutdownNow()
+      HostAlloc.initialize(-1L)
+    }
+  }
+
+  test("one subtask reads source files concurrently and preserves column chunks") {
+    val sourceCount = 2
+    val tracker = new SourceReadTracker(sourceCount)
+    val sourceBytes = Array.tabulate[Byte](1024)(index => (index & 0xff).toByte)
+    val footers = (0 until sourceCount).map { ordinal =>
+      val input = new BlockingVectoredInput(ordinal, sourceBytes, tracker)
+      val baseOffset = 100L + ordinal * 300L
+      footerWithOpener(
+        ordinal,
+        twoColumnParquetSchema,
+        twoColumnReadSchema,
+        Seq(block(twoColumnParquetSchema, rows = 1L,
+          ColumnSpec("id", baseOffset + 4L, baseOffset, 4L, 4L),
+          ColumnSpec("value", baseOffset + 100L, 0L, 5L, 5L))),
+        new InputFileOpener {
+          override def open(): RapidsInputFile = input
+        })
+    }
+    val scanFiles = footers.map { footerResult =>
+      new StagedScanFile[Int](footerResult.getSource, footerResult.getSource.getOrdinal)
+    }
+    val combinedBytesVerified = new AtomicBoolean()
+    val adapter = new StagedScanAdapter[Int, String] {
+      override def readAndFilterFooter(file: StagedScanFile[Int]): FooterResult[String] =
+        footers(file.getFormatFile)
+
+      override def canCombine(
+          left: FooterResult[String],
+          right: FooterResult[String]): Boolean = true
+
+      override def decodeAndPostProcess(
+          subtask: ReadSubtask[String],
+          parquetData: HostMemoryBuffer): JIterator[ColumnarBatch] = {
+        try {
+          val layout = subtask.getLayout
+          val header = new Array[Byte](layout.getHeaderBytes.length)
+          parquetData.getBytes(header, 0L, 0L, header.length)
+          assert(header.toIndexedSeq === layout.getHeaderBytes.toIndexedSeq)
+          layout.getRanges.asScala.foreach { range =>
+            val actual = new Array[Byte](Math.toIntExact(range.getLength))
+            parquetData.getBytes(actual, 0L, range.getOutputOffset, actual.length)
+            val expected = sourceBytes.slice(
+              Math.toIntExact(range.getInputOffset),
+              Math.toIntExact(range.getInputOffset + range.getLength))
+            assert(actual.toIndexedSeq === expected.toIndexedSeq)
+          }
+          val footer = new Array[Byte](layout.getFooterAndTrailerBytes.length)
+          parquetData.getBytes(footer, 0L, layout.getFooterOffset, footer.length)
+          assert(footer.toIndexedSeq === layout.getFooterAndTrailerBytes.toIndexedSeq)
+          combinedBytesVerified.set(true)
+          Collections.emptyList[ColumnarBatch]().iterator()
+        } finally {
+          parquetData.close()
+        }
+      }
+
+      override def closeContext(context: String): Unit = {}
+
+      override def close(): Unit = {}
+    }
+
+    HostAlloc.initialize(0L)
+    val reader = new StagedParquetPartitionReader[Int, String](
+      scanFiles.asJava,
+      adapter,
+      Int.MaxValue,
+      Long.MaxValue,
+      Long.MaxValue,
+      2,
+      2,
+      5,
+      null)
+    val caller = Executors.newSingleThreadExecutor()
+    try {
+      val hasNext = caller.submit(new java.util.concurrent.Callable[Boolean] {
+        override def call(): Boolean = reader.hasNext()
+      })
+
+      assert(tracker.firstTwoStarted.await(10, TimeUnit.SECONDS))
+      assert(tracker.startedCalls.get() === 2)
+      assert(tracker.activeCalls.get() === 2)
+      assert(tracker.maximumActiveCalls.get() === 2)
+
+      tracker.release(1)
+      assert(tracker.firstFinished.await(10, TimeUnit.SECONDS))
+      assert(tracker.activeCalls.get() === 1)
+      assert(!hasNext.isDone)
+      assert(!combinedBytesVerified.get())
+
+      tracker.release(1)
+      assert(!hasNext.get(10, TimeUnit.SECONDS))
+      assert(tracker.activeCalls.get() === 0)
+      assert(tracker.writeFailures.isEmpty)
+      assert(combinedBytesVerified.get())
+
+      val calls = tracker.calls.asScala.toSeq.sortBy(_._1)
+      assert(calls.map(_._1) === Seq(0, 1))
+      assert(calls.head._2 === Seq(
+        (100L, 4L, 4L),
+        (200L, 5L, 8L)))
+      assert(calls.last._2 === Seq(
+        (400L, 4L, 13L),
+        (500L, 5L, 17L)))
+    } finally {
+      tracker.release(sourceCount * 2)
+      reader.close()
+      caller.shutdownNow()
+      HostAlloc.initialize(-1L)
+    }
+  }
+
+  test("close leaves a shared output alive until every active source writer exits") {
+    val sourceCount = 2
+    val tracker = new SourceReadTracker(sourceCount)
+    val sourceBytes = Array.tabulate[Byte](1024)(index => (index & 0xff).toByte)
+    val footers = (0 until sourceCount).map { ordinal =>
+      val input = new BlockingVectoredInput(ordinal, sourceBytes, tracker)
+      val baseOffset = 100L + ordinal * 300L
+      footerWithOpener(
+        ordinal,
+        twoColumnParquetSchema,
+        twoColumnReadSchema,
+        Seq(block(twoColumnParquetSchema, rows = 1L,
+          ColumnSpec("id", baseOffset + 4L, baseOffset, 4L, 4L),
+          ColumnSpec("value", baseOffset + 100L, 0L, 5L, 5L))),
+        new InputFileOpener {
+          override def open(): RapidsInputFile = input
+        })
+    }
+    val scanFiles = footers.map { footerResult =>
+      new StagedScanFile[Int](footerResult.getSource, footerResult.getSource.getOrdinal)
+    }
+    val decodeCalled = new AtomicBoolean()
+    val adapter = new StagedScanAdapter[Int, String] {
+      override def readAndFilterFooter(file: StagedScanFile[Int]): FooterResult[String] =
+        footers(file.getFormatFile)
+
+      override def canCombine(
+          left: FooterResult[String],
+          right: FooterResult[String]): Boolean = true
+
+      override def decodeAndPostProcess(
+          subtask: ReadSubtask[String],
+          parquetData: HostMemoryBuffer): JIterator[ColumnarBatch] = {
+        decodeCalled.set(true)
+        parquetData.close()
+        Collections.emptyList[ColumnarBatch]().iterator()
+      }
+
+      override def closeContext(context: String): Unit = {}
+
+      override def close(): Unit = {}
+    }
+
+    HostAlloc.initialize(0L)
+    val reader = new StagedParquetPartitionReader[Int, String](
+      scanFiles.asJava,
+      adapter,
+      Int.MaxValue,
+      Long.MaxValue,
+      Long.MaxValue,
+      2,
+      2,
+      5,
+      null)
+    val caller = Executors.newSingleThreadExecutor()
+    try {
+      val hasNext = caller.submit(new java.util.concurrent.Callable[Boolean] {
+        override def call(): Boolean = reader.hasNext()
+      })
+
+      assert(tracker.firstTwoStarted.await(10, TimeUnit.SECONDS))
+      assert(tracker.activeCalls.get() === 2)
+      reader.close()
+      assert(!hasNext.get(10, TimeUnit.SECONDS))
+      assert(tracker.activeCalls.get() === 2)
+      assert(!decodeCalled.get())
+
+      // The fake inputs write only after they are released. Successful writes after close prove
+      // that reclamation remains behind the all-source terminal barrier.
+      tracker.release(2)
+      assert(tracker.allFinished.await(10, TimeUnit.SECONDS))
+      assert(tracker.writeFailures.isEmpty)
+      assert(!decodeCalled.get())
     } finally {
       tracker.release(sourceCount * 2)
       reader.close()
@@ -694,9 +954,8 @@ class StagedParquetPlannerSuite extends AnyFunSuite {
       constantsProvider = (_: IcebergPartitionedFile) =>
         Collections.emptyMap[Integer, Object](),
       conf = readerConf,
-      footerThreads = 1,
-      ioThreads = 1,
-      combineThreads = 1)
+      cpuThreads = 1,
+      ioThreads = 1)
 
     try {
       // Before the fix, this first access initialized DecodeSupport and failed because the
@@ -713,10 +972,12 @@ class StagedParquetPlannerSuite extends AnyFunSuite {
     val footerStarted = new CountDownLatch(1)
     val releaseFooter = new CountDownLatch(1)
     val adapterClosed = new CountDownLatch(1)
+    val footerThreadName = new AtomicReference[String]()
     val contextCloseCount = new AtomicInteger()
     val adapterWasClosed = new AtomicBoolean()
     val adapter = new StagedScanAdapter[String, String] {
       override def readAndFilterFooter(file: StagedScanFile[String]): FooterResult[String] = {
+        footerThreadName.set(Thread.currentThread().getName)
         footerStarted.countDown()
         releaseFooter.await()
         input
@@ -748,7 +1009,6 @@ class StagedParquetPlannerSuite extends AnyFunSuite {
       1L,
       1,
       1,
-      1,
       1024,
       null)
     val caller = Executors.newSingleThreadExecutor()
@@ -757,6 +1017,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite {
         override def call(): Boolean = reader.hasNext()
       })
       assert(footerStarted.await(10, TimeUnit.SECONDS))
+      assert(footerThreadName.get().startsWith("iceberg-staged-cpu-"))
 
       reader.close()
       assert(!hasNext.get(10, TimeUnit.SECONDS))

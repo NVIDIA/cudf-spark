@@ -97,12 +97,8 @@ class GpuIcebergPartitionReader(private val task: GpuSparkInputPartition,
         if (task.icebergStagedReadEnabled && !hasDeletes && !hasEncryptedData &&
             !hasRowPosition && !multiThread.queryUsesInputFile) {
           new GpuStagedIcebergParquetReader(rapidsFileIO, files, constantsMap, conf,
-            task.icebergStagedReadFooterThreads,
-            task.multiThreadReadNumThreads,
-            task.icebergStagedReadCombineThreads,
-            task.icebergStagedReadMaxInFlightSubtasks,
-            task.icebergStagedReadMaxInFlightBytes,
-            task.icebergStagedReadMaxConcurrentSourceReads)
+            task.icebergStagedReadCpuThreads,
+            task.multiThreadReadNumThreads)
         } else {
           new GpuMultiThreadIcebergParquetReader(rapidsFileIO, files, constantsMap,
             gpuDeleteFiterMap, conf)

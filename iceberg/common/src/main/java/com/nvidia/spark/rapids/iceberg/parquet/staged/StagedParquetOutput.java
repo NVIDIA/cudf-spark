@@ -26,11 +26,12 @@ import java.util.List;
 /**
  * Writable storage for one synthetic Parquet file produced by the staged reader.
  *
- * <p>The output has a strict lifecycle: {@code WRITABLE -> SEALED -> CLOSED}. The I/O worker
- * owns a writable output, ownership moves to the combine worker, and a sealed output is finally
- * published to the Spark task thread in a {@link StagedReadResult}. Calls from those stages must
- * not overlap. Implementations still synchronize lifecycle transitions so an asynchronous close
- * cannot race a write without producing a deterministic failure.</p>
+ * <p>The output has a strict lifecycle: {@code WRITABLE -> SEALED -> CLOSED}. Multiple source-file
+ * I/O workers may concurrently copy disjoint planned ranges while it is writable. After every
+ * source writer finishes, ownership moves to one combine worker, which writes the header/footer
+ * and seals the output. The sealed output is finally published to the Spark task thread in a
+ * {@link StagedReadResult}. Implementations synchronize lifecycle transitions so combination or
+ * asynchronous close cannot overlap an active data copy.</p>
  *
  * <p>All sizes and offsets are bytes. Source offsets in {@link PlannedReadRange} address the
  * original Parquet file; output offsets address this synthetic Parquet file. A caller owns the
@@ -84,12 +85,14 @@ public interface StagedParquetOutput extends AutoCloseable {
    *
    * <p>The orchestrator groups ranges by source file before invoking this method. Every range is
    * one Parquet column chunk and must remain a distinct vectored-I/O request so PerfIO can fetch
-   * chunks concurrently. File-backed outputs use a writable local-file mapping so the full source
-   * range list can remain one vectored call without an aggregate scratch allocation.</p>
+   * chunks concurrently. Calls for different source files may overlap when all output ranges are
+   * disjoint. File-backed outputs use a writable local-file mapping so the full source range list
+   * can remain one vectored call without an aggregate scratch allocation. {@code scratchBytes} is
+   * also passed to cached-range copies, whose input is a regular seekable channel.</p>
    *
    * @param input original Parquet input file; the output does not take ownership
    * @param ranges planned ranges belonging to {@code input}
-   * @param scratchBytes target bytes for bounded file-backed vectored-I/O batches
+   * @param scratchBytes positive transfer-size hint for output implementations
    * @param observer callback receiving an owning view of every copied range
    * @throws IOException if the input cannot be read or the local output cannot be written
    */

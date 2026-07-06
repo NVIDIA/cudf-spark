@@ -17,7 +17,6 @@
 package com.nvidia.spark.rapids.iceberg.parquet.staged;
 
 import java.nio.channels.SeekableByteChannel;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.Iterator;
@@ -58,12 +57,14 @@ import org.apache.spark.sql.vectorized.ColumnarBatch;
  *
  * <p>The pipeline has a deliberately strict thread boundary:</p>
  * <ol>
- *   <li>Footer workers fetch metadata and perform format-specific row-group filtering.</li>
+ *   <li>CPU workers fetch metadata and perform format-specific row-group filtering.</li>
  *   <li>The Spark task thread waits for the complete footer barrier and creates an immutable
  *       {@link PartitionReadPlan}.</li>
- *   <li>A bounded window of planned subtasks is admitted. I/O workers pass distinct column-chunk
- *       ranges to vectored reads targeting an exact-sized host buffer or executor-local mapping,
- *       and combine workers add the synthetic Parquet header and footer.</li>
+ *   <li>Each planned subtask lazily preallocates one exact-sized host buffer or executor-local
+ *       mapping when its first I/O job starts. One I/O-pool job per source file then writes its
+ *       distinct column-chunk ranges concurrently into disjoint regions of that shared output. A
+ *       CPU-pool continuation adds the synthetic Parquet header and footer after every source job
+ *       completes.</li>
  *   <li>The Spark task thread consumes sealed results in completion order and performs GPU
  *       decode and format-specific post-processing.</li>
  * </ol>
@@ -78,10 +79,6 @@ import org.apache.spark.sql.vectorized.ColumnarBatch;
  */
 public final class StagedParquetPartitionReader<F, C>
     implements Iterator<ColumnarBatch>, AutoCloseable {
-  private static final int DEFAULT_MAX_IN_FLIGHT_SUBTASKS = 8;
-  private static final long DEFAULT_MAX_IN_FLIGHT_BYTES = 512L * 1024L * 1024L;
-  private static final int DEFAULT_MAX_CONCURRENT_SOURCE_READS = 4;
-
   private final List<StagedScanFile<F>> files;
   private final StagedScanAdapter<F, C> adapter;
   private final StableGreedyReadPlanner<C> planner;
@@ -89,16 +86,12 @@ public final class StagedParquetPartitionReader<F, C>
   private final TaskContext taskContext;
   private final long taskAttemptId;
   private final int fileIoScratchBytes;
-  private final int maxInFlightSubtasks;
-  private final long maxInFlightBytes;
-  private final int maxConcurrentSourceReads;
   private final Object lifecycleLock = new Object();
   private final Object iteratorLock = new Object();
   private final BlockingQueue<Completion<C>> completions = new LinkedBlockingQueue<>();
   private final List<Future<TimedFooter<C>>> footerFutures = new ArrayList<>();
   private final List<FooterResult<C>> footers = new ArrayList<>();
   private final List<SubtaskExecution<C>> executions = new ArrayList<>();
-  private final ArrayDeque<QueuedSourceRead> pendingSourceReads = new ArrayDeque<>();
   private final ConcurrentLinkedQueue<FooterOwnership<C>> footerContexts =
       new ConcurrentLinkedQueue<>();
   private final AtomicInteger activeFooterTasks = new AtomicInteger();
@@ -109,11 +102,6 @@ public final class StagedParquetPartitionReader<F, C>
 
   private boolean initialized;
   private int remainingResults;
-  private List<ReadSubtask<C>> plannedSubtasks = java.util.Collections.emptyList();
-  private int nextSubtaskToSubmit;
-  private int inFlightSubtasks;
-  private long inFlightBytes;
-  private int activeSourceReads;
   private Iterator<ColumnarBatch> currentBatches;
 
   /**
@@ -126,10 +114,9 @@ public final class StagedParquetPartitionReader<F, C>
    * @param maxEstimatedGpuBytes maximum estimated GPU bytes per subtask
    * @param targetParquetBytes target encoded bytes before closing a combined subtask; a
    *                           non-positive value disables cross-file combining
-   * @param footerThreads executor-wide footer worker count
+   * @param cpuThreads executor-wide footer/filter and synthetic-file finalization worker count
    * @param ioThreads executor-wide data-I/O worker count
-   * @param combineThreads executor-wide synthetic-footer worker count
-   * @param fileIoScratchBytes bounded scratch size for disk-backed staged output
+   * @param fileIoScratchBytes positive copy-size setting supplied to staged outputs
    * @param taskContext Spark task context captured by the task thread; may be null in tests
    */
   public StagedParquetPartitionReader(
@@ -138,66 +125,21 @@ public final class StagedParquetPartitionReader<F, C>
       int maxRows,
       long maxEstimatedGpuBytes,
       long targetParquetBytes,
-      int footerThreads,
+      int cpuThreads,
       int ioThreads,
-      int combineThreads,
       int fileIoScratchBytes,
-      TaskContext taskContext) {
-    this(files, adapter, maxRows, maxEstimatedGpuBytes, targetParquetBytes,
-        footerThreads, ioThreads, combineThreads, fileIoScratchBytes,
-        DEFAULT_MAX_IN_FLIGHT_SUBTASKS, DEFAULT_MAX_IN_FLIGHT_BYTES,
-        DEFAULT_MAX_CONCURRENT_SOURCE_READS, taskContext);
-  }
-
-  /**
-   * Creates a lazy reader with explicit per-task admission limits.
-   *
-   * @param maxInFlightSubtasks maximum admitted synthetic-file/decode units for this Spark task
-   * @param maxInFlightBytes maximum total planned bytes across those admitted units
-   * @param maxConcurrentSourceReads maximum active source-level vectored calls across all admitted
-   *                                 units; ranges inside each call remain independently concurrent
-   */
-  public StagedParquetPartitionReader(
-      List<StagedScanFile<F>> files,
-      StagedScanAdapter<F, C> adapter,
-      int maxRows,
-      long maxEstimatedGpuBytes,
-      long targetParquetBytes,
-      int footerThreads,
-      int ioThreads,
-      int combineThreads,
-      int fileIoScratchBytes,
-      int maxInFlightSubtasks,
-      long maxInFlightBytes,
-      int maxConcurrentSourceReads,
       TaskContext taskContext) {
     this.files = immutableFileCopy(files);
     this.adapter = Objects.requireNonNull(adapter, "adapter");
     this.planner = new StableGreedyReadPlanner<>(
         maxRows, maxEstimatedGpuBytes, targetParquetBytes,
         adapter::canCombine, adapter::estimateGpuBytes);
-    this.pools = StagedScanThreadPools.getOrCreate(
-        footerThreads, ioThreads, combineThreads);
+    this.pools = StagedScanThreadPools.getOrCreate(cpuThreads, ioThreads);
     if (fileIoScratchBytes <= 0) {
       throw new IllegalArgumentException(
           "fileIoScratchBytes must be positive: " + fileIoScratchBytes);
     }
-    if (maxInFlightSubtasks <= 0) {
-      throw new IllegalArgumentException(
-          "maxInFlightSubtasks must be positive: " + maxInFlightSubtasks);
-    }
-    if (maxInFlightBytes <= 0) {
-      throw new IllegalArgumentException(
-          "maxInFlightBytes must be positive: " + maxInFlightBytes);
-    }
-    if (maxConcurrentSourceReads <= 0) {
-      throw new IllegalArgumentException(
-          "maxConcurrentSourceReads must be positive: " + maxConcurrentSourceReads);
-    }
     this.fileIoScratchBytes = fileIoScratchBytes;
-    this.maxInFlightSubtasks = maxInFlightSubtasks;
-    this.maxInFlightBytes = maxInFlightBytes;
-    this.maxConcurrentSourceReads = maxConcurrentSourceReads;
     this.taskContext = taskContext;
     this.taskAttemptId = taskContext == null ? -1L : taskContext.taskAttemptId();
   }
@@ -255,14 +197,12 @@ public final class StagedParquetPartitionReader<F, C>
           }
           remainingResults -= 1;
           if (completion.error != null) {
-            retireExecution(completion.execution, false);
+            retireExecution(completion.execution);
             throw propagate(completion.error);
           }
           resultPassedToDecode = true;
           decoded = decode(completion.result);
-          // decode() materializes and closes the staged output before returning. Release its exact
-          // admission bytes only now, then refill the bounded I/O window.
-          retireExecution(completion.execution, true);
+          retireExecution(completion.execution);
           synchronized (iteratorLock) {
             if (closed.get()) {
               return false;
@@ -296,18 +236,12 @@ public final class StagedParquetPartitionReader<F, C>
     }
   }
 
-  private void retireExecution(SubtaskExecution<C> execution, boolean submitMore) {
+  private void retireExecution(SubtaskExecution<C> execution) {
     if (execution == null) {
       return;
     }
     synchronized (lifecycleLock) {
-      if (executions.remove(execution)) {
-        inFlightSubtasks -= 1;
-        inFlightBytes = Math.subtractExact(inFlightBytes, execution.admittedBytes);
-      }
-    }
-    if (submitMore && !closed.get()) {
-      submitAvailableSubtasks();
+      executions.remove(execution);
     }
   }
 
@@ -331,7 +265,7 @@ public final class StagedParquetPartitionReader<F, C>
 
   /**
    * Submit every footer operation, wait for the complete barrier on the task thread, plan, and
-   * admit a bounded window of I/O subtasks. Publication order after this point is completion order.
+   * submit every subtask to the I/O pool. Publication order after this point is completion order.
    */
   private void initializeIfNeeded() throws Exception {
     if (initialized) {
@@ -345,9 +279,9 @@ public final class StagedParquetPartitionReader<F, C>
       }
       Future<TimedFooter<C>> future;
       try {
-        future = pools.footerExecutor().submit(() -> {
+        future = pools.cpuExecutor().submit(() -> {
           try {
-            return runOnTaskPoolThread(() -> {
+            return runAsTaskPoolThread(() -> {
               long start = System.nanoTime();
               FooterResult<C> footer = adapter.readAndFilterFooter(file);
               if (footer == null) {
@@ -408,54 +342,25 @@ public final class StagedParquetPartitionReader<F, C>
       checkOpen();
       plan = planner.plan(new ArrayList<>(footers));
     }
-    plannedSubtasks = plan.getSubtasks();
+    List<ReadSubtask<C>> plannedSubtasks = plan.getSubtasks();
     remainingResults = plannedSubtasks.size();
     initialized = true;
-    submitAvailableSubtasks();
-  }
-
-  /**
-   * Admit a bounded window of exact planned bytes without blocking a worker on a semaphore.
-   * One oversized subtask is admitted when the window is empty so byte limits cannot deadlock.
-   */
-  private void submitAvailableSubtasks() {
-    List<SubtaskExecution<C>> admitted = new ArrayList<>();
-    synchronized (lifecycleLock) {
-      checkOpen();
-      while (nextSubtaskToSubmit < plannedSubtasks.size()
-          && inFlightSubtasks < maxInFlightSubtasks) {
-        ReadSubtask<C> subtask = plannedSubtasks.get(nextSubtaskToSubmit);
-        long bytes = subtask.getLayout().getTotalSizeBytes();
-        boolean fitsBytes = bytes <= maxInFlightBytes - inFlightBytes;
-        if (!fitsBytes && inFlightSubtasks > 0) {
-          break;
-        }
-        SubtaskExecution<C> execution = new SubtaskExecution<>(subtask, bytes);
+    for (ReadSubtask<C> subtask : plannedSubtasks) {
+      SubtaskExecution<C> execution = new SubtaskExecution<>(subtask);
+      synchronized (lifecycleLock) {
+        checkOpen();
         executions.add(execution);
-        admitted.add(execution);
-        nextSubtaskToSubmit += 1;
-        inFlightSubtasks += 1;
-        inFlightBytes = Math.addExact(inFlightBytes, bytes);
       }
-    }
-    for (SubtaskExecution<C> execution : admitted) {
       submit(execution);
     }
   }
 
-  private void submit(SubtaskExecution<C> execution) {
-    ReadSubtask<C> subtask = execution.subtask;
-
-    CompletableFuture<StagedParquetOutput> outputFuture = CompletableFuture.supplyAsync(
-        () -> runUncheckedOnTaskPoolThread(() -> createOutput(execution)),
-        pools.ioExecutor());
-    CompletableFuture<PendingRead<C>> ioFuture = outputFuture.thenCompose(
-        output -> submitSourceReads(execution, output));
-    execution.ioFuture = ioFuture;
+  private void submit(SubtaskExecution<C> execution) throws Exception {
+    CompletableFuture<PendingRead<C>> ioFuture = submitSourceReads(execution);
 
     CompletableFuture<StagedReadResult<C>> resultFuture = ioFuture.thenApplyAsync(
-        pending -> runUncheckedOnTaskPoolThread(() -> combine(execution, pending)),
-        pools.combineExecutor());
+        pending -> runUncheckedAsTaskPoolThread(() -> combine(execution, pending)),
+        pools.cpuExecutor());
     resultFuture.whenComplete((result, error) -> {
       if (error != null) {
         Throwable failure = unwrap(error);
@@ -488,8 +393,128 @@ public final class StagedParquetPartitionReader<F, C>
         }
       }
     });
-    if (closed.get()) {
-      execution.cancelAndClose();
+  }
+
+  /**
+   * Submit one directly scheduled I/O-pool job per source file in this subtask.
+   *
+   * <p>Each source receives at most one {@code readVectored} call containing a distinct range for
+   * every cache-miss Parquet column chunk; cache-hit chunks are copied directly from their cached
+   * channels. This preserves both levels of remote-I/O concurrency: source files run as independent
+   * pool jobs and PerfIO runs the miss ranges within each source concurrently. The first source job
+   * lazily creates the exact-sized output; sibling jobs briefly synchronize on that initialization
+   * and then write their disjoint output ranges concurrently. The returned future completes only
+   * after every writer is terminal, which makes it safe for the dependent CPU continuation to
+   * write the synthetic header/footer and seal the output.</p>
+   */
+  private CompletableFuture<PendingRead<C>> submitSourceReads(
+      SubtaskExecution<C> execution) {
+    Map<StagedFileSource, List<PlannedReadRange>> rangesBySource = new LinkedHashMap<>();
+    for (PlannedReadRange range : execution.subtask.getLayout().getRanges()) {
+      rangesBySource.computeIfAbsent(range.getSource(), ignored -> new ArrayList<>())
+          .add(range);
+    }
+
+    List<CompletableFuture<SourceReadStats>> sourceFutures = new ArrayList<>();
+    for (Map.Entry<StagedFileSource, List<PlannedReadRange>> entry
+        : rangesBySource.entrySet()) {
+      if (closed.get()) {
+        sourceFutures.add(failedFuture(
+            new CancellationException("staged reader closed before source I/O submission")));
+        break;
+      }
+      try {
+        sourceFutures.add(CompletableFuture.supplyAsync(
+            () -> runUncheckedAsTaskPoolThread(() -> {
+              StagedParquetOutput output = getOrCreateOutput(execution);
+              return readSourceRanges(output, entry.getKey(), entry.getValue());
+            }),
+            pools.ioExecutor()));
+      } catch (Throwable submissionError) {
+        // Preserve the all-writers-terminal barrier when a later submission fails. Closing the
+        // shared output before already-submitted writers finish would race their HMB writes.
+        sourceFutures.add(failedFuture(submissionError));
+        break;
+      }
+    }
+
+    // A valid Parquet projection can contain no physical column ranges. It still needs an output
+    // for the header/footer, and allocating it as an I/O job preserves the same lazy memory bound.
+    if (sourceFutures.isEmpty()) {
+      if (closed.get()) {
+        sourceFutures.add(failedFuture(
+            new CancellationException("staged reader closed before output allocation")));
+      } else {
+        try {
+          sourceFutures.add(CompletableFuture.supplyAsync(
+              () -> runUncheckedAsTaskPoolThread(() -> {
+                getOrCreateOutput(execution);
+                return SourceReadStats.EMPTY;
+              }),
+              pools.ioExecutor()));
+        } catch (Throwable submissionError) {
+          sourceFutures.add(failedFuture(submissionError));
+        }
+      }
+    }
+
+    CompletableFuture<?>[] allSourceFutures =
+        sourceFutures.toArray(new CompletableFuture<?>[sourceFutures.size()]);
+    return CompletableFuture.allOf(allSourceFutures).thenApply(ignored -> {
+      long ioNanos = 0L;
+      long cacheHitCount = 0L;
+      long cacheHitBytes = 0L;
+      long cacheMissCount = 0L;
+      long cacheMissBytes = 0L;
+      long cacheReadNanos = 0L;
+      for (CompletableFuture<SourceReadStats> sourceFuture : sourceFutures) {
+        SourceReadStats stats = sourceFuture.join();
+        ioNanos = Math.addExact(ioNanos, stats.ioNanos);
+        cacheHitCount = Math.addExact(cacheHitCount, stats.cacheHitCount);
+        cacheHitBytes = Math.addExact(cacheHitBytes, stats.cacheHitBytes);
+        cacheMissCount = Math.addExact(cacheMissCount, stats.cacheMissCount);
+        cacheMissBytes = Math.addExact(cacheMissBytes, stats.cacheMissBytes);
+        cacheReadNanos = Math.addExact(cacheReadNanos, stats.cacheReadNanos);
+      }
+      StagedParquetOutput output = execution.output.get();
+      if (output == null) {
+        throw new IllegalStateException("source I/O completed without a staged Parquet output");
+      }
+      return new PendingRead<>(output, ioNanos, cacheHitCount, cacheHitBytes,
+          cacheMissCount, cacheMissBytes, cacheReadNanos);
+    });
+  }
+
+  private static <T> CompletableFuture<T> failedFuture(Throwable error) {
+    CompletableFuture<T> failed = new CompletableFuture<>();
+    failed.completeExceptionally(error);
+    return failed;
+  }
+
+  /**
+   * Lazily create the one shared output for a subtask.
+   *
+   * <p>Output creation happens under an I/O worker's installed Spark task/RMM context instead of
+   * on the task thread. The per-execution monitor prevents duplicate exact-sized allocations while
+   * allowing every source worker to write concurrently as soon as initialization returns. A failed
+   * allocation is memoized so waiting siblings observe the same root failure.</p>
+   */
+  private StagedParquetOutput getOrCreateOutput(SubtaskExecution<C> execution) {
+    synchronized (execution.outputInitializationLock) {
+      if (execution.outputInitializationFailure != null) {
+        throw propagate(execution.outputInitializationFailure);
+      }
+      checkOpen();
+      StagedParquetOutput existing = execution.output.get();
+      if (existing != null) {
+        return existing;
+      }
+      try {
+        return createOutput(execution);
+      } catch (Throwable error) {
+        execution.outputInitializationFailure = error;
+        throw propagate(error);
+      }
     }
   }
 
@@ -508,122 +533,6 @@ public final class StagedParquetPartitionReader<F, C>
       throw new CancellationException("staged reader closed before I/O started");
     }
     return output;
-  }
-
-  private CompletableFuture<PendingRead<C>> submitSourceReads(
-      SubtaskExecution<C> execution,
-      StagedParquetOutput output) {
-    Map<StagedFileSource, List<PlannedReadRange>> rangesBySource = new LinkedHashMap<>();
-    for (PlannedReadRange range : execution.subtask.getLayout().getRanges()) {
-      rangesBySource.computeIfAbsent(range.getSource(), ignored -> new ArrayList<>())
-          .add(range);
-    }
-
-    ConcurrentLinkedQueue<SourceReadStats> sourceStats = new ConcurrentLinkedQueue<>();
-    List<CompletableFuture<?>> sourceFutures = new ArrayList<>();
-    for (Map.Entry<StagedFileSource, List<PlannedReadRange>> entry
-        : rangesBySource.entrySet()) {
-      CompletableFuture<SourceReadStats> sourceFuture =
-          enqueueSourceRead(output, entry.getKey(), entry.getValue());
-      sourceFutures.add(sourceFuture.thenAccept(sourceStats::add));
-    }
-    execution.sourceFutures = sourceFutures;
-
-    CompletableFuture<?>[] allFutures =
-        sourceFutures.toArray(new CompletableFuture<?>[sourceFutures.size()]);
-    return CompletableFuture.allOf(allFutures).thenApply(ignored -> {
-      long ioNanos = 0L;
-      long cacheHitCount = 0L;
-      long cacheHitBytes = 0L;
-      long cacheMissCount = 0L;
-      long cacheMissBytes = 0L;
-      long cacheReadNanos = 0L;
-      for (SourceReadStats stats : sourceStats) {
-        ioNanos = Math.addExact(ioNanos, stats.ioNanos);
-        cacheHitCount = Math.addExact(cacheHitCount, stats.cacheHitCount);
-        cacheHitBytes = Math.addExact(cacheHitBytes, stats.cacheHitBytes);
-        cacheMissCount = Math.addExact(cacheMissCount, stats.cacheMissCount);
-        cacheMissBytes = Math.addExact(cacheMissBytes, stats.cacheMissBytes);
-        cacheReadNanos = Math.addExact(cacheReadNanos, stats.cacheReadNanos);
-      }
-      return new PendingRead<>(output, ioNanos, cacheHitCount, cacheHitBytes,
-          cacheMissCount, cacheMissBytes, cacheReadNanos);
-    });
-  }
-
-  /**
-   * Queue one physical-source read behind this Spark task's nonblocking source limit.
-   *
-   * <p>The limit applies to source-level {@code readVectored} calls across every admitted subtask,
-   * not to the ranges inside a call. Each active call still carries all of that source's selected
-   * column chunks, and PerfIO executes those ranges concurrently.</p>
-   */
-  private CompletableFuture<SourceReadStats> enqueueSourceRead(
-      StagedParquetOutput output,
-      StagedFileSource source,
-      List<PlannedReadRange> ranges) {
-    QueuedSourceRead request = new QueuedSourceRead(output, source, ranges);
-    List<QueuedSourceRead> toStart;
-    synchronized (lifecycleLock) {
-      if (closed.get()) {
-        request.completion.completeExceptionally(
-            new CancellationException("staged reader closed before source I/O submission"));
-        return request.completion;
-      }
-      pendingSourceReads.addLast(request);
-      toStart = takeSourceReadsToStart();
-    }
-    startSourceReads(toStart);
-    return request.completion;
-  }
-
-  /** Must be called with lifecycleLock held; returned work must be submitted outside the lock. */
-  private List<QueuedSourceRead> takeSourceReadsToStart() {
-    List<QueuedSourceRead> toStart = new ArrayList<>();
-    while (!closed.get() && activeSourceReads < maxConcurrentSourceReads
-        && !pendingSourceReads.isEmpty()) {
-      toStart.add(pendingSourceReads.removeFirst());
-      activeSourceReads += 1;
-    }
-    return toStart;
-  }
-
-  private void startSourceReads(List<QueuedSourceRead> requests) {
-    for (QueuedSourceRead request : requests) {
-      try {
-        CompletableFuture.supplyAsync(
-            () -> runUncheckedOnTaskPoolThread(() -> readSourceRanges(
-                request.output, request.source, request.ranges)),
-            pools.ioExecutor()).whenComplete((stats, error) ->
-                sourceReadFinished(request, stats, error));
-      } catch (Throwable error) {
-        sourceReadFinished(request, null, error);
-      }
-    }
-  }
-
-  private void sourceReadFinished(
-      QueuedSourceRead request,
-      SourceReadStats stats,
-      Throwable error) {
-    List<QueuedSourceRead> toStart;
-    synchronized (lifecycleLock) {
-      activeSourceReads -= 1;
-      if (activeSourceReads < 0) {
-        activeSourceReads = 0;
-        recordAsynchronousCleanupFailure(
-            new IllegalStateException("active source-read count became negative"));
-      }
-      toStart = takeSourceReadsToStart();
-    }
-    // Refill before running arbitrary CompletableFuture continuations so one task retains its
-    // bounded I/O width even when a completed subtask immediately schedules combine/decode work.
-    startSourceReads(toStart);
-    if (error == null) {
-      request.completion.complete(stats);
-    } else {
-      request.completion.completeExceptionally(unwrap(error));
-    }
   }
 
   private SourceReadStats readSourceRanges(
@@ -794,7 +703,15 @@ public final class StagedParquetPartitionReader<F, C>
     }
   }
 
-  private <T> T runOnTaskPoolThread(Callable<T> operation) throws Exception {
+  /**
+   * Run shared-pool work as part of the Spark task that created this reader.
+   *
+   * <p>{@link TaskContext} is thread-local and is not inherited by executor-pool workers. The RMM
+   * registration associates host allocation, spill, and retry coordination on this worker with
+   * the owning Spark task. This is the same paired registration used by the existing asynchronous
+   * Parquet, ORC, and Avro readers.</p>
+   */
+  private <T> T runAsTaskPoolThread(Callable<T> operation) throws Exception {
     if (taskContext == null) {
       return operation.call();
     }
@@ -806,6 +723,7 @@ public final class StagedParquetPartitionReader<F, C>
     try {
       TrampolineUtil$.MODULE$.setTaskContext(taskContext);
       taskContextInstalled = true;
+      // Tell the RMM retry framework which Spark task temporarily owns this shared worker.
       RmmSpark.poolThreadWorkingOnTask(taskAttemptId);
       rmmRegistered = true;
       result = operation.call();
@@ -851,9 +769,9 @@ public final class StagedParquetPartitionReader<F, C>
     return result;
   }
 
-  private <T> T runUncheckedOnTaskPoolThread(Callable<T> operation) {
+  private <T> T runUncheckedAsTaskPoolThread(Callable<T> operation) {
     try {
-      return runOnTaskPoolThread(operation);
+      return runAsTaskPoolThread(operation);
     } catch (Throwable error) {
       throw new CompletionException(error);
     }
@@ -964,28 +882,18 @@ public final class StagedParquetPartitionReader<F, C>
         currentBatches = null;
       }
     }
-    List<SubtaskExecution<C>> executionsToCancel;
-    List<QueuedSourceRead> queuedSourceReadsToCancel;
     synchronized (lifecycleLock) {
       footerFutures.clear();
-      executionsToCancel = new ArrayList<>(executions);
       executions.clear();
-      queuedSourceReadsToCancel = new ArrayList<>(pendingSourceReads);
-      pendingSourceReads.clear();
       footers.clear();
     }
     // Footer futures are intentionally left running. Their contexts are registered by the
     // worker itself, and the last worker closes adapter-wide state. Future cancellation can mark
     // a running FutureTask complete before its callable exits, which would reintroduce a close
     // race with the adapter. Dropping our references is sufficient after the closed flag is set.
-    for (SubtaskExecution<C> execution : executionsToCancel) {
-      execution.cancelAndClose();
-    }
-    for (QueuedSourceRead request : queuedSourceReadsToCancel) {
-      request.completion.completeExceptionally(
-          new CancellationException("staged reader closed before queued source I/O started"));
-    }
-
+    // Source futures are likewise left terminal-barrier-driven: queued jobs observe closed before
+    // allocating/reading, active writers finish, and only then may the callback close their shared
+    // output. Cancelling allOf could otherwise close an output while supplyAsync is still writing.
     // Leave failure/sentinel entries in the queue so a concurrently blocked hasNext stays
     // unblocked. Only successful entries own resources and need removal during cleanup.
     for (Completion<C> completion : completions) {
@@ -1023,24 +931,6 @@ public final class StagedParquetPartitionReader<F, C>
   private static void closeIterator(Iterator<ColumnarBatch> iterator) throws Exception {
     if (iterator instanceof AutoCloseable) {
       ((AutoCloseable) iterator).close();
-    }
-  }
-
-  /** One source-level vectored call queued by the per-Spark-task admission pump. */
-  private final class QueuedSourceRead {
-    private final StagedParquetOutput output;
-    private final StagedFileSource source;
-    private final List<PlannedReadRange> ranges;
-    private final CompletableFuture<SourceReadStats> completion = new CompletableFuture<>();
-
-    private QueuedSourceRead(
-        StagedParquetOutput output,
-        StagedFileSource source,
-        List<PlannedReadRange> ranges) {
-      this.output = Objects.requireNonNull(output, "output");
-      this.source = Objects.requireNonNull(source, "source");
-      this.ranges = java.util.Collections.unmodifiableList(
-          new ArrayList<>(Objects.requireNonNull(ranges, "ranges")));
     }
   }
 
@@ -1094,6 +984,9 @@ public final class StagedParquetPartitionReader<F, C>
 
   /** Aggregate measurements from one independently scheduled physical source. */
   private static final class SourceReadStats {
+    private static final SourceReadStats EMPTY =
+        new SourceReadStats(0L, 0L, 0L, 0L, 0L, 0L);
+
     private final long ioNanos;
     private final long cacheHitCount;
     private final long cacheHitBytes;
@@ -1146,20 +1039,21 @@ public final class StagedParquetPartitionReader<F, C>
   /**
    * Mutable lifecycle state for one otherwise immutable subtask.
    *
-   * <p>{@code output} is non-null only while I/O or combination owns it. Successful combination
-   * atomically removes it before constructing {@link StagedReadResult}; cancellation atomically
-   * removes and closes it. Exactly one path can win.</p>
+   * <p>{@code outputInitializationLock} protects the lazy, exactly-once allocation and its
+   * memoized failure. {@code output} is non-null only while source I/O or combination owns the
+   * shared output. Successful combination atomically removes it before constructing
+   * {@link StagedReadResult}; terminal-stage cleanup atomically removes and closes it. Exactly one
+   * ownership path can win.</p>
    */
   private static final class SubtaskExecution<C> {
     private final ReadSubtask<C> subtask;
-    private final long admittedBytes;
+    private final Object outputInitializationLock = new Object();
     private final AtomicReference<StagedParquetOutput> output = new AtomicReference<>();
-    private volatile CompletableFuture<?> ioFuture;
-    private volatile List<CompletableFuture<?>> sourceFutures;
+    /** Accessed only while holding {@link #outputInitializationLock}. */
+    private Throwable outputInitializationFailure;
 
-    private SubtaskExecution(ReadSubtask<C> subtask, long admittedBytes) {
+    private SubtaskExecution(ReadSubtask<C> subtask) {
       this.subtask = subtask;
-      this.admittedBytes = admittedBytes;
     }
 
     private void closeOutput(StagedParquetOutput expected) {
@@ -1176,21 +1070,6 @@ public final class StagedParquetPartitionReader<F, C>
       }
     }
 
-    private void cancelAndClose() {
-      // Never close an output from the cancellation thread while a worker may be inside a remote
-      // read or footer write. That would block close() on the output monitor. A running worker
-      // observes the reader's closed flag and releases its own output before returning.
-      if (output.get() != null) {
-        return;
-      }
-      CompletableFuture<?> io = ioFuture;
-      if (io != null) {
-        io.cancel(true);
-      }
-      // Never cancel resultFuture here. Once combination atomically removes output from this
-      // execution cell, only the future/callback can receive and close the StagedReadResult.
-      // Canceling in that handoff window would discard the value and leak its sealed output.
-    }
   }
 
   /** Queue value that publishes exactly one success or failure for a planned subtask. */

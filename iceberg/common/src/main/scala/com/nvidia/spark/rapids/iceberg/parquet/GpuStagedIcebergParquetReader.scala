@@ -69,21 +69,17 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
  *
  * Most of the new pipeline is Java. This small Scala boundary intentionally remains beside the
  * existing Iceberg reader because it invokes Scala-native RAPIDS decode and post-processing APIs.
- * Footer filtering runs in the footer pool, planning runs on the Spark task thread, I/O and
- * synthetic-file finalization run in their dedicated pools, and this adapter's decode method is
- * called only by the Spark task thread.
+ * Footer loading/filtering and synthetic-file finalization run in the CPU pool, planning runs on
+ * the Spark task thread, each source file is read independently in the I/O pool, and this adapter's
+ * decode method is called only by the Spark task thread.
  */
 class GpuStagedIcebergParquetReader(
     val rapidsFileIO: IcebergFileIO,
     val files: Seq[IcebergPartitionedFile],
     val constantsProvider: IcebergPartitionedFile => JMap[Integer, _],
     override val conf: GpuIcebergParquetReaderConf,
-    footerThreads: Int,
-    ioThreads: Int,
-    combineThreads: Int,
-    maxInFlightSubtasks: Int = 8,
-    maxInFlightBytes: Long = 512L * 1024L * 1024L,
-    maxConcurrentSourceReads: Int = 4) extends GpuIcebergParquetReader {
+    cpuThreads: Int,
+    ioThreads: Int) extends GpuIcebergParquetReader {
 
   private val multiThreadConf = conf.threadConf.asInstanceOf[MultiThread]
   private val expectedSparkSchema = SparkSchemaUtil.convert(conf.expectedSchema)
@@ -135,13 +131,9 @@ class GpuStagedIcebergParquetReader(
       conf.maxBatchSizeRows,
       conf.maxBatchSizeBytes,
       targetParquetBytes,
-      footerThreads,
+      cpuThreads,
       ioThreads,
-      combineThreads,
       scratchBytes,
-      maxInFlightSubtasks,
-      maxInFlightBytes,
-      maxConcurrentSourceReads,
       TaskContext.get())
   }
 
