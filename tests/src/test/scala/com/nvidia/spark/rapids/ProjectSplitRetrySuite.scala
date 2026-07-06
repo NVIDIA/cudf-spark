@@ -359,6 +359,24 @@ class ProjectSplitRetrySuite extends RmmSparkRetrySuiteBase {
     }
   }
 
+  test("fallback streaming entry closes input when abandoned before next") {
+    val context = new MockTaskContext(taskAttemptId = 1, partitionId = 0)
+    TrampolineUtil.setTaskContext(context)
+    try {
+      val tier = GpuBindReferences.bindGpuReferencesTiered(
+        addOneExprs(), batchAttrs, new SQLConf(), Map.empty)
+      val sb = newSpillable()
+      val pieces = tier.projectAndCloseStreamingWithSplitRetry(
+        sb, allowMultipleOutputBatches = false)
+      assert(pieces.hasNext)
+      context.markTaskComplete()
+      assertClosed(sb)
+    } finally {
+      TrampolineUtil.unsetTaskContext()
+      ScalableTaskCompletion.reset()
+    }
+  }
+
   test("streaming entry falls back to single piece for multi-tier projection") {
     val tier = GpuBindReferences.bindGpuReferencesTiered(
       mixedNonRetryableExprs(), batchAttrs, new SQLConf(), Map.empty)
