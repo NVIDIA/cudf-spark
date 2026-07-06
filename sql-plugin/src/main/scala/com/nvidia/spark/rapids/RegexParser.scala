@@ -526,7 +526,14 @@ class RegexParser(pattern: String) {
       consumeExpected('{')
     }
     val start = pos
-    while (!eof() && isHexDigit(pattern.charAt(pos))) {
+    // Java spec: non-braced `\xNN` consumes EXACTLY two hex digits and any
+    // trailing hex digits are part of the surrounding pattern. The braced form
+    // `\x{h...h}` consumes hex digits until the closing '}' (validated below).
+    // Issue #14739: previously this loop was unbounded for both forms, so
+    // patterns like "\\x61a" were rejected even though they are valid Java
+    // regex meaning "0x61 (= 'a') followed by the literal 'a'".
+    val hexLimit = if (varHex) Int.MaxValue else 2
+    while (pos - start < hexLimit && !eof() && isHexDigit(pattern.charAt(pos))) {
       pos += 1
     }
     val hexDigit = pattern.substring(start, pos)
