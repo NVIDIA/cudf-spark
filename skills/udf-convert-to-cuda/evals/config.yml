@@ -1,0 +1,10 @@
+schema_version: 1
+harbor:
+  # preserve: build the eval container from environment/Dockerfile as written, keeping our
+  # own `FROM ...-rockylinux8` base. The default rebase would instead swap our FROM with the
+  # default skill eval base, losing our base image.
+  custom_dockerfile_mode: preserve
+skill_workspace:
+  mode: group
+  include:  # prerequisite skills for udf-convert-to-cuda
+    - ../udf-gen-test
