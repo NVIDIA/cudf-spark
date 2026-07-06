@@ -352,7 +352,7 @@ def test_hive_text_round_trip_partitioned_case_insensitive(spark_tmp_path, data_
                     reason="Hive text reads are disabled on CDH, as per "
                            "https://github.com/NVIDIA/spark-rapids/pull/7628")
 @ignore_order(local=True)
-@allow_non_gpu("EqualTo", "IsNotNull", *non_utc_allow_for_test_basic_hive_text_read)
+@allow_non_gpu("EqualTo,IsNotNull,Literal", *non_utc_allow_for_test_basic_hive_text_read)
 def test_hive_text_partition_listing_shim_paths(spark_tmp_path, spark_tmp_table_factory):
     gen = StructGen([('my_field', int_gen)], nullable=False)
     data_path = spark_tmp_path + '/hive_text_table'
