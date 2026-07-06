@@ -111,7 +111,8 @@ class GpuReaderFactory(private val metrics: Map[String, GpuMetric],
           CombineConf(combineThresholdSize, combineWaitTime),
           disableCombining,
           hasFilePathMetadata,
-          hasRowPositionMetadata)
+          hasRowPositionMetadata,
+          queryUsesInputFile)
       } else {
         MultiFile(poolConfBuilder, hasFilePathMetadata, hasRowPositionMetadata)
       }

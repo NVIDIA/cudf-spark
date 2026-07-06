@@ -143,6 +143,15 @@ object GpuMetric extends Logging {
   val ASYNC_READ_TIME = "shuffleAsyncReadTime"
   val ICEBERG_BUILD_ACTION_TIME = "icebergBuildActionTime"
   val ICEBERG_POST_PROCESS_TIME = "icebergPostProcessTime"
+  val ICEBERG_STAGED_FOOTER_TIME = "icebergStagedFooterTime"
+  val ICEBERG_STAGED_IO_TIME = "icebergStagedIoTime"
+  val ICEBERG_STAGED_COMBINE_TIME = "icebergStagedCombineTime"
+  val ICEBERG_STAGED_WAIT_TIME = "icebergStagedWaitTime"
+  val ICEBERG_STAGED_FOOTER_WAIT_TIME = "icebergStagedFooterWaitTime"
+  val ICEBERG_STAGED_RESULT_WAIT_TIME = "icebergStagedResultWaitTime"
+  val ICEBERG_STAGED_MATERIALIZATION_TIME = "icebergStagedMaterializationTime"
+  val ICEBERG_STAGED_DISK_SUBTASK_COUNT = "icebergStagedDiskSubtaskCount"
+  val ICEBERG_STAGED_DISK_BYTES = "icebergStagedDiskBytes"
 
   // Metric Descriptions.
   val DESCRIPTION_BUFFER_TIME = "buffer time"
@@ -201,6 +210,19 @@ object GpuMetric extends Logging {
   val DESCRIPTION_ASYNC_READ_TIME = "async read time"
   val DESCRIPTION_ICEBERG_BUILD_ACTION_TIME = "iceberg build action tree time"
   val DESCRIPTION_ICEBERG_POST_PROCESS_TIME = "iceberg post process time"
+  val DESCRIPTION_ICEBERG_STAGED_FOOTER_TIME = "iceberg staged footer/filter worker time"
+  val DESCRIPTION_ICEBERG_STAGED_IO_TIME = "iceberg staged data I/O worker time"
+  val DESCRIPTION_ICEBERG_STAGED_COMBINE_TIME = "iceberg staged combine worker time"
+  val DESCRIPTION_ICEBERG_STAGED_WAIT_TIME = "iceberg staged task wait time"
+  val DESCRIPTION_ICEBERG_STAGED_FOOTER_WAIT_TIME =
+    "iceberg staged footer barrier wait time"
+  val DESCRIPTION_ICEBERG_STAGED_RESULT_WAIT_TIME =
+    "iceberg staged data result wait time"
+  val DESCRIPTION_ICEBERG_STAGED_MATERIALIZATION_TIME =
+    "iceberg staged materialization time"
+  val DESCRIPTION_ICEBERG_STAGED_DISK_SUBTASK_COUNT =
+    "iceberg staged disk-backed subtasks"
+  val DESCRIPTION_ICEBERG_STAGED_DISK_BYTES = "iceberg staged disk-backed bytes"
 
   /**
    * Determine if a GpuMetric wraps a TimingMetric or NanoTimingMetric.

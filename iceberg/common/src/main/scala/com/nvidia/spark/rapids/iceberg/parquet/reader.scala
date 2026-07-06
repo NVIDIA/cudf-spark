@@ -120,7 +120,8 @@ case class MultiThread(
     combineConf: CombineConf,
     disableCombining: Boolean,
     hasFilePathMetadata: Boolean,
-    hasRowPositionMetadata: Boolean) extends ThreadConf
+    hasRowPositionMetadata: Boolean,
+    queryUsesInputFile: Boolean) extends ThreadConf
 
 case class MultiFile(
     poolConfBuilder: ThreadPoolConfBuilder,

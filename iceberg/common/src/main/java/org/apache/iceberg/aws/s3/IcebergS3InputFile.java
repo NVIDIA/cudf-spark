@@ -58,7 +58,7 @@ public final class IcebergS3InputFile implements RapidsInputFile {
   }
 
   public static RapidsInputFile maybeCreate(InputFile inputFile, FileIO fileIO) {
-    // When the gating conf is off (or the file is not an S3 file), return the
+    // When resolved PerfIO S3 support is unavailable (or this is not an S3 file), return the
     // default IcebergInputFile so the standard Iceberg SeekableInputStream path is used.
     IcebergInputFile delegate = new IcebergInputFile(inputFile);
     if (!RapidsInputFiles.isS3PerfEnabled()) {
@@ -80,6 +80,9 @@ public final class IcebergS3InputFile implements RapidsInputFile {
       }
       LOG.debug("IcebergS3RangeCopier path disabled for {}", s3Uri);
       return delegate;
+    }
+    if (TaskContext.get() != null) {
+      GpuTaskMetrics$.MODULE$.get().recordPerfioS3BackendOnce();
     }
     LOG.debug("IcebergS3RangeCopier path active for {}", s3Uri);
     return new IcebergS3InputFile(delegate, s3Uri, icebergS3Client);

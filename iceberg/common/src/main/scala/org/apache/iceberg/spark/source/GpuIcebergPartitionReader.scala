@@ -86,9 +86,27 @@ class GpuIcebergPartitionReader(private val task: GpuSparkInputPartition,
       case SingleFile =>
         new GpuSingleThreadIcebergParquetReader(rapidsFileIO, files, constantsMap,
           gpuDeleteFiterMap, conf)
-      case _: MultiThread =>
-        new GpuMultiThreadIcebergParquetReader(rapidsFileIO, files, constantsMap,
-          gpuDeleteFiterMap, conf)
+      case multiThread: MultiThread =>
+        // The first staged-reader implementation intentionally excludes delete processing,
+        // encrypted data, and _pos. Those scans remain on the existing, well-tested reader. The
+        // _pos post-processor is stateful and cannot safely consume completion-order subtasks yet.
+        val hasDeletes = tasks.values.exists(_.deletes().asScala.nonEmpty)
+        val hasEncryptedData = tasks.values.exists(_.file().keyMetadata() != null)
+        val hasRowPosition =
+          task.expectedSchema.findField(MetadataColumns.ROW_POSITION.fieldId()) != null
+        if (task.icebergStagedReadEnabled && !hasDeletes && !hasEncryptedData &&
+            !hasRowPosition && !multiThread.queryUsesInputFile) {
+          new GpuStagedIcebergParquetReader(rapidsFileIO, files, constantsMap, conf,
+            task.icebergStagedReadFooterThreads,
+            task.multiThreadReadNumThreads,
+            task.icebergStagedReadCombineThreads,
+            task.icebergStagedReadMaxInFlightSubtasks,
+            task.icebergStagedReadMaxInFlightBytes,
+            task.icebergStagedReadMaxConcurrentSourceReads)
+        } else {
+          new GpuMultiThreadIcebergParquetReader(rapidsFileIO, files, constantsMap,
+            gpuDeleteFiterMap, conf)
+        }
       case _: MultiFile =>
         new GpuCoalescingIcebergParquetReader(rapidsFileIO, files, constantsMap, conf)
     }
