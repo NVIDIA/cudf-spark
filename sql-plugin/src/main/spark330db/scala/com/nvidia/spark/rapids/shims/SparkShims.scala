@@ -25,7 +25,7 @@ import org.apache.spark.sql.catalyst.expressions.{Expression, Stateful}
 import org.apache.spark.sql.catalyst.expressions.objects.{ExternalMapToCatalyst, InvokeLike}
 import org.apache.spark.sql.execution.command.{CreateDataSourceTableAsSelectCommand, DataWritingCommand, RunnableCommand}
 
-object SparkShimImpl extends Spark330PlusDBShims {
+object SparkShimImpl extends Spark330PlusDBShims with SparkCatalogPartitionShims {
   override def isExpressionStateful(expr: Expression): Boolean = expr match {
     case _: Stateful | _: InvokeLike | _: ExternalMapToCatalyst => true
     case _ => false

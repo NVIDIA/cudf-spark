@@ -22,6 +22,8 @@ import org.apache.parquet.schema.MessageType
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{SparkSession => SqlSparkSession}
 import org.apache.spark.sql.catalyst.{InternalRow, TableIdentifier}
+import org.apache.spark.sql.catalyst.catalog.{CatalogTable, CatalogTablePartition}
+import org.apache.spark.sql.catalyst.catalog.CatalogTypes.TablePartitionSpec
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, CreateMap, Expression,
   MapConcat, MapFromArrays, MapFromEntries, ScalaUDF, StringToMap}
 import org.apache.spark.sql.catalyst.plans.physical.{BroadcastMode, Partitioning}
@@ -98,6 +100,18 @@ trait SparkShims {
    * in favor of filesWithAbsolutePaths or innerFiles.
    */
   def getPartitionFiles(partition: FilePartition): Seq[PartitionedFile]
+
+  def listPartitionsByFilter(
+      sparkSession: SqlSparkSession,
+      tableName: TableIdentifier,
+      predicates: Seq[Expression],
+      resolvedCatalogTable: Option[CatalogTable]): Seq[CatalogTablePartition]
+
+  def listPartitions(
+      sparkSession: SqlSparkSession,
+      tableName: TableIdentifier,
+      partialSpec: Option[TablePartitionSpec],
+      resolvedCatalogTable: Option[CatalogTable]): Seq[CatalogTablePartition]
 
   def shouldFailDivOverflow: Boolean
 

@@ -347,6 +347,45 @@ def test_hive_text_round_trip_partitioned_case_insensitive(spark_tmp_path, data_
         lambda spark: read_hive_text_table_partitions(spark, table_name, "DT='1'"),
         conf=hive_text_enabled_conf)
 
+
+@pytest.mark.skipif(is_spark_cdh(),
+                    reason="Hive text reads are disabled on CDH, as per "
+                           "https://github.com/NVIDIA/spark-rapids/pull/7628")
+@ignore_order(local=True)
+@allow_non_gpu("EqualTo", "IsNotNull", *non_utc_allow_for_test_basic_hive_text_read)
+def test_hive_text_partition_listing_shim_paths(spark_tmp_path, spark_tmp_table_factory):
+    gen = StructGen([('my_field', int_gen)], nullable=False)
+    data_path = spark_tmp_path + '/hive_text_table'
+    table_name = spark_tmp_table_factory.get()
+
+    with_cpu_session(lambda spark: create_hive_text_table_partitioned(
+        spark, gen, table_name, data_path))
+
+    def read_partitioned_table(spark):
+        def assert_gpu_hive_scan(df, description):
+            is_gpu = str(spark.conf.get("spark.rapids.sql.enabled", "false")).lower() == "true"
+            if is_gpu:
+                plan = df._jdf.queryExecution().executedPlan()
+                explain_str = str(plan)
+                callback = spark._sc._jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+                assert callback.contains(plan, "GpuHiveTableScanExec"), \
+                    "%s did not use GpuHiveTableScanExec:\n%s" % (description, explain_str)
+
+        # The unfiltered query exercises SparkShimImpl.listPartitions.
+        unfiltered = spark.sql(
+            "SELECT 'unfiltered' AS query_name, my_field FROM %s" % table_name)
+        assert_gpu_hive_scan(unfiltered, "Unfiltered partitioned Hive text read")
+
+        # The filtered query exercises SparkShimImpl.listPartitionsByFilter.
+        filtered = spark.sql(
+            "SELECT 'filtered' AS query_name, my_field FROM %s WHERE dt = '1'" % table_name)
+        assert_gpu_hive_scan(filtered, "Filtered partitioned Hive text read")
+        return unfiltered.unionByName(filtered)
+
+    conf = copy_and_update(hive_text_enabled_conf,
+                           {"spark.sql.hive.metastorePartitionPruning": "true"})
+    assert_gpu_and_cpu_are_equal_collect(read_partitioned_table, conf=conf)
+
 @pytest.mark.skipif(is_spark_cdh(),
                     reason="Hive text reads are disabled on CDH, as per "
                            "https://github.com/NVIDIA/spark-rapids/pull/7628")

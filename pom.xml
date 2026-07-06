@@ -669,11 +669,13 @@
                 <iceberg.artifact.suffix>${spark40x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.runtime.version>${iceberg.110x.version}</iceberg.runtime.version>
                 <rapids.iceberg.artifactId>rapids-4-spark-iceberg-1-10-x</rapids.iceberg.artifactId>
+                <rapids.iceberg.artifactId2>rapids-4-spark-iceberg-1-11-x</rapids.iceberg.artifactId2>
                 <slf4j.version>2.0.7</slf4j.version>
             </properties>
             <modules>
                 <module>delta-lake/delta-40x</module>
                 <module>iceberg/iceberg-1-10-x</module>
+                <module>iceberg/iceberg-1-11-x</module>
             </modules>
         </profile>
         <profile>
@@ -693,11 +695,13 @@
                 <iceberg.artifact.suffix>${spark40x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.runtime.version>${iceberg.110x.version}</iceberg.runtime.version>
                 <rapids.iceberg.artifactId>rapids-4-spark-iceberg-1-10-x</rapids.iceberg.artifactId>
+                <rapids.iceberg.artifactId2>rapids-4-spark-iceberg-1-11-x</rapids.iceberg.artifactId2>
                 <slf4j.version>2.0.7</slf4j.version>
             </properties>
             <modules>
                 <module>delta-lake/delta-40x</module>
                 <module>iceberg/iceberg-1-10-x</module>
+                <module>iceberg/iceberg-1-11-x</module>
             </modules>
         </profile>
         <profile>

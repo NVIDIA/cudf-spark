@@ -765,7 +765,8 @@ def test_formats_for_legacy_mode_other_formats_tz_rules():
 def test_to_timestamp_legacy_millisecond_format_fallback():
     conf = {
         'spark.sql.legacy.timeParserPolicy': 'LEGACY',
-        'spark.rapids.sql.incompatibleDateFormats.enabled': True
+        'spark.rapids.sql.incompatibleDateFormats.enabled': True,
+        'spark.rapids.sql.expression.cpuBridge.enabled': False
     }
     assert_gpu_fallback_collect(
         lambda spark: spark.createDataFrame(
