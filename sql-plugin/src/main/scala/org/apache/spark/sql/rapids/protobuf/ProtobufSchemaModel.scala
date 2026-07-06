@@ -86,6 +86,7 @@ trait ProtobufFieldDescriptor {
   def protoTypeName: String
   def isRepeated: Boolean
   def isRequired: Boolean
+  def isInOneof: Boolean
   def defaultValueResult: Either[String, Option[ProtobufDefaultValue]]
   def enumMetadata: Option[ProtobufEnumMetadata]
   def messageDescriptor: Option[ProtobufMessageDescriptor]

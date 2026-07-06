@@ -70,17 +70,22 @@ private[shims] object SparkProtobufCompat extends Logging {
 
   def parsePlannerOptions(
       options: Map[String, String]): Either[String, ProtobufPlannerOptions] = {
-    val enumsAsInts = Try(options.getOrElse("enums.as.ints", "false").toBoolean)
-      .toEither
-      .left
-      .map { _ =>
-        "Invalid value for from_protobuf option 'enums.as.ints': " +
-          s"'${options.getOrElse("enums.as.ints", "")}' (expected true/false)"
-      }
-    enumsAsInts.map(v =>
-      ProtobufPlannerOptions(
-        enumsAsInts = v,
-        failOnErrors = options.getOrElse("mode", "FAILFAST").equalsIgnoreCase("FAILFAST")))
+    val mode = options.getOrElse("mode", "FAILFAST")
+    if (mode.equalsIgnoreCase("DROPMALFORMED")) {
+      Left("from_protobuf DROPMALFORMED mode is not supported on GPU")
+    } else {
+      val enumsAsInts = Try(options.getOrElse("enums.as.ints", "false").toBoolean)
+        .toEither
+        .left
+        .map { _ =>
+          "Invalid value for from_protobuf option 'enums.as.ints': " +
+            s"'${options.getOrElse("enums.as.ints", "")}' (expected true/false)"
+        }
+      enumsAsInts.map(v =>
+        ProtobufPlannerOptions(
+          enumsAsInts = v,
+          failOnErrors = mode.equalsIgnoreCase("FAILFAST")))
+    }
   }
 
   def unsupportedOptions(options: Map[String, String]): Seq[String] =
@@ -221,6 +226,7 @@ private[shims] object SparkProtobufCompat extends Logging {
     override lazy val protoTypeName: String = typeName(PbReflect.getFieldType(raw))
     override lazy val isRepeated: Boolean = PbReflect.isRepeated(raw)
     override lazy val isRequired: Boolean = PbReflect.isRequired(raw)
+    override lazy val isInOneof: Boolean = PbReflect.getContainingOneof(raw) != null
     override lazy val enumMetadata: Option[ProtobufEnumMetadata] =
       if (protoTypeName == "ENUM") {
         Some(ProtobufEnumMetadata(PbReflect.getEnumValues(PbReflect.getEnumType(raw))))
@@ -350,6 +356,8 @@ private[shims] object SparkProtobufCompat extends Logging {
 
     def isRequired(fd: AnyRef): Boolean =
       invoke0[java.lang.Boolean](fd, "isRequired").booleanValue()
+
+    def getContainingOneof(fd: AnyRef): AnyRef = invoke0[AnyRef](fd, "getContainingOneof")
 
     def hasDefaultValue(fd: AnyRef): Boolean =
       invoke0[java.lang.Boolean](fd, "hasDefaultValue").booleanValue()

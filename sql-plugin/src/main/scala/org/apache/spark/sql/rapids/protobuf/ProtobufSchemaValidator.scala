@@ -22,6 +22,10 @@ import org.apache.spark.sql.rapids.GpuFromProtobuf
 import org.apache.spark.sql.types._
 
 object ProtobufSchemaValidator {
+  // Keep planner rejection aligned with JNI so unsupported schemas fall back before execution.
+  val MAX_NESTING_DEPTH: Int = 10
+  val MAX_REPEATED_FIELDS_PER_MESSAGE: Int = 32
+
   private final case class JniDefaultValues(
       defaultInt: Long,
       defaultFloat: Double,
@@ -74,6 +78,7 @@ object ProtobufSchemaValidator {
 
   def validateFlattenedSchema(flatFields: Seq[FlattenedFieldDescriptor]): Either[String, Unit] = {
     val structTypeId = DType.STRUCT.getTypeId.getNativeId
+    val repeatedFieldsByParent = scala.collection.mutable.Map.empty[Int, Int]
     flatFields.zipWithIndex.foreach { case (field, idx) =>
       if (field.parentIdx >= idx) {
         return Left(s"Flattened protobuf schema has invalid parent index at position $idx")
@@ -84,14 +89,32 @@ object ProtobufSchemaValidator {
       if (field.parentIdx >= 0 && field.depth <= 0) {
         return Left(s"Nested protobuf field at position $idx must have positive depth")
       }
+      if (field.depth >= MAX_NESTING_DEPTH) {
+        return Left(
+          s"Protobuf nesting depth exceeds maximum supported depth of $MAX_NESTING_DEPTH")
+      }
       if (field.parentIdx >= 0 && flatFields(field.parentIdx).outputTypeId != structTypeId) {
         return Left(
           s"Protobuf field at position $idx has a non-STRUCT parent at ${field.parentIdx}")
+      }
+      if (field.parentIdx >= 0 && field.depth != flatFields(field.parentIdx).depth + 1) {
+        return Left(
+          s"Protobuf field at position $idx has depth inconsistent with parent " +
+            s"${field.parentIdx}")
       }
       if (field.parentIdx >= 0 && field.isOutput != flatFields(field.parentIdx).isOutput) {
         return Left(
           s"Protobuf field at position $idx has an output flag different from parent " +
             s"${field.parentIdx}")
+      }
+      if (field.isRepeated) {
+        val repeatedCount = repeatedFieldsByParent.getOrElse(field.parentIdx, 0) + 1
+        if (repeatedCount > MAX_REPEATED_FIELDS_PER_MESSAGE) {
+          return Left(
+            s"Protobuf schema exceeds maximum supported repeated fields per message " +
+              s"($MAX_REPEATED_FIELDS_PER_MESSAGE) at parent index ${field.parentIdx}")
+        }
+        repeatedFieldsByParent.update(field.parentIdx, repeatedCount)
       }
       if (field.encoding == GpuFromProtobuf.ENC_ENUM_STRING) {
         if (field.enumValidValues == null || field.enumNames == null) {

@@ -13,18 +13,49 @@
 # limitations under the License.
 
 import pytest
+from pyspark.sql import functions as f
 
 from asserts import assert_gpu_and_cpu_are_equal_collect
 from data_gen import *
 from spark_session import is_before_spark_340
-from marks import allow_non_gpu, approximate_float
+from marks import allow_non_gpu, approximate_float, validate_execs_in_gpu_plan
 
-@pytest.mark.parametrize('data_gen', all_basic_gens + decimal_gens + array_gens_sample + map_gens_sample + struct_gens_sample, ids=idfn)
+limit_binary_gens = [
+    binary_gen,
+    ArrayGen(BinaryGen(max_length=10), max_length=10),
+    MapGen(StringGen("[a-z]{1,5}", nullable=False), BinaryGen(max_length=10), max_length=10),
+    StructGen([('payload', BinaryGen(max_length=10))]),
+]
+
+
+@pytest.mark.parametrize('data_gen', all_basic_gens + limit_binary_gens + decimal_gens +
+                         array_gens_sample + map_gens_sample + struct_gens_sample,
+                         ids=idfn)
 def test_simple_limit(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
         # We need some processing after the limit to avoid a CollectLimitExec
         lambda spark : unary_op_df(spark, data_gen, num_slices=1).limit(10).repartition(1),
         conf = {'spark.sql.execution.sortBeforeRepartition': 'false'})
+
+
+@validate_execs_in_gpu_plan('GpuGlobalLimitExec')
+@pytest.mark.parametrize('shape', ['binary', 'array', 'struct'])
+def test_binary_collect_limit(shape):
+    def run_on_spark(spark):
+        binary = f.col("id").cast("binary")
+        value = {
+            'binary': binary,
+            'array': f.array(binary),
+            'struct': f.struct(binary.alias("payload")),
+        }[shape]
+        return spark.range(64).select(value.alias("a")).limit(10)
+
+    assert_gpu_and_cpu_are_equal_collect(
+        run_on_spark,
+        conf={
+            'spark.rapids.sql.exec.CollectLimitExec': 'true',
+            'spark.sql.adaptive.enabled': 'false',
+        })
 
 
 def offset_test_wrapper(sql, batch_size):

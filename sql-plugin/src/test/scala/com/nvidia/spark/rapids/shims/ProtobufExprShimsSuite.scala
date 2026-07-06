@@ -39,6 +39,31 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
     StructField("id", IntegerType, nullable = true),
     StructField("name", StringType, nullable = true)))
 
+  private def flattenedField(
+      fieldNumber: Int,
+      parentIdx: Int,
+      depth: Int,
+      outputTypeId: Int = DType.INT32.getTypeId.getNativeId,
+      isRepeated: Boolean = false): FlattenedFieldDescriptor = {
+    FlattenedFieldDescriptor(
+      fieldNumber = fieldNumber,
+      parentIdx = parentIdx,
+      depth = depth,
+      wireType = 0,
+      outputTypeId = outputTypeId,
+      encoding = GpuFromProtobuf.ENC_DEFAULT,
+      isRepeated = isRepeated,
+      isRequired = false,
+      hasDefaultValue = false,
+      isOutput = true,
+      defaultInt = 0L,
+      defaultFloat = 0.0,
+      defaultBool = false,
+      defaultString = Array.emptyByteArray,
+      enumValidValues = null,
+      enumNames = null)
+  }
+
   private case class FakeExprChild() extends Expression {
     override def children: Seq[Expression] = Nil
     override def nullable: Boolean = true
@@ -149,6 +174,7 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
       protoTypeName: String,
       isRepeated: Boolean = false,
       isRequired: Boolean = false,
+      isInOneof: Boolean = false,
       defaultValue: Option[ProtobufDefaultValue] = None,
       defaultValueError: Option[String] = None,
       enumMetadata: Option[ProtobufEnumMetadata] = None,
@@ -183,6 +209,19 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
     val plannerOptions = SparkProtobufCompat.parsePlannerOptions(info.options)
     assert(plannerOptions ==
       Right(ProtobufPlannerOptions(enumsAsInts = true, failOnErrors = false)))
+  }
+
+  test("compat rejects DROPMALFORMED mode") {
+    val result = SparkProtobufCompat.parsePlannerOptions(Map("mode" -> "DROPMALFORMED"))
+
+    assert(result.left.toOption.contains(
+      "from_protobuf DROPMALFORMED mode is not supported on GPU"))
+  }
+
+  test("compat treats unknown parse modes as permissive") {
+    val result = SparkProtobufCompat.parsePlannerOptions(Map("mode" -> "unknown"))
+
+    assert(result == Right(ProtobufPlannerOptions(enumsAsInts = false, failOnErrors = false)))
   }
 
   test("compat invokes Spark 3.4 descriptor builder with descriptor path") {
@@ -367,6 +406,22 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
       "type mismatch: Spark StringType vs Protobuf INT32"))
   }
 
+  test("extractor rejects oneof fields") {
+    val fieldInfo = ProtobufSchemaExtractor.extractFieldInfo(
+      StructField("value", IntegerType, nullable = true),
+      FakeFieldDescriptor(
+        name = "value",
+        fieldNumber = 1,
+        protoTypeName = "INT32",
+        isInOneof = true),
+      enumsAsInts = true)
+
+    assert(fieldInfo.isRight)
+    assert(!fieldInfo.toOption.get.isSupported)
+    assert(fieldInfo.toOption.get.unsupportedReason.contains(
+      "protobuf oneof fields are not supported on GPU"))
+  }
+
   test("extractor gives explicit reason for unsupported FLOAT/DOUBLE widening mismatches") {
     val doubleFromFloat = ProtobufSchemaExtractor.extractFieldInfo(
       StructField("score", DoubleType, nullable = true),
@@ -519,6 +574,86 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
 
     val validation = ProtobufSchemaValidator.validateFlattenedSchema(flatFields)
     assert(validation.left.toOption.exists(_.contains("non-STRUCT parent")))
+  }
+
+  test("validator allows 32 repeated fields under one parent") {
+    val flatFields = (1 to 32).map { fieldNumber =>
+      flattenedField(fieldNumber, parentIdx = -1, depth = 0, isRepeated = true)
+    }
+
+    assert(ProtobufSchemaValidator.validateFlattenedSchema(flatFields).isRight)
+  }
+
+  test("validator rejects more than 32 repeated fields under one parent") {
+    val flatFields = (1 to 33).map { fieldNumber =>
+      flattenedField(fieldNumber, parentIdx = -1, depth = 0, isRepeated = true)
+    }
+
+    val validation = ProtobufSchemaValidator.validateFlattenedSchema(flatFields)
+
+    assert(validation.left.toOption.exists(
+      _.contains("maximum supported repeated fields per message (32)")))
+  }
+
+  test("validator counts repeated fields independently for each parent") {
+    val firstParent = flattenedField(
+      fieldNumber = 1,
+      parentIdx = -1,
+      depth = 0,
+      outputTypeId = DType.STRUCT.getTypeId.getNativeId)
+    val firstChildren = (1 to 32).map { fieldNumber =>
+      flattenedField(fieldNumber, parentIdx = 0, depth = 1, isRepeated = true)
+    }
+    val secondParentIdx = 1 + firstChildren.size
+    val secondParent = flattenedField(
+      fieldNumber = 2,
+      parentIdx = -1,
+      depth = 0,
+      outputTypeId = DType.STRUCT.getTypeId.getNativeId)
+    val secondChildren = (1 to 32).map { fieldNumber =>
+      flattenedField(
+        fieldNumber,
+        parentIdx = secondParentIdx,
+        depth = 1,
+        isRepeated = true)
+    }
+    val flatFields = Seq(firstParent) ++ firstChildren ++ Seq(secondParent) ++ secondChildren
+
+    assert(ProtobufSchemaValidator.validateFlattenedSchema(flatFields).isRight)
+  }
+
+  test("validator enforces the JNI nesting depth boundary") {
+    def schemaThroughDepth(maxDepth: Int): Seq[FlattenedFieldDescriptor] =
+      (0 to maxDepth).map { depth =>
+        flattenedField(
+          fieldNumber = depth + 1,
+          parentIdx = depth - 1,
+          depth = depth,
+          outputTypeId = if (depth < maxDepth) {
+            DType.STRUCT.getTypeId.getNativeId
+          } else {
+            DType.INT32.getTypeId.getNativeId
+          })
+      }
+
+    assert(ProtobufSchemaValidator.validateFlattenedSchema(
+      schemaThroughDepth(ProtobufSchemaValidator.MAX_NESTING_DEPTH - 1)).isRight)
+    assert(ProtobufSchemaValidator.validateFlattenedSchema(
+      schemaThroughDepth(ProtobufSchemaValidator.MAX_NESTING_DEPTH)).isLeft)
+  }
+
+  test("validator rejects child depth inconsistent with parent") {
+    val flatFields = Seq(
+      flattenedField(
+        fieldNumber = 1,
+        parentIdx = -1,
+        depth = 0,
+        outputTypeId = DType.STRUCT.getTypeId.getNativeId),
+      flattenedField(fieldNumber = 2, parentIdx = 0, depth = 2))
+
+    val validation = ProtobufSchemaValidator.validateFlattenedSchema(flatFields)
+
+    assert(validation.left.toOption.exists(_.contains("depth inconsistent with parent")))
   }
 
   test("struct field meta resolves ordinal from converted child schema") {

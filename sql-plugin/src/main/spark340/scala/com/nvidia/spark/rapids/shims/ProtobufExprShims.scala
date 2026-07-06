@@ -95,6 +95,7 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
 
         private var fullSchema: StructType = _
         private var failOnErrors: Boolean = _
+        private var preventCpuBridge: Boolean = false
 
         // Flattened schema variables for GPU decoding
         private var flatFieldNumbers: Array[Int] = _
@@ -131,6 +132,16 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
               willNotWorkOnGpu(reason)
               return
           }
+          val plannerOptions = SparkProtobufCompat.parsePlannerOptions(exprInfo.options) match {
+            case Right(opts) => opts
+            case Left(reason) =>
+              // Interpreted bridge evaluation can bypass Spark's option validation.
+              preventCpuBridge = true
+              willNotWorkOnGpu(reason)
+              return
+          }
+          val enumsAsInts = plannerOptions.enumsAsInts
+          failOnErrors = plannerOptions.failOnErrors
           val unsupportedOptions = SparkProtobufCompat.unsupportedOptions(exprInfo.options)
           if (unsupportedOptions.nonEmpty) {
             val keys = unsupportedOptions.mkString(",")
@@ -138,15 +149,6 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
               s"from_protobuf options are not supported yet on GPU: $keys")
             return
           }
-
-          val plannerOptions = SparkProtobufCompat.parsePlannerOptions(exprInfo.options) match {
-            case Right(opts) => opts
-            case Left(reason) =>
-              willNotWorkOnGpu(reason)
-              return
-          }
-          val enumsAsInts = plannerOptions.enumsAsInts
-          failOnErrors = plannerOptions.failOnErrors
           val messageName = exprInfo.messageName
 
           val msgDesc = SparkProtobufCompat.resolveMessageDescriptor(exprInfo) match {
@@ -218,7 +220,7 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
           val indicesToDecode = fullSchema.fields.indices.filter { idx =>
             outputIndexSet.contains(idx) ||
               fieldsInfoMap.get(fullSchema.fields(idx).name).exists { info =>
-                info.protoTypeName == "MESSAGE" && info.isSupported
+                info.protoTypeName == "MESSAGE"
               }
           }.toArray
 
@@ -264,8 +266,10 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
 
               val currentIdx = flatFields.size
 
-              if (depth >= 10) {
-                failStep5("Protobuf nesting depth exceeds maximum supported depth of 10")
+              if (depth >= ProtobufSchemaValidator.MAX_NESTING_DEPTH) {
+                failStep5(
+                  "Protobuf nesting depth exceeds maximum supported depth of " +
+                    ProtobufSchemaValidator.MAX_NESTING_DEPTH)
                 return
               }
 
@@ -806,6 +810,8 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
           }
           StructType(decodedFields.map(f => f.copy(nullable = true)))
         }
+
+        override def preventsTreeBridgeOptimization: Boolean = preventCpuBridge
 
         /**
          * Check if an expression references the output of a protobuf decode expression.

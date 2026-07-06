@@ -56,12 +56,17 @@ object ProtobufSchemaExtractor {
       sparkField: StructField,
       fieldDescriptor: ProtobufFieldDescriptor,
       enumsAsInts: Boolean): Either[String, ProtobufFieldInfo] = {
-    val (isSupported, unsupportedReason, encoding) =
+    val (isSupported, unsupportedReason, encoding) = if (fieldDescriptor.isInOneof) {
+      (false,
+        Some("protobuf oneof fields are not supported on GPU"),
+        GpuFromProtobuf.ENC_DEFAULT)
+    } else {
       checkFieldSupport(
         sparkField.dataType,
         fieldDescriptor.protoTypeName,
         fieldDescriptor.isRepeated,
         enumsAsInts)
+    }
 
     val defaultValue = fieldDescriptor.defaultValueResult match {
       case Right(value) =>
