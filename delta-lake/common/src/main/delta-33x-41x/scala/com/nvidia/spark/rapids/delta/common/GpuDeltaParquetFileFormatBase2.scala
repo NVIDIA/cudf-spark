@@ -26,6 +26,7 @@ import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric._
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
+import com.nvidia.spark.rapids.delta.RapidsDeletionVectorRowCountUtils
 import com.nvidia.spark.rapids.jni.fileio.RapidsFileIO
 import com.nvidia.spark.rapids.parquet._
 import org.apache.hadoop.conf.Configuration
@@ -264,6 +265,31 @@ class GpuDeltaParquetFileFormatBase2(
     readDataSchema, debugDumpPrefix, debugDumpAlways, maxReadBatchSizeRows, maxReadBatchSizeBytes,
     compressCfg, execMetrics, useFieldId) {
 
+    override protected def computeNumRowsAlive(
+        totalNumRows: Long,
+        chunkedBlocks: Seq[BlockMetaData]): Int = {
+      if (totalNumRows == 0 || tablePath.isEmpty) {
+        Math.toIntExact(totalNumRows)
+      } else {
+        val dvDescriptorOpt = split.otherConstantMetadataColumnValues
+          .get(FILE_ROW_INDEX_FILTER_ID_ENCODED).asInstanceOf[Option[String]]
+        val filterTypeOpt = split.otherConstantMetadataColumnValues
+          .get(FILE_ROW_INDEX_FILTER_TYPE).asInstanceOf[Option[RowIndexFilterType]]
+        if (dvDescriptorOpt.isEmpty && filterTypeOpt.isEmpty) {
+          Math.toIntExact(totalNumRows)
+        } else {
+          val scalaBitmap = RapidsDeletionVectors.loadScalaBitmap(
+            conf, dvDescriptorOpt, filterTypeOpt, tablePath.get)
+          RapidsDeletionVectorRowCountUtils.computeNumRowsAlive(
+            totalNumRows, scalaBitmap.cardinality, chunkedBlocks) { countDeletedRow =>
+            scalaBitmap.forEach { deletedIndex: Long =>
+              countDeletedRow(deletedIndex)
+            }
+          }
+        }
+      }
+    }
+
     override protected def readBuffer(
         parquetOpts: ParquetOptions,
         colTypes: Array[DataType],
@@ -354,39 +380,13 @@ class GpuDeltaParquetFileFormatBase2(
 
   object SpillableDeletionVectorInfo {
 
-    /**
-     * Computes the number of deleted rows within the given row ranges
-     * in the bitmap.
-     */
-    private def countDeletedRows(
-        scalaBitmap: RoaringBitmapArray,
-        rowGroupOffsets: Array[Long],
-        rowGroupNumRows: Array[Int]): Long = {
-      if (scalaBitmap.cardinality == 0) return 0L
-      var count = 0L
-      val rowRanges = rowGroupOffsets.zip(rowGroupNumRows)
-      // Computes the number of deleted rows by iterating only over the set bits
-      // in the bitmap (deleted row indices) and checking which row group each
-      // belongs to. This is O(deleted_rows * num_row_groups) instead of
-      // O(total_rows). The former is usually smaller than the latter.
-      // This is a temporary solution until we add a dedicated API in cuDF.
-      scalaBitmap.forEach { deletedIndex: Long =>
-        rowRanges.find { case (offset, numRows) =>
-          deletedIndex >= offset && deletedIndex < offset + numRows
-        }.foreach { _ =>
-          // If the deleted index falls within this row group, count it as deleted.
-          count += 1L
-        }
-      }
-      count
-    }
-
     def apply(
         serializedBitmap: HostMemoryBuffer,
         scalaBitmap: RoaringBitmapArray,
         rowGroupOffsets: Array[Long],
         rowGroupNumRows: Array[Int]): SpillableDeletionVectorInfo = {
-      val numRowsDeleted = countDeletedRows(scalaBitmap, rowGroupOffsets, rowGroupNumRows)
+      val numRowsDeleted =
+        RapidsDeletionVectors.countDeletedRows(scalaBitmap, rowGroupOffsets, rowGroupNumRows)
       new SpillableDeletionVectorInfo(
         SpillableHostBuffer(
           serializedBitmap,
@@ -1148,27 +1148,14 @@ class GpuDeltaParquetFileFormatBase2(
               SpillPriorities.ACTIVE_BATCHING_PRIORITY)
             closeOnExcept(gpuBitmap) { _ =>
               val filterTypeOpt = entry.dvDescriptor.map(_ => RowIndexFilterType.IF_CONTAINED)
-              val scalaBitmap = RapidsDeletionVectors.loadScalaBitmap(
-                conf, entry.dvDescriptor, filterTypeOpt, tp)
               val totalRows = entry.rowGroupNumRows.map(_.toLong).sum
-              val numDeleted: Long = if (scalaBitmap.cardinality == 0) {
+              val numDeleted = if (entry.dvDescriptor.isEmpty) {
                 0L
               } else {
-                // Computes the number of rows deleted within given row ranges.
-                // This currently requires iterating through the bitmap and
-                // checking each deleted index against the row ranges.
-                // This is a temporary solution until we add a dedicated API in cuDF.
-                var count = 0L
-                val rowRanges = entry.rowGroupOffsets.zip(entry.rowGroupNumRows)
-                scalaBitmap.forEach { deletedIndex: Long =>
-                  rowRanges.find { case (offset, numRows) =>
-                    deletedIndex >= offset && deletedIndex < offset + numRows
-                  }.foreach { _ =>
-                    // If the deleted index falls within this row group, count it as deleted.
-                    count += 1L
-                  }
-                }
-                count
+                val scalaBitmap = RapidsDeletionVectors.loadScalaBitmap(
+                  conf, entry.dvDescriptor, filterTypeOpt, tp)
+                RapidsDeletionVectors.countDeletedRows(
+                  scalaBitmap, entry.rowGroupOffsets, entry.rowGroupNumRows)
               }
               require(numDeleted <= totalRows,
                 s"Deletion vector cardinality ($numDeleted) exceeds " +

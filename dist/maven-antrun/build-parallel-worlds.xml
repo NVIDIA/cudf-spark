@@ -120,7 +120,10 @@
               dir="${project.build.directory}"
               resultproperty="build-parallel-worlds.dedupeExitCode"
               errorproperty="build-parallel-worlds.dedupeErrorMsg"
-              failonerror="false"/>
+              failonerror="false">
+            <env key="UNSHIMMED_COMMON_FROM_SINGLE_SHIM_TXT"
+                 value="${spark.rapids.source.basedir}/${rapids.module}/unshimmed-common-from-single-shim.txt"/>
+        </exec>
         <fail message="exec binary-dedupe.sh failed, exit code is ${build-parallel-worlds.dedupeExitCode}, error msg is ${build-parallel-worlds.dedupeErrorMsg}">
             <condition>
                 <not>

@@ -30,7 +30,7 @@ import com.nvidia.spark.rapids.parquet.{GpuParquetUtils, ParquetFileInfoWithBloc
 import com.nvidia.spark.rapids.shims.PartitionedFileUtilsShim
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
-import org.apache.iceberg.Schema
+import org.apache.iceberg.{MetadataColumns, Schema}
 import org.apache.iceberg.expressions.Expression
 import org.apache.iceberg.hadoop.HadoopInputFile
 import org.apache.iceberg.io.InputFile
@@ -205,16 +205,53 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
       requiredSchema: Schema): (ParquetFileInfoWithBlockMeta, ShadedMessageType) = {
     withResource(file.newReader(conf.metrics)) { reader =>
       val fileSchema = reader.getFileMetaData.getSchema
-
-      val rowGroupFirstRowIndices = new Array[Long](reader.getRowGroups.size())
-      var accumulatedRowCount = 0L
-      for (i <- 0 until reader.getRowGroups.size()) {
-        rowGroupFirstRowIndices(i) = accumulatedRowCount
-        accumulatedRowCount += reader.getRowGroups.get(i).getRowCount
-      }
       val (typeWithIds, fileReadSchema) = projectSchema(fileSchema, requiredSchema)
       val filteredBlocks = filterRowGroups(reader, requiredSchema, typeWithIds, file.filter)
-      val blockFirstRowIndices = filteredBlocks.map(b => rowGroupFirstRowIndices(b._2))
+      val needsRowPosition =
+        requiredSchema.findField(MetadataColumns.ROW_POSITION.fieldId()) != null
+      val blockFirstRowIndices: Seq[Long] = if (needsRowPosition) {
+        // _pos is file-global. When file.split is set the reader is opened with
+        // ParquetReadOptions.withRange, which makes the footer expose only the row groups
+        // that intersect the range, so the ranged reader's own footer is not usable for
+        // file-global accounting. Open a second reader without the range to enumerate every
+        // row group and map its absolute byte offset to its file-global first-row index.
+        // getStartingPos is stable across filtering, so it remains a valid key when looking
+        // up the ranged reader's filtered blocks.
+        val firstRowIndexByStartingPos =
+          scala.collection.mutable.HashMap.empty[Long, Long]
+        def populateFromAllBlocks(allBlocks: java.util.List[ShadedBlockMetaData]): Unit = {
+          var accumulatedRowCount = 0L
+          var i = 0
+          while (i < allBlocks.size()) {
+            val b = allBlocks.get(i)
+            firstRowIndexByStartingPos(b.getStartingPos) = accumulatedRowCount
+            accumulatedRowCount += b.getRowCount
+            i += 1
+          }
+        }
+        if (file.split.isDefined) {
+          withResource(file.copy(split = None).newReader(conf.metrics)) { fullReader =>
+            populateFromAllBlocks(fullReader.getFooter.getBlocks)
+          }
+        } else {
+          populateFromAllBlocks(reader.getFooter.getBlocks)
+        }
+        filteredBlocks.map { case (block, _) =>
+          firstRowIndexByStartingPos.getOrElse(block.getStartingPos,
+            throw new IllegalStateException(
+              s"Row group at offset ${block.getStartingPos} in ${file.path} was not found " +
+                s"in the full Parquet footer; the footer or reader state may be inconsistent."))
+        }
+      } else {
+        // No _pos projection and no positional deletes — the values are never consumed,
+        // so skip the extra full-file reader open and emit per-task running counts.
+        var acc = 0L
+        filteredBlocks.map { case (block, _) =>
+          val start = acc
+          acc += block.getRowCount
+          start
+        }
+      }
       val blocks = clipBlocksToSchema(fileReadSchema, filteredBlocks.map(_._1))
 
       val sqlConf = SQLConf.get

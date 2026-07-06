@@ -21,7 +21,8 @@ from data_gen import gen_df, copy_and_update
 from iceberg import create_iceberg_table, \
     iceberg_base_table_cols, iceberg_gens_list, \
     get_full_table_name, iceberg_full_gens_list, iceberg_nested_write_gens_list, \
-    iceberg_write_enabled_conf, iceberg_unsupported_mark
+    iceberg_write_enabled_conf, iceberg_unsupported_mark, \
+    overwrite_dynamic_partition_transforms
 from marks import iceberg, ignore_order, allow_non_gpu, allow_non_gpu_conditional, datagen_overrides
 from spark_session import with_gpu_session, with_cpu_session, is_spark_400_or_later
 
@@ -122,37 +123,13 @@ def test_insert_overwrite_dynamic_bucket_partitioned(spark_tmp_table_factory, pa
 @datagen_overrides(seed=0, reason='https://github.com/NVIDIA/spark-rapids-jni/issues/4016')
 @ignore_order(local=True)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
-@pytest.mark.parametrize("partition_col_sql", [
-    pytest.param("year(_c8)", id="year(date_col)"),
-    pytest.param("month(_c8)", id="month(date_col)"),
-    pytest.param("day(_c8)", id="day(date_col)"),
-    pytest.param("month(_c9)", id="month(timestamp_col)"),
-    pytest.param("day(_c9)", id="day(timestamp_col)"),
-    pytest.param("hour(_c9)", id="hour(timestamp_col)"),
-    pytest.param("truncate(10, _c2)", id="truncate(10, int_col)"),
-    pytest.param("truncate(10, _c3)", id="truncate(10, long_col)"),
-    pytest.param("truncate(5, _c6)", id="truncate(5, string_col)"),
-    pytest.param("truncate(10, _c13)", id="truncate(10, decimal32_col)"),
-    pytest.param("truncate(10, _c14)", id="truncate(10, decimal64_col)"),
-    pytest.param("truncate(10, _c15)", id="truncate(10, decimal128_col)"),
-    pytest.param("bucket(16, _c2)", id="bucket(16, int_col)"),
-    pytest.param("bucket(16, _c3)", id="bucket(16, long_col)"),
-    pytest.param("bucket(16, _c8)", id="bucket(16, date_col)"),
-    pytest.param("bucket(16, _c9)", id="bucket(16, timestamp_col)"),
-    pytest.param("bucket(16, _c6)", id="bucket(16, string_col)"),
-    pytest.param("bucket(16, _c13)", id="bucket(16, decimal32_col)"),
-    pytest.param("bucket(16, _c14)", id="bucket(16, decimal64_col)"),
-    pytest.param("bucket(16, _c15)", id="bucket(16, decimal128_col)"),
-    pytest.param("_c0", id="identity(byte)"),
-    pytest.param("_c2", id="identity(int)"),
-    pytest.param("_c3", id="identity(long)"),
-    pytest.param("_c6", id="identity(string)"),
-    pytest.param("_c8", id="identity(date)"),
-    pytest.param("_c10", id="identity(decimal)"),
-])
+@pytest.mark.parametrize("partition_col_sql", overwrite_dynamic_partition_transforms)
 @allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
 def test_insert_overwrite_dynamic_bucket_partitioned_full_coverage(spark_tmp_table_factory, partition_col_sql):
-    """Full partition coverage test - skipped for remote catalogs."""
+    """Sanity-check dynamic INSERT OVERWRITE against a few partition transforms
+    distinct from those picked by other DML ops. The 26-transform partition-writer
+    coverage anchor lives in
+    iceberg_append_test.py::test_insert_into_partitioned_table_full_coverage."""
     _do_test_insert_overwrite_dynamic_partitioned(spark_tmp_table_factory, partition_col_sql)
 
 

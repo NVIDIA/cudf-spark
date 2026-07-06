@@ -198,6 +198,27 @@ class AstExpressionMetaSuite extends AnyFunSuite {
       meta, Seq(left.exprId), Seq(right.exprId)))
   }
 
+  test("legacy AST capability follows CPU bridge state changes") {
+    val left = AttributeReference("left_i", IntegerType)()
+    val right = AttributeReference("right_i", IntegerType)()
+    val bridgeConf = new RapidsConf(Map(RapidsConf.ENABLE_CPU_BRIDGE.key -> "true"))
+    val meta = GpuOverrides.wrapExpr(EqualTo(left, right), bridgeConf, None)
+
+    meta.tagForGpu()
+    assert(meta.canSelfBeLegacyAst)
+    assert(meta.canBePrecomputedForJoin)
+
+    meta.moveToCpuBridge()
+    assert(meta.willUseGpuCpuBridge)
+    assert(!meta.canSelfBeLegacyAst)
+    assert(!meta.canBePrecomputedForJoin)
+
+    meta.undoBridgeOptimization()
+    assert(!meta.willUseGpuCpuBridge)
+    assert(meta.canSelfBeLegacyAst)
+    assert(meta.canBePrecomputedForJoin)
+  }
+
   test("legacy AST capability does not convert an unreplaced descendant") {
     val left = AttributeReference("left_i", IntegerType)()
     val right = AttributeReference("right_i", IntegerType)()

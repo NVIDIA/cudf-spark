@@ -187,8 +187,10 @@ object GpuProjectExec {
         // different vector length, thus not able to reuse cached vectors.
         GpuExpressionsUtils.cachedNullVectors.get.clear()
 
-        val newColumns = boundExprs.safeMap(_.columnarEval(cb)).toArray[ColumnVector]
-        new ColumnarBatch(newColumns, cb.numRows())
+        GpuArrayHofFusion.project(cb, boundExprs).getOrElse {
+          val newColumns = boundExprs.safeMap(_.columnarEval(cb)).toArray[ColumnVector]
+          new ColumnarBatch(newColumns, cb.numRows())
+        }
       } finally {
         GpuExpressionsUtils.cachedNullVectors.get.clear()
       }
@@ -218,7 +220,6 @@ object GpuProjectExec {
    */
   def projectWithRetrySingleBatch(sb: SpillableColumnarBatch,
       boundExprs: Seq[Expression]): ColumnarBatch = {
-
     // For retryable expressions, use split-retry: on GPU OOM, halve the input
     // batch by rows and re-run on each half. This recovers from cuDF-internal
     // scratch allocations that the pre-split estimator cannot see (e.g. regex
@@ -912,13 +913,17 @@ case class GpuProjectExec(
 
   override lazy val additionalMetrics: Map[String, GpuMetric] = Map(
     KEY_NUM_PRE_SPLIT -> createMetric(DEBUG_LEVEL, "num pre-splits"),
-    OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY))
+    OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY),
+    CPU_BRIDGE_PROCESSING_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
+      DESCRIPTION_CPU_BRIDGE_PROCESSING_TIME),
+    CPU_BRIDGE_WAIT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_CPU_BRIDGE_WAIT_TIME))
 
   override def internalDoExecuteColumnar() : RDD[ColumnarBatch] = {
     val numOutputRows = gpuLongMetric(NUM_OUTPUT_ROWS)
     val numOutputBatches = gpuLongMetric(NUM_OUTPUT_BATCHES)
     val opTime = gpuLongMetric(OP_TIME_LEGACY)
     val numPreSplit = gpuLongMetric(KEY_NUM_PRE_SPLIT)
+    
     val boundProjectList = GpuBindReferences.bindGpuReferencesTiered(projectList, child.output,
       conf, allMetrics)
     val localEnablePreSplit = enablePreSplit
@@ -1466,7 +1471,8 @@ case class GpuProjectAstExec(
       }
     } else {
       @tailrec
-      def recurse(boundExprs: Seq[Seq[GpuExpression]],
+      def recurse(
+          boundExprs: Seq[Seq[GpuExpression]],
           sb: SpillableColumnarBatch,
           recurseCloseInputBatch: Boolean): SpillableColumnarBatch = boundExprs match {
         case Nil => sb
@@ -1503,7 +1509,8 @@ case class GpuProjectAstExec(
 
   def project(batch: ColumnarBatch): ColumnarBatch = {
     @tailrec
-    def recurse(boundExprs: Seq[Seq[GpuExpression]],
+    def recurse(
+        boundExprs: Seq[Seq[GpuExpression]],
         cb: ColumnarBatch,
         isFirst: Boolean): ColumnarBatch = {
       boundExprs match {
@@ -1697,7 +1704,11 @@ case class GpuFilterExec(
     Seq[AnyRef](coalesceAfter.asInstanceOf[java.lang.Boolean])
 
   override lazy val additionalMetrics: Map[String, GpuMetric] = Map(
-    OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY))
+    OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY),
+    CPU_BRIDGE_PROCESSING_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
+      DESCRIPTION_CPU_BRIDGE_PROCESSING_TIME),
+    CPU_BRIDGE_WAIT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
+      DESCRIPTION_CPU_BRIDGE_WAIT_TIME))
 
   // Split out all the IsNotNulls from condition.
   private val (notNullPreds, _) = splitConjunctivePredicates(condition).partition {

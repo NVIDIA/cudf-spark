@@ -19,7 +19,6 @@ package org.apache.iceberg.spark
 import scala.collection.JavaConverters._
 import scala.collection.mutable
 
-import com.nvidia.spark.rapids.SchemaUtils._
 import org.apache.iceberg.{MetadataColumns, Schema}
 import org.apache.iceberg.types.{Type, Types, TypeUtil}
 
@@ -28,6 +27,19 @@ import org.apache.spark.sql.execution.datasources.parquet.ParquetUtils.FIELD_ID_
 import org.apache.spark.sql.types._
 
 object GpuTypeToSparkType {
+  private[iceberg] val LIST_ELEMENT_FIELD_ID_METADATA_KEY =
+    "rapids.parquet.list.element.field.id"
+  private[iceberg] val LIST_ELEMENT_NESTED_IDS_METADATA_KEY =
+    "rapids.parquet.list.element.nested.ids"
+  private[iceberg] val MAP_KEY_FIELD_ID_METADATA_KEY =
+    "rapids.parquet.map.key.field.id"
+  private[iceberg] val MAP_KEY_NESTED_IDS_METADATA_KEY =
+    "rapids.parquet.map.key.nested.ids"
+  private[iceberg] val MAP_VALUE_FIELD_ID_METADATA_KEY =
+    "rapids.parquet.map.value.field.id"
+  private[iceberg] val MAP_VALUE_NESTED_IDS_METADATA_KEY =
+    "rapids.parquet.map.value.nested.ids"
+
   def toSparkType(schema: Schema): StructType = {
     TypeUtil.visit(schema, new GpuTypeToSparkType).asInstanceOf[StructType]
   }
@@ -88,8 +100,9 @@ class GpuTypeToSparkType extends TypeToSparkType {
   override def list(list: Types.ListType, elementResult: DataType): DataType = {
     val elementNested = popNested()
     val builder = new MetadataBuilder()
-      .putLong(LIST_ELEMENT_FIELD_ID_METADATA_KEY, list.elementId().toLong)
-    elementNested.foreach(builder.putString(LIST_ELEMENT_NESTED_IDS_METADATA_KEY, _))
+      .putLong(GpuTypeToSparkType.LIST_ELEMENT_FIELD_ID_METADATA_KEY, list.elementId().toLong)
+    elementNested.foreach(
+      builder.putString(GpuTypeToSparkType.LIST_ELEMENT_NESTED_IDS_METADATA_KEY, _))
     pushNested(jsonOrNone(builder))
     super.list(list, elementResult)
   }
@@ -101,10 +114,10 @@ class GpuTypeToSparkType extends TypeToSparkType {
     val valueNested = popNested()
     val keyNested = popNested()
     val builder = new MetadataBuilder()
-      .putLong(MAP_KEY_FIELD_ID_METADATA_KEY, map.keyId().toLong)
-    keyNested.foreach(builder.putString(MAP_KEY_NESTED_IDS_METADATA_KEY, _))
-    builder.putLong(MAP_VALUE_FIELD_ID_METADATA_KEY, map.valueId().toLong)
-    valueNested.foreach(builder.putString(MAP_VALUE_NESTED_IDS_METADATA_KEY, _))
+      .putLong(GpuTypeToSparkType.MAP_KEY_FIELD_ID_METADATA_KEY, map.keyId().toLong)
+    keyNested.foreach(builder.putString(GpuTypeToSparkType.MAP_KEY_NESTED_IDS_METADATA_KEY, _))
+    builder.putLong(GpuTypeToSparkType.MAP_VALUE_FIELD_ID_METADATA_KEY, map.valueId().toLong)
+    valueNested.foreach(builder.putString(GpuTypeToSparkType.MAP_VALUE_NESTED_IDS_METADATA_KEY, _))
     pushNested(jsonOrNone(builder))
     super.map(map, keyResult, valueResult)
   }

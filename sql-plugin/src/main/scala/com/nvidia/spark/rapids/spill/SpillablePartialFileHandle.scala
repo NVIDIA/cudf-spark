@@ -20,6 +20,7 @@ import java.io.{BufferedInputStream, BufferedOutputStream, File, FileInputStream
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 
+import ai.rapids.cudf.HostMemoryBuffer
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.HostAlloc
 
@@ -239,6 +240,7 @@ class SpillablePartialFileHandle private (
         throw new IllegalStateException("Host buffer is null")
     }
   }
+
 
   /**
    * Spill current buffer content to file and switch to file-based mode.
@@ -571,13 +573,33 @@ class SpillablePartialFileHandle private (
   private var spillInProgress: Boolean = false
 
   /**
-   * Spill memory buffer to disk.
+   * Spill memory buffer to disk, as part of the shuffle commit
+   */
+  def spillForCommit(): Long = {
+    spillInternal(commit = true)
+  }
+
+  /**
+   * Spill memory buffer to disk, as part of memory pressure
+   */
+  override def spill(): Long = {
+    spillInternal(commit = false)
+  }
+
+  /**
+   * This method spills this handle to disk, and optionally tracks the time
+   * and bytes written as a spill metric given it is caused by memory pressure,
+   * which is signaled by commit = false.
    *
    * Following SpillFramework pattern: all state checks inside synchronized block.
    * IO operations are performed outside the synchronized block to allow
    * concurrent read() access to the buffer during the file write.
+   *
+   * @param commit if true, the spill is happening due to a shuffle commit phase
+   *               do not track the time/bytes in our spill metric.
+   * @return the number of bytes written to disk, or 0 if spilling was skipped
    */
-  override def spill(): Long = {
+  private def spillInternal(commit: Boolean): Long = {
     if (storageMode != PartialFileStorageMode.MEMORY_WITH_SPILL) {
       return 0L  // Nothing to spill for FILE_ONLY mode
     }
@@ -597,32 +619,14 @@ class SpillablePartialFileHandle private (
       }
     }
 
-    // Perform IO outside lock - read() can still access buffer during this time
-    // Wrap with spillToDiskTime to track spill timing metrics
-    GpuTaskMetrics.get.spillToDiskTime {
-      try {
-        val fos = new FileOutputStream(file)
-        try {
-          val channel = fos.getChannel
-          val bb = bufferToSpill.asByteBuffer()
-          bb.limit(totalBytesWritten.toInt)
-          while (bb.hasRemaining) {
-            channel.write(bb)
-          }
-          if (syncWrites) {
-            channel.force(true)
-          }
-        } finally {
-          fos.close()
-        }
-      } catch {
-        case e: Exception =>
-          // IO failed, reset flag and propagate
-          synchronized {
-            spillInProgress = false
-            notifyAll()  // Wake up any waiting doClose()
-          }
-          throw e
+
+    if (commit) {
+      doSpill(bufferToSpill)
+    } else {
+      // we are spilling due to memory pressure. Lets measure the doSpill
+      // time since it's not part of the regular shuffle commit.
+      GpuTaskMetrics.get.spillToDiskTime {
+        doSpill(bufferToSpill)
       }
     }
 
@@ -643,13 +647,46 @@ class SpillablePartialFileHandle private (
       bufferToSpill.close()
       host = None
 
-      // Record spill bytes metric
-      TrampolineUtil.incTaskMetricsDiskBytesSpilled(totalBytesWritten)
+      if (!commit) {
+        // if we are not committing, we want to account for these bytes
+        // in the spill to disk metric, otherwise we are going to account
+        // for them in the shuffle write metric.
+        TrampolineUtil.incTaskMetricsDiskBytesSpilled(totalBytesWritten)
+      }
 
       logDebug(s"Spilled to ${file.getAbsolutePath} " +
         s"($totalBytesWritten bytes)")
 
       totalBytesWritten
+    }
+  }
+
+  // Performs IO outside lock - read() can still access buffer during this time
+  // Only to be called from spillInternal!
+  private def doSpill(bufferToSpill: HostMemoryBuffer): Unit = {
+    try {
+      val fos = new FileOutputStream(file)
+      try {
+        val channel = fos.getChannel
+        val bb = bufferToSpill.asByteBuffer()
+        bb.limit(totalBytesWritten.toInt)
+        while (bb.hasRemaining) {
+          channel.write(bb)
+        }
+        if (syncWrites) {
+          channel.force(true)
+        }
+      } finally {
+        fos.close()
+      }
+    } catch {
+      case e: Exception =>
+        // IO failed, reset flag and propagate
+        synchronized {
+          spillInProgress = false
+          notifyAll() // Wake up any waiting doClose()
+        }
+        throw e
     }
   }
 

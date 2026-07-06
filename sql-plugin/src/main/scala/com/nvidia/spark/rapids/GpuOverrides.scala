@@ -987,6 +987,9 @@ object GpuOverrides extends Logging {
           }
         }
 
+        // BoundReference should not be directly wrapped in a bridge (unit test compatibility)
+        override def isBridgeCompatible: Boolean = false
+
         override def convertToGpuImpl(): GpuExpression = GpuBoundReference(
           currentRow.ordinal, currentRow.dataType, currentRow.nullable)(
           NamedExpression.newExprId, "")
@@ -1011,14 +1014,14 @@ object GpuOverrides extends Logging {
           // This is the only NOOP operator.  It goes away when things are bound
           override def convertToGpuImpl(): Expression = att
 
-        // There are so many of these that we don't need to print them out, unless it
-        // will not work on the GPU
-        override def print(append: StringBuilder, depth: Int, all: Boolean): Unit = {
-          if (!this.canThisBeReplaced || cannotRunOnGpuBecauseOfSparkPlan) {
-            super.print(append, depth, all)
+          // There are so many of these that we don't need to print them out, unless it
+          // will not work on the GPU
+          override def print(append: StringBuilder, depth: Int, all: Boolean): Unit = {
+            if (!this.canThisBeReplaced || cannotRunOnGpuBecauseOfSparkPlan) {
+              super.print(append, depth, all)
+            }
           }
-        }
-      }),
+        }),
 
     expr[ToDegrees](
       "Converts radians to degrees",
@@ -1632,6 +1635,10 @@ object GpuOverrides extends Logging {
           }
         }
 
+        // Allow foldable non-literal Coalesce (e.g. coalesce(cast(null as bigint), -1001)):
+        // AQE can regenerate these after ConstantFolding ran; GpuCoalesce evaluates them on GPU.
+        override val isFoldableNonLitAllowed: Boolean = true
+
         override def convertToGpuImpl(): GpuExpression =
           GpuCoalesce(childExprs.map(_.convertToGpu()))
       }),
@@ -1835,6 +1842,7 @@ object GpuOverrides extends Logging {
             TypeSig.STRING)),
       (a, conf, p, r) => new UnixTimeExprMeta[DateFormatClass](a, conf, p, r) {
         override def isTimeZoneSupported = true
+        override protected def allowLegacyFormattingOnlyFormats: Boolean = true
         override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression =
           GpuDateFormatClass(lhs, rhs, strfFormat, a.timeZoneId)
       }
@@ -2949,6 +2957,34 @@ object GpuOverrides extends Logging {
         }
       }
     ),
+    expr[ArraySort](
+      "Sorts the input array in ascending order with nulls last according to the natural " +
+          "ordering of the elements (the default comparator). A custom comparator, or a nested " +
+          "element type (array or struct), falls back to the CPU",
+      ExprChecks.projectOnly(
+        TypeSig.ARRAY.nested(TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128),
+        TypeSig.ARRAY.nested(TypeSig.all),
+        Seq(
+          ParamCheck("array",
+            TypeSig.ARRAY.nested(TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128),
+            TypeSig.ARRAY.nested(TypeSig.all)))),
+      (in, conf, p, r) => new ExprMeta[ArraySort](in, conf, p, r) {
+        // Wrap only the array; listSortRows applies the default comparator natively, so the
+        // comparator lambda is excluded from children (neither converted nor type-checked).
+        // This must wrap exactly one child to stay 1:1 with the single ParamCheck above, which
+        // the framework pairs to childExprs positionally.
+        override val childExprs: Seq[BaseExprMeta[_]] =
+          Seq(GpuOverrides.wrapExpr(in.arguments.head, this.conf, Some(this)))
+
+        override def tagExprForGpu(): Unit = {
+          if (!GpuArraySort.isDefaultComparator(in)) {
+            willNotWorkOnGpu("array_sort with a custom comparator function is not supported " +
+                "on the GPU; only the default ordering (ascending, nulls last) is supported")
+          }
+        }
+        override def convertToGpuImpl(): GpuExpression =
+          GpuArraySort(childExprs.head.convertToGpu())
+      }),
     expr[CreateArray](
       "Returns an array with the given elements",
       ExprChecks.projectOnly(
@@ -3106,7 +3142,7 @@ object GpuOverrides extends Logging {
         Seq(
           ParamCheck("argument",
             TypeSig.ARRAY.nested(TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.NULL +
-                TypeSig.BINARY + TypeSig.STRUCT),
+                TypeSig.BINARY + TypeSig.ARRAY + TypeSig.STRUCT + TypeSig.MAP),
             TypeSig.ARRAY.nested(TypeSig.all)),
           ParamCheck("zero",
             TypeSig.commonCudfTypes + TypeSig.DECIMAL_128,
@@ -5093,6 +5129,10 @@ object GpuOverrideUtil extends Logging {
 /** Tag the initial plan when AQE is enabled */
 case class GpuQueryStagePrepOverrides() extends Rule[SparkPlan] with Logging {
   override def apply(sparkPlan: SparkPlan): SparkPlan = GpuOverrideUtil.tryOverride { plan =>
+    // Exposing a bare exchange at the root is only valid while AQE is preparing a
+    // query stage. Tag the exchanges seen in this rule so transition cleanup can
+    // distinguish that path from final adaptive plan execution.
+    GpuTransitionOverrides.tagAqeQueryStageExchanges(plan)
     // Note that we disregard the GPU plan returned here and instead rely on side effects of
     // tagging the underlying SparkPlan.
     GpuOverrides().applyWithContext(plan, Some("AQE Query Stage Prep"))
@@ -5217,10 +5257,13 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
         val foundExprs = project.expressions.flatMap { e =>
           PlanUtils.findExpressions(e, {
             case udf: ScalaUDF =>
-              val contains = udf.function.getClass.getCanonicalName.contains("tahoe.Snapshot")
+              val functionClass = udf.function.getClass
+              val functionClassName = Option(functionClass.getCanonicalName)
+                .getOrElse(functionClass.getName)
+              val contains = functionClassName.contains("tahoe.Snapshot")
               if (contains) {
                 logDebug(s"Found ScalaUDF with tahoe.Snapshot: $udf," +
-                  s" function class name is: ${udf.function.getClass.getCanonicalName}")
+                  s" function class name is: $functionClassName")
               }
               contains
             case _ => false

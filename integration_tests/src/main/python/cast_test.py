@@ -820,7 +820,7 @@ def test_cast_int_to_string_not_UTC():
 
 not_utc_fallback_test_params = [(timestamp_gen, 'STRING')]
 
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('Cast')
 @pytest.mark.parametrize('from_gen, to_type', not_utc_fallback_test_params, ids=idfn)
 def test_cast_fallback_not_UTC(from_gen, to_type):
     assert_gpu_fallback_collect(

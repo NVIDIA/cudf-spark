@@ -88,4 +88,36 @@ class RapidsExecutorPluginSuite extends AnyFunSuite {
     assert(RapidsExecutorPlugin.cudfVersionSatisfied("7.0.1-20220101.001122-12", "7.0.1-SNAPSHOT"))
     assert(!RapidsExecutorPlugin.cudfVersionSatisfied("7.0.1-SNAPSHOT", "7.0.1-20220101.001122-12"))
   }
+
+  test("safeShutdown runs all steps when none fail") {
+    var count = 0
+    RapidsPluginUtils.safeShutdown(Seq(
+      () => count += 1,
+      () => count += 1))
+    assert(count === 2)
+  }
+
+  test("safeShutdown runs remaining steps after a failure") {
+    var count = 0
+    val ex = intercept[RuntimeException] {
+      RapidsPluginUtils.safeShutdown(Seq(
+        () => count += 1,
+        () => throw new RuntimeException("first"),
+        () => count += 1,
+        () => throw new IllegalStateException("second")))
+    }
+    assert(count === 2)
+    assert(ex.getMessage === "first")
+    assert(ex.getSuppressed.length === 1)
+    assert(ex.getSuppressed()(0).isInstanceOf[IllegalStateException])
+    assert(ex.getSuppressed()(0).getMessage === "second")
+  }
+
+  test("safeShutdown rethrows the only failure") {
+    val ex = intercept[RuntimeException] {
+      RapidsPluginUtils.safeShutdown(Seq(() => throw new RuntimeException("only")))
+    }
+    assert(ex.getMessage === "only")
+    assert(ex.getSuppressed.isEmpty)
+  }
 }

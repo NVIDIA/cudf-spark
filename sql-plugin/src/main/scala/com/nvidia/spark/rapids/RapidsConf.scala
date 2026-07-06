@@ -21,7 +21,7 @@ import java.util
 import scala.collection.JavaConverters._
 import scala.collection.mutable.{HashMap, ListBuffer}
 
-import ai.rapids.cudf.Cuda
+import ai.rapids.cudf.{Cuda, ParquetWriterOptions}
 import com.nvidia.spark.rapids.jni.RmmSpark.OomInjectionType
 import com.nvidia.spark.rapids.jni.kudo.DumpOption
 import com.nvidia.spark.rapids.lore.{LoreId, OutputLoreId}
@@ -475,7 +475,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       "GPU implementation will automatically be wrapped in bridge expressions instead of " +
       "causing plan fallbacks.")
     .booleanConf
-    .createWithDefault(false)
+    .createWithDefault(true)
 
   val BRIDGE_DISALLOW_LIST = conf("spark.rapids.sql.expression.cpuBridge.disallowList")
     .doc("Comma separated list of expression class names that should not use CPU bridge " +
@@ -483,6 +483,15 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .internal()
     .stringConf
     .createWithDefault("")
+
+  val CPU_BRIDGE_THREAD_POOL_SIZE = conf("spark.rapids.sql.cpuBridge.threadPoolSize")
+    .doc("Override the default CPU bridge thread pool size. When set to a positive value, " +
+      "uses this specific number of threads instead of the default calculation based on " +
+      "task slots. This is an internal config primarily for testing and debugging.")
+    .internal()
+    .integerConf
+    .checkValue(v => v > 0, "Thread pool size must be positive")
+    .createOptional
 
   val GPU_COREDUMP_COMPRESSION_CODEC = conf("spark.rapids.gpu.coreDump.compression.codec")
     .doc("The codec used to compress GPU core dumps. Spark provides the codecs " +
@@ -1382,6 +1391,36 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
         "The Parquet writer row group size bytes must be at least 1024.")
       .createOptional
 
+  val PARQUET_WRITER_DICTIONARY_POLICY =
+    conf("spark.rapids.sql.format.parquet.writer.dictionaryPolicy")
+      .doc("Dictionary policy for the GPU Parquet writer. NEVER disables dictionary " +
+        "encoding for every column. ADAPTIVE (cuDF default) uses dictionary encoding " +
+        "unless the per-column-chunk dictionary would exceed " +
+        "spark.rapids.sql.format.parquet.writer.maxDictionarySize. ALWAYS allows " +
+        "dictionary encoding even when it would prevent compression of a column chunk. " +
+        "If not set, the cuDF writer default (ADAPTIVE) is used.")
+      .internal()
+      .stringConf
+      .transform(_.toUpperCase(java.util.Locale.ROOT))
+      .checkValues(ParquetWriterOptions.DictionaryPolicy.values.map(_.toString).toSet)
+      .createOptional
+
+  val PARQUET_WRITER_MAX_DICTIONARY_SIZE =
+    conf("spark.rapids.sql.format.parquet.writer.maxDictionarySize")
+      .doc("Maximum size in bytes of a per-column-chunk dictionary in a Parquet row " +
+        "group written by the GPU writer. Only consulted when the dictionary policy is " +
+        "ADAPTIVE (see spark.rapids.sql.format.parquet.writer.dictionaryPolicy); column " +
+        "chunks whose dictionary payload would exceed this limit fall back to PLAIN " +
+        "encoding. Raising this can reduce GPU-written file size for high-cardinality " +
+        "columns at the cost of larger dictionary pages. If not set, the cuDF writer " +
+        "default (1 MiB) is used.")
+      .internal()
+      .bytesConf(ByteUnit.BYTE)
+      .checkValue(v => v >= 0L && v <= Integer.MAX_VALUE.toLong,
+        s"The Parquet writer max dictionary size must be in [0, ${Integer.MAX_VALUE}] " +
+          "(cuDF requires the dictionary size to fit in an int32).")
+      .createOptional
+
   object ParquetFooterReaderType extends Enumeration {
     val JAVA, NATIVE, AUTO = Value
   }
@@ -1400,13 +1439,14 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       .checkValues(ParquetFooterReaderType.values.map(_.toString))
       .createWithDefault(ParquetFooterReaderType.AUTO.toString)
 
-  // This is an experimental feature now. And eventually, should be enabled or disabled depending
-  // on something that we don't know yet but would try to figure out.
+  // Deprecated legacy row-based UDF path. CPU bridge is the preferred replacement when it can
+  // bridge the expression safely.
   val ENABLE_CPU_BASED_UDF = conf("spark.rapids.sql.rowBasedUDF.enabled")
-    .doc("When set to true, optimizes a row-based UDF in a GPU operation by transferring " +
-      "only the data it needs between GPU and CPU inside a query operation, instead of falling " +
-      "this operation back to CPU. This is an experimental feature, and this config might be " +
-      "removed in the future.")
+    .doc("Deprecated. When set to true, enables the legacy row-based UDF path in a GPU " +
+      "operation by transferring only the data it needs between GPU and CPU inside a query " +
+      "operation, instead of falling this operation back to CPU. CPU bridge is the preferred " +
+      "replacement when it can safely bridge the expression, and this config might be removed " +
+      "in the future.")
     .booleanConf
     .createWithDefault(false)
 
@@ -1992,16 +2032,6 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       "run on the CPU instead.")
     .booleanConf
     .createWithDefault(true)
-
-  val REGEXP_MAX_STATE_MEMORY_BYTES = conf("spark.rapids.sql.regexp.maxStateMemoryBytes")
-    .doc("Specifies the maximum memory on GPU to be used for regular expressions." +
-      "The memory usage is an estimate based on an upper-bound approximation on the " +
-      "complexity of the regular expression. Note that the actual memory usage may " +
-      "still be higher than this estimate depending on the number of rows in the data" +
-      "column and the input strings themselves. It is recommended to not set this to " +
-      s"more than 3 times ${GPU_BATCH_SIZE_BYTES.key}")
-    .bytesConf(ByteUnit.BYTE)
-    .createWithDefault(Integer.MAX_VALUE)
 
   // INTERNAL TEST AND DEBUG CONFIGS
 
@@ -2752,6 +2782,18 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
   val ENABLE_AQE_EXCHANGE_REUSE_FIXUP = conf("spark.rapids.sql.aqeExchangeReuseFixup.enable")
       .doc("Option to turn on the fixup of exchange reuse when running with " +
           "adaptive query execution.")
+      .internal()
+      .booleanConf
+      .createWithDefault(true)
+
+  val ENABLE_NON_AQE_BROADCAST_REUSE_FIXUP =
+    conf("spark.rapids.sql.nonAqeBroadcastReuseFixup.enable")
+      .doc("Option to turn on the fixup of broadcast exchange reuse for DPP " +
+          "subqueries when AQE is disabled. The DPP-side GpuBroadcastExchange is built " +
+          "during GpuOverrides and bypasses GpuTransitionOverrides, so it does not match " +
+          "the join-side broadcast canonically. This fixup builds a per-query signature map " +
+          "of join-side GpuBroadcastExchangeExec nodes in the main plan and rewrites a " +
+          "matching DPP-side broadcast to ReusedExchangeExec.")
       .internal()
       .booleanConf
       .createWithDefault(true)
@@ -3999,16 +4041,6 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val isRegExpEnabled: Boolean = get(ENABLE_REGEXP)
 
-  lazy val maxRegExpStateMemory: Long =  {
-    val size = get(REGEXP_MAX_STATE_MEMORY_BYTES)
-    if (size > 3 * gpuTargetBatchSizeBytes) {
-      logWarning(s"${REGEXP_MAX_STATE_MEMORY_BYTES.key} is more than 3 times " +
-        s"${GPU_BATCH_SIZE_BYTES.key}. This may cause regular expression operations to " +
-        s"encounter GPU out of memory errors.")
-    }
-    size
-  }
-
   lazy val getSparkGpuResourceName: String = get(SPARK_GPU_RESOURCE_NAME)
 
   lazy val isCpuBasedUDFEnabled: Boolean = get(ENABLE_CPU_BASED_UDF)
@@ -4024,6 +4056,9 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val concurrentWriterPartitionFlushSize: Long = get(CONCURRENT_WRITER_PARTITION_FLUSH_SIZE)
 
   lazy val isAqeExchangeReuseFixupEnabled: Boolean = get(ENABLE_AQE_EXCHANGE_REUSE_FIXUP)
+
+  lazy val isNonAqeBroadcastReuseFixupEnabled: Boolean =
+    get(ENABLE_NON_AQE_BROADCAST_REUSE_FIXUP)
 
   lazy val chunkedPackPoolSize: Long = get(CHUNKED_PACK_POOL_SIZE)
 
@@ -4146,6 +4181,11 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
       Set.empty
     }
   }
+
+  /**
+   * Get the CPU bridge thread pool size override, if configured.
+   */
+  def getCpuBridgeThreadPoolSize: Option[Int] = get(CPU_BRIDGE_THREAD_POOL_SIZE).map(_.toInt)
 }
 
 case class OomInjectionConf(

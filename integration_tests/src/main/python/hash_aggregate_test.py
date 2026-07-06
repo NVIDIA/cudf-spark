@@ -1111,7 +1111,9 @@ def test_hash_groupby_collect_partial_fallback_aqe_plan_changed(spark_tmp_table_
     # --- Run test case ---
     conf = {
         'spark.sql.adaptive.enabled': True,
-        'spark.sql.execution.useObjectHashAggregateExec': use_obj_hash_agg
+        'spark.sql.execution.useObjectHashAggregateExec': use_obj_hash_agg,
+        # we disable the bridge so that the test can cover what it was intended to cover
+        'spark.rapids.sql.expression.cpuBridge.enabled': False
     }
     # Assume forall is not supported on GPU yet, so the AggregateExec including it
     # will be half on CPU and half on GPU.

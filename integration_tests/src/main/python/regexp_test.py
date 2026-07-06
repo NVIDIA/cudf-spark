@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -197,7 +197,12 @@ def test_split_optimized_no_re_combined():
 @allow_non_gpu('ProjectExec', 'StringSplit')
 def test_split_unsupported_fallback():
     data_gen = mk_str_gen('([bf]o{0,2}:){1,7}') \
-        .with_special_case('boo:and:foo')
+        .with_special_case('boo:and:foo') \
+        .with_special_case('foo bar') \
+        .with_special_case('hello world') \
+        .with_special_case('a') \
+        .with_special_case(' leading') \
+        .with_special_case('trailing ')
     assert_gpu_sql_fallback_collect(
         lambda spark : unary_op_df(spark, data_gen),
         'StringSplit',
@@ -205,6 +210,11 @@ def test_split_unsupported_fallback():
         'select ' +
         'split(a, "o*"),' +
         'split(a, "o?") from string_split_table')
+    assert_gpu_sql_fallback_collect(
+        lambda spark : unary_op_df(spark, data_gen),
+        'StringSplit',
+        'string_split_table',
+        'select split(a, "\\\\b") from string_split_table')
 
 def test_split_regexp_disabled_no_fallback():
     conf = { 'spark.rapids.sql.regexp.enabled': 'false' }
@@ -330,7 +340,8 @@ def test_re_replace_escaped_chars():
 
 
 def test_re_replace_backrefs():
-    gen = mk_str_gen('.{0,5}TEST[\ud720 A]{0,5}TEST')
+    gen = mk_str_gen('.{0,5}TEST[\ud720 A]{0,5}TEST') \
+        .with_special_case("TESTTESTTEST")
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: unary_op_df(spark, gen).selectExpr(
             'REGEXP_REPLACE(a, "(TEST)", "$1")',
@@ -339,7 +350,22 @@ def test_re_replace_backrefs():
             'REGEXP_REPLACE(a, "(T)[a-z]+(T)", "[$2][$1][$0]")',
             'REGEXP_REPLACE(a, "([0-9]+)(T)[a-z]+(T)", "[$3][$2][$1]")',
             'REGEXP_REPLACE(a, "(.)([0-9]+TEST)", "$0 $1 $2")',
-            'REGEXP_REPLACE(a, "(TESTT)", "\\0 \\1")'  # no match
+            'REGEXP_REPLACE(a, "(TESTT)", "\\0 \\1")',  # no match
+            # issue-14743: greedy-with-backoff per Java's `Matcher.appendReplacement`.
+            # "$12" on a 2-group pattern must be parsed as "$1" + literal "2", not as
+            # group 12 (which would error in cuDF).
+            'REGEXP_REPLACE(a, "(T)(E)", "$12")',
+            'REGEXP_REPLACE(a, "(T)(E)", "x$12y")',
+            'REGEXP_REPLACE(a, "(T)(E)", "$123$2")',
+            # 12 user groups plus a trailing line-anchor `$`. Two distinct boundary
+            # checks:
+            # 1. User `$123$2` -> `$12` + literal `3` + `$2`; the user count being 12
+            #    (not the transpiled 13) is enough for the greedy-with-backoff to back off.
+            # 2. User `$13` -> `$1` + literal `3` (NOT a reference to the transpiler's
+            #    internally-generated 13th group, which exists only after line-anchor
+            #    rewriting and must stay invisible to user-replacement parsing).
+            'REGEXP_REPLACE(a, "(T)(E)(S)(T)(T)(E)(S)(T)(T)(E)(S)(T)$", "$123$2")',
+            'REGEXP_REPLACE(a, "(T)(E)(S)(T)(T)(E)(S)(T)(T)(E)(S)(T)$", "$13")'
         ),
         conf=_regexp_conf)
 
@@ -371,6 +397,17 @@ def test_re_replace_backrefs_idx_out_of_bounds():
     assert_gpu_and_cpu_error(lambda spark: unary_op_df(spark, gen).selectExpr(
         'REGEXP_REPLACE(a, "(T)(E)(S)(T)", "[$5]")').collect(),
         conf=_regexp_conf,
+        error_message='')
+
+@allow_non_gpu('ProjectExec', 'RegExpReplace')
+def test_re_replace_backrefs_braced_numeric_unsupported():
+    gen = mk_str_gen('.{0,5}TEST[\ud720 A]{0,5}')
+    # variable.substitute=false keeps `${N}` literal so it reaches RegExpReplace
+    # instead of being expanded by Spark's SQL parser.
+    assert_gpu_and_cpu_error(lambda spark: unary_op_df(spark, gen).selectExpr(
+        'REGEXP_REPLACE(a, "(T)(E)(S)(T)", "[${2}]")',
+        'REGEXP_REPLACE(a, "(T)(E)(S)(T)", "[${12}]")').collect(),
+        conf={**_regexp_conf, 'spark.sql.variable.substitute': 'false'},
         error_message='')
 
 def test_re_replace_backrefs_escaped():
@@ -598,6 +635,9 @@ def test_character_classes():
 
 @datagen_overrides(seed=0, reason="https://github.com/NVIDIA/spark-rapids/issues/10641")
 def test_regexp_choice():
+    # These choice patterns transpile to many cuDF states (e.g. `(abc1a$|^ab2ab|a3abc)`
+    # is ~21 states). They run on the GPU directly now that the regex complexity gate
+    # has been removed (#14887).
     gen = mk_str_gen('[abcd]{1,3}[0-9]{1,3}[abcd]{1,3}[ \n\t\r]{0,2}')
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark: unary_op_df(spark, gen).selectExpr(
@@ -938,7 +978,7 @@ def test_regexp_replace_fallback_configured_off():
     )
 
 
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('RegExpExtract')
 def test_unsupported_fallback_regexp_extract():
     gen = mk_str_gen('[abcdef]{0,2}')
     regex_gen = StringGen(r'\[a-z\]\+')
@@ -960,7 +1000,7 @@ def test_unsupported_fallback_regexp_extract():
     assert_gpu_did_fallback('REGEXP_EXTRACT("PROD", reg_ex, num)')
 
 
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('RegExpExtractAll')
 def test_unsupported_fallback_regexp_extract_all():
     gen = mk_str_gen('[abcdef]{0,2}')
     regex_gen = StringGen(r'\[a-z\]\+')
@@ -1055,52 +1095,6 @@ def test_regexp_split_unicode_support():
             'split(a, "[bf]", -1)',
             'split(a, "[o]", -2)'),
             conf=_regexp_conf)
-
-@allow_non_gpu('ProjectExec', 'RLike')
-def test_regexp_memory_fallback():
-    gen = StringGen('test')
-    assert_gpu_fallback_collect(
-        lambda spark: unary_op_df(spark, gen).selectExpr(
-            'a rlike "a{6}"',
-            'a rlike "a{6,}"',
-            'a rlike "(?:ab){0,3}"',
-            'a rlike "(?:12345)?"',
-            'a rlike "(?:12345)+"',
-            'a rlike "(?:123456)*"',
-            'a rlike "a{1,6}"',
-            'a rlike "abcdef"',
-            'a rlike "(1)(2)(3)"',
-            'a rlike "1|2|3|4|5|6"'
-        ),
-        cpu_fallback_class_name='RLike',
-        conf={
-            'spark.rapids.sql.regexp.enabled': True,
-            'spark.rapids.sql.regexp.maxStateMemoryBytes': '10',
-            'spark.rapids.sql.batchSizeBytes': '20' # 1 row in the batch
-        }
-    )
-
-def test_regexp_memory_ok():
-    gen = StringGen('test')
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: unary_op_df(spark, gen).selectExpr(
-            'a rlike "a{6}"',
-            'a rlike "a{6,}"',
-            'a rlike "(?:ab){0,3}"',
-            'a rlike "(?:12345)?"',
-            'a rlike "(?:12345)+"',
-            'a rlike "(?:123456)*"',
-            'a rlike "a{1,6}"',
-            'a rlike "abcdef"',
-            'a rlike "(1)(2)(3)"',
-            'a rlike "1|2|3|4|5|6"'
-        ),
-        conf={
-            'spark.rapids.sql.regexp.enabled': True,
-            'spark.rapids.sql.regexp.maxStateMemoryBytes': '12',
-            'spark.rapids.sql.batchSizeBytes': '20' # 1 row in the batch
-        }
-    )
 
 def test_illegal_regexp_exception():
         gen = mk_str_gen('[abcdef]{0,5}')

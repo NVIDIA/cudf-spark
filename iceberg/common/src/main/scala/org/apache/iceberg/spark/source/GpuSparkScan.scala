@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,9 +20,9 @@ import scala.collection.JavaConverters._
 import scala.util.{Failure, Success, Try}
 
 import com.nvidia.spark.rapids._
-import org.apache.hadoop.shaded.org.apache.commons.lang3.reflect.FieldUtils
-import org.apache.iceberg.{BaseMetadataTable, ScanTaskGroup}
-import org.apache.iceberg.spark.{GpuSparkReadConf, SparkReadConf}
+import com.nvidia.spark.rapids.iceberg.ShimUtils
+import org.apache.iceberg.ScanTaskGroup
+import org.apache.iceberg.spark.GpuSparkReadConf
 import org.apache.iceberg.types.Types
 
 import org.apache.spark.sql.connector.metric.{CustomMetric, CustomTaskMetric}
@@ -31,23 +31,21 @@ import org.apache.spark.sql.connector.read.streaming.MicroBatchStream
 import org.apache.spark.sql.types.StructType
 
 
-abstract class GpuSparkScan(val cpuScan: SparkScan,
+abstract class GpuSparkScan(val cpuScan: Scan,
     val rapidsConf: RapidsConf,
     val queryUsesInputFile: Boolean,
 ) extends GpuScan with SupportsReportStatistics {
   private val readConf: GpuSparkReadConf = new GpuSparkReadConf(
-    FieldUtils.readField(cpuScan, "readConf", true)
-    .asInstanceOf[SparkReadConf])
+    GpuSparkScanAccess.readConf(cpuScan))
 
   def readTimestampWithoutZone: Boolean = readConf.handleTimestampWithoutZone()
 
   override def readSchema(): StructType = cpuScan.readSchema()
 
-  override def estimateStatistics(): Statistics = cpuScan.estimateStatistics()
+  override def estimateStatistics(): Statistics = GpuSparkScanAccess.estimateStatistics(cpuScan)
 
   override def toBatch: Batch = {
-    val cpuBatch = cpuScan.toBatch.asInstanceOf[SparkBatch]
-    new GpuSparkBatch(cpuBatch, this)
+    new GpuSparkBatch(GpuSparkScanAccess.toBatch(cpuScan), this)
   }
 
   override def toMicroBatchStream(checkpointLocation: String): MicroBatchStream =
@@ -65,7 +63,7 @@ abstract class GpuSparkScan(val cpuScan: SparkScan,
   protected def taskGroups(): Seq[_ <: ScanTaskGroup[_]]
 
   def hasNestedType: Boolean = {
-    cpuScan.expectedSchema()
+    GpuSparkScanAccess.expectedSchema(cpuScan)
       .asStruct()
       .fields()
       .asScala
@@ -76,20 +74,19 @@ abstract class GpuSparkScan(val cpuScan: SparkScan,
 
 object GpuSparkScan {
   def isMetadataScan(scan: Scan): Boolean = {
-    scan.asInstanceOf[SparkScan].table().isInstanceOf[BaseMetadataTable]
+    GpuSparkScanAccess.isMetadataScan(scan)
   }
 
   def tryConvert(cpuScan: Scan, rapidsConf: RapidsConf): Try[GpuSparkScan] = {
     Try {
-      cpuScan match {
-        case icebergScan: SparkBatchQueryScan =>
-          new GpuSparkBatchQueryScan(icebergScan, rapidsConf, false)
-        case s: SparkCopyOnWriteScan =>
-          new GpuSparkCopyOnWriteScan(s, rapidsConf, false)
-        case _ =>
-          throw new IllegalArgumentException(
-            s"Currently iceberg support only supports batch query scan and copy-on-write scan, " +
-              s"but got ${cpuScan.getClass.getName}")
+      if (GpuSparkScanAccess.isBatchQueryScan(cpuScan)) {
+        new GpuSparkBatchQueryScan(cpuScan, rapidsConf, false)
+      } else if (GpuSparkScanAccess.isCopyOnWriteScan(cpuScan)) {
+        ShimUtils.newCopyOnWriteScan(cpuScan, rapidsConf, false)
+      } else {
+        throw new IllegalArgumentException(
+          s"Currently iceberg support only supports batch query scan and copy-on-write scan, " +
+            s"but got ${cpuScan.getClass.getName}")
       }
     }
   }

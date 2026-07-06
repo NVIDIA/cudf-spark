@@ -25,7 +25,7 @@ import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.jni.{Arithmetic, CastStrings, ExceptionWithRowIndex, RoundMode}
 
 import org.apache.spark.sql.catalyst.expressions.{Expression, ImplicitCastInputTypes}
-import org.apache.spark.sql.catalyst.trees.{CurrentOrigin, Origin}
+import org.apache.spark.sql.catalyst.trees.CurrentOrigin
 import org.apache.spark.sql.rapids.shims.{OriginContextShim, RapidsErrorUtils}
 import org.apache.spark.sql.types._
 
@@ -867,13 +867,11 @@ object RoundingErrorUtil {
    * @param outOfBounds A boolean column that indicates which value cannot be casted.
    * Users must make sure that there is at least one `true` in this column.
    * @param toType The type to cast.
-   * @param origin The expression origin used to restore the query context.
    */
   def cannotChangeDecimalPrecisionError(
       values: ColumnView,
       outOfBounds: ColumnView,
-      toType: DecimalType,
-      origin: Origin = CurrentOrigin.get): ArithmeticException = {
+      toType: DecimalType): ArithmeticException = {
     val rowId = withResource(outOfBounds.copyToHost()) { hcv =>
       (0L until outOfBounds.getRowCount)
         .find(i => !hcv.isNull(i) && hcv.getBoolean(i))
@@ -882,7 +880,9 @@ object RoundingErrorUtil {
     val value = withResource(values.getScalarElement(rowId.toInt)) { s =>
       s.getBigDecimal
     }
+    // Pass the SQL query context (set on the executor via `CurrentOrigin.withOrigin`
+    // around `doColumnar`) so the exception message preserves SPARK-39190 parity.
     RapidsErrorUtils.cannotChangeDecimalPrecisionError(
-      Decimal(value), toType, OriginContextShim.queryContext(origin))
+      Decimal(value), toType, OriginContextShim.queryContext(CurrentOrigin.get))
   }
 }

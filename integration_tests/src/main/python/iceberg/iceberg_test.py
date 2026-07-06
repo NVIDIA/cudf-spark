@@ -340,7 +340,7 @@ def test_iceberg_read_timetravel(spark_tmp_table_factory, reader_type):
                          "ORDER BY committed_at").head()[0]
     first_snapshot_id = with_cpu_session(setup_snapshots)
     assert_gpu_and_cpu_are_equal_collect(
-        lambda spark : spark.read.option("snapshot-id", first_snapshot_id) \
+        lambda spark : spark.read.option("versionAsOf", first_snapshot_id) \
             .format("iceberg").load("{}".format(full_table)),
         conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
@@ -666,6 +666,66 @@ def test_iceberg_read_metadata_columns_with_partition_evolution(spark_tmp_table_
     # Test reading all metadata columns along with data columns
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.sql(f"SELECT a, b, c, _file, _pos, _spec_id, _partition FROM {table}"),
+        conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+def test_iceberg_read_pos_with_split_file(spark_tmp_table_factory, reader_type):
+    # Writes a single Parquet data file containing many row groups, then forces
+    # Iceberg's planner to split that file across multiple scan tasks at row-group
+    # byte boundaries via a tiny row-group size, a tiny split target, and a zero
+    # per-file open cost. The query projects Iceberg's _pos metadata column; the
+    # GPU result must match CPU regardless of how the planner splits the file.
+    # Note: with the COALESCING reader_type, GpuReaderFactory routes _pos scans
+    # away from the coalescing reader (canUseCoalescing excludes
+    # hasRowPositionMetadata), so that parametrization actually exercises the
+    # per-file/multi-thread path. The split-file _pos correctness assertion still
+    # holds in whichever reader is chosen.
+    table = get_full_table_name(spark_tmp_table_factory)
+    def setup_iceberg_table(spark):
+        spark.sql(f"CREATE TABLE {table} (id BIGINT) USING ICEBERG {_NO_FANOUT}")
+        spark.sql(
+            f"ALTER TABLE {table} SET TBLPROPERTIES ("
+            "'write.parquet.row-group-size-bytes' = '4096', "
+            "'read.split.target-size'             = '4096', "
+            "'read.split.open-file-cost'          = '0')")
+        spark.range(0, 1500).coalesce(1).writeTo(table).append()
+    with_cpu_session(setup_iceberg_table)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(f"SELECT id, _pos FROM {table}"),
+        conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+def test_iceberg_read_mor_with_pos_deletes_split_file(spark_tmp_table_factory, reader_type):
+    # Same split-file conditions as test_iceberg_read_pos_with_split_file, but on
+    # a v2 Merge-on-Read table with positional delete files. The query does not
+    # project _pos; the Iceberg reader still adds it internally to match against
+    # the positional delete list. The test deletes a scattered subset by id and
+    # asserts CPU and GPU return the same surviving rows.
+    # Note: the COALESCING reader_type does not actually exercise the coalescing
+    # reader here either — GpuReaderFactory.canUseCoalescing already excludes any
+    # scan with delete files (`hasNoDeletes` is false), so the test runs against
+    # the per-file/multi-thread reader regardless of the requested reader_type.
+    table = get_full_table_name(spark_tmp_table_factory)
+    def setup_iceberg_table(spark):
+        spark.sql(
+            f"CREATE TABLE {table} (id BIGINT) USING ICEBERG TBLPROPERTIES ("
+            "'format-version'                     = '2', "
+            "'write.delete.mode'                  = 'merge-on-read', "
+            "'write.spark.fanout.enabled'         = 'false', "
+            "'write.parquet.row-group-size-bytes' = '4096', "
+            "'read.split.target-size'             = '4096', "
+            "'read.split.open-file-cost'          = '0')")
+        spark.range(0, 1500).coalesce(1).writeTo(table).append()
+        spark.sql(f"DELETE FROM {table} WHERE id % 7 = 3")
+    with_cpu_session(setup_iceberg_table)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(f"SELECT id FROM {table}"),
         conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
 

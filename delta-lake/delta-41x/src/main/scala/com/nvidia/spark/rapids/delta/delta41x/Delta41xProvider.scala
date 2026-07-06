@@ -78,7 +78,7 @@ object Delta41xProvider extends DeltaProviderBase with Logging {
 
   override protected def toGpuParquetFileFormat(conf: RapidsConf, fmt: DeltaParquetFileFormat)
   : FileFormat = {
-    if (canPushDVPredicateDownToScan(conf)) {
+    if (isPushDVPredicateDownEnabled(conf)) {
       GpuDeltaParquetFileFormat2(
         protocol = fmt.protocol,
         metadata = fmt.metadata,

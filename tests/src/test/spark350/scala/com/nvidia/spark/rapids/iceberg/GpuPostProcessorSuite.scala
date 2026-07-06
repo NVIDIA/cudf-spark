@@ -23,6 +23,7 @@
 {"spark": "355"}
 {"spark": "356"}
 {"spark": "357"}
+{"spark": "358"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.iceberg
 
@@ -94,6 +95,34 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       timestampRebaseMode = null,
       hasInt96Timestamps = false,
       blocksFirstRowIndices = Seq(0L)
+    )
+    (info, shadedSchema)
+  }
+
+  /**
+   * Build a `ParquetFileInfoWithBlockMeta` that simulates a split scan task whose blocks
+   * begin somewhere in the middle of the file (i.e. `blocksFirstRowIndices` does not start
+   * at 0). `firstFileGlobalRowIndex` is the file-global first-row index of the first block
+   * in `blockRowCounts`; subsequent blocks are placed contiguously after it.
+   */
+  private def createMultiBlockParquetInfo(
+      shadedSchema: ShadedMessageType,
+      blockRowCounts: Seq[Long],
+      firstFileGlobalRowIndex: Long): (ParquetFileInfoWithBlockMeta, ShadedMessageType) = {
+    val blocks = blockRowCounts.map(createBlockMetaData)
+    val firstRowIndices = blockRowCounts
+      .scanLeft(firstFileGlobalRowIndex)(_ + _)
+      .dropRight(1)
+    val info = ParquetFileInfoWithBlockMeta(
+      filePath = new Path("/test/file.parquet"),
+      blocks = blocks,
+      partValues = InternalRow.empty,
+      schema = unshade(shadedSchema),
+      readSchema = StructType(Seq.empty),
+      dateRebaseMode = null,
+      timestampRebaseMode = null,
+      hasInt96Timestamps = false,
+      blocksFirstRowIndices = firstRowIndices
     )
     (info, shadedSchema)
   }
@@ -899,6 +928,80 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
 
     assert(processor.displayActionPlan().contains(
       s"FetchConstant(fieldId=$structFieldId, struct<"))
+  }
+
+  test("FetchRowPosition emits file-global _pos across multiple blocks") {
+    import com.nvidia.spark.rapids.Arm.withResource
+    import com.nvidia.spark.rapids.GpuColumnVector
+    import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkColumnVector}
+
+    val rowPosId = MetadataColumns.ROW_POSITION.fieldId()
+
+    // Empty parquet schema: _pos is a generated metadata column, no input column is read
+    // from parquet for it.
+    val parquetSchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
+
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(rowPosId, "_pos", Types.LongType.get())
+    )
+
+    // Simulate a split task whose first block starts at file-global row 500 (this is the
+    // scenario the reader.scala fix exists for; before that fix the task-local first-row
+    // index would be 0). Two blocks of 500 + 400 rows: file-global rows [500, 999] and
+    // [1000, 1399].
+    val (parquetInfo, shadedSchema) =
+      createMultiBlockParquetInfo(parquetSchema, Seq(500L, 400L), firstFileGlobalRowIndex = 500L)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo,
+      new JHashMap[Integer, Any](),
+      expectedSchema,
+      shadedSchema,
+      Map.empty)
+
+    def emptyBatch(rows: Int): ColumnarBatch =
+      new ColumnarBatch(Array.empty[SparkColumnVector], rows)
+
+    // Check every row, not just first/last — a middle-row off-by-one would otherwise slip
+    // past, and the cross-block batch below relies on knowing the exact transition row.
+    def assertPosRange(batch: ColumnarBatch, expectedStart: Long, expectedEnd: Long): Unit = {
+      assert(batch.numRows() == (expectedEnd - expectedStart + 1).toInt)
+      assert(batch.numCols() == 1)
+      withResource(batch.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { hostCol =>
+        val base = hostCol.getBase
+        var i = 0
+        while (i < batch.numRows()) {
+          val actual = base.getLong(i)
+          val expected = expectedStart + i
+          assert(actual == expected,
+            s"_pos[$i] expected $expected, got $actual")
+          i += 1
+        }
+      }
+    }
+
+    // Batch 1: 300 rows entirely inside block 0 → file-global _pos = 500..799.
+    withResource(processor.process(emptyBatch(300))) { batch =>
+      assertPosRange(batch, 500L, 799L)
+    }
+
+    // Batch 2: 100 rows still inside block 0 (100 rows of block 0 remain after this batch).
+    // → file-global _pos = 800..899.
+    withResource(processor.process(emptyBatch(100))) { batch =>
+      assertPosRange(batch, 800L, 899L)
+    }
+
+    // Batch 3: 350 rows straddle the block 0 → block 1 boundary (100 from block 0 + 250 from
+    // block 1). This exercises the `if (curRowPos >= curBlockRowEnd)` branch inside the
+    // per-row loop in FetchRowPosition.execute — a single process() call that crosses
+    // blocks. → file-global _pos = 900..1249.
+    withResource(processor.process(emptyBatch(350))) { batch =>
+      assertPosRange(batch, 900L, 1249L)
+    }
+
+    // Batch 4: 150 rows entirely inside block 1 → file-global _pos = 1250..1399.
+    withResource(processor.process(emptyBatch(150))) { batch =>
+      assertPosRange(batch, 1250L, 1399L)
+    }
   }
 
   test("Constant struct with required children does not throw") {

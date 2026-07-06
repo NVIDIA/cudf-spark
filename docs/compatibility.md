@@ -374,7 +374,7 @@ in a quoted string. If it is in a quoted string the local of the JVM is used to 
 If the local is not for the `US`, which is the default we will fall back to the CPU because we do not currently
 parse those numbers correctly. The `US` format removes all commas ',' from the quoted string.
 As a part of this, though, non-arabic numbers are also supported. We do not support parsing these numbers
-see (issue 10532)[https://github.com/NVIDIA/spark-rapids/issues/10532].
+see [issue 10532](https://github.com/NVIDIA/spark-rapids/issues/10532).
 
 ### JSON Date/Timestamp Types 
 
@@ -741,6 +741,11 @@ LEGACY timeParserPolicy support has the following limitations when running on th
 
 When formatting dates and timestamps as strings using functions such as `from_unixtime`, only a
 subset of valid format strings are supported on the GPU.
+
+With timeParserPolicy set to `LEGACY`, `date_format` and `from_unixtime` additionally support
+`yyyy-MM-dd HH:mm:ss.SSS` when
+[`spark.rapids.sql.incompatibleDateFormats.enabled`](additional-functionality/advanced_configs.md#sql.incompatibleDateFormats.enabled)
+is set to `true`. Parsing strings with this format remains unsupported in `LEGACY` mode.
 
 Formats that contain any of the following characters are unsupported and will fall back to CPU:
 

@@ -16,12 +16,16 @@
 
 package com.nvidia.spark.rapids.iceberg.iceberg16x;
 
+import com.nvidia.spark.rapids.RapidsConf;
 import com.nvidia.spark.rapids.iceberg.IcebergShimUtils;
 import org.apache.iceberg.*;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.spark.source.GpuBaseReader;
+import org.apache.iceberg.spark.source.GpuSparkCopyOnWriteV1Scan;
+import org.apache.iceberg.spark.source.GpuSparkScan;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.PartitionUtil;
+import org.apache.spark.sql.connector.read.Scan;
 
 import java.util.Collections;
 import java.util.Map;
@@ -54,4 +58,12 @@ public class ShimUtilsImpl implements IcebergShimUtils {
     // openParquetReader: inherits the no-cache default from IcebergShimUtils. The shaded
     // ParquetFileReader in 1.6.x has no public API to inject pre-parsed footer metadata,
     // so file-cache routing is not possible here.
+
+    @Override
+    public GpuSparkScan newCopyOnWriteScan(
+            Scan cpuScan,
+            RapidsConf rapidsConf,
+            boolean queryUsesInputFile) {
+        return GpuSparkCopyOnWriteV1Scan.create(cpuScan, rapidsConf, queryUsesInputFile);
+    }
 }

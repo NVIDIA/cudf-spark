@@ -39,6 +39,13 @@ class GpuOptimisticTransaction(
 
   def this(
       deltaLog: DeltaLog,
+      snapshot: Snapshot,
+      rapidsConf: RapidsConf)(implicit clock: Clock) = {
+    this(deltaLog, Option.empty[CatalogTable], snapshot, rapidsConf)
+  }
+
+  def this(
+      deltaLog: DeltaLog,
       catalogTable: Option[CatalogTable],
       snapshotOpt: Option[Snapshot],
       rapidsConf: RapidsConf)(implicit clock: Clock) = {

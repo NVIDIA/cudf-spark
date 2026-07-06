@@ -17,6 +17,7 @@
 package com.nvidia.spark.rapids.iceberg;
 
 import com.nvidia.spark.rapids.GpuMetric;
+import com.nvidia.spark.rapids.RapidsConf;
 import com.nvidia.spark.rapids.ShimLoader;
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
 
@@ -28,6 +29,8 @@ import org.apache.iceberg.Table;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.shaded.org.apache.parquet.ParquetReadOptions;
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader;
+import org.apache.iceberg.spark.source.GpuSparkScan;
+import org.apache.spark.sql.connector.read.Scan;
 
 import java.io.IOException;
 import java.util.Map;
@@ -70,5 +73,12 @@ public class ShimUtils {
             ParquetReadOptions options,
             scala.collection.immutable.Map<String, GpuMetric> metrics) throws IOException {
         return IMPL.openParquetReader(inputFile, filePath, options, metrics);
+    }
+
+    public static GpuSparkScan newCopyOnWriteScan(
+            Scan cpuScan,
+            RapidsConf rapidsConf,
+            boolean queryUsesInputFile) {
+        return IMPL.newCopyOnWriteScan(cpuScan, rapidsConf, queryUsesInputFile);
     }
 }

@@ -466,7 +466,7 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     doTranspileTest(TIMESTAMP_TRUNCATE_REGEX,
       TIMESTAMP_TRUNCATE_REGEX
         .replaceAll("\\.", "[^\n\r\u0085\u2028\u2029]")
-        .replaceAll("\\\\Z", "(?:\r\n)?\\$"))
+        .replaceAll("\\\\Z", "\\$"))
   }
 
   test("transpile \\A repetitions") {
@@ -479,12 +479,9 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     assertUnsupported("abc\\z", RegexFindMode, "")
   }
 
-  test("transpile $") {
-    doTranspileTest("a$", "a(?:\r\n)?$")
-  }
-
   test("transpile \\Z") {
-    val expected = "a(?:\r\n)?$"
+    val expected = "a$"
+    doTranspileTest("a$", expected)
     doTranspileTest("a\\Z", expected)
     doTranspileTest("a\\Z+", expected)
     doTranspileTest("a\\Z{1}", expected)
@@ -769,6 +766,10 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     }
   }
 
+  test("issue-14748: word boundaries are not literal split delimiters") {
+    assertNoTranspileToSplittableString(Set(raw"\b", raw"\B"))
+  }
+
   test("regexp_split - character class repetition - ? and *") {
     val patterns = Set(raw"[a-z][0-9]?", raw"[a-z][0-9]*")
     val data = Seq("a", "aa", "a1a1", "a1b2", "a1b")
@@ -1021,7 +1022,9 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
       input: Seq[String]): Array[String] = {
     val result = new Array[String](input.length)
     val replace = GpuRegExpUtils.unescapeReplaceString(replaceString)
-    val (hasBackrefs, converted) = GpuRegExpUtils.backrefConversion(replace)
+    // Pass -1 to opt out of Java-spec greedy-with-backoff; the REPLACE_STRING used by this
+    // helper contains no `$N` backrefs, so the legacy behavior is sufficient here.
+    val (hasBackrefs, converted) = GpuRegExpUtils.backrefConversion(replace, -1)
     withResource(ColumnVector.fromStrings(input: _*)) { cv =>
       val c = if (hasBackrefs) {
         cv.stringReplaceWithBackrefs(new RegexProgram(cudfPattern,

@@ -48,6 +48,7 @@ import org.apache.spark.util.Clock
  * This class is not thread-safe.
  *
  * @param deltaLog The Delta Log for the table this transaction is modifying.
+ * @param catalogTable catalog table for commit routing.
  * @param snapshot The snapshot that this transaction is reading at.
  * @param rapidsConf RAPIDS Accelerator config settings.
  */

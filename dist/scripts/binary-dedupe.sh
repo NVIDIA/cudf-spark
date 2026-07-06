@@ -38,6 +38,7 @@ export SPARK_SHARED_TXT="$PWD/spark-shared.txt"
 export SPARK_SHARED_COPY_LIST="$PWD/spark-shared-copy-list.txt"
 export DELETE_DUPLICATES_TXT="$PWD/delete-duplicates.txt"
 export SPARK_SHARED_DIR="$PWD/spark-shared"
+export UNSHIMMED_FROM_SPARK_SHARED_COPY_LIST="$PWD/unshimmed-from-spark-shared-copy-list.txt"
 
 # This script de-duplicates .class files at the binary level.
 # We could also diff classes using scalap / javap outputs.
@@ -99,6 +100,38 @@ function retain_single_copy() {
   done >> "$DELETE_DUPLICATES_TXT" || exit 255
 }
 
+function copy_unshimmed_from_spark_shared() {
+  set -e
+  local unshimmed_patterns_txt="${UNSHIMMED_COMMON_FROM_SINGLE_SHIM_TXT:-}"
+
+  [[ -n "$unshimmed_patterns_txt" ]] || return 0
+  [[ -f "$unshimmed_patterns_txt" ]] || {
+    echo >&2 "Unshimmed common list does not exist: $unshimmed_patterns_txt"
+    exit 255
+  }
+
+  : > "$UNSHIMMED_FROM_SPARK_SHARED_COPY_LIST"
+  while read -r shared_path; do
+    local rel_path="${shared_path#./parallel-world/spark-shared/}"
+    local pattern
+    while read -r pattern; do
+      [[ -n "$pattern" ]] || continue
+      [[ "$pattern" =~ ^[[:space:]]*# ]] && continue
+      # shellcheck disable=SC2053
+      if [[ "$rel_path" == $pattern ]]; then
+        echo "$rel_path" >> "$UNSHIMMED_FROM_SPARK_SHARED_COPY_LIST"
+        break
+      fi
+    done < "$unshimmed_patterns_txt"
+  done < <(find ./parallel-world/spark-shared -type f)
+
+  if [[ -s "$UNSHIMMED_FROM_SPARK_SHARED_COPY_LIST" ]]; then
+    echo "Promoting root-layout files from spark-shared via $unshimmed_patterns_txt"
+    rsync --files-from="$UNSHIMMED_FROM_SPARK_SHARED_COPY_LIST" \
+      ./parallel-world/spark-shared ./parallel-world
+  fi
+}
+
 # this belongs into maven initialize phase, left in here for easier
 # standalone debugging
 # truncate incremental files
@@ -123,6 +156,9 @@ for copy_list in from-spark[34]*-to-spark-shared.txt; do
 done
 
 mv "$SPARK_SHARED_DIR" parallel-world/
+
+echo "$((++STEP))/ promoting allowlisted spark-shared files to root layout"
+copy_unshimmed_from_spark_shared
 
 # Verify that all class files in the conventional jar location are bitwise
 # identical regardless of the Spark-version-specific jar.

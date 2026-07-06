@@ -18,7 +18,10 @@ import pytest
 from delta_lake_merge_common import *
 from marks import *
 from pyspark.sql.types import *
-from spark_session import is_before_spark_320, is_databricks_runtime, spark_version, supports_delta_lake_deletion_vectors, is_before_spark_353, is_spark_400_or_later, is_databricks173_or_later
+from spark_session import (is_before_spark_320, is_databricks_runtime, spark_version,
+                           supports_delta_lake_deletion_vectors, is_before_spark_353,
+                           is_spark_400_or_later, is_databricks143,
+                           is_databricks173_or_later)
 
 delta_merge_enabled_conf = copy_and_update(delta_writes_enabled_conf,
                                            {"spark.rapids.sql.command.MergeIntoCommand": "true",
@@ -102,6 +105,86 @@ def test_delta_merge_not_matched_by_source_fallback(spark_tmp_path, spark_tmp_ta
                          use_cdf=False, enable_deletion_vectors=enable_deletion_vectors,
                          src_table_func=lambda spark: binary_op_df(spark, SetValuesGen(IntegerType(), range(10))),
                          dest_table_func=lambda spark: binary_op_df(spark, SetValuesGen(IntegerType(), range(20, 30))),
+                         merge_sql=merge_sql,
+                         check_func=checker)
+
+@allow_non_gpu("BroadcastHashJoinExec,ColumnarToRowExec,BroadcastExchangeExec,"
+               "UnionExec,UnionWithLocalDataExec,RangeExec",
+               delta_write_fallback_allow, *delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_databricks143(),
+                    reason="The shimmed UnionWithLocalDataExec fallback is DBR 14.3-specific")
+def test_delta_merge_not_matched_by_source_union_source_fallback(
+        spark_tmp_path, spark_tmp_table_factory):
+    materialize_conf = copy_and_update(delta_merge_enabled_conf, {
+        "spark.databricks.delta.merge.materializeSource": "all"})
+
+    def checker(data_path, do_merge):
+        assert_gpu_fallback_write(do_merge, read_delta_path, data_path,
+                                  ["ExecutedCommandExec", "UnionExec"],
+                                  conf=materialize_conf)
+
+    def create_test_data(spark, num=120):
+        from datetime import datetime, timedelta, timezone
+        import pandas as pd
+
+        start = datetime(2022, 1, 1, tzinfo=timezone.utc)
+        categories = ["electronics", "books", "home_garden", "toys"]
+        rows = {
+            "product_id": [],
+            "sale_datetime": [],
+            "sale_date": [],
+            "product_category": [],
+            "sales_amount": [],
+            "quantity": []
+        }
+        for i in range(num):
+            if i % 10 == 0:
+                rows["sale_datetime"].append(None)
+                rows["sale_date"].append(None)
+            else:
+                dt = start + timedelta(days=i * 3)
+                rows["sale_datetime"].append(dt)
+                rows["sale_date"].append(dt.date())
+            rows["product_id"].append(i)
+            rows["product_category"].append(categories[i % len(categories)])
+            rows["sales_amount"].append(float(100 + i))
+            rows["quantity"].append((i % 10) + 1)
+
+        df = spark.createDataFrame(pd.DataFrame(rows))
+        return df.withColumn("year", f.year("sale_datetime"))
+
+    def extra_source_df(spark, start, end):
+        return spark.range(start, end).select(
+            f.col("id").alias("product_id"),
+            f.lit(None).cast(TimestampType()).alias("sale_datetime"),
+            f.lit(None).cast(DateType()).alias("sale_date"),
+            f.lit("books").alias("product_category"),
+            (f.col("id").cast(DoubleType()) * 10.0).alias("sales_amount"),
+            f.lit(1).cast(LongType()).alias("quantity"),
+            f.lit(2025).cast(IntegerType()).alias("year"))
+
+    def source_df(spark):
+        target_df = create_test_data(spark, num=120)
+        matched = target_df.filter(f.col("product_id") < 60)
+        inserted = extra_source_df(spark, 200, 260)
+        return matched.unionByName(inserted)
+
+    merge_sql = "MERGE INTO {dest_table} " \
+                "USING {src_table} " \
+                "ON {src_table}.product_id == {dest_table}.product_id " \
+                "WHEN MATCHED THEN " \
+                "  UPDATE SET {dest_table}.sales_amount = {src_table}.sales_amount " \
+                "WHEN NOT MATCHED THEN " \
+                "  INSERT * " \
+                "WHEN NOT MATCHED BY SOURCE THEN " \
+                "  DELETE"
+    delta_sql_merge_test(spark_tmp_path, spark_tmp_table_factory,
+                         use_cdf=False,
+                         enable_deletion_vectors=False,
+                         src_table_func=source_df,
+                         dest_table_func=lambda spark: create_test_data(spark, num=120),
                          merge_sql=merge_sql,
                          check_func=checker)
 

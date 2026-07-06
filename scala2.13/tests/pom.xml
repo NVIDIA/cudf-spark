@@ -234,6 +234,29 @@
                 </dependency>
             </dependencies>
         </profile>
+        <profile>
+            <id>release412</id>
+            <activation>
+                <property>
+                    <name>buildver</name>
+                    <value>412</value>
+                </property>
+            </activation>
+            <dependencies>
+                <dependency>
+                    <groupId>io.delta</groupId>
+                    <artifactId>${delta41x.spark.artifactId}</artifactId>
+                    <version>${delta41x.version}</version>
+                    <scope>test</scope>
+                    <exclusions>
+                        <exclusion>
+                            <groupId>io.unitycatalog</groupId>
+                            <artifactId>unitycatalog-client</artifactId>
+                        </exclusion>
+                    </exclusions>
+                </dependency>
+            </dependencies>
+        </profile>
         <!-- #endif scala-2.13 -->
 
     </profiles>

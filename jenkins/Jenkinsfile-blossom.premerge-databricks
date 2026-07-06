@@ -59,7 +59,6 @@ pipeline {
 
     environment {
         GITHUB_TOKEN = credentials("github-token")
-        PVC = credentials("pvc")
         CUSTOM_WORKSPACE = "/home/jenkins/agent/workspace/${BUILD_TAG}"
         // DB related ENVs
         IDLE_TIMEOUT = '390' // 6.5 hours
@@ -103,7 +102,6 @@ pipeline {
                                 label "premerge-ci-${DB_RUNTIME}-${BUILD_NUMBER}"
                                 cloud "${common.CLOUD_NAME}"
                                 yaml "${IMAGE_DB}"
-                                workspaceVolume persistentVolumeClaimWorkspaceVolume(claimName: "${PVC}", readOnly: false)
                                 customWorkspace "${CUSTOM_WORKSPACE}-${DB_RUNTIME}-${BUILD_NUMBER}"
                             }
                         }
@@ -118,9 +116,13 @@ pipeline {
                         steps {
                             script {
                                 container('cpu') {
-                                    unstash('source_tree')
-                                    databricksBuild()
-                                    deleteDir() // cleanup content if no error
+                                    try {
+                                        unstash('source_tree')
+                                        databricksBuild()
+                                    } catch (e) {
+                                        common.uploadDebugBundle(this, 'spark-rapids', "databricks-${DB_RUNTIME}")
+                                        throw e
+                                    }
                                 }
                             }
                         }

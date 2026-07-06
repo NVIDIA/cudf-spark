@@ -15,7 +15,6 @@
 import os
 import tempfile
 import logging
-from itertools import combinations
 from types import MappingProxyType
 from typing import Callable, List, Dict, Optional
 
@@ -24,12 +23,13 @@ from pyspark.sql.types import FloatType, DoubleType, BinaryType
 
 import pytest
 
+from conftest import spark_jvm
 from data_gen import *
 from spark_session import is_iceberg_supported_spark, with_cpu_session
 
 iceberg_unsupported_mark = pytest.mark.skipif(
     not is_iceberg_supported_spark(),
-    reason="Iceberg acceleration requires Spark 3.5.x or 4.0.x")
+    reason="Iceberg acceleration requires Spark 3.5.x, 4.0.x, or 4.1.x")
 
 # iceberg supported types
 iceberg_table_gen = MappingProxyType({
@@ -50,6 +50,99 @@ iceberg_base_table_cols = list(iceberg_table_gen.keys())
 iceberg_gens_list = [iceberg_table_gen[col] for col in iceberg_base_table_cols]
 
 rapids_reader_types = ['PERFILE', 'MULTITHREADED', 'COALESCING']
+
+# Anchor list used by the single partition-transform coverage test
+# (iceberg_append_test.py::test_insert_into_partitioned_table_full_coverage).
+# That test exercises the partition writer against all 26 transforms. Every other
+# DML op only sanity-checks its own SQL path against a few distinct transforms
+# picked from this list via the per-op constants further down; the anchor is what
+# guarantees full transform coverage of the partition writer.
+full_coverage_partition_transforms = [
+    pytest.param("year(_c8)", id="year(date_col)"),
+    pytest.param("month(_c8)", id="month(date_col)"),
+    pytest.param("day(_c8)", id="day(date_col)"),
+    pytest.param("month(_c9)", id="month(timestamp_col)"),
+    pytest.param("day(_c9)", id="day(timestamp_col)"),
+    pytest.param("hour(_c9)", id="hour(timestamp_col)"),
+    pytest.param("truncate(10, _c2)", id="truncate(10, int_col)"),
+    pytest.param("truncate(10, _c3)", id="truncate(10, long_col)"),
+    pytest.param("truncate(5, _c6)", id="truncate(5, string_col)"),
+    pytest.param("truncate(10, _c13)", id="truncate(10, decimal32_col)"),
+    pytest.param("truncate(10, _c14)", id="truncate(10, decimal64_col)"),
+    pytest.param("truncate(10, _c15)", id="truncate(10, decimal128_col)"),
+    pytest.param("bucket(16, _c2)", id="bucket(16, int_col)"),
+    pytest.param("bucket(16, _c3)", id="bucket(16, long_col)"),
+    pytest.param("bucket(16, _c8)", id="bucket(16, date_col)"),
+    pytest.param("bucket(16, _c9)", id="bucket(16, timestamp_col)"),
+    pytest.param("bucket(16, _c6)", id="bucket(16, string_col)"),
+    pytest.param("bucket(16, _c13)", id="bucket(16, decimal32_col)"),
+    pytest.param("bucket(16, _c14)", id="bucket(16, decimal64_col)"),
+    pytest.param("bucket(16, _c15)", id="bucket(16, decimal128_col)"),
+    pytest.param("_c0", id="identity(byte)"),
+    pytest.param("_c2", id="identity(int)"),
+    pytest.param("_c3", id="identity(long)"),
+    pytest.param("_c6", id="identity(string)"),
+    pytest.param("_c8", id="identity(date)"),
+    pytest.param("_c10", id="identity(decimal)"),
+]
+
+# Per-op subsets. Each transform picked here is distinct from every other pick
+# across all 7 op subsets (22 distinct transforms total). The four transforms
+# not picked here are still exercised by the anchor. Each 4-pick op covers one
+# transform from each family (datetime/truncate/bucket/identity); the single-mode
+# slots in delete/update/merge each pick from one family.
+ctas_partition_transforms = [
+    pytest.param("year(_c8)", id="year(date_col)"),
+    pytest.param("truncate(10, _c2)", id="truncate(10, int_col)"),
+    pytest.param("bucket(16, _c2)", id="bucket(16, int_col)"),
+    pytest.param("_c0", id="identity(byte)"),
+]
+
+rtas_partition_transforms = [
+    pytest.param("month(_c8)", id="month(date_col)"),
+    pytest.param("truncate(10, _c3)", id="truncate(10, long_col)"),
+    pytest.param("bucket(16, _c3)", id="bucket(16, long_col)"),
+    pytest.param("_c2", id="identity(int)"),
+]
+
+overwrite_static_partition_transforms = [
+    pytest.param("day(_c8)", id="day(date_col)"),
+    pytest.param("truncate(5, _c6)", id="truncate(5, string_col)"),
+    pytest.param("bucket(16, _c8)", id="bucket(16, date_col)"),
+    pytest.param("_c3", id="identity(long)"),
+]
+
+overwrite_dynamic_partition_transforms = [
+    pytest.param("month(_c9)", id="month(timestamp_col)"),
+    pytest.param("truncate(10, _c13)", id="truncate(10, decimal32_col)"),
+    pytest.param("bucket(16, _c9)", id="bucket(16, timestamp_col)"),
+    pytest.param("_c6", id="identity(string)"),
+]
+
+# Each list pairs (partition_col_sql, <mode>). Always used together as
+# `@pytest.mark.parametrize("partition_col_sql,<mode_arg>", <list>)`, so the
+# tuple order must match the order of names in the parametrize arg string
+# (`partition_col_sql` first, then the mode arg). Pytest binds parameters to the
+# test function by name, so the function-signature order does not matter.
+#
+# Each list is just two cases (one per mode, exercising one transform family):
+# the 26-transform partition-writer matrix lives in the append anchor
+# (test_insert_into_partitioned_table_full_coverage); per-op cross-mode coverage
+# of year(_c9) is preserved in the non-_full_coverage basic tests.
+delete_partition_transforms_distributed = [
+    pytest.param("day(_c9)", 'copy-on-write', id="copy-on-write-day(timestamp_col)"),
+    pytest.param("hour(_c9)", 'merge-on-read', id="merge-on-read-hour(timestamp_col)"),
+]
+
+update_partition_transforms_distributed = [
+    pytest.param("truncate(10, _c14)", 'copy-on-write', id="copy-on-write-truncate(10, decimal64_col)"),
+    pytest.param("truncate(10, _c15)", 'merge-on-read', id="merge-on-read-truncate(10, decimal128_col)"),
+]
+
+merge_partition_transforms_distributed = [
+    pytest.param("bucket(16, _c6)", 'copy-on-write', id="copy-on-write-bucket(16, string_col)"),
+    pytest.param("bucket(16, _c13)", 'merge-on-read', id="merge-on-read-bucket(16, decimal32_col)"),
+]
 
 # All data types of iceberg, not all of them are supported by spark-rapids for now
 iceberg_map_gens = [MapGen(f(nullable=False), f()) for f in [
@@ -98,15 +191,36 @@ def can_be_eq_delete_col(data_gen: DataGen) -> bool:
             # loader, we should remove this after the bug is fixed.
             not isinstance(data_gen.data_type, BinaryType))
 
-def _eq_column_combinations(all_columns: List[str],
-                           all_types: List[DataGen],
-                           n: int) -> List[List[str]]:
-    # In primitive types, float, double can't be used in eq deletes
-    cols = [col for (col, data_gen) in list(zip(all_columns, all_types))
-            if can_be_eq_delete_col(data_gen)]
-    return list(combinations(cols, n))
+# Representative eq-delete column pairs. The full C(14, 2) = 91-pair matrix
+# previously tested every column combination, but eq-delete correctness only
+# requires that every eligible column type appears in some pair (not every pair
+# of types). The 10 pairs below cover all 14 eligible eq-delete columns of
+# iceberg_table_gen (_c0..c3, _c6..c15; _c4 float and _c5 double are excluded by
+# can_be_eq_delete_col), spanning every distinct primitive Spark type used there
+# while mixing numeric/string/temporal/decimal across each pair.
+representative_eq_column_combinations = [
+    pytest.param(("_c0", "_c12"), id="(byte, decimal128)"),
+    pytest.param(("_c1", "_c6"),  id="(short, string)"),
+    pytest.param(("_c2", "_c8"),  id="(int, date)"),
+    pytest.param(("_c3", "_c9"),  id="(long, timestamp)"),
+    pytest.param(("_c7", "_c10"), id="(boolean, decimal32)"),
+    pytest.param(("_c11", "_c13"), id="(decimal64, decimal32_special)"),
+    pytest.param(("_c14", "_c15"), id="(decimal64_special, decimal128_special)"),
+    pytest.param(("_c6", "_c9"),  id="(string, timestamp)"),
+    pytest.param(("_c0", "_c11"), id="(byte, decimal64)"),
+    pytest.param(("_c2", "_c12"), id="(int, decimal128)"),
+]
 
-all_eq_column_combinations = _eq_column_combinations(iceberg_base_table_cols, iceberg_gens_list, 2)
+# Reader-type canary: pairs to exercise the three rapids_reader_types against the
+# eq-delete read path. Three pairs is enough to confirm that reader-type selection
+# composes with eq-delete handling; the full per-pair coverage runs against the
+# default reader only in test_iceberg_v2_eq_deletes. Each canary pair is distinct
+# from representative_eq_column_combinations so the two tests don't overlap.
+eq_reader_canary_pairs = [
+    pytest.param(("_c2", "_c6"),  id="(int, string)"),
+    pytest.param(("_c9", "_c12"), id="(timestamp, decimal128)"),
+    pytest.param(("_c1", "_c10"), id="(short, decimal32)"),
+]
 
 def setup_base_iceberg_table(spark_tmp_table_factory,
                              seed: Optional[int] = None,
@@ -205,6 +319,36 @@ def _build_tblprops(extra_props: Optional[Dict[str, str]] = None) -> Dict[str, s
 # SQL fragment for raw CREATE TABLE statements that have no other TBLPROPERTIES.
 _BASE_TBLPROPS_SQL = "TBLPROPERTIES (" + \
     ", ".join(f"'{k}' = '{v}'" for k, v in _build_tblprops().items()) + ")"
+
+
+def read_parquet_codec(spark: SparkSession, path: str) -> str:
+    """Open the Parquet footer of `path` and return the codec name of the first column of
+    the first row group (uppercase, e.g. "ZSTD", "UNCOMPRESSED")."""
+    jvm = spark_jvm()
+    hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
+    hadoop_path = jvm.org.apache.hadoop.fs.Path(path)
+    reader = jvm.org.apache.parquet.hadoop.ParquetFileReader.open(hadoop_conf, hadoop_path)
+    try:
+        blocks = reader.getFooter().getBlocks()
+        assert blocks.size() > 0, f"Parquet file {path} has no row groups"
+        cols = blocks.get(0).getColumns()
+        assert cols.size() > 0, f"Row group 0 in {path} has no column chunks"
+        return cols.get(0).getCodec().name()
+    finally:
+        reader.close()
+
+
+def assert_iceberg_files_use_codec(spark: SparkSession, table_name: str, expected_codec: str,
+                                   files_table: str = "files") -> None:
+    """Assert every Parquet file listed in `{table_name}.{files_table}` uses `expected_codec`.
+    Parquet reports the "uncompressed" Iceberg codec as "UNCOMPRESSED" in the footer."""
+    file_rows = spark.sql(f"SELECT file_path FROM {table_name}.{files_table}").collect()
+    assert len(file_rows) > 0, f"no files found in {table_name}.{files_table}"
+    expected_footer = expected_codec.upper()
+    for row in file_rows:
+        actual = read_parquet_codec(spark, row.file_path)
+        assert actual == expected_footer, \
+            f"expected codec {expected_footer} but file {row.file_path} used {actual}"
 
 
 def create_iceberg_table(table_name: str,

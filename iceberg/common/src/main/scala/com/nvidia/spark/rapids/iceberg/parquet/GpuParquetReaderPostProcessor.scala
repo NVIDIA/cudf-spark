@@ -165,32 +165,42 @@ private[iceberg] case object FetchRowPosition extends ColumnAction {
     val numRows = ctx.numRows
     val rowPoses = new Array[Long](numRows)
     val processor = ctx.processor
-    var curBlockRowCount = processor.parquetInfo.blocks(processor.curBlockIndex).getRowCount
-    var curBlockRowStart =
-      processor.parquetInfo.blocksFirstRowIndices(processor.curBlockIndex)
+
+    // Advance state in locals and commit back to the processor only after fromLongs()
+    // succeeds, so an OOM during column allocation does not leave the processor in a
+    // partially-advanced state. The matching snapshot/restore of these three counters
+    // around the withRetryNoSplit block in process() below covers the full retry scope.
+    var localBlockIndex = processor.curBlockIndex
+    var localProcessedRowCount = processor.processedRowCount
+    var localProcessedBlockRowCounts = processor.processedBlockRowCounts
+
+    var curBlockRowCount = processor.parquetInfo.blocks(localBlockIndex).getRowCount
+    var curBlockRowStart = processor.parquetInfo.blocksFirstRowIndices(localBlockIndex)
     var curBlockRowEnd = curBlockRowStart + curBlockRowCount
-    var curRowPos = curBlockRowStart + processor.processedRowCount -
-      processor.processedBlockRowCounts
+    var curRowPos = curBlockRowStart + localProcessedRowCount - localProcessedBlockRowCounts
 
     for (i <- 0 until numRows) {
       if (curRowPos >= curBlockRowEnd) {
         // switch to next block
-        processor.curBlockIndex += 1
-        processor.processedBlockRowCounts += curBlockRowCount
-        curRowPos = processor.parquetInfo.blocksFirstRowIndices(processor.curBlockIndex)
+        localBlockIndex += 1
+        localProcessedBlockRowCounts += curBlockRowCount
+        curRowPos = processor.parquetInfo.blocksFirstRowIndices(localBlockIndex)
 
-        curBlockRowCount = processor.parquetInfo.blocks(processor.curBlockIndex).getRowCount
-        curBlockRowStart =
-          processor.parquetInfo.blocksFirstRowIndices(processor.curBlockIndex)
+        curBlockRowCount = processor.parquetInfo.blocks(localBlockIndex).getRowCount
+        curBlockRowStart = processor.parquetInfo.blocksFirstRowIndices(localBlockIndex)
         curBlockRowEnd = curBlockRowStart + curBlockRowCount
       }
 
       rowPoses(i) = curRowPos
       curRowPos += 1
-      processor.processedRowCount += 1
+      localProcessedRowCount += 1
     }
 
-    CudfColumnVector.fromLongs(rowPoses: _*)
+    val result = CudfColumnVector.fromLongs(rowPoses: _*)
+    processor.curBlockIndex = localBlockIndex
+    processor.processedRowCount = localProcessedRowCount
+    processor.processedBlockRowCounts = localProcessedBlockRowCounts
+    result
   }
 
   override def display(indent: Int): String = {
@@ -744,7 +754,18 @@ class GpuParquetReaderPostProcessor(
     }
 
     postProcessTimeMetric.ns {
+      // Snapshot the _pos counters before withRetryNoSplit. FetchRowPosition.execute commits
+      // its advance to the processor after fromLongs() succeeds, but a later field action in
+      // the same safeMap iteration (UpCast, FillNull, GpuColumnVector.from, ...) can still
+      // OOM and cause withRetryNoSplit to rerun this whole block. Without a restore, the
+      // retry would see already-advanced counters and produce wrong _pos values.
+      val snapBlockIndex = curBlockIndex
+      val snapProcessedRowCount = processedRowCount
+      val snapProcessedBlockRowCounts = processedBlockRowCounts
       withRetryNoSplit(SpillableColumnarBatch(originalBatch, ACTIVE_ON_DECK_PRIORITY)) { scb =>
+        curBlockIndex = snapBlockIndex
+        processedRowCount = snapProcessedRowCount
+        processedBlockRowCounts = snapProcessedBlockRowCounts
         // getColumnarBatch() returns a batch with refcounts incremented.
         // We MUST close it to balance the refcounts, even if an exception occurs.
         withResource(scb.getColumnarBatch()) { batch =>

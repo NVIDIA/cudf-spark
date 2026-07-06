@@ -253,7 +253,7 @@ def test_get_map_value_supported_keys(data_gen):
         exist_classes="GpuGetMapValue,GpuMapKeys")
 
 
-@allow_non_gpu("ProjectExec")
+@allow_non_gpu("GetMapValue")
 @pytest.mark.parametrize('data_gen', not_supported_get_map_value_keys_map_gens, ids=idfn)
 def test_get_map_value_fallback_keys(data_gen):
     key_gen = data_gen._key_gen

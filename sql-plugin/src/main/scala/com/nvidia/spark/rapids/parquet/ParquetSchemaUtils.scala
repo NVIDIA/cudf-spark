@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -366,12 +366,12 @@ object ParquetSchemaUtils {
       caseSensitive: Boolean,
       useFieldId: Boolean): DataType = {
     val elementType = sparkType.elementType
-    // Unannotated repeated group should be interpreted as required list of required element, so
-    // list element type is just the group itself.
-    // TODO: When we drop Spark 3.1.x, this should use Parquet's LogicalTypeAnnotation
-    //       Note that the original type is not null for leaf nodes.
-    //if (parquetList.getLogicalTypeAnnotation == null &&
-    val newSparkType = if (parquetList.isRepetition(Repetition.REPEATED)) {
+    // Per the Parquet backward-compatibility rules, a REPEATED field is the legacy 1-level list
+    // unless it is LIST- or MAP-annotated. A LIST-annotated REPEATED group must use the wrapper
+    // branch below; routing it through the legacy path throws ClassCastException (#11589, #11592).
+    val newSparkType = if (parquetList.isRepetition(Repetition.REPEATED) &&
+        parquetList.getOriginalType != OriginalType.LIST &&
+        parquetList.getOriginalType != OriginalType.MAP) {
       clipSparkType(elementType, parquetList, caseSensitive, useFieldId)
     } else {
       val parquetListGroup = parquetList.asGroupType()

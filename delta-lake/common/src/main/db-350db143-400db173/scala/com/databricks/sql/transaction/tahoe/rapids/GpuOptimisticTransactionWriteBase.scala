@@ -63,6 +63,7 @@ import org.apache.spark.util.{Clock, SerializableConfiguration}
  * This class is not thread-safe.
  *
  * @param deltaLog The Delta Log for the table this transaction is modifying.
+ * @param catalogTable catalog table for commit routing.
  * @param snapshot The snapshot that this transaction is reading at.
  * @param rapidsConf RAPIDS Accelerator config settings.
  */
@@ -78,6 +79,13 @@ abstract class GpuOptimisticTransactionWriteBase(
    * @param deltaLog   The Delta Log for the table this transaction is modifying.
    * @param rapidsConf RAPIDS Accelerator config settings
    */
+  def this(
+      deltaLog: DeltaLog,
+      snapshot: Snapshot,
+      rapidsConf: RapidsConf)(implicit clock: Clock) = {
+    this(deltaLog, Option.empty[CatalogTable], snapshot, rapidsConf)
+  }
+
   def this(deltaLog: DeltaLog, rapidsConf: RapidsConf)(implicit clock: Clock) = {
     this(deltaLog, Option.empty[CatalogTable], deltaLog.update(), rapidsConf)
   }

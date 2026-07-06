@@ -132,6 +132,12 @@
       "rule": "Verify dependency version alignment across all build profiles and shaded JAR consistency.",
       "scope": ["pom.xml", "**/pom.xml", "build/**"],
       "severity": "medium"
+    },
+    {
+      "id": "databricks-ci-tag",
+      "rule": "Databricks pre-merge CI auto-runs only when the diff touches a 'sql-plugin/src/main/...db/' shim dir or a path containing 'databricks'. The Databricks pre-merge builds with -DskipTests and runs only the Python integration tests (run_pyspark_from_build.sh); Scala unit tests are never executed on Databricks, so the '[databricks]' tag is only meaningful for integration_tests/** changes (hence this rule's scope). For an integration test or its utilities that could behave differently on Databricks — filesystem/path semantics (local vs DBFS/abfss, file:// scheme, os.walk/os.path.getsize), or optimizer/plan-string assertions (alias names and plan rendering differ on DBR) — where the PR title lacks the '[databricks]' tag, recommend adding it (or confirming Databricks coverage another way), because the standard Linux pre-merge does not run Databricks and DBR-only failures will otherwise surface later on an unrelated PR. Do NOT flag changes that already touch a *db* shim path (auto-covered) or doc-only changes.",
+      "scope": ["integration_tests/**"],
+      "severity": "medium"
     }
   ]
 }

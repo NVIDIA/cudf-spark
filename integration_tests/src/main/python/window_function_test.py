@@ -1373,7 +1373,7 @@ def test_percent_rank_single_part_multiple_batches():
                 'spark.sql.adaptive.enabled': 'false'})
 
 @pytest.mark.skipif(is_before_spark_320(), reason="Only in Spark 3.2.0 is IGNORE NULLS supported for lead and lag by Spark")
-@allow_non_gpu('WindowExec', 'Alias', 'WindowExpression', 'Lead', 'Literal', 'WindowSpecDefinition', 'SpecifiedWindowFrame', *non_utc_allow)
+@allow_non_gpu('WindowExec', 'Alias', 'WindowExpression', 'Lead', 'WindowSpecDefinition', 'SpecifiedWindowFrame', *non_utc_allow)
 @ignore_order(local=True)
 @pytest.mark.parametrize('d_gen', all_basic_gens, ids=meta_idfn('agg:'))
 @pytest.mark.parametrize('c_gen', [UniqueLongGen()], ids=meta_idfn('orderBy:'))
@@ -1399,7 +1399,7 @@ def test_window_aggs_lead_ignore_nulls_fallback(a_gen, b_gen, c_gen, d_gen):
     conf={'spark.sql.adaptive.enabled': 'false'})
 
 @pytest.mark.skipif(is_before_spark_320(), reason="Only in Spark 3.2.0 is IGNORE NULLS supported for lead and lag by Spark")
-@allow_non_gpu('WindowExec', 'Alias', 'WindowExpression', 'Lag', 'Literal', 'WindowSpecDefinition', 'SpecifiedWindowFrame', *non_utc_allow)
+@allow_non_gpu('WindowExec', 'Alias', 'WindowExpression', 'Lag', 'WindowSpecDefinition', 'SpecifiedWindowFrame', *non_utc_allow)
 @ignore_order(local=True)
 @pytest.mark.parametrize('d_gen', all_basic_gens, ids=meta_idfn('agg:'))
 @pytest.mark.parametrize('c_gen', [UniqueLongGen()], ids=meta_idfn('orderBy:'))
@@ -1998,7 +1998,7 @@ def test_window_aggs_for_rows_collect_set_nested_array():
 # Arrays and struct of struct (more than single level nesting) are not supported
 @pytest.mark.parametrize('part_gen', [ArrayGen(long_gen), StructGen([["a", StructGen([["a1", long_gen]])]])], ids=meta_idfn('partBy:'))
 # For arrays the sort and hash partition are also not supported
-@allow_non_gpu('WindowExec', 'Alias', 'WindowExpression', 'AggregateExpression', 'Count', 'WindowSpecDefinition', 'SpecifiedWindowFrame', 'Literal', 'SortExec', 'SortOrder', 'ShuffleExchangeExec', 'HashPartitioning')
+@allow_non_gpu('WindowExec', 'Alias', 'WindowExpression', 'AggregateExpression', 'Count', 'WindowSpecDefinition', 'SpecifiedWindowFrame', 'SortExec', 'SortOrder', 'ShuffleExchangeExec', 'HashPartitioning')
 def test_nested_part_fallback(part_gen):
     data_gen = [
             ('a', RepeatSeqGen(part_gen, length=20)),

@@ -879,12 +879,21 @@ def test_parquet_input_meta_fallback(spark_tmp_path, v1_enabled_list, reader_con
                         'input_file_block_length()'),
             conf=all_confs)
 
+# More buckets reduce per-task CPU sort pressure. Both sides must use the same
+# bucket count so Spark can still use the bucketed join path.
+_BUCKET_TEST_NUM_BUCKETS = 8
+_BUCKET_TEST_LEFT_ROWS = 100_000
+_BUCKET_TEST_RIGHT_ROWS = 1_000_000
+
 def createBucketedTableAndJoin(spark, tbl_1, tbl_2):
-    spark.range(10e4).write.bucketBy(4, "id").sortBy("id").mode('overwrite').saveAsTable(tbl_1)
-    spark.range(10e6).write.bucketBy(4, "id").sortBy("id").mode('overwrite').saveAsTable(tbl_2)
-    bucketed_4_10e4 = spark.table(tbl_1)
-    bucketed_4_10e6 = spark.table(tbl_2)
-    return bucketed_4_10e4.join(bucketed_4_10e6, "id")
+    # Keep this large enough to exercise bucketed joins, while reducing CPU-side sort pressure.
+    (spark.range(_BUCKET_TEST_LEFT_ROWS).write.bucketBy(_BUCKET_TEST_NUM_BUCKETS, "id")
+        .sortBy("id").mode('overwrite').saveAsTable(tbl_1))
+    (spark.range(_BUCKET_TEST_RIGHT_ROWS).write.bucketBy(_BUCKET_TEST_NUM_BUCKETS, "id")
+        .sortBy("id").mode('overwrite').saveAsTable(tbl_2))
+    bucketed_left = spark.table(tbl_1)
+    bucketed_right = spark.table(tbl_2)
+    return bucketed_left.join(bucketed_right, "id")
 
 @ignore_order
 @allow_non_gpu('DataWritingCommandExec,ExecutedCommandExec,WriteFilesExec')
@@ -981,21 +990,28 @@ def test_parquet_interleaved_file_splits_partition_value_alignment(
 
     with_cpu_session(setup_table, conf=write_conf)
 
-    parquet_files_by_part = {}
-    for root, _, files in os.walk(data_path):
-        parquet_files = [os.path.join(root, f) for f in files if f.endswith(".parquet")]
-        if parquet_files:
-            parquet_files_by_part[os.path.basename(root)] = parquet_files
+    def parquet_file_info_by_part(spark):
+        rows = spark.read.parquet(data_path).selectExpr(
+            "p",
+            "named_struct('file_path', _metadata.file_path, "
+            "'file_size', _metadata.file_size) AS file_info") \
+            .groupBy("p") \
+            .agg(collect_set("file_info").alias("files")) \
+            .collect()
+        return {
+            f"p={row['p']}": [(file["file_path"], file["file_size"]) for file in row["files"]]
+            for row in rows
+        }
+
+    parquet_files_by_part = with_cpu_session(parquet_file_info_by_part)
 
     assert sorted(parquet_files_by_part.keys()) == ["p=1", "p=2"], \
         f"Expected parquet files under p=1 and p=2, got {parquet_files_by_part}"
     assert len(parquet_files_by_part["p=1"]) == 1, parquet_files_by_part["p=1"]
     assert len(parquet_files_by_part["p=2"]) == 1, parquet_files_by_part["p=2"]
 
-    a_path = parquet_files_by_part["p=1"][0]
-    b_path = parquet_files_by_part["p=2"][0]
-    a_size = os.path.getsize(a_path)
-    b_size = os.path.getsize(b_path)
+    a_path, a_size = parquet_files_by_part["p=1"][0]
+    b_path, b_size = parquet_files_by_part["p=2"][0]
     a_tail = a_size % max_split
     assert a_size > max_split, \
         f"File A ({a_size}) must exceed max_split ({max_split}) to split"

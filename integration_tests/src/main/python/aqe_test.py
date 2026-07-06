@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,7 +20,7 @@ from conftest import is_databricks_runtime, is_not_utc
 from data_gen import *
 from spark_session import is_spark_400_or_later
 from marks import ignore_order, allow_non_gpu
-from spark_session import with_cpu_session, is_databricks113_or_later, is_before_spark_330, is_databricks_version_or_later
+from spark_session import with_cpu_session, is_databricks113_or_later, is_before_spark_330, is_databricks_version, is_databricks_version_or_later
 
 # allow non gpu when time zone is non-UTC because of https://github.com/NVIDIA/spark-rapids/issues/9653'
 not_utc_aqe_allow=['ShuffleExchangeExec', 'HashAggregateExec'] if is_not_utc() else []
@@ -169,7 +169,10 @@ def test_aqe_broadcast_join_non_columnar_child(spark_tmp_path):
             """
         )
 
-    conf = copy_and_update(_adaptive_conf, { 'spark.rapids.sql.expression.Concat': 'false' })
+    # Disable the CPU Bridge because the test wants to know what happens when ProjectExec falls back to CPU
+    # Not what happens when the bridge falls back an expression.
+    conf = copy_and_update(_adaptive_conf, { 'spark.rapids.sql.expression.Concat': 'false',
+        'spark.rapids.sql.expression.cpuBridge.enabled': 'false' })
 
     if is_databricks113_or_later():
         assert_cpu_and_gpu_are_equal_collect_with_capture(do_it, exist_classes="GpuShuffleExchangeExec",conf=conf)
@@ -337,6 +340,73 @@ def test_aqe_join_executor_broadcast_enforce_single_batch():
         non_exist_classes="GpuBroadcastExchangeExec",
         conf=conf)
 
+
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_databricks_runtime(),
+    reason="Executor side broadcast only supported on Databricks")
+def test_aqe_bhj_executor_broadcast_shuffle_coalesce_with_residual_condition(spark_tmp_path):
+    from datetime import datetime
+    from decimal import Decimal
+
+    conf = copy_and_update(_adaptive_conf, {
+        "spark.rapids.sql.exec.BroadcastHashJoinExec": "true",
+        "spark.sql.shuffle.partitions": "32",
+        "spark.sql.autoBroadcastJoinThreshold": str(10 * 1024 * 1024),
+        "spark.sql.adaptive.autoBroadcastJoinThreshold": str(10 * 1024 * 1024),
+    })
+    left_path = spark_tmp_path + '/left'
+    right_path = spark_tmp_path + '/right'
+
+    # Keep each composite join key duplicated with different ids. Self-matches
+    # are removed by the residual id predicate, while cross-pair matches remain.
+    rows = [
+        (1, True, 99.99, Decimal("150.50"), datetime(2024, 1, 15, 10, 30, 0)),
+        (2, True, 99.99, Decimal("150.50"), datetime(2024, 1, 15, 10, 30, 0)),
+        (3, False, 199.99, Decimal("250.75"), datetime(2024, 2, 20, 14, 45, 30)),
+        (5, False, 199.99, Decimal("250.75"), datetime(2024, 2, 20, 14, 45, 30)),
+        (8, True, 299.99, Decimal("350.25"), datetime(2024, 3, 10, 9, 15, 45)),
+        (13, True, 299.99, Decimal("350.25"), datetime(2024, 3, 10, 9, 15, 45)),
+    ]
+    schema = StructType([
+        StructField("id", IntegerType(), True),
+        StructField("is_active", BooleanType(), True),
+        StructField("price", DoubleType(), True),
+        StructField("amount", DecimalType(10, 2), True),
+        StructField("created_at", TimestampType(), True),
+    ])
+
+    def prep(spark):
+        df = spark.createDataFrame(rows, schema)
+        df.write.mode("overwrite").parquet(left_path)
+        df.write.mode("overwrite").parquet(right_path)
+
+    with_cpu_session(prep)
+
+    def do_it(spark):
+        spark.read.parquet(left_path).createOrReplaceTempView("C_TABLE")
+        spark.read.parquet(right_path).createOrReplaceTempView("G_TABLE")
+        return spark.sql("""
+            SELECT C_TABLE.*, G_TABLE.*
+            FROM C_TABLE
+            INNER JOIN G_TABLE
+              ON C_TABLE.is_active  = G_TABLE.is_active
+             AND C_TABLE.price      = G_TABLE.price
+             AND C_TABLE.amount     = G_TABLE.amount
+             AND C_TABLE.created_at = G_TABLE.created_at
+            WHERE ABS(IFNULL(C_TABLE.id, 10) - IFNULL(G_TABLE.id, 10)) > 1e-09
+        """)
+
+    exist_classes = "GpuBroadcastHashJoinExec"
+    if is_databricks_version(14, 3):
+        exist_classes += ",GpuShuffleCoalesceExec"
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it,
+        exist_classes=exist_classes,
+        non_exist_classes="GpuBroadcastExchangeExec",
+        conf=conf,
+        require_non_empty=True)
+
 # This test relies on the join not being on the GPU because a join on an array is not
 # currently supported. This causes the join to fall back to the CPU, and with AQE the
 # broadcast needs to also fall back to the CPU, but it does not always with AQE
@@ -360,7 +430,7 @@ def test_aqe_join_and_agg_single_value():
     assert_gpu_and_cpu_are_equal_collect(lambda spark: spark.sql(test_query), conf=_adaptive_conf)
 
 # this should be fixed by https://github.com/NVIDIA/spark-rapids/issues/11120
-aqe_join_with_dpp_fallback=["FilterExec"] if (is_databricks_runtime() or is_before_spark_330()) else []
+aqe_join_with_dpp_fallback=["FilterExec", "InSubqueryExec"] if (is_databricks_runtime() or is_before_spark_330()) else []
 if is_databricks_version_or_later(14, 3):
     aqe_join_with_dpp_fallback.append("CollectLimitExec")
 

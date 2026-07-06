@@ -28,7 +28,8 @@ from marks import (allow_non_gpu, approximate_float, datagen_overrides, disable_
                    ignore_order, inject_oom, validate_execs_in_gpu_plan)
 from spark_session import (
     with_cpu_session, with_gpu_session, is_before_spark_330, is_before_spark_340,
-    is_before_spark_400, is_databricks113_or_later)
+    is_before_spark_400, is_databricks113_or_later, is_spark_403,
+    is_spark_412_or_later)
 from conftest import is_libcudf_jit_available, get_libcudf_jit_unavailable_reason
 import pyspark.sql.functions as f
 from pyspark.sql.types import (BooleanType, ByteType, DecimalType, DoubleType, FloatType,
@@ -74,6 +75,9 @@ ast_descrs = [
 
 ast_boolean_descr = [(boolean_gen, True)]
 ast_double_descr = [(double_gen, True)]
+# AST is not expressive enough to support the ACOSH Spark emulation expression in Spark 4.0.3
+# and Spark 4.1.2+.
+ast_acosh_descr = [(double_gen, not (is_spark_403() or is_spark_412_or_later()))]
 
 _project_ast_enabled_conf = {"spark.rapids.sql.projectAstEnabled": "true"}
 _jit_ast_enabled_conf = {
@@ -289,7 +293,7 @@ def test_asinh(data_descr):
     assert_unary_ast(data_descr, lambda df: df.selectExpr('asinh(a)'))
 
 @approximate_float
-@pytest.mark.parametrize('data_descr', ast_double_descr, ids=idfn)
+@pytest.mark.parametrize('data_descr', ast_acosh_descr, ids=idfn)
 def test_acosh(data_descr):
     assert_unary_ast(data_descr, lambda df: df.selectExpr('acosh(a)'))
 

@@ -18,6 +18,7 @@ package com.nvidia.spark.rapids.iceberg;
 
 import com.nvidia.spark.rapids.GpuMetric;
 import com.nvidia.spark.rapids.NoopMetric$;
+import com.nvidia.spark.rapids.RapidsConf;
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
 import org.apache.hadoop.fs.Path;
 import org.apache.iceberg.ContentFile;
@@ -28,6 +29,8 @@ import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.parquet.GpuParquetIO;
 import org.apache.iceberg.shaded.org.apache.parquet.ParquetReadOptions;
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader;
+import org.apache.iceberg.spark.source.GpuSparkScan;
+import org.apache.spark.sql.connector.read.Scan;
 import scala.Option;
 
 import java.io.IOException;
@@ -98,4 +101,18 @@ public interface IcebergShimUtils {
         missCounter.$plus$eq(1L);
         return ParquetFileReader.open(GpuParquetIO.file(inputFile.getDelegate()), options);
     }
+
+    /**
+     * Constructs the version-appropriate {@code GpuSparkCopyOnWriteScan} subclass.
+     *
+     * <p>Iceberg 1.6.x, 1.9.x, and 1.10.x have {@code SparkCopyOnWriteScan}
+     * implementing {@code SupportsRuntimeFiltering} with {@code filter(Filter[])};
+     * Iceberg 1.11.x switched to {@code SupportsRuntimeV2Filtering} with
+     * {@code filter(Predicate[])}. The concrete class therefore differs per Iceberg
+     * version and is constructed here rather than directly in common code.
+     */
+    GpuSparkScan newCopyOnWriteScan(
+            Scan cpuScan,
+            RapidsConf rapidsConf,
+            boolean queryUsesInputFile);
 }

@@ -482,7 +482,8 @@ def test_buckets_write_correctness(spark_tmp_path, spark_tmp_table_factory):
         cur_bucket_id += 1
 
 @ignore_order(local=True)
-@allow_non_gpu('DataWritingCommandExec,ExecutedCommandExec,WriteFilesExec, SortExec')
+@allow_non_gpu('DataWritingCommandExec','ExecutedCommandExec','WriteFilesExec', 'SortExec', 
+  'Murmur3Hash', 'CollationAwareMurmur3Hash')
 def test_buckets_write_fallback_unsupported_types(spark_tmp_path, spark_tmp_table_factory):
     data_path = spark_tmp_path + '/PARQUET_DATA'
     gen_list = [["id", binary_gen], ["data", long_gen]]

@@ -78,11 +78,8 @@ pipeline {
         ART_CREDS = credentials("urm_creds")
         ARTIFACTORY_NAME = "${common.ARTIFACTORY_NAME}"
 
-        PVC = credentials("pvc")
         CUSTOM_WORKSPACE = "/home/jenkins/agent/workspace/${BUILD_TAG}"
         CLASSIFIER = 'cuda12'
-        PVC_MOUNT_PATH = "/pvc"
-        PVC_WORKSPACE = "/pvc/workspace/${BUILD_TAG}"
     }
 
     stages {
@@ -186,7 +183,7 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                         kubernetes {
                             label "premerge-ci-1-${BUILD_TAG}"
                             cloud "${common.CLOUD_NAME}"
-                            yaml pod.getGPUYAMLwithVolume("${IMAGE_PREMERGE}", "${env.GPU_RESOURCE}", "${PVC}", "${PVC_MOUNT_PATH}", '8', '32Gi')
+                            yaml pod.getGPUYAML("${IMAGE_PREMERGE}", "${env.GPU_RESOURCE}", '8', '32Gi')
                             customWorkspace "${CUSTOM_WORKSPACE}"
                         }
                     }
@@ -208,11 +205,11 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                                               sourcePattern         : sourcePattern
                                         ])
                                     } catch(e) {
-                                        common.syncDir(this, "${env.CUSTOM_WORKSPACE}", "${env.PVC_WORKSPACE}", false, ['.m2/'])
+                                        common.printJVMCoreDumps(this)
+                                        common.uploadDebugBundle(this, 'spark-rapids', 'mvn-verify')
                                         throw e
                                     } finally {
                                         common.publishPytestResult(this, "${STAGE_NAME}")
-                                        common.printJVMCoreDumps(this)
                                     }
                                 }
                             }
@@ -228,7 +225,7 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                         kubernetes {
                             label "premerge-ci-2-${BUILD_TAG}"
                             cloud "${common.CLOUD_NAME}"
-                            yaml pod.getGPUYAMLwithVolume("${IMAGE_PREMERGE}", "${env.GPU_RESOURCE}", "${PVC}", "${PVC_MOUNT_PATH}", '8', '32Gi')
+                            yaml pod.getGPUYAML("${IMAGE_PREMERGE}", "${env.GPU_RESOURCE}", '8', '32Gi')
                             customWorkspace "${CUSTOM_WORKSPACE}-ci-2" // Use different workspace to avoid conflict with IT
                         }
                     }
@@ -244,11 +241,11 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                                         common.prepareArtNetrc(this)
                                         sh "$PREMERGE_SCRIPT ci_2"
                                     } catch(e) {
-                                        common.syncDir(this, "${env.CUSTOM_WORKSPACE}-ci-2", "${env.PVC_WORKSPACE}-ci-2", false, ['.m2/'])
+                                        common.printJVMCoreDumps(this)
+                                        common.uploadDebugBundle(this, 'spark-rapids', 'ci-2')
                                         throw e
                                     } finally {
                                         common.publishPytestResult(this, "${STAGE_NAME}")
-                                        common.printJVMCoreDumps(this)
                                     }
                                 }
                             }
@@ -264,7 +261,7 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                         kubernetes {
                             label "ci-scala213-${BUILD_TAG}"
                             cloud "${common.CLOUD_NAME}"
-                            yaml pod.getGPUYAMLwithVolume("${IMAGE_PREMERGE}", "${env.GPU_RESOURCE}", "${PVC}", "${PVC_MOUNT_PATH}", '8', '32Gi')
+                            yaml pod.getGPUYAML("${IMAGE_PREMERGE}", "${env.GPU_RESOURCE}", '8', '32Gi')
                             customWorkspace "${CUSTOM_WORKSPACE}-scala-213" // Use different workspace to avoid conflict with IT
                         }
                     }
@@ -280,11 +277,11 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                                         common.prepareArtNetrc(this)
                                         sh "$PREMERGE_SCRIPT ci_scala213"
                                     } catch(e) {
-                                        common.syncDir(this, "${env.CUSTOM_WORKSPACE}-scala-213", "${env.PVC_WORKSPACE}-scala-213", false, ['.m2/'])
+                                        common.printJVMCoreDumps(this)
+                                        common.uploadDebugBundle(this, 'spark-rapids', 'scala-213')
                                         throw e
                                     } finally {
                                         common.publishPytestResult(this, "${STAGE_NAME}")
-                                        common.printJVMCoreDumps(this)
                                     }
                                 }
                             }

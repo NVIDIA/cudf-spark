@@ -285,7 +285,7 @@ object ShimLoader {
         s"This RAPIDS Plugin build does not support Spark build ${sparkVersion}. " +
           s"Supported Spark versions: ${supportedVersions}. " +
           "Consult the Release documentation at " +
-          "https://nvidia.github.io/spark-rapids/docs/download.html")
+          "https://nvidia.github.io/cudf-spark/docs/download.html")
     }
   }
 

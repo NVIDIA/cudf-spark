@@ -26,7 +26,7 @@ import com.nvidia.spark.rapids.iceberg.parquet.{
   SingleFile,
   ThreadConf
 }
-import org.apache.iceberg.{FileFormat, MetadataColumns, ScanTask, ScanTaskGroup}
+import org.apache.iceberg.{FileFormat, MetadataColumns}
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.read.{InputPartition, PartitionReader, PartitionReaderFactory}
@@ -65,10 +65,8 @@ class GpuReaderFactory(private val metrics: Map[String, GpuMetric],
   override def supportColumnarReads(partition: InputPartition) = true
 
   private def calcThreadConf(partition: GpuSparkInputPartition): ThreadConf = {
-    val scans = partition
-      .cpuPartition
-      .taskGroup()
-      .asInstanceOf[ScanTaskGroup[ScanTask]]
+    val scans = GpuSparkScanAccess
+      .taskGroup(partition.cpuPartition)
       .tasks
       .asScala
       .map(_.asFileScanTask())
@@ -88,7 +86,15 @@ class GpuReaderFactory(private val metrics: Map[String, GpuMetric],
       }
 
       val canUseMultiThread = canUseParquetMultiThread
-      val canUseCoalescing = canUseParquetCoalescing && hasNoDeletes && !queryUsesInputFile
+      // `_pos` must be file-global. The coalescing reader's parent
+      // (MultiFileCoalescingPartitionReaderBase.populateCurrentBlockChunk) can merge blocks
+      // from multiple Iceberg splits of the same physical Parquet file into one chunk and
+      // finalize the whole chunk with the first split's per-file post-processor, which
+      // would emit wrong `_pos` for any rows past the first split. Route `_pos`-projecting
+      // scans to the multi-thread/single-file readers instead — those finalize batches per
+      // `IcebergPartitionedFile`, so each split's own post-processor handles its own rows.
+      val canUseCoalescing = canUseParquetCoalescing && hasNoDeletes && !queryUsesInputFile &&
+        !hasRowPositionMetadata
 
       val files = scans.map(s => locationOf(s.file)).toArray
 

@@ -502,7 +502,8 @@ def assert_gpu_fallback_write_sql(write_func,
 def assert_cpu_and_gpu_are_equal_collect_with_capture(func,
         exist_classes='',
         non_exist_classes='',
-        conf={}):
+        conf={},
+        require_non_empty=False):
     (bring_back, collect_type) = _prep_func_for_compare(func, 'COLLECT_WITH_DATAFRAME')
 
     conf = _prep_incompat_conf(conf)
@@ -511,6 +512,8 @@ def assert_cpu_and_gpu_are_equal_collect_with_capture(func,
     cpu_start = time.time()
     from_cpu, cpu_df = with_cpu_session(bring_back, conf=conf)
     cpu_end = time.time()
+    if require_non_empty:
+        assert len(from_cpu) > 0, "Expected non-empty result"
     print('### GPU RUN ###')
     gpu_start = time.time()
     from_gpu, gpu_df = with_gpu_session(bring_back, conf=conf)

@@ -352,16 +352,22 @@ object RapidsDeletionVectors extends Logging {
     }
   }
 
-  def getRowGroupMetadata(blocks: collection.Seq[BlockMetaData]): (Array[Long], Array[Int]) = {
-    val rowGroupOffsets = blocks.map(_.getRowIndexOffset)
-    if (rowGroupOffsets.exists(_ < 0)) {
-      throw new IllegalStateException("Found invalid row group offset")
+  def getRowGroupMetadata(blocks: collection.Seq[BlockMetaData]): (Array[Long], Array[Int]) =
+    RapidsDeletionVectorRowCountUtils.getRowGroupMetadata(blocks)
+
+  /**
+   * Computes the number of deleted rows within the given row ranges in the bitmap.
+   */
+  def countDeletedRows(
+      scalaBitmap: RoaringBitmapArray,
+      rowGroupOffsets: Array[Long],
+      rowGroupNumRows: Array[Int]): Long = {
+    RapidsDeletionVectorRowCountUtils.countDeletedRows(
+      scalaBitmap.cardinality, rowGroupOffsets, rowGroupNumRows) { countDeletedRow =>
+        scalaBitmap.forEach { deletedIndex: Long =>
+          countDeletedRow(deletedIndex)
+        }
     }
-    val rowGroupNumRows = blocks.map(_.getRowCount)
-    if (rowGroupNumRows.exists(numRows => !numRows.isValidInt)) {
-      throw new IllegalStateException("Found invalid row group num rows")
-    }
-    (rowGroupOffsets.toArray, rowGroupNumRows.map(_.toInt).toArray)
   }
 
   /**

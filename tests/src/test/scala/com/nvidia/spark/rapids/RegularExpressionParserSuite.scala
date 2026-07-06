@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -283,6 +283,19 @@ class RegularExpressionParserSuite extends AnyFunSuite {
     RegexChar('$'))))
   }
   
+  test("replacement: numeric braced backref rejected (Java spec)") {
+    val brace = "$" + "{"
+    val cases = Seq(s"[${brace}2}]", s"${brace}1}", s"${brace}12}",
+        s"a${brace}3}b", s"${brace}0}")
+    for (rep <- cases) {
+      val e = intercept[RegexUnsupportedException] {
+        new RegexParser(rep).parseReplacement(4)
+      }
+      assert(e.getMessage.contains("backref in replacement string is not supported"),
+        s"unexpected message for replacement '$rep': ${e.getMessage}")
+    }
+  }
+
   private def parse(pattern: String): RegexAST = {
     new RegexParser(pattern).parse()
   }

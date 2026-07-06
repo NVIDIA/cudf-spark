@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -55,7 +55,16 @@ class GpuRegExpReplaceMeta(
           val (pat, repl) =
               new CudfRegexTranspiler(RegexReplaceMode).getTranspiledAST(s.toString, None,
                   replacement)
-          repl.map { r => GpuRegExpUtils.backrefConversion(r.toRegexString) }.foreach {
+          // Use the user's Java pattern group count for the greedy-with-backoff parse so that
+          // user-authored backref tokens (e.g. `$13` on a 12-group pattern) follow Java's
+          // `Matcher.appendReplacement` spec. Backrefs already emitted in braced `${N}` form
+          // are treated as resolved by the replacement AST and do not need to be covered by
+          // the user pattern's group count.
+          val userNumCaptureGroups =
+            java.util.regex.Pattern.compile(s.toString).matcher("").groupCount()
+          repl.map { r =>
+            GpuRegExpUtils.backrefConversion(r.toRegexString, userNumCaptureGroups)
+          }.foreach {
               case (hasBackref, convertedRep) =>
                 containsBackref = hasBackref
                 replacement = Some(GpuRegExpUtils.unescapeReplaceString(convertedRep))
@@ -69,7 +78,6 @@ class GpuRegExpReplaceMeta(
                   replaceOpt = Some(GpuRegExpStringReplaceMulti)
                 case _ =>
                   GpuRegExpUtils.tagForRegExpEnabled(this)
-                  GpuRegExpUtils.validateRegExpComplexity(this, pat)
                   cudfPattern = Some(pat.toRegexString)
               }
           }

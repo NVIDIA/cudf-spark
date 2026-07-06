@@ -24,7 +24,7 @@ import com.nvidia.spark.rapids.shims.InvalidateCacheShims
 import org.apache.hadoop.fs.Path
 
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.catalyst.expressions.{AttributeReference, EqualTo, Expression, Literal}
+import org.apache.spark.sql.catalyst.expressions.{And, AttributeReference, EqualTo, Expression, Literal}
 import org.apache.spark.sql.delta.{DeltaLog, DeltaParquetFileFormat}
 import org.apache.spark.sql.delta.DeltaParquetFileFormat.IS_ROW_DELETED_COLUMN_NAME
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
@@ -138,14 +138,14 @@ abstract class DeltaProviderBase extends DeltaIOProvider {
       InvalidateCacheShims.getInvalidateCache(cpuExec.invalidateCache))
   }
 
-  override def canPushDVPredicateDownToScan(conf: RapidsConf): Boolean = {
+  override def isPushDVPredicateDownEnabled(conf: RapidsConf): Boolean = {
     val dvConf = DeltaSQLConf.DELETION_VECTORS_USE_METADATA_ROW_INDEX
     val useMetadataRowIndex = conf.getStr(dvConf.key)
       .getOrElse(dvConf.defaultValueString).toBoolean
     useMetadataRowIndex && conf.isDeltaDeletionVectorPredicatePushdownEnabled
   }
 
-  override def pushDVPredicateDownToScan(plan: SparkPlan): SparkPlan = {
+  override def tryPushDVPredicateDownToScan(plan: SparkPlan): SparkPlan = {
     val pushed = DVPredicatePushdown.pushToScan(plan)
 
     // Spark often generates a plan that looks like below for deletion vector scans:
@@ -163,6 +163,18 @@ abstract class DeltaProviderBase extends DeltaIOProvider {
   }
 
   override def pruneFileMetadata(plan: SparkPlan): SparkPlan = {
+    def pruneMetadataProject(
+        project: GpuProjectExec,
+        scan: GpuFileSourceScanExec): SparkPlan = {
+      project.copy(projectList = project.projectList.filterNot(_.name == "_metadata"))
+        .withNewChildren(Seq(
+          scan.copy(
+            originalOutput = scan.originalOutput.filterNot(_.name == "_tmp_metadata_row_index"),
+            requiredSchema = StructType(
+              scan.requiredSchema.filterNot(_.name == "_tmp_metadata_row_index")
+            ))(scan.rapidsConf)))
+    }
+
     plan match {
       // This logic is a special case of eliminating of unused columns.
       //
@@ -186,14 +198,30 @@ abstract class DeltaProviderBase extends DeltaIOProvider {
           inputList.exists(_.name == "_metadata") =>
         dvRoot.withNewChildren(Seq(
           dvFilter.withNewChildren(Seq(
-            dvFilterInput.copy(projectList = inputList.filterNot(_.name == "_metadata"))
-              .withNewChildren(Seq(
-                fsse.copy(
-                  originalOutput =
-                    fsse.originalOutput.filterNot(_.name == "_tmp_metadata_row_index"),
-                  requiredSchema = StructType(
-                    fsse.requiredSchema.filterNot(_.name == "_tmp_metadata_row_index")
-                  ))(fsse.rapidsConf)))))))
+            pruneMetadataProject(dvFilterInput, fsse)))))
+      // Defensive match for a CPU FilterExec shape before GPU/CPU transitions are inserted.
+      case dvRoot @ GpuProjectExec(outputList,
+      dvFilter @ FilterExec(condition,
+      dvFilterInput @ GpuProjectExec(inputList, fsse: GpuFileSourceScanExec, _)), _)
+        if condition.references.exists(_.name == IS_ROW_DELETED_COLUMN_NAME) &&
+          !outputList.flatMap(_.references).exists(_.name == "_metadata") &&
+          inputList.exists(_.name == "_metadata") =>
+        dvRoot.withNewChildren(Seq(
+          dvFilter.withNewChildren(Seq(
+            pruneMetadataProject(dvFilterInput, fsse)))))
+      case dvRoot @ GpuProjectExec(outputList,
+      rowToCol @ RowToColumnarExec(
+      dvFilter @ FilterExec(condition,
+      colToRow @ ColumnarToRowExec(
+      dvFilterInput @ GpuProjectExec(inputList, fsse: GpuFileSourceScanExec, _)))), _)
+        if condition.references.exists(_.name == IS_ROW_DELETED_COLUMN_NAME) &&
+          !outputList.flatMap(_.references).exists(_.name == "_metadata") &&
+          inputList.exists(_.name == "_metadata") =>
+        dvRoot.withNewChildren(Seq(
+          rowToCol.withNewChildren(Seq(
+            dvFilter.withNewChildren(Seq(
+              colToRow.withNewChildren(Seq(
+                pruneMetadataProject(dvFilterInput, fsse)))))))))
       case _ =>
         plan.withNewChildren(plan.children.map(pruneFileMetadata))
     }
@@ -218,6 +246,14 @@ abstract class DeltaProviderBase extends DeltaIOProvider {
 }
 
 object DVPredicatePushdown extends ShimPredicateHelper {
+
+  def hasNativeDeletionVectorGpuScan(plan: SparkPlan): Boolean = {
+    plan.exists {
+      case fsse: GpuFileSourceScanExec =>
+        fsse.relation.fileFormat.isInstanceOf[GpuDeltaParquetFileFormatBase2]
+      case _ => false
+    }
+  }
 
   /**
    * Pushes down deletion vector predicates to scan level by removing them from the FilterExec.
@@ -277,35 +313,70 @@ object DVPredicatePushdown extends ShimPredicateHelper {
       }
     }
 
+    /**
+     * Removes DV predicates from the filter condition and, when safe, prunes the
+     * [[IS_ROW_DELETED_COLUMN_NAME]] column from the child plan.
+     *
+     * DV predicates are dropped from the returned predicate list only when the filter child
+     * contains a native deletion-vector GPU scan. Pruning the column from the child is safe
+     * only when no other predicate in the condition also reads [[IS_ROW_DELETED_COLUMN_NAME]].
+     *
+     * Returns a pair of:
+     *   - `Some(newChild)` with [[IS_ROW_DELETED_COLUMN_NAME]] pruned from the subtree, or
+     *     `None` if column pruning is not safe (the caller should use the original child)
+     *   - the remaining predicates that the caller should re-attach as a new filter
+     *     (empty if the entire condition consisted of pushed deletion-vector predicates)
+     */
+    def pruneDvPredicate(
+        condition: Expression,
+        child: SparkPlan): (Option[SparkPlan], Seq[Expression]) = {
+      // Decompose the condition into CNF
+      val conjuncts = splitConjunctivePredicates(condition)
+      // the dv condition should be "IS_ROW_DELETED_COLUMN_NAME == 0"
+      val (dvPredicate, otherPredicates) = conjuncts.partition { predicate =>
+        predicate.references.size == 1 &&
+          predicate.references.exists(_.name == IS_ROW_DELETED_COLUMN_NAME) &&
+          isDVCondition(predicate)
+      }
+
+      val otherPredicatesReadingIsRowDeleted = otherPredicates.exists { predicate =>
+        predicate.references.exists(_.name == IS_ROW_DELETED_COLUMN_NAME)
+      }
+
+      val canDropDvPredicate = dvPredicate.nonEmpty && hasNativeDeletionVectorGpuScan(child)
+
+      if (canDropDvPredicate && !otherPredicatesReadingIsRowDeleted) {
+        // Since we are going to drop this dvPredicate and isRowDeleted is not used in other
+        // predicates, we can prune isRowDeleted column from the child plan
+        val pruned = pruneIsRowDeletedColumn(child)
+        (Some(pruned), otherPredicates)
+      } else if (canDropDvPredicate) {
+        (None, otherPredicates)
+      } else {
+        (None, Seq(condition))
+      }
+    }
+
     plan.transformUp {
       case filter @ GpuFilterExec(condition, child)
         if condition.references.exists(_.name == IS_ROW_DELETED_COLUMN_NAME) =>
-        // Decompose the condition into CNF
-        val conjuncts = splitConjunctivePredicates(condition)
-        // the dv condition should be "IS_ROW_DELETED_COLUMN_NAME == 0"
-        val (dvPredicate, otherPredicates) = conjuncts.partition(p =>
-          p.references.size == 1 &&
-            p.references.exists(_.name == IS_ROW_DELETED_COLUMN_NAME) &&
-            isDVCondition(p)
-        )
-
-        val otherPredicatesReadingIsRowDeleted = otherPredicates.filter(
-          p => p.references.exists(_.name == IS_ROW_DELETED_COLUMN_NAME)
-        )
-
-        val newChild = if (dvPredicate.nonEmpty && otherPredicatesReadingIsRowDeleted.isEmpty) {
-          // Since we are going to drop this dvPredicate and isRowDeleted is not used in other
-          // predicates, we can prune isRowDeleted column from the child plan
-          pruneIsRowDeletedColumn(child)
-        } else {
-          child
-        }
-
-        if (otherPredicates.isEmpty) {
+        val (maybeNewChild, nonDvPredicates) = pruneDvPredicate(condition, child)
+        val newChild = maybeNewChild.getOrElse(child)
+        if (nonDvPredicates.isEmpty) {
           newChild
         } else {
-          filter.copy(condition = otherPredicates.reduce(GpuAnd),
+          filter.copy(
+            condition = nonDvPredicates.reduce(GpuAnd),
             child = newChild)(filter.coalesceAfter)
+        }
+      case filter @ FilterExec(condition, child)
+        if condition.references.exists(_.name == IS_ROW_DELETED_COLUMN_NAME) =>
+        val (maybeNewChild, nonDvPredicates) = pruneDvPredicate(condition, child)
+        val newChild = maybeNewChild.getOrElse(child)
+        if (nonDvPredicates.isEmpty) {
+          newChild
+        } else {
+          filter.copy(condition = nonDvPredicates.reduce(And), child = newChild)
         }
     }
   }

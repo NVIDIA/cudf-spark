@@ -21,7 +21,8 @@ from asserts import assert_gpu_and_cpu_are_equal_collect
 from conftest import is_iceberg_remote_catalog
 from iceberg import rapids_reader_types, \
     setup_base_iceberg_table, _add_eq_deletes, _change_table, \
-    all_eq_column_combinations, iceberg_unsupported_mark, create_iceberg_table, \
+    representative_eq_column_combinations, eq_reader_canary_pairs, \
+    iceberg_unsupported_mark, create_iceberg_table, \
     iceberg_base_table_cols, iceberg_gens_list, get_full_table_name
 from data_gen import gen_df, get_datagen_seed, int_gen, long_gen, string_gen
 from marks import iceberg, ignore_order
@@ -30,18 +31,47 @@ from spark_session import with_gpu_session, with_cpu_session
 pytestmark = iceberg_unsupported_mark
 
 
+# Eq-delete pair coverage. All 14 eligible eq-delete columns of iceberg_table_gen
+# (_c0..c3, _c6..c15; _c4 float and _c5 double are excluded by can_be_eq_delete_col)
+# appear in at least one pair in representative_eq_column_combinations; the full
+# C(14, 2) matrix is unnecessary because eq-delete correctness depends on
+# per-column type handling, not on the cross product of every two columns. Runs
+# against the default reader; reader-type compatibility is checked separately by
+# test_iceberg_v2_eq_deletes_reader_types.
+# In spark/iceberg integration, there is no builtin way to generate eq deletion files using
+# sql, we used a low level api to add eq deletion files to iceberg table.
+# This does not work with aws s3tables, which is a managed table service.
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.parametrize('eq_delete_cols',
+                         representative_eq_column_combinations,
+                         ids=lambda x: str(x))
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason = "S3tables catalog is managed")
+def test_iceberg_v2_eq_deletes(spark_tmp_table_factory, spark_tmp_path,
+                               eq_delete_cols, register_iceberg_add_eq_deletes_udf):
+    table_name = setup_base_iceberg_table(spark_tmp_table_factory)
+
+    _change_table(table_name,
+                  lambda spark: _add_eq_deletes(spark, list(eq_delete_cols), 120, table_name,
+                                                spark_tmp_path),
+                  "No equation deletes generated")
+
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.table(table_name))
+
+
+# Reader-type canary for eq-deletes: a small set of pairs crossed with all three
+# rapids_reader_types confirms reader-type selection composes with the eq-delete
+# read path. Full pair coverage runs against the default reader above.
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
 @pytest.mark.parametrize('eq_delete_cols',
-                         all_eq_column_combinations,
+                         eq_reader_canary_pairs,
                          ids=lambda x: str(x))
-# In spark/iceberg integration, there is no builtin way to generate eq deletion files using
-# sql, we used a low level api to add eq deletion files to iceberg table.
-# This does not work with aws s3tables, which is a managed table service.
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason = "S3tables catalog is managed")
-def test_iceberg_v2_eq_deletes(spark_tmp_table_factory, spark_tmp_path, reader_type,
-                               eq_delete_cols, register_iceberg_add_eq_deletes_udf):
+def test_iceberg_v2_eq_deletes_reader_types(spark_tmp_table_factory, spark_tmp_path, reader_type,
+                                            eq_delete_cols, register_iceberg_add_eq_deletes_udf):
     table_name = setup_base_iceberg_table(spark_tmp_table_factory)
 
     _change_table(table_name,

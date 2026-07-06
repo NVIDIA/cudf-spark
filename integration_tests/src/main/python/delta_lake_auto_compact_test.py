@@ -1,4 +1,4 @@
-# Copyright (c) 2023-2025, NVIDIA CORPORATION.
+# Copyright (c) 2023-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,10 +18,15 @@ from data_gen import copy_and_update, idfn
 from delta_lake_utils import *
 from marks import allow_non_gpu, delta_lake
 from pyspark.sql.functions import *
-from spark_session import is_spark_353_or_later, is_databricks_runtime, is_databricks104_or_later, supports_delta_lake_deletion_vectors
+from spark_session import is_spark_353_or_later, is_databricks_runtime, \
+    is_databricks104_or_later, is_databricks173_or_later, supports_delta_lake_deletion_vectors
 
 _conf = {'spark.rapids.sql.explain': 'ALL',
          'spark.databricks.delta.autoCompact.minNumFiles': 3}  # Num files before compaction.
+
+_auto_compact_min_files_deletion_vector_values = deletion_vector_values \
+    if is_databricks173_or_later() else deletion_vector_values_with_350DB143_xfail_reasons(
+        enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12042")
 
 
 def write_to_delta(enable_deletion_vectors, num_rows=30, is_partitioned=False, num_writes=3):
@@ -57,6 +62,53 @@ def assert_optimized(spark, table_path):
     # Check that at least one OPTIMIZE operation exists.
     assert optimize_op_cnt > 0, \
         "Expected at least one OPTIMIZE operation in the table history."
+
+
+def assert_inline_auto_compaction_used_gpu(captured_plans):
+    """
+    The triggering append is expected to produce one RapidsDeltaWrite plan. Inline
+    auto compaction should produce a second one; otherwise the hook likely fell back.
+    """
+    plan_callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    for class_name in delta_write:
+        num_delta_write_plans = len([
+            plan for plan in captured_plans if plan_callback.contains(plan, class_name)])
+        if num_delta_write_plans >= 2:
+            continue
+        plan_descriptions = "\n".join(str(plan) for plan in captured_plans)
+        assert False, (
+            f"Expected at least two {class_name} plans, one for the triggering append "
+            f"and one for inline auto compaction, but captured {num_delta_write_plans}:\n"
+            f"{plan_descriptions}")
+
+
+@delta_lake
+@allow_non_gpu(*delta_meta_allow)
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="DBR 17.3 has the GPU inline auto-compaction hook under test")
+def test_auto_compact_dbr173_inline_uses_gpu(spark_tmp_path):
+    data_path = spark_tmp_path + "/AUTO_COMPACT_DBR173_GPU_INLINE"
+    conf_enable_auto_compact = copy_and_update(
+        _conf, {'spark.databricks.delta.autoCompact.enabled': 'true'})
+
+    # Write below the threshold first so the captured write below has exactly one
+    # user append and, if inline auto compaction runs on GPU, one compaction write.
+    writer = write_to_delta(False, num_writes=2)
+    with_gpu_session(func=lambda spark: writer(spark, data_path),
+                     conf=conf_enable_auto_compact)
+
+    plan_callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    plan_callback.startCapture()
+    try:
+        with_gpu_session(
+            func=lambda spark: write_to_delta(False, num_writes=1)(spark, data_path),
+            conf=conf_enable_auto_compact)
+        captured_plans = plan_callback.getResultsWithTimeout(10000)
+        assert_inline_auto_compaction_used_gpu(captured_plans)
+    finally:
+        plan_callback.endCapture()
+
+    with_cpu_session(lambda spark: assert_optimized(spark, data_path), {})
 
 
 @delta_lake
@@ -218,8 +270,9 @@ def test_auto_compact_disabled(spark_tmp_path, auto_compact_conf, enable_deletio
 @pytest.mark.skipif(is_databricks_runtime() and not is_databricks104_or_later(),
                     reason="Auto compaction of Delta Lake tables is only supported "
                            "on Databricks 10.4+")
-@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_350DB143_xfail_reasons(
-                            enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12042"), ids=idfn)
+@pytest.mark.parametrize("enable_deletion_vectors",
+                         _auto_compact_min_files_deletion_vector_values,
+                         ids=idfn)
 def test_auto_compact_min_num_files(spark_tmp_path, enable_deletion_vectors):
     """
     This test verifies that auto-compaction honours the minNumFiles setting.

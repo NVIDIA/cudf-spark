@@ -390,8 +390,11 @@ class RegexParser(pattern: String) {
         if (peek().contains('}')) {
           consumeExpected('}')
           num match {
-            case Some(n) =>
-              RegexBackref(n)
+            case Some(_) =>
+              throw new RegexUnsupportedException(
+                "Numeric `${N}` backref in replacement string is not supported on GPU " +
+                  "(Java's Matcher.appendReplacement rejects this syntax)",
+                Some(start))
             case _ =>
               treatAsLiteralDollar()
           }
@@ -759,6 +762,7 @@ class CudfRegexTranspiler(mode: RegexMode) {
 
   def transpileToSplittableString(e: RegexAST): Option[String] = {
     e match {
+      case RegexEscaped('b') | RegexEscaped('B') => None
       case RegexEscaped(ch) if escapeChars.contains(ch) => Some(escapeChars(ch).toString)
       case RegexEscaped(ch) if regexPunct.contains(ch) => Some(ch.toString)
       case RegexChar(ch) if !regexMetaChars.contains(ch) => Some(ch.toString)
@@ -850,20 +854,6 @@ class CudfRegexTranspiler(mode: RegexMode) {
 
   private val lineTerminatorChars = Seq('\n', '\r', '\u0085', '\u2028', '\u2029')
 
-  // from Java 8 documention: a line terminator is a 1 to 2 character sequence that marks
-  // the end of a line of an input character sequence.
-  // this method produces a RegexAST which outputs a regular expression to match any possible
-  // combination of line terminators.
-  // Cudf added support to identify \n, \r, \u0085, \u2028, \u2029 as line break characters
-  // when EXT_NEWLINE flag is set. See issue: https://github.com/NVIDIA/spark-rapids/issues/11554
-  private def lineTerminatorMatcher(excludeCRLF: Boolean, capture: Boolean): RegexAST = {
-    if (excludeCRLF) {
-      RegexEmpty()
-    } else {
-      RegexGroup(capture = capture, RegexSequence(ListBuffer(RegexChar('\r'), RegexChar('\n'))),
-          None)
-    }
-  }
 
   private def negateCharacterClass(
       components: ListBuffer[RegexCharacterClassComponent]): RegexAST = {
@@ -1086,26 +1076,13 @@ class CudfRegexTranspiler(mode: RegexMode) {
                 && lineTerminatorChars.contains(ch) =>
                 throw new RegexUnsupportedException("Regex sequences with a line terminator "
                     + "character followed by '$' are not supported in replace mode", regex.position)
-            case Some(RegexChar(ch)) if ch == '\r' =>
-              // when using the the CR (\r), it prevents the line anchor from handling any other
-              // line terminator sequences, so we just output the anchor and we are finished
-              // for example: \r$ -> \r$ (no transpilation)
-              RegexChar('$')
             case Some(RegexEscaped('b')) | Some(RegexEscaped('B')) =>
               throw new RegexUnsupportedException(
                       "Regex sequences with \\b or \\B not supported around $", regex.position)
             case _ =>
-              // otherwise by default we can match any or none the full set of line terminators
-              if (mode == RegexReplaceMode) {
-                replacement match {
-                  case Some(rr) => rr.appendBackref(rr.numCaptureGroups + 1)
-                  case _ =>
-                }
-              }
-              RegexSequence(ListBuffer(
-                RegexRepetition(lineTerminatorMatcher(excludeCRLF = false,
-                    capture = mode == RegexReplaceMode), SimpleQuantifier('?')),
-                RegexChar('$')))
+              // cuDF #22763 makes EXT_NEWLINE treat \r\n as one line terminator for $, so emit
+              // the anchor directly instead of the (\r\n)? synthetic group it needed before.
+              RegexChar('$')
           }
         case '^' if mode == RegexSplitMode =>
           RegexEscaped('A')
@@ -1949,7 +1926,11 @@ sealed case class RegexBackref(num: Int, isNew: Boolean = false) extends RegexAS
     this.position = Some(position)
   }
   override def children(): Seq[RegexAST] = Seq.empty
-  override def toRegexString: String = s"$$$num"
+  // Backrefs marked as internally generated are emitted in braced `${N}` form so
+  // `backrefConversion` can tell them apart from user-authored `$N` tokens and pass them
+  // through verbatim. User-authored backrefs keep the raw `$N` form so the
+  // greedy-with-backoff parser in `backrefConversion` honors the user's pattern group count.
+  override def toRegexString: String = if (isNew) s"$${$num}" else s"$$$num"
 }
 
 sealed case class RegexReplacement(parts: ListBuffer[RegexAST],

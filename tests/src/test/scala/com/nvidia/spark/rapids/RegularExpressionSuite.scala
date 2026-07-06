@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -50,7 +50,7 @@ class RegularExpressionSuite extends SparkQueryCompareTestSuite {
     "RegExpReplace",
     nullableStringsFromCsv,
     execsAllowedNonGpu = Seq("ProjectExec", "Alias",
-      "RegExpReplace", "AttributeReference", "Literal"), conf = conf) {
+      "RegExpReplace", "AttributeReference"), conf = conf) {
     frame => frame.selectExpr("regexp_replace(strings,'a',strings)")
   }
 
@@ -75,7 +75,7 @@ class RegularExpressionSuite extends SparkQueryCompareTestSuite {
   testGpuFallback("String regexp_replace input empty cpu fall back",
     "RegExpReplace",
     nullableStringsFromCsv, execsAllowedNonGpu = Seq("ProjectExec", "Alias",
-      "RegExpReplace", "AttributeReference", "Literal"), conf = conf) {
+      "RegExpReplace", "AttributeReference"), conf = conf) {
     frame => frame.selectExpr("regexp_replace(strings,'','D')")
   }
 
@@ -113,6 +113,18 @@ class RegularExpressionSuite extends SparkQueryCompareTestSuite {
     nullableStringsFromCsv, conf = conf) { frame =>
       assume(isUnicodeEnabled())
       frame.selectExpr("regexp_replace(strings,'\\(foo\\)','D')")
+  }
+
+  // #14856 / revans2: anchored alternation with a backref. With the old (\r\n)? workaround the
+  // synthetic group shifted (E) to group 2, so [$1] referenced the wrong group; once the
+  // workaround is dropped (cudf #22763) (E) stays group 1 and GPU must match CPU here.
+  testSparkResultsAreEqual("regexp_replace anchored alternation backref T$|(E)",
+    spark => {
+      import spark.implicits._
+      Seq("T", "E", "TE", "ET", "xExE", "T\r\nE", "E\r\n").toDF("strings")
+    }, conf = conf) { frame =>
+      assume(isUnicodeEnabled())
+      frame.selectExpr("regexp_replace(strings, 'T$|(E)', '[$1]')")
   }
 
   testSparkResultsAreEqual("String regexp_extract regex 1", extractStrings, conf = conf) {

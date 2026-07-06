@@ -17,6 +17,7 @@
 package com.nvidia.spark.rapids.iceberg.iceberg110x;
 
 import com.nvidia.spark.rapids.GpuMetric;
+import com.nvidia.spark.rapids.RapidsConf;
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
 import com.nvidia.spark.rapids.iceberg.IcebergShimUtils;
 import org.apache.hadoop.fs.Path;
@@ -27,8 +28,11 @@ import org.apache.iceberg.io.SupportsStorageCredentials;
 import org.apache.iceberg.shaded.org.apache.parquet.ParquetReadOptions;
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.iceberg.spark.SparkUtil;
+import org.apache.iceberg.spark.source.GpuSparkCopyOnWriteV1Scan;
+import org.apache.iceberg.spark.source.GpuSparkScan;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.PartitionUtil;
+import org.apache.spark.sql.connector.read.Scan;
 
 import java.io.IOException;
 import java.util.Collections;
@@ -73,5 +77,13 @@ public class ShimUtilsImpl implements IcebergShimUtils {
             ParquetReadOptions options,
             scala.collection.immutable.Map<String, GpuMetric> metrics) throws IOException {
         return GpuParquetIOShim.openReader(inputFile, filePath, options, metrics);
+    }
+
+    @Override
+    public GpuSparkScan newCopyOnWriteScan(
+            Scan cpuScan,
+            RapidsConf rapidsConf,
+            boolean queryUsesInputFile) {
+        return GpuSparkCopyOnWriteV1Scan.create(cpuScan, rapidsConf, queryUsesInputFile);
     }
 }

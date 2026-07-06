@@ -26,6 +26,7 @@ import com.databricks.sql.io.{RowIndexFilterProvider, RowIndexFilterType}
 import com.databricks.sql.transaction.tahoe.{
   DeltaColumnMapping,
   DeltaColumnMappingMode,
+  DeltaParquetFileFormat,
   IdMapping,
   NameMapping,
   NoMapping
@@ -358,6 +359,29 @@ case class GpuDeltaParquetFileFormatNativeDV(
         }
       }
     }
+
+    override protected def computeNumRowsAlive(
+        totalNumRows: Long,
+        chunkedBlocks: Seq[BlockMetaData]): Int = {
+      if (totalNumRows == 0 || tablePathOpt.isEmpty) {
+        Math.toIntExact(totalNumRows)
+      } else {
+        val dv = RapidsDeletionVectors.lookupDeletionVector(split, deletionVectorReadInfo)
+        if (dv.dvDescriptor.isEmpty && dv.filterType.isEmpty &&
+            dv.rowIndexFilterProvider.isEmpty) {
+          Math.toIntExact(totalNumRows)
+        } else {
+          val scalaBitmap = RapidsDeletionVectors.loadScalaBitmap(
+            conf, dv.dvDescriptor, dv.filterType, dv.rowIndexFilterProvider, tablePathOpt.get)
+          RapidsDeletionVectorRowCountUtils.computeNumRowsAlive(
+            totalNumRows, scalaBitmap.cardinality, chunkedBlocks) { countDeletedRow =>
+            scalaBitmap.forEach { deletedIndex: Long =>
+              countDeletedRow(deletedIndex)
+            }
+          }
+        }
+      }
+    }
   }
 
   ///////////////////////////////////////
@@ -388,41 +412,13 @@ case class GpuDeltaParquetFileFormatNativeDV(
 
   object SpillableDeletionVectorInfo {
 
-    /**
-     * Computes the number of deleted rows within the given row ranges
-     * in the bitmap.
-     */
-    def countDeletedRows(
-        scalaBitmap: RoaringBitmapArray,
-        rowGroupOffsets: Array[Long],
-        rowGroupNumRows: Array[Int]): Long = {
-      if (scalaBitmap.cardinality == 0) return 0L
-      var count = 0L
-      val rowRanges = rowGroupOffsets.zip(rowGroupNumRows)
-      // Computes the number of deleted rows by iterating only over the set bits
-      // in the bitmap (deleted row indices) and checking which row group each
-      // belongs to. This is O(deleted_rows * num_row_groups) instead of
-      // O(total_rows). The former is usually smaller than the latter.
-      // cuDF added a dedicated API in https://github.com/rapidsai/cudf/pull/21963.
-      // Track the Spark RAPIDS follow-up in
-      // https://github.com/NVIDIA/spark-rapids/issues/14628.
-      scalaBitmap.forEach { deletedIndex: Long =>
-        rowRanges.find { case (offset, numRows) =>
-          deletedIndex >= offset && deletedIndex < offset + numRows
-        }.foreach { _ =>
-          // If the deleted index falls within this row group, count it as deleted.
-          count += 1L
-        }
-      }
-      count
-    }
-
     def apply(
         serializedBitmap: HostMemoryBuffer,
         scalaBitmap: RoaringBitmapArray,
         rowGroupOffsets: Array[Long],
         rowGroupNumRows: Array[Int]): SpillableDeletionVectorInfo = {
-      val numRowsDeleted = countDeletedRows(scalaBitmap, rowGroupOffsets, rowGroupNumRows)
+      val numRowsDeleted =
+        RapidsDeletionVectors.countDeletedRows(scalaBitmap, rowGroupOffsets, rowGroupNumRows)
       new SpillableDeletionVectorInfo(
         SpillableHostBuffer(
           serializedBitmap,
@@ -1264,11 +1260,16 @@ case class GpuDeltaParquetFileFormatNativeDV(
             }
             closeOnExcept(gpuBitmap) { _ =>
               val filterTypeOpt = entry.dvDescriptor.map(_ => RowIndexFilterType.IF_CONTAINED)
-              val scalaBitmap = RapidsDeletionVectors.loadScalaBitmap(
-                conf, entry.dvDescriptor, filterTypeOpt, entry.rowIndexFilterProvider, tp)
               val totalRows = entry.rowGroupNumRows.map(_.toLong).sum
-              val numDeleted = SpillableDeletionVectorInfo.countDeletedRows(
-                scalaBitmap, entry.rowGroupOffsets, entry.rowGroupNumRows)
+              val numDeleted =
+                if (entry.dvDescriptor.isEmpty && entry.rowIndexFilterProvider.isEmpty) {
+                  0L
+                } else {
+                  val scalaBitmap = RapidsDeletionVectors.loadScalaBitmap(
+                    conf, entry.dvDescriptor, filterTypeOpt, entry.rowIndexFilterProvider, tp)
+                  RapidsDeletionVectors.countDeletedRows(
+                    scalaBitmap, entry.rowGroupOffsets, entry.rowGroupNumRows)
+                }
               require(numDeleted <= totalRows,
                 s"Deletion vector cardinality ($numDeleted) exceeds " +
                   s"file row count ($totalRows)")
@@ -1436,14 +1437,74 @@ case class DeltaParquetTableReader(
   override protected lazy val resources: Seq[AutoCloseable] =
     Seq(reader) ++ buffers ++ dvInfos.map(_.serializedBitmap)
 
+  private lazy val deletionVectorSkipRowIndexes =
+    MakeParquetTableWithDVProducer.deletionVectorSkipRowIndexes(readDataSchema)
+
   override protected def postProcessChunk(chunk: Table): Table = {
     // The cuDF reader prepends an extra index column in the output table.
     // We need to drop it before returning as we don't use it.
     RapidsDeletionVectors.dropFirstColumn(chunk)
   }
+
+  override def next: Table = {
+    MakeParquetTableWithDVProducer.materializeDeletionVectorSkipRowColumnsAsFalseIfNeeded(
+      super.next, deletionVectorSkipRowIndexes)
+  }
 }
 
 object MakeParquetTableWithDVProducer extends Logging {
+  private def isDeletionVectorSkipRowColumn(name: String): Boolean =
+    name == DeltaParquetFileFormat.IS_ROW_DELETED_COLUMN_NAME ||
+      name == GpuDeltaParquetFileFormat.EDGE_COMPUTED_COLUMN_SKIP_ROW
+
+  private[delta] def deletionVectorSkipRowIndexes(readDataSchema: StructType): Array[Int] =
+    readDataSchema.fields.zipWithIndex.collect {
+      case (field, index) if isDeletionVectorSkipRowColumn(field.name) => index
+    }
+
+  // Returns the input table unchanged when the planner has pruned skip-row columns.
+  // If replacement is needed, this closes the input table and returns a new one.
+  private[delta] def materializeDeletionVectorSkipRowColumnsAsFalseIfNeeded(
+      table: Table,
+      skipRowIndexes: Array[Int]): Table = {
+    if (skipRowIndexes.nonEmpty) {
+      withResource(table) { tableToClose =>
+        materializeDeletionVectorSkipRowColumnsAsFalse(tableToClose, skipRowIndexes)
+      }
+    } else {
+      table
+    }
+  }
+
+  private[delta] def materializeDeletionVectorSkipRowColumnsAsFalse(
+      table: Table,
+      skipRowIndexes: Array[Int]): Table = {
+    require(skipRowIndexes.forall(_ < table.getNumberOfColumns),
+      s"Expected skip-row indexes ${skipRowIndexes.mkString(",")} within " +
+        s"${table.getNumberOfColumns} output columns")
+    val numRows = Math.toIntExact(table.getRowCount)
+    withResource(Scalar.fromBool(false)) { falseScalar =>
+      val columns = new Array[ColumnVector](table.getNumberOfColumns)
+      val replacementColumns = new ArrayBuffer[ColumnVector](skipRowIndexes.length)
+      try {
+        var i = 0
+        while (i < table.getNumberOfColumns) {
+          columns(i) = if (skipRowIndexes.contains(i)) {
+            val replacement = ColumnVector.fromScalar(falseScalar, numRows)
+            replacementColumns += replacement
+            replacement
+          } else {
+            table.getColumn(i)
+          }
+          i += 1
+        }
+        new Table(columns: _*)
+      } finally {
+        replacementColumns.safeClose()
+      }
+    }
+  }
+
   def apply(
       useChunkedReader: Boolean,
       maxChunkedReaderMemoryUsageSizeBytes: Long,
@@ -1479,6 +1540,7 @@ object MakeParquetTableWithDVProducer extends Logging {
         isSchemaCaseSensitive, useFieldId, readDataSchema, clippedParquetSchema,
         splits, debugDumpPrefix, debugDumpAlways, deletionVectorInfos)
     } else {
+      val skipRowIndexes = deletionVectorSkipRowIndexes(readDataSchema)
       val table = withResource(buffers) { _ =>
         withResource(deletionVectorInfos.map(_.serializedBitmap)) { _ =>
           try {
@@ -1517,7 +1579,8 @@ object MakeParquetTableWithDVProducer extends Logging {
         clippedParquetSchema, readDataSchema, isSchemaCaseSensitive, useFieldId)
       val outputTable = GpuParquetScan.rebaseDateTime(evolvedSchemaTable, dateRebaseMode,
         timestampRebaseMode)
-      new SingleGpuDataProducer(outputTable)
+      new SingleGpuDataProducer(
+        materializeDeletionVectorSkipRowColumnsAsFalseIfNeeded(outputTable, skipRowIndexes))
     }
   }
 }

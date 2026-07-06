@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2023-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,6 +25,15 @@
 {"spark": "342"}
 {"spark": "343"}
 {"spark": "344"}
+{"spark": "350"}
+{"spark": "351"}
+{"spark": "352"}
+{"spark": "353"}
+{"spark": "354"}
+{"spark": "355"}
+{"spark": "356"}
+{"spark": "357"}
+{"spark": "358"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids
 
@@ -34,7 +43,6 @@ import org.apache.spark.SparkConf
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.{TestArrayUDT, TestNestedStructUDT, TestPrimitiveUDT}
-import org.apache.spark.sql.rapids.TestingUDT._
 import org.apache.spark.sql.types._
 
 class ParquetUDTSuite extends SparkQueryCompareTestSuite {

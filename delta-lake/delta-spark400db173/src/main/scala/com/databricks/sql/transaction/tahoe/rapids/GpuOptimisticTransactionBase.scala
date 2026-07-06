@@ -27,7 +27,7 @@ import com.databricks.sql.transaction.tahoe.constraints.{Constraint, DeltaInvari
 import com.databricks.sql.transaction.tahoe.files.{TahoeBatchFileIndex, TransactionalWriteOptions}
 import com.nvidia.spark.rapids.RapidsConf
 
-import org.apache.spark.sql.Dataset
+import org.apache.spark.sql.{Dataset, SparkSession}
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.execution.SparkPlan
@@ -70,5 +70,20 @@ abstract class GpuOptimisticTransactionBase(
       index: TahoeBatchFileIndex, _, _, _, _, _), _, _, _, _, _, _) =>
         index.actionType.equals("Optimize")
     }.headOption.getOrElse(false)
+  }
+}
+private[rapids] object GpuDeltaCpuFallback {
+  def withRapidsDisabled[T](spark: SparkSession)(f: => T): T = {
+    val rapidsEnabled = RapidsConf.SQL_ENABLED.key
+    val original = spark.conf.getOption(rapidsEnabled)
+    spark.conf.set(rapidsEnabled, "false")
+    try {
+      f
+    } finally {
+      original match {
+        case Some(value) => spark.conf.set(rapidsEnabled, value)
+        case None => spark.conf.unset(rapidsEnabled)
+      }
+    }
   }
 }

@@ -18,6 +18,7 @@ package com.nvidia.spark.rapids.delta.common
 
 import ai.rapids.cudf._
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.delta.RapidsDeletionVectorRowCountUtils
 import com.nvidia.spark.rapids.jni.fileio.RapidsFileIO
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
@@ -168,16 +169,22 @@ object RapidsDeletionVectors extends Logging {
     }
   }
 
-  def getRowGroupMetadata(blocks: collection.Seq[BlockMetaData]): (Array[Long], Array[Int]) = {
-    val rowGroupOffsets = blocks.map(_.getRowIndexOffset)
-    if (rowGroupOffsets.find(offset => offset < 0).isDefined) {
-      throw new IllegalStateException("Found invalid row group offset")
+  def getRowGroupMetadata(blocks: collection.Seq[BlockMetaData]): (Array[Long], Array[Int]) =
+    RapidsDeletionVectorRowCountUtils.getRowGroupMetadata(blocks)
+
+  /**
+   * Computes the number of deleted rows within the given row ranges in the bitmap.
+   */
+  def countDeletedRows(
+      scalaBitmap: RoaringBitmapArray,
+      rowGroupOffsets: Array[Long],
+      rowGroupNumRows: Array[Int]): Long = {
+    RapidsDeletionVectorRowCountUtils.countDeletedRows(
+      scalaBitmap.cardinality, rowGroupOffsets, rowGroupNumRows) { countDeletedRow =>
+        scalaBitmap.forEach { deletedIndex: Long =>
+          countDeletedRow(deletedIndex)
+        }
     }
-    val rowGroupNumRows = blocks.map(_.getRowCount)
-    if (rowGroupNumRows.find(numRows => !numRows.isValidInt).isDefined) {
-      throw new IllegalStateException("Found invalid row group num rows")
-    }
-    (rowGroupOffsets.toArray, rowGroupNumRows.map(_.toInt).toArray)
   }
 
   /**
