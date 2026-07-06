@@ -103,6 +103,10 @@ public final class StagedParquetPartitionReader<F, C>
   private boolean initialized;
   private int remainingResults;
   private Iterator<ColumnarBatch> currentBatches;
+  // Guarded by iteratorLock. Once the caller advances again, the previously returned batch has
+  // finished flowing through the downstream GPU pipeline and this reader can yield the task-wide
+  // permit before it restores or decodes another batch.
+  private boolean batchReturnedSinceLastAdvance;
 
   /**
    * Creates a lazy partition reader. No footer or data work is submitted until the first
@@ -157,31 +161,55 @@ public final class StagedParquetPartitionReader<F, C>
   @Override
   public boolean hasNext() {
     if (closed.get()) {
+      releaseGpuSemaphoreFromTaskThread();
       return false;
     }
     try {
       initializeIfNeeded();
       while (true) {
+        boolean semaphoreReleasedForAdvance = false;
         if (closed.get()) {
+          releaseGpuSemaphoreFromTaskThread();
           return false;
         }
         synchronized (iteratorLock) {
+          if (batchReturnedSinceLastAdvance) {
+            // CachedGpuBatchIterator makes multi-batch decode output spillable specifically so
+            // the semaphore can be yielded between batches. The iterator protocol guarantees
+            // that asking to advance means the caller is done processing the prior batch.
+            releaseGpuSemaphoreFromTaskThread();
+            semaphoreReleasedForAdvance = true;
+            batchReturnedSinceLastAdvance = false;
+          }
           if (currentBatches != null) {
             if (currentBatches.hasNext()) {
               return true;
+            }
+            // The adapter acquires the semaphore while decoding, and next() acquires it while
+            // restoring a cached spillable batch. Release as soon as that decoded iterator is
+            // exhausted. In particular, this must happen before the remainingResults == 0 return
+            // below; otherwise the last subtask holds the GPU until Spark completes the task.
+            if (!semaphoreReleasedForAdvance) {
+              releaseGpuSemaphoreFromTaskThread();
+              semaphoreReleasedForAdvance = true;
             }
             closeIterator(currentBatches);
             currentBatches = null;
           }
         }
         if (remainingResults == 0) {
+          if (!semaphoreReleasedForAdvance) {
+            releaseGpuSemaphoreFromTaskThread();
+          }
           return false;
         }
 
         Completion<C> completion;
         long waitStart = System.nanoTime();
         try {
-          GpuSemaphore$.MODULE$.releaseIfNecessary(taskContext);
+          if (!semaphoreReleasedForAdvance) {
+            releaseGpuSemaphoreFromTaskThread();
+          }
           completion = completions.take();
         } catch (InterruptedException e) {
           Thread.currentThread().interrupt();
@@ -205,6 +233,9 @@ public final class StagedParquetPartitionReader<F, C>
           retireExecution(completion.execution);
           synchronized (iteratorLock) {
             if (closed.get()) {
+              // decodeAndPostProcess may just have acquired the semaphore even though close won
+              // the race before this iterator could be installed.
+              releaseGpuSemaphoreFromTaskThread();
               return false;
             }
             if (currentBatches != null) {
@@ -225,12 +256,14 @@ public final class StagedParquetPartitionReader<F, C>
         }
       }
     } catch (CancellationException cancelled) {
+      releaseGpuSemaphoreAfterFailure(cancelled);
       if (closed.get()) {
         return false;
       }
       closeAfterFailure(cancelled);
       throw cancelled;
     } catch (Throwable error) {
+      releaseGpuSemaphoreAfterFailure(error);
       closeAfterFailure(error);
       throw propagate(error);
     }
@@ -251,13 +284,21 @@ public final class StagedParquetPartitionReader<F, C>
       if (!hasNext()) {
         throw new NoSuchElementException("no more staged Parquet batches");
       }
+      // Do not hold iteratorLock while acquiring: another task can own the GPU for an arbitrary
+      // time, and close() must remain able to cancel and reclaim this iterator in the meantime.
+      GpuSemaphore$.MODULE$.acquireIfNecessary(taskContext);
       synchronized (iteratorLock) {
-        if (currentBatches == null) {
+        if (closed.get() || currentBatches == null) {
           throw new CancellationException("staged Parquet reader was closed before next()");
         }
-        return currentBatches.next();
+        // The acquire above restores a spillable batch and covers Iceberg GPU post-processing.
+        // It is idempotent for the first batch, whose decode already acquired the permit.
+        ColumnarBatch nextBatch = currentBatches.next();
+        batchReturnedSinceLastAdvance = true;
+        return nextBatch;
       }
     } catch (Throwable error) {
+      releaseGpuSemaphoreAfterFailure(error);
       closeAfterFailure(error);
       throw propagate(error);
     }
@@ -272,6 +313,10 @@ public final class StagedParquetPartitionReader<F, C>
       return;
     }
     checkOpen();
+    // Footer submission/filtering and task-thread planning are CPU-only. Relinquish any permit
+    // still owned by this task before starting that work rather than waiting for the first
+    // Future.get().
+    releaseGpuSemaphoreFromTaskThread();
     for (StagedScanFile<F> file : files) {
       synchronized (lifecycleLock) {
         checkOpen();
@@ -316,7 +361,6 @@ public final class StagedParquetPartitionReader<F, C>
     }
     for (Future<TimedFooter<C>> future : submittedFooters) {
       long waitStart = System.nanoTime();
-      GpuSemaphore$.MODULE$.releaseIfNecessary(taskContext);
       TimedFooter<C> timedFooter = getFooterFuture(future);
       adapter.onFooterWait(System.nanoTime() - waitStart);
       FooterResult<C> footer = timedFooter.footer;
@@ -671,8 +715,10 @@ public final class StagedParquetPartitionReader<F, C>
   private Iterator<ColumnarBatch> decode(StagedReadResult<C> result) throws Exception {
     HostMemoryBuffer materialized = null;
     try {
+      // The completion-wait boundary has already yielded the semaphore, so everything through
+      // host materialization runs without it. decodeAndPostProcess owns the initial acquire
+      // immediately before cuDF; next() reacquires after an inter-batch yield.
       adapter.onSubtaskCompleted(result.getSubtask(), result.getStats());
-      GpuSemaphore$.MODULE$.releaseIfNecessary(taskContext);
       long materializeStart = System.nanoTime();
       materialized = result.getOutput().materialize();
       long materializeEnd = System.nanoTime();
@@ -700,6 +746,29 @@ public final class StagedParquetPartitionReader<F, C>
   private void checkOpen() {
     if (closed.get()) {
       throw new CancellationException("staged Parquet reader is closed");
+    }
+  }
+
+  /**
+   * Release the task-wide GPU permit at a task-thread CPU/I/O boundary.
+   *
+   * <p>This helper must never be called by the footer, source-I/O, or combine pool workers.
+   * {@code GpuSemaphore} ownership is keyed by Spark task attempt rather than Java thread, so a
+   * worker using the captured {@link TaskContext} could otherwise release the permit while this
+   * reader's task thread is concurrently decoding on the GPU.</p>
+   */
+  private void releaseGpuSemaphoreFromTaskThread() {
+    GpuSemaphore$.MODULE$.releaseIfNecessary(taskContext);
+  }
+
+  /** Preserve an operation's primary failure if semaphore bookkeeping also fails. */
+  private void releaseGpuSemaphoreAfterFailure(Throwable original) {
+    try {
+      releaseGpuSemaphoreFromTaskThread();
+    } catch (Throwable releaseError) {
+      if (releaseError != original) {
+        original.addSuppressed(releaseError);
+      }
     }
   }
 
