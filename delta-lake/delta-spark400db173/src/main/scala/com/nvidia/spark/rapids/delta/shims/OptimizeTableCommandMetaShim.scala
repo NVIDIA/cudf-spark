@@ -31,7 +31,8 @@ object OptimizeTableCommandMetaShim {
       cmd.zOrderBy.nonEmpty,
       cmd.optimizeContext.reorg.nonEmpty,
       cmd.optimizeContext.maxDeletedRowsRatio.nonEmpty,
-      cmd.optimizeContext.isFull)
+      cmd.optimizeContext.isFull,
+      allowLiquid = false)
   }
 
   def tagForGpu(meta: OptimizeTableCommandEdgeMeta, deltaLog: DeltaLog): Unit = {
@@ -42,7 +43,8 @@ object OptimizeTableCommandMetaShim {
       cmd.zOrderBy.nonEmpty,
       reorg = false,
       optimizeDeletedRows = false,
-      cmd.isFull)
+      cmd.isFull,
+      allowLiquid = true)
   }
 
   private def tagForGpu(
@@ -51,8 +53,10 @@ object OptimizeTableCommandMetaShim {
       hasZOrderBy: Boolean,
       reorg: Boolean,
       optimizeDeletedRows: Boolean,
-      isFull: Boolean): Unit = {
-    tagForGpuCommon(meta, deltaLog, hasZOrderBy, reorg, optimizeDeletedRows, isFull)
+      isFull: Boolean,
+      allowLiquid: Boolean): Unit = {
+    tagForGpuCommon(
+      meta, deltaLog, hasZOrderBy, reorg, optimizeDeletedRows, isFull, allowLiquid)
   }
 
   private def tagForGpu(
@@ -61,8 +65,10 @@ object OptimizeTableCommandMetaShim {
       hasZOrderBy: Boolean,
       reorg: Boolean,
       optimizeDeletedRows: Boolean,
-      isFull: Boolean): Unit = {
-    tagForGpuCommon(meta, deltaLog, hasZOrderBy, reorg, optimizeDeletedRows, isFull)
+      isFull: Boolean,
+      allowLiquid: Boolean): Unit = {
+    tagForGpuCommon(
+      meta, deltaLog, hasZOrderBy, reorg, optimizeDeletedRows, isFull, allowLiquid)
   }
 
   private def tagForGpuCommon(
@@ -71,7 +77,8 @@ object OptimizeTableCommandMetaShim {
       hasZOrderBy: Boolean,
       reorg: Boolean,
       optimizeDeletedRows: Boolean,
-      isFull: Boolean): Unit = {
+      isFull: Boolean,
+      allowLiquid: Boolean): Unit = {
     val snapshot = deltaLog.unsafeVolatileSnapshot
     if (DeletionVectorUtils.deletionVectorsWritable(snapshot) ||
         !DeletionVectorUtils.isTableDVFree(snapshot)) {
@@ -83,7 +90,7 @@ object OptimizeTableCommandMetaShim {
     if (optimizeDeletedRows) meta.willNotWorkOnGpu(
       "Delta OPTIMIZE with deletion-vector cleanup is not supported on GPU")
     if (isFull) meta.willNotWorkOnGpu("Delta OPTIMIZE FULL is not supported on GPU")
-    if (ClusteredTableUtils.isSupported(snapshot.protocol)) {
+    if (!allowLiquid && ClusteredTableUtils.isSupported(snapshot.protocol)) {
       meta.willNotWorkOnGpu("Delta OPTIMIZE on liquid clustered tables is not supported on GPU")
     }
   }

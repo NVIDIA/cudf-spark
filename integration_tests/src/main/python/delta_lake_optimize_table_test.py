@@ -175,6 +175,31 @@ def _write_many_small_liquid_files(
     assert len(num_files) > 7, f"Expected more than 7 files, but got {num_files}"
 
 
+def _write_many_small_liquid_row_tracking_files(
+        spark, enable_deletion_vectors, path, partition_columns=None, clustering_columns=None):
+    if enable_deletion_vectors:
+        raise ValueError("Liquid row-tracking OPTIMIZE coverage requires deletion vectors disabled")
+    if partition_columns or clustering_columns != ["a"]:
+        raise ValueError("Liquid row-tracking OPTIMIZE coverage uses CLUSTER BY (a)")
+
+    spark.sql(f"""
+        CREATE TABLE delta.`{path}` (a BIGINT, b STRING, c STRING)
+        USING DELTA
+        TBLPROPERTIES (
+          'delta.enableDeletionVectors' = 'false',
+          'delta.enableRowTracking' = 'true')
+        CLUSTER BY (a)
+    """)
+    data = spark.range(4096).selectExpr(
+        "id AS a", "CAST(pmod(id, 17) AS STRING) AS b", "CAST(id * 3 AS STRING) AS c")
+    for bucket in range(8):
+        data.where(f"pmod(a, 8) = {bucket}").repartition(4) \
+            .write.format("delta").mode("append").save(path)
+
+    num_files = spark.read.format("delta").load(path).inputFiles()
+    assert len(num_files) > 7, f"Expected more than 7 files, but got {num_files}"
+
+
 def _delete_rows_and_disable_deletion_vectors(spark, path):
     spark.range(10000).selectExpr(
         "CAST(id AS INT) AS a",
@@ -214,12 +239,13 @@ def _assert_captured_plan_contains(plan_callback, captured_plans, class_name, de
         f"{plan_descriptions}")
 
 
-def _assert_gpu_optimize_executed(plan_callback, captured_plans):
+def _assert_gpu_optimize_executed(plan_callback, captured_plans, require_gpu_write=True):
     _assert_captured_plan_contains(
         plan_callback, captured_plans, "GpuExecutedCommandExec", "OPTIMIZE")
-    for class_name in delta_write:
-        _assert_captured_plan_contains(
-            plan_callback, captured_plans, class_name, "OPTIMIZE write")
+    if require_gpu_write:
+        for class_name in delta_write:
+            _assert_captured_plan_contains(
+                plan_callback, captured_plans, class_name, "OPTIMIZE write")
 
 
 def _setup_tables(enable_deletion_vectors, cpu_path, gpu_path, partition_columns, clustering_columns,
@@ -237,7 +263,8 @@ def _setup_tables(enable_deletion_vectors, cpu_path, gpu_path, partition_columns
 
 
 def _assert_optimize_parity(enable_deletion_vectors, spark_tmp_path, partition_columns=None, clustering_columns=None,
-                            conf=_optimize_conf, write_func=_write_many_small_files):
+                            conf=_optimize_conf, write_func=_write_many_small_files,
+                            require_gpu_write=True):
     data_path = spark_tmp_path + "/DELTA_OPTIMIZE"
     cpu_path = data_path + "/CPU"
     gpu_path = data_path + "/GPU"
@@ -252,7 +279,8 @@ def _assert_optimize_parity(enable_deletion_vectors, spark_tmp_path, partition_c
     try:
         gpu_result = with_gpu_session(lambda s: s.sql(_optimize_sql(gpu_path)).collect(), conf=conf)
         captured_plans = plan_callback.getResultsWithTimeout(10000)
-        _assert_gpu_optimize_executed(plan_callback, captured_plans)
+        _assert_gpu_optimize_executed(
+            plan_callback, captured_plans, require_gpu_write=require_gpu_write)
     finally:
         plan_callback.endCapture()
     # Validate the returned path for each run; metrics object is not stable across JVMs
@@ -309,13 +337,24 @@ def _assert_optimize_fallback(enable_deletion_vectors, spark_tmp_path, partition
         with_cpu_session(lambda s: assert_gpu_and_cpu_latest_delta_log_equivalent(s, data_path))
 
 
-def _assert_liquid_optimize_gpu_write_parity(spark_tmp_path):
+def _assert_liquid_optimize_gpu_write_parity(
+        spark_tmp_path, write_func=_write_many_small_liquid_files, repeat_optimize=False):
     data_path = spark_tmp_path + "/DELTA_LIQUID_OPTIMIZE_WRITE"
     cpu_path = data_path + "/CPU"
     gpu_path = data_path + "/GPU"
     _setup_tables(
         False, cpu_path, gpu_path, None, ["a"], _optimize_conf,
-        write_func=_write_many_small_liquid_files)
+        write_func=write_func)
+
+    def assert_data_and_log_parity():
+        cpu_data = with_cpu_session(lambda spark: _read_sorted(spark, cpu_path).collect(),
+                                    conf=_optimize_conf)
+        gpu_data = with_cpu_session(lambda spark: _read_sorted(spark, gpu_path).collect(),
+                                    conf=_optimize_conf)
+        assert_equal(cpu_data, gpu_data)
+        with_cpu_session(
+            lambda spark: assert_gpu_and_cpu_latest_delta_log_equivalent(spark, data_path),
+            conf=_optimize_conf)
 
     cpu_result = with_cpu_session(
         lambda spark: spark.sql(_optimize_sql(cpu_path)).collect(), conf=_optimize_conf)
@@ -334,14 +373,24 @@ def _assert_liquid_optimize_gpu_write_parity(spark_tmp_path):
 
     assert str(cpu_result[0][0]).rstrip('/').endswith('/CPU')
     assert str(gpu_result[0][0]).rstrip('/').endswith('/GPU')
-    cpu_data = with_cpu_session(lambda spark: _read_sorted(spark, cpu_path).collect(),
-                                conf=_optimize_conf)
-    gpu_data = with_cpu_session(lambda spark: _read_sorted(spark, gpu_path).collect(),
-                                conf=_optimize_conf)
-    assert_equal(cpu_data, gpu_data)
-    with_cpu_session(
-        lambda spark: assert_gpu_and_cpu_latest_delta_log_equivalent(spark, data_path),
-        conf=_optimize_conf)
+    assert_data_and_log_parity()
+
+    if repeat_optimize:
+        second_cpu_result = with_cpu_session(
+            lambda spark: spark.sql(_optimize_sql(cpu_path)).collect(), conf=_optimize_conf)
+        plan_callback.startCapture()
+        try:
+            second_gpu_result = _with_gpu_session_no_test(
+                lambda spark: spark.sql(_optimize_sql(gpu_path)).collect(), conf=_optimize_conf)
+            captured_plans = plan_callback.getResultsWithTimeout(10000)
+            _assert_captured_plan_contains(
+                plan_callback, captured_plans, "GpuExecutedCommandExec",
+                "repeated liquid OPTIMIZE")
+        finally:
+            plan_callback.endCapture()
+        assert str(second_cpu_result[0][0]).rstrip('/').endswith('/CPU')
+        assert str(second_gpu_result[0][0]).rstrip('/').endswith('/GPU')
+        assert_data_and_log_parity()
 
 
 @allow_non_gpu(*delta_meta_allow)
@@ -385,14 +434,26 @@ def test_delta_optimize_row_tracking_table(spark_tmp_path):
                     reason="OPTIMIZE table command is supported for Databricks 17.3+")
 @pytest.mark.parametrize("enable_deletion_vectors", _optimize_clustered_deletion_vector_values, ids=idfn)
 def test_delta_optimize_clustered_table(spark_tmp_path, enable_deletion_vectors):
-    if is_databricks173_or_later():
+    if is_databricks173_or_later() and enable_deletion_vectors:
         _assert_optimize_fallback(enable_deletion_vectors, spark_tmp_path, clustering_columns=["a"])
     else:
-        _assert_optimize_parity(enable_deletion_vectors, spark_tmp_path, clustering_columns=["a"])
+        _assert_optimize_parity(
+            enable_deletion_vectors,
+            spark_tmp_path,
+            clustering_columns=["a"],
+            require_gpu_write=not is_databricks173_or_later())
 
 
 @delta_lake
 @pytest.mark.skipif(not is_databricks173_or_later(),
                     reason="Native liquid OPTIMIZE write coverage is for Databricks 17.3+")
 def test_delta_optimize_clustered_table_gpu_write(spark_tmp_path):
-    _assert_liquid_optimize_gpu_write_parity(spark_tmp_path)
+    _assert_liquid_optimize_gpu_write_parity(spark_tmp_path, repeat_optimize=True)
+
+
+@delta_lake
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="Native liquid row-tracking OPTIMIZE coverage is for Databricks 17.3+")
+def test_delta_optimize_clustered_row_tracking_table_gpu_write(spark_tmp_path):
+    _assert_liquid_optimize_gpu_write_parity(
+        spark_tmp_path, write_func=_write_many_small_liquid_row_tracking_files)

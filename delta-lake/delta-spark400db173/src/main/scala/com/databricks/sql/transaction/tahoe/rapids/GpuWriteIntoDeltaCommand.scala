@@ -21,12 +21,12 @@ import com.databricks.sql.transaction.tahoe.DeltaIdentityColumnStatsTracker
 import com.databricks.sql.transaction.tahoe.commands.{DeletionVectorUtils, WriteIntoDeltaCommand}
 import com.databricks.sql.transaction.tahoe.stats.{DeltaJobStatisticsTracker,
   StatisticsOnLoadJobTracker}
+import com.databricks.spark.util.CommandContext
 import com.nvidia.spark.rapids.{DataFromReplacementRule, DataWritingCommandMeta,
   GpuDataWritingCommand, GpuMetric, GpuParquetFileFormat, RapidsConf, RapidsMeta}
 import com.nvidia.spark.rapids.delta.{GpuDeltaJobStatisticsTracker, GpuStatisticsCollection,
   RapidsDeltaUtils}
 
-import org.apache.spark.SparkContext
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.RuntimeReplaceable
@@ -44,19 +44,23 @@ import org.apache.spark.util.SerializableConfiguration
 
 /** Limits the generic DBR V1 write rule to the native liquid OPTIMIZE call stack. */
 object GpuLiquidOptimizeWriteContext {
-  private val activeKey = "spark.rapids.sql.delta.liquidOptimizeWrite.active"
+  private val activeTag = "spark.rapids.sql.delta.liquidOptimizeWrite.active"
 
-  def isActive: Boolean = SparkContext.getActive
-    .exists(_.getLocalProperty(activeKey) == "true")
+  def isActive: Boolean = CommandContext.getContextObject
+    .exists(_.tags.get(activeTag).contains("true"))
 
-  def withOptimize[T](spark: SparkSession)(body: => T): T = {
-    val sparkContext = spark.sparkContext
-    val previous = sparkContext.getLocalProperty(activeKey)
-    sparkContext.setLocalProperty(activeKey, "true")
+  def withOptimize[T](body: => T): T = {
+    // DBR's OptimizeExecutor captures this raw universe context before submitting each batch and
+    // installs it in its shared worker pool. Spark local properties are not propagated by that
+    // boundary and would be unsafe on reused threads.
+    val previous = CommandContext.getUniverseContextObject
+    val current = CommandContext.getContextObject.getOrElse(CommandContext.EMPTY)
+    val marked = current.copy(tags = current.tags.updated(activeTag, "true"))
+    CommandContext.setUniverseContextObject(marked)
     try {
       body
     } finally {
-      sparkContext.setLocalProperty(activeKey, previous)
+      CommandContext.setUniverseContextObject(previous)
     }
   }
 }
