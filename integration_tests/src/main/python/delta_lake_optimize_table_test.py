@@ -448,6 +448,13 @@ def test_delta_optimize_clustered_table(spark_tmp_path, enable_deletion_vectors)
 @pytest.mark.skipif(not is_databricks173_or_later(),
                     reason="Native liquid OPTIMIZE write coverage is for Databricks 17.3+")
 def test_delta_optimize_clustered_table_gpu_write(spark_tmp_path):
+    _assert_liquid_optimize_gpu_write_parity(spark_tmp_path)
+
+
+@delta_lake
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="Repeated native liquid OPTIMIZE coverage is for Databricks 17.3+")
+def test_delta_optimize_clustered_table_gpu_write_repeated(spark_tmp_path):
     _assert_liquid_optimize_gpu_write_parity(spark_tmp_path, repeat_optimize=True)
 
 
