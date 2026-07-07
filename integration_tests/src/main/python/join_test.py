@@ -19,9 +19,10 @@ from pyspark.sql.types import *
 from asserts import (assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_row_counts_equal,
                      assert_gpu_fallback_collect, assert_cpu_and_gpu_are_equal_collect_with_capture,
                      assert_cpu_and_gpu_are_equal_sql_with_capture, assert_gpu_and_cpu_are_equal_sql)
-from conftest import is_emr_runtime
+from conftest import is_dataproc_runtime, is_dataproc_serverless_runtime, is_emr_runtime
 from data_gen import *
-from marks import ignore_order, allow_non_gpu, incompat, validate_execs_in_gpu_plan, disable_ansi_mode
+from marks import (allow_non_gpu, disable_ansi_mode, ignore_order, incompat,
+                   validate_execs_in_gpu_plan)
 from spark_session import with_cpu_session, is_databricks_runtime, is_spark_400_or_later, is_spark_411_or_later
 from src.main.python.spark_session import with_gpu_session
 
@@ -1355,6 +1356,13 @@ bloom_filter_confs = {
     "spark.sql.optimizer.runtime.bloomFilter.enabled": "true"
 }
 
+# Dataproc uses Cast instead of XxHash64 for runtime bloom filter probe keys.
+dataproc_bloom_filter_probe_allow = (
+    ("Cast",)
+    if is_dataproc_runtime() or is_dataproc_serverless_runtime()
+    else ()
+)
+
 def check_bloom_filter_join(confs, expected_classes, is_multi_column):
     def do_join(spark):
         if is_multi_column:
@@ -1378,8 +1386,10 @@ def test_bloom_filter_join(batch_size, is_multi_column):
                             expected_classes="GpuBloomFilterMightContain,GpuBloomFilterAggregate",
                             is_multi_column=is_multi_column)
 
-@allow_non_gpu("ShuffleExchangeExec", "And", "BloomFilterMightContain", "GetStructField", 
-  "ScalarSubquery", "XxHash64", "Remainder")
+@allow_non_gpu(
+    "ShuffleExchangeExec", "And", "BloomFilterMightContain", "GetStructField",
+    "ScalarSubquery", "XxHash64", "Remainder",
+    *dataproc_bloom_filter_probe_allow)
 @ignore_order(local=True)
 @pytest.mark.parametrize("is_multi_column", [False, True], ids=idfn)
 @pytest.mark.skipif(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/8921")
