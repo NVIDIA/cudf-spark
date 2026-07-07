@@ -32,11 +32,11 @@ import java.util.Objects;
 /**
  * Executor-local-file implementation of {@link StagedParquetOutput}.
  *
- * <p>This is selected only when the bounded exact host allocation cannot make progress. The local
- * file is exposed as a writable memory-mapped {@link HostMemoryBuffer}, which lets one vectored
- * call retain every Parquet column chunk as a distinct request and write directly to its final
- * file offset. The mapping is pageable local-file storage rather than a full pinned/pageable
- * HostAlloc allocation. This object owns the mapping, random-access handle, and path.</p>
+ * <p>This is selected only when the non-blocking exact host allocation fails. The local file is
+ * exposed as a writable memory-mapped {@link HostMemoryBuffer}, which lets one vectored call retain
+ * every Parquet column chunk as a distinct request and write directly to its final file offset.
+ * The mapping is pageable local-file storage rather than a full pinned/pageable HostAlloc
+ * allocation. This object owns the mapping, random-access handle, and path.</p>
  */
 final class FileStagedParquetOutput extends AbstractStagedParquetOutput {
   private final Path path;

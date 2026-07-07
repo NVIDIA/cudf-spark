@@ -455,7 +455,7 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
     }
   }
 
-  test("bounded tryAlloc caps total rounds and does not spill after the last failure") {
+  test("tryAlloc2 ignores RMM retry after one internal allocation cycle") {
     PinnedMemoryPool.initialize(0)
     HostAlloc.initialize(4 * 1024)
 
@@ -463,29 +463,28 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
       val originalHostStore = SpillFramework.storesInternal.hostStore
       val hostStore = mock[SpillableHostStore]
       when(hostStore.spill(1L)).thenReturn(0L)
-      // A live handle tells HostAlloc that a local retry could make progress. The bounded API
-      // must nevertheless stop after five allocation rounds (and therefore four spills).
+      // A live handle keeps the original internal retry loop running for all ten attempts.
+      // tryAlloc2 must then ignore RMM's request to start another internal cycle.
       when(hostStore.numHandles).thenReturn(1)
       SpillFramework.storesInternal.hostStore = hostStore
+      val thread = new TaskThread("tryAlloc2", 1)
+      thread.initialize()
       try {
         failAfter(Span(10, Seconds)) {
-          withResource(HostAlloc.tryAlloc(1L, preferPinned = false, maxAttempts = 5)) {
-            result => assert(result.isEmpty)
+          val allocation = thread.doIt(new TaskThreadOp[Option[HostMemoryBuffer]] {
+            override def doIt(): Option[HostMemoryBuffer] = {
+              HostAlloc.tryAlloc2(1L, preferPinned = false)
+            }
+          })
+          withResource(allocation.get(timeoutMs, TimeUnit.MILLISECONDS)) { result =>
+            assert(result.isEmpty)
           }
         }
-        verify(hostStore, times(4)).spill(1L)
+        verify(hostStore, times(10)).spill(1L)
       } finally {
+        thread.done.get(1, TimeUnit.SECONDS)
         SpillFramework.storesInternal.hostStore = originalHostStore
       }
-    }
-  }
-
-  test("bounded tryAlloc requires a positive attempt count") {
-    assertThrows[IllegalArgumentException] {
-      HostAlloc.tryAlloc(1L, preferPinned = false, maxAttempts = 0)
-    }
-    assertThrows[IllegalArgumentException] {
-      HostAlloc.tryAlloc(1L, preferPinned = false, maxAttempts = -1)
     }
   }
 

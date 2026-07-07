@@ -34,18 +34,15 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * Selects memory or executor-local disk for an exact-sized staged Parquet output.
  *
- * <p>The host-memory path has a small, fixed retry budget. A successful
- * {@link com.nvidia.spark.rapids.HostAlloc} allocation chooses host memory; if allocation cannot
- * make progress within that budget, this factory chooses disk instead of waiting indefinitely for
- * another task's buffer. Local files include task-attempt and subtask identifiers for diagnostics
- * but also use the JDK's random suffix for collision safety. The returned output owns the
- * allocation or local file.</p>
+ * <p>The allocation is deliberately non-blocking: a successful
+ * {@link com.nvidia.spark.rapids.HostAlloc} allocation chooses host memory, while failure after one
+ * internal allocation cycle chooses disk instead of waiting for another task buffer to spill.
+ * Local files include task-attempt and subtask identifiers for diagnostics but also use the JDK's
+ * random suffix for collision safety. The returned output owns the allocation or local file.</p>
  */
 public final class StagedParquetOutputFactory {
   private static final String SPARK_LOCAL_DIR = "spark.local.dir";
   private static final String SPARK_LOCAL_DIRS_ENV = "SPARK_LOCAL_DIRS";
-  // Each round probes pinned and pageable pools: one initial round plus at most four retries.
-  private static final int MAX_HOST_ALLOCATION_ATTEMPTS = 5;
   private static final AtomicInteger NEXT_LOCAL_DIRECTORY = new AtomicInteger();
 
   private StagedParquetOutputFactory() {
@@ -68,9 +65,7 @@ public final class StagedParquetOutputFactory {
       throw new IllegalArgumentException("exactSizeBytes must be positive: " + exactSizeBytes);
     }
 
-    Option<HostMemoryBuffer> allocation =
-        HostAlloc$.MODULE$.tryAlloc(
-            exactSizeBytes, true, MAX_HOST_ALLOCATION_ATTEMPTS);
+    Option<HostMemoryBuffer> allocation = HostAlloc$.MODULE$.tryAlloc2(exactSizeBytes, true);
     if (allocation.isDefined()) {
       return new MemoryStagedParquetOutput(allocation.get(), exactSizeBytes);
     }

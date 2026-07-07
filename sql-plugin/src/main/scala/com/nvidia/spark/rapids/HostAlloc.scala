@@ -34,7 +34,6 @@ import org.apache.spark.sql.rapids.GpuTaskMetrics
 case class HostAllocResult(buffer: HostMemoryBuffer, isPinned: Boolean)
 
 private class HostAlloc(nonPinnedLimit: Long) extends HostMemoryAllocator with Logging {
-  private val maxInternalAllocationAttempts = 10
   private var currentNonPinnedAllocated: Long = 0L
   private val pinnedLimit: Long = PinnedMemoryPool.getTotalPoolSizeBytes
   // For now we are going to assume that we are the only ones calling into the pinned pool
@@ -195,12 +194,8 @@ private class HostAlloc(nonPinnedLimit: Long) extends HostMemoryAllocator with L
 
   private def tryAllocInternal(amount: Long,
       preferPinned: Boolean,
-      blocking: Boolean,
-      maxAttempts: Int,
-      spillAfterFinalFailure: Boolean): (Option[HostMemoryBuffer], Boolean, Int) = {
-    require(maxAttempts > 0, s"maxAttempts must be greater than zero: $maxAttempts")
+      blocking: Boolean): (Option[HostMemoryBuffer], Boolean) = {
     var retryCount = 0L
-    var attemptsMade = 0
     var ret = Option.empty[HostAllocResult]
     var shouldRetry = false
     var shouldRetryInternal = true
@@ -208,7 +203,6 @@ private class HostAlloc(nonPinnedLimit: Long) extends HostMemoryAllocator with L
     var allocAttemptFinishedWithoutException = false
     try {
       do {
-        attemptsMade += 1
         ret = (
           if (preferPinned) {
             tryAllocPinned(amount).map(HostAllocResult(_, isPinned = true))
@@ -221,20 +215,14 @@ private class HostAlloc(nonPinnedLimit: Long) extends HostMemoryAllocator with L
             tryAllocPinned(amount).map(HostAllocResult(_, isPinned = true))
           }
         }
-        // The legacy allocators spill after their final local attempt before asking RMM whether
-        // to enter another retry cycle. A bounded caller deliberately does not: once its total
-        // attempt budget is exhausted, that spill cannot help this allocation and disk fallback
-        // should happen promptly.
-        if (ret.isEmpty && (attemptsMade < maxAttempts || spillAfterFinalFailure)) {
+        if (ret.isEmpty) {
           // We could not make it work so try and spill enough to make it work
           shouldRetryInternal = spillAndCheckRetry(amount, retryCount)
           if (shouldRetryInternal) {
             retryCount += 1
           }
-        } else {
-          shouldRetryInternal = false
         }
-      } while(ret.isEmpty && shouldRetryInternal && attemptsMade < maxAttempts)
+      } while(ret.isEmpty && shouldRetryInternal && retryCount < 10)
       allocAttemptFinishedWithoutException = true
     } finally {
       ret match {
@@ -254,7 +242,7 @@ private class HostAlloc(nonPinnedLimit: Long) extends HostMemoryAllocator with L
             blocking, isRecursive)
       }
     }
-    (ret.map(_.buffer), shouldRetry, attemptsMade)
+    (ret.map(_.buffer), shouldRetry)
   }
 
   def tryAlloc(amount: Long, preferPinned: Boolean = true): Option[HostMemoryBuffer] = {
@@ -264,8 +252,7 @@ private class HostAlloc(nonPinnedLimit: Long) extends HostMemoryAllocator with L
     var shouldRetry = true
     var ret = Option.empty[HostMemoryBuffer]
     while (shouldRetry) {
-      val (r, sr, _) = tryAllocInternal(amount, preferPinned, blocking = false,
-        maxInternalAllocationAttempts, spillAfterFinalFailure = true)
+      val (r, sr) = tryAllocInternal(amount, preferPinned, blocking = false)
       ret = r
       shouldRetry = sr
     }
@@ -273,35 +260,14 @@ private class HostAlloc(nonPinnedLimit: Long) extends HostMemoryAllocator with L
   }
 
   /**
-   * Try to allocate without exceeding a total number of allocation rounds.
-   *
-   * Each round probes the preferred pool and then the fallback pool. The round budget spans both
-   * local spill retries and any additional retry cycles requested by RMM. This is useful for
-   * callers with an alternate backing store that must not wait indefinitely for host memory. Five
-   * rounds, for example, means the initial round plus at most four retries.
+   * Run one non-blocking internal allocation cycle and ignore RMM's request for another cycle.
+   * The internal cycle can still spill and retry locally up to ten times.
    */
-  def tryAlloc(amount: Long,
-      preferPinned: Boolean,
-      maxAttempts: Int): Option[HostMemoryBuffer] = {
-    require(maxAttempts > 0, s"maxAttempts must be greater than zero: $maxAttempts")
+  def tryAlloc2(amount: Long, preferPinned: Boolean = true): Option[HostMemoryBuffer] = {
     if (canNeverSucceed(amount, preferPinned)) {
       return None
     }
-
-    var remainingAttempts = maxAttempts
-    var shouldRetry = true
-    var ret = Option.empty[HostMemoryBuffer]
-    while (ret.isEmpty && shouldRetry && remainingAttempts > 0) {
-      val (result, retry, attemptsMade) = tryAllocInternal(
-        amount,
-        preferPinned,
-        blocking = false,
-        remainingAttempts,
-        spillAfterFinalFailure = false)
-      ret = result
-      shouldRetry = retry
-      remainingAttempts -= attemptsMade
-    }
+    val (ret, _) = tryAllocInternal(amount, preferPinned, blocking = false)
     ret
   }
 
@@ -310,8 +276,7 @@ private class HostAlloc(nonPinnedLimit: Long) extends HostMemoryAllocator with L
     var ret = Option.empty[HostMemoryBuffer]
     var count = 0
     while (ret.isEmpty && count < 1000) {
-      val (r, _, _) = tryAllocInternal(amount, preferPinned, blocking = true,
-        maxInternalAllocationAttempts, spillAfterFinalFailure = true)
+      val (r, _) = tryAllocInternal(amount, preferPinned, blocking = true)
       ret = r
       count += 1
     }
@@ -351,15 +316,11 @@ object HostAlloc extends Logging {
   }
 
   /**
-   * Try to allocate host memory using at most `maxAttempts` total allocation rounds.
-   * Each round probes both the preferred and fallback pools.
-   * Unlike the two-argument API, this method does not retry indefinitely when RMM reports that a
-   * cooperative retry may eventually succeed.
+   * Run one non-blocking internal allocation cycle and ignore RMM's request for another cycle.
+   * The internal cycle can still spill and retry locally up to ten times.
    */
-  def tryAlloc(amount: Long,
-      preferPinned: Boolean,
-      maxAttempts: Int): Option[HostMemoryBuffer] = {
-    getSingleton.tryAlloc(amount, preferPinned, maxAttempts)
+  def tryAlloc2(amount: Long, preferPinned: Boolean = true): Option[HostMemoryBuffer] = {
+    getSingleton.tryAlloc2(amount, preferPinned)
   }
 
   def alloc(amount: Long, preferPinned: Boolean = true): HostMemoryBuffer = {
