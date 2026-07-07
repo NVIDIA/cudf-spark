@@ -189,11 +189,13 @@ postprocess_profile() {
 
 declare -a result_csvs
 
+run_benchmarks() {
 if [[ "${BENCH_SUMMARIZE_ONLY}" == "true" ]]; then
   mapfile -t result_csvs < <(
     find "${BENCH_RESULTS_DIR}" -maxdepth 1 -name '*.csv' ! -name 'summary.csv' \
       -printf '%p\n' | sort -V
   )
+  summarize_results
 else
   declare -a suites counts depths modes
   split_csv "${BENCH_EXPR_SUITES}" suites
@@ -368,9 +370,12 @@ else
         done
       done
     done
+    summarize_results
   done
 fi
+}
 
+summarize_results() {
 python3 - "${BENCH_MARKDOWN_PATH}" "${BENCH_COMBINED_CSV_PATH}" "${BENCH_EXPR_SUITES}" \
   "${result_csvs[@]}" <<'PY'
 import csv
@@ -550,3 +555,6 @@ PY
 
 echo "Markdown summary: ${BENCH_MARKDOWN_PATH}"
 echo "Combined CSV: ${BENCH_COMBINED_CSV_PATH}"
+}
+
+run_benchmarks

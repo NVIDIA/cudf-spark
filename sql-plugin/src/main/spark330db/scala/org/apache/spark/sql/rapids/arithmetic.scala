@@ -276,12 +276,12 @@ object DecimalRemainderChecks {
       numFirstTableColumns: Int): ast.AstExpression = {
     require(canUseAst(lhs.dataType, rhs.dataType, output),
       "Decimal remainder AST requires identical input and output types")
-    val mode = if (failOnError) {
-      ast.JitComplianceMode.ANSI
+    val errorPolicy = if (failOnError) {
+      ast.JitErrorPolicy.PROPAGATE
     } else {
-      ast.JitComplianceMode.ANSI_TRY
+      ast.JitErrorPolicy.NULLIFY
     }
-    new ast.JitOperation(ast.JitOperator.MOD, mode,
+    new ast.JitOperation(ast.JitOperator.MOD_OVERFLOW, errorPolicy,
       lhs.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns),
       rhs.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns))
   }
@@ -601,12 +601,12 @@ object DecimalIntegralDivideChecks {
       numFirstTableColumns: Int): ast.AstExpression = {
     require(canUseAst(lhs.dataType, rhs.dataType, output),
       "Decimal integral divide AST requires identical inputs with precision at most 18")
-    val mode = if (failOnError) {
-      ast.JitComplianceMode.ANSI
+    val errorPolicy = if (failOnError) {
+      ast.JitErrorPolicy.PROPAGATE
     } else {
-      ast.JitComplianceMode.ANSI_TRY
+      ast.JitErrorPolicy.NULLIFY
     }
-    val divide = new ast.JitOperation(ast.JitOperator.DIV, mode,
+    val divide = new ast.JitOperation(ast.JitOperator.DIV_OVERFLOW, errorPolicy,
       lhs.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns),
       rhs.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns))
     new ast.JitOperation(ast.JitOperator.CAST_TO_INT64, divide)

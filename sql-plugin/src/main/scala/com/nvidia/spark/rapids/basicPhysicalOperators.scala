@@ -83,7 +83,7 @@ class GpuProjectExecMeta(
   }
 
   private def tagAndCollectAstJitErrorSites(
-      gpuExprs: Seq[NamedExpression]): List[Option[AstJitErrorSite]] = {
+      gpuExprs: Seq[NamedExpression]): List[List[AstJitErrorSite]] = {
     childExprs.zip(gpuExprs).map { case (meta, gpuExpr) =>
       val sites = gpuExpr.collect {
         case expr: GpuExpression => expr.selfAstJitErrorSite
@@ -91,13 +91,9 @@ class GpuProjectExecMeta(
       if (sites.exists(_.kind == AstJitErrorKind.DecimalPrecision)) {
         meta.willNotWorkInAst(
           "AST JIT decimal precision errors do not include the value required by Spark.")
-        None
-      } else if (sites.size > 1) {
-        meta.willNotWorkInAst(
-          "AST JIT cannot identify which fallible expression produced an evaluation error.")
-        None
+        List.empty
       } else {
-        sites.headOption
+        sites.toList
       }
     }.toList
   }
@@ -974,7 +970,7 @@ object GpuProjectAstExec {
       outputSources: Seq[AstProjectOutputSource],
       literalsToProject: Seq[GpuExpression],
       expressionsToCompute: Seq[GpuExpression],
-      errorSitesToCompute: Seq[Option[AstJitErrorSite]]) {
+      errorSitesToCompute: Seq[Seq[AstJitErrorSite]]) {
     require(expressionsToCompute.size == errorSitesToCompute.size,
       "AST expressions and error sites must have the same size")
 
@@ -989,7 +985,7 @@ object GpuProjectAstExec {
 
   private[rapids] def planOutputs(
       expressions: Seq[GpuExpression],
-      errorSites: Seq[Option[AstJitErrorSite]]): AstProjectOutputPlan = {
+      errorSites: Seq[Seq[AstJitErrorSite]]): AstProjectOutputPlan = {
     require(expressions.size == errorSites.size,
       "AST expressions and error sites must have the same size")
     val passThroughInputIndices = GpuProjectExec.extractSingleBoundIndex(expressions)
@@ -1001,7 +997,7 @@ object GpuProjectAstExec {
     val outputSources = ArrayBuffer.empty[AstProjectOutputSource]
     val literalsToProject = ArrayBuffer.empty[GpuExpression]
     val expressionsToCompute = ArrayBuffer.empty[GpuExpression]
-    val errorSitesToCompute = ArrayBuffer.empty[Option[AstJitErrorSite]]
+    val errorSitesToCompute = ArrayBuffer.empty[Seq[AstJitErrorSite]]
     val reusableLiterals = mutable.HashMap.empty[GpuExpressionEquals, Int]
     val reusableExpressions = mutable.HashMap.empty[GpuExpressionEquals, Int]
 
@@ -1089,8 +1085,18 @@ object GpuProjectAstExec {
 
   private def translateAstJitError(
       error: CudfException,
-      site: Option[AstJitErrorSite]): Throwable = {
-    (Option(error.getMessage), site) match {
+      sites: Seq[AstJitErrorSite]): Throwable = {
+    val message = Option(error.getMessage)
+    // cuDF reports the error category but not which fused node produced it.
+    val site = message match {
+      case Some(JIT_DIVISION_BY_ZERO_MESSAGE) =>
+        sites.find(site => site.kind == AstJitErrorKind.IntegralDivide ||
+          site.kind == AstJitErrorKind.IntegralRemainder)
+      case Some(JIT_OVERFLOW_MESSAGE) =>
+        sites.find(_.kind != AstJitErrorKind.IntegralRemainder)
+      case _ => None
+    }
+    (message, site) match {
       case (Some(JIT_DIVISION_BY_ZERO_MESSAGE),
           Some(AstJitErrorSite(
             AstJitErrorKind.IntegralDivide | AstJitErrorKind.IntegralRemainder, origin))) =>
@@ -1133,7 +1139,7 @@ case class GpuProjectAstExec(
     //   immutable/List.scala#L516
     projectList: List[Expression],
     child: SparkPlan)(
-    val astJitErrorSites: List[Option[AstJitErrorSite]] = Nil
+    val astJitErrorSites: List[List[AstJitErrorSite]] = Nil
 ) extends GpuProjectExecLike {
 
   override def otherCopyArgs: Seq[AnyRef] = astJitErrorSites :: Nil
@@ -1163,7 +1169,7 @@ case class GpuProjectAstExec(
     val boundProjectList = GpuBindReferences.bindGpuReferences(projectList, child.output,
       allMetrics)
     val outputErrorSites = if (astJitErrorSites.isEmpty) {
-      List.fill(boundProjectList.size)(None)
+      List.fill(boundProjectList.size)(List.empty[AstJitErrorSite])
     } else {
       require(astJitErrorSites.size == boundProjectList.size,
         "AST JIT error sites must match the project expressions")
@@ -1307,7 +1313,7 @@ case class GpuProjectAstExec(
 
   private class RetryableCompiledAstExpressions(
       boundProjectList: Seq[GpuExpression],
-      errorSites: Seq[Option[AstJitErrorSite]],
+      errorSites: Seq[Seq[AstJitErrorSite]],
       opTime: GpuMetric,
       compileAstsTime: GpuMetric,
       computeAstsTime: GpuMetric) extends Retryable with AutoCloseable {

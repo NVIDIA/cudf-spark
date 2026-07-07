@@ -342,7 +342,8 @@ case class GpuUnaryMinus(child: Expression, failOnError: Boolean) extends GpuUna
     if (dataType.isInstanceOf[DecimalType]) {
       new ast.JitOperation(ast.JitOperator.NEG, childAst)
     } else if (GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)) {
-      new ast.JitOperation(ast.JitOperator.NEG, ast.JitComplianceMode.ANSI, childAst)
+      new ast.JitOperation(
+        ast.JitOperator.NEG_OVERFLOW, ast.JitErrorPolicy.PROPAGATE, childAst)
     } else {
       val literalZero = dataType match {
         case LongType => ast.Literal.ofLong(0)
@@ -423,7 +424,8 @@ case class GpuAbs(child: Expression, failOnError: Boolean) extends CudfUnaryExpr
     if (dataType.isInstanceOf[DecimalType]) {
       new ast.JitOperation(ast.JitOperator.ABS, childAst)
     } else if (GpuAnsi.shouldUseAnsiArithmeticAst(failOnError, dataType)) {
-      new ast.JitOperation(ast.JitOperator.ABS, ast.JitComplianceMode.ANSI, childAst)
+      new ast.JitOperation(
+        ast.JitOperator.ABS_OVERFLOW, ast.JitErrorPolicy.PROPAGATE, childAst)
     } else {
       super.convertToAst(numFirstTableColumns)
     }
@@ -491,9 +493,9 @@ abstract class GpuAddBase extends CudfBinaryArithmetic with Serializable {
         ast.JitOperator.ADD, left, right, dataType.asInstanceOf[DecimalType],
         numFirstTableColumns)
     } else if (GpuAnsi.shouldUseCheckedArithmeticAst(failOnError, isTryMode, dataType)) {
-      val mode = if (isTryMode) ast.JitComplianceMode.ANSI_TRY
-        else ast.JitComplianceMode.ANSI
-      new ast.JitOperation(ast.JitOperator.ADD, mode,
+      val errorPolicy = if (isTryMode) ast.JitErrorPolicy.NULLIFY
+        else ast.JitErrorPolicy.PROPAGATE
+      new ast.JitOperation(ast.JitOperator.ADD_OVERFLOW, errorPolicy,
         left.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns),
         right.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns))
     } else {
@@ -601,9 +603,9 @@ abstract class GpuSubtractBase extends CudfBinaryArithmetic with Serializable {
         ast.JitOperator.SUB, left, right, dataType.asInstanceOf[DecimalType],
         numFirstTableColumns)
     } else if (GpuAnsi.shouldUseCheckedArithmeticAst(failOnError, isTryMode, dataType)) {
-      val mode = if (isTryMode) ast.JitComplianceMode.ANSI_TRY
-        else ast.JitComplianceMode.ANSI
-      new ast.JitOperation(ast.JitOperator.SUB, mode,
+      val errorPolicy = if (isTryMode) ast.JitErrorPolicy.NULLIFY
+        else ast.JitErrorPolicy.PROPAGATE
+      new ast.JitOperation(ast.JitOperator.SUB_OVERFLOW, errorPolicy,
         left.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns),
         right.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns))
     } else {
@@ -1034,9 +1036,9 @@ case class GpuMultiply(
 
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
     if (GpuAnsi.shouldUseCheckedArithmeticAst(failOnError, tryMode, dataType)) {
-      val mode = if (tryMode) ast.JitComplianceMode.ANSI_TRY
-        else ast.JitComplianceMode.ANSI
-      new ast.JitOperation(ast.JitOperator.MUL, mode,
+      val errorPolicy = if (tryMode) ast.JitErrorPolicy.NULLIFY
+        else ast.JitErrorPolicy.PROPAGATE
+      new ast.JitOperation(ast.JitOperator.MUL_OVERFLOW, errorPolicy,
         left.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns),
         right.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns))
     } else {
@@ -1473,12 +1475,13 @@ abstract class GpuIntegralDivideParent(
     if (GpuAnsi.supportsIntegralDivideAst(left.dataType, right.dataType)) {
       val leftAst = left.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns)
       val rightAst = right.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns)
-      val mode = if (failOnError) {
-        ast.JitComplianceMode.ANSI
+      val errorPolicy = if (failOnError) {
+        ast.JitErrorPolicy.PROPAGATE
       } else {
-        ast.JitComplianceMode.ANSI_TRY
+        ast.JitErrorPolicy.NULLIFY
       }
-      val divide = new ast.JitOperation(ast.JitOperator.DIV, mode, leftAst, rightAst)
+      val divide = new ast.JitOperation(
+        ast.JitOperator.DIV_OVERFLOW, errorPolicy, leftAst, rightAst)
       if (!failOnError && left.dataType == LongType) {
         val minValue = ast.Literal.ofLong(Long.MinValue)
         val lhsIsMin = new ast.BinaryOperation(
@@ -1519,12 +1522,12 @@ abstract class GpuRemainderBase(left: Expression, right: Expression)
 
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
     if (GpuAnsi.supportsRemainderAst(left.dataType, right.dataType)) {
-      val mode = if (failOnError) {
-        ast.JitComplianceMode.ANSI
+      val errorPolicy = if (failOnError) {
+        ast.JitErrorPolicy.PROPAGATE
       } else {
-        ast.JitComplianceMode.ANSI_TRY
+        ast.JitErrorPolicy.NULLIFY
       }
-      new ast.JitOperation(ast.JitOperator.MOD, mode,
+      new ast.JitOperation(ast.JitOperator.MOD_OVERFLOW, errorPolicy,
         left.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns),
         right.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns))
     } else {

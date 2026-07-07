@@ -1622,12 +1622,38 @@ def test_ansi_jit_later_output_error_after_oom():
         gpu_error_pattern)
 
 @_requires_libcudf_jit
-def test_ansi_jit_multiple_fallible_nodes_fall_back_from_ast():
-    assert_gpu_ast(False,
-        lambda spark: spark.createDataFrame(
-            [(1, 2)] * 8,
-            'a INT, b INT').selectExpr('(a + 1) * (b + 1)'),
-        conf=_ansi_jit_ast_enabled_conf)
+@validate_execs_in_gpu_plan('GpuProjectAstExec')
+def test_ansi_jit_nested_fallible_nodes_report_overflow():
+    ast_conf = copy_and_update(
+        _ansi_jit_ast_enabled_conf,
+        _project_ast_enabled_conf,
+        {"spark.rapids.sql.test.injectRetryOOM": "false"})
+    df_fun = lambda spark: spark.createDataFrame(
+        [(INT_MAX, 1, 1)] * 8,
+        'a INT, b INT, c INT').selectExpr('(a + b) * c').collect()
+    assert_spark_exception(
+        lambda: with_cpu_session(df_fun, ast_conf),
+        '[ARITHMETIC_OVERFLOW]')
+    assert_spark_exception(
+        lambda: with_gpu_session(df_fun, ast_conf),
+        '[ARITHMETIC_OVERFLOW]')
+
+@_requires_libcudf_jit
+@validate_execs_in_gpu_plan('GpuProjectAstExec')
+def test_ansi_jit_nested_fallible_nodes_report_division_by_zero():
+    ast_conf = copy_and_update(
+        _ansi_jit_ast_enabled_conf,
+        _project_ast_enabled_conf,
+        {"spark.rapids.sql.test.injectRetryOOM": "false"})
+    df_fun = lambda spark: spark.createDataFrame(
+        [(1, 2, 0)] * 8,
+        'a INT, b INT, c INT').selectExpr('(a + b) DIV c').collect()
+    assert_spark_exception(
+        lambda: with_cpu_session(df_fun, ast_conf),
+        '[DIVIDE_BY_ZERO]')
+    assert_spark_exception(
+        lambda: with_gpu_session(df_fun, ast_conf),
+        '[DIVIDE_BY_ZERO]')
 
 @_requires_libcudf_jit
 @validate_execs_in_gpu_plan('GpuProjectExec')

@@ -872,6 +872,17 @@ distribution. The results are not bit-for-bit identical with the Apache Spark im
 `approximate_percentile`. This feature is enabled by default and can be disabled by setting
 `spark.rapids.sql.expression.ApproximatePercentile=false`.
 
+## Project AST JIT ANSI error reporting
+
+Project AST JIT support for ANSI integral arithmetic is experimental and disabled by default. When
+an output expression contains multiple operations that can fail, cuDF reports the error category
+but not which operation produced it. The GPU reports the same Spark error category, such as
+`ARITHMETIC_OVERFLOW` or `DIVIDE_BY_ZERO`, but its error message and query context can identify a
+different operation in the fused expression than Spark CPU. Successful results are unaffected.
+
+This limitation applies when `spark.rapids.sql.projectAstAnsiArithmeticEnabled` is enabled. Disable
+that configuration when exact ANSI error messages and query context are required.
+
 ## Conditionals and operations with side effects (ANSI mode)
 
 In Apache Spark condition operations like `if`, `coalesce`, and `case/when` lazily evaluate

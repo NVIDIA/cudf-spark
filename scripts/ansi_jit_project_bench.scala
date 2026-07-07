@@ -518,9 +518,9 @@ object AnsiJitProjectBench {
 
   def makePchProbeQuery(): DataFrame = {
     val input = spark.read.parquet(dataPath).limit(1)
-    input.select(
-      (((col("l3") + typedLit(104729L, LongType)) * typedLit(37L, LongType)) - col("l2"))
-        .as("__pch_probe"))
+    input.select(expr(
+      "try_subtract(try_multiply(try_add(l3, cast(104729 as BIGINT)), " +
+        "cast(37 as BIGINT)), l2)").as("__pch_probe"))
   }
 
   def flattenPlan(plan: SparkPlan): Seq[SparkPlan] =
@@ -638,10 +638,11 @@ object AnsiJitProjectBench {
       s"Unknown BENCH_CONSUME_MODE=$other. Expected plan or aggregate.")
   }
 
-  def requireAstProject(mode: Mode, plan: SparkPlan): String = {
+  def requireAstProject(mode: Mode, exprSuite: String, plan: SparkPlan): String = {
     val nodes = projectNodeNames(plan)
+    val projectElided = Set("literal", "duplicate_literal").contains(exprSuite) && nodes == "none"
     if (requireAstForJit && mode.jitCacheState != "none" &&
-        !nodes.contains("GpuProjectAstExec")) {
+        !projectElided && !nodes.contains("GpuProjectAstExec")) {
       val head = plan.treeString.split('\n').take(8).mkString(" | ")
       throw new IllegalStateException(
         s"${mode.name} expected GpuProjectAstExec but ran $nodes. " +
@@ -661,7 +662,7 @@ object AnsiJitProjectBench {
       val startNs = System.nanoTime()
       val (rowsSeen, _, plan) = consume(makePchProbeQuery(), label)
       val wallMs = (System.nanoTime() - startNs).toDouble / 1000000.0
-      val nodes = requireAstProject(mode, plan)
+      val nodes = requireAstProject(mode, exprSuite, plan)
       if (printPlan) {
         println(s"plan[$label]:")
         println(plan.treeString)
@@ -696,7 +697,7 @@ object AnsiJitProjectBench {
       val projectNonCompileMs = math.max(0.0, projectMs - compileAstsMs)
       val projectOtherMs = math.max(0.0, projectMs - compileAstsMs - computeAstsMs)
       val allGpuMs = metricValueByKeyOrName(plan, "opTime", "op time").toDouble / 1000000.0
-      val nodes = requireAstProject(mode, plan)
+      val nodes = requireAstProject(mode, exprSuite, plan)
       val head = plan.treeString.split('\n').take(8).mkString(" | ")
       if (printPlan) {
         println(s"plan[$label]:")

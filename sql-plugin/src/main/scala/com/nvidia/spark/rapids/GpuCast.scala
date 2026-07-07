@@ -358,13 +358,13 @@ object GpuCast {
       childAst: ast.AstExpression,
       precision: Int,
       ansiMode: Boolean): ast.AstExpression = {
-    val mode = if (ansiMode) {
-      ast.JitComplianceMode.ANSI
+    val errorPolicy = if (ansiMode) {
+      ast.JitErrorPolicy.PROPAGATE
     } else {
-      ast.JitComplianceMode.ANSI_TRY
+      ast.JitErrorPolicy.NULLIFY
     }
-    new ast.JitOperation(ast.JitOperator.PRECISION_CHECK,
-      mode,
+    new ast.JitOperation(ast.JitOperator.CHECK_PRECISION,
+      errorPolicy,
       childAst,
       ast.Literal.ofInt(precision))
   }

@@ -36,7 +36,7 @@ class GpuProjectAstSuite extends AnyFunSuite {
     val productErrorSite = AstJitErrorSite(AstJitErrorKind.Multiply, product.origin)
 
     val plan = GpuProjectAstExec.planOutputs(
-      expressions, Seq(None, Some(sumErrorSite), None, Some(productErrorSite), None))
+      expressions, Seq(Seq.empty, Seq(sumErrorSite), Seq.empty, Seq(productErrorSite), Seq.empty))
 
     assert(plan.outputSources == Seq(
       GpuProjectAstExec.AstInputColumn(1),
@@ -45,8 +45,23 @@ class GpuProjectAstSuite extends AnyFunSuite {
       GpuProjectAstExec.AstComputedColumn(1),
       GpuProjectAstExec.AstInputColumn(1)))
     assert(plan.expressionsToCompute == Seq(sum, product))
-    assert(plan.errorSitesToCompute == Seq(Some(sumErrorSite), Some(productErrorSite)))
+    assert(plan.errorSitesToCompute == Seq(Seq(sumErrorSite), Seq(productErrorSite)))
     assert(!plan.allPassThrough)
+  }
+
+  test("AST output planning preserves nested error sites") {
+    val a = GpuBoundReference(0, LongType, nullable = true)(NamedExpression.newExprId, "a")
+    val b = GpuBoundReference(1, LongType, nullable = true)(NamedExpression.newExprId, "b")
+    val sum = GpuAdd(a, b, failOnError = true)()
+    val product = GpuMultiply(sum, b, failOnError = true)()
+    val nested = GpuAlias(product, "nested")()
+    val errorSites = Seq(
+      AstJitErrorSite(AstJitErrorKind.Multiply, product.origin),
+      AstJitErrorSite(AstJitErrorKind.Add, sum.origin))
+
+    val plan = GpuProjectAstExec.planOutputs(Seq(nested), Seq(errorSites))
+
+    assert(plan.errorSitesToCompute == Seq(errorSites))
   }
 
   test("AST output planning reuses equivalent computed expressions") {
@@ -59,7 +74,8 @@ class GpuProjectAstSuite extends AnyFunSuite {
     val passB = GpuAlias(b, "pass_b")()
     val expressions = Seq(sum, passB, product, reversedSum, duplicateSum)
 
-    val plan = GpuProjectAstExec.planOutputs(expressions, Seq.fill(expressions.size)(None))
+    val plan = GpuProjectAstExec.planOutputs(
+      expressions, Seq.fill(expressions.size)(Seq.empty[AstJitErrorSite]))
 
     assert(plan.outputSources == Seq(
       GpuProjectAstExec.AstComputedColumn(0),
@@ -68,7 +84,7 @@ class GpuProjectAstSuite extends AnyFunSuite {
       GpuProjectAstExec.AstComputedColumn(0),
       GpuProjectAstExec.AstComputedColumn(0)))
     assert(plan.expressionsToCompute == Seq(sum, product))
-    assert(plan.errorSitesToCompute == Seq(None, None))
+    assert(plan.errorSitesToCompute == Seq(Seq.empty, Seq.empty))
   }
 
   test("AST output planning projects top-level literals without JIT") {
@@ -82,7 +98,7 @@ class GpuProjectAstSuite extends AnyFunSuite {
     val expressions = Seq(a, literal, duplicateLiteral, nestedLiteral, forcedErrorLiteral)
 
     val plan = GpuProjectAstExec.planOutputs(
-      expressions, Seq(None, None, None, None, Some(errorSite)))
+      expressions, Seq(Seq.empty, Seq.empty, Seq.empty, Seq.empty, Seq(errorSite)))
 
     assert(plan.outputSources == Seq(
       GpuProjectAstExec.AstInputColumn(0),
@@ -92,7 +108,7 @@ class GpuProjectAstSuite extends AnyFunSuite {
       GpuProjectAstExec.AstComputedColumn(1)))
     assert(plan.literalsToProject == Seq(literal))
     assert(plan.expressionsToCompute == Seq(nestedLiteral, forcedErrorLiteral))
-    assert(plan.errorSitesToCompute == Seq(None, Some(errorSite)))
+    assert(plan.errorSitesToCompute == Seq(Seq.empty, Seq(errorSite)))
     assert(!plan.allPassThrough)
   }
 
@@ -110,15 +126,15 @@ class GpuProjectAstSuite extends AnyFunSuite {
       Seq(checkedSum, duplicateCheckedSum, nondeterministic, duplicateNondeterministic)
 
     val plan = GpuProjectAstExec.planOutputs(
-      expressions, Seq(Some(firstErrorSite), Some(secondErrorSite), None, None))
+      expressions, Seq(Seq(firstErrorSite), Seq(secondErrorSite), Seq.empty, Seq.empty))
 
     assert(plan.outputSources == expressions.indices.map(GpuProjectAstExec.AstComputedColumn))
     assert(plan.expressionsToCompute == expressions)
     assert(plan.errorSitesToCompute ==
-      Seq(Some(firstErrorSite), Some(secondErrorSite), None, None))
+      Seq(Seq(firstErrorSite), Seq(secondErrorSite), Seq.empty, Seq.empty))
 
     val uncheckedPlan = GpuProjectAstExec.planOutputs(
-      Seq(checkedSum, duplicateCheckedSum), Seq(None, None))
+      Seq(checkedSum, duplicateCheckedSum), Seq(Seq.empty, Seq.empty))
     assert(uncheckedPlan.expressionsToCompute == Seq(checkedSum, duplicateCheckedSum))
   }
 
@@ -128,7 +144,7 @@ class GpuProjectAstSuite extends AnyFunSuite {
     val errorSite = AstJitErrorSite(AstJitErrorKind.Add, passA.origin)
 
     val error = intercept[IllegalArgumentException] {
-      GpuProjectAstExec.planOutputs(Seq(passA), Seq(Some(errorSite)))
+      GpuProjectAstExec.planOutputs(Seq(passA), Seq(Seq(errorSite)))
     }
 
     assert(error.getMessage.contains("Pass-through AST outputs cannot have error sites"))
@@ -139,7 +155,8 @@ class GpuProjectAstSuite extends AnyFunSuite {
     val b = GpuBoundReference(1, LongType, nullable = true)(NamedExpression.newExprId, "b")
     val expressions = Seq(GpuAlias(b, "b")(), GpuAlias(a, "a")(), GpuAlias(b, "b2")())
 
-    val plan = GpuProjectAstExec.planOutputs(expressions, Seq.fill(expressions.size)(None))
+    val plan = GpuProjectAstExec.planOutputs(
+      expressions, Seq.fill(expressions.size)(Seq.empty[AstJitErrorSite]))
 
     assert(plan.allPassThrough)
     assert(plan.outputSources == Seq(
