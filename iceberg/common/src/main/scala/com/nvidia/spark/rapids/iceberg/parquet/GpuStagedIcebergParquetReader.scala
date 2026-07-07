@@ -52,6 +52,7 @@ import com.nvidia.spark.rapids.GpuMetric.{
 import com.nvidia.spark.rapids.SpillPriorities.ACTIVE_BATCHING_PRIORITY
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
 import com.nvidia.spark.rapids.iceberg.parquet.staged._
+import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile
 import com.nvidia.spark.rapids.parquet.{
   CpuCompressionConfig,
   MakeParquetTableProducer,
@@ -65,26 +66,25 @@ import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /**
- * Iceberg adapter for the staged Parquet partition reader.
+ * Iceberg callbacks and GPU decode for the staged Parquet partition reader.
  *
- * Most of the new pipeline is Java. This small Scala boundary intentionally remains beside the
- * existing Iceberg reader because it invokes Scala-native RAPIDS decode and post-processing APIs.
- * Footer loading/filtering, source-file I/O, and synthetic-file finalization run in one shared
- * executor-wide pool. Planning runs on the Spark task thread, each source file is still read as an
- * independent job, and this adapter's decode method is called only by the Spark task thread.
+ * The Java reader owns scheduling, I/O, and output lifetime. This small callback boundary remains
+ * because footer filtering and GPU decode use existing Scala APIs. Admission operates on whole
+ * subtasks across the executor; all source files within an admitted subtask still read
+ * concurrently.
  */
 class GpuStagedIcebergParquetReader(
     val rapidsFileIO: IcebergFileIO,
     val files: Seq[IcebergPartitionedFile],
     val constantsProvider: IcebergPartitionedFile => JMap[Integer, _],
     override val conf: GpuIcebergParquetReaderConf,
-    workerThreads: Int) extends GpuIcebergParquetReader {
+    workerThreads: Int,
+    maxConcurrentSubtasks: Int) extends GpuIcebergParquetReader {
 
   private val multiThreadConf = conf.threadConf.asInstanceOf[MultiThread]
   private val expectedSparkSchema = SparkSchemaUtil.convert(conf.expectedSchema)
   private val closed = new AtomicBoolean()
-  private val stagedReaderRef = new AtomicReference[
-    StagedParquetPartitionReader[IcebergPartitionedFile, IcebergFooterContext]]()
+  private val stagedReaderRef = new AtomicReference[StagedParquetPartitionReader]()
   private lazy val stagedReader = {
     val reader = createReader()
     stagedReaderRef.set(reader)
@@ -106,15 +106,10 @@ class GpuStagedIcebergParquetReader(
   }
 
   private def createReader()
-  : StagedParquetPartitionReader[IcebergPartitionedFile, IcebergFooterContext] = {
-    val stagedFiles: JList[StagedScanFile[IcebergPartitionedFile]] =
-      files.zipWithIndex.map { case (file, ordinal) =>
-        val source = new StagedFileSource(
-          ordinal,
-          file.path,
-          file.sparkPartitionedFile,
-          () => rapidsFileIO.newInputFile(file.file.getDelegate.location()))
-        new StagedScanFile(source, file)
+  : StagedParquetPartitionReader = {
+    val stagedFiles: JList[StagedFileSource] =
+      files.map { file =>
+        new StagedFileSource(file)
       }.asJava
 
     val targetParquetBytes = if (multiThreadConf.disableCombining) {
@@ -131,22 +126,16 @@ class GpuStagedIcebergParquetReader(
       conf.maxBatchSizeBytes,
       targetParquetBytes,
       workerThreads,
+      maxConcurrentSubtasks,
       scratchBytes,
       TaskContext.get())
   }
 
-  /**
-   * Format-specific state and operations kept at the edge of the format-neutral Java pipeline.
-   * Footer contexts are immutable after construction; only their post-processor is stateful, and
-   * it is called exclusively from the task thread. The outer reader has already rejected `_pos`,
-   * whose row-order state is incompatible with completion-order decode in this first version.
-   */
-  private class IcebergAdapter
-      extends StagedScanAdapter[IcebergPartitionedFile, IcebergFooterContext] {
+  /** Scala operations invoked by the Iceberg-specific Java pipeline. */
+  private class IcebergAdapter extends StagedScanAdapter {
 
-    override def readAndFilterFooter(file: StagedScanFile[IcebergPartitionedFile])
-    : FooterResult[IcebergFooterContext] = {
-      val icebergFile = file.getFormatFile
+    override def readAndFilterFooter(file: StagedFileSource): FooterResult = {
+      val icebergFile = file.getIcebergFile
       val (parquetInfo, shadedFileReadSchema) =
         filterParquetBlocks(icebergFile, conf.expectedSchema)
       val postProcessor = new GpuParquetReaderPostProcessor(
@@ -155,48 +144,47 @@ class GpuStagedIcebergParquetReader(
         conf.expectedSchema,
         shadedFileReadSchema,
         conf.metrics)
-      val context = new IcebergFooterContext(
-        icebergFile, parquetInfo, shadedFileReadSchema, postProcessor)
-
       new FooterResult(
-        file.getSource,
+        file,
         parquetInfo.blocks.toList.asJava,
         parquetInfo.schema,
         parquetInfo.readSchema,
-        parquetInfo.blocksFirstRowIndices.map(Long.box).toList.asJava,
         parquetInfo.dateRebaseMode,
         parquetInfo.timestampRebaseMode,
         parquetInfo.hasInt96Timestamps,
-        context)
+        postProcessor)
+    }
+
+    override def openInputFile(file: StagedFileSource): RapidsInputFile = {
+      rapidsFileIO.newInputFile(file.getIcebergFile.file.getDelegate.location())
     }
 
     override def canCombine(
-        left: FooterResult[IcebergFooterContext],
-        right: FooterResult[IcebergFooterContext]): Boolean = {
+        left: FooterResult,
+        right: FooterResult): Boolean = {
       left.getClippedSchema == right.getClippedSchema &&
         left.getReadSchema == right.getReadSchema &&
         left.getDateRebaseMode == right.getDateRebaseMode &&
         left.getTimestampRebaseMode == right.getTimestampRebaseMode &&
         left.hasInt96Timestamps() == right.hasInt96Timestamps() &&
-        left.getContext.getPostProcessor.compatibleForCombining(
-          right.getContext.getPostProcessor)
+        left.getPostProcessor.compatibleForCombining(right.getPostProcessor)
     }
 
     override def estimateGpuBytes(
-        footer: FooterResult[IcebergFooterContext],
+        footer: FooterResult,
         rowCount: Long): Long = {
       GpuBatchUtils.estimateGpuMemory(expectedSparkSchema, rowCount)
     }
 
     override def onFooterCompleted(
-        footer: FooterResult[IcebergFooterContext],
+        footer: FooterResult,
         footerNanos: Long): Unit = {
       conf.metrics.get(FILTER_TIME).foreach(_ += footerNanos)
       conf.metrics.get(ICEBERG_STAGED_FOOTER_TIME).foreach(_ += footerNanos)
     }
 
     override def onSubtaskCompleted(
-        subtask: ReadSubtask[IcebergFooterContext],
+        subtask: ReadSubtask,
         stats: SubtaskStats): Unit = {
       conf.metrics.get(BUFFER_TIME).foreach(_ += stats.getIoNanos + stats.getCombineNanos)
       conf.metrics.get(ICEBERG_STAGED_IO_TIME).foreach(_ += stats.getIoNanos)
@@ -214,7 +202,7 @@ class GpuStagedIcebergParquetReader(
     }
 
     override def onMaterializationCompleted(
-        subtask: ReadSubtask[IcebergFooterContext],
+        subtask: ReadSubtask,
         materializationNanos: Long): Unit = {
       conf.metrics.get(ICEBERG_STAGED_MATERIALIZATION_TIME).foreach(_ += materializationNanos)
     }
@@ -234,10 +222,10 @@ class GpuStagedIcebergParquetReader(
     }
 
     override def decodeAndPostProcess(
-        subtask: ReadSubtask[IcebergFooterContext],
+        subtask: ReadSubtask,
         parquetData: HostMemoryBuffer): JIterator[ColumnarBatch] = {
       val firstFooter = subtask.getSegments.get(0).getFooter
-      val context = firstFooter.getContext
+      val postProcessor = firstFooter.getPostProcessor
       val readSchema = firstFooter.getReadSchema
       val clippedSchema = firstFooter.getClippedSchema
 
@@ -247,7 +235,7 @@ class GpuStagedIcebergParquetReader(
         val emptyInput = new ColumnarBatch(
           Array.empty[org.apache.spark.sql.vectorized.ColumnVector],
           Math.toIntExact(subtask.getRowCount))
-        val processed = context.getPostProcessor.process(emptyInput)
+        val processed = postProcessor.process(emptyInput)
         return new CloseableJavaBatchIterator(
           new SingleGpuColumnarBatchIterator(processed))
       }
@@ -261,7 +249,7 @@ class GpuStagedIcebergParquetReader(
       val decoded = withResource(stagedInput) { input =>
         val parseOptions = stagedParquetOptions(readSchema, clippedSchema)
         val splits = subtask.getSegments.asScala
-          .map(_.getFooter.getSource.getPartitionedFile)
+          .map(_.getFooter.getSource.getIcebergFile.sparkPartitionedFile)
           .toArray
         RmmRapidsRetryIterator.withRetryNoSplit[Iterator[ColumnarBatch]] {
           GpuSemaphore.acquireIfNecessary(TaskContext.get())
@@ -287,12 +275,8 @@ class GpuStagedIcebergParquetReader(
           CachedGpuBatchIterator(producer, readSchema.fields.map(_.dataType))
         }
       }
-      new PostProcessingJavaBatchIterator(decoded, context.getPostProcessor)
+      new PostProcessingJavaBatchIterator(decoded, postProcessor)
     }
-
-    override def closeContext(context: IcebergFooterContext): Unit = {}
-
-    override def close(): Unit = {}
   }
 
   /**

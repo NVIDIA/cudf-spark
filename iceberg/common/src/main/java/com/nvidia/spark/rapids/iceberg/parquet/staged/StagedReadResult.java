@@ -26,11 +26,9 @@ import java.util.Objects;
  * completion queue transfers the result to the task thread, which must close it after GPU decode.
  * Reader cancellation closes queued or in-flight results instead. Close is idempotent so those
  * paths may converge safely.</p>
- *
- * @param <C> format context borrowed by the associated read subtask
  */
-public final class StagedReadResult<C> implements AutoCloseable {
-  private final ReadSubtask<C> subtask;
+public final class StagedReadResult implements AutoCloseable {
+  private final ReadSubtask subtask;
   private final StagedParquetOutput output;
   private final SubtaskStats stats;
   private boolean closed;
@@ -43,7 +41,7 @@ public final class StagedReadResult<C> implements AutoCloseable {
    * @param stats immutable I/O and combine measurements
    */
   public StagedReadResult(
-      ReadSubtask<C> subtask,
+      ReadSubtask subtask,
       StagedParquetOutput output,
       SubtaskStats stats) {
     this.subtask = Objects.requireNonNull(subtask, "subtask");
@@ -52,34 +50,22 @@ public final class StagedReadResult<C> implements AutoCloseable {
     if (!output.isSealed()) {
       throw new IllegalArgumentException("a staged read result requires a sealed output");
     }
-    if (stats.stagedBytes() != output.sizeBytes()) {
+    if (stats.getStagedBytes() != output.sizeBytes()) {
       throw new IllegalArgumentException(
           "subtask stats byte count does not match the sealed output size");
     }
-    if (stats.backingStore() != output.backingStore()) {
+    if (stats.getBackingStore() != output.backingStore()) {
       throw new IllegalArgumentException(
           "subtask stats backing store does not match the sealed output");
     }
   }
 
-  public ReadSubtask<C> subtask() {
+  public ReadSubtask getSubtask() {
     return subtask;
-  }
-
-  public ReadSubtask<C> getSubtask() {
-    return subtask;
-  }
-
-  public StagedParquetOutput output() {
-    return output;
   }
 
   public StagedParquetOutput getOutput() {
     return output;
-  }
-
-  public SubtaskStats stats() {
-    return stats;
   }
 
   public SubtaskStats getStats() {

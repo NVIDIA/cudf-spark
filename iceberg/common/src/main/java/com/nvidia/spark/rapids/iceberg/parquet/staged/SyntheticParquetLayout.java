@@ -21,8 +21,6 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 
-import org.apache.parquet.hadoop.metadata.BlockMetaData;
-
 /**
  * Exact immutable layout of one synthetic Parquet file.
  *
@@ -32,13 +30,12 @@ import org.apache.parquet.hadoop.metadata.BlockMetaData;
  * little-endian length, and the final {@code PAR1} magic. Consequently
  * {@code totalSizeBytes} is an exact allocation size rather than an estimate.</p>
  *
- * <p>The adjusted row-group metadata points at synthetic-file offsets and is read-only after
- * publication. Byte arrays are defensively copied on construction and access. Sizes and offsets
- * are bytes.</p>
+ * <p>The builder serializes adjusted row-group metadata directly into the footer; the runtime
+ * layout only retains bytes and copy instructions needed by I/O workers. Byte arrays are
+ * defensively copied on construction and access. Sizes and offsets are bytes.</p>
  */
 public final class SyntheticParquetLayout {
   private final List<PlannedReadRange> ranges;
-  private final List<BlockMetaData> adjustedBlocks;
   private final byte[] headerBytes;
   private final byte[] footerAndTrailerBytes;
   private final long dataSizeBytes;
@@ -46,13 +43,11 @@ public final class SyntheticParquetLayout {
 
   public SyntheticParquetLayout(
       List<PlannedReadRange> ranges,
-      List<BlockMetaData> adjustedBlocks,
       byte[] headerBytes,
       byte[] footerAndTrailerBytes,
       long dataSizeBytes,
       long totalSizeBytes) {
     this.ranges = immutableCopy(ranges, "ranges");
-    this.adjustedBlocks = immutableCopy(adjustedBlocks, "adjustedBlocks");
     this.headerBytes = Objects.requireNonNull(headerBytes, "headerBytes").clone();
     this.footerAndTrailerBytes = Objects.requireNonNull(
         footerAndTrailerBytes, "footerAndTrailerBytes").clone();
@@ -94,10 +89,6 @@ public final class SyntheticParquetLayout {
 
   public List<PlannedReadRange> getRanges() {
     return ranges;
-  }
-
-  public List<BlockMetaData> getAdjustedBlocks() {
-    return adjustedBlocks;
   }
 
   public byte[] getHeaderBytes() {

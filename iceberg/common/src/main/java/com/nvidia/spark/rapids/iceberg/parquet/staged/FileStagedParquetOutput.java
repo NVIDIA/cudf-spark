@@ -93,13 +93,13 @@ final class FileStagedParquetOutput extends AbstractStagedParquetOutput {
       List<RapidsInputFile.CopyRange> copies = new java.util.ArrayList<>(ranges.size());
       for (PlannedReadRange range : ranges) {
         Objects.requireNonNull(range, "range");
-        checkWriteBounds(range.outputOffset(), range.length());
-        if (range.sourceOffset() < 0) {
+        checkWriteBounds(range.getOutputOffset(), range.getLength());
+        if (range.getInputOffset() < 0) {
           throw new IllegalArgumentException(
-              "source offset must be non-negative: " + range.sourceOffset());
+              "source offset must be non-negative: " + range.getInputOffset());
         }
         copies.add(new RapidsInputFile.CopyRange(
-            range.sourceOffset(), range.length(), range.outputOffset()));
+            range.getInputOffset(), range.getLength(), range.getOutputOffset()));
       }
 
       // PerfIO schedules the CopyRanges concurrently. Keep one range per column chunk and make a
@@ -107,7 +107,7 @@ final class FileStagedParquetOutput extends AbstractStagedParquetOutput {
       input.readVectored(mappedBuffer, copies);
       for (PlannedReadRange range : ranges) {
         observer.rangeCopied(
-            range, mappedBuffer.slice(range.outputOffset(), range.length()));
+            range, mappedBuffer.slice(range.getOutputOffset(), range.getLength()));
       }
     } finally {
       endConcurrentWrite();

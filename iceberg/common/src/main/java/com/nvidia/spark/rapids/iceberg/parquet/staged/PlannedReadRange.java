@@ -50,17 +50,7 @@ public final class PlannedReadRange {
     return source;
   }
 
-  /** Alias used by the staged storage implementation. */
-  public StagedFileSource source() {
-    return source;
-  }
-
   public long getInputOffset() {
-    return inputOffset;
-  }
-
-  /** Alias that emphasizes that this offset addresses the source file. */
-  public long sourceOffset() {
     return inputOffset;
   }
 
@@ -68,17 +58,7 @@ public final class PlannedReadRange {
     return length;
   }
 
-  /** Compact alias used while translating ranges for vectored I/O. */
-  public long length() {
-    return length;
-  }
-
   public long getOutputOffset() {
-    return outputOffset;
-  }
-
-  /** Compact alias used by memory- and file-backed staged outputs. */
-  public long outputOffset() {
     return outputOffset;
   }
 }

@@ -24,43 +24,38 @@ import java.util.Objects;
 /**
  * Immutable unit of asynchronous I/O, finalization, and subsequent GPU decode.
  *
- * <p>Segments retain stable input order and borrow their footer contexts. The layout is exact and
- * can be safely published with this object to I/O and combine workers. {@code subtaskId} is unique
- * only within one partition read plan. Row counts are rows and byte fields are bytes.</p>
- *
- * @param <C> format-specific footer context
+ * <p>Segments retain stable input order and borrow their Iceberg footer state. The layout is
+ * exact and can be safely published with this object to I/O and combine workers.
+ * {@code subtaskId} is unique only within one partition read plan. Row counts are rows.</p>
  */
-public final class ReadSubtask<C> {
+public final class ReadSubtask {
   private final long subtaskId;
-  private final List<ReadSegment<C>> segments;
+  private final List<ReadSegment> segments;
   private final SyntheticParquetLayout layout;
   private final long rowCount;
-  private final long estimatedGpuBytes;
 
   public ReadSubtask(
       long subtaskId,
-      List<ReadSegment<C>> segments,
+      List<ReadSegment> segments,
       SyntheticParquetLayout layout,
-      long rowCount,
-      long estimatedGpuBytes) {
+      long rowCount) {
     if (subtaskId < 0) {
       throw new IllegalArgumentException("subtaskId must be non-negative");
     }
-    if (rowCount < 0 || estimatedGpuBytes < 0) {
-      throw new IllegalArgumentException("row and byte counts must be non-negative");
+    if (rowCount < 0) {
+      throw new IllegalArgumentException("rowCount must be non-negative");
     }
     this.subtaskId = subtaskId;
     this.segments = immutableCopy(segments);
     this.layout = Objects.requireNonNull(layout, "layout");
     this.rowCount = rowCount;
-    this.estimatedGpuBytes = estimatedGpuBytes;
     if (this.segments.isEmpty()) {
       throw new IllegalArgumentException("a read subtask must contain at least one segment");
     }
 
     long segmentRows = 0L;
     long segmentDataBytes = 0L;
-    for (ReadSegment<C> segment : this.segments) {
+    for (ReadSegment segment : this.segments) {
       segmentRows = Math.addExact(segmentRows, segment.getRowCount());
       segmentDataBytes = Math.addExact(segmentDataBytes, segment.getDataSizeBytes());
     }
@@ -73,9 +68,9 @@ public final class ReadSubtask<C> {
     }
   }
 
-  private static <C> List<ReadSegment<C>> immutableCopy(List<ReadSegment<C>> values) {
+  private static List<ReadSegment> immutableCopy(List<ReadSegment> values) {
     Objects.requireNonNull(values, "segments");
-    ArrayList<ReadSegment<C>> copy = new ArrayList<>(values);
+    ArrayList<ReadSegment> copy = new ArrayList<>(values);
     if (copy.contains(null)) {
       throw new IllegalArgumentException("segments must not contain null values");
     }
@@ -86,7 +81,7 @@ public final class ReadSubtask<C> {
     return subtaskId;
   }
 
-  public List<ReadSegment<C>> getSegments() {
+  public List<ReadSegment> getSegments() {
     return segments;
   }
 
@@ -96,9 +91,5 @@ public final class ReadSubtask<C> {
 
   public long getRowCount() {
     return rowCount;
-  }
-
-  public long getEstimatedGpuBytes() {
-    return estimatedGpuBytes;
   }
 }

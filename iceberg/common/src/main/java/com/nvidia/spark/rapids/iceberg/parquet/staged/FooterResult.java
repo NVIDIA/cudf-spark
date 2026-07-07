@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.Objects;
 
 import com.nvidia.spark.rapids.DateTimeRebaseMode;
+import com.nvidia.spark.rapids.iceberg.parquet.GpuParquetReaderPostProcessor;
 import org.apache.parquet.hadoop.metadata.BlockMetaData;
 import org.apache.parquet.schema.MessageType;
 import org.apache.spark.sql.types.StructType;
@@ -34,22 +35,19 @@ import org.apache.spark.sql.types.StructType;
  * are treated as immutable by this pipeline; the synthetic-layout builder creates new metadata
  * rather than mutating them.</p>
  *
- * <p>{@code blockFirstRowIndices} contains the file-global zero-based row index for each matching
- * block. It has exactly the same cardinality and order as {@code blocks}. The partition reader
- * owns {@code context} for its lifetime; segments and subtasks borrow it and must not close it.</p>
- *
- * @param <C> format-specific footer context
+ * <p>This first implementation is deliberately Iceberg-specific. The post-processor contains the
+ * schema-evolution and partition-constant work that must run after cuDF decodes a subtask. It is
+ * borrowed by planned segments and remains task-confined during decode.</p>
  */
-public final class FooterResult<C> {
+public final class FooterResult {
   private final StagedFileSource source;
   private final List<BlockMetaData> blocks;
   private final MessageType clippedSchema;
   private final StructType readSchema;
-  private final List<Long> blockFirstRowIndices;
   private final DateTimeRebaseMode dateRebaseMode;
   private final DateTimeRebaseMode timestampRebaseMode;
   private final boolean hasInt96Timestamps;
-  private final C context;
+  private final GpuParquetReaderPostProcessor postProcessor;
 
   /**
    * Creates a fully filtered footer result.
@@ -58,47 +56,29 @@ public final class FooterResult<C> {
    * @param blocks filtered blocks in original file order
    * @param clippedSchema unshaded physical Parquet schema for the copied columns
    * @param readSchema Spark schema materialized by the Parquet decoder
-   * @param blockFirstRowIndices file-global first row index for each block
    * @param dateRebaseMode date rebase behavior used during decode
    * @param timestampRebaseMode timestamp rebase behavior used during decode
    * @param hasInt96Timestamps whether the source can contain INT96 timestamps
-   * @param context format-specific context borrowed by planned subtasks
+   * @param postProcessor Iceberg post-processing state borrowed by planned subtasks
    */
   public FooterResult(
       StagedFileSource source,
       List<BlockMetaData> blocks,
       MessageType clippedSchema,
       StructType readSchema,
-      List<Long> blockFirstRowIndices,
       DateTimeRebaseMode dateRebaseMode,
       DateTimeRebaseMode timestampRebaseMode,
       boolean hasInt96Timestamps,
-      C context) {
+      GpuParquetReaderPostProcessor postProcessor) {
     this.source = Objects.requireNonNull(source, "source");
     this.blocks = immutableCopy(blocks, "blocks");
     this.clippedSchema = Objects.requireNonNull(clippedSchema, "clippedSchema");
     this.readSchema = Objects.requireNonNull(readSchema, "readSchema");
-    this.blockFirstRowIndices = immutableCopy(
-        blockFirstRowIndices, "blockFirstRowIndices");
     this.dateRebaseMode = Objects.requireNonNull(dateRebaseMode, "dateRebaseMode");
     this.timestampRebaseMode = Objects.requireNonNull(
         timestampRebaseMode, "timestampRebaseMode");
     this.hasInt96Timestamps = hasInt96Timestamps;
-    this.context = Objects.requireNonNull(context, "context");
-    if (this.blocks.size() != this.blockFirstRowIndices.size()) {
-      throw new IllegalArgumentException(
-          "blocks and blockFirstRowIndices must have the same size");
-    }
-    long previous = -1L;
-    for (Long index : this.blockFirstRowIndices) {
-      if (index == null || index < 0) {
-        throw new IllegalArgumentException("block first-row indices must be non-negative");
-      }
-      if (index < previous) {
-        throw new IllegalArgumentException("block first-row indices must be ordered");
-      }
-      previous = index;
-    }
+    this.postProcessor = Objects.requireNonNull(postProcessor, "postProcessor");
   }
 
   private static <T> List<T> immutableCopy(List<T> values, String name) {
@@ -126,10 +106,6 @@ public final class FooterResult<C> {
     return readSchema;
   }
 
-  public List<Long> getBlockFirstRowIndices() {
-    return blockFirstRowIndices;
-  }
-
   public DateTimeRebaseMode getDateRebaseMode() {
     return dateRebaseMode;
   }
@@ -142,7 +118,7 @@ public final class FooterResult<C> {
     return hasInt96Timestamps;
   }
 
-  public C getContext() {
-    return context;
+  public GpuParquetReaderPostProcessor getPostProcessor() {
+    return postProcessor;
   }
 }

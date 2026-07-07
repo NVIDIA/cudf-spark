@@ -20,44 +20,48 @@ import java.util.Iterator;
 
 import ai.rapids.cudf.HostMemoryBuffer;
 import com.nvidia.spark.rapids.GpuBatchUtils$;
+import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 
 import org.apache.spark.sql.vectorized.ColumnarBatch;
 
 /**
- * Supplies format-specific operations around the format-neutral staged Parquet pipeline.
+ * Scala callbacks used by the Java Iceberg staged reader.
  *
- * <p>The first implementation is backed by Iceberg, but the two context types deliberately
- * keep Iceberg details out of the planner, I/O, storage, and scheduling classes. Implementations
- * may be called from the Spark task thread and from footer worker threads. They must therefore
- * treat input objects as immutable after publication.</p>
- *
- * @param <F> format-specific input-file context
- * @param <C> format-specific context created while filtering a footer
+ * <p>This is the only abstraction between the Java pipeline and the existing Scala Iceberg
+ * footer/decode code. Footer and input-opening callbacks run on shared workers. Planning,
+ * metrics, and decode callbacks run on the Spark task thread.</p>
  */
-public interface StagedScanAdapter<F, C> extends AutoCloseable {
+public interface StagedScanAdapter {
   /**
    * Fetches and filters the footer for one file or split.
    *
-   * <p>The returned context is owned by the partition reader. It remains alive until the reader
-   * is closed and is only borrowed by read subtasks.</p>
+   * <p>The returned footer contains the Iceberg post-processor needed when its subtask is decoded.
+   * It owns no closeable resource.</p>
    */
-  FooterResult<C> readAndFilterFooter(StagedScanFile<F> file) throws Exception;
+  FooterResult readAndFilterFooter(StagedFileSource file) throws Exception;
+
+  /**
+   * Opens the physical input immediately before an admitted source job reads its column chunks.
+   * Keeping this Iceberg callback lazy avoids constructing S3 clients for files removed by footer
+   * filtering or projections with no physical columns.
+   */
+  RapidsInputFile openInputFile(StagedFileSource file) throws Exception;
 
   /** Reports footer/filter worker time on the Spark task thread after the footer barrier. */
-  default void onFooterCompleted(FooterResult<C> footer, long footerNanos) {
+  default void onFooterCompleted(FooterResult footer, long footerNanos) {
   }
 
   /**
    * Returns whether row groups from two footer results may share one synthetic Parquet file.
    * This method executes on the Spark task thread during planning.
    */
-  boolean canCombine(FooterResult<C> left, FooterResult<C> right);
+  boolean canCombine(FooterResult left, FooterResult right);
 
   /**
    * Estimates the final decoded bytes used for planning GPU-sized subtasks. Formats that add
    * columns after Parquet decode should override this physical-read-schema default.
    */
-  default long estimateGpuBytes(FooterResult<C> footer, long rowCount) {
+  default long estimateGpuBytes(FooterResult footer, long rowCount) {
     return GpuBatchUtils$.MODULE$.estimateGpuMemory(footer.getReadSchema(), rowCount);
   }
 
@@ -69,19 +73,19 @@ public interface StagedScanAdapter<F, C> extends AutoCloseable {
    * normal RAPIDS iterator lifecycle.</p>
    */
   Iterator<ColumnarBatch> decodeAndPostProcess(
-      ReadSubtask<C> subtask,
+      ReadSubtask subtask,
       HostMemoryBuffer parquetData) throws Exception;
 
   /**
    * Reports a sealed subtask immediately before the Spark task thread materializes and decodes
    * it. Implementations can update task metrics here without making worker-thread metric updates.
    */
-  default void onSubtaskCompleted(ReadSubtask<C> subtask, SubtaskStats stats) {
+  default void onSubtaskCompleted(ReadSubtask subtask, SubtaskStats stats) {
   }
 
   /** Reports successful staged-output materialization time on the Spark task thread. */
   default void onMaterializationCompleted(
-      ReadSubtask<C> subtask,
+      ReadSubtask subtask,
       long materializationNanos) {
   }
 
@@ -99,10 +103,4 @@ public interface StagedScanAdapter<F, C> extends AutoCloseable {
     onTaskWait(waitNanos);
   }
 
-  /** Closes one adapter context exactly once when the partition reader is closed. */
-  void closeContext(C context) throws Exception;
-
-  /** Closes adapter-wide state. Implementations must be idempotent. */
-  @Override
-  void close() throws Exception;
 }

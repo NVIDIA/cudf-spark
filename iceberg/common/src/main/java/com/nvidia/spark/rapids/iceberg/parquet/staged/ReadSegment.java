@@ -27,74 +27,36 @@ import org.apache.parquet.hadoop.metadata.ColumnChunkMetaData;
 /**
  * Consecutive filtered row groups from one physical file within a read subtask.
  *
- * <p>The segment borrows its {@link FooterResult} and format context. Its block and first-row
- * index lists are immutable snapshots in identical order. {@code firstBlockIndex} is an index
- * into the footer result's filtered-block list, not necessarily the original unfiltered footer.
- * Row counts are rows, while data and GPU estimates are bytes.</p>
- *
- * @param <C> format-specific footer context
+ * <p>The segment borrows its {@link FooterResult}; it does not own the footer or its Iceberg
+ * post-processor. Blocks are a consecutive immutable slice of the filtered footer in physical
+ * read order. Row counts are rows and data sizes are encoded Parquet bytes.</p>
  */
-public final class ReadSegment<C> {
-  private final FooterResult<C> footer;
-  private final int firstBlockIndex;
+public final class ReadSegment {
+  private final FooterResult footer;
   private final List<BlockMetaData> blocks;
-  private final List<Long> blockFirstRowIndices;
   private final long rowCount;
   private final long dataSizeBytes;
-  private final long estimatedGpuBytes;
 
   /**
    * Creates a segment from a consecutive slice of one footer result.
    *
    * @param footer borrowed footer result
-   * @param firstBlockIndex index of the first block in {@code footer.getBlocks()}
    * @param blocks consecutive source blocks in physical read order
-   * @param blockFirstRowIndices file-global first-row index for each supplied block
-   * @param estimatedGpuBytes estimated decoded GPU bytes for the segment
    */
   public ReadSegment(
-      FooterResult<C> footer,
-      int firstBlockIndex,
-      List<BlockMetaData> blocks,
-      List<Long> blockFirstRowIndices,
-      long estimatedGpuBytes) {
+      FooterResult footer,
+      List<BlockMetaData> blocks) {
     this.footer = Objects.requireNonNull(footer, "footer");
-    if (firstBlockIndex < 0) {
-      throw new IllegalArgumentException("firstBlockIndex must be non-negative");
-    }
-    if (estimatedGpuBytes < 0) {
-      throw new IllegalArgumentException("estimatedGpuBytes must be non-negative");
-    }
-    this.firstBlockIndex = firstBlockIndex;
     this.blocks = immutableCopy(blocks, "blocks");
-    this.blockFirstRowIndices = immutableCopy(
-        blockFirstRowIndices, "blockFirstRowIndices");
-    this.estimatedGpuBytes = estimatedGpuBytes;
 
     if (this.blocks.isEmpty()) {
       throw new IllegalArgumentException("a read segment must contain at least one block");
     }
-    if (this.blocks.size() != this.blockFirstRowIndices.size()) {
-      throw new IllegalArgumentException(
-          "blocks and blockFirstRowIndices must have the same size");
-    }
-    if (firstBlockIndex + this.blocks.size() > footer.getBlocks().size()) {
-      throw new IllegalArgumentException("segment exceeds the footer block list");
-    }
+    validateConsecutiveFooterSlice(footer, this.blocks);
 
     long rows = 0L;
     long bytes = 0L;
-    for (int index = 0; index < this.blocks.size(); index++) {
-      BlockMetaData block = this.blocks.get(index);
-      if (block != footer.getBlocks().get(firstBlockIndex + index)) {
-        throw new IllegalArgumentException(
-            "segment blocks must be a consecutive slice of the footer result");
-      }
-      if (!this.blockFirstRowIndices.get(index).equals(
-          footer.getBlockFirstRowIndices().get(firstBlockIndex + index))) {
-        throw new IllegalArgumentException(
-            "segment first-row indices must match the footer result");
-      }
+    for (BlockMetaData block : this.blocks) {
       rows = Math.addExact(rows, block.getRowCount());
       for (ColumnChunkMetaData column : block.getColumns()) {
         bytes = Math.addExact(bytes, column.getTotalSize());
@@ -102,6 +64,28 @@ public final class ReadSegment<C> {
     }
     this.rowCount = rows;
     this.dataSizeBytes = bytes;
+  }
+
+  private static void validateConsecutiveFooterSlice(
+      FooterResult footer,
+      List<BlockMetaData> blocks) {
+    List<BlockMetaData> footerBlocks = footer.getBlocks();
+    int firstIndex = -1;
+    for (int index = 0; index < footerBlocks.size(); index++) {
+      if (footerBlocks.get(index) == blocks.get(0)) {
+        firstIndex = index;
+        break;
+      }
+    }
+    if (firstIndex < 0 || firstIndex + blocks.size() > footerBlocks.size()) {
+      throw new IllegalArgumentException("segment exceeds the footer block list");
+    }
+    for (int index = 0; index < blocks.size(); index++) {
+      if (blocks.get(index) != footerBlocks.get(firstIndex + index)) {
+        throw new IllegalArgumentException(
+            "segment blocks must be a consecutive slice of the footer result");
+      }
+    }
   }
 
   private static <T> List<T> immutableCopy(List<T> values, String name) {
@@ -113,20 +97,12 @@ public final class ReadSegment<C> {
     return Collections.unmodifiableList(copy);
   }
 
-  public FooterResult<C> getFooter() {
+  public FooterResult getFooter() {
     return footer;
-  }
-
-  public int getFirstBlockIndex() {
-    return firstBlockIndex;
   }
 
   public List<BlockMetaData> getBlocks() {
     return blocks;
-  }
-
-  public List<Long> getBlockFirstRowIndices() {
-    return blockFirstRowIndices;
   }
 
   public long getRowCount() {
@@ -135,9 +111,5 @@ public final class ReadSegment<C> {
 
   public long getDataSizeBytes() {
     return dataSizeBytes;
-  }
-
-  public long getEstimatedGpuBytes() {
-    return estimatedGpuBytes;
   }
 }

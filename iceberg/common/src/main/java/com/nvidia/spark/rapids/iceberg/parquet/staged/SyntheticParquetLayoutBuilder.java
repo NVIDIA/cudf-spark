@@ -51,10 +51,9 @@ public final class SyntheticParquetLayoutBuilder {
    * Builds the exact layout for ordered, mutually compatible segments.
    *
    * @param segments non-empty segments in synthetic-file order
-   * @param <C> format-specific footer context
    * @return exact immutable layout
    */
-  public <C> SyntheticParquetLayout build(List<ReadSegment<C>> segments) {
+  public SyntheticParquetLayout build(List<ReadSegment> segments) {
     if (segments == null || segments.isEmpty()) {
       throw new IllegalArgumentException("segments must not be empty");
     }
@@ -64,7 +63,7 @@ public final class SyntheticParquetLayoutBuilder {
     ArrayList<BlockMetaData> adjustedBlocks = new ArrayList<>();
     long outputOffset = PARQUET_MAGIC.length;
 
-    for (ReadSegment<C> segment : segments) {
+    for (ReadSegment segment : segments) {
       if (!schema.equals(segment.getFooter().getClippedSchema())) {
         throw new IllegalArgumentException(
             "all segments in a synthetic Parquet file must use the same schema");
@@ -97,7 +96,6 @@ public final class SyntheticParquetLayoutBuilder {
     long totalSize = Math.addExact(outputOffset, footerAndTrailer.length);
     return new SyntheticParquetLayout(
         ranges,
-        adjustedBlocks,
         PARQUET_MAGIC,
         footerAndTrailer,
         dataSize,

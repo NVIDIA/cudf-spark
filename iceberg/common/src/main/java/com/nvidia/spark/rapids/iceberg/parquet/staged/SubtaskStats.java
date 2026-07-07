@@ -84,32 +84,16 @@ public final class SubtaskStats {
     this.cacheReadNanos = cacheReadNanos;
   }
 
-  public long ioNanos() {
-    return ioNanos;
-  }
-
   public long getIoNanos() {
     return ioNanos;
-  }
-
-  public long combineNanos() {
-    return combineNanos;
   }
 
   public long getCombineNanos() {
     return combineNanos;
   }
 
-  public long stagedBytes() {
-    return stagedBytes;
-  }
-
   public long getStagedBytes() {
     return stagedBytes;
-  }
-
-  public StagedParquetOutput.BackingStore backingStore() {
-    return backingStore;
   }
 
   public StagedParquetOutput.BackingStore getBackingStore() {

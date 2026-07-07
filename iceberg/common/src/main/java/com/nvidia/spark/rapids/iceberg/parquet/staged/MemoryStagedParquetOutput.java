@@ -80,20 +80,20 @@ final class MemoryStagedParquetOutput extends AbstractStagedParquetOutput {
       List<RapidsInputFile.CopyRange> copies = new ArrayList<>(ranges.size());
       for (PlannedReadRange range : ranges) {
         Objects.requireNonNull(range, "range");
-        checkWriteBounds(range.outputOffset(), range.length());
-        if (range.sourceOffset() < 0) {
+        checkWriteBounds(range.getOutputOffset(), range.getLength());
+        if (range.getInputOffset() < 0) {
           throw new IllegalArgumentException(
-              "source offset must be non-negative: " + range.sourceOffset());
+              "source offset must be non-negative: " + range.getInputOffset());
         }
         // Keep every column chunk distinct. PerfIO uses this list to issue the range GETs
         // concurrently and is responsible for any backend-specific request optimization.
         copies.add(new RapidsInputFile.CopyRange(
-            range.sourceOffset(), range.length(), range.outputOffset()));
+            range.getInputOffset(), range.getLength(), range.getOutputOffset()));
       }
       input.readVectored(writableBuffer, copies);
       for (PlannedReadRange range : ranges) {
         observer.rangeCopied(
-            range, writableBuffer.slice(range.outputOffset(), range.length()));
+            range, writableBuffer.slice(range.getOutputOffset(), range.getLength()));
       }
     } finally {
       endConcurrentWrite();

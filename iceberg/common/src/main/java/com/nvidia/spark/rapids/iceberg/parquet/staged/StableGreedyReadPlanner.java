@@ -20,84 +20,58 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.BiPredicate;
 
 import com.nvidia.spark.rapids.GpuBatchUtils$;
 import org.apache.parquet.hadoop.metadata.BlockMetaData;
 import org.apache.parquet.hadoop.metadata.ColumnChunkMetaData;
 
 /**
- * Stable greedy planner for filtered Parquet row groups.
+ * Stable greedy planner for filtered Iceberg Parquet row groups.
  *
  * <p>The planner runs only on the Spark task thread after the complete footer barrier. It walks
  * footer results and row groups in caller-provided order. A subtask is closed before adding a row
- * group that would exceed a hard row/GPU-byte limit or violate format compatibility. The copied
- * data target is checked only when crossing to another source: once a source has been admitted to
- * a subtask, all of its row groups remain together unless a row/GPU-byte limit requires a split.
- * An individual row group that exceeds a hard limit is retained as a standalone subtask, matching
+ * group that would exceed a hard row/GPU-byte limit or violate Iceberg compatibility. An
+ * individual row group that exceeds a hard limit is retained as a standalone subtask, matching
  * the existing soft-limit behavior.</p>
  *
- * <p>{@code targetParquetBytes} is compared with encoded column-chunk bytes, excluding the small
- * synthetic header/footer overhead, before admitting the first row group of the next source. A
- * non-positive target disables cross-source combination while retaining row-group batching within
- * each source. No execution work is submitted by this class.</p>
- *
- * @param <C> format-specific footer context
+ * <p>The copied-data target is checked only when crossing to another source. Once a source has
+ * been admitted to a subtask, its row groups remain together unless a row/GPU-byte limit requires
+ * a split. A non-positive target disables cross-source combination while retaining row-group
+ * batching within each source.</p>
  */
-public final class StableGreedyReadPlanner<C> {
+public final class StableGreedyReadPlanner {
+  /** Estimates final GPU bytes after Iceberg schema evolution and constant materialization. */
+  @FunctionalInterface
+  public interface GpuSizeEstimator {
+    long estimate(FooterResult footer, long rowCount);
+  }
+
   private final int maxRows;
   private final long maxEstimatedGpuBytes;
   private final long targetParquetBytes;
-  private final FooterCompatibility<C> compatibility;
-  private final FooterGpuSizeEstimator<C> gpuSizeEstimator;
+  private final BiPredicate<FooterResult, FooterResult> compatibility;
+  private final GpuSizeEstimator gpuSizeEstimator;
   private final SyntheticParquetLayoutBuilder layoutBuilder;
 
   public StableGreedyReadPlanner(
       int maxRows,
       long maxEstimatedGpuBytes,
       long targetParquetBytes,
-      FooterCompatibility<C> compatibility) {
+      BiPredicate<FooterResult, FooterResult> compatibility) {
     this(maxRows, maxEstimatedGpuBytes, targetParquetBytes,
         compatibility,
         (footer, rows) -> GpuBatchUtils$.MODULE$.estimateGpuMemory(
-            footer.getReadSchema(), rows),
-        new SyntheticParquetLayoutBuilder());
+            footer.getReadSchema(), rows));
   }
 
-  /**
-   * Creates a planner with an injectable layout builder for focused tests.
-   */
+  /** Creates a planner with an Iceberg-aware final-output GPU estimator. */
   public StableGreedyReadPlanner(
       int maxRows,
       long maxEstimatedGpuBytes,
       long targetParquetBytes,
-      FooterCompatibility<C> compatibility,
-      SyntheticParquetLayoutBuilder layoutBuilder) {
-    this(maxRows, maxEstimatedGpuBytes, targetParquetBytes,
-        compatibility,
-        (footer, rows) -> GpuBatchUtils$.MODULE$.estimateGpuMemory(
-            footer.getReadSchema(), rows),
-        layoutBuilder);
-  }
-
-  /** Creates a planner with a format-aware final-output GPU estimator. */
-  public StableGreedyReadPlanner(
-      int maxRows,
-      long maxEstimatedGpuBytes,
-      long targetParquetBytes,
-      FooterCompatibility<C> compatibility,
-      FooterGpuSizeEstimator<C> gpuSizeEstimator) {
-    this(maxRows, maxEstimatedGpuBytes, targetParquetBytes,
-        compatibility, gpuSizeEstimator, new SyntheticParquetLayoutBuilder());
-  }
-
-  /** Creates a fully injectable planner for focused tests. */
-  public StableGreedyReadPlanner(
-      int maxRows,
-      long maxEstimatedGpuBytes,
-      long targetParquetBytes,
-      FooterCompatibility<C> compatibility,
-      FooterGpuSizeEstimator<C> gpuSizeEstimator,
-      SyntheticParquetLayoutBuilder layoutBuilder) {
+      BiPredicate<FooterResult, FooterResult> compatibility,
+      GpuSizeEstimator gpuSizeEstimator) {
     if (maxRows <= 0) {
       throw new IllegalArgumentException("maxRows must be positive");
     }
@@ -109,28 +83,28 @@ public final class StableGreedyReadPlanner<C> {
     this.targetParquetBytes = targetParquetBytes;
     this.compatibility = Objects.requireNonNull(compatibility, "compatibility");
     this.gpuSizeEstimator = Objects.requireNonNull(gpuSizeEstimator, "gpuSizeEstimator");
-    this.layoutBuilder = Objects.requireNonNull(layoutBuilder, "layoutBuilder");
+    this.layoutBuilder = new SyntheticParquetLayoutBuilder();
   }
 
   /**
-   * Plans all non-empty filtered row groups.
+   * Plans every non-empty filtered row group in deterministic input order.
    *
-   * @param footers immutable footer results in input traversal order
-   * @return deterministic partition plan
+   * @param footers filtered Iceberg footers in partition traversal order
+   * @return immutable ordered subtasks
    */
-  public PartitionReadPlan<C> plan(List<FooterResult<C>> footers) {
+  public List<ReadSubtask> plan(List<FooterResult> footers) {
     Objects.requireNonNull(footers, "footers");
     if (footers.contains(null)) {
       throw new IllegalArgumentException("footers must not contain null values");
     }
 
-    ArrayList<ReadSubtask<C>> subtasks = new ArrayList<>();
-    ArrayList<SelectedBlock<C>> selected = new ArrayList<>();
+    ArrayList<ReadSubtask> subtasks = new ArrayList<>();
+    ArrayList<SelectedBlock> selected = new ArrayList<>();
     long selectedRows = 0L;
     long selectedDataBytes = 0L;
     long nextSubtaskId = 0L;
 
-    for (FooterResult<C> footer : footers) {
+    for (FooterResult footer : footers) {
       List<BlockMetaData> blocks = footer.getBlocks();
       for (int blockIndex = 0; blockIndex < blocks.size(); blockIndex++) {
         BlockMetaData block = blocks.get(blockIndex);
@@ -160,7 +134,7 @@ public final class StableGreedyReadPlanner<C> {
           selectedDataBytes = 0L;
         }
 
-        selected.add(new SelectedBlock<>(footer, blockIndex, block));
+        selected.add(new SelectedBlock(footer, blockIndex, block));
         selectedRows = Math.addExact(selectedRows, block.getRowCount());
         selectedDataBytes = Math.addExact(selectedDataBytes, blockDataBytes);
       }
@@ -169,18 +143,7 @@ public final class StableGreedyReadPlanner<C> {
     if (!selected.isEmpty()) {
       subtasks.add(buildSubtask(nextSubtaskId, selected));
     }
-
-    long totalRows = 0L;
-    long totalGpuBytes = 0L;
-    long totalParquetBytes = 0L;
-    for (ReadSubtask<C> subtask : subtasks) {
-      totalRows = Math.addExact(totalRows, subtask.getRowCount());
-      totalGpuBytes = Math.addExact(totalGpuBytes, subtask.getEstimatedGpuBytes());
-      totalParquetBytes = Math.addExact(
-          totalParquetBytes, subtask.getLayout().getTotalSizeBytes());
-    }
-    return new PartitionReadPlan<>(
-        subtasks, totalRows, totalGpuBytes, totalParquetBytes);
+    return Collections.unmodifiableList(new ArrayList<>(subtasks));
   }
 
   private boolean hasReachedTarget(long selectedDataBytes) {
@@ -188,16 +151,16 @@ public final class StableGreedyReadPlanner<C> {
   }
 
   private boolean isCompatibleWithAll(
-      List<SelectedBlock<C>> selected,
-      FooterResult<C> candidate) {
-    FooterResult<C> previous = null;
-    for (SelectedBlock<C> item : selected) {
-      FooterResult<C> existing = item.footer;
+      List<SelectedBlock> selected,
+      FooterResult candidate) {
+    FooterResult previous = null;
+    for (SelectedBlock item : selected) {
+      FooterResult existing = item.footer;
       if (existing == previous || existing == candidate) {
         previous = existing;
         continue;
       }
-      if (targetParquetBytes <= 0 || !compatibility.canCombine(existing, candidate)) {
+      if (targetParquetBytes <= 0 || !compatibility.test(existing, candidate)) {
         return false;
       }
       previous = existing;
@@ -205,14 +168,13 @@ public final class StableGreedyReadPlanner<C> {
     return true;
   }
 
-  private ReadSubtask<C> buildSubtask(
+  private ReadSubtask buildSubtask(
       long subtaskId,
-      List<SelectedBlock<C>> selected) {
-    ArrayList<ReadSegment<C>> segments = new ArrayList<>();
+      List<SelectedBlock> selected) {
+    ArrayList<ReadSegment> segments = new ArrayList<>();
     int start = 0;
     while (start < selected.size()) {
-      FooterResult<C> footer = selected.get(start).footer;
-      int firstBlockIndex = selected.get(start).blockIndex;
+      FooterResult footer = selected.get(start).footer;
       int end = start + 1;
       while (end < selected.size()
           && selected.get(end).footer == footer
@@ -221,30 +183,19 @@ public final class StableGreedyReadPlanner<C> {
       }
 
       ArrayList<BlockMetaData> blocks = new ArrayList<>(end - start);
-      ArrayList<Long> firstRowIndices = new ArrayList<>(end - start);
-      long segmentRows = 0L;
       for (int index = start; index < end; index++) {
-        SelectedBlock<C> item = selected.get(index);
-        blocks.add(item.block);
-        firstRowIndices.add(footer.getBlockFirstRowIndices().get(item.blockIndex));
-        segmentRows = Math.addExact(segmentRows, item.block.getRowCount());
+        blocks.add(selected.get(index).block);
       }
-      segments.add(new ReadSegment<>(
-          footer,
-          firstBlockIndex,
-          blocks,
-          firstRowIndices,
-          estimateGpuBytes(footer, segmentRows)));
+      segments.add(new ReadSegment(footer, blocks));
       start = end;
     }
 
     long rows = 0L;
-    for (ReadSegment<C> segment : segments) {
+    for (ReadSegment segment : segments) {
       rows = Math.addExact(rows, segment.getRowCount());
     }
-    long gpuBytes = estimateGpuBytes(segments.get(0).getFooter(), rows);
     SyntheticParquetLayout layout = layoutBuilder.build(segments);
-    return new ReadSubtask<>(subtaskId, segments, layout, rows, gpuBytes);
+    return new ReadSubtask(subtaskId, segments, layout, rows);
   }
 
   private static long encodedDataBytes(BlockMetaData block) {
@@ -255,7 +206,7 @@ public final class StableGreedyReadPlanner<C> {
     return bytes;
   }
 
-  private long estimateGpuBytes(FooterResult<C> footer, long rows) {
+  private long estimateGpuBytes(FooterResult footer, long rows) {
     long estimate = gpuSizeEstimator.estimate(footer, rows);
     if (estimate < 0) {
       throw new IllegalStateException("GPU memory estimate must not be negative");
@@ -263,14 +214,14 @@ public final class StableGreedyReadPlanner<C> {
     return estimate;
   }
 
-  /** Task-thread-only tuple used while preserving stable traversal order. */
-  private static final class SelectedBlock<C> {
-    private final FooterResult<C> footer;
+  /** Task-thread-only tuple used while preserving stable row-group order. */
+  private static final class SelectedBlock {
+    private final FooterResult footer;
     private final int blockIndex;
     private final BlockMetaData block;
 
     private SelectedBlock(
-        FooterResult<C> footer,
+        FooterResult footer,
         int blockIndex,
         BlockMetaData block) {
       this.footer = footer;
