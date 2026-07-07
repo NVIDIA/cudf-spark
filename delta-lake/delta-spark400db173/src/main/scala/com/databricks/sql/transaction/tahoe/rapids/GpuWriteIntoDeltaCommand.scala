@@ -19,17 +19,17 @@ package com.databricks.sql.transaction.tahoe.rapids
 import com.databricks.sql.io.skipping.liquid.ClusteredTableUtils
 import com.databricks.sql.transaction.tahoe.DeltaIdentityColumnStatsTracker
 import com.databricks.sql.transaction.tahoe.commands.{DeletionVectorUtils, WriteIntoDeltaCommand}
-import com.databricks.sql.transaction.tahoe.stats.{DeltaJobStatisticsTracker,
+import com.databricks.sql.transaction.tahoe.stats.{DeltaJobStatisticsTracker, DeltaStatistics,
   StatisticsOnLoadJobTracker}
-import com.databricks.spark.util.CommandContext
 import com.nvidia.spark.rapids.{DataFromReplacementRule, DataWritingCommandMeta,
-  GpuDataWritingCommand, GpuMetric, GpuParquetFileFormat, RapidsConf, RapidsMeta}
+  GpuDataWritingCommand, GpuMetric, GpuParquetFileFormat, NoopMetric, RapidsConf, RapidsMeta}
 import com.nvidia.spark.rapids.delta.{GpuDeltaJobStatisticsTracker, GpuStatisticsCollection,
   RapidsDeltaUtils}
 
+import org.apache.spark.SparkContext
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.RuntimeReplaceable
+import org.apache.spark.sql.catalyst.expressions.{CreateNamedStruct, RuntimeReplaceable}
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.datasources.{BasicWriteJobStatsTracker,
@@ -44,23 +44,22 @@ import org.apache.spark.util.SerializableConfiguration
 
 /** Limits the generic DBR V1 write rule to the native liquid OPTIMIZE call stack. */
 object GpuLiquidOptimizeWriteContext {
-  private val activeTag = "spark.rapids.sql.delta.liquidOptimizeWrite.active"
+  private val activeKey = "spark.rapids.sql.delta.liquidOptimizeWrite.active"
 
-  def isActive: Boolean = CommandContext.getContextObject
-    .exists(_.tags.get(activeTag).contains("true"))
+  def isActive: Boolean = SparkContext.getActive
+    .exists(_.getLocalProperty(activeKey) == "true")
 
-  def withOptimize[T](body: => T): T = {
-    // DBR's OptimizeExecutor captures this raw universe context before submitting each batch and
-    // installs it in its shared worker pool. Spark local properties are not propagated by that
-    // boundary and would be unsafe on reused threads.
-    val previous = CommandContext.getUniverseContextObject
-    val current = CommandContext.getContextObject.getOrElse(CommandContext.EMPTY)
-    val marked = current.copy(tags = current.tags.updated(activeTag, "true"))
-    CommandContext.setUniverseContextObject(marked)
+  def withOptimize[T](spark: SparkSession)(body: => T): T = {
+    // DBR's SparkThreadLocalCapturingHelper captures Spark local properties when each native
+    // OPTIMIZE batch is submitted, installs them in its shared worker pool, and restores the
+    // worker's prior properties in finally.
+    val sparkContext = spark.sparkContext
+    val previous = sparkContext.getLocalProperty(activeKey)
+    sparkContext.setLocalProperty(activeKey, "true")
     try {
       body
     } finally {
-      CommandContext.setUniverseContextObject(previous)
+      sparkContext.setLocalProperty(activeKey, previous)
     }
   }
 }
@@ -98,7 +97,12 @@ class GpuWriteIntoDeltaCommandMeta(
       case _: StatisticsOnLoadJobTracker =>
         willNotWorkOnGpu("DBR statistics-on-load are not supported by the GPU " +
           "WriteIntoDeltaCommand")
-      case _: BasicWriteJobStatsTracker | _: DeltaJobStatisticsTracker =>
+      case _: BasicWriteJobStatsTracker =>
+      case delta: DeltaJobStatisticsTracker =>
+        GpuWriteIntoDeltaCommand.extractStatsCollectionSchema(delta) match {
+          case Left(reason) => willNotWorkOnGpu(reason)
+          case Right(_) =>
+        }
       case tracker =>
         willNotWorkOnGpu(s"DBR write statistics tracker ${tracker.getClass.getName} is not " +
           "supported by the GPU WriteIntoDeltaCommand")
@@ -110,6 +114,57 @@ class GpuWriteIntoDeltaCommandMeta(
     conf.stableSort,
     conf.concurrentWriterPartitionFlushSize,
     conf.outputDebugDumpPrefix)
+}
+
+object GpuWriteIntoDeltaCommand {
+  def extractStatsCollectionSchema(
+      tracker: DeltaJobStatisticsTracker): Either[String, StructType] = {
+    val dataSchema = StructType(tracker.dataCols.map { attr =>
+      StructField(attr.name, attr.dataType, attr.nullable, attr.metadata)
+    })
+    val nullCountSchema = tracker.statsColExpr.collect {
+      case struct: CreateNamedStruct => struct.dataType
+    }.collectFirst {
+      case schema: StructType if schema.fieldNames.contains(DeltaStatistics.NULL_COUNT) =>
+        schema(DeltaStatistics.NULL_COUNT).dataType match {
+          case nullCountSchema: StructType => Right(nullCountSchema)
+          case other => Left(s"DBR Delta statistics ${DeltaStatistics.NULL_COUNT} field has " +
+            s"unsupported type $other")
+        }
+    }.getOrElse(Left(
+      s"DBR Delta statistics expression has no ${DeltaStatistics.NULL_COUNT} struct"))
+    nullCountSchema.flatMap(projectStatsCollectionSchema(dataSchema, _))
+  }
+
+  private def projectStatsCollectionSchema(
+      dataSchema: StructType,
+      statsShape: StructType,
+      parentPath: Seq[String] = Nil): Either[String, StructType] = {
+    statsShape.fields.foldLeft[Either[String, Seq[StructField]]](Right(Seq.empty)) {
+      case (result, statsField) =>
+        result.flatMap { projectedFields =>
+          val fieldPath = parentPath :+ statsField.name
+          dataSchema.fields.find(_.name == statsField.name) match {
+            case None =>
+              Left(s"DBR Delta statistics field ${fieldPath.mkString(".")} is not present " +
+                "in the write data schema")
+            case Some(dataField) =>
+              (dataField.dataType, statsField.dataType) match {
+                case (dataStruct: StructType, statsStruct: StructType) =>
+                  projectStatsCollectionSchema(dataStruct, statsStruct, fieldPath)
+                    .map(projected => projectedFields :+ dataField.copy(dataType = projected))
+                case (_: StructType, _) | (_, _: StructType) =>
+                  Left(s"DBR Delta statistics field ${fieldPath.mkString(".")} has a " +
+                    "different nested structure than the write data schema")
+                case _ =>
+                  // nullCount contains Long leaves. Keep only its shape and ordering while using
+                  // the original data types required for min/max collection.
+                  Right(projectedFields :+ dataField)
+              }
+          }
+        }
+    }.map(StructType(_))
+  }
 }
 
 /**
@@ -150,7 +205,8 @@ case class GpuWriteIntoDeltaCommand(
       hadoopConf = cpuCmd.hadoopConf,
       partitionColumns = partitionColumns,
       bucketSpec = cpuCmd.bucketSpec,
-      statsTrackers = convertedTrackers.map(_.gpu),
+      statsTrackers = convertedTrackers.map(_.gpu) :+
+        gpuWriteJobStatsTracker(cpuCmd.hadoopConf),
       options = cpuCmd.options,
       useStableSort = useStableSort,
       concurrentWriterPartitionFlushSize = concurrentWriterPartitionFlushSize,
@@ -167,11 +223,22 @@ case class GpuWriteIntoDeltaCommand(
     case identity: DeltaIdentityColumnStatsTracker =>
       throw new IllegalStateException(
         s"Unsupported identity-column statistics tracker ${identity.getClass.getName}")
+    case statsOnLoad: StatisticsOnLoadJobTracker =>
+      throw new IllegalStateException(
+        s"Unsupported statistics-on-load tracker ${statsOnLoad.getClass.getName}")
+    case basic: BasicWriteJobStatsTracker =>
+      val gpu = new BasicColumnarWriteJobStatsTracker(
+        new SerializableConfiguration(cpuCmd.hadoopConf),
+        GpuMetric.wrap(basic.driverSideMetrics),
+        NoopMetric)
+      ConvertedTracker(gpu, () => ())
     case delta: DeltaJobStatisticsTracker =>
-      val statsSchema = StructType(delta.dataCols.map { attr =>
+      val dataSchema = StructType(delta.dataCols.map { attr =>
         StructField(attr.name, attr.dataType, attr.nullable, attr.metadata)
       })
-      val explodedDataSchema = GpuStatisticsCollection.explode(statsSchema).toMap
+      val statsSchema = GpuWriteIntoDeltaCommand.extractStatsCollectionSchema(delta)
+        .fold(reason => throw new IllegalStateException(reason), identity)
+      val explodedDataSchema = GpuStatisticsCollection.explode(dataSchema).toMap
       val statsColExpr = delta.statsColExpr.transform {
         case runtime: RuntimeReplaceable => runtime.replacement
       }
@@ -182,14 +249,6 @@ case class GpuWriteIntoDeltaCommand(
       val gpu = new GpuDeltaJobStatisticsTracker(
         delta.dataCols, statsColExpr, batchStatsToRow)
       ConvertedTracker(gpu, () => delta.recordedStats = gpu.recordedStats)
-    case basic: BasicWriteJobStatsTracker =>
-      val gpu = new BasicColumnarWriteJobStatsTracker(
-        new SerializableConfiguration(cpuCmd.hadoopConf),
-        GpuMetric.wrap(basic.driverSideMetrics))
-      ConvertedTracker(gpu, () => ())
-    case statsOnLoad: StatisticsOnLoadJobTracker =>
-      throw new IllegalStateException(
-        s"Unsupported statistics-on-load tracker ${statsOnLoad.getClass.getName}")
     case other =>
       throw new IllegalStateException(s"Unsupported write statistics tracker " +
         other.getClass.getName)

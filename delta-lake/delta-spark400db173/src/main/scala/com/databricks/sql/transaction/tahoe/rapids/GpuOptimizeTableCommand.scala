@@ -125,7 +125,7 @@ case class GpuOptimizeTableCommandEdge(
       // and commit protocol. The scoped marker only enables the nested WriteIntoDeltaCommand
       // data-plane replacement while the native runner performs an OPTIMIZE rewrite.
       val txn = table.deltaLog.startTransaction(table.catalogTable, Some(snapshot))
-      val optimizeMetrics = GpuLiquidOptimizeWriteContext.withOptimize {
+      val optimizeMetrics = GpuLiquidOptimizeWriteContext.withOptimize(sparkSession) {
         new OptimizeRunner(
           sparkSession,
           txn,
