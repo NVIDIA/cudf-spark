@@ -44,12 +44,14 @@ import ai.rapids.cudf.HostMemoryBuffer;
 import com.nvidia.spark.rapids.GpuSemaphore$;
 import com.nvidia.spark.rapids.filecache.FileCache;
 import com.nvidia.spark.rapids.filecache.FileCache.FileCacheStartedToken;
+import com.nvidia.spark.rapids.iceberg.parquet.IcebergPartitionedFile;
 import com.nvidia.spark.rapids.jni.RmmSpark;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import scala.Option;
 
 import org.apache.spark.TaskContext;
 import org.apache.spark.sql.rapids.execution.TrampolineUtil$;
+import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
 
 /**
@@ -57,7 +59,7 @@ import org.apache.spark.sql.vectorized.ColumnarBatch;
  *
  * <p>The pipeline has a deliberately strict thread boundary:</p>
  * <ol>
- *   <li>Shared workers fetch metadata and perform format-specific row-group filtering.</li>
+ *   <li>Shared workers fetch metadata and perform Iceberg row-group filtering.</li>
  *   <li>The Spark task thread waits for the complete footer barrier and plans ordered subtasks.</li>
  *   <li>Only a configured number of whole subtasks are admitted across the executor. All source
  *       files and column chunks in each admitted subtask still read concurrently into one
@@ -72,19 +74,16 @@ import org.apache.spark.sql.vectorized.ColumnarBatch;
  */
 public final class StagedParquetPartitionReader
     implements Iterator<ColumnarBatch>, AutoCloseable {
-  private final List<StagedFileSource> files;
+  private final List<IcebergPartitionedFile> files;
   private final StagedScanAdapter adapter;
   private final StableGreedyReadPlanner planner;
   private final StagedScanThreadPools pools;
   private final TaskContext taskContext;
   private final long taskAttemptId;
-  private final int fileIoScratchBytes;
   private final Object lifecycleLock = new Object();
   private final Object iteratorLock = new Object();
   // The queue contains at most the one admitted subtask's terminal result (plus a close sentinel).
   private final BlockingQueue<Completion> completions = new LinkedBlockingQueue<>();
-  private final List<Future<TimedFooter>> footerFutures = new ArrayList<>();
-  private final List<FooterResult> footers = new ArrayList<>();
   private final Deque<ReadSubtask> pendingSubtasks = new ArrayDeque<>();
   private final AtomicBoolean closed = new AtomicBoolean();
   private final AtomicReference<Throwable> asynchronousCleanupFailure = new AtomicReference<>();
@@ -104,45 +103,39 @@ public final class StagedParquetPartitionReader
    * {@link #hasNext()} call.
    *
    * @param files inputs in deterministic Spark partition order
-   * @param adapter format-specific footer and decode operations
+   * @param adapter Iceberg footer and decode operations
+   * @param expectedSparkSchema final Iceberg output schema used for GPU-size planning
    * @param maxRows maximum planned rows per GPU subtask (soft for a single row group)
    * @param maxEstimatedGpuBytes maximum estimated GPU bytes per subtask
    * @param targetParquetBytes target encoded bytes before closing a combined subtask; a
    *                           non-positive value disables cross-file combining
    * @param workerThreads executor-wide worker count shared by footer, I/O, and finalization jobs
    * @param maxConcurrentSubtasks maximum data-read subtasks admitted across this executor
-   * @param fileIoScratchBytes positive copy-size setting supplied to staged outputs
    * @param taskContext Spark task context captured by the task thread; may be null in tests
    */
   public StagedParquetPartitionReader(
-      List<StagedFileSource> files,
+      List<IcebergPartitionedFile> files,
       StagedScanAdapter adapter,
+      StructType expectedSparkSchema,
       int maxRows,
       long maxEstimatedGpuBytes,
       long targetParquetBytes,
       int workerThreads,
       int maxConcurrentSubtasks,
-      int fileIoScratchBytes,
       TaskContext taskContext) {
     this.files = immutableFileCopy(files);
     this.adapter = Objects.requireNonNull(adapter, "adapter");
     this.planner = new StableGreedyReadPlanner(
-        maxRows, maxEstimatedGpuBytes, targetParquetBytes,
-        adapter::canCombine, adapter::estimateGpuBytes);
+        maxRows, maxEstimatedGpuBytes, targetParquetBytes, expectedSparkSchema);
     this.pools = StagedScanThreadPools.getOrCreate(workerThreads, maxConcurrentSubtasks);
-    if (fileIoScratchBytes <= 0) {
-      throw new IllegalArgumentException(
-          "fileIoScratchBytes must be positive: " + fileIoScratchBytes);
-    }
-    this.fileIoScratchBytes = fileIoScratchBytes;
     this.taskContext = taskContext;
     this.taskAttemptId = taskContext == null ? -1L : taskContext.taskAttemptId();
   }
 
-  private static List<StagedFileSource> immutableFileCopy(
-      List<StagedFileSource> input) {
+  private static List<IcebergPartitionedFile> immutableFileCopy(
+      List<IcebergPartitionedFile> input) {
     Objects.requireNonNull(input, "files");
-    ArrayList<StagedFileSource> copy = new ArrayList<>(input);
+    ArrayList<IcebergPartitionedFile> copy = new ArrayList<>(input);
     if (copy.contains(null)) {
       throw new IllegalArgumentException("files must not contain null values");
     }
@@ -231,7 +224,7 @@ public final class StagedParquetPartitionReader
           // the GPU, but no third subtask can start until this successor is taken here.
           startNextSubtask();
           resultPassedToDecode = true;
-          decoded = decode(completion.result);
+          decoded = decode(completion);
           synchronized (iteratorLock) {
             if (closed.get()) {
               // decodeAndPostProcess may just have acquired the semaphore even though close won
@@ -251,8 +244,8 @@ public final class StagedParquetPartitionReader
           }
           // A metric callback or any other pre-decode failure must not lose a result that has
           // already been removed from the completion queue.
-          if (!resultPassedToDecode && completion.result != null) {
-            completion.result.close();
+          if (!resultPassedToDecode) {
+            completion.close();
           }
         }
       }
@@ -306,7 +299,9 @@ public final class StagedParquetPartitionReader
     // still owned by this task before starting that work rather than waiting for the first
     // Future.get().
     releaseGpuSemaphoreFromTaskThread();
-    for (StagedFileSource file : files) {
+    List<Future<TimedFooter>> footerFutures = new ArrayList<>();
+    List<FooterResult> footers = new ArrayList<>();
+    for (IcebergPartitionedFile file : files) {
       checkOpen();
       Future<TimedFooter> future = pools.executor().submit(() ->
           runAsTaskPoolThread(() -> {
@@ -317,33 +312,25 @@ public final class StagedParquetPartitionReader
             }
             return new TimedFooter(footer, System.nanoTime() - start);
           }));
-      synchronized (lifecycleLock) {
-        if (closed.get()) {
-          throw new CancellationException("staged reader closed while submitting footers");
-        }
-        footerFutures.add(future);
+      if (closed.get()) {
+        throw new CancellationException("staged reader closed while submitting footers");
       }
+      footerFutures.add(future);
     }
-    List<Future<TimedFooter>> submittedFooters;
-    synchronized (lifecycleLock) {
-      submittedFooters = new ArrayList<>(footerFutures);
-    }
-    for (Future<TimedFooter> future : submittedFooters) {
+    for (Future<TimedFooter> future : footerFutures) {
       long waitStart = System.nanoTime();
       TimedFooter timedFooter = getFooterFuture(future);
       adapter.onFooterWait(System.nanoTime() - waitStart);
       FooterResult footer = timedFooter.footer;
-      adapter.onFooterCompleted(footer, timedFooter.footerNanos);
-      synchronized (lifecycleLock) {
-        checkOpen();
-        footers.add(footer);
-      }
+      adapter.onFooterCompleted(timedFooter.footerNanos);
+      checkOpen();
+      footers.add(footer);
     }
 
     List<ReadSubtask> plan;
     synchronized (lifecycleLock) {
       checkOpen();
-      plan = planner.plan(new ArrayList<>(footers));
+      plan = planner.plan(footers);
       pendingSubtasks.addAll(plan);
       remainingResults = pendingSubtasks.size();
       initialized = true;
@@ -403,17 +390,12 @@ public final class StagedParquetPartitionReader
     // allocation off the Spark task thread without occupying sibling workers on an initialization
     // monitor. Once allocation succeeds, every source in this admitted subtask is submitted.
     CompletableFuture<StagedParquetOutput> outputFuture = new CompletableFuture<>();
-    CompletableFuture<PendingRead> pendingFuture = outputFuture.thenCompose(output -> {
-      SourceReadStage sourceReadStage = prepareSourceReads(execution, output);
-      startSourceReads(sourceReadStage);
-      return sourceReadStage.pendingFuture;
-    });
-
-    // The non-async continuation runs on the last source worker (or the allocation worker for an
-    // empty physical projection), never on the Spark task thread.
-    CompletableFuture<StagedReadResult> resultFuture = pendingFuture.thenApply(
-        pending -> runUncheckedAsTaskPoolThread(() -> combine(execution, pending)));
-    resultFuture.whenComplete((result, error) -> {
+    CompletableFuture<Completion> completionFuture = outputFuture.thenCompose(output ->
+        // The non-async continuation runs on the last source worker (or the allocation worker for
+        // an empty projection), never on the Spark task thread.
+        startSourceReads(execution, output).thenApply(stats ->
+            runUncheckedAsTaskPoolThread(() -> combine(execution, output, stats))));
+    completionFuture.whenComplete((completion, error) -> {
       try {
         if (error != null) {
           Throwable failure = unwrap(error);
@@ -435,16 +417,15 @@ public final class StagedParquetPartitionReader
             completions.offer(Completion.failure(execution, failure));
           }
         } else if (closed.get()) {
-          if (result != null) {
-            closeResultAfterAsync(result);
+          if (completion != null) {
+            closeCompletionAfterAsync(completion);
           }
         } else {
-          Completion completion = Completion.success(execution, result);
           completions.offer(completion);
           // close() can race between the first closed check and queue publication. If it wins,
           // remove and close the just-published result so close() cannot miss it while draining.
           if (closed.get() && completions.remove(completion)) {
-            closeResultAfterAsync(result);
+            closeCompletionAfterAsync(completion);
           }
         }
       } finally {
@@ -499,7 +480,7 @@ public final class StagedParquetPartitionReader
   }
 
   /**
-   * Prepare one directly scheduled shared-pool job per source file in this subtask.
+   * Submit one shared-pool job per source file and return their aggregate barrier.
    *
    * <p>Each source receives at most one {@code readVectored} call containing a distinct range for
    * every cache-miss Parquet column chunk; cache-hit chunks are copied directly from their cached
@@ -510,21 +491,19 @@ public final class StagedParquetPartitionReader
    * before these jobs are submitted. This guarantees the last source worker writes the synthetic
    * header/footer and seals the output immediately after every writer is terminal.</p>
    */
-  private SourceReadStage prepareSourceReads(
+  private CompletableFuture<SourceReadStats> startSourceReads(
       SubtaskExecution execution,
       StagedParquetOutput output) {
-    Map<StagedFileSource, List<PlannedReadRange>> rangesBySource = new LinkedHashMap<>();
-    for (PlannedReadRange range : execution.subtask.getLayout().getRanges()) {
-      rangesBySource.computeIfAbsent(range.getSource(), ignored -> new ArrayList<>())
+    Map<FooterResult, List<PlannedReadRange>> rangesBySource = new LinkedHashMap<>();
+    for (PlannedReadRange range : execution.subtask.getRanges()) {
+      rangesBySource.computeIfAbsent(range.getFooter(), ignored -> new ArrayList<>())
           .add(range);
     }
 
     List<Callable<SourceReadStats>> sourceJobs = new ArrayList<>();
-    for (Map.Entry<StagedFileSource, List<PlannedReadRange>> entry
+    for (Map.Entry<FooterResult, List<PlannedReadRange>> entry
         : rangesBySource.entrySet()) {
-      sourceJobs.add(() -> {
-        return readSourceRanges(output, entry.getKey(), entry.getValue());
-      });
+      sourceJobs.add(() -> readSourceRanges(output, entry.getKey(), entry.getValue()));
     }
 
     List<CompletableFuture<SourceReadStats>> sourceFutures = new ArrayList<>();
@@ -533,44 +512,30 @@ public final class StagedParquetPartitionReader
     }
     CompletableFuture<?>[] allSourceFutures =
         sourceFutures.toArray(new CompletableFuture<?>[sourceFutures.size()]);
-    CompletableFuture<PendingRead> pendingFuture =
+    CompletableFuture<SourceReadStats> allReads =
         CompletableFuture.allOf(allSourceFutures).thenApply(ignored -> {
-          long ioNanos = 0L;
-          long cacheHitCount = 0L;
-          long cacheHitBytes = 0L;
-          long cacheMissCount = 0L;
-          long cacheMissBytes = 0L;
-          long cacheReadNanos = 0L;
+          SourceReadStats total = SourceReadStats.EMPTY;
           for (CompletableFuture<SourceReadStats> sourceFuture : sourceFutures) {
-            SourceReadStats stats = sourceFuture.join();
-            ioNanos = Math.addExact(ioNanos, stats.ioNanos);
-            cacheHitCount = Math.addExact(cacheHitCount, stats.cacheHitCount);
-            cacheHitBytes = Math.addExact(cacheHitBytes, stats.cacheHitBytes);
-            cacheMissCount = Math.addExact(cacheMissCount, stats.cacheMissCount);
-            cacheMissBytes = Math.addExact(cacheMissBytes, stats.cacheMissBytes);
-            cacheReadNanos = Math.addExact(cacheReadNanos, stats.cacheReadNanos);
+            total = total.add(sourceFuture.join());
           }
-          return new PendingRead(output, ioNanos, cacheHitCount, cacheHitBytes,
-              cacheMissCount, cacheMissBytes, cacheReadNanos);
+          return total;
         });
-    return new SourceReadStage(sourceJobs, sourceFutures, pendingFuture);
-  }
 
-  /** Submit prepared jobs, completing every unsubmitted future if submission is interrupted. */
-  private void startSourceReads(SourceReadStage stage) {
-    for (int index = 0; index < stage.jobs.size(); index++) {
+    // The allOf barrier above must exist before the first job is submitted. Otherwise a fast last
+    // writer could finish before the combine continuation is attached.
+    for (int index = 0; index < sourceJobs.size(); index++) {
       if (closed.get()) {
-        completeUnsubmittedSourceJobs(stage, index,
+        completeUnsubmittedSourceJobs(sourceFutures, index,
             new CancellationException("staged reader closed before source I/O submission"));
-        return;
+        return allReads;
       }
       final int jobIndex = index;
       try {
         pools.executor().execute(() -> {
-          CompletableFuture<SourceReadStats> future = stage.futures.get(jobIndex);
+          CompletableFuture<SourceReadStats> future = sourceFutures.get(jobIndex);
           try {
             SourceReadStats result = runUncheckedAsTaskPoolThread(
-                stage.jobs.get(jobIndex));
+                sourceJobs.get(jobIndex));
             future.complete(result);
           } catch (Throwable error) {
             future.completeExceptionally(error);
@@ -579,27 +544,27 @@ public final class StagedParquetPartitionReader
       } catch (Throwable submissionError) {
         // Already-submitted writers remain part of allOf. Marking only unsubmitted work terminal
         // preserves the barrier and prevents failure cleanup from racing active HMB/file writes.
-        completeUnsubmittedSourceJobs(stage, index, submissionError);
-        return;
+        completeUnsubmittedSourceJobs(sourceFutures, index, submissionError);
+        return allReads;
       }
     }
+    return allReads;
   }
 
   private static void completeUnsubmittedSourceJobs(
-      SourceReadStage stage,
+      List<CompletableFuture<SourceReadStats>> futures,
       int firstUnsubmitted,
       Throwable error) {
-    for (int index = firstUnsubmitted; index < stage.futures.size(); index++) {
-      stage.futures.get(index).completeExceptionally(error);
+    for (int index = firstUnsubmitted; index < futures.size(); index++) {
+      futures.get(index).completeExceptionally(error);
     }
   }
 
   private StagedParquetOutput createOutput(SubtaskExecution execution) throws Exception {
     checkOpen();
     ReadSubtask subtask = execution.subtask;
-    SyntheticParquetLayout layout = subtask.getLayout();
-    StagedParquetOutput output = StagedParquetOutputFactory.create(
-        layout.getTotalSizeBytes(), taskAttemptId, subtask.getSubtaskId());
+    StagedParquetOutput output = StagedParquetOutput.create(
+        subtask.getTotalSizeBytes(), taskAttemptId, subtask.getSubtaskId());
     if (!execution.output.compareAndSet(null, output)) {
       output.close();
       throw new CancellationException("staged read was cancelled before I/O started");
@@ -613,7 +578,7 @@ public final class StagedParquetPartitionReader
 
   private SourceReadStats readSourceRanges(
       StagedParquetOutput output,
-      StagedFileSource source,
+      FooterResult footer,
       List<PlannedReadRange> ranges) throws Exception {
     long start = System.nanoTime();
     long cacheHitCount = 0L;
@@ -626,7 +591,7 @@ public final class StagedParquetPartitionReader
     Throwable primaryFailure = null;
     try {
       checkOpen();
-      RapidsInputFile input = adapter.openInputFile(source);
+      RapidsInputFile input = adapter.openInputFile(footer.getFile());
       if (input == null) {
         throw new IllegalStateException("input-file adapter returned null");
       }
@@ -639,7 +604,7 @@ public final class StagedParquetPartitionReader
           long cacheStart = System.nanoTime();
           try (SeekableByteChannel channel = cached.get()) {
             output.copyCachedRange(
-                channel, range.getOutputOffset(), range.getLength(), fileIoScratchBytes);
+                channel, range.getOutputOffset(), range.getLength());
           }
           cacheReadNanos = Math.addExact(
               cacheReadNanos, System.nanoTime() - cacheStart);
@@ -657,17 +622,19 @@ public final class StagedParquetPartitionReader
         }
       }
 
-      output.copyRanges(input, remoteRanges, fileIoScratchBytes, (range, data) -> {
-        FileCacheStartedToken token = cacheTokens.remove(range);
-        if (token == null) {
-          data.close();
-          return;
+      output.copyRanges(input, remoteRanges);
+      for (PlannedReadRange range : remoteRanges) {
+        FileCacheStartedToken token = cacheTokens.get(range);
+        if (token != null) {
+          HostMemoryBuffer data = output.sliceForCache(
+              range.getOutputOffset(), range.getLength());
+          cacheTokens.remove(range);
+          // complete() consumes the HMB and marks the token finished before it queues cache work.
+          // Ownership therefore transfers even if complete() itself throws; closing/cancelling
+          // here would double-release the buffer and can mask the original cache failure.
+          token.complete(data);
         }
-        // complete() consumes the HMB and marks the token finished before it queues cache work.
-        // Ownership therefore transfers even if complete() itself throws; closing/cancelling here
-        // would double-release the buffer and can mask the original cache failure.
-        token.complete(data);
-      });
+      }
       checkOpen();
       return new SourceReadStats(System.nanoTime() - start,
           cacheHitCount, cacheHitBytes, cacheMissCount, cacheMissBytes, cacheReadNanos);
@@ -693,42 +660,42 @@ public final class StagedParquetPartitionReader
     }
   }
 
-  private StagedReadResult combine(
+  private Completion combine(
       SubtaskExecution execution,
-      PendingRead pending) throws Exception {
-    StagedParquetOutput output = pending.output;
-    SyntheticParquetLayout layout = execution.subtask.getLayout();
+      StagedParquetOutput output,
+      SourceReadStats ioStats) throws Exception {
+    ReadSubtask subtask = execution.subtask;
     long start = System.nanoTime();
     try {
       checkOpen();
-      output.writeBytes(0L, layout.getHeaderBytes());
-      output.writeBytes(layout.getFooterOffset(), layout.getFooterAndTrailerBytes());
-      output.seal(layout.getTotalSizeBytes());
+      output.writeBytes(0L, subtask.getHeaderBytes());
+      output.writeBytes(subtask.getFooterOffset(), subtask.getFooterAndTrailerBytes());
+      output.seal();
       long combineNanos = System.nanoTime() - start;
 
       // Move ownership out of the cancellation cell before publishing the immutable result.
       if (!execution.output.compareAndSet(output, null)) {
         throw new CancellationException("staged read was cancelled while combining");
       }
-      StagedReadResult result = null;
+      Completion completion = null;
       try {
-        result = new StagedReadResult(execution.subtask, output,
-            new SubtaskStats(pending.ioNanos, combineNanos, output.sizeBytes(),
-                output.backingStore(), pending.cacheHitCount, pending.cacheHitBytes,
-                pending.cacheMissCount, pending.cacheMissBytes, pending.cacheReadNanos));
+        completion = Completion.success(execution, output,
+            new SubtaskStats(ioStats.ioNanos, combineNanos, output.isDiskBacked(),
+                ioStats.cacheHitCount, ioStats.cacheHitBytes,
+                ioStats.cacheMissCount, ioStats.cacheMissBytes, ioStats.cacheReadNanos));
         if (closed.get()) {
           CancellationException cancellation =
               new CancellationException("staged read was cancelled before publication");
           try {
-            result.close();
+            completion.close();
           } catch (Throwable closeError) {
             cancellation.addSuppressed(closeError);
           }
           throw cancellation;
         }
-        return result;
+        return completion;
       } catch (Throwable error) {
-        if (result == null) {
+        if (completion == null) {
           try {
             output.close();
           } catch (Throwable closeError) {
@@ -747,31 +714,32 @@ public final class StagedParquetPartitionReader
     }
   }
 
-  private Iterator<ColumnarBatch> decode(StagedReadResult result) throws Exception {
+  private Iterator<ColumnarBatch> decode(Completion completion) throws Exception {
+    ReadSubtask subtask = completion.execution.subtask;
     HostMemoryBuffer materialized = null;
     try {
       // The completion-wait boundary has already yielded the semaphore, so everything through
       // host materialization runs without it. decodeAndPostProcess owns the initial acquire
       // immediately before cuDF; next() reacquires after an inter-batch yield.
-      adapter.onSubtaskCompleted(result.getSubtask(), result.getStats());
+      adapter.onSubtaskCompleted(subtask, completion.stats);
       long materializeStart = System.nanoTime();
-      materialized = result.getOutput().materialize();
+      materialized = completion.output.materialize();
       long materializeEnd = System.nanoTime();
       long materializationNanos = materializeEnd - materializeStart;
-      adapter.onMaterializationCompleted(result.getSubtask(), materializationNanos);
+      adapter.onMaterializationCompleted(materializationNanos);
       // materialize() returns an independent reference, so the spillable buffer or local file can
       // be released before the task thread enters GPU decode.
-      result.close();
+      completion.close();
       HostMemoryBuffer transferred = materialized;
       materialized = null; // ownership transfers when the adapter is invoked, even on failure
       Iterator<ColumnarBatch> decoded = adapter.decodeAndPostProcess(
-          result.getSubtask(), transferred);
+          subtask, transferred);
       if (decoded == null) {
         throw new IllegalStateException("decode adapter returned null");
       }
       return decoded;
     } finally {
-      result.close();
+      completion.close();
       if (materialized != null) {
         materialized.close();
       }
@@ -852,7 +820,7 @@ public final class StagedParquetPartitionReader
     }
     if (failure != null) {
       // A Java return value is discarded when a finally/cleanup action throws. In particular,
-      // combine() may already have transferred its output into a StagedReadResult. Close any
+      // combine() may already have transferred its output into a Completion. Close any
       // successfully returned resource before propagating the cleanup failure so that handoff
       // cannot leak a host buffer or local file.
       if (operationCompleted && result instanceof AutoCloseable) {
@@ -905,9 +873,9 @@ public final class StagedParquetPartitionReader
     }
   }
 
-  private void closeResultAfterAsync(StagedReadResult result) {
+  private void closeCompletionAfterAsync(Completion completion) {
     try {
-      result.close();
+      completion.close();
     } catch (Throwable error) {
       recordAsynchronousCleanupFailure(error);
     }
@@ -956,8 +924,6 @@ public final class StagedParquetPartitionReader
     }
     SubtaskExecution executionToCancel;
     synchronized (lifecycleLock) {
-      footerFutures.clear();
-      footers.clear();
       pendingSubtasks.clear();
       executionToCancel = activeExecution;
     }
@@ -973,9 +939,9 @@ public final class StagedParquetPartitionReader
     // Leave failure/sentinel entries in the queue so a concurrently blocked hasNext stays
     // unblocked. Only successful entries own resources and need removal during cleanup.
     for (Completion completion : completions) {
-      if (completion.result != null && completions.remove(completion)) {
+      if (completion.output != null && completions.remove(completion)) {
         try {
-          completion.result.close();
+          completion.close();
         } catch (Throwable error) {
           failure = addFailure(failure, error);
         }
@@ -1026,58 +992,10 @@ public final class StagedParquetPartitionReader
     return new RuntimeException(unwrapped);
   }
 
-  /**
-   * Immutable submission bundle for one subtask's source work.
-   *
-   * <p>The futures and {@code pendingFuture} dependency are created before any job is submitted.
-   * This ordering guarantees successful finalization runs inline on the last shared-pool source
-   * worker rather than on the planning thread or at the tail of the executor queue.</p>
-   */
-  private static final class SourceReadStage {
-    private final List<Callable<SourceReadStats>> jobs;
-    private final List<CompletableFuture<SourceReadStats>> futures;
-    private final CompletableFuture<PendingRead> pendingFuture;
-
-    private SourceReadStage(
-        List<Callable<SourceReadStats>> jobs,
-        List<CompletableFuture<SourceReadStats>> futures,
-        CompletableFuture<PendingRead> pendingFuture) {
-      this.jobs = java.util.Collections.unmodifiableList(new ArrayList<>(jobs));
-      this.futures = java.util.Collections.unmodifiableList(new ArrayList<>(futures));
-      this.pendingFuture = Objects.requireNonNull(pendingFuture, "pendingFuture");
-    }
-  }
-
-  /** I/O-stage value whose output remains owned by its execution's atomic ownership cell. */
-  private static final class PendingRead {
-    private final StagedParquetOutput output;
-    private final long ioNanos;
-    private final long cacheHitCount;
-    private final long cacheHitBytes;
-    private final long cacheMissCount;
-    private final long cacheMissBytes;
-    private final long cacheReadNanos;
-
-    private PendingRead(
-        StagedParquetOutput output,
-        long ioNanos,
-        long cacheHitCount,
-        long cacheHitBytes,
-        long cacheMissCount,
-        long cacheMissBytes,
-        long cacheReadNanos) {
-      this.output = output;
-      this.ioNanos = ioNanos;
-      this.cacheHitCount = cacheHitCount;
-      this.cacheHitBytes = cacheHitBytes;
-      this.cacheMissCount = cacheMissCount;
-      this.cacheMissBytes = cacheMissBytes;
-      this.cacheReadNanos = cacheReadNanos;
-    }
-  }
-
   /** Aggregate measurements from one independently scheduled physical source. */
   private static final class SourceReadStats {
+    private static final SourceReadStats EMPTY =
+        new SourceReadStats(0L, 0L, 0L, 0L, 0L, 0L);
     private final long ioNanos;
     private final long cacheHitCount;
     private final long cacheHitBytes;
@@ -1098,6 +1016,16 @@ public final class StagedParquetPartitionReader
       this.cacheMissCount = cacheMissCount;
       this.cacheMissBytes = cacheMissBytes;
       this.cacheReadNanos = cacheReadNanos;
+    }
+
+    private SourceReadStats add(SourceReadStats other) {
+      return new SourceReadStats(
+          Math.addExact(ioNanos, other.ioNanos),
+          Math.addExact(cacheHitCount, other.cacheHitCount),
+          Math.addExact(cacheHitBytes, other.cacheHitBytes),
+          Math.addExact(cacheMissCount, other.cacheMissCount),
+          Math.addExact(cacheMissBytes, other.cacheMissBytes),
+          Math.addExact(cacheReadNanos, other.cacheReadNanos));
     }
   }
 
@@ -1120,7 +1048,7 @@ public final class StagedParquetPartitionReader
    * <p>{@code output} is installed once by the allocation job and remains non-null only while
    * source I/O or combination owns the shared output. Successful combination atomically removes
    * it before constructing
-   * {@link StagedReadResult}; terminal-stage cleanup atomically removes and closes it. Exactly one
+   * the completion queue; terminal-stage cleanup atomically removes and closes it. Exactly one
    * ownership path can win.</p>
    */
   private static final class SubtaskExecution {
@@ -1162,32 +1090,48 @@ public final class StagedParquetPartitionReader
 
   }
 
-  /** Queue value that publishes exactly one success or failure for a planned subtask. */
-  private static final class Completion {
+  /** Queue value and sole owner of a successfully sealed subtask output. */
+  private static final class Completion implements AutoCloseable {
     private final SubtaskExecution execution;
-    private final StagedReadResult result;
+    private final StagedParquetOutput output;
+    private final SubtaskStats stats;
     private final Throwable error;
+    private boolean closed;
 
     private Completion(
         SubtaskExecution execution,
-        StagedReadResult result,
+        StagedParquetOutput output,
+        SubtaskStats stats,
         Throwable error) {
       this.execution = execution;
-      this.result = result;
+      this.output = output;
+      this.stats = stats;
       this.error = error;
     }
 
     private static Completion success(
         SubtaskExecution execution,
-        StagedReadResult result) {
+        StagedParquetOutput output,
+        SubtaskStats stats) {
       return new Completion(Objects.requireNonNull(execution, "execution"),
-          Objects.requireNonNull(result, "result"), null);
+          Objects.requireNonNull(output, "output"),
+          Objects.requireNonNull(stats, "stats"), null);
     }
 
     private static Completion failure(
         SubtaskExecution execution,
         Throwable error) {
-      return new Completion(execution, null, Objects.requireNonNull(error, "error"));
+      return new Completion(execution, null, null, Objects.requireNonNull(error, "error"));
+    }
+
+    @Override
+    public synchronized void close() {
+      if (!closed) {
+        closed = true;
+        if (output != null) {
+          output.close();
+        }
+      }
     }
   }
 }

@@ -16,230 +16,84 @@
 
 package com.nvidia.spark.rapids.iceberg.parquet.staged;
 
-import ai.rapids.cudf.HostMemoryBuffer;
-import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
-
-import java.io.EOFException;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.channels.FileChannel;
-import java.nio.channels.SeekableByteChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.List;
 import java.util.Objects;
+
+import ai.rapids.cudf.HostMemoryBuffer;
 
 /**
  * Executor-local-file implementation of {@link StagedParquetOutput}.
  *
- * <p>This is selected only when the non-blocking exact host allocation fails. The local file is
- * exposed as a writable memory-mapped {@link HostMemoryBuffer}, which lets one vectored call retain
- * every Parquet column chunk as a distinct request and write directly to its final file offset.
- * The mapping is pageable local-file storage rather than a full pinned/pageable HostAlloc
- * allocation. This object owns the mapping, random-access handle, and path.</p>
+ * <p>This is selected only when the exact host allocation fails. The task-owned file is exposed
+ * through a writable memory mapping, so source workers can write disjoint ranges concurrently and
+ * vectored reads can target their final offsets directly. This object owns only the mapping and
+ * path; the file handle used to establish the exact length is closed during construction.</p>
  */
-final class FileStagedParquetOutput extends AbstractStagedParquetOutput {
+final class FileStagedParquetOutput extends StagedParquetOutput {
   private final Path path;
-  private RandomAccessFile file;
-  private FileChannel channel;
   private HostMemoryBuffer mappedBuffer;
 
-  FileStagedParquetOutput(Path path, long capacityBytes) throws IOException {
-    super(capacityBytes);
+  FileStagedParquetOutput(Path path, long exactSizeBytes) throws IOException {
+    super(exactSizeBytes, true);
     this.path = Objects.requireNonNull(path, "path");
     boolean succeeded = false;
     try {
-      file = new RandomAccessFile(path.toFile(), "rw");
-      file.setLength(capacityBytes);
-      channel = file.getChannel();
+      try (RandomAccessFile file = new RandomAccessFile(path.toFile(), "rw")) {
+        file.setLength(exactSizeBytes);
+      }
       mappedBuffer = HostMemoryBuffer.mapFile(
-          path.toFile(), FileChannel.MapMode.READ_WRITE, 0L, capacityBytes);
+          path.toFile(), FileChannel.MapMode.READ_WRITE, 0L, exactSizeBytes);
       succeeded = true;
     } finally {
       if (!succeeded) {
-        if (file != null) {
-          file.close();
-          file = null;
-        }
         Files.deleteIfExists(path);
       }
     }
   }
 
   @Override
-  public BackingStore backingStore() {
-    return BackingStore.LOCAL_FILE;
+  HostMemoryBuffer writableBuffer() {
+    return mappedBuffer;
   }
 
   @Override
-  public void copyRanges(
-      RapidsInputFile input,
-      List<PlannedReadRange> ranges,
-      int scratchBytes,
-      RangeCopyObserver observer) throws IOException {
-    Objects.requireNonNull(input, "input");
-    Objects.requireNonNull(ranges, "ranges");
-    Objects.requireNonNull(observer, "observer");
-    if (ranges.isEmpty()) {
-      return;
-    }
-    if (scratchBytes <= 0) {
-      throw new IllegalArgumentException(
-          "positive scratchBytes are required for file-backed staged I/O");
-    }
-
-    beginConcurrentWrite();
-    try {
-      List<RapidsInputFile.CopyRange> copies = new java.util.ArrayList<>(ranges.size());
-      for (PlannedReadRange range : ranges) {
-        Objects.requireNonNull(range, "range");
-        checkWriteBounds(range.getOutputOffset(), range.getLength());
-        if (range.getInputOffset() < 0) {
-          throw new IllegalArgumentException(
-              "source offset must be non-negative: " + range.getInputOffset());
-        }
-        copies.add(new RapidsInputFile.CopyRange(
-            range.getInputOffset(), range.getLength(), range.getOutputOffset()));
-      }
-
-      // PerfIO schedules the CopyRanges concurrently. Keep one range per column chunk and make a
-      // single call for this source; the mapped output avoids needing an aggregate scratch HMB.
-      input.readVectored(mappedBuffer, copies);
-      for (PlannedReadRange range : ranges) {
-        observer.rangeCopied(
-            range, mappedBuffer.slice(range.getOutputOffset(), range.getLength()));
-      }
-    } finally {
-      endConcurrentWrite();
-    }
+  void sealStorage() {
+    // GPU decode consumes an owning slice of this live mapping. Forcing dirty pages to disk here
+    // would add a full-subtask barrier without making the temporary file more useful.
   }
 
   @Override
-  public void copyCachedRange(
-      SeekableByteChannel source,
-      long outputOffset,
-      long length,
-      int scratchBytes) throws IOException {
-    Objects.requireNonNull(source, "source");
-    if (scratchBytes <= 0) {
-      throw new IllegalArgumentException("scratchBytes must be positive: " + scratchBytes);
-    }
-    beginConcurrentWrite();
-    try {
-      checkWriteBounds(outputOffset, length);
-      long copied = 0L;
-      while (copied < length) {
-        int amount = (int) Math.min(length - copied, Integer.MAX_VALUE);
-        java.nio.ByteBuffer destination =
-            mappedBuffer.asByteBuffer(outputOffset + copied, amount);
-        while (destination.hasRemaining()) {
-          int read = source.read(destination);
-          if (read < 0) {
-            throw new EOFException(
-                "cached data range ended with " + (length - copied) + " bytes remaining");
-          }
-          if (read == 0) {
-            Thread.yield();
-          }
-        }
-        copied += amount;
-      }
-    } finally {
-      endConcurrentWrite();
-    }
+  HostMemoryBuffer materializeStorage() {
+    // The owning slice keeps the mapping valid independently. On EMR/Linux the task-owned path
+    // can therefore be unlinked when this output closes before GPU decode starts.
+    return mappedBuffer.slice(0L, exactSizeBytes());
   }
 
   @Override
-  public void writeBytes(
-      long outputOffset,
-      byte[] source,
-      int sourceOffset,
-      int length) throws IOException {
-    Objects.requireNonNull(source, "source");
-    if (sourceOffset < 0 || length < 0 || sourceOffset > source.length - length) {
-      throw new IndexOutOfBoundsException(
-          "source range [" + sourceOffset + ", " + (sourceOffset + length) +
-              ") exceeds array length " + source.length);
-    }
-    beginExclusiveWrite();
+  void closeStorage() {
+    Throwable failure = null;
     try {
-      checkWriteBounds(outputOffset, length);
-      mappedBuffer.setBytes(outputOffset, source, sourceOffset, length);
-    } finally {
-      endExclusiveWrite();
+      if (mappedBuffer != null) {
+        mappedBuffer.close();
+      }
+    } catch (Throwable error) {
+      failure = error;
     }
-  }
-
-  @Override
-  public void seal(long actualSizeBytes) throws IOException {
-    beginExclusiveWrite();
+    mappedBuffer = null;
     try {
-      beginSeal(actualSizeBytes);
-      // GPU decode consumes an owning slice of this live mapping; the task-owned file is never a
-      // durable result, so forcing dirty pages to disk here would only add a full-subtask barrier.
-      finishSeal();
-    } finally {
-      endExclusiveWrite();
+      Files.deleteIfExists(path);
+    } catch (IOException ignored) {
+      // Spark executor cleanup will remove its local directory if immediate deletion fails.
     }
-  }
-
-  @Override
-  public HostMemoryBuffer materialize() throws IOException {
-    beginSealedRead();
-    try {
-      // A slice retains the mapping independently. EMR runs on Linux, where the task-owned path can
-      // be unlinked by result.close while this reference remains valid through GPU decode.
-      return mappedBuffer.slice(0L, sealedSizeBytes());
-    } finally {
-      endSealedRead();
+    if (failure instanceof RuntimeException) {
+      throw (RuntimeException) failure;
     }
-  }
-
-  @Override
-  public void close() {
-    beginExclusiveClose();
-    try {
-      if (!beginClose()) {
-        return;
-      }
-      Throwable failure = null;
-      try {
-        if (mappedBuffer != null) {
-          mappedBuffer.close();
-        }
-      } catch (Throwable error) {
-        failure = error;
-      }
-      try {
-        if (channel != null) {
-          channel.close();
-        }
-      } catch (IOException ignored) {
-        // Best effort; RandomAccessFile.close below gets another chance to release the descriptor.
-      }
-      try {
-        if (file != null) {
-          file.close();
-        }
-      } catch (IOException ignored) {
-        // Cleanup is best effort and close must remain safe from task-completion listeners.
-      }
-      mappedBuffer = null;
-      channel = null;
-      file = null;
-      try {
-        Files.deleteIfExists(path);
-      } catch (IOException ignored) {
-        // Spark executor cleanup will remove its local directory if immediate deletion fails.
-      }
-      if (failure instanceof RuntimeException) {
-        throw (RuntimeException) failure;
-      }
-      if (failure instanceof Error) {
-        throw (Error) failure;
-      }
-    } finally {
-      endExclusiveClose();
+    if (failure instanceof Error) {
+      throw (Error) failure;
     }
   }
 }

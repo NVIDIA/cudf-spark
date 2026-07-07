@@ -19,7 +19,7 @@ package com.nvidia.spark.rapids.iceberg.parquet.staged;
 import java.util.Iterator;
 
 import ai.rapids.cudf.HostMemoryBuffer;
-import com.nvidia.spark.rapids.GpuBatchUtils$;
+import com.nvidia.spark.rapids.iceberg.parquet.IcebergPartitionedFile;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 
 import org.apache.spark.sql.vectorized.ColumnarBatch;
@@ -38,31 +38,17 @@ public interface StagedScanAdapter {
    * <p>The returned footer contains the Iceberg post-processor needed when its subtask is decoded.
    * It owns no closeable resource.</p>
    */
-  FooterResult readAndFilterFooter(StagedFileSource file) throws Exception;
+  FooterResult readAndFilterFooter(IcebergPartitionedFile file) throws Exception;
 
   /**
    * Opens the physical input immediately before an admitted source job reads its column chunks.
    * Keeping this Iceberg callback lazy avoids constructing S3 clients for files removed by footer
    * filtering or projections with no physical columns.
    */
-  RapidsInputFile openInputFile(StagedFileSource file) throws Exception;
+  RapidsInputFile openInputFile(IcebergPartitionedFile file) throws Exception;
 
   /** Reports footer/filter worker time on the Spark task thread after the footer barrier. */
-  default void onFooterCompleted(FooterResult footer, long footerNanos) {
-  }
-
-  /**
-   * Returns whether row groups from two footer results may share one synthetic Parquet file.
-   * This method executes on the Spark task thread during planning.
-   */
-  boolean canCombine(FooterResult left, FooterResult right);
-
-  /**
-   * Estimates the final decoded bytes used for planning GPU-sized subtasks. Formats that add
-   * columns after Parquet decode should override this physical-read-schema default.
-   */
-  default long estimateGpuBytes(FooterResult footer, long rowCount) {
-    return GpuBatchUtils$.MODULE$.estimateGpuMemory(footer.getReadSchema(), rowCount);
+  default void onFooterCompleted(long footerNanos) {
   }
 
   /**
@@ -84,23 +70,15 @@ public interface StagedScanAdapter {
   }
 
   /** Reports successful staged-output materialization time on the Spark task thread. */
-  default void onMaterializationCompleted(
-      ReadSubtask subtask,
-      long materializationNanos) {
+  default void onMaterializationCompleted(long materializationNanos) {
   }
 
-  /** Reports time for which the Spark task thread blocked waiting for staged worker output. */
-  default void onTaskWait(long waitNanos) {
-  }
-
-  /** Reports the task-thread portion of {@link #onTaskWait(long)} spent at the footer barrier. */
+  /** Reports task-thread time spent waiting at the footer barrier. */
   default void onFooterWait(long waitNanos) {
-    onTaskWait(waitNanos);
   }
 
-  /** Reports the task-thread portion of {@link #onTaskWait(long)} awaiting a completed subtask. */
+  /** Reports task-thread time spent waiting for a completed subtask. */
   default void onResultWait(long waitNanos) {
-    onTaskWait(waitNanos);
   }
 
 }

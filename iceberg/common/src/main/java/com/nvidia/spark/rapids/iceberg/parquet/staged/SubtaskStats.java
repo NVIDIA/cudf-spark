@@ -16,20 +16,16 @@
 
 package com.nvidia.spark.rapids.iceberg.parquet.staged;
 
-import java.util.Objects;
-
 /**
  * Immutable CPU-stage measurements attached to a completed read subtask.
  *
- * <p>Times are elapsed nanoseconds measured around work, not wall-clock timestamps. Staged bytes
- * is the final synthetic Parquet size, not the number of source bytes fetched. The object is
- * safely published together with {@link StagedReadResult} through the completion queue.</p>
+ * <p>Times are elapsed nanoseconds measured around work, not wall-clock timestamps. The object is
+ * safely published together with its sealed output through the completion queue.</p>
  */
 public final class SubtaskStats {
   private final long ioNanos;
   private final long combineNanos;
-  private final long stagedBytes;
-  private final StagedParquetOutput.BackingStore backingStore;
+  private final boolean diskBacked;
   private final long cacheHitCount;
   private final long cacheHitBytes;
   private final long cacheMissCount;
@@ -41,8 +37,7 @@ public final class SubtaskStats {
    *
    * @param ioNanos elapsed I/O-stage time in nanoseconds
    * @param combineNanos elapsed combine-stage time in nanoseconds
-   * @param stagedBytes final synthetic Parquet size in bytes
-   * @param backingStore medium containing the sealed result
+   * @param diskBacked whether the sealed result uses an executor-local file
    * @param cacheHitCount column-chunk data-cache hits
    * @param cacheHitBytes bytes copied from data-cache hits
    * @param cacheMissCount column-chunk data-cache misses
@@ -52,8 +47,7 @@ public final class SubtaskStats {
   public SubtaskStats(
       long ioNanos,
       long combineNanos,
-      long stagedBytes,
-      StagedParquetOutput.BackingStore backingStore,
+      boolean diskBacked,
       long cacheHitCount,
       long cacheHitBytes,
       long cacheMissCount,
@@ -66,17 +60,13 @@ public final class SubtaskStats {
       throw new IllegalArgumentException(
           "combineNanos must be non-negative: " + combineNanos);
     }
-    if (stagedBytes < 0) {
-      throw new IllegalArgumentException("stagedBytes must be non-negative: " + stagedBytes);
-    }
     if (cacheHitCount < 0 || cacheHitBytes < 0 || cacheMissCount < 0 ||
         cacheMissBytes < 0 || cacheReadNanos < 0) {
       throw new IllegalArgumentException("cache measurements must be non-negative");
     }
     this.ioNanos = ioNanos;
     this.combineNanos = combineNanos;
-    this.stagedBytes = stagedBytes;
-    this.backingStore = Objects.requireNonNull(backingStore, "backingStore");
+    this.diskBacked = diskBacked;
     this.cacheHitCount = cacheHitCount;
     this.cacheHitBytes = cacheHitBytes;
     this.cacheMissCount = cacheMissCount;
@@ -92,12 +82,8 @@ public final class SubtaskStats {
     return combineNanos;
   }
 
-  public long getStagedBytes() {
-    return stagedBytes;
-  }
-
-  public StagedParquetOutput.BackingStore getBackingStore() {
-    return backingStore;
+  public boolean isDiskBacked() {
+    return diskBacked;
   }
 
   public long getCacheHitCount() {

@@ -23,6 +23,7 @@ import java.util.Objects;
 
 import com.nvidia.spark.rapids.DateTimeRebaseMode;
 import com.nvidia.spark.rapids.iceberg.parquet.GpuParquetReaderPostProcessor;
+import com.nvidia.spark.rapids.iceberg.parquet.IcebergPartitionedFile;
 import org.apache.parquet.hadoop.metadata.BlockMetaData;
 import org.apache.parquet.schema.MessageType;
 import org.apache.spark.sql.types.StructType;
@@ -32,15 +33,15 @@ import org.apache.spark.sql.types.StructType;
  *
  * <p>A footer worker constructs this object and publishes it to the Spark task thread. Lists are
  * defensively copied and exposed as unmodifiable views. The referenced Parquet metadata objects
- * are treated as immutable by this pipeline; the synthetic-layout builder creates new metadata
+ * are treated as immutable by this pipeline; {@link ReadSubtask} creates relocated metadata
  * rather than mutating them.</p>
  *
  * <p>This first implementation is deliberately Iceberg-specific. The post-processor contains the
  * schema-evolution and partition-constant work that must run after cuDF decodes a subtask. It is
- * borrowed by planned segments and remains task-confined during decode.</p>
+ * borrowed by planned file slices and remains task-confined during decode.</p>
  */
 public final class FooterResult {
-  private final StagedFileSource source;
+  private final IcebergPartitionedFile file;
   private final List<BlockMetaData> blocks;
   private final MessageType clippedSchema;
   private final StructType readSchema;
@@ -52,7 +53,7 @@ public final class FooterResult {
   /**
    * Creates a fully filtered footer result.
    *
-   * @param source source file or split
+   * @param file Iceberg file and split metadata
    * @param blocks filtered blocks in original file order
    * @param clippedSchema unshaded physical Parquet schema for the copied columns
    * @param readSchema Spark schema materialized by the Parquet decoder
@@ -62,7 +63,7 @@ public final class FooterResult {
    * @param postProcessor Iceberg post-processing state borrowed by planned subtasks
    */
   public FooterResult(
-      StagedFileSource source,
+      IcebergPartitionedFile file,
       List<BlockMetaData> blocks,
       MessageType clippedSchema,
       StructType readSchema,
@@ -70,7 +71,7 @@ public final class FooterResult {
       DateTimeRebaseMode timestampRebaseMode,
       boolean hasInt96Timestamps,
       GpuParquetReaderPostProcessor postProcessor) {
-    this.source = Objects.requireNonNull(source, "source");
+    this.file = Objects.requireNonNull(file, "file");
     this.blocks = immutableCopy(blocks, "blocks");
     this.clippedSchema = Objects.requireNonNull(clippedSchema, "clippedSchema");
     this.readSchema = Objects.requireNonNull(readSchema, "readSchema");
@@ -90,8 +91,8 @@ public final class FooterResult {
     return Collections.unmodifiableList(copy);
   }
 
-  public StagedFileSource getSource() {
-    return source;
+  public IcebergPartitionedFile getFile() {
+    return file;
   }
 
   public List<BlockMetaData> getBlocks() {

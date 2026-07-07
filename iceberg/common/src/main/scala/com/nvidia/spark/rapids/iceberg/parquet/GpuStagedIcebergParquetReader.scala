@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids.iceberg.parquet
 
-import java.util.{Iterator => JIterator, List => JList, Map => JMap}
+import java.util.{Iterator => JIterator, Map => JMap}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 
 import scala.collection.JavaConverters._
@@ -24,7 +24,6 @@ import scala.collection.JavaConverters._
 import ai.rapids.cudf.HostMemoryBuffer
 import com.nvidia.spark.rapids.{
   CachedGpuBatchIterator,
-  GpuBatchUtils,
   GpuSemaphore,
   RmmRapidsRetryIterator,
   SingleGpuColumnarBatchIterator,
@@ -107,35 +106,28 @@ class GpuStagedIcebergParquetReader(
 
   private def createReader()
   : StagedParquetPartitionReader = {
-    val stagedFiles: JList[StagedFileSource] =
-      files.map { file =>
-        new StagedFileSource(file)
-      }.asJava
-
     val targetParquetBytes = if (multiThreadConf.disableCombining) {
       0L
     } else {
       multiThreadConf.combineConf.combineThresholdSize
     }
-    val scratchBytes = conf.conf.getInt(
-      "parquet.read.allocation.size", 8 * 1024 * 1024)
     new StagedParquetPartitionReader(
-      stagedFiles,
+      files.asJava,
       new IcebergAdapter,
+      expectedSparkSchema,
       conf.maxBatchSizeRows,
       conf.maxBatchSizeBytes,
       targetParquetBytes,
       workerThreads,
       maxConcurrentSubtasks,
-      scratchBytes,
       TaskContext.get())
   }
 
   /** Scala operations invoked by the Iceberg-specific Java pipeline. */
   private class IcebergAdapter extends StagedScanAdapter {
 
-    override def readAndFilterFooter(file: StagedFileSource): FooterResult = {
-      val icebergFile = file.getIcebergFile
+    override def readAndFilterFooter(file: IcebergPartitionedFile): FooterResult = {
+      val icebergFile = file
       val (parquetInfo, shadedFileReadSchema) =
         filterParquetBlocks(icebergFile, conf.expectedSchema)
       val postProcessor = new GpuParquetReaderPostProcessor(
@@ -155,30 +147,11 @@ class GpuStagedIcebergParquetReader(
         postProcessor)
     }
 
-    override def openInputFile(file: StagedFileSource): RapidsInputFile = {
-      rapidsFileIO.newInputFile(file.getIcebergFile.file.getDelegate.location())
+    override def openInputFile(file: IcebergPartitionedFile): RapidsInputFile = {
+      rapidsFileIO.newInputFile(file.file.getDelegate.location())
     }
 
-    override def canCombine(
-        left: FooterResult,
-        right: FooterResult): Boolean = {
-      left.getClippedSchema == right.getClippedSchema &&
-        left.getReadSchema == right.getReadSchema &&
-        left.getDateRebaseMode == right.getDateRebaseMode &&
-        left.getTimestampRebaseMode == right.getTimestampRebaseMode &&
-        left.hasInt96Timestamps() == right.hasInt96Timestamps() &&
-        left.getPostProcessor.compatibleForCombining(right.getPostProcessor)
-    }
-
-    override def estimateGpuBytes(
-        footer: FooterResult,
-        rowCount: Long): Long = {
-      GpuBatchUtils.estimateGpuMemory(expectedSparkSchema, rowCount)
-    }
-
-    override def onFooterCompleted(
-        footer: FooterResult,
-        footerNanos: Long): Unit = {
+    override def onFooterCompleted(footerNanos: Long): Unit = {
       conf.metrics.get(FILTER_TIME).foreach(_ += footerNanos)
       conf.metrics.get(ICEBERG_STAGED_FOOTER_TIME).foreach(_ += footerNanos)
     }
@@ -194,37 +167,35 @@ class GpuStagedIcebergParquetReader(
       conf.metrics.get(FILECACHE_DATA_RANGE_MISSES).foreach(_ += stats.getCacheMissCount)
       conf.metrics.get(FILECACHE_DATA_RANGE_MISSES_SIZE).foreach(_ += stats.getCacheMissBytes)
       conf.metrics.get(FILECACHE_DATA_RANGE_READ_TIME).foreach(_ += stats.getCacheReadNanos)
-      conf.metrics.get("readBufferSize").foreach(_ += subtask.getLayout.getDataSizeBytes)
-      if (stats.getBackingStore == StagedParquetOutput.BackingStore.LOCAL_FILE) {
+      conf.metrics.get("readBufferSize").foreach(_ += subtask.getDataSizeBytes)
+      if (stats.isDiskBacked) {
         conf.metrics.get(ICEBERG_STAGED_DISK_SUBTASK_COUNT).foreach(_ += 1L)
-        conf.metrics.get(ICEBERG_STAGED_DISK_BYTES).foreach(_ += stats.getStagedBytes)
+        conf.metrics.get(ICEBERG_STAGED_DISK_BYTES).foreach(_ += subtask.getTotalSizeBytes)
       }
     }
 
-    override def onMaterializationCompleted(
-        subtask: ReadSubtask,
-        materializationNanos: Long): Unit = {
+    override def onMaterializationCompleted(materializationNanos: Long): Unit = {
       conf.metrics.get(ICEBERG_STAGED_MATERIALIZATION_TIME).foreach(_ += materializationNanos)
     }
 
-    override def onTaskWait(waitNanos: Long): Unit = {
+    private def recordTaskWait(waitNanos: Long): Unit = {
       conf.metrics.get(ICEBERG_STAGED_WAIT_TIME).foreach(_ += waitNanos)
     }
 
     override def onFooterWait(waitNanos: Long): Unit = {
-      onTaskWait(waitNanos)
+      recordTaskWait(waitNanos)
       conf.metrics.get(ICEBERG_STAGED_FOOTER_WAIT_TIME).foreach(_ += waitNanos)
     }
 
     override def onResultWait(waitNanos: Long): Unit = {
-      onTaskWait(waitNanos)
+      recordTaskWait(waitNanos)
       conf.metrics.get(ICEBERG_STAGED_RESULT_WAIT_TIME).foreach(_ += waitNanos)
     }
 
     override def decodeAndPostProcess(
         subtask: ReadSubtask,
         parquetData: HostMemoryBuffer): JIterator[ColumnarBatch] = {
-      val firstFooter = subtask.getSegments.get(0).getFooter
+      val firstFooter = subtask.getFileSlices.get(0).getFooter
       val postProcessor = firstFooter.getPostProcessor
       val readSchema = firstFooter.getReadSchema
       val clippedSchema = firstFooter.getClippedSchema
@@ -248,8 +219,8 @@ class GpuStagedIcebergParquetReader(
         parquetData, parquetData.getLength, ACTIVE_BATCHING_PRIORITY)
       val decoded = withResource(stagedInput) { input =>
         val parseOptions = stagedParquetOptions(readSchema, clippedSchema)
-        val splits = subtask.getSegments.asScala
-          .map(_.getFooter.getSource.getIcebergFile.sparkPartitionedFile)
+        val splits = subtask.getFileSlices.asScala
+          .map(_.getFooter.getFile.sparkPartitionedFile)
           .toArray
         RmmRapidsRetryIterator.withRetryNoSplit[Iterator[ColumnarBatch]] {
           GpuSemaphore.acquireIfNecessary(TaskContext.get())

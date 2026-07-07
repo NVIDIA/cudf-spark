@@ -24,20 +24,20 @@ import java.util.Objects;
  * <p>{@code inputOffset} is an absolute byte offset in the original source file.
  * {@code outputOffset} is an absolute byte offset in the synthetic Parquet file, including its
  * four-byte header. {@code length} is measured in bytes. Planned ranges never overlap in the
- * output and are ordered by increasing output offset within a layout.</p>
+ * output and are ordered by increasing output offset within a subtask.</p>
  */
 public final class PlannedReadRange {
-  private final StagedFileSource source;
+  private final FooterResult footer;
   private final long inputOffset;
   private final long length;
   private final long outputOffset;
 
   public PlannedReadRange(
-      StagedFileSource source,
+      FooterResult footer,
       long inputOffset,
       long length,
       long outputOffset) {
-    this.source = Objects.requireNonNull(source, "source");
+    this.footer = Objects.requireNonNull(footer, "footer");
     if (inputOffset < 0 || length < 0 || outputOffset < 0) {
       throw new IllegalArgumentException("range offsets and length must be non-negative");
     }
@@ -46,8 +46,9 @@ public final class PlannedReadRange {
     this.outputOffset = outputOffset;
   }
 
-  public StagedFileSource getSource() {
-    return source;
+  /** The filtered file occurrence that owns this column chunk. */
+  public FooterResult getFooter() {
+    return footer;
   }
 
   public long getInputOffset() {

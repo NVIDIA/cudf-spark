@@ -30,7 +30,6 @@ package com.nvidia.spark.rapids.iceberg.parquet.staged
 import java.io.ByteArrayInputStream
 import java.nio.file.Files
 import java.util.{Collections, IdentityHashMap, Iterator => JIterator, List => JList}
-import java.util.function.BiPredicate
 import java.util.concurrent.{
   ConcurrentLinkedQueue,
   CountDownLatch,
@@ -75,7 +74,8 @@ import org.apache.parquet.hadoop.metadata.{
 }
 import org.apache.parquet.schema.{MessageType, Types}
 import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT32
-import org.mockito.Mockito.mock
+import org.mockito.ArgumentMatchers.any
+import org.mockito.Mockito.{mock, when}
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -84,7 +84,7 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 
 class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
 
-  private val sourceInputs = new IdentityHashMap[StagedFileSource, RapidsInputFile]()
+  private val sourceInputs = new IdentityHashMap[IcebergPartitionedFile, RapidsInputFile]()
 
   override protected def afterEach(): Unit = {
     try {
@@ -96,9 +96,9 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
   }
 
   private abstract class TestAdapter extends StagedScanAdapter {
-    override def openInputFile(file: StagedFileSource): RapidsInputFile = {
+    override def openInputFile(file: IcebergPartitionedFile): RapidsInputFile = {
       val input = sourceInputs.get(file)
-      require(input != null, s"missing test input for ${file.getIcebergFile.path}")
+      require(input != null, s"missing test input for ${file.path}")
       input
     }
   }
@@ -125,6 +125,11 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
   private val twoColumnReadSchema = StructType(Seq(
     StructField("id", IntegerType, nullable = false),
     StructField("value", IntegerType, nullable = false)))
+
+  private val threeColumnReadSchema = StructType(Seq(
+    StructField("id", IntegerType, nullable = false),
+    StructField("value", IntegerType, nullable = false),
+    StructField("extra", IntegerType, nullable = false)))
 
   private def column(
       schema: MessageType,
@@ -200,26 +205,24 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       input: RapidsInputFile): FooterResult = {
     val path = new Path(s"file:///tmp/staged-planner-$ordinal.parquet")
     val icebergInput = new IcebergInputFile(HadoopInputFile.fromPath(path, new Configuration()))
-    val source = new StagedFileSource(IcebergPartitionedFile(icebergInput))
-    sourceInputs.put(source, input)
+    val file = IcebergPartitionedFile(icebergInput)
+    sourceInputs.put(file, input)
+    val postProcessor = mock(classOf[GpuParquetReaderPostProcessor])
+    when(postProcessor.compatibleForCombining(any[GpuParquetReaderPostProcessor]()))
+      .thenReturn(true)
     new FooterResult(
-      source,
+      file,
       blocks.asJava,
       schema,
       readSchema,
       DateTimeRebaseCorrected,
       DateTimeRebaseCorrected,
       false,
-      mock(classOf[GpuParquetReaderPostProcessor]))
+      postProcessor)
   }
 
-  private def compatible(value: Boolean): BiPredicate[FooterResult, FooterResult] =
-    new BiPredicate[FooterResult, FooterResult] {
-      override def test(existing: FooterResult, candidate: FooterResult): Boolean = value
-    }
-
-  private def sourceOrdinal(source: StagedFileSource): Int = {
-    source.getIcebergFile.path.getName
+  private def sourceOrdinal(file: IcebergPartitionedFile): Int = {
+    file.path.getName
       .stripPrefix("staged-planner-")
       .stripSuffix(".parquet")
       .toInt
@@ -227,8 +230,8 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
 
   private def planShape(plan: JList[ReadSubtask]): Seq[(Long, Long, Seq[Int])] = {
     plan.asScala.map { subtask =>
-      val sources = subtask.getSegments.asScala.map(segment =>
-        sourceOrdinal(segment.getFooter.getSource))
+      val sources = subtask.getFileSlices.asScala.map(fileSlice =>
+        sourceOrdinal(fileSlice.getFooter.getFile))
       (subtask.getSubtaskId, subtask.getRowCount, sources.toSeq)
     }.toSeq
   }
@@ -348,19 +351,21 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       throw new AssertionError("staged output must use readVectored, not open")
   }
 
-  private def recordingObserver(
-      observed: ArrayBuffer[(PlannedReadRange, Seq[Byte])]) =
-    new StagedParquetOutput.RangeCopyObserver {
-      override def rangeCopied(range: PlannedReadRange, data: HostMemoryBuffer): Unit = {
-        try {
-          val bytes = new Array[Byte](Math.toIntExact(data.getLength))
-          data.getBytes(bytes, 0L, 0L, bytes.length)
-          observed += range -> bytes.toIndexedSeq
-        } finally {
-          data.close()
-        }
+  private def recordCopiedRanges(
+      output: StagedParquetOutput,
+      ranges: Seq[PlannedReadRange],
+      observed: ArrayBuffer[(PlannedReadRange, Seq[Byte])]): Unit = {
+    ranges.foreach { range =>
+      val data = output.sliceForCache(range.getOutputOffset, range.getLength)
+      try {
+        val bytes = new Array[Byte](Math.toIntExact(data.getLength))
+        data.getBytes(bytes, 0L, 0L, bytes.length)
+        observed += range -> bytes.toIndexedSeq
+      } finally {
+        data.close()
       }
     }
+  }
 
   test("stable planning preserves input order and honors the row limit") {
     val file0 = footer(0, oneColumnParquetSchema, oneColumnReadSchema, Seq(
@@ -369,7 +374,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     val file1 = footer(1, oneColumnParquetSchema, oneColumnReadSchema, Seq(
       oneColumnBlock(rows = 2L, offset = 300L, size = 12L)))
     val planner = new StableGreedyReadPlanner(
-      5, Long.MaxValue, Long.MaxValue, compatible(value = true))
+      5, Long.MaxValue, Long.MaxValue, oneColumnReadSchema)
 
     val firstPlan = planner.plan(Seq(file0, file1).asJava)
     val secondPlan = planner.plan(Seq(file0, file1).asJava)
@@ -377,7 +382,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
 
     assert(planShape(firstPlan) === expected)
     assert(planShape(secondPlan) === expected)
-    assert(firstPlan.get(0).getSegments.get(0).getBlocks.size() === 2)
+    assert(firstPlan.get(0).getFileSlices.get(0).getBlocks.size() === 2)
   }
 
   test("planner honors GPU limits and retains an oversized row group") {
@@ -388,15 +393,12 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     // One required INT column is estimated at four bytes per row. Each three-row block fits
     // under 20 bytes, but their 24-byte combined estimate does not.
     val gpuLimited = new StableGreedyReadPlanner(
-      Int.MaxValue, 20L, Long.MaxValue, compatible(value = true))
+      Int.MaxValue, 20L, Long.MaxValue, oneColumnReadSchema)
       .plan(Seq(gpuLimitedFooter).asJava)
     assert(gpuLimited.asScala.map(_.getRowCount) === Seq(3L, 3L))
 
-    val finalOutputEstimator = new StableGreedyReadPlanner.GpuSizeEstimator {
-      override def estimate(footer: FooterResult, rowCount: Long): Long = rowCount * 10L
-    }
     val evolvedOutputLimited = new StableGreedyReadPlanner(
-      Int.MaxValue, 50L, Long.MaxValue, compatible(value = true), finalOutputEstimator)
+      Int.MaxValue, 50L, Long.MaxValue, threeColumnReadSchema)
       .plan(Seq(gpuLimitedFooter).asJava)
     assert(evolvedOutputLimited.asScala.map(_.getRowCount) === Seq(3L, 3L))
 
@@ -404,7 +406,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       oneColumnBlock(rows = 6L, offset = 100L, size = 10L),
       oneColumnBlock(rows = 1L, offset = 200L, size = 3L)))
     val oversized = new StableGreedyReadPlanner(
-      5, Long.MaxValue, Long.MaxValue, compatible(value = true))
+      5, Long.MaxValue, Long.MaxValue, oneColumnReadSchema)
       .plan(Seq(oversizedFooter).asJava)
     assert(oversized.asScala.map(_.getRowCount) === Seq(6L, 1L))
   }
@@ -421,16 +423,16 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       oneColumnBlock(rows = 1L, offset = 100L, size = 1L * mib)))
 
     val plan = new StableGreedyReadPlanner(
-      Int.MaxValue, Long.MaxValue, target, compatible(value = true))
+      Int.MaxValue, Long.MaxValue, target, oneColumnReadSchema)
       .plan(Seq(file0, file1, file2).asJava)
 
     // file0 is below the target, so file1 is admitted. Its second row group must stay with its
     // first even though the combined subtask has crossed 64 MiB. The target is consulted again
     // only at the boundary before file2.
     assert(planShape(plan) === Seq((0L, 3L, Seq(0, 1)), (1L, 1L, Seq(2))))
-    assert(plan.get(0).getSegments.get(1).getBlocks.size() === 2)
-    assert(plan.get(0).getLayout.getDataSizeBytes === 120L * mib)
-    assert(plan.get(1).getLayout.getDataSizeBytes === 1L * mib)
+    assert(plan.get(0).getFileSlices.get(1).getBlocks.size() === 2)
+    assert(plan.get(0).getDataSizeBytes === 120L * mib)
+    assert(plan.get(1).getDataSizeBytes === 1L * mib)
   }
 
   test("cross-file combination requires compatibility and a positive target") {
@@ -440,17 +442,21 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       oneColumnBlock(rows = 3L, offset = 200L, size = 5L)))
 
     val combined = new StableGreedyReadPlanner(
-      Int.MaxValue, Long.MaxValue, 1024L, compatible(value = true))
+      Int.MaxValue, Long.MaxValue, 1024L, oneColumnReadSchema)
       .plan(Seq(file0, file1).asJava)
     assert(planShape(combined) === Seq((0L, 5L, Seq(0, 1))))
 
+    val incompatibleFile = footer(1, twoColumnParquetSchema, twoColumnReadSchema, Seq(
+      block(twoColumnParquetSchema, rows = 3L,
+        ColumnSpec("id", 200L, 0L, 5L, 5L),
+        ColumnSpec("value", 300L, 0L, 5L, 5L))))
     val incompatible = new StableGreedyReadPlanner(
-      Int.MaxValue, Long.MaxValue, 1024L, compatible(value = false))
-      .plan(Seq(file0, file1).asJava)
+      Int.MaxValue, Long.MaxValue, 1024L, twoColumnReadSchema)
+      .plan(Seq(file0, incompatibleFile).asJava)
     assert(planShape(incompatible) === Seq((0L, 2L, Seq(0)), (1L, 3L, Seq(1))))
 
     val crossFileDisabled = new StableGreedyReadPlanner(
-      Int.MaxValue, Long.MaxValue, 0L, compatible(value = true))
+      Int.MaxValue, Long.MaxValue, 0L, oneColumnReadSchema)
       .plan(Seq(file0, file1).asJava)
     assert(planShape(crossFileDisabled) ===
       Seq((0L, 2L, Seq(0)), (1L, 3L, Seq(1))))
@@ -459,9 +465,29 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       oneColumnBlock(rows = 2L, offset = 300L, size = 4L),
       oneColumnBlock(rows = 3L, offset = 400L, size = 5L)))
     val sameFilePlan = new StableGreedyReadPlanner(
-      Int.MaxValue, Long.MaxValue, 0L, compatible(value = false))
+      Int.MaxValue, Long.MaxValue, 0L, oneColumnReadSchema)
       .plan(Seq(sameFile).asJava)
     assert(planShape(sameFilePlan) === Seq((0L, 5L, Seq(2))))
+  }
+
+  test("distinct footer occurrences remain distinct when they share one Iceberg file") {
+    val first = footer(0, oneColumnParquetSchema, oneColumnReadSchema, Seq(
+      oneColumnBlock(rows = 2L, offset = 100L, size = 4L)))
+    val second = new FooterResult(
+      first.getFile,
+      Seq(oneColumnBlock(rows = 3L, offset = 200L, size = 5L)).asJava,
+      first.getClippedSchema,
+      first.getReadSchema,
+      first.getDateRebaseMode,
+      first.getTimestampRebaseMode,
+      first.hasInt96Timestamps(),
+      first.getPostProcessor)
+
+    assert(first.getFile eq second.getFile)
+    val plan = new StableGreedyReadPlanner(
+      Int.MaxValue, Long.MaxValue, 0L, oneColumnReadSchema)
+      .plan(Seq(first, second).asJava)
+    assert(planShape(plan) === Seq((0L, 2L, Seq(0)), (1L, 3L, Seq(0))))
   }
 
   test("synthetic layout has exact contiguous ranges and relocated page offsets") {
@@ -474,12 +500,12 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
         ColumnSpec("id", 504L, 500L, 7L, 11L),
         ColumnSpec("value", 600L, 0L, 9L, 13L))))
     val plan = new StableGreedyReadPlanner(
-      Int.MaxValue, Long.MaxValue, Long.MaxValue, compatible(value = true))
+      Int.MaxValue, Long.MaxValue, Long.MaxValue, twoColumnReadSchema)
       .plan(Seq(file0, file1).asJava)
-    val layout = plan.get(0).getLayout
+    val layout = plan.get(0)
     val ranges = layout.getRanges.asScala
 
-    assert(ranges.map(range => sourceOrdinal(range.getSource)) === Seq(0, 0, 1, 1))
+    assert(ranges.map(range => sourceOrdinal(range.getFooter.getFile)) === Seq(0, 0, 1, 1))
     assert(ranges.map(_.getInputOffset) === Seq(100L, 300L, 500L, 600L))
     assert(ranges.map(_.getLength) === Seq(12L, 20L, 7L, 9L))
     assert(ranges.map(_.getOutputOffset) === Seq(4L, 16L, 36L, 43L))
@@ -514,7 +540,6 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     val sourceBytes = (0 until 32).map(_.toByte).toArray
     val input = new RecordingVectoredInput(sourceBytes)
     val source = footer(10, oneColumnParquetSchema, oneColumnReadSchema, Seq.empty)
-      .getSource
     // The first two ranges are adjacent in both input and output. They must still be sent as
     // distinct requests because each range represents one Parquet column chunk.
     val ranges = Seq(
@@ -525,7 +550,8 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     val output = new MemoryStagedParquetOutput(HostMemoryBuffer.allocate(16L), 16L)
 
     try {
-      output.copyRanges(input, ranges.asJava, 1, recordingObserver(observed))
+      output.copyRanges(input, ranges.asJava)
+      recordCopiedRanges(output, ranges, observed)
 
       assert(input.vectoredCalls === Seq(Seq(
         (1L, 3L, 2L),
@@ -547,7 +573,6 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     val sourceBytes = (0 until 32).map(index => (index + 20).toByte).toArray
     val input = new RecordingVectoredInput(sourceBytes)
     val source = footer(11, oneColumnParquetSchema, oneColumnReadSchema, Seq.empty)
-      .getSource
     val ranges = Seq(
       new PlannedReadRange(source, 1L, 3L, 2L),
       new PlannedReadRange(source, 4L, 2L, 5L),
@@ -558,12 +583,12 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
 
     try {
       // The writable mmap lets every column chunk for this source share one vectored request.
-      // scratchBytes is intentionally smaller than their total to catch accidental batching.
-      output.copyRanges(input, ranges.asJava, 5, recordingObserver(observed))
+      output.copyRanges(input, ranges.asJava)
+      recordCopiedRanges(output, ranges, observed)
       output.writeBytes(0L, Array[Byte](1, 2), 0, 2)
       output.writeBytes(7L, Array[Byte](7, 8, 9), 0, 3)
       output.writeBytes(14L, Array[Byte](14, 15), 0, 2)
-      output.seal(16L)
+      output.seal()
 
       assert(input.vectoredCalls === Seq(Seq(
         (1L, 3L, 2L),
@@ -614,8 +639,8 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       new BlockingVectoredInput(0, sourceBytes, tracker),
       new BlockingVectoredInput(1, sourceBytes, tracker))
     val sources = Seq(
-      footer(20, oneColumnParquetSchema, oneColumnReadSchema, Seq.empty).getSource,
-      footer(21, oneColumnParquetSchema, oneColumnReadSchema, Seq.empty).getSource)
+      footer(20, oneColumnParquetSchema, oneColumnReadSchema, Seq.empty),
+      footer(21, oneColumnParquetSchema, oneColumnReadSchema, Seq.empty))
     val ranges = Seq(
       Seq(
         new PlannedReadRange(sources(0), 1L, 4L, 2L),
@@ -625,16 +650,13 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
         new PlannedReadRange(sources(1), 30L, 2L, 20L)))
     val writableBuffer = HostMemoryBuffer.allocate(32L)
     val output = new MemoryStagedParquetOutput(writableBuffer, 32L)
-    val observer = new StagedParquetOutput.RangeCopyObserver {
-      override def rangeCopied(range: PlannedReadRange, data: HostMemoryBuffer): Unit = data.close()
-    }
     val workers = Executors.newFixedThreadPool(2)
 
     try {
       val writes = inputs.indices.map { index =>
         workers.submit(new Runnable {
           override def run(): Unit =
-            output.copyRanges(inputs(index), ranges(index).asJava, 1, observer)
+            output.copyRanges(inputs(index), ranges(index).asJava)
         })
       }
 
@@ -675,14 +697,10 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
           ColumnSpec("value", baseOffset + 100L, 0L, 5L, 5L))),
         input)
     }
-    val scanFiles = footers.map(_.getSource)
+    val scanFiles = footers.map(_.getFile)
     val adapter = new TestAdapter {
-      override def readAndFilterFooter(file: StagedFileSource): FooterResult =
-        footers.find(_.getSource eq file).get
-
-      override def canCombine(
-          left: FooterResult,
-          right: FooterResult): Boolean = true
+      override def readAndFilterFooter(file: IcebergPartitionedFile): FooterResult =
+        footers.find(_.getFile eq file).get
 
       override def decodeAndPostProcess(
           subtask: ReadSubtask,
@@ -697,12 +715,12 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     val reader = new StagedParquetPartitionReader(
       scanFiles.asJava,
       adapter,
+      twoColumnReadSchema,
       Int.MaxValue,
       Long.MaxValue,
       Long.MaxValue,
       2,
       1,
-      5,
       null)
     val caller = Executors.newSingleThreadExecutor()
     try {
@@ -763,7 +781,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
           ColumnSpec("id", baseOffset + 4L, baseOffset, 4L, 4L))),
         input)
     }
-    val scanFiles = footers.map(_.getSource)
+    val scanFiles = footers.map(_.getFile)
     val decodeCount = new AtomicInteger()
     val firstResultTaken = new CountDownLatch(1)
     val allowResultProcessing = new CountDownLatch(1)
@@ -771,12 +789,8 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     val allowFirstDecode = new CountDownLatch(1)
     val blockFirstResult = new AtomicBoolean(true)
     val adapter = new TestAdapter {
-      override def readAndFilterFooter(file: StagedFileSource): FooterResult =
-        footers.find(_.getSource eq file).get
-
-      override def canCombine(
-          left: FooterResult,
-          right: FooterResult): Boolean = false
+      override def readAndFilterFooter(file: IcebergPartitionedFile): FooterResult =
+        footers.find(_.getFile eq file).get
 
       override def onResultWait(waitNanos: Long): Unit = {
         if (blockFirstResult.compareAndSet(true, false)) {
@@ -801,12 +815,12 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     val reader = new StagedParquetPartitionReader(
       scanFiles.asJava,
       adapter,
+      oneColumnReadSchema,
       Int.MaxValue,
       Long.MaxValue,
       0L,
       1,
       1,
-      5,
       null)
     val caller = Executors.newSingleThreadExecutor()
     try {
@@ -863,9 +877,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
 
     def adapterFor(footer: FooterResult, blockDecode: Boolean): StagedScanAdapter =
       new TestAdapter {
-        override def readAndFilterFooter(file: StagedFileSource): FooterResult = footer
-
-        override def canCombine(left: FooterResult, right: FooterResult): Boolean = true
+        override def readAndFilterFooter(file: IcebergPartitionedFile): FooterResult = footer
 
         override def decodeAndPostProcess(
             subtask: ReadSubtask,
@@ -882,24 +894,24 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
 
     HostAlloc.initialize(0L)
     val firstReader = new StagedParquetPartitionReader(
-      Seq(footers.head.getSource).asJava,
+      Seq(footers.head.getFile).asJava,
       adapterFor(footers.head, blockDecode = true),
+      oneColumnReadSchema,
       Int.MaxValue,
       Long.MaxValue,
       0L,
       2,
       1,
-      5,
       null)
     val secondReader = new StagedParquetPartitionReader(
-      Seq(footers.last.getSource).asJava,
+      Seq(footers.last.getFile).asJava,
       adapterFor(footers.last, blockDecode = false),
+      oneColumnReadSchema,
       Int.MaxValue,
       Long.MaxValue,
       0L,
       2,
       1,
-      5,
       null)
     val callers = Executors.newFixedThreadPool(2)
     try {
@@ -957,21 +969,17 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
           ColumnSpec("value", baseOffset + 100L, 0L, 5L, 5L))),
         input)
     }
-    val scanFiles = footers.map(_.getSource)
+    val scanFiles = footers.map(_.getFile)
     val combinedBytesVerified = new AtomicBoolean()
     val adapter = new TestAdapter {
-      override def readAndFilterFooter(file: StagedFileSource): FooterResult =
-        footers.find(_.getSource eq file).get
-
-      override def canCombine(
-          left: FooterResult,
-          right: FooterResult): Boolean = true
+      override def readAndFilterFooter(file: IcebergPartitionedFile): FooterResult =
+        footers.find(_.getFile eq file).get
 
       override def decodeAndPostProcess(
           subtask: ReadSubtask,
           parquetData: HostMemoryBuffer): JIterator[ColumnarBatch] = {
         try {
-          val layout = subtask.getLayout
+          val layout = subtask
           val header = new Array[Byte](layout.getHeaderBytes.length)
           parquetData.getBytes(header, 0L, 0L, header.length)
           assert(header.toIndexedSeq === layout.getHeaderBytes.toIndexedSeq)
@@ -999,12 +1007,12 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     val reader = new StagedParquetPartitionReader(
       scanFiles.asJava,
       adapter,
+      twoColumnReadSchema,
       Int.MaxValue,
       Long.MaxValue,
       Long.MaxValue,
       2,
       1,
-      5,
       null)
     val caller = Executors.newSingleThreadExecutor()
     try {
@@ -1061,15 +1069,11 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
           ColumnSpec("value", baseOffset + 100L, 0L, 5L, 5L))),
         input)
     }
-    val scanFiles = footers.map(_.getSource)
+    val scanFiles = footers.map(_.getFile)
     val decodeCalled = new AtomicBoolean()
     val adapter = new TestAdapter {
-      override def readAndFilterFooter(file: StagedFileSource): FooterResult =
-        footers.find(_.getSource eq file).get
-
-      override def canCombine(
-          left: FooterResult,
-          right: FooterResult): Boolean = true
+      override def readAndFilterFooter(file: IcebergPartitionedFile): FooterResult =
+        footers.find(_.getFile eq file).get
 
       override def decodeAndPostProcess(
           subtask: ReadSubtask,
@@ -1085,12 +1089,12 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     val reader = new StagedParquetPartitionReader(
       scanFiles.asJava,
       adapter,
+      twoColumnReadSchema,
       Int.MaxValue,
       Long.MaxValue,
       Long.MaxValue,
       2,
       1,
-      5,
       null)
     val caller = Executors.newSingleThreadExecutor()
     try {
@@ -1167,24 +1171,20 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
 
   test("close unblocks a footer wait and ignores a footer that finishes later") {
     val input = footer(0, oneColumnParquetSchema, oneColumnReadSchema, Seq.empty)
-    val scanFile = input.getSource
+    val scanFile = input.getFile
     val footerStarted = new CountDownLatch(1)
     val releaseFooter = new CountDownLatch(1)
     val footerFinished = new CountDownLatch(1)
     val footerThreadName = new AtomicReference[String]()
     val decodeCalled = new AtomicBoolean()
     val adapter = new TestAdapter {
-      override def readAndFilterFooter(file: StagedFileSource): FooterResult = {
+      override def readAndFilterFooter(file: IcebergPartitionedFile): FooterResult = {
         footerThreadName.set(Thread.currentThread().getName)
         footerStarted.countDown()
         releaseFooter.await()
         footerFinished.countDown()
         input
       }
-
-      override def canCombine(
-          left: FooterResult,
-          right: FooterResult): Boolean = true
 
       override def decodeAndPostProcess(
           subtask: ReadSubtask,
@@ -1197,12 +1197,12 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     val reader = new StagedParquetPartitionReader(
       Seq(scanFile).asJava,
       adapter,
+      oneColumnReadSchema,
       Int.MaxValue,
       Long.MaxValue,
       1L,
       1,
       1,
-      1024,
       null)
     val caller = Executors.newSingleThreadExecutor()
     try {

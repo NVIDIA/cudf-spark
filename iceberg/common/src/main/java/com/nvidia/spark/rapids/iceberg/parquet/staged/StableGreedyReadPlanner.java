@@ -20,11 +20,11 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
-import java.util.function.BiPredicate;
 
 import com.nvidia.spark.rapids.GpuBatchUtils$;
 import org.apache.parquet.hadoop.metadata.BlockMetaData;
 import org.apache.parquet.hadoop.metadata.ColumnChunkMetaData;
+import org.apache.spark.sql.types.StructType;
 
 /**
  * Stable greedy planner for filtered Iceberg Parquet row groups.
@@ -41,37 +41,16 @@ import org.apache.parquet.hadoop.metadata.ColumnChunkMetaData;
  * batching within each source.</p>
  */
 public final class StableGreedyReadPlanner {
-  /** Estimates final GPU bytes after Iceberg schema evolution and constant materialization. */
-  @FunctionalInterface
-  public interface GpuSizeEstimator {
-    long estimate(FooterResult footer, long rowCount);
-  }
-
   private final int maxRows;
   private final long maxEstimatedGpuBytes;
   private final long targetParquetBytes;
-  private final BiPredicate<FooterResult, FooterResult> compatibility;
-  private final GpuSizeEstimator gpuSizeEstimator;
-  private final SyntheticParquetLayoutBuilder layoutBuilder;
+  private final StructType expectedSparkSchema;
 
   public StableGreedyReadPlanner(
       int maxRows,
       long maxEstimatedGpuBytes,
       long targetParquetBytes,
-      BiPredicate<FooterResult, FooterResult> compatibility) {
-    this(maxRows, maxEstimatedGpuBytes, targetParquetBytes,
-        compatibility,
-        (footer, rows) -> GpuBatchUtils$.MODULE$.estimateGpuMemory(
-            footer.getReadSchema(), rows));
-  }
-
-  /** Creates a planner with an Iceberg-aware final-output GPU estimator. */
-  public StableGreedyReadPlanner(
-      int maxRows,
-      long maxEstimatedGpuBytes,
-      long targetParquetBytes,
-      BiPredicate<FooterResult, FooterResult> compatibility,
-      GpuSizeEstimator gpuSizeEstimator) {
+      StructType expectedSparkSchema) {
     if (maxRows <= 0) {
       throw new IllegalArgumentException("maxRows must be positive");
     }
@@ -81,9 +60,8 @@ public final class StableGreedyReadPlanner {
     this.maxRows = maxRows;
     this.maxEstimatedGpuBytes = maxEstimatedGpuBytes;
     this.targetParquetBytes = targetParquetBytes;
-    this.compatibility = Objects.requireNonNull(compatibility, "compatibility");
-    this.gpuSizeEstimator = Objects.requireNonNull(gpuSizeEstimator, "gpuSizeEstimator");
-    this.layoutBuilder = new SyntheticParquetLayoutBuilder();
+    this.expectedSparkSchema = Objects.requireNonNull(
+        expectedSparkSchema, "expectedSparkSchema");
   }
 
   /**
@@ -116,11 +94,9 @@ public final class StableGreedyReadPlanner {
         }
         long blockDataBytes = encodedDataBytes(block);
         long candidateRows = Math.addExact(selectedRows, block.getRowCount());
-        long candidateGpuBytes = estimateGpuBytes(
-            selected.isEmpty() ? footer : selected.get(0).footer,
-            candidateRows);
+        long candidateGpuBytes = estimateGpuBytes(candidateRows);
         boolean crossesSourceBoundary = !selected.isEmpty()
-            && selected.get(selected.size() - 1).footer.getSource() != footer.getSource();
+            && selected.get(selected.size() - 1).footer != footer;
 
         boolean shouldFlush = !selected.isEmpty()
             && ((crossesSourceBoundary && hasReachedTarget(selectedDataBytes))
@@ -134,7 +110,7 @@ public final class StableGreedyReadPlanner {
           selectedDataBytes = 0L;
         }
 
-        selected.add(new SelectedBlock(footer, blockIndex, block));
+        selected.add(new SelectedBlock(footer, blockIndex));
         selectedRows = Math.addExact(selectedRows, block.getRowCount());
         selectedDataBytes = Math.addExact(selectedDataBytes, blockDataBytes);
       }
@@ -160,7 +136,7 @@ public final class StableGreedyReadPlanner {
         previous = existing;
         continue;
       }
-      if (targetParquetBytes <= 0 || !compatibility.test(existing, candidate)) {
+      if (targetParquetBytes <= 0 || !compatible(existing, candidate)) {
         return false;
       }
       previous = existing;
@@ -171,7 +147,7 @@ public final class StableGreedyReadPlanner {
   private ReadSubtask buildSubtask(
       long subtaskId,
       List<SelectedBlock> selected) {
-    ArrayList<ReadSegment> segments = new ArrayList<>();
+    ArrayList<ReadSubtask.FileSlice> fileSlices = new ArrayList<>();
     int start = 0;
     while (start < selected.size()) {
       FooterResult footer = selected.get(start).footer;
@@ -182,20 +158,12 @@ public final class StableGreedyReadPlanner {
         end++;
       }
 
-      ArrayList<BlockMetaData> blocks = new ArrayList<>(end - start);
-      for (int index = start; index < end; index++) {
-        blocks.add(selected.get(index).block);
-      }
-      segments.add(new ReadSegment(footer, blocks));
+      fileSlices.add(new ReadSubtask.FileSlice(
+          footer, selected.get(start).blockIndex, end - start));
       start = end;
     }
 
-    long rows = 0L;
-    for (ReadSegment segment : segments) {
-      rows = Math.addExact(rows, segment.getRowCount());
-    }
-    SyntheticParquetLayout layout = layoutBuilder.build(segments);
-    return new ReadSubtask(subtaskId, segments, layout, rows);
+    return new ReadSubtask(subtaskId, fileSlices);
   }
 
   private static long encodedDataBytes(BlockMetaData block) {
@@ -206,27 +174,34 @@ public final class StableGreedyReadPlanner {
     return bytes;
   }
 
-  private long estimateGpuBytes(FooterResult footer, long rows) {
-    long estimate = gpuSizeEstimator.estimate(footer, rows);
+  private long estimateGpuBytes(long rows) {
+    long estimate = GpuBatchUtils$.MODULE$.estimateGpuMemory(expectedSparkSchema, rows);
     if (estimate < 0) {
       throw new IllegalStateException("GPU memory estimate must not be negative");
     }
     return estimate;
   }
 
+  /** Iceberg files may share one synthetic Parquet file only when decode behavior is identical. */
+  private static boolean compatible(FooterResult left, FooterResult right) {
+    return left.getClippedSchema().equals(right.getClippedSchema())
+        && left.getReadSchema().equals(right.getReadSchema())
+        && left.getDateRebaseMode().equals(right.getDateRebaseMode())
+        && left.getTimestampRebaseMode().equals(right.getTimestampRebaseMode())
+        && left.hasInt96Timestamps() == right.hasInt96Timestamps()
+        && left.getPostProcessor().compatibleForCombining(right.getPostProcessor());
+  }
+
   /** Task-thread-only tuple used while preserving stable row-group order. */
   private static final class SelectedBlock {
     private final FooterResult footer;
     private final int blockIndex;
-    private final BlockMetaData block;
 
     private SelectedBlock(
         FooterResult footer,
-        int blockIndex,
-        BlockMetaData block) {
+        int blockIndex) {
       this.footer = footer;
       this.blockIndex = blockIndex;
-      this.block = block;
     }
   }
 }
