@@ -152,6 +152,29 @@ def _write_many_small_row_tracking_files(
     assert len(num_files) > 63, f"Expected more than 63 files, but got {num_files}"
 
 
+def _write_many_small_liquid_files(
+        spark, enable_deletion_vectors, path, partition_columns=None, clustering_columns=None):
+    if enable_deletion_vectors:
+        raise ValueError("Liquid OPTIMIZE GPU rewrite coverage requires deletion vectors disabled")
+    if partition_columns or clustering_columns != ["a"]:
+        raise ValueError("Liquid OPTIMIZE GPU rewrite coverage uses CLUSTER BY (a)")
+
+    spark.sql(f"""
+        CREATE TABLE delta.`{path}` (a BIGINT, b STRING, c STRING)
+        USING DELTA
+        TBLPROPERTIES ('delta.enableDeletionVectors' = 'false')
+        CLUSTER BY (a)
+    """)
+    data = spark.range(4096).selectExpr(
+        "id AS a", "CAST(pmod(id, 17) AS STRING) AS b", "CAST(id * 3 AS STRING) AS c")
+    for bucket in range(8):
+        data.where(f"pmod(a, 8) = {bucket}").repartition(4) \
+            .write.format("delta").mode("append").save(path)
+
+    num_files = spark.read.format("delta").load(path).inputFiles()
+    assert len(num_files) > 7, f"Expected more than 7 files, but got {num_files}"
+
+
 def _delete_rows_and_disable_deletion_vectors(spark, path):
     spark.range(10000).selectExpr(
         "CAST(id AS INT) AS a",
@@ -286,6 +309,41 @@ def _assert_optimize_fallback(enable_deletion_vectors, spark_tmp_path, partition
         with_cpu_session(lambda s: assert_gpu_and_cpu_latest_delta_log_equivalent(s, data_path))
 
 
+def _assert_liquid_optimize_gpu_write_parity(spark_tmp_path):
+    data_path = spark_tmp_path + "/DELTA_LIQUID_OPTIMIZE_WRITE"
+    cpu_path = data_path + "/CPU"
+    gpu_path = data_path + "/GPU"
+    _setup_tables(
+        False, cpu_path, gpu_path, None, ["a"], _optimize_conf,
+        write_func=_write_many_small_liquid_files)
+
+    cpu_result = with_cpu_session(
+        lambda spark: spark.sql(_optimize_sql(cpu_path)).collect(), conf=_optimize_conf)
+    plan_callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    plan_callback.startCapture()
+    try:
+        gpu_result = _with_gpu_session_no_test(
+            lambda spark: spark.sql(_optimize_sql(gpu_path)).collect(), conf=_optimize_conf)
+        captured_plans = plan_callback.getResultsWithTimeout(10000)
+        _assert_captured_plan_contains(
+            plan_callback, captured_plans, "GpuDataWritingCommandExec", "liquid OPTIMIZE write")
+        _assert_captured_plan_contains(
+            plan_callback, captured_plans, "GpuWriteFilesExec", "liquid OPTIMIZE write files")
+    finally:
+        plan_callback.endCapture()
+
+    assert str(cpu_result[0][0]).rstrip('/').endswith('/CPU')
+    assert str(gpu_result[0][0]).rstrip('/').endswith('/GPU')
+    cpu_data = with_cpu_session(lambda spark: _read_sorted(spark, cpu_path).collect(),
+                                conf=_optimize_conf)
+    gpu_data = with_cpu_session(lambda spark: _read_sorted(spark, gpu_path).collect(),
+                                conf=_optimize_conf)
+    assert_equal(cpu_data, gpu_data)
+    with_cpu_session(
+        lambda spark: assert_gpu_and_cpu_latest_delta_log_equivalent(spark, data_path),
+        conf=_optimize_conf)
+
+
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
@@ -331,3 +389,10 @@ def test_delta_optimize_clustered_table(spark_tmp_path, enable_deletion_vectors)
         _assert_optimize_fallback(enable_deletion_vectors, spark_tmp_path, clustering_columns=["a"])
     else:
         _assert_optimize_parity(enable_deletion_vectors, spark_tmp_path, clustering_columns=["a"])
+
+
+@delta_lake
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="Native liquid OPTIMIZE write coverage is for Databricks 17.3+")
+def test_delta_optimize_clustered_table_gpu_write(spark_tmp_path):
+    _assert_liquid_optimize_gpu_write_parity(spark_tmp_path)
