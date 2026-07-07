@@ -27,14 +27,14 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Executor-wide I/O and CPU pools for the Iceberg staged reader.
+ * Executor-wide worker pool for the Iceberg staged reader.
  *
- * <p>The CPU pool fetches and filters footers and finalizes already-fetched synthetic Parquet
- * files. The I/O pool owns independently scheduled source-file reads; its width is the only bound
- * on active source jobs. Keeping footer jobs out of the I/O queue prevents already-submitted data
- * reads from delaying another Spark task's footer barrier. The first task on an executor fixes the
- * configured sizes, and later tasks reuse those pools. All workers are daemon threads and idle
- * core threads time out, so the singleton does not delay executor shutdown.</p>
+ * <p>Footer loading/filtering, source-file I/O, and synthetic Parquet finalization all use this
+ * pool. Sharing one concurrency budget avoids reserving workers for a stage that is temporarily
+ * idle and bounds the total number of outer staged-reader jobs on an executor. PerfIO can still
+ * issue the column-chunk requests within one source job concurrently. The first task on an
+ * executor fixes the configured size, and later tasks reuse that pool. All workers are daemon
+ * threads and idle core threads time out, so the singleton does not delay executor shutdown.</p>
  *
  * <p>Pool submission does not transfer Spark task context automatically. Each staged callable is
  * responsible for installing and removing its captured {@code TaskContext}, as well as the RAPIDS
@@ -46,55 +46,41 @@ public final class StagedScanThreadPools {
 
   private static StagedScanThreadPools singleton;
 
-  private final int cpuThreads;
-  private final int ioThreads;
-  private final ExecutorService cpuExecutor;
-  private final ExecutorService ioExecutor;
+  private final int threads;
+  private final ExecutorService executor;
 
-  private StagedScanThreadPools(int cpuThreads, int ioThreads) {
-    this.cpuThreads = cpuThreads;
-    this.ioThreads = ioThreads;
-    this.cpuExecutor = newPool("iceberg-staged-cpu", cpuThreads);
-    this.ioExecutor = newPool("iceberg-staged-io", ioThreads);
+  private StagedScanThreadPools(int threads) {
+    this.threads = threads;
+    this.executor = newPool("iceberg-staged-worker", threads);
   }
 
   /**
-   * Return the executor-wide pools, creating them on the first request.
+   * Return the executor-wide pool, creating it on the first request.
    *
-   * <p>Every size must be positive. A later request with different sizes reuses the initialized
-   * pools and logs a warning because replacing a pool while tasks own futures would violate
+   * <p>The size must be positive. A later request with a different size reuses the initialized
+   * pool and logs a warning because replacing a pool while tasks own futures would violate
    * cancellation and ownership guarantees.</p>
    */
-  public static synchronized StagedScanThreadPools getOrCreate(
-      int cpuThreads,
-      int ioThreads) {
-    checkThreadCount("cpuThreads", cpuThreads);
-    checkThreadCount("ioThreads", ioThreads);
+  public static synchronized StagedScanThreadPools getOrCreate(int threads) {
+    checkThreadCount("threads", threads);
     if (singleton == null) {
-      singleton = new StagedScanThreadPools(cpuThreads, ioThreads);
-    } else if (singleton.cpuThreads != cpuThreads || singleton.ioThreads != ioThreads) {
-      LOG.warn("Reusing initialized Iceberg staged-read pools ({}/{}) instead of " +
-              "requested sizes ({}/{})",
-          singleton.cpuThreads, singleton.ioThreads, cpuThreads, ioThreads);
+      singleton = new StagedScanThreadPools(threads);
+    } else if (singleton.threads != threads) {
+      LOG.warn("Reusing initialized Iceberg staged-read pool ({}) instead of requested size ({})",
+          singleton.threads, threads);
     }
     return singleton;
   }
 
-  /** Return the pool that fetches/filters footers and finalizes synthetic Parquet outputs. */
-  public ExecutorService cpuExecutor() {
-    return cpuExecutor;
-  }
-
-  /** Return the pool that fetches planned Parquet data ranges. */
-  public ExecutorService ioExecutor() {
-    return ioExecutor;
+  /** Return the shared pool used by every asynchronous staged-reader operation. */
+  public ExecutorService executor() {
+    return executor;
   }
 
   /** Stop and forget the singleton so a same-JVM test can select deterministic pool widths. */
   static synchronized void resetForTesting() {
     if (singleton != null) {
-      singleton.cpuExecutor.shutdownNow();
-      singleton.ioExecutor.shutdownNow();
+      singleton.executor.shutdownNow();
       singleton = null;
     }
   }

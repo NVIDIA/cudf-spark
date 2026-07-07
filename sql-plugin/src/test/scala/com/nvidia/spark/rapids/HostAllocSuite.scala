@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,7 +22,7 @@ import ai.rapids.cudf.{HostMemoryBuffer, PinnedMemoryPool, Rmm, RmmAllocationMod
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.jni.{RmmSpark, RmmSparkThreadState, TaskPriority, ThreadStateRegistry}
 import com.nvidia.spark.rapids.spill._
-import org.mockito.Mockito.when
+import org.mockito.Mockito.{times, verify, when}
 import org.scalatest.{BeforeAndAfterAll, BeforeAndAfterEach}
 import org.scalatest.concurrent.{Signaler, TimeLimits}
 import org.scalatest.funsuite.AnyFunSuite
@@ -452,6 +452,40 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
       withResource(HostAlloc.tryAlloc(4 * 1024 + 1)) { buffer =>
         assert(buffer.isEmpty)
       }
+    }
+  }
+
+  test("bounded tryAlloc caps total rounds and does not spill after the last failure") {
+    PinnedMemoryPool.initialize(0)
+    HostAlloc.initialize(4 * 1024)
+
+    withResource(HostAlloc.tryAlloc(4 * 1024, preferPinned = false).get) { _ =>
+      val originalHostStore = SpillFramework.storesInternal.hostStore
+      val hostStore = mock[SpillableHostStore]
+      when(hostStore.spill(1L)).thenReturn(0L)
+      // A live handle tells HostAlloc that a local retry could make progress. The bounded API
+      // must nevertheless stop after five allocation rounds (and therefore four spills).
+      when(hostStore.numHandles).thenReturn(1)
+      SpillFramework.storesInternal.hostStore = hostStore
+      try {
+        failAfter(Span(10, Seconds)) {
+          withResource(HostAlloc.tryAlloc(1L, preferPinned = false, maxAttempts = 5)) {
+            result => assert(result.isEmpty)
+          }
+        }
+        verify(hostStore, times(4)).spill(1L)
+      } finally {
+        SpillFramework.storesInternal.hostStore = originalHostStore
+      }
+    }
+  }
+
+  test("bounded tryAlloc requires a positive attempt count") {
+    assertThrows[IllegalArgumentException] {
+      HostAlloc.tryAlloc(1L, preferPinned = false, maxAttempts = 0)
+    }
+    assertThrows[IllegalArgumentException] {
+      HostAlloc.tryAlloc(1L, preferPinned = false, maxAttempts = -1)
     }
   }
 

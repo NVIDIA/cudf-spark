@@ -248,6 +248,8 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     val maximumActiveCalls = new AtomicInteger()
     val startedCalls = new AtomicInteger()
     val calls = new ConcurrentLinkedQueue[(Int, Seq[(Long, Long, Long)])]()
+    val threadNames = new ConcurrentLinkedQueue[String]()
+    val firstStarted = new CountDownLatch(1)
     val firstTwoStarted = new CountDownLatch(2)
     val thirdStarted = new CountDownLatch(1)
     val allStarted = new CountDownLatch(expectedSources)
@@ -257,12 +259,14 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     private val releases = new Semaphore(0)
 
     def start(sourceOrdinal: Int, ranges: JList[RapidsInputFile.CopyRange]): Unit = {
+      threadNames.add(Thread.currentThread().getName)
       calls.add(sourceOrdinal -> ranges.asScala.map { range =>
         (range.getInputOffset, range.getLength, range.getOutputOffset)
       }.toSeq)
       val active = activeCalls.incrementAndGet()
       updateMaximum(active)
       val started = startedCalls.incrementAndGet()
+      firstStarted.countDown()
       if (started <= 2) {
         firstTwoStarted.countDown()
       }
@@ -631,7 +635,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  test("I/O pool bounds concurrent source reads without merging column-chunk ranges") {
+  test("shared pool bounds concurrent source reads without merging column-chunk ranges") {
     val sourceCount = 4
     val tracker = new SourceReadTracker(sourceCount)
     val sourceBytes = Array.tabulate[Byte](2048)(index => (index & 0xff).toByte)
@@ -682,7 +686,6 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       Int.MaxValue,
       Long.MaxValue,
       0L,
-      sourceCount,
       2,
       5,
       null)
@@ -695,7 +698,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       assert(tracker.firstTwoStarted.await(10, TimeUnit.SECONDS))
       assert(tracker.activeCalls.get() === 2)
       assert(tracker.startedCalls.get() === 2)
-      // Both I/O workers are blocked, so the executor cannot start another source job.
+      // Both shared workers are blocked, so the executor cannot start another source job.
       assert(!tracker.thirdStarted.await(500, TimeUnit.MILLISECONDS))
       assert(tracker.maximumActiveCalls.get() === 2)
 
@@ -710,6 +713,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       assert(!hasNext.get(10, TimeUnit.SECONDS))
       assert(tracker.activeCalls.get() === 0)
       assert(tracker.maximumActiveCalls.get() === 2)
+      assert(tracker.threadNames.asScala.forall(_.startsWith("iceberg-staged-worker-")))
 
       val calls = tracker.calls.asScala.toSeq.sortBy(_._1)
       assert(calls.map(_._1) === (0 until sourceCount))
@@ -720,6 +724,84 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
           (baseOffset, 4L, 4L),
           (baseOffset + 100L, 5L, 8L)))
       }
+    } finally {
+      tracker.release(sourceCount * 2)
+      reader.close()
+      caller.shutdownNow()
+      HostAlloc.initialize(-1L)
+    }
+  }
+
+  test("last source worker finalizes before a later shared-pool read") {
+    val sourceCount = 2
+    val tracker = new SourceReadTracker(sourceCount)
+    val sourceBytes = Array.tabulate[Byte](1024)(index => (index & 0xff).toByte)
+    val footers = (0 until sourceCount).map { ordinal =>
+      val input = new BlockingVectoredInput(ordinal, sourceBytes, tracker)
+      val baseOffset = 100L + ordinal * 300L
+      footerWithOpener(
+        ordinal,
+        oneColumnParquetSchema,
+        oneColumnReadSchema,
+        Seq(block(oneColumnParquetSchema, rows = 1L,
+          ColumnSpec("id", baseOffset + 4L, baseOffset, 4L, 4L))),
+        new InputFileOpener {
+          override def open(): RapidsInputFile = input
+        })
+    }
+    val scanFiles = footers.map { footerResult =>
+      new StagedScanFile[Int](footerResult.getSource, footerResult.getSource.getOrdinal)
+    }
+    val decodeCount = new AtomicInteger()
+    val adapter = new StagedScanAdapter[Int, String] {
+      override def readAndFilterFooter(file: StagedScanFile[Int]): FooterResult[String] =
+        footers(file.getFormatFile)
+
+      override def canCombine(
+          left: FooterResult[String],
+          right: FooterResult[String]): Boolean = false
+
+      override def decodeAndPostProcess(
+          subtask: ReadSubtask[String],
+          parquetData: HostMemoryBuffer): JIterator[ColumnarBatch] = {
+        parquetData.close()
+        decodeCount.incrementAndGet()
+        Collections.singletonList(new ColumnarBatch(
+          Array.empty[org.apache.spark.sql.vectorized.ColumnVector], 1)).iterator()
+      }
+
+      override def closeContext(context: String): Unit = {}
+
+      override def close(): Unit = {}
+    }
+
+    HostAlloc.initialize(0L)
+    val reader = new StagedParquetPartitionReader[Int, String](
+      scanFiles.asJava,
+      adapter,
+      Int.MaxValue,
+      Long.MaxValue,
+      0L,
+      1,
+      5,
+      null)
+    val caller = Executors.newSingleThreadExecutor()
+    try {
+      val hasNext = caller.submit(new java.util.concurrent.Callable[Boolean] {
+        override def call(): Boolean = reader.hasNext()
+      })
+
+      // With one worker, source 2 sits immediately behind source 1. Releasing source 1 must run
+      // its finalizer inline before the same worker starts and blocks in source 2. Queueing the
+      // finalizer at the FIFO tail would leave hasNext blocked here.
+      assert(tracker.firstStarted.await(10, TimeUnit.SECONDS))
+      assert(tracker.startedCalls.get() === 1)
+      tracker.release(1)
+      assert(tracker.firstFinished.await(10, TimeUnit.SECONDS))
+      assert(tracker.firstTwoStarted.await(10, TimeUnit.SECONDS))
+      assert(hasNext.get(10, TimeUnit.SECONDS))
+      assert(decodeCount.get() === 1)
+      reader.next().close()
     } finally {
       tracker.release(sourceCount * 2)
       reader.close()
@@ -796,7 +878,6 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       Int.MaxValue,
       Long.MaxValue,
       Long.MaxValue,
-      2,
       2,
       5,
       null)
@@ -890,7 +971,6 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       Long.MaxValue,
       Long.MaxValue,
       2,
-      2,
       5,
       null)
     val caller = Executors.newSingleThreadExecutor()
@@ -954,8 +1034,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       constantsProvider = (_: IcebergPartitionedFile) =>
         Collections.emptyMap[Integer, Object](),
       conf = readerConf,
-      cpuThreads = 1,
-      ioThreads = 1)
+      workerThreads = 1)
 
     try {
       // Before the fix, this first access initialized DecodeSupport and failed because the
@@ -1008,7 +1087,6 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       Long.MaxValue,
       1L,
       1,
-      1,
       1024,
       null)
     val caller = Executors.newSingleThreadExecutor()
@@ -1017,7 +1095,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
         override def call(): Boolean = reader.hasNext()
       })
       assert(footerStarted.await(10, TimeUnit.SECONDS))
-      assert(footerThreadName.get().startsWith("iceberg-staged-cpu-"))
+      assert(footerThreadName.get().startsWith("iceberg-staged-worker-"))
 
       reader.close()
       assert(!hasNext.get(10, TimeUnit.SECONDS))

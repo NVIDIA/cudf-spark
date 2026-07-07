@@ -1864,17 +1864,6 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       .booleanConf
       .createWithDefault(false)
 
-  val ICEBERG_STAGED_READ_CPU_THREADS =
-    conf("spark.rapids.sql.format.iceberg.stagedRead.cpuThreads")
-      .doc("Number of executor-wide CPU threads used by the staged Iceberg reader for footer " +
-        "loading, row-group filtering, and synthetic Parquet finalization. If unset, this " +
-        "defaults to the configured executor core count, capped at 16.")
-      .startupOnly()
-      .internal()
-      .integerConf
-      .checkValue(v => v > 0, "The CPU thread count must be greater than zero.")
-      .createOptional
-
   val ICEBERG_S3_ASYNC_MAX_CONCURRENCY =
     conf("spark.rapids.iceberg.s3.async.max-concurrency")
       .doc("Max concurrent connections for the AwsCrtAsyncHttpClient used by the " +
@@ -3829,15 +3818,6 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val isIcebergWriteEnabled: Boolean = get(ENABLE_ICEBERG_WRITE)
 
   lazy val isIcebergStagedReadEnabled: Boolean = get(ICEBERG_STAGED_READ_ENABLED)
-
-  lazy val icebergStagedReadCpuThreads: Int = {
-    val defaultThreads = getStr("spark.executor.cores")
-      .map(_.toInt)
-      .getOrElse(1)
-    get(ICEBERG_STAGED_READ_CPU_THREADS)
-      .map(_.toInt)
-      .getOrElse(math.max(1, math.min(16, defaultThreads)))
-  }
 
   lazy val isHiveDelimitedTextEnabled: Boolean = get(ENABLE_HIVE_TEXT)
 
