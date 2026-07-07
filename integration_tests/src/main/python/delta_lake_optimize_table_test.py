@@ -428,7 +428,7 @@ def test_delta_optimize_row_tracking_table(spark_tmp_path):
 
 
 @delta_lake
-@allow_non_gpu('ExecutedCommandExec', *delta_meta_allow)
+@allow_non_gpu('ExecutedCommandExec', 'HashAggregateExec', *delta_meta_allow)
 @pytest.mark.skipif(is_before_spark_353(), reason="Liquid clustering requires Delta 3.3+")
 @pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
                     reason="OPTIMIZE table command is supported for Databricks 17.3+")
