@@ -1176,7 +1176,7 @@ case class GpuProjectAstExec(
 
   def projectAndCloseStreamingWithSplitRetry(
       sb: SpillableColumnarBatch,
-      allowMultipleOutputBatches: Boolean): Iterator[ColumnarBatch] = {
+      allowMultipleOutputBatches: Boolean): Iterator[ColumnarBatch] = closeOnExcept(sb) { _ =>
     if (allowMultipleOutputBatches &&
         areAllRetryable &&
         RapidsConf.PROJECT_SPLIT_RETRY_ENABLED.get(SQLConf.get)) {

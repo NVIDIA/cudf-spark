@@ -21,7 +21,13 @@ import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingSeq
 import com.nvidia.spark.rapids.jni.{GpuSplitAndRetryOOM, RmmSpark}
 
-import org.apache.spark.sql.catalyst.expressions.{AttributeReference, ExprId, NamedExpression}
+import org.apache.spark.TaskContext
+import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, ExprId,
+  NamedExpression}
+import org.apache.spark.sql.execution.LeafExecNode
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.GpuAdd
 import org.apache.spark.sql.rapids.catalyst.expressions.GpuRand
@@ -29,12 +35,22 @@ import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 import org.apache.spark.sql.types.{DataType, IntegerType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
+import org.apache.spark.util.TaskCompletionListener
 
 class ProjectSplitRetrySuite extends RmmSparkRetrySuiteBase {
   private val NUM_ROWS = 500
   private val RAND_SEED = 10
   private val intAttr = AttributeReference("int", IntegerType)(ExprId(10))
   private val batchAttrs = Seq(intAttr)
+
+  private case class TestColumnarLeafExec(
+      override val output: Seq[Attribute],
+      rdd: RDD[ColumnarBatch]) extends LeafExecNode {
+    override def supportsColumnar: Boolean = true
+    override protected def doExecute(): RDD[InternalRow] =
+      throw new UnsupportedOperationException("TestColumnarLeafExec only supports columnar")
+    override protected def doExecuteColumnar(): RDD[ColumnarBatch] = rdd
+  }
 
   // Reset retry counters so a leaked count from one test cannot mask a
   // missed injection in the next.
@@ -311,6 +327,44 @@ class ProjectSplitRetrySuite extends RmmSparkRetrySuiteBase {
     assert(RmmSpark.getAndResetNumSplitRetryThrow(/*taskId*/ 1) > 0)
   }
 
+  test("GpuProjectExec streams split-retry pieces and counts output batches") {
+    val spark = SparkSession.builder()
+        .master("local[1]")
+        .appName("ProjectSplitRetrySuite")
+        .config(RapidsConf.METRICS_LEVEL.key, "DEBUG")
+        .getOrCreate()
+    try {
+      val input = buildBatch()
+      closeOnExcept(input) { _ =>
+        val inputRdd = spark.sparkContext.parallelize(Seq(input), numSlices = 1)
+        val project = GpuProjectExec(
+          addOneExprs().map(_.asInstanceOf[NamedExpression]).toList,
+          TestColumnarLeafExec(batchAttrs, inputRdd))
+        val outputRdd = project.doExecuteColumnar()
+        val context = new MockTaskContext(taskAttemptId = 1, partitionId = 0)
+        TrampolineUtil.setTaskContext(context)
+        try {
+          RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
+            RmmSpark.OomInjectionType.GPU.ordinal, 0)
+          val output = drainPieces(outputRdd.compute(outputRdd.partitions.head, context))
+          val numBatches = output.size
+          withResource(output) { _ =>
+            assert(numBatches >= 2,
+              s"expected >= 2 pieces from GpuProjectExec, got $numBatches")
+            assertResult(NUM_ROWS)(output.map(_.numRows()).sum)
+          }
+          assertResult(numBatches)(project.metrics(GpuMetric.NUM_OUTPUT_BATCHES).value)
+          assert(RmmSpark.getAndResetNumSplitRetryThrow(/*taskId*/ 1) > 0)
+        } finally {
+          TrampolineUtil.unsetTaskContext()
+          ScalableTaskCompletion.reset()
+        }
+      }
+    } finally {
+      spark.stop()
+    }
+  }
+
   test("streaming entry yields one piece when no split occurs") {
     val tier = GpuBindReferences.bindGpuReferencesTiered(
       addOneExprs(), batchAttrs, new SQLConf(), Map.empty)
@@ -374,6 +428,30 @@ class ProjectSplitRetrySuite extends RmmSparkRetrySuiteBase {
     } finally {
       TrampolineUtil.unsetTaskContext()
       ScalableTaskCompletion.reset()
+    }
+  }
+
+  test("streaming entry closes input when iterator construction fails") {
+    Seq(true, false).foreach { allowMultipleOutputBatches =>
+      val expected = new RuntimeException("task completion registration failed")
+      val context = new MockTaskContext(taskAttemptId = 1, partitionId = 0) {
+        override def addTaskCompletionListener(listener: TaskCompletionListener): TaskContext =
+          throw expected
+      }
+      TrampolineUtil.setTaskContext(context)
+      try {
+        val tier = GpuBindReferences.bindGpuReferencesTiered(
+          addOneExprs(), batchAttrs, new SQLConf(), Map.empty)
+        val sb = newSpillable()
+        val thrown = intercept[RuntimeException] {
+          tier.projectAndCloseStreamingWithSplitRetry(sb, allowMultipleOutputBatches)
+        }
+        assert(thrown eq expected)
+        assertClosed(sb)
+      } finally {
+        TrampolineUtil.unsetTaskContext()
+        ScalableTaskCompletion.reset()
+      }
     }
   }
 
