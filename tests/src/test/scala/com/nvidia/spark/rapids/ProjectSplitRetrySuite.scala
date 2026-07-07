@@ -294,6 +294,44 @@ class ProjectSplitRetrySuite extends RmmSparkRetrySuiteBase {
     assert(RmmSpark.getAndResetNumRetryThrow(/*taskId*/ 1) > 0)
   }
 
+  private def runProjectExecSplitRetry(enablePreSplit: Boolean): Int = {
+    val spark = SparkSession.builder()
+        .master("local[1]")
+        .appName("ProjectSplitRetrySuite")
+        .config(RapidsConf.METRICS_LEVEL.key, "DEBUG")
+        .getOrCreate()
+    try {
+      val input = buildBatch()
+      closeOnExcept(input) { _ =>
+        val inputRdd = spark.sparkContext.parallelize(Seq(input), numSlices = 1)
+        val project = GpuProjectExec(
+          addOneExprs().map(_.asInstanceOf[NamedExpression]).toList,
+          TestColumnarLeafExec(batchAttrs, inputRdd),
+          enablePreSplit = enablePreSplit)
+        val outputRdd = project.doExecuteColumnar()
+        val context = new MockTaskContext(taskAttemptId = 1, partitionId = 0)
+        TrampolineUtil.setTaskContext(context)
+        try {
+          RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
+            RmmSpark.OomInjectionType.GPU.ordinal, 0)
+          val output = drainPieces(outputRdd.compute(outputRdd.partitions.head, context))
+          val numBatches = output.size
+          withResource(output) { _ =>
+            assertResult(NUM_ROWS)(output.map(_.numRows()).sum)
+          }
+          assertResult(numBatches)(project.metrics(GpuMetric.NUM_OUTPUT_BATCHES).value)
+          assert(RmmSpark.getAndResetNumSplitRetryThrow(/*taskId*/ 1) > 0)
+          numBatches
+        } finally {
+          TrampolineUtil.unsetTaskContext()
+          ScalableTaskCompletion.reset()
+        }
+      }
+    } finally {
+      spark.stop()
+    }
+  }
+
   // Owns drained batches and closes partial output on failure.
   private def drainPieces(
       it: Iterator[ColumnarBatch]): scala.collection.mutable.ArrayBuffer[ColumnarBatch] = {
@@ -328,41 +366,13 @@ class ProjectSplitRetrySuite extends RmmSparkRetrySuiteBase {
   }
 
   test("GpuProjectExec streams split-retry pieces and counts output batches") {
-    val spark = SparkSession.builder()
-        .master("local[1]")
-        .appName("ProjectSplitRetrySuite")
-        .config(RapidsConf.METRICS_LEVEL.key, "DEBUG")
-        .getOrCreate()
-    try {
-      val input = buildBatch()
-      closeOnExcept(input) { _ =>
-        val inputRdd = spark.sparkContext.parallelize(Seq(input), numSlices = 1)
-        val project = GpuProjectExec(
-          addOneExprs().map(_.asInstanceOf[NamedExpression]).toList,
-          TestColumnarLeafExec(batchAttrs, inputRdd))
-        val outputRdd = project.doExecuteColumnar()
-        val context = new MockTaskContext(taskAttemptId = 1, partitionId = 0)
-        TrampolineUtil.setTaskContext(context)
-        try {
-          RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
-            RmmSpark.OomInjectionType.GPU.ordinal, 0)
-          val output = drainPieces(outputRdd.compute(outputRdd.partitions.head, context))
-          val numBatches = output.size
-          withResource(output) { _ =>
-            assert(numBatches >= 2,
-              s"expected >= 2 pieces from GpuProjectExec, got $numBatches")
-            assertResult(NUM_ROWS)(output.map(_.numRows()).sum)
-          }
-          assertResult(numBatches)(project.metrics(GpuMetric.NUM_OUTPUT_BATCHES).value)
-          assert(RmmSpark.getAndResetNumSplitRetryThrow(/*taskId*/ 1) > 0)
-        } finally {
-          TrampolineUtil.unsetTaskContext()
-          ScalableTaskCompletion.reset()
-        }
-      }
-    } finally {
-      spark.stop()
-    }
+    val numBatches = runProjectExecSplitRetry(enablePreSplit = true)
+    assert(numBatches >= 2,
+      s"expected >= 2 pieces from GpuProjectExec, got $numBatches")
+  }
+
+  test("GpuProjectExec keeps one output batch when pre-split is disabled") {
+    assertResult(1)(runProjectExecSplitRetry(enablePreSplit = false))
   }
 
   test("streaming entry yields one piece when no split occurs") {
