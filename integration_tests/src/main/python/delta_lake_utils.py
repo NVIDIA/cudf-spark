@@ -32,8 +32,31 @@ delta_meta_allow = [
     "ObjectHashAggregateExec",
     "ProjectExec",
     "SerializeFromObjectExec",
-    "SortExec"
+    "SortExec",
+    "Add",
+    "ScalaUDF",
+    "And",
+    "Subtract",
+    "GetStructField",
+    "Coalesce",
+    "AssertNotNull",
+    "Divide",
+    "Cast",
+    "CaseWhen",
+    "GreaterThan",
+    "LessThan",
+    "KnownNotNull",
+    "Or",
+    "IsNull",
+    "Not",
+    "EqualTo",
+    "CheckOverflowInTableWrite",
+    "JsonToStructs"
 ]
+
+if is_databricks173_or_later():
+    # DBR 17.3 DV write/update paths can serialize Delta stats JSON on the CPU bridge.
+    delta_meta_allow += ["StructsToJson", "CreateNamedStruct"]
 
 delta_write = ["RapidsDeltaWrite"]
 

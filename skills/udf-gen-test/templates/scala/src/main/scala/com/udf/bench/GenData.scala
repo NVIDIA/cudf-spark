@@ -28,7 +28,7 @@ object GenData {
     val outputPath = parsed.get("output-path")
 
     // Build Spark session
-    val builder = SparkSession.builder().appName("GenData")
+    val builder = SparkSession.builder().appName("GenData").enableHiveSupport()
     SparkUtils.applySparkConfs(builder, sparkConfs)
     val spark = builder.getOrCreate()
 

@@ -81,10 +81,6 @@ Based on profiling insights (or optimization patterns from the reference), make 
 ### Step 3: Run Unit Tests
 
 ```bash
-# Java
-mvn test -Dtest=CudfComparisonTest
-
-# Scala
 mvn test -Dsuites=com.udf.CudfComparisonTest
 ```
 

@@ -33,7 +33,7 @@ Derive `<CamelName>` and `<snake_name>` from the UDF class name.
 
 The project can be found under this skill's templates directory.
 ```bash
-cp -r templates/<java|scala> <project_root>/<CamelName>/
+cp -r templates/scala <project_root>/<CamelName>/
 ```
 
 This provides a complete Maven project with all test and benchmark infrastructure.
@@ -56,7 +56,7 @@ Set the package declaration to `com.udf`:
 
 ## Step 2: Implement the Unit Test
 
-Read `src/test/<java|scala>/com/udf/UnitTest.<java|scala>`. Replace placeholders with the actual camel/snake UDF name.
+Read `src/test/scala/com/udf/UnitTest.scala`. Replace placeholders with the actual camel/snake UDF name.
 
 Fill in the TODO methods following the docstrings. Include diverse edge cases in `createTestData` (nulls, empty strings, malformed inputs, varying lengths).
 
@@ -86,10 +86,6 @@ Assertions should verify schema, row count, deterministic ordering, output value
 ## Step 3: Compile and Test
 
 ```bash
-# Java
-mvn test -Dtest=UnitTest
-
-# Scala
 mvn test -Dsuites=com.udf.UnitTest
 ```
 
@@ -100,16 +96,16 @@ If it fails, analyze the error output (stdout/stderr) and fix the test code. Con
 The template projects use JaCoCo (Java) / scoverage (Scala) code coverage tools.
 
 ```bash
-# Java
-mvn -Pcoverage test jacoco:report -Dtest=UnitTest
+# Java UDF
+mvn -Pcoverage test jacoco:report -Dsuites=com.udf.UnitTest
 
-# Scala
+# Scala UDF
 mvn -Pcoverage scoverage:report -Dsuites=com.udf.UnitTest
 ```
 
-For Java, read `target/site/jacoco/jacoco.csv` and inspect LINE, BRANCH, and METHOD counters for the target CPU UDF class and local helper classes. In `jacoco.xml`, counters appear as `<counter type="...">` elements, and source-line misses appear under `<sourcefile><line nr="..." mi="..." ci="..." mb="..." cb="...">`.
+For a Java UDF, read `target/site/jacoco/jacoco.csv` and inspect LINE, BRANCH, and METHOD counters for the target CPU UDF class and local helper classes. In `jacoco.xml`, counters appear as `<counter type="...">` elements, and source-line misses appear under `<sourcefile><line nr="..." mi="..." ci="..." mb="..." cb="...">`.
 
-For Scala, read `target/scoverage.xml` and inspect statement, branch, and method-level coverage for the target CPU UDF class/object and local helper classes/objects. scoverage XML stores package/class/method `statement-rate` and `branch-rate` attributes, and each executable statement has `line`, `branch`, and `invocation-count` attributes.
+For a Scala UDF, read `target/scoverage.xml` and inspect statement, branch, and method-level coverage for the target CPU UDF class/object and local helper classes/objects. scoverage XML stores package/class/method `statement-rate` and `branch-rate` attributes, and each executable statement has `line`, `branch`, and `invocation-count` attributes.
 
 Use the coverage report as actionable feedback:
 1. Inspect missed Java line, branch, and method coverage, or missed Scala statement, branch, and method-level coverage.
@@ -143,6 +139,6 @@ If any quality checks fail, revise the test code and re-run.
 
 Upon successful completion:
 - Project directory: `<project_root>/<CamelName>/`
-- Unit test: `src/test/<java|scala>/com/udf/UnitTest.<java|scala>`
+- Unit test: `src/test/scala/com/udf/UnitTest.scala`
 
 These outputs are required for **Step 2: Convert UDF**.

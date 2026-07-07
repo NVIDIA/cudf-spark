@@ -110,7 +110,7 @@ Once you've installed the skills, try the workflow with one of the provided exam
       Results
 
       - Project directory: FormatPhoneUDF/
-      - Unit test: FormatPhoneUDF/src/test/java/com/udf/UnitTest.java
+      - Unit test: FormatPhoneUDF/src/test/scala/com/udf/UnitTest.scala
       - Status: All tests passing
       - Test coverage: 12 cases
    ```

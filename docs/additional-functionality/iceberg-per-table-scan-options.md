@@ -25,17 +25,17 @@ tables you do not explicitly tune.
 
 Use this when you want to:
 
-- override Iceberg scan options for a specific table without modifying the
+- Override Iceberg scan options for a specific table without modifying the
   table itself or recompiling the application; or
 - A/B test split-size / lookback tunings across runs by toggling a session
   conf instead of rewriting tables.
 
-If you are happy with the iceberg defaults, or you set scan options at the
+If you are happy with the Iceberg defaults, or you set scan options at the
 DataFrame level via `.option(...)`, you do not need this feature.
 
 ## Enabling
 
-Replace Iceberg's session catalog with the rapids drop-in. For the default
+Replace Iceberg's session catalog with the RAPIDS drop-in. For the default
 catalog (`spark_catalog`):
 
 ```
@@ -46,7 +46,7 @@ catalog (`spark_catalog`):
 ```
 
 The `io-impl=org.apache.iceberg.aws.s3.S3FileIO` line is required when the
-warehouse lives on S3 — without it, iceberg falls back to the hadoop
+warehouse lives on S3 — without it, Iceberg falls back to the Hadoop
 `FileSystem` API and you have to deal with `s3a://` URI rewrites yourself.
 Drop the line for non-S3 warehouses.
 
@@ -80,13 +80,13 @@ Three suffixes are recognized at every scope:
 | `read-split-planning-lookback`  | `SparkReadOptions.LOOKBACK`            | `read.split.planning-lookback`  | int         |
 | `read-split-open-file-cost`     | `SparkReadOptions.FILE_OPEN_COST`      | `read.split.open-file-cost`     | bytes (long)|
 
-The suffix names mirror the iceberg `TableProperties` keys (the token after
+The suffix names mirror the Iceberg `TableProperties` keys (the token after
 `read.split.`) with `-` instead of `.`, so the dot-separated session-conf
 path remains unambiguous.
 
-`<catalog>` is the Spark catalog name, `<namespace>` is the iceberg namespace
-(`default` for hadoop catalogs that have not been organized into namespaces),
-and `<table>` is the iceberg table name.
+`<catalog>` is the Spark catalog name, `<namespace>` is the Iceberg namespace
+(`default` for Hadoop catalogs that have not been organized into namespaces),
+and `<table>` is the Iceberg table name.
 
 ### Example
 
@@ -117,10 +117,10 @@ to lowest:
    (`spark.rapids.iceberg.catalog-setting.<catalog>.<suffix>`)
 3. **Global** — global session conf
    (`spark.rapids.iceberg.global-setting.<suffix>`)
-4. **Table itself** — iceberg `TBLPROPERTIES`
+4. **Table itself** — Iceberg `TBLPROPERTIES`
    (e.g. `read.split.target-size`, set via `ALTER TABLE … SET TBLPROPERTIES`)
 
-If none of the four is set, iceberg's built-in default applies. An explicit
+If none of the four is set, Iceberg's built-in default applies. An explicit
 DataFrame `.option(...)` call wins over all four priorities:
 
 ```scala
@@ -130,7 +130,7 @@ spark.read.format("iceberg")
 ```
 
 Tables for which no `spark.rapids.iceberg.<…>.*` conf is set at any scope and
-no matching `TBLPROPERTIES` is configured behave exactly as if the rapids
+no matching `TBLPROPERTIES` is configured behave exactly as if the RAPIDS
 catalog wrapper were not in use.
 
 ## Caveats
@@ -151,9 +151,9 @@ catalog wrapper were not in use.
   conf is set against such an identifier, the wrapper throws an
   `IllegalArgumentException` from `RapidsSparkTable` rather than silently
   picking the wrong override; in that case, either rename the identifier,
-  switch to a catalog- or global-scoped conf, or set the iceberg
+  switch to a catalog- or global-scoped conf, or set the Iceberg
   `read.split.*` table property directly.
-- The wrapper applies to scans only. Writes go through the underlying iceberg
+- The wrapper applies to scans only. Writes go through the underlying Iceberg
   `SparkTable.newWriteBuilder` unchanged.
 - The session-conf lookup happens once per `newScanBuilder(options)` call (a
   single `SparkSession.conf` read per option key) and is cheap; setting many

@@ -340,7 +340,7 @@ def test_iceberg_read_timetravel(spark_tmp_table_factory, reader_type):
                          "ORDER BY committed_at").head()[0]
     first_snapshot_id = with_cpu_session(setup_snapshots)
     assert_gpu_and_cpu_are_equal_collect(
-        lambda spark : spark.read.option("snapshot-id", first_snapshot_id) \
+        lambda spark : spark.read.option("versionAsOf", first_snapshot_id) \
             .format("iceberg").load("{}".format(full_table)),
         conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
 

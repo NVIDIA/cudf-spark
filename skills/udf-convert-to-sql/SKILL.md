@@ -41,16 +41,12 @@ Implement the SQL expression in a file at `src/main/resources/<snake_name>.sql`.
 
 ## Step 2: Fill in test and iterate
 
-Update `src/test/<java|scala>/com/udf/SqlComparisonTest.<java|scala>`:
+Update `src/test/scala/com/udf/SqlComparisonTest.scala`:
 - Update the SQL file path to point to your `src/main/resources/<snake_name>.sql` file
 - Replace placeholders with the actual camel/snake UDF name
 
 Then run the test:
 ```bash
-# Java
-mvn test -Dtest=SqlComparisonTest
-
-# Scala
 mvn test -Dsuites=com.udf.SqlComparisonTest
 ```
 

@@ -21,7 +21,7 @@ import com.nvidia.spark.rapids.iceberg.IcebergShimUtils;
 import org.apache.iceberg.*;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.spark.source.GpuBaseReader;
-import org.apache.iceberg.spark.source.GpuSparkCopyOnWriteScan;
+import org.apache.iceberg.spark.source.GpuSparkCopyOnWriteV1Scan;
 import org.apache.iceberg.spark.source.GpuSparkScan;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.PartitionUtil;
@@ -64,6 +64,6 @@ public class ShimUtilsImpl implements IcebergShimUtils {
             Scan cpuScan,
             RapidsConf rapidsConf,
             boolean queryUsesInputFile) {
-        return GpuSparkCopyOnWriteScan.create(cpuScan, rapidsConf, queryUsesInputFile);
+        return GpuSparkCopyOnWriteV1Scan.create(cpuScan, rapidsConf, queryUsesInputFile);
     }
 }

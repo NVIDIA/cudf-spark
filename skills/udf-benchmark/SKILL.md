@@ -28,7 +28,7 @@ Derive `<CamelName>` and `<snake_name>` from the UDF class name.
 
 ## Step 1: Implement BenchUtils
 
-Read `src/main/<java|scala>/com/udf/bench/BenchUtils.<java|scala>`. Replace placeholders with the actual camel/snake UDF name.
+Read `src/main/scala/com/udf/bench/BenchUtils.scala`. Replace placeholders with the actual camel/snake UDF name.
 
 Fill in the TODO methods following the docstrings. For variable-length inputs, generate sizable rows representative of enterprise-scale data. Refer to the unit test for schema and example data.
 
@@ -76,7 +76,7 @@ Follow [CUDF_MICROBENCHMARKS.md](CUDF_MICROBENCHMARKS.md) to implement and run i
 ## Output
 
 Upon successful completion:
-- Benchmark utilities: `src/main/<java|scala>/com/udf/bench/BenchUtils.<java|scala>`
-- Microbenchmarks (cuDF): `src/main/<java|scala>/com/udf/bench/MicroBenchRunner.<java|scala>`
+- Benchmark utilities: `src/main/scala/com/udf/bench/BenchUtils.scala`
+- Microbenchmarks (cuDF): `src/main/scala/com/udf/bench/MicroBenchRunner.scala`
 - Generated data: `data/`
 - Benchmark results: `results/`

@@ -1324,7 +1324,6 @@ conf_for_parquet_aggregate_pushdown = {
     "spark.sql.sources.useV1SourceList": ""
 }
 
-@pytest.mark.skipif(is_before_spark_330(), reason='Aggregate push down on Parquet is a new feature of Spark 330')
 def test_parquet_scan_without_aggregation_pushdown_not_fallback(spark_tmp_path):
     """
     No aggregation will be pushed down in this test, so we should not fallback to CPU
@@ -1342,7 +1341,6 @@ def test_parquet_scan_without_aggregation_pushdown_not_fallback(spark_tmp_path):
     )
 
 
-@pytest.mark.skipif(is_before_spark_330(), reason='Aggregate push down on Parquet is a new feature of Spark 330')
 @allow_non_gpu(any = True)
 def test_parquet_scan_with_aggregation_pushdown_fallback(spark_tmp_path):
     """
@@ -1361,7 +1359,6 @@ def test_parquet_scan_with_aggregation_pushdown_fallback(spark_tmp_path):
         non_exist_classes= "GpuBatchScanExec",
         conf = conf_for_parquet_aggregate_pushdown)
 
-@pytest.mark.skipif(is_before_spark_330(), reason='Hidden file metadata columns are a new feature of Spark 330')
 @allow_non_gpu(any = True)
 @pytest.mark.parametrize('metadata_column', ["file_path", "file_name", "file_size", "file_modification_time"])
 def test_parquet_scan_with_hidden_metadata_fallback(spark_tmp_path, metadata_column):
@@ -1408,7 +1405,6 @@ def with_id(i):
 
 # Field ID test cases were re-written from:
 # https://github.com/apache/spark/blob/v3.3.0-rc3/sql/core/src/test/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetFieldIdIOSuite.scala
-@pytest.mark.skipif(is_before_spark_330(), reason='Field ID is not supported before Spark 330')
 @pytest.mark.parametrize('footer_read', ["JAVA", "NATIVE", "AUTO"], ids=idfn)
 def test_parquet_read_field_id_using_correctly(spark_tmp_path, footer_read):
     data_path = spark_tmp_path + '/PARQUET_DATA'
@@ -1460,7 +1456,6 @@ def test_parquet_read_field_id_using_correctly(spark_tmp_path, footer_read):
         lambda spark: spark.read.parquet(data_path).where("name >= 'oh'"),
         conf=conf)
 
-@pytest.mark.skipif(is_before_spark_330(), reason='Field ID is not supported before Spark 330')
 @pytest.mark.parametrize('footer_read', ["JAVA", "NATIVE", "AUTO"], ids=idfn)
 def test_parquet_read_field_id_absence(spark_tmp_path, footer_read):
     data_path = spark_tmp_path + '/PARQUET_DATA'
@@ -1488,7 +1483,6 @@ def test_parquet_read_field_id_absence(spark_tmp_path, footer_read):
         lambda spark: spark.read.schema(read_schema).parquet(data_path),
         conf=conf)
 
-@pytest.mark.skipif(is_before_spark_330(), reason='Field ID is not supported before Spark 330')
 @pytest.mark.parametrize('footer_read', ["JAVA", "NATIVE", "AUTO"], ids=idfn)
 def test_parquet_read_multiple_field_id_matches(spark_tmp_path, footer_read):
     data_path = spark_tmp_path + '/PARQUET_DATA'
@@ -1513,7 +1507,6 @@ def test_parquet_read_multiple_field_id_matches(spark_tmp_path, footer_read):
         conf=conf,
         error_message="Found duplicate field(s)")
 
-@pytest.mark.skipif(is_before_spark_330(), reason='Field ID is not supported before Spark 330')
 @pytest.mark.parametrize('footer_read', ["JAVA", "NATIVE", "AUTO"], ids=idfn)
 def test_parquet_read_without_field_id(spark_tmp_path, footer_read):
     data_path = spark_tmp_path + '/PARQUET_DATA'
@@ -1551,7 +1544,6 @@ def test_parquet_read_without_field_id(spark_tmp_path, footer_read):
 
 #  test global config: field_id_write_enable=false, field_id_read_enable=true
 #  test global config: field_id_write_enable=true,  field_id_read_enable=true
-@pytest.mark.skipif(is_before_spark_330(), reason='Field ID is not supported before Spark 330')
 @pytest.mark.parametrize('footer_read', ["JAVA", "NATIVE", "AUTO"], ids=idfn)
 def test_parquet_read_field_id_global_flags(spark_tmp_path, footer_read):
     data_path = spark_tmp_path + '/PARQUET_DATA'
@@ -1590,7 +1582,6 @@ def test_parquet_read_field_id_global_flags(spark_tmp_path, footer_read):
         lambda spark: spark.read.schema(read_schema).parquet(data_path),
         conf=conf)
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_parquet_read_daytime_interval_cpu_file(spark_tmp_path):
     data_path = spark_tmp_path + '/PARQUET_DATA'
     gen_list = [('_c1', DayTimeIntervalGen())]
@@ -1599,7 +1590,6 @@ def test_parquet_read_daytime_interval_cpu_file(spark_tmp_path):
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark: spark.read.parquet(data_path))
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_parquet_read_daytime_interval_gpu_file(spark_tmp_path):
     data_path = spark_tmp_path + '/PARQUET_DATA'
     gen_list = [('_c1', DayTimeIntervalGen())]
@@ -1609,7 +1599,6 @@ def test_parquet_read_daytime_interval_gpu_file(spark_tmp_path):
             lambda spark: spark.read.parquet(data_path))
 
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_parquet_push_down_on_interval_type(spark_tmp_path):
     gen_list = [('_c1', DayTimeIntervalGen())]
     data_path = spark_tmp_path + '/PARQUET_DATA'

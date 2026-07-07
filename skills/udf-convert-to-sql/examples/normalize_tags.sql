@@ -5,7 +5,7 @@ SELECT
   CASE
     WHEN tags IS NULL THEN NULL
     WHEN SIZE(FILTER(tags, x -> x IS NOT NULL AND TRIM(x) != '')) = 0 THEN NULL
-    ELSE ARRAY_SORT(ARRAY_DISTINCT(
+    ELSE SORT_ARRAY(ARRAY_DISTINCT(
       TRANSFORM(
         FILTER(tags, x -> x IS NOT NULL AND TRIM(x) != ''),
         x -> LOWER(TRIM(x))

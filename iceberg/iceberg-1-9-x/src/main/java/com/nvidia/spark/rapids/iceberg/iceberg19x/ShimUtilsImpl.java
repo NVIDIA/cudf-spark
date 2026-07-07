@@ -23,7 +23,7 @@ import org.apache.iceberg.data.IdentityPartitionConverters;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.StorageCredential;
 import org.apache.iceberg.io.SupportsStorageCredentials;
-import org.apache.iceberg.spark.source.GpuSparkCopyOnWriteScan;
+import org.apache.iceberg.spark.source.GpuSparkCopyOnWriteV1Scan;
 import org.apache.iceberg.spark.source.GpuSparkScan;
 import org.apache.iceberg.spark.source.GpuStructInternalRow;
 import org.apache.iceberg.types.Type;
@@ -86,6 +86,6 @@ public class ShimUtilsImpl implements IcebergShimUtils {
             Scan cpuScan,
             RapidsConf rapidsConf,
             boolean queryUsesInputFile) {
-        return GpuSparkCopyOnWriteScan.create(cpuScan, rapidsConf, queryUsesInputFile);
+        return GpuSparkCopyOnWriteV1Scan.create(cpuScan, rapidsConf, queryUsesInputFile);
     }
 }

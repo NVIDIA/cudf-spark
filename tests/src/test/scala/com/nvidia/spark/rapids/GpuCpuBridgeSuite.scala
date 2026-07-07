@@ -145,9 +145,9 @@ class GpuCpuBridgeSuite extends SparkQueryCompareTestSuite {
     assert(disallowList.size == 2)
   }
   
-  test("Bridge default config is disabled") {
-    // With no config set, bridge should be disabled by default
+  test("Bridge default config is enabled") {
+    // With no config set, bridge should be enabled by default (feature is complete)
     val conf = new RapidsConf(Map.empty[String, String])
-    assert(!conf.isCpuBridgeEnabled)
+    assert(conf.isCpuBridgeEnabled)
   }
 }

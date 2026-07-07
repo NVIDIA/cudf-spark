@@ -71,9 +71,26 @@ public final class GpuSparkScanAccess {
   }
 
   public static String branch(Scan scan) {
-    // Iceberg 1.10.x and earlier: protected method SparkScan.branch(). Iceberg 1.11.x
-    // removed it entirely; return null for display purposes.
-    return invokeMethod(sparkScan(scan), String.class, "branch");
+    // Iceberg 1.10.x and earlier exposed a protected SparkScan.branch() method;
+    // 1.11.x removed it but the concrete scan classes still carry a private
+    // `branch` field (included in description()). Read the field directly so this
+    // works across all supported Iceberg versions. Returns null when no branch is
+    // set (or, defensively, when the field is absent).
+    Object target = sparkScan(scan);
+    Field f = findField(target.getClass(), "branch");
+    if (f == null) {
+      return null;
+    }
+    try {
+      f.setAccessible(true);
+      Object v = f.get(target);
+      return v == null ? null : v.toString();
+    } catch (IllegalAccessException | RuntimeException e) {
+      // RuntimeException also covers InaccessibleObjectException (Java 9+ module
+      // encapsulation) and SecurityException, so any access failure degrades to
+      // null per the contract above rather than escaping from this display-only path.
+      return null;
+    }
   }
 
   public static boolean caseSensitive(Scan scan) {

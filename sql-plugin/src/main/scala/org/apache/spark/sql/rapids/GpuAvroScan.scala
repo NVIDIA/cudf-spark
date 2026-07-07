@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -137,7 +137,7 @@ case class GpuAvroScan(
   override def equals(obj: Any): Boolean = obj match {
     case a: GpuAvroScan =>
       super.equals(a) && dataSchema == a.dataSchema && options == a.options &&
-          equivalentFilters(pushedFilters, a.pushedFilters) && rapidsConf == a.rapidsConf &&
+          equivalentFilters(pushedFilters, a.pushedFilters) &&
           queryUsesInputFile == a.queryUsesInputFile
     case _ => false
   }

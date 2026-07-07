@@ -1303,11 +1303,13 @@ abstract class BaseExprMeta[INPUT <: Expression](
    * Check whether this node itself can be converted to AST. It will not recursively check its
    * children. It's used to check join condition AST-ability in top-down fashion.
    */
-  lazy val canSelfBeAst = {
+  // A def, not a memoized val: willUseGpuCpuBridge can be flipped by requireAstForGpu()/
+  // undoBridgeOptimization() after a first read, so caching would return a stale answer.
+  final def canSelfBeAst: Boolean = {
     tagForAst()
-    // An expression cannot be AST if it cannot be replaced (disabled) or if it has
-    // AST-specific issues
-    canThisBeReplaced && cannotBeAstReasons.isEmpty
+    // Not AST-able if disabled, bridged (a GpuCpuBridgeExpression has no AST form), or it has
+    // AST-specific issues.
+    canThisBeReplaced && !willUseGpuCpuBridge && cannotBeAstReasons.isEmpty
   }
 
   final def requireAstForGpu(): Unit = {
@@ -1427,13 +1429,13 @@ abstract class BaseExprMeta[INPUT <: Expression](
    */
   private def deduplicateGpuInputs(
       gpuInputsWithIndex: Seq[(Expression, Int)]): (Seq[Expression], Map[Int, Int]) = {
-    
+
     import org.apache.spark.sql.rapids.catalyst.expressions.GpuExpressionEquals
-    
+
     val deduplicatedInputs = scala.collection.mutable.ListBuffer[Expression]()
     val seenExpressions = scala.collection.mutable.Map[GpuExpressionEquals, Int]()
     val inputMapping = scala.collection.mutable.Map[Int, Int]()
-    
+
     gpuInputsWithIndex.foreach { case (gpuExpr, originalIndex) =>
       val exprWrapper = GpuExpressionEquals(gpuExpr)
       seenExpressions.get(exprWrapper) match {
@@ -1448,7 +1450,7 @@ abstract class BaseExprMeta[INPUT <: Expression](
           inputMapping(originalIndex) = newIndex
       }
     }
-    
+
     (deduplicatedInputs.toSeq, inputMapping.toMap)
   }
 
@@ -1456,34 +1458,83 @@ abstract class BaseExprMeta[INPUT <: Expression](
    * Checks if this expression is compatible with CPU bridge execution.
    * This determines whether THIS specific expression can be wrapped in a bridge.
    * Can be overridden in specific expression metas to provide custom compatibility rules.
-   * 
+   *
    * @return true if this expression can be executed via CPU bridge, false otherwise
    */
   def isBridgeCompatible: Boolean = {
     import org.apache.spark.sql.catalyst.expressions.{Generator, NamedLambdaVariable, TryEval, Unevaluable, WindowFunction}
     import org.apache.spark.sql.catalyst.expressions.aggregate.AggregateFunction
-    
-    if (!conf.isCpuBridgeEnabled) return false
-    
+    import org.apache.spark.sql.catalyst.expressions.objects.LambdaVariable
+
     val exprClass = expr.getClass
-    
-    // Check config-level disallow list
-    if (conf.bridgeDisallowList.contains(exprClass.getName)) return false
-    
-    // Filter out expression types that cannot be directly executed on CPU
-    if (classOf[Unevaluable].isAssignableFrom(exprClass) ||
-        classOf[AggregateFunction].isAssignableFrom(exprClass) ||
-        classOf[WindowFunction].isAssignableFrom(exprClass) ||
-        classOf[NamedLambdaVariable].isAssignableFrom(exprClass) ||
-        classOf[Generator].isAssignableFrom(exprClass) ||
-        classOf[TryEval].isAssignableFrom(exprClass)) {
-      return false
+
+    // TryEval implements try_* by evaluating the child expression on CPU, catching CPU
+    // exceptions, and converting them to null. To preserve that contract, the entire child
+    // tree would need to stay on CPU; bridging TryEval with GPU children would bypass the
+    // CPU exception path. Let the enclosing plan node fall back instead.
+    def isTryEval: Boolean = classOf[TryEval].isAssignableFrom(exprClass)
+
+    // LambdaVariable is a scoped placeholder owned by Spark object expressions such as
+    // MapObjects, CatalystToExternalMap, and ExternalMapToCatalyst. Those expressions require
+    // LambdaVariable children in fixed positions and cast them back during tree rewrites.
+    // Bridging LambdaVariable independently can replace the placeholder with a BoundReference
+    // and corrupt the parent expression tree.
+    def isLambdaVariable: Boolean = classOf[LambdaVariable].isAssignableFrom(exprClass)
+
+    // convertForGpuCpuBridge rebuilds the CPU expression by positionally replacing the
+    // GPU-convertible children with BoundReferences and calling expr.withNewChildren. That is
+    // only valid when this meta's childExprs correspond one-to-one, in order, with
+    // expr.children. Some metas intentionally override childExprs to drop or reorder children
+    // (e.g. InvokeExprMeta hides the evaluator-literal child of the Invoke that Spark 4.0 uses
+    // for parse_url/to_json). Bridging those would fail with "Incorrect number of children" or
+    // silently rebuild the wrong tree, so let the enclosing node fall back instead.
+    def childrenMatch: Boolean = {
+      val wrappedChildren = childExprs.map(_.wrapped.asInstanceOf[AnyRef])
+      val exprChildren = expr.children
+      wrappedChildren.length == exprChildren.length &&
+        !wrappedChildren.zip(exprChildren).exists {
+          case (wrappedChild, exprChild) => !wrappedChild.eq(exprChild.asInstanceOf[AnyRef])
+        }
     }
-    
-    // Exclude nondeterministic expressions for correctness
-    if (!expr.deterministic) return false
-    
-    true
+
+    // Filter out expression types that cannot be directly executed on CPU.
+    def canExecuteOnCpu: Boolean = !classOf[Unevaluable].isAssignableFrom(exprClass) &&
+      !classOf[AggregateFunction].isAssignableFrom(exprClass) &&
+      !classOf[WindowFunction].isAssignableFrom(exprClass) &&
+      !classOf[NamedLambdaVariable].isAssignableFrom(exprClass) &&
+      !classOf[Generator].isAssignableFrom(exprClass)
+
+    // Some expressions carry task/partition-local state whose values cannot be preserved if the
+    // bridge splits a batch across worker threads. The shim predicate filters out those correctness
+    // blockers while allowing expressions whose mutable state is only cloned worker-local scratch.
+    def isStateful: Boolean = SparkShimImpl.isExpressionStateful(expr)
+
+    conf.isCpuBridgeEnabled &&
+      !conf.bridgeDisallowList.contains(exprClass.getName) &&
+      !isTryEval &&
+      !isLambdaVariable &&
+      childrenMatch &&
+      canExecuteOnCpu &&
+      !isStateful &&
+      expr.deterministic
+  }
+
+  /**
+   * Checks if the presence of this expression in a tree should prevent ALL bridge
+   * optimization for the entire plan node.
+   *
+   * @return true if this expression prevents all bridge optimization in the tree
+   */
+  def preventsTreeBridgeOptimization: Boolean = false
+
+  /**
+   * Checks if this expression tree contains any expression that prevents bridge optimization.
+   * Used by the optimizer to determine if bridge optimization should be skipped entirely.
+   *
+   * @return true if this expression or any child prevents bridge optimization
+   */
+  final def containsExpressionThatPreventsBridge: Boolean = {
+    preventsTreeBridgeOptimization || childExprs.exists(_.containsExpressionThatPreventsBridge)
   }
 
   /**
@@ -1528,13 +1579,19 @@ abstract class BaseExprMeta[INPUT <: Expression](
 
   /**
    * Determines if a child expression should be converted to a GPU input for the bridge.
-   * Returns true if the child can be replaced AND is not a Literal or ScalarSubquery.
-   * Literals and ScalarSubqueries are kept on the CPU side to avoid unnecessary data movement.
+   * Returns true if the child can be replaced AND is not a Literal, ScalarSubquery,
+   * or LambdaFunction.
+   * Literals, ScalarSubqueries, and LambdaFunctions are kept on the CPU side:
+   * - Literals and ScalarSubqueries to avoid unnecessary data movement
+   * - LambdaFunctions because they contain unevaluable placeholders (NamedLambdaVariables)
+   *   that cannot be evaluated in columnar fashion on the GPU
    */
   private def shouldConvertChildToGpuInput(childMeta: BaseExprMeta[_]): Boolean = {
+    import org.apache.spark.sql.catalyst.expressions.LambdaFunction
     childMeta.canThisBeReplaced &&
       !childMeta.wrapped.isInstanceOf[Literal] &&
-      !childMeta.wrapped.isInstanceOf[ScalarSubquery]
+      !childMeta.wrapped.isInstanceOf[ScalarSubquery] &&
+      !childMeta.wrapped.isInstanceOf[LambdaFunction]
   }
 
   def convertForGpuCpuBridge(): GpuExpression = {
@@ -1581,11 +1638,14 @@ abstract class BaseExprMeta[INPUT <: Expression](
     }
     val boundCpuExpression = expr.withNewChildren(boundChildren)
 
-    GpuCpuBridgeExpression(
+    val bridgeExpression = GpuCpuBridgeExpression(
       gpuInputs = deduplicatedGpuInputs,
       cpuExpression = boundCpuExpression,
       outputDataType = expr.dataType,
       outputNullable = expr.nullable)
+
+    // Apply bridge optimization to merge adjacent bridge expressions
+    GpuCpuBridgeOptimizer.optimizeByMergingBridgeExpressions(bridgeExpression)
   }
 }
 
@@ -1898,39 +1958,4 @@ final class RuleNotFoundRunnableCommandMeta[INPUT <: RunnableCommand](
 
   override def convertToGpu(): RunnableCommand =
     throw new IllegalStateException("Cannot be converted to GPU")
-}
-
-/**
- * Simple optimizer for CPU-GPU bridge expressions.
- * This applies a straightforward rule: if an expression can't run on GPU
- * but is compatible with the bridge, move it to the bridge.
- */
-object GpuCpuBridgeOptimizer {
-
-  /**
-   * Check and optimize expression metas by moving expressions to CPU bridge when possible.
-   * This is a simple non-cost-based approach that just enables the bridge for any expression
-   * that can't run on GPU but is bridge-compatible.
-   * 
-   * @param exprs The expression metas to check and potentially optimize
-   */
-  def checkAndOptimizeExpressionMetas(exprs: Seq[BaseExprMeta[_]]): Unit = {
-    if (exprs.nonEmpty && exprs.head.conf.isCpuBridgeEnabled) {
-      exprs.foreach(applySimpleBridgeRule)
-    }
-  }
-
-  /**
-   * Recursively apply the simple bridge rule to an expression and its children.
-   * If an expression can't run on GPU but can use the bridge, move it to the bridge.
-   */
-  private def applySimpleBridgeRule(expr: BaseExprMeta[_]): Unit = {
-    // First recurse to children
-    expr.childExprs.foreach(applySimpleBridgeRule)
-    
-    // Then apply to this expression if it qualifies
-    if (!expr.canThisBeReplaced && expr.canMoveToCpuBridge && !expr.willUseGpuCpuBridge) {
-      expr.moveToCpuBridge()
-    }
-  }
 }

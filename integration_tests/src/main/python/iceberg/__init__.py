@@ -29,7 +29,7 @@ from spark_session import is_iceberg_supported_spark, with_cpu_session
 
 iceberg_unsupported_mark = pytest.mark.skipif(
     not is_iceberg_supported_spark(),
-    reason="Iceberg acceleration requires Spark 3.5.x or 4.0.x")
+    reason="Iceberg acceleration requires Spark 3.5.x, 4.0.x, or 4.1.x")
 
 # iceberg supported types
 iceberg_table_gen = MappingProxyType({

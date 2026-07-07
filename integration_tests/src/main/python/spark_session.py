@@ -186,9 +186,6 @@ def is_before_spark_322():
 def is_before_spark_323():
     return spark_version() < "3.2.3"
 
-def is_before_spark_330():
-    return spark_version() < "3.3.0"
-
 def is_before_spark_331():
     return spark_version() < "3.3.1"
 
@@ -252,8 +249,11 @@ def is_spark_35x():
 def is_spark_40x():
     return "4.0.0" <= spark_version() < "4.1.0"
 
+def is_spark_41x():
+    return "4.1.0" <= spark_version() < "4.2.0"
+
 def is_iceberg_supported_spark():
-    return is_spark_35x() or is_spark_40x()
+    return is_spark_35x() or is_spark_40x() or is_spark_41x()
 
 def is_spark_400_or_later():
     return spark_version() >= "4.0.0"
@@ -261,8 +261,14 @@ def is_spark_400_or_later():
 def is_spark_401_or_later():
     return spark_version() >= "4.0.1"
 
+def is_spark_403():
+    return spark_version() == "4.0.3"
+
 def is_spark_411_or_later():
     return spark_version() >= "4.1.1"
+
+def is_spark_412_or_later():
+    return spark_version() >= "4.1.2"
 
 def is_spark_330():
     return spark_version() == "3.3.0"

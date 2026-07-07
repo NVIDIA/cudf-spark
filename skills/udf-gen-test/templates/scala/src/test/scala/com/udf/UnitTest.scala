@@ -13,7 +13,8 @@ import org.scalatest.BeforeAndAfterAll
 
 object UnitTest extends Assertions {
   /**
-   * TODO: Create a test DataFrame with diverse test cases including edge cases.
+   * TODO: Create a test DataFrame with diverse test cases including edge cases
+   * (at least 10+ cases).
    *
    * Example:
    * {{{
@@ -24,7 +25,8 @@ object UnitTest extends Assertions {
    *   val testData = Seq(
    *     Row(1, 800),
    *     Row(2, 550),
-   *     Row(3, null)
+   *     Row(3, null),
+   *     // ...
    *   )
    *   spark.createDataFrame(spark.sparkContext.parallelize(testData), schema)
    * }}}
@@ -34,9 +36,11 @@ object UnitTest extends Assertions {
   /**
    * TODO: Register the UDF with Spark.
    *
-   * Example:
+   * Examples:
    * {{{
-   *   spark.udf.register(udfName, new CalculateRiskUDF())
+   *   spark.udf.register(udfName, new CalculateRiskUDF())   // Scala UDF
+   *   spark.udf.register(udfName, new FormatPhoneUDF(), StringType)   // Java UDF
+   *   spark.sql(s"CREATE TEMPORARY FUNCTION $udfName AS 'com.udf.IntegerMultiplyBy2UDF'")   // Hive UDF
    * }}}
    */
   def registerUDF(spark: SparkSession, udfName: String): Unit = ???
@@ -53,7 +57,7 @@ object UnitTest extends Assertions {
   def executeUDF(spark: SparkSession, udfName: String, testDF: DataFrame): DataFrame = ???
 
   /**
-   * TODO: Verify UDF results using assert statements.
+   * TODO: Assert the UDF results match expectations.
    *
    * Example:
    * {{{
@@ -63,7 +67,7 @@ object UnitTest extends Assertions {
    *   assert(results(2).getAs[String]("risk_level") === "UNKNOWN")
    * }}}
    */
-  def verifyUDFResults(resultDF: DataFrame, testDF: DataFrame): Unit = ???
+  def assertUDFResults(resultDF: DataFrame, testDF: DataFrame): Unit = ???
 }
 
 class UnitTest extends AnyFunSuite with BeforeAndAfterAll {
@@ -78,6 +82,7 @@ class UnitTest extends AnyFunSuite with BeforeAndAfterAll {
       .config("spark.rapids.skipGpuArchitectureCheck", "true")
       .config("spark.rapids.sql.mode", "explainOnly")
       .config("spark.sql.adaptive.enabled", "false")
+      .enableHiveSupport()
       .getOrCreate()
   }
 
@@ -86,11 +91,12 @@ class UnitTest extends AnyFunSuite with BeforeAndAfterAll {
   }
 
   test("UDF produces correct results") {
-    val testDF = UnitTest.createTestData(spark).repartition(1)
+    // Repartition down to 2 tasks to ensure we exercise multi-row columns.
+    val testDF = UnitTest.createTestData(spark).repartition(2)
 
     UnitTest.registerUDF(spark, "placeholder_udf_name")
     val resultDF = UnitTest.executeUDF(spark, "placeholder_udf_name", testDF)
 
-    UnitTest.verifyUDFResults(resultDF, testDF)
+    UnitTest.assertUDFResults(resultDF, testDF)
   }
 }

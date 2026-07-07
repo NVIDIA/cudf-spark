@@ -28,7 +28,7 @@ import com.nvidia.spark.rapids.shims.{GpuBatchScanExec, SparkShimImpl}
 
 import org.apache.spark.SparkContext
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, AttributeReference, Expression, SortOrder}
+import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, AttributeReference, BoundReference, Expression, Literal, SortOrder}
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.trees.TreeNodeTag
 import org.apache.spark.sql.execution._
@@ -636,7 +636,15 @@ class GpuTransitionOverrides extends Rule[SparkPlan] {
   def assertIsOnTheGpu(exp: Expression, conf: RapidsConf): Unit = {
     // There are no GpuAttributeReference or GpuSortOrder
     exp match {
-      case _: AttributeReference | _: SortOrder | _: GpuExpression =>
+      case _: AttributeReference | _: SortOrder =>
+        // These are always allowed
+      case bridge: GpuCpuBridgeExpression =>
+        // For bridge expressions, validate the CPU expressions inside
+        assertBridgeExpressionsAllowed(bridge, conf)
+      case _: BoundReference | _: Literal =>
+          // These are always allowed, and ignored
+      case _: GpuExpression =>
+        // Regular GPU expressions are allowed
       case _ =>
         val classBaseName = PlanUtils.getBaseNameFromClass(exp.getClass.toString)
         if (!conf.testingAllowedNonGpu.contains(classBaseName)) {
@@ -644,6 +652,61 @@ class GpuTransitionOverrides extends Rule[SparkPlan] {
         }
     }
     exp.children.foreach(subExp => assertIsOnTheGpu(subExp, conf))
+  }
+
+  /**
+   * Validates that all CPU expressions within a GpuCpuBridgeExpression are allowed in test mode.
+   * This function recursively traverses the CPU expression tree inside the bridge and checks
+   * each CPU expression against the testingAllowedNonGpu allowlist.
+   */
+  def assertBridgeExpressionsAllowed(bridge: GpuCpuBridgeExpression, conf: RapidsConf): Unit = {
+    val disallowedExprs = scala.collection.mutable.ListBuffer[String]()
+    val allowedExprs = scala.collection.mutable.ListBuffer[String]()
+
+    def collectCpuExpressions(expr: Expression, path: String = ""): Unit = {
+      val currentPath = if (path.isEmpty) {
+        expr.getClass.getSimpleName
+      } else {
+        s"$path.${expr.getClass.getSimpleName}"
+      }
+
+      expr match {
+        case _: Literal | _: BoundReference => ()
+        case _ =>
+          val classBaseName = PlanUtils.getBaseNameFromClass(expr.getClass.toString)
+          if (conf.testingAllowedNonGpu.contains(classBaseName)) {
+            allowedExprs += s"$currentPath ($classBaseName) [ALLOWED]"
+          } else {
+            disallowedExprs += s"$currentPath ($classBaseName) [NOT ALLOWED]"
+          }
+      }
+
+      expr.children.zipWithIndex.foreach { case (child, index) =>
+        collectCpuExpressions(child, s"$currentPath.child[$index]")
+      }
+    }
+
+    collectCpuExpressions(bridge.cpuExpression)
+
+    if (disallowedExprs.nonEmpty) {
+      val errorMessage = new StringBuilder()
+      errorMessage.append(s"GpuCpuBridgeExpression contains disallowed CPU expressions:\n")
+      errorMessage.append(s"Bridge: ${bridge.toString}\n")
+      errorMessage.append(s"CPU Expression Tree Analysis:\n")
+
+      // Show disallowed expressions first
+      errorMessage.append("  DISALLOWED EXPRESSIONS:\n")
+      disallowedExprs.foreach(expr => errorMessage.append(s"    - $expr\n"))
+
+      // When everything is allowed there is nothing to report; allowed expressions are only
+      // included as context when reporting a disallowed expression.
+      if (allowedExprs.nonEmpty) {
+        errorMessage.append("  ALLOWED EXPRESSIONS (for context):\n")
+        allowedExprs.foreach(expr => errorMessage.append(s"    - $expr\n"))
+      }
+
+      throw new IllegalArgumentException(errorMessage.toString())
+    }
   }
 
   def assertIsOnTheGpu(plan: SparkPlan, conf: RapidsConf): Unit = {

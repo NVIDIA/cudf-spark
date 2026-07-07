@@ -12,7 +12,7 @@ This document provides context for AI coding agents (Claude Code, GitHub Copilot
 - **Sign-off required** — all commits must use `git commit -s` for DCO compliance
 - **No rebase during review** — if a PR is under review, do not rebase; merge the base branch instead to preserve reviewer comment context
 - **Scala 2.13 sync** — after modifying any `pom.xml`, run `./build/make-scala-version-build-files.sh 2.13`
-- **PR title tags** — use `[databricks]` to trigger Databricks CI, `[skip ci]` for doc-only changes
+- **PR title tags** — `[databricks]` triggers Databricks pre-merge CI; `[skip ci]` for doc-only changes. Databricks CI auto-runs only when the diff touches a `sql-plugin/src/main/…db/` shim dir or a path containing `databricks`; otherwise it does **not** run. Add `[databricks]` manually when a change could behave differently on Databricks without touching those paths — e.g. integration tests that depend on filesystem/path semantics (local vs DBFS/`abfss`, `file://` scheme, `os.walk`/`os.path`), or optimizer/plan-string assertions (alias names and plan rendering differ on DBR) — since the Linux pre-merge will not catch DBR-only failures
 
 ## Build Commands
 

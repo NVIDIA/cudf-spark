@@ -30,7 +30,7 @@ import com.nvidia.spark.rapids.jni.{GpuListSliceUtils, MapUtils}
 import com.nvidia.spark.rapids.shims.{GetSequenceSize, NullIntolerantShim, ShimExpression}
 
 import org.apache.spark.sql.catalyst.analysis.{TypeCheckResult, TypeCoercion}
-import org.apache.spark.sql.catalyst.expressions.{ElementAt, ExpectsInputTypes, Expression, ImplicitCastInputTypes, NamedExpression, RowOrdering, Sequence, TimeZoneAwareExpression}
+import org.apache.spark.sql.catalyst.expressions.{ArraySort, ElementAt, ExpectsInputTypes, Expression, ImplicitCastInputTypes, LambdaFunction, NamedExpression, RowOrdering, Sequence, TimeZoneAwareExpression}
 import org.apache.spark.sql.catalyst.trees.{CurrentOrigin, Origin}
 import org.apache.spark.sql.catalyst.util.{GenericArrayData, TypeUtils}
 import org.apache.spark.sql.internal.SQLConf
@@ -862,6 +862,38 @@ case class GpuSortArray(base: Expression, ascendingOrder: Expression)
   private def isDescendingOrder(scalar: GpuScalar): Boolean = scalar.getValue match {
     case ascending: Boolean => !ascending
     case invalidValue => throw new IllegalArgumentException(s"invalid value $invalidValue")
+  }
+}
+
+case class GpuArraySort(child: Expression) extends GpuUnaryExpression with ExpectsInputTypes {
+
+  override def dataType: DataType = child.dataType
+
+  override def inputTypes: Seq[AbstractDataType] = Seq(ArrayType)
+
+  override def checkInputDataTypes(): TypeCheckResult = child.dataType match {
+    case ArrayType(dt, _) if RowOrdering.isOrderable(dt) =>
+      TypeCheckResult.TypeCheckSuccess
+    case ArrayType(dt, _) =>
+      TypeCheckResult.TypeCheckFailure(
+        s"$prettyName does not support sorting array of type ${dt.catalogString} " +
+          "which is not orderable")
+    case dt =>
+      TypeCheckResult.TypeCheckFailure(s"$prettyName only supports array input, but found $dt")
+  }
+
+  override protected def doColumnar(input: GpuColumnVector): cudf.ColumnVector = {
+    // false, false => ascending order with nulls last (array_sort's default comparator)
+    input.getBase.listSortRows(false, false)
+  }
+}
+
+object GpuArraySort {
+  /** True iff the lambda is array_sort's default comparator (ascending, nulls last). */
+  def isDefaultComparator(arraySort: ArraySort): Boolean = arraySort.function match {
+    case LambdaFunction(body, Seq(left, right), _) =>
+      body.canonicalized == ArraySort.comparator(left, right).canonicalized
+    case _ => false
   }
 }
 

@@ -132,7 +132,8 @@ trait BloomFilterAggregateQuerySuiteBase extends SparkQueryCompareTestSuite {
         import spark.implicits._
         spark.range(0, 4).select($"id".cast("long").as("col"))
       },
-      Seq("ObjectHashAggregateExec", "ProjectExec", "ShuffleExchangeExec"),
+      Seq("ObjectHashAggregateExec", "ProjectExec", "ShuffleExchangeExec",
+        "BloomFilterMightContain", "ScalarSubquery"),
       conf = bloomFilterEnabledConf.clone()
         .set("spark.rapids.sql.expression.BloomFilterMightContain", "false")
         .set("spark.rapids.sql.hashAgg.replaceMode", mode)

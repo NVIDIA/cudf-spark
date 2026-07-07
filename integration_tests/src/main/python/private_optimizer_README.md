@@ -51,9 +51,7 @@ All modules carry `@pytest.mark.private_optimizer`, so the whole area runs with:
      such as broadcast thresholds or AQE toggles).
    - `assert_rule_fires(fn, on_conf, off_conf, marker, physical=False)`
      — runs the OFF-CPU vs ON-GPU comparison and the plan-marker check.
-   - `require_private_optimizer` — the shared compatibility guard (see below).
-3. **Decorate** the test with `@pytest.mark.private_optimizer` and
-   `@require_private_optimizer`. Add `@approximate_float` only when the rule
+3. **Decorate** the test with `@pytest.mark.private_optimizer`. Add `@approximate_float` only when the rule
    changes floating-point evaluation order — that is enough for floating-point
    tolerance, since `assert_rule_fires` routes result comparison through
    `assert_equal_with_local_sort`, whose `get_float_check()` honors it.
@@ -94,7 +92,7 @@ present in the ON plan and absent from the OFF plan, so a no-op conf flip fails
 the test. Use `physical=True` when the effect is only visible after AQE (the
 executed plan); otherwise the optimized plan is checked. Examples in this area:
 `sum(sum(` (pushed partial aggregate), `_stddev_` (decomposed alias),
-`generated_agg_list` (merged subquery scan), `coalesced and skewed` (skew
+`named_struct(c_0,` (merged subquery scan), `coalesced and skewed` (skew
 reader).
 
 ### When a row-count / aggregate-only check is acceptable
@@ -111,10 +109,7 @@ rule actually ran. Do **not** weaken the marker check to make a test pass.
 ### Compatibility across Spark versions and runtimes
 
 The private plugin is built for **Spark 3.3.0 and later** (private core build
-matrix: 330..411 plus the `400db173` Databricks buildver). Below 3.3.0 the rules
-are not present at all, so `require_private_optimizer` (a
-`pytest.mark.skipif(is_before_spark_330())` in `private_optimizer_common`) skips
-the whole area there. Within that matrix all four current rules apply on every
+matrix: 330..411 plus the `400db173` Databricks buildver). Within that matrix all four current rules apply on every
 runtime, including Databricks, so we do **not** add per-runtime skips.
 
 If a future rule is genuinely unsupported on some runtime/version, express it

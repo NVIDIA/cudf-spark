@@ -25,6 +25,7 @@ SPDX-License-Identifier: Apache-2.0
         <!-- Spark/RAPIDS versions -->
         <spark.version>3.5.5</spark.version>
         <rapids4spark.version>26.04.0</rapids4spark.version>
+        <jacoco.version>0.8.14</jacoco.version>
         <scoverage.plugin.version>2.1.0</scoverage.plugin.version>
         <scoverage.scalac.plugin.version>2.0.11</scoverage.scalac.plugin.version>
         <scalatest.jvm.args>${test.jvm.args}</scalatest.jvm.args>
@@ -92,6 +93,50 @@ SPDX-License-Identifier: Apache-2.0
                             <scalacPluginVersion>${scoverage.scalac.plugin.version}</scalacPluginVersion>
                             <highlighting>true</highlighting>
                             <excludedPackages>com\.udf\.bench\..*;com\.udf\.SparkUtils.*;com\.udf\.Arm.*</excludedPackages>
+                        </configuration>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.jacoco</groupId>
+                        <artifactId>jacoco-maven-plugin</artifactId>
+                        <version>${jacoco.version}</version>
+                        <configuration>
+                            <formats>
+                                <format>HTML</format>
+                                <format>XML</format>
+                                <format>CSV</format>
+                            </formats>
+                            <excludes>
+                                <exclude>com/udf/bench/*</exclude>
+                                <exclude>com/udf/SparkUtils*</exclude>
+                                <exclude>com/udf/Arm*</exclude>
+                            </excludes>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <id>prepare-agent</id>
+                                <goals>
+                                    <goal>prepare-agent</goal>
+                                </goals>
+                                <configuration>
+                                    <propertyName>jacoco.agent.argLine</propertyName>
+                                </configuration>
+                            </execution>
+                            <execution>
+                                <id>report</id>
+                                <phase>verify</phase>
+                                <goals>
+                                    <goal>report</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <!-- Inject the jacoco agent into the ScalaTest fork. -->
+                    <!-- ${jacoco.agent.argLine} is set by prepare-agent at runtime. -->
+                    <plugin>
+                        <groupId>org.scalatest</groupId>
+                        <artifactId>scalatest-maven-plugin</artifactId>
+                        <configuration>
+                            <argLine>${jacoco.agent.argLine} ${scalatest.jvm.args}</argLine>
                         </configuration>
                     </plugin>
                 </plugins>

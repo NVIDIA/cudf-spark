@@ -888,16 +888,10 @@ def test_delta_filter_out_metadata_col(spark_tmp_path, dv_predicate_pushdown):
         assert_gpu_and_cpu_are_equal_collect(read_table, conf=conf)
 
 
-@allow_non_gpu("FilterExec", "ColumnarToRowExec", *delta_meta_allow)
-@delta_lake
-@ignore_order(local=True)
-@pytest.mark.skipif(not supports_delta_lake_deletion_vectors(),
-                    reason="Delta Lake deletion vector support is required")
-@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
-                    reason="Deletion vector scan is not supported on Databricks before 17.3")
-@pytest.mark.skipif(is_before_spark_353(),
-                    reason="Spark-RAPIDS supports scan with deletion vectors starting in Spark 3.5.3")
-def test_delta_dv_cpu_filter_after_native_scan(spark_tmp_path):
+_delta_meta_allow_without_filter = [c for c in delta_meta_allow if c != "FilterExec"]
+
+
+def _test_delta_dv_filter_after_native_scan(spark_tmp_path, cpu_bridge_enabled):
     data_path = spark_tmp_path + "/DELTA_DATA"
     conf = {
         "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true",
@@ -905,6 +899,8 @@ def test_delta_dv_cpu_filter_after_native_scan(spark_tmp_path):
         "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
         "spark.rapids.sql.expression.In": "false",
         "spark.rapids.sql.expression.InSet": "false",
+        "spark.rapids.sql.expression.cpuBridge.enabled": cpu_bridge_enabled,
+        "spark.rapids.sql.format.parquet.reader.type": "MULTITHREADED",
         "spark.rapids.sql.reader.chunked": "true"
     }
 
@@ -937,12 +933,47 @@ def test_delta_dv_cpu_filter_after_native_scan(spark_tmp_path):
                 assert callback.contains(plan, "GpuFileSourceScanExec"), explain_str
                 assert "__delta_internal_is_row_deleted" not in explain_str
                 assert "_metadata" not in explain_str
-            assert callback.contains(plan, "org.apache.spark.sql.execution.FilterExec"), \
-                explain_str
+            if cpu_bridge_enabled:
+                assert callback.contains(plan, "GpuFilterExec"), explain_str
+                assert not callback.contains(plan, "org.apache.spark.sql.execution.FilterExec"), \
+                    explain_str
+                assert callback.contains(plan, "GpuCpuBridgeExpression"), explain_str
+                assert callback.didFallBack(plan, "In") or callback.didFallBack(plan, "InSet"), \
+                    explain_str
+            else:
+                assert callback.contains(plan, "org.apache.spark.sql.execution.FilterExec"), \
+                    explain_str
+                assert not callback.contains(plan, "GpuCpuBridgeExpression"), explain_str
         return df
 
     with_cpu_session(create_delta, conf=conf)
     assert_gpu_and_cpu_are_equal_collect(read_table, conf=conf)
+
+
+@allow_non_gpu("FilterExec", "In", "InSet", "ColumnarToRowExec", *delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not supports_delta_lake_deletion_vectors(),
+                    reason="Delta Lake deletion vector support is required")
+@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
+                    reason="Deletion vector scan is not supported on Databricks before 17.3")
+@pytest.mark.skipif(is_before_spark_353(),
+                    reason="Spark-RAPIDS supports scan with deletion vectors starting in Spark 3.5.3")
+def test_delta_dv_cpu_filter_after_native_scan(spark_tmp_path):
+    _test_delta_dv_filter_after_native_scan(spark_tmp_path, cpu_bridge_enabled=False)
+
+
+@allow_non_gpu("In", "InSet", "ColumnarToRowExec", *_delta_meta_allow_without_filter)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not supports_delta_lake_deletion_vectors(),
+                    reason="Delta Lake deletion vector support is required")
+@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
+                    reason="Deletion vector scan is not supported on Databricks before 17.3")
+@pytest.mark.skipif(is_before_spark_353(),
+                    reason="Spark-RAPIDS supports scan with deletion vectors starting in Spark 3.5.3")
+def test_delta_dv_cpu_bridge_filter_after_native_scan(spark_tmp_path):
+    _test_delta_dv_filter_after_native_scan(spark_tmp_path, cpu_bridge_enabled=True)
 
 
 @allow_non_gpu(*delta_meta_allow)

@@ -54,7 +54,7 @@ Use `src/main/java/com/udf/PlaceholderUDFNameNativeRapidsUDF.java` as a starting
 4. Implement `evaluateColumnar` to validate column count/types and call the native method.
 5. Rename the native method to a descriptive operation name, e.g. `cosineSimilarityNative`.
 
-For Scala projects, keep this Java wrapper under `src/main/java/com/udf/` and register it from the Scala test/project. JNI can be used from Scala, but the Java wrapper keeps native symbol names and examples simpler.
+The project joint-compiles Java, so keep this Java wrapper under `src/main/java/com/udf/` and register it from the Scala test. JNI can be used from Scala, but the Java wrapper keeps native symbol names and examples simpler.
 If the Java wrapper's CPU fallback needs to call a Scala object, direct references can fail before `scala-maven-plugin` compiles the Scala classes; use reflection in the row-by-row fallback only, and keep `evaluateColumnar` on the normal JNI path.
 
 Read [JNI_CUDA_GUIDE.md](references/JNI_CUDA_GUIDE.md) for the `evaluateColumnar` contract, type mapping, pointer ownership, `NativeDepsLoader`, and native memory rules.
@@ -104,16 +104,12 @@ If the build fails while resolving cuDF headers or RAPIDS CMake, check network a
 
 ## Step 5: Build and Test
 
-Fill in the target-specific TODOs in `src/test/<java|scala>/com/udf/CudfComparisonTest.<java|scala>`:
+Fill in the target-specific TODOs in `src/test/scala/com/udf/CudfComparisonTest.scala`:
 - Register `<CamelName>NativeRapidsUDF` as the GPU implementation
 - Replace placeholder UDF names
 
 Run:
 ```bash
-# Java
-mvn test -Dtest=CudfComparisonTest -Pcuda-native-udf
-
-# Scala project using a Java native RapidsUDF wrapper
 mvn test -Dsuites=com.udf.CudfComparisonTest -Pcuda-native-udf
 ```
 
@@ -129,7 +125,7 @@ docker run --rm --gpus all \
   -v /etc/group:/etc/group:ro \
   -w /workspace \
   cuda-udf-build \
-  -c "mvn -B -Dmaven.repo.local=/workspace/.m2/repository test -Dtest=CudfComparisonTest -Pcuda-native-udf -Dnative.build.path=/workspace/target/native-build-docker -DskipCudfExtraction=true"
+  -c "mvn -B -Dmaven.repo.local=/workspace/.m2/repository test -Dsuites=com.udf.CudfComparisonTest -Pcuda-native-udf -Dnative.build.path=/workspace/target/native-build-docker -DskipCudfExtraction=true"
 ```
 
 If tests fail, iterate on the Java bridge or native implementation.

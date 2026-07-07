@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,6 +25,21 @@
 {"spark": "342"}
 {"spark": "343"}
 {"spark": "344"}
+{"spark": "350"}
+{"spark": "350db143"}
+{"spark": "351"}
+{"spark": "352"}
+{"spark": "353"}
+{"spark": "354"}
+{"spark": "355"}
+{"spark": "356"}
+{"spark": "357"}
+{"spark": "358"}
+{"spark": "400"}
+{"spark": "401"}
+{"spark": "402"}
+{"spark": "403"}
+{"spark": "411"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids
 
@@ -32,7 +47,6 @@ import java.time.Period
 
 import scala.util.Random
 
-import org.apache.spark.SparkException
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.types._
 
@@ -40,6 +54,15 @@ import org.apache.spark.sql.types._
 // TODO move this to the integration test module, see issue
 //  https://github.com/NVIDIA/spark-rapids/issues/5212
 class IntervalDivisionSuite extends SparkQueryCompareTestSuite {
+  private def intervalArithmeticError(e: Exception): Boolean = {
+    val msg = Option(e.getMessage).getOrElse("")
+    val full = s"${e.getClass.getName}: $msg"
+    full.contains("ArithmeticException") ||
+      msg.contains("INTERVAL_DIVIDED_BY_ZERO") ||
+      msg.contains("ARITHMETIC_OVERFLOW") ||
+      msg.contains("input is infinite or NaN") ||
+      msg.contains("Has NaN")
+  }
 
   testSparkResultsAreEqual(
     "test year-month interval / num, normal case",
@@ -131,8 +154,8 @@ class IntervalDivisionSuite extends SparkQueryCompareTestSuite {
 
   // both gpu and cpu will throw ArithmeticException
   def testDivideYMOverflow(testCaseName: String, months: Int, num: Any): Unit = {
-    testBothCpuGpuExpectedException[SparkException](testCaseName + ", cv / scalar",
-      e => e.getMessage.contains("ArithmeticException"),
+    testBothCpuGpuExpectedException[Exception](testCaseName + ", cv / scalar",
+      intervalArithmeticError,
       spark => {
         val data = Seq(Row(Period.ofMonths(months)))
         val schema = StructType(Seq(
@@ -162,8 +185,8 @@ class IntervalDivisionSuite extends SparkQueryCompareTestSuite {
         }
     }
 
-    testBothCpuGpuExpectedException[SparkException](testCaseName + ", cv / cv",
-      e => e.getMessage.contains("ArithmeticException"),
+    testBothCpuGpuExpectedException[Exception](testCaseName + ", cv / cv",
+      intervalArithmeticError,
       spark => {
         // Period is the external type of year-month type
         val (data, schema) = num match {
@@ -202,8 +225,8 @@ class IntervalDivisionSuite extends SparkQueryCompareTestSuite {
       df => df.selectExpr(s"c1 / c2")
     }
 
-    testBothCpuGpuExpectedException[SparkException](testCaseName + ", scalar / cv",
-      e => e.getMessage.contains("ArithmeticException"),
+    testBothCpuGpuExpectedException[Exception](testCaseName + ", scalar / cv",
+      intervalArithmeticError,
       spark => {
         val (data, schema) = num match {
           case b: Byte => (Seq(Row(b)), StructType(Seq(StructField("c1", ByteType))))

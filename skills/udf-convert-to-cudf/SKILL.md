@@ -64,16 +64,12 @@ Create a copy of the original UDF file in the same source directory (`src/main/<
 
 ## Step 3: Build and Test
 
-Fill in the target-specific TODOs in `src/test/<java|scala>/com/udf/CudfComparisonTest.<java|scala>`:
+Fill in the target-specific TODOs in `src/test/scala/com/udf/CudfComparisonTest.scala`:
 - Implement `registerRapidsUDF` to register the new RapidsUDF class.
 - Replace placeholders with the actual camel/snake UDF name
 
 Then run the test:
 ```bash
-# Java
-mvn test -Dtest=CudfComparisonTest
-
-# Scala
 mvn test -Dsuites=com.udf.CudfComparisonTest
 ```
 
@@ -91,10 +87,6 @@ Treat the unit test as the CPU behavior specification. Do not weaken or remove t
 
 Re-run with memory leak detection:
 ```bash
-# Java
-mvn test -Dtest=CudfComparisonTest -Ddebug.memory.leaks=true > /tmp/memleak.log 2>&1
-
-# Scala
 mvn test -Dsuites=com.udf.CudfComparisonTest -Ddebug.memory.leaks=true > /tmp/memleak.log 2>&1
 
 # Check for leaks

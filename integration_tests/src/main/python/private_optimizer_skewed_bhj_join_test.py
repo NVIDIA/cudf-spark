@@ -17,12 +17,16 @@ import pytest
 from private_optimizer_common import (
     assert_rule_fires,
     private_optimizer_conf,
-    require_private_optimizer,
 )
+from spark_session import is_databricks_runtime
 
 
 @pytest.mark.private_optimizer
-@require_private_optimizer
+@pytest.mark.skipif(
+    is_databricks_runtime(),
+    reason="Databricks executor-broadcast AQE can put the materialized shuffle on the "
+           "BHJ build side; this marker test covers streamed-side skew split. "
+           "See https://github.com/NVIDIA/cudf-spark/issues/15136")
 def test_optimize_skewed_bhj_join(spark_tmp_path):
     """OptimizeSkewedBHJJoinRule splits a skewed partition on the streamed side
     of an AQE broadcast hash join. Needs a runtime broadcast (static

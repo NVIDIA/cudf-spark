@@ -561,6 +561,17 @@ and releases memory between partitions. Dedicated fanout-enabled test cases
 (e.g., `test_*_fanout_enabled`) still exercise the fanout writer path with a single
 partition type to keep memory usage manageable.
 
+#### Iceberg REST catalog write compression
+
+Some REST catalog deployments can apply a catalog-side default Parquet compression codec that
+is not supported by the RAPIDS GPU writer. The REST catalog CI sets table defaults for data
+and delete files to use `zstd`, which is supported by the GPU writer:
+
+```shell
+"PYSP_TEST_spark_sql_catalog_spark__catalog_table-default_write_parquet_compression-codec=zstd"
+"PYSP_TEST_spark_sql_catalog_spark__catalog_table-default_write_delete_parquet_compression-codec=zstd"
+```
+
 ### Run Apache iceberg s3tables tests
 
 To run iceberg tests against aws s3tables catalog, we need to setup several things:

@@ -1097,11 +1097,9 @@ object GpuRegExpUtils {
     var i = 0
     var hasBracedBackref = false
     while (i < rep.length) {
-      // Pass through already-braced `${N}` tokens unchanged. These are emitted by the
-      // transpiler for internally-generated backrefs (e.g. the line-anchor rewrite's
-      // captured line terminator) and must not be re-parsed against the user pattern's
-      // group count, which would mis-resolve them when the user count is less than the
-      // generated index.
+      // Pass through already-braced `${N}` tokens unchanged. The replacement AST uses this
+      // form for backrefs that have already been resolved by the transpiler, so re-parsing
+      // them against the caller-provided group count could change their meaning.
       if (rep.charAt(i) == '$' && i + 2 < rep.length && rep.charAt(i + 1) == '{') {
         val close = rep.indexOf('}', i + 2)
         val allDigits = close > i + 2 &&

@@ -18,8 +18,8 @@ Your job is to review whether the GPU/SQL implementation is a properly validated
 
 Review the files that exist in the generated project:
 - CPU UDF source under `src/main/<java|scala>/com/udf/`
-- `src/test/<java|scala>/com/udf/UnitTest.<java|scala>`
-- `src/test/<java|scala>/com/udf/CudfComparisonTest.<java|scala>` or `SqlComparisonTest.<java|scala>`
+- `src/test/scala/com/udf/UnitTest.scala`
+- `src/test/scala/com/udf/CudfComparisonTest.scala` or `SqlComparisonTest.scala`
 - GPU/SQL implementation files
 - coverage reports, test output, or comments documenting accepted discrepancies if present
 
@@ -39,7 +39,7 @@ Check that:
 - Assertions verify schema, row count, deterministic ordering, output values, null propagation, and exception/default behavior where applicable.
 - The test exercises visible CPU UDF branches. Coverage reports should support this when available.
 - Assertions reflect the CPU UDF's actual behavior and do not merely assert weak properties such as non-null output.
-- Extra unit tests outside the shared `verifyUDFResults` path are mirrored in the comparison test and run against both CPU and GPU/SQL paths.
+- Extra unit tests outside the shared `assertUDFResults` path are mirrored in the comparison test and run against both CPU and GPU/SQL paths.
 
 ## Comparison Test Checks
 
