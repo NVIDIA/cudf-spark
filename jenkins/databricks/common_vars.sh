@@ -108,6 +108,9 @@ fi
 
 export TEST_TYPE=${TEST_TYPE:-"nightly"}
 
+# Databricks Maven coordinates do not publish a spark-protobuf artifact.
+export INCLUDE_SPARK_PROTOBUF_JAR=false
+
 if [[ -n "$LOCAL_JAR_PATH" ]]; then
     export LOCAL_JAR_PATH=$LOCAL_JAR_PATH
 fi
