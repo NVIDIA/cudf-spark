@@ -57,7 +57,7 @@ import org.apache.spark.sql.types._
  * @param isRequired Whether each field is required
  * @param hasDefaultValue Whether each field has a default value
  * @param isOutput Whether each field should be included in the returned cudf STRUCT. Fields
- *                 marked false are decoded only to validate pruned nested protobuf messages.
+ *                 marked false are decoded only to validate projected-out protobuf fields.
  * @param defaultInts Default int/long values
  * @param defaultFloats Default float/double values
  * @param defaultBools Default bool values

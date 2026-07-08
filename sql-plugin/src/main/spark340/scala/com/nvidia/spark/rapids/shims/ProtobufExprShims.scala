@@ -28,10 +28,13 @@
 {"spark": "355"}
 {"spark": "356"}
 {"spark": "357"}
+{"spark": "358"}
 {"spark": "400"}
 {"spark": "401"}
 {"spark": "402"}
+{"spark": "403"}
 {"spark": "411"}
+{"spark": "412"}
 spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.shims
@@ -44,7 +47,7 @@ import com.nvidia.spark.rapids._
 import org.apache.spark.sql.catalyst.expressions.{
   AttributeReference, Expression, GetArrayStructFields, GetStructField, UnaryExpression
 }
-import org.apache.spark.sql.execution.ProjectExec
+import org.apache.spark.sql.execution.{ProjectExec, SparkPlan}
 import org.apache.spark.sql.rapids.GpuFromProtobuf
 import org.apache.spark.sql.rapids.protobuf.{
   FlattenedFieldDescriptor,
@@ -158,14 +161,11 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
               return
           }
 
-          // Reject proto3 descriptors — GPU decoder only supports proto2 semantics.
-          // proto3 has different null/default-value behavior that the GPU path doesn't handle.
-          val protoSyntax = msgDesc.syntax
-          if (!SparkProtobufCompat.isGpuSupportedProtoSyntax(protoSyntax)) {
-            willNotWorkOnGpu(
-              "proto3/editions syntax is not supported by the GPU protobuf decoder; " +
-                "only proto2 is supported. The query will fall back to CPU.")
-            return
+          SparkProtobufCompat.validateDescriptorGraphSyntax(fullSchema, msgDesc) match {
+            case Left(reason) =>
+              willNotWorkOnGpu(reason)
+              return
+            case Right(_) =>
           }
 
           // Step 1: Analyze all fields and build field info map
@@ -189,10 +189,8 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
           }.toSet
           val outputFieldNames = requiredFieldNames ++ protoRequiredFieldNames
 
-          // Step 2c: When nested pruning selects only some children of a struct,
-          // proto2 required children must still be included so their presence
-          // can be checked by the GPU decoder.
-          augmentNestedRequirementsWithRequired(msgDesc)
+          // Step 2c: Preserve validation semantics when nested pruning selects only some children.
+          augmentNestedRequirementsForValidation(msgDesc)
 
           // Step 3: Check if all fields to be decoded are supported
           val unsupportedRequired = outputFieldNames.filter { name =>
@@ -209,20 +207,13 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
             return
           }
 
-          // Step 4: Identify which fields in fullSchema need output decoding and which
-          // top-level message fields are needed only for validation. Spark CPU parses embedded
-          // messages even when Catalyst later prunes them, so GPU must still recurse into pruned
-          // message fields to catch malformed inner payloads.
+          // Step 4: Keep every root descriptor for Spark's root unknown-field/type validation,
+          // while using isOutput to avoid materializing fields that were projected out.
           val outputTopLevelIndices = fullSchema.fields.zipWithIndex.collect {
             case (sf, idx) if outputFieldNames.contains(sf.name) => idx
           }
           val outputIndexSet = outputTopLevelIndices.toSet
-          val indicesToDecode = fullSchema.fields.indices.filter { idx =>
-            outputIndexSet.contains(idx) ||
-              fieldsInfoMap.get(fullSchema.fields(idx).name).exists { info =>
-                info.protoTypeName == "MESSAGE"
-              }
-          }.toArray
+          val indicesToDecode = fullSchema.fields.indices.toArray
 
           // Verify all fields to be decoded are actually supported
           // (This catches edge cases where field analysis might have issues)
@@ -463,16 +454,17 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
           }
 
           while (currentMeta.isDefined && safeToPrune) {
+            val planMeta = currentMeta.get
             val allowSemanticReferenceMatch = currentMeta == startingPlanMeta
-            currentMeta.get.wrapped match {
+            planMeta.wrapped match {
               case p: ProjectExec =>
-                p.projectList.foreach {
+                val directAliases = p.projectList.collect {
                   case alias: org.apache.spark.sql.catalyst.expressions.Alias
                       if isProtobufStructReference(
                         alias.child, allowSemanticReferenceMatch) =>
-                    protobufOutputExprIds += alias.exprId
-                  case _ =>
+                    alias.exprId
                 }
+                protobufOutputExprIds ++= directAliases
                 p.projectList.foreach(
                   collectStructFieldReferences(
                     _, fieldReqs, holder, allowSemanticReferenceMatch))
@@ -506,6 +498,12 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
                 logDebug(s"Schema pruning disabled: unrecognized plan node " +
                   s"${other.getClass.getSimpleName} above from_protobuf")
                 safeToPrune = false
+            }
+            if (planMeta.parent.isEmpty &&
+                planMeta.wrapped.asInstanceOf[SparkPlan].output.exists { attr =>
+                  protobufOutputExprIds.contains(attr.exprId)
+                }) {
+              holder()
             }
           }
 
@@ -580,33 +578,44 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
           }
         }
 
-        /**
-         * Augment nestedFieldRequirements so that proto2 required children are
-         * always included when nested pruning is active. Without this, a required
-         * child that is not referenced downstream would be pruned, and the GPU
-         * decoder would not check its presence.
-         */
-        private def augmentNestedRequirementsWithRequired(
+        /** Preserve validation-only nested fields that generic wire skipping cannot validate. */
+        private def augmentNestedRequirementsForValidation(
             rootMsgDesc: ProtobufMessageDescriptor): Unit = {
           if (nestedFieldRequirements.isEmpty) return
-          nestedFieldRequirements = nestedFieldRequirements.map {
+          val augmentedRequirements = nestedFieldRequirements.map {
             case entry @ (pathKey, Some(childNames)) =>
               val pathParts = pathKey.split("\\.").toSeq
               resolveProtoMsgDesc(rootMsgDesc, pathParts) match {
                 case Some(childMsgDesc) =>
                   val schemaType = resolveSchemaAtPath(fullSchema, pathParts)
                   if (schemaType != null) {
-                    val requiredChildNames = schemaType.fields.flatMap { sf =>
-                      childMsgDesc.findField(sf.name).filter(_.isRequired).map(_ => sf.name)
+                    val childDescriptors = schemaType.fields.flatMap { sf =>
+                      childMsgDesc.findField(sf.name).map(sf.name -> _)
+                    }
+                    val validationSensitiveChildren = childDescriptors.collect {
+                      case (name, fd) if fd.protoTypeName == "MESSAGE" || fd.isRepeated => name
                     }.toSet
-                    if (requiredChildNames.subsetOf(childNames)) entry
-                    else pathKey -> Some(childNames ++ requiredChildNames)
+                    if (!validationSensitiveChildren.subsetOf(childNames)) {
+                      pathKey -> None
+                    } else {
+                      val requiredChildNames = childDescriptors.collect {
+                        case (name, fd) if fd.isRequired => name
+                      }.toSet
+                      if (requiredChildNames.subsetOf(childNames)) entry
+                      else pathKey -> Some(childNames ++ requiredChildNames)
+                    }
                   } else {
                     entry
                   }
                 case None => entry
               }
             case other => other
+          }
+          val wholePaths = augmentedRequirements.collect {
+            case (path, None) => path
+          }.toSeq
+          nestedFieldRequirements = augmentedRequirements.filterNot { case (path, _) =>
+            wholePaths.exists(whole => path.startsWith(s"$whole."))
           }
         }
 
@@ -693,6 +702,12 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
           }
         }
 
+        private def isStructLike(dataType: DataType): Boolean = dataType match {
+          case _: StructType => true
+          case ArrayType(_: StructType, _) => true
+          case _ => false
+        }
+
         private def collectStructFieldReferences(
             expr: Expression,
             fieldReqs: mutable.Map[String, Option[Set[String]]],
@@ -711,6 +726,9 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
                       fieldReqs(fieldName) = None
                     } else {
                       registerPathRequirements(fieldReqs, parentPath, fieldName)
+                      if (isStructLike(expr.dataType)) {
+                        fieldReqs((parentPath :+ fieldName).mkString(".")) = None
+                      }
                     }
                   } else {
                     collectStructFieldReferences(
@@ -725,6 +743,9 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
               resolveFieldAccessChain(gasf.child, allowSemanticReferenceMatch) match {
                 case Some(parentPath) if parentPath.nonEmpty =>
                   registerPathRequirements(fieldReqs, parentPath, gasf.field.name)
+                  if (isStructLike(gasf.dataType)) {
+                    fieldReqs((parentPath :+ gasf.field.name).mkString(".")) = None
+                  }
                 case Some(parentPath) if parentPath.isEmpty =>
                   logDebug("Schema pruning disabled: unexpected direct protobuf reference in " +
                     "GetArrayStructFields")

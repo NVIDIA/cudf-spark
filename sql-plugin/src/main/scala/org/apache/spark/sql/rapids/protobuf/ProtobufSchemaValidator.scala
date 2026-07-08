@@ -161,6 +161,8 @@ object ProtobufSchemaValidator {
     fieldInfo.enumMetadata match {
       case Some(enumMeta) if enumMeta.values.isEmpty =>
         return Left(s"Enum field '$path' is missing enum values")
+      case Some(enumMeta) if enumMeta.hasAliases =>
+        return Left(s"Enum aliases are not supported on GPU for protobuf field '$path'")
       case Some(_) if fieldInfo.protoTypeName != "ENUM" =>
         return Left(s"Non-enum field '$path' should not carry enum metadata")
       case None if fieldInfo.protoTypeName == "ENUM" =>
@@ -171,6 +173,10 @@ object ProtobufSchemaValidator {
     if (fieldInfo.encoding == GpuFromProtobuf.ENC_ENUM_STRING &&
         fieldInfo.enumMetadata.isEmpty) {
       return Left(s"Enum-string field '$path' is missing enum metadata")
+    }
+
+    if (field.dataType == BinaryType && fieldInfo.hasDefaultValue) {
+      return Left(s"Protobuf bytes defaults are not supported on GPU for field '$path'")
     }
 
     Right(())
@@ -205,8 +211,6 @@ object ProtobufSchemaValidator {
             Right(empty.copy(
               defaultInt = number.toLong,
               defaultString = name.getBytes("UTF-8")))
-          case (BinaryType, ProtobufDefaultValue.BinaryValue(value)) =>
-            Right(empty.copy(defaultString = value))
           case _ =>
             Left(s"Incompatible default value for protobuf field '$path': $defaultValue")
         }

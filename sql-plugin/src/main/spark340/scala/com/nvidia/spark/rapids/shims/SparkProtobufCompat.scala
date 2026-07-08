@@ -28,16 +28,20 @@
 {"spark": "355"}
 {"spark": "356"}
 {"spark": "357"}
+{"spark": "358"}
 {"spark": "400"}
 {"spark": "401"}
 {"spark": "402"}
+{"spark": "403"}
 {"spark": "411"}
+{"spark": "412"}
 spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.shims
 
 import java.lang.reflect.Method
 import java.nio.file.{Files, Paths}
+import java.util.Locale
 
 import scala.util.Try
 
@@ -46,6 +50,7 @@ import com.nvidia.spark.rapids.ShimReflectionUtils
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.rapids.protobuf._
+import org.apache.spark.sql.types.{ArrayType, StructType}
 
 private[shims] object SparkProtobufCompat extends Logging {
   private[this] val sparkProtobufUtilsObjectClassName =
@@ -92,7 +97,52 @@ private[shims] object SparkProtobufCompat extends Logging {
     options.keys.filterNot(SupportedOptions.contains).toSeq.sorted
 
   def isGpuSupportedProtoSyntax(syntax: String): Boolean =
-    syntax.nonEmpty && syntax != "null" && syntax != "PROTO3" && syntax != "EDITIONS"
+    syntax == "PROTO2"
+
+  private[shims] def validateDescriptorGraphSyntax(
+      schema: StructType,
+      root: ProtobufMessageDescriptor): Either[String, Unit] = {
+    def nestedStruct(dataType: org.apache.spark.sql.types.DataType): Option[StructType] = {
+      dataType match {
+        case st: StructType => Some(st)
+        case ArrayType(st: StructType, _) => Some(st)
+        case _ => None
+      }
+    }
+
+    def validate(schema: StructType, desc: ProtobufMessageDescriptor,
+        path: String): Either[String, Unit] = {
+      if (!isGpuSupportedProtoSyntax(desc.syntax)) {
+        val location = if (path.isEmpty) "root message" else s"protobuf field '$path'"
+        return Left(s"$location uses unsupported ${desc.syntax} syntax; only proto2 is supported")
+      }
+
+      schema.fields.foreach { field =>
+        desc.findField(field.name).foreach { fieldDesc =>
+          val fieldPath = if (path.isEmpty) field.name else s"$path.${field.name}"
+          fieldDesc.referencedTypeSyntax.foreach { syntax =>
+            if (!isGpuSupportedProtoSyntax(syntax)) {
+              return Left(
+                s"Referenced type for protobuf field '$fieldPath' uses unsupported $syntax " +
+                  "syntax; only proto2 is supported")
+            }
+          }
+          for {
+            childSchema <- nestedStruct(field.dataType)
+            childDesc <- fieldDesc.messageDescriptor
+          } {
+            validate(childSchema, childDesc, fieldPath) match {
+              case left @ Left(_) => return left
+              case Right(_) =>
+            }
+          }
+        }
+      }
+      Right(())
+    }
+
+    validate(schema, root, "")
+  }
 
   def resolveMessageDescriptor(
       exprInfo: ProtobufExprInfo): Either[String, ProtobufMessageDescriptor] = {
@@ -213,8 +263,14 @@ private[shims] object SparkProtobufCompat extends Logging {
   private def typeName(t: AnyRef): String =
     if (t == null) "" else Try(PbReflect.invoke0[String](t, "name")).getOrElse(t.toString)
 
+  private def readFileSyntax(fileDesc: AnyRef): String =
+    PbReflect.getFileSyntax(fileDesc, typeName)
+
+  private[shims] def readDescriptorSyntax(desc: AnyRef): String =
+    Try(readFileSyntax(PbReflect.getFile(desc))).getOrElse("")
+
   private final class ReflectiveMessageDescriptor(raw: AnyRef) extends ProtobufMessageDescriptor {
-    override lazy val syntax: String = PbReflect.getFileSyntax(raw, typeName)
+    override lazy val syntax: String = readDescriptorSyntax(raw)
 
     override def findField(name: String): Option[ProtobufFieldDescriptor] =
       Option(PbReflect.findFieldByName(raw, name)).map(new ReflectiveFieldDescriptor(_))
@@ -254,6 +310,13 @@ private[shims] object SparkProtobufCompat extends Logging {
       } else {
         None
       }
+    override lazy val referencedTypeSyntax: Option[String] = protoTypeName match {
+      case "MESSAGE" =>
+        Some(Try(readDescriptorSyntax(PbReflect.getMessageType(raw))).getOrElse(""))
+      case "ENUM" =>
+        Some(Try(readDescriptorSyntax(PbReflect.getEnumType(raw))).getOrElse(""))
+      case _ => None
+    }
   }
 
   private def toDefaultValue(
@@ -369,6 +432,8 @@ private[shims] object SparkProtobufCompat extends Logging {
 
     def getEnumType(fd: AnyRef): AnyRef = invoke0[AnyRef](fd, "getEnumType")
 
+    def getFile(desc: AnyRef): AnyRef = invoke0[AnyRef](desc, "getFile")
+
     def getEnumValues(enumType: AnyRef): Seq[ProtobufEnumValue] = {
       import scala.collection.JavaConverters._
       val values = invoke0[java.util.List[_]](enumType, "getValues")
@@ -380,10 +445,13 @@ private[shims] object SparkProtobufCompat extends Logging {
       }.toSeq
     }
 
-    def getFileSyntax(msgDesc: AnyRef, typeNameFn: AnyRef => String): String = Try {
-      val fileDesc = invoke0[AnyRef](msgDesc, "getFile")
-      val syntaxObj = invoke0[AnyRef](fileDesc, "getSyntax")
-      typeNameFn(syntaxObj)
+    def getFileSyntax(fileDesc: AnyRef, typeNameFn: AnyRef => String): String = Try {
+      val syntaxObj = Try(invoke0[AnyRef](fileDesc, "getSyntax")).getOrElse {
+        val fileProto = invoke0[AnyRef](fileDesc, "toProto")
+        invoke0[AnyRef](fileProto, "getSyntax")
+      }
+      val syntax = typeNameFn(syntaxObj).trim
+      if (syntax.isEmpty) "PROTO2" else syntax.toUpperCase(Locale.ROOT)
     }.getOrElse("")
   }
 }

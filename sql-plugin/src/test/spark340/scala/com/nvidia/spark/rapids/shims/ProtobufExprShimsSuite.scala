@@ -14,6 +14,29 @@
  * limitations under the License.
  */
 
+/*** spark-rapids-shim-json-lines
+{"spark": "340"}
+{"spark": "341"}
+{"spark": "342"}
+{"spark": "343"}
+{"spark": "344"}
+{"spark": "350"}
+{"spark": "351"}
+{"spark": "352"}
+{"spark": "353"}
+{"spark": "354"}
+{"spark": "355"}
+{"spark": "356"}
+{"spark": "357"}
+{"spark": "358"}
+{"spark": "400"}
+{"spark": "401"}
+{"spark": "402"}
+{"spark": "403"}
+{"spark": "411"}
+{"spark": "412"}
+spark-rapids-shim-json-lines ***/
+
 package com.nvidia.spark.rapids.shims
 
 import ai.rapids.cudf.DType
@@ -162,6 +185,34 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
     }
   }
 
+  private final class FakeFileDescriptorProto(syntax: String) {
+    def getSyntax: String = syntax
+  }
+
+  private final class FakeModernFileDescriptor(syntax: String) {
+    def toProto: FakeFileDescriptorProto = new FakeFileDescriptorProto(syntax)
+  }
+
+  private final class FakeModernDescriptor(syntax: String) {
+    def getFile: FakeModernFileDescriptor = new FakeModernFileDescriptor(syntax)
+  }
+
+  private final class FakeLegacyFileDescriptor(syntax: String) {
+    def getSyntax: String = syntax
+  }
+
+  private final class FakeLegacyDescriptor(syntax: String) {
+    def getFile: FakeLegacyFileDescriptor = new FakeLegacyFileDescriptor(syntax)
+  }
+
+  private final class FakeBrokenFileDescriptor
+
+  private final class FakeBrokenDescriptor {
+    def getFile: FakeBrokenFileDescriptor = new FakeBrokenFileDescriptor
+  }
+
+  private final class FakeDescriptorWithoutFile
+
   private case class FakeMessageDescriptor(
       syntax: String,
       fields: Map[String, ProtobufFieldDescriptor]) extends ProtobufMessageDescriptor {
@@ -178,7 +229,8 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
       defaultValue: Option[ProtobufDefaultValue] = None,
       defaultValueError: Option[String] = None,
       enumMetadata: Option[ProtobufEnumMetadata] = None,
-      messageDescriptor: Option[ProtobufMessageDescriptor] = None) extends ProtobufFieldDescriptor {
+      messageDescriptor: Option[ProtobufMessageDescriptor] = None,
+      referencedTypeSyntax: Option[String] = None) extends ProtobufFieldDescriptor {
     override lazy val defaultValueResult: Either[String, Option[ProtobufDefaultValue]] =
       defaultValueError match {
         case Some(reason) => Left(reason)
@@ -322,6 +374,54 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
     assert(SparkProtobufCompat.isGpuSupportedProtoSyntax("PROTO2"))
   }
 
+  test("compat reads syntax through protobuf 4 FileDescriptor API") {
+    assert(SparkProtobufCompat.readDescriptorSyntax(
+      new FakeModernDescriptor("proto2")) == "PROTO2")
+    assert(SparkProtobufCompat.readDescriptorSyntax(
+      new FakeModernDescriptor("proto3")) == "PROTO3")
+    assert(SparkProtobufCompat.readDescriptorSyntax(
+      new FakeModernDescriptor("")) == "PROTO2")
+    assert(SparkProtobufCompat.readDescriptorSyntax(
+      new FakeLegacyDescriptor("PROTO2")) == "PROTO2")
+    assert(SparkProtobufCompat.readDescriptorSyntax(
+      new FakeBrokenDescriptor) == "")
+    assert(SparkProtobufCompat.readDescriptorSyntax(
+      new FakeDescriptorWithoutFile) == "")
+  }
+
+  test("compat rejects imported proto3 message and enum types") {
+    val childSchema = StructType(Seq(StructField("value", IntegerType, nullable = true)))
+    val proto3Child = FakeMessageDescriptor(
+      syntax = "PROTO3",
+      fields = Map("value" -> FakeFieldDescriptor("value", 1, "INT32")))
+    val messageRoot = FakeMessageDescriptor(
+      syntax = "PROTO2",
+      fields = Map("child" -> FakeFieldDescriptor(
+        name = "child",
+        fieldNumber = 1,
+        protoTypeName = "MESSAGE",
+        messageDescriptor = Some(proto3Child),
+        referencedTypeSyntax = Some("PROTO3"))))
+    val messageSchema = StructType(Seq(
+      StructField("child", childSchema, nullable = true)))
+
+    val messageResult = SparkProtobufCompat.validateDescriptorGraphSyntax(
+      messageSchema, messageRoot)
+    assert(messageResult.left.toOption.exists(_.contains("field 'child'")))
+
+    val enumRoot = FakeMessageDescriptor(
+      syntax = "PROTO2",
+      fields = Map("status" -> FakeFieldDescriptor(
+        name = "status",
+        fieldNumber = 1,
+        protoTypeName = "ENUM",
+        referencedTypeSyntax = Some("PROTO3"))))
+    val enumSchema = StructType(Seq(StructField("status", StringType, nullable = true)))
+
+    val enumResult = SparkProtobufCompat.validateDescriptorGraphSyntax(enumSchema, enumRoot)
+    assert(enumResult.left.toOption.exists(_.contains("field 'status'")))
+  }
+
   test("compat returns Left for unsupported default value types") {
     val method = SparkProtobufCompat.getClass.getDeclaredMethods
       .find(_.getName.endsWith("toDefaultValue"))
@@ -359,6 +459,18 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
     assert(infos.isRight)
     assert(infos.toOption.get("language").defaultValue.contains(
       ProtobufDefaultValue.EnumValue(1, "EN")))
+  }
+
+  test("enum metadata sorts values and names by number") {
+    val enumMeta = ProtobufEnumMetadata(Seq(
+      ProtobufEnumValue(10, "TEN"),
+      ProtobufEnumValue(1, "ONE"),
+      ProtobufEnumValue(5, "FIVE")))
+
+    assert(enumMeta.validValues.sameElements(Array(1, 5, 10)))
+    assert(enumMeta.orderedNames.map(new String(_, "UTF-8"))
+      .sameElements(Array("ONE", "FIVE", "TEN")))
+    assert(!enumMeta.hasAliases)
   }
 
   test("extractor records reflection failures as unsupported field info") {
@@ -507,6 +619,58 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
       isOutput = true)
 
     assert(flat.left.toOption.exists(_.contains("missing enum metadata")))
+  }
+
+  test("validator rejects enum aliases before JNI construction") {
+    val enumMeta = ProtobufEnumMetadata(Seq(
+      ProtobufEnumValue(0, "UNKNOWN"),
+      ProtobufEnumValue(1, "FIRST"),
+      ProtobufEnumValue(1, "ALIAS")))
+    val info = ProtobufFieldInfo(
+      fieldNumber = 1,
+      protoTypeName = "ENUM",
+      sparkType = StringType,
+      encoding = GpuFromProtobuf.ENC_ENUM_STRING,
+      isSupported = true,
+      unsupportedReason = None,
+      isRequired = false,
+      defaultValue = None,
+      enumMetadata = Some(enumMeta))
+
+    val flat = ProtobufSchemaValidator.toFlattenedFieldDescriptor(
+      path = "status",
+      field = StructField("status", StringType, nullable = true),
+      fieldInfo = info,
+      parentIdx = -1,
+      depth = 0,
+      outputTypeId = DType.STRING.getTypeId.getNativeId,
+      isOutput = true)
+
+    assert(flat.left.toOption.exists(_.contains("Enum aliases are not supported")))
+  }
+
+  test("validator rejects bytes defaults before JNI construction") {
+    val info = ProtobufFieldInfo(
+      fieldNumber = 1,
+      protoTypeName = "BYTES",
+      sparkType = BinaryType,
+      encoding = GpuFromProtobuf.ENC_DEFAULT,
+      isSupported = true,
+      unsupportedReason = None,
+      isRequired = false,
+      defaultValue = Some(ProtobufDefaultValue.BinaryValue(Array[Byte](1, 2))),
+      enumMetadata = None)
+
+    val flat = ProtobufSchemaValidator.toFlattenedFieldDescriptor(
+      path = "payload",
+      field = StructField("payload", BinaryType, nullable = true),
+      fieldInfo = info,
+      parentIdx = -1,
+      depth = 0,
+      outputTypeId = DType.LIST.getTypeId.getNativeId,
+      isOutput = true)
+
+    assert(flat.left.toOption.exists(_.contains("bytes defaults are not supported")))
   }
 
   test("validator returns Left for incompatible default type instead of throwing") {

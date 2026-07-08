@@ -58,6 +58,14 @@ class GpuProjectExecMeta(
   override protected lazy val outputTypeMetas: Option[Seq[DataTypeMeta]] =
     Some(childExprs.map(_.typeMeta))
 
+  override def outputAttributes: Seq[Attribute] = {
+    if (canThisBeReplaced) {
+      super.outputAttributes
+    } else {
+      wrapped.output
+    }
+  }
+
   override def convertToGpu(): GpuExec = {
     // Force list to avoid recursive Java serialization of lazy list Seq implementation
     val gpuExprs = childExprs.map(_.convertToGpu().asInstanceOf[NamedExpression]).toList

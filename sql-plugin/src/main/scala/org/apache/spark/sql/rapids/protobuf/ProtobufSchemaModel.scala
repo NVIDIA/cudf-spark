@@ -65,12 +65,18 @@ object ProtobufDefaultValue {
 final case class ProtobufEnumValue(number: Int, name: String)
 
 final case class ProtobufEnumMetadata(values: Seq[ProtobufEnumValue]) {
-  lazy val validValues: Array[Int] = values.map(_.number).toArray
-  lazy val orderedNames: Array[Array[Byte]] = values.map(_.name.getBytes("UTF-8")).toArray
-  lazy val namesByNumber: Map[Int, String] = values.map(v => v.number -> v.name).toMap
+  private lazy val valuesByNumber = values.sortBy(_.number)
+
+  lazy val hasAliases: Boolean = valuesByNumber
+    .sliding(2)
+    .exists(pair => pair.length == 2 && pair.head.number == pair.last.number)
+  lazy val validValues: Array[Int] = valuesByNumber.map(_.number).toArray
+  lazy val orderedNames: Array[Array[Byte]] =
+    valuesByNumber.map(_.name.getBytes("UTF-8")).toArray
+  lazy val namesByNumber: Map[Int, String] = valuesByNumber.map(v => v.number -> v.name).toMap
 
   def enumDefault(number: Int): ProtobufDefaultValue.EnumValue = {
-    val name = namesByNumber.getOrElse(number, s"$number")
+    val name = namesByNumber.getOrElse(number, number.toString)
     ProtobufDefaultValue.EnumValue(number, name)
   }
 }
@@ -90,6 +96,7 @@ trait ProtobufFieldDescriptor {
   def defaultValueResult: Either[String, Option[ProtobufDefaultValue]]
   def enumMetadata: Option[ProtobufEnumMetadata]
   def messageDescriptor: Option[ProtobufMessageDescriptor]
+  def referencedTypeSyntax: Option[String]
 }
 
 final case class ProtobufFieldInfo(
