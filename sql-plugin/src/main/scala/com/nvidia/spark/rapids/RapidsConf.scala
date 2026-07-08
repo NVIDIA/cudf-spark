@@ -1864,17 +1864,6 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       .booleanConf
       .createWithDefault(false)
 
-  val ICEBERG_STAGED_READ_MAX_CONCURRENT_SUBTASKS =
-    conf("spark.rapids.sql.format.iceberg.stagedRead.maxConcurrentSubtasks")
-      .doc("Maximum number of staged Iceberg data-read subtasks admitted concurrently on one " +
-        "executor. All source files and Parquet column chunks inside an admitted subtask may " +
-        "still read concurrently. Footer filtering is not subject to this limit.")
-      .startupOnly()
-      .internal()
-      .integerConf
-      .checkValue(_ > 0, "Maximum concurrent staged-read subtasks must be greater than 0")
-      .createWithDefault(1)
-
   val ICEBERG_S3_ASYNC_MAX_CONCURRENCY =
     conf("spark.rapids.iceberg.s3.async.max-concurrency")
       .doc("Max concurrent connections for the AwsCrtAsyncHttpClient used by the " +
@@ -3829,9 +3818,6 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val isIcebergWriteEnabled: Boolean = get(ENABLE_ICEBERG_WRITE)
 
   lazy val isIcebergStagedReadEnabled: Boolean = get(ICEBERG_STAGED_READ_ENABLED)
-
-  lazy val icebergStagedReadMaxConcurrentSubtasks: Int =
-    get(ICEBERG_STAGED_READ_MAX_CONCURRENT_SUBTASKS)
 
   lazy val isHiveDelimitedTextEnabled: Boolean = get(ENABLE_HIVE_TEXT)
 

@@ -68,8 +68,8 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
  * Iceberg callbacks and GPU decode for the staged Parquet partition reader.
  *
  * The Java reader owns scheduling, I/O, and output lifetime. This small callback boundary remains
- * because footer filtering and GPU decode use existing Scala APIs. Admission operates on whole
- * subtasks across the executor; all source files within an admitted subtask still read
+ * because footer filtering and GPU decode use existing Scala APIs. Each Spark task submits its
+ * planned data reads in order; the asynchronous I/O engine may execute submitted reads
  * concurrently.
  */
 class GpuStagedIcebergParquetReader(
@@ -77,8 +77,7 @@ class GpuStagedIcebergParquetReader(
     val files: Seq[IcebergPartitionedFile],
     val constantsProvider: IcebergPartitionedFile => JMap[Integer, _],
     override val conf: GpuIcebergParquetReaderConf,
-    workerThreads: Int,
-    maxConcurrentSubtasks: Int) extends GpuIcebergParquetReader {
+    workerThreads: Int) extends GpuIcebergParquetReader {
 
   private val multiThreadConf = conf.threadConf.asInstanceOf[MultiThread]
   private val expectedSparkSchema = SparkSchemaUtil.convert(conf.expectedSchema)
@@ -119,7 +118,6 @@ class GpuStagedIcebergParquetReader(
       conf.maxBatchSizeBytes,
       targetParquetBytes,
       workerThreads,
-      maxConcurrentSubtasks,
       TaskContext.get())
   }
 

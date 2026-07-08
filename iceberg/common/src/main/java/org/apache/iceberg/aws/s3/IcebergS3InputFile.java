@@ -35,6 +35,7 @@ import java.io.IOException;
 import java.net.URI;
 import java.util.List;
 import java.util.OptionalLong;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * S3-backed {@link RapidsInputFile} that delegates byte-range reads to
@@ -121,6 +122,17 @@ public final class IcebergS3InputFile implements RapidsInputFile {
   public void readVectored(HostMemoryBuffer output, List<CopyRange> copyRanges)
       throws IOException {
     IcebergS3RangeCopier.copyToHMB(icebergS3Client, output, s3Uri, copyRanges);
+  }
+
+  /**
+   * Submit every range in list order and return the PerfIO completion barrier without blocking.
+   */
+  @Override
+  public CompletableFuture<Void> readVectoredAsync(
+      HostMemoryBuffer output,
+      List<CopyRange> copyRanges) {
+    return IcebergS3RangeCopier.copyToHMBAsync(
+        icebergS3Client, output, s3Uri, copyRanges);
   }
 
   /**

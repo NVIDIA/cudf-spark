@@ -28,9 +28,9 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.concurrent.locks.StampedLock;
 
 import ai.rapids.cudf.HostMemoryBuffer;
 import com.nvidia.spark.rapids.HostAlloc$;
@@ -42,9 +42,10 @@ import scala.Option;
  * Exact-sized writable storage for one synthetic Parquet file.
  *
  * <p>The output has a strict lifecycle: {@code WRITABLE -> SEALED -> CLOSED}. Source workers may
- * concurrently copy disjoint ranges while it is writable. The last source worker writes the
- * synthetic header and footer and seals the output. The Spark task thread then obtains an
- * independent host-buffer reference with {@link #materialize()} before closing this output.</p>
+ * concurrently copy disjoint ranges while it is writable. After all source futures finish, a
+ * staged worker writes the synthetic header and footer and seals the output. The Spark task thread
+ * then obtains an independent host-buffer reference with {@link #materialize()} before closing
+ * this output.</p>
  *
  * <p>This class also owns storage selection. It uses host memory when one non-blocking allocation
  * cycle succeeds and otherwise creates a memory-mapped file in an executor-local directory. The
@@ -57,7 +58,11 @@ abstract class StagedParquetOutput implements AutoCloseable {
 
   private final long exactSizeBytes;
   private final boolean diskBacked;
-  private final ReentrantReadWriteLock operationLock = new ReentrantReadWriteLock();
+  // A read stamp is held for the lifetime of every asynchronous source write. Unlike a
+  // ReentrantReadWriteLock, StampedLock does not require the thread that acquired a stamp to
+  // release it. That matters because a vectored-read future normally completes on an S3 client
+  // thread rather than on the staged worker that submitted it.
+  private final StampedLock operationLock = new StampedLock();
   private boolean sealed;
   private boolean closed;
 
@@ -105,19 +110,18 @@ abstract class StagedParquetOutput implements AutoCloseable {
    * Copy all cache-miss column chunks for one source with one vectored read.
    *
    * <p>Every planned range remains a distinct {@link RapidsInputFile.CopyRange}, preserving
-   * PerfIO's per-column-chunk concurrency. Different source workers may call this concurrently
-   * because their output ranges are disjoint.</p>
+   * PerfIO's per-column-chunk concurrency. Different source futures may write concurrently because
+   * their output ranges are disjoint.</p>
    */
-  final void copyRanges(
+  final CompletableFuture<Void> copyRangesAsync(
       RapidsInputFile input,
-      List<PlannedReadRange> ranges) throws IOException {
+      List<PlannedReadRange> ranges) {
     Objects.requireNonNull(input, "input");
     Objects.requireNonNull(ranges, "ranges");
     if (ranges.isEmpty()) {
-      return;
+      return CompletableFuture.completedFuture(null);
     }
 
-    beginConcurrentWrite();
     try {
       List<RapidsInputFile.CopyRange> copies = new ArrayList<>(ranges.size());
       for (PlannedReadRange range : ranges) {
@@ -126,10 +130,45 @@ abstract class StagedParquetOutput implements AutoCloseable {
         copies.add(new RapidsInputFile.CopyRange(
             range.getInputOffset(), range.getLength(), range.getOutputOffset()));
       }
-      input.readVectored(writableBuffer(), copies);
-    } finally {
-      endConcurrentWrite();
+      long writeStamp = beginConcurrentWrite();
+      CompletableFuture<Void> readFuture;
+      try {
+        readFuture = Objects.requireNonNull(
+            input.readVectoredAsync(writableBuffer(), copies),
+            "readVectoredAsync returned null");
+      } catch (Throwable submissionError) {
+        endConcurrentWrite(writeStamp);
+        return failedFuture(submissionError);
+      }
+
+      CompletableFuture<Void> completion = new CompletableFuture<>();
+      readFuture.whenComplete((ignored, readError) -> {
+        Throwable failure = readError;
+        try {
+          endConcurrentWrite(writeStamp);
+        } catch (Throwable closeError) {
+          if (failure == null) {
+            failure = closeError;
+          } else if (failure != closeError) {
+            failure.addSuppressed(closeError);
+          }
+        }
+        if (failure == null) {
+          completion.complete(null);
+        } else {
+          completion.completeExceptionally(failure);
+        }
+      });
+      return completion;
+    } catch (Throwable validationError) {
+      return failedFuture(validationError);
     }
+  }
+
+  private static <T> CompletableFuture<T> failedFuture(Throwable error) {
+    CompletableFuture<T> future = new CompletableFuture<>();
+    future.completeExceptionally(error);
+    return future;
   }
 
   /** Copy one cached column chunk from its positioned channel into the synthetic output. */
@@ -138,7 +177,7 @@ abstract class StagedParquetOutput implements AutoCloseable {
       long outputOffset,
       long length) throws IOException {
     Objects.requireNonNull(source, "source");
-    beginConcurrentWrite();
+    long writeStamp = beginConcurrentWrite();
     try {
       checkWriteBounds(outputOffset, length);
       long copied = 0L;
@@ -159,7 +198,7 @@ abstract class StagedParquetOutput implements AutoCloseable {
         copied += amount;
       }
     } finally {
-      endConcurrentWrite();
+      endConcurrentWrite(writeStamp);
     }
   }
 
@@ -170,12 +209,12 @@ abstract class StagedParquetOutput implements AutoCloseable {
    * must close it or transfer ownership, even after this output is sealed or closed.</p>
    */
   final HostMemoryBuffer sliceForCache(long outputOffset, long length) {
-    beginConcurrentWrite();
+    long writeStamp = beginConcurrentWrite();
     try {
       checkWriteBounds(outputOffset, length);
       return writableBuffer().slice(outputOffset, length);
     } finally {
-      endConcurrentWrite();
+      endConcurrentWrite(writeStamp);
     }
   }
 
@@ -191,12 +230,12 @@ abstract class StagedParquetOutput implements AutoCloseable {
           "source range [" + sourceOffset + ", " + (sourceOffset + length) +
               ") exceeds array length " + source.length);
     }
-    beginExclusiveWrite();
+    long writeStamp = beginExclusiveWrite();
     try {
       checkWriteBounds(outputOffset, length);
       writableBuffer().setBytes(outputOffset, source, sourceOffset, length);
     } finally {
-      endExclusiveWrite();
+      endExclusiveWrite(writeStamp);
     }
   }
 
@@ -207,12 +246,12 @@ abstract class StagedParquetOutput implements AutoCloseable {
 
   /** Seal the exact-sized output after every source writer is terminal. */
   final void seal() throws IOException {
-    beginExclusiveWrite();
+    long writeStamp = beginExclusiveWrite();
     try {
       sealStorage();
       sealed = true;
     } finally {
-      endExclusiveWrite();
+      endExclusiveWrite(writeStamp);
     }
   }
 
@@ -221,21 +260,19 @@ abstract class StagedParquetOutput implements AutoCloseable {
    * The reference remains valid independently of this output's subsequent close.
    */
   final HostMemoryBuffer materialize() throws IOException {
-    Lock lock = operationLock.readLock();
-    lock.lock();
+    long stamp = operationLock.readLock();
     try {
       ensureSealed();
       return materializeStorage();
     } finally {
-      lock.unlock();
+      operationLock.unlockRead(stamp);
     }
   }
 
   /** Release the host allocation or local file. Closing is idempotent. */
   @Override
   public final void close() {
-    Lock lock = operationLock.writeLock();
-    lock.lock();
+    long stamp = operationLock.writeLock();
     try {
       if (closed) {
         return;
@@ -243,7 +280,7 @@ abstract class StagedParquetOutput implements AutoCloseable {
       closed = true;
       closeStorage();
     } finally {
-      lock.unlock();
+      operationLock.unlockWrite(stamp);
     }
   }
 
@@ -282,41 +319,41 @@ abstract class StagedParquetOutput implements AutoCloseable {
   }
 
   /** Enter a data-copy operation; disjoint ranges may be written concurrently. */
-  private void beginConcurrentWrite() {
-    Lock lock = operationLock.readLock();
-    lock.lock();
+  private long beginConcurrentWrite() {
+    long stamp = operationLock.readLock();
     boolean succeeded = false;
     try {
       ensureWritable();
       succeeded = true;
+      return stamp;
     } finally {
       if (!succeeded) {
-        lock.unlock();
+        operationLock.unlockRead(stamp);
       }
     }
   }
 
-  private void endConcurrentWrite() {
-    operationLock.readLock().unlock();
+  private void endConcurrentWrite(long stamp) {
+    operationLock.unlockRead(stamp);
   }
 
   /** Enter a header/footer write or seal operation after all concurrent data writes finish. */
-  private void beginExclusiveWrite() {
-    Lock lock = operationLock.writeLock();
-    lock.lock();
+  private long beginExclusiveWrite() {
+    long stamp = operationLock.writeLock();
     boolean succeeded = false;
     try {
       ensureWritable();
       succeeded = true;
+      return stamp;
     } finally {
       if (!succeeded) {
-        lock.unlock();
+        operationLock.unlockWrite(stamp);
       }
     }
   }
 
-  private void endExclusiveWrite() {
-    operationLock.writeLock().unlock();
+  private void endExclusiveWrite(long stamp) {
+    operationLock.unlockWrite(stamp);
   }
 
   private void ensureOpen() {
