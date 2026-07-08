@@ -193,13 +193,17 @@ function write_root_safe_spark_shared_classes() {
     analyzer_script="$(dirname "$UNSHIMMED_COMMON_FROM_SINGLE_SHIM_TXT")/scripts/analyze-parallel-world-deps.py"
   fi
   [[ -n "$analyzer_script" && -f "$analyzer_script" ]] || {
-    echo >&2 "Cannot locate analyze-parallel-world-deps.py for default unshim analysis"
-    exit 255
+    echo >&2 "WARNING: cannot locate analyze-parallel-world-deps.py; skipping diagnostic default unshim analysis"
+    : > "$ROOT_SAFE_SPARK_SHARED_TXT"
+    return 0
   }
 
   echo "$((++STEP))/ analyzing spark-shared dependency paths > $ROOT_SAFE_SPARK_SHARED_TXT"
-  python3 "$analyzer_script" ./parallel-world \
-    --write-safe-paths "$ROOT_SAFE_SPARK_SHARED_TXT"
+  if ! python3 "$analyzer_script" ./parallel-world \
+      --write-safe-paths "$ROOT_SAFE_SPARK_SHARED_TXT"; then
+    echo >&2 "WARNING: spark-shared dependency analysis failed; continuing because it is diagnostic"
+    : > "$ROOT_SAFE_SPARK_SHARED_TXT"
+  fi
 }
 
 function write_default_unshimmed_spark_shared_classes() {

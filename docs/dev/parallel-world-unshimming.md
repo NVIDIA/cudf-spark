@@ -122,7 +122,7 @@ order.
 
 Classes often form dependency cycles. If one class in a cycle moves to the root
 layout, the rest of that cycle usually has to move or be refactored with it.
-Strongly connected components make that explicit.
+Strongly connected components (SCCs) make that explicit.
 
 ```mermaid
 flowchart LR

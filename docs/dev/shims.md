@@ -24,6 +24,7 @@ In the following we provide recipes for typical scenarios addressed by the Shim 
 
 ## One-way Shim Module Boundary
 
+This section describes the shim-facing module boundary rather than the full project module layout.
 Shim source can be split between three layers when the implementation does not have to live
 in the same module as the Spark-version-specific API reference.
 
@@ -59,11 +60,14 @@ that calls another `spark-shared` class that eventually calls a `sparkXYZ` class
 
 `dist/unshimmed-common-from-single-shim.txt` names classes and resources that are allowed to be
 stored in the conventional layout after the dist jar is assembled. During `binary-dedupe.sh`, files
-from that allowlist may be promoted out of `spark-shared` into the root layout before the bitwise
-identity check runs. This is important for profiles where the highest Spark build contributes only a
-stub module, while a lower Spark build contributes the real implementation. For example, root-safe
-Iceberg helpers can still be placed in the conventional layout even when the Spark 4.1 shim uses the
-Iceberg stub.
+from that allowlist may be promoted out of `spark-shared` into the root layout before the final
+identity sanity check runs. The script then verifies that root-layout class files that require shared
+identity are present in the bitwise-identical `spark-shared` set, unless covered by a narrow
+compatibility exception in `unshimmed_class_needs_shared_identity`. This proves byte-for-byte
+identity; it does not replace analyzer-based dependency-path review for root-safety. This is
+important for profiles where the highest Spark build contributes only a stub module, while a lower
+Spark build contributes the real implementation. For example, root-safe Iceberg helpers can still be
+placed in the conventional layout even when the Spark 4.1 shim uses the Iceberg stub.
 
 Use a small bootstrap allowlist for classes that are allowed to refer to packages generated with
 `$_spark.version.classifier_`, such as `com.nvidia.spark.rapids.spark330.RapidsShuffleManager`.
