@@ -25,9 +25,10 @@ from asserts import (
 )
 from data_gen import (
     BooleanGen, IntegerGen, LongGen, FloatGen, DoubleGen, StringGen, BinaryGen,
-    pb, encode_pb_message, gen_df, idfn, _encode_protobuf_packed_repeated
+    SetValuesGen, gen_df, idfn
 )
 from marks import allow_non_gpu, ignore_order, validate_execs_in_gpu_plan
+from protobuf_data_gen import pb, encode_pb_message
 from spark_session import with_cpu_session, is_before_spark_340
 import pyspark.sql.functions as f
 from pyspark.sql.window import Window
@@ -191,13 +192,17 @@ def test_call_from_protobuf_preserves_options_for_legacy_signature():
 
 
 def test_encode_protobuf_packed_repeated_fixed_uses_unsigned_twos_complement():
-    i32_encoded = _encode_protobuf_packed_repeated(
-        1, IntegerType(), [0xFFFFFFFF], encoding='fixed')
-    i64_encoded = _encode_protobuf_packed_repeated(
-        1, LongType(), [0xFFFFFFFFFFFFFFFF], encoding='fixed')
+    i32_schema = pb.message("PackedFixed32", [
+        pb.repeated(pb.fixed32("values", 1), packed=True),
+    ])
+    i64_schema = pb.message("PackedFixed64", [
+        pb.repeated(pb.fixed64("values", 1), packed=True),
+    ])
 
-    assert i32_encoded == b"\x0a\x04" + struct.pack("<I", 0xFFFFFFFF)
-    assert i64_encoded == b"\x0a\x08" + struct.pack("<Q", 0xFFFFFFFFFFFFFFFF)
+    assert i32_schema.encode({"values": [0xFFFFFFFF]}) == \
+        b"\x0a\x04" + struct.pack("<I", 0xFFFFFFFF)
+    assert i64_schema.encode({"values": [0xFFFFFFFFFFFFFFFF]}) == \
+        b"\x0a\x08" + struct.pack("<Q", 0xFFFFFFFFFFFFFFFF)
 
 
 def _build_simple_descriptor_set_bytes(spark):
@@ -524,198 +529,6 @@ def _load_nested_proto_desc_resource():
         return fp.read()
 
 
-def _build_main_log_record_fields():
-    """Build PbField tree matching MainLogRecord schema from nested proto files."""
-    u32 = lambda: IntegerGen(min_val=0, max_val=100000)
-    u64 = lambda: LongGen(min_val=0, max_val=(1 << 50))
-
-    type_a_query_schema = [
-        _scalar("keyword", 1, StringGen()),
-        _scalar("session_id", 2, StringGen()),
-    ]
-    type_a_pair_schema = [
-        _scalar("record_id", 1, StringGen()),
-        _scalar("item_id", 2, StringGen()),
-    ]
-    schema_type_a = [
-        _nested("query_schema", 1, type_a_query_schema),
-        _repeated_message("pair_schema", 2, type_a_pair_schema, min_len=0, max_len=3),
-    ]
-
-    type_b_query_schema = [
-        _scalar("profile_tag_id", 1, StringGen()),
-        _scalar("entity_id", 2, StringGen()),
-    ]
-    type_b_style_elem = [
-        _scalar("template_id", 1, StringGen()),
-        _scalar("material_id", 2, StringGen()),
-    ]
-    type_b_style_schema = [
-        _repeated_message("values", 1, type_b_style_elem, min_len=0, max_len=3),
-    ]
-    schema_type_b = [
-        _nested("query_schema", 1, type_b_query_schema),
-        _repeated_message("style_schema", 2, type_b_style_schema, min_len=0, max_len=3),
-    ]
-
-    type_c_query_schema = [
-        _scalar("keyword", 1, StringGen()),
-        _scalar("category", 2, StringGen()),
-    ]
-    type_c_pair_schema = [
-        _scalar("item_id", 1, StringGen()),
-        _scalar("target_url", 2, StringGen()),
-    ]
-    type_c_style_schema = [
-        _repeated_message("values", 1, [], min_len=0, max_len=3),
-    ]
-    schema_type_c = [
-        _nested("query_schema", 1, type_c_query_schema),
-        _repeated_message("pair_schema", 2, type_c_pair_schema, min_len=0, max_len=3),
-        _repeated_message("style_schema", 3, type_c_style_schema, min_len=0, max_len=3),
-    ]
-    predictor_schema = [
-        _nested("type_a_schema", 1, schema_type_a),
-        _nested("type_b_schema", 2, schema_type_b),
-        _nested("type_c_schema", 3, schema_type_c),
-    ]
-
-    device_req_field = [
-        _scalar("os_type", 1, IntegerGen()),
-        _scalar("device_id", 2, BinaryGen(min_length=0, max_length=16)),
-    ]
-    partner_info = [
-        _scalar("token", 1, StringGen()),
-        _scalar("partner_id", 2, u64()),
-    ]
-    coordinate = [
-        _scalar("x", 1, DoubleGen()),
-        _scalar("y", 2, DoubleGen()),
-    ]
-    location_point = [
-        _scalar("frequency", 1, u32()),
-        _nested("coord", 2, coordinate),
-        _scalar("timestamp", 3, u64()),
-    ]
-    change_log = [
-        _scalar("value_before", 1, u32()),
-        _scalar("parameters", 2, StringGen()),
-    ]
-    kv_pair = [
-        _scalar("key", 1, BinaryGen(min_length=0, max_length=16)),
-        _scalar("value", 2, BinaryGen(min_length=0, max_length=16)),
-    ]
-    style_config = [
-        _scalar("style_id", 1, u32()),
-        _repeated_message("kv_pairs", 2, kv_pair, min_len=0, max_len=3),
-    ]
-    module_a_res = [
-        _scalar("route_tag", 1, StringGen()),
-        _scalar("status_tag", 2, IntegerGen()),
-        _scalar("region_id", 3, u32()),
-        _repeated("experiment_ids", 4, StringGen(), packed=False, min_len=0, max_len=3),
-        _scalar("quality_score", 5, DoubleGen()),
-        _repeated_message("location_points", 6, location_point, min_len=0, max_len=3),
-        _repeated("interest_ids", 7, u64(), packed=False, min_len=0, max_len=3),
-    ]
-    module_a_src_res = [
-        _scalar("match_type", 1, u32()),
-    ]
-    module_a_detail = [
-        _scalar("type_code", 1, u32()),
-        _scalar("item_id", 2, u64()),
-        _scalar("strategy_type", 3, IntegerGen()),
-        _scalar("min_value", 4, LongGen()),
-        _scalar("target_url", 5, BinaryGen(min_length=0, max_length=24)),
-        _scalar("title", 6, StringGen()),
-        _scalar("is_valid", 7, BooleanGen()),
-        _scalar("score_ratio", 8, FloatGen()),
-        _repeated("template_ids", 9, u32(), packed=False, min_len=0, max_len=3),
-        _repeated("material_ids", 10, u64(), packed=False, min_len=0, max_len=3),
-        _repeated_message("styles", 11, style_config, min_len=0, max_len=3),
-        _repeated_message("change_logs", 12, change_log, min_len=0, max_len=3),
-        _nested("partner_info", 13, partner_info),
-        _nested("predictor_schema", 14, predictor_schema),
-    ]
-
-    block_element = [
-        _scalar("element_id", 1, u64()),
-        _repeated("ref_ids", 2, u64(), packed=False, min_len=0, max_len=3),
-    ]
-    block_info = [
-        _scalar("block_id", 1, u64()),
-        _repeated_message("elements", 2, block_element, min_len=0, max_len=3),
-    ]
-    module_b_detail = [
-        _repeated("tags", 1, u32(), packed=False, min_len=0, max_len=3),
-        _scalar("item_id", 2, u64()),
-        _scalar("name", 3, StringGen()),
-        _repeated_message("blocks", 4, block_info, min_len=0, max_len=3),
-    ]
-
-    request_info = [
-        _scalar("page_num", 1, u32()),
-        _scalar("channel_code", 2, StringGen()),
-        _repeated("experiment_ids", 3, u32(), packed=False, min_len=0, max_len=3),
-        _scalar("is_filtered", 4, BooleanGen()),
-    ]
-    extended_req_info = [
-        _nested("device_req_field", 1, device_req_field),
-    ]
-    server_added_field = [
-        _scalar("region_code", 1, u32()),
-        _scalar("flow_type", 2, StringGen()),
-        _scalar("filter_result", 3, IntegerGen()),
-        _repeated("hit_rule_list", 4, IntegerGen(), packed=False, min_len=0, max_len=3),
-        _scalar("request_time", 5, u64()),
-        _scalar("skip_flag", 6, BooleanGen()),
-    ]
-    basic_info = [
-        _nested("request_info", 1, request_info),
-        _nested("extended_req_info", 2, extended_req_info),
-        _nested("server_added_field", 3, server_added_field),
-    ]
-
-    channel_info = [
-        _scalar("channel_id", 1, IntegerGen()),
-        _nested("module_a_res", 2, module_a_res),
-    ]
-    src_channel_info = [
-        _scalar("channel_id", 1, IntegerGen()),
-        _nested("module_a_src_res", 2, module_a_src_res),
-    ]
-    item_detail_field = [
-        _scalar("rank", 1, u32()),
-        _scalar("record_id", 2, u64()),
-        _scalar("keyword", 3, StringGen()),
-        _nested("module_a_detail", 4, module_a_detail),
-        _nested("module_b_detail", 5, module_b_detail),
-    ]
-    data_source_field = [
-        _scalar("source_id", 1, u32()),
-        _repeated_message("src_channel_list", 2, src_channel_info, min_len=0, max_len=3),
-        _scalar("billing_name", 3, StringGen()),
-        _repeated_message("item_list", 4, item_detail_field, min_len=0, max_len=3),
-        _scalar("is_free", 5, BooleanGen()),
-    ]
-    log_content = [
-        _nested("basic_info", 1, basic_info),
-        _repeated_message("channel_list", 2, channel_info, min_len=0, max_len=3),
-        _repeated_message("source_list", 3, data_source_field, min_len=0, max_len=3),
-    ]
-
-    return [
-        _scalar(
-            "source", 1,
-            IntegerGen(min_val=0, max_val=1, nullable=False, special_cases=[4])),
-        _scalar("timestamp", 2, LongGen(min_val=0, max_val=(1 << 50), nullable=False)),
-        _scalar("user_id", 3, StringGen()),
-        _scalar("account_id", 4, LongGen()),
-        _scalar("client_ip", 5, IntegerGen(min_val=0, max_val=0x7FFFFFFF), encoding='fixed'),
-        _nested("log_content", 6, log_content),
-    ]
-
-
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @pytest.mark.parametrize("options", [None, {"enums.as.ints": "true"}])
 @ignore_order(local=True)
@@ -730,9 +543,13 @@ def test_from_protobuf_customer_heavy_nested_proto(local_tmp_path, from_protobuf
         fp.write(desc_bytes)
 
     message_name = "com.test.proto.sample.MainLogRecord"
-    data_gen = _as_datagen(_build_main_log_record_fields())
+    generation = pb.generation(
+        default_repeated_length=(0, 3),
+        enums_as_ints=options is not None and options.get("enums.as.ints") == "true")
 
     def run_on_spark(spark):
+        data_gen = pb.from_descriptor(
+            spark, desc_bytes, message_name, generation=generation).as_datagen()
         generated = gen_df(spark, data_gen).select("bin")
         decoded = _call_from_protobuf(
             from_protobuf_fn, f.col("bin"), message_name, desc_path, desc_bytes,
@@ -741,6 +558,59 @@ def test_from_protobuf_customer_heavy_nested_proto(local_tmp_path, from_protobuf
         return generated.select(decoded.alias("decoded"))
 
     assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+
+
+def _build_descriptor_datagen_contract_bytes(spark):
+    return _build_proto2_descriptor(
+        spark,
+        "descriptor_datagen_contract.proto",
+        [
+            _msg("DescriptorDataGenContract", [
+                _field(
+                    "status", 1, "ENUM", label="required",
+                    type_name=".test.Status"),
+                _field("u32", 2, "UINT32", default=4294967295),
+                _field("label", 3, "STRING", default="fallback"),
+                _field("values", 4, "INT32", label="repeated", packed=True),
+            ]),
+        ],
+        file_enums=[
+            _enum("Status", [("UNKNOWN", 0), ("READY", 2)]),
+        ])
+
+
+@pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
+def test_descriptor_datagen_matches_cpu_values_and_schema(
+        local_tmp_path, from_protobuf_fn):
+    desc_path, desc_bytes = _setup_protobuf_desc(
+        local_tmp_path,
+        "descriptor_datagen_contract.desc",
+        _build_descriptor_datagen_contract_bytes)
+    message_name = "test.DescriptorDataGenContract"
+    generation = pb.generation(
+        value_gens={
+            "status": SetValuesGen(StringType(), ["READY"]),
+            "u32": SetValuesGen(IntegerType(), [None]),
+            "label": SetValuesGen(StringType(), [None]),
+            "values": SetValuesGen(IntegerType(), [7]),
+        },
+        repeated_lengths={"values": 2})
+
+    def check_cpu_contract(spark):
+        row_gen = pb.from_descriptor(
+            spark, desc_bytes, message_name, generation=generation).as_datagen()
+        generated = gen_df(spark, row_gen, length=1, seed=0)
+        decoded = _call_from_protobuf(
+            from_protobuf_fn, f.col("bin"), message_name, desc_path, desc_bytes)
+        selected = generated.select(
+            f.struct("status", "u32", "label", "values").alias("expected"),
+            decoded.alias("actual"))
+        row = selected.collect()[0]
+
+        assert row["expected"] == row["actual"]
+        assert selected.schema["expected"].dataType == selected.schema["actual"].dataType
+
+    with_cpu_session(check_cpu_contract)
 
 
 def _build_nested_descriptor_set_bytes(spark):
