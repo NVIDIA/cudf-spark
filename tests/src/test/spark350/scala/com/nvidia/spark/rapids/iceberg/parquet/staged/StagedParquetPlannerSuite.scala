@@ -953,22 +953,36 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  test("one subtask reads source files concurrently and preserves column chunks") {
+  test("one subtask reads equal file occurrences independently and concurrently") {
     val sourceCount = 2
     val tracker = new SourceReadTracker(sourceCount)
     val sourceBytes = Array.tabulate[Byte](1024)(index => (index & 0xff).toByte)
-    val footers = (0 until sourceCount).map { ordinal =>
-      val input = new BlockingVectoredInput(ordinal, sourceBytes, tracker)
-      val baseOffset = 100L + ordinal * 300L
-      footerWithInput(
-        ordinal,
-        twoColumnParquetSchema,
-        twoColumnReadSchema,
-        Seq(block(twoColumnParquetSchema, rows = 1L,
-          ColumnSpec("id", baseOffset + 4L, baseOffset, 4L, 4L),
-          ColumnSpec("value", baseOffset + 100L, 0L, 5L, 5L))),
-        input)
-    }
+    val first = footerWithInput(
+      0,
+      twoColumnParquetSchema,
+      twoColumnReadSchema,
+      Seq(block(twoColumnParquetSchema, rows = 1L,
+        ColumnSpec("id", 104L, 100L, 4L, 4L),
+        ColumnSpec("value", 200L, 0L, 5L, 5L))),
+      new BlockingVectoredInput(0, sourceBytes, tracker))
+    // These are distinct scan occurrences but compare equal as case-class values. They must keep
+    // separate footer/post-processing identity and therefore become two independent source jobs.
+    val secondFile = IcebergPartitionedFile(first.getFile.file)
+    sourceInputs.put(secondFile, new BlockingVectoredInput(1, sourceBytes, tracker))
+    val second = new FooterResult(
+      secondFile,
+      Seq(block(twoColumnParquetSchema, rows = 1L,
+        ColumnSpec("id", 404L, 400L, 4L, 4L),
+        ColumnSpec("value", 500L, 0L, 5L, 5L))).asJava,
+      first.getClippedSchema,
+      first.getReadSchema,
+      first.getDateRebaseMode,
+      first.getTimestampRebaseMode,
+      first.hasInt96Timestamps(),
+      first.getPostProcessor)
+    assert(first.getFile == second.getFile)
+    assert(!(first.getFile eq second.getFile))
+    val footers = Seq(first, second)
     val scanFiles = footers.map(_.getFile)
     val combinedBytesVerified = new AtomicBoolean()
     val adapter = new TestAdapter {

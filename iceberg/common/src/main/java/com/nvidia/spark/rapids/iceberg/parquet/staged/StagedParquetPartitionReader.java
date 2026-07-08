@@ -22,7 +22,6 @@ import java.util.ArrayList;
 import java.util.Deque;
 import java.util.IdentityHashMap;
 import java.util.Iterator;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
@@ -385,83 +384,77 @@ public final class StagedParquetPartitionReader
     }
   }
 
-  private void submit(SubtaskExecution execution) throws Exception {
-    // Allocate exactly once on a pool worker before source jobs are submitted. This keeps host
-    // allocation off the Spark task thread without occupying sibling workers on an initialization
-    // monitor. Once allocation succeeds, every source in this admitted subtask is submitted.
-    CompletableFuture<StagedParquetOutput> outputFuture = new CompletableFuture<>();
-    CompletableFuture<Completion> completionFuture = outputFuture.thenCompose(output ->
-        // The non-async continuation runs on the last source worker (or the allocation worker for
-        // an empty projection), never on the Spark task thread.
-        startSourceReads(execution, output).thenApply(stats ->
-            runUncheckedAsTaskPoolThread(() -> combine(execution, output, stats))));
-    completionFuture.whenComplete((completion, error) -> {
-      try {
-        if (error != null) {
-          Throwable failure = unwrap(error);
-          // The I/O worker may have installed an output before the combine callable could start.
-          // Examples include executor rejection and task-context/RMM registration failures. This
-          // callback runs only after the whole dependent stage is terminal, so it is the first
-          // cancellation-safe place outside a worker to reclaim that still-owned output.
-          try {
-            execution.closeOutputAfterStage();
-          } catch (Throwable closeError) {
-            if (closeError != failure) {
-              failure.addSuppressed(closeError);
-            }
-            if (closed.get()) {
-              recordAsynchronousCleanupFailure(closeError);
-            }
-          }
-          if (!closed.get()) {
-            completions.offer(Completion.failure(execution, failure));
-          }
-        } else if (closed.get()) {
-          if (completion != null) {
-            closeCompletionAfterAsync(completion);
-          }
-        } else {
-          completions.offer(completion);
-          // close() can race between the first closed check and queue publication. If it wins,
-          // remove and close the just-published result so close() cannot miss it while draining.
-          if (closed.get() && completions.remove(completion)) {
-            closeCompletionAfterAsync(completion);
-          }
-        }
-      } finally {
-        // Release only after all writers and finalization are terminal. The admission queue can
-        // now start every source in one later subtask without interleaving its requests here.
-        execution.completeAdmission();
-      }
-    });
-    startOutputAllocation(execution, outputFuture);
+  private void submit(SubtaskExecution execution) {
+    // startSubtask runs allocation and source submission on the same worker. Flattening the future
+    // it returns keeps this high-level chain readable without adding a same-pool queue hop between
+    // allocation and the same subtask's reads.
+    CompletableFuture
+        .supplyAsync(() -> startSubtask(execution), pools.executor())
+        .thenCompose(completionFuture -> completionFuture)
+        .whenComplete((completion, error) -> finishSubtask(execution, completion, error));
   }
 
-  /** Submit the one output-allocation job that precedes all source jobs in an admitted subtask. */
-  private void startOutputAllocation(
+  /** Allocate the output, submit every source, and attach combine while on a pool worker. */
+  private CompletableFuture<Completion> startSubtask(SubtaskExecution execution) {
+    // Only allocation is wrapped here. In particular, an empty projection may combine inline;
+    // combine installs its own task context/RMM registration after allocation has unregistered.
+    StagedParquetOutput output = runUncheckedAsTaskPoolThread(
+        () -> createOutput(execution));
+    return startSourceReads(execution, output).thenApply(stats ->
+        // This continuation always runs on a pool worker. Fast or empty reads may make that this
+        // allocation worker; otherwise it is the worker that completes the source barrier.
+        runUncheckedAsTaskPoolThread(() -> combine(execution, output, stats)));
+  }
+
+  /** Publish one terminal subtask result and release its executor-wide admission. */
+  private void finishSubtask(
       SubtaskExecution execution,
-      CompletableFuture<StagedParquetOutput> outputFuture) {
-    if (closed.get()) {
-      outputFuture.completeExceptionally(
-          new CancellationException("staged reader closed before output allocation"));
-      return;
-    }
+      Completion completion,
+      Throwable error) {
     try {
-      pools.executor().execute(() -> {
+      if (error != null) {
+        Throwable failure = unwrap(error);
+        // The I/O worker may have installed an output before the combine callable could start.
+        // Examples include executor rejection and task-context/RMM registration failures. This
+        // callback runs only after the whole dependent stage is terminal, so it is the first
+        // cancellation-safe place outside a worker to reclaim that still-owned output.
         try {
-          StagedParquetOutput output = runUncheckedAsTaskPoolThread(
-              () -> createOutput(execution));
-          outputFuture.complete(output);
-        } catch (Throwable error) {
-          outputFuture.completeExceptionally(error);
+          execution.closeOutputAfterStage();
+        } catch (Throwable closeError) {
+          if (closeError != failure) {
+            failure.addSuppressed(closeError);
+          }
+          if (closed.get()) {
+            recordAsynchronousCleanupFailure(closeError);
+          }
         }
-      });
-    } catch (Throwable submissionError) {
-      outputFuture.completeExceptionally(submissionError);
+        if (!closed.get()) {
+          completions.offer(Completion.failure(execution, failure));
+        }
+      } else if (closed.get()) {
+        if (completion != null) {
+          closeCompletionAfterAsync(completion);
+        }
+      } else {
+        completions.offer(completion);
+        // close() can race between the first closed check and queue publication. If it wins,
+        // remove and close the just-published result so close() cannot miss it while draining.
+        if (closed.get() && completions.remove(completion)) {
+          closeCompletionAfterAsync(completion);
+        }
+      }
+    } finally {
+      // Release only after all writers and finalization are terminal. The admission queue can
+      // now start every source in one later subtask without interleaving its requests here.
+      execution.completeAdmission();
     }
   }
 
-  /** Publish a failure that happened while an admitted subtask was being submitted. */
+  /*
+   * Initial supplyAsync rejection happens before a completion chain exists, so the admission
+   * starter catches it and calls this method. Failures after acceptance flow through
+   * finishSubtask instead.
+   */
   private void publishStartupFailure(SubtaskExecution execution, Throwable error) {
     Throwable failure = unwrap(error);
     try {
@@ -494,16 +487,26 @@ public final class StagedParquetPartitionReader
   private CompletableFuture<SourceReadStats> startSourceReads(
       SubtaskExecution execution,
       StagedParquetOutput output) {
-    Map<FooterResult, List<PlannedReadRange>> rangesBySource = new LinkedHashMap<>();
+    // FooterResult represents one scan occurrence. Two occurrences may compare equal at the
+    // Iceberg file level while carrying different filters or post-processing state, so grouping
+    // must use identity. Keep first-seen order separately because IdentityHashMap is unordered.
+    Map<FooterResult, List<PlannedReadRange>> rangesBySource = new IdentityHashMap<>();
+    List<FooterResult> sourceOrder = new ArrayList<>();
     for (PlannedReadRange range : execution.subtask.getRanges()) {
-      rangesBySource.computeIfAbsent(range.getFooter(), ignored -> new ArrayList<>())
-          .add(range);
+      FooterResult footer = range.getFooter();
+      List<PlannedReadRange> sourceRanges = rangesBySource.get(footer);
+      if (sourceRanges == null) {
+        sourceRanges = new ArrayList<>();
+        rangesBySource.put(footer, sourceRanges);
+        sourceOrder.add(footer);
+      }
+      sourceRanges.add(range);
     }
 
     List<Callable<SourceReadStats>> sourceJobs = new ArrayList<>();
-    for (Map.Entry<FooterResult, List<PlannedReadRange>> entry
-        : rangesBySource.entrySet()) {
-      sourceJobs.add(() -> readSourceRanges(output, entry.getKey(), entry.getValue()));
+    for (FooterResult footer : sourceOrder) {
+      List<PlannedReadRange> sourceRanges = rangesBySource.get(footer);
+      sourceJobs.add(() -> readSourceRanges(output, footer, sourceRanges));
     }
 
     List<CompletableFuture<SourceReadStats>> sourceFutures = new ArrayList<>();
@@ -537,8 +540,8 @@ public final class StagedParquetPartitionReader
             SourceReadStats result = runUncheckedAsTaskPoolThread(
                 sourceJobs.get(jobIndex));
             future.complete(result);
-          } catch (Throwable error) {
-            future.completeExceptionally(error);
+          } catch (Throwable sourceError) {
+            future.completeExceptionally(sourceError);
           }
         });
       } catch (Throwable submissionError) {
