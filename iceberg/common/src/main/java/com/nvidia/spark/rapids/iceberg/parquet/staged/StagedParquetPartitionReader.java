@@ -17,21 +17,23 @@
 package com.nvidia.spark.rapids.iceberg.parquet.staged;
 
 import java.nio.channels.SeekableByteChannel;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Deque;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -60,8 +62,9 @@ import org.apache.spark.sql.vectorized.ColumnarBatch;
  *   <li>The Spark task thread waits for the complete footer barrier and plans ordered subtasks.</li>
  *   <li>Each task submits planned subtask I/O in order. Subtask N+1 may submit after N has enqueued
  *       all of its asynchronous reads; it does not wait for N to finish.</li>
- *   <li>The task thread consumes completion futures in plan order and feeds each synthetic file
- *       to GPU decode.</li>
+ *   <li>The task thread feeds completed synthetic files to GPU decode in completion order. The I/O
+ *       submission order is only a best-effort hint to the asynchronous I/O implementation; a
+ *       later subtask is never held behind an earlier subtask that is slow to finish.</li>
  * </ol>
  */
 public final class StagedParquetPartitionReader
@@ -74,9 +77,15 @@ public final class StagedParquetPartitionReader
   private final long taskAttemptId;
   private final Object lifecycleLock = new Object();
   private final Object iteratorLock = new Object();
-  // Guarded by lifecycleLock. Futures remain in planner order even when I/O finishes out of order.
-  private final Deque<CompletableFuture<Completion>> pendingResults = new ArrayDeque<>();
-  private final CompletableFuture<Void> closeSignal = new CompletableFuture<>();
+  // Guarded by lifecycleLock. Tracks every result not yet claimed by the task thread so close()
+  // can reclaim outputs regardless of completion order.
+  private final Set<CompletableFuture<Completion>> pendingResults = new HashSet<>();
+  // Futures are added by their completion threads and consumed by the Spark task thread. Keeping
+  // this separate from pendingResults preserves actual completion order instead of plan order.
+  private final BlockingQueue<CompletableFuture<Completion>> completedResults =
+      new LinkedBlockingQueue<>();
+  // A queue sentinel used solely to wake a task thread blocked in waitForNextCompletedResult().
+  private final CompletableFuture<Completion> closeWakeup = new CompletableFuture<>();
   private final AtomicBoolean closed = new AtomicBoolean();
   private final AtomicReference<Throwable> asynchronousCleanupFailure = new AtomicReference<>();
 
@@ -176,18 +185,11 @@ public final class StagedParquetPartitionReader
           return false;
         }
 
-        CompletableFuture<Completion> resultFuture;
-        synchronized (lifecycleLock) {
-          resultFuture = pendingResults.peekFirst();
-        }
-        if (resultFuture == null) {
-          throw new IllegalStateException("missing staged result future");
-        }
-
         long waitStart = System.nanoTime();
         if (!semaphoreReleasedForAdvance) {
           releaseGpuSemaphoreFromTaskThread();
         }
+        CompletableFuture<Completion> resultFuture = waitForNextCompletedResult();
         Completion completion = waitForResult(resultFuture);
         boolean resultPassedToDecode = false;
         Iterator<ColumnarBatch> decoded = null;
@@ -198,13 +200,12 @@ public final class StagedParquetPartitionReader
             return false;
           }
           synchronized (lifecycleLock) {
-            if (pendingResults.peekFirst() != resultFuture) {
+            if (!pendingResults.remove(resultFuture)) {
               if (closed.get()) {
                 return false;
               }
-              throw new IllegalStateException("staged results are not in planner order");
+              throw new IllegalStateException("completed staged result is not pending");
             }
-            pendingResults.removeFirst();
             remainingResults -= 1;
           }
           resultPassedToDecode = true;
@@ -273,7 +274,7 @@ public final class StagedParquetPartitionReader
     }
   }
 
-  /** Submit all footers, plan on the task thread, and wire ordered subtask futures. */
+  /** Submit all footers, plan on the task thread, and wire ordered I/O submission futures. */
   private void initializeIfNeeded() throws Exception {
     if (initialized) {
       return;
@@ -318,7 +319,11 @@ public final class StagedParquetPartitionReader
       for (ReadSubtask subtask : plan) {
         checkOpen();
         SubtaskFutures futures = submit(subtask, previousSubmission);
-        pendingResults.addLast(futures.completion);
+        pendingResults.add(futures.completion);
+        // Record terminal futures in the order they actually finish. whenComplete runs immediately
+        // if a very small subtask completed before this callback could be installed.
+        futures.completion.whenComplete(
+            (completion, error) -> completedResults.offer(futures.completion));
         previousSubmission = futures.ioSubmitted;
       }
       remainingResults = pendingResults.size();
@@ -756,10 +761,20 @@ public final class StagedParquetPartitionReader
     }
   }
 
-  /** Wait for the next planned result or return promptly when close wins the race. */
+  /** Wait for whichever subtask finishes next or return promptly when close wins the race. */
+  private CompletableFuture<Completion> waitForNextCompletedResult()
+      throws InterruptedException {
+    CompletableFuture<Completion> resultFuture = completedResults.take();
+    checkOpen();
+    if (resultFuture == closeWakeup) {
+      throw new IllegalStateException("close wakeup observed while reader is open");
+    }
+    return resultFuture;
+  }
+
+  /** Obtain the already-terminal result and preserve its original failure type. */
   private Completion waitForResult(CompletableFuture<Completion> resultFuture) throws Exception {
     try {
-      CompletableFuture.anyOf(resultFuture, closeSignal).get();
       checkOpen();
       return resultFuture.get();
     } catch (InterruptedException e) {
@@ -817,8 +832,8 @@ public final class StagedParquetPartitionReader
     if (!closed.compareAndSet(false, true)) {
       return;
     }
-    // Wake a task thread waiting on the next ordered completion without cancelling any writer.
-    closeSignal.complete(null);
+    // Wake a task thread waiting for the next completion without cancelling any writer.
+    completedResults.offer(closeWakeup);
     Throwable failure = null;
     synchronized (iteratorLock) {
       if (currentBatches != null) {
@@ -839,7 +854,7 @@ public final class StagedParquetPartitionReader
     // and no closeable resources. Future cancellation can mark a running FutureTask complete
     // before its callable exits, so dropping our references after setting closed is safer.
     // Data futures are likewise left terminal-barrier-driven: active SDK writers finish before
-    // their future can publish a Completion. Attach cleanup to every ordered result instead of
+    // their future can publish a Completion. Attach cleanup to every pending result instead of
     // cancelling it, which could otherwise reclaim an output while an async write is still live.
     for (CompletableFuture<Completion> resultFuture : resultsToClose) {
       resultFuture.whenComplete((completion, error) -> {

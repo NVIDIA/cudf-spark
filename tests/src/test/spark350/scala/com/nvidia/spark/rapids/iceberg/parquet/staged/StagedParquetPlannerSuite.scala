@@ -49,6 +49,7 @@ import com.nvidia.spark.rapids.{
   HostAlloc,
   ThreadPoolConfBuilder
 }
+import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile
 import com.nvidia.spark.rapids.iceberg.parquet.{
   GpuIcebergParquetReaderConf,
   GpuParquetReaderPostProcessor,
@@ -56,7 +57,6 @@ import com.nvidia.spark.rapids.iceberg.parquet.{
   IcebergPartitionedFile,
   MultiThread
 }
-import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile
 import com.nvidia.spark.rapids.jni.fileio.{RapidsInputFile, SeekableInputStream}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
@@ -784,7 +784,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  test("subtasks submit IO in order and consume out-of-order completions in plan order") {
+  test("subtasks submit IO in order and decode whichever subtask completes first") {
     val sourceCount = 2
     val tracker = new SourceReadTracker(sourceCount)
     val sourceBytes = Array.tabulate[Byte](1024)(index => (index & 0xff).toByte)
@@ -837,17 +837,22 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       assert(tracker.startedCalls.get() === 2)
       assert(tracker.calls.asScala.map(_._1).toSeq === Seq(0, 1))
 
-      // Finish the second subtask first. The task thread must continue waiting for the first
-      // planned result instead of decoding completion order.
+      // Finish the second subtask first. Ordered submission is only a best-effort priority hint to
+      // the I/O engine, so the task thread must not block this ready result behind subtask 0.
       tracker.releaseOrdinal(1)
-      assert(!hasNext.isDone)
-      tracker.releaseOrdinal(0)
       assert(hasNext.get(10, TimeUnit.SECONDS))
       reader.next().close()
-      assert(reader.hasNext)
+      assert(decoded.asScala.toSeq === Seq(1))
+
+      val nextHasNext = caller.submit(new java.util.concurrent.Callable[Boolean] {
+        override def call(): Boolean = reader.hasNext()
+      })
+      assert(!nextHasNext.isDone)
+      tracker.releaseOrdinal(0)
+      assert(nextHasNext.get(10, TimeUnit.SECONDS))
       reader.next().close()
       assert(!reader.hasNext)
-      assert(decoded.asScala.toSeq === Seq(0, 1))
+      assert(decoded.asScala.toSeq === Seq(1, 0))
     } finally {
       tracker.release(sourceCount * 2)
       reader.close()
