@@ -94,6 +94,7 @@
                 <rapids.delta.artifactId1>rapids-4-spark-delta-21x</rapids.delta.artifactId1>
                 <rapids.delta.artifactId2>rapids-4-spark-delta-22x</rapids.delta.artifactId2>
                 <rapids.delta.artifactId3>rapids-4-spark-delta-23x</rapids.delta.artifactId3>
+                <spark.protobuf.skipCopy>true</spark.protobuf.skipCopy>
             </properties>
             <modules>
                 <module>delta-lake/delta-21x</module>
@@ -118,6 +119,7 @@
                 <rapids.delta.artifactId1>rapids-4-spark-delta-21x</rapids.delta.artifactId1>
                 <rapids.delta.artifactId2>rapids-4-spark-delta-22x</rapids.delta.artifactId2>
                 <rapids.delta.artifactId3>rapids-4-spark-delta-23x</rapids.delta.artifactId3>
+                <spark.protobuf.skipCopy>true</spark.protobuf.skipCopy>
             </properties>
             <modules>
                 <module>delta-lake/delta-21x</module>
@@ -142,6 +144,7 @@
                 <rapids.delta.artifactId1>rapids-4-spark-delta-21x</rapids.delta.artifactId1>
                 <rapids.delta.artifactId2>rapids-4-spark-delta-22x</rapids.delta.artifactId2>
                 <rapids.delta.artifactId3>rapids-4-spark-delta-23x</rapids.delta.artifactId3>
+                <spark.protobuf.skipCopy>true</spark.protobuf.skipCopy>
             </properties>
             <modules>
                 <module>delta-lake/delta-21x</module>
@@ -166,6 +169,7 @@
                 <rapids.delta.artifactId1>rapids-4-spark-delta-21x</rapids.delta.artifactId1>
                 <rapids.delta.artifactId2>rapids-4-spark-delta-22x</rapids.delta.artifactId2>
                 <rapids.delta.artifactId3>rapids-4-spark-delta-23x</rapids.delta.artifactId3>
+                <spark.protobuf.skipCopy>true</spark.protobuf.skipCopy>
             </properties>
             <modules>
                 <module>delta-lake/delta-21x</module>
@@ -190,6 +194,7 @@
                 <rapids.delta.artifactId1>rapids-4-spark-delta-21x</rapids.delta.artifactId1>
                 <rapids.delta.artifactId2>rapids-4-spark-delta-22x</rapids.delta.artifactId2>
                 <rapids.delta.artifactId3>rapids-4-spark-delta-23x</rapids.delta.artifactId3>
+                <spark.protobuf.skipCopy>true</spark.protobuf.skipCopy>
             </properties>
             <modules>
                 <module>delta-lake/delta-21x</module>
@@ -669,11 +674,13 @@
                 <iceberg.artifact.suffix>${spark40x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.runtime.version>${iceberg.110x.version}</iceberg.runtime.version>
                 <rapids.iceberg.artifactId>rapids-4-spark-iceberg-1-10-x</rapids.iceberg.artifactId>
+                <rapids.iceberg.artifactId2>rapids-4-spark-iceberg-1-11-x</rapids.iceberg.artifactId2>
                 <slf4j.version>2.0.7</slf4j.version>
             </properties>
             <modules>
                 <module>delta-lake/delta-40x</module>
                 <module>iceberg/iceberg-1-10-x</module>
+                <module>iceberg/iceberg-1-11-x</module>
             </modules>
         </profile>
         <profile>
@@ -693,11 +700,13 @@
                 <iceberg.artifact.suffix>${spark40x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.runtime.version>${iceberg.110x.version}</iceberg.runtime.version>
                 <rapids.iceberg.artifactId>rapids-4-spark-iceberg-1-10-x</rapids.iceberg.artifactId>
+                <rapids.iceberg.artifactId2>rapids-4-spark-iceberg-1-11-x</rapids.iceberg.artifactId2>
                 <slf4j.version>2.0.7</slf4j.version>
             </properties>
             <modules>
                 <module>delta-lake/delta-40x</module>
                 <module>iceberg/iceberg-1-10-x</module>
+                <module>iceberg/iceberg-1-11-x</module>
             </modules>
         </profile>
         <profile>
@@ -869,6 +878,8 @@
         <rapids.secondaryCacheDir>${spark.rapids.project.basedir}/target/${spark.version.classifier}/.sbt/1.0/zinc/org.scala-sbt</rapids.secondaryCacheDir>
         <allowConventionalDistJar>false</allowConventionalDistJar>
         <buildver>330</buildver>
+        <!-- spark-protobuf is a Spark 3.4.0+ module; release33x profiles override to `true`. -->
+        <spark.protobuf.skipCopy>false</spark.protobuf.skipCopy>
         <maven.compiler.source>1.8</maven.compiler.source>
         <java.major.version>8</java.major.version>
         <scala.compiler.release>${java.major.version}</scala.compiler.release>

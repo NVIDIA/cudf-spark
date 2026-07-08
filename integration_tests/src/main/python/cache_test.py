@@ -19,7 +19,7 @@ from conftest import is_not_utc
 from data_gen import *
 from pyspark import StorageLevel
 import pyspark.sql.functions as f
-from spark_session import with_cpu_session, with_gpu_session, is_before_spark_330, is_spark_350_or_351
+from spark_session import with_cpu_session, with_gpu_session, is_spark_350_or_351
 from join_test import create_df
 from marks import incompat, allow_non_gpu, allow_non_gpu_conditional, ignore_order, disable_ansi_mode
 import pyspark.mllib.linalg as mllib
@@ -334,7 +334,6 @@ def test_cache_udt():
     # statement here to compare
     assert cpu_result == gpu_result, "not equal"
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Spark3.3.0')
 @pytest.mark.parametrize('enable_vectorized_conf', enable_vectorized_confs, ids=idfn)
 @ignore_order(local=True)
 def test_cache_daytimeinterval(enable_vectorized_conf):

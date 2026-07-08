@@ -16,7 +16,8 @@
 
 package com.nvidia.spark.rapids
 
-import org.apache.spark.sql.catalyst.expressions.{Add, BoundReference, Literal}
+import org.apache.spark.sql.catalyst.expressions.{Abs, Add, BoundReference, Literal,
+  NamedExpression}
 import org.apache.spark.sql.types.{IntegerType, LongType}
 
 /**
@@ -39,7 +40,8 @@ class GpuCpuBridgeSuite extends SparkQueryCompareTestSuite {
       Literal(100L)
     )
     
-    val gpuInput = GpuBoundReference(0, LongType, nullable = false)(null, "x")
+    val gpuInput = GpuBoundReference(0, LongType, nullable = false)(
+      NamedExpression.newExprId, "x")
     val bridgeExpr = GpuCpuBridgeExpression(
       gpuInputs = Seq(gpuInput),
       cpuExpression = cpuExpression,
@@ -52,6 +54,10 @@ class GpuCpuBridgeSuite extends SparkQueryCompareTestSuite {
     assert(bridgeExpr.prettyName == "gpu_cpu_bridge")
     assert(bridgeExpr.hasSideEffects) // Bridge always reports hasSideEffects
     assert(bridgeExpr.children.size == 2) // gpuInput + cpuExpression
+    val bridgeSql = bridgeExpr.sql
+    assert(bridgeSql.startsWith("gpu_cpu_bridge("))
+    assert(bridgeSql.contains("gpuInputs=["))
+    assert(bridgeSql.contains("cpuExpression="))
   }
   
   test("GpuCpuBridgeExpression with nullable output") {
@@ -109,6 +115,38 @@ class GpuCpuBridgeSuite extends SparkQueryCompareTestSuite {
     )
     
     assert(bridgeExpr.prettyName == "gpu_cpu_bridge")
+  }
+
+  test("Bridge allow-list error reports allowed and disallowed CPU expressions") {
+    val cpuExpression = Add(
+      Abs(BoundReference(0, IntegerType, nullable = true)),
+      Literal(1))
+    val bridgeExpr = GpuCpuBridgeExpression(
+      gpuInputs = Seq(GpuBoundReference(0, IntegerType, nullable = true)(
+        NamedExpression.newExprId, "x")),
+      cpuExpression = cpuExpression,
+      outputDataType = IntegerType,
+      outputNullable = true)
+    val conf = new RapidsConf(Map(RapidsConf.TEST_ALLOWED_NONGPU.key -> "Add"))
+
+    val error = intercept[IllegalArgumentException] {
+      new GpuTransitionOverrides().assertBridgeExpressionsAllowed(bridgeExpr, conf)
+    }
+
+    assert(error.getMessage.contains("DISALLOWED EXPRESSIONS"))
+    assert(error.getMessage.contains("(Abs) [NOT ALLOWED]"))
+    assert(error.getMessage.contains("ALLOWED EXPRESSIONS (for context)"))
+    assert(error.getMessage.contains("(Add) [ALLOWED]"))
+  }
+
+  test("GPU assertion rejects an unapproved CPU expression") {
+    val error = intercept[IllegalArgumentException] {
+      new GpuTransitionOverrides().assertIsOnTheGpu(
+        Abs(Literal(1)), new RapidsConf(Map.empty[String, String]))
+    }
+
+    assert(error.getMessage.contains("Abs"))
+    assert(error.getMessage.contains("is not columnar"))
   }
   
   // ============================================================================

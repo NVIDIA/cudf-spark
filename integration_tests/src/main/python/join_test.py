@@ -22,7 +22,7 @@ from asserts import (assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_ro
 from conftest import is_emr_runtime
 from data_gen import *
 from marks import ignore_order, allow_non_gpu, incompat, validate_execs_in_gpu_plan, disable_ansi_mode
-from spark_session import with_cpu_session, is_before_spark_330, is_databricks_runtime, is_spark_400_or_later, is_spark_411_or_later
+from spark_session import with_cpu_session, is_databricks_runtime, is_spark_400_or_later, is_spark_411_or_later
 from src.main.python.spark_session import with_gpu_session
 
 # mark this test as ci_1 for mvn verify sanity check in pre-merge CI
@@ -417,8 +417,8 @@ def test_broadcast_nested_loop_join_degen_left_outer_build_no_columns():
                                      conf={'spark.sql.adaptive.enabled': 'false'})
 
 @ignore_order(local=True)
-@pytest.mark.skipif(is_before_spark_330() or is_databricks_runtime(),
-                    reason="GPU does not support InSubqueryExec before 330 and on DBs")
+@pytest.mark.skipif(is_databricks_runtime(),
+                    reason="GPU does not support InSubqueryExec on Databricks")
 @pytest.mark.parametrize('a_val', ['1', '10'], ids=idfn)  # 1: in t1, 10: not in t1
 def test_broadcast_nested_loop_join_degen_left_outer_stream_no_columns(a_val):
     def degen_join_func(spark):
@@ -1372,7 +1372,6 @@ def check_bloom_filter_join(confs, expected_classes, is_multi_column):
 @pytest.mark.parametrize("batch_size", ['1g', '1000'], ids=idfn)
 @pytest.mark.parametrize("is_multi_column", [False, True], ids=idfn)
 @pytest.mark.skipif(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/8921")
-@pytest.mark.skipif(is_before_spark_330(), reason="Bloom filter joins added in Spark 3.3.0")
 def test_bloom_filter_join(batch_size, is_multi_column):
     conf = {"spark.rapids.sql.batchSizeBytes": batch_size}
     check_bloom_filter_join(confs=conf,
@@ -1384,7 +1383,6 @@ def test_bloom_filter_join(batch_size, is_multi_column):
 @ignore_order(local=True)
 @pytest.mark.parametrize("is_multi_column", [False, True], ids=idfn)
 @pytest.mark.skipif(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/8921")
-@pytest.mark.skipif(is_before_spark_330(), reason="Bloom filter joins added in Spark 3.3.0")
 def test_bloom_filter_join_cpu_probe(is_multi_column):
     conf = {"spark.rapids.sql.expression.BloomFilterMightContain": "false"}
     check_bloom_filter_join(confs=conf,
@@ -1395,7 +1393,6 @@ def test_bloom_filter_join_cpu_probe(is_multi_column):
 @ignore_order(local=True)
 @pytest.mark.parametrize("is_multi_column", [False, True], ids=idfn)
 @pytest.mark.skipif(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/8921")
-@pytest.mark.skipif(is_before_spark_330(), reason="Bloom filter joins added in Spark 3.3.0")
 def test_bloom_filter_join_cpu_build(is_multi_column):
     conf = {"spark.rapids.sql.expression.BloomFilterAggregate": "false"}
     check_bloom_filter_join(confs=conf,
@@ -1407,7 +1404,6 @@ def test_bloom_filter_join_cpu_build(is_multi_column):
 @pytest.mark.parametrize("agg_replace_mode", ["partial", "final"])
 @pytest.mark.parametrize("is_multi_column", [False, True], ids=idfn)
 @pytest.mark.skipif(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/8921")
-@pytest.mark.skipif(is_before_spark_330(), reason="Bloom filter joins added in Spark 3.3.0")
 def test_bloom_filter_join_split_cpu_build(agg_replace_mode, is_multi_column):
     conf = {"spark.rapids.sql.hashAgg.replaceMode": agg_replace_mode}
     check_bloom_filter_join(confs=conf,
@@ -1416,7 +1412,6 @@ def test_bloom_filter_join_split_cpu_build(agg_replace_mode, is_multi_column):
 
 @ignore_order(local=True)
 @pytest.mark.skipif(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/8921")
-@pytest.mark.skipif(is_before_spark_330(), reason="Bloom filter joins added in Spark 3.3.0")
 def test_bloom_filter_join_with_merge_some_null_filters(spark_tmp_path):
     data_path1 = spark_tmp_path + "/BLOOM_JOIN_DATA1"
     data_path2 = spark_tmp_path + "/BLOOM_JOIN_DATA2"
@@ -1433,7 +1428,6 @@ def test_bloom_filter_join_with_merge_some_null_filters(spark_tmp_path):
 
 @ignore_order(local=True)
 @pytest.mark.skipif(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/8921")
-@pytest.mark.skipif(is_before_spark_330(), reason="Bloom filter joins added in Spark 3.3.0")
 def test_bloom_filter_join_with_merge_all_null_filters(spark_tmp_path):
     data_path1 = spark_tmp_path + "/BLOOM_JOIN_DATA1"
     data_path2 = spark_tmp_path + "/BLOOM_JOIN_DATA2"

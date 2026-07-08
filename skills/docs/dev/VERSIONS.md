@@ -24,6 +24,10 @@ Update this default value:
 
 - `CUDA_VERSION` must match the CUDA toolkit version spark-rapids is built against (the same version the native build uses on the host).
 
+**Note:** The pre-merge CI image `skills/ci/Dockerfile.pre-merge` is a mirror of this toolchain, plus python dependencies. Keep its `CUDA_VERSION`, `CMAKE_VERSION`, `TOOLSET_VERSION`, `MAVEN_VERSION`, and `CCACHE_VERSION` in sync with this file.
+
+After changing `skills/ci/Dockerfile.pre-merge`, **rebuild and publish** the CI image so pre-merge jobs can pull the updated environment.
+
 ### Native CUDA dependency extraction
 
 File: `skills/udf-convert-to-cuda/templates/cuda/native/scripts/extract-cudf-libs.sh`
