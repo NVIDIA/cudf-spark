@@ -46,8 +46,7 @@ def create_cpu_bridge_fallback_conf(disabled_gpu_expressions, disallowed_bridge_
 def with_columnar_source(df):
     return df.filter(f.monotonically_increasing_id() >= f.lit(0))
 
-# Only include Add and Boundreference Expressions to verify that the CPU bridge is working
-# as expected.
+# Allow only Add to fall back so this test isolates the CPU bridge path.
 @allow_non_gpu('Add')
 def test_cpu_bridge_add_fallback():
     """Test CPU bridge when Add expression is forced to fall back to CPU"""
@@ -61,10 +60,12 @@ def test_cpu_bridge_add_fallback():
     assert_gpu_and_cpu_are_equal_collect(test_func, conf=conf)
 
 
+# MIN_ROWS_PER_SUBBATCH is 500,000: these values exercise one and two sub-batch results.
 @allow_non_gpu('Add')
-def test_cpu_bridge_add_large_batch_parallel_path():
+@pytest.mark.parametrize('row_count', [500000, 500001], ids=idfn)
+def test_cpu_bridge_add_large_batch_parallel_path(row_count):
     def test_func(spark):
-        return spark.range(0, 500001, 1, 1) \
+        return spark.range(0, row_count, 1, 1) \
             .selectExpr("id + 1 as bridged") \
             .agg(f.sum("bridged"))
 
@@ -85,8 +86,7 @@ def test_cpu_bridge_stateful_map_large_batch_parallel_path():
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         test_func, exist_classes="GpuCpuBridgeExpression", conf=conf)
 
-# Only include Multiply and Boundreference Expressions to verify that the CPU bridge is working
-# as expected.
+# Allow only Multiply to fall back so this test isolates the CPU bridge path.
 @allow_non_gpu('Multiply')
 def test_cpu_bridge_multiply_fallback():
     """Test CPU bridge when Multiply expression is forced to fall back to CPU"""
@@ -98,6 +98,43 @@ def test_cpu_bridge_multiply_fallback():
     # Force Multiply to fall back to CPU bridge
     conf = create_cpu_bridge_fallback_conf(['Multiply'])
     assert_gpu_and_cpu_are_equal_collect(test_func, conf=conf)
+
+
+# Csc has no GPU implementation and is a deterministic UnaryMathExpression, so unlike the
+# Add/Multiply tests above it covers the RuleNotFoundExprMeta -> CPU bridge path. Keep the bridge
+# explicitly enabled so this remains a targeted bridge test even if the default changes again.
+@allow_non_gpu('Csc')
+@pytest.mark.parametrize('aqe_enabled', ['false', 'true'], ids=idfn)
+def test_cpu_bridge_csc_select(aqe_enabled):
+    conf = {
+        'spark.rapids.sql.expression.cpuBridge.enabled': True,
+        'spark.sql.adaptive.enabled': aqe_enabled,
+    }
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: gen_df(spark,
+            [('x', DoubleGen(min_exp=-3, max_exp=5, no_nans=True))],
+            length=100
+        ).selectExpr("x", "csc(x) AS csc_x"),
+        exist_classes='GpuCpuBridgeExpression',
+        conf=conf)
+
+
+@allow_non_gpu('Csc')
+@pytest.mark.parametrize('aqe_enabled', ['false', 'true'], ids=idfn)
+def test_cpu_bridge_csc_filter(aqe_enabled):
+    conf = {
+        'spark.rapids.sql.expression.cpuBridge.enabled': True,
+        'spark.sql.adaptive.enabled': aqe_enabled,
+    }
+    # Keep Csc only in the predicate so a Project bridge cannot mask a Filter bridge regression.
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: gen_df(spark,
+            [('x', DoubleGen(min_exp=-1, max_exp=2, no_nans=True))],
+            length=200
+        ).filter("csc(x) > 1.5").select("x"),
+        exist_classes='GpuCpuBridgeExpression',
+        conf=conf)
+
 
 @allow_non_gpu('ProjectExec')
 @pytest.mark.skipif(not is_spark_341_or_later(),
