@@ -35,17 +35,20 @@ import org.apache.spark.sql.types._
  *
  * For a `MAP<STRING, ARRAY<STRING>>` (and `MAP<STRING, STRING>`) schema the map is extracted as a
  * "raw" map: keys, values and array elements are raw JSON byte ranges (surrounding quotes stripped
- * but NOT JSON-unescaped). Verified against Spark 3.5.5, the output diverges from Spark CPU on only
- * two documented corner cases (see docs/compatibility.md):
+ * but NOT JSON-unescaped). Verified against Spark 3.5.5, the output diverges from Spark CPU on
+ * three documented corner cases (see docs/compatibility.md):
  *  - escape sequences (e.g. `\"`, `\\`, `\\uXXXX`) are kept verbatim rather than
  *    unescaped/normalized;
  *  - for `ARRAY<STRING>`, object / nested-array elements are returned as their raw JSON substring
- *    rather than Spark's re-serialized form.
- * The following MATCH Spark and are NOT divergences: scalar (number/boolean) array elements
- * (raw text equals Spark's string coercion, e.g. `1` -> `"1"`); a map value that is not a
- * JSON array and not the JSON `null` literal nulls the whole row (PERMISSIVE bad-record);
- * duplicate keys kept in document order (matches Spark 3.5.x; later Spark may de-dup per
- * `spark.sql.mapKeyDedupPolicy`).
+ *    rather than Spark's re-serialized form;
+ *  - numeric elements keep their raw JSON token; Spark re-renders numbers, so non-canonical
+ *    spellings differ (`007` -> `"7"` with `allowNumericLeadingZeros`, `1.00000` -> `"1.0"`,
+ *    `1e2` -> `"100.0"`), and non-numeric numbers stay bare while Spark quotes them (`NaN` ->
+ *    `"NaN"`, `Infinity` -> `"Infinity"`).
+ * The following MATCH Spark and are NOT divergences: canonical elements whose raw text already
+ * equals Spark's rendering (e.g. `1`, `1.5`, `true`); a map value that is not a JSON array and not
+ * the JSON `null` literal nulls the whole row (PERMISSIVE bad-record); duplicate keys kept in
+ * document order (matches Spark 3.5.x; later Spark may de-dup per `spark.sql.mapKeyDedupPolicy`).
  */
 case class GpuJsonToStructs(
     schema: DataType,

@@ -425,13 +425,16 @@ a `MAP<STRING,STRING>` or `MAP<STRING,ARRAY<STRING>>` as a top level schema, but
 arrays at the top level.
 
 For map schemas the values (and, for `MAP<STRING,ARRAY<STRING>>`, the array elements) are extracted as raw JSON
-text. Two cases can therefore differ from Spark: (1) escape sequences are not normalized or unescaped (see the
-JSON Normalization section above), and (2) array elements that are JSON objects or nested arrays are returned as
-their raw JSON substring rather than Spark's re-serialized form. Scalar number/boolean array elements do match
-Spark, because the raw text equals Spark's string coercion (e.g. `1` becomes `"1"`). For `MAP<STRING,ARRAY<STRING>>`
-a map value that is neither a JSON array nor the JSON `null` literal (i.e. a scalar or object) makes the entire row
-null, matching Spark's PERMISSIVE bad-record handling. Duplicate keys are kept in document order, which matches
-Spark 3.5.x `from_json`; later Spark versions may de-duplicate per `spark.sql.mapKeyDedupPolicy`.
+text. Three cases can therefore differ from Spark: (1) escape sequences are not normalized or unescaped (see the
+JSON Normalization section above); (2) array elements that are JSON objects or nested arrays are returned as their
+raw JSON substring rather than Spark's re-serialized form; and (3) numeric elements keep their raw JSON token,
+whereas Spark re-renders numbers, so non-canonical spellings differ (`007` -> `"7"` with `allowNumericLeadingZeros`,
+`1.00000` -> `"1.0"`, `1e2` -> `"100.0"`) and non-numeric numbers stay bare while Spark quotes them (`NaN` ->
+`"NaN"`, `Infinity` -> `"Infinity"` with `allowNonNumericNumbers`); tokens already matching Spark's rendering
+(`1`, `1.5`, `true`) are unaffected. For `MAP<STRING,ARRAY<STRING>>` a map value that is
+neither a JSON array nor the JSON `null` literal (i.e. a scalar or object) makes the entire row null, matching
+Spark's PERMISSIVE bad-record handling. Duplicate keys are kept in document order, which matches Spark 3.5.x
+`from_json`; later Spark versions may de-duplicate per `spark.sql.mapKeyDedupPolicy`.
 
 ### `to_json` Function
 

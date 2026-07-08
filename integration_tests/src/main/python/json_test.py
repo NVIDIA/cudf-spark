@@ -821,7 +821,7 @@ def test_from_json_map_with_arrays_corner_cases():
         ['{"a": ["x", "y", "z"]}'],      # basic multi-element
         ['{"a": [null, "x"]}'],          # literal-null element + non-null sibling
         ['{"a": [""]}'],                 # empty-string element
-        ['{"a": [1, 22, 333, true, false]}'],   # scalar number/bool elements: raw text == Spark string coercion (verified xpass)
+        ['{"a": [1, 22, 333, 1.5, true, false]}'],   # scalar number/bool/decimal elements: raw text == Spark string coercion (verified xpass)
         ['{"a": ["é", "日本"]}'],  # literal UTF-8 elements (no escape sequences)
         ['{ "a" : [ "x" , "y" ] }'],     # surrounding whitespace
         ['{"": ["x"]}'],                 # empty key
@@ -881,6 +881,65 @@ def test_from_json_map_with_arrays_nested_elements_xfail():
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark : spark.createDataFrame(data, schema=schema) \
             .select(f.map_entries(f.from_json(f.col('a'), 'MAP<STRING,ARRAY<STRING>>'))),
+        conf=_enable_all_types_conf)
+
+@allow_non_gpu(*non_utc_allow)
+@pytest.mark.xfail(reason="GPU keeps raw JSON number tokens; Spark's from_json re-renders them, so "
+                          "non-canonical spellings differ (007->7, 1.00000->1.0, 1e2->100.0). "
+                          "Documented divergence: docs/compatibility.md 'from_json Function'.",
+                   strict=False)
+def test_from_json_map_with_arrays_numeric_xfail():
+    # allowNumericLeadingZeros makes 007 parseable; floats diverge under default options.
+    schema = StructType([StructField("a", StringType())])
+    data = [
+        ['{"a": [007]}'],            # leading zeros: GPU "007" vs Spark "7"
+        ['{"a": [1.00000, 1e2]}'],   # float re-render: GPU "1.00000"/"1e2" vs Spark "1.0"/"100.0"
+    ]
+    options = {"allowNumericLeadingZeros": "true"}
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark : spark.createDataFrame(data, schema=schema) \
+            .select(f.map_entries(f.from_json(f.col('a'), 'MAP<STRING,ARRAY<STRING>>', options))),
+        conf=_enable_all_types_conf)
+
+@allow_non_gpu(*non_utc_allow)
+@pytest.mark.parametrize('allow_single_quotes', ['true', 'false'])
+@pytest.mark.parametrize('allow_unquoted_chars', ['true', 'false'])
+def test_from_json_map_with_arrays_options(allow_single_quotes, allow_unquoted_chars):
+    # A subset of the options matrix from test_from_json_map_with_options, through the
+    # MAP<STRING,ARRAY<STRING>> dispatch, proving the parser options reach the array path. Inputs
+    # exercise single-quoted strings and literal control chars in elements; when an option is off
+    # both engines reject its input alike (bad record -> null), so every combo stays GPU==CPU.
+    # allowNumericLeadingZeros stays false and allowNonNumericNumbers is not toggled here: where
+    # either would accept the token the GPU keeps it raw while Spark re-renders/quotes it -- the
+    # test_from_json_map_with_arrays_numeric_xfail / _nonnumeric_xfail probes cover those.
+    json_string_gen = StringGen(r'{"a": \["[0-9]{0,5}"\]}') \
+        .with_special_pattern(r"""{'a': \['[0-9]{0,5}'\]}""", weight=50) \
+        .with_special_pattern(r'{"(a|a\r\n\tb)": \["(xyz|01\r\n\t23)"\]}', weight=50)
+    options = {"allowSingleQuotes": allow_single_quotes,
+               "allowUnquotedControlChars": allow_unquoted_chars}
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark : unary_op_df(spark, json_string_gen, length=20) \
+            .select(f.map_entries(f.from_json(f.col('a'), 'MAP<STRING,ARRAY<STRING>>', options))),
+        conf=_enable_all_types_conf)
+
+@allow_non_gpu(*non_utc_allow)
+@pytest.mark.xfail(reason="GPU keeps the bare NaN/Infinity token under allowNonNumericNumbers, while "
+                          "Spark re-serializes non-numeric numbers as quoted strings, so the array "
+                          "elements differ. Documented divergence: docs/compatibility.md "
+                          "'from_json Function'.",
+                   strict=False)
+def test_from_json_map_with_arrays_nonnumeric_xfail():
+    # allowNonNumericNumbers=true makes NaN/Infinity parseable; the GPU emits the bare token whereas
+    # Spark quotes it (verified GPU ['NaN','Infinity'] vs CPU ['"NaN"','"Infinity"']).
+    schema = StructType([StructField("a", StringType())])
+    data = [
+        ['{"a": [NaN, Infinity]}'],   # bare non-numeric tokens
+        ['{"a": [-Infinity]}'],       # signed non-numeric token, tested separately
+    ]
+    options = {"allowNonNumericNumbers": "true"}
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark : spark.createDataFrame(data, schema=schema) \
+            .select(f.map_entries(f.from_json(f.col('a'), 'MAP<STRING,ARRAY<STRING>>', options))),
         conf=_enable_all_types_conf)
 
 @pytest.mark.parametrize('schema', [
