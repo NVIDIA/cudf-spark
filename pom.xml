@@ -815,7 +815,7 @@
         <spark.version.classifier>spark${buildver}</spark.version.classifier>
         <cuda.version>cuda12</cuda.version>
         <jni.classifier>${cuda.version}</jni.classifier>
-        <spark-rapids-jni.version>26.06.0</spark-rapids-jni.version>
+        <spark-rapids-jni.version>26.06.1-SNAPSHOT</spark-rapids-jni.version>
         <spark-rapids-private.version>26.06.1</spark-rapids-private.version>
         <spark-rapids-hybrid.version>26.06.0</spark-rapids-hybrid.version>
         <scala.binary.version>2.12</scala.binary.version>
