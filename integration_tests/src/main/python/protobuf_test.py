@@ -25,7 +25,7 @@ from asserts import (
 )
 from data_gen import (
     BooleanGen, IntegerGen, LongGen, FloatGen, DoubleGen, StringGen, BinaryGen,
-    SetValuesGen, gen_df, idfn
+    gen_df, idfn
 )
 from marks import allow_non_gpu, ignore_order, validate_execs_in_gpu_plan
 from protobuf_data_gen import pb, encode_pb_message
@@ -503,108 +503,6 @@ def test_from_protobuf_simple_parquet_binary_round_trip(
         return df.select(decoded.alias("decoded"))
 
     assert_gpu_and_cpu_are_equal_collect(run_on_spark)
-
-
-def _load_nested_proto_desc_resource():
-    """Load the pre-compiled nested proto descriptor file.
-
-    The .desc file is checked into the repository under
-    integration_tests/src/test/resources/protobuf_test/nested_proto/generated/.
-    Returns the raw bytes or None if the file does not exist.
-    """
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
-    desc_file = os.path.join(base_dir, "src", "test", "resources",
-                             "protobuf_test", "nested_proto", "generated",
-                             "main_log.desc")
-    if not os.path.exists(desc_file):
-        return None
-    with open(desc_file, 'rb') as fp:
-        return fp.read()
-
-
-@pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
-@pytest.mark.parametrize("options", [None, {"enums.as.ints": "true"}])
-@ignore_order(local=True)
-def test_from_protobuf_customer_heavy_nested_proto(local_tmp_path, from_protobuf_fn, options):
-    """Integration test with real nested proto: multi-level nesting, cross-file imports, enums."""
-    desc_bytes = _load_nested_proto_desc_resource()
-    if desc_bytes is None:
-        pytest.skip("nested_proto descriptor not found; run gen_nested_proto_data.sh first")
-
-    desc_path = os.path.join(local_tmp_path, "main_log.desc")
-    with open(desc_path, "wb") as fp:
-        fp.write(desc_bytes)
-
-    message_name = "com.test.proto.sample.MainLogRecord"
-    generation = pb.generation(
-        default_repeated_length=(0, 3),
-        enums_as_ints=options is not None and options.get("enums.as.ints") == "true")
-
-    def run_on_spark(spark):
-        data_gen = pb.from_descriptor(
-            spark, desc_bytes, message_name, generation=generation).as_datagen()
-        generated = gen_df(spark, data_gen).select("bin")
-        decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), message_name, desc_path, desc_bytes,
-            options=options)
-
-        return generated.select(decoded.alias("decoded"))
-
-    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
-
-
-def _build_descriptor_datagen_contract_bytes(spark):
-    return _build_proto2_descriptor(
-        spark,
-        "descriptor_datagen_contract.proto",
-        [
-            _msg("DescriptorDataGenContract", [
-                _field(
-                    "status", 1, "ENUM", label="required",
-                    type_name=".test.Status"),
-                _field("u32", 2, "UINT32", default=4294967295),
-                _field("label", 3, "STRING", default="fallback"),
-                _field("values", 4, "INT32", label="repeated", packed=True),
-            ]),
-        ],
-        file_enums=[
-            _enum("Status", [("UNKNOWN", 0), ("READY", 2)]),
-        ])
-
-
-@pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
-def test_descriptor_datagen_matches_cpu_values_and_schema(
-        local_tmp_path, from_protobuf_fn):
-    desc_path, desc_bytes = _setup_protobuf_desc(
-        local_tmp_path,
-        "descriptor_datagen_contract.desc",
-        _build_descriptor_datagen_contract_bytes)
-    message_name = "test.DescriptorDataGenContract"
-    generation = pb.generation(
-        value_gens={
-            "status": SetValuesGen(StringType(), ["READY"]),
-            "u32": SetValuesGen(IntegerType(), [None]),
-            "label": SetValuesGen(StringType(), [None]),
-            "values": SetValuesGen(IntegerType(), [7]),
-        },
-        repeated_lengths={"values": 2})
-
-    def check_cpu_contract(spark):
-        row_gen = pb.from_descriptor(
-            spark, desc_bytes, message_name, generation=generation).as_datagen()
-        generated = gen_df(spark, row_gen, length=1, seed=0)
-        decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), message_name, desc_path, desc_bytes)
-        selected = generated.select(
-            f.struct("status", "u32", "label", "values").alias("expected"),
-            decoded.alias("actual"))
-        row = selected.collect()[0]
-
-        assert row["expected"] == row["actual"]
-        assert selected.schema["expected"].dataType == selected.schema["actual"].dataType
-
-    with_cpu_session(check_cpu_contract)
 
 
 def _build_nested_descriptor_set_bytes(spark):
@@ -1741,6 +1639,8 @@ def _build_default_value_descriptor_set_bytes(spark):
             _field("count", 1, "INT32", default=42),
             _field("name", 2, "STRING", default="unknown"),
             _field("flag", 3, "BOOL", default=True),
+            _field("zero_count", 4, "INT32", default=0),
+            _field("empty_name", 5, "STRING", default=""),
         ]),
     ])
 
@@ -1762,6 +1662,8 @@ def test_from_protobuf_default_values_cases(local_tmp_path, from_protobuf_fn, de
         _scalar("count", 1, IntegerGen(), default=42),
         _scalar("name", 2, StringGen(), default="unknown"),
         _scalar("flag", 3, BooleanGen(), default=True),
+        _scalar("zero_count", 4, IntegerGen(), default=0),
+        _scalar("empty_name", 5, StringGen(), default=""),
     ])
 
     if default_case == "field_present":
@@ -1785,9 +1687,15 @@ def test_from_protobuf_default_values_cases(local_tmp_path, from_protobuf_fn, de
             return df.select(
                 decoded.getField("count").alias("count"),
                 decoded.getField("name").alias("name"),
-                decoded.getField("flag").alias("flag"))
+                decoded.getField("flag").alias("flag"),
+                decoded.getField("zero_count").alias("zero_count"),
+                decoded.getField("empty_name").alias("empty_name"))
         return df.select(decoded.getField("name").alias("name"))
 
+    if default_case == "missing_fields":
+        cpu_rows = with_cpu_session(lambda spark: run_on_spark(spark).collect())
+        assert all(row["zero_count"] == 0 and row["empty_name"] == ""
+                   for row in cpu_rows)
     assert_gpu_and_cpu_are_equal_collect(run_on_spark)
 
 
@@ -3103,17 +3011,31 @@ def test_from_protobuf_bug3_unrelated_struct_name_collision(
     assert_gpu_and_cpu_are_equal_collect(run_on_spark)
 
 
-def _build_max_depth_descriptor_set_bytes(spark):
-    """Build a descriptor for a 12-level nested message chain."""
+def _build_nested_depth_descriptor_set_bytes(spark, depth):
     messages = []
-    for i in range(12, 0, -1):
+    for i in range(depth, 0, -1):
         fields = [_field(f"val{i}", 1, "INT32")]
-        if i < 12:
+        if i < depth:
             fields.append(
                 _field(f"level{i + 1}", 2, "MESSAGE", type_name=f".test.Level{i + 1}")
             )
         messages.append(_msg(f"Level{i}", fields))
-    return _build_proto2_descriptor(spark, "max_depth.proto", messages)
+    return _build_proto2_descriptor(spark, f"nested_depth_{depth}.proto", messages)
+
+
+def _build_nested_depth_fields(level, depth):
+    fields = [_scalar(f"val{level}", 1, IntegerGen())]
+    if level < depth:
+        fields.append(_nested(
+            f"level{level + 1}", 2, _build_nested_depth_fields(level + 1, depth)))
+    return fields
+
+
+def _build_nested_depth_value(level, depth):
+    value = {f"val{level}": level}
+    if level < depth:
+        value[f"level{level + 1}"] = _build_nested_depth_value(level + 1, depth)
+    return value
 
 
 def _build_many_repeated_fields_descriptor_set_bytes(spark, field_count):
@@ -3172,32 +3094,53 @@ def test_from_protobuf_repeated_field_capacity_boundary(
 
 
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
+@ignore_order(local=True)
+def test_from_protobuf_max_depth_boundary(local_tmp_path, from_protobuf_fn):
+    depth = 10
+    desc_path, desc_bytes = _setup_protobuf_desc(
+        local_tmp_path,
+        f"nested_depth_{depth}.desc",
+        lambda spark: _build_nested_depth_descriptor_set_bytes(spark, depth))
+    schema = _schema("Level1", _build_nested_depth_fields(1, depth))
+    row = schema.encode(_build_nested_depth_value(1, depth))
+
+    def run_on_spark(spark):
+        decoded = _call_from_protobuf(
+            from_protobuf_fn,
+            f.col("bin"),
+            "test.Level1",
+            desc_path,
+            desc_bytes)
+        field = decoded
+        for i in range(2, depth + 1):
+            field = field.getField(f"level{i}")
+        return spark.createDataFrame([(row,)], ["bin"]).select(
+            field.getField(f"val{depth}").alias(f"val{depth}"))
+
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+
+
+@pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @allow_non_gpu("ProtobufDataToCatalyst")
 @ignore_order(local=True)
 def test_from_protobuf_max_depth_falls_back(local_tmp_path, from_protobuf_fn):
+    depth = 12
     desc_path, desc_bytes = _setup_protobuf_desc(
-        local_tmp_path, "max_depth.desc",
-        _build_max_depth_descriptor_set_bytes)
+        local_tmp_path,
+        f"nested_depth_{depth}.desc",
+        lambda spark: _build_nested_depth_descriptor_set_bytes(spark, depth))
     message_name = "test.Level1"
-
-    def build_nested_gen(level):
-        if level == 12:
-            return [_scalar(f"val{level}", 1, IntegerGen())]
-        return [
-            _scalar(f"val{level}", 1, IntegerGen()),
-            _nested(f"level{level+1}", 2, build_nested_gen(level+1))
-        ]
-
-    data_gen = _as_datagen(build_nested_gen(1))
+    schema = _schema("Level1", _build_nested_depth_fields(1, depth))
+    row = schema.encode(_build_nested_depth_value(1, depth))
 
     def run_on_spark(spark):
-        df = gen_df(spark, data_gen)
+        df = spark.createDataFrame([(row,)], ["bin"])
         decoded = _call_from_protobuf(
             from_protobuf_fn, f.col("bin"), message_name, desc_path, desc_bytes)
         field = decoded
-        for i in range(2, 13):
+        for i in range(2, depth + 1):
             field = field.getField(f"level{i}")
-        return df.select(field.getField("val12").alias("val12"))
+        return df.select(field.getField(f"val{depth}").alias(f"val{depth}"))
 
     assert_gpu_fallback_collect(run_on_spark, "ProtobufDataToCatalyst")
 
@@ -3244,6 +3187,29 @@ _nested_smoke_desc_bytes = bytes.fromhex(
     "320b2e746573742e4368696c64121a0a056974656d7318032003280b320b2e74"
     "6573742e4368696c64620670726f746f32")
 
+# Keep these cross-file contracts independent of Spark's shaded descriptor runtime.
+_protobuf_semantics_desc_bytes = bytes.fromhex(
+    "0a3f0a0a6c6561662e70726f746f12047465737422230a12496d706f72746564"
+    "4772616e646368696c64120d0a0576616c7565180120012805620670726f746f"
+    "320ad5010a0b6368696c642e70726f746f1204746573741a0a6c6561662e7072"
+    "6f746f223d0a0d496d706f727465644368696c64122c0a0a6772616e64636869"
+    "6c6418012001280b32182e746573742e496d706f727465644772616e64636869"
+    "6c6422380a0c52657065617465644c65616612280a0676616c75657318012003"
+    "280b32182e746573742e496d706f727465644772616e646368696c6422330a0d"
+    "52657065617465644368696c6412220a066c656176657318012003280b32122e"
+    "746573742e52657065617465644c656166620670726f746f320ad3020a0a726f"
+    "6f742e70726f746f1204746573741a0b6368696c642e70726f746f22320a0c49"
+    "6d706f72746564526f6f7412220a056368696c6418012001280b32132e746573"
+    "742e496d706f727465644368696c64229c010a0c556e7369676e6564526f6f74"
+    "121c0a0673746174757318012002280e320c2e746573742e5374617475731214"
+    "0a0c72657175697265645f75363418022002280412140a0c6f7074696f6e616c"
+    "5f75333218032001280d12140a0c72657065617465645f75333218042003280d"
+    "12140a0c72657065617465645f75363418052003280412160a0b64656661756c"
+    "745f7536341806200128043a013022350a0c5265706561746564526f6f741225"
+    "0a086368696c6472656e18012003280b32132e746573742e5265706561746564"
+    "4368696c642a200a06537461747573120b0a07554e4b4e4f574e100012090a05"
+    "52454144591002620670726f746f32")
+
 _oneof_smoke_desc_bytes = bytes.fromhex(
     "0a5e0a116f6e656f665f736d6f6b652e70726f746f120474657374223b0a0643"
     "686f696365120b0a01691801200128054800120b0a0173180220012809480012"
@@ -3276,6 +3242,14 @@ def nested_smoke_desc(local_tmp_path):
     with open(desc_path, "wb") as fp:
         fp.write(_nested_smoke_desc_bytes)
     return desc_path, _nested_smoke_desc_bytes
+
+
+@pytest.fixture
+def protobuf_semantics_desc(local_tmp_path):
+    desc_path = os.path.join(local_tmp_path, "protobuf_semantics.desc")
+    with open(desc_path, "wb") as fp:
+        fp.write(_protobuf_semantics_desc_bytes)
+    return desc_path, _protobuf_semantics_desc_bytes
 
 
 @pytest.fixture
@@ -3325,6 +3299,129 @@ def test_from_protobuf_smoke_nested_projection(nested_smoke_desc, from_protobuf_
             decoded.getField("child").getField("a").alias("child_a"),
             decoded.getField("items")[0].getField("b").alias("first_item_b"))
 
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+
+
+@pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
+def test_from_protobuf_optional_nested_message_presence(
+        nested_smoke_desc, from_protobuf_fn):
+    desc_path, desc_bytes = nested_smoke_desc
+    rows = [
+        (0, b""),
+        (1, b"\x12\x00"),
+        (2, b"\x12\x02\x08\x07"),
+    ]
+
+    def run_on_spark(spark):
+        decoded = _call_from_protobuf(
+            from_protobuf_fn,
+            f.col("bin"),
+            "test.Root",
+            desc_path,
+            desc_bytes)
+        return spark.createDataFrame(rows, ["id", "bin"]).select(
+            "id", decoded.getField("child").alias("child")).orderBy("id")
+
+    cpu_rows = with_cpu_session(
+        lambda spark: run_on_spark(spark).orderBy("id").collect())
+    assert cpu_rows[0]["child"] is None
+    assert cpu_rows[1]["child"].asDict() == {"a": None, "b": None}
+    assert cpu_rows[2]["child"].asDict() == {"a": 7, "b": None}
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+
+
+@pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
+def test_from_protobuf_proto2_transitive_import(
+        protobuf_semantics_desc, from_protobuf_fn):
+    desc_path, desc_bytes = protobuf_semantics_desc
+
+    def run_on_spark(spark):
+        decoded = _call_from_protobuf(
+            from_protobuf_fn,
+            f.col("bin"),
+            "test.ImportedRoot",
+            desc_path,
+            desc_bytes)
+        return spark.createDataFrame(
+            [(b"\x0a\x04\x0a\x02\x08\x07",)], ["bin"]).select(
+                decoded.getField("child").getField("grandchild")
+                    .getField("value").alias("value"))
+
+    cpu_rows = with_cpu_session(lambda spark: run_on_spark(spark).collect())
+    assert [row["value"] for row in cpu_rows] == [7]
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+
+
+@pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
+def test_from_protobuf_unsigned_boundaries(
+        protobuf_semantics_desc, from_protobuf_fn):
+    desc_path, desc_bytes = protobuf_semantics_desc
+    row = (
+        _encode_tag(1, 0) + _encode_varint(2) +
+        _encode_tag(2, 0) + _encode_varint((1 << 64) - 1) +
+        _encode_tag(3, 0) + _encode_varint(1 << 31) +
+        _encode_tag(4, 0) + _encode_varint(0) +
+        _encode_tag(4, 0) + _encode_varint((1 << 32) - 1) +
+        _encode_tag(5, 0) + _encode_varint(1 << 63) +
+        _encode_tag(5, 0) + _encode_varint((1 << 64) - 1))
+
+    def run_on_spark(spark):
+        decoded = _call_from_protobuf(
+            from_protobuf_fn,
+            f.col("bin"),
+            "test.UnsignedRoot",
+            desc_path,
+            desc_bytes)
+        return spark.createDataFrame([(row,)], ["bin"]).select(decoded.alias("decoded"))
+
+    cpu_rows = with_cpu_session(lambda spark: run_on_spark(spark).collect())
+    assert cpu_rows[0]["decoded"].asDict() == {
+        "status": "READY",
+        "required_u64": -1,
+        "optional_u32": -(1 << 31),
+        "repeated_u32": [0, -1],
+        "repeated_u64": [-(1 << 63), -1],
+        "default_u64": 0,
+    }
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+
+
+@pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
+def test_from_protobuf_multilevel_repeated_messages(
+        protobuf_semantics_desc, from_protobuf_fn):
+    desc_path, desc_bytes = protobuf_semantics_desc
+    schema = pb.message("RepeatedRoot", [
+        pb.repeated_message("children", 1, [
+            pb.repeated_message("leaves", 1, [
+                pb.repeated_message("values", 1, [
+                    pb.int32("value", 1),
+                ]),
+            ]),
+        ]),
+    ])
+    values = [
+        {"children": []},
+        {"children": [{"leaves": []}]},
+        {"children": [
+            {"leaves": [{"values": [{"value": 1}, {"value": 2}]}]},
+            {"leaves": [{"values": []}]},
+        ]},
+    ]
+
+    def run_on_spark(spark):
+        decoded = _call_from_protobuf(
+            from_protobuf_fn,
+            f.col("bin"),
+            "test.RepeatedRoot",
+            desc_path,
+            desc_bytes)
+        rows = [(index, schema.encode(value)) for index, value in enumerate(values)]
+        return spark.createDataFrame(rows, ["id", "bin"]).select(
+            "id", decoded.getField("children").alias("children")).orderBy("id")
+
+    cpu_rows = with_cpu_session(lambda spark: run_on_spark(spark).collect())
+    assert [row.asDict(recursive=True)["children"] for row in cpu_rows] == [
+        value["children"] for value in values]
     assert_gpu_and_cpu_are_equal_collect(run_on_spark)
 
 
