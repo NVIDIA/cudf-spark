@@ -23,11 +23,11 @@ from asserts import (
     assert_gpu_fallback_collect,
 )
 from data_gen import (
-    BooleanGen, IntegerGen, LongGen, FloatGen, DoubleGen, StringGen, BinaryGen,
-    SetValuesGen, gen_df, idfn
+    ArrayGen, BinaryGen, BooleanGen, DoubleGen, FloatGen, IntegerGen, LongGen,
+    SetValuesGen, StringGen, StructGen, idfn
 )
 from marks import allow_non_gpu, ignore_order, validate_execs_in_gpu_plan
-from protobuf_data_gen import pb
+from protobuf_data_gen import call_protobuf_function, materialize_protobuf_data
 from spark_session import (
     is_before_spark_340,
     is_spark_protobuf_available,
@@ -36,15 +36,7 @@ from spark_session import (
 )
 import pyspark.sql.functions as f
 from pyspark.sql.window import Window
-from pyspark.sql.types import (
-    BinaryType,
-    BooleanType,
-    DoubleType,
-    FloatType,
-    IntegerType,
-    LongType,
-    StringType,
-)
+from pyspark.sql.types import StringType
 
 pytestmark = [
     pytest.mark.premerge_ci_1,
@@ -54,73 +46,28 @@ pytestmark = [
 ]
 
 
-def _scalar(name, field_number, gen, encoding='default', default=None):
-    spark_type = gen.data_type
-    if isinstance(spark_type, BooleanType):
-        return pb.bool(name, field_number, gen=gen, default=default)
-    if isinstance(spark_type, IntegerType):
-        if encoding == 'fixed':
-            return pb.fixed32(name, field_number, gen=gen, default=default)
-        if encoding == 'zigzag':
-            return pb.sint32(name, field_number, gen=gen, default=default)
-        return pb.int32(name, field_number, gen=gen, default=default)
-    if isinstance(spark_type, LongType):
-        if encoding == 'fixed':
-            return pb.fixed64(name, field_number, gen=gen, default=default)
-        if encoding == 'zigzag':
-            return pb.sint64(name, field_number, gen=gen, default=default)
-        return pb.int64(name, field_number, gen=gen, default=default)
-    if isinstance(spark_type, FloatType):
-        return pb.float(name, field_number, gen=gen, default=default)
-    if isinstance(spark_type, DoubleType):
-        return pb.double(name, field_number, gen=gen, default=default)
-    if isinstance(spark_type, StringType):
-        return pb.string(name, field_number, gen=gen, default=default)
-    if isinstance(spark_type, BinaryType):
-        return pb.bytes(name, field_number, gen=gen, default=default)
-    raise ValueError(f"Unsupported DataGen for protobuf scalar: {spark_type}")
-
-
-def _nested(name, field_number, children):
-    return pb.nested(name, field_number, children)
-
-
-def _repeated(name, field_number, element_gen, packed=False,
-              encoding='default', min_len=0, max_len=5):
-    return pb.repeated(
-        _scalar(name, field_number, element_gen, encoding=encoding),
-        min_len=min_len,
-        max_len=max_len,
-        packed=packed)
-
-
-def _repeated_message(name, field_number, children, min_len=0, max_len=5):
-    return pb.repeated_message(
-        name, field_number, children, min_len=min_len, max_len=max_len)
-
-
 # Random data generation configurations for simple scalars
 _random_scalar_test_configs = [
     # (test_id, data_gen_config)
     ("all_types", [
-        _scalar("b", 1, BooleanGen()),
-        _scalar("i32", 2, IntegerGen()),
-        _scalar("i64", 3, LongGen()),
-        _scalar("f32", 4, FloatGen()),
-        _scalar("f64", 5, DoubleGen()),
-        _scalar("s", 6, StringGen()),
+        ("b", BooleanGen()),
+        ("i32", IntegerGen()),
+        ("i64", LongGen()),
+        ("f32", FloatGen()),
+        ("f64", DoubleGen()),
+        ("s", StringGen()),
     ]),
     ("integers_edge_cases", [
-        _scalar("b", 1, BooleanGen()),
-        _scalar("i32", 2, IntegerGen(
+        ("b", BooleanGen()),
+        ("i32", IntegerGen(
             min_val=-2147483648, max_val=2147483647,
             special_cases=[-2147483648, -1, 0, 1, 2147483647])),
-        _scalar("i64", 3, LongGen(
+        ("i64", LongGen(
             min_val=-9223372036854775808, max_val=9223372036854775807,
             special_cases=[-9223372036854775808, -1, 0, 1, 9223372036854775807])),
-        _scalar("f32", 4, FloatGen()),
-        _scalar("f64", 5, DoubleGen()),
-        _scalar("s", 6, StringGen()),
+        ("f32", FloatGen()),
+        ("f64", DoubleGen()),
+        ("s", StringGen()),
     ]),
 ]
 
@@ -136,13 +83,6 @@ def from_protobuf_fn():
     return from_protobuf
 
 
-@pytest.fixture(scope="module")
-def to_protobuf_fn():
-    """Return the runtime-provided PySpark API."""
-    from pyspark.sql.protobuf.functions import to_protobuf
-    return to_protobuf
-
-
 def _setup_protobuf_desc(local_tmp_path, desc_name, build_fn):
     """Build descriptor bytes and write them to the driver's local filesystem."""
     if not is_spark_protobuf_descriptor_runtime_available():
@@ -154,76 +94,11 @@ def _setup_protobuf_desc(local_tmp_path, desc_name, build_fn):
     return desc_path, desc_bytes
 
 
-def _call_protobuf_function(protobuf_fn, col, message_name,
-                            desc_path, desc_bytes, options=None):
-    sig = inspect.signature(protobuf_fn)
-    if "binaryDescriptorSet" in sig.parameters:
-        kw = dict(binaryDescriptorSet=bytearray(desc_bytes))
-        if options is not None:
-            kw["options"] = options
-        return protobuf_fn(col, message_name, **kw)
-    if options is not None:
-        return protobuf_fn(col, message_name, desc_path, options)
-    return protobuf_fn(col, message_name, desc_path)
-
-
 def _call_from_protobuf(from_protobuf_fn, col, message_name,
                         desc_path, desc_bytes, options=None):
     """Call from_protobuf using the right API variant."""
-    return _call_protobuf_function(
+    return call_protobuf_function(
         from_protobuf_fn, col, message_name, desc_path, desc_bytes, options)
-
-
-def _call_to_protobuf(to_protobuf_fn, col, message_name,
-                      desc_path, desc_bytes, options=None):
-    """Call to_protobuf using the right API variant."""
-    return _call_protobuf_function(
-        to_protobuf_fn, col, message_name, desc_path, desc_bytes, options)
-
-
-def _validate_materialized_schema(schema):
-    if any(field.name.casefold() == "bin" for field in schema.fields):
-        raise ValueError("protobuf field name conflicts with binary column: bin")
-
-
-def _collect_materialized_protobuf(
-        source, to_protobuf_fn, schema, desc_path, desc_bytes):
-    logical_value = f.struct(
-        *(f.col(field.name).alias(field.name) for field in schema.fields))
-    encoded = source.select(
-        "*",
-        _call_to_protobuf(
-            to_protobuf_fn, logical_value, schema.full_name,
-            desc_path, desc_bytes).alias("bin"))
-    rows = [tuple(row[:-1]) + (bytes(row["bin"]),) for row in encoded.collect()]
-    return rows, encoded.schema
-
-
-def _materialize_protobuf_data(
-        to_protobuf_fn, schema, desc_path, desc_bytes, length=2048):
-    """Materialize CPU-writer output before the CPU/GPU decoder comparison."""
-    _validate_materialized_schema(schema)
-
-    def materialize(spark):
-        source = gen_df(spark, schema.as_logical_datagen(), length=length)
-        return _collect_materialized_protobuf(
-            source, to_protobuf_fn, schema, desc_path, desc_bytes)
-
-    return with_cpu_session(materialize)
-
-
-def _materialize_protobuf_rows(
-        to_protobuf_fn, schema, desc_path, desc_bytes, logical_rows):
-    """Encode explicit logical rows with CPU to_protobuf before comparison."""
-    _validate_materialized_schema(schema)
-
-    def materialize(spark):
-        logical_type = schema.as_logical_datagen().data_type
-        source = spark.createDataFrame(logical_rows, logical_type)
-        return _collect_materialized_protobuf(
-            source, to_protobuf_fn, schema, desc_path, desc_bytes)
-
-    return with_cpu_session(materialize)
 
 
 def test_call_from_protobuf_preserves_options_for_legacy_signature():
@@ -241,53 +116,29 @@ def test_call_from_protobuf_preserves_options_for_legacy_signature():
     assert calls == [("col", "msg", "/tmp/test.desc", (options,))]
 
 
-def test_protobuf_schema_rejects_mismatched_datagen_type():
-    with pytest.raises(TypeError, match="string field s requires StringType"):
-        pb.string("s", 1, gen=IntegerGen())
-    with pytest.raises(TypeError, match="enum field status requires StringType"):
-        status = pb.enum_type("Status", [("UNKNOWN", 0)])
-        pb.enum_field("status", 1, status, gen=IntegerGen())
+def test_call_protobuf_function_preserves_options_for_binary_signature():
+    calls = []
 
+    def fake_from_protobuf(
+            col, message_name, binaryDescriptorSet=None, options=None):
+        calls.append((col, message_name, binaryDescriptorSet, options))
+        return "ok"
 
-def test_protobuf_schema_rejects_invalid_defaults():
-    with pytest.raises(TypeError, match="bool field flag requires a bool default"):
-        pb.bool("flag", 1, default="false")
-    with pytest.raises(ValueError, match="int32 default is out of range"):
-        pb.int32("value", 1, default=1 << 31)
-    with pytest.raises(ValueError, match="Unknown enum name"):
-        status = pb.enum_type("Status", [("UNKNOWN", 0)])
-        pb.enum_field("status", 1, status, default="MISSING")
-    with pytest.raises(NotImplementedError, match="bytes defaults"):
-        pb.bytes("payload", 1, default=b"data")
+    options = {"enums.as.ints": "true"}
+    result = call_protobuf_function(
+        fake_from_protobuf, "col", "msg", "/tmp/test.desc", b"desc",
+        options=options)
 
-
-def test_protobuf_cardinality_modifiers_reject_non_optional_fields():
-    repeated = pb.repeated(pb.int32("values", 1))
-    with pytest.raises(ValueError, match=r"required\(\) expects an optional field"):
-        pb.required(repeated)
-
-    required = pb.required(pb.int32("value", 1))
-    with pytest.raises(ValueError, match=r"repeated\(\) expects an optional field"):
-        pb.repeated(required)
-
-
-def test_protobuf_logical_datagen_rejects_nullable_repeated_elements():
-    schema = pb.message("Repeated", [
-        pb.repeated(pb.int32("values", 1, gen=IntegerGen())),
-    ])
-
-    with pytest.raises(
-            ValueError, match="repeated field values requires a non-nullable DataGen"):
-        schema.as_logical_datagen()
+    assert result == "ok"
+    assert calls == [("col", "msg", bytearray(b"desc"), options)]
 
 
 def test_protobuf_materializer_reserves_binary_column_name():
-    schema = pb.message("BinaryColumnConflict", [
-        pb.int32("BIN", 1, gen=IntegerGen()),
-    ])
+    logical_gen = StructGen([("BIN", IntegerGen())], nullable=False)
 
     with pytest.raises(ValueError, match="conflicts with binary column"):
-        _materialize_protobuf_data(None, schema, None, None)
+        materialize_protobuf_data(
+            logical_gen, "BinaryColumnConflict", None, None)
 
 
 def _build_simple_descriptor_set_bytes(spark):
@@ -541,82 +392,81 @@ def _build_oneof_message_descriptor_set_bytes(spark):
     ])
 
 
-@pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
-def test_protobuf_descriptor_avoids_nested_type_name_collisions(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
-    colliding_enum = pb.enum_type("Nested2", [("UNKNOWN", 0), ("READY", 1)])
-    colliding_value = pb.enum_type("Status", [("ZERO", 0), ("Nested3", 1)])
-    schema = pb.message("TypeNameCollision", [
-        pb.enum_field("status", 1, colliding_enum, gen=SetValuesGen(
-            StringType(), ["UNKNOWN", "READY"])),
-        pb.nested("child", 2, [
-            pb.int32("value", 1, gen=IntegerGen()),
+def _build_interop_descriptor_set_bytes(spark):
+    return _build_proto2_descriptor(spark, "interop.proto", [
+        _msg("InteropChild", [
+            _field("count", 1, "INT32"),
+            _field("name", 2, "STRING"),
         ]),
-        pb.nested("other_child", 3, [
-            pb.int32("value", 1, gen=IntegerGen()),
+        _msg("InteropItem", [
+            _field("id", 1, "INT32"),
+            _field("name", 2, "STRING"),
         ]),
-        pb.enum_field("other_status", 4, colliding_value, gen=SetValuesGen(
-            StringType(), ["ZERO", "Nested3"])),
-    ], package="test")
-    desc_path, desc_bytes = _setup_protobuf_desc(
-        local_tmp_path, "type_name_collision.desc", schema.descriptor_set_bytes)
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, schema, desc_path, desc_bytes, length=16)
-
-    def run_on_spark(spark):
-        df = spark.createDataFrame(fixture_rows, fixture_schema)
-        expected = f.struct(
-            *(f.col(field.name).alias(field.name) for field in schema.fields))
-        decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), schema.full_name,
-            desc_path, desc_bytes)
-        return df.select(expected.alias("expected"), decoded.alias("decoded"))
-
-    cpu_rows = with_cpu_session(lambda spark: run_on_spark(spark).collect())
-    assert all(row["expected"] == row["decoded"] for row in cpu_rows)
-    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+        _msg("Interop", [
+            _field("b", 1, "BOOL"),
+            _field("i32", 2, "INT32"),
+            _field("i64", 3, "INT64"),
+            _field("f32", 4, "FLOAT"),
+            _field("f64", 5, "DOUBLE"),
+            _field("s", 6, "STRING"),
+            _field("payload", 7, "BYTES"),
+            _field("packed_values", 8, "INT32", label="repeated", packed=True),
+            _field("child", 9, "MESSAGE", type_name=".test.InteropChild"),
+            _field("tags", 10, "STRING", label="repeated"),
+            _field("chunks", 11, "BYTES", label="repeated"),
+            _field(
+                "items", 12, "MESSAGE", label="repeated",
+                type_name=".test.InteropItem"),
+            _field("status", 13, "ENUM", type_name=".test.Interop.Status"),
+        ], enums=[_enum("Status", [("UNKNOWN", 0), ("READY", 1)])]),
+    ])
 
 
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
 def test_from_protobuf_cpu_to_protobuf_interoperability(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
-    status = pb.enum_type("Status", [("UNKNOWN", 0), ("READY", 1)])
-    schema = pb.message("Interop", [
-        _scalar("b", 1, BooleanGen(nullable=True)),
-        _scalar("i32", 2, IntegerGen(nullable=True)),
-        _scalar("i64", 3, LongGen(nullable=True)),
-        _scalar("f32", 4, FloatGen(nullable=True, no_nans=True)),
-        _scalar("f64", 5, DoubleGen(nullable=True, no_nans=True)),
-        _scalar("s", 6, StringGen(nullable=True)),
-        _scalar("payload", 7, BinaryGen(nullable=True)),
-        _repeated(
-            "packed_values", 8, IntegerGen(nullable=False),
-            packed=True, min_len=0, max_len=5),
-        _nested("child", 9, [
-            _scalar("count", 1, IntegerGen()),
-            _scalar("name", 2, StringGen()),
-        ]),
-        _repeated("tags", 10, StringGen(nullable=False), min_len=0, max_len=5),
-        _repeated("chunks", 11, BinaryGen(nullable=False), min_len=0, max_len=3),
-        _repeated_message("items", 12, [
-            _scalar("id", 1, IntegerGen()),
-            _scalar("name", 2, StringGen()),
-        ], min_len=0, max_len=3),
-        pb.enum_field("status", 13, status, gen=SetValuesGen(
-            StringType(), ["UNKNOWN", "READY"])),
-    ], package="test")
+        local_tmp_path, from_protobuf_fn):
+    logical_gen = StructGen([
+        ("b", BooleanGen(nullable=True)),
+        ("i32", IntegerGen(nullable=True)),
+        ("i64", LongGen(nullable=True)),
+        ("f32", FloatGen(nullable=True, no_nans=True)),
+        ("f64", DoubleGen(nullable=True, no_nans=True)),
+        ("s", StringGen(nullable=True)),
+        ("payload", BinaryGen(nullable=True)),
+        ("packed_values", ArrayGen(
+            IntegerGen(nullable=False), min_length=0, max_length=5,
+            nullable=False)),
+        ("child", StructGen([
+            ("count", IntegerGen()),
+            ("name", StringGen()),
+        ])),
+        ("tags", ArrayGen(
+            StringGen(nullable=False), min_length=0, max_length=5,
+            nullable=False)),
+        ("chunks", ArrayGen(
+            BinaryGen(nullable=False), min_length=0, max_length=3,
+            nullable=False)),
+        ("items", ArrayGen(
+            StructGen([
+                ("id", IntegerGen()),
+                ("name", StringGen()),
+            ], nullable=False),
+            min_length=0, max_length=3, nullable=False)),
+        ("status", SetValuesGen(StringType(), ["UNKNOWN", "READY"])),
+    ], nullable=False)
     desc_path, desc_bytes = _setup_protobuf_desc(
-        local_tmp_path, "interop.desc", schema.descriptor_set_bytes)
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, schema, desc_path, desc_bytes, length=256)
+        local_tmp_path, "interop.desc", _build_interop_descriptor_set_bytes)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        logical_gen, "test.Interop", desc_path, desc_bytes, length=256)
 
     def run_on_spark(spark):
         df = spark.createDataFrame(fixture_rows, fixture_schema)
         expected = f.struct(
-            *(f.col(field.name).alias(field.name) for field in schema.fields))
+            *(f.col(field.name).alias(field.name)
+              for field in logical_gen.data_type.fields))
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), schema.full_name,
+            from_protobuf_fn, f.col("bin"), "test.Interop",
             desc_path, desc_bytes)
         return df.select(expected.alias("expected"), decoded.alias("decoded"))
 
@@ -641,25 +491,23 @@ def _build_nested_descriptor_set_bytes(spark):
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
 def test_from_protobuf_schema_projection_simple_fields_only(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
+        local_tmp_path, from_protobuf_fn):
     """Selecting scalar siblings should prune the unused nested message."""
     desc_path, desc_bytes = _setup_protobuf_desc(
         local_tmp_path, "nested.desc", _build_nested_descriptor_set_bytes)
-    schema = pb.message("WithNested", [
-        _scalar("simple_int", 1, IntegerGen()),
-        _scalar("simple_str", 2, StringGen()),
-        _nested("nested_msg", 3, [
-            _scalar("x", 1, IntegerGen()),
-        ]),
-        _scalar("simple_long", 4, LongGen()),
-    ], package="test")
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, schema, desc_path, desc_bytes)
+    logical_gen = StructGen([
+        ("simple_int", IntegerGen()),
+        ("simple_str", StringGen()),
+        ("nested_msg", StructGen([("x", IntegerGen())])),
+        ("simple_long", LongGen()),
+    ], nullable=False)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        logical_gen, "test.WithNested", desc_path, desc_bytes)
 
     def run_on_spark(spark):
         df = spark.createDataFrame(fixture_rows, fixture_schema)
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), schema.full_name, desc_path, desc_bytes)
+            from_protobuf_fn, f.col("bin"), "test.WithNested", desc_path, desc_bytes)
         return df.select(
             decoded.getField("simple_int").alias("simple_int"),
             decoded.getField("simple_str").alias("simple_str"),
@@ -708,22 +556,21 @@ def _build_nested_enum_descriptor_set_bytes(spark):
 ], ids=lambda x: x)
 @ignore_order(local=True)
 def test_from_protobuf_enum_cases(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn, enum_case):
+        local_tmp_path, from_protobuf_fn, enum_case):
     """Parametrized enum decoding tests for int/string modes and unknown values."""
     desc_path, desc_bytes = _setup_protobuf_desc(
         local_tmp_path, "enum.desc", _build_enum_descriptor_set_bytes)
     message_name = "test.WithEnum"
-    color_enum = pb.enum_type("Color", [("RED", 0), ("GREEN", 1), ("BLUE", 2)])
-    schema = pb.message("WithEnum", [
-        pb.enum_field("color", 1, color_enum, gen=SetValuesGen(
+    logical_gen = StructGen([
+        ("color", SetValuesGen(
             StringType(), ["RED", "GREEN", "BLUE", None])),
-        _scalar("count", 2, IntegerGen()),
-        _scalar("name", 3, StringGen()),
-    ], package="test")
+        ("count", IntegerGen()),
+        ("name", StringGen()),
+    ], nullable=False)
 
     if enum_case == "as_int":
-        materialized, _ = _materialize_protobuf_rows(
-            to_protobuf_fn, schema, desc_path, desc_bytes, [
+        materialized, _ = materialize_protobuf_data(
+            logical_gen, message_name, desc_path, desc_bytes, logical_rows=[
                 {"color": "GREEN", "count": 42, "name": "test"},
                 {"color": "RED", "count": 100, "name": None},
                 {"color": None, "count": 200, "name": "hello"},
@@ -736,8 +583,8 @@ def test_from_protobuf_enum_cases(
         options = {"enums.as.ints": "true", "mode": "PERMISSIVE"}
         select_mode = "fields2"
     elif enum_case == "as_string":
-        materialized, _ = _materialize_protobuf_rows(
-            to_protobuf_fn, schema, desc_path, desc_bytes, [
+        materialized, _ = materialize_protobuf_data(
+            logical_gen, message_name, desc_path, desc_bytes, logical_rows=[
                 {"color": "GREEN", "count": 42, "name": "test"},
                 {"color": "RED", "count": 100, "name": None},
                 {"color": "BLUE", "count": 200, "name": "hello"},
@@ -841,7 +688,7 @@ def test_from_protobuf_aliased_enum_falls_back(
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
 def test_from_protobuf_nested_enum_valid_and_missing_values(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
+        local_tmp_path, from_protobuf_fn):
     """
     Nested enum decode parity test:
       - valid nested enum values decode to names in string mode
@@ -851,18 +698,17 @@ def test_from_protobuf_nested_enum_valid_and_missing_values(
     desc_path, desc_bytes = _setup_protobuf_desc(
         local_tmp_path, "nested_enum.desc", _build_nested_enum_descriptor_set_bytes)
     message_name = "test.WithNestedEnum"
-    status_enum = pb.enum_type("Status", [("UNKNOWN", 0), ("OK", 1), ("BAD", 2)])
-    schema = pb.message("WithNestedEnum", [
-        _scalar("id", 1, IntegerGen()),
-        _nested("detail", 2, [
-            pb.enum_field("status", 1, status_enum, gen=SetValuesGen(
+    logical_gen = StructGen([
+        ("id", IntegerGen()),
+        ("detail", StructGen([
+            ("status", SetValuesGen(
                 StringType(), ["UNKNOWN", "OK", "BAD", None])),
-            _scalar("count", 2, IntegerGen()),
-        ]),
-        _scalar("name", 3, StringGen(nullable=True)),
-    ], package="test")
-    fixture_rows, _ = _materialize_protobuf_rows(
-        to_protobuf_fn, schema, desc_path, desc_bytes, [
+            ("count", IntegerGen()),
+        ])),
+        ("name", StringGen(nullable=True)),
+    ], nullable=False)
+    fixture_rows, _ = materialize_protobuf_data(
+        logical_gen, message_name, desc_path, desc_bytes, logical_rows=[
             {"id": 1, "detail": {"status": "OK", "count": 10}, "name": "ok"},
             {"id": 2, "detail": {"status": "BAD", "count": 20}, "name": "bad"},
             {"id": 3, "detail": {"status": None, "count": 30}, "name": "none"},
@@ -1273,20 +1119,20 @@ def _build_nested_required_field_descriptor_set_bytes(spark):
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
 def test_from_protobuf_required_field_present(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
+        local_tmp_path, from_protobuf_fn):
     """
     Test that required fields decode correctly when present.
     GPU should produce same results as CPU.
     """
     desc_path, desc_bytes = _setup_protobuf_desc(
         local_tmp_path, "required.desc", _build_required_field_descriptor_set_bytes)
-    required_schema = pb.message("WithRequired", [
-        pb.required(_scalar("id", 1, LongGen(nullable=False))),
-        _scalar("name", 2, StringGen()),
-        _scalar("count", 3, IntegerGen()),
-    ], package="test")
-    fixture_rows, _ = _materialize_protobuf_rows(
-        to_protobuf_fn, required_schema, desc_path, desc_bytes, [
+    logical_gen = StructGen([
+        ("id", LongGen(nullable=False)),
+        ("name", StringGen()),
+        ("count", IntegerGen()),
+    ], nullable=False)
+    fixture_rows, _ = materialize_protobuf_data(
+        logical_gen, "test.WithRequired", desc_path, desc_bytes, logical_rows=[
             {"id": 100, "name": "test", "count": 42},
             {"id": 200, "name": None, "count": None},
         ])
@@ -1295,7 +1141,7 @@ def test_from_protobuf_required_field_present(
     def run_on_spark(spark):
         df = spark.createDataFrame(test_data, schema="bin binary")
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), required_schema.full_name,
+            from_protobuf_fn, f.col("bin"), "test.WithRequired",
             desc_path, desc_bytes)
         return df.select(
             decoded.getField("id").alias("id"),
@@ -1845,24 +1691,24 @@ def _scalar_test_id(config):
 @pytest.mark.parametrize("test_config", _random_scalar_test_configs, ids=_scalar_test_id)
 @ignore_order(local=True)
 def test_from_protobuf_random_scalars(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn, test_config):
+        local_tmp_path, from_protobuf_fn, test_config):
     """
     Parametrized test for from_protobuf with randomly generated scalar data.
     Covers: all types, integer edge cases, float edge cases, large datasets.
     """
-    test_id, field_configs = test_config
+    _, field_configs = test_config
 
-    schema = pb.message("Simple", field_configs, package="test")
+    logical_gen = StructGen(field_configs, nullable=False)
     desc_path, desc_bytes = _setup_protobuf_desc(
-        local_tmp_path, "simple.desc", schema.descriptor_set_bytes)
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, schema, desc_path, desc_bytes)
+        local_tmp_path, "simple.desc", _build_simple_descriptor_set_bytes)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        logical_gen, "test.Simple", desc_path, desc_bytes)
 
     def run_on_spark(spark):
         df = spark.createDataFrame(fixture_rows, fixture_schema)
 
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), schema.full_name, desc_path, desc_bytes)
+            from_protobuf_fn, f.col("bin"), "test.Simple", desc_path, desc_bytes)
 
         # Select all decoded fields
         return df.select(
@@ -1877,37 +1723,52 @@ def test_from_protobuf_random_scalars(
     assert_gpu_and_cpu_are_equal_collect(run_on_spark)
 
 
+def _build_all_scalars_descriptor_set_bytes(spark):
+    return _build_proto2_descriptor(spark, "all_scalars.proto", [
+        _msg("AllScalars", [
+            _field("b", 1, "BOOL"),
+            _field("i32", 2, "INT32"),
+            _field("i64", 3, "INT64"),
+            _field("f32", 4, "FLOAT"),
+            _field("f64", 5, "DOUBLE"),
+            _field("s", 6, "STRING"),
+            _field("si32", 7, "SINT32"),
+            _field("si64", 8, "SINT64"),
+            _field("fx32", 9, "FIXED32"),
+            _field("fx64", 10, "FIXED64"),
+        ]),
+    ])
+
+
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
 def test_from_protobuf_all_scalar_types(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
+        local_tmp_path, from_protobuf_fn):
     """Decode all scalar wire encodings together in one message."""
-    schema = pb.message("AllScalars", [
-        _scalar("b", 1, BooleanGen()),
-        _scalar("i32", 2, IntegerGen()),
-        _scalar("i64", 3, LongGen()),
-        _scalar("f32", 4, FloatGen()),
-        _scalar("f64", 5, DoubleGen()),
-        _scalar("s", 6, StringGen()),
-        _scalar("si32", 7, IntegerGen(
-            special_cases=[-1, 0, 1, -2147483648, 2147483647]), encoding='zigzag'),
-        _scalar("si64", 8, LongGen(
-            special_cases=[-1, 0, 1, -9223372036854775808, 9223372036854775807]),
-            encoding='zigzag'),
-        _scalar("fx32", 9, IntegerGen(
-            special_cases=[0, 1, -1, 2147483647, -2147483648]), encoding='fixed'),
-        _scalar("fx64", 10, LongGen(
-            special_cases=[0, 1, -1]), encoding='fixed'),
-    ], package="test")
+    logical_gen = StructGen([
+        ("b", BooleanGen()),
+        ("i32", IntegerGen()),
+        ("i64", LongGen()),
+        ("f32", FloatGen()),
+        ("f64", DoubleGen()),
+        ("s", StringGen()),
+        ("si32", IntegerGen(
+            special_cases=[-1, 0, 1, -2147483648, 2147483647])),
+        ("si64", LongGen(
+            special_cases=[-1, 0, 1, -9223372036854775808, 9223372036854775807])),
+        ("fx32", IntegerGen(
+            special_cases=[0, 1, -1, 2147483647, -2147483648])),
+        ("fx64", LongGen(special_cases=[0, 1, -1])),
+    ], nullable=False)
     desc_path, desc_bytes = _setup_protobuf_desc(
-        local_tmp_path, "all_scalars.desc", schema.descriptor_set_bytes)
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, schema, desc_path, desc_bytes)
+        local_tmp_path, "all_scalars.desc", _build_all_scalars_descriptor_set_bytes)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        logical_gen, "test.AllScalars", desc_path, desc_bytes)
 
     def run_on_spark(spark):
         df = spark.createDataFrame(fixture_rows, fixture_schema)
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), schema.full_name, desc_path, desc_bytes)
+            from_protobuf_fn, f.col("bin"), "test.AllScalars", desc_path, desc_bytes)
         return df.select(
             decoded.getField("b").alias("b"),
             decoded.getField("i32").alias("i32"),
@@ -1924,23 +1785,29 @@ def test_from_protobuf_all_scalar_types(
     assert_gpu_and_cpu_are_equal_collect(run_on_spark)
 
 
+def _build_scalar_bytes_descriptor_set_bytes(spark):
+    return _build_proto2_descriptor(spark, "scalar_bytes.proto", [
+        _msg("ScalarBytes", [_field("payload", 1, "BYTES")]),
+    ])
+
+
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
 def test_from_protobuf_scalar_bytes(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
+        local_tmp_path, from_protobuf_fn):
     """Decode optional bytes scalar field, including empty bytes."""
-    schema = pb.message("ScalarBytes", [
-        _scalar("payload", 1, BinaryGen(min_length=0, max_length=16)),
-    ], package="test")
+    logical_gen = StructGen([
+        ("payload", BinaryGen(min_length=0, max_length=16)),
+    ], nullable=False)
     desc_path, desc_bytes = _setup_protobuf_desc(
-        local_tmp_path, "scalar_bytes.desc", schema.descriptor_set_bytes)
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, schema, desc_path, desc_bytes)
+        local_tmp_path, "scalar_bytes.desc", _build_scalar_bytes_descriptor_set_bytes)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        logical_gen, "test.ScalarBytes", desc_path, desc_bytes)
 
     def run_on_spark(spark):
         df = spark.createDataFrame(fixture_rows, fixture_schema)
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), schema.full_name, desc_path, desc_bytes)
+            from_protobuf_fn, f.col("bin"), "test.ScalarBytes", desc_path, desc_bytes)
         return df.select(decoded.getField("payload").alias("payload"))
 
     assert_gpu_and_cpu_are_equal_collect(run_on_spark)
@@ -2028,27 +1895,109 @@ def test_from_protobuf_duplicate_singular_messages_merge(local_tmp_path, from_pr
     assert_gpu_and_cpu_are_equal_collect(run_on_spark)
 
 
+def _build_repeated_int_descriptor_set_bytes(spark):
+    return _build_proto2_descriptor(spark, "repeated_int.proto", [
+        _msg("WithRepeatedInt", [
+            _field("id", 1, "INT32"),
+            _field("values", 2, "INT32", label="repeated"),
+        ]),
+    ])
+
+
+def _build_repeated_string_descriptor_set_bytes(spark):
+    return _build_proto2_descriptor(spark, "repeated_string.proto", [
+        _msg("WithRepeatedString", [
+            _field("name", 1, "STRING"),
+            _field("tags", 2, "STRING", label="repeated"),
+        ]),
+    ])
+
+
+def _build_deep_nested_descriptor_set_bytes(spark):
+    return _build_proto2_descriptor(spark, "deep_nested.proto", [
+        _msg("Inner", [_field("value", 1, "INT32")]),
+        _msg("Middle", [
+            _field("name", 1, "STRING"),
+            _field("inner", 2, "MESSAGE", type_name=".test.Inner"),
+        ]),
+        _msg("Outer", [
+            _field("id", 1, "INT32"),
+            _field("middle", 2, "MESSAGE", type_name=".test.Middle"),
+        ]),
+    ])
+
+
+def _build_repeated_message_descriptor_set_bytes(spark):
+    return _build_proto2_descriptor(spark, "repeated_message.proto", [
+        _msg("Item", [
+            _field("id", 1, "INT32"),
+            _field("name", 2, "STRING"),
+        ]),
+        _msg("Container", [
+            _field("title", 1, "STRING"),
+            _field(
+                "items", 2, "MESSAGE", label="repeated",
+                type_name=".test.Item"),
+        ]),
+    ])
+
+
+def _build_nested_with_repeated_descriptor_set_bytes(spark):
+    return _build_proto2_descriptor(spark, "nested_with_repeated.proto", [
+        _msg("NestedWithRepeated", [
+            _field("name", 1, "STRING"),
+            _field("values", 2, "INT32", label="repeated"),
+            _field("count", 3, "INT32"),
+        ]),
+        _msg("OuterWithNestedRepeated", [
+            _field("id", 1, "INT32"),
+            _field(
+                "nested", 2, "MESSAGE",
+                type_name=".test.NestedWithRepeated"),
+        ]),
+    ])
+
+
+def _build_repeated_with_nested_descriptor_set_bytes(spark):
+    return _build_proto2_descriptor(spark, "repeated_with_nested.proto", [
+        _msg("Inner", [_field("value", 1, "INT32")]),
+        _msg("ItemWithNested", [
+            _field("id", 1, "INT32"),
+            _field("inner", 2, "MESSAGE", type_name=".test.Inner"),
+            _field("name", 3, "STRING"),
+        ]),
+        _msg("ContainerWithNestedItems", [
+            _field("title", 1, "STRING"),
+            _field(
+                "items", 2, "MESSAGE", label="repeated",
+                type_name=".test.ItemWithNested"),
+        ]),
+    ])
+
+
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
 def test_from_protobuf_repeated_int32(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
+        local_tmp_path, from_protobuf_fn):
     """
     Test decoding repeated int32 field (ArrayType of integers).
     """
-    schema = pb.message("WithRepeatedInt", [
-        _scalar("id", 1, IntegerGen()),
-        _repeated(
-            "values", 2, IntegerGen(nullable=False), min_len=0, max_len=10),
-    ], package="test")
+    logical_gen = StructGen([
+        ("id", IntegerGen()),
+        ("values", ArrayGen(
+            IntegerGen(nullable=False), min_length=0, max_length=10,
+            nullable=False)),
+    ], nullable=False)
     desc_path, desc_bytes = _setup_protobuf_desc(
-        local_tmp_path, "repeated_int.desc", schema.descriptor_set_bytes)
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, schema, desc_path, desc_bytes)
+        local_tmp_path, "repeated_int.desc", _build_repeated_int_descriptor_set_bytes)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        logical_gen, "test.WithRepeatedInt", desc_path, desc_bytes)
 
     def run_on_spark(spark):
         df = spark.createDataFrame(fixture_rows, fixture_schema)
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), schema.full_name, desc_path, desc_bytes)
+            from_protobuf_fn, f.col("bin"), "test.WithRepeatedInt",
+            desc_path, desc_bytes)
         return df.select(
             decoded.getField("id").alias("id"),
             decoded.getField("values").alias("values"),
@@ -2060,23 +2009,27 @@ def test_from_protobuf_repeated_int32(
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
 def test_from_protobuf_repeated_string(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
+        local_tmp_path, from_protobuf_fn):
     """
     Test decoding repeated string field (ArrayType of strings).
     """
-    schema = pb.message("WithRepeatedString", [
-        _scalar("name", 1, StringGen()),
-        _repeated("tags", 2, StringGen(nullable=False), min_len=0, max_len=5),
-    ], package="test")
+    logical_gen = StructGen([
+        ("name", StringGen()),
+        ("tags", ArrayGen(
+            StringGen(nullable=False), min_length=0, max_length=5,
+            nullable=False)),
+    ], nullable=False)
     desc_path, desc_bytes = _setup_protobuf_desc(
-        local_tmp_path, "repeated_string.desc", schema.descriptor_set_bytes)
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, schema, desc_path, desc_bytes)
+        local_tmp_path, "repeated_string.desc",
+        _build_repeated_string_descriptor_set_bytes)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        logical_gen, "test.WithRepeatedString", desc_path, desc_bytes)
 
     def run_on_spark(spark):
         df = spark.createDataFrame(fixture_rows, fixture_schema)
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), schema.full_name, desc_path, desc_bytes)
+            from_protobuf_fn, f.col("bin"), "test.WithRepeatedString",
+            desc_path, desc_bytes)
         return df.select(
             decoded.getField("name").alias("name"),
             decoded.getField("tags").alias("tags"),
@@ -2088,25 +2041,25 @@ def test_from_protobuf_repeated_string(
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
 def test_from_protobuf_nested_message(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
+        local_tmp_path, from_protobuf_fn):
     """
     Test decoding nested message field (StructType).
     """
-    schema = pb.message("WithNested", [
-        _scalar("simple_int", 1, IntegerGen()),
-        _scalar("simple_str", 2, StringGen(nullable=True)),
-        _nested("nested_msg", 3, [_scalar("x", 1, IntegerGen())]),
-        _scalar("simple_long", 4, LongGen()),
-    ], package="test")
+    logical_gen = StructGen([
+        ("simple_int", IntegerGen()),
+        ("simple_str", StringGen(nullable=True)),
+        ("nested_msg", StructGen([("x", IntegerGen())])),
+        ("simple_long", LongGen()),
+    ], nullable=False)
     desc_path, desc_bytes = _setup_protobuf_desc(
-        local_tmp_path, "nested.desc", schema.descriptor_set_bytes)
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, schema, desc_path, desc_bytes)
+        local_tmp_path, "nested.desc", _build_nested_descriptor_set_bytes)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        logical_gen, "test.WithNested", desc_path, desc_bytes)
 
     def run_on_spark(spark):
         df = spark.createDataFrame(fixture_rows, fixture_schema)
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), schema.full_name, desc_path, desc_bytes)
+            from_protobuf_fn, f.col("bin"), "test.WithNested", desc_path, desc_bytes)
         # Select all fields including nested
         return df.select(
             decoded.getField("simple_int").alias("simple_int"),
@@ -2121,26 +2074,26 @@ def test_from_protobuf_nested_message(
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
 def test_from_protobuf_deep_nested(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
+        local_tmp_path, from_protobuf_fn):
     """
     Test decoding deeply nested messages (3 levels).
     """
-    schema = pb.message("Outer", [
-        _scalar("id", 1, IntegerGen()),
-        _nested("middle", 2, [
-            _scalar("name", 1, StringGen()),
-            _nested("inner", 2, [_scalar("value", 1, IntegerGen())]),
-        ]),
-    ], package="test")
+    logical_gen = StructGen([
+        ("id", IntegerGen()),
+        ("middle", StructGen([
+            ("name", StringGen()),
+            ("inner", StructGen([("value", IntegerGen())])),
+        ])),
+    ], nullable=False)
     desc_path, desc_bytes = _setup_protobuf_desc(
-        local_tmp_path, "deep_nested.desc", schema.descriptor_set_bytes)
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, schema, desc_path, desc_bytes)
+        local_tmp_path, "deep_nested.desc", _build_deep_nested_descriptor_set_bytes)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        logical_gen, "test.Outer", desc_path, desc_bytes)
 
     def run_on_spark(spark):
         df = spark.createDataFrame(fixture_rows, fixture_schema)
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), schema.full_name, desc_path, desc_bytes)
+            from_protobuf_fn, f.col("bin"), "test.Outer", desc_path, desc_bytes)
         return df.select(
             decoded.getField("id").alias("id"),
             decoded.getField("middle").alias("middle"),
@@ -2152,26 +2105,29 @@ def test_from_protobuf_deep_nested(
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
 def test_from_protobuf_repeated_message(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
+        local_tmp_path, from_protobuf_fn):
     """
     Test decoding repeated message field (ArrayType of StructType).
     """
-    schema = pb.message("Container", [
-        _scalar("title", 1, StringGen()),
-        _repeated_message("items", 2, [
-            _scalar("id", 1, IntegerGen()),
-            _scalar("name", 2, StringGen()),
-        ], min_len=0, max_len=5),
-    ], package="test")
+    logical_gen = StructGen([
+        ("title", StringGen()),
+        ("items", ArrayGen(
+            StructGen([
+                ("id", IntegerGen()),
+                ("name", StringGen()),
+            ], nullable=False),
+            min_length=0, max_length=5, nullable=False)),
+    ], nullable=False)
     desc_path, desc_bytes = _setup_protobuf_desc(
-        local_tmp_path, "repeated_message.desc", schema.descriptor_set_bytes)
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, schema, desc_path, desc_bytes)
+        local_tmp_path, "repeated_message.desc",
+        _build_repeated_message_descriptor_set_bytes)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        logical_gen, "test.Container", desc_path, desc_bytes)
 
     def run_on_spark(spark):
         df = spark.createDataFrame(fixture_rows, fixture_schema)
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), schema.full_name, desc_path, desc_bytes)
+            from_protobuf_fn, f.col("bin"), "test.Container", desc_path, desc_bytes)
         return df.select(
             decoded.getField("title").alias("title"),
             decoded.getField("items").alias("items"),
@@ -2183,30 +2139,33 @@ def test_from_protobuf_repeated_message(
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
 def test_from_protobuf_nested_with_repeated(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
+        local_tmp_path, from_protobuf_fn):
     """
     Test decoding nested message that contains repeated fields.
     Schema: OuterWithNestedRepeated { id, nested: NestedWithRepeated { name, values[], count } }
     This tests StructType containing StructType containing ArrayType.
     """
-    schema = pb.message("OuterWithNestedRepeated", [
-        _scalar("id", 1, IntegerGen()),
-        _nested("nested", 2, [
-            _scalar("name", 1, StringGen()),
-            _repeated(
-                "values", 2, IntegerGen(nullable=False), min_len=0, max_len=5),
-            _scalar("count", 3, IntegerGen()),
-        ]),
-    ], package="test")
+    logical_gen = StructGen([
+        ("id", IntegerGen()),
+        ("nested", StructGen([
+            ("name", StringGen()),
+            ("values", ArrayGen(
+                IntegerGen(nullable=False), min_length=0, max_length=5,
+                nullable=False)),
+            ("count", IntegerGen()),
+        ])),
+    ], nullable=False)
     desc_path, desc_bytes = _setup_protobuf_desc(
-        local_tmp_path, "nested_with_repeated.desc", schema.descriptor_set_bytes)
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, schema, desc_path, desc_bytes)
+        local_tmp_path, "nested_with_repeated.desc",
+        _build_nested_with_repeated_descriptor_set_bytes)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        logical_gen, "test.OuterWithNestedRepeated", desc_path, desc_bytes)
 
     def run_on_spark(spark):
         df = spark.createDataFrame(fixture_rows, fixture_schema)
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), schema.full_name, desc_path, desc_bytes)
+            from_protobuf_fn, f.col("bin"), "test.OuterWithNestedRepeated",
+            desc_path, desc_bytes)
         return df.select(
             decoded.getField("id").alias("id"),
             decoded.getField("nested").alias("nested"),
@@ -2218,29 +2177,33 @@ def test_from_protobuf_nested_with_repeated(
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
 def test_from_protobuf_repeated_with_nested(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
+        local_tmp_path, from_protobuf_fn):
     """
     Test decoding repeated message that contains nested message.
     Schema: ContainerWithNestedItems { title, items[]: ItemWithNested { id, inner: Inner { value }, name } }
     This tests ArrayType(StructType(StructType)) - nested struct inside repeated message.
     """
-    schema = pb.message("ContainerWithNestedItems", [
-        _scalar("title", 1, StringGen()),
-        _repeated_message("items", 2, [
-            _scalar("id", 1, IntegerGen()),
-            _nested("inner", 2, [_scalar("value", 1, IntegerGen())]),
-            _scalar("name", 3, StringGen()),
-        ], min_len=0, max_len=3),
-    ], package="test")
+    logical_gen = StructGen([
+        ("title", StringGen()),
+        ("items", ArrayGen(
+            StructGen([
+                ("id", IntegerGen()),
+                ("inner", StructGen([("value", IntegerGen())])),
+                ("name", StringGen()),
+            ], nullable=False),
+            min_length=0, max_length=3, nullable=False)),
+    ], nullable=False)
     desc_path, desc_bytes = _setup_protobuf_desc(
-        local_tmp_path, "repeated_with_nested.desc", schema.descriptor_set_bytes)
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, schema, desc_path, desc_bytes)
+        local_tmp_path, "repeated_with_nested.desc",
+        _build_repeated_with_nested_descriptor_set_bytes)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        logical_gen, "test.ContainerWithNestedItems", desc_path, desc_bytes)
 
     def run_on_spark(spark):
         df = spark.createDataFrame(fixture_rows, fixture_schema)
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), schema.full_name, desc_path, desc_bytes)
+            from_protobuf_fn, f.col("bin"), "test.ContainerWithNestedItems",
+            desc_path, desc_bytes)
         return df.select(
             decoded.getField("title").alias("title"),
             decoded.getField("items").alias("items"),
@@ -2264,31 +2227,32 @@ def _build_packed_repeated_descriptor_set_bytes(spark):
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
 def test_from_protobuf_packed_repeated(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
+        local_tmp_path, from_protobuf_fn):
     """
     Test packed repeated fields (int, double, bool) using DataGen.
     """
-    schema = pb.message("WithPackedRepeated", [
-        _scalar("id", 1, IntegerGen()),
-        _repeated(
-            "int_values", 2, IntegerGen(nullable=False),
-            packed=True, min_len=0, max_len=10),
-        _repeated(
-            "double_values", 3, DoubleGen(nullable=False),
-            packed=True, min_len=0, max_len=5),
-        _repeated(
-            "bool_values", 4, BooleanGen(nullable=False),
-            packed=True, min_len=0, max_len=5),
-    ], package="test")
+    logical_gen = StructGen([
+        ("id", IntegerGen()),
+        ("int_values", ArrayGen(
+            IntegerGen(nullable=False), min_length=0, max_length=10,
+            nullable=False)),
+        ("double_values", ArrayGen(
+            DoubleGen(nullable=False), min_length=0, max_length=5,
+            nullable=False)),
+        ("bool_values", ArrayGen(
+            BooleanGen(nullable=False), min_length=0, max_length=5,
+            nullable=False)),
+    ], nullable=False)
     desc_path, desc_bytes = _setup_protobuf_desc(
-        local_tmp_path, "packed.desc", schema.descriptor_set_bytes)
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, schema, desc_path, desc_bytes)
+        local_tmp_path, "packed.desc", _build_packed_repeated_descriptor_set_bytes)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        logical_gen, "test.WithPackedRepeated", desc_path, desc_bytes)
 
     def run_on_spark(spark):
         df = spark.createDataFrame(fixture_rows, fixture_schema)
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), schema.full_name, desc_path, desc_bytes)
+            from_protobuf_fn, f.col("bin"), "test.WithPackedRepeated",
+            desc_path, desc_bytes)
         return df.select(
             decoded.getField("id").alias("id"),
             decoded.getField("int_values").alias("int_values"),
@@ -2299,28 +2263,48 @@ def test_from_protobuf_packed_repeated(
     assert_gpu_and_cpu_are_equal_collect(run_on_spark)
 
 
+def _build_repeated_all_types_descriptor_set_bytes(spark):
+    return _build_proto2_descriptor(spark, "repeated_all_types.proto", [
+        _msg("WithRepeatedAllTypes", [
+            _field("id", 1, "INT32"),
+            _field("long_values", 2, "INT64", label="repeated"),
+            _field("float_values", 3, "FLOAT", label="repeated"),
+            _field("double_values", 4, "DOUBLE", label="repeated"),
+            _field("bool_values", 5, "BOOL", label="repeated"),
+            _field("bytes_values", 6, "BYTES", label="repeated"),
+        ]),
+    ])
+
+
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
 def test_from_protobuf_repeated_all_types(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
+        local_tmp_path, from_protobuf_fn):
     """Test repeated fields of various types (int64, float, double, bool, bytes) using DataGen."""
-    schema = pb.message("WithRepeatedAllTypes", [
-        _scalar("id", 1, IntegerGen()),
-        _repeated("long_values", 2, LongGen(nullable=False)),
-        _repeated("float_values", 3, FloatGen(nullable=False)),
-        _repeated("double_values", 4, DoubleGen(nullable=False)),
-        _repeated("bool_values", 5, BooleanGen(nullable=False)),
-        _repeated("bytes_values", 6, BinaryGen(nullable=False)),
-    ], package="test")
+    logical_gen = StructGen([
+        ("id", IntegerGen()),
+        ("long_values", ArrayGen(
+            LongGen(nullable=False), min_length=0, max_length=5, nullable=False)),
+        ("float_values", ArrayGen(
+            FloatGen(nullable=False), min_length=0, max_length=5, nullable=False)),
+        ("double_values", ArrayGen(
+            DoubleGen(nullable=False), min_length=0, max_length=5, nullable=False)),
+        ("bool_values", ArrayGen(
+            BooleanGen(nullable=False), min_length=0, max_length=5, nullable=False)),
+        ("bytes_values", ArrayGen(
+            BinaryGen(nullable=False), min_length=0, max_length=5, nullable=False)),
+    ], nullable=False)
     desc_path, desc_bytes = _setup_protobuf_desc(
-        local_tmp_path, "repeated_all.desc", schema.descriptor_set_bytes)
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, schema, desc_path, desc_bytes)
+        local_tmp_path, "repeated_all.desc",
+        _build_repeated_all_types_descriptor_set_bytes)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        logical_gen, "test.WithRepeatedAllTypes", desc_path, desc_bytes)
 
     def run_on_spark(spark):
         df = spark.createDataFrame(fixture_rows, fixture_schema)
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), schema.full_name, desc_path, desc_bytes)
+            from_protobuf_fn, f.col("bin"), "test.WithRepeatedAllTypes",
+            desc_path, desc_bytes)
         return df.select(
             decoded.getField("id").alias("id"),
             decoded.getField("long_values").alias("long_values"),
@@ -2336,25 +2320,28 @@ def test_from_protobuf_repeated_all_types(
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
 def test_from_protobuf_large_repeated_array(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
+        local_tmp_path, from_protobuf_fn):
     """
     Test decoding large repeated field (500-1000 elements).
     Stress test for array handling.
     """
-    schema = pb.message("WithRepeatedInt", [
-        _scalar("id", 1, IntegerGen()),
-        _repeated(
-            "values", 2, IntegerGen(nullable=False), min_len=500, max_len=1000),
-    ], package="test")
+    logical_gen = StructGen([
+        ("id", IntegerGen()),
+        ("values", ArrayGen(
+            IntegerGen(nullable=False), min_length=500, max_length=1000,
+            nullable=False)),
+    ], nullable=False)
     desc_path, desc_bytes = _setup_protobuf_desc(
-        local_tmp_path, "large_repeated_int.desc", schema.descriptor_set_bytes)
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, schema, desc_path, desc_bytes, length=128)
+        local_tmp_path, "large_repeated_int.desc",
+        _build_repeated_int_descriptor_set_bytes)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        logical_gen, "test.WithRepeatedInt", desc_path, desc_bytes, length=128)
 
     def run_on_spark(spark):
         df = spark.createDataFrame(fixture_rows, fixture_schema)
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), schema.full_name, desc_path, desc_bytes)
+            from_protobuf_fn, f.col("bin"), "test.WithRepeatedInt",
+            desc_path, desc_bytes)
         return df.select(
             decoded.getField("id").alias("id"),
             f.size(decoded.getField("values")).alias("array_size"),
@@ -2363,33 +2350,41 @@ def test_from_protobuf_large_repeated_array(
     assert_gpu_and_cpu_are_equal_collect(run_on_spark)
 
 
+def _build_signed_integers_descriptor_set_bytes(spark):
+    return _build_proto2_descriptor(spark, "signed_integers.proto", [
+        _msg("WithSignedInts", [
+            _field("si32", 1, "SINT32"),
+            _field("si64", 2, "SINT64"),
+            _field("sf32", 3, "SFIXED32"),
+            _field("sf64", 4, "SFIXED64"),
+        ]),
+    ])
+
+
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
 def test_from_protobuf_signed_integers(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
-    """
-    Test decoding signed integer types with zigzag encoding.
-    Zigzag: -1 -> 1, 1 -> 2, -2 -> 3, 2 -> 4, etc.
-    """
-    schema = pb.message("WithSignedInts", [
-        pb.sint32("si32", 1, gen=IntegerGen(
+        local_tmp_path, from_protobuf_fn):
+    """Decode signed integers using zigzag and fixed-width encodings."""
+    logical_gen = StructGen([
+        ("si32", IntegerGen(
             special_cases=[-1, 0, 1, -2147483648, 2147483647])),
-        pb.sint64("si64", 2, gen=LongGen(
+        ("si64", LongGen(
             special_cases=[-1, 0, 1, -9223372036854775808, 9223372036854775807])),
-        pb.sfixed32("sf32", 3, gen=IntegerGen(
+        ("sf32", IntegerGen(
             special_cases=[0, 1, -1, 2147483647, -2147483648])),
-        pb.sfixed64("sf64", 4, gen=LongGen(
-            special_cases=[0, 1, -1])),
-    ], package="test")
+        ("sf64", LongGen(special_cases=[0, 1, -1])),
+    ], nullable=False)
     desc_path, desc_bytes = _setup_protobuf_desc(
-        local_tmp_path, "signed.desc", schema.descriptor_set_bytes)
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, schema, desc_path, desc_bytes)
+        local_tmp_path, "signed.desc", _build_signed_integers_descriptor_set_bytes)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        logical_gen, "test.WithSignedInts", desc_path, desc_bytes)
 
     def run_on_spark(spark):
         df = spark.createDataFrame(fixture_rows, fixture_schema)
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), schema.full_name, desc_path, desc_bytes)
+            from_protobuf_fn, f.col("bin"), "test.WithSignedInts",
+            desc_path, desc_bytes)
         
         return df.select(
             decoded.getField("si32").alias("si32"),
@@ -2401,28 +2396,37 @@ def test_from_protobuf_signed_integers(
     assert_gpu_and_cpu_are_equal_collect(run_on_spark)
 
 
+def _build_fixed_integers_descriptor_set_bytes(spark):
+    return _build_proto2_descriptor(spark, "fixed_integers.proto", [
+        _msg("WithFixedInts", [
+            _field("fx32", 1, "FIXED32"),
+            _field("fx64", 2, "FIXED64"),
+        ]),
+    ])
+
+
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
 def test_from_protobuf_fixed_integers(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
+        local_tmp_path, from_protobuf_fn):
     """
     Test decoding fixed-width unsigned integer types.
     """
-    schema = pb.message("WithFixedInts", [
-        pb.fixed32("fx32", 1, gen=IntegerGen(
+    logical_gen = StructGen([
+        ("fx32", IntegerGen(
             special_cases=[0, 1, -1, 2147483647, -2147483648])),
-        pb.fixed64("fx64", 2, gen=LongGen(
-            special_cases=[0, 1, -1])),
-    ], package="test")
+        ("fx64", LongGen(special_cases=[0, 1, -1])),
+    ], nullable=False)
     desc_path, desc_bytes = _setup_protobuf_desc(
-        local_tmp_path, "fixed.desc", schema.descriptor_set_bytes)
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, schema, desc_path, desc_bytes)
+        local_tmp_path, "fixed.desc", _build_fixed_integers_descriptor_set_bytes)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        logical_gen, "test.WithFixedInts", desc_path, desc_bytes)
 
     def run_on_spark(spark):
         df = spark.createDataFrame(fixture_rows, fixture_schema)
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), schema.full_name, desc_path, desc_bytes)
+            from_protobuf_fn, f.col("bin"), "test.WithFixedInts",
+            desc_path, desc_bytes)
         return df.select(
             decoded.getField("fx32").alias("fx32"),
             decoded.getField("fx64").alias("fx64"),
@@ -2449,23 +2453,24 @@ def _build_schema_projection_descriptor_set_bytes(spark):
     ])
 
 
-def _schema_projection_detail_fields():
-    return [
-        _scalar("a", 1, IntegerGen()),
-        _scalar("b", 2, IntegerGen(
+def _schema_projection_detail_gen(nullable):
+    return StructGen([
+        ("a", IntegerGen()),
+        ("b", IntegerGen(
             nullable=False, min_val=-100, max_val=100, special_cases=[])),
-        _scalar("c", 3, StringGen("[a-z]{0,12}")),
-    ]
+        ("c", StringGen("[a-z]{0,12}")),
+    ], nullable=nullable)
 
 
-_schema_proj_schema = pb.message("SchemaProj", [
-    _scalar("id", 1, IntegerGen(
+_schema_proj_gen = StructGen([
+    ("id", IntegerGen(
         nullable=False, min_val=0, max_val=7, special_cases=[])),
-    _scalar("name", 2, StringGen("[a-z]{0,16}", nullable=True)),
-    _nested("detail", 3, _schema_projection_detail_fields()),
-    _repeated_message(
-        "items", 4, _schema_projection_detail_fields(), min_len=0, max_len=4),
-], package="test")
+    ("name", StringGen("[a-z]{0,16}", nullable=True)),
+    ("detail", _schema_projection_detail_gen(nullable=True)),
+    ("items", ArrayGen(
+        _schema_projection_detail_gen(nullable=False),
+        min_length=0, max_length=4, nullable=False)),
+], nullable=False)
 
 
 _schema_proj_cases = [
@@ -2492,19 +2497,19 @@ def _get_field_by_path(expr, path):
 @validate_execs_in_gpu_plan("GpuHashAggregateExec")
 @ignore_order(local=True)
 def test_from_protobuf_projection_through_aggregate(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
+        local_tmp_path, from_protobuf_fn):
     desc_path, desc_bytes = _setup_protobuf_desc(
         local_tmp_path,
         "schema_proj_aggregate.desc",
         _build_schema_projection_descriptor_set_bytes)
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, _schema_proj_schema, desc_path, desc_bytes, length=257)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        _schema_proj_gen, "test.SchemaProj", desc_path, desc_bytes, length=257)
 
     def run_on_spark(spark):
         generated = spark.createDataFrame(fixture_rows, fixture_schema)
         partitioned = generated.repartition(4, "id")
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), _schema_proj_schema.full_name,
+            from_protobuf_fn, f.col("bin"), "test.SchemaProj",
             desc_path, desc_bytes)
         decoded_df = partitioned.select("id", "detail", decoded.alias("decoded"))
         return decoded_df.groupBy("id").agg(
@@ -2520,18 +2525,18 @@ def test_from_protobuf_projection_through_aggregate(
 @validate_execs_in_gpu_plan("GpuSortExec")
 @ignore_order(local=True)
 def test_from_protobuf_projection_through_sort(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
+        local_tmp_path, from_protobuf_fn):
     desc_path, desc_bytes = _setup_protobuf_desc(
         local_tmp_path,
         "schema_proj_sort.desc",
         _build_schema_projection_descriptor_set_bytes)
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, _schema_proj_schema, desc_path, desc_bytes, length=257)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        _schema_proj_gen, "test.SchemaProj", desc_path, desc_bytes, length=257)
 
     def run_on_spark(spark):
         generated = spark.createDataFrame(fixture_rows, fixture_schema)
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), _schema_proj_schema.full_name,
+            from_protobuf_fn, f.col("bin"), "test.SchemaProj",
             desc_path, desc_bytes)
         decoded_df = generated.select("id", "name", "detail", decoded.alias("decoded"))
         return decoded_df.sortWithinPartitions(
@@ -2552,19 +2557,19 @@ def test_from_protobuf_projection_through_sort(
 @validate_execs_in_gpu_plan("GpuRunningWindowExec")
 @ignore_order(local=True)
 def test_from_protobuf_projection_through_window(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
+        local_tmp_path, from_protobuf_fn):
     desc_path, desc_bytes = _setup_protobuf_desc(
         local_tmp_path,
         "schema_proj_window.desc",
         _build_schema_projection_descriptor_set_bytes)
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, _schema_proj_schema, desc_path, desc_bytes, length=257)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        _schema_proj_gen, "test.SchemaProj", desc_path, desc_bytes, length=257)
 
     def run_on_spark(spark):
         generated = spark.createDataFrame(fixture_rows, fixture_schema)
         partitioned = generated.repartition(4, "id")
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), _schema_proj_schema.full_name,
+            from_protobuf_fn, f.col("bin"), "test.SchemaProj",
             desc_path, desc_bytes)
         decoded_df = partitioned.select("id", "detail", decoded.alias("decoded"))
         window = Window.partitionBy("id").orderBy(f.col("decoded.detail.b"))
@@ -2583,18 +2588,18 @@ def test_from_protobuf_projection_through_window(
 @pytest.mark.parametrize("boundary", ["alias", "withcolumn"], ids=idfn)
 @ignore_order(local=True)
 def test_from_protobuf_projection_across_plan_boundary(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn, boundary):
+        local_tmp_path, from_protobuf_fn, boundary):
     """Schema projection across alias (select→select) and withColumn plan boundaries."""
     desc_path, desc_bytes = _setup_protobuf_desc(
         local_tmp_path, "schema_proj_boundary.desc",
         _build_schema_projection_descriptor_set_bytes)
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, _schema_proj_schema, desc_path, desc_bytes, length=64)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        _schema_proj_gen, "test.SchemaProj", desc_path, desc_bytes, length=64)
 
     def run_on_spark(spark):
         df = spark.createDataFrame(fixture_rows, fixture_schema)
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), _schema_proj_schema.full_name,
+            from_protobuf_fn, f.col("bin"), "test.SchemaProj",
             desc_path, desc_bytes)
         if boundary == "alias":
             aliased = df.select(decoded.alias("decoded"))
@@ -2614,17 +2619,17 @@ def test_from_protobuf_projection_across_plan_boundary(
 @pytest.mark.parametrize("terminal", ["project", "sort"], ids=idfn)
 @ignore_order(local=True)
 def test_from_protobuf_terminal_whole_struct_and_field(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn, terminal):
+        local_tmp_path, from_protobuf_fn, terminal):
     desc_path, desc_bytes = _setup_protobuf_desc(
         local_tmp_path, "schema_proj_whole.desc",
         _build_schema_projection_descriptor_set_bytes)
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, _schema_proj_schema, desc_path, desc_bytes, length=64)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        _schema_proj_gen, "test.SchemaProj", desc_path, desc_bytes, length=64)
 
     def run_on_spark(spark):
         df = spark.createDataFrame(fixture_rows, fixture_schema)
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), _schema_proj_schema.full_name,
+            from_protobuf_fn, f.col("bin"), "test.SchemaProj",
             desc_path, desc_bytes)
         result = df.select(
             decoded.alias("whole"),
@@ -2716,37 +2721,56 @@ def test_from_protobuf_different_messages_same_binary_column_do_not_interfere(
     assert_gpu_and_cpu_are_equal_collect(run_on_spark)
 
 
-_deep_5_level_schema = pb.message("Level1", [
-    _scalar("val1", 1, IntegerGen()),
-    _nested("level2", 2, [
-        _scalar("val2", 1, IntegerGen()),
-        _nested("level3", 2, [
-            _scalar("val3", 1, IntegerGen()),
-            _nested("level4", 2, [
-                _scalar("val4", 1, IntegerGen()),
-                _nested("level5", 2, [
-                    _scalar("val5", 1, IntegerGen()),
-                ]),
-            ]),
-        ]),
-    ]),
-], package="test")
+def _build_nested_depth_descriptor_set_bytes(spark, depth):
+    messages = []
+    for i in range(depth, 0, -1):
+        fields = [_field(f"val{i}", 1, "INT32")]
+        if i < depth:
+            fields.append(
+                _field(
+                    f"level{i + 1}", 2, "MESSAGE",
+                    type_name=f".test.Level{i + 1}"))
+        messages.append(_msg(f"Level{i}", fields))
+    return _build_proto2_descriptor(spark, f"nested_depth_{depth}.proto", messages)
+
+
+def _build_nested_depth_gen(level, depth, nullable):
+    fields = [(f"val{level}", IntegerGen())]
+    if level < depth:
+        fields.append((
+            f"level{level + 1}",
+            _build_nested_depth_gen(level + 1, depth, nullable=True)))
+    return StructGen(fields, nullable=nullable)
+
+
+def _build_nested_depth_value(level, depth):
+    value = {f"val{level}": level}
+    if level < depth:
+        value[f"level{level + 1}"] = _build_nested_depth_value(level + 1, depth)
+    return value
+
+
+_deep_5_level_gen = _build_nested_depth_gen(1, 5, nullable=False)
+
+
+def _build_deep_5_descriptor_set_bytes(spark):
+    return _build_nested_depth_descriptor_set_bytes(spark, 5)
 
 
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
 def test_from_protobuf_deep_nesting_5_levels(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
+        local_tmp_path, from_protobuf_fn):
     desc_path, desc_bytes = _setup_protobuf_desc(
         local_tmp_path, "deep_nested_5_level.desc",
-        _deep_5_level_schema.descriptor_set_bytes)
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, _deep_5_level_schema, desc_path, desc_bytes)
+        _build_deep_5_descriptor_set_bytes)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        _deep_5_level_gen, "test.Level1", desc_path, desc_bytes)
 
     def run_on_spark(spark):
         df = spark.createDataFrame(fixture_rows, fixture_schema)
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), _deep_5_level_schema.full_name,
+            from_protobuf_fn, f.col("bin"), "test.Level1",
             desc_path, desc_bytes)
         return df.select(
             decoded.getField("val1").alias("val1"),
@@ -2759,17 +2783,17 @@ def test_from_protobuf_deep_nesting_5_levels(
 @pytest.mark.parametrize("case_id,select_specs", _schema_proj_cases, ids=lambda c: c[0] if isinstance(c, tuple) else str(c))
 @ignore_order(local=True)
 def test_from_protobuf_schema_projection_cases(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn, case_id, select_specs):
+        local_tmp_path, from_protobuf_fn, case_id, select_specs):
     """Parametrized nested-schema projection tests."""
     desc_path, desc_bytes = _setup_protobuf_desc(
         local_tmp_path, "schema_proj.desc", _build_schema_projection_descriptor_set_bytes)
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, _schema_proj_schema, desc_path, desc_bytes, length=64)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        _schema_proj_gen, "test.SchemaProj", desc_path, desc_bytes, length=64)
 
     def run_on_spark(spark):
         df = spark.createDataFrame(fixture_rows, fixture_schema)
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), _schema_proj_schema.full_name,
+            from_protobuf_fn, f.col("bin"), "test.SchemaProj",
             desc_path, desc_bytes)
         selected = [_get_field_by_path(decoded, path).alias(alias)
                     for alias, path in select_specs]
@@ -2794,26 +2818,24 @@ def _build_name_collision_descriptor_set_bytes(spark):
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
 def test_from_protobuf_bug1_name_collision(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
+        local_tmp_path, from_protobuf_fn):
     desc_path, desc_bytes = _setup_protobuf_desc(
         local_tmp_path, "name_collision.desc",
         _build_name_collision_descriptor_set_bytes)
-    schema = pb.message("Event", [
-        _nested("user_info", 1, [
-            _scalar("age", 1, IntegerGen()),
-            _scalar("id", 2, IntegerGen()),
-        ]),
-        _nested("ad_info", 2, [
-            _scalar("id", 1, IntegerGen()),
-        ]),
-    ], package="test")
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, schema, desc_path, desc_bytes)
+    logical_gen = StructGen([
+        ("user_info", StructGen([
+            ("age", IntegerGen()),
+            ("id", IntegerGen()),
+        ])),
+        ("ad_info", StructGen([("id", IntegerGen())])),
+    ], nullable=False)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        logical_gen, "test.Event", desc_path, desc_bytes)
 
     def run_on_spark(spark):
         df = spark.createDataFrame(fixture_rows, fixture_schema)
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), schema.full_name, desc_path, desc_bytes)
+            from_protobuf_fn, f.col("bin"), "test.Event", desc_path, desc_bytes)
         
         return df.select(
             decoded.getField("user_info").getField("age").alias("age"),
@@ -2836,23 +2858,23 @@ def _build_filter_jump_descriptor_set_bytes(spark):
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
 def test_from_protobuf_bug2_filter_jump(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
+        local_tmp_path, from_protobuf_fn):
     desc_path, desc_bytes = _setup_protobuf_desc(
         local_tmp_path, "filter_jump.desc",
         _build_filter_jump_descriptor_set_bytes)
-    schema = pb.message("Event", [
-        _scalar("status", 1, IntegerGen(min_val=1, max_val=1)),
-        _scalar("ad_info", 2, StringGen()),
-    ], package="test")
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, schema, desc_path, desc_bytes)
+    logical_gen = StructGen([
+        ("status", IntegerGen(min_val=1, max_val=1)),
+        ("ad_info", StringGen()),
+    ], nullable=False)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        logical_gen, "test.Event", desc_path, desc_bytes)
 
     def run_on_spark(spark):
         df = spark.createDataFrame(fixture_rows, fixture_schema)
         pb_expr1 = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), schema.full_name, desc_path, desc_bytes)
+            from_protobuf_fn, f.col("bin"), "test.Event", desc_path, desc_bytes)
         pb_expr2 = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), schema.full_name, desc_path, desc_bytes)
+            from_protobuf_fn, f.col("bin"), "test.Event", desc_path, desc_bytes)
         
         return df.filter(pb_expr1.getField("status") == 1).select(pb_expr2.getField("ad_info").alias("ad_info"))
 
@@ -2874,18 +2896,18 @@ def _build_unrelated_struct_name_collision_descriptor_set_bytes(spark):
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
 def test_from_protobuf_bug3_unrelated_struct_name_collision(
-        spark_tmp_path, local_tmp_path, from_protobuf_fn, to_protobuf_fn):
+        spark_tmp_path, local_tmp_path, from_protobuf_fn):
     desc_path, desc_bytes = _setup_protobuf_desc(
         local_tmp_path, "unrelated_struct.desc",
         _build_unrelated_struct_name_collision_descriptor_set_bytes)
-    schema = pb.message("Event", [
-        _nested("ad_info", 1, [
-            _scalar("dummy", 1, IntegerGen()),
-            _scalar("winfoid", 2, IntegerGen()),
-        ]),
-    ], package="test")
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, schema, desc_path, desc_bytes)
+    logical_gen = StructGen([
+        ("ad_info", StructGen([
+            ("dummy", IntegerGen()),
+            ("winfoid", IntegerGen()),
+        ])),
+    ], nullable=False)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        logical_gen, "test.Event", desc_path, desc_bytes)
 
     def run_on_spark(spark):
         df = spark.createDataFrame(fixture_rows, fixture_schema)
@@ -2899,7 +2921,7 @@ def test_from_protobuf_bug3_unrelated_struct_name_collision(
         read_df = spark.read.parquet(path)
         
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), schema.full_name, desc_path, desc_bytes)
+            from_protobuf_fn, f.col("bin"), "test.Event", desc_path, desc_bytes)
         
         # We only select decoded.ad_info.winfoid, so dummy is pruned.
         # winfoid gets ordinal 0 in the pruned schema.
@@ -2912,33 +2934,6 @@ def test_from_protobuf_bug3_unrelated_struct_name_collision(
         )
 
     assert_gpu_and_cpu_are_equal_collect(run_on_spark)
-
-
-def _build_nested_depth_descriptor_set_bytes(spark, depth):
-    messages = []
-    for i in range(depth, 0, -1):
-        fields = [_field(f"val{i}", 1, "INT32")]
-        if i < depth:
-            fields.append(
-                _field(f"level{i + 1}", 2, "MESSAGE", type_name=f".test.Level{i + 1}")
-            )
-        messages.append(_msg(f"Level{i}", fields))
-    return _build_proto2_descriptor(spark, f"nested_depth_{depth}.proto", messages)
-
-
-def _build_nested_depth_fields(level, depth):
-    fields = [_scalar(f"val{level}", 1, IntegerGen())]
-    if level < depth:
-        fields.append(_nested(
-            f"level{level + 1}", 2, _build_nested_depth_fields(level + 1, depth)))
-    return fields
-
-
-def _build_nested_depth_value(level, depth):
-    value = {f"val{level}": level}
-    if level < depth:
-        value[f"level{level + 1}"] = _build_nested_depth_value(level + 1, depth)
-    return value
 
 
 def _build_many_repeated_fields_descriptor_set_bytes(spark, field_count):
@@ -2999,17 +2994,16 @@ def test_from_protobuf_repeated_field_capacity_boundary(
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
 def test_from_protobuf_max_depth_boundary(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
+        local_tmp_path, from_protobuf_fn):
     depth = 10
     desc_path, desc_bytes = _setup_protobuf_desc(
         local_tmp_path,
         f"nested_depth_{depth}.desc",
         lambda spark: _build_nested_depth_descriptor_set_bytes(spark, depth))
-    schema = pb.message(
-        "Level1", _build_nested_depth_fields(1, depth), package="test")
-    fixture_rows, _ = _materialize_protobuf_rows(
-        to_protobuf_fn, schema, desc_path, desc_bytes,
-        [_build_nested_depth_value(1, depth)])
+    logical_gen = _build_nested_depth_gen(1, depth, nullable=False)
+    fixture_rows, _ = materialize_protobuf_data(
+        logical_gen, "test.Level1", desc_path, desc_bytes,
+        logical_rows=[_build_nested_depth_value(1, depth)])
     row = fixture_rows[0][-1]
 
     def run_on_spark(spark):
@@ -3032,23 +3026,22 @@ def test_from_protobuf_max_depth_boundary(
 @allow_non_gpu("ProtobufDataToCatalyst")
 @ignore_order(local=True)
 def test_from_protobuf_max_depth_falls_back(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
+        local_tmp_path, from_protobuf_fn):
     depth = 12
     desc_path, desc_bytes = _setup_protobuf_desc(
         local_tmp_path,
         f"nested_depth_{depth}.desc",
         lambda spark: _build_nested_depth_descriptor_set_bytes(spark, depth))
-    schema = pb.message(
-        "Level1", _build_nested_depth_fields(1, depth), package="test")
-    fixture_rows, _ = _materialize_protobuf_rows(
-        to_protobuf_fn, schema, desc_path, desc_bytes,
-        [_build_nested_depth_value(1, depth)])
+    logical_gen = _build_nested_depth_gen(1, depth, nullable=False)
+    fixture_rows, _ = materialize_protobuf_data(
+        logical_gen, "test.Level1", desc_path, desc_bytes,
+        logical_rows=[_build_nested_depth_value(1, depth)])
     row = fixture_rows[0][-1]
 
     def run_on_spark(spark):
         df = spark.createDataFrame([(row,)], ["bin"])
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), schema.full_name, desc_path, desc_bytes)
+            from_protobuf_fn, f.col("bin"), "test.Level1", desc_path, desc_bytes)
         field = decoded
         for i in range(2, depth + 1):
             field = field.getField(f"level{i}")
@@ -3132,17 +3125,19 @@ _oneof_smoke_desc_bytes = bytes.fromhex(
     "686f696365120b0a01691801200128054800120b0a0173180220012809480012"
     "0d0a056f7468657218032001280542080a0663686f696365620670726f746f32")
 
-_nested_smoke_message = pb.message("Root", [
-    pb.int32("top", 1, gen=IntegerGen()),
-    pb.nested("child", 2, [
-        pb.int32("a", 1, gen=IntegerGen()),
-        pb.string("b", 2, gen=StringGen()),
-    ]),
-    pb.repeated_message("items", 3, [
-        pb.int32("a", 1, gen=IntegerGen()),
-        pb.string("b", 2, gen=StringGen()),
-    ]),
-], package="test")
+_nested_smoke_gen = StructGen([
+    ("top", IntegerGen()),
+    ("child", StructGen([
+        ("a", IntegerGen()),
+        ("b", StringGen()),
+    ])),
+    ("items", ArrayGen(
+        StructGen([
+            ("a", IntegerGen()),
+            ("b", StringGen()),
+        ], nullable=False),
+        min_length=0, max_length=5, nullable=False)),
+], nullable=False)
 
 
 @pytest.fixture
@@ -3196,15 +3191,16 @@ def test_from_protobuf_smoke_path_api(simple_desc, from_protobuf_fn):
 
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 def test_from_protobuf_smoke_nested_projection(
-        nested_smoke_desc, from_protobuf_fn, to_protobuf_fn):
+        nested_smoke_desc, from_protobuf_fn):
     desc_path, desc_bytes = nested_smoke_desc
     values = [
         {"top": 1, "child": {"a": 2, "b": "child"},
          "items": [{"a": 3, "b": "first"}, {"a": 4, "b": "second"}]},
         {"top": 5, "child": None, "items": []},
     ]
-    fixture_rows, _ = _materialize_protobuf_rows(
-        to_protobuf_fn, _nested_smoke_message, desc_path, desc_bytes, values)
+    fixture_rows, _ = materialize_protobuf_data(
+        _nested_smoke_gen, "test.Root", desc_path, desc_bytes,
+        logical_rows=values)
     encoded = [(row[-1],) for row in fixture_rows]
 
     def run_on_spark(spark):
@@ -3308,17 +3304,23 @@ def test_from_protobuf_unsigned_boundaries(
 
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 def test_from_protobuf_multilevel_repeated_messages(
-        protobuf_semantics_desc, from_protobuf_fn, to_protobuf_fn):
+        protobuf_semantics_desc, from_protobuf_fn):
     desc_path, desc_bytes = protobuf_semantics_desc
-    schema = pb.message("RepeatedRoot", [
-        pb.repeated_message("children", 1, [
-            pb.repeated_message("leaves", 1, [
-                pb.repeated_message("values", 1, [
-                    pb.int32("value", 1, gen=IntegerGen()),
-                ]),
-            ]),
-        ]),
-    ], package="test")
+    logical_gen = StructGen([
+        ("children", ArrayGen(
+            StructGen([
+                ("leaves", ArrayGen(
+                    StructGen([
+                        ("values", ArrayGen(
+                            StructGen([
+                                ("value", IntegerGen()),
+                            ], nullable=False),
+                            min_length=0, max_length=5, nullable=False)),
+                    ], nullable=False),
+                    min_length=0, max_length=5, nullable=False)),
+            ], nullable=False),
+            min_length=0, max_length=5, nullable=False)),
+    ], nullable=False)
     values = [
         {"children": []},
         {"children": [{"leaves": []}]},
@@ -3327,8 +3329,9 @@ def test_from_protobuf_multilevel_repeated_messages(
             {"leaves": [{"values": []}]},
         ]},
     ]
-    fixture_rows, _ = _materialize_protobuf_rows(
-        to_protobuf_fn, schema, desc_path, desc_bytes, values)
+    fixture_rows, _ = materialize_protobuf_data(
+        logical_gen, "test.RepeatedRoot", desc_path, desc_bytes,
+        logical_rows=values)
     rows = [(index, row[-1]) for index, row in enumerate(fixture_rows)]
 
     def run_on_spark(spark):
@@ -3625,17 +3628,17 @@ def test_from_protobuf_nested_child_default_values(local_tmp_path, from_protobuf
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
 def test_deep_pruning_3_level_leaf(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
+        local_tmp_path, from_protobuf_fn):
     """Access decoded.level2.level3.val3 -- triggers 3-level deep pruning."""
     desc_path, desc_bytes = _setup_protobuf_desc(
-        local_tmp_path, "dp3.desc", _deep_5_level_schema.descriptor_set_bytes)
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, _deep_5_level_schema, desc_path, desc_bytes)
+        local_tmp_path, "dp3.desc", _build_deep_5_descriptor_set_bytes)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        _deep_5_level_gen, "test.Level1", desc_path, desc_bytes)
 
     def run_on_spark(spark):
         df = spark.createDataFrame(fixture_rows, fixture_schema)
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), _deep_5_level_schema.full_name,
+            from_protobuf_fn, f.col("bin"), "test.Level1",
             desc_path, desc_bytes)
         return df.select(
             decoded.getField("val1").alias("val1"),
@@ -3648,17 +3651,17 @@ def test_deep_pruning_3_level_leaf(
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
 def test_deep_pruning_5_level_leaf(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
+        local_tmp_path, from_protobuf_fn):
     """Access decoded.level2.level3.level4.level5.val5 -- deepest leaf."""
     desc_path, desc_bytes = _setup_protobuf_desc(
-        local_tmp_path, "dp5.desc", _deep_5_level_schema.descriptor_set_bytes)
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, _deep_5_level_schema, desc_path, desc_bytes)
+        local_tmp_path, "dp5.desc", _build_deep_5_descriptor_set_bytes)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        _deep_5_level_gen, "test.Level1", desc_path, desc_bytes)
 
     def run_on_spark(spark):
         df = spark.createDataFrame(fixture_rows, fixture_schema)
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), _deep_5_level_schema.full_name,
+            from_protobuf_fn, f.col("bin"), "test.Level1",
             desc_path, desc_bytes)
         return df.select(
             _get_field_by_path(decoded, ["level2", "level3", "level4", "level5", "val5"])
@@ -3671,21 +3674,21 @@ def test_deep_pruning_5_level_leaf(
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
 def test_deep_pruning_mixed_depths(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
+        local_tmp_path, from_protobuf_fn):
     """Access leaves at different depths in the same query.
 
     Select val1 (depth 1), val2 (depth 2), val3 (depth 3), and val5 (depth 5)
     to exercise pruning at every intermediate level simultaneously.
     """
     desc_path, desc_bytes = _setup_protobuf_desc(
-        local_tmp_path, "dp_mix.desc", _deep_5_level_schema.descriptor_set_bytes)
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, _deep_5_level_schema, desc_path, desc_bytes)
+        local_tmp_path, "dp_mix.desc", _build_deep_5_descriptor_set_bytes)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        _deep_5_level_gen, "test.Level1", desc_path, desc_bytes)
 
     def run_on_spark(spark):
         df = spark.createDataFrame(fixture_rows, fixture_schema)
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), _deep_5_level_schema.full_name,
+            from_protobuf_fn, f.col("bin"), "test.Level1",
             desc_path, desc_bytes)
         return df.select(
             decoded.getField("val1").alias("val1"),
@@ -3701,17 +3704,17 @@ def test_deep_pruning_mixed_depths(
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
 def test_deep_pruning_whole_struct_at_depth_3(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
+        local_tmp_path, from_protobuf_fn):
     """Select the whole level3 struct -- no deep pruning inside level3."""
     desc_path, desc_bytes = _setup_protobuf_desc(
-        local_tmp_path, "dp_whole3.desc", _deep_5_level_schema.descriptor_set_bytes)
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, _deep_5_level_schema, desc_path, desc_bytes)
+        local_tmp_path, "dp_whole3.desc", _build_deep_5_descriptor_set_bytes)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        _deep_5_level_gen, "test.Level1", desc_path, desc_bytes)
 
     def run_on_spark(spark):
         df = spark.createDataFrame(fixture_rows, fixture_schema)
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), _deep_5_level_schema.full_name,
+            from_protobuf_fn, f.col("bin"), "test.Level1",
             desc_path, desc_bytes)
         return df.select(
             decoded.getField("level2").getField("level3").alias("level3"),
@@ -3723,17 +3726,17 @@ def test_deep_pruning_whole_struct_at_depth_3(
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
 def test_deep_pruning_whole_struct_and_leaf_at_depth_3(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
+        local_tmp_path, from_protobuf_fn):
     desc_path, desc_bytes = _setup_protobuf_desc(
         local_tmp_path, "dp_whole_and_leaf3.desc",
-        _deep_5_level_schema.descriptor_set_bytes)
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, _deep_5_level_schema, desc_path, desc_bytes)
+        _build_deep_5_descriptor_set_bytes)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        _deep_5_level_gen, "test.Level1", desc_path, desc_bytes)
 
     def run_on_spark(spark):
         df = spark.createDataFrame(fixture_rows, fixture_schema)
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), _deep_5_level_schema.full_name,
+            from_protobuf_fn, f.col("bin"), "test.Level1",
             desc_path, desc_bytes)
         level3 = decoded.getField("level2").getField("level3")
         return df.select(
@@ -3746,17 +3749,17 @@ def test_deep_pruning_whole_struct_and_leaf_at_depth_3(
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
 def test_deep_pruning_whole_ancestor_and_deep_leaf(
-        local_tmp_path, from_protobuf_fn, to_protobuf_fn):
+        local_tmp_path, from_protobuf_fn):
     desc_path, desc_bytes = _setup_protobuf_desc(
         local_tmp_path, "dp_whole_ancestor.desc",
-        _deep_5_level_schema.descriptor_set_bytes)
-    fixture_rows, fixture_schema = _materialize_protobuf_data(
-        to_protobuf_fn, _deep_5_level_schema, desc_path, desc_bytes)
+        _build_deep_5_descriptor_set_bytes)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        _deep_5_level_gen, "test.Level1", desc_path, desc_bytes)
 
     def run_on_spark(spark):
         df = spark.createDataFrame(fixture_rows, fixture_schema)
         decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), _deep_5_level_schema.full_name,
+            from_protobuf_fn, f.col("bin"), "test.Level1",
             desc_path, desc_bytes)
         level2 = decoded.getField("level2")
         return df.select(
