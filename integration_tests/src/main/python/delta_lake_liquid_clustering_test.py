@@ -53,6 +53,20 @@ def assert_liquid_clustering_delta_logs_equivalent(data_path):
         with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
 
 
+def delta_path_identifier(path):
+    return f"delta.`{path}`"
+
+
+def optimize_liquid_clustered_table(spark, table_identifier):
+    spark.sql(f"OPTIMIZE {table_identifier}").collect()
+    optimize_count = (
+        spark.sql(f"DESCRIBE HISTORY {table_identifier}")
+        .where("operation = 'OPTIMIZE'")
+        .count())
+    assert optimize_count > 0, (
+        f"Expected OPTIMIZE to run for liquid clustered table {table_identifier}")
+
+
 @allow_non_gpu(*delta_meta_allow)
 @allow_non_gpu_conditional(is_databricks173_or_later(),
                            f"{delta_write_fallback_allow},AtomicCreateTableAsSelectExec,"
@@ -77,6 +91,7 @@ def test_delta_ctas_sql_liquid_clustering(spark_tmp_path, spark_tmp_table_factor
             CLUSTER BY (a)
             AS SELECT * FROM {view_name}
         """)
+        optimize_liquid_clustered_table(spark, delta_path_identifier(path))
 
     data_path = spark_tmp_path + "/DELTA_LIQUID_CLUSTER"
 
@@ -122,6 +137,7 @@ def setup_clustered_table_sql(spark, path, table_name, view_name):
             INSERT INTO {table_name}
             SELECT * FROM {view_name}
         """)
+    optimize_liquid_clustered_table(spark, table_name)
 
 
 @allow_non_gpu(*delta_meta_allow, "CreateTableExec")
@@ -147,6 +163,7 @@ def test_delta_rtas_sql_liquid_clustering(spark_tmp_path, spark_tmp_table_factor
             CLUSTER BY (a)
             AS SELECT * FROM {view_name}
         """)
+        optimize_liquid_clustered_table(spark, table_name)
 
     data_path = spark_tmp_path + "/DELTA_LIQUID_CLUSTER"
 
@@ -176,6 +193,7 @@ def test_delta_append_sql_liquid_clustering(spark_tmp_path, spark_tmp_table_fact
             INSERT INTO {table_name}
             SELECT * FROM {view_name}
         """)
+        optimize_liquid_clustered_table(spark, table_name)
 
     data_path = spark_tmp_path + "/DELTA_LIQUID_CLUSTER"
 
@@ -206,6 +224,7 @@ def test_delta_insert_overwrite_static_sql_liquid_clustering(spark_tmp_path,
             INSERT OVERWRITE TABLE {table_name}
             SELECT * FROM {view_name}
         """)
+        optimize_liquid_clustered_table(spark, table_name)
 
     data_path = spark_tmp_path + "/DELTA_LIQUID_CLUSTER"
 
@@ -240,6 +259,7 @@ def test_delta_insert_overwrite_dynamic_sql_liquid_clustering(spark_tmp_path,
             INSERT OVERWRITE TABLE {table_name}
             SELECT * FROM {view_name}
         """)
+        optimize_liquid_clustered_table(spark, table_name)
 
     data_path = spark_tmp_path + "/DELTA_LIQUID_CLUSTER"
 
@@ -279,6 +299,7 @@ def test_delta_insert_overwrite_replace_where_sql_liquid_clustering(spark_tmp_pa
             REPLACE WHERE b = 'x'
             SELECT * FROM {view_name}
         """)
+        optimize_liquid_clustered_table(spark, table_name)
 
     data_path = spark_tmp_path + "/DELTA_LIQUID_CLUSTER"
 
@@ -311,6 +332,7 @@ def do_test_delta_dml_sql_liquid_clustering(spark_tmp_path,
     def modify_table(spark, path):
         table_name = cpu_table_name if path == cpu_data_path else gpu_table_name
         spark.sql(sql_func(table_name))
+        optimize_liquid_clustered_table(spark, table_name)
 
     assert_gpu_and_cpu_writes_are_equal_collect(
         modify_table,
@@ -402,6 +424,7 @@ def test_delta_merge_sql_liquid_clustering(spark_tmp_path, spark_tmp_table_facto
               INSERT *
             """
         spark.sql(sql).collect()
+        optimize_liquid_clustered_table(spark, target_name)
 
     read_table = lambda spark, path: spark.read.format("delta").load(path)
     if is_databricks173_or_later():
@@ -465,6 +488,7 @@ def test_delta_append_df_liquid_clustering(spark_tmp_path, spark_tmp_table_facto
         create_clustered_delta_table_df(table_name, path)
         # Create a temp view to select from for the CTAS operation
         write_to_delta_table_df(spark, path, "append")
+        optimize_liquid_clustered_table(spark, table_name)
 
     data_path = spark_tmp_path + "/DELTA_LIQUID_CLUSTER"
 
@@ -496,6 +520,7 @@ def test_delta_insert_overwrite_df_liquid_clustering(spark_tmp_path,
         create_clustered_delta_table_df(table_name, path)
         write_to_delta_table_df(spark, path, "overwrite",
                                 opts = {'partitionOverwriteMode': overwrite_mode})
+        optimize_liquid_clustered_table(spark, table_name)
 
     data_path = spark_tmp_path + "/DELTA_LIQUID_CLUSTER"
 
@@ -527,6 +552,7 @@ def test_delta_insert_overwrite_replace_where_df_liquid_clustering(
         create_clustered_delta_table_df(table_name, path)
         write_to_delta_table_df(spark, path, "overwrite",
                                 opts = {'replaceWhere': " b='x' "})
+        optimize_liquid_clustered_table(spark, table_name)
 
     data_path = spark_tmp_path + "/DELTA_LIQUID_CLUSTER"
 
