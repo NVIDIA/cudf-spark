@@ -879,7 +879,6 @@ class BinaryGen(DataGen):
                               for _ in range(length)])
             self._start(rand, gen_bytes)
 
-
 # Note: Current(2023/06/06) maxmium IT data size is 7282688 bytes, so LRU cache with maxsize 128
 # will lead to 7282688 * 128 = 932 MB additional memory usage in edge case, which is acceptable.
 @lru_cache(maxsize=128, typed=True)

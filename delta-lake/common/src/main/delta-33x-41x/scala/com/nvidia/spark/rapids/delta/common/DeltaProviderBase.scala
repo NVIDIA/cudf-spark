@@ -387,15 +387,11 @@ object DVPredicatePushdown extends ShimPredicateHelper {
   def mergeIdenticalProjects(plan: SparkPlan): SparkPlan = {
     plan.transformUp {
       case p @ GpuProjectExec(projList1,
-      GpuProjectExec(projList2, child, enablePreSplit1),
-      enablePreSplit2) =>
+      GpuProjectExec(projList2, child, enablePreSplit1), enablePreSplit2) =>
         val projSet1 = projList1.map(_.exprId).toSet
         val projSet2 = projList2.map(_.exprId).toSet
         if (projSet1 == projSet2) {
-          GpuProjectExec(
-            projList1,
-            child,
-            enablePreSplit1 && enablePreSplit2)
+          GpuProjectExec(projList1, child, enablePreSplit1 && enablePreSplit2)
         } else {
           p
         }
