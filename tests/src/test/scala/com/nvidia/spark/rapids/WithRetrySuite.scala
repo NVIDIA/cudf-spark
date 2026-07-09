@@ -86,6 +86,36 @@ class WithRetrySuite
     }
   }
 
+  test("withRetry does not close a caller-owned closeable iterator on failure") {
+    val myItems = Seq(mock[AutoCloseable], mock[AutoCloseable])
+    val underlying = myItems.iterator
+    var inputWasClosed = false
+    val input: Iterator[AutoCloseable] = new Iterator[AutoCloseable] with AutoCloseable {
+      override def hasNext: Boolean = underlying.hasNext
+
+      override def next(): AutoCloseable = underlying.next()
+
+      override def close(): Unit = {
+        inputWasClosed = true
+        underlying.foreach(_.close())
+      }
+    }
+    val splitPolicy: AutoCloseable => Seq[AutoCloseable] = null
+
+    assertThrows[IllegalStateException] {
+      try {
+        withRetry(input, splitPolicy) { _ =>
+          throw new IllegalStateException("unhandled exception")
+        }.toSeq
+      } finally {
+        assert(!inputWasClosed)
+        verify(myItems.head, times(1)).close()
+        verify(myItems.last, times(0)).close()
+        myItems.last.close()
+      }
+    }
+  }
+
   test("withRetryNoSplit closes input on failure") {
     val myItems = Seq(buildBatch, buildBatch)
     assertThrows[IllegalStateException] {

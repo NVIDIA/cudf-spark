@@ -18,8 +18,9 @@ package com.nvidia.spark.rapids
 
 import org.scalatest.funsuite.AnyFunSuite
 
-import org.apache.spark.sql.catalyst.expressions.{Add, And, AttributeReference, CaseWhen,
-  GreaterThan, Literal, MonotonicallyIncreasingID, Multiply, ScalaUDF, XxHash64}
+import org.apache.spark.sql.catalyst.expressions.{Abs, Add, And, AttributeReference,
+  BoundReference, CaseWhen, GreaterThan, Literal, MonotonicallyIncreasingID, Multiply, ScalaUDF,
+  XxHash64}
 import org.apache.spark.sql.types.LongType
 
 class GpuCpuBridgeOptimizerUnitSuite extends AnyFunSuite {
@@ -28,8 +29,10 @@ class GpuCpuBridgeOptimizerUnitSuite extends AnyFunSuite {
     RapidsConf.ENABLE_CPU_BRIDGE.key -> "true"
   ))
 
-  private def wrap(e: org.apache.spark.sql.catalyst.expressions.Expression): BaseExprMeta[_] = {
-    val meta = GpuOverrides.wrapExpr(e, conf(), None)
+  private def wrap(
+      e: org.apache.spark.sql.catalyst.expressions.Expression,
+      rapidsConf: RapidsConf = conf()): BaseExprMeta[_] = {
+    val meta = GpuOverrides.wrapExpr(e, rapidsConf, None)
     meta.tagForGpu()
     meta
   }
@@ -236,6 +239,33 @@ class GpuCpuBridgeOptimizerUnitSuite extends AnyFunSuite {
     // Expect all children on GPU in both cases under tie-breaking that prefers GPU
     assert(kids7.forall(_ == false), s"Expected all 7 children on GPU: $kids7")
     assert(kids8.forall(_ == false), s"Expected all 8 children on GPU: $kids8")
+  }
+
+  test("Heuristic handles heterogeneous CPU and GPU child capabilities (unit)") {
+    val rapidsConf = new RapidsConf(Map(
+      RapidsConf.ENABLE_CPU_BRIDGE.key -> "true",
+      RapidsConf.BRIDGE_DISALLOW_LIST.key -> classOf[Abs].getName))
+    val children = Seq(
+      Add(BoundReference(0, LongType, nullable = false), Literal(1L)),
+      Abs(BoundReference(1, LongType, nullable = false))) ++
+      (1L to 6L).map(Literal(_))
+    val rootMeta = wrap(XxHash64(children, 42L), rapidsConf)
+    rootMeta.willNotWorkOnGpu("disabled for test")
+
+    val addMeta = rootMeta.childExprs.head
+    addMeta.willNotWorkOnGpu("disabled for test")
+    val absMeta = rootMeta.childExprs(1)
+
+    assert(!addMeta.canThisBeReplaced && addMeta.canMoveToCpuBridge)
+    assert(absMeta.canThisBeReplaced && !absMeta.canMoveToCpuBridge)
+
+    GpuCpuBridgeOptimizer.optimizeByMinimizingMovement(rootMeta)
+
+    assert(rootMeta.willUseGpuCpuBridge)
+    assert(addMeta.willUseGpuCpuBridge)
+    assert(!absMeta.willUseGpuCpuBridge)
+    assert(rootMeta.childExprs.drop(2).forall(_.willUseGpuCpuBridge),
+      "Scalar literals should co-locate with the CPU parent")
   }
 
   test("Heuristic: 13 mixed Add/Multiply children into XxHash64 under CPU (unit)") {
@@ -502,5 +532,4 @@ class GpuCpuBridgeOptimizerUnitSuite extends AnyFunSuite {
     assert(addMetas.forall(_.willUseGpuCpuBridge), "Both Adds should be on CPU bridge")
   }
 }
-
 
