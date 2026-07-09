@@ -374,7 +374,14 @@ def test_re_replace_anchors():
         .with_special_case("TEST") \
         .with_special_case("TEST\n") \
         .with_special_case("TEST\r\n") \
-        .with_special_case("TEST\r")
+        .with_special_case("TEST\r") \
+        .with_special_case("$") \
+        .with_special_case("^") \
+        .with_special_case("$\n") \
+        .with_special_case("\n$") \
+        .with_special_case("a^") \
+        .with_special_case("a^\n") \
+        .with_special_case("a\nb")
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: unary_op_df(spark, gen).selectExpr(
             'REGEXP_REPLACE(a, "TEST$", "")',
@@ -388,6 +395,13 @@ def test_re_replace_anchors():
             'REGEXP_REPLACE(a, "^TEST\\\\Z", "PROD")',
             'REGEXP_REPLACE(a, "TEST\\\\Z", "PROD")',
             'REGEXP_REPLACE(a, "^TEST$", "PROD")',
+            # Issue #14746: $ and ^ inside character classes are literals, not anchors.
+            'REGEXP_REPLACE(a, "[$\\\\n]", "X")',
+            'REGEXP_REPLACE(a, "[$]\\\\n", "X")',
+            'REGEXP_REPLACE(a, "\\\\n[$]", "X")',
+            'REGEXP_REPLACE(a, "(?:[$])\\\\n", "X")',
+            'REGEXP_REPLACE(a, "[a^]$", "X")',
+            'REGEXP_REPLACE(a, "(?:[a^])$", "X")',
         ),
         conf=_regexp_conf)
 
