@@ -132,7 +132,6 @@
                                     <includes>
                                         <include>parquet-hadoop*.jar</include>
                                         <include>spark-avro*.jar</include>
-                                        <include>spark-protobuf*.jar</include>
                                     </includes>
                                 </filesets>
                             </filesets>
@@ -163,24 +162,6 @@
                                     <artifactId>parquet-hadoop</artifactId>
                                     <version>${parquet.hadoop.version}</version>
                                     <classifier>tests</classifier>
-                                </artifactItem>
-                            </artifactItems>
-                        </configuration>
-                    </execution>
-                    <execution>
-                        <id>copy-spark-protobuf</id>
-                        <phase>package</phase>
-                        <goals>
-                            <goal>copy</goal>
-                        </goals>
-                        <configuration>
-                            <skip>${spark.protobuf.skipCopy}</skip>
-                            <useBaseVersion>true</useBaseVersion>
-                            <artifactItems>
-                                <artifactItem>
-                                    <groupId>org.apache.spark</groupId>
-                                    <artifactId>spark-protobuf_${scala.binary.version}</artifactId>
-                                    <version>${spark.version}</version>
                                 </artifactItem>
                             </artifactItems>
                         </configuration>
