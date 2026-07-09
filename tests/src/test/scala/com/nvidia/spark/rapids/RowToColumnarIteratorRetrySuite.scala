@@ -21,9 +21,12 @@ import scala.collection.mutable.ArrayBuffer
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.jni.{GpuSplitAndRetryOOM, RmmSpark}
 
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow
 import org.apache.spark.sql.catalyst.util.{ArrayBasedMapData, ArrayData}
+import org.apache.spark.sql.rapids.execution.TrampolineUtil
+import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.unsafe.types.UTF8String
@@ -189,6 +192,43 @@ class RowToColumnarIteratorRetrySuite extends RmmSparkRetrySuiteBase {
       assertResult((1 to numRows).toSeq)(allValues.toSeq)
     } finally {
       batches.foreach(_.close())
+    }
+  }
+
+  test("test pending GPU OOM split batches reacquire semaphore") {
+    val spark = SparkSession.builder()
+        .master("local[1]")
+        .appName("RowToColumnarIteratorRetrySuite")
+        .getOrCreate()
+    val context = new MockTaskContext(taskAttemptId = 1, partitionId = 0)
+    TrampolineUtil.setTaskContext(context)
+    try {
+      val rowIter: Iterator[InternalRow] = (1 to 10).map(InternalRow(_)).toIterator
+      val goal = TargetSize(batchSize)
+      val row2ColIter = new RowToColumnarIterator(
+        rowIter, schema, goal, batchSize, new GpuRowToColumnConverter(schema))
+
+      RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
+        RmmSpark.OomInjectionType.GPU.ordinal, 0)
+
+      withResource(row2ColIter.next()) { batch =>
+        assertResult(5)(batch.numRows())
+      }
+      GpuSemaphore.releaseIfNecessary(context)
+      val (_, releasedAt) = GpuSemaphore.getLastSemAcqAndRelTime(context)
+      assert(releasedAt > 0)
+
+      withResource(row2ColIter.next()) { batch =>
+        assertResult(5)(batch.numRows())
+      }
+      val (reacquiredAt, _) = GpuSemaphore.getLastSemAcqAndRelTime(context)
+      assert(reacquiredAt > releasedAt)
+      assert(!row2ColIter.hasNext)
+    } finally {
+      GpuSemaphore.releaseIfNecessary(context)
+      TrampolineUtil.unsetTaskContext()
+      ScalableTaskCompletion.reset()
+      spark.stop()
     }
   }
 

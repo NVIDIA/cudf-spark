@@ -617,7 +617,11 @@ class RowToColumnarIterator(
 
   override def next(): ColumnarBatch = {
     if (pendingBatchIter.hasNext) {
-      return recordOutput(pendingBatchIter.next())
+      Option(TaskContext.get())
+          .foreach(ctx => GpuSemaphore.acquireIfNecessary(ctx))
+      return recordOutput(NvtxIdWithMetrics(NvtxRegistry.ROW_TO_COLUMNAR, opTime) {
+        pendingBatchIter.next()
+      })
     }
     if (!hasNext) {
       throw new NoSuchElementException
@@ -754,44 +758,41 @@ class RowToColumnarIterator(
         Option(TaskContext.get())
             .foreach(ctx => GpuSemaphore.acquireIfNecessary(ctx))
 
-        // Build host columns and wrap in HostColumnarBatchWithRowRange for split retry.
-        // On GPU OOM during transfer, the batch can be split in half and retried.
-        val hostColumns = RmmRapidsRetryIterator.withRetryNoSplit {
-          builders.buildHostColumns()
-        }
-        val hostBatch = withResource(hostColumns) { _ =>
-          HostColumnarBatchWithRowRange(hostColumns, rowCount, dataTypes)
-        }
+        val ret = NvtxIdWithMetrics(NvtxRegistry.ROW_TO_COLUMNAR, opTime) {
+          // Build host columns and wrap in HostColumnarBatchWithRowRange for split retry.
+          // On GPU OOM during transfer, the batch can be split in half and retried.
+          val hostColumns = RmmRapidsRetryIterator.withRetryNoSplit {
+            builders.buildHostColumns()
+          }
+          val hostBatch = withResource(hostColumns) { _ =>
+            HostColumnarBatchWithRowRange(hostColumns, rowCount, dataTypes)
+          }
 
-        localGoal match {
-          case _: RequireSingleBatchLike =>
-            // Cannot split when a single batch is required
-            pendingBatchIter = Iterator.empty
-            val ret = RmmRapidsRetryIterator.withRetryNoSplit(hostBatch) { batch =>
-              NvtxIdWithMetrics(NvtxRegistry.ROW_TO_COLUMNAR, opTime) {
+          localGoal match {
+            case _: RequireSingleBatchLike =>
+              // Cannot split when a single batch is required
+              pendingBatchIter = Iterator.empty
+              RmmRapidsRetryIterator.withRetryNoSplit(hostBatch) { batch =>
                 batch.copyToGpu()
               }
-            }
-            numInputRows += rowCount
-            ret
-          case _ =>
-            val it = RmmRapidsRetryIterator.withRetry(
-              hostBatch,
-              splitHostBatchInHalf
-            ) { batch =>
-              NvtxIdWithMetrics(NvtxRegistry.ROW_TO_COLUMNAR, opTime) {
+            case _ =>
+              val it = RmmRapidsRetryIterator.withRetry(
+                hostBatch,
+                splitHostBatchInHalf
+              ) { batch =>
                 batch.copyToGpu()
               }
-            }
-            // Return the first batch now and keep the iterator for subsequent output batches.
-            // This ensures we only transfer one split at a time.
-            closeOnExcept(it.next()) { first =>
-              pendingBatchIter = it
-              numInputRows += rowCount
-              first
-            }
+              // Return the first batch now and keep the iterator for subsequent output batches.
+              // This ensures we only transfer one split at a time.
+              closeOnExcept(it.next()) { first =>
+                pendingBatchIter = it
+                first
+              }
+          }
         }
+        numInputRows += rowCount
         // Output metrics and targetRows refinement are handled in recordOutput().
+        ret
       }
     }
   }

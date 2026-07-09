@@ -85,7 +85,9 @@ class HostColumnarBatchWithRowRange private (
     val gpuColumns = new Array[org.apache.spark.sql.vectorized.ColumnVector](hostColumns.length)
     closeOnExcept(gpuColumns) { _ =>
       for (i <- hostColumns.indices) {
-        gpuColumns(i) = GpuColumnVector.from(hostColumns(i).copyToDevice(), dataTypes(i))
+        closeOnExcept(hostColumns(i).copyToDevice()) { deviceColumn =>
+          gpuColumns(i) = GpuColumnVector.from(deviceColumn, dataTypes(i))
+        }
       }
       new ColumnarBatch(gpuColumns, numRows)
     }
@@ -97,7 +99,9 @@ class HostColumnarBatchWithRowRange private (
     closeOnExcept(gpuColumns) { _ =>
       for (i <- hostColumns.indices) {
         withResource(sliceHostColumn(hostColumns(i), startRow, numRows)) { slicedHost =>
-          gpuColumns(i) = GpuColumnVector.from(slicedHost.copyToDevice(), dataTypes(i))
+          closeOnExcept(slicedHost.copyToDevice()) { deviceColumn =>
+            gpuColumns(i) = GpuColumnVector.from(deviceColumn, dataTypes(i))
+          }
         }
       }
       new ColumnarBatch(gpuColumns, numRows)
