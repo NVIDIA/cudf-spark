@@ -31,9 +31,6 @@ from pyspark.sql.types import (
 
 from data_gen import DataGen
 
-__all__ = ["pb", "encode_pb_message"]
-
-
 # -----------------------------------------------------------------------------
 # Protobuf schema-first test modeling / generation / encoding
 # -----------------------------------------------------------------------------
@@ -101,6 +98,16 @@ def _unsigned_spark_value(value, bits, field_name):
     return value - (1 << bits) if value >= sign_bit else value
 
 
+def _signed_wire_value(value, bits, kind_name, field_name):
+    value = int(value)
+    signed_min = -(1 << (bits - 1))
+    signed_max = (1 << (bits - 1)) - 1
+    if value < signed_min or value > signed_max:
+        raise ValueError(
+            f'{kind_name} value is out of range for {field_name}: {value}')
+    return value
+
+
 class PbCardinality(Enum):
     OPTIONAL = 'optional'
     REQUIRED = 'required'
@@ -148,6 +155,71 @@ def _pb_scalar_kind_spark_type(kind):
     raise ValueError(f'Unsupported protobuf scalar kind: {kind}')
 
 
+def _validate_pb_scalar_default(field_spec):
+    default = field_spec.default
+    if default is None:
+        return
+    kind = field_spec.kind
+    if kind == PbScalarKind.BOOL:
+        if not isinstance(default, bool):
+            raise TypeError(
+                f'bool field {field_spec.name} requires a bool default')
+        return
+    if kind in {
+            PbScalarKind.INT32, PbScalarKind.SINT32, PbScalarKind.SFIXED32}:
+        if isinstance(default, bool) or not isinstance(default, int):
+            raise TypeError(
+                f'{kind.value} field {field_spec.name} requires an int default')
+        _signed_wire_value(default, 32, kind.value, field_spec.name)
+        return
+    if kind in {
+            PbScalarKind.INT64, PbScalarKind.SINT64, PbScalarKind.SFIXED64}:
+        if isinstance(default, bool) or not isinstance(default, int):
+            raise TypeError(
+                f'{kind.value} field {field_spec.name} requires an int default')
+        _signed_wire_value(default, 64, kind.value, field_spec.name)
+        return
+    if kind in {PbScalarKind.UINT32, PbScalarKind.FIXED32}:
+        if isinstance(default, bool) or not isinstance(default, int):
+            raise TypeError(
+                f'{kind.value} field {field_spec.name} requires an int default')
+        if default < 0 or default >= 1 << 32:
+            raise ValueError(
+                f'{kind.value} default is out of range for {field_spec.name}: {default}')
+        return
+    if kind in {PbScalarKind.UINT64, PbScalarKind.FIXED64}:
+        if isinstance(default, bool) or not isinstance(default, int):
+            raise TypeError(
+                f'{kind.value} field {field_spec.name} requires an int default')
+        if default < 0 or default >= 1 << 64:
+            raise ValueError(
+                f'{kind.value} default is out of range for {field_spec.name}: {default}')
+        return
+    if kind == PbScalarKind.ENUM:
+        if isinstance(default, str):
+            field_spec.enum.number_for(default)
+        elif isinstance(default, bool) or not isinstance(default, int):
+            raise TypeError(
+                f'enum field {field_spec.name} requires a string or int default')
+        else:
+            _signed_wire_value(default, 32, kind.value, field_spec.name)
+            field_spec.enum.name_for(default)
+        return
+    if kind in {PbScalarKind.FLOAT, PbScalarKind.DOUBLE}:
+        if isinstance(default, bool) or not isinstance(default, (int, float)):
+            raise TypeError(
+                f'{kind.value} field {field_spec.name} requires a numeric default')
+        return
+    if kind == PbScalarKind.STRING:
+        if not isinstance(default, str):
+            raise TypeError(
+                f'string field {field_spec.name} requires a string default')
+        return
+    if kind == PbScalarKind.BYTES:
+        raise NotImplementedError('bytes defaults are not supported')
+    raise ValueError(f'Unsupported protobuf scalar kind: {kind}')
+
+
 @dataclass(frozen=True)
 class PbEnumSpec:
     name: str
@@ -155,6 +227,7 @@ class PbEnumSpec:
     allow_alias: bool = False
 
     def __post_init__(self):
+        object.__setattr__(self, 'name', str(self.name))
         values = tuple((str(name), int(number)) for name, number in self.values)
         if not values:
             raise ValueError('enum spec must contain at least one value')
@@ -164,6 +237,8 @@ class PbEnumSpec:
             raise ValueError(f'duplicate enum names in {self.name}')
         if not self.allow_alias and len(numbers) != len(set(numbers)):
             raise ValueError(f'duplicate enum numbers in {self.name}')
+        if any(number < -(1 << 31) or number >= (1 << 31) for number in numbers):
+            raise ValueError(f'enum number is out of int32 range in {self.name}')
         object.__setattr__(self, 'values', values)
 
     def number_for(self, value):
@@ -173,6 +248,13 @@ class PbEnumSpec:
                     return number
             raise ValueError(f'Unknown enum name {value!r} for enum {self.name}')
         return int(value)
+
+    def name_for(self, value):
+        number = self.number_for(value)
+        for name, candidate in self.values:
+            if candidate == number:
+                return name
+        raise ValueError(f'Unknown enum number {number} for enum {self.name}')
 
 
 @dataclass(frozen=True)
@@ -192,6 +274,21 @@ class PbScalarFieldSpec:
         object.__setattr__(self, 'name', str(self.name))
         object.__setattr__(self, 'number', int(self.number))
         _validate_protobuf_field_number(self.number)
+        if self.gen is not None:
+            if not isinstance(self.gen, DataGen):
+                raise TypeError(
+                    f'{self.kind.value} field {self.name} requires a DataGen, '
+                    f'got {type(self.gen).__name__}')
+            expected_type = _pb_scalar_kind_spark_type(self.kind)
+            valid_types = ((IntegerType, StringType) if self.kind == PbScalarKind.ENUM
+                           else (type(expected_type),))
+            if not isinstance(self.gen.data_type, valid_types):
+                expected_name = ('IntegerType or StringType'
+                                 if self.kind == PbScalarKind.ENUM
+                                 else type(expected_type).__name__)
+                raise TypeError(
+                    f'{self.kind.value} field {self.name} requires {expected_name}, '
+                    f'got {type(self.gen.data_type).__name__}')
         if self.cardinality != PbCardinality.REPEATED and self.packed:
             raise ValueError(f'packed encoding requires repeated cardinality: {self.name}')
         if self.cardinality == PbCardinality.REPEATED and self.default is not None:
@@ -203,6 +300,7 @@ class PbScalarFieldSpec:
                 raise ValueError(f'enum field requires enum spec: {self.name}')
         elif self.enum is not None:
             raise ValueError(f'non-enum field cannot carry enum settings: {self.name}')
+        _validate_pb_scalar_default(self)
         if self.packed and self.kind not in {
                 PbScalarKind.BOOL, PbScalarKind.INT32, PbScalarKind.INT64,
                 PbScalarKind.UINT32, PbScalarKind.UINT64, PbScalarKind.SINT32,
@@ -237,17 +335,32 @@ class PbMessageFieldSpec:
 class PbMessageSpec:
     name: str
     fields: tuple
+    package: str = ''
 
     def __post_init__(self):
         object.__setattr__(self, 'name', str(self.name))
         object.__setattr__(self, 'fields', tuple(self.fields))
+        object.__setattr__(self, 'package', str(self.package).strip('.'))
         _validate_pb_fields(self.fields, self.name)
 
-    def as_datagen(self, binary_col_name='bin'):
-        return ProtobufRowGen(self, binary_col_name=binary_col_name)
+    @property
+    def full_name(self):
+        return '.'.join(part for part in (self.package, self.name) if part)
+
+    def as_datagen(self, binary_col_name='bin', enums_as_ints=True):
+        return ProtobufRowGen(
+            self, binary_col_name=binary_col_name, enums_as_ints=enums_as_ints)
+
+    def as_logical_datagen(self, enums_as_ints=True):
+        return ProtobufRowGen(
+            self, binary_col_name=None, enums_as_ints=enums_as_ints)
 
     def encode(self, value):
         return encode_pb_message(self, value)
+
+    def descriptor_set_bytes(self, spark, file_name=None):
+        return _build_descriptor_set_bytes(
+            spark, self, file_name or f'{self.name}.proto')
 
 
 def _validate_pb_fields(fields, owner_name):
@@ -259,9 +372,129 @@ def _validate_pb_fields(fields, owner_name):
         raise ValueError(f'duplicate field numbers in {owner_name}')
 
 
+def _build_descriptor_set_bytes(spark, message_spec, file_name):
+    D = spark.sparkContext._jvm.org.sparkproject.spark_protobuf.protobuf.DescriptorProtos
+    file_builder = (D.FileDescriptorProto.newBuilder()
+                    .setName(file_name)
+                    .setSyntax('proto2'))
+    if message_spec.package:
+        file_builder.setPackage(message_spec.package)
+
+    type_map = {
+        PbScalarKind.BOOL: D.FieldDescriptorProto.Type.TYPE_BOOL,
+        PbScalarKind.INT32: D.FieldDescriptorProto.Type.TYPE_INT32,
+        PbScalarKind.INT64: D.FieldDescriptorProto.Type.TYPE_INT64,
+        PbScalarKind.UINT32: D.FieldDescriptorProto.Type.TYPE_UINT32,
+        PbScalarKind.UINT64: D.FieldDescriptorProto.Type.TYPE_UINT64,
+        PbScalarKind.SINT32: D.FieldDescriptorProto.Type.TYPE_SINT32,
+        PbScalarKind.SINT64: D.FieldDescriptorProto.Type.TYPE_SINT64,
+        PbScalarKind.FIXED32: D.FieldDescriptorProto.Type.TYPE_FIXED32,
+        PbScalarKind.FIXED64: D.FieldDescriptorProto.Type.TYPE_FIXED64,
+        PbScalarKind.SFIXED32: D.FieldDescriptorProto.Type.TYPE_SFIXED32,
+        PbScalarKind.SFIXED64: D.FieldDescriptorProto.Type.TYPE_SFIXED64,
+        PbScalarKind.FLOAT: D.FieldDescriptorProto.Type.TYPE_FLOAT,
+        PbScalarKind.DOUBLE: D.FieldDescriptorProto.Type.TYPE_DOUBLE,
+        PbScalarKind.STRING: D.FieldDescriptorProto.Type.TYPE_STRING,
+        PbScalarKind.BYTES: D.FieldDescriptorProto.Type.TYPE_BYTES,
+        PbScalarKind.ENUM: D.FieldDescriptorProto.Type.TYPE_ENUM,
+    }
+    label_map = {
+        PbCardinality.OPTIONAL: D.FieldDescriptorProto.Label.LABEL_OPTIONAL,
+        PbCardinality.REQUIRED: D.FieldDescriptorProto.Label.LABEL_REQUIRED,
+        PbCardinality.REPEATED: D.FieldDescriptorProto.Label.LABEL_REPEATED,
+    }
+    packed_options = D.FieldOptions.newBuilder().setPacked(True).build()
+
+    def default_literal(field_spec):
+        if field_spec.kind == PbScalarKind.BYTES:
+            raise NotImplementedError(
+                'bytes default protobuf descriptor generation is not implemented')
+        if field_spec.kind == PbScalarKind.BOOL:
+            return 'true' if field_spec.default else 'false'
+        if field_spec.kind == PbScalarKind.ENUM:
+            if isinstance(field_spec.default, str):
+                return field_spec.default
+            return field_spec.enum.name_for(field_spec.default)
+        return str(field_spec.default)
+
+    def build_enum(enum_spec):
+        enum_builder = D.EnumDescriptorProto.newBuilder().setName(enum_spec.name)
+        if enum_spec.allow_alias:
+            enum_builder.setOptions(
+                D.EnumOptions.newBuilder().setAllowAlias(True).build())
+        for value_name, value_number in enum_spec.values:
+            enum_builder.addValue(
+                D.EnumValueDescriptorProto.newBuilder()
+                .setName(value_name)
+                .setNumber(value_number)
+                .build())
+        return enum_builder.build()
+
+    def build_message(name, fields, full_name):
+        message_builder = D.DescriptorProto.newBuilder().setName(name)
+        enum_specs = {}
+        for field_spec in fields:
+            if (isinstance(field_spec, PbScalarFieldSpec) and
+                    field_spec.kind == PbScalarKind.ENUM):
+                previous = enum_specs.setdefault(field_spec.enum.name, field_spec.enum)
+                if previous != field_spec.enum:
+                    raise ValueError(
+                        f'conflicting enum definitions for {field_spec.enum.name}')
+        for enum_spec in enum_specs.values():
+            message_builder.addEnumType(build_enum(enum_spec))
+        enum_value_names = {
+            value_name
+            for enum_spec in enum_specs.values()
+            for value_name, _ in enum_spec.values
+        }
+        reserved_names = (
+            set(enum_specs) |
+            enum_value_names |
+            {field_spec.name for field_spec in fields})
+        nested_names = {}
+        for field_spec in fields:
+            if isinstance(field_spec, PbMessageFieldSpec):
+                nested_name = f'Nested{field_spec.number}'
+                while nested_name in reserved_names:
+                    nested_name += '_'
+                reserved_names.add(nested_name)
+                nested_names[field_spec.number] = nested_name
+        for field_spec in fields:
+            field_builder = (D.FieldDescriptorProto.newBuilder()
+                             .setName(field_spec.name)
+                             .setNumber(field_spec.number)
+                             .setLabel(label_map[field_spec.cardinality]))
+            if isinstance(field_spec, PbScalarFieldSpec):
+                if field_spec.kind == PbScalarKind.ENUM:
+                    field_builder.setType(D.FieldDescriptorProto.Type.TYPE_ENUM)
+                    field_builder.setTypeName(f'.{full_name}.{field_spec.enum.name}')
+                else:
+                    field_builder.setType(type_map[field_spec.kind])
+                if field_spec.default is not None:
+                    field_builder.setDefaultValue(default_literal(field_spec))
+                if field_spec.packed:
+                    field_builder.setOptions(packed_options)
+            else:
+                nested_name = nested_names[field_spec.number]
+                nested_full_name = f'{full_name}.{nested_name}'
+                message_builder.addNestedType(
+                    build_message(nested_name, field_spec.fields, nested_full_name))
+                field_builder.setType(D.FieldDescriptorProto.Type.TYPE_MESSAGE)
+                field_builder.setTypeName(f'.{nested_full_name}')
+            message_builder.addField(field_builder.build())
+        return message_builder.build()
+
+    root_full_name = '.'.join(
+        part for part in (message_spec.package, message_spec.name) if part)
+    file_builder.addMessageType(
+        build_message(message_spec.name, message_spec.fields, root_full_name))
+    descriptor_set = D.FileDescriptorSet.newBuilder().addFile(file_builder.build()).build()
+    return bytes(descriptor_set.toByteArray())
+
+
 class _PbBuilder:
-    def message(self, name, fields):
-        return PbMessageSpec(name, tuple(fields))
+    def message(self, name, fields, package=''):
+        return PbMessageSpec(name, tuple(fields), package=package)
 
     def bool(self, name, number, gen=None, default=None):
         return PbScalarFieldSpec(name, number, PbScalarKind.BOOL, gen=gen, default=default)
@@ -322,6 +555,10 @@ class _PbBuilder:
         return self.message_field(name, number, fields)
 
     def repeated(self, field_spec, min_len=0, max_len=5, packed=False):
+        if not isinstance(field_spec, (PbScalarFieldSpec, PbMessageFieldSpec)):
+            raise TypeError(f'Unsupported protobuf field for repeated(): {type(field_spec)}')
+        if field_spec.cardinality != PbCardinality.OPTIONAL:
+            raise ValueError('repeated() expects an optional field')
         if isinstance(field_spec, PbScalarFieldSpec):
             return replace(
                 field_spec,
@@ -337,19 +574,24 @@ class _PbBuilder:
                 cardinality=PbCardinality.REPEATED,
                 min_len=min_len,
                 max_len=max_len)
-        raise TypeError(f'Unsupported protobuf field for repeated(): {type(field_spec)}')
 
     def repeated_message(self, name, number, fields, min_len=0, max_len=5):
-        return self.repeated(self.message_field(name, number, fields), min_len=min_len, max_len=max_len)
+        return self.repeated(
+            self.message_field(name, number, fields),
+            min_len=min_len,
+            max_len=max_len)
 
     def required(self, field_spec):
+        if not isinstance(field_spec, (PbScalarFieldSpec, PbMessageFieldSpec)):
+            raise TypeError(f'Unsupported protobuf field for required(): {type(field_spec)}')
+        if field_spec.cardinality != PbCardinality.OPTIONAL:
+            raise ValueError('required() expects an optional field')
         if isinstance(field_spec, PbScalarFieldSpec):
             if field_spec.default is not None:
                 raise ValueError('required fields cannot have defaults')
             return replace(field_spec, cardinality=PbCardinality.REQUIRED)
         if isinstance(field_spec, PbMessageFieldSpec):
             return replace(field_spec, cardinality=PbCardinality.REQUIRED)
-        raise TypeError(f'Unsupported protobuf field for required(): {type(field_spec)}')
 
 
 pb = _PbBuilder()
@@ -380,13 +622,13 @@ def _pb_field_cache_repr(field_spec):
 
 def _pb_message_cache_repr(message_spec):
     children = ','.join(_pb_field_cache_repr(field_spec) for field_spec in message_spec.fields)
-    return 'PbMessage(' + message_spec.name + ',[' + children + '])'
+    return ('PbMessage(' + message_spec.full_name + ',[' + children + '])')
 
 
 class ProtobufEncoder:
     def encode_message(self, message_spec, value):
         if value is None:
-            return b''
+            value = {}
         if not isinstance(message_spec, PbMessageSpec):
             raise TypeError(f'encode_message expects PbMessageSpec, got {type(message_spec)}')
         return self._encode_message_fields(message_spec.fields, value)
@@ -431,7 +673,10 @@ class ProtobufEncoder:
         if kind == PbScalarKind.BOOL:
             return _PROTOBUF_WIRE_VARINT, _encode_protobuf_uvarint(1 if scalar_value else 0)
         if kind in {PbScalarKind.INT32, PbScalarKind.INT64, PbScalarKind.ENUM}:
-            u64 = int(scalar_value) & 0xFFFFFFFFFFFFFFFF
+            bits = 64 if kind == PbScalarKind.INT64 else 32
+            scalar_value = _signed_wire_value(
+                scalar_value, bits, kind.value, field_spec.name)
+            u64 = scalar_value & 0xFFFFFFFFFFFFFFFF
             return _PROTOBUF_WIRE_VARINT, _encode_protobuf_uvarint(u64)
         if kind == PbScalarKind.UINT32:
             return (_PROTOBUF_WIRE_VARINT,
@@ -442,9 +687,17 @@ class ProtobufEncoder:
                     _encode_protobuf_uvarint(
                         _unsigned_wire_value(scalar_value, 64, field_spec.name)))
         if kind == PbScalarKind.SINT32:
-            return _PROTOBUF_WIRE_VARINT, _encode_protobuf_uvarint(_encode_protobuf_zigzag32(scalar_value))
+            scalar_value = _signed_wire_value(
+                scalar_value, 32, kind.value, field_spec.name)
+            return (_PROTOBUF_WIRE_VARINT,
+                    _encode_protobuf_uvarint(
+                        _encode_protobuf_zigzag32(scalar_value)))
         if kind == PbScalarKind.SINT64:
-            return _PROTOBUF_WIRE_VARINT, _encode_protobuf_uvarint(_encode_protobuf_zigzag64(scalar_value))
+            scalar_value = _signed_wire_value(
+                scalar_value, 64, kind.value, field_spec.name)
+            return (_PROTOBUF_WIRE_VARINT,
+                    _encode_protobuf_uvarint(
+                        _encode_protobuf_zigzag64(scalar_value)))
         if kind == PbScalarKind.FIXED32:
             return (_PROTOBUF_WIRE_32BIT,
                     struct.pack(
@@ -454,9 +707,14 @@ class ProtobufEncoder:
                     struct.pack(
                         '<Q', _unsigned_wire_value(scalar_value, 64, field_spec.name)))
         if kind == PbScalarKind.SFIXED32:
-            return _PROTOBUF_WIRE_32BIT, struct.pack('<I', int(scalar_value) & 0xFFFFFFFF)
+            scalar_value = _signed_wire_value(
+                scalar_value, 32, kind.value, field_spec.name)
+            return _PROTOBUF_WIRE_32BIT, struct.pack('<I', scalar_value & 0xFFFFFFFF)
         if kind == PbScalarKind.SFIXED64:
-            return _PROTOBUF_WIRE_64BIT, struct.pack('<Q', int(scalar_value) & 0xFFFFFFFFFFFFFFFF)
+            scalar_value = _signed_wire_value(
+                scalar_value, 64, kind.value, field_spec.name)
+            return _PROTOBUF_WIRE_64BIT, struct.pack(
+                '<Q', scalar_value & 0xFFFFFFFFFFFFFFFF)
         if kind == PbScalarKind.FLOAT:
             return _PROTOBUF_WIRE_32BIT, struct.pack('<f', float(scalar_value))
         if kind == PbScalarKind.DOUBLE:
@@ -471,6 +729,8 @@ class ProtobufEncoder:
 
     def _encode_scalar_field(self, field_spec, value):
         if value is _PB_MISSING or value is None:
+            if field_spec.cardinality == PbCardinality.REQUIRED:
+                raise ValueError(f'required field {field_spec.name} is missing')
             return b''
         if field_spec.cardinality == PbCardinality.REPEATED:
             if not isinstance(value, (list, tuple)):
@@ -499,6 +759,8 @@ class ProtobufEncoder:
 
     def _encode_message_field(self, field_spec, value):
         if value is _PB_MISSING or value is None:
+            if field_spec.cardinality == PbCardinality.REQUIRED:
+                raise ValueError(f'required field {field_spec.name} is missing')
             return b''
         if field_spec.cardinality == PbCardinality.REPEATED:
             if not isinstance(value, (list, tuple)):
@@ -567,9 +829,15 @@ class ProtobufValueGenerator:
 
 
 class ProtobufSparkAdapter:
+    def __init__(self, enums_as_ints=True):
+        self._enums_as_ints = bool(enums_as_ints)
+
     def field_spark_field(self, field_spec):
         if isinstance(field_spec, PbScalarFieldSpec):
-            data_type = _pb_scalar_kind_spark_type(field_spec.kind)
+            if field_spec.kind == PbScalarKind.ENUM and not self._enums_as_ints:
+                data_type = StringType()
+            else:
+                data_type = _pb_scalar_kind_spark_type(field_spec.kind)
             if field_spec.cardinality == PbCardinality.REPEATED:
                 return StructField(
                     field_spec.name,
@@ -604,7 +872,8 @@ class ProtobufSparkAdapter:
         if value is None:
             return None
         if field_spec.kind == PbScalarKind.ENUM:
-            return field_spec.enum.number_for(value)
+            number = field_spec.enum.number_for(value)
+            return number if self._enums_as_ints else field_spec.enum.name_for(number)
         if field_spec.kind == PbScalarKind.BOOL:
             return bool(value)
         if field_spec.kind in {PbScalarKind.FLOAT, PbScalarKind.DOUBLE}:
@@ -628,6 +897,10 @@ class ProtobufSparkAdapter:
             return [self._scalar_single_value(field_spec, element) for element in value]
         if value in (_PB_MISSING, None):
             if field_spec.default is not None:
+                if (field_spec.kind == PbScalarKind.ENUM and
+                        not self._enums_as_ints and
+                        isinstance(field_spec.default, str)):
+                    return field_spec.default
                 return self._scalar_single_value(field_spec, field_spec.default)
             return None
         return self._scalar_single_value(field_spec, value)
@@ -645,19 +918,24 @@ class ProtobufSparkAdapter:
 
 
 class ProtobufRowGen(DataGen):
-    """Generate Spark rows with logical protobuf fields plus a serialized binary column."""
-    def __init__(self, message_spec, binary_col_name='bin', nullable=False):
-        binary_col_name = str(binary_col_name)
-        if binary_col_name.casefold() in {
-                field_spec.name.casefold() for field_spec in message_spec.fields}:
-            raise ValueError(
-                f'binary column name conflicts with protobuf field: {binary_col_name}')
+    """Generate Spark rows from a protobuf message specification."""
+    def __init__(
+            self, message_spec, binary_col_name='bin', nullable=False,
+            enums_as_ints=True):
+        if binary_col_name is not None:
+            binary_col_name = str(binary_col_name)
+            if binary_col_name.casefold() in {
+                    field_spec.name.casefold() for field_spec in message_spec.fields}:
+                raise ValueError(
+                    f'binary column name conflicts with protobuf field: {binary_col_name}')
         self._message_spec = message_spec
         self._binary_col_name = binary_col_name
-        self._adapter = ProtobufSparkAdapter()
+        self._enums_as_ints = bool(enums_as_ints)
+        self._adapter = ProtobufSparkAdapter(enums_as_ints=self._enums_as_ints)
         struct_fields = [self._adapter.field_spark_field(field_spec)
                          for field_spec in message_spec.fields]
-        struct_fields.append(StructField(binary_col_name, BinaryType(), nullable=True))
+        if binary_col_name is not None:
+            struct_fields.append(StructField(binary_col_name, BinaryType(), nullable=True))
         super().__init__(StructType(struct_fields), nullable=nullable)
 
     def __repr__(self):
@@ -665,7 +943,7 @@ class ProtobufRowGen(DataGen):
 
     def _cache_repr(self):
         return (super()._cache_repr() + '(' + _pb_message_cache_repr(self._message_spec) +
-                ',' + self._binary_col_name + ')')
+                ',' + str(self._binary_col_name) + ',' + str(self._enums_as_ints) + ')')
 
     def __eq__(self, other):
         return isinstance(other, ProtobufRowGen) and self._cache_repr() == other._cache_repr()
@@ -684,13 +962,14 @@ class ProtobufRowGen(DataGen):
     def start(self, rand):
         self._start_field_gens(self._message_spec.fields, rand)
         value_gen = ProtobufValueGenerator(rand)
-        encoder = ProtobufEncoder()
+        encoder = ProtobufEncoder() if self._binary_col_name is not None else None
 
         def make_row():
             message_value = value_gen.generate_message(self._message_spec, force_present=True)
             logical_values = self._adapter.message_tuple(self._message_spec.fields, message_value)
-            message_bytes = encoder.encode_message(self._message_spec, message_value)
-            return logical_values + (message_bytes,)
+            if encoder is None:
+                return logical_values
+            return logical_values + (encoder.encode_message(self._message_spec, message_value),)
 
         self._start(rand, make_row)
 

@@ -19,7 +19,6 @@ from data_gen import *
 from spark_session import is_before_spark_340
 from marks import allow_non_gpu, approximate_float
 
-
 @pytest.mark.parametrize('data_gen', all_basic_gens + decimal_gens + array_gens_sample + map_gens_sample + struct_gens_sample, ids=idfn)
 def test_simple_limit(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
