@@ -16,46 +16,34 @@
 
 package com.nvidia.spark.rapids.iceberg.parquet.staged;
 
-import java.io.EOFException;
 import java.io.IOException;
-import java.nio.ByteBuffer;
 import java.nio.channels.SeekableByteChannel;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.StampedLock;
 
 import ai.rapids.cudf.HostMemoryBuffer;
 import com.nvidia.spark.rapids.HostAlloc$;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
-import org.apache.spark.SparkEnv;
-import scala.Option;
 
 /**
  * Exact-sized writable storage for one synthetic Parquet file.
  *
- * <p>The output has a strict lifecycle: {@code WRITABLE -> SEALED -> CLOSED}. Source workers may
- * concurrently copy disjoint ranges while it is writable. After all source futures finish, a
- * staged worker writes the synthetic header and footer and seals the output. The Spark task thread
- * then obtains an independent host-buffer reference with {@link #materialize()} before closing
- * this output.</p>
+ * <p>The output has a strict lifecycle: {@code WRITABLE -> SEALED -> CLOSED}. Async source
+ * writers may concurrently copy disjoint ranges while it is writable. After the owning worker's
+ * read barrier, it writes the synthetic header and footer and seals the output. The Spark task
+ * thread then obtains an independent host-buffer reference with {@link #materialize()} before
+ * closing this output.</p>
  *
- * <p>This class also owns storage selection. It uses host memory when one non-blocking allocation
- * cycle succeeds and otherwise creates a memory-mapped file in an executor-local directory. The
- * planned synthetic size is exact, so sealing never needs a second size argument.</p>
+ * <p>Storage is non-pinned host memory obtained with one blocking allocation that participates
+ * in normal host spilling. The blocking-worker execution model bounds how many outputs exist at
+ * once, and keeping staged bytes out of the pinned pool leaves it free for decode transfers and
+ * device spill. The planned synthetic size is exact, so sealing never needs a second size
+ * argument.</p>
  */
 abstract class StagedParquetOutput implements AutoCloseable {
-  private static final String SPARK_LOCAL_DIR = "spark.local.dir";
-  private static final String SPARK_LOCAL_DIRS_ENV = "SPARK_LOCAL_DIRS";
-  private static final AtomicInteger NEXT_LOCAL_DIRECTORY = new AtomicInteger();
-
   private final long exactSizeBytes;
   private final boolean diskBacked;
   // A read stamp is held for the lifetime of every asynchronous source write. Unlike a
@@ -75,22 +63,20 @@ abstract class StagedParquetOutput implements AutoCloseable {
     this.diskBacked = diskBacked;
   }
 
-  /** Create one owned memory- or file-backed output for an exact synthetic-file size. */
-  static StagedParquetOutput create(
-      long exactSizeBytes,
-      long taskAttemptId,
-      long subtaskId) throws IOException {
+  /**
+   * Create one owned output for an exact synthetic-file size.
+   *
+   * <p>The allocation is non-pinned and blocking: it spills and waits through the normal host
+   * retry protocol instead of failing over to another backend. The caller is a dedicated subtask
+   * worker whose whole pipeline is blocking, so waiting here is the intended backpressure.</p>
+   */
+  static StagedParquetOutput create(long exactSizeBytes) throws IOException {
     if (exactSizeBytes <= 0) {
       throw new IllegalArgumentException(
           "exactSizeBytes must be positive: " + exactSizeBytes);
     }
-
-    Option<HostMemoryBuffer> allocation = HostAlloc$.MODULE$.tryAlloc2(exactSizeBytes, true);
-    if (allocation.isDefined()) {
-      return new MemoryStagedParquetOutput(allocation.get(), exactSizeBytes);
-    }
-    return new FileStagedParquetOutput(
-        createLocalFile(taskAttemptId, subtaskId), exactSizeBytes);
+    HostMemoryBuffer allocation = HostAlloc$.MODULE$.alloc(exactSizeBytes, false);
+    return new MemoryStagedParquetOutput(allocation, exactSizeBytes);
   }
 
   /** Return the exact allocation and final sealed size to subclasses. */
@@ -98,13 +84,10 @@ abstract class StagedParquetOutput implements AutoCloseable {
     return exactSizeBytes;
   }
 
-  /** Return whether this output uses an executor-local memory-mapped file. */
+  /** Return whether this output uses an executor-local file. */
   final boolean isDiskBacked() {
     return diskBacked;
   }
-
-  /** Return the live writable buffer. This is called only during a locked writable operation. */
-  abstract HostMemoryBuffer writableBuffer();
 
   /**
    * Copy all cache-miss column chunks for one source with one vectored read.
@@ -134,7 +117,7 @@ abstract class StagedParquetOutput implements AutoCloseable {
       CompletableFuture<Void> readFuture;
       try {
         readFuture = Objects.requireNonNull(
-            input.readVectoredAsync(writableBuffer(), copies),
+            submitVectoredRead(input, copies),
             "readVectoredAsync returned null");
       } catch (Throwable submissionError) {
         endConcurrentWrite(writeStamp);
@@ -180,23 +163,7 @@ abstract class StagedParquetOutput implements AutoCloseable {
     long writeStamp = beginConcurrentWrite();
     try {
       checkWriteBounds(outputOffset, length);
-      long copied = 0L;
-      while (copied < length) {
-        int amount = (int) Math.min(length - copied, Integer.MAX_VALUE);
-        ByteBuffer destination = writableBuffer().asByteBuffer(outputOffset + copied, amount);
-        while (destination.hasRemaining()) {
-          int read = source.read(destination);
-          if (read < 0) {
-            throw new EOFException(
-                "cached data range ended with " + destination.remaining() +
-                    " bytes remaining");
-          }
-          if (read == 0) {
-            Thread.yield();
-          }
-        }
-        copied += amount;
-      }
+      copyCachedRangeStorage(source, outputOffset, length);
     } finally {
       endConcurrentWrite(writeStamp);
     }
@@ -208,11 +175,11 @@ abstract class StagedParquetOutput implements AutoCloseable {
    * <p>The returned slice retains its backing allocation independently. The caller owns it and
    * must close it or transfer ownership, even after this output is sealed or closed.</p>
    */
-  final HostMemoryBuffer sliceForCache(long outputOffset, long length) {
+  final HostMemoryBuffer sliceForCache(long outputOffset, long length) throws IOException {
     long writeStamp = beginConcurrentWrite();
     try {
       checkWriteBounds(outputOffset, length);
-      return writableBuffer().slice(outputOffset, length);
+      return sliceForCacheStorage(outputOffset, length);
     } finally {
       endConcurrentWrite(writeStamp);
     }
@@ -233,7 +200,7 @@ abstract class StagedParquetOutput implements AutoCloseable {
     long writeStamp = beginExclusiveWrite();
     try {
       checkWriteBounds(outputOffset, length);
-      writableBuffer().setBytes(outputOffset, source, sourceOffset, length);
+      writeBytesStorage(outputOffset, source, sourceOffset, length);
     } finally {
       endExclusiveWrite(writeStamp);
     }
@@ -283,6 +250,32 @@ abstract class StagedParquetOutput implements AutoCloseable {
       operationLock.unlockWrite(stamp);
     }
   }
+
+  /**
+   * Submit one vectored read whose destination is this output's backing store. Called while a
+   * concurrent-write stamp is held; the stamp is released when the returned future is terminal.
+   */
+  abstract CompletableFuture<Void> submitVectoredRead(
+      RapidsInputFile input,
+      List<RapidsInputFile.CopyRange> copies) throws IOException;
+
+  /** Copy one bounds-checked cached range into the backing store under a write stamp. */
+  abstract void copyCachedRangeStorage(
+      SeekableByteChannel source,
+      long outputOffset,
+      long length) throws IOException;
+
+  /** Create an owning bounds-checked view of a completed range for the data cache. */
+  abstract HostMemoryBuffer sliceForCacheStorage(
+      long outputOffset,
+      long length) throws IOException;
+
+  /** Write bounds-checked combine-stage bytes while the exclusive write stamp is held. */
+  abstract void writeBytesStorage(
+      long outputOffset,
+      byte[] source,
+      int sourceOffset,
+      int length) throws IOException;
 
   /** Perform the backing-store transition while the exclusive lifecycle lock is held. */
   abstract void sealStorage() throws IOException;
@@ -359,63 +352,6 @@ abstract class StagedParquetOutput implements AutoCloseable {
   private void ensureOpen() {
     if (closed) {
       throw new IllegalStateException("staged Parquet output is closed");
-    }
-  }
-
-  private static Path createLocalFile(long taskAttemptId, long subtaskId) throws IOException {
-    String prefix = "rapids-iceberg-staged-" + taskAttemptId + "-" + subtaskId + "-";
-    IOException failure = null;
-    List<Path> directories = candidateDirectories();
-    if (directories.isEmpty()) {
-      throw new IOException("no Spark or JVM local directory is configured");
-    }
-    int start = Math.floorMod(NEXT_LOCAL_DIRECTORY.getAndIncrement(), directories.size());
-    for (int index = 0; index < directories.size(); index++) {
-      Path directory = directories.get((start + index) % directories.size());
-      try {
-        Files.createDirectories(directory);
-        return Files.createTempFile(directory, prefix, ".parquet");
-      } catch (IOException | RuntimeException e) {
-        IOException current = e instanceof IOException
-            ? (IOException) e
-            : new IOException("invalid Spark local directory " + directory, e);
-        if (failure == null) {
-          failure = current;
-        } else {
-          failure.addSuppressed(current);
-        }
-      }
-    }
-    throw new IOException("unable to create a local staged Parquet file", failure);
-  }
-
-  private static List<Path> candidateDirectories() {
-    Set<String> candidates = new LinkedHashSet<>();
-    addDirectories(candidates, System.getenv(SPARK_LOCAL_DIRS_ENV));
-
-    SparkEnv sparkEnv = SparkEnv.get();
-    if (sparkEnv != null) {
-      addDirectories(candidates,
-          sparkEnv.conf().get(SPARK_LOCAL_DIR, System.getProperty("java.io.tmpdir")));
-    }
-    addDirectories(candidates, System.getProperty("java.io.tmpdir"));
-
-    List<Path> paths = new ArrayList<>(candidates.size());
-    for (String candidate : candidates) {
-      paths.add(Paths.get(candidate));
-    }
-    return paths;
-  }
-
-  private static void addDirectories(Set<String> candidates, String directories) {
-    if (directories == null) {
-      return;
-    }
-    for (String candidate : directories.split(",")) {
-      String trimmed = candidate.trim();
-      if (!trimmed.isEmpty()) {
-        candidates.add(trimmed);
-      }
     }
   }
 }

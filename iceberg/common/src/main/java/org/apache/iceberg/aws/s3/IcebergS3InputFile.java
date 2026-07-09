@@ -33,6 +33,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.net.URI;
+import java.nio.channels.FileChannel;
 import java.util.List;
 import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
@@ -132,6 +133,24 @@ public final class IcebergS3InputFile implements RapidsInputFile {
       HostMemoryBuffer output,
       List<CopyRange> copyRanges) {
     return IcebergS3RangeCopier.copyToHMBAsync(
+        icebergS3Client, output, s3Uri, copyRanges);
+  }
+
+  @Override
+  public void readVectored(FileChannel output, List<CopyRange> copyRanges)
+      throws IOException {
+    IcebergS3RangeCopier.copyToFile(icebergS3Client, output, s3Uri, copyRanges);
+  }
+
+  /**
+   * Submit every range in list order and stream response bytes directly into the destination
+   * file with positioned writes, returning the PerfIO completion barrier without blocking.
+   */
+  @Override
+  public CompletableFuture<Void> readVectoredAsync(
+      FileChannel output,
+      List<CopyRange> copyRanges) {
+    return IcebergS3RangeCopier.copyToFileAsync(
         icebergS3Client, output, s3Uri, copyRanges);
   }
 

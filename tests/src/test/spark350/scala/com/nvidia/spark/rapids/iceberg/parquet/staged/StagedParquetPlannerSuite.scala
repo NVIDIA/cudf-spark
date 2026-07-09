@@ -28,7 +28,6 @@ spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.iceberg.parquet.staged
 
 import java.io.ByteArrayInputStream
-import java.nio.file.Files
 import java.util.{Collections, IdentityHashMap, Iterator => JIterator, List => JList}
 import java.util.concurrent.{
   CompletableFuture,
@@ -597,69 +596,6 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  test("file output preserves one vectored request per source and materializes exact bytes") {
-    val sourceBytes = (0 until 32).map(index => (index + 20).toByte).toArray
-    val input = new RecordingVectoredInput(sourceBytes)
-    val source = footer(11, oneColumnParquetSchema, oneColumnReadSchema, Seq.empty)
-    val ranges = Seq(
-      new PlannedReadRange(source, 1L, 3L, 2L),
-      new PlannedReadRange(source, 4L, 2L, 5L),
-      new PlannedReadRange(source, 9L, 4L, 10L))
-    val observed = ArrayBuffer.empty[(PlannedReadRange, Seq[Byte])]
-    val path = Files.createTempFile("staged-parquet-output-test-", ".parquet")
-    val output = new FileStagedParquetOutput(path, 16L)
-
-    try {
-      // The writable mmap lets every column chunk for this source share one vectored request.
-      output.copyRangesAsync(input, ranges.asJava).join()
-      recordCopiedRanges(output, ranges, observed)
-      output.writeBytes(0L, Array[Byte](1, 2), 0, 2)
-      output.writeBytes(7L, Array[Byte](7, 8, 9), 0, 3)
-      output.writeBytes(14L, Array[Byte](14, 15), 0, 2)
-      output.seal()
-
-      assert(input.vectoredCalls === Seq(Seq(
-        (1L, 3L, 2L),
-        (4L, 2L, 5L),
-        (9L, 4L, 10L))))
-      assert(input.openCalls === 0)
-      assert(observed.map(_._1) === ranges)
-
-      val expected = Array.fill[Byte](16)(0)
-      expected(0) = 1
-      expected(1) = 2
-      expected(7) = 7
-      expected(8) = 8
-      expected(9) = 9
-      expected(14) = 14
-      expected(15) = 15
-      ranges.foreach { range =>
-        Array.copy(
-          sourceBytes,
-          Math.toIntExact(range.getInputOffset),
-          expected,
-          Math.toIntExact(range.getOutputOffset),
-          Math.toIntExact(range.getLength))
-      }
-
-      val materialized = output.materialize()
-      try {
-        // The task thread releases/unlinks the staged output before GPU decode. The owning slice
-        // must keep the mmap valid independently on EMR/Linux.
-        output.close()
-        assert(!Files.exists(path))
-        val actual = new Array[Byte](16)
-        materialized.getBytes(actual, 0L, 0L, actual.length)
-        assert(actual.toIndexedSeq === expected.toIndexedSeq)
-      } finally {
-        materialized.close()
-      }
-    } finally {
-      output.close()
-    }
-    assert(!Files.exists(path))
-  }
-
   test("memory output accepts concurrent source writes into disjoint ranges") {
     val sourceBytes = Array.tabulate[Byte](64)(index => (index + 10).toByte)
     val tracker = new SourceReadTracker(2)
@@ -738,8 +674,8 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       }
     }
 
-    // Force local-file outputs so the test does not need to initialize the spill framework.
-    HostAlloc.initialize(0L)
+    // Bound the non-pinned host allocations that back staged outputs in these tests.
+    HostAlloc.initialize(1L << 26)
     val reader = new StagedParquetPartitionReader(
       scanFiles.asJava,
       adapter,
@@ -815,7 +751,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       }
     }
 
-    HostAlloc.initialize(0L)
+    HostAlloc.initialize(1L << 26)
     val reader = new StagedParquetPartitionReader(
       scanFiles.asJava,
       adapter,
@@ -823,7 +759,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       Int.MaxValue,
       Long.MaxValue,
       0L,
-      1,
+      2,
       null)
     val caller = Executors.newSingleThreadExecutor()
     try {
@@ -831,14 +767,14 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
         override def call(): Boolean = reader.hasNext()
       })
 
-      // Subtask 1 is submitted immediately after subtask 0 returns its async I/O future, without
-      // waiting for subtask 0 to complete.
+      // With two workers available, both blocking subtasks run their I/O concurrently, and the
+      // async submissions still observe plan order through the FIFO pool.
       assert(tracker.firstTwoStarted.await(10, TimeUnit.SECONDS))
       assert(tracker.startedCalls.get() === 2)
       assert(tracker.calls.asScala.map(_._1).toSeq === Seq(0, 1))
 
-      // Finish the second subtask first. Ordered submission is only a best-effort priority hint to
-      // the I/O engine, so the task thread must not block this ready result behind subtask 0.
+      // Finish the second subtask first. Submission order is not completion order, so the task
+      // thread must not block this ready result behind subtask 0.
       tracker.releaseOrdinal(1)
       assert(hasNext.get(10, TimeUnit.SECONDS))
       reader.next().close()
@@ -854,6 +790,95 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       assert(!reader.hasNext)
       assert(decoded.asScala.toSeq === Seq(1, 0))
     } finally {
+      tracker.release(sourceCount * 2)
+      reader.close()
+      caller.shutdownNow()
+      HostAlloc.initialize(-1L)
+    }
+  }
+
+  test("a completed subtask holds its worker slot until the task thread picks it") {
+    val sourceCount = 3
+    val tracker = new SourceReadTracker(sourceCount)
+    val sourceBytes = Array.tabulate[Byte](1024)(index => (index & 0xff).toByte)
+    val footers = (0 until sourceCount).map { ordinal =>
+      val input = new BlockingVectoredInput(ordinal, sourceBytes, tracker)
+      val baseOffset = 100L + ordinal * 300L
+      footerWithInput(
+        ordinal,
+        oneColumnParquetSchema,
+        oneColumnReadSchema,
+        Seq(block(oneColumnParquetSchema, rows = 1L,
+          ColumnSpec("id", baseOffset + 4L, baseOffset, 4L, 4L))),
+        input)
+    }
+    val scanFiles = footers.map(_.getFile)
+    val firstDecodeGate = new CountDownLatch(1)
+    val decodeCalls = new AtomicInteger()
+    val adapter = new TestAdapter {
+      override def readAndFilterFooter(file: IcebergPartitionedFile): FooterResult =
+        footers.find(_.getFile eq file).get
+
+      override def decodeAndPostProcess(
+          subtask: ReadSubtask,
+          parquetData: HostMemoryBuffer): JIterator[ColumnarBatch] = {
+        parquetData.close()
+        if (decodeCalls.incrementAndGet() == 1) {
+          // Keep the task thread busy inside its first decode, exactly like a long GPU stage,
+          // so the next completed subtask stays unclaimed.
+          assert(firstDecodeGate.await(30, TimeUnit.SECONDS))
+        }
+        Collections.singletonList(new ColumnarBatch(
+          Array.empty[org.apache.spark.sql.vectorized.ColumnVector], 1)).iterator()
+      }
+    }
+
+    // Bound the non-pinned host allocations that back staged outputs in these tests.
+    HostAlloc.initialize(1L << 26)
+    val reader = new StagedParquetPartitionReader(
+      scanFiles.asJava,
+      adapter,
+      oneColumnReadSchema,
+      Int.MaxValue,
+      Long.MaxValue,
+      0L,
+      1,
+      null)
+    val caller = Executors.newSingleThreadExecutor()
+    try {
+      val hasNext = caller.submit(new java.util.concurrent.Callable[Boolean] {
+        override def call(): Boolean = reader.hasNext()
+      })
+
+      // A single worker bounds the in-flight subtasks to one.
+      assert(tracker.firstStarted.await(10, TimeUnit.SECONDS))
+      assert(tracker.startedCalls.get() === 1)
+
+      // Claiming subtask 0 frees the worker while the task thread is stuck in decode; the worker
+      // then starts subtask 1.
+      tracker.release(1)
+      assert(tracker.firstTwoStarted.await(10, TimeUnit.SECONDS))
+
+      // Subtask 1 completes and is published, but its worker must keep the only pool slot until
+      // the task thread picks the result. The task thread is still inside decode, so subtask 2
+      // must not start.
+      tracker.release(1)
+      Thread.sleep(200)
+      assert(tracker.startedCalls.get() === 2)
+
+      // Let the task thread finish decoding and claim subtask 1; only then may subtask 2 start.
+      firstDecodeGate.countDown()
+      assert(hasNext.get(10, TimeUnit.SECONDS))
+      reader.next().close()
+      val secondHasNext = caller.submit(new java.util.concurrent.Callable[Boolean] {
+        override def call(): Boolean = reader.hasNext()
+      })
+      assert(tracker.allStarted.await(10, TimeUnit.SECONDS))
+      assert(tracker.startedCalls.get() === 3)
+      tracker.release(1)
+      assert(secondHasNext.get(10, TimeUnit.SECONDS))
+    } finally {
+      firstDecodeGate.countDown()
       tracker.release(sourceCount * 2)
       reader.close()
       caller.shutdownNow()
@@ -887,7 +912,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
         }
       }
 
-    HostAlloc.initialize(0L)
+    HostAlloc.initialize(1L << 26)
     val firstReader = new StagedParquetPartitionReader(
       Seq(footers.head.getFile).asJava,
       adapterFor(footers.head),
@@ -999,7 +1024,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
 
     }
 
-    HostAlloc.initialize(0L)
+    HostAlloc.initialize(1L << 26)
     val reader = new StagedParquetPartitionReader(
       scanFiles.asJava,
       adapter,
@@ -1080,7 +1105,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
 
     }
 
-    HostAlloc.initialize(0L)
+    HostAlloc.initialize(1L << 26)
     val reader = new StagedParquetPartitionReader(
       scanFiles.asJava,
       adapter,

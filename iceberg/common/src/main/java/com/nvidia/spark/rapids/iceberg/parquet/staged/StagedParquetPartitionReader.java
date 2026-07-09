@@ -31,6 +31,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -60,10 +61,14 @@ import org.apache.spark.sql.vectorized.ColumnarBatch;
  * <ol>
  *   <li>Shared workers fetch metadata and perform Iceberg row-group filtering.</li>
  *   <li>The Spark task thread waits for the complete footer barrier and plans ordered subtasks.</li>
- *   <li>Each task submits planned subtask I/O in order. Subtask N+1 may submit after N has enqueued
- *       all of its asynchronous reads; it does not wait for N to finish.</li>
- *   <li>The task thread feeds completed synthetic files to GPU decode in completion order. The I/O
- *       submission order is only a best-effort hint to the asynchronous I/O implementation; a
+ *   <li>Every planned subtask is enqueued to the shared pool in plan order, but each subtask
+ *       executes as one blocking worker job: allocate the exact non-pinned output, copy cache
+ *       hits, hand all cache-miss column-chunk reads to the async I/O engine, block until they
+ *       finish, publish cache slices, and write/seal the synthetic file. The worker then keeps
+ *       its pool slot until the task thread picks the result for decode, so pool occupancy is
+ *       the executor-wide bound on in-flight subtasks and buffered bytes — the same natural
+ *       pacing the non-staged multithreaded reader gets from its blocking per-file reads.</li>
+ *   <li>The task thread feeds completed synthetic files to GPU decode in completion order; a
  *       later subtask is never held behind an earlier subtask that is slow to finish.</li>
  * </ol>
  */
@@ -108,7 +113,8 @@ public final class StagedParquetPartitionReader
    * @param maxEstimatedGpuBytes maximum estimated GPU bytes per subtask
    * @param targetParquetBytes target encoded bytes before closing a combined subtask; a
    *                           non-positive value disables cross-file combining
-   * @param workerThreads executor-wide worker count shared by footer, I/O, and finalization jobs
+   * @param workerThreads executor-wide worker count shared by footer and blocking subtask jobs;
+   *                      this is also the executor-wide bound on in-flight subtasks
    * @param taskContext Spark task context captured by the task thread; may be null in tests
    */
   public StagedParquetPartitionReader(
@@ -208,6 +214,9 @@ public final class StagedParquetPartitionReader
             }
             remainingResults -= 1;
           }
+          // The result is picked: free the worker slot that was parked on this handover so the
+          // next queued subtask can start its blocking pipeline.
+          completion.markClaimed();
           resultPassedToDecode = true;
           decoded = decode(completion);
           synchronized (iteratorLock) {
@@ -315,16 +324,15 @@ public final class StagedParquetPartitionReader
     synchronized (lifecycleLock) {
       checkOpen();
       List<ReadSubtask> plan = planner.plan(footers);
-      CompletableFuture<Void> previousSubmission = CompletableFuture.completedFuture(null);
       for (ReadSubtask subtask : plan) {
         checkOpen();
-        SubtaskFutures futures = submit(subtask, previousSubmission);
-        pendingResults.add(futures.completion);
-        // Record terminal futures in the order they actually finish. whenComplete runs immediately
-        // if a very small subtask completed before this callback could be installed.
-        futures.completion.whenComplete(
-            (completion, error) -> completedResults.offer(futures.completion));
-        previousSubmission = futures.ioSubmitted;
+        CompletableFuture<Completion> completionFuture = new CompletableFuture<>();
+        pendingResults.add(completionFuture);
+        // Record terminal futures in the order they actually finish. whenComplete runs
+        // immediately if a very small subtask completed before this callback could be installed.
+        completionFuture.whenComplete(
+            (completion, error) -> completedResults.offer(completionFuture));
+        pools.executor().submit(() -> runWorker(subtask, completionFuture));
       }
       remainingResults = pendingResults.size();
       initialized = true;
@@ -332,137 +340,105 @@ public final class StagedParquetPartitionReader
   }
 
   /**
-   * Build one subtask's ordered submission and completion chains.
+   * Execute one subtask end-to-end on a shared worker and hold the worker slot until handover.
    *
-   * <p>The I/O-submitted future gates the next subtask in this Spark task. It becomes terminal
-   * after every source request has been handed to its asynchronous input implementation, not
-   * after those requests finish. The separate completion future owns the output until all I/O and
-   * synthetic-Parquet finalization are terminal.</p>
+   * <p>The slot is released when the task thread claims the published result (or when close
+   * cleanup reclaims it), so the number of allocated-but-undecoded subtask outputs on an executor
+   * can never exceed the shared pool size. A failed subtask publishes its failure and releases
+   * the slot immediately: there is no buffer to hand over.</p>
    */
-  private SubtaskFutures submit(
-      ReadSubtask subtask,
-      CompletableFuture<Void> previousIoSubmission) {
-    CompletableFuture<SubmittedIo> ioSubmitted = previousIoSubmission
-        .thenApplyAsync(ignored -> runUncheckedAsTaskPoolThread(() -> {
-          // Step 1: allocate this subtask's exact-sized memory or disk output.
-          StagedParquetOutput output = createOutput(subtask);
-          try {
-            // Step 2: submit every source and column-chunk read in deterministic order. This
-            // stage ends as soon as the async read APIs return their futures. Keeping allocation
-            // and submission in one continuation prevents executor rejection between them from
-            // stranding an allocated output.
-            return startSourceReads(subtask, output);
-          } catch (Throwable error) {
-            try {
-              // close() waits behind any async writer stamps already acquired by this subtask.
-              output.close();
-            } catch (Throwable closeError) {
-              if (closeError != error) {
-                error.addSuppressed(closeError);
-              }
-            }
-            throw propagate(error);
-          }
-        }), pools.executor());
-
-    // Step 3: release the next subtask only after this one's async read APIs have returned. A
-    // returned future owns any request failure; only a failure before this submission point stops
-    // the per-task chain.
-    CompletableFuture<Void> nextSubmission = ioSubmitted.thenApply(ignored -> null);
-
-    CompletableFuture<Completion> completion = ioSubmitted.thenCompose(submitted ->
-        // Step 4: wait asynchronously for every accepted source read and its cache finalizer.
-        submitted.reads
-            // Step 5: write the synthetic header/footer and seal the output on a staged worker.
-            .thenApplyAsync(stats -> runUncheckedAsTaskPoolThread(
-                () -> combine(subtask, submitted.output, stats)), pools.executor())
-            // Step 6: after the full terminal barrier, either transfer the result to the task
-            // thread or reclaim the still-owned output and preserve the original failure.
-            .handle((result, error) -> finishSubtask(submitted.output, result, error)));
-
-    return new SubtaskFutures(nextSubmission, completion);
+  private void runWorker(ReadSubtask subtask, CompletableFuture<Completion> completionFuture) {
+    Completion completion;
+    try {
+      completion = runAsTaskPoolThread(() -> runSubtask(subtask));
+    } catch (Throwable error) {
+      completionFuture.completeExceptionally(error);
+      return;
+    }
+    if (!completionFuture.complete(completion)) {
+      // The public future contract is internal; this indicates a bug rather than a race.
+      closeCompletionAfterAsync(completion);
+      return;
+    }
+    completion.awaitHandover();
   }
 
-  private Completion finishSubtask(
-      StagedParquetOutput output,
-      Completion completion,
-      Throwable error) {
-    if (error != null) {
+  /**
+   * Run one subtask's blocking pipeline: allocate, copy cache hits, submit async cache-miss
+   * reads in deterministic order, block until every accepted read is terminal, publish cache
+   * slices, and combine/seal the synthetic file.
+   */
+  private Completion runSubtask(ReadSubtask subtask) throws Exception {
+    checkOpen();
+    StagedParquetOutput output = createOutput(subtask);
+    List<PendingSourceRead> sources = new ArrayList<>();
+    try {
+      // FooterResult represents one scan occurrence. Two occurrences may compare equal at the
+      // Iceberg file level while carrying different filters or post-processing state, so grouping
+      // must use identity. Keep first-seen order separately: IdentityHashMap is unordered.
+      Map<FooterResult, List<PlannedReadRange>> rangesBySource = new IdentityHashMap<>();
+      List<FooterResult> sourceOrder = new ArrayList<>();
+      for (PlannedReadRange range : subtask.getRanges()) {
+        FooterResult footer = range.getFooter();
+        List<PlannedReadRange> sourceRanges = rangesBySource.get(footer);
+        if (sourceRanges == null) {
+          sourceRanges = new ArrayList<>();
+          rangesBySource.put(footer, sourceRanges);
+          sourceOrder.add(footer);
+        }
+        sourceRanges.add(range);
+      }
+
+      // Copy cache hits and hand every cache-miss range to the async engine, source by source in
+      // first-seen order. The returned futures run concurrently in PerfIO; this worker is the
+      // only thread that blocks on them.
+      for (FooterResult footer : sourceOrder) {
+        checkOpen();
+        sources.add(beginSourceRead(output, footer, rangesBySource.get(footer)));
+      }
+
+      // The pacing point of the blocking model: wait for every accepted read. All sources are
+      // drained even after a failure so the output can never be reclaimed under a live writer.
+      Throwable readFailure = null;
+      for (PendingSourceRead source : sources) {
+        readFailure = addFailure(readFailure, source.awaitRead());
+      }
+      if (readFailure != null) {
+        throw propagate(readFailure);
+      }
+      checkOpen();
+
+      // Publish owning cache slices inline on this worker; continuations must not depend on the
+      // shared pool because every one of its threads may be a blocked subtask worker.
+      SourceReadStats stats = SourceReadStats.EMPTY;
+      for (PendingSourceRead source : sources) {
+        stats = stats.add(source.publishToCache(output));
+      }
+      return combine(subtask, output, stats);
+    } catch (Throwable error) {
       Throwable failure = unwrap(error);
+      for (PendingSourceRead source : sources) {
+        // Accepted writers must become terminal before the output is reclaimed.
+        Throwable drainFailure = source.awaitRead();
+        if (drainFailure != null && drainFailure != failure) {
+          failure.addSuppressed(drainFailure);
+        }
+        failure = cancelCacheTokens(source.cacheTokens, failure);
+      }
       try {
         output.close();
       } catch (Throwable closeError) {
         if (closeError != failure) {
           failure.addSuppressed(closeError);
         }
-        if (closed.get()) {
-          recordAsynchronousCleanupFailure(closeError);
-        }
       }
-      throw new CompletionException(failure);
+      throw propagate(failure);
     }
-    if (closed.get()) {
-      closeCompletionAfterAsync(completion);
-      throw new CompletionException(
-          new CancellationException("staged reader closed before result publication"));
-    }
-    return completion;
-  }
-
-  /**
-   * Submit every source's async vectored read in deterministic order.
-   *
-   * <p>Calls to {@code readVectoredAsync} occur sequentially on one staged worker, but their
-   * returned futures run concurrently in PerfIO. This keeps each task's request order stable
-   * without occupying one worker per source.</p>
-   */
-  private SubmittedIo startSourceReads(
-      ReadSubtask subtask,
-      StagedParquetOutput output) {
-    // FooterResult represents one scan occurrence. Two occurrences may compare equal at the
-    // Iceberg file level while carrying different filters or post-processing state, so grouping
-    // must use identity. Keep first-seen order separately because IdentityHashMap is unordered.
-    Map<FooterResult, List<PlannedReadRange>> rangesBySource = new IdentityHashMap<>();
-    List<FooterResult> sourceOrder = new ArrayList<>();
-    for (PlannedReadRange range : subtask.getRanges()) {
-      FooterResult footer = range.getFooter();
-      List<PlannedReadRange> sourceRanges = rangesBySource.get(footer);
-      if (sourceRanges == null) {
-        sourceRanges = new ArrayList<>();
-        rangesBySource.put(footer, sourceRanges);
-        sourceOrder.add(footer);
-      }
-      sourceRanges.add(range);
-    }
-
-    List<CompletableFuture<SourceReadStats>> sourceFutures = new ArrayList<>();
-    for (FooterResult footer : sourceOrder) {
-      if (closed.get()) {
-        sourceFutures.add(failedFuture(new CancellationException(
-            "staged reader closed before source I/O submission")));
-        break;
-      }
-      sourceFutures.add(readSourceRangesAsync(
-          output, footer, rangesBySource.get(footer)));
-    }
-
-    CompletableFuture<?>[] allSourceFutures =
-        sourceFutures.toArray(new CompletableFuture<?>[sourceFutures.size()]);
-    CompletableFuture<SourceReadStats> allReads =
-        CompletableFuture.allOf(allSourceFutures).thenApply(ignored -> {
-          SourceReadStats total = SourceReadStats.EMPTY;
-          for (CompletableFuture<SourceReadStats> sourceFuture : sourceFutures) {
-            total = total.add(sourceFuture.join());
-          }
-          return total;
-        });
-    return new SubmittedIo(output, allReads);
   }
 
   private StagedParquetOutput createOutput(ReadSubtask subtask) throws Exception {
     checkOpen();
-    StagedParquetOutput output = StagedParquetOutput.create(
-        subtask.getTotalSizeBytes(), taskAttemptId, subtask.getSubtaskId());
+    StagedParquetOutput output = StagedParquetOutput.create(subtask.getTotalSizeBytes());
     if (closed.get()) {
       output.close();
       throw new CancellationException("staged reader closed before I/O started");
@@ -470,10 +446,16 @@ public final class StagedParquetPartitionReader
     return output;
   }
 
-  private CompletableFuture<SourceReadStats> readSourceRangesAsync(
+  /**
+   * Copy one source's cache hits and hand its cache-miss ranges to the async I/O engine.
+   *
+   * <p>Runs on the owning subtask worker. The returned state carries the in-flight read future
+   * plus everything needed to publish cache slices inline after the worker's blocking wait.</p>
+   */
+  private PendingSourceRead beginSourceRead(
       StagedParquetOutput output,
       FooterResult footer,
-      List<PlannedReadRange> ranges) {
+      List<PlannedReadRange> ranges) throws Exception {
     long start = System.nanoTime();
     long cacheHitCount = 0L;
     long cacheHitBytes = 0L;
@@ -514,45 +496,75 @@ public final class StagedParquetPartitionReader
           }
         }
       }
-
-      final long finalCacheHitCount = cacheHitCount;
-      final long finalCacheHitBytes = cacheHitBytes;
-      final long finalCacheMissCount = cacheMissCount;
-      final long finalCacheMissBytes = cacheMissBytes;
-      final long finalCacheReadNanos = cacheReadNanos;
-
-      CompletableFuture<SourceReadStats> completion =
-          output.copyRangesAsync(input, remoteRanges)
-              .thenApplyAsync(ignored -> runUncheckedAsTaskPoolThread(() -> {
-                checkOpen();
-                for (PlannedReadRange range : remoteRanges) {
-                  FileCacheStartedToken token = cacheTokens.get(range);
-                  if (token != null) {
-                    HostMemoryBuffer data = output.sliceForCache(
-                        range.getOutputOffset(), range.getLength());
-                    // Keep the token cancellable until the owning slice exists. complete()
-                    // consumes the HMB before it queues cache work, so remove the token immediately
-                    // before handing over ownership.
-                    cacheTokens.remove(range);
-                    token.complete(data);
-                  }
-                }
-                return new SourceReadStats(System.nanoTime() - start,
-                    finalCacheHitCount, finalCacheHitBytes,
-                    finalCacheMissCount, finalCacheMissBytes, finalCacheReadNanos);
-              }), pools.executor())
-              .handle((stats, error) -> {
-                Throwable failure = error == null ? null : unwrap(error);
-                failure = cancelCacheTokens(cacheTokens, failure);
-                if (failure != null) {
-                  throw new CompletionException(failure);
-                }
-                return stats;
-              });
-      return completion;
+      CompletableFuture<Void> read = output.copyRangesAsync(input, remoteRanges);
+      return new PendingSourceRead(read, remoteRanges, cacheTokens, start,
+          cacheHitCount, cacheHitBytes, cacheMissCount, cacheMissBytes, cacheReadNanos);
     } catch (Throwable submissionError) {
-      Throwable failure = cancelCacheTokens(cacheTokens, submissionError);
-      return failedFuture(failure);
+      // Nothing was accepted by the async engine for this source, so only its tokens need care.
+      throw propagate(cancelCacheTokens(cacheTokens, submissionError));
+    }
+  }
+
+  /** One source's in-flight read plus the state needed to publish its cache slices. */
+  private static final class PendingSourceRead {
+    private final CompletableFuture<Void> read;
+    private final List<PlannedReadRange> remoteRanges;
+    private final Map<PlannedReadRange, FileCacheStartedToken> cacheTokens;
+    private final long startNanos;
+    private final long cacheHitCount;
+    private final long cacheHitBytes;
+    private final long cacheMissCount;
+    private final long cacheMissBytes;
+    private final long cacheReadNanos;
+
+    private PendingSourceRead(
+        CompletableFuture<Void> read,
+        List<PlannedReadRange> remoteRanges,
+        Map<PlannedReadRange, FileCacheStartedToken> cacheTokens,
+        long startNanos,
+        long cacheHitCount,
+        long cacheHitBytes,
+        long cacheMissCount,
+        long cacheMissBytes,
+        long cacheReadNanos) {
+      this.read = read;
+      this.remoteRanges = remoteRanges;
+      this.cacheTokens = cacheTokens;
+      this.startNanos = startNanos;
+      this.cacheHitCount = cacheHitCount;
+      this.cacheHitBytes = cacheHitBytes;
+      this.cacheMissCount = cacheMissCount;
+      this.cacheMissBytes = cacheMissBytes;
+      this.cacheReadNanos = cacheReadNanos;
+    }
+
+    /** Block until this source's accepted reads are terminal; null on success. Idempotent. */
+    private Throwable awaitRead() {
+      try {
+        read.join();
+        return null;
+      } catch (Throwable error) {
+        return unwrap(error);
+      }
+    }
+
+    /** Hand owning cache slices to their tokens and return this source's final measurements. */
+    private SourceReadStats publishToCache(StagedParquetOutput output) throws Exception {
+      for (PlannedReadRange range : remoteRanges) {
+        FileCacheStartedToken token = cacheTokens.get(range);
+        if (token != null) {
+          HostMemoryBuffer data = output.sliceForCache(
+              range.getOutputOffset(), range.getLength());
+          // Keep the token cancellable until the owning slice exists. complete() consumes the
+          // HMB before it queues cache work, so remove the token immediately before handing
+          // over ownership.
+          cacheTokens.remove(range);
+          token.complete(data);
+        }
+      }
+      return new SourceReadStats(System.nanoTime() - startNanos,
+          cacheHitCount, cacheHitBytes,
+          cacheMissCount, cacheMissBytes, cacheReadNanos);
     }
   }
 
@@ -729,14 +741,6 @@ public final class StagedParquetPartitionReader
     return result;
   }
 
-  private <T> T runUncheckedAsTaskPoolThread(Callable<T> operation) {
-    try {
-      return runAsTaskPoolThread(operation);
-    } catch (Throwable error) {
-      throw new CompletionException(error);
-    }
-  }
-
   private TimedFooter getFooterFuture(Future<TimedFooter> future) throws Exception {
     while (true) {
       checkOpen();
@@ -790,12 +794,6 @@ public final class StagedParquetPartitionReader
       }
       throw new RuntimeException(cause);
     }
-  }
-
-  private static <T> CompletableFuture<T> failedFuture(Throwable error) {
-    CompletableFuture<T> future = new CompletableFuture<>();
-    future.completeExceptionally(error);
-    return future;
   }
 
   private void closeCompletionAfterAsync(Completion completion) {
@@ -958,52 +956,14 @@ public final class StagedParquetPartitionReader
     }
   }
 
-  /** The two distinct ordering points produced by {@link #submit}. */
-  private static final class SubtaskFutures {
-    private final CompletableFuture<Void> ioSubmitted;
-    private final CompletableFuture<Completion> completion;
-
-    private SubtaskFutures(
-        CompletableFuture<Void> ioSubmitted,
-        CompletableFuture<Completion> completion) {
-      this.ioSubmitted = ioSubmitted;
-      this.completion = completion;
-    }
-  }
-
-  /** Output ownership plus the terminal barrier for all reads submitted into that output. */
-  private final class SubmittedIo implements AutoCloseable {
-    private final StagedParquetOutput output;
-    private final CompletableFuture<SourceReadStats> reads;
-
-    private SubmittedIo(
-        StagedParquetOutput output,
-        CompletableFuture<SourceReadStats> reads) {
-      this.output = output;
-      this.reads = reads;
-    }
-
-    /**
-     * Reclaim an output returned by the operation if task-context/RMM cleanup then fails.
-     * Cleanup remains behind the read barrier and therefore cannot race an accepted SDK writer.
-     */
-    @Override
-    public void close() {
-      reads.whenComplete((ignored, error) -> {
-        try {
-          output.close();
-        } catch (Throwable closeError) {
-          recordAsynchronousCleanupFailure(closeError);
-        }
-      });
-    }
-  }
-
   /** Sole owner of one successfully sealed subtask output. */
   private static final class Completion implements AutoCloseable {
     private final ReadSubtask subtask;
     private final StagedParquetOutput output;
     private final SubtaskStats stats;
+    // Released when the task thread picks this result, or by any cleanup path through close().
+    // The producing worker parks on this latch so its pool slot is held until handover.
+    private final CountDownLatch handover = new CountDownLatch(1);
     private boolean closed;
 
     private Completion(
@@ -1024,11 +984,35 @@ public final class StagedParquetPartitionReader
           Objects.requireNonNull(stats, "stats"));
     }
 
+    /** Mark this result as picked by the task thread, freeing the parked worker slot. */
+    private void markClaimed() {
+      handover.countDown();
+    }
+
+    /**
+     * Park the producing worker until this result is claimed or cleaned up. An interrupt (for
+     * example a pool shutdown) ends the park immediately: the parked thread is pure backpressure
+     * and owns no state, so abandoning the wait is always safe.
+     */
+    private void awaitHandover() {
+      try {
+        handover.await();
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+    }
+
     @Override
     public synchronized void close() {
       if (!closed) {
         closed = true;
-        output.close();
+        try {
+          output.close();
+        } finally {
+          // Every cleanup path funnels through close(), so a worker can never stay parked for a
+          // result that no task thread will pick.
+          handover.countDown();
+        }
       }
     }
   }
