@@ -835,9 +835,12 @@ def test_from_json_map_with_arrays_corner_cases():
         conf=_enable_all_types_conf)
 
 @allow_non_gpu(*non_utc_allow)
-@pytest.mark.xfail(reason="GPU from_json extracts map array elements as raw JSON text and does not "
-                          "normalize/unescape escape sequences, while Spark unescapes them. Known "
-                          "limitation: docs/compatibility.md 'JSON Normalization (String Types)'.",
+@pytest.mark.xfail(reason="GPU keeps map array string elements as raw JSON (escapes not "
+                          "unescaped) while Spark unescapes them. This differs on all Spark "
+                          "versions: string elements are VALUE_STRING tokens unescaped via "
+                          "getText, so Spark 4.0 enableExactStringParsing does not apply. "
+                          "docs/compatibility.md 'JSON Normalization (String Types)'; "
+                          "https://github.com/NVIDIA/cudf-spark/issues/15240",
                    strict=False)
 def test_from_json_map_with_arrays_escaped_xfail():
     # Escaped quote/backslash and \\u escape sequences inside string elements: GPU keeps them
@@ -868,9 +871,14 @@ def test_from_json_map_with_arrays_duplicate_keys_xfail():
         conf=_enable_all_types_conf)
 
 @allow_non_gpu(*non_utc_allow)
-@pytest.mark.xfail(reason="Nested object/array array elements: GPU returns the raw JSON substring of "
-                          "each element, which can differ from Spark's re-serialization (whitespace / "
-                          "key formatting). Confirmed divergence (xfail).",
+@pytest.mark.xfail(condition=is_before_spark_400(),
+                   reason="Nested object/array elements: GPU returns each element's raw JSON "
+                          "substring, differing from Spark's re-serialization on Spark < 4.0 "
+                          "(whitespace / key formatting). Spark 4.0+ enableExactStringParsing "
+                          "(default true) returns raw source bytes matching the GPU, so it is "
+                          "asserted as hard equality there. docs/compatibility.md "
+                          "'from_json Function'; "
+                          "https://github.com/NVIDIA/cudf-spark/issues/15240",
                    strict=False)
 def test_from_json_map_with_arrays_nested_elements_xfail():
     schema = StructType([StructField("a", StringType())])
@@ -884,9 +892,40 @@ def test_from_json_map_with_arrays_nested_elements_xfail():
         conf=_enable_all_types_conf)
 
 @allow_non_gpu(*non_utc_allow)
-@pytest.mark.xfail(reason="GPU keeps raw JSON number tokens; Spark's from_json re-renders them, so "
+@pytest.mark.skipif(is_before_spark_400(),
+                    reason="spark.sql.json.enableExactStringParsing exists only in Spark 4.0+")
+@pytest.mark.xfail(reason="With enableExactStringParsing=false, Spark 4.0+ re-serializes "
+                          "non-string tokens as Spark < 4.0 does, so the GPU raw elements "
+                          "still diverge from the CPU here. Confirms the divergence is "
+                          "exact-parsing-gated, not purely version-gated. "
+                          "docs/compatibility.md 'from_json Function'; "
+                          "https://github.com/NVIDIA/cudf-spark/issues/15240",
+                   strict=False)
+def test_from_json_map_with_arrays_exact_string_parsing_off_xfail():
+    # Spark 4.0+ only: force enableExactStringParsing=false so the CPU re-serializes non-string
+    # tokens (the pre-4.0 behavior), reintroducing the raw-vs-rendered divergence the default-config
+    # xfails above no longer see. Guards against a regression on the explicit-false override.
+    schema = StructType([StructField("a", StringType())])
+    data = [
+        ['{"a": [{"x": 1}]}'],       # nested object: GPU raw vs CPU re-serialized
+        ['{"a": [007, 1.00000]}'],   # numbers: GPU raw token vs CPU re-rendered
+    ]
+    options = {"allowNumericLeadingZeros": "true"}
+    conf = copy_and_update(_enable_all_types_conf,
+                           {"spark.sql.json.enableExactStringParsing": "false"})
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark : spark.createDataFrame(data, schema=schema) \
+            .select(f.map_entries(f.from_json(f.col('a'), 'MAP<STRING,ARRAY<STRING>>', options))),
+        conf=conf)
+
+@allow_non_gpu(*non_utc_allow)
+@pytest.mark.xfail(condition=is_before_spark_400(),
+                   reason="GPU keeps raw JSON number tokens; Spark < 4.0 re-renders them, so "
                           "non-canonical spellings differ (007->7, 1.00000->1.0, 1e2->100.0). "
-                          "Documented divergence: docs/compatibility.md 'from_json Function'.",
+                          "Spark 4.0+ enableExactStringParsing (default true) keeps the raw "
+                          "token matching the GPU, so it is asserted as hard equality there. "
+                          "docs/compatibility.md 'from_json Function'; "
+                          "https://github.com/NVIDIA/cudf-spark/issues/15240",
                    strict=False)
 def test_from_json_map_with_arrays_numeric_xfail():
     # allowNumericLeadingZeros makes 007 parseable; floats diverge under default options.
@@ -923,10 +962,13 @@ def test_from_json_map_with_arrays_options(allow_single_quotes, allow_unquoted_c
         conf=_enable_all_types_conf)
 
 @allow_non_gpu(*non_utc_allow)
-@pytest.mark.xfail(reason="GPU keeps the bare NaN/Infinity token under allowNonNumericNumbers, while "
-                          "Spark re-serializes non-numeric numbers as quoted strings, so the array "
-                          "elements differ. Documented divergence: docs/compatibility.md "
-                          "'from_json Function'.",
+@pytest.mark.xfail(condition=is_before_spark_400(),
+                   reason="GPU keeps the bare NaN/Infinity token under allowNonNumericNumbers; "
+                          "Spark < 4.0 re-serializes non-numeric numbers as quoted strings, so "
+                          "the elements differ. Spark 4.0+ enableExactStringParsing (default "
+                          "true) keeps the bare token matching the GPU, so it is asserted as "
+                          "hard equality there. docs/compatibility.md 'from_json Function'; "
+                          "https://github.com/NVIDIA/cudf-spark/issues/15240",
                    strict=False)
 def test_from_json_map_with_arrays_nonnumeric_xfail():
     # allowNonNumericNumbers=true makes NaN/Infinity parseable; the GPU emits the bare token whereas
