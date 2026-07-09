@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,10 +30,10 @@ import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
 import com.nvidia.spark.rapids.iceberg.{ColumnarBatchWithPartition, GpuIcebergPartitioner, GpuIcebergSpecPartitioner}
 import com.nvidia.spark.rapids.iceberg.utils.GpuStructProjection
 import org.apache.hadoop.mapreduce.Job
-import org.apache.hadoop.shaded.org.apache.commons.lang3.reflect.{FieldUtils, MethodUtils}
 import org.apache.iceberg._
 import org.apache.iceberg.deletes.DeleteGranularity
 import org.apache.iceberg.io._
+import org.apache.iceberg.io.DeleteSchemaUtil
 import org.apache.iceberg.spark.GpuTypeToSparkType
 import org.apache.iceberg.spark.GpuTypeToSparkType.toSparkType
 import org.apache.iceberg.spark.source.GpuSparkWrite.supports
@@ -60,10 +60,11 @@ import org.apache.spark.util.SerializableConfiguration
  * GPU version of Iceberg's SparkPositionDeltaWrite.
  * This class handles merge-on-read DELETE operations that write position delete files.
  */
-class GpuSparkPositionDeltaWrite(cpu: SparkPositionDeltaWrite)
+class GpuSparkPositionDeltaWrite(cpu: DeltaWrite)
   extends GpuDeltaWrite with RequiresDistributionAndOrdering {
-  private[source] val table = FieldUtils.readField(cpu, "table", true)
-    .asInstanceOf[Table]
+  private val writeRequirements = cpu.asInstanceOf[RequiresDistributionAndOrdering]
+
+  private[source] val table = GpuSparkWriteAccess.table(cpu)
 
   override def toBatch: DeltaBatchWrite = {
     // Call the CPU version's toBatch to get PositionDeltaBatchWrite
@@ -77,24 +78,19 @@ class GpuSparkPositionDeltaWrite(cpu: SparkPositionDeltaWrite)
 
   override def toString: String = s"GpuSparkPositionDeltaWrite(table=$table)"
   
-  private[source] def abort(messages: Array[WriterCommitMessage]): Unit = {
-    MethodUtils.invokeMethod(cpu, true, "abort", messages.asInstanceOf[Array[Object]])
-  }
+  override def requiredDistribution(): Distribution = writeRequirements.requiredDistribution()
 
-  override def requiredDistribution(): Distribution = cpu.requiredDistribution()
+  override def requiredOrdering(): Array[SortOrder] = writeRequirements.requiredOrdering()
 
-  override def requiredOrdering(): Array[SortOrder] = cpu.requiredOrdering()
-
-  override def advisoryPartitionSizeInBytes(): Long = cpu.advisoryPartitionSizeInBytes()
+  override def advisoryPartitionSizeInBytes(): Long =
+    writeRequirements.advisoryPartitionSizeInBytes()
 
   private[source] def createDeltaWriterFactory: DeltaWriterFactory = {
-    val sparkContext: JavaSparkContext = FieldUtils.readField(cpu, "sparkContext", true)
-      .asInstanceOf[JavaSparkContext]
+    val sparkContext: JavaSparkContext = GpuSparkWriteAccess.sparkContext(cpu)
     val tableBroadcast = sparkContext.broadcast(SerializableTable.copyOf(table))
-    val command = FieldUtils.readField(cpu, "command", true).asInstanceOf[Command]
-    val context = GpuWriteContext(FieldUtils.readField(cpu, "context", true))
-    val writeProps = FieldUtils.readField(cpu, "writeProperties", true)
-      .asInstanceOf[java.util.Map[String, String]]
+    val command = GpuSparkWriteAccess.command(cpu)
+    val context = GpuWriteContext(GpuSparkWriteAccess.context(cpu))
+    val writeProps = GpuSparkWriteAccess.writeProperties(cpu)
       .asScala
       .toMap
 
@@ -116,13 +112,14 @@ class GpuSparkPositionDeltaWrite(cpu: SparkPositionDeltaWrite)
       tmpJob
     }
 
+    val dataSparkTypeWithFieldIds = GpuSparkPositionDeltaWrite.dataWriterSparkTypeFor(
+      command, context)
+
     val outputWriterFactory = new GpuParquetFileFormat().prepareWrite(
       SparkSession.active,
       job,
-      Map.empty,
-//      writeProps,
-//      context.dataSparkType
-      positionDeleteSparkType
+      GpuSparkWrite.translateIcebergWriteProperties(writeProps),
+      dataSparkTypeWithFieldIds
     )
 
     val serializedHadoopConf = new SerializableConfiguration(job.getConfiguration)
@@ -144,17 +141,33 @@ class GpuSparkPositionDeltaWrite(cpu: SparkPositionDeltaWrite)
 
 
 object GpuSparkPositionDeltaWrite {
+  private[source] def dataWriterSchemaFor(command: Command, context: GpuWriteContext): Schema = {
+    if (command == Command.DELETE) {
+      DeleteSchemaUtil.pathPosSchema()
+    } else {
+      Option(context.dataSchema).getOrElse(
+        throw new IllegalStateException(s"Missing data schema for delta command: $command"))
+    }
+  }
+
+  private[source] def dataWriterSparkTypeFor(
+      command: Command,
+      context: GpuWriteContext): StructType = {
+    toSparkType(dataWriterSchemaFor(command, context))
+  }
+
   def tableOf(deltaWrite: DeltaWrite): Table = {
-    FieldUtils.readField(deltaWrite, "table", true).asInstanceOf[Table]
+    GpuSparkWriteAccess.table(deltaWrite)
   }
 
   def tagForGpu(deltaWrite: DeltaWrite, meta: SparkPlanMeta[_]): Unit = {
     if (!supports(deltaWrite.getClass)) {
-      meta.willNotWorkOnGpu(s"GpuSparkWrite only supports ${classOf[SparkWrite].getName}, " +
+      meta.willNotWorkOnGpu(s"GpuSparkWrite only supports " +
+        s"${GpuSparkWriteAccess.sparkWriteClassName()}, " +
         s"but got: ${deltaWrite.getClass.getName}")
       return
     }
-    val context = GpuWriteContext(FieldUtils.readField(deltaWrite, "context", true))
+    val context = GpuWriteContext(GpuSparkWriteAccess.context(deltaWrite))
 
     val table: Table = tableOf(deltaWrite)
     val partitionSpec = table.spec()
@@ -169,10 +182,15 @@ object GpuSparkPositionDeltaWrite {
       Option(context.deleteFileFormat),
       partitionSpec,
       meta)
+
+    // Merge-on-read writes both data files and position-delete files, so the resolved
+    // delete codec matters too.
+    GpuSparkWrite.tagParquetCompressionForGpu(GpuSparkWriteAccess.writeProperties(deltaWrite),
+      hasDeleteFiles = true, meta)
   }
 
   def convert(deltaWrite: DeltaWrite): GpuSparkPositionDeltaWrite = {
-    new GpuSparkPositionDeltaWrite(deltaWrite.asInstanceOf[SparkPositionDeltaWrite])
+    new GpuSparkPositionDeltaWrite(deltaWrite)
   }
 }
 
@@ -202,7 +220,7 @@ class GpuPositionDeltaWriterFactory(
     val writerFactory = new GpuSparkFileWriterFactory(
       table,
       context.dataFileFormat,
-      context.dataSparkType,
+      GpuSparkPositionDeltaWrite.dataWriterSparkTypeFor(command, context),
       table.sortOrder(),
       context.deleteFileFormat,
       positionDeleteSparkType,
@@ -490,7 +508,7 @@ trait GpuDeleteAndDataDeltaWriter extends GpuDeltaWriter {
   override def commit(): WriterCommitMessage = {
     close()
     val result = delegate.result()
-    new SparkPositionDeltaWrite.DeltaTaskCommit(result)
+    GpuSparkWriteAccess.deltaTaskCommit(result)
   }
 
   override def abort(): Unit = {
@@ -614,7 +632,7 @@ class GpuDeleteOnlyDeltaWriter(
   override def commit(): WriterCommitMessage = {
     close()
     val result = delegate.result()
-    new SparkPositionDeltaWrite.DeltaTaskCommit(result)
+    GpuSparkWriteAccess.deltaTaskCommit(result)
   }
 
   override def abort(): Unit = {
@@ -794,34 +812,21 @@ object GpuWriteContext {
   }
 
   /**
-   * Creates a GpuWriteContext from a CPU Context object using reflection.
-   * This reads all fields from the CPU SparkPositionDeltaWrite.Context.
+   * Creates a GpuWriteContext from a CPU Context object through the root-layout helper.
    */
   private[iceberg] def apply(cpu: AnyRef): GpuWriteContext = {
-    val dataSchema = FieldUtils.readField(cpu, "dataSchema", true)
-      .asInstanceOf[Schema]
-    val dataSparkType = FieldUtils.readField(cpu, "dataSparkType", true)
-      .asInstanceOf[StructType]
-    val dataFileFormat = FieldUtils.readField(cpu, "dataFileFormat", true)
-      .asInstanceOf[FileFormat]
-    val targetDataFileSize = FieldUtils.readField(cpu, "targetDataFileSize", true)
-      .asInstanceOf[Long]
-    val deleteSparkType = FieldUtils.readField(cpu, "deleteSparkType", true)
-      .asInstanceOf[StructType]
-    val metadataSparkType = FieldUtils.readField(cpu, "metadataSparkType", true)
-      .asInstanceOf[StructType]
-    val deleteFileFormat = FieldUtils.readField(cpu, "deleteFileFormat", true)
-      .asInstanceOf[FileFormat]
-    val targetDeleteFileSize = FieldUtils.readField(cpu, "targetDeleteFileSize", true)
-      .asInstanceOf[Long]
-    val deleteGranularity = FieldUtils.readField(cpu, "deleteGranularity", true)
-      .asInstanceOf[DeleteGranularity]
-    val queryId = FieldUtils.readField(cpu, "queryId", true)
-      .asInstanceOf[String]
-    val useFanoutWriter = FieldUtils.readField(cpu, "useFanoutWriter", true)
-      .asInstanceOf[Boolean]
-    val inputOrdered = FieldUtils.readField(cpu, "inputOrdered", true)
-      .asInstanceOf[Boolean]
+    val dataSchema = GpuSparkWriteAccess.contextDataSchema(cpu)
+    val dataSparkType = GpuSparkWriteAccess.contextDataSparkType(cpu)
+    val dataFileFormat = GpuSparkWriteAccess.contextDataFileFormat(cpu)
+    val targetDataFileSize = GpuSparkWriteAccess.contextTargetDataFileSize(cpu)
+    val deleteSparkType = GpuSparkWriteAccess.contextDeleteSparkType(cpu)
+    val metadataSparkType = GpuSparkWriteAccess.contextMetadataSparkType(cpu)
+    val deleteFileFormat = GpuSparkWriteAccess.contextDeleteFileFormat(cpu)
+    val targetDeleteFileSize = GpuSparkWriteAccess.contextTargetDeleteFileSize(cpu)
+    val deleteGranularity = GpuSparkWriteAccess.contextDeleteGranularity(cpu)
+    val queryId = GpuSparkWriteAccess.contextQueryId(cpu)
+    val useFanoutWriter = GpuSparkWriteAccess.contextUseFanoutWriter(cpu)
+    val inputOrdered = GpuSparkWriteAccess.contextInputOrdered(cpu)
     
     GpuWriteContext(
       dataSchema,

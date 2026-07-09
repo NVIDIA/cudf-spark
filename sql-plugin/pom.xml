@@ -22,13 +22,13 @@
     <parent>
         <groupId>com.nvidia</groupId>
         <artifactId>rapids-4-spark-shim-deps-parent_2.12</artifactId>
-        <version>26.06.0-SNAPSHOT</version>
+        <version>26.08.0-SNAPSHOT</version>
         <relativePath>../shim-deps/pom.xml</relativePath>
     </parent>
     <artifactId>rapids-4-spark-sql_2.12</artifactId>
     <name>RAPIDS Accelerator for Apache Spark SQL Plugin</name>
     <description>The RAPIDS SQL plugin for Apache Spark</description>
-    <version>26.06.0-SNAPSHOT</version>
+    <version>26.08.0-SNAPSHOT</version>
 
     <properties>
         <rapids.module>sql-plugin</rapids.module>
@@ -80,10 +80,6 @@
         <dependency>
             <groupId>com.google.flatbuffers</groupId>
             <artifactId>flatbuffers-java</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.spark</groupId>
-            <artifactId>spark-avro_${scala.binary.version}</artifactId>
         </dependency>
         <dependency>
             <groupId>org.roaringbitmap</groupId>

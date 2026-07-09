@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids.iceberg.parquet
 
-import java.util.{List => JList, Map => JMap, Optional}
+import java.util.{List => JList, Map => JMap, Objects, Optional}
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable.Stack
@@ -165,32 +165,42 @@ private[iceberg] case object FetchRowPosition extends ColumnAction {
     val numRows = ctx.numRows
     val rowPoses = new Array[Long](numRows)
     val processor = ctx.processor
-    var curBlockRowCount = processor.parquetInfo.blocks(processor.curBlockIndex).getRowCount
-    var curBlockRowStart =
-      processor.parquetInfo.blocksFirstRowIndices(processor.curBlockIndex)
+
+    // Advance state in locals and commit back to the processor only after fromLongs()
+    // succeeds, so an OOM during column allocation does not leave the processor in a
+    // partially-advanced state. The matching snapshot/restore of these three counters
+    // around the withRetryNoSplit block in process() below covers the full retry scope.
+    var localBlockIndex = processor.curBlockIndex
+    var localProcessedRowCount = processor.processedRowCount
+    var localProcessedBlockRowCounts = processor.processedBlockRowCounts
+
+    var curBlockRowCount = processor.parquetInfo.blocks(localBlockIndex).getRowCount
+    var curBlockRowStart = processor.parquetInfo.blocksFirstRowIndices(localBlockIndex)
     var curBlockRowEnd = curBlockRowStart + curBlockRowCount
-    var curRowPos = curBlockRowStart + processor.processedRowCount -
-      processor.processedBlockRowCounts
+    var curRowPos = curBlockRowStart + localProcessedRowCount - localProcessedBlockRowCounts
 
     for (i <- 0 until numRows) {
       if (curRowPos >= curBlockRowEnd) {
         // switch to next block
-        processor.curBlockIndex += 1
-        processor.processedBlockRowCounts += curBlockRowCount
-        curRowPos = processor.parquetInfo.blocksFirstRowIndices(processor.curBlockIndex)
+        localBlockIndex += 1
+        localProcessedBlockRowCounts += curBlockRowCount
+        curRowPos = processor.parquetInfo.blocksFirstRowIndices(localBlockIndex)
 
-        curBlockRowCount = processor.parquetInfo.blocks(processor.curBlockIndex).getRowCount
-        curBlockRowStart =
-          processor.parquetInfo.blocksFirstRowIndices(processor.curBlockIndex)
+        curBlockRowCount = processor.parquetInfo.blocks(localBlockIndex).getRowCount
+        curBlockRowStart = processor.parquetInfo.blocksFirstRowIndices(localBlockIndex)
         curBlockRowEnd = curBlockRowStart + curBlockRowCount
       }
 
       rowPoses(i) = curRowPos
       curRowPos += 1
-      processor.processedRowCount += 1
+      localProcessedRowCount += 1
     }
 
-    CudfColumnVector.fromLongs(rowPoses: _*)
+    val result = CudfColumnVector.fromLongs(rowPoses: _*)
+    processor.curBlockIndex = localBlockIndex
+    processor.processedRowCount = localProcessedRowCount
+    processor.processedBlockRowCounts = localProcessedBlockRowCounts
+    result
   }
 
   override def display(indent: Int): String = {
@@ -396,12 +406,23 @@ private class ActionBuildingVisitor(
     idToConstant: JMap[Integer, _]
 ) extends SchemaWithPartnerVisitor[Type, ColumnAction] {
 
-  // Track the current field and whether we are inside a constant struct.
-  private val fieldStack = Stack.empty[(Types.NestedField, Boolean)]
+  // Track the current field, its partner type in the file schema (null when the
+  // field is missing from the file), and whether we are inside a constant struct.
+  // The partner is stored so that strict-ancestor "inside a missing container"
+  // can be detected by descendants — see isInsideMissingContainer below.
+  private val fieldStack = Stack.empty[(Types.NestedField, Type, Boolean)]
   private def currentField: Types.NestedField =
     fieldStack.headOption.map(_._1).orNull
   private def isInsideConstantStruct: Boolean =
-    fieldStack.headOption.exists(_._2)
+    fieldStack.headOption.exists(_._3)
+  // True iff a STRICT ancestor of the current field is missing from the file
+  // schema (partner == null at an ancestor level). The current field's own
+  // missing-ness is reflected by the visitor method's `partner` parameter and
+  // is intentionally excluded here, so the missing container's own handler
+  // still runs the normal partner==null logic (constant lookup, fill-null for
+  // optional, or throw for required).
+  private def isInsideMissingContainer: Boolean =
+    fieldStack.size > 1 && fieldStack.tail.exists(_._2 == null)
 
   override def schema(
       schema: Schema,
@@ -424,7 +445,11 @@ private class ActionBuildingVisitor(
     }
 
     if (partner == null) {
-      if (isInsideConstantStruct) {
+      // Inside a missing ancestor: the parent's own handler will emit
+      // FillNull for the whole container and discard this result, so any
+      // safe placeholder works — FillNull mirrors the isInsideConstantStruct
+      // path and never requires an input column at execute time.
+      if (isInsideConstantStruct || isInsideMissingContainer) {
         return FillNull(sparkType)
       }
       return MissingFieldActionBuilder.buildAction(
@@ -463,7 +488,7 @@ private class ActionBuildingVisitor(
   }
 
   override def beforeField(field: Types.NestedField, partner: Type): Unit = {
-    fieldStack.push((field,
+    fieldStack.push((field, partner,
       isInsideConstantStruct ||
         (field.`type`().isStructType &&
           idToConstant.containsKey(field.fieldId()))))
@@ -484,7 +509,7 @@ private class ActionBuildingVisitor(
       elementResult: ColumnAction): ColumnAction = {
     if (partner == null) {
       val sparkType = SparkSchemaUtil.convert(list)
-      if (isInsideConstantStruct) {
+      if (isInsideConstantStruct || isInsideMissingContainer) {
         return FillNull(sparkType)
       }
       return MissingFieldActionBuilder.buildAction(
@@ -493,7 +518,7 @@ private class ActionBuildingVisitor(
         currentField.isOptional,
         idToConstant)
     }
-    
+
     if (elementResult == PassThrough) {
       PassThrough
     } else {
@@ -508,7 +533,7 @@ private class ActionBuildingVisitor(
       valueResult: ColumnAction): ColumnAction = {
     if (partner == null) {
       val sparkType = SparkSchemaUtil.convert(map)
-      if (isInsideConstantStruct) {
+      if (isInsideConstantStruct || isInsideMissingContainer) {
         return FillNull(sparkType)
       }
       return MissingFieldActionBuilder.buildAction(
@@ -517,7 +542,7 @@ private class ActionBuildingVisitor(
         currentField.isOptional,
         idToConstant)
     }
-    
+
     if (keyResult == PassThrough && valueResult == PassThrough) {
       PassThrough
     } else {
@@ -538,7 +563,8 @@ private class ActionBuildingVisitor(
       } else {
         UpCast(fileType, expectedType)
       }
-    } else if (isInsideConstantStruct) {
+    } else if (isInsideConstantStruct || isInsideMissingContainer) {
+      // Children of a missing container — see struct() for rationale.
       FillNull(expectedType)
     } else {
       MissingFieldActionBuilder.buildAction(
@@ -632,20 +658,20 @@ class GpuParquetReaderPostProcessor(
   private[iceberg] var currentNumRows = 0
 
   // Convert shaded parquet schema to Iceberg schema for comparison
-  private val fileIcebergSchema: Schema = ParquetSchemaUtil.convert(shadedFileReadSchema)
+  private lazy val fileIcebergSchema: Schema = ParquetSchemaUtil.convert(shadedFileReadSchema)
 
   // Build field ID to batch index mapping using the UNSHADED schema from parquetInfo.
   // The parquet reader returns top-level columns in the physical file-read order captured by
   // parquetInfo.schema, which can differ from the requested Iceberg schema order.
   // Map field ID to that batch position.
-  private val fieldIdToBatchIndex: Map[Int, Int] = {
+  private lazy val fieldIdToBatchIndex: Map[Int, Int] = {
     (0 until fileReadSchema.getFieldCount).flatMap { i =>
       Option(fileReadSchema.getType(i).getId).map(id => id.intValue() -> i)
     }.toMap
   }
 
   // Pre-compute action tree by visiting expected schema with file schema as partner
-  private val rootAction: ColumnAction = buildActionTimeMetric.ns {
+  private lazy val rootAction: ColumnAction = buildActionTimeMetric.ns {
     val visitor = new ActionBuildingVisitor(idToConstant)
     val accessors = new FileSchemaAccessors()
     SchemaWithPartnerVisitor.visit(
@@ -655,11 +681,38 @@ class GpuParquetReaderPostProcessor(
       accessors)
   }
 
-  private val expectedFields = expectedSchema.asStruct().fields().asScala
-  private val expectedSparkTypes = expectedFields.map(f => SparkSchemaUtil.convert(f.`type`()))
+  private lazy val expectedFields = expectedSchema.asStruct().fields().asScala
+  private lazy val expectedSparkTypes = expectedFields.map(f => SparkSchemaUtil.convert(f.`type`()))
 
   // Check if we can pass through the entire batch without any processing.
-  private val canPassThroughBatch: Boolean = rootAction == PassThrough
+  private lazy val canPassThroughBatch: Boolean = rootAction == PassThrough
+
+  // Only constants that synthesize projected fields need to participate in combining checks.
+  // If a projected field is still read from the parquet file, differing constant-map values for
+  // that field do not affect the materialized output.
+  private[iceberg] lazy val synthesizedConstantFieldIdsForCombining: Set[Integer] =
+    idToConstant.keySet().asScala.filter { fieldId =>
+      expectedSchema.idToName().containsKey(fieldId) &&
+        !fileIcebergSchema.idToName().containsKey(fieldId)
+    }.toSet
+
+  private def hasMatchingConstant(
+      other: GpuParquetReaderPostProcessor,
+      key: Integer): Boolean = {
+    idToConstant.containsKey(key) == other.idToConstant.containsKey(key) &&
+      Objects.equals(idToConstant.get(key), other.idToConstant.get(key))
+  }
+
+  private[iceberg] def compatibleForCombining(other: GpuParquetReaderPostProcessor): Boolean = {
+    // Iceberg's constants map can include entries for projected fields that are still read
+    // directly from parquet, such as identity partition source columns. Those entries should not
+    // block combining because the post-processor never materializes them from constants.
+    //
+    // Only expected fields that are synthesized from constants for either file can affect the
+    // combined output, so compatibility checks are limited to that subset.
+    (synthesizedConstantFieldIdsForCombining ++ other.synthesizedConstantFieldIdsForCombining)
+      .forall(hasMatchingConstant(other, _))
+  }
 
   // Expose for testing - displays the action tree
   private[iceberg] def displayActionPlan(): String = {
@@ -701,7 +754,18 @@ class GpuParquetReaderPostProcessor(
     }
 
     postProcessTimeMetric.ns {
+      // Snapshot the _pos counters before withRetryNoSplit. FetchRowPosition.execute commits
+      // its advance to the processor after fromLongs() succeeds, but a later field action in
+      // the same safeMap iteration (UpCast, FillNull, GpuColumnVector.from, ...) can still
+      // OOM and cause withRetryNoSplit to rerun this whole block. Without a restore, the
+      // retry would see already-advanced counters and produce wrong _pos values.
+      val snapBlockIndex = curBlockIndex
+      val snapProcessedRowCount = processedRowCount
+      val snapProcessedBlockRowCounts = processedBlockRowCounts
       withRetryNoSplit(SpillableColumnarBatch(originalBatch, ACTIVE_ON_DECK_PRIORITY)) { scb =>
+        curBlockIndex = snapBlockIndex
+        processedRowCount = snapProcessedRowCount
+        processedBlockRowCounts = snapProcessedBlockRowCounts
         // getColumnarBatch() returns a batch with refcounts incremented.
         // We MUST close it to balance the refcounts, even if an exception occurs.
         withResource(scb.getColumnarBatch()) { batch =>

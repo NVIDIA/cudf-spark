@@ -67,6 +67,18 @@ joins on a floating point value, which is not wise to do anyways, and the value 
 floating point aggregation then the join may fail to work properly with the plugin but would have
 worked with plain Spark. This is behavior is enabled by default but can be disabled with the config
 [`spark.rapids.sql.variableFloatAgg.enabled`](additional-functionality/advanced_configs.md#sql.variableFloatAgg.enabled).
+This applies to scalar aggregations (`sum`, `avg`, etc.) and to array-level aggregations
+(the `aggregate` / `reduce` higher-order function with SUM or PRODUCT) — both delegate to cuDF
+parallel reductions and are governed by the same config.
+
+For standard deviation and variance aggregations (`stddev`, `stddev_pop`, `stddev_samp`,
+`variance`, `var_pop`, and `var_samp`) on very large finite floating-point values, the exact
+mathematical result can exceed the range of a double. In these overflow cases Spark CPU and the
+RAPIDS Accelerator may report different IEEE floating-point sentinels, such as `NaN` versus
+`+Infinity`, because partial aggregate state can be merged in a different order. `-Infinity` is
+not an expected outcome for stddev/variance over finite inputs and is not treated as an accepted
+overflow sentinel. This is limited to overflow behavior for extreme inputs; ordinary finite
+inputs should still match within normal floating-point tolerance.
 
 ### `0.0` vs `-0.0`
 
@@ -362,7 +374,7 @@ in a quoted string. If it is in a quoted string the local of the JVM is used to 
 If the local is not for the `US`, which is the default we will fall back to the CPU because we do not currently
 parse those numbers correctly. The `US` format removes all commas ',' from the quoted string.
 As a part of this, though, non-arabic numbers are also supported. We do not support parsing these numbers
-see (issue 10532)[https://github.com/NVIDIA/spark-rapids/issues/10532].
+see [issue 10532](https://github.com/NVIDIA/spark-rapids/issues/10532).
 
 ### JSON Date/Timestamp Types 
 
@@ -481,6 +493,79 @@ The following regular expression patterns are not yet supported on the GPU and w
 - Empty pattern: `""`
 
 Work is ongoing to increase the range of regular expressions that can run on the GPU.
+
+## Array Higher-Order Function `aggregate`
+
+Spark's `aggregate` (also exposed as `reduce`) higher-order function takes any user lambda as
+the merge function:
+
+```sql
+aggregate(arr, zero, (acc, x) -> merge_expr, acc -> finish_expr)
+```
+
+The GPU implementation does not run an arbitrary lambda. Instead, it pattern-matches the merge
+lambda against a fixed set of shapes that map to cuDF segmented reductions, and falls back to
+CPU when the lambda doesn't match. The finish lambda must be the identity (`acc -> acc` or
+omitted).
+
+The merge lambda must reduce to the form `(acc, x) -> op(acc, g(x))` where `op` is associative
+and `g(x)` does not reference `acc`. Supported `op`s and the Catalyst expressions that map to
+each:
+
+| Op       | Catalyst shape         | Element types                     |
+| -------- | ---------------------- | --------------------------------- |
+| SUM      | `Add(acc, g)`          | byte / short / int / long; float / double gated by `spark.rapids.sql.variableFloatAgg.enabled` |
+| PRODUCT  | `Multiply(acc, g)`     | byte / short / int / long; float / double gated by `spark.rapids.sql.variableFloatAgg.enabled` |
+| MAX      | `Greatest(acc, g)` (2 children only) | byte / short / int / long  |
+| MIN      | `Least(acc, g)` (2 children only)    | byte / short / int / long  |
+| ALL      | `And(acc, g)`          | boolean                           |
+| ANY      | `Or(acc, g)`           | boolean                           |
+
+The decomposer also accepts these structural variations:
+
+- **Commuted operands**: `op(g, acc)` is treated the same as `op(acc, g)`.
+- **`Cast` around the acc side**: `Add(Cast(acc, t), g)` and chained casts on the acc side are
+  unwrapped (g must still not reference acc).
+- **`If` branches**: `If(cond, op(acc, t_g), op(acc, f_g))` is lifted to
+  `op(acc, If(cond, t_g, f_g))`. A bare-acc branch (e.g. `If(cond, acc + 1, acc)`) is treated as
+  `op(acc, identity)` and lifted to `op(acc, If(cond, t_g, identity))`. `cond` must not
+  reference acc. For `MAX` / `MIN`, this structural rewrite falls back when the initial zero can
+  be null because a bare-acc branch must preserve the no-contribution null accumulator state.
+- **`CaseWhen` branches**: same handling as `If`, generalized to N branches with a required
+  `else` branch.
+- **Nested `If` / `CaseWhen`**: handled recursively as long as every branch eventually reduces
+  to op-of-acc with `op` consistent across all branches.
+
+The following shapes fall back to CPU:
+
+- Lambdas whose body uses an op that isn't one of the six above (e.g. `Subtract`, `Divide`),
+  or `Greatest`/`Least` with three or more children.
+- Lambdas where `g(x)` references `acc`, or where different `If`/`CaseWhen` branches use
+  different ops.
+- A `CaseWhen` without an `else` branch (the implicit-null fall-through is not modelled).
+- A finish lambda that isn't the identity.
+- `g(x).dataType` that doesn't equal the accumulator/zero type (Spark's
+  `checkInputDataTypes` rule).
+- `MAX` / `MIN` on `float` / `double`: cuDF's `fmax(NaN, x) = x` absorbs NaN, while Spark's
+  `Greatest` / `Least` use `Double.compare` which propagates NaN.
+- `MAX` / `MIN` with a nullable initial zero and a bare-acc branch in `If` / `CaseWhen`: replacing
+  bare acc with an identity value would lose Spark's no-contribution null accumulator state.
+- `ALL` / `ANY` when the input array can contain null elements or the lifted `g(x)` expression
+  can produce nulls: cuDF's INCLUDE-null segmented all/any returns null whenever any element is
+  null, while Spark's 3VL short-circuits (`false AND null = false`,
+  `true OR null = true`).
+- `SUM` / `PRODUCT` on `float` / `double` when
+  `spark.rapids.sql.variableFloatAgg.enabled=false`: cuDF's parallel tree-reduction sums in a
+  different order than Spark's sequential left-fold.
+- `SUM` / `PRODUCT` on decimal types: Spark decimal arithmetic has overflow-specific behavior
+  (`SUM` returns null on overflow in non-ANSI mode and raises in ANSI mode), while cuDF segmented
+  reductions do not currently provide matching overflow handling.
+- `SUM` / `PRODUCT` on integer types under `spark.sql.ansi.enabled=true`: cuDF's segmented reduce
+  wraps on overflow rather than raising `ArithmeticException`. Full ANSI support is tracked as a
+  follow-up.
+
+Each fallback condition produces a self-contained reason in the query's GPU plan explain output,
+so users can see exactly which rule triggered the CPU fallback for their query.
 
 ## URL Parsing
 
@@ -656,6 +741,11 @@ LEGACY timeParserPolicy support has the following limitations when running on th
 
 When formatting dates and timestamps as strings using functions such as `from_unixtime`, only a
 subset of valid format strings are supported on the GPU.
+
+With timeParserPolicy set to `LEGACY`, `date_format` and `from_unixtime` additionally support
+`yyyy-MM-dd HH:mm:ss.SSS` when
+[`spark.rapids.sql.incompatibleDateFormats.enabled`](additional-functionality/advanced_configs.md#sql.incompatibleDateFormats.enabled)
+is set to `true`. Parsing strings with this format remains unsupported in `LEGACY` mode.
 
 Formats that contain any of the following characters are unsupported and will fall back to CPU:
 

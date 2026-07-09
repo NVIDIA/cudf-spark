@@ -69,7 +69,7 @@ class ShuffleHandleWithMetrics[K, V, C](
 }
 
 abstract class GpuShuffleBlockResolverBase(
-    protected val wrapped: ShuffleBlockResolver,
+    val wrapped: IndexShuffleBlockResolver,
     catalog: ShuffleBufferCatalog)
   extends ShuffleBlockResolver with Logging {
   override def getBlockData(blockId: BlockId, dirs: Option[Array[String]]): ManagedBuffer = {
@@ -2101,20 +2101,28 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
 
   override def unregisterShuffle(shuffleId: Int): Boolean = {
     unregisterGpuShuffle(shuffleId)
-    shuffleBlockResolver match {
-      case isbr: IndexShuffleBlockResolver =>
-        Option(taskIdMapsForShuffle.remove(shuffleId)).foreach { mapTaskIds =>
-          mapTaskIds.synchronized {
-            mapTaskIds.iterator.foreach { mapTaskId =>
-              isbr.removeDataByMap(shuffleId, mapTaskId)
-            }
-          }
-        }
-      case _: GpuShuffleBlockResolver => // noop
+    // We need to remove old shuffle blocks when Spark GC's a shuffle Id upstream.
+    // In order to do so, we need to find the IndexShuffleBlockResolver in use.
+    // We have two scenarios:
+    // 1) We could be running in some compatibility mode where IndexShuffleBlockResolver
+    //    (which comes from Spark) is the resolver we are using.
+    // 2) We are using our own GpuShuffleBlockResolver, which can keep data in its own
+    //    internal catalog, and it will also use the block manager to write map output
+    //    to disk.
+    val isbr = shuffleBlockResolver match {
+      case isbr: IndexShuffleBlockResolver => isbr
+      case gpur: GpuShuffleBlockResolverBase => gpur.wrapped
       case _ =>
         throw new IllegalStateException(
           "unregisterShuffle called with unexpected resolver " +
             s"$shuffleBlockResolver and blocks left to be cleaned")
+    }
+    Option(taskIdMapsForShuffle.remove(shuffleId)).foreach { mapTaskIds =>
+      mapTaskIds.synchronized {
+        mapTaskIds.iterator.foreach { mapTaskId =>
+          isbr.removeDataByMap(shuffleId, mapTaskId)
+        }
+      }
     }
     wrapped.unregisterShuffle(shuffleId)
   }

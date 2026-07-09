@@ -1,4 +1,4 @@
-# Copyright (c) 2021-2025, NVIDIA CORPORATION.
+# Copyright (c) 2021-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,7 +17,8 @@ import pytest
 from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, assert_gpu_and_cpu_are_equal_collect
 from data_gen import *
 from marks import approximate_float, datagen_overrides, ignore_order, disable_ansi_mode
-from spark_session import with_cpu_session, is_before_spark_330
+from spark_session import with_cpu_session, is_spark_403, is_spark_412_or_later
+
 import pyspark.sql.functions as f
 
 # Each descriptor contains a list of data generators and a corresponding boolean
@@ -60,6 +61,9 @@ ast_descrs = [
 
 ast_boolean_descr = [(boolean_gen, True)]
 ast_double_descr = [(double_gen, True)]
+# AST is not expressive enough to support the ACOSH Spark emulation expression in Spark 4.0.3
+# and Spark 4.1.2+.
+ast_acosh_descr = [(double_gen, not (is_spark_403() or is_spark_412_or_later()))]
 
 _project_ast_enabled_conf = {"spark.rapids.sql.projectAstEnabled": "true"}
 
@@ -127,7 +131,6 @@ def test_bitwise_not(data_descr):
 def test_unary_positive(data_descr):
     assert_unary_ast(data_descr, lambda df: df.selectExpr('+a'))
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_unary_positive_for_daytime_interval():
     data_descr = (DayTimeIntervalGen(), True)
     assert_unary_ast(data_descr, lambda df: df.selectExpr('+a'))
@@ -217,7 +220,7 @@ def test_asinh(data_descr):
     assert_unary_ast(data_descr, lambda df: df.selectExpr('asinh(a)'))
 
 @approximate_float
-@pytest.mark.parametrize('data_descr', ast_double_descr, ids=idfn)
+@pytest.mark.parametrize('data_descr', ast_acosh_descr, ids=idfn)
 def test_acosh(data_descr):
     assert_unary_ast(data_descr, lambda df: df.selectExpr('acosh(a)'))
 

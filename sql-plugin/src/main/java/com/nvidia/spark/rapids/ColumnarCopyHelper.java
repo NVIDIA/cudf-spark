@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -174,6 +174,28 @@ public class ColumnarCopyHelper {
         bytesCopied += b.appendNull();
       } else {
         bytesCopied += b.appendUTF8String(cv.getUTF8String(i).getBytes());
+      }
+    }
+    return bytesCopied;
+  }
+
+  public static long binaryCopy(ColumnVector cv, RapidsHostColumnBuilder b, int rows) {
+    long bytesCopied = 0L;
+    if (!cv.hasNull()) {
+      for (int i = 0; i < rows; i++) {
+        byte[] value = cv.getBinary(i);
+        b.appendByteList(value);
+        bytesCopied += value.length + Integer.BYTES;
+      }
+      return bytesCopied;
+    }
+    for (int i = 0; i < rows; i++) {
+      if (cv.isNullAt(i)) {
+        bytesCopied += b.appendNull();
+      } else {
+        byte[] value = cv.getBinary(i);
+        b.appendByteList(value);
+        bytesCopied += value.length + Integer.BYTES;
       }
     }
     return bytesCopied;

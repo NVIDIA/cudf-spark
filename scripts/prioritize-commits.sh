@@ -41,7 +41,7 @@ fi
 ARTF_ROOT="$WORKSPACE/jars"
 MVN_GET_CMD="mvn org.apache.maven.plugins:maven-dependency-plugin:2.8:get -B \
     -Dmaven.repo.local=$WORKSPACE/.m2 \
-    -DrepoUrl=$URM_URL -Ddest=$ARTF_ROOT -s jenkins/settings.xml"
+    -DrepoUrl=$ART_URL -Ddest=$ARTF_ROOT -s jenkins/settings.xml"
 
 rm -rf $ARTF_ROOT && mkdir -p $ARTF_ROOT
 # maven download SNAPSHOT jars: rapids-4-spark, spark3.0

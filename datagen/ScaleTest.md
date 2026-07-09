@@ -44,7 +44,7 @@ $SPARK_HOME/bin/spark-submit \
 --conf spark.sql.parquet.datetimeRebaseModeInWrite=CORRECTED \
 --class com.nvidia.rapids.tests.scaletest.ScaleTestDataGen \ # the main class
 --jars $SPARK_HOME/examples/jars/scopt_2.12-3.7.1.jar \ # one dependency jar just shipped with Spark under $SPARK_HOME
-./target/datagen_2.12-26.06.0-SNAPSHOT-spark332.jar \
+./target/datagen_2.12-26.08.0-SNAPSHOT-spark332.jar \
 1 \
 10 \
 parquet \

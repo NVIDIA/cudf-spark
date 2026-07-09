@@ -1,4 +1,4 @@
-# Copyright (c) 2021-2024, NVIDIA CORPORATION.
+# Copyright (c) 2021-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,7 +14,8 @@
 
 import pytest
 
-from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_error
+from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_error, \
+    assert_cpu_and_gpu_are_equal_collect_with_capture, assert_gpu_fallback_collect
 from data_gen import *
 from pyspark.sql.types import *
 
@@ -158,6 +159,72 @@ def test_sort_array_lit(data_gen):
         lambda spark: unary_op_df(spark, data_gen, length=10).select(
             f.sort_array(f.lit(array_lit), True),
             f.sort_array(f.lit(array_lit), False)))
+
+# array_sort runs on the GPU for flat (non-nested) element types. A nested element type (array or
+# struct) falls back to the CPU: cudf's listSortRows applies one null order at every nesting level,
+# but Spark's array_sort needs null elements last and null sub-elements first.
+_array_sort_gens = non_nested_array_gens
+
+# array_sort(arr) with the default comparator (ascending, nulls last) must run on GPU.
+# Capture the plan so a silent CPU fallback (which still matches results) fails the test.
+@pytest.mark.parametrize('data_gen', _array_sort_gens, ids=idfn)
+def test_array_sort(data_gen):
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: unary_op_df(spark, data_gen).select(f.array_sort(f.col('a'))),
+        exist_classes='GpuArraySort')
+
+
+def test_array_sort_normalize_nans():
+    # NaN-normalization parity on the GPU listSortRows path, for the flat array<double> and
+    # array<float> cases. An array<struct<...>> element type falls back to the CPU (covered by
+    # test_array_sort_unsupported_nesting_fallback), so it is not exercised here.
+    bytes1 = struct.pack('L', 0x7ff83cec2c05b870)
+    bytes2 = struct.pack('L', 0xfff5101d3f1cd31b)
+    bytes3 = struct.pack('L', 0x7c22453f18c407a8)
+    nan1 = struct.unpack('d', bytes1)[0]
+    nan2 = struct.unpack('d', bytes2)[0]
+    other = struct.unpack('d', bytes3)[0]
+    data = [([nan2] + [other for _ in range(256)] + [nan1],)]
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.createDataFrame(data).selectExpr('array_sort(_1)'))
+    # Pin the column to FloatType so the values stay FLOAT32; createDataFrame would otherwise infer
+    # DoubleType for Python floats and the float NaN-normalization path would go untested.
+    f_nan1 = struct.unpack('f', struct.pack('I', 0x7fc00001))[0]
+    f_nan2 = struct.unpack('f', struct.pack('I', 0xffc00001))[0]
+    f_other = struct.unpack('f', struct.pack('I', 0x3f800000))[0]
+    f_data = [([f_nan2] + [f_other for _ in range(256)] + [f_nan1],)]
+    f_schema = StructType([StructField('a', ArrayType(FloatType()))])
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.createDataFrame(f_data, f_schema).selectExpr('array_sort(a)'))
+
+@allow_non_gpu('ProjectExec')
+@pytest.mark.parametrize('data_gen', [ArrayGen(IntegerGen()), ArrayGen(StringGen())], ids=idfn)
+def test_array_sort_custom_comparator_fallback(data_gen):
+    # A custom comparator (2-arg array_sort) is unsupported on GPU and must fall back,
+    # while still producing correct results.
+    assert_gpu_fallback_collect(
+        lambda spark: unary_op_df(spark, data_gen).selectExpr(
+            'array_sort(a, (l, r) -> case when l < r then 1 when l > r then -1 else 0 end)'),
+        'ArraySort')
+
+# A nested element type (struct or array) falls back to the CPU while still matching results: cudf
+# applies one null order at all nesting levels, which cannot match array_sort's null-elements-last
+# plus null-sub-elements-first ordering.
+@allow_non_gpu('ProjectExec')
+@pytest.mark.parametrize('data_gen', [
+    ArrayGen(all_basic_struct_gen, max_length=6),
+    ArrayGen(StructGen([['b', byte_gen], ['s', StructGen([['c', byte_gen], ['d', byte_gen]])]]),
+             max_length=10),
+    ArrayGen(ArrayGen(int_gen, max_length=4), max_length=4),
+    ArrayGen(ArrayGen(string_gen, max_length=4), max_length=4),
+    ArrayGen(ArrayGen(ArrayGen(byte_gen, max_length=3), max_length=3), max_length=3),
+    ArrayGen(ArrayGen(all_basic_struct_gen, max_length=4), max_length=4),
+    ArrayGen(StructGen([['c', ArrayGen(int_gen, max_length=4)]]), max_length=4)],
+    ids=idfn)
+def test_array_sort_unsupported_nesting_fallback(data_gen):
+    assert_gpu_fallback_collect(
+        lambda spark: unary_op_df(spark, data_gen).select(f.array_sort(f.col('a'))),
+        'ArraySort')
 
 
 @pytest.mark.parametrize('data_gen', [ArrayGen(IntegerGen())], ids=idfn)

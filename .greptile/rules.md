@@ -16,5 +16,6 @@ shim layer architecture, see `AGENTS.md` at the repo root.
 - [ ] H4: Test quality — no GPU execution verification, hardcoded sleeps, unseeded random data; GPU resource cleanup in afterAll/afterEach
 - [ ] H5: Configuration — new RapidsConf without docs/defaults; should use .internal() if not user-visible; new features default off
 - [ ] H6: Magic numbers — unexplained numeric literals without named constants or comments
-- [ ] H7: Pre-merge CI gaps — only selected shims run unit tests; [databricks] needed for DB CI; feature-gated tests need explicit enable; limited Scala 2.13 coverage
+- [ ] H7: Pre-merge CI gaps — only selected shims run unit tests; feature-gated tests need explicit enable; limited Scala 2.13 coverage
 - [ ] H8: Upstream dependencies — SNAPSHOT changes from spark-rapids-jni/cudf may break; verify API usage against upstream repos
+- [ ] H9: Databricks coverage — change may behave differently on Databricks (filesystem/path semantics, plan-string/optimizer assertions, DBR Spark-fork runtime) but the PR title lacks [databricks] and the diff doesn't touch a *db* shim path or a path containing `databricks` (either auto-triggers DB CI). Recommend [databricks] or confirm DB validation (see AGENTS.md § PR title tags)

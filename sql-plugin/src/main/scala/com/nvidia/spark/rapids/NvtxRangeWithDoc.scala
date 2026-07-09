@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -889,7 +889,7 @@ object NvtxRangeDocs {
               |entry in NvtxRangeWithDoc.scala and create an `NvtxRangeWithDoc` in the
               |code location that you want to cover, passing in the newly created NvtxId.
               |
-              |See [nvtx_profiling.md](https://nvidia.github.io/spark-rapids/docs/dev/nvtx_profiling.html) for more info.
+              |See [nvtx_profiling.md](https://nvidia.github.io/cudf-spark/docs/dev/nvtx_profiling.html) for more info.
               |
               |""".stripMargin)
     // scalastyle:on line.size.limit

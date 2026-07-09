@@ -1,4 +1,4 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.
+# Copyright (c) 2025-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,14 +19,13 @@ from asserts import *
 from data_gen import *
 from delta_lake_utils import delta_meta_allow
 from marks import *
-from spark_session import with_gpu_session, is_spark_353_or_later, is_before_spark_330, is_databricks122_or_later
+from spark_session import with_gpu_session, is_spark_353_or_later, is_databricks122_or_later
 from dataclasses import dataclass
 
 
 in_commit_ts_param_id = lambda val: f"in_commit_ts={val}"
 
 @delta_lake
-@pytest.mark.skipif(is_before_spark_330(), reason = "AS OF sql syntax is only supported after spark 3.3.0")
 def test_time_travel_on_non_existing_table():
     def time_travel_on_non_existing_table():
         with_gpu_session(lambda spark: spark.sql("SELECT * FROM not_existing VERSION AS OF 0"))
@@ -128,7 +127,6 @@ def test_time_travel_df_version(spark_tmp_path, spark_tmp_table_factory, in_comm
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
-@pytest.mark.skipif(is_before_spark_330(), reason = "AS OF sql syntax is only supported after spark 3.3.0")
 @pytest.mark.parametrize("in_commit_ts", enable_in_commit_ts(), ids=in_commit_ts_param_id)
 def test_time_travel_sql_version(spark_tmp_path, spark_tmp_table_factory, in_commit_ts):
     result = do_set_up_tables_for_time_travel(spark_tmp_path, spark_tmp_table_factory,
@@ -162,7 +160,6 @@ def test_time_travel_df_timestamp(spark_tmp_path, spark_tmp_table_factory, in_co
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
-@pytest.mark.skipif(is_before_spark_330(), reason = "AS OF sql syntax is only supported after spark 3.3.0")
 @pytest.mark.parametrize("in_commit_ts", enable_in_commit_ts(), ids=in_commit_ts_param_id)
 def test_time_travel_sql_timestamp(spark_tmp_path, spark_tmp_table_factory, in_commit_ts):
     result = do_set_up_tables_for_time_travel(spark_tmp_path, spark_tmp_table_factory,

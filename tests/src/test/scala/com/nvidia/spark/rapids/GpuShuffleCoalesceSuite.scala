@@ -261,13 +261,12 @@ class GpuShuffleCoalesceSuite extends AnyFunSuite with BeforeAndAfterEach {
   }
 
   test("GPU kudo partitioning with deserialization and split retry") {
-    // Use a larger target size to allow coalescing multiple partitions.
-    // This ensures we have enough data to trigger a split when OOM is forced.
-    // Use a very small minSplitSize to allow the split retry to work with
-    // the target size of 100000.
+    // minSplitSize=1 so the split is not blocked by the minSize floor for small test data.
+    // In production minSplitSize defaults to 10MB; the split throws if dataSize/2 < minSize.
     runKudoShuffleTest(
       targetBatchSize = 100000,
-      minSplitSize = Some(1024L), // 1 KB - small enough to allow splitting
+      minSplitSize = Some(1L),
       forceSplitRetry = true)
   }
+
 }

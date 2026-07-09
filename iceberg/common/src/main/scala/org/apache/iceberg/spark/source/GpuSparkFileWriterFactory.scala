@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package org.apache.iceberg.spark.source
 import com.nvidia.spark.rapids.{ColumnarOutputWriterFactory, GpuParquetWriter, SpillableColumnarBatch}
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
 import com.nvidia.spark.rapids.iceberg.parquet.GpuIcebergParquetAppender
+import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.mapreduce.TaskAttemptContext
 import org.apache.iceberg._
 import org.apache.iceberg.deletes.{EqualityDeleteWriter, PositionDeleteWriter}
@@ -26,6 +27,7 @@ import org.apache.iceberg.encryption.EncryptedOutputFile
 import org.apache.iceberg.io.{DataWriter, FileWriterFactory, GpuPositionDeleteFileWriter}
 
 import org.apache.spark.sql.execution.datasources.GpuWriteFiles
+import org.apache.spark.sql.execution.datasources.parquet.ParquetWriteSupport
 import org.apache.spark.sql.rapids.ColumnarWriteTaskStatsTracker
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.util.SerializableConfiguration
@@ -46,9 +48,11 @@ class GpuSparkFileWriterFactory(val table: Table,
   require(deleteFileFormat == FileFormat.PARQUET,
     s"GpuSparkFileWriterFactory only supports PARQUET file format, but got $deleteFileFormat")
 
-
-  private lazy val taskAttemptContext: TaskAttemptContext = GpuWriteFiles
-    .calcHadoopTaskAttemptContext(hadoopConf.value)
+  private def newTaskAttemptContext(sparkType: StructType): TaskAttemptContext = {
+    val conf = new Configuration(hadoopConf.value)
+    ParquetWriteSupport.setSchema(sparkType, conf)
+    GpuWriteFiles.calcHadoopTaskAttemptContext(conf)
+  }
 
   override def newDataWriter(file: EncryptedOutputFile,
     partitionSpec: PartitionSpec,
@@ -90,8 +94,9 @@ class GpuSparkFileWriterFactory(val table: Table,
   }
 
 
-
-  private def createAppender(path: String, sparkType: StructType): GpuIcebergParquetAppender = {
+  private def createAppender(path: String,
+                             sparkType: StructType): GpuIcebergParquetAppender = {
+    val taskAttemptContext = newTaskAttemptContext(sparkType)
     val gpuWriter =  columnarOutputWriterFactory.newInstance(
       path = path,
       dataSchema = sparkType,

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,11 +15,12 @@
  */
 package com.nvidia.spark.rapids
 
-import ai.rapids.cudf.{ColumnVector, DType, Scalar}
+import ai.rapids.cudf.{ColumnVector, ColumnView, DType, Scalar}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.jni.{Arithmetic, RoundMode}
 
 import org.apache.spark.sql.catalyst.expressions.Expression
+import org.apache.spark.sql.catalyst.trees.{CurrentOrigin, Origin}
 import org.apache.spark.sql.types.{DataType, DecimalType, LongType}
 
 /**
@@ -43,23 +44,38 @@ case class GpuCheckOverflow(child: Expression,
     DType.create(DType.DTypeEnum.DECIMAL32, expectedCudfScale)
   }
 
-  override protected def doColumnar(input: GpuColumnVector): ColumnVector = {
-    val base = input.getBase
-    val rounded = if (resultDType.equals(base.getType)) {
-      base.incRefCount()
-    } else {
-      withResource(Arithmetic.round(base, dataType.scale, RoundMode.HALF_UP)) { rounded =>
-        if (resultDType.getTypeId != base.getType.getTypeId) {
-          rounded.castTo(resultDType)
-        } else {
-          rounded.incRefCount()
+  // SPARK-39190: snapshot the Origin at construction so the SQL query context survives the
+  // reflection-based plan reconstruction (e.g. GpuBindReferences → mapChildren → makeCopy)
+  // that otherwise resets `origin` to its default.
+  val capturedOrigin: Origin = origin
+
+  // Defensive: re-enter the captured origin around the case-class copy.  Spark's `mapChildren` /
+  // `withNewChildren` already wrap with `CurrentOrigin.withOrigin(this.origin)`, but if any future
+  // reconstruction path (e.g. direct reflection) bypasses that wrap, this override keeps the
+  // parser-set SQL context attached to the rebound instance.
+  override def withNewChildInternal(newChild: Expression): Expression =
+    CurrentOrigin.withOrigin(capturedOrigin) {
+      copy(child = newChild)
+    }
+
+  override protected def doColumnar(input: GpuColumnVector): ColumnVector =
+    CurrentOrigin.withOrigin(capturedOrigin) {
+      val base = input.getBase
+      val rounded = if (resultDType.equals(base.getType)) {
+        base.incRefCount()
+      } else {
+        withResource(Arithmetic.round(base, dataType.scale, RoundMode.HALF_UP)) { rounded =>
+          if (resultDType.getTypeId != base.getType.getTypeId) {
+            rounded.castTo(resultDType)
+          } else {
+            rounded.incRefCount()
+          }
         }
       }
+      withResource(rounded) { rounded =>
+        GpuCast.checkNFixDecimalBounds(rounded, dataType, !nullOnOverflow)
+      }
     }
-    withResource(rounded) { rounded =>
-      GpuCast.checkNFixDecimalBounds(rounded, dataType, !nullOnOverflow)
-    }
-  }
 
   override def nullable: Boolean = true
 }
@@ -100,13 +116,32 @@ case class GpuMakeDecimal(
   override def nullable: Boolean = child.nullable || nullOnOverflow
   override def toString: String = s"MakeDecimal($child,$precision,$sparkScale)"
 
+  private lazy val outputType =
+    ai.rapids.cudf.DecimalUtils.createDecimalType(precision, sparkScale)
+
   private lazy val (minValue, maxValue) = {
     val bounds = ai.rapids.cudf.DecimalUtils.bounds(dataType.precision, dataType.scale)
     (bounds.getKey.unscaledValue().longValue(), bounds.getValue.unscaledValue().longValue())
   }
 
+  private def makeResult(
+      outOfBounds: ColumnVector,
+      outputView: ColumnView): ColumnVector = {
+    if (!nullOnOverflow) {
+      withResource(outOfBounds.any()) { isAny =>
+        if (isAny.isValid && isAny.getBoolean) {
+          throw new IllegalStateException(GpuCast.INVALID_INPUT_MESSAGE)
+        }
+      }
+      outputView.copyToColumnVector()
+    } else {
+      withResource(Scalar.fromNull(outputType)) { nullVal =>
+        outOfBounds.ifElse(nullVal, outputView)
+      }
+    }
+  }
+
   override protected def doColumnar(input: GpuColumnVector): ColumnVector = {
-    val outputType = ai.rapids.cudf.DecimalUtils.createDecimalType(precision, sparkScale)
     val base = input.getBase
     val outOfBounds = withResource(Scalar.fromLong(maxValue)) { maxScalar =>
       withResource(base.greaterThan(maxScalar)) { over =>
@@ -117,19 +152,31 @@ case class GpuMakeDecimal(
         }
       }
     }
+
     withResource(outOfBounds) { outOfBounds =>
-      withResource(base.bitCastTo(outputType)) { outputView =>
-        if (!nullOnOverflow) {
-          withResource(outOfBounds.any()) { isAny =>
-            if (isAny.isValid && isAny.getBoolean) {
-              throw new IllegalStateException(GpuCast.INVALID_INPUT_MESSAGE)
-            }
+      if (outputType.isBackedByInt) {
+        // In production Spark, this path is unreachable: MakeDecimal is only
+        // used in the SUM optimization where the input is always Long and
+        // output precision = input precision + 10, so the minimum output
+        // precision is 11 (always INT64-backed). We support it here for
+        // test completeness when MakeDecimal is constructed directly with
+        // precision <= 9.
+        withResource(base.castTo(DType.INT32)) { int32 =>
+          withResource(int32.bitCastTo(outputType)) {
+            makeResult(outOfBounds, _)
           }
-          outputView.copyToColumnVector()
-        } else {
-          withResource(Scalar.fromNull(outputType)) { nullVal =>
-            outOfBounds.ifElse(nullVal, outputView)
-          }
+        }
+      } else if (!outputType.isBackedByLong) {
+        // DECIMAL128 (precision > 18) is not needed: MakeDecimal only
+        // operates on Long inputs (max ~18 digits), and the GPU TypeSig
+        // restricts output to DECIMAL_64. Higher precisions fall back to CPU.
+        throw new IllegalStateException(
+          s"Unexpected decimal output type in GpuMakeDecimal: $outputType")
+      } else {
+        // Precision 10-18: decimal is backed by INT64.
+        // bitCastTo is zero-copy since widths already match.
+        withResource(base.bitCastTo(outputType)) {
+          makeResult(outOfBounds, _)
         }
       }
     }

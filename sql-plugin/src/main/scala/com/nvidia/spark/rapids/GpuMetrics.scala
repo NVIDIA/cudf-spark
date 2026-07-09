@@ -191,7 +191,7 @@ object GpuMetric extends Logging {
   val DESCRIPTION_DELETION_VECTOR_SCATTER_TIME = "deletion vector scatter time"
   val DESCRIPTION_DELETION_VECTOR_SIZE = "deletion vector size"
   val DESCRIPTION_CPU_BRIDGE_PROCESSING_TIME = "CPU bridge processing time"
-  val DESCRIPTION_CPU_BRIDGE_WAIT_TIME = "CPU bridge wait time"
+  val DESCRIPTION_CPU_BRIDGE_WAIT_TIME = "CPU bridge elapsed time"
   val DESCRIPTION_COPY_TO_HOST_TIME = "deviceToHost memory copy time"
   val DESCRIPTION_READ_THROTTLING_TIME = "read throttling time"
 
@@ -417,12 +417,23 @@ sealed abstract class GpuMetric extends Serializable {
   var companionGpuMetric: Option[GpuMetric] = None
   private var semWaitTimeWhenActivated = 0L
   private var excludeMetricsWhenActivated: Seq[Long] = Seq.empty
+  // Snapshot of each excludeMetric's companion value at activation. Needed so
+  // the companion `.add` at deactivation can subtract descendants' COMPANION
+  // deltas (their `op time (excl. SemWait)`) rather than their RAW deltas
+  // (their `op time`, which still embed their own SemWait). Without this,
+  // any SemWait that fired inside a descendant's wrap would be subtracted
+  // twice from this wrap's companion -- once via this wrap's `semWaitDelta`
+  // and again embedded in the descendant's raw delta -- making the companion
+  // go negative on nested wraps.
+  private var excludeCompanionMetricsWhenActivated: Seq[Long] = Seq.empty
 
   def tryActivateTimer(excludeMetrics: Seq[GpuMetric]): Boolean = {
     if (!isTimerActive) {
       isTimerActive = true
       semWaitTimeWhenActivated = GpuTaskMetrics.get.getSemWaitTime()
       excludeMetricsWhenActivated = excludeMetrics.map(_.value)
+      excludeCompanionMetricsWhenActivated =
+        excludeMetrics.map(_.companionGpuMetric.map(_.value).getOrElse(0L))
       true
     } else {
       false
@@ -443,13 +454,33 @@ sealed abstract class GpuMetric extends Serializable {
             s"excludeMetricsWhenActivated size ${excludeMetricsWhenActivated.length}")
       }
 
+      // Sum of descendants' companion deltas. Used for the companion update so
+      // that SemWait fired inside a descendant's wrap is subtracted once (via
+      // the descendant's companion delta) rather than twice.
+      //
+      // Invariant: when THIS metric has a companion (the `foreach` below runs),
+      // every excludeMetric also has a companion. excludeMetrics are descendant
+      // OP_TIME_NEW metrics, created from the same `allMetrics` map as this one,
+      // so the companion ("excl. SemWait") variant exists for all of them or
+      // none of them at a given metrics level. The `getOrElse(0L)` is therefore
+      // a defensive fallback that does not fire in that branch; it only returns
+      // 0 when this metric itself has no companion, in which case the companion
+      // update below is skipped entirely.
+      val totalCompanionExcludeTime = excludeMetrics
+        .zip(excludeCompanionMetricsWhenActivated)
+        .map { case (metric, startValue) =>
+          metric.companionGpuMetric.map(_.value - startValue).getOrElse(0L)
+        }.sum
+
+      // SemWait that fired anywhere inside this wrap, task-global delta over the
+      // wrap. Subtracted from the companion so it reflects "excl. SemWait".
+      val semWaitDelta = GpuTaskMetrics.get.getSemWaitTime() - semWaitTimeWhenActivated
+
       companionGpuMetric.foreach(c =>
-        c.add(duration
-          - (GpuTaskMetrics.get.getSemWaitTime() - semWaitTimeWhenActivated)
-          - totalExcludeTime
-        ))
+        c.add(duration - semWaitDelta - totalCompanionExcludeTime))
       semWaitTimeWhenActivated = 0L
       excludeMetricsWhenActivated = Seq.empty
+      excludeCompanionMetricsWhenActivated = Seq.empty
 
       add(duration - totalExcludeTime)
     }

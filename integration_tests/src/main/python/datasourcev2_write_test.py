@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -73,7 +73,7 @@ def test_write_hive_bucketed_table(spark_tmp_table_factory, file_format):
 
 
 @ignore_order
-@allow_non_gpu('DataWritingCommandExec,ExecutedCommandExec,SortExec,WriteFilesExec')
+@allow_non_gpu('DataWritingCommandExec','ExecutedCommandExec','SortExec','WriteFilesExec','HiveHash')
 @pytest.mark.skipif(not (is_hive_available() and is_spark_330_or_later()),
                     reason="Must have Hive on Spark 3.3+")
 @pytest.mark.parametrize('file_format', ['parquet', 'orc'])
@@ -101,7 +101,7 @@ nested_gen_depth_9 = [StructGen([('depth_8', StructGen([('depth_7', StructGen([(
     ArrayGen(StructGen([('depth_0', string_gen)]), max_length=5))]))]), max_length=5))]))]))]))])]
 
 @ignore_order
-@allow_non_gpu('DataWritingCommandExec,ExecutedCommandExec,SortExec,WriteFilesExec')
+@allow_non_gpu('DataWritingCommandExec','ExecutedCommandExec','SortExec','WriteFilesExec','HiveHash')
 @pytest.mark.skipif(not (is_hive_available() and is_spark_330_or_later()),
                     reason="Must have Hive on Spark 3.3+")
 @pytest.mark.parametrize('file_format', ['parquet', 'orc'])

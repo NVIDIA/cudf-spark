@@ -198,7 +198,7 @@ class RapidsLocalDiskShuffleMapOutputWriter(
       // If memory-based and not spilled yet, force spill to create file
       // writeMetadataFileAndCommit requires a valid file
       if (handle.isMemoryBased && !handle.isSpilled) {
-        handle.spill()
+        handle.spillForCommit()
       }
     }
 

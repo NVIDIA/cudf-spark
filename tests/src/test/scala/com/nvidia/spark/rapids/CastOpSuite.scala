@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -467,7 +467,7 @@ class CastOpSuite extends GpuExpressionTestSuite {
     val schema = FuzzerUtils.createSchema(Seq(dataType))
     val childExpr: GpuBoundReference =
       GpuBoundReference(0, dataType, nullable = false)(NamedExpression.newExprId, "arg")
-    checkEvaluateGpuUnaryExpression(GpuCast(childExpr, DataTypes.StringType),
+    checkEvaluateGpuUnaryExpression(GpuCast(childExpr, DataTypes.StringType)(),
       dataType,
       DataTypes.StringType,
       expectedFun = castToStringExpectedFun[T],

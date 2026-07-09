@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,9 +16,11 @@
 
 package com.nvidia.spark.rapids.io.async
 
-import java.io.{BufferedInputStream, BufferedOutputStream, DataInputStream, File, FileInputStream, FileOutputStream, IOException, OutputStream}
+import java.io.{BufferedInputStream, BufferedOutputStream, DataInputStream, File, FileInputStream}
+import java.io.{FileOutputStream, IOException, OutputStream, PipedInputStream, PipedOutputStream}
 import java.nio.ByteBuffer
-import java.util.concurrent.{Callable, ExecutorService, Future}
+import java.util.concurrent.{Callable, CountDownLatch, ExecutorService, Future, TimeUnit}
+import java.util.concurrent.atomic.AtomicReference
 
 import com.google.common.util.concurrent.ForwardingExecutorService
 import com.nvidia.spark.rapids.Arm.withResource
@@ -93,6 +95,67 @@ class AsyncOutputStreamSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
     assertResult(bufLen * numBufs)(stream.metrics.numBytesScheduled)
     assertResult(bufLen * numBufs)(stream.metrics.numBytesWritten.get())
+  }
+
+  test("pipe-backed delegate does not see async writer thread as dead between writes") {
+    val pipeSource = new PipedInputStream(bufLen * maxBufCount)
+    val pipeSink = new PipedOutputStream(pipeSource)
+    val firstBufferRead = new CountDownLatch(1)
+    val secondReadStarted = new CountDownLatch(1)
+    val pipeConsumerFailure = new AtomicReference[Throwable]()
+    val pipeConsumerExecutor =
+      TrampolineUtil.newDaemonCachedThreadPool("AsyncOutputStreamPipeConsumer", 1, 1)
+    withResource(new AutoCloseable {
+      override def close(): Unit = pipeConsumerExecutor.shutdownNow()
+    }) { _ =>
+      withResource(pipeSource) { _ =>
+        val pipeConsumerFuture = pipeConsumerExecutor.submit(new Callable[Unit] {
+          override def call(): Unit = {
+            val readBuffer = new Array[Byte](bufLen)
+            var totalBytesRead = 0
+            var readCount = 0
+            var done = false
+
+            try {
+              while (!done) {
+                readCount += 1
+                if (readCount == 2) {
+                  secondReadStarted.countDown()
+                }
+                val bytesRead = pipeSource.read(readBuffer)
+                if (bytesRead == -1) {
+                  done = true
+                } else {
+                  totalBytesRead += bytesRead
+                  if (totalBytesRead >= bufLen) {
+                    firstBufferRead.countDown()
+                  }
+                }
+            }
+          } catch {
+            case t: Throwable =>
+                pipeConsumerFailure.set(t)
+                throw t
+            }
+          }
+        })
+
+        withResource(AsyncOutputStream(() => pipeSink, trafficController, Seq.empty)) { os =>
+          os.write(buf)
+          assert(firstBufferRead.await(5, TimeUnit.SECONDS),
+            "timed out waiting for first pipe read")
+          assert(secondReadStarted.await(5, TimeUnit.SECONDS),
+            "timed out waiting for second pipe read")
+
+          Thread.sleep(2500)
+          assert(pipeConsumerFailure.get() == null,
+            s"pipe consumer failed while waiting for more data: ${pipeConsumerFailure.get()}")
+
+          os.write(buf)
+        }
+        pipeConsumerFuture.get(5, TimeUnit.SECONDS)
+      }
+    }
   }
 
   def testWrite(writeCall: (AsyncOutputStream, Int) => Unit,

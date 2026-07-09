@@ -59,6 +59,7 @@ AggregateExpression,4
 Alias,4
 And,4
 ApproximatePercentile,4
+ArrayAggregate,4
 ArrayContains,4
 ArrayDistinct,4
 ArrayExcept,4
@@ -71,6 +72,7 @@ ArrayMin,4
 ArrayPosition,4
 ArrayRemove,4
 ArrayRepeat,4
+ArraySort,4
 ArrayTransform,4
 ArrayUnion,4
 ArraysOverlap,4
@@ -153,6 +155,7 @@ GetTimestamp,4
 GreaterThan,4
 GreaterThanOrEqual,4
 Greatest,4
+Hex,4
 HiveGenericUDF,4
 HiveHash,4
 HiveSimpleUDF,4
@@ -277,6 +280,7 @@ StartsWith,4
 StaticInvoke,4
 StddevPop,4
 StddevSamp,4
+StringDecode,4
 StringInstr,4
 StringLPad,4
 StringLocate,4

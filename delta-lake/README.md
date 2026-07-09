@@ -18,6 +18,7 @@ and directory contains the corresponding support code.
 | 2.4.x              | Spark 3.4.x     | `delta-24x`        |
 | 3.3.x              | Spark 3.5.[3-]  | `delta-33x`        |
 | 4.0.x              | Spark 4.0.x     | `delta-40x`        |
+| 4.1.x              | Spark 4.1.x     | `delta-41x`        |
 | Databricks 13.3    | Databricks 13.3 | `delta-spark341db` |
 | Databricks 14.3    | Databricks 14.3 | `delta-spark350db143` |
 

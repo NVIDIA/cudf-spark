@@ -17,7 +17,7 @@ the plugin. To add your own Nvtx range to the code, create an NvtxId
 entry in NvtxRangeWithDoc.scala and create an `NvtxRangeWithDoc` in the
 code location that you want to cover, passing in the newly created NvtxId.
 
-See [nvtx_profiling.md](https://nvidia.github.io/spark-rapids/docs/dev/nvtx_profiling.html) for more info.
+See [nvtx_profiling.md](https://nvidia.github.io/cudf-spark/docs/dev/nvtx_profiling.html) for more info.
 
 
 

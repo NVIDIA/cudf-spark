@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -770,7 +770,20 @@ class QuerySpecs(config: Config, spark: SparkSession) {
             s"from f_facts",
         config.iterations,
         config.timeout,
-        "COLLECT LIST WINDOW (We may never really be able to do this well)")).map { tc =>
+        "COLLECT LIST WINDOW (We may never really be able to do this well)"),
+      TestQuery("q42",
+        s"SELECT " +
+            s"a_key4_1, " +
+            s"a_data_low_unique_1, " +
+            s"f_data_low_unique_1 " +
+            s"FROM a_facts JOIN f_facts " +
+            s"on a_key4_1 = f_key4_1 AND " +
+            s"a_data_low_unique_1 < CAST(f_data_low_unique_1 AS BIGINT) AND " +
+            s"CAST(f_data_row_num_1 AS BIGINT) > a_data_low_unique_1",
+        config.iterations,
+        config.timeout,
+        "Conditional equi-join with CAST in non-equality condition (regression test for " +
+            "#14283: non-AST CAST extraction into pre-join GpuProjectExec).")).map { tc =>
       (tc.name, tc)
     }: _*)
     if (config.queries.isEmpty) {

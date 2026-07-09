@@ -48,11 +48,11 @@ import org.apache.spark.util.MutableURLClassLoader
     Each shim can see a consistent parallel world without conflicts by referencing
     only one conflicting directory.
     E.g., Spark 3.2.0 Shim will use
-    jar:file:/home/spark/rapids-4-spark_2.12-26.06.0.jar!/spark-shared/
-    jar:file:/home/spark/rapids-4-spark_2.12-26.06.0.jar!/spark320/
+    jar:file:/home/spark/rapids-4-spark_2.12-26.08.0.jar!/spark-shared/
+    jar:file:/home/spark/rapids-4-spark_2.12-26.08.0.jar!/spark320/
     Spark 3.3.1 will use
-    jar:file:/home/spark/rapids-4-spark_2.12-26.06.0.jar!/spark-shared/
-    jar:file:/home/spark/rapids-4-spark_2.12-26.06.0.jar!/spark331/
+    jar:file:/home/spark/rapids-4-spark_2.12-26.08.0.jar!/spark-shared/
+    jar:file:/home/spark/rapids-4-spark_2.12-26.08.0.jar!/spark331/
     Using these Jar URL's allows referencing different bytecode produced from identical sources
     by incompatible Scala / Spark dependencies.
  */
@@ -285,7 +285,7 @@ object ShimLoader {
         s"This RAPIDS Plugin build does not support Spark build ${sparkVersion}. " +
           s"Supported Spark versions: ${supportedVersions}. " +
           "Consult the Release documentation at " +
-          "https://nvidia.github.io/spark-rapids/docs/download.html")
+          "https://nvidia.github.io/cudf-spark/docs/download.html")
     }
   }
 

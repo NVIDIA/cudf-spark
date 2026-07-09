@@ -163,7 +163,6 @@ def test_array_item_ansi_fail_invalid_index(index):
         error_message=message)
 
 
-@pytest.mark.skipif(is_before_spark_330(), reason="try_element_at is not supported before Spark 3.3.0")
 @pytest.mark.parametrize('data_gen', array_item_test_gens, ids=idfn)
 def test_try_element_at_basic(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
@@ -176,7 +175,6 @@ def test_try_element_at_basic(data_gen):
             'try_element_at(a, b)'))
 
 
-@pytest.mark.skipif(is_before_spark_330(), reason="try_element_at is not supported before Spark 3.3.0")
 @pytest.mark.parametrize('index', [-2, 100, array_out_index_gen], ids=idfn)
 def test_try_element_at_invalid_index(index):
     if isinstance(index, int):
@@ -191,7 +189,6 @@ def test_try_element_at_invalid_index(index):
     assert_gpu_and_cpu_are_equal_collect(test_func, conf=ansi_enabled_conf)
 
 
-@pytest.mark.skipif(is_before_spark_330(), reason="try_element_at is not supported before Spark 3.3.0")
 @pytest.mark.parametrize('index', [0, array_zero_index_gen], ids=idfn)
 def test_try_element_at_zero_index_throws_error(index):
     if is_spark_340_or_later():
@@ -487,7 +484,7 @@ def test_array_element_at(data_gen):
 @pytest.mark.parametrize('index', [100, array_out_index_gen], ids=idfn)
 @disable_ansi_mode
 def test_array_element_at_ansi_fail_invalid_index(index):
-    message = "ArrayIndexOutOfBoundsException" if is_before_spark_330() or not is_before_spark_400() else "SparkArrayIndexOutOfBoundsException"
+    message = "ArrayIndexOutOfBoundsException" if not is_before_spark_400() else "SparkArrayIndexOutOfBoundsException"
     if isinstance(index, int):
         test_func = lambda spark: unary_op_df(spark, ArrayGen(int_gen)).select(
             element_at(col('a'), index)).collect()
@@ -537,7 +534,8 @@ def test_array_element_at_zero_index_fail(index, ansi_enabled):
         error_message=message)
 
 
-@pytest.mark.parametrize('data_gen', array_gens_sample, ids=idfn)
+@pytest.mark.parametrize('data_gen', array_gens_sample +
+    [ArrayGen(BinaryGen(max_length=10), max_length=10)], ids=idfn)
 @disable_ansi_mode
 def test_array_transform(data_gen):
     def do_it(spark):
@@ -659,7 +657,8 @@ def test_get_array_struct_fields(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark : unary_op_df(spark, array_struct_gen).selectExpr('a.child0'))
 
-@pytest.mark.parametrize('data_gen', [ArrayGen(string_gen), ArrayGen(int_gen)])
+@pytest.mark.parametrize('data_gen', [ArrayGen(string_gen), ArrayGen(int_gen),
+    ArrayGen(BinaryGen(max_length=10))], ids=idfn)
 @pytest.mark.parametrize('threeVL', [
     pytest.param(False, id='3VL:off'),
     pytest.param(True, id='3VL:on'),
@@ -678,6 +677,9 @@ def test_array_exists(data_gen, threeVL):
         if isinstance(element_type, StringType):
             columns.extend(['exists(a, entry -> length(entry) > 5) as exists_longer_than_5'])
 
+        if isinstance(element_type, BinaryType):
+            columns.extend(['exists(a, item -> length(hex(item)) > 0) as exists_non_empty'])
+
         return unary_op_df(spark, data_gen).selectExpr(columns)
 
     assert_gpu_and_cpu_are_equal_collect(do_it, conf= {
@@ -686,8 +688,9 @@ def test_array_exists(data_gen, threeVL):
 
 
 @pytest.mark.parametrize('data_gen', [
-    ArrayGen(string_gen), 
+    ArrayGen(string_gen),
     ArrayGen(int_gen),
+    ArrayGen(BinaryGen(max_length=10)),
     ArrayGen(ArrayGen(int_gen)),
     ArrayGen(ArrayGen(StructGen([["A", int_gen], ["B", string_gen]])))], ids=idfn)
 def test_array_filter(data_gen):
@@ -703,6 +706,9 @@ def test_array_filter(data_gen):
 
         if isinstance(element_type, StringType):
             columns.extend(['filter(a, entry -> length(entry) > 5) as filter_longer_than_5'])
+
+        if isinstance(element_type, BinaryType):
+            columns.extend(['filter(a, item -> length(hex(item)) > 5) as filter_longer_than_5'])
 
         if isinstance(element_type, ArrayType):
             columns.extend(['filter(a, entry -> size(entry) < 5) as filter_shorter_than_5'])
@@ -943,11 +949,12 @@ def test_array_remove_scalar(data_gen):
             'array_remove(a, 10)')
     )
 
-@pytest.mark.parametrize('data_gen', [ByteGen(special_cases=[5]), ShortGen(special_cases=[5]), 
+@pytest.mark.parametrize('data_gen', [ByteGen(special_cases=[5]), ShortGen(special_cases=[5]),
                                       IntegerGen(special_cases=[5]), LongGen(special_cases=[5]),
-                                      FloatGen(special_cases=_non_neg_zero_float_special_cases + [-0.0]), 
+                                      FloatGen(special_cases=_non_neg_zero_float_special_cases + [-0.0]),
                                       DoubleGen(special_cases=_non_neg_zero_double_special_cases + [-0.0]),
-                                      StringGen(pattern='[0-9]{1,5}'), boolean_gen, date_gen, timestamp_gen] + decimal_gens, ids=idfn)
+                                      StringGen(pattern='[0-9]{1,5}'), boolean_gen, date_gen, timestamp_gen,
+                                      StructGen([['child0', int_gen], ['child1', string_gen]], nullable=False)] + decimal_gens, ids=idfn)
 def test_array_remove(data_gen):
     gen = StructGen(
         [('a', ArrayGen(data_gen, nullable=True)),
@@ -959,6 +966,23 @@ def test_array_remove(data_gen):
             'array_remove(a, b)',
             'array_remove(a, null)')
     )
+
+# ARRAY and BINARY element types are not in GpuArrayRemove's TypeSig and must fall back to CPU.
+# This test locks in that the TypeSig narrowing in GpuOverrides is effective.
+@allow_non_gpu('ProjectExec', 'ArrayRemove')
+@pytest.mark.parametrize('data_gen', [
+    ArrayGen(int_gen, max_length=5),
+    BinaryGen(max_length=10)],
+    ids=idfn)
+def test_array_remove_fallback(data_gen):
+    gen = StructGen(
+        [('a', ArrayGen(data_gen, nullable=True)),
+         ('b', data_gen)],
+        nullable=False)
+
+    assert_gpu_fallback_collect(
+        lambda spark: gen_df(spark, gen).selectExpr('array_remove(a, b)'),
+        'ArrayRemove')
 
 
 @pytest.mark.parametrize('data_gen', [ArrayGen(sub_gen) for sub_gen in array_gens_sample], ids=idfn)

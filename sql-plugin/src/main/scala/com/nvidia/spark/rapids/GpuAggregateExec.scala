@@ -43,7 +43,7 @@ import org.apache.spark.sql.catalyst.util.truncatedString
 import org.apache.spark.sql.execution.{ExplainUtils, SortExec, SparkPlan}
 import org.apache.spark.sql.execution.aggregate.{BaseAggregateExec, HashAggregateExec, ObjectHashAggregateExec, SortAggregateExec}
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.rapids.aggregate.{CpuToGpuAggregateBufferConverter, CudfAggregate, GpuAggregateExpression, GpuToCpuAggregateBufferConverter}
+import org.apache.spark.sql.rapids.aggregate.{CudfAggregate, GpuAggregateExpression}
 import org.apache.spark.sql.rapids.execution.{GpuBatchSubPartitioner, GpuShuffleMeta, TrampolineUtil}
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -1768,12 +1768,11 @@ object GpuTypedImperativeSupportedAggregateExecMeta {
       partialAggMeta: GpuBaseAggregateMeta[_],
       fromCpuToGpu: Boolean): Seq[NamedExpression] = {
 
-    val converters = mutable.Queue[Either[
-      CpuToGpuAggregateBufferConverter, GpuToCpuAggregateBufferConverter]]()
-    mergeAggMeta.childExprs.foreach {
+    val converters = mergeAggMeta.childExprs.collect {
       case e if e.childExprs.length == 1 &&
-        e.childExprs.head.isInstanceOf[TypedImperativeAggExprMeta[_]] =>
-        e.wrapped.asInstanceOf[AggregateExpression].mode match {
+          e.childExprs.head.isInstanceOf[TypedImperativeAggExprMeta[_]] =>
+        val aggExpr = e.wrapped.asInstanceOf[AggregateExpression]
+        aggExpr.mode match {
           case Final | PartialMerge =>
             val typImpAggMeta = e.childExprs.head.asInstanceOf[TypedImperativeAggExprMeta[_]]
             val converter = if (fromCpuToGpu) {
@@ -1781,31 +1780,32 @@ object GpuTypedImperativeSupportedAggregateExecMeta {
             } else {
               Right(typImpAggMeta.createGpuToCpuBufferConverter())
             }
-            converters.enqueue(converter)
-          case _ =>
+            val aggFn = aggExpr.aggregateFunction.asInstanceOf[TypedImperativeAggregate[_]]
+            Some(aggFn.inputAggBufferAttributes.head.exprId -> converter)
+          case _ => None
         }
-      case _ =>
-    }
+      case _ => None
+    }.flatten.toMap
 
     val expressions = partialAggMeta.resultExpressions.map {
-      case retExpr if retExpr.typeMeta.typeConverted =>
-        val resultExpr = retExpr.wrapped.asInstanceOf[AttributeReference]
-        val ref = if (fromCpuToGpu) {
-          resultExpr
-        } else {
-          resultExpr.copy(dataType = retExpr.typeMeta.dataType.get)(
-            resultExpr.exprId, resultExpr.qualifier)
-        }
-        converters.dequeue() match {
-          case Left(converter) =>
-            Alias(converter.createExpression(ref),
-              ref.name + "_converted")(NamedExpression.newExprId)
-          case Right(converter) =>
-            Alias(converter.createExpression(ref),
-              ref.name + "_converted")(NamedExpression.newExprId)
-        }
       case retExpr =>
-        retExpr.wrapped.asInstanceOf[NamedExpression]
+        retExpr.wrapped match {
+          // Some typed imperative aggregates, like BloomFilterAggregate, keep BinaryType on both
+          // CPU and GPU but still need a bridge conversion because the buffer semantics differ.
+          case resultExpr: AttributeReference if converters.contains(resultExpr.exprId) =>
+            val ref = if (fromCpuToGpu || !retExpr.typeMeta.typeConverted) {
+              resultExpr
+            } else {
+              resultExpr.copy(dataType = retExpr.typeMeta.dataType.get)(
+                resultExpr.exprId, resultExpr.qualifier)
+            }
+            val convertedExpr = converters(resultExpr.exprId).fold(
+              _.createExpression(ref),
+              _.createExpression(ref))
+            Alias(convertedExpr, ref.name + "_converted")(NamedExpression.newExprId)
+          case _ =>
+            retExpr.wrapped.asInstanceOf[NamedExpression]
+        }
     }
 
     expressions
@@ -1978,7 +1978,11 @@ case class GpuHashAggregateExec(
     "NUM_AGGS" -> createMetric(DEBUG_LEVEL, "num agg operations"),
     "NUM_PRE_SPLITS" -> createMetric(DEBUG_LEVEL, "num pre splits"),
     "NUM_TASKS_SINGLE_PASS" -> createMetric(MODERATE_LEVEL, "number of single pass tasks"),
-    "HEURISTIC_TIME" -> createNanoTimingMetric(DEBUG_LEVEL, "time in heuristic")
+    "HEURISTIC_TIME" -> createNanoTimingMetric(DEBUG_LEVEL, "time in heuristic"),
+    CPU_BRIDGE_PROCESSING_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
+      DESCRIPTION_CPU_BRIDGE_PROCESSING_TIME),
+    CPU_BRIDGE_WAIT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
+      DESCRIPTION_CPU_BRIDGE_WAIT_TIME)
   )
 
   // requiredChildDistributions are CPU expressions, so remove it from the GPU expressions list

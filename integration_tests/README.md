@@ -263,7 +263,7 @@ individually, so you don't risk running unit tests along with the integration te
 http://www.scalatest.org/user_guide/using_the_scalatest_shell
 
 ```shell
-spark-shell --jars rapids-4-spark-tests_2.12-26.06.0-SNAPSHOT-tests.jar,rapids-4-spark-integration-tests_2.12-26.06.0-SNAPSHOT-tests.jar,scalatest_2.12-3.0.5.jar,scalactic_2.12-3.0.5.jar
+spark-shell --jars rapids-4-spark-tests_2.12-26.08.0-SNAPSHOT-tests.jar,rapids-4-spark-integration-tests_2.12-26.08.0-SNAPSHOT-tests.jar,scalatest_2.12-3.0.5.jar,scalactic_2.12-3.0.5.jar
 ```
 
 First you import the `scalatest_shell` and tell the tests where they can find the test files you
@@ -286,7 +286,7 @@ If you just want to verify the SQL replacement is working you will need to add t
 assumes CUDA 12 is being used and the Spark distribution is built with Scala 2.12.
 
 ```
-$SPARK_HOME/bin/spark-submit --jars "rapids-4-spark_2.12-26.06.0-SNAPSHOT-cuda12.jar" ./runtests.py
+$SPARK_HOME/bin/spark-submit --jars "rapids-4-spark_2.12-26.08.0-SNAPSHOT-cuda12.jar" ./runtests.py
 ```
 
 You don't have to enable the plugin for this to work, the test framework will do that for you.
@@ -507,7 +507,7 @@ To run cudf_udf tests, need following configuration changes:
 As an example, here is the `spark-submit` command with the cudf_udf parameter on CUDA 12:
 
 ```
-$SPARK_HOME/bin/spark-submit --jars "rapids-4-spark_2.12-26.06.0-SNAPSHOT-cuda12.jar,rapids-4-spark-tests_2.12-26.06.0-SNAPSHOT.jar" --conf spark.rapids.memory.gpu.allocFraction=0.3 --conf spark.rapids.python.memory.gpu.allocFraction=0.3 --conf spark.rapids.python.concurrentPythonWorkers=2 --py-files "rapids-4-spark_2.12-26.06.0-SNAPSHOT-cuda12.jar" --conf spark.executorEnv.PYTHONPATH="rapids-4-spark_2.12-26.06.0-SNAPSHOT-cuda12.jar" ./runtests.py --cudf_udf
+$SPARK_HOME/bin/spark-submit --jars "rapids-4-spark_2.12-26.08.0-SNAPSHOT-cuda12.jar,rapids-4-spark-tests_2.12-26.08.0-SNAPSHOT.jar" --conf spark.rapids.memory.gpu.allocFraction=0.3 --conf spark.rapids.python.memory.gpu.allocFraction=0.3 --conf spark.rapids.python.concurrentPythonWorkers=2 --py-files "rapids-4-spark_2.12-26.08.0-SNAPSHOT-cuda12.jar" --conf spark.executorEnv.PYTHONPATH="rapids-4-spark_2.12-26.08.0-SNAPSHOT-cuda12.jar" ./runtests.py --cudf_udf
 ```
 
 ### Enabling fuzz tests
@@ -525,6 +525,20 @@ Some tests require that Apache Iceberg has been configured in the Spark environm
 properly without it. These tests assume Iceberg is not configured and are disabled by default.
 If Spark has been configured to support Iceberg then these tests can be enabled by adding the
 `--iceberg` option to the command.
+
+When testing Iceberg package-private access paths, load the local Iceberg runtime jar with
+`ICEBERG_EXTRA_CLASSPATH` instead of `PYSP_TEST_spark_jars` or
+`PYSP_TEST_spark_jars_packages`. The test driver will place the RAPIDS, test, and Iceberg
+jars on `spark.driver.extraClassPath` and `spark.executor.extraClassPath`:
+
+```shell
+ICEBERG_EXTRA_CLASSPATH=/path/to/iceberg-spark-runtime-3.5_2.12-1.10.1.jar \
+PYSP_TEST_spark_sql_extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions \
+PYSP_TEST_spark_sql_catalog_spark__catalog=org.apache.iceberg.spark.SparkSessionCatalog \
+PYSP_TEST_spark_sql_catalog_spark__catalog_type=hadoop \
+PYSP_TEST_spark_sql_catalog_spark__catalog_warehouse=/tmp/spark-warehouse-$RANDOM \
+./integration_tests/run_pyspark_from_build.sh -m iceberg --iceberg
+```
 
 #### Disabling Iceberg fanout writer
 
@@ -546,6 +560,17 @@ With fanout disabled, Iceberg uses the clustered writer which writes one partiti
 and releases memory between partitions. Dedicated fanout-enabled test cases
 (e.g., `test_*_fanout_enabled`) still exercise the fanout writer path with a single
 partition type to keep memory usage manageable.
+
+#### Iceberg REST catalog write compression
+
+Some REST catalog deployments can apply a catalog-side default Parquet compression codec that
+is not supported by the RAPIDS GPU writer. The REST catalog CI sets table defaults for data
+and delete files to use `zstd`, which is supported by the GPU writer:
+
+```shell
+"PYSP_TEST_spark_sql_catalog_spark__catalog_table-default_write_parquet_compression-codec=zstd"
+"PYSP_TEST_spark_sql_catalog_spark__catalog_table-default_write_delete_parquet_compression-codec=zstd"
+```
 
 ### Run Apache iceberg s3tables tests
 
@@ -694,7 +719,7 @@ It is advised that tests be added for all applicable literal types, for an opera
 
 Note that for most operations, if all inputs are literal values, the Spark Catalyst optimizer will evaluate
 the expression during the logical planning phase of query compilation, via
-[Constant Folding](https://jaceklaskowski.gitbooks.io/mastering-spark-sql/content/spark-sql-Optimizer-ConstantFolding.html)
+[Constant Folding](https://books.japila.pl/spark-sql-internals/logical-optimizations/ConstantFolding/)
 E.g. Consider this query:
 ```sql
 SELECT SUM(1+2+3) FROM ...

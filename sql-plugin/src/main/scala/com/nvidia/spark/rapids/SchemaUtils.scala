@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,12 +30,27 @@ import org.apache.orc.TypeDescription
 import org.apache.spark.sql.catalyst.parser.CatalystSqlParser
 import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
 import org.apache.spark.sql.execution.QueryExecutionException
+import org.apache.spark.sql.execution.datasources.parquet.ParquetUtils.FIELD_ID_METADATA_KEY
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.types._
 
 object SchemaUtils {
-  // Parquet field ID metadata key
-  private val FIELD_ID_METADATA_KEY = "parquet.field.id"
+  // Side-channel keys for nested element field ids. Spark's StructField metadata only attaches to
+  // top-level fields, so to round-trip ids for list elements / map keys / map values we store
+  // them on the parent StructField under these keys (with `_NESTED_IDS` carrying further-nested
+  // ids as a JSON-serialized Metadata).
+  val LIST_ELEMENT_FIELD_ID_METADATA_KEY =
+    "rapids.parquet.list.element.field.id"
+  val LIST_ELEMENT_NESTED_IDS_METADATA_KEY =
+    "rapids.parquet.list.element.nested.ids"
+  val MAP_KEY_FIELD_ID_METADATA_KEY =
+    "rapids.parquet.map.key.field.id"
+  val MAP_KEY_NESTED_IDS_METADATA_KEY =
+    "rapids.parquet.map.key.nested.ids"
+  val MAP_VALUE_FIELD_ID_METADATA_KEY =
+    "rapids.parquet.map.value.field.id"
+  val MAP_VALUE_NESTED_IDS_METADATA_KEY =
+    "rapids.parquet.map.value.nested.ids"
 
   /**
    * Convert a TypeDescription to a Catalyst StructType.
@@ -85,6 +100,10 @@ object SchemaUtils {
    * @param isCaseSensitive Whether the name check should be case sensitive or not
    * @param castFunc optional, function to cast the input column to the required type
    * @param needCast if true, table columns will always be traversed to look for needed casts
+   * @param allowNonStructWrapping if true, allow wrapping a non-STRUCT column into a struct
+   *   view when the expected Catalyst type is a single-field StructType. This is only needed
+   *   for the Parquet legacy 2-level LIST case where cuDF returns an unwrapped child column.
+   *   Should NOT be enabled for ORC or other formats.
    * @return a new table mapping to the "readSchema". Users should close it if no longer needed.
    */
   private[rapids] def evolveSchemaIfNeededAndClose(
@@ -93,7 +112,8 @@ object SchemaUtils {
       readSchema: StructType,
       isCaseSensitive: Boolean,
       castFunc: Option[(ColumnView, DataType, DataType) => ColumnView] = None,
-      needCast: Boolean = false): Table = {
+      needCast: Boolean = false,
+      allowNonStructWrapping: Boolean = false): Table = {
     // Schema evolution is needed when
     //   1) there are columns with precision can be stored in an int, or
     //   2) "readSchema" is not equal to "tableSchema".
@@ -113,7 +133,7 @@ object SchemaUtils {
             val cv = table.getColumn(typeAndId._2)
             withResource(new ArrayBuffer[ColumnView]) { toClose =>
               val newCol = evolveColumnRecursively(cv, typeAndId._1, rf.dataType, isCaseSensitive,
-                toClose, castFunc, needCast)
+                toClose, castFunc, needCast, allowNonStructWrapping)
               if (newCol == cv) {
                 cv.incRefCount()
               } else {
@@ -139,7 +159,8 @@ object SchemaUtils {
       col: ColumnView, colType: DataType, targetType: DataType,
       isCaseSensitive: Boolean, toClose: ArrayBuffer[ColumnView],
       castFunc: Option[(ColumnView, DataType, DataType) => ColumnView],
-      needCast: Boolean): ColumnView = {
+      needCast: Boolean,
+      allowNonStructWrapping: Boolean): ColumnView = {
     // An util function to add a view to the buffer "toClose".
     val addToClose = (v: ColumnView) => {
       toClose += v
@@ -153,33 +174,48 @@ object SchemaUtils {
             !TrampolineUtil.sameType(colSt, toSt) ||
             getPrecisionsList(colSt).exists(p => p <= Decimal.MAX_INT_DIGITS)
         if (needSchemaEvo) {
+          // cuDF's Parquet reader may not follow the backward-compatibility rules
+          // for legacy 2-level LIST types (e.g. repeated groups named "array" with
+          // a single field). In this case cuDF returns the unwrapped child column
+          // instead of a STRUCT column. Detect this and wrap it back into a struct
+          // so schema evolution can proceed normally. See NVIDIA/spark-rapids#11454.
+          // Gated by allowNonStructWrapping so this only applies to Parquet paths,
+          // not ORC or other formats that share this method.
+          val actualCol = if (allowNonStructWrapping &&
+              col.getType.getTypeId != DType.DTypeEnum.STRUCT &&
+              colSt.length == 1) {
+            addToClose(ColumnView.makeStructView(col))
+          } else {
+            col
+          }
           val typeIdMap = buildTypeIdMapFromSchema(colSt, isCaseSensitive)
           val newViews = toSt.safeMap { f =>
             if (typeIdMap.contains(f.name)) {
               val typeAndId = typeIdMap(f.name)
-              val cv = addToClose(col.getChildColumnView(typeAndId._2))
+              val cv = addToClose(actualCol.getChildColumnView(typeAndId._2))
               val newChild = evolveColumnRecursively(cv, typeAndId._1, f.dataType,
-                isCaseSensitive, toClose, castFunc, needCast)
+                isCaseSensitive, toClose, castFunc, needCast, allowNonStructWrapping)
               if (newChild != cv) {
                 addToClose(newChild)
               }
               newChild
             } else {
               // Return a null column if the name is not found in the table.
-              addToClose(
-                GpuColumnVector.columnVectorFromNull(col.getRowCount.toInt, f.dataType))
+              addToClose(GpuColumnVector.columnVectorFromNull(
+                actualCol.getRowCount.toInt, f.dataType))
             }
           }
-          val opNullCount = Optional.of(col.getNullCount.asInstanceOf[java.lang.Long])
-          new ColumnView(col.getType, col.getRowCount, opNullCount, col.getValid,
-            col.getOffsets, newViews.toArray)
+          val opNullCount =
+            Optional.of(actualCol.getNullCount.asInstanceOf[java.lang.Long])
+          new ColumnView(actualCol.getType, actualCol.getRowCount, opNullCount,
+            actualCol.getValid, actualCol.getOffsets, newViews.toArray)
         } else {
           col
         }
       case (colAt: ArrayType, toAt: ArrayType) =>
         val child = addToClose(col.getChildColumnView(0))
         val newChild = evolveColumnRecursively(child, colAt.elementType, toAt.elementType,
-          isCaseSensitive, toClose, castFunc, needCast)
+          isCaseSensitive, toClose, castFunc, needCast, allowNonStructWrapping)
         if (child == newChild) {
           col
         } else {
@@ -195,7 +231,7 @@ object SchemaUtils {
         val processView = (id: Int, srcType: DataType, distType: DataType) => {
           val view = addToClose(listChild.getChildColumnView(id))
           val newView = evolveColumnRecursively(view, srcType, distType, isCaseSensitive,
-            toClose, castFunc, needCast)
+            toClose, castFunc, needCast, allowNonStructWrapping)
           if (newView != view) {
             newStructChildren += addToClose(newView)
             newStructIndices += id
@@ -245,6 +281,17 @@ object SchemaUtils {
       Option.empty
     }
 
+    def nestedFieldMetadata(fieldIdKey: String, nestedIdsKey: String): Metadata = {
+      val nestedBuilder = new MetadataBuilder()
+      if (fieldMeta.contains(fieldIdKey)) {
+        nestedBuilder.putLong(FIELD_ID_METADATA_KEY, fieldMeta.getLong(fieldIdKey))
+      }
+      if (fieldMeta.contains(nestedIdsKey)) {
+        nestedBuilder.withMetadata(Metadata.fromJson(fieldMeta.getString(nestedIdsKey)))
+      }
+      nestedBuilder.build()
+    }
+
     dataType match {
       case dt: DecimalType =>
         if (parquetFieldIdWriteEnabled && parquetFieldId.nonEmpty) {
@@ -271,39 +318,74 @@ object SchemaUtils {
           writeInt96,
           parquetFieldIdWriteEnabled).build())
       case a: ArrayType =>
-        builder.withListColumn(
-          writerOptionsFromField(
-            listBuilder(name, nullable),
-            a.elementType,
-            name,
-            a.containsNull,
-            writeInt96, fieldMeta, parquetFieldIdWriteEnabled).build())
+        val elementFieldMetadata = nestedFieldMetadata(
+          LIST_ELEMENT_FIELD_ID_METADATA_KEY,
+          LIST_ELEMENT_NESTED_IDS_METADATA_KEY)
+        val outerListBuilder = if (parquetFieldIdWriteEnabled && parquetFieldId.nonEmpty) {
+          listBuilder(name, nullable, parquetFieldId.get)
+        } else {
+          listBuilder(name, nullable)
+        }
+        val listOptions = a.elementType match {
+          case BinaryType =>
+            val elementParquetFieldId = if (elementFieldMetadata.contains(FIELD_ID_METADATA_KEY)) {
+              Option(Math.toIntExact(elementFieldMetadata.getLong(FIELD_ID_METADATA_KEY)))
+            } else {
+              Option.empty
+            }
+            if (parquetFieldIdWriteEnabled && elementParquetFieldId.nonEmpty) {
+              outerListBuilder
+                .withBinaryColumn("element", a.containsNull, elementParquetFieldId.get)
+                .build()
+            } else {
+              outerListBuilder.withBinaryColumn("element", a.containsNull).build()
+            }
+          case _ =>
+            writerOptionsFromField(
+              outerListBuilder,
+              a.elementType,
+              "element",
+              a.containsNull,
+              writeInt96,
+              elementFieldMetadata,
+              parquetFieldIdWriteEnabled).build()
+        }
+        builder.withListColumn(listOptions)
       case m: MapType =>
         // It is ok to use `StructBuilder` here for key and value, since either
         // `OrcWriterOptions.Builder` or `ParquetWriterOptions.Builder` is actually an
         // `AbstractStructBuilder`, and here only handles the common column metadata things.
-        builder.withMapColumn(
-          mapColumn(name,
-            writerOptionsFromField(
-              // This nullable is useless because we use the child of struct column
-              structBuilder(name, nullable),
-              m.keyType,
-              "key",
-              nullable = false,
-              writeInt96, fieldMeta, parquetFieldIdWriteEnabled).build().getChildColumnOptions()(0),
-            writerOptionsFromField(
-              structBuilder(name, nullable),
-              m.valueType,
-              "value",
-              m.valueContainsNull,
-              writeInt96,
-              fieldMeta,
-              parquetFieldIdWriteEnabled).build().getChildColumnOptions()(0),
-            // set the nullable for this map
-            // if `m` is a key of another map, this `nullable` should be false
-            // e.g.: map1(map2(int,int), int), the map2 is the map
-            // key of map1, map2 should be non-nullable
-            nullable))
+        val keyOptions = writerOptionsFromField(
+          // This nullable is useless because we use the child of struct column
+          structBuilder(name, nullable),
+          m.keyType,
+          "key",
+          nullable = false,
+          writeInt96,
+          nestedFieldMetadata(
+            MAP_KEY_FIELD_ID_METADATA_KEY,
+            MAP_KEY_NESTED_IDS_METADATA_KEY),
+          parquetFieldIdWriteEnabled).build().getChildColumnOptions()(0)
+        val valueOptions = writerOptionsFromField(
+          structBuilder(name, nullable),
+          m.valueType,
+          "value",
+          m.valueContainsNull,
+          writeInt96,
+          nestedFieldMetadata(
+            MAP_VALUE_FIELD_ID_METADATA_KEY,
+            MAP_VALUE_NESTED_IDS_METADATA_KEY),
+          parquetFieldIdWriteEnabled).build().getChildColumnOptions()(0)
+        // set the nullable for this map
+        // if `m` is a key of another map, this `nullable` should be false
+        // e.g.: map1(map2(int,int), int), the map2 is the map
+        // key of map1, map2 should be non-nullable
+        val mapOptions = if (parquetFieldIdWriteEnabled && parquetFieldId.nonEmpty) {
+          mapColumn(name, keyOptions, valueOptions, nullable, parquetFieldId.get)
+        } else {
+          mapColumn(name, keyOptions, valueOptions, nullable)
+        }
+        builder.withMapColumn(mapOptions)
       case BinaryType =>
         if (parquetFieldIdWriteEnabled && parquetFieldId.nonEmpty) {
           builder.withBinaryColumn(name, nullable, parquetFieldId.get)

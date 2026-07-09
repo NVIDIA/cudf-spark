@@ -24,7 +24,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
 import ai.rapids.cudf.{NvtxColor, NvtxRange}
-import com.nvidia.spark.rapids.{NvtxId, NvtxRegistry}
+import com.nvidia.spark.rapids.{NvtxId, NvtxRegistry, PerfIO}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
 import com.nvidia.spark.rapids.jni.RmmSpark
@@ -281,6 +281,13 @@ class GpuTaskMetrics extends Serializable with Logging {
   // Disk write savings from SpillablePartialFileHandle
   private val diskWriteSavedBytes = new LongAccumulator
 
+  // PerfIO S3 backend executor counts — each executor contributes 1 to its active backend
+  // per stage, making it easy to see from the event log whether PerfIO is enabled on all nodes.
+  private val perfioS3NettyExecutors = new LongAccumulator
+  private val perfioS3CrtExecutors = new LongAccumulator
+  private val perfioS3S3aExecutors = new LongAccumulator
+  private val perfioS3IcebergFallbacks = new LongAccumulator
+
   private var maxHostBytesAllocated: Long = 0
   private var maxPageableBytesAllocated: Long = 0
   private var maxPinnedBytesAllocated: Long = 0
@@ -343,7 +350,11 @@ class GpuTaskMetrics extends Serializable with Logging {
     "gpuMaxTaskFootprint" -> maxGpuFootprint,
     "multithreadReaderMaxParallelism" -> multithreadReaderMaxParallelism,
     "gpuMaxConcurrentGpuTasks" -> maxConcurrentGpuTasks,
-    "gpuDiskWriteSavedBytes" -> diskWriteSavedBytes
+    "gpuDiskWriteSavedBytes" -> diskWriteSavedBytes,
+    "perfio.s3.netty.executors" -> perfioS3NettyExecutors,
+    "perfio.s3.crt.executors" -> perfioS3CrtExecutors,
+    "perfio.s3.s3a.executors" -> perfioS3S3aExecutors,
+    "perfio.s3.iceberg.fallbacks" -> perfioS3IcebergFallbacks
   )
 
   def register(sc: SparkContext): Unit = {
@@ -496,6 +507,30 @@ class GpuTaskMetrics extends Serializable with Logging {
 
   def addDiskWriteSaved(bytes: Long): Unit = {
     diskWriteSavedBytes.add(bytes)
+  }
+
+  /**
+   * Records this executor's PerfIO S3 backend exactly once per stage (per GpuTaskMetrics
+   * instance). Call from task code on any S3 read path. Uses the accumulator ID as a key
+   * to prevent double-counting — each new stage creates fresh accumulators with new IDs.
+   */
+  def recordPerfioS3BackendOnce(): Unit = {
+    val acc = PerfIO.s3BackendName match {
+      case "netty" => perfioS3NettyExecutors
+      case "crt"   => perfioS3CrtExecutors
+      case _       => perfioS3S3aExecutors
+    }
+    try {
+      if (PerfIO.reportedBackendAccIds.add(acc.id)) {
+        acc.add(1L)
+      }
+    } catch {
+      case _: IllegalArgumentException => // accumulator not yet registered; no-op
+    }
+  }
+
+  def recordPerfioS3IcebergFallback(): Unit = {
+    perfioS3IcebergFallbacks.add(1L)
   }
 }
 

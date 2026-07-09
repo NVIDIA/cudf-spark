@@ -1,0 +1,41 @@
+/*
+ * Copyright (c) 2026, NVIDIA CORPORATION.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.iceberg.aws.s3;
+
+import java.net.URI;
+import java.net.URISyntaxException;
+
+import org.apache.iceberg.io.InputFile;
+
+/** Package-local access to Iceberg S3 file internals. */
+public final class IcebergS3InputFileAccess {
+  private IcebergS3InputFileAccess() {
+  }
+
+  public static URI s3Uri(InputFile inputFile) {
+    if (!(inputFile instanceof BaseS3File)) {
+      return null;
+    }
+    S3URI uri = ((BaseS3File) inputFile).uri();
+    try {
+      return new URI("s3", uri.bucket(), "/" + uri.key(), null);
+    } catch (URISyntaxException e) {
+      throw new IllegalArgumentException(
+          "Invalid S3 URI for bucket=" + uri.bucket() + " key=" + uri.key(), e);
+    }
+  }
+}

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@ from pyspark.sql.types import *
 from spark_session import *
 
 delta_write_gens = [x for sublist in parquet_write_gens_list for x in sublist]
+
 
 delta_part_write_gens = [
     byte_gen,
@@ -79,6 +80,96 @@ def _assert_sql(data_path, confs, query):
         confs)
 
 
+TYPE_WIDENING_CASES = [
+    pytest.param(
+        "INT",
+        "BIGINT",
+        "(1L, CAST(NULL AS INT)), (2L, -2147483648), (3L, -1), (4L, 2147483647)",
+        "(5L, CAST(NULL AS BIGINT)), (6L, CAST(-2147483649 AS BIGINT)), "
+        "(7L, CAST(2147483648 AS BIGINT)), (8L, CAST(2147483649 AS BIGINT))",
+        id="int_to_bigint"),
+    pytest.param(
+        "FLOAT",
+        "DOUBLE",
+        "(1L, CAST(NULL AS FLOAT)), (2L, CAST(-1.25 AS FLOAT)), "
+        "(3L, CAST('NaN' AS FLOAT)), (4L, CAST(3.4028235E38 AS FLOAT))",
+        "(5L, CAST(NULL AS DOUBLE)), (6L, CAST(-16777217.25 AS DOUBLE)), "
+        "(7L, CAST('NaN' AS DOUBLE)), (8L, CAST(-3.4028236E38 AS DOUBLE)), "
+        "(9L, CAST(3.4028236E38 AS DOUBLE))",
+        id="float_to_double"),
+]
+
+
+def _setup_type_widened_table(spark, path, source_type, target_type, initial_rows):
+    _create_table(spark, path, f"id BIGINT, value {source_type}")
+    spark.sql(f"INSERT INTO delta.`{path}` VALUES {initial_rows}")
+    spark.sql(
+        f"ALTER TABLE delta.`{path}` SET TBLPROPERTIES ('delta.enableTypeWidening' = 'true')")
+    spark.sql(f"ALTER TABLE delta.`{path}` ALTER COLUMN value TYPE {target_type}")
+
+
+def _insert_type_widened_rows(spark, path, appended_rows):
+    spark.sql(f"INSERT INTO delta.`{path}` VALUES {appended_rows}")
+
+
+# Collecting rows still goes through ColumnarToRowExec after the Delta scan.
+@allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_spark_400_or_later(),
+                    reason="Delta type widening ALTER COLUMN requires Delta 4.0+")
+@pytest.mark.parametrize(
+    "source_type,target_type,initial_rows,appended_rows",
+    TYPE_WIDENING_CASES)
+def test_delta_type_widening_read_round_trip(
+        spark_tmp_path, source_type, target_type, initial_rows, appended_rows):
+    data_path = spark_tmp_path + "/DELTA_DATA"
+
+    def setup_table(spark):
+        _setup_type_widened_table(spark, data_path, source_type, target_type, initial_rows)
+        _insert_type_widened_rows(spark, data_path, appended_rows)
+
+    with_cpu_session(setup_table, conf=writer_confs)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(
+            f"SELECT id, value, typeof(value) AS value_type "
+            f"FROM delta.`{data_path}` ORDER BY id"),
+        conf=_delta_confs)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_spark_400_or_later(),
+                    reason="Delta type widening ALTER COLUMN requires Delta 4.0+")
+@pytest.mark.parametrize(
+    "source_type,target_type,initial_rows,appended_rows",
+    TYPE_WIDENING_CASES)
+def test_delta_write_round_trip_after_type_widening(
+        spark_tmp_path, source_type, target_type, initial_rows, appended_rows):
+    data_path = spark_tmp_path + "/DELTA_DATA"
+
+    def setup_tables(spark):
+        for path in [data_path + "/CPU", data_path + "/GPU"]:
+            _setup_type_widened_table(spark, path, source_type, target_type, initial_rows)
+
+    def do_insert(spark, path):
+        _insert_type_widened_rows(spark, path, appended_rows)
+
+    with_cpu_session(setup_tables, conf=writer_confs)
+    assert_gpu_and_cpu_writes_are_equal_collect(
+        do_insert,
+        lambda spark, path: spark.sql(
+            f"SELECT id, value, typeof(value) AS value_type "
+            f"FROM delta.`{path}` ORDER BY id"),
+        data_path,
+        conf=_delta_confs)
+    # DBR 17.3 may produce different add-file action counts for CPU and GPU writes.
+    # The row-level assertion above is the stable behavior check for this type-widening case.
+    if not is_databricks173_or_later():
+        with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
+
+
 @allow_non_gpu(delta_write_fallback_allow, *delta_meta_allow)
 @delta_lake
 @ignore_order
@@ -113,7 +204,8 @@ def test_delta_write_round_trip_managed(spark_tmp_table_factory, enable_deletion
     (cpu_table, gpu_table) = assert_gpu_and_cpu_save_as_table_are_equal_collect(
         spark_tmp_table_factory,
         lambda spark, table: get_writer_with_deletion_vector_property_set(
-            gen_df(spark, gen_list).coalesce(1).write.format("delta"), enable_deletion_vectors)
+            gen_df(spark, gen_list, length=delta_db173_wide_schema_gen_length)
+                .coalesce(1).write.format("delta"), enable_deletion_vectors)
             .saveAsTable(table),
         conf=conf
     )
@@ -131,7 +223,8 @@ def test_delta_write_round_trip_unmanaged(spark_tmp_path, enable_deletion_vector
     data_path = spark_tmp_path + "/DELTA_DATA"
     assert_gpu_and_cpu_writes_are_equal_collect(
         lambda spark, path: get_writer_with_deletion_vector_property_set(
-            gen_df(spark, gen_list).coalesce(1).write.format("delta"), enable_deletion_vectors).save(path),
+            gen_df(spark, gen_list, length=delta_db173_wide_schema_gen_length)
+                .coalesce(1).write.format("delta"), enable_deletion_vectors).save(path),
         lambda spark, path: spark.read.format("delta").load(path),
         data_path,
         conf=copy_and_update(writer_confs, delta_writes_enabled_conf))
@@ -226,7 +319,9 @@ def _atomic_write_table_as_select(gens, spark_tmp_table_factory, spark_tmp_path,
     def do_write(spark, path):
         table = spark_tmp_table_factory.get()
         path_to_table[path] = table
-        writer = get_writer_with_deletion_vector_property_set(gen_df(spark, gen_list).coalesce(1).write.format("delta"), enable_deletion_vectors)
+        writer = get_writer_with_deletion_vector_property_set(
+            gen_df(spark, gen_list, length=delta_db173_wide_schema_gen_length)
+                .coalesce(1).write.format("delta"), enable_deletion_vectors)
         if overwrite:
             writer = writer.mode("overwrite")
         writer.saveAsTable(table)
@@ -268,7 +363,7 @@ def _atomic_write_table_as_select_sql(gens, spark_tmp_table_factory, replace,
 
     def do_write(spark, table):
         view = spark_tmp_table_factory.get()
-        df = gen_df(spark, gen_list)
+        df = gen_df(spark, gen_list, length=delta_db173_wide_schema_gen_length)
         df.createOrReplaceTempView(view)
 
         table_props = {
@@ -342,12 +437,14 @@ def test_delta_append_data_exec_v1(spark_tmp_path, use_cdf, enable_deletion_vect
     gen_list = [("c" + str(i), gen) for i, gen in enumerate(delta_write_gens)]
     data_path = spark_tmp_path + "/DELTA_DATA"
     def setup_tables(spark):
-        setup_delta_dest_tables(spark, data_path,
-                                lambda spark: gen_df(spark, gen_list).coalesce(1), use_cdf, enable_deletion_vectors)
+        setup_delta_dest_tables(
+            spark, data_path,
+            lambda spark: gen_df(spark, gen_list, length=delta_db173_wide_schema_gen_length).coalesce(1),
+            use_cdf, enable_deletion_vectors)
     with_cpu_session(setup_tables, writer_confs)
     assert_gpu_and_cpu_writes_are_equal_collect(
         lambda spark, path: get_writer_with_deletion_vector_property_set(
-            gen_df(spark, gen_list).coalesce(1)\
+            gen_df(spark, gen_list, length=delta_db173_wide_schema_gen_length).coalesce(1)\
             .write.format("delta").mode("append"), enable_deletion_vectors).saveAsTable(f"delta.`{path}`"),
         read_delta_path,
         data_path,
@@ -366,7 +463,7 @@ def test_delta_overwrite_by_expression_exec_v1(spark_tmp_table_factory, spark_tm
     src_path = spark_tmp_path + "/PARQUET_DATA"
     src_table = spark_tmp_table_factory.get()
     def setup_src_table(spark):
-        df = gen_df(spark, gen_list).coalesce(1)
+        df = gen_df(spark, gen_list, length=delta_db173_wide_schema_gen_length).coalesce(1)
         df.write.parquet(src_path)
         spark.read.parquet(src_path).createOrReplaceTempView(src_table)
     with_cpu_session(setup_src_table, conf=writer_confs)
@@ -454,6 +551,10 @@ def test_delta_overwrite_dynamic_missing_clauses(spark_tmp_table_factory, spark_
 @allow_non_gpu_delta_write_if(is_before_spark_353(), reason="Dynamic partition overwrites are not supported before Spark 3.5.3")
 @ignore_order(local=True)
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
+# DB-17.3 plans this INSERT OVERWRITE through V1 WriteIntoDeltaCommand, which is still
+# tracked by issue #11169. Older shims resolve the same SQL through V2
+# OverwriteByExpressionExecV1 and can be intercepted by GpuOverwriteByExpressionExecV1.
+@pytest.mark.xfail(is_databricks173_or_later(), reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
 @pytest.mark.parametrize("mode", [
     "STATIC",
     pytest.param("DYNAMIC", marks=pytest.mark.xfail(condition=is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/9543"))
@@ -478,8 +579,6 @@ def test_delta_overwrite_mixed_clause(spark_tmp_table_factory, spark_tmp_path, m
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
-@pytest.mark.skipif(is_databricks_runtime() and is_before_spark_330(),
-                    reason="Databricks 10.4 does not properly handle options passed during DataFrame API write")
 @pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_350DB143_xfail_reasons(
                             enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12027"), ids=idfn)
 def test_delta_write_round_trip_cdf_write_opt(spark_tmp_path, enable_deletion_vectors):
@@ -1085,7 +1184,7 @@ def test_delta_write_optimized_supported_types_partitioned(spark_tmp_path):
     genlist = [ SetValuesGen(StringType(), ["a", "b", "c"]) ] + delta_write_gens
     gens = [("c" + str(i), gen) for i, gen in enumerate(genlist)]
     assert_gpu_and_cpu_writes_are_equal_collect(
-        lambda spark, path: gen_df(spark, gens) \
+        lambda spark, path: gen_df(spark, gens, length=delta_db173_wide_schema_gen_length) \
             .write.format("delta").partitionBy("c0").save(path),
         lambda spark, path: spark.read.format("delta").load(path),
         data_path,
@@ -1189,6 +1288,10 @@ def test_delta_write_optimized_partitioned(spark_tmp_path):
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
+# In DB-17.3, replaceWhere adds V1 WriteFilesExec plus DeltaInvariantChecker for the
+# predicate, so this follows the unsupported WriteIntoDeltaCommand path tracked by #11169.
+# Older shims reach V2 OverwriteByExpressionExecV1 and are intercepted on GPU.
+@pytest.mark.xfail(is_databricks173_or_later(), reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
 def test_delta_write_partial_overwrite_replace_where(spark_tmp_path):
     gen_list = [("a", int_gen),
                 ("b", SetValuesGen(StringType(), ["x", "y", "z"])),

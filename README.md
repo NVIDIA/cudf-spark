@@ -5,7 +5,7 @@ The RAPIDS Accelerator for Apache Spark provides a set of plugins for
 [Apache Spark](https://spark.apache.org) that leverage GPUs to accelerate processing 
 via the [RAPIDS](https://rapids.ai) libraries.
 
-Documentation on the current release can be found [here](https://nvidia.github.io/spark-rapids/).
+Documentation on the current release can be found [here](https://nvidia.github.io/cudf-spark/).
 
 To get started and try the plugin out use the [getting started guide](https://docs.nvidia.com/spark-rapids/user-guide/latest/getting-started/overview.html).
 
@@ -34,7 +34,7 @@ or answer a question on the [discussion board](https://github.com/NVIDIA/spark-r
 
 ## Download
 
-The jar files for the most recent release can be retrieved from the [download](https://nvidia.github.io/spark-rapids/docs/download.html)
+The jar files for the most recent release can be retrieved from the [download](https://nvidia.github.io/cudf-spark/docs/download.html)
 page.
 
 ## Building From Source
@@ -75,7 +75,7 @@ as a `provided` dependency.
 <dependency>
     <groupId>com.nvidia</groupId>
     <artifactId>rapids-4-spark_2.12</artifactId>
-    <version>26.06.0-SNAPSHOT</version>
+    <version>26.08.0-SNAPSHOT</version>
     <scope>provided</scope>
 </dependency>
 ```

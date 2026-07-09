@@ -18,7 +18,9 @@
 {"spark": "400"}
 {"spark": "401"}
 {"spark": "402"}
+{"spark": "403"}
 {"spark": "411"}
+{"spark": "412"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.execution.rapids.shims
 
@@ -39,5 +41,12 @@ object FilePartitionShims extends SplitFiles {
 
   def copyWithFiles(p: FilePartition, newFiles: Array[PartitionedFile]): FilePartition = {
     p.copy(files = newFiles)
+  }
+
+  def getFilePartitions(
+      relation: HadoopFsRelation,
+      splitFiles: Seq[PartitionedFile],
+      maxSplitBytes: Long): Seq[FilePartition] = {
+    FilePartition.getFilePartitions(relation.sparkSession, splitFiles, maxSplitBytes)
   }
 }

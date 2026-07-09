@@ -22,14 +22,14 @@
     <parent>
         <groupId>com.nvidia</groupId>
         <artifactId>rapids-4-spark-shim-deps-parent_2.13</artifactId>
-        <version>26.06.0-SNAPSHOT</version>
+        <version>26.08.0-SNAPSHOT</version>
         <relativePath>../../shim-deps/pom.xml</relativePath>
     </parent>
 
     <artifactId>rapids-4-spark-delta-spark330db_2.13</artifactId>
     <name>RAPIDS Accelerator for Apache Spark Databricks 11.3 Delta Lake Support</name>
     <description>Databricks 11.3 Delta Lake support for the RAPIDS Accelerator for Apache Spark</description>
-    <version>26.06.0-SNAPSHOT</version>
+    <version>26.08.0-SNAPSHOT</version>
 
     <properties>
         <rapids.module>../delta-lake/delta-spark330db</rapids.module>
@@ -46,9 +46,7 @@
         <dependency>
             <groupId>com.nvidia</groupId>
             <artifactId>rapids-4-spark-sql_${scala.binary.version}</artifactId>
-            <version>${project.version}</version>
             <classifier>${spark.version.classifier}</classifier>
-            <scope>provided</scope>
         </dependency>
     </dependencies>
 

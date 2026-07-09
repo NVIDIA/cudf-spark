@@ -36,7 +36,9 @@
 {"spark": "400db173"}
 {"spark": "401"}
 {"spark": "402"}
+{"spark": "403"}
 {"spark": "411"}
+{"spark": "412"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids
 
@@ -62,8 +64,10 @@ import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, Attribut
 import org.apache.spark.sql.catalyst.util.{CaseInsensitiveMap, DateTimeUtils}
 import org.apache.spark.sql.connector.write.WriterCommitMessage
 import org.apache.spark.sql.execution.{SparkPlan, SQLExecution}
+import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, QueryStageExec}
 import org.apache.spark.sql.execution.datasources.{GpuWriteFiles, GpuWriteFilesExec, GpuWriteFilesSpec, WriteTaskResult, WriteTaskStats}
 import org.apache.spark.sql.execution.datasources.FileFormatWriter.OutputSpec
+import org.apache.spark.sql.execution.exchange.Exchange
 import org.apache.spark.sql.rapids.GpuFileFormatWriter.GpuConcurrentOutputWriterSpec
 import org.apache.spark.sql.rapids.execution.RapidsAnalysisException
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.SparkSession
@@ -271,15 +275,35 @@ trait GpuFileFormatWriterBase extends Serializable with Logging {
         rdd
       }
 
-      // Collect exclude metrics from the plan
-      val excludeMetrics = plan match {
-        case gpuExec: GpuExec =>
-          val currentMetric = gpuExec.getOpTimeNewMetric.toSeq
-          val childMetrics = gpuExec.getDescendantOpTimeMetrics
-          currentMetric ++ childMetrics
-        case _ =>
-          Seq.empty[GpuMetric]
+      // Collect exclude metrics from the plan. The child may be wrapped in
+      // non-GpuExec nodes -- AdaptiveSparkPlanExec (AQE) and the query-stage
+      // wrappers it finalizes into -- so a plain `plan match { case GpuExec }`
+      // returns Seq.empty and the Insert op_time then double-counts every
+      // descendant. Descend through wrappers (unwrapping AQE to its
+      // already-finalized executedPlan and query stages to their plan) to the
+      // GpuExec roots before collecting.
+      def collectExcludeMetrics(p: SparkPlan, visited: Set[SparkPlan]): Seq[GpuMetric] = {
+        if (visited.contains(p)) {
+          // Guard against cycles / re-visiting shared (reused) sub-plans.
+          Seq.empty
+        } else {
+          val seen = visited + p
+          p match {
+            case aqe: AdaptiveSparkPlanExec => collectExcludeMetrics(aqe.executedPlan, seen)
+            case qs: QueryStageExec => collectExcludeMetrics(qs.plan, seen)
+            case gpuExec: GpuExec => gpuExec.getOpTimeNewMetric.toSeq ++
+              gpuExec.getDescendantOpTimeMetrics
+            // Stop at a stage boundary: a (non-GPU) Exchange under a CPU subtree leads
+            // into a different stage whose op_time is not part of this write task's
+            // interval. Mirror the Exchange stop in GpuExec.getDescendantOpTimeMetrics.
+            case _: Exchange => Seq.empty
+            case other => other.children.flatMap(collectExcludeMetrics(_, seen))
+          }
+        }
       }
+      // distinct: a reused descendant reached via multiple GpuExec roots must be
+      // excluded once, not once per path (double-exclusion would under-count).
+      val excludeMetrics = collectExcludeMetrics(plan, Set.empty).distinct
 
       // SPARK-41448 map reduce job IDs need to consistent across attempts for correctness
       val jobTrackerID = SparkHadoopWriterUtils.createJobTrackerID(new Date())
@@ -429,26 +453,35 @@ trait GpuFileFormatWriterBase extends Serializable with Logging {
 
     committer.setupTask(taskAttemptContext)
 
-    val dataWriter =
-      if (sparkPartitionId != 0 && !iterator.hasNext) {
-        // In case of empty job, leave first partition to save meta for file format like parquet.
-        new GpuEmptyDirectoryDataWriter(description, taskAttemptContext, committer)
-      } else if (description.partitionColumns.isEmpty && description.bucketSpec.isEmpty) {
-        new GpuSingleDirectoryDataWriter(description, taskAttemptContext, committer,
-          baseDebugOutputPath)
-      } else {
-        concurrentOutputWriterSpec match {
-          case Some(spec) =>
-            new GpuDynamicPartitionDataConcurrentWriter(description, taskAttemptContext,
-              committer, spec, baseDebugOutputPath)
-          case _ =>
-            new GpuDynamicPartitionDataSingleWriter(description, taskAttemptContext, committer,
-              baseDebugOutputPath)
-        }
-      }
+    // Resolve the Insert op_time metric up front so the `.ns(excludeMetrics)`
+    // wrap can activate before the empty-partition `iterator.hasNext` check
+    // below. Without this, that hasNext cascades through every descendant
+    // operator's `.ns` wrap *outside* the Insert wrap, so the descendant
+    // op_time those wraps accumulate is never subtracted from Insert's
+    // op_time.
+    val opTimeMetric: GpuMetric = description.statsTrackers
+      .collectFirst { case t: GpuWriteJobStatsTracker => t.opTimeNewMetric }
+      .getOrElse(NoopMetric)
 
-    // Use GpuMetric.ns to automatically collect execution time
-    dataWriter.operatorTimeMetric.ns(excludeMetrics) {
+    opTimeMetric.ns(excludeMetrics) {
+      val dataWriter =
+        if (sparkPartitionId != 0 && !iterator.hasNext) {
+          // In case of empty job, leave first partition to save meta for file format like parquet.
+          new GpuEmptyDirectoryDataWriter(description, taskAttemptContext, committer)
+        } else if (description.partitionColumns.isEmpty && description.bucketSpec.isEmpty) {
+          new GpuSingleDirectoryDataWriter(description, taskAttemptContext, committer,
+            baseDebugOutputPath)
+        } else {
+          concurrentOutputWriterSpec match {
+            case Some(spec) =>
+              new GpuDynamicPartitionDataConcurrentWriter(description, taskAttemptContext,
+                committer, spec, baseDebugOutputPath)
+            case _ =>
+              new GpuDynamicPartitionDataSingleWriter(description, taskAttemptContext, committer,
+                baseDebugOutputPath)
+          }
+        }
+
       try {
         Utils.tryWithSafeFinallyAndFailureCallbacks(block = {
           // Execute the task to write rows out and commit the task.

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,15 +18,19 @@ package com.nvidia.spark.rapids
 import ai.rapids.cudf.{ColumnVector, Scalar}
 import com.nvidia.spark.rapids.Arm.withResource
 
-import org.apache.spark.TaskContext
 import org.apache.spark.sql.types.{DataType, IntegerType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /**
  * An expression that returns the current partition id just like
- * `org.apache.spark.sql.catalyst.expressions.SparkPartitionID`
+ * `org.apache.spark.sql.catalyst.expressions.SparkPartitionID`.
+ *
+ * The partition index used here is the parent RDD partition index injected by the
+ * hosting operator via [[GpuNondeterministic.initialize]] — NOT
+ * `TaskContext.getPartitionId()`. This preserves SPARK-14393's invariant that
+ * values are stable across `coalesce`/`union`.
  */
-case class GpuSparkPartitionID() extends GpuLeafExpression {
+case class GpuSparkPartitionID() extends GpuLeafExpression with GpuNondeterministic {
   /**
    * We need to recompute this if something fails.
    */
@@ -36,15 +40,15 @@ case class GpuSparkPartitionID() extends GpuLeafExpression {
   override def dataType: DataType = IntegerType
 
   @transient private[this] var partitionId: Int = _
-  @transient private[this] var wasInitialized: Boolean = _
 
   override val prettyName = "SPARK_PARTITION_ID"
 
+  override protected def initializeInternal(partitionIndex: Int): Unit = {
+    partitionId = partitionIndex
+  }
+
   override def columnarEval(batch: ColumnarBatch): GpuColumnVector = {
-    if (!wasInitialized) {
-      partitionId = TaskContext.getPartitionId()
-      wasInitialized = true
-    }
+    ensureInitialized()
     val numRows = batch.numRows()
     withResource(Scalar.fromInt(partitionId)) { part =>
       GpuColumnVector.from(ColumnVector.fromScalar(part, numRows), dataType)

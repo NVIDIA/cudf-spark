@@ -24,12 +24,12 @@ Where `$SPARK_VERSION` is a compressed version number, like 330 for Spark 3.3.0.
 
 After this the jar should be at
 `target/datagen_2.12-$PLUGIN_VERSION-spark$SPARK_VERSION.jar`
-for example a Spark 3.3.0 jar for the 26.06.0 release would be
-`target/datagen_2.12-26.06.0-spark330.jar`
+for example a Spark 3.3.0 jar for the 26.08.0 release would be
+`target/datagen_2.12-26.08.0-spark330.jar`
 
 To get a spark shell with this you can run
 ```shell
-spark-shell --jars target/datagen_2.12-26.06.0-spark330.jar
+spark-shell --jars target/datagen_2.12-26.08.0-spark330.jar
 ```
 
 After that you should be good to go.

@@ -91,4 +91,10 @@ class RapidsErrorUtilsBase extends RapidsErrorUtilsFor330plus {
   def invalidInputSyntaxForBooleanError(s: UTF8String): RuntimeException = {
     QueryExecutionErrors.invalidInputSyntaxForBooleanError(s, null)
   }
+
+  def invalidInputSyntaxForBooleanError(
+      s: UTF8String,
+      errorContext: SQLQueryContext): RuntimeException = {
+    QueryExecutionErrors.invalidInputSyntaxForBooleanError(s, errorContext)
+  }
 }

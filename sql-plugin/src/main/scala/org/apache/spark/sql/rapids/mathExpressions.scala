@@ -25,7 +25,8 @@ import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.jni.{Arithmetic, CastStrings, ExceptionWithRowIndex, RoundMode}
 
 import org.apache.spark.sql.catalyst.expressions.{Expression, ImplicitCastInputTypes}
-import org.apache.spark.sql.rapids.shims.RapidsErrorUtils
+import org.apache.spark.sql.catalyst.trees.CurrentOrigin
+import org.apache.spark.sql.rapids.shims.{OriginContextShim, RapidsErrorUtils}
 import org.apache.spark.sql.types._
 
 abstract class CudfUnaryMathExpression(name: String) extends GpuUnaryMathExpression(name)
@@ -77,6 +78,24 @@ case class GpuBin(child: Expression) extends GpuUnaryExpression
 
   override def doColumnar(input: GpuColumnVector): ColumnVector = {
     CastStrings.fromLongToBinary(input.getBase)
+  }
+}
+
+case class GpuHex(child: Expression) extends GpuUnaryExpression with Serializable {
+  // Preserve the input StringType (including collation) for string inputs,
+  // matching Spark's Hex.dataType behavior.
+  override def dataType: DataType = child.dataType match {
+    case st: StringType => st
+    case _ => StringType
+  }
+
+  override def doColumnar(input: GpuColumnVector): ColumnVector = {
+    child.dataType match {
+      case LongType =>
+        CastStrings.fromIntegersWithBase(input.getBase, 16)
+      case _: StringType | BinaryType =>
+        CastStrings.bytesToHex(input.getBase)
+    }
   }
 }
 
@@ -225,7 +244,7 @@ case class GpuCeil(child: Expression, outputType: DataType)
             withResource(outOfBounds.any()) { isAny =>
               if (isAny.isValid && isAny.getBoolean) {
                 throw RoundingErrorUtil.cannotChangeDecimalPrecisionError(
-                  input.getBase, outOfBounds, dt, outputType
+                  input.getBase, outOfBounds, outputType
                 )
               }
             }
@@ -301,7 +320,7 @@ case class GpuFloor(child: Expression, outputType: DataType)
             withResource(outOfBounds.any()) { isAny =>
               if (isAny.isValid && isAny.getBoolean) {
                 throw RoundingErrorUtil.cannotChangeDecimalPrecisionError(
-                  input.getBase, outOfBounds, dt, outputType
+                  input.getBase, outOfBounds, outputType
                 )
               }
             }
@@ -497,15 +516,6 @@ object GpuHypot {
     }
   }
 
-  def eitherNull(x: ColumnVector,
-                 y: ColumnVector): ColumnVector = {
-    withResource(x.isNull) { xIsNull =>
-      withResource(y.isNull) { yIsNull =>
-        xIsNull.or(yIsNull)
-      }
-    }
-  }
-
   def computeHypot(x: ColumnVector, y: ColumnVector): ColumnVector = {
     val yOverXSquared = withResource(y.div(x)) { yOverX =>
       yOverX.mul(yOverX)
@@ -572,11 +582,7 @@ case class GpuHypot(left: Expression, right: Expression) extends CudfBinaryMathE
       }
 
       withResource(infOrRest) { _ =>
-        withResource(Scalar.fromNull(x.getType)) { nullS =>
-          withResource(GpuHypot.eitherNull(x, y)) { eitherNull =>
-            eitherNull.ifElse(nullS, infOrRest)
-          }
-        }
+        infOrRest.mergeAndSetValidity(BinaryOp.BITWISE_AND, x, y)
       }
     }
   }
@@ -852,28 +858,31 @@ object RoundingErrorUtil {
   /**
    * Wrapper of the `cannotChangeDecimalPrecisionError` of RapidsErrorUtils.
    *
+   * Uses `Decimal(BigDecimal)` so the value's natural precision is preserved; the
+   * `(value, p, s)` constructor caps precision at 38 and would itself throw
+   * "Decimal precision N exceeds max precision 38" exactly when the overflow value
+   * already exceeds 38 digits, swallowing the intended overflow message.
+   *
    * @param values A decimal column which contains values that try to cast.
    * @param outOfBounds A boolean column that indicates which value cannot be casted.
    * Users must make sure that there is at least one `true` in this column.
-   * @param fromType The current decimal type.
    * @param toType The type to cast.
-   * @param context The error context, default value is "".
    */
   def cannotChangeDecimalPrecisionError(
       values: ColumnView,
       outOfBounds: ColumnView,
-      fromType: DecimalType,
-      toType: DecimalType,
-      context: String = ""): ArithmeticException = {
-    val row_id = withResource(outOfBounds.copyToHost()) {hcv =>
-      (0.toLong until outOfBounds.getRowCount)
+      toType: DecimalType): ArithmeticException = {
+    val rowId = withResource(outOfBounds.copyToHost()) { hcv =>
+      (0L until outOfBounds.getRowCount)
         .find(i => !hcv.isNull(i) && hcv.getBoolean(i))
         .get
     }
-    val value = withResource(values.copyToHost()){hcv =>
-      hcv.getBigDecimal(row_id)
+    val value = withResource(values.getScalarElement(rowId.toInt)) { s =>
+      s.getBigDecimal
     }
+    // Pass the SQL query context (set on the executor via `CurrentOrigin.withOrigin`
+    // around `doColumnar`) so the exception message preserves SPARK-39190 parity.
     RapidsErrorUtils.cannotChangeDecimalPrecisionError(
-      Decimal(value, fromType.precision, fromType.scale), toType)
+      Decimal(value), toType, OriginContextShim.queryContext(CurrentOrigin.get))
   }
 }

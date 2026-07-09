@@ -16,7 +16,9 @@
 
 package org.apache.spark.sql.rapids
 
-import ai.rapids.cudf.{ColumnVector, ColumnView, DType}
+import java.util.{List => JList}
+
+import ai.rapids.cudf.{ColumnVector, ColumnView, DType, HostColumnVector}
 import com.nvidia.spark.rapids.{GpuColumnVector, GpuExpression, GpuExpressionsUtils, GpuMapUtils}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsPluginImplicits.{AutoCloseableProducingSeq, ReallyAGpuExpression}
@@ -104,8 +106,18 @@ case class GpuCreateMap(
     GpuCreateMap.exceptionOnDupKeys || super.hasSideEffects
 
   override def columnarEval(batch: ColumnarBatch): GpuColumnVector = {
+    val numRows = batch.numRows()
+    if (children.isEmpty) {
+      // cudf's ColumnVector.makeList cannot construct a 0-element list column
+      // when the element DType is nested (STRUCT here). For map(), fall back
+      // to fromLists with an explicit schema, which mirrors how literal empty
+      // maps are built in literals.scala.
+      val colType = GpuColumnVector.convertFrom(dataType, nullable)
+      val emptyRow: JList[HostColumnVector.StructData] = java.util.Collections.emptyList()
+      val rows = Seq.fill(numRows)(emptyRow)
+      return GpuColumnVector.from(ColumnVector.fromLists(colType, rows: _*), dataType)
+    }
     withResource(new Array[ColumnVector](children.size)) { columns =>
-      val numRows = batch.numRows()
       children.indices.foreach { index =>
         columns(index) = children(index).columnarEval(batch).getBase
       }

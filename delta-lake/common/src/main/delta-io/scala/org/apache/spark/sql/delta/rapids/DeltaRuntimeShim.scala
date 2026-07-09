@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -72,8 +72,11 @@ object DeltaRuntimeShim {
     } else if (VersionUtils.cmpSparkVersion(3, 5, 2) > 0 &&
                VersionUtils.cmpSparkVersion(4, 0, 0) < 0) {
       "org.apache.spark.sql.delta.rapids.delta33x.Delta33xRuntimeShim"
-    } else if (VersionUtils.cmpSparkVersion(4, 0, 0) >= 0) {
+    } else if (VersionUtils.cmpSparkVersion(4, 0, 0) >= 0 &&
+               VersionUtils.cmpSparkVersion(4, 1, 0) < 0) {
       "org.apache.spark.sql.delta.rapids.delta40x.Delta40xRuntimeShim"
+    } else if (VersionUtils.cmpSparkVersion(4, 1, 0) >= 0) {
+      "org.apache.spark.sql.delta.rapids.delta41x.Delta41xRuntimeShim"
     } else {
       val sparkVer = ShimLoader.getShimVersion
       throw new IllegalStateException(

@@ -75,7 +75,7 @@ object Delta33xProvider extends DeltaProviderBase with Logging {
 
   override protected def toGpuParquetFileFormat(conf: RapidsConf, fmt: DeltaParquetFileFormat)
   : FileFormat = {
-    if (canPushDVPredicateDownToScan(conf)) {
+    if (isPushDVPredicateDownEnabled(conf)) {
       // Pushing down deletion vector predicates is currently only supported
       // when the metadata row index is enabled.
       GpuDelta33xParquetFileFormat2(fmt.protocol, fmt.metadata, fmt.nullableRowTrackingFields,

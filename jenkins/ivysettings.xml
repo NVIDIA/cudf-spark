@@ -24,14 +24,14 @@
   <credentials
     host="${env.HOST_NAME}"
     realm="Artifactory Realm"
-    username="${env.URM_CREDS_USR}"
-    passwd="${env.URM_CREDS_PSW}"/>
+    username="${env.ART_CREDS_USR}"
+    passwd="${env.ART_CREDS_PSW}"/>
   <resolvers>
     <chain name="art-chain" returnFirst="true">
       <ibiblio
         name="artifactory"
         m2compatible="true"
-        root="${env.URM_URL}"/>
+        root="${env.ART_URL}"/>
       <!-- Default: Maven Central -->
       <ibiblio
         name="maven-central"

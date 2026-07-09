@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -149,6 +149,40 @@ class RegularExpressionParserSuite extends AnyFunSuite {
       RegexSequence(ListBuffer(RegexHexDigit("ABC"))))
   }
 
+  test("non-braced \\xNN caps at 2 hex digits") {
+    // Java spec: non-braced \x consumes EXACTLY two hex digits; any trailing
+    // hex digits are part of the surrounding pattern. Previously the parser
+    // greedily consumed all subsequent hex digits and then rejected the
+    // pattern because the consumed string wasn't 2 chars long.
+
+    // \x61 followed by literal 'a' (the canonical bug repro).
+    assert(parse(raw"\x61a") ===
+      RegexSequence(ListBuffer(RegexHexDigit("61"), RegexChar('a'))))
+
+    // \x41 followed by literal 'f' — 'f' is a hex digit and used to be
+    // swallowed by the greedy loop.
+    assert(parse(raw"\x41f") ===
+      RegexSequence(ListBuffer(RegexHexDigit("41"), RegexChar('f'))))
+
+    // \x05 followed by digit '7' — '7' is also a hex digit.
+    assert(parse(raw"\x057") ===
+      RegexSequence(ListBuffer(RegexHexDigit("05"), RegexChar('7'))))
+
+    // Inside a character class: \x41 followed by literal 'b' as a class
+    // member. parseCharacterClass narrows non-zero \xNN into a RegexChar with
+    // the resolved codepoint, so 0x41 -> 'A'. Confirms the 2-digit cap is
+    // applied through parseCharacterClass too (without it the parser would
+    // reject "[\\x41b]" as "Invalid hex digit: 41b").
+    assert(parse(raw"[\x41b]") ===
+      RegexSequence(ListBuffer(
+        RegexCharacterClass(negated = false,
+          ListBuffer(RegexChar('A'), RegexChar('b'))))))
+
+    // Braced form must still consume more than 2 hex digits.
+    assert(parse(raw"\x{1F600}") ===
+      RegexSequence(ListBuffer(RegexHexDigit("1F600"))))
+  }
+
   test("octal digit") {
     val digits = Seq("00", "01", "076", "077", "0123", "0177", "0377")
     for (digit <- digits) {
@@ -283,6 +317,19 @@ class RegularExpressionParserSuite extends AnyFunSuite {
     RegexChar('$'))))
   }
   
+  test("replacement: numeric braced backref rejected (Java spec)") {
+    val brace = "$" + "{"
+    val cases = Seq(s"[${brace}2}]", s"${brace}1}", s"${brace}12}",
+        s"a${brace}3}b", s"${brace}0}")
+    for (rep <- cases) {
+      val e = intercept[RegexUnsupportedException] {
+        new RegexParser(rep).parseReplacement(4)
+      }
+      assert(e.getMessage.contains("backref in replacement string is not supported"),
+        s"unexpected message for replacement '$rep': ${e.getMessage}")
+    }
+  }
+
   private def parse(pattern: String): RegexAST = {
     new RegexParser(pattern).parse()
   }

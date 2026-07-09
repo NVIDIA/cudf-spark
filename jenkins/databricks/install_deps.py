@@ -66,6 +66,8 @@ def define_deps(spark_version, scala_version):
             f'{spark_prefix}--common--network-shuffle--network-shuffle-{spark_suffix}_deploy.jar'),
         Artifact('org.apache.spark', f'spark-unsafe_{scala_version}',
             f'{spark_prefix}--common--unsafe--unsafe-{spark_suffix}_deploy.jar'),
+        Artifact('org.apache.spark', f'spark-sketch_{scala_version}',
+            f'{spark_prefix}--common--sketch--sketch-{spark_suffix}_deploy.jar'),
         Artifact('org.apache.spark', f'spark-launcher_{scala_version}',
                  f'{spark_prefix}--launcher--launcher-{spark_suffix}_deploy.jar'),
         Artifact('org.apache.spark', f'spark-sql_{scala_version}',

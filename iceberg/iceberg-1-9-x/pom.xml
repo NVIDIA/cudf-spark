@@ -21,15 +21,15 @@
 
     <parent>
         <groupId>com.nvidia</groupId>
-        <artifactId>rapids-4-spark-jdk-profiles_2.12</artifactId>
-        <version>26.06.0-SNAPSHOT</version>
-        <relativePath>../../jdk-profiles/pom.xml</relativePath>
+        <artifactId>rapids-4-spark-parent_2.12</artifactId>
+        <version>26.08.0-SNAPSHOT</version>
+        <relativePath>../../pom.xml</relativePath>
     </parent>
 
     <artifactId>rapids-4-spark-iceberg-1-9-x_2.12</artifactId>
     <name>RAPIDS Accelerator for Apache Iceberg</name>
     <description>Apache Iceberg support for the RAPIDS Accelerator for Apache Spark</description>
-    <version>26.06.0-SNAPSHOT</version>
+    <version>26.08.0-SNAPSHOT</version>
 
     <properties>
         <rapids.module>../iceberg/iceberg-1-9-x</rapids.module>
@@ -42,13 +42,7 @@
         <dependency>
             <groupId>com.nvidia</groupId>
             <artifactId>rapids-4-spark-sql_${scala.binary.version}</artifactId>
-            <version>${project.version}</version>
             <classifier>${spark.version.classifier}</classifier>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.spark</groupId>
-            <artifactId>spark-sql_${scala.binary.version}</artifactId>
         </dependency>
         <dependency>
             <groupId>org.apache.iceberg</groupId>

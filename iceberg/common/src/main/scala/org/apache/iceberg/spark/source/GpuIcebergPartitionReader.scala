@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -40,7 +40,7 @@ class GpuIcebergPartitionReader(private val task: GpuSparkInputPartition,
 ) extends PartitionReader[ColumnarBatch] {
   private var inited = false
   
-  private lazy val table = task.cpuPartition.table()
+  private lazy val table = GpuSparkScanAccess.table(task.cpuPartition)
   private lazy val fileIO = table.io()
   private lazy val rapidsFileIO = new IcebergFileIO(fileIO)
   private lazy val conf = newConf()
@@ -86,17 +86,17 @@ class GpuIcebergPartitionReader(private val task: GpuSparkInputPartition,
       case SingleFile =>
         new GpuSingleThreadIcebergParquetReader(rapidsFileIO, files, constantsMap,
           gpuDeleteFiterMap, conf)
-      case MultiThread(_, _) =>
+      case _: MultiThread =>
         new GpuMultiThreadIcebergParquetReader(rapidsFileIO, files, constantsMap,
           gpuDeleteFiterMap, conf)
-      case MultiFile(_) =>
+      case _: MultiFile =>
         new GpuCoalescingIcebergParquetReader(rapidsFileIO, files, constantsMap, conf)
     }
   }
 
   private def collectFiles() = {
-    val tasks: Seq[FileScanTask] = task.cpuPartition.taskGroup()
-      .asInstanceOf[ScanTaskGroup[ScanTask]]
+    val tasks: Seq[FileScanTask] = GpuSparkScanAccess
+      .taskGroup(task.cpuPartition)
       .tasks()
       .asScala
       .map(t => t.asFileScanTask())
@@ -131,7 +131,7 @@ class GpuIcebergPartitionReader(private val task: GpuSparkInputPartition,
       .map(nm => NameMappingParser.fromJson(nm))
 
     GpuIcebergParquetReaderConf(
-      task.cpuPartition.isCaseSensitive,
+      GpuSparkScanAccess.isCaseSensitive(task.cpuPartition),
       task.hadoopConf.value.value,
       task.maxReadBatchSizeRows,
       task.maxReadBatchSizeBytes,

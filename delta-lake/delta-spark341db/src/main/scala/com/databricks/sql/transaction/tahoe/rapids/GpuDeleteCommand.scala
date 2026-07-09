@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * This file was derived from DeleteCommand.scala
  * in the Delta Lake project at https://github.com/delta-io/delta.
@@ -29,6 +29,7 @@ import com.databricks.sql.transaction.tahoe.commands.{DeleteCommandMetrics, Dele
 import com.databricks.sql.transaction.tahoe.commands.MergeIntoCommandBase.totalBytesAndDistinctPartitionValues
 import com.databricks.sql.transaction.tahoe.files.TahoeBatchFileIndex
 import com.databricks.sql.transaction.tahoe.rapids.GpuDeleteCommand.{rewritingFilesMsg, FINDING_TOUCHED_FILES_MSG}
+import com.databricks.sql.transaction.tahoe.sources.DeltaSQLConf
 import com.nvidia.spark.rapids.delta.GpuDeltaMetricUpdateUDF
 
 import org.apache.spark.SparkContext
@@ -132,7 +133,8 @@ case class GpuDeleteCommand(
     val deleteActions: Seq[FileAction] = condition match {
       case None =>
         // Case 1: Delete the whole table if the condition is true
-        val allFiles = txn.filterFiles(Nil)
+        val reportRowLevelMetrics = conf.getConf(DeltaSQLConf.DELTA_DML_METRICS_FROM_METADATA)
+        val allFiles = txn.filterFiles(Nil, keepNumRecords = reportRowLevelMetrics)
 
         numRemovedFiles = allFiles.size
         scanTimeMs = (System.nanoTime() - startTime) / 1000 / 1000
@@ -142,6 +144,7 @@ case class GpuDeleteCommand(
         numBytesBeforeSkipping = numBytes
         numFilesAfterSkipping = numRemovedFiles
         numBytesAfterSkipping = numBytes
+        numDeletedRows = getDeletedRowsFromAddFilesAndUpdateMetrics(allFiles)
         if (txn.metadata.partitionColumns.nonEmpty) {
           numPartitionsAfterSkipping = Some(numPartitions)
           numPartitionsRemovedFrom = Some(numPartitions)
@@ -161,7 +164,9 @@ case class GpuDeleteCommand(
           // Case 2: The condition can be evaluated using metadata only.
           //         Delete a set of files without the need of scanning any data files.
           val operationTimestamp = System.currentTimeMillis()
-          val candidateFiles = txn.filterFiles(metadataPredicates)
+          val reportRowLevelMetrics = conf.getConf(DeltaSQLConf.DELTA_DML_METRICS_FROM_METADATA)
+          val candidateFiles =
+            txn.filterFiles(metadataPredicates, keepNumRecords = reportRowLevelMetrics)
 
           scanTimeMs = (System.nanoTime() - startTime) / 1000 / 1000
           numRemovedFiles = candidateFiles.size
@@ -170,6 +175,7 @@ case class GpuDeleteCommand(
           val (numCandidateBytes, numCandidatePartitions) =
             totalBytesAndDistinctPartitionValues(candidateFiles)
           numBytesAfterSkipping = numCandidateBytes
+          numDeletedRows = getDeletedRowsFromAddFilesAndUpdateMetrics(candidateFiles)
           if (txn.metadata.partitionColumns.nonEmpty) {
             numPartitionsAfterSkipping = Some(numCandidatePartitions)
             numPartitionsRemovedFrom = Some(numCandidatePartitions)
@@ -278,6 +284,7 @@ case class GpuDeleteCommand(
     numPartitionsAfterSkipping.foreach(metrics("numPartitionsAfterSkipping").set)
     numPartitionsAddedTo.foreach(metrics("numPartitionsAddedTo").set)
     numPartitionsRemovedFrom.foreach(metrics("numPartitionsRemovedFrom").set)
+    numDeletedRows.foreach(metrics("numDeletedRows").set)
     numCopiedRows.foreach(metrics("numCopiedRows").set)
     metrics("numDeletionVectorsAdded").set(0)
     metrics("numDeletionVectorsRemoved").set(0)

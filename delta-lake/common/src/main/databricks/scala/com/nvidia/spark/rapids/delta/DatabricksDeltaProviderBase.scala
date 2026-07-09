@@ -142,6 +142,13 @@ trait DatabricksDeltaProviderBase extends DeltaProviderImplBase {
       getWriteOptions(cpuExec.writeOptions), cpuExec.session)
   }
 
+  override def convertToGpu(
+      cpuExec: AtomicCreateTableAsSelectExec,
+      meta: AtomicCreateTableAsSelectExecMeta): GpuExec = {
+    throw new IllegalStateException(
+      "Delta CTAS was tagged as unsupported and should not be converted to GPU")
+  }
+
   override def tagForGpu(
       cpuExec: AtomicReplaceTableAsSelectExec,
       meta: AtomicReplaceTableAsSelectExecMeta): Unit = {
@@ -158,6 +165,13 @@ trait DatabricksDeltaProviderBase extends DeltaProviderImplBase {
     }
     RapidsDeltaUtils.tagForDeltaWrite(meta, cpuExec.query.schema, None,
       getWriteOptions(cpuExec.writeOptions), cpuExec.session)
+  }
+
+  override def convertToGpu(
+      cpuExec: AtomicReplaceTableAsSelectExec,
+      meta: AtomicReplaceTableAsSelectExecMeta): GpuExec = {
+    throw new IllegalStateException(
+      "Delta RTAS was tagged as unsupported and should not be converted to GPU")
   }
 
   protected case class DeltaWriteV1Config(

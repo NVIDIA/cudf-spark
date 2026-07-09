@@ -1,0 +1,427 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0" 
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>com.udf</groupId>
+    <artifactId>aether-agent-udfs</artifactId>
+    <version>1.0.0</version>
+    <name>Aether UDF Conversion</name>
+    <description>This project contains UDFs that will be converted from CPU to GPU.</description>
+    <packaging>jar</packaging>
+
+    <properties>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.sourceEncoding>UTF-8</project.reporting.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+        <scala.binary.version>2.12</scala.binary.version>
+        <scala.version>2.12.15</scala.version>
+        <!-- Spark/RAPIDS versions -->
+        <spark.version>3.5.5</spark.version>
+        <rapids4spark.version>26.04.0</rapids4spark.version>
+        <jacoco.version>0.8.14</jacoco.version>
+        <scoverage.plugin.version>2.1.0</scoverage.plugin.version>
+        <scoverage.scalac.plugin.version>2.0.11</scoverage.scalac.plugin.version>
+        <scalatest.jvm.args>${test.jvm.args}</scalatest.jvm.args>
+        <cuda.version>cuda12</cuda.version>
+        <cudf.git.branch>v26.04.00</cudf.git.branch>
+        <rapids.cmake.branch>v26.04.00</rapids.cmake.branch>
+        <!-- Memory leak debugging -->
+        <!-- SLF4J logs are off by default, enable cuDF logs if memory leak debugging is enabled -->
+        <debug.memory.leaks>false</debug.memory.leaks>
+        <cudf.log.level>off</cudf.log.level>
+        <!-- Native CUDA UDF build configuration. The cuda-native-udf profile uses these. -->
+        <USE_PREBUILT_CUDF>ON</USE_PREBUILT_CUDF>
+        <GPU_ARCHS>RAPIDS</GPU_ARCHS>
+        <CPP_PARALLEL_LEVEL>10</CPP_PARALLEL_LEVEL>
+        <PER_THREAD_DEFAULT_STREAM>ON</PER_THREAD_DEFAULT_STREAM>
+        <CUDF_ENABLE_ARROW_S3>OFF</CUDF_ENABLE_ARROW_S3>
+        <skipCudfExtraction>false</skipCudfExtraction>
+        <native.library.name>rapidsudfjni</native.library.name>
+        <native.build.path>${project.build.directory}/native-build</native.build.path>
+        <!-- These args apply to the forked ScalaTest JVM -->
+        <!-- Benchmarks run in the Maven JVM via exec:java, and args are in .mvn/jvm.config -->
+        <test.jvm.args>-Xmx5g -ea
+            -Dai.rapids.refcount.debug=${debug.memory.leaks}
+            -Dorg.slf4j.simpleLogger.defaultLogLevel=off
+            -Dorg.slf4j.simpleLogger.log.ai.rapids.cudf=${cudf.log.level}
+            --add-opens=java.base/java.lang=ALL-UNNAMED
+            --add-opens=java.base/java.lang.invoke=ALL-UNNAMED
+            --add-opens=java.base/java.lang.reflect=ALL-UNNAMED
+            --add-opens=java.base/java.io=ALL-UNNAMED
+            --add-opens=java.base/java.net=ALL-UNNAMED
+            --add-opens=java.base/java.nio=ALL-UNNAMED
+            --add-opens=java.base/java.util=ALL-UNNAMED
+            --add-opens=java.base/java.util.concurrent=ALL-UNNAMED
+            --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED
+            --add-opens=java.base/sun.nio.ch=ALL-UNNAMED
+            --add-opens=java.base/sun.nio.cs=ALL-UNNAMED
+            --add-opens=java.base/sun.security.action=ALL-UNNAMED
+            --add-opens=java.base/sun.util.calendar=ALL-UNNAMED
+            --add-opens=java.security.jgss/sun.security.krb5=ALL-UNNAMED</test.jvm.args>
+    </properties>
+
+    <profiles>
+        <profile>
+            <id>debug-leaks</id>
+            <activation>
+                <property>
+                    <name>debug.memory.leaks</name>
+                    <value>true</value>
+                </property>
+            </activation>
+            <properties>
+                <cudf.log.level>error</cudf.log.level>
+            </properties>
+        </profile>
+        <profile>
+            <id>coverage</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.scoverage</groupId>
+                        <artifactId>scoverage-maven-plugin</artifactId>
+                        <version>${scoverage.plugin.version}</version>
+                        <configuration>
+                            <scalaVersion>${scala.version}</scalaVersion>
+                            <scalacPluginVersion>${scoverage.scalac.plugin.version}</scalacPluginVersion>
+                            <highlighting>true</highlighting>
+                            <excludedPackages>com\.udf\.bench\..*;com\.udf\.SparkUtils.*;com\.udf\.Arm.*</excludedPackages>
+                        </configuration>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.jacoco</groupId>
+                        <artifactId>jacoco-maven-plugin</artifactId>
+                        <version>${jacoco.version}</version>
+                        <configuration>
+                            <formats>
+                                <format>HTML</format>
+                                <format>XML</format>
+                                <format>CSV</format>
+                            </formats>
+                            <excludes>
+                                <exclude>com/udf/bench/*</exclude>
+                                <exclude>com/udf/SparkUtils*</exclude>
+                                <exclude>com/udf/Arm*</exclude>
+                            </excludes>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <id>prepare-agent</id>
+                                <goals>
+                                    <goal>prepare-agent</goal>
+                                </goals>
+                                <configuration>
+                                    <propertyName>jacoco.agent.argLine</propertyName>
+                                </configuration>
+                            </execution>
+                            <execution>
+                                <id>report</id>
+                                <phase>verify</phase>
+                                <goals>
+                                    <goal>report</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <!-- Inject the jacoco agent into the ScalaTest fork. -->
+                    <!-- ${jacoco.agent.argLine} is set by prepare-agent at runtime. -->
+                    <plugin>
+                        <groupId>org.scalatest</groupId>
+                        <artifactId>scalatest-maven-plugin</artifactId>
+                        <configuration>
+                            <argLine>${jacoco.agent.argLine} ${scalatest.jvm.args}</argLine>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
+            <id>cuda-native-udf</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-dependency-plugin</artifactId>
+                        <version>3.6.1</version>
+                        <executions>
+                            <execution>
+                                <id>copy-rapids-jar-with-classifier</id>
+                                <phase>generate-sources</phase>
+                                <goals>
+                                    <goal>copy</goal>
+                                </goals>
+                                <configuration>
+                                    <artifactItems>
+                                        <artifactItem>
+                                            <groupId>com.nvidia</groupId>
+                                            <artifactId>rapids-4-spark_${scala.binary.version}</artifactId>
+                                            <version>${rapids4spark.version}</version>
+                                            <classifier>${cuda.version}</classifier>
+                                            <type>jar</type>
+                                            <overWrite>false</overWrite>
+                                            <outputDirectory>${project.build.directory}/rapids-jar</outputDirectory>
+                                        </artifactItem>
+                                    </artifactItems>
+                                    <ignoreMissingArtifact>true</ignoreMissingArtifact>
+                                </configuration>
+                            </execution>
+                            <execution>
+                                <id>copy-rapids-jar-no-classifier</id>
+                                <phase>generate-sources</phase>
+                                <goals>
+                                    <goal>copy</goal>
+                                </goals>
+                                <configuration>
+                                    <artifactItems>
+                                        <artifactItem>
+                                            <groupId>com.nvidia</groupId>
+                                            <artifactId>rapids-4-spark_${scala.binary.version}</artifactId>
+                                            <version>${rapids4spark.version}</version>
+                                            <type>jar</type>
+                                            <overWrite>false</overWrite>
+                                            <outputDirectory>${project.build.directory}/rapids-jar</outputDirectory>
+                                        </artifactItem>
+                                    </artifactItems>
+                                    <ignoreMissingArtifact>true</ignoreMissingArtifact>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-antrun-plugin</artifactId>
+                        <version>3.1.0</version>
+                        <executions>
+                            <execution>
+                                <id>extract-cuda-native-dependencies</id>
+                                <phase>generate-sources</phase>
+                                <configuration>
+                                    <skip>${skipCudfExtraction}</skip>
+                                    <target>
+                                        <exec executable="bash" dir="${project.basedir}" failonerror="true">
+                                            <arg value="native/scripts/extract-cudf-libs.sh"/>
+                                            <env key="RAPIDS4SPARK_VERSION" value="${rapids4spark.version}"/>
+                                            <env key="SCALA_VERSION" value="${scala.binary.version}"/>
+                                            <env key="CUDA_VERSION" value="${cuda.version}"/>
+                                            <env key="CUDF_BRANCH" value="${cudf.git.branch}"/>
+                                            <env key="TARGET_DIR" value="${project.build.directory}"/>
+                                        </exec>
+                                    </target>
+                                </configuration>
+                                <goals>
+                                    <goal>run</goal>
+                                </goals>
+                            </execution>
+                            <execution>
+                                <id>cmake-cuda-native-udf</id>
+                                <phase>compile</phase>
+                                <configuration>
+                                    <target>
+                                        <mkdir dir="${native.build.path}"/>
+                                        <exec executable="cmake" dir="${native.build.path}" failonerror="true">
+                                            <arg value="${project.basedir}/native/src/main/cpp"/>
+                                            <arg value="-DCMAKE_BUILD_TYPE=Release"/>
+                                            <arg value="-DNATIVE_LIBRARY_NAME=${native.library.name}"/>
+                                            <arg value="-DBUILD_UDF_BENCHMARKS=OFF"/>
+                                            <arg value="-DGPU_ARCHS=${GPU_ARCHS}"/>
+                                            <arg value="-DPER_THREAD_DEFAULT_STREAM=${PER_THREAD_DEFAULT_STREAM}"/>
+                                            <arg value="-DCUDF_ENABLE_ARROW_S3=${CUDF_ENABLE_ARROW_S3}"/>
+                                            <arg value="-DUSE_PREBUILT_CUDF=${USE_PREBUILT_CUDF}"/>
+                                            <arg value="-DNATIVE_DEPS_DIR=${project.build.directory}/native-deps"/>
+                                            <arg value="-DCUDF_SOURCE_DIR=${project.build.directory}/cudf-repo/cpp"/>
+                                            <arg value="-DRAPIDS_CMAKE_BRANCH=${rapids.cmake.branch}"/>
+                                        </exec>
+                                        <exec executable="cmake" failonerror="true">
+                                            <arg value="--build"/>
+                                            <arg value="${native.build.path}"/>
+                                            <arg value="-j${CPP_PARALLEL_LEVEL}"/>
+                                            <arg value="-v"/>
+                                        </exec>
+                                    </target>
+                                </configuration>
+                                <goals>
+                                    <goal>run</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-resources-plugin</artifactId>
+                        <version>3.3.1</version>
+                        <executions>
+                            <execution>
+                                <id>copy-cuda-native-library-to-classes</id>
+                                <phase>process-classes</phase>
+                                <goals>
+                                    <goal>copy-resources</goal>
+                                </goals>
+                                <configuration>
+                                    <overwrite>true</overwrite>
+                                    <outputDirectory>${project.build.outputDirectory}/${os.arch}/${os.name}</outputDirectory>
+                                    <resources>
+                                        <resource>
+                                            <directory>${native.build.path}</directory>
+                                            <includes>
+                                                <include>lib${native.library.name}.so</include>
+                                            </includes>
+                                        </resource>
+                                    </resources>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+
+    <dependencies>
+        <!-- Spark -->
+        <dependency>
+            <groupId>org.apache.spark</groupId>
+            <artifactId>spark-hive_${scala.binary.version}</artifactId>
+            <version>${spark.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <!-- Scala -->
+        <dependency>
+            <groupId>org.scala-lang</groupId>
+            <artifactId>scala-library</artifactId>
+            <version>${scala.version}</version>
+        </dependency>
+        <!-- RAPIDS plugin -->
+        <dependency>
+            <groupId>com.nvidia</groupId>
+            <artifactId>rapids-4-spark_${scala.binary.version}</artifactId>
+            <version>${rapids4spark.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <!-- ScalaTest -->
+        <dependency>
+            <groupId>org.scalatest</groupId>
+            <artifactId>scalatest_${scala.binary.version}</artifactId>
+            <version>3.2.17</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- SLF4J -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <version>1.7.36</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <sourceDirectory>src/main/scala</sourceDirectory>
+        <testSourceDirectory>src/test/scala</testSourceDirectory>
+        <plugins>
+            <!-- Compile Java sources if present, e.g., CUDA JNI wrappers. -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>build-helper-maven-plugin</artifactId>
+                <version>3.5.0</version>
+                <executions>
+                    <execution>
+                        <id>add-java-source</id>
+                        <phase>generate-sources</phase>
+                        <goals>
+                            <goal>add-source</goal>
+                        </goals>
+                        <configuration>
+                            <sources>
+                                <source>src/main/java</source>
+                            </sources>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- Scala compiler plugin -->
+            <plugin>
+                <groupId>net.alchim31.maven</groupId>
+                <artifactId>scala-maven-plugin</artifactId>
+                <version>4.3.0</version>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>compile</goal>
+                            <goal>testCompile</goal>
+                        </goals>
+                    </execution>
+                </executions>
+                <configuration>
+                    <scalaVersion>${scala.version}</scalaVersion>
+                </configuration>
+            </plugin>
+            
+            <!-- Disable default surefire -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.1.2</version>
+                <configuration>
+                    <skipTests>true</skipTests>
+                </configuration>
+            </plugin>
+            <!-- ScalaTest runner -->
+            <plugin>
+                <groupId>org.scalatest</groupId>
+                <artifactId>scalatest-maven-plugin</artifactId>
+                <version>2.2.0</version>
+                <configuration>
+                    <reportsDirectory>${project.build.directory}/surefire-reports</reportsDirectory>
+                    <argLine>${scalatest.jvm.args}</argLine>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>test</id>
+                        <goals>
+                            <goal>test</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- exec-maven-plugin for running main classes -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.1.0</version>
+            </plugin>
+            <!-- Shade plugin to create an uber JAR -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.2.4</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/*.SF</exclude>
+                                        <exclude>META-INF/*.DSA</exclude>
+                                        <exclude>META-INF/*.RSA</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
