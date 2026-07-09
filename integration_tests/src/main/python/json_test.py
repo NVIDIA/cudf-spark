@@ -426,6 +426,7 @@ def test_basic_from_json(std_input_path, filename, schema, allow_non_numeric_num
         conf=updated_conf)
 
 
+# Databricks CI smoke test for GPU from_json (throwaway [databricks] PR, not for merge).
 @ignore_order
 @pytest.mark.parametrize('filename', [
     'malformed1.ndjson',
