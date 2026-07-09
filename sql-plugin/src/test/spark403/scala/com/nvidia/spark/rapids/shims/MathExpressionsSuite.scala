@@ -15,14 +15,14 @@
  */
 
 /*** spark-rapids-shim-json-lines
+{"spark": "403"}
 {"spark": "412"}
 spark-rapids-shim-json-lines ***/
-package com.nvidia.spark.rapids.shims.spark412
+package com.nvidia.spark.rapids.shims
 
 import ai.rapids.cudf.ColumnVector
 import com.nvidia.spark.rapids.{FQSuiteName, GpuColumnVector}
 import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.shims.{GpuAcosh, GpuAsinh, HyperbolicMathExpressions}
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.catalyst.expressions.Literal
@@ -31,8 +31,8 @@ import org.apache.spark.sql.types.DoubleType
 class MathExpressionsSuite extends AnyFunSuite with FQSuiteName {
   import HyperbolicMathExpressions._
 
-  private val Log2 = StrictMath.log(2.0)
-  private val Epsilon = 1e-12
+  private val log2 = StrictMath.log(2.0)
+  private val epsilon = 1e-12
 
   test("acosh matches Spark-compatible boundary behavior") {
     val inputs = Seq(
@@ -123,7 +123,7 @@ class MathExpressionsSuite extends AnyFunSuite with FQSuiteName {
     if (x < 1.0) {
       Double.NaN
     } else if (x >= LARGE_ACOSH) {
-      StrictMath.log(x) + Log2
+      StrictMath.log(x) + log2
     } else {
       StrictMath.log(x + StrictMath.sqrt(x * x - 1.0))
     }
@@ -131,7 +131,7 @@ class MathExpressionsSuite extends AnyFunSuite with FQSuiteName {
 
   private def expectedAsinh(x: Double): Double = {
     if (Math.abs(x) >= LARGE_ASINH) {
-      Math.signum(x) * (StrictMath.log(Math.abs(x)) + Log2)
+      Math.signum(x) * (StrictMath.log(Math.abs(x)) + log2)
     } else {
       StrictMath.log(x + StrictMath.sqrt(x * x + 1.0))
     }
@@ -144,7 +144,7 @@ class MathExpressionsSuite extends AnyFunSuite with FQSuiteName {
       } else if (e.isInfinite || e == 0.0) {
         assert(a === e)
       } else {
-        assert(Math.abs(a - e) <= Math.abs(e) * Epsilon)
+        assert(Math.abs(a - e) <= Math.abs(e) * epsilon)
       }
     }
   }

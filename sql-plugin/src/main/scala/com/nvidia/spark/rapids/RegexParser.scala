@@ -526,7 +526,14 @@ class RegexParser(pattern: String) {
       consumeExpected('{')
     }
     val start = pos
-    while (!eof() && isHexDigit(pattern.charAt(pos))) {
+    // Java spec: non-braced `\xNN` consumes EXACTLY two hex digits and any
+    // trailing hex digits are part of the surrounding pattern. The braced form
+    // `\x{h...h}` consumes hex digits until the closing '}' (validated below).
+    // Issue #14739: previously this loop was unbounded for both forms, so
+    // patterns like "\\x61a" were rejected even though they are valid Java
+    // regex meaning "0x61 (= 'a') followed by the literal 'a'".
+    val hexLimit = if (varHex) Int.MaxValue else 2
+    while (pos - start < hexLimit && !eof() && isHexDigit(pattern.charAt(pos))) {
       pos += 1
     }
     val hexDigit = pattern.substring(start, pos)
@@ -762,6 +769,7 @@ class CudfRegexTranspiler(mode: RegexMode) {
 
   def transpileToSplittableString(e: RegexAST): Option[String] = {
     e match {
+      case RegexEscaped('b') | RegexEscaped('B') => None
       case RegexEscaped(ch) if escapeChars.contains(ch) => Some(escapeChars(ch).toString)
       case RegexEscaped(ch) if regexPunct.contains(ch) => Some(ch.toString)
       case RegexChar(ch) if !regexMetaChars.contains(ch) => Some(ch.toString)
@@ -853,20 +861,6 @@ class CudfRegexTranspiler(mode: RegexMode) {
 
   private val lineTerminatorChars = Seq('\n', '\r', '\u0085', '\u2028', '\u2029')
 
-  // from Java 8 documention: a line terminator is a 1 to 2 character sequence that marks
-  // the end of a line of an input character sequence.
-  // this method produces a RegexAST which outputs a regular expression to match any possible
-  // combination of line terminators.
-  // Cudf added support to identify \n, \r, \u0085, \u2028, \u2029 as line break characters
-  // when EXT_NEWLINE flag is set. See issue: https://github.com/NVIDIA/spark-rapids/issues/11554
-  private def lineTerminatorMatcher(excludeCRLF: Boolean, capture: Boolean): RegexAST = {
-    if (excludeCRLF) {
-      RegexEmpty()
-    } else {
-      RegexGroup(capture = capture, RegexSequence(ListBuffer(RegexChar('\r'), RegexChar('\n'))),
-          None)
-    }
-  }
 
   private def negateCharacterClass(
       components: ListBuffer[RegexCharacterClassComponent]): RegexAST = {
@@ -922,14 +916,14 @@ class CudfRegexTranspiler(mode: RegexMode) {
       contains(regex, {
         case RegexChar('^') | RegexEscaped('A') => true
         case _ => false
-      })
+      }, recurseIntoCharacterClasses = false)
     }
 
     def containsEndAnchor(regex: RegexAST): Boolean = {
       contains(regex, {
         case RegexChar('$') | RegexEscaped('z') | RegexEscaped('Z') => true
         case _ => false
-      })
+      }, recurseIntoCharacterClasses = false)
     }
 
     def containsNewline(regex: RegexAST): Boolean = {
@@ -974,7 +968,7 @@ class CudfRegexTranspiler(mode: RegexMode) {
       }
     }
 
-    def checkEndAnchorContextSplit(r1: RegexAST, r2: RegexAST): Unit = {
+    def checkAdjacentEndAnchorContextSplit(r1: RegexAST, r2: RegexAST): Unit = {
       if ((containsEndAnchor(r1) &&
           (containsNewline(r2) || containsEmpty(r2) || containsBeginAnchor(r2))) ||
         (containsEndAnchor(r2) &&
@@ -986,29 +980,43 @@ class CudfRegexTranspiler(mode: RegexMode) {
       }
     }
 
+    def checkEndAnchorContextSplit(parts: Seq[RegexAST]): Unit = {
+      var prefixContainsEmpty = false
+      var previousPart: Option[RegexAST] = None
+
+      parts.zipWithIndex.foreach { case (part, index) =>
+        previousPart.foreach(previous => checkAdjacentEndAnchorContextSplit(previous, part))
+
+        // Split also rejects an optional term anywhere before a real end anchor. Keep this
+        // prefix-wide check limited to optional terms: newline and begin-anchor context is
+        // intentionally adjacent-only, so supported expressions such as ^a$ and \na$ remain
+        // on the GPU.
+        if (prefixContainsEmpty && containsEndAnchor(part)) {
+          val prefix = parts.take(index).map(_.toRegexString).mkString
+          throw new RegexUnsupportedException(
+            s"End of line/string anchor is not supported in this context: " +
+              s"${toReadableString(prefix)}${toReadableString(part.toRegexString)}",
+            part.position)
+        }
+
+        prefixContainsEmpty = prefixContainsEmpty || containsEmpty(part)
+        previousPart = Some(part)
+      }
+    }
+
     def checkUnsupported(regex: RegexAST): Unit = {
       regex match {
+        case RegexSequence(parts) if mode == RegexSplitMode =>
+          checkEndAnchorContextSplit(parts.toSeq)
         case RegexSequence(parts) =>
           for (i <- 1 until parts.length) {
-            if (mode == RegexSplitMode) {
-              checkEndAnchorContextSplit(parts(i - 1), parts(i))
-            } else {
-              checkEndAnchorContext(parts(i - 1), parts(i))
-            }
+            checkEndAnchorContext(parts(i - 1), parts(i))
           }
         case RegexChoice(l, r) =>
           checkUnsupported(l)
           checkUnsupported(r)
         case RegexGroup(_, term, _) => checkUnsupported(term)
         case RegexRepetition(ast, _) => checkUnsupported(ast)
-        case RegexCharacterClass(_, components) =>
-          for (i <- 1 until components.length) {
-            if (mode == RegexSplitMode) {
-              checkEndAnchorContextSplit(components(i - 1), components(i))
-            } else {
-              checkEndAnchorContext(components(i - 1), components(i))
-            }
-          }
         case _ =>
           // ignore
       }
@@ -1089,26 +1097,13 @@ class CudfRegexTranspiler(mode: RegexMode) {
                 && lineTerminatorChars.contains(ch) =>
                 throw new RegexUnsupportedException("Regex sequences with a line terminator "
                     + "character followed by '$' are not supported in replace mode", regex.position)
-            case Some(RegexChar(ch)) if ch == '\r' =>
-              // when using the the CR (\r), it prevents the line anchor from handling any other
-              // line terminator sequences, so we just output the anchor and we are finished
-              // for example: \r$ -> \r$ (no transpilation)
-              RegexChar('$')
             case Some(RegexEscaped('b')) | Some(RegexEscaped('B')) =>
               throw new RegexUnsupportedException(
                       "Regex sequences with \\b or \\B not supported around $", regex.position)
             case _ =>
-              // otherwise by default we can match any or none the full set of line terminators
-              if (mode == RegexReplaceMode) {
-                replacement match {
-                  case Some(rr) => rr.appendBackref(rr.numCaptureGroups + 1)
-                  case _ =>
-                }
-              }
-              RegexSequence(ListBuffer(
-                RegexRepetition(lineTerminatorMatcher(excludeCRLF = false,
-                    capture = mode == RegexReplaceMode), SimpleQuantifier('?')),
-                RegexChar('$')))
+              // cuDF #22763 makes EXT_NEWLINE treat \r\n as one line terminator for $, so emit
+              // the anchor directly instead of the (\r\n)? synthetic group it needed before.
+              RegexChar('$')
           }
         case '^' if mode == RegexSplitMode =>
           RegexEscaped('A')
@@ -1605,16 +1600,22 @@ class CudfRegexTranspiler(mode: RegexMode) {
     }
   }
 
-  private def contains(regex: RegexAST, f: RegexAST => Boolean): Boolean = {
+  private def contains(regex: RegexAST, f: RegexAST => Boolean,
+      recurseIntoCharacterClasses: Boolean = true): Boolean = {
     if (f(regex)) {
       true
     } else {
       regex match {
-        case RegexSequence(parts) => parts.exists(x => contains(x, f))
-        case RegexGroup(_, term, _) => contains(term, f)
-        case RegexChoice(l, r) => contains(l, f) || contains(r, f)
-        case RegexRepetition(term, _) => contains(term, f)
-        case RegexCharacterClass(_, chars) => chars.exists(ch => contains(ch, f))
+        case RegexSequence(parts) =>
+          parts.exists(x => contains(x, f, recurseIntoCharacterClasses))
+        case RegexGroup(_, term, _) => contains(term, f, recurseIntoCharacterClasses)
+        case RegexChoice(l, r) =>
+          contains(l, f, recurseIntoCharacterClasses) ||
+            contains(r, f, recurseIntoCharacterClasses)
+        case RegexRepetition(term, _) => contains(term, f, recurseIntoCharacterClasses)
+        case RegexCharacterClass(_, chars) if recurseIntoCharacterClasses =>
+          chars.exists(ch => contains(ch, f, recurseIntoCharacterClasses))
+        case RegexCharacterClass(_, _) => false
         case leaf => f(leaf)
       }
     }
@@ -1952,9 +1953,9 @@ sealed case class RegexBackref(num: Int, isNew: Boolean = false) extends RegexAS
     this.position = Some(position)
   }
   override def children(): Seq[RegexAST] = Seq.empty
-  // Internally-generated backrefs (e.g. from line-anchor rewriting) are emitted in braced
-  // `${N}` form so `backrefConversion` can tell them apart from user-authored `$N` tokens
-  // and pass them through verbatim. User-authored backrefs keep the raw `$N` form so the
+  // Backrefs marked as internally generated are emitted in braced `${N}` form so
+  // `backrefConversion` can tell them apart from user-authored `$N` tokens and pass them
+  // through verbatim. User-authored backrefs keep the raw `$N` form so the
   // greedy-with-backoff parser in `backrefConversion` honors the user's pattern group count.
   override def toRegexString: String = if (isNew) s"$${$num}" else s"$$$num"
 }

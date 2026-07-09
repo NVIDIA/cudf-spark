@@ -29,6 +29,7 @@ import com.nvidia.spark.rapids.GpuMetric._
 import com.nvidia.spark.rapids.PreProjectSplitIterator.{KEY_NUM_PRE_SPLIT, PreSplitOutSizeEstimator}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{splitSpillableInHalfByRows, withRestoreOnRetry, withRetry, withRetryNoSplit}
+import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
 import com.nvidia.spark.rapids.jni.GpuSplitAndRetryOOM
 import com.nvidia.spark.rapids.shims._
 
@@ -131,8 +132,10 @@ object GpuProjectExec {
         // different vector length, thus not able to reuse cached vectors.
         GpuExpressionsUtils.cachedNullVectors.get.clear()
 
-        val newColumns = boundExprs.safeMap(_.columnarEval(cb)).toArray[ColumnVector]
-        new ColumnarBatch(newColumns, cb.numRows())
+        GpuArrayHofFusion.project(cb, boundExprs).getOrElse {
+          val newColumns = boundExprs.safeMap(_.columnarEval(cb)).toArray[ColumnVector]
+          new ColumnarBatch(newColumns, cb.numRows())
+        }
       } finally {
         GpuExpressionsUtils.cachedNullVectors.get.clear()
       }
@@ -162,7 +165,6 @@ object GpuProjectExec {
    */
   def projectWithRetrySingleBatch(sb: SpillableColumnarBatch,
       boundExprs: Seq[Expression]): ColumnarBatch = {
-
     // For retryable expressions, use split-retry: on GPU OOM, halve the input
     // batch by rows and re-run on each half. This recovers from cuDF-internal
     // scratch allocations that the pre-split estimator cannot see (e.g. regex
@@ -232,28 +234,21 @@ object GpuProjectExec {
   }
 
   /**
-   * Run a retryable projection with row-split retry. On GPU OOM the retry
-   * framework calls splitSpillableInHalfByRows to halve the input batch and
-   * re-runs the projection on each half; sub-batches are concatenated back into
-   * a single output batch to preserve the single-batch contract of
-   * projectAndCloseWithRetrySingleBatch.
+   * Run a retryable projection with row-split retry and return the projected
+   * pieces directly. A no-split run yields one batch.
    *
-   * Caller must ensure the projection driven by `runProject` is retryable.
-   * Non-deterministic expressions are safe here only when they implement
-   * Retryable and can restore their state for each split attempt.
+   * Caller must ensure `runProject` is retryable; non-deterministic expressions
+   * must restore their state for each split attempt. `runProject` must not
+   * close its input.
    *
-   * `runProject` receives a (non-spillable) ColumnarBatch and returns the
-   * projected ColumnarBatch. It must not close its input (the framework will).
-   *
-   * Takes ownership of `sb`: it is closed by the retry iterator when drained.
-   * If the caller does not want to surrender ownership, it must increment the
-   * ref count before calling.
+   * Takes ownership of `sb`. If the iterator is abandoned before the first
+   * next(), task completion closes `sb` via the retry framework.
    */
-  private[rapids] def runWithSplitRetry(
+  private[rapids] def runStreamingWithSplitRetry(
       sb: SpillableColumnarBatch,
       retryables: Seq[Retryable],
-      runProject: ColumnarBatch => ColumnarBatch): ColumnarBatch = {
-    val resultIter = withRetry(sb, splitSpillableInHalfByRows) { spillable =>
+      runProject: ColumnarBatch => ColumnarBatch): Iterator[ColumnarBatch] = {
+    withRetry(sb, splitSpillableInHalfByRows) { spillable =>
       retryables.foreach(_.checkpoint())
       withResource(spillable.getColumnarBatch()) { cb =>
         withRestoreOnRetry(retryables) {
@@ -261,6 +256,14 @@ object GpuProjectExec {
         }
       }
     }
+  }
+
+  /** Drains the streaming iterator and concatenates pieces for single-batch callers. */
+  private[rapids] def runWithSplitRetry(
+      sb: SpillableColumnarBatch,
+      retryables: Seq[Retryable],
+      runProject: ColumnarBatch => ColumnarBatch): ColumnarBatch = {
+    val resultIter = runStreamingWithSplitRetry(sb, retryables, runProject)
     val pieces = ArrayBuffer[ColumnarBatch]()
     closeOnExcept(pieces) { _ =>
       while (resultIter.hasNext) {
@@ -856,13 +859,17 @@ case class GpuProjectExec(
 
   override lazy val additionalMetrics: Map[String, GpuMetric] = Map(
     KEY_NUM_PRE_SPLIT -> createMetric(DEBUG_LEVEL, "num pre-splits"),
-    OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY))
+    OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY),
+    CPU_BRIDGE_PROCESSING_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
+      DESCRIPTION_CPU_BRIDGE_PROCESSING_TIME),
+    CPU_BRIDGE_WAIT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_CPU_BRIDGE_WAIT_TIME))
 
   override def internalDoExecuteColumnar() : RDD[ColumnarBatch] = {
     val numOutputRows = gpuLongMetric(NUM_OUTPUT_ROWS)
     val numOutputBatches = gpuLongMetric(NUM_OUTPUT_BATCHES)
     val opTime = gpuLongMetric(OP_TIME_LEGACY)
     val numPreSplit = gpuLongMetric(KEY_NUM_PRE_SPLIT)
+    
     val boundProjectList = GpuBindReferences.bindGpuReferencesTiered(projectList, child.output,
       conf, allMetrics)
     val localEnablePreSplit = enablePreSplit
@@ -881,17 +888,26 @@ case class GpuProjectExec(
       } else {
         iter
       }
-      maybeSplitIter.map { split =>
-        val ret = NvtxIdWithMetrics(NvtxRegistry.PROJECT_EXEC, opTime) {
+      // The streaming entry owns `sb` and may emit multiple pieces per input
+      // only when this project is allowed to change batch boundaries.
+      // Wrap next() so lazy projection work is counted in the project metric.
+      maybeSplitIter.flatMap { split =>
+        val pieces = NvtxIdWithMetrics(NvtxRegistry.PROJECT_EXEC, opTime) {
           val sb = SpillableColumnarBatch(split, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
-          // Note if this ever changes to include splitting the output we need to
-          // have an option to not do this for window to work properly.
-          // [Update 2024/12/24: "localEnablePreSplit" is introduced for this goal]
-          boundProjectList.projectAndCloseWithRetrySingleBatch(sb)
+          boundProjectList.projectAndCloseStreamingWithSplitRetry(
+            sb, allowMultipleOutputBatches = localEnablePreSplit)
         }
-        numOutputBatches += 1
-        numOutputRows += ret.numRows()
-        ret
+        new Iterator[ColumnarBatch] {
+          override def hasNext: Boolean = pieces.hasNext
+          override def next(): ColumnarBatch = {
+            val ret = NvtxIdWithMetrics(NvtxRegistry.PROJECT_EXEC, opTime) {
+              pieces.next()
+            }
+            numOutputBatches += 1
+            numOutputRows += ret.numRows()
+            ret
+          }
+        }
       }
     }
   }
@@ -1110,7 +1126,8 @@ case class GpuProjectAstExec(
       }
     } else {
       @tailrec
-      def recurse(boundExprs: Seq[Seq[GpuExpression]],
+      def recurse(
+          boundExprs: Seq[Seq[GpuExpression]],
           sb: SpillableColumnarBatch,
           recurseCloseInputBatch: Boolean): SpillableColumnarBatch = boundExprs match {
         case Nil => sb
@@ -1145,9 +1162,53 @@ case class GpuProjectAstExec(
   def projectWithRetrySingleBatch(sb: SpillableColumnarBatch): ColumnarBatch =
     projectWithRetrySingleBatchInternal(sb, closeInputBatch = false)
 
+  /**
+   * Project `sb` and close it, returning an iterator so split-retry pieces can
+   * flow downstream without concatenation. Non-streaming paths are wrapped in a
+   * lazy one-shot iterator so callers can measure projection work around next().
+   *
+   * Set `allowMultipleOutputBatches` only for callers that can consume multiple
+   * output batches per input. Operators with one-output-per-input state must
+   * preserve the single-batch path.
+   */
+  def projectAndCloseStreamingWithSplitRetry(sb: SpillableColumnarBatch): Iterator[ColumnarBatch] =
+    projectAndCloseStreamingWithSplitRetry(sb, allowMultipleOutputBatches = true)
+
+  def projectAndCloseStreamingWithSplitRetry(
+      sb: SpillableColumnarBatch,
+      allowMultipleOutputBatches: Boolean): Iterator[ColumnarBatch] = closeOnExcept(sb) { _ =>
+    if (allowMultipleOutputBatches &&
+        areAllRetryable &&
+        RapidsConf.PROJECT_SPLIT_RETRY_ENABLED.get(SQLConf.get)) {
+      GpuProjectExec.runStreamingWithSplitRetry(sb, retryables, project(_))
+    } else {
+      new Iterator[ColumnarBatch] {
+        @volatile private var consumed = false
+        // Until first next(), `sb` is not inside projectAndCloseWithRetrySingleBatch.
+        private val onClose = Option(TaskContext.get()).map { tc =>
+          onTaskCompletion(tc) {
+            if (!consumed) {
+              sb.close()
+            }
+          }
+        }
+        override def hasNext: Boolean = !consumed
+        override def next(): ColumnarBatch = {
+          if (consumed) {
+            throw new NoSuchElementException
+          }
+          consumed = true
+          onClose.foreach(_.removeCallback())
+          projectAndCloseWithRetrySingleBatch(sb)
+        }
+      }
+    }
+  }
+
   def project(batch: ColumnarBatch): ColumnarBatch = {
     @tailrec
-    def recurse(boundExprs: Seq[Seq[GpuExpression]],
+    def recurse(
+        boundExprs: Seq[Seq[GpuExpression]],
         cb: ColumnarBatch,
         isFirst: Boolean): ColumnarBatch = {
       boundExprs match {
@@ -1341,7 +1402,11 @@ case class GpuFilterExec(
     Seq[AnyRef](coalesceAfter.asInstanceOf[java.lang.Boolean])
 
   override lazy val additionalMetrics: Map[String, GpuMetric] = Map(
-    OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY))
+    OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY),
+    CPU_BRIDGE_PROCESSING_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
+      DESCRIPTION_CPU_BRIDGE_PROCESSING_TIME),
+    CPU_BRIDGE_WAIT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
+      DESCRIPTION_CPU_BRIDGE_WAIT_TIME))
 
   // Split out all the IsNotNulls from condition.
   private val (notNullPreds, _) = splitConjunctivePredicates(condition).partition {

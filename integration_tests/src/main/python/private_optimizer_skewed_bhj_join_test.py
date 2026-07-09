@@ -17,13 +17,11 @@ import pytest
 from private_optimizer_common import (
     assert_rule_fires,
     private_optimizer_conf,
-    require_private_optimizer,
 )
 from spark_session import is_databricks_runtime
 
 
 @pytest.mark.private_optimizer
-@require_private_optimizer
 @pytest.mark.skipif(
     is_databricks_runtime(),
     reason="Databricks executor-broadcast AQE can put the materialized shuffle on the "

@@ -49,16 +49,17 @@ jobs:
             *.py,
             build/*,
             *.cpp,
+            *.cu,
+            *.hpp,
             *Dockerfile*,
+            *CMakeLists.txt,
             *Jenkinsfile*,
             *.ini,
             *.java,
             *.fbs,
-            skills/**
+            *.sql,
+            *.toml
           excluded_file_patterns: |
             *target/*,
             thirdparty/*,
-            sql-plugin/src/main/java/com/nvidia/spark/rapids/format/*,
-            skills/README.md,
-            skills/.gitignore,
-            skills/docs/**
+            sql-plugin/src/main/java/com/nvidia/spark/rapids/format/*

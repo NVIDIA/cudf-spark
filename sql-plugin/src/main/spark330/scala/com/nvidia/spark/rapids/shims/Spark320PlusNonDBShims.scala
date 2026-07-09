@@ -36,12 +36,13 @@
 {"spark": "400"}
 {"spark": "401"}
 {"spark": "402"}
+{"spark": "403"}
 {"spark": "411"}
 {"spark": "412"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
-import com.nvidia.spark.rapids.{BucketJoinTwoSidesPrefetch, FoldLocalAggregate, RapidsConf, SparkShims}
+import com.nvidia.spark.rapids.{BucketJoinTwoSidesPrefetch, FoldLocalAggregate, RapidsConf}
 import org.apache.hadoop.fs.FileStatus
 
 import org.apache.spark.sql.catalyst.InternalRow
@@ -54,7 +55,7 @@ import org.apache.spark.sql.execution.exchange.ReusedExchangeExec
 /**
  * Shim methods that can be compiled with every supported 3.2.0+ except Databricks versions
  */
-trait Spark320PlusNonDBShims extends SparkShims with WindowInPandasShims {
+trait Spark320PlusNonDBShims extends SparkCatalogPartitionShims with WindowInPandasShims {
 
   override final def broadcastModeTransform(mode: BroadcastMode, rows: Array[InternalRow]): Any =
     mode.transform(rows)

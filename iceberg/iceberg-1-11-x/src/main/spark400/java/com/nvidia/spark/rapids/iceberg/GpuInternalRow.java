@@ -13,9 +13,25 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+/*** spark-rapids-shim-json-lines
+{"spark": "400"}
+{"spark": "401"}
+{"spark": "402"}
+{"spark": "403"}
+spark-rapids-shim-json-lines ***/
 
-package com.nvidia.spark.rapids.iceberg.iceberg111x
+package com.nvidia.spark.rapids.iceberg;
 
-import com.nvidia.spark.rapids.iceberg.IcebergProviderBase
+import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.unsafe.types.VariantVal;
 
-class IcebergProviderImpl extends IcebergProviderBase
+public class GpuInternalRow extends GpuInternalRowBase {
+  public GpuInternalRow(InternalRow row) {
+    super(row);
+  }
+
+  @Override
+  public VariantVal getVariant(int ordinal) {
+    return getWrapped().getVariant(ordinal);
+  }
+}

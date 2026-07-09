@@ -20,7 +20,7 @@ from conftest import is_databricks_runtime, is_not_utc
 from data_gen import *
 from spark_session import is_spark_400_or_later
 from marks import ignore_order, allow_non_gpu
-from spark_session import with_cpu_session, is_databricks113_or_later, is_before_spark_330, is_databricks_version, is_databricks_version_or_later
+from spark_session import with_cpu_session, is_databricks113_or_later, is_databricks_version, is_databricks_version_or_later
 
 # allow non gpu when time zone is non-UTC because of https://github.com/NVIDIA/spark-rapids/issues/9653'
 not_utc_aqe_allow=['ShuffleExchangeExec', 'HashAggregateExec'] if is_not_utc() else []
@@ -169,7 +169,10 @@ def test_aqe_broadcast_join_non_columnar_child(spark_tmp_path):
             """
         )
 
-    conf = copy_and_update(_adaptive_conf, { 'spark.rapids.sql.expression.Concat': 'false' })
+    # Disable the CPU Bridge because the test wants to know what happens when ProjectExec falls back to CPU
+    # Not what happens when the bridge falls back an expression.
+    conf = copy_and_update(_adaptive_conf, { 'spark.rapids.sql.expression.Concat': 'false',
+        'spark.rapids.sql.expression.cpuBridge.enabled': 'false' })
 
     if is_databricks113_or_later():
         assert_cpu_and_gpu_are_equal_collect_with_capture(do_it, exist_classes="GpuShuffleExchangeExec",conf=conf)
@@ -427,7 +430,7 @@ def test_aqe_join_and_agg_single_value():
     assert_gpu_and_cpu_are_equal_collect(lambda spark: spark.sql(test_query), conf=_adaptive_conf)
 
 # this should be fixed by https://github.com/NVIDIA/spark-rapids/issues/11120
-aqe_join_with_dpp_fallback=["FilterExec"] if (is_databricks_runtime() or is_before_spark_330()) else []
+aqe_join_with_dpp_fallback=["FilterExec", "InSubqueryExec"] if is_databricks_runtime() else []
 if is_databricks_version_or_later(14, 3):
     aqe_join_with_dpp_fallback.append("CollectLimitExec")
 

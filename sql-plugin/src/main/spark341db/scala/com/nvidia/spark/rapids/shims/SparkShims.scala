@@ -19,4 +19,4 @@
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
-object SparkShimImpl extends Spark341PlusDBShims
+object SparkShimImpl extends Spark341PlusDBShims with SparkCatalogPartitionShims

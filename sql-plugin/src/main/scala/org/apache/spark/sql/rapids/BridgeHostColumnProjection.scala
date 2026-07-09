@@ -18,10 +18,13 @@ package org.apache.spark.sql.rapids
 
 import com.nvidia.spark.rapids.RapidsHostColumnBuilder
 
+import org.apache.spark.{SparkConf, SparkEnv}
+import org.apache.spark.serializer.JavaSerializer
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.BindReferences.bindReferences
 import org.apache.spark.sql.catalyst.expressions.codegen._
+import org.apache.spark.sql.execution.ExecSubqueryExpression
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.UTF8String
@@ -31,7 +34,7 @@ import org.apache.spark.unsafe.types.UTF8String
  *
  * CAUTION: the returned projection object should *not* be assumed to be thread-safe.
  */
-abstract class BridgeUnsafeProjection {
+abstract class BridgeHostColumnProjection {
   def apply(rows: Iterator[InternalRow],
             builders: Array[RapidsHostColumnBuilder]): Unit
 
@@ -39,16 +42,16 @@ abstract class BridgeUnsafeProjection {
 }
 
 /**
- * Interpreted implementation of BridgeUnsafeProjection.
+ * Interpreted implementation of BridgeHostColumnProjection.
  * Falls back to direct expression evaluation when code generation fails.
  * Shares the same append logic as GpuCpuBridgeExpression.
  */
-class InterpretedBridgeUnsafeProjection(expressions: Seq[Expression]) 
-  extends BridgeUnsafeProjection {
+class InterpretedBridgeHostColumnProjection(expressions: Seq[Expression])
+  extends BridgeHostColumnProjection {
   
   // Create optimized append functions once for each expression
   private val appendFunctions = expressions.map { expr =>
-    BridgeUnsafeProjection.createOptimizedAppendFunction(expr.dataType, expr.nullable)
+    BridgeHostColumnProjection.createOptimizedAppendFunction(expr.dataType, expr.nullable)
   }
   
   override def apply(rows: Iterator[InternalRow],
@@ -63,131 +66,94 @@ class InterpretedBridgeUnsafeProjection(expressions: Seq[Expression])
 }
 
 /**
- * The factory object for `UnsafeProjection`.
+ * Factory for [[BridgeHostColumnProjection]]. Uses a code-generated implementation and falls
+ * back to [[InterpretedBridgeHostColumnProjection]] if code generation fails.
  */
-object BridgeUnsafeProjection
-  extends CodeGeneratorWithInterpretedFallback[Seq[Expression], BridgeUnsafeProjection] {
+object BridgeHostColumnProjection
+  extends CodeGeneratorWithInterpretedFallback[Seq[Expression], BridgeHostColumnProjection] {
 
-  override protected def createCodeGeneratedObject(in: Seq[Expression]): BridgeUnsafeProjection = {
-    // Just call generate directly - let any exceptions propagate naturally
-    // The CodeGeneratorWithInterpretedFallback base class will catch exceptions 
-    // and fall back to createInterpretedObject
-    BridgeGenerateUnsafeProjection.generate(in, SQLConf.get.subexpressionEliminationEnabled)
+  override protected def createCodeGeneratedObject(
+      in: Seq[Expression]): BridgeHostColumnProjection = {
+    // Let any codegen exception propagate; CodeGeneratorWithInterpretedFallback catches it
+    // and calls createInterpretedObject.
+    GenerateBridgeHostColumnProjection.generate(in, SQLConf.get.subexpressionEliminationEnabled)
   }
 
-  override protected def createInterpretedObject(in: Seq[Expression]): BridgeUnsafeProjection = {
-    new InterpretedBridgeUnsafeProjection(in)
+  override protected def createInterpretedObject(
+      in: Seq[Expression]): BridgeHostColumnProjection = {
+    new InterpretedBridgeHostColumnProjection(in)
+  }
+
+  /**
+   * Describes how to append a single non-null scalar value to a RapidsHostColumnBuilder.
+   * Single source of truth for scalar type dispatch, shared by both the interpreted append
+   * closures (createOptimizedAppendFunction) and the generated code
+   * (GenerateBridgeHostColumnProjection.generateBuilderAppendCode) so the two cannot drift.
+   *
+   * @param interp      appends a known-non-null boxed value at runtime (interpreted path)
+   * @param codegen     given an already-typed value var and a builder ref, returns the Java
+   *                    statement appending the known-non-null value (codegen path)
+   * @param objectTyped true if the value is a reference type that may itself be null
+   *                    (String/Binary/Decimal), which codegen must also guard on `value == null`
+   */
+  case class ScalarAppender(
+      interp: (Any, RapidsHostColumnBuilder) => Unit,
+      codegen: (String, String) => String,
+      objectTyped: Boolean)
+
+  /**
+   * Returns the scalar appender for `dataType`, or None for NullType and nested types, which
+   * each path handles on its own (codegen: recursive direct-to-builder; interpreted:
+   * GpuRowToColumnConverter).
+   */
+  def scalarAppender(dataType: DataType): Option[ScalarAppender] = dataType match {
+    case BooleanType => Some(ScalarAppender(
+      (v, b) => b.append(v.asInstanceOf[Boolean]), (vv, br) => s"$br.append($vv);", false))
+    case ByteType => Some(ScalarAppender(
+      (v, b) => b.append(v.asInstanceOf[Byte]), (vv, br) => s"$br.append($vv);", false))
+    case ShortType => Some(ScalarAppender(
+      (v, b) => b.append(v.asInstanceOf[Short]), (vv, br) => s"$br.append($vv);", false))
+    case IntegerType | DateType | _: YearMonthIntervalType => Some(ScalarAppender(
+      (v, b) => b.append(v.asInstanceOf[Int]), (vv, br) => s"$br.append($vv);", false))
+    case LongType | TimestampType | _: DayTimeIntervalType => Some(ScalarAppender(
+      (v, b) => b.append(v.asInstanceOf[Long]), (vv, br) => s"$br.append($vv);", false))
+    case FloatType => Some(ScalarAppender(
+      (v, b) => b.append(v.asInstanceOf[Float]), (vv, br) => s"$br.append($vv);", false))
+    case DoubleType => Some(ScalarAppender(
+      (v, b) => b.append(v.asInstanceOf[Double]), (vv, br) => s"$br.append($vv);", false))
+    case StringType => Some(ScalarAppender(
+      (v, b) => b.appendUTF8String(v.asInstanceOf[UTF8String].getBytes),
+      (vv, br) => s"$br.appendUTF8String($vv.getBytes());", true))
+    case BinaryType => Some(ScalarAppender(
+      (v, b) => b.appendByteList(v.asInstanceOf[Array[Byte]]),
+      (vv, br) => s"$br.appendByteList($vv);", true))
+    case _: DecimalType => Some(ScalarAppender(
+      (v, b) => b.append(v.asInstanceOf[Decimal].toJavaBigDecimal),
+      (vv, br) => s"$br.append($vv.toJavaBigDecimal());", true))
+    case _ => None
   }
 
   /**
    * Creates an optimized append function for the specific data type and nullability.
-   * Similar to how TypeConverter generates specialized functions, this avoids the overhead
-   * of evaluating the data type on every append operation.
-   * 
-   * This is SHARED code used by both:
-   * - InterpretedBridgeUnsafeProjection (when codegen fails)
-   * - GpuCpuBridgeExpression (for the existing interpreted evaluation path)
+   * Shared by InterpretedBridgeHostColumnProjection and GpuCpuBridgeExpression's interpreted path.
    */
-  def createOptimizedAppendFunction(dataType: DataType, 
-    nullable: Boolean): (Any, RapidsHostColumnBuilder) => Unit = {
+  def createOptimizedAppendFunction(dataType: DataType,
+      nullable: Boolean): (Any, RapidsHostColumnBuilder) => Unit = {
     import com.nvidia.spark.rapids.GpuRowToColumnConverter
     import org.apache.spark.sql.catalyst.expressions.SpecificInternalRow
-    
-    dataType match {
-      // Primitive types - generate specialized functions
-      case BooleanType =>
-        if (nullable) (value: Any, builder: RapidsHostColumnBuilder) => 
-          if (value == null) builder.appendNull() else builder.append(value.asInstanceOf[Boolean])
-        else (value: Any, builder: RapidsHostColumnBuilder) => 
-          builder.append(value.asInstanceOf[Boolean])
-      
-      case ByteType =>
-        if (nullable) (value: Any, builder: RapidsHostColumnBuilder) => 
-          if (value == null) builder.appendNull() else builder.append(value.asInstanceOf[Byte])
-        else (value: Any, builder: RapidsHostColumnBuilder) => 
-          builder.append(value.asInstanceOf[Byte])
-      
-      case ShortType =>
-        if (nullable) (value: Any, builder: RapidsHostColumnBuilder) => 
-          if (value == null) builder.appendNull() else builder.append(value.asInstanceOf[Short])
-        else (value: Any, builder: RapidsHostColumnBuilder) => 
-          builder.append(value.asInstanceOf[Short])
-      
-      case IntegerType | DateType =>
-        if (nullable) (value: Any, builder: RapidsHostColumnBuilder) => 
-          if (value == null) builder.appendNull() else builder.append(value.asInstanceOf[Int])
-        else (value: Any, builder: RapidsHostColumnBuilder) => 
-          builder.append(value.asInstanceOf[Int])
-      
-      case LongType | TimestampType =>
-        if (nullable) (value: Any, builder: RapidsHostColumnBuilder) => 
-          if (value == null) builder.appendNull() else builder.append(value.asInstanceOf[Long])
-        else (value: Any, builder: RapidsHostColumnBuilder) => 
-          builder.append(value.asInstanceOf[Long])
-      
-      case FloatType =>
-        if (nullable) (value: Any, builder: RapidsHostColumnBuilder) => 
-          if (value == null) builder.appendNull() else builder.append(value.asInstanceOf[Float])
-        else (value: Any, builder: RapidsHostColumnBuilder) => 
-          builder.append(value.asInstanceOf[Float])
-      
-      case DoubleType =>
-        if (nullable) (value: Any, builder: RapidsHostColumnBuilder) => 
-          if (value == null) builder.appendNull() else builder.append(value.asInstanceOf[Double])
-        else (value: Any, builder: RapidsHostColumnBuilder) => 
-          builder.append(value.asInstanceOf[Double])
-      
-      case StringType =>
-        if (nullable) (value: Any, builder: RapidsHostColumnBuilder) => 
-          if (value == null) builder.appendNull() else {
-            val utf8String = value.asInstanceOf[UTF8String]
-            builder.appendUTF8String(utf8String.getBytes)
-          }
-        else (value: Any, builder: RapidsHostColumnBuilder) => {
-          val utf8String = value.asInstanceOf[UTF8String]
-          builder.appendUTF8String(utf8String.getBytes)
+
+    scalarAppender(dataType) match {
+      case Some(sa) =>
+        if (nullable) {
+          (value: Any, builder: RapidsHostColumnBuilder) =>
+            if (value == null) builder.appendNull() else sa.interp(value, builder)
+        } else {
+          (value: Any, builder: RapidsHostColumnBuilder) => sa.interp(value, builder)
         }
-      
-      case BinaryType =>
-        if (nullable) (value: Any, builder: RapidsHostColumnBuilder) => 
-          if (value == null) {
-            builder.appendNull() 
-          } else {
-            builder.appendByteList(value.asInstanceOf[Array[Byte]])
-          }
-        else (value: Any, builder: RapidsHostColumnBuilder) => 
-          builder.appendByteList(value.asInstanceOf[Array[Byte]])
-      
-      case _: DecimalType =>
-        if (nullable) (value: Any, builder: RapidsHostColumnBuilder) => 
-          if (value == null) {
-            builder.appendNull() 
-          } else {
-            builder.append(value.asInstanceOf[Decimal].toJavaBigDecimal)
-          }
-        else (value: Any, builder: RapidsHostColumnBuilder) => 
-          builder.append(value.asInstanceOf[Decimal].toJavaBigDecimal)
-      
-      case _: YearMonthIntervalType =>
-        // YearMonthIntervalType is stored as Int (number of months)
-        if (nullable) (value: Any, builder: RapidsHostColumnBuilder) => 
-          if (value == null) builder.appendNull() else builder.append(value.asInstanceOf[Int])
-        else (value: Any, builder: RapidsHostColumnBuilder) => 
-          builder.append(value.asInstanceOf[Int])
-      
-      case _: DayTimeIntervalType =>
-        // DayTimeIntervalType is stored as Long (number of microseconds)
-        if (nullable) (value: Any, builder: RapidsHostColumnBuilder) => 
-          if (value == null) builder.appendNull() else builder.append(value.asInstanceOf[Long])
-        else (value: Any, builder: RapidsHostColumnBuilder) => 
-          builder.append(value.asInstanceOf[Long])
-      
-      case _ =>
-        // For complex types or unsupported types, fall back to TypeConverter
-        // Only pay the SpecificInternalRow overhead when we actually need it
+      case None =>
+        // Complex / NullType / unsupported types: fall back to GpuRowToColumnConverter.
         val converter = GpuRowToColumnConverter.getConverterForType(dataType, nullable)
         val resultRow = new SpecificInternalRow(Array(dataType))
-        
         (value: Any, builder: RapidsHostColumnBuilder) => {
           resultRow.update(0, value)
           converter.append(resultRow, 0, builder)
@@ -196,50 +162,109 @@ object BridgeUnsafeProjection
   }
 
   /**
-   * Returns an UnsafeProjection for given StructType.
+   * Returns a projection for the given StructType.
    *
    * CAUTION: the returned projection object is *not* thread-safe.
    */
-  def create(schema: StructType): BridgeUnsafeProjection = create(schema.fields.map(_.dataType))
+  def create(schema: StructType): BridgeHostColumnProjection = create(schema.fields.map(_.dataType))
 
   /**
-   * Returns an UnsafeProjection for given Array of DataTypes.
+   * Returns a projection for the given Array of DataTypes.
    *
    * CAUTION: the returned projection object is *not* thread-safe.
    */
-  def create(fields: Array[DataType]): BridgeUnsafeProjection = {
+  def create(fields: Array[DataType]): BridgeHostColumnProjection = {
     create(fields.zipWithIndex.map(x => BoundReference(x._2, x._1, true)))
   }
 
-  /**
-   * Returns an UnsafeProjection for given sequence of bound Expressions.
-   */
-  def create(exprs: Seq[Expression]): BridgeUnsafeProjection = {
-    createObject(exprs)
+  private def bridgeSerializer = Option(SparkEnv.get)
+      .map(_.closureSerializer.newInstance())
+      .getOrElse(new JavaSerializer(new SparkConf()).newInstance())
+
+  private def cloneFunction(function: AnyRef): AnyRef =
+    org.apache.spark.util.Utils.clone[AnyRef](function, bridgeSerializer)
+
+  private def containsSubquery(arg: Any): Boolean = arg match {
+    case _: ExecSubqueryExpression => true
+    case e: Expression => e.productIterator.exists(containsSubquery)
+    case Some(value) => containsSubquery(value)
+    case _: DataType => false
+    case s: Stream[_] => s.exists(containsSubquery)
+    case s: Seq[_] => s.exists(containsSubquery)
+    case m: Map[_, _] => m.exists { case (key, value) =>
+      containsSubquery(key) || containsSubquery(value)
+    }
+    case (left, right) => containsSubquery(left) || containsSubquery(right)
+    case _ => false
   }
 
-  def create(expr: Expression): BridgeUnsafeProjection = create(Seq(expr))
+  private def cloneExpressionPreservingSubqueries(expr: Expression): Expression = expr match {
+    case subquery: ExecSubqueryExpression => subquery
+    case _ if !containsSubquery(expr) => expr.clone()
+    case _ =>
+      def cloneAny(arg: Any): Any = arg match {
+        case subquery: ExecSubqueryExpression => subquery
+        case e: Expression => cloneExpressionPreservingSubqueries(e)
+        case dt: DataType => dt
+        case Some(value) => Some(cloneAny(value))
+        case s: Stream[_] => s.map(cloneAny).force
+        case s: Seq[_] => s.map(cloneAny)
+        case m: Map[_, _] => m.map { case (key, value) => cloneAny(key) -> cloneAny(value) }
+        case (left, right) => (cloneAny(left), cloneAny(right))
+        case other => other
+      }
+
+      val copiedArgs = expr.productIterator.map(arg => cloneAny(arg).asInstanceOf[AnyRef]).toArray
+      expr.makeCopy(copiedArgs)
+  }
+
+  private def refreshLambdaVariables(expr: Expression): Expression = {
+    val variables = scala.collection.mutable.HashMap.empty[ExprId, NamedLambdaVariable]
+    expr.transformUp {
+      case variable: NamedLambdaVariable =>
+        variables.getOrElseUpdate(variable.exprId,
+          variable.newInstance().asInstanceOf[NamedLambdaVariable])
+    }
+  }
+
+  private def cloneForBridge(expr: Expression): Expression = {
+    refreshLambdaVariables(cloneExpressionPreservingSubqueries(expr)).transformUp {
+      case udf: ScalaUDF => udf.copy(function = cloneFunction(udf.function))
+    }
+  }
 
   /**
-   * Returns an UnsafeProjection for given sequence of Expressions, which will be bound to
+   * Returns a projection for the given sequence of bound Expressions.
+   */
+  def create(exprs: Seq[Expression]): BridgeHostColumnProjection = {
+    // Each projection instance owns its expression tree. Some Spark expressions keep transient
+    // interpreter caches even when they are not marked stateful, and ScalaUDF carries a user
+    // function object that must not be shared by worker-thread-local projections.
+    createObject(exprs.map(cloneForBridge))
+  }
+
+  def create(expr: Expression): BridgeHostColumnProjection = create(Seq(expr))
+
+  /**
+   * Returns a projection for the given sequence of Expressions, which will be bound to
    * `inputSchema`.
    */
-  def create(exprs: Seq[Expression], inputSchema: Seq[Attribute]): BridgeUnsafeProjection = {
+  def create(exprs: Seq[Expression], inputSchema: Seq[Attribute]): BridgeHostColumnProjection = {
     create(bindReferences(exprs, inputSchema))
   }
 }
 
 /**
- * Generates a [[Projection]] that returns an [[UnsafeRow]].
+ * Code generator for [[BridgeHostColumnProjection]]. Adapted from Spark's
+ * `GenerateUnsafeProjection`: instead of packing each row into an `UnsafeRow`, it generates code
+ * that evaluates the expressions and appends each result directly into a per-column
+ * [[RapidsHostColumnBuilder]], so the output can be moved straight to the GPU.
  *
- * It generates the code for all the expressions, computes the total length for all the columns
- * (can be accessed via variables), and then copies the data into a scratch buffer space in the
- * form of UnsafeRow (the scratch buffer will grow as needed).
- *
- * @note The returned UnsafeRow will be pointed to a scratch buffer inside the projection.
+ * Because this mirrors Spark's generator, keep it aligned with the Spark version being built
+ * against when touching the codegen template or supported-type checks.
  */
-object BridgeGenerateUnsafeProjection extends
-  CodeGenerator[Seq[Expression], BridgeUnsafeProjection] {
+object GenerateBridgeHostColumnProjection extends
+  CodeGenerator[Seq[Expression], BridgeHostColumnProjection] {
 
   case class Schema(dataType: DataType, nullable: Boolean)
 
@@ -284,84 +309,46 @@ object BridgeGenerateUnsafeProjection extends
       isNullVar: String,
       builderRef: String): String = {
     
-    dataType match {
-      case BooleanType | ByteType | ShortType | IntegerType | DateType | 
-           LongType | TimestampType | FloatType | DoubleType | 
-           _: YearMonthIntervalType | _: DayTimeIntervalType =>
+    BridgeHostColumnProjection.scalarAppender(dataType) match {
+      case Some(sa) =>
         if (nullable) {
+          val pred = if (sa.objectTyped) s"$isNullVar || $valueVar == null" else isNullVar
           s"""
-             |if ($isNullVar) {
+             |if ($pred) {
              |  $builderRef.appendNull();
              |} else {
-             |  $builderRef.append($valueVar);
+             |  ${sa.codegen(valueVar, builderRef)}
              |}
            """.stripMargin
         } else {
-          s"$builderRef.append($valueVar);"
+          sa.codegen(valueVar, builderRef)
         }
-        
-      case StringType =>
-        if (nullable) {
-          s"""
-             |if ($isNullVar || $valueVar == null) {
-             |  $builderRef.appendNull();
-             |} else {
-             |  $builderRef.appendUTF8String($valueVar.getBytes());
-             |}
-           """.stripMargin
-        } else {
-          s"$builderRef.appendUTF8String($valueVar.getBytes());"
+
+      case None =>
+        dataType match {
+          case NullType =>
+            s"$builderRef.appendNull();"
+
+          case ArrayType(elementType, containsNull) =>
+            generateArrayAppendCode(ctx, elementType, containsNull, nullable, valueVar,
+              isNullVar, builderRef)
+
+          case structType: StructType =>
+            generateStructAppendCode(ctx, structType, nullable, valueVar, isNullVar, builderRef)
+
+          case MapType(keyType, valueType, valueContainsNull) =>
+            generateMapAppendCode(ctx, keyType, valueType, valueContainsNull, nullable,
+              valueVar, isNullVar, builderRef)
+
+          case _ =>
+            // This should never be reached due to canSupportDirectCodegen check
+            throw new UnsupportedOperationException(
+              s"Cannot generate direct append code for unsupported type: $dataType. " +
+              s"`canSupportDirectCodegen` check should have prevented this.")
         }
-        
-      case BinaryType =>
-        if (nullable) {
-          s"""
-             |if ($isNullVar || $valueVar == null) {
-             |  $builderRef.appendNull();
-             |} else {
-             |  $builderRef.appendByteList($valueVar);
-             |}
-           """.stripMargin
-        } else {
-          s"$builderRef.appendByteList($valueVar);"
-        }
-        
-      case _: DecimalType =>
-        if (nullable) {
-          s"""
-             |if ($isNullVar || $valueVar == null) {
-             |  $builderRef.appendNull();
-             |} else {
-             |  $builderRef.append($valueVar.toJavaBigDecimal());
-             |}
-           """.stripMargin
-        } else {
-          s"$builderRef.append($valueVar.toJavaBigDecimal());"
-        }
-      
-      case NullType =>
-        s"$builderRef.appendNull();"
-      
-      case ArrayType(elementType, containsNull) =>
-        generateArrayAppendCode(ctx, elementType, containsNull, nullable, valueVar, 
-          isNullVar, builderRef)
-        
-      case structType: StructType =>
-        generateStructAppendCode(ctx, structType, nullable, valueVar, isNullVar, builderRef)
-        
-      case MapType(keyType, valueType, valueContainsNull) =>
-        generateMapAppendCode(ctx, keyType, valueType, valueContainsNull, nullable, 
-          valueVar, isNullVar, builderRef)
-      
-      case _ =>
-        // This should never be reached due to canSupportDirectCodegen check
-        // But if it is, throw an exception that will trigger interpreted fallback
-        throw new UnsupportedOperationException(
-          s"Cannot generate direct append code for unsupported type: $dataType. " +
-          s"`canSupportDirectCodegen` check should have prevented this.")
     }
   }
-  
+
   private def generateArrayAppendCode(
       ctx: CodegenContext,
       elementType: DataType,
@@ -549,17 +536,17 @@ object BridgeGenerateUnsafeProjection extends
 
   def generate(
       expressions: Seq[Expression],
-      subexpressionEliminationEnabled: Boolean): BridgeUnsafeProjection = {
+      subexpressionEliminationEnabled: Boolean): BridgeHostColumnProjection = {
     create(canonicalize(expressions), subexpressionEliminationEnabled)
   }
 
-  protected def create(references: Seq[Expression]): BridgeUnsafeProjection = {
+  protected def create(references: Seq[Expression]): BridgeHostColumnProjection = {
     create(references, subexpressionEliminationEnabled = false)
   }
 
   private def create(
       expressions: Seq[Expression],
-      subexpressionEliminationEnabled: Boolean): BridgeUnsafeProjection = {
+      subexpressionEliminationEnabled: Boolean): BridgeHostColumnProjection = {
     // Check upfront if we can support all types with direct codegen
     // This provides a fast-fail mechanism before attempting expensive codegen
     val unsupportedTypes = expressions.map(_.dataType).filterNot(canSupportDirectCodegen)
@@ -606,18 +593,19 @@ object BridgeGenerateUnsafeProjection extends
       )
     )
 
+    val parentClassName = classOf[BridgeHostColumnProjection].getName
     val codeBody =
       s"""
          |public java.lang.Object generate(Object[] references) {
-         |  return new SpecificUnsafeProjection(references);
+         |  return new SpecificBridgeHostColumnProjection(references);
          |}
          |
-         |class SpecificUnsafeProjection extends ${classOf[BridgeUnsafeProjection].getName} {
+         |class SpecificBridgeHostColumnProjection extends $parentClassName {
          |
          |  private Object[] references;
          |  ${ctx.declareMutableStates()}
          |
-         |  public SpecificUnsafeProjection(Object[] references) {
+         |  public SpecificBridgeHostColumnProjection(Object[] references) {
          |    this.references = references;
          |    ${ctx.initMutableStates()}
          |  }
@@ -643,6 +631,6 @@ object BridgeGenerateUnsafeProjection extends
     logDebug(s"code for ${expressions.mkString(",")}:\n${CodeFormatter.format(code)}")
 
     val (clazz, _) = CodeGenerator.compile(code)
-    clazz.generate(ctx.references.toArray).asInstanceOf[BridgeUnsafeProjection]
+    clazz.generate(ctx.references.toArray).asInstanceOf[BridgeHostColumnProjection]
   }
 }
