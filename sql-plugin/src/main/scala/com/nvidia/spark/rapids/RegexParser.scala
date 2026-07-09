@@ -916,14 +916,14 @@ class CudfRegexTranspiler(mode: RegexMode) {
       contains(regex, {
         case RegexChar('^') | RegexEscaped('A') => true
         case _ => false
-      })
+      }, recurseIntoCharacterClasses = false)
     }
 
     def containsEndAnchor(regex: RegexAST): Boolean = {
       contains(regex, {
         case RegexChar('$') | RegexEscaped('z') | RegexEscaped('Z') => true
         case _ => false
-      })
+      }, recurseIntoCharacterClasses = false)
     }
 
     def containsNewline(regex: RegexAST): Boolean = {
@@ -968,7 +968,7 @@ class CudfRegexTranspiler(mode: RegexMode) {
       }
     }
 
-    def checkEndAnchorContextSplit(r1: RegexAST, r2: RegexAST): Unit = {
+    def checkAdjacentEndAnchorContextSplit(r1: RegexAST, r2: RegexAST): Unit = {
       if ((containsEndAnchor(r1) &&
           (containsNewline(r2) || containsEmpty(r2) || containsBeginAnchor(r2))) ||
         (containsEndAnchor(r2) &&
@@ -980,29 +980,43 @@ class CudfRegexTranspiler(mode: RegexMode) {
       }
     }
 
+    def checkEndAnchorContextSplit(parts: Seq[RegexAST]): Unit = {
+      var prefixContainsEmpty = false
+      var previousPart: Option[RegexAST] = None
+
+      parts.zipWithIndex.foreach { case (part, index) =>
+        previousPart.foreach(previous => checkAdjacentEndAnchorContextSplit(previous, part))
+
+        // Split also rejects an optional term anywhere before a real end anchor. Keep this
+        // prefix-wide check limited to optional terms: newline and begin-anchor context is
+        // intentionally adjacent-only, so supported expressions such as ^a$ and \na$ remain
+        // on the GPU.
+        if (prefixContainsEmpty && containsEndAnchor(part)) {
+          val prefix = parts.take(index).map(_.toRegexString).mkString
+          throw new RegexUnsupportedException(
+            s"End of line/string anchor is not supported in this context: " +
+              s"${toReadableString(prefix)}${toReadableString(part.toRegexString)}",
+            part.position)
+        }
+
+        prefixContainsEmpty = prefixContainsEmpty || containsEmpty(part)
+        previousPart = Some(part)
+      }
+    }
+
     def checkUnsupported(regex: RegexAST): Unit = {
       regex match {
+        case RegexSequence(parts) if mode == RegexSplitMode =>
+          checkEndAnchorContextSplit(parts.toSeq)
         case RegexSequence(parts) =>
           for (i <- 1 until parts.length) {
-            if (mode == RegexSplitMode) {
-              checkEndAnchorContextSplit(parts(i - 1), parts(i))
-            } else {
-              checkEndAnchorContext(parts(i - 1), parts(i))
-            }
+            checkEndAnchorContext(parts(i - 1), parts(i))
           }
         case RegexChoice(l, r) =>
           checkUnsupported(l)
           checkUnsupported(r)
         case RegexGroup(_, term, _) => checkUnsupported(term)
         case RegexRepetition(ast, _) => checkUnsupported(ast)
-        case RegexCharacterClass(_, components) =>
-          for (i <- 1 until components.length) {
-            if (mode == RegexSplitMode) {
-              checkEndAnchorContextSplit(components(i - 1), components(i))
-            } else {
-              checkEndAnchorContext(components(i - 1), components(i))
-            }
-          }
         case _ =>
           // ignore
       }
@@ -1586,16 +1600,22 @@ class CudfRegexTranspiler(mode: RegexMode) {
     }
   }
 
-  private def contains(regex: RegexAST, f: RegexAST => Boolean): Boolean = {
+  private def contains(regex: RegexAST, f: RegexAST => Boolean,
+      recurseIntoCharacterClasses: Boolean = true): Boolean = {
     if (f(regex)) {
       true
     } else {
       regex match {
-        case RegexSequence(parts) => parts.exists(x => contains(x, f))
-        case RegexGroup(_, term, _) => contains(term, f)
-        case RegexChoice(l, r) => contains(l, f) || contains(r, f)
-        case RegexRepetition(term, _) => contains(term, f)
-        case RegexCharacterClass(_, chars) => chars.exists(ch => contains(ch, f))
+        case RegexSequence(parts) =>
+          parts.exists(x => contains(x, f, recurseIntoCharacterClasses))
+        case RegexGroup(_, term, _) => contains(term, f, recurseIntoCharacterClasses)
+        case RegexChoice(l, r) =>
+          contains(l, f, recurseIntoCharacterClasses) ||
+            contains(r, f, recurseIntoCharacterClasses)
+        case RegexRepetition(term, _) => contains(term, f, recurseIntoCharacterClasses)
+        case RegexCharacterClass(_, chars) if recurseIntoCharacterClasses =>
+          chars.exists(ch => contains(ch, f, recurseIntoCharacterClasses))
+        case RegexCharacterClass(_, _) => false
         case leaf => f(leaf)
       }
     }

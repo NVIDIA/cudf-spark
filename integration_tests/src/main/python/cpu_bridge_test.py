@@ -17,9 +17,9 @@ import pytest
 from pyspark.sql.functions import col
 import pyspark.sql.functions as f
 from asserts import assert_gpu_and_cpu_are_equal_collect, assert_cpu_and_gpu_are_equal_collect_with_capture, assert_gpu_fallback_collect, assert_cpu_and_gpu_are_equal_sql_with_capture
-from marks import allow_non_gpu
+from conftest import is_dataproc_runtime, is_dataproc_serverless_runtime
 from data_gen import *
-from marks import ignore_order
+from marks import allow_non_gpu, ignore_order
 from spark_session import is_databricks_runtime, is_spark_341_or_later, with_cpu_session
 
 
@@ -233,6 +233,13 @@ bloom_filter_confs = {
     "spark.sql.optimizer.runtime.bloomFilter.enabled": True
 }
 
+# Dataproc uses Cast instead of XxHash64 for runtime bloom filter probe keys.
+dataproc_bloom_filter_probe_allow = (
+    ("Cast",)
+    if is_dataproc_runtime() or is_dataproc_serverless_runtime()
+    else ()
+)
+
 def check_bloom_filter_join(confs, is_multi_column):
     def do_join(spark):
         if is_multi_column:
@@ -248,8 +255,10 @@ def check_bloom_filter_join(confs, is_multi_column):
     all_confs = copy_and_update(bloom_filter_confs, partial_conf)
     assert_gpu_and_cpu_are_equal_collect(do_join, conf=all_confs)
 
-@allow_non_gpu("ShuffleExchangeExec", "BloomFilterMightContain", "ScalarSubquery", 
-"XxHash64", "GetStructField", "Remainder", "And")
+@allow_non_gpu(
+    "ShuffleExchangeExec", "BloomFilterMightContain", "ScalarSubquery",
+    "XxHash64", "GetStructField", "Remainder", "And",
+    *dataproc_bloom_filter_probe_allow)
 @ignore_order(local=True)
 @pytest.mark.parametrize("is_multi_column", [False, True], ids=["SINGLE_COLUMN", "MULTI_COLUMN"])
 @pytest.mark.skipif(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/8921")

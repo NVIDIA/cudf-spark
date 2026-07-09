@@ -29,7 +29,12 @@ from data_gen import (
 )
 from marks import allow_non_gpu, ignore_order, validate_execs_in_gpu_plan
 from protobuf_data_gen import pb, encode_pb_message
-from spark_session import with_cpu_session, is_before_spark_340
+from spark_session import (
+    is_before_spark_340,
+    is_spark_protobuf_available,
+    is_spark_protobuf_descriptor_runtime_available,
+    with_cpu_session,
+)
 import pyspark.sql.functions as f
 from pyspark.sql.window import Window
 from pyspark.sql.types import (
@@ -42,14 +47,11 @@ from pyspark.sql.types import (
     StringType,
 )
 
-_include_spark_protobuf_jar = (
-    os.environ.get('INCLUDE_SPARK_PROTOBUF_JAR', 'true').lower() != 'false')
-
 pytestmark = [
     pytest.mark.premerge_ci_1,
     pytest.mark.skipif(
-        not _include_spark_protobuf_jar,
-        reason="INCLUDE_SPARK_PROTOBUF_JAR is disabled"),
+        not is_spark_protobuf_available(),
+        reason="from_protobuf is unavailable"),
 ]
 
 
@@ -132,29 +134,21 @@ _random_scalar_test_configs = [
 ]
 
 
-def _try_import_from_protobuf():
-    try:
-        from pyspark.sql.protobuf.functions import from_protobuf
-        return from_protobuf
-    except Exception:
-        return None
-
-
 # ---------------------------------------------------------------------------
 # Shared fixture and helpers to reduce per-test boilerplate
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(scope="module")
 def from_protobuf_fn():
-    """Skip the module if the PySpark API is unavailable."""
-    fn = _try_import_from_protobuf()
-    if fn is None:
-        pytest.skip("from_protobuf not available")
-    return fn
+    """Return the runtime-provided PySpark API."""
+    from pyspark.sql.protobuf.functions import from_protobuf
+    return from_protobuf
 
 
 def _setup_protobuf_desc(local_tmp_path, desc_name, build_fn):
     """Build descriptor bytes and write them to the driver's local filesystem."""
+    if not is_spark_protobuf_descriptor_runtime_available():
+        pytest.skip("Spark protobuf descriptor runtime is unavailable")
     desc_path = os.path.join(local_tmp_path, desc_name)
     desc_bytes = with_cpu_session(build_fn)
     with open(desc_path, "wb") as fp:
@@ -3243,6 +3237,30 @@ _simple_desc_bytes = bytes.fromhex(
     "0a360a0c73696d706c652e70726f746f12047465737422200a0653696d706c65"
     "120b0a0369333218012001280512090a0173180220012809")
 
+_nested_smoke_desc_bytes = bytes.fromhex(
+    "0a8e010a126e65737465645f736d6f6b652e70726f746f120474657374221d0a"
+    "054368696c6412090a016118012001280512090a0162180220012809224b0a04"
+    "526f6f74120b0a03746f70180120012805121a0a056368696c6418022001280b"
+    "320b2e746573742e4368696c64121a0a056974656d7318032003280b320b2e74"
+    "6573742e4368696c64620670726f746f32")
+
+_oneof_smoke_desc_bytes = bytes.fromhex(
+    "0a5e0a116f6e656f665f736d6f6b652e70726f746f120474657374223b0a0643"
+    "686f696365120b0a01691801200128054800120b0a0173180220012809480012"
+    "0d0a056f7468657218032001280542080a0663686f696365620670726f746f32")
+
+_nested_smoke_message = pb.message("Root", [
+    pb.int32("top", 1),
+    pb.nested("child", 2, [
+        pb.int32("a", 1),
+        pb.string("b", 2),
+    ]),
+    pb.repeated_message("items", 3, [
+        pb.int32("a", 1),
+        pb.string("b", 2),
+    ]),
+])
+
 
 @pytest.fixture
 def simple_desc(local_tmp_path):
@@ -3250,6 +3268,22 @@ def simple_desc(local_tmp_path):
     with open(desc_path, "wb") as fp:
         fp.write(_simple_desc_bytes)
     return desc_path, _simple_desc_bytes
+
+
+@pytest.fixture
+def nested_smoke_desc(local_tmp_path):
+    desc_path = os.path.join(local_tmp_path, "nested_smoke.desc")
+    with open(desc_path, "wb") as fp:
+        fp.write(_nested_smoke_desc_bytes)
+    return desc_path, _nested_smoke_desc_bytes
+
+
+@pytest.fixture
+def oneof_smoke_desc(local_tmp_path):
+    desc_path = os.path.join(local_tmp_path, "oneof_smoke.desc")
+    with open(desc_path, "wb") as fp:
+        fp.write(_oneof_smoke_desc_bytes)
+    return desc_path, _oneof_smoke_desc_bytes
 
 
 def _make_smoke_df(spark):
@@ -3267,6 +3301,55 @@ def test_from_protobuf_smoke_path_api(simple_desc, from_protobuf_fn):
             from_protobuf_fn(f.col("bin"), "test.Simple", desc_path).alias("decoded"))
 
     assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+
+
+@pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
+def test_from_protobuf_smoke_nested_projection(nested_smoke_desc, from_protobuf_fn):
+    desc_path, _ = nested_smoke_desc
+    values = [
+        {"top": 1, "child": {"a": 2, "b": "child"},
+         "items": [{"a": 3, "b": "first"}, {"a": 4, "b": "second"}]},
+        {"top": 5, "child": None, "items": []},
+    ]
+
+    def run_on_spark(spark):
+        encoded = [(_nested_smoke_message.encode(value),) for value in values]
+        decoded = _call_from_protobuf(
+            from_protobuf_fn,
+            f.col("bin"),
+            "test.Root",
+            desc_path,
+            _nested_smoke_desc_bytes)
+        return spark.createDataFrame(encoded, ["bin"]).select(
+            decoded.getField("top").alias("top"),
+            decoded.getField("child").getField("a").alias("child_a"),
+            decoded.getField("items")[0].getField("b").alias("first_item_b"))
+
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+
+
+@pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
+@allow_non_gpu("ProtobufDataToCatalyst")
+def test_from_protobuf_smoke_oneof_falls_back(oneof_smoke_desc, from_protobuf_fn):
+    desc_path, desc_bytes = oneof_smoke_desc
+    rows = [
+        (_encode_tag(1, 0) + _encode_varint(7) +
+         _encode_tag(3, 0) + _encode_varint(9)),
+        (_encode_tag(2, 2) + _encode_varint(1) + b"x" +
+         _encode_tag(3, 0) + _encode_varint(10)),
+    ]
+
+    def run_on_spark(spark):
+        decoded = _call_from_protobuf(
+            from_protobuf_fn,
+            f.col("bin"),
+            "test.Choice",
+            desc_path,
+            desc_bytes)
+        return spark.createDataFrame([(row,) for row in rows], ["bin"]).select(
+            decoded.alias("decoded"))
+
+    assert_gpu_fallback_collect(run_on_spark, "ProtobufDataToCatalyst")
 
 
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")

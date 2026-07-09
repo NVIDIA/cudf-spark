@@ -29,6 +29,7 @@
 #   - SPARK_HOME: Path to your Apache Spark installation.
 #   - SKIP_TESTS: If set to true, skips running the Python integration tests.
 #   - INCLUDE_SPARK_AVRO_JAR: If set to true, includes Avro tests.
+#   - INCLUDE_SPARK_PROTOBUF_JAR: Controls external spark-protobuf jar injection.
 #   - TEST: Specifies a specific test to run.
 #   - TEST_TAGS: Allows filtering tests based on tags.
 #   - TEST_TYPE: Specifies the type of tests to run.
@@ -48,7 +49,7 @@
 #   To run all tests, including Avro tests:
 #     INCLUDE_SPARK_AVRO_JAR=true ./run_pyspark_from_build.sh
 #
-#   To run tests WITHOUT Protobuf tests (protobuf is included by default):
+#   To run without injecting an external spark-protobuf jar:
 #     INCLUDE_SPARK_PROTOBUF_JAR=false ./run_pyspark_from_build.sh
 #
 #   To run a specific test:
@@ -62,6 +63,28 @@
 # ============================================================================
 
 set -ex
+
+is_databricks_runtime_arg() {
+    local expect_runtime_env_value=false
+    local runtime_env=""
+    local arg
+    for arg in "$@"; do
+        if [[ "$expect_runtime_env_value" == "true" ]]; then
+            runtime_env="$arg"
+            expect_runtime_env_value=false
+            continue
+        fi
+        case "$arg" in
+            --runtime_env)
+                expect_runtime_env_value=true
+                ;;
+            --runtime_env=*)
+                runtime_env="${arg#*=}"
+                ;;
+        esac
+    done
+    [[ "${runtime_env,,}" == "databricks" ]]
+}
 
 SCRIPTPATH="$( cd "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
 cd "$SCRIPTPATH"
@@ -150,16 +173,19 @@ else
 
     INCLUDE_SPARK_PROTOBUF_JAR_REQUESTED=$(echo "${INCLUDE_SPARK_PROTOBUF_JAR}" | tr '[:upper:]' '[:lower:]')
     PROTOBUF_JAR_COUNT=$(readlink -e $PROTOBUF_JARS 2>/dev/null | wc -l)
-    if [[ "$INCLUDE_SPARK_PROTOBUF_JAR_REQUESTED" != "false" \
+    if is_databricks_runtime_arg "$@"; then
+        export INCLUDE_SPARK_PROTOBUF_JAR=false
+        PROTOBUF_JARS=""
+    elif [[ "$INCLUDE_SPARK_PROTOBUF_JAR_REQUESTED" != "false" \
           && "$PROTOBUF_JAR_COUNT" -eq 1 ]];
     then
         export INCLUDE_SPARK_PROTOBUF_JAR=true
     else
         if [[ "$INCLUDE_SPARK_PROTOBUF_JAR_REQUESTED" != "false" \
               && "$PROTOBUF_JAR_COUNT" -gt 1 ]]; then
-            >&2 echo "WARNING: Multiple spark-protobuf jars were found (matched: $PROTOBUF_JARS); disabling protobuf tests."
+            >&2 echo "WARNING: Multiple spark-protobuf jars were found (matched: $PROTOBUF_JARS); not injecting spark-protobuf."
         elif [[ "$INCLUDE_SPARK_PROTOBUF_JAR_REQUESTED" == "true" ]]; then
-            >&2 echo "WARNING: INCLUDE_SPARK_PROTOBUF_JAR=true was requested but a spark-protobuf jar was not found (searched: $PROTOBUF_JARS); disabling protobuf tests."
+            >&2 echo "WARNING: INCLUDE_SPARK_PROTOBUF_JAR=true was requested but a spark-protobuf jar was not found (searched: $PROTOBUF_JARS)."
         fi
         export INCLUDE_SPARK_PROTOBUF_JAR=false
         PROTOBUF_JARS=""

@@ -251,6 +251,9 @@
                     <name>databricks</name>
                 </property>
             </activation>
+            <properties>
+                <spark.protobuf.skipCopy>true</spark.protobuf.skipCopy>
+            </properties>
             <dependencies>
                 <dependency>
                     <groupId>com.nvidia</groupId>

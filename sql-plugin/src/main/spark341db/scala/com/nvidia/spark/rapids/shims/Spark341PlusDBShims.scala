@@ -100,7 +100,8 @@ trait Spark341PlusDBShims extends Spark332PlusDBShims {
               a.evalType, a.udfDeterministic, a.resultId)
         })
     ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
-    super.getExprs ++ shimExprs ++ DayTimeIntervalShims.exprs ++ RoundingShims.exprs
+    super.getExprs ++ shimExprs ++ DayTimeIntervalShims.exprs ++ RoundingShims.exprs ++
+      ProtobufExprShims.exprs
   }
 
   private val shimExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = Seq(

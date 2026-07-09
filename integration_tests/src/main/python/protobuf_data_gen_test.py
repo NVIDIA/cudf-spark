@@ -12,21 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import random
 import unittest
 
 from data_gen import IntegerGen, SetValuesGen, StringGen
 from protobuf_data_gen import pb
 from pyspark.sql.types import BooleanType, IntegerType, LongType, StringType
-from spark_session import is_before_spark_340, with_cpu_session
+from spark_session import is_spark_protobuf_descriptor_runtime_available, with_cpu_session
 
 
-_include_spark_protobuf_jar = (
-    os.environ.get('INCLUDE_SPARK_PROTOBUF_JAR', 'true').lower() != 'false')
 _requires_spark_protobuf = unittest.skipIf(
-    is_before_spark_340() or not _include_spark_protobuf_jar,
-    "descriptor adapter requires Spark 3.4+ and spark-protobuf")
+    not is_spark_protobuf_descriptor_runtime_available(),
+    "descriptor adapter requires Spark's protobuf descriptor runtime")
 
 
 def _build_single_int_descriptor(spark):
