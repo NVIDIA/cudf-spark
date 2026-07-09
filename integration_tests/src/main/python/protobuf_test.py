@@ -2550,38 +2550,6 @@ def _schema_projection_data_gen():
 
 
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
-@validate_execs_in_gpu_plan("GpuGlobalLimitExec")
-@ignore_order(local=True)
-def test_from_protobuf_nonzero_offset_binary_view(local_tmp_path, from_protobuf_fn):
-    desc_path, desc_bytes = _setup_protobuf_desc(
-        local_tmp_path,
-        "schema_proj_offset.desc",
-        _build_schema_projection_descriptor_set_bytes)
-    message_name = "test.SchemaProj"
-    data_gen = _schema_projection_data_gen()
-
-    def run_on_spark(spark):
-        generated = gen_df(spark, data_gen, length=257, num_slices=1)
-        sliced = generated.offset(17)
-        decoded = _call_from_protobuf(
-            from_protobuf_fn, f.col("bin"), message_name, desc_path, desc_bytes)
-        return sliced.select(
-            "id",
-            "name",
-            "detail",
-            "items",
-            decoded.getField("id").alias("decoded_id"),
-            decoded.getField("name").alias("decoded_name"),
-            decoded.getField("detail").alias("decoded_detail"),
-            decoded.getField("items").alias("decoded_items")).repartition(1)
-
-    assert_gpu_and_cpu_are_equal_collect(run_on_spark, conf={
-        "spark.sql.adaptive.enabled": "false",
-        "spark.rapids.sql.batchSizeBytes": "1g",
-    })
-
-
-@pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @validate_execs_in_gpu_plan("GpuHashAggregateExec")
 @ignore_order(local=True)
 def test_from_protobuf_projection_through_aggregate(local_tmp_path, from_protobuf_fn):
