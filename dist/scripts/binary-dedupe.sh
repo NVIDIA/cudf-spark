@@ -363,59 +363,25 @@ function unshimmed_class_needs_shared_identity() {
   set -e
   class_file="$1"
 
-  # the raw spark-shared.txt file list contains all single-sha1 classes
-  # including the ones that are unshimmed. Instead of expensively recomputing
-  # sha1 look up if there is an entry with the unshimmed class as a suffix
-
-  class_file_quoted=$(printf "%q" "$class_file")
-  # TODO currently RapidsShuffleManager is "removed" from /spark* by construction in
-  # dist pom.xml via ant. We could delegate this logic to this script
-  # and make both simmpler
+  # Most root-layout classes with the same FQCN must be bitwise-identical across
+  # the selected shim jars. This function preserves only the legacy/bootstrap
+  # exceptions that predate default unshimming and cannot be represented by
+  # SPARK_SHARED_TXT:
   #
-  # TODO ParquetCachedBatchSerializer is not bitwise-identical after 411, 
-  # but it is compatible with previous versions because it merely adds a new method.
-  # we might need to replace this strict check with MiMa
-  # https://github.com/apache/spark/blob/7011706a0a8dbec6adb5b5b121921b29b314335f/sql/core/src/main/scala/org/apache/spark/sql/columnar/CachedBatchSerializer.scala#L75-L95
-  # ProxyRapidsShuffleInternalManagerBase is not bitwise-identical when
-  # DB 17.3 is included because ShuffleManager.getReader signature differs
-  # (8-param with prismMapStatusEnabled vs 7-param). This is safe because
-  # the class provides concrete implementations for ALL getReader variants,
-  # so the JVM resolves the correct one at runtime regardless of which
-  # ShuffleManager version the class was compiled against.
-  # GpuShuffleDependency has identical JVM bytecode and descriptors between
-  # Spark 3.5 and 4.1. Only ScalaSignature metadata differs after compiling
-  # the same source against different Spark dependency jars. WindowInPandasExecTypeShim
-  # has no methods in the class shell; its companion carries the behavior.
-  # CloseableColumnBatchIterator has identical descriptors and code; Scala 2.13 only
-  # renames generic Signature-attribute type variables across the Spark 3.5/4.1 compiles.
-  # GpuReadCSVFileFormat and GpuReadJsonFileFormat have identical descriptors and
-  # executable javap output; only ScalaSignature metadata differs across Spark deps.
-  # PythonMapInArrowExecShims and PythonArgumentUtils class shells have identical
-  # executable bytecode; only source-file metadata differs across shim source names.
-  # GpuUnionExecShim and RapidsErrorUtils class shells have identical executable
-  # bytecode; only ScalaSignature metadata differs.
-  # GpuStringTrim* differs after Spark 4.1 because String2TrimExpression adds
-  # collation/context-independent foldability methods. The case-class fields,
-  # product surface, and Spark 3.5-callable methods remain compatible; Spark 3.x
-  # does not invoke the added methods.
-  # GpuAtomicCreateTableAsSelectExec companion has identical executable bytecode;
-  # only line-number debug metadata differs across shim sources.
+  # - version-qualified RapidsShuffleManager classes are copied per shim and are
+  #   unique by construction;
+  # - ParquetCachedBatchSerializer is a public root facade that remains binary
+  #   compatible across Spark 4.1 despite adding a new Spark API method;
+  # - ProxyRapidsShuffleInternalManagerBase covers the known DB 17.3
+  #   ShuffleManager.getReader signature split by implementing all variants.
+  #
+  # Do not add new same-FQCN compatibility waivers here. Keep those classes in
+  # spark-shared or refactor them until the bytecode comparison proves shared
+  # identity.
+  class_file_quoted=$(printf "%q" "$class_file")
   if [[ "$class_file_quoted" =~ com/nvidia/spark/rapids/spark[34].*/.*ShuffleManager.class || \
           "$class_file_quoted" == "com/nvidia/spark/ParquetCachedBatchSerializer.class" || \
-          "$class_file_quoted" =~ org/apache/spark/sql/rapids/ProxyRapidsShuffleInternalManagerBase || \
-          "$class_file_quoted" == "org/apache/spark/sql/rapids/GpuShuffleDependency.class" || \
-          "$class_file_quoted" == "com/nvidia/spark/rapids/parquet/CloseableColumnBatchIterator.class" || \
-          "$class_file_quoted" == "com/nvidia/spark/rapids/GpuReadCSVFileFormat.class" || \
-          "$class_file_quoted" == "org/apache/spark/sql/catalyst/json/rapids/GpuReadJsonFileFormat.class" || \
-          "$class_file_quoted" == "com/nvidia/spark/rapids/shims/PythonMapInArrowExecShims.class" || \
-          "$class_file_quoted" == "org/apache/spark/sql/rapids/execution/python/shims/PythonArgumentUtils.class" || \
-          "$class_file_quoted" == "com/nvidia/spark/rapids/shims/GpuUnionExecShim.class" || \
-          "$class_file_quoted" == "org/apache/spark/sql/rapids/GpuStringTrim.class" || \
-          "$class_file_quoted" == "org/apache/spark/sql/rapids/GpuStringTrimLeft.class" || \
-          "$class_file_quoted" == "org/apache/spark/sql/rapids/GpuStringTrimRight.class" || \
-          "$class_file" == "org/apache/spark/sql/execution/datasources/v2/rapids/GpuAtomicCreateTableAsSelectExec$.class" || \
-          "$class_file_quoted" == "org/apache/spark/sql/rapids/shims/RapidsErrorUtils.class" || \
-          "$class_file_quoted" == "org/apache/spark/sql/rapids/execution/python/shims/WindowInPandasExecTypeShim.class" ]]; then
+          "$class_file_quoted" =~ org/apache/spark/sql/rapids/ProxyRapidsShuffleInternalManagerBase ]]; then
       return 1
   fi
   return 0

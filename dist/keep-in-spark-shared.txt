@@ -1,6 +1,26 @@
 # Patterns for common spark-shared class files that must not be promoted to
 # the root layout even when binary dedupe marks them bitwise-identical.
 #
-# Add entries only when a class is bitwise-identical but must remain loaded
-# from spark-shared for compatibility or packaging reasons. New common classes
-# should normally stay unshimmed by default.
+# Add entries only when a class must remain in the parallel-world layout
+# for compatibility, packaging, or follow-up validation reasons. New common
+# classes should normally stay unshimmed by default.
+
+# These classes are intentionally not added to the compatibility waiver in
+# binary-dedupe.sh. They looked executable-bytecode-compatible in the unshim
+# investigation, but are not bitwise-identical across representative shim sets
+# due to metadata, debug-info, or Spark API shape differences. Keep them in the
+# parallel-world layout until they are refactored to be bitwise-identical or a
+# dedicated ABI-compatibility verifier replaces the legacy waiver mechanism.
+org/apache/spark/sql/rapids/GpuShuffleDependency.class
+com/nvidia/spark/rapids/parquet/CloseableColumnBatchIterator.class
+com/nvidia/spark/rapids/GpuReadCSVFileFormat.class
+org/apache/spark/sql/catalyst/json/rapids/GpuReadJsonFileFormat.class
+com/nvidia/spark/rapids/shims/PythonMapInArrowExecShims.class
+org/apache/spark/sql/rapids/execution/python/shims/PythonArgumentUtils.class
+com/nvidia/spark/rapids/shims/GpuUnionExecShim.class
+org/apache/spark/sql/rapids/GpuStringTrim.class
+org/apache/spark/sql/rapids/GpuStringTrimLeft.class
+org/apache/spark/sql/rapids/GpuStringTrimRight.class
+org/apache/spark/sql/execution/datasources/v2/rapids/GpuAtomicCreateTableAsSelectExec$.class
+org/apache/spark/sql/rapids/shims/RapidsErrorUtils.class
+org/apache/spark/sql/rapids/execution/python/shims/WindowInPandasExecTypeShim.class
