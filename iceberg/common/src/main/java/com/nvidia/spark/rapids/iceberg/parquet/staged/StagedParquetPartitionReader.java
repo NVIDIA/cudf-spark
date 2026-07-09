@@ -31,7 +31,6 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -60,14 +59,17 @@ import org.apache.spark.sql.vectorized.ColumnarBatch;
  * <p>The pipeline has a deliberately strict thread boundary:</p>
  * <ol>
  *   <li>Shared workers fetch metadata and perform Iceberg row-group filtering.</li>
- *   <li>The Spark task thread waits for the complete footer barrier and plans ordered subtasks.</li>
+ *   <li>The Spark task thread consumes footers in file-list order as they resolve, feeding an
+ *       incremental planning session and submitting each closed subtask immediately, so later
+ *       footer waits overlap the data I/O of earlier subtasks.</li>
  *   <li>Every planned subtask is enqueued to the shared pool in plan order, but each subtask
  *       executes as one blocking worker job: allocate the exact non-pinned output, copy cache
  *       hits, hand all cache-miss column-chunk reads to the async I/O engine, block until they
- *       finish, publish cache slices, and write/seal the synthetic file. The worker then keeps
- *       its pool slot until the task thread picks the result for decode, so pool occupancy is
- *       the executor-wide bound on in-flight subtasks and buffered bytes — the same natural
- *       pacing the non-staged multithreaded reader gets from its blocking per-file reads.</li>
+ *       finish, publish cache slices, and write/seal the synthetic file into a spillable host
+ *       buffer. Publishing the completion finishes the subtask and frees the worker slot, so
+ *       pool occupancy bounds the actively executing subtasks — the same natural pacing the
+ *       non-staged multithreaded reader gets from its blocking per-file reads — while completed
+ *       results wait for decode under normal host spilling.</li>
  *   <li>The task thread feeds completed synthetic files to GPU decode in completion order; a
  *       later subtask is never held behind an earlier subtask that is slow to finish.</li>
  * </ol>
@@ -214,9 +216,6 @@ public final class StagedParquetPartitionReader
             }
             remainingResults -= 1;
           }
-          // The result is picked: free the worker slot that was parked on this handover so the
-          // next queued subtask can start its blocking pipeline.
-          completion.markClaimed();
           resultPassedToDecode = true;
           decoded = decode(completion);
           synchronized (iteratorLock) {
@@ -283,7 +282,7 @@ public final class StagedParquetPartitionReader
     }
   }
 
-  /** Submit all footers, plan on the task thread, and wire ordered I/O submission futures. */
+  /** Submit all footers, then consume them in file order while streaming subtasks to workers. */
   private void initializeIfNeeded() throws Exception {
     if (initialized) {
       return;
@@ -294,7 +293,6 @@ public final class StagedParquetPartitionReader
     // Future.get().
     releaseGpuSemaphoreFromTaskThread();
     List<Future<TimedFooter>> footerFutures = new ArrayList<>();
-    List<FooterResult> footers = new ArrayList<>();
     for (IcebergPartitionedFile file : files) {
       checkOpen();
       Future<TimedFooter> future = pools.executor().submit(() ->
@@ -311,41 +309,60 @@ public final class StagedParquetPartitionReader
       }
       footerFutures.add(future);
     }
+
+    // Consume footers in file-list order and hand every closed subtask to a worker immediately.
+    // Footers keep resolving concurrently while earlier subtasks already buffer their data, so
+    // the footer barrier overlaps data I/O instead of serializing in front of it. Feeding the
+    // session in file order keeps the plan identical to the full-barrier plan.
+    StableGreedyReadPlanner.Session session = planner.newSession();
     for (Future<TimedFooter> future : footerFutures) {
       long waitStart = System.nanoTime();
       TimedFooter timedFooter = getFooterFuture(future);
       adapter.onFooterWait(System.nanoTime() - waitStart);
-      FooterResult footer = timedFooter.footer;
       adapter.onFooterCompleted(timedFooter.footerNanos);
       checkOpen();
-      footers.add(footer);
+      for (ReadSubtask subtask : session.add(timedFooter.footer)) {
+        submitSubtask(subtask);
+      }
     }
-
+    for (ReadSubtask subtask : session.finish()) {
+      submitSubtask(subtask);
+    }
     synchronized (lifecycleLock) {
       checkOpen();
-      List<ReadSubtask> plan = planner.plan(footers);
-      for (ReadSubtask subtask : plan) {
-        checkOpen();
-        CompletableFuture<Completion> completionFuture = new CompletableFuture<>();
-        pendingResults.add(completionFuture);
-        // Record terminal futures in the order they actually finish. whenComplete runs
-        // immediately if a very small subtask completed before this callback could be installed.
-        completionFuture.whenComplete(
-            (completion, error) -> completedResults.offer(completionFuture));
-        pools.executor().submit(() -> runWorker(subtask, completionFuture));
-      }
-      remainingResults = pendingResults.size();
       initialized = true;
     }
   }
 
+  /** Register one planned subtask and hand it to a blocking worker. */
+  private void submitSubtask(ReadSubtask subtask) {
+    CompletableFuture<Completion> completionFuture = new CompletableFuture<>();
+    synchronized (lifecycleLock) {
+      checkOpen();
+      pendingResults.add(completionFuture);
+      remainingResults += 1;
+    }
+    // Record terminal futures in the order they actually finish. whenComplete runs immediately
+    // if a very small subtask completed before this callback could be installed.
+    completionFuture.whenComplete(
+        (completion, error) -> completedResults.offer(completionFuture));
+    try {
+      pools.executor().submit(() -> runWorker(subtask, completionFuture));
+    } catch (Throwable submitError) {
+      // Surface a rejected submission through the normal claim path so the registered result
+      // can never strand the task thread, then abort initialization.
+      completionFuture.completeExceptionally(submitError);
+      throw submitError;
+    }
+  }
+
   /**
-   * Execute one subtask end-to-end on a shared worker and hold the worker slot until handover.
+   * Execute one subtask end-to-end on a shared worker.
    *
-   * <p>The slot is released when the task thread claims the published result (or when close
-   * cleanup reclaims it), so the number of allocated-but-undecoded subtask outputs on an executor
-   * can never exceed the shared pool size. A failed subtask publishes its failure and releases
-   * the slot immediately: there is no buffer to hand over.</p>
+   * <p>The subtask counts as finished once its completion is published: the sealed output is
+   * already spillable at that point, so it waits for decode in the completion queue under normal
+   * host-memory management while this worker slot immediately starts the next queued subtask.
+   * Worker occupancy therefore bounds the actively executing subtasks, not the decode backlog.</p>
    */
   private void runWorker(ReadSubtask subtask, CompletableFuture<Completion> completionFuture) {
     Completion completion;
@@ -358,9 +375,7 @@ public final class StagedParquetPartitionReader
     if (!completionFuture.complete(completion)) {
       // The public future contract is internal; this indicates a bug rather than a race.
       closeCompletionAfterAsync(completion);
-      return;
     }
-    completion.awaitHandover();
   }
 
   /**
@@ -961,9 +976,6 @@ public final class StagedParquetPartitionReader
     private final ReadSubtask subtask;
     private final StagedParquetOutput output;
     private final SubtaskStats stats;
-    // Released when the task thread picks this result, or by any cleanup path through close().
-    // The producing worker parks on this latch so its pool slot is held until handover.
-    private final CountDownLatch handover = new CountDownLatch(1);
     private boolean closed;
 
     private Completion(
@@ -984,35 +996,11 @@ public final class StagedParquetPartitionReader
           Objects.requireNonNull(stats, "stats"));
     }
 
-    /** Mark this result as picked by the task thread, freeing the parked worker slot. */
-    private void markClaimed() {
-      handover.countDown();
-    }
-
-    /**
-     * Park the producing worker until this result is claimed or cleaned up. An interrupt (for
-     * example a pool shutdown) ends the park immediately: the parked thread is pure backpressure
-     * and owns no state, so abandoning the wait is always safe.
-     */
-    private void awaitHandover() {
-      try {
-        handover.await();
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-      }
-    }
-
     @Override
     public synchronized void close() {
       if (!closed) {
         closed = true;
-        try {
-          output.close();
-        } finally {
-          // Every cleanup path funnels through close(), so a worker can never stay parked for a
-          // result that no task thread will pick.
-          handover.countDown();
-        }
+        output.close();
       }
     }
   }

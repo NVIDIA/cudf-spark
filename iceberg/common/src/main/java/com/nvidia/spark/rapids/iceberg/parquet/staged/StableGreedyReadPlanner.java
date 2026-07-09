@@ -35,9 +35,11 @@ import org.apache.spark.sql.types.StructType;
  * individual row group that exceeds a hard limit is retained as a standalone subtask, matching
  * the existing soft-limit behavior.</p>
  *
- * <p>The copied-data target is checked only when crossing to another source. Once a source has
- * been admitted to a subtask, its row groups remain together unless a row/GPU-byte limit requires
- * a split. A non-positive target disables cross-source combination while retaining row-group
+ * <p>The copied-data target is a subtask size target: once the accumulated encoded bytes reach
+ * it, the next row group starts a new subtask whether or not it comes from the same source. Small
+ * sources combine up to the target and a large source splits into multiple roughly target-sized
+ * subtasks, so one oversized file cannot monopolize a worker slot with an arbitrarily large
+ * buffer. A non-positive target disables cross-source combination while retaining row-group
  * batching within each source.</p>
  */
 public final class StableGreedyReadPlanner {
@@ -76,13 +78,43 @@ public final class StableGreedyReadPlanner {
       throw new IllegalArgumentException("footers must not contain null values");
     }
 
+    Session session = newSession();
     ArrayList<ReadSubtask> subtasks = new ArrayList<>();
-    ArrayList<SelectedBlock> selected = new ArrayList<>();
-    long selectedRows = 0L;
-    long selectedDataBytes = 0L;
-    long nextSubtaskId = 0L;
-
     for (FooterResult footer : footers) {
+      subtasks.addAll(session.add(footer));
+    }
+    subtasks.addAll(session.finish());
+    return Collections.unmodifiableList(subtasks);
+  }
+
+  /** Create an incremental planning session that consumes footers in file-list order. */
+  public Session newSession() {
+    return new Session();
+  }
+
+  /**
+   * Incremental planning state fed one footer at a time.
+   *
+   * <p>Feeding footers one by one produces exactly the subtasks of {@link #plan}: the greedy
+   * walk only ever inspects row groups seen so far, so a subtask can be published to a worker
+   * as soon as its closing decision is made instead of after the complete footer barrier. The
+   * caller must feed footers in file-list order to keep the plan stable.</p>
+   */
+  public final class Session {
+    private final ArrayList<SelectedBlock> selected = new ArrayList<>();
+    private long selectedRows;
+    private long selectedDataBytes;
+    private long nextSubtaskId;
+    private boolean finished;
+
+    private Session() {
+    }
+
+    /** Feed the next footer in file-list order and return the subtasks its row groups closed. */
+    public List<ReadSubtask> add(FooterResult footer) {
+      Objects.requireNonNull(footer, "footer");
+      ensureActive();
+      ArrayList<ReadSubtask> closed = new ArrayList<>();
       List<BlockMetaData> blocks = footer.getBlocks();
       for (int blockIndex = 0; blockIndex < blocks.size(); blockIndex++) {
         BlockMetaData block = blocks.get(blockIndex);
@@ -95,16 +127,14 @@ public final class StableGreedyReadPlanner {
         long blockDataBytes = encodedDataBytes(block);
         long candidateRows = Math.addExact(selectedRows, block.getRowCount());
         long candidateGpuBytes = estimateGpuBytes(candidateRows);
-        boolean crossesSourceBoundary = !selected.isEmpty()
-            && selected.get(selected.size() - 1).footer != footer;
 
         boolean shouldFlush = !selected.isEmpty()
-            && ((crossesSourceBoundary && hasReachedTarget(selectedDataBytes))
+            && (hasReachedTarget(selectedDataBytes)
                 || candidateRows > maxRows
                 || candidateGpuBytes > maxEstimatedGpuBytes
                 || !isCompatibleWithAll(selected, footer));
         if (shouldFlush) {
-          subtasks.add(buildSubtask(nextSubtaskId++, selected));
+          closed.add(buildSubtask(nextSubtaskId++, selected));
           selected.clear();
           selectedRows = 0L;
           selectedDataBytes = 0L;
@@ -114,12 +144,27 @@ public final class StableGreedyReadPlanner {
         selectedRows = Math.addExact(selectedRows, block.getRowCount());
         selectedDataBytes = Math.addExact(selectedDataBytes, blockDataBytes);
       }
+      return closed;
     }
 
-    if (!selected.isEmpty()) {
-      subtasks.add(buildSubtask(nextSubtaskId, selected));
+    /** Flush the final open subtask after the last footer has been fed. */
+    public List<ReadSubtask> finish() {
+      ensureActive();
+      finished = true;
+      if (selected.isEmpty()) {
+        return Collections.emptyList();
+      }
+      List<ReadSubtask> last =
+          Collections.singletonList(buildSubtask(nextSubtaskId, selected));
+      selected.clear();
+      return last;
     }
-    return Collections.unmodifiableList(new ArrayList<>(subtasks));
+
+    private void ensureActive() {
+      if (finished) {
+        throw new IllegalStateException("planning session is finished");
+      }
+    }
   }
 
   private boolean hasReachedTarget(long selectedDataBytes) {

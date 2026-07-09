@@ -438,7 +438,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     assert(oversized.asScala.map(_.getRowCount) === Seq(6L, 1L))
   }
 
-  test("copied-data target is enforced only when crossing a source boundary") {
+  test("copied-data target caps a subtask within and across sources") {
     val mib = 1024L * 1024L
     val target = 64L * mib
     val file0 = footer(0, oneColumnParquetSchema, oneColumnReadSchema, Seq(
@@ -453,13 +453,67 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       Int.MaxValue, Long.MaxValue, target, oneColumnReadSchema)
       .plan(Seq(file0, file1, file2).asJava)
 
-    // file0 is below the target, so file1 is admitted. Its second row group must stay with its
-    // first even though the combined subtask has crossed 64 MiB. The target is consulted again
-    // only at the boundary before file2.
-    assert(planShape(plan) === Seq((0L, 3L, Seq(0, 1)), (1L, 1L, Seq(2))))
-    assert(plan.get(0).getFileSlices.get(1).getBlocks.size() === 2)
-    assert(plan.get(0).getDataSizeBytes === 120L * mib)
-    assert(plan.get(1).getDataSizeBytes === 1L * mib)
+    // The target is a subtask-size target. file0 is below it, so file1's first row group is
+    // admitted; the subtask has then reached 64 MiB, so file1's second row group starts a new
+    // subtask even though it comes from an already-admitted source, and file2 combines with it.
+    assert(planShape(plan) === Seq((0L, 2L, Seq(0, 1)), (1L, 2L, Seq(1, 2))))
+    assert(plan.get(0).getDataSizeBytes === 80L * mib)
+    assert(plan.get(1).getDataSizeBytes === 41L * mib)
+  }
+
+  test("copied-data target splits one large file into multiple subtasks") {
+    val mib = 1024L * 1024L
+    val target = 64L * mib
+    val largeFile = footer(0, oneColumnParquetSchema, oneColumnReadSchema, Seq(
+      oneColumnBlock(rows = 1L, offset = 100L, size = 40L * mib),
+      oneColumnBlock(rows = 1L, offset = 100L + 40L * mib, size = 40L * mib),
+      oneColumnBlock(rows = 1L, offset = 100L + 80L * mib, size = 40L * mib)))
+
+    val plan = new StableGreedyReadPlanner(
+      Int.MaxValue, Long.MaxValue, target, oneColumnReadSchema)
+      .plan(Seq(largeFile).asJava)
+    assert(planShape(plan) === Seq((0L, 2L, Seq(0)), (1L, 1L, Seq(0))))
+    assert(plan.get(0).getDataSizeBytes === 80L * mib)
+    assert(plan.get(1).getDataSizeBytes === 40L * mib)
+
+    // One row group larger than the whole target still forms a standalone subtask.
+    val oversized = footer(1, oneColumnParquetSchema, oneColumnReadSchema, Seq(
+      oneColumnBlock(rows = 1L, offset = 100L, size = 100L * mib),
+      oneColumnBlock(rows = 1L, offset = 100L + 100L * mib, size = 1L * mib)))
+    val oversizedPlan = new StableGreedyReadPlanner(
+      Int.MaxValue, Long.MaxValue, target, oneColumnReadSchema)
+      .plan(Seq(oversized).asJava)
+    assert(planShape(oversizedPlan) === Seq((0L, 1L, Seq(1)), (1L, 1L, Seq(1))))
+    assert(oversizedPlan.get(0).getDataSizeBytes === 100L * mib)
+    assert(oversizedPlan.get(1).getDataSizeBytes === 1L * mib)
+  }
+
+  test("incremental planning emits subtasks before later footers are fed") {
+    val mib = 1024L * 1024L
+    val target = 64L * mib
+    val largeFile = footer(0, oneColumnParquetSchema, oneColumnReadSchema, Seq(
+      oneColumnBlock(rows = 1L, offset = 100L, size = 40L * mib),
+      oneColumnBlock(rows = 1L, offset = 100L + 40L * mib, size = 40L * mib),
+      oneColumnBlock(rows = 1L, offset = 100L + 80L * mib, size = 40L * mib)))
+    val tail = footer(1, oneColumnParquetSchema, oneColumnReadSchema, Seq(
+      oneColumnBlock(rows = 1L, offset = 100L, size = 1L * mib)))
+    val planner = new StableGreedyReadPlanner(
+      Int.MaxValue, Long.MaxValue, target, oneColumnReadSchema)
+
+    val session = planner.newSession()
+    val fromLarge = session.add(largeFile)
+    // The first two row groups reach the target, so their subtask is published while only the
+    // first footer has been fed.
+    assert(planShape(fromLarge) === Seq((0L, 2L, Seq(0))))
+    val fromTail = session.add(tail)
+    assert(fromTail.isEmpty)
+    val fin = session.finish()
+    assert(planShape(fin) === Seq((1L, 2L, Seq(0, 1))))
+
+    // Streamed planning is identical to full-barrier planning.
+    val batch = planner.plan(Seq(largeFile, tail).asJava)
+    assert(planShape(batch) ===
+      planShape((fromLarge.asScala ++ fromTail.asScala ++ fin.asScala).asJava))
   }
 
   test("cross-file combination requires compatibility and a positive target") {
@@ -720,7 +774,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  test("subtasks submit IO in order and decode whichever subtask completes first") {
+  test("concurrent subtasks decode whichever completes first") {
     val sourceCount = 2
     val tracker = new SourceReadTracker(sourceCount)
     val sourceBytes = Array.tabulate[Byte](1024)(index => (index & 0xff).toByte)
@@ -767,11 +821,12 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
         override def call(): Boolean = reader.hasNext()
       })
 
-      // With two workers available, both blocking subtasks run their I/O concurrently, and the
-      // async submissions still observe plan order through the FIFO pool.
+      // With two workers available, both blocking subtasks run their I/O concurrently. The FIFO
+      // pool starts them in plan order, but two already-running workers give no cross-thread
+      // ordering guarantee for the instant each async submission is observed.
       assert(tracker.firstTwoStarted.await(10, TimeUnit.SECONDS))
       assert(tracker.startedCalls.get() === 2)
-      assert(tracker.calls.asScala.map(_._1).toSeq === Seq(0, 1))
+      assert(tracker.calls.asScala.map(_._1).toSet === Set(0, 1))
 
       // Finish the second subtask first. Submission order is not completion order, so the task
       // thread must not block this ready result behind subtask 0.
@@ -797,7 +852,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  test("a completed subtask holds its worker slot until the task thread picks it") {
+  test("a combined subtask frees its worker before the task thread picks it") {
     val sourceCount = 3
     val tracker = new SourceReadTracker(sourceCount)
     val sourceBytes = Array.tabulate[Byte](1024)(index => (index & 0xff).toByte)
@@ -825,7 +880,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
         parquetData.close()
         if (decodeCalls.incrementAndGet() == 1) {
           // Keep the task thread busy inside its first decode, exactly like a long GPU stage,
-          // so the next completed subtask stays unclaimed.
+          // so later completions stay unclaimed while workers publish them.
           assert(firstDecodeGate.await(30, TimeUnit.SECONDS))
         }
         Collections.singletonList(new ColumnarBatch(
@@ -850,33 +905,31 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
         override def call(): Boolean = reader.hasNext()
       })
 
-      // A single worker bounds the in-flight subtasks to one.
+      // A single worker bounds the actively executing subtasks to one.
       assert(tracker.firstStarted.await(10, TimeUnit.SECONDS))
       assert(tracker.startedCalls.get() === 1)
 
-      // Claiming subtask 0 frees the worker while the task thread is stuck in decode; the worker
-      // then starts subtask 1.
+      // Completing subtask 0 lets the task thread claim it and enter the gated decode; the freed
+      // worker starts subtask 1.
       tracker.release(1)
       assert(tracker.firstTwoStarted.await(10, TimeUnit.SECONDS))
 
-      // Subtask 1 completes and is published, but its worker must keep the only pool slot until
-      // the task thread picks the result. The task thread is still inside decode, so subtask 2
-      // must not start.
+      // Subtask 1 publishes its completion and immediately frees the only pool slot, so
+      // subtask 2 starts even though the task thread is still inside decode and nobody has
+      // picked subtask 1.
       tracker.release(1)
-      Thread.sleep(200)
-      assert(tracker.startedCalls.get() === 2)
-
-      // Let the task thread finish decoding and claim subtask 1; only then may subtask 2 start.
-      firstDecodeGate.countDown()
-      assert(hasNext.get(10, TimeUnit.SECONDS))
-      reader.next().close()
-      val secondHasNext = caller.submit(new java.util.concurrent.Callable[Boolean] {
-        override def call(): Boolean = reader.hasNext()
-      })
       assert(tracker.allStarted.await(10, TimeUnit.SECONDS))
       assert(tracker.startedCalls.get() === 3)
       tracker.release(1)
-      assert(secondHasNext.get(10, TimeUnit.SECONDS))
+
+      // Unblock the first decode and drain the remaining completions.
+      firstDecodeGate.countDown()
+      assert(hasNext.get(10, TimeUnit.SECONDS))
+      reader.next().close()
+      while (reader.hasNext()) {
+        reader.next().close()
+      }
+      assert(tracker.writeFailures.isEmpty)
     } finally {
       firstDecodeGate.countDown()
       tracker.release(sourceCount * 2)
@@ -1184,6 +1237,77 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       assert(reader.stagedParquetOptions(oneColumnReadSchema, oneColumnParquetSchema) != null)
     } finally {
       reader.close()
+    }
+  }
+
+  test("subtask I/O starts before the last footer resolves") {
+    val tracker = new SourceReadTracker(3)
+    val sourceBytes = Array.tabulate[Byte](1024)(index => (index & 0xff).toByte)
+    val input0 = new BlockingVectoredInput(0, sourceBytes, tracker)
+    val input1 = new BlockingVectoredInput(1, sourceBytes, tracker)
+    val file0 = footerWithInput(0, oneColumnParquetSchema, oneColumnReadSchema, Seq(
+      oneColumnBlock(rows = 1L, offset = 100L, size = 4L),
+      oneColumnBlock(rows = 1L, offset = 200L, size = 4L)), input0)
+    val file1 = footerWithInput(1, oneColumnParquetSchema, oneColumnReadSchema, Seq(
+      oneColumnBlock(rows = 1L, offset = 300L, size = 4L)), input1)
+    val scanFiles = Seq(file0, file1).map(_.getFile)
+    val lastFooterGate = new CountDownLatch(1)
+    val adapter = new TestAdapter {
+      override def readAndFilterFooter(file: IcebergPartitionedFile): FooterResult = {
+        val result = Seq(file0, file1).find(_.getFile eq file).get
+        if (result eq file1) {
+          // Hold the last footer hostage so the test can observe earlier subtask I/O running.
+          assert(lastFooterGate.await(30, TimeUnit.SECONDS))
+        }
+        result
+      }
+
+      override def decodeAndPostProcess(
+          subtask: ReadSubtask,
+          parquetData: HostMemoryBuffer): JIterator[ColumnarBatch] = {
+        parquetData.close()
+        Collections.emptyList[ColumnarBatch]().iterator()
+      }
+    }
+
+    // Bound the non-pinned host allocations that back staged outputs in these tests.
+    HostAlloc.initialize(1L << 26)
+    // maxRows = 1 closes a subtask per row group, so file0 publishes its first subtask while
+    // file1's footer is still pending.
+    val reader = new StagedParquetPartitionReader(
+      scanFiles.asJava,
+      adapter,
+      oneColumnReadSchema,
+      1,
+      Long.MaxValue,
+      Long.MaxValue,
+      2,
+      null)
+    val caller = Executors.newSingleThreadExecutor()
+    try {
+      val hasNext = caller.submit(new java.util.concurrent.Callable[Boolean] {
+        override def call(): Boolean = reader.hasNext()
+      })
+
+      // The streamed plan hands file0's first subtask to a worker, and its data read begins,
+      // all while the last footer has not resolved.
+      assert(tracker.firstStarted.await(10, TimeUnit.SECONDS))
+      assert(tracker.startedCalls.get() === 1)
+
+      lastFooterGate.countDown()
+      tracker.release(1)
+      assert(tracker.firstTwoStarted.await(10, TimeUnit.SECONDS))
+      tracker.release(1)
+      assert(tracker.allStarted.await(10, TimeUnit.SECONDS))
+      tracker.release(1)
+      assert(!hasNext.get(10, TimeUnit.SECONDS))
+      assert(tracker.writeFailures.isEmpty)
+    } finally {
+      lastFooterGate.countDown()
+      tracker.release(6)
+      reader.close()
+      caller.shutdownNow()
+      HostAlloc.initialize(-1L)
     }
   }
 
