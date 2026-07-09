@@ -34,11 +34,18 @@ def CUDA_NAME = 'cuda12.0.1' // hardcode cuda version for docker build part
 def PREMERGE_DOCKERFILE = 'jenkins/Dockerfile-blossom.ubuntu'
 def IMAGE_PREMERGE // temp image for premerge test
 def IMAGE_DB = pod.getCPUYAML("${common.ARTIFACTORY_NAME}/sw-spark-docker/spark:rapids-databricks-ubuntu22")
-def IMAGE_SKILLS = "${common.ARTIFACTORY_NAME}/sw-spark-docker/plugin:skills-premerge-rockylinux8-cuda12.9.1-blossom-dev"
+// Skills uses a separate Rocky 8 toolchain. Keep this in sync with the Skills Dockerfile
+// and the Docker Manager stable image tag.
+def SKILLS_CUDA_VERSION = '12.9.1'
+def SKILLS_PREMERGE_DOCKERFILE = 'skills/ci/Dockerfile.pre-merge'
+def IMAGE_SKILLS = "${common.ARTIFACTORY_NAME}/sw-spark-docker/plugin:" +
+    "skills-premerge-rockylinux8-cuda${SKILLS_CUDA_VERSION}-blossom-dev"
 def PREMERGE_TAG
+def SKILLS_PREMERGE_TAG
 def skipped = false
 def db_build = false
 def skills_build = false
+def TEMP_SKILLS_IMAGE_BUILD = false
 def normal_build = true
 def sourcePattern = 'shuffle-plugin/src/main/scala/,udf-compiler/src/main/scala/,' +
     'sql-plugin/src/main/java/,sql-plugin/src/main/scala/'
@@ -118,9 +125,11 @@ pipeline {
                     if (changedFiles) {
                         skills_build = changedFiles.any { it.startsWith('skills/') }
                         normal_build = changedFiles.any { !it.startsWith('skills/') }
+                        TEMP_SKILLS_IMAGE_BUILD = changedFiles.contains(SKILLS_PREMERGE_DOCKERFILE)
                     }
                     echo "Changed files: ${changedFiles ?: 'none detected'}"
-                    echo "Premerge selection: normal=${normal_build}, skills=${skills_build}"
+                    echo "Premerge selection: normal=${normal_build}, skills=${skills_build}, " +
+                        "skillsImage=${TEMP_SKILLS_IMAGE_BUILD}"
 
                     // check if need trigger databricks CI build
                     if (title ==~ /.*\[databricks\].*/ ||
@@ -176,6 +185,38 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                 }
             }
         } // end of Build docker image
+
+        stage('Build Skills docker image') {
+            when {
+                beforeAgent true
+                expression {
+                    !skipped && TEMP_SKILLS_IMAGE_BUILD
+                }
+            }
+
+            agent {
+                kubernetes {
+                    label "skills-premerge-docker-${BUILD_TAG}"
+                    cloud "${common.CLOUD_NAME}"
+                    yaml pod.getDockerBuildYAML()
+                }
+            }
+
+            steps {
+                script {
+                    unstash "source_tree"
+                    container('cpu') {
+                        SKILLS_PREMERGE_TAG = "skills-premerge-rockylinux8-" +
+                            "cuda${SKILLS_CUDA_VERSION}-${BUILD_TAG}"
+                        IMAGE_SKILLS = "${ARTIFACTORY_NAME}/sw-spark-docker-local/plugin:" +
+                            "${SKILLS_PREMERGE_TAG}"
+                        docker.build(IMAGE_SKILLS,
+                            "--network=host -f ${SKILLS_PREMERGE_DOCKERFILE} .")
+                        uploadDocker(IMAGE_SKILLS)
+                    }
+                }
+            }
+        } // end of Build Skills docker image
 
         stage('Premerge Test') {
             when {
@@ -461,6 +502,11 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                 if (normal_build && TEMP_IMAGE_BUILD) {
                     container('cpu') {
                         deleteDockerTempTag("${PREMERGE_TAG}") // clean premerge temp image
+                    }
+                }
+                if (TEMP_SKILLS_IMAGE_BUILD) {
+                    container('cpu') {
+                        deleteDockerTempTag(SKILLS_PREMERGE_TAG)
                     }
                 }
             }
