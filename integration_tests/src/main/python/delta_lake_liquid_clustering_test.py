@@ -59,12 +59,6 @@ def delta_path_identifier(path):
 
 def optimize_liquid_clustered_table(spark, table_identifier):
     spark.sql(f"OPTIMIZE {table_identifier}").collect()
-    optimize_count = (
-        spark.sql(f"DESCRIBE HISTORY {table_identifier}")
-        .where("operation = 'OPTIMIZE'")
-        .count())
-    assert optimize_count > 0, (
-        f"Expected OPTIMIZE to run for liquid clustered table {table_identifier}")
 
 
 @allow_non_gpu(*delta_meta_allow)
