@@ -199,6 +199,18 @@ class StringOperatorsSuite extends SparkQueryCompareTestSuite {
 }
 
 class RegExpUtilsSuite extends AnyFunSuite {
+  test("countGroups ignores non-capturing groups") {
+    val cases = Seq(
+      "(?:(a))" -> 1,
+      "(?:(a)(b))" -> 2,
+      "(?:(a)|(b))" -> 2,
+      "(x)(?:(a)|(b))(y)" -> 4)
+
+    cases.foreach { case (pattern, expected) =>
+      assert(GpuRegExpUtils.countGroups(pattern) == expected)
+    }
+  }
+
   test("get list of choices from regexp for multi-replace") {
     val regexChoices = Map(
       "aa|bb" -> Seq("aa", "bb"),

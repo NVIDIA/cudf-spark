@@ -559,6 +559,15 @@ def test_regexp_extract():
                 'regexp_extract(a, "^([a-d]*)([0-9]*)(\\\\/[a-d]*)$", 3)'),
         conf=_regexp_conf)
 
+    capture_group_gen = mk_str_gen('[abcd]{1,2}')
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: unary_op_df(spark, capture_group_gen).selectExpr(
+                'regexp_extract(a, "(a)|(b)", 2)',
+                'regexp_extract(a, "(?:(a)(b))", 2)',
+                'regexp_extract(a, "((a)|(b))", 3)',
+                'regexp_extract(a, "(a)(b)|(c)(d)", 4)'),
+        conf=_regexp_conf)
+
 def test_regexp_extract_no_match():
     gen = mk_str_gen('[abcd]{1,3}[0-9]{1,3}[abcd]{1,3}')
     assert_gpu_and_cpu_are_equal_collect(
@@ -594,6 +603,14 @@ def test_regexp_extract_idx_out_of_bounds():
             lambda spark: unary_op_df(spark, gen).selectExpr(
                 'regexp_extract(a, "^([a-d]*)([0-9]*)([a-d]*)$", 4)').collect(),
             error_message = message,
+            conf=_regexp_conf)
+
+    non_capturing_message = "Regex group count is 1, but the specified group index is 2" if is_before_spark_350() and not (is_databricks_runtime() and spark_version() == "3.4.1") else \
+        "[INVALID_PARAMETER_VALUE.REGEX_GROUP_INDEX] The value of parameter(s) `idx` in `regexp_extract` is invalid: Expects group index between 0 and 1, but got 2."
+    assert_gpu_and_cpu_error(
+            lambda spark: unary_op_df(spark, gen).selectExpr(
+                'regexp_extract(a, "(?:(a))", 2)').collect(),
+            error_message = non_capturing_message,
             conf=_regexp_conf)
 
 def test_regexp_extract_multiline():
@@ -945,6 +962,17 @@ def test_regexp_extract_all_idx_positive(slices):
             ),
         conf=_regexp_conf)
 
+    capture_group_gen = mk_str_gen('[abcd]{1,2}')
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: unary_op_df(
+                spark, capture_group_gen, num_slices=slices).selectExpr(
+                'regexp_extract_all(a, "(a)|(b)", 2)',
+                'regexp_extract_all(a, "(?:(a)(b))", 2)',
+                'regexp_extract_all(a, "((a)|(b))", 3)',
+                'regexp_extract_all(a, "(a)(b)|(c)(d)", 4)',
+            ),
+        conf=_regexp_conf)
+
 @allow_non_gpu('ProjectExec', 'RegExpExtractAll')
 def test_regexp_extract_all_idx_negative():
     message = "The specified group index cannot be less than zero" if is_before_spark_350() and not (is_databricks_runtime() and spark_version() == "3.4.1") else \
@@ -968,6 +996,15 @@ def test_regexp_extract_all_idx_out_of_bounds():
                 'regexp_extract_all(a, "([a-d]+).*([0-9])", 3)'
             ).collect(),
         error_message=message,
+        conf=_regexp_conf)
+
+    non_capturing_message = "Regex group count is 1, but the specified group index is 2" if is_before_spark_350() and not (is_databricks_runtime() and spark_version() == "3.4.1") else \
+        "[INVALID_PARAMETER_VALUE.REGEX_GROUP_INDEX] The value of parameter(s) `idx` in `regexp_extract_all` is invalid: Expects group index between 0 and 1, but got 2."
+    assert_gpu_and_cpu_error(
+            lambda spark: unary_op_df(spark, gen).selectExpr(
+                'regexp_extract_all(a, "(?:(a))", 2)'
+            ).collect(),
+        error_message=non_capturing_message,
         conf=_regexp_conf)
 
 def test_rlike_unicode_support():

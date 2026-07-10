@@ -547,6 +547,10 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     doTranspileTest("(ab)+(c)(d)", "(ab)+(?:c)(?:d)", 1)
     doTranspileTest("(ab)+(c)(d)", "(?:ab)+(c)(?:d)", 2)
     doTranspileTest("([a-z0-9]((([abcd](\\d?)))))", "(?:[a-z0-9](?:((?:[abcd](?:[0-9]?)))))", 3)
+    doTranspileTest("(a)|(b)", "(?:a)|(b)", 2)
+    doTranspileTest("(?:(a)(b))", "(?:(?:a)(b))", 2)
+    doTranspileTest("((a)|(b))", "(?:(?:a)|(b))", 3)
+    doTranspileTest("(a)(b)|(c)(d)", "(?:a)(?:b)|(c)(?:d)", 3)
     doTranspileTest("ab", "ab", 1)
   }
 

@@ -820,16 +820,68 @@ def test_parquet_read_merge_schema_from_conf(spark_tmp_path, v1_enabled_list, re
             lambda spark : spark.read.parquet(data_path),
             conf=all_confs)
 
+missing_struct_confs = [
+    {
+        'spark.sql.legacy.parquet.returnNullStructIfAllFieldsMissing': False,
+        'spark.sql.optimizer.nestedSchemaPruning.enabled': True,
+    },
+    {
+        'spark.sql.legacy.parquet.returnNullStructIfAllFieldsMissing': False,
+        'spark.sql.optimizer.nestedSchemaPruning.enabled': False,
+    },
+    {
+        'spark.sql.legacy.parquet.returnNullStructIfAllFieldsMissing': True,
+        'spark.sql.optimizer.nestedSchemaPruning.enabled': True,
+    },
+] if spark_version() >= "4.1.0" else [{}]
+
+
+@pytest.mark.parametrize('missing_struct_conf', missing_struct_confs, ids=idfn)
 @pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
 @pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
-def test_read_parquet_with_empty_clipped_schema(spark_tmp_path, v1_enabled_list, reader_confs):
-    data_path = spark_tmp_path + '/PARQUET_DATA'
+def test_read_parquet_with_empty_clipped_schema(
+        spark_tmp_path, v1_enabled_list, reader_confs, missing_struct_conf):
+    data_path = spark_tmp_path + '/PARQUET_DATA_FLAT'
     with_cpu_session(
-        lambda spark: gen_df(spark, [('a', int_gen)], length=100).write.parquet(data_path))
+        lambda spark: spark.range(100).selectExpr('cast(id as int) as a').write.parquet(data_path))
     schema = StructType([StructField('b', IntegerType()), StructField('c', StringType())])
-    all_confs = copy_and_update(reader_confs, {'spark.sql.sources.useV1SourceList': v1_enabled_list})
+    all_confs = copy_and_update(reader_confs, missing_struct_conf)
+    all_confs['spark.sql.sources.useV1SourceList'] = v1_enabled_list
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.schema(schema).parquet(data_path), conf=all_confs)
+
+    nested_data_path = spark_tmp_path + '/PARQUET_DATA_NESTED'
+    with_cpu_session(
+        lambda spark: spark.sql("""
+            SELECT named_struct('_1', 1, '_2', 'a') AS _1
+            UNION ALL SELECT named_struct('_1', 2, '_2', cast(null AS string))
+            UNION ALL SELECT cast(null AS struct<_1:int,_2:string>)
+            """).write.parquet(nested_data_path))
+    nested_schema = StructType([StructField('_1', StructType([
+        StructField('_3', IntegerType()), StructField('_4', LongType())]))])
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(nested_schema).parquet(nested_data_path), conf=all_confs)
+
+    nested_map_data_path = spark_tmp_path + '/PARQUET_DATA_NESTED_MAP'
+    with_cpu_session(
+        lambda spark: spark.sql("""
+            SELECT named_struct('_1', map(1, named_struct('_1', 1, '_2', 'a'))) AS _1
+            UNION ALL SELECT cast(null AS struct<_1:map<int,struct<_1:int,_2:string>>>)
+            """).write.parquet(nested_map_data_path))
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(nested_schema).parquet(nested_map_data_path),
+        conf=all_confs)
+
+    nested_array_data_path = spark_tmp_path + '/PARQUET_DATA_NESTED_ARRAY'
+    with_cpu_session(
+        lambda spark: spark.sql("""
+            SELECT named_struct('_1', array(1, 2, cast(null AS int))) AS _1
+            UNION ALL SELECT cast(null AS struct<_1:array<int>>)
+            """).write.parquet(nested_array_data_path))
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(nested_schema).parquet(nested_array_data_path),
+        conf=all_confs)
+
 
 @pytest.mark.parametrize('reader_confs', reader_opt_confs)
 @pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
