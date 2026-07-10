@@ -871,13 +871,13 @@ def test_from_json_map_with_arrays_duplicate_keys_xfail():
         conf=_enable_all_types_conf)
 
 @allow_non_gpu(*non_utc_allow)
-@pytest.mark.xfail(condition=is_before_spark_400(),
-                   reason="Nested object/array elements: GPU returns each element's raw JSON "
-                          "substring, differing from Spark's re-serialization on Spark < 4.0 "
-                          "(whitespace / key formatting). Spark 4.0+ enableExactStringParsing "
-                          "(default true) returns raw source bytes matching the GPU, so it is "
-                          "asserted as hard equality there. docs/compatibility.md "
-                          "'from_json Function'; "
+@pytest.mark.xfail(reason="Nested object/array elements: the GPU returns each element's raw JSON "
+                          "substring, while Spark re-serializes them (whitespace and key formatting "
+                          "normalized). This differs on ALL Spark versions: from_json on a string "
+                          "column parses via a Reader (CreateJacksonParser.utf8String), so Spark "
+                          "4.0's enableExactStringParsing raw-bytes path (which requires a "
+                          "byte[]/file source) is unreachable and the CPU always re-serializes "
+                          "non-string tokens. docs/compatibility.md 'from_json Function'; "
                           "https://github.com/NVIDIA/cudf-spark/issues/15240",
                    strict=False)
 def test_from_json_map_with_arrays_nested_elements_xfail():
@@ -894,17 +894,19 @@ def test_from_json_map_with_arrays_nested_elements_xfail():
 @allow_non_gpu(*non_utc_allow)
 @pytest.mark.skipif(is_before_spark_400(),
                     reason="spark.sql.json.enableExactStringParsing exists only in Spark 4.0+")
-@pytest.mark.xfail(reason="With enableExactStringParsing=false, Spark 4.0+ re-serializes "
-                          "non-string tokens as Spark < 4.0 does, so the GPU raw elements "
-                          "still diverge from the CPU here. Confirms the divergence is "
-                          "exact-parsing-gated, not purely version-gated. "
+@pytest.mark.xfail(reason="Regression guard that enableExactStringParsing is a no-op for from_json "
+                          "on a string column: with the option explicitly false the GPU raw "
+                          "elements diverge from the CPU exactly as they do with the default true, "
+                          "because from_json parses via a Reader (CreateJacksonParser.utf8String) "
+                          "and the option's raw-bytes path only applies to byte[]/file sources. "
                           "docs/compatibility.md 'from_json Function'; "
                           "https://github.com/NVIDIA/cudf-spark/issues/15240",
                    strict=False)
 def test_from_json_map_with_arrays_exact_string_parsing_off_xfail():
-    # Spark 4.0+ only: force enableExactStringParsing=false so the CPU re-serializes non-string
-    # tokens (the pre-4.0 behavior), reintroducing the raw-vs-rendered divergence the default-config
-    # xfails above no longer see. Guards against a regression on the explicit-false override.
+    # Spark 4.0+ only: force enableExactStringParsing=false to confirm the option is a no-op for
+    # from_json on a string column -- the CPU re-serializes non-string tokens (so the GPU raw
+    # elements still diverge) exactly as with the default true, because the option's raw-bytes path
+    # is unreachable for a Reader source.
     schema = StructType([StructField("a", StringType())])
     data = [
         ['{"a": [{"x": 1}]}'],       # nested object: GPU raw vs CPU re-serialized
@@ -919,12 +921,13 @@ def test_from_json_map_with_arrays_exact_string_parsing_off_xfail():
         conf=conf)
 
 @allow_non_gpu(*non_utc_allow)
-@pytest.mark.xfail(condition=is_before_spark_400(),
-                   reason="GPU keeps raw JSON number tokens; Spark < 4.0 re-renders them, so "
+@pytest.mark.xfail(reason="GPU keeps raw JSON number tokens; Spark re-renders them, so "
                           "non-canonical spellings differ (007->7, 1.00000->1.0, 1e2->100.0). "
-                          "Spark 4.0+ enableExactStringParsing (default true) keeps the raw "
-                          "token matching the GPU, so it is asserted as hard equality there. "
-                          "docs/compatibility.md 'from_json Function'; "
+                          "This differs on ALL Spark versions: from_json on a string column parses "
+                          "via a Reader (CreateJacksonParser.utf8String), so Spark 4.0's "
+                          "enableExactStringParsing raw-bytes path (which requires a byte[]/file "
+                          "source) is unreachable and the CPU always re-renders numbers via "
+                          "copyCurrentStructure. docs/compatibility.md 'from_json Function'; "
                           "https://github.com/NVIDIA/cudf-spark/issues/15240",
                    strict=False)
 def test_from_json_map_with_arrays_numeric_xfail():
@@ -962,12 +965,14 @@ def test_from_json_map_with_arrays_options(allow_single_quotes, allow_unquoted_c
         conf=_enable_all_types_conf)
 
 @allow_non_gpu(*non_utc_allow)
-@pytest.mark.xfail(condition=is_before_spark_400(),
-                   reason="GPU keeps the bare NaN/Infinity token under allowNonNumericNumbers; "
-                          "Spark < 4.0 re-serializes non-numeric numbers as quoted strings, so "
-                          "the elements differ. Spark 4.0+ enableExactStringParsing (default "
-                          "true) keeps the bare token matching the GPU, so it is asserted as "
-                          "hard equality there. docs/compatibility.md 'from_json Function'; "
+@pytest.mark.xfail(reason="GPU keeps the bare NaN/Infinity token under allowNonNumericNumbers; "
+                          "Spark re-serializes non-numeric numbers as quoted strings (NaN -> "
+                          "'NaN', Infinity -> 'Infinity'), so the elements differ. This differs on "
+                          "ALL Spark versions: from_json on a string column parses via a Reader "
+                          "(CreateJacksonParser.utf8String), so Spark 4.0's enableExactStringParsing "
+                          "raw-bytes path (which requires a byte[]/file source) is unreachable and "
+                          "the CPU always re-serializes non-string tokens. docs/compatibility.md "
+                          "'from_json Function'; "
                           "https://github.com/NVIDIA/cudf-spark/issues/15240",
                    strict=False)
 def test_from_json_map_with_arrays_nonnumeric_xfail():

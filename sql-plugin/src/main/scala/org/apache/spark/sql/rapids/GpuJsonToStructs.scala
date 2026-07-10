@@ -45,10 +45,12 @@ import org.apache.spark.sql.types._
  *    spellings differ (`007` -> `"7"` with `allowNumericLeadingZeros`, `1.00000` -> `"1.0"`,
  *    `1e2` -> `"100.0"`), and non-numeric numbers stay bare while Spark quotes them (`NaN` ->
  *    `"NaN"`, `Infinity` -> `"Infinity"`).
- * The escape-sequence case differs on all Spark versions (string tokens are always unescaped); the
- * nested-element and numeric/non-numeric cases apply to Spark < 4.0.0 (and Spark 4.0.0+ only with
- * `spark.sql.json.enableExactStringParsing` = `false`), because from 4.0.0 that option (default
- * `true`) returns the raw source bytes for non-string tokens, matching the GPU.
+ * All of these differ from Spark on ALL versions, including 4.0.0+: `from_json` on a string column
+ * parses via a Reader (Spark's `CreateJacksonParser.utf8String`), so Spark 4.0.0's
+ * `spark.sql.json.enableExactStringParsing` (default `true`) does not apply. Its raw-source-byte
+ * path (`JacksonParser`) fires only for `Array[Byte]` / file sources (e.g. `spark.read.json`), never
+ * a Reader, so the CPU always re-serializes non-string tokens (cases 2/3 via `copyCurrentStructure`)
+ * and always unescapes string tokens (case 1, via `getText`).
  * The following MATCH Spark and are NOT divergences: canonical elements whose raw text already
  * equals Spark's rendering (e.g. `1`, `1.5`, `true`); a map value that is not a JSON array and not
  * the JSON `null` literal nulls the whole row (PERMISSIVE bad-record); duplicate keys kept in

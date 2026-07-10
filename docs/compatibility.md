@@ -431,11 +431,12 @@ raw JSON substring rather than Spark's re-serialized form; and (3) numeric eleme
 whereas Spark re-renders numbers, so non-canonical spellings differ (`007` -> `"7"` with `allowNumericLeadingZeros`,
 `1.00000` -> `"1.0"`, `1e2` -> `"100.0"`) and non-numeric numbers stay bare while Spark quotes them (`NaN` ->
 `"NaN"`, `Infinity` -> `"Infinity"` with `allowNonNumericNumbers`); tokens already matching Spark's rendering
-(`1`, `1.5`, `true`) are unaffected. Cases (2) and (3) describe Spark before 4.0.0 (and Spark 4.0.0+ only when
-`spark.sql.json.enableExactStringParsing` is `false`): from Spark 4.0.0 that option defaults to `true` and makes
-the CPU return the raw source text for non-string JSON tokens, matching the GPU, so nested and numeric/non-numeric
-elements no longer differ there. Case (1) still differs on all Spark versions because JSON string tokens are
-always unescaped by Spark. For `MAP<STRING,ARRAY<STRING>>` a map value that is
+(`1`, `1.5`, `true`) are unaffected. All three cases differ from Spark on ALL versions, including 4.0.0+, because
+`from_json` on a string column parses via a Reader (Spark's `CreateJacksonParser.utf8String`): Spark 4.0.0's
+`spark.sql.json.enableExactStringParsing` (default `true`) preserves raw source text only for `Array[Byte]` / file
+sources (e.g. `spark.read.json`), never a Reader, so its raw path is unreachable here and the CPU always
+re-serializes non-string tokens (cases 2 and 3). Case (1) likewise differs on all versions because JSON string
+tokens are always unescaped by Spark. For `MAP<STRING,ARRAY<STRING>>` a map value that is
 neither a JSON array nor the JSON `null` literal (i.e. a scalar or object) makes the entire row null, matching
 Spark's PERMISSIVE bad-record handling. Duplicate keys are kept in document order, which matches Spark 3.5.x
 `from_json`; later Spark versions may de-duplicate per `spark.sql.mapKeyDedupPolicy`.
