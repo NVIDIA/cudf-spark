@@ -32,12 +32,9 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorCompletionService;
-import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import ai.rapids.cudf.HostMemoryBuffer;
@@ -60,9 +57,11 @@ import org.apache.spark.sql.vectorized.ColumnarBatch;
  * <p>The pipeline has a deliberately strict thread boundary:</p>
  * <ol>
  *   <li>Shared workers fetch metadata and perform Iceberg row-group filtering.</li>
- *   <li>The Spark task thread consumes footers in completion order, feeding an incremental
- *       planning session and submitting each closed subtask immediately, so a slow footer never
- *       stalls planning or data I/O for files whose footers already resolved.</li>
+ *   <li>Each footer job feeds the shared incremental planning session as it completes,
+ *       serialized on the session, and submits every closed subtask immediately. A slow footer
+ *       never stalls planning or data I/O for files whose footers already resolved, and the task
+ *       thread never waits for footers: it claims completed results while planning is still in
+ *       flight.</li>
  *   <li>Every planned subtask is enqueued to the shared pool in plan order, but each subtask
  *       executes as one blocking worker job: allocate the exact non-pinned output, copy cache
  *       hits, hand all cache-miss column-chunk reads to the async I/O engine, block until they
@@ -94,10 +93,20 @@ public final class StagedParquetPartitionReader
       new LinkedBlockingQueue<>();
   // A queue sentinel used solely to wake a task thread blocked in waitForNextCompletedResult().
   private final CompletableFuture<Completion> closeWakeup = new CompletableFuture<>();
+  // A queue sentinel that makes a blocked task thread re-check planning progress and failures.
+  private final CompletableFuture<Completion> planningWakeup = new CompletableFuture<>();
   private final AtomicBoolean closed = new AtomicBoolean();
   private final AtomicReference<Throwable> asynchronousCleanupFailure = new AtomicReference<>();
+  private final AtomicReference<Throwable> planningFailure = new AtomicReference<>();
+  private final AtomicInteger pendingFooters = new AtomicInteger();
 
+  // Fed by footer-completion continuations on pool threads; all access synchronizes on the
+  // session object itself.
+  private StableGreedyReadPlanner.Session session;
   private boolean initialized;
+  // Guarded by lifecycleLock together with remainingResults: the claim loop is terminal only
+  // when planning has completed and every registered result has been claimed.
+  private boolean planningComplete;
   private int remainingResults;
   private Iterator<ColumnarBatch> currentBatches;
   // Guarded by iteratorLock. Once the caller advances again, the previously returned batch has
@@ -187,7 +196,15 @@ public final class StagedParquetPartitionReader
             currentBatches = null;
           }
         }
-        if (remainingResults == 0) {
+        Throwable failure = planningFailure.get();
+        if (failure != null) {
+          throw propagate(failure);
+        }
+        boolean terminal;
+        synchronized (lifecycleLock) {
+          terminal = planningComplete && remainingResults == 0;
+        }
+        if (terminal) {
           if (!semaphoreReleasedForAdvance) {
             releaseGpuSemaphoreFromTaskThread();
           }
@@ -199,6 +216,10 @@ public final class StagedParquetPartitionReader
           releaseGpuSemaphoreFromTaskThread();
         }
         CompletableFuture<Completion> resultFuture = waitForNextCompletedResult();
+        if (resultFuture == planningWakeup) {
+          adapter.onResultWait(System.nanoTime() - waitStart);
+          continue;
+        }
         Completion completion = waitForResult(resultFuture);
         boolean resultPassedToDecode = false;
         Iterator<ColumnarBatch> decoded = null;
@@ -283,70 +304,105 @@ public final class StagedParquetPartitionReader
     }
   }
 
-  /** Submit all footers, then consume them in completion order, streaming subtasks to workers. */
-  private void initializeIfNeeded() throws Exception {
+  /** Submit all footer jobs; each drives incremental planning as it completes. */
+  private void initializeIfNeeded() {
     if (initialized) {
       return;
     }
     checkOpen();
-    // Footer submission/filtering and task-thread planning are CPU-only. Relinquish any permit
-    // still owned by this task before starting that work rather than waiting for the first
-    // completed footer.
+    // Footer fetch/filter runs on the shared pool and planning runs on whichever pool thread
+    // completes each footer, so the task thread never waits here: it proceeds straight to
+    // claiming completed results, and GPU decode overlaps both footer I/O and planning.
     releaseGpuSemaphoreFromTaskThread();
-    ExecutorCompletionService<TimedFooter> footerService =
-        new ExecutorCompletionService<>(pools.executor());
-    int submittedFooters = 0;
+    session = planner.newSession();
+    pendingFooters.set(files.size());
+    initialized = true;
+    if (files.isEmpty()) {
+      finishPlanning();
+      return;
+    }
     for (IcebergPartitionedFile file : files) {
       checkOpen();
-      footerService.submit(() ->
-          runAsTaskPoolThread(() -> {
-            long start = System.nanoTime();
-            FooterResult footer = adapter.readAndFilterFooter(file);
-            if (footer == null) {
-              throw new IllegalStateException("footer adapter returned null");
-            }
-            return new TimedFooter(footer, System.nanoTime() - start);
-          }));
-      submittedFooters++;
-      if (closed.get()) {
-        throw new CancellationException("staged reader closed while submitting footers");
-      }
-    }
-
-    // Consume footers in whichever order they complete and hand every closed subtask to a worker
-    // immediately, so one slow footer never stalls the planning and data I/O of files whose
-    // footers already resolved. Any feed order is correct: within one footer, row groups keep
-    // their file order, and compatibility rules make every resulting combination a valid
-    // synthetic file. The subtask grouping is therefore arrival-dependent rather than stable.
-    StableGreedyReadPlanner.Session session = planner.newSession();
-    for (int consumed = 0; consumed < submittedFooters; consumed++) {
-      long waitStart = System.nanoTime();
-      TimedFooter timedFooter = getFooterFuture(takeCompletedFooter(footerService));
-      adapter.onFooterWait(System.nanoTime() - waitStart);
-      adapter.onFooterCompleted(timedFooter.footerNanos);
-      checkOpen();
-      for (ReadSubtask subtask : session.add(timedFooter.footer)) {
-        submitSubtask(subtask);
-      }
-    }
-    for (ReadSubtask subtask : session.finish()) {
-      submitSubtask(subtask);
-    }
-    synchronized (lifecycleLock) {
-      checkOpen();
-      initialized = true;
+      pools.executor().submit(() -> runFooterJob(file));
     }
   }
 
-  /** Wait for whichever footer completes next or observe close without cancelling the callable. */
-  private Future<TimedFooter> takeCompletedFooter(
-      ExecutorCompletionService<TimedFooter> footerService) throws InterruptedException {
-    while (true) {
-      checkOpen();
-      Future<TimedFooter> future = footerService.poll(100L, TimeUnit.MILLISECONDS);
-      if (future != null) {
-        return future;
+  /**
+   * Fetch one footer and, on completion, feed it to the shared planning session.
+   *
+   * <p>Footers reach the session in whichever order they complete, so one slow footer never
+   * stalls the planning and data I/O of files whose footers already resolved. Any feed order is
+   * correct: within one footer, row groups keep their file order, and compatibility rules make
+   * every resulting combination a valid synthetic file. The subtask grouping is therefore
+   * arrival-dependent rather than stable. Synchronizing on the session serializes concurrent
+   * footer completions, including the per-task footer metric they publish.</p>
+   */
+  private void runFooterJob(IcebergPartitionedFile file) {
+    TimedFooter timedFooter;
+    try {
+      timedFooter = runAsTaskPoolThread(() -> {
+        long start = System.nanoTime();
+        FooterResult footer = adapter.readAndFilterFooter(file);
+        if (footer == null) {
+          throw new IllegalStateException("footer adapter returned null");
+        }
+        return new TimedFooter(footer, System.nanoTime() - start);
+      });
+    } catch (Throwable error) {
+      recordPlanningFailure(error);
+      footerDone();
+      return;
+    }
+    try {
+      synchronized (session) {
+        adapter.onFooterCompleted(timedFooter.footerNanos);
+        if (!closed.get() && planningFailure.get() == null) {
+          for (ReadSubtask subtask : session.add(timedFooter.footer)) {
+            submitSubtask(subtask);
+          }
+        }
       }
+    } catch (Throwable error) {
+      recordPlanningFailure(error);
+    } finally {
+      footerDone();
+    }
+  }
+
+  /** Record the first planning failure and wake the task thread so it can surface it. */
+  private void recordPlanningFailure(Throwable error) {
+    if (closed.get() && unwrap(error) instanceof CancellationException) {
+      // An expected consequence of close racing footer work, not a planning failure.
+      return;
+    }
+    planningFailure.compareAndSet(null, unwrap(error));
+    completedResults.offer(planningWakeup);
+  }
+
+  /** Flush the final subtask when the last footer resolves, then wake the task thread. */
+  private void footerDone() {
+    if (pendingFooters.decrementAndGet() == 0) {
+      finishPlanning();
+    }
+  }
+
+  private void finishPlanning() {
+    try {
+      synchronized (session) {
+        if (!closed.get() && planningFailure.get() == null) {
+          for (ReadSubtask subtask : session.finish()) {
+            submitSubtask(subtask);
+          }
+        }
+      }
+    } catch (Throwable error) {
+      recordPlanningFailure(error);
+    } finally {
+      synchronized (lifecycleLock) {
+        planningComplete = true;
+      }
+      // Wake a task thread blocked on the completion queue so it re-checks the terminal state.
+      completedResults.offer(planningWakeup);
     }
   }
 
@@ -770,30 +826,6 @@ public final class StagedParquetPartitionReader
       throw new RuntimeException(failure);
     }
     return result;
-  }
-
-  private TimedFooter getFooterFuture(Future<TimedFooter> future) throws Exception {
-    while (true) {
-      checkOpen();
-      try {
-        return future.get(100L, TimeUnit.MILLISECONDS);
-      } catch (TimeoutException ignored) {
-        // Polling lets an explicit close wake the task thread without canceling a footer callable
-        // that may still be using adapter state.
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        throw e;
-      } catch (ExecutionException e) {
-        Throwable cause = unwrap(e);
-        if (cause instanceof Exception) {
-          throw (Exception) cause;
-        }
-        if (cause instanceof Error) {
-          throw (Error) cause;
-        }
-        throw new RuntimeException(cause);
-      }
-    }
   }
 
   /** Wait for whichever subtask finishes next or return promptly when close wins the race. */
