@@ -105,7 +105,7 @@ class GpuStagedIcebergParquetReader(
 
   private def createReader()
   : StagedParquetPartitionReader = {
-    val targetParquetBytes = if (multiThreadConf.disableCombining) {
+    val combineThreshold = if (multiThreadConf.disableCombining) {
       0L
     } else {
       multiThreadConf.combineConf.combineThresholdSize
@@ -116,7 +116,7 @@ class GpuStagedIcebergParquetReader(
       expectedSparkSchema,
       conf.maxBatchSizeRows,
       conf.maxBatchSizeBytes,
-      targetParquetBytes,
+      combineThreshold,
       workerThreads,
       TaskContext.get())
   }

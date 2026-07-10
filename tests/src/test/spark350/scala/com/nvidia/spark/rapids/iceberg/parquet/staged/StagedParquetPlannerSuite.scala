@@ -699,7 +699,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  test("one worker submits all async sources without merging column-chunk ranges") {
+  test("every file downloads its fragment with one vectored call per column chunk") {
     val sourceCount = 4
     val tracker = new SourceReadTracker(sourceCount)
     val sourceBytes = Array.tabulate[Byte](2048)(index => (index & 0xff).toByte)
@@ -730,6 +730,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
 
     // Bound the non-pinned host allocations that back staged outputs in these tests.
     HostAlloc.initialize(1L << 26)
+    // Enough workers for every footer to chain straight into a concurrently running download.
     val reader = new StagedParquetPartitionReader(
       scanFiles.asJava,
       adapter,
@@ -737,7 +738,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       Int.MaxValue,
       Long.MaxValue,
       Long.MaxValue,
-      2,
+      sourceCount,
       null)
     val caller = Executors.newSingleThreadExecutor()
     try {
@@ -749,7 +750,6 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       assert(tracker.activeCalls.get() === sourceCount)
       assert(tracker.startedCalls.get() === sourceCount)
       assert(tracker.maximumActiveCalls.get() === sourceCount)
-      // Async inputs return immediately, so a single staged worker can enqueue every source.
       assert(tracker.threadNames.asScala.forall(_.startsWith("iceberg-staged-worker-")))
 
       tracker.release(sourceCount)
@@ -758,18 +758,15 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
 
       val calls = tracker.calls.asScala.toSeq.sortBy(_._1)
       assert(calls.map(_._1) === (0 until sourceCount))
-      // Footers feed the planner in completion order, so which synthetic slot a source occupies
-      // is arrival-dependent. Each source must still keep one call with both distinct column
-      // chunks laid out contiguously at its slot, and the slots must tile the data section.
-      val sourceStarts = calls.map { case (ordinal, ranges) =>
+      // Each file's download targets its own fragment, so output offsets are fragment-relative
+      // and independent of planning: both column chunks stay distinct vectored ranges packed
+      // back to back from offset zero.
+      calls.foreach { case (ordinal, ranges) =>
         val baseOffset = 100L + ordinal * 300L
-        val outputOffset = ranges.head._3
         assert(ranges === Seq(
-          (baseOffset, 4L, outputOffset),
-          (baseOffset + 100L, 5L, outputOffset + 4L)))
-        outputOffset
+          (baseOffset, 4L, 0L),
+          (baseOffset + 100L, 5L, 4L)))
       }
-      assert(sourceStarts.sorted === (0 until sourceCount).map(slot => 4L + slot * 9L))
     } finally {
       tracker.release(sourceCount * 2)
       reader.close()
@@ -778,7 +775,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  test("concurrent subtasks decode whichever completes first") {
+  test("decode keeps input order even when a later download finishes first") {
     val sourceCount = 2
     val tracker = new SourceReadTracker(sourceCount)
     val sourceBytes = Array.tabulate[Byte](1024)(index => (index & 0xff).toByte)
@@ -825,29 +822,28 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
         override def call(): Boolean = reader.hasNext()
       })
 
-      // With two workers available, both blocking subtasks run their I/O concurrently. The FIFO
-      // pool starts them in plan order, but two already-running workers give no cross-thread
-      // ordering guarantee for the instant each async submission is observed.
+      // With two workers available, both file downloads run their I/O concurrently.
       assert(tracker.firstTwoStarted.await(10, TimeUnit.SECONDS))
       assert(tracker.startedCalls.get() === 2)
       assert(tracker.calls.asScala.map(_._1).toSet === Set(0, 1))
 
-      // Finish the second subtask first. Submission order is not completion order, so the task
-      // thread must not block this ready result behind subtask 0.
+      // Finish the second file first. Decode keeps input order, so the task thread must keep
+      // waiting for file 0 rather than consuming the already-finished file 1.
       tracker.releaseOrdinal(1)
+      val holdUntil = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(300)
+      while (System.nanoTime() < holdUntil) {
+        assert(!hasNext.isDone, "decode must not run ahead of input order")
+        Thread.sleep(20)
+      }
+
+      tracker.releaseOrdinal(0)
       assert(hasNext.get(10, TimeUnit.SECONDS))
       reader.next().close()
-      assert(decoded.asScala.toSeq === Seq(1))
-
-      val nextHasNext = caller.submit(new java.util.concurrent.Callable[Boolean] {
-        override def call(): Boolean = reader.hasNext()
-      })
-      assert(!nextHasNext.isDone)
-      tracker.releaseOrdinal(0)
-      assert(nextHasNext.get(10, TimeUnit.SECONDS))
+      assert(decoded.asScala.toSeq === Seq(0))
+      assert(reader.hasNext())
       reader.next().close()
       assert(!reader.hasNext)
-      assert(decoded.asScala.toSeq === Seq(1, 0))
+      assert(decoded.asScala.toSeq === Seq(0, 1))
     } finally {
       tracker.release(sourceCount * 2)
       reader.close()
@@ -856,7 +852,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  test("a combined subtask frees its worker before the task thread picks it") {
+  test("a downloaded fragment frees its worker before the task thread consumes it") {
     val sourceCount = 3
     val tracker = new SourceReadTracker(sourceCount)
     val sourceBytes = Array.tabulate[Byte](1024)(index => (index & 0xff).toByte)
@@ -909,18 +905,18 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
         override def call(): Boolean = reader.hasNext()
       })
 
-      // A single worker bounds the actively executing subtasks to one.
+      // A single worker bounds the concurrently downloading files to one.
       assert(tracker.firstStarted.await(10, TimeUnit.SECONDS))
       assert(tracker.startedCalls.get() === 1)
 
-      // Completing subtask 0 lets the task thread claim it and enter the gated decode; the freed
-      // worker starts subtask 1.
+      // Completing file 0 lets the task thread assemble it and enter the gated decode; the
+      // freed worker starts file 1's download.
       tracker.release(1)
       assert(tracker.firstTwoStarted.await(10, TimeUnit.SECONDS))
 
-      // Subtask 1 publishes its completion and immediately frees the only pool slot, so
-      // subtask 2 starts even though the task thread is still inside decode and nobody has
-      // picked subtask 1.
+      // File 1's fragment publishes and immediately frees the only pool slot, so file 2's
+      // download starts even though the task thread is still inside decode and nobody has
+      // consumed fragment 1.
       tracker.release(1)
       assert(tracker.allStarted.await(10, TimeUnit.SECONDS))
       assert(tracker.startedCalls.get() === 3)
@@ -1017,7 +1013,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  test("one subtask reads equal file occurrences independently and concurrently") {
+  test("equal file occurrences download independently and combine into one subtask") {
     val sourceCount = 2
     val tracker = new SourceReadTracker(sourceCount)
     val sourceBytes = Array.tabulate[Byte](1024)(index => (index & 0xff).toByte)
@@ -1114,14 +1110,16 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       assert(tracker.writeFailures.isEmpty)
       assert(combinedBytesVerified.get())
 
+      // Each occurrence downloads into its own fragment, so both write from fragment offset
+      // zero; the assembled synthetic offsets (4/8 and 13/17) were verified inside decode.
       val calls = tracker.calls.asScala.toSeq.sortBy(_._1)
       assert(calls.map(_._1) === Seq(0, 1))
       assert(calls.head._2 === Seq(
-        (100L, 4L, 4L),
-        (200L, 5L, 8L)))
+        (100L, 4L, 0L),
+        (200L, 5L, 4L)))
       assert(calls.last._2 === Seq(
-        (400L, 4L, 13L),
-        (500L, 5L, 17L)))
+        (400L, 4L, 0L),
+        (500L, 5L, 4L)))
     } finally {
       tracker.release(sourceCount * 2)
       reader.close()
@@ -1130,7 +1128,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  test("close leaves a shared output alive until every active source writer exits") {
+  test("close leaves fragment outputs alive until every active writer exits") {
     val sourceCount = 2
     val tracker = new SourceReadTracker(sourceCount)
     val sourceBytes = Array.tabulate[Byte](1024)(index => (index & 0xff).toByte)
@@ -1244,8 +1242,8 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  test("subtask I/O starts before the last footer resolves") {
-    val tracker = new SourceReadTracker(3)
+  test("file downloads start before the last footer resolves") {
+    val tracker = new SourceReadTracker(2)
     val sourceBytes = Array.tabulate[Byte](1024)(index => (index & 0xff).toByte)
     val input0 = new BlockingVectoredInput(0, sourceBytes, tracker)
     val input1 = new BlockingVectoredInput(1, sourceBytes, tracker)
@@ -1256,11 +1254,12 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       oneColumnBlock(rows = 1L, offset = 300L, size = 4L)), input1)
     val scanFiles = Seq(file0, file1).map(_.getFile)
     val lastFooterGate = new CountDownLatch(1)
+    val decodedRangesVerified = new AtomicInteger()
     val adapter = new TestAdapter {
       override def readAndFilterFooter(file: IcebergPartitionedFile): FooterResult = {
         val result = Seq(file0, file1).find(_.getFile eq file).get
         if (result eq file1) {
-          // Hold the last footer hostage so the test can observe earlier subtask I/O running.
+          // Hold the last footer hostage so the test can observe earlier file I/O running.
           assert(lastFooterGate.await(30, TimeUnit.SECONDS))
         }
         result
@@ -1269,15 +1268,26 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       override def decodeAndPostProcess(
           subtask: ReadSubtask,
           parquetData: HostMemoryBuffer): JIterator[ColumnarBatch] = {
-        parquetData.close()
-        Collections.emptyList[ColumnarBatch]().iterator()
+        try {
+          subtask.getRanges.asScala.foreach { range =>
+            val actual = new Array[Byte](Math.toIntExact(range.getLength))
+            parquetData.getBytes(actual, 0L, range.getOutputOffset, actual.length)
+            val expected = sourceBytes.slice(
+              Math.toIntExact(range.getInputOffset),
+              Math.toIntExact(range.getInputOffset + range.getLength))
+            assert(actual.toIndexedSeq === expected.toIndexedSeq)
+          }
+          decodedRangesVerified.incrementAndGet()
+          Collections.emptyList[ColumnarBatch]().iterator()
+        } finally {
+          parquetData.close()
+        }
       }
     }
 
     // Bound the non-pinned host allocations that back staged outputs in these tests.
     HostAlloc.initialize(1L << 26)
-    // maxRows = 1 closes a subtask per row group, so file0 publishes its first subtask while
-    // file1's footer is still pending.
+    // maxRows = 1 closes a subtask per row group, so one fragment serves several subtasks.
     val reader = new StagedParquetPartitionReader(
       scanFiles.asJava,
       adapter,
@@ -1293,19 +1303,23 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
         override def call(): Boolean = reader.hasNext()
       })
 
-      // The streamed plan hands file0's first subtask to a worker, and its data read begins,
-      // all while the last footer has not resolved.
+      // file0's download is chained on its own footer, so its whole-fragment read (both row
+      // groups in one vectored call) begins while the last footer has not resolved.
       assert(tracker.firstStarted.await(10, TimeUnit.SECONDS))
       assert(tracker.startedCalls.get() === 1)
+      assert(tracker.calls.asScala.head._2 === Seq(
+        (100L, 4L, 0L),
+        (200L, 4L, 4L)))
 
       lastFooterGate.countDown()
       tracker.release(1)
       assert(tracker.firstTwoStarted.await(10, TimeUnit.SECONDS))
       tracker.release(1)
-      assert(tracker.allStarted.await(10, TimeUnit.SECONDS))
-      tracker.release(1)
       assert(!hasNext.get(10, TimeUnit.SECONDS))
       assert(tracker.writeFailures.isEmpty)
+      // Three subtasks decoded: fragment 0 was sliced into two split subtasks, so byte
+      // verification also covers assembling several subtasks from one fragment.
+      assert(decodedRangesVerified.get() === 3)
     } finally {
       lastFooterGate.countDown()
       tracker.release(6)
@@ -1315,8 +1329,8 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  test("a slow first footer does not block subtasks of later footers") {
-    val tracker = new SourceReadTracker(3)
+  test("a slow first footer does not block later files' downloads") {
+    val tracker = new SourceReadTracker(2)
     val sourceBytes = Array.tabulate[Byte](1024)(index => (index & 0xff).toByte)
     val input0 = new BlockingVectoredInput(0, sourceBytes, tracker)
     val input1 = new BlockingVectoredInput(1, sourceBytes, tracker)
@@ -1331,8 +1345,9 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       override def readAndFilterFooter(file: IcebergPartitionedFile): FooterResult = {
         val result = Seq(file0, file1).find(_.getFile eq file).get
         if (result eq file0) {
-          // The FIRST file's footer is the slow one. Completion-order consumption must let
-          // file1's subtasks run ahead of it.
+          // The FIRST file's footer is the slow one. Downloads chain on each footer's own
+          // completion, so file1's data I/O must run ahead of it even though planning and
+          // decode keep input order.
           assert(firstFooterGate.await(30, TimeUnit.SECONDS))
         }
         result
@@ -1348,8 +1363,6 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
 
     // Bound the non-pinned host allocations that back staged outputs in these tests.
     HostAlloc.initialize(1L << 26)
-    // maxRows = 1 closes a subtask per row group, so file1 publishes its first subtask from its
-    // own footer alone.
     val reader = new StagedParquetPartitionReader(
       scanFiles.asJava,
       adapter,
@@ -1365,16 +1378,20 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
         override def call(): Boolean = reader.hasNext()
       })
 
-      // file1's first subtask starts its data read while file0's footer is still pending.
+      // file1's whole-file download starts while file0's footer is still pending, but nothing
+      // decodes: in-order planning is still waiting on the first footer.
       assert(tracker.firstStarted.await(10, TimeUnit.SECONDS))
       assert(tracker.startedCalls.get() === 1)
       assert(tracker.calls.asScala.head._1 === 1)
+      tracker.release(1)
+      val holdUntil = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(300)
+      while (System.nanoTime() < holdUntil) {
+        assert(!hasNext.isDone, "decode must wait for the first footer to keep input order")
+        Thread.sleep(20)
+      }
 
       firstFooterGate.countDown()
-      tracker.release(1)
       assert(tracker.firstTwoStarted.await(10, TimeUnit.SECONDS))
-      tracker.release(1)
-      assert(tracker.allStarted.await(10, TimeUnit.SECONDS))
       tracker.release(1)
       assert(!hasNext.get(10, TimeUnit.SECONDS))
       assert(tracker.writeFailures.isEmpty)

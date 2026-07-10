@@ -294,6 +294,14 @@ public final class ReadSubtask {
       return footer;
     }
 
+    public int getFirstBlock() {
+      return firstBlock;
+    }
+
+    public int getBlockCount() {
+      return blockCount;
+    }
+
     public List<BlockMetaData> getBlocks() {
       return footer.getBlocks().subList(firstBlock, firstBlock + blockCount);
     }

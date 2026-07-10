@@ -29,9 +29,9 @@ import org.apache.spark.sql.types.StructType;
 /**
  * Stable greedy planner for filtered Iceberg Parquet row groups.
  *
- * <p>The planner runs only on the Spark task thread after the complete footer barrier. It walks
- * footer results and row groups in caller-provided order. A subtask is closed before adding a row
- * group that would exceed a hard row/GPU-byte limit or violate Iceberg compatibility. An
+ * <p>The planner runs only on the Spark task thread, consuming footers incrementally in
+ * caller-provided order and walking row groups in file order. A subtask is closed before adding a
+ * row group that would exceed a hard row/GPU-byte limit or violate Iceberg compatibility. An
  * individual row group that exceeds a hard limit is retained as a standalone subtask, matching
  * the existing soft-limit behavior.</p>
  *
@@ -45,13 +45,13 @@ import org.apache.spark.sql.types.StructType;
 public final class StableGreedyReadPlanner {
   private final int maxRows;
   private final long maxEstimatedGpuBytes;
-  private final long targetParquetBytes;
+  private final long combineThreshold;
   private final StructType expectedSparkSchema;
 
   public StableGreedyReadPlanner(
       int maxRows,
       long maxEstimatedGpuBytes,
-      long targetParquetBytes,
+      long combineThreshold,
       StructType expectedSparkSchema) {
     if (maxRows <= 0) {
       throw new IllegalArgumentException("maxRows must be positive");
@@ -61,7 +61,7 @@ public final class StableGreedyReadPlanner {
     }
     this.maxRows = maxRows;
     this.maxEstimatedGpuBytes = maxEstimatedGpuBytes;
-    this.targetParquetBytes = targetParquetBytes;
+    this.combineThreshold = combineThreshold;
     this.expectedSparkSchema = Objects.requireNonNull(
         expectedSparkSchema, "expectedSparkSchema");
   }
@@ -95,13 +95,14 @@ public final class StableGreedyReadPlanner {
   /**
    * Incremental planning state fed one footer at a time.
    *
-   * <p>The greedy walk only ever inspects row groups seen so far, so a subtask can be published
-   * to a worker as soon as its closing decision is made instead of after the complete footer
-   * barrier. Any feed order is correct: row groups within one footer always keep their file
-   * order, and the compatibility rules hold for every pairing. The feed order determines which
-   * sources combine, so callers that need a reproducible plan (such as {@link #plan}) must feed
-   * a deterministic order, while the staged reader deliberately feeds completion order to avoid
-   * footer head-of-line blocking.</p>
+   * <p>The greedy walk only ever inspects row groups seen so far, so a subtask can be consumed
+   * as soon as its closing decision is made instead of after the complete footer barrier. Any
+   * feed order is correct: row groups within one footer always keep their file order, and the
+   * compatibility rules hold for every pairing. The feed order determines which sources combine,
+   * so the staged reader feeds strictly in file-list order, which both keeps decode output in
+   * input order and makes the plan reproducible for a given file list. Data downloads are not
+   * delayed by this ordering: they are chained on each footer's own completion, ahead of
+   * planning.</p>
    */
   public final class Session {
     private final ArrayList<SelectedBlock> selected = new ArrayList<>();
@@ -132,7 +133,7 @@ public final class StableGreedyReadPlanner {
         long candidateGpuBytes = estimateGpuBytes(candidateRows);
 
         boolean shouldFlush = !selected.isEmpty()
-            && (hasReachedTarget(selectedDataBytes)
+            && (hasReachedCombineThreshold(selectedDataBytes)
                 || candidateRows > maxRows
                 || candidateGpuBytes > maxEstimatedGpuBytes
                 || !isCompatibleWithAll(selected, footer));
@@ -170,8 +171,8 @@ public final class StableGreedyReadPlanner {
     }
   }
 
-  private boolean hasReachedTarget(long selectedDataBytes) {
-    return targetParquetBytes > 0 && selectedDataBytes >= targetParquetBytes;
+  private boolean hasReachedCombineThreshold(long selectedDataBytes) {
+    return combineThreshold > 0 && selectedDataBytes >= combineThreshold;
   }
 
   private boolean isCompatibleWithAll(
@@ -184,7 +185,7 @@ public final class StableGreedyReadPlanner {
         previous = existing;
         continue;
       }
-      if (targetParquetBytes <= 0 || !compatible(existing, candidate)) {
+      if (combineThreshold <= 0 || !compatible(existing, candidate)) {
         return false;
       }
       previous = existing;
