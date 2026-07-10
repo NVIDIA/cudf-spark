@@ -758,14 +758,18 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
 
       val calls = tracker.calls.asScala.toSeq.sortBy(_._1)
       assert(calls.map(_._1) === (0 until sourceCount))
-      calls.foreach { case (ordinal, ranges) =>
+      // Footers feed the planner in completion order, so which synthetic slot a source occupies
+      // is arrival-dependent. Each source must still keep one call with both distinct column
+      // chunks laid out contiguously at its slot, and the slots must tile the data section.
+      val sourceStarts = calls.map { case (ordinal, ranges) =>
         val baseOffset = 100L + ordinal * 300L
-        val outputOffset = 4L + ordinal * 9L
-        // One source-level call retains both distinct column chunks at their final output offsets.
+        val outputOffset = ranges.head._3
         assert(ranges === Seq(
           (baseOffset, 4L, outputOffset),
           (baseOffset + 100L, 5L, outputOffset + 4L)))
+        outputOffset
       }
+      assert(sourceStarts.sorted === (0 until sourceCount).map(slot => 4L + slot * 9L))
     } finally {
       tracker.release(sourceCount * 2)
       reader.close()
@@ -1304,6 +1308,78 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       assert(tracker.writeFailures.isEmpty)
     } finally {
       lastFooterGate.countDown()
+      tracker.release(6)
+      reader.close()
+      caller.shutdownNow()
+      HostAlloc.initialize(-1L)
+    }
+  }
+
+  test("a slow first footer does not block subtasks of later footers") {
+    val tracker = new SourceReadTracker(3)
+    val sourceBytes = Array.tabulate[Byte](1024)(index => (index & 0xff).toByte)
+    val input0 = new BlockingVectoredInput(0, sourceBytes, tracker)
+    val input1 = new BlockingVectoredInput(1, sourceBytes, tracker)
+    val file0 = footerWithInput(0, oneColumnParquetSchema, oneColumnReadSchema, Seq(
+      oneColumnBlock(rows = 1L, offset = 100L, size = 4L)), input0)
+    val file1 = footerWithInput(1, oneColumnParquetSchema, oneColumnReadSchema, Seq(
+      oneColumnBlock(rows = 1L, offset = 300L, size = 4L),
+      oneColumnBlock(rows = 1L, offset = 400L, size = 4L)), input1)
+    val scanFiles = Seq(file0, file1).map(_.getFile)
+    val firstFooterGate = new CountDownLatch(1)
+    val adapter = new TestAdapter {
+      override def readAndFilterFooter(file: IcebergPartitionedFile): FooterResult = {
+        val result = Seq(file0, file1).find(_.getFile eq file).get
+        if (result eq file0) {
+          // The FIRST file's footer is the slow one. Completion-order consumption must let
+          // file1's subtasks run ahead of it.
+          assert(firstFooterGate.await(30, TimeUnit.SECONDS))
+        }
+        result
+      }
+
+      override def decodeAndPostProcess(
+          subtask: ReadSubtask,
+          parquetData: HostMemoryBuffer): JIterator[ColumnarBatch] = {
+        parquetData.close()
+        Collections.emptyList[ColumnarBatch]().iterator()
+      }
+    }
+
+    // Bound the non-pinned host allocations that back staged outputs in these tests.
+    HostAlloc.initialize(1L << 26)
+    // maxRows = 1 closes a subtask per row group, so file1 publishes its first subtask from its
+    // own footer alone.
+    val reader = new StagedParquetPartitionReader(
+      scanFiles.asJava,
+      adapter,
+      oneColumnReadSchema,
+      1,
+      Long.MaxValue,
+      Long.MaxValue,
+      2,
+      null)
+    val caller = Executors.newSingleThreadExecutor()
+    try {
+      val hasNext = caller.submit(new java.util.concurrent.Callable[Boolean] {
+        override def call(): Boolean = reader.hasNext()
+      })
+
+      // file1's first subtask starts its data read while file0's footer is still pending.
+      assert(tracker.firstStarted.await(10, TimeUnit.SECONDS))
+      assert(tracker.startedCalls.get() === 1)
+      assert(tracker.calls.asScala.head._1 === 1)
+
+      firstFooterGate.countDown()
+      tracker.release(1)
+      assert(tracker.firstTwoStarted.await(10, TimeUnit.SECONDS))
+      tracker.release(1)
+      assert(tracker.allStarted.await(10, TimeUnit.SECONDS))
+      tracker.release(1)
+      assert(!hasNext.get(10, TimeUnit.SECONDS))
+      assert(tracker.writeFailures.isEmpty)
+    } finally {
+      firstFooterGate.countDown()
       tracker.release(6)
       reader.close()
       caller.shutdownNow()

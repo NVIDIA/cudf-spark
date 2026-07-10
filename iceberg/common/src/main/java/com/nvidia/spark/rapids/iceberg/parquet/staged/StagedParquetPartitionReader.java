@@ -32,6 +32,7 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -59,9 +60,9 @@ import org.apache.spark.sql.vectorized.ColumnarBatch;
  * <p>The pipeline has a deliberately strict thread boundary:</p>
  * <ol>
  *   <li>Shared workers fetch metadata and perform Iceberg row-group filtering.</li>
- *   <li>The Spark task thread consumes footers in file-list order as they resolve, feeding an
- *       incremental planning session and submitting each closed subtask immediately, so later
- *       footer waits overlap the data I/O of earlier subtasks.</li>
+ *   <li>The Spark task thread consumes footers in completion order, feeding an incremental
+ *       planning session and submitting each closed subtask immediately, so a slow footer never
+ *       stalls planning or data I/O for files whose footers already resolved.</li>
  *   <li>Every planned subtask is enqueued to the shared pool in plan order, but each subtask
  *       executes as one blocking worker job: allocate the exact non-pinned output, copy cache
  *       hits, hand all cache-miss column-chunk reads to the async I/O engine, block until they
@@ -282,7 +283,7 @@ public final class StagedParquetPartitionReader
     }
   }
 
-  /** Submit all footers, then consume them in file order while streaming subtasks to workers. */
+  /** Submit all footers, then consume them in completion order, streaming subtasks to workers. */
   private void initializeIfNeeded() throws Exception {
     if (initialized) {
       return;
@@ -290,12 +291,14 @@ public final class StagedParquetPartitionReader
     checkOpen();
     // Footer submission/filtering and task-thread planning are CPU-only. Relinquish any permit
     // still owned by this task before starting that work rather than waiting for the first
-    // Future.get().
+    // completed footer.
     releaseGpuSemaphoreFromTaskThread();
-    List<Future<TimedFooter>> footerFutures = new ArrayList<>();
+    ExecutorCompletionService<TimedFooter> footerService =
+        new ExecutorCompletionService<>(pools.executor());
+    int submittedFooters = 0;
     for (IcebergPartitionedFile file : files) {
       checkOpen();
-      Future<TimedFooter> future = pools.executor().submit(() ->
+      footerService.submit(() ->
           runAsTaskPoolThread(() -> {
             long start = System.nanoTime();
             FooterResult footer = adapter.readAndFilterFooter(file);
@@ -304,20 +307,21 @@ public final class StagedParquetPartitionReader
             }
             return new TimedFooter(footer, System.nanoTime() - start);
           }));
+      submittedFooters++;
       if (closed.get()) {
         throw new CancellationException("staged reader closed while submitting footers");
       }
-      footerFutures.add(future);
     }
 
-    // Consume footers in file-list order and hand every closed subtask to a worker immediately.
-    // Footers keep resolving concurrently while earlier subtasks already buffer their data, so
-    // the footer barrier overlaps data I/O instead of serializing in front of it. Feeding the
-    // session in file order keeps the plan identical to the full-barrier plan.
+    // Consume footers in whichever order they complete and hand every closed subtask to a worker
+    // immediately, so one slow footer never stalls the planning and data I/O of files whose
+    // footers already resolved. Any feed order is correct: within one footer, row groups keep
+    // their file order, and compatibility rules make every resulting combination a valid
+    // synthetic file. The subtask grouping is therefore arrival-dependent rather than stable.
     StableGreedyReadPlanner.Session session = planner.newSession();
-    for (Future<TimedFooter> future : footerFutures) {
+    for (int consumed = 0; consumed < submittedFooters; consumed++) {
       long waitStart = System.nanoTime();
-      TimedFooter timedFooter = getFooterFuture(future);
+      TimedFooter timedFooter = getFooterFuture(takeCompletedFooter(footerService));
       adapter.onFooterWait(System.nanoTime() - waitStart);
       adapter.onFooterCompleted(timedFooter.footerNanos);
       checkOpen();
@@ -331,6 +335,18 @@ public final class StagedParquetPartitionReader
     synchronized (lifecycleLock) {
       checkOpen();
       initialized = true;
+    }
+  }
+
+  /** Wait for whichever footer completes next or observe close without cancelling the callable. */
+  private Future<TimedFooter> takeCompletedFooter(
+      ExecutorCompletionService<TimedFooter> footerService) throws InterruptedException {
+    while (true) {
+      checkOpen();
+      Future<TimedFooter> future = footerService.poll(100L, TimeUnit.MILLISECONDS);
+      if (future != null) {
+        return future;
+      }
     }
   }
 

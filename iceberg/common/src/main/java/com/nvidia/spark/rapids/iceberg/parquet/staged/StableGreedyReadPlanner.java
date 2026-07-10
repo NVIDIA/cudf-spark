@@ -95,10 +95,13 @@ public final class StableGreedyReadPlanner {
   /**
    * Incremental planning state fed one footer at a time.
    *
-   * <p>Feeding footers one by one produces exactly the subtasks of {@link #plan}: the greedy
-   * walk only ever inspects row groups seen so far, so a subtask can be published to a worker
-   * as soon as its closing decision is made instead of after the complete footer barrier. The
-   * caller must feed footers in file-list order to keep the plan stable.</p>
+   * <p>The greedy walk only ever inspects row groups seen so far, so a subtask can be published
+   * to a worker as soon as its closing decision is made instead of after the complete footer
+   * barrier. Any feed order is correct: row groups within one footer always keep their file
+   * order, and the compatibility rules hold for every pairing. The feed order determines which
+   * sources combine, so callers that need a reproducible plan (such as {@link #plan}) must feed
+   * a deterministic order, while the staged reader deliberately feeds completion order to avoid
+   * footer head-of-line blocking.</p>
    */
   public final class Session {
     private final ArrayList<SelectedBlock> selected = new ArrayList<>();
