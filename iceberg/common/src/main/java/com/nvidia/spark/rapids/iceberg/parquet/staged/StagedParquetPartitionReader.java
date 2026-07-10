@@ -65,8 +65,8 @@ import org.apache.spark.sql.vectorized.ColumnarBatch;
  *       without waiting for planning or for any other file's footer.</li>
  *   <li>The Spark task thread consumes footers strictly in file-list order, feeding the
  *       incremental planning session; plans are therefore deterministic for a given file list.
- *       No polling is involved: {@code close()} wakes the task thread by completing the per-file
- *       futures exceptionally.</li>
+ *       No polling is involved: every wait races the target future against a close signal, so
+ *       {@code close()} wakes the task thread without touching the per-file futures.</li>
  *   <li>Subtasks are assembled and decoded in plan order. Assembly waits for the constituent
  *       fragments, copies one contiguous fragment region per file slice into an exact-sized
  *       synthetic Parquet buffer, and writes the header and relocated footer. Completed
@@ -85,11 +85,13 @@ public final class StagedParquetPartitionReader
   private final Object iteratorLock = new Object();
   private final AtomicBoolean closed = new AtomicBoolean();
   private final AtomicReference<Throwable> asynchronousCleanupFailure = new AtomicReference<>();
-  // Ordered per-file futures the task thread waits on; guarded by lifecycleLock so close() can
-  // snapshot them while initialization is still appending.
-  private final List<CompletableFuture<FooterHandle>> footerFutures = new ArrayList<>();
-  // Every created fragment future, registered by footer jobs for close-time cleanup.
-  private final List<CompletableFuture<FileFragment>> fragmentRegistry = new ArrayList<>();
+  // Completed by close() to wake the task thread from any per-file wait without interfering
+  // with the pipeline futures, whose sole completers stay the pool jobs themselves.
+  private final CompletableFuture<Void> closeSignal = new CompletableFuture<>();
+  // Ordered, file-indexed pipeline futures; guarded by lifecycleLock so close() can snapshot
+  // them while initialization is still appending.
+  private final List<CompletableFuture<TimedFooter>> footerFutures = new ArrayList<>();
+  private final List<CompletableFuture<FileFragment>> fragmentFutures = new ArrayList<>();
 
   // Task-thread-only planning and assembly state.
   private StableGreedyReadPlanner.Session session;
@@ -265,7 +267,11 @@ public final class StagedParquetPartitionReader
     }
   }
 
-  /** Submit one footer job per file; each chains its file's download when the footer resolves. */
+  /**
+   * Compose one two-stage pipeline per file: fetch the footer on the pool, then chain that
+   * file's blocking download onto the footer's own completion. A footer failure propagates to
+   * its fragment future automatically, and the pool jobs are the sole completers of both stages.
+   */
   private void initializeIfNeeded() {
     if (initialized) {
       return;
@@ -278,62 +284,48 @@ public final class StagedParquetPartitionReader
     initialized = true;
     for (IcebergPartitionedFile file : files) {
       checkOpen();
-      CompletableFuture<FooterHandle> footerFuture = new CompletableFuture<>();
+      CompletableFuture<TimedFooter> footerFuture = CompletableFuture.supplyAsync(
+          () -> readTimedFooter(file), pools.executor());
+      CompletableFuture<FileFragment> fragmentFuture = footerFuture.thenApplyAsync(
+          timed -> downloadFragmentOnPool(timed.footer), pools.executor());
       synchronized (lifecycleLock) {
         footerFutures.add(footerFuture);
+        fragmentFutures.add(fragmentFuture);
       }
-      pools.executor().submit(() -> runFooterJob(file, footerFuture));
     }
   }
 
-  /** Fetch one footer and chain its file's blocking download job. */
-  private void runFooterJob(
-      IcebergPartitionedFile file,
-      CompletableFuture<FooterHandle> footerFuture) {
-    FooterResult footer;
-    long footerNanos;
+  /** Fetch and filter one footer as registered Spark-task pool work. */
+  private TimedFooter readTimedFooter(IcebergPartitionedFile file) {
     try {
       long start = System.nanoTime();
-      footer = runAsTaskPoolThread(() -> {
+      FooterResult footer = runAsTaskPoolThread(() -> {
         FooterResult result = adapter.readAndFilterFooter(file);
         if (result == null) {
           throw new IllegalStateException("footer adapter returned null");
         }
         return result;
       });
-      footerNanos = System.nanoTime() - start;
+      return new TimedFooter(footer, System.nanoTime() - start);
     } catch (Throwable error) {
-      footerFuture.completeExceptionally(error);
-      return;
+      throw wrapAsCompletion(error);
     }
-    CompletableFuture<FileFragment> fragmentFuture = new CompletableFuture<>();
-    synchronized (lifecycleLock) {
-      fragmentRegistry.add(fragmentFuture);
-    }
-    try {
-      pools.executor().submit(() -> runDownloadJob(footer, fragmentFuture));
-    } catch (Throwable submitError) {
-      fragmentFuture.completeExceptionally(submitError);
-    }
-    footerFuture.complete(new FooterHandle(footer, footerNanos, fragmentFuture));
   }
 
-  /** Execute one file's blocking download and publish its fragment. */
-  private void runDownloadJob(
-      FooterResult footer,
-      CompletableFuture<FileFragment> fragmentFuture) {
-    FileFragment fragment;
+  /** Execute one file's blocking download as registered Spark-task pool work. */
+  private FileFragment downloadFragmentOnPool(FooterResult footer) {
     try {
-      fragment = runAsTaskPoolThread(() -> downloadFragment(footer));
+      return runAsTaskPoolThread(() -> downloadFragment(footer));
     } catch (Throwable error) {
-      fragmentFuture.completeExceptionally(error);
-      return;
+      throw wrapAsCompletion(error);
     }
-    if (!fragmentFuture.complete(fragment)) {
-      // close() completed this future exceptionally first; the writers are already terminal, so
-      // reclaim the fragment here.
-      closeFragmentAfterAsync(fragment);
+  }
+
+  private static CompletionException wrapAsCompletion(Throwable error) {
+    if (error instanceof CompletionException) {
+      return (CompletionException) error;
     }
+    return new CompletionException(error);
   }
 
   /**
@@ -464,11 +456,7 @@ public final class StagedParquetPartitionReader
    */
   private ReadSubtask nextPlannedSubtask() throws Exception {
     while (plannedSubtasks.isEmpty()) {
-      List<CompletableFuture<FooterHandle>> futures;
-      synchronized (lifecycleLock) {
-        futures = footerFutures;
-      }
-      if (footerCursor >= futures.size()) {
+      if (footerCursor >= files.size()) {
         if (planningFinished) {
           return null;
         }
@@ -476,16 +464,21 @@ public final class StagedParquetPartitionReader
         plannedSubtasks.addAll(session.finish());
         continue;
       }
+      CompletableFuture<TimedFooter> footerFuture;
+      CompletableFuture<FileFragment> fragmentFuture;
+      synchronized (lifecycleLock) {
+        footerFuture = footerFutures.get(footerCursor);
+        fragmentFuture = fragmentFutures.get(footerCursor);
+      }
       long waitStart = System.nanoTime();
-      FooterHandle handle = getFutureResult(futures.get(footerCursor));
+      TimedFooter timed = awaitOrCancel(footerFuture);
       adapter.onFooterWait(System.nanoTime() - waitStart);
       footerCursor++;
-      adapter.onFooterCompleted(handle.footerNanos);
-      checkOpen();
-      fragmentByFooter.put(handle.footer, handle.fragment);
-      footerOrder.put(handle.footer, consumedFragments.size());
-      consumedFragments.add(handle.fragment);
-      plannedSubtasks.addAll(session.add(handle.footer));
+      adapter.onFooterCompleted(timed.footerNanos);
+      fragmentByFooter.put(timed.footer, fragmentFuture);
+      footerOrder.put(timed.footer, consumedFragments.size());
+      consumedFragments.add(fragmentFuture);
+      plannedSubtasks.addAll(session.add(timed.footer));
     }
     return plannedSubtasks.poll();
   }
@@ -504,10 +497,9 @@ public final class StagedParquetPartitionReader
       if (future == null) {
         throw new IllegalStateException("subtask references an unconsumed footer");
       }
-      fragments.add(getFutureResult(future));
+      fragments.add(awaitOrCancel(future));
     }
     adapter.onResultWait(System.nanoTime() - waitStart);
-    checkOpen();
 
     long ioNanos = 0L;
     long cacheHitCount = 0L;
@@ -618,8 +610,15 @@ public final class StagedParquetPartitionReader
     }
   }
 
-  /** Obtain a per-file future's result and preserve its original failure type. */
-  private <T> T getFutureResult(CompletableFuture<T> future) throws Exception {
+  /**
+   * Wait for one pipeline future while racing the close signal, so the task thread never stays
+   * blocked on a closed reader and close() never has to interfere with the pipeline futures.
+   */
+  private <T> T awaitOrCancel(CompletableFuture<T> future) throws Exception {
+    // The joined any-of future never throws here: a failed stage is rethrown below with its
+    // original failure type instead of anyOf's CompletionException wrapper.
+    CompletableFuture.anyOf(future, closeSignal).exceptionally(ignored -> null).join();
+    checkOpen();
     try {
       return future.get();
     } catch (InterruptedException e) {
@@ -754,22 +753,14 @@ public final class StagedParquetPartitionReader
     if (!closed.compareAndSet(false, true)) {
       return;
     }
-    // Wake the task thread wherever it waits by completing every per-file future exceptionally.
-    // A download job that loses this race observes complete() == false and reclaims its own
-    // fragment; footer and download callables are never cancelled, they drain naturally.
-    CancellationException cancelled =
-        new CancellationException("staged Parquet reader is closed");
-    List<CompletableFuture<FooterHandle>> footerSnapshot;
+    // Wake the task thread from any per-file wait. The pipeline futures stay untouched — their
+    // pool jobs remain the sole completers and are never cancelled, they drain naturally.
+    closeSignal.complete(null);
     List<CompletableFuture<FileFragment>> fragmentSnapshot;
     synchronized (lifecycleLock) {
-      footerSnapshot = new ArrayList<>(footerFutures);
-      fragmentSnapshot = new ArrayList<>(fragmentRegistry);
-    }
-    for (CompletableFuture<FooterHandle> future : footerSnapshot) {
-      future.completeExceptionally(cancelled);
+      fragmentSnapshot = new ArrayList<>(fragmentFutures);
     }
     for (CompletableFuture<FileFragment> future : fragmentSnapshot) {
-      future.completeExceptionally(cancelled);
       // Reclaim fragments that completed before close or complete later without a consumer.
       // Consumed fragments close twice harmlessly: fragment close is idempotent.
       future.whenComplete((fragment, error) -> {
@@ -834,19 +825,14 @@ public final class StagedParquetPartitionReader
     return new RuntimeException(unwrapped);
   }
 
-  /** One consumed footer paired with worker timing and its file's in-flight download. */
-  private static final class FooterHandle {
+  /** One filtered footer paired with the worker's fetch/filter elapsed time. */
+  private static final class TimedFooter {
     private final FooterResult footer;
     private final long footerNanos;
-    private final CompletableFuture<FileFragment> fragment;
 
-    private FooterHandle(
-        FooterResult footer,
-        long footerNanos,
-        CompletableFuture<FileFragment> fragment) {
+    private TimedFooter(FooterResult footer, long footerNanos) {
       this.footer = footer;
       this.footerNanos = footerNanos;
-      this.fragment = fragment;
     }
   }
 }
