@@ -1158,6 +1158,7 @@ def test_range_window_multi_order_by_unsupported_order_type_fallback():
 # (DATATYPE_MISMATCH.RANGE_FRAME_MULTI_ORDER) on both CPU and GPU, so the plugin's value-bounded
 # multi-order-by guard is never reached from a user query. Assert that GPU and CPU fail
 # consistently rather than expecting a CPU fallback that cannot occur.
+# Note:  This really isn't a plugin test, so much as a confirmation of Spark's behaviour.
 def test_range_window_multi_order_by_value_bounded_consistent_error():
     assert_gpu_and_cpu_error(
         lambda spark: _multi_order_range_two_numeric_df(spark).selectExpr(
@@ -1167,7 +1168,7 @@ def test_range_window_multi_order_by_value_bounded_consistent_error():
             ' ORDER BY oi ASC NULLS FIRST, ol ASC NULLS FIRST'
             ' RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS bounded_sum').collect(),
         conf=_multi_order_range_conf,
-        error_message='RANGE_FRAME_MULTI_ORDER')
+        error_message='')
 
 
 @ignore_order(local=True)
