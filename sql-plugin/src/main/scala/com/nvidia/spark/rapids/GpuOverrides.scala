@@ -939,7 +939,7 @@ object GpuOverrides extends Logging {
       (lit, conf, p, r) => new LiteralExprMeta(lit, conf, p, r) {
         override def tagSelfForAst(): Unit = {
           if (lit.dataType.isInstanceOf[DecimalType] &&
-              !this.conf.isProjectAstAnsiArithmeticEnabled) {
+              !this.conf.isProjectAstRowIrEnabled) {
             willNotWorkInAst("AST decimal literals require row IR JIT support.")
           }
         }
@@ -962,7 +962,7 @@ object GpuOverrides extends Logging {
       (a, conf, p, r) => new UnaryAstExprMeta[Alias](a, conf, p, r) {
         override def tagSelfForAst(): Unit = {
           if (a.dataType.isInstanceOf[DecimalType] &&
-              !this.conf.isProjectAstAnsiArithmeticEnabled) {
+              !this.conf.isProjectAstRowIrEnabled) {
             willNotWorkInAst("AST decimal references require row IR JIT support.")
           }
         }
@@ -982,7 +982,7 @@ object GpuOverrides extends Logging {
       (currentRow, conf, p, r) => new ExprMeta[BoundReference](currentRow, conf, p, r) {
         override def tagSelfForAst(): Unit = {
           if (currentRow.dataType.isInstanceOf[DecimalType] &&
-              !this.conf.isProjectAstAnsiArithmeticEnabled) {
+              !this.conf.isProjectAstRowIrEnabled) {
             willNotWorkInAst("AST decimal references require row IR JIT support.")
           }
         }
@@ -1006,7 +1006,7 @@ object GpuOverrides extends Logging {
         (att, conf, p, r) => new BaseExprMeta[AttributeReference](att, conf, p, r) {
           override def tagSelfForAst(): Unit = {
             if (att.dataType.isInstanceOf[DecimalType] &&
-                !this.conf.isProjectAstAnsiArithmeticEnabled) {
+                !this.conf.isProjectAstRowIrEnabled) {
               willNotWorkInAst("AST decimal references require row IR JIT support.")
             }
           }
@@ -1213,14 +1213,14 @@ object GpuOverrides extends Logging {
         override def tagSelfForAst(): Unit = {
           super.tagSelfForAst()
           if (a.dataType.isInstanceOf[DecimalType] &&
-              !this.conf.isProjectAstAnsiArithmeticEnabled) {
+              !this.conf.isProjectAstRowIrEnabled) {
             willNotWorkInAst("AST decimal unary minus requires row IR JIT support.")
           }
           if (!ansiEnabled && GpuAnsi.requiresRowIrArithmeticAst(a.dataType)) {
             willNotWorkInAst("AST Byte/Short unary minus requires ANSI row IR JIT support.")
           }
           if (ansiEnabled && GpuAnsi.needBasicOpOverflowCheck(a.dataType) &&
-              (!this.conf.isProjectAstAnsiArithmeticEnabled ||
+              (!this.conf.isProjectAstRowIrEnabled ||
                   !GpuAnsi.supportsAnsiArithmeticAst(a.dataType))) {
             willNotWorkInAst("AST unary minus does not support ANSI mode.")
           }
@@ -1497,7 +1497,7 @@ object GpuOverrides extends Logging {
         ("amount", TypeSig.INT, TypeSig.INT)),
       (a, conf, p, r) => new BinaryExprMeta[ShiftLeft](a, conf, p, r) {
         override def tagSelfForAst(): Unit = {
-          if (!this.conf.isProjectAstAnsiArithmeticEnabled) {
+          if (!this.conf.isProjectAstRowIrEnabled) {
             willNotWorkInAst("AST shift requires row IR JIT support.")
           }
         }
@@ -1514,7 +1514,7 @@ object GpuOverrides extends Logging {
         ("amount", TypeSig.INT, TypeSig.INT)),
       (a, conf, p, r) => new BinaryExprMeta[ShiftRight](a, conf, p, r) {
         override def tagSelfForAst(): Unit = {
-          if (!this.conf.isProjectAstAnsiArithmeticEnabled) {
+          if (!this.conf.isProjectAstRowIrEnabled) {
             willNotWorkInAst("AST shift requires row IR JIT support.")
           }
         }
@@ -1531,7 +1531,7 @@ object GpuOverrides extends Logging {
         ("amount", TypeSig.INT, TypeSig.INT)),
       (a, conf, p, r) => new BinaryExprMeta[ShiftRightUnsigned](a, conf, p, r) {
         override def tagSelfForAst(): Unit = {
-          if (!this.conf.isProjectAstAnsiArithmeticEnabled) {
+          if (!this.conf.isProjectAstRowIrEnabled) {
             willNotWorkInAst("AST shift requires row IR JIT support.")
           }
         }
@@ -1630,7 +1630,7 @@ object GpuOverrides extends Logging {
           TypeSig.all))),
       (a, conf, p, r) => new ExprMeta[Coalesce](a, conf, p, r) {
         override def tagSelfForAst(): Unit = {
-          if (!this.conf.isProjectAstAnsiArithmeticEnabled) {
+          if (!this.conf.isProjectAstRowIrEnabled) {
             willNotWorkInAst("AST coalesce requires row IR JIT support.")
           }
         }
@@ -2014,7 +2014,7 @@ object GpuOverrides extends Logging {
         private val tryMode = TryModeShim.isTryMode(a)
 
         override def tagExprForGpu(): Unit = {
-          if (tryMode && (!this.conf.isProjectAstAnsiArithmeticEnabled ||
+          if (tryMode && (!this.conf.isProjectAstRowIrEnabled ||
               !GpuAnsi.supportsAnsiArithmeticAst(a.dataType))) {
             willNotWorkOnGpu(
               "try_add supports integral types only when row IR JIT support is enabled")
@@ -2024,7 +2024,7 @@ object GpuOverrides extends Logging {
         override def tagSelfForAst(): Unit = {
           a.dataType match {
             case _: DecimalType =>
-              if (!this.conf.isProjectAstAnsiArithmeticEnabled) {
+              if (!this.conf.isProjectAstRowIrEnabled) {
                 willNotWorkInAst("AST decimal addition requires row IR JIT support.")
               } else if (!DecimalAddSubChecks.canUseAst(
                   a.left.dataType, a.right.dataType, a.dataType)) {
@@ -2033,7 +2033,7 @@ object GpuOverrides extends Logging {
               }
             case _ => super.tagSelfForAst()
           }
-          if (tryMode && (!this.conf.isProjectAstAnsiArithmeticEnabled ||
+          if (tryMode && (!this.conf.isProjectAstRowIrEnabled ||
               !GpuAnsi.supportsAnsiArithmeticAst(a.dataType))) {
             willNotWorkInAst("AST try_add requires integral row IR JIT support.")
           } else if (!tryMode && !ansiEnabled &&
@@ -2041,7 +2041,7 @@ object GpuOverrides extends Logging {
             willNotWorkInAst("AST Byte/Short addition requires ANSI row IR JIT support.")
           }
           if (!tryMode && ansiEnabled && GpuAnsi.needBasicOpOverflowCheck(a.dataType) &&
-              (!this.conf.isProjectAstAnsiArithmeticEnabled ||
+              (!this.conf.isProjectAstRowIrEnabled ||
                   !GpuAnsi.supportsAnsiArithmeticAst(a.dataType))) {
             willNotWorkInAst("AST Addition does not support ANSI mode.")
           }
@@ -2065,7 +2065,7 @@ object GpuOverrides extends Logging {
         private val tryMode = TryModeShim.isTryMode(a)
 
         override def tagExprForGpu(): Unit = {
-          if (tryMode && (!this.conf.isProjectAstAnsiArithmeticEnabled ||
+          if (tryMode && (!this.conf.isProjectAstRowIrEnabled ||
               !GpuAnsi.supportsAnsiArithmeticAst(a.dataType))) {
             willNotWorkOnGpu(
               "try_subtract supports integral types only when row IR JIT support is enabled")
@@ -2075,7 +2075,7 @@ object GpuOverrides extends Logging {
         override def tagSelfForAst(): Unit = {
           a.dataType match {
             case _: DecimalType =>
-              if (!this.conf.isProjectAstAnsiArithmeticEnabled) {
+              if (!this.conf.isProjectAstRowIrEnabled) {
                 willNotWorkInAst("AST decimal subtraction requires row IR JIT support.")
               } else if (!DecimalAddSubChecks.canUseAst(
                   a.left.dataType, a.right.dataType, a.dataType)) {
@@ -2084,7 +2084,7 @@ object GpuOverrides extends Logging {
               }
             case _ => super.tagSelfForAst()
           }
-          if (tryMode && (!this.conf.isProjectAstAnsiArithmeticEnabled ||
+          if (tryMode && (!this.conf.isProjectAstRowIrEnabled ||
               !GpuAnsi.supportsAnsiArithmeticAst(a.dataType))) {
             willNotWorkInAst("AST try_subtract requires integral row IR JIT support.")
           } else if (!tryMode && !ansiEnabled &&
@@ -2092,7 +2092,7 @@ object GpuOverrides extends Logging {
             willNotWorkInAst("AST Byte/Short subtraction requires ANSI row IR JIT support.")
           }
           if (!tryMode && ansiEnabled && GpuAnsi.needBasicOpOverflowCheck(a.dataType) &&
-              (!this.conf.isProjectAstAnsiArithmeticEnabled ||
+              (!this.conf.isProjectAstRowIrEnabled ||
                   !GpuAnsi.supportsAnsiArithmeticAst(a.dataType))) {
             willNotWorkInAst("AST Subtraction does not support ANSI mode.")
           }
@@ -2234,7 +2234,7 @@ object GpuOverrides extends Logging {
       CaseWhenCheck,
       (a, conf, p, r) => new ExprMeta[CaseWhen](a, conf, p, r) {
         override def tagSelfForAst(): Unit = {
-          if (!this.conf.isProjectAstAnsiArithmeticEnabled) {
+          if (!this.conf.isProjectAstRowIrEnabled) {
             willNotWorkInAst("AST CASE WHEN requires row IR JIT support.")
           }
         }
@@ -2270,7 +2270,7 @@ object GpuOverrides extends Logging {
             TypeSig.all))),
       (a, conf, p, r) => new ExprMeta[If](a, conf, p, r) {
         override def tagSelfForAst(): Unit = {
-          if (!this.conf.isProjectAstAnsiArithmeticEnabled) {
+          if (!this.conf.isProjectAstRowIrEnabled) {
             willNotWorkInAst("AST IF requires row IR JIT support.")
           }
         }

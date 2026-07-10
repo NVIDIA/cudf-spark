@@ -105,12 +105,20 @@ class GpuProjectExecMeta(
     if (conf.isProjectAstEnabled) {
       tagUnsupportedAstSideEffects(gpuExprs)
       val astJitErrorSites = tagAndCollectAstJitErrorSites(gpuExprs)
-      val canUseAnsiJitAst =
-        !conf.isProjectAstAnsiArithmeticEnabled || conf.isLibcudfJitConfigured
+      val usesRowIrJitAst = gpuExprs.exists {
+        case expr: GpuExpression => expr.usesRowIrJitAst
+        case _ => false
+      }
+      val usesAnsiFallibleAst = astJitErrorSites.exists(_.nonEmpty)
+      val canUseRowIrJitAst = !usesRowIrJitAst || conf.isProjectAstRowIrEnabled
+      val canUseAnsiFallibleAst =
+        !usesAnsiFallibleAst || conf.isProjectAstAnsiArithmeticEnabled
       // cuDF requires return column is fixed width
       val allReturnTypesFixedWidth = gpuExprs.forall(e => GpuBatchUtils.isFixedWidth(e.dataType))
-      if (canUseAnsiJitAst && allReturnTypesFixedWidth && childExprs.forall(_.canThisBeAst)) {
-        return GpuProjectAstExec(gpuExprs, gpuChild)(astJitErrorSites)
+      if (canUseRowIrJitAst && canUseAnsiFallibleAst && allReturnTypesFixedWidth &&
+          childExprs.forall(_.canThisBeAst)) {
+        return GpuProjectAstExec(gpuExprs, gpuChild)(
+          astJitErrorSites, conf.isProjectAstRowIrEnabled)
       }
       // explain AST because this is optional and it is sometimes hard to debug
       if (conf.shouldExplain) {
@@ -119,9 +127,13 @@ class GpuProjectExecMeta(
         if (explain.nonEmpty) {
           logWarning(s"AST PROJECT\n$explain")
         }
-        if (!canUseAnsiJitAst) {
-          logWarning("AST PROJECT\n  ANSI AST JIT requires LIBCUDF_JIT_ENABLED=1 " +
-            "before executor libcudf initialization")
+        if (!canUseRowIrJitAst) {
+          logWarning(s"AST PROJECT\n  row IR JIT expressions require " +
+            s"${RapidsConf.ENABLE_PROJECT_AST_ROW_IR.key}=true")
+        }
+        if (!canUseAnsiFallibleAst) {
+          logWarning(s"AST PROJECT\n  ANSI fallible expressions require " +
+            s"${RapidsConf.ENABLE_PROJECT_AST_ANSI_ARITHMETIC.key}=true")
         }
         if (!allReturnTypesFixedWidth) {
           logWarning(s"AST PROJECT\n  have non fixed return column, " +
@@ -958,8 +970,6 @@ case class GpuProjectExec(
 object GpuProjectAstExec {
   val COMPILE_ASTS_TIME = "compileAstsTime"
   val COMPUTE_ASTS_TIME = "computeAstsTime"
-  val LIBCUDF_JIT_ENV_KEY = "LIBCUDF_JIT_ENABLED"
-  val LIBCUDF_JIT_EXECUTOR_ENV_KEY = s"spark.executorEnv.$LIBCUDF_JIT_ENV_KEY"
 
   private[rapids] sealed trait AstProjectOutputSource
   private[rapids] case class AstInputColumn(inputIndex: Int) extends AstProjectOutputSource
@@ -1042,26 +1052,7 @@ object GpuProjectAstExec {
 
   private def isJitRuntimeRequired(conf: RapidsConf): Boolean =
     conf.isSqlExecuteOnGPU && conf.isProjectAstEnabled &&
-      conf.isProjectAstAnsiArithmeticEnabled
-
-  private[rapids] def requireJitRuntimeConfigured(conf: RapidsConf): Unit = {
-    if (isJitRuntimeRequired(conf) && !conf.isLibcudfJitConfigured) {
-      throw new IllegalArgumentException(
-        s"${RapidsConf.ENABLE_PROJECT_AST_ANSI_ARITHMETIC.key}=true requires " +
-          s"$LIBCUDF_JIT_EXECUTOR_ENV_KEY=1")
-    }
-  }
-
-  private[rapids] def requireJitExecutorEnvironment(
-      conf: RapidsConf,
-      environment: Map[String, String] = sys.env): Unit = {
-    if (isJitRuntimeRequired(conf) &&
-        !environment.get(LIBCUDF_JIT_ENV_KEY).contains("1")) {
-      throw new IllegalStateException(
-        s"$LIBCUDF_JIT_ENV_KEY=1 is not set in the executor process environment, " +
-          s"but ${RapidsConf.ENABLE_PROJECT_AST_ANSI_ARITHMETIC.key}=true")
-    }
-  }
+      conf.isProjectAstRowIrEnabled
 
   private[rapids] def initializeJitRuntime(
       conf: RapidsConf,
@@ -1139,10 +1130,13 @@ case class GpuProjectAstExec(
     //   immutable/List.scala#L516
     projectList: List[Expression],
     child: SparkPlan)(
-    val astJitErrorSites: List[List[AstJitErrorSite]] = Nil
+    val astJitErrorSites: List[List[AstJitErrorSite]] = Nil,
+    val useJit: Boolean = false
 ) extends GpuProjectExecLike {
 
-  override def otherCopyArgs: Seq[AnyRef] = astJitErrorSites :: Nil
+  override def otherCopyArgs: Seq[AnyRef] = Seq[AnyRef](
+    astJitErrorSites,
+    useJit.asInstanceOf[java.lang.Boolean])
 
   override lazy val additionalMetrics: Map[String, GpuMetric] = Map(
     OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY),
@@ -1218,7 +1212,7 @@ case class GpuProjectAstExec(
           } else {
             val spillable = SpillableColumnarBatch(
               input.next(), SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
-            // JIT can initialize native state lazily during computeColumn, so rebuild compiled
+            // JIT can initialize native state lazily during computeColumnJit, so rebuild compiled
             // expressions after retry instead of reusing state from a failed attempt.
             maybeSplittedItr = Iterator(GpuProjectExec.runWithSplitRetry(
               spillable, Seq(compiledAstExprs), { cb =>
@@ -1336,7 +1330,11 @@ case class GpuProjectAstExec(
       NvtxIdWithMetrics(NvtxRegistry.COMPUTE_ASTS, computeAstsTime) {
         expressions.zip(errorSites).safeMap { case (expr, site) =>
           try {
-            expr.computeColumn(table)
+            if (useJit) {
+              expr.computeColumnJit(table)
+            } else {
+              expr.computeColumn(table)
+            }
           } catch {
             case e: CudfException => throw GpuProjectAstExec.translateAstJitError(e, site)
           }

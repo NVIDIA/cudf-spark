@@ -34,7 +34,7 @@ import org.apache.spark.sql.types.{ByteType, DataType, DoubleType, IntegerType, 
 class TryEvalShimSuite extends AnyFunSuite {
 
   private val jitConf = new RapidsConf(Map(
-    RapidsConf.ENABLE_PROJECT_AST_ANSI_ARITHMETIC.key -> "true"))
+    RapidsConf.ENABLE_PROJECT_AST_ROW_IR.key -> "true"))
   private val noJitConf = new RapidsConf(Map.empty[String, String])
 
   private def wrap(expression: Expression, conf: RapidsConf): BaseExprMeta[_] = {

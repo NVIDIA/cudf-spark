@@ -66,7 +66,7 @@ object TryEvalShims {
           if (operation.isEmpty) {
             willNotWorkOnGpu(
               "only integral try_add/try_subtract/try_multiply and DOUBLE try_divide are supported")
-          } else if (!this.conf.isProjectAstAnsiArithmeticEnabled) {
+          } else if (!this.conf.isProjectAstRowIrEnabled) {
             willNotWorkOnGpu("TRY arithmetic requires row IR JIT support")
           } else if (!inputsAreSafe) {
             willNotWorkOnGpu("TRY arithmetic cannot catch errors from its input expressions")
@@ -77,7 +77,7 @@ object TryEvalShims {
           if (operation.isEmpty) {
             willNotWorkInAst(
               "only integral try_add/try_subtract/try_multiply and DOUBLE try_divide are supported")
-          } else if (!this.conf.isProjectAstAnsiArithmeticEnabled) {
+          } else if (!this.conf.isProjectAstRowIrEnabled) {
             willNotWorkInAst("TRY arithmetic requires row IR JIT support")
           } else if (!inputsAreSafe) {
             willNotWorkInAst("TRY arithmetic cannot catch errors from its input expressions")

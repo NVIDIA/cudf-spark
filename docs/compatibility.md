@@ -880,8 +880,9 @@ but not which operation produced it. The GPU reports the same Spark error catego
 `ARITHMETIC_OVERFLOW` or `DIVIDE_BY_ZERO`, but its error message and query context can identify a
 different operation in the fused expression than Spark CPU. Successful results are unaffected.
 
-This limitation applies when `spark.rapids.sql.projectAstAnsiArithmeticEnabled` is enabled. Disable
-that configuration when exact ANSI error messages and query context are required.
+This limitation applies when both `spark.rapids.sql.projectAstRowIrEnabled` and
+`spark.rapids.sql.projectAstAnsiArithmeticEnabled` are enabled. Disable the latter configuration
+when exact ANSI error messages and query context are required.
 
 ## Conditionals and operations with side effects (ANSI mode)
 

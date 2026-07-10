@@ -164,7 +164,7 @@ object DecimalArithmeticOverrides {
         private val tryMode = TryModeShim.isTryMode(a)
 
         override def tagExprForGpu(): Unit = {
-          if (tryMode && (!conf.isProjectAstAnsiArithmeticEnabled ||
+          if (tryMode && (!conf.isProjectAstRowIrEnabled ||
               !GpuAnsi.supportsAnsiArithmeticAst(a.dataType))) {
             willNotWorkOnGpu(
               "try_multiply supports integral types only when row IR JIT support is enabled")
@@ -173,7 +173,7 @@ object DecimalArithmeticOverrides {
 
         override def tagSelfForAst(): Unit = {
           super.tagSelfForAst()
-          if (tryMode && (!conf.isProjectAstAnsiArithmeticEnabled ||
+          if (tryMode && (!conf.isProjectAstRowIrEnabled ||
               !GpuAnsi.supportsAnsiArithmeticAst(a.dataType))) {
             willNotWorkInAst("AST try_multiply requires integral row IR JIT support.")
           } else if (!tryMode && !ansiEnabled &&
@@ -181,7 +181,7 @@ object DecimalArithmeticOverrides {
             willNotWorkInAst("AST Byte/Short multiplication requires ANSI row IR JIT support.")
           }
           if (!tryMode && ansiEnabled && GpuAnsi.needBasicOpOverflowCheck(a.dataType) &&
-              (!conf.isProjectAstAnsiArithmeticEnabled ||
+              (!conf.isProjectAstRowIrEnabled ||
                   !GpuAnsi.supportsAnsiArithmeticAst(a.dataType))) {
             willNotWorkInAst("GPU AST multiplication does not support ANSI mode")
           }
@@ -222,7 +222,7 @@ object DecimalArithmeticOverrides {
 
         override def tagSelfForAst(): Unit = {
           super.tagSelfForAst()
-          if (!conf.isProjectAstAnsiArithmeticEnabled ||
+          if (!conf.isProjectAstRowIrEnabled ||
               !GpuAnsi.supportsTrueDivideAst(
                 ansiEnabled, a.left.dataType, a.right.dataType)) {
             willNotWorkInAst(
@@ -254,7 +254,7 @@ object DecimalArithmeticOverrides {
 
         override def tagSelfForAst(): Unit = {
           super.tagSelfForAst()
-          if (!conf.isProjectAstAnsiArithmeticEnabled ||
+          if (!conf.isProjectAstRowIrEnabled ||
               !GpuAnsi.supportsIntegralDivideAst(a.left.dataType, a.right.dataType)) {
             willNotWorkInAst("AST integral divide requires row IR JIT support.")
           }
@@ -283,7 +283,7 @@ object DecimalArithmeticOverrides {
 
         override def tagSelfForAst(): Unit = {
           super.tagSelfForAst()
-          if (!conf.isProjectAstAnsiArithmeticEnabled ||
+          if (!conf.isProjectAstRowIrEnabled ||
               !GpuAnsi.supportsRemainderAst(a.left.dataType, a.right.dataType)) {
             willNotWorkInAst("AST remainder requires row IR JIT support.")
           }

@@ -22,7 +22,7 @@
  *
  *   export CUDA129=/home/haoyangl/code/.conda/cudf-cuda12.9-envs/rapids
  *   export LD_LIBRARY_PATH=$CUDA129/lib:$CUDA129/targets/x86_64-linux/lib:$LD_LIBRARY_PATH
- *   export LIBCUDF_JIT_ENABLED=1
+ *   export LIBCUDF_JIT_ENABLED=0
  *   export LIBCUDF_JIT_VERBOSE=1
  *   export BENCH_BASE_PATH=/tmp/ansi_jit_project_bench
  *   export LIBCUDF_KERNEL_CACHE_PATH=$BENCH_BASE_PATH/jit_cache
@@ -30,7 +30,7 @@
  *   $SPARK_HOME/bin/spark-shell \
  *     --jars dist/target/rapids-4-spark_2.12-*-cuda12.jar \
  *     --conf spark.plugins=com.nvidia.spark.SQLPlugin \
- *     --conf spark.executorEnv.LIBCUDF_JIT_ENABLED=1 \
+ *     --conf spark.executorEnv.LIBCUDF_JIT_ENABLED=0 \
  *     --conf spark.executorEnv.LIBCUDF_JIT_VERBOSE=$LIBCUDF_JIT_VERBOSE \
  *     --conf spark.executorEnv.LIBCUDF_KERNEL_CACHE_PATH=$LIBCUDF_KERNEL_CACHE_PATH \
  *     --conf spark.executorEnv.LD_LIBRARY_PATH=$LD_LIBRARY_PATH \
@@ -121,16 +121,19 @@ object AnsiJitProjectBench {
   val astJitConfs: Map[String, String] = Map(
     "spark.rapids.sql.enabled" -> "true",
     "spark.rapids.sql.projectAstEnabled" -> "true",
+    "spark.rapids.sql.projectAstRowIrEnabled" -> "true",
     "spark.rapids.sql.projectAstAnsiArithmeticEnabled" -> "true")
 
   val allModes: Seq[Mode] = Seq(
     Mode("CPU", Map(
       "spark.rapids.sql.enabled" -> "false",
       "spark.rapids.sql.projectAstEnabled" -> "false",
+      "spark.rapids.sql.projectAstRowIrEnabled" -> "false",
       "spark.rapids.sql.projectAstAnsiArithmeticEnabled" -> "false")),
     Mode("GPU_PROJECT", Map(
       "spark.rapids.sql.enabled" -> "true",
       "spark.rapids.sql.projectAstEnabled" -> "false",
+      "spark.rapids.sql.projectAstRowIrEnabled" -> "false",
       "spark.rapids.sql.projectAstAnsiArithmeticEnabled" -> "false")),
     Mode("GPU_AST_JIT_COLD", astJitConfs, "cold"),
     Mode("GPU_AST_JIT_DISK_WARM", astJitConfs, "disk_warm"),
@@ -833,9 +836,6 @@ object AnsiJitProjectBench {
     println(s"clearJitCacheForCold=$clearJitCacheForCold")
     println(s"allowClearNonBenchJitCache=$allowClearNonBenchJitCache")
     println(s"LD_LIBRARY_PATH=${sys.env.getOrElse("LD_LIBRARY_PATH", "(unset)")}")
-    if (sys.env.get("LIBCUDF_JIT_ENABLED") != Some("1")) {
-      println("WARNING: LIBCUDF_JIT_ENABLED is not 1. GPU_AST_JIT_* modes are expected to fail.")
-    }
     if (modes.exists(isProcessColdMeasured) && kernelCachePath.isEmpty) {
       println("WARNING: GPU_AST_JIT_* cold modes cannot force a cold disk cache without " +
         "LIBCUDF_KERNEL_CACHE_PATH.")

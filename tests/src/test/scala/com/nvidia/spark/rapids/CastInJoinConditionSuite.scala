@@ -83,9 +83,10 @@ class CastInJoinConditionSuite extends SparkQueryCompareTestSuite {
 
   private def rowIrJitRangeJoinConf: SparkConf = rangeJoinConf
     .set(RapidsConf.ENABLE_PROJECT_AST.key, "true")
-    .set(RapidsConf.ENABLE_PROJECT_AST_ANSI_ARITHMETIC.key, "true")
+    .set(RapidsConf.ENABLE_PROJECT_AST_ROW_IR.key, "true")
 
   private def ansiRowIrJitRangeJoinConf: SparkConf = rowIrJitRangeJoinConf
+    .set(RapidsConf.ENABLE_PROJECT_AST_ANSI_ARITHMETIC.key, "true")
     .set(SQLConf.ANSI_ENABLED.key, "true")
 
   private def rangeJoinSql(

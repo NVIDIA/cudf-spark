@@ -260,13 +260,8 @@ object RmmRapidsRetryIterator extends Logging {
     (causedByRetry, causedBySplit, isFromGpuOom)
   }
 
-  private def isColumnSizeOverflow(ex: Throwable): Boolean = ex match {
-    case e: CudfColumnSizeOverflowException =>
-      // JNI maps std::overflow_error to CudfColumnSizeOverflowException, but transform UDF
-      // arithmetic errors should propagate instead of split-retrying as column size overflows.
-      !Option(e.getMessage).exists(_.contains("error in transform UDF"))
-    case _ => false
-  }
+  private def isColumnSizeOverflow(ex: Throwable): Boolean =
+    ex.isInstanceOf[CudfColumnSizeOverflowException]
 
   @tailrec
   private def isOrCausedByColumnSizeOverflow(ex: Throwable): Boolean = {

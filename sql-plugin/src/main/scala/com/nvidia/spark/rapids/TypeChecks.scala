@@ -1427,10 +1427,10 @@ class CastChecks extends ExprChecks {
     val cast = meta.wrapped.asInstanceOf[UnaryExpression]
     (cast.child.dataType, cast.dataType) match {
       case (from, to)
-          if meta.conf.isProjectAstAnsiArithmeticEnabled &&
+          if meta.conf.isProjectAstRowIrEnabled &&
               GpuCast.canCastToAst(from, to) =>
         tagBase(meta, meta.willNotWorkInAst)
-      case (_: DecimalType, _: DecimalType) if !meta.conf.isProjectAstAnsiArithmeticEnabled =>
+      case (_: DecimalType, _: DecimalType) if !meta.conf.isProjectAstRowIrEnabled =>
         meta.willNotWorkInAst("AST decimal cast requires row IR JIT support.")
       case (_: DecimalType, _: DecimalType) =>
         meta.willNotWorkInAst(

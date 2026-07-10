@@ -1247,10 +1247,16 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       .booleanConf
       .createWithDefault(false)
 
+  val ENABLE_PROJECT_AST_ROW_IR = conf("spark.rapids.sql.projectAstRowIrEnabled")
+      .doc("Enable safe row IR JIT operations in project AST expressions, including " +
+        "operations that nullify evaluation errors.")
+      .internal()
+      .booleanConf
+      .createWithDefault(false)
+
   val ENABLE_PROJECT_AST_ANSI_ARITHMETIC = conf("spark.rapids.sql.projectAstAnsiArithmeticEnabled")
-      .doc("Enable project AST support for row IR JIT operations, including ANSI integral " +
-        "arithmetic and conditional nullification. This requires LIBCUDF_JIT_ENABLED=1 " +
-        "for executor processes.")
+      .doc("Enable ANSI error-propagating arithmetic in project AST expressions. This requires " +
+        s"${ENABLE_PROJECT_AST_ROW_IR.key}=true.")
       .internal()
       .booleanConf
       .createWithDefault(false)
@@ -3647,10 +3653,10 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val isProjectAstEnabled: Boolean = get(ENABLE_PROJECT_AST)
 
-  lazy val isProjectAstAnsiArithmeticEnabled: Boolean = get(ENABLE_PROJECT_AST_ANSI_ARITHMETIC)
+  lazy val isProjectAstRowIrEnabled: Boolean = get(ENABLE_PROJECT_AST_ROW_IR)
 
-  lazy val isLibcudfJitConfigured: Boolean =
-    getStr("spark.executorEnv.LIBCUDF_JIT_ENABLED").contains("1")
+  lazy val isProjectAstAnsiArithmeticEnabled: Boolean =
+    isProjectAstRowIrEnabled && get(ENABLE_PROJECT_AST_ANSI_ARITHMETIC)
 
   lazy val isTieredProjectEnabled: Boolean = get(ENABLE_TIERED_PROJECT)
 

@@ -16,13 +16,31 @@
 
 package com.nvidia.spark.rapids
 
+import org.mockito.Mockito.mock
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.catalyst.expressions.NamedExpression
+import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.rapids.{GpuAdd, GpuMultiply}
 import org.apache.spark.sql.types.LongType
 
 class GpuProjectAstSuite extends AnyFunSuite {
+  test("AST plan copy preserves JIT settings") {
+    val a = GpuBoundReference(0, LongType, nullable = true)(NamedExpression.newExprId, "a")
+    val b = GpuBoundReference(1, LongType, nullable = true)(NamedExpression.newExprId, "b")
+    val sum = GpuAlias(GpuAdd(a, b, failOnError = true)(), "sum")()
+    val errorSites = List(List(AstJitErrorSite(AstJitErrorKind.Add, sum.origin)))
+    val child = mock(classOf[SparkPlan])
+    val replacement = mock(classOf[SparkPlan])
+    val plan = GpuProjectAstExec(List(sum), child)(errorSites, useJit = true)
+
+    val copied = plan.withNewChildren(Seq(replacement)).asInstanceOf[GpuProjectAstExec]
+
+    assert(copied.child eq replacement)
+    assert(copied.astJitErrorSites == errorSites)
+    assert(copied.useJit)
+  }
+
   test("AST output planning excludes pass-through expressions") {
     val a = GpuBoundReference(0, LongType, nullable = true)(NamedExpression.newExprId, "a")
     val b = GpuBoundReference(1, LongType, nullable = true)(NamedExpression.newExprId, "b")

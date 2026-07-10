@@ -55,7 +55,7 @@ class AstExpressionMetaSuite extends AnyFunSuite {
 
   private val conf = new RapidsConf(Map.empty[String, String])
   private val rowIrJitConf = new RapidsConf(Map(
-    RapidsConf.ENABLE_PROJECT_AST_ANSI_ARITHMETIC.key -> "true"))
+    RapidsConf.ENABLE_PROJECT_AST_ROW_IR.key -> "true"))
 
   private def countingUnaryMeta(depth: Int, conversionCount: AtomicInteger): BaseExprMeta[_] = {
     val input = AttributeReference("input", IntegerType)()

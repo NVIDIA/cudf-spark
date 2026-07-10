@@ -159,7 +159,7 @@ _setup_libcudf_jit_runtime() {
     return 0
   fi
 
-  export LIBCUDF_JIT_ENABLED="${LIBCUDF_JIT_ENABLED:-1}"
+  export LIBCUDF_JIT_ENABLED="${LIBCUDF_JIT_ENABLED:-0}"
   _prepend_cuda_jit_runtime_dirs
 
   if ! _can_load_library libcuda.so; then

@@ -80,17 +80,20 @@ ast_double_descr = [(double_gen, True)]
 ast_acosh_descr = [(double_gen, not (is_spark_403() or is_spark_412_or_later()))]
 
 _project_ast_enabled_conf = {"spark.rapids.sql.projectAstEnabled": "true"}
-_jit_ast_enabled_conf = {
-    "spark.rapids.sql.projectAstAnsiArithmeticEnabled": "true",
-    "spark.executorEnv.LIBCUDF_JIT_ENABLED": "1"}
-if "LD_LIBRARY_PATH" in os.environ:
-    _jit_ast_enabled_conf["spark.executorEnv.LD_LIBRARY_PATH"] = os.environ["LD_LIBRARY_PATH"]
-_ansi_jit_ast_enabled_conf = copy_and_update(ansi_enabled_conf, _jit_ast_enabled_conf)
+_jit_ast_enabled_conf = {"spark.rapids.sql.projectAstRowIrEnabled": "true"}
+_ansi_jit_ast_enabled_conf = copy_and_update(
+    ansi_enabled_conf,
+    _jit_ast_enabled_conf,
+    {"spark.rapids.sql.projectAstAnsiArithmeticEnabled": "true"})
+_ansi_safe_row_ir_ast_enabled_conf = copy_and_update(ansi_enabled_conf, _jit_ast_enabled_conf)
 _non_ansi_jit_ast_enabled_conf = copy_and_update(ansi_disabled_conf, _jit_ast_enabled_conf)
 _requires_libcudf_jit = pytest.mark.skipif(
     not is_libcudf_jit_available(),
-    reason="ANSI JIT AST requires libcudf JIT runtime: " +
+    reason="Project AST JIT requires libcudf JIT runtime: " +
            get_libcudf_jit_unavailable_reason())
+_requires_global_jit_disabled = pytest.mark.skipif(
+    os.environ.get("LIBCUDF_JIT_ENABLED") != "0",
+    reason="explicit JIT API coverage requires LIBCUDF_JIT_ENABLED=0 at process startup")
 
 def assert_gpu_ast(is_supported, func, conf={}):
     exist = "GpuProjectAstExec"
@@ -176,7 +179,7 @@ def test_decimal_literal_falls_back_without_jit(spark_tmp_path):
     assert_gpu_ast(is_supported=False,
                    func=lambda spark: spark.read.parquet(data_path).selectExpr(
                        'cast(12.34 as DECIMAL(7, 2))'),
-                   conf={"spark.executorEnv.LIBCUDF_JIT_ENABLED": "0"})
+                   conf={"spark.rapids.sql.projectAstRowIrEnabled": "false"})
 
 @pytest.mark.parametrize('data_descr', ast_descrs, ids=idfn)
 def test_isnull(data_descr):
@@ -615,8 +618,7 @@ def test_decimal_conditionals_and_comparison_require_jit(expression):
     assert_gpu_ast(False,
         lambda spark: _decimal_conditional_df(spark, DecimalType(9, 2)).selectExpr(expression),
         conf={
-            "spark.executorEnv.LIBCUDF_JIT_ENABLED": "0",
-            "spark.rapids.sql.projectAstAnsiArithmeticEnabled": "false"
+            "spark.rapids.sql.projectAstRowIrEnabled": "false"
         })
 
 _ast_decimal_add_sub_cases = [
@@ -1381,7 +1383,9 @@ _ansi_jit_narrow_fallback_cases = [
     ('byte_non_ansi_jit_on', 'a TINYINT, b TINYINT', [(11, 2), (-11, 2), (None, 1)],
      _non_ansi_jit_ast_enabled_conf),
     ('short_non_ansi_jit_on', 'a SMALLINT, b SMALLINT', [(181, 2), (-181, 2), (None, 1)],
-     _non_ansi_jit_ast_enabled_conf)]
+     _non_ansi_jit_ast_enabled_conf),
+    ('int_ansi_fallible_off', 'a INT, b INT', [(46340, 2), (-46340, 2), (None, 1)],
+     _ansi_safe_row_ir_ast_enabled_conf)]
 
 @_requires_libcudf_jit
 @pytest.mark.parametrize(
@@ -1392,6 +1396,15 @@ def test_narrow_arithmetic_requires_ansi_row_ir_jit(case):
                    lambda spark: spark.createDataFrame(rows * 8, schema).selectExpr(
                        'a + b', 'a - b', 'a * b', '-a', 'abs(a)'),
                    conf=conf)
+
+@_requires_libcudf_jit
+@_requires_global_jit_disabled
+def test_safe_row_ir_does_not_require_ansi_fallible_semantics():
+    assert_gpu_ast(True,
+                   lambda spark: spark.createDataFrame(
+                       [(1,), (-1,), (None,)] * 8, 'a INT').selectExpr(
+                           'if(a > 0, shiftleft(a, 1), shiftright(a, 1))'),
+                   conf=_ansi_safe_row_ir_ast_enabled_conf)
 
 @_requires_libcudf_jit
 def test_ansi_jit_byte_add_exact_width():
@@ -1782,7 +1795,7 @@ def test_try_jit_integral_arithmetic(case, conf):
 
     assert_gpu_ast(True, project, conf=conf)
 
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('Add', 'Subtract', 'Multiply')
 def test_try_integral_arithmetic_falls_back_without_row_ir_jit():
     assert_gpu_fallback_collect(
         lambda spark: spark.createDataFrame(
@@ -1862,7 +1875,7 @@ def test_try_jit_primitive_mod(case, conf):
 
 @pytest.mark.skipif(is_before_spark_400(), reason="try_mod is not supported before Spark 4.0.0")
 @_requires_libcudf_jit
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('Remainder', 'Add')
 def test_try_mod_side_effecting_lhs_falls_back():
     assert_gpu_fallback_collect(
         lambda spark: spark.createDataFrame(
@@ -1873,7 +1886,7 @@ def test_try_mod_side_effecting_lhs_falls_back():
 
 @pytest.mark.skipif(is_before_spark_400(), reason="try_mod is not supported before Spark 4.0.0")
 @_requires_libcudf_jit
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('Remainder')
 def test_try_jit_decimal_mod_falls_back():
     assert_gpu_fallback_collect(
         lambda spark: binary_op_df(spark, DecimalGen(10, 2)).selectExpr('try_mod(a, b)'),
@@ -1904,7 +1917,7 @@ def test_try_primitive_mod_regular_gpu_project(case):
         conf=_ansi_jit_ast_enabled_conf)
 
 @pytest.mark.skipif(is_before_spark_400(), reason="try_mod is not supported before Spark 4.0.0")
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('Remainder')
 @approximate_float
 @pytest.mark.parametrize(
     'case', _primitive_remainder_plan_cases, ids=lambda case: case[0])
@@ -2006,7 +2019,7 @@ def test_try_true_divide_regular_gpu_project():
                 'try_divide(a, b)', 'cast(null as STRING)'),
         conf=_ansi_jit_ast_enabled_conf)
 
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('Divide')
 @approximate_float
 def test_try_true_divide_falls_back_without_row_ir_jit():
     assert_gpu_fallback_collect(
@@ -2016,7 +2029,7 @@ def test_try_true_divide_falls_back_without_row_ir_jit():
         'Divide', conf=ansi_enabled_conf)
 
 @_requires_libcudf_jit
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('Divide', 'Cast', 'Add')
 def test_try_divide_side_effecting_lhs_falls_back():
     assert_gpu_fallback_collect(
         lambda spark: spark.createDataFrame(
@@ -2064,8 +2077,7 @@ def test_ansi_jit_integral_mod_sign_for_integer_ansi_on():
 def test_ansi_jit_integral_div_by_zero_errors(expression):
     ast_conf = copy_and_update(
         _ansi_jit_ast_enabled_conf,
-        _project_ast_enabled_conf,
-        {"spark.rapids.sql.test.injectRetryOOM": "false"})
+        _project_ast_enabled_conf)
     df_fun = lambda spark: two_col_df(
         spark,
         LongGen(nullable=False, min_val=-100, max_val=100, special_cases=[]),
@@ -2087,8 +2099,7 @@ def test_ansi_jit_integral_div_by_zero_errors(expression):
 def test_ansi_jit_integral_div_overflow_errors():
     ast_conf = copy_and_update(
         _ansi_jit_ast_enabled_conf,
-        _project_ast_enabled_conf,
-        {"spark.rapids.sql.test.injectRetryOOM": "false"})
+        _project_ast_enabled_conf)
     df_fun = lambda spark: spark.createDataFrame(
         spark.sparkContext.parallelize([(LONG_MIN, -1)] * 8, 1),
         'a LONG, b LONG').selectExpr('a DIV b').collect()

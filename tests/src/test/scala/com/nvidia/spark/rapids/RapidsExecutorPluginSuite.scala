@@ -21,30 +21,21 @@ import org.scalatest.funsuite.AnyFunSuite
 class RapidsExecutorPluginSuite extends AnyFunSuite {
   private val jitFeatureConf = Map(
     RapidsConf.ENABLE_PROJECT_AST.key -> "true",
-    RapidsConf.ENABLE_PROJECT_AST_ANSI_ARITHMETIC.key -> "true")
+    RapidsConf.ENABLE_PROJECT_AST_ROW_IR.key -> "true")
 
-  test("project AST JIT requires executor deployment configuration") {
-    val configured = new RapidsConf(jitFeatureConf +
-      (GpuProjectAstExec.LIBCUDF_JIT_EXECUTOR_ENV_KEY -> "1"))
-    GpuProjectAstExec.requireJitRuntimeConfigured(configured)
+  test("ANSI project AST requires row IR") {
+    val ansiOnly = new RapidsConf(Map(
+      RapidsConf.ENABLE_PROJECT_AST_ANSI_ARITHMETIC.key -> "true"))
+    assert(!ansiOnly.isProjectAstRowIrEnabled)
+    assert(!ansiOnly.isProjectAstAnsiArithmeticEnabled)
 
-    val error = intercept[IllegalArgumentException] {
-      GpuProjectAstExec.requireJitRuntimeConfigured(new RapidsConf(jitFeatureConf))
-    }
-    assert(error.getMessage.contains(
-      "spark.executorEnv.LIBCUDF_JIT_ENABLED=1"))
-  }
+    val rowIrOnly = new RapidsConf(jitFeatureConf)
+    assert(rowIrOnly.isProjectAstRowIrEnabled)
+    assert(!rowIrOnly.isProjectAstAnsiArithmeticEnabled)
 
-  test("project AST JIT requires executor process environment") {
-    val conf = new RapidsConf(jitFeatureConf)
-    GpuProjectAstExec.requireJitExecutorEnvironment(
-      conf, Map(GpuProjectAstExec.LIBCUDF_JIT_ENV_KEY -> "1"))
-
-    val error = intercept[IllegalStateException] {
-      GpuProjectAstExec.requireJitExecutorEnvironment(conf, Map.empty)
-    }
-    assert(error.getMessage.contains(
-      "LIBCUDF_JIT_ENABLED=1 is not set in the executor process environment"))
+    val ansiWithRowIr = new RapidsConf(jitFeatureConf +
+      (RapidsConf.ENABLE_PROJECT_AST_ANSI_ARITHMETIC.key -> "true"))
+    assert(ansiWithRowIr.isProjectAstAnsiArithmeticEnabled)
   }
 
   test("project AST JIT runtime preflight preserves the cause") {
@@ -56,6 +47,14 @@ class RapidsExecutorPluginSuite extends AnyFunSuite {
     assert(error.getMessage.contains("libnvrtc"))
     assert(error.getMessage.contains("libnvJitLink"))
     assert(error.getCause eq cause)
+  }
+
+  test("project AST JIT runtime preflight is skipped without row IR") {
+    var initialized = false
+    GpuProjectAstExec.initializeJitRuntime(
+      new RapidsConf(Map(RapidsConf.ENABLE_PROJECT_AST.key -> "true")),
+      () => initialized = true)
+    assert(!initialized)
   }
 
   test("cudf version check") {

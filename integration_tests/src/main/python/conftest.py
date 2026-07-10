@@ -108,8 +108,6 @@ def _load_library(library_name):
 def _probe_libcudf_jit():
     if get_libcudf_jit_mode() == "disabled":
         return False, "libcudf JIT tests are disabled"
-    if os.environ.get("LIBCUDF_JIT_ENABLED") != "1":
-        return False, "LIBCUDF_JIT_ENABLED=1 is not set before libcudf initialization"
 
     missing = []
     for library_name in ["libcuda.so", "libnvrtc.so", "libnvJitLink.so.12"]:

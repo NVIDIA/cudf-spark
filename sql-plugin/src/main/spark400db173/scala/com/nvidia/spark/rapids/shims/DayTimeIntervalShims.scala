@@ -49,14 +49,14 @@ object DayTimeIntervalShims {
         override def tagSelfForAst(): Unit = {
           super.tagSelfForAst()
           if (a.dataType.isInstanceOf[DecimalType] &&
-              !this.conf.isProjectAstAnsiArithmeticEnabled) {
+              !this.conf.isProjectAstRowIrEnabled) {
             willNotWorkInAst("AST decimal abs requires row IR JIT support.")
           }
           if (!ansiEnabled && GpuAnsi.requiresRowIrArithmeticAst(a.dataType)) {
             willNotWorkInAst("AST Byte/Short abs requires ANSI row IR JIT support.")
           }
           if (ansiEnabled && GpuAnsi.needBasicOpOverflowCheck(a.dataType) &&
-              (!this.conf.isProjectAstAnsiArithmeticEnabled ||
+              (!this.conf.isProjectAstRowIrEnabled ||
                   !GpuAnsi.supportsAnsiArithmeticAst(a.dataType))) {
             willNotWorkInAst("AST abs does not support ANSI mode.")
           }
