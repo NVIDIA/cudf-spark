@@ -163,7 +163,6 @@ def test_array_item_ansi_fail_invalid_index(index):
         error_message=message)
 
 
-@pytest.mark.skipif(is_before_spark_330(), reason="try_element_at is not supported before Spark 3.3.0")
 @pytest.mark.parametrize('data_gen', array_item_test_gens, ids=idfn)
 def test_try_element_at_basic(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
@@ -176,7 +175,6 @@ def test_try_element_at_basic(data_gen):
             'try_element_at(a, b)'))
 
 
-@pytest.mark.skipif(is_before_spark_330(), reason="try_element_at is not supported before Spark 3.3.0")
 @pytest.mark.parametrize('index', [-2, 100, array_out_index_gen], ids=idfn)
 def test_try_element_at_invalid_index(index):
     if isinstance(index, int):
@@ -191,7 +189,6 @@ def test_try_element_at_invalid_index(index):
     assert_gpu_and_cpu_are_equal_collect(test_func, conf=ansi_enabled_conf)
 
 
-@pytest.mark.skipif(is_before_spark_330(), reason="try_element_at is not supported before Spark 3.3.0")
 @pytest.mark.parametrize('index', [0, array_zero_index_gen], ids=idfn)
 def test_try_element_at_zero_index_throws_error(index):
     if is_spark_340_or_later():
@@ -487,7 +484,7 @@ def test_array_element_at(data_gen):
 @pytest.mark.parametrize('index', [100, array_out_index_gen], ids=idfn)
 @disable_ansi_mode
 def test_array_element_at_ansi_fail_invalid_index(index):
-    message = "ArrayIndexOutOfBoundsException" if is_before_spark_330() or not is_before_spark_400() else "SparkArrayIndexOutOfBoundsException"
+    message = "ArrayIndexOutOfBoundsException" if not is_before_spark_400() else "SparkArrayIndexOutOfBoundsException"
     if isinstance(index, int):
         test_func = lambda spark: unary_op_df(spark, ArrayGen(int_gen)).select(
             element_at(col('a'), index)).collect()

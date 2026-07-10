@@ -27,9 +27,8 @@ from data_gen import *
 from marks import (allow_non_gpu, approximate_float, datagen_overrides, disable_ansi_mode,
                    ignore_order, inject_oom, validate_execs_in_gpu_plan)
 from spark_session import (
-    with_cpu_session, with_gpu_session, is_before_spark_330, is_before_spark_340,
-    is_before_spark_400, is_databricks113_or_later, is_spark_403,
-    is_spark_412_or_later)
+    with_cpu_session, with_gpu_session, is_before_spark_340, is_before_spark_400,
+    is_databricks113_or_later, is_spark_403, is_spark_412_or_later)
 from conftest import is_libcudf_jit_available, get_libcudf_jit_unavailable_reason
 import pyspark.sql.functions as f
 from pyspark.sql.types import (BooleanType, ByteType, DecimalType, DoubleType, FloatType,
@@ -206,7 +205,6 @@ def test_bitwise_not(data_descr):
 def test_unary_positive(data_descr):
     assert_unary_ast(data_descr, lambda df: df.selectExpr('+a'))
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_unary_positive_for_daytime_interval():
     data_descr = (DayTimeIntervalGen(), True)
     assert_unary_ast(data_descr, lambda df: df.selectExpr('+a'))

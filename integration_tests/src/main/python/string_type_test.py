@@ -34,7 +34,7 @@ _non_utf8_binary_collations = ["UNICODE", "UTF8_LCASE", "UNICODE_CI"]
 
 # test Collate, currently does not have GPU version for Collate
 @pytest.mark.skipif(is_before_spark_400(), reason="Spark versions before 400 do not support collate")
-@allow_non_gpu("ProjectExec")
+@allow_non_gpu("ProjectExec", "Collate", "ResolvedCollation")
 def test_collate_expr_fallback():
     data_gen = [("c1", string_gen)]
     assert_gpu_fallback_collect(

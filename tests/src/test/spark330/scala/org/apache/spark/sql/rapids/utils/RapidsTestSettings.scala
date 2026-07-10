@@ -32,6 +32,32 @@ class RapidsTestSettings extends BackendTestSettings {
     .exclude("SPARK-32908: maximum target error in percentile_approx", KNOWN_ISSUE("https://github.com/NVIDIA/spark-rapids/issues/14635"))
   enableSuite[RapidsDataFrameJoinSuite]
     .exclude("SPARK-24690 enables star schema detection even if CBO disabled", KNOWN_ISSUE("https://github.com/NVIDIA/spark-rapids/issues/14653"))
+  enableSuite[RapidsBroadcastJoinSuite]
+    .exclude("unsafe broadcast hash join updates peak execution memory", WONT_FIX_ISSUE("CPU memory metric test; not applicable to GPU broadcast hash join execution."))
+    .exclude("unsafe broadcast hash outer join updates peak execution memory", WONT_FIX_ISSUE("CPU memory metric test; not applicable to GPU broadcast hash join execution."))
+    .exclude("unsafe broadcast left semi join updates peak execution memory", WONT_FIX_ISSUE("CPU memory metric test; not applicable to GPU broadcast hash join execution."))
+    .exclude("SPARK-23192: broadcast hint should be retained after using the cached data", ADJUST_UT("Replaced by testRapids version that checks GpuBroadcastHashJoinExec."))
+    .exclude("SPARK-23214: cached data should not carry extra hint info", ADJUST_UT("Replaced by testRapids version that checks GpuInMemoryTableScanExec and no GpuBroadcastHashJoinExec."))
+    .exclude("Shouldn't change broadcast join buildSide if user clearly specified", ADJUST_UT("Replaced by testRapids version that checks GpuBroadcastHashJoinExec and supported GpuBroadcastNestedLoopJoinExec build-side choices."))
+    .exclude("Shouldn't bias towards build right if user didn't specify", ADJUST_UT("Replaced by testRapids version that checks no-hint GpuBroadcastHashJoinExec and supported GpuBroadcastNestedLoopJoinExec build-side choices."))
+    .exclude("broadcast join where streamed side's output partitioning is HashPartitioning", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15141"))
+    .exclude("broadcast join where streamed side's output partitioning is PartitioningCollection", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15141"))
+    .exclude("BroadcastHashJoinExec output partitioning scenarios for inner join", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15141"))
+    .exclude("BroadcastHashJoinExec output partitioning size should be limited with a config", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15141"))
+    .exclude("SPARK-37742: join planning shouldn't read invalid InMemoryRelation stats", ADJUST_UT("Replaced by testRapids version that checks GpuInMemoryTableScanExec and no GpuBroadcastHashJoinExec."))
+  enableSuite[RapidsBroadcastJoinSuiteAE]
+    .exclude("unsafe broadcast hash join updates peak execution memory", WONT_FIX_ISSUE("CPU memory metric test; not applicable to GPU broadcast hash join execution."))
+    .exclude("unsafe broadcast hash outer join updates peak execution memory", WONT_FIX_ISSUE("CPU memory metric test; not applicable to GPU broadcast hash join execution."))
+    .exclude("unsafe broadcast left semi join updates peak execution memory", WONT_FIX_ISSUE("CPU memory metric test; not applicable to GPU broadcast hash join execution."))
+    .exclude("SPARK-23192: broadcast hint should be retained after using the cached data", ADJUST_UT("Replaced by testRapids version that checks GpuBroadcastHashJoinExec."))
+    .exclude("SPARK-23214: cached data should not carry extra hint info", ADJUST_UT("Replaced by testRapids version that checks GpuInMemoryTableScanExec and no GpuBroadcastHashJoinExec."))
+    .exclude("Shouldn't change broadcast join buildSide if user clearly specified", ADJUST_UT("Replaced by testRapids version that checks GpuBroadcastHashJoinExec and supported GpuBroadcastNestedLoopJoinExec build-side choices."))
+    .exclude("Shouldn't bias towards build right if user didn't specify", ADJUST_UT("Replaced by testRapids version that checks no-hint GpuBroadcastHashJoinExec and supported GpuBroadcastNestedLoopJoinExec build-side choices."))
+    .exclude("broadcast join where streamed side's output partitioning is HashPartitioning", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15141"))
+    .exclude("broadcast join where streamed side's output partitioning is PartitioningCollection", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15141"))
+    .exclude("BroadcastHashJoinExec output partitioning scenarios for inner join", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15141"))
+    .exclude("BroadcastHashJoinExec output partitioning size should be limited with a config", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15141"))
+    .exclude("SPARK-37742: join planning shouldn't read invalid InMemoryRelation stats", ADJUST_UT("Replaced by testRapids version that checks GpuInMemoryTableScanExec and no GpuBroadcastHashJoinExec."))
   enableSuite[RapidsDynamicPartitionPruningV1SuiteAEOff]
     .exclude("Make sure dynamic pruning works on uncorrelated queries", ADJUST_UT("Replaced by testRapids version that checks GpuSubqueryBroadcastExec"))
     .exclude("static scan metrics", ADJUST_UT("Replaced by testRapids version that checks GpuFileSourceScanExec metrics"))
@@ -142,6 +168,11 @@ class RapidsTestSettings extends BackendTestSettings {
     .exclude("SPARK-24596 Non-cascading Cache Invalidation - verify cached data reuse", ADJUST_UT("Replaced by testRapids version that checks non-cascading cache invalidation reuses loaded cached data without re-evaluating the UDF."))
     .exclude("SPARK-26708 Cache data and cached plan should stay consistent", ADJUST_UT("Replaced by testRapids version that checks loaded and unloaded dependent caches keep consistent cached plans under RAPIDS."))
   enableSuite[RapidsDatasetPrimitiveSuite]
+  enableSuite[RapidsFileSourceStrategySuite]
+    .exclude("partitioned table - after scan filters", ADJUST_UT("Replaced by testRapids version that checks GpuFilterExec residual filters."))
+    .exclude("[SPARK-16818] partition pruned file scans implement sameResult correctly", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15161"))
+  enableSuite[RapidsFileScanSuite]
+  enableSuite[RapidsPruneFileSourcePartitionsSuite]
   enableSuite[RapidsDataFrameWindowFunctionsSuite]
     .exclude("Window spill with more than the inMemoryThreshold and spillThreshold", WONT_FIX_ISSUE("GPU implementation doesn't respect the inMemoryThreshold and spillThreshold"))
     .exclude("SPARK-21258: complex object in combination with spilling", WONT_FIX_ISSUE("GPU implementation doesn't respect the inMemoryThreshold and spillThreshold"))
@@ -165,6 +196,39 @@ class RapidsTestSettings extends BackendTestSettings {
   enableSuite[RapidsMathFunctionsSuite]
   enableSuite[RapidsMiscFunctionsSuite]
   enableSuite[RapidsParquetAvroCompatibilitySuite]
+  enableSuite[RapidsParquetV1FilterSuite]
+    .exclude("filter pushdown - binary", ADJUST_UT("Original Spark test verifies parquet-mr FilterPredicate construction and record-level filtering for BinaryType; GPU Parquet scan does not use parquet-mr record filters, so the replacement checks final output correctness with a GPU scan."))
+    .exclude("filter pushdown - date", ADJUST_UT("Original Spark test verifies parquet-mr FilterPredicate construction and record-level filtering for DateType across CORRECTED/LEGACY rebase modes; GPU Parquet scan does not use parquet-mr predicates, so the replacement checks final output correctness for the supported GPU scan path."))
+    .exclude("filter pushdown - timestamp", ADJUST_UT("Original Spark test verifies parquet-mr FilterPredicate construction and record-level filtering for TIMESTAMP_MILLIS/TIMESTAMP_MICROS, plus no INT96 pushdown, across CORRECTED/LEGACY rebase modes; GPU Parquet scan does not use parquet-mr predicates, so the replacement checks final output correctness for the supported GPU scan path."))
+    .exclude("Filters should be pushed down for vectorized Parquet reader at row group level", WONT_FIX_ISSUE("CPU Parquet row-group pruning accumulator test; it asserts Spark parquet-mr reader counters instead of GPU scan behavior."))
+    .exclude("SPARK-31026: Parquet predicate pushdown for fields having dots in the names", WONT_FIX_ISSUE("CPU Parquet-mr reader counter assertion; GPU scan metrics do not expose the same reader counter."))
+    .exclude("Filters should be pushed down for Parquet readers at row group level", WONT_FIX_ISSUE("CPU Parquet row-group pruning accumulator test; it asserts Spark parquet-mr reader counters instead of GPU scan behavior."))
+    .exclude("filter pushdown - StringStartsWith", WONT_FIX_ISSUE("CPU Parquet row-group pruning accumulator test; it asserts Spark parquet-mr reader counters instead of GPU scan behavior."))
+    .exclude("SPARK-17091: Convert IN predicate to Parquet filter push-down", WONT_FIX_ISSUE("CPU Parquet row-group pruning accumulator test; it asserts Spark parquet-mr reader counters instead of GPU scan behavior."))
+    .exclude("Support Parquet column index", WONT_FIX_ISSUE("CPU Parquet column-index pruning accumulator test; GPU scan metrics do not expose the same reader counter."))
+    .exclude("SPARK-34562: Bloom filter push down", WONT_FIX_ISSUE("CPU Parquet bloom-filter pruning accumulator test; GPU scan metrics do not expose the same reader counter."))
+    .exclude("SPARK-36866: filter pushdown - year-month interval", WONT_FIX_ISSUE("Original Spark test verifies parquet-mr FilterPredicate construction and exact record-level filtering for YearMonthIntervalType after stripping Spark filters; RAPIDS uses GPU Parquet scan, and this shim does not support year-month interval comparison predicates as GPU residual filters, so the inherited check can observe extra row-group rows."))
+    .exclude("SPARK-36866: filter pushdown - day-time interval", WONT_FIX_ISSUE("Original Spark test verifies parquet-mr FilterPredicate construction and exact record-level filtering for DayTimeIntervalType after stripping Spark filters; RAPIDS uses GPU Parquet scan rather than parquet-mr record filtering, so the inherited check can observe extra row-group rows."))
+  enableSuite[RapidsParquetV2FilterSuite]
+    .exclude("filter pushdown - binary", ADJUST_UT("Original Spark test verifies parquet-mr FilterPredicate construction and record-level filtering for BinaryType; GPU Parquet scan does not use parquet-mr record filters, so the replacement checks final output correctness with a GPU scan."))
+    .exclude("filter pushdown - date", ADJUST_UT("Original Spark test verifies parquet-mr FilterPredicate construction and record-level filtering for DateType across CORRECTED/LEGACY rebase modes; GPU Parquet scan does not use parquet-mr predicates, so the replacement checks final output correctness for the supported GPU scan path."))
+    .exclude("filter pushdown - timestamp", ADJUST_UT("Original Spark test verifies parquet-mr FilterPredicate construction and record-level filtering for TIMESTAMP_MILLIS/TIMESTAMP_MICROS, plus no INT96 pushdown, across CORRECTED/LEGACY rebase modes; GPU Parquet scan does not use parquet-mr predicates, so the replacement checks final output correctness for the supported GPU scan path."))
+    .exclude("Filters should be pushed down for vectorized Parquet reader at row group level", WONT_FIX_ISSUE("CPU Parquet row-group pruning accumulator test; it asserts Spark parquet-mr reader counters instead of GPU scan behavior."))
+    .exclude("SPARK-31026: Parquet predicate pushdown for fields having dots in the names", WONT_FIX_ISSUE("CPU Parquet-mr reader counter assertion; GPU scan metrics do not expose the same reader counter."))
+    .exclude("Filters should be pushed down for Parquet readers at row group level", WONT_FIX_ISSUE("CPU Parquet row-group pruning accumulator test; it asserts Spark parquet-mr reader counters instead of GPU scan behavior."))
+    .exclude("filter pushdown - StringStartsWith", WONT_FIX_ISSUE("CPU Parquet row-group pruning accumulator test; it asserts Spark parquet-mr reader counters instead of GPU scan behavior."))
+    .exclude("SPARK-17091: Convert IN predicate to Parquet filter push-down", WONT_FIX_ISSUE("CPU Parquet row-group pruning accumulator test; it asserts Spark parquet-mr reader counters instead of GPU scan behavior."))
+    .exclude("Support Parquet column index", WONT_FIX_ISSUE("CPU Parquet column-index pruning accumulator test; GPU scan metrics do not expose the same reader counter."))
+    .exclude("SPARK-34562: Bloom filter push down", WONT_FIX_ISSUE("CPU Parquet bloom-filter pruning accumulator test; GPU scan metrics do not expose the same reader counter."))
+    .exclude("SPARK-36866: filter pushdown - year-month interval", WONT_FIX_ISSUE("Original Spark test verifies parquet-mr FilterPredicate construction and exact record-level filtering for YearMonthIntervalType after stripping Spark filters; RAPIDS uses GPU Parquet scan, and this shim does not support year-month interval comparison predicates as GPU residual filters, so the inherited check can observe extra row-group rows."))
+    .exclude("SPARK-36866: filter pushdown - day-time interval", WONT_FIX_ISSUE("Original Spark test verifies parquet-mr FilterPredicate construction and exact record-level filtering for DayTimeIntervalType after stripping Spark filters; RAPIDS uses GPU Parquet scan rather than parquet-mr record filtering, so the inherited check can observe extra row-group rows."))
+  enableSuite[RapidsParquetIOSuite]
+    .exclude("vectorized reader: missing all struct fields", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15178"))
+    .exclude("compression codec", WONT_FIX_ISSUE("Inherited test asserts CPU Parquet writer codec metadata; GPU writer can emit a different valid set of codecs."))
+    .exclude("SPARK-35640: int as long should throw schema incompatible error", WONT_FIX_ISSUE("GPU Parquet reader accepts the widening read where the CPU vectorized reader throws this schema mismatch exception."))
+    .exclude("SPARK-11044 Parquet writer version fixed as version1 ", WONT_FIX_ISSUE("Inherited test asserts CPU parquet-mr dictionary encoding names; GPU writer uses different valid encodings."))
+  enableSuite[RapidsParquetV1AggregatePushDownSuite]
+  enableSuite[RapidsParquetV2AggregatePushDownSuite]
   enableSuite[RapidsParquetColumnIndexSuite]
   enableSuite[RapidsParquetCompressionCodecPrecedenceSuite]
     .exclude("Create parquet table with compression", KNOWN_ISSUE("https://github.com/NVIDIA/spark-rapids/issues/11416"))
@@ -199,6 +263,59 @@ class RapidsTestSettings extends BackendTestSettings {
   enableSuite[RapidsParquetThriftCompatibilitySuite]
     .exclude("Read Parquet file generated by parquet-thrift", ADJUST_UT("https://github.com/NVIDIA/spark-rapids/pull/11591"))
   enableSuite[RapidsParquetVectorizedSuite]
+  enableSuite[RapidsOrcFilterSuite]
+  enableSuite[RapidsOrcV1QuerySuite]
+    .exclude("SPARK-20728 Make ORCFileFormat configurable between sql/hive and sql/core", WONT_FIX_ISSUE("Inherited Spark check toggles between CPU native/hive ORC implementations; RAPIDS uses the GPU ORC path instead."))
+    .exclude("SPARK-34862: Support ORC vectorized reader for nested column", WONT_FIX_ISSUE("CPU ORC vectorized-reader assertion; GPU uses GpuOrcScan rather than Spark CPU vectorized reader flag."))
+    .exclude("SPARK-37728: Reading nested columns with ORC vectorized reader should not cause ArrayIndexOutOfBoundsException", WONT_FIX_ISSUE("CPU ORC vectorized-reader assertion; GPU uses GpuOrcScan rather than Spark CPU vectorized reader flag."))
+    .exclude("SPARK-36594: ORC vectorized reader should properly check maximal number of fields", WONT_FIX_ISSUE("CPU ORC vectorized-reader limit assertion; GPU does not expose Spark CPU ORC vectorized-reader flag."))
+  enableSuite[RapidsOrcV2QuerySuite]
+    .exclude("SPARK-20728 Make ORCFileFormat configurable between sql/hive and sql/core", WONT_FIX_ISSUE("Inherited Spark check toggles between CPU native/hive ORC implementations; RAPIDS uses the GPU ORC path instead."))
+    .exclude("SPARK-34862: Support ORC vectorized reader for nested column", WONT_FIX_ISSUE("CPU ORC vectorized-reader assertion; GPU uses GpuOrcScan rather than Spark CPU vectorized reader flag."))
+    .exclude("SPARK-37728: Reading nested columns with ORC vectorized reader should not cause ArrayIndexOutOfBoundsException", WONT_FIX_ISSUE("CPU ORC vectorized-reader assertion; GPU uses GpuOrcScan rather than Spark CPU vectorized reader flag."))
+    .exclude("SPARK-36594: ORC vectorized reader should properly check maximal number of fields", WONT_FIX_ISSUE("CPU ORC vectorized-reader limit assertion; GPU does not expose Spark CPU ORC vectorized-reader flag."))
+  enableSuite[RapidsOrcV1AggregatePushDownSuite]
+  enableSuite[RapidsOrcV2AggregatePushDownSuite]
+    .exclude("nested column: Count(top level column) push down", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15186"))
+
+  private val orcSchemaPruningModes = Seq(
+    "Spark vectorized reader - without partition data column",
+    "Spark vectorized reader - with partition data column",
+    "Non-vectorized reader - without partition data column",
+    "Non-vectorized reader - with partition data column")
+
+  private val orcComplexReaderFailureReason =
+    KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15179")
+
+  private val orcV1ComplexReaderFailureCases = Seq(
+    "select a single complex field",
+    "select a single complex field and the partition column",
+    "partial schema intersection - select missing subfield",
+    "empty schema intersection",
+    "select one deep nested complex field after join",
+    "select one deep nested complex field after outer join")
+
+  private val orcV1SchemaPruning = enableSuite[RapidsOrcV1SchemaPruningSuite]
+  orcV1ComplexReaderFailureCases.foreach { testName =>
+    orcSchemaPruningModes.foreach { mode =>
+      orcV1SchemaPruning.exclude(s"$mode - $testName", orcComplexReaderFailureReason)
+    }
+  }
+
+  private val orcV2ComplexReaderFailureCases = Seq(
+    "select a single complex field",
+    "select a single complex field and the partition column",
+    "partial schema intersection - select missing subfield",
+    "empty schema intersection",
+    "select one deep nested complex field after join",
+    "select one deep nested complex field after outer join")
+
+  private val orcV2SchemaPruning = enableSuite[RapidsOrcV2SchemaPruningSuite]
+  orcV2ComplexReaderFailureCases.foreach { testName =>
+    orcSchemaPruningModes.foreach { mode =>
+      orcV2SchemaPruning.exclude(s"$mode - $testName", orcComplexReaderFailureReason)
+    }
+  }
   enableSuite[RapidsRandomSuite]
     .exclude("random", ADJUST_UT("Replaced by testRapids version that considers partitionIndex offset"))
     .exclude("SPARK-9127 codegen with long seed", ADJUST_UT("Replaced by testRapids version that considers partitionIndex offset"))
@@ -206,6 +323,17 @@ class RapidsTestSettings extends BackendTestSettings {
   enableSuite[RapidsRegexpExpressionsSuite]
   enableSuite[RapidsSQLWindowFunctionSuite]
     .exclude("test with low buffer spill threshold", WONT_FIX_ISSUE("GPU window implementation doesn't respect Spark WindowExec spill thresholds."))
+  enableSuite[RapidsSortSuite]
+    .exclude("basic sorting using ExternalSort", ADJUST_UT("Replaced by testRapids query-level version that checks GpuSortExec."))
+    .exclude("sorting all nulls", WONT_FIX_ISSUE("Direct CPU SortExec SparkPlanTest, not a GPU execution path."))
+    .exclude("sort followed by limit", ADJUST_UT("Replaced by testRapids query-level version that checks GpuTopN."))
+    .exclude("sorting does not crash for large inputs", WONT_FIX_ISSUE("Direct CPU SortExec spill-path SparkPlanTest, not a GPU execution path."))
+    .exclude("sorting updates peak execution memory", WONT_FIX_ISSUE("CPU memory metric test; not applicable to GPU sort execution."))
+    .exclude("SPARK-33260: sort order is a Stream", WONT_FIX_ISSUE("Direct CPU SortExec SparkPlanTest, not a GPU execution path."))
+    .excludeByPrefix("sorting on ", WONT_FIX_ISSUE("Direct CPU SortExec SparkPlanTest, not a GPU execution path."))
+  enableSuite[RapidsTakeOrderedAndProjectSuite]
+    .exclude("TakeOrderedAndProject.doExecute without project", ADJUST_UT("Replaced by testRapids query-level version that checks GpuTopN."))
+    .exclude("TakeOrderedAndProject.doExecute with project", ADJUST_UT("Replaced by testRapids query-level version that checks GpuTopN."))
   enableSuite[RapidsStringExpressionsSuite]
     .exclude("SPARK-22550: Elt should not generate codes beyond 64KB", WONT_FIX_ISSUE("https://github.com/NVIDIA/spark-rapids/issues/10775"))
     .exclude("SPARK-22603: FormatString should not generate codes beyond 64KB", WONT_FIX_ISSUE("https://github.com/NVIDIA/spark-rapids/issues/10775"))

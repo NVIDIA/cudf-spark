@@ -16,7 +16,7 @@ import pytest
 from pyspark import BarrierTaskContext, TaskContext
 
 from conftest import is_at_least_precommit_run, is_databricks_runtime
-from spark_session import (is_before_spark_330, is_before_spark_331, is_before_spark_350,
+from spark_session import (is_before_spark_331, is_before_spark_350,
                            is_databricks133_or_later, is_databricks143_or_later,
                            is_spark_400_or_later, is_spark_411_or_later)
 
@@ -392,7 +392,6 @@ def test_cogroup_apply_fallback():
 
 @ignore_order
 @pytest.mark.parametrize('data_gen', [LongGen(nullable=False)], ids=idfn)
-@pytest.mark.skipif(is_before_spark_330(), reason='mapInArrow is introduced in Pyspark 3.3.0')
 def test_map_arrow_apply_udf(data_gen):
     def filter_func(iterator):
         for batch in iterator:

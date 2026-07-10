@@ -26,7 +26,7 @@ from pyspark.sql.dataframe import DataFrame
 from pyspark.sql.types import *
 from marks import *
 import pyspark.sql.functions as f
-from spark_session import is_databricks104_or_later, with_cpu_session, is_before_spark_330, is_spark_340_or_later
+from spark_session import is_databricks104_or_later, with_cpu_session, is_spark_340_or_later
 
 pytestmark = pytest.mark.nightly_resource_consuming_test
 
@@ -1949,7 +1949,6 @@ def test_agg_nested_map():
     assert_gpu_and_cpu_are_equal_collect(do_it, conf = {# Disable ANSI mode to avoid issues with array indexes and map keys not being present
         'spark.sql.ansi.enabled': False})
 
-@pytest.mark.skipif(is_before_spark_330(), reason="try_sum is not supported before Spark 3.3.0")
 @allow_non_gpu('HashAggregateExec', 'ShuffleExchangeExec')
 @pytest.mark.parametrize('data_gen', integral_gens, ids=idfn)
 def test_try_sum_fallback_to_cpu(data_gen):
@@ -1961,7 +1960,6 @@ def test_try_sum_fallback_to_cpu(data_gen):
         # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
         conf={'spark.sql.adaptive.enabled': 'false'})
 
-@pytest.mark.skipif(is_before_spark_330(), reason="try_sum is not supported before Spark 3.3.0")
 @ignore_order(local=True)
 @allow_non_gpu('HashAggregateExec', 'ShuffleExchangeExec')
 @pytest.mark.parametrize('data_gen', integral_gens, ids=idfn)
@@ -1975,7 +1973,6 @@ def test_try_sum_groupby_fallback_to_cpu(data_gen):
         # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
         conf={'spark.sql.adaptive.enabled': 'false'})
 
-@pytest.mark.skipif(is_before_spark_330(), reason="try_avg is not supported before Spark 3.3.0")
 @approximate_float
 @ignore_order(local=True)
 @allow_non_gpu('HashAggregateExec', 'ShuffleExchangeExec')

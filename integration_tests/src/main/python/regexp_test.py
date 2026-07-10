@@ -374,7 +374,14 @@ def test_re_replace_anchors():
         .with_special_case("TEST") \
         .with_special_case("TEST\n") \
         .with_special_case("TEST\r\n") \
-        .with_special_case("TEST\r")
+        .with_special_case("TEST\r") \
+        .with_special_case("$") \
+        .with_special_case("^") \
+        .with_special_case("$\n") \
+        .with_special_case("\n$") \
+        .with_special_case("a^") \
+        .with_special_case("a^\n") \
+        .with_special_case("a\nb")
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: unary_op_df(spark, gen).selectExpr(
             'REGEXP_REPLACE(a, "TEST$", "")',
@@ -388,6 +395,13 @@ def test_re_replace_anchors():
             'REGEXP_REPLACE(a, "^TEST\\\\Z", "PROD")',
             'REGEXP_REPLACE(a, "TEST\\\\Z", "PROD")',
             'REGEXP_REPLACE(a, "^TEST$", "PROD")',
+            # Issue #14746: $ and ^ inside character classes are literals, not anchors.
+            'REGEXP_REPLACE(a, "[$\\\\n]", "X")',
+            'REGEXP_REPLACE(a, "[$]\\\\n", "X")',
+            'REGEXP_REPLACE(a, "\\\\n[$]", "X")',
+            'REGEXP_REPLACE(a, "(?:[$])\\\\n", "X")',
+            'REGEXP_REPLACE(a, "[a^]$", "X")',
+            'REGEXP_REPLACE(a, "(?:[a^])$", "X")',
         ),
         conf=_regexp_conf)
 
@@ -670,6 +684,29 @@ def test_regexp_hexadecimal_digits():
                 'regexp_replace(a, "\\\\xff", "@")',
                 'regexp_replace(a, "[\\\\xa0-\\\\xb0]", "@")',
                 'regexp_replace(a, "\\\\x{10ffff}", "@")',
+                # Issue #14739: non-braced \xNN followed by another hex digit
+                # used to be greedily consumed and rejected. The cap fix below
+                # makes these patterns run on GPU instead of falling back.
+                r'regexp_replace(a, "\\x61a", "X")',
+                r'regexp_replace(a, "\\x41f", "X")',
+                r'rlike(a, "\\x61a")',
+                r'rlike(a, "[\\x41b]")',
+            ),
+        conf=_regexp_conf)
+    # Issue #14739 (positive-match path): the random data above only contains
+    # `[abcd]`-prefixed strings, so two-character substrings like "aa", "Af",
+    # or "ab" only appear by coincidence. Add a literal dataframe with strings
+    # that DO contain the targeted two-char substrings so the matched/replaced
+    # branch of the cap fix is actually exercised on both GPU and CPU.
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: spark.createDataFrame(
+                [("aa",), ("Af",), ("ab",), ("zz",), ("Aff",), ("xaay",)],
+                "a string").selectExpr(
+                r'regexp_replace(a, "\\x61a", "X")',  # "aa" -> "X"
+                r'regexp_replace(a, "\\x41f", "X")',  # "Af" -> "X"
+                r'rlike(a, "\\x61a")',
+                r'rlike(a, "\\x41f")',
+                r'rlike(a, "[\\x41b]")',  # [A,b] char class
             ),
         conf=_regexp_conf)
 
