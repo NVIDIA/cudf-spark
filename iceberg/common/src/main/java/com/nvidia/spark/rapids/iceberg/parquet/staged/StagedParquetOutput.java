@@ -211,6 +211,26 @@ abstract class StagedParquetOutput implements AutoCloseable {
     writeBytes(outputOffset, source, 0, source.length);
   }
 
+  /**
+   * Copy bytes from a host buffer into a bounds-checked output range. Used by the owning worker
+   * to route the useful segments of a gap-merged read from its scratch buffer into the packed
+   * output; disjoint ranges may be written concurrently with other writers.
+   */
+  final void copyFromHostBuffer(
+      long outputOffset,
+      HostMemoryBuffer source,
+      long sourceOffset,
+      long length) throws IOException {
+    Objects.requireNonNull(source, "source");
+    long writeStamp = beginConcurrentWrite();
+    try {
+      checkWriteBounds(outputOffset, length);
+      copyFromHostBufferStorage(outputOffset, source, sourceOffset, length);
+    } finally {
+      endConcurrentWrite(writeStamp);
+    }
+  }
+
   /** Seal the exact-sized output after every source writer is terminal. */
   final void seal() throws IOException {
     long writeStamp = beginExclusiveWrite();
@@ -276,6 +296,13 @@ abstract class StagedParquetOutput implements AutoCloseable {
       byte[] source,
       int sourceOffset,
       int length) throws IOException;
+
+  /** Copy one bounds-checked host-buffer range into the backing store under a write stamp. */
+  abstract void copyFromHostBufferStorage(
+      long outputOffset,
+      HostMemoryBuffer source,
+      long sourceOffset,
+      long length) throws IOException;
 
   /** Perform the backing-store transition while the exclusive lifecycle lock is held. */
   abstract void sealStorage() throws IOException;

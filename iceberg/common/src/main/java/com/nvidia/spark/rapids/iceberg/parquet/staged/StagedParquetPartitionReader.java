@@ -20,6 +20,7 @@ import java.nio.channels.SeekableByteChannel;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -75,6 +76,17 @@ import org.apache.spark.sql.vectorized.ColumnarBatch;
  */
 public final class StagedParquetPartitionReader
     implements Iterator<ColumnarBatch>, AutoCloseable {
+  /**
+   * Coalescing limits for cache-miss reads within one file. Ranges whose source gap is at most
+   * the gap limit merge into one ranged read as long as the merged span stays within the span
+   * limit. Gap bytes are downloaded and discarded, so the gap limit bounds the wasted bandwidth
+   * a merge can add while eliminating a request round-trip.
+   */
+  static final long COALESCE_GAP_LIMIT_BYTES = 4L << 20;
+  static final long COALESCE_SPAN_LIMIT_BYTES = 32L << 20;
+  /** Assembly-buffer capacity is rounded up to this granularity so it stops growing quickly. */
+  private static final long ASSEMBLY_GRANULARITY_BYTES = 16L << 20;
+
   private final List<IcebergPartitionedFile> files;
   private final StagedScanAdapter adapter;
   private final StableGreedyReadPlanner planner;
@@ -106,6 +118,13 @@ public final class StagedParquetPartitionReader
   private final Set<FileFragment> statsAttributed =
       Collections.newSetFromMap(new IdentityHashMap<>());
   private int fragmentsClosedUpTo;
+
+  // Reused across this reader's strictly sequential assemblies so synthetic-buffer pages fault
+  // once per reader instead of once per subtask. Guarded by lifecycleLock for the close() race.
+  // Reuse is safe because decodeAndPostProcess returns only after the decode output no longer
+  // references the assembled input, and each assembly hands out a fresh slice whose close only
+  // dereferences this parent.
+  private HostMemoryBuffer assemblyBuffer;
 
   private Iterator<ColumnarBatch> currentBatches;
   // Guarded by iteratorLock. Once the caller advances again, the previously returned batch has
@@ -351,10 +370,11 @@ public final class StagedParquetPartitionReader
     long cacheMissCount = 0L;
     long cacheMissBytes = 0L;
     long cacheReadNanos = 0L;
-    List<PlannedReadRange> missRanges = new ArrayList<>();
-    List<FileCacheStartedToken> missTokens = new ArrayList<>();
+    List<MissChunk> misses = new ArrayList<>();
     StagedParquetOutput output = StagedParquetOutput.create(totalBytes);
-    CompletableFuture<Void> read = null;
+    HostMemoryBuffer scratch = null;
+    CompletableFuture<Void> directRead = null;
+    CompletableFuture<Void> scratchRead = null;
     try {
       if (closed.get()) {
         throw new CancellationException("staged reader closed before fragment I/O started");
@@ -381,32 +401,72 @@ public final class StagedParquetPartitionReader
             cacheHitCount += 1L;
             cacheHitBytes = Math.addExact(cacheHitBytes, length);
           } else {
-            missRanges.add(new PlannedReadRange(footer, sourceOffset, length, fragmentOffset));
-            cacheMissCount += 1L;
-            cacheMissBytes = Math.addExact(cacheMissBytes, length);
+            MissChunk chunk = new MissChunk(sourceOffset, length, fragmentOffset);
             Option<FileCacheStartedToken> token = fileCache.startDataRangeCache(
                 input, sourceOffset, length);
-            missTokens.add(token.isDefined() ? token.get() : null);
+            chunk.token = token.isDefined() ? token.get() : null;
+            misses.add(chunk);
+            cacheMissCount += 1L;
+            cacheMissBytes = Math.addExact(cacheMissBytes, length);
           }
           fragmentOffset = Math.addExact(fragmentOffset, length);
         }
       }
 
+      // Merge miss chunks into few ranged reads. Zero-gap merges land directly on their
+      // contiguous packed fragment region; gap-carrying merges read their whole source span
+      // into a transient scratch buffer whose useful segments are routed into the fragment
+      // after the read barrier. Gap bytes are downloaded and discarded — bounded extra
+      // bandwidth traded for far fewer request round-trips.
+      List<MergedRead> mergedReads = mergeMissChunks(misses);
+      List<PlannedReadRange> directRanges = new ArrayList<>();
+      List<RapidsInputFile.CopyRange> scratchRanges = new ArrayList<>();
+      long scratchBytes = 0L;
+      for (MergedRead read : mergedReads) {
+        if (read.isDirect()) {
+          directRanges.add(new PlannedReadRange(
+              footer, read.sourceStart, read.spanBytes(), read.chunks.get(0).fragmentOffset));
+        } else {
+          read.scratchStart = scratchBytes;
+          scratchRanges.add(new RapidsInputFile.CopyRange(
+              read.sourceStart, read.spanBytes(), scratchBytes));
+          scratchBytes = Math.addExact(scratchBytes, read.spanBytes());
+        }
+      }
+      if (scratchBytes > 0) {
+        scratch = HostAlloc$.MODULE$.alloc(scratchBytes, false);
+      }
+
       // The pacing point of the blocking model: wait for every accepted read.
-      read = output.copyRangesAsync(input, missRanges);
-      read.join();
+      directRead = output.copyRangesAsync(input, directRanges);
+      scratchRead = scratch == null
+          ? CompletableFuture.completedFuture(null)
+          : input.readVectoredAsync(scratch, scratchRanges);
+      directRead.join();
+      scratchRead.join();
       checkOpen();
 
+      // Route the useful segments of gap-merged reads into the packed fragment.
+      for (MergedRead read : mergedReads) {
+        if (read.scratchStart >= 0) {
+          for (MissChunk chunk : read.chunks) {
+            output.copyFromHostBuffer(
+                chunk.fragmentOffset,
+                scratch,
+                read.scratchStart + (chunk.sourceOffset - read.sourceStart),
+                chunk.length);
+          }
+        }
+      }
+
       // Publish owning cache slices inline on this worker.
-      for (int index = 0; index < missRanges.size(); index++) {
-        FileCacheStartedToken token = missTokens.get(index);
+      for (MissChunk chunk : misses) {
+        FileCacheStartedToken token = chunk.token;
         if (token != null) {
-          PlannedReadRange range = missRanges.get(index);
-          HostMemoryBuffer data = output.sliceForCache(
-              range.getOutputOffset(), range.getLength());
+          HostMemoryBuffer data = output.sliceForCache(chunk.fragmentOffset, chunk.length);
           // Keep the token cancellable until the owning slice exists. complete() consumes the
           // HMB before it queues cache work, so clear the token before handing over ownership.
-          missTokens.set(index, null);
+          chunk.token = null;
           token.complete(data);
         }
       }
@@ -415,22 +475,14 @@ public final class StagedParquetPartitionReader
           new FileFragment.DownloadStats(System.nanoTime() - start,
               cacheHitCount, cacheHitBytes, cacheMissCount, cacheMissBytes, cacheReadNanos));
     } catch (Throwable error) {
+      // Accepted writers must become terminal before the output or scratch is reclaimed.
       Throwable failure = unwrap(error);
-      if (read != null) {
-        // Accepted writers must become terminal before the output is reclaimed.
-        try {
-          read.join();
-        } catch (Throwable drainError) {
-          Throwable unwrapped = unwrap(drainError);
-          if (unwrapped != failure) {
-            failure.addSuppressed(unwrapped);
-          }
-        }
-      }
-      for (FileCacheStartedToken token : missTokens) {
-        if (token != null) {
+      failure = drainRead(directRead, failure);
+      failure = drainRead(scratchRead, failure);
+      for (MissChunk chunk : misses) {
+        if (chunk.token != null) {
           try {
-            token.cancel();
+            chunk.token.cancel();
           } catch (Throwable cancelError) {
             failure = addFailure(failure, cancelError);
           }
@@ -444,7 +496,98 @@ public final class StagedParquetPartitionReader
         }
       }
       throw propagate(failure);
+    } finally {
+      if (scratch != null) {
+        // Success joined both reads and the failure path drained them, so no writer can still
+        // touch the scratch bytes here.
+        scratch.close();
+      }
     }
+  }
+
+  private static Throwable drainRead(CompletableFuture<Void> read, Throwable primary) {
+    if (read == null) {
+      return primary;
+    }
+    try {
+      read.join();
+    } catch (Throwable drainError) {
+      Throwable unwrapped = unwrap(drainError);
+      if (unwrapped != primary) {
+        primary.addSuppressed(unwrapped);
+      }
+    }
+    return primary;
+  }
+
+  /** One cache-miss column chunk: source range, packed fragment offset, and its cache token. */
+  private static final class MissChunk {
+    final long sourceOffset;
+    final long length;
+    final long fragmentOffset;
+    FileCacheStartedToken token;
+
+    MissChunk(long sourceOffset, long length, long fragmentOffset) {
+      this.sourceOffset = sourceOffset;
+      this.length = length;
+      this.fragmentOffset = fragmentOffset;
+    }
+  }
+
+  /** Consecutive source-sorted miss chunks merged into one ranged read. */
+  private static final class MergedRead {
+    final List<MissChunk> chunks = new ArrayList<>();
+    long sourceStart;
+    long sourceEnd;
+    long scratchStart = -1L;
+
+    long spanBytes() {
+      return sourceEnd - sourceStart;
+    }
+
+    /** Direct reads have no source gaps and land exactly on one packed fragment region. */
+    boolean isDirect() {
+      long expectedSource = sourceStart;
+      long expectedFragment = chunks.get(0).fragmentOffset;
+      for (MissChunk chunk : chunks) {
+        if (chunk.sourceOffset != expectedSource || chunk.fragmentOffset != expectedFragment) {
+          return false;
+        }
+        expectedSource += chunk.length;
+        expectedFragment += chunk.length;
+      }
+      return true;
+    }
+  }
+
+  /**
+   * Greedily merge source-sorted miss chunks whose source gaps and merged spans stay within the
+   * coalescing limits. One S3 request per column chunk is latency-bound on small files — the
+   * base reader's per-file read shape is roughly one request per file — so fewer, larger ranged
+   * reads win even though gap bytes are discarded.
+   */
+  private static List<MergedRead> mergeMissChunks(List<MissChunk> misses) {
+    ArrayList<MissChunk> sorted = new ArrayList<>(misses);
+    sorted.sort(Comparator.comparingLong(chunk -> chunk.sourceOffset));
+    ArrayList<MergedRead> merged = new ArrayList<>();
+    MergedRead current = null;
+    for (MissChunk chunk : sorted) {
+      long chunkEnd = Math.addExact(chunk.sourceOffset, chunk.length);
+      if (current != null
+          && chunk.sourceOffset >= current.sourceEnd
+          && chunk.sourceOffset - current.sourceEnd <= COALESCE_GAP_LIMIT_BYTES
+          && chunkEnd - current.sourceStart <= COALESCE_SPAN_LIMIT_BYTES) {
+        current.chunks.add(chunk);
+        current.sourceEnd = chunkEnd;
+      } else {
+        current = new MergedRead();
+        current.sourceStart = chunk.sourceOffset;
+        current.sourceEnd = chunkEnd;
+        current.chunks.add(chunk);
+        merged.add(current);
+      }
+    }
+    return merged;
   }
 
   /**
@@ -523,8 +666,7 @@ public final class StagedParquetPartitionReader
     long materializeNanos = 0L;
     byte[] headerBytes = subtask.getHeaderBytes();
     byte[] footerBytes = subtask.getFooterAndTrailerBytes();
-    HostMemoryBuffer synthetic =
-        HostAlloc$.MODULE$.alloc(subtask.getTotalSizeBytes(), false);
+    HostMemoryBuffer synthetic = borrowAssemblyBuffer(subtask.getTotalSizeBytes());
     boolean handedOff = false;
     try {
       synthetic.setBytes(0L, headerBytes, 0, headerBytes.length);
@@ -571,6 +713,34 @@ public final class StagedParquetPartitionReader
       if (!handedOff) {
         synthetic.close();
       }
+    }
+  }
+
+  /**
+   * Return a caller-owned exact-sized slice of the reusable assembly buffer, growing it in
+   * {@link #ASSEMBLY_GRANULARITY_BYTES} steps when a subtask needs more capacity. The blocking
+   * host allocation runs outside the lock so close() is never blocked behind it.
+   */
+  private HostMemoryBuffer borrowAssemblyBuffer(long sizeBytes) {
+    synchronized (lifecycleLock) {
+      checkOpen();
+      if (assemblyBuffer != null && assemblyBuffer.getLength() >= sizeBytes) {
+        return assemblyBuffer.slice(0L, sizeBytes);
+      }
+    }
+    long granules = (sizeBytes + ASSEMBLY_GRANULARITY_BYTES - 1) / ASSEMBLY_GRANULARITY_BYTES;
+    HostMemoryBuffer grown = HostAlloc$.MODULE$.alloc(
+        Math.multiplyExact(granules, ASSEMBLY_GRANULARITY_BYTES), false);
+    synchronized (lifecycleLock) {
+      if (closed.get()) {
+        grown.close();
+        throw new CancellationException("staged Parquet reader is closed");
+      }
+      if (assemblyBuffer != null) {
+        assemblyBuffer.close();
+      }
+      assemblyBuffer = grown;
+      return assemblyBuffer.slice(0L, sizeBytes);
     }
   }
 
@@ -759,6 +929,11 @@ public final class StagedParquetPartitionReader
     List<CompletableFuture<FileFragment>> fragmentSnapshot;
     synchronized (lifecycleLock) {
       fragmentSnapshot = new ArrayList<>(fragmentFutures);
+      if (assemblyBuffer != null) {
+        // An in-flight decode still holding a slice keeps the memory alive by reference count.
+        assemblyBuffer.close();
+        assemblyBuffer = null;
+      }
     }
     for (CompletableFuture<FileFragment> future : fragmentSnapshot) {
       // Reclaim fragments that completed before close or complete later without a consumer.

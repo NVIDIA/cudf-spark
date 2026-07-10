@@ -100,6 +100,15 @@ final class MemoryStagedParquetOutput extends StagedParquetOutput {
   }
 
   @Override
+  void copyFromHostBufferStorage(
+      long outputOffset,
+      HostMemoryBuffer source,
+      long sourceOffset,
+      long length) {
+    buffer.copyFromHostBuffer(outputOffset, source, sourceOffset, length);
+  }
+
+  @Override
   void sealStorage() throws IOException {
     if (SpillFramework$.MODULE$.storesInternal() == null) {
       // Executors always initialize the spill framework before any scan runs; only

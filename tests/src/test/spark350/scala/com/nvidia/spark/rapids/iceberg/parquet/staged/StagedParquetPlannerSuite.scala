@@ -699,23 +699,31 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  test("every file downloads its fragment with one vectored call per column chunk") {
+  test("every file coalesces its cache misses into merged vectored reads") {
     val sourceCount = 4
     val tracker = new SourceReadTracker(sourceCount)
     val sourceBytes = Array.tabulate[Byte](2048)(index => (index & 0xff).toByte)
     val footers = (0 until sourceCount).map { ordinal =>
       val input = new BlockingVectoredInput(ordinal, sourceBytes, tracker)
       val baseOffset = 100L + ordinal * 300L
+      // Files 0-2 leave a 96-byte source gap between their two chunks (scratch-routed merge);
+      // file 3's chunks are source-adjacent (direct merge into the packed fragment).
+      val valueSpec = if (ordinal == 3) {
+        ColumnSpec("value", baseOffset + 4L, 0L, 5L, 5L)
+      } else {
+        ColumnSpec("value", baseOffset + 100L, 0L, 5L, 5L)
+      }
       footerWithInput(
         ordinal,
         twoColumnParquetSchema,
         twoColumnReadSchema,
         Seq(block(twoColumnParquetSchema, rows = 1L,
           ColumnSpec("id", baseOffset + 4L, baseOffset, 4L, 4L),
-          ColumnSpec("value", baseOffset + 100L, 0L, 5L, 5L))),
+          valueSpec)),
         input)
     }
     val scanFiles = footers.map(_.getFile)
+    val decodedSubtasks = new AtomicInteger()
     val adapter = new TestAdapter {
       override def readAndFilterFooter(file: IcebergPartitionedFile): FooterResult =
         footers.find(_.getFile eq file).get
@@ -723,8 +731,22 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       override def decodeAndPostProcess(
           subtask: ReadSubtask,
           parquetData: HostMemoryBuffer): JIterator[ColumnarBatch] = {
-        parquetData.close()
-        Collections.emptyList[ColumnarBatch]().iterator()
+        try {
+          // Byte-verify both merge shapes end to end: scratch routing must land every chunk at
+          // its packed offset, and the direct merge must write straight into the fragment.
+          subtask.getRanges.asScala.foreach { range =>
+            val actual = new Array[Byte](Math.toIntExact(range.getLength))
+            parquetData.getBytes(actual, 0L, range.getOutputOffset, actual.length)
+            val expected = sourceBytes.slice(
+              Math.toIntExact(range.getInputOffset),
+              Math.toIntExact(range.getInputOffset + range.getLength))
+            assert(actual.toIndexedSeq === expected.toIndexedSeq)
+          }
+          decodedSubtasks.incrementAndGet()
+          Collections.emptyList[ColumnarBatch]().iterator()
+        } finally {
+          parquetData.close()
+        }
       }
     }
 
@@ -758,14 +780,17 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
 
       val calls = tracker.calls.asScala.toSeq.sortBy(_._1)
       assert(calls.map(_._1) === (0 until sourceCount))
-      // Each file's download targets its own fragment, so output offsets are fragment-relative
-      // and independent of planning: both column chunks stay distinct vectored ranges packed
-      // back to back from offset zero.
+      assert(decodedSubtasks.get() === 1)
       calls.foreach { case (ordinal, ranges) =>
         val baseOffset = 100L + ordinal * 300L
-        assert(ranges === Seq(
-          (baseOffset, 4L, 0L),
-          (baseOffset + 100L, 5L, 4L)))
+        if (ordinal == 3) {
+          // Source-adjacent chunks merge into one direct read landing on the packed fragment.
+          assert(ranges === Seq((baseOffset, 9L, 0L)))
+        } else {
+          // The 96-byte gap is under the merge limit: one scratch-routed read spans both
+          // chunks, and the gap bytes are discarded during segment routing.
+          assert(ranges === Seq((baseOffset, 105L, 0L)))
+        }
       }
     } finally {
       tracker.release(sourceCount * 2)
@@ -1110,16 +1135,13 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       assert(tracker.writeFailures.isEmpty)
       assert(combinedBytesVerified.get())
 
-      // Each occurrence downloads into its own fragment, so both write from fragment offset
-      // zero; the assembled synthetic offsets (4/8 and 13/17) were verified inside decode.
+      // Each occurrence coalesces its gapped chunks into one scratch-routed read from scratch
+      // offset zero; the assembled synthetic offsets (4/8 and 13/17) were verified inside
+      // decode, which also proves the segment routing dropped the 96 gap bytes.
       val calls = tracker.calls.asScala.toSeq.sortBy(_._1)
       assert(calls.map(_._1) === Seq(0, 1))
-      assert(calls.head._2 === Seq(
-        (100L, 4L, 0L),
-        (200L, 5L, 4L)))
-      assert(calls.last._2 === Seq(
-        (400L, 4L, 0L),
-        (500L, 5L, 4L)))
+      assert(calls.head._2 === Seq((100L, 105L, 0L)))
+      assert(calls.last._2 === Seq((400L, 105L, 0L)))
     } finally {
       tracker.release(sourceCount * 2)
       reader.close()
@@ -1304,12 +1326,11 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       })
 
       // file0's download is chained on its own footer, so its whole-fragment read (both row
-      // groups in one vectored call) begins while the last footer has not resolved.
+      // groups coalesced into one scratch-routed span) begins while the last footer has not
+      // resolved.
       assert(tracker.firstStarted.await(10, TimeUnit.SECONDS))
       assert(tracker.startedCalls.get() === 1)
-      assert(tracker.calls.asScala.head._2 === Seq(
-        (100L, 4L, 0L),
-        (200L, 4L, 4L)))
+      assert(tracker.calls.asScala.head._2 === Seq((100L, 104L, 0L)))
 
       lastFooterGate.countDown()
       tracker.release(1)
