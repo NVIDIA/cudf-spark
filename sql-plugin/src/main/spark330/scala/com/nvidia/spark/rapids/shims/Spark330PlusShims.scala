@@ -51,7 +51,6 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.datasources.{FileFormat, FilePartition, FileScanRDD, PartitionedFile}
-import org.apache.spark.sql.rapids.shims.{GpuDivideYMInterval, GpuMultiplyYMInterval}
 import org.apache.spark.sql.types.StructType
 
 trait Spark330PlusShims extends Spark321PlusShims with Spark320PlusNonDBShims {
@@ -69,33 +68,9 @@ trait Spark330PlusShims extends Spark321PlusShims with Spark320PlusNonDBShims {
   }
 
   // GPU support ANSI interval types from 330
-  override def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
-    val map: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = Seq(
-      GpuOverrides.expr[MultiplyYMInterval](
-        "Year-month interval * number",
-        ExprChecks.binaryProject(
-          TypeSig.YEARMONTH,
-          TypeSig.YEARMONTH,
-          ("lhs", TypeSig.YEARMONTH, TypeSig.YEARMONTH),
-          ("rhs", TypeSig.gpuNumeric - TypeSig.DECIMAL_128, TypeSig.gpuNumeric)),
-        (a, conf, p, r) => new BinaryExprMeta[MultiplyYMInterval](a, conf, p, r) {
-          override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression =
-            GpuMultiplyYMInterval(lhs, rhs)
-        }),
-      GpuOverrides.expr[DivideYMInterval](
-        "Year-month interval * operator",
-        ExprChecks.binaryProject(
-          TypeSig.YEARMONTH,
-          TypeSig.YEARMONTH,
-          ("lhs", TypeSig.YEARMONTH, TypeSig.YEARMONTH),
-          ("rhs", TypeSig.gpuNumeric - TypeSig.DECIMAL_128, TypeSig.gpuNumeric)),
-        (a, conf, p, r) => new BinaryExprMeta[DivideYMInterval](a, conf, p, r) {
-          override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression =
-            GpuDivideYMInterval(lhs, rhs)
-        })
-    ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
-    super.getExprs ++ map ++ DayTimeIntervalShims.exprs ++ RoundingShims.exprs
-  }
+  override def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] =
+    super.getExprs ++ YearMonthIntervalShims.exprs ++ DayTimeIntervalShims.exprs ++
+      RoundingShims.exprs
 
   // GPU support ANSI interval types from 330
   override def getExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] =

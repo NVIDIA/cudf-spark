@@ -45,9 +45,7 @@ import com.nvidia.spark.rapids.jni.fileio.{RapidsFileIO, RapidsInputFile}
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile.CopyRange
 import com.nvidia.spark.rapids.parquet.ParquetPartitionReader.{LocalCopy, PARQUET_MAGIC}
 import com.nvidia.spark.rapids.shims.{ColumnDefaultValuesShims, GpuParquetCrypto, GpuTypeShims, ShimFilePartitionReaderFactory, SparkShimImpl}
-import com.nvidia.spark.rapids.shims.parquet.{GpuParquetUtilsShims,
-  ParquetLegacyNanoAsLongShims, ParquetSchemaClippingShims, ParquetSchemaClipShims,
-  ParquetStringPredShims}
+import com.nvidia.spark.rapids.shims.parquet.{GpuParquetUtilsShims, ParquetLegacyNanoAsLongShims, ParquetSchemaClipShims, ParquetStringPredShims}
 import org.apache.commons.io.output.{CountingOutputStream, NullOutputStream}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
@@ -510,8 +508,6 @@ protected case class GpuParquetFileFilterHandler(
   private val int96RebaseMode = SparkShimImpl.int96ParquetRebaseRead(sqlConf)
   private val readUseFieldId = ParquetSchemaClipShims.useFieldId(sqlConf)
   private val ignoreMissingParquetFieldId = ParquetSchemaClipShims.ignoreMissingIds(sqlConf)
-  private val returnNullStructIfAllFieldsMissing =
-    ParquetSchemaClippingShims.returnNullStructIfAllFieldsMissing(sqlConf)
 
   private val PARQUET_ENCRYPTION_CONFS = Seq("parquet.encryption.kms.client.class",
     "parquet.encryption.kms.client.class", "parquet.crypto.factory.class")
@@ -698,18 +694,7 @@ protected case class GpuParquetFileFilterHandler(
         }
       }
       val footer: ParquetMetadata = try {
-        val readSchemaContainsStruct = readDataSchema.exists { field =>
-          TrampolineUtil.dataTypeExistsRecursively(field.dataType, _.isInstanceOf[StructType])
-        }
-        val nativeFooterCanPreserveMissingStructNullability =
-          ParquetSchemaClippingShims.nativeFooterCanPreserveMissingStructNullability(
-            returnNullStructIfAllFieldsMissing, readSchemaContainsStruct)
         footerReader match {
-          case ParquetFooterReaderType.NATIVE if !nativeFooterCanPreserveMissingStructNullability =>
-            // The native footer clips to the requested schema before returning the physical
-            // schema. Spark 4.1+ needs a non-requested leaf to preserve a missing struct's
-            // validity, so retain the full physical schema through the Java footer path.
-            readAndSimpleFilterFooter(fileIO, file, conf, filePath)
           case ParquetFooterReaderType.NATIVE =>
             val (serialized, rowIndexOffsets) = withResource(readAndFilterFooter(fileIO, file,
               conf, readDataSchema, filePath)) { tableFooter =>
@@ -798,9 +783,8 @@ protected case class GpuParquetFileFilterHandler(
 
       val (clipped, clippedSchema) =
         NvtxRegistry.PARQUET_CLIP_SCHEMA {
-          val clippedSchema = ParquetSchemaClippingShims.clipParquetSchema(
-            fileSchema, readDataSchema, conf, returnNullStructIfAllFieldsMissing,
-            isCaseSensitive, readUseFieldId, ignoreMissingParquetFieldId)
+          val clippedSchema = ParquetSchemaUtils.clipParquetSchema(
+            fileSchema, readDataSchema, isCaseSensitive, readUseFieldId)
           // Check if the read schema is compatible with the file schema.
           checkSchemaCompat(clippedSchema, readDataSchema,
             (t: Type, d: DataType) => throwTypeIncompatibleError(t, d, file.filePath.toString()),
@@ -2278,7 +2262,7 @@ trait ParquetPartitionReaderBase extends Logging with ScanWithMetrics
 
 // Parquet schema wrapper
 case class ParquetSchemaWrapper(schema: MessageType) extends SchemaBase {
-  override lazy val isEmpty: Boolean = schema.getPaths.isEmpty
+  override def isEmpty: Boolean = schema.getFields.isEmpty
 }
 
 // Parquet BlockMetaData wrapper
@@ -3018,7 +3002,7 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
               fileBlockMeta.hasInt96Timestamps, fileBlockMeta.schema, fileBlockMeta.readSchema, 0,
               Seq.empty)
           } else {
-            if (fileBlockMeta.schema.getPaths.isEmpty) {
+            if (fileBlockMeta.schema.getFieldCount == 0) {
               val bytesRead = fileSystemBytesRead() - startingBytesRead
               val numRows = fileBlockMeta.blocks.map(_.getRowCount).sum.toInt
               newHMEmptyMetadataForChunks(file, 0, bytesRead,
@@ -3561,7 +3545,6 @@ abstract class AbstractParquetPartitionReader(
   with ParquetPartitionReaderBase {
 
   private val blockIterator:  BufferedIterator[BlockMetaData] = clippedBlocks.iterator.buffered
-  private val isClippedSchemaEmpty = clippedParquetSchema.getPaths.isEmpty
 
   override def next(): Boolean = {
     if (batchIter.hasNext) {
@@ -3589,7 +3572,7 @@ abstract class AbstractParquetPartitionReader(
     NvtxRegistry.PARQUET_READ_BATCH {
       val currentChunkedBlocks = populateCurrentBlockChunk(blockIterator,
         maxReadBatchSizeRows, maxReadBatchSizeBytes, readDataSchema)
-      if (isClippedSchemaEmpty) {
+      if (clippedParquetSchema.getFieldCount == 0) {
         // not reading any data, so return a degenerate ColumnarBatch with the row count
         val numRows = computeNumRowsAlive(
           currentChunkedBlocks.map(_.getRowCount).sum, currentChunkedBlocks)
