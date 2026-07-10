@@ -80,9 +80,11 @@ public final class StagedParquetPartitionReader
    * Coalescing limits for cache-miss reads within one file. Ranges whose source gap is at most
    * the gap limit merge into one ranged read as long as the merged span stays within the span
    * limit. Gap bytes are downloaded and discarded, so the gap limit bounds the wasted bandwidth
-   * a merge can add while eliminating a request round-trip.
+   * a merge can add while eliminating a request round-trip. Gaps come mostly from column
+   * pruning: a large gap limit re-downloads the pruned columns as discarded filler, multiplying
+   * scan bandwidth on wide tables, so the limit stays well under a typical column chunk.
    */
-  static final long COALESCE_GAP_LIMIT_BYTES = 4L << 20;
+  static final long COALESCE_GAP_LIMIT_BYTES = 512L << 10;
   static final long COALESCE_SPAN_LIMIT_BYTES = 32L << 20;
   /** Assembly-buffer capacity is rounded up to this granularity so it stops growing quickly. */
   private static final long ASSEMBLY_GRANULARITY_BYTES = 16L << 20;
@@ -362,7 +364,8 @@ public final class StagedParquetPartitionReader
     long totalBytes = blockOffsets[blocks.size()];
     if (totalBytes == 0) {
       return new FileFragment(footer, blockOffsets, null,
-          new FileFragment.DownloadStats(System.nanoTime() - start, 0L, 0L, 0L, 0L, 0L));
+          new FileFragment.DownloadStats(System.nanoTime() - start,
+              0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L));
     }
 
     long cacheHitCount = 0L;
@@ -371,7 +374,9 @@ public final class StagedParquetPartitionReader
     long cacheMissBytes = 0L;
     long cacheReadNanos = 0L;
     List<MissChunk> misses = new ArrayList<>();
+    long allocStart = System.nanoTime();
     StagedParquetOutput output = StagedParquetOutput.create(totalBytes);
+    long allocNanos = System.nanoTime() - allocStart;
     HostMemoryBuffer scratch = null;
     CompletableFuture<Void> directRead = null;
     CompletableFuture<Void> scratchRead = null;
@@ -422,7 +427,9 @@ public final class StagedParquetPartitionReader
       List<PlannedReadRange> directRanges = new ArrayList<>();
       List<RapidsInputFile.CopyRange> scratchRanges = new ArrayList<>();
       long scratchBytes = 0L;
+      long requestedBytes = 0L;
       for (MergedRead read : mergedReads) {
+        requestedBytes = Math.addExact(requestedBytes, read.spanBytes());
         if (read.isDirect()) {
           directRanges.add(new PlannedReadRange(
               footer, read.sourceStart, read.spanBytes(), read.chunks.get(0).fragmentOffset));
@@ -434,19 +441,24 @@ public final class StagedParquetPartitionReader
         }
       }
       if (scratchBytes > 0) {
-        scratch = HostAlloc$.MODULE$.alloc(scratchBytes, false);
+        long scratchAllocStart = System.nanoTime();
+        scratch = HostAlloc$.MODULE$.alloc(scratchBytes, true);
+        allocNanos += System.nanoTime() - scratchAllocStart;
       }
 
       // The pacing point of the blocking model: wait for every accepted read.
+      long readStart = System.nanoTime();
       directRead = output.copyRangesAsync(input, directRanges);
       scratchRead = scratch == null
           ? CompletableFuture.completedFuture(null)
           : input.readVectoredAsync(scratch, scratchRanges);
       directRead.join();
       scratchRead.join();
+      long readWaitNanos = System.nanoTime() - readStart;
       checkOpen();
 
       // Route the useful segments of gap-merged reads into the packed fragment.
+      long routeStart = System.nanoTime();
       for (MergedRead read : mergedReads) {
         if (read.scratchStart >= 0) {
           for (MissChunk chunk : read.chunks) {
@@ -458,8 +470,10 @@ public final class StagedParquetPartitionReader
           }
         }
       }
+      long routeNanos = System.nanoTime() - routeStart;
 
       // Publish owning cache slices inline on this worker.
+      long finalizeStart = System.nanoTime();
       for (MissChunk chunk : misses) {
         FileCacheStartedToken token = chunk.token;
         if (token != null) {
@@ -473,6 +487,8 @@ public final class StagedParquetPartitionReader
       output.seal();
       return new FileFragment(footer, blockOffsets, output,
           new FileFragment.DownloadStats(System.nanoTime() - start,
+              allocNanos, readWaitNanos, routeNanos, System.nanoTime() - finalizeStart,
+              directRanges.size() + scratchRanges.size(), requestedBytes,
               cacheHitCount, cacheHitBytes, cacheMissCount, cacheMissBytes, cacheReadNanos));
     } catch (Throwable error) {
       // Accepted writers must become terminal before the output or scratch is reclaimed.
@@ -645,6 +661,12 @@ public final class StagedParquetPartitionReader
     adapter.onResultWait(System.nanoTime() - waitStart);
 
     long ioNanos = 0L;
+    long ioAllocNanos = 0L;
+    long ioReadWaitNanos = 0L;
+    long ioRouteNanos = 0L;
+    long ioFinalizeNanos = 0L;
+    long ioRequestCount = 0L;
+    long ioRequestedBytes = 0L;
     long cacheHitCount = 0L;
     long cacheHitBytes = 0L;
     long cacheMissCount = 0L;
@@ -654,6 +676,12 @@ public final class StagedParquetPartitionReader
       if (statsAttributed.add(fragment)) {
         FileFragment.DownloadStats stats = fragment.getStats();
         ioNanos = Math.addExact(ioNanos, stats.ioNanos);
+        ioAllocNanos = Math.addExact(ioAllocNanos, stats.allocNanos);
+        ioReadWaitNanos = Math.addExact(ioReadWaitNanos, stats.readWaitNanos);
+        ioRouteNanos = Math.addExact(ioRouteNanos, stats.routeNanos);
+        ioFinalizeNanos = Math.addExact(ioFinalizeNanos, stats.finalizeNanos);
+        ioRequestCount += stats.requestCount;
+        ioRequestedBytes = Math.addExact(ioRequestedBytes, stats.requestedBytes);
         cacheHitCount += stats.cacheHitCount;
         cacheHitBytes = Math.addExact(cacheHitBytes, stats.cacheHitBytes);
         cacheMissCount += stats.cacheMissCount;
@@ -697,7 +725,8 @@ public final class StagedParquetPartitionReader
       // through onMaterializationCompleted only.
       long combineNanos = System.nanoTime() - assembleStart - materializeNanos;
       adapter.onSubtaskCompleted(subtask, new SubtaskStats(
-          ioNanos, Math.max(combineNanos, 0L), false,
+          ioNanos, ioAllocNanos, ioReadWaitNanos, ioRouteNanos, ioFinalizeNanos,
+          ioRequestCount, ioRequestedBytes, Math.max(combineNanos, 0L), false,
           cacheHitCount, cacheHitBytes, cacheMissCount, cacheMissBytes, cacheReadNanos));
       adapter.onMaterializationCompleted(materializeNanos);
       closeFragmentsThrough(maxFooterOrder(slices));
@@ -729,8 +758,10 @@ public final class StagedParquetPartitionReader
       }
     }
     long granules = (sizeBytes + ASSEMBLY_GRANULARITY_BYTES - 1) / ASSEMBLY_GRANULARITY_BYTES;
+    // Pinned-preferred like the base reader's combine buffer: the assembled synthetic file is
+    // the decode host-to-device source, so pinned memory also speeds the GPU transfer.
     HostMemoryBuffer grown = HostAlloc$.MODULE$.alloc(
-        Math.multiplyExact(granules, ASSEMBLY_GRANULARITY_BYTES), false);
+        Math.multiplyExact(granules, ASSEMBLY_GRANULARITY_BYTES), true);
     synchronized (lifecycleLock) {
       if (closed.get()) {
         grown.close();
@@ -1010,4 +1041,5 @@ public final class StagedParquetPartitionReader
       this.footerNanos = footerNanos;
     }
   }
+
 }

@@ -37,11 +37,13 @@ import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
  * thread then obtains an independent host-buffer reference with {@link #materialize()} before
  * closing this output.</p>
  *
- * <p>Storage is non-pinned host memory obtained with one blocking allocation that participates
- * in normal host spilling. The blocking-worker execution model bounds how many outputs exist at
- * once, and keeping staged bytes out of the pinned pool leaves it free for decode transfers and
- * device spill. The planned synthetic size is exact, so sealing never needs a second size
- * argument.</p>
+ * <p>Storage is pinned-preferred host memory obtained with one blocking allocation that
+ * participates in normal host spilling, matching the base multithreaded reader's buffers. The
+ * pinned pool is pre-faulted and pooled, so both the S3 SDK writers and the cache-hit channel
+ * copies write at memory speed instead of paying first-touch page faults and mmap churn on a
+ * fresh mapping per file; when the pool is tight the allocation falls back to plain host memory.
+ * The blocking-worker execution model bounds how many outputs are being written at once. The
+ * planned synthetic size is exact, so sealing never needs a second size argument.</p>
  */
 abstract class StagedParquetOutput implements AutoCloseable {
   private final long exactSizeBytes;
@@ -66,16 +68,17 @@ abstract class StagedParquetOutput implements AutoCloseable {
   /**
    * Create one owned output for an exact synthetic-file size.
    *
-   * <p>The allocation is non-pinned and blocking: it spills and waits through the normal host
-   * retry protocol instead of failing over to another backend. The caller is a dedicated subtask
-   * worker whose whole pipeline is blocking, so waiting here is the intended backpressure.</p>
+   * <p>The allocation is pinned-preferred and blocking: it spills and waits through the normal
+   * host retry protocol instead of failing over to another backend. The caller is a dedicated
+   * download worker whose whole pipeline is blocking, so waiting here is the intended
+   * backpressure.</p>
    */
   static StagedParquetOutput create(long exactSizeBytes) throws IOException {
     if (exactSizeBytes <= 0) {
       throw new IllegalArgumentException(
           "exactSizeBytes must be positive: " + exactSizeBytes);
     }
-    HostMemoryBuffer allocation = HostAlloc$.MODULE$.alloc(exactSizeBytes, false);
+    HostMemoryBuffer allocation = HostAlloc$.MODULE$.alloc(exactSizeBytes, true);
     return new MemoryStagedParquetOutput(allocation, exactSizeBytes);
   }
 

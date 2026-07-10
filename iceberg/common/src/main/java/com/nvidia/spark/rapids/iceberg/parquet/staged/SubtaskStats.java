@@ -24,6 +24,12 @@ package com.nvidia.spark.rapids.iceberg.parquet.staged;
  */
 public final class SubtaskStats {
   private final long ioNanos;
+  private final long ioAllocNanos;
+  private final long ioReadWaitNanos;
+  private final long ioRouteNanos;
+  private final long ioFinalizeNanos;
+  private final long ioRequestCount;
+  private final long ioRequestedBytes;
   private final long combineNanos;
   private final boolean diskBacked;
   private final long cacheHitCount;
@@ -36,6 +42,12 @@ public final class SubtaskStats {
    * Construct immutable measurements for a completed subtask.
    *
    * @param ioNanos elapsed I/O-stage time in nanoseconds
+   * @param ioAllocNanos I/O-stage time blocked in fragment and scratch host allocation
+   * @param ioReadWaitNanos I/O-stage time blocked waiting for merged ranged reads
+   * @param ioRouteNanos I/O-stage time routing scratch segments into packed fragments
+   * @param ioFinalizeNanos I/O-stage time publishing cache slices and sealing
+   * @param ioRequestCount merged ranged reads issued
+   * @param ioRequestedBytes total bytes spanned by merged reads, including discarded gap bytes
    * @param combineNanos elapsed combine-stage time in nanoseconds
    * @param diskBacked whether the sealed result uses an executor-local file
    * @param cacheHitCount column-chunk data-cache hits
@@ -46,6 +58,12 @@ public final class SubtaskStats {
    */
   public SubtaskStats(
       long ioNanos,
+      long ioAllocNanos,
+      long ioReadWaitNanos,
+      long ioRouteNanos,
+      long ioFinalizeNanos,
+      long ioRequestCount,
+      long ioRequestedBytes,
       long combineNanos,
       boolean diskBacked,
       long cacheHitCount,
@@ -56,6 +74,10 @@ public final class SubtaskStats {
     if (ioNanos < 0) {
       throw new IllegalArgumentException("ioNanos must be non-negative: " + ioNanos);
     }
+    if (ioAllocNanos < 0 || ioReadWaitNanos < 0 || ioRouteNanos < 0 ||
+        ioFinalizeNanos < 0 || ioRequestCount < 0 || ioRequestedBytes < 0) {
+      throw new IllegalArgumentException("I/O phase measurements must be non-negative");
+    }
     if (combineNanos < 0) {
       throw new IllegalArgumentException(
           "combineNanos must be non-negative: " + combineNanos);
@@ -65,6 +87,12 @@ public final class SubtaskStats {
       throw new IllegalArgumentException("cache measurements must be non-negative");
     }
     this.ioNanos = ioNanos;
+    this.ioAllocNanos = ioAllocNanos;
+    this.ioReadWaitNanos = ioReadWaitNanos;
+    this.ioRouteNanos = ioRouteNanos;
+    this.ioFinalizeNanos = ioFinalizeNanos;
+    this.ioRequestCount = ioRequestCount;
+    this.ioRequestedBytes = ioRequestedBytes;
     this.combineNanos = combineNanos;
     this.diskBacked = diskBacked;
     this.cacheHitCount = cacheHitCount;
@@ -76,6 +104,30 @@ public final class SubtaskStats {
 
   public long getIoNanos() {
     return ioNanos;
+  }
+
+  public long getIoAllocNanos() {
+    return ioAllocNanos;
+  }
+
+  public long getIoReadWaitNanos() {
+    return ioReadWaitNanos;
+  }
+
+  public long getIoRouteNanos() {
+    return ioRouteNanos;
+  }
+
+  public long getIoFinalizeNanos() {
+    return ioFinalizeNanos;
+  }
+
+  public long getIoRequestCount() {
+    return ioRequestCount;
+  }
+
+  public long getIoRequestedBytes() {
+    return ioRequestedBytes;
   }
 
   public long getCombineNanos() {

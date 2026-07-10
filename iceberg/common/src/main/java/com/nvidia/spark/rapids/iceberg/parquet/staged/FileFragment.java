@@ -110,9 +110,24 @@ final class FileFragment implements AutoCloseable {
     }
   }
 
-  /** Immutable per-fragment download measurements, attributed once to a consuming subtask. */
+  /**
+   * Immutable per-fragment download measurements, attributed once to a consuming subtask.
+   *
+   * <p>The download span ({@code ioNanos}) is additionally split into its phases so the
+   * per-file elapsed time can be attributed: fragment/scratch allocation, the blocked wait on
+   * merged ranged reads, scratch segment routing, and cache publication plus seal.
+   * {@code requestCount} counts the merged ranged reads actually issued and
+   * {@code requestedBytes} the total bytes they span, including gap bytes that are downloaded
+   * and discarded — compare with the cache-miss bytes to see the over-read ratio.</p>
+   */
   static final class DownloadStats {
     final long ioNanos;
+    final long allocNanos;
+    final long readWaitNanos;
+    final long routeNanos;
+    final long finalizeNanos;
+    final long requestCount;
+    final long requestedBytes;
     final long cacheHitCount;
     final long cacheHitBytes;
     final long cacheMissCount;
@@ -121,12 +136,24 @@ final class FileFragment implements AutoCloseable {
 
     DownloadStats(
         long ioNanos,
+        long allocNanos,
+        long readWaitNanos,
+        long routeNanos,
+        long finalizeNanos,
+        long requestCount,
+        long requestedBytes,
         long cacheHitCount,
         long cacheHitBytes,
         long cacheMissCount,
         long cacheMissBytes,
         long cacheReadNanos) {
       this.ioNanos = ioNanos;
+      this.allocNanos = allocNanos;
+      this.readWaitNanos = readWaitNanos;
+      this.routeNanos = routeNanos;
+      this.finalizeNanos = finalizeNanos;
+      this.requestCount = requestCount;
+      this.requestedBytes = requestedBytes;
       this.cacheHitCount = cacheHitCount;
       this.cacheHitBytes = cacheHitBytes;
       this.cacheMissCount = cacheMissCount;

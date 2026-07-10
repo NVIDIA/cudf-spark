@@ -43,6 +43,12 @@ import com.nvidia.spark.rapids.GpuMetric.{
   ICEBERG_STAGED_DISK_SUBTASK_COUNT,
   ICEBERG_STAGED_FOOTER_TIME,
   ICEBERG_STAGED_FOOTER_WAIT_TIME,
+  ICEBERG_STAGED_IO_ALLOC_TIME,
+  ICEBERG_STAGED_IO_FINALIZE_TIME,
+  ICEBERG_STAGED_IO_READ_BYTES,
+  ICEBERG_STAGED_IO_READ_WAIT_TIME,
+  ICEBERG_STAGED_IO_REQUEST_COUNT,
+  ICEBERG_STAGED_IO_ROUTE_TIME,
   ICEBERG_STAGED_IO_TIME,
   ICEBERG_STAGED_MATERIALIZATION_TIME,
   ICEBERG_STAGED_RESULT_WAIT_TIME,
@@ -159,6 +165,12 @@ class GpuStagedIcebergParquetReader(
         stats: SubtaskStats): Unit = {
       conf.metrics.get(BUFFER_TIME).foreach(_ += stats.getIoNanos + stats.getCombineNanos)
       conf.metrics.get(ICEBERG_STAGED_IO_TIME).foreach(_ += stats.getIoNanos)
+      conf.metrics.get(ICEBERG_STAGED_IO_ALLOC_TIME).foreach(_ += stats.getIoAllocNanos)
+      conf.metrics.get(ICEBERG_STAGED_IO_READ_WAIT_TIME).foreach(_ += stats.getIoReadWaitNanos)
+      conf.metrics.get(ICEBERG_STAGED_IO_ROUTE_TIME).foreach(_ += stats.getIoRouteNanos)
+      conf.metrics.get(ICEBERG_STAGED_IO_FINALIZE_TIME).foreach(_ += stats.getIoFinalizeNanos)
+      conf.metrics.get(ICEBERG_STAGED_IO_REQUEST_COUNT).foreach(_ += stats.getIoRequestCount)
+      conf.metrics.get(ICEBERG_STAGED_IO_READ_BYTES).foreach(_ += stats.getIoRequestedBytes)
       conf.metrics.get(ICEBERG_STAGED_COMBINE_TIME).foreach(_ += stats.getCombineNanos)
       conf.metrics.get(FILECACHE_DATA_RANGE_HITS).foreach(_ += stats.getCacheHitCount)
       conf.metrics.get(FILECACHE_DATA_RANGE_HITS_SIZE).foreach(_ += stats.getCacheHitBytes)
