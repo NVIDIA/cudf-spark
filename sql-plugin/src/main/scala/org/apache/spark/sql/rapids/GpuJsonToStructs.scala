@@ -48,9 +48,9 @@ import org.apache.spark.sql.types._
  * All of these differ from Spark on ALL versions, including 4.0.0+: `from_json` on a string column
  * parses via a Reader (Spark's `CreateJacksonParser.utf8String`), so Spark 4.0.0's
  * `spark.sql.json.enableExactStringParsing` (default `true`) does not apply. Its raw-source-byte
- * path (`JacksonParser`) fires only for `Array[Byte]` / file sources (e.g. `spark.read.json`), never
- * a Reader, so the CPU always re-serializes non-string tokens (cases 2/3 via `copyCurrentStructure`)
- * and always unescapes string tokens (case 1, via `getText`).
+ * path (`JacksonParser`) fires only for `Array[Byte]` / file sources (e.g. `spark.read.json`),
+ * never a Reader, so the CPU always re-serializes non-string tokens (cases 2/3, via
+ * `copyCurrentStructure`) and always unescapes string tokens (case 1, via `getText`).
  * The following MATCH Spark and are NOT divergences: canonical elements whose raw text already
  * equals Spark's rendering (e.g. `1`, `1.5`, `true`); a map value that is not a JSON array and not
  * the JSON `null` literal nulls the whole row (PERMISSIVE bad-record); duplicate keys kept in
