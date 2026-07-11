@@ -4422,7 +4422,8 @@ object GpuOverrides extends Logging {
 
   val dataWriteCmds: Map[Class[_ <: DataWritingCommand],
       DataWritingCommandRule[_ <: DataWritingCommand]] =
-    commonDataWriteCmds ++ GpuHiveOverrides.dataWriteCmds ++ SparkShimImpl.getDataWriteCmds
+    commonDataWriteCmds ++ GpuHiveOverrides.dataWriteCmds ++ SparkShimImpl.getDataWriteCmds ++
+      ExternalSource.dataWriteCmds
 
   def runnableCmd[INPUT <: RunnableCommand](
       desc: String,
