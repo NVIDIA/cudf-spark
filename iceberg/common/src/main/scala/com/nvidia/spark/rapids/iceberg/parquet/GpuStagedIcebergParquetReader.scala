@@ -21,15 +21,13 @@ import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 
 import scala.collection.JavaConverters._
 
-import ai.rapids.cudf.HostMemoryBuffer
 import com.nvidia.spark.rapids.{
   CachedGpuBatchIterator,
   GpuSemaphore,
   RmmRapidsRetryIterator,
-  SingleGpuColumnarBatchIterator,
-  SpillableHostBuffer
+  SingleGpuColumnarBatchIterator
 }
-import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.Arm.closeOnExcept
 import com.nvidia.spark.rapids.GpuMetric.{
   BUFFER_TIME,
   FILECACHE_DATA_RANGE_HITS,
@@ -54,7 +52,6 @@ import com.nvidia.spark.rapids.GpuMetric.{
   ICEBERG_STAGED_RESULT_WAIT_TIME,
   ICEBERG_STAGED_WAIT_TIME
 }
-import com.nvidia.spark.rapids.SpillPriorities.ACTIVE_BATCHING_PRIORITY
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
 import com.nvidia.spark.rapids.iceberg.parquet.staged._
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile
@@ -63,7 +60,6 @@ import com.nvidia.spark.rapids.parquet.{
   MakeParquetTableProducer,
   ParquetPartitionReaderBase
 }
-import org.apache.iceberg.spark.SparkSchemaUtil
 import org.apache.parquet.schema.MessageType
 
 import org.apache.spark.TaskContext
@@ -74,9 +70,9 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
  * Iceberg callbacks and GPU decode for the staged Parquet partition reader.
  *
  * The Java reader owns scheduling, I/O, and output lifetime. This small callback boundary remains
- * because footer filtering and GPU decode use existing Scala APIs. Each Spark task submits its
- * planned data reads in order; the asynchronous I/O engine may execute submitted reads
- * concurrently.
+ * because footer filtering and GPU decode use existing Scala APIs. File jobs are submitted in
+ * partition order; combine mode admits their completed fragments in completion order, matching
+ * the existing multithreaded Iceberg reader.
  */
 class GpuStagedIcebergParquetReader(
     val rapidsFileIO: IcebergFileIO,
@@ -86,7 +82,6 @@ class GpuStagedIcebergParquetReader(
     workerThreads: Int) extends GpuIcebergParquetReader {
 
   private val multiThreadConf = conf.threadConf.asInstanceOf[MultiThread]
-  private val expectedSparkSchema = SparkSchemaUtil.convert(conf.expectedSchema)
   private val closed = new AtomicBoolean()
   private val stagedReaderRef = new AtomicReference[StagedParquetPartitionReader]()
   private lazy val stagedReader = {
@@ -116,13 +111,18 @@ class GpuStagedIcebergParquetReader(
     } else {
       multiThreadConf.combineConf.combineThresholdSize
     }
+    val combineWaitMs = if (multiThreadConf.disableCombining) {
+      0L
+    } else {
+      multiThreadConf.combineConf.combineWaitTime.toLong
+    }
     new StagedParquetPartitionReader(
       files.asJava,
       new IcebergAdapter,
-      expectedSparkSchema,
       conf.maxBatchSizeRows,
       conf.maxBatchSizeBytes,
       combineThreshold,
+      combineWaitMs,
       workerThreads,
       TaskContext.get())
   }
@@ -163,7 +163,6 @@ class GpuStagedIcebergParquetReader(
     override def onSubtaskCompleted(
         subtask: ReadSubtask,
         stats: SubtaskStats): Unit = {
-      conf.metrics.get(BUFFER_TIME).foreach(_ += stats.getIoNanos + stats.getCombineNanos)
       conf.metrics.get(ICEBERG_STAGED_IO_TIME).foreach(_ += stats.getIoNanos)
       conf.metrics.get(ICEBERG_STAGED_IO_ALLOC_TIME).foreach(_ += stats.getIoAllocNanos)
       conf.metrics.get(ICEBERG_STAGED_IO_READ_WAIT_TIME).foreach(_ += stats.getIoReadWaitNanos)
@@ -199,19 +198,22 @@ class GpuStagedIcebergParquetReader(
 
     override def onResultWait(waitNanos: Long): Unit = {
       recordTaskWait(waitNanos)
+      // Match the standard multithreaded reader's critical-path semantics. Per-file worker I/O
+      // spans overlap and belong only in the staged-specific metrics above; BUFFER_TIME records
+      // how long the Spark task was actually blocked waiting for a file result.
+      conf.metrics.get(BUFFER_TIME).foreach(_ += waitNanos)
       conf.metrics.get(ICEBERG_STAGED_RESULT_WAIT_TIME).foreach(_ += waitNanos)
     }
 
     override def decodeAndPostProcess(
         subtask: ReadSubtask,
-        parquetData: HostMemoryBuffer): JIterator[ColumnarBatch] = {
+        parquetInput: StagedParquetInput): JIterator[ColumnarBatch] = {
       val firstFooter = subtask.getFileSlices.get(0).getFooter
       val postProcessor = firstFooter.getPostProcessor
       val readSchema = firstFooter.getReadSchema
       val clippedSchema = firstFooter.getClippedSchema
 
       if (clippedSchema.getFieldCount == 0) {
-        parquetData.close()
         GpuSemaphore.acquireIfNecessary(TaskContext.get())
         val emptyInput = new ColumnarBatch(
           Array.empty[org.apache.spark.sql.vectorized.ColumnVector],
@@ -221,27 +223,28 @@ class GpuStagedIcebergParquetReader(
           new SingleGpuColumnarBatchIterator(processed))
       }
 
-      // Make the materialized input spillable before entering the retry block. Each retry obtains
-      // a fresh owning HMB reference; MakeParquetTableProducer consumes that reference, while the
-      // spillable remains available to rematerialize another attempt. CachedGpuBatchIterator
-      // eagerly drains the producer, so returned batches no longer depend on staged host storage.
-      val stagedInput = SpillableHostBuffer(
-        parquetData, parquetData.getLength, ACTIVE_BATCHING_PRIORITY)
-      val decoded = withResource(stagedInput) { input =>
-        val parseOptions = stagedParquetOptions(readSchema, clippedSchema)
-        val splits = subtask.getFileSlices.asScala
-          .map(_.getFooter.getFile.sparkPartitionedFile)
-          .toArray
-        RmmRapidsRetryIterator.withRetryNoSplit[Iterator[ColumnarBatch]] {
+      val parseOptions = stagedParquetOptions(readSchema, clippedSchema)
+      val splits = subtask.getFileSlices.asScala
+        .map(_.getFooter.getFile.sparkPartitionedFile)
+        .toArray
+      val decoded = RmmRapidsRetryIterator.withRetryNoSplit[Iterator[ColumnarBatch]] {
+        val materializeStart = System.nanoTime()
+        val attempt = parquetInput.materialize()
+        val materializeNanos = System.nanoTime() - materializeStart
+        // A retry receives fresh owning header/footer buffers and fresh owning references to the
+        // fragment slices. MakeParquetTableProducer consumes them once invoked; closeOnExcept
+        // covers failures before that ownership transfer. CachedGpuBatchIterator eagerly drains
+        // the producer, so returned batches no longer depend on staged host storage.
+        closeOnExcept(attempt) { hostBuffers =>
+          onMaterializationCompleted(materializeNanos)
           GpuSemaphore.acquireIfNecessary(TaskContext.get())
-          val attempt = input.getDataHostBuffer
           val producer = MakeParquetTableProducer(
             conf.useChunkedReader,
             conf.maxChunkedReaderMemoryUsageSizeBytes,
             conf.conf,
             conf.targetBatchSizeBytes,
             parseOptions,
-            Array(attempt),
+            hostBuffers,
             conf.metrics,
             firstFooter.getDateRebaseMode,
             firstFooter.getTimestampRebaseMode,

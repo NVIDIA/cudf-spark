@@ -35,9 +35,9 @@ import org.apache.parquet.schema.MessageType;
  * Immutable unit of asynchronous I/O, finalization, and subsequent GPU decode.
  *
  * <p>The Spark task thread creates a subtask from ordered, compatible file slices. Construction
- * calculates the exact synthetic Parquet file: source copy ranges follow the four-byte header,
- * and relocated row-group metadata is serialized into the final footer. The resulting total size
- * is therefore an exact allocation size rather than an estimate.</p>
+ * calculates the exact synthetic Parquet file: fragment slices follow the four-byte header, and
+ * relocated row-group metadata is serialized into the final footer. The resulting total size is
+ * therefore exact rather than an estimate.</p>
  *
  * <p>File slices retain stable input order and borrow their Iceberg footer state. Byte arrays are
  * defensively copied on access. {@code subtaskId} is unique only within one partition read plan;
@@ -50,7 +50,6 @@ public final class ReadSubtask {
 
   private final long subtaskId;
   private final List<FileSlice> fileSlices;
-  private final List<PlannedReadRange> ranges;
   private final byte[] footerAndTrailerBytes;
   private final long dataSizeBytes;
   private final long totalSizeBytes;
@@ -91,7 +90,6 @@ public final class ReadSubtask {
     this.rowCount = rows;
 
     MessageType schema = this.fileSlices.get(0).getFooter().getClippedSchema();
-    ArrayList<PlannedReadRange> plannedRanges = new ArrayList<>();
     ArrayList<BlockMetaData> adjustedBlocks = new ArrayList<>();
     long outputOffset = PARQUET_MAGIC.length;
 
@@ -107,10 +105,7 @@ public final class ReadSubtask {
         long uncompressedSize = 0L;
 
         for (ColumnChunkMetaData sourceColumn : sourceBlock.getColumns()) {
-          long sourceOffset = sourceColumn.getStartingPos();
           long length = sourceColumn.getTotalSize();
-          plannedRanges.add(new PlannedReadRange(
-              fileSlice.getFooter(), sourceOffset, length, outputOffset));
 
           ColumnChunkMetaData adjustedColumn = relocateColumn(sourceColumn, outputOffset);
           adjustedBlock.addColumn(adjustedColumn);
@@ -123,7 +118,6 @@ public final class ReadSubtask {
       }
     }
 
-    this.ranges = Collections.unmodifiableList(plannedRanges);
     this.footerAndTrailerBytes = serializeFooterAndTrailer(schema, adjustedBlocks);
     this.dataSizeBytes = Math.subtractExact(outputOffset, PARQUET_MAGIC.length);
     this.totalSizeBytes = Math.addExact(outputOffset, footerAndTrailerBytes.length);
@@ -132,7 +126,6 @@ public final class ReadSubtask {
       throw new IllegalArgumentException(
           "planned data size does not match the file-slice column chunks");
     }
-    validateLayout();
   }
 
   private static List<FileSlice> immutableCopy(List<FileSlice> values) {
@@ -142,27 +135,6 @@ public final class ReadSubtask {
       throw new IllegalArgumentException("fileSlices must not contain null values");
     }
     return Collections.unmodifiableList(copy);
-  }
-
-  private void validateLayout() {
-    long expectedOffset = PARQUET_MAGIC.length;
-    long rangeBytes = 0L;
-    for (PlannedReadRange range : ranges) {
-      if (range.getOutputOffset() != expectedOffset) {
-        throw new IllegalArgumentException(
-            "planned output ranges must be contiguous and follow the header");
-      }
-      rangeBytes = Math.addExact(rangeBytes, range.getLength());
-      expectedOffset = Math.addExact(expectedOffset, range.getLength());
-    }
-    if (rangeBytes != dataSizeBytes) {
-      throw new IllegalArgumentException("data size does not match planned ranges");
-    }
-    long expectedTotal = Math.addExact(expectedOffset, footerAndTrailerBytes.length);
-    if (expectedTotal != totalSizeBytes) {
-      throw new IllegalArgumentException(
-          "total size does not match header, ranges, and footer");
-    }
   }
 
   /**
@@ -235,10 +207,6 @@ public final class ReadSubtask {
 
   public List<FileSlice> getFileSlices() {
     return fileSlices;
-  }
-
-  public List<PlannedReadRange> getRanges() {
-    return ranges;
   }
 
   public byte[] getHeaderBytes() {

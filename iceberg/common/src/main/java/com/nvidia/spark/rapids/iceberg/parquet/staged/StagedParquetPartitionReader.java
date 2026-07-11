@@ -28,11 +28,14 @@ import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -50,48 +53,46 @@ import scala.Option;
 
 import org.apache.spark.TaskContext;
 import org.apache.spark.sql.rapids.execution.TrampolineUtil$;
-import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
 
 /**
  * Coordinates the staged Parquet pipeline for one Spark input partition.
  *
- * <p>The pipeline keeps input order end to end, matching the default {@code keepReadsInOrder}
- * behavior of the non-staged multithreaded reader:</p>
+ * <p>The pipeline matches the Iceberg multithreaded reader's admission order:</p>
  * <ol>
- *   <li>One footer job per file runs on the shared pool. As soon as a footer resolves, it chains
- *       a blocking download job for that file's filtered column chunks — pool occupancy paces
- *       concurrent downloads. Each download packs its chunks contiguously into a per-file
- *       {@link FileFragment} whose layout comes from the file's own footer, so data I/O starts
- *       without waiting for planning or for any other file's footer.</li>
- *   <li>The Spark task thread consumes footers strictly in file-list order, feeding the
- *       incremental planning session; plans are therefore deterministic for a given file list.
- *       No polling is involved: every wait races the target future against a close signal, so
- *       {@code close()} wakes the task thread without touching the per-file futures.</li>
- *   <li>Subtasks are assembled and decoded in plan order. Assembly waits for the constituent
- *       fragments, copies one contiguous fragment region per file slice into an exact-sized
- *       synthetic Parquet buffer, and writes the header and relocated footer. Completed
- *       fragments wait as spillable host buffers until consumed.</li>
+ *   <li>One fused pool job per file fetches and filters the footer, publishes it mid-job, and
+ *       continues straight into that file's blocking download — pool occupancy paces concurrent
+ *       file pipelines exactly like the base multithreaded reader. Each download packs its
+ *       chunks contiguously into a per-file {@link FileFragment} whose layout comes from the
+ *       file's own footer, so data I/O starts without waiting for planning or for any other
+ *       file's footer.</li>
+ *   <li>With combining enabled, completed file jobs enter a completion queue. The Spark task
+ *       thread blocks for the first result, then gives each additional result a fresh combine
+ *       wait. With combining disabled it consumes jobs in file-list order. Closing the reader
+ *       wakes either kind of wait without cancelling worker futures.</li>
+ *   <li>Subtasks are decoded in plan order. After waiting for their constituent fragments, the
+ *       task thread presents the synthetic Parquet file as a small header, zero-copy fragment
+ *       slices, and a small relocated footer. Completed fragments wait as spillable host buffers
+ *       until consumed; there is no second task-sized assembly allocation.</li>
  * </ol>
  */
 public final class StagedParquetPartitionReader
     implements Iterator<ColumnarBatch>, AutoCloseable {
+  private static final int CLOSED_COMPLETION = -1;
   /**
-   * Coalescing limits for cache-miss reads within one file. Ranges whose source gap is at most
-   * the gap limit merge into one ranged read as long as the merged span stays within the span
-   * limit. Gap bytes are downloaded and discarded, so the gap limit bounds the wasted bandwidth
-   * a merge can add while eliminating a request round-trip. Gaps come mostly from column
-   * pruning: a large gap limit re-downloads the pruned columns as discarded filler, multiplying
-   * scan bandwidth on wide tables, so the limit stays well under a typical column chunk.
+   * Coalescing policy for cache-miss reads within one file, matching the base multithreaded
+   * reader's contiguous-only {@code coalesceReads}: only ranges with a zero source gap merge,
+   * and a contiguous run has no artificial maximum span. Gapped columns remain separate ranges
+   * that the shared S3 client can fetch in parallel. No gap bytes are downloaded, so the scratch
+   * route stays idle.
    */
-  static final long COALESCE_GAP_LIMIT_BYTES = 512L << 10;
-  static final long COALESCE_SPAN_LIMIT_BYTES = 32L << 20;
-  /** Assembly-buffer capacity is rounded up to this granularity so it stops growing quickly. */
-  private static final long ASSEMBLY_GRANULARITY_BYTES = 16L << 20;
+  static final long COALESCE_GAP_LIMIT_BYTES = 0L;
 
   private final List<IcebergPartitionedFile> files;
   private final StagedScanAdapter adapter;
   private final StableGreedyReadPlanner planner;
+  private final boolean combineEnabled;
+  private final long combineWaitMs;
   private final StagedScanThreadPools pools;
   private final TaskContext taskContext;
   private final long taskAttemptId;
@@ -106,33 +107,21 @@ public final class StagedParquetPartitionReader
   // them while initialization is still appending.
   private final List<CompletableFuture<TimedFooter>> footerFutures = new ArrayList<>();
   private final List<CompletableFuture<FileFragment>> fragmentFutures = new ArrayList<>();
+  private final BlockingQueue<Integer> completedFileIndexes = new LinkedBlockingQueue<>();
 
-  // Task-thread-only planning and assembly state.
+  // Task-thread-only planning and decode-input state.
   private StableGreedyReadPlanner.Session session;
   private boolean initialized;
   private boolean planningFinished;
-  private int footerCursor;
+  private int filesAdmitted;
+  private int orderedFileCursor;
   private final ArrayDeque<ReadSubtask> plannedSubtasks = new ArrayDeque<>();
   private final Map<FooterResult, CompletableFuture<FileFragment>> fragmentByFooter =
       new IdentityHashMap<>();
-  private final Map<FooterResult, Integer> footerOrder = new IdentityHashMap<>();
-  private final List<CompletableFuture<FileFragment>> consumedFragments = new ArrayList<>();
   private final Set<FileFragment> statsAttributed =
       Collections.newSetFromMap(new IdentityHashMap<>());
-  private int fragmentsClosedUpTo;
-
-  // Reused across this reader's strictly sequential assemblies so synthetic-buffer pages fault
-  // once per reader instead of once per subtask. Guarded by lifecycleLock for the close() race.
-  // Reuse is safe because decodeAndPostProcess returns only after the decode output no longer
-  // references the assembled input, and each assembly hands out a fresh slice whose close only
-  // dereferences this parent.
-  private HostMemoryBuffer assemblyBuffer;
 
   private Iterator<ColumnarBatch> currentBatches;
-  // Guarded by iteratorLock. Once the caller advances again, the previously returned batch has
-  // finished flowing through the downstream GPU pipeline and this reader can yield the task-wide
-  // permit before it restores or decodes another batch.
-  private boolean batchReturnedSinceLastAdvance;
 
   /**
    * Creates a lazy partition reader. No footer or data work is submitted until the first
@@ -140,12 +129,13 @@ public final class StagedParquetPartitionReader
    *
    * @param files inputs in deterministic Spark partition order
    * @param adapter Iceberg footer and decode operations
-   * @param expectedSparkSchema final Iceberg output schema used for GPU-size planning
    * @param maxRows maximum planned rows per GPU subtask (soft for a single row group)
    * @param maxEstimatedGpuBytes maximum estimated GPU bytes per subtask
    * @param combineThreshold encoded-byte combine threshold for one subtask, from
    *                         spark.rapids.sql.reader.multithreaded.combine.sizeBytes; a
    *                         non-positive value disables cross-file combining
+   * @param combineWaitMs fresh wait after every admitted result while building a combined
+   *                      subtask. The first result is always awaited without a timeout.
    * @param workerThreads executor-wide worker count shared by footer and download jobs; this
    *                      bounds the concurrently downloading files
    * @param taskContext Spark task context captured by the task thread; may be null in tests
@@ -153,16 +143,18 @@ public final class StagedParquetPartitionReader
   public StagedParquetPartitionReader(
       List<IcebergPartitionedFile> files,
       StagedScanAdapter adapter,
-      StructType expectedSparkSchema,
       int maxRows,
       long maxEstimatedGpuBytes,
       long combineThreshold,
+      long combineWaitMs,
       int workerThreads,
       TaskContext taskContext) {
     this.files = immutableFileCopy(files);
     this.adapter = Objects.requireNonNull(adapter, "adapter");
     this.planner = new StableGreedyReadPlanner(
-        maxRows, maxEstimatedGpuBytes, combineThreshold, expectedSparkSchema);
+        maxRows, maxEstimatedGpuBytes, combineThreshold);
+    this.combineEnabled = combineThreshold > 0L;
+    this.combineWaitMs = Math.max(combineWaitMs, 0L);
     this.pools = StagedScanThreadPools.getOrCreate(workerThreads);
     this.taskContext = taskContext;
     this.taskAttemptId = taskContext == null ? -1L : taskContext.taskAttemptId();
@@ -187,42 +179,31 @@ public final class StagedParquetPartitionReader
     try {
       initializeIfNeeded();
       while (true) {
-        boolean semaphoreReleasedForAdvance = false;
         if (closed.get()) {
           releaseGpuSemaphoreFromTaskThread();
           return false;
         }
         synchronized (iteratorLock) {
-          if (batchReturnedSinceLastAdvance) {
-            // CachedGpuBatchIterator makes multi-batch decode output spillable specifically so
-            // the semaphore can be yielded between batches. The iterator protocol guarantees
-            // that asking to advance means the caller is done processing the prior batch.
-            releaseGpuSemaphoreFromTaskThread();
-            semaphoreReleasedForAdvance = true;
-            batchReturnedSinceLastAdvance = false;
-          }
           if (currentBatches != null) {
             if (currentBatches.hasNext()) {
+              // Match the base multithreaded reader: retain the task-wide GPU permit until every
+              // batch eagerly decoded into the current iterator has been consumed. Yielding here
+              // would let other tasks allocate while this iterator still owns ACTIVE_ON_DECK GPU
+              // batches, causing those pending batches to spill to host and later be restored.
               return true;
-            }
-            // The adapter acquires the semaphore while decoding, and next() acquires it while
-            // restoring a cached spillable batch. Release as soon as that decoded iterator is
-            // exhausted, and before the footer/fragment waits or the terminal return below.
-            if (!semaphoreReleasedForAdvance) {
-              releaseGpuSemaphoreFromTaskThread();
-              semaphoreReleasedForAdvance = true;
             }
             closeIterator(currentBatches);
             currentBatches = null;
           }
         }
-        if (!semaphoreReleasedForAdvance) {
-          releaseGpuSemaphoreFromTaskThread();
-        }
+
+        // The current decoded iterator is empty. Release before planning the next subtask because
+        // completion-order admission may block on footer filtering or fragment I/O.
+        releaseGpuSemaphoreFromTaskThread();
 
         ReadSubtask subtask = nextPlannedSubtask();
         if (subtask == null) {
-          closeFragmentsThrough(consumedFragments.size());
+          closeAllFragmentFutures();
           return false;
         }
         Iterator<ColumnarBatch> decoded = null;
@@ -275,10 +256,10 @@ public final class StagedParquetPartitionReader
         if (closed.get() || currentBatches == null) {
           throw new CancellationException("staged Parquet reader was closed before next()");
         }
-        // The acquire above restores a spillable batch and covers Iceberg GPU post-processing.
-        // It is idempotent for the first batch, whose decode already acquired the permit.
+        // Decode normally retains the permit for this iterator, so this acquire is idempotent. It
+        // also safely restores ownership if another task component released the task-wide permit
+        // between hasNext() and next(), and covers Iceberg GPU post-processing.
         ColumnarBatch nextBatch = currentBatches.next();
-        batchReturnedSinceLastAdvance = true;
         return nextBatch;
       }
     } catch (Throwable error) {
@@ -289,9 +270,12 @@ public final class StagedParquetPartitionReader
   }
 
   /**
-   * Compose one two-stage pipeline per file: fetch the footer on the pool, then chain that
-   * file's blocking download onto the footer's own completion. A footer failure propagates to
-   * its fragment future automatically, and the pool jobs are the sole completers of both stages.
+   * Submit one fused pool job per file: the job fetches and filters the footer, completes the
+   * footer future mid-job for independent footer timing/failure publication, and continues
+   * straight into that file's blocking download on the same worker — the base reader's
+   * one-job-per-file shape. A single queue pass per file matters: a separately re-queued
+   * download job would wait behind every other task's queued jobs a second time, roughly
+   * doubling the pipeline latency the task thread observes for each file.
    */
   private void initializeIfNeeded() {
     if (initialized) {
@@ -299,44 +283,55 @@ public final class StagedParquetPartitionReader
     }
     checkOpen();
     // Footer fetch/filter and downloads run on the shared pool. Relinquish any permit still
-    // owned by this task before the in-order footer waits below.
+    // owned by this task before the file-completion waits below.
     releaseGpuSemaphoreFromTaskThread();
     session = planner.newSession();
     initialized = true;
-    for (IcebergPartitionedFile file : files) {
-      checkOpen();
-      CompletableFuture<TimedFooter> footerFuture = CompletableFuture.supplyAsync(
-          () -> readTimedFooter(file), pools.executor());
-      CompletableFuture<FileFragment> fragmentFuture = footerFuture.thenApplyAsync(
-          timed -> downloadFragmentOnPool(timed.footer), pools.executor());
+    for (int fileIndex = 0; fileIndex < files.size(); fileIndex++) {
       synchronized (lifecycleLock) {
+        checkOpen();
+        IcebergPartitionedFile file = files.get(fileIndex);
+        CompletableFuture<TimedFooter> footerFuture = new CompletableFuture<>();
+        CompletableFuture<FileFragment> fragmentFuture = CompletableFuture.supplyAsync(
+            () -> executeFileJob(file, footerFuture), pools.executor());
+        final int completedIndex = fileIndex;
+        // Publish every submitted future while holding the same lock close() uses to snapshot
+        // them. A close racing submission therefore cannot miss and leak this job's fragment.
+        fragmentFuture.whenComplete((fragment, error) -> {
+          if (error != null) {
+            footerFuture.completeExceptionally(error);
+          }
+          if (combineEnabled) {
+            completedFileIndexes.offer(completedIndex);
+          }
+        });
         footerFutures.add(footerFuture);
         fragmentFutures.add(fragmentFuture);
       }
     }
   }
 
-  /** Fetch and filter one footer as registered Spark-task pool work. */
-  private TimedFooter readTimedFooter(IcebergPartitionedFile file) {
+  /**
+   * Execute the fused footer and download job under one Spark task/RMM registration.
+   *
+   * <p>The footer future is deliberately published before the download starts, while admission
+   * waits for the completed fragment. Keeping both phases inside one registration avoids
+   * needlessly detaching and immediately reattaching the same worker to the same Spark task.</p>
+   */
+  private FileFragment executeFileJob(
+      IcebergPartitionedFile file,
+      CompletableFuture<TimedFooter> footerFuture) {
     try {
-      long start = System.nanoTime();
-      FooterResult footer = runAsTaskPoolThread(() -> {
+      return runAsTaskPoolThread(() -> {
+        long footerStart = System.nanoTime();
         FooterResult result = adapter.readAndFilterFooter(file);
         if (result == null) {
           throw new IllegalStateException("footer adapter returned null");
         }
-        return result;
+        TimedFooter timed = new TimedFooter(result, System.nanoTime() - footerStart);
+        footerFuture.complete(timed);
+        return downloadFragment(result);
       });
-      return new TimedFooter(footer, System.nanoTime() - start);
-    } catch (Throwable error) {
-      throw wrapAsCompletion(error);
-    }
-  }
-
-  /** Execute one file's blocking download as registered Spark-task pool work. */
-  private FileFragment downloadFragmentOnPool(FooterResult footer) {
-    try {
-      return runAsTaskPoolThread(() -> downloadFragment(footer));
     } catch (Throwable error) {
       throw wrapAsCompletion(error);
     }
@@ -352,7 +347,7 @@ public final class StagedParquetPartitionReader
   /**
    * Download one file's filtered column chunks into a contiguous fragment.
    *
-   * <p>Runs as one blocking pool job: allocate the exact non-pinned fragment, copy cache hits,
+   * <p>Runs as one blocking pool job: allocate the exact pinned-preferred fragment, copy cache hits,
    * hand all cache-miss chunks to the async I/O engine in order, block until every accepted read
    * is terminal, publish owning cache slices, and seal the fragment as spillable.</p>
    */
@@ -378,8 +373,6 @@ public final class StagedParquetPartitionReader
     StagedParquetOutput output = StagedParquetOutput.create(totalBytes);
     long allocNanos = System.nanoTime() - allocStart;
     HostMemoryBuffer scratch = null;
-    CompletableFuture<Void> directRead = null;
-    CompletableFuture<Void> scratchRead = null;
     try {
       if (closed.get()) {
         throw new CancellationException("staged reader closed before fragment I/O started");
@@ -398,13 +391,21 @@ public final class StagedParquetPartitionReader
           Option<SeekableByteChannel> cached = fileCache.getDataRangeChannel(
               input, sourceOffset, length);
           if (cached.isDefined()) {
-            long cacheStart = System.nanoTime();
             try (SeekableByteChannel channel = cached.get()) {
-              output.copyCachedRange(channel, fragmentOffset, length);
+              // Keep hit accounting before the copy, matching GpuParquetScan.copyLocal.
+              cacheHitCount += 1L;
+              cacheHitBytes = Math.addExact(cacheHitBytes, length);
+              // Match GpuParquetScan.copyLocal: time only the byte copy. Closing the cache
+              // channel (including FileCache.finishLocalFileRead bookkeeping) is deliberately
+              // outside this metric even though it remains part of the worker's I/O time.
+              long cacheStart = System.nanoTime();
+              try {
+                output.copyCachedRange(channel, fragmentOffset, length);
+              } finally {
+                cacheReadNanos = Math.addExact(
+                    cacheReadNanos, System.nanoTime() - cacheStart);
+              }
             }
-            cacheReadNanos = Math.addExact(cacheReadNanos, System.nanoTime() - cacheStart);
-            cacheHitCount += 1L;
-            cacheHitBytes = Math.addExact(cacheHitBytes, length);
           } else {
             MissChunk chunk = new MissChunk(sourceOffset, length, fragmentOffset);
             Option<FileCacheStartedToken> token = fileCache.startDataRangeCache(
@@ -442,18 +443,18 @@ public final class StagedParquetPartitionReader
       }
       if (scratchBytes > 0) {
         long scratchAllocStart = System.nanoTime();
-        scratch = HostAlloc$.MODULE$.alloc(scratchBytes, true);
+        scratch = HostAlloc$.MODULE$.alloc(scratchBytes, false);
         allocNanos += System.nanoTime() - scratchAllocStart;
       }
 
-      // The pacing point of the blocking model: wait for every accepted read.
+      // Blocking remote reads on this worker via the same synchronous readVectored the base
+      // multithreaded reader uses; the elapsed span is the remote-read metric compared against
+      // the base reader. The calls return only when every byte has landed.
       long readStart = System.nanoTime();
-      directRead = output.copyRangesAsync(input, directRanges);
-      scratchRead = scratch == null
-          ? CompletableFuture.completedFuture(null)
-          : input.readVectoredAsync(scratch, scratchRanges);
-      directRead.join();
-      scratchRead.join();
+      output.copyRanges(input, directRanges);
+      if (scratch != null) {
+        input.readVectored(scratch, scratchRanges);
+      }
       long readWaitNanos = System.nanoTime() - readStart;
       checkOpen();
 
@@ -491,10 +492,9 @@ public final class StagedParquetPartitionReader
               directRanges.size() + scratchRanges.size(), requestedBytes,
               cacheHitCount, cacheHitBytes, cacheMissCount, cacheMissBytes, cacheReadNanos));
     } catch (Throwable error) {
-      // Accepted writers must become terminal before the output or scratch is reclaimed.
+      // The blocking reads are terminal on return, so no writer can still touch the output or
+      // scratch here.
       Throwable failure = unwrap(error);
-      failure = drainRead(directRead, failure);
-      failure = drainRead(scratchRead, failure);
       for (MissChunk chunk : misses) {
         if (chunk.token != null) {
           try {
@@ -514,26 +514,9 @@ public final class StagedParquetPartitionReader
       throw propagate(failure);
     } finally {
       if (scratch != null) {
-        // Success joined both reads and the failure path drained them, so no writer can still
-        // touch the scratch bytes here.
         scratch.close();
       }
     }
-  }
-
-  private static Throwable drainRead(CompletableFuture<Void> read, Throwable primary) {
-    if (read == null) {
-      return primary;
-    }
-    try {
-      read.join();
-    } catch (Throwable drainError) {
-      Throwable unwrapped = unwrap(drainError);
-      if (unwrapped != primary) {
-        primary.addSuppressed(unwrapped);
-      }
-    }
-    return primary;
   }
 
   /** One cache-miss column chunk: source range, packed fragment offset, and its cache token. */
@@ -577,10 +560,9 @@ public final class StagedParquetPartitionReader
   }
 
   /**
-   * Greedily merge source-sorted miss chunks whose source gaps and merged spans stay within the
-   * coalescing limits. One S3 request per column chunk is latency-bound on small files — the
-   * base reader's per-file read shape is roughly one request per file — so fewer, larger ranged
-   * reads win even though gap bytes are discarded.
+   * Greedily merge contiguous source-sorted miss chunks. This intentionally has no merged-span
+   * cap: the base multithreaded reader coalesces every contiguous run before submitting the
+   * resulting ranges together in one vectored-read call.
    */
   private static List<MergedRead> mergeMissChunks(List<MissChunk> misses) {
     ArrayList<MissChunk> sorted = new ArrayList<>(misses);
@@ -591,8 +573,7 @@ public final class StagedParquetPartitionReader
       long chunkEnd = Math.addExact(chunk.sourceOffset, chunk.length);
       if (current != null
           && chunk.sourceOffset >= current.sourceEnd
-          && chunk.sourceOffset - current.sourceEnd <= COALESCE_GAP_LIMIT_BYTES
-          && chunkEnd - current.sourceStart <= COALESCE_SPAN_LIMIT_BYTES) {
+          && chunk.sourceOffset - current.sourceEnd <= COALESCE_GAP_LIMIT_BYTES) {
         current.chunks.add(chunk);
         current.sourceEnd = chunkEnd;
       } else {
@@ -606,16 +587,10 @@ public final class StagedParquetPartitionReader
     return merged;
   }
 
-  /**
-   * Advance in-order planning until the next subtask is available.
-   *
-   * <p>Waits for footer futures strictly in file-list order, so the plan is deterministic for a
-   * given file list. Downloads are unaffected by this ordering: they were chained on each
-   * footer's own completion.</p>
-   */
+  /** Advance baseline-compatible file admission until the next subtask is available. */
   private ReadSubtask nextPlannedSubtask() throws Exception {
     while (plannedSubtasks.isEmpty()) {
-      if (footerCursor >= files.size()) {
+      if (filesAdmitted >= files.size()) {
         if (planningFinished) {
           return null;
         }
@@ -623,34 +598,89 @@ public final class StagedParquetPartitionReader
         plannedSubtasks.addAll(session.finish());
         continue;
       }
-      CompletableFuture<TimedFooter> footerFuture;
-      CompletableFuture<FileFragment> fragmentFuture;
-      synchronized (lifecycleLock) {
-        footerFuture = footerFutures.get(footerCursor);
-        fragmentFuture = fragmentFutures.get(footerCursor);
+
+      if (!combineEnabled) {
+        admitFile(orderedFileCursor++);
+        continue;
       }
-      long waitStart = System.nanoTime();
-      TimedFooter timed = awaitOrCancel(footerFuture);
-      adapter.onFooterWait(System.nanoTime() - waitStart);
-      footerCursor++;
-      adapter.onFooterCompleted(timed.footerNanos);
-      fragmentByFooter.put(timed.footer, fragmentFuture);
-      footerOrder.put(timed.footer, consumedFragments.size());
-      consumedFragments.add(fragmentFuture);
-      plannedSubtasks.addAll(session.add(timed.footer));
+
+      // Completion-order combine mirrors ExecutorCompletionService in the base reader. The
+      // group's first file waits without a deadline. Every admitted file that leaves the group
+      // open earns a new full combine wait for the next completion; there is no cumulative
+      // subtask budget.
+      Integer completedIndex = awaitCompletedFile(!session.hasOpenBlocks());
+      if (completedIndex == null) {
+        plannedSubtasks.addAll(session.flush());
+      } else {
+        admitFile(completedIndex);
+      }
     }
     return plannedSubtasks.poll();
   }
 
   /**
-   * Wait for the subtask's fragments, assemble the exact synthetic Parquet buffer on the task
-   * thread, and hand it to GPU decode. Fragment download measurements are attributed to the
-   * first consuming subtask; assembly time is reported as combine time.
+   * Wait for a completed file index. A null result is a combine timeout; close uses a sentinel
+   * to wake the same blocking queue immediately.
+   */
+  private Integer awaitCompletedFile(boolean waitForFirst) throws InterruptedException {
+    long waitStart = System.nanoTime();
+    Integer fileIndex;
+    try {
+      if (waitForFirst) {
+        fileIndex = completedFileIndexes.take();
+      } else if (combineWaitMs > 0L) {
+        fileIndex = completedFileIndexes.poll(combineWaitMs, TimeUnit.MILLISECONDS);
+      } else {
+        fileIndex = completedFileIndexes.poll();
+      }
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw e;
+    }
+    adapter.onResultWait(System.nanoTime() - waitStart);
+    if (fileIndex != null && fileIndex == CLOSED_COMPLETION) {
+      checkOpen();
+      throw new CancellationException("staged Parquet reader completion queue closed");
+    }
+    checkOpen();
+    return fileIndex;
+  }
+
+  /** Admit one fully completed file result into the task-thread planner. */
+  private void admitFile(int fileIndex) throws Exception {
+    CompletableFuture<TimedFooter> footerFuture;
+    CompletableFuture<FileFragment> fragmentFuture;
+    synchronized (lifecycleLock) {
+      footerFuture = footerFutures.get(fileIndex);
+      fragmentFuture = fragmentFutures.get(fileIndex);
+    }
+
+    if (combineEnabled) {
+      // The completion queue publishes only terminal fragment futures.
+      awaitOrCancel(fragmentFuture);
+    } else {
+      long resultWaitStart = System.nanoTime();
+      awaitOrCancel(fragmentFuture);
+      adapter.onResultWait(System.nanoTime() - resultWaitStart);
+    }
+    long footerWaitStart = System.nanoTime();
+    TimedFooter timed = awaitOrCancel(footerFuture);
+    adapter.onFooterWait(System.nanoTime() - footerWaitStart);
+    adapter.onFooterCompleted(timed.footerNanos);
+
+    filesAdmitted++;
+    fragmentByFooter.put(timed.footer, fragmentFuture);
+    plannedSubtasks.addAll(session.add(timed.footer));
+  }
+
+  /**
+   * Wait for the subtask's fragments and hand a zero-copy logical Parquet input to GPU decode.
+   * Fragment download measurements are attributed to the first consuming subtask; combine time
+   * now measures only construction of the segment description rather than a full data copy.
    */
   private Iterator<ColumnarBatch> assembleAndDecode(ReadSubtask subtask) throws Exception {
     List<ReadSubtask.FileSlice> slices = subtask.getFileSlices();
     ArrayList<FileFragment> fragments = new ArrayList<>(slices.size());
-    long waitStart = System.nanoTime();
     for (ReadSubtask.FileSlice slice : slices) {
       CompletableFuture<FileFragment> future = fragmentByFooter.get(slice.getFooter());
       if (future == null) {
@@ -658,7 +688,6 @@ public final class StagedParquetPartitionReader
       }
       fragments.add(awaitOrCancel(future));
     }
-    adapter.onResultWait(System.nanoTime() - waitStart);
 
     long ioNanos = 0L;
     long ioAllocNanos = 0L;
@@ -691,115 +720,63 @@ public final class StagedParquetPartitionReader
     }
 
     long assembleStart = System.nanoTime();
-    long materializeNanos = 0L;
-    byte[] headerBytes = subtask.getHeaderBytes();
-    byte[] footerBytes = subtask.getFooterAndTrailerBytes();
-    HostMemoryBuffer synthetic = borrowAssemblyBuffer(subtask.getTotalSizeBytes());
-    boolean handedOff = false;
-    try {
-      synthetic.setBytes(0L, headerBytes, 0, headerBytes.length);
-      long outputOffset = headerBytes.length;
-      for (int index = 0; index < slices.size(); index++) {
-        ReadSubtask.FileSlice slice = slices.get(index);
-        FileFragment fragment = fragments.get(index);
-        long sliceBytes = fragment.sliceBytes(slice.getFirstBlock(), slice.getBlockCount());
-        if (sliceBytes > 0) {
-          long materializeStart = System.nanoTime();
-          HostMemoryBuffer fragmentData = fragment.getData().materialize();
-          materializeNanos += System.nanoTime() - materializeStart;
-          try {
-            synthetic.copyFromHostBuffer(outputOffset, fragmentData,
-                fragment.blockStartOffset(slice.getFirstBlock()), sliceBytes);
-          } finally {
-            fragmentData.close();
-          }
+    StagedParquetInput parquetInput = new StagedParquetInput(subtask, fragments);
+    long combineNanos = System.nanoTime() - assembleStart;
+    adapter.onSubtaskCompleted(subtask, new SubtaskStats(
+        ioNanos, ioAllocNanos, ioReadWaitNanos, ioRouteNanos, ioFinalizeNanos,
+        ioRequestCount, ioRequestedBytes, combineNanos, false,
+        cacheHitCount, cacheHitBytes, cacheMissCount, cacheMissBytes, cacheReadNanos));
+
+    // The adapter eagerly drains cuDF's producer, so no returned batch references the borrowed
+    // fragments. Only after it returns can we close fragment owners behind the admission cursor.
+    Iterator<ColumnarBatch> decoded = adapter.decodeAndPostProcess(subtask, parquetInput);
+    if (decoded == null) {
+      throw new IllegalStateException("decode adapter returned null");
+    }
+    closeFullyConsumedFragments(slices, fragments);
+    return decoded;
+  }
+
+  /**
+   * Close every fragment whose final non-empty row group was consumed by this subtask. A file
+   * split by a per-file row/GPU limit stays live only until its last slice; complete files in a
+   * combined subtask close immediately after cuDF has eagerly consumed their zero-copy slices.
+   */
+  private void closeFullyConsumedFragments(
+      List<ReadSubtask.FileSlice> slices,
+      List<FileFragment> fragments) {
+    for (int index = 0; index < slices.size(); index++) {
+      ReadSubtask.FileSlice slice = slices.get(index);
+      List<BlockMetaData> blocks = slice.getFooter().getBlocks();
+      boolean hasLaterData = false;
+      for (int blockIndex = slice.getFirstBlock() + slice.getBlockCount();
+          blockIndex < blocks.size(); blockIndex++) {
+        if (blocks.get(blockIndex).getRowCount() > 0L) {
+          hasLaterData = true;
+          break;
         }
-        outputOffset = Math.addExact(outputOffset, sliceBytes);
       }
-      if (outputOffset != subtask.getFooterOffset()) {
-        throw new IllegalStateException("assembled data does not match the planned layout");
-      }
-      synthetic.setBytes(outputOffset, footerBytes, 0, footerBytes.length);
-
-      // Keep the assembly and materialization metrics disjoint: fragment restores are reported
-      // through onMaterializationCompleted only.
-      long combineNanos = System.nanoTime() - assembleStart - materializeNanos;
-      adapter.onSubtaskCompleted(subtask, new SubtaskStats(
-          ioNanos, ioAllocNanos, ioReadWaitNanos, ioRouteNanos, ioFinalizeNanos,
-          ioRequestCount, ioRequestedBytes, Math.max(combineNanos, 0L), false,
-          cacheHitCount, cacheHitBytes, cacheMissCount, cacheMissBytes, cacheReadNanos));
-      adapter.onMaterializationCompleted(materializeNanos);
-      closeFragmentsThrough(maxFooterOrder(slices));
-
-      // Ownership transfers when the adapter is invoked, even on failure.
-      handedOff = true;
-      Iterator<ColumnarBatch> decoded = adapter.decodeAndPostProcess(subtask, synthetic);
-      if (decoded == null) {
-        throw new IllegalStateException("decode adapter returned null");
-      }
-      return decoded;
-    } finally {
-      if (!handedOff) {
-        synthetic.close();
+      if (!hasLaterData) {
+        FileFragment fragment = fragments.get(index);
+        fragmentByFooter.remove(slice.getFooter());
+        statsAttributed.remove(fragment);
+        closeFragmentAfterAsync(fragment);
       }
     }
   }
 
-  /**
-   * Return a caller-owned exact-sized slice of the reusable assembly buffer, growing it in
-   * {@link #ASSEMBLY_GRANULARITY_BYTES} steps when a subtask needs more capacity. The blocking
-   * host allocation runs outside the lock so close() is never blocked behind it.
-   */
-  private HostMemoryBuffer borrowAssemblyBuffer(long sizeBytes) {
+  /** Close completed fragments now and attach cleanup to any fragment still finishing. */
+  private void closeAllFragmentFutures() {
+    List<CompletableFuture<FileFragment>> fragmentSnapshot;
     synchronized (lifecycleLock) {
-      checkOpen();
-      if (assemblyBuffer != null && assemblyBuffer.getLength() >= sizeBytes) {
-        return assemblyBuffer.slice(0L, sizeBytes);
-      }
+      fragmentSnapshot = new ArrayList<>(fragmentFutures);
     }
-    long granules = (sizeBytes + ASSEMBLY_GRANULARITY_BYTES - 1) / ASSEMBLY_GRANULARITY_BYTES;
-    // Pinned-preferred like the base reader's combine buffer: the assembled synthetic file is
-    // the decode host-to-device source, so pinned memory also speeds the GPU transfer.
-    HostMemoryBuffer grown = HostAlloc$.MODULE$.alloc(
-        Math.multiplyExact(granules, ASSEMBLY_GRANULARITY_BYTES), true);
-    synchronized (lifecycleLock) {
-      if (closed.get()) {
-        grown.close();
-        throw new CancellationException("staged Parquet reader is closed");
-      }
-      if (assemblyBuffer != null) {
-        assemblyBuffer.close();
-      }
-      assemblyBuffer = grown;
-      return assemblyBuffer.slice(0L, sizeBytes);
-    }
-  }
-
-  private int maxFooterOrder(List<ReadSubtask.FileSlice> slices) {
-    int max = 0;
-    for (ReadSubtask.FileSlice slice : slices) {
-      Integer order = footerOrder.get(slice.getFooter());
-      if (order != null && order > max) {
-        max = order;
-      }
-    }
-    return max;
-  }
-
-  /**
-   * Close fragments whose footer position is before {@code exclusiveEnd}. In-order planning
-   * guarantees the footer positions across consecutive subtasks never decrease, so a fragment
-   * behind the newest consumed position can never be referenced again.
-   */
-  private void closeFragmentsThrough(int exclusiveEnd) {
-    while (fragmentsClosedUpTo < exclusiveEnd) {
-      CompletableFuture<FileFragment> future = consumedFragments.get(fragmentsClosedUpTo);
+    for (CompletableFuture<FileFragment> future : fragmentSnapshot) {
       future.whenComplete((fragment, error) -> {
         if (fragment != null) {
           closeFragmentAfterAsync(fragment);
         }
       });
-      fragmentsClosedUpTo++;
     }
   }
 
@@ -957,24 +934,10 @@ public final class StagedParquetPartitionReader
     // Wake the task thread from any per-file wait. The pipeline futures stay untouched — their
     // pool jobs remain the sole completers and are never cancelled, they drain naturally.
     closeSignal.complete(null);
-    List<CompletableFuture<FileFragment>> fragmentSnapshot;
-    synchronized (lifecycleLock) {
-      fragmentSnapshot = new ArrayList<>(fragmentFutures);
-      if (assemblyBuffer != null) {
-        // An in-flight decode still holding a slice keeps the memory alive by reference count.
-        assemblyBuffer.close();
-        assemblyBuffer = null;
-      }
-    }
-    for (CompletableFuture<FileFragment> future : fragmentSnapshot) {
-      // Reclaim fragments that completed before close or complete later without a consumer.
-      // Consumed fragments close twice harmlessly: fragment close is idempotent.
-      future.whenComplete((fragment, error) -> {
-        if (fragment != null) {
-          closeFragmentAfterAsync(fragment);
-        }
-      });
-    }
+    completedFileIndexes.offer(CLOSED_COMPLETION);
+    // Reclaim fragments that completed before close or complete later without a consumer.
+    // Consumed fragments close twice harmlessly: fragment close is idempotent.
+    closeAllFragmentFutures();
     Throwable failure = null;
     synchronized (iteratorLock) {
       if (currentBatches != null) {

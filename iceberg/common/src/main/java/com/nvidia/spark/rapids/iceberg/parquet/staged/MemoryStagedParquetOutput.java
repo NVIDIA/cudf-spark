@@ -28,15 +28,15 @@ import java.nio.ByteBuffer;
 import java.nio.channels.SeekableByteChannel;
 import java.util.List;
 import java.util.Objects;
-import java.util.concurrent.CompletableFuture;
 
 /**
  * Host-memory implementation of {@link StagedParquetOutput}.
  *
- * <p>The factory transfers ownership of {@code buffer} to this object. The buffer is a plain
- * non-pinned allocation while it is written; sealing transfers it to a {@link SpillableHostBuffer}
- * so completed results waiting in the completion queue can participate in normal host spilling.
- * A materialized buffer is a separate, caller-owned reference.</p>
+ * <p>The factory transfers ownership of {@code buffer} to this object. The buffer is allocated
+ * pinned-preferred, with HostAlloc's bounded non-pinned fallback; sealing transfers it to a
+ * {@link SpillableHostBuffer} so completed results waiting in the completion queue can
+ * participate in normal host spilling. A materialized buffer is a separate, caller-owned
+ * reference.</p>
  */
 final class MemoryStagedParquetOutput extends StagedParquetOutput {
   /** Owned only before seal; set to null when ownership moves to {@code sealedBuffer}. */
@@ -59,10 +59,10 @@ final class MemoryStagedParquetOutput extends StagedParquetOutput {
   }
 
   @Override
-  CompletableFuture<Void> submitVectoredRead(
+  void readVectoredStorage(
       RapidsInputFile input,
-      List<RapidsInputFile.CopyRange> copies) {
-    return input.readVectoredAsync(buffer, copies);
+      List<RapidsInputFile.CopyRange> copies) throws IOException {
+    input.readVectored(buffer, copies);
   }
 
   @Override

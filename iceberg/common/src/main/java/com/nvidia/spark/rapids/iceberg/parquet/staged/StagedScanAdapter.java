@@ -18,7 +18,6 @@ package com.nvidia.spark.rapids.iceberg.parquet.staged;
 
 import java.util.Iterator;
 
-import ai.rapids.cudf.HostMemoryBuffer;
 import com.nvidia.spark.rapids.iceberg.parquet.IcebergPartitionedFile;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 
@@ -52,15 +51,15 @@ public interface StagedScanAdapter {
   }
 
   /**
-   * Decodes and post-processes one materialized synthetic Parquet file.
+   * Decodes and post-processes one logical synthetic Parquet file.
    *
-   * <p>Ownership of {@code parquetData} transfers to this method. The returned iterator must
-   * close it either eagerly or when the iterator itself is exhausted or closed through the
-   * normal RAPIDS iterator lifecycle.</p>
+   * <p>{@code parquetInput} is borrowed and remains valid only for this call. The implementation
+   * may materialize a fresh owning array for every RMM retry attempt; each array must be closed
+   * or transferred to the cuDF Parquet reader before this method returns.</p>
    */
   Iterator<ColumnarBatch> decodeAndPostProcess(
       ReadSubtask subtask,
-      HostMemoryBuffer parquetData) throws Exception;
+      StagedParquetInput parquetInput) throws Exception;
 
   /**
    * Reports a sealed subtask immediately before the Spark task thread materializes and decodes

@@ -31,13 +31,14 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * <p>Footer loading/filtering, source-file I/O, and synthetic Parquet finalization all use this
  * pool. Sharing one concurrency budget avoids reserving workers for a stage that is temporarily
- * idle. Each Spark task builds its own ordered data-I/O submission chain. Once a vectored read is
- * submitted, its asynchronous engine owns the request until the returned future is terminal; the
- * shared workers are free to perform footer, allocation, cache, and Parquet-finalization work.</p>
+ * idle. One fused job holds one worker from footer loading through the blocking vectored read,
+ * cache publication, and fragment sealing. The fixed pool width therefore bounds concurrent
+ * whole-file pipelines; a worker returns to the shared FIFO queue only after its file is complete
+ * or has failed.</p>
  *
  * <p>Pool submission does not transfer Spark task context automatically. Each staged callable is
- * responsible for installing and removing its captured {@code TaskContext}, as well as the RAPIDS
- * pool-thread marker, in a {@code finally} block.</p>
+ * responsible for installing its captured {@code TaskContext} and RAPIDS pool-thread marker once
+ * around the fused file job, and removing both in a {@code finally} block.</p>
  */
 public final class StagedScanThreadPools {
   private static final Logger LOG = LoggerFactory.getLogger(StagedScanThreadPools.class);
@@ -71,7 +72,7 @@ public final class StagedScanThreadPools {
     return singleton;
   }
 
-  /** Return the shared pool used by every asynchronous staged-reader operation. */
+  /** Return the shared pool used by every staged file job. */
   public ExecutorService executor() {
     return executor;
   }

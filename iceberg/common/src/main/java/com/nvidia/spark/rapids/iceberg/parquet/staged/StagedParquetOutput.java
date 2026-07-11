@@ -21,7 +21,6 @@ import java.nio.channels.SeekableByteChannel;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.locks.StampedLock;
 
 import ai.rapids.cudf.HostMemoryBuffer;
@@ -29,29 +28,25 @@ import com.nvidia.spark.rapids.HostAlloc$;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 
 /**
- * Exact-sized writable storage for one synthetic Parquet file.
+ * Exact-sized writable storage for one file's packed Parquet column chunks.
  *
- * <p>The output has a strict lifecycle: {@code WRITABLE -> SEALED -> CLOSED}. Async source
- * writers may concurrently copy disjoint ranges while it is writable. After the owning worker's
- * read barrier, it writes the synthetic header and footer and seals the output. The Spark task
- * thread then obtains an independent host-buffer reference with {@link #materialize()} before
- * closing this output.</p>
+ * <p>The output has a strict lifecycle: {@code WRITABLE -> SEALED -> CLOSED}. The owning worker
+ * writes it with blocking vectored reads, cached-range copies, and scratch segment routing;
+ * disjoint ranges may also be written concurrently. After its reads return, the worker seals the
+ * output. The Spark task thread then obtains an independent host-buffer reference with
+ * {@link #materialize()} before closing this output.</p>
  *
- * <p>Storage is pinned-preferred host memory obtained with one blocking allocation that
- * participates in normal host spilling, matching the base multithreaded reader's buffers. The
- * pinned pool is pre-faulted and pooled, so both the S3 SDK writers and the cache-hit channel
- * copies write at memory speed instead of paying first-touch page faults and mmap churn on a
- * fresh mapping per file; when the pool is tight the allocation falls back to plain host memory.
- * The blocking-worker execution model bounds how many outputs are being written at once. The
- * planned synthetic size is exact, so sealing never needs a second size argument.</p>
+ * <p>Storage uses the same pinned-preferred host allocation policy as the base multithreaded
+ * Parquet reader. HostAlloc falls back to bounded non-pinned memory when the pinned pool cannot
+ * satisfy an allocation. The blocking-worker execution model bounds how many outputs are being
+ * written at once, and zero-copy decode avoids retaining a second task-sized assembly buffer.
+ * The planned fragment size is exact, so sealing never needs a second size argument.</p>
  */
 abstract class StagedParquetOutput implements AutoCloseable {
   private final long exactSizeBytes;
   private final boolean diskBacked;
-  // A read stamp is held for the lifetime of every asynchronous source write. Unlike a
-  // ReentrantReadWriteLock, StampedLock does not require the thread that acquired a stamp to
-  // release it. That matters because a vectored-read future normally completes on an S3 client
-  // thread rather than on the staged worker that submitted it.
+  // A read stamp is held around every write so seal and close (exclusive stamps) stay behind
+  // all writers even if a caller ever writes concurrently from another thread.
   private final StampedLock operationLock = new StampedLock();
   private boolean sealed;
   private boolean closed;
@@ -66,12 +61,11 @@ abstract class StagedParquetOutput implements AutoCloseable {
   }
 
   /**
-   * Create one owned output for an exact synthetic-file size.
+   * Create one owned output for an exact packed-fragment size.
    *
-   * <p>The allocation is pinned-preferred and blocking: it spills and waits through the normal
-   * host retry protocol instead of failing over to another backend. The caller is a dedicated
-   * download worker whose whole pipeline is blocking, so waiting here is the intended
-   * backpressure.</p>
+   * <p>The allocation is pinned-preferred and blocking, matching the base reader's destination.
+   * It falls back to bounded non-pinned storage and participates in the normal host retry/spill
+   * protocol. The caller is a dedicated download worker, so waiting here is backpressure.</p>
    */
   static StagedParquetOutput create(long exactSizeBytes) throws IOException {
     if (exactSizeBytes <= 0) {
@@ -93,68 +87,32 @@ abstract class StagedParquetOutput implements AutoCloseable {
   }
 
   /**
-   * Copy all cache-miss column chunks for one source with one vectored read.
-   *
-   * <p>Every planned range remains a distinct {@link RapidsInputFile.CopyRange}, preserving
-   * PerfIO's per-column-chunk concurrency. Different source futures may write concurrently because
-   * their output ranges are disjoint.</p>
+   * Copy all cache-miss ranges for one file with one blocking vectored read, mirroring the base
+   * multithreaded reader's synchronous {@code readVectored} call on its pool workers. The call
+   * returns only when every byte has landed, so close() never races an in-flight writer on this
+   * path.
    */
-  final CompletableFuture<Void> copyRangesAsync(
+  final void copyRanges(
       RapidsInputFile input,
-      List<PlannedReadRange> ranges) {
+      List<PlannedReadRange> ranges) throws IOException {
     Objects.requireNonNull(input, "input");
     Objects.requireNonNull(ranges, "ranges");
     if (ranges.isEmpty()) {
-      return CompletableFuture.completedFuture(null);
+      return;
     }
-
+    List<RapidsInputFile.CopyRange> copies = new ArrayList<>(ranges.size());
+    for (PlannedReadRange range : ranges) {
+      Objects.requireNonNull(range, "range");
+      checkWriteBounds(range.getOutputOffset(), range.getLength());
+      copies.add(new RapidsInputFile.CopyRange(
+          range.getInputOffset(), range.getLength(), range.getOutputOffset()));
+    }
+    long writeStamp = beginConcurrentWrite();
     try {
-      List<RapidsInputFile.CopyRange> copies = new ArrayList<>(ranges.size());
-      for (PlannedReadRange range : ranges) {
-        Objects.requireNonNull(range, "range");
-        checkWriteBounds(range.getOutputOffset(), range.getLength());
-        copies.add(new RapidsInputFile.CopyRange(
-            range.getInputOffset(), range.getLength(), range.getOutputOffset()));
-      }
-      long writeStamp = beginConcurrentWrite();
-      CompletableFuture<Void> readFuture;
-      try {
-        readFuture = Objects.requireNonNull(
-            submitVectoredRead(input, copies),
-            "readVectoredAsync returned null");
-      } catch (Throwable submissionError) {
-        endConcurrentWrite(writeStamp);
-        return failedFuture(submissionError);
-      }
-
-      CompletableFuture<Void> completion = new CompletableFuture<>();
-      readFuture.whenComplete((ignored, readError) -> {
-        Throwable failure = readError;
-        try {
-          endConcurrentWrite(writeStamp);
-        } catch (Throwable closeError) {
-          if (failure == null) {
-            failure = closeError;
-          } else if (failure != closeError) {
-            failure.addSuppressed(closeError);
-          }
-        }
-        if (failure == null) {
-          completion.complete(null);
-        } else {
-          completion.completeExceptionally(failure);
-        }
-      });
-      return completion;
-    } catch (Throwable validationError) {
-      return failedFuture(validationError);
+      readVectoredStorage(input, copies);
+    } finally {
+      endConcurrentWrite(writeStamp);
     }
-  }
-
-  private static <T> CompletableFuture<T> failedFuture(Throwable error) {
-    CompletableFuture<T> future = new CompletableFuture<>();
-    future.completeExceptionally(error);
-    return future;
   }
 
   /** Copy one cached column chunk from its positioned channel into the synthetic output. */
@@ -275,10 +233,10 @@ abstract class StagedParquetOutput implements AutoCloseable {
   }
 
   /**
-   * Submit one vectored read whose destination is this output's backing store. Called while a
-   * concurrent-write stamp is held; the stamp is released when the returned future is terminal.
+   * Perform one blocking vectored read whose destination is this output's backing store. Called
+   * while a concurrent-write stamp is held; the read is terminal when this returns.
    */
-  abstract CompletableFuture<Void> submitVectoredRead(
+  abstract void readVectoredStorage(
       RapidsInputFile input,
       List<RapidsInputFile.CopyRange> copies) throws IOException;
 

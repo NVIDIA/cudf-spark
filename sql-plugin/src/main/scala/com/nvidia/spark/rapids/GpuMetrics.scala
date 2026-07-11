@@ -230,11 +230,11 @@ object GpuMetric extends Logging {
     "iceberg staged disk-backed subtasks"
   val DESCRIPTION_ICEBERG_STAGED_DISK_BYTES = "iceberg staged disk-backed bytes"
   val DESCRIPTION_ICEBERG_STAGED_IO_ALLOC_TIME = "iceberg staged I/O alloc time"
-  val DESCRIPTION_ICEBERG_STAGED_IO_READ_WAIT_TIME = "iceberg staged I/O read wait time"
+  val DESCRIPTION_ICEBERG_STAGED_IO_READ_WAIT_TIME = "iceberg staged remote read time"
   val DESCRIPTION_ICEBERG_STAGED_IO_ROUTE_TIME = "iceberg staged I/O scratch route time"
   val DESCRIPTION_ICEBERG_STAGED_IO_FINALIZE_TIME = "iceberg staged I/O publish/seal time"
-  val DESCRIPTION_ICEBERG_STAGED_IO_REQUEST_COUNT = "iceberg staged I/O merged requests"
-  val DESCRIPTION_ICEBERG_STAGED_IO_READ_BYTES = "iceberg staged I/O requested bytes"
+  val DESCRIPTION_ICEBERG_STAGED_IO_REQUEST_COUNT = "iceberg staged remote read requests"
+  val DESCRIPTION_ICEBERG_STAGED_IO_READ_BYTES = "iceberg staged remote read bytes"
 
   /**
    * Determine if a GpuMetric wraps a TimingMetric or NanoTimingMetric.

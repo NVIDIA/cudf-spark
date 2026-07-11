@@ -35,24 +35,22 @@ import org.apache.spark.sql.types.StructType;
  * individual row group that exceeds a hard limit is retained as a standalone subtask, matching
  * the existing soft-limit behavior.</p>
  *
- * <p>The copied-data target is a subtask size target: once the accumulated encoded bytes reach
- * it, the next row group starts a new subtask whether or not it comes from the same source. Small
- * sources combine up to the target and a large source splits into multiple roughly target-sized
- * subtasks, so one oversized file cannot monopolize a worker slot with an arbitrarily large
- * buffer. A non-positive target disables cross-source combination while retaining row-group
- * batching within each source.</p>
+ * <p>The copied-data target controls combination between complete file results, matching the
+ * base multithreaded reader. Row groups from one file are split only by the row/GPU-byte limits;
+ * the combine target is checked after the complete footer has been admitted. Consequently a
+ * file may take a subtask beyond the target, but the target never creates additional decode
+ * batches within that file. A non-positive target disables cross-source combination while
+ * retaining row-group batching within each source.</p>
  */
 public final class StableGreedyReadPlanner {
   private final int maxRows;
   private final long maxEstimatedGpuBytes;
   private final long combineThreshold;
-  private final StructType expectedSparkSchema;
 
   public StableGreedyReadPlanner(
       int maxRows,
       long maxEstimatedGpuBytes,
-      long combineThreshold,
-      StructType expectedSparkSchema) {
+      long combineThreshold) {
     if (maxRows <= 0) {
       throw new IllegalArgumentException("maxRows must be positive");
     }
@@ -62,8 +60,6 @@ public final class StableGreedyReadPlanner {
     this.maxRows = maxRows;
     this.maxEstimatedGpuBytes = maxEstimatedGpuBytes;
     this.combineThreshold = combineThreshold;
-    this.expectedSparkSchema = Objects.requireNonNull(
-        expectedSparkSchema, "expectedSparkSchema");
   }
 
   /**
@@ -87,7 +83,7 @@ public final class StableGreedyReadPlanner {
     return Collections.unmodifiableList(subtasks);
   }
 
-  /** Create an incremental planning session that consumes footers in file-list order. */
+  /** Create an incremental planning session that consumes footers in caller-provided order. */
   public Session newSession() {
     return new Session();
   }
@@ -98,28 +94,34 @@ public final class StableGreedyReadPlanner {
    * <p>The greedy walk only ever inspects row groups seen so far, so a subtask can be consumed
    * as soon as its closing decision is made instead of after the complete footer barrier. Any
    * feed order is correct: row groups within one footer always keep their file order, and the
-   * compatibility rules hold for every pairing. The feed order determines which sources combine,
-   * so the staged reader feeds strictly in file-list order, which both keeps decode output in
-   * input order and makes the plan reproducible for a given file list. Data downloads are not
-   * delayed by this ordering: they are chained on each footer's own completion, ahead of
-   * planning.</p>
+   * compatibility rules hold for every pairing. The feed order determines which sources combine:
+   * the staged reader uses file-list order when combining is disabled, and worker-completion
+   * order when it is enabled, matching the base multithreaded reader.</p>
    */
   public final class Session {
     private final ArrayList<SelectedBlock> selected = new ArrayList<>();
     private long selectedRows;
     private long selectedDataBytes;
+    private long selectedGpuBytes;
     private long nextSubtaskId;
     private boolean finished;
 
     private Session() {
     }
 
-    /** Feed the next footer in file-list order and return the subtasks its row groups closed. */
+    /** Feed the next footer in admission order and return the subtasks its row groups closed. */
     public List<ReadSubtask> add(FooterResult footer) {
       Objects.requireNonNull(footer, "footer");
       ensureActive();
       ArrayList<ReadSubtask> closed = new ArrayList<>();
       List<BlockMetaData> blocks = footer.getBlocks();
+      // The base reader decides whether to admit the next complete file result by inspecting the
+      // bytes/rows already selected. Once admitted, that file is atomic for cross-file combine:
+      // it may soft-overshoot a limit, but is not split from the files preceding it.
+      boolean combineWholeFooter = !selected.isEmpty()
+          && combineThreshold > 0
+          && isCompatibleWithAll(selected, footer);
+      boolean splitCurrentFooter = false;
       for (int blockIndex = 0; blockIndex < blocks.size(); blockIndex++) {
         BlockMetaData block = blocks.get(blockIndex);
         if (block.getRowCount() == 0) {
@@ -129,25 +131,68 @@ public final class StableGreedyReadPlanner {
           throw new UnsupportedOperationException("too many rows in one Parquet row group");
         }
         long blockDataBytes = encodedDataBytes(block);
+        long blockGpuBytes = estimateGpuBytes(footer.getReadSchema(), block.getRowCount());
         long candidateRows = Math.addExact(selectedRows, block.getRowCount());
-        long candidateGpuBytes = estimateGpuBytes(candidateRows);
+        long candidateGpuBytes = Math.addExact(selectedGpuBytes, blockGpuBytes);
 
-        boolean shouldFlush = !selected.isEmpty()
-            && (hasReachedCombineThreshold(selectedDataBytes)
-                || candidateRows > maxRows
+        boolean selectedHasCurrentFooter = !selected.isEmpty()
+            && selected.get(selected.size() - 1).footer == footer;
+        boolean shouldFlush = !selected.isEmpty() && !combineWholeFooter
+            && (candidateRows > maxRows
                 || candidateGpuBytes > maxEstimatedGpuBytes
                 || !isCompatibleWithAll(selected, footer));
         if (shouldFlush) {
+          splitCurrentFooter |= selectedHasCurrentFooter;
           closed.add(buildSubtask(nextSubtaskId++, selected));
           selected.clear();
           selectedRows = 0L;
           selectedDataBytes = 0L;
+          selectedGpuBytes = 0L;
         }
 
         selected.add(new SelectedBlock(footer, blockIndex));
         selectedRows = Math.addExact(selectedRows, block.getRowCount());
         selectedDataBytes = Math.addExact(selectedDataBytes, blockDataBytes);
+        selectedGpuBytes = Math.addExact(selectedGpuBytes, blockGpuBytes);
       }
+      // The base reader's combination unit is a completed file result. Checking limits only at
+      // this boundary prevents the combine target from splitting one file, while closing an
+      // atomically admitted file after any soft overshoot. A file that needed internal row/GPU
+      // splitting remains by itself, just as the base reader's multi-buffer file result does.
+      // At this outer boundary the reader-byte limit compares encoded host bytes; GPU estimates
+      // apply only to the within-file row-group split above.
+      if (!selected.isEmpty()
+          && (combineThreshold <= 0
+              || splitCurrentFooter
+              || hasReachedCombineThreshold(selectedDataBytes)
+              || selectedRows >= maxRows
+              || selectedDataBytes >= maxEstimatedGpuBytes)) {
+        closed.add(buildSubtask(nextSubtaskId++, selected));
+        selected.clear();
+        selectedRows = 0L;
+        selectedDataBytes = 0L;
+        selectedGpuBytes = 0L;
+      }
+      return closed;
+    }
+
+    /** Return whether an admitted file result is waiting for more compatible results. */
+    public boolean hasOpenBlocks() {
+      return !selected.isEmpty();
+    }
+
+    /** Close the currently admitted result group after the combine wait expires. */
+    public List<ReadSubtask> flush() {
+      ensureActive();
+      if (selected.isEmpty()) {
+        return Collections.emptyList();
+      }
+      List<ReadSubtask> closed =
+          Collections.singletonList(buildSubtask(nextSubtaskId++, selected));
+      selected.clear();
+      selectedRows = 0L;
+      selectedDataBytes = 0L;
+      selectedGpuBytes = 0L;
       return closed;
     }
 
@@ -161,6 +206,9 @@ public final class StableGreedyReadPlanner {
       List<ReadSubtask> last =
           Collections.singletonList(buildSubtask(nextSubtaskId, selected));
       selected.clear();
+      selectedRows = 0L;
+      selectedDataBytes = 0L;
+      selectedGpuBytes = 0L;
       return last;
     }
 
@@ -223,8 +271,8 @@ public final class StableGreedyReadPlanner {
     return bytes;
   }
 
-  private long estimateGpuBytes(long rows) {
-    long estimate = GpuBatchUtils$.MODULE$.estimateGpuMemory(expectedSparkSchema, rows);
+  private static long estimateGpuBytes(StructType readSchema, long rows) {
+    long estimate = GpuBatchUtils$.MODULE$.estimateGpuMemory(readSchema, rows);
     if (estimate < 0) {
       throw new IllegalStateException("GPU memory estimate must not be negative");
     }
