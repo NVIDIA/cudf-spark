@@ -40,7 +40,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import ai.rapids.cudf.HostMemoryBuffer;
-import com.nvidia.spark.rapids.GpuSemaphore$;
 import com.nvidia.spark.rapids.HostAlloc$;
 import com.nvidia.spark.rapids.filecache.FileCache;
 import com.nvidia.spark.rapids.filecache.FileCache.FileCacheStartedToken;
@@ -135,7 +134,8 @@ public final class StagedParquetPartitionReader
    *                         spark.rapids.sql.reader.multithreaded.combine.sizeBytes; a
    *                         non-positive value disables cross-file combining
    * @param combineWaitMs fresh wait after every admitted result while building a combined
-   *                      subtask. The first result is always awaited without a timeout.
+   *                      subtask. The first result is mandatory: baseline may first make a
+   *                      timed probe, but an empty probe falls through to an indefinite wait.
    * @param workerThreads executor-wide worker count shared by footer and download jobs; this
    *                      bounds the concurrently downloading files
    * @param taskContext Spark task context captured by the task thread; may be null in tests
@@ -173,23 +173,17 @@ public final class StagedParquetPartitionReader
   @Override
   public boolean hasNext() {
     if (closed.get()) {
-      releaseGpuSemaphoreFromTaskThread();
       return false;
     }
     try {
       initializeIfNeeded();
       while (true) {
         if (closed.get()) {
-          releaseGpuSemaphoreFromTaskThread();
           return false;
         }
         synchronized (iteratorLock) {
           if (currentBatches != null) {
             if (currentBatches.hasNext()) {
-              // Match the base multithreaded reader: retain the task-wide GPU permit until every
-              // batch eagerly decoded into the current iterator has been consumed. Yielding here
-              // would let other tasks allocate while this iterator still owns ACTIVE_ON_DECK GPU
-              // batches, causing those pending batches to spill to host and later be restored.
               return true;
             }
             closeIterator(currentBatches);
@@ -197,10 +191,10 @@ public final class StagedParquetPartitionReader
           }
         }
 
-        // The current decoded iterator is empty. Release before planning the next subtask because
-        // completion-order admission may block on footer filtering or fragment I/O.
-        releaseGpuSemaphoreFromTaskThread();
-
+        // Match MultiFileCloudParquetPartitionReader: GPU decode acquires the task-wide
+        // semaphore, and the Spark task-completion listener releases it. The reader deliberately
+        // retains that permit while waiting for every later subtask instead of introducing a
+        // staged-only release/reacquire cycle that increases concurrent GPU residency and spill.
         ReadSubtask subtask = nextPlannedSubtask();
         if (subtask == null) {
           closeAllFragmentFutures();
@@ -212,9 +206,6 @@ public final class StagedParquetPartitionReader
           decoded = assembleAndDecode(subtask);
           synchronized (iteratorLock) {
             if (closed.get()) {
-              // decodeAndPostProcess may just have acquired the semaphore even though close won
-              // the race before this iterator could be installed.
-              releaseGpuSemaphoreFromTaskThread();
               return false;
             }
             if (currentBatches != null) {
@@ -230,14 +221,12 @@ public final class StagedParquetPartitionReader
         }
       }
     } catch (CancellationException cancelled) {
-      releaseGpuSemaphoreAfterFailure(cancelled);
       if (closed.get()) {
         return false;
       }
       closeAfterFailure(cancelled);
       throw cancelled;
     } catch (Throwable error) {
-      releaseGpuSemaphoreAfterFailure(error);
       closeAfterFailure(error);
       throw propagate(error);
     }
@@ -249,21 +238,14 @@ public final class StagedParquetPartitionReader
       if (!hasNext()) {
         throw new NoSuchElementException("no more staged Parquet batches");
       }
-      // Do not hold iteratorLock while acquiring: another task can own the GPU for an arbitrary
-      // time, and close() must remain able to cancel and reclaim this iterator in the meantime.
-      GpuSemaphore$.MODULE$.acquireIfNecessary(taskContext);
       synchronized (iteratorLock) {
         if (closed.get() || currentBatches == null) {
           throw new CancellationException("staged Parquet reader was closed before next()");
         }
-        // Decode normally retains the permit for this iterator, so this acquire is idempotent. It
-        // also safely restores ownership if another task component released the task-wide permit
-        // between hasNext() and next(), and covers Iceberg GPU post-processing.
         ColumnarBatch nextBatch = currentBatches.next();
         return nextBatch;
       }
     } catch (Throwable error) {
-      releaseGpuSemaphoreAfterFailure(error);
       closeAfterFailure(error);
       throw propagate(error);
     }
@@ -282,9 +264,6 @@ public final class StagedParquetPartitionReader
       return;
     }
     checkOpen();
-    // Footer fetch/filter and downloads run on the shared pool. Relinquish any permit still
-    // owned by this task before the file-completion waits below.
-    releaseGpuSemaphoreFromTaskThread();
     session = planner.newSession();
     initialized = true;
     for (int fileIndex = 0; fileIndex < files.size(); fileIndex++) {
@@ -817,29 +796,6 @@ public final class StagedParquetPartitionReader
   private void checkOpen() {
     if (closed.get()) {
       throw new CancellationException("staged Parquet reader is closed");
-    }
-  }
-
-  /**
-   * Release the task-wide GPU permit at a task-thread CPU/I/O boundary.
-   *
-   * <p>This helper must never be called by the footer or download pool workers.
-   * {@code GpuSemaphore} ownership is keyed by Spark task attempt rather than Java thread, so a
-   * worker using the captured {@link TaskContext} could otherwise release the permit while this
-   * reader's task thread is concurrently decoding on the GPU.</p>
-   */
-  private void releaseGpuSemaphoreFromTaskThread() {
-    GpuSemaphore$.MODULE$.releaseIfNecessary(taskContext);
-  }
-
-  /** Preserve an operation's primary failure if semaphore bookkeeping also fails. */
-  private void releaseGpuSemaphoreAfterFailure(Throwable original) {
-    try {
-      releaseGpuSemaphoreFromTaskThread();
-    } catch (Throwable releaseError) {
-      if (releaseError != original) {
-        original.addSuppressed(releaseError);
-      }
     }
   }
 

@@ -44,7 +44,10 @@ import ai.rapids.cudf.HostMemoryBuffer
 import com.nvidia.spark.rapids.{
   CombineConf,
   DateTimeRebaseCorrected,
+  GpuDeviceManager,
+  GpuSemaphore,
   HostAlloc,
+  ScalableTaskCompletion,
   ThreadPoolConfBuilder
 }
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile
@@ -77,6 +80,7 @@ import org.mockito.Mockito.{mock, when}
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.funsuite.AnyFunSuite
 
+import org.apache.spark.{SparkConf, SparkEnv, TaskContext}
 import org.apache.spark.sql.types.{IntegerType, StructField, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -966,6 +970,149 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       tracker.release(sourceCount * 2)
       reader.close()
       caller.shutdownNow()
+      HostAlloc.initialize(-1L)
+    }
+  }
+
+  test("staged scan retains the GPU semaphore until Spark task completion") {
+    val sourceBytes = Array.tabulate[Byte](1024)(index => (index & 0xff).toByte)
+    val secondReadTracker = new SourceReadTracker(expectedSources = 1)
+    val first = footerWithInput(
+      0,
+      oneColumnParquetSchema,
+      oneColumnReadSchema,
+      Seq(oneColumnBlock(rows = 1L, offset = 100L, size = 4L)),
+      new RecordingVectoredInput(sourceBytes))
+    val second = footerWithInput(
+      1,
+      oneColumnParquetSchema,
+      oneColumnReadSchema,
+      Seq(oneColumnBlock(rows = 1L, offset = 400L, size = 4L)),
+      new BlockingVectoredInput(1, sourceBytes, secondReadTracker))
+    val footers = Seq(first, second)
+
+    val ownerContext = mock(classOf[TaskContext])
+    when(ownerContext.taskAttemptId()).thenReturn(1001L)
+    when(ownerContext.stageId()).thenReturn(7)
+
+    val firstIteratorClosed = new CountDownLatch(1)
+    val adapter = new TestAdapter {
+      override def readAndFilterFooter(file: IcebergPartitionedFile): FooterResult =
+        footers.find(_.getFile eq file).get
+
+      override def decodeAndPostProcess(
+          subtask: ReadSubtask,
+          parquetInput: StagedParquetInput): JIterator[ColumnarBatch] = {
+        // The production adapter acquires immediately before cuDF decode. Use the captured mock
+        // context here because this test deliberately does not initialize a CUDA device.
+        GpuSemaphore.acquireIfNecessary(ownerContext)
+        val ordinal = sourceOrdinal(subtask.getFileSlices.get(0).getFooter.getFile)
+        val batchCount = if (ordinal == 0) 2 else 1
+        val batches = (0 until batchCount).map { _ =>
+          new ColumnarBatch(
+            Array.empty[org.apache.spark.sql.vectorized.ColumnVector], 1)
+        }.iterator
+        new JIterator[ColumnarBatch] with AutoCloseable {
+          private val closed = new AtomicBoolean()
+
+          override def hasNext: Boolean = batches.hasNext
+
+          override def next(): ColumnarBatch = batches.next()
+
+          override def close(): Unit = {
+            if (closed.compareAndSet(false, true) && ordinal == 0) {
+              firstIteratorClosed.countDown()
+            }
+          }
+        }
+      }
+    }
+
+    val previousRmmTaskInit = GpuDeviceManager.rmmTaskInitEnabled
+    val previousSparkEnv = SparkEnv.get
+    val testSparkEnv = mock(classOf[SparkEnv])
+    when(testSparkEnv.conf).thenReturn(new SparkConf(false)
+      .set("spark.rapids.sql.concurrentGpuTasks", "1"))
+    val setSparkEnv = SparkEnv.getClass.getMethod("set", classOf[SparkEnv])
+    var reader: StagedParquetPartitionReader = null
+    var caller: java.util.concurrent.ExecutorService = null
+    val continueAfterFirstBatch = new CountDownLatch(1)
+    val firstBatchObserved = new CountDownLatch(1)
+    HostAlloc.initialize(1L << 26)
+    ScalableTaskCompletion.reset()
+    GpuSemaphore.shutdown()
+    GpuSemaphore.initialize(1)
+    GpuDeviceManager.setRmmTaskInitEnabled(false)
+    setSparkEnv.invoke(SparkEnv, testSparkEnv)
+    try {
+      reader = new StagedParquetPartitionReader(
+        footers.map(_.getFile).asJava,
+        adapter,
+        Int.MaxValue,
+        Long.MaxValue,
+        0L,
+        0L,
+        2,
+        ownerContext)
+      caller = Executors.newSingleThreadExecutor()
+
+      val scan = caller.submit(new java.util.concurrent.Callable[Boolean] {
+        override def call(): Boolean = {
+          assert(reader.hasNext())
+          reader.next().close()
+          // Advancing within one eagerly decoded iterator must not yield the task-wide permit.
+          assert(reader.hasNext())
+          firstBatchObserved.countDown()
+          assert(continueAfterFirstBatch.await(10, TimeUnit.SECONDS))
+          reader.next().close()
+
+          // This call closes the first decoded iterator, then blocks for file 1's fragment.
+          assert(reader.hasNext())
+          reader.next().close()
+          !reader.hasNext
+        }
+      })
+
+      assert(firstBatchObserved.await(10, TimeUnit.SECONDS))
+      val (firstAcquire, firstRelease) =
+        GpuSemaphore.getLastSemAcqAndRelTime(ownerContext)
+      assert(firstAcquire > firstRelease,
+        "the scan yielded its GPU permit while decoded batches were still pending")
+
+      assert(secondReadTracker.firstStarted.await(10, TimeUnit.SECONDS))
+      continueAfterFirstBatch.countDown()
+      assert(firstIteratorClosed.await(10, TimeUnit.SECONDS))
+      assert(!scan.isDone, "the scan should be blocked waiting for the second file")
+      val (waitAcquire, waitRelease) =
+        GpuSemaphore.getLastSemAcqAndRelTime(ownerContext)
+      assert(waitAcquire > waitRelease,
+        "the scan yielded its GPU permit between decoded subtasks")
+
+      secondReadTracker.releaseOrdinal(1)
+      assert(scan.get(10, TimeUnit.SECONDS))
+      val (terminalAcquire, terminalRelease) =
+        GpuSemaphore.getLastSemAcqAndRelTime(ownerContext)
+      assert(terminalAcquire > terminalRelease,
+        "the scan released its GPU permit before Spark task completion")
+
+      // GpuSemaphore registers this callback on the first acquire. Simulate Spark completing the
+      // task and verify that task completion, rather than the reader, releases the permit.
+      ScalableTaskCompletion.reset()
+      assert(GpuSemaphore.getLastSemAcqAndRelTime(ownerContext) === ((0L, 0L)))
+    } finally {
+      continueAfterFirstBatch.countDown()
+      secondReadTracker.release(1)
+      if (reader != null) {
+        reader.close()
+      }
+      if (caller != null) {
+        caller.shutdownNow()
+      }
+      secondReadTracker.allFinished.await(10, TimeUnit.SECONDS)
+      ScalableTaskCompletion.reset()
+      GpuSemaphore.shutdown()
+      setSparkEnv.invoke(SparkEnv, previousSparkEnv)
+      GpuDeviceManager.setRmmTaskInitEnabled(previousRmmTaskInit)
       HostAlloc.initialize(-1L)
     }
   }
