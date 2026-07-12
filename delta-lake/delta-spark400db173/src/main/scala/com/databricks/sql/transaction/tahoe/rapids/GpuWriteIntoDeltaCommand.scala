@@ -18,19 +18,21 @@ package com.databricks.sql.transaction.tahoe.rapids
 
 import com.databricks.sql.transaction.tahoe.DeltaParquetFileFormat
 import com.databricks.sql.transaction.tahoe.commands.WriteIntoDeltaCommand
+import com.databricks.sql.transaction.tahoe.schema.InnerInvariantViolationException
 import com.databricks.sql.transaction.tahoe.stats.{DeltaJobStatisticsTracker,
   StatisticsOnLoadJobTracker}
 import com.nvidia.spark.rapids.{DataFromReplacementRule, DataWritingCommandMeta,
   GpuDataWritingCommand, GpuMetric, GpuParquetFileFormat, RapidsConf, RapidsMeta}
 
-import org.apache.spark.sql.Row
-import org.apache.spark.sql.catalyst.expressions.Attribute
+import org.apache.spark.sql.catalyst.expressions.{Attribute, ExprId}
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.execution.SparkPlan
-import org.apache.spark.sql.execution.datasources.BasicWriteJobStatsTracker
+import org.apache.spark.sql.execution.datasources.{BasicWriteJobStatsTracker, GpuWriteFiles}
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.rapids.{BasicColumnarWriteJobStatsTracker, ColumnarWriteJobStatsTracker,
   GpuFileFormatWriter}
+import org.apache.spark.sql.rapids.BasicColumnarWriteJobStatsTracker.TASK_COMMIT_TIME
+import org.apache.spark.sql.rapids.shims.TrampolineConnectShims
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.SparkSession
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.util.SerializableConfiguration
@@ -42,12 +44,24 @@ class GpuWriteIntoDeltaCommandMeta(
     rule: DataFromReplacementRule)
   extends DataWritingCommandMeta[WriteIntoDeltaCommand](cmd, conf, parent, rule) {
 
+  private var fileFormat: Option[GpuParquetFileFormat] = None
+
+  private def tagAttributeMapping(attribute: Attribute, description: String): Unit = {
+    val matches = cmd.query.output.count(_.exprId == attribute.exprId)
+    if (matches != 1) {
+      willNotWorkOnGpu(s"Delta $description ${attribute.exprId} has $matches query matches")
+    }
+  }
+
   override protected def tagSelfForGpuInternal(): Unit = {
     if (!conf.isDeltaWriteEnabled) {
       willNotWorkOnGpu("Delta Lake output acceleration has been disabled")
     }
     if (cmd.fileFormat.getClass != classOf[DeltaParquetFileFormat]) {
       willNotWorkOnGpu(s"Delta file format ${cmd.fileFormat.getClass.getName} is not supported")
+    } else {
+      fileFormat = GpuParquetFileFormat.tagGpuSupport(
+        this, TrampolineConnectShims.getActiveSession, cmd.options, cmd.query.schema)
     }
     if (cmd.bucketSpec.nonEmpty) {
       willNotWorkOnGpu("Bucketed Delta writes are not supported")
@@ -55,8 +69,23 @@ class GpuWriteIntoDeltaCommandMeta(
     if (cmd.staticPartitions.nonEmpty) {
       willNotWorkOnGpu("Static partition Delta writes are not supported by this command path")
     }
+    if (cmd.partitionColExprIds.nonEmpty) {
+      willNotWorkOnGpu("Partitioned DBR Delta writes require DeltaFileFormatWriter's private " +
+        "partitioned task-attempt context")
+    }
+    cmd.outputSpec.outputColumns.foreach(tagAttributeMapping(_, "output column"))
+    cmd.partitionColExprIds.foreach { exprId =>
+      val matches = cmd.query.output.count(_.exprId == exprId)
+      if (matches != 1) {
+        willNotWorkOnGpu(s"Delta partition column $exprId has $matches query matches")
+      }
+    }
     cmd.statsTrackers.foreach {
-      case _: BasicWriteJobStatsTracker =>
+      case tracker: BasicWriteJobStatsTracker =>
+        val metrics = tracker.driverSideMetrics ++ cmd.writeJobMetrics
+        if (!metrics.contains(TASK_COMMIT_TIME)) {
+          willNotWorkOnGpu(s"Delta basic statistics tracker is missing $TASK_COMMIT_TIME")
+        }
       case _: DeltaJobStatisticsTracker =>
       case _: StatisticsOnLoadJobTracker =>
         willNotWorkOnGpu("DBR StatisticsOnLoadJobTracker is not supported on GPU")
@@ -66,13 +95,17 @@ class GpuWriteIntoDeltaCommandMeta(
     }
   }
 
-  override def convertToGpu(): GpuDataWritingCommand =
-    GpuWriteIntoDeltaCommand(cmd, conf)
+  override def convertToGpu(): GpuDataWritingCommand = {
+    val gpuFileFormat = fileFormat.getOrElse(
+      throw new IllegalStateException("fileFormat missing, tagSelfForGpu not called?"))
+    GpuWriteIntoDeltaCommand(cmd, conf, gpuFileFormat)
+  }
 }
 
 case class GpuWriteIntoDeltaCommand(
     cpuCmd: WriteIntoDeltaCommand,
-    @transient rapidsConf: RapidsConf) extends GpuDataWritingCommand {
+    @transient rapidsConf: RapidsConf,
+    fileFormat: GpuParquetFileFormat) extends GpuDataWritingCommand {
 
   override def query: LogicalPlan = cpuCmd.query
 
@@ -82,14 +115,16 @@ case class GpuWriteIntoDeltaCommand(
 
   override def requireSingleBatch: Boolean = false
 
-  private def columnarStatsTrackers: Seq[ColumnarWriteJobStatsTracker] = {
+  private def columnarStatsTrackers(
+      sparkSession: SparkSession): Seq[ColumnarWriteJobStatsTracker] = {
     val serializableConf = new SerializableConfiguration(cpuCmd.hadoopConf)
     cpuCmd.statsTrackers.map {
       case tracker: BasicWriteJobStatsTracker =>
+        val metrics = tracker.driverSideMetrics ++ cpuCmd.writeJobMetrics
         new BasicColumnarWriteJobStatsTracker(
-          serializableConf, GpuMetric.wrap(tracker.driverSideMetrics))
+          serializableConf, GpuMetric.wrap(metrics))
       case tracker: DeltaJobStatisticsTracker =>
-        GpuWriteIntoDeltaCommandStats(cpuCmd, tracker)
+        GpuWriteIntoDeltaCommandStats(cpuCmd, tracker, sparkSession)
       case tracker =>
         throw new IllegalStateException(
           s"Unsupported Delta write statistics tracker ${tracker.getClass.getName}")
@@ -99,30 +134,52 @@ case class GpuWriteIntoDeltaCommand(
   override def runColumnar(
       sparkSession: SparkSession,
       child: SparkPlan): Seq[ColumnarBatch] = {
-    val partitionColumns = cpuCmd.partitionColExprIds.map { exprId =>
-      child.output.find(_.exprId == exprId).getOrElse {
-        throw new IllegalStateException(s"Missing Delta partition column expression $exprId")
+    val dataPlan = GpuWriteFiles.getWriteFilesOpt(child).map(_.child).getOrElse(child)
+
+    def resolveAttribute(exprId: ExprId,
+        description: String): Attribute = {
+      val queryMatches = cpuCmd.query.output.zipWithIndex.filter(_._1.exprId == exprId)
+      queryMatches match {
+        case Seq((_, ordinal)) if ordinal < dataPlan.output.size => dataPlan.output(ordinal)
+        case Seq((_, ordinal)) => throw new IllegalStateException(
+          s"Delta $description $exprId maps to missing data output ordinal $ordinal")
+        case matches => throw new IllegalStateException(
+          s"Delta $description $exprId has ${matches.size} query output matches")
       }
     }
-    val outputSpec = cpuCmd.outputSpec.copy(outputColumns = child.output)
+
+    val outputColumns = cpuCmd.outputSpec.outputColumns.map { attribute =>
+      resolveAttribute(attribute.exprId, "output column")
+    }
+    val partitionColumns = cpuCmd.partitionColExprIds.map { exprId =>
+      resolveAttribute(exprId, "partition column")
+    }
+    val outputSpec = cpuCmd.outputSpec.copy(outputColumns = outputColumns)
     val writePartitionColumns = WriteIntoDeltaCommand.writePartitionColumns(
       cpuCmd.protocol, cpuCmd.metadata, sparkSession)
-    val effectivePartitions = if (writePartitionColumns) partitionColumns else Seq.empty[Attribute]
+    if (partitionColumns.nonEmpty && writePartitionColumns) {
+      throw new IllegalStateException(
+        "Writing partition columns into Delta Parquet data files is not supported")
+    }
 
-    GpuFileFormatWriter.write(
-      sparkSession = sparkSession,
-      plan = child,
-      fileFormat = new GpuParquetFileFormat,
-      committer = cpuCmd.committer,
-      outputSpec = outputSpec,
-      hadoopConf = cpuCmd.hadoopConf,
-      partitionColumns = effectivePartitions,
-      bucketSpec = None,
-      statsTrackers = columnarStatsTrackers,
-      options = cpuCmd.options,
-      useStableSort = rapidsConf.stableSort,
-      concurrentWriterPartitionFlushSize = rapidsConf.concurrentWriterPartitionFlushSize,
-      baseDebugOutputPath = rapidsConf.outputDebugDumpPrefix)
+    try {
+      GpuFileFormatWriter.write(
+        sparkSession = sparkSession,
+        plan = child,
+        fileFormat = fileFormat,
+        committer = cpuCmd.committer,
+        outputSpec = outputSpec,
+        hadoopConf = cpuCmd.hadoopConf,
+        partitionColumns = partitionColumns,
+        bucketSpec = None,
+        statsTrackers = columnarStatsTrackers(sparkSession),
+        options = cpuCmd.options,
+        useStableSort = rapidsConf.stableSort,
+        concurrentWriterPartitionFlushSize = rapidsConf.concurrentWriterPartitionFlushSize,
+        baseDebugOutputPath = rapidsConf.outputDebugDumpPrefix)
+    } catch {
+      case InnerInvariantViolationException(violation) => throw violation
+    }
     Seq.empty
   }
 }

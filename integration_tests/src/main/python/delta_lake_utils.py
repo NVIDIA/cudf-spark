@@ -400,6 +400,22 @@ def assert_rapids_delta_write(do_test, conf):
     finally:
         jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.endCapture()
 
+def assert_db173_gpu_data_writing_command(do_test, conf):
+    """Assert that DBR 17.3 executed the nested Delta data-file command on GPU."""
+    jvm = spark_jvm()
+    callback = jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        result = with_gpu_session(do_test, conf=conf)
+        captured_plans = callback.getResultsWithTimeout(10000)
+        assert len(captured_plans) > 0, "No execution plans captured for Delta write"
+        for cls in ["GpuDataWritingCommandExec", "GpuWriteFilesExec"]:
+            assert any(callback.contains(plan, cls) for plan in captured_plans), \
+                f"{cls} is not found in any captured plan"
+        return result
+    finally:
+        callback.endCapture()
+
 def assert_rapids_gpu_delete_ran(do_test, conf):
     """
     Runs a Delta DELETE on the GPU and asserts the GpuDeleteCommand actually executed

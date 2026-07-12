@@ -212,6 +212,55 @@ def test_delta_write_round_trip_managed(spark_tmp_table_factory, enable_deletion
     assert_delta_history_equal(conf, cpu_table, gpu_table)
 
 
+@allow_non_gpu('AppendDataExecV1', 'AtomicCreateTableAsSelectExec',
+               'AtomicReplaceTableAsSelectExec',
+               *delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_databricks173_or_later(), reason="DBR 17.3 native write path")
+@pytest.mark.parametrize("enable_deletion_vectors", [None, False, True], ids=idfn)
+def test_delta_db173_native_managed_ctas_rtas(
+        spark_tmp_table_factory, enable_deletion_vectors):
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+    cpu_table = spark_tmp_table_factory.get() + '_cpu'
+    gpu_table = spark_tmp_table_factory.get() + '_gpu'
+
+    def write_table(spark, table, replace):
+        source = spark.range(4096).selectExpr(
+            "id AS carrier_id",
+            "concat('CARRIER-', id) AS carrier_code",
+            "CAST(id % 7 AS INT) AS carrier_type")
+        if replace:
+            source = source.selectExpr(
+                "carrier_code", "carrier_id", "carrier_type", "carrier_id + 1 AS version")
+        writer = source.write.format("delta").mode("overwrite") \
+            .option("overwriteSchema", "true")
+        if enable_deletion_vectors is not None:
+            writer = writer.option(
+                "delta.enableDeletionVectors", str(enable_deletion_vectors).lower())
+        writer.saveAsTable(table)
+
+    with_cpu_session(lambda spark: write_table(spark, cpu_table, False), conf=conf)
+    assert_db173_gpu_data_writing_command(
+        lambda spark: write_table(spark, gpu_table, False), conf=conf)
+
+    with_cpu_session(lambda spark: write_table(spark, cpu_table, True), conf=conf)
+    assert_db173_gpu_data_writing_command(
+        lambda spark: write_table(spark, gpu_table, True), conf=conf)
+
+    def table_state(spark, table):
+        rows = spark.table(table).orderBy("carrier_id").collect()
+        schema = spark.table(table).schema.json()
+        version_zero = spark.sql(
+            f"SELECT * FROM {table} VERSION AS OF 0 ORDER BY carrier_id").collect()
+        return rows, schema, version_zero
+
+    cpu_state = with_cpu_session(lambda spark: table_state(spark, cpu_table), conf=conf)
+    gpu_state = with_cpu_session(lambda spark: table_state(spark, gpu_table), conf=conf)
+    assert_equal(cpu_state, gpu_state)
+    assert_delta_history_equal(conf, cpu_table, gpu_table)
+
+
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)

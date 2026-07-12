@@ -25,20 +25,27 @@ import com.nvidia.spark.rapids.delta.{GpuDeltaJobStatisticsTracker, GpuStatistic
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.execution.datasources.WriteTaskStats
 import org.apache.spark.sql.rapids.{ColumnarWriteJobStatsTracker, ColumnarWriteTaskStatsTracker}
-import org.apache.spark.sql.rapids.shims.TrampolineConnectShims
+import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.SparkSession
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 private object GpuWriteIntoDeltaCommandStats {
   def apply(
       cpuCmd: WriteIntoDeltaCommand,
-      nativeTracker: DeltaJobStatisticsTracker): ColumnarWriteJobStatsTracker = {
+      nativeTracker: DeltaJobStatisticsTracker,
+      sparkSession: SparkSession): ColumnarWriteJobStatsTracker = {
+    val useTableSchema = sparkSession.sessionState.conf.getConf(
+      DeltaSQLConf.DELTA_COLLECT_STATS_USING_TABLE_SCHEMA)
     val statsCollection = new GpuStatisticsCollection {
-      override val spark = TrampolineConnectShims.getActiveSession
+      override val spark = sparkSession
       override val deletionVectorsSupported: Boolean =
         DeletionVectorUtils.deletionVectorsWritable(
           cpuCmd.deltaLog.unsafeVolatileSnapshot, Some(cpuCmd.protocol), Some(cpuCmd.metadata))
-      override val tableDataSchema: StructType = cpuCmd.metadata.schema
+      override val tableDataSchema: StructType = if (useTableSchema) {
+        cpuCmd.metadata.schema
+      } else {
+        nativeTracker.dataCols.toStructType
+      }
       override val dataSchema: StructType = nativeTracker.dataCols.toStructType
       override val numIndexedCols: Int =
         DeltaConfigs.DATA_SKIPPING_NUM_INDEXED_COLS.fromMetaData(cpuCmd.metadata)
