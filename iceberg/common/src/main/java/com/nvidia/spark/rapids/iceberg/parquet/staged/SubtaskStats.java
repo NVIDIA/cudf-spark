@@ -57,8 +57,8 @@ public final class SubtaskStats {
    * @param cacheMissCount column-chunk data-cache misses
    * @param cacheMissBytes bytes fetched for data-cache misses
    * @param cacheReadNanos elapsed time copying ranges that were cache hits before this scan
-   * @param assemblyCapacityBytes task-observed executor assembly capacity after this assembly
-   * @param peakAssemblyCapacityBytes task-observed executor peak assembly capacity
+   * @param assemblyCapacityBytes partition reader's assembly capacity after this assembly
+   * @param peakAssemblyCapacityBytes partition reader's peak assembly capacity
    */
   public SubtaskStats(
       long ioNanos,

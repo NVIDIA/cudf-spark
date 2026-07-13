@@ -238,9 +238,9 @@ object GpuMetric extends Logging {
   val DESCRIPTION_ICEBERG_STAGED_IO_REQUEST_COUNT = "iceberg staged remote read requests"
   val DESCRIPTION_ICEBERG_STAGED_IO_READ_BYTES = "iceberg staged remote read bytes"
   val DESCRIPTION_ICEBERG_STAGED_ASSEMBLY_CAPACITY =
-    "iceberg staged task-observed executor assembly-buffer capacity"
+    "iceberg staged partition-reader assembly-buffer capacity"
   val DESCRIPTION_ICEBERG_STAGED_PEAK_ASSEMBLY_CAPACITY =
-    "iceberg staged task-observed peak executor assembly-buffer capacity"
+    "iceberg staged peak partition-reader assembly-buffer capacity"
 
   /**
    * Determine if a GpuMetric wraps a TimingMetric or NanoTimingMetric.

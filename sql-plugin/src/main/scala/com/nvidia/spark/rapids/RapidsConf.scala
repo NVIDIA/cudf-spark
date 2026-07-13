@@ -1866,14 +1866,14 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
 
   val ICEBERG_STAGED_READ_ASSEMBLY_BUFFER_COUNT =
     conf("spark.rapids.sql.format.iceberg.stagedRead.assemblyBufferCount")
-      .doc("Number of reusable host assembly buffers shared by the experimental staged " +
-        "Iceberg reader on each executor. This bounds staged encoded-data memory independently " +
-        "of the multithreaded reader worker count.")
+      .doc("Maximum number of reusable host assembly buffers allocated by each partition " +
+        "reader. The buffers are closed when its Spark task finishes. This bounds each task's " +
+        "staged encoded-data memory independently of the shared worker count.")
       .startupOnly()
       .internal()
       .integerConf
       .checkValue(_ > 0, "assembly buffer count must be positive")
-      .createWithDefault(32)
+      .createWithDefault(2)
 
   val ICEBERG_S3_ASYNC_MAX_CONCURRENCY =
     conf("spark.rapids.iceberg.s3.async.max-concurrency")

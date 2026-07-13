@@ -24,12 +24,13 @@ import ai.rapids.cudf.HostMemoryBuffer;
 import com.nvidia.spark.rapids.HostAlloc$;
 
 /**
- * Executor-wide bounded pool of reusable host buffers that are fed to cuDF.
+ * Partition-reader-owned bounded pool of reusable host buffers that are fed to cuDF.
  *
  * <p>The pool pre-creates a fixed number of slots, not fixed-sized allocations. A slot lazily
  * allocates or grows its pinned-preferred buffer on the shared staged worker that fills it. This
  * keeps allocation out of synchronized planner callbacks while making the number of large host
- * allocations independent of the footer/download worker count.</p>
+ * allocations independent of the footer/download worker count. Closing the owning partition
+ * reader closes this pool and all buffers allocated by that Spark task.</p>
  *
  * <p>Acquisition is asynchronous and FIFO. A shared worker must never block waiting for a slot:
  * doing so could occupy every worker while the Spark task is waiting for an assembly job that
@@ -70,7 +71,7 @@ final class AssemblyBufferPool implements AutoCloseable {
     return waiter;
   }
 
-  /** Return one atomic executor-pool capacity observation for scan metrics. */
+  /** Return one atomic partition-reader-pool capacity observation for scan metrics. */
   synchronized CapacitySnapshot capacitySnapshot() {
     return new CapacitySnapshot(currentCapacityBytes, peakCapacityBytes);
   }
@@ -155,12 +156,30 @@ final class AssemblyBufferPool implements AutoCloseable {
     for (CompletableFuture<Lease> waiter : pending) {
       waiter.completeExceptionally(failure);
     }
+    Throwable closeFailure = null;
     for (Slot slot : slots) {
-      closeSlot(slot);
+      try {
+        closeSlot(slot);
+      } catch (Throwable error) {
+        if (closeFailure == null) {
+          closeFailure = error;
+        } else if (closeFailure != error) {
+          closeFailure.addSuppressed(error);
+        }
+      }
+    }
+    if (closeFailure instanceof Error) {
+      throw (Error) closeFailure;
+    }
+    if (closeFailure instanceof RuntimeException) {
+      throw (RuntimeException) closeFailure;
+    }
+    if (closeFailure != null) {
+      throw new RuntimeException(closeFailure);
     }
   }
 
-  /** Immutable, internally consistent observation of retained executor assembly capacity. */
+  /** Immutable, internally consistent observation of retained partition-reader capacity. */
   static final class CapacitySnapshot {
     private final long currentCapacityBytes;
     private final long peakCapacityBytes;
@@ -261,7 +280,7 @@ final class AssemblyBufferPool implements AutoCloseable {
     }
   }
 
-  /** One reusable allocation retained only while the executor-wide pool is alive. */
+  /** One reusable allocation retained only while the owning partition reader is alive. */
   private static final class Slot {
     private HostMemoryBuffer buffer;
 

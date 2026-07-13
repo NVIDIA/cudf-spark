@@ -29,6 +29,7 @@ package com.nvidia.spark.rapids.iceberg.parquet.staged
 
 import java.io.ByteArrayInputStream
 import java.util.{Collections, List => JList}
+import java.util.concurrent.CompletionException
 
 import scala.collection.JavaConverters._
 
@@ -643,6 +644,50 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       }
       if (handedOff != null) {
         handedOff.close()
+      }
+      pool.close()
+    }
+  }
+
+  test("assembly buffer pool closes task buffers without closing an active worker buffer") {
+    val pool = new AssemblyBufferPool(2)
+    var returnedLease: AssemblyBufferPool.Lease = null
+    var activeLease: AssemblyBufferPool.Lease = null
+    try {
+      returnedLease = pool.acquire().getNow(null)
+      activeLease = pool.acquire().getNow(null)
+      returnedLease.ensureCapacity(64L)
+      activeLease.ensureCapacity(96L)
+      val returnedBuffer = returnedLease.buffer()
+      val activeBuffer = activeLease.buffer()
+
+      // A returned slot is idle and can be freed synchronously with its owning Spark task.
+      returnedLease.close()
+      returnedLease = null
+      pool.close()
+      assert(returnedBuffer.getRefCount === 0)
+
+      // Closing underneath an assembly worker would be a use-after-close. A leased buffer stays
+      // valid until that worker returns it, then closes instead of re-entering the closed pool.
+      assert(activeBuffer.getRefCount === 1)
+      assert(pool.capacitySnapshot().getCurrentCapacityBytes === 96L)
+      activeLease.close()
+      activeLease = null
+      assert(activeBuffer.getRefCount === 0)
+      assert(pool.capacitySnapshot().getCurrentCapacityBytes === 0L)
+      assert(pool.capacitySnapshot().getPeakCapacityBytes === 160L)
+
+      val rejected = pool.acquire()
+      assert(rejected.isCompletedExceptionally)
+      intercept[CompletionException] {
+        rejected.join()
+      }
+    } finally {
+      if (returnedLease != null) {
+        returnedLease.close()
+      }
+      if (activeLease != null) {
+        activeLease.close()
       }
       pool.close()
     }

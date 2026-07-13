@@ -53,39 +53,31 @@ public final class StagedScanThreadPools {
   private static StagedScanThreadPools singleton;
 
   private final int threads;
-  private final int assemblyBuffers;
   private final ThreadPoolExecutor executor;
   private final ScheduledExecutorService timer;
-  private final AssemblyBufferPool assemblyBufferPool;
   private final AtomicLong nextSequence = new AtomicLong();
 
-  private StagedScanThreadPools(int threads, int assemblyBuffers) {
+  private StagedScanThreadPools(int threads) {
     this.threads = threads;
-    this.assemblyBuffers = assemblyBuffers;
     this.executor = newPool("iceberg-staged-worker", threads);
     this.timer = Executors.newSingleThreadScheduledExecutor(
         new NamedDaemonThreadFactory("iceberg-staged-timer"));
-    this.assemblyBufferPool = new AssemblyBufferPool(assemblyBuffers);
   }
 
   /**
    * Return the executor-wide pool, creating it on the first request.
    *
-   * <p>Both sizes must be positive. A later request with different sizes reuses the initialized
-   * pools and logs a warning because replacing them while tasks own futures would violate
-   * cancellation and ownership guarantees.</p>
+   * <p>The size must be positive. A later request with a different size reuses the initialized
+   * pool and logs a warning because replacing it while tasks own futures would violate
+   * cancellation guarantees.</p>
    */
-  public static synchronized StagedScanThreadPools getOrCreate(
-      int threads,
-      int assemblyBuffers) {
+  public static synchronized StagedScanThreadPools getOrCreate(int threads) {
     checkPositive("threads", threads);
-    checkPositive("assemblyBuffers", assemblyBuffers);
     if (singleton == null) {
-      singleton = new StagedScanThreadPools(threads, assemblyBuffers);
-    } else if (singleton.threads != threads || singleton.assemblyBuffers != assemblyBuffers) {
-      LOG.warn("Reusing initialized Iceberg staged-read pool with {} workers and {} assembly " +
-          "buffers instead of requested {} workers and {} assembly buffers",
-          singleton.threads, singleton.assemblyBuffers, threads, assemblyBuffers);
+      singleton = new StagedScanThreadPools(threads);
+    } else if (singleton.threads != threads) {
+      LOG.warn("Reusing initialized Iceberg staged-read pool with {} workers instead of " +
+          "requested {} workers", singleton.threads, threads);
     }
     return singleton;
   }
@@ -103,10 +95,6 @@ public final class StagedScanThreadPools {
   /** Schedule a tiny non-blocking planner timeout callback. */
   void schedule(Runnable callback, long delay, TimeUnit unit) {
     timer.schedule(callback, delay, unit);
-  }
-
-  AssemblyBufferPool assemblyBuffers() {
-    return assemblyBufferPool;
   }
 
   private <T> CompletableFuture<T> submit(int priority, Callable<T> callable) {
@@ -132,7 +120,6 @@ public final class StagedScanThreadPools {
     if (singleton != null) {
       singleton.executor.shutdownNow();
       singleton.timer.shutdownNow();
-      singleton.assemblyBufferPool.close();
       singleton = null;
     }
   }

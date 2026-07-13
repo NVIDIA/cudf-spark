@@ -179,8 +179,7 @@ class GpuStagedIcebergParquetReader(
       conf.metrics.get(FILECACHE_DATA_RANGE_MISSES).foreach(_ += stats.getCacheMissCount)
       conf.metrics.get(FILECACHE_DATA_RANGE_MISSES_SIZE).foreach(_ += stats.getCacheMissBytes)
       conf.metrics.get(FILECACHE_DATA_RANGE_READ_TIME).foreach(_ += stats.getCacheReadNanos)
-      // These are executor-pool snapshots observed by this task. Spark sums SQL metrics across
-      // tasks, so event-log analysis must use the maximum task update rather than the plan sum.
+      // These are snapshots of this Spark task's partition-reader-owned assembly pool.
       conf.metrics.get(ICEBERG_STAGED_ASSEMBLY_CAPACITY)
         .foreach(_.set(stats.getAssemblyCapacityBytes))
       conf.metrics.get(ICEBERG_STAGED_PEAK_ASSEMBLY_CAPACITY).foreach { metric =>
