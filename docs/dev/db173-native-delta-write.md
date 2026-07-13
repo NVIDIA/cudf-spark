@@ -124,7 +124,9 @@ The 14 customer notebook bodies were executed with their SQL transformations unc
 synthetic Delta source because the SSH environment had no Unity Catalog workspace credentials or
 `samples` catalog. The generated source included 5,000,000 `catalog_sales` rows, 1,666,666
 `store_sales` rows, and dimensions up to 500,000 customers and 200,000 items. This is not TPC-DS
-SF1000 data despite retaining the notebook scale label.
+SF1000 data despite retaining the notebook scale label. The standalone launcher set
+`spark.sql.sources.default=delta`, matching the Databricks default required by the final customer
+SQL statement, which intentionally omits an explicit `USING DELTA` clause.
 
 The run exercised 15 write boundaries per pass: 14 final tables plus the
 `fact_salesinvoice_loadtemp` boundary. Across fresh and existing-target GPU passes, conversion
@@ -133,6 +135,12 @@ with zero corresponding CPU fallbacks and zero CPU Parquet-MR writer markers. Fo
 tests verify that this eligible shape executes as `GpuDataWritingCommandExec` plus
 `GpuWriteFilesExec`. The five notebook `DELETE` statements per pass remained separate CPU Delta
 mutations and are not counted as CTAS/RTAS writes.
+
+A post-merge clean-HEAD GPU pass repeated the fresh-target workload in 96.043 seconds. All 15
+atomic boundaries contained a GPU-eligible nested command and file writer, with zero CPU nested
+writer or Parquet-MR writer markers. The 14 final Delta logs all retained DBR-default deletion
+vectors and complete nonempty AddFile min/max/null-count statistics. This single additional GPU
+observation is a correctness and coverage check, not a new paired performance comparison.
 
 | Target state | GPU | CPU | Observed CPU/GPU ratio |
 | --- | ---: | ---: | ---: |
