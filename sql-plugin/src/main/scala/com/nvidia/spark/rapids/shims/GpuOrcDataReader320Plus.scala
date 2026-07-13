@@ -22,7 +22,6 @@ import java.nio.channels.SeekableByteChannel
 import ai.rapids.cudf.HostMemoryBuffer
 import com.nvidia.spark.rapids.Arm.closeOnExcept
 import com.nvidia.spark.rapids.GpuMetric
-import com.nvidia.spark.rapids.filecache.FileCache
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.hive.common.io.DiskRangeList
 import org.apache.orc.OrcProto
@@ -47,7 +46,7 @@ abstract class GpuOrcDataReader320Plus(
         buffer.limit((current.getEnd - offset).toInt)
         current.asInstanceOf[BufferChunk].setChunk(buffer)
         // see if the filecache wants any of this data
-        val cacheToken = FileCache.get.startDataRangeCache(inputFile,
+        val cacheToken = fileCache.startDataRangeCache(inputFile,
           baseOffset + current.getOffset, current.getLength)
         cacheToken.foreach { token =>
           val hmb = closeOnExcept(HostMemoryBuffer.allocate(current.getLength, false)) { hmb =>
