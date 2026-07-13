@@ -12,6 +12,7 @@ com/nvidia/spark/rapids/Optimizer.class
 com/nvidia/spark/rapids/optimizer/SQLOptimizerPlugin*
 com/nvidia/spark/rapids/ShimLoaderTemp*
 com/nvidia/spark/rapids/SparkShims*
+com/nvidia/spark/rapids/SparkRapidsBuildInfoEvent*.class
 com/nvidia/spark/rapids/fileio/iceberg/IcebergInputFile.class
 com/nvidia/spark/rapids/fileio/iceberg/IcebergInputStream.class
 com/nvidia/spark/rapids/fileio/iceberg/IcebergOutputFile.class
