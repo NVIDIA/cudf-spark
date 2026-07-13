@@ -94,13 +94,10 @@ class GpuIcebergPartitionReader(private val task: GpuSparkInputPartition,
         val hasEncryptedData = tasks.values.exists(_.file().keyMetadata() != null)
         val hasRowPosition =
           task.expectedSchema.findField(MetadataColumns.ROW_POSITION.fieldId()) != null
-        // The POC intentionally supports only the normal NDS completion-order route. Any scan
-        // that requires Iceberg's ordered/no-combine semantics stays on the baseline reader.
-        if (task.icebergStagedReadEnabled && !multiThread.disableCombining &&
-            !hasDeletes && !hasEncryptedData && !hasRowPosition &&
-            !multiThread.queryUsesInputFile) {
+        if (task.icebergStagedReadEnabled && !hasDeletes && !hasEncryptedData &&
+            !hasRowPosition && !multiThread.queryUsesInputFile) {
           new GpuStagedIcebergParquetReader(rapidsFileIO, files, constantsMap, conf,
-            task.multiThreadReadNumThreads, task.icebergStagedReadAssemblyBufferCount)
+            task.multiThreadReadNumThreads)
         } else {
           new GpuMultiThreadIcebergParquetReader(rapidsFileIO, files, constantsMap,
             gpuDeleteFiterMap, conf)

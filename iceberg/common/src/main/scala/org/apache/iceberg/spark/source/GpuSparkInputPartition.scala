@@ -57,8 +57,6 @@ class GpuSparkInputPartition(val cpuPartition: InputPartition,
   val multiThreadReadNumThreads: Int = rapidsConf.multiThreadReadNumThreads
   val maxNumParquetFilesParallel: Int = rapidsConf.maxNumParquetFilesParallel
   val icebergStagedReadEnabled: Boolean = rapidsConf.isIcebergStagedReadEnabled
-  val icebergStagedReadAssemblyBufferCount: Int =
-    rapidsConf.icebergStagedReadAssemblyBufferCount
 
 
   override def preferredLocations(): Array[String] = cpuPartition.preferredLocations()

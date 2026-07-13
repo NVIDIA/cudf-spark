@@ -20,7 +20,7 @@ package com.nvidia.spark.rapids.iceberg.parquet.staged;
  * Immutable CPU-stage measurements attached to a completed read subtask.
  *
  * <p>Times are elapsed nanoseconds measured around work, not wall-clock timestamps. The object is
- * safely published together with its completed assembly buffer.</p>
+ * safely published together with its sealed output through the completion queue.</p>
  */
 public final class SubtaskStats {
   private final long ioNanos;
@@ -37,28 +37,24 @@ public final class SubtaskStats {
   private final long cacheMissCount;
   private final long cacheMissBytes;
   private final long cacheReadNanos;
-  private final long assemblyCapacityBytes;
-  private final long peakAssemblyCapacityBytes;
 
   /**
    * Construct immutable measurements for a completed subtask.
    *
-   * @param ioNanos remote-to-cache file-pipeline elapsed time in nanoseconds
-   * @param ioAllocNanos time allocating or growing the reusable assembly host buffer
-   * @param ioReadWaitNanos time blocked waiting for leader-owned S3 requests
-   * @param ioRouteNanos time copying all selected cache ranges into the assembly buffer
-   * @param ioFinalizeNanos time committing direct cache writers and acquiring read leases
-   * @param ioRequestCount coalesced S3 requests issued
-   * @param ioRequestedBytes total bytes requested from S3
+   * @param ioNanos elapsed I/O-stage time in nanoseconds
+   * @param ioAllocNanos I/O-stage time blocked in fragment and scratch host allocation
+   * @param ioReadWaitNanos I/O-stage time blocked waiting for merged ranged reads
+   * @param ioRouteNanos I/O-stage time routing scratch segments into packed fragments
+   * @param ioFinalizeNanos I/O-stage time publishing cache slices and sealing
+   * @param ioRequestCount merged ranged reads issued
+   * @param ioRequestedBytes total bytes spanned by merged reads, including discarded gap bytes
    * @param combineNanos elapsed combine-stage time in nanoseconds
-   * @param diskBacked whether encoded source data was staged through executor-local cache files
+   * @param diskBacked whether the sealed result uses an executor-local file
    * @param cacheHitCount column-chunk data-cache hits
    * @param cacheHitBytes bytes copied from data-cache hits
    * @param cacheMissCount column-chunk data-cache misses
    * @param cacheMissBytes bytes fetched for data-cache misses
-   * @param cacheReadNanos elapsed time copying ranges that were cache hits before this scan
-   * @param assemblyCapacityBytes partition reader's assembly capacity after this assembly
-   * @param peakAssemblyCapacityBytes partition reader's peak assembly capacity
+   * @param cacheReadNanos elapsed time copying cached ranges
    */
   public SubtaskStats(
       long ioNanos,
@@ -74,9 +70,7 @@ public final class SubtaskStats {
       long cacheHitBytes,
       long cacheMissCount,
       long cacheMissBytes,
-      long cacheReadNanos,
-      long assemblyCapacityBytes,
-      long peakAssemblyCapacityBytes) {
+      long cacheReadNanos) {
     if (ioNanos < 0) {
       throw new IllegalArgumentException("ioNanos must be non-negative: " + ioNanos);
     }
@@ -92,11 +86,6 @@ public final class SubtaskStats {
         cacheMissBytes < 0 || cacheReadNanos < 0) {
       throw new IllegalArgumentException("cache measurements must be non-negative");
     }
-    if (assemblyCapacityBytes < 0 || peakAssemblyCapacityBytes < assemblyCapacityBytes) {
-      throw new IllegalArgumentException(
-          "invalid assembly capacity current=" + assemblyCapacityBytes +
-              ", peak=" + peakAssemblyCapacityBytes);
-    }
     this.ioNanos = ioNanos;
     this.ioAllocNanos = ioAllocNanos;
     this.ioReadWaitNanos = ioReadWaitNanos;
@@ -111,8 +100,6 @@ public final class SubtaskStats {
     this.cacheMissCount = cacheMissCount;
     this.cacheMissBytes = cacheMissBytes;
     this.cacheReadNanos = cacheReadNanos;
-    this.assemblyCapacityBytes = assemblyCapacityBytes;
-    this.peakAssemblyCapacityBytes = peakAssemblyCapacityBytes;
   }
 
   public long getIoNanos() {
@@ -169,13 +156,5 @@ public final class SubtaskStats {
 
   public long getCacheReadNanos() {
     return cacheReadNanos;
-  }
-
-  public long getAssemblyCapacityBytes() {
-    return assemblyCapacityBytes;
-  }
-
-  public long getPeakAssemblyCapacityBytes() {
-    return peakAssemblyCapacityBytes;
   }
 }

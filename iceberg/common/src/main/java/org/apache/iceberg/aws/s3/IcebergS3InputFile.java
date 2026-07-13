@@ -18,6 +18,7 @@ package org.apache.iceberg.aws.s3;
 
 import ai.rapids.cudf.HostMemoryBuffer;
 import com.nvidia.spark.rapids.IcebergS3RangeCopier;
+import com.nvidia.spark.rapids.IcebergS3RangeCopier.FileChannelCopyResult;
 import com.nvidia.spark.rapids.IcebergS3RangeCopier.FileChannelCopyRange;
 import com.nvidia.spark.rapids.IcebergS3RangeCopier.IcebergS3Client;
 import com.nvidia.spark.rapids.fileio.RapidsInputFiles;
@@ -137,6 +138,17 @@ public final class IcebergS3InputFile implements RapidsInputFile {
   public long readVectoredToFileChannels(List<FileChannelCopyRange> copyRanges)
       throws IOException {
     return IcebergS3RangeCopier.copyToFileChannels(
+        icebergS3Client, s3Uri, copyRanges);
+  }
+
+  /**
+   * Downloads each range to its mandatory cache-file destination and optionally mirrors the
+   * same S3 response bytes into host memory. A host-memory failure is reported in the result
+   * without interrupting the cache write.
+   */
+  public FileChannelCopyResult readVectoredToFileChannelsAndHostMemory(
+      List<FileChannelCopyRange> copyRanges) throws IOException {
+    return IcebergS3RangeCopier.copyToFileChannelsAndHostMemory(
         icebergS3Client, s3Uri, copyRanges);
   }
 

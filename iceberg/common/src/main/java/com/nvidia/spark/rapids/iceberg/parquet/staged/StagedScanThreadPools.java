@@ -19,107 +19,68 @@ package com.nvidia.spark.rapids.iceberg.parquet.staged;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.concurrent.Callable;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.PriorityBlockingQueue;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Executor-wide worker pool for the Iceberg staged reader.
  *
  * <p>Footer loading/filtering, source-file I/O, and synthetic Parquet finalization all use this
  * pool. Sharing one concurrency budget avoids reserving workers for a stage that is temporarily
- * idle. One fused job holds one worker from footer loading through the blocking direct-to-cache
- * S3 read and cache publication. The fixed pool width therefore bounds concurrent whole-file
- * pipelines. Cache-to-host assembly uses the same workers but is prioritized ahead of queued
- * file jobs so prepared GPU input is not stranded behind speculative downloads.</p>
+ * idle. One fused job holds one worker from footer loading through the blocking vectored read,
+ * cache publication, and fragment sealing. The fixed pool width therefore bounds concurrent
+ * whole-file pipelines; a worker returns to the shared FIFO queue only after its file is complete
+ * or has failed.</p>
  *
  * <p>Pool submission does not transfer Spark task context automatically. Each staged callable is
  * responsible for installing its captured {@code TaskContext} and RAPIDS pool-thread marker once
- * around each blocking file or assembly job, and removing both in a {@code finally} block.</p>
+ * around the fused file job, and removing both in a {@code finally} block.</p>
  */
 public final class StagedScanThreadPools {
   private static final Logger LOG = LoggerFactory.getLogger(StagedScanThreadPools.class);
   private static final long KEEP_ALIVE_SECONDS = 60L;
-  private static final int ASSEMBLY_PRIORITY = 0;
-  private static final int FILE_PRIORITY = 1;
 
   private static StagedScanThreadPools singleton;
 
   private final int threads;
-  private final ThreadPoolExecutor executor;
-  private final ScheduledExecutorService timer;
-  private final AtomicLong nextSequence = new AtomicLong();
+  private final ExecutorService executor;
 
   private StagedScanThreadPools(int threads) {
     this.threads = threads;
     this.executor = newPool("iceberg-staged-worker", threads);
-    this.timer = Executors.newSingleThreadScheduledExecutor(
-        new NamedDaemonThreadFactory("iceberg-staged-timer"));
   }
 
   /**
    * Return the executor-wide pool, creating it on the first request.
    *
    * <p>The size must be positive. A later request with a different size reuses the initialized
-   * pool and logs a warning because replacing it while tasks own futures would violate
-   * cancellation guarantees.</p>
+   * pool and logs a warning because replacing a pool while tasks own futures would violate
+   * cancellation and ownership guarantees.</p>
    */
   public static synchronized StagedScanThreadPools getOrCreate(int threads) {
     checkPositive("threads", threads);
     if (singleton == null) {
       singleton = new StagedScanThreadPools(threads);
     } else if (singleton.threads != threads) {
-      LOG.warn("Reusing initialized Iceberg staged-read pool with {} workers instead of " +
-          "requested {} workers", singleton.threads, threads);
+      LOG.warn("Reusing initialized Iceberg staged-read pool with {} threads instead of " +
+          "requested {} threads", singleton.threads, threads);
     }
     return singleton;
   }
 
-  /** Submit one footer/download file pipeline in FIFO order behind decode-critical assembly. */
-  <T> CompletableFuture<T> submitFile(Callable<T> callable) {
-    return submit(FILE_PRIORITY, callable);
-  }
-
-  /** Submit cache-to-host assembly ahead of queued speculative file pipelines. */
-  <T> CompletableFuture<T> submitAssembly(Callable<T> callable) {
-    return submit(ASSEMBLY_PRIORITY, callable);
-  }
-
-  /** Schedule a tiny non-blocking planner timeout callback. */
-  void schedule(Runnable callback, long delay, TimeUnit unit) {
-    timer.schedule(callback, delay, unit);
-  }
-
-  private <T> CompletableFuture<T> submit(int priority, Callable<T> callable) {
-    CompletableFuture<T> result = new CompletableFuture<>();
-    PrioritizedRunnable task = new PrioritizedRunnable(
-        priority, nextSequence.getAndIncrement(), () -> {
-          try {
-            result.complete(callable.call());
-          } catch (Throwable error) {
-            result.completeExceptionally(error);
-          }
-        });
-    try {
-      executor.execute(task);
-    } catch (Throwable error) {
-      result.completeExceptionally(error);
-    }
-    return result;
+  /** Return the shared pool used by every staged file job. */
+  public ExecutorService executor() {
+    return executor;
   }
 
   /** Stop and forget the singleton so a same-JVM test can select deterministic pool widths. */
   static synchronized void resetForTesting() {
     if (singleton != null) {
       singleton.executor.shutdownNow();
-      singleton.timer.shutdownNow();
       singleton = null;
     }
   }
@@ -130,41 +91,16 @@ public final class StagedScanThreadPools {
     }
   }
 
-  private static ThreadPoolExecutor newPool(String name, int threads) {
+  private static ExecutorService newPool(String name, int threads) {
     ThreadPoolExecutor executor = new ThreadPoolExecutor(
         threads,
         threads,
         KEEP_ALIVE_SECONDS,
         TimeUnit.SECONDS,
-        new PriorityBlockingQueue<Runnable>(),
+        new LinkedBlockingQueue<Runnable>(),
         new NamedDaemonThreadFactory(name));
     executor.allowCoreThreadTimeOut(true);
     return executor;
-  }
-
-  /** Priority first, then global submission order for deterministic FIFO within a stage. */
-  private static final class PrioritizedRunnable
-      implements Runnable, Comparable<PrioritizedRunnable> {
-    private final int priority;
-    private final long sequence;
-    private final Runnable delegate;
-
-    private PrioritizedRunnable(int priority, long sequence, Runnable delegate) {
-      this.priority = priority;
-      this.sequence = sequence;
-      this.delegate = delegate;
-    }
-
-    @Override
-    public void run() {
-      delegate.run();
-    }
-
-    @Override
-    public int compareTo(PrioritizedRunnable other) {
-      int priorityOrder = Integer.compare(priority, other.priority);
-      return priorityOrder != 0 ? priorityOrder : Long.compare(sequence, other.sequence);
-    }
   }
 
   /** Named daemon factory used only by this executor-wide singleton. */

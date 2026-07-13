@@ -16,9 +16,7 @@
 
 package com.nvidia.spark.rapids.iceberg.parquet.staged;
 
-import java.io.EOFException;
-import java.nio.ByteBuffer;
-import java.nio.channels.SeekableByteChannel;
+import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -31,18 +29,22 @@ import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import ai.rapids.cudf.HostMemoryBuffer;
 import com.nvidia.spark.rapids.GpuSemaphore$;
+import com.nvidia.spark.rapids.HostAlloc$;
 import com.nvidia.spark.rapids.IcebergS3RangeCopier.FileChannelCopyRange;
+import com.nvidia.spark.rapids.IcebergS3RangeCopier.FileChannelCopyResult;
 import com.nvidia.spark.rapids.filecache.FileCache;
 import com.nvidia.spark.rapids.filecache.FileCacheDataRangeLease;
 import com.nvidia.spark.rapids.filecache.FileCacheDataRangeReservation;
@@ -53,66 +55,90 @@ import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import org.apache.iceberg.aws.s3.IcebergS3InputFile;
 import org.apache.parquet.hadoop.metadata.BlockMetaData;
 import org.apache.parquet.hadoop.metadata.ColumnChunkMetaData;
+import scala.Option;
 
 import org.apache.spark.TaskContext;
 import org.apache.spark.sql.rapids.execution.TrampolineUtil$;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
 
 /**
- * Event-driven, disk-first Iceberg Parquet reader for one Spark input partition.
+ * Coordinates the staged Parquet pipeline for one Spark input partition.
  *
- * <p>One fused shared-pool job per file publishes its filtered footer and then downloads every
- * selected column chunk directly into an exact file-cache reservation. Synchronized callbacks on
- * this reader serialize the incremental planner in footer-completion order. When a combination
- * closes, the planner asynchronously leases one of this partition reader's assembly buffers
- * and submits a high-priority cache-to-buffer fill. The Spark task thread never plans, downloads,
- * or assembles: it waits for a completed assembly buffer and invokes the existing GPU decoder.</p>
- *
- * <p>The POC intentionally supports completion order only. Scans requiring Iceberg's ordered
- * route are rejected before this reader is constructed.</p>
+ * <p>The pipeline matches the Iceberg multithreaded reader's admission order:</p>
+ * <ol>
+ *   <li>One fused pool job per file fetches and filters the footer, publishes it mid-job, and
+ *       continues straight into that file's blocking download — pool occupancy paces concurrent
+ *       file pipelines exactly like the base multithreaded reader. Each download packs its
+ *       chunks contiguously into a per-file {@link FileFragment} whose layout comes from the
+ *       file's own footer, so data I/O starts without waiting for planning or for any other
+ *       file's footer.</li>
+ *   <li>With combining enabled, completed file jobs enter a completion queue. The Spark task
+ *       thread blocks for the first result, then gives each additional result a fresh combine
+ *       wait. With combining disabled it consumes jobs in file-list order. Closing the reader
+ *       wakes either kind of wait without cancelling worker futures.</li>
+ *   <li>Subtasks are decoded in plan order. After waiting for their constituent fragments, the
+ *       task thread presents the synthetic Parquet file as a small header, zero-copy fragment
+ *       slices, and a small relocated footer. Completed fragments wait as spillable host buffers
+ *       until consumed; there is no second task-sized assembly allocation.</li>
+ * </ol>
  */
 public final class StagedParquetPartitionReader
     implements Iterator<ColumnarBatch>, AutoCloseable {
+  private static final int CLOSED_COMPLETION = -1;
+
   private final List<IcebergPartitionedFile> files;
   private final StagedScanAdapter adapter;
   private final StableGreedyReadPlanner planner;
   private final boolean combineEnabled;
   private final long combineWaitMs;
   private final StagedScanThreadPools pools;
-  // This pool and every HMB it allocates belong exclusively to this partition reader. The
-  // configured slot count is also the reader's concurrency limit, and close() releases all slots
-  // when the Spark task finishes (or as soon as an in-flight lease is returned on cancellation).
-  private final AssemblyBufferPool assemblyBuffers;
   private final TaskContext taskContext;
   private final long taskAttemptId;
-
+  private final Object lifecycleLock = new Object();
+  private final Object iteratorLock = new Object();
   private final AtomicBoolean closed = new AtomicBoolean();
   private final AtomicReference<Throwable> asynchronousCleanupFailure = new AtomicReference<>();
-  private final Object iteratorLock = new Object();
+  // Completed by close() to wake the task thread from any per-file wait without interfering
+  // with the pipeline futures, whose sole completers stay the pool jobs themselves.
+  private final CompletableFuture<Void> closeSignal = new CompletableFuture<>();
+  // Ordered, file-indexed pipeline futures; guarded by lifecycleLock so close() can snapshot
+  // them while initialization is still appending.
+  private final List<CompletableFuture<TimedFooter>> footerFutures = new ArrayList<>();
+  private final List<CompletableFuture<FileFragment>> fragmentFutures = new ArrayList<>();
+  private final BlockingQueue<Integer> completedFileIndexes = new LinkedBlockingQueue<>();
 
-  // All fields below through terminalFailure are guarded by this reader's monitor. Completable
-  // futures invoke the synchronized callbacks directly; there is no planner event queue/thread.
+  // Task-thread-only planning and decode-input state.
   private StableGreedyReadPlanner.Session session;
   private boolean initialized;
   private boolean planningFinished;
-  private int footersCompleted;
-  private int downloadsCompleted;
-  private long combineGeneration;
-  private long unreportedFooterNanos;
-  private long unreportedPlanningNanos;
-  private Throwable terminalFailure;
-  private final Map<Integer, TimedFooter> footerByIndex = new java.util.HashMap<>();
-  private final Map<FooterResult, DiskReadyFile> diskFiles = new IdentityHashMap<>();
-  private final ArrayDeque<AssemblyPlan> pendingAssembly = new ArrayDeque<>();
-  private final ArrayDeque<PreparedSubtask> readyAssembly = new ArrayDeque<>();
-  private final List<CompletableFuture<DiskReadyFile>> fileFutures = new ArrayList<>();
-  private CompletableFuture<AssemblyBufferPool.Lease> pendingLease;
-  private CompletableFuture<PreparedSubtask> taskWaiter;
-  private int assembliesInFlight;
+  private int filesAdmitted;
+  private int orderedFileCursor;
+  private final ArrayDeque<ReadSubtask> plannedSubtasks = new ArrayDeque<>();
+  private final Map<FooterResult, CompletableFuture<FileFragment>> fragmentByFooter =
+      new IdentityHashMap<>();
+  private final Set<FileFragment> statsAttributed =
+      Collections.newSetFromMap(new IdentityHashMap<>());
 
-  // Spark-task iterator state. GPU decode remains task-confined.
   private Iterator<ColumnarBatch> currentBatches;
 
+  /**
+   * Creates a lazy partition reader. No footer or data work is submitted until the first
+   * {@link #hasNext()} call.
+   *
+   * @param files inputs in deterministic Spark partition order
+   * @param adapter Iceberg footer and decode operations
+   * @param maxRows maximum planned rows per GPU subtask (soft for a single row group)
+   * @param maxEstimatedGpuBytes maximum estimated GPU bytes per subtask
+   * @param combineThreshold encoded-byte combine threshold for one subtask, from
+   *                         spark.rapids.sql.reader.multithreaded.combine.sizeBytes; a
+   *                         non-positive value disables cross-file combining
+   * @param combineWaitMs fresh wait after every admitted result while building a combined
+   *                      subtask. The first result is mandatory: baseline may first make a
+   *                      timed probe, but an empty probe falls through to an indefinite wait.
+   * @param workerThreads executor-wide worker count shared by footer and download jobs; this
+   *                      bounds the concurrently downloading files
+   * @param taskContext Spark task context captured by the task thread; may be null in tests
+   */
   public StagedParquetPartitionReader(
       List<IcebergPartitionedFile> files,
       StagedScanAdapter adapter,
@@ -121,20 +147,14 @@ public final class StagedParquetPartitionReader
       long combineThreshold,
       long combineWaitMs,
       int workerThreads,
-      int assemblyBufferCount,
       TaskContext taskContext) {
     this.files = immutableFileCopy(files);
     this.adapter = Objects.requireNonNull(adapter, "adapter");
     this.planner = new StableGreedyReadPlanner(
         maxRows, maxEstimatedGpuBytes, combineThreshold);
     this.combineEnabled = combineThreshold > 0L;
-    this.combineWaitMs = Math.max(0L, combineWaitMs);
-    if (assemblyBufferCount <= 0) {
-      throw new IllegalArgumentException(
-          "assemblyBufferCount must be positive: " + assemblyBufferCount);
-    }
+    this.combineWaitMs = Math.max(combineWaitMs, 0L);
     this.pools = StagedScanThreadPools.getOrCreate(workerThreads);
-    this.assemblyBuffers = new AssemblyBufferPool(assemblyBufferCount);
     this.taskContext = taskContext;
     this.taskAttemptId = taskContext == null ? -1L : taskContext.taskAttemptId();
   }
@@ -170,66 +190,29 @@ public final class StagedParquetPartitionReader
           }
         }
 
-        long waitStart = System.nanoTime();
-        PreparedSubtask prepared;
-        try {
-          CompletableFuture<PreparedSubtask> ready = nextReady();
-          if (!ready.isDone() && taskContext != null) {
-            // Unlike the baseline reader, the staged reader assembles off the Spark task thread.
-            // There is no GPU work left to protect until this future supplies a complete input.
-            // A task can arrive here while holding GpuSemaphore because a downstream operator
-            // asked the scan for another batch. Do not hold that permit while waiting for one of
-            // the bounded assembly slots. Otherwise all slots can be owned by tasks waiting to
-            // acquire GpuSemaphore while the permit owners wait here for those same slots.
-            // decodeAndPostProcess acquires the permit again after the assembled input is ready.
-            GpuSemaphore$.MODULE$.releaseIfNecessary(taskContext);
-          }
-          prepared = await(ready);
-        } finally {
-          adapter.onResultWait(System.nanoTime() - waitStart);
-        }
-        long completedFooterNanos = drainFooterNanos();
-        if (completedFooterNanos > 0L) {
-          adapter.onFooterCompleted(completedFooterNanos);
-        }
-        if (prepared == null) {
-          closeDiskFilesAfterEnd();
+        // Waiting below releases an already-held GPU permit only when no file result is ready.
+        // The Scala decode adapter reacquires immediately before entering cuDF.
+        ReadSubtask subtask = nextPlannedSubtask();
+        if (subtask == null) {
+          closeAllFragmentFutures();
           return false;
         }
-        Throwable failureAfterWait;
-        synchronized (this) {
-          failureAfterWait = terminalFailure;
-        }
-        if (closed.get()) {
-          prepared.close();
-          return false;
-        }
-        if (failureAfterWait != null) {
-          prepared.close();
-          throw propagate(failureAfterWait);
-        }
-
         Iterator<ColumnarBatch> decoded = null;
-        boolean installed = false;
+        boolean decodedInstalled = false;
         try {
-          adapter.onSubtaskCompleted(prepared.subtask, prepared.stats);
-          adapter.onMaterializationCompleted(prepared.assemblyNanos);
-          decoded = adapter.decodeAndPostProcess(prepared.subtask, prepared.input);
-          if (decoded == null) {
-            throw new IllegalStateException("decode adapter returned null");
-          }
+          decoded = assembleAndDecode(subtask);
           synchronized (iteratorLock) {
             if (closed.get()) {
               return false;
             }
+            if (currentBatches != null) {
+              throw new IllegalStateException("another decoded iterator is already active");
+            }
             currentBatches = decoded;
-            installed = true;
+            decodedInstalled = true;
           }
         } finally {
-          // The Scala adapter eagerly drains MakeParquetTableProducer before returning, so the
-          // reusable encoded-input slot can be returned before downstream consumes GPU batches.
-          prepared.close();
-          if (decoded != null && !installed) {
+          if (decoded != null && !decodedInstalled) {
             closeIterator(decoded);
           }
         }
@@ -253,10 +236,11 @@ public final class StagedParquetPartitionReader
         throw new NoSuchElementException("no more staged Parquet batches");
       }
       synchronized (iteratorLock) {
-        if (currentBatches == null || closed.get()) {
-          throw new CancellationException("staged Parquet reader closed before next()");
+        if (closed.get() || currentBatches == null) {
+          throw new CancellationException("staged Parquet reader was closed before next()");
         }
-        return currentBatches.next();
+        ColumnarBatch nextBatch = currentBatches.next();
+        return nextBatch;
       }
     } catch (Throwable error) {
       closeAfterFailure(error);
@@ -264,820 +248,629 @@ public final class StagedParquetPartitionReader
     }
   }
 
-  /** Submit every fused footer/direct-cache file job lazily on the first iterator access. */
+  /**
+   * Submit one fused pool job per file: the job fetches and filters the footer, completes the
+   * footer future mid-job for independent footer timing/failure publication, and continues
+   * straight into that file's blocking download on the same worker — the base reader's
+   * one-job-per-file shape. A single queue pass per file matters: a separately re-queued
+   * download job would wait behind every other task's queued jobs a second time, roughly
+   * doubling the pipeline latency the task thread observes for each file.
+   */
   private void initializeIfNeeded() {
-    synchronized (this) {
-      if (initialized) {
-        return;
-      }
-      checkOpen();
-      initialized = true;
-      session = planner.newSession();
-      if (files.isEmpty()) {
-        planningFinished = true;
-        session.finish();
-        return;
-      }
+    if (initialized) {
+      return;
     }
-
+    checkOpen();
+    session = planner.newSession();
+    initialized = true;
     for (int fileIndex = 0; fileIndex < files.size(); fileIndex++) {
-      if (closed.get()) {
-        break;
-      }
-      final int index = fileIndex;
-      IcebergPartitionedFile file = files.get(index);
-      CompletableFuture<TimedFooter> footerFuture = new CompletableFuture<>();
-      footerFuture.whenComplete((footer, error) -> {
-        if (error != null) {
-          failPlanner(unwrap(error));
-        } else {
-          try {
-            onFooterReady(index, footer);
-          } catch (Throwable callbackError) {
-            failPlanner(unwrap(callbackError));
+      synchronized (lifecycleLock) {
+        checkOpen();
+        IcebergPartitionedFile file = files.get(fileIndex);
+        CompletableFuture<TimedFooter> footerFuture = new CompletableFuture<>();
+        CompletableFuture<FileFragment> fragmentFuture = CompletableFuture.supplyAsync(
+            () -> executeFileJob(file, footerFuture), pools.executor());
+        final int completedIndex = fileIndex;
+        // Publish every submitted future while holding the same lock close() uses to snapshot
+        // them. A close racing submission therefore cannot miss and leak this job's fragment.
+        fragmentFuture.whenComplete((fragment, error) -> {
+          if (error != null) {
+            footerFuture.completeExceptionally(error);
           }
-        }
-      });
-      CompletableFuture<DiskReadyFile> fileFuture = pools.submitFile(
-          () -> executeFileJob(file, footerFuture));
-      fileFuture.whenComplete((readyFile, error) -> {
-        if (error != null) {
-          footerFuture.completeExceptionally(unwrap(error));
-          failPlanner(unwrap(error));
-        } else if (readyFile == null) {
-          IllegalStateException missingResult = new IllegalStateException(
-              "file job completed without a cache-ready file");
-          footerFuture.completeExceptionally(missingResult);
-          failPlanner(missingResult);
-        } else {
-          try {
-            onDownloadReady(index, readyFile);
-          } catch (Throwable callbackError) {
-            readyFile.close();
-            failPlanner(unwrap(callbackError));
+          if (combineEnabled) {
+            completedFileIndexes.offer(completedIndex);
           }
-        }
-      });
-      synchronized (this) {
-        fileFutures.add(fileFuture);
+        });
+        footerFutures.add(footerFuture);
+        fragmentFutures.add(fragmentFuture);
       }
     }
-  }
-
-  /** One fused worker job publishes its footer, then writes selected bytes directly to cache. */
-  private DiskReadyFile executeFileJob(
-      IcebergPartitionedFile file,
-      CompletableFuture<TimedFooter> footerFuture) throws Exception {
-    return runAsTaskPoolThread(() -> {
-      long footerStart = System.nanoTime();
-      FooterResult footer = adapter.readAndFilterFooter(file);
-      if (footer == null) {
-        throw new IllegalStateException("footer adapter returned null");
-      }
-      long footerNanos = System.nanoTime() - footerStart;
-      TimedFooter timedFooter = new TimedFooter(footer, footerNanos);
-      footerFuture.complete(timedFooter);
-      return downloadToCache(timedFooter);
-    });
   }
 
   /**
-   * Reserve one exact cache file per original column chunk and stream cache misses directly from
-   * the Iceberg S3 client. Adjacent source ranges are coalesced by the private copier while its
-   * response is routed across the distinct cache-file channels.
+   * Execute the fused footer and download job under one Spark task/RMM registration.
+   *
+   * <p>The footer future is deliberately published before the download starts, while admission
+   * waits for the completed fragment. Keeping both phases inside one registration avoids
+   * needlessly detaching and immediately reattaching the same worker to the same Spark task.</p>
    */
-  private DiskReadyFile downloadToCache(TimedFooter timedFooter) throws Exception {
-    checkOpen();
-    long ioStart = System.nanoTime();
-    RapidsInputFile input = adapter.openInputFile(timedFooter.footer.getFile());
-    if (input == null) {
-      throw new IllegalStateException("input-file adapter returned null");
+  private FileFragment executeFileJob(
+      IcebergPartitionedFile file,
+      CompletableFuture<TimedFooter> footerFuture) {
+    try {
+      return runAsTaskPoolThread(() -> {
+        long footerStart = System.nanoTime();
+        FooterResult result = adapter.readAndFilterFooter(file);
+        if (result == null) {
+          throw new IllegalStateException("footer adapter returned null");
+        }
+        TimedFooter timed = new TimedFooter(result, System.nanoTime() - footerStart);
+        footerFuture.complete(timed);
+        return downloadFragment(result);
+      });
+    } catch (Throwable error) {
+      throw wrapAsCompletion(error);
     }
-    FileCache cache = FileCache.get();
-    ArrayList<List<PendingRange>> pendingByBlock = new ArrayList<>();
-    ArrayList<PendingRange> allRanges = new ArrayList<>();
-    ArrayList<OwnedWriter> ownedWriters = new ArrayList<>();
-    ArrayList<FileChannelCopyRange> remoteRanges = new ArrayList<>();
-    ArrayList<DiskReadyFile.CachedRange> claimedRanges = new ArrayList<>();
-    boolean leasesTransferred = false;
+  }
+
+  private static CompletionException wrapAsCompletion(Throwable error) {
+    if (error instanceof CompletionException) {
+      return (CompletionException) error;
+    }
+    return new CompletionException(error);
+  }
+
+  /**
+   * Download one file's filtered column chunks into a contiguous fragment.
+   *
+   * <p>The file cache is the authoritative destination for every selected column chunk. The
+   * worker first reserves every exact range, then makes one bounded host-allocation attempt. If
+   * it succeeds, cache-owner downloads tee the same S3 response into both the mandatory cache
+   * file and the fragment HMB; cache hits and followers are copied from their committed leases.
+   * If it fails, the worker downloads to cache only, waits for every range to become readable,
+   * and only then performs a blocking fragment allocation and copies the ranges from disk.</p>
+   */
+  private FileFragment downloadFragment(FooterResult footer) throws Exception {
+    checkOpen();
+    long start = System.nanoTime();
+    List<BlockMetaData> blocks = footer.getBlocks();
+    long[] blockOffsets = FileFragment.computeBlockOffsets(blocks);
+    long totalBytes = blockOffsets[blocks.size()];
+    if (totalBytes == 0) {
+      return new FileFragment(footer, blockOffsets, null,
+          new FileFragment.DownloadStats(System.nanoTime() - start,
+              0L, 0L, 0L, 0L, 0L, 0L, false,
+              0L, 0L, 0L, 0L, 0L));
+    }
+
+    List<CacheRange> ranges = new ArrayList<>();
+    List<CacheRange> writerRanges = new ArrayList<>();
+    StagedParquetOutput output = null;
     long cacheHitCount = 0L;
     long cacheHitBytes = 0L;
     long cacheMissCount = 0L;
     long cacheMissBytes = 0L;
-
+    long cacheReadNanos = 0L;
     try {
-      for (BlockMetaData block : timedFooter.footer.getBlocks()) {
-        ArrayList<PendingRange> blockRanges = new ArrayList<>();
+      if (closed.get()) {
+        throw new CancellationException("staged reader closed before fragment I/O started");
+      }
+      RapidsInputFile genericInput = adapter.openInputFile(footer.getFile());
+      if (genericInput == null) {
+        throw new IllegalStateException("input-file adapter returned null");
+      }
+      // This POC is deliberately Iceberg/S3-only. Keeping the concrete cast here avoids a
+      // second generic reader abstraction around the mandatory cache-file API.
+      IcebergS3InputFile input = (IcebergS3InputFile) genericInput;
+      FileCache fileCache = FileCache.get();
+      long fragmentOffset = 0L;
+      for (BlockMetaData block : blocks) {
         for (ColumnChunkMetaData column : block.getColumns()) {
-          long sourceOffset = column.getStartingPos();
+          checkOpen();
           long length = column.getTotalSize();
-          Optional<FileCacheDataRangeReservation> optional =
-              cache.reserveDataRangeCache(input, sourceOffset, length);
-          if (!optional.isPresent()) {
-            throw new IllegalStateException(
-                "staged Iceberg POC requires a writable file-cache reservation for " +
-                    input.path() + " range " + sourceOffset + ":" + length);
+          long sourceOffset = column.getStartingPos();
+          Optional<FileCacheDataRangeReservation> optionalReservation =
+              fileCache.reserveDataRangeCache(input, sourceOffset, length);
+          if (!optionalReservation.isPresent()) {
+            throw new IOException(
+                "file cache could not reserve mandatory Iceberg range " +
+                    input.path() + " [" + sourceOffset + ", " +
+                    Math.addExact(sourceOffset, length) + ")");
           }
-          FileCacheDataRangeReservation reservation = optional.get();
-          boolean cacheHit = reservation.isCacheHit();
-          PendingRange pending = new PendingRange(length, cacheHit, reservation);
-          blockRanges.add(pending);
-          allRanges.add(pending);
-          if (cacheHit) {
-            cacheHitCount++;
+          FileCacheDataRangeReservation reservation = optionalReservation.get();
+          Optional<FileCacheDataRangeWriter> optionalWriter = reservation.getWriter();
+          CacheRange range = new CacheRange(
+              sourceOffset,
+              length,
+              fragmentOffset,
+              reservation,
+              optionalWriter.isPresent() ? new OwnedCacheWriter(optionalWriter.get()) : null);
+          ranges.add(range);
+          if (range.writer != null) {
+            writerRanges.add(range);
+          }
+          if (reservation.isCacheHit()) {
+            cacheHitCount += 1L;
             cacheHitBytes = Math.addExact(cacheHitBytes, length);
           } else {
-            cacheMissCount++;
+            cacheMissCount += 1L;
             cacheMissBytes = Math.addExact(cacheMissBytes, length);
           }
-
-          Optional<FileCacheDataRangeWriter> writer = reservation.getWriter();
-          if (writer.isPresent()) {
-            OwnedWriter owned = new OwnedWriter(writer.get());
-            ownedWriters.add(owned);
-            if (length > 0L) {
-              remoteRanges.add(new FileChannelCopyRange(
-                  sourceOffset, length, owned.writer.getChannel(), 0L));
-            }
-          }
+          fragmentOffset = Math.addExact(fragmentOffset, length);
         }
-        pendingByBlock.add(blockRanges);
       }
 
-      remoteRanges.sort(Comparator.comparingLong(FileChannelCopyRange::getInputOffset));
-      long requestCount = countCoalescedRequests(remoteRanges);
-      long requestedBytes = totalRangeBytes(remoteRanges);
-      long remoteStart = System.nanoTime();
-      if (!(input instanceof IcebergS3InputFile)) {
-        throw new IllegalStateException(
-            "staged Iceberg POC requires IcebergS3InputFile, found " +
-                input.getClass().getName());
+      // The copier coalesces only adjacent ranges in list order. Source sorting keeps the
+      // baseline reader's contiguous-only coalescing without downloading gap bytes.
+      writerRanges.sort(Comparator.comparingLong(range -> range.sourceOffset));
+
+      // Exactly one bounded allocation cycle decides the branch. tryAlloc2 may spill/retry
+      // internally, but it does not start another outer retry cycle for this file.
+      long allocStart = System.nanoTime();
+      Option<HostMemoryBuffer> optionalAllocation =
+          HostAlloc$.MODULE$.tryAlloc2(totalBytes, true);
+      long allocNanos = System.nanoTime() - allocStart;
+      HostMemoryBuffer directHostDestination = null;
+      if (optionalAllocation.isDefined()) {
+        directHostDestination = optionalAllocation.get();
+        output = new MemoryStagedParquetOutput(directHostDestination, totalBytes);
       }
-      long actualRemoteBytes =
-          ((IcebergS3InputFile) input).readVectoredToFileChannels(remoteRanges);
-      long remoteNanos = System.nanoTime() - remoteStart;
-      if (actualRemoteBytes != requestedBytes) {
-        throw new EOFException(
-            "direct cache download wrote " + actualRemoteBytes +
-                " bytes, expected " + requestedBytes);
+
+      List<FileChannelCopyRange> remoteRanges = new ArrayList<>(writerRanges.size());
+      long requestedBytes = 0L;
+      for (CacheRange range : writerRanges) {
+        requestedBytes = Math.addExact(requestedBytes, range.length);
+        if (directHostDestination == null) {
+          remoteRanges.add(new FileChannelCopyRange(
+              range.sourceOffset,
+              range.length,
+              range.writer.getChannel(),
+              0L));
+        } else {
+          remoteRanges.add(new FileChannelCopyRange(
+              range.sourceOffset,
+              range.length,
+              range.writer.getChannel(),
+              0L,
+              directHostDestination,
+              range.fragmentOffset));
+        }
       }
+
+      // Submit each owner range once. The file write is authoritative; host mirroring is best
+      // effort and a failed mirror is repaired from that same committed cache file.
+      long readStart = System.nanoTime();
+      FileChannelCopyResult copyResult =
+          input.readVectoredToFileChannelsAndHostMemory(remoteRanges);
+      if (copyResult.getBytesCopied() != requestedBytes) {
+        throw new IOException(
+            "Iceberg S3 copy wrote " + copyResult.getBytesCopied() +
+                " bytes; expected " + requestedBytes);
+      }
+      long readWaitNanos = System.nanoTime() - readStart;
       checkOpen();
 
-      long commitStart = System.nanoTime();
-      for (OwnedWriter owned : ownedWriters) {
-        // commit() makes the writer terminal before it starts publication. Mark our wrapper
-        // first so a synchronous commit failure is not followed by an invalid cancel().
-        owned.terminal = true;
-        owned.writer.commit();
+      // Publish owners and obtain one independent pinned read lease per exact range. Followers
+      // never issue another S3 read; their future completes after the owner's commit.
+      long finalizeStart = System.nanoTime();
+      for (CacheRange range : writerRanges) {
+        range.writer.commit();
       }
-      CompletableFuture<?>[] completions = allRanges.stream()
-          .map(range -> range.reservation.getCompletionFuture())
-          .toArray(CompletableFuture<?>[]::new);
-      CompletableFuture.allOf(completions).get();
+      for (CacheRange range : ranges) {
+        range.lease = awaitCacheLease(range.reservation.getCompletionFuture());
+        range.completionClaimed = true;
+      }
+      long finalizeNanos = System.nanoTime() - finalizeStart;
+      checkOpen();
 
-      ArrayList<List<DiskReadyFile.CachedRange>> readyByBlock = new ArrayList<>();
-      for (List<PendingRange> block : pendingByBlock) {
-        ArrayList<DiskReadyFile.CachedRange> readyBlock = new ArrayList<>();
-        for (PendingRange pending : block) {
-          FileCacheDataRangeLease lease = pending.reservation.getCompletionFuture().get();
-          pending.leaseClaimed = true;
-          DiskReadyFile.CachedRange readyRange = new DiskReadyFile.CachedRange(
-              pending.length, pending.cacheHit, lease);
-          claimedRanges.add(readyRange);
-          readyBlock.add(readyRange);
-        }
-        readyByBlock.add(readyBlock);
+      if (output == null) {
+        // Cache I/O is terminal before this blocking allocation. Host-memory pressure therefore
+        // cannot hold a remote request or one unit of remote-read concurrency open.
+        long blockingAllocStart = System.nanoTime();
+        HostMemoryBuffer allocation = HostAlloc$.MODULE$.alloc(totalBytes, true);
+        allocNanos = Math.addExact(allocNanos, System.nanoTime() - blockingAllocStart);
+        output = new MemoryStagedParquetOutput(allocation, totalBytes);
       }
-      long commitNanos = System.nanoTime() - commitStart;
-      DiskReadyFile readyFile = new DiskReadyFile(timedFooter.footer, readyByBlock,
-          new DiskReadyFile.DownloadStats(
-              System.nanoTime() - ioStart,
-              remoteNanos,
-              commitNanos,
-              requestCount,
-              requestedBytes,
-              cacheHitCount,
-              cacheHitBytes,
-              cacheMissCount,
-              cacheMissBytes));
-      leasesTransferred = true;
-      return readyFile;
-    } catch (Throwable error) {
-      Throwable failure = unwrap(error);
-      if (failure instanceof InterruptedException) {
-        Thread.currentThread().interrupt();
-      }
-      for (OwnedWriter owned : ownedWriters) {
-        if (!owned.terminal) {
+
+      // Disk-first loads every range. The tee branch loads cache hits and followers; if any
+      // best-effort host mirror failed, all owner ranges are conservatively repaired from cache.
+      boolean loadAllWriterRanges =
+          directHostDestination == null || !copyResult.allHostCopiesSucceeded();
+      long routeStart = System.nanoTime();
+      for (CacheRange range : ranges) {
+        if (range.writer == null || loadAllWriterRanges) {
+          // This is the same cache-to-HMB work measured by the baseline cache-reader metric.
+          // Include immediate hits, followers, the complete disk-first branch, and tee repair.
+          long cacheStart = System.nanoTime();
           try {
-            owned.writer.cancel();
-            owned.terminal = true;
+            output.copyCachedRange(
+                range.lease.getChannel(), range.fragmentOffset, range.length);
+          } finally {
+            cacheReadNanos = Math.addExact(
+                cacheReadNanos, System.nanoTime() - cacheStart);
+          }
+        }
+      }
+      long routeNanos = System.nanoTime() - routeStart;
+
+      long sealStart = System.nanoTime();
+      for (CacheRange range : ranges) {
+        range.lease.close();
+        range.lease = null;
+      }
+      output.seal();
+      finalizeNanos = Math.addExact(finalizeNanos, System.nanoTime() - sealStart);
+      return new FileFragment(footer, blockOffsets, output,
+          new FileFragment.DownloadStats(System.nanoTime() - start,
+              allocNanos, readWaitNanos, routeNanos, finalizeNanos,
+              countCoalescedRequests(writerRanges), requestedBytes,
+              directHostDestination == null,
+              cacheHitCount, cacheHitBytes, cacheMissCount, cacheMissBytes, cacheReadNanos));
+    } catch (Throwable error) {
+      // The copier drains accepted requests before returning, so partial files are no longer
+      // being written and every nonterminal owner can be cancelled safely.
+      Throwable failure = unwrap(error);
+      for (CacheRange range : writerRanges) {
+        if (!range.writer.isTerminal()) {
+          try {
+            range.writer.cancel();
           } catch (Throwable cancelError) {
             failure = addFailure(failure, cancelError);
           }
         }
       }
-      for (PendingRange pending : allRanges) {
-        if (!pending.leaseClaimed) {
-          pending.reservation.getCompletionFuture().whenComplete((lease, ignored) -> {
+
+      // A committed owner or follower can complete after this worker fails. Close claimed
+      // leases now and attach cleanup to every future whose lease has not yet been claimed.
+      for (CacheRange range : ranges) {
+        if (range.lease != null) {
+          try {
+            range.lease.close();
+          } catch (Throwable closeError) {
+            failure = addFailure(failure, closeError);
+          } finally {
+            range.lease = null;
+          }
+        } else if (!range.completionClaimed) {
+          range.reservation.getCompletionFuture().whenComplete((lease, completionError) -> {
             if (lease != null) {
               try {
                 lease.close();
-              } catch (Throwable cleanupError) {
-                recordAsynchronousCleanupFailure(cleanupError);
+              } catch (Throwable closeError) {
+                recordAsynchronousCleanupFailure(closeError);
               }
             }
           });
         }
       }
-      if (!leasesTransferred) {
-        closeAll(claimedRanges);
+      if (output != null) {
+        try {
+          output.close();
+        } catch (Throwable closeError) {
+          failure = addFailure(failure, closeError);
+        }
       }
       throw propagate(failure);
     }
   }
 
-  private static long countCoalescedRequests(List<FileChannelCopyRange> ranges) {
+  /** One selected column chunk and its mandatory exact-range cache reservation. */
+  private static final class CacheRange {
+    final long sourceOffset;
+    final long length;
+    final long fragmentOffset;
+    final FileCacheDataRangeReservation reservation;
+    final OwnedCacheWriter writer;
+    FileCacheDataRangeLease lease;
+    boolean completionClaimed;
+
+    CacheRange(
+        long sourceOffset,
+        long length,
+        long fragmentOffset,
+        FileCacheDataRangeReservation reservation,
+        OwnedCacheWriter writer) {
+      this.sourceOffset = sourceOffset;
+      this.length = length;
+      this.fragmentOffset = fragmentOffset;
+      this.reservation = Objects.requireNonNull(reservation, "reservation");
+      this.writer = writer;
+    }
+  }
+
+  /** Tracks the exactly-once commit/cancel obligation of one cache-owned writer. */
+  private static final class OwnedCacheWriter {
+    private final FileCacheDataRangeWriter writer;
+    private boolean terminal;
+
+    OwnedCacheWriter(FileCacheDataRangeWriter writer) {
+      this.writer = Objects.requireNonNull(writer, "writer");
+    }
+
+    java.nio.channels.FileChannel getChannel() {
+      return writer.getChannel();
+    }
+
+    void commit() {
+      if (terminal) {
+        throw new IllegalStateException("cache writer is already terminal");
+      }
+      // commit owns the terminal transition even if cache publication itself throws.
+      terminal = true;
+      writer.commit();
+    }
+
+    void cancel() {
+      if (!terminal) {
+        terminal = true;
+        writer.cancel();
+      }
+    }
+
+    boolean isTerminal() {
+      return terminal;
+    }
+  }
+
+  /** Count the contiguous request groups the S3 copier submits for source-sorted ranges. */
+  private static long countCoalescedRequests(List<CacheRange> sortedWriterRanges) {
     long requests = 0L;
     long previousEnd = -1L;
-    for (FileChannelCopyRange range : ranges) {
-      if (requests == 0L || range.getInputOffset() != previousEnd) {
-        requests++;
+    boolean hasPrevious = false;
+    for (CacheRange range : sortedWriterRanges) {
+      if (range.length == 0L) {
+        continue;
       }
-      previousEnd = Math.addExact(range.getInputOffset(), range.getLength());
+      if (!hasPrevious || range.sourceOffset != previousEnd) {
+        requests += 1L;
+      }
+      previousEnd = Math.addExact(range.sourceOffset, range.length);
+      hasPrevious = true;
     }
     return requests;
   }
 
-  private static long totalRangeBytes(List<FileChannelCopyRange> ranges) {
-    long total = 0L;
-    for (FileChannelCopyRange range : ranges) {
-      total = Math.addExact(total, range.getLength());
+  private static FileCacheDataRangeLease awaitCacheLease(
+      CompletableFuture<FileCacheDataRangeLease> future) throws Exception {
+    try {
+      return future.get();
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw e;
+    } catch (ExecutionException e) {
+      Throwable cause = unwrap(e);
+      if (cause instanceof Exception) {
+        throw (Exception) cause;
+      }
+      if (cause instanceof Error) {
+        throw (Error) cause;
+      }
+      throw new RuntimeException(cause);
     }
-    return total;
+  }
+
+  /** Advance baseline-compatible file admission until the next subtask is available. */
+  private ReadSubtask nextPlannedSubtask() throws Exception {
+    while (plannedSubtasks.isEmpty()) {
+      if (filesAdmitted >= files.size()) {
+        if (planningFinished) {
+          return null;
+        }
+        planningFinished = true;
+        plannedSubtasks.addAll(session.finish());
+        continue;
+      }
+
+      if (!combineEnabled) {
+        admitFile(orderedFileCursor++);
+        continue;
+      }
+
+      // Completion-order combine mirrors ExecutorCompletionService in the base reader. The
+      // group's first file waits without a deadline. Every admitted file that leaves the group
+      // open earns a new full combine wait for the next completion; there is no cumulative
+      // subtask budget.
+      Integer completedIndex = awaitCompletedFile(!session.hasOpenBlocks());
+      if (completedIndex == null) {
+        plannedSubtasks.addAll(session.flush());
+      } else {
+        admitFile(completedIndex);
+      }
+    }
+    return plannedSubtasks.poll();
   }
 
   /**
-   * Admit one footer in callback completion order and advance incremental planning.
-   *
-   * <p>Planning deliberately does not wait for the corresponding download. Emitted subtasks stay
-   * as metadata-only assembly plans until all of their cache-ready files have been published.</p>
+   * Wait for a completed file index. A null result is a combine timeout; close uses a sentinel
+   * to wake the same blocking queue immediately.
    */
-  private void onFooterReady(int fileIndex, TimedFooter footer) {
-    CompletableFuture<PreparedSubtask> endWaiter = null;
-    boolean scheduleTimeout = false;
-    long timeoutGeneration = 0L;
-    Throwable failure = null;
-    synchronized (this) {
-      if (closed.get() || terminalFailure != null) {
-        return;
-      }
-      try {
-        if (footerByIndex.put(fileIndex, footer) != null) {
-          throw new IllegalStateException("footer completed more than once for file " + fileIndex);
-        }
-        footersCompleted++;
-        unreportedFooterNanos = Math.addExact(
-            unreportedFooterNanos, footer.footerNanos);
-        combineGeneration++;
-
-        long planningStart = System.nanoTime();
-        List<ReadSubtask> emitted = session.add(footer.footer);
-        unreportedPlanningNanos = Math.addExact(
-            unreportedPlanningNanos, System.nanoTime() - planningStart);
-        List<AssemblyPlan> plans = createAssemblyPlansLocked(emitted);
-
-        if (footersCompleted == files.size()) {
-          planningFinished = true;
-          long finishStart = System.nanoTime();
-          List<ReadSubtask> finalSubtasks = session.finish();
-          unreportedPlanningNanos = Math.addExact(
-              unreportedPlanningNanos, System.nanoTime() - finishStart);
-          plans = append(plans, createAssemblyPlansLocked(finalSubtasks));
-        } else if (combineEnabled && session.hasOpenBlocks()) {
-          if (combineWaitMs > 0L) {
-            scheduleTimeout = true;
-            timeoutGeneration = combineGeneration;
-          } else {
-            long flushStart = System.nanoTime();
-            List<ReadSubtask> flushed = session.flush();
-            unreportedPlanningNanos = Math.addExact(
-                unreportedPlanningNanos, System.nanoTime() - flushStart);
-            plans = append(plans, createAssemblyPlansLocked(flushed));
-          }
-        }
-        pendingAssembly.addAll(plans);
-        endWaiter = detachEndWaiterIfReadyLocked();
-      } catch (Throwable plannerError) {
-        failure = unwrap(plannerError);
-      }
-    }
-
-    if (failure != null) {
-      failPlanner(failure);
-      return;
-    }
-    if (endWaiter != null) {
-      endWaiter.complete(null);
-    }
-    if (scheduleTimeout) {
-      try {
-        long generation = timeoutGeneration;
-        pools.schedule(() -> onCombineTimeout(generation),
-            combineWaitMs, TimeUnit.MILLISECONDS);
-      } catch (Throwable scheduleError) {
-        failPlanner(unwrap(scheduleError));
-        return;
-      }
-    }
-    requestAssemblySlotIfNeeded();
-  }
-
-  /** Publish one cache-ready file and wake any metadata plan whose inputs are now ready. */
-  private void onDownloadReady(int fileIndex, DiskReadyFile readyFile) {
-    CompletableFuture<PreparedSubtask> endWaiter = null;
-    boolean discard = false;
-    Throwable failure = null;
-    synchronized (this) {
-      if (closed.get() || terminalFailure != null) {
-        discard = true;
-      } else {
-        TimedFooter timed = footerByIndex.get(fileIndex);
-        if (timed == null || timed.footer != readyFile.footer()) {
-          failure = new IllegalStateException(
-              "download completed before its matching footer event");
-          discard = true;
-        } else if (diskFiles.containsKey(readyFile.footer())) {
-          failure = new IllegalStateException(
-              "download completed more than once for file " + fileIndex);
-          discard = true;
-        } else {
-          downloadsCompleted++;
-          diskFiles.put(readyFile.footer(), readyFile);
-          endWaiter = detachEndWaiterIfReadyLocked();
-        }
-      }
-    }
-
-    if (discard) {
-      readyFile.close();
-      if (failure != null) {
-        failPlanner(failure);
-      }
-      return;
-    }
-    if (endWaiter != null) {
-      endWaiter.complete(null);
-    }
-    requestAssemblySlotIfNeeded();
-  }
-
-  /** Flush the current combination when its latest fresh 200-ms grace expires. */
-  private void onCombineTimeout(long generation) {
-    CompletableFuture<PreparedSubtask> endWaiter = null;
-    Throwable failure = null;
-    synchronized (this) {
-      if (closed.get() || terminalFailure != null || planningFinished ||
-          generation != combineGeneration || !session.hasOpenBlocks()) {
-        return;
-      }
-      try {
-        long planningStart = System.nanoTime();
-        List<ReadSubtask> flushed = session.flush();
-        unreportedPlanningNanos = Math.addExact(
-            unreportedPlanningNanos, System.nanoTime() - planningStart);
-        List<AssemblyPlan> plans = createAssemblyPlansLocked(flushed);
-        pendingAssembly.addAll(plans);
-        endWaiter = detachEndWaiterIfReadyLocked();
-      } catch (Throwable plannerError) {
-        failure = unwrap(plannerError);
-      }
-    }
-    if (failure != null) {
-      failPlanner(failure);
-      return;
-    }
-    if (endWaiter != null) {
-      endWaiter.complete(null);
-    }
-    requestAssemblySlotIfNeeded();
-  }
-
-  /** Convert planner output to metadata-only plans while still under the planner monitor. */
-  private List<AssemblyPlan> createAssemblyPlansLocked(List<ReadSubtask> subtasks) {
-    if (subtasks.isEmpty()) {
-      return Collections.emptyList();
-    }
-    ArrayList<AssemblyPlan> plans = new ArrayList<>(subtasks.size());
+  private Integer awaitCompletedFile(boolean waitForFirst) throws InterruptedException {
+    long waitStart = System.nanoTime();
+    Integer fileIndex = completedFileIndexes.poll();
     try {
-      for (ReadSubtask subtask : subtasks) {
-        long planningNanos = unreportedPlanningNanos;
-        plans.add(new AssemblyPlan(subtask, planningNanos));
-        unreportedPlanningNanos = 0L;
-      }
-    } catch (Throwable error) {
-      closeAll(plans);
-      throw error;
-    }
-    return plans;
-  }
-
-  private static <T> List<T> append(List<T> first, List<T> second) {
-    if (first.isEmpty()) {
-      return second;
-    }
-    if (second.isEmpty()) {
-      return first;
-    }
-    ArrayList<T> combined = new ArrayList<>(first.size() + second.size());
-    combined.addAll(first);
-    combined.addAll(second);
-    return combined;
-  }
-
-  /** Request at most one assembly lease ahead of this partition's pending plans. */
-  private void requestAssemblySlotIfNeeded() {
-    CompletableFuture<AssemblyBufferPool.Lease> request;
-    synchronized (this) {
-      if (closed.get() || terminalFailure != null || !hasReadyAssemblyPlanLocked() ||
-          pendingLease != null) {
-        return;
-      }
-      request = assemblyBuffers.acquire();
-      pendingLease = request;
-    }
-    // A queued lease is commonly released by the Spark task after decode. Dispatch the state
-    // transition back to the shared pool so the task thread never selects a plan or claims cache
-    // ranges. Executor rejection is handled inline only as a terminal cleanup path.
-    request.whenComplete((lease, error) -> {
-      CompletableFuture<Void> dispatched = pools.submitAssembly(() -> {
-        try {
-          onAssemblySlotAvailable(request, lease, error);
-        } catch (Throwable callbackError) {
-          if (lease != null) {
-            lease.close();
-          }
-          failPlanner(unwrap(callbackError));
-        }
-        return null;
-      });
-      dispatched.whenComplete((ignored, dispatchError) -> {
-        if (dispatchError != null) {
-          Throwable failure = unwrap(dispatchError);
-          if (error != null) {
-            failure = addFailure(unwrap(error), failure);
-          }
-          onAssemblySlotAvailable(request, lease, failure);
-        }
-      });
-    });
-  }
-
-  /** Pair the next planned subtask with a nonblocking assembly slot and submit its fill. */
-  private void onAssemblySlotAvailable(
-      CompletableFuture<AssemblyBufferPool.Lease> request,
-      AssemblyBufferPool.Lease lease,
-      Throwable error) {
-    AssemblyPlan plan = null;
-    boolean discardLease = false;
-    Throwable failure = null;
-    synchronized (this) {
-      if (pendingLease == request) {
-        pendingLease = null;
-      }
-      if (error != null) {
-        // Failure is published below, outside this monitor.
-      } else if (closed.get() || terminalFailure != null) {
-        discardLease = lease != null;
-      } else if (lease == null) {
-        failure = new IllegalStateException(
-            "assembly buffer acquisition completed without a lease");
-      } else {
-        plan = pollReadyAssemblyPlanLocked();
-        if (plan == null) {
-          discardLease = lease != null;
-        } else {
-          try {
-            // Cache leases are claimed only after a bounded assembly slot has been granted.
-            plan.claimRanges(diskFiles);
-            assembliesInFlight++;
-          } catch (Throwable claimError) {
-            failure = unwrap(claimError);
-            discardLease = lease != null;
-          }
+      if (fileIndex == null) {
+        if (waitForFirst) {
+          // Unlike the baseline reader, the staged task thread is not assembling input while it
+          // waits. Do not retain a GPU permit when there is no ready fragment to decode.
+          GpuSemaphore$.MODULE$.releaseIfNecessary(taskContext);
+          fileIndex = completedFileIndexes.take();
+        } else if (combineWaitMs > 0L) {
+          GpuSemaphore$.MODULE$.releaseIfNecessary(taskContext);
+          fileIndex = completedFileIndexes.poll(combineWaitMs, TimeUnit.MILLISECONDS);
         }
       }
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw e;
     }
-
-    if (error != null) {
-      if (lease != null) {
-        lease.close();
-      }
-      failPlanner(unwrap(error));
-      return;
-    }
-    if (discardLease) {
-      lease.close();
-    }
-    if (failure != null) {
-      if (plan != null) {
-        plan.close();
-      }
-      failPlanner(failure);
-      return;
-    }
-    if (discardLease) {
-      requestAssemblySlotIfNeeded();
-      return;
-    }
-    if (plan != null) {
-      AssemblyPlan selectedPlan = plan;
-      pools.submitAssembly(() -> runAsTaskPoolThread(
-          () -> assemble(selectedPlan, lease)))
-          .whenComplete((prepared, assemblyError) -> {
-            Throwable completionError =
-                assemblyError == null ? null : unwrap(assemblyError);
-            if (assemblyError != null) {
-              // submitAssembly reports executor rejection through the future without running the
-              // callable. Closing here is idempotent with assemble()'s normal failure cleanup.
-              try {
-                selectedPlan.close();
-              } catch (Throwable cleanupError) {
-                completionError = addFailure(completionError, cleanupError);
-              }
-              try {
-                lease.close();
-              } catch (Throwable cleanupError) {
-                completionError = addFailure(completionError, cleanupError);
-              }
-            }
-            try {
-              onAssemblyReady(prepared, completionError);
-            } catch (Throwable callbackError) {
-              if (prepared != null) {
-                prepared.close();
-              }
-              failPlanner(unwrap(callbackError));
-            }
-          });
-    }
-    requestAssemblySlotIfNeeded();
-  }
-
-  /** Return whether any planned subtask has all of its cache-ready file dependencies. */
-  private boolean hasReadyAssemblyPlanLocked() {
-    for (AssemblyPlan plan : pendingAssembly) {
-      if (plan.isReady(diskFiles)) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  /** Remove the first planner-order subtask whose downloads are all cache-ready. */
-  private AssemblyPlan pollReadyAssemblyPlanLocked() {
-    Iterator<AssemblyPlan> plans = pendingAssembly.iterator();
-    while (plans.hasNext()) {
-      AssemblyPlan plan = plans.next();
-      if (plan.isReady(diskFiles)) {
-        plans.remove();
-        return plan;
-      }
-    }
-    return null;
-  }
-
-  /** Fill one reusable buffer from pinned cache channels in exact synthetic-file order. */
-  private PreparedSubtask assemble(
-      AssemblyPlan plan,
-      AssemblyBufferPool.Lease lease) throws Exception {
-    long assemblyStart = System.nanoTime();
-    long allocNanos = 0L;
-    long cacheReadNanos = 0L;
-    long allDiskReadNanos = 0L;
-    boolean leaseTransferred = false;
-    try {
+    adapter.onResultWait(System.nanoTime() - waitStart);
+    if (fileIndex != null && fileIndex == CLOSED_COMPLETION) {
       checkOpen();
-      ReadSubtask subtask = plan.subtask;
-      allocNanos = lease.ensureCapacity(subtask.getTotalSizeBytes());
-      HostMemoryBuffer output = lease.buffer();
-      byte[] header = subtask.getHeaderBytes();
-      output.setBytes(0L, header, 0, header.length);
-      long outputOffset = header.length;
+      throw new CancellationException("staged Parquet reader completion queue closed");
+    }
+    checkOpen();
+    return fileIndex;
+  }
 
-      for (DiskReadyFile.CachedRange range : plan.ranges) {
-        long readStart = System.nanoTime();
-        copyCachedRange(range.channel(), output, outputOffset, range.length());
-        long elapsed = System.nanoTime() - readStart;
-        allDiskReadNanos = Math.addExact(allDiskReadNanos, elapsed);
-        if (range.initialCacheHit()) {
-          cacheReadNanos = Math.addExact(cacheReadNanos, elapsed);
+  /** Admit one fully completed file result into the task-thread planner. */
+  private void admitFile(int fileIndex) throws Exception {
+    CompletableFuture<TimedFooter> footerFuture;
+    CompletableFuture<FileFragment> fragmentFuture;
+    synchronized (lifecycleLock) {
+      footerFuture = footerFutures.get(fileIndex);
+      fragmentFuture = fragmentFutures.get(fileIndex);
+    }
+
+    if (!fragmentFuture.isDone()) {
+      GpuSemaphore$.MODULE$.releaseIfNecessary(taskContext);
+    }
+    if (combineEnabled) {
+      // The completion queue publishes only terminal fragment futures.
+      awaitOrCancel(fragmentFuture);
+    } else {
+      long resultWaitStart = System.nanoTime();
+      awaitOrCancel(fragmentFuture);
+      adapter.onResultWait(System.nanoTime() - resultWaitStart);
+    }
+    long footerWaitStart = System.nanoTime();
+    TimedFooter timed = awaitOrCancel(footerFuture);
+    adapter.onFooterWait(System.nanoTime() - footerWaitStart);
+    adapter.onFooterCompleted(timed.footerNanos);
+
+    filesAdmitted++;
+    fragmentByFooter.put(timed.footer, fragmentFuture);
+    plannedSubtasks.addAll(session.add(timed.footer));
+  }
+
+  /**
+   * Wait for the subtask's fragments and hand a zero-copy logical Parquet input to GPU decode.
+   * Fragment download measurements are attributed to the first consuming subtask; combine time
+   * now measures only construction of the segment description rather than a full data copy.
+   */
+  private Iterator<ColumnarBatch> assembleAndDecode(ReadSubtask subtask) throws Exception {
+    List<ReadSubtask.FileSlice> slices = subtask.getFileSlices();
+    ArrayList<FileFragment> fragments = new ArrayList<>(slices.size());
+    for (ReadSubtask.FileSlice slice : slices) {
+      CompletableFuture<FileFragment> future = fragmentByFooter.get(slice.getFooter());
+      if (future == null) {
+        throw new IllegalStateException("subtask references an unconsumed footer");
+      }
+      if (!future.isDone()) {
+        GpuSemaphore$.MODULE$.releaseIfNecessary(taskContext);
+      }
+      fragments.add(awaitOrCancel(future));
+    }
+
+    long ioNanos = 0L;
+    long ioAllocNanos = 0L;
+    long ioReadWaitNanos = 0L;
+    long ioRouteNanos = 0L;
+    long ioFinalizeNanos = 0L;
+    long ioRequestCount = 0L;
+    long ioRequestedBytes = 0L;
+    long cacheHitCount = 0L;
+    long cacheHitBytes = 0L;
+    long cacheMissCount = 0L;
+    long cacheMissBytes = 0L;
+    long cacheReadNanos = 0L;
+    boolean diskBacked = false;
+    for (FileFragment fragment : fragments) {
+      FileFragment.DownloadStats stats = fragment.getStats();
+      diskBacked |= stats.diskBacked;
+      if (statsAttributed.add(fragment)) {
+        ioNanos = Math.addExact(ioNanos, stats.ioNanos);
+        ioAllocNanos = Math.addExact(ioAllocNanos, stats.allocNanos);
+        ioReadWaitNanos = Math.addExact(ioReadWaitNanos, stats.readWaitNanos);
+        ioRouteNanos = Math.addExact(ioRouteNanos, stats.routeNanos);
+        ioFinalizeNanos = Math.addExact(ioFinalizeNanos, stats.finalizeNanos);
+        ioRequestCount += stats.requestCount;
+        ioRequestedBytes = Math.addExact(ioRequestedBytes, stats.requestedBytes);
+        cacheHitCount += stats.cacheHitCount;
+        cacheHitBytes = Math.addExact(cacheHitBytes, stats.cacheHitBytes);
+        cacheMissCount += stats.cacheMissCount;
+        cacheMissBytes = Math.addExact(cacheMissBytes, stats.cacheMissBytes);
+        cacheReadNanos = Math.addExact(cacheReadNanos, stats.cacheReadNanos);
+      }
+    }
+
+    long assembleStart = System.nanoTime();
+    StagedParquetInput parquetInput = new StagedParquetInput(subtask, fragments);
+    long combineNanos = System.nanoTime() - assembleStart;
+    adapter.onSubtaskCompleted(subtask, new SubtaskStats(
+        ioNanos, ioAllocNanos, ioReadWaitNanos, ioRouteNanos, ioFinalizeNanos,
+        ioRequestCount, ioRequestedBytes, combineNanos, diskBacked,
+        cacheHitCount, cacheHitBytes, cacheMissCount, cacheMissBytes, cacheReadNanos));
+
+    // The adapter eagerly drains cuDF's producer, so no returned batch references the borrowed
+    // fragments. Only after it returns can we close fragment owners behind the admission cursor.
+    Iterator<ColumnarBatch> decoded = adapter.decodeAndPostProcess(subtask, parquetInput);
+    if (decoded == null) {
+      throw new IllegalStateException("decode adapter returned null");
+    }
+    closeFullyConsumedFragments(slices, fragments);
+    return decoded;
+  }
+
+  /**
+   * Close every fragment whose final non-empty row group was consumed by this subtask. A file
+   * split by a per-file row/GPU limit stays live only until its last slice; complete files in a
+   * combined subtask close immediately after cuDF has eagerly consumed their zero-copy slices.
+   */
+  private void closeFullyConsumedFragments(
+      List<ReadSubtask.FileSlice> slices,
+      List<FileFragment> fragments) {
+    for (int index = 0; index < slices.size(); index++) {
+      ReadSubtask.FileSlice slice = slices.get(index);
+      List<BlockMetaData> blocks = slice.getFooter().getBlocks();
+      boolean hasLaterData = false;
+      for (int blockIndex = slice.getFirstBlock() + slice.getBlockCount();
+          blockIndex < blocks.size(); blockIndex++) {
+        if (blocks.get(blockIndex).getRowCount() > 0L) {
+          hasLaterData = true;
+          break;
         }
-        outputOffset = Math.addExact(outputOffset, range.length());
-        range.close();
       }
-      if (outputOffset != subtask.getFooterOffset()) {
-        throw new IllegalStateException(
-            "assembled data ended at " + outputOffset +
-                ", expected footer at " + subtask.getFooterOffset());
-      }
-      byte[] footer = subtask.getFooterAndTrailerBytes();
-      output.setBytes(outputOffset, footer, 0, footer.length);
-
-      StagedParquetInput input = new StagedParquetInput(subtask.getTotalSizeBytes(), lease);
-      AssemblyBufferPool.CapacitySnapshot capacity =
-          assemblyBuffers.capacitySnapshot();
-      SubtaskStats stats = new SubtaskStats(
-          plan.stats.ioNanos,
-          allocNanos,
-          plan.stats.remoteReadNanos,
-          allDiskReadNanos,
-          plan.stats.cacheCommitNanos,
-          plan.stats.requestCount,
-          plan.stats.requestedBytes,
-          plan.planningNanos,
-          true,
-          plan.stats.cacheHitCount,
-          plan.stats.cacheHitBytes,
-          plan.stats.cacheMissCount,
-          plan.stats.cacheMissBytes,
-          cacheReadNanos,
-          capacity.getCurrentCapacityBytes(),
-          capacity.getPeakCapacityBytes());
-      PreparedSubtask prepared = new PreparedSubtask(
-          subtask, input, stats, System.nanoTime() - assemblyStart);
-      leaseTransferred = true;
-      return prepared;
-    } finally {
-      plan.close();
-      if (!leaseTransferred) {
-        lease.close();
+      if (!hasLaterData) {
+        FileFragment fragment = fragments.get(index);
+        fragmentByFooter.remove(slice.getFooter());
+        statsAttributed.remove(fragment);
+        closeFragmentAfterAsync(fragment);
       }
     }
   }
 
-  private static void copyCachedRange(
-      SeekableByteChannel source,
-      HostMemoryBuffer destination,
-      long destinationOffset,
-      long length) throws Exception {
-    source.position(0L);
-    long copied = 0L;
-    while (copied < length) {
-      int amount = (int) Math.min(length - copied, Integer.MAX_VALUE);
-      ByteBuffer output = destination.asByteBuffer(destinationOffset + copied, amount);
-      while (output.hasRemaining()) {
-        int read = source.read(output);
-        if (read < 0) {
-          throw new EOFException(
-              "cached range ended with " + output.remaining() + " bytes remaining");
+  /** Close completed fragments now and attach cleanup to any fragment still finishing. */
+  private void closeAllFragmentFutures() {
+    List<CompletableFuture<FileFragment>> fragmentSnapshot;
+    synchronized (lifecycleLock) {
+      fragmentSnapshot = new ArrayList<>(fragmentFutures);
+    }
+    for (CompletableFuture<FileFragment> future : fragmentSnapshot) {
+      future.whenComplete((fragment, error) -> {
+        if (fragment != null) {
+          closeFragmentAfterAsync(fragment);
         }
-        if (read == 0) {
-          Thread.yield();
-        }
-      }
-      copied += amount;
+      });
     }
   }
 
-  /** Publish completed assemblies in completion order; the task consumes only this output. */
-  private void onAssemblyReady(
-      PreparedSubtask prepared,
-      Throwable error) {
-    CompletableFuture<PreparedSubtask> waiter = null;
-    boolean discard = false;
-    Throwable failure = error == null ? null : unwrap(error);
-    synchronized (this) {
-      if (assembliesInFlight <= 0) {
-        failure = addFailure(failure,
-            new IllegalStateException("assembly completed without an in-flight plan"));
-      } else {
-        assembliesInFlight--;
-      }
-      if (failure == null && prepared == null) {
-        failure = new IllegalStateException("assembly completed without a prepared subtask");
-      }
-      if (failure != null) {
-        // Failure is handled below after releasing this monitor.
-      } else if (closed.get() || terminalFailure != null) {
-        discard = true;
-      } else if (taskWaiter != null) {
-        waiter = taskWaiter;
-        taskWaiter = null;
-      } else {
-        readyAssembly.addLast(prepared);
-      }
-    }
-    if (failure != null) {
-      failPlanner(failure);
-      if (prepared != null) {
-        prepared.close();
-      }
-    } else if (discard) {
-      prepared.close();
-    } else if (waiter != null) {
-      if (!waiter.complete(prepared)) {
-        prepared.close();
-      }
-    }
-    requestAssemblySlotIfNeeded();
-  }
-
-  /** Return a future for the next completion-order assembly result or the end sentinel (null). */
-  private synchronized CompletableFuture<PreparedSubtask> nextReady() {
-    // close() flips the atomic flag before taking this monitor. Without this check it can finish
-    // between hasNext's outer check and this method, after which a newly installed waiter would
-    // have no producer left to wake it.
-    if (closed.get()) {
-      return CompletableFuture.completedFuture(null);
-    }
-    if (!readyAssembly.isEmpty()) {
-      return CompletableFuture.completedFuture(readyAssembly.pollFirst());
-    }
-    if (terminalFailure != null) {
-      CompletableFuture<PreparedSubtask> failed = new CompletableFuture<>();
-      failed.completeExceptionally(terminalFailure);
-      return failed;
-    }
-    if (isEndReadyLocked()) {
-      return CompletableFuture.completedFuture(null);
-    }
-    if (taskWaiter != null) {
-      throw new IllegalStateException("Spark task already waits for a prepared subtask");
-    }
-    taskWaiter = new CompletableFuture<>();
-    return taskWaiter;
-  }
-
-  private boolean isEndReadyLocked() {
-    return planningFinished && downloadsCompleted == files.size() &&
-        pendingAssembly.isEmpty() && pendingLease == null &&
-        assembliesInFlight == 0 && readyAssembly.isEmpty();
-  }
-
-  private CompletableFuture<PreparedSubtask> detachEndWaiterIfReadyLocked() {
-    if (taskWaiter != null && isEndReadyLocked()) {
-      CompletableFuture<PreparedSubtask> waiter = taskWaiter;
-      taskWaiter = null;
-      return waiter;
-    }
-    return null;
-  }
-
-  /** Release the remaining cache pins after normal terminal consumption. */
-  private void closeDiskFilesAfterEnd() {
-    List<DiskReadyFile> remaining;
-    synchronized (this) {
-      if (!isEndReadyLocked() || diskFiles.isEmpty()) {
-        return;
-      }
-      remaining = new ArrayList<>(diskFiles.values());
-      diskFiles.clear();
-    }
-    closeAll(remaining);
-  }
-
-  /** Move completed footer-worker timing to the Spark task thread for metric publication. */
-  private synchronized long drainFooterNanos() {
-    long nanos = unreportedFooterNanos;
-    unreportedFooterNanos = 0L;
-    return nanos;
-  }
-
-  /** First pipeline failure wins and wakes the task; resource closing happens outside locks. */
-  private void failPlanner(Throwable error) {
-    CompletableFuture<PreparedSubtask> waiter;
-    CompletableFuture<AssemblyBufferPool.Lease> leaseRequest;
-    List<AssemblyPlan> pending;
-    List<PreparedSubtask> ready;
-    List<DiskReadyFile> diskReady;
-    synchronized (this) {
-      if (terminalFailure != null || closed.get()) {
-        return;
-      }
-      terminalFailure = error;
-      combineGeneration++;
-      waiter = taskWaiter;
-      taskWaiter = null;
-      leaseRequest = pendingLease;
-      pendingLease = null;
-      pending = new ArrayList<>(pendingAssembly);
-      pendingAssembly.clear();
-      ready = new ArrayList<>(readyAssembly);
-      readyAssembly.clear();
-      diskReady = new ArrayList<>(diskFiles.values());
-      diskFiles.clear();
-    }
-    releasePendingLeaseRequest(leaseRequest);
-    closeAll(pending);
-    closeAll(ready);
-    closeAll(diskReady);
-    if (waiter != null) {
-      waiter.completeExceptionally(error);
+  private void closeFragmentAfterAsync(FileFragment fragment) {
+    try {
+      fragment.close();
+    } catch (Throwable error) {
+      recordAsynchronousCleanupFailure(error);
     }
   }
 
-  private static <T> T await(CompletableFuture<T> future) throws Exception {
+  /**
+   * Wait for one pipeline future while racing the close signal, so the task thread never stays
+   * blocked on a closed reader and close() never has to interfere with the pipeline futures.
+   */
+  private <T> T awaitOrCancel(CompletableFuture<T> future) throws Exception {
+    // The joined any-of future never throws here: a failed stage is rethrown below with its
+    // original failure type instead of anyOf's CompletionException wrapper.
+    CompletableFuture.anyOf(future, closeSignal).exceptionally(ignored -> null).join();
+    checkOpen();
     try {
       return future.get();
     } catch (InterruptedException e) {
@@ -1099,16 +892,16 @@ public final class StagedParquetPartitionReader
     if (closed.get()) {
       throw new CancellationException("staged Parquet reader is closed");
     }
-    Throwable failure;
-    synchronized (this) {
-      failure = terminalFailure;
-    }
-    if (failure != null) {
-      throw propagate(failure);
-    }
   }
 
-  /** Install the captured Spark task/RMM identity around each blocking shared-pool operation. */
+  /**
+   * Run shared-pool work as part of the Spark task that created this reader.
+   *
+   * <p>{@link TaskContext} is thread-local and is not inherited by executor-pool workers. The RMM
+   * registration associates host allocation, spill, and retry coordination on this worker with
+   * the owning Spark task. This is the same paired registration used by the existing asynchronous
+   * Parquet, ORC, and Avro readers.</p>
+   */
   private <T> T runAsTaskPoolThread(Callable<T> operation) throws Exception {
     if (taskContext == null) {
       return operation.call();
@@ -1116,11 +909,12 @@ public final class StagedParquetPartitionReader
     T result = null;
     Throwable failure = null;
     boolean operationCompleted = false;
-    boolean contextInstalled = false;
+    boolean taskContextInstalled = false;
     boolean rmmRegistered = false;
     try {
       TrampolineUtil$.MODULE$.setTaskContext(taskContext);
-      contextInstalled = true;
+      taskContextInstalled = true;
+      // Tell the RMM retry framework which Spark task temporarily owns this shared worker.
       RmmSpark.poolThreadWorkingOnTask(taskAttemptId);
       rmmRegistered = true;
       result = operation.call();
@@ -1136,7 +930,7 @@ public final class StagedParquetPartitionReader
         failure = addFailure(failure, cleanupError);
       }
       try {
-        if (contextInstalled) {
+        if (taskContextInstalled) {
           TrampolineUtil$.MODULE$.unsetTaskContext();
         }
       } catch (Throwable cleanupError) {
@@ -1162,78 +956,6 @@ public final class StagedParquetPartitionReader
     return result;
   }
 
-  @Override
-  public void close() {
-    if (!closed.compareAndSet(false, true)) {
-      return;
-    }
-
-    CompletableFuture<PreparedSubtask> waiter;
-    CompletableFuture<AssemblyBufferPool.Lease> leaseRequest;
-    List<AssemblyPlan> pending;
-    List<PreparedSubtask> ready;
-    List<DiskReadyFile> diskReady;
-    List<CompletableFuture<DiskReadyFile>> futures;
-    synchronized (this) {
-      combineGeneration++;
-      waiter = taskWaiter;
-      taskWaiter = null;
-      leaseRequest = pendingLease;
-      pendingLease = null;
-      pending = new ArrayList<>(pendingAssembly);
-      pendingAssembly.clear();
-      ready = new ArrayList<>(readyAssembly);
-      readyAssembly.clear();
-      diskReady = new ArrayList<>(diskFiles.values());
-      diskFiles.clear();
-      futures = new ArrayList<>(fileFutures);
-    }
-    releasePendingLeaseRequest(leaseRequest);
-    // Free this Spark task's idle assembly HMBs now. A slot still owned by an assembly worker is
-    // marked for close and frees its HMB when that idempotent lease is returned.
-    Throwable failure = null;
-    try {
-      assemblyBuffers.close();
-    } catch (Throwable error) {
-      failure = error;
-    }
-    if (waiter != null) {
-      waiter.complete(null);
-    }
-    closeAll(pending);
-    closeAll(ready);
-    closeAll(diskReady);
-    for (CompletableFuture<DiskReadyFile> future : futures) {
-      future.whenComplete((file, ignored) -> {
-        if (file != null) {
-          try {
-            file.close();
-          } catch (Throwable cleanupError) {
-            recordAsynchronousCleanupFailure(cleanupError);
-          }
-        }
-      });
-    }
-
-    synchronized (iteratorLock) {
-      if (currentBatches != null) {
-        try {
-          closeIterator(currentBatches);
-        } catch (Throwable error) {
-          failure = addFailure(failure, error);
-        }
-        currentBatches = null;
-      }
-    }
-    Throwable asyncFailure = asynchronousCleanupFailure.get();
-    if (asyncFailure != null) {
-      failure = addFailure(failure, asyncFailure);
-    }
-    if (failure != null) {
-      throw propagate(failure);
-    }
-  }
-
   private void recordAsynchronousCleanupFailure(Throwable error) {
     Throwable first = asynchronousCleanupFailure.get();
     if (first == null && asynchronousCleanupFailure.compareAndSet(null, error)) {
@@ -1247,22 +969,6 @@ public final class StagedParquetPartitionReader
     }
   }
 
-  /** Cancel an ungranted slot request, or immediately return a slot granted before dispatch. */
-  private static void releasePendingLeaseRequest(
-      CompletableFuture<AssemblyBufferPool.Lease> leaseRequest) {
-    if (leaseRequest == null || leaseRequest.cancel(false)) {
-      return;
-    }
-    try {
-      AssemblyBufferPool.Lease granted = leaseRequest.getNow(null);
-      if (granted != null) {
-        granted.close();
-      }
-    } catch (CancellationException | CompletionException ignored) {
-      // An exceptional acquisition owns no slot. Its callback will observe the terminal reader.
-    }
-  }
-
   private void closeAfterFailure(Throwable original) {
     try {
       close();
@@ -1271,20 +977,35 @@ public final class StagedParquetPartitionReader
     }
   }
 
-  private static void closeAll(Iterable<? extends AutoCloseable> resources) {
-    for (AutoCloseable resource : resources) {
-      try {
-        resource.close();
-      } catch (Throwable ignored) {
-        // A primary pipeline failure or cancellation is already being reported. Late cleanup
-        // failures are best-effort here because there is no task-thread observer for them.
+  @Override
+  public void close() {
+    if (!closed.compareAndSet(false, true)) {
+      return;
+    }
+    // Wake the task thread from any per-file wait. The pipeline futures stay untouched — their
+    // pool jobs remain the sole completers and are never cancelled, they drain naturally.
+    closeSignal.complete(null);
+    completedFileIndexes.offer(CLOSED_COMPLETION);
+    // Reclaim fragments that completed before close or complete later without a consumer.
+    // Consumed fragments close twice harmlessly: fragment close is idempotent.
+    closeAllFragmentFutures();
+    Throwable failure = null;
+    synchronized (iteratorLock) {
+      if (currentBatches != null) {
+        try {
+          closeIterator(currentBatches);
+        } catch (Throwable error) {
+          failure = error;
+        }
+        currentBatches = null;
       }
     }
-  }
-
-  private static void closeIterator(Iterator<ColumnarBatch> iterator) throws Exception {
-    if (iterator instanceof AutoCloseable) {
-      ((AutoCloseable) iterator).close();
+    Throwable asynchronousFailure = asynchronousCleanupFailure.get();
+    if (asynchronousFailure != null) {
+      failure = addFailure(failure, asynchronousFailure);
+    }
+    if (failure != null) {
+      throw propagate(failure);
     }
   }
 
@@ -1296,6 +1017,12 @@ public final class StagedParquetPartitionReader
       first.addSuppressed(next);
     }
     return first;
+  }
+
+  private static void closeIterator(Iterator<ColumnarBatch> iterator) throws Exception {
+    if (iterator instanceof AutoCloseable) {
+      ((AutoCloseable) iterator).close();
+    }
   }
 
   private static Throwable unwrap(Throwable error) {
@@ -1318,7 +1045,7 @@ public final class StagedParquetPartitionReader
     return new RuntimeException(unwrapped);
   }
 
-  /** Footer metadata published before its fused worker proceeds to direct-cache download. */
+  /** One filtered footer paired with the worker's fetch/filter elapsed time. */
   private static final class TimedFooter {
     private final FooterResult footer;
     private final long footerNanos;
@@ -1329,162 +1056,4 @@ public final class StagedParquetPartitionReader
     }
   }
 
-  /** One direct-cache reservation in original row-group/column order. */
-  private static final class PendingRange {
-    private final long length;
-    private final boolean cacheHit;
-    private final FileCacheDataRangeReservation reservation;
-    private boolean leaseClaimed;
-
-    private PendingRange(
-        long length,
-        boolean cacheHit,
-        FileCacheDataRangeReservation reservation) {
-      this.length = length;
-      this.cacheHit = cacheHit;
-      this.reservation = reservation;
-    }
-  }
-
-  /** Tracks whether a writable reservation may still be canceled after a failed S3 operation. */
-  private static final class OwnedWriter {
-    private final FileCacheDataRangeWriter writer;
-    private boolean terminal;
-
-    private OwnedWriter(FileCacheDataRangeWriter writer) {
-      this.writer = writer;
-    }
-  }
-
-  /**
-   * Immutable assembly work emitted by the synchronized planner.
-   *
-   * <p>It owns the exact cache leases for this subtask. Closing before successful assembly
-   * releases every pin; successful assembly also closes them immediately after copying.</p>
-   */
-  private static final class AssemblyPlan implements AutoCloseable {
-    private final ReadSubtask subtask;
-    private final long planningNanos;
-    private List<DiskReadyFile.CachedRange> ranges = Collections.emptyList();
-    private DiskReadyFile.DownloadStats stats = DiskReadyFile.DownloadStats.EMPTY;
-    private boolean rangesClaimed;
-
-    private AssemblyPlan(
-        ReadSubtask subtask,
-        long planningNanos) {
-      this.subtask = Objects.requireNonNull(subtask, "subtask");
-      this.planningNanos = planningNanos;
-    }
-
-    /** Return whether every footer referenced by this metadata plan is cache-ready. */
-    private boolean isReady(Map<FooterResult, DiskReadyFile> diskFiles) {
-      for (ReadSubtask.FileSlice slice : subtask.getFileSlices()) {
-        if (!diskFiles.containsKey(slice.getFooter())) {
-          return false;
-        }
-      }
-      return true;
-    }
-
-    /** Transfer this subtask's exact cache leases after an assembly slot has been granted. */
-    private void claimRanges(Map<FooterResult, DiskReadyFile> diskFiles) {
-      if (rangesClaimed) {
-        throw new IllegalStateException("assembly plan cache ranges were already claimed");
-      }
-      ArrayList<DiskReadyFile.CachedRange> claimed = new ArrayList<>();
-      DownloadStatsAccumulator accumulator = new DownloadStatsAccumulator();
-      try {
-        Set<DiskReadyFile> statsFiles =
-            Collections.newSetFromMap(new IdentityHashMap<DiskReadyFile, Boolean>());
-        for (ReadSubtask.FileSlice slice : subtask.getFileSlices()) {
-          DiskReadyFile diskFile = diskFiles.get(slice.getFooter());
-          if (diskFile == null) {
-            throw new IllegalStateException("planned footer has no cache-ready file");
-          }
-          claimed.addAll(diskFile.takeRanges(slice.getFirstBlock(), slice.getBlockCount()));
-          if (statsFiles.add(diskFile)) {
-            accumulator.add(diskFile.claimStats());
-          }
-        }
-        long bytes = 0L;
-        for (DiskReadyFile.CachedRange range : claimed) {
-          bytes = Math.addExact(bytes, range.length());
-        }
-        if (bytes != subtask.getDataSizeBytes()) {
-          throw new IllegalStateException(
-              "claimed cache bytes " + bytes +
-                  " do not match planned bytes " + subtask.getDataSizeBytes());
-        }
-      } catch (Throwable error) {
-        closeAll(claimed);
-        throw error;
-      }
-      ranges = claimed;
-      stats = accumulator.build();
-      rangesClaimed = true;
-    }
-
-    @Override
-    public void close() {
-      closeAll(ranges);
-    }
-  }
-
-  /** Assembly output handed to the Spark task; owns the reusable slot until decode returns. */
-  private static final class PreparedSubtask implements AutoCloseable {
-    private final ReadSubtask subtask;
-    private final StagedParquetInput input;
-    private final SubtaskStats stats;
-    private final long assemblyNanos;
-    private final AtomicBoolean closed = new AtomicBoolean();
-
-    private PreparedSubtask(
-        ReadSubtask subtask,
-        StagedParquetInput input,
-        SubtaskStats stats,
-        long assemblyNanos) {
-      this.subtask = subtask;
-      this.input = input;
-      this.stats = stats;
-      this.assemblyNanos = assemblyNanos;
-    }
-
-    @Override
-    public void close() {
-      if (closed.compareAndSet(false, true)) {
-        input.close();
-      }
-    }
-  }
-
-  /** Adds per-file worker measurements once when several files combine into one subtask. */
-  private static final class DownloadStatsAccumulator {
-    private long ioNanos;
-    private long remoteReadNanos;
-    private long cacheCommitNanos;
-    private long requestCount;
-    private long requestedBytes;
-    private long cacheHitCount;
-    private long cacheHitBytes;
-    private long cacheMissCount;
-    private long cacheMissBytes;
-
-    private void add(DiskReadyFile.DownloadStats stats) {
-      ioNanos = Math.addExact(ioNanos, stats.ioNanos);
-      remoteReadNanos = Math.addExact(remoteReadNanos, stats.remoteReadNanos);
-      cacheCommitNanos = Math.addExact(cacheCommitNanos, stats.cacheCommitNanos);
-      requestCount = Math.addExact(requestCount, stats.requestCount);
-      requestedBytes = Math.addExact(requestedBytes, stats.requestedBytes);
-      cacheHitCount = Math.addExact(cacheHitCount, stats.cacheHitCount);
-      cacheHitBytes = Math.addExact(cacheHitBytes, stats.cacheHitBytes);
-      cacheMissCount = Math.addExact(cacheMissCount, stats.cacheMissCount);
-      cacheMissBytes = Math.addExact(cacheMissBytes, stats.cacheMissBytes);
-    }
-
-    private DiskReadyFile.DownloadStats build() {
-      return new DiskReadyFile.DownloadStats(
-          ioNanos, remoteReadNanos, cacheCommitNanos, requestCount, requestedBytes,
-          cacheHitCount, cacheHitBytes, cacheMissCount, cacheMissBytes);
-    }
-  }
 }
