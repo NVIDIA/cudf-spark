@@ -32,7 +32,6 @@ from typing import Callable, Dict
 from pyspark.sql.types import StringType, IntegerType
 
 from asserts import assert_gpu_fallback_write, assert_gpu_and_cpu_writes_are_equal_collect
-from conftest import is_databricks_runtime
 from data_gen import unary_op_df, int_gen, copy_and_update, SetValuesGen, string_gen, long_gen, \
     gen_df, append_unique_int_col_to_df
 from delta_lake_delete_test import delta_delete_enabled_conf
@@ -62,7 +61,7 @@ def assert_liquid_clustering_delta_logs_equivalent(data_path):
     reason="DBR 17.3 plans Delta liquid CTAS through V2 AtomicCreateTableAsSelectExec")
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_databricks_runtime() and not is_spark_353_or_later(),
+@pytest.mark.skipif(not is_spark_353_or_later(),
                     reason="CTAS with cluster by is only supported on delta 3.3+")
 def test_delta_ctas_sql_liquid_clustering(spark_tmp_path, spark_tmp_table_factory):
     view_name = spark_tmp_table_factory.get()
@@ -125,7 +124,7 @@ def setup_clustered_table_sql(spark, path, table_name, view_name):
 @allow_non_gpu(*delta_meta_allow, "CreateTableExec")
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_databricks_runtime() and not is_spark_353_or_later(),
+@pytest.mark.skipif(not is_spark_353_or_later(),
                     reason="RTAS with cluster by is only supported on delta 3.3+")
 @pytest.mark.skipif(is_spark_356_or_later(),
                     reason="https://github.com/delta-io/delta/issues/4671")
@@ -158,7 +157,7 @@ def test_delta_rtas_sql_liquid_clustering(spark_tmp_path, spark_tmp_table_factor
 @allow_non_gpu(*delta_meta_allow, "CreateTableExec")
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_databricks_runtime() and not is_spark_353_or_later(),
+@pytest.mark.skipif(not is_spark_353_or_later(),
                     reason="Create table with cluster by is only supported on delta 3.1+")
 def test_delta_append_sql_liquid_clustering(spark_tmp_path, spark_tmp_table_factory):
     def write_func(spark, path):
@@ -185,7 +184,7 @@ def test_delta_append_sql_liquid_clustering(spark_tmp_path, spark_tmp_table_fact
 @allow_non_gpu(*delta_meta_allow, "CreateTableExec")
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_databricks_runtime() and not is_spark_353_or_later(),
+@pytest.mark.skipif(not is_spark_353_or_later(),
                     reason="Create table with cluster by is only supported on delta 3.1+")
 def test_delta_insert_overwrite_static_sql_liquid_clustering(spark_tmp_path,
                                                                spark_tmp_table_factory):
@@ -215,7 +214,7 @@ def test_delta_insert_overwrite_static_sql_liquid_clustering(spark_tmp_path,
 @allow_non_gpu(*delta_meta_allow, "CreateTableExec")
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_databricks_runtime() and not is_spark_353_or_later(),
+@pytest.mark.skipif(not is_spark_353_or_later(),
                     reason="Create table with cluster by is only supported on delta 3.1+")
 @pytest.mark.skipif(is_databricks173_or_later(),
                     reason="DBR 17.3 disallows dynamic partition overwrite for liquid clustering")
@@ -252,7 +251,7 @@ def test_delta_insert_overwrite_dynamic_sql_liquid_clustering(spark_tmp_path,
     reason="DBR 17.3 liquid clustering replaceWhere may use CPU Delta write commands")
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_databricks_runtime() and not is_spark_353_or_later(),
+@pytest.mark.skipif(not is_spark_353_or_later(),
                     reason="Create table with cluster by is only supported on delta 3.1+")
 def test_delta_insert_overwrite_replace_where_sql_liquid_clustering(spark_tmp_path,
                                                                              spark_tmp_table_factory):
@@ -312,7 +311,7 @@ def do_test_delta_dml_sql_liquid_clustering(spark_tmp_path,
     reason="DBR 17.3 liquid clustering DML may use CPU Delta write commands")
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_databricks_runtime() and not is_spark_353_or_later(),
+@pytest.mark.skipif(not is_spark_353_or_later(),
                     reason="Create table with cluster by is only supported on delta 3.1+")
 def test_delta_delete_sql_liquid_clustering(spark_tmp_path, spark_tmp_table_factory):
 
@@ -327,7 +326,7 @@ def test_delta_delete_sql_liquid_clustering(spark_tmp_path, spark_tmp_table_fact
     reason="DBR 17.3 liquid clustering DML may use CPU Delta write commands")
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_databricks_runtime() and not is_spark_353_or_later(),
+@pytest.mark.skipif(not is_spark_353_or_later(),
                     reason="Create table with cluster by is only supported on delta 3.1+")
 @disable_ansi_mode
 def test_delta_update_sql_liquid_clustering(spark_tmp_path,
@@ -342,7 +341,7 @@ def test_delta_update_sql_liquid_clustering(spark_tmp_path,
 @allow_non_gpu_conditional(is_spark_400_or_later(), "HashAggregateExec")
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_databricks_runtime() and is_before_spark_353(),
+@pytest.mark.skipif(is_before_spark_353(),
                     reason="Spark-RAPIDS plugin supports liquid clustering for Delta IO 3.3+")
 def test_delta_merge_sql_liquid_clustering(spark_tmp_path, spark_tmp_table_factory):
 
@@ -437,7 +436,7 @@ def write_to_delta_table_df(spark, path, mode, opts= None):
 @allow_non_gpu(*delta_meta_allow, "CreateTableExec")
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_databricks_runtime() and not is_spark_353_or_later(),
+@pytest.mark.skipif(not is_spark_353_or_later(),
                     reason="Create table with cluster by is only supported on delta 3.1+")
 def test_delta_append_df_liquid_clustering(spark_tmp_path, spark_tmp_table_factory):
     def write_func(spark, path):
@@ -461,7 +460,7 @@ def test_delta_append_df_liquid_clustering(spark_tmp_path, spark_tmp_table_facto
 @ignore_order
 @pytest.mark.parametrize("overwrite_mode", ["STATIC", "DYNAMIC"],
                          ids = lambda val: f"overwrite_mode={val}")
-@pytest.mark.skipif(not is_databricks_runtime() and not is_spark_353_or_later(),
+@pytest.mark.skipif(not is_spark_353_or_later(),
                     reason="Create table with cluster by is only supported on delta 3.1+")
 def test_delta_insert_overwrite_df_liquid_clustering(spark_tmp_path,
                                                               spark_tmp_table_factory,
@@ -493,7 +492,7 @@ def test_delta_insert_overwrite_df_liquid_clustering(spark_tmp_path,
     reason="DBR 17.3 liquid clustering replaceWhere may use CPU Delta write commands")
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_databricks_runtime() and not is_spark_353_or_later(),
+@pytest.mark.skipif(not is_spark_353_or_later(),
                     reason="Create table with cluster by is only supported on delta 3.1+")
 def test_delta_insert_overwrite_replace_where_df_liquid_clustering(
         spark_tmp_path, spark_tmp_table_factory):
