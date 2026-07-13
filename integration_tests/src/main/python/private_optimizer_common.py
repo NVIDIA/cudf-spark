@@ -33,24 +33,16 @@ rule actually fired, so every test built on these helpers does two things:
 See ``private_optimizer_README.md`` for how to add a new rule module.
 """
 
-import pytest
-
 from asserts import assert_equal_with_local_sort
-from spark_session import is_before_spark_330, with_cpu_session, with_gpu_session
+from spark_session import with_cpu_session, with_gpu_session
 
 # The private optimizer rules ship in the spark-rapids-private plugin, which is
 # built only for Spark 3.3.0 and later (see the private core pom build matrix:
-# 330..411 plus the Databricks 400db173 buildver). Below 3.3.0 the rules are not
-# present at all, so the conf flips would be silent no-ops. This is the one
-# version floor we can assert from the source; runtimes within the matrix
+# 330..411 plus the Databricks 400db173 buildver). Runtimes within the matrix
 # (including Databricks) are all supported for these four rules, so we do not
 # add per-runtime skips here. A rule that becomes unsupported on some future
 # runtime is caught by the plan-marker assertion below (it fails loudly instead
 # of passing silently), not by guessing a version here.
-require_private_optimizer = pytest.mark.skipif(
-    is_before_spark_330(),
-    reason="private optimizer rules require the spark-rapids-private plugin, "
-           "which is built for Spark 3.3.0+")
 
 PRIVATE_OPTIMIZER_BASE_CONF = {
     "spark.rapids.sql.private.enabled": "true",

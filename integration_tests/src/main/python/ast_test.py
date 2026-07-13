@@ -17,8 +17,8 @@ import pytest
 from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, assert_gpu_and_cpu_are_equal_collect
 from data_gen import *
 from marks import approximate_float, datagen_overrides, ignore_order, disable_ansi_mode
-from spark_session import with_cpu_session, is_before_spark_330, is_spark_403, \
-    is_spark_412_or_later
+from spark_session import with_cpu_session, is_spark_403, is_spark_412_or_later
+
 import pyspark.sql.functions as f
 
 # Each descriptor contains a list of data generators and a corresponding boolean
@@ -131,7 +131,6 @@ def test_bitwise_not(data_descr):
 def test_unary_positive(data_descr):
     assert_unary_ast(data_descr, lambda df: df.selectExpr('+a'))
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_unary_positive_for_daytime_interval():
     data_descr = (DayTimeIntervalGen(), True)
     assert_unary_ast(data_descr, lambda df: df.selectExpr('+a'))

@@ -163,7 +163,6 @@ def test_hybrid_parquet_read_fallback_to_gpu(spark_tmp_path, parquet_gens):
 
 @pytest.mark.skipif(is_databricks_runtime(), reason="Hybrid feature does not support Databricks currently")
 @pytest.mark.skipif(not is_hybrid_backend_loaded(), reason="HybridScan specialized tests")
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 @hybrid_test
 def test_hybrid_parquet_read_daytime_interval_fallback_to_gpu(spark_tmp_path):
     data_path = spark_tmp_path + '/PARQUET_DATA'

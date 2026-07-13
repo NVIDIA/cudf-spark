@@ -1230,13 +1230,13 @@ object GpuRegExpUtils {
   }
 
   /**
-   * Returns the number of groups in regexp
-   * (includes both capturing and non-capturing groups)
+   * Returns the number of capturing groups in regexp.
    */
   def countGroups(pattern: String): Int = {
     def countGroups(regexp: RegexAST): Int = {
       regexp match {
-        case RegexGroup(_, term, _) => 1 + countGroups(term)
+        case RegexGroup(capture, term, _) =>
+          (if (capture) 1 else 0) + countGroups(term)
         case other => other.children().map(countGroups).sum
       }
    }
