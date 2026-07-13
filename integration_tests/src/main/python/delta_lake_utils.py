@@ -247,9 +247,9 @@ def read_delta_logs(spark, path):
     log_data = spark.sparkContext.wholeTextFiles(path).collect()
     return dict([(os.path.basename(x), _decode_jsons(y)) for x, y in log_data])
 
-def assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path):
-    cpu_log_data = spark.sparkContext.wholeTextFiles(data_path + "/CPU/_delta_log/*").collect()
-    gpu_log_data = spark.sparkContext.wholeTextFiles(data_path + "/GPU/_delta_log/*").collect()
+def assert_delta_logs_at_paths_equivalent(spark, cpu_path, gpu_path):
+    cpu_log_data = spark.sparkContext.wholeTextFiles(cpu_path + "/_delta_log/*").collect()
+    gpu_log_data = spark.sparkContext.wholeTextFiles(gpu_path + "/_delta_log/*").collect()
     assert len(cpu_log_data) == len(gpu_log_data), "Different number of Delta log files:\nCPU: {}\nGPU: {}".format(cpu_log_data, gpu_log_data)
     cpu_logs_data = [ (os.path.basename(x), y) for x, y in cpu_log_data if x.endswith(".json") ]
     gpu_logs_dict = dict([ (os.path.basename(x), y) for x, y in gpu_log_data if x.endswith(".json") ])
@@ -261,6 +261,23 @@ def assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path):
         assert len(cpu_jsons) == len(gpu_jsons), "Different line counts in {}:\nCPU: {}\nGPU: {}".format(file, cpu_json_data, gpu_json_data)
         for cpu_json, gpu_json in zip(cpu_jsons, gpu_jsons):
             assert_delta_log_json_equivalent(file, cpu_json, gpu_json)
+
+def assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path):
+    assert_delta_logs_at_paths_equivalent(spark, data_path + "/CPU", data_path + "/GPU")
+
+def assert_delta_add_file_stats_present(spark, path):
+    logs = read_delta_logs(spark, path + "/_delta_log/*.json")
+    add_actions = [
+        action["add"] for actions in logs.values() for action in actions if "add" in action
+    ]
+    assert len(add_actions) > 0, f"No AddFile actions found in {path}"
+    for add in add_actions:
+        assert add.get("stats"), f"Missing AddFile statistics in {path}: {add}"
+        stats = json.loads(add["stats"])
+        assert stats.get("numRecords", 0) > 0, \
+            f"Invalid AddFile numRecords in {path}: {stats}"
+        assert {"minValues", "maxValues", "nullCount"}.issubset(stats), \
+            f"Incomplete AddFile statistics in {path}: {stats}"
 
 def assert_gpu_and_cpu_latest_delta_log_equivalent(spark, data_path):
     cpu_logs = read_delta_logs(spark, data_path + "/CPU/_delta_log/*.json")
@@ -410,9 +427,16 @@ def assert_db173_gpu_data_writing_command(do_test, conf):
         captured_plans = callback.getResultsWithTimeout(10000)
         assert len(captured_plans) > 0, "No execution plans captured for Delta write"
         required_classes = ["GpuDataWritingCommandExec", "GpuWriteFilesExec"]
-        assert any(all(callback.contains(plan, cls) for cls in required_classes)
-                   for plan in captured_plans), \
+        matching_plans = [
+            plan for plan in captured_plans
+            if all(callback.contains(plan, cls) for cls in required_classes)
+        ]
+        assert len(matching_plans) > 0, \
             f"No captured plan contains all of {required_classes}"
+        for plan in captured_plans:
+            for cpu_class in ["DataWritingCommandExec", "WriteFilesExec"]:
+                assert not callback.didFallBack(plan, cpu_class), \
+                    f"Captured GPU Delta write also contains CPU {cpu_class}"
         return result
     finally:
         callback.endCapture()

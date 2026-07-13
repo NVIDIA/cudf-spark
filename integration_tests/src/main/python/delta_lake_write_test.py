@@ -218,25 +218,42 @@ def test_delta_write_round_trip_managed(spark_tmp_table_factory, enable_deletion
 @delta_lake
 @ignore_order(local=True)
 @pytest.mark.skipif(not is_databricks173_or_later(), reason="DBR 17.3 native write path")
-@pytest.mark.parametrize("enable_deletion_vectors", [None, False, True], ids=idfn)
+@pytest.mark.parametrize("enable_deletion_vectors,column_mapping", [
+    pytest.param(None, None, id="dv_default-no_mapping"),
+    pytest.param(False, None, id="dv_false-no_mapping"),
+    pytest.param(True, None, id="dv_true-no_mapping"),
+    pytest.param(None, "name", id="dv_default-name_mapping"),
+    pytest.param(None, "id", id="dv_default-id_mapping"),
+])
 def test_delta_db173_native_managed_ctas_rtas(
-        spark_tmp_table_factory, enable_deletion_vectors):
+        spark_tmp_table_factory, enable_deletion_vectors, column_mapping):
     conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+    if column_mapping is not None:
+        conf = copy_and_update(conf, {
+            "spark.databricks.delta.properties.defaults.columnMapping.mode": column_mapping,
+            "spark.databricks.delta.properties.defaults.minReaderVersion": "2",
+            "spark.databricks.delta.properties.defaults.minWriterVersion": "5",
+            "spark.sql.parquet.fieldId.read.enabled": "true",
+            "spark.sql.parquet.fieldId.write.enabled": "true",
+        })
     cpu_table = spark_tmp_table_factory.get() + '_cpu'
     gpu_table = spark_tmp_table_factory.get() + '_gpu'
     source_table = spark_tmp_table_factory.get() + '_source'
 
+    source_conf = copy_and_update(conf, {
+        "spark.databricks.delta.properties.defaults.columnMapping.mode": "none"
+    })
     with_cpu_session(
         lambda spark: spark.range(4096).selectExpr(
             "id AS carrier_id",
             "concat('CARRIER-', id) AS carrier_code",
             "CAST(id % 7 AS INT) AS carrier_type") \
             .write.format("delta").mode("overwrite").saveAsTable(source_table),
-        conf=conf)
+        conf=source_conf)
 
     def write_table(spark, table, replace):
         # A managed Delta scan preserves pass-through ExprIds like the customer projections do.
-        source = spark.table(source_table)
+        source = spark.table(source_table).coalesce(1)
         if replace:
             source = source.selectExpr(
                 "carrier_code", "carrier_id", "carrier_type", "carrier_id + 1 AS version")
@@ -261,15 +278,75 @@ def test_delta_db173_native_managed_ctas_rtas(
 
     def table_state(spark, table):
         rows = spark.table(table).orderBy("carrier_id").collect()
-        schema = spark.table(table).schema.json()
+        schema = [
+            (field.name, field.dataType.json(), field.nullable)
+            for field in spark.table(table).schema.fields
+        ]
         version_zero = spark.sql(
             f"SELECT * FROM {table} VERSION AS OF 0 ORDER BY carrier_id").collect()
-        return rows, schema, version_zero
+        detail = spark.sql(f"DESCRIBE DETAIL {table}").select(
+            "format", "partitionColumns", "properties",
+            "minReaderVersion", "minWriterVersion").first().asDict(recursive=True)
+        return rows, schema, version_zero, detail
+
+    def normalized_add_actions(spark, table):
+        schema = spark.table(table).schema
+        physical_to_logical = {
+            field.metadata.get("delta.columnMapping.physicalName", field.name): field.name
+            for field in schema.fields
+        }
+        location = spark.sql(f"DESCRIBE DETAIL {table}").select("location").first()[0]
+        logs = read_delta_logs(spark, location + "/_delta_log/*.json")
+        ignored_tags = {
+            "INSERTION_TIME", "MAX_INSERTION_TIME", "MIN_INSERTION_TIME", "ZCUBE_ID",
+            "compactedInto", "optimizeCommandId"
+        }
+        normalized = {}
+        for version, actions in logs.items():
+            add_actions = []
+            for action in actions:
+                if "add" not in action:
+                    continue
+                add = action["add"]
+                stats = json.loads(add["stats"])
+                for key in ("minValues", "maxValues", "nullCount"):
+                    stats[key] = {
+                        physical_to_logical.get(name, name): value
+                        for name, value in stats[key].items()
+                    }
+                tags = {
+                    key: value for key, value in add.get("tags", {}).items()
+                    if key not in ignored_tags
+                }
+                add_actions.append({
+                    "partitionValues": add["partitionValues"],
+                    "stats": stats,
+                    "tags": tags,
+                })
+            normalized[version] = sorted(
+                add_actions, key=lambda value: json.dumps(value, sort_keys=True))
+        return normalized
+
+    def check_delta_logs(spark):
+        def location(table):
+            return spark.sql(f"DESCRIBE DETAIL {table}").select("location").first()[0]
+
+        cpu_path = location(cpu_table)
+        gpu_path = location(gpu_table)
+        assert_delta_add_file_stats_present(spark, cpu_path)
+        assert_delta_add_file_stats_present(spark, gpu_path)
+        if column_mapping is None:
+            assert_delta_logs_at_paths_equivalent(spark, cpu_path, gpu_path)
+        else:
+            assert_equal(
+                normalized_add_actions(spark, cpu_table),
+                normalized_add_actions(spark, gpu_table))
 
     cpu_state = with_cpu_session(lambda spark: table_state(spark, cpu_table), conf=conf)
     gpu_state = with_cpu_session(lambda spark: table_state(spark, gpu_table), conf=conf)
     assert_equal(cpu_state, gpu_state)
     assert_delta_history_equal(conf, cpu_table, gpu_table)
+    with_cpu_session(check_delta_logs, conf=conf)
 
 
 @allow_non_gpu(*delta_meta_allow)

@@ -16,7 +16,7 @@
 
 package com.databricks.sql.transaction.tahoe.rapids
 
-import com.databricks.sql.transaction.tahoe.DeltaParquetFileFormat
+import com.databricks.sql.transaction.tahoe.{DeltaColumnMapping, DeltaParquetFileFormat}
 import com.databricks.sql.transaction.tahoe.commands.WriteIntoDeltaCommand
 import com.databricks.sql.transaction.tahoe.schema.InnerInvariantViolationException
 import com.databricks.sql.transaction.tahoe.stats.{DeltaJobStatisticsTracker,
@@ -34,6 +34,7 @@ import org.apache.spark.sql.rapids.{BasicColumnarWriteJobStatsTracker, ColumnarW
 import org.apache.spark.sql.rapids.BasicColumnarWriteJobStatsTracker.TASK_COMMIT_TIME
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.SparkSession
+import org.apache.spark.sql.types.StructField
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.util.SerializableConfiguration
 
@@ -42,8 +43,14 @@ private object DeltaWriteAttributeMapping {
     left.name == right.name && left.dataType == right.dataType
   }
 
+  private def structurallyMatches(left: Attribute, right: StructField): Boolean = {
+    left.name == right.name && left.dataType == right.dataType
+  }
+
   def validateQueryAttributeAtOrdinal(
       queryOutput: Seq[Attribute],
+      logicalField: StructField,
+      physicalField: StructField,
       attribute: Attribute,
       ordinal: Int,
       description: String): Either[String, Unit] = {
@@ -52,15 +59,18 @@ private object DeltaWriteAttributeMapping {
     } else {
       val queryAttribute = queryOutput(ordinal)
       val exprIdOrdinal = queryOutput.indexWhere(_.exprId == attribute.exprId)
+      val matchesExpectedSchema = structurallyMatches(attribute, queryAttribute) ||
+        (structurallyMatches(queryAttribute, logicalField) &&
+          structurallyMatches(attribute, physicalField))
       if (attribute.exprId == queryAttribute.exprId ||
-          (exprIdOrdinal == -1 && structurallyMatches(attribute, queryAttribute))) {
+          (exprIdOrdinal == -1 && matchesExpectedSchema)) {
         Right(())
       } else if (exprIdOrdinal != -1) {
         Left(s"Delta $description ${attribute.exprId} maps to query output ordinal " +
           s"$exprIdOrdinal instead of native output ordinal $ordinal")
       } else {
         Left(s"Delta $description ${attribute.exprId} has no query ExprId match and does not " +
-          s"structurally match query output ordinal $ordinal")
+          s"match the logical or physical Delta schema at query output ordinal $ordinal")
       }
     }
   }
@@ -89,13 +99,23 @@ class GpuWriteIntoDeltaCommandMeta(
   extends DataWritingCommandMeta[WriteIntoDeltaCommand](cmd, conf, parent, rule) {
 
   private var fileFormat: Option[GpuParquetFileFormat] = None
+  private lazy val logicalDataFields = cmd.metadata.dataSchema.fields
+  private lazy val physicalDataFields = DeltaColumnMapping.createPhysicalSchema(
+    cmd.metadata.dataSchema,
+    cmd.metadata.schema,
+    cmd.metadata.columnMappingMode).fields
 
   private def tagAttributeMapping(
       attribute: Attribute,
       ordinal: Int,
       description: String): Unit = {
     DeltaWriteAttributeMapping.validateQueryAttributeAtOrdinal(
-      cmd.query.output, attribute, ordinal, description) match {
+      cmd.query.output,
+      logicalDataFields(ordinal),
+      physicalDataFields(ordinal),
+      attribute,
+      ordinal,
+      description) match {
       case Left(reason) => willNotWorkOnGpu(reason)
       case Right(_) => ()
     }
@@ -118,25 +138,31 @@ class GpuWriteIntoDeltaCommandMeta(
       willNotWorkOnGpu("Static partition Delta writes are not supported by this command path")
     }
     if (cmd.partitionColExprIds.nonEmpty) {
-      willNotWorkOnGpu("Partitioned DBR Delta writes require DeltaFileFormatWriter's private " +
-        "partitioned task-attempt context")
+      willNotWorkOnGpu("Partitioned DBR Delta writes are not supported by this command path " +
+        "until native partition materialization and partition-evolution semantics are validated")
     }
-    if (cmd.outputSpec.outputColumns.size != cmd.query.output.size) {
-      willNotWorkOnGpu(s"Delta output specification has ${cmd.outputSpec.outputColumns.size} " +
-        s"columns but the query has ${cmd.query.output.size}")
+    val columnCounts = Seq(
+      "output specification" -> cmd.outputSpec.outputColumns.size,
+      "query" -> cmd.query.output.size,
+      "logical data schema" -> logicalDataFields.length,
+      "physical data schema" -> physicalDataFields.length)
+    if (columnCounts.map(_._2).distinct.size != 1) {
+      willNotWorkOnGpu(s"Delta column count mismatch: ${columnCounts.map {
+        case (description, count) => s"$description=$count"
+      }.mkString(", ")}")
     } else {
       cmd.outputSpec.outputColumns.zipWithIndex.foreach { case (attribute, ordinal) =>
         tagAttributeMapping(attribute, ordinal, "output column")
       }
-    }
-    cmd.partitionColExprIds.foreach { exprId =>
-      val matches = cmd.outputSpec.outputColumns.zipWithIndex.filter(_._1.exprId == exprId)
-      matches match {
-        case Seq((attribute, ordinal)) =>
-          tagAttributeMapping(attribute, ordinal, "partition column")
-        case _ =>
-          willNotWorkOnGpu(
-            s"Delta partition column $exprId has ${matches.size} output specification matches")
+      cmd.partitionColExprIds.foreach { exprId =>
+        val matches = cmd.outputSpec.outputColumns.zipWithIndex.filter(_._1.exprId == exprId)
+        matches match {
+          case Seq((attribute, ordinal)) =>
+            tagAttributeMapping(attribute, ordinal, "partition column")
+          case _ =>
+            willNotWorkOnGpu(
+              s"Delta partition column $exprId has ${matches.size} output specification matches")
+        }
       }
     }
     cmd.statsTrackers.foreach {
@@ -165,6 +191,12 @@ case class GpuWriteIntoDeltaCommand(
     cpuCmd: WriteIntoDeltaCommand,
     @transient rapidsConf: RapidsConf,
     fileFormat: GpuParquetFileFormat) extends GpuDataWritingCommand {
+
+  private lazy val logicalDataFields = cpuCmd.metadata.dataSchema.fields
+  private lazy val physicalDataFields = DeltaColumnMapping.createPhysicalSchema(
+    cpuCmd.metadata.dataSchema,
+    cpuCmd.metadata.schema,
+    cpuCmd.metadata.columnMappingMode).fields
 
   override def query: LogicalPlan = cpuCmd.query
 
@@ -207,7 +239,12 @@ case class GpuWriteIntoDeltaCommand(
         ordinal: Int,
         description: String): Attribute = {
       DeltaWriteAttributeMapping.validateQueryAttributeAtOrdinal(
-        cpuCmd.query.output, attribute, ordinal, description) match {
+        cpuCmd.query.output,
+        logicalDataFields(ordinal),
+        physicalDataFields(ordinal),
+        attribute,
+        ordinal,
+        description) match {
         case Right(_) => ()
         case Left(reason) => throw new IllegalStateException(reason)
       }

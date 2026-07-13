@@ -16,7 +16,7 @@
 
 package com.databricks.sql.transaction.tahoe.rapids
 
-import com.databricks.sql.transaction.tahoe.DeltaConfigs
+import com.databricks.sql.transaction.tahoe.{DeltaColumnMapping, DeltaConfigs}
 import com.databricks.sql.transaction.tahoe.commands.{DeletionVectorUtils, WriteIntoDeltaCommand}
 import com.databricks.sql.transaction.tahoe.sources.DeltaSQLConf
 import com.databricks.sql.transaction.tahoe.stats.DeltaJobStatisticsTracker
@@ -42,7 +42,10 @@ private object GpuWriteIntoDeltaCommandStats {
         DeletionVectorUtils.deletionVectorsWritable(
           cpuCmd.deltaLog.unsafeVolatileSnapshot, Some(cpuCmd.protocol), Some(cpuCmd.metadata))
       override val tableDataSchema: StructType = if (useTableSchema) {
-        cpuCmd.metadata.schema
+        DeltaColumnMapping.createPhysicalSchema(
+          cpuCmd.metadata.dataSchema,
+          cpuCmd.metadata.schema,
+          cpuCmd.metadata.columnMappingMode)
       } else {
         nativeTracker.dataCols.toStructType
       }
