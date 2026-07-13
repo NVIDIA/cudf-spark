@@ -48,9 +48,6 @@
 #   To run all tests, including Avro tests:
 #     INCLUDE_SPARK_AVRO_JAR=true ./run_pyspark_from_build.sh
 #
-#   To run tests WITHOUT Protobuf tests (protobuf is included by default):
-#     INCLUDE_SPARK_PROTOBUF_JAR=false ./run_pyspark_from_build.sh
-#
 #   To run a specific test:
 #     TEST=my_test ./run_pyspark_from_build.sh
 #
@@ -105,7 +102,6 @@ else
     # support alternate local jars NOT building from the source code
     if [ -d "$LOCAL_JAR_PATH" ]; then
         AVRO_JARS=$(echo "$LOCAL_JAR_PATH"/spark-avro*.jar)
-        PROTOBUF_JARS=$(echo "$LOCAL_JAR_PATH"/spark-protobuf*.jar)
         PLUGIN_JAR=$(echo "$LOCAL_JAR_PATH"/rapids-4-spark_*.jar)
         if [ -f $(echo $LOCAL_JAR_PATH/parquet-hadoop*.jar) ]; then
             export INCLUDE_PARQUET_HADOOP_TEST_JAR=true
@@ -122,7 +118,6 @@ else
     else
         [[ "$SCALA_VERSION" != "2.12"  ]] && TARGET_DIR=${TARGET_DIR/integration_tests/scala$SCALA_VERSION\/integration_tests}
         AVRO_JARS=$(echo "$TARGET_DIR"/dependency/spark-avro*.jar)
-        PROTOBUF_JARS=$(echo "$TARGET_DIR"/dependency/spark-protobuf*.jar)
         PARQUET_HADOOP_TESTS=$(echo "$TARGET_DIR"/dependency/parquet-hadoop*.jar)
         # remove the log4j.properties file so it doesn't conflict with ours, ignore errors
         # if it isn't present or already removed
@@ -148,26 +143,9 @@ else
         AVRO_JARS=""
     fi
 
-    INCLUDE_SPARK_PROTOBUF_JAR_REQUESTED=$(echo "${INCLUDE_SPARK_PROTOBUF_JAR}" | tr '[:upper:]' '[:lower:]')
-    PROTOBUF_JAR_COUNT=$(readlink -e $PROTOBUF_JARS 2>/dev/null | wc -l)
-    if [[ "$INCLUDE_SPARK_PROTOBUF_JAR_REQUESTED" != "false" \
-          && "$PROTOBUF_JAR_COUNT" -eq 1 ]];
-    then
-        export INCLUDE_SPARK_PROTOBUF_JAR=true
-    else
-        if [[ "$INCLUDE_SPARK_PROTOBUF_JAR_REQUESTED" != "false" \
-              && "$PROTOBUF_JAR_COUNT" -gt 1 ]]; then
-            >&2 echo "WARNING: Multiple spark-protobuf jars were found (matched: $PROTOBUF_JARS); disabling protobuf tests."
-        elif [[ "$INCLUDE_SPARK_PROTOBUF_JAR_REQUESTED" == "true" ]]; then
-            >&2 echo "WARNING: INCLUDE_SPARK_PROTOBUF_JAR=true was requested but a spark-protobuf jar was not found (searched: $PROTOBUF_JARS); disabling protobuf tests."
-        fi
-        export INCLUDE_SPARK_PROTOBUF_JAR=false
-        PROTOBUF_JARS=""
-    fi
-
-    # ALL_JARS includes dist.jar integration-test.jar avro.jar parquet.jar protobuf.jar if they exist
+    # ALL_JARS includes dist.jar integration-test.jar avro.jar parquet.jar if they exist
     # Remove non-existing paths and canonicalize the paths including get rid of links and `..`
-    ALL_JARS=$(readlink -e $PLUGIN_JAR $TEST_JARS $AVRO_JARS $PARQUET_HADOOP_TESTS $PROTOBUF_JARS || true)
+    ALL_JARS=$(readlink -e $PLUGIN_JAR $TEST_JARS $AVRO_JARS $PARQUET_HADOOP_TESTS || true)
     # `:` separated jars
     ALL_JARS="${ALL_JARS//$'\n'/:}"
 

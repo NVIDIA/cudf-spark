@@ -7200,7 +7200,7 @@ are limited.
 <tr>
 <td rowSpan="3">DivideYMInterval</td>
 <td rowSpan="3"> </td>
-<td rowSpan="3">Year-month interval * operator</td>
+<td rowSpan="3">Year-month interval / number</td>
 <td rowSpan="3">None</td>
 <td rowSpan="3">project</td>
 <td>lhs</td>

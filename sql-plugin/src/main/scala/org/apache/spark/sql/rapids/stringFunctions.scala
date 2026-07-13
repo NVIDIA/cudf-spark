@@ -1230,13 +1230,13 @@ object GpuRegExpUtils {
   }
 
   /**
-   * Returns the number of groups in regexp
-   * (includes both capturing and non-capturing groups)
+   * Returns the number of capturing groups in regexp.
    */
   def countGroups(pattern: String): Int = {
     def countGroups(regexp: RegexAST): Int = {
       regexp match {
-        case RegexGroup(_, term, _) => 1 + countGroups(term)
+        case RegexGroup(capture, term, _) =>
+          (if (capture) 1 else 0) + countGroups(term)
         case other => other.children().map(countGroups).sum
       }
    }
@@ -1257,15 +1257,24 @@ object GpuRegExpUtils {
           case _ => None
         }
       case RegexSequence(parts) =>
-        if (GpuOverrides.isSupportedStringReplacePattern(regex.toRegexString)) {
+        if (parts.isEmpty) {
+          None
+        } else if (GpuOverrides.isSupportedStringReplacePattern(regex.toRegexString)) {
           Some(Seq(regex.toRegexString))
+        } else if (parts.size == 1) {
+          getChoicesFromRegex(parts.head)
         } else {
-          parts.foldLeft(Some(Seq[String]()): Option[Seq[String]]) { (m: Option[Seq[String]], r) =>
-            getChoicesFromRegex(r) match {
-              case Some(l) => m.map(_ ++ l)
-              case _ => None
-            }
-          }
+          // A sequence represents concatenation, not a union. Fixed single-literal
+          // children can be joined; alternatives require the regex engine.
+          parts.foldLeft(Option(new StringBuilder)) {
+            case (Some(builder), part) =>
+              getChoicesFromRegex(part) match {
+                case Some(literals) if literals.size == 1 =>
+                  Some(builder.append(literals.head))
+                case _ => None
+              }
+            case (None, _) => None
+          }.map(builder => Seq(builder.result()))
         }
       case _ =>
         if (GpuOverrides.isSupportedStringReplacePattern(regex.toRegexString)) {
