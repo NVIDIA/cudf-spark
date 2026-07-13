@@ -874,11 +874,13 @@ distribution. The results are not bit-for-bit identical with the Apache Spark im
 
 ## Project AST JIT ANSI error reporting
 
-Project AST JIT support for ANSI integral arithmetic is experimental and disabled by default. When
-an output expression contains multiple operations that can fail, cuDF reports the error category
-but not which operation produced it. The GPU reports the same Spark error category, such as
-`ARITHMETIC_OVERFLOW` or `DIVIDE_BY_ZERO`, but its error message and query context can identify a
-different operation in the fused expression than Spark CPU. Successful results are unaffected.
+Project AST JIT support for ANSI integral arithmetic is experimental and disabled by default. See
+[Project AST JIT](additional-functionality/project-ast-jit.md) for configuration, runtime, cache,
+and performance guidance. When an output expression contains multiple operations that can fail,
+cuDF reports the error category but not which operation produced it. The GPU reports the same Spark
+error category, such as `ARITHMETIC_OVERFLOW` or `DIVIDE_BY_ZERO`, but its error message and query
+context can identify a different operation in the fused expression than Spark CPU. Successful
+results are unaffected.
 
 This limitation applies when both `spark.rapids.sql.projectAstRowIrEnabled` and
 `spark.rapids.sql.projectAstAnsiArithmeticEnabled` are enabled. Disable the latter configuration
