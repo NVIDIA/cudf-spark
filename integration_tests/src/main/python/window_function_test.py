@@ -773,6 +773,8 @@ _multi_order_range_fallback_data_gen = [
     ('oi', RepeatSeqGen(_multi_order_range_int_gen(), length=_multi_order_range_repeat_length)),
     ('flag', RepeatSeqGen(BooleanGen(nullable=(True, 20.0)),
         length=_multi_order_range_repeat_length)),
+    ('ostruct', RepeatSeqGen(_multi_order_range_struct_gen(),
+        length=_multi_order_range_repeat_length)),
     ('v', _multi_order_range_value_gen()),
 ]
 
@@ -1144,10 +1146,10 @@ def test_range_window_multi_order_by_unsupported_order_type_fallback():
         'WindowExec',
         'window_agg_table',
         '''
-        SELECT p, oi, flag, v,
+        SELECT p, oi, flag, ostruct, v,
           SUM(v) OVER (
             PARTITION BY p
-            ORDER BY oi ASC NULLS FIRST, flag ASC NULLS FIRST
+            ORDER BY oi ASC NULLS FIRST, flag ASC NULLS FIRST, ostruct ASC NULLS FIRST
             RANGE BETWEEN CURRENT ROW AND CURRENT ROW) AS peer_sum
         FROM window_agg_table
         ''',

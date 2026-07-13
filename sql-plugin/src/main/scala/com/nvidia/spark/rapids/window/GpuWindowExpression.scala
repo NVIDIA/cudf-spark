@@ -129,11 +129,11 @@ abstract class GpuWindowExpressionMetaBase(
                      DateType | TimestampType | StringType | DecimalType() => true
                 case _ => false
               }
-              // Report the first unsupported column so the message names the offending type even
-              // when an earlier order-by column is supported.
-              orderSpec.find(so => !isSupportedOrderType(so.dataType)).foreach { so =>
-                willNotWorkOnGpu(s"the type of orderBy column is not supported in a window" +
-                  s" range function, found ${so.dataType}")
+              val unsupportedOrderTypes =
+                orderSpec.map(_.dataType).filterNot(isSupportedOrderType).distinct
+              if (unsupportedOrderTypes.nonEmpty) {
+                willNotWorkOnGpu(s"the types of orderBy columns are not supported in a window" +
+                  s" range function, found ${unsupportedOrderTypes.mkString(", ")}")
               }
 
               def checkRangeBoundaryConfig(dt: DataType): Unit = {
