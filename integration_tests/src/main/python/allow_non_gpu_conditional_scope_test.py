@@ -27,10 +27,8 @@ import pytest
 from conftest import get_non_gpu_allowed
 from marks import allow_non_gpu_conditional
 
-allow_conditional = allow_non_gpu_conditional
-
 # Module-scope marker: applies to every test in this file.
-pytestmark = allow_conditional(True, "ModuleScopeOp")
+pytestmark = allow_non_gpu_conditional(True, "ModuleScopeOp")
 
 
 def allowed():
@@ -41,7 +39,7 @@ def test_module_scope_applies():
     assert "ModuleScopeOp" in allowed(), f"got {allowed()}"
 
 
-@allow_conditional(True, "FuncScopeOp")
+@allow_non_gpu_conditional(True, "FuncScopeOp")
 def test_module_plus_function_scope():
     a = allowed()
     assert "FuncScopeOp" in a and "ModuleScopeOp" in a, \
@@ -49,14 +47,14 @@ def test_module_plus_function_scope():
 
 
 class TestClassScope:
-    pytestmark = allow_conditional(True, "ClassScopeOp")
+    pytestmark = allow_non_gpu_conditional(True, "ClassScopeOp")
 
     def test_module_plus_class_scope(self):
         a = allowed()
         assert "ClassScopeOp" in a and "ModuleScopeOp" in a, \
             f"module + class markers must both contribute, got {a}"
 
-    @allow_conditional(True, "FuncScopeOp2")
+    @allow_non_gpu_conditional(True, "FuncScopeOp2")
     def test_module_class_function_scope(self):
         a = allowed()
         assert {"ModuleScopeOp", "ClassScopeOp", "FuncScopeOp2"} <= set(a), \
@@ -64,7 +62,7 @@ class TestClassScope:
 
 
 @pytest.mark.parametrize("x", [
-    pytest.param(1, marks=allow_conditional(True, "ParamScopeOp")),
+    pytest.param(1, marks=allow_non_gpu_conditional(True, "ParamScopeOp")),
     pytest.param(2),
 ])
 def test_param_scope(x):
@@ -75,7 +73,7 @@ def test_param_scope(x):
         assert "ParamScopeOp" not in a and "ModuleScopeOp" in a, f"got {a}"
 
 
-@allow_conditional(True, "ModuleScopeOp")
+@allow_non_gpu_conditional(True, "ModuleScopeOp")
 def test_dedup_across_scopes():
     a = allowed()
     assert a.count("ModuleScopeOp") == 1, \

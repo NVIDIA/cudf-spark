@@ -38,15 +38,9 @@ import conftest
 from conftest import get_non_gpu_allowed, is_allowing_any_non_gpu
 from marks import allow_non_gpu, allow_non_gpu_conditional
 
-allow_conditional = allow_non_gpu_conditional
-
 
 def allowed():
     return list(get_non_gpu_allowed())
-
-
-def allowing_any():
-    return is_allowing_any_non_gpu()
 
 
 # ---------------------------------------------------------------------------
@@ -55,27 +49,27 @@ def allowing_any():
 
 def test_baseline_no_marker():
     assert allowed() == [], f"no marker must allow nothing, got {allowed()}"
-    assert not allowing_any()
+    assert not is_allowing_any_non_gpu()
 
 
-@allow_conditional(True, "CondTrueOp")
+@allow_non_gpu_conditional(True, "CondTrueOp")
 def test_true_condition_applies_ops():
     assert "CondTrueOp" in allowed(), \
         f"true condition must apply its ops, got {allowed()}"
-    assert not allowing_any()
+    assert not is_allowing_any_non_gpu()
 
 
 @allow_non_gpu("BaseOp")
-@allow_conditional(True, "CondOp")
+@allow_non_gpu_conditional(True, "CondOp")
 def test_true_condition_merges_with_base():
     assert "BaseOp" in allowed() and "CondOp" in allowed(), \
         f"true condition must merge with the base allow list, got {allowed()}"
 
 
-@allow_conditional(True, "AnyWithOps", any=True)
+@allow_non_gpu_conditional(True, "AnyWithOps", any=True)
 def test_any_true_with_ops_precedence():
     # any=True takes precedence over an ops payload (mirrors allow_non_gpu).
-    assert allowing_any(), "any=True with a true condition must allow anything"
+    assert is_allowing_any_non_gpu(), "any=True with a true condition must allow anything"
     assert "AnyWithOps" not in allowed(), \
         f"ops payload must be superseded by any=True, got {allowed()}"
 
@@ -84,23 +78,23 @@ def test_any_true_with_ops_precedence():
 # False conditions must contribute no allowances
 # ---------------------------------------------------------------------------
 
-@allow_conditional(False, "LeakedOp")
+@allow_non_gpu_conditional(False, "LeakedOp")
 def test_false_condition_adds_nothing():
     assert "LeakedOp" not in allowed(), \
         f"LEAK: ops of a false-condition marker are applied, got {allowed()}"
-    assert not allowing_any()
+    assert not is_allowing_any_non_gpu()
 
 
 @allow_non_gpu("KeptOp")
-@allow_conditional(False, "LeakA,LeakB")
+@allow_non_gpu_conditional(False, "LeakA,LeakB")
 def test_false_condition_keeps_base_allowances_intact():
     assert allowed() == ["KeptOp"], \
         f"false condition must leave exactly the base allowances, got {allowed()}"
 
 
-@allow_conditional(False, "LeakedAnyOp", any=True)
+@allow_non_gpu_conditional(False, "LeakedAnyOp", any=True)
 def test_false_condition_with_any_true():
-    assert not allowing_any(), "any=True must be gated by the condition"
+    assert not is_allowing_any_non_gpu(), "any=True must be gated by the condition"
     assert "LeakedAnyOp" not in allowed(), \
         f"LEAK: ops of a false-condition any=True marker applied, got {allowed()}"
 
@@ -109,19 +103,19 @@ def test_false_condition_with_any_true():
 # Condition-only and any-only invocation forms must set up cleanly
 # ---------------------------------------------------------------------------
 
-@allow_conditional(True)
+@allow_non_gpu_conditional(True)
 def test_condition_only_true_warns_not_errors():
     # A condition-only marker allows nothing (plus a warning), like a bare
     # @allow_non_gpu. Pre-fix, setup died with IndexError on args[1].
     assert allowed() == [], f"condition-only marker must allow nothing, got {allowed()}"
-    assert not allowing_any()
+    assert not is_allowing_any_non_gpu()
 
 
-@allow_conditional(True, any=True)
+@allow_non_gpu_conditional(True, any=True)
 def test_any_true_without_ops():
     # The documented (condition, any=True) form. Pre-fix, setup died with
     # IndexError on args[1] before kwargs were even inspected.
-    assert allowing_any(), "(True, any=True) must allow anything on the CPU"
+    assert is_allowing_any_non_gpu(), "(True, any=True) must allow anything on the CPU"
     assert allowed() == []
 
 
@@ -129,7 +123,7 @@ def test_any_true_without_ops():
 # Varargs, stacked markers, and payload trimming
 # ---------------------------------------------------------------------------
 
-@allow_conditional(True, "MultiA", "MultiB")
+@allow_non_gpu_conditional(True, "MultiA", "MultiB")
 def test_multiple_ops_varargs():
     # Varargs ops are accepted like allow_non_gpu. Pre-fix, args[2:] were
     # silently ignored.
@@ -137,8 +131,8 @@ def test_multiple_ops_varargs():
         f"all ops args must be honored, got {allowed()}"
 
 
-@allow_conditional(True, "StackTop")
-@allow_conditional(True, "StackBottom")
+@allow_non_gpu_conditional(True, "StackTop")
+@allow_non_gpu_conditional(True, "StackBottom")
 def test_stacked_markers_union():
     # Every stacked marker contributes (each gated by its own condition).
     # Pre-fix, get_closest_marker silently dropped all but one.
@@ -146,7 +140,7 @@ def test_stacked_markers_union():
         f"stacked markers must union their allowances, got {allowed()}"
 
 
-@allow_conditional(True, "SpaceA, SpaceB")
+@allow_non_gpu_conditional(True, "SpaceA, SpaceB")
 def test_embedded_space_trimmed():
     # Entries are trimmed on split so Python-side consumers of
     # get_non_gpu_allowed() never see ' SpaceB'. (The Scala side already
@@ -206,13 +200,13 @@ def test_non_bool_condition_alone_raises_typeerror_not_indexerror():
 def test_nonbool_any_string_rejected():
     with pytest.raises(TypeError, match="'any' parameter"):
         _setup(_FakeMark((True, "OpA"), {"any": "false"}))
-    assert not allowing_any(), "truthy string any= must not disable test mode"
+    assert not is_allowing_any_non_gpu(), "truthy string any= must not disable test mode"
 
 
 def test_nonbool_any_int_rejected():
     with pytest.raises(TypeError, match="'any' parameter"):
         _setup(_FakeMark((True, "OpA"), {"any": 1}))
-    assert not allowing_any()
+    assert not is_allowing_any_non_gpu()
 
 
 # ---------------------------------------------------------------------------
@@ -239,11 +233,11 @@ def test_zero_argument_marker_rejected():
         _setup(_FakeMark(()))
 
 
-@allow_conditional(True, "ExplicitAnyFalseOp", any=False)
+@allow_non_gpu_conditional(True, "ExplicitAnyFalseOp", any=False)
 def test_explicit_any_false_with_ops():
     # any=False is the documented default spelled out: ops apply normally.
     assert "ExplicitAnyFalseOp" in allowed(), f"got {allowed()}"
-    assert not allowing_any()
+    assert not is_allowing_any_non_gpu()
 
 
 # ---------------------------------------------------------------------------
@@ -269,7 +263,7 @@ def test_active_empty_payload_warns():
     with pytest.warns(UserWarning, match="empty ops payload"):
         _setup(_FakeMark((True, "")))
     assert allowed() == []
-    assert not allowing_any()
+    assert not is_allowing_any_non_gpu()
 
 
 def test_whitespace_payload_warns():
