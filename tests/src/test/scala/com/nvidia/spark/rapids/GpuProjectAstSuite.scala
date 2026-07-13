@@ -21,24 +21,23 @@ import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.catalyst.expressions.NamedExpression
 import org.apache.spark.sql.execution.SparkPlan
-import org.apache.spark.sql.rapids.{GpuAdd, GpuMultiply}
-import org.apache.spark.sql.types.LongType
+import org.apache.spark.sql.rapids.{GpuAdd, GpuMultiply, GpuShiftLeft}
+import org.apache.spark.sql.types.{IntegerType, LongType}
 
 class GpuProjectAstSuite extends AnyFunSuite {
-  test("AST plan copy preserves JIT settings") {
+  test("AST plan copy preserves JIT error sites") {
     val a = GpuBoundReference(0, LongType, nullable = true)(NamedExpression.newExprId, "a")
     val b = GpuBoundReference(1, LongType, nullable = true)(NamedExpression.newExprId, "b")
     val sum = GpuAlias(GpuAdd(a, b, failOnError = true)(), "sum")()
     val errorSites = List(List(AstJitErrorSite(AstJitErrorKind.Add, sum.origin)))
     val child = mock(classOf[SparkPlan])
     val replacement = mock(classOf[SparkPlan])
-    val plan = GpuProjectAstExec(List(sum), child)(errorSites, useJit = true)
+    val plan = GpuProjectAstExec(List(sum), child)(errorSites)
 
     val copied = plan.withNewChildren(Seq(replacement)).asInstanceOf[GpuProjectAstExec]
 
     assert(copied.child eq replacement)
     assert(copied.astJitErrorSites == errorSites)
-    assert(copied.useJit)
   }
 
   test("AST output planning excludes pass-through expressions") {
@@ -80,6 +79,20 @@ class GpuProjectAstSuite extends AnyFunSuite {
     val plan = GpuProjectAstExec.planOutputs(Seq(nested), Seq(errorSites))
 
     assert(plan.errorSitesToCompute == Seq(errorSites))
+  }
+
+  test("AST output planning uses JIT only for row IR outputs") {
+    val a = GpuBoundReference(0, LongType, nullable = true)(NamedExpression.newExprId, "a")
+    val b = GpuBoundReference(1, LongType, nullable = true)(NamedExpression.newExprId, "b")
+    val legacySum = GpuAlias(GpuAdd(a, b, failOnError = false)(), "sum")()
+    val rowIrShift = GpuAlias(GpuShiftLeft(a, GpuLiteral(1, IntegerType)), "shift")()
+
+    val plan = GpuProjectAstExec.planOutputs(
+      Seq(legacySum, rowIrShift), Seq(Seq.empty, Seq.empty))
+
+    assert(plan.backendsToCompute == Seq(
+      GpuProjectAstExec.LegacyAstBackend,
+      GpuProjectAstExec.RowIrJitBackend))
   }
 
   test("AST output planning reuses equivalent computed expressions") {

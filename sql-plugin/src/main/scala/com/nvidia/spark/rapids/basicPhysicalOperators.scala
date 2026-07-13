@@ -118,8 +118,7 @@ class GpuProjectExecMeta(
       val allReturnTypesFixedWidth = gpuExprs.forall(e => GpuBatchUtils.isFixedWidth(e.dataType))
       if (canUseRowIrJitAst && canUseAnsiFallibleAst && allReturnTypesFixedWidth &&
           childExprs.forall(_.canThisBeAst)) {
-        return GpuProjectAstExec(gpuExprs, gpuChild)(
-          astJitErrorSites, conf.isProjectAstRowIrEnabled)
+        return GpuProjectAstExec(gpuExprs, gpuChild)(astJitErrorSites)
       }
       // explain AST because this is optional and it is sometimes hard to debug
       if (conf.shouldExplain) {
@@ -987,15 +986,25 @@ object GpuProjectAstExec {
   private[rapids] case class AstLiteralColumn(literalIndex: Int) extends AstProjectOutputSource
   private[rapids] case class AstComputedColumn(computedIndex: Int) extends AstProjectOutputSource
 
+  private[rapids] sealed trait AstComputeBackend
+  private[rapids] case object LegacyAstBackend extends AstComputeBackend
+  private[rapids] case object RowIrJitBackend extends AstComputeBackend
+
+  private[rapids] case class AstExpressionToCompute(
+      expression: GpuExpression,
+      errorSites: Seq[AstJitErrorSite],
+      backend: AstComputeBackend)
+
   private[rapids] case class AstProjectOutputPlan(
       outputSources: Seq[AstProjectOutputSource],
       literalsToProject: Seq[GpuExpression],
-      expressionsToCompute: Seq[GpuExpression],
-      errorSitesToCompute: Seq[Seq[AstJitErrorSite]]) {
-    require(expressionsToCompute.size == errorSitesToCompute.size,
-      "AST expressions and error sites must have the same size")
+      computedExpressions: Seq[AstExpressionToCompute]) {
 
-    def allPassThrough: Boolean = literalsToProject.isEmpty && expressionsToCompute.isEmpty
+    def expressionsToCompute: Seq[GpuExpression] = computedExpressions.map(_.expression)
+    def errorSitesToCompute: Seq[Seq[AstJitErrorSite]] = computedExpressions.map(_.errorSites)
+    def backendsToCompute: Seq[AstComputeBackend] = computedExpressions.map(_.backend)
+
+    def allPassThrough: Boolean = literalsToProject.isEmpty && computedExpressions.isEmpty
   }
 
   @tailrec
@@ -1017,8 +1026,7 @@ object GpuProjectAstExec {
 
     val outputSources = ArrayBuffer.empty[AstProjectOutputSource]
     val literalsToProject = ArrayBuffer.empty[GpuExpression]
-    val expressionsToCompute = ArrayBuffer.empty[GpuExpression]
-    val errorSitesToCompute = ArrayBuffer.empty[Seq[AstJitErrorSite]]
+    val computedExpressions = ArrayBuffer.empty[AstExpressionToCompute]
     val reusableLiterals = mutable.HashMap.empty[GpuExpressionEquals, Int]
     val reusableExpressions = mutable.HashMap.empty[GpuExpressionEquals, Int]
 
@@ -1045,9 +1053,13 @@ object GpuProjectAstExec {
             val reuseKey = if (canReuse) Some(GpuExpressionEquals(valueExpression)) else None
             val computedIndex = reuseKey.flatMap(reusableExpressions.get)
             outputSources += AstComputedColumn(computedIndex.getOrElse {
-              val newIndex = expressionsToCompute.size
-              expressionsToCompute += expression
-              errorSitesToCompute += errorSite
+              val newIndex = computedExpressions.size
+              val backend = if (valueExpression.usesRowIrJitAst) {
+                RowIrJitBackend
+              } else {
+                LegacyAstBackend
+              }
+              computedExpressions += AstExpressionToCompute(expression, errorSite, backend)
               reuseKey.foreach(reusableExpressions.put(_, newIndex))
               newIndex
             })
@@ -1057,8 +1069,7 @@ object GpuProjectAstExec {
     AstProjectOutputPlan(
       outputSources.toSeq,
       literalsToProject.toSeq,
-      expressionsToCompute.toSeq,
-      errorSitesToCompute.toSeq)
+      computedExpressions.toSeq)
   }
 
   private def isJitRuntimeRequired(conf: RapidsConf): Boolean =
@@ -1141,13 +1152,10 @@ case class GpuProjectAstExec(
     //   immutable/List.scala#L516
     projectList: List[Expression],
     child: SparkPlan)(
-    val astJitErrorSites: List[List[AstJitErrorSite]] = Nil,
-    val useJit: Boolean = false
+    val astJitErrorSites: List[List[AstJitErrorSite]] = Nil
 ) extends GpuProjectExecLike {
 
-  override def otherCopyArgs: Seq[AnyRef] = Seq[AnyRef](
-    astJitErrorSites,
-    useJit.asInstanceOf[java.lang.Boolean])
+  override def otherCopyArgs: Seq[AnyRef] = Seq[AnyRef](astJitErrorSites)
 
   override lazy val additionalMetrics: Map[String, GpuMetric] = Map(
     OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY),
@@ -1185,8 +1193,7 @@ case class GpuProjectAstExec(
     new GpuColumnarBatchIterator(true) {
       private[this] var maybeSplittedItr: Iterator[ColumnarBatch] = Iterator.empty
       private[this] val compiledAstExprs =
-        new RetryableCompiledAstExpressions(outputPlan.expressionsToCompute,
-          outputPlan.errorSitesToCompute, opTime,
+        new RetryableCompiledAstExpressions(outputPlan.computedExpressions, opTime,
           compileAstsTime, computeAstsTime)
 
       override def hasNext: Boolean = maybeSplittedItr.hasNext || {
@@ -1209,7 +1216,7 @@ case class GpuProjectAstExec(
                 cb.close()
               }
             })
-          } else if (outputPlan.expressionsToCompute.isEmpty) {
+          } else if (outputPlan.computedExpressions.isEmpty) {
             val spillable = SpillableColumnarBatch(
               input.next(), SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
             maybeSplittedItr = GpuProjectExec.runStreamingWithSplitRetry(
@@ -1272,7 +1279,7 @@ case class GpuProjectAstExec(
           case (GpuProjectAstExec.AstLiteralColumn(literalIndex), _) =>
             literalColumns.column(literalIndex).asInstanceOf[GpuColumnVector].incRefCount()
           case (_: GpuProjectAstExec.AstComputedColumn, _) =>
-            throw new IllegalStateException("Computed AST columns require JIT evaluation")
+            throw new IllegalStateException("Computed AST columns require AST evaluation")
         }
         closeOnExcept(outputColumns) { _ =>
           new ColumnarBatch(outputColumns.toArray, inputBatch.numRows())
@@ -1299,7 +1306,7 @@ case class GpuProjectAstExec(
           computedColumns: Seq[cudf.ColumnVector]): Table = {
         require(literalColumns.map(_.numCols()).getOrElse(0) ==
           outputPlan.literalsToProject.size, "Literal columns must match the output plan")
-        require(computedColumns.size == outputPlan.expressionsToCompute.size,
+        require(computedColumns.size == outputPlan.computedExpressions.size,
           "Computed AST columns must match the output plan")
         withResource(outputPlan.outputSources.safeMap {
           case GpuProjectAstExec.AstInputColumn(inputIndex) =>
@@ -1317,8 +1324,7 @@ case class GpuProjectAstExec(
   }
 
   private class RetryableCompiledAstExpressions(
-      boundProjectList: Seq[GpuExpression],
-      errorSites: Seq[Seq[AstJitErrorSite]],
+      plannedExpressions: Seq[GpuProjectAstExec.AstExpressionToCompute],
       opTime: GpuMetric,
       compileAstsTime: GpuMetric,
       computeAstsTime: GpuMetric) extends Retryable with AutoCloseable {
@@ -1339,15 +1345,17 @@ case class GpuProjectAstExec(
       val expressions = compiledAstExprs.getOrElse(
         throw new IllegalStateException("AST expressions were not compiled before evaluation"))
       NvtxIdWithMetrics(NvtxRegistry.COMPUTE_ASTS, computeAstsTime) {
-        expressions.zip(errorSites).safeMap { case (expr, site) =>
+        require(expressions.size == plannedExpressions.size,
+          "Compiled AST expressions must match their output plan")
+        expressions.zip(plannedExpressions).safeMap { case (expr, planned) =>
           try {
-            if (useJit) {
-              expr.computeColumnJit(table)
-            } else {
-              expr.computeColumn(table)
+            planned.backend match {
+              case GpuProjectAstExec.LegacyAstBackend => expr.computeColumn(table)
+              case GpuProjectAstExec.RowIrJitBackend => expr.computeColumnJit(table)
             }
           } catch {
-            case e: CudfException => throw GpuProjectAstExec.translateAstJitError(e, site)
+            case e: CudfException =>
+              throw GpuProjectAstExec.translateAstJitError(e, planned.errorSites)
           }
         }
       }
@@ -1365,9 +1373,9 @@ case class GpuProjectAstExec(
 
     private def compile(): Seq[cudf.ast.CompiledExpression] =
       NvtxIdWithMetrics(NvtxRegistry.COMPILE_ASTS, opTime, compileAstsTime) {
-        boundProjectList.safeMap { expr =>
+        plannedExpressions.safeMap { planned =>
           // Use intmax for the left table column count since there's only one input table here.
-          expr.convertToAst(Int.MaxValue).compile()
+          planned.expression.convertToAst(Int.MaxValue).compile()
         }
       }
   }

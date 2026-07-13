@@ -257,7 +257,7 @@ ci_scala213() {
     export TEST_TYPE="pre-commit"
     # SPARK_HOME (and related) must be set to a Spark built with Scala 2.13
     SPARK_HOME=$SPARK_HOME PYTHONPATH=$PYTHONPATH \
-        ./integration_tests/run_pyspark_from_build.sh
+        ./integration_tests/run_pyspark_from_build.sh --libcudf_jit_mode=required
     # enable avro test separately
     SPARK_HOME=$SPARK_HOME PYTHONPATH=$PYTHONPATH \
         INCLUDE_SPARK_AVRO_JAR=true TEST='avro_test.py' ./integration_tests/run_pyspark_from_build.sh

@@ -19,9 +19,11 @@ package org.apache.spark.sql.rapids
 import java.io.File
 import java.nio.file.Files
 
+import scala.collection.mutable.ArrayBuffer
+
 import ai.rapids.cudf.Table
 import com.nvidia.spark.rapids._
-import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.jni.RmmSpark
 import org.mockito.Mockito.{mock, spy, when}
 
@@ -34,6 +36,7 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims._
 import org.apache.spark.sql.tests.datagen.DataGenExprShims
 import org.apache.spark.sql.types._
+import org.apache.spark.sql.vectorized.ColumnarBatch
 
 class ProjectExprSuite extends SparkQueryCompareTestSuite {
   def forceHostColumnarToGpu(): SparkConf = {
@@ -67,7 +70,7 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
     }
   }
 
-  private def buildFromBufferProjectBatch(): org.apache.spark.sql.vectorized.ColumnarBatch = {
+  private def buildFromBufferProjectBatch(): ColumnarBatch = {
     withResource(new Table.TestBuilder()
         .column(5L, null.asInstanceOf[java.lang.Long], 3L, 1L)
         .column(6L.asInstanceOf[java.lang.Long], 7L, 8L, 9L)
@@ -80,7 +83,7 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
   }
 
   private def assertLongColumn(
-      batch: org.apache.spark.sql.vectorized.ColumnarBatch,
+      batch: ColumnarBatch,
       columnIndex: Int,
       expected: Seq[Option[Long]]): Unit = {
     val gcv = batch.column(columnIndex).asInstanceOf[GpuColumnVector]
@@ -93,6 +96,30 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
           assert(hcv.isNull(rowIndex))
       }
     }
+  }
+
+  private def assertLongColumn(
+      batches: Seq[ColumnarBatch],
+      columnIndex: Int,
+      expected: Seq[Option[Long]]): Unit = {
+    var rowOffset = 0
+    batches.foreach { batch =>
+      val nextOffset = rowOffset + batch.numRows()
+      assertLongColumn(batch, columnIndex, expected.slice(rowOffset, nextOffset))
+      rowOffset = nextOffset
+    }
+    assertResult(expected.size)(rowOffset)
+  }
+
+  private def drainBatches(
+      iterator: Iterator[ColumnarBatch]): ArrayBuffer[ColumnarBatch] = {
+    val batches = ArrayBuffer.empty[ColumnarBatch]
+    closeOnExcept(batches) { _ =>
+      while (iterator.hasNext) {
+        batches += iterator.next()
+      }
+    }
+    batches
   }
 
   private def withDebugMetrics[T](body: => T): T = {
@@ -260,20 +287,20 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
         val mockPlan = mock(classOf[SparkPlan])
         when(mockPlan.output).thenReturn(Seq.empty)
         val ast = GpuProjectAstExec(exprs.map(_.asInstanceOf[Expression]), mockPlan)()
-        val input = new org.apache.spark.sql.vectorized.ColumnarBatch(
+        val input = new ColumnarBatch(
           Array.empty[org.apache.spark.sql.vectorized.ColumnVector], 5)
         RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
           RmmSpark.OomInjectionType.GPU.ordinal, 0)
 
         withResource(ast.buildRetryableAstIterator(Seq(input).iterator)) { result =>
-          withResource(result.next()) { cb =>
-            assertResult(5)(cb.numRows)
-            assertResult(3)(cb.numCols)
-            assertLongColumn(cb, 0, Seq.fill(5)(Some(7L)))
-            assertLongColumn(cb, 1, Seq.fill(5)(None))
-            assertLongColumn(cb, 2, Seq.fill(5)(Some(7L)))
+          withResource(drainBatches(result)) { batches =>
+            assert(batches.size >= 2)
+            assertResult(5)(batches.map(_.numRows()).sum)
+            assert(batches.forall(_.numCols() == 3))
+            assertLongColumn(batches, 0, Seq.fill(5)(Some(7L)))
+            assertLongColumn(batches, 1, Seq.fill(5)(None))
+            assertLongColumn(batches, 2, Seq.fill(5)(Some(7L)))
           }
-          assert(!result.hasNext)
         }
         assertResult(0)(ast.metrics(GpuProjectAstExec.COMPILE_ASTS_TIME).value)
         assertResult(0)(ast.metrics(GpuProjectAstExec.COMPUTE_ASTS_TIME).value)
@@ -347,19 +374,19 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
         RmmSpark.OomInjectionType.GPU.ordinal, 0)
       withResource(sb) { sb =>
         withResource(ast.buildRetryableAstIterator(Seq(sb.getColumnarBatch).iterator)) { result =>
-          withResource(result.next()) { cb =>
-            assertResult(4)(cb.numRows)
-            assertResult(8)(cb.numCols)
-            assertLongColumn(cb, 0, Seq(Some(6L), Some(7L), Some(8L), Some(9L)))
-            assertLongColumn(cb, 1, Seq(Some(11L), None, Some(11L), Some(10L)))
-            assertLongColumn(cb, 2, Seq(Some(5L), None, Some(3L), Some(1L)))
-            assertLongColumn(cb, 3, Seq.fill(4)(Some(7L)))
-            assertLongColumn(cb, 4, Seq.fill(4)(Some(7L)))
-            assertLongColumn(cb, 5, Seq(Some(30L), None, Some(24L), Some(9L)))
-            assertLongColumn(cb, 6, Seq(Some(11L), None, Some(11L), Some(10L)))
-            assertLongColumn(cb, 7, Seq(Some(6L), Some(7L), Some(8L), Some(9L)))
+          withResource(drainBatches(result)) { batches =>
+            assert(batches.size >= 2)
+            assertResult(4)(batches.map(_.numRows()).sum)
+            assert(batches.forall(_.numCols() == 8))
+            assertLongColumn(batches, 0, Seq(Some(6L), Some(7L), Some(8L), Some(9L)))
+            assertLongColumn(batches, 1, Seq(Some(11L), None, Some(11L), Some(10L)))
+            assertLongColumn(batches, 2, Seq(Some(5L), None, Some(3L), Some(1L)))
+            assertLongColumn(batches, 3, Seq.fill(4)(Some(7L)))
+            assertLongColumn(batches, 4, Seq.fill(4)(Some(7L)))
+            assertLongColumn(batches, 5, Seq(Some(30L), None, Some(24L), Some(9L)))
+            assertLongColumn(batches, 6, Seq(Some(11L), None, Some(11L), Some(10L)))
+            assertLongColumn(batches, 7, Seq(Some(6L), Some(7L), Some(8L), Some(9L)))
           }
-          assert(!result.hasNext)
         }
       }
       assert(RmmSpark.getAndResetNumSplitRetryThrow(0) > 0,
