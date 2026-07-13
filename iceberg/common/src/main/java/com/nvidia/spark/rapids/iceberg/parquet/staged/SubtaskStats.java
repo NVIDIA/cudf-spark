@@ -37,6 +37,8 @@ public final class SubtaskStats {
   private final long cacheMissCount;
   private final long cacheMissBytes;
   private final long cacheReadNanos;
+  private final long assemblyCapacityBytes;
+  private final long peakAssemblyCapacityBytes;
 
   /**
    * Construct immutable measurements for a completed subtask.
@@ -55,6 +57,8 @@ public final class SubtaskStats {
    * @param cacheMissCount column-chunk data-cache misses
    * @param cacheMissBytes bytes fetched for data-cache misses
    * @param cacheReadNanos elapsed time copying ranges that were cache hits before this scan
+   * @param assemblyCapacityBytes task-observed executor assembly capacity after this assembly
+   * @param peakAssemblyCapacityBytes task-observed executor peak assembly capacity
    */
   public SubtaskStats(
       long ioNanos,
@@ -70,7 +74,9 @@ public final class SubtaskStats {
       long cacheHitBytes,
       long cacheMissCount,
       long cacheMissBytes,
-      long cacheReadNanos) {
+      long cacheReadNanos,
+      long assemblyCapacityBytes,
+      long peakAssemblyCapacityBytes) {
     if (ioNanos < 0) {
       throw new IllegalArgumentException("ioNanos must be non-negative: " + ioNanos);
     }
@@ -86,6 +92,11 @@ public final class SubtaskStats {
         cacheMissBytes < 0 || cacheReadNanos < 0) {
       throw new IllegalArgumentException("cache measurements must be non-negative");
     }
+    if (assemblyCapacityBytes < 0 || peakAssemblyCapacityBytes < assemblyCapacityBytes) {
+      throw new IllegalArgumentException(
+          "invalid assembly capacity current=" + assemblyCapacityBytes +
+              ", peak=" + peakAssemblyCapacityBytes);
+    }
     this.ioNanos = ioNanos;
     this.ioAllocNanos = ioAllocNanos;
     this.ioReadWaitNanos = ioReadWaitNanos;
@@ -100,6 +111,8 @@ public final class SubtaskStats {
     this.cacheMissCount = cacheMissCount;
     this.cacheMissBytes = cacheMissBytes;
     this.cacheReadNanos = cacheReadNanos;
+    this.assemblyCapacityBytes = assemblyCapacityBytes;
+    this.peakAssemblyCapacityBytes = peakAssemblyCapacityBytes;
   }
 
   public long getIoNanos() {
@@ -156,5 +169,13 @@ public final class SubtaskStats {
 
   public long getCacheReadNanos() {
     return cacheReadNanos;
+  }
+
+  public long getAssemblyCapacityBytes() {
+    return assemblyCapacityBytes;
+  }
+
+  public long getPeakAssemblyCapacityBytes() {
+    return peakAssemblyCapacityBytes;
   }
 }

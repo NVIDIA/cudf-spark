@@ -38,6 +38,10 @@ import com.nvidia.spark.rapids.HostAlloc$;
 final class AssemblyBufferPool implements AutoCloseable {
   private final ArrayDeque<Slot> freeSlots = new ArrayDeque<>();
   private final ArrayDeque<CompletableFuture<Lease>> waiters = new ArrayDeque<>();
+  // These values describe retained HMB capacity, not bytes currently occupied by encoded input.
+  // They are guarded by this pool's monitor so readers can publish a consistent pair.
+  private long currentCapacityBytes;
+  private long peakCapacityBytes;
   private boolean closed;
 
   AssemblyBufferPool(int slotCount) {
@@ -66,23 +70,63 @@ final class AssemblyBufferPool implements AutoCloseable {
     return waiter;
   }
 
+  /** Return one atomic executor-pool capacity observation for scan metrics. */
+  synchronized CapacitySnapshot capacitySnapshot() {
+    return new CapacitySnapshot(currentCapacityBytes, peakCapacityBytes);
+  }
+
+  private synchronized void addCapacity(long bytes) {
+    currentCapacityBytes = Math.addExact(currentCapacityBytes, bytes);
+    peakCapacityBytes = Math.max(peakCapacityBytes, currentCapacityBytes);
+  }
+
+  private synchronized void removeCapacity(long bytes) {
+    if (bytes > currentCapacityBytes) {
+      throw new IllegalStateException(
+          "assembly capacity underflow: removing " + bytes + " from " +
+              currentCapacityBytes);
+    }
+    currentCapacityBytes -= bytes;
+  }
+
+  private void closeSlot(Slot slot) {
+    HostMemoryBuffer buffer = slot.detachBuffer();
+    if (buffer == null) {
+      return;
+    }
+    long capacity = buffer.getLength();
+    try {
+      buffer.close();
+    } finally {
+      removeCapacity(capacity);
+    }
+  }
+
   private void release(Slot slot) {
     CompletableFuture<Lease> waiter = null;
+    boolean closeSlot = false;
     synchronized (this) {
       if (closed) {
-        slot.close();
-        return;
-      }
-      while (!waiters.isEmpty() && waiter == null) {
-        CompletableFuture<Lease> candidate = waiters.pollFirst();
-        if (!candidate.isCancelled()) {
-          waiter = candidate;
+        closeSlot = true;
+      } else {
+        while (!waiters.isEmpty() && waiter == null) {
+          CompletableFuture<Lease> candidate = waiters.pollFirst();
+          if (!candidate.isCancelled()) {
+            waiter = candidate;
+          }
+        }
+        if (waiter == null) {
+          freeSlots.addLast(slot);
         }
       }
-      if (waiter == null) {
-        freeSlots.addLast(slot);
-        return;
-      }
+    }
+
+    if (closeSlot) {
+      closeSlot(slot);
+      return;
+    }
+    if (waiter == null) {
+      return;
     }
 
     // Complete outside the pool monitor. The dependent planner callback may immediately submit
@@ -112,7 +156,26 @@ final class AssemblyBufferPool implements AutoCloseable {
       waiter.completeExceptionally(failure);
     }
     for (Slot slot : slots) {
-      slot.close();
+      closeSlot(slot);
+    }
+  }
+
+  /** Immutable, internally consistent observation of retained executor assembly capacity. */
+  static final class CapacitySnapshot {
+    private final long currentCapacityBytes;
+    private final long peakCapacityBytes;
+
+    private CapacitySnapshot(long currentCapacityBytes, long peakCapacityBytes) {
+      this.currentCapacityBytes = currentCapacityBytes;
+      this.peakCapacityBytes = peakCapacityBytes;
+    }
+
+    long getCurrentCapacityBytes() {
+      return currentCapacityBytes;
+    }
+
+    long getPeakCapacityBytes() {
+      return peakCapacityBytes;
     }
   }
 
@@ -141,11 +204,28 @@ final class AssemblyBufferPool implements AutoCloseable {
         return 0L;
       }
       if (slot.buffer != null) {
-        slot.buffer.close();
-        slot.buffer = null;
+        HostMemoryBuffer oldBuffer = slot.detachBuffer();
+        long oldCapacity = oldBuffer.getLength();
+        try {
+          oldBuffer.close();
+        } finally {
+          owner.removeCapacity(oldCapacity);
+        }
       }
       long start = System.nanoTime();
-      slot.buffer = HostAlloc$.MODULE$.alloc(requiredBytes, true);
+      HostMemoryBuffer newBuffer = HostAlloc$.MODULE$.alloc(requiredBytes, true);
+      slot.buffer = newBuffer;
+      try {
+        owner.addCapacity(newBuffer.getLength());
+      } catch (RuntimeException | Error registrationError) {
+        slot.buffer = null;
+        try {
+          newBuffer.close();
+        } catch (Throwable closeError) {
+          registrationError.addSuppressed(closeError);
+        }
+        throw registrationError;
+      }
       return System.nanoTime() - start;
     }
 
@@ -182,15 +262,13 @@ final class AssemblyBufferPool implements AutoCloseable {
   }
 
   /** One reusable allocation retained only while the executor-wide pool is alive. */
-  private static final class Slot implements AutoCloseable {
+  private static final class Slot {
     private HostMemoryBuffer buffer;
 
-    @Override
-    public void close() {
-      if (buffer != null) {
-        buffer.close();
-        buffer = null;
-      }
+    private HostMemoryBuffer detachBuffer() {
+      HostMemoryBuffer detached = buffer;
+      buffer = null;
+      return detached;
     }
   }
 }

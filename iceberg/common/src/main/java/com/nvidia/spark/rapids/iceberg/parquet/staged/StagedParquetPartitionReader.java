@@ -73,6 +73,11 @@ import org.apache.spark.sql.vectorized.ColumnarBatch;
  */
 public final class StagedParquetPartitionReader
     implements Iterator<ColumnarBatch>, AutoCloseable {
+  // A reader may prepare one input for immediate decode and one input ahead. Admission starts
+  // when a global slot is paired with a plan and ends only after PreparedSubtask.close returns
+  // that slot. This prevents one partition from monopolizing the executor-wide assembly pool.
+  private static final int MAX_ADMITTED_ASSEMBLIES = 2;
+
   private final List<IcebergPartitionedFile> files;
   private final StagedScanAdapter adapter;
   private final StableGreedyReadPlanner planner;
@@ -105,6 +110,7 @@ public final class StagedParquetPartitionReader
   private CompletableFuture<AssemblyBufferPool.Lease> pendingLease;
   private CompletableFuture<PreparedSubtask> taskWaiter;
   private int assembliesInFlight;
+  private int assembliesAdmitted;
 
   // Spark-task iterator state. GPU decode remains task-confined.
   private Iterator<ColumnarBatch> currentBatches;
@@ -166,6 +172,8 @@ public final class StagedParquetPartitionReader
         try {
           CompletableFuture<PreparedSubtask> ready = nextReady();
           if (!ready.isDone() && taskContext != null) {
+            // Unlike the baseline reader, the staged reader assembles off the Spark task thread.
+            // There is no GPU work left to protect until this future supplies a complete input.
             // A task can arrive here while holding GpuSemaphore because a downstream operator
             // asked the scan for another batch. Do not hold that permit while waiting for one of
             // the bounded assembly slots. Otherwise all slots can be owned by tasks waiting to
@@ -689,7 +697,7 @@ public final class StagedParquetPartitionReader
     CompletableFuture<AssemblyBufferPool.Lease> request;
     synchronized (this) {
       if (closed.get() || terminalFailure != null || !hasReadyAssemblyPlanLocked() ||
-          pendingLease != null) {
+          pendingLease != null || assembliesAdmitted >= MAX_ADMITTED_ASSEMBLIES) {
         return;
       }
       request = pools.assemblyBuffers().acquire();
@@ -728,6 +736,7 @@ public final class StagedParquetPartitionReader
       AssemblyBufferPool.Lease lease,
       Throwable error) {
     AssemblyPlan plan = null;
+    AssemblyAdmission admission = null;
     boolean discardLease = false;
     Throwable failure = null;
     synchronized (this) {
@@ -749,7 +758,9 @@ public final class StagedParquetPartitionReader
           try {
             // Cache leases are claimed only after a bounded assembly slot has been granted.
             plan.claimRanges(diskFiles);
+            admission = new AssemblyAdmission(this);
             assembliesInFlight++;
+            assembliesAdmitted++;
           } catch (Throwable claimError) {
             failure = unwrap(claimError);
             discardLease = lease != null;
@@ -781,21 +792,33 @@ public final class StagedParquetPartitionReader
     }
     if (plan != null) {
       AssemblyPlan selectedPlan = plan;
+      AssemblyAdmission selectedAdmission = admission;
       pools.submitAssembly(() -> runAsTaskPoolThread(
-          () -> assemble(selectedPlan, lease)))
+          () -> assemble(selectedPlan, lease, selectedAdmission)))
           .whenComplete((prepared, assemblyError) -> {
+            Throwable completionError =
+                assemblyError == null ? null : unwrap(assemblyError);
             if (assemblyError != null) {
               // submitAssembly reports executor rejection through the future without running the
               // callable. Closing here is idempotent with assemble()'s normal failure cleanup.
-              selectedPlan.close();
-              lease.close();
+              try {
+                selectedPlan.close();
+              } catch (Throwable cleanupError) {
+                completionError = addFailure(completionError, cleanupError);
+              }
+              try {
+                lease.close();
+              } catch (Throwable cleanupError) {
+                completionError = addFailure(completionError, cleanupError);
+              }
             }
             try {
-              onAssemblyReady(prepared, assemblyError);
+              onAssemblyReady(prepared, completionError, selectedAdmission);
             } catch (Throwable callbackError) {
               if (prepared != null) {
                 prepared.close();
               }
+              selectedAdmission.close();
               failPlanner(unwrap(callbackError));
             }
           });
@@ -829,7 +852,8 @@ public final class StagedParquetPartitionReader
   /** Fill one reusable buffer from pinned cache channels in exact synthetic-file order. */
   private PreparedSubtask assemble(
       AssemblyPlan plan,
-      AssemblyBufferPool.Lease lease) throws Exception {
+      AssemblyBufferPool.Lease lease,
+      AssemblyAdmission admission) throws Exception {
     long assemblyStart = System.nanoTime();
     long allocNanos = 0L;
     long cacheReadNanos = 0L;
@@ -864,7 +888,8 @@ public final class StagedParquetPartitionReader
       output.setBytes(outputOffset, footer, 0, footer.length);
 
       StagedParquetInput input = new StagedParquetInput(subtask.getTotalSizeBytes(), lease);
-      leaseTransferred = true;
+      AssemblyBufferPool.CapacitySnapshot capacity =
+          pools.assemblyBuffers().capacitySnapshot();
       SubtaskStats stats = new SubtaskStats(
           plan.stats.ioNanos,
           allocNanos,
@@ -879,9 +904,14 @@ public final class StagedParquetPartitionReader
           plan.stats.cacheHitBytes,
           plan.stats.cacheMissCount,
           plan.stats.cacheMissBytes,
-          cacheReadNanos);
-      return new PreparedSubtask(
-          subtask, input, stats, System.nanoTime() - assemblyStart);
+          cacheReadNanos,
+          capacity.getCurrentCapacityBytes(),
+          capacity.getPeakCapacityBytes());
+      PreparedSubtask prepared = new PreparedSubtask(
+          subtask, input, stats, System.nanoTime() - assemblyStart,
+          admission);
+      leaseTransferred = true;
+      return prepared;
     } finally {
       plan.close();
       if (!leaseTransferred) {
@@ -915,7 +945,10 @@ public final class StagedParquetPartitionReader
   }
 
   /** Publish completed assemblies in completion order; the task consumes only this output. */
-  private void onAssemblyReady(PreparedSubtask prepared, Throwable error) {
+  private void onAssemblyReady(
+      PreparedSubtask prepared,
+      Throwable error,
+      AssemblyAdmission admission) {
     CompletableFuture<PreparedSubtask> waiter = null;
     boolean discard = false;
     Throwable failure = error == null ? null : unwrap(error);
@@ -941,16 +974,30 @@ public final class StagedParquetPartitionReader
       }
     }
     if (failure != null) {
+      // Publish terminal state first so admission release cannot schedule replacement work.
+      failPlanner(failure);
       if (prepared != null) {
         prepared.close();
+      } else {
+        admission.close();
       }
-      failPlanner(failure);
     } else if (discard) {
       prepared.close();
     } else if (waiter != null) {
       if (!waiter.complete(prepared)) {
         prepared.close();
       }
+    }
+    requestAssemblySlotIfNeeded();
+  }
+
+  /** Release one idempotent admission after its prepared input has returned the global slot. */
+  private void onAssemblyAdmissionReleased() {
+    synchronized (this) {
+      if (assembliesAdmitted <= 0) {
+        throw new IllegalStateException("prepared subtask closed without an assembly admission");
+      }
+      assembliesAdmitted--;
     }
     requestAssemblySlotIfNeeded();
   }
@@ -984,7 +1031,7 @@ public final class StagedParquetPartitionReader
   private boolean isEndReadyLocked() {
     return planningFinished && downloadsCompleted == files.size() &&
         pendingAssembly.isEmpty() && pendingLease == null &&
-        assembliesInFlight == 0 && readyAssembly.isEmpty();
+        assembliesInFlight == 0 && assembliesAdmitted == 0 && readyAssembly.isEmpty();
   }
 
   private CompletableFuture<PreparedSubtask> detachEndWaiterIfReadyLocked() {
@@ -1395,27 +1442,54 @@ public final class StagedParquetPartitionReader
     }
   }
 
+  /** One plan's admission, released exactly once across success and exceptional cleanup paths. */
+  private static final class AssemblyAdmission implements AutoCloseable {
+    private final StagedParquetPartitionReader owner;
+    private final AtomicBoolean closed = new AtomicBoolean();
+
+    private AssemblyAdmission(StagedParquetPartitionReader owner) {
+      this.owner = owner;
+    }
+
+    @Override
+    public void close() {
+      if (closed.compareAndSet(false, true)) {
+        owner.onAssemblyAdmissionReleased();
+      }
+    }
+  }
+
   /** Assembly output handed to the Spark task; owns the reusable slot until decode returns. */
   private static final class PreparedSubtask implements AutoCloseable {
     private final ReadSubtask subtask;
     private final StagedParquetInput input;
     private final SubtaskStats stats;
     private final long assemblyNanos;
+    private final AssemblyAdmission admission;
+    private final AtomicBoolean closed = new AtomicBoolean();
 
     private PreparedSubtask(
         ReadSubtask subtask,
         StagedParquetInput input,
         SubtaskStats stats,
-        long assemblyNanos) {
+        long assemblyNanos,
+        AssemblyAdmission admission) {
       this.subtask = subtask;
       this.input = input;
       this.stats = stats;
       this.assemblyNanos = assemblyNanos;
+      this.admission = admission;
     }
 
     @Override
     public void close() {
-      input.close();
+      if (closed.compareAndSet(false, true)) {
+        try {
+          input.close();
+        } finally {
+          admission.close();
+        }
+      }
     }
   }
 

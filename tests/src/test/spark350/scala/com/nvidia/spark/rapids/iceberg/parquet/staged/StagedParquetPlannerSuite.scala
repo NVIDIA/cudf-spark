@@ -585,4 +585,66 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       pool.close()
     }
   }
+
+  test("assembly buffer pool tracks retained current and peak capacity") {
+    val pool = new AssemblyBufferPool(2)
+    var first: AssemblyBufferPool.Lease = null
+    var second: AssemblyBufferPool.Lease = null
+    var handedOff: AssemblyBufferPool.Lease = null
+
+    def assertCapacity(current: Long, peak: Long): Unit = {
+      val snapshot = pool.capacitySnapshot()
+      assert(snapshot.getCurrentCapacityBytes === current)
+      assert(snapshot.getPeakCapacityBytes === peak)
+    }
+
+    try {
+      // Slots are pre-created, but their host buffers are allocated lazily.
+      assertCapacity(current = 0L, peak = 0L)
+      first = pool.acquire().getNow(null)
+      second = pool.acquire().getNow(null)
+      assertCapacity(current = 0L, peak = 0L)
+
+      first.ensureCapacity(64L)
+      assertCapacity(current = 64L, peak = 64L)
+
+      // Reusing a larger allocation neither shrinks the slot nor increases the peak.
+      first.ensureCapacity(32L)
+      assertCapacity(current = 64L, peak = 64L)
+
+      second.ensureCapacity(96L)
+      assertCapacity(current = 160L, peak = 160L)
+
+      // Growing a slot replaces its old allocation and accounts only the retained capacities.
+      first.ensureCapacity(128L)
+      assertCapacity(current = 224L, peak = 224L)
+
+      first.close()
+      first = null
+      assertCapacity(current = 224L, peak = 224L)
+
+      // Returning and handing off a lease retains the slot's high-water allocation for reuse.
+      handedOff = pool.acquire().getNow(null)
+      handedOff.ensureCapacity(16L)
+      assertCapacity(current = 224L, peak = 224L)
+
+      handedOff.close()
+      handedOff = null
+      second.close()
+      second = null
+      pool.close()
+      assertCapacity(current = 0L, peak = 224L)
+    } finally {
+      if (first != null) {
+        first.close()
+      }
+      if (second != null) {
+        second.close()
+      }
+      if (handedOff != null) {
+        handedOff.close()
+      }
+      pool.close()
+    }
+  }
 }

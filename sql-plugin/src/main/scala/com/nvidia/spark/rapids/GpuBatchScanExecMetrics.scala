@@ -72,6 +72,10 @@ trait GpuBatchScanExecMetrics extends GpuExec {
       createMetric(MODERATE_LEVEL, DESCRIPTION_ICEBERG_STAGED_IO_REQUEST_COUNT),
     ICEBERG_STAGED_IO_READ_BYTES ->
       createSizeMetric(MODERATE_LEVEL, DESCRIPTION_ICEBERG_STAGED_IO_READ_BYTES),
+    ICEBERG_STAGED_ASSEMBLY_CAPACITY ->
+      createSizeMetric(MODERATE_LEVEL, DESCRIPTION_ICEBERG_STAGED_ASSEMBLY_CAPACITY),
+    ICEBERG_STAGED_PEAK_ASSEMBLY_CAPACITY ->
+      createSizeMetric(MODERATE_LEVEL, DESCRIPTION_ICEBERG_STAGED_PEAK_ASSEMBLY_CAPACITY),
   ) ++ fileCacheMetrics ++ scanCustomMetrics
 
   lazy val fileCacheMetrics: Map[String, GpuMetric] = createFileCacheMetrics()
