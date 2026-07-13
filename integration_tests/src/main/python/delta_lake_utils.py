@@ -409,9 +409,10 @@ def assert_db173_gpu_data_writing_command(do_test, conf):
         result = with_gpu_session(do_test, conf=conf)
         captured_plans = callback.getResultsWithTimeout(10000)
         assert len(captured_plans) > 0, "No execution plans captured for Delta write"
-        for cls in ["GpuDataWritingCommandExec", "GpuWriteFilesExec"]:
-            assert any(callback.contains(plan, cls) for plan in captured_plans), \
-                f"{cls} is not found in any captured plan"
+        required_classes = ["GpuDataWritingCommandExec", "GpuWriteFilesExec"]
+        assert any(all(callback.contains(plan, cls) for cls in required_classes)
+                   for plan in captured_plans), \
+            f"No captured plan contains all of {required_classes}"
         return result
     finally:
         callback.endCapture()

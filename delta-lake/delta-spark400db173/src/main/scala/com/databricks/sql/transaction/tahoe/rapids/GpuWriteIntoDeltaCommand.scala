@@ -24,7 +24,7 @@ import com.databricks.sql.transaction.tahoe.stats.{DeltaJobStatisticsTracker,
 import com.nvidia.spark.rapids.{DataFromReplacementRule, DataWritingCommandMeta,
   GpuDataWritingCommand, GpuMetric, GpuParquetFileFormat, RapidsConf, RapidsMeta}
 
-import org.apache.spark.sql.catalyst.expressions.{Attribute, ExprId}
+import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.datasources.{BasicWriteJobStatsTracker, GpuWriteFiles}
@@ -37,6 +37,50 @@ import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.SparkSession
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.util.SerializableConfiguration
 
+private object DeltaWriteAttributeMapping {
+  private def structurallyMatches(left: Attribute, right: Attribute): Boolean = {
+    left.name == right.name && left.dataType == right.dataType
+  }
+
+  def validateQueryAttributeAtOrdinal(
+      queryOutput: Seq[Attribute],
+      attribute: Attribute,
+      ordinal: Int,
+      description: String): Either[String, Unit] = {
+    if (ordinal >= queryOutput.size) {
+      Left(s"Delta $description ${attribute.exprId} maps to missing query output ordinal $ordinal")
+    } else {
+      val queryAttribute = queryOutput(ordinal)
+      val exprIdOrdinal = queryOutput.indexWhere(_.exprId == attribute.exprId)
+      if (attribute.exprId == queryAttribute.exprId ||
+          (exprIdOrdinal == -1 && structurallyMatches(attribute, queryAttribute))) {
+        Right(())
+      } else if (exprIdOrdinal != -1) {
+        Left(s"Delta $description ${attribute.exprId} maps to query output ordinal " +
+          s"$exprIdOrdinal instead of native output ordinal $ordinal")
+      } else {
+        Left(s"Delta $description ${attribute.exprId} has no query ExprId match and does not " +
+          s"structurally match query output ordinal $ordinal")
+      }
+    }
+  }
+
+  def remapToDataAttribute(
+      outputAttribute: Attribute,
+      queryAttribute: Attribute,
+      dataAttribute: Attribute,
+      description: String,
+      ordinal: Int): Either[String, Attribute] = {
+    if (structurallyMatches(queryAttribute, dataAttribute)) {
+      Right(outputAttribute.withExprId(dataAttribute.exprId))
+    } else {
+      Left(s"Delta $description at ordinal $ordinal does not structurally match the data plan: " +
+        s"query=${queryAttribute.name}:${queryAttribute.dataType.catalogString}, " +
+        s"data=${dataAttribute.name}:${dataAttribute.dataType.catalogString}")
+    }
+  }
+}
+
 class GpuWriteIntoDeltaCommandMeta(
     cmd: WriteIntoDeltaCommand,
     conf: RapidsConf,
@@ -46,10 +90,14 @@ class GpuWriteIntoDeltaCommandMeta(
 
   private var fileFormat: Option[GpuParquetFileFormat] = None
 
-  private def tagAttributeMapping(attribute: Attribute, description: String): Unit = {
-    val matches = cmd.query.output.count(_.exprId == attribute.exprId)
-    if (matches != 1) {
-      willNotWorkOnGpu(s"Delta $description ${attribute.exprId} has $matches query matches")
+  private def tagAttributeMapping(
+      attribute: Attribute,
+      ordinal: Int,
+      description: String): Unit = {
+    DeltaWriteAttributeMapping.validateQueryAttributeAtOrdinal(
+      cmd.query.output, attribute, ordinal, description) match {
+      case Left(reason) => willNotWorkOnGpu(reason)
+      case Right(_) => ()
     }
   }
 
@@ -73,11 +121,22 @@ class GpuWriteIntoDeltaCommandMeta(
       willNotWorkOnGpu("Partitioned DBR Delta writes require DeltaFileFormatWriter's private " +
         "partitioned task-attempt context")
     }
-    cmd.outputSpec.outputColumns.foreach(tagAttributeMapping(_, "output column"))
+    if (cmd.outputSpec.outputColumns.size != cmd.query.output.size) {
+      willNotWorkOnGpu(s"Delta output specification has ${cmd.outputSpec.outputColumns.size} " +
+        s"columns but the query has ${cmd.query.output.size}")
+    } else {
+      cmd.outputSpec.outputColumns.zipWithIndex.foreach { case (attribute, ordinal) =>
+        tagAttributeMapping(attribute, ordinal, "output column")
+      }
+    }
     cmd.partitionColExprIds.foreach { exprId =>
-      val matches = cmd.query.output.count(_.exprId == exprId)
-      if (matches != 1) {
-        willNotWorkOnGpu(s"Delta partition column $exprId has $matches query matches")
+      val matches = cmd.outputSpec.outputColumns.zipWithIndex.filter(_._1.exprId == exprId)
+      matches match {
+        case Seq((attribute, ordinal)) =>
+          tagAttributeMapping(attribute, ordinal, "partition column")
+        case _ =>
+          willNotWorkOnGpu(
+            s"Delta partition column $exprId has ${matches.size} output specification matches")
       }
     }
     cmd.statsTrackers.foreach {
@@ -136,23 +195,45 @@ case class GpuWriteIntoDeltaCommand(
       child: SparkPlan): Seq[ColumnarBatch] = {
     val dataPlan = GpuWriteFiles.getWriteFilesOpt(child).map(_.child).getOrElse(child)
 
-    def resolveAttribute(exprId: ExprId,
+    if (cpuCmd.outputSpec.outputColumns.size != cpuCmd.query.output.size ||
+        dataPlan.output.size != cpuCmd.query.output.size) {
+      throw new IllegalStateException(
+        s"Delta output size mismatch: outputSpec=${cpuCmd.outputSpec.outputColumns.size}, " +
+          s"query=${cpuCmd.query.output.size}, dataPlan=${dataPlan.output.size}")
+    }
+
+    def resolveAttribute(
+        attribute: Attribute,
+        ordinal: Int,
         description: String): Attribute = {
-      val queryMatches = cpuCmd.query.output.zipWithIndex.filter(_._1.exprId == exprId)
-      queryMatches match {
-        case Seq((_, ordinal)) if ordinal < dataPlan.output.size => dataPlan.output(ordinal)
-        case Seq((_, ordinal)) => throw new IllegalStateException(
-          s"Delta $description $exprId maps to missing data output ordinal $ordinal")
-        case matches => throw new IllegalStateException(
-          s"Delta $description $exprId has ${matches.size} query output matches")
+      DeltaWriteAttributeMapping.validateQueryAttributeAtOrdinal(
+        cpuCmd.query.output, attribute, ordinal, description) match {
+        case Right(_) => ()
+        case Left(reason) => throw new IllegalStateException(reason)
+      }
+      DeltaWriteAttributeMapping.remapToDataAttribute(
+        attribute,
+        cpuCmd.query.output(ordinal),
+        dataPlan.output(ordinal),
+        description,
+        ordinal) match {
+        case Right(value) => value
+        case Left(reason) => throw new IllegalStateException(reason)
       }
     }
 
-    val outputColumns = cpuCmd.outputSpec.outputColumns.map { attribute =>
-      resolveAttribute(attribute.exprId, "output column")
+    val outputColumns = cpuCmd.outputSpec.outputColumns.zipWithIndex.map {
+      case (attribute, ordinal) =>
+        resolveAttribute(attribute, ordinal, "output column")
     }
     val partitionColumns = cpuCmd.partitionColExprIds.map { exprId =>
-      resolveAttribute(exprId, "partition column")
+      val matches = cpuCmd.outputSpec.outputColumns.zipWithIndex.filter(_._1.exprId == exprId)
+      matches match {
+        case Seq((attribute, ordinal)) =>
+          resolveAttribute(attribute, ordinal, "partition column")
+        case _ => throw new IllegalStateException(
+          s"Delta partition column $exprId has ${matches.size} output specification matches")
+      }
     }
     val outputSpec = cpuCmd.outputSpec.copy(outputColumns = outputColumns)
     val writePartitionColumns = WriteIntoDeltaCommand.writePartitionColumns(

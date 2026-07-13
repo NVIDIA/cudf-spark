@@ -224,15 +224,26 @@ def test_delta_db173_native_managed_ctas_rtas(
     conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
     cpu_table = spark_tmp_table_factory.get() + '_cpu'
     gpu_table = spark_tmp_table_factory.get() + '_gpu'
+    source_table = spark_tmp_table_factory.get() + '_source'
 
-    def write_table(spark, table, replace):
-        source = spark.range(4096).selectExpr(
+    with_cpu_session(
+        lambda spark: spark.range(4096).selectExpr(
             "id AS carrier_id",
             "concat('CARRIER-', id) AS carrier_code",
-            "CAST(id % 7 AS INT) AS carrier_type")
+            "CAST(id % 7 AS INT) AS carrier_type") \
+            .write.format("delta").mode("overwrite").saveAsTable(source_table),
+        conf=conf)
+
+    def write_table(spark, table, replace):
+        # A managed Delta scan preserves pass-through ExprIds like the customer projections do.
+        source = spark.table(source_table)
         if replace:
             source = source.selectExpr(
                 "carrier_code", "carrier_id", "carrier_type", "carrier_id + 1 AS version")
+        # DBR's staged Delta output may retain fresh target ExprIds while Catalyst removes
+        # no-op aliases and exposes the underlying query ExprIds. Exercise the safe ordinal
+        # mapping used when the names and types still match exactly.
+        source = source.selectExpr(*[f"`{column}` AS `{column}`" for column in source.columns])
         writer = source.write.format("delta").mode("overwrite") \
             .option("overwriteSchema", "true")
         if enable_deletion_vectors is not None:
