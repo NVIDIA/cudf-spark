@@ -41,6 +41,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import ai.rapids.cudf.HostMemoryBuffer;
+import com.nvidia.spark.rapids.GpuSemaphore$;
 import com.nvidia.spark.rapids.IcebergS3RangeCopier.FileChannelCopyRange;
 import com.nvidia.spark.rapids.filecache.FileCache;
 import com.nvidia.spark.rapids.filecache.FileCacheDataRangeLease;
@@ -163,7 +164,16 @@ public final class StagedParquetPartitionReader
         long waitStart = System.nanoTime();
         PreparedSubtask prepared;
         try {
-          prepared = await(nextReady());
+          CompletableFuture<PreparedSubtask> ready = nextReady();
+          if (!ready.isDone() && taskContext != null) {
+            // A task can arrive here while holding GpuSemaphore because a downstream operator
+            // asked the scan for another batch. Do not hold that permit while waiting for one of
+            // the bounded assembly slots. Otherwise all slots can be owned by tasks waiting to
+            // acquire GpuSemaphore while the permit owners wait here for those same slots.
+            // decodeAndPostProcess acquires the permit again after the assembled input is ready.
+            GpuSemaphore$.MODULE$.releaseIfNecessary(taskContext);
+          }
+          prepared = await(ready);
         } finally {
           adapter.onResultWait(System.nanoTime() - waitStart);
         }

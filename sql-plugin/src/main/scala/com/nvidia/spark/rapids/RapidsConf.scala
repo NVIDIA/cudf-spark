@@ -1873,7 +1873,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       .internal()
       .integerConf
       .checkValue(_ > 0, "assembly buffer count must be positive")
-      .createWithDefault(2)
+      .createWithDefault(32)
 
   val ICEBERG_S3_ASYNC_MAX_CONCURRENCY =
     conf("spark.rapids.iceberg.s3.async.max-concurrency")
