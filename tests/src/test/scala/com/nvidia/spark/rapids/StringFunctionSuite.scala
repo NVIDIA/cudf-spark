@@ -199,6 +199,18 @@ class StringOperatorsSuite extends SparkQueryCompareTestSuite {
 }
 
 class RegExpUtilsSuite extends AnyFunSuite {
+  test("countGroups ignores non-capturing groups") {
+    val cases = Seq(
+      "(?:(a))" -> 1,
+      "(?:(a)(b))" -> 2,
+      "(?:(a)|(b))" -> 2,
+      "(x)(?:(a)|(b))(y)" -> 4)
+
+    cases.foreach { case (pattern, expected) =>
+      assert(GpuRegExpUtils.countGroups(pattern) == expected)
+    }
+  }
+
   test("get list of choices from regexp for multi-replace") {
     val regexChoices = Map(
       "aa|bb" -> Seq("aa", "bb"),
@@ -209,6 +221,9 @@ class RegExpUtilsSuite extends AnyFunSuite {
       "(aa|bb)|(cc|dd)" -> Seq("aa", "bb", "cc", "dd"),
       "aa|bb|cc|dd|ee" -> Seq("aa", "bb", "cc", "dd", "ee"),
       "aa|bb|cc|dd|ee|ff" -> Seq("aa", "bb", "cc", "dd", "ee", "ff"),
+      "foo(cat)" -> Seq("foocat"),
+      "(foo)(cat)" -> Seq("foocat"),
+      "(foo)(cat)|(bar)(dog)" -> Seq("foocat", "bardog"),
       "a\n|b\t|c\r" -> Seq("a\n", "b\t", "c\r")
     )
 
@@ -218,6 +233,17 @@ class RegExpUtilsSuite extends AnyFunSuite {
       val result = GpuRegExpUtils.getChoicesFromRegex(ast)
       assert(result.isDefined && result.forall(_ == choices))
     }
+
+    Seq("foo(cat|dog)", "(cat|dog)foo").foreach { pattern =>
+      val (ast, _) = (new CudfRegexTranspiler(RegexReplaceMode)).getTranspiledAST(pattern,
+        None, Some(""))
+      assert(GpuRegExpUtils.getChoicesFromRegex(ast).isEmpty,
+        s"mixed sequence must not use stringReplaceMulti: $pattern")
+    }
+
+    val emptySequence = RegexSequence(
+      scala.collection.mutable.ListBuffer.empty[RegexAST])
+    assert(GpuRegExpUtils.getChoicesFromRegex(emptySequence).isEmpty)
 
   }
 

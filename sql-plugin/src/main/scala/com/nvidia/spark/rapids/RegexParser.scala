@@ -837,6 +837,10 @@ class CudfRegexTranspiler(mode: RegexMode) {
         }
         None
 
+      case RegexChoice(a, b) =>
+        getUnsupportedRepetitionBaseOption(a)
+          .orElse(getUnsupportedRepetitionBaseOption(b))
+
       case RegexGroup(_, term, _) =>
         getUnsupportedRepetitionBaseOption(term)
 
@@ -1050,8 +1054,12 @@ class CudfRegexTranspiler(mode: RegexMode) {
           current += 1
           RegexGroup(n == current, updateGroupsForExtract(term, n), lookahead)
         }
+        case RegexGroup(false, term, lookahead) =>
+          RegexGroup(capture = false, updateGroupsForExtract(term, n), lookahead)
         case RegexSequence(parts) =>
           RegexSequence(parts.map(updateGroupsForExtract(_, n)))
+        case RegexChoice(left, right) =>
+          RegexChoice(updateGroupsForExtract(left, n), updateGroupsForExtract(right, n))
         case RegexRepetition(term, quantifier) =>
           RegexRepetition(updateGroupsForExtract(term, n), quantifier)
         case _ => regex
