@@ -316,12 +316,6 @@ def is_databricks113_or_later():
 def is_databricks122_or_later():
     return is_databricks_version_or_later(12, 2)
 
-def is_databricks133_or_later():
-    return is_databricks_version_or_later(13, 3)
-
-def is_databricks133():
-    return is_databricks_version(13, 3)
-
 def is_databricks143():
     return is_databricks_version(14, 3)
 

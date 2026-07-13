@@ -252,12 +252,12 @@ The following acronyms may appear in directory names:
 
 |Acronym|Definition  |Example|Example Explanation                           |
 |-------|------------|-------|----------------------------------------------|
-|db     |Databricks  |341db  |Databricks Spark based on Spark 3.4.1         |
+|db     |Databricks  |350db143|Databricks Spark based on Spark 3.5.0        |
 |cdh    |Cloudera CDH|(removed)|Cloudera CDH shims have been removed         |
 
 The version-specific directory names have one of the following forms / use cases:
 
-* `src/main/spark${buildver}`, example: `src/main/spark341db`
+* `src/main/spark${buildver}`, example: `src/main/spark350db143`
 * `src/test/spark${buildver}`, example: `src/test/spark340`
 
 with a special shim descriptor as a Scala/Java comment. See [shimplify.md][1]

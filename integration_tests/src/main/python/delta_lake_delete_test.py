@@ -23,7 +23,7 @@ import glob
 import pyarrow.parquet as pq
 from spark_session import is_before_spark_320, is_databricks_runtime, supports_delta_lake_deletion_vectors, \
     with_cpu_session, with_gpu_session, is_before_spark_353, is_spark_353_or_later, \
-    is_databricks133_or_later, is_databricks173_or_later
+    is_databricks173_or_later
 
 delta_delete_enabled_conf = copy_and_update(delta_writes_enabled_conf,
                                             {"spark.rapids.sql.command.DeleteCommand": "true",
@@ -350,8 +350,8 @@ def test_delta_delete_rows(spark_tmp_path, use_cdf, partition_columns, enable_de
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_databricks133_or_later(),
-                    reason="DBR 13.3+ whole-table DELETE row-count regression coverage")
+@pytest.mark.skipif(not is_databricks_runtime(),
+                    reason="Databricks whole-table DELETE row-count regression coverage")
 def test_delta_delete_entire_table_reports_row_count(spark_tmp_path):
     def generate_dest_data(spark):
         return spark.createDataFrame(
@@ -371,8 +371,8 @@ def test_delta_delete_entire_table_reports_row_count(spark_tmp_path):
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_databricks133_or_later(),
-                    reason="DBR 13.3+ metadata-only DELETE row-count regression coverage")
+@pytest.mark.skipif(not is_databricks_runtime(),
+                    reason="Databricks metadata-only DELETE row-count regression coverage")
 def test_delta_delete_metadata_only_reports_row_count(spark_tmp_path):
     def generate_dest_data(spark):
         return spark.createDataFrame(

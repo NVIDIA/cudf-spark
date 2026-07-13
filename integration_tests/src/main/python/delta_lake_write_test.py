@@ -195,7 +195,7 @@ def test_delta_write_disabled_fallback(spark_tmp_path, disable_conf, enable_dele
 @delta_lake
 @ignore_order(local=True)
 @pytest.mark.xfail(is_databricks143_or_later(), reason="https://github.com/NVIDIA/spark-rapids/issues/13106")
-@pytest.mark.xfail(is_databricks133_or_later(), reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
+@pytest.mark.xfail(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
 @pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_350DB143_xfail_reasons(
     enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12027"), ids=idfn)
 def test_delta_write_round_trip_managed(spark_tmp_table_factory, enable_deletion_vectors):
@@ -337,7 +337,7 @@ def _atomic_write_table_as_select(gens, spark_tmp_table_factory, spark_tmp_path,
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
 @pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_350DB143_xfail_reasons(
                             enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12041"), ids=idfn)
-@pytest.mark.xfail(is_databricks133_or_later(), reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
+@pytest.mark.xfail(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
 def test_delta_atomic_create_table_as_select(spark_tmp_table_factory, spark_tmp_path, enable_deletion_vectors):
     _atomic_write_table_as_select(delta_write_gens, spark_tmp_table_factory, spark_tmp_path,
                                   overwrite=False,
@@ -350,7 +350,7 @@ def test_delta_atomic_create_table_as_select(spark_tmp_table_factory, spark_tmp_
 @pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_350DB143_xfail_reasons(
                             enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12041"), ids=idfn)
 @pytest.mark.xfail(is_spark_356_or_later(), reason="https://github.com/delta-io/delta/issues/4671")
-@pytest.mark.xfail(is_databricks133_or_later(), reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
+@pytest.mark.xfail(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
 def test_delta_atomic_replace_table_as_select(spark_tmp_table_factory, spark_tmp_path, enable_deletion_vectors):
     _atomic_write_table_as_select(delta_write_gens, spark_tmp_table_factory, spark_tmp_path,
                                   overwrite=True, enable_deletion_vectors=enable_deletion_vectors)
@@ -408,7 +408,7 @@ def _atomic_write_table_as_select_sql(gens, spark_tmp_table_factory, replace,
 @pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_350DB143_xfail_reasons(
     enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12041"), ids=idfn)
 @pytest.mark.parametrize("use_cdf", [True, False], ids=idfn)
-@pytest.mark.xfail(is_databricks133_or_later(), reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
+@pytest.mark.xfail(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
 def test_delta_ctas_sql(spark_tmp_table_factory, enable_deletion_vectors, use_cdf):
     _atomic_write_table_as_select_sql(delta_write_gens, spark_tmp_table_factory,
                                       False, enable_deletion_vectors, use_cdf)
@@ -421,7 +421,7 @@ def test_delta_ctas_sql(spark_tmp_table_factory, enable_deletion_vectors, use_cd
     enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12041"), ids=idfn)
 @pytest.mark.parametrize("use_cdf", [True, False], ids=idfn)
 @pytest.mark.xfail(is_spark_356_or_later(), reason="https://github.com/delta-io/delta/issues/4671")
-@pytest.mark.xfail(is_databricks133_or_later(), reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
+@pytest.mark.xfail(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
 def test_delta_rtas_sql(spark_tmp_table_factory, enable_deletion_vectors, use_cdf):
     _atomic_write_table_as_select_sql(delta_write_gens, spark_tmp_table_factory,
                                       True, enable_deletion_vectors, use_cdf)

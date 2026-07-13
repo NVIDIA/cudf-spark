@@ -17,7 +17,7 @@ from pyspark import BarrierTaskContext, TaskContext
 
 from conftest import is_at_least_precommit_run, is_databricks_runtime
 from spark_session import (is_before_spark_331, is_before_spark_350,
-                           is_databricks133_or_later, is_databricks143_or_later,
+                           is_databricks143_or_later,
                            is_spark_400_or_later, is_spark_411_or_later)
 
 from pyspark.sql.pandas.utils import require_minimum_pyarrow_version, require_minimum_pandas_version
@@ -191,8 +191,8 @@ pre_cur_win = Window\
 low_upper_win = Window.partitionBy('a').orderBy('b').rowsBetween(-3, 3)
 
 running_win_param = pytest.param(pre_cur_win, marks=pytest.mark.xfail(
-    condition=is_databricks133_or_later(),
-    reason="DB13.3 and 14.3 wrongly use RunningWindowFunctionExec to evaluate a PythonUDAF \
+    condition=is_databricks_runtime(),
+    reason="Databricks wrongly uses RunningWindowFunctionExec to evaluate a PythonUDAF \
 and it will fail even on CPU"))
 
 udf_windows = [no_part_win, unbounded_win, cur_follow_win, running_win_param, low_upper_win]
