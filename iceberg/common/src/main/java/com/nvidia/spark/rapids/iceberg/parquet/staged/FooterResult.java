@@ -31,10 +31,10 @@ import org.apache.spark.sql.types.StructType;
 /**
  * Immutable result of fetching a footer and filtering its row groups.
  *
- * <p>A footer worker constructs this object and publishes it to the Spark task thread. Lists are
- * defensively copied and exposed as unmodifiable views. The referenced Parquet metadata objects
- * are treated as immutable by this pipeline; {@link ReadSubtask} creates relocated metadata
- * rather than mutating them.</p>
+ * <p>A footer worker constructs this object and publishes it to the synchronized event planner.
+ * Lists are defensively copied and exposed as unmodifiable views. The referenced Parquet metadata
+ * objects are treated as immutable by this pipeline; {@link ReadSubtask} creates relocated
+ * metadata rather than mutating them.</p>
  *
  * <p>This first implementation is deliberately Iceberg-specific. The post-processor contains the
  * schema-evolution and partition-constant work that must run after cuDF decodes a subtask. It is

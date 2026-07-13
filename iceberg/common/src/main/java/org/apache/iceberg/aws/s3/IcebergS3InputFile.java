@@ -18,6 +18,7 @@ package org.apache.iceberg.aws.s3;
 
 import ai.rapids.cudf.HostMemoryBuffer;
 import com.nvidia.spark.rapids.IcebergS3RangeCopier;
+import com.nvidia.spark.rapids.IcebergS3RangeCopier.FileChannelCopyRange;
 import com.nvidia.spark.rapids.IcebergS3RangeCopier.IcebergS3Client;
 import com.nvidia.spark.rapids.fileio.RapidsInputFiles;
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
@@ -121,6 +122,22 @@ public final class IcebergS3InputFile implements RapidsInputFile {
   public void readVectored(HostMemoryBuffer output, List<CopyRange> copyRanges)
       throws IOException {
     IcebergS3RangeCopier.copyToHMB(icebergS3Client, output, s3Uri, copyRanges);
+  }
+
+  /**
+   * Downloads S3 ranges directly into positioned regions of caller-owned file
+   * channels. The requests are submitted in list order but execute concurrently
+   * through the same shared async S3 client used by {@link #readVectored}.
+   *
+   * <p>This method blocks until every accepted request finishes. It neither
+   * closes a destination channel nor changes its current position.</p>
+   *
+   * @return total bytes written.
+   */
+  public long readVectoredToFileChannels(List<FileChannelCopyRange> copyRanges)
+      throws IOException {
+    return IcebergS3RangeCopier.copyToFileChannels(
+        icebergS3Client, s3Uri, copyRanges);
   }
 
   /**

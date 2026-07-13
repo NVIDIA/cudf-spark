@@ -40,7 +40,6 @@ import com.nvidia.spark.rapids.GpuMetric.{
   ICEBERG_STAGED_DISK_BYTES,
   ICEBERG_STAGED_DISK_SUBTASK_COUNT,
   ICEBERG_STAGED_FOOTER_TIME,
-  ICEBERG_STAGED_FOOTER_WAIT_TIME,
   ICEBERG_STAGED_IO_ALLOC_TIME,
   ICEBERG_STAGED_IO_FINALIZE_TIME,
   ICEBERG_STAGED_IO_READ_BYTES,
@@ -71,15 +70,16 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
  *
  * The Java reader owns scheduling, I/O, and output lifetime. This small callback boundary remains
  * because footer filtering and GPU decode use existing Scala APIs. File jobs are submitted in
- * partition order; combine mode admits their completed fragments in completion order, matching
- * the existing multithreaded Iceberg reader.
+ * partition order. Footer completions drive planning, cache-ready completions unlock assembly,
+ * and prepared buffers are decoded in completion order.
  */
 class GpuStagedIcebergParquetReader(
     val rapidsFileIO: IcebergFileIO,
     val files: Seq[IcebergPartitionedFile],
     val constantsProvider: IcebergPartitionedFile => JMap[Integer, _],
     override val conf: GpuIcebergParquetReaderConf,
-    workerThreads: Int) extends GpuIcebergParquetReader {
+    workerThreads: Int,
+    assemblyBufferCount: Int) extends GpuIcebergParquetReader {
 
   private val multiThreadConf = conf.threadConf.asInstanceOf[MultiThread]
   private val closed = new AtomicBoolean()
@@ -124,6 +124,7 @@ class GpuStagedIcebergParquetReader(
       combineThreshold,
       combineWaitMs,
       workerThreads,
+      assemblyBufferCount,
       TaskContext.get())
   }
 
@@ -191,11 +192,6 @@ class GpuStagedIcebergParquetReader(
       conf.metrics.get(ICEBERG_STAGED_WAIT_TIME).foreach(_ += waitNanos)
     }
 
-    override def onFooterWait(waitNanos: Long): Unit = {
-      recordTaskWait(waitNanos)
-      conf.metrics.get(ICEBERG_STAGED_FOOTER_WAIT_TIME).foreach(_ += waitNanos)
-    }
-
     override def onResultWait(waitNanos: Long): Unit = {
       recordTaskWait(waitNanos)
       // Match the standard multithreaded reader's critical-path semantics. Per-file worker I/O
@@ -231,10 +227,10 @@ class GpuStagedIcebergParquetReader(
         val materializeStart = System.nanoTime()
         val attempt = parquetInput.materialize()
         val materializeNanos = System.nanoTime() - materializeStart
-        // A retry receives fresh owning header/footer buffers and fresh owning references to the
-        // fragment slices. MakeParquetTableProducer consumes them once invoked; closeOnExcept
-        // covers failures before that ownership transfer. CachedGpuBatchIterator eagerly drains
-        // the producer, so returned batches no longer depend on staged host storage.
+        // A retry receives a fresh owning slice of the completed assembly buffer.
+        // MakeParquetTableProducer consumes it once invoked; closeOnExcept covers failures before
+        // that ownership transfer. CachedGpuBatchIterator eagerly drains the producer, so returned
+        // batches no longer depend on staged host storage.
         closeOnExcept(attempt) { hostBuffers =>
           onMaterializationCompleted(materializeNanos)
           GpuSemaphore.acquireIfNecessary(TaskContext.get())

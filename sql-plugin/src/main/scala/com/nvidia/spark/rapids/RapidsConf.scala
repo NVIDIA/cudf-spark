@@ -1864,6 +1864,17 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       .booleanConf
       .createWithDefault(false)
 
+  val ICEBERG_STAGED_READ_ASSEMBLY_BUFFER_COUNT =
+    conf("spark.rapids.sql.format.iceberg.stagedRead.assemblyBufferCount")
+      .doc("Number of reusable host assembly buffers shared by the experimental staged " +
+        "Iceberg reader on each executor. This bounds staged encoded-data memory independently " +
+        "of the multithreaded reader worker count.")
+      .startupOnly()
+      .internal()
+      .integerConf
+      .checkValue(_ > 0, "assembly buffer count must be positive")
+      .createWithDefault(2)
+
   val ICEBERG_S3_ASYNC_MAX_CONCURRENCY =
     conf("spark.rapids.iceberg.s3.async.max-concurrency")
       .doc("Max concurrent connections for the AwsCrtAsyncHttpClient used by the " +
@@ -3818,6 +3829,9 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val isIcebergWriteEnabled: Boolean = get(ENABLE_ICEBERG_WRITE)
 
   lazy val isIcebergStagedReadEnabled: Boolean = get(ICEBERG_STAGED_READ_ENABLED)
+
+  lazy val icebergStagedReadAssemblyBufferCount: Int =
+    get(ICEBERG_STAGED_READ_ASSEMBLY_BUFFER_COUNT)
 
   lazy val isHiveDelimitedTextEnabled: Boolean = get(ENABLE_HIVE_TEXT)
 

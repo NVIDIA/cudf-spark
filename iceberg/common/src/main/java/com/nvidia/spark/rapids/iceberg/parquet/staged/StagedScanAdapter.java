@@ -27,8 +27,9 @@ import org.apache.spark.sql.vectorized.ColumnarBatch;
  * Scala callbacks used by the Java Iceberg staged reader.
  *
  * <p>This is the only abstraction between the Java pipeline and the existing Scala Iceberg
- * footer/decode code. Footer and input-opening callbacks run on shared workers. Planning,
- * metrics, and decode callbacks run on the Spark task thread.</p>
+ * footer/decode code. Footer and input-opening callbacks run on shared workers; the Java reader's
+ * synchronized event callbacks own planning; metrics and decode callbacks run on the Spark task
+ * thread.</p>
  */
 public interface StagedScanAdapter {
   /**
@@ -46,7 +47,7 @@ public interface StagedScanAdapter {
    */
   RapidsInputFile openInputFile(IcebergPartitionedFile file) throws Exception;
 
-  /** Reports footer/filter worker time on the Spark task thread after the footer barrier. */
+  /** Reports accumulated footer/filter worker time on the Spark task thread after a wait. */
   default void onFooterCompleted(long footerNanos) {
   }
 
@@ -62,7 +63,7 @@ public interface StagedScanAdapter {
       StagedParquetInput parquetInput) throws Exception;
 
   /**
-   * Reports a sealed subtask immediately before the Spark task thread materializes and decodes
+   * Reports a prepared subtask immediately before the Spark task thread materializes and decodes
    * it. Implementations can update task metrics here without making worker-thread metric updates.
    */
   default void onSubtaskCompleted(ReadSubtask subtask, SubtaskStats stats) {
@@ -70,10 +71,6 @@ public interface StagedScanAdapter {
 
   /** Reports successful staged-output materialization time on the Spark task thread. */
   default void onMaterializationCompleted(long materializationNanos) {
-  }
-
-  /** Reports task-thread time spent waiting at the footer barrier. */
-  default void onFooterWait(long waitNanos) {
   }
 
   /** Reports task-thread time spent waiting for a completed subtask. */

@@ -32,12 +32,12 @@ import org.apache.parquet.hadoop.metadata.ParquetMetadata;
 import org.apache.parquet.schema.MessageType;
 
 /**
- * Immutable unit of asynchronous I/O, finalization, and subsequent GPU decode.
+ * Immutable metadata plan for cache-to-host assembly and subsequent GPU decode.
  *
- * <p>The Spark task thread creates a subtask from ordered, compatible file slices. Construction
- * calculates the exact synthetic Parquet file: fragment slices follow the four-byte header, and
- * relocated row-group metadata is serialized into the final footer. The resulting total size is
- * therefore exact rather than an estimate.</p>
+ * <p>The synchronized footer-event planner creates a subtask from ordered, compatible file
+ * slices. Construction calculates the exact synthetic Parquet file: selected encoded column
+ * chunks follow the four-byte header, and relocated row-group metadata is serialized into the
+ * final footer. The resulting total size is exact rather than an estimate.</p>
  *
  * <p>File slices retain stable input order and borrow their Iceberg footer state. Byte arrays are
  * defensively copied on access. {@code subtaskId} is unique only within one partition read plan;

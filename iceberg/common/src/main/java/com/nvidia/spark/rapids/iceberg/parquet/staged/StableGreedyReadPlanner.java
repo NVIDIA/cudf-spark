@@ -29,11 +29,11 @@ import org.apache.spark.sql.types.StructType;
 /**
  * Stable greedy planner for filtered Iceberg Parquet row groups.
  *
- * <p>The planner runs only on the Spark task thread, consuming footers incrementally in
- * caller-provided order and walking row groups in file order. A subtask is closed before adding a
- * row group that would exceed a hard row/GPU-byte limit or violate Iceberg compatibility. An
- * individual row group that exceeds a hard limit is retained as a standalone subtask, matching
- * the existing soft-limit behavior.</p>
+ * <p>The reader serializes this planner inside synchronized footer-completion callbacks. It
+ * consumes footers incrementally in callback order and walks row groups in file order. A subtask
+ * is closed before adding a row group that would exceed a hard row/GPU-byte limit or violate
+ * Iceberg compatibility. An individual row group that exceeds a hard limit is retained as a
+ * standalone subtask, matching the existing soft-limit behavior.</p>
  *
  * <p>The copied-data target controls combination between complete file results, matching the
  * base multithreaded reader. Row groups from one file are split only by the row/GPU-byte limits;
@@ -95,8 +95,8 @@ public final class StableGreedyReadPlanner {
    * as soon as its closing decision is made instead of after the complete footer barrier. Any
    * feed order is correct: row groups within one footer always keep their file order, and the
    * compatibility rules hold for every pairing. The feed order determines which sources combine:
-   * the staged reader uses file-list order when combining is disabled, and worker-completion
-   * order when it is enabled, matching the base multithreaded reader.</p>
+   * the staged POC always feeds footer-completion order. A non-positive combine target disables
+   * cross-file combination but does not introduce an input-order cursor.</p>
    */
   public final class Session {
     private final ArrayList<SelectedBlock> selected = new ArrayList<>();
@@ -289,7 +289,7 @@ public final class StableGreedyReadPlanner {
         && left.getPostProcessor().compatibleForCombining(right.getPostProcessor());
   }
 
-  /** Task-thread-only tuple used while preserving stable row-group order. */
+  /** Session-local tuple used while preserving stable row-group order. */
   private static final class SelectedBlock {
     private final FooterResult footer;
     private final int blockIndex;
