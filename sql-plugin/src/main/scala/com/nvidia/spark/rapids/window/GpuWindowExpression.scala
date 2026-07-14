@@ -119,8 +119,8 @@ abstract class GpuWindowExpressionMetaBase(
               val orderSpec = wrapped.windowSpec.orderSpec
               val hasMultipleOrderByColumns = orderSpec.length > 1
               if (hasMultipleOrderByColumns && spec.isValueBound) {
-                willNotWorkOnGpu("range window frames with value boundaries are not supported " +
-                  "with multiple order-by columns")
+                willNotWorkOnGpu("unexpected plugin path: Spark should be rejecting " +
+                  "value-bounded range window frames with multiple order-by columns")
               }
               // Order-by types accepted for multi-column RANGE windows; the analogous
               // single-column gate is GpuWindowUtil.isValidRangeFrameType.
