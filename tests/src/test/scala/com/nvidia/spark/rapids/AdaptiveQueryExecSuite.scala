@@ -123,6 +123,15 @@ class AdaptiveQueryExecSuite
       try {
         assert(org.apache.spark.sql.SparkSession.getActiveSession.isEmpty)
 
+        val expectedFailure = intercept[RuntimeException] {
+          GpuOverrideUtil.withActiveSession(spark) {
+            assert(org.apache.spark.sql.SparkSession.getActiveSession.contains(spark))
+            throw new RuntimeException("expected test failure")
+          }
+        }
+        assert(expectedFailure.getMessage == "expected test failure")
+        assert(org.apache.spark.sql.SparkSession.getActiveSession.isEmpty)
+
         // Direct, unregistered conversion remains session-less, but scan construction must not
         // eagerly dereference that missing session.
         spark.conf.set(RapidsConf.EXPLAIN.key, "NONE")
@@ -134,15 +143,16 @@ class AdaptiveQueryExecSuite
 
         spark.conf.set(RapidsConf.TEST_CONF.key, "true")
         spark.conf.set(RapidsConf.TAG_LORE_ID_ENABLED.key, "true")
-        GpuQueryStagePrepOverrides(spark).apply(cpuPlan)
+        ShimLoader.newGpuQueryStagePrepOverrides(spark).apply(cpuPlan)
         assert(org.apache.spark.sql.SparkSession.getActiveSession.isEmpty)
 
-        val gpuPlan = GpuOverrides(spark).apply(cpuPlan)
+        val columnarRules = ShimLoader.newColumnarOverrideRules(spark)
+        val gpuPlan = columnarRules.preColumnarTransitions.apply(cpuPlan)
         val gpuScan = gpuPlan.find(_.isInstanceOf[GpuFileSourceScanExec]).get
         assert(SparkSessionUtils.sessionFromPlan(gpuScan) eq spark)
         assert(org.apache.spark.sql.SparkSession.getActiveSession.isEmpty)
 
-        val transitionedPlan = new GpuTransitionOverrides(spark).apply(gpuPlan)
+        val transitionedPlan = columnarRules.postColumnarTransitions.apply(gpuPlan)
         val transitionedScan = transitionedPlan.find(_.isInstanceOf[GpuFileSourceScanExec]).get
         assert(SparkSessionUtils.sessionFromPlan(transitionedScan) eq spark)
         assert(org.apache.spark.sql.SparkSession.getActiveSession.isEmpty)
