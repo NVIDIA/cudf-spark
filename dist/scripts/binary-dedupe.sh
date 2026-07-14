@@ -364,24 +364,30 @@ function unshimmed_class_needs_shared_identity() {
   class_file="$1"
 
   # Most root-layout classes with the same FQCN must be bitwise-identical across
-  # the selected shim jars. This function preserves only the legacy/bootstrap
-  # exceptions that predate default unshimming and cannot be represented by
-  # SPARK_SHARED_TXT:
+  # the selected shim jars. This function preserves only root-visible legacy
+  # exceptions that predate default unshimming. These classes have compatible
+  # executable bytecode for their supported runtime paths, but differ in Scala
+  # metadata, debug attributes, or Spark-dependency-shaped signatures.
   #
-  # - version-qualified RapidsShuffleManager classes are copied per shim and are
-  #   unique by construction;
-  # - ParquetCachedBatchSerializer is a public root facade that remains binary
-  #   compatible across Spark 4.1 despite adding a new Spark API method;
-  # - ProxyRapidsShuffleInternalManagerBase covers the known DB 17.3
-  #   ShuffleManager.getReader signature split by implementing all variants.
-  #
-  # Do not add new same-FQCN compatibility waivers here. Keep those classes in
-  # spark-shared or refactor them until the bytecode comparison proves shared
-  # identity.
+  # Keep this list narrow. Do not add a class here when it can stay in
+  # spark-shared without being referenced from root-loaded code.
   class_file_quoted=$(printf "%q" "$class_file")
   if [[ "$class_file_quoted" =~ com/nvidia/spark/rapids/spark[34].*/.*ShuffleManager.class || \
           "$class_file_quoted" == "com/nvidia/spark/ParquetCachedBatchSerializer.class" || \
-          "$class_file_quoted" =~ org/apache/spark/sql/rapids/ProxyRapidsShuffleInternalManagerBase ]]; then
+          "$class_file_quoted" =~ org/apache/spark/sql/rapids/ProxyRapidsShuffleInternalManagerBase || \
+          "$class_file_quoted" == "org/apache/spark/sql/rapids/GpuShuffleDependency.class" || \
+          "$class_file_quoted" == "com/nvidia/spark/rapids/parquet/CloseableColumnBatchIterator.class" || \
+          "$class_file_quoted" == "com/nvidia/spark/rapids/GpuReadCSVFileFormat.class" || \
+          "$class_file_quoted" == "org/apache/spark/sql/catalyst/json/rapids/GpuReadJsonFileFormat.class" || \
+          "$class_file_quoted" == "com/nvidia/spark/rapids/shims/PythonMapInArrowExecShims.class" || \
+          "$class_file_quoted" == "org/apache/spark/sql/rapids/execution/python/shims/PythonArgumentUtils.class" || \
+          "$class_file_quoted" == "com/nvidia/spark/rapids/shims/GpuUnionExecShim.class" || \
+          "$class_file_quoted" == "org/apache/spark/sql/rapids/GpuStringTrim.class" || \
+          "$class_file_quoted" == "org/apache/spark/sql/rapids/GpuStringTrimLeft.class" || \
+          "$class_file_quoted" == "org/apache/spark/sql/rapids/GpuStringTrimRight.class" || \
+          "$class_file" == "org/apache/spark/sql/execution/datasources/v2/rapids/GpuAtomicCreateTableAsSelectExec$.class" || \
+          "$class_file_quoted" == "org/apache/spark/sql/rapids/shims/RapidsErrorUtils.class" || \
+          "$class_file_quoted" == "org/apache/spark/sql/rapids/execution/python/shims/WindowInPandasExecTypeShim.class" ]]; then
       return 1
   fi
   return 0

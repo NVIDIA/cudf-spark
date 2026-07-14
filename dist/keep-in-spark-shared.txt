@@ -5,22 +5,8 @@
 # for compatibility, packaging, or follow-up validation reasons. New common
 # classes should normally stay unshimmed by default.
 
-# These classes are intentionally not added to the compatibility waiver in
-# binary-dedupe.sh. They looked executable-bytecode-compatible in the unshim
-# investigation, but are not bitwise-identical across representative shim sets
-# due to metadata, debug-info, or Spark API shape differences. Keep them in the
-# parallel-world layout until they are refactored to be bitwise-identical or a
-# dedicated ABI-compatibility verifier replaces the legacy waiver mechanism.
-org/apache/spark/sql/rapids/GpuShuffleDependency.class
-com/nvidia/spark/rapids/parquet/CloseableColumnBatchIterator.class
-com/nvidia/spark/rapids/GpuReadCSVFileFormat.class
-org/apache/spark/sql/catalyst/json/rapids/GpuReadJsonFileFormat.class
-com/nvidia/spark/rapids/shims/PythonMapInArrowExecShims.class
-org/apache/spark/sql/rapids/execution/python/shims/PythonArgumentUtils.class
-com/nvidia/spark/rapids/shims/GpuUnionExecShim.class
-org/apache/spark/sql/rapids/GpuStringTrim.class
-org/apache/spark/sql/rapids/GpuStringTrimLeft.class
-org/apache/spark/sql/rapids/GpuStringTrimRight.class
-org/apache/spark/sql/execution/datasources/v2/rapids/GpuAtomicCreateTableAsSelectExec$.class
-org/apache/spark/sql/rapids/shims/RapidsErrorUtils.class
-org/apache/spark/sql/rapids/execution/python/shims/WindowInPandasExecTypeShim.class
+# There are currently no holdback entries. The initial candidates are runtime-
+# reachable from root-loaded plugin code, so keeping them only in spark-shared
+# creates classpath holes. They remain narrow compatibility waivers in
+# binary-dedupe.sh until the call sites are refactored behind bridges or the
+# verifier learns to distinguish ABI-compatible metadata differences.
