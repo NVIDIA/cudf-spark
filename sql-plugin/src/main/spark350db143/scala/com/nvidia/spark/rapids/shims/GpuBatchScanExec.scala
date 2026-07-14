@@ -21,9 +21,11 @@
 {"spark": "401"}
 {"spark": "402"}
 {"spark": "403"}
+{"spark": "404"}
 {"spark": "411"}
 {"spark": "412"}
 spark-rapids-shim-json-lines ***/
+
 package com.nvidia.spark.rapids.shims
 
 import com.google.common.base.Objects
