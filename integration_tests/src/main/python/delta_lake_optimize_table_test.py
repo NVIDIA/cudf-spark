@@ -264,7 +264,7 @@ def _setup_tables(enable_deletion_vectors, cpu_path, gpu_path, partition_columns
 
 def _assert_optimize_parity(enable_deletion_vectors, spark_tmp_path, partition_columns=None, clustering_columns=None,
                             conf=_optimize_conf, write_func=_write_many_small_files,
-                            require_gpu_write=True):
+                            require_gpu_write=True, use_gpu_test_mode=True):
     data_path = spark_tmp_path + "/DELTA_OPTIMIZE"
     cpu_path = data_path + "/CPU"
     gpu_path = data_path + "/GPU"
@@ -277,7 +277,8 @@ def _assert_optimize_parity(enable_deletion_vectors, spark_tmp_path, partition_c
     plan_callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
     plan_callback.startCapture()
     try:
-        gpu_result = with_gpu_session(lambda s: s.sql(_optimize_sql(gpu_path)).collect(), conf=conf)
+        gpu_session = with_gpu_session if use_gpu_test_mode else _with_gpu_session_no_test
+        gpu_result = gpu_session(lambda s: s.sql(_optimize_sql(gpu_path)).collect(), conf=conf)
         captured_plans = plan_callback.getResultsWithTimeout(10000)
         _assert_gpu_optimize_executed(
             plan_callback, captured_plans, require_gpu_write=require_gpu_write)
@@ -428,7 +429,7 @@ def test_delta_optimize_row_tracking_table(spark_tmp_path):
 
 
 @delta_lake
-@allow_non_gpu('ExecutedCommandExec', 'HashAggregateExec', *delta_meta_allow)
+@allow_non_gpu('ExecutedCommandExec', *delta_meta_allow)
 @pytest.mark.skipif(is_before_spark_353(), reason="Liquid clustering requires Delta 3.3+")
 @pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
                     reason="OPTIMIZE table command is supported for Databricks 17.3+")
@@ -441,7 +442,8 @@ def test_delta_optimize_clustered_table(spark_tmp_path, enable_deletion_vectors)
             enable_deletion_vectors,
             spark_tmp_path,
             clustering_columns=["a"],
-            require_gpu_write=not is_databricks173_or_later())
+            require_gpu_write=not is_databricks173_or_later(),
+            use_gpu_test_mode=not is_databricks173_or_later())
 
 
 @delta_lake
