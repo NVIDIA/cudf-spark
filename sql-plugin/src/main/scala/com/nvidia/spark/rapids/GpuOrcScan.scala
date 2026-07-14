@@ -834,11 +834,26 @@ trait OrcCommonFunctions extends OrcCodecWritingHelper { self: FilePartitionRead
   // The Spark schema describing what will be read
   def readDataSchema: StructType
 
-  /** Copy the stripe to the channel */
-  protected def copyStripeData(
+  /** Reserve output space for stripe data and return its destination and source ranges. */
+  protected def reserveStripeData(
+      out: HostMemoryOutputStream,
+      inputDataRanges: DiskRangeList): (Long, DiskRangeList) = {
+    val startPos = out.getPos
+    var totalLength = 0L
+    var current = inputDataRanges
+    while (current != null) {
+      totalLength += current.getLength
+      current = current.next
+    }
+    out.seek(startPos + totalLength)
+    (startPos, inputDataRanges)
+  }
+
+  /** Copy all selected stripe ranges to their reserved output positions. */
+  protected def copyStripesData(
       dataReader: GpuOrcDataReader,
       out: HostMemoryOutputStream,
-      inputDataRanges: DiskRangeList): Unit = {
+      inputDataRanges: Seq[(Long, DiskRangeList)]): Unit = {
 
     val start = System.nanoTime()
     dataReader.copyFileDataToHostStream(out, inputDataRanges)
@@ -1174,13 +1189,15 @@ trait OrcPartitionReaderBase extends OrcCommonFunctions with Logging
     // write the stripes
     withCodecOutputStream(ctx, rawOut) { protoWriter =>
       withResource(OrcTools.buildDataReader(ctx, metrics)) { dataReader =>
+        val inputDataRanges = new ArrayBuffer[(Long, DiskRangeList)](stripes.length)
         stripes.foreach { stripe =>
           stripe.infoBuilder.setOffset(rawOut.getPos)
-          copyStripeData(dataReader, rawOut, stripe.inputDataRanges)
+          inputDataRanges += reserveStripeData(rawOut, stripe.inputDataRanges)
           val stripeFooterStartOffset = rawOut.getPos
           protoWriter.writeAndFlush(stripe.footer)
           stripe.infoBuilder.setFooterLength(rawOut.getPos - stripeFooterStartOffset)
         }
+        copyStripesData(dataReader, rawOut, inputDataRanges.toSeq)
       }
     }
     // write the file tail (file footer + postscript)
@@ -2817,14 +2834,16 @@ class MultiFileOrcPartitionReader(
           withCodecOutputStream(ctx, rawOut) { protoWriter =>
             withResource(OrcTools.buildDataReader(ctx, metrics)) { dataReader =>
               // write the stripes including INDEX+DATA+STRIPE_FOOTER
+              val inputDataRanges = new ArrayBuffer[(Long, DiskRangeList)](stripes.length)
               stripes.foreach { stripeWithMeta =>
                 val stripe = stripeWithMeta.stripe
                 stripe.infoBuilder.setOffset(offset + rawOut.getPos)
-                copyStripeData(dataReader, rawOut, stripe.inputDataRanges)
+                inputDataRanges += reserveStripeData(rawOut, stripe.inputDataRanges)
                 val stripeFooterStartOffset = rawOut.getPos
                 protoWriter.writeAndFlush(stripe.footer)
                 stripe.infoBuilder.setFooterLength(rawOut.getPos - stripeFooterStartOffset)
               }
+              copyStripesData(dataReader, rawOut, inputDataRanges.toSeq)
             }
           }
         }

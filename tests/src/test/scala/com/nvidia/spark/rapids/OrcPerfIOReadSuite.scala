@@ -362,6 +362,37 @@ class OrcPerfIOReadSuite extends AnyFunSuite with Matchers with MockitoSugar {
     result shouldEqual Array[Byte](2, 3, 4, 5, 6, 10, 11, 12)
   }
 
+  test("ranges from multiple stripes share one vectored call and retain output gaps") {
+    val fileBytes = Array.tabulate[Byte](32)(_.toByte)
+    val inputFile = new RecordingInputFile(fileBytes)
+    val reader = newReader(inputFile)
+
+    withResource(HostMemoryBuffer.allocate(16, false)) { output =>
+      val stream = new HostMemoryOutputStream(output)
+      stream.seek(14)
+      inputFile.expectedVectoredOutput = Some(output)
+      try {
+        reader.copyFileDataToHostStream(stream, Seq(
+          (0L, ranges((2, 2))),
+          (1L, ranges((2, 4))),
+          (7L, ranges((10, 13)))))
+      } finally {
+        inputFile.expectedVectoredOutput = None
+      }
+
+      inputFile.vectoredReads shouldEqual Seq(Seq(
+        RecordedRange(2, 2, 1),
+        RecordedRange(10, 3, 7)))
+      stream.getPos shouldEqual 14L
+      val firstStripe = new Array[Byte](2)
+      val secondStripe = new Array[Byte](3)
+      output.getBytes(firstStripe, 0, 1, firstStripe.length)
+      output.getBytes(secondStripe, 0, 7, secondStripe.length)
+      firstStripe shouldEqual Array[Byte](2, 3)
+      secondStripe shouldEqual Array[Byte](10, 11, 12)
+    }
+  }
+
   test("mixed cache hits and misses preserve output order and batch misses") {
     val fileBytes = Array.tabulate[Byte](32)(_.toByte)
     val inputFile = new RecordingInputFile(fileBytes)

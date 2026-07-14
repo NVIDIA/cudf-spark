@@ -135,22 +135,33 @@ abstract class GpuOrcDataReaderBase(
   }
 
   def copyFileDataToHostStream(out: HostMemoryOutputStream, ranges: DiskRangeList): Unit = {
-    val remoteCopies = new ArrayBuffer[CopyRange]
     val startPos = out.getPos
-    var totalBytesToCopy = 0L
+    copyFileDataToHostStream(out, Seq((startPos, ranges)))
+    out.seek(startPos + getTotalLength(ranges))
+  }
+
+  def copyFileDataToHostStream(
+      out: HostMemoryOutputStream,
+      rangeGroups: Seq[(Long, DiskRangeList)]): Unit = {
+    val remoteCopies = new ArrayBuffer[CopyRange]
+    val originalPos = out.getPos
     withResource(new ArrayBuffer[LocalCopy]) { localCopies =>
-      var current = ranges
-      while (current != null) {
-        val length = current.getLength
-        val outputOffset = startPos + totalBytesToCopy
-        val channel = fileCache.getDataRangeChannel(inputFile, current.getOffset, length)
-        if (channel.isDefined) {
-          localCopies += LocalCopy(channel.get, length, outputOffset)
-        } else {
-          remoteCopies += new CopyRange(current.getOffset, length, outputOffset)
+      rangeGroups.foreach { case (startPos, ranges) =>
+        var outputOffset = startPos
+        var current = ranges
+        while (current != null) {
+          val length = current.getLength
+          if (length > 0) {
+            val channel = fileCache.getDataRangeChannel(inputFile, current.getOffset, length)
+            if (channel.isDefined) {
+              localCopies += LocalCopy(channel.get, length, outputOffset)
+            } else {
+              remoteCopies += new CopyRange(current.getOffset, length, outputOffset)
+            }
+          }
+          outputOffset += length
+          current = current.next
         }
-        totalBytesToCopy += length
-        current = current.next
       }
       localCopies.foreach { localCopy =>
         copyLocal(localCopy, out)
@@ -158,8 +169,18 @@ abstract class GpuOrcDataReaderBase(
       }
     }
     copyRemoteBlocksData(remoteCopies.toSeq, out)
-    // fix up output position after ranges were copied out of order
-    out.seek(startPos + totalBytesToCopy)
+    // restore output position after ranges were copied out of order
+    out.seek(originalPos)
+  }
+
+  private def getTotalLength(ranges: DiskRangeList): Long = {
+    var totalLength = 0L
+    var current = ranges
+    while (current != null) {
+      totalLength += current.getLength
+      current = current.next
+    }
+    totalLength
   }
 
   private def copyRemoteBlocksData(
