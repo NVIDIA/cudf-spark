@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
+
 import pytest
 
 from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect, \
@@ -31,6 +33,10 @@ _regexp_conf = { 'spark.rapids.sql.regexp.enabled': True }
 
 def mk_str_gen(pattern):
     return StringGen(pattern).with_special_case('').with_special_pattern('.{0,10}')
+
+def _regexp_replace_error_message(java_message):
+    return re.compile(
+        re.escape(java_message) + r'|\[INVALID_REGEXP_REPLACE\] Could not perform regexp_replace')
 
 def test_split_re_negative_limit():
     data_gen = mk_str_gen('([bf]o{0,2}:){1,7}') \
@@ -472,6 +478,80 @@ def test_regexp_replace():
                 'regexp_replace(a, "(?:aa)+", "A")',
                 'regexp_replace(a, "a|b|c", "A")'),
         conf=_regexp_conf)
+
+# https://github.com/NVIDIA/spark-rapids/issues/14742
+# Replacement-string parser must match java.util.regex.Matcher#appendReplacement.
+# Use the DataFrame API rather than selectExpr because Spark SQL variable substitution
+# expands ${...} inside SQL string literals before regexp_replace sees it.
+def test_regexp_replace_backslash_digit_is_literal():
+    from pyspark.sql.functions import regexp_replace, col
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.createDataFrame([("abc",)], ["a"]).select(
+            regexp_replace(col("a"), "(a)", "\\1")),
+        conf=_regexp_conf)
+
+
+@allow_non_gpu('ProjectExec', 'RegExpReplace')
+def test_regexp_replace_trailing_backslash_throws():
+    from pyspark.sql.functions import regexp_replace, col
+    assert_gpu_and_cpu_error(
+        lambda spark: spark.createDataFrame([("a",)], ["a"]).select(
+            regexp_replace(col("a"), "a", "\\")).collect(),
+        conf=_regexp_conf,
+        error_message=_regexp_replace_error_message("character to be escaped is missing"))
+
+
+@allow_non_gpu('ProjectExec', 'RegExpReplace')
+def test_regexp_replace_dollar_non_digit_throws():
+    from pyspark.sql.functions import regexp_replace, col
+    assert_gpu_and_cpu_error(
+        lambda spark: spark.createDataFrame([("a",)], ["a"]).select(
+            regexp_replace(col("a"), "a", "$x")).collect(),
+        conf=_regexp_conf,
+        error_message=_regexp_replace_error_message("Illegal group reference"))
+
+
+@allow_non_gpu('ProjectExec', 'RegExpReplace')
+def test_regexp_replace_digit_leading_named_group_throws():
+    from pyspark.sql.functions import regexp_replace, col
+    assert_gpu_and_cpu_error(
+        lambda spark: spark.createDataFrame([("a",)], ["a"]).select(
+            regexp_replace(col("a"), "(a)", "${1}")).collect(),
+        conf=_regexp_conf,
+        error_message=_regexp_replace_error_message(
+            "capturing group name {1} starts with digit character"))
+
+
+@allow_non_gpu('ProjectExec', 'RegExpReplace')
+def test_regexp_replace_unknown_named_group_throws():
+    from pyspark.sql.functions import regexp_replace, col
+    assert_gpu_and_cpu_error(
+        lambda spark: spark.createDataFrame([("a",)], ["a"]).select(
+            regexp_replace(col("a"), "(a)", "${name}")).collect(),
+        conf=_regexp_conf,
+        error_message=_regexp_replace_error_message("No group with name {name}"))
+
+
+# `\$1` -> the backslash escapes the `$`, so the result is the literal text `$1`
+# (java.util.regex.Matcher#appendReplacement semantics). The DataFrame API avoids SQL
+# `${...}` variable substitution.
+def test_regexp_replace_escaped_dollar_before_digit_is_literal():
+    from pyspark.sql.functions import regexp_replace, col
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.createDataFrame([("abc",)], ["a"]).select(
+            regexp_replace(col("a"), "(a)", r"\$1")),
+        conf=_regexp_conf)
+
+
+# `\\$1` -> `\\` is an escaped backslash and the following `$1` is a genuine group-1
+# backref, so the result is a literal `\` followed by the captured group.
+def test_regexp_replace_double_backslash_before_dollar_is_backref():
+    from pyspark.sql.functions import regexp_replace, col
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.createDataFrame([("abc",)], ["a"]).select(
+            regexp_replace(col("a"), "(a)", r"\\$1")),
+        conf=_regexp_conf)
+
 
 def test_regexp_replace_mixed_sequence():
     suffix_gen = mk_str_gen('[abcd]{0,3}') \
