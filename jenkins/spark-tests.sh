@@ -564,7 +564,7 @@ if [[ "$TEST_MODE" == "CUDF_UDF_ONLY" ]]; then
   CUDF_VER=$(echo "${PROJECT_VER}" | cut -d '.' -f 1,2)
   CUDA_VER_FOR_CUDF=${CUDA_VER_FOR_CUDF:-'12.9'}
 
-  conda create -y -n ${CUDF_UDF_ENV} -c rapidsai-nightly -c nvidia -c conda-forge -c defaults \
+  conda create -y -n ${CUDF_UDF_ENV} -c rapidsai-nightly -c conda-forge -c nvidia -c defaults \
     python=${CUDF_UDF_PYTHON_VER} pip cudf=${CUDF_VER} cuda-version=${CUDA_VER_FOR_CUDF}
 
   # Activate the cudf_udf env and reset PYTHONPATH to use the new env's site-packages
@@ -585,6 +585,7 @@ if [[ "$TEST_MODE" == "CUDF_UDF_ONLY" ]]; then
     PYSP_TEST_spark_rapids_memory_gpu_minAllocFraction=0 \
     PYSP_TEST_spark_rapids_python_memory_gpu_allocFraction=0.1 \
     PYSP_TEST_spark_rapids_python_concurrentPythonWorkers=2 \
+    PYSP_TEST_spark_executorEnv_CONDA_PREFIX=${CONDA_PREFIX} \
     PYSP_TEST_spark_executorEnv_PYTHONPATH=${RAPIDS_PLUGIN_JAR} \
     ./run_pyspark_from_build.sh -m cudf_udf --cudf_udf
 

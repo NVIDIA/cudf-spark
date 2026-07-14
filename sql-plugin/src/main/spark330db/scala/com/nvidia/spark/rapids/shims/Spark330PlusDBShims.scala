@@ -52,7 +52,8 @@ trait Spark330PlusDBShims extends Spark321PlusDBShims {
         }),
       GpuElementAtMeta.elementAtRule(true)
     ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
-    super.getExprs ++ shimExprs ++ DayTimeIntervalShims.exprs ++ RoundingShims.exprs
+    super.getExprs ++ shimExprs ++ YearMonthIntervalShims.exprs ++
+      DayTimeIntervalShims.exprs ++ RoundingShims.exprs
   }
 
   override def getExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] =

@@ -1404,6 +1404,28 @@ def test_day_time_interval_division_number_no_overflow2(data_gen):
         # avoid dividing by 0
         lambda spark: gen_df(spark, gen_list).selectExpr("_c1 / case when _c2 = 0 then cast(1 as {}) else _c2 end".format(to_cast_string(data_gen.data_type))))
 
+@pytest.mark.parametrize('data_gen', _no_overflow_multiply_gens_for_fallback + [DoubleGen(min_exp=-3, max_exp=5, special_cases=[0.0])], ids=idfn)
+def test_year_month_interval_multiply_number(data_gen):
+    # Cast result to BIGINT (months count) so the final schema is LongType.
+    # YearMonthIntervalType schema is not deserializable by PySpark 3.3.0
+    # client-side, and CAST(YM AS STRING) is not GPU-supported (would force
+    # the multiply onto CPU). CAST(YM AS BIGINT) is GPU-supported.
+    gen_list = [('_c2', data_gen)]
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: gen_df(spark, gen_list).selectExpr(
+            "CAST(INTERVAL '0-3' YEAR TO MONTH * _c2 AS BIGINT)",
+            "CAST(INTERVAL '5-7' YEAR TO MONTH * _c2 AS BIGINT)",
+            "CAST(_c2 * INTERVAL '100-0' YEAR TO MONTH AS BIGINT)"))
+
+@pytest.mark.parametrize('data_gen', _no_overflow_multiply_gens_for_fallback + [DoubleGen(min_exp=0, max_exp=5, special_cases=[])], ids=idfn)
+def test_year_month_interval_division_number_no_overflow(data_gen):
+    # Cast result to BIGINT (same reason as test_year_month_interval_multiply_number).
+    gen_list = [('_c2', data_gen)]
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: gen_df(spark, gen_list).selectExpr(
+            "CAST(INTERVAL '5-3' YEAR TO MONTH / _c2 AS BIGINT)",
+            "CAST(INTERVAL '100-0' YEAR TO MONTH / _c2 AS BIGINT)"))
+
 def _get_overflow_df_1col(spark, data_type, value, expr):
     return spark.createDataFrame(
         SparkContext.getOrCreate().parallelize([value]),

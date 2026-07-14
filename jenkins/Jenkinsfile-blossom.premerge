@@ -34,9 +34,19 @@ def CUDA_NAME = 'cuda12.0.1' // hardcode cuda version for docker build part
 def PREMERGE_DOCKERFILE = 'jenkins/Dockerfile-blossom.ubuntu'
 def IMAGE_PREMERGE // temp image for premerge test
 def IMAGE_DB = pod.getCPUYAML("${common.ARTIFACTORY_NAME}/sw-spark-docker/spark:rapids-databricks-ubuntu22")
+// Skills uses a separate Rocky 8 toolchain. Keep this in sync with the Skills Dockerfile
+// and the Docker Manager stable image tag.
+def SKILLS_CUDA_VERSION = '12.9.1'
+def SKILLS_PREMERGE_DOCKERFILE = 'skills/ci/Dockerfile.pre-merge'
+def IMAGE_SKILLS = "${common.ARTIFACTORY_NAME}/sw-spark-docker/plugin:" +
+    "skills-premerge-rockylinux8-cuda${SKILLS_CUDA_VERSION}-blossom-dev"
 def PREMERGE_TAG
+def SKILLS_PREMERGE_TAG
 def skipped = false
 def db_build = false
+def skills_build = false
+def TEMP_SKILLS_IMAGE_BUILD = false
+def normal_build = true
 def sourcePattern = 'shuffle-plugin/src/main/scala/,udf-compiler/src/main/scala/,' +
     'sql-plugin/src/main/java/,sql-plugin/src/main/scala/'
 // The path where the CI_PART1 job shares rapids plugin built tars with the CI_PART job
@@ -105,9 +115,25 @@ pipeline {
                         skipped = true
                         return
                     }
+                    githubHelper.updateCommitStatus("", "Running", GitHubCommitState.PENDING)
                     checkoutCode(githubHelper.getCloneUrl(), githubHelper.getMergedSHA())
+
+                    def changedFilesOutput = sh(returnStdout: true,
+                        script: 'git -c core.quotePath=false --no-pager diff ' +
+                            '--name-only --no-renames HEAD^1 HEAD').trim()
+                    def changedFiles = changedFilesOutput ? changedFilesOutput.readLines() : []
+                    if (changedFiles) {
+                        skills_build = changedFiles.any { it.startsWith('skills/') }
+                        normal_build = changedFiles.any { !it.startsWith('skills/') }
+                        TEMP_SKILLS_IMAGE_BUILD = changedFiles.contains(SKILLS_PREMERGE_DOCKERFILE)
+                    }
+                    echo "Changed files: ${changedFiles ?: 'none detected'}"
+                    echo "Premerge selection: normal=${normal_build}, skills=${skills_build}, " +
+                        "skillsImage=${TEMP_SKILLS_IMAGE_BUILD}"
+
                     // check if need trigger databricks CI build
-                    if (title ==~ /.*\[databricks\].*/ || databricksCodeChanged()) {
+                    if (title ==~ /.*\[databricks\].*/ ||
+                            (normal_build && databricksCodeChanged())) {
                         db_build = true
                     }
                 }
@@ -118,7 +144,7 @@ pipeline {
             when {
                 beforeAgent true
                 expression {
-                    !skipped
+                    !skipped && normal_build
                 }
             }
 
@@ -132,7 +158,6 @@ pipeline {
 
             steps {
                 script {
-                    githubHelper.updateCommitStatus("", "Running", GitHubCommitState.PENDING)
                     unstash "source_tree"
                     container('cpu') {
                         // check if pre-merge dockerfile modified
@@ -161,19 +186,106 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
             }
         } // end of Build docker image
 
+        stage('Build Skills docker image') {
+            when {
+                beforeAgent true
+                expression {
+                    !skipped && TEMP_SKILLS_IMAGE_BUILD
+                }
+            }
+
+            agent {
+                kubernetes {
+                    label "skills-premerge-docker-${BUILD_TAG}"
+                    cloud "${common.CLOUD_NAME}"
+                    yaml pod.getDockerBuildYAML()
+                }
+            }
+
+            steps {
+                script {
+                    unstash "source_tree"
+                    container('cpu') {
+                        SKILLS_PREMERGE_TAG = "skills-premerge-rockylinux8-" +
+                            "cuda${SKILLS_CUDA_VERSION}-${BUILD_TAG}"
+                        IMAGE_SKILLS = "${ARTIFACTORY_NAME}/sw-spark-docker-local/plugin:" +
+                            "${SKILLS_PREMERGE_TAG}"
+                        docker.build(IMAGE_SKILLS,
+                            "--network=host -f ${SKILLS_PREMERGE_DOCKERFILE} .")
+                        uploadDocker(IMAGE_SKILLS)
+                    }
+                }
+            }
+        } // end of Build Skills docker image
+
         stage('Premerge Test') {
             when {
                 beforeAgent true
                 beforeOptions true
                 expression {
-                    !skipped
+                    !skipped && (normal_build || skills_build)
                 }
             }
             // Parallel run mvn verify (build and integration tests) and unit tests (for multiple Spark versions)
             // If any one is failed will abort another if not finish yet and will upload failure log to Github
             failFast true
             parallel {
+                stage('Skills Premerge Test') {
+                    when {
+                        beforeAgent true
+                        beforeOptions true
+                        expression {
+                            skills_build
+                        }
+                    }
+
+                    options {
+                        lock(label: "${params.GPU_POOL}", quantity: 1, variable: 'GPU_RESOURCE')
+                    }
+
+                    agent {
+                        kubernetes {
+                            label "skills-premerge-${BUILD_TAG}"
+                            cloud "${common.CLOUD_NAME}"
+                            yaml pod.getGPUYAML("${IMAGE_SKILLS}", "${env.GPU_RESOURCE}", '8', '32Gi')
+                            customWorkspace "${CUSTOM_WORKSPACE}-skills"
+                        }
+                    }
+
+                    steps {
+                        script {
+                            unstash "source_tree"
+                            container('gpu') {
+                                timeout(time: 90, unit: 'MINUTES') {
+                                    try {
+                                        common.resolveIncompatibleDriverIssue(this)
+                                        common.restoreM2Cache(this)
+                                        common.prepareArtNetrc(this)
+                                        sh '''
+                                            mkdir -p "$HOME/.m2"
+                                            cp jenkins/settings.xml "$HOME/.m2/settings.xml"
+                                        '''
+                                        sh "skills/ci/pre-merge.sh"
+                                    } catch(e) {
+                                        common.printJVMCoreDumps(this)
+                                        common.uploadDebugBundle(this, 'spark-rapids', 'skills')
+                                        throw e
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } // end of Skills Premerge Test
+
                 stage('mvn verify') {
+                    when {
+                        beforeAgent true
+                        beforeOptions true
+                        expression {
+                            normal_build
+                        }
+                    }
+
                     options {
                         // We have to use params to pass the resource label in options block,
                         // this is a limitation of declarative pipeline. And we need to lock resource before agent start
@@ -218,6 +330,14 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                 } // end of mvn verify stage
 
                 stage('Premerge CI 2') {
+                    when {
+                        beforeAgent true
+                        beforeOptions true
+                        expression {
+                            normal_build
+                        }
+                    }
+
                     options {
                         lock(label: "${params.GPU_POOL}", quantity: 1, variable: 'GPU_RESOURCE')
                     }
@@ -254,6 +374,14 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                 } // end of Unit Test stage
 
                 stage('CI scala 2.13') {
+                    when {
+                        beforeAgent true
+                        beforeOptions true
+                        expression {
+                            normal_build
+                        }
+                    }
+
                      options {
                         lock(label: "${params.GPU_POOL}", quantity: 1, variable: 'GPU_RESOURCE')
                     }
@@ -371,9 +499,14 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                     }
                 }
 
-                if (TEMP_IMAGE_BUILD) {
+                if (normal_build && TEMP_IMAGE_BUILD) {
                     container('cpu') {
                         deleteDockerTempTag("${PREMERGE_TAG}") // clean premerge temp image
+                    }
+                }
+                if (TEMP_SKILLS_IMAGE_BUILD) {
+                    container('cpu') {
+                        deleteDockerTempTag(SKILLS_PREMERGE_TAG)
                     }
                 }
             }
