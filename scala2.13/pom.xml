@@ -782,6 +782,44 @@
             </build>
         </profile>
         <profile>
+            <id>release413</id>
+            <activation>
+                <property>
+                    <name>buildver</name>
+                    <value>413</value>
+                </property>
+            </activation>
+            <properties>
+                <buildver>413</buildver>
+                <spark.version>${spark413.version}</spark.version>
+                <spark.test.version>${spark413.version}</spark.test.version>
+                <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
+                <rapids.delta.artifactId1>rapids-4-spark-delta-41x</rapids.delta.artifactId1>
+                <iceberg.artifact.suffix>${spark40x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
+                <iceberg.runtime.version>${iceberg.110x.version}</iceberg.runtime.version>
+                <slf4j.version>2.0.7</slf4j.version>
+                <scala.javac.args>-Xlint:all,-serial,-path,-try,-processing,-options|-Werror</scala.javac.args>
+            </properties>
+            <modules>
+                <module>delta-lake/delta-41x</module>
+                <module>iceberg/iceberg-stub</module>
+            </modules>
+            <build>
+                <pluginManagement>
+                    <plugins>
+                        <plugin>
+                            <groupId>net.alchim31.maven</groupId>
+                            <artifactId>scala-maven-plugin</artifactId>
+                            <configuration>
+                                <release combine.self="override"/>
+                                <target>${java.major.version}</target>
+                            </configuration>
+                        </plugin>
+                    </plugins>
+                </pluginManagement>
+            </build>
+        </profile>
+        <profile>
             <id>release420</id>
             <activation>
                 <property>
@@ -999,6 +1037,7 @@
         <spark403.version>4.0.3</spark403.version>
         <spark411.version>4.1.1</spark411.version>
         <spark412.version>4.1.2</spark412.version>
+        <spark413.version>4.1.3</spark413.version>
         <spark420.version>4.2.0</spark420.version>
         <mockito.version>3.12.4</mockito.version>
         <!-- 4.7.1 required: later versions auto-derive -release from -target,
@@ -1716,14 +1755,14 @@ This will force full Scala code rebuild in downstream modules.
                         <requireProperty>
                           <property>buildver</property>
                           <regex>^(33[0-4]|34[0-4]|35[0-8]|341db|350db143)$</regex>
-                          <regexMessage>Unsupported buildver value ${buildver} for a Scala 2.12 build. Supported Scala 2.12 buildver values are: 330, 331, 332, 333, 334, 340, 341, 342, 343, 344, 350, 351, 352, 353, 354, 355, 356, 357, 358, 341db, 350db143. For Scala 2.13/Spark 4.x builds, use -f scala2.13/pom.xml with a supported Scala 2.13 buildver such as 350, 400, 403, 412, or 420.</regexMessage>
+                          <regexMessage>Unsupported buildver value ${buildver} for a Scala 2.12 build. Supported Scala 2.12 buildver values are: 330, 331, 332, 333, 334, 340, 341, 342, 343, 344, 350, 351, 352, 353, 354, 355, 356, 357, 358, 341db, 350db143. For Scala 2.13/Spark 4.x builds, use -f scala2.13/pom.xml with a supported Scala 2.13 buildver such as 350, 400, 403, 412, 413, or 420.</regexMessage>
                         </requireProperty>
                         --><!-- #endif scala-2.12 -->
                         <!-- #if scala-2.13 -->
                         <requireProperty>
                             <property>buildver</property>
-                            <regex>^(35[0-8]|40[0-3]|41[1-2]|420|400db173)$</regex>
-                            <regexMessage>Unsupported buildver value ${buildver} for a Scala 2.13 build. Supported Scala 2.13 buildver values are: 350, 351, 352, 353, 354, 355, 356, 357, 358, 400, 401, 402, 403, 411, 412, 420, 400db173. Spark 3.3.x and 3.4.x builds use Scala 2.12; for example, build Spark 330 with the root pom.xml instead of scala2.13/pom.xml.</regexMessage>
+                            <regex>^(35[0-8]|40[0-3]|41[1-3]|420|400db173)$</regex>
+                            <regexMessage>Unsupported buildver value ${buildver} for a Scala 2.13 build. Supported Scala 2.13 buildver values are: 350, 351, 352, 353, 354, 355, 356, 357, 358, 400, 401, 402, 403, 411, 412, 413, 420, 400db173. Spark 3.3.x and 3.4.x builds use Scala 2.12; for example, build Spark 330 with the root pom.xml instead of scala2.13/pom.xml.</regexMessage>
                         </requireProperty>
                         <!-- #endif scala-2.13 -->
                         <requireProperty>
