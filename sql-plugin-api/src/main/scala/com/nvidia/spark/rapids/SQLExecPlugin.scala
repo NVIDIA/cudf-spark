@@ -35,11 +35,11 @@ class SQLExecPlugin extends (SparkSessionExtensions => Unit) {
   }
 
   private def columnarOverrides(sparkSession: SparkSession): ColumnarRule = {
-    ShimLoader.newColumnarOverrideRules()
+    ShimLoader.newColumnarOverrideRules(sparkSession)
   }
 
   private def queryStagePrepOverrides(sparkSession: SparkSession): Rule[SparkPlan] = {
-    ShimLoader.newGpuQueryStagePrepOverrides()
+    ShimLoader.newGpuQueryStagePrepOverrides(sparkSession)
   }
 
   private def postHocResolutionOverrides(sparkSession: SparkSession): Rule[LogicalPlan] = {
