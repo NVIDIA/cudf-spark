@@ -368,6 +368,8 @@ function unshimmed_class_needs_shared_identity() {
   # exceptions that predate default unshimming. These classes have compatible
   # executable bytecode for their supported runtime paths, but differ in Scala
   # metadata, debug attributes, or Spark-dependency-shaped signatures.
+  # SparkRapidsBuildInfoEvent is root-loaded during plugin initialization along
+  # with root-level build-info resources; Databricks shim metadata can differ.
   #
   # Keep this list narrow. Do not add a class here when it can stay in
   # spark-shared without being referenced from root-loaded code.
@@ -375,6 +377,7 @@ function unshimmed_class_needs_shared_identity() {
   if [[ "$class_file_quoted" =~ com/nvidia/spark/rapids/spark[34].*/.*ShuffleManager.class || \
           "$class_file_quoted" == "com/nvidia/spark/ParquetCachedBatchSerializer.class" || \
           "$class_file_quoted" =~ org/apache/spark/sql/rapids/ProxyRapidsShuffleInternalManagerBase || \
+          "$class_file_quoted" =~ com/nvidia/spark/rapids/SparkRapidsBuildInfoEvent.*\.class || \
           "$class_file_quoted" == "org/apache/spark/sql/rapids/GpuShuffleDependency.class" || \
           "$class_file_quoted" == "com/nvidia/spark/rapids/parquet/CloseableColumnBatchIterator.class" || \
           "$class_file_quoted" == "com/nvidia/spark/rapids/GpuReadCSVFileFormat.class" || \
