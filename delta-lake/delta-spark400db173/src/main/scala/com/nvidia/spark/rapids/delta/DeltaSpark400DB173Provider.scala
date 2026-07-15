@@ -33,8 +33,8 @@ import com.databricks.sql.transaction.tahoe.coordinatedcommits.{
 import com.databricks.sql.transaction.tahoe.rapids.{
   GpuDeltaLog,
   GpuDeltaV1Write,
-  GpuWriteIntoDeltaCommandMeta,
-  GpuWriteIntoDelta
+  GpuWriteIntoDelta,
+  GpuWriteIntoDeltaCommandMeta
 }
 import com.databricks.sql.transaction.tahoe.sources.DeltaSQLConf
 import com.nvidia.spark.rapids._
