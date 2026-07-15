@@ -33,7 +33,7 @@ import com.nvidia.spark.rapids.GpuMetric._
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.lore.{GpuLoreDumpRDD, SimpleRDD}
 import com.nvidia.spark.rapids.lore.GpuLore.LORE_DUMP_RDD_TAG
-import com.nvidia.spark.rapids.shims.{BroadcastExchangeShims, ShimBroadcastExchangeLike, ShimUnaryExecNode, SparkShimImpl}
+import com.nvidia.spark.rapids.shims.{BroadcastExchangeShims, ShimBroadcastExchangeLike, ShimUnaryExecNode}
 
 import org.apache.spark.SparkException
 import org.apache.spark.broadcast.Broadcast
@@ -407,7 +407,7 @@ abstract class GpuBroadcastExchangeExecBase(
             }
           NvtxIdWithMetrics(NvtxRegistry.BROADCAST_BUILD, buildTime) {
             val emptyRelation = if (collected.isEmpty) {
-              SparkShimImpl.tryTransformIfEmptyRelation(mode)
+              _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.tryTransformIfEmptyRelation(mode)
             } else {
               None
             }

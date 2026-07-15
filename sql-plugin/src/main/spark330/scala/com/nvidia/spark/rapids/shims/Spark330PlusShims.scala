@@ -51,10 +51,19 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.datasources.{FileFormat, FilePartition, FileScanRDD, PartitionedFile}
+import org.apache.spark.sql.execution.exchange.ShuffleOrigin
 import org.apache.spark.sql.rapids.shims.{GpuDivideYMInterval, GpuMultiplyYMInterval}
 import org.apache.spark.sql.types.StructType
 
 trait Spark330PlusShims extends Spark321PlusShims with Spark320PlusNonDBShims {
+
+  override def isTryMode(expr: Expression): Boolean = TryModeShim.isTryMode(expr)
+
+  override def isSupportedShuffleOrigin(origin: ShuffleOrigin): Boolean =
+    ShuffleOriginUtil.isSupported(origin)
+
+  override def ignoreTimeZoneInCanonicalization(expr: Expression): Expression =
+    CastingConfigShim.ignoreTimeZone(expr)
 
   override def neverReplaceShowCurrentNamespaceCommand: ExecRule[_ <: SparkPlan] = null
 
@@ -94,12 +103,14 @@ trait Spark330PlusShims extends Spark321PlusShims with Spark320PlusNonDBShims {
             GpuDivideYMInterval(lhs, rhs)
         })
     ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
-    super.getExprs ++ map ++ DayTimeIntervalShims.exprs ++ RoundingShims.exprs
+    super.getExprs ++ DecimalArithmeticOverrides.exprs ++ map ++ DayTimeIntervalShims.exprs ++
+        RoundingShims.exprs
   }
 
   // GPU support ANSI interval types from 330
   override def getExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] =
-    super.getExecs ++ PythonMapInArrowExecShims.execs
+    super.getExecs ++ RangeExecShims.execs ++ PythonMapInArrowExecShims.execs ++
+        MapInPandasExecShims.execs
 
 }
 

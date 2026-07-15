@@ -19,25 +19,32 @@ package com.nvidia.spark.rapids
 import org.apache.hadoop.fs.FileStatus
 import org.apache.parquet.schema.MessageType
 
+import ai.rapids.cudf.{ColumnVector, ColumnView}
+import org.apache.spark.SparkContext
+import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{SparkSession => SqlSparkSession}
 import org.apache.spark.sql.catalyst.{InternalRow, TableIdentifier}
 import org.apache.spark.sql.catalyst.catalog.{CatalogTable, CatalogTablePartition}
 import org.apache.spark.sql.catalyst.catalog.CatalogTypes.TablePartitionSpec
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, CreateMap, Expression,
-  MapConcat, MapFromArrays, MapFromEntries, ScalaUDF, StringToMap}
+  MapConcat, MapFromArrays, MapFromEntries, NamedExpression, ScalaUDF, StringToMap}
 import org.apache.spark.sql.catalyst.plans.physical.{BroadcastMode, Partitioning}
-import org.apache.spark.sql.catalyst.trees.TreeNode
+import org.apache.spark.sql.catalyst.trees.{Origin, TreeNode}
 import org.apache.spark.sql.catalyst.util.DateFormatter
+import org.apache.spark.sql.connector.metric.CustomMetric
 import org.apache.spark.sql.connector.read.Scan
 import org.apache.spark.sql.execution.{ColumnarToRowTransition, SparkPlan}
 import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, BroadcastQueryStageExec, ShuffleQueryStageExec}
 import org.apache.spark.sql.execution.command.{DataWritingCommand, RunnableCommand}
 import org.apache.spark.sql.execution.datasources.{FileFormat, FilePartition, PartitionedFile, PartitioningAwareFileIndex}
 import org.apache.spark.sql.execution.datasources.parquet.ParquetFilters
-import org.apache.spark.sql.execution.exchange.{ReusedExchangeExec, ShuffleExchangeLike}
+import org.apache.spark.sql.execution.exchange.{ReusedExchangeExec, ShuffleExchangeLike, ShuffleOrigin}
+import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
+import org.apache.spark.util.SerializableConfiguration
+import org.apache.spark.unsafe.types.UTF8String
 
 trait SparkShims {
   def parquetRebaseReadKey: String
@@ -52,6 +59,26 @@ trait SparkShims {
   def int96ParquetRebaseReadKey: String
   def int96ParquetRebaseWriteKey: String
   def isCastingStringToNegDecimalScaleSupported: Boolean = true
+
+  def castTypesDayTimeCanCastTo: TypeSig = TypeSig.DAYTIME + TypeSig.STRING + TypeSig.integral
+
+  def castTypesYearMonthCanCastTo: TypeSig = TypeSig.integral
+
+  def castTypesDayTimeCanCastToOnSpark: TypeSig =
+    TypeSig.DAYTIME + TypeSig.STRING + TypeSig.integral
+
+  def castTypesYearMonthCanCastToOnSpark: TypeSig =
+    TypeSig.YEARMONTH + TypeSig.STRING + TypeSig.integral
+
+  def castAdditionalTypesBooleanCanCastTo: TypeSig = TypeSig.TIMESTAMP
+
+  def castAdditionalTypesDateCanCastTo: TypeSig = TypeSig.BOOLEAN + TypeSig.integral + TypeSig.fp
+
+  def castAdditionalTypesTimestampCanCastTo: TypeSig = TypeSig.BOOLEAN
+
+  def castAdditionalTypesIntegralCanCastTo: TypeSig = TypeSig.YEARMONTH + TypeSig.DAYTIME
+
+  def castAdditionalTypesStringCanCastTo: TypeSig = TypeSig.DAYTIME
 
   // These expressions are stateful only because they reuse mutable scratch buffers. Bridge
   // projection cloning gives every worker its own expression tree and therefore its own buffers.
@@ -75,6 +102,97 @@ trait SparkShims {
     dateTimeRebaseModeFromConf: String): ParquetFilters
 
   def isWindowFunctionExec(plan: SparkPlan): Boolean
+
+  def isTryMode(expr: Expression): Boolean = false
+
+  def isAggregateInPandasExec(plan: SparkPlan): Boolean = false
+
+  def getAggregateInPandasGroupingExpressions(plan: SparkPlan): Seq[NamedExpression] = Seq.empty
+
+  def jsonPathParserMaxPathDepth: Int
+
+  def supportsAnsiCastFloatToTimestamp(): Boolean
+
+  def castFloatToTimestampAnsi(floatInput: ColumnView, toType: DataType): ColumnVector
+
+  def isSupportedDayTimeType(dt: DataType): Boolean
+
+  def isSupportedYearMonthType(dt: DataType): Boolean
+
+  def hasSideEffectsIfCastIntToDayTime(dt: DataType): Boolean
+
+  def hasSideEffectsIfCastIntToYearMonth(dt: DataType): Boolean
+
+  def hasSideEffectsIfCastFloatToTimestamp: Boolean
+
+  def toDayTimeIntervalString(input: ColumnView, dataType: DataType): ColumnVector
+
+  def castStringToDayTimeIntervalWithThrow(input: ColumnView, dataType: DataType): ColumnVector
+
+  def dayTimeIntervalToLong(input: ColumnView, dataType: DataType): ColumnVector
+
+  def dayTimeIntervalToInt(input: ColumnView, dataType: DataType): ColumnVector
+
+  def dayTimeIntervalToShort(input: ColumnView, dataType: DataType): ColumnVector
+
+  def dayTimeIntervalToByte(input: ColumnView, dataType: DataType): ColumnVector
+
+  def longToDayTimeInterval(input: ColumnView, dataType: DataType): ColumnVector
+
+  def intToDayTimeInterval(input: ColumnView, dataType: DataType): ColumnVector
+
+  def yearMonthIntervalToLong(input: ColumnView, dataType: DataType): ColumnVector
+
+  def yearMonthIntervalToInt(input: ColumnView, dataType: DataType): ColumnVector
+
+  def yearMonthIntervalToShort(input: ColumnView, dataType: DataType): ColumnVector
+
+  def yearMonthIntervalToByte(input: ColumnView, dataType: DataType): ColumnVector
+
+  def longToYearMonthInterval(input: ColumnView, dataType: DataType): ColumnVector
+
+  def intToYearMonthInterval(input: ColumnView, dataType: DataType): ColumnVector
+
+  def castDecimalToString(decimalInput: ColumnView, usePlainString: Boolean): ColumnVector
+
+  def originContextSummary(origin: Origin): String
+
+  def cannotChangeDecimalPrecisionError(
+      value: Decimal,
+      toType: DecimalType,
+      origin: Origin): Throwable
+
+  def invalidInputInCastToNumberError(
+      to: DataType,
+      s: UTF8String,
+      origin: Origin): Throwable
+
+  def arithmeticOverflowError(
+      message: String,
+      hint: String,
+      origin: Origin): Throwable
+
+  def invalidInputSyntaxForBooleanError(
+      s: UTF8String,
+      origin: Origin): Throwable
+
+  def createSqlMetric(context: SparkContext, name: String): SQLMetric
+  def createNanoTimingSqlMetric(context: SparkContext, name: String): SQLMetric
+  def createSizeSqlMetric(context: SparkContext, name: String): SQLMetric
+  def createAverageSqlMetric(context: SparkContext, name: String): SQLMetric
+  def createTimingSqlMetric(context: SparkContext, name: String): SQLMetric
+  def createV2CustomSqlMetric(context: SparkContext, metric: CustomMetric): SQLMetric
+
+  def canonicalizeShimExpression(expr: Expression): Option[Expression] = None
+
+  def ignoreTimeZoneInCanonicalization(expr: Expression): Expression = expr
+
+  def newGpuLoreReplayExec(
+      idxInParent: Int,
+      parentRootPath: String,
+      hadoopConf: Broadcast[SerializableConfiguration]): SparkPlan =
+    throw new UnsupportedOperationException("LORE replay is not supported by this shim")
+
   def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]]
   def getExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]]
   def getScans: Map[Class[_ <: Scan], ScanRule[_ <: Scan]]
@@ -160,6 +278,8 @@ trait SparkShims {
   def aqeShuffleReaderExec: ExecRule[_ <: SparkPlan]
 
   def isExecutorBroadcastShuffle(shuffle: ShuffleExchangeLike): Boolean = false
+
+  def isSupportedShuffleOrigin(origin: ShuffleOrigin): Boolean = true
 
   def shuffleParentReadsShuffleData(shuffle: ShuffleExchangeLike, parent: SparkPlan): Boolean =
     false

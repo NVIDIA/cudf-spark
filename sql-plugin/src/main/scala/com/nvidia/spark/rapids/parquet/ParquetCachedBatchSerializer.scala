@@ -31,7 +31,7 @@ import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.GpuColumnVector.GpuColumnarBatchBuilder
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
-import com.nvidia.spark.rapids.shims.{LegacyBehaviorPolicyShim, ParquetVariantShims, SparkShimImpl}
+import com.nvidia.spark.rapids.shims.{LegacyBehaviorPolicyShim, ParquetVariantShims}
 import com.nvidia.spark.rapids.shims.parquet.{ParquetFieldIdShims, ParquetLegacyNanoAsLongShims, ParquetTimestampNTZShims}
 import org.apache.commons.io.output.ByteArrayOutputStream
 import org.apache.hadoop.conf.Configuration
@@ -1154,7 +1154,7 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
           // at least a single block
           val stream = new ByteArrayOutputStream(ByteArrayOutputFile.BLOCK_SIZE)
           val outputFile: OutputFile = new ByteArrayOutputFile(stream)
-          conf.setConfString(SparkShimImpl.parquetRebaseWriteKey,
+          conf.setConfString(_root_.com.nvidia.spark.rapids.CurrentSparkShim.get.parquetRebaseWriteKey,
             LegacyBehaviorPolicyShim.CORRECTED_STR)
           if (cachedAttributes.isEmpty) {
             // The schema is empty, most probably it is because of the edge case where there
@@ -1293,7 +1293,7 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
     hadoopConf.setBoolean(SQLConf.PARQUET_INT96_AS_TIMESTAMP.key, false)
     hadoopConf.setBoolean(SQLConf.CASE_SENSITIVE.key, false)
 
-    hadoopConf.set(SparkShimImpl.parquetRebaseWriteKey, LegacyBehaviorPolicyShim.CORRECTED_STR)
+    hadoopConf.set(_root_.com.nvidia.spark.rapids.CurrentSparkShim.get.parquetRebaseWriteKey, LegacyBehaviorPolicyShim.CORRECTED_STR)
 
     hadoopConf.set(SQLConf.PARQUET_OUTPUT_TIMESTAMP_TYPE.key,
       SQLConf.ParquetOutputTimestampType.TIMESTAMP_MICROS.toString)

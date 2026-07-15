@@ -69,7 +69,7 @@ import org.apache.spark.sql.rapids.catalyst.expressions.GpuRand
 import org.apache.spark.sql.rapids.execution._
 import org.apache.spark.sql.rapids.execution.python._
 import org.apache.spark.sql.rapids.execution.python.GpuFlatMapGroupsInPandasExecMeta
-import org.apache.spark.sql.rapids.shims.{GpuAscii, GpuMapInPandasExecMeta}
+import org.apache.spark.sql.rapids.shims.GpuAscii
 import org.apache.spark.sql.rapids.zorder.ZOrderRules
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.{CalendarInterval, UTF8String}
@@ -558,7 +558,7 @@ object GpuOverrides extends Logging {
             val cpuCanonical = b.canonicalized.asInstanceOf[BroadcastExchangeExec]
             val gpuExchange = ExchangeMappingCache.findGpuExchangeReplacement(cpuCanonical)
             gpuExchange.map { g =>
-              SparkShimImpl.newBroadcastQueryStageExec(bqse, ReusedExchangeExec(output, g))
+              _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.newBroadcastQueryStageExec(bqse, ReusedExchangeExec(output, g))
             }.getOrElse(bqse)
           case _ => bqse
         }
@@ -1478,36 +1478,6 @@ object GpuOverrides extends Logging {
         override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression =
           GpuShiftRightUnsigned(lhs, rhs)
       }),
-    expr[BitwiseAnd](
-      "Returns the bitwise AND of the operands",
-      ExprChecks.binaryProjectAndAst(
-        TypeSig.implicitCastsAstTypes, TypeSig.integral, TypeSig.integral,
-        ("lhs", TypeSig.integral, TypeSig.integral),
-        ("rhs", TypeSig.integral, TypeSig.integral)),
-      (a, conf, p, r) => new BinaryAstExprMeta[BitwiseAnd](a, conf, p, r) {
-        override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression =
-          GpuBitwiseAnd(lhs, rhs)
-      }),
-    expr[BitwiseOr](
-      "Returns the bitwise OR of the operands",
-      ExprChecks.binaryProjectAndAst(
-        TypeSig.implicitCastsAstTypes, TypeSig.integral, TypeSig.integral,
-        ("lhs", TypeSig.integral, TypeSig.integral),
-        ("rhs", TypeSig.integral, TypeSig.integral)),
-      (a, conf, p, r) => new BinaryAstExprMeta[BitwiseOr](a, conf, p, r) {
-        override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression =
-          GpuBitwiseOr(lhs, rhs)
-      }),
-    expr[BitwiseXor](
-      "Returns the bitwise XOR of the operands",
-      ExprChecks.binaryProjectAndAst(
-        TypeSig.implicitCastsAstTypes, TypeSig.integral, TypeSig.integral,
-        ("lhs", TypeSig.integral, TypeSig.integral),
-        ("rhs", TypeSig.integral, TypeSig.integral)),
-      (a, conf, p, r) => new BinaryAstExprMeta[BitwiseXor](a, conf, p, r) {
-        override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression =
-          GpuBitwiseXor(lhs, rhs)
-      }),
     expr[BitwiseNot](
       "Returns the bitwise NOT of the operands",
       ExprChecks.unaryProjectAndAstInputMatchesOutput(
@@ -1945,7 +1915,7 @@ object GpuOverrides extends Logging {
 
         override def tagExprForGpu(): Unit = {
           // Check if this Add expression is in TRY mode context
-          if (TryModeShim.isTryMode(a)) {
+          if (_root_.com.nvidia.spark.rapids.CurrentSparkShim.get.isTryMode(a)) {
             willNotWorkOnGpu("try_add is not supported on GPU")
           }
         }
@@ -1974,7 +1944,7 @@ object GpuOverrides extends Logging {
 
         override def tagExprForGpu(): Unit = {
           // Check if this Subtract expression is in TRY mode context
-          if (TryModeShim.isTryMode(a)) {
+          if (_root_.com.nvidia.spark.rapids.CurrentSparkShim.get.isTryMode(a)) {
             willNotWorkOnGpu("try_subtract is not supported on GPU")
           }
         }
@@ -2304,28 +2274,6 @@ object GpuOverrides extends Logging {
         // Min does not overflow, so it doesn't need the ANSI check
         override val needsAnsiCheck: Boolean = false
       }),
-    expr[Sum](
-      "Sum aggregate operator",
-      ExprChecks.fullAgg(
-        TypeSig.LONG + TypeSig.DOUBLE + TypeSig.DECIMAL_128,
-        TypeSig.LONG + TypeSig.DOUBLE + TypeSig.DECIMAL_128,
-        Seq(ParamCheck("input", TypeSig.gpuNumeric, TypeSig.cpuNumeric))),
-      (a, conf, p, r) => new AggExprMeta[Sum](a, conf, p, r) {
-        override def tagAggForGpu(): Unit = {
-          val inputDataType = a.child.dataType
-          checkAndTagFloatAgg(inputDataType, this.conf, this)
-
-          // Check if this Sum expression is in TRY mode context
-          if (TryModeShim.isTryMode(a)) {
-            willNotWorkOnGpu("try_sum is not supported on GPU")
-          }
-        }
-
-        override def needsAnsiCheck: Boolean = false
-
-        override def convertToGpu(childExprs: Seq[Expression]): GpuExpression =
-          GpuSum(childExprs.head, a.dataType)
-      }),
     expr[NthValue](
       "nth window operator",
       ExprChecks.windowOnly(
@@ -2438,44 +2386,6 @@ object GpuOverrides extends Logging {
 
         // MinBy does not overflow, so it doesn't need the ANSI check
         override val needsAnsiCheck: Boolean = false
-      }),
-    expr[BRound](
-      "Round an expression to d decimal places using HALF_EVEN rounding mode",
-      ExprChecks.binaryProject(
-        TypeSig.gpuNumeric, TypeSig.cpuNumeric,
-        ("value", TypeSig.gpuNumeric +
-            TypeSig.psNote(TypeEnum.FLOAT, "result may round slightly differently") +
-            TypeSig.psNote(TypeEnum.DOUBLE, "result may round slightly differently"),
-            TypeSig.cpuNumeric),
-        ("scale", TypeSig.lit(TypeEnum.INT), TypeSig.lit(TypeEnum.INT))),
-      (a, conf, p, r) => new GpuBRoundMeta(a, conf, p, r) {
-        override def tagExprForGpu(): Unit = {
-          a.child.dataType match {
-            case FloatType | DoubleType if !this.conf.isIncompatEnabled =>
-              willNotWorkOnGpu("rounding floating point numbers may be slightly off " +
-                  s"compared to Spark's result, to enable set ${RapidsConf.INCOMPATIBLE_OPS}")
-            case _ => // NOOP
-          }
-        }
-      }),
-    expr[Round](
-      "Round an expression to d decimal places using HALF_UP rounding mode",
-      ExprChecks.binaryProject(
-        TypeSig.gpuNumeric, TypeSig.cpuNumeric,
-        ("value", TypeSig.gpuNumeric +
-            TypeSig.psNote(TypeEnum.FLOAT, "result may round slightly differently") +
-            TypeSig.psNote(TypeEnum.DOUBLE, "result may round slightly differently"),
-            TypeSig.cpuNumeric),
-        ("scale", TypeSig.lit(TypeEnum.INT), TypeSig.lit(TypeEnum.INT))),
-      (a, conf, p, r) => new GpuRoundMeta(a, conf, p, r) {
-        override def tagExprForGpu(): Unit = {
-          a.child.dataType match {
-            case FloatType | DoubleType if !this.conf.isIncompatEnabled =>
-              willNotWorkOnGpu("rounding floating point numbers may be slightly off " +
-                  s"compared to Spark's result, to enable set ${RapidsConf.INCOMPATIBLE_OPS}")
-            case _ => // NOOP
-          }
-        }
       }),
     expr[PythonUDF](
       "UDF run in an external python process. Does not actually run on the GPU, but " +
@@ -2662,17 +2572,6 @@ object GpuOverrides extends Logging {
         override def convertToGpu(arr: Expression, ordinal: Expression): GpuExpression =
           GpuGetArrayItem(arr, ordinal, in.failOnError)
       }),
-    expr[GetMapValue](
-      "Gets Value from a Map based on a key",
-      ExprChecks.binaryProject(
-        (TypeSig.commonCudfTypes + TypeSig.ARRAY + TypeSig.STRUCT + TypeSig.NULL +
-          TypeSig.DECIMAL_128 + TypeSig.MAP + TypeSig.BINARY).nested(),
-        TypeSig.all,
-        ("map", TypeSig.MAP.nested(TypeSig.commonCudfTypes + TypeSig.ARRAY + TypeSig.STRUCT +
-          TypeSig.NULL + TypeSig.DECIMAL_128 + TypeSig.MAP + TypeSig.BINARY),
-          TypeSig.MAP.nested(TypeSig.all)),
-        ("key", TypeSig.commonCudfTypes + TypeSig.DECIMAL_128, TypeSig.all)),
-      (in, conf, p, r) => new GetMapValueMeta(in, conf, p, r){}),
     GpuElementAtMeta.elementAtRule(false),
     expr[MapKeys](
       "Returns an unordered array containing the keys of the map",
@@ -3408,27 +3307,6 @@ object GpuOverrides extends Logging {
       (a, conf, p, r) => new ComplexTypeMergingExprMeta[Concat](a, conf, p, r) {
         override def convertToGpu(child: Seq[Expression]): GpuExpression = GpuConcat(child)
       }),
-    expr[Conv](
-      desc = "Convert string representing a number from one base to another",
-      pluginChecks = ExprChecks.projectOnly(
-        outputCheck = TypeSig.STRING,
-        paramCheck = Seq(
-          ParamCheck(
-            name = "num",
-            cudf = TypeSig.STRING,
-            spark = TypeSig.STRING),
-          ParamCheck(
-            name = "from_base",
-            cudf = TypeSig.INT,
-            spark = TypeSig.INT),
-          ParamCheck(
-            name = "to_base",
-            cudf = TypeSig.INT,
-            spark = TypeSig.INT)),
-        sparkOutputSig = TypeSig.STRING),
-      (convExpr, conf, parentMetaOpt, dataFromReplacementRule) =>
-        new GpuConvMeta(convExpr, conf, parentMetaOpt, dataFromReplacementRule)
-    ),
     expr[FormatNumber](
       "Formats the number x like '#,###,###.##', rounded to d decimal places.",
       ExprChecks.binaryProject(TypeSig.STRING, TypeSig.STRING,
@@ -4253,16 +4131,16 @@ object GpuOverrides extends Logging {
       StaticInvokeCheck,
       (a, conf, p, r) => new StaticInvokeMeta(a, conf, p, r)
     ).note("The supported types are not deterministic since it's a dynamic expression"),
-    SparkShimImpl.ansiCastRule
+    _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.ansiCastRule
   ).collect { case r if r != null => (r.getClassFor.asSubclass(classOf[Expression]), r)}.toMap
 
   // Shim expressions should be last to allow overrides with shim-specific versions
   val expressions: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] =
     commonExpressions ++ TimeStamp.getExprs ++ GpuHiveOverrides.exprs ++
-        ZOrderRules.exprs ++ DecimalArithmeticOverrides.exprs ++
+        ZOrderRules.exprs ++
         BloomFilterShims.exprs ++ StringDecodeShims.exprs ++
         InSubqueryShims.exprs ++ RaiseErrorShim.exprs ++
-        ExternalSource.exprRules ++ SparkShimImpl.getExprs
+        ExternalSource.exprRules ++ _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getExprs
 
   def wrapScan[INPUT <: Scan](
       scan: INPUT,
@@ -4311,7 +4189,7 @@ object GpuOverrides extends Logging {
       })).map(r => (r.getClassFor.asSubclass(classOf[Scan]), r)).toMap
 
   val scans: Map[Class[_ <: Scan], ScanRule[_ <: Scan]] =
-    commonScans ++ SparkShimImpl.getScans ++ ExternalSource.getScans
+    commonScans ++ _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getScans ++ ExternalSource.getScans
 
   def wrapPart[INPUT <: Partitioning](
       part: INPUT,
@@ -4403,7 +4281,7 @@ object GpuOverrides extends Logging {
   ).map(r => (r.getClassFor.asSubclass(classOf[Partitioning]), r)).toMap
 
   val parts : Map[Class[_ <: Partitioning], PartRule[_ <: Partitioning]] =
-    commonParts ++ SparkShimImpl.getPartitionings
+    commonParts ++ _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getPartitionings
 
   def wrapDataWriteCmds[INPUT <: DataWritingCommand](
       writeCmd: INPUT,
@@ -4422,7 +4300,7 @@ object GpuOverrides extends Logging {
 
   val dataWriteCmds: Map[Class[_ <: DataWritingCommand],
       DataWritingCommandRule[_ <: DataWritingCommand]] =
-    commonDataWriteCmds ++ GpuHiveOverrides.dataWriteCmds ++ SparkShimImpl.getDataWriteCmds
+    commonDataWriteCmds ++ GpuHiveOverrides.dataWriteCmds ++ _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getDataWriteCmds
 
   def runnableCmd[INPUT <: RunnableCommand](
       desc: String,
@@ -4453,7 +4331,7 @@ object GpuOverrides extends Logging {
   val runnableCmds = commonRunnableCmds ++
     GpuHiveOverrides.runnableCmds ++
       ExternalSource.runnableCmds ++
-      SparkShimImpl.getRunnableCmds
+      _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getRunnableCmds
 
   def wrapPlan[INPUT <: SparkPlan](
       plan: INPUT,
@@ -4479,23 +4357,6 @@ object GpuOverrides extends Logging {
             GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
         TypeSig.all),
       (proj, conf, p, r) => new GpuProjectExecMeta(proj, conf, p, r)),
-    exec[RangeExec](
-      "The backend for range operator",
-      ExecChecks(TypeSig.LONG, TypeSig.LONG),
-      (range, conf, p, r) => {
-        new SparkPlanMeta[RangeExec](range, conf, p, r) {
-          override def convertToGpu(): GpuExec =
-            GpuRangeExec(range.start, range.end, range.step, range.numSlices, range.output,
-              this.conf.gpuTargetBatchSizeBytes)
-        }
-      }),
-    exec[BatchScanExec](
-      "The backend for most file input",
-      ExecChecks(
-        (TypeSig.commonCudfTypes + TypeSig.STRUCT + TypeSig.MAP + TypeSig.ARRAY +
-          TypeSig.DECIMAL_128 + TypeSig.BINARY).nested(),
-        TypeSig.all),
-      (p, conf, parent, r) => new BatchScanExecMeta(p, conf, parent, r)),
     exec[CoalesceExec](
       "The backend for the dataframe coalesce method",
       ExecChecks((gpuCommonTypes + TypeSig.STRUCT + TypeSig.ARRAY +
@@ -4566,19 +4427,6 @@ object GpuOverrides extends Logging {
           TypeSig.ARRAY + TypeSig.DECIMAL_128 + TypeSig.BINARY +
           GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(), TypeSig.all),
       GpuFilterExecMeta),
-    exec[ShuffleExchangeExec](
-      "The backend for most data being exchanged between processes",
-      ExecChecks((TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128 + TypeSig.BINARY +
-          TypeSig.ARRAY + TypeSig.STRUCT + TypeSig.MAP +
-          GpuTypeShims.additionalArithmeticSupportedTypes).nested()
-          .withPsNote(TypeEnum.STRUCT, "Round-robin partitioning is not supported for nested " +
-              s"structs if ${SQLConf.SORT_BEFORE_REPARTITION.key} is true")
-          .withPsNote(
-            Seq(TypeEnum.MAP),
-            "Round-robin partitioning is not supported if " +
-              s"${SQLConf.SORT_BEFORE_REPARTITION.key} is true"),
-        TypeSig.all),
-      (shuffle, conf, p, r) => new GpuShuffleMeta(shuffle, conf, p, r)),
     exec[UnionExec](
       "The backend for the union operator",
       ExecChecks((TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128 +
@@ -4597,16 +4445,6 @@ object GpuOverrides extends Logging {
           TypeSig.NULL + TypeSig.DECIMAL_128 + TypeSig.STRUCT),
         TypeSig.all),
       (exchange, conf, p, r) => new GpuBroadcastMeta(exchange, conf, p, r)),
-    exec[BroadcastHashJoinExec](
-      "Implementation of join using broadcast data",
-      JoinTypeChecks.equiJoinExecChecks,
-      (join, conf, p, r) => new GpuBroadcastHashJoinMeta(join, conf, p, r)),
-    exec[BroadcastNestedLoopJoinExec](
-      "Implementation of join using brute force. Full outer joins and joins where the " +
-          "broadcast side matches the join side (e.g.: LeftOuter with left broadcast) are not " +
-          "supported",
-      JoinTypeChecks.nonEquiJoinChecks,
-      (join, conf, p, r) => new GpuBroadcastNestedLoopJoinMeta(join, conf, p, r)),
     exec[CartesianProductExec](
       "Implementation of join using brute force",
       ExecChecks((TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128 + TypeSig.BINARY +
@@ -4722,9 +4560,7 @@ object GpuOverrides extends Logging {
       ExecChecks(TypeSig.all, TypeSig.all),
       (s, conf, p, r) => new GpuSubqueryBroadcastMeta(s, conf, p, r)
     ),
-    SparkShimImpl.aqeShuffleReaderExec,
-    // AggregateInPandasExec renamed to ArrowAggregatePythonExec in Spark 4.1.0
-    AggregateInPandasExecShims.execRule.orNull,
+    _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.aqeShuffleReaderExec,
     exec[ArrowEvalPythonExec](
       "The backend of the Scalar Pandas UDFs. Accelerates the data transfer between the" +
         " Java process and the Python process. It also supports scheduling GPU resources" +
@@ -4763,13 +4599,6 @@ object GpuOverrides extends Logging {
         " for the Python process when enabled.",
       ExecChecks(TypeSig.commonCudfTypes, TypeSig.all),
       (flatPy, conf, p, r) => new GpuFlatMapGroupsInPandasExecMeta(flatPy, conf, p, r)),
-    exec[MapInPandasExec](
-      "The backend for Map Pandas Iterator UDF. Accelerates the data transfer between the" +
-        " Java process and the Python process. It also supports scheduling GPU resources" +
-        " for the Python process when enabled.",
-      ExecChecks((TypeSig.commonCudfTypes + TypeSig.ARRAY + TypeSig.STRUCT).nested(),
-        TypeSig.all),
-      (mapPy, conf, p, r) => new GpuMapInPandasExecMeta(mapPy, conf, p, r)),
     exec[InMemoryTableScanExec](
       "Implementation of InMemoryTableScanExec to use GPU accelerated caching",
       ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.STRUCT + TypeSig.ARRAY +
@@ -4780,7 +4609,7 @@ object GpuOverrides extends Logging {
     neverReplaceExec[DescribeNamespaceExec]("Namespace metadata operation"),
     neverReplaceExec[DropNamespaceExec]("Namespace metadata operation"),
     neverReplaceExec[SetCatalogAndNamespaceExec]("Namespace metadata operation"),
-    SparkShimImpl.neverReplaceShowCurrentNamespaceCommand,
+    _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.neverReplaceShowCurrentNamespaceCommand,
     ShowNamespacesExecShims.neverReplaceExec.orNull,
     neverReplaceExec[AlterTableExec]("Table metadata operation"),
     neverReplaceExec[CreateTableExec]("Table metadata operation"),
@@ -4800,7 +4629,7 @@ object GpuOverrides extends Logging {
 
   lazy val execs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] =
     commonExecs ++ GpuHiveOverrides.execs ++ ExternalSource.execRules ++
-      SparkShimImpl.getExecs // Shim execs at the end; shims get the last word in substitutions.
+      _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getExecs // Shim execs at the end; shims get the last word in substitutions.
 
   def getTimeParserPolicy: TimeParserPolicy = {
     val policy = SQLConf.get.getConfString(SQLConf.LEGACY_TIME_PARSER_POLICY.key, "EXCEPTION")
@@ -4964,7 +4793,7 @@ object GpuOverrides extends Logging {
       case c2r: ColumnarToRowExec => prepareExplainOnly(c2r.child)
       case re: ReusedExchangeExec => prepareExplainOnly(re.child)
       case aqe: AdaptiveSparkPlanExec =>
-        prepareExplainOnly(SparkShimImpl.getAdaptiveInputPlan(aqe))
+        prepareExplainOnly(_root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getAdaptiveInputPlan(aqe))
       case sub: SubqueryExec => prepareExplainOnly(sub.child)
     }
     planAfter
@@ -5028,7 +4857,7 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
         t => f"Plan conversion to the GPU took $t%.2f ms") {
         var updatedPlan = updateForAdaptivePlan(plan, conf)
         updatedPlan = HybridExecutionUtils.tryToApplyHybridScanRules(updatedPlan, conf)
-        updatedPlan = SparkShimImpl.applyShimPlanRules(updatedPlan, conf)
+        updatedPlan = _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.applyShimPlanRules(updatedPlan, conf)
         updatedPlan = applyOverrides(updatedPlan, conf)
         if (conf.logQueryTransformations) {
           val logPrefix = context.map(str => s"[$str]").getOrElse("")
@@ -5041,7 +4870,7 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
       // this mode logs the explain output and returns the original CPU plan
       var updatedPlan = updateForAdaptivePlan(plan, conf)
       updatedPlan = HybridExecutionUtils.tryToApplyHybridScanRules(updatedPlan, conf)
-      updatedPlan = SparkShimImpl.applyShimPlanRules(updatedPlan, conf)
+      updatedPlan = _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.applyShimPlanRules(updatedPlan, conf)
       GpuOverrides.explainCatalystSQLPlan(updatedPlan, conf)
       plan
     } else {
@@ -5096,7 +4925,7 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
         // example filename: "file:/tmp/delta-table/_delta_log/00000000000000000000.json"
         val found = StaticPartitionShims.getStaticPartitions(f.relation).map { parts =>
           parts.exists { part =>
-            SparkShimImpl.getPartitionFiles(part).exists(partFile =>
+            _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getPartitionFiles(part).exists(partFile =>
               checkDeltaFunc(partFile.filePath.toString))
           }
         }.getOrElse {

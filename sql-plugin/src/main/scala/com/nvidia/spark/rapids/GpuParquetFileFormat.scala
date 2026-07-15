@@ -152,9 +152,9 @@ object GpuParquetFileFormat {
     }
     if (schemaHasDates || schemaHasTimestamps) {
       val int96RebaseMode = DateTimeRebaseMode.fromName(
-        SparkShimImpl.int96ParquetRebaseWrite(sqlConf))
+        _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.int96ParquetRebaseWrite(sqlConf))
       val dateTimeRebaseMode = DateTimeRebaseMode.fromName(
-        SparkShimImpl.parquetRebaseWrite(sqlConf))
+        _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.parquetRebaseWrite(sqlConf))
 
       if ((int96RebaseMode == DateTimeRebaseLegacy || dateTimeRebaseMode == DateTimeRebaseLegacy)
         && !GpuOverrides.isUTCTimezone()) {
@@ -217,10 +217,10 @@ class GpuParquetFileFormat extends ColumnarFileFormat with Logging {
 
     val outputTimestampType = sqlConf.parquetOutputTimestampType
     val dateTimeRebaseMode = DateTimeRebaseMode.fromName(
-      sparkSession.sqlContext.getConf(SparkShimImpl.parquetRebaseWriteKey))
+      sparkSession.sqlContext.getConf(_root_.com.nvidia.spark.rapids.CurrentSparkShim.get.parquetRebaseWriteKey))
     val timestampRebaseMode = if (outputTimestampType.equals(ParquetOutputTimestampType.INT96)) {
       DateTimeRebaseMode.fromName(
-        sparkSession.sqlContext.getConf(SparkShimImpl.int96ParquetRebaseWriteKey))
+        sparkSession.sqlContext.getConf(_root_.com.nvidia.spark.rapids.CurrentSparkShim.get.int96ParquetRebaseWriteKey))
     } else {
       dateTimeRebaseMode
     }

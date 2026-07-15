@@ -782,8 +782,9 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
     require(XxHash64Utils.MAX_STACK_DEPTH == Hash.MAX_STACK_DEPTH,
       s"XxHash64Utils.MAX_STACK_DEPTH (${XxHash64Utils.MAX_STACK_DEPTH}) != " +
         s"Hash.MAX_STACK_DEPTH (${Hash.MAX_STACK_DEPTH})")
-    require(JsonPathParser.MAX_PATH_DEPTH == JSONUtils.MAX_PATH_DEPTH,
-      s"JsonPathParser.MAX_PATH_DEPTH (${JsonPathParser.MAX_PATH_DEPTH}) != " +
+    val jsonPathMaxPathDepth = CurrentSparkShim.get.jsonPathParserMaxPathDepth
+    require(jsonPathMaxPathDepth == JSONUtils.MAX_PATH_DEPTH,
+      s"JsonPathParser.MAX_PATH_DEPTH ($jsonPathMaxPathDepth) != " +
         s"JSONUtils.MAX_PATH_DEPTH (${JSONUtils.MAX_PATH_DEPTH})")
   }
 

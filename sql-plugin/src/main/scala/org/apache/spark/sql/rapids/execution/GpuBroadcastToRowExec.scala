@@ -24,7 +24,7 @@ import scala.concurrent.ExecutionContext
 import com.nvidia.spark.rapids.{GpuExec, GpuMetric}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.GpuMetric.{COLLECT_TIME, DESCRIPTION_COLLECT_TIME, ESSENTIAL_LEVEL, NUM_OUTPUT_ROWS}
-import com.nvidia.spark.rapids.shims.{ShimBroadcastExchangeLike, ShimUnaryExecNode, SparkShimImpl}
+import com.nvidia.spark.rapids.shims.{ShimBroadcastExchangeLike, ShimUnaryExecNode}
 
 import org.apache.spark.SparkException
 import org.apache.spark.broadcast.Broadcast
@@ -64,11 +64,11 @@ case class GpuBroadcastToRowExec(
       val broadcastBatch = child.executeBroadcast[Any]()
       val rows: Array[InternalRow] = broadcastBatch.value match {
         case b: SerializeConcatHostBuffersDeserializeBatch => projectSerializedBatch(b)
-        case b if SparkShimImpl.isEmptyRelation(b) => Array.empty
+        case b if _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.isEmptyRelation(b) => Array.empty
         case b => throw new IllegalStateException(s"Unexpected broadcast type: ${b.getClass}")
       }
 
-      val result = SparkShimImpl.broadcastModeTransform(broadcastMode, rows)
+      val result = _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.broadcastModeTransform(broadcastMode, rows)
       val broadcasted = sparkContext.broadcast(result)
       promise.trySuccess(broadcasted)
       broadcasted

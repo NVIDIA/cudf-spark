@@ -125,6 +125,8 @@
                  value="${spark.rapids.source.basedir}/${rapids.module}/unshimmed-common-from-single-shim.txt"/>
             <env key="KEEP_IN_SPARK_SHARED_TXT"
                  value="${spark.rapids.source.basedir}/${rapids.module}/keep-in-spark-shared.txt"/>
+            <env key="KEEP_IN_SPARK_SHIM_DIRS_TXT"
+                 value="${spark.rapids.source.basedir}/${rapids.module}/keep-in-spark-shim-dirs.txt"/>
             <env key="UNSHIM_ANALYZER_SCRIPT"
                  value="${spark.rapids.source.basedir}/${rapids.module}/scripts/analyze-parallel-world-deps.py"/>
         </exec>

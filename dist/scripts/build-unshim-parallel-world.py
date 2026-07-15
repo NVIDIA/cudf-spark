@@ -286,6 +286,8 @@ def main():
     dedupe_env["UNSHIMMED_COMMON_FROM_SINGLE_SHIM_TXT"] = str(
         dist_dir / "unshimmed-common-from-single-shim.txt")
     dedupe_env["KEEP_IN_SPARK_SHARED_TXT"] = str(dist_dir / "keep-in-spark-shared.txt")
+    dedupe_env["KEEP_IN_SPARK_SHIM_DIRS_TXT"] = str(
+        dist_dir / "keep-in-spark-shim-dirs.txt")
     dedupe_env["UNSHIM_ANALYZER_SCRIPT"] = str(
         dist_dir / "scripts" / "analyze-parallel-world-deps.py")
     run_checked([str(dist_dir / "scripts" / "binary-dedupe.sh")],

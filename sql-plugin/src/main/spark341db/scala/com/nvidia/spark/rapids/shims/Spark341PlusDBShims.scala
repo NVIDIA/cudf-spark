@@ -33,11 +33,30 @@ import org.apache.spark.sql.execution.adaptive._
 import org.apache.spark.sql.execution.exchange.ENSURE_REQUIREMENTS
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, BroadcastNestedLoopJoinExec}
 import org.apache.spark.sql.execution.window.WindowGroupLimitExec
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.GpuV1WriteUtils.GpuEmpty2Null
 import org.apache.spark.sql.rapids.execution.python.GpuPythonUDAF
 import org.apache.spark.sql.types.StringType
 
 trait Spark341PlusDBShims extends Spark332PlusDBShims {
+  override def castAdditionalTypesBooleanCanCastTo: TypeSig = if (SQLConf.get.ansiEnabled) {
+    TypeSig.none
+  } else {
+    TypeSig.TIMESTAMP
+  }
+
+  override def castAdditionalTypesDateCanCastTo: TypeSig = if (SQLConf.get.ansiEnabled) {
+    TypeSig.none
+  } else {
+    TypeSig.BOOLEAN + TypeSig.integral + TypeSig.fp
+  }
+
+  override def castAdditionalTypesTimestampCanCastTo: TypeSig = if (SQLConf.get.ansiEnabled) {
+    TypeSig.none
+  } else {
+    TypeSig.BOOLEAN
+  }
+
   override def isExpressionStateful(expr: Expression): Boolean = expr match {
     case _: InvokeLike | _: ExternalMapToCatalyst => true
     case _ => expr.stateful && !isBridgeCloneSafeStatefulExpression(expr)

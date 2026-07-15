@@ -21,7 +21,6 @@ import java.util.Objects
 import ai.rapids.cudf.ColumnVector
 import ai.rapids.cudf.ast
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
-import com.nvidia.spark.rapids.shims.SparkShimImpl
 
 import org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, Expression, ExprId, Generator, NamedExpression}
@@ -87,7 +86,7 @@ case class GpuAlias(child: Expression, name: String)(
   }
 
   override def sql: String = {
-    if (SparkShimImpl.hasAliasQuoteFix) {
+    if (_root_.com.nvidia.spark.rapids.CurrentSparkShim.get.hasAliasQuoteFix) {
       val qualifierPrefix =
         if (qualifier.nonEmpty) qualifier.map(quoteIfNeeded).mkString(".") + "." else ""
       s"${child.sql} AS $qualifierPrefix${quoteIfNeeded(name)}"

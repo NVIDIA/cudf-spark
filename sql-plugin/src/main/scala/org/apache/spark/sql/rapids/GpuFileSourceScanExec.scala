@@ -22,7 +22,7 @@ import scala.collection.mutable.HashMap
 
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.filecache.FileCacheLocalityManager
-import com.nvidia.spark.rapids.shims.{GpuDataSourceRDD, PartitionedFileUtilsShim, SparkShimImpl, StaticPartitionShims}
+import com.nvidia.spark.rapids.shims.{GpuDataSourceRDD, PartitionedFileUtilsShim, StaticPartitionShims}
 import org.apache.hadoop.fs.Path
 
 import org.apache.spark.rdd.RDD
@@ -606,7 +606,7 @@ case class GpuFileSourceScanExec(
 
     if (isPerFileReadEnabled) {
       logInfo("Using the original per file reader")
-      SparkShimImpl.getFileScanRDD(relation.sparkSession, readFile.get, locatedPartitions,
+      _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getFileScanRDD(relation.sparkSession, readFile.get, locatedPartitions,
         requiredSchema, fileFormat = Some(relation.fileFormat))
     } else {
       logDebug(s"Using Datasource RDD, files are: " +

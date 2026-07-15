@@ -13,6 +13,7 @@ com/nvidia/spark/rapids/optimizer/SQLOptimizerPlugin*
 com/nvidia/spark/rapids/ShimLoaderTemp*
 com/nvidia/spark/rapids/SparkShims*
 com/nvidia/spark/rapids/SparkRapidsBuildInfoEvent*.class
+com/nvidia/spark/rapids/shims/GpuBroadcastJoinMeta*.class
 com/nvidia/spark/rapids/fileio/iceberg/IcebergInputFile.class
 com/nvidia/spark/rapids/fileio/iceberg/IcebergInputStream.class
 com/nvidia/spark/rapids/fileio/iceberg/IcebergOutputFile.class
@@ -51,7 +52,9 @@ org/apache/iceberg/spark/source/GpuBaseReader.class
 org/apache/iceberg/spark/source/GpuSparkPlanningUtil.class
 org/apache/iceberg/spark/source/GpuSparkScanAccess.class
 org/apache/iceberg/spark/source/GpuSparkWriteAccess.class
+org/apache/spark/sql/rapids/RapidsCachingWriterBase.class
 org/apache/spark/sql/rapids/AdaptiveSparkPlanHelperShim*
 org/apache/spark/sql/rapids/ExecutionPlanCaptureCallback*
+org/apache/spark/sql/rapids/execution/TrampolineUtil*.class
 rapids4spark-private-version-info.properties
 rapids/*.py

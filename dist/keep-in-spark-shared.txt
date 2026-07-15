@@ -5,8 +5,8 @@
 # for compatibility, packaging, or follow-up validation reasons. New common
 # classes should normally stay unshimmed by default.
 
-# There are currently no holdback entries. The initial candidates are runtime-
-# reachable from root-loaded plugin code, so keeping them only in spark-shared
-# creates classpath holes. They remain narrow compatibility waivers in
-# binary-dedupe.sh until the call sites are refactored behind bridges or the
-# verifier learns to distinguish ABI-compatible metadata differences.
+# These rule containers are loaded through ShimLoader and instantiate
+# shim-sensitive GpuOverrides.class. Keep the containers in the parallel-world
+# layout so the shim classloader resolves GpuOverrides from the selected shim.
+com/nvidia/spark/rapids/ColumnarOverrideRules*.class
+com/nvidia/spark/rapids/GpuQueryStagePrepOverrides*.class

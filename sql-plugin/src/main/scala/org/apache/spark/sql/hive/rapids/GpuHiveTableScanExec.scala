@@ -28,7 +28,7 @@ import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric._
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingSeq
 import com.nvidia.spark.rapids.jni.CastStrings
-import com.nvidia.spark.rapids.shims.{ShimFilePartitionReaderFactory, ShimSparkPlan, SparkShimImpl}
+import com.nvidia.spark.rapids.shims.{ShimFilePartitionReaderFactory, ShimSparkPlan}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileStatus, Path}
 import org.apache.hadoop.hive.ql.metadata.{Partition => HivePartition}
@@ -158,13 +158,13 @@ case class GpuHiveTableScanExec(requestedAttributes: Seq[Attribute],
         val normalizedFilters = partitionPruningPredicate.map(_.transform {
           case a: AttributeReference => originalAttributes(a)
         })
-        SparkShimImpl.listPartitionsByFilter(
+        _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.listPartitionsByFilter(
           sparkSession,
           hiveTableRelation.tableMeta.identifier,
           normalizedFilters,
           Some(hiveTableRelation.tableMeta))
       } else {
-        SparkShimImpl.listPartitions(
+        _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.listPartitions(
           sparkSession,
           hiveTableRelation.tableMeta.identifier,
           None,
@@ -281,7 +281,7 @@ case class GpuHiveTableScanExec(requestedAttributes: Seq[Attribute],
     // TODO [future]: Handle small-file optimization.
     //                (https://github.com/NVIDIA/spark-rapids/issues/7017)
     //                Currently assuming per-file reading.
-    SparkShimImpl.getFileScanRDD(sparkSession, readFile, filePartitions, readSchema)
+    _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getFileScanRDD(sparkSession, readFile, filePartitions, readSchema)
                  .asInstanceOf[RDD[ColumnarBatch]]
   }
 

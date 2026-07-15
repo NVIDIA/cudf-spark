@@ -29,7 +29,7 @@ import ai.rapids.cudf.{ColumnVector, DType, HostColumnVector, Scalar}
 import ai.rapids.cudf.ast
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingArray
-import com.nvidia.spark.rapids.shims.{GpuTypeShims, SparkShimImpl}
+import com.nvidia.spark.rapids.shims.{GpuTypeShims}
 import org.apache.commons.codec.binary.{Hex => ApacheHex}
 import org.json4s.JsonAST.{JField, JNull, JString}
 
@@ -715,7 +715,7 @@ case class GpuLiteral (value: Any, dataType: DataType) extends GpuLeafExpression
       }
     case (v: Decimal, _: DecimalType) => v + "BD"
     case (v: Int, DateType) =>
-      val formatter = SparkShimImpl.getDateFormatter()
+      val formatter = _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getDateFormatter()
       s"DATE '${formatter.format(v)}'"
     case (v: Long, TimestampType) =>
       val formatter = TimestampFormatter.getFractionFormatter(

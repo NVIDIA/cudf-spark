@@ -16,8 +16,6 @@
 
 package com.nvidia.spark.rapids
 
-import com.nvidia.spark.rapids.shims.CastingConfigShim
-
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.rapids._
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
@@ -59,7 +57,7 @@ object GpuCanonicalize {
   def ignoreTimeZoneInCast(e: Expression): Expression = e match {
     case c: GpuCast if c.timeZoneId.nonEmpty && !c.needsTimeZone =>
       c.withTimeZone(null)
-    case _ => CastingConfigShim.ignoreTimeZone(e)
+    case _ => CurrentSparkShim.get.ignoreTimeZoneInCanonicalization(e)
   }
 
   /** Collects adjacent commutative operations. */
@@ -77,13 +75,10 @@ object GpuCanonicalize {
     gatherCommutative(e, f).sortBy(_.hashCode())
 
   /** Rearrange expressions that are commutative or associative. */
-  private def expressionReorder(e: Expression): Expression = e match {
-    case a @ GpuAdd(_, _, f) =>
-      orderCommutative(a, { case GpuAdd(l, r, _) => Seq(l, r) })
-        .reduce((l, r) => GpuAdd(l, r, f)(a.origin))
-    case m @ GpuMultiply(_, _, f) =>
-      orderCommutative(m, { case GpuMultiply(l, r, _) => Seq(l, r) })
-        .reduce((l, r) => GpuMultiply(l, r, f)(m.origin))
+  private def expressionReorder(e: Expression): Expression =
+    CurrentSparkShim.get.canonicalizeShimExpression(e).getOrElse(expressionReorderCommon(e))
+
+  private def expressionReorderCommon(e: Expression): Expression = e match {
     case o: GpuOr =>
       orderCommutative(o, { case GpuOr(l, r) if l.deterministic && r.deterministic => Seq(l, r) })
           .reduce(GpuOr)
@@ -91,12 +86,6 @@ object GpuCanonicalize {
       orderCommutative(a, { case GpuAnd(l, r) if l.deterministic && r.deterministic => Seq(l, r)})
           .reduce(GpuAnd)
 
-    case o: GpuBitwiseOr =>
-      orderCommutative(o, { case GpuBitwiseOr(l, r) => Seq(l, r) }).reduce(GpuBitwiseOr)
-    case a: GpuBitwiseAnd =>
-      orderCommutative(a, { case GpuBitwiseAnd(l, r) => Seq(l, r) }).reduce(GpuBitwiseAnd)
-    case x: GpuBitwiseXor =>
-      orderCommutative(x, { case GpuBitwiseXor(l, r) => Seq(l, r) }).reduce(GpuBitwiseXor)
     case GpuEqualTo(l, r) if l.hashCode() > r.hashCode() => GpuEqualTo(r, l)
     case GpuEqualNullSafe(l, r) if l.hashCode() > r.hashCode() => GpuEqualNullSafe(r, l)
 

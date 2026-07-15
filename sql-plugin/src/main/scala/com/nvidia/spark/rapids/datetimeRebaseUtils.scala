@@ -20,7 +20,6 @@ import java.util.TimeZone
 
 import ai.rapids.cudf.{ColumnView, DType, Scalar}
 import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.shims.SparkShimImpl
 
 import org.apache.spark.sql.catalyst.util.{DateTimeUtils, RebaseDateTime}
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
@@ -167,9 +166,9 @@ object DateTimeRebaseUtils {
 
   def newRebaseExceptionInRead(format: String): Exception = {
     val config = if (format == "Parquet") {
-      SparkShimImpl.parquetRebaseReadKey
+      _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.parquetRebaseReadKey
     } else if (format == "Avro") {
-      SparkShimImpl.avroRebaseReadKey
+      _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.avroRebaseReadKey
     } else {
       throw new IllegalStateException("unrecognized format " + format)
     }

@@ -46,6 +46,8 @@ export UNSHIMMED_NEED_SHARED_TXT="$PWD/unshimmed-need-shared.txt"
 export UNSHIMMED_MISSING_SHARED_TXT="$PWD/unshimmed-missing-shared.txt"
 KEEP_IN_SPARK_SHARED_PATTERNS=()
 KEEP_IN_SPARK_SHARED_PATTERNS_LOADED=0
+KEEP_IN_SPARK_SHIM_DIRS_PATTERNS=()
+KEEP_IN_SPARK_SHIM_DIRS_PATTERNS_LOADED=0
 
 SPARK_SHIM_DIRS=()
 if [[ "${UNSHIM_FAST:-0}" == "1" ]]; then
@@ -129,6 +131,65 @@ if [[ "$CACHE_HIT" == "0" && -n "$DEDUPE_CACHE_SPARK_SHARED_TXT" ]]; then
   cp tmp-shim-sha-package-files.txt "$DEDUPE_CACHE_SHIM_SHA_PACKAGE_FILES_TXT"
   cp tmp-count-shim-sha-package-files.txt "$DEDUPE_CACHE_COUNT_SHIM_SHA_PACKAGE_FILES_TXT"
 fi
+
+function load_keep_in_spark_shim_dirs_patterns() {
+  set -e
+  [[ "$KEEP_IN_SPARK_SHIM_DIRS_PATTERNS_LOADED" == "0" ]] || return 0
+  KEEP_IN_SPARK_SHIM_DIRS_PATTERNS_LOADED=1
+
+  local keep_patterns_txt="${KEEP_IN_SPARK_SHIM_DIRS_TXT:-}"
+  [[ -n "$keep_patterns_txt" ]] || return 0
+  [[ -f "$keep_patterns_txt" ]] || {
+    echo >&2 "Keep-in-spark-shim-dirs list does not exist: $keep_patterns_txt"
+    exit 255
+  }
+
+  local pattern
+  while IFS= read -r pattern; do
+    [[ -n "$pattern" ]] || continue
+    [[ "$pattern" =~ ^[[:space:]]*# ]] && continue
+    KEEP_IN_SPARK_SHIM_DIRS_PATTERNS+=("$pattern")
+  done < "$keep_patterns_txt"
+}
+
+function keep_in_spark_shim_dirs() {
+  set -e
+  local class_file="$1"
+  local pattern
+  for pattern in "${KEEP_IN_SPARK_SHIM_DIRS_PATTERNS[@]}"; do
+    # shellcheck disable=SC2053
+    if [[ "$class_file" == $pattern ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+function filter_keep_in_spark_shim_dirs() {
+  set -e
+  load_keep_in_spark_shim_dirs_patterns
+  [[ "${#KEEP_IN_SPARK_SHIM_DIRS_PATTERNS[@]}" -gt 0 ]] || return 0
+
+  local tmp_txt="$SPARK_SHARED_TXT.tmp"
+  local class_resource
+  local path_without_leading_slash
+  local class_file
+
+  echo "$((++STEP))/ retaining selected classes in Spark shim directories"
+  : > "$tmp_txt"
+  while IFS= read -r class_resource; do
+    [[ -n "$class_resource" ]] || continue
+    path_without_leading_slash="${class_resource#/}"
+    class_file="${path_without_leading_slash#*/}"
+    if keep_in_spark_shim_dirs "$class_file"; then
+      continue
+    fi
+    echo "$class_resource"
+  done < "$SPARK_SHARED_TXT" > "$tmp_txt"
+  mv "$tmp_txt" "$SPARK_SHARED_TXT"
+}
+
+filter_keep_in_spark_shim_dirs
 
 function retain_single_copy() {
   set -e
@@ -378,6 +439,8 @@ function unshimmed_class_needs_shared_identity() {
           "$class_file_quoted" == "com/nvidia/spark/ParquetCachedBatchSerializer.class" || \
           "$class_file_quoted" =~ org/apache/spark/sql/rapids/ProxyRapidsShuffleInternalManagerBase || \
           "$class_file_quoted" =~ com/nvidia/spark/rapids/SparkRapidsBuildInfoEvent.*\.class || \
+          "$class_file_quoted" =~ org/apache/spark/sql/rapids/execution/TrampolineUtil.*\.class || \
+          "$class_file_quoted" =~ com/nvidia/spark/rapids/shims/GpuBroadcastJoinMeta.*\.class || \
           "$class_file_quoted" == "org/apache/spark/sql/rapids/GpuShuffleDependency.class" || \
           "$class_file_quoted" == "com/nvidia/spark/rapids/parquet/CloseableColumnBatchIterator.class" || \
           "$class_file_quoted" == "com/nvidia/spark/rapids/GpuReadCSVFileFormat.class" || \
