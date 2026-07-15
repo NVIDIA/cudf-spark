@@ -15,20 +15,27 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "411"}
-{"spark": "412"}
+{"spark": "420"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids
 
+import org.apache.spark.sql.catalyst.FunctionIdentifier
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims._
 
-class BloomFilterAggregateQuerySuiteSpark411 extends BloomFilterAggregateQuerySuiteBase {
+class BloomFilterAggregateQuerySuiteSpark420 extends BloomFilterAggregateQuerySuiteBase {
+
+  // CatalogManager's constants are private[sql], so mirror the well-known session namespace here.
+  private val systemCatalogName = "system"
+  private val sessionNamespace = "session"
+
+  override protected def sessionFuncId(name: String): FunctionIdentifier = FunctionIdentifier(
+    name, Some(sessionNamespace), Some(systemCatalogName))
 
   // V2 literal: version=2, numHashes=5, seed=0, numLongs=3, followed by 3 longs of bit data
   testSparkResultsAreEqual(
     "might_contain with V2 literal bloom filter buffer",
     spark => spark.range(1, 1).asInstanceOf[DataFrame],
-    conf=bloomFilterEnabledConf.clone()) {
+    conf = bloomFilterEnabledConf.clone()) {
     df =>
       withExposedSqlFuncs(df.sparkSession) { spark =>
         spark.sql(

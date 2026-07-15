@@ -15,38 +15,17 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "330"}
-{"spark": "330db"}
-{"spark": "331"}
-{"spark": "332"}
-{"spark": "332db"}
-{"spark": "333"}
-{"spark": "334"}
-{"spark": "340"}
-{"spark": "341"}
-{"spark": "341db"}
-{"spark": "342"}
-{"spark": "343"}
-{"spark": "344"}
-{"spark": "350"}
-{"spark": "350db143"}
-{"spark": "351"}
-{"spark": "352"}
-{"spark": "353"}
-{"spark": "354"}
-{"spark": "355"}
-{"spark": "356"}
-{"spark": "357"}
-{"spark": "358"}
-{"spark": "400"}
-{"spark": "401"}
-{"spark": "402"}
-{"spark": "403"}
-{"spark": "411"}
-{"spark": "412"}
+{"spark": "420"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.metrics.source
 
+import org.apache.spark.TaskContext
+import org.apache.spark.util.TaskInterruptListener
+
 class MockTaskContext(taskAttemptId: Long, partitionId: Int)
     extends MockTaskContextBase(taskAttemptId, partitionId) {
+
+  // Spark 4.2 makes the TaskInterruptListener overload abstract.
+  override def addTaskInterruptListener(
+      listener: TaskInterruptListener): TaskContext = this
 }
