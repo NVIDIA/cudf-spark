@@ -145,6 +145,13 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     )
   }
 
+  test("hex- and octal-escaped newlines next to end anchor") {
+    val patterns = Seq("\\x0A$", "\\x{A}$", "\\012$")
+    patterns.foreach(pattern =>
+      assertUnsupported(pattern, RegexReplaceMode,
+        "End of line/string anchor is not supported in this context"))
+  }
+
   test("cuDF does not support possessive quantifier") {
     val patterns = Seq("a*+", "a|(a?|a*+)")
     patterns.foreach(pattern =>
