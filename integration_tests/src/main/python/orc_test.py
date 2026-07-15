@@ -658,7 +658,6 @@ def test_read_with_more_columns(spark_tmp_path, orc_gen, reader_confs, v1_enable
             lambda spark : spark.read.schema(rs).orc(data_path),
             conf=all_confs)
 
-@pytest.mark.skipif(is_before_spark_330(), reason='Hidden file metadata columns are a new feature of Spark 330')
 @allow_non_gpu(any = True)
 @pytest.mark.parametrize('metadata_column', ["file_path", "file_name", "file_size", "file_modification_time"])
 def test_orc_scan_with_hidden_metadata_fallback(spark_tmp_path, metadata_column):
@@ -730,7 +729,6 @@ def _do_orc_scan_with_agg_on_partitioned_column(spark, path, agg):
     spark.range(10).selectExpr("id", "id % 3 as p").write.partitionBy("p").mode("overwrite").orc(path)
     return spark.read.orc(path).selectExpr('{}(p)'.format(agg))
 
-@pytest.mark.skipif(is_before_spark_330(), reason='Aggregate push down on ORC is a new feature of Spark 330')
 @pytest.mark.parametrize('aggregate', _aggregate_orc_list)
 @allow_non_gpu(any = True)
 def test_orc_scan_with_aggregate_pushdown(spark_tmp_path, aggregate):
@@ -753,7 +751,6 @@ def test_orc_scan_with_aggregate_pushdown(spark_tmp_path, aggregate):
         non_exist_classes="GpuBatchScanExec",
         conf=_orc_aggregate_pushdown_enabled_conf)
 
-@pytest.mark.skipif(is_before_spark_330(), reason='Aggregate push down on ORC is a new feature of Spark 330')
 @pytest.mark.parametrize('aggregate', _aggregate_orc_list_col_partition)
 @allow_non_gpu(any = True)
 def test_orc_scan_with_aggregate_pushdown_on_col_partition(spark_tmp_path, aggregate):
@@ -776,7 +773,6 @@ def test_orc_scan_with_aggregate_pushdown_on_col_partition(spark_tmp_path, aggre
             non_exist_classes="GpuBatchScanExec",
             conf=_orc_aggregate_pushdown_enabled_conf)
 
-@pytest.mark.skipif(is_before_spark_330(), reason='Aggregate push down on ORC is a new feature of Spark 330')
 @pytest.mark.parametrize('aggregate', _aggregate_orc_list_no_col_partition)
 def test_orc_scan_with_aggregate_no_pushdown_on_col_partition(spark_tmp_path, aggregate):
     """

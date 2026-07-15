@@ -20,7 +20,7 @@ from datetime import date, datetime, timezone
 from dateutil import tz
 from marks import allow_non_gpu, approximate_float, datagen_overrides, disable_ansi_mode, ignore_order, incompat, tz_sensitive_test
 from pyspark.sql.types import *
-from spark_session import with_cpu_session, is_before_spark_330, is_before_spark_350, is_before_spark_400, is_databricks143_or_later
+from spark_session import with_cpu_session, is_before_spark_350, is_before_spark_400, is_databricks143_or_later
 import pyspark.sql.functions as f
 from timezones import all_timezones, fixed_offset_timezones, fixed_offset_timezones_iana, variable_offset_timezones, variable_offset_timezones_iana
 
@@ -56,7 +56,6 @@ def test_timeadd(data_gen):
         lambda spark: unary_op_df(spark, TimestampGen(start=datetime(5, 1, 1, tzinfo=timezone.utc), end=datetime(15, 1, 1, tzinfo=timezone.utc)), seed=1)
             .selectExpr("a + (interval {} days {} seconds)".format(days, seconds)))
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 @allow_non_gpu(*non_utc_allow)
 def test_timeadd_daytime_column():
     gen_list = [

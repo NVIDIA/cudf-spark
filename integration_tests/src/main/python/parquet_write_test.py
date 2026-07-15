@@ -651,7 +651,6 @@ def get_nested_parquet_meta_data_for_field_id():
     return schema, data
 
 
-@pytest.mark.skipif(is_before_spark_330(), reason='Field ID is not supported before Spark 330')
 def test_parquet_write_field_id(spark_tmp_path):
     data_path = spark_tmp_path + '/PARQUET_DATA'
     schema, data = get_nested_parquet_meta_data_for_field_id()
@@ -668,7 +667,6 @@ def test_parquet_write_field_id(spark_tmp_path):
         data_path,
         conf=enable_parquet_field_id_read)
 
-@pytest.mark.skipif(is_before_spark_330(), reason='Field ID is not supported before Spark 330')
 def test_parquet_write_field_id_disabled(spark_tmp_path):
     data_path = spark_tmp_path + '/PARQUET_DATA'
     schema, data = get_nested_parquet_meta_data_for_field_id()
@@ -686,7 +684,6 @@ def test_parquet_write_field_id_disabled(spark_tmp_path):
         conf=enable_parquet_field_id_read)
 
 @pytest.mark.order(1) # at the head of xdist worker queue if pytest-order is installed
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_write_daytime_interval(spark_tmp_path):
     gen_list = [('_c1', DayTimeIntervalGen())]
     data_path = spark_tmp_path + '/PARQUET_DATA'
