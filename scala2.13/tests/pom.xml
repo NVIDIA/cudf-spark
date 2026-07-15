@@ -33,6 +33,8 @@
         <rapids.module>tests</rapids.module>
         <rapids.default.jar.excludePattern>**/*</rapids.default.jar.excludePattern>
         <rapids.shim.jar.phase>package</rapids.shim.jar.phase>
+        <parallelForkCount>4</parallelForkCount>
+        <parallelSparkConfs/>
     </properties>
 
     <dependencies>
@@ -119,6 +121,74 @@
 
     <profiles>
         <profile>
+            <id>parallel-unit-tests</id>
+            <activation>
+                <property>
+                    <name>parallel</name>
+                    <value>true</value>
+                </property>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.scalatest</groupId>
+                        <artifactId>scalatest-maven-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>test</id>
+                                <phase>none</phase>
+                            </execution>
+                            <execution>
+                                <id>test-ansi-off</id>
+                                <phase>none</phase>
+                            </execution>
+                            <execution>
+                                <id>test-ansi-on</id>
+                                <phase>none</phase>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>exec-maven-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>parallel-unit-tests</id>
+                                <phase>test</phase>
+                                <goals>
+                                    <goal>exec</goal>
+                                </goals>
+                                <configuration>
+                                    <executable>${java.home}/bin/java</executable>
+                                    <classpathScope>test</classpathScope>
+                                    <arguments>
+                                        <argument>-Xmx512m</argument>
+                                        <argument>-cp</argument>
+                                        <classpath/>
+                                        <argument>com.nvidia.spark.rapids.ParallelUnitTestRunner</argument>
+                                        <argument>testClasses=${project.build.testOutputDirectory}</argument>
+                                        <argument>reportsDir=${project.build.directory}/surefire-reports</argument>
+                                        <argument>forkCount=${parallelForkCount}</argument>
+                                        <argument>wildcardSuites=${wildcardSuites}</argument>
+                                        <argument>tagsToInclude=${test.include.tags}</argument>
+                                        <argument>tagsToExclude=${test.exclude.tags}</argument>
+                                        <argument>argLine=${argLine}</argument>
+                                        <argument>testJvmArgs=-ea -Xmx4g -Xss4m ${extraJavaTestArgs}</argument>
+                                        <argument>shuffleManagerOverride=${rapids.shuffle.manager.override}</argument>
+                                        <argument>allocationFraction=${rapids.test.gpu.allocFraction}</argument>
+                                        <argument>maxAllocationFraction=${rapids.test.gpu.maxAllocFraction}</argument>
+                                        <argument>minAllocationFraction=${rapids.test.gpu.minAllocFraction}</argument>
+                                        <argument>testFailureIgnore=${maven.test.failure.ignore}</argument>
+                                        <argument>sparkConfs=${parallelSparkConfs}</argument>
+                                    </arguments>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
             <id>release330</id>
             <activation>
                 <property>
@@ -171,6 +241,11 @@
                     <value>400</value>
                 </property>
             </activation>
+            <properties>
+                <parallelSparkConfs>
+                    spark.sql.ansi.enabled=false;spark.sql.ansi.enabled=true
+                </parallelSparkConfs>
+            </properties>
             <build>
                 <plugins>
                     <plugin>

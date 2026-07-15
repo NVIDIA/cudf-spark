@@ -1520,6 +1520,8 @@ This will force full Scala code rebuild in downstream modules.
                     <artifactId>scalatest-maven-plugin</artifactId>
                     <version>${scalatest-maven-plugin.version}</version>
                     <configuration>
+                        <!-- Only the tests module handles -Dparallel=true, using isolated JVMs. -->
+                        <parallel>false</parallel>
                         <reportsDirectory>${project.build.directory}/surefire-reports</reportsDirectory>
                         <junitxml>.</junitxml>
                         <filereports>scala-test-output.txt</filereports>
