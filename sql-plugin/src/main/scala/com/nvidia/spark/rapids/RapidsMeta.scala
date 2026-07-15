@@ -724,8 +724,9 @@ abstract class SparkPlanMeta[INPUT <: SparkPlan](plan: INPUT,
   // child can't be replaced.
   private def fixUpExchangeOverhead(): Unit = {
     childPlans.foreach(_.fixUpExchangeOverhead())
-    if (wrapped.isInstanceOf[ShuffleExchangeExec] &&
-        !_root_.com.nvidia.spark.rapids.CurrentSparkShim.get.isExecutorBroadcastShuffle(wrapped.asInstanceOf[ShuffleExchangeExec]) &&
+    if (wrapped.isInstanceOf[ShuffleExchangeExec] && !_root_.com.nvidia.spark.rapids
+        .CurrentSparkShim.get.isExecutorBroadcastShuffle(
+          wrapped.asInstanceOf[ShuffleExchangeExec]) &&
         !childPlans.exists(_.supportsColumnar) &&
         (plan.conf.adaptiveExecutionEnabled ||
         !parent.exists(_.supportsColumnar))) {
@@ -1033,7 +1034,8 @@ object ExpressionContext {
     val parent = findParentPlanMeta(meta)
     assert(parent.isDefined, "It is expected that an aggregate function is a child of a SparkPlan")
     parent.get.wrapped match {
-      case agg: SparkPlan if _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.isWindowFunctionExec(agg) =>
+      case agg: SparkPlan if _root_.com.nvidia.spark.rapids.CurrentSparkShim.get
+          .isWindowFunctionExec(agg) =>
         WindowAggExprContext
       // AggregateInPandasExec renamed to ArrowAggregatePythonExec in Spark 4.1.0
       case agg: SparkPlan if _root_.com.nvidia.spark.rapids.CurrentSparkShim.get
@@ -1509,7 +1511,8 @@ abstract class BaseExprMeta[INPUT <: Expression](
     // Some expressions carry task/partition-local state whose values cannot be preserved if the
     // bridge splits a batch across worker threads. The shim predicate filters out those correctness
     // blockers while allowing expressions whose mutable state is only cloned worker-local scratch.
-    def isStateful: Boolean = _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.isExpressionStateful(expr)
+    def isStateful: Boolean =
+      _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.isExpressionStateful(expr)
 
     conf.isCpuBridgeEnabled &&
       !conf.bridgeDisallowList.contains(exprClass.getName) &&

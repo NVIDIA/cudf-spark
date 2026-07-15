@@ -16,10 +16,10 @@
 
 package com.nvidia.spark.rapids
 
+import ai.rapids.cudf.{ColumnVector, ColumnView}
 import org.apache.hadoop.fs.FileStatus
 import org.apache.parquet.schema.MessageType
 
-import ai.rapids.cudf.{ColumnVector, ColumnView}
 import org.apache.spark.SparkContext
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.rdd.RDD
@@ -43,8 +43,8 @@ import org.apache.spark.sql.execution.exchange.{ReusedExchangeExec, ShuffleExcha
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
-import org.apache.spark.util.SerializableConfiguration
 import org.apache.spark.unsafe.types.UTF8String
+import org.apache.spark.util.SerializableConfiguration
 
 trait SparkShims {
   def parquetRebaseReadKey: String

@@ -359,7 +359,8 @@ abstract class MultiFilePartitionReaderFactoryBase(
   override def createColumnarReader(partition: InputPartition): PartitionReader[ColumnarBatch] = {
     assert(partition.isInstanceOf[FilePartition])
     val filePartition = partition.asInstanceOf[FilePartition]
-    val files = _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getPartitionFiles(filePartition).toArray
+    val files = _root_.com.nvidia.spark.rapids.CurrentSparkShim.get
+      .getPartitionFiles(filePartition).toArray
     val filePaths = files.map(_.filePath.toString())
     val conf = broadcastedConf.value.value
 

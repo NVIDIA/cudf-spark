@@ -18,11 +18,11 @@ package com.nvidia.spark.rapids.shims
 
 import scala.annotation.nowarn
 
+import ai.rapids.cudf.{ColumnVector, ColumnView}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.GpuOverrides.exec
 import com.nvidia.spark.rapids.lore.GpuLoreReplayExec
 
-import ai.rapids.cudf.{ColumnVector, ColumnView}
 import org.apache.spark.SparkContext
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.internal.Logging
@@ -47,14 +47,14 @@ import org.apache.spark.sql.execution.joins._
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
 import org.apache.spark.sql.execution.window.WindowExecBase
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.types._
 import org.apache.spark.sql.rapids._
 import org.apache.spark.sql.rapids.aggregate._
 import org.apache.spark.sql.rapids.execution._
 import org.apache.spark.sql.rapids.shims.{GpuCastToNumberErrorShim, OriginContextShim, RapidsErrorUtils, SparkSessionUtils}
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.SparkSession
-import org.apache.spark.util.SerializableConfiguration
+import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.UTF8String
+import org.apache.spark.util.SerializableConfiguration
 
 /**
  * Shim base class that can be compiled with every supported 3.2.0+

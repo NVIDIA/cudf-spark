@@ -217,10 +217,12 @@ class GpuParquetFileFormat extends ColumnarFileFormat with Logging {
 
     val outputTimestampType = sqlConf.parquetOutputTimestampType
     val dateTimeRebaseMode = DateTimeRebaseMode.fromName(
-      sparkSession.sqlContext.getConf(_root_.com.nvidia.spark.rapids.CurrentSparkShim.get.parquetRebaseWriteKey))
+      sparkSession.sqlContext.getConf(
+        _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.parquetRebaseWriteKey))
     val timestampRebaseMode = if (outputTimestampType.equals(ParquetOutputTimestampType.INT96)) {
       DateTimeRebaseMode.fromName(
-        sparkSession.sqlContext.getConf(_root_.com.nvidia.spark.rapids.CurrentSparkShim.get.int96ParquetRebaseWriteKey))
+        sparkSession.sqlContext.getConf(
+          _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.int96ParquetRebaseWriteKey))
     } else {
       dateTimeRebaseMode
     }

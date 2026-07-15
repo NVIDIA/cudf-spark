@@ -146,8 +146,9 @@ abstract class CastExprMetaBase[INPUT <: UnaryLike[Expression] with TimeZoneAwar
           willNotWorkOnGpu("Casting strings to timestamps is disabled, please set" +
             s" ${RapidsConf.ENABLE_CAST_STRING_TO_TIMESTAMP} to true.")
         }
-      case (StringType, dt:DecimalType) =>
-        if (dt.scale < 0 && !_root_.com.nvidia.spark.rapids.CurrentSparkShim.get.isCastingStringToNegDecimalScaleSupported) {
+      case (StringType, dt: DecimalType) =>
+        if (dt.scale < 0 && !_root_.com.nvidia.spark.rapids.CurrentSparkShim.get
+            .isCastingStringToNegDecimalScaleSupported) {
           willNotWorkOnGpu("RAPIDS doesn't support casting string to decimal for " +
               "negative scale decimal in this version of Spark because of SPARK-37451")
         }
@@ -496,8 +497,8 @@ object GpuCast {
             withResource(input.nansToNulls()) { inputWithNansToNull =>
               withResource(FloatUtils.infinityToNulls(inputWithNansToNull)) {
                 inputWithoutNanAndInfinity =>
-                  if (fromDataType == FloatType &&
-                      _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.hasCastFloatTimestampUpcast) {
+                  if (fromDataType == FloatType && _root_.com.nvidia.spark.rapids
+                      .CurrentSparkShim.get.hasCastFloatTimestampUpcast) {
                     withResource(inputWithoutNanAndInfinity.castTo(DType.FLOAT64)) { doubles =>
                       withResource(doubles.mul(microsPerSec, DType.INT64)) {
                         inputTimesMicrosCv =>
@@ -587,10 +588,12 @@ object GpuCast {
       case (from: MapType, to: MapType) =>
         castMapToMap(from, to, input, options)
 
-      case (dayTime: DataType, StringType) if CurrentSparkShim.get.isSupportedDayTimeType(dayTime) =>
+      case (dayTime: DataType, StringType)
+          if CurrentSparkShim.get.isSupportedDayTimeType(dayTime) =>
         CurrentSparkShim.get.toDayTimeIntervalString(input, dayTime)
 
-      case (StringType, dayTime: DataType) if CurrentSparkShim.get.isSupportedDayTimeType(dayTime) =>
+      case (StringType, dayTime: DataType)
+          if CurrentSparkShim.get.isSupportedDayTimeType(dayTime) =>
         CurrentSparkShim.get.castStringToDayTimeIntervalWithThrow(input, dayTime)
 
       // cast(`day time interval` as integral)
@@ -755,7 +758,8 @@ object GpuCast {
     case TimestampType => castTimestampToString(input)
     case FloatType | DoubleType => CastStrings.fromFloat(input, options.castToJsonString)
     case BinaryType => castBinToString(input, options)
-    case _: DecimalType => CurrentSparkShim.get.castDecimalToString(input, options.useDecimalPlainString)
+    case _: DecimalType =>
+      CurrentSparkShim.get.castDecimalToString(input, options.useDecimalPlainString)
     case StructType(fields) => castStructToString(input, fields, options)
 
     case ArrayType(elementType, _) =>

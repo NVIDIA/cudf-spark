@@ -558,7 +558,8 @@ object GpuOverrides extends Logging {
             val cpuCanonical = b.canonicalized.asInstanceOf[BroadcastExchangeExec]
             val gpuExchange = ExchangeMappingCache.findGpuExchangeReplacement(cpuCanonical)
             gpuExchange.map { g =>
-              _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.newBroadcastQueryStageExec(bqse, ReusedExchangeExec(output, g))
+              _root_.com.nvidia.spark.rapids.CurrentSparkShim.get
+                .newBroadcastQueryStageExec(bqse, ReusedExchangeExec(output, g))
             }.getOrElse(bqse)
           case _ => bqse
         }
@@ -4197,7 +4198,8 @@ object GpuOverrides extends Logging {
       })).map(r => (r.getClassFor.asSubclass(classOf[Scan]), r)).toMap
 
   val scans: Map[Class[_ <: Scan], ScanRule[_ <: Scan]] =
-    commonScans ++ _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getScans ++ ExternalSource.getScans
+    commonScans ++ _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getScans ++
+      ExternalSource.getScans
 
   def wrapPart[INPUT <: Partitioning](
       part: INPUT,
@@ -4308,7 +4310,8 @@ object GpuOverrides extends Logging {
 
   val dataWriteCmds: Map[Class[_ <: DataWritingCommand],
       DataWritingCommandRule[_ <: DataWritingCommand]] =
-    commonDataWriteCmds ++ GpuHiveOverrides.dataWriteCmds ++ _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getDataWriteCmds
+    commonDataWriteCmds ++ GpuHiveOverrides.dataWriteCmds ++
+      _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getDataWriteCmds
 
   def runnableCmd[INPUT <: RunnableCommand](
       desc: String,
@@ -4637,7 +4640,7 @@ object GpuOverrides extends Logging {
 
   lazy val execs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] =
     commonExecs ++ GpuHiveOverrides.execs ++ ExternalSource.execRules ++
-      _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getExecs // Shim execs at the end; shims get the last word in substitutions.
+      _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getExecs // Shim execs at the end.
 
   def getTimeParserPolicy: TimeParserPolicy = {
     val policy = SQLConf.get.getConfString(SQLConf.LEGACY_TIME_PARSER_POLICY.key, "EXCEPTION")
@@ -4801,7 +4804,8 @@ object GpuOverrides extends Logging {
       case c2r: ColumnarToRowExec => prepareExplainOnly(c2r.child)
       case re: ReusedExchangeExec => prepareExplainOnly(re.child)
       case aqe: AdaptiveSparkPlanExec =>
-        prepareExplainOnly(_root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getAdaptiveInputPlan(aqe))
+        prepareExplainOnly(
+          _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getAdaptiveInputPlan(aqe))
       case sub: SubqueryExec => prepareExplainOnly(sub.child)
     }
     planAfter
@@ -4865,7 +4869,8 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
         t => f"Plan conversion to the GPU took $t%.2f ms") {
         var updatedPlan = updateForAdaptivePlan(plan, conf)
         updatedPlan = HybridExecutionUtils.tryToApplyHybridScanRules(updatedPlan, conf)
-        updatedPlan = _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.applyShimPlanRules(updatedPlan, conf)
+        updatedPlan = _root_.com.nvidia.spark.rapids.CurrentSparkShim.get
+          .applyShimPlanRules(updatedPlan, conf)
         updatedPlan = applyOverrides(updatedPlan, conf)
         if (conf.logQueryTransformations) {
           val logPrefix = context.map(str => s"[$str]").getOrElse("")
@@ -4878,7 +4883,8 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
       // this mode logs the explain output and returns the original CPU plan
       var updatedPlan = updateForAdaptivePlan(plan, conf)
       updatedPlan = HybridExecutionUtils.tryToApplyHybridScanRules(updatedPlan, conf)
-      updatedPlan = _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.applyShimPlanRules(updatedPlan, conf)
+      updatedPlan = _root_.com.nvidia.spark.rapids.CurrentSparkShim.get
+        .applyShimPlanRules(updatedPlan, conf)
       GpuOverrides.explainCatalystSQLPlan(updatedPlan, conf)
       plan
     } else {
@@ -4933,8 +4939,8 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
         // example filename: "file:/tmp/delta-table/_delta_log/00000000000000000000.json"
         val found = StaticPartitionShims.getStaticPartitions(f.relation).map { parts =>
           parts.exists { part =>
-            _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getPartitionFiles(part).exists(partFile =>
-              checkDeltaFunc(partFile.filePath.toString))
+            _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getPartitionFiles(part)
+              .exists(partFile => checkDeltaFunc(partFile.filePath.toString))
           }
         }.getOrElse {
           f.relation.location.rootPaths.exists { path =>

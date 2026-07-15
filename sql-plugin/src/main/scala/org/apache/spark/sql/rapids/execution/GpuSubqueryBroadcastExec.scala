@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -214,8 +214,9 @@ case class GpuSubqueryBroadcastExec(
       SQLExecution.withExecutionId(session, executionId) {
         val broadcastBatch = child.executeBroadcast[Any]()
         val result: Array[InternalRow] = broadcastBatch.value match {
-          case b: SerializeConcatHostBuffersDeserializeBatch =>  projectSerializedBatchToRows(b)
-          case b if _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.isEmptyRelation(b) => Array.empty
+          case b: SerializeConcatHostBuffersDeserializeBatch => projectSerializedBatchToRows(b)
+          case b if _root_.com.nvidia.spark.rapids.CurrentSparkShim.get
+              .isEmptyRelation(b) => Array.empty
           case b => throw new IllegalStateException(s"Unexpected broadcast type: ${b.getClass}")
         }
 

@@ -112,7 +112,8 @@ class GpuTransitionOverrides extends Rule[SparkPlan] {
         case a: AdaptiveSparkPlanExec =>
           // we hit this case when we have an adaptive plan wrapped in a write
           // to columnar file format on the GPU
-          val columnarAdaptivePlan = _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.columnarAdaptivePlan(a, goal)
+          val columnarAdaptivePlan = _root_.com.nvidia.spark.rapids.CurrentSparkShim.get
+            .columnarAdaptivePlan(a, goal)
           optimizeAdaptiveTransitions(columnarAdaptivePlan, None)
         case _ =>
           val newChild = checkInjectedProject(child, child, isRowToCol = true)
@@ -162,13 +163,15 @@ class GpuTransitionOverrides extends Rule[SparkPlan] {
       val plan = GpuTransitionOverrides.getNonQueryStagePlan(s)
       if (plan.supportsColumnar && plan.isInstanceOf[GpuExec]) {
         (plan, parent) match {
-          case (_, Some(x)) if _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.isCustomReaderExec(x) =>
+          case (_, Some(x)) if _root_.com.nvidia.spark.rapids.CurrentSparkShim.get
+              .isCustomReaderExec(x) =>
             // We can't insert a coalesce batches operator between a custom shuffle reader
             // and a shuffle query stage, so we instead insert it around the custom shuffle
             // reader later on, in the next top-level case clause.
             s
           case (ex: ShuffleExchangeLike, Some(x))
-              if _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.shuffleParentReadsShuffleData(ex, x) =>
+              if _root_.com.nvidia.spark.rapids.CurrentSparkShim.get
+                .shuffleParentReadsShuffleData(ex, x) =>
             // In some cases, the parent might have to read the shuffle data directly, so
             // we don't need the post-shuffle coalesce exec since the parent should 
             // coalesce the shuffle data as needed
@@ -189,12 +192,14 @@ class GpuTransitionOverrides extends Rule[SparkPlan] {
       addPostShuffleCoalesce(e.copy(child = optimizeAdaptiveTransitions(e.child, Some(e))))
 
     // Leave TableCacheQueryStage wrapper intact and let shims decide behavior.
-    case p if _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getTableCacheNonQueryStagePlan(p).nonEmpty =>
+    case p if _root_.com.nvidia.spark.rapids.CurrentSparkShim.get
+        .getTableCacheNonQueryStagePlan(p).nonEmpty =>
       p.withNewChildren(p.children.map(c => optimizeAdaptiveTransitions(c, Some(p))))
 
-    case c2re: ColumnarToRowExec if
-        _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.checkCToRWithExecBroadcastAQECoalPart(c2re, parent) =>
-      val shuffle = _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getShuffleFromCToRWithExecBroadcastAQECoalPart(c2re)
+    case c2re: ColumnarToRowExec if _root_.com.nvidia.spark.rapids.CurrentSparkShim.get
+        .checkCToRWithExecBroadcastAQECoalPart(c2re, parent) =>
+      val shuffle = _root_.com.nvidia.spark.rapids.CurrentSparkShim.get
+        .getShuffleFromCToRWithExecBroadcastAQECoalPart(c2re)
       shuffle match {
         case Some(s) =>
             /*
@@ -216,11 +221,13 @@ class GpuTransitionOverrides extends Rule[SparkPlan] {
 
     case ColumnarToRowExec(e: ShuffleQueryStageExec) =>
       val c2r = GpuColumnarToRowExec(optimizeAdaptiveTransitions(e, Some(plan)))
-      _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.addRowShuffleToQueryStageTransitionIfNeeded(c2r, e)
+      _root_.com.nvidia.spark.rapids.CurrentSparkShim.get
+        .addRowShuffleToQueryStageTransitionIfNeeded(c2r, e)
 
     // If Spark wrapped a TableCache query stage with a CPU ColumnarToRow, replace it with
     // a GPU ColumnarToRow to avoid CPU accessing GPU vectors.
-    case ColumnarToRowExec(e) if _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getTableCacheNonQueryStagePlan(e).nonEmpty =>
+    case ColumnarToRowExec(e) if _root_.com.nvidia.spark.rapids.CurrentSparkShim.get
+        .getTableCacheNonQueryStagePlan(e).nonEmpty =>
       GpuColumnarToRowExec(optimizeAdaptiveTransitions(e, Some(plan)))
 
     case ColumnarToRowExec(e: BroadcastQueryStageExec) =>
@@ -737,7 +744,8 @@ class GpuTransitionOverrides extends Rule[SparkPlan] {
       case _: ShowTablesExec =>
       case _: DropTableExec =>
       case _: RDDScanExec => () // Ignored
-      case p if _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.skipAssertIsOnTheGpu(p) => () // Ignored
+      case p if _root_.com.nvidia.spark.rapids.CurrentSparkShim.get
+          .skipAssertIsOnTheGpu(p) => () // Ignored
       case p: ExecutedCommandExec if !isTestExempted(p) =>
         val meta = GpuOverrides.wrapPlan(p, conf, None)
         if (!meta.suppressWillWorkOnGpuInfo) {
@@ -983,7 +991,8 @@ class GpuTransitionOverrides extends Rule[SparkPlan] {
         // Some distributions of Spark don't properly transform the plan after the
         // plugin performs its final transformations of the plan. In this case, we 
         // need to apply any remaining rules that should have been applied.
-        updatedPlan = _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.applyPostShimPlanRules(updatedPlan)
+        updatedPlan = _root_.com.nvidia.spark.rapids.CurrentSparkShim.get
+          .applyPostShimPlanRules(updatedPlan)
 
         updatedPlan = markGpuPlanningComplete(updatedPlan)
         if (rapidsConf.isAqeExchangeReuseFixupEnabled &&
@@ -1083,7 +1092,8 @@ object GpuTransitionOverrides {
           sqse.plan
         }
       case _ =>
-        _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getTableCacheNonQueryStagePlan(plan).getOrElse(plan)
+        _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getTableCacheNonQueryStagePlan(plan)
+          .getOrElse(plan)
     }
   }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -64,11 +64,13 @@ case class GpuBroadcastToRowExec(
       val broadcastBatch = child.executeBroadcast[Any]()
       val rows: Array[InternalRow] = broadcastBatch.value match {
         case b: SerializeConcatHostBuffersDeserializeBatch => projectSerializedBatch(b)
-        case b if _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.isEmptyRelation(b) => Array.empty
+        case b if _root_.com.nvidia.spark.rapids.CurrentSparkShim.get
+            .isEmptyRelation(b) => Array.empty
         case b => throw new IllegalStateException(s"Unexpected broadcast type: ${b.getClass}")
       }
 
-      val result = _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.broadcastModeTransform(broadcastMode, rows)
+      val result = _root_.com.nvidia.spark.rapids.CurrentSparkShim.get
+        .broadcastModeTransform(broadcastMode, rows)
       val broadcasted = sparkContext.broadcast(result)
       promise.trySuccess(broadcasted)
       broadcasted

@@ -62,8 +62,8 @@ class GpuFileScanRDD(
         inputMetrics.setBytesRead(existingBytesRead + getBytesReadCallback())
       }
 
-      private[this] val files = _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getPartitionFiles(
-        split.asInstanceOf[FilePartition]).toIterator
+      private[this] val files = _root_.com.nvidia.spark.rapids.CurrentSparkShim.get
+        .getPartitionFiles(split.asInstanceOf[FilePartition]).toIterator
       private[this] var currentFile: PartitionedFile = null
       private[this] var currentIterator: Iterator[Object] = null
 

@@ -606,8 +606,9 @@ case class GpuFileSourceScanExec(
 
     if (isPerFileReadEnabled) {
       logInfo("Using the original per file reader")
-      _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getFileScanRDD(relation.sparkSession, readFile.get, locatedPartitions,
-        requiredSchema, fileFormat = Some(relation.fileFormat))
+      _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getFileScanRDD(
+        relation.sparkSession, readFile.get, locatedPartitions, requiredSchema,
+        fileFormat = Some(relation.fileFormat))
     } else {
       logDebug(s"Using Datasource RDD, files are: " +
         s"${prunedPartitions.flatMap(FilePartitionShims.getFiles).mkString(",")}")

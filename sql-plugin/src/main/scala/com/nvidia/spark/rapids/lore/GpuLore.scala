@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -146,7 +146,8 @@ object GpuLore extends Logging {
       broadcastHadoopConf: Broadcast[SerializableConfiguration]): GpuExec = {
     // Load children
     val newChildren = rootExec.children.zipWithIndex.map { case (plan, idx) =>
-      val newChild = CurrentSparkShim.get.newGpuLoreReplayExec(idx, rootPath.toString, broadcastHadoopConf)
+      val newChild = CurrentSparkShim.get.newGpuLoreReplayExec(
+        idx, rootPath.toString, broadcastHadoopConf)
       plan match {
         case b: GpuBroadcastExchangeExec =>
           b.withNewChildren(Seq(newChild))
@@ -171,7 +172,8 @@ object GpuLore extends Logging {
     val innerPlan = sub.plan.child
 
     if (innerPlan.isInstanceOf[GpuExec]) {
-      var newChild: SparkPlan = CurrentSparkShim.get.newGpuLoreReplayExec(id, rootPath.toString, hadoopConf)
+      var newChild: SparkPlan = CurrentSparkShim.get.newGpuLoreReplayExec(
+        id, rootPath.toString, hadoopConf)
 
       if (!innerPlan.supportsColumnar) {
         newChild = GpuColumnarToRowExec(newChild)
