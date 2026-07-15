@@ -795,24 +795,24 @@ Max,S,`max`,None,reduction,input,S,S,S,S,S,S,S,S,PS,S,S,S,NS,NS,PS,NA,PS,NS,NA,N
 Max,S,`max`,None,reduction,result,S,S,S,S,S,S,S,S,PS,S,S,S,NS,NS,PS,NA,PS,NS,NA,NA
 Max,S,`max`,None,window,input,S,S,S,S,S,S,S,S,PS,S,S,S,NS,NS,NS,NA,NS,NS,NA,NA
 Max,S,`max`,None,window,result,S,S,S,S,S,S,S,S,PS,S,S,S,NS,NS,NS,NA,NS,NS,NA,NA
-MaxBy,S,`max_by`,None,aggregation,value,S,S,S,S,S,S,S,S,PS,S,S,S,S,NS,PS,PS,PS,NS,NS,NS
-MaxBy,S,`max_by`,None,aggregation,ordering,S,S,S,S,S,NS,NS,S,PS,S,S,S,NS,NS,PS,NA,PS,NS,NA,NA
-MaxBy,S,`max_by`,None,aggregation,result,S,S,S,S,S,S,S,S,PS,S,S,S,S,NS,PS,PS,PS,NS,NS,NS
-MaxBy,S,`max_by`,None,reduction,value,S,S,S,S,S,S,S,S,PS,S,S,S,S,NS,PS,PS,PS,NS,NS,NS
-MaxBy,S,`max_by`,None,reduction,ordering,S,S,S,S,S,NS,NS,S,PS,S,S,S,NS,NS,PS,NA,PS,NS,NA,NA
-MaxBy,S,`max_by`,None,reduction,result,S,S,S,S,S,S,S,S,PS,S,S,S,S,NS,PS,PS,PS,NS,NS,NS
+MaxBy,S, ,None,aggregation,value,S,S,S,S,S,S,S,S,PS,S,S,S,S,NS,PS,PS,PS,NS,NS,NS
+MaxBy,S, ,None,aggregation,ordering,S,S,S,S,S,NS,NS,S,PS,S,S,S,NS,NS,PS,NA,PS,NS,NA,NA
+MaxBy,S, ,None,aggregation,result,S,S,S,S,S,S,S,S,PS,S,S,S,S,NS,PS,PS,PS,NS,NS,NS
+MaxBy,S, ,None,reduction,value,S,S,S,S,S,S,S,S,PS,S,S,S,S,NS,PS,PS,PS,NS,NS,NS
+MaxBy,S, ,None,reduction,ordering,S,S,S,S,S,NS,NS,S,PS,S,S,S,NS,NS,PS,NA,PS,NS,NA,NA
+MaxBy,S, ,None,reduction,result,S,S,S,S,S,S,S,S,PS,S,S,S,S,NS,PS,PS,PS,NS,NS,NS
 Min,S,`min`,None,aggregation,input,S,S,S,S,S,S,S,S,PS,S,S,S,NS,NS,PS,NA,PS,NS,NA,NA
 Min,S,`min`,None,aggregation,result,S,S,S,S,S,S,S,S,PS,S,S,S,NS,NS,PS,NA,PS,NS,NA,NA
 Min,S,`min`,None,reduction,input,S,S,S,S,S,S,S,S,PS,S,S,S,NS,NS,PS,NA,PS,NS,NA,NA
 Min,S,`min`,None,reduction,result,S,S,S,S,S,S,S,S,PS,S,S,S,NS,NS,PS,NA,PS,NS,NA,NA
 Min,S,`min`,None,window,input,S,S,S,S,S,S,S,S,PS,S,S,S,NS,NS,NS,NA,NS,NS,NA,NA
 Min,S,`min`,None,window,result,S,S,S,S,S,S,S,S,PS,S,S,S,NS,NS,NS,NA,NS,NS,NA,NA
-MinBy,S,`min_by`,None,aggregation,value,S,S,S,S,S,S,S,S,PS,S,S,S,S,NS,PS,PS,PS,NS,NS,NS
-MinBy,S,`min_by`,None,aggregation,ordering,S,S,S,S,S,NS,NS,S,PS,S,S,S,NS,NS,PS,NA,PS,NS,NA,NA
-MinBy,S,`min_by`,None,aggregation,result,S,S,S,S,S,S,S,S,PS,S,S,S,S,NS,PS,PS,PS,NS,NS,NS
-MinBy,S,`min_by`,None,reduction,value,S,S,S,S,S,S,S,S,PS,S,S,S,S,NS,PS,PS,PS,NS,NS,NS
-MinBy,S,`min_by`,None,reduction,ordering,S,S,S,S,S,NS,NS,S,PS,S,S,S,NS,NS,PS,NA,PS,NS,NA,NA
-MinBy,S,`min_by`,None,reduction,result,S,S,S,S,S,S,S,S,PS,S,S,S,S,NS,PS,PS,PS,NS,NS,NS
+MinBy,S, ,None,aggregation,value,S,S,S,S,S,S,S,S,PS,S,S,S,S,NS,PS,PS,PS,NS,NS,NS
+MinBy,S, ,None,aggregation,ordering,S,S,S,S,S,NS,NS,S,PS,S,S,S,NS,NS,PS,NA,PS,NS,NA,NA
+MinBy,S, ,None,aggregation,result,S,S,S,S,S,S,S,S,PS,S,S,S,S,NS,PS,PS,PS,NS,NS,NS
+MinBy,S, ,None,reduction,value,S,S,S,S,S,S,S,S,PS,S,S,S,S,NS,PS,PS,PS,NS,NS,NS
+MinBy,S, ,None,reduction,ordering,S,S,S,S,S,NS,NS,S,PS,S,S,S,NS,NS,PS,NA,PS,NS,NA,NA
+MinBy,S, ,None,reduction,result,S,S,S,S,S,S,S,S,PS,S,S,S,S,NS,PS,PS,PS,NS,NS,NS
 Percentile,S,`percentile`,None,aggregation,input,NA,S,S,S,S,S,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 Percentile,S,`percentile`,None,aggregation,percentage,NA,NA,NA,NA,NA,NA,PS,NA,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA
 Percentile,S,`percentile`,None,aggregation,frequency,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA
