@@ -17,7 +17,7 @@ import re
 import pytest
 
 from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect, \
-    assert_gpu_and_cpu_error, \
+    assert_gpu_and_cpu_error, assert_gpu_and_cpu_same_data_or_error, \
     assert_gpu_sql_fallback_collect
 from data_gen import *
 from marks import *
@@ -492,9 +492,9 @@ def test_regexp_replace_backslash_digit_is_literal():
 
 
 @allow_non_gpu('ProjectExec', 'RegExpReplace')
-def test_regexp_replace_trailing_backslash_throws():
+def test_regexp_replace_trailing_backslash_matches_cpu():
     from pyspark.sql.functions import regexp_replace, col
-    assert_gpu_and_cpu_error(
+    assert_gpu_and_cpu_same_data_or_error(
         lambda spark: spark.createDataFrame([("a",)], ["a"]).select(
             regexp_replace(col("a"), "a", "\\")).collect(),
         conf=_regexp_conf,
@@ -502,9 +502,9 @@ def test_regexp_replace_trailing_backslash_throws():
 
 
 @allow_non_gpu('ProjectExec', 'RegExpReplace')
-def test_regexp_replace_dollar_non_digit_throws():
+def test_regexp_replace_dollar_non_digit_matches_cpu():
     from pyspark.sql.functions import regexp_replace, col
-    assert_gpu_and_cpu_error(
+    assert_gpu_and_cpu_same_data_or_error(
         lambda spark: spark.createDataFrame([("a",)], ["a"]).select(
             regexp_replace(col("a"), "a", "$x")).collect(),
         conf=_regexp_conf,
