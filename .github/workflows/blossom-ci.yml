@@ -61,7 +61,6 @@ jobs:
         github.actor == 'patilkishorv' ||
         github.actor == 'pmattione-nvidia' ||
         github.actor == 'pxLi' ||
-        github.actor == 'razajafri' ||
         github.actor == 'res-life' ||
         github.actor == 'revans2' ||
         github.actor == 'rishic3' ||
