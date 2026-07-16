@@ -145,7 +145,7 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     )
   }
 
-  test("hex- and octal-escaped newlines next to end anchor") {
+  test("hex- and octal-escaped line terminators before $ in replace mode") {
     val patterns = Seq("\\x0A$", "\\x{A}$", "\\012$")
     patterns.foreach(pattern =>
       assertUnsupported(pattern, RegexReplaceMode,
@@ -681,6 +681,9 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     test(raw"[^a\n]", raw"(?:[\r]|[^a\n])")
     test(raw"[^a\r]", raw"[^a\r]")
     test(raw"[^a\r\n]", raw"[^a\r\n]")
+    test(raw"[^\x0D]", raw"[^\x0d]")
+    test(raw"[^\x{D}]", raw"[^\x0d]")
+    test(raw"[^\015]", raw"[^\015]")
   }
 
   test("compare CPU and GPU: regexp replace negated character class") {
@@ -693,7 +696,8 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
       "[a]", "[a\r]", "[a\n]", "[a\r\n]",
       "[^b]", "[^b\r]", "[^b\n]", "[^b\r\n]",
       "[^z]", "[^\r]", "[^\n]", "[^\r]",
-      "[^\r\n]", "[^b\r]", "[^bc\r\n]", "[^\\r\\n]", "[^\r\r]", "[^\r\n\r]", "[^\n\n\r\r]")
+      "[^\r\n]", "[^b\r]", "[^bc\r\n]", "[^\\r\\n]", "[^\r\r]", "[^\r\n\r]", "[^\n\n\r\r]",
+      "[^\\x0D]", "[^\\x{D}]", "[^\\015]")
     assertCpuGpuMatchesRegexpReplace(patterns, inputs)
   }
 
