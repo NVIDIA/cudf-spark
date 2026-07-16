@@ -22,6 +22,7 @@ import java.util.{Locale, ServiceConfigurationError, ServiceLoader}
 import scala.util.{Failure, Success, Try}
 
 import com.nvidia.spark.rapids.GpuParquetFileFormat
+import com.nvidia.spark.rapids.shims.SparkShimImpl
 import org.apache.commons.lang3.reflect.ConstructorUtils
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
@@ -157,7 +158,7 @@ abstract class GpuDataSourceBase(
       format.inferSchema(
         sparkSession,
         caseInsensitiveOptions - "path",
-        _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.filesFromFileIndex(tempFileIndex))
+        SparkShimImpl.filesFromFileIndex(tempFileIndex))
     }.getOrElse {
       throw RapidsErrorUtils.dataSchemaNotSpecifiedError(format.toString)
     }
@@ -223,7 +224,7 @@ abstract class GpuDataSourceBase(
           format.inferSchema(
             sparkSession,
             caseInsensitiveOptions - "path",
-            _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.filesFromFileIndex(fileCatalog))
+            SparkShimImpl.filesFromFileIndex(fileCatalog))
         }.getOrElse {
           throw RapidsErrorUtils.
             dataSchemaNotSpecifiedError(format.toString, fileCatalog.allFiles().mkString(","))

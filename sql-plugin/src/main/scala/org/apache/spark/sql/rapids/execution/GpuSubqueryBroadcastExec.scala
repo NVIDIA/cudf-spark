@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2024, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,7 +25,7 @@ import scala.concurrent.duration.Duration
 import com.nvidia.spark.rapids.{BaseExprMeta, DataFromReplacementRule, GpuColumnarToRowExec, GpuExec, GpuMetric, RapidsConf, RapidsMeta, SparkPlanMeta, TargetSize}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.GpuMetric.{COLLECT_TIME, DESCRIPTION_COLLECT_TIME, ESSENTIAL_LEVEL}
-import com.nvidia.spark.rapids.shims.{ShimBaseSubqueryExec, ShimUnaryExecNode}
+import com.nvidia.spark.rapids.shims.{ShimBaseSubqueryExec, ShimUnaryExecNode, SparkShimImpl}
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
@@ -115,13 +115,13 @@ abstract class GpuSubqueryBroadcastMetaBase(
     //          +- [GPU overrides of executed subquery...]
     //
     case a: AdaptiveSparkPlanExec =>
-      _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getAdaptiveInputPlan(a) match {
+      SparkShimImpl.getAdaptiveInputPlan(a) match {
         case ex: BroadcastExchangeExec =>
           val exMeta = new GpuBroadcastMeta(ex, conf, p, r)
           exMeta.tagForGpu()
           if (exMeta.canThisBeReplaced) {
             broadcastBuilder = () =>
-              _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.columnarAdaptivePlan(
+              SparkShimImpl.columnarAdaptivePlan(
                 a, TargetSize(conf.gpuTargetBatchSizeBytes))
           } else {
             willNotWorkOnGpu("underlying BroadcastExchange can not run in the GPU.")
@@ -148,7 +148,7 @@ abstract class GpuSubqueryBroadcastMetaBase(
       case b: BroadcastExchangeExec =>
         b.mode
       case a: AdaptiveSparkPlanExec =>
-        _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.getAdaptiveInputPlan(a) match {
+        SparkShimImpl.getAdaptiveInputPlan(a) match {
           case b: BroadcastExchangeExec =>
             b.mode
           case _ =>
@@ -214,9 +214,8 @@ case class GpuSubqueryBroadcastExec(
       SQLExecution.withExecutionId(session, executionId) {
         val broadcastBatch = child.executeBroadcast[Any]()
         val result: Array[InternalRow] = broadcastBatch.value match {
-          case b: SerializeConcatHostBuffersDeserializeBatch => projectSerializedBatchToRows(b)
-          case b if _root_.com.nvidia.spark.rapids.CurrentSparkShim.get
-              .isEmptyRelation(b) => Array.empty
+          case b: SerializeConcatHostBuffersDeserializeBatch =>  projectSerializedBatchToRows(b)
+          case b if SparkShimImpl.isEmptyRelation(b) => Array.empty
           case b => throw new IllegalStateException(s"Unexpected broadcast type: ${b.getClass}")
         }
 

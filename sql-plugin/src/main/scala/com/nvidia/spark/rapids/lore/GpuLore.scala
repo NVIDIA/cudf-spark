@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,8 +23,9 @@ import scala.collection.mutable
 import scala.reflect.ClassTag
 import scala.util.control.NonFatal
 
-import com.nvidia.spark.rapids.{CurrentSparkShim, GpuColumnarToRowExec, GpuDataWritingCommandExec, GpuExec, RapidsConf, ShimLoader}
+import com.nvidia.spark.rapids.{GpuColumnarToRowExec, GpuDataWritingCommandExec, GpuExec, RapidsConf, ShimLoader}
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.shims.SparkShimImpl
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
 
@@ -146,8 +147,7 @@ object GpuLore extends Logging {
       broadcastHadoopConf: Broadcast[SerializableConfiguration]): GpuExec = {
     // Load children
     val newChildren = rootExec.children.zipWithIndex.map { case (plan, idx) =>
-      val newChild = CurrentSparkShim.get.newGpuLoreReplayExec(
-        idx, rootPath.toString, broadcastHadoopConf)
+      val newChild = GpuLoreReplayExec(idx, rootPath.toString, broadcastHadoopConf)
       plan match {
         case b: GpuBroadcastExchangeExec =>
           b.withNewChildren(Seq(newChild))
@@ -172,8 +172,7 @@ object GpuLore extends Logging {
     val innerPlan = sub.plan.child
 
     if (innerPlan.isInstanceOf[GpuExec]) {
-      var newChild: SparkPlan = CurrentSparkShim.get.newGpuLoreReplayExec(
-        id, rootPath.toString, hadoopConf)
+      var newChild: SparkPlan = GpuLoreReplayExec(id, rootPath.toString, hadoopConf)
 
       if (!innerPlan.supportsColumnar) {
         newChild = GpuColumnarToRowExec(newChild)
@@ -372,7 +371,7 @@ object GpuLore extends Logging {
    * Disable LORE dumping when the current shim enables GPU WriteFiles.
    */
   private def checkGpuDataWritingCommandSupportedVersion(): Unit = {
-    if (_root_.com.nvidia.spark.rapids.CurrentSparkShim.get.hasGpuWriteFiles) {
+    if (SparkShimImpl.hasGpuWriteFiles) {
       val currentShimVersion = ShimLoader.getShimVersion
       throw new UnsupportedOperationException(
         s"LORE dump is not supported for GpuDataWritingCommandExec on Spark" +

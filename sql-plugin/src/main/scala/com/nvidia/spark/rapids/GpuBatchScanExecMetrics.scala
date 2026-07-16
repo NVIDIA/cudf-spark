@@ -17,6 +17,7 @@
 package com.nvidia.spark.rapids
 
 import org.apache.spark.sql.connector.read.Scan
+import org.apache.spark.sql.execution.metric.SQLMetrics
 
 trait GpuBatchScanExecMetrics extends GpuExec {
   import GpuMetric._
@@ -47,8 +48,7 @@ trait GpuBatchScanExecMetrics extends GpuExec {
 
   private lazy val scanCustomMetrics: Map[String, GpuMetric] = {
     scan.supportedCustomMetrics().map { metric =>
-      metric.name() -> WrappedGpuMetric(
-        CurrentSparkShim.get.createV2CustomSqlMetric(sparkContext, metric))
+      metric.name() -> WrappedGpuMetric(SQLMetrics.createV2CustomMetric(sparkContext, metric))
     }.toMap
   }
 }

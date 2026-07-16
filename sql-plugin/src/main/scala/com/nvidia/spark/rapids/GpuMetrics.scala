@@ -24,7 +24,7 @@ import org.apache.spark.{SparkContext, TaskContext}
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.expressions.Expression
-import org.apache.spark.sql.execution.metric.SQLMetric
+import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
 import org.apache.spark.sql.rapids.GpuTaskMetrics
 
 /**
@@ -71,19 +71,19 @@ class GpuMetricFactory(metricsConf: MetricsLevel, context: SparkContext) {
   }
 
   def create(level: MetricsLevel, name: String): GpuMetric =
-    createInternal(level, CurrentSparkShim.get.createSqlMetric(context, name))
+    createInternal(level, SQLMetrics.createMetric(context, name))
 
   def createNanoTiming(level: MetricsLevel, name: String): GpuMetric =
-    createInternal(level, CurrentSparkShim.get.createNanoTimingSqlMetric(context, name))
+    createInternal(level, SQLMetrics.createNanoTimingMetric(context, name))
 
   def createSize(level: MetricsLevel, name: String): GpuMetric =
-    createInternal(level, CurrentSparkShim.get.createSizeSqlMetric(context, name))
+    createInternal(level, SQLMetrics.createSizeMetric(context, name))
 
   def createAverage(level: MetricsLevel, name: String): GpuMetric =
-    createInternal(level, CurrentSparkShim.get.createAverageSqlMetric(context, name))
+    createInternal(level, SQLMetrics.createAverageMetric(context, name))
 
   def createTiming(level: MetricsLevel, name: String): GpuMetric =
-    createInternal(level, CurrentSparkShim.get.createTimingSqlMetric(context, name))
+    createInternal(level, SQLMetrics.createTimingMetric(context, name))
 }
 
 object GpuMetric extends Logging {
@@ -519,10 +519,8 @@ final case class WrappedGpuMetric(sqlMetric: SQLMetric, withMetricsExclSemWait: 
 
   if (withMetricsExclSemWait) {
     if (GpuMetric.isTimeMetric(this)) {
-      companionGpuMetric = Some(WrappedGpuMetric.apply(
-        CurrentSparkShim.get.createNanoTimingSqlMetric(
-          SparkSession.getActiveSession.get.sparkContext,
-          sqlMetric.name.get + " (excl. SemWait)")))
+      companionGpuMetric = Some(WrappedGpuMetric.apply(SQLMetrics.createNanoTimingMetric(
+        SparkSession.getActiveSession.get.sparkContext, sqlMetric.name.get + " (excl. SemWait)")))
     }
   }
 

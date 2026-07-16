@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@ import scala.concurrent.ExecutionContext
 import com.nvidia.spark.rapids.{GpuExec, GpuMetric}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.GpuMetric.{COLLECT_TIME, DESCRIPTION_COLLECT_TIME, ESSENTIAL_LEVEL, NUM_OUTPUT_ROWS}
-import com.nvidia.spark.rapids.shims.{ShimBroadcastExchangeLike, ShimUnaryExecNode}
+import com.nvidia.spark.rapids.shims.{ShimBroadcastExchangeLike, ShimUnaryExecNode, SparkShimImpl}
 
 import org.apache.spark.SparkException
 import org.apache.spark.broadcast.Broadcast
@@ -64,13 +64,11 @@ case class GpuBroadcastToRowExec(
       val broadcastBatch = child.executeBroadcast[Any]()
       val rows: Array[InternalRow] = broadcastBatch.value match {
         case b: SerializeConcatHostBuffersDeserializeBatch => projectSerializedBatch(b)
-        case b if _root_.com.nvidia.spark.rapids.CurrentSparkShim.get
-            .isEmptyRelation(b) => Array.empty
+        case b if SparkShimImpl.isEmptyRelation(b) => Array.empty
         case b => throw new IllegalStateException(s"Unexpected broadcast type: ${b.getClass}")
       }
 
-      val result = _root_.com.nvidia.spark.rapids.CurrentSparkShim.get
-        .broadcastModeTransform(broadcastMode, rows)
+      val result = SparkShimImpl.broadcastModeTransform(broadcastMode, rows)
       val broadcasted = sparkContext.broadcast(result)
       promise.trySuccess(broadcasted)
       broadcasted

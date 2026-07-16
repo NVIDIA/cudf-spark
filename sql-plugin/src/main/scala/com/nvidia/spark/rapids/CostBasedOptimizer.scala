@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids
 
 import scala.collection.mutable.ListBuffer
 
-import com.nvidia.spark.rapids.shims.{GlobalLimitShims, QueryStageRowCountShims}
+import com.nvidia.spark.rapids.shims.{GlobalLimitShims, QueryStageRowCountShims, SparkShimImpl}
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.expressions.{Alias, AttributeReference, Expression, GetStructField, WindowFrame, WindowSpecDefinition}
@@ -262,7 +262,7 @@ class CostBasedOptimizer extends Optimizer with Logging {
   private def isExchangeOp(plan: SparkPlanMeta[_]): Boolean = {
     // if the child query stage already executed on GPU then we need to keep the
     // next operator on GPU in these cases
-    _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.isExchangeOp(plan)
+    SparkShimImpl.isExchangeOp(plan)
   }
 }
 

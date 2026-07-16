@@ -19,7 +19,7 @@ package com.nvidia.spark.rapids
 import java.io.{File, FileOutputStream}
 
 import ai.rapids.cudf.DType
-import com.nvidia.spark.rapids.shims.GpuTypeShims
+import com.nvidia.spark.rapids.shims.{CastCheckShims, GpuTypeShims}
 
 import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression, UnaryExpression, WindowSpecDefinition}
 import org.apache.spark.sql.types._
@@ -1297,20 +1297,19 @@ class CastChecks extends ExprChecks {
 
   // When updating these please check child classes too
   import TypeSig._
-  private def castShims: SparkShims = CurrentSparkShim.get
   val nullChecks: TypeSig = integral + fp + BOOLEAN + TIMESTAMP + DATE + STRING +
     NULL + DECIMAL_128
   val sparkNullSig: TypeSig = all
 
   def booleanChecks: TypeSig = integral + fp + BOOLEAN + STRING + DECIMAL_128 +
-    castShims.castAdditionalTypesBooleanCanCastTo
+    CastCheckShims.additionalTypesBooleanCanCastTo
   def sparkBooleanSig: TypeSig = cpuNumeric + BOOLEAN + STRING +
-    castShims.castAdditionalTypesBooleanCanCastTo
+    CastCheckShims.additionalTypesBooleanCanCastTo
 
   val integralChecks: TypeSig = gpuNumeric + BOOLEAN + TIMESTAMP + STRING +
-      BINARY + castShims.castAdditionalTypesIntegralCanCastTo
+      BINARY + CastCheckShims.additionalTypesIntegralCanCastTo
   val sparkIntegralSig: TypeSig = cpuNumeric + BOOLEAN + TIMESTAMP + STRING +
-      BINARY + castShims.castAdditionalTypesIntegralCanCastTo
+      BINARY + CastCheckShims.additionalTypesIntegralCanCastTo
 
   val fpToStringPsNote: String = s"Conversion may produce different results and requires " +
       s"${RapidsConf.ENABLE_CAST_FLOAT_TO_STRING} to be true."
@@ -1319,19 +1318,19 @@ class CastChecks extends ExprChecks {
   val sparkFpSig: TypeSig = cpuNumeric + BOOLEAN + TIMESTAMP + STRING
 
   def dateChecks: TypeSig = TIMESTAMP + DATE + STRING +
-    castShims.castAdditionalTypesDateCanCastTo
+    CastCheckShims.additionalTypesDateCanCastTo
   def sparkDateSig: TypeSig = DECIMAL_128 + TIMESTAMP + DATE + STRING +
-    castShims.castAdditionalTypesDateCanCastTo
+    CastCheckShims.additionalTypesDateCanCastTo
 
   def timestampChecks: TypeSig = integral + fp + TIMESTAMP + DATE + STRING +
-    castShims.castAdditionalTypesTimestampCanCastTo
+    CastCheckShims.additionalTypesTimestampCanCastTo
   def sparkTimestampSig: TypeSig = cpuNumeric + TIMESTAMP + DATE + STRING +
-    castShims.castAdditionalTypesTimestampCanCastTo
+    CastCheckShims.additionalTypesTimestampCanCastTo
 
   val stringChecks: TypeSig = gpuNumeric + BOOLEAN + TIMESTAMP + DATE + STRING +
-      BINARY + castShims.castAdditionalTypesStringCanCastTo
+      BINARY + CastCheckShims.additionalTypesStringCanCastTo
   val sparkStringSig: TypeSig = cpuNumeric + BOOLEAN + TIMESTAMP + DATE + CALENDAR + STRING +
-      BINARY + castShims.castAdditionalTypesStringCanCastTo
+      BINARY + CastCheckShims.additionalTypesStringCanCastTo
 
   val binaryChecks: TypeSig = STRING + BINARY
   val sparkBinarySig: TypeSig = STRING + BINARY
@@ -1368,11 +1367,11 @@ class CastChecks extends ExprChecks {
   val udtChecks: TypeSig = none
   val sparkUdtSig: TypeSig = STRING + UDT
 
-  val daytimeChecks: TypeSig = castShims.castTypesDayTimeCanCastTo
-  val sparkDaytimeChecks: TypeSig = castShims.castTypesDayTimeCanCastToOnSpark
+  val daytimeChecks: TypeSig = CastCheckShims.typesDayTimeCanCastTo
+  val sparkDaytimeChecks: TypeSig = CastCheckShims.typesDayTimeCanCastToOnSpark
 
-  val yearmonthChecks: TypeSig = castShims.castTypesYearMonthCanCastTo
-  val sparkYearmonthChecks: TypeSig = castShims.castTypesYearMonthCanCastToOnSpark
+  val yearmonthChecks: TypeSig = CastCheckShims.typesYearMonthCanCastTo
+  val sparkYearmonthChecks: TypeSig = CastCheckShims.typesYearMonthCanCastToOnSpark
 
   private[this] def getChecksAndSigs(from: DataType): (TypeSig, TypeSig) = from match {
     case NullType => (nullChecks, sparkNullSig)

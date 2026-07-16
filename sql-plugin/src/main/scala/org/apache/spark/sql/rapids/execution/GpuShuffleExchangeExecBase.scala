@@ -24,7 +24,7 @@ import com.nvidia.spark.rapids.GpuMetric.{DEBUG_LEVEL, ESSENTIAL_LEVEL, MODERATE
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{splitSpillableInHalfByRows, withRetry}
 import com.nvidia.spark.rapids.SpillPriorities.ACTIVE_ON_DECK_PRIORITY
-import com.nvidia.spark.rapids.shims.{GpuHashPartitioning, GpuRangePartitioning, ShimUnaryExecNode}
+import com.nvidia.spark.rapids.shims.{GpuHashPartitioning, GpuRangePartitioning, ShimUnaryExecNode, ShuffleOriginUtil, SparkShimImpl}
 
 import org.apache.spark.{MapOutputStatistics, ShuffleDependency}
 import org.apache.spark.rapids.shims.GpuShuffleExchangeExec
@@ -87,8 +87,7 @@ abstract class GpuShuffleMetaBase(
 
   override def tagPlanForGpu(): Unit = {
 
-    if (!_root_.com.nvidia.spark.rapids.CurrentSparkShim.get
-        .isSupportedShuffleOrigin(shuffle.shuffleOrigin)) {
+    if (!ShuffleOriginUtil.isSupported(shuffle.shuffleOrigin)) {
       willNotWorkOnGpu(s"${shuffle.shuffleOrigin} not supported on GPU")
     }
 
@@ -125,7 +124,7 @@ abstract class GpuShuffleMetaBase(
     val newChild = childPlans.head.wrapped match {
       case adaptive: AdaptiveSparkPlanExec =>
         val goal = TargetSize(conf.gpuTargetBatchSizeBytes)
-        _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.columnarAdaptivePlan(adaptive, goal)
+        SparkShimImpl.columnarAdaptivePlan(adaptive, goal)
       case _ => childPlans.head.convertIfNeeded()
     }
     val gpuShuffle = convertShuffleToGpu(newChild)
@@ -278,9 +277,8 @@ abstract class GpuShuffleExchangeExecBase(
   protected override def doExecute(): RDD[InternalRow] =
     throw new IllegalStateException(s"Row-based execution should not occur for $this")
 
-  override def internalDoExecuteColumnar(): RDD[ColumnarBatch] =
-    _root_.com.nvidia.spark.rapids.CurrentSparkShim.get
-      .attachTreeIfSupported(this, "execute") {
+  override def internalDoExecuteColumnar(): RDD[ColumnarBatch] = SparkShimImpl
+    .attachTreeIfSupported(this, "execute") {
       // Returns the same ShuffleRowRDD if this plan is used by multiple plans.
       if (cachedShuffleRDD == null) {
         cachedShuffleRDD = new ShuffledBatchRDD(shuffleDependencyColumnar, metrics ++ readMetrics)

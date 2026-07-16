@@ -18,6 +18,7 @@ package org.apache.spark.sql.rapids.shims
 import java.io.{FileNotFoundException, IOException}
 
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
+import com.nvidia.spark.rapids.shims.SparkShimImpl
 import org.apache.parquet.io.ParquetDecodingException
 
 import org.apache.spark.{Partition => RDDPartition, SparkUpgradeException, TaskContext}
@@ -62,8 +63,8 @@ class GpuFileScanRDD(
         inputMetrics.setBytesRead(existingBytesRead + getBytesReadCallback())
       }
 
-      private[this] val files = _root_.com.nvidia.spark.rapids.CurrentSparkShim.get
-        .getPartitionFiles(split.asInstanceOf[FilePartition]).toIterator
+      private[this] val files = SparkShimImpl.getPartitionFiles(
+        split.asInstanceOf[FilePartition]).toIterator
       private[this] var currentFile: PartitionedFile = null
       private[this] var currentIterator: Iterator[Object] = null
 

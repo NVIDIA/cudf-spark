@@ -24,7 +24,7 @@ import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.jni.{Arithmetic, ExceptionWithRowIndex}
-import com.nvidia.spark.rapids.shims.{DecimalMultiply128, GpuTypeShims, NullIntolerantShim, ShimExpression}
+import com.nvidia.spark.rapids.shims.{DecimalMultiply128, GpuTypeShims, NullIntolerantShim, ShimExpression, SparkShimImpl}
 
 import org.apache.spark.sql.catalyst.analysis.{TypeCheckResult, TypeCoercion}
 import org.apache.spark.sql.catalyst.expressions.{ComplexTypeMergingExpression, ExpectsInputTypes, Expression}
@@ -1145,7 +1145,7 @@ abstract class GpuIntegralDivideParent(
   override def inputType: AbstractDataType = TypeCollection(IntegralType, DecimalType)
 
   lazy val failOnOverflow: Boolean =
-    _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.shouldFailDivOverflow
+    SparkShimImpl.shouldFailDivOverflow
 
   override def checkDivideOverflow: Boolean = left.dataType match {
     case LongType if failOnOverflow => true

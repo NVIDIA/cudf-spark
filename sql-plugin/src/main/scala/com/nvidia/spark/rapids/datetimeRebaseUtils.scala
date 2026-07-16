@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2024, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import java.util.TimeZone
 
 import ai.rapids.cudf.{ColumnView, DType, Scalar}
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.shims.SparkShimImpl
 
 import org.apache.spark.sql.catalyst.util.{DateTimeUtils, RebaseDateTime}
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
@@ -166,9 +167,9 @@ object DateTimeRebaseUtils {
 
   def newRebaseExceptionInRead(format: String): Exception = {
     val config = if (format == "Parquet") {
-      _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.parquetRebaseReadKey
+      SparkShimImpl.parquetRebaseReadKey
     } else if (format == "Avro") {
-      _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.avroRebaseReadKey
+      SparkShimImpl.avroRebaseReadKey
     } else {
       throw new IllegalStateException("unrecognized format " + format)
     }

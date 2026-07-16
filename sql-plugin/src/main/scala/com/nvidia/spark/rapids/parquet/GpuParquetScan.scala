@@ -44,7 +44,7 @@ import com.nvidia.spark.rapids.jni.{DateTimeRebase, ParquetFooter, RmmSpark}
 import com.nvidia.spark.rapids.jni.fileio.{RapidsFileIO, RapidsInputFile}
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile.CopyRange
 import com.nvidia.spark.rapids.parquet.ParquetPartitionReader.{LocalCopy, PARQUET_MAGIC}
-import com.nvidia.spark.rapids.shims.{ColumnDefaultValuesShims, GpuParquetCrypto, GpuTypeShims, ShimFilePartitionReaderFactory}
+import com.nvidia.spark.rapids.shims.{ColumnDefaultValuesShims, GpuParquetCrypto, GpuTypeShims, ShimFilePartitionReaderFactory, SparkShimImpl}
 import com.nvidia.spark.rapids.shims.parquet.{GpuParquetUtilsShims, ParquetLegacyNanoAsLongShims, ParquetSchemaClipShims, ParquetStringPredShims}
 import org.apache.commons.io.output.{CountingOutputStream, NullOutputStream}
 import org.apache.hadoop.conf.Configuration
@@ -504,10 +504,8 @@ protected case class GpuParquetFileFilterHandler(
   // flag is renamed to 'xxxxStringPredicate' and specified by another config.
   private val pushDownStringPredicate = ParquetStringPredShims.pushDown(sqlConf)
   private val pushDownInFilterThreshold = sqlConf.parquetFilterPushDownInFilterThreshold
-  private val datetimeRebaseMode = _root_.com.nvidia.spark.rapids.CurrentSparkShim.get
-    .parquetRebaseRead(sqlConf)
-  private val int96RebaseMode = _root_.com.nvidia.spark.rapids.CurrentSparkShim.get
-    .int96ParquetRebaseRead(sqlConf)
+  private val datetimeRebaseMode = SparkShimImpl.parquetRebaseRead(sqlConf)
+  private val int96RebaseMode = SparkShimImpl.int96ParquetRebaseRead(sqlConf)
   private val readUseFieldId = ParquetSchemaClipShims.useFieldId(sqlConf)
   private val ignoreMissingParquetFieldId = ParquetSchemaClipShims.ignoreMissingIds(sqlConf)
 
@@ -761,10 +759,9 @@ protected case class GpuParquetFileFilterHandler(
         readDataSchema)
 
       val pushedFilters = if (enableParquetFilterPushDown) {
-        val parquetFilters = _root_.com.nvidia.spark.rapids.CurrentSparkShim.get
-          .getParquetFilters(fileSchema, pushDownDate, pushDownTimestamp, pushDownDecimal,
-            pushDownStringPredicate, pushDownInFilterThreshold, isCaseSensitive,
-            footer.getFileMetaData.getKeyValueMetaData.get, datetimeRebaseMode)
+        val parquetFilters = SparkShimImpl.getParquetFilters(fileSchema, pushDownDate,
+          pushDownTimestamp, pushDownDecimal, pushDownStringPredicate, pushDownInFilterThreshold,
+          isCaseSensitive, footer.getFileMetaData.getKeyValueMetaData.get, datetimeRebaseMode)
         filters.flatMap(parquetFilters.createFilter).reduceOption(FilterApi.and)
       } else {
         None

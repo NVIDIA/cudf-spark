@@ -331,15 +331,21 @@ function copy_unshimmed_from_spark_shared() {
 
   : > "$raw_copy_list"
   write_root_safe_spark_shared_classes
-  write_default_unshimmed_spark_shared_classes
-  cat "$DEFAULT_UNSHIMMED_SPARK_SHARED_TXT" >> "$raw_copy_list"
+  if [[ "${UNSHIM_PROMOTE_DEFAULT_SPARK_SHARED_CLASSES:-0}" == "1" ||
+        "${UNSHIM_PROMOTE_DEFAULT_SPARK_SHARED_CLASSES:-0}" == "true" ]]; then
+    write_default_unshimmed_spark_shared_classes
+    cat "$DEFAULT_UNSHIMMED_SPARK_SHARED_TXT" >> "$raw_copy_list"
+  else
+    echo "$((++STEP))/ default spark-shared class promotion disabled"
+    : > "$DEFAULT_UNSHIMMED_SPARK_SHARED_TXT"
+  fi
   append_matching_spark_shared_patterns \
     "${UNSHIMMED_COMMON_FROM_SINGLE_SHIM_TXT:-}" "$raw_copy_list"
 
   sort -u "$raw_copy_list" > "$sorted_copy_list"
   filter_keep_in_spark_shared "$sorted_copy_list" "$UNSHIMMED_FROM_SPARK_SHARED_COPY_LIST"
   if [[ -s "$UNSHIMMED_FROM_SPARK_SHARED_COPY_LIST" ]]; then
-    echo "Promoting root-layout files from spark-shared by default"
+    echo "Promoting root-layout files from spark-shared"
     rsync --files-from="$UNSHIMMED_FROM_SPARK_SHARED_COPY_LIST" \
       ./parallel-world/spark-shared ./parallel-world
   fi

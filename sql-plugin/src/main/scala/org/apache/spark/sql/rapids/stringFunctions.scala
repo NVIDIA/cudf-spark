@@ -34,7 +34,7 @@ import com.nvidia.spark.rapids.jni.CharsetDecode
 import com.nvidia.spark.rapids.jni.GpuSubstringIndexUtils
 import com.nvidia.spark.rapids.jni.NumberConverter
 import com.nvidia.spark.rapids.jni.RegexRewriteUtils
-import com.nvidia.spark.rapids.shims.{NullIntolerantShim, ShimExpression}
+import com.nvidia.spark.rapids.shims.{NullIntolerantShim, ShimExpression, SparkShimImpl}
 
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.errors.ConvUtils
@@ -1468,7 +1468,7 @@ case class GpuRegExpReplace(
       case _ =>
         val prog = new RegexProgram(cudfRegexPattern,
           EnumSet.of(RegexFlag.EXT_NEWLINE), CaptureGroups.NON_CAPTURE)
-        if (_root_.com.nvidia.spark.rapids.CurrentSparkShim.get.reproduceEmptyStringBug &&
+        if (SparkShimImpl.reproduceEmptyStringBug &&
             GpuRegExpUtils.isEmptyRepetition(javaRegexpPattern)) {
           val isEmpty = withResource(strExpr.getBase.getCharLengths) { len =>
             withResource(Scalar.fromInt(0)) { zero =>
@@ -1512,7 +1512,7 @@ case class GpuRegExpReplaceWithBackref(
 
   override protected def doColumnar(input: GpuColumnVector): ColumnVector = {
     val prog = new RegexProgram(cudfRegexPattern, EnumSet.of(RegexFlag.EXT_NEWLINE))
-    if (_root_.com.nvidia.spark.rapids.CurrentSparkShim.get.reproduceEmptyStringBug &&
+    if (SparkShimImpl.reproduceEmptyStringBug &&
         GpuRegExpUtils.isEmptyRepetition(javaRegexpPattern)) {
       val isEmpty = withResource(input.getBase.getCharLengths) { len =>
         withResource(Scalar.fromInt(0)) { zero =>

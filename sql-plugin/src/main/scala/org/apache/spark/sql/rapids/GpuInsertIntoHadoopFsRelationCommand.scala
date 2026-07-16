@@ -19,6 +19,7 @@ package org.apache.spark.sql.rapids
 import java.io.IOException
 
 import com.nvidia.spark.rapids.{ColumnarFileFormat, GpuDataWritingCommand, RapidsConf}
+import com.nvidia.spark.rapids.shims.SparkShimImpl
 import org.apache.hadoop.fs.{FileSystem, Path}
 
 import org.apache.spark.internal.io.FileCommitProtocol
@@ -104,7 +105,7 @@ case class GpuInsertIntoHadoopFsRelationCommand(
     // When partitions are tracked by the catalog, compute all custom partition locations that
     // may be relevant to the insertion job.
     if (partitionsTrackedByCatalog) {
-      matchingPartitions = _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.listPartitions(
+      matchingPartitions = SparkShimImpl.listPartitions(
         sparkSession,
         catalogTable.get.identifier,
         Some(staticPartitions),

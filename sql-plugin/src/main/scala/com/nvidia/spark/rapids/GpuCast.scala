@@ -25,7 +25,7 @@ import ai.rapids.cudf.{BinaryOp, CaptureGroups, ColumnVector, ColumnView, DType,
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.jni.{Arithmetic, CastException, CastStrings, DecimalUtils, GpuTimeZoneDB, RoundMode}
-import com.nvidia.spark.rapids.shims.{CastTimeToIntShim, NullIntolerantShim}
+import com.nvidia.spark.rapids.shims.{AnsiUtil, CastTimeToIntShim, GpuCastShims, GpuIntervalUtils, GpuTypeShims, NullIntolerantShim, SparkShimImpl}
 import org.apache.commons.text.StringEscapeUtils
 
 import org.apache.spark.sql.catalyst.analysis.TypeCheckResult
@@ -35,6 +35,7 @@ import org.apache.spark.sql.catalyst.util.DateTimeConstants.MICROS_PER_SECOND
 import org.apache.spark.sql.catalyst.util.DateTimeUtils
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.RoundingErrorUtil
+import org.apache.spark.sql.rapids.shims.{GpuCastToNumberErrorShim, OriginContextShim, RapidsErrorUtils}
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.UTF8String
 
@@ -146,9 +147,8 @@ abstract class CastExprMetaBase[INPUT <: UnaryLike[Expression] with TimeZoneAwar
           willNotWorkOnGpu("Casting strings to timestamps is disabled, please set" +
             s" ${RapidsConf.ENABLE_CAST_STRING_TO_TIMESTAMP} to true.")
         }
-      case (StringType, dt: DecimalType) =>
-        if (dt.scale < 0 && !_root_.com.nvidia.spark.rapids.CurrentSparkShim.get
-            .isCastingStringToNegDecimalScaleSupported) {
+      case (StringType, dt:DecimalType) =>
+        if (dt.scale < 0 && !SparkShimImpl.isCastingStringToNegDecimalScaleSupported) {
           willNotWorkOnGpu("RAPIDS doesn't support casting string to decimal for " +
               "negative scale decimal in this version of Spark because of SPARK-37451")
         }
@@ -486,19 +486,19 @@ object GpuCast {
 
       case (FloatType | DoubleType, TimestampType) =>
         // Spark casting to timestamp from double assumes value is in microseconds
-        if (ansiMode && CurrentSparkShim.get.supportsAnsiCastFloatToTimestamp()) {
+        if (ansiMode && AnsiUtil.supportsAnsiCastFloatToTimestamp()) {
           // We are going through a util class because Spark 3.3.0+ throws an
           // exception if the float value is nan, +/- inf or out-of-range value,
           // where previously it didn't
-          CurrentSparkShim.get.castFloatToTimestampAnsi(input, toDataType)
+          AnsiUtil.castFloatToTimestampAnsi(input, toDataType)
         } else {
           // non-Ansi mode, convert nan/inf to null
           withResource(Scalar.fromInt(1000000)) { microsPerSec =>
             withResource(input.nansToNulls()) { inputWithNansToNull =>
               withResource(FloatUtils.infinityToNulls(inputWithNansToNull)) {
                 inputWithoutNanAndInfinity =>
-                  if (fromDataType == FloatType && _root_.com.nvidia.spark.rapids
-                      .CurrentSparkShim.get.hasCastFloatTimestampUpcast) {
+                  if (fromDataType == FloatType &&
+                      SparkShimImpl.hasCastFloatTimestampUpcast) {
                     withResource(inputWithoutNanAndInfinity.castTo(DType.FLOAT64)) { doubles =>
                       withResource(doubles.mul(microsPerSec, DType.INT64)) {
                         inputTimesMicrosCv =>
@@ -588,47 +588,45 @@ object GpuCast {
       case (from: MapType, to: MapType) =>
         castMapToMap(from, to, input, options)
 
-      case (dayTime: DataType, StringType)
-          if CurrentSparkShim.get.isSupportedDayTimeType(dayTime) =>
-        CurrentSparkShim.get.toDayTimeIntervalString(input, dayTime)
+      case (dayTime: DataType, StringType) if GpuTypeShims.isSupportedDayTimeType(dayTime) =>
+        GpuIntervalUtils.toDayTimeIntervalString(input, dayTime)
 
-      case (StringType, dayTime: DataType)
-          if CurrentSparkShim.get.isSupportedDayTimeType(dayTime) =>
-        CurrentSparkShim.get.castStringToDayTimeIntervalWithThrow(input, dayTime)
+      case (StringType, dayTime: DataType) if GpuTypeShims.isSupportedDayTimeType(dayTime) =>
+        GpuIntervalUtils.castStringToDayTimeIntervalWithThrow(input, dayTime)
 
       // cast(`day time interval` as integral)
-      case (dt: DataType, _: LongType) if CurrentSparkShim.get.isSupportedDayTimeType(dt) =>
-        CurrentSparkShim.get.dayTimeIntervalToLong(input, dt)
-      case (dt: DataType, _: IntegerType) if CurrentSparkShim.get.isSupportedDayTimeType(dt) =>
-        CurrentSparkShim.get.dayTimeIntervalToInt(input, dt)
-      case (dt: DataType, _: ShortType) if CurrentSparkShim.get.isSupportedDayTimeType(dt) =>
-        CurrentSparkShim.get.dayTimeIntervalToShort(input, dt)
-      case (dt: DataType, _: ByteType) if CurrentSparkShim.get.isSupportedDayTimeType(dt) =>
-        CurrentSparkShim.get.dayTimeIntervalToByte(input, dt)
+      case (dt: DataType, _: LongType) if GpuTypeShims.isSupportedDayTimeType(dt) =>
+        GpuIntervalUtils.dayTimeIntervalToLong(input, dt)
+      case (dt: DataType, _: IntegerType) if GpuTypeShims.isSupportedDayTimeType(dt) =>
+        GpuIntervalUtils.dayTimeIntervalToInt(input, dt)
+      case (dt: DataType, _: ShortType) if GpuTypeShims.isSupportedDayTimeType(dt) =>
+        GpuIntervalUtils.dayTimeIntervalToShort(input, dt)
+      case (dt: DataType, _: ByteType) if GpuTypeShims.isSupportedDayTimeType(dt) =>
+        GpuIntervalUtils.dayTimeIntervalToByte(input, dt)
 
       // cast(integral as `day time interval`)
-      case (_: LongType, dt: DataType) if CurrentSparkShim.get.isSupportedDayTimeType(dt) =>
-        CurrentSparkShim.get.longToDayTimeInterval(input, dt)
+      case (_: LongType, dt: DataType) if GpuTypeShims.isSupportedDayTimeType(dt) =>
+        GpuIntervalUtils.longToDayTimeInterval(input, dt)
       case (_: IntegerType | ShortType | ByteType, dt: DataType)
-        if CurrentSparkShim.get.isSupportedDayTimeType(dt) =>
-        CurrentSparkShim.get.intToDayTimeInterval(input, dt)
+        if GpuTypeShims.isSupportedDayTimeType(dt) =>
+        GpuIntervalUtils.intToDayTimeInterval(input, dt)
 
       // cast(`year month interval` as integral)
-      case (ym: DataType, _: LongType) if CurrentSparkShim.get.isSupportedYearMonthType(ym) =>
-        CurrentSparkShim.get.yearMonthIntervalToLong(input, ym)
-      case (ym: DataType, _: IntegerType) if CurrentSparkShim.get.isSupportedYearMonthType(ym) =>
-        CurrentSparkShim.get.yearMonthIntervalToInt(input, ym)
-      case (ym: DataType, _: ShortType) if CurrentSparkShim.get.isSupportedYearMonthType(ym) =>
-        CurrentSparkShim.get.yearMonthIntervalToShort(input, ym)
-      case (ym: DataType, _: ByteType) if CurrentSparkShim.get.isSupportedYearMonthType(ym) =>
-        CurrentSparkShim.get.yearMonthIntervalToByte(input, ym)
+      case (ym: DataType, _: LongType) if GpuTypeShims.isSupportedYearMonthType(ym) =>
+        GpuIntervalUtils.yearMonthIntervalToLong(input, ym)
+      case (ym: DataType, _: IntegerType) if GpuTypeShims.isSupportedYearMonthType(ym) =>
+        GpuIntervalUtils.yearMonthIntervalToInt(input, ym)
+      case (ym: DataType, _: ShortType) if GpuTypeShims.isSupportedYearMonthType(ym) =>
+        GpuIntervalUtils.yearMonthIntervalToShort(input, ym)
+      case (ym: DataType, _: ByteType) if GpuTypeShims.isSupportedYearMonthType(ym) =>
+        GpuIntervalUtils.yearMonthIntervalToByte(input, ym)
 
       // cast(integral as `year month interval`)
-      case (_: LongType, ym: DataType) if CurrentSparkShim.get.isSupportedYearMonthType(ym) =>
-        CurrentSparkShim.get.longToYearMonthInterval(input, ym)
+      case (_: LongType, ym: DataType) if GpuTypeShims.isSupportedYearMonthType(ym) =>
+        GpuIntervalUtils.longToYearMonthInterval(input, ym)
       case (_: IntegerType | ShortType | ByteType, ym: DataType)
-        if CurrentSparkShim.get.isSupportedYearMonthType(ym) =>
-        CurrentSparkShim.get.intToYearMonthInterval(input, ym)
+        if GpuTypeShims.isSupportedYearMonthType(ym) =>
+        GpuIntervalUtils.intToYearMonthInterval(input, ym)
       case (TimestampType, DateType) if options.timeZoneId.isDefined =>
         val zoneId = DateTimeUtils.getZoneId(options.timeZoneId.get)
         withResource(GpuTimeZoneDB.fromUtcTimestampToTimestamp(input.asInstanceOf[ColumnVector],
@@ -654,6 +652,7 @@ object GpuCast {
         val s = withResource(input.getScalarElement(c.getRowWithError)) { errScalar =>
           errScalar.getJavaString
         }
+        val ctx = OriginContextShim.queryContext(CurrentOrigin.get)
         // CPU parity: unparseable strings raise CAST_INVALID_INPUT, but
         // parseable values that don't fit the target precision raise
         // NUMERIC_VALUE_OUT_OF_RANGE via cannotChangeDecimalPrecisionError.
@@ -664,10 +663,10 @@ object GpuCast {
         }
         parsed match {
           case Some(d) =>
-            throw CurrentSparkShim.get.cannotChangeDecimalPrecisionError(d, to, CurrentOrigin.get)
+            throw RapidsErrorUtils.cannotChangeDecimalPrecisionError(d, to, ctx)
           case None =>
-            throw CurrentSparkShim.get.invalidInputInCastToNumberError(
-              to, UTF8String.fromString(s), CurrentOrigin.get)
+            throw GpuCastToNumberErrorShim.invalidInputInCastToNumberError(
+              to, UTF8String.fromString(s), ctx)
         }
     }
   }
@@ -680,8 +679,8 @@ object GpuCast {
         val s = withResource(input.getScalarElement(c.getRowWithError)) { errScalar =>
           UTF8String.fromString(errScalar.getJavaString)
         }
-        throw CurrentSparkShim.get.invalidInputInCastToNumberError(
-          to, s, CurrentOrigin.get)
+        throw GpuCastToNumberErrorShim.invalidInputInCastToNumberError(
+          to, s, OriginContextShim.queryContext(CurrentOrigin.get))
     }
   }
 
@@ -708,8 +707,8 @@ object GpuCast {
       withResource(values.isNan()) { valuesIsNan =>
         withResource(valuesIsNan.any()) { anyNan =>
           if (anyNan.isValid && anyNan.getBoolean) {
-            throw CurrentSparkShim.get.arithmeticOverflowError(
-              errorMsg, "", CurrentOrigin.get)
+            throw RapidsErrorUtils.arithmeticOverflowError(
+              errorMsg, "", OriginContextShim.queryContext(CurrentOrigin.get))
           }
         }
       }
@@ -720,8 +719,8 @@ object GpuCast {
           !inclusiveMin && ord.compare(minInput, minValue) <= 0 ||
           inclusiveMax && ord.compare(maxInput, maxValue) > 0 ||
           !inclusiveMax && ord.compare(maxInput, maxValue) >= 0) {
-        throw CurrentSparkShim.get.arithmeticOverflowError(
-          errorMsg, "", CurrentOrigin.get)
+        throw RapidsErrorUtils.arithmeticOverflowError(
+          errorMsg, "", OriginContextShim.queryContext(CurrentOrigin.get))
       }
     }
 
@@ -758,8 +757,7 @@ object GpuCast {
     case TimestampType => castTimestampToString(input)
     case FloatType | DoubleType => CastStrings.fromFloat(input, options.castToJsonString)
     case BinaryType => castBinToString(input, options)
-    case _: DecimalType =>
-      CurrentSparkShim.get.castDecimalToString(input, options.useDecimalPlainString)
+    case _: DecimalType => GpuCastShims.CastDecimalToString(input, options.useDecimalPlainString)
     case StructType(fields) => castStructToString(input, fields, options)
 
     case ArrayType(elementType, _) =>
@@ -1250,9 +1248,9 @@ object GpuCast {
           if (ansiEnabled) {
             withResource(validBools.all()) { isAllBool =>
               if (isAllBool.isValid && !isAllBool.getBoolean) {
-                throw CurrentSparkShim.get.invalidInputSyntaxForBooleanError(
+                throw RapidsErrorUtils.invalidInputSyntaxForBooleanError(
                   UTF8String.fromString("in the input column has atleast one invalid value"),
-                  CurrentOrigin.get)
+                  OriginContextShim.queryContext(CurrentOrigin.get))
               }
             }
           }
@@ -1291,7 +1289,7 @@ object GpuCast {
           if (all.isValid && !all.getBoolean) {
             throw new DateTimeException(
               "One or more values is not a valid date" +
-                CurrentSparkShim.get.originContextSummary(CurrentOrigin.get))
+                OriginContextShim.contextSummary(CurrentOrigin.get))
           }
         }
       }
@@ -1343,7 +1341,7 @@ object GpuCast {
     if (ansiMode && result == null) {
       // All the errors of Spark 32x, 33x, 34x, 35x contains "DateTimeException"
       throw new DateTimeException(
-        "DateTimeException" + CurrentSparkShim.get.originContextSummary(CurrentOrigin.get))
+        "DateTimeException" + OriginContextShim.contextSummary(CurrentOrigin.get))
     } else {
       result
     }
@@ -1383,7 +1381,7 @@ object GpuCast {
       if (ansiMode && result == null) {
         throw new DateTimeException(
           "One or more values is not a valid timestamp" +
-            CurrentSparkShim.get.originContextSummary(CurrentOrigin.get))
+            OriginContextShim.contextSummary(CurrentOrigin.get))
       } else {
         result
       }
@@ -1497,8 +1495,8 @@ object GpuCast {
           case _ => throw new IllegalArgumentException(s"unsupported type $fromType")
         }
       }
-      throw CurrentSparkShim.get.cannotChangeDecimalPrecisionError(
-        Decimal(failedVal), dt, CurrentOrigin.get)
+      throw RapidsErrorUtils.cannotChangeDecimalPrecisionError(
+        Decimal(failedVal), dt, OriginContextShim.queryContext(CurrentOrigin.get))
     }
     converted.result
   }
@@ -1681,21 +1679,21 @@ case class GpuCast(
       case (FloatType | DoubleType, IntegerType) if ansiMode => true
       case (FloatType | DoubleType, LongType) if ansiMode => true
       case (_: LongType, dayTimeIntervalType: DataType)
-        if CurrentSparkShim.get.isSupportedDayTimeType(dayTimeIntervalType) => true
+        if GpuTypeShims.isSupportedDayTimeType(dayTimeIntervalType) => true
       case (_: IntegerType, dayTimeIntervalType: DataType)
-        if CurrentSparkShim.get.isSupportedDayTimeType(dayTimeIntervalType) =>
-        CurrentSparkShim.get.hasSideEffectsIfCastIntToDayTime(dayTimeIntervalType)
+        if GpuTypeShims.isSupportedDayTimeType(dayTimeIntervalType) =>
+        GpuTypeShims.hasSideEffectsIfCastIntToDayTime(dayTimeIntervalType)
       case (dayTimeIntervalType: DataType, _: IntegerType | ShortType | ByteType)
-        if CurrentSparkShim.get.isSupportedDayTimeType(dayTimeIntervalType) => true
+        if GpuTypeShims.isSupportedDayTimeType(dayTimeIntervalType) => true
       case (_: LongType, yearMonthIntervalType: DataType)
-        if CurrentSparkShim.get.isSupportedYearMonthType(yearMonthIntervalType) => true
+        if GpuTypeShims.isSupportedYearMonthType(yearMonthIntervalType) => true
       case (_: IntegerType, yearMonthIntervalType: DataType)
-        if CurrentSparkShim.get.isSupportedYearMonthType(yearMonthIntervalType) =>
-        CurrentSparkShim.get.hasSideEffectsIfCastIntToYearMonth(yearMonthIntervalType)
+        if GpuTypeShims.isSupportedYearMonthType(yearMonthIntervalType) =>
+        GpuTypeShims.hasSideEffectsIfCastIntToYearMonth(yearMonthIntervalType)
       case (yearMonthIntervalType: DataType, _: ShortType | ByteType)
-        if CurrentSparkShim.get.isSupportedYearMonthType(yearMonthIntervalType) => true
+        if GpuTypeShims.isSupportedYearMonthType(yearMonthIntervalType) => true
       case (FloatType | DoubleType, TimestampType) =>
-        CurrentSparkShim.get.hasSideEffectsIfCastFloatToTimestamp
+        GpuTypeShims.hasSideEffectsIfCastFloatToTimestamp
       case _ => false
     }
   }
@@ -1733,8 +1731,8 @@ case class GpuCast(
 
   override def doColumnar(input: GpuColumnVector): ColumnVector = {
     // Wrap the cast in the CPU expression's origin so any ANSI error thrown by
-    // the static `doCast` helpers can pick up the SQL query context through
-    // the active Spark shim.
+    // the static `doCast` helpers picks up the SQL query context via
+    // `OriginContextShim.queryContext(CurrentOrigin.get)` (see error-site helpers in this file).
     CurrentOrigin.withOrigin(origin) {
       doCast(input.getBase, input.dataType(), dataType, options)
     }

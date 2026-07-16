@@ -33,6 +33,7 @@ import com.nvidia.spark.rapids.GpuMetric._
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.io.async._
+import com.nvidia.spark.rapids.shims.SparkShimImpl
 import org.apache.commons.io.IOUtils
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileSystem, Path}
@@ -359,8 +360,7 @@ abstract class MultiFilePartitionReaderFactoryBase(
   override def createColumnarReader(partition: InputPartition): PartitionReader[ColumnarBatch] = {
     assert(partition.isInstanceOf[FilePartition])
     val filePartition = partition.asInstanceOf[FilePartition]
-    val files = _root_.com.nvidia.spark.rapids.CurrentSparkShim.get
-      .getPartitionFiles(filePartition).toArray
+    val files = SparkShimImpl.getPartitionFiles(filePartition).toArray
     val filePaths = files.map(_.filePath.toString())
     val conf = broadcastedConf.value.value
 

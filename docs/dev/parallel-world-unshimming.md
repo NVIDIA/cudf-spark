@@ -185,9 +185,11 @@ need Scala or shim-specific APIs.
 
 ## Packaging Policy
 
-The default packaging flow still requires bitwise identity for classes promoted
-from `spark-shared` to the root layout. The SCC analysis answers a different
-question: whether the promoted class is safe to load from the root layout.
+The packaging flow still requires bitwise identity for classes promoted
+from `spark-shared` to the root layout. Automatic promotion of all eligible
+common classes is opt-in via `UNSHIM_PROMOTE_DEFAULT_SPARK_SHARED_CLASSES=1`;
+the SCC analysis answers a different question: whether the promoted class is
+safe to load from the root layout.
 
 The relevant packaging files are:
 
@@ -198,7 +200,7 @@ The relevant packaging files are:
 * `dist/unshimmed-from-each-spark3xx.txt`: per-shim root artifacts such as
   classifier-package service providers.
 
-The intended steady state is:
+The intended steady state, to be enabled by follow-up source/unshim PRs, is:
 
 * new common classes are unshimmed by default when they are bitwise-identical and
   root-safe;

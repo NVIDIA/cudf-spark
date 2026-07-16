@@ -50,29 +50,10 @@ import org.apache.spark.sql.execution.{CollectLimitExec, GlobalLimitExec, SparkP
 import org.apache.spark.sql.execution.command.{CreateDataSourceTableAsSelectCommand, DataWritingCommand, RunnableCommand}
 import org.apache.spark.sql.execution.datasources.{GpuWriteFilesMeta, WriteFilesExec}
 import org.apache.spark.sql.execution.exchange.ENSURE_REQUIREMENTS
-import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.GpuElementAtMeta
 import org.apache.spark.sql.rapids.GpuV1WriteUtils.GpuEmpty2Null
 
 trait Spark340PlusNonDBShims extends Spark331PlusNonDBShims {
-  override def castAdditionalTypesBooleanCanCastTo: TypeSig = if (SQLConf.get.ansiEnabled) {
-    TypeSig.none
-  } else {
-    TypeSig.TIMESTAMP
-  }
-
-  override def castAdditionalTypesDateCanCastTo: TypeSig = if (SQLConf.get.ansiEnabled) {
-    TypeSig.none
-  } else {
-    TypeSig.BOOLEAN + TypeSig.integral + TypeSig.fp
-  }
-
-  override def castAdditionalTypesTimestampCanCastTo: TypeSig = if (SQLConf.get.ansiEnabled) {
-    TypeSig.none
-  } else {
-    TypeSig.BOOLEAN
-  }
-
   override def isExpressionStateful(expr: Expression): Boolean = expr match {
     case _: InvokeLike | _: ExternalMapToCatalyst => true
     case _ => expr.stateful && !isBridgeCloneSafeStatefulExpression(expr)

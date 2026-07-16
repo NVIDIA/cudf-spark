@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2023, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ import java.util.Objects
 import ai.rapids.cudf.ColumnVector
 import ai.rapids.cudf.ast
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
+import com.nvidia.spark.rapids.shims.SparkShimImpl
 
 import org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, Expression, ExprId, Generator, NamedExpression}
@@ -86,7 +87,7 @@ case class GpuAlias(child: Expression, name: String)(
   }
 
   override def sql: String = {
-    if (_root_.com.nvidia.spark.rapids.CurrentSparkShim.get.hasAliasQuoteFix) {
+    if (SparkShimImpl.hasAliasQuoteFix) {
       val qualifierPrefix =
         if (qualifier.nonEmpty) qualifier.map(quoteIfNeeded).mkString(".") + "." else ""
       s"${child.sql} AS $qualifierPrefix${quoteIfNeeded(name)}"

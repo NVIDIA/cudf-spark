@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package org.apache.spark.sql.rapids.execution
 
 import com.nvidia.spark.rapids.{CloseableBufferedIterator, GpuColumnVector, GpuMetric, GpuSemaphore, NvtxIdWithMetrics, NvtxRegistry, RmmRapidsRetryIterator}
 import com.nvidia.spark.rapids.Arm.closeOnExcept
+import com.nvidia.spark.rapids.shims.SparkShimImpl
 
 import org.apache.spark.{SparkContext, TaskContext}
 import org.apache.spark.broadcast.Broadcast
@@ -49,7 +50,7 @@ object GpuBroadcastHelper {
             spillable.getColumnarBatch()
           }
         }
-      case v if _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.isEmptyRelation(v) =>
+      case v if SparkShimImpl.isEmptyRelation(v) =>
         GpuColumnVector.emptyBatch(broadcastSchema)
       case t =>
         throw new IllegalStateException(s"Invalid broadcast batch received $t")
@@ -73,7 +74,7 @@ object GpuBroadcastHelper {
     broadcastRelation.value match {
       case broadcastBatch: SerializeConcatHostBuffersDeserializeBatch =>
         broadcastBatch.numRows
-      case v if _root_.com.nvidia.spark.rapids.CurrentSparkShim.get.isEmptyRelation(v) => 0
+      case v if SparkShimImpl.isEmptyRelation(v) => 0
       case t =>
         throw new IllegalStateException(s"Invalid broadcast batch received $t")
     }
@@ -90,8 +91,7 @@ object GpuBroadcastHelper {
         hostBatchRDD.map { serializedBatch =>
           serializedBatch.batch.getColumnarBatch()
         }
-      case v if _root_.com.nvidia.spark.rapids.CurrentSparkShim.get
-          .isEmptyRelation(v) => sc.emptyRDD
+      case v if SparkShimImpl.isEmptyRelation(v) => sc.emptyRDD
       case t => throw new IllegalStateException(s"Invalid broadcast batch received $t")
     }
   }

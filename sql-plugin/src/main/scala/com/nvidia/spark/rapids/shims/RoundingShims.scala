@@ -21,48 +21,10 @@ import com.nvidia.spark.rapids._
 
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.rapids._
-import org.apache.spark.sql.types.{DecimalType, DoubleType, FloatType}
+import org.apache.spark.sql.types.DecimalType
 
 object RoundingShims {
   def exprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = Seq(
-    GpuOverrides.expr[BRound](
-      "Round an expression to d decimal places using HALF_EVEN rounding mode",
-      ExprChecks.binaryProject(
-        TypeSig.gpuNumeric, TypeSig.cpuNumeric,
-        ("value", TypeSig.gpuNumeric +
-            TypeSig.psNote(TypeEnum.FLOAT, "result may round slightly differently") +
-            TypeSig.psNote(TypeEnum.DOUBLE, "result may round slightly differently"),
-            TypeSig.cpuNumeric),
-        ("scale", TypeSig.lit(TypeEnum.INT), TypeSig.lit(TypeEnum.INT))),
-      (a, conf, p, r) => new GpuBRoundMeta(a, conf, p, r) {
-        override def tagExprForGpu(): Unit = {
-          a.child.dataType match {
-            case FloatType | DoubleType if !this.conf.isIncompatEnabled =>
-              willNotWorkOnGpu("rounding floating point numbers may be slightly off " +
-                  s"compared to Spark's result, to enable set ${RapidsConf.INCOMPATIBLE_OPS}")
-            case _ => // NOOP
-          }
-        }
-      }),
-    GpuOverrides.expr[Round](
-      "Round an expression to d decimal places using HALF_UP rounding mode",
-      ExprChecks.binaryProject(
-        TypeSig.gpuNumeric, TypeSig.cpuNumeric,
-        ("value", TypeSig.gpuNumeric +
-            TypeSig.psNote(TypeEnum.FLOAT, "result may round slightly differently") +
-            TypeSig.psNote(TypeEnum.DOUBLE, "result may round slightly differently"),
-            TypeSig.cpuNumeric),
-        ("scale", TypeSig.lit(TypeEnum.INT), TypeSig.lit(TypeEnum.INT))),
-      (a, conf, p, r) => new GpuRoundMeta(a, conf, p, r) {
-        override def tagExprForGpu(): Unit = {
-          a.child.dataType match {
-            case FloatType | DoubleType if !this.conf.isIncompatEnabled =>
-              willNotWorkOnGpu("rounding floating point numbers may be slightly off " +
-                  s"compared to Spark's result, to enable set ${RapidsConf.INCOMPATIBLE_OPS}")
-            case _ => // NOOP
-          }
-        }
-      }),
     GpuOverrides.expr[RoundCeil](
       "Computes the ceiling of the given expression to d decimal places",
       ExprChecks.binaryProject(

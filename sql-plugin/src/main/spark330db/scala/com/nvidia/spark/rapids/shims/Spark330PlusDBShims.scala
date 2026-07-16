@@ -29,19 +29,11 @@ import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.plans.physical.SinglePartition
 import org.apache.spark.sql.execution.{ColumnarToRowTransition, SparkPlan}
 import org.apache.spark.sql.execution.adaptive.ShuffleQueryStageExec
-import org.apache.spark.sql.execution.exchange.{EXECUTOR_BROADCAST, ShuffleExchangeExec, ShuffleExchangeLike, ShuffleOrigin}
+import org.apache.spark.sql.execution.exchange.{EXECUTOR_BROADCAST, ShuffleExchangeExec, ShuffleExchangeLike}
 import org.apache.spark.sql.rapids.{GpuCheckOverflowInTableInsert, GpuElementAtMeta}
 import org.apache.spark.sql.rapids.execution.{GpuBroadcastHashJoinExec, GpuBroadcastNestedLoopJoinExec}
 
 trait Spark330PlusDBShims extends Spark321PlusDBShims {
-  override def isTryMode(expr: Expression): Boolean = TryModeShim.isTryMode(expr)
-
-  override def isSupportedShuffleOrigin(origin: ShuffleOrigin): Boolean =
-    ShuffleOriginUtil.isSupported(origin)
-
-  override def ignoreTimeZoneInCanonicalization(expr: Expression): Expression =
-    CastingConfigShim.ignoreTimeZone(expr)
-
   override def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
     val shimExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = Seq(
       GpuOverrides.expr[CheckOverflowInTableInsert](
@@ -60,13 +52,12 @@ trait Spark330PlusDBShims extends Spark321PlusDBShims {
         }),
       GpuElementAtMeta.elementAtRule(true)
     ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
-    super.getExprs ++ DecimalArithmeticOverrides.exprs ++ shimExprs ++
-      YearMonthIntervalShims.exprs ++ DayTimeIntervalShims.exprs ++ RoundingShims.exprs
+    super.getExprs ++ shimExprs ++ YearMonthIntervalShims.exprs ++
+      DayTimeIntervalShims.exprs ++ RoundingShims.exprs
   }
 
   override def getExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] =
-    super.getExecs ++ RangeExecShims.execs ++ PythonMapInArrowExecShims.execs ++
-        MapInPandasExecShims.execs
+    super.getExecs ++ PythonMapInArrowExecShims.execs
 
   override def reproduceEmptyStringBug: Boolean = false
 
