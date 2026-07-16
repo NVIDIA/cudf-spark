@@ -34,6 +34,7 @@ jobs:
 
     # This job only runs for pull request comments
     if: |
+      github.event.issue.pull_request &&
       github.event.comment.body == 'build' &&
       (
         github.actor == 'abellina' ||
@@ -70,14 +71,15 @@ jobs:
         github.actor == 'liurenjie1024' ||
         github.actor == 'binmahone' ||
         github.actor == 'zpuller' ||
-        github.actor == 'pxLi'  ||
+        github.actor == 'pxLi' ||
         github.actor == 'SurajAralihalli' ||
         github.actor == 'jihoonson' ||
         github.actor == 'knoguchi22' ||
         github.actor == 'patilkishorv' ||
         github.actor == 'pmattione-nvidia' ||
         github.actor == 'rishic3' ||
-        github.actor == 'sdrp713'
+        github.actor == 'sdrp713' ||
+        false
       )
     steps:
       - name: Check if comment is issued by authorized person
