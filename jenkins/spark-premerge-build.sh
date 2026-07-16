@@ -31,7 +31,29 @@ CUDA_CLASSIFIER=${CUDA_CLASSIFIER:-'cuda12'}
 CLASSIFIER=${CLASSIFIER:-"$CUDA_CLASSIFIER"} # default as CUDA_CLASSIFIER for compatibility
 MVN_SETTINGS=${MVN_SETTINGS:-"jenkins/settings.xml"}
 MVN=${MVN:-"mvn -s $MVN_SETTINGS -Dmaven.wagon.http.retryHandler.count=3"}
-MVN_BUILD_ARGS="-Drat.skip=true -Dmaven.scaladoc.skip -Dmaven.scalastyle.skip=true -Dcuda.version=$CLASSIFIER"
+# Jenkins enables this when the PR title contains [fast-ut]. Keep local/manual runs serial by default.
+PARALLEL_UT=${PARALLEL_UT:-false}
+PARALLEL_UT_FORK_COUNT=${PARALLEL_UT_FORK_COUNT:-}
+MVN_PARALLEL_UT_ARGS="-Dparallel=$PARALLEL_UT"
+
+if [[ "$PARALLEL_UT" != "true" && "$PARALLEL_UT" != "false" ]]; then
+    >&2 echo "ERROR: PARALLEL_UT must be true or false"
+    exit 1
+fi
+
+if [[ -n "$PARALLEL_UT_FORK_COUNT" ]]; then
+    if [[ ! "$PARALLEL_UT_FORK_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+        >&2 echo "ERROR: PARALLEL_UT_FORK_COUNT must be a positive integer"
+        exit 1
+    fi
+    MVN_PARALLEL_UT_ARGS+=" -DparallelForkCount=$PARALLEL_UT_FORK_COUNT"
+fi
+
+MVN_BUILD_ARGS="-Drat.skip=true -Dmaven.scaladoc.skip -Dmaven.scalastyle.skip=true \
+  -Dcuda.version=$CLASSIFIER $MVN_PARALLEL_UT_ARGS"
+
+echo "Parallel unit tests: enabled=$PARALLEL_UT, \
+forks=${PARALLEL_UT_FORK_COUNT:-Maven default}"
 
 mvn_verify() {
     echo "Run mvn verify..."
@@ -88,7 +110,8 @@ mvn_verify() {
 
     # Here run Python integration tests tagged with 'premerge_ci_1' only, that would help balance test duration and memory
     # consumption from two k8s pods running in parallel, which executes 'mvn_verify()' and 'ci_2()' respectively.
-    $MVN -B $MVN_URM_MIRROR $PREMERGE_PROFILES clean verify -Dpytest.TEST_TAGS="premerge_ci_1" \
+    $MVN -B $MVN_URM_MIRROR $PREMERGE_PROFILES clean verify $MVN_PARALLEL_UT_ARGS \
+        -Dpytest.TEST_TAGS="premerge_ci_1" \
         -Dpytest.TEST_TYPE="pre-commit" -Dcuda.version=$CLASSIFIER
 
     # The jacoco coverage should have been collected, but because of how the shade plugin
