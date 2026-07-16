@@ -24,8 +24,8 @@ import javax.xml.parsers.DocumentBuilderFactory
 import scala.collection.mutable.ArrayBuffer
 
 import com.nvidia.spark.rapids.spill.SpillFramework
-
 import org.apache.hadoop.fs.FileUtil
+
 import org.apache.spark.sql.SparkSession
 
 /** Runs ScalaTest suites concurrently in isolated JVMs. */
