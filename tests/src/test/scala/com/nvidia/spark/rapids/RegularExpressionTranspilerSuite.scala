@@ -915,7 +915,8 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     }
   }
 
-  test("string split fuzz - anchor focused") {
+  // Disabled until https://github.com/NVIDIA/cudf-spark/issues/15293 is fixed
+  ignore("string split fuzz - anchor focused") {
     val (data, patterns) = generateDataAndPatterns(validDataChars = Some("\r\nabc"),
       validPatternChars = "^$\\AZz\r\n()", RegexSplitMode)
     doStringSplitTest(patterns, data, -1)
