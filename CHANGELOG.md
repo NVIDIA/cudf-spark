@@ -1,5 +1,5 @@
 # Change log
-Generated on 2026-06-14
+Generated on 2026-07-17
 
 ## Release 26.06
 
@@ -21,6 +21,7 @@ Generated on 2026-06-14
 ### Performance
 |||
 |:---|:---|
+|[#15163](https://github.com/NVIDIA/spark-rapids/issues/15163)|Parquet Hadoop fallback readVectored uses 128 KiB copies and can regress remote scans|
 |[#14283](https://github.com/NVIDIA/spark-rapids/issues/14283)|[FEA] Support join condition which has "cast to bigint"|
 |[#14068](https://github.com/NVIDIA/spark-rapids/issues/14068)|[FEA] Iceberg planning overhead is larger than parquet planning.|
 |[#14591](https://github.com/NVIDIA/spark-rapids/issues/14591)|[FEA] Support perf io in iceberg.|
@@ -30,6 +31,8 @@ Generated on 2026-06-14
 ### Bugs Fixed
 |||
 |:---|:---|
+|[#15235](https://github.com/NVIDIA/spark-rapids/issues/15235)|[BUG] cudaErrorIllegalAddress while writing into the Delta table|
+|[#15183](https://github.com/NVIDIA/spark-rapids/issues/15183)|[BUG] DBR 17.3 build fails after SessionCatalog listPartitions APIs added resolvedCatalogTable|
 |[#14864](https://github.com/NVIDIA/spark-rapids/issues/14864)|[BUG] test_parquet_interleaved_file_splits_partition_value_alignment fails on Dataproc Serverless: os.walk cannot see GCS-backed spark_tmp_path|
 |[#14981](https://github.com/NVIDIA/spark-rapids/issues/14981)|[BUG] DBR 14.3 CPU fallback MERGE with NOT MATCHED BY SOURCE can fail with GpuUnionExec|
 |[#14986](https://github.com/NVIDIA/spark-rapids/issues/14986)|[BUG] Delta DELETE on Databricks 14.3 returns num_affected_rows = -1 for metadata-only (partition/whole-table) deletes|
@@ -75,6 +78,12 @@ Generated on 2026-06-14
 ### PRs
 |||
 |:---|:---|
+|[#15299](https://github.com/NVIDIA/spark-rapids/pull/15299)|Update dependency version JNI to 26.06.1|
+|[#15298](https://github.com/NVIDIA/spark-rapids/pull/15298)|[DOC] update download page for 26.06.1 release [skip ci]|
+|[#15164](https://github.com/NVIDIA/spark-rapids/pull/15164)|Use configured copy buffer for Hadoop vectored reads|
+|[#15228](https://github.com/NVIDIA/spark-rapids/pull/15228)|Update dependency version JNI to 26.06.1-SNAPSHOT|
+|[#15211](https://github.com/NVIDIA/spark-rapids/pull/15211)|Fix DBR 17.3 build after SessionCatalog partition API change|
+|[#15084](https://github.com/NVIDIA/spark-rapids/pull/15084)|Update changelog for the v26.06.0 release [skip ci]|
 |[#15079](https://github.com/NVIDIA/spark-rapids/pull/15079)|Update dependency version private to 26.06.1|
 |[#15024](https://github.com/NVIDIA/spark-rapids/pull/15024)|Fall back when Iceberg S3 PerfIO is unsupported|
 |[#15066](https://github.com/NVIDIA/spark-rapids/pull/15066)|Use current repository name in GitHub workflows [skip ci]|
@@ -359,15 +368,19 @@ Generated on 2026-06-14
 |[#14492](https://github.com/NVIDIA/spark-rapids/pull/14492)|Databricks run-tests: rsync test reports from scala2.13 for Spark 4.x|
 |[#14464](https://github.com/NVIDIA/spark-rapids/pull/14464)|Fix oom of iceberg ci|
 |[#14475](https://github.com/NVIDIA/spark-rapids/pull/14475)|Fix databricks build break caused by `NoIcebergProviderImpl`|
+|[#14445](https://github.com/NVIDIA/spark-rapids/pull/14445)|Add runtime check for supported icberg version|
 |[#14466](https://github.com/NVIDIA/spark-rapids/pull/14466)|Use long instead of int to track kudo buffer sizes and offsets in GpuShuffleCoalesce|
 |[#14467](https://github.com/NVIDIA/spark-rapids/pull/14467)|Update doc for deletionVectors.predicatePushdown.enabled to note useMetadataRowIndex dependency [skip ci]|
 |[#14468](https://github.com/NVIDIA/spark-rapids/pull/14468)|Fix compile break from BloomFilter.create deprecation|
 |[#14460](https://github.com/NVIDIA/spark-rapids/pull/14460)|Enable the new DV-aware Delta reader by default|
 |[#14398](https://github.com/NVIDIA/spark-rapids/pull/14398)|[AutoSparkUT] Fix CollectLimitExec GPU replacement for Command results (SPARK-19650)|
 |[#14456](https://github.com/NVIDIA/spark-rapids/pull/14456)|Fix DB-17.3 integration tests in join_test.py|
+|[#14455](https://github.com/NVIDIA/spark-rapids/pull/14455)|Fix DB-17.3 integration tests for JSON, Parquet, and ORC write|
 |[#14435](https://github.com/NVIDIA/spark-rapids/pull/14435)|Add support for Coalesce reader for Delta Lake using cuDF deletion vector APIs|
 |[#14270](https://github.com/NVIDIA/spark-rapids/pull/14270)|Add read support for nested data types in iceberg.|
+|[#14446](https://github.com/NVIDIA/spark-rapids/pull/14446)|[AutoSparkUT] Fix cached table zero-column scan crash (issue #14098)|
 |[#14400](https://github.com/NVIDIA/spark-rapids/pull/14400)|[AutoSparkUT] Re-enable 'normalize special floating numbers in subquery' test (issue #14116)|
+|[#14293](https://github.com/NVIDIA/spark-rapids/pull/14293)|Close stream time gap in RowToColumnarIterator hasNext|
 |[#14450](https://github.com/NVIDIA/spark-rapids/pull/14450)|Fix `_metadata` column incorrectly pruned when nested fields are referenced|
 |[#14448](https://github.com/NVIDIA/spark-rapids/pull/14448)|check rapids shuffle configured instead of available before heartbeat init|
 |[#14436](https://github.com/NVIDIA/spark-rapids/pull/14436)|[AutoSparkUT] Fix trunc/date_trunc to return null for invalid format strings|
