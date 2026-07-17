@@ -22,13 +22,13 @@
     <parent>
         <groupId>com.nvidia</groupId>
         <artifactId>rapids-4-spark-parent_2.12</artifactId>
-        <version>26.06.1</version>
+        <version>26.06.1-SNAPSHOT</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
     <artifactId>rapids-4-spark-shim-deps-parent_2.12</artifactId>
     <packaging>pom</packaging>
     <description>Shim Dependencies Profiles</description>
-    <version>26.06.1</version>
+    <version>26.06.1-SNAPSHOT</version>
     <profiles>
         <profile>
             <id>release330cdh</id>

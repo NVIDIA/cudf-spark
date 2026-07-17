@@ -98,7 +98,7 @@ $SPARK_HOME/bin/spark-submit \
 --conf spark.sql.parquet.datetimeRebaseModeInWrite=CORRECTED \
 --jars $SPARK_HOME/examples/jars/scopt_2.12-3.7.1.jar \
 --class com.nvidia.spark.rapids.tests.scaletest.ScaleTest \
-./target/rapids-4-spark-integration-tests_2.12-26.06.1-spark332.jar \
+./target/rapids-4-spark-integration-tests_2.12-26.06.1-SNAPSHOT-spark332.jar \
 10 \
 100 \
 parquet \
