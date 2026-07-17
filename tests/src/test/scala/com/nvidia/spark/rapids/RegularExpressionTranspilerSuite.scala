@@ -159,13 +159,13 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
   }
 
   test("cuDF does not support positive or negative lookahead") {
-    val negPatterns = Seq("a(!b)", "a(!b)c?")
+    val negPatterns = Seq("a(?!b)", "a(?!b)c?")
     negPatterns.foreach(pattern =>
       assertUnsupported(pattern, RegexFindMode,
         "Negative lookahead groups are not supported")
     )
 
-    val posPatterns = Seq("a(=b)", "a(=b)c?")
+    val posPatterns = Seq("a(?=b)", "a(?=b)c?")
     posPatterns.foreach(pattern =>
       assertUnsupported(pattern, RegexFindMode,
         "Positive lookahead groups are not supported")
