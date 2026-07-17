@@ -4985,6 +4985,8 @@ protected class ExplainPlanImpl extends ExplainPlanBase {
 object GpuOverrideUtil extends Logging {
   def withActiveSession[T](sparkSession: SparkSession)(body: => T): T = {
     if (sparkSession == null) {
+      // A session is only captured for rules registered through ColumnarOverrideRules.
+      // Direct callers (including tests) intentionally preserve the existing unscoped behavior.
       body
     } else {
       SparkSessionUtils.withActiveSession(sparkSession)(body)
