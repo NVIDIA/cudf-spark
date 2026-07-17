@@ -820,7 +820,7 @@
         <spark-rapids-hybrid.version>26.06.0</spark-rapids-hybrid.version>
         <scala.binary.version>2.13</scala.binary.version>
         <scala.recompileMode>incremental</scala.recompileMode>
-        <scala.version>2.12.21</scala.version>
+        <scala.version>2.13.18</scala.version>
         <!--
         -processing
         to suppress unactionable "No processor claimed any of these annotations"
