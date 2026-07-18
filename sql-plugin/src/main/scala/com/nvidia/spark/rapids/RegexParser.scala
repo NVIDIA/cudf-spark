@@ -882,9 +882,6 @@ class CudfRegexTranspiler(mode: RegexMode) {
 
     val componentsWithoutLinefeed = components.filterNot {
       case RegexChar(ch) => ch == '\r'
-      case RegexEscaped(ch) => ch == 'r'
-      case r: RegexOctalChar => r.codePoint == '\r'.toInt
-      case r: RegexHexDigit => r.codePoint == '\r'.toInt
       case RegexCharacterRange(startRegex, RegexChar(end)) =>
         val start = startRegex match {
           case RegexChar(ch) => ch

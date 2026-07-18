@@ -145,8 +145,8 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     )
   }
 
-  test("hex- and octal-escaped line terminators before $ in replace mode") {
-    val patterns = Seq("\\x0A$", "\\x{A}$", "\\012$")
+  test("hex- and octal-escaped line terminators before end anchors in replace mode") {
+    val patterns = Seq("\\x0A$", "\\x{A}$", "\\012$", "\\x0D\\Z")
     patterns.foreach(pattern =>
       assertUnsupported(pattern, RegexReplaceMode,
         "End of line/string anchor is not supported in this context"))
@@ -681,9 +681,9 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     test(raw"[^a\n]", raw"(?:[\r]|[^a\n])")
     test(raw"[^a\r]", raw"[^a\r]")
     test(raw"[^a\r\n]", raw"[^a\r\n]")
-    test(raw"[^\x0D]", raw"[^\x0d]")
-    test(raw"[^\x{D}]", raw"[^\x0d]")
-    test(raw"[^\015]", raw"[^\015]")
+    test(raw"[^\x0D]", raw"[^\r]")
+    test(raw"[^\x{D}]", raw"[^\r]")
+    test(raw"[^\015]", raw"[^\r]")
   }
 
   test("compare CPU and GPU: regexp replace negated character class") {
