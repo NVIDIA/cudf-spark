@@ -21,7 +21,7 @@ not collect it as a test file. Each private-optimizer rule lives in its own
 The covered rules are semantics-preserving but default-off or otherwise dormant
 in public IT.
 Comparing a same-conf CPU run against a same-conf GPU run cannot tell whether a
-rule actually fired, so every test built on these helpers does two things:
+rule actually fired, so positive-path tests built on these helpers do two things:
 
   1. Compares an OFF-rule CPU baseline against an ON-rule GPU run. Because the
      rules preserve semantics, OFF-CPU == ON-GPU proves both data correctness
@@ -30,6 +30,10 @@ rule actually fired, so every test built on these helpers does two things:
      the test FAILS if the conf flip is a no-op (wrong conf, wrong query shape,
      or private jar not loaded).
 
+Runtime-specific no-op paths use ``assert_rule_skipped`` instead. Those tests
+require a marker for the guarded plan shape and assert that the rule marker is
+absent while preserving the same OFF-CPU vs ON-GPU result comparison.
+
 See ``private_optimizer_README.md`` for how to add a new rule module.
 """
 
@@ -37,12 +41,10 @@ from asserts import assert_equal_with_local_sort
 from spark_session import with_cpu_session, with_gpu_session
 
 # The private optimizer rules ship in the spark-rapids-private plugin, which is
-# built only for Spark 3.3.0 and later (see the private core pom build matrix:
-# 330..411 plus the Databricks 400db173 buildver). Runtimes within the matrix
-# (including Databricks) are all supported for these four rules, so we do not
-# add per-runtime skips here. A rule that becomes unsupported on some future
-# runtime is caught by the plan-marker assertion below (it fails loudly instead
-# of passing silently), not by guessing a version here.
+# built only for Spark 3.3.0 and later. Rules are loaded across the supported
+# Apache and Databricks build matrix. An intentional runtime-plan guard belongs
+# in the rule itself and is covered here with assert_rule_skipped; do not hide
+# that path with a blanket runtime skip.
 
 PRIVATE_OPTIMIZER_BASE_CONF = {
     "spark.rapids.sql.private.enabled": "true",
@@ -89,5 +91,30 @@ def assert_rule_fires(fn, on_conf, off_conf, marker, physical=False):
         "rule did not fire: marker '%s' absent with rule ON\n%s" % (marker, on_plan)
     assert marker not in off_plan, \
         "marker '%s' present with rule OFF, not a valid discriminator\n%s" % (marker, off_plan)
+
+    assert_equal_with_local_sort(cpu_rows, gpu_rows)
+
+
+def assert_rule_skipped(fn, on_conf, off_conf, marker, physical=False, required_on_markers=()):
+    """OFF-rule CPU baseline vs ON-rule GPU run for a runtime-specific no-op path.
+
+    marker must be absent from both plans; results of the OFF-CPU and ON-GPU
+    runs must match. Use this only when the rule is expected to skip itself for
+    a known runtime or plan shape. Every required_on_markers entry must still be
+    present in the ON plan to prove the test reached the expected shape.
+    """
+    cpu_rows, off_plan = with_cpu_session(
+        lambda s: collect_and_plan(s, fn, physical), conf=off_conf)
+    gpu_rows, on_plan = with_gpu_session(
+        lambda s: collect_and_plan(s, fn, physical), conf=on_conf)
+
+    assert marker not in on_plan, \
+        "runtime skip failed: marker '%s' present with rule ON\n%s" % (marker, on_plan)
+    assert marker not in off_plan, \
+        "marker '%s' present in OFF-CPU baseline, not a valid skipped-path check\n%s" % (
+            marker, off_plan)
+    for required_marker in required_on_markers:
+        assert required_marker in on_plan, \
+            "required marker '%s' missing from rule ON plan\n%s" % (required_marker, on_plan)
 
     assert_equal_with_local_sort(cpu_rows, gpu_rows)
