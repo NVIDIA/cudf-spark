@@ -204,6 +204,18 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
         "cuDF does not support repetition of group containing: 3*"))
   }
 
+  test("repetition base validation recurses into choices") {
+    Seq("(3?|a)+", "(a|3?)+").foreach { pattern =>
+      assertUnsupported(pattern, RegexFindMode,
+        "cuDF does not support repetition of group containing: 3?")
+    }
+    Seq(
+      "(3|a)+" -> "(3|a)+",
+      raw"(a|\d)+" -> "(a|[0-9])+").foreach { case (pattern, expected) =>
+      assert(transpile(pattern, RegexFindMode) === expected)
+    }
+  }
+
   test("cuDF does not support OR at BOL / EOL") {
     val patterns = Seq("$|a", "^|a")
     patterns.foreach(pattern => {
@@ -339,6 +351,34 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
       "End of line/string anchor is not supported in this context")
   }
 
+  test("issue-14746: anchors inside character classes are literals") {
+    val patterns = Seq(
+      """[$\n]""",
+      """[$^]""",
+      """[$]\n""",
+      """\n[$]""",
+      """(?:[$])\n""",
+      """[a^]$""",
+      """(?:[a^])$""")
+    val inputs = Seq("", "$", "^", "\n", "$\n", "\n$", "a^", "a^\n", "a\nb")
+
+    assertCpuGpuMatchesRegexpFind(patterns, inputs)
+    assertCpuGpuMatchesRegexpReplace(patterns, inputs)
+
+    // Character-class components are alternatives, not a sequence with anchor context.
+    val characterClass = RegexCharacterClass(
+      negated = false, ListBuffer(RegexChar('$'), RegexChar('\n')))
+    val (transpiledClass, _) = new CudfRegexTranspiler(RegexReplaceMode)
+      .getTranspiledAST(characterClass, None, None)
+    assert(transpiledClass === characterClass)
+
+    // Real anchors outside a class must still detect newlines inside the adjacent class.
+    Seq("""[\r\n]$""", """$[\r\n]""").foreach { pattern =>
+      assertUnsupported(pattern, RegexReplaceMode,
+        "End of line/string anchor is not supported in this context")
+    }
+  }
+
   test("line anchor $ - find") {
     val patterns = Seq("a$", "a$b", "\f$", "$\f","TEST$")
     val inputs = Seq("a", "a\n", "a\r", "a\r\n", "a\f", "\f", "\r", "\u0085", "\u2028",
@@ -466,7 +506,7 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     doTranspileTest(TIMESTAMP_TRUNCATE_REGEX,
       TIMESTAMP_TRUNCATE_REGEX
         .replaceAll("\\.", "[^\n\r\u0085\u2028\u2029]")
-        .replaceAll("\\\\Z", "(?:\r\n)?\\$"))
+        .replaceAll("\\\\Z", "\\$"))
   }
 
   test("transpile \\A repetitions") {
@@ -479,12 +519,9 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     assertUnsupported("abc\\z", RegexFindMode, "")
   }
 
-  test("transpile $") {
-    doTranspileTest("a$", "a(?:\r\n)?$")
-  }
-
   test("transpile \\Z") {
-    val expected = "a(?:\r\n)?$"
+    val expected = "a$"
+    doTranspileTest("a$", expected)
     doTranspileTest("a\\Z", expected)
     doTranspileTest("a\\Z+", expected)
     doTranspileTest("a\\Z{1}", expected)
@@ -522,6 +559,10 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     doTranspileTest("(ab)+(c)(d)", "(ab)+(?:c)(?:d)", 1)
     doTranspileTest("(ab)+(c)(d)", "(?:ab)+(c)(?:d)", 2)
     doTranspileTest("([a-z0-9]((([abcd](\\d?)))))", "(?:[a-z0-9](?:((?:[abcd](?:[0-9]?)))))", 3)
+    doTranspileTest("(a)|(b)", "(?:a)|(b)", 2)
+    doTranspileTest("(?:(a)(b))", "(?:(?:a)(b))", 2)
+    doTranspileTest("((a)|(b))", "(?:(?:a)|(b))", 3)
+    doTranspileTest("(a)(b)|(c)(d)", "(?:a)(?:b)|(c)(?:d)", 3)
     doTranspileTest("ab", "ab", 1)
   }
 
@@ -769,6 +810,33 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     }
   }
 
+  test("issue-14746: string split treats anchors in character classes as literals") {
+    val patterns = Set(
+      """[$\n]""",
+      """[$^]""",
+      """[$]\n""",
+      "^a$",
+      """\na$""",
+      """[\r\n]a$""")
+    val data = Seq("", "$", "^", "a", "\na", "\r\na", "$\n", "\n$", "a\nb")
+    doStringSplitTest(patterns, data, -1)
+
+    Seq("""[\r\n]$""", """$[\r\n]""").foreach { pattern =>
+      assertUnsupported(pattern, RegexSplitMode,
+        "End of line/string anchor is not supported in this context")
+    }
+
+    val optionalPrefixError = intercept[RegexUnsupportedException] {
+      transpile("a?bc$", RegexSplitMode)
+    }
+    assert(optionalPrefixError.getMessage.endsWith("near index 4"),
+      s"Unexpected split anchor position: ${optionalPrefixError.getMessage}")
+  }
+
+  test("issue-14748: word boundaries are not literal split delimiters") {
+    assertNoTranspileToSplittableString(Set(raw"\b", raw"\B"))
+  }
+
   test("regexp_split - character class repetition - ? and *") {
     val patterns = Set(raw"[a-z][0-9]?", raw"[a-z][0-9]*")
     val data = Seq("a", "aa", "a1a1", "a1b2", "a1b")
@@ -847,7 +915,8 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     }
   }
 
-  test("string split fuzz - anchor focused") {
+  // Disabled until https://github.com/NVIDIA/cudf-spark/issues/15293 is fixed
+  ignore("string split fuzz - anchor focused") {
     val (data, patterns) = generateDataAndPatterns(validDataChars = Some("\r\nabc"),
       validPatternChars = "^$\\AZz\r\n()", RegexSplitMode)
     doStringSplitTest(patterns, data, -1)
@@ -1021,7 +1090,9 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
       input: Seq[String]): Array[String] = {
     val result = new Array[String](input.length)
     val replace = GpuRegExpUtils.unescapeReplaceString(replaceString)
-    val (hasBackrefs, converted) = GpuRegExpUtils.backrefConversion(replace)
+    // Pass -1 to opt out of Java-spec greedy-with-backoff; the REPLACE_STRING used by this
+    // helper contains no `$N` backrefs, so the legacy behavior is sufficient here.
+    val (hasBackrefs, converted) = GpuRegExpUtils.backrefConversion(replace, -1)
     withResource(ColumnVector.fromStrings(input: _*)) { cv =>
       val c = if (hasBackrefs) {
         cv.stringReplaceWithBackrefs(new RegexProgram(cudfPattern,

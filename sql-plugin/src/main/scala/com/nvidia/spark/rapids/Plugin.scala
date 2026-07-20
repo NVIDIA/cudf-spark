@@ -137,11 +137,11 @@ object RapidsPluginUtils extends Logging {
     val possibleRapidsJarURLs = classloader.getResources(propName).asScala.toSet.toSeq.filter {
       url => {
         val urlPath = url.toString
-        // Filter out submodule jars, e.g. rapids-4-spark-aggregator_2.12-26.06.0-spark341.jar,
+        // Filter out submodule jars, e.g. rapids-4-spark-aggregator_2.12-26.08.0-spark341.jar,
         // and files stored under subdirs of '!/', e.g.
-        // rapids-4-spark_2.12-26.06.0-cuda12.jar!/spark330/rapids4spark-version-info.properties
+        // rapids-4-spark_2.12-26.08.0-cuda12.jar!/spark330/rapids4spark-version-info.properties
         // We only want to find the main jar, e.g.
-        // rapids-4-spark_2.12-26.06.0-cuda12.jar!/rapids4spark-version-info.properties
+        // rapids-4-spark_2.12-26.08.0-cuda12.jar!/rapids4spark-version-info.properties
         !urlPath.contains("rapids-4-spark-") && urlPath.endsWith("!/" + propName)
       }
     }
@@ -436,6 +436,25 @@ object RapidsPluginUtils extends Logging {
         s"Binaries available for architectures $supportedMajorArchStr.")
     }
   }
+
+  /**
+   * Runs each shutdown step even if prior steps fail. The first exception is primary; later
+   * exceptions are added as suppressed. Rethrows the primary exception if any step failed.
+   */
+  def safeShutdown(steps: Seq[() => Unit]): Unit = {
+    var shutdownException: Throwable = null
+    steps.foreach { step =>
+      try {
+        step()
+      } catch {
+        case e: Throwable if shutdownException == null => shutdownException = e
+        case e: Throwable => shutdownException.addSuppressed(e)
+      }
+    }
+    if (shutdownException != null) {
+      throw shutdownException
+    }
+  }
 }
 
 /**
@@ -549,11 +568,13 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
   }
 
   override def shutdown(): Unit = {
-    extraDriverPlugins.foreach(_.shutdown())
-    FileCacheLocalityManager.shutdown()
-    // Shutdown listener first to trigger cleanup for any remaining jobs
-    Option(shuffleCleanupListener).foreach(_.shutdown())
-    ShuffleCleanupManager.shutdown()
+    RapidsPluginUtils.safeShutdown(
+      extraDriverPlugins.map(plugin => () => plugin.shutdown()) ++
+        Seq(
+          () => FileCacheLocalityManager.shutdown(),
+          // Shutdown listener first to trigger cleanup for any remaining jobs
+          () => Option(shuffleCleanupListener).foreach(_.shutdown()),
+          () => ShuffleCleanupManager.shutdown()))
   }
 }
 
@@ -804,20 +825,23 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
   }
 
   override def shutdown(): Unit = {
-    GpuTimeZoneDB.shutdown()
-    GpuSemaphore.shutdown()
-    PythonWorkerSemaphore.shutdown()
-    GpuDeviceManager.shutdown()
-    ProfilerOnExecutor.shutdown()
-    if (isAsyncProfilerEnabled) {
-      AsyncProfilerOnExecutor.shutdown()
-    }
-    Option(rapidsShuffleHeartbeatEndpoint).foreach(_.close())
-    Option(shuffleCleanupEndpoint).foreach(_.close())
-    extraExecutorPlugins.foreach(_.shutdown())
-    FileCache.shutdown()
-    GpuCoreDumpHandler.shutdown()
-    TrafficController.shutdown()
+    RapidsPluginUtils.safeShutdown(
+      Seq(
+        () => GpuTimeZoneDB.shutdown(),
+        () => GpuSemaphore.shutdown(),
+        () => PythonWorkerSemaphore.shutdown(),
+        () => GpuDeviceManager.shutdown(),
+        () => ProfilerOnExecutor.shutdown(),
+        () => if (isAsyncProfilerEnabled) {
+          AsyncProfilerOnExecutor.shutdown()
+        },
+        () => Option(rapidsShuffleHeartbeatEndpoint).foreach(_.close()),
+        () => Option(shuffleCleanupEndpoint).foreach(_.close())) ++
+        extraExecutorPlugins.map(plugin => () => plugin.shutdown()) ++
+        Seq(
+          () => FileCache.shutdown(),
+          () => GpuCoreDumpHandler.shutdown(),
+          () => TrafficController.shutdown()))
   }
 
   override def onTaskFailed(failureReason: TaskFailedReason): Unit = {

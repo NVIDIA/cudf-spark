@@ -18,11 +18,10 @@ package org.apache.spark.sql.rapids.catalyst.expressions
 
 import ai.rapids.cudf.{DType, HostColumnVector}
 import com.nvidia.spark.Retryable
-import com.nvidia.spark.rapids.{GpuColumnVector, GpuExpression, GpuLiteral, NvtxRegistry, RetryStateTracker}
+import com.nvidia.spark.rapids.{GpuColumnVector, GpuExpression, GpuLiteral, GpuNondeterministic, NvtxRegistry, RetryStateTracker}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.shims.ShimUnaryExpression
 
-import org.apache.spark.TaskContext
 import org.apache.spark.sql.catalyst.expressions.{ExpectsInputTypes, Expression, ExpressionWithRandomSeed}
 import org.apache.spark.sql.rapids.execution.RapidsAnalysisException
 import org.apache.spark.sql.types._
@@ -68,7 +67,8 @@ trait GpuExpressionRetryable extends GpuExpression with Retryable {
 
 /** Generate a random column with i.i.d. uniformly distributed values in [0, 1). */
 case class GpuRand(child: Expression, doContextCheck: Boolean) extends ShimUnaryExpression
-  with ExpectsInputTypes with ExpressionWithRandomSeed with GpuExpressionRetryable {
+  with ExpectsInputTypes with ExpressionWithRandomSeed with GpuExpressionRetryable
+  with GpuNondeterministic {
 
   def this(doContextCheck: Boolean) = this(GpuLiteral(Utils.random.nextLong(), LongType),
     doContextCheck)
@@ -104,11 +104,7 @@ case class GpuRand(child: Expression, doContextCheck: Boolean) extends ShimUnary
       s"Input argument to $prettyName must be an integer, long or null literal.")
   }
 
-  private var previousPartition: Int = 0
-
   private var curXORShiftRandomSeed: Option[Long] = None
-
-  private def wasInitialized: Boolean = rng != null
 
   override def nullable: Boolean = false
 
@@ -116,22 +112,16 @@ case class GpuRand(child: Expression, doContextCheck: Boolean) extends ShimUnary
 
   override def inputTypes: Seq[AbstractDataType] = Seq(TypeCollection(IntegerType, LongType))
 
-  private def initRandom(): Unit = {
-    val partId = TaskContext.getPartitionId()
-    if (partId != previousPartition || !wasInitialized) {
-      rng = new RapidsXORShiftRandom(seed + partId)
-      previousPartition = partId
-    }
+  override protected def initializeInternal(partitionIndex: Int): Unit = {
+    // Seed with the parent partition index so values stay stable across
+    // coalesce/union (SPARK-14393). Reset curXORShiftRandomSeed because the
+    // checkpoint state of a prior partition is no longer valid.
+    rng = new RapidsXORShiftRandom(seed + partitionIndex)
+    curXORShiftRandomSeed = None
   }
 
   override def doColumnarEval(batch: ColumnarBatch): GpuColumnVector = {
-    if (curXORShiftRandomSeed.isEmpty) {
-      // checkpoint not called, need to init the random generator here
-      initRandom()
-    } else {
-      // make sure here uses the same random generator with checkpoint
-      assert(wasInitialized)
-    }
+    ensureInitialized()
     NvtxRegistry.RANDOM_EXPR {
       val numRows = batch.numRows()
       withResource(HostColumnVector.builder(DType.FLOAT64, numRows)) { builder =>
@@ -142,14 +132,15 @@ case class GpuRand(child: Expression, doContextCheck: Boolean) extends ShimUnary
   }
 
   override def doCheckpoint(): Unit = {
-    // In a task, checkpoint is called before columnarEval, so need to try to
-    // init the random generator here.
-    initRandom()
+    // In a task, checkpoint is called before columnarEval. If the hosting operator
+    // didn't call initialize() for us, fall back here just like columnarEval does.
+    ensureInitialized()
     curXORShiftRandomSeed = Some(rng.currentSeed)
   }
 
   override def doRestore(): Unit = {
-    assert(wasInitialized && curXORShiftRandomSeed.isDefined)
+    assert(curXORShiftRandomSeed.isDefined,
+      "GpuRand restore called without a prior checkpoint")
     rng.setHashedSeed(curXORShiftRandomSeed.get)
   }
 }

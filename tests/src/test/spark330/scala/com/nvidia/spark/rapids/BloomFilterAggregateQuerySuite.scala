@@ -42,6 +42,7 @@ spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids
 
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims._
 
 class BloomFilterAggregateQuerySuite extends BloomFilterAggregateQuerySuiteBase {
@@ -72,32 +73,59 @@ class BloomFilterAggregateQuerySuite extends BloomFilterAggregateQuerySuiteBase 
     }
   }
 
-  // test with GPU bloom build, CPU bloom probe
+  // test with GPU bloom build, CPU bloom probe - bridge disabled
   for (numEstimated <- Seq(4096L, 4194304L, Long.MaxValue,
     SQLConf.RUNTIME_BLOOM_FILTER_MAX_NUM_ITEMS.defaultValue.get)) {
     for (numBits <- Seq(4096L, 4194304L,
       SQLConf.RUNTIME_BLOOM_FILTER_MAX_NUM_BITS.defaultValue.get)) {
       ALLOW_NON_GPU_testSparkResultsAreEqualWithCapture(
-        s"might_contain GPU build CPU probe estimated=$numEstimated numBits=$numBits",
+        s"might_contain GPU build CPU probe (bridge disabled) " +
+          s"estimated=$numEstimated numBits=$numBits",
         buildData,
         Seq("LocalTableScanExec", "ProjectExec", "ShuffleExchangeExec"),
         conf = bloomFilterEnabledConf.clone()
           .set("spark.rapids.sql.expression.BloomFilterMightContain", "false")
+          .set("spark.rapids.sql.expression.cpuBridge.enabled", "false")
       )(doBloomFilterTest(numEstimated, numBits))(getPlanValidator("ProjectExec"))
     }
   }
 
-  // test with partial/final-only GPU bloom build, CPU bloom probe
+  // test with GPU bloom build, CPU bloom probe - bridge enabled
+  for (numEstimated <- Seq(4096L, 4194304L, Long.MaxValue,
+    SQLConf.RUNTIME_BLOOM_FILTER_MAX_NUM_ITEMS.defaultValue.get)) {
+    for (numBits <- Seq(4096L, 4194304L,
+      SQLConf.RUNTIME_BLOOM_FILTER_MAX_NUM_BITS.defaultValue.get)) {
+      ALLOW_NON_GPU_testSparkResultsAreEqualWithCapture(
+        s"might_contain GPU build CPU probe (bridge enabled) " +
+          s"estimated=$numEstimated numBits=$numBits",
+        buildData,
+        Seq("LocalTableScanExec", "ShuffleExchangeExec", 
+          "BloomFilterMightContain", "ScalarSubquery"),
+        conf = bloomFilterEnabledConf.clone()
+          .set("spark.rapids.sql.expression.BloomFilterMightContain", "false")
+          .set("spark.rapids.sql.expression.cpuBridge.enabled", "true")
+      )(doBloomFilterTest(numEstimated, numBits)) { (cpuPlan, gpuPlan) =>
+        // With bridge enabled, expect GpuProjectExec instead of ProjectExec
+        ExecutionPlanCaptureCallback.assertContains(gpuPlan, "GpuProjectExec")
+        // Validate that BloomFilterMightContain fell back via bridge
+        ExecutionPlanCaptureCallback.assertDidFallBack(gpuPlan, "BloomFilterMightContain")
+      }
+    }
+  }
+
+  // test with partial/final-only GPU bloom build, CPU bloom probe - bridge disabled
   for (mode <- Seq("partial", "final")) {
     for (numEstimated <- Seq(SQLConf.RUNTIME_BLOOM_FILTER_MAX_NUM_ITEMS.defaultValue.get)) {
       for (numBits <- Seq(SQLConf.RUNTIME_BLOOM_FILTER_MAX_NUM_BITS.defaultValue.get)) {
         ALLOW_NON_GPU_testSparkResultsAreEqualWithCapture(
-          s"might_contain GPU $mode build CPU probe estimated=$numEstimated numBits=$numBits",
+          s"might_contain GPU $mode build CPU probe (bridge disabled) " +
+            s"estimated=$numEstimated numBits=$numBits",
           buildData,
           Seq("ObjectHashAggregateExec", "ProjectExec", "ShuffleExchangeExec"),
           conf = bloomFilterEnabledConf.clone()
             .set("spark.rapids.sql.expression.BloomFilterMightContain", "false")
             .set("spark.rapids.sql.hashAgg.replaceMode", mode)
+            .set("spark.rapids.sql.expression.cpuBridge.enabled", "false")
         )(doBloomFilterTest(numEstimated, numBits))(getPlanValidator("ObjectHashAggregateExec"))
       }
     }

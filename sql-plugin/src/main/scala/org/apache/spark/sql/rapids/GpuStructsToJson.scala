@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,6 +34,9 @@ class GpuStructsToJsonMeta(
     rule: DataFromReplacementRule
   ) extends UnaryExprMeta[StructsToJson](expr, conf, parent, rule) {
 
+  // Timezone only affects JSON output when the input contains timestamps.
+  override def isTimeZoneSupported: Boolean = true
+
   override def tagExprForGpu(): Unit = {
     if (expr.options.get("pretty").exists(_.equalsIgnoreCase("true"))) {
       willNotWorkOnGpu("to_json option pretty=true is not supported")
@@ -60,10 +63,14 @@ class GpuStructsToJsonMeta(
           // tracking issue is https://github.com/NVIDIA/spark-rapids/issues/9602
           willNotWorkOnGpu(s"Unsupported timestampFormat '$timestampFormat' in to_json")
       }
-      if (options.zoneId.normalized() != GpuOverrides.UTC_TIMEZONE_ID) {
+      if (expr.options.exists { case (key, _) => key.equalsIgnoreCase("timeZone") } &&
+          options.zoneId.normalized() != GpuOverrides.UTC_TIMEZONE_ID) {
+        willNotWorkOnGpu(s"Unsupported timeZone '${options.zoneId}' in to_json")
+      }
+      if (expr.zoneId.normalized() != GpuOverrides.UTC_TIMEZONE_ID) {
         // we hard-code the timezone `Z` in GpuCast.castTimestampToJson
         // so we need to fall back if expr different timeZone is specified
-        willNotWorkOnGpu(s"Unsupported timeZone '${options.zoneId}' in to_json")
+        willNotWorkOnGpu(s"Unsupported timeZone '${expr.zoneId}' in to_json")
       }
     }
 

@@ -4,6 +4,7 @@
 .bloop*
 .cache
 .classpath
+.cursor/
 .DS_Store
 .ensime
 .ensime_cache/

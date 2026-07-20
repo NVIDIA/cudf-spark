@@ -95,14 +95,14 @@ trait DeltaProvider {
       meta: OverwriteByExpressionExecV1Meta): GpuExec
 
   /**
-   * Returns true if deletion vector predicates can be pushed down to the scan.
+   * Returns true if deletion vector predicate pushdown is enabled via configuration.
    */
-  def canPushDVPredicateDownToScan(conf: RapidsConf): Boolean = false
+  def isPushDVPredicateDownEnabled(conf: RapidsConf): Boolean = false
 
   /**
-   * Pushes down deletion vector predicates to the scan if possible
+   * Tries to push down deletion vector predicates to the scan.
    */
-  def pushDVPredicateDownToScan(plan: SparkPlan): SparkPlan = plan
+  def tryPushDVPredicateDownToScan(plan: SparkPlan): SparkPlan = plan
 
   def pruneFileMetadata(plan: SparkPlan): SparkPlan = plan
 

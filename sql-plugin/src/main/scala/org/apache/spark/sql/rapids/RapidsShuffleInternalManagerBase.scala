@@ -2111,7 +2111,7 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
     //    to disk.
     val isbr = shuffleBlockResolver match {
       case isbr: IndexShuffleBlockResolver => isbr
-      case gpur: GpuShuffleBlockResolver => gpur.resolver
+      case gpur: GpuShuffleBlockResolverBase => gpur.wrapped
       case _ =>
         throw new IllegalStateException(
           "unregisterShuffle called with unexpected resolver " +

@@ -37,7 +37,7 @@ scala_version = project.getProperty('scala.binary.version')
 project_build_dir = project.getProperty('project.build.directory')
 deps_dir = os.sep.join([project_build_dir, 'deps'])
 top_dist_jar_dir = os.sep.join([project_build_dir, 'parallel-world'])
-urm_url = project.getProperty('env.URM_URL')
+art_url = project.getProperty('env.ART_URL')
 jenkins_settings = os.sep.join([source_basedir, 'jenkins', 'settings.xml'])
 repo_local = project.getProperty('maven.repo.local')
 
@@ -67,7 +67,7 @@ for bv in buildver_list:
                 '='.join(['-Dclassifier', classifier]),
                 '='.join(['-Dtransitive', 'false'])
             ]
-            if urm_url:
+            if art_url:
                 mvn_cmd.extend(['-s', jenkins_settings])
             if repo_local:
                 mvn_cmd.append('='.join(['-Dmaven.repo.local', repo_local]))

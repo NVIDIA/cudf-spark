@@ -19,11 +19,11 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.suites
 
-import org.apache.spark.sql.SubquerySuite
-import org.apache.spark.sql.execution.{ReusedSubqueryExec, SubqueryExec}
+import org.apache.spark.sql.{Row, SubquerySuite}
+import org.apache.spark.sql.execution.{ExecSubqueryExpression, ReusedSubqueryExec, SubqueryExec}
 import org.apache.spark.sql.execution.adaptive.DisableAdaptiveExecution
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.rapids.GpuScalarSubquery
+import org.apache.spark.sql.rapids.{GpuFileSourceScanExec, GpuScalarSubquery}
 import org.apache.spark.sql.rapids.execution.GpuShuffleExchangeExecBase
 import org.apache.spark.sql.rapids.utils.RapidsSQLTestsTrait
 
@@ -89,6 +89,40 @@ class RapidsSubquerySuite
             "expect 0 ReusedSubqueryExec when not reusing")
         }
       }
+    }
+  }
+
+  // Original: SubquerySuite.scala (Spark v3.3.0) lines 1321-1339.
+  // GPU plan replaces FileSourceScanExec with GpuFileSourceScanExec, so
+  // the original WholeStageCodegen→ColumnarToRow→InputAdapter→
+  // FileSourceScanExec match never fires. Verify the same intent on the
+  // GPU node: a single GpuFileSourceScanExec whose partitionFilters
+  // contain a subquery (i.e. partition pruning was pushed into the
+  // scan), and dynamicallySelectedPartitions narrowed runtime reads to
+  // p=0 only — directly mirroring the CPU test's
+  // FileScanRDD.filePartitions check.
+  // https://github.com/NVIDIA/spark-rapids/issues/14172
+  testRapids("SPARK-26893: Allow pushdown of partition pruning subquery filters to file source") {
+    withTable("a", "b") {
+      spark.range(4).selectExpr("id", "id % 2 AS p").write.partitionBy("p").saveAsTable("a")
+      spark.range(2).write.saveAsTable("b")
+
+      val df = sql("SELECT * FROM a WHERE p <= (SELECT MIN(id) FROM b)")
+      checkAnswer(df, Seq(Row(0, 0), Row(2, 0)))
+
+      val plan = df.queryExecution.executedPlan
+      val gpuScans = collect(plan) { case s: GpuFileSourceScanExec => s }
+      // Pick the scan whose partitionFilters contain a subquery (pushdown target)
+      // rather than asserting on total scan count, so the test stays robust if
+      // additional file scans (e.g. table `b` inside the scalar subquery) become
+      // GpuFileSourceScanExec as GPU coverage expands.
+      val fs = gpuScans.find(_.partitionFilters.exists(ExecSubqueryExpression.hasSubquery))
+        .getOrElse(fail(s"expected a GpuFileSourceScanExec with a subquery in partitionFilters " +
+          s"(pushdown failed); found ${gpuScans.size} GPU scan(s) total"))
+      val readFiles = fs.dynamicallySelectedPartitions.flatMap(_.files)
+      assert(readFiles.nonEmpty, "no files selected after dynamic pruning")
+      assert(readFiles.forall(_.getPath.toString.contains("p=0")),
+        s"expected only p=0 files, got ${readFiles.map(_.getPath).mkString(", ")}")
     }
   }
 

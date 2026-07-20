@@ -21,6 +21,28 @@ from clusterutils import ClusterUtils
 import params
 
 
+def get_test_report_path_prefix():
+    """Return the remote repo root whose integration_tests/target contains run_dir outputs.
+
+    When jar_path is provided, tests run from that uploaded JAR directory. Otherwise Spark
+    4+ Databricks builds run from scala2.13/pom.xml, so run_pyspark_from_build.sh writes
+    run_dir* under spark-rapids/scala2.13/integration_tests/target.
+    """
+    source_path = (params.jar_path or "/home/ubuntu/spark-rapids").rstrip("/")
+    if params.jar_path:
+        return source_path
+
+    try:
+        spark_major_version = int(params.base_spark_pom_version.split(".", 1)[0])
+    except ValueError:
+        print("WARNING: unable to parse base Spark version '%s'; using the default report path" %
+              params.base_spark_pom_version)
+        spark_major_version = 0
+    if spark_major_version >= 4:
+        return "%s/scala2.13" % source_path
+    return source_path
+
+
 def main():
     """Define main function."""
     master_addr = ClusterUtils.cluster_get_master_addr(params.workspace, params.clusterid, params.token)
@@ -45,16 +67,27 @@ def main():
     try:
         subprocess.check_call(ssh_command, shell=True)
     finally:
-        print("Copying test report tarball back")
-        if params.base_spark_pom_version.startswith("4."):
-            default_jar_path = "/home/ubuntu/spark-rapids/scala2.13"
-        else:
-            default_jar_path = "/home/ubuntu/spark-rapids"
-        report_path_prefix = params.jar_path if params.jar_path else default_jar_path
-        rsync_command = "rsync -I -Pave \"ssh %s\" ubuntu@%s:%s/integration_tests/target/run_dir*/TEST-pytest-*.xml ./" % \
-            (ssh_args, master_addr, report_path_prefix)
-        print("rsync command: %s" % rsync_command)
-        subprocess.check_call(rsync_command, shell = True)
+        print("Copying test reports back")
+        try:
+            report_target_path = "%s/integration_tests/target" % get_test_report_path_prefix()
+            subprocess.check_call("mkdir -p integration_tests/target", shell=True)
+            # Copy the diagnostics needed by Jenkins while avoiding unrelated run_dir contents.
+            rsync_command = "rsync -I -Pave \"ssh %s\" --prune-empty-dirs " \
+                "--include='run_dir*/' " \
+                "--include='run_dir*/TEST-pytest-*.xml' " \
+                "--include='run_dir*/eventlog_*/***' " \
+                "--include='run_dir*/*_worker_logs.log' " \
+                "--exclude='*' ubuntu@%s:%s/ integration_tests/target/" % \
+                (ssh_args, master_addr, report_target_path)
+            print("rsync command: %s" % rsync_command)
+            subprocess.check_call(rsync_command, shell=True)
+            # Keep the existing Jenkins JUnit publishing flow, which expects XML files in this
+            # directory.
+            copy_xml_command = "cp integration_tests/target/run_dir*/TEST-pytest-*.xml ./ || true"
+            print("copy xml command: %s" % copy_xml_command)
+            subprocess.check_call(copy_xml_command, shell=True)
+        except subprocess.CalledProcessError as e:
+            print("WARNING: test report collection failed: %s" % e)
 
 
 if __name__ == '__main__':

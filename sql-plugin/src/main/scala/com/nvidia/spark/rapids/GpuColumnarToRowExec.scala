@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@ package com.nvidia.spark.rapids
 import scala.annotation.tailrec
 import scala.collection.mutable.Queue
 
-import ai.rapids.cudf.{HostColumnVector, Table}
+import ai.rapids.cudf.{Cuda, HostColumnVector, Table}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.AssertUtils.assertInTests
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
@@ -31,9 +31,10 @@ import com.nvidia.spark.rapids.shims.{CudfUnsafeRow, ShimUnaryExecNode}
 import org.apache.spark.TaskContext
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.{Attribute, SortOrder, UnsafeProjection, UnsafeRow}
+import org.apache.spark.sql.catalyst.expressions.{Attribute, SortOrder, UnsafeProjection}
 import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.execution.{ColumnarToRowTransition, SparkPlan}
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.execution.GpuColumnToRowMapPartitionsRDD
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -51,19 +52,29 @@ class AcceleratedColumnarToRowIterator(
   @transient private var pendingCvs: Queue[HostColumnVector] = Queue.empty
   // GPU batches read in must be closed by the receiver (us)
   @transient private var currentCv: Option[HostColumnVector] = None
-  // This only works on fixedWidth types for now...
-  assertInTests(schema.forall(attr => UnsafeRow.isFixedLength(attr.dataType)))
+  // The accelerated path now also accepts STRING (8-byte offset/length slot in the JCUDF row)
+  // and DECIMAL128 (16-byte rep). Use the canonical C2R gate so this assertion stays in sync
+  // with whatever CudfUnsafeRow can decode.
+  assertInTests(schema.forall(attr => CudfRowTransitions.isC2RSupportedType(attr.dataType)))
   // We want to remap the rows to improve packing.  This means that they should be sorted by
   // the largest alignment to the smallest.
 
   // for packMap the nth entry is the index of the original input column that we want at
   // the nth entry.
+  //
+  // The JCUDF row layout stores a STRING/BINARY column as an 8-byte (uint32 offset, uint32
+  // length) slot in the fixed-width region — not Spark's defaultSize-of-20 estimate — so
+  // sorting by that real slot size keeps variable-width columns adjacent to LONG/DOUBLE and
+  // avoids wasted padding between LONG and INT.
+  private def packSizeOf(dt: DataType): Int = dt match {
+    case StringType | BinaryType => 8
+    case _                       => DecimalUtil.getDataTypeSize(dt)
+  }
+
   private val packMap: Array[Int] = schema
     .zipWithIndex
-    .sortWith {
-      (x, y) =>
-        DecimalUtil.getDataTypeSize(x._1.dataType) > DecimalUtil.getDataTypeSize(y._1.dataType)
-    }.map(_._2)
+    .sortWith { (x, y) => packSizeOf(x._1.dataType) > packSizeOf(y._1.dataType) }
+    .map(_._2)
     .toArray
   // For unpackMap the nth entry is the index in the row that came back for the original
   private val unpackMap: Array[Int] = packMap
@@ -75,6 +86,21 @@ class AcceleratedColumnarToRowIterator(
   private var baseDataAddress: Long = -1
   private var at: Int = 0
   private var total: Int = 0
+
+  // Pre-computed kernel-selection inputs. The fixed-width-optimized kernel only accepts
+  // fixed-width columns (DType.getSizeInBytes > 0 — i.e. not STRING/BINARY/LIST) and only
+  // tolerates per-row sizes up to ~1536 bytes; past that it throws "Row size is too large
+  // to fit in shared memory". 96 DECIMAL128 columns (96 * 16 = 1536, plus validity) already
+  // exceeds that limit, so the column-count check alone is not enough. Hoist both checks
+  // out of the per-batch hot path.
+  private val schemaAllFixedWidth: Boolean = schema.forall { a =>
+    GpuColumnVector.getNonNestedRapidsType(a.dataType).getSizeInBytes > 0
+  }
+  private val schemaEstimatedRowBytes: Int =
+    CudfUnsafeRow.getRowSizeEstimate(packMap.map(schema(_)))
+  // Matches max_shared_size / 32 (smallest possible block_size that still divides by 32) in
+  // calc_fixed_width_kernel_dims; see row_conversion.cu :: calc_fixed_width_kernel_dims.
+  private val fixedWidthOptimizedRowLimitBytes = 1536
 
   // Don't install the callback if in a unit test
   Option(TaskContext.get()).foreach { tc =>
@@ -120,13 +146,16 @@ class AcceleratedColumnarToRowIterator(
         val it = RmmRapidsRetryIterator.withRetry(scb, splitSpillableInHalfByRows) { attempt =>
           withResource(attempt.getColumnarBatch()) { attemptCb =>
             withResource(rearrangeRows(attemptCb)) { table =>
-              // The fixed-width optimized cudf kernel only supports up to 1.5 KB per row which
-              // means at most 184 double/long values. Spark by default limits codegen to 100
-              // fields "spark.sql.codegen.maxFields". So, we are going to be cautious and
-              // start with that until we have tested it more. We branching over the size of
-              // the output to know which kernel to call. If schema.length < 100 we call the
-              // fixed-width optimized version, otherwise the generic one
-              if (schema.length < 100) {
+              // The fixed-width-optimized kernel beats the generic transpose for narrow
+              // (< 100 cols) all-fixed-width schemas, but rejects STRING/BINARY and any row
+              // wider than the per-block shmem budget (~1536 bytes; see the matching limit
+              // in row_conversion.cu :: calc_fixed_width_kernel_dims). Fall back to the
+              // generic convertToRows when either constraint is violated.
+              val useOptimized =
+                schema.length < 100 &&
+                  schemaAllFixedWidth &&
+                  schemaEstimatedRowBytes <= fixedWidthOptimizedRowLimitBytes
+              if (useOptimized) {
                 RowConversion.convertToRowsFixedWidthOptimized(table)
               } else {
                 RowConversion.convertToRows(table)
@@ -322,16 +351,40 @@ class ColumnarToRowIterator(batches: Iterator[ColumnarBatch],
 }
 
 object CudfRowTransitions {
-  def isSupportedType(dataType: DataType): Boolean = dataType match {
-    // Only fixed width for now...
+  // Types whose encoded width on the R2C side is one of {1, 2, 4, 8} bytes, which is all the
+  // GeneratedInternalRowToCudfRowIterator codegen knows how to emit. Widening this set requires
+  // teaching that codegen to write 16-byte fields (DECIMAL128) and variable-width payloads
+  // (STRING / BINARY) into the JCUDF row, which has not been done yet.
+  def isR2CSupportedType(dataType: DataType): Boolean = dataType match {
     case ByteType | ShortType | IntegerType | LongType |
          FloatType | DoubleType | BooleanType | DateType | TimestampType => true
     case dt: DecimalType if dt.precision <= Decimal.MAX_LONG_DIGITS => true
     case _ => false
   }
 
-  def areAllSupported(schema: Seq[Attribute]): Boolean =
-    schema.forall(att => isSupportedType(att.dataType))
+  // Types that the C2R fast path can decode out of a JCUDF row. STRING is encoded in the row
+  // as a (uint32 offset, uint32 length) slot pointing to the row-trailing variable-width
+  // region; CudfUnsafeRow.getUTF8String reads it in place. DECIMAL128 (precision in (18, 38])
+  // is supported after the spark-rapids-jni row_conversion fixes. BINARY would also work in
+  // principle but cudf maps BINARY to LIST<INT8>, which the row_conversion path does not
+  // handle today, so leave it out for now.
+  def isC2RSupportedType(dataType: DataType): Boolean = dataType match {
+    case dt: DecimalType if dt.precision <= DecimalType.MAX_PRECISION => true
+    case StringType => true
+    case other => isR2CSupportedType(other)
+  }
+
+  // Legacy alias kept for callers that pre-date the C2R/R2C split. Defaults to the strict
+  // R2C set so older call sites do not accidentally pick up the wider C2R set.
+  def isSupportedType(dataType: DataType): Boolean = isR2CSupportedType(dataType)
+
+  def areAllR2CSupported(schema: Seq[Attribute]): Boolean =
+    schema.forall(att => isR2CSupportedType(att.dataType))
+
+  def areAllC2RSupported(schema: Seq[Attribute]): Boolean =
+    schema.forall(att => isC2RSupportedType(att.dataType))
+
+  def areAllSupported(schema: Seq[Attribute]): Boolean = areAllR2CSupported(schema)
 }
 
 case class GpuColumnarToRowExec(
@@ -390,22 +443,27 @@ object GpuColumnarToRowExec {
    * where CUDF JNI column->row transposition works incorrectly on certain
    * GPU architectures.
    */
-  private lazy val isAcceleratedTransposeSupported: Boolean = {
-    // Check if the current CUDA device architecture exceeds Pascal.
-    // i.e. CUDA compute capability > 6.x.
-    // Reference:  https://developer.nvidia.com/cuda-gpus
-    //Cuda.getComputeCapabilityMajor > 6
-    // https://github.com/NVIDIA/spark-rapids/issues/10062, at least until we can debug and fix it.
-    false
-  }
+  // The accelerated columnar-to-row transpose kernel is correct on every compute capability
+  // > Pascal after the spark-rapids-jni row_conversion bug fixes (off-by-one in
+  // determine_tiles, tile-boundary race, etc.). Pre-Volta GPUs are kept on the slow path
+  // because we have not validated the kernel there. Reference:
+  // https://developer.nvidia.com/cuda-gpus
+  private lazy val isAcceleratedTransposeSupported: Boolean =
+    Cuda.getComputeCapabilityMajor > 6
 
   def makeIteratorFunc(
       output: Seq[Attribute],
       numOutputRows: GpuMetric,
       numInputBatches: GpuMetric,
       opTime: GpuMetric,
-      streamTime: GpuMetric): Iterator[ColumnarBatch] => Iterator[InternalRow] = {
-    if (CudfRowTransitions.areAllSupported(output) &&
+      streamTime: GpuMetric)
+      : Iterator[ColumnarBatch] => Iterator[InternalRow] = {
+    // Read the kill switch on the driver where this function is invoked (doExecute,
+    // GpuRangePartitioner sampling, ...) so every caller honors it without having to
+    // thread the conf through their own signatures.
+    val acceleratedTransposeEnabled =
+      new RapidsConf(SQLConf.get).isAcceleratedColumnarToRowEnabled
+    if (CudfRowTransitions.areAllC2RSupported(output) &&
         // For a small number of columns it is still best to do it the original way
         output.length > 4 &&
         // We can support upto 2^31 bytes per row. That is ~250M columns of 64-bit fixed-width data.
@@ -416,11 +474,10 @@ object GpuColumnarToRowExec {
       (batches: Iterator[ColumnarBatch]) => {
         // UnsafeProjection is not serializable so do it on the executor side
         val toUnsafe = UnsafeProjection.create(output, output)
-        // Work around {@link https://github.com/rapidsai/cudf/issues/10569}, where CUDF JNI
-        // acceleration of column->row transposition produces incorrect results on certain
-        // GPU architectures.
-        // Check that the accelerated transpose works correctly on the current CUDA device.
-        if (isAcceleratedTransposeSupported) {
+        // The fast path requires both a capable GPU and the conf-level kill switch
+        // (spark.rapids.sql.acceleratedColumnarToRow.enabled) to be on. The conf exists so
+        // users can A/B test or fall back without changing code.
+        if (acceleratedTransposeEnabled && isAcceleratedTransposeSupported) {
           new AcceleratedColumnarToRowIterator(output, batches, numInputBatches, numOutputRows,
             opTime, streamTime).map(toUnsafe)
         } else {

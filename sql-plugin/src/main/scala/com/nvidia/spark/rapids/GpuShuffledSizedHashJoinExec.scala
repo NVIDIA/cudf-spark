@@ -407,20 +407,19 @@ abstract class GpuShuffledSizedHashJoinExec[HOST_BATCH_TYPE <: AutoCloseable] ex
     STREAM_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_STREAM_TIME),
     SMALL_JOIN_COUNT -> createMetric(DEBUG_LEVEL, DESCRIPTION_SMALL_JOIN_COUNT),
     BIG_JOIN_COUNT -> createMetric(DEBUG_LEVEL, DESCRIPTION_BIG_JOIN_COUNT),
-    JOIN_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_JOIN_TIME))
+    JOIN_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_JOIN_TIME),
+    CPU_BRIDGE_PROCESSING_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
+      DESCRIPTION_CPU_BRIDGE_PROCESSING_TIME),
+    CPU_BRIDGE_WAIT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
+      DESCRIPTION_CPU_BRIDGE_WAIT_TIME))
 
   override def requiredChildDistribution: Seq[Distribution] =
     Seq(GpuHashPartitioning.getDistribution(cpuLeftKeys),
       GpuHashPartitioning.getDistribution(cpuRightKeys))
 
   override def output: Seq[Attribute] = joinType match {
-    case _: InnerLike => left.output ++ right.output
-    case LeftOuter =>
-      left.output ++ right.output.map(_.withNullability(true))
-    case RightOuter =>
-      left.output.map(_.withNullability(true)) ++ right.output
-    case FullOuter =>
-      left.output.map(_.withNullability(true)) ++ right.output.map(_.withNullability(true))
+    case _: InnerLike | LeftOuter | RightOuter | FullOuter =>
+      GpuHashJoin.output(joinType, left.output, right.output)
     case x =>
       throw new IllegalArgumentException(s"unsupported join type: $x")
   }

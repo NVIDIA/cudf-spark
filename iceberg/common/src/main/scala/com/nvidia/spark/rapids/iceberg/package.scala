@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,15 +21,17 @@ import scala.collection.JavaConverters._
 import org.apache.iceberg.Schema
 
 package object iceberg {
-  def fieldIndex(schema: Schema, fieldId: Int): Int = {
+  def findFieldIndex(schema: Schema, fieldId: Int): Option[Int] = {
     val idx = schema
       .columns()
       .asScala
       .indexWhere(_.fieldId() == fieldId)
-    if (idx == -1) {
+    if (idx == -1) None else Some(idx)
+  }
+
+  def fieldIndex(schema: Schema, fieldId: Int): Int = {
+    findFieldIndex(schema, fieldId).getOrElse {
       throw new IllegalArgumentException(s"Field id $fieldId not found in schema")
-    } else {
-      idx
     }
   }
 }

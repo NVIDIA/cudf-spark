@@ -18,6 +18,8 @@ package com.nvidia.spark.rapids
 
 import java.time.ZoneId
 
+import scala.util.Try
+
 import ai.rapids.cudf._
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingArray
@@ -25,8 +27,9 @@ import com.nvidia.spark.rapids.jni.DateTimeRebase
 import com.nvidia.spark.rapids.jni.fileio.RapidsFileIO
 import com.nvidia.spark.rapids.shims._
 import com.nvidia.spark.rapids.shims.parquet._
+import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.mapreduce.{Job, OutputCommitter, TaskAttemptContext}
-import org.apache.parquet.hadoop.{ParquetOutputCommitter, ParquetOutputFormat}
+import org.apache.parquet.hadoop.{ParquetOutputCommitter, ParquetOutputFormat, ParquetWriter}
 import org.apache.parquet.hadoop.ParquetOutputFormat.JobSummaryLevel
 import org.apache.parquet.hadoop.codec.CodecConfig
 import org.apache.parquet.hadoop.util.ContextUtil
@@ -43,6 +46,28 @@ import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 object GpuParquetFileFormat {
+  private val DefaultParquetBlockSize = ParquetWriter.DEFAULT_BLOCK_SIZE.toLong
+
+  private def isDefaultParquetBlockSize(value: String): Boolean =
+    Try(value.trim.toLong).toOption.contains(DefaultParquetBlockSize)
+
+  def parquetBlockSizeWarning(
+      conf: Configuration,
+      options: Map[String, String]): Option[String] = {
+    options.get(ParquetOutputFormat.BLOCK_SIZE)
+      .orElse(Option(conf.get(ParquetOutputFormat.BLOCK_SIZE)))
+      .filterNot(isDefaultParquetBlockSize)
+      .map { value =>
+        s"${ParquetOutputFormat.BLOCK_SIZE} is set to $value, but the RAPIDS GPU Parquet " +
+          "writer does not apply Spark CPU writer row group sizing semantics for this setting. " +
+          s"Set ${RapidsConf.ENABLE_PARQUET_WRITE.key}=false to use Spark CPU Parquet " +
+          "writer behavior. To tune RAPIDS GPU writer row group sizing, use internal " +
+          s"configs ${RapidsConf.PARQUET_WRITER_ROW_GROUP_SIZE_ROWS.key} and " +
+          s"${RapidsConf.PARQUET_WRITER_ROW_GROUP_SIZE_BYTES.key}; these are cuDF-specific " +
+          s"and are not equivalent to ${ParquetOutputFormat.BLOCK_SIZE}."
+      }
+  }
+
   def tagGpuSupport(
       meta: RapidsMeta[_, _, _],
       spark: SparkSession,
@@ -186,6 +211,9 @@ class GpuParquetFileFormat extends ColumnarFileFormat with Logging {
     val parquetOptions = new ParquetOptions(options, sqlConf)
 
     val conf = ContextUtil.getConfiguration(job)
+    GpuParquetFileFormat.parquetBlockSizeWarning(conf, options).foreach { warning =>
+      logWarning(warning)
+    }
 
     val outputTimestampType = sqlConf.parquetOutputTimestampType
     val dateTimeRebaseMode = DateTimeRebaseMode.fromName(
@@ -280,6 +308,15 @@ class GpuParquetFileFormat extends ColumnarFileFormat with Logging {
     // holdGpuBetweenBatches is on by default if asyncOutputWriteEnabled is on
     val holdGpuBetweenBatches = RapidsConf.ASYNC_QUERY_OUTPUT_WRITE_HOLD_GPU_IN_TASK.get(sqlConf)
       .getOrElse(asyncOutputWriteEnabled)
+    val parquetWriterRowGroupSizeRows =
+      RapidsConf.PARQUET_WRITER_ROW_GROUP_SIZE_ROWS.get(sqlConf)
+    val parquetWriterRowGroupSizeBytes =
+      RapidsConf.PARQUET_WRITER_ROW_GROUP_SIZE_BYTES.get(sqlConf)
+    val parquetWriterMaxDictionarySize =
+      RapidsConf.PARQUET_WRITER_MAX_DICTIONARY_SIZE.get(sqlConf)
+    val parquetWriterDictionaryPolicy =
+      RapidsConf.PARQUET_WRITER_DICTIONARY_POLICY.get(sqlConf)
+        .map(ParquetWriterOptions.DictionaryPolicy.valueOf)
 
     new ColumnarOutputWriterFactory {
         override def newInstance(
@@ -291,7 +328,9 @@ class GpuParquetFileFormat extends ColumnarFileFormat with Logging {
           fileIO: RapidsFileIO): ColumnarOutputWriter = {
         new GpuParquetWriter(path, dataSchema, compressionType, outputTimestampType.toString,
           dateTimeRebaseMode, timestampRebaseMode, context, parquetFieldIdWriteEnabled,
-          statsTrackers, debugOutputPath, holdGpuBetweenBatches, asyncOutputWriteEnabled, fileIO)
+          parquetWriterRowGroupSizeRows, parquetWriterRowGroupSizeBytes,
+          parquetWriterMaxDictionarySize, parquetWriterDictionaryPolicy, statsTrackers,
+          debugOutputPath, holdGpuBetweenBatches, asyncOutputWriteEnabled, fileIO)
       }
 
       override def getFileExtension(context: TaskAttemptContext): String = {
@@ -299,8 +338,9 @@ class GpuParquetFileFormat extends ColumnarFileFormat with Logging {
       }
 
       override def partitionFlushSize(context: TaskAttemptContext): Long =
-        context.getConfiguration.getLong("write.parquet.row-group-size-bytes",
-          128L * 1024L * 1024L) // 128M
+        parquetWriterRowGroupSizeBytes.getOrElse(
+          context.getConfiguration.getLong("write.parquet.row-group-size-bytes",
+            128L * 1024L * 1024L)) // 128M
     }
   }
 }
@@ -314,6 +354,10 @@ class GpuParquetWriter(
     timestampRebaseMode: DateTimeRebaseMode,
     context: TaskAttemptContext,
     parquetFieldIdEnabled: Boolean,
+    parquetWriterRowGroupSizeRows: Option[Integer],
+    parquetWriterRowGroupSizeBytes: Option[Long],
+    parquetWriterMaxDictionarySize: Option[Long],
+    parquetWriterDictionaryPolicy: Option[ParquetWriterOptions.DictionaryPolicy],
     statsTrackers: Seq[ColumnarWriteTaskStatsTracker],
     debugDumpPath: Option[String],
     holdGpuBetweenBatches: Boolean,
@@ -407,6 +451,18 @@ class GpuParquetWriter(
         parquetFieldIdEnabled)
       .withMetadata(writeContext.getExtraMetaData)
       .withCompressionType(compressionType)
+    parquetWriterRowGroupSizeRows.foreach { rowGroupSizeRows =>
+      builder.withRowGroupSizeRows(rowGroupSizeRows)
+    }
+    parquetWriterRowGroupSizeBytes.foreach { rowGroupSizeBytes =>
+      builder.withRowGroupSizeBytes(rowGroupSizeBytes)
+    }
+    parquetWriterMaxDictionarySize.foreach { maxDictionarySize =>
+      builder.withMaxDictionarySize(maxDictionarySize)
+    }
+    parquetWriterDictionaryPolicy.foreach { dictionaryPolicy =>
+      builder.withDictionaryPolicy(dictionaryPolicy)
+    }
     Table.writeParquetChunked(builder.build(), this)
   }
 }

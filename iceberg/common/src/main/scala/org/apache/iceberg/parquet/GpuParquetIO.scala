@@ -18,6 +18,7 @@ package org.apache.iceberg.parquet
 
 import com.nvidia.spark.rapids.GpuMetric
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile
+import com.nvidia.spark.rapids.iceberg.ShimUtils
 import org.apache.hadoop.fs.Path
 import org.apache.iceberg.io.InputFile
 import org.apache.iceberg.shaded.org.apache.parquet.ParquetReadOptions
@@ -26,13 +27,13 @@ import org.apache.iceberg.shaded.org.apache.parquet.io.{InputFile => ShadedInput
 
 object GpuParquetIO {
   def file(file: InputFile): ShadedInputFile = {
-    ParquetIO.file(file)
+    GpuParquetIOAccess.file(file)
   }
 
   /**
-   * Open a shaded `ParquetFileReader`. Footer caching is version-dependent and handled by the
-   * per-iceberg-version [[GpuParquetIOShim]]: the 1.10.x shim caches via `FileCache`, while the
-   * 1.6.x / 1.9.x shims open without caching (their shaded parquet has no way to inject a
+   * Open a shaded `ParquetFileReader`. Footer caching is version-dependent and resolved via
+   * `IcebergShimUtils.openParquetReader`: 1.10.x overrides it to cache via `FileCache`, while
+   * 1.6.x / 1.9.x inherit the no-cache default (their shaded parquet has no way to inject a
    * pre-parsed footer).
    */
   def openReader(
@@ -40,6 +41,6 @@ object GpuParquetIO {
       filePath: Path,
       options: ParquetReadOptions,
       metrics: Map[String, GpuMetric]): ParquetFileReader = {
-    GpuParquetIOShim.openReader(inputFile, filePath, options, metrics)
+    ShimUtils.openParquetReader(inputFile, filePath, options, metrics)
   }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 package com.nvidia.spark.rapids.fileio.hadoop;
 
+import com.nvidia.spark.rapids.fileio.RapidsInputFiles;
 import com.nvidia.spark.rapids.jni.fileio.RapidsFileIO;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import com.nvidia.spark.rapids.jni.fileio.RapidsOutputFile;
@@ -40,12 +41,20 @@ public class HadoopFileIO implements RapidsFileIO {
     }
 
     @Override
-    public HadoopInputFile newInputFile(String path) throws IOException {
+    public RapidsInputFile newInputFile(String path) throws IOException {
         return this.newInputFile(new Path(path));
     }
 
     @Override
-    public HadoopInputFile newInputFile(Path path) throws IOException {
+    public RapidsInputFile newInputFile(Path path) throws IOException {
+        String scheme = path.toUri().getScheme();
+        if (scheme != null && scheme.startsWith("s3") && RapidsInputFiles.isS3PerfEnabled()) {
+            return S3InputFile.create(path, hadoopConf.value());
+        }
+        if (scheme != null && (scheme.equals("gs") || scheme.equals("gcs")) &&
+                RapidsInputFiles.isGCSPerfEnabled()) {
+            return GCSInputFile.create(path, hadoopConf.value());
+        }
         return HadoopInputFile.create(path, hadoopConf.value());
     }
 

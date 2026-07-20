@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * This file was derived from DoAutoCompaction.scala
  * from https://github.com/delta-io/delta/pull/1156

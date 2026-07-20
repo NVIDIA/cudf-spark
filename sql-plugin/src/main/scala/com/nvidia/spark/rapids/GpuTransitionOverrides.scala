@@ -28,17 +28,19 @@ import com.nvidia.spark.rapids.shims.{GpuBatchScanExec, SparkShimImpl}
 
 import org.apache.spark.SparkContext
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, AttributeReference, Expression, SortOrder}
+import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, AttributeReference, BoundReference, Expression, Literal, SortOrder}
 import org.apache.spark.sql.catalyst.rules.Rule
+import org.apache.spark.sql.catalyst.trees.TreeNodeTag
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.adaptive._
 import org.apache.spark.sql.execution.columnar.InMemoryTableScanExec
 import org.apache.spark.sql.execution.command.{DataWritingCommandExec, ExecutedCommandExec}
 import org.apache.spark.sql.execution.datasources.v2.{DataSourceV2ScanExecBase, DropTableExec, ShowTablesExec}
-import org.apache.spark.sql.execution.exchange.{BroadcastExchangeLike, Exchange, ReusedExchangeExec, ShuffleExchangeLike}
+import org.apache.spark.sql.execution.exchange.{BroadcastExchangeLike, ENSURE_REQUIREMENTS,
+  Exchange, ReusedExchangeExec, ShuffleExchangeLike}
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, BroadcastNestedLoopJoinExec}
 import org.apache.spark.sql.rapids.{GpuDataSourceScanExec, GpuFileSourceScanExec, GpuShuffleEnv, GpuTaskMetrics}
-import org.apache.spark.sql.rapids.execution.{ExchangeMappingCache, GpuBroadcastExchangeExec, GpuBroadcastExchangeExecBase, GpuBroadcastToRowExec, GpuCustomShuffleReaderExec, GpuHashJoin, GpuShuffleExchangeExecBase}
+import org.apache.spark.sql.rapids.execution.{ExchangeMappingCache, GpuBroadcastExchangeExec, GpuBroadcastExchangeExecBase, GpuBroadcastToRowExec, GpuCustomShuffleReaderExec, GpuHashJoin, GpuShuffleExchangeExecBase, GpuSubqueryBroadcastExec}
 import org.apache.spark.sql.types.StructType
 
 /**
@@ -132,19 +134,23 @@ class GpuTransitionOverrides extends Rule[SparkPlan] {
       // because we need to return an operator that implements `BroadcastExchangeLike` or
       // `ShuffleExchangeLike`.
       bb.child match {
-        case GpuShuffleCoalesceExec(e: GpuShuffleExchangeExecBase, _) if parent.isEmpty =>
+        case GpuShuffleCoalesceExec(e: GpuShuffleExchangeExecBase, _)
+            if GpuTransitionOverrides.canExposeExchangeForAqeStage(e, parent) =>
           // The coalesce step gets added back into the plan later on, in a
           // future query stage that reads the output from this query stage. This
           // is handled in the case clauses below.
           e.withNewChildren(e.children.map(c => optimizeAdaptiveTransitions(c, Some(e))))
-        case GpuCoalesceBatches(e: GpuShuffleExchangeExecBase, _) if parent.isEmpty =>
+        case GpuCoalesceBatches(e: GpuShuffleExchangeExecBase, _)
+            if GpuTransitionOverrides.canExposeExchangeForAqeStage(e, parent) =>
           // The coalesce step gets added back into the plan later on, in a
           // future query stage that reads the output from this query stage. This
           // is handled in the case clauses below.
           e.withNewChildren(e.children.map(c => optimizeAdaptiveTransitions(c, Some(e))))
         case _ => optimizeAdaptiveTransitions(bb.child, Some(bb)) match {
-          case e: GpuBroadcastExchangeExecBase => e
-          case e: GpuShuffleExchangeExecBase => e
+          case e: GpuBroadcastExchangeExecBase
+              if GpuTransitionOverrides.canExposeExchangeForAqeStage(e, parent) => e
+          case e: GpuShuffleExchangeExecBase
+              if GpuTransitionOverrides.canExposeExchangeForAqeStage(e, parent) => e
           case other => GpuColumnarToRowExec(other)
         }
       }
@@ -630,7 +636,15 @@ class GpuTransitionOverrides extends Rule[SparkPlan] {
   def assertIsOnTheGpu(exp: Expression, conf: RapidsConf): Unit = {
     // There are no GpuAttributeReference or GpuSortOrder
     exp match {
-      case _: AttributeReference | _: SortOrder | _: GpuExpression =>
+      case _: AttributeReference | _: SortOrder =>
+        // These are always allowed
+      case bridge: GpuCpuBridgeExpression =>
+        // For bridge expressions, validate the CPU expressions inside
+        assertBridgeExpressionsAllowed(bridge, conf)
+      case _: BoundReference | _: Literal =>
+          // These are always allowed, and ignored
+      case _: GpuExpression =>
+        // Regular GPU expressions are allowed
       case _ =>
         val classBaseName = PlanUtils.getBaseNameFromClass(exp.getClass.toString)
         if (!conf.testingAllowedNonGpu.contains(classBaseName)) {
@@ -638,6 +652,61 @@ class GpuTransitionOverrides extends Rule[SparkPlan] {
         }
     }
     exp.children.foreach(subExp => assertIsOnTheGpu(subExp, conf))
+  }
+
+  /**
+   * Validates that all CPU expressions within a GpuCpuBridgeExpression are allowed in test mode.
+   * This function recursively traverses the CPU expression tree inside the bridge and checks
+   * each CPU expression against the testingAllowedNonGpu allowlist.
+   */
+  def assertBridgeExpressionsAllowed(bridge: GpuCpuBridgeExpression, conf: RapidsConf): Unit = {
+    val disallowedExprs = scala.collection.mutable.ListBuffer[String]()
+    val allowedExprs = scala.collection.mutable.ListBuffer[String]()
+
+    def collectCpuExpressions(expr: Expression, path: String = ""): Unit = {
+      val currentPath = if (path.isEmpty) {
+        expr.getClass.getSimpleName
+      } else {
+        s"$path.${expr.getClass.getSimpleName}"
+      }
+
+      expr match {
+        case _: Literal | _: BoundReference => ()
+        case _ =>
+          val classBaseName = PlanUtils.getBaseNameFromClass(expr.getClass.toString)
+          if (conf.testingAllowedNonGpu.contains(classBaseName)) {
+            allowedExprs += s"$currentPath ($classBaseName) [ALLOWED]"
+          } else {
+            disallowedExprs += s"$currentPath ($classBaseName) [NOT ALLOWED]"
+          }
+      }
+
+      expr.children.zipWithIndex.foreach { case (child, index) =>
+        collectCpuExpressions(child, s"$currentPath.child[$index]")
+      }
+    }
+
+    collectCpuExpressions(bridge.cpuExpression)
+
+    if (disallowedExprs.nonEmpty) {
+      val errorMessage = new StringBuilder()
+      errorMessage.append(s"GpuCpuBridgeExpression contains disallowed CPU expressions:\n")
+      errorMessage.append(s"Bridge: ${bridge.toString}\n")
+      errorMessage.append(s"CPU Expression Tree Analysis:\n")
+
+      // Show disallowed expressions first
+      errorMessage.append("  DISALLOWED EXPRESSIONS:\n")
+      disallowedExprs.foreach(expr => errorMessage.append(s"    - $expr\n"))
+
+      // When everything is allowed there is nothing to report; allowed expressions are only
+      // included as context when reporting a disallowed expression.
+      if (allowedExprs.nonEmpty) {
+        errorMessage.append("  ALLOWED EXPRESSIONS (for context):\n")
+        allowedExprs.foreach(expr => errorMessage.append(s"    - $expr\n"))
+      }
+
+      throw new IllegalArgumentException(errorMessage.toString())
+    }
   }
 
   def assertIsOnTheGpu(plan: SparkPlan, conf: RapidsConf): Unit = {
@@ -759,6 +828,77 @@ class GpuTransitionOverrides extends Rule[SparkPlan] {
     }
   }
 
+  /**
+   * In non-AQE mode with DPP, GpuSubqueryBroadcastExec builds its underlying
+   * GpuBroadcastExchangeExec directly in GpuOverrides without going through this rule.
+   * The DPP-side broadcast therefore has a structurally different child (e.g. missing
+   * GpuCoalesceBatches that this rule inserts on the main plan) than the join-side
+   * broadcast for the same logical CPU exchange, and its cpuCanonical is also computed
+   * after GPU rewriting so it does not match the join-side cpuCanonical. Spark's
+   * ReuseExchangeAndSubquery rule does not merge them, so the dim side is materialized
+   * twice and DPP loses its intended performance benefit.
+   *
+   * This pass walks subquery expressions in the final plan, identifies the DPP-side
+   * GpuBroadcastExchangeExec inside a GpuSubqueryBroadcastExec, and matches it against
+   * the main-plan GpuBroadcastExchangeExec instances by (mode, child canonical form with
+   * GpuCoalesceBatches stripped — see stripGpuCoalesceBatches below). When a match is found,
+   * the DPP-side broadcast is rewritten to ReusedExchangeExec referencing the join-side
+   * instance.
+   */
+  private[rapids] def fixupNonAdaptiveBroadcastReuse(p: SparkPlan): SparkPlan = {
+    // Normalize a plan for signature matching by removing GpuCoalesceBatches wraps. The main-plan
+    // broadcast picks these up from insertCoalesce / optimizeCoalesce but the DPP-side broadcast
+    // (built earlier in GpuOverrides without going through GpuTransitionOverrides) does not, so
+    // we have to strip them on both sides before comparing canonical forms. This is the only
+    // structural difference observed in practice; other transitions (host->device, etc.) live
+    // outside the broadcast subtree and never reach this helper.
+    def stripGpuCoalesceBatches(plan: SparkPlan): SparkPlan = plan match {
+      case g: GpuCoalesceBatches => stripGpuCoalesceBatches(g.child)
+      case other => other.withNewChildren(other.children.map(stripGpuCoalesceBatches))
+    }
+
+    def signature(g: GpuBroadcastExchangeExec): (Any, SparkPlan) =
+      (g.mode.canonicalized, stripGpuCoalesceBatches(g.child).canonicalized)
+
+    // Collect all main-plan GpuBroadcastExchangeExec instances. SparkPlan.foreach only walks
+    // the plan-tree children and does NOT descend into ExecSubqueryExpression plans, so
+    // DPP-side broadcasts (which live inside GpuSubqueryBroadcastExec under a subquery
+    // expression) are naturally excluded from this collection — exactly what we want, because
+    // those are the instances the transformAllExpressions pass below will rewrite.
+    val mainPlanBroadcasts = mutable.ArrayBuffer.empty[GpuBroadcastExchangeExec]
+    p.foreach {
+      case g: GpuBroadcastExchangeExec => mainPlanBroadcasts += g
+      case _ =>
+    }
+    if (mainPlanBroadcasts.isEmpty) return p
+
+    val bySig = mainPlanBroadcasts.groupBy(signature).map {
+      case (sig, instances) => sig -> instances.head
+    }
+
+    p.transformAllExpressions {
+      case sub: ExecSubqueryExpression if sub.plan.isInstanceOf[GpuSubqueryBroadcastExec] =>
+        val gsb = sub.plan.asInstanceOf[GpuSubqueryBroadcastExec]
+        gsb.child match {
+          case dpp: GpuBroadcastExchangeExec =>
+            bySig.get(signature(dpp)) match {
+              case Some(matched) if !(matched eq dpp) =>
+                // Use dpp.output (not matched.output) so the reused exchange exposes the
+                // DPP-side attributes that downstream subquery expressions reference, while
+                // reading from the matched main-plan exchange. The AQE fixup
+                // fixupAdaptiveExchangeReuse uses the same shape (its g.output is the
+                // DPP-side attributes from the in-pass collected map).
+                val reused = ReusedExchangeExec(dpp.output, matched)
+                val newGsb = gsb.withNewChildren(Seq(reused))
+                  .asInstanceOf[GpuSubqueryBroadcastExec]
+                sub.withNewPlan(newGsb)
+              case _ => sub
+            }
+          case _ => sub
+        }
+    }
+  }
+
   private def insertStageLevelMetrics(plan: SparkPlan): Unit = {
     val sc = SparkSession.active.sparkContext
     val gen = new AtomicInteger(0)
@@ -805,8 +945,8 @@ class GpuTransitionOverrides extends Rule[SparkPlan] {
       GpuOverrides.logDuration(rapidsConf.shouldExplain,
         t => f"GPU plan transition optimization took $t%.2f ms") {
         var updatedPlan = DeltaProvider().pruneFileMetadata(plan)
-        if (DeltaProvider().canPushDVPredicateDownToScan(rapidsConf)) {
-          updatedPlan = DeltaProvider().pushDVPredicateDownToScan(updatedPlan)
+        if (DeltaProvider().isPushDVPredicateDownEnabled(rapidsConf)) {
+          updatedPlan = DeltaProvider().tryPushDVPredicateDownToScan(updatedPlan)
         }
         updatedPlan = insertHashOptimizeSorts(updatedPlan)
         updatedPlan = updateScansForInputAndOrder(updatedPlan)
@@ -850,6 +990,10 @@ class GpuTransitionOverrides extends Rule[SparkPlan] {
             plan.conf.adaptiveExecutionEnabled && plan.conf.exchangeReuseEnabled) {
           updatedPlan = fixupAdaptiveExchangeReuse(updatedPlan)
         }
+        if (rapidsConf.isNonAqeBroadcastReuseFixupEnabled &&
+            !plan.conf.adaptiveExecutionEnabled && plan.conf.exchangeReuseEnabled) {
+          updatedPlan = fixupNonAdaptiveBroadcastReuse(updatedPlan)
+        }
 
         if (rapidsConf.isTagLoreIdEnabled) {
           updatedPlan = GpuLore.tagForLore(updatedPlan, rapidsConf)
@@ -870,6 +1014,55 @@ class GpuTransitionOverrides extends Rule[SparkPlan] {
 }
 
 object GpuTransitionOverrides {
+  val aqeQueryStageExchange = TreeNodeTag[Boolean]("rapids.aqe.queryStageExchange")
+
+  def tagAqeQueryStageExchanges(plan: SparkPlan): Unit = {
+    def tagPlanAndSubqueries(plan: SparkPlan): Unit = {
+      plan.foreach { node =>
+        node match {
+          case exchange: Exchange =>
+            exchange.setTagValue(aqeQueryStageExchange, true)
+          case reused: ReusedSubqueryExec =>
+            tagPlanAndSubqueries(reused.child)
+          case _ =>
+        }
+        node.expressions.foreach(_.foreach {
+          case subquery: ExecSubqueryExpression =>
+            tagPlanAndSubqueries(subquery.plan)
+          case _ =>
+        })
+      }
+    }
+    tagPlanAndSubqueries(plan)
+  }
+
+  def copyAqeQueryStageExchangeTag(from: SparkPlan, to: SparkPlan): Unit = {
+    if (from.getTagValue(aqeQueryStageExchange).contains(true)) {
+      to.setTagValue(aqeQueryStageExchange, true)
+    }
+  }
+
+  private[rapids] def canExposeExchangeForAqeStage(
+      exchange: SparkPlan,
+      parent: Option[SparkPlan]): Boolean = {
+    parent.isEmpty &&
+        (exchange.getTagValue(aqeQueryStageExchange).contains(true) ||
+            exchangeGeneratedByEnsureRequirements(exchange))
+  }
+
+  // AQE can insert generated shuffles during re-optimization after query-stage prep has
+  // already tagged the original exchanges. A parentless ENSURE_REQUIREMENTS shuffle is a
+  // query-stage root, unlike user repartition exchanges with explicit repartition origins.
+  private def exchangeGeneratedByEnsureRequirements(exchange: SparkPlan): Boolean = exchange match {
+    case shuffle: ShuffleExchangeLike =>
+      // Compare by origin name instead of `==`. Some proprietary Spark distributions define
+      // their own ENSURE_REQUIREMENTS singleton to work around upstream ShuffleOrigin being
+      // sealed. Those instances are not equal to the upstream case object but preserve the
+      // same origin name.
+      shuffle.shuffleOrigin.toString == ENSURE_REQUIREMENTS.toString
+    case _ => false
+  }
+
   /**
    * Returning the underlying plan of a query stage, or the plan itself if it is not a
    * query stage. This method is typically used when we want to determine if a plan is

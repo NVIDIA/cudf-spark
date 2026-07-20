@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,11 +18,12 @@ package org.apache.spark.sql.rapids.delta
 
 import com.nvidia.spark.rapids.delta.GpuDeltaIdentityColumnStatsTracker
 
-import org.apache.spark.sql.{Column, Dataset, SparkSession}
+import org.apache.spark.sql.{Dataset, SparkSession}
 import org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute
 import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression}
 import org.apache.spark.sql.catalyst.plans.logical.LocalRelation
 import org.apache.spark.sql.functions.{array, max, min, to_json}
+import org.apache.spark.sql.nvidia.DFUDFShims
 import org.apache.spark.sql.types.StructType
 
 object GpuIdentityColumn {
@@ -46,7 +47,9 @@ object GpuIdentityColumn {
       s"expected $highWaterMarks found $identityInfo")
 
     val columns = identityInfo.map { case (name, useMax) =>
-      val column = new Column(UnresolvedAttribute.quoted(name))
+      // Build from a quoted unresolved attribute so dots in identity column names are treated
+      // as literal name characters, not nested field traversal.
+      val column = DFUDFShims.exprToColumn(UnresolvedAttribute.quoted(name))
       if (useMax) {
         max(column)
       } else {

@@ -22,13 +22,13 @@
     <parent>
         <groupId>com.nvidia</groupId>
         <artifactId>rapids-4-spark-shim-deps-parent_2.12</artifactId>
-        <version>26.06.0-SNAPSHOT</version>
+        <version>26.08.0-SNAPSHOT</version>
         <relativePath>../shim-deps/pom.xml</relativePath>
     </parent>
 
     <artifactId>rapids-4-spark-sql-plugin-api_2.12</artifactId>
     <description>Module for Non-Shimmable API</description>
-    <version>26.06.0-SNAPSHOT</version>
+    <version>26.08.0-SNAPSHOT</version>
     <properties>
         <rapids.module>sql-plugin-api</rapids.module>
         <rapids.compressed.artifact>false</rapids.compressed.artifact>
@@ -68,6 +68,29 @@
                 <property>
                     <name>buildver</name>
                     <value>411</value>
+                </property>
+            </activation>
+            <build>
+                <pluginManagement>
+                    <plugins>
+                        <plugin>
+                            <groupId>net.alchim31.maven</groupId>
+                            <artifactId>scala-maven-plugin</artifactId>
+                            <configuration>
+                                <release conf.combine="override">${java.major.version}</release>
+                                <addJavacArgs conf.combine="override">-Xlint:all,-serial,-path,-try,-processing</addJavacArgs>
+                            </configuration>
+                        </plugin>
+                    </plugins>
+                </pluginManagement>
+            </build>
+        </profile>
+        <profile>
+            <id>release412</id>
+            <activation>
+                <property>
+                    <name>buildver</name>
+                    <value>412</value>
                 </property>
             </activation>
             <build>

@@ -39,4 +39,11 @@ object FilePartitionShims extends SplitFiles {
   def copyWithFiles(p: FilePartition, newFiles: Array[PartitionedFile]): FilePartition = {
     p.copy(files = newFiles)
   }
+
+  def getFilePartitions(
+      relation: HadoopFsRelation,
+      splitFiles: Seq[PartitionedFile],
+      maxSplitBytes: Long): Seq[FilePartition] = {
+    FilePartition.getFilePartitions(relation.sparkSession, splitFiles, maxSplitBytes)
+  }
 }

@@ -23,6 +23,7 @@
 {"spark": "355"}
 {"spark": "356"}
 {"spark": "357"}
+{"spark": "358"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.iceberg
 
@@ -94,6 +95,34 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       timestampRebaseMode = null,
       hasInt96Timestamps = false,
       blocksFirstRowIndices = Seq(0L)
+    )
+    (info, shadedSchema)
+  }
+
+  /**
+   * Build a `ParquetFileInfoWithBlockMeta` that simulates a split scan task whose blocks
+   * begin somewhere in the middle of the file (i.e. `blocksFirstRowIndices` does not start
+   * at 0). `firstFileGlobalRowIndex` is the file-global first-row index of the first block
+   * in `blockRowCounts`; subsequent blocks are placed contiguously after it.
+   */
+  private def createMultiBlockParquetInfo(
+      shadedSchema: ShadedMessageType,
+      blockRowCounts: Seq[Long],
+      firstFileGlobalRowIndex: Long): (ParquetFileInfoWithBlockMeta, ShadedMessageType) = {
+    val blocks = blockRowCounts.map(createBlockMetaData)
+    val firstRowIndices = blockRowCounts
+      .scanLeft(firstFileGlobalRowIndex)(_ + _)
+      .dropRight(1)
+    val info = ParquetFileInfoWithBlockMeta(
+      filePath = new Path("/test/file.parquet"),
+      blocks = blocks,
+      partValues = InternalRow.empty,
+      schema = unshade(shadedSchema),
+      readSchema = StructType(Seq.empty),
+      dateRebaseMode = null,
+      timestampRebaseMode = null,
+      hasInt96Timestamps = false,
+      blocksFirstRowIndices = firstRowIndices
     )
     (info, shadedSchema)
   }
@@ -901,6 +930,80 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       s"FetchConstant(fieldId=$structFieldId, struct<"))
   }
 
+  test("FetchRowPosition emits file-global _pos across multiple blocks") {
+    import com.nvidia.spark.rapids.Arm.withResource
+    import com.nvidia.spark.rapids.GpuColumnVector
+    import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkColumnVector}
+
+    val rowPosId = MetadataColumns.ROW_POSITION.fieldId()
+
+    // Empty parquet schema: _pos is a generated metadata column, no input column is read
+    // from parquet for it.
+    val parquetSchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
+
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(rowPosId, "_pos", Types.LongType.get())
+    )
+
+    // Simulate a split task whose first block starts at file-global row 500 (this is the
+    // scenario the reader.scala fix exists for; before that fix the task-local first-row
+    // index would be 0). Two blocks of 500 + 400 rows: file-global rows [500, 999] and
+    // [1000, 1399].
+    val (parquetInfo, shadedSchema) =
+      createMultiBlockParquetInfo(parquetSchema, Seq(500L, 400L), firstFileGlobalRowIndex = 500L)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo,
+      new JHashMap[Integer, Any](),
+      expectedSchema,
+      shadedSchema,
+      Map.empty)
+
+    def emptyBatch(rows: Int): ColumnarBatch =
+      new ColumnarBatch(Array.empty[SparkColumnVector], rows)
+
+    // Check every row, not just first/last — a middle-row off-by-one would otherwise slip
+    // past, and the cross-block batch below relies on knowing the exact transition row.
+    def assertPosRange(batch: ColumnarBatch, expectedStart: Long, expectedEnd: Long): Unit = {
+      assert(batch.numRows() == (expectedEnd - expectedStart + 1).toInt)
+      assert(batch.numCols() == 1)
+      withResource(batch.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { hostCol =>
+        val base = hostCol.getBase
+        var i = 0
+        while (i < batch.numRows()) {
+          val actual = base.getLong(i)
+          val expected = expectedStart + i
+          assert(actual == expected,
+            s"_pos[$i] expected $expected, got $actual")
+          i += 1
+        }
+      }
+    }
+
+    // Batch 1: 300 rows entirely inside block 0 → file-global _pos = 500..799.
+    withResource(processor.process(emptyBatch(300))) { batch =>
+      assertPosRange(batch, 500L, 799L)
+    }
+
+    // Batch 2: 100 rows still inside block 0 (100 rows of block 0 remain after this batch).
+    // → file-global _pos = 800..899.
+    withResource(processor.process(emptyBatch(100))) { batch =>
+      assertPosRange(batch, 800L, 899L)
+    }
+
+    // Batch 3: 350 rows straddle the block 0 → block 1 boundary (100 from block 0 + 250 from
+    // block 1). This exercises the `if (curRowPos >= curBlockRowEnd)` branch inside the
+    // per-row loop in FetchRowPosition.execute — a single process() call that crosses
+    // blocks. → file-global _pos = 900..1249.
+    withResource(processor.process(emptyBatch(350))) { batch =>
+      assertPosRange(batch, 900L, 1249L)
+    }
+
+    // Batch 4: 150 rows entirely inside block 1 → file-global _pos = 1250..1399.
+    withResource(processor.process(emptyBatch(150))) { batch =>
+      assertPosRange(batch, 1250L, 1399L)
+    }
+  }
+
   test("Constant struct with required children does not throw") {
     val structFieldId = 1
     val fieldAId = 2
@@ -933,6 +1036,159 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
     val plan = processor.displayActionPlan()
     assert(plan.contains(
       s"FetchConstant(fieldId=$structFieldId, struct<"))
+  }
+
+  // Regression: ALTER TABLE ADD COLUMN of an optional nested MAP must not
+  // throw when reading old data files that pre-date the ADD. Iceberg map
+  // keys are intrinsically required, so the post-order visitor used to call
+  // MissingFieldActionBuilder for the key with isOptional=false and throw
+  // "Missing required field" before the missing-container's own map() handler
+  // could emit FillNull.
+  test("Missing nested optional map with required key does not throw") {
+    val infoStructId = 1
+    val scoreFieldId = 2
+    val propsMapId = 3  // newly-added MAP, missing from file
+    val propsKeyId = 4
+    val propsValueId = 5
+
+    // Parquet file: info STRUCT<score: BIGINT> — no props
+    val scoreType =
+      ShadedTypes.primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
+      .id(scoreFieldId).named("score")
+    val infoStruct = ShadedTypes.optionalGroup().addField(scoreType)
+      .id(infoStructId).named("info")
+    val parquetSchema = new ShadedMessageType("test",
+      Seq[ShadedType](infoStruct).asJava)
+
+    // Expected: info STRUCT<score, props: MAP<STRING, BIGINT>>
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(infoStructId, "info",
+        Types.StructType.of(
+          Types.NestedField.optional(scoreFieldId, "score", Types.LongType.get()),
+          Types.NestedField.optional(propsMapId, "props",
+            Types.MapType.ofOptional(propsKeyId, propsValueId,
+              Types.StringType.get(), Types.LongType.get()))
+        ))
+    )
+
+    val rowCount = 3
+    val (parquetInfo, shadedSchema) = createParquetInfo(parquetSchema, rowCount.toLong)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo,
+      new JHashMap[Integer, Any](),
+      expectedSchema,
+      shadedSchema,
+      Map.empty)
+
+    val plan = processor.displayActionPlan()
+    // The missing map itself must emit FillNull (it's the only valid behavior
+    // for an optional missing field). Children are discarded by the parent.
+    assert(plan.contains("FillNull(map<"),
+      s"expected FillNull for missing map in plan:\n$plan")
+
+    // Exercise process() too: action-tree construction succeeding is not the
+    // same guarantee as execute() succeeding for FillNull(map<...>).
+    import com.nvidia.spark.rapids.{FuzzerUtils, GpuColumnVector, SpillableColumnarBatch}
+    import com.nvidia.spark.rapids.SpillPriorities
+    import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+    import org.apache.spark.sql.types.{LongType, StructField, StructType => SparkStructType}
+
+    val inputSparkSchema = SparkStructType(Array(StructField(
+      "info",
+      SparkStructType(Seq(StructField("score", LongType, true))),
+      true)))
+    val inputBatch = FuzzerUtils.createColumnarBatch(inputSparkSchema, rowCount, seed = 42)
+    val spillable = closeOnExcept(inputBatch) { batch =>
+      SpillableColumnarBatch(batch, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+    }
+    withResource(spillable) { _ =>
+      withResource(processor.process(spillable.getColumnarBatch())) { outputBatch =>
+        assert(outputBatch.numRows() == rowCount)
+        assert(outputBatch.numCols() == 1)
+        val infoCol = outputBatch.column(0).asInstanceOf[GpuColumnVector].getBase
+        // info struct gains props as a second child.
+        assert(infoCol.getNumChildren == 2,
+          s"expected info struct to have 2 children, got ${infoCol.getNumChildren}")
+        withResource(infoCol.getChildColumnView(1)) { propsCol =>
+          assert(propsCol.getNullCount == rowCount,
+            s"props should be all-null; nullCount=${propsCol.getNullCount} rowCount=$rowCount")
+        }
+      }
+    }
+  }
+
+  // Same defect, with LIST<required element> as the missing container.
+  test("Missing nested optional list with required element does not throw") {
+    val outerStructId = 1
+    val keepFieldId = 2
+    val newListId = 3   // newly-added list, missing from file
+    val newListElementId = 4
+
+    val keepType =
+      ShadedTypes.primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
+      .id(keepFieldId).named("keep")
+    val outerStruct = ShadedTypes.optionalGroup().addField(keepType)
+      .id(outerStructId).named("outer")
+    val parquetSchema = new ShadedMessageType("test",
+      Seq[ShadedType](outerStruct).asJava)
+
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(outerStructId, "outer",
+        Types.StructType.of(
+          Types.NestedField.optional(keepFieldId, "keep", Types.LongType.get()),
+          // List with a REQUIRED element — the bug also fires here because the
+          // required element primitive is visited before the parent list().
+          Types.NestedField.optional(newListId, "new_list",
+            Types.ListType.ofRequired(newListElementId, Types.LongType.get()))
+        ))
+    )
+
+    val (parquetInfo, shadedSchema) = createParquetInfo(parquetSchema)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo,
+      new JHashMap[Integer, Any](),
+      expectedSchema,
+      shadedSchema,
+      Map.empty)
+
+    val plan = processor.displayActionPlan()
+    assert(plan.contains("FillNull(array<"),
+      s"expected FillNull for missing list in plan:\n$plan")
+  }
+
+  // Doubly-nested: a missing struct that itself contains a missing map with
+  // a required key. Exercises strict-ancestor isInsideMissingContainer when
+  // multiple levels above also have partner == null.
+  test("Doubly nested missing container with required descendant does not throw") {
+    val metaStructId = 1   // missing struct
+    val propsMapId = 2     // missing map (inside metaStruct)
+    val propsKeyId = 3
+    val propsValueId = 4
+
+    val parquetSchema = new ShadedMessageType("test",
+      Seq.empty[ShadedType].asJava)
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(metaStructId, "meta",
+        Types.StructType.of(
+          Types.NestedField.optional(propsMapId, "props",
+            Types.MapType.ofOptional(propsKeyId, propsValueId,
+              Types.StringType.get(), Types.LongType.get()))
+        ))
+    )
+
+    val (parquetInfo, shadedSchema) = createParquetInfo(parquetSchema)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo,
+      new JHashMap[Integer, Any](),
+      expectedSchema,
+      shadedSchema,
+      Map.empty)
+
+    val plan = processor.displayActionPlan()
+    // Outer struct is missing; its child map is also missing — only the
+    // outer FillNull(struct<...>) is composed into the plan.
+    assert(plan.contains("FillNull(struct<"),
+      s"expected FillNull for outer missing struct in plan:\n$plan")
   }
 
 }

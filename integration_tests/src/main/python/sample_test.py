@@ -1,4 +1,4 @@
-# Copyright (c) 2021-2022, NVIDIA CORPORATION.
+# Copyright (c) 2021-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,7 +16,6 @@ import pytest
 from asserts import assert_gpu_and_cpu_are_equal_collect
 from data_gen import *
 from pyspark.sql.types import *
-from spark_session import is_before_spark_330
 
 from marks import *
 
@@ -51,14 +50,12 @@ def test_sample_with_replacement(data_gen):
             withReplacement =True, fraction = 0.5, seed = 1)
     )
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_sample_for_interval():
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: unary_op_df(spark, DayTimeIntervalGen(), num_slices=10)
             .sample(fraction=0.9, seed=1)
     )
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_sample_with_replacement_for_interval():
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: unary_op_df(spark, DayTimeIntervalGen(), num_slices=10).sample(

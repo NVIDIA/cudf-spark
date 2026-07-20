@@ -265,7 +265,6 @@ def pytest_runtest_setup(item):
     _allow_any_non_gpu_conditional = False
     non_gpu_databricks = item.get_closest_marker('allow_non_gpu_databricks')
     non_gpu = item.get_closest_marker('allow_non_gpu')
-    non_gpu_conditional = item.get_closest_marker('allow_non_gpu_conditional')
     _per_test_ansi_mode_enabled = None if item.get_closest_marker('disable_ansi_mode') is None \
       else not item.get_closest_marker('disable_ansi_mode')
 
@@ -292,21 +291,42 @@ def pytest_runtest_setup(item):
         _allow_any_non_gpu = False
         _non_gpu_allowed = []
 
-    if non_gpu_conditional:
+    for non_gpu_conditional in item.iter_markers('allow_non_gpu_conditional'):
+        # Validate the marker deterministically on BOTH condition branches so a
+        # malformed marker fails everywhere, not only where its condition is true.
+        unknown_kwargs = set(non_gpu_conditional.kwargs) - {'any'}
+        if unknown_kwargs:
+            raise TypeError(
+                "allow_non_gpu_conditional got unexpected keyword argument(s) "
+                f"{sorted(unknown_kwargs)}; only 'any' is supported.")
+        allow_any = non_gpu_conditional.kwargs.get('any', False)
+        if not isinstance(allow_any, bool):
+            raise TypeError(
+                "The 'any' parameter of 'allow_non_gpu_conditional' must be a Boolean.")
+        if not non_gpu_conditional.args:
+            raise TypeError(
+                "The 'allow_non_gpu_conditional' marker requires a Boolean condition "
+                "as its first argument.")
         condition = non_gpu_conditional.args[0]
-        _non_gpu_allowed_conditional = non_gpu_conditional.args[1]
         if not isinstance(condition, bool):
-            raise TypeError("The first parameter of 'allow_non_gpu_conditional' must be a Boolean.")
+            raise TypeError(
+                "The first parameter of 'allow_non_gpu_conditional' must be a Boolean.")
+        op_args = non_gpu_conditional.args[1:]
+        if not all(isinstance(arg, str) for arg in op_args):
+            raise TypeError("allow_non_gpu_conditional op names must be strings.")
+        ops = [op.strip() for arg in op_args for op in arg.split(',')]
+        ops = [op for op in ops if op]
+        if op_args and not ops:
+            warnings.warn('allow_non_gpu_conditional marker with an empty ops payload')
         if condition:
-            if non_gpu_conditional.kwargs and non_gpu_conditional.kwargs['any']:
+            if allow_any:
                 _allow_any_non_gpu_conditional = True
-                _non_gpu_allowed_conditional = []
-            elif _non_gpu_allowed_conditional:
-                _allow_any_non_gpu_conditional = False
-            else:
+            elif ops:
+                for op in ops:
+                    if op not in _non_gpu_allowed_conditional:
+                        _non_gpu_allowed_conditional.append(op)
+            elif not op_args:
                 warnings.warn('allow_non_gpu_conditional marker without anything allowed')
-                _allow_any_non_gpu_conditional = False
-                _non_gpu_allowed_conditional = []
 
 
     _allow_any_non_gpu = _allow_any_non_gpu | _allow_any_non_gpu_databricks | _allow_any_non_gpu_conditional
@@ -315,7 +335,7 @@ def pytest_runtest_setup(item):
     elif _non_gpu_allowed_databricks:
         _non_gpu_allowed = _non_gpu_allowed_databricks
     if _non_gpu_allowed_conditional:
-        _non_gpu_allowed = list(_non_gpu_allowed) + _non_gpu_allowed_conditional.split(",")
+        _non_gpu_allowed = list(_non_gpu_allowed) + _non_gpu_allowed_conditional
 
     global _validate_execs_in_gpu_plan
     validate_execs = item.get_closest_marker('validate_execs_in_gpu_plan')

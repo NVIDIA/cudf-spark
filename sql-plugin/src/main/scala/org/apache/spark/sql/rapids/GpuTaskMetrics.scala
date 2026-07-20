@@ -286,6 +286,7 @@ class GpuTaskMetrics extends Serializable with Logging {
   private val perfioS3NettyExecutors = new LongAccumulator
   private val perfioS3CrtExecutors = new LongAccumulator
   private val perfioS3S3aExecutors = new LongAccumulator
+  private val perfioS3IcebergFallbacks = new LongAccumulator
 
   private var maxHostBytesAllocated: Long = 0
   private var maxPageableBytesAllocated: Long = 0
@@ -352,7 +353,8 @@ class GpuTaskMetrics extends Serializable with Logging {
     "gpuDiskWriteSavedBytes" -> diskWriteSavedBytes,
     "perfio.s3.netty.executors" -> perfioS3NettyExecutors,
     "perfio.s3.crt.executors" -> perfioS3CrtExecutors,
-    "perfio.s3.s3a.executors" -> perfioS3S3aExecutors
+    "perfio.s3.s3a.executors" -> perfioS3S3aExecutors,
+    "perfio.s3.iceberg.fallbacks" -> perfioS3IcebergFallbacks
   )
 
   def register(sc: SparkContext): Unit = {
@@ -525,6 +527,10 @@ class GpuTaskMetrics extends Serializable with Logging {
     } catch {
       case _: IllegalArgumentException => // accumulator not yet registered; no-op
     }
+  }
+
+  def recordPerfioS3IcebergFallback(): Unit = {
+    perfioS3IcebergFallbacks.add(1L)
   }
 }
 

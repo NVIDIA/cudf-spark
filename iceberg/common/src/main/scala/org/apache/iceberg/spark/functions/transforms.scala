@@ -18,7 +18,7 @@ package org.apache.iceberg.spark.functions
 
 import scala.util.Try
 
-import com.nvidia.spark.rapids.iceberg.fieldIndex
+import com.nvidia.spark.rapids.iceberg.findFieldIndex
 import org.apache.iceberg.Schema
 import org.apache.iceberg.transforms.Transform
 
@@ -100,9 +100,16 @@ object GpuTransform {
 
 case class GpuFieldTransform(sourceFieldId: Int, transform: GpuTransform) {
   def supports(inputType: StructType, inputSchema: Schema): Boolean = {
-    val fieldIdx = fieldIndex(inputSchema, sourceFieldId)
-    val sparkField = inputType.fields(fieldIdx)
-    transform.support(sparkField.dataType, sparkField.nullable)
+    // Iceberg allows partition source fields to reference nested-leaf field ids
+    // (e.g. `bucket(4, contact.email)`). Those ids do not appear in
+    // `schema.columns()` (top level only), so an Option-returning lookup lets
+    // us refuse GPU and fall back to CPU instead of throwing.
+    findFieldIndex(inputSchema, sourceFieldId) match {
+      case Some(idx) =>
+        val sparkField = inputType.fields(idx)
+        transform.support(sparkField.dataType, sparkField.nullable)
+      case None => false
+    }
   }
 }
 

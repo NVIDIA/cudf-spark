@@ -152,10 +152,10 @@ object CoalesceReadOption extends Logging {
 object GpuShuffleCoalesceUtils {
   /**
    * Creates a split policy that divides a sequence of tables based on target byte size.
-   * Uses splitTargetSizeInHalfGpu to split the target size, then splits the tables
-   * sequence to match the new target size based on byte size. If it is unable to find
-   * a split, e.g. if the targetSize is larger than the full data size, it instead splits
-   * the sequence in half by number of elements.
+   * splitTargetSizeInHalfGpu uses dataSize/2 when dataSize is known and smaller than
+   * targetSize/2, ensuring the byte-size loop always finds a valid split point for 2+
+   * tables. Throws GpuSplitAndRetryOOM if the sequence cannot be split further (single
+   * table, or newTarget < minSize).
    */
   def createSplitPolicyByTargetSize[T <: AutoCloseable](
       tableOperator: SerializedTableOperator[T, _],
@@ -163,56 +163,37 @@ object GpuShuffleCoalesceUtils {
       Seq[CloseableTableSeqWithTargetSize[T]] = {
     (wrapper: CloseableTableSeqWithTargetSize[T]) => {
       val tables = wrapper
-      if (tables.isEmpty) {
+      if (tables.length <= 1) {
         throw new com.nvidia.spark.rapids.jni.GpuSplitAndRetryOOM(
-          s"GPU OutOfMemory: empty table sequence cannot be split!")
+          s"GPU OutOfMemory: a sequence of ${tables.length} tables cannot be split!")
       }
 
-      // Don't close the wrapper here - withRetry will handle closing it.
-      // The split sequences need to reference the same table objects.
-      // First split the target size
-      val splitTargetSizes = splitTargetSizeInHalfGpu(wrapper.targetSize)
-      if (splitTargetSizes.isEmpty) {
-        throw new com.nvidia.spark.rapids.jni.GpuSplitAndRetryOOM(
-          s"GPU OutOfMemory: target size ${wrapper.targetSize.targetSize} " +
-              s"cannot be split further!")
-      }
-      val newTargetSize = splitTargetSizes.head
+      val newTargetSize = splitTargetSizeInHalfGpu(wrapper.targetSize).head
       val targetByteSize = newTargetSize.targetSize
 
-      // Split tables based on byte size to match the new target
       var currentSize = 0L
       var splitIndex = 0
-      var foundSplit = false
-
-      for (i <- tables.indices if !foundSplit) {
+      var firstHalfSize = 0L
+      for (i <- tables.indices) {
         val tableSize = tableOperator.getDataLen(tables(i))
         if (currentSize + tableSize > targetByteSize && i > 0) {
           splitIndex = i
-          foundSplit = true
+          firstHalfSize = currentSize
+          currentSize = Long.MaxValue  // stop iterating
         } else {
           currentSize += tableSize
         }
       }
 
-      if (!foundSplit) {
-        // If we can't split, check if we have at least 2 tables to split by count
-        if (tables.length <= 1) {
-          throw new com.nvidia.spark.rapids.jni.GpuSplitAndRetryOOM(
-            s"GPU OutOfMemory: a sequence of ${tables.length} tables cannot be split!")
-        }
-        splitIndex = tables.length / 2
-      }
-
       val firstHalfTables = tables.take(splitIndex)
       val secondHalfTables = tables.drop(splitIndex)
+      val secondHalfSize = newTargetSize.dataSize - firstHalfSize
 
-      // Don't close the wrapper here - treat this as a logical split only.
-      // withRetry will handle closing the wrapper and the split sequences
-      // appropriately when each split sequence is processed.
       Seq(
-        CloseableTableSeqWithTargetSize(firstHalfTables, newTargetSize),
-        CloseableTableSeqWithTargetSize(secondHalfTables, newTargetSize)
+        CloseableTableSeqWithTargetSize(firstHalfTables,
+          AutoCloseableTargetSize(targetByteSize, newTargetSize.minSize, firstHalfSize)),
+        CloseableTableSeqWithTargetSize(secondHalfTables,
+          AutoCloseableTargetSize(targetByteSize, newTargetSize.minSize, secondHalfSize))
       )
     }
   }
@@ -566,8 +547,9 @@ abstract class CoalesceIteratorBase[T <: AutoCloseable : ClassTag, R <: AutoClos
       val tablesSeq = tables.toSeq
       splitPolicy match {
         case Some(policy) =>
-          // Create AutoCloseableTargetSize with targetBatchByteSize and minSplitSize
-          val targetSizeWrapper = AutoCloseableTargetSize(targetBatchByteSize, minSplitSizeForRetry)
+          val dataSize = tablesSeq.map(tableOperator.getDataLen).sum
+          val targetSizeWrapper = AutoCloseableTargetSize(targetBatchByteSize,
+            minSplitSizeForRetry, dataSize)
           val wrapper = CloseableTableSeqWithTargetSize(tablesSeq, targetSizeWrapper)
           val wrapperIter = Iterator(wrapper)
           inputIter = Some(wrapperIter)

@@ -22,14 +22,14 @@
     <parent>
         <groupId>com.nvidia</groupId>
         <artifactId>rapids-4-spark-parent_2.12</artifactId>
-        <version>26.06.0-SNAPSHOT</version>
+        <version>26.08.0-SNAPSHOT</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
     <artifactId>rapids-4-spark-tools-support</artifactId>
     <packaging>pom</packaging>
     <name>RAPIDS Accelerator for Apache Spark Tools Support</name>
     <description>Supporting code for RAPIDS Accelerator tools</description>
-    <version>26.06.0-SNAPSHOT</version>
+    <version>26.08.0-SNAPSHOT</version>
     <dependencies>
         <dependency>
             <groupId>com.nvidia</groupId>
@@ -138,7 +138,7 @@
                                 <ac:if xmlns:ac="antlib:net.sf.antcontrib">
                                     <or>
                                       <equals arg1="spark${env.BASE_VER}" arg2="${spark.version.classifier}"/>
-                                      <equals arg1="spark321" arg2="${spark.version.classifier}"/>
+                                      <equals arg1="spark330" arg2="${spark.version.classifier}"/>
                                     </or>
                                     <ac:then>
                                         <!-- requires Spark jvm args for newer Java versions -->

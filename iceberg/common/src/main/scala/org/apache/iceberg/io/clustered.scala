@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,18 +16,57 @@
 
 package org.apache.iceberg.io
 
+import java.util.function.{BiFunction, Consumer, Supplier}
+
 import com.nvidia.spark.rapids.SpillableColumnarBatch
 import org.apache.iceberg.{DataFile, DeleteFile, PartitionSpec, StructLike}
 import org.apache.iceberg.relocated.com.google.common.collect.Lists
 import org.apache.iceberg.spark.source.GpuSparkFileWriterFactory
 import org.apache.iceberg.util.CharSequenceSet
 
+private[io] abstract class GpuClusteredWriter[R] extends
+    PartitioningWriter[SpillableColumnarBatch, R] {
+  protected def newWriter(partitionSpec: PartitionSpec, partition: StructLike):
+      FileWriter[SpillableColumnarBatch, R]
+  protected def addResult(result: R): Unit
+  protected def aggregatedResult(): R
+
+  private val delegate: PartitioningWriter[SpillableColumnarBatch, R] =
+    new GpuClusteredWriterBridge[SpillableColumnarBatch, R](
+      new BiFunction[PartitionSpec, StructLike, FileWriter[SpillableColumnarBatch, R]] {
+        override def apply(
+            partitionSpec: PartitionSpec,
+            partition: StructLike): FileWriter[SpillableColumnarBatch, R] =
+          newWriter(partitionSpec, partition)
+      },
+      new Consumer[R] {
+        override def accept(result: R): Unit = addResult(result)
+      },
+      new Supplier[R] {
+        override def get(): R = aggregatedResult()
+      })
+
+  override def write(
+      batch: SpillableColumnarBatch,
+      partitionSpec: PartitionSpec,
+      partition: StructLike): Unit = {
+    delegate.write(batch, partitionSpec, partition)
+  }
+
+  override def close(): Unit = {
+    delegate.close()
+  }
+
+  override def result(): R = {
+    delegate.result()
+  }
+}
+
 class GpuClusteredDataWriter(
   writerFactory: GpuSparkFileWriterFactory,
   fileFactory: OutputFileFactory,
   io: FileIO,
-  targetFileSize: Long) extends
-  ClusteredWriter[SpillableColumnarBatch, DataWriteResult] {
+  targetFileSize: Long) extends GpuClusteredWriter[DataWriteResult] {
 
   private val dataFiles = Lists.newArrayList[DataFile]()
 
@@ -55,7 +94,7 @@ class GpuClusteredPositionDeleteWriter(
     writerFactory: GpuSparkFileWriterFactory,
     fileFactory: OutputFileFactory,
     io: FileIO,
-    targetFileSize: Long) extends ClusteredWriter[SpillableColumnarBatch, DeleteWriteResult] {
+    targetFileSize: Long) extends GpuClusteredWriter[DeleteWriteResult] {
 
   private val deleteFiles = Lists.newArrayList[DeleteFile]()
   private val referencedDataFiles = CharSequenceSet.empty()

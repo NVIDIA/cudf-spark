@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2024, NVIDIA CORPORATION.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,6 +27,6 @@ jobs:
         uses: NVIDIA/spark-rapids-common/signoff-check@main
         with:
           owner: ${{ github.repository_owner }}
-          repo: spark-rapids
+          repo: ${{ github.event.repository.name }}
           pull_number: ${{ github.event.number }}
           token: ${{ secrets.GITHUB_TOKEN }}

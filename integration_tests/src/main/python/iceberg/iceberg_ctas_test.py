@@ -15,19 +15,31 @@
 from typing import Callable, Dict, Optional
 
 import pytest
+from pyspark.sql.types import ArrayType, BinaryType
 
 from asserts import assert_equal_with_local_sort, assert_gpu_fallback_collect
 from conftest import is_iceberg_remote_catalog
-from data_gen import gen_df, copy_and_update
-from iceberg import (create_iceberg_table, iceberg_base_table_cols,
+from data_gen import gen_df, copy_and_update, RepeatSeqGen
+from iceberg import (create_iceberg_table,
+                     iceberg_base_table_cols,
                      iceberg_gens_list, iceberg_full_gens_list,
                      get_full_table_name, iceberg_write_enabled_conf,
-                     iceberg_unsupported_mark, _build_tblprops)
+                     iceberg_unsupported_mark, _build_tblprops,
+                     ctas_partition_transforms)
 from marks import iceberg, ignore_order, allow_non_gpu, allow_non_gpu_conditional, datagen_overrides
 from spark_session import with_gpu_session, with_cpu_session, is_spark_400_or_later
 
 pytestmark = [
     iceberg_unsupported_mark,
+]
+
+_BINARY_CTAS_GEN_LISTS = [
+    [("_c0", RepeatSeqGen(
+        [bytearray(b""), bytearray(b"a"), None, bytearray(b"xyz"), bytearray(b"")],
+        data_type=BinaryType()))],
+    [("_c0", RepeatSeqGen(
+        [[bytearray(b"")], [bytearray(b"a"), bytearray(b"")], [], None, [bytearray(b"xyz")]],
+        data_type=ArrayType(BinaryType())))]
 ]
 
 
@@ -73,9 +85,11 @@ def _assert_gpu_equals_cpu_ctas(spark_tmp_table_factory,
     gpu_table = f"{base_name}_gpu"
     cpu_table = f"{base_name}_cpu"
 
-    with_gpu_session(lambda spark: _execute_ctas(spark, gpu_table, spark_tmp_table_factory,
-                                                 df_gen, table_prop, partition_col_sql, False),
-                     conf=conf)
+    def run_gpu_ctas(spark):
+        _execute_ctas(spark, gpu_table, spark_tmp_table_factory,
+                      df_gen, table_prop, partition_col_sql, ret=True)
+
+    with_gpu_session(run_gpu_ctas, conf=conf)
     with_cpu_session(lambda spark: _execute_ctas(spark, cpu_table, spark_tmp_table_factory,
                                                  df_gen, table_prop, partition_col_sql, False),
                      conf=conf)
@@ -127,37 +141,12 @@ def test_ctas_partitioned_table(spark_tmp_table_factory, partition_col_sql):
 @datagen_overrides(seed=0, reason='https://github.com/NVIDIA/spark-rapids-jni/issues/4016')
 @ignore_order(local=True)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
-@pytest.mark.parametrize("partition_col_sql", [
-    pytest.param("year(_c8)", id="year(date_col)"),
-    pytest.param("month(_c8)", id="month(date_col)"),
-    pytest.param("day(_c8)", id="day(date_col)"),
-    pytest.param("month(_c9)", id="month(timestamp_col)"),
-    pytest.param("day(_c9)", id="day(timestamp_col)"),
-    pytest.param("hour(_c9)", id="hour(timestamp_col)"),
-    pytest.param("truncate(10, _c2)", id="truncate(10, int_col)"),
-    pytest.param("truncate(10, _c3)", id="truncate(10, long_col)"),
-    pytest.param("truncate(5, _c6)", id="truncate(5, string_col)"),
-    pytest.param("truncate(10, _c13)", id="truncate(10, decimal32_col)"),
-    pytest.param("truncate(10, _c14)", id="truncate(10, decimal64_col)"),
-    pytest.param("truncate(10, _c15)", id="truncate(10, decimal128_col)"),
-    pytest.param("bucket(16, _c2)", id="bucket(16, int_col)"),
-    pytest.param("bucket(16, _c3)", id="bucket(16, long_col)"),
-    pytest.param("bucket(16, _c8)", id="bucket(16, date_col)"),
-    pytest.param("bucket(16, _c9)", id="bucket(16, timestamp_col)"),
-    pytest.param("bucket(16, _c6)", id="bucket(16, string_col)"),
-    pytest.param("bucket(16, _c13)", id="bucket(16, decimal32_col)"),
-    pytest.param("bucket(16, _c14)", id="bucket(16, decimal64_col)"),
-    pytest.param("bucket(16, _c15)", id="bucket(16, decimal128_col)"),
-    pytest.param("_c0", id="identity(byte)"),
-    pytest.param("_c2", id="identity(int)"),
-    pytest.param("_c3", id="identity(long)"),
-    pytest.param("_c6", id="identity(string)"),
-    pytest.param("_c8", id="identity(date)"),
-    pytest.param("_c10", id="identity(decimal)"),
-])
+@pytest.mark.parametrize("partition_col_sql", ctas_partition_transforms)
 @allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
 def test_ctas_partitioned_table_full_coverage(spark_tmp_table_factory, partition_col_sql):
-    """Full partition coverage test - skipped for remote catalogs."""
+    """Sanity-check CTAS against a few partition transforms distinct from those
+    picked by other DML ops. The 26-transform partition-writer coverage anchor
+    lives in iceberg_append_test.py::test_insert_into_partitioned_table_full_coverage."""
     _do_test_ctas_partitioned_table(spark_tmp_table_factory, partition_col_sql)
 
 
@@ -215,51 +204,51 @@ def test_ctas_fallback_when_conf_disabled(spark_tmp_table_factory,
 
 @iceberg
 @ignore_order(local=True)
-@allow_non_gpu('AtomicCreateTableAsSelectExec', 'AppendDataExec',  'ShuffleExchangeExec', 'ProjectExec')
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
-@allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
-def test_ctas_unpartitioned_table_all_cols_fallback(spark_tmp_table_factory):
+@pytest.mark.parametrize("gen_list", _BINARY_CTAS_GEN_LISTS, ids=["binary", "array_binary"])
+def test_ctas_unpartitioned_table_binary_types(spark_tmp_table_factory, gen_list):
     table_prop = {
         "format-version": "2"
     }
 
-    def run_ctas(spark):
-        cols = [f"_c{idx}" for idx, _ in enumerate(iceberg_full_gens_list)]
-        target = get_full_table_name(spark_tmp_table_factory)
-        return _execute_ctas(spark,
-                      target,
-                      spark_tmp_table_factory,
-                      lambda sp: gen_df(sp, list(zip(cols, iceberg_full_gens_list))),
-                      table_prop)
+    df_gen = lambda spark: gen_df(spark, gen_list, length=32)
 
-    assert_gpu_fallback_collect(run_ctas,
-                                'AtomicCreateTableAsSelectExec',
-                                conf=iceberg_write_enabled_conf)
+    _assert_gpu_equals_cpu_ctas(spark_tmp_table_factory, df_gen, table_prop)
 
 
 @iceberg
 @ignore_order(local=True)
-@allow_non_gpu('AtomicCreateTableAsSelectExec', 'AppendDataExec', 'ShuffleExchangeExec', 'ProjectExec')
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
 @allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
-def test_ctas_partitioned_table_all_cols_fallback(spark_tmp_table_factory):
+def test_ctas_unpartitioned_table_all_cols(spark_tmp_table_factory):
     table_prop = {
         "format-version": "2"
     }
 
-    def run_ctas(spark):
-        cols = [f"_c{idx}" for idx, _ in enumerate(iceberg_full_gens_list)]
-        target = get_full_table_name(spark_tmp_table_factory)
-        return _execute_ctas(spark,
-                      target,
-                      spark_tmp_table_factory,
-                      lambda sp: gen_df(sp, list(zip(cols, iceberg_full_gens_list))),
-                      table_prop,
-                      partition_col_sql="bucket(16, _c2)")
+    cols = [f"_c{idx}" for idx, _ in enumerate(iceberg_full_gens_list)]
+    gen_list = list(zip(cols, iceberg_full_gens_list))
+    df_gen = lambda spark: gen_df(spark, gen_list)
 
-    assert_gpu_fallback_collect(run_ctas,
-                                'AtomicCreateTableAsSelectExec',
-                                conf=iceberg_write_enabled_conf)
+    _assert_gpu_equals_cpu_ctas(spark_tmp_table_factory, df_gen, table_prop)
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
+@allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
+def test_ctas_partitioned_table_all_cols(spark_tmp_table_factory):
+    table_prop = {
+        "format-version": "2"
+    }
+
+    cols = [f"_c{idx}" for idx, _ in enumerate(iceberg_full_gens_list)]
+    gen_list = list(zip(cols, iceberg_full_gens_list))
+    df_gen = lambda spark: gen_df(spark, gen_list)
+
+    _assert_gpu_equals_cpu_ctas(spark_tmp_table_factory,
+                                df_gen,
+                                table_prop,
+                                partition_col_sql="bucket(16, _c2)")
 
 
 @iceberg

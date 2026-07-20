@@ -23,8 +23,9 @@ tar -zxf ../spark-rapids-built.tgz
 cd spark-rapids
 echo "Maven mirror is $MVN_URM_MIRROR"
 SERVER_ID='snapshots'
-SERVER_URL="$URM_URL-local"
-MVN="mvn -Dmaven.wagon.http.retryHandler.count=3 -DretryFailedDeploymentCount=3"
+SERVER_URL="$ART_URL-local"
+MVN_SETTINGS=${MVN_SETTINGS:-"jenkins/settings.xml"}
+MVN="mvn -s $MVN_SETTINGS -Dmaven.wagon.http.retryHandler.count=3 -DretryFailedDeploymentCount=3"
 # Determine Scala version and POM file from Spark version
 if [[ "$BASE_SPARK_VERSION" == 4.* ]]; then
     SCALA_VERSION="2.13"
@@ -38,7 +39,7 @@ fi
 # remove the periods so change something like 3.2.1 to 321
 VERSION_NUM=${BASE_SPARK_VERSION_TO_INSTALL_DATABRICKS_JARS//.}
 SPARK_VERSION_STR=spark$VERSION_NUM
-SPARK_PLUGIN_JAR_VERSION=`mvn help:evaluate -q -f $POM_FILE -pl dist -Dexpression=project.version -DforceStdout`
+SPARK_PLUGIN_JAR_VERSION=$($MVN help:evaluate -q -pl dist -Dexpression=project.version -DforceStdout)
 # Append 143 or 173 into the db shim version because Databricks 14.3.x and 15.4.x are both based on spark version 3.5.0
 # and Databricks 17.3 based on Spark 4.0.0
 if [[ "$DB_RUNTIME" == "14.3"* ]]; then

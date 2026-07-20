@@ -839,8 +839,9 @@ class GpuDynamicPartitionDataConcurrentWriter(
     // Write the cached batches
     val writeFunc: (WriterIndex, WriterStatusWithBatches) => Unit =
       if (pendingBatches.nonEmpty) {
-        // Flush all the caches before going into sorted sequential write
-        writeOneCacheAndClose
+        // Flush all non-empty caches before going into sorted sequential write. Some writers may
+        // have been flushed previously, but are kept open for possible reuse during fallback.
+        writeOneCacheIfNeededAndClose
       } else {
         // Still the concurrent write, so write out only partitions that size > threshold.
         (wi, ws) =>
@@ -850,6 +851,13 @@ class GpuDynamicPartitionDataConcurrentWriter(
       }
     concurrentWriters.foreach { case (writerIdx, writerStatus) =>
       writeFunc(writerIdx, writerStatus)
+    }
+  }
+
+  private def writeOneCacheIfNeededAndClose(writerId: WriterIndex,
+      status: WriterStatusWithBatches): Unit = {
+    if (status.tableCaches.nonEmpty) {
+      writeOneCacheAndClose(writerId, status)
     }
   }
 

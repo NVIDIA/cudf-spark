@@ -59,7 +59,8 @@ class GpuIcebergParquetAppender(
   override def close(): Unit = {
     if (!closed) {
       inner.close()
-      footer = withResource(IcebergPartitionedFile(fileIO.newInputFile(inner.path)).newReader()) {
+      footer = withResource(
+          IcebergPartitionedFile(fileIO.newIcebergInputFile(inner.path)).newReader()) {
         reader =>
           // TODO: Remove the read after https://github.com/rapidsai/cudf/issues/18886 got fixed.
           reader.getFooter

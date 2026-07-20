@@ -57,10 +57,10 @@ variable.
 
 Examples:
 
-To run all tests against Apache Spark 3.2.1,
+To run all tests against Apache Spark 3.3.0,
 
 ```bash
-mvn package -pl tests -am -Dbuildver=321
+mvn package -pl tests -am -Dbuildver=330
 ```
 
 To pass Apache Spark configs `--conf spark.dynamicAllocation.enabled=false --conf spark.task.cpus=1`

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,32 +18,28 @@ package org.apache.iceberg.spark.source
 
 import org.apache.spark.sql.connector.write._
 
-abstract class GpuBaseBatchWrite(write: GpuSparkWrite) extends BatchWrite {
+abstract class GpuBaseBatchWrite(
+    write: GpuSparkWrite,
+    cpuBatchWrite: BatchWrite) extends BatchWrite {
   override def createBatchWriterFactory(physicalWriteInfo: PhysicalWriteInfo): DataWriterFactory
   = write.createDataWriterFactory
 
   override def abort(writerCommitMessages: Array[WriterCommitMessage]): Unit =
-    write.abort(writerCommitMessages)
+    cpuBatchWrite.abort(writerCommitMessages)
 
-  override def useCommitCoordinator(): Boolean = false
+  override def useCommitCoordinator(): Boolean = cpuBatchWrite.useCommitCoordinator()
 }
 
-class GpuBatchAppend(write: GpuSparkWrite) extends GpuBaseBatchWrite(write) {
+class GpuBatchAppend(write: GpuSparkWrite, cpuBatchWrite: BatchWrite)
+  extends GpuBaseBatchWrite(write, cpuBatchWrite) {
   override def commit(messages: Array[WriterCommitMessage]): Unit = {
-    val append = write.table.newAppend()
-
-    val files = write.files(messages)
-
-    val numFiles = files.length
-    files.foreach(append.appendFile)
-
-    write.commitOperation(append, s"append with $numFiles new data files")
+    cpuBatchWrite.commit(messages)
   }
 }
 
 class GpuDynamicOverwrite(
     write: GpuSparkWrite,
-    cpuBatchWrite: BatchWrite) extends GpuBaseBatchWrite(write) {
+    cpuBatchWrite: BatchWrite) extends GpuBaseBatchWrite(write, cpuBatchWrite) {
 
   override def commit(messages: Array[WriterCommitMessage]): Unit = {
     // Delegate to the CPU version's commit method
@@ -53,7 +49,7 @@ class GpuDynamicOverwrite(
 }
 
 class GpuOverwriteByFilter(write: GpuSparkWrite, cpuOverwrite: BatchWrite)
-  extends GpuBaseBatchWrite(write) {
+  extends GpuBaseBatchWrite(write, cpuOverwrite) {
   override def commit(messages: Array[WriterCommitMessage]): Unit = {
     // Delegate to CPU OverwriteByFilter's commit method
     cpuOverwrite.commit(messages)
@@ -65,7 +61,7 @@ class GpuOverwriteByFilter(write: GpuSparkWrite, cpuOverwrite: BatchWrite)
  * This wraps the CPU BatchRewrite for DELETE operations.
  */
 class GpuCopyOnWriteOperation(write: GpuSparkWrite, cpuBatchWrite: BatchWrite)
-  extends GpuBaseBatchWrite(write) {
+  extends GpuBaseBatchWrite(write, cpuBatchWrite) {
   override def commit(messages: Array[WriterCommitMessage]): Unit = {
     // Delegate to CPU BatchRewrite's commit method
     // The CPU version handles the complex logic for copy-on-write operations

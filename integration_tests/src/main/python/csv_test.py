@@ -492,7 +492,6 @@ def test_csv_save_as_table_fallback(spark_tmp_path, spark_tmp_table_factory):
             data_path,
             'DataWritingCommandExec')
 
-@pytest.mark.skipif(is_before_spark_330(), reason='Hidden file metadata columns are a new feature of Spark 330')
 @allow_non_gpu(any = True)
 @pytest.mark.parametrize('metadata_column', ["file_path", "file_name", "file_size", "file_modification_time"])
 def test_csv_scan_with_hidden_metadata_fallback(spark_tmp_path, metadata_column):
@@ -512,7 +511,6 @@ def test_csv_scan_with_hidden_metadata_fallback(spark_tmp_path, metadata_column)
         exist_classes= "FileSourceScanExec",
         non_exist_classes= "GpuBatchScanExec")
 
-@pytest.mark.skipif(is_before_spark_330(), reason='Reading day-time interval type is supported from Spark3.3.0')
 @pytest.mark.parametrize('v1_enabled_list', ["", "csv"])
 def test_round_trip_for_interval(spark_tmp_path, v1_enabled_list):
     csv_interval_gens = [

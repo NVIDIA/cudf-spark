@@ -1,4 +1,4 @@
-# Copyright (c) 2023-2025, NVIDIA CORPORATION.
+# Copyright (c) 2023-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,7 +19,8 @@ from data_gen import *
 from delta_lake_utils import *
 from marks import *
 from spark_session import is_before_spark_320, is_databricks_runtime, \
-    supports_delta_lake_deletion_vectors, with_cpu_session, is_before_spark_353
+    supports_delta_lake_deletion_vectors, with_cpu_session, is_before_spark_353, \
+    is_databricks173_or_later
 
 delta_update_enabled_conf = copy_and_update(delta_writes_enabled_conf,
                                             {"spark.rapids.sql.command.UpdateCommand": "true",
@@ -187,6 +188,16 @@ def test_delta_update_rows_with_dv(spark_tmp_path, use_cdf, partition_columns, e
     update_sql = "UPDATE delta.`{path}` SET c = b WHERE b >= 'd'"
     assert_delta_sql_update_collect(spark_tmp_path, use_cdf, enable_deletion_vectors, generate_dest_data,
                                     update_sql, partition_columns)
+
+@allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="DBR 17.3 row tracking regression coverage")
+def test_delta_update_preserves_row_tracking_db173(spark_tmp_path):
+    conf = copy_and_update(delta_update_enabled_conf, delta_row_tracking_dml_conf)
+    assert_delta_row_tracking_dml(
+        spark_tmp_path, "UPDATE delta.`{path}` SET c = b WHERE a IN (2, 3)", conf)
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake

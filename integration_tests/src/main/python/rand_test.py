@@ -1,4 +1,4 @@
-# Copyright (c) 2024-2025, NVIDIA CORPORATION.
+# Copyright (c) 2024-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -71,6 +71,55 @@ def test_filter_with_rand():
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: unary_op_df(spark, const_int_gen, num_slices=1).filter(f.rand(42) > 0.5)
     )
+
+
+@ignore_order(local=True)
+def test_project_with_rand_after_coalesce():
+    # SPARK-14393 / spark-rapids #14156: rand(seed) values must stay stable
+    # across coalesce. Use multi-slice so coalesce actually merges partitions.
+    int_gen = IntegerGen(nullable=False)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: unary_op_df(spark, int_gen, num_slices=8)
+            .select('a', f.rand(42))
+            .coalesce(2)
+    )
+
+
+@ignore_order(local=True)
+def test_project_with_rand_after_union():
+    # SPARK-14393 / spark-rapids #14156: rand(seed) values must stay stable
+    # when two multi-partition DataFrames are unioned.
+    int_gen = IntegerGen(nullable=False)
+    def build(spark):
+        df1 = unary_op_df(spark, int_gen, num_slices=4).select('a', f.rand(42))
+        df2 = unary_op_df(spark, int_gen, num_slices=4).select('a', f.rand(42))
+        return df1.union(df2)
+    assert_gpu_and_cpu_are_equal_collect(build)
+
+
+@ignore_order(local=True)
+def test_filter_with_rand_after_coalesce():
+    # SPARK-14393 / spark-rapids #14156: rand(seed) inside a filter must use
+    # the parent partition index, not the post-coalesce task index, so the
+    # rows kept by `rand(42) > 0.5` match CPU after coalesce merges parents.
+    int_gen = IntegerGen(nullable=False)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: unary_op_df(spark, int_gen, num_slices=8)
+            .filter(f.rand(42) > 0.5)
+            .coalesce(2)
+    )
+
+
+@ignore_order(local=True)
+def test_filter_with_rand_after_union():
+    # SPARK-14393 / spark-rapids #14156: rand(seed) inside a filter must stay
+    # stable when two multi-partition DataFrames are unioned.
+    int_gen = IntegerGen(nullable=False)
+    def build(spark):
+        df1 = unary_op_df(spark, int_gen, num_slices=4).filter(f.rand(42) > 0.5)
+        df2 = unary_op_df(spark, int_gen, num_slices=4).filter(f.rand(42) > 0.5)
+        return df1.union(df2)
+    assert_gpu_and_cpu_are_equal_collect(build)
 
 # See https://github.com/apache/spark/commit/9c0b803ba124a6e70762aec1e5559b0d66529f4d
 @ignore_order(local=True)

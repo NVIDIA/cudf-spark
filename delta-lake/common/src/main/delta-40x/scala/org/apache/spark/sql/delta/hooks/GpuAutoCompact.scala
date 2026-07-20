@@ -21,13 +21,10 @@
 
 package org.apache.spark.sql.delta.hooks
 
-import org.apache.spark.internal.MDC
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.delta._
 import org.apache.spark.sql.delta.actions._
-import org.apache.spark.sql.delta.logging.DeltaLogKeys
 import org.apache.spark.sql.delta.rapids.GpuOptimisticTransactionBase
-import org.apache.spark.sql.delta.stats.AutoCompactPartitionStats
 
 /**
  * Delta 4.0 version-specific implementation of GpuAutoCompact.
@@ -35,7 +32,7 @@ import org.apache.spark.sql.delta.stats.AutoCompactPartitionStats
  * - DeltaTransaction instead of OptimisticTransactionImpl
  * - Iterator[Action] instead of Seq[Action]
  */
-case object GpuAutoCompact extends GpuAutoCompactBase {
+case object GpuAutoCompact extends GpuTransactionalAutoCompactBase {
 
   override def run(
       spark: SparkSession,
@@ -62,40 +59,13 @@ case object GpuAutoCompact extends GpuAutoCompactBase {
       addedPartitions,
       OP_TYPE,
       maxDeletedRowsRatio = None)
-
-    if (autoCompactRequest.shouldCompact) {
-      try {
-        GpuAutoCompact
-          .compact(
-            spark,
-            txn.deltaLog,
-            txn.catalogTable,
-            autoCompactRequest.targetPartitionsPredicate,
-            OP_TYPE,
-            maxDeletedRowsRatio = None
-          )
-        val partitionsStats = AutoCompactPartitionStats.instance(spark)
-        partitionsStats.markPartitionsAsCompacted(
-          txn.deltaLog.tableId,
-          autoCompactRequest.allowedPartitions
-        )
-      } catch {
-        case e: Throwable =>
-          logError(log"Auto Compaction failed with: ${MDC(DeltaLogKeys.ERROR, e.getMessage)}")
-          recordDeltaEvent(
-            txn.deltaLog,
-            opType = "delta.autoCompaction.error",
-            data = getErrorData(e))
-          throw e
-      } finally {
-        if (AutoCompactUtils.reservePartitionEnabled(spark)) {
-          AutoCompactPartitionReserve.releasePartitions(
-            txn.deltaLog.tableId,
-            autoCompactRequest.allowedPartitions
-          )
-        }
-      }
-    }
+    executeAutoCompactRequest(
+      spark,
+      txn.deltaLog,
+      txn.catalogTable,
+      autoCompactRequest,
+      OP_TYPE,
+      maxDeletedRowsRatio = None)
   }
 
   override def run(
@@ -109,10 +79,18 @@ case object GpuAutoCompact extends GpuAutoCompactBase {
     // Skip Auto Compact if current transaction is not qualified or the table is not qualified
     // based on the value of autoCompactTypeOpt.
     if (shouldSkipAutoCompact(autoCompactTypeOpt, spark, txn)) return
-    compactIfNecessary(
+    val autoCompactRequest = AutoCompactUtils.prepareAutoCompactRequest(
       spark,
       txn,
       postCommitSnapshot,
+      txn.partitionsAddedToOpt.map(_.toSet),
+      OP_TYPE,
+      maxDeletedRowsRatio = None)
+    executeAutoCompactRequest(
+      spark,
+      txn.deltaLog,
+      txn.catalogTable,
+      autoCompactRequest,
       OP_TYPE,
       maxDeletedRowsRatio = None)
   }

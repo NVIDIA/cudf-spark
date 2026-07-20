@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -144,6 +144,8 @@ object HostColumnarToGpu extends Logging {
         ColumnarCopyHelper.doubleCopy(cv, b, rows)
       case StringType =>
         ColumnarCopyHelper.stringCopy(cv, b, rows)
+      case BinaryType =>
+        ColumnarCopyHelper.binaryCopy(cv, b, rows)
       case dt: DecimalType =>
         cv match {
           case wcv: WritableColumnVector =>

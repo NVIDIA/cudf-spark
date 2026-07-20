@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2025, NVIDIA CORPORATION.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,7 +22,7 @@ from data_gen import *
 from parquet_write_test import parquet_datetime_gen_simple, parquet_nested_datetime_gen, parquet_ts_write_options
 from marks import *
 import pyarrow as pa
-import pyarrow.parquet as pa_pq
+from parquet_test_utils import parquet_row_group_midpoints
 from pyspark.sql.types import *
 from pyspark.sql.functions import *
 from spark_init_internal import spark_version
@@ -879,12 +879,21 @@ def test_parquet_input_meta_fallback(spark_tmp_path, v1_enabled_list, reader_con
                         'input_file_block_length()'),
             conf=all_confs)
 
+# More buckets reduce per-task CPU sort pressure. Both sides must use the same
+# bucket count so Spark can still use the bucketed join path.
+_BUCKET_TEST_NUM_BUCKETS = 8
+_BUCKET_TEST_LEFT_ROWS = 100_000
+_BUCKET_TEST_RIGHT_ROWS = 1_000_000
+
 def createBucketedTableAndJoin(spark, tbl_1, tbl_2):
-    spark.range(10e4).write.bucketBy(4, "id").sortBy("id").mode('overwrite').saveAsTable(tbl_1)
-    spark.range(10e6).write.bucketBy(4, "id").sortBy("id").mode('overwrite').saveAsTable(tbl_2)
-    bucketed_4_10e4 = spark.table(tbl_1)
-    bucketed_4_10e6 = spark.table(tbl_2)
-    return bucketed_4_10e4.join(bucketed_4_10e6, "id")
+    # Keep this large enough to exercise bucketed joins, while reducing CPU-side sort pressure.
+    (spark.range(_BUCKET_TEST_LEFT_ROWS).write.bucketBy(_BUCKET_TEST_NUM_BUCKETS, "id")
+        .sortBy("id").mode('overwrite').saveAsTable(tbl_1))
+    (spark.range(_BUCKET_TEST_RIGHT_ROWS).write.bucketBy(_BUCKET_TEST_NUM_BUCKETS, "id")
+        .sortBy("id").mode('overwrite').saveAsTable(tbl_2))
+    bucketed_left = spark.table(tbl_1)
+    bucketed_right = spark.table(tbl_2)
+    return bucketed_left.join(bucketed_right, "id")
 
 @ignore_order
 @allow_non_gpu('DataWritingCommandExec,ExecutedCommandExec,WriteFilesExec')
@@ -919,6 +928,120 @@ def test_small_file_memory(spark_tmp_path, v1_enabled_list):
             conf={'spark.rapids.sql.format.parquet.reader.type': 'COALESCING',
                   'spark.sql.sources.useV1SourceList': v1_enabled_list,
                   'spark.sql.files.maxPartitionBytes': "1g"})
+
+
+@allow_non_gpu("FileSourceScanExec", "ColumnarToRowExec")
+@ignore_order(local=True)
+@pytest.mark.skipif(is_before_spark_350(),
+                    reason="spark.sql.files.maxPartitionNum requires Spark 3.5.0+")
+@pytest.mark.parametrize("parquet_reader_type", ["PERFILE", "MULTITHREADED", "COALESCING"],
+                         ids=idfn)
+def test_parquet_interleaved_file_splits_partition_value_alignment(
+        spark_tmp_path, parquet_reader_type):
+    """
+    Verifies partition values remain aligned when reading split Parquet files from different
+    partition directories.
+
+    The setup creates file A under p=1 and file B under p=2 such that Spark's
+    length-desc split sort produces [A..., B, A-tail] in a single FilePartition.
+    The row-group midpoint precondition below proves A-tail contributes at least
+    one Parquet block to the coalescing reader; otherwise the split interleaving
+    would not reach populateCurrentBlockChunk.
+    """
+    data_path = spark_tmp_path + "/PARQUET_DATA"
+    max_split = 128 * 1024
+    a_rows = 3000
+    b_rows = 800
+    b_split = a_rows
+
+    write_conf = {
+        "spark.sql.files.maxRecordsPerFile": "0",
+        "parquet.block.size": "16384",
+        "spark.sql.parquet.compression.codec": "uncompressed",
+    }
+    read_conf = {
+        "spark.rapids.sql.format.parquet.reader.type": parquet_reader_type,
+        "spark.sql.files.maxPartitionBytes": str(max_split),
+        "spark.sql.files.openCostInBytes": "1",
+        # Pin actual maxSplitBytes == maxPartitionBytes. Without this,
+        # FilePartition.maxSplitBytes computes
+        # min(maxPartitionBytes, max(openCost, totalBytes / minPartitionNum)),
+        # which on high-parallelism CI runners collapses to a much smaller
+        # value and breaks the size-engineering below.
+        "spark.sql.files.minPartitionNum": "1",
+        # Repack initial split-per-partition layout into ONE FilePartition.
+        "spark.sql.files.maxPartitionNum": "1"
+    }
+
+    def setup_table(spark):
+        payload_expr = (
+            "concat(sha2(CAST(id AS STRING), 256), "
+            "sha2(CAST(id + 17 AS STRING), 256)) AS payload")
+        spark.range(0, a_rows) \
+             .selectExpr("CAST(id AS INT) AS a", payload_expr) \
+             .repartition(1).write \
+             .option("parquet.enable.dictionary", "false") \
+             .parquet(f"{data_path}/p=1")
+        spark.range(b_split, b_split + b_rows) \
+             .selectExpr("CAST(id AS INT) AS a", payload_expr) \
+             .repartition(1).write \
+             .option("parquet.enable.dictionary", "false") \
+             .parquet(f"{data_path}/p=2")
+
+    with_cpu_session(setup_table, conf=write_conf)
+
+    def parquet_file_info_by_part(spark):
+        rows = spark.read.parquet(data_path).selectExpr(
+            "p",
+            "named_struct('file_path', _metadata.file_path, "
+            "'file_size', _metadata.file_size) AS file_info") \
+            .groupBy("p") \
+            .agg(collect_set("file_info").alias("files")) \
+            .collect()
+        return {
+            f"p={row['p']}": [(file["file_path"], file["file_size"]) for file in row["files"]]
+            for row in rows
+        }
+
+    parquet_files_by_part = with_cpu_session(parquet_file_info_by_part)
+
+    assert sorted(parquet_files_by_part.keys()) == ["p=1", "p=2"], \
+        f"Expected parquet files under p=1 and p=2, got {parquet_files_by_part}"
+    assert len(parquet_files_by_part["p=1"]) == 1, parquet_files_by_part["p=1"]
+    assert len(parquet_files_by_part["p=2"]) == 1, parquet_files_by_part["p=2"]
+
+    a_path, a_size = parquet_files_by_part["p=1"][0]
+    b_path, b_size = parquet_files_by_part["p=2"][0]
+    a_tail = a_size % max_split
+    assert a_size > max_split, \
+        f"File A ({a_size}) must exceed max_split ({max_split}) to split"
+    assert 0 < a_tail < b_size < max_split, (
+        f"Sort order will not interleave: a_tail={a_tail}, "
+        f"b={b_size}, max_split={max_split}")
+
+    a_tail_start = a_size - a_tail
+    a_midpoints, b_midpoints = with_cpu_session(
+        lambda spark: (
+            parquet_row_group_midpoints(spark, a_path),
+            parquet_row_group_midpoints(spark, b_path),
+        ))
+    assert any(a_tail_start <= midpoint < a_size for midpoint in a_midpoints), (
+        f"A tail split [{a_tail_start}, {a_size}) has no row-group midpoint; "
+        f"midpoints={a_midpoints}")
+    assert b_midpoints, f"File B has no row groups: {b_path}"
+
+    num_partitions = with_gpu_session(
+        lambda spark: spark.read.parquet(data_path).select("a").rdd.getNumPartitions(),
+        conf=read_conf)
+    assert num_partitions == 1, \
+        f"Expected 1 FilePartition after rescale, got {num_partitions}"
+
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.parquet(data_path).selectExpr(
+            f"SUM(CASE WHEN a < {b_split} AND p != 1 THEN 1 "
+            f"WHEN a >= {b_split} AND p != 2 THEN 1 "
+            "ELSE 0 END) AS bad_partition_rows"),
+        conf=read_conf)
 
 
 _nested_pruning_schemas = [
@@ -1204,7 +1327,6 @@ conf_for_parquet_aggregate_pushdown = {
     "spark.sql.sources.useV1SourceList": ""
 }
 
-@pytest.mark.skipif(is_before_spark_330(), reason='Aggregate push down on Parquet is a new feature of Spark 330')
 def test_parquet_scan_without_aggregation_pushdown_not_fallback(spark_tmp_path):
     """
     No aggregation will be pushed down in this test, so we should not fallback to CPU
@@ -1222,7 +1344,6 @@ def test_parquet_scan_without_aggregation_pushdown_not_fallback(spark_tmp_path):
     )
 
 
-@pytest.mark.skipif(is_before_spark_330(), reason='Aggregate push down on Parquet is a new feature of Spark 330')
 @allow_non_gpu(any = True)
 def test_parquet_scan_with_aggregation_pushdown_fallback(spark_tmp_path):
     """
@@ -1241,7 +1362,6 @@ def test_parquet_scan_with_aggregation_pushdown_fallback(spark_tmp_path):
         non_exist_classes= "GpuBatchScanExec",
         conf = conf_for_parquet_aggregate_pushdown)
 
-@pytest.mark.skipif(is_before_spark_330(), reason='Hidden file metadata columns are a new feature of Spark 330')
 @allow_non_gpu(any = True)
 @pytest.mark.parametrize('metadata_column', ["file_path", "file_name", "file_size", "file_modification_time"])
 def test_parquet_scan_with_hidden_metadata_fallback(spark_tmp_path, metadata_column):
@@ -1288,7 +1408,6 @@ def with_id(i):
 
 # Field ID test cases were re-written from:
 # https://github.com/apache/spark/blob/v3.3.0-rc3/sql/core/src/test/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetFieldIdIOSuite.scala
-@pytest.mark.skipif(is_before_spark_330(), reason='Field ID is not supported before Spark 330')
 @pytest.mark.parametrize('footer_read', ["JAVA", "NATIVE", "AUTO"], ids=idfn)
 def test_parquet_read_field_id_using_correctly(spark_tmp_path, footer_read):
     data_path = spark_tmp_path + '/PARQUET_DATA'
@@ -1340,7 +1459,6 @@ def test_parquet_read_field_id_using_correctly(spark_tmp_path, footer_read):
         lambda spark: spark.read.parquet(data_path).where("name >= 'oh'"),
         conf=conf)
 
-@pytest.mark.skipif(is_before_spark_330(), reason='Field ID is not supported before Spark 330')
 @pytest.mark.parametrize('footer_read', ["JAVA", "NATIVE", "AUTO"], ids=idfn)
 def test_parquet_read_field_id_absence(spark_tmp_path, footer_read):
     data_path = spark_tmp_path + '/PARQUET_DATA'
@@ -1368,7 +1486,6 @@ def test_parquet_read_field_id_absence(spark_tmp_path, footer_read):
         lambda spark: spark.read.schema(read_schema).parquet(data_path),
         conf=conf)
 
-@pytest.mark.skipif(is_before_spark_330(), reason='Field ID is not supported before Spark 330')
 @pytest.mark.parametrize('footer_read', ["JAVA", "NATIVE", "AUTO"], ids=idfn)
 def test_parquet_read_multiple_field_id_matches(spark_tmp_path, footer_read):
     data_path = spark_tmp_path + '/PARQUET_DATA'
@@ -1393,7 +1510,6 @@ def test_parquet_read_multiple_field_id_matches(spark_tmp_path, footer_read):
         conf=conf,
         error_message="Found duplicate field(s)")
 
-@pytest.mark.skipif(is_before_spark_330(), reason='Field ID is not supported before Spark 330')
 @pytest.mark.parametrize('footer_read', ["JAVA", "NATIVE", "AUTO"], ids=idfn)
 def test_parquet_read_without_field_id(spark_tmp_path, footer_read):
     data_path = spark_tmp_path + '/PARQUET_DATA'
@@ -1431,7 +1547,6 @@ def test_parquet_read_without_field_id(spark_tmp_path, footer_read):
 
 #  test global config: field_id_write_enable=false, field_id_read_enable=true
 #  test global config: field_id_write_enable=true,  field_id_read_enable=true
-@pytest.mark.skipif(is_before_spark_330(), reason='Field ID is not supported before Spark 330')
 @pytest.mark.parametrize('footer_read', ["JAVA", "NATIVE", "AUTO"], ids=idfn)
 def test_parquet_read_field_id_global_flags(spark_tmp_path, footer_read):
     data_path = spark_tmp_path + '/PARQUET_DATA'
@@ -1470,7 +1585,6 @@ def test_parquet_read_field_id_global_flags(spark_tmp_path, footer_read):
         lambda spark: spark.read.schema(read_schema).parquet(data_path),
         conf=conf)
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_parquet_read_daytime_interval_cpu_file(spark_tmp_path):
     data_path = spark_tmp_path + '/PARQUET_DATA'
     gen_list = [('_c1', DayTimeIntervalGen())]
@@ -1479,7 +1593,6 @@ def test_parquet_read_daytime_interval_cpu_file(spark_tmp_path):
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark: spark.read.parquet(data_path))
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_parquet_read_daytime_interval_gpu_file(spark_tmp_path):
     data_path = spark_tmp_path + '/PARQUET_DATA'
     gen_list = [('_c1', DayTimeIntervalGen())]
@@ -1489,7 +1602,6 @@ def test_parquet_read_daytime_interval_gpu_file(spark_tmp_path):
             lambda spark: spark.read.parquet(data_path))
 
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_parquet_push_down_on_interval_type(spark_tmp_path):
     gen_list = [('_c1', DayTimeIntervalGen())]
     data_path = spark_tmp_path + '/PARQUET_DATA'

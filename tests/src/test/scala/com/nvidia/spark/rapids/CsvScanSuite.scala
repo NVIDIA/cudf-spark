@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,10 +16,14 @@
 
 package com.nvidia.spark.rapids
 
+import java.io.File
+import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.functions.{col, date_add, lit}
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.types.{StructField, StructType, TimestampType}
+import org.apache.spark.sql.types.{DecimalType, StructField, StructType, TimestampType}
 
 class CsvScanSuite extends SparkQueryCompareTestSuite {
   testSparkResultsAreEqual("Test CSV projection with whitespace delimiter between date and time",
@@ -73,6 +77,26 @@ class CsvScanSuite extends SparkQueryCompareTestSuite {
     timestampsAsDatesCsvDf,
     conf=new SparkConf()) {
     df => df.withColumn("next_day", date_add(col("dates"), lit(1)))
+  }
+
+  testGpuReadFallback(
+    "Test CSV decimal parse with non-US locale falls back",
+    "FileSourceScanExec",
+    (file: File) => spark => {
+      spark.read
+        .format("csv")
+        .option("delimiter", ";")
+        .option("locale", "de-DE")
+        .schema(StructType(Array(StructField("amount", DecimalType(10, 2)))))
+        .load(file.getCanonicalPath)
+    },
+    (_, file) => {
+      Files.createDirectories(file.toPath)
+      Files.write(file.toPath.resolve("part-00000.csv"),
+        "1.234,56\n".getBytes(StandardCharsets.UTF_8))
+    },
+    execsAllowedNonGpu = Seq("FileSourceScanExec", "ShuffleExchangeExec")) {
+    df => df.select(col("amount"))
   }
 
   // Fails with Spark 3.2.0 and later - see https://github.com/NVIDIA/spark-rapids/issues/4940

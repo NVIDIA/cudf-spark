@@ -23,8 +23,7 @@ import scala.collection.mutable
 
 import com.nvidia.spark.rapids.filecache.FileCacheLocalityManager
 import com.nvidia.spark.rapids.iceberg.ShimUtils.locationOf
-import org.apache.hadoop.shaded.org.apache.commons.lang3.reflect.FieldUtils
-import org.apache.iceberg.{ScanTask, ScanTaskGroup, Schema, SchemaParser}
+import org.apache.iceberg.SchemaParser
 
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.connector.read.{Batch, InputPartition, PartitionReaderFactory}
@@ -36,7 +35,7 @@ object GpuSparkBatch {
 }
 
 class GpuSparkBatch(
-    val cpuBatch: SparkBatch,
+    val cpuBatch: Batch,
     val parentScan: GpuSparkScan,
 ) extends Batch  {
   import GpuSparkBatch._
@@ -49,8 +48,7 @@ class GpuSparkBatch(
   }
 
   override def planInputPartitions(): Array[InputPartition] = {
-    val expectedSchema = FieldUtils.readField(cpuBatch, "expectedSchema", true)
-      .asInstanceOf[Schema]
+    val expectedSchema = GpuSparkScanAccess.expectedSchema(cpuBatch)
     val expectedSchemaString = SchemaParser.toJson(expectedSchema)
 
     val sparkContext = SparkSession.getActiveSession.get.sparkContext
@@ -58,14 +56,13 @@ class GpuSparkBatch(
       new SerializableConfiguration(sparkContext.hadoopConfiguration))
 
     cpuBatch.planInputPartitions().map { partition =>
-      val cpuPartition = partition.asInstanceOf[SparkInputPartition]
-      val fileCacheLocations = preferredLocationsFromFileCache(cpuPartition)
+      val fileCacheLocations = preferredLocationsFromFileCache(partition)
       val preferredLocations = if (fileCacheLocations.nonEmpty) {
         fileCacheLocations
       } else {
-        cpuPartition.preferredLocations()
+        partition.preferredLocations()
       }
-      new GpuSparkInputPartition(cpuPartition,
+      new GpuSparkInputPartition(partition,
         parentScan.rapidsConf,
         hadoopConf,
         expectedSchemaString,
@@ -73,10 +70,9 @@ class GpuSparkBatch(
     }
   }
 
-  private def preferredLocationsFromFileCache(partition: SparkInputPartition): Array[String] = {
+  private def preferredLocationsFromFileCache(partition: InputPartition): Array[String] = {
     val hostToNumBytes = mutable.HashMap.empty[String, Long]
-    partition.taskGroup()
-      .asInstanceOf[ScanTaskGroup[ScanTask]]
+    GpuSparkScanAccess.taskGroup(partition)
       .tasks()
       .asScala
       .map(_.asFileScanTask())

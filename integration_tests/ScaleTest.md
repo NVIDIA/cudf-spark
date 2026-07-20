@@ -61,6 +61,7 @@ The queries are define in the source code. You can check the table below to see 
 | q39        | unbounded window with simple partition by and order by columns, but complexity window operations as combinations of a few input columns | select {complexity aggregations mins/max of any column or SUM of two or more numeric columns multiplied together} over (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING PARTITION BY c_foreign_a ORDER BY c_data_row_num_1 |
 | q40        | COLLECT SET WINDOW (We may never really be able to do this well)                                       | select array_sort(collect_set(f_data_low_unique_1)) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW PARTITION BY f_key4_* order by f_data_row_num_1) |
 | q41        | COLLECT LIST WINDOW (We may never really be able to do this well)                                      | select collect_list(f_data_low_unique_1) OVER (ROWS BETWEEN complexity PRECEDING and CURRENT ROW PARTITION BY f_key4_* order by f_data_row_num_1) |
+| q42        | Conditional equi-join with CAST in non-equality condition (regression test for #14283).                | SELECT a_key4_1, a_data_low_unique_1, f_data_low_unique_1 FROM a_facts JOIN f_facts on a_key4_1 = f_key4_1 AND a_data_low_unique_1 < CAST(f_data_low_unique_1 AS BIGINT) AND CAST(f_data_row_num_1 AS BIGINT) > a_data_low_unique_1 |
 
 
 ## Submit
@@ -97,7 +98,7 @@ $SPARK_HOME/bin/spark-submit \
 --conf spark.sql.parquet.datetimeRebaseModeInWrite=CORRECTED \
 --jars $SPARK_HOME/examples/jars/scopt_2.12-3.7.1.jar \
 --class com.nvidia.spark.rapids.tests.scaletest.ScaleTest \
-./target/rapids-4-spark-integration-tests_2.12-26.06.0-SNAPSHOT-spark332.jar \
+./target/rapids-4-spark-integration-tests_2.12-26.08.0-SNAPSHOT-spark332.jar \
 10 \
 100 \
 parquet \
