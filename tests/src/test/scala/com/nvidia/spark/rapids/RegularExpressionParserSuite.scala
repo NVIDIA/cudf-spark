@@ -92,6 +92,31 @@ class RegularExpressionParserSuite extends AnyFunSuite {
           RegexGroup(RegexGroup.Named("n"), RegexSequence(ListBuffer(RegexChar('f')))))))
   }
 
+  test("flags") {
+    assert(parse("(?i)(?m-s)(?-duxU)(?)(?i-)(?-)") ===
+      RegexSequence(ListBuffer(
+        RegexInlineFlags(RegexFlagSet(Set(RegexFlag.CaseInsensitive), Set())),
+        RegexInlineFlags(RegexFlagSet(Set(RegexFlag.Multiline), Set(RegexFlag.DotAll))),
+        RegexInlineFlags(RegexFlagSet(Set(),
+          Set(RegexFlag.UnixLines, RegexFlag.UnicodeCase, RegexFlag.Comments,
+            RegexFlag.UnicodeClasses))),
+        RegexInlineFlags(RegexFlagSet(Set(), Set())),
+        RegexInlineFlags(RegexFlagSet(Set(RegexFlag.CaseInsensitive), Set())),
+        RegexInlineFlags(RegexFlagSet(Set(), Set())))))
+  }
+
+  test("scoped inline flags") {
+    assert(parse("(?i:ab)") ===
+      RegexSequence(ListBuffer(
+        RegexGroup(RegexGroup.ScopedFlags(RegexFlagSet(Set(RegexFlag.CaseInsensitive), Set())),
+          RegexSequence(ListBuffer(RegexChar('a'), RegexChar('b')))))))
+    assert(parse("(?i-s:a)") ===
+      RegexSequence(ListBuffer(
+        RegexGroup(RegexGroup.ScopedFlags(
+          RegexFlagSet(Set(RegexFlag.CaseInsensitive), Set(RegexFlag.DotAll))),
+          RegexSequence(ListBuffer(RegexChar('a')))))))
+  }
+
   test("character class") {
     assert(parse("[a-z+A-Z]") ===
       RegexSequence(ListBuffer(
@@ -256,14 +281,12 @@ class RegularExpressionParserSuite extends AnyFunSuite {
   }
 
   test("group containing quantifier") {
-    val e = intercept[RegexUnsupportedException] {
-      parse("(?)")
-    }
-    assert(e.getMessage.startsWith("Base expression cannot start with quantifier"))
-
     assert(parse("(?:a?)") === RegexSequence(ListBuffer(
       RegexGroup(RegexGroup.NonCapturing, RegexSequence(ListBuffer(
         RegexRepetition(RegexChar('a'), SimpleQuantifier('?'))))))))
+    assert(parse("(?i:a)") === RegexSequence(ListBuffer(
+      RegexGroup(RegexGroup.ScopedFlags(RegexFlagSet(Set(RegexFlag.CaseInsensitive), Set())),
+        RegexSequence(ListBuffer(RegexChar('a')))))))
   }
 
   test("group not starting with ? is a capturing group") {

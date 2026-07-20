@@ -22,7 +22,7 @@ import java.util.regex.{Pattern, PatternSyntaxException}
 import scala.collection.mutable.{HashSet, ListBuffer}
 import scala.util.{Random, Try}
 
-import ai.rapids.cudf.{CaptureGroups, ColumnVector, CudfException, RegexFlag, RegexProgram}
+import ai.rapids.cudf.{CaptureGroups, ColumnVector, CudfException, RegexFlag => CudfRegexFlag, RegexProgram}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RegexParser.toReadableString
 import org.scalatest.funsuite.AnyFunSuite
@@ -1161,7 +1161,7 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     val result = new Array[Boolean](input.length)
     withResource(ColumnVector.fromStrings(input: _*)) { cv =>
       val prog = new RegexProgram(cudfPattern,
-        EnumSet.of(RegexFlag.EXT_NEWLINE) ,CaptureGroups.NON_CAPTURE)
+        EnumSet.of(CudfRegexFlag.EXT_NEWLINE) ,CaptureGroups.NON_CAPTURE)
       withResource(cv.containsRe(prog)) { c =>
         withResource(c.copyToHost()) { hv =>
           result.indices.foreach(i => result(i) = hv.getBoolean(i))
@@ -1184,11 +1184,11 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     withResource(ColumnVector.fromStrings(input: _*)) { cv =>
       val c = if (hasBackrefs) {
         cv.stringReplaceWithBackrefs(new RegexProgram(cudfPattern,
-          EnumSet.of(RegexFlag.EXT_NEWLINE)), converted)
+          EnumSet.of(CudfRegexFlag.EXT_NEWLINE)), converted)
       } else {
         withResource(GpuScalar.from(converted, DataTypes.StringType)) { replace =>
           val prog = new RegexProgram(cudfPattern,
-            EnumSet.of(RegexFlag.EXT_NEWLINE), CaptureGroups.NON_CAPTURE)
+            EnumSet.of(CudfRegexFlag.EXT_NEWLINE), CaptureGroups.NON_CAPTURE)
           cv.replaceRegex(prog, replace)
         }
       }
@@ -1223,7 +1223,7 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     withResource(ColumnVector.fromStrings(input: _*)) { cv =>
       val x = if (isRegex) {
         cv.stringSplitRecord(new RegexProgram(pattern,
-          EnumSet.of(RegexFlag.EXT_NEWLINE), CaptureGroups.NON_CAPTURE), limit)
+          EnumSet.of(CudfRegexFlag.EXT_NEWLINE), CaptureGroups.NON_CAPTURE), limit)
       } else {
         cv.stringSplitRecord(pattern, limit)
       }

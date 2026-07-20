@@ -177,43 +177,79 @@ class RegexParser(pattern: String) {
     base
   }
 
+  private def parseFlags(): RegexFlagSet = {
+    def parseFlagSet(): Set[RegexFlag] = {
+      var result = Set.empty[RegexFlag]
+      while (!eof() && peek().exists(ch => RegexFlag.allFlagsString.contains(ch))) {
+        result += RegexFlag.fromChar(consume())
+      }
+      result
+    }
+    val flags = parseFlagSet()
+    val negated = if (peek().contains('-')) {
+      consumeExpected('-'); parseFlagSet()
+    } else Set.empty[RegexFlag]
+    RegexFlagSet(flags, negated)
+  }
+
   private def parseGroup(): RegexAST = {
-    val groupType = if (pos + 1 < pattern.length
-        && pattern.charAt(pos) == '?'
-        && ":!=<>".contains(pattern.charAt(pos+1))) {
+    val groupType = if (peek().contains('?')) {
       consumeExpected('?')
-      consume() match {  // guaranteed exhaustive by the contains call above
-        case ':' => RegexGroup.NonCapturing
-        case '!' => RegexGroup.NegativeLookahead
-        case '=' => RegexGroup.PositiveLookahead
-        case '>' => RegexGroup.Independent
-        case '<' if pos < pattern.length => consume() match {
-          case '!' => RegexGroup.NegativeLookbehind
-          case '=' => RegexGroup.PositiveLookbehind
-          case ch if isLetter(ch) =>
-            val nameStart = pos-1
-            while (!eof() && peek().exists(c => isLetter(c) || isAsciiDigit(c))) {
-              skip()
-            }
-            val name = pattern.substring(nameStart, pos)
-            if (!peek().contains('>')) {
-              throw new RegexUnsupportedException(
-                "Illegal named capture group: malformed <name>", Some(nameStart-1))
-            }
-            consumeExpected('>')
-            RegexGroup.Named(name)
-          case _ => throw new RegexUnsupportedException(
-            "Unexpected character after '<' in group", Some(pos-1))
+      peek() match {
+        case None => throw new RegexUnsupportedException("Unterminated inline flags", Some(pos))
+        case Some(ch) if ":!=<>".contains(ch) => consumeExpected(ch) match {
+          // guaranteed exhaustive by the contains call above
+          case ':' => RegexGroup.NonCapturing
+          case '!' => RegexGroup.NegativeLookahead
+          case '=' => RegexGroup.PositiveLookahead
+          case '>' => RegexGroup.Independent
+          case '<' if pos < pattern.length => consume() match {
+            case '!' => RegexGroup.NegativeLookbehind
+            case '=' => RegexGroup.PositiveLookbehind
+            case ch if isLetter(ch) =>
+              val nameStart = pos-1
+              while (!eof() && peek().exists(c => isLetter(c) || isAsciiDigit(c))) {
+                skip()
+              }
+              val name = pattern.substring(nameStart, pos)
+              if (!peek().contains('>')) {
+                throw new RegexUnsupportedException(
+                  "Illegal named capture group: malformed <name>", Some(nameStart-1))
+              }
+              consumeExpected('>')
+              RegexGroup.Named(name)
+            case _ => throw new RegexUnsupportedException(
+              "Unexpected character after '<' in group", Some(pos-1))
+          }
+          case '<' => throw new RegexUnsupportedException(
+            "Pattern may not end with trailing '<' in group", Some(pos-1))
         }
-        case '<' => throw new RegexUnsupportedException(
-          "Pattern may not end with trailing '<' in group", Some(pos-1))
+        case Some(_) =>
+          val flags = parseFlags()
+          // Leave the ':' to distinguish scoped flags from inline flags.
+          peek() match {
+            case Some(':') | Some(')') | None =>
+            case Some(ch) =>
+              throw new RegexUnsupportedException(s"Unexpected inline flag '$ch'", Some(pos))
+          }
+          RegexGroup.ScopedFlags(flags)
       }
     } else {
       RegexGroup.Capturing
     }
-    val term = parseUntil(() => peek().contains(')'))
-    consumeExpected(')')
-    RegexGroup(groupType, term)
+    (peek(), groupType) match {
+      case (None, RegexGroup.ScopedFlags(_)) =>
+        throw new RegexUnsupportedException("Unterminated inline flags", Some(pos))
+      case (None, _) => throw new RegexUnsupportedException("Unclosed group", Some(pos))
+      case (Some(')'), RegexGroup.ScopedFlags(flags)) =>
+        consumeExpected(')')
+        RegexInlineFlags(flags)
+      case (Some(ch), _) =>
+        if (ch == ':') consumeExpected(':')
+        val term = parseUntil(() => peek().contains(')'))
+        consumeExpected(')')
+        RegexGroup(groupType, term)
+    }
   }
 
   private def parseCharacterClass(): RegexCharacterClass = {
@@ -1633,6 +1669,8 @@ class CudfRegexTranspiler(mode: RegexMode) {
             "Independent groups are not supported"
           case RegexGroup.Named(_) =>
             "Named capture groups are not supported"
+          case RegexGroup.ScopedFlags(_) =>
+            "Scoped inline flags are not supported"
           case _ =>
             s"Unknown group type: ${g.groupType}"
         }
@@ -1779,6 +1817,35 @@ sealed case class RegexSequence(parts: ListBuffer[RegexAST]) extends RegexAST {
   override def toRegexString: String = parts.map(_.toRegexString).mkString
 }
 
+sealed abstract class RegexFlag(val char: Char)
+object RegexFlag {
+  case object CaseInsensitive extends RegexFlag('i')
+  case object UnixLines extends RegexFlag('d')
+  case object Multiline extends RegexFlag('m')
+  case object DotAll extends RegexFlag('s')
+  case object UnicodeCase extends RegexFlag('u')
+  case object Comments extends RegexFlag('x')
+  case object UnicodeClasses extends RegexFlag('U')
+  final val all: Seq[RegexFlag] =
+    Seq(CaseInsensitive, UnixLines, Multiline, DotAll, UnicodeCase, Comments, UnicodeClasses)
+  final val fromChar: Map[Char, RegexFlag] = all.map(f => f.char -> f).toMap
+  final val allFlagsString: String = all.map(_.char).mkString
+}
+
+sealed case class RegexFlagSet(flags: Set[RegexFlag], negated: Set[RegexFlag]) {
+  def isEmpty: Boolean = flags.isEmpty && negated.isEmpty
+  def toRegexString: String = {
+    val flagsString = flags.map(_.char).mkString
+    val negatedString = if (negated.isEmpty) "" else s"-${negated.map(_.char).mkString}"
+    s"${flagsString}${negatedString}"
+  }
+}
+
+sealed case class RegexInlineFlags(flags: RegexFlagSet) extends RegexAST {
+  override def children(): Seq[RegexAST] = Seq.empty
+  override def toRegexString: String = s"(?${flags.toRegexString})"
+}
+
 object RegexGroup {
   sealed trait Type
   case object Capturing extends Type
@@ -1789,6 +1856,7 @@ object RegexGroup {
   case object NegativeLookbehind extends Type
   case class Named(name: String) extends Type
   case object Independent extends Type
+  case class ScopedFlags(flags: RegexFlagSet) extends Type
 }
 
 sealed case class RegexGroup(groupType: RegexGroup.Type, term: RegexAST) extends RegexAST {
@@ -1807,6 +1875,7 @@ sealed case class RegexGroup(groupType: RegexGroup.Type, term: RegexAST) extends
     case NegativeLookbehind => s"(?<!${term.toRegexString})"
     case Named(name) => s"(?<$name>${term.toRegexString})"
     case Independent => s"(?>${term.toRegexString})"
+    case ScopedFlags(flags) => s"(?${flags.toRegexString}:${term.toRegexString})"
   }
 }
 
