@@ -26,6 +26,7 @@ import scala.collection.mutable.ArrayBuffer
 import com.nvidia.spark.rapids.spill.SpillFramework
 import org.apache.hadoop.fs.FileUtil
 
+import org.apache.spark.SparkContextAccessor
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.analysis.FunctionRegistry
 
@@ -40,6 +41,8 @@ object ParallelUnitTestRunner {
   private val sparkWarehousePrefix = "spark-warehouse"
   private val workerMode = "worker"
   private val protocolPrefix = "__RAPIDS_PARALLEL_UT__"
+  private val workerExitTimeoutSeconds = 60L
+  private val workerDestroyTimeoutSeconds = 10L
 
   def main(args: Array[String]): Unit = {
     if (args.headOption.contains(workerMode)) {
@@ -321,7 +324,7 @@ object ParallelUnitTestRunner {
 
       var running = sendNextTask()
       var line = reader.readLine()
-      while (line != null) {
+      while (line != null && running) {
         if (line.startsWith(s"$protocolPrefix\tRESULT\t")) {
           val fields = line.split("\\t", -1)
           val succeeded = fields.length == 4 && fields(3).toBoolean
@@ -339,17 +342,33 @@ object ParallelUnitTestRunner {
         } else {
           println(s"[wave-$runId-worker-$workerId] $line")
         }
-        line = reader.readLine()
+        if (running) {
+          line = reader.readLine()
+        }
       }
-      reader.close()
       writer.close()
-      val exitCode = process.waitFor()
+      val outputThread = streamWorkerOutput(runId, workerId, reader)
+      val exited = process.waitFor(workerExitTimeoutSeconds, TimeUnit.SECONDS)
+      if (!exited) {
+        failures.add(s"wave-$runId worker-$workerId did not exit within " +
+            s"$workerExitTimeoutSeconds seconds")
+        process.destroy()
+        if (!process.waitFor(workerDestroyTimeoutSeconds, TimeUnit.SECONDS)) {
+          process.destroyForcibly()
+          process.waitFor(workerDestroyTimeoutSeconds, TimeUnit.SECONDS)
+        }
+      }
+      outputThread.join(TimeUnit.SECONDS.toMillis(workerDestroyTimeoutSeconds))
+      if (outputThread.isAlive) {
+        reader.close()
+      }
+      val exitCode = if (process.isAlive) None else Some(process.exitValue())
       currentTask.foreach { task =>
         failures.add(s"wave-$runId ${task.suite} lost when worker-$workerId exited " +
-            s"with status $exitCode")
+            s"with status ${exitCode.getOrElse("unknown")}")
       }
-      if (exitCode != 0 && currentTask.isEmpty) {
-        failures.add(s"wave-$runId worker-$workerId exited with status $exitCode")
+      if (exited && exitCode.exists(_ != 0) && currentTask.isEmpty) {
+        failures.add(s"wave-$runId worker-$workerId exited with status ${exitCode.get}")
       }
     } catch {
       case t: Throwable =>
@@ -405,6 +424,7 @@ object ParallelUnitTestRunner {
       line = reader.readLine()
     }
     reader.close()
+    System.exit(0)
   }
 
   private def initializeSparkFunctionRegistry(): Unit = {
@@ -423,7 +443,7 @@ object ParallelUnitTestRunner {
     }
   }
 
-  private def cleanupWorkerState(tmpDir: Path): Unit = {
+  private[rapids] def cleanupWorkerState(tmpDir: Path): Unit = {
     val failures = ArrayBuffer.empty[Throwable]
     val warehouseDirs = ArrayBuffer.empty[File]
     def cleanup(body: => Unit): Unit = try {
@@ -434,12 +454,17 @@ object ParallelUnitTestRunner {
 
     val sessions = (SparkSession.getActiveSession.toSeq ++
         SparkSession.getDefaultSession.toSeq).distinct
+    val sparkContexts =
+      (sessions.map(_.sparkContext) ++ SparkContextAccessor.getActive.toSeq).distinct
     sessions.foreach { session =>
       cleanup(session.catalog.clearCache())
       cleanup {
         warehouseDirs += new File(session.conf.get("spark.sql.warehouse.dir"))
       }
     }
+    sparkContexts.foreach(context => cleanup(context.stop()))
+    cleanup(SparkSession.clearActiveSession())
+    cleanup(SparkSession.clearDefaultSession())
     cleanup {
       warehouseDirs ++= Option(tmpDir.toFile.listFiles()).getOrElse(Array.empty[File])
           .filter(file => file.isDirectory && file.getName.startsWith(sparkWarehousePrefix))
@@ -578,6 +603,26 @@ object ParallelUnitTestRunner {
         } finally {
           reader.close()
         }
+      }
+    }
+    thread.setDaemon(true)
+    thread.start()
+    thread
+  }
+
+  private def streamWorkerOutput(
+      runId: Int,
+      workerId: Int,
+      reader: BufferedReader): Thread = {
+    val thread = new Thread(s"parallel-unit-test-output-$runId-worker-$workerId") {
+      override def run(): Unit = try {
+        var line = reader.readLine()
+        while (line != null) {
+          println(s"[wave-$runId-worker-$workerId] $line")
+          line = reader.readLine()
+        }
+      } finally {
+        reader.close()
       }
     }
     thread.setDaemon(true)
