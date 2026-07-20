@@ -58,7 +58,11 @@ def delta_path_identifier(path):
 
 
 def optimize_liquid_clustered_table(spark, table_identifier):
-    spark.sql(f"OPTIMIZE {table_identifier}").collect()
+    if is_databricks173_or_later():
+        with_cpu_session(lambda cpu_spark: cpu_spark.sql(
+            f"OPTIMIZE {table_identifier}").collect())
+    else:
+        spark.sql(f"OPTIMIZE {table_identifier}").collect()
 
 
 @allow_non_gpu(*delta_meta_allow)
