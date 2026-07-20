@@ -37,6 +37,7 @@ import com.nvidia.spark.rapids.jni.RegexRewriteUtils
 import com.nvidia.spark.rapids.shims.{NullIntolerantShim, ShimExpression, SparkShimImpl}
 
 import org.apache.spark.sql.catalyst.expressions._
+import org.apache.spark.sql.catalyst.util.GenericArrayData
 import org.apache.spark.sql.errors.ConvUtils
 import org.apache.spark.sql.rapids.catalyst.expressions._
 import org.apache.spark.sql.types._
@@ -1073,13 +1074,12 @@ object GpuRegExpUtils {
   }
 
   /**
-   * Convert symbols of back-references if input string contains any.
-   * In spark's regex rule, there are two patterns of back-references:
-   * \group_index and \$group_index
-   * This method transforms above two patterns into cuDF pattern \${group_index}, except they are
-   * preceded by escape character.
+   * Convert numbered `$group_index` back-reference symbols into cuDF's `${group_index}` form.
+   * Java `Matcher#appendReplacement` treats `\digit` as the literal digit character, not as a
+   * back-reference. Escaped pairs are kept verbatim here and are later normalized by
+   * `unescapeReplaceString`.
    *
-   * Java's `Matcher.appendReplacement` reads the digits after `$` or `\` one at a time and
+   * Java's `Matcher.appendReplacement` reads the digits after `$` one at a time and
    * stops as soon as adding the next digit would make the running group index exceed the
    * actual capture-group count; any further digits are treated as literal characters
    * (greedy-with-backoff). When `numCaptureGroups` is negative the caller is opting out of the
@@ -1112,8 +1112,7 @@ object GpuRegExpUtils {
           b.append(rep.charAt(i))
           i += 1
         }
-      } else if (Seq('$', '\\').contains(rep.charAt(i))
-        && i + 1 < rep.length && rep.charAt(i + 1).isDigit) {
+      } else if (rep.charAt(i) == '$' && i + 1 < rep.length && rep.charAt(i + 1).isDigit) {
 
         // Consume digits one at a time. If the running group index would exceed the actual
         // capture-group count, stop and leave the remaining digits as literals. When no digit
@@ -1122,7 +1121,6 @@ object GpuRegExpUtils {
         // error.
         var j = i + 1
         var n = 0
-        val consumed = new StringBuilder
         var stopped = false
         while (j < rep.length && rep.charAt(j).isDigit && !stopped) {
           val nextN = n * 10 + (rep.charAt(j) - '0')
@@ -1130,12 +1128,11 @@ object GpuRegExpUtils {
             stopped = true
           } else {
             n = nextN
-            consumed.append(rep.charAt(j))
             j += 1
           }
         }
-        if (consumed.nonEmpty) {
-          b.append("${").append(consumed).append("}")
+        if (j > i + 1) {
+          b.append("${").append(n).append("}")
           i = j
         } else {
           // Legacy path: greedily swallow every digit so cuDF errors on the out-of-range
@@ -1151,8 +1148,10 @@ object GpuRegExpUtils {
           i = k
         }
       } else if (rep.charAt(i) == '\\' && i + 1 < rep.length) {
-        // skip potential escape sequences like `\$` or `\\`; `\digit` is handled by the
-        // greedy-with-backoff branch above.
+        // Intentionally keep the whole escape sequence (`\` + the next char) together so
+        // `unescapeReplaceString` can strip just the leading backslash. The cases that matter
+        // here are `\$` (escaped dollar -> literal `$`) and `\\` (escaped backslash); any other
+        // `\X` could fall through to the else branch, but keeping the pair together is harmless.
         b.append('\\').append(rep.charAt(i + 1))
         i += 2
       } else {
@@ -1755,58 +1754,44 @@ case class GpuRegExpExtractAll(
           EnumSet.of(RegexFlag.EXT_NEWLINE), CaptureGroups.NON_CAPTURE)
         str.getBase.extractAllRecord(prog, 0)
       case _ =>
-        // Extract matches corresponding to idx. cuDF's extract_all_record does not support
-        // group idx, so we must manually extract the relevant matches. Example:
-        // Given the pattern (\d+)-(\d+) and idx=1
-        //
-        // |      Input      |      Java       |               cuDF             |
-        // |-----------------|-----------------|--------------------------------|
-        // | '1-2, 3-4, 5-6' | ['1', '3', '5'] | ['1', '2', '3', '4', '5', '6'] |
-        //
-        // Since idx=1 and the pattern has 2 capture groups, we take the 1st element and every
-        // 2nd element afterwards from the cuDF list
-
         val rowCount = str.getRowCount
         val prog = new RegexProgram(cudfRegexPattern, EnumSet.of(RegexFlag.EXT_NEWLINE))
 
-        val extractedWithNulls = withResource(
-          // Now the index is always 1 because we have transpiled all the capture groups to the
-          // single group that we care about, so we just have to handle the idx = 1 case here
-          str.getBase.extractAllRecord(prog, 1)) { allExtracted =>
-            withResource(allExtracted.countElements) { listSizes =>
-              withResource(listSizes.max) { maxSize =>
-                val maxSizeInt = maxSize.getInt
-                val stringCols = Range(0, maxSizeInt, 1).safeMap {
-                  i =>
-                    allExtracted.extractListElement(i)
-                }
-                withResource(stringCols) { _ =>
-                  ColumnVector.makeList(rowCount, DType.STRING, stringCols: _*)
+        // The transpiler leaves only the requested group as a capture group, so cuDF already
+        // returns one list element per regex match. Align the remaining result semantics with
+        // Spark: an unmatched capture is an empty string, no matches is an empty list, and a
+        // null input is a null list.
+        withResource(str.getBase.extractAllRecord(prog, 1)) { extracted =>
+          val noMatchesAsEmptyLists = withResource(GpuScalar.from(
+            new GenericArrayData(Array.empty[Any]), dataType)) { emptyStringList =>
+            // cuDF returns a zero-row list column when the entire input has no matches.
+            // Restore the input row count before applying Spark's null-input semantics.
+            if (extracted.getRowCount == 0) {
+              ColumnVector.fromScalar(emptyStringList, rowCount.toInt)
+            } else {
+              val capturesWithEmptyStrings = withResource(extracted.getChildColumnView(0)) {
+                captures =>
+                  withResource(Scalar.fromString("")) { emptyString =>
+                    withResource(captures.replaceNulls(emptyString)) { normalizedCaptures =>
+                      withResource(extracted.replaceListChild(normalizedCaptures)) {
+                        _.copyToColumnVector()
+                      }
+                    }
+                  }
+              }
+              withResource(capturesWithEmptyStrings) { normalized =>
+                withResource(normalized.isNull) { noMatchesOrNullInput =>
+                  noMatchesOrNullInput.ifElse(emptyStringList, normalized)
                 }
               }
             }
           }
-        // Filter out null values in the lists
-        val extractedStrings = withResource(extractedWithNulls) { _ =>
-          val booleanMask = withResource(extractedWithNulls.getListOffsetsView) { offsetsCol =>
-            withResource(extractedWithNulls.getChildColumnView(0)) { stringCol =>
-              withResource(stringCol.isNotNull) { isNotNull =>
-                isNotNull.makeListFromOffsets(rowCount, offsetsCol)
-              }
-            }
-          }
-          withResource(booleanMask) {
-            extractedWithNulls.applyBooleanMask
-          }
-        }
-
-        // If input is null, output should also be null
-        withResource(extractedStrings) { s =>
-          withResource(GpuScalar.from(null, DataTypes.createArrayType(DataTypes.StringType))) {
-            nullStringList =>
+          withResource(noMatchesAsEmptyLists) { normalized =>
+            withResource(GpuScalar.from(null, dataType)) { nullStringList =>
               withResource(str.getBase.isNull) { isInputNull =>
-                isInputNull.ifElse(nullStringList, s)
+                isInputNull.ifElse(nullStringList, normalized)
               }
+            }
           }
         }
     }
