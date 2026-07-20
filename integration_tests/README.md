@@ -563,13 +563,17 @@ partition type to keep memory usage manageable.
 
 #### Iceberg REST catalog write compression
 
-Some REST catalog deployments can apply a catalog-side default Parquet compression codec that
-is not supported by the RAPIDS GPU writer. The REST catalog CI sets table defaults for data
-and delete files to use `zstd`, which is supported by the GPU writer:
+Older Iceberg REST clients, including 1.6.x, do not apply client-side
+`spark.sql.catalog.*.table-default.*` settings when creating REST tables. The resulting tables
+can use a default Parquet compression codec that is not supported by the RAPIDS GPU writer.
+REST catalog tests therefore add explicit table properties for data and delete files to use
+`zstd`, which is supported by the GPU writer:
 
-```shell
-"PYSP_TEST_spark_sql_catalog_spark__catalog_table-default_write_parquet_compression-codec=zstd"
-"PYSP_TEST_spark_sql_catalog_spark__catalog_table-default_write_delete_parquet_compression-codec=zstd"
+```sql
+TBLPROPERTIES (
+  'write.parquet.compression-codec' = 'zstd',
+  'write.delete.parquet.compression-codec' = 'zstd'
+)
 ```
 
 ### Run Apache iceberg s3tables tests

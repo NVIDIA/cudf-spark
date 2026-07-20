@@ -699,6 +699,594 @@ def test_range_windows_with_string_order_by_column(data_gen, batch_size, ansi):
         conf={'spark.rapids.sql.batchSizeBytes': batch_size,
             'spark.sql.ansi.enabled': ansi})
 
+
+# Multi-column RANGE peer frames cover rows equal on all order-by keys. Repeating the keys with
+# period `_multi_order_range_repeat_length` over `_multi_order_range_num_rows` rows makes key
+# tuples recur, so peer groups span more than one row.
+_multi_order_range_num_rows = 2048
+_multi_order_range_repeat_length = 64
+
+
+def _multi_order_range_partition_gen():
+    return RepeatSeqGen(
+        IntegerGen(nullable=False, min_val=0, max_val=7, special_cases=[]),
+        length=_multi_order_range_repeat_length)
+
+
+def _multi_order_range_value_gen():
+    return IntegerGen(nullable=False, min_val=0, max_val=1000, special_cases=[])
+
+
+def _multi_order_range_int_gen(nullable=True):
+    return IntegerGen(
+        nullable=(True, 20.0) if nullable else False, min_val=0, max_val=5, special_cases=[])
+
+
+def _multi_order_range_string_gen():
+    return StringGen(pattern='[abc]', nullable=(True, 20.0))
+
+
+def _multi_order_range_long_gen():
+    return LongGen(nullable=(True, 20.0), min_val=0, max_val=5, special_cases=[])
+
+
+def _multi_order_range_date_gen():
+    return DateGen(
+        nullable=(True, 20.0),
+        start=date(year=2020, month=1, day=1),
+        end=date(year=2020, month=1, day=15))
+
+
+# Nullable aggregation column; the default v gen is non-nullable, so this covers nulls in the agg
+# input flowing through RANGE peer/running frames with multiple order-by columns.
+def _multi_order_range_nullable_value_gen():
+    return IntegerGen(nullable=(True, 20.0), min_val=0, max_val=1000, special_cases=[])
+
+
+# Struct used as a 2nd order-by key: ORDER BY on a struct is an unsupported type, so it must fall
+# back to the CPU even though the leading key is supported.
+def _multi_order_range_struct_gen():
+    return StructGen(
+        [('s_int', _multi_order_range_int_gen()), ('s_str', _multi_order_range_string_gen())],
+        nullable=(True, 20.0))
+
+
+# Repeat a short generated sequence so every observed partition has many rows and some
+# partition/order-key tuples are guaranteed to repeat.
+_multi_order_range_data_gen = [
+    ('p', _multi_order_range_partition_gen()),
+    ('oi', RepeatSeqGen(_multi_order_range_int_gen(), length=_multi_order_range_repeat_length)),
+    ('os', RepeatSeqGen(_multi_order_range_string_gen(), length=_multi_order_range_repeat_length)),
+    ('v', _multi_order_range_value_gen()),
+]
+
+_single_order_range_data_gen = [
+    ('p', _multi_order_range_partition_gen()),
+    ('oi', RepeatSeqGen(
+        IntegerGen(nullable=False, min_val=0, max_val=10, special_cases=[]),
+        length=_multi_order_range_repeat_length)),
+    ('v', _multi_order_range_value_gen()),
+]
+
+_multi_order_range_fallback_data_gen = [
+    ('p', _multi_order_range_partition_gen()),
+    ('oi', RepeatSeqGen(_multi_order_range_int_gen(), length=_multi_order_range_repeat_length)),
+    ('flag', RepeatSeqGen(BooleanGen(nullable=(True, 20.0)),
+        length=_multi_order_range_repeat_length)),
+    ('ostruct', RepeatSeqGen(_multi_order_range_struct_gen(),
+        length=_multi_order_range_repeat_length)),
+    ('v', _multi_order_range_value_gen()),
+]
+
+_multi_order_range_timestamp_data_gen = [
+    ('p', _multi_order_range_partition_gen()),
+    ('oi', RepeatSeqGen(_multi_order_range_int_gen(), length=_multi_order_range_repeat_length)),
+    ('os', RepeatSeqGen(_multi_order_range_string_gen(), length=_multi_order_range_repeat_length)),
+    ('ts', RepeatSeqGen(
+        TimestampGen(
+            nullable=(True, 20.0),
+            start=datetime(2020, 1, 1, tzinfo=timezone.utc),
+            end=datetime(2020, 1, 15, tzinfo=timezone.utc)),
+        length=_multi_order_range_repeat_length)),
+    ('v', _multi_order_range_value_gen()),
+]
+
+_multi_order_range_fp_data_gen = [
+    ('p', _multi_order_range_partition_gen()),
+    ('oi', RepeatSeqGen(_multi_order_range_int_gen(), length=_multi_order_range_repeat_length)),
+    ('os', RepeatSeqGen(_multi_order_range_string_gen(), length=_multi_order_range_repeat_length)),
+    ('oflt', RepeatSeqGen(
+        [None, math.nan, math.nan, 0.0, -0.0, 1.25, 1.25, -2.5],
+        data_type=FloatType())),
+    ('odbl', RepeatSeqGen(
+        [None, math.nan, math.nan, 0.0, -0.0, 2.25, 2.25, -3.5],
+        data_type=DoubleType())),
+    ('v', _multi_order_range_value_gen()),
+]
+
+_supported_multi_order_range_order_by_gens = [
+    pytest.param(
+        ByteGen(nullable=(True, 20.0), min_val=0, max_val=5, special_cases=[]),
+        _multi_order_range_string_gen(),
+        id='byte_string'),
+    pytest.param(
+        ShortGen(nullable=(True, 20.0), min_val=0, max_val=5, special_cases=[]),
+        _multi_order_range_int_gen(),
+        id='short_integer'),
+    pytest.param(
+        LongGen(nullable=(True, 20.0), min_val=0, max_val=5, special_cases=[]),
+        _multi_order_range_string_gen(),
+        id='long_string'),
+    pytest.param(
+        DateGen(
+            nullable=(True, 20.0),
+            start=date(year=2020, month=1, day=1),
+            end=date(year=2020, month=1, day=15)),
+        _multi_order_range_string_gen(),
+        id='date_string'),
+    pytest.param(
+        DecimalGen(precision=12, scale=2, nullable=(True, 20.0), special_cases=[]),
+        _multi_order_range_string_gen(),
+        id='decimal_string'),
+]
+
+_multi_order_range_conf = {
+    'spark.sql.adaptive.enabled': 'false',
+    'spark.sql.ansi.enabled': 'false',
+}
+
+_multi_order_range_batched_conf = {
+    'spark.rapids.sql.batchSizeBytes': '1000',
+    'spark.sql.adaptive.enabled': 'false',
+    'spark.sql.ansi.enabled': 'false',
+}
+
+
+def _multi_order_range_df(spark):
+    return gen_df(spark, _multi_order_range_data_gen, length=_multi_order_range_num_rows)
+
+
+def _single_order_range_df(spark):
+    return gen_df(spark, _single_order_range_data_gen, length=_multi_order_range_num_rows)
+
+
+def _multi_order_range_fallback_df(spark):
+    return gen_df(
+        spark, _multi_order_range_fallback_data_gen, length=_multi_order_range_num_rows)
+
+
+def _multi_order_range_supported_type_df(spark, first_order_gen, second_order_gen):
+    data_gen = [
+        ('p', _multi_order_range_partition_gen()),
+        ('oa', RepeatSeqGen(first_order_gen, length=_multi_order_range_repeat_length)),
+        ('ob', RepeatSeqGen(second_order_gen, length=_multi_order_range_repeat_length)),
+        ('v', _multi_order_range_value_gen()),
+    ]
+    return gen_df(spark, data_gen, length=_multi_order_range_num_rows)
+
+
+def _multi_order_range_timestamp_df(spark):
+    return gen_df(
+        spark, _multi_order_range_timestamp_data_gen, length=_multi_order_range_num_rows)
+
+
+def _multi_order_range_fp_df(spark):
+    return gen_df(spark, _multi_order_range_fp_data_gen, length=_multi_order_range_num_rows)
+
+
+def _multi_order_range_two_numeric_df(spark):
+    data_gen = [
+        ('p', _multi_order_range_partition_gen()),
+        ('oi', RepeatSeqGen(_multi_order_range_int_gen(), length=_multi_order_range_repeat_length)),
+        ('ol', RepeatSeqGen(_multi_order_range_long_gen(), length=_multi_order_range_repeat_length)),
+        ('v', _multi_order_range_value_gen()),
+    ]
+    return gen_df(spark, data_gen, length=_multi_order_range_num_rows)
+
+
+def _multi_order_range_nullable_agg_df(spark):
+    data_gen = [
+        ('p', _multi_order_range_partition_gen()),
+        ('oi', RepeatSeqGen(_multi_order_range_int_gen(), length=_multi_order_range_repeat_length)),
+        ('os', RepeatSeqGen(_multi_order_range_string_gen(), length=_multi_order_range_repeat_length)),
+        ('vn', _multi_order_range_nullable_value_gen()),
+    ]
+    return gen_df(spark, data_gen, length=_multi_order_range_num_rows)
+
+
+def _multi_order_range_struct_df(spark):
+    data_gen = [
+        ('p', _multi_order_range_partition_gen()),
+        ('oi', RepeatSeqGen(_multi_order_range_int_gen(), length=_multi_order_range_repeat_length)),
+        ('ostruct',
+            RepeatSeqGen(_multi_order_range_struct_gen(), length=_multi_order_range_repeat_length)),
+        ('v', _multi_order_range_value_gen()),
+    ]
+    return gen_df(spark, data_gen, length=_multi_order_range_num_rows)
+
+
+def _multi_order_range_three_key_df(spark):
+    data_gen = [
+        ('p', _multi_order_range_partition_gen()),
+        ('oi', RepeatSeqGen(_multi_order_range_int_gen(), length=_multi_order_range_repeat_length)),
+        ('os', RepeatSeqGen(_multi_order_range_string_gen(), length=_multi_order_range_repeat_length)),
+        ('od', RepeatSeqGen(_multi_order_range_date_gen(), length=_multi_order_range_repeat_length)),
+        ('v', _multi_order_range_value_gen()),
+    ]
+    return gen_df(spark, data_gen, length=_multi_order_range_num_rows)
+
+
+@ignore_order(local=True)
+def test_range_window_multi_order_by_current_row_peers():
+    assert_gpu_and_cpu_are_equal_sql(
+        _multi_order_range_df,
+        'window_agg_table',
+        '''
+        SELECT p, oi, os, v,
+          COUNT(*) OVER (
+            PARTITION BY p
+            ORDER BY oi ASC NULLS FIRST, os DESC NULLS FIRST
+            RANGE BETWEEN CURRENT ROW AND CURRENT ROW) AS peer_count,
+          SUM(v) OVER (
+            PARTITION BY p
+            ORDER BY oi ASC NULLS FIRST, os DESC NULLS FIRST
+            RANGE BETWEEN CURRENT ROW AND CURRENT ROW) AS peer_sum
+        FROM window_agg_table
+        ''',
+        conf=_multi_order_range_conf,
+        validate_execs_in_gpu_plan=['GpuWindowExec'])
+
+
+@ignore_order(local=True)
+def test_range_window_multi_order_by_unbounded_to_current_running():
+    assert_gpu_and_cpu_are_equal_sql(
+        _multi_order_range_df,
+        'window_agg_table',
+        '''
+        SELECT p, oi, os, v,
+          COUNT(*) OVER (
+            PARTITION BY p
+            ORDER BY oi ASC, os DESC
+            RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_count,
+          SUM(v) OVER (
+            PARTITION BY p
+            ORDER BY oi ASC, os DESC
+            RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_sum
+        FROM window_agg_table
+        ''',
+        conf=_multi_order_range_batched_conf,
+        validate_execs_in_gpu_plan=['GpuRunningWindowExec'])
+
+
+@ignore_order(local=True)
+def test_range_window_multi_order_by_current_to_unbounded_mixed_null_ordering():
+    assert_gpu_and_cpu_are_equal_sql(
+        _multi_order_range_df,
+        'window_agg_table',
+        '''
+        SELECT p, oi, os, v,
+          COUNT(*) OVER (
+            PARTITION BY p
+            ORDER BY oi DESC NULLS LAST, os ASC NULLS FIRST
+            RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS following_count,
+          SUM(v) OVER (
+            PARTITION BY p
+            ORDER BY oi DESC NULLS LAST, os ASC NULLS FIRST
+            RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS following_sum
+        FROM window_agg_table
+        ''',
+        conf=_multi_order_range_conf,
+        validate_execs_in_gpu_plan=['GpuWindowExec'])
+
+
+@ignore_order(local=True)
+@pytest.mark.parametrize(
+    'first_order_gen,second_order_gen',
+    _supported_multi_order_range_order_by_gens)
+def test_range_window_multi_order_by_supported_order_types(
+        first_order_gen, second_order_gen):
+    assert_gpu_and_cpu_are_equal_sql(
+        lambda spark: _multi_order_range_supported_type_df(
+            spark, first_order_gen, second_order_gen),
+        'window_agg_table',
+        '''
+        SELECT p, oa, ob, v,
+          COUNT(*) OVER (
+            PARTITION BY p
+            ORDER BY oa ASC NULLS FIRST, ob DESC NULLS LAST
+            RANGE BETWEEN CURRENT ROW AND CURRENT ROW) AS peer_count,
+          SUM(v) OVER (
+            PARTITION BY p
+            ORDER BY oa ASC NULLS FIRST, ob DESC NULLS LAST
+            RANGE BETWEEN CURRENT ROW AND CURRENT ROW) AS peer_sum
+        FROM window_agg_table
+        ''',
+        conf=_multi_order_range_conf,
+        validate_execs_in_gpu_plan=['GpuWindowExec'])
+
+
+@ignore_order(local=True)
+@allow_non_gpu(*non_utc_allow)
+def test_range_window_multi_order_by_timestamp_string_current_row_peers():
+    assert_gpu_and_cpu_are_equal_sql(
+        _multi_order_range_timestamp_df,
+        'window_agg_table',
+        '''
+        SELECT p, ts, os, v,
+          COUNT(*) OVER (
+            PARTITION BY p
+            ORDER BY ts ASC NULLS LAST, os DESC NULLS FIRST
+            RANGE BETWEEN CURRENT ROW AND CURRENT ROW) AS peer_count,
+          SUM(v) OVER (
+            PARTITION BY p
+            ORDER BY ts ASC NULLS LAST, os DESC NULLS FIRST
+            RANGE BETWEEN CURRENT ROW AND CURRENT ROW) AS peer_sum
+        FROM window_agg_table
+        ''',
+        conf=_multi_order_range_conf,
+        validate_execs_in_gpu_plan=['GpuWindowExec'])
+
+
+@ignore_order(local=True)
+@allow_non_gpu(*non_utc_allow)
+def test_range_window_multi_order_by_integer_timestamp_unbounded_to_current_running():
+    assert_gpu_and_cpu_are_equal_sql(
+        _multi_order_range_timestamp_df,
+        'window_agg_table',
+        '''
+        SELECT p, oi, ts, v,
+          COUNT(*) OVER (
+            PARTITION BY p
+            ORDER BY oi ASC NULLS FIRST, ts DESC NULLS LAST
+            RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_count,
+          SUM(v) OVER (
+            PARTITION BY p
+            ORDER BY oi ASC NULLS FIRST, ts DESC NULLS LAST
+            RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_sum
+        FROM window_agg_table
+        ''',
+        conf=_multi_order_range_batched_conf,
+        validate_execs_in_gpu_plan=['GpuRunningWindowExec'])
+
+
+@ignore_order(local=True)
+@allow_non_gpu(*non_utc_allow)
+def test_range_window_multi_order_by_timestamp_string_current_to_unbounded():
+    assert_gpu_and_cpu_are_equal_sql(
+        _multi_order_range_timestamp_df,
+        'window_agg_table',
+        '''
+        SELECT p, ts, os, v,
+          COUNT(*) OVER (
+            PARTITION BY p
+            ORDER BY ts DESC NULLS LAST, os ASC NULLS FIRST
+            RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS following_count,
+          SUM(v) OVER (
+            PARTITION BY p
+            ORDER BY ts DESC NULLS LAST, os ASC NULLS FIRST
+            RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS following_sum
+        FROM window_agg_table
+        ''',
+        conf=_multi_order_range_conf,
+        validate_execs_in_gpu_plan=['GpuWindowExec'])
+
+
+@approximate_float
+@ignore_order(local=True)
+def test_range_window_multi_order_by_float_string_current_row_peers():
+    assert_gpu_and_cpu_are_equal_sql(
+        _multi_order_range_fp_df,
+        'window_agg_table',
+        '''
+        SELECT p, oflt, os, v,
+          COUNT(*) OVER (
+            PARTITION BY p
+            ORDER BY oflt ASC NULLS LAST, os DESC NULLS FIRST
+            RANGE BETWEEN CURRENT ROW AND CURRENT ROW) AS peer_count,
+          SUM(v) OVER (
+            PARTITION BY p
+            ORDER BY oflt ASC NULLS LAST, os DESC NULLS FIRST
+            RANGE BETWEEN CURRENT ROW AND CURRENT ROW) AS peer_sum
+        FROM window_agg_table
+        ''',
+        conf=_multi_order_range_conf,
+        validate_execs_in_gpu_plan=['GpuWindowExec'])
+
+
+@approximate_float
+@ignore_order(local=True)
+def test_range_window_multi_order_by_double_integer_unbounded_to_current_running():
+    assert_gpu_and_cpu_are_equal_sql(
+        _multi_order_range_fp_df,
+        'window_agg_table',
+        '''
+        SELECT p, odbl, oi, v,
+          COUNT(*) OVER (
+            PARTITION BY p
+            ORDER BY odbl ASC NULLS FIRST, oi DESC NULLS LAST
+            RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_count,
+          SUM(v) OVER (
+            PARTITION BY p
+            ORDER BY odbl ASC NULLS FIRST, oi DESC NULLS LAST
+            RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_sum
+        FROM window_agg_table
+        ''',
+        conf=_multi_order_range_batched_conf,
+        validate_execs_in_gpu_plan=['GpuRunningWindowExec'])
+
+
+@ignore_order(local=True)
+def test_range_window_single_order_by_bounded_uses_existing_path():
+    assert_gpu_and_cpu_are_equal_sql(
+        _single_order_range_df,
+        'window_agg_table',
+        '''
+        SELECT p, oi, v,
+          COUNT(*) OVER (
+            PARTITION BY p
+            ORDER BY oi ASC
+            RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS bounded_count,
+          SUM(v) OVER (
+            PARTITION BY p
+            ORDER BY oi ASC
+            RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS bounded_sum
+        FROM window_agg_table
+        ''',
+        conf=_multi_order_range_conf,
+        validate_execs_in_gpu_plan=['GpuWindowExec'])
+
+
+@ignore_order(local=True)
+@allow_non_gpu('WindowExec', 'Alias', 'WindowExpression', 'AggregateExpression', 'Sum',
+    'WindowSpecDefinition', 'SpecifiedWindowFrame', 'Literal', 'SortExec', 'SortOrder',
+    'ShuffleExchangeExec', 'HashPartitioning')
+def test_range_window_multi_order_by_unsupported_order_type_fallback():
+    assert_gpu_sql_fallback_collect(
+        _multi_order_range_fallback_df,
+        'WindowExec',
+        'window_agg_table',
+        '''
+        SELECT p, oi, flag, ostruct, v,
+          SUM(v) OVER (
+            PARTITION BY p
+            ORDER BY oi ASC NULLS FIRST, flag ASC NULLS FIRST, ostruct ASC NULLS FIRST
+            RANGE BETWEEN CURRENT ROW AND CURRENT ROW) AS peer_sum
+        FROM window_agg_table
+        ''',
+        conf=_multi_order_range_conf)
+
+
+# A value-bounded RANGE frame with multiple order-by columns is rejected by Spark's analyzer
+# (DATATYPE_MISMATCH.RANGE_FRAME_MULTI_ORDER) on both CPU and GPU, so the plugin's value-bounded
+# multi-order-by guard is never reached from a user query. Assert that GPU and CPU fail
+# consistently rather than expecting a CPU fallback that cannot occur.
+# Note:  This really isn't a plugin test, so much as a confirmation of Spark's behaviour.
+def test_range_window_multi_order_by_value_bounded_consistent_error():
+    assert_gpu_and_cpu_error(
+        lambda spark: _multi_order_range_two_numeric_df(spark).selectExpr(
+            'p', 'oi', 'ol', 'v',
+            'SUM(v) OVER ('
+            ' PARTITION BY p'
+            ' ORDER BY oi ASC NULLS FIRST, ol ASC NULLS FIRST'
+            ' RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS bounded_sum').collect(),
+        conf=_multi_order_range_conf,
+        error_message='')
+
+
+@ignore_order(local=True)
+@pytest.mark.parametrize("ansi", [True, False], ids=["ANSI", "NOT_ANSI"])
+def test_range_window_multi_order_by_current_row_peers_ansi(ansi):
+    conf = dict(_multi_order_range_conf)
+    conf['spark.sql.ansi.enabled'] = ansi
+    assert_gpu_and_cpu_are_equal_sql(
+        _multi_order_range_df,
+        'window_agg_table',
+        '''
+        SELECT p, oi, os, v,
+          COUNT(*) OVER (
+            PARTITION BY p
+            ORDER BY oi ASC NULLS FIRST, os DESC NULLS FIRST
+            RANGE BETWEEN CURRENT ROW AND CURRENT ROW) AS peer_count,
+          SUM(v) OVER (
+            PARTITION BY p
+            ORDER BY oi ASC NULLS FIRST, os DESC NULLS FIRST
+            RANGE BETWEEN CURRENT ROW AND CURRENT ROW) AS peer_sum
+        FROM window_agg_table
+        ''',
+        conf=conf,
+        validate_execs_in_gpu_plan=['GpuWindowExec'])
+
+
+@approximate_float
+@ignore_order(local=True)
+def test_range_window_multi_order_by_min_max_avg():
+    assert_gpu_and_cpu_are_equal_sql(
+        _multi_order_range_df,
+        'window_agg_table',
+        '''
+        SELECT p, oi, os, v,
+          MIN(v) OVER (
+            PARTITION BY p
+            ORDER BY oi ASC NULLS FIRST, os DESC NULLS FIRST
+            RANGE BETWEEN CURRENT ROW AND CURRENT ROW) AS peer_min,
+          MAX(v) OVER (
+            PARTITION BY p
+            ORDER BY oi ASC NULLS FIRST, os DESC NULLS FIRST
+            RANGE BETWEEN CURRENT ROW AND CURRENT ROW) AS peer_max,
+          AVG(v) OVER (
+            PARTITION BY p
+            ORDER BY oi ASC NULLS FIRST, os DESC NULLS FIRST
+            RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_avg
+        FROM window_agg_table
+        ''',
+        conf=_multi_order_range_conf,
+        validate_execs_in_gpu_plan=['GpuWindowExec'])
+
+
+@ignore_order(local=True)
+def test_range_window_multi_order_by_nullable_agg_column():
+    assert_gpu_and_cpu_are_equal_sql(
+        _multi_order_range_nullable_agg_df,
+        'window_agg_table',
+        '''
+        SELECT p, oi, os, vn,
+          COUNT(vn) OVER (
+            PARTITION BY p
+            ORDER BY oi ASC NULLS FIRST, os DESC NULLS FIRST
+            RANGE BETWEEN CURRENT ROW AND CURRENT ROW) AS peer_count,
+          SUM(vn) OVER (
+            PARTITION BY p
+            ORDER BY oi ASC NULLS FIRST, os DESC NULLS FIRST
+            RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_sum
+        FROM window_agg_table
+        ''',
+        conf=_multi_order_range_conf,
+        validate_execs_in_gpu_plan=['GpuWindowExec'])
+
+
+# A struct as the 2nd order-by key is an unsupported order-by type, so the plan must fall back to
+# the CPU even though the leading key is supported. Complements the Boolean fallback test above.
+@ignore_order(local=True)
+@allow_non_gpu('WindowExec', 'Alias', 'WindowExpression', 'AggregateExpression', 'Sum',
+    'WindowSpecDefinition', 'SpecifiedWindowFrame', 'Literal', 'SortExec', 'SortOrder',
+    'ShuffleExchangeExec', 'HashPartitioning')
+def test_range_window_multi_order_by_struct_order_type_fallback():
+    assert_gpu_sql_fallback_collect(
+        _multi_order_range_struct_df,
+        'WindowExec',
+        'window_agg_table',
+        '''
+        SELECT p, oi, ostruct, v,
+          SUM(v) OVER (
+            PARTITION BY p
+            ORDER BY oi ASC NULLS FIRST, ostruct ASC NULLS FIRST
+            RANGE BETWEEN CURRENT ROW AND CURRENT ROW) AS peer_sum
+        FROM window_agg_table
+        ''',
+        conf=_multi_order_range_conf)
+
+
+@ignore_order(local=True)
+def test_range_window_three_order_by_current_row_peers():
+    assert_gpu_and_cpu_are_equal_sql(
+        _multi_order_range_three_key_df,
+        'window_agg_table',
+        '''
+        SELECT p, oi, os, od, v,
+          COUNT(*) OVER (
+            PARTITION BY p
+            ORDER BY oi ASC NULLS FIRST, os DESC NULLS FIRST, od ASC NULLS LAST
+            RANGE BETWEEN CURRENT ROW AND CURRENT ROW) AS peer_count,
+          SUM(v) OVER (
+            PARTITION BY p
+            ORDER BY oi ASC NULLS FIRST, os DESC NULLS FIRST, od ASC NULLS LAST
+            RANGE BETWEEN CURRENT ROW AND CURRENT ROW) AS peer_sum
+        FROM window_agg_table
+        ''',
+        conf=_multi_order_range_conf,
+        validate_execs_in_gpu_plan=['GpuWindowExec'])
+
+
 # This is for aggregations that work with the optimized unbounded to unbounded window optimization.
 # They don't need to be batched specially, but it only works if all of the aggregations can support this.
 # the order returned should be consistent because the data ends up in a single task (no partitioning)
