@@ -81,8 +81,8 @@ class GpuSparkBatch(
       }
 
     hostToNumBytes.toSeq.sortBy {
-      case (_, numBytes) => numBytes
-    }.reverse.take(NumPreferredLocations).map {
+      case (host, numBytes) => (-numBytes, host)
+    }.take(NumPreferredLocations).map {
       case (host, _) => host
     }.toArray
   }

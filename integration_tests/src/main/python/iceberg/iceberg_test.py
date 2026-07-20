@@ -646,11 +646,10 @@ def _iceberg_filecache_preferred_locations(jvm, partition):
         add_file_cache_locations(
             jvm.com.nvidia.spark.rapids.iceberg.ShimUtils.locationOf(file_task.file()),
             file_task.length())
-    preferred_locations = [
-        host for host, _ in sorted(host_to_num_bytes.items(),
-                                  key=lambda host_and_bytes: host_and_bytes[1],
-                                  reverse=True)[:3]
-    ]
+    sorted_locations = sorted(
+        host_to_num_bytes.items(),
+        key=lambda host_and_bytes: (-host_and_bytes[1], host_and_bytes[0]))
+    preferred_locations = [host for host, _ in sorted_locations[:3]]
     return preferred_locations, files
 
 
@@ -659,25 +658,34 @@ def _read_iceberg_twice_with_filecache_check(spark, query):
     jvm = spark.sparkContext._jvm
     deadline = time.time() + 10
     last_files = []
+    last_mismatches = []
     while True:
         df, partitions = _iceberg_gpu_input_partitions(spark, query)
         has_cache_locations = False
         last_files = []
+        current_mismatches = []
         for partition in partitions:
             expected_locations, files = _iceberg_filecache_preferred_locations(jvm, partition)
             last_files.extend(files)
+            preferred_locations = list(partition.preferredLocations())
             if expected_locations:
                 has_cache_locations = True
-                preferred_locations = list(partition.preferredLocations())
                 missing_locations = [
                     loc for loc in expected_locations if loc not in preferred_locations
                 ]
-                assert len(missing_locations) == 0, \
-                    f"Cached locations {missing_locations} are missing from preferred locations " \
-                    f"{preferred_locations} for Iceberg files {files}"
-        if has_cache_locations:
+                if missing_locations:
+                    current_mismatches.append(
+                        f"Cached locations {missing_locations} are missing from preferred "
+                        f"locations {preferred_locations} for Iceberg files {files}")
+        if current_mismatches:
+            # The locality manager is updated asynchronously. Retry with newly planned
+            # partitions if it changed after this plan's preferred locations were computed.
+            last_mismatches = current_mismatches
+        if has_cache_locations and not current_mismatches:
             return first_result, df.collect()
         if time.time() >= deadline:
+            if last_mismatches:
+                raise AssertionError("\n".join(last_mismatches))
             raise AssertionError(
                 f"File cache did not report locality for Iceberg files: {last_files}")
         time.sleep(1)
