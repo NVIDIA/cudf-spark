@@ -16,7 +16,8 @@
 
 package com.nvidia.spark.rapids
 
-import java.io.{BufferedReader, BufferedWriter, File, InputStreamReader, OutputStreamWriter}
+import java.io.{
+  BufferedReader, BufferedWriter, File, InputStreamReader, IOException, OutputStreamWriter}
 import java.nio.file.{Files, Path, Paths}
 import java.util.concurrent.{ConcurrentLinkedQueue, TimeUnit}
 import javax.xml.parsers.DocumentBuilderFactory
@@ -26,9 +27,9 @@ import scala.collection.mutable.ArrayBuffer
 import com.nvidia.spark.rapids.spill.SpillFramework
 import org.apache.hadoop.fs.FileUtil
 
-import org.apache.spark.SparkContextAccessor
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.analysis.FunctionRegistry
+import org.apache.spark.sql.rapids.execution.TrampolineUtil
 
 /** Runs ScalaTest suites concurrently in isolated JVMs. */
 object ParallelUnitTestRunner {
@@ -316,8 +317,7 @@ object ParallelUnitTestRunner {
             writer.flush()
             true
           case None =>
-            writer.write("STOP\n")
-            writer.flush()
+            requestWorkerStop(writer, runId, workerId)
             false
         }
       }
@@ -346,7 +346,6 @@ object ParallelUnitTestRunner {
           line = reader.readLine()
         }
       }
-      writer.close()
       val outputThread = streamWorkerOutput(runId, workerId, reader)
       val exited = process.waitFor(workerExitTimeoutSeconds, TimeUnit.SECONDS)
       if (!exited) {
@@ -359,9 +358,6 @@ object ParallelUnitTestRunner {
         }
       }
       outputThread.join(TimeUnit.SECONDS.toMillis(workerDestroyTimeoutSeconds))
-      if (outputThread.isAlive) {
-        reader.close()
-      }
       val exitCode = if (process.isAlive) None else Some(process.exitValue())
       currentTask.foreach { task =>
         failures.add(s"wave-$runId ${task.suite} lost when worker-$workerId exited " +
@@ -375,6 +371,29 @@ object ParallelUnitTestRunner {
         currentTask.foreach(taskQueue.add)
         failures.add(s"wave-$runId worker-$workerId failed: ${t.getMessage}")
     }
+  }
+
+  private[rapids] def requestWorkerStop(
+      writer: BufferedWriter,
+      runId: Int,
+      workerId: Int): Thread = {
+    val thread = new Thread(s"parallel-unit-test-stop-$runId-worker-$workerId") {
+      override def run(): Unit = try {
+        writer.write("STOP\n")
+        writer.flush()
+      } catch {
+        case _: IOException => // The worker may exit before consuming the stop request.
+      } finally {
+        try {
+          writer.close()
+        } catch {
+          case _: IOException => // The process shutdown closes the pipe.
+        }
+      }
+    }
+    thread.setDaemon(true)
+    thread.start()
+    thread
   }
 
   private def workerMain(args: Array[String]): Unit = {
@@ -454,17 +473,13 @@ object ParallelUnitTestRunner {
 
     val sessions = (SparkSession.getActiveSession.toSeq ++
         SparkSession.getDefaultSession.toSeq).distinct
-    val sparkContexts =
-      (sessions.map(_.sparkContext) ++ SparkContextAccessor.getActive.toSeq).distinct
     sessions.foreach { session =>
       cleanup(session.catalog.clearCache())
       cleanup {
         warehouseDirs += new File(session.conf.get("spark.sql.warehouse.dir"))
       }
     }
-    sparkContexts.foreach(context => cleanup(context.stop()))
-    cleanup(SparkSession.clearActiveSession())
-    cleanup(SparkSession.clearDefaultSession())
+    cleanup(cleanupSparkSessionAndContext())
     cleanup {
       warehouseDirs ++= Option(tmpDir.toFile.listFiles()).getOrElse(Array.empty[File])
           .filter(file => file.isDirectory && file.getName.startsWith(sparkWarehousePrefix))
@@ -480,6 +495,13 @@ object ParallelUnitTestRunner {
       failures.tail.foreach(failures.head.addSuppressed)
       throw failures.head
     }
+  }
+
+  private def cleanupSparkSessionAndContext(): Unit = try {
+    TrampolineUtil.cleanupAnyExistingSession()
+  } finally {
+    SparkSession.clearActiveSession()
+    SparkSession.clearDefaultSession()
   }
 
   private def childCommand(

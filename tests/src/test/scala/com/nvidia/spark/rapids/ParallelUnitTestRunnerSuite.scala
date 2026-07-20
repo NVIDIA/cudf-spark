@@ -16,15 +16,42 @@
 
 package com.nvidia.spark.rapids
 
+import java.io.{BufferedWriter, Writer}
 import java.nio.file.Files
+import java.util.concurrent.{CountDownLatch, TimeUnit}
 
 import org.apache.hadoop.fs.FileUtil
 import org.scalatest.funsuite.AnyFunSuite
 
-import org.apache.spark.{SparkConf, SparkContext, SparkContextAccessor}
+import org.apache.spark.SparkConf
 import org.apache.spark.sql.SparkSession
 
 class ParallelUnitTestRunnerSuite extends AnyFunSuite {
+  test("worker stop request does not block on the command pipe") {
+    val writeStarted = new CountDownLatch(1)
+    val releaseWrite = new CountDownLatch(1)
+    val writer = new BufferedWriter(new Writer {
+      override def write(chars: Array[Char], offset: Int, length: Int): Unit = {
+        writeStarted.countDown()
+        releaseWrite.await()
+      }
+
+      override def flush(): Unit = {}
+
+      override def close(): Unit = {}
+    })
+
+    val stopThread = ParallelUnitTestRunner.requestWorkerStop(writer, 1, 1)
+    try {
+      assert(writeStarted.await(5, TimeUnit.SECONDS))
+      assert(stopThread.isAlive)
+    } finally {
+      releaseWrite.countDown()
+      stopThread.join(TimeUnit.SECONDS.toMillis(5))
+    }
+    assert(!stopThread.isAlive)
+  }
+
   test("cleanup worker state stops Spark sessions and contexts") {
     val tmpDir = Files.createTempDirectory("parallel-unit-test-runner")
     val warehouseDir = tmpDir.resolve("spark-warehouse")
@@ -46,7 +73,6 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
       ParallelUnitTestRunner.cleanupWorkerState(tmpDir)
 
       assert(spark.sparkContext.isStopped)
-      assert(SparkContextAccessor.getActive.isEmpty)
       assert(SparkSession.getActiveSession.isEmpty)
       assert(SparkSession.getDefaultSession.isEmpty)
     } finally {
@@ -55,30 +81,6 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
       }
       SparkSession.clearActiveSession()
       SparkSession.clearDefaultSession()
-      FileUtil.fullyDelete(tmpDir.toFile)
-    }
-  }
-
-  test("cleanup worker state stops a standalone Spark context") {
-    val tmpDir = Files.createTempDirectory("parallel-unit-test-runner-context")
-    val sparkConf = new SparkConf()
-        .setAppName(getClass.getSimpleName)
-        .setMaster("local[1]")
-        .set("spark.driver.host", "localhost")
-        .set("spark.ui.enabled", "false")
-    val sparkContext = new SparkContext(sparkConf)
-
-    try {
-      assert(SparkContextAccessor.getActive.contains(sparkContext))
-
-      ParallelUnitTestRunner.cleanupWorkerState(tmpDir)
-
-      assert(sparkContext.isStopped)
-      assert(SparkContextAccessor.getActive.isEmpty)
-    } finally {
-      if (!sparkContext.isStopped) {
-        sparkContext.stop()
-      }
       FileUtil.fullyDelete(tmpDir.toFile)
     }
   }
