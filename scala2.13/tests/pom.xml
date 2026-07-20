@@ -35,6 +35,9 @@
         <rapids.shim.jar.phase>package</rapids.shim.jar.phase>
         <parallelForkCount>4</parallelForkCount>
         <parallelSparkConfs/>
+        <!-- Default for the parallel runner's exec execution: unlike the scalatest plugin,
+             exec:exec does not honor -DskipTests on its own, so it is wired up explicitly. -->
+        <skipTests>false</skipTests>
     </properties>
 
     <dependencies>
@@ -159,6 +162,9 @@
                                     <goal>exec</goal>
                                 </goals>
                                 <configuration>
+                                    <!-- exec:exec does not honor -DskipTests; mirror it here so
+                                         package/install builds that skip tests stay test-free. -->
+                                    <skip>${skipTests}</skip>
                                     <executable>${java.home}/bin/java</executable>
                                     <classpathScope>test</classpathScope>
                                     <arguments>
@@ -172,6 +178,8 @@
                                         <argument>wildcardSuites=${wildcardSuites}</argument>
                                         <argument>tagsToInclude=${test.include.tags}</argument>
                                         <argument>tagsToExclude=${test.exclude.tags}</argument>
+                                        <argument>suffixes=${suffixes}</argument>
+                                        <argument>testsFilter=${tests}</argument>
                                         <argument>argLine=${argLine}</argument>
                                         <argument>testJvmArgs=-ea -Xmx4g -Xss4m ${extraJavaTestArgs}</argument>
                                         <argument>shuffleManagerOverride=${rapids.shuffle.manager.override}</argument>

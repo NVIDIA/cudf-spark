@@ -34,19 +34,25 @@ MVN=${MVN:-"mvn -s $MVN_SETTINGS -Dmaven.wagon.http.retryHandler.count=3"}
 # Jenkins enables this when the PR title contains [fast-ut]. Keep local/manual runs serial by default.
 PARALLEL_UT=${PARALLEL_UT:-false}
 PARALLEL_UT_FORK_COUNT=${PARALLEL_UT_FORK_COUNT:-}
-MVN_PARALLEL_UT_ARGS="-Dparallel=$PARALLEL_UT"
 
 if [[ "$PARALLEL_UT" != "true" && "$PARALLEL_UT" != "false" ]]; then
     >&2 echo "ERROR: PARALLEL_UT must be true or false"
     exit 1
 fi
 
-if [[ -n "$PARALLEL_UT_FORK_COUNT" ]]; then
-    if [[ ! "$PARALLEL_UT_FORK_COUNT" =~ ^[1-9][0-9]*$ ]]; then
-        >&2 echo "ERROR: PARALLEL_UT_FORK_COUNT must be a positive integer"
-        exit 1
+if [[ -n "$PARALLEL_UT_FORK_COUNT" && ! "$PARALLEL_UT_FORK_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+    >&2 echo "ERROR: PARALLEL_UT_FORK_COUNT must be a positive integer"
+    exit 1
+fi
+
+# Only set -Dparallel when opting in: the generic property name is also mapped by other test
+# plugins (maven-surefire-plugin binds ${parallel}), so serial builds must not define it at all.
+MVN_PARALLEL_UT_ARGS=""
+if [[ "$PARALLEL_UT" == "true" ]]; then
+    MVN_PARALLEL_UT_ARGS="-Dparallel=true"
+    if [[ -n "$PARALLEL_UT_FORK_COUNT" ]]; then
+        MVN_PARALLEL_UT_ARGS+=" -DparallelForkCount=$PARALLEL_UT_FORK_COUNT"
     fi
-    MVN_PARALLEL_UT_ARGS+=" -DparallelForkCount=$PARALLEL_UT_FORK_COUNT"
 fi
 
 MVN_BUILD_ARGS="-Drat.skip=true -Dmaven.scaladoc.skip -Dmaven.scalastyle.skip=true \

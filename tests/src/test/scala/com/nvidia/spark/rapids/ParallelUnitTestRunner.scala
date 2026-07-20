@@ -61,6 +61,15 @@ object ParallelUnitTestRunner {
     val reportsDir = Paths.get(config("reportsDir")).toAbsolutePath
     val requestedForks = config("forkCount").toInt
     val wildcardSuites = propertyList(config("wildcardSuites"))
+    // The serial scalatest plugin honors these filters, but this runner does not; fail fast
+    // instead of silently running the full suite set on the caller's GPU.
+    val unsupportedFilters = Seq("suffixes" -> "-Dsuffixes", "testsFilter" -> "-Dtests")
+        .collect { case (key, flag) if propertyValue(config.getOrElse(key, ""), "").nonEmpty =>
+          flag
+        }
+    require(unsupportedFilters.isEmpty,
+      s"${unsupportedFilters.mkString(" and ")} are not supported with -Dparallel=true; " +
+          "use -DwildcardSuites or run without -Dparallel")
     val tagsToInclude = propertyList(config("tagsToInclude"))
     val tagsToExclude = propertyList(config("tagsToExclude"))
     val childJvmArgs = splitJvmArgs(config("argLine")) ++ splitJvmArgs(config("testJvmArgs"))
@@ -77,11 +86,14 @@ object ParallelUnitTestRunner {
     }
 
     Files.createDirectories(reportsDir)
-    val discovered = discoverSuiteNames(testClasses)
-        .filter(matchesWildcard(_, wildcardSuites))
-        .sorted
-
-    require(discovered.nonEmpty, "No ScalaTest suites were discovered")
+    val allSuites = discoverSuiteNames(testClasses)
+    require(allSuites.nonEmpty, "No ScalaTest suites were discovered")
+    val discovered = allSuites.filter(matchesWildcard(_, wildcardSuites)).sorted
+    if (discovered.isEmpty) {
+      // Match the serial scalatest plugin: a filter that selects no suites is a successful no-op.
+      println(s"No suites matched wildcardSuites=${wildcardSuites.mkString(",")}; nothing to run")
+      return
+    }
     val forkCount = math.min(math.max(requestedForks, 1), discovered.size)
     val historicalTimings = loadTimings(reportsDir)
     val timingCoverage = discovered.count(historicalTimings.contains).toDouble / discovered.size
@@ -152,19 +164,26 @@ object ParallelUnitTestRunner {
     val failures = new ConcurrentLinkedQueue[String]()
 
     def runDedicated(): Unit = dedicatedTask.foreach { task =>
-      runSuite(
-        task,
-        runId,
-        sparkConf,
-        testClasses,
-        reportsDir,
-        childJvmArgs,
-        tagsToInclude,
-        tagsToExclude,
-        shuffleManagerOverride,
-        allocationFraction,
-        maxAllocationFraction,
-        minAllocationFraction).foreach(failures.add)
+      // Record launch errors as failures: an uncaught throwable on the dedicated thread would
+      // otherwise skip the suite silently and let the wave report success.
+      try {
+        runSuite(
+          task,
+          runId,
+          sparkConf,
+          testClasses,
+          reportsDir,
+          childJvmArgs,
+          tagsToInclude,
+          tagsToExclude,
+          shuffleManagerOverride,
+          allocationFraction,
+          maxAllocationFraction,
+          minAllocationFraction).foreach(failures.add)
+      } catch {
+        case t: Throwable =>
+          failures.add(s"wave-$runId ${task.suite} could not be run: ${t.getMessage}")
+      }
     }
 
     def runPool(workerCount: Int): Unit = {
@@ -258,7 +277,8 @@ object ParallelUnitTestRunner {
     val processBuilder = new ProcessBuilder(command: _*).redirectErrorStream(true)
     sparkConf.foreach(processBuilder.environment().put("SPARK_CONF", _))
     val process = processBuilder.start()
-    val outputThread = streamOutput(runId, task.id, process)
+    val outputThread = streamLines(s"wave-$runId-suite-${task.id}",
+      new BufferedReader(new InputStreamReader(process.getInputStream)))
     val exitCode = process.waitFor()
     outputThread.join(TimeUnit.SECONDS.toMillis(10))
     if (exitCode == 0) {
@@ -299,11 +319,16 @@ object ParallelUnitTestRunner {
       allocationFraction,
       maxAllocationFraction,
       minAllocationFraction)
-    val processBuilder = new ProcessBuilder(command: _*).redirectErrorStream(true)
+    // Keep stderr out of the protocol stream: unsynchronized stderr writes (Spark logging,
+    // stack traces) could otherwise splice into a RESULT line and stall the RUN/RESULT exchange.
+    val processBuilder = new ProcessBuilder(command: _*)
     sparkConf.foreach(processBuilder.environment().put("SPARK_CONF", _))
     var currentTask: Option[SuiteTask] = None
+    var process: Process = null
     try {
-      val process = processBuilder.start()
+      process = processBuilder.start()
+      val errorThread = streamLines(s"wave-$runId-worker-$workerId",
+        new BufferedReader(new InputStreamReader(process.getErrorStream)))
       val writer = new BufferedWriter(new OutputStreamWriter(process.getOutputStream))
       val reader = new BufferedReader(new InputStreamReader(process.getInputStream))
 
@@ -346,9 +371,10 @@ object ParallelUnitTestRunner {
           line = reader.readLine()
         }
       }
-      val outputThread = streamWorkerOutput(runId, workerId, reader)
+      val outputThread = streamLines(s"wave-$runId-worker-$workerId", reader)
       val (exited, terminated) = stopWorkerProcess(process, runId, workerId)
       outputThread.join(TimeUnit.SECONDS.toMillis(workerDestroyTimeoutSeconds))
+      errorThread.join(TimeUnit.SECONDS.toMillis(workerDestroyTimeoutSeconds))
       val exitCode = if (process.isAlive) None else Some(process.exitValue())
       if (!terminated) {
         failures.add(s"wave-$runId worker-$workerId could not be terminated")
@@ -364,6 +390,10 @@ object ParallelUnitTestRunner {
       case t: Throwable =>
         currentTask.foreach(taskQueue.add)
         failures.add(s"wave-$runId worker-$workerId failed: ${t.getMessage}")
+        // Do not leak a live worker JVM (and its GPU allocation) on coordinator errors.
+        if (process != null && process.isAlive) {
+          process.destroyForcibly()
+        }
     }
   }
 
@@ -629,37 +659,16 @@ object ParallelUnitTestRunner {
     runnerArgs
   }
 
-  private def streamOutput(runId: Int, suiteId: Int, process: Process): Thread = {
-    val thread = new Thread(s"parallel-unit-test-output-$runId-$suiteId") {
-      override def run(): Unit = {
-        val reader = new BufferedReader(new InputStreamReader(process.getInputStream))
-        try {
-          var line = reader.readLine()
-          while (line != null) {
-            println(s"[wave-$runId-suite-$suiteId] $line")
-            line = reader.readLine()
-          }
-        } finally {
-          reader.close()
-        }
-      }
-    }
-    thread.setDaemon(true)
-    thread.start()
-    thread
-  }
-
-  private def streamWorkerOutput(
-      runId: Int,
-      workerId: Int,
-      reader: BufferedReader): Thread = {
-    val thread = new Thread(s"parallel-unit-test-output-$runId-worker-$workerId") {
+  private def streamLines(label: String, reader: BufferedReader): Thread = {
+    val thread = new Thread(s"parallel-unit-test-output-$label") {
       override def run(): Unit = try {
         var line = reader.readLine()
         while (line != null) {
-          println(s"[wave-$runId-worker-$workerId] $line")
+          println(s"[$label] $line")
           line = reader.readLine()
         }
+      } catch {
+        case _: IOException => // The stream closes when the process is torn down.
       } finally {
         reader.close()
       }
@@ -673,10 +682,23 @@ object ParallelUnitTestRunner {
       suites: Seq[String],
       timings: Map[String, Double],
       testClasses: Path): Seq[(String, Double)] = {
+    // Timings are seconds while the class-file fallback is bytes; never mix the two scales, or
+    // the byte-sized weights of a few unmeasured suites would dominate the schedule. Unmeasured
+    // suites get the median timing instead when historical timings are in use.
+    val medianTiming = if (timings.nonEmpty) {
+      val sorted = timings.values.toSeq.sorted
+      sorted(sorted.size / 2)
+    } else {
+      0.0
+    }
     suites.map { suite =>
-      val classFile = testClasses.resolve(suite.replace('.', File.separatorChar) + ".class")
-      val fallbackWeight = if (Files.exists(classFile)) Files.size(classFile).toDouble else 1.0
-      suite -> timings.getOrElse(suite, fallbackWeight)
+      def classFileWeight: Double = {
+        val classFile = testClasses.resolve(suite.replace('.', File.separatorChar) + ".class")
+        if (Files.exists(classFile)) Files.size(classFile).toDouble else 1.0
+      }
+      val weight = timings.getOrElse(suite,
+        if (timings.nonEmpty) medianTiming else classFileWeight)
+      suite -> weight
     }.sortBy { case (_, weight) => -weight }
   }
 
@@ -699,7 +721,7 @@ object ParallelUnitTestRunner {
   }
 
   private def loadTimings(reportsDir: Path): Map[String, Double] = {
-    val factory = DocumentBuilderFactory.newInstance()
+    val builder = DocumentBuilderFactory.newInstance().newDocumentBuilder()
     val stream = Files.list(reportsDir)
     try {
       val iterator = stream.iterator()
@@ -709,7 +731,8 @@ object ParallelUnitTestRunner {
         val name = path.getFileName.toString
         if (name.startsWith("TEST-") && name.endsWith(".xml")) {
           try {
-            val root = factory.newDocumentBuilder().parse(path.toFile).getDocumentElement
+            builder.reset()
+            val root = builder.parse(path.toFile).getDocumentElement
             timings += root.getAttribute("name") -> root.getAttribute("time").toDouble
           } catch {
             case _: Exception => // Ignore incomplete or incompatible historical reports.
