@@ -1664,7 +1664,7 @@ private case class GpuOrcFileFilterHandler(
       }
 
       (checkTypeCompatibility(fileSchema, readSchema, isCaseAware, fileIncluded, isForcePos,
-        isOrcFloatTypesToStringEnable),
+        isOrcFloatTypesToStringEnable, isRoot = true),
         fileIncluded)
     }
 
@@ -1679,7 +1679,8 @@ private case class GpuOrcFileFilterHandler(
         isCaseAware: Boolean,
         fileIncluded: Array[Boolean],
         isForcePos: Boolean,
-        isOrcFloatTypesToStringEnable: Boolean): TypeDescription = {
+        isOrcFloatTypesToStringEnable: Boolean,
+        isRoot: Boolean): TypeDescription = {
       (fileType.getCategory, readType.getCategory) match {
         case (TypeDescription.Category.STRUCT, TypeDescription.Category.STRUCT) =>
           // Check for the top or nested struct types.
@@ -1708,27 +1709,36 @@ private case class GpuOrcFileFilterHandler(
             .zipWithIndex.foreach { case ((fileFieldName, fType), idx) =>
             getReadFieldType(fileFieldName, idx).foreach { case (rField, rType) =>
               val newChild = checkTypeCompatibility(fType, rType,
-                isCaseAware, fileIncluded, isForcePos, isOrcFloatTypesToStringEnable)
+                isCaseAware, fileIncluded, isForcePos, isOrcFloatTypesToStringEnable,
+                isRoot = false)
               prunedReadSchema.addField(rField, newChild)
             }
           }
           fileIncluded(fileType.getId) = true
-          prunedReadSchema
+          // The ORC root struct is only a schema container, so retaining one of its children
+          // would turn a zero-column scan into a one-column scan. Nested structs need a child
+          // retained to carry their parent validity through schema evolution.
+          if (!isRoot && prunedReadSchema.getChildren.isEmpty &&
+              !fileType.getChildren.isEmpty) {
+            retainCheapestColumn(fileType, fileIncluded)
+          } else {
+            prunedReadSchema
+          }
         // Go into children for LIST, MAP to filter out the missing names
         // for struct children.
         case (TypeDescription.Category.LIST, TypeDescription.Category.LIST) =>
           val newChild = checkTypeCompatibility(fileType.getChildren.get(0),
             readType.getChildren.get(0), isCaseAware, fileIncluded, isForcePos,
-            isOrcFloatTypesToStringEnable)
+            isOrcFloatTypesToStringEnable, isRoot = false)
           fileIncluded(fileType.getId) = true
           TypeDescription.createList(newChild)
         case (TypeDescription.Category.MAP, TypeDescription.Category.MAP) =>
           val newKey = checkTypeCompatibility(fileType.getChildren.get(0),
             readType.getChildren.get(0), isCaseAware, fileIncluded, isForcePos,
-            isOrcFloatTypesToStringEnable)
+            isOrcFloatTypesToStringEnable, isRoot = false)
           val newValue = checkTypeCompatibility(fileType.getChildren.get(1),
             readType.getChildren.get(1), isCaseAware, fileIncluded, isForcePos,
-            isOrcFloatTypesToStringEnable)
+            isOrcFloatTypesToStringEnable, isRoot = false)
           fileIncluded(fileType.getId) = true
           TypeDescription.createMap(newKey, newValue)
         case (ft, rt) if ft.isPrimitive && rt.isPrimitive =>
@@ -1747,6 +1757,72 @@ private case class GpuOrcFileFilterHandler(
           throw new QueryExecutionException("Unsupported type pair of " +
             s"(file type, read type)=($f, $r)")
       }
+    }
+
+    /**
+     * Retain the cheapest physical path when every requested child of a struct is missing.
+     * The retained path carries the parent struct validity into schema evolution, where the
+     * requested children are added as null columns.
+     */
+    private def retainCheapestColumn(
+        fileType: TypeDescription,
+        fileIncluded: Array[Boolean]): TypeDescription = {
+      def primitiveCost(t: TypeDescription): Int = t.getCategory match {
+        case TypeDescription.Category.BOOLEAN => 1
+        case TypeDescription.Category.BYTE | TypeDescription.Category.SHORT |
+             TypeDescription.Category.INT | TypeDescription.Category.FLOAT |
+             TypeDescription.Category.DATE => 4
+        case TypeDescription.Category.LONG | TypeDescription.Category.DOUBLE |
+             TypeDescription.Category.TIMESTAMP => 8
+        case TypeDescription.Category.DECIMAL => 16
+        case _ => 32
+      }
+
+      def estimate(t: TypeDescription, repetitionLevel: Int = 0): (Int, Int) = {
+        t.getCategory match {
+          case TypeDescription.Category.STRUCT =>
+            val children = t.getChildren.asScala
+            if (children.isEmpty) {
+              (Int.MaxValue, Int.MaxValue)
+            } else {
+              children.map(estimate(_, repetitionLevel)).min
+            }
+          case TypeDescription.Category.LIST =>
+            estimate(t.getChildren.get(0), repetitionLevel + 1)
+          case TypeDescription.Category.MAP =>
+            val key = estimate(t.getChildren.get(0), repetitionLevel + 1)
+            val value = estimate(t.getChildren.get(1), repetitionLevel + 1)
+            (key._1.max(value._1), key._2 + value._2)
+          case _ => (repetitionLevel, primitiveCost(t))
+        }
+      }
+
+      def retain(t: TypeDescription): TypeDescription = {
+        fileIncluded(t.getId) = true
+        t.getCategory match {
+          case TypeDescription.Category.STRUCT =>
+            val children = t.getChildren.asScala
+            if (children.isEmpty) {
+              t.clone()
+            } else {
+              val selectedIndex = children.indices.minBy(i => estimate(children(i)))
+              TypeDescription.createStruct().addField(
+                t.getFieldNames.get(selectedIndex), retain(children(selectedIndex)))
+            }
+          case TypeDescription.Category.LIST =>
+            TypeDescription.createList(retain(t.getChildren.get(0)))
+          case TypeDescription.Category.MAP =>
+            TypeDescription.createMap(
+              retain(t.getChildren.get(0)), retain(t.getChildren.get(1)))
+          case _ =>
+            // Primitive types contain only their own ID. For an unsupported complex type such
+            // as UNION, retain the full subtree so the cloned schema and include mask agree.
+            (t.getId to t.getMaximumId).foreach(i => fileIncluded(i) = true)
+            t.clone()
+        }
+      }
+
+      retain(fileType)
     }
 
     /**

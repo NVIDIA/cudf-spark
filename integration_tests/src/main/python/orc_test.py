@@ -615,6 +615,66 @@ def test_read_nested_pruning(spark_tmp_path, data_gen, read_schema, reader_confs
             conf=all_confs)
 
 
+@pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
+@pytest.mark.parametrize('v1_enabled_list', ["", "orc"])
+def test_read_orc_with_all_nested_fields_missing(
+        spark_tmp_path, reader_confs, v1_enabled_list):
+    data_path = spark_tmp_path + '/ORC_DATA'
+    with_cpu_session(
+        lambda spark: spark.sql("""
+            SELECT named_struct('first', 'Janet', 'last', 'Jones') AS name
+            UNION ALL SELECT cast(null AS struct<first:string,last:string>)
+            """).write.orc(data_path))
+    read_schema = StructType([StructField('name', StructType([
+        StructField('middle', StringType())]))])
+    all_confs = copy_and_update(reader_confs, {
+        'spark.sql.sources.useV1SourceList': v1_enabled_list})
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(read_schema).orc(data_path), conf=all_confs)
+
+    array_data_path = spark_tmp_path + '/ORC_ARRAY_DATA'
+    with_cpu_session(
+        lambda spark: spark.sql("""
+            SELECT named_struct('history', array(1, 2)) AS name
+            UNION ALL SELECT cast(null AS struct<history:array<int>>)
+            """).write.orc(array_data_path))
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(read_schema).orc(array_data_path), conf=all_confs)
+
+    map_data_path = spark_tmp_path + '/ORC_MAP_DATA'
+    with_cpu_session(
+        lambda spark: spark.sql("""
+            SELECT named_struct('attrs', map('a', 1)) AS name
+            UNION ALL SELECT cast(null AS struct<attrs:map<string,int>>)
+            """).write.orc(map_data_path))
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(read_schema).orc(map_data_path), conf=all_confs)
+
+    array_struct_data_path = spark_tmp_path + '/ORC_ARRAY_STRUCT_DATA'
+    with_cpu_session(
+        lambda spark: spark.sql("""
+            SELECT array(named_struct('first', 'Janet')) AS names
+            UNION ALL SELECT cast(null AS array<struct<first:string>>)
+            """).write.orc(array_struct_data_path))
+    array_struct_read_schema = StructType([StructField('names', ArrayType(StructType([
+        StructField('middle', StringType())])))])
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(array_struct_read_schema).orc(array_struct_data_path),
+        conf=all_confs)
+
+    map_struct_data_path = spark_tmp_path + '/ORC_MAP_STRUCT_DATA'
+    with_cpu_session(
+        lambda spark: spark.sql("""
+            SELECT map('primary', named_struct('first', 'Janet')) AS names
+            UNION ALL SELECT cast(null AS map<string,struct<first:string>>)
+            """).write.orc(map_struct_data_path))
+    map_struct_read_schema = StructType([StructField('names', MapType(
+        StringType(), StructType([StructField('middle', StringType())])))])
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(map_struct_read_schema).orc(map_struct_data_path),
+        conf=all_confs)
+
+
 # This is for the corner case of reading only a struct column that has no nulls.
 # Then there will be no streams in a stripe connecting to this column (Its ROW_INDEX
 # streams have been pruned by the Plugin.), and CUDF throws an exception for such case.
