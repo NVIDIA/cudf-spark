@@ -27,6 +27,7 @@ import com.nvidia.spark.rapids.spill.SpillFramework
 import org.apache.hadoop.fs.FileUtil
 
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.catalyst.analysis.FunctionRegistry
 
 /** Runs ScalaTest suites concurrently in isolated JVMs. */
 object ParallelUnitTestRunner {
@@ -35,6 +36,7 @@ object ParallelUnitTestRunner {
   private val unresolvedProperty = "${"
   private val parallelGpuAllocationRatio = 0.8
   private val dedicatedSuite = "com.nvidia.spark.rapids.ParquetWriterSuite"
+  private val sparkTestingProperty = "spark.testing"
   private val sparkWarehousePrefix = "spark-warehouse"
   private val workerMode = "worker"
   private val protocolPrefix = "__RAPIDS_PARALLEL_UT__"
@@ -357,6 +359,7 @@ object ParallelUnitTestRunner {
   }
 
   private def workerMain(args: Array[String]): Unit = {
+    initializeSparkFunctionRegistry()
     val config = args.map { arg =>
       val separator = arg.indexOf('=')
       require(separator > 0, s"Invalid worker argument: $arg")
@@ -402,6 +405,22 @@ object ParallelUnitTestRunner {
       line = reader.readLine()
     }
     reader.close()
+  }
+
+  private def initializeSparkFunctionRegistry(): Unit = {
+    val originalSparkTesting = Option(System.getProperty(sparkTestingProperty))
+    try {
+      // Spark 3.3 conditionally registers test-only SQL functions when this object initializes.
+      // Persistent workers may otherwise initialize it in a non-Spark suite before SparkFunSuite
+      // sets spark.testing, leaving later upstream Spark suites with an incomplete registry.
+      System.setProperty(sparkTestingProperty, "true")
+      FunctionRegistry.builtin.listFunction()
+    } finally {
+      originalSparkTesting match {
+        case Some(value) => System.setProperty(sparkTestingProperty, value)
+        case None => System.clearProperty(sparkTestingProperty)
+      }
+    }
   }
 
   private def cleanupWorkerState(tmpDir: Path): Unit = {
