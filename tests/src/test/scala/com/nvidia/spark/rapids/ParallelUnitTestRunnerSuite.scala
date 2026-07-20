@@ -16,7 +16,8 @@
 
 package com.nvidia.spark.rapids
 
-import java.io.{BufferedWriter, Writer}
+import java.io.{
+  BufferedWriter, ByteArrayInputStream, ByteArrayOutputStream, InputStream, OutputStream, Writer}
 import java.nio.file.Files
 import java.util.concurrent.{CountDownLatch, TimeUnit}
 
@@ -27,6 +28,44 @@ import org.apache.spark.SparkConf
 import org.apache.spark.sql.SparkSession
 
 class ParallelUnitTestRunnerSuite extends AnyFunSuite {
+  test("a forcibly terminated worker does not count as a test failure") {
+    class TimedOutProcess extends Process {
+      private var alive = true
+      var forciblyDestroyed = false
+
+      override def getOutputStream: OutputStream = new ByteArrayOutputStream()
+
+      override def getInputStream: InputStream = new ByteArrayInputStream(Array.empty[Byte])
+
+      override def getErrorStream: InputStream = new ByteArrayInputStream(Array.empty[Byte])
+
+      override def waitFor(): Int = throw new UnsupportedOperationException()
+
+      override def waitFor(timeout: Long, unit: TimeUnit): Boolean = !alive
+
+      override def exitValue(): Int = if (alive) throw new IllegalThreadStateException() else 137
+
+      override def destroy(): Unit = {}
+
+      override def destroyForcibly(): Process = {
+        forciblyDestroyed = true
+        alive = false
+        this
+      }
+
+      override def isAlive: Boolean = alive
+    }
+    val process = new TimedOutProcess
+
+    val (exited, terminated) = ParallelUnitTestRunner.stopWorkerProcess(
+      process, 1, 1, exitTimeoutSeconds = 0, destroyTimeoutSeconds = 0)
+
+    assert(!exited)
+    assert(terminated)
+    assert(process.forciblyDestroyed)
+    assert(!process.isAlive)
+  }
+
   test("worker stop request does not block on the command pipe") {
     val writeStarted = new CountDownLatch(1)
     val releaseWrite = new CountDownLatch(1)

@@ -42,7 +42,7 @@ object ParallelUnitTestRunner {
   private val sparkWarehousePrefix = "spark-warehouse"
   private val workerMode = "worker"
   private val protocolPrefix = "__RAPIDS_PARALLEL_UT__"
-  private val workerExitTimeoutSeconds = 60L
+  private val workerExitTimeoutSeconds = 10L
   private val workerDestroyTimeoutSeconds = 10L
 
   def main(args: Array[String]): Unit = {
@@ -347,18 +347,12 @@ object ParallelUnitTestRunner {
         }
       }
       val outputThread = streamWorkerOutput(runId, workerId, reader)
-      val exited = process.waitFor(workerExitTimeoutSeconds, TimeUnit.SECONDS)
-      if (!exited) {
-        failures.add(s"wave-$runId worker-$workerId did not exit within " +
-            s"$workerExitTimeoutSeconds seconds")
-        process.destroy()
-        if (!process.waitFor(workerDestroyTimeoutSeconds, TimeUnit.SECONDS)) {
-          process.destroyForcibly()
-          process.waitFor(workerDestroyTimeoutSeconds, TimeUnit.SECONDS)
-        }
-      }
+      val (exited, terminated) = stopWorkerProcess(process, runId, workerId)
       outputThread.join(TimeUnit.SECONDS.toMillis(workerDestroyTimeoutSeconds))
       val exitCode = if (process.isAlive) None else Some(process.exitValue())
+      if (!terminated) {
+        failures.add(s"wave-$runId worker-$workerId could not be terminated")
+      }
       currentTask.foreach { task =>
         failures.add(s"wave-$runId ${task.suite} lost when worker-$workerId exited " +
             s"with status ${exitCode.getOrElse("unknown")}")
@@ -371,6 +365,29 @@ object ParallelUnitTestRunner {
         currentTask.foreach(taskQueue.add)
         failures.add(s"wave-$runId worker-$workerId failed: ${t.getMessage}")
     }
+  }
+
+  private[rapids] def stopWorkerProcess(
+      process: Process,
+      runId: Int,
+      workerId: Int,
+      exitTimeoutSeconds: Long = workerExitTimeoutSeconds,
+      destroyTimeoutSeconds: Long = workerDestroyTimeoutSeconds): (Boolean, Boolean) = {
+    val exited = process.waitFor(exitTimeoutSeconds, TimeUnit.SECONDS)
+    val terminated = if (exited) {
+      true
+    } else {
+      System.err.println(s"wave-$runId worker-$workerId did not exit within " +
+          s"$exitTimeoutSeconds seconds; terminating it")
+      process.destroy()
+      if (process.waitFor(destroyTimeoutSeconds, TimeUnit.SECONDS)) {
+        true
+      } else {
+        process.destroyForcibly()
+        process.waitFor(destroyTimeoutSeconds, TimeUnit.SECONDS)
+      }
+    }
+    exited -> terminated
   }
 
   private[rapids] def requestWorkerStop(
