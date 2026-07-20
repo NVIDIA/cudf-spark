@@ -153,8 +153,9 @@ case class GpuOptimizeTableCommandEdge(
     if (isFull) {
       throw new IllegalStateException("Delta OPTIMIZE FULL should not run on GPU")
     }
-    if (DeletionVectorUtils.deletionVectorsWritable(snapshot) ||
-        !DeletionVectorUtils.isTableDVFree(snapshot)) {
+    if (!ClusteredTableUtils.isSupported(snapshot.protocol) &&
+        (DeletionVectorUtils.deletionVectorsWritable(snapshot) ||
+          !DeletionVectorUtils.isTableDVFree(snapshot))) {
       throw new IllegalStateException(
         "Delta OPTIMIZE on tables with deletion vectors should not run on GPU")
     }

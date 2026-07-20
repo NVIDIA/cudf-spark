@@ -80,8 +80,9 @@ object OptimizeTableCommandMetaShim {
       isFull: Boolean,
       allowLiquid: Boolean): Unit = {
     val snapshot = deltaLog.unsafeVolatileSnapshot
-    if (DeletionVectorUtils.deletionVectorsWritable(snapshot) ||
-        !DeletionVectorUtils.isTableDVFree(snapshot)) {
+    val isLiquid = ClusteredTableUtils.isSupported(snapshot.protocol)
+    if ((!allowLiquid || !isLiquid) && (DeletionVectorUtils.deletionVectorsWritable(snapshot) ||
+        !DeletionVectorUtils.isTableDVFree(snapshot))) {
       meta.willNotWorkOnGpu(
         "Delta OPTIMIZE on tables with deletion vectors is not supported on GPU")
     }
@@ -90,7 +91,7 @@ object OptimizeTableCommandMetaShim {
     if (optimizeDeletedRows) meta.willNotWorkOnGpu(
       "Delta OPTIMIZE with deletion-vector cleanup is not supported on GPU")
     if (isFull) meta.willNotWorkOnGpu("Delta OPTIMIZE FULL is not supported on GPU")
-    if (!allowLiquid && ClusteredTableUtils.isSupported(snapshot.protocol)) {
+    if (!allowLiquid && isLiquid) {
       meta.willNotWorkOnGpu("Delta OPTIMIZE on liquid clustered tables is not supported on GPU")
     }
   }

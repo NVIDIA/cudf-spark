@@ -18,7 +18,7 @@ package com.databricks.sql.transaction.tahoe.rapids
 
 import com.databricks.sql.io.skipping.liquid.ClusteredTableUtils
 import com.databricks.sql.transaction.tahoe.DeltaIdentityColumnStatsTracker
-import com.databricks.sql.transaction.tahoe.commands.{DeletionVectorUtils, WriteIntoDeltaCommand}
+import com.databricks.sql.transaction.tahoe.commands.WriteIntoDeltaCommand
 import com.databricks.sql.transaction.tahoe.stats.{DeltaJobStatisticsTracker, DeltaStatistics,
   StatisticsOnLoadJobTracker}
 import com.nvidia.spark.rapids.{DataFromReplacementRule, DataWritingCommandMeta,
@@ -73,16 +73,10 @@ class GpuWriteIntoDeltaCommandMeta(
     extends DataWritingCommandMeta[WriteIntoDeltaCommand](cmd, conf, parent, rule) {
 
   override protected def tagSelfForGpuInternal(): Unit = {
-    val snapshot = cmd.deltaLog.unsafeVolatileSnapshot
     if (!GpuLiquidOptimizeWriteContext.isActive ||
         !ClusteredTableUtils.isSupported(cmd.protocol)) {
       willNotWorkOnGpu(
         "DBR WriteIntoDeltaCommand GPU support is limited to native liquid OPTIMIZE")
-    }
-    if (DeletionVectorUtils.deletionVectorsWritable(snapshot) ||
-        !DeletionVectorUtils.isTableDVFree(snapshot)) {
-      willNotWorkOnGpu(
-        "DBR liquid OPTIMIZE with deletion vectors is not supported on GPU")
     }
     if (!conf.isDeltaWriteEnabled) {
       willNotWorkOnGpu("Delta Lake output acceleration has been disabled. To enable set " +

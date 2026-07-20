@@ -27,6 +27,10 @@ _optimize_conf = copy_and_update(delta_writes_enabled_conf, {
     "spark.databricks.delta.autoCompact.enabled": "false"
 })
 
+_liquid_optimize_dv_conf = copy_and_update(_optimize_conf, {
+    "spark.databricks.delta.delete.deletionVectors.persistent": "true"
+})
+
 _optimize_deletion_vector_values = [False] if is_databricks173_or_later() else \
     deletion_vector_values_with_350DB143_xfail_reasons(
         enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042')
@@ -154,15 +158,13 @@ def _write_many_small_row_tracking_files(
 
 def _write_many_small_liquid_files(
         spark, enable_deletion_vectors, path, partition_columns=None, clustering_columns=None):
-    if enable_deletion_vectors:
-        raise ValueError("Liquid OPTIMIZE GPU rewrite coverage requires deletion vectors disabled")
     if partition_columns or clustering_columns != ["a"]:
         raise ValueError("Liquid OPTIMIZE GPU rewrite coverage uses CLUSTER BY (a)")
 
     spark.sql(f"""
         CREATE TABLE delta.`{path}` (a BIGINT, b STRING, c STRING)
         USING DELTA
-        TBLPROPERTIES ('delta.enableDeletionVectors' = 'false')
+        TBLPROPERTIES ('delta.enableDeletionVectors' = '{str(enable_deletion_vectors).lower()}')
         CLUSTER BY (a)
     """)
     data = spark.range(4096).selectExpr(
@@ -218,6 +220,15 @@ def _delete_rows_and_disable_deletion_vectors(spark, path):
 def _delete_rows_with_deletion_vectors(spark, path):
     num_deleted = spark.sql(f"DELETE FROM delta.`{path}` WHERE b = 'a'").collect()[0][0]
     assert num_deleted > 0, "Expected DELETE to create deletion vectors"
+
+
+def _delete_liquid_rows_with_deletion_vectors(spark, path):
+    num_deleted = spark.sql(
+        f"DELETE FROM delta.`{path}` WHERE pmod(a, 97) = 0").collect()[0][0]
+    assert num_deleted > 0, "Expected DELETE to create deletion vectors"
+    dv_adds = spark.read.json(path + "/_delta_log/*.json") \
+        .where("add.deletionVector IS NOT NULL").count()
+    assert dv_adds > 0, "Expected the liquid table to contain deletion-vector AddFiles"
 
 
 def _read_sorted(spark, path):
@@ -339,31 +350,32 @@ def _assert_optimize_fallback(enable_deletion_vectors, spark_tmp_path, partition
 
 
 def _assert_liquid_optimize_gpu_write_parity(
-        spark_tmp_path, write_func=_write_many_small_liquid_files, repeat_optimize=False):
+        spark_tmp_path, write_func=_write_many_small_liquid_files, repeat_optimize=False,
+        enable_deletion_vectors=False, conf=_optimize_conf, post_setup_func=None):
     data_path = spark_tmp_path + "/DELTA_LIQUID_OPTIMIZE_WRITE"
     cpu_path = data_path + "/CPU"
     gpu_path = data_path + "/GPU"
     _setup_tables(
-        False, cpu_path, gpu_path, None, ["a"], _optimize_conf,
-        write_func=write_func)
+        enable_deletion_vectors, cpu_path, gpu_path, None, ["a"], conf,
+        post_setup_func=post_setup_func, write_func=write_func)
 
     def assert_data_and_log_parity():
         cpu_data = with_cpu_session(lambda spark: _read_sorted(spark, cpu_path).collect(),
-                                    conf=_optimize_conf)
+                                    conf=conf)
         gpu_data = with_cpu_session(lambda spark: _read_sorted(spark, gpu_path).collect(),
-                                    conf=_optimize_conf)
+                                    conf=conf)
         assert_equal(cpu_data, gpu_data)
         with_cpu_session(
             lambda spark: assert_gpu_and_cpu_latest_delta_log_equivalent(spark, data_path),
-            conf=_optimize_conf)
+            conf=conf)
 
     cpu_result = with_cpu_session(
-        lambda spark: spark.sql(_optimize_sql(cpu_path)).collect(), conf=_optimize_conf)
+        lambda spark: spark.sql(_optimize_sql(cpu_path)).collect(), conf=conf)
     plan_callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
     plan_callback.startCapture()
     try:
         gpu_result = _with_gpu_session_no_test(
-            lambda spark: spark.sql(_optimize_sql(gpu_path)).collect(), conf=_optimize_conf)
+            lambda spark: spark.sql(_optimize_sql(gpu_path)).collect(), conf=conf)
         captured_plans = plan_callback.getResultsWithTimeout(10000)
         _assert_captured_plan_contains(
             plan_callback, captured_plans, "GpuDataWritingCommandExec", "liquid OPTIMIZE write")
@@ -378,11 +390,11 @@ def _assert_liquid_optimize_gpu_write_parity(
 
     if repeat_optimize:
         second_cpu_result = with_cpu_session(
-            lambda spark: spark.sql(_optimize_sql(cpu_path)).collect(), conf=_optimize_conf)
+            lambda spark: spark.sql(_optimize_sql(cpu_path)).collect(), conf=conf)
         plan_callback.startCapture()
         try:
             second_gpu_result = _with_gpu_session_no_test(
-                lambda spark: spark.sql(_optimize_sql(gpu_path)).collect(), conf=_optimize_conf)
+                lambda spark: spark.sql(_optimize_sql(gpu_path)).collect(), conf=conf)
             captured_plans = plan_callback.getResultsWithTimeout(10000)
             _assert_captured_plan_contains(
                 plan_callback, captured_plans, "GpuExecutedCommandExec",
@@ -435,15 +447,12 @@ def test_delta_optimize_row_tracking_table(spark_tmp_path):
                     reason="OPTIMIZE table command is supported for Databricks 17.3+")
 @pytest.mark.parametrize("enable_deletion_vectors", _optimize_clustered_deletion_vector_values, ids=idfn)
 def test_delta_optimize_clustered_table(spark_tmp_path, enable_deletion_vectors):
-    if is_databricks173_or_later() and enable_deletion_vectors:
-        _assert_optimize_fallback(enable_deletion_vectors, spark_tmp_path, clustering_columns=["a"])
-    else:
-        _assert_optimize_parity(
-            enable_deletion_vectors,
-            spark_tmp_path,
-            clustering_columns=["a"],
-            require_gpu_write=not is_databricks173_or_later(),
-            use_gpu_test_mode=not is_databricks173_or_later())
+    _assert_optimize_parity(
+        enable_deletion_vectors,
+        spark_tmp_path,
+        clustering_columns=["a"],
+        require_gpu_write=not is_databricks173_or_later(),
+        use_gpu_test_mode=not is_databricks173_or_later())
 
 
 @delta_lake
@@ -451,6 +460,19 @@ def test_delta_optimize_clustered_table(spark_tmp_path, enable_deletion_vectors)
                     reason="Native liquid OPTIMIZE write coverage is for Databricks 17.3+")
 def test_delta_optimize_clustered_table_gpu_write(spark_tmp_path):
     _assert_liquid_optimize_gpu_write_parity(spark_tmp_path)
+
+
+@delta_lake
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="Native liquid DV OPTIMIZE write coverage is for Databricks 17.3+")
+@pytest.mark.skipif(not supports_delta_lake_deletion_vectors(),
+                    reason="Deletion vectors aren't supported")
+def test_delta_optimize_clustered_table_gpu_write_with_deletion_vectors(spark_tmp_path):
+    _assert_liquid_optimize_gpu_write_parity(
+        spark_tmp_path,
+        enable_deletion_vectors=True,
+        conf=_liquid_optimize_dv_conf,
+        post_setup_func=_delete_liquid_rows_with_deletion_vectors)
 
 
 @delta_lake
