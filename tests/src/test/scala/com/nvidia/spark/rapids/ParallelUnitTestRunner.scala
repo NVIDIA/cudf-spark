@@ -35,6 +35,7 @@ object ParallelUnitTestRunner {
   private val unresolvedProperty = "${"
   private val parallelGpuAllocationRatio = 0.8
   private val dedicatedSuite = "com.nvidia.spark.rapids.ParquetWriterSuite"
+  private val sparkWarehousePrefix = "spark-warehouse"
   private val workerMode = "worker"
   private val protocolPrefix = "__RAPIDS_PARALLEL_UT__"
 
@@ -389,7 +390,7 @@ object ParallelUnitTestRunner {
           t.printStackTrace(System.out)
       } finally {
         try {
-          cleanupWorkerState()
+          cleanupWorkerState(Paths.get(System.getProperty("java.io.tmpdir")))
         } catch {
           case t: Throwable =>
             t.printStackTrace(System.out)
@@ -403,8 +404,9 @@ object ParallelUnitTestRunner {
     reader.close()
   }
 
-  private def cleanupWorkerState(): Unit = {
+  private def cleanupWorkerState(tmpDir: Path): Unit = {
     val failures = ArrayBuffer.empty[Throwable]
+    val warehouseDirs = ArrayBuffer.empty[File]
     def cleanup(body: => Unit): Unit = try {
       body
     } catch {
@@ -416,8 +418,17 @@ object ParallelUnitTestRunner {
     sessions.foreach { session =>
       cleanup(session.catalog.clearCache())
       cleanup {
-        val warehouseDir = new File(session.conf.get("spark.sql.warehouse.dir"))
-        Option(warehouseDir.listFiles()).getOrElse(Array.empty[File]).foreach(FileUtil.fullyDelete)
+        warehouseDirs += new File(session.conf.get("spark.sql.warehouse.dir"))
+      }
+    }
+    cleanup {
+      warehouseDirs ++= Option(tmpDir.toFile.listFiles()).getOrElse(Array.empty[File])
+          .filter(file => file.isDirectory && file.getName.startsWith(sparkWarehousePrefix))
+    }
+    warehouseDirs.distinct.foreach { warehouseDir =>
+      cleanup {
+        Option(warehouseDir.listFiles()).getOrElse(Array.empty[File])
+            .foreach(FileUtil.fullyDelete)
       }
     }
     cleanup(SpillFramework.shutdown())
