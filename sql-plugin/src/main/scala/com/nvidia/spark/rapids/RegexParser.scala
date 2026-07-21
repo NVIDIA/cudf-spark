@@ -182,7 +182,7 @@ class RegexParser(pattern: String) {
         && pattern.charAt(pos) == '?'
         && ":!=".contains(pattern.charAt(pos+1))) {
       consumeExpected('?')
-      (false, consume() match {  // exhaustiveness guaranteed by the guard
+      (false, consume() match {  // guaranteed exhaustive by the contains call above
         case ':' => None
         case '!' => Some(RegexNegativeLookahead)
         case '=' => Some(RegexPositiveLookahead)
