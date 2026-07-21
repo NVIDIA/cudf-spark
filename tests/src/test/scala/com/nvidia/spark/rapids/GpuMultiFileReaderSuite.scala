@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,6 +30,19 @@ import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 class GpuMultiFileReaderSuite extends AnyFunSuite with RmmSparkRetrySuiteBase {
+
+  test("force memory bounded pool") {
+    val builder = new ThreadPoolConfBuilder(
+      maxThreadNumber = 8,
+      isMemoryBounded = false,
+      memoryCapacityFromDriver = 1L << 20,
+      timeoutMs = 1000L,
+      stageLevelPool = false)
+
+    assertResult(DefaultThreadPoolConf(8, stageLevelPool = false))(builder.build())
+    assertResult(MemoryBoundedPoolConf(8, false, 1L << 20, 1000L))(
+      builder.build(forceMemoryBounded = true))
+  }
 
   test("avoid infinite loop when host buffers empty") {
     val conf = new Configuration(false)

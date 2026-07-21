@@ -450,8 +450,8 @@ class ThreadPoolConfBuilder(
   // 2. If not set, figure out the value according to physical memory settings of current
   // executor via `initializePinnedPoolAndOffHeapLimits`
   // 3. if still not set, use the default value `DEFAULT_MEMORY_CAPACITY`.
-  def build(): ThreadPoolConf = {
-    if (!isMemoryBounded) {
+  def build(forceMemoryBounded: Boolean = false): ThreadPoolConf = {
+    if (!isMemoryBounded && !forceMemoryBounded) {
       DefaultThreadPoolConf(maxThreadNumber, stageLevelPool)
     } else {
       val memCap: Long = if (memoryCapacityFromDriver > 0) {
