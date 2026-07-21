@@ -19,7 +19,7 @@ from private_optimizer_common import (
     assert_rule_skipped,
     private_optimizer_conf,
 )
-from spark_session import is_databricks_runtime
+from spark_session import is_databricks_runtime, is_spark_420_or_later
 
 
 SKEWED_BHJ_MARKER = "coalesced and skewed"
@@ -73,9 +73,10 @@ def _skewed_bhj_global_agg(spark):
 
 @pytest.mark.private_optimizer
 @pytest.mark.skipif(
-    is_databricks_runtime(),
-    reason="The positive rule-fire assertion is Apache-only; the Databricks "
-           "executor-broadcast guarded path is covered by the skipped-path test below. "
+    is_databricks_runtime() or is_spark_420_or_later(),
+    reason="The positive rule-fire assertion is unsupported on Databricks and Spark 4.2. "
+           "Databricks executor-broadcast coverage is in the skipped-path test below; "
+           "Spark 4.2 can put the same marker on the off-plan. "
            "See https://github.com/NVIDIA/cudf-spark/issues/15136")
 def test_optimize_skewed_bhj_join(spark_tmp_path):
     """OptimizeSkewedBHJJoinRule splits a skewed partition on the streamed side

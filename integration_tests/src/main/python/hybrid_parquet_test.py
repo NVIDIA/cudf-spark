@@ -29,6 +29,13 @@ Hybrid Scan unsupported types:
 3. BinaryType is NOT supported
 4. MapType wrapped by NestedType (Struct of Map/Array of Map/Map of Map) is NOT fully supported
 """
+
+python_udf_non_gpu_execs = ['BatchEvalPythonExec']
+if is_spark_420_or_later():
+    # Spark 4.2 can plan regular Python udf(...) as ArrowEvalPythonExec when
+    # Arrow-optimized Python UDFs are enabled.
+    python_udf_non_gpu_execs.append('ArrowEvalPythonExec')
+
 parquet_gens_list = [
     [byte_gen, short_gen, int_gen, long_gen, float_gen, double_gen,
      string_gen, boolean_gen, date_gen,
@@ -266,7 +273,7 @@ def test_hybrid_parquet_filter_pushdown_cpu(spark_tmp_path):
         lambda spark: spark.read.parquet(data_path).filter(f.col("a").startswith('1') & (f.ascii(f.col("a")) >= 50) & (f.col("a") < '1000')),
         conf=filter_split_conf)
 
-@allow_non_gpu('FilterExec', 'BatchEvalPythonExec', 'PythonUDF')
+@allow_non_gpu('FilterExec', *python_udf_non_gpu_execs, 'PythonUDF')
 @pytest.mark.skipif(is_databricks_runtime(), reason="Hybrid feature does not support Databricks currently")
 @pytest.mark.skipif(not is_hybrid_backend_loaded(), reason="HybridScan specialized tests")
 @hybrid_test

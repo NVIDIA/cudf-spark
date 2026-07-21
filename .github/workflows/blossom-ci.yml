@@ -34,51 +34,52 @@ jobs:
 
     # This job only runs for pull request comments
     if: |
+      github.event.issue.pull_request &&
       github.event.comment.body == 'build' &&
       (
         github.actor == 'abellina' ||
+        github.actor == 'amahussein' ||
         github.actor == 'anfeng' ||
+        github.actor == 'binmahone' ||
+        github.actor == 'cindyyuanjiang' ||
         github.actor == 'firestarman' ||
         github.actor == 'GaryShen2008' ||
-        github.actor == 'kuhushukla' ||
-        github.actor == 'mythrocks' ||
-        github.actor == 'nartal1' ||
-        github.actor == 'NvTimLiu' ||
-        github.actor == 'razajafri' ||
-        github.actor == 'revans2' ||
-        github.actor == 'sameerz' ||
-        github.actor == 'tgravescs' ||
-        github.actor == 'wbo4958' ||
-        github.actor == 'wjxiz1992' ||
-        github.actor == 'sperlingxx' ||
-        github.actor == 'hyperbolic2346' ||
         github.actor == 'gerashegalov' ||
-        github.actor == 'ttnghia' ||
-        github.actor == 'nvliyuan' ||
-        github.actor == 'res-life' ||
         github.actor == 'HaoYang670' ||
-        github.actor == 'NVnavkumar' ||
-        github.actor == 'amahussein' ||
-        github.actor == 'mattahrens' ||
-        github.actor == 'YanxuanLiu' ||
-        github.actor == 'cindyyuanjiang' ||
-        github.actor == 'thirtiseven' ||
-        github.actor == 'winningsix' ||
-        github.actor == 'viadea' ||
-        github.actor == 'yinqingh' ||
-        github.actor == 'parthosa' ||
-        github.actor == 'liurenjie1024' ||
-        github.actor == 'binmahone' ||
-        github.actor == 'zpuller' ||
-        github.actor == 'pxLi'  ||
-        github.actor == 'SurajAralihalli' ||
+        github.actor == 'hyperbolic2346' ||
+        github.actor == 'igorpeshansky' ||
         github.actor == 'jihoonson' ||
         github.actor == 'knoguchi22' ||
+        github.actor == 'kuhushukla' ||
+        github.actor == 'liurenjie1024' ||
+        github.actor == 'mattahrens' ||
+        github.actor == 'mythrocks' ||
+        github.actor == 'nartal1' ||
+        github.actor == 'nvliyuan' ||
+        github.actor == 'NVnavkumar' ||
+        github.actor == 'NvTimLiu' ||
+        github.actor == 'parthosa' ||
         github.actor == 'patilkishorv' ||
         github.actor == 'pmattione-nvidia' ||
+        github.actor == 'pxLi' ||
+        github.actor == 'res-life' ||
+        github.actor == 'revans2' ||
         github.actor == 'rishic3' ||
+        github.actor == 'sameerz' ||
         github.actor == 'sdrp713' ||
-        github.actor == 'igorpeshansky'
+        github.actor == 'sperlingxx' ||
+        github.actor == 'SurajAralihalli' ||
+        github.actor == 'tgravescs' ||
+        github.actor == 'thirtiseven' ||
+        github.actor == 'ttnghia' ||
+        github.actor == 'viadea' ||
+        github.actor == 'wbo4958' ||
+        github.actor == 'winningsix' ||
+        github.actor == 'wjxiz1992' ||
+        github.actor == 'YanxuanLiu' ||
+        github.actor == 'yinqingh' ||
+        github.actor == 'zpuller' ||
+        false
       )
     steps:
       - name: Check if comment is issued by authorized person

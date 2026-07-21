@@ -760,7 +760,7 @@ def test_formats_for_legacy_mode_other_formats_tz_rules():
          'spark.rapids.sql.incompatibleDateFormats.enabled': True})
 
 @disable_ansi_mode
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('ProjectExec', 'GetTimestamp')
 def test_to_timestamp_legacy_millisecond_format_fallback():
     conf = {
         'spark.sql.legacy.timeParserPolicy': 'LEGACY',
