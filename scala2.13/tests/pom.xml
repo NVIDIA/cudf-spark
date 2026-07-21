@@ -35,6 +35,9 @@
         <rapids.shim.jar.phase>package</rapids.shim.jar.phase>
         <parallelForkCount>4</parallelForkCount>
         <parallelSparkConfs/>
+        <!-- Per-suite hang watchdog: a suite exceeding this many seconds gets a thread dump
+             captured and its JVM killed, failing the run instead of hanging it. -->
+        <parallelSuiteTimeout>1800</parallelSuiteTimeout>
         <!-- Default for the parallel runner's exec execution: unlike the scalatest plugin,
              exec:exec does not honor -DskipTests on its own, so it is wired up explicitly. -->
         <skipTests>false</skipTests>
@@ -188,6 +191,7 @@
                                         <argument>minAllocationFraction=${rapids.test.gpu.minAllocFraction}</argument>
                                         <argument>testFailureIgnore=${maven.test.failure.ignore}</argument>
                                         <argument>sparkConfs=${parallelSparkConfs}</argument>
+                                        <argument>suiteTimeoutSeconds=${parallelSuiteTimeout}</argument>
                                     </arguments>
                                 </configuration>
                             </execution>

@@ -18,8 +18,10 @@ package com.nvidia.spark.rapids
 
 import java.io.{
   BufferedReader, BufferedWriter, File, InputStreamReader, IOException, OutputStreamWriter}
+import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
 import java.util.concurrent.{ConcurrentLinkedQueue, TimeUnit}
+import java.util.concurrent.atomic.AtomicLong
 import javax.xml.parsers.DocumentBuilderFactory
 
 import scala.collection.mutable.ArrayBuffer
@@ -44,6 +46,8 @@ object ParallelUnitTestRunner {
   private val protocolPrefix = "__RAPIDS_PARALLEL_UT__"
   private val workerExitTimeoutSeconds = 10L
   private val workerDestroyTimeoutSeconds = 10L
+  private val watchdogPollSeconds = 15L
+  private val defaultSuiteTimeoutSeconds = 1800L
 
   def main(args: Array[String]): Unit = {
     if (args.headOption.contains(workerMode)) {
@@ -77,6 +81,8 @@ object ParallelUnitTestRunner {
     val allocationFraction = propertyDouble(config("allocationFraction"), 1.0)
     val maxAllocationFraction = propertyDouble(config("maxAllocationFraction"), 1.0)
     val minAllocationFraction = propertyDouble(config("minAllocationFraction"), 0.25)
+    val suiteTimeoutSeconds = propertyDouble(
+      config.getOrElse("suiteTimeoutSeconds", ""), defaultSuiteTimeoutSeconds.toDouble).toLong
     val testFailureIgnore = propertyValue(config("testFailureIgnore"), "false").toBoolean
     val configuredSparkConfs = propertySeparatedList(config("sparkConfs"), ';')
     val sparkConfs = if (configuredSparkConfs.isEmpty) {
@@ -133,7 +139,8 @@ object ParallelUnitTestRunner {
         shuffleManagerOverride,
         perForkAllocation,
         perForkMaxAllocation,
-        perForkMinAllocation)
+        perForkMinAllocation,
+        suiteTimeoutSeconds)
     }
 
     if (failures.nonEmpty) {
@@ -160,7 +167,8 @@ object ParallelUnitTestRunner {
       shuffleManagerOverride: String,
       allocationFraction: Double,
       maxAllocationFraction: Double,
-      minAllocationFraction: Double): Seq[String] = {
+      minAllocationFraction: Double,
+      suiteTimeoutSeconds: Long): Seq[String] = {
     val failures = new ConcurrentLinkedQueue[String]()
 
     def runDedicated(): Unit = dedicatedTask.foreach { task =>
@@ -179,7 +187,8 @@ object ParallelUnitTestRunner {
           shuffleManagerOverride,
           allocationFraction,
           maxAllocationFraction,
-          minAllocationFraction).foreach(failures.add)
+          minAllocationFraction,
+          suiteTimeoutSeconds).foreach(failures.add)
       } catch {
         case t: Throwable =>
           failures.add(s"wave-$runId ${task.suite} could not be run: ${t.getMessage}")
@@ -206,7 +215,8 @@ object ParallelUnitTestRunner {
               shuffleManagerOverride,
               allocationFraction,
               maxAllocationFraction,
-              minAllocationFraction)
+              minAllocationFraction,
+              suiteTimeoutSeconds)
           }
           thread.start()
           thread
@@ -256,7 +266,8 @@ object ParallelUnitTestRunner {
       shuffleManagerOverride: String,
       allocationFraction: Double,
       maxAllocationFraction: Double,
-      minAllocationFraction: Double): Option[String] = {
+      minAllocationFraction: Double,
+      suiteTimeoutSeconds: Long): Option[String] = {
     val tmpDir = reportsDir.resolve(s"tmp-wave-$runId-suite-${task.id}")
     Files.createDirectories(tmpDir)
     println(f"[wave-$runId-suite-${task.id}] START ${task.suite} " +
@@ -279,13 +290,22 @@ object ParallelUnitTestRunner {
     val process = processBuilder.start()
     val outputThread = streamLines(s"wave-$runId-suite-${task.id}",
       new BufferedReader(new InputStreamReader(process.getInputStream)))
-    val exitCode = process.waitFor()
+    val finished = process.waitFor(suiteTimeoutSeconds, TimeUnit.SECONDS)
+    if (!finished) {
+      System.err.println(s"wave-$runId ${task.suite} exceeded $suiteTimeoutSeconds seconds; " +
+          "capturing a thread dump and killing the fork")
+      dumpWorkerThreads(s"wave-$runId-suite-${task.id}", process, reportsDir)
+      process.destroyForcibly()
+      process.waitFor(workerDestroyTimeoutSeconds, TimeUnit.SECONDS)
+    }
     outputThread.join(TimeUnit.SECONDS.toMillis(10))
-    if (exitCode == 0) {
+    if (!finished) {
+      Some(s"wave-$runId ${task.suite} exceeded the ${suiteTimeoutSeconds}s suite timeout")
+    } else if (process.exitValue() == 0) {
       println(s"[wave-$runId-suite-${task.id}] PASS ${task.suite}")
       None
     } else {
-      Some(s"wave-$runId ${task.suite} exited with status $exitCode")
+      Some(s"wave-$runId ${task.suite} exited with status ${process.exitValue()}")
     }
   }
 
@@ -303,7 +323,8 @@ object ParallelUnitTestRunner {
       shuffleManagerOverride: String,
       allocationFraction: Double,
       maxAllocationFraction: Double,
-      minAllocationFraction: Double): Unit = {
+      minAllocationFraction: Double,
+      suiteTimeoutSeconds: Long): Unit = {
     val tmpDir = reportsDir.resolve(s"tmp-wave-$runId-worker-$workerId")
     Files.createDirectories(tmpDir)
     val command = poolWorkerCommand(
@@ -331,17 +352,25 @@ object ParallelUnitTestRunner {
         new BufferedReader(new InputStreamReader(process.getErrorStream)))
       val writer = new BufferedWriter(new OutputStreamWriter(process.getOutputStream))
       val reader = new BufferedReader(new InputStreamReader(process.getInputStream))
+      // A hung suite would otherwise block this thread in readLine() until the CI job timeout;
+      // the watchdog captures a thread dump and kills the worker so the run fails visibly.
+      val suiteDeadlineNanos = new AtomicLong(Long.MaxValue)
+      startSuiteWatchdog(runId, workerId, process, reportsDir, failures, suiteDeadlineNanos,
+        () => currentTask.map(_.suite), suiteTimeoutSeconds)
 
       def sendNextTask(): Boolean = {
         Option(taskQueue.poll()) match {
           case Some(task) =>
             currentTask = Some(task)
+            suiteDeadlineNanos.set(
+              System.nanoTime() + TimeUnit.SECONDS.toNanos(suiteTimeoutSeconds))
             println(f"[wave-$runId-worker-$workerId] START ${task.suite} " +
                 f"(estimated weight ${task.weight}%.1f)")
             writer.write(s"RUN\t${task.id}\t${task.suite}\n")
             writer.flush()
             true
           case None =>
+            suiteDeadlineNanos.set(Long.MaxValue)
             requestWorkerStop(writer, runId, workerId)
             false
         }
@@ -361,6 +390,7 @@ object ParallelUnitTestRunner {
             }
           }
           currentTask = None
+          suiteDeadlineNanos.set(Long.MaxValue)
           if (running) {
             running = sendNextTask()
           }
@@ -394,6 +424,77 @@ object ParallelUnitTestRunner {
         if (process != null && process.isAlive) {
           process.destroyForcibly()
         }
+    }
+  }
+
+  private def startSuiteWatchdog(
+      runId: Int,
+      workerId: Int,
+      process: Process,
+      reportsDir: Path,
+      failures: ConcurrentLinkedQueue[String],
+      deadlineNanos: AtomicLong,
+      currentSuite: () => Option[String],
+      suiteTimeoutSeconds: Long): Thread = {
+    val thread = new Thread(s"parallel-unit-test-watchdog-$runId-worker-$workerId") {
+      override def run(): Unit = {
+        while (process.isAlive) {
+          val deadline = deadlineNanos.get()
+          if (deadline != Long.MaxValue && System.nanoTime() - deadline > 0) {
+            val suite = currentSuite().getOrElse("<unknown suite>")
+            System.err.println(s"wave-$runId worker-$workerId: $suite exceeded " +
+                s"$suiteTimeoutSeconds seconds; capturing a thread dump and killing the worker")
+            failures.add(s"wave-$runId $suite exceeded the ${suiteTimeoutSeconds}s suite " +
+                s"timeout in worker-$workerId")
+            dumpWorkerThreads(s"wave-$runId-worker-$workerId", process, reportsDir)
+            process.destroyForcibly()
+            return
+          }
+          try {
+            Thread.sleep(TimeUnit.SECONDS.toMillis(watchdogPollSeconds))
+          } catch {
+            case _: InterruptedException => return
+          }
+        }
+      }
+    }
+    thread.setDaemon(true)
+    thread.start()
+    thread
+  }
+
+  /** Best-effort jstack of a hung test JVM, echoed to the build log and saved to a file. */
+  private def dumpWorkerThreads(label: String, process: Process, reportsDir: Path): Unit = {
+    try {
+      val jstack = Paths.get(System.getProperty("java.home"), "bin", "jstack").toString
+      // Process.pid() is a Java 9+ API while this module still compiles against the Java 8 API;
+      // resolve it reflectively (the test JVMs only ever run on JDK 9+).
+      val pid = classOf[Process].getMethod("pid").invoke(process).toString
+      val dumper = new ProcessBuilder(jstack, "-l", pid)
+          .redirectErrorStream(true)
+          .start()
+      val reader = new BufferedReader(new InputStreamReader(dumper.getInputStream))
+      val dump = new StringBuilder
+      try {
+        var line = reader.readLine()
+        while (line != null) {
+          dump.append(line).append('\n')
+          line = reader.readLine()
+        }
+      } finally {
+        reader.close()
+      }
+      if (!dumper.waitFor(60, TimeUnit.SECONDS)) {
+        dumper.destroyForcibly()
+      }
+      val dumpFile = reportsDir.resolve(s"$label-timeout-jstack.txt")
+      Files.write(dumpFile, dump.toString.getBytes(StandardCharsets.UTF_8))
+      println(s"[$label] thread dump of the hung test JVM (also saved to $dumpFile):")
+      print(dump.toString)
+      System.out.flush()
+    } catch {
+      case t: Throwable =>
+        System.err.println(s"[$label] failed to capture a thread dump: ${t.getMessage}")
     }
   }
 
