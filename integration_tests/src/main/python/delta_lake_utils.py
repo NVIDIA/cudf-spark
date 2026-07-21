@@ -418,8 +418,12 @@ def assert_rapids_delta_write(do_test, conf):
         jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.endCapture()
 
 def assert_db173_gpu_data_writing_command(
-        do_test, conf, optimized_write, expected_atomic_gpu_class, aqe_enabled=None):
-    """Assert that DBR 17.3 executed both atomic staging and Delta data writing on GPU."""
+        do_test, conf, optimized_write, expected_atomic_gpu_class, aqe_enabled=None,
+        expect_legacy_optimized_write=False):
+    """Assert DBR 17.3 atomic staging and Delta data writing, including optimize-write scope."""
+    if expect_legacy_optimized_write:
+        assert optimized_write and aqe_enabled is False, \
+            "Legacy optimized write is expected only when optimized write is on and AQE is off"
     jvm = spark_jvm()
     callback = jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
     callback.startCapture()
@@ -457,12 +461,24 @@ def assert_db173_gpu_data_writing_command(
             if callback.containsShuffleExchangeWithOrigin(
                 plan, cpu_optimized_write, optimized_write_origin)
         ]
-        if optimized_write:
+        legacy_optimized_plans = [
+            plan for plan in captured_plans
+            if callback.contains(plan, "DeltaOptimizedWriterExec")
+        ]
+        if expect_legacy_optimized_write:
+            assert legacy_optimized_plans, \
+                "DBR non-AQE DeltaOptimizedWriterExec was not captured"
+            assert not all_gpu_optimized_plans and not cpu_optimized_plans, \
+                f"Legacy optimized write unexpectedly used {optimized_write_origin}"
+        elif optimized_write:
             assert write_gpu_optimized_plans, \
                 f"{gpu_optimized_write} is not found for {optimized_write_origin}"
+            assert not legacy_optimized_plans, \
+                "AQE optimized write unexpectedly used DeltaOptimizedWriterExec"
         else:
-            assert not all_gpu_optimized_plans and not cpu_optimized_plans, \
-                f"Optimize write is disabled but {optimized_write_origin} was captured"
+            assert not all_gpu_optimized_plans and not cpu_optimized_plans \
+                and not legacy_optimized_plans, \
+                "Optimize write is disabled but an optimized-write plan was captured"
         assert not cpu_optimized_plans, \
             f"DBR {optimized_write_origin} shuffle remained on CPU"
         if aqe_enabled:

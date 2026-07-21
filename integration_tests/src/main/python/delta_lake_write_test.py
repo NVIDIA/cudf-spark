@@ -366,10 +366,34 @@ def test_delta_db173_native_managed_ctas_rtas(
 @delta_lake
 @ignore_order(local=True)
 @pytest.mark.skipif(not is_databricks173_or_later(), reason="DBR 17.3 native write path")
-@pytest.mark.parametrize("optimized_write", [False, True], ids=idfn)
-@pytest.mark.parametrize("aqe_enabled", [False, True], ids=idfn)
+@pytest.mark.parametrize("optimized_write,aqe_enabled", [
+    pytest.param(False, False, id="optimize_off-aqe_off"),
+    pytest.param(False, True, id="optimize_off-aqe_on"),
+    pytest.param(True, True, id="optimize_on-aqe_on"),
+])
 def test_delta_db173_native_sql_ctas_rtas(
         spark_tmp_table_factory, optimized_write, aqe_enabled):
+    _run_delta_db173_native_sql_ctas_rtas(
+        spark_tmp_table_factory, optimized_write, aqe_enabled, False)
+
+
+@allow_non_gpu('AppendDataExecV1', 'AtomicCreateTableAsSelectExec',
+               'AtomicReplaceTableAsSelectExec', 'DeltaOptimizedWriterExec',
+               *delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_databricks173_or_later(), reason="DBR 17.3 native write path")
+def test_delta_db173_native_sql_ctas_rtas_legacy_optimized_write(
+        spark_tmp_table_factory):
+    # DBR 17.3 uses its row-only DeltaOptimizedWriterExec when AQE is disabled. This is a
+    # correctness test for that expected mixed fallback; GPU optimized write requires AQE.
+    _run_delta_db173_native_sql_ctas_rtas(
+        spark_tmp_table_factory, True, False, True)
+
+
+def _run_delta_db173_native_sql_ctas_rtas(
+        spark_tmp_table_factory, optimized_write, aqe_enabled,
+        expect_legacy_optimized_write):
     conf = copy_and_update(writer_confs, delta_writes_enabled_conf, {
         "spark.databricks.delta.optimizeWrite.enabled": str(optimized_write).lower(),
         "spark.sql.adaptive.enabled": str(aqe_enabled).lower(),
@@ -377,8 +401,10 @@ def test_delta_db173_native_sql_ctas_rtas(
         "spark.sql.shuffle.partitions": "32",
         "spark.sql.execution.sortBeforeRepartition": "true",
     })
-    cpu_table = spark_tmp_table_factory.get() + '_sql_cpu'
-    gpu_table = spark_tmp_table_factory.get() + '_sql_gpu'
+    cpu_ctas_table = spark_tmp_table_factory.get() + '_sql_ctas_cpu'
+    gpu_ctas_table = spark_tmp_table_factory.get() + '_sql_ctas_gpu'
+    cpu_rtas_table = spark_tmp_table_factory.get() + '_sql_rtas_cpu'
+    gpu_rtas_table = spark_tmp_table_factory.get() + '_sql_rtas_gpu'
     source_table = spark_tmp_table_factory.get() + '_sql_source'
 
     with_cpu_session(
@@ -397,7 +423,7 @@ def test_delta_db173_native_sql_ctas_rtas(
         assert effective_aqe.lower() == str(aqe_enabled).lower()
         command = "CREATE OR REPLACE TABLE" if replace else "CREATE TABLE"
         projection = (
-            "carrier_code, carrier_id, carrier_type, carrier_id + 1 AS version"
+            "carrier_id, carrier_code, carrier_type, carrier_id + 1 AS version"
             if replace else "carrier_id, carrier_code, carrier_type"
         )
         spark.sql(
@@ -406,20 +432,22 @@ def test_delta_db173_native_sql_ctas_rtas(
             f"FROM {source_table}").collect()
 
     with_cpu_session(
-        lambda spark: execute_atomic_sql(spark, cpu_table, False), conf=conf)
+        lambda spark: execute_atomic_sql(spark, cpu_ctas_table, False), conf=conf)
     assert_db173_gpu_data_writing_command(
-        lambda spark: execute_atomic_sql(spark, gpu_table, False), conf=conf,
+        lambda spark: execute_atomic_sql(spark, gpu_ctas_table, False), conf=conf,
         optimized_write=optimized_write,
         expected_atomic_gpu_class="GpuAtomicCreateTableAsSelectExec",
-        aqe_enabled=aqe_enabled)
+        aqe_enabled=aqe_enabled,
+        expect_legacy_optimized_write=expect_legacy_optimized_write)
 
     with_cpu_session(
-        lambda spark: execute_atomic_sql(spark, cpu_table, True), conf=conf)
+        lambda spark: execute_atomic_sql(spark, cpu_rtas_table, True), conf=conf)
     assert_db173_gpu_data_writing_command(
-        lambda spark: execute_atomic_sql(spark, gpu_table, True), conf=conf,
+        lambda spark: execute_atomic_sql(spark, gpu_rtas_table, True), conf=conf,
         optimized_write=optimized_write,
         expected_atomic_gpu_class="GpuAtomicReplaceTableAsSelectExec",
-        aqe_enabled=aqe_enabled)
+        aqe_enabled=aqe_enabled,
+        expect_legacy_optimized_write=expect_legacy_optimized_write)
 
     def table_state(spark, table):
         df = spark.table(table)
@@ -435,15 +463,22 @@ def test_delta_db173_native_sql_ctas_rtas(
             "minReaderVersion", "minWriterVersion").first().asDict(recursive=True)
         return rows, schema, version_zero, detail
 
-    cpu_state = with_cpu_session(lambda spark: table_state(spark, cpu_table), conf=conf)
-    gpu_state = with_cpu_session(lambda spark: table_state(spark, gpu_table), conf=conf)
-    assert_equal(cpu_state, gpu_state)
-    assert_delta_history_equal(conf, cpu_table, gpu_table)
+    table_pairs = [
+        (cpu_ctas_table, gpu_ctas_table),
+        (cpu_rtas_table, gpu_rtas_table),
+    ]
+    for cpu_table, gpu_table in table_pairs:
+        cpu_state = with_cpu_session(lambda spark: table_state(spark, cpu_table), conf=conf)
+        gpu_state = with_cpu_session(lambda spark: table_state(spark, gpu_table), conf=conf)
+        assert_equal(cpu_state, gpu_state)
+        assert_delta_history_equal(conf, cpu_table, gpu_table)
 
     def check_delta_logs(spark):
         def location(table):
             return spark.sql(f"DESCRIBE DETAIL {table}").select("location").first()[0]
-        assert_delta_logs_at_paths_equivalent(spark, location(cpu_table), location(gpu_table))
+        for cpu_table, gpu_table in table_pairs:
+            assert_delta_logs_at_paths_equivalent(
+                spark, location(cpu_table), location(gpu_table))
 
     with_cpu_session(check_delta_logs, conf=conf)
 
