@@ -417,8 +417,9 @@ def assert_rapids_delta_write(do_test, conf):
     finally:
         jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.endCapture()
 
-def assert_db173_gpu_data_writing_command(do_test, conf):
-    """Assert that DBR 17.3 executed the nested Delta data-file command on GPU."""
+def assert_db173_gpu_data_writing_command(
+        do_test, conf, optimized_write, expected_atomic_gpu_class):
+    """Assert that DBR 17.3 executed both atomic staging and Delta data writing on GPU."""
     jvm = spark_jvm()
     callback = jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
     callback.startCapture()
@@ -433,10 +434,42 @@ def assert_db173_gpu_data_writing_command(do_test, conf):
         ]
         assert len(matching_plans) > 0, \
             f"No captured plan contains all of {required_classes}"
+        assert any(
+            callback.contains(plan, expected_atomic_gpu_class)
+            for plan in captured_plans
+        ), f"{expected_atomic_gpu_class} is not found in the captured atomic write plans"
+
+        gpu_optimized_write = "GpuShuffleExchangeExec"
+        optimized_marker_plans = [
+            plan for plan in matching_plans
+            if "DELTA_OPTIMIZED_WRITE" in str(plan.toString())
+            or "deltaoptimizedwritepartitioning" in str(plan.toString()).lower()
+        ]
+        gpu_optimized_plans = [
+            plan for plan in optimized_marker_plans
+            if callback.contains(plan, gpu_optimized_write)
+        ]
+        cpu_optimized_plans = [
+            plan for plan in optimized_marker_plans
+            if not callback.contains(plan, gpu_optimized_write)
+        ]
+        if optimized_write:
+            assert gpu_optimized_plans, \
+                f"{gpu_optimized_write} is not found for DELTA_OPTIMIZED_WRITE"
+        else:
+            assert not optimized_marker_plans, \
+                "Optimize write is disabled but DELTA_OPTIMIZED_WRITE was captured"
+        assert not cpu_optimized_plans, \
+            "DBR DELTA_OPTIMIZED_WRITE shuffle remained on CPU"
+
         for plan in captured_plans:
             for cpu_class in ["DataWritingCommandExec", "WriteFilesExec"]:
                 assert not callback.didFallBack(plan, cpu_class), \
                     f"Captured GPU Delta write also contains CPU {cpu_class}"
+            for cpu_atomic_class in [
+                    "AtomicCreateTableAsSelectExec", "AtomicReplaceTableAsSelectExec"]:
+                assert not callback.didFallBack(plan, cpu_atomic_class), \
+                    f"Captured Delta write contains CPU {cpu_atomic_class}"
         return result
     finally:
         callback.endCapture()

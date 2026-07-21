@@ -67,5 +67,8 @@ class GpuShuffleMeta(
       childParts.head.convertToGpu(),
       newChild,
       shuffle.shuffleOrigin
-    )(shuffle.outputPartitioning)
+    // DBR keeps marker partitionings such as DeltaOptimizedWritePartitioning in the target
+    // contract even when outputPartitioning has already become its physical hash partitioning.
+    // AQE rules use that target contract to identify and tune the exchange.
+    )(shuffle.targetOutputPartitioning)
 }

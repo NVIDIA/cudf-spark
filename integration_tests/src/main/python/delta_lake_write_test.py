@@ -225,9 +225,13 @@ def test_delta_write_round_trip_managed(spark_tmp_table_factory, enable_deletion
     pytest.param(None, "name", id="dv_default-name_mapping"),
     pytest.param(None, "id", id="dv_default-id_mapping"),
 ])
+@pytest.mark.parametrize("optimized_write", [False, True], ids=idfn)
 def test_delta_db173_native_managed_ctas_rtas(
-        spark_tmp_table_factory, enable_deletion_vectors, column_mapping):
-    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+        spark_tmp_table_factory, enable_deletion_vectors, column_mapping, optimized_write):
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf, {
+        "spark.databricks.delta.optimizeWrite.enabled": str(optimized_write).lower(),
+        "spark.sql.execution.sortBeforeRepartition": "true",
+    })
     if column_mapping is not None:
         conf = copy_and_update(conf, {
             "spark.databricks.delta.properties.defaults.columnMapping.mode": column_mapping,
@@ -252,6 +256,9 @@ def test_delta_db173_native_managed_ctas_rtas(
         conf=source_conf)
 
     def write_table(spark, table, replace):
+        effective_optimize_write = spark.conf.get(
+            "spark.databricks.delta.optimizeWrite.enabled")
+        assert effective_optimize_write.lower() == str(optimized_write).lower()
         # A managed Delta scan preserves pass-through ExprIds like the customer projections do.
         source = spark.table(source_table).coalesce(1)
         if replace:
@@ -270,11 +277,15 @@ def test_delta_db173_native_managed_ctas_rtas(
 
     with_cpu_session(lambda spark: write_table(spark, cpu_table, False), conf=conf)
     assert_db173_gpu_data_writing_command(
-        lambda spark: write_table(spark, gpu_table, False), conf=conf)
+        lambda spark: write_table(spark, gpu_table, False), conf=conf,
+        optimized_write=optimized_write,
+        expected_atomic_gpu_class="GpuAtomicReplaceTableAsSelectExec")
 
     with_cpu_session(lambda spark: write_table(spark, cpu_table, True), conf=conf)
     assert_db173_gpu_data_writing_command(
-        lambda spark: write_table(spark, gpu_table, True), conf=conf)
+        lambda spark: write_table(spark, gpu_table, True), conf=conf,
+        optimized_write=optimized_write,
+        expected_atomic_gpu_class="GpuAtomicReplaceTableAsSelectExec")
 
     def table_state(spark, table):
         rows = spark.table(table).orderBy("carrier_id").collect()
@@ -346,6 +357,84 @@ def test_delta_db173_native_managed_ctas_rtas(
     gpu_state = with_cpu_session(lambda spark: table_state(spark, gpu_table), conf=conf)
     assert_equal(cpu_state, gpu_state)
     assert_delta_history_equal(conf, cpu_table, gpu_table)
+    with_cpu_session(check_delta_logs, conf=conf)
+
+
+@allow_non_gpu('AppendDataExecV1', 'AtomicCreateTableAsSelectExec',
+               'AtomicReplaceTableAsSelectExec',
+               *delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_databricks173_or_later(), reason="DBR 17.3 native write path")
+@pytest.mark.parametrize("optimized_write", [False, True], ids=idfn)
+def test_delta_db173_native_sql_ctas_rtas(spark_tmp_table_factory, optimized_write):
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf, {
+        "spark.databricks.delta.optimizeWrite.enabled": str(optimized_write).lower(),
+        "spark.sql.execution.sortBeforeRepartition": "true",
+    })
+    cpu_table = spark_tmp_table_factory.get() + '_sql_cpu'
+    gpu_table = spark_tmp_table_factory.get() + '_sql_gpu'
+    source_table = spark_tmp_table_factory.get() + '_sql_source'
+
+    with_cpu_session(
+        lambda spark: spark.range(8192).selectExpr(
+            "id AS carrier_id",
+            "concat('CARRIER-', id) AS carrier_code",
+            "CAST(id % 7 AS INT) AS carrier_type")
+            .write.format("delta").mode("overwrite").saveAsTable(source_table),
+        conf=conf)
+
+    def execute_atomic_sql(spark, table, replace):
+        effective_optimize_write = spark.conf.get(
+            "spark.databricks.delta.optimizeWrite.enabled")
+        assert effective_optimize_write.lower() == str(optimized_write).lower()
+        command = "CREATE OR REPLACE TABLE" if replace else "CREATE TABLE"
+        projection = (
+            "carrier_code, carrier_id, carrier_type, carrier_id + 1 AS version"
+            if replace else "carrier_id, carrier_code, carrier_type"
+        )
+        spark.sql(
+            f"{command} {table} USING DELTA AS "
+            f"SELECT {projection} FROM {source_table}").collect()
+
+    with_cpu_session(
+        lambda spark: execute_atomic_sql(spark, cpu_table, False), conf=conf)
+    assert_db173_gpu_data_writing_command(
+        lambda spark: execute_atomic_sql(spark, gpu_table, False), conf=conf,
+        optimized_write=optimized_write,
+        expected_atomic_gpu_class="GpuAtomicCreateTableAsSelectExec")
+
+    with_cpu_session(
+        lambda spark: execute_atomic_sql(spark, cpu_table, True), conf=conf)
+    assert_db173_gpu_data_writing_command(
+        lambda spark: execute_atomic_sql(spark, gpu_table, True), conf=conf,
+        optimized_write=optimized_write,
+        expected_atomic_gpu_class="GpuAtomicReplaceTableAsSelectExec")
+
+    def table_state(spark, table):
+        df = spark.table(table)
+        rows = df.orderBy("carrier_id").collect()
+        schema = [
+            (field.name, field.dataType.json(), field.nullable)
+            for field in df.schema.fields
+        ]
+        version_zero = spark.sql(
+            f"SELECT * FROM {table} VERSION AS OF 0 ORDER BY carrier_id").collect()
+        detail = spark.sql(f"DESCRIBE DETAIL {table}").select(
+            "format", "partitionColumns", "properties",
+            "minReaderVersion", "minWriterVersion").first().asDict(recursive=True)
+        return rows, schema, version_zero, detail
+
+    cpu_state = with_cpu_session(lambda spark: table_state(spark, cpu_table), conf=conf)
+    gpu_state = with_cpu_session(lambda spark: table_state(spark, gpu_table), conf=conf)
+    assert_equal(cpu_state, gpu_state)
+    assert_delta_history_equal(conf, cpu_table, gpu_table)
+
+    def check_delta_logs(spark):
+        def location(table):
+            return spark.sql(f"DESCRIBE DETAIL {table}").select("location").first()[0]
+        assert_delta_logs_at_paths_equivalent(spark, location(cpu_table), location(gpu_table))
+
     with_cpu_session(check_delta_logs, conf=conf)
 
 

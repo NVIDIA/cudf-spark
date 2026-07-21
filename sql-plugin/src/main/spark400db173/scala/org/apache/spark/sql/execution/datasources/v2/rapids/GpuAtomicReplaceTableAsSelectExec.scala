@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,12 +15,10 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "341db"}
-{"spark": "350db143"}
+{"spark": "400db173"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.execution.datasources.v2.rapids
 
-import scala.annotation.nowarn
 import scala.collection.JavaConverters._
 
 import com.nvidia.spark.rapids.GpuExec
@@ -30,25 +28,19 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.NoSuchTableException
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, TableSpec}
-import org.apache.spark.sql.catalyst.util.CharVarcharUtils
-import org.apache.spark.sql.connector.catalog.{CatalogV2Util, Identifier, StagingTableCatalog, Table, TableCatalog}
+import org.apache.spark.sql.connector.catalog.{CatalogV2Implicits, CatalogV2Util, Column, Identifier,
+  StagingTableCatalog, Table, TableCatalog, TableInfo, TableWritePrivilege}
 import org.apache.spark.sql.connector.expressions.Transform
 import org.apache.spark.sql.errors.QueryCompilationErrors
 import org.apache.spark.sql.execution.datasources.v2.V2CreateTableAsSelectBaseExec
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /**
- * GPU version of AtomicReplaceTableAsSelectExec.
+ * GPU wrapper for DBR 17.3 atomic RTAS.
  *
- * Physical plan node for v2 replace table as select when the catalog supports staging
- * table replacement.
- *
- * A new table will be created using the schema of the query, and rows from the query are appended.
- * If the table exists, its contents and schema should be replaced with the schema and the contents
- * of the query. This implementation is atomic. The table replacement is staged, and the commit
- * operation at the end should perform the replacement of the table's metadata and contents. If the
- * write fails, the table is instructed to roll back staged changes and any previously written table
- * is left untouched.
+ * DBR's native catalog remains responsible for stage/commit/abort and therefore for Unity
+ * Catalog, catalog-owned tables and coordinated commits. The nested AppendData plan is still
+ * planned normally and can select the DBR 17.3 native GPU Delta writer.
  */
 case class GpuAtomicReplaceTableAsSelectExec(
     override val output: Seq[Attribute],
@@ -62,30 +54,67 @@ case class GpuAtomicReplaceTableAsSelectExec(
     invalidateCache: (TableCatalog, Table, Identifier) => Unit)
   extends V2CreateTableAsSelectBaseExec with GpuExec {
 
-
-  val properties = CatalogV2Util.convertTableProperties(tableSpec)
+  private val properties = CatalogV2Util.convertTableProperties(tableSpec)
 
   override def supportsColumnar: Boolean = false
 
+  private def tableInfo(columns: Array[Column]): TableInfo = {
+    new TableInfo.Builder()
+      .withColumns(columns)
+      .withPartitions(partitioning.toArray)
+      .withProperties(properties.asJava)
+      .build()
+  }
+
+  private def loadForInsert(): Table = {
+    catalog.loadTable(ident, Set(TableWritePrivilege.INSERT).asJava)
+  }
+
+  private def hasRowColumnControls: Boolean =
+    tableSpec.rowFilter.isDefined || tableSpec.columnMasks.isDefined
+
+  private def stageCreateOrReplace(columns: Array[Column]): Table = {
+    if (hasRowColumnControls) {
+      import CatalogV2Implicits._
+      catalog.stageCreateOrReplaceWithRowColumnControls(
+        ident,
+        columns.asSchema,
+        partitioning.toArray,
+        properties.asJava,
+        tableSpec.rowFilter.orNull,
+        tableSpec.columnMasks.orNull)
+    } else {
+      catalog.stageCreateOrReplace(ident, tableInfo(columns))
+    }
+  }
+
+  private def stageReplace(columns: Array[Column]): Table = {
+    if (hasRowColumnControls) {
+      import CatalogV2Implicits._
+      catalog.stageReplaceWithRowColumnControls(
+        ident,
+        columns.asSchema,
+        partitioning.toArray,
+        properties.asJava,
+        tableSpec.rowFilter.orNull,
+        tableSpec.columnMasks.orNull)
+    } else {
+      catalog.stageReplace(ident, tableInfo(columns))
+    }
+  }
+
   override protected def run(): Seq[InternalRow] = {
-    val schema = CharVarcharUtils.getRawSchema(query.schema, conf).asNullable
+    val columns = getV2Columns(query.schema, catalog.useNullableQuerySchema)
     if (catalog.tableExists(ident)) {
       val table = catalog.loadTable(ident)
       invalidateCache(catalog, table, ident)
     }
+
     val staged = if (orCreate) {
-      (catalog.stageCreateOrReplace(
-        ident, schema, partitioning.toArray,
-        properties.asJava
-      ): @nowarn(
-        "msg=stageCreateOrReplace in trait StagingTableCatalog is deprecated"))
+      stageCreateOrReplace(columns)
     } else if (catalog.tableExists(ident)) {
       try {
-        (catalog.stageReplace(
-          ident, schema, partitioning.toArray,
-          properties.asJava
-        ): @nowarn(
-          "msg=stageReplace in trait StagingTableCatalog is deprecated"))
+        stageReplace(columns)
       } catch {
         case e: NoSuchTableException =>
           throw QueryCompilationErrors.cannotReplaceMissingTableError(ident, Some(e))
@@ -93,7 +122,8 @@ case class GpuAtomicReplaceTableAsSelectExec(
     } else {
       throw QueryCompilationErrors.cannotReplaceMissingTableError(ident)
     }
-    writeToTable(catalog, staged, writeOptions, ident, query)
+    val table = Option(staged).getOrElse(loadForInsert())
+    writeToTable(catalog, table, writeOptions, ident, query)
   }
 
   override protected def internalDoExecuteColumnar(): RDD[ColumnarBatch] =

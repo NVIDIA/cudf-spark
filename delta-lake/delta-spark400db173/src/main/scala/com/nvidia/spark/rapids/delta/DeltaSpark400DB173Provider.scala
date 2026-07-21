@@ -68,6 +68,10 @@ import org.apache.spark.sql.execution.datasources.v2.{
   AtomicCreateTableAsSelectExec,
   AtomicReplaceTableAsSelectExec
 }
+import org.apache.spark.sql.execution.datasources.v2.rapids.{
+  GpuAtomicCreateTableAsSelectExec,
+  GpuAtomicReplaceTableAsSelectExec
+}
 import org.apache.spark.sql.rapids.{GpuAnd, GpuEqualTo, GpuFileSourceScanExec, GpuNot}
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims
 import org.apache.spark.sql.sources.InsertableRelation
@@ -256,10 +260,20 @@ object DeltaSpark400DB173Provider extends DatabricksDeltaProviderBase {
       meta: AtomicCreateTableAsSelectExecMeta): Unit = {
     tagDB173UnsupportedTableSpec(meta, cpuExec.tableSpec, cpuExec.session)
     super.tagForGpu(cpuExec, meta)
-    if (meta.canThisBeReplaced) {
-      meta.willNotWorkOnGpu(
-        "Delta CTAS is not yet supported on GPU for DB-17.3")
-    }
+  }
+
+  override def convertToGpu(
+      cpuExec: AtomicCreateTableAsSelectExec,
+      meta: AtomicCreateTableAsSelectExecMeta): GpuExec = {
+    GpuAtomicCreateTableAsSelectExec(
+      cpuExec.output,
+      cpuExec.catalog,
+      cpuExec.ident,
+      cpuExec.partitioning,
+      cpuExec.query,
+      cpuExec.tableSpec,
+      cpuExec.writeOptions,
+      cpuExec.ifNotExists)
   }
 
   override def tagForGpu(
@@ -267,15 +281,26 @@ object DeltaSpark400DB173Provider extends DatabricksDeltaProviderBase {
       meta: AtomicReplaceTableAsSelectExecMeta): Unit = {
     tagDB173UnsupportedTableSpec(meta, cpuExec.tableSpec, cpuExec.session)
     super.tagForGpu(cpuExec, meta)
-    if (meta.canThisBeReplaced) {
-      meta.willNotWorkOnGpu(
-        "Delta RTAS is not yet supported on GPU for DB-17.3")
-    }
   }
 
-  // Keep CTAS/RTAS on CPU for DB-17.3 until GpuCreateDeltaTableCommand preserves the new
-  // table-creation semantics. The feature-specific tags below make explain output name the
-  // exact unsupported Delta feature instead of only the broad CTAS/RTAS fallback:
+  override def convertToGpu(
+      cpuExec: AtomicReplaceTableAsSelectExec,
+      meta: AtomicReplaceTableAsSelectExecMeta): GpuExec = {
+    GpuAtomicReplaceTableAsSelectExec(
+      cpuExec.output,
+      cpuExec.catalog,
+      cpuExec.ident,
+      cpuExec.partitioning,
+      cpuExec.query,
+      cpuExec.tableSpec,
+      cpuExec.writeOptions,
+      cpuExec.orCreate,
+      cpuExec.invalidateCache)
+  }
+
+  // The atomic wrappers retain DBR's native catalog and staged table, but these table-creation
+  // features remain fail-closed until their native metadata and catalog paths have dedicated
+  // correctness coverage:
   //   - row filter / column mask             -> https://github.com/NVIDIA/spark-rapids/issues/14601
   //   - catalog-owned / coordinated commits  -> https://github.com/NVIDIA/spark-rapids/issues/14601
   //   - liquid clustering / auto TTL         -> https://github.com/NVIDIA/spark-rapids/issues/14599

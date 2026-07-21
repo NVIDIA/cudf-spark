@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,12 +15,10 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "341db"}
-{"spark": "350db143"}
+{"spark": "400db173"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.execution.datasources.v2.rapids
 
-import scala.annotation.nowarn
 import scala.collection.JavaConverters._
 
 import com.nvidia.spark.rapids.GpuExec
@@ -29,23 +27,20 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, TableSpec}
-import org.apache.spark.sql.catalyst.util.CharVarcharUtils
-import org.apache.spark.sql.connector.catalog.{CatalogV2Util, Identifier, StagingTableCatalog}
+import org.apache.spark.sql.connector.catalog.{CatalogV2Implicits, CatalogV2Util, Identifier,
+  StagingTableCatalog, Table, TableInfo, TableWritePrivilege}
 import org.apache.spark.sql.connector.expressions.Transform
 import org.apache.spark.sql.errors.QueryCompilationErrors
-import org.apache.spark.sql.execution.datasources.v2.V2CreateTableAsSelectBaseExec
+import org.apache.spark.sql.execution.datasources.v2.{V2CreateTableAsSelectBaseExec,
+  WriteToDataSourceV2Exec}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /**
- * GPU version of AtomicCreateTableAsSelectExec.
+ * GPU wrapper for DBR 17.3 atomic CTAS.
  *
- * Physical plan node for v2 create table as select, when the catalog is determined to support
- * staging table creation.
- *
- * A new table will be created using the schema of the query, and rows from the query are appended.
- * The CTAS operation is atomic. The creation of the table is staged and the commit of the write
- * should bundle the commitment of the metadata and the table contents in a single unit. If the
- * write fails, the table is instructed to roll back all staged changes.
+ * The wrapper deliberately keeps DBR's native catalog and staged table. Only the physical command
+ * node is replaced; staging, nested AppendData execution, commit and abort continue through the
+ * DBR 17.3 V2 APIs inherited from [[V2CreateTableAsSelectBaseExec]].
  */
 case class GpuAtomicCreateTableAsSelectExec(
     override val output: Seq[Attribute],
@@ -55,28 +50,48 @@ case class GpuAtomicCreateTableAsSelectExec(
     query: LogicalPlan,
     tableSpec: TableSpec,
     writeOptions: Map[String, String],
-    ifNotExists: Boolean) extends V2CreateTableAsSelectBaseExec with GpuExec {
+    ifNotExists: Boolean)
+  extends V2CreateTableAsSelectBaseExec with GpuExec {
 
-  val properties = CatalogV2Util.convertTableProperties(tableSpec)
+  private val properties = CatalogV2Util.convertTableProperties(tableSpec)
 
   override def supportsColumnar: Boolean = false
+
+  private def loadForInsert(): Table = {
+    catalog.loadTable(ident, Set(TableWritePrivilege.INSERT).asJava)
+  }
 
   override protected def run(): Seq[InternalRow] = {
     if (catalog.tableExists(ident)) {
       if (ifNotExists) {
         return Nil
       }
-
       throw QueryCompilationErrors.tableAlreadyExistsError(ident)
     }
-    val schema = CharVarcharUtils.getRawSchema(query.schema, conf).asNullable
-    val stagedTable = (catalog.stageCreate(
-      ident, getV2Columns(schema, catalog.useNullableQuerySchema),
-      partitioning.toArray,
-      properties.asJava): @nowarn(
-      "msg=stageCreate in trait StagingTableCatalog is deprecated"))
 
-    writeToTable(catalog, stagedTable, writeOptions, ident, query)
+    val columns = getV2Columns(query.schema, catalog.useNullableQuerySchema)
+    val table = WriteToDataSourceV2Exec.handleConcurrentCreateExceptions(ifNotExists) {
+      val staged = if (tableSpec.rowFilter.isDefined || tableSpec.columnMasks.isDefined) {
+        import CatalogV2Implicits._
+        catalog.stageCreateWithRowColumnControls(
+          ident,
+          columns.asSchema,
+          partitioning.toArray,
+          properties.asJava,
+          tableSpec.rowFilter.orNull,
+          tableSpec.columnMasks.orNull)
+      } else {
+        val tableInfo = new TableInfo.Builder()
+          .withColumns(columns)
+          .withPartitions(partitioning.toArray)
+          .withProperties(properties.asJava)
+          .build()
+        catalog.stageCreate(ident, tableInfo)
+      }
+      Option(staged).getOrElse(loadForInsert())
+    }.getOrElse(return Nil)
+
+    writeToTable(catalog, table, writeOptions, ident, query, ifNotExists)
   }
 
   override protected def internalDoExecuteColumnar(): RDD[ColumnarBatch] =

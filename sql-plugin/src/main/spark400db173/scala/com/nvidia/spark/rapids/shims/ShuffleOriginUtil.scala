@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,19 +15,23 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "330db"}
-{"spark": "332db"}
-{"spark": "341db"}
-{"spark": "350db143"}
+{"spark": "400db173"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
-import org.apache.spark.sql.execution.exchange.{ENSURE_REQUIREMENTS, EXECUTOR_BROADCAST, REBALANCE_PARTITIONS_BY_COL, REBALANCE_PARTITIONS_BY_NONE, REPARTITION_BY_COL, REPARTITION_BY_NUM, ShuffleOrigin}
+import org.apache.spark.sql.execution.exchange.{DELTA_OPTIMIZED_WRITE, ENSURE_REQUIREMENTS,
+  EXECUTOR_BROADCAST, REBALANCE_PARTITIONS_BY_COL, REBALANCE_PARTITIONS_BY_NONE,
+  REPARTITION_BY_COL, REPARTITION_BY_NUM, ShuffleOrigin}
 
 object ShuffleOriginUtil {
-  private val knownOrigins: Set[ShuffleOrigin] = Set(ENSURE_REQUIREMENTS,
-    REPARTITION_BY_COL, REPARTITION_BY_NUM, REBALANCE_PARTITIONS_BY_NONE,
-    REBALANCE_PARTITIONS_BY_COL, EXECUTOR_BROADCAST)
+  private val knownOrigins: Set[ShuffleOrigin] = Set(
+    ENSURE_REQUIREMENTS,
+    REPARTITION_BY_COL,
+    REPARTITION_BY_NUM,
+    REBALANCE_PARTITIONS_BY_NONE,
+    REBALANCE_PARTITIONS_BY_COL,
+    EXECUTOR_BROADCAST,
+    DELTA_OPTIMIZED_WRITE)
 
   def isSupported(origin: ShuffleOrigin): Boolean = knownOrigins.contains(origin)
 }
