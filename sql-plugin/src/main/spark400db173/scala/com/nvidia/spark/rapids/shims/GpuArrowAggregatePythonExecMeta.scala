@@ -18,6 +18,7 @@
 {"spark": "400db173"}
 {"spark": "411"}
 {"spark": "412"}
+{"spark": "420"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
@@ -47,6 +48,15 @@ class GpuArrowAggregatePythonExecMeta(
 
   val pythonUDAFs: Seq[PythonUDAF] =
     aggPandas.aggExpressions.map(_.aggregateFunction.asInstanceOf[PythonUDAF])
+
+  override def tagPlanForGpu(): Unit = {
+    // Spark 4.2 added grouped aggregate iterator UDF eval types on this exec.
+    // They need a Python iterator protocol the GPU aggregate runner does not implement yet.
+    if (pythonUDAFs.exists(udf =>
+      TypeUtilsShims.isUnsupportedArrowAggregatePythonEvalType(udf.evalType))) {
+      willNotWorkOnGpu("grouped aggregate iterator UDFs are not supported on GPU yet")
+    }
+  }
 
   private val udfs: Seq[BaseExprMeta[PythonUDAF]] =
     pythonUDAFs.map(GpuOverrides.wrapExpr(_, conf, Some(this)))

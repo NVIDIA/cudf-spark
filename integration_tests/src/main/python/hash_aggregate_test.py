@@ -26,7 +26,8 @@ from pyspark.sql.dataframe import DataFrame
 from pyspark.sql.types import *
 from marks import *
 import pyspark.sql.functions as f
-from spark_session import is_databricks104_or_later, with_cpu_session, is_spark_340_or_later
+from spark_session import is_databricks104_or_later, with_cpu_session, is_spark_340_or_later, \
+    is_spark_420_or_later
 
 pytestmark = pytest.mark.nightly_resource_consuming_test
 
@@ -861,6 +862,33 @@ def test_hash_groupby_collect_list(data_gen, use_obj_hash_agg):
     assert_gpu_and_cpu_are_equal_collect(
         doit,
         conf={'spark.sql.execution.useObjectHashAggregateExec': str(use_obj_hash_agg).lower()})
+
+
+@pytest.mark.skipif(not is_spark_420_or_later(),
+                    reason='collect_list/array_agg RESPECT NULLS is introduced in Spark 4.2')
+@allow_non_gpu("ProjectExec")
+@ignore_order(local=True)
+@pytest.mark.parametrize('use_obj_hash_agg', [True, False], ids=idfn)
+def test_hash_groupby_collect_list_respect_nulls(use_obj_hash_agg):
+    def doit(spark):
+        return spark.sql("""
+            SELECT a,
+                   sort_array(collect_list(b) RESPECT NULLS) AS respect_list,
+                   sort_array(array_agg(b) RESPECT NULLS) AS respect_array
+            FROM VALUES
+                (1, 1),
+                (1, NULL),
+                (1, 3),
+                (2, NULL),
+                (2, 5)
+            AS tab(a, b)
+            GROUP BY a
+        """)
+
+    assert_gpu_and_cpu_are_equal_collect(
+        doit,
+        conf={'spark.sql.execution.useObjectHashAggregateExec': str(use_obj_hash_agg).lower()})
+
 
 @ignore_order(local=True)
 @pytest.mark.parametrize('use_obj_hash_agg', [True, False], ids=idfn)
