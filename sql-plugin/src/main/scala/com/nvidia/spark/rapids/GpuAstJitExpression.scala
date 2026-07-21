@@ -67,7 +67,10 @@ case class GpuAstJitExpression(child: Expression)
     getCompiledExpression
   }
 
-  override def restore(): Unit = closeCompiledExpression()
+  override def restore(): Unit = {
+    // The existing task callback closes the expression recompiled after a retry.
+    closeCompiledExpression()
+  }
 
   override def close(): Unit = closeCompiledExpression()
 

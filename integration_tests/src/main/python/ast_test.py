@@ -383,19 +383,21 @@ def test_jit_add_multiply(data_gen):
         non_exist_classes="GpuProjectAst",
         conf=_project_ast_jit_enabled_conf)
 
+@pytest.mark.parametrize('data_gen', [int_gen, long_gen], ids=idfn)
 @disable_ansi_mode
-def test_jit_mixed_nested_subexpressions():
+def test_jit_mixed_nested_subexpressions(data_gen):
     assert_cpu_and_gpu_are_equal_collect_with_capture(
-        lambda spark: binary_op_df(spark, int_gen).select(
+        lambda spark: binary_op_df(spark, data_gen).select(
             (f.col('a') + f.col('b')) - (f.col('a') * f.col('b'))),
         exist_classes=r"GpuProject.*AST_JIT.*- AST_JIT",
         non_exist_classes="GpuProjectAst",
         conf=_project_ast_jit_enabled_conf)
 
+@pytest.mark.parametrize('data_gen', [int_gen, long_gen], ids=idfn)
 @disable_ansi_mode
-def test_jit_mixed_project_expressions():
+def test_jit_mixed_project_expressions(data_gen):
     assert_cpu_and_gpu_are_equal_collect_with_capture(
-        lambda spark: binary_op_df(spark, int_gen).select(
+        lambda spark: binary_op_df(spark, data_gen).select(
             (f.col('a') + f.col('b')).alias('jit'),
             (f.col('a') - f.col('b')).alias('gpu'),
             ((f.col('a') * f.col('b')) - f.col('a')).alias('mixed')),
