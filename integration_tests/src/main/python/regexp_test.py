@@ -1042,9 +1042,9 @@ def test_rlike_fallback_possessive_quantifier():
             conf=_regexp_conf)
 
 @allow_non_gpu('ProjectExec', 'RLike')
-def test_rlike_fallback_lookaheads():
+def test_rlike_fallback_lookarounds_independent_named():
     gen = mk_str_gen('(\u20ac|\\w){0,3}a[|b*.$\r\n]{0,2}c\\w{0,3}')
-    for pattern in ['a(?=a*)', 'a(?!a*)']:
+    for pattern in ['a(?=a*)', 'a(?!a*)', 'a(?<=a)', 'a(?<!a)', 'a(?>a*)', 'a(?<n>a*)']:
         assert_gpu_fallback_collect(
             lambda spark, pattern=pattern: unary_op_df(spark, gen).selectExpr(
                 f'a rlike "{pattern}"'),

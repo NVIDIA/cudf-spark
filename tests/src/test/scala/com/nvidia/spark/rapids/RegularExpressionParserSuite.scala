@@ -78,6 +78,18 @@ class RegularExpressionParserSuite extends AnyFunSuite {
         RegexSequence(ListBuffer(
           RegexGroup(RegexGroup.Capturing, RegexSequence(ListBuffer(RegexChar('a')))),
           RegexGroup(RegexGroup.Capturing, RegexSequence(ListBuffer(RegexChar('b')))))))
+      assert(parse("(?:a)(?:b)") ===
+        RegexSequence(ListBuffer(
+          RegexGroup(RegexGroup.NonCapturing, RegexSequence(ListBuffer(RegexChar('a')))),
+          RegexGroup(RegexGroup.NonCapturing, RegexSequence(ListBuffer(RegexChar('b')))))))
+      assert(parse("(?=a)(?!b)(?<=c)(?<!d)(?>e)(?<n>f)") ===
+        RegexSequence(ListBuffer(
+          RegexGroup(RegexGroup.PositiveLookahead, RegexSequence(ListBuffer(RegexChar('a')))),
+          RegexGroup(RegexGroup.NegativeLookahead, RegexSequence(ListBuffer(RegexChar('b')))),
+          RegexGroup(RegexGroup.PositiveLookbehind, RegexSequence(ListBuffer(RegexChar('c')))),
+          RegexGroup(RegexGroup.NegativeLookbehind, RegexSequence(ListBuffer(RegexChar('d')))),
+          RegexGroup(RegexGroup.Independent, RegexSequence(ListBuffer(RegexChar('e')))),
+          RegexGroup(RegexGroup.Named("n"), RegexSequence(ListBuffer(RegexChar('f')))))))
   }
 
   test("character class") {
@@ -211,6 +223,11 @@ class RegularExpressionParserSuite extends AnyFunSuite {
   test("repetition with group containing escape character") {
     assert(parse(raw"(\A)+") ===
       RegexSequence(ListBuffer(RegexRepetition(RegexGroup(RegexGroup.Capturing,
+          RegexSequence(ListBuffer(RegexEscaped('A')))),
+          SimpleQuantifier('+'))))
+    )
+    assert(parse(raw"(?:\A)+") ===
+      RegexSequence(ListBuffer(RegexRepetition(RegexGroup(RegexGroup.NonCapturing,
           RegexSequence(ListBuffer(RegexEscaped('A')))),
           SimpleQuantifier('+'))))
     )

@@ -180,12 +180,33 @@ class RegexParser(pattern: String) {
   private def parseGroup(): RegexAST = {
     val groupType = if (pos + 1 < pattern.length
         && pattern.charAt(pos) == '?'
-        && ":!=".contains(pattern.charAt(pos+1))) {
+        && ":!=<>".contains(pattern.charAt(pos+1))) {
       consumeExpected('?')
       consume() match {  // guaranteed exhaustive by the contains call above
         case ':' => RegexGroup.NonCapturing
         case '!' => RegexGroup.NegativeLookahead
         case '=' => RegexGroup.PositiveLookahead
+        case '>' => RegexGroup.Independent
+        case '<' if pos < pattern.length => consume() match {
+          case '!' => RegexGroup.NegativeLookbehind
+          case '=' => RegexGroup.PositiveLookbehind
+          case ch if isLetter(ch) =>
+            val nameStart = pos-1
+            while (!eof() && peek().exists(c => isLetter(c) || isAsciiDigit(c))) {
+              skip()
+            }
+            val name = pattern.substring(nameStart, pos)
+            if (!peek().contains('>')) {
+              throw new RegexUnsupportedException(
+                "Illegal named capture group: malformed <name>", Some(nameStart-1))
+            }
+            consumeExpected('>')
+            RegexGroup.Named(name)
+          case _ => throw new RegexUnsupportedException(
+            s"Unexpected character after '<' in group", Some(pos-1))
+        }
+        case '<' => throw new RegexUnsupportedException(
+          s"Pattern may not end with trailing '<' in group", Some(pos-1))
       }
     } else {
       RegexGroup.Capturing
@@ -1337,6 +1358,12 @@ class CudfRegexTranspiler(mode: RegexMode) {
               // when matching against line terminator characters
               case Some(RegexChar('$')) | Some(RegexEscaped('Z')) =>
                 part match {
+                  case RegexGroup(groupType, _)
+                      if groupType != RegexGroup.Capturing
+                          && groupType != RegexGroup.NonCapturing =>
+                    throw new RegexUnsupportedException(
+                      "Regex sequence $ followed by a lookaround, independent, or named capture " +
+                      "group is not supported", part.position)
                   case RegexGroup(groupType, RegexSequence(
                       ListBuffer(RegexCharacterClass(true, parts))))
                       if parts.forall(!isBeginOrEndLineAnchor(_)) =>
@@ -1405,6 +1432,12 @@ class CudfRegexTranspiler(mode: RegexMode) {
             "regex_replace and regex_split on GPU do not support repetition with {0}",
             quantifier.position)
 
+        case (g @ RegexGroup(groupType, _), _)
+            if groupType != RegexGroup.Capturing && groupType != RegexGroup.NonCapturing =>
+          throw new RegexUnsupportedException(
+            "Repetition of lookaround, independent, or named capture groups is not supported",
+            g.position)
+
         case (RegexGroup(groupType, term), SimpleQuantifier(ch))
             if "+*".contains(ch) && !isSupportedRepetitionBase(term) =>
           (term, ch) match {
@@ -1414,9 +1447,7 @@ class CudfRegexTranspiler(mode: RegexMode) {
               // (\A)+ can be transpiled to (\A) (dropping the repetition)
               // we use rewrite(...) here to handle logic regarding modes
               // (\A is not supported in RegexSplitMode)
-              RegexGroup(
-                if (groupType == RegexGroup.Capturing) groupType else RegexGroup.NonCapturing,
-                rewrite(term, replacement, previous, flags))
+              RegexGroup(groupType, rewrite(term, replacement, previous, flags))
             // NOTE: (\A)* can be transpiled to (\A)?
             // however, (\A)? is not supported in libcudf yet
             case _ =>
@@ -1434,9 +1465,7 @@ class CudfRegexTranspiler(mode: RegexMode) {
               // (\A){1,} can be transpiled to (\A) (dropping the repetition)
               // we use rewrite(...) here to handle logic regarding modes
               // (\A is not supported in RegexSplitMode)
-              RegexGroup(
-                if (groupType == RegexGroup.Capturing) groupType else RegexGroup.NonCapturing,
-                rewrite(term, replacement, previous, flags))
+              RegexGroup(groupType, rewrite(term, replacement, previous, flags))
             // NOTE: (\A)* can be transpiled to (\A)?
             // however, (\A)? is not supported in libcudf yet
             case _ =>
@@ -1454,9 +1483,7 @@ class CudfRegexTranspiler(mode: RegexMode) {
               // (\A){1,} can be transpiled to (\A) (dropping the repetition)
               // we use rewrite(...) here to handle logic regarding modes
               // (\A is not supported in RegexSplitMode)
-              RegexGroup(
-                if (groupType == RegexGroup.Capturing) groupType else RegexGroup.NonCapturing,
-                rewrite(term, replacement, previous, flags))
+              RegexGroup(groupType, rewrite(term, replacement, previous, flags))
             // NOTE: (\A)* can be transpiled to (\A)?
             // however, (\A)? is not supported in libcudf yet
             case _ =>
@@ -1557,12 +1584,27 @@ class CudfRegexTranspiler(mode: RegexMode) {
         }
         RegexChoice(ll, rr)
 
-      case g @ RegexGroup(RegexGroup.PositiveLookahead | RegexGroup.NegativeLookahead, _) =>
+      case g @ RegexGroup(RegexGroup.PositiveLookahead |
+                          RegexGroup.NegativeLookahead |
+                          RegexGroup.PositiveLookbehind |
+                          RegexGroup.NegativeLookbehind |
+                          RegexGroup.Independent |
+                          RegexGroup.Named(_), _) =>
         val msg = g.groupType match {
           case RegexGroup.PositiveLookahead =>
             "Positive lookahead groups are not supported"
           case RegexGroup.NegativeLookahead =>
             "Negative lookahead groups are not supported"
+          case RegexGroup.PositiveLookbehind =>
+            "Positive lookbehind groups are not supported"
+          case RegexGroup.NegativeLookbehind =>
+            "Negative lookbehind groups are not supported"
+          case RegexGroup.Independent =>
+            "Independent groups are not supported"
+          case RegexGroup.Named(_) =>
+            "Named capture groups are not supported"
+          case _ =>  // unreachable
+            throw new IllegalStateException(s"Unhandled group type: ${g.groupType}")
         }
         throw new RegexUnsupportedException(msg, g.position)
 
@@ -1739,8 +1781,12 @@ object RegexGroup {
   sealed trait Type
   case object Capturing extends Type
   case object NonCapturing extends Type
-  case object NegativeLookahead extends Type
   case object PositiveLookahead extends Type
+  case object NegativeLookahead extends Type
+  case object PositiveLookbehind extends Type
+  case object NegativeLookbehind extends Type
+  case class Named(name: String) extends Type
+  case object Independent extends Type
 }
 
 sealed case class RegexGroup(groupType: RegexGroup.Type, term: RegexAST) extends RegexAST {
@@ -1755,6 +1801,10 @@ sealed case class RegexGroup(groupType: RegexGroup.Type, term: RegexAST) extends
     case PositiveLookahead => s"(?=${term.toRegexString})"
     case NegativeLookahead => s"(?!${term.toRegexString})"
     case NonCapturing => s"(?:${term.toRegexString})"
+    case PositiveLookbehind => s"(?<=${term.toRegexString})"
+    case NegativeLookbehind => s"(?<!${term.toRegexString})"
+    case Named(name) => s"(?<$name>${term.toRegexString})"
+    case Independent => s"(?>${term.toRegexString})"
   }
 }
 
