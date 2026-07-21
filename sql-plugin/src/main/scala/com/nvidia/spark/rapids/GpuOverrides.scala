@@ -469,7 +469,7 @@ object GpuOverrides extends Logging {
   private[this] lazy val regexList: Seq[String] = Seq("\\", "\u0000", "\\x", "\t", "\n", "\r",
     "\f", "\\a", "\\e", "\\cx", "[", "]", "^", "&", ".", "*", "\\d", "\\D", "\\h", "\\H", "\\s",
     "\\S", "\\v", "\\V", "\\w", "\\w", "\\p", "$", "\\b", "\\B", "\\A", "\\G", "\\Z", "\\z", "\\R",
-    "?", "|", "(", ")", "{", "}", "\\k", "\\Q", "\\E", ":", "!", "<=", ">")
+    "?", "+", "|", "(", ")", "{", "}", "\\k", "\\Q", "\\E", ":", "!", "<=", ">")
   val regexMetaChars = ".$^[]\\|?*+(){}"
   /**
    * Provides a way to log an info message about how long an operation took in milliseconds.
@@ -3805,7 +3805,8 @@ object GpuOverrides extends Logging {
         }
 
         override def convertToGpu(childExprs: Seq[Expression]): GpuExpression =
-          GpuCollectList(childExprs.head, c.mutableAggBufferOffset, c.inputAggBufferOffset)
+          GpuCollectList(childExprs.head, c.mutableAggBufferOffset, c.inputAggBufferOffset,
+            TypeUtilsShims.collectListIgnoreNulls(c))
 
         override def aggBufferAttribute: AttributeReference = {
           val aggBuffer = c.aggBufferAttributes.head
@@ -3813,7 +3814,8 @@ object GpuOverrides extends Logging {
         }
 
         override def createCpuToGpuBufferConverter(): CpuToGpuAggregateBufferConverter =
-          new CpuToGpuCollectBufferConverter(c.child.dataType)
+          new CpuToGpuCollectBufferConverter(c.child.dataType,
+            !TypeUtilsShims.collectListIgnoreNulls(c))
 
         override def createGpuToCpuBufferConverter(): GpuToCpuAggregateBufferConverter =
           new GpuToCpuCollectBufferConverter()

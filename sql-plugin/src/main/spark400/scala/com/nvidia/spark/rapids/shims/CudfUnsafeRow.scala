@@ -27,19 +27,6 @@ import org.apache.spark.sql.catalyst.expressions.Attribute
 
 final class CudfUnsafeRow(
    attributes: Array[Attribute],
-   remapping: Array[Int]) extends CudfUnsafeRowBase(attributes, remapping) {
-  def getVariant(ordinal: Int) = {
-    throw new UnsupportedOperationException("VariantVal is not supported")
-  }
-
-  // Added in Spark 4.1.0 for spatial types
-  def getGeography(ordinal: Int) = {
-    throw new UnsupportedOperationException("GeographyVal is not supported")
-  }
-
-  def getGeometry(ordinal: Int) = {
-    throw new UnsupportedOperationException("GeometryVal is not supported")
-  }
-}
+   remapping: Array[Int]) extends CudfUnsafeRowBase(attributes, remapping)
 
 object CudfUnsafeRow extends CudfUnsafeRowTrait

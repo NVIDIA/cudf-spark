@@ -90,11 +90,12 @@ object CudfAll {
   def apply(): CudfAggregate = new CudfMin(BooleanType)
 }
 
-class CudfCollectList(override val dataType: DataType) extends CudfAggregate {
+class CudfCollectList(override val dataType: DataType, nullPolicy: NullPolicy)
+    extends CudfAggregate {
   override lazy val reductionAggregate: cudf.ColumnVector => cudf.Scalar =
-    (col: cudf.ColumnVector) => col.reduce(ReductionAggregation.collectList(), DType.LIST)
+    (col: cudf.ColumnVector) => col.reduce(ReductionAggregation.collectList(nullPolicy), DType.LIST)
   override lazy val groupByAggregate: GroupByAggregation =
-    GroupByAggregation.collectList()
+    GroupByAggregation.collectList(nullPolicy)
   override val name: String = "CudfCollectList"
 }
 
@@ -110,7 +111,8 @@ class CudfMergeLists(override val dataType: DataType) extends CudfAggregate {
  * Spark handles NaN's equality by different way for non-nested float/double and float/double
  * in nested types. When we use non-nested versions of floats and doubles, NaN values are
  * considered unequal, but when we collect sets of nested versions, NaNs are considered equal
- * on the CPU. So we set NaNEquality dynamically in CudfCollectSet and CudfMergeSets.
+ * on the CPU. Spark 4.2 changed non-nested NaNs to be equal too, so use a shim helper
+ * for the non-nested NaN equality in CudfCollectSet and CudfMergeSets.
  * Note that dataType is ArrayType(child.dataType) here.
  */
 class CudfCollectSet(override val dataType: DataType) extends CudfAggregate {
@@ -119,7 +121,7 @@ class CudfCollectSet(override val dataType: DataType) extends CudfAggregate {
       val collectSet = dataType match {
         case ArrayType(FloatType | DoubleType, _) =>
           ReductionAggregation.collectSet(
-            NullPolicy.EXCLUDE, NullEquality.EQUAL, NaNEquality.UNEQUAL)
+            NullPolicy.EXCLUDE, NullEquality.EQUAL, TypeUtilsShims.collectSetFloatNanEquality)
         case _: DataType =>
           ReductionAggregation.collectSet(
             NullPolicy.EXCLUDE, NullEquality.EQUAL, NaNEquality.ALL_EQUAL)
@@ -129,7 +131,7 @@ class CudfCollectSet(override val dataType: DataType) extends CudfAggregate {
   override lazy val groupByAggregate: GroupByAggregation = dataType match {
     case ArrayType(FloatType | DoubleType, _) =>
       GroupByAggregation.collectSet(
-        NullPolicy.EXCLUDE, NullEquality.EQUAL, NaNEquality.UNEQUAL)
+        NullPolicy.EXCLUDE, NullEquality.EQUAL, TypeUtilsShims.collectSetFloatNanEquality)
     case _: DataType =>
       GroupByAggregation.collectSet(
         NullPolicy.EXCLUDE, NullEquality.EQUAL, NaNEquality.ALL_EQUAL)
@@ -142,7 +144,8 @@ class CudfMergeSets(override val dataType: DataType) extends CudfAggregate {
     (col: cudf.ColumnVector) => {
       val mergeSets = dataType match {
         case ArrayType(FloatType | DoubleType, _) =>
-          ReductionAggregation.mergeSets(NullEquality.EQUAL, NaNEquality.UNEQUAL)
+          ReductionAggregation.mergeSets(
+            NullEquality.EQUAL, TypeUtilsShims.collectSetFloatNanEquality)
         case _: DataType =>
           ReductionAggregation.mergeSets(NullEquality.EQUAL, NaNEquality.ALL_EQUAL)
       }
@@ -150,7 +153,7 @@ class CudfMergeSets(override val dataType: DataType) extends CudfAggregate {
     }
   override lazy val groupByAggregate: GroupByAggregation = dataType match {
     case ArrayType(FloatType | DoubleType, _) =>
-      GroupByAggregation.mergeSets(NullEquality.EQUAL, NaNEquality.UNEQUAL)
+      GroupByAggregation.mergeSets(NullEquality.EQUAL, TypeUtilsShims.collectSetFloatNanEquality)
     case _: DataType =>
       GroupByAggregation.mergeSets(NullEquality.EQUAL, NaNEquality.ALL_EQUAL)
   }
@@ -1900,10 +1903,11 @@ trait GpuCollectBase
   with GpuAggregateWindowFunction {
 
   def child: Expression
+  protected def arrayContainsNull: Boolean = false
 
   override def nullable: Boolean = false
 
-  override def dataType: DataType = ArrayType(child.dataType, containsNull = false)
+  override def dataType: DataType = ArrayType(child.dataType, containsNull = arrayContainsNull)
 
   override def children: Seq[Expression] = child :: Nil
 
@@ -1929,10 +1933,17 @@ trait GpuCollectBase
 case class GpuCollectList(
     child: Expression,
     mutableAggBufferOffset: Int = 0,
-    inputAggBufferOffset: Int = 0)
+    inputAggBufferOffset: Int = 0,
+    ignoreNulls: Boolean = true)
     extends GpuCollectBase {
 
-  override lazy val updateAggregates: Seq[CudfAggregate] = Seq(new CudfCollectList(dataType))
+  private lazy val nullPolicy: NullPolicy =
+    if (ignoreNulls) NullPolicy.EXCLUDE else NullPolicy.INCLUDE
+
+  override protected def arrayContainsNull: Boolean = !ignoreNulls
+
+  override lazy val updateAggregates: Seq[CudfAggregate] =
+    Seq(new CudfCollectList(dataType, nullPolicy))
   override lazy val mergeAggregates: Seq[CudfAggregate] = Seq(new CudfMergeLists(dataType))
   override lazy val evaluateExpression: Expression = outputBuf
   override def aggBufferAttributes: Seq[AttributeReference] = outputBuf :: Nil
@@ -1941,7 +1952,7 @@ case class GpuCollectList(
 
   override def windowAggregation(
       inputs: Seq[(ColumnVector, Int)]): RollingAggregationOnColumn =
-    RollingAggregation.collectList().onColumn(inputs.head._2)
+    RollingAggregation.collectList(nullPolicy).onColumn(inputs.head._2)
 
   // minPeriods should be 0.
   // Consider the following rows: v = [ 0, 1, 2, 3, 4, 5 ]
@@ -1972,12 +1983,12 @@ case class GpuCollectSet(
   // Spark handles NaN's equality by different way for non-nested float/double and float/double
   // in nested types. When we use non-nested versions of floats and doubles, NaN values are
   // considered unequal, but when we collect sets of nested versions, NaNs are considered equal
-  // on the CPU. So we set NaNEquality dynamically here.
+  // on the CPU. Spark 4.2 changed non-nested NaNs to be equal too, so use a shim helper here.
   override def windowAggregation(
       inputs: Seq[(ColumnVector, Int)]): RollingAggregationOnColumn = child.dataType match {
     case FloatType | DoubleType =>
       RollingAggregation.collectSet(NullPolicy.EXCLUDE, NullEquality.EQUAL,
-        NaNEquality.UNEQUAL).onColumn(inputs.head._2)
+        TypeUtilsShims.collectSetFloatNanEquality).onColumn(inputs.head._2)
     case _ =>
       RollingAggregation.collectSet(NullPolicy.EXCLUDE, NullEquality.EQUAL,
         NaNEquality.ALL_EQUAL).onColumn(inputs.head._2)
@@ -1991,19 +2002,21 @@ case class GpuCollectSet(
 }
 
 class CpuToGpuCollectBufferConverter(
-    elementType: DataType) extends CpuToGpuAggregateBufferConverter {
+    elementType: DataType,
+    containsNull: Boolean = false) extends CpuToGpuAggregateBufferConverter {
   def createExpression(child: Expression): CpuToGpuBufferTransition = {
-    CpuToGpuCollectBufferTransition(child, elementType)
+    CpuToGpuCollectBufferTransition(child, elementType, containsNull)
   }
 }
 
 case class CpuToGpuCollectBufferTransition(
     override val child: Expression,
-    private val elementType: DataType) extends CpuToGpuBufferTransition {
+    private val elementType: DataType,
+    private val containsNull: Boolean) extends CpuToGpuBufferTransition {
 
   private lazy val row = new UnsafeRow(1)
 
-  override def dataType: DataType = ArrayType(elementType, containsNull = false)
+  override def dataType: DataType = ArrayType(elementType, containsNull)
 
   override protected def nullSafeEval(input: Any): ArrayData = {
     // Converts binary buffer into UnSafeArrayData, according to the deserialize method of Collect.

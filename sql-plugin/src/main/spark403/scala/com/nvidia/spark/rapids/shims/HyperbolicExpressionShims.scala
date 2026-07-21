@@ -17,6 +17,7 @@
 /*** spark-rapids-shim-json-lines
 {"spark": "403"}
 {"spark": "412"}
+{"spark": "420"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
@@ -56,14 +57,14 @@ trait HyperbolicExpressionShims extends SparkShims {
         ExprChecks.mathUnaryWithAst,
         (a, conf, p, r) => new UnaryAstExprMeta[Asinh](a, conf, p, r) {
           override def convertToGpu(child: Expression): GpuExpression =
-            if (this.conf.includeImprovedFloat) {
+            if (this.conf.includeImprovedFloat || TypeUtilsShims.useImprovedAsinhByDefault) {
               GpuAsinhImproved(child)
             } else {
               GpuAsinh(child)
             }
 
           override def tagSelfForAst(): Unit = {
-            if (!this.conf.includeImprovedFloat) {
+            if (!this.conf.includeImprovedFloat && !TypeUtilsShims.useImprovedAsinhByDefault) {
               // The compatibility expression needs conditional branches for preserving large
               // positive/negative behavior. AST cannot express that logic today.
               willNotWorkInAst("asinh is not AST compatible for this Spark version")

@@ -1468,15 +1468,16 @@ class GpuSampleExecMeta(
     with Logging {
   override def convertToGpu(): GpuExec = {
     val gpuChild = childPlans.head.convertIfNeeded()
+    val seed = SampleExecShims.resolvedSeed(sample)
     if (conf.isFastSampleEnabled) {
       // Use GPU sample JNI, this is faster, but the output is not the same as CPU produces
       GpuFastSampleExec(sample.lowerBound, sample.upperBound, sample.withReplacement,
-        sample.seed, gpuChild)
+        seed, gpuChild)
     } else {
       // The output is the same as CPU produces
       // First generates row indexes by CPU sampler, then use GPU to gathers
       GpuSampleExec(sample.lowerBound, sample.upperBound, sample.withReplacement,
-        sample.seed, gpuChild)
+        seed, gpuChild)
     }
   }
 }
