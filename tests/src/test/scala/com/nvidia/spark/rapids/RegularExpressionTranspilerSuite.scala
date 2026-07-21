@@ -1381,7 +1381,9 @@ class FuzzRegExp(suggestedChars: String, skipKnownIssues: Boolean = true,
   }
 
   private def group(depth: Int) = {
-    RegexGroup(capture = rr.nextBoolean(), generate(depth + 1), None)
+    RegexGroup(
+      if (rr.nextBoolean()) RegexGroup.Capturing else RegexGroup.NonCapturing,
+      generate(depth + 1))
   }
 
   private def repetition(depth: Int) = {
