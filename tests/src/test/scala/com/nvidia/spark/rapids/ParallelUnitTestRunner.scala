@@ -39,7 +39,14 @@ object ParallelUnitTestRunner {
 
   private val unresolvedProperty = "${"
   private val parallelGpuAllocationRatio = 0.8
-  private val dedicatedSuite = "com.nvidia.spark.rapids.ParquetWriterSuite"
+  // Suites that must not share the GPU with concurrently running suites: ParquetWriterSuite for
+  // its long runtime, and the DPP suites whose GPU broadcasts starve under concurrent GPU load
+  // (premerge run 13639 hung in AEOn; run 13641 hit the 300s broadcast timeout in AEOff). Each
+  // runs serially on the dedicated fork in its own fresh JVM.
+  private val isolatedSuites = Seq(
+    "com.nvidia.spark.rapids.ParquetWriterSuite",
+    "org.apache.spark.sql.rapids.suites.RapidsDynamicPartitionPruningV1SuiteAEOff",
+    "org.apache.spark.sql.rapids.suites.RapidsDynamicPartitionPruningV1SuiteAEOn")
   private val sparkTestingProperty = "spark.testing"
   private val sparkWarehousePrefix = "spark-warehouse"
   private val workerMode = "worker"
@@ -111,14 +118,14 @@ object ParallelUnitTestRunner {
     val perForkMaxAllocation = maxAllocationFraction * parallelGpuAllocationRatio / forkCount
     val perForkMinAllocation = math.min(minAllocationFraction / forkCount, perForkMaxAllocation)
 
-    val dedicatedTask = suiteTasks.find(_.suite == dedicatedSuite)
-    val pooledTasks = suiteTasks.filterNot(_.suite == dedicatedSuite)
+    val dedicatedTasks = suiteTasks.filter(task => isolatedSuites.contains(task.suite))
+    val pooledTasks = suiteTasks.filterNot(task => isolatedSuites.contains(task.suite))
     println(s"Running ${discovered.size} suites with at most $forkCount concurrent processes")
-    dedicatedTask.foreach { _ =>
-      println(s"  dedicated fork: $dedicatedSuite")
+    if (dedicatedTasks.nonEmpty) {
+      println(s"  dedicated fork: ${dedicatedTasks.map(_.suite).mkString(", ")}")
     }
     if (pooledTasks.nonEmpty) {
-      val poolSize = if (dedicatedTask.nonEmpty && forkCount > 1) forkCount - 1 else forkCount
+      val poolSize = if (dedicatedTasks.nonEmpty && forkCount > 1) forkCount - 1 else forkCount
       println(s"  worker pool: ${pooledTasks.size} suites across $poolSize persistent forks")
     }
 
@@ -128,7 +135,7 @@ object ParallelUnitTestRunner {
       runWave(
         runId,
         sparkConf,
-        dedicatedTask,
+        dedicatedTasks,
         pooledTasks,
         forkCount,
         testClasses,
@@ -156,7 +163,7 @@ object ParallelUnitTestRunner {
   private def runWave(
       runId: Int,
       sparkConf: Option[String],
-      dedicatedTask: Option[SuiteTask],
+      dedicatedTasks: Seq[SuiteTask],
       pooledTasks: Seq[SuiteTask],
       forkCount: Int,
       testClasses: Path,
@@ -171,7 +178,7 @@ object ParallelUnitTestRunner {
       suiteTimeoutSeconds: Long): Seq[String] = {
     val failures = new ConcurrentLinkedQueue[String]()
 
-    def runDedicated(): Unit = dedicatedTask.foreach { task =>
+    def runDedicated(): Unit = dedicatedTasks.foreach { task =>
       // Record launch errors as failures: an uncaught throwable on the dedicated thread would
       // otherwise skip the suite silently and let the wave report success.
       try {
@@ -230,18 +237,20 @@ object ParallelUnitTestRunner {
       }
     }
 
-    if (dedicatedTask.nonEmpty && pooledTasks.nonEmpty && forkCount == 1) {
+    if (dedicatedTasks.nonEmpty && pooledTasks.nonEmpty && forkCount == 1) {
       runDedicated()
       runPool(1)
     } else {
-      val dedicatedThread = dedicatedTask.map { _ =>
+      val dedicatedThread = if (dedicatedTasks.isEmpty) {
+        None
+      } else {
         val thread = new Thread(s"parallel-unit-test-dedicated-$runId") {
           override def run(): Unit = runDedicated()
         }
         thread.start()
-        thread
+        Some(thread)
       }
-      val poolSize = if (dedicatedTask.nonEmpty) forkCount - 1 else forkCount
+      val poolSize = if (dedicatedTasks.nonEmpty) forkCount - 1 else forkCount
       runPool(poolSize)
       dedicatedThread.foreach(_.join())
     }
@@ -730,6 +739,9 @@ object ParallelUnitTestRunner {
     "-Dspark.ui.enabled=false",
     "-Dspark.ui.showConsoleProgress=false",
     "-Dspark.unsafe.exceptionOnMemoryLeak=true",
+    // GPU broadcasts are slowed by concurrent test JVMs sharing the device; give them more
+    // headroom than the 300s default (observed broadcast timeout in premerge run 13641).
+    "-Dspark.sql.broadcastTimeout=1200",
     s"-Drapids.test.gpu.allocFraction=$allocationFraction",
     s"-Drapids.test.gpu.maxAllocFraction=$maxAllocationFraction",
     s"-Drapids.test.gpu.minAllocFraction=$minAllocationFraction",
