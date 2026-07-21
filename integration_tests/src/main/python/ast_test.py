@@ -17,8 +17,8 @@ import pytest
 from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, assert_gpu_and_cpu_are_equal_collect
 from data_gen import *
 from marks import approximate_float, datagen_overrides, ignore_order, disable_ansi_mode
-from spark_session import with_cpu_session, is_spark_403, is_spark_412_or_later
-
+from spark_session import with_cpu_session, is_spark_403, is_spark_412_or_later, \
+    is_spark_420_or_later
 import pyspark.sql.functions as f
 
 # Each descriptor contains a list of data generators and a corresponding boolean
@@ -213,9 +213,10 @@ def test_acos(data_descr):
 def test_atan(data_descr):
     assert_unary_ast(data_descr, lambda df: df.selectExpr('atan(a)'))
 
-# AST is not expressive enough to support the ASINH Spark emulation expression
+# AST is not expressive enough to support the ASINH Spark emulation expression.
+# Spark 4.2 uses the improved ASINH path by default, which is AST-compatible.
 @approximate_float
-@pytest.mark.parametrize('data_descr', [(double_gen, False)], ids=idfn)
+@pytest.mark.parametrize('data_descr', [(double_gen, is_spark_420_or_later())], ids=idfn)
 def test_asinh(data_descr):
     assert_unary_ast(data_descr, lambda df: df.selectExpr('asinh(a)'))
 
