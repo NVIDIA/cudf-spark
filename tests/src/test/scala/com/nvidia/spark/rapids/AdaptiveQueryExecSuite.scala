@@ -39,6 +39,7 @@ import org.apache.spark.sql.functions.{col, when}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.{ExecutionPlanCaptureCallback, GpuFileSourceScanExec}
 import org.apache.spark.sql.rapids.execution.{GpuCustomShuffleReaderExec, GpuJoinExec, GpuShuffleExchangeExecBase}
+import org.apache.spark.sql.rapids.shims.SparkSessionUtils
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.SparkSession
 import org.apache.spark.sql.types.{ArrayType, DataTypes, DecimalType, IntegerType, StringType, StructField, StructType}
 
@@ -106,6 +107,61 @@ class AdaptiveQueryExecSuite
   private case class TestLeafExec(override val output: Seq[Attribute]) extends LeafExecNode {
     override protected def doExecute(): RDD[InternalRow] =
       throw new UnsupportedOperationException("TestLeafExec should not be executed")
+  }
+
+  test("GPU planning rules use their captured session when no session is active") {
+    val conf = new SparkConf().set("spark.sql.adaptive.enabled", "true")
+    withGpuSparkSession({ spark =>
+      val scanPath = new File(TEST_FILES_ROOT, "captured-session-scan").getCanonicalPath
+      spark.conf.set(RapidsConf.SQL_ENABLED.key, "false")
+      spark.range(10).write.parquet(scanPath)
+      spark.conf.set(RapidsConf.SQL_ENABLED.key, "true")
+
+      val cpuPlan = spark.read.parquet(scanPath).repartition(2).queryExecution.sparkPlan
+      val previousSession = org.apache.spark.sql.SparkSession.getActiveSession
+      org.apache.spark.sql.SparkSession.clearActiveSession()
+      try {
+        assert(org.apache.spark.sql.SparkSession.getActiveSession.isEmpty)
+
+        val expectedFailure = intercept[RuntimeException] {
+          GpuOverrideUtil.withActiveSession(spark) {
+            assert(org.apache.spark.sql.SparkSession.getActiveSession.contains(spark))
+            throw new RuntimeException("expected test failure")
+          }
+        }
+        assert(expectedFailure.getMessage == "expected test failure")
+        assert(org.apache.spark.sql.SparkSession.getActiveSession.isEmpty)
+
+        // Direct, unregistered conversion remains session-less, but scan construction must not
+        // eagerly dereference that missing session.
+        spark.conf.set(RapidsConf.EXPLAIN.key, "NONE")
+        spark.conf.set(RapidsConf.TEST_CONF.key, "false")
+        spark.conf.set(RapidsConf.TAG_LORE_ID_ENABLED.key, "false")
+        val unscopedPlan = GpuOverrides().apply(cpuPlan)
+        val unscopedScan = unscopedPlan.find(_.isInstanceOf[GpuFileSourceScanExec]).get
+        assert(SparkSessionUtils.sessionFromPlan(unscopedScan) == null)
+
+        spark.conf.set(RapidsConf.TEST_CONF.key, "true")
+        spark.conf.set(RapidsConf.TAG_LORE_ID_ENABLED.key, "true")
+        ShimLoader.newGpuQueryStagePrepOverrides(spark).apply(cpuPlan)
+        assert(org.apache.spark.sql.SparkSession.getActiveSession.isEmpty)
+
+        val columnarRules = ShimLoader.newColumnarOverrideRules(spark)
+        val gpuPlan = columnarRules.preColumnarTransitions.apply(cpuPlan)
+        val gpuScan = gpuPlan.find(_.isInstanceOf[GpuFileSourceScanExec]).get
+        assert(SparkSessionUtils.sessionFromPlan(gpuScan) eq spark)
+        assert(org.apache.spark.sql.SparkSession.getActiveSession.isEmpty)
+
+        val transitionedPlan = columnarRules.postColumnarTransitions.apply(gpuPlan)
+        val transitionedScan = transitionedPlan.find(_.isInstanceOf[GpuFileSourceScanExec]).get
+        assert(SparkSessionUtils.sessionFromPlan(transitionedScan) eq spark)
+        assert(org.apache.spark.sql.SparkSession.getActiveSession.isEmpty)
+      } finally {
+        previousSession.foreach { session =>
+          org.apache.spark.sql.SparkSession.setActiveSession(session)
+        }
+      }
+    }, conf)
   }
 
   test("AQE query stage exchange tagging descends into subquery plans") {

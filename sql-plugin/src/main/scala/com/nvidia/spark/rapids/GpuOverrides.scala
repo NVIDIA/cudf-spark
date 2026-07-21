@@ -69,7 +69,7 @@ import org.apache.spark.sql.rapids.catalyst.expressions.GpuRand
 import org.apache.spark.sql.rapids.execution._
 import org.apache.spark.sql.rapids.execution.python._
 import org.apache.spark.sql.rapids.execution.python.GpuFlatMapGroupsInPandasExecMeta
-import org.apache.spark.sql.rapids.shims.{GpuAscii, GpuMapInPandasExecMeta}
+import org.apache.spark.sql.rapids.shims.{GpuAscii, GpuMapInPandasExecMeta, SparkSessionUtils}
 import org.apache.spark.sql.rapids.zorder.ZOrderRules
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.{CalendarInterval, UTF8String}
@@ -4993,6 +4993,16 @@ protected class ExplainPlanImpl extends ExplainPlanBase {
 
 // work around any GpuOverride failures
 object GpuOverrideUtil extends Logging {
+  def withActiveSession[T](sparkSession: SparkSession)(body: => T): T = {
+    if (sparkSession == null) {
+      // A session is only captured for rules registered through ColumnarOverrideRules.
+      // Direct callers (including tests) intentionally preserve the existing unscoped behavior.
+      body
+    } else {
+      SparkSessionUtils.withActiveSession(sparkSession)(body)
+    }
+  }
+
   def tryOverride(fn: SparkPlan => SparkPlan): SparkPlan => SparkPlan = { plan =>
     val planOriginal = plan.clone()
     val failOnError = TEST_CONF.get(plan.conf) || !SUPPRESS_PLANNING_FAILURE.get(plan.conf)
@@ -5010,25 +5020,32 @@ object GpuOverrideUtil extends Logging {
 }
 
 /** Tag the initial plan when AQE is enabled */
-case class GpuQueryStagePrepOverrides() extends Rule[SparkPlan] with Logging {
-  override def apply(sparkPlan: SparkPlan): SparkPlan = GpuOverrideUtil.tryOverride { plan =>
-    // Exposing a bare exchange at the root is only valid while AQE is preparing a
-    // query stage. Tag the exchanges seen in this rule so transition cleanup can
-    // distinguish that path from final adaptive plan execution.
-    GpuTransitionOverrides.tagAqeQueryStageExchanges(plan)
-    // Note that we disregard the GPU plan returned here and instead rely on side effects of
-    // tagging the underlying SparkPlan.
-    GpuOverrides().applyWithContext(plan, Some("AQE Query Stage Prep"))
-    // return the original plan which is now modified as a side-effect of invoking GpuOverrides
-    plan
-  }(sparkPlan)
+case class GpuQueryStagePrepOverrides(sparkSession: SparkSession)
+    extends Rule[SparkPlan] with Logging {
+  override def apply(sparkPlan: SparkPlan): SparkPlan =
+      GpuOverrideUtil.withActiveSession(sparkSession) {
+    GpuOverrideUtil.tryOverride { plan =>
+      // Exposing a bare exchange at the root is only valid while AQE is preparing a
+      // query stage. Tag the exchanges seen in this rule so transition cleanup can
+      // distinguish that path from final adaptive plan execution.
+      GpuTransitionOverrides.tagAqeQueryStageExchanges(plan)
+      // Note that we disregard the GPU plan returned here and instead rely on side effects of
+      // tagging the underlying SparkPlan.
+      GpuOverrides().applyWithContext(plan, Some("AQE Query Stage Prep"))
+      // return the original plan which is now modified as a side-effect of invoking GpuOverrides
+      plan
+    }(sparkPlan)
+  }
 }
 
-case class GpuOverrides() extends Rule[SparkPlan] with Logging {
+case class GpuOverrides(sparkSession: SparkSession = null) extends Rule[SparkPlan] with Logging {
 
   // Spark calls this method once for the whole plan when AQE is off. When AQE is on, it
   // gets called once for each query stage (where a query stage is an `Exchange`).
-  override def apply(sparkPlan: SparkPlan): SparkPlan = applyWithContext(sparkPlan, None)
+  override def apply(sparkPlan: SparkPlan): SparkPlan =
+    GpuOverrideUtil.withActiveSession(sparkSession) {
+      applyWithContext(sparkPlan, None)
+    }
 
   def applyWithContext(sparkPlan: SparkPlan, context: Option[String]): SparkPlan =
       GpuOverrideUtil.tryOverride { plan =>
