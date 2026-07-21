@@ -225,11 +225,10 @@ def get_commits(releases: set):
         else:
             from_branch = f"origin/release/{from_rel}"
 
-        # Get all the commit hashes, excluding those commits whose title contains '[bot]'
+        # Get all commit hashes. Automated PRs are filtered using the actual PR title later.
         git_log_args = [
             "git", "--no-pager", "log",
-            f"{from_branch}..{to_branch}", "--pretty=format:%h",
-            "--grep=[bot]", "-F", "--invert-grep"
+            f"{from_branch}..{to_branch}", "--pretty=format:%h"
         ]
 
         # Use check=True to raise exception if git fails, making errors explicit

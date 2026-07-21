@@ -350,8 +350,6 @@ org.apache.iceberg:iceberg-aws-bundle:${ICEBERG_VERSION}"
           # filecache.enabled is a startup-only config, so it must be set here via
           # PYSP_TEST_ env var rather than as a session-level Spark config, because
           # FileCacheManager is initialized at executor startup time.
-          # Some REST catalog defaults resolve Iceberg Parquet writes to gzip, which
-          # is not supported by the GPU writer, so use a supported default codec.
           env \
             HOST_NAME=$PROJECT_REPO_HOST \
             EXPECTED_ICEBERG_VERSION=${ICEBERG_VERSION} \
@@ -370,8 +368,6 @@ org.apache.iceberg:iceberg-aws-bundle:${ICEBERG_VERSION}"
             "PYSP_TEST_spark_sql_catalog_spark__catalog_oauth2-server-uri=${ICEBERG_REST_OAUTH2_SERVER_URI:-http://localhost:8080/realms/iceberg/protocol/openid-connect/token}" \
             PYSP_TEST_spark_sql_catalog_spark__catalog_scope="${ICEBERG_REST_SCOPE:-lakekeeper}" \
             PYSP_TEST_spark_sql_catalog_spark__catalog_warehouse="${ICEBERG_REST_WAREHOUSE:-demo}" \
-            "PYSP_TEST_spark_sql_catalog_spark__catalog_table-default_write_parquet_compression-codec=zstd" \
-            "PYSP_TEST_spark_sql_catalog_spark__catalog_table-default_write_delete_parquet_compression-codec=zstd" \
             ./run_pyspark_from_build.sh -m iceberg --iceberg
     elif [[ "$test_type" == "s3tables" ]]; then
       echo "!!! Running iceberg tests with s3tables"
@@ -564,7 +560,7 @@ if [[ "$TEST_MODE" == "CUDF_UDF_ONLY" ]]; then
   CUDF_VER=$(echo "${PROJECT_VER}" | cut -d '.' -f 1,2)
   CUDA_VER_FOR_CUDF=${CUDA_VER_FOR_CUDF:-'12.9'}
 
-  conda create -y -n ${CUDF_UDF_ENV} -c rapidsai-nightly -c nvidia -c conda-forge -c defaults \
+  conda create -y -n ${CUDF_UDF_ENV} -c rapidsai-nightly -c conda-forge -c nvidia -c defaults \
     python=${CUDF_UDF_PYTHON_VER} pip cudf=${CUDF_VER} cuda-version=${CUDA_VER_FOR_CUDF}
 
   # Activate the cudf_udf env and reset PYTHONPATH to use the new env's site-packages
@@ -585,6 +581,7 @@ if [[ "$TEST_MODE" == "CUDF_UDF_ONLY" ]]; then
     PYSP_TEST_spark_rapids_memory_gpu_minAllocFraction=0 \
     PYSP_TEST_spark_rapids_python_memory_gpu_allocFraction=0.1 \
     PYSP_TEST_spark_rapids_python_concurrentPythonWorkers=2 \
+    PYSP_TEST_spark_executorEnv_CONDA_PREFIX=${CONDA_PREFIX} \
     PYSP_TEST_spark_executorEnv_PYTHONPATH=${RAPIDS_PLUGIN_JAR} \
     ./run_pyspark_from_build.sh -m cudf_udf --cudf_udf
 

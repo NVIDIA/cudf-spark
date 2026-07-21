@@ -23,6 +23,9 @@
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
+import ai.rapids.cudf.NaNEquality
+
+import org.apache.spark.sql.catalyst.expressions.aggregate.CollectList
 import org.apache.spark.sql.catalyst.util.TypeUtils
 
 /**
@@ -31,4 +34,12 @@ import org.apache.spark.sql.catalyst.util.TypeUtils
  */
 object TypeUtilsShims {
   val checkForNumericExpr = TypeUtils.checkForNumericExpr _
+
+  val collectSetFloatNanEquality: NaNEquality = NaNEquality.UNEQUAL
+
+  def collectListIgnoreNulls(_collectList: CollectList): Boolean = true
+
+  val useImprovedAsinhByDefault: Boolean = false
+
+  def isUnsupportedArrowAggregatePythonEvalType(evalType: Int): Boolean = false
 }

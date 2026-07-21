@@ -265,12 +265,16 @@ class RegExpUtilsSuite extends AnyFunSuite {
       (2, "$2", true, open + "2}"),
       // 0 groups, "$1": legacy path -- emit ${1} so cuDF surfaces the error.
       (0, "$1", true, open + "1}"),
-      // Same shape with backslash backref.
-      (2, "\\12", true, open + "1}2"),
+      // Java replacement strings treat `\digit` as the literal digit, not a backref.
+      (2, "\\12", false, "\\12"),
       // No digits after `$` -- literal `$`.
       (2, "$a", false, "$a"),
       // `$0` is the whole-match backref and is always valid (cuDF supports group 0).
       (2, "$0", true, open + "0}"),
+      // Leading zeroes participate in the Java greedy-with-backoff parse.
+      (1, "$09", true, open + "0}9"),
+      (0, "$01", true, open + "0}1"),
+      (2, "$001", true, open + "1}"),
       // Numbers in the middle: "x$12y" with 2 groups -> "x${1}2y".
       (2, "x$12y", true, "x" + open + "1}2y"),
       // First digit alone would already exceed the count: fall back to the legacy
@@ -319,6 +323,18 @@ class RegExpUtilsSuite extends AnyFunSuite {
     assert(has2)
     assert(conv2 == open + "1}3",
       s"expected user `$$13` to back off to `$${1}3`, got `$conv2`")
+  }
+
+  test("isSupportedStringReplacePattern classifies regex patterns correctly") {
+    val cases = Seq(
+      "A" -> true,
+      "A*" -> false,
+      "(A)" -> false,
+      "A+" -> false)
+
+    cases.foreach { case (pattern, expected) =>
+      assert(GpuOverrides.isSupportedStringReplacePattern(pattern) == expected)
+    }
   }
 }
 

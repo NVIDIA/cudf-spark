@@ -469,7 +469,7 @@ object GpuOverrides extends Logging {
   private[this] lazy val regexList: Seq[String] = Seq("\\", "\u0000", "\\x", "\t", "\n", "\r",
     "\f", "\\a", "\\e", "\\cx", "[", "]", "^", "&", ".", "*", "\\d", "\\D", "\\h", "\\H", "\\s",
     "\\S", "\\v", "\\V", "\\w", "\\w", "\\p", "$", "\\b", "\\B", "\\A", "\\G", "\\Z", "\\z", "\\R",
-    "?", "|", "(", ")", "{", "}", "\\k", "\\Q", "\\E", ":", "!", "<=", ">")
+    "?", "+", "|", "(", ")", "{", "}", "\\k", "\\Q", "\\E", ":", "!", "<=", ">")
   val regexMetaChars = ".$^[]\\|?*+(){}"
   /**
    * Provides a way to log an info message about how long an operation took in milliseconds.
@@ -3805,7 +3805,8 @@ object GpuOverrides extends Logging {
         }
 
         override def convertToGpu(childExprs: Seq[Expression]): GpuExpression =
-          GpuCollectList(childExprs.head, c.mutableAggBufferOffset, c.inputAggBufferOffset)
+          GpuCollectList(childExprs.head, c.mutableAggBufferOffset, c.inputAggBufferOffset,
+            TypeUtilsShims.collectListIgnoreNulls(c))
 
         override def aggBufferAttribute: AttributeReference = {
           val aggBuffer = c.aggBufferAttributes.head
@@ -3813,7 +3814,8 @@ object GpuOverrides extends Logging {
         }
 
         override def createCpuToGpuBufferConverter(): CpuToGpuAggregateBufferConverter =
-          new CpuToGpuCollectBufferConverter(c.child.dataType)
+          new CpuToGpuCollectBufferConverter(c.child.dataType,
+            !TypeUtilsShims.collectListIgnoreNulls(c))
 
         override def createGpuToCpuBufferConverter(): GpuToCpuAggregateBufferConverter =
           new GpuToCpuCollectBufferConverter()
@@ -4042,9 +4044,10 @@ object GpuOverrides extends Logging {
       "Returns a struct value with the given `jsonStr` and `schema`",
       ExprChecks.projectOnly(
         TypeSig.STRUCT.nested(jsonStructReadTypes) +
-          TypeSig.MAP.nested(TypeSig.STRING).withPsNote(TypeEnum.MAP,
-          "MAP only supports keys and values that are of STRING type " +
-            "and is only supported at the top level"),
+          TypeSig.MAP.nested(TypeSig.STRING + TypeSig.ARRAY.nested(TypeSig.STRING))
+            .withPsNote(TypeEnum.MAP,
+          "MAP only supports keys of STRING type and values that are of STRING type " +
+            "or ARRAY of STRING type, and is only supported at the top level"),
         (TypeSig.STRUCT + TypeSig.MAP + TypeSig.ARRAY).nested(TypeSig.all),
         Seq(ParamCheck("jsonStr", TypeSig.STRING, TypeSig.STRING))),
       (a, conf, p, r) => new UnaryExprMeta[JsonToStructs](a, conf, p, r) {
@@ -4063,7 +4066,14 @@ object GpuOverrides extends Logging {
 
         override def tagExprForGpu(): Unit = {
           a.schema match {
+            // from_json to a MAP is a "raw" extraction: values (and, for ARRAY<STRING>, array
+            // elements) are raw JSON text. Verified vs Spark 3.5.5, it diverges on only two cases:
+            // escapes are not unescaped, and object/nested-array elements stay as raw JSON
+            // substrings. Scalar elements, whole-row null on a non-array value, and
+            // document-order duplicate keys all match Spark. See docs/compatibility.md and
+            // GpuJsonToStructs.
             case MapType(StringType, StringType, _) => ()
+            case MapType(StringType, ArrayType(StringType, _), _) => ()
             case st: StructType =>
               if (hasDuplicateFieldNames(st)) {
                 willNotWorkOnGpu("from_json on GPU does not support duplicate field " +
@@ -4075,8 +4085,8 @@ object GpuOverrides extends Logging {
                   "Set `spark.rapids.sql.json.read.datetime.enabled` to `true` to enable them.")
               }
             case _ =>
-              willNotWorkOnGpu("from_json on GPU only supports MapType<StringType, StringType> " +
-                "or StructType schema")
+              willNotWorkOnGpu("from_json on GPU only supports MapType<StringType, StringType>, " +
+                "MapType<StringType, ArrayType[StringType]>, or StructType schema")
           }
           GpuJsonScan.tagSupport(SQLConf.get, JsonToStructsReaderType, a.dataType, a.dataType,
             a.options, this)

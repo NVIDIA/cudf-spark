@@ -117,21 +117,23 @@ abstract class GpuWindowExpressionMetaBase(
             } else {
               // check whether order by column is supported or not
               val orderSpec = wrapped.windowSpec.orderSpec
-              if (orderSpec.length > 1) {
-                // We only support a single order by column
-                willNotWorkOnGpu("only a single date/time or numeric (Boolean exclusive) " +
-                  "based column in window range functions is supported")
+              val hasMultipleOrderByColumns = orderSpec.length > 1
+              if (hasMultipleOrderByColumns && spec.isValueBound) {
+                willNotWorkOnGpu("unexpected plugin path: Spark should be rejecting " +
+                  "value-bounded range window frames with multiple order-by columns")
               }
-              val orderByTypeSupported = orderSpec.forall { so =>
-                so.dataType match {
-                  case ByteType | ShortType | IntegerType | LongType | FloatType | DoubleType |
-                       DateType | TimestampType | StringType | DecimalType() => true
-                  case _ => false
-                }
+              // Order-by types accepted for multi-column RANGE windows; the analogous
+              // single-column gate is GpuWindowUtil.isValidRangeFrameType.
+              def isSupportedOrderType(dt: DataType): Boolean = dt match {
+                case ByteType | ShortType | IntegerType | LongType | FloatType | DoubleType |
+                     DateType | TimestampType | StringType | DecimalType() => true
+                case _ => false
               }
-              if (!orderByTypeSupported) {
-                willNotWorkOnGpu(s"the type of orderBy column is not supported in a window" +
-                  s" range function, found ${orderSpec.head.dataType}")
+              val unsupportedOrderTypes =
+                orderSpec.map(_.dataType).filterNot(isSupportedOrderType).distinct
+              if (unsupportedOrderTypes.nonEmpty) {
+                willNotWorkOnGpu(s"the types of orderBy columns are not supported in a window" +
+                  s" range function, found ${unsupportedOrderTypes.mkString(", ")}")
               }
 
               def checkRangeBoundaryConfig(dt: DataType): Unit = {

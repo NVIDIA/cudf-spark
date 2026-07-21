@@ -18,7 +18,8 @@ from pyspark import BarrierTaskContext, TaskContext
 from conftest import is_at_least_precommit_run, is_databricks_runtime
 from spark_session import (is_before_spark_331, is_before_spark_350,
                            is_databricks133_or_later, is_databricks143_or_later,
-                           is_spark_400_or_later, is_spark_411_or_later)
+                           is_spark_400_or_later, is_spark_411_or_later,
+                           is_spark_420_or_later)
 
 from pyspark.sql.pandas.utils import require_minimum_pyarrow_version, require_minimum_pandas_version
 
@@ -167,6 +168,52 @@ def test_group_aggregate_udf_more_types(data_gen):
                     .groupBy('a')\
                     .agg(group_size_udf(f.col('b'))),
             conf=arrow_udf_conf)
+
+
+@ignore_order
+@allow_non_gpu('ArrowAggregatePythonExec')
+@pytest.mark.skipif(not is_spark_420_or_later(),
+                    reason='grouped aggregate iterator UDFs are introduced in Spark 4.2.0')
+def test_group_aggregate_pandas_iter_udf_fallback():
+    from pyspark.sql.pandas.functions import PandasUDFType
+
+    @f.pandas_udf('long', functionType=PandasUDFType.GROUPED_AGG_ITER)
+    def pandas_sum_iter(to_process: Iterator[pd.Series]) -> int:
+        total = 0
+        for series in to_process:
+            total += series.sum()
+        return total
+
+    assert_gpu_fallback_collect(
+        lambda spark: binary_op_df(spark, LongGen(nullable=False), num_slices=4)
+                .groupBy('a')
+                .agg(pandas_sum_iter(f.col('b'))),
+        'ArrowAggregatePythonExec',
+        conf=arrow_udf_conf_unsafe)
+
+
+@ignore_order
+@allow_non_gpu('ArrowAggregatePythonExec')
+@pytest.mark.skipif(not is_spark_420_or_later(),
+                    reason='grouped aggregate iterator UDFs are introduced in Spark 4.2.0')
+def test_group_aggregate_arrow_iter_udf_fallback():
+    from pyspark.sql.pandas.functions import ArrowUDFType
+    import pyarrow.compute as pc
+
+    @f.arrow_udf('long', functionType=ArrowUDFType.GROUPED_AGG_ITER)
+    def arrow_sum_iter(to_process: Iterator[pyarrow.Array]) -> int:
+        total = 0
+        for array in to_process:
+            value = pc.sum(array).as_py()
+            total += 0 if value is None else value
+        return total
+
+    assert_gpu_fallback_collect(
+        lambda spark: binary_op_df(spark, LongGen(nullable=False), num_slices=4)
+                .groupBy('a')
+                .agg(arrow_sum_iter(f.col('b'))),
+        'ArrowAggregatePythonExec',
+        conf=arrow_udf_conf_unsafe)
 
 
 # ======= Test window in Pandas =======

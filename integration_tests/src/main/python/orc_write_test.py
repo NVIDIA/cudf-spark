@@ -18,7 +18,9 @@ import pyarrow as pa
 import pyarrow.orc as orc
 
 from asserts import assert_gpu_and_cpu_writes_are_equal_collect, assert_gpu_fallback_write
-from spark_session import is_before_spark_320, is_databricks_version_or_later, is_spark_321cdh, is_spark_400_or_later, is_spark_cdh, with_cpu_session, with_gpu_session
+from spark_session import is_before_spark_320, is_databricks_version_or_later, \
+    is_spark_321cdh, is_spark_400_or_later, is_spark_420_or_later, is_spark_cdh, \
+    with_cpu_session, with_gpu_session
 from conftest import is_apache_runtime, is_databricks_runtime, is_not_utc
 from datetime import date, datetime, timezone
 from data_gen import *
@@ -511,8 +513,12 @@ def test_orc_do_not_lowercase_columns(spark_tmp_path):
 
     # The wording of the `is not exists` error message in Spark 4.x is unfortunate, but accurate:
     # https://github.com/apache/spark/blob/4501285a49e4c0429c9cf2c105f044e1c8a93d21/python/pyspark/errors/error-conditions.json#L487
-    expected_error_message = "Key `acol` is not exists." if is_spark_400_or_later() or is_databricks_version_or_later(14, 3) \
-                             else "No StructField named acol"
+    if is_spark_420_or_later():
+        expected_error_message = "Key `acol` does not exist."
+    elif is_spark_400_or_later() or is_databricks_version_or_later(14, 3):
+        expected_error_message = "Key `acol` is not exists."
+    else:
+        expected_error_message = "No StructField named acol"
     assert_gpu_and_cpu_writes_are_equal_collect(
         # column is uppercase
         lambda spark, path: spark.range(0, 1000).select(col("id").alias("Acol")).write.orc(path),
