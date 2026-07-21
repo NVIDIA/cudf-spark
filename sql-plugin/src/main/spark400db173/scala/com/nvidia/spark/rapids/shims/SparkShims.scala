@@ -65,9 +65,9 @@ object SparkShimImpl extends Spark400PlusDBShims {
         (partitioning, conf, parent, rule) =>
           new PartMeta[DeltaOptimizedWritePartitioning](
               partitioning, conf, parent, rule) {
-            // Keep DBR's partitioning as the CPU output partitioning on the converted exchange
-            // so its DELTA_OPTIMIZED_WRITE AQE/skew rules still see the native contract. The
-            // shuffle dependency itself uses the equivalent physical hash partitioning on GPU.
+            // Keep DBR's marker as targetOutputPartitioning on the converted exchange so its
+            // DELTA_OPTIMIZED_WRITE AQE/skew rules still see the native contract. The exchange
+            // advertises and executes the equivalent physical hash partitioning on GPU.
             override val childParts: Seq[PartMeta[_]] = Seq(GpuOverrides.wrapPart(
               partitioning.getPhysicalPartitioning, this.conf, Some(this)))
 

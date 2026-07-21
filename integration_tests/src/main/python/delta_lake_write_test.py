@@ -367,9 +367,14 @@ def test_delta_db173_native_managed_ctas_rtas(
 @ignore_order(local=True)
 @pytest.mark.skipif(not is_databricks173_or_later(), reason="DBR 17.3 native write path")
 @pytest.mark.parametrize("optimized_write", [False, True], ids=idfn)
-def test_delta_db173_native_sql_ctas_rtas(spark_tmp_table_factory, optimized_write):
+@pytest.mark.parametrize("aqe_enabled", [False, True], ids=idfn)
+def test_delta_db173_native_sql_ctas_rtas(
+        spark_tmp_table_factory, optimized_write, aqe_enabled):
     conf = copy_and_update(writer_confs, delta_writes_enabled_conf, {
         "spark.databricks.delta.optimizeWrite.enabled": str(optimized_write).lower(),
+        "spark.sql.adaptive.enabled": str(aqe_enabled).lower(),
+        "spark.sql.adaptive.coalescePartitions.enabled": "true",
+        "spark.sql.shuffle.partitions": "32",
         "spark.sql.execution.sortBeforeRepartition": "true",
     })
     cpu_table = spark_tmp_table_factory.get() + '_sql_cpu'
@@ -377,7 +382,7 @@ def test_delta_db173_native_sql_ctas_rtas(spark_tmp_table_factory, optimized_wri
     source_table = spark_tmp_table_factory.get() + '_sql_source'
 
     with_cpu_session(
-        lambda spark: spark.range(8192).selectExpr(
+        lambda spark: spark.range(81920).selectExpr(
             "id AS carrier_id",
             "concat('CARRIER-', id) AS carrier_code",
             "CAST(id % 7 AS INT) AS carrier_type")
@@ -388,6 +393,8 @@ def test_delta_db173_native_sql_ctas_rtas(spark_tmp_table_factory, optimized_wri
         effective_optimize_write = spark.conf.get(
             "spark.databricks.delta.optimizeWrite.enabled")
         assert effective_optimize_write.lower() == str(optimized_write).lower()
+        effective_aqe = spark.conf.get("spark.sql.adaptive.enabled")
+        assert effective_aqe.lower() == str(aqe_enabled).lower()
         command = "CREATE OR REPLACE TABLE" if replace else "CREATE TABLE"
         projection = (
             "carrier_code, carrier_id, carrier_type, carrier_id + 1 AS version"
@@ -395,21 +402,24 @@ def test_delta_db173_native_sql_ctas_rtas(spark_tmp_table_factory, optimized_wri
         )
         spark.sql(
             f"{command} {table} USING DELTA AS "
-            f"SELECT {projection} FROM {source_table}").collect()
+            f"SELECT /*+ REPARTITION(32, carrier_id) */ {projection} "
+            f"FROM {source_table}").collect()
 
     with_cpu_session(
         lambda spark: execute_atomic_sql(spark, cpu_table, False), conf=conf)
     assert_db173_gpu_data_writing_command(
         lambda spark: execute_atomic_sql(spark, gpu_table, False), conf=conf,
         optimized_write=optimized_write,
-        expected_atomic_gpu_class="GpuAtomicCreateTableAsSelectExec")
+        expected_atomic_gpu_class="GpuAtomicCreateTableAsSelectExec",
+        aqe_enabled=aqe_enabled)
 
     with_cpu_session(
         lambda spark: execute_atomic_sql(spark, cpu_table, True), conf=conf)
     assert_db173_gpu_data_writing_command(
         lambda spark: execute_atomic_sql(spark, gpu_table, True), conf=conf,
         optimized_write=optimized_write,
-        expected_atomic_gpu_class="GpuAtomicReplaceTableAsSelectExec")
+        expected_atomic_gpu_class="GpuAtomicReplaceTableAsSelectExec",
+        aqe_enabled=aqe_enabled)
 
     def table_state(spark, table):
         df = spark.table(table)

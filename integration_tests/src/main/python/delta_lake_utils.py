@@ -418,7 +418,7 @@ def assert_rapids_delta_write(do_test, conf):
         jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.endCapture()
 
 def assert_db173_gpu_data_writing_command(
-        do_test, conf, optimized_write, expected_atomic_gpu_class):
+        do_test, conf, optimized_write, expected_atomic_gpu_class, aqe_enabled=None):
     """Assert that DBR 17.3 executed both atomic staging and Delta data writing on GPU."""
     jvm = spark_jvm()
     callback = jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
@@ -440,27 +440,45 @@ def assert_db173_gpu_data_writing_command(
         ), f"{expected_atomic_gpu_class} is not found in the captured atomic write plans"
 
         gpu_optimized_write = "GpuShuffleExchangeExec"
-        optimized_marker_plans = [
-            plan for plan in matching_plans
-            if "DELTA_OPTIMIZED_WRITE" in str(plan.toString())
-            or "deltaoptimizedwritepartitioning" in str(plan.toString()).lower()
+        cpu_optimized_write = "ShuffleExchangeExec"
+        optimized_write_origin = "DELTA_OPTIMIZED_WRITE"
+        all_gpu_optimized_plans = [
+            plan for plan in captured_plans
+            if callback.containsShuffleExchangeWithOrigin(
+                plan, gpu_optimized_write, optimized_write_origin)
         ]
-        gpu_optimized_plans = [
-            plan for plan in optimized_marker_plans
-            if callback.contains(plan, gpu_optimized_write)
+        write_gpu_optimized_plans = [
+            plan for plan in matching_plans
+            if callback.containsShuffleExchangeWithOrigin(
+                plan, gpu_optimized_write, optimized_write_origin)
         ]
         cpu_optimized_plans = [
-            plan for plan in optimized_marker_plans
-            if not callback.contains(plan, gpu_optimized_write)
+            plan for plan in captured_plans
+            if callback.containsShuffleExchangeWithOrigin(
+                plan, cpu_optimized_write, optimized_write_origin)
         ]
         if optimized_write:
-            assert gpu_optimized_plans, \
-                f"{gpu_optimized_write} is not found for DELTA_OPTIMIZED_WRITE"
+            assert write_gpu_optimized_plans, \
+                f"{gpu_optimized_write} is not found for {optimized_write_origin}"
         else:
-            assert not optimized_marker_plans, \
-                "Optimize write is disabled but DELTA_OPTIMIZED_WRITE was captured"
+            assert not all_gpu_optimized_plans and not cpu_optimized_plans, \
+                f"Optimize write is disabled but {optimized_write_origin} was captured"
         assert not cpu_optimized_plans, \
-            "DBR DELTA_OPTIMIZED_WRITE shuffle remained on CPU"
+            f"DBR {optimized_write_origin} shuffle remained on CPU"
+        if aqe_enabled:
+            final_adaptive_write_plans = [
+                plan for plan in matching_plans
+                if callback.containsFinalAdaptivePlan(plan)
+            ]
+            assert final_adaptive_write_plans, \
+                "AQE is enabled but no final adaptive Delta write plan was captured"
+            if optimized_write:
+                assert any(
+                    callback.containsShuffleQueryStageWithExchangeOrigin(
+                        plan, gpu_optimized_write, optimized_write_origin)
+                    for plan in final_adaptive_write_plans
+                ), (f"AQE is enabled but no final adaptive Delta write plan contains a GPU "
+                    f"{optimized_write_origin} shuffle query stage")
 
         for plan in captured_plans:
             for cpu_class in ["DataWritingCommandExec", "WriteFilesExec"]:

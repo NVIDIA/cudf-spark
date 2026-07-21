@@ -21,15 +21,17 @@ package org.apache.spark.rapids.shims
 
 import com.databricks.sql.transaction.tahoe.perf.DeltaOptimizedWritePartitioning
 import com.databricks.sql.transaction.tahoe.sources.DeltaSQLConf
-import com.nvidia.spark.rapids.{GpuBoundReference, SparkQueryCompareTestSuite, SparkSessionHolder}
+import com.nvidia.spark.rapids.{GpuBoundReference, GpuOverrides, RapidsConf,
+  SparkQueryCompareTestSuite, SparkSessionHolder}
 import com.nvidia.spark.rapids.shims.GpuHashPartitioning
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference}
-import org.apache.spark.sql.execution.LeafExecNode
+import org.apache.spark.sql.catalyst.plans.logical.Range
+import org.apache.spark.sql.execution.{LeafExecNode, RangeExec}
 import org.apache.spark.sql.execution.adaptive.AdaptiveRepartitioningStatus
-import org.apache.spark.sql.execution.exchange.DELTA_OPTIMIZED_WRITE
+import org.apache.spark.sql.execution.exchange.{DELTA_OPTIMIZED_WRITE, ShuffleExchangeExec}
 import org.apache.spark.sql.types.IntegerType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -68,6 +70,43 @@ class GpuDeltaOptimizedWriteShuffleSuite extends SparkQueryCompareTestSuite {
   private val markerOverrides = Map(
     DeltaSQLConf.DELTA_OPTIMIZE_WRITE_SHUFFLE_BLOCKS.key -> "40",
     DeltaSQLConf.DELTA_OPTIMIZE_WRITE_MAX_SHUFFLE_PARTITIONS.key -> "7")
+
+  test("production shuffle meta preserves the Delta target marker during GPU conversion") {
+    // DBR's ShuffleExchangeExec constructor reads SparkEnv eagerly.
+    val _ = SparkSessionHolder.sparkSession.sparkContext
+    val range = RangeExec(Range(0L, 10L, 1L, Some(10)))
+    val target = new DeltaOptimizedWritePartitioning(range.output, markerOverrides)
+    val cpuExchange = ShuffleExchangeExec(
+      target,
+      range,
+      DELTA_OPTIMIZED_WRITE)
+
+    assert(cpuExchange.targetOutputPartitioning eq target)
+    assert(cpuExchange.outputPartitioning == target.getPhysicalPartitioning)
+    assert(cpuExchange.outputPartitioning.numPartitions == 0)
+
+    val meta = GpuOverrides.wrapAndTagPlan(
+      cpuExchange,
+      new RapidsConf(Map.empty[String, String]))
+    assert(meta.canThisBeReplaced, meta.explain(false))
+    val converted = meta.convertIfNeeded() match {
+      case exchange: GpuShuffleExchangeExec => exchange
+      case other => fail(s"Expected GpuShuffleExchangeExec, found ${other.getClass.getName}")
+    }
+
+    assert(converted.shuffleOrigin == DELTA_OPTIMIZED_WRITE)
+    assert(converted.targetOutputPartitioning eq target)
+    assert(converted.outputPartitioning == cpuExchange.outputPartitioning)
+    assert(converted.gpuOutputPartitioning.numPartitions == 0)
+    val convertedTarget = converted.targetOutputPartitioning
+      .asInstanceOf[DeltaOptimizedWritePartitioning]
+    assert(convertedTarget.overridingSQLConfs == markerOverrides)
+    withSQLConf(
+      DeltaSQLConf.DELTA_OPTIMIZE_WRITE_SHUFFLE_BLOCKS.key -> "1000",
+      DeltaSQLConf.DELTA_OPTIMIZE_WRITE_MAX_SHUFFLE_PARTITIONS.key -> "2") {
+      assert(convertedTarget.createDynamicPhysicalPartitioning(10).numPartitions == 4)
+    }
+  }
 
   test("Delta optimized write keeps target and physical output distinct through tree copies") {
     val (exchange, target) = newExchange(inputPartitions = 10, markerOverrides)
