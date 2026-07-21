@@ -108,6 +108,7 @@ Name | Description | Default Value | Applicable at
 <a name="sql.format.hive.text.write.enabled"></a>spark.rapids.sql.format.hive.text.write.enabled|When set to false disables Hive text table write acceleration. Array/Struct/Map columns are unsupported for write acceleration.|true|Runtime
 <a name="sql.format.iceberg.enabled"></a>spark.rapids.sql.format.iceberg.enabled|When set to false disables all Iceberg acceleration|true|Runtime
 <a name="sql.format.iceberg.read.enabled"></a>spark.rapids.sql.format.iceberg.read.enabled|When set to false disables Iceberg input acceleration|true|Runtime
+<a name="sql.format.iceberg.read.fileCacheLocality.numPreferredLocations"></a>spark.rapids.sql.format.iceberg.read.fileCacheLocality.numPreferredLocations|Maximum number of executor hosts to prepend to the preferred locations for each Iceberg input partition, ranked by the number of bytes already present in the RAPIDS file cache.|5|Runtime
 <a name="sql.format.iceberg.write.enabled"></a>spark.rapids.sql.format.iceberg.write.enabled|When set to false disables Iceberg write acceleration|true|Runtime
 <a name="sql.format.json.enabled"></a>spark.rapids.sql.format.json.enabled|When set to true enables all json input and output acceleration. (only input is currently supported anyways)|true|Runtime
 <a name="sql.format.json.read.enabled"></a>spark.rapids.sql.format.json.read.enabled|When set to true enables json input acceleration|true|Runtime

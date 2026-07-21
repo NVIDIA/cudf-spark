@@ -31,7 +31,6 @@ import org.apache.spark.util.SerializableConfiguration
 
 object GpuSparkBatch {
   private val LocalHost = "localhost"
-  private val NumPreferredLocations = 3
 }
 
 class GpuSparkBatch(
@@ -82,7 +81,7 @@ class GpuSparkBatch(
 
     hostToNumBytes.toSeq.sortBy {
       case (host, numBytes) => (-numBytes, host)
-    }.take(NumPreferredLocations).map {
+    }.take(parentScan.rapidsConf.icebergFileCacheLocalityNumPreferredLocations).map {
       case (host, _) => host
     }.toArray
   }

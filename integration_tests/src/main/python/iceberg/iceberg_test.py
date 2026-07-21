@@ -628,7 +628,7 @@ def _iceberg_gpu_input_partitions(spark, query):
     return df, partitions
 
 
-def _iceberg_filecache_preferred_locations(jvm, partition):
+def _iceberg_filecache_preferred_locations(jvm, partition, num_preferred_locations):
     manager = jvm.com.nvidia.spark.rapids.filecache.FileCacheLocalityManager.get()
     host_to_num_bytes = {}
     files = []
@@ -649,13 +649,17 @@ def _iceberg_filecache_preferred_locations(jvm, partition):
     sorted_locations = sorted(
         host_to_num_bytes.items(),
         key=lambda host_and_bytes: (-host_and_bytes[1], host_and_bytes[0]))
-    preferred_locations = [host for host, _ in sorted_locations[:3]]
+    preferred_locations = [
+        host for host, _ in sorted_locations[:num_preferred_locations]
+    ]
     return preferred_locations, files
 
 
 def _read_iceberg_twice_with_filecache_check(spark, query):
     first_result = spark.sql(query).collect()
     jvm = spark.sparkContext._jvm
+    num_preferred_locations = int(spark.conf.get(
+        "spark.rapids.sql.format.iceberg.read.fileCacheLocality.numPreferredLocations", "5"))
     deadline = time.time() + 10
     last_files = []
     last_mismatches = []
@@ -665,18 +669,18 @@ def _read_iceberg_twice_with_filecache_check(spark, query):
         last_files = []
         current_mismatches = []
         for partition in partitions:
-            expected_locations, files = _iceberg_filecache_preferred_locations(jvm, partition)
+            file_cache_locations, files = _iceberg_filecache_preferred_locations(
+                jvm, partition, num_preferred_locations)
             last_files.extend(files)
+            cpu_locations = list(partition.cpuPartition().preferredLocations())
+            expected_locations = file_cache_locations if file_cache_locations else cpu_locations
             preferred_locations = list(partition.preferredLocations())
-            if expected_locations:
+            if file_cache_locations:
                 has_cache_locations = True
-                missing_locations = [
-                    loc for loc in expected_locations if loc not in preferred_locations
-                ]
-                if missing_locations:
-                    current_mismatches.append(
-                        f"Cached locations {missing_locations} are missing from preferred "
-                        f"locations {preferred_locations} for Iceberg files {files}")
+            if preferred_locations != expected_locations:
+                current_mismatches.append(
+                    f"Expected preferred locations {expected_locations}, got "
+                    f"{preferred_locations} for Iceberg files {files}")
         if current_mismatches:
             # The locality manager is updated asynchronously. Retry with newly planned
             # partitions if it changed after this plan's preferred locations were computed.
@@ -715,6 +719,7 @@ def test_iceberg_read_with_filecache(spark_tmp_table_factory, reader_type):
     # be set via PYSP_TEST_spark_rapids_filecache_enabled env var, not here.
     filecache_conf = {
         'spark.rapids.sql.format.parquet.reader.type': reader_type,
+        'spark.rapids.sql.format.iceberg.read.fileCacheLocality.numPreferredLocations': '1',
     }
     gpu_result_1, gpu_result_2 = with_gpu_session(
         lambda spark: _read_iceberg_twice_with_filecache_check(spark, query),

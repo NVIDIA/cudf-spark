@@ -1850,6 +1850,16 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .booleanConf
     .createWithDefault(true)
 
+  val ICEBERG_FILE_CACHE_LOCALITY_NUM_PREFERRED_LOCATIONS =
+    conf("spark.rapids.sql.format.iceberg.read.fileCacheLocality.numPreferredLocations")
+      .doc("Maximum number of executor hosts to prepend to the preferred locations for each " +
+        "Iceberg input partition, ranked by the number of bytes already present in the RAPIDS " +
+        "file cache.")
+      .integerConf
+      .checkValue(_ > 0,
+        "The number of Iceberg file-cache preferred locations must be greater than 0.")
+      .createWithDefault(5)
+
   val ENABLE_ICEBERG_WRITE = conf("spark.rapids.sql.format.iceberg.write.enabled")
     .doc("When set to false disables Iceberg write acceleration")
     .booleanConf
@@ -3805,6 +3815,9 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val isIcebergEnabled: Boolean = get(ENABLE_ICEBERG)
 
   lazy val isIcebergReadEnabled: Boolean = get(ENABLE_ICEBERG_READ)
+
+  lazy val icebergFileCacheLocalityNumPreferredLocations: Int =
+    get(ICEBERG_FILE_CACHE_LOCALITY_NUM_PREFERRED_LOCATIONS)
 
   lazy val isIcebergWriteEnabled: Boolean = get(ENABLE_ICEBERG_WRITE)
 
