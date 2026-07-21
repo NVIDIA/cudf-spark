@@ -309,6 +309,7 @@ def test_re_replace_repetition():
                 'REGEXP_REPLACE(a, "A{0,}", "PROD")',
                 'REGEXP_REPLACE(a, "T?E?", "PROD")',
                 'REGEXP_REPLACE(a, "A*", "PROD")',
+                'REGEXP_REPLACE(a, "A+", "PROD")',
                 'REGEXP_REPLACE(a, "A{0,5}", "PROD")',
                 'REGEXP_REPLACE(a, "(A*)", "PROD")',
                 'REGEXP_REPLACE(a, "(((A*)))", "PROD")',

@@ -21,7 +21,9 @@ from pyspark.sql.types import *
 from pyspark.sql.types import DateType, TimestampType, NumericType
 from pyspark.sql.window import Window
 import pyspark.sql.functions as f
-from spark_session import is_before_spark_320, is_databricks113_or_later, is_databricks133_or_later, is_spark_350_or_later, spark_version, with_cpu_session, is_spark_340_or_later
+from spark_session import is_before_spark_320, is_databricks113_or_later, \
+    is_databricks133_or_later, is_spark_350_or_later, spark_version, with_cpu_session, \
+    is_spark_340_or_later, is_spark_420_or_later
 import warnings
 
 # mark this test as ci_1 for mvn verify sanity check in pre-merge CI
@@ -2216,6 +2218,34 @@ def test_window_aggs_for_rows_collect_list():
             (partition by a order by b,c_int rows between CURRENT ROW and UNBOUNDED FOLLOWING) as collect_map
         from window_collect_table
         ''',
+        conf={'spark.rapids.sql.window.collectList.enabled': True})
+
+
+@pytest.mark.skipif(not is_spark_420_or_later(),
+                    reason='collect_list RESPECT NULLS is introduced in Spark 4.2')
+@allow_non_gpu("ShuffleExchangeExec")
+@ignore_order(local=True)
+def test_window_aggs_for_rows_collect_list_respect_nulls():
+    def do_it(spark):
+        spark.sql("""
+            SELECT * FROM VALUES
+                (1, 1, 1),
+                (1, 2, NULL),
+                (1, 3, 3),
+                (2, 1, NULL),
+                (2, 2, 5)
+            AS tab(a, b, c)
+        """).createOrReplaceTempView("window_collect_table")
+        return spark.sql("""
+            SELECT a, b,
+                   collect_list(c) RESPECT NULLS OVER
+                     (PARTITION BY a ORDER BY b
+                      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS respect_list
+            FROM window_collect_table
+        """)
+
+    assert_gpu_and_cpu_are_equal_collect(
+        do_it,
         conf={'spark.rapids.sql.window.collectList.enabled': True})
 
 
