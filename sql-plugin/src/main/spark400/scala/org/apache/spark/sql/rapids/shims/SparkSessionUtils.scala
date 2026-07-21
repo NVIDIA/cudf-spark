@@ -37,4 +37,8 @@ object SparkSessionUtils {
   def leafNodeDefaultParallelism(ss: SparkSession): Int = {
     ss.leafNodeDefaultParallelism
   }
+
+  def withActiveSession[T](ss: org.apache.spark.sql.SparkSession)(body: => T): T = {
+    ss.asInstanceOf[SparkSession].withActive(body)
+  }
 }

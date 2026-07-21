@@ -339,12 +339,17 @@ object ShimLoader {
     ShimReflectionUtils.newInstanceOf("com.nvidia.spark.rapids.RapidsExecutorPlugin")
   }
 
-  def newColumnarOverrideRules(): ColumnarRule = {
-    ShimReflectionUtils.newInstanceOf("com.nvidia.spark.rapids.ColumnarOverrideRules")
+  def newColumnarOverrideRules(ss: SparkSession): ColumnarRule = {
+    val clz = ShimReflectionUtils.loadClass("com.nvidia.spark.rapids.ColumnarOverrideRules")
+    val constructor = clz.getConstructor(classOf[SparkSession])
+    constructor.newInstance(ss).asInstanceOf[ColumnarRule]
   }
 
-  def newGpuQueryStagePrepOverrides(): Rule[SparkPlan] = {
-    ShimReflectionUtils.newInstanceOf("com.nvidia.spark.rapids.GpuQueryStagePrepOverrides")
+  def newGpuQueryStagePrepOverrides(ss: SparkSession): Rule[SparkPlan] = {
+    val clz = ShimReflectionUtils.loadClass(
+      "com.nvidia.spark.rapids.GpuQueryStagePrepOverrides")
+    val constructor = clz.getConstructor(classOf[SparkSession])
+    constructor.newInstance(ss).asInstanceOf[Rule[SparkPlan]]
   }
 
   def newGpuPostHocResolutionOverrides(ss: SparkSession): Rule[LogicalPlan] = {
