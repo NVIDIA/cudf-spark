@@ -59,6 +59,12 @@ class GpuProjectExecMeta(
     // Force list to avoid recursive Java serialization of lazy list Seq implementation
     val gpuExprs = childExprs.map(_.convertToGpu().asInstanceOf[NamedExpression]).toList
     val gpuChild = childPlans.head.convertIfNeeded()
+    if (conf.isProjectAstJitEnabled) {
+      val jitProjectList = GpuAstJitExpression.wrapProjectExpressions(gpuExprs)
+      if (jitProjectList.exists(_.find(_.isInstanceOf[GpuAstJitExpression]).isDefined)) {
+        return GpuProjectExec(jitProjectList, gpuChild)
+      }
+    }
     if (conf.isProjectAstEnabled) {
       // cuDF requires return column is fixed width
       val allReturnTypesFixedWidth = gpuExprs.forall(e => GpuBatchUtils.isFixedWidth(e.dataType))

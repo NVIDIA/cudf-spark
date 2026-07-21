@@ -197,6 +197,21 @@ trait GpuExpression extends Expression {
   def convertToAst(numFirstTableColumns: Int): ast.AstExpression =
     throw new IllegalStateException(s"Cannot convert ${this.getClass.getSimpleName} to AST")
 
+  def selfSupportsAstJit: Boolean = false
+
+  def selfIsAstJitOperator: Boolean = false
+
+  final def supportsAstJit: Boolean = selfSupportsAstJit && children.forall {
+    case child: GpuExpression => child.supportsAstJit
+    case _: AttributeReference => true
+    case _ => false
+  }
+
+  final def containsAstJitOperator: Boolean = selfIsAstJitOperator || children.exists {
+    case child: GpuExpression => child.containsAstJitOperator
+    case _ => false
+  }
+
   /** Could evaluating this expression cause side-effects, such as throwing an exception? */
   def hasSideEffects: Boolean =
     children.exists {

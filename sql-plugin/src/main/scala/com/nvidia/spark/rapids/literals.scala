@@ -645,6 +645,8 @@ object GpuLiteral {
  */
 case class GpuLiteral (value: Any, dataType: DataType) extends GpuLeafExpression {
 
+  override def selfSupportsAstJit: Boolean = true
+
   // Assume this came from Spark Literal and no need to call Literal.validateLiteralValue here.
 
   override def foldable: Boolean = true

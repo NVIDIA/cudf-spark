@@ -66,6 +66,7 @@ ast_double_descr = [(double_gen, True)]
 ast_acosh_descr = [(double_gen, not (is_spark_403() or is_spark_412_or_later()))]
 
 _project_ast_enabled_conf = {"spark.rapids.sql.projectAstEnabled": "true"}
+_project_ast_jit_enabled_conf = {"spark.rapids.sql.projectAstJitEnabled": "true"}
 
 def assert_gpu_ast(is_supported, func, conf={}):
     exist = "GpuProjectAstExec"
@@ -369,6 +370,37 @@ def test_multiplication(data_descr):
             f.col('a') * f.lit(100).cast(data_type),
             f.lit(-12).cast(data_type) * f.col('b'),
             f.col('a') * f.col('b')))
+
+@pytest.mark.parametrize('data_gen', [int_gen, long_gen], ids=idfn)
+@disable_ansi_mode
+def test_jit_add_multiply(data_gen):
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: binary_op_df(spark, data_gen).select(
+            f.col('a') + f.col('b'),
+            f.col('a') * f.col('b')),
+        exist_classes=r"GpuProject.*AST_JIT",
+        non_exist_classes="GpuProjectAst",
+        conf=_project_ast_jit_enabled_conf)
+
+@disable_ansi_mode
+def test_jit_mixed_nested_subexpressions():
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: binary_op_df(spark, int_gen).select(
+            (f.col('a') + f.col('b')) - (f.col('a') * f.col('b'))),
+        exist_classes=r"GpuProject.*AST_JIT.*- AST_JIT",
+        non_exist_classes="GpuProjectAst",
+        conf=_project_ast_jit_enabled_conf)
+
+@disable_ansi_mode
+def test_jit_mixed_project_expressions():
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: binary_op_df(spark, int_gen).select(
+            (f.col('a') + f.col('b')).alias('jit'),
+            (f.col('a') - f.col('b')).alias('gpu'),
+            ((f.col('a') * f.col('b')) - f.col('a')).alias('mixed')),
+        exist_classes=r"GpuProject.*AST_JIT.*AS jit.*AS gpu.*AST_JIT.*AS mixed",
+        non_exist_classes="GpuProjectAst",
+        conf=_project_ast_jit_enabled_conf)
 
 # Each descriptor contains a list of data generators and a corresponding boolean
 # indicating whether that data type is supported by the AST
