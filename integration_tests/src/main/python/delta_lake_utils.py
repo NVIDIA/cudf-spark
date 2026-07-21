@@ -463,7 +463,7 @@ def assert_db173_gpu_data_writing_command(
         ]
         legacy_optimized_plans = [
             plan for plan in captured_plans
-            if callback.contains(plan, "DeltaOptimizedWriterExec")
+            if callback.didFallBack(plan, "DeltaOptimizedWriterExec")
         ]
         if expect_legacy_optimized_write:
             assert legacy_optimized_plans, \
