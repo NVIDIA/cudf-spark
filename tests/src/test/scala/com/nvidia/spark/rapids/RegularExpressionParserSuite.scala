@@ -139,7 +139,7 @@ class RegularExpressionParserSuite extends AnyFunSuite {
                 RegexCharacterRange(RegexChar('A'), RegexChar('Z')))),
               SimpleQuantifier('+')
             )
-          )))
+          ))
         ),
         RegexEscaped(']')
       ))
@@ -262,16 +262,16 @@ class RegularExpressionParserSuite extends AnyFunSuite {
 
     assert(parse("(?:a?)") === RegexSequence(ListBuffer(
       RegexGroup(RegexGroup.NonCapturing, RegexSequence(ListBuffer(
-        RegexRepetition(RegexChar('a'), SimpleQuantifier('?')))))))
+        RegexRepetition(RegexChar('a'), SimpleQuantifier('?'))))))))
   }
 
   test("group not starting with ? is a capturing group") {
     assert(parse("(=a)") === RegexSequence(ListBuffer(
       RegexGroup(RegexGroup.Capturing, RegexSequence(ListBuffer(
-        RegexChar('='), RegexChar('a'))))))
+        RegexChar('='), RegexChar('a')))))))
     assert(parse("(!a)") === RegexSequence(ListBuffer(
       RegexGroup(RegexGroup.Capturing, RegexSequence(ListBuffer(
-        RegexChar('!'), RegexChar('a'))))))
+        RegexChar('!'), RegexChar('a')))))))
   }
 
   test("complex expression") {
@@ -321,7 +321,7 @@ class RegularExpressionParserSuite extends AnyFunSuite {
                     SimpleQuantifier('+')), RegexEscaped('.'),
                 RegexRepetition(RegexCharacterClass(negated = false,
                     ListBuffer(RegexCharacterRange(RegexChar('0'), RegexChar('9')))),
-                    SimpleQuantifier('*'))))))))),
+                    SimpleQuantifier('*')))))))))),
                   RegexRepetition(
               RegexGroup(RegexGroup.Capturing, RegexSequence(ListBuffer(
                 RegexCharacterClass(negated = false, ListBuffer(RegexChar('e'), RegexChar('E'))),
@@ -332,7 +332,7 @@ class RegularExpressionParserSuite extends AnyFunSuite {
                   SimpleQuantifier('+'))))), SimpleQuantifier('?')),
             RegexRepetition(RegexCharacterClass(negated = false, ListBuffer(
               RegexChar('f'), RegexChar('F'), RegexChar('d'), RegexChar('D'))),
-              SimpleQuantifier('?')))))),
+              SimpleQuantifier('?'))))))),
           RegexChoice(RegexSequence(ListBuffer(
             RegexChar('I'), RegexChar('n'), RegexChar('f'))),
             RegexSequence(ListBuffer(

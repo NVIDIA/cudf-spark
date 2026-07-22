@@ -2057,7 +2057,9 @@ object RegexRewrite {
   @scala.annotation.tailrec
   private def removeBrackets(astLs: collection.Seq[RegexAST]): collection.Seq[RegexAST] = {
     astLs match {
-      case collection.Seq(RegexGroup(_, RegexSequence(terms))) => removeBrackets(terms)
+      case collection.Seq(RegexGroup(
+        RegexGroup.Capturing | RegexGroup.NonCapturing,
+        RegexSequence(terms))) => removeBrackets(terms)
       case _ => astLs
     }
   }
@@ -2119,7 +2121,8 @@ object RegexRewrite {
 
   private def getMultipleContainsLiterals(ast: RegexAST): Seq[UTF8String] = {
     ast match {
-      case RegexGroup(_, term) => getMultipleContainsLiterals(term)
+      case RegexGroup(RegexGroup.Capturing | RegexGroup.NonCapturing, term) =>
+        getMultipleContainsLiterals(term)
       case RegexChoice(RegexSequence(parts), ls) if isLiteralString(parts) => {
         getMultipleContainsLiterals(ls) match {
           case Seq() => Seq.empty
@@ -2136,7 +2139,8 @@ object RegexRewrite {
     ast match {
       case RegexRepetition(RegexChar('.'), SimpleQuantifier('*')) => true
       case RegexSequence(parts) if parts.forall(isWildcard) => true
-      case RegexGroup(_, term) if isWildcard(term) => true
+      case RegexGroup(RegexGroup.Capturing | RegexGroup.NonCapturing, term)
+          if isWildcard(term) => true
       case _ => false
     }
   }

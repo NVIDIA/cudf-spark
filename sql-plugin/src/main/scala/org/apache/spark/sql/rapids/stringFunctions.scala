@@ -1244,7 +1244,7 @@ object GpuRegExpUtils {
 
   def getChoicesFromRegex(regex: RegexAST): Option[Seq[String]] = {
     regex match {
-      case RegexGroup(_, t) =>
+      case RegexGroup(RegexGroup.Capturing | RegexGroup.NonCapturing, t) =>
         getChoicesFromRegex(t)
       case RegexChoice(a, b) =>
         getChoicesFromRegex(a) match {
