@@ -2384,9 +2384,14 @@ def test_window_aggs_for_rows_collect_set():
         float_special_cases = [
             FLOAT_MIN, FLOAT_MAX, 0.0, 1.0, -1.0,
             float('inf'), float('-inf'), float('nan'), NEG_FLOAT_NAN_MAX_VALUE]
+        double_special_cases = [
+            DOUBLE_MIN, DOUBLE_MAX, 0.0, 1.0, -1.0,
+            float('inf'), float('-inf'), float('nan'), NEG_DOUBLE_NAN_MAX_VALUE]
+        collect_set_fp_gens = {
+            'c_float': RepeatSeqGen(FloatGen(special_cases=float_special_cases), length=15),
+            'c_double': RepeatSeqGen(DoubleGen(special_cases=double_special_cases), length=15)}
         data_gen = [
-            (name, RepeatSeqGen(FloatGen(special_cases=float_special_cases), length=15))
-            if name == 'c_float' else (name, gen)
+            (name, collect_set_fp_gens[name]) if name in collect_set_fp_gens else (name, gen)
             for name, gen in data_gen]
 
     assert_gpu_and_cpu_are_equal_sql(
