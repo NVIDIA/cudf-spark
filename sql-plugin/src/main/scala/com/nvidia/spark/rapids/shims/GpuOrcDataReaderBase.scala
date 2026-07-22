@@ -25,8 +25,8 @@ import scala.collection.mutable.ArrayBuffer
 import ai.rapids.cudf.HostMemoryBuffer
 import com.nvidia.spark.rapids.{GpuMetric, HostMemoryOutputStream, NoopMetric}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
-import com.nvidia.spark.rapids.filecache.FileCache
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
+import com.nvidia.spark.rapids.filecache.FileCache
 import com.nvidia.spark.rapids.fileio.hadoop.HadoopFileIO
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile.CopyRange
@@ -165,7 +165,6 @@ abstract class GpuOrcDataReaderBase(
       }
       localCopies.foreach { localCopy =>
         copyLocal(localCopy, out)
-        localCopy.close()
       }
     }
     copyRemoteBlocksData(remoteCopies.toSeq, out)
