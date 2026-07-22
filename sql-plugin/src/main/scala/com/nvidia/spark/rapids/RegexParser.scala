@@ -1791,7 +1791,7 @@ object RegexGroup {
 
 sealed case class RegexGroup(groupType: RegexGroup.Type, term: RegexAST) extends RegexAST {
   import RegexGroup._
-  def this(groupType: Type, term: RegexAST, position: Int) = {
+  def this(groupType: RegexGroup.Type, term: RegexAST, position: Int) = {
     this(groupType, term)
     this.position = Some(position)
   }
