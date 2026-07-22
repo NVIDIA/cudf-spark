@@ -123,7 +123,9 @@ case class GpuAtomicReplaceTableAsSelectExec(
       throw QueryCompilationErrors.cannotReplaceMissingTableError(ident)
     }
     val table = Option(staged).getOrElse(loadForInsert())
-    writeToTable(catalog, table, writeOptions, ident, query)
+    GpuAtomicDeltaWriteContext.withAtomicWrite {
+      writeToTable(catalog, table, writeOptions, ident, query)
+    }
   }
 
   override protected def internalDoExecuteColumnar(): RDD[ColumnarBatch] =

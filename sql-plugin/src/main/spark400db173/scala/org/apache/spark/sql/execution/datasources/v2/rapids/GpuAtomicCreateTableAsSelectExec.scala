@@ -91,7 +91,9 @@ case class GpuAtomicCreateTableAsSelectExec(
       Option(staged).getOrElse(loadForInsert())
     }.getOrElse(return Nil)
 
-    writeToTable(catalog, table, writeOptions, ident, query, ifNotExists)
+    GpuAtomicDeltaWriteContext.withAtomicWrite {
+      writeToTable(catalog, table, writeOptions, ident, query, ifNotExists)
+    }
   }
 
   override protected def internalDoExecuteColumnar(): RDD[ColumnarBatch] =

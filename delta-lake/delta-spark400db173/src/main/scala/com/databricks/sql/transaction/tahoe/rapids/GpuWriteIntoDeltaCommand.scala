@@ -29,6 +29,7 @@ import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.datasources.{BasicWriteJobStatsTracker, GpuWriteFiles}
+import org.apache.spark.sql.execution.datasources.v2.rapids.GpuAtomicDeltaWriteContext
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.rapids.{BasicColumnarWriteJobStatsTracker, ColumnarWriteJobStatsTracker,
   GpuFileFormatWriter}
@@ -123,24 +124,21 @@ class GpuWriteIntoDeltaCommandMeta(
   }
 
   override protected def tagSelfForGpuInternal(): Unit = {
+    if (!GpuAtomicDeltaWriteContext.isActive) {
+      willNotWorkOnGpu(
+        "DBR WriteIntoDeltaCommand GPU support is limited to atomic CTAS/RTAS")
+    }
     if (!conf.isDeltaWriteEnabled) {
       willNotWorkOnGpu("Delta Lake output acceleration has been disabled")
     }
     val spark = TrampolineConnectShims.getActiveSession
-    // DBR retains the original data-source parameters on DeltaLog, but prunes many of them from
-    // WriteIntoDeltaCommand.options. Merge both so the nested command cannot lose a fallback that
-    // was identified while planning the outer DeltaDataSource command.
-    val writeOptions = cmd.deltaLog.options ++ cmd.options
-    // The outer DeltaDataSource command may have already fallen back while constructing this
-    // nested write command. Revalidate the Delta write here so unsupported optimize-write schemas
-    // and retained writer options cannot re-enter the GPU path.
     RapidsDeltaUtils.tagForDeltaWrite(
-      this, cmd.query.schema, Some(cmd.deltaLog), writeOptions, spark)
+      this, cmd.query.schema, Some(cmd.deltaLog), cmd.options, spark)
     if (cmd.fileFormat.getClass != classOf[DeltaParquetFileFormat]) {
       willNotWorkOnGpu(s"Delta file format ${cmd.fileFormat.getClass.getName} is not supported")
     } else {
       fileFormat = GpuParquetFileFormat.tagGpuSupport(
-        this, spark, writeOptions, cmd.hadoopConf, cmd.query.schema)
+        this, spark, cmd.options, cmd.hadoopConf, cmd.query.schema)
     }
     if (cmd.bucketSpec.nonEmpty) {
       willNotWorkOnGpu("Bucketed Delta writes are not supported")

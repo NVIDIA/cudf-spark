@@ -22,8 +22,6 @@
 package com.databricks.sql.transaction.tahoe.rapids
 
 import java.net.URI
-import java.util.Locale
-
 import scala.collection.mutable.ListBuffer
 
 import com.databricks.sql.transaction.tahoe._
@@ -303,10 +301,7 @@ abstract class GpuOptimisticTransactionWriteBase(
         case Some(writeOptions) =>
           writeOptions.options.filter { case (key, _) =>
             key.equalsIgnoreCase(DeltaOptions.MAX_RECORDS_PER_FILE) ||
-                key.equalsIgnoreCase(DeltaOptions.COMPRESSION) ||
-                key.equalsIgnoreCase("parquet.encryption.column.keys") ||
-                key.equalsIgnoreCase("parquet.encryption.footer.key") ||
-                key.toLowerCase(Locale.ROOT).startsWith("parquet.bloom.filter.enabled#")
+                key.equalsIgnoreCase(DeltaOptions.COMPRESSION)
           }
       }
       val deltaFileFormat = deltaLog.fileFormat(deltaLog.unsafeVolatileSnapshot.protocol, metadata)

@@ -52,11 +52,8 @@ if is_before_spark_353():
                             enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
 def test_delta_merge_disabled_fallback(spark_tmp_path, spark_tmp_table_factory, disable_conf, enable_deletion_vectors):
     def checker(data_path, do_merge):
-        expected_fallback = ("ExecutedCommandExec"
-                             if "spark.rapids.sql.command.MergeIntoCommand" in disable_conf
-                             else delta_write_fallback_check)
         assert_gpu_fallback_write(do_merge, read_delta_path, data_path,
-                                  expected_fallback, conf=disable_conf)
+                                  delta_write_fallback_check, conf=disable_conf)
     merge_sql = "MERGE INTO {dest_table} USING {src_table} ON {dest_table}.a == {src_table}.a" \
                 " WHEN NOT MATCHED THEN INSERT *"
     delta_sql_merge_test(spark_tmp_path, spark_tmp_table_factory,

@@ -38,7 +38,7 @@ import com.databricks.sql.transaction.tahoe.rapids.{
   GpuWriteIntoDelta,
   GpuWriteIntoDeltaCommandMeta
 }
-import com.databricks.sql.transaction.tahoe.sources.{DeltaDataSource, DeltaSQLConf}
+import com.databricks.sql.transaction.tahoe.sources.DeltaSQLConf
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.delta.shims.DeltaLogShim
 import com.nvidia.spark.rapids.shims.ShimPredicateHelper
@@ -65,8 +65,7 @@ import org.apache.spark.sql.execution.{
   SparkPlan
 }
 import org.apache.spark.sql.execution.command.{DataWritingCommand, RunnableCommand}
-import org.apache.spark.sql.execution.datasources.{FileFormat, HadoopFsRelation, LogicalRelation,
-  SaveIntoDataSourceCommand}
+import org.apache.spark.sql.execution.datasources.{FileFormat, HadoopFsRelation, LogicalRelation}
 import org.apache.spark.sql.execution.datasources.v2.{
   AtomicCreateTableAsSelectExec,
   AtomicReplaceTableAsSelectExec
@@ -75,21 +74,12 @@ import org.apache.spark.sql.execution.datasources.v2.rapids.{
   GpuAtomicCreateTableAsSelectExec,
   GpuAtomicReplaceTableAsSelectExec
 }
-import org.apache.spark.sql.rapids.{ExternalSource, GpuAnd, GpuEqualTo, GpuFileSourceScanExec, GpuNot}
+import org.apache.spark.sql.rapids.{GpuAnd, GpuEqualTo, GpuFileSourceScanExec, GpuNot}
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims
-import org.apache.spark.sql.sources.{CreatableRelationProvider, InsertableRelation}
+import org.apache.spark.sql.sources.InsertableRelation
 import org.apache.spark.sql.types.StructType
 
 object DeltaSpark400DB173Provider extends DatabricksDeltaProviderBase {
-
-  override def getCreatableRelationRules: Map[Class[_ <: CreatableRelationProvider],
-      CreatableRelationProviderRule[_ <: CreatableRelationProvider]] = {
-    val rule = ExternalSource.toCreatableRelationProviderRule[DeltaDataSource](
-      "Write to Delta Lake table",
-      (a, conf, p, r) => new DeltaCreatableRelationProviderDB173Meta(a, conf, p, r))
-    super.getCreatableRelationRules +
-      (rule.getClassFor.asSubclass(classOf[CreatableRelationProvider]) -> rule)
-  }
 
   override def getDataWritingCommandRules: Map[Class[_ <: DataWritingCommand],
       DataWritingCommandRule[_ <: DataWritingCommand]] = {
@@ -377,38 +367,6 @@ object DeltaSpark400DB173Provider extends DatabricksDeltaProviderBase {
 
   private def trueOrInvalidBoolean(value: String): Boolean =
     !value.trim.equalsIgnoreCase("false")
-}
-
-/**
- * DBR builds [[WriteIntoDeltaCommand]] only after executing the outer data-source command and
- * drops many writer options while doing so. Convert the provider first and defer file-writer
- * eligibility to [[GpuWriteIntoDeltaCommandMeta]], where the original options are still present.
- */
-class DeltaCreatableRelationProviderDB173Meta(
-    source: DeltaDataSource,
-    conf: RapidsConf,
-    parent: Option[RapidsMeta[_, _, _]],
-    rule: DataFromReplacementRule)
-    extends CreatableRelationProviderMeta[DeltaDataSource](source, conf, parent, rule) {
-  require(parent.isDefined, "Must provide parent meta")
-
-  private val saveCmd = parent.get.wrapped match {
-    case s: SaveIntoDataSourceCommand => s
-    case s =>
-      throw new IllegalStateException(s"Expected SaveIntoDataSourceCommand, found ${s.getClass}")
-  }
-
-  override def tagSelfForGpu(): Unit = {
-    if (!conf.isDeltaWriteEnabled) {
-      willNotWorkOnGpu("Delta Lake output acceleration has been disabled. To enable set " +
-        s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
-    }
-    if (!saveCmd.options.contains("path")) {
-      willNotWorkOnGpu("no path specified for Delta Lake table")
-    }
-  }
-
-  override def convertToGpu(): GpuCreatableRelationProvider = new GpuDeltaDataSource(conf)
 }
 
 private object DB173DVPredicatePushdown extends ShimPredicateHelper {
