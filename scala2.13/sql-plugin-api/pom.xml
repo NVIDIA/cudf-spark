@@ -108,5 +108,28 @@
                 </pluginManagement>
             </build>
         </profile>
+        <profile>
+            <id>release413</id>
+            <activation>
+                <property>
+                    <name>buildver</name>
+                    <value>413</value>
+                </property>
+            </activation>
+            <build>
+                <pluginManagement>
+                    <plugins>
+                        <plugin>
+                            <groupId>net.alchim31.maven</groupId>
+                            <artifactId>scala-maven-plugin</artifactId>
+                            <configuration>
+                                <release conf.combine="override">${java.major.version}</release>
+                                <addJavacArgs conf.combine="override">-Xlint:all,-serial,-path,-try,-processing</addJavacArgs>
+                            </configuration>
+                        </plugin>
+                    </plugins>
+                </pluginManagement>
+            </build>
+        </profile>
     </profiles>
 </project>

@@ -21,10 +21,12 @@
 
 package com.databricks.sql.transaction.tahoe.rapids
 
-import com.databricks.sql.io.skipping.liquid.ClusteredTableUtils
-import com.databricks.sql.transaction.tahoe.Snapshot
-import com.databricks.sql.transaction.tahoe.commands.{DeltaCommand, DeltaOptimizeContext}
-import com.databricks.sql.transaction.tahoe.commands.optimize.OptimizeMetrics
+import com.databricks.sql.io.skipping.liquid.{ClusteredTableUtils, ClusteringColumnInfo}
+import com.databricks.sql.transaction.tahoe.{DeltaLog, Snapshot}
+import com.databricks.sql.transaction.tahoe.commands.{DeletionVectorUtils, DeltaCommand,
+  DeltaOptimizeContext, OptimizeTableCommandBase}
+import com.databricks.sql.transaction.tahoe.commands.optimize.{OptimizeContext,
+  OptimizeMetrics, OptimizeRunner}
 
 import org.apache.spark.sql.{Encoders, Row, SparkSession}
 import org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute
@@ -95,16 +97,12 @@ case class GpuOptimizeTableCommandEdge(
     isFull: Boolean,
     predicates: Seq[Expression]
   )(val zOrderBy: Seq[UnresolvedAttribute])
-  extends RunnableCommand with DeltaCommand with UnaryNode {
+  extends OptimizeTableCommandBase with UnaryNode {
 
   override val otherCopyArgs: Seq[AnyRef] = zOrderBy :: Nil
 
   override protected def withNewChildInternal(newChild: LogicalPlan): GpuOptimizeTableCommandEdge =
     copy(child = newChild)(zOrderBy)
-
-  override val output: Seq[Attribute] = Seq(
-    AttributeReference("path", StringType)(),
-    AttributeReference("metrics", Encoders.product[OptimizeMetrics].schema)())
 
   override def run(sparkSession: SparkSession): Seq[Row] = {
     val table = getDeltaTable(child, "OPTIMIZE")
@@ -113,12 +111,39 @@ case class GpuOptimizeTableCommandEdge(
 
     verifyPartitionPredicates(sparkSession, snapshot.metadata.partitionColumns, predicates)
 
-    new GpuOptimizeExecutor(
-      sparkSession,
-      snapshot,
-      table.catalogTable,
-      predicates,
-      DeltaOptimizeContext(isFull = isFull)).optimize()
+    if (ClusteredTableUtils.isSupported(snapshot.protocol)) {
+      if (predicates.nonEmpty) {
+        throw new IllegalStateException(
+          "Delta OPTIMIZE with partition predicates on liquid clustered tables " +
+            "should not run on GPU")
+      }
+      ClusteredTableUtils.validateClusteringColumnsInStatsSchema(
+        snapshot, ClusteringColumnInfo.extractLogicalNames(snapshot))
+      DeltaLog.assertRemovable(snapshot)
+
+      // Keep DBR's native liquid-clustering planner, Kd-tree domain metadata, transactions,
+      // and commit protocol. The scoped marker only enables the nested WriteIntoDeltaCommand
+      // data-plane replacement while the native runner performs an OPTIMIZE rewrite.
+      val txn = table.deltaLog.startTransaction(table.catalogTable, Some(snapshot))
+      val optimizeMetrics = GpuLiquidOptimizeWriteContext.withOptimize(sparkSession) {
+        new OptimizeRunner(
+          sparkSession,
+          txn,
+          zOrderBy,
+          predicates,
+          metrics,
+          OptimizeContext(isAutoCompact = false, parentTxnRuntimeMs = 0L, isFull = isFull))
+          .runAndReturnMetrics()
+      }
+      optimizeMetrics.map(metric => Row(table.deltaLog.dataPath.toString, metric))
+    } else {
+      new GpuOptimizeExecutor(
+        sparkSession,
+        snapshot,
+        table.catalogTable,
+        predicates,
+        DeltaOptimizeContext(isFull = isFull)).optimize()
+    }
   }
 
   private def validateSupportedOptimize(snapshot: Snapshot): Unit = {
@@ -128,9 +153,11 @@ case class GpuOptimizeTableCommandEdge(
     if (isFull) {
       throw new IllegalStateException("Delta OPTIMIZE FULL should not run on GPU")
     }
-    if (ClusteredTableUtils.isSupported(snapshot.protocol)) {
+    if (!ClusteredTableUtils.isSupported(snapshot.protocol) &&
+        (DeletionVectorUtils.deletionVectorsWritable(snapshot) ||
+          !DeletionVectorUtils.isTableDVFree(snapshot))) {
       throw new IllegalStateException(
-        "Delta OPTIMIZE on liquid clustered tables should not run on GPU")
+        "Delta OPTIMIZE on tables with deletion vectors should not run on GPU")
     }
   }
 }

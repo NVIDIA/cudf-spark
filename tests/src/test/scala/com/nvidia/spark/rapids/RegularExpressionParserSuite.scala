@@ -248,6 +248,15 @@ class RegularExpressionParserSuite extends AnyFunSuite {
         RegexRepetition(RegexChar('a'), SimpleQuantifier('?')))), None))))
   }
 
+  test("group not starting with ? is a capturing group") {
+    assert(parse("(=a)") === RegexSequence(ListBuffer(
+      RegexGroup(true, RegexSequence(ListBuffer(
+        RegexChar('='), RegexChar('a'))), None))))
+    assert(parse("(!a)") === RegexSequence(ListBuffer(
+      RegexGroup(true, RegexSequence(ListBuffer(
+        RegexChar('!'), RegexChar('a'))), None))))
+  }
+
   test("complex expression") {
     val ast = parse(
       "^" +            // start of line

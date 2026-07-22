@@ -1041,6 +1041,16 @@ def test_rlike_fallback_possessive_quantifier():
             'RLike',
             conf=_regexp_conf)
 
+@allow_non_gpu('ProjectExec', 'RLike')
+def test_rlike_fallback_lookaheads():
+    gen = mk_str_gen('(\u20ac|\\w){0,3}a[|b*.$\r\n]{0,2}c\\w{0,3}')
+    for pattern in ['a(?=a*)', 'a(?!a*)']:
+        assert_gpu_fallback_collect(
+            lambda spark, pattern=pattern: unary_op_df(spark, gen).selectExpr(
+                f'a rlike "{pattern}"'),
+            'RLike',
+            conf=_regexp_conf)
+
 def test_regexp_extract_all_idx_zero():
     gen = mk_str_gen('[abcd]{0,3}[0-9]{0,3}-[0-9]{0,3}[abcd]{1,3}')
     assert_gpu_and_cpu_are_equal_collect(
