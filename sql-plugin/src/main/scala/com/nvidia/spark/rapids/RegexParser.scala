@@ -178,24 +178,17 @@ class RegexParser(pattern: String) {
   }
 
   private def parseGroup(): RegexAST = {
-    var captureGroup = if (pos + 1 < pattern.length
+    val (captureGroup, lookahead) = if (pos + 1 < pattern.length
         && pattern.charAt(pos) == '?'
-        && pattern.charAt(pos+1) == ':') {
-      pos += 2
-      false
-    } else {
-      true
-    }
-    val lookahead = if (pos + 1 < pattern.length
-        && "!=".contains(pattern.charAt(pos))) {
-      pos += 1
-      captureGroup = false
-      pattern.charAt(pos-1) match {
-        case '=' => Some(RegexPositiveLookahead)
+        && ":!=".contains(pattern.charAt(pos+1))) {
+      consumeExpected('?')
+      (false, consume() match {  // guaranteed exhaustive by the contains call above
+        case ':' => None
         case '!' => Some(RegexNegativeLookahead)
-      }
+        case '=' => Some(RegexPositiveLookahead)
+      })
     } else {
-      None
+      (true, None)
     }
     val term = parseUntil(() => peek().contains(')'))
     consumeExpected(')')
@@ -1762,8 +1755,8 @@ sealed case class RegexGroup(capture: Boolean, term: RegexAST,
     s"(${term.toRegexString})"
   } else if (lookahead.isDefined) {
     lookahead match {
-      case Some(RegexPositiveLookahead) => s"(=${term.toRegexString})"
-      case Some(RegexNegativeLookahead) => s"(!${term.toRegexString})"
+      case Some(RegexPositiveLookahead) => s"(?=${term.toRegexString})"
+      case Some(RegexNegativeLookahead) => s"(?!${term.toRegexString})"
       case _ => throw new IllegalStateException("Should not reach here")
     }
   } else {
