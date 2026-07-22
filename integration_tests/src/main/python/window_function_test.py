@@ -23,7 +23,7 @@ from pyspark.sql.window import Window
 import pyspark.sql.functions as f
 from spark_session import is_before_spark_320, is_databricks113_or_later, \
     is_databricks133_or_later, is_spark_350_or_later, spark_version, with_cpu_session, \
-    is_spark_340_or_later, is_spark_420_or_later
+    is_scala212, is_spark_340_or_later, is_spark_420_or_later
 import warnings
 
 # mark this test as ci_1 for mvn verify sanity check in pre-merge CI
@@ -2330,6 +2330,14 @@ def test_join_sum_window_of_window_no_ansi(data_gen):
 
 # Generates some repeated values to test the deduplication of GpuCollectSet.
 # And GpuCollectSet does not yet support struct type.
+_collect_set_float_special_cases = None
+if is_scala212():
+    # Scala 2.12 CPU window collect_set can retain both signed zeros, while the GPU and
+    # Scala 2.13 treat them as the same value. Exclude -0.0 from the Scala 2.12 test data.
+    _collect_set_float_special_cases = [
+        FLOAT_MIN, FLOAT_MAX, 0.0, 1.0, -1.0,
+        float('inf'), float('-inf'), float('nan'), NEG_FLOAT_NAN_MAX_VALUE]
+
 _gen_data_for_collect_set = [
     ('a', RepeatSeqGen(LongGen(), length=20)),
     ('b', UniqueLongGen()),
@@ -2341,7 +2349,8 @@ _gen_data_for_collect_set = [
     ('c_timestamp', RepeatSeqGen(TimestampGen(), length=15)),
     ('c_byte', RepeatSeqGen(ByteGen(), length=15)),
     ('c_string', RepeatSeqGen(StringGen(), length=15)),
-    ('c_float', RepeatSeqGen(FloatGen(), length=15)),
+    ('c_float', RepeatSeqGen(
+        FloatGen(special_cases=_collect_set_float_special_cases), length=15)),
     ('c_double', RepeatSeqGen(DoubleGen(), length=15)),
     ('c_decimal_32', RepeatSeqGen(DecimalGen(precision=8, scale=3), length=15)),
     ('c_decimal_64', RepeatSeqGen(decimal_gen_64bit, length=15)),
