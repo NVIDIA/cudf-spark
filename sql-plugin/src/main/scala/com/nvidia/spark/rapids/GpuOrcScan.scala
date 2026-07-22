@@ -614,10 +614,7 @@ case class GpuOrcMultiFilePartitionReaderFactory(
   override def buildBaseColumnarReaderForCloud(files: Array[PartitionedFile], conf: Configuration):
       PartitionReader[ColumnarBatch] = {
     val combineConf = CombineConf(combineThresholdSize, combineWaitTime)
-    val perfIOEnabled = files.exists { file =>
-      PerfIO.isEnabledFor(new URI(file.filePath.toString))
-    }
-    val poolConf = poolConfBuilder.build(forceMemoryBounded = perfIOEnabled)
+    val poolConf = poolConfBuilder.build()
     val reader = new MultiFileCloudOrcPartitionReader(
       conf, files, dataSchema, readDataSchema, partitionSchema,
       maxReadBatchSizeRows, maxReadBatchSizeBytes, targetBatchSizeBytes, maxGpuColumnSizeBytes,
@@ -2239,28 +2236,7 @@ class MultiFileCloudOrcPartitionReader(
       taskContext: TaskContext,
       partFile: PartitionedFile,
       conf: Configuration,
-      filters: Array[Filter]) extends MemoryBoundedAsyncRunner[HostMemoryBuffersWithMetaDataBase] {
-
-    override def sparkTaskContext: Option[TaskContext] = Some(taskContext)
-
-    // The filtered stripe size is not known until the read starts, so use the input file size as
-    // a conservative upper bound, matching the Parquet multi-file reader.
-    override val requiredMemoryBytes: Long = partFile.length
-
-    // Keep the memory reservation until the host buffers have been consumed, not merely until the
-    // asynchronous read finishes.
-    override protected def buildResult(
-        resultData: HostMemoryBuffersWithMetaDataBase,
-        metrics: AsyncMetrics): AsyncResult[HostMemoryBuffersWithMetaDataBase] = {
-      val releaseCallback: () => Unit = () => {
-        if (this.isHoldingResource) {
-          this.withStateLock { _ =>
-            this.releaseResourceCallback()
-          }
-        }
-      }
-      new DecayReleaseResult(resultData, metrics, releaseCallback)
-    }
+      filters: Array[Filter]) extends UnboundedAsyncRunner[HostMemoryBuffersWithMetaDataBase]  {
 
     private var blockChunkIter: BufferedIterator[OrcOutputStripe] = null
 

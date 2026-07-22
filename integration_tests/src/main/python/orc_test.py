@@ -23,7 +23,6 @@ from spark_init_internal import spark_version
 from spark_session import *
 from parquet_test import _nested_pruning_schemas
 from conftest import is_databricks_runtime
-from multithread_file_reader_utils import resource_bounded_multithreaded_reader_conf
 
 pytestmark = pytest.mark.nightly_resource_consuming_test
 
@@ -105,26 +104,6 @@ def test_basic_read(std_input_path, name, read_func, v1_enabled_list, orc_impl, 
     assert_gpu_and_cpu_are_equal_collect(
             read_func(std_input_path + '/' + name),
             conf=all_confs)
-
-_resource_bounded_orc_confs = resource_bounded_multithreaded_reader_conf(
-    file_type='orc',
-    combine_size_conf=0,
-    keep_order_conf=[False, True],
-    reader_type_conf='MULTITHREADED',
-    pool_size_conf=64,
-    memory_limit_conf=1 << 10,
-    timeout_conf=[0, 1000])
-
-
-@pytest.mark.parametrize('reader_confs', _resource_bounded_orc_confs, ids=idfn)
-def test_orc_read_multithread_flow_ctrl_excessive_req(spark_tmp_path, reader_confs):
-    data_path = spark_tmp_path + '/ORC_DATA'
-    with_cpu_session(
-        lambda spark: gen_df(spark, [('a', long_gen)], length=4096)
-            .repartition(16)
-            .write.orc(data_path))
-    assert_gpu_and_cpu_are_equal_collect(read_orc_sql(data_path), conf=reader_confs)
-
 
 # ORC does not support negative scale for decimal. So here is "decimal_gens_no_neg".
 # Otherwise it will get the below exception.
