@@ -2330,14 +2330,6 @@ def test_join_sum_window_of_window_no_ansi(data_gen):
 
 # Generates some repeated values to test the deduplication of GpuCollectSet.
 # And GpuCollectSet does not yet support struct type.
-_collect_set_float_special_cases = None
-if is_scala212():
-    # Scala 2.12 CPU window collect_set can retain both signed zeros, while the GPU and
-    # Scala 2.13 treat them as the same value. Exclude -0.0 from the Scala 2.12 test data.
-    _collect_set_float_special_cases = [
-        FLOAT_MIN, FLOAT_MAX, 0.0, 1.0, -1.0,
-        float('inf'), float('-inf'), float('nan'), NEG_FLOAT_NAN_MAX_VALUE]
-
 _gen_data_for_collect_set = [
     ('a', RepeatSeqGen(LongGen(), length=20)),
     ('b', UniqueLongGen()),
@@ -2349,8 +2341,7 @@ _gen_data_for_collect_set = [
     ('c_timestamp', RepeatSeqGen(TimestampGen(), length=15)),
     ('c_byte', RepeatSeqGen(ByteGen(), length=15)),
     ('c_string', RepeatSeqGen(StringGen(), length=15)),
-    ('c_float', RepeatSeqGen(
-        FloatGen(special_cases=_collect_set_float_special_cases), length=15)),
+    ('c_float', RepeatSeqGen(FloatGen(), length=15)),
     ('c_double', RepeatSeqGen(DoubleGen(), length=15)),
     ('c_decimal_32', RepeatSeqGen(DecimalGen(precision=8, scale=3), length=15)),
     ('c_decimal_64', RepeatSeqGen(decimal_gen_64bit, length=15)),
@@ -2386,8 +2377,20 @@ _gen_data_for_collect_set_nested = [
 @ignore_order(local=True)
 @allow_non_gpu(*non_utc_allow)
 def test_window_aggs_for_rows_collect_set():
+    data_gen = _gen_data_for_collect_set
+    if is_scala212():
+        # Scala 2.12 CPU window collect_set can retain both signed zeros, while the GPU and
+        # Scala 2.13 treat them as the same value. Exclude -0.0 from this Scala 2.12 test.
+        float_special_cases = [
+            FLOAT_MIN, FLOAT_MAX, 0.0, 1.0, -1.0,
+            float('inf'), float('-inf'), float('nan'), NEG_FLOAT_NAN_MAX_VALUE]
+        data_gen = [
+            (name, RepeatSeqGen(FloatGen(special_cases=float_special_cases), length=15))
+            if name == 'c_float' else (name, gen)
+            for name, gen in data_gen]
+
     assert_gpu_and_cpu_are_equal_sql(
-        lambda spark: gen_df(spark, _gen_data_for_collect_set),
+        lambda spark: gen_df(spark, data_gen),
         "window_collect_table",
         '''
         select a, b,
