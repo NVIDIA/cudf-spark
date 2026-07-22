@@ -217,8 +217,8 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
 
   test("cuDF does not support $ followed by lookaround, independent, or named groups") {
     val patterns =
-      Seq("$(?=[^a])", "$(?![^a])", "$(?<=[^a])", "$(?<![^a])", "$(?>[^a])", "$(?<n>[^a])",
-          raw"\Z(?=[^a])", raw"\Z(?>[^a])")
+      Seq("$(?=a)", "$(?!a)", "$(?<=a)", "$(?<!a)", "$(?>a)", "$(?<n>a)",
+          raw"\Z(?=a)", raw"\Z(?>a)")
     patterns.foreach(pattern =>
       assertUnsupported(pattern, RegexFindMode,
         "Regex sequence $ followed by a lookaround, independent, or named capture " +
