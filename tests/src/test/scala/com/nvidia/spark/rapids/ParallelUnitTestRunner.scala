@@ -22,7 +22,6 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
 import java.util.concurrent.{ConcurrentLinkedQueue, TimeUnit}
 import java.util.concurrent.atomic.AtomicLong
-import javax.xml.parsers.DocumentBuilderFactory
 
 import scala.collection.mutable.ArrayBuffer
 
@@ -108,10 +107,7 @@ object ParallelUnitTestRunner {
       return
     }
     val forkCount = math.min(math.max(requestedForks, 1), discovered.size)
-    val historicalTimings = loadTimings(reportsDir)
-    val timingCoverage = discovered.count(historicalTimings.contains).toDouble / discovered.size
-    val timings = if (timingCoverage >= 0.8) historicalTimings else Map.empty[String, Double]
-    val suiteTasks = orderSuites(discovered, timings, testClasses)
+    val suiteTasks = orderSuites(discovered, testClasses)
         .zipWithIndex
         .map { case ((suite, weight), index) => SuiteTask(index + 1, suite, weight) }
     val perForkAllocation = allocationFraction * parallelGpuAllocationRatio / forkCount
@@ -795,24 +791,10 @@ object ParallelUnitTestRunner {
 
   private def orderSuites(
       suites: Seq[String],
-      timings: Map[String, Double],
       testClasses: Path): Seq[(String, Double)] = {
-    // Timings are seconds while the class-file fallback is bytes; never mix the two scales, or
-    // the byte-sized weights of a few unmeasured suites would dominate the schedule. Unmeasured
-    // suites get the median timing instead when historical timings are in use.
-    val medianTiming = if (timings.nonEmpty) {
-      val sorted = timings.values.toSeq.sorted
-      sorted(sorted.size / 2)
-    } else {
-      0.0
-    }
     suites.map { suite =>
-      def classFileWeight: Double = {
-        val classFile = testClasses.resolve(suite.replace('.', File.separatorChar) + ".class")
-        if (Files.exists(classFile)) Files.size(classFile).toDouble else 1.0
-      }
-      val weight = timings.getOrElse(suite,
-        if (timings.nonEmpty) medianTiming else classFileWeight)
+      val classFile = testClasses.resolve(suite.replace('.', File.separatorChar) + ".class")
+      val weight = if (Files.exists(classFile)) Files.size(classFile).toDouble else 1.0
       suite -> weight
     }.sortBy { case (_, weight) => -weight }
   }
@@ -833,33 +815,6 @@ object ParallelUnitTestRunner {
       None)
         .asInstanceOf[scala.collection.immutable.Set[String]]
         .toSeq
-  }
-
-  private[rapids] def loadTimings(reportsDir: Path): Map[String, Double] = {
-    val builder = DocumentBuilderFactory.newInstance().newDocumentBuilder()
-    // Multi-wave runs keep each wave's JUnit XML in a separate subdirectory. Walk the report tree
-    // so a subsequent non-clean run can still reuse those timings.
-    val stream = Files.walk(reportsDir)
-    try {
-      val iterator = stream.iterator()
-      val timings = scala.collection.mutable.Map.empty[String, Double]
-      while (iterator.hasNext) {
-        val path = iterator.next()
-        val name = path.getFileName.toString
-        if (name.startsWith("TEST-") && name.endsWith(".xml")) {
-          try {
-            builder.reset()
-            val root = builder.parse(path.toFile).getDocumentElement
-            timings += root.getAttribute("name") -> root.getAttribute("time").toDouble
-          } catch {
-            case _: Exception => // Ignore incomplete or incompatible historical reports.
-          }
-        }
-      }
-      timings.toMap
-    } finally {
-      stream.close()
-    }
   }
 
   private def matchesWildcard(suite: String, wildcards: Seq[String]): Boolean = {
