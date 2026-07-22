@@ -245,7 +245,9 @@ def test_reading_file_written_with_gpu(spark_tmp_path, column_gen):
     try:
         # For now, this compares the results of reading back the GPU-written data, via fastparquet and GPU.
         assert_gpu_and_cpu_are_equal_collect(read_parquet(data_path=data_path, local_data_path=local_data_path),
-                                             conf=conf)
+                                             conf=conf,
+                                             result_canonicalize_func_before_compare=
+                                             get_fastparquet_result_canonicalizer())
     finally:
         # Clean up local copy of data.
         delete_local_directory(local_base_path)

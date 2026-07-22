@@ -33,6 +33,8 @@ import com.databricks.sql.transaction.tahoe.coordinatedcommits.{
 import com.databricks.sql.transaction.tahoe.rapids.{
   GpuDeltaLog,
   GpuDeltaV1Write,
+  GpuLiquidOptimizeWriteContext,
+  GpuLiquidOptimizeWriteIntoDeltaCommandMeta,
   GpuWriteIntoDelta,
   GpuWriteIntoDeltaCommandMeta
 }
@@ -83,8 +85,12 @@ object DeltaSpark400DB173Provider extends DatabricksDeltaProviderBase {
       DataWritingCommandRule[_ <: DataWritingCommand]] = {
     Seq(
       GpuOverrides.dataWriteCmd[WriteIntoDeltaCommand](
-        "Write Delta data files using DBR's native transaction command",
-        (a, conf, p, r) => new GpuWriteIntoDeltaCommandMeta(a, conf, p, r))
+        "Write files for a DBR Delta transaction",
+        (a, conf, p, r) => if (GpuLiquidOptimizeWriteContext.isActive) {
+          new GpuLiquidOptimizeWriteIntoDeltaCommandMeta(a, conf, p, r)
+        } else {
+          new GpuWriteIntoDeltaCommandMeta(a, conf, p, r)
+        })
     ).map(r => (r.getClassFor.asSubclass(classOf[DataWritingCommand]), r)).toMap
   }
 

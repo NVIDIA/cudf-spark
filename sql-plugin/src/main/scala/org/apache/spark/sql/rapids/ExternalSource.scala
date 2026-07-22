@@ -74,7 +74,8 @@ trait ExternalSourceBase extends Logging {
       RunnableCommandRule[_ <: RunnableCommand]] = deltaProvider.getRunnableCommandRules
 
   lazy val dataWriteCmds: Map[Class[_ <: DataWritingCommand],
-      DataWritingCommandRule[_ <: DataWritingCommand]] = deltaProvider.getDataWritingCommandRules
+      DataWritingCommandRule[_ <: DataWritingCommand]] =
+    deltaProvider.getDataWritingCommandRules
 
   lazy val execRules: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] =
     deltaProvider.getExecRules

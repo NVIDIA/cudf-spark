@@ -1027,7 +1027,7 @@ def test_get_json_object_child_formats(std_input_path, input_file):
     "int_struct_formatted_problematic_rows.json",
     "int_mixed_array_struct_formatted.json",
     "bad_whitespace.json",
-    pytest.param("escaped_strings.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/11386')),
+    "escaped_strings.json",
     pytest.param("nested_escaped_strings.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/11387')),
     pytest.param("repeated_columns.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/11361')),
     "mixed_objects.json",

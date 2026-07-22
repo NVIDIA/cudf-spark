@@ -31,7 +31,7 @@ import pytest
 from typing import Callable, Dict
 from pyspark.sql.types import StringType, IntegerType
 
-from asserts import assert_gpu_fallback_write, assert_gpu_and_cpu_writes_are_equal_collect
+from asserts import assert_gpu_and_cpu_writes_are_equal_collect
 from conftest import is_databricks_runtime
 from data_gen import unary_op_df, int_gen, copy_and_update, SetValuesGen, string_gen, long_gen, \
     gen_df, append_unique_int_col_to_df
@@ -51,6 +51,18 @@ def assert_liquid_clustering_delta_logs_equivalent(data_path):
     # operation parameters that differ between CPU clustered writes and GPU Delta writes.
     if not is_databricks173_or_later():
         with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
+
+
+def delta_path_identifier(path):
+    return f"delta.`{path}`"
+
+
+def optimize_liquid_clustered_table(spark, table_identifier):
+    if is_databricks173_or_later():
+        with_cpu_session(lambda cpu_spark: cpu_spark.sql(
+            f"OPTIMIZE {table_identifier}").collect())
+    else:
+        spark.sql(f"OPTIMIZE {table_identifier}").collect()
 
 
 @allow_non_gpu(*delta_meta_allow)
@@ -77,6 +89,7 @@ def test_delta_ctas_sql_liquid_clustering(spark_tmp_path, spark_tmp_table_factor
             CLUSTER BY (a)
             AS SELECT * FROM {view_name}
         """)
+        optimize_liquid_clustered_table(spark, delta_path_identifier(path))
 
     data_path = spark_tmp_path + "/DELTA_LIQUID_CLUSTER"
 
@@ -89,7 +102,11 @@ def test_delta_ctas_sql_liquid_clustering(spark_tmp_path, spark_tmp_table_factor
 
 
 
-def create_clustered_table_sql(spark, table_name, path):
+def create_clustered_table_sql(spark, table_name, path, enable_deletion_vectors=None):
+    table_properties = ""
+    if enable_deletion_vectors is not None:
+        table_properties = f"""
+            TBLPROPERTIES ('delta.enableDeletionVectors' = '{str(enable_deletion_vectors).lower()}')"""
     spark.sql(f"""
             CREATE TABLE {table_name}
             (a long, 
@@ -101,6 +118,7 @@ def create_clustered_table_sql(spark, table_name, path):
             USING DELTA
             LOCATION '{path}'
             CLUSTER BY (a, b, d)
+            {table_properties}
         """)
 
 
@@ -115,13 +133,15 @@ def gen_df_and_replace_view(spark, view_name):
     df.coalesce(1).createOrReplaceTempView(view_name)
 
 
-def setup_clustered_table_sql(spark, path, table_name, view_name):
-    create_clustered_table_sql(spark, table_name, path)
+def setup_clustered_table_sql(spark, path, table_name, view_name,
+                              enable_deletion_vectors=None):
+    create_clustered_table_sql(spark, table_name, path, enable_deletion_vectors)
     gen_df_and_replace_view(spark, view_name)
     spark.sql(f"""
             INSERT INTO {table_name}
             SELECT * FROM {view_name}
         """)
+    optimize_liquid_clustered_table(spark, table_name)
 
 
 @allow_non_gpu(*delta_meta_allow, "CreateTableExec")
@@ -147,6 +167,7 @@ def test_delta_rtas_sql_liquid_clustering(spark_tmp_path, spark_tmp_table_factor
             CLUSTER BY (a)
             AS SELECT * FROM {view_name}
         """)
+        optimize_liquid_clustered_table(spark, table_name)
 
     data_path = spark_tmp_path + "/DELTA_LIQUID_CLUSTER"
 
@@ -176,6 +197,7 @@ def test_delta_append_sql_liquid_clustering(spark_tmp_path, spark_tmp_table_fact
             INSERT INTO {table_name}
             SELECT * FROM {view_name}
         """)
+        optimize_liquid_clustered_table(spark, table_name)
 
     data_path = spark_tmp_path + "/DELTA_LIQUID_CLUSTER"
 
@@ -206,6 +228,7 @@ def test_delta_insert_overwrite_static_sql_liquid_clustering(spark_tmp_path,
             INSERT OVERWRITE TABLE {table_name}
             SELECT * FROM {view_name}
         """)
+        optimize_liquid_clustered_table(spark, table_name)
 
     data_path = spark_tmp_path + "/DELTA_LIQUID_CLUSTER"
 
@@ -240,6 +263,7 @@ def test_delta_insert_overwrite_dynamic_sql_liquid_clustering(spark_tmp_path,
             INSERT OVERWRITE TABLE {table_name}
             SELECT * FROM {view_name}
         """)
+        optimize_liquid_clustered_table(spark, table_name)
 
     data_path = spark_tmp_path + "/DELTA_LIQUID_CLUSTER"
 
@@ -279,6 +303,7 @@ def test_delta_insert_overwrite_replace_where_sql_liquid_clustering(spark_tmp_pa
             REPLACE WHERE b = 'x'
             SELECT * FROM {view_name}
         """)
+        optimize_liquid_clustered_table(spark, table_name)
 
     data_path = spark_tmp_path + "/DELTA_LIQUID_CLUSTER"
 
@@ -301,16 +326,22 @@ def do_test_delta_dml_sql_liquid_clustering(spark_tmp_path,
     gpu_data_path = f"{base_data_path}/GPU"
     gpu_table_name = spark_tmp_table_factory.get()
 
+    # DBR 17.3 liquid clustered tables otherwise default into persistent DV writes,
+    # which are covered by the existing Delta DML DV fallback tests.
+    enable_deletion_vectors = False if is_databricks173_or_later() else None
     with_cpu_session(lambda spark: setup_clustered_table_sql(spark, cpu_data_path,
                                                              cpu_table_name,
-                                                             spark_tmp_table_factory.get()))
+                                                             spark_tmp_table_factory.get(),
+                                                             enable_deletion_vectors))
     with_cpu_session(lambda spark: setup_clustered_table_sql(spark, gpu_data_path,
                                                              gpu_table_name,
-                                                             spark_tmp_table_factory.get()))
+                                                             spark_tmp_table_factory.get(),
+                                                             enable_deletion_vectors))
 
     def modify_table(spark, path):
         table_name = cpu_table_name if path == cpu_data_path else gpu_table_name
         spark.sql(sql_func(table_name))
+        optimize_liquid_clustered_table(spark, table_name)
 
     assert_gpu_and_cpu_writes_are_equal_collect(
         modify_table,
@@ -318,10 +349,9 @@ def do_test_delta_dml_sql_liquid_clustering(spark_tmp_path,
         base_data_path,
         conf=conf)
 
-@allow_non_gpu(*delta_meta_allow, delta_write_fallback_allow)
-@allow_non_gpu_delta_write_if(
-    is_databricks173_or_later(),
-    reason="DBR 17.3 liquid clustering DML may use CPU Delta write commands")
+@allow_non_gpu(*delta_meta_allow)
+@allow_non_gpu_conditional(is_databricks173_or_later(),
+                           "FileSourceScanExec,ColumnarToRowExec")
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(is_databricks_runtime() and not is_databricks133_or_later(),
@@ -334,11 +364,9 @@ def test_delta_delete_sql_liquid_clustering(spark_tmp_path, spark_tmp_table_fact
         spark_tmp_path, spark_tmp_table_factory, delta_delete_enabled_conf,
         lambda table_name: f"DELETE FROM {table_name} WHERE a > 0")
 
-@allow_non_gpu(*delta_meta_allow, delta_write_fallback_allow, "CreateTableExec",
-               "AppendDataExecV1")
-@allow_non_gpu_delta_write_if(
-    is_databricks173_or_later(),
-    reason="DBR 17.3 liquid clustering DML may use CPU Delta write commands")
+@allow_non_gpu(*delta_meta_allow, "CreateTableExec", "AppendDataExecV1")
+@allow_non_gpu_conditional(is_databricks173_or_later(),
+                           "FileSourceScanExec,ColumnarToRowExec")
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(is_databricks_runtime() and not is_databricks133_or_later(),
@@ -354,8 +382,10 @@ def test_delta_update_sql_liquid_clustering(spark_tmp_path,
         lambda table_name: f"UPDATE {table_name} SET e = e+1 WHERE a > 0")
 
 
-@allow_non_gpu(delta_write_fallback_allow, *delta_meta_allow)
+@allow_non_gpu(*delta_meta_allow)
 @allow_non_gpu_conditional(is_spark_400_or_later(), "HashAggregateExec")
+@allow_non_gpu_conditional(is_databricks173_or_later(),
+                           "FileSourceScanExec,ColumnarToRowExec")
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(is_databricks_runtime() and not is_databricks133_or_later(),
@@ -375,18 +405,23 @@ def test_delta_merge_sql_liquid_clustering(spark_tmp_path, spark_tmp_table_facto
     gpu_target_path = f"{base_target_path}/GPU"
     gpu_target_name = spark_tmp_table_factory.get()
 
+    enable_deletion_vectors = False if is_databricks173_or_later() else None
     with_cpu_session(lambda spark: setup_clustered_table_sql(spark, cpu_source_path,
                                                              cpu_source_name,
-                                                             spark_tmp_table_factory.get()))
+                                                             spark_tmp_table_factory.get(),
+                                                             enable_deletion_vectors))
     with_cpu_session(lambda spark: setup_clustered_table_sql(spark, gpu_source_path,
                                                              gpu_source_name,
-                                                             spark_tmp_table_factory.get()))
+                                                             spark_tmp_table_factory.get(),
+                                                             enable_deletion_vectors))
     with_cpu_session(lambda spark: setup_clustered_table_sql(spark, cpu_target_path,
                                                              cpu_target_name,
-                                                             spark_tmp_table_factory.get()))
+                                                             spark_tmp_table_factory.get(),
+                                                             enable_deletion_vectors))
     with_cpu_session(lambda spark: setup_clustered_table_sql(spark, gpu_target_path,
                                                              gpu_target_name,
-                                                             spark_tmp_table_factory.get()))
+                                                             spark_tmp_table_factory.get(),
+                                                             enable_deletion_vectors))
 
     def merge_table(spark, path):
         type = "cpu" if path == cpu_target_path else "gpu"
@@ -402,21 +437,14 @@ def test_delta_merge_sql_liquid_clustering(spark_tmp_path, spark_tmp_table_facto
               INSERT *
             """
         spark.sql(sql).collect()
+        optimize_liquid_clustered_table(spark, target_name)
 
     read_table = lambda spark, path: spark.read.format("delta").load(path)
-    if is_databricks173_or_later():
-        assert_gpu_fallback_write(
-            merge_table,
-            read_table,
-            base_target_path,
-            "ExecutedCommandExec",
-            conf=delta_merge_enabled_conf)
-    else:
-        assert_gpu_and_cpu_writes_are_equal_collect(
-            merge_table,
-            read_table,
-            base_target_path,
-            conf=delta_merge_enabled_conf)
+    assert_gpu_and_cpu_writes_are_equal_collect(
+        merge_table,
+        read_table,
+        base_target_path,
+        conf=delta_merge_enabled_conf)
 
 
 def create_clustered_delta_table_df(table_name, table_path):
@@ -465,6 +493,7 @@ def test_delta_append_df_liquid_clustering(spark_tmp_path, spark_tmp_table_facto
         create_clustered_delta_table_df(table_name, path)
         # Create a temp view to select from for the CTAS operation
         write_to_delta_table_df(spark, path, "append")
+        optimize_liquid_clustered_table(spark, table_name)
 
     data_path = spark_tmp_path + "/DELTA_LIQUID_CLUSTER"
 
@@ -496,6 +525,7 @@ def test_delta_insert_overwrite_df_liquid_clustering(spark_tmp_path,
         create_clustered_delta_table_df(table_name, path)
         write_to_delta_table_df(spark, path, "overwrite",
                                 opts = {'partitionOverwriteMode': overwrite_mode})
+        optimize_liquid_clustered_table(spark, table_name)
 
     data_path = spark_tmp_path + "/DELTA_LIQUID_CLUSTER"
 
@@ -527,6 +557,7 @@ def test_delta_insert_overwrite_replace_where_df_liquid_clustering(
         create_clustered_delta_table_df(table_name, path)
         write_to_delta_table_df(spark, path, "overwrite",
                                 opts = {'replaceWhere': " b='x' "})
+        optimize_liquid_clustered_table(spark, table_name)
 
     data_path = spark_tmp_path + "/DELTA_LIQUID_CLUSTER"
 

@@ -177,11 +177,11 @@ def assert_delta_log_json_equivalent(filename, c_json, g_json):
                 configuration.pop(config_key, None)
             d["configuration"] = json.dumps(configuration, sort_keys=True)
     def fixup_deletion_vector(c_val, g_val):
-        # DV storage IDs are table-specific; keep comparing stable descriptor fields.
+        # DV storage IDs and offsets are table-specific; compare stable descriptor fields.
         c_dv = c_val.get("deletionVector")
         g_dv = g_val.get("deletionVector")
         if c_dv and g_dv:
-            del_keys(("pathOrInlineDv",), c_dv, g_dv)
+            del_keys(("pathOrInlineDv", "offset"), c_dv, g_dv)
 
     for key, c_val in c_json.items():
         g_val = g_json[key]

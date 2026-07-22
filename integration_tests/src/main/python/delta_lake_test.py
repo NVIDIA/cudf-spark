@@ -693,8 +693,11 @@ def test_delta_deletion_vector_interleaved_file_splits(
         f"b={b_size}, max_split={max_split}")
 
     a_tail_start = a_size - a_tail
-    a_midpoints = parquet_row_group_midpoints(a_path)
-    b_midpoints = parquet_row_group_midpoints(b_path)
+    a_midpoints, b_midpoints = with_cpu_session(
+        lambda spark: (
+            parquet_row_group_midpoints(spark, a_path),
+            parquet_row_group_midpoints(spark, b_path),
+        ))
     assert any(a_tail_start <= midpoint < a_size for midpoint in a_midpoints), (
         f"A tail split [{a_tail_start}, {a_size}) has no row-group midpoint; "
         f"midpoints={a_midpoints}")

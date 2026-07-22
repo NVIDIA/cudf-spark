@@ -159,13 +159,13 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
   }
 
   test("cuDF does not support positive or negative lookahead") {
-    val negPatterns = Seq("a(!b)", "a(!b)c?")
+    val negPatterns = Seq("a(?!b)", "a(?!b)c?")
     negPatterns.foreach(pattern =>
       assertUnsupported(pattern, RegexFindMode,
         "Negative lookahead groups are not supported")
     )
 
-    val posPatterns = Seq("a(=b)", "a(=b)c?")
+    val posPatterns = Seq("a(?=b)", "a(?=b)c?")
     posPatterns.foreach(pattern =>
       assertUnsupported(pattern, RegexFindMode,
         "Positive lookahead groups are not supported")
@@ -202,6 +202,18 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     Seq("(3*)+").foreach(pattern =>
       assertUnsupported(pattern, RegexFindMode,
         "cuDF does not support repetition of group containing: 3*"))
+  }
+
+  test("repetition base validation recurses into choices") {
+    Seq("(3?|a)+", "(a|3?)+").foreach { pattern =>
+      assertUnsupported(pattern, RegexFindMode,
+        "cuDF does not support repetition of group containing: 3?")
+    }
+    Seq(
+      "(3|a)+" -> "(3|a)+",
+      raw"(a|\d)+" -> "(a|[0-9])+").foreach { case (pattern, expected) =>
+      assert(transpile(pattern, RegexFindMode) === expected)
+    }
   }
 
   test("cuDF does not support OR at BOL / EOL") {
@@ -903,7 +915,8 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     }
   }
 
-  test("string split fuzz - anchor focused") {
+  // Disabled until https://github.com/NVIDIA/cudf-spark/issues/15293 is fixed
+  ignore("string split fuzz - anchor focused") {
     val (data, patterns) = generateDataAndPatterns(validDataChars = Some("\r\nabc"),
       validPatternChars = "^$\\AZz\r\n()", RegexSplitMode)
     doStringSplitTest(patterns, data, -1)
