@@ -34,16 +34,15 @@ import org.apache.spark.sql.rapids.execution.TrampolineUtil
 
 /** Runs ScalaTest suites concurrently in isolated JVMs. */
 object ParallelUnitTestRunner {
-  private case class SuiteTask(id: Int, suite: String, weight: Double)
+  private[rapids] case class SuiteTask(id: Int, suite: String, weight: Double)
+  private[rapids] case class SuiteBatch(tasks: Seq[SuiteTask]) {
+    require(tasks.nonEmpty, "A suite batch must not be empty")
+  }
 
   private val unresolvedProperty = "${"
   private val parallelGpuAllocationRatio = 0.8
-  // Suites that must not share the GPU with concurrently running suites: ParquetWriterSuite for
-  // its long runtime, and the DPP suites whose GPU broadcasts starve under concurrent GPU load
-  // (premerge run 13639 hung in AEOn; run 13641 hit the 300s broadcast timeout in AEOff). Each
-  // runs serially on the dedicated fork in its own fresh JVM.
-  private val isolatedSuites = Seq(
-    "com.nvidia.spark.rapids.ParquetWriterSuite",
+  private val parquetWriterSuite = "com.nvidia.spark.rapids.ParquetWriterSuite"
+  private val dppSuites = Seq(
     "org.apache.spark.sql.rapids.suites.RapidsDynamicPartitionPruningV1SuiteAEOff",
     "org.apache.spark.sql.rapids.suites.RapidsDynamicPartitionPruningV1SuiteAEOn")
   private val sparkTestingProperty = "spark.testing"
@@ -70,6 +69,7 @@ object ParallelUnitTestRunner {
     val testClasses = Paths.get(config("testClasses")).toAbsolutePath
     val reportsDir = Paths.get(config("reportsDir")).toAbsolutePath
     val requestedForks = config("forkCount").toInt
+    require(requestedForks > 1, "parallelForkCount must be greater than 1")
     val wildcardSuites = propertyList(config("wildcardSuites"))
     // The serial scalatest plugin honors these filters, but this runner does not; fail fast
     // instead of silently running the full suite set on the caller's GPU.
@@ -110,20 +110,16 @@ object ParallelUnitTestRunner {
     val suiteTasks = orderSuites(discovered, testClasses)
         .zipWithIndex
         .map { case ((suite, weight), index) => SuiteTask(index + 1, suite, weight) }
+    val suiteBatches = createSuiteBatches(suiteTasks)
     val perForkAllocation = allocationFraction * parallelGpuAllocationRatio / forkCount
     val perForkMaxAllocation = maxAllocationFraction * parallelGpuAllocationRatio / forkCount
     val perForkMinAllocation = math.min(minAllocationFraction / forkCount, perForkMaxAllocation)
 
-    val dedicatedTasks = suiteTasks.filter(task => isolatedSuites.contains(task.suite))
-    val pooledTasks = suiteTasks.filterNot(task => isolatedSuites.contains(task.suite))
     println(s"Running ${discovered.size} suites with at most $forkCount concurrent processes")
-    if (dedicatedTasks.nonEmpty) {
-      println(s"  dedicated fork: ${dedicatedTasks.map(_.suite).mkString(", ")}")
+    suiteBatches.filter(_.tasks.size > 1).foreach { batch =>
+      println(s"  serial suite batch: ${batch.tasks.map(_.suite).mkString(", ")}")
     }
-    if (pooledTasks.nonEmpty) {
-      val poolSize = if (dedicatedTasks.nonEmpty && forkCount > 1) forkCount - 1 else forkCount
-      println(s"  worker pool: ${pooledTasks.size} suites across $poolSize persistent forks")
-    }
+    println(s"  worker pool: ${suiteBatches.size} batches across $forkCount persistent forks")
 
     val failures = sparkConfs.zipWithIndex.flatMap { case (sparkConf, runIndex) =>
       sparkConf.foreach(conf => println(s"Parallel test wave ${runIndex + 1}: SPARK_CONF=$conf"))
@@ -131,8 +127,7 @@ object ParallelUnitTestRunner {
       runWave(
         runId,
         sparkConf,
-        dedicatedTasks,
-        pooledTasks,
+        suiteBatches,
         forkCount,
         testClasses,
         reportsDir,
@@ -159,8 +154,7 @@ object ParallelUnitTestRunner {
   private def runWave(
       runId: Int,
       sparkConf: Option[String],
-      dedicatedTasks: Seq[SuiteTask],
-      pooledTasks: Seq[SuiteTask],
+      suiteBatches: Seq[SuiteBatch],
       forkCount: Int,
       testClasses: Path,
       reportsDir: Path,
@@ -174,14 +168,16 @@ object ParallelUnitTestRunner {
       suiteTimeoutSeconds: Long): Seq[String] = {
     val failures = new ConcurrentLinkedQueue[String]()
 
-    def runDedicated(): Unit = dedicatedTasks.foreach { task =>
-      // Record launch errors as failures: an uncaught throwable on the dedicated thread would
-      // otherwise skip the suite silently and let the wave report success.
-      try {
-        runSuite(
-          task,
+    val taskQueue = new ConcurrentLinkedQueue[SuiteBatch]()
+    suiteBatches.foreach(taskQueue.add)
+    val workers = (1 to math.min(forkCount, suiteBatches.size)).map { workerId =>
+      val thread = new Thread(s"parallel-unit-test-worker-$runId-$workerId") {
+        override def run(): Unit = runPoolWorker(
+          workerId,
           runId,
           sparkConf,
+          taskQueue,
+          failures,
           testClasses,
           reportsDir,
           childJvmArgs,
@@ -191,64 +187,18 @@ object ParallelUnitTestRunner {
           allocationFraction,
           maxAllocationFraction,
           minAllocationFraction,
-          suiteTimeoutSeconds).foreach(failures.add)
-      } catch {
-        case t: Throwable =>
-          failures.add(s"wave-$runId ${task.suite} could not be run: ${t.getMessage}")
+          suiteTimeoutSeconds)
       }
+      thread.start()
+      thread
     }
-
-    def runPool(workerCount: Int): Unit = {
-      if (pooledTasks.nonEmpty) {
-        val taskQueue = new ConcurrentLinkedQueue[SuiteTask]()
-        pooledTasks.foreach(taskQueue.add)
-        val workers = (1 to math.min(workerCount, pooledTasks.size)).map { workerId =>
-          val thread = new Thread(s"parallel-unit-test-worker-$runId-$workerId") {
-            override def run(): Unit = runPoolWorker(
-              workerId,
-              runId,
-              sparkConf,
-              taskQueue,
-              failures,
-              testClasses,
-              reportsDir,
-              childJvmArgs,
-              tagsToInclude,
-              tagsToExclude,
-              shuffleManagerOverride,
-              allocationFraction,
-              maxAllocationFraction,
-              minAllocationFraction,
-              suiteTimeoutSeconds)
-          }
-          thread.start()
-          thread
-        }
-        workers.foreach(_.join())
-        var unprocessed = taskQueue.poll()
-        while (unprocessed != null) {
-          failures.add(s"wave-$runId ${unprocessed.suite} was not processed")
-          unprocessed = taskQueue.poll()
-        }
+    workers.foreach(_.join())
+    var unprocessed = taskQueue.poll()
+    while (unprocessed != null) {
+      unprocessed.tasks.foreach { task =>
+        failures.add(s"wave-$runId ${task.suite} was not processed")
       }
-    }
-
-    if (dedicatedTasks.nonEmpty && pooledTasks.nonEmpty && forkCount == 1) {
-      runDedicated()
-      runPool(1)
-    } else {
-      val dedicatedThread = if (dedicatedTasks.isEmpty) {
-        None
-      } else {
-        val thread = new Thread(s"parallel-unit-test-dedicated-$runId") {
-          override def run(): Unit = runDedicated()
-        }
-        thread.start()
-        Some(thread)
-      }
-      val poolSize = if (dedicatedTasks.nonEmpty) forkCount - 1 else forkCount
-      runPool(poolSize)
-      dedicatedThread.foreach(_.join())
+      unprocessed = taskQueue.poll()
     }
 
     val failureResults = ArrayBuffer.empty[String]
@@ -259,66 +209,11 @@ object ParallelUnitTestRunner {
     failureResults.toSeq
   }
 
-  private def runSuite(
-      task: SuiteTask,
-      runId: Int,
-      sparkConf: Option[String],
-      testClasses: Path,
-      reportsDir: Path,
-      childJvmArgs: Seq[String],
-      tagsToInclude: Seq[String],
-      tagsToExclude: Seq[String],
-      shuffleManagerOverride: String,
-      allocationFraction: Double,
-      maxAllocationFraction: Double,
-      minAllocationFraction: Double,
-      suiteTimeoutSeconds: Long): Option[String] = {
-    val tmpDir = reportsDir.resolve(s"tmp-wave-$runId-suite-${task.id}")
-    Files.createDirectories(tmpDir)
-    println(f"[wave-$runId-suite-${task.id}] START ${task.suite} " +
-        f"(estimated weight ${task.weight}%.1f)")
-    val command = childCommand(
-      task,
-      runId,
-      testClasses,
-      reportsDir,
-      tmpDir,
-      childJvmArgs,
-      tagsToInclude,
-      tagsToExclude,
-      shuffleManagerOverride,
-      allocationFraction,
-      maxAllocationFraction,
-      minAllocationFraction)
-    val processBuilder = new ProcessBuilder(command: _*).redirectErrorStream(true)
-    sparkConf.foreach(processBuilder.environment().put("SPARK_CONF", _))
-    val process = processBuilder.start()
-    val outputThread = streamLines(s"wave-$runId-suite-${task.id}",
-      new BufferedReader(new InputStreamReader(process.getInputStream)))
-    val finished = process.waitFor(suiteTimeoutSeconds, TimeUnit.SECONDS)
-    if (!finished) {
-      System.err.println(s"wave-$runId ${task.suite} exceeded $suiteTimeoutSeconds seconds; " +
-          "capturing a thread dump and killing the fork")
-      dumpWorkerThreads(s"wave-$runId-suite-${task.id}", process, reportsDir)
-      process.destroyForcibly()
-      process.waitFor(workerDestroyTimeoutSeconds, TimeUnit.SECONDS)
-    }
-    outputThread.join(TimeUnit.SECONDS.toMillis(10))
-    if (!finished) {
-      Some(s"wave-$runId ${task.suite} exceeded the ${suiteTimeoutSeconds}s suite timeout")
-    } else if (process.exitValue() == 0) {
-      println(s"[wave-$runId-suite-${task.id}] PASS ${task.suite}")
-      None
-    } else {
-      Some(s"wave-$runId ${task.suite} exited with status ${process.exitValue()}")
-    }
-  }
-
   private def runPoolWorker(
       workerId: Int,
       runId: Int,
       sparkConf: Option[String],
-      taskQueue: ConcurrentLinkedQueue[SuiteTask],
+      taskQueue: ConcurrentLinkedQueue[SuiteBatch],
       failures: ConcurrentLinkedQueue[String],
       testClasses: Path,
       reportsDir: Path,
@@ -350,6 +245,7 @@ object ParallelUnitTestRunner {
     val processBuilder = new ProcessBuilder(command: _*)
     sparkConf.foreach(processBuilder.environment().put("SPARK_CONF", _))
     var currentTask: Option[SuiteTask] = None
+    var remainingBatchTasks = List.empty[SuiteTask]
     var process: Process = null
     try {
       process = processBuilder.start()
@@ -363,8 +259,19 @@ object ParallelUnitTestRunner {
       startSuiteWatchdog(runId, workerId, process, reportsDir, failures, suiteDeadlineNanos,
         () => currentTask.map(_.suite), suiteTimeoutSeconds)
 
+      def pollNextTask(): Option[SuiteTask] = remainingBatchTasks match {
+        case task :: tail =>
+          remainingBatchTasks = tail
+          Some(task)
+        case Nil =>
+          Option(taskQueue.poll()).flatMap { batch =>
+            remainingBatchTasks = batch.tasks.toList
+            pollNextTask()
+          }
+      }
+
       def sendNextTask(): Boolean = {
-        Option(taskQueue.poll()) match {
+        pollNextTask() match {
           case Some(task) =>
             currentTask = Some(task)
             suiteDeadlineNanos.set(
@@ -418,12 +325,18 @@ object ParallelUnitTestRunner {
         failures.add(s"wave-$runId ${task.suite} lost when worker-$workerId exited " +
             s"with status ${exitCode.getOrElse("unknown")}")
       }
+      remainingBatchTasks.foreach { task =>
+        failures.add(s"wave-$runId ${task.suite} was not processed after worker-$workerId exited")
+      }
       if (exited && exitCode.exists(_ != 0) && currentTask.isEmpty) {
         failures.add(s"wave-$runId worker-$workerId exited with status ${exitCode.get}")
       }
     } catch {
       case t: Throwable =>
-        currentTask.foreach(taskQueue.add)
+        val unfinishedTasks = currentTask.toSeq ++ remainingBatchTasks
+        if (unfinishedTasks.nonEmpty) {
+          taskQueue.add(SuiteBatch(unfinishedTasks))
+        }
         failures.add(s"wave-$runId worker-$workerId failed: ${t.getMessage}")
         // Do not leak a live worker JVM (and its GPU allocation) on coordinator errors.
         if (process != null && process.isAlive) {
@@ -657,35 +570,6 @@ object ParallelUnitTestRunner {
     SparkSession.clearDefaultSession()
   }
 
-  private def childCommand(
-      task: SuiteTask,
-      runId: Int,
-      testClasses: Path,
-      reportsDir: Path,
-      tmpDir: Path,
-      childJvmArgs: Seq[String],
-      tagsToInclude: Seq[String],
-      tagsToExclude: Seq[String],
-      shuffleManagerOverride: String,
-      allocationFraction: Double,
-      maxAllocationFraction: Double,
-      minAllocationFraction: Double): Seq[String] = {
-    val runnerArgs = scalaTestArgs(
-      task.suite,
-      task.id,
-      runId,
-      testClasses,
-      reportsDir,
-      tagsToInclude,
-      tagsToExclude)
-    javaCommand(childJvmArgs, childSystemProperties(
-      tmpDir,
-      shuffleManagerOverride,
-      allocationFraction,
-      maxAllocationFraction,
-      minAllocationFraction)) ++ Seq("org.scalatest.tools.Runner") ++ runnerArgs
-  }
-
   private def poolWorkerCommand(
       workerId: Int,
       runId: Int,
@@ -797,6 +681,20 @@ object ParallelUnitTestRunner {
       val weight = if (Files.exists(classFile)) Files.size(classFile).toDouble else 1.0
       suite -> weight
     }.sortBy { case (_, weight) => -weight }
+  }
+
+  private[rapids] def createSuiteBatches(tasks: Seq[SuiteTask]): Seq[SuiteBatch] = {
+    val taskBySuite = tasks.map(task => task.suite -> task).toMap
+    // Submit these first so the long Parquet suite gets one worker while both DPP suites are
+    // pinned to another worker and execute serially. Each worker rejoins the general queue after
+    // completing its special batch.
+    val specialBatches = Seq(Seq(parquetWriterSuite), dppSuites).flatMap { suites =>
+      val batchTasks = suites.flatMap(taskBySuite.get)
+      if (batchTasks.nonEmpty) Some(SuiteBatch(batchTasks)) else None
+    }
+    val specialSuites = specialBatches.flatMap(_.tasks.map(_.suite)).toSet
+    specialBatches ++ tasks.filterNot(task => specialSuites.contains(task.suite))
+        .map(task => SuiteBatch(Seq(task)))
   }
 
   private def discoverSuiteNames(testClasses: Path): Seq[String] = {

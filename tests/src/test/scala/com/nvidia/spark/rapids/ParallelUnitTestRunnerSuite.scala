@@ -28,6 +28,28 @@ import org.apache.spark.SparkConf
 import org.apache.spark.sql.SparkSession
 
 class ParallelUnitTestRunnerSuite extends AnyFunSuite {
+  test("special suites are submitted as serial worker batches") {
+    val parquetSuite = "com.nvidia.spark.rapids.ParquetWriterSuite"
+    val dppOff =
+      "org.apache.spark.sql.rapids.suites.RapidsDynamicPartitionPruningV1SuiteAEOff"
+    val dppOn =
+      "org.apache.spark.sql.rapids.suites.RapidsDynamicPartitionPruningV1SuiteAEOn"
+    val tasks = Seq(
+      ParallelUnitTestRunner.SuiteTask(1, "example.SuiteOne", 5.0),
+      ParallelUnitTestRunner.SuiteTask(2, dppOn, 4.0),
+      ParallelUnitTestRunner.SuiteTask(3, parquetSuite, 3.0),
+      ParallelUnitTestRunner.SuiteTask(4, dppOff, 2.0),
+      ParallelUnitTestRunner.SuiteTask(5, "example.SuiteTwo", 1.0))
+
+    val batches = ParallelUnitTestRunner.createSuiteBatches(tasks)
+
+    assert(batches.map(_.tasks.map(_.suite)) === Seq(
+      Seq(parquetSuite),
+      Seq(dppOff, dppOn),
+      Seq("example.SuiteOne"),
+      Seq("example.SuiteTwo")))
+  }
+
   test("JUnit XML reports are scoped by test wave") {
     val reportsDir = Files.createTempDirectory("parallel-unit-test-reports")
     try {
