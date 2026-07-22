@@ -108,8 +108,11 @@ def test_delta_update_disabled_fallback(spark_tmp_path, disable_conf, enable_del
         update_sql="UPDATE delta.`{}` SET a = 0".format(path)
         spark.sql(update_sql)
     with_cpu_session(setup_tables)
+    expected_fallback = ("ExecutedCommandExec"
+                         if "spark.rapids.sql.command.UpdateCommand" in disable_conf
+                         else delta_write_fallback_check)
     assert_gpu_fallback_write(write_func, read_delta_path, data_path,
-                              delta_write_fallback_check, disable_conf)
+                              expected_fallback, disable_conf)
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake

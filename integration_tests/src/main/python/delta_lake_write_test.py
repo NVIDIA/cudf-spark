@@ -230,6 +230,7 @@ def test_delta_db173_native_managed_ctas_rtas(
         spark_tmp_table_factory, enable_deletion_vectors, column_mapping, optimized_write):
     conf = copy_and_update(writer_confs, delta_writes_enabled_conf, {
         "spark.databricks.delta.optimizeWrite.enabled": str(optimized_write).lower(),
+        "spark.sql.adaptive.enabled": "true",
         "spark.sql.execution.sortBeforeRepartition": "true",
     })
     if column_mapping is not None:
@@ -279,13 +280,15 @@ def test_delta_db173_native_managed_ctas_rtas(
     assert_db173_gpu_data_writing_command(
         lambda spark: write_table(spark, gpu_table, False), conf=conf,
         optimized_write=optimized_write,
-        expected_atomic_gpu_class="GpuAtomicReplaceTableAsSelectExec")
+        expected_atomic_gpu_class="GpuAtomicReplaceTableAsSelectExec",
+        aqe_enabled=True)
 
     with_cpu_session(lambda spark: write_table(spark, cpu_table, True), conf=conf)
     assert_db173_gpu_data_writing_command(
         lambda spark: write_table(spark, gpu_table, True), conf=conf,
         optimized_write=optimized_write,
-        expected_atomic_gpu_class="GpuAtomicReplaceTableAsSelectExec")
+        expected_atomic_gpu_class="GpuAtomicReplaceTableAsSelectExec",
+        aqe_enabled=True)
 
     def table_state(spark, table):
         rows = spark.table(table).orderBy("carrier_id").collect()
@@ -1476,12 +1479,17 @@ def test_delta_write_optimized_unsupported_sort_fallback(spark_tmp_path, gen):
         "spark.sql.execution.sortBeforeRepartition": "true",
         "spark.databricks.delta.properties.defaults.autoOptimize.optimizeWrite": "true"
     })
-    assert_gpu_fallback_write(
-        lambda spark, path: unary_op_df(spark, gen).coalesce(1).write.format("delta").save(path),
-        lambda spark, path: spark.read.format("delta").load(path),
-        data_path,
-        delta_write_fallback_check,
-        conf=confs)
+    write_func = lambda spark, path: unary_op_df(spark, gen).coalesce(1) \
+        .write.format("delta").save(path)
+    read_func = lambda spark, path: spark.read.format("delta").load(path)
+    if is_databricks173_or_later():
+        # DBR 17.3 AQE optimized writes use a GPU DELTA_OPTIMIZED_WRITE hash exchange and do not
+        # execute the legacy DeltaOptimizedWriterExec sort that requires sortable nested types.
+        assert_gpu_and_cpu_writes_are_equal_collect(
+            write_func, read_func, data_path, conf=confs)
+    else:
+        assert_gpu_fallback_write(
+            write_func, read_func, data_path, delta_write_fallback_check, conf=confs)
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake

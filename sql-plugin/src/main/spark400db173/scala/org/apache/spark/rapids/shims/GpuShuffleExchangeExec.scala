@@ -99,6 +99,10 @@ case class GpuShuffleExchangeExec(
   }
 
   override def withNewNumPartitions(numPartitions: Int): ShuffleExchangeLike = {
+    // DeltaOptimizedWritePartitioning is a planning marker and inherits the unsupported default
+    // implementation of withNewNumPartitions. Once AQE explicitly resizes the exchange, use its
+    // advertised physical partitioning as the new target, matching the requested partition count
+    // across the target, GPU partitioning, and shuffle dependency.
     val newTargetPartitioning = outputPartitioning.withNewNumPartitions(numPartitions)
     val newExec = copy(gpuPartitioningWithNumPartitions(numPartitions), child, shuffleOrigin,
       adaptiveRepartitioningStatus)(newTargetPartitioning)
@@ -109,6 +113,8 @@ case class GpuShuffleExchangeExec(
   def repartition(numPartitions: Int,
       updatedRepartitioningStatus: AdaptiveRepartitioningStatus):
       ShuffleExchangeLike = {
+    // See withNewNumPartitions: an explicitly resized exchange no longer uses the zero-partition
+    // Delta optimized-write marker as its target.
     val newTargetPartitioning = outputPartitioning.withNewNumPartitions(numPartitions)
     copy(gpuPartitioningWithNumPartitions(numPartitions), child, shuffleOrigin,
       updatedRepartitioningStatus)(newTargetPartitioning)

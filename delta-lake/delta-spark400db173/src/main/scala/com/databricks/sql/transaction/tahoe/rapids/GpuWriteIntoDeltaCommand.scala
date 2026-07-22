@@ -129,7 +129,8 @@ class GpuWriteIntoDeltaCommandMeta(
       willNotWorkOnGpu(s"Delta file format ${cmd.fileFormat.getClass.getName} is not supported")
     } else {
       fileFormat = GpuParquetFileFormat.tagGpuSupport(
-        this, TrampolineConnectShims.getActiveSession, cmd.options, cmd.query.schema)
+        this, TrampolineConnectShims.getActiveSession, cmd.options, cmd.hadoopConf,
+        cmd.query.schema)
     }
     if (cmd.bucketSpec.nonEmpty) {
       willNotWorkOnGpu("Bucketed Delta writes are not supported")
