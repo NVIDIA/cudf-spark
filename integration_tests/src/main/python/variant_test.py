@@ -14,8 +14,8 @@
 
 import pytest
 
-from asserts import assert_gpu_and_cpu_are_equal_collect
-from marks import incompat
+from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect
+from marks import allow_non_gpu, incompat
 from spark_session import is_before_spark_400, with_cpu_session
 
 pytestmark = [pytest.mark.premerge_ci_1]
@@ -47,3 +47,17 @@ def test_parquet_variant_try_get_string(spark_tmp_path):
         lambda spark: spark.read.parquet(data_path).selectExpr(
             "try_variant_get(v, '$.y', 'string') AS y"),
         conf=_variant_parquet_conf)
+
+
+@allow_non_gpu('ProjectExec')
+@incompat
+@pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
+def test_variant_try_get_int_falls_back():
+    def do_it(spark):
+        return spark.createDataFrame([
+            ('{"x":7}',),
+            ('{"x":42}',),
+            ('{"y":"zzz"}',)
+        ], ['json']).selectExpr("try_variant_get(parse_json(json), '$.x', 'int') AS x")
+
+    assert_gpu_fallback_collect(do_it, 'VariantGet')

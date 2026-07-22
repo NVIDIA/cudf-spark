@@ -31,7 +31,7 @@ import com.nvidia.spark.rapids.jni.VariantUtils
 
 import org.apache.spark.sql.catalyst.expressions.{Expression, Literal}
 import org.apache.spark.sql.catalyst.expressions.variant.VariantGet
-import org.apache.spark.sql.types.{ByteType, DataType, IntegerType, LongType, ShortType, StringType}
+import org.apache.spark.sql.types.{DataType, StringType}
 import org.apache.spark.unsafe.types.UTF8String
 
 class GpuVariantGetMeta(
@@ -47,7 +47,8 @@ class GpuVariantGetMeta(
     }
 
     if (!GpuVariantGet.isSupportedTargetType(expr.targetType)) {
-      willNotWorkOnGpu(s"target type ${expr.targetType.simpleString} is not supported")
+      willNotWorkOnGpu(s"target type ${expr.targetType.simpleString} is not supported; " +
+        "only string targets are enabled until Spark-compatible Variant casts are implemented")
     }
 
     GpuVariantGet.parseSimplePath(expr.path) match {
@@ -109,7 +110,7 @@ object GpuVariantGet {
   private val SimplePath = """^(?:\$\.)?([A-Za-z_][A-Za-z0-9_]*)$""".r
 
   def isSupportedTargetType(dt: DataType): Boolean = dt match {
-    case ByteType | ShortType | IntegerType | LongType | StringType => true
+    case StringType => true
     case _ => false
   }
 
@@ -123,10 +124,6 @@ object GpuVariantGet {
   }
 
   def toCudfTargetType(dt: DataType): DType = dt match {
-    case ByteType => DType.INT8
-    case ShortType => DType.INT16
-    case IntegerType => DType.INT32
-    case LongType => DType.INT64
     case StringType => DType.STRING
     case other => throw new IllegalArgumentException(s"unsupported variant target type: $other")
   }
