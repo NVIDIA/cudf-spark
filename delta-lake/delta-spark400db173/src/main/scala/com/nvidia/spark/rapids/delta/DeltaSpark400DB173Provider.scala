@@ -25,7 +25,7 @@ import com.databricks.sql.execution.metric.IncrementMetric
 import com.databricks.sql.transaction.tahoe.{DeltaConfigs, DeltaOptions}
 import com.databricks.sql.transaction.tahoe.DeltaParquetFileFormat
 import com.databricks.sql.transaction.tahoe.commands.{OptimizeTableCommand,
-  OptimizeTableCommandEdge, WriteIntoDeltaEdge}
+  OptimizeTableCommandEdge, WriteIntoDeltaCommand, WriteIntoDeltaEdge}
 import com.databricks.sql.transaction.tahoe.coordinatedcommits.{
   CatalogOwnedTableUtils,
   CoordinatedCommitsUtils
@@ -33,7 +33,8 @@ import com.databricks.sql.transaction.tahoe.coordinatedcommits.{
 import com.databricks.sql.transaction.tahoe.rapids.{
   GpuDeltaLog,
   GpuDeltaV1Write,
-  GpuWriteIntoDelta
+  GpuWriteIntoDelta,
+  GpuWriteIntoDeltaCommandMeta
 }
 import com.databricks.sql.transaction.tahoe.sources.DeltaSQLConf
 import com.nvidia.spark.rapids._
@@ -61,7 +62,7 @@ import org.apache.spark.sql.execution.{
   RowToColumnarExec,
   SparkPlan
 }
-import org.apache.spark.sql.execution.command.RunnableCommand
+import org.apache.spark.sql.execution.command.{DataWritingCommand, RunnableCommand}
 import org.apache.spark.sql.execution.datasources.{FileFormat, HadoopFsRelation, LogicalRelation}
 import org.apache.spark.sql.execution.datasources.v2.{
   AtomicCreateTableAsSelectExec,
@@ -73,6 +74,15 @@ import org.apache.spark.sql.sources.InsertableRelation
 import org.apache.spark.sql.types.StructType
 
 object DeltaSpark400DB173Provider extends DatabricksDeltaProviderBase {
+
+  override def getDataWritingCommandRules: Map[Class[_ <: DataWritingCommand],
+      DataWritingCommandRule[_ <: DataWritingCommand]] = {
+    Seq(
+      GpuOverrides.dataWriteCmd[WriteIntoDeltaCommand](
+        "Write files for a DBR Delta transaction",
+        (a, conf, p, r) => new GpuWriteIntoDeltaCommandMeta(a, conf, p, r))
+    ).map(r => (r.getClassFor.asSubclass(classOf[DataWritingCommand]), r)).toMap
+  }
 
   override def getRunnableCommandRules: Map[Class[_ <: RunnableCommand],
       RunnableCommandRule[_ <: RunnableCommand]] = {

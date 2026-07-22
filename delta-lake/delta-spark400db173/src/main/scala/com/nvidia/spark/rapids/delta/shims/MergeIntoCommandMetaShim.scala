@@ -16,9 +16,7 @@
 
 package com.nvidia.spark.rapids.delta.shims
 
-import com.databricks.sql.io.skipping.liquid.ClusteredTableUtils
 import com.databricks.sql.transaction.tahoe.DeltaLog
-import com.databricks.sql.transaction.tahoe.actions.Protocol
 import com.databricks.sql.transaction.tahoe.commands.{DeletionVectorUtils, MergeIntoCommand,
   MergeIntoCommandBase, MergeIntoCommandEdge}
 import com.databricks.sql.transaction.tahoe.rapids.{GpuDeltaLog, GpuMergeIntoCommand}
@@ -44,19 +42,10 @@ object MergeIntoCommandMetaShim {
     if (mergeCmd.notMatchedBySourceClauses.nonEmpty) {
       meta.willNotWorkOnGpu("notMatchedBySourceClauses not supported on GPU")
     }
-    tagLiquidClusteringFallback(meta, mergeCmd.targetFileIndex.protocol)
     tagPersistentDeletionVectorFallback(
       meta,
       mergeCmd.targetFileIndex.deltaLog,
       mergeCmd.conf.getConf(DeltaSQLConf.MERGE_USE_PERSISTENT_DELETION_VECTORS))
-  }
-
-  private def tagLiquidClusteringFallback(
-      meta: RapidsMeta[_, _, _],
-      protocol: Protocol): Unit = {
-    if (ClusteredTableUtils.isSupported(protocol)) {
-      meta.willNotWorkOnGpu("Delta MERGE with liquid clustering is not supported on GPU")
-    }
   }
 
   private def tagPersistentDeletionVectorFallback(
