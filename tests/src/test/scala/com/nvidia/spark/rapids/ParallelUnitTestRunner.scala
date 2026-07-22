@@ -749,7 +749,7 @@ object ParallelUnitTestRunner {
     s"-Dspark.rapids.memory.gpu.maxAllocFraction=$maxAllocationFraction",
     s"-Dspark.rapids.memory.gpu.minAllocFraction=$minAllocationFraction")
 
-  private def scalaTestArgs(
+  private[rapids] def scalaTestArgs(
       suite: String,
       taskId: Int,
       runId: Int,
@@ -757,10 +757,12 @@ object ParallelUnitTestRunner {
       reportsDir: Path,
       tagsToInclude: Seq[String],
       tagsToExclude: Seq[String]): ArrayBuffer[String] = {
+    val xmlReportsDir = reportsDir.resolve(s"wave-$runId")
+    Files.createDirectories(xmlReportsDir)
     val runnerArgs = ArrayBuffer[String](
       "-R", testClasses.toString,
       "-o",
-      "-u", reportsDir.toString,
+      "-u", xmlReportsDir.toString,
       "-f", reportsDir.resolve(s"scala-test-output-wave-$runId-suite-$taskId.txt").toString)
     if (tagsToInclude.nonEmpty) {
       runnerArgs ++= Seq("-n", tagsToInclude.mkString(" "))
@@ -833,9 +835,11 @@ object ParallelUnitTestRunner {
         .toSeq
   }
 
-  private def loadTimings(reportsDir: Path): Map[String, Double] = {
+  private[rapids] def loadTimings(reportsDir: Path): Map[String, Double] = {
     val builder = DocumentBuilderFactory.newInstance().newDocumentBuilder()
-    val stream = Files.list(reportsDir)
+    // Multi-wave runs keep each wave's JUnit XML in a separate subdirectory. Walk the report tree
+    // so a subsequent non-clean run can still reuse those timings.
+    val stream = Files.walk(reportsDir)
     try {
       val iterator = stream.iterator()
       val timings = scala.collection.mutable.Map.empty[String, Double]

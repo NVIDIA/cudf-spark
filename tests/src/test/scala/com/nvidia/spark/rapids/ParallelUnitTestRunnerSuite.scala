@@ -18,7 +18,8 @@ package com.nvidia.spark.rapids
 
 import java.io.{
   BufferedWriter, ByteArrayInputStream, ByteArrayOutputStream, InputStream, OutputStream, Writer}
-import java.nio.file.Files
+import java.nio.charset.StandardCharsets
+import java.nio.file.{Files, Paths}
 import java.util.concurrent.{CountDownLatch, TimeUnit}
 
 import org.apache.hadoop.fs.FileUtil
@@ -28,6 +29,47 @@ import org.apache.spark.SparkConf
 import org.apache.spark.sql.SparkSession
 
 class ParallelUnitTestRunnerSuite extends AnyFunSuite {
+  test("JUnit XML reports are scoped by test wave") {
+    val reportsDir = Files.createTempDirectory("parallel-unit-test-reports")
+    try {
+      val wave1Args = ParallelUnitTestRunner.scalaTestArgs(
+        "example.Suite", 1, 1, reportsDir, reportsDir, Seq.empty, Seq.empty)
+      val wave2Args = ParallelUnitTestRunner.scalaTestArgs(
+        "example.Suite", 1, 2, reportsDir, reportsDir, Seq.empty, Seq.empty)
+
+      val wave1Reports = Paths.get(wave1Args(wave1Args.indexOf("-u") + 1))
+      val wave2Reports = Paths.get(wave2Args(wave2Args.indexOf("-u") + 1))
+      assert(wave1Reports === reportsDir.resolve("wave-1"))
+      assert(wave2Reports === reportsDir.resolve("wave-2"))
+      assert(Files.isDirectory(wave1Reports))
+      assert(Files.isDirectory(wave2Reports))
+    } finally {
+      FileUtil.fullyDelete(reportsDir.toFile)
+    }
+  }
+
+  test("historical timings are loaded from wave report directories") {
+    val reportsDir = Files.createTempDirectory("parallel-unit-test-timings")
+    val wave1Reports = Files.createDirectories(reportsDir.resolve("wave-1"))
+    val wave2Reports = Files.createDirectories(reportsDir.resolve("wave-2"))
+    try {
+      Files.write(
+        wave1Reports.resolve("TEST-example.SuiteOne.xml"),
+        "<testsuite name=\"example.SuiteOne\" time=\"12.5\"/>"
+            .getBytes(StandardCharsets.UTF_8))
+      Files.write(
+        wave2Reports.resolve("TEST-example.SuiteTwo.xml"),
+        "<testsuite name=\"example.SuiteTwo\" time=\"7.25\"/>"
+            .getBytes(StandardCharsets.UTF_8))
+
+      assert(ParallelUnitTestRunner.loadTimings(reportsDir) === Map(
+        "example.SuiteOne" -> 12.5,
+        "example.SuiteTwo" -> 7.25))
+    } finally {
+      FileUtil.fullyDelete(reportsDir.toFile)
+    }
+  }
+
   test("a forcibly terminated worker does not count as a test failure") {
     class TimedOutProcess extends Process {
       private var alive = true
