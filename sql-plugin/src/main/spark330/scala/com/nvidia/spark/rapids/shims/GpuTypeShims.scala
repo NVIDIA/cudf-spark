@@ -13,12 +13,36 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+/*** spark-rapids-shim-json-lines
+{"spark": "330"}
+{"spark": "330db"}
+{"spark": "331"}
+{"spark": "332"}
+{"spark": "332db"}
+{"spark": "333"}
+{"spark": "334"}
+{"spark": "340"}
+{"spark": "341"}
+{"spark": "341db"}
+{"spark": "342"}
+{"spark": "343"}
+{"spark": "344"}
+{"spark": "350"}
+{"spark": "350db143"}
+{"spark": "351"}
+{"spark": "352"}
+{"spark": "353"}
+{"spark": "354"}
+{"spark": "355"}
+{"spark": "356"}
+{"spark": "357"}
+{"spark": "358"}
+spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
 import ai.rapids.cudf
 import ai.rapids.cudf.{DType, Scalar}
-import com.nvidia.spark.rapids.{ColumnarCopyHelper, GpuColumnVector, RapidsHostColumnBuilder}
-import com.nvidia.spark.rapids.{TypeConverter, TypeSig}
+import com.nvidia.spark.rapids.{ColumnarCopyHelper, RapidsHostColumnBuilder, TypeConverter, TypeSig}
 import com.nvidia.spark.rapids.GpuRowToColumnConverter.{IntConverter, LongConverter, NotNullIntConverter, NotNullLongConverter}
 
 import org.apache.spark.sql.types.{DataType, DayTimeIntervalType, YearMonthIntervalType}
@@ -99,8 +123,6 @@ object GpuTypeShims {
       case _: YearMonthIntervalType =>
         // use int32 as Spark does
         DType.INT32
-      case dt if GpuColumnVector.isVariantType(dt) =>
-        DType.STRUCT
       case _ =>
         null
     }
@@ -215,13 +237,13 @@ object GpuTypeShims {
   /**
    * Get additional Parquet supported types for this Shim
    */
-  def additionalParquetSupportedTypes: TypeSig = TypeSig.ansiIntervals + TypeSig.VARIANT
+  def additionalParquetSupportedTypes: TypeSig = TypeSig.ansiIntervals
 
   /**
    * Get additional common operators supported types for this Shim
    * (filter, sample, project, alias, table scan ...... which GPU supports from 330)
    */
-  def additionalCommonOperatorSupportedTypes: TypeSig = TypeSig.ansiIntervals + TypeSig.VARIANT
+  def additionalCommonOperatorSupportedTypes: TypeSig = TypeSig.ansiIntervals
 
   def hasSideEffectsIfCastIntToYearMonth(ym: DataType): Boolean =
       // if cast(int as interval year), multiplication by 12 can cause overflow
