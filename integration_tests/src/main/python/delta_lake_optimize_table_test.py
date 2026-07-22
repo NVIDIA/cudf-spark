@@ -32,11 +32,11 @@ _liquid_optimize_dv_conf = copy_and_update(_optimize_conf, {
 })
 
 _optimize_deletion_vector_values = [False] if is_databricks173_or_later() else \
-    deletion_vector_values_with_350DB143_xfail_reasons(
+    deletion_vector_values_with_xfail_reasons(
         enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042')
 
 _optimize_clustered_deletion_vector_values = deletion_vector_values if is_databricks173_or_later() else \
-    deletion_vector_values_with_350DB143_xfail_reasons(
+    deletion_vector_values_with_xfail_reasons(
         enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042')
 
 

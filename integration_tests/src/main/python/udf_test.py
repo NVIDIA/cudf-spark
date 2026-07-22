@@ -17,7 +17,7 @@ from pyspark import BarrierTaskContext, TaskContext
 
 from conftest import is_at_least_precommit_run, is_databricks_runtime
 from spark_session import (is_before_spark_331, is_before_spark_350,
-                           is_databricks143_or_later, is_spark_400_or_later,
+                           is_spark_400_or_later,
                            is_spark_411_or_later, is_spark_420_or_later)
 
 from pyspark.sql.pandas.utils import require_minimum_pyarrow_version, require_minimum_pandas_version
@@ -458,7 +458,7 @@ def test_map_arrow_apply_udf(data_gen):
         conf=conf)
 
 
-map_in_pandas_node_name = 'MapInArrowExec' if is_spark_400_or_later() or is_databricks143_or_later() \
+map_in_pandas_node_name = 'MapInArrowExec' if is_spark_400_or_later() or is_databricks_runtime() \
     else 'PythonMapInArrowExec'
 
 @pytest.mark.parametrize('data_type', ['string', 'binary'], ids=idfn)
@@ -501,9 +501,9 @@ def test_map_pandas_udf_with_empty_partitions():
                     reason='mapInPandas with barrier mode is introduced by Pyspark 3.5.0')
 @pytest.mark.parametrize('is_barrier', [True, False], ids=idfn)
 def test_map_in_pandas_with_barrier_mode(is_barrier):
-    # The "tc" here can be either a BarrierTaskContext or TaskContext on DB14.3,
+    # The "tc" here can be either a BarrierTaskContext or TaskContext on Databricks,
     # not sure any special change made by DB.
-    tc_types = (BarrierTaskContext, TaskContext) if is_databricks143_or_later() else BarrierTaskContext
+    tc_types = (BarrierTaskContext, TaskContext) if is_databricks_runtime() else BarrierTaskContext
 
     def func(iterator):
         tc = TaskContext.get()
@@ -524,9 +524,9 @@ def test_map_in_pandas_with_barrier_mode(is_barrier):
                     reason='mapInArrow with barrier mode is introduced by Pyspark 3.5.0')
 @pytest.mark.parametrize('is_barrier', [True, False], ids=idfn)
 def test_map_in_arrow_with_barrier_mode(is_barrier):
-    # The "tc" here can be either a BarrierTaskContext or TaskContext on DB14.3,
+    # The "tc" here can be either a BarrierTaskContext or TaskContext on Databricks,
     # not sure any special change made by DB.
-    tc_types = (BarrierTaskContext, TaskContext) if is_databricks143_or_later() else BarrierTaskContext
+    tc_types = (BarrierTaskContext, TaskContext) if is_databricks_runtime() else BarrierTaskContext
 
     def func(iterator):
         tc = TaskContext.get()
