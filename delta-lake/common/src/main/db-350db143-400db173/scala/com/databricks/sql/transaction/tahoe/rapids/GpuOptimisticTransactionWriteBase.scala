@@ -22,6 +22,7 @@
 package com.databricks.sql.transaction.tahoe.rapids
 
 import java.net.URI
+
 import scala.collection.mutable.ListBuffer
 
 import com.databricks.sql.transaction.tahoe._
