@@ -18,7 +18,7 @@ import pytest
 import re
 
 from spark_session import is_databricks122_or_later, supports_delta_lake_deletion_vectors, is_databricks143_or_later, \
-    is_databricks173_or_later, is_databricks_runtime, with_cpu_session, with_gpu_session
+    is_databricks173_or_later, with_cpu_session, with_gpu_session
 from asserts import assert_equal
 from conftest import spark_jvm
 
@@ -98,29 +98,6 @@ delta_write_fallback_allow = "ExecutedCommandExec,DataWritingCommandExec,WriteFi
 delta_write_fallback_check = "DataWritingCommandExec" if is_databricks122_or_later() else "ExecutedCommandExec"
 
 delta_optimized_write_fallback_allow = "ExecutedCommandExec,DataWritingCommandExec,DeltaOptimizedWriterExec,WriteFilesExec" if is_databricks122_or_later() else "ExecutedCommandExec"
-
-
-def delta_lake_version():
-    """Return the loaded OSS Delta Lake implementation version, if it is available."""
-    if is_databricks_runtime():
-        return None
-    try:
-        jvm = spark_jvm()
-        class_loader = jvm.java.lang.Thread.currentThread().getContextClassLoader()
-        delta_log_class = jvm.java.lang.Class.forName(
-            "org.apache.spark.sql.delta.DeltaLog", False, class_loader)
-        delta_package = delta_log_class.getPackage()
-        return None if delta_package is None else delta_package.getImplementationVersion()
-    except Exception:
-        # Delta tests can be collected without an OSS Delta jar on the classpath. Treat a missing
-        # class or manifest version as unsupported instead of failing test discovery.
-        return None
-
-
-def is_oss_delta_lake_41():
-    version = delta_lake_version()
-    return version is not None and str(version).split(".", 2)[:2] == ["4", "1"]
-
 
 def _fixup_operation_metrics(opm):
     """Update the specified operationMetrics node to facilitate log comparisons"""
