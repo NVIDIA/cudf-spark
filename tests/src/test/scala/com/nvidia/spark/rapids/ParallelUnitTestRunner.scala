@@ -639,8 +639,11 @@ object ParallelUnitTestRunner {
       tagsToExclude: Seq[String]): ArrayBuffer[String] = {
     val xmlReportsDir = reportsDir.resolve(s"wave-$runId")
     Files.createDirectories(xmlReportsDir)
+    // The worker JVM already has testClasses on its system classpath. Passing -R here makes
+    // ScalaTest create a new classloader for every Runner.run invocation. Spark retains JVM-wide
+    // state between suites, so types loaded by the previous runner (for example,
+    // ParquetCachedBatchSerializer) then fail identity checks in the next suite.
     val runnerArgs = ArrayBuffer[String](
-      "-R", testClasses.toString,
       "-o",
       "-u", xmlReportsDir.toString,
       "-f", reportsDir.resolve(s"scala-test-output-wave-$runId-suite-$taskId.txt").toString)

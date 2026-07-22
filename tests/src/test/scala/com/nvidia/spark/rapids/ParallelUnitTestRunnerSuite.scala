@@ -58,6 +58,8 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
       val wave2Args = ParallelUnitTestRunner.scalaTestArgs(
         "example.Suite", 1, 2, reportsDir, reportsDir, Seq.empty, Seq.empty)
 
+      assert(!wave1Args.contains("-R"))
+      assert(!wave2Args.contains("-R"))
       val wave1Reports = Paths.get(wave1Args(wave1Args.indexOf("-u") + 1))
       val wave2Reports = Paths.get(wave2Args(wave2Args.indexOf("-u") + 1))
       assert(wave1Reports === reportsDir.resolve("wave-1"))
