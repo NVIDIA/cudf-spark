@@ -533,6 +533,8 @@ protected case class GpuParquetFileFilterHandler(
           schemaBuilder.addChild(field.name, convertToParquetNative(field.dataType))
         }
         schemaBuilder.build()
+      case dt if GpuColumnVector.isVariantType(dt) =>
+        new ParquetFooter.ValueElement()
       case _: NumericType | BinaryType | BooleanType | DateType | TimestampType | StringType =>
         new ParquetFooter.ValueElement()
       case at: ArrayType =>
@@ -811,6 +813,33 @@ protected case class GpuParquetFileFilterHandler(
     }
   }
 
+  private def isVariantPhysicalType(
+      fileType: Type,
+      isCaseSensitive: Boolean): Boolean = {
+    if (fileType.isPrimitive) {
+      false
+    } else {
+      val fieldMap = fileType.asGroupType().getFields.asScala.map { field =>
+        val fieldName = if (isCaseSensitive) {
+          field.getName
+        } else {
+          field.getName.toLowerCase(Locale.ROOT)
+        }
+        fieldName -> field
+      }.toMap
+
+      def isBinaryField(name: String): Boolean = {
+        val lookupName = if (isCaseSensitive) name else name.toLowerCase(Locale.ROOT)
+        fieldMap.get(lookupName).exists { field =>
+          field.isPrimitive &&
+            field.asPrimitiveType().getPrimitiveTypeName == PrimitiveTypeName.BINARY
+        }
+      }
+
+      isBinaryField("metadata") && isBinaryField("value")
+    }
+  }
+
   /**
    * Recursively check if the read schema is compatible with the file schema. The errorCallback
    * will be invoked to throw an exception once any incompatible type pairs are found.
@@ -913,6 +942,11 @@ protected case class GpuParquetFileFilterHandler(
           rootFileType, rootReadType)
         checkSchemaCompat(parquetMapValue, map.valueType, errorCallback, isCaseSensitive,
           useFieldId, rootFileType, rootReadType)
+
+      case dt if GpuColumnVector.isVariantType(dt) =>
+        if (!isVariantPhysicalType(fileType, isCaseSensitive)) {
+          errorCallback(rootFileType.getOrElse(fileType), rootReadType.getOrElse(readType))
+        }
 
       case dt =>
         checkPrimitiveCompat(fileType.asPrimitiveType(),

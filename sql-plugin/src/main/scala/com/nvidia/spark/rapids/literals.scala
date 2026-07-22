@@ -236,6 +236,8 @@ object GpuScalar extends Logging {
    */
   def from(v: Any, t: DataType): Scalar = t match {
     case nullType if v == null => nullType match {
+      case variantType if GpuColumnVector.isVariantType(variantType) =>
+        Scalar.structFromNull(GpuColumnVector.variantHostChildren(): _*)
       case ArrayType(elementType, _) =>
         Scalar.listFromNull(resolveElementType(elementType))
       case StructType(fields) =>

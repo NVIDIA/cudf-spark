@@ -115,6 +115,7 @@ object TypeEnum extends Enumeration {
   val UDT: Value = Value
   val DAYTIME: Value = Value
   val YEARMONTH: Value = Value
+  val VARIANT: Value = Value
 }
 
 /**
@@ -301,6 +302,7 @@ final class TypeSig private(
     case _: StructType => litOnlyTypes.contains(TypeEnum.STRUCT)
     case _: DayTimeIntervalType => litOnlyTypes.contains(TypeEnum.DAYTIME)
     case _: YearMonthIntervalType => litOnlyTypes.contains(TypeEnum.YEARMONTH)
+    case dt if GpuColumnVector.isVariantType(dt) => litOnlyTypes.contains(TypeEnum.VARIANT)
     case _ => false
   }
 
@@ -338,6 +340,7 @@ final class TypeSig private(
         }
       case _: DayTimeIntervalType => check.contains(TypeEnum.DAYTIME)
       case _: YearMonthIntervalType => check.contains(TypeEnum.YEARMONTH)
+      case dt if GpuColumnVector.isVariantType(dt) => check.contains(TypeEnum.VARIANT)
       case _ => false
     }
 
@@ -426,6 +429,8 @@ final class TypeSig private(
         basicNotSupportedMessage(dataType, TypeEnum.DAYTIME, check, isChild)
       case _: YearMonthIntervalType =>
         basicNotSupportedMessage(dataType, TypeEnum.YEARMONTH, check, isChild)
+      case dt if GpuColumnVector.isVariantType(dt) =>
+        basicNotSupportedMessage(dataType, TypeEnum.VARIANT, check, isChild)
       case _ => Seq(withChild(isChild, s"$dataType is not supported"))
     }
 
@@ -607,6 +612,11 @@ object TypeSig {
    * YearMonthIntervalType of Spark 3.2.0+ support
    */
   val YEARMONTH: TypeSig = new TypeSig(TypeEnum.ValueSet(TypeEnum.YEARMONTH))
+
+  /**
+   * Spark VariantType support. It is physically backed by a cudf struct column.
+   */
+  val VARIANT: TypeSig = new TypeSig(TypeEnum.ValueSet(TypeEnum.VARIANT))
 
   /**
    * A signature for types that are generally supported by the plugin/CUDF. Please make sure to

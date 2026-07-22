@@ -978,10 +978,10 @@ object GpuOverrides extends Logging {
     expr[AttributeReference](
       "References an input column",
       ExprChecks.projectAndAst(
-        TypeSig.astTypes + GpuTypeShims.additionalArithmeticSupportedTypes,
+        TypeSig.astTypes + GpuTypeShims.additionalCommonOperatorSupportedTypes,
         (TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.MAP + TypeSig.ARRAY +
             TypeSig.STRUCT + TypeSig.DECIMAL_128 + TypeSig.BINARY +
-            GpuTypeShims.additionalArithmeticSupportedTypes).nested(),
+            GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
         TypeSig.all),
         (att, conf, p, r) => new BaseExprMeta[AttributeReference](att, conf, p, r) {
           // This is the only NOOP operator.  It goes away when things are bound

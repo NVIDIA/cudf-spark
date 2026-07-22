@@ -101,8 +101,30 @@ public class GpuColumnVector extends GpuColumnVectorBase {
     TableDebug.get().debug(name, hostCol);
   }
 
+  public static boolean isVariantType(DataType spark) {
+    return spark != null && "variant".equals(spark.typeName());
+  }
+
+  private static HostColumnVector.ListType variantByteListType(boolean nullable) {
+    return new HostColumnVector.ListType(
+        nullable, new HostColumnVector.BasicType(false, DType.UINT8));
+  }
+
+  public static HostColumnVector.DataType[] variantHostChildren() {
+    return new HostColumnVector.DataType[] {
+        variantByteListType(true),
+        variantByteListType(true)
+    };
+  }
+
+  public static HostColumnVector.StructType variantHostType(boolean nullable) {
+    return new HostColumnVector.StructType(nullable, variantHostChildren());
+  }
+
   public static HostColumnVector.DataType convertFrom(DataType spark, boolean nullable) {
-    if (spark instanceof ArrayType) {
+    if (isVariantType(spark)) {
+      return variantHostType(nullable);
+    } else if (spark instanceof ArrayType) {
       ArrayType arrayType = (ArrayType) spark;
       return new HostColumnVector.ListType(nullable,
           convertFrom(arrayType.elementType(), arrayType.containsNull()));
@@ -447,6 +469,8 @@ public class GpuColumnVector extends GpuColumnVectorBase {
       return DecimalUtil.createCudfDecimal((DecimalType) type);
     } else if (type instanceof GpuUnsignedIntegerType) {
       return DType.UINT32;
+    } else if (isVariantType(type)) {
+      return DType.STRUCT;
     } else if (type instanceof GpuUnsignedLongType) {
       return DType.UINT64;
     }
@@ -593,6 +617,12 @@ public class GpuColumnVector extends GpuColumnVectorBase {
       } else if (dt instanceof BinaryType) {
         Schema.Builder listBuilder = builder.addColumn(DType.LIST, name);
         listBuilder.addColumn(DType.UINT8, name + "_bytes");
+      } else if (isVariantType(dt)) {
+        Schema.Builder structBuilder = builder.addColumn(DType.STRUCT, name);
+        structBuilder.addColumn(DType.LIST, name + "_metadata")
+            .addColumn(DType.UINT8, name + "_metadata_bytes");
+        structBuilder.addColumn(DType.LIST, name + "_value")
+            .addColumn(DType.UINT8, name + "_value_bytes");
       } else {
         Schema.Builder childBuilder = builder.addColumn(GpuColumnVector.getRapidsType(dt), name);
         if (dt instanceof ArrayType) {
@@ -659,6 +689,9 @@ public class GpuColumnVector extends GpuColumnVectorBase {
    */
   static boolean typeConversionAllowed(ColumnView cv, DataType colType) {
     DType dt = cv.getType();
+    if (isVariantType(colType)) {
+      return isVariantColumn(cv);
+    }
     if (!dt.isNestedType()) {
       return getNonNestedRapidsType(colType).equals(dt);
     }
@@ -721,6 +754,10 @@ public class GpuColumnVector extends GpuColumnVectorBase {
       // Unexpected type
       return false;
     }
+  }
+
+  private static boolean isVariantColumn(ColumnView cv) {
+    return cv.getType().equals(DType.STRUCT);
   }
 
   static boolean typeConversionAllowed(Table table, DataType[] colTypes, int startCol, int endCol) {
@@ -830,6 +867,9 @@ public class GpuColumnVector extends GpuColumnVectorBase {
   }
 
   private static String buildColumnTypeString(DataType sparkType) {
+    if (isVariantType(sparkType)) {
+      return "STRUCT(LIST(UINT8),LIST(UINT8))";
+    }
     DType dtype = toRapidsOrNull(sparkType);
     if (dtype != null) {
       return dtype.toString();

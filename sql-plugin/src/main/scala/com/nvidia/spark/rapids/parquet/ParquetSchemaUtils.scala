@@ -355,6 +355,9 @@ object ParquetSchemaUtils {
       case t: StructType =>
         clipSparkStructType(t, parquetType.asGroupType(), caseSensitive, useFieldId)
 
+      case t if GpuColumnVector.isVariantType(t) =>
+        t
+
       case _ =>
         ParquetSchemaClipShims.convertPrimitiveField(parquetType.asPrimitiveType())
     }

@@ -17,7 +17,8 @@ package com.nvidia.spark.rapids.shims
 
 import ai.rapids.cudf
 import ai.rapids.cudf.{DType, Scalar}
-import com.nvidia.spark.rapids.{ColumnarCopyHelper, RapidsHostColumnBuilder, TypeConverter, TypeSig}
+import com.nvidia.spark.rapids.{ColumnarCopyHelper, GpuColumnVector, RapidsHostColumnBuilder}
+import com.nvidia.spark.rapids.{TypeConverter, TypeSig}
 import com.nvidia.spark.rapids.GpuRowToColumnConverter.{IntConverter, LongConverter, NotNullIntConverter, NotNullLongConverter}
 
 import org.apache.spark.sql.types.{DataType, DayTimeIntervalType, YearMonthIntervalType}
@@ -98,6 +99,8 @@ object GpuTypeShims {
       case _: YearMonthIntervalType =>
         // use int32 as Spark does
         DType.INT32
+      case dt if GpuColumnVector.isVariantType(dt) =>
+        DType.STRUCT
       case _ =>
         null
     }
@@ -212,13 +215,13 @@ object GpuTypeShims {
   /**
    * Get additional Parquet supported types for this Shim
    */
-  def additionalParquetSupportedTypes: TypeSig = TypeSig.ansiIntervals
+  def additionalParquetSupportedTypes: TypeSig = TypeSig.ansiIntervals + TypeSig.VARIANT
 
   /**
    * Get additional common operators supported types for this Shim
    * (filter, sample, project, alias, table scan ...... which GPU supports from 330)
    */
-  def additionalCommonOperatorSupportedTypes: TypeSig = TypeSig.ansiIntervals
+  def additionalCommonOperatorSupportedTypes: TypeSig = TypeSig.ansiIntervals + TypeSig.VARIANT
 
   def hasSideEffectsIfCastIntToYearMonth(ym: DataType): Boolean =
       // if cast(int as interval year), multiplication by 12 can cause overflow
