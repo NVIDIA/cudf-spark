@@ -23,6 +23,7 @@ import com.databricks.sql.transaction.tahoe.stats.{DeltaJobStatisticsTracker,
   StatisticsOnLoadJobTracker}
 import com.nvidia.spark.rapids.{DataFromReplacementRule, DataWritingCommandMeta,
   GpuDataWritingCommand, GpuMetric, GpuParquetFileFormat, RapidsConf, RapidsMeta}
+import com.nvidia.spark.rapids.delta.RapidsDeltaUtils
 
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
@@ -125,12 +126,17 @@ class GpuWriteIntoDeltaCommandMeta(
     if (!conf.isDeltaWriteEnabled) {
       willNotWorkOnGpu("Delta Lake output acceleration has been disabled")
     }
+    val spark = TrampolineConnectShims.getActiveSession
+    // The outer DeltaDataSource command may have already fallen back while constructing this
+    // nested write command. Revalidate the Delta write here so unsupported optimize-write schemas
+    // and retained writer options cannot re-enter the GPU path.
+    RapidsDeltaUtils.tagForDeltaWrite(
+      this, cmd.query.schema, Some(cmd.deltaLog), cmd.options, spark)
     if (cmd.fileFormat.getClass != classOf[DeltaParquetFileFormat]) {
       willNotWorkOnGpu(s"Delta file format ${cmd.fileFormat.getClass.getName} is not supported")
     } else {
       fileFormat = GpuParquetFileFormat.tagGpuSupport(
-        this, TrampolineConnectShims.getActiveSession, cmd.options, cmd.hadoopConf,
-        cmd.query.schema)
+        this, spark, cmd.options, cmd.hadoopConf, cmd.query.schema)
     }
     if (cmd.bucketSpec.nonEmpty) {
       willNotWorkOnGpu("Bucketed Delta writes are not supported")

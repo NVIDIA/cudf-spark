@@ -1479,17 +1479,12 @@ def test_delta_write_optimized_unsupported_sort_fallback(spark_tmp_path, gen):
         "spark.sql.execution.sortBeforeRepartition": "true",
         "spark.databricks.delta.properties.defaults.autoOptimize.optimizeWrite": "true"
     })
-    write_func = lambda spark, path: unary_op_df(spark, gen).coalesce(1) \
-        .write.format("delta").save(path)
-    read_func = lambda spark, path: spark.read.format("delta").load(path)
-    if is_databricks173_or_later():
-        # DBR 17.3 AQE optimized writes use a GPU DELTA_OPTIMIZED_WRITE hash exchange and do not
-        # execute the legacy DeltaOptimizedWriterExec sort that requires sortable nested types.
-        assert_gpu_and_cpu_writes_are_equal_collect(
-            write_func, read_func, data_path, conf=confs)
-    else:
-        assert_gpu_fallback_write(
-            write_func, read_func, data_path, delta_write_fallback_check, conf=confs)
+    assert_gpu_fallback_write(
+        lambda spark, path: unary_op_df(spark, gen).coalesce(1).write.format("delta").save(path),
+        lambda spark, path: spark.read.format("delta").load(path),
+        data_path,
+        delta_write_fallback_check,
+        conf=confs)
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake

@@ -481,7 +481,8 @@ def assert_db173_gpu_data_writing_command(
                 "Optimize write is disabled but an optimized-write plan was captured"
         assert not cpu_optimized_plans, \
             f"DBR {optimized_write_origin} shuffle remained on CPU"
-        if aqe_enabled:
+        # AQE only produces a final adaptive write plan when optimized write inserts its shuffle.
+        if aqe_enabled and optimized_write:
             final_adaptive_write_plans = [
                 plan for plan in matching_plans
                 if callback.containsFinalAdaptivePlan(plan)
