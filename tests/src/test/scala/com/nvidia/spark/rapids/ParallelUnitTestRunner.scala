@@ -21,7 +21,7 @@ import java.io.{
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
 import java.util.concurrent.{ConcurrentLinkedQueue, TimeUnit}
-import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.{AtomicLong, AtomicReference}
 
 import scala.collection.mutable.ArrayBuffer
 
@@ -244,7 +244,9 @@ object ParallelUnitTestRunner {
     // stack traces) could otherwise splice into a RESULT line and stall the RUN/RESULT exchange.
     val processBuilder = new ProcessBuilder(command: _*)
     sparkConf.foreach(processBuilder.environment().put("SPARK_CONF", _))
-    var currentTask: Option[SuiteTask] = None
+    // Read by the watchdog thread (see startSuiteWatchdog), so it must be safely published across
+    // threads rather than left as a plain var lifted into a non-volatile heap ref.
+    val currentTask = new AtomicReference[Option[SuiteTask]](None)
     var remainingBatchTasks = List.empty[SuiteTask]
     var process: Process = null
     try {
@@ -257,7 +259,7 @@ object ParallelUnitTestRunner {
       // the watchdog captures a thread dump and kills the worker so the run fails visibly.
       val suiteDeadlineNanos = new AtomicLong(Long.MaxValue)
       startSuiteWatchdog(runId, workerId, process, reportsDir, failures, suiteDeadlineNanos,
-        () => currentTask.map(_.suite), suiteTimeoutSeconds)
+        () => currentTask.get.map(_.suite), suiteTimeoutSeconds)
 
       def pollNextTask(): Option[SuiteTask] = remainingBatchTasks match {
         case task :: tail =>
@@ -273,7 +275,7 @@ object ParallelUnitTestRunner {
       def sendNextTask(): Boolean = {
         pollNextTask() match {
           case Some(task) =>
-            currentTask = Some(task)
+            currentTask.set(Some(task))
             suiteDeadlineNanos.set(
               System.nanoTime() + TimeUnit.SECONDS.toNanos(suiteTimeoutSeconds))
             println(f"[wave-$runId-worker-$workerId] START ${task.suite} " +
@@ -294,14 +296,14 @@ object ParallelUnitTestRunner {
         if (line.startsWith(s"$protocolPrefix\tRESULT\t")) {
           val fields = line.split("\\t", -1)
           val succeeded = fields.length == 4 && fields(3).toBoolean
-          currentTask.foreach { task =>
+          currentTask.get.foreach { task =>
             if (succeeded) {
               println(s"[wave-$runId-worker-$workerId] PASS ${task.suite}")
             } else {
               failures.add(s"wave-$runId ${task.suite} failed in worker-$workerId")
             }
           }
-          currentTask = None
+          currentTask.set(None)
           suiteDeadlineNanos.set(Long.MaxValue)
           if (running) {
             running = sendNextTask()
@@ -321,19 +323,19 @@ object ParallelUnitTestRunner {
       if (!terminated) {
         failures.add(s"wave-$runId worker-$workerId could not be terminated")
       }
-      currentTask.foreach { task =>
+      currentTask.get.foreach { task =>
         failures.add(s"wave-$runId ${task.suite} lost when worker-$workerId exited " +
             s"with status ${exitCode.getOrElse("unknown")}")
       }
       remainingBatchTasks.foreach { task =>
         failures.add(s"wave-$runId ${task.suite} was not processed after worker-$workerId exited")
       }
-      if (exited && exitCode.exists(_ != 0) && currentTask.isEmpty) {
+      if (exited && exitCode.exists(_ != 0) && currentTask.get.isEmpty) {
         failures.add(s"wave-$runId worker-$workerId exited with status ${exitCode.get}")
       }
     } catch {
       case t: Throwable =>
-        val unfinishedTasks = currentTask.toSeq ++ remainingBatchTasks
+        val unfinishedTasks = currentTask.get.toSeq ++ remainingBatchTasks
         if (unfinishedTasks.nonEmpty) {
           taskQueue.add(SuiteBatch(unfinishedTasks))
         }
