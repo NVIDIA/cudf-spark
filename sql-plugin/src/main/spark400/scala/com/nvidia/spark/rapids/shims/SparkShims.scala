@@ -19,5 +19,5 @@
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
-object SparkShimImpl extends Spark400VariantShims {
+object SparkShimImpl extends Spark400PlusCommonShims {
 }
