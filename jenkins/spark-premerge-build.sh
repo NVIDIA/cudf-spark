@@ -40,8 +40,9 @@ if [[ "$PARALLEL_UT" != "true" && "$PARALLEL_UT" != "false" ]]; then
     exit 1
 fi
 
-if [[ -n "$PARALLEL_UT_FORK_COUNT" && ! "$PARALLEL_UT_FORK_COUNT" =~ ^[1-9][0-9]*$ ]]; then
-    >&2 echo "ERROR: PARALLEL_UT_FORK_COUNT must be a positive integer"
+if [[ -n "$PARALLEL_UT_FORK_COUNT" &&
+      ! "$PARALLEL_UT_FORK_COUNT" =~ ^([2-9]|[1-9][0-9]+)$ ]]; then
+    >&2 echo "ERROR: PARALLEL_UT_FORK_COUNT must be an integer greater than 1"
     exit 1
 fi
 
