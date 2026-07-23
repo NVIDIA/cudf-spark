@@ -66,6 +66,24 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
     assert(ParallelUnitTestRunner.effectiveWorkerCount(4, batches) === 1)
   }
 
+  test("wildcardSuites match by fully qualified name prefix, like ScalaTest -w") {
+    val suite = "com.nvidia.spark.rapids.ParquetWriterSuite"
+
+    // No wildcards selects everything.
+    assert(ParallelUnitTestRunner.matchesWildcard(suite, Seq.empty))
+    // A package prefix selects suites under it.
+    assert(ParallelUnitTestRunner.matchesWildcard(suite, Seq("com.nvidia.spark.rapids")))
+    // An exact name matches itself.
+    assert(ParallelUnitTestRunner.matchesWildcard(suite, Seq(suite)))
+    // Any of several prefixes matching is enough.
+    assert(ParallelUnitTestRunner.matchesWildcard(suite, Seq("org.apache.spark", "com.nvidia")))
+    // A substring that is not a prefix must not match (unlike the previous `contains` behavior).
+    assert(!ParallelUnitTestRunner.matchesWildcard(suite, Seq("rapids.ParquetWriterSuite")))
+    assert(!ParallelUnitTestRunner.matchesWildcard(suite, Seq("ParquetWriterSuite")))
+    // An unrelated prefix must not match.
+    assert(!ParallelUnitTestRunner.matchesWildcard(suite, Seq("org.apache.spark")))
+  }
+
   test("JUnit XML reports are scoped by test wave") {
     val reportsDir = Files.createTempDirectory("parallel-unit-test-reports")
     try {

@@ -746,8 +746,10 @@ object ParallelUnitTestRunner {
         .toSeq
   }
 
-  private def matchesWildcard(suite: String, wildcards: Seq[String]): Boolean = {
-    wildcards.isEmpty || wildcards.exists(suite.contains)
+  // Mirror ScalaTest's -w (wildcardSuites) semantics, which select suites whose fully qualified
+  // name begins with the given string, rather than matching the string anywhere in the name.
+  private[rapids] def matchesWildcard(suite: String, wildcards: Seq[String]): Boolean = {
+    wildcards.isEmpty || wildcards.exists(suite.startsWith)
   }
 
   private def propertyList(value: String): Seq[String] = {
