@@ -267,6 +267,12 @@ def is_spark_401_or_later():
 def is_spark_403():
     return spark_version() == "4.0.3"
 
+def is_spark_404():
+    return spark_version() == "4.0.4"
+
+def is_spark_403_or_404():
+    return is_spark_403() or is_spark_404()
+
 def is_spark_411_or_later():
     return spark_version() >= "4.1.1"
 
