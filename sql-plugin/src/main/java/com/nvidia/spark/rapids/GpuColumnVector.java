@@ -619,10 +619,10 @@ public class GpuColumnVector extends GpuColumnVectorBase {
         listBuilder.addColumn(DType.UINT8, name + "_bytes");
       } else if (isVariantType(dt)) {
         Schema.Builder structBuilder = builder.addColumn(DType.STRUCT, name);
-        structBuilder.addColumn(DType.LIST, name + "_metadata")
-            .addColumn(DType.UINT8, name + "_metadata_bytes");
         structBuilder.addColumn(DType.LIST, name + "_value")
             .addColumn(DType.UINT8, name + "_value_bytes");
+        structBuilder.addColumn(DType.LIST, name + "_metadata")
+            .addColumn(DType.UINT8, name + "_metadata_bytes");
       } else {
         Schema.Builder childBuilder = builder.addColumn(GpuColumnVector.getRapidsType(dt), name);
         if (dt instanceof ArrayType) {
@@ -757,7 +757,25 @@ public class GpuColumnVector extends GpuColumnVectorBase {
   }
 
   private static boolean isVariantColumn(ColumnView cv) {
-    return cv.getType().equals(DType.STRUCT);
+    if (!cv.getType().equals(DType.STRUCT) || cv.getNumChildren() != 2) {
+      return false;
+    }
+    try (ColumnView value = cv.getChildColumnView(0);
+         ColumnView metadata = cv.getChildColumnView(1)) {
+      return isVariantBinaryChild(value) && isVariantBinaryChild(metadata);
+    }
+  }
+
+  private static boolean isVariantBinaryChild(ColumnView cv) {
+    if (cv.getType().equals(DType.STRING)) {
+      return true;
+    }
+    if (!cv.getType().equals(DType.LIST) || cv.getNumChildren() != 1) {
+      return false;
+    }
+    try (ColumnView bytes = cv.getChildColumnView(0)) {
+      return bytes.getType().equals(DType.UINT8);
+    }
   }
 
   static boolean typeConversionAllowed(Table table, DataType[] colTypes, int startCol, int endCol) {

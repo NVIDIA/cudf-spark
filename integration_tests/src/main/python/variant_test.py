@@ -145,6 +145,78 @@ def test_parquet_variant_try_get_null_variant_rows(spark_tmp_path):
         conf=_variant_parquet_conf)
 
 
+@incompat
+@pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
+def test_parquet_variant_try_get_null_and_missing_fields(spark_tmp_path):
+    data_path = spark_tmp_path + '/VARIANT_NULL_FIELDS_PARQUET'
+
+    def write_data(spark):
+        spark.sql("""
+          SELECT parse_json('{"x":null,"n":null,"scalar":5}') AS v
+          UNION ALL
+          SELECT parse_json('{"n":{"inner":"deep"},"scalar":{"inner":9}}') AS v
+          UNION ALL
+          SELECT parse_json('{"x":7}') AS v
+        """).write.mode('overwrite').parquet(data_path)
+
+    with_cpu_session(write_data)
+
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.parquet(data_path).selectExpr(
+            "try_variant_get(v, '$.x', 'int') AS x",
+            "try_variant_get(v, '$.missing', 'string') AS missing",
+            "try_variant_get(v, '$.n.inner', 'string') AS nested",
+            "try_variant_get(v, '$.scalar.inner', 'int') AS scalar_nested"),
+        conf=_variant_parquet_conf)
+
+
+@incompat
+@pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
+def test_parquet_variant_try_get_integral_boundaries(spark_tmp_path):
+    data_path = spark_tmp_path + '/VARIANT_INTEGRAL_BOUNDARIES_PARQUET'
+
+    def write_data(spark):
+        spark.sql("""
+          SELECT parse_json(
+            '{"bmin":-128,"bmax":127,"smin":-32768,"smax":32767,' ||
+            '"imin":-2147483648,"imax":2147483647,' ||
+            '"lmin":-9223372036854775808,"lmax":9223372036854775807,' ||
+            '"byte_overflow":128,"short_overflow":32768,' ||
+            '"int_overflow":2147483648}') AS v
+        """).write.mode('overwrite').parquet(data_path)
+
+    with_cpu_session(write_data)
+
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.parquet(data_path).selectExpr(
+            "try_variant_get(v, '$.bmin', 'tinyint') AS bmin",
+            "try_variant_get(v, '$.bmax', 'tinyint') AS bmax",
+            "try_variant_get(v, '$.smin', 'smallint') AS smin",
+            "try_variant_get(v, '$.smax', 'smallint') AS smax",
+            "try_variant_get(v, '$.imin', 'int') AS imin",
+            "try_variant_get(v, '$.imax', 'int') AS imax",
+            "try_variant_get(v, '$.lmin', 'bigint') AS lmin",
+            "try_variant_get(v, '$.lmax', 'bigint') AS lmax",
+            "try_variant_get(v, '$.byte_overflow', 'tinyint') AS byte_overflow",
+            "try_variant_get(v, '$.short_overflow', 'smallint') AS short_overflow",
+            "try_variant_get(v, '$.int_overflow', 'int') AS int_overflow"),
+        conf=_variant_parquet_conf)
+
+
+@incompat
+@pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
+def test_parquet_variant_try_get_before_shuffle(spark_tmp_path):
+    data_path = spark_tmp_path + '/VARIANT_SHUFFLE_PARQUET'
+    with_cpu_session(lambda spark: _write_variant_parquet(spark, data_path))
+
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.parquet(data_path).selectExpr(
+            "try_variant_get(v, '$.x', 'int') AS x",
+            "try_variant_get(v, '$.n.inner', 'string') AS inner").repartition(2)
+            .orderBy("x", "inner"),
+        conf=_variant_parquet_conf)
+
+
 @allow_non_gpu('ProjectExec')
 @incompat
 @pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
@@ -156,6 +228,36 @@ def test_variant_try_get_array_path_falls_back():
             ('{"x":7}',)
         ], ['json']).selectExpr(
             "try_variant_get(parse_json(json), '$.arr[0]', 'int') AS first_value")
+
+    assert_gpu_fallback_collect(do_it, 'VariantGet')
+
+
+@allow_non_gpu('ProjectExec')
+@incompat
+@pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
+def test_variant_try_get_non_literal_path_falls_back():
+    def do_it(spark):
+        return spark.createDataFrame([
+            ('{"x":7}', '$.x'),
+            ('{"x":42}', '$.x'),
+            ('{}', '$.x')
+        ], ['json', 'path']).selectExpr(
+            "try_variant_get(parse_json(json), path, 'int') AS x")
+
+    assert_gpu_fallback_collect(do_it, 'VariantGet')
+
+
+@allow_non_gpu('ProjectExec')
+@incompat
+@pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
+def test_variant_try_get_quoted_path_falls_back():
+    def do_it(spark):
+        return spark.createDataFrame([
+            ('{"a.b":7}',),
+            ('{"a.b":42}',),
+            ('{}',)
+        ], ['json']).selectExpr(
+            "try_variant_get(parse_json(json), '$[\"a.b\"]', 'int') AS x")
 
     assert_gpu_fallback_collect(do_it, 'VariantGet')
 
