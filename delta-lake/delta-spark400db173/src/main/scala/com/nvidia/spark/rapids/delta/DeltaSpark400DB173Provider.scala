@@ -31,6 +31,7 @@ import com.databricks.sql.transaction.tahoe.coordinatedcommits.{
   CoordinatedCommitsUtils
 }
 import com.databricks.sql.transaction.tahoe.rapids.{
+  GpuCheckOverflowInTableWrite,
   GpuDeltaLog,
   GpuDeltaV1Write,
   GpuWriteIntoDelta,
@@ -82,6 +83,11 @@ object DeltaSpark400DB173Provider extends DatabricksDeltaProviderBase {
         "Write files for a DBR Delta transaction",
         (a, conf, p, r) => new GpuWriteIntoDeltaCommandMeta(a, conf, p, r))
     ).map(r => (r.getClassFor.asSubclass(classOf[DataWritingCommand]), r)).toMap
+  }
+  
+  override def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
+    val rule = GpuCheckOverflowInTableWrite.exprRule
+    super.getExprs + (rule.getClassFor.asSubclass(classOf[Expression]) -> rule)
   }
 
   override def getRunnableCommandRules: Map[Class[_ <: RunnableCommand],
