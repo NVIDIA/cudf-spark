@@ -15,7 +15,7 @@
 import pytest
 
 from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_error, assert_gpu_fallback_collect
-from spark_session import is_before_spark_320, is_before_spark_330
+from spark_session import is_before_spark_320
 from conftest import is_not_utc
 from data_gen import *
 from marks import ignore_order, allow_non_gpu
@@ -133,7 +133,6 @@ nest_2_two = (StructGen([('b', ArrayGen(base_two[0], 1, 1))]), StructGen([('b', 
 @pytest.mark.parametrize('gen_pair', [base_one,   base_two,
                                       nest_1_one, nest_1_two,
                                       nest_2_one, nest_2_two])
-@pytest.mark.skipif(is_before_spark_330(), reason="This is supported only in Spark 3.3.0+")
 def test_union_by_missing_field_name_in_arrays_structs(gen_pair):
     """
     This tests the union of two DFs of arrays of structs with missing field names.

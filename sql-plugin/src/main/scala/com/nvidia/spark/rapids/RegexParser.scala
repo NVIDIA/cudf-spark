@@ -68,25 +68,29 @@ class RegexParser(pattern: String) {
   def parseReplacement(numCaptureGroups: Int): RegexReplacement = {
     val sequence = RegexReplacement(new ListBuffer(), numCaptureGroups)
     while (!eof()) {
-      parseReplacementBase() match {
-        case RegexSequence(parts) =>
-          sequence.parts ++= parts
-        case other =>
-          sequence.parts += other
-      }
+      sequence.parts ++= parseReplacementBase()
     }
     sequence
   }
 
-  private def parseReplacementBase(): RegexAST = {
-      consume() match {
-        case '\\' =>
-          parseBackrefOrEscaped()
-        case '$' =>
-          parseBackrefOrLiteralDollar()
-        case other =>
-          RegexChar(other)
-      }
+  private def parseReplacementBase(): Seq[RegexAST] = {
+    consume() match {
+      case '\\' =>
+        // `\X` escapes the next char; emit the backslash + char as flat literals so
+        // `unescapeReplaceString` later strips just the backslash (Java appendReplacement
+        // semantics). We must NOT route the next char back through `parseReplacementBase`:
+        // an escaped `$` (e.g. `\$a`) is a literal `$`, whereas the `$` case below would
+        // throw on a following non-digit and mis-handle `\$1`.
+        if (eof()) {
+          // Matches java.util.regex.Matcher's verbatim message; do not recase.
+          throw new RegexUnsupportedException("character to be escaped is missing", Some(pos))
+        }
+        Seq(RegexChar('\\'), RegexChar(consume()))
+      case '$' =>
+        parseBackref()
+      case other =>
+        Seq(RegexChar(other))
+    }
   }
 
 
@@ -174,24 +178,17 @@ class RegexParser(pattern: String) {
   }
 
   private def parseGroup(): RegexAST = {
-    var captureGroup = if (pos + 1 < pattern.length
+    val (captureGroup, lookahead) = if (pos + 1 < pattern.length
         && pattern.charAt(pos) == '?'
-        && pattern.charAt(pos+1) == ':') {
-      pos += 2
-      false
-    } else {
-      true
-    }
-    val lookahead = if (pos + 1 < pattern.length
-        && "!=".contains(pattern.charAt(pos))) {
-      pos += 1
-      captureGroup = false
-      pattern.charAt(pos-1) match {
-        case '=' => Some(RegexPositiveLookahead)
+        && ":!=".contains(pattern.charAt(pos+1))) {
+      consumeExpected('?')
+      (false, consume() match {  // guaranteed exhaustive by the contains call above
+        case ':' => None
         case '!' => Some(RegexNegativeLookahead)
-      }
+        case '=' => Some(RegexPositiveLookahead)
+      })
     } else {
-      None
+      (true, None)
     }
     val term = parseUntil(() => peek().contains(')'))
     consumeExpected(')')
@@ -363,56 +360,52 @@ class RegexParser(pattern: String) {
     }
   }
 
-  private def parseBackrefOrEscaped(): RegexAST = {
-    val start = pos
-
-    consumeInt match {
-      case Some(refNum) =>
-        RegexBackref(refNum)
-      case None =>
-        pos = start
-        RegexChar('\\')
-    }
-  }
-
-  private def parseBackrefOrLiteralDollar(): RegexAST = {
-    val start = pos
-
-    def treatAsLiteralDollar() = {
-      pos = start
-      RegexChar('$')
-    }
-
+  private def parseBackref(): Seq[RegexAST] = {
+    val dollarPos = pos - 1   // position of the `$` that begins this reference
     peek() match {
       case Some('{') =>
         consumeExpected('{')
-        val num = consumeInt()
-        if (peek().contains('}')) {
-          consumeExpected('}')
-          num match {
-            case Some(_) =>
+        peek() match {
+          case Some(ch) if isAsciiDigit(ch) =>
+            throw new RegexUnsupportedException(
+              "Illegal group reference: group name starts with digit character",
+              Some(dollarPos))
+          case Some(ch) if isLetter(ch) =>
+            val nameStart = pos
+            while (!eof() && peek().exists(c => isLetter(c) || isAsciiDigit(c))) {
+              skip()
+            }
+            val name = pattern.substring(nameStart, pos)
+            if (!peek().contains('}')) {
               throw new RegexUnsupportedException(
-                "Numeric `${N}` backref in replacement string is not supported on GPU " +
-                  "(Java's Matcher.appendReplacement rejects this syntax)",
-                Some(start))
-            case _ =>
-              treatAsLiteralDollar()
-          }
-        } else {
-          treatAsLiteralDollar()
-        }
-      case Some(ch) if ch >= '1' && ch <= '9' =>
-        val num = consumeInt()
-        num match {
-          case Some(n) =>
-            RegexBackref(n)
+                "Illegal group reference: malformed " + "$" + "{name} reference",
+                Some(dollarPos))
+            }
+            consumeExpected('}')
+            throw new RegexUnsupportedException(
+              s"Named-group reference $${$name} is not supported on the GPU",
+              Some(dollarPos))
           case _ =>
-            treatAsLiteralDollar()
+            throw new RegexUnsupportedException(
+              "Illegal group reference: empty or malformed " + "$" + "{name}",
+              Some(dollarPos))
         }
+      case Some(ch) if isAsciiDigit(ch) =>
+        val parts = ListBuffer[RegexAST](RegexChar('$'))
+        while (!eof() && peek().exists(isAsciiDigit)) {
+          parts += RegexChar(consume())
+        }
+        parts.toSeq
       case _ =>
-        treatAsLiteralDollar()
+        throw new RegexUnsupportedException(
+          "Illegal group reference", Some(dollarPos))
     }
   }
+
+  private def isLetter(ch: Char): Boolean =
+    (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')
+
+  private def isAsciiDigit(ch: Char): Boolean = ch >= '0' && ch <= '9'
 
   private def parseEscapedCharacter(): RegexAST = {
     peek() match {
@@ -512,7 +505,7 @@ class RegexParser(pattern: String) {
     RegexCharacterClass(negated, characters = getCharacters(className))
   }
 
-  private def isHexDigit(ch: Char): Boolean = ch.isDigit ||
+  private def isHexDigit(ch: Char): Boolean = isAsciiDigit(ch) ||
     (ch >= 'a' && ch <= 'f') ||
     (ch >= 'A' && ch <= 'F')
 
@@ -526,7 +519,14 @@ class RegexParser(pattern: String) {
       consumeExpected('{')
     }
     val start = pos
-    while (!eof() && isHexDigit(pattern.charAt(pos))) {
+    // Java spec: non-braced `\xNN` consumes EXACTLY two hex digits and any
+    // trailing hex digits are part of the surrounding pattern. The braced form
+    // `\x{h...h}` consumes hex digits until the closing '}' (validated below).
+    // Issue #14739: previously this loop was unbounded for both forms, so
+    // patterns like "\\x61a" were rejected even though they are valid Java
+    // regex meaning "0x61 (= 'a') followed by the literal 'a'".
+    val hexLimit = if (varHex) Int.MaxValue else 2
+    while (pos - start < hexLimit && !eof() && isHexDigit(pattern.charAt(pos))) {
       pos += 1
     }
     val hexDigit = pattern.substring(start, pos)
@@ -620,7 +620,7 @@ class RegexParser(pattern: String) {
 
   private def consumeInt(): Option[Int] = {
     val start = pos
-    while (!eof() && peek().exists(_.isDigit)) {
+    while (!eof() && peek().exists(isAsciiDigit)) {
       skip()
     }
     if (start == pos) {
@@ -830,6 +830,10 @@ class CudfRegexTranspiler(mode: RegexMode) {
         }
         None
 
+      case RegexChoice(a, b) =>
+        getUnsupportedRepetitionBaseOption(a)
+          .orElse(getUnsupportedRepetitionBaseOption(b))
+
       case RegexGroup(_, term, _) =>
         getUnsupportedRepetitionBaseOption(term)
 
@@ -909,14 +913,14 @@ class CudfRegexTranspiler(mode: RegexMode) {
       contains(regex, {
         case RegexChar('^') | RegexEscaped('A') => true
         case _ => false
-      })
+      }, recurseIntoCharacterClasses = false)
     }
 
     def containsEndAnchor(regex: RegexAST): Boolean = {
       contains(regex, {
         case RegexChar('$') | RegexEscaped('z') | RegexEscaped('Z') => true
         case _ => false
-      })
+      }, recurseIntoCharacterClasses = false)
     }
 
     def containsNewline(regex: RegexAST): Boolean = {
@@ -961,7 +965,7 @@ class CudfRegexTranspiler(mode: RegexMode) {
       }
     }
 
-    def checkEndAnchorContextSplit(r1: RegexAST, r2: RegexAST): Unit = {
+    def checkAdjacentEndAnchorContextSplit(r1: RegexAST, r2: RegexAST): Unit = {
       if ((containsEndAnchor(r1) &&
           (containsNewline(r2) || containsEmpty(r2) || containsBeginAnchor(r2))) ||
         (containsEndAnchor(r2) &&
@@ -973,29 +977,43 @@ class CudfRegexTranspiler(mode: RegexMode) {
       }
     }
 
+    def checkEndAnchorContextSplit(parts: Seq[RegexAST]): Unit = {
+      var prefixContainsEmpty = false
+      var previousPart: Option[RegexAST] = None
+
+      parts.zipWithIndex.foreach { case (part, index) =>
+        previousPart.foreach(previous => checkAdjacentEndAnchorContextSplit(previous, part))
+
+        // Split also rejects an optional term anywhere before a real end anchor. Keep this
+        // prefix-wide check limited to optional terms: newline and begin-anchor context is
+        // intentionally adjacent-only, so supported expressions such as ^a$ and \na$ remain
+        // on the GPU.
+        if (prefixContainsEmpty && containsEndAnchor(part)) {
+          val prefix = parts.take(index).map(_.toRegexString).mkString
+          throw new RegexUnsupportedException(
+            s"End of line/string anchor is not supported in this context: " +
+              s"${toReadableString(prefix)}${toReadableString(part.toRegexString)}",
+            part.position)
+        }
+
+        prefixContainsEmpty = prefixContainsEmpty || containsEmpty(part)
+        previousPart = Some(part)
+      }
+    }
+
     def checkUnsupported(regex: RegexAST): Unit = {
       regex match {
+        case RegexSequence(parts) if mode == RegexSplitMode =>
+          checkEndAnchorContextSplit(parts.toSeq)
         case RegexSequence(parts) =>
           for (i <- 1 until parts.length) {
-            if (mode == RegexSplitMode) {
-              checkEndAnchorContextSplit(parts(i - 1), parts(i))
-            } else {
-              checkEndAnchorContext(parts(i - 1), parts(i))
-            }
+            checkEndAnchorContext(parts(i - 1), parts(i))
           }
         case RegexChoice(l, r) =>
           checkUnsupported(l)
           checkUnsupported(r)
         case RegexGroup(_, term, _) => checkUnsupported(term)
         case RegexRepetition(ast, _) => checkUnsupported(ast)
-        case RegexCharacterClass(_, components) =>
-          for (i <- 1 until components.length) {
-            if (mode == RegexSplitMode) {
-              checkEndAnchorContextSplit(components(i - 1), components(i))
-            } else {
-              checkEndAnchorContext(components(i - 1), components(i))
-            }
-          }
         case _ =>
           // ignore
       }
@@ -1029,8 +1047,12 @@ class CudfRegexTranspiler(mode: RegexMode) {
           current += 1
           RegexGroup(n == current, updateGroupsForExtract(term, n), lookahead)
         }
+        case RegexGroup(false, term, lookahead) =>
+          RegexGroup(capture = false, updateGroupsForExtract(term, n), lookahead)
         case RegexSequence(parts) =>
           RegexSequence(parts.map(updateGroupsForExtract(_, n)))
+        case RegexChoice(left, right) =>
+          RegexChoice(updateGroupsForExtract(left, n), updateGroupsForExtract(right, n))
         case RegexRepetition(term, quantifier) =>
           RegexRepetition(updateGroupsForExtract(term, n), quantifier)
         case _ => regex
@@ -1579,16 +1601,22 @@ class CudfRegexTranspiler(mode: RegexMode) {
     }
   }
 
-  private def contains(regex: RegexAST, f: RegexAST => Boolean): Boolean = {
+  private def contains(regex: RegexAST, f: RegexAST => Boolean,
+      recurseIntoCharacterClasses: Boolean = true): Boolean = {
     if (f(regex)) {
       true
     } else {
       regex match {
-        case RegexSequence(parts) => parts.exists(x => contains(x, f))
-        case RegexGroup(_, term, _) => contains(term, f)
-        case RegexChoice(l, r) => contains(l, f) || contains(r, f)
-        case RegexRepetition(term, _) => contains(term, f)
-        case RegexCharacterClass(_, chars) => chars.exists(ch => contains(ch, f))
+        case RegexSequence(parts) =>
+          parts.exists(x => contains(x, f, recurseIntoCharacterClasses))
+        case RegexGroup(_, term, _) => contains(term, f, recurseIntoCharacterClasses)
+        case RegexChoice(l, r) =>
+          contains(l, f, recurseIntoCharacterClasses) ||
+            contains(r, f, recurseIntoCharacterClasses)
+        case RegexRepetition(term, _) => contains(term, f, recurseIntoCharacterClasses)
+        case RegexCharacterClass(_, chars) if recurseIntoCharacterClasses =>
+          chars.exists(ch => contains(ch, f, recurseIntoCharacterClasses))
+        case RegexCharacterClass(_, _) => false
         case leaf => f(leaf)
       }
     }
@@ -1727,8 +1755,8 @@ sealed case class RegexGroup(capture: Boolean, term: RegexAST,
     s"(${term.toRegexString})"
   } else if (lookahead.isDefined) {
     lookahead match {
-      case Some(RegexPositiveLookahead) => s"(=${term.toRegexString})"
-      case Some(RegexNegativeLookahead) => s"(!${term.toRegexString})"
+      case Some(RegexPositiveLookahead) => s"(?=${term.toRegexString})"
+      case Some(RegexNegativeLookahead) => s"(?!${term.toRegexString})"
       case _ => throw new IllegalStateException("Should not reach here")
     }
   } else {

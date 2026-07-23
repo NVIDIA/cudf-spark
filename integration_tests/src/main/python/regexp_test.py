@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
+
 import pytest
 
 from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect, \
-    assert_gpu_and_cpu_error, \
+    assert_gpu_and_cpu_error, assert_gpu_and_cpu_same_data_or_error, \
     assert_gpu_sql_fallback_collect
 from data_gen import *
 from marks import *
@@ -31,6 +33,10 @@ _regexp_conf = { 'spark.rapids.sql.regexp.enabled': True }
 
 def mk_str_gen(pattern):
     return StringGen(pattern).with_special_case('').with_special_pattern('.{0,10}')
+
+def _regexp_replace_error_message(java_message):
+    return re.compile(
+        re.escape(java_message) + r'|\[INVALID_REGEXP_REPLACE\] Could not perform regexp_replace')
 
 def test_split_re_negative_limit():
     data_gen = mk_str_gen('([bf]o{0,2}:){1,7}') \
@@ -303,6 +309,7 @@ def test_re_replace_repetition():
                 'REGEXP_REPLACE(a, "A{0,}", "PROD")',
                 'REGEXP_REPLACE(a, "T?E?", "PROD")',
                 'REGEXP_REPLACE(a, "A*", "PROD")',
+                'REGEXP_REPLACE(a, "A+", "PROD")',
                 'REGEXP_REPLACE(a, "A{0,5}", "PROD")',
                 'REGEXP_REPLACE(a, "(A*)", "PROD")',
                 'REGEXP_REPLACE(a, "(((A*)))", "PROD")',
@@ -374,7 +381,14 @@ def test_re_replace_anchors():
         .with_special_case("TEST") \
         .with_special_case("TEST\n") \
         .with_special_case("TEST\r\n") \
-        .with_special_case("TEST\r")
+        .with_special_case("TEST\r") \
+        .with_special_case("$") \
+        .with_special_case("^") \
+        .with_special_case("$\n") \
+        .with_special_case("\n$") \
+        .with_special_case("a^") \
+        .with_special_case("a^\n") \
+        .with_special_case("a\nb")
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: unary_op_df(spark, gen).selectExpr(
             'REGEXP_REPLACE(a, "TEST$", "")',
@@ -388,6 +402,13 @@ def test_re_replace_anchors():
             'REGEXP_REPLACE(a, "^TEST\\\\Z", "PROD")',
             'REGEXP_REPLACE(a, "TEST\\\\Z", "PROD")',
             'REGEXP_REPLACE(a, "^TEST$", "PROD")',
+            # Issue #14746: $ and ^ inside character classes are literals, not anchors.
+            'REGEXP_REPLACE(a, "[$\\\\n]", "X")',
+            'REGEXP_REPLACE(a, "[$]\\\\n", "X")',
+            'REGEXP_REPLACE(a, "\\\\n[$]", "X")',
+            'REGEXP_REPLACE(a, "(?:[$])\\\\n", "X")',
+            'REGEXP_REPLACE(a, "[a^]$", "X")',
+            'REGEXP_REPLACE(a, "(?:[a^])$", "X")',
         ),
         conf=_regexp_conf)
 
@@ -457,6 +478,100 @@ def test_regexp_replace():
                 'regexp_replace(a, "([^x])|([^y])", "A")',
                 'regexp_replace(a, "(?:aa)+", "A")',
                 'regexp_replace(a, "a|b|c", "A")'),
+        conf=_regexp_conf)
+
+# https://github.com/NVIDIA/spark-rapids/issues/14742
+# Replacement-string parser must match java.util.regex.Matcher#appendReplacement.
+# Use the DataFrame API rather than selectExpr because Spark SQL variable substitution
+# expands ${...} inside SQL string literals before regexp_replace sees it.
+def test_regexp_replace_backslash_digit_is_literal():
+    from pyspark.sql.functions import regexp_replace, col
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.createDataFrame([("abc",)], ["a"]).select(
+            regexp_replace(col("a"), "(a)", "\\1")),
+        conf=_regexp_conf)
+
+
+@allow_non_gpu('ProjectExec', 'RegExpReplace')
+def test_regexp_replace_trailing_backslash_matches_cpu():
+    from pyspark.sql.functions import regexp_replace, col
+    assert_gpu_and_cpu_same_data_or_error(
+        lambda spark: spark.createDataFrame([("a",)], ["a"]).select(
+            regexp_replace(col("a"), "a", "\\")).collect(),
+        conf=_regexp_conf,
+        error_message=_regexp_replace_error_message("character to be escaped is missing"))
+
+
+@allow_non_gpu('ProjectExec', 'RegExpReplace')
+def test_regexp_replace_dollar_non_digit_matches_cpu():
+    from pyspark.sql.functions import regexp_replace, col
+    assert_gpu_and_cpu_same_data_or_error(
+        lambda spark: spark.createDataFrame([("a",)], ["a"]).select(
+            regexp_replace(col("a"), "a", "$x")).collect(),
+        conf=_regexp_conf,
+        error_message=_regexp_replace_error_message("Illegal group reference"))
+
+
+@allow_non_gpu('ProjectExec', 'RegExpReplace')
+def test_regexp_replace_digit_leading_named_group_throws():
+    from pyspark.sql.functions import regexp_replace, col
+    assert_gpu_and_cpu_error(
+        lambda spark: spark.createDataFrame([("a",)], ["a"]).select(
+            regexp_replace(col("a"), "(a)", "${1}")).collect(),
+        conf=_regexp_conf,
+        error_message=_regexp_replace_error_message(
+            "capturing group name {1} starts with digit character"))
+
+
+@allow_non_gpu('ProjectExec', 'RegExpReplace')
+def test_regexp_replace_unknown_named_group_throws():
+    from pyspark.sql.functions import regexp_replace, col
+    assert_gpu_and_cpu_error(
+        lambda spark: spark.createDataFrame([("a",)], ["a"]).select(
+            regexp_replace(col("a"), "(a)", "${name}")).collect(),
+        conf=_regexp_conf,
+        error_message=_regexp_replace_error_message("No group with name {name}"))
+
+
+# `\$1` -> the backslash escapes the `$`, so the result is the literal text `$1`
+# (java.util.regex.Matcher#appendReplacement semantics). The DataFrame API avoids SQL
+# `${...}` variable substitution.
+def test_regexp_replace_escaped_dollar_before_digit_is_literal():
+    from pyspark.sql.functions import regexp_replace, col
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.createDataFrame([("abc",)], ["a"]).select(
+            regexp_replace(col("a"), "(a)", r"\$1")),
+        conf=_regexp_conf)
+
+
+# `\\$1` -> `\\` is an escaped backslash and the following `$1` is a genuine group-1
+# backref, so the result is a literal `\` followed by the captured group.
+def test_regexp_replace_double_backslash_before_dollar_is_backref():
+    from pyspark.sql.functions import regexp_replace, col
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.createDataFrame([("abc",)], ["a"]).select(
+            regexp_replace(col("a"), "(a)", r"\\$1")),
+        conf=_regexp_conf)
+
+
+def test_regexp_replace_mixed_sequence():
+    suffix_gen = mk_str_gen('[abcd]{0,3}') \
+        .with_special_case('xfoocat') \
+        .with_special_case('foofoocat') \
+        .with_special_case('foofish') \
+        .with_special_case('foodog')
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: unary_op_df(spark, suffix_gen).selectExpr(
+                'regexp_replace(a, "foo(cat|dog)", "X")',
+                'regexp_replace(a, "(foo)(cat)", "X")'),
+        conf=_regexp_conf)
+
+    prefix_gen = mk_str_gen('[abcd]{0,3}') \
+        .with_special_case('catfoo') \
+        .with_special_case('dogfoo')
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: unary_op_df(spark, prefix_gen).selectExpr(
+                'regexp_replace(a, "(cat|dog)foo", "X")'),
         conf=_regexp_conf)
 
 @pytest.mark.skipif(is_before_spark_320(), reason='regexp is synonym for RLike starting in Spark 3.2.0')
@@ -545,6 +660,15 @@ def test_regexp_extract():
                 'regexp_extract(a, "^([a-d]*)([0-9]*)(\\\\/[a-d]*)$", 3)'),
         conf=_regexp_conf)
 
+    capture_group_gen = mk_str_gen('[abcd]{1,2}')
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: unary_op_df(spark, capture_group_gen).selectExpr(
+                'regexp_extract(a, "(a)|(b)", 2)',
+                'regexp_extract(a, "(?:(a)(b))", 2)',
+                'regexp_extract(a, "((a)|(b))", 3)',
+                'regexp_extract(a, "(a)(b)|(c)(d)", 4)'),
+        conf=_regexp_conf)
+
 def test_regexp_extract_no_match():
     gen = mk_str_gen('[abcd]{1,3}[0-9]{1,3}[abcd]{1,3}')
     assert_gpu_and_cpu_are_equal_collect(
@@ -580,6 +704,14 @@ def test_regexp_extract_idx_out_of_bounds():
             lambda spark: unary_op_df(spark, gen).selectExpr(
                 'regexp_extract(a, "^([a-d]*)([0-9]*)([a-d]*)$", 4)').collect(),
             error_message = message,
+            conf=_regexp_conf)
+
+    non_capturing_message = "Regex group count is 1, but the specified group index is 2" if is_before_spark_350() and not (is_databricks_runtime() and spark_version() == "3.4.1") else \
+        "[INVALID_PARAMETER_VALUE.REGEX_GROUP_INDEX] The value of parameter(s) `idx` in `regexp_extract` is invalid: Expects group index between 0 and 1, but got 2."
+    assert_gpu_and_cpu_error(
+            lambda spark: unary_op_df(spark, gen).selectExpr(
+                'regexp_extract(a, "(?:(a))", 2)').collect(),
+            error_message = non_capturing_message,
             conf=_regexp_conf)
 
 def test_regexp_extract_multiline():
@@ -670,6 +802,29 @@ def test_regexp_hexadecimal_digits():
                 'regexp_replace(a, "\\\\xff", "@")',
                 'regexp_replace(a, "[\\\\xa0-\\\\xb0]", "@")',
                 'regexp_replace(a, "\\\\x{10ffff}", "@")',
+                # Issue #14739: non-braced \xNN followed by another hex digit
+                # used to be greedily consumed and rejected. The cap fix below
+                # makes these patterns run on GPU instead of falling back.
+                r'regexp_replace(a, "\\x61a", "X")',
+                r'regexp_replace(a, "\\x41f", "X")',
+                r'rlike(a, "\\x61a")',
+                r'rlike(a, "[\\x41b]")',
+            ),
+        conf=_regexp_conf)
+    # Issue #14739 (positive-match path): the random data above only contains
+    # `[abcd]`-prefixed strings, so two-character substrings like "aa", "Af",
+    # or "ab" only appear by coincidence. Add a literal dataframe with strings
+    # that DO contain the targeted two-char substrings so the matched/replaced
+    # branch of the cap fix is actually exercised on both GPU and CPU.
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: spark.createDataFrame(
+                [("aa",), ("Af",), ("ab",), ("zz",), ("Aff",), ("xaay",)],
+                "a string").selectExpr(
+                r'regexp_replace(a, "\\x61a", "X")',  # "aa" -> "X"
+                r'regexp_replace(a, "\\x41f", "X")',  # "Af" -> "X"
+                r'rlike(a, "\\x61a")',
+                r'rlike(a, "\\x41f")',
+                r'rlike(a, "[\\x41b]")',  # [A,b] char class
             ),
         conf=_regexp_conf)
 
@@ -879,11 +1034,22 @@ def test_rlike_missing_escape():
 @allow_non_gpu('ProjectExec', 'RLike')
 def test_rlike_fallback_possessive_quantifier():
     gen = mk_str_gen('(\u20ac|\\w){0,3}a[|b*.$\r\n]{0,2}c\\w{0,3}')
-    assert_gpu_fallback_collect(
-            lambda spark: unary_op_df(spark, gen).selectExpr(
-                'a rlike "a*+"'),
-                'RLike',
-        conf=_regexp_conf)
+    for pattern in ['a*+', '(3?|a)+', '(a|3?)+']:
+        assert_gpu_fallback_collect(
+            lambda spark, pattern=pattern: unary_op_df(spark, gen).selectExpr(
+                f'a rlike "{pattern}"'),
+            'RLike',
+            conf=_regexp_conf)
+
+@allow_non_gpu('ProjectExec', 'RLike')
+def test_rlike_fallback_lookaheads():
+    gen = mk_str_gen('(\u20ac|\\w){0,3}a[|b*.$\r\n]{0,2}c\\w{0,3}')
+    for pattern in ['a(?=a*)', 'a(?!a*)']:
+        assert_gpu_fallback_collect(
+            lambda spark, pattern=pattern: unary_op_df(spark, gen).selectExpr(
+                f'a rlike "{pattern}"'),
+            'RLike',
+            conf=_regexp_conf)
 
 def test_regexp_extract_all_idx_zero():
     gen = mk_str_gen('[abcd]{0,3}[0-9]{0,3}-[0-9]{0,3}[abcd]{1,3}')
@@ -905,6 +1071,17 @@ def test_regexp_extract_all_idx_positive(slices):
                 'regexp_extract_all(a, "(a)(b)", 2)',
                 'regexp_extract_all(a, "([a-z0-9]((([abcd](\\\\d?)))))", 3)',
                 'regexp_extract_all(a, "(\\\\d+)-(\\\\d+)", 2)',
+            ),
+        conf=_regexp_conf)
+
+    capture_group_gen = mk_str_gen('[abcd]{1,2}')
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: unary_op_df(
+                spark, capture_group_gen, num_slices=slices).selectExpr(
+                'regexp_extract_all(a, "(a)|(b)", 2)',
+                'regexp_extract_all(a, "(?:(a)(b))", 2)',
+                'regexp_extract_all(a, "((a)|(b))", 3)',
+                'regexp_extract_all(a, "(a)(b)|(c)(d)", 4)',
             ),
         conf=_regexp_conf)
 
@@ -931,6 +1108,15 @@ def test_regexp_extract_all_idx_out_of_bounds():
                 'regexp_extract_all(a, "([a-d]+).*([0-9])", 3)'
             ).collect(),
         error_message=message,
+        conf=_regexp_conf)
+
+    non_capturing_message = "Regex group count is 1, but the specified group index is 2" if is_before_spark_350() and not (is_databricks_runtime() and spark_version() == "3.4.1") else \
+        "[INVALID_PARAMETER_VALUE.REGEX_GROUP_INDEX] The value of parameter(s) `idx` in `regexp_extract_all` is invalid: Expects group index between 0 and 1, but got 2."
+    assert_gpu_and_cpu_error(
+            lambda spark: unary_op_df(spark, gen).selectExpr(
+                'regexp_extract_all(a, "(?:(a))", 2)'
+            ).collect(),
+        error_message=non_capturing_message,
         conf=_regexp_conf)
 
 def test_rlike_unicode_support():
@@ -998,6 +1184,8 @@ def test_unsupported_fallback_regexp_extract():
     assert_gpu_did_fallback('REGEXP_EXTRACT("PROD", "[a-z]+", num)')
     assert_gpu_did_fallback('REGEXP_EXTRACT("PROD", reg_ex, 0)')
     assert_gpu_did_fallback('REGEXP_EXTRACT("PROD", reg_ex, num)')
+    assert_gpu_did_fallback('REGEXP_EXTRACT(a, "(3?|a)+", 0)')
+    assert_gpu_did_fallback('REGEXP_EXTRACT(a, "(a|3?)+", 0)')
 
 
 @allow_non_gpu('RegExpExtractAll')

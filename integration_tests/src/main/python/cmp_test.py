@@ -17,7 +17,7 @@ import pytest
 from asserts import assert_gpu_and_cpu_are_equal_collect
 from conftest import is_not_utc
 from data_gen import *
-from spark_session import with_cpu_session, is_before_spark_313, is_before_spark_330
+from spark_session import with_cpu_session, is_before_spark_313
 from pyspark.sql.types import *
 from marks import datagen_overrides, allow_non_gpu
 import pyspark.sql.functions as f
@@ -35,7 +35,6 @@ def test_eq(data_gen):
                 f.col('b') == f.lit(None).cast(data_type),
                 f.col('a') == f.col('b')))
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_eq_for_interval():
     def test_func(data_gen):
         (s1, s2) = with_cpu_session(
@@ -68,7 +67,6 @@ def test_eq_ns(data_gen):
                 f.col('b').eqNullSafe(f.lit(None).cast(data_type)),
                 f.col('a').eqNullSafe(f.col('b'))))
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_eq_ns_for_interval():
     data_gen = DayTimeIntervalGen()
     (s1, s2) = with_cpu_session(
@@ -95,7 +93,6 @@ def test_ne(data_gen):
                 f.col('b') != f.lit(None).cast(data_type),
                 f.col('a') != f.col('b')))
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_ne_for_interval():
     def test_func(data_gen):
         (s1, s2) = with_cpu_session(
@@ -128,7 +125,6 @@ def test_lt(data_gen):
                 f.col('b') < f.lit(None).cast(data_type),
                 f.col('a') < f.col('b')))
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_lt_for_interval():
     def test_func(data_gen):
         (s1, s2) = with_cpu_session(
@@ -162,7 +158,6 @@ def test_lte(data_gen):
                 f.col('b') <= f.lit(None).cast(data_type),
                 f.col('a') <= f.col('b')))
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_lte_for_interval():
     def test_func(data_gen):
         (s1, s2) = with_cpu_session(
@@ -196,7 +191,6 @@ def test_gt(data_gen):
                 f.col('b') > f.lit(None).cast(data_type),
                 f.col('a') > f.col('b')))
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_gt_interval():
     def test_func(data_gen):
         (s1, s2) = with_cpu_session(
@@ -230,7 +224,6 @@ def test_gte(data_gen):
                 f.col('b') >= f.lit(None).cast(data_type),
                 f.col('a') >= f.col('b')))
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_gte_for_interval():
     def test_func(data_gen):
         (s1, s2) = with_cpu_session(
@@ -256,7 +249,6 @@ def test_isnull(data_gen):
             lambda spark : unary_op_df(spark, data_gen).select(
                 f.isnull(f.col('a'))))
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_isnull_for_interval():
     data_gen = DayTimeIntervalGen()
     assert_gpu_and_cpu_are_equal_collect(

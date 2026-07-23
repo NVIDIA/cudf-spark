@@ -17,13 +17,11 @@ import pytest
 from private_optimizer_common import (
     assert_rule_fires,
     private_optimizer_conf,
-    require_private_optimizer,
 )
 from spark_session import with_cpu_session
 
 
 @pytest.mark.private_optimizer
-@require_private_optimizer
 def test_agg_pushdown_rule(spark_tmp_path):
     """AggPushdownRule pushes a partial aggregate onto the fact side of a
     fact-dim shuffle join. Fires only on a row-counted relation (parquet, not

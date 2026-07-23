@@ -50,8 +50,8 @@ On startup, the `SQLExecPlugin` plugin registers two distinct sets of
 optimizer rules:
 
 ```scala
-extensions.injectColumnar(_ => ColumnarOverrideRules())
-extensions.injectQueryStagePrepRule(_ => GpuQueryStagePrepOverrides())
+extensions.injectColumnar(session => ColumnarOverrideRules(session))
+extensions.injectQueryStagePrepRule(session => GpuQueryStagePrepOverrides(session))
 ```
 
 The `ColumnarOverrideRules` are used whether AQE is enabled or not, and the

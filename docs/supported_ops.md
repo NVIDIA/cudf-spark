@@ -7200,7 +7200,7 @@ are limited.
 <tr>
 <td rowSpan="3">DivideYMInterval</td>
 <td rowSpan="3"> </td>
-<td rowSpan="3">Year-month interval * operator</td>
+<td rowSpan="3">Year-month interval / number</td>
 <td rowSpan="3">None</td>
 <td rowSpan="3">project</td>
 <td>lhs</td>
@@ -10142,7 +10142,7 @@ are limited.
 <td> </td>
 <td> </td>
 <td><b>NS</b></td>
-<td><em>PS<br/>MAP only supports keys and values that are of STRING type and is only supported at the top level;<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, BINARY, CALENDAR, MAP, UDT, DAYTIME, YEARMONTH</em></td>
+<td><em>PS<br/>MAP only supports keys of STRING type and values that are of STRING type or ARRAY of STRING type, and is only supported at the top level;<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, BINARY, CALENDAR, MAP, UDT, DAYTIME, YEARMONTH</em></td>
 <td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, BINARY, CALENDAR, MAP, UDT, DAYTIME, YEARMONTH</em></td>
 <td> </td>
 <td> </td>

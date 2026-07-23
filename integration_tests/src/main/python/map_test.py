@@ -279,9 +279,8 @@ def test_basic_scalar_map_get_map_value(key_gen):
 
 
 @allow_non_gpu('WindowLocalExec')
-@datagen_overrides(seed=0, condition=is_before_spark_314()
-                             or (not is_before_spark_320() and is_before_spark_323())
-                             or (not is_before_spark_330() and is_before_spark_331()), reason="https://issues.apache.org/jira/browse/SPARK-40089")
+@datagen_overrides(seed=0, condition=is_before_spark_331(),
+                   reason="https://issues.apache.org/jira/browse/SPARK-40089")
 @pytest.mark.parametrize('data_gen', supported_key_map_gens, ids=idfn)
 @allow_non_gpu(*non_utc_allow)
 def test_map_scalars_supported_key_types(data_gen):
@@ -538,17 +537,6 @@ def test_str_to_map_input_all_empty(empty_type):
             'str_to_map(a, ",", ":") as m2'
         ), conf={'spark.sql.mapKeyDedupPolicy': 'LAST_WIN'})
 
-@pytest.mark.skipif(not is_before_spark_330(),
-                    reason="Only in Spark 3.1.1+ (< 3.3.0) + ANSI mode, map key throws on no such element")
-@pytest.mark.parametrize('data_gen', [simple_string_to_string_map_gen], ids=idfn)
-def test_simple_get_map_value_ansi_fail(data_gen):
-    message = "org.apache.spark.SparkNoSuchElementException" if is_databricks104_or_later() else "java.util.NoSuchElementException"
-    assert_gpu_and_cpu_error(
-            lambda spark: unary_op_df(spark, data_gen).selectExpr(
-                'a["NOT_FOUND"]').collect(),
-            conf=ansi_enabled_conf,
-            error_message=message)
-
 @pytest.mark.skipif(is_before_spark_340() and not is_databricks113_or_later(),
                     reason="Only in Spark 3.4+ with ANSI mode, map key returns null on no such element")
 @pytest.mark.parametrize('data_gen', [simple_string_to_string_map_gen], ids=idfn)
@@ -651,7 +639,7 @@ def test_get_map_value_element_at_map_string_col_keys(data_gen):
                     reason="Since Spark3.4 and DB11.3, null will always be returned on invalid access to map")
 def test_element_at_map_string_col_keys_ansi_fail(data_gen):
     keys = StringGen(pattern='NOT_FOUND')
-    message = "org.apache.spark.SparkNoSuchElementException" if (not is_before_spark_330() or is_databricks104_or_later()) else "java.util.NoSuchElementException"
+    message = "org.apache.spark.SparkNoSuchElementException"
     # For 3.3.X strictIndexOperator should not affect element_at
     test_conf = copy_and_update(ansi_enabled_conf, {'spark.sql.ansi.strictIndexOperator': 'false'})
     assert_gpu_and_cpu_error(
@@ -675,7 +663,7 @@ def test_element_at_map_string_col_keys_ansi_null(data_gen):
                     reason="Since Spark3.4 and DB11.3, null will always be returned on invalid access to map")
 def test_get_map_value_string_col_keys_ansi_fail(data_gen):
     keys = StringGen(pattern='NOT_FOUND')
-    message = "org.apache.spark.SparkNoSuchElementException" if (not is_before_spark_330() or is_databricks104_or_later()) else "java.util.NoSuchElementException"
+    message = "org.apache.spark.SparkNoSuchElementException"
     assert_gpu_and_cpu_error(
         lambda spark: two_col_df(spark, data_gen, keys).selectExpr(
             'a[b]').collect(),
@@ -722,7 +710,7 @@ def test_element_at_map_timestamp_keys(data_gen):
 @pytest.mark.skipif(is_spark_340_or_later() or is_databricks113_or_later(),
                     reason="Since Spark3.4 and DB11.3, null will always be returned on invalid access to map")
 def test_map_element_at_ansi_fail(data_gen):
-    message = "org.apache.spark.SparkNoSuchElementException" if (not is_before_spark_330() or is_databricks104_or_later()) else "java.util.NoSuchElementException"
+    message = "org.apache.spark.SparkNoSuchElementException"
     # For 3.3.0+ strictIndexOperator should not affect element_at
     test_conf = copy_and_update(ansi_enabled_conf, {'spark.sql.ansi.strictIndexOperator': 'false'})
     assert_gpu_and_cpu_error(
@@ -928,7 +916,6 @@ def test_map_filter(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: unary_op_df(spark, data_gen).selectExpr(columns))
 
-@pytest.mark.skipif(is_before_spark_330(), reason="try_element_at is not supported before Spark 3.3.0")
 @pytest.mark.parametrize('data_gen', numeric_key_map_gens, ids=idfn)
 def test_try_element_at_map_numeric_keys(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
@@ -940,7 +927,6 @@ def test_try_element_at_map_numeric_keys(data_gen):
             'try_element_at(a, 999)'))
 
 
-@pytest.mark.skipif(is_before_spark_330(), reason="try_element_at is not supported before Spark 3.3.0")
 @pytest.mark.parametrize('data_gen', [simple_string_to_string_map_gen], ids=idfn)
 def test_try_element_at_map_missing_keys(data_gen):
     missing_keys = StringGen(pattern='MISSING_KEY')

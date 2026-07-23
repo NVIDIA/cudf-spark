@@ -315,7 +315,6 @@ def test_iceberg_delete_nested_types(spark_tmp_table_factory, delete_mode):
     pytest.param('copy-on-write', 'ReplaceDataExec', id='cow'),
     pytest.param('merge-on-read', 'WriteDeltaExec', id='mor')
 ])
-@pytest.mark.xfail(reason="https://github.com/NVIDIA/spark-rapids/issues/13649")
 def test_iceberg_delete_fallback_iceberg_disabled(spark_tmp_table_factory, delete_mode, fallback_exec):
     """Test DELETE falls back when Iceberg is completely disabled (both modes)"""
     base_table_name = get_full_table_name(spark_tmp_table_factory)

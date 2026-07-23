@@ -13,6 +13,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+/*** spark-rapids-shim-json-lines
+{"spark": "411"}
+spark-rapids-shim-json-lines ***/
 
 package org.apache.iceberg.spark.source
 

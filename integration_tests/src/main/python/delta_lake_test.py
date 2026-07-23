@@ -693,8 +693,11 @@ def test_delta_deletion_vector_interleaved_file_splits(
         f"b={b_size}, max_split={max_split}")
 
     a_tail_start = a_size - a_tail
-    a_midpoints = parquet_row_group_midpoints(a_path)
-    b_midpoints = parquet_row_group_midpoints(b_path)
+    a_midpoints, b_midpoints = with_cpu_session(
+        lambda spark: (
+            parquet_row_group_midpoints(spark, a_path),
+            parquet_row_group_midpoints(spark, b_path),
+        ))
     assert any(a_tail_start <= midpoint < a_size for midpoint in a_midpoints), (
         f"A tail split [{a_tail_start}, {a_size}) has no row-group midpoint; "
         f"midpoints={a_midpoints}")
@@ -888,9 +891,6 @@ def test_delta_filter_out_metadata_col(spark_tmp_path, dv_predicate_pushdown):
         assert_gpu_and_cpu_are_equal_collect(read_table, conf=conf)
 
 
-_delta_meta_allow_without_filter = [c for c in delta_meta_allow if c != "FilterExec"]
-
-
 def _test_delta_dv_filter_after_native_scan(spark_tmp_path, cpu_bridge_enabled):
     data_path = spark_tmp_path + "/DELTA_DATA"
     conf = {
@@ -963,7 +963,12 @@ def test_delta_dv_cpu_filter_after_native_scan(spark_tmp_path):
     _test_delta_dv_filter_after_native_scan(spark_tmp_path, cpu_bridge_enabled=False)
 
 
-@allow_non_gpu("In", "InSet", "ColumnarToRowExec", *_delta_meta_allow_without_filter)
+# This covers the CPU bridge path: the filter expression runs on the CPU while
+# GpuFilterExec remains in the plan. FilterExec still has to be allowed because
+# Delta metadata queries run on the CPU by default, and their plans include
+# FilterExec. Even when a Delta metadata query runs on the GPU, its filter
+# expression is not bridge-compatible because it is nondeterministic.
+@allow_non_gpu("FilterExec", "In", "InSet", "ColumnarToRowExec", *delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
 @pytest.mark.skipif(not supports_delta_lake_deletion_vectors(),

@@ -40,8 +40,7 @@ def test_cast_empty_string_to_int_ansi_off():
 
 @pytest.mark.parametrize('to_type', ['BYTE', 'SHORT', 'INTEGER', 'LONG'])
 def test_cast_empty_string_to_int_ansi_on(to_type):
-    err_mess = "invalid input syntax for type numeric" if is_before_spark_330() \
-        else "cannot be cast to "
+    err_mess = "cannot be cast to "
     assert_gpu_and_cpu_error(
         lambda spark : unary_op_df(spark, StringGen(pattern="")).selectExpr(
             'CAST(a as {})'.format(to_type)).collect(),
@@ -75,7 +74,7 @@ def test_cast_string_to_boolean_invalid_ansi_on(invalid_value):
         lambda spark: spark.createDataFrame([(invalid_value,)], "str_col string")
                            .selectExpr("CAST(str_col AS BOOLEAN) as bool_col").collect(),
         conf=ansi_enabled_conf,
-        error_message="invalid input syntax" if is_before_spark_330() else "SparkRuntimeException")
+        error_message="SparkRuntimeException")
 
 # These tests are not intended to be exhaustive. The scala test CastOpSuite should cover
 # just about everything for non-nested values. This is intended to check that the
@@ -519,7 +518,6 @@ def test_cast_string_to_negative_scale_decimal_overflow(ansi_on):
                                              conf=ansi_disabled_conf)
 
 
-@pytest.mark.skipif(is_before_spark_330(), reason="ansi cast throws exception only in 3.3.0+")
 @pytest.mark.parametrize('type', [DoubleType(), FloatType()], ids=idfn)
 @pytest.mark.parametrize('invalid_value', [float("inf"), float("-inf"), float("nan")])
 @allow_non_gpu(*non_utc_allow)
@@ -534,7 +532,6 @@ def test_cast_float_to_timestamp_ansi_for_nan_inf(type, invalid_value):
                              if is_before_spark_400() else "DateTimeException")
 
 # if float.floor > Long.max or float.ceil < Long.min, throw exception
-@pytest.mark.skipif(is_before_spark_330(), reason="ansi cast throws exception only in 3.3.0+")
 @pytest.mark.parametrize('type', [DoubleType(), FloatType()], ids=idfn)
 @pytest.mark.parametrize('invalid_value', [float(LONG_MAX) + 100, float(LONG_MIN) - 100])
 @allow_non_gpu(*non_utc_allow)
@@ -545,7 +542,6 @@ def test_cast_float_to_timestamp_ansi_overflow(type, invalid_value):
         return df.select(f.col('value').cast(TimestampType())).collect()
     assert_gpu_and_cpu_error(fun, {"spark.sql.ansi.enabled": True}, "ArithmeticException")
 
-@pytest.mark.skipif(is_before_spark_330(), reason='330+ throws exception in ANSI mode')
 @allow_non_gpu(*non_utc_allow)
 def test_cast_float_to_timestamp_side_effect():
     def getDf(spark):
@@ -583,8 +579,6 @@ long_gen_to_timestamp = LongGen(max_val=math.floor((9999-1970) * 365 * 86400),
     int_gen,
     long_gen_to_timestamp], ids=idfn)
 def test_cast_integral_to_timestamp(gen, ansi_enabled):
-    if(is_before_spark_330() and ansi_enabled): # 330- does not support in ANSI mode
-        pytest.skip()
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: unary_op_df(spark, gen).selectExpr("cast(a as timestamp)"),
         conf={"spark.sql.ansi.enabled": ansi_enabled})
@@ -592,8 +586,6 @@ def test_cast_integral_to_timestamp(gen, ansi_enabled):
 @pytest.mark.parametrize('ansi_enabled', [True, False], ids=['ANSI_ON', 'ANSI_OFF'])
 @allow_non_gpu(*non_utc_allow)
 def test_cast_float_to_timestamp(ansi_enabled):
-    if(is_before_spark_330() and ansi_enabled): # 330- does not support in ANSI mode
-        pytest.skip()
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: unary_op_df(spark, long_gen_to_timestamp)
             .selectExpr("cast(cast(a as float) as timestamp)"),
@@ -602,8 +594,6 @@ def test_cast_float_to_timestamp(ansi_enabled):
 @pytest.mark.parametrize('ansi_enabled', [True, False], ids=['ANSI_ON', 'ANSI_OFF'])
 @allow_non_gpu(*non_utc_allow)
 def test_cast_double_to_timestamp(ansi_enabled):
-    if (is_before_spark_330() and ansi_enabled):  # 330- does not support in ANSI mode
-        pytest.skip()
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: unary_op_df(spark, long_gen_to_timestamp)
             .selectExpr("cast(cast(a as double) as timestamp)"),
@@ -617,7 +607,6 @@ def test_cast_double_to_timestamp(ansi_enabled):
     (INT_MAX + 1, IntegerType()),
     (INT_MIN - 1, IntegerType()),
 ], ids=idfn)
-@pytest.mark.skipif(is_before_spark_330(), reason="Spark 330- does not ansi casting between numeric and timestamp")
 def test_cast_timestamp_to_integral_ansi_overflow(invalid_and_type):
     (invalid, to_type) = invalid_and_type
     assert_gpu_and_cpu_error(
@@ -627,7 +616,6 @@ def test_cast_timestamp_to_integral_ansi_overflow(invalid_and_type):
         conf=ansi_enabled_conf,
         error_message="overflow")
 
-@pytest.mark.skipif(is_before_spark_330(), reason="Spark 330- does not ansi casting between numeric and timestamp")
 def test_cast_timestamp_to_numeric_ansi_no_overflow():
     data = [datetime.fromtimestamp(i) for i in range(BYTE_MIN, BYTE_MAX + 1)]
     assert_gpu_and_cpu_are_equal_collect(
@@ -660,7 +648,6 @@ def test_cast_timestamp_to_date():
         lambda spark: unary_op_df(spark, timestamp_gen)
             .selectExpr("cast(a as date)"))
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_cast_day_time_interval_to_string():
     _assert_cast_to_string_equal(DayTimeIntervalGen(start_field='day', end_field='day', special_cases=[MIN_DAY_TIME_INTERVAL, MAX_DAY_TIME_INTERVAL, timedelta(seconds=0)]), {})
     _assert_cast_to_string_equal(DayTimeIntervalGen(start_field='day', end_field='hour', special_cases=[MIN_DAY_TIME_INTERVAL, MAX_DAY_TIME_INTERVAL, timedelta(seconds=0)]), {})
@@ -673,7 +660,6 @@ def test_cast_day_time_interval_to_string():
     _assert_cast_to_string_equal(DayTimeIntervalGen(start_field='minute', end_field='second', special_cases=[MIN_DAY_TIME_INTERVAL, MAX_DAY_TIME_INTERVAL, timedelta(seconds=0)]), {})
     _assert_cast_to_string_equal(DayTimeIntervalGen(start_field='second', end_field='second', special_cases=[MIN_DAY_TIME_INTERVAL, MAX_DAY_TIME_INTERVAL, timedelta(seconds=0)]), {})
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_cast_string_to_day_time_interval():
     gen = DayTimeIntervalGen(start_field='day', end_field='second', special_cases=[MIN_DAY_TIME_INTERVAL, MAX_DAY_TIME_INTERVAL, timedelta(seconds=0)])
     dtType = DayTimeIntervalType(0, 3) # 0 is day; 3 is second
@@ -685,7 +671,6 @@ def test_cast_string_to_day_time_interval():
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: unary_op_df(spark, gen).select(f.col('a').cast(StringType()).cast(dtType)))
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 @pytest.mark.parametrize('invalid_string', [
     "INTERVAL 'xxx' DAY TO SECOND", # invalid format
     "-999999999 04:00:54.775808000" # exceeds min value, min value is "-106751991 04:00:54.775808000"
@@ -698,7 +683,6 @@ def test_cast_string_to_day_time_interval_exception(invalid_string):
         return df.select(f.col('value').cast(dtType)).collect()
     assert_gpu_and_cpu_error(fun, {}, "IllegalArgumentException")
 
-@pytest.mark.skipif(is_before_spark_330(), reason='casting between interval and integral is not supported before Pyspark 3.3.0')
 def test_cast_day_time_interval_to_integral_no_overflow():
     second_dt_gen = DayTimeIntervalGen(start_field='second', end_field='second', min_value=timedelta(seconds=-128), max_value=timedelta(seconds=127), nullable=False)
     gen = StructGen([('a', DayTimeIntervalGen(start_field='day', end_field='day', min_value=timedelta(seconds=-128 * 86400), max_value=timedelta(seconds=127 * 86400))),
@@ -726,7 +710,6 @@ integral_gens_no_overflow = [
     ByteGen(),
     # StructGen([("a", ShortGen()), ("b", ByteGen())])
 ]
-@pytest.mark.skipif(is_before_spark_330(), reason='casting between interval and integral is not supported before Pyspark 3.3.0')
 def test_cast_integral_to_day_time_interval_no_overflow():
     long_gen = IntegerGen(min_val=math.ceil(INT_MIN / 86400 / 1000000), max_val=math.floor(INT_MAX / 86400 / 1000000), special_cases=[0, 1, -1])
     int_gen = LongGen(min_val=math.ceil(LONG_MIN / 86400 / 1000000), max_val=math.floor(LONG_MAX / 86400 / 1000000), special_cases=[0, 1, -1], nullable=False)
@@ -762,7 +745,6 @@ cast_day_time_to_inregral_overflow_pairs = [
     (BYTE_MIN - 1, ByteType()),
     (BYTE_MAX + 1, ByteType())
 ]
-@pytest.mark.skipif(is_before_spark_330(), reason='casting between interval and integral is not supported before Pyspark 3.3.0')
 @pytest.mark.parametrize('large_second, integral_type', cast_day_time_to_inregral_overflow_pairs)
 def test_cast_day_time_interval_to_integral_overflow(large_second, integral_type):
     def getDf(spark):
@@ -779,7 +761,6 @@ large_days_overflow_pairs = [
     (-day_time_interval_max_day - 1, IntegerType()),
     (+day_time_interval_max_day + 1, IntegerType())
 ]
-@pytest.mark.skipif(is_before_spark_330(), reason='casting between interval and integral is not supported before Pyspark 3.3.0')
 @pytest.mark.parametrize('large_day,integral_type', large_days_overflow_pairs)
 def test_cast_integral_to_day_time_interval_overflow(large_day, integral_type):
     def getDf(spark):
@@ -789,7 +770,6 @@ def test_cast_integral_to_day_time_interval_overflow(large_day, integral_type):
         conf={},
         error_message="overflow")
 
-@pytest.mark.skipif(is_before_spark_330(), reason='casting between interval and integral is not supported before Pyspark 3.3.0')
 def test_cast_integral_to_day_time_side_effect():
     # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
     conf = {'spark.sql.adaptive.enabled': 'false'}
@@ -800,7 +780,6 @@ def test_cast_integral_to_day_time_side_effect():
         lambda spark: getDf(spark).selectExpr("if(c_b, interval 0 day, cast(c_i as interval day))", "if(c_b, interval 0 second, cast(c_l as interval second))"),
         conf=conf)
 
-@pytest.mark.skipif(is_before_spark_330(), reason='casting between interval and integral is not supported before Pyspark 3.3.0')
 def test_cast_day_time_to_integral_side_effect():
     # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
     conf = {'spark.sql.adaptive.enabled': 'false'}
