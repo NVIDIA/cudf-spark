@@ -76,8 +76,20 @@ class RegularExpressionParserSuite extends AnyFunSuite {
   test("group") {
       assert(parse("(a)(b)") ===
         RegexSequence(ListBuffer(
-          RegexGroup(capture = true, RegexSequence(ListBuffer(RegexChar('a'))), None),
-          RegexGroup(capture = true, RegexSequence(ListBuffer(RegexChar('b'))), None))))
+          RegexGroup(RegexGroup.Capturing, RegexSequence(ListBuffer(RegexChar('a')))),
+          RegexGroup(RegexGroup.Capturing, RegexSequence(ListBuffer(RegexChar('b')))))))
+      assert(parse("(?:a)(?:b)") ===
+        RegexSequence(ListBuffer(
+          RegexGroup(RegexGroup.NonCapturing, RegexSequence(ListBuffer(RegexChar('a')))),
+          RegexGroup(RegexGroup.NonCapturing, RegexSequence(ListBuffer(RegexChar('b')))))))
+      assert(parse("(?=a)(?!b)(?<=c)(?<!d)(?>e)(?<n>f)") ===
+        RegexSequence(ListBuffer(
+          RegexGroup(RegexGroup.PositiveLookahead, RegexSequence(ListBuffer(RegexChar('a')))),
+          RegexGroup(RegexGroup.NegativeLookahead, RegexSequence(ListBuffer(RegexChar('b')))),
+          RegexGroup(RegexGroup.PositiveLookbehind, RegexSequence(ListBuffer(RegexChar('c')))),
+          RegexGroup(RegexGroup.NegativeLookbehind, RegexSequence(ListBuffer(RegexChar('d')))),
+          RegexGroup(RegexGroup.Independent, RegexSequence(ListBuffer(RegexChar('e')))),
+          RegexGroup(RegexGroup.Named("n"), RegexSequence(ListBuffer(RegexChar('f')))))))
   }
 
   test("character class") {
@@ -120,14 +132,14 @@ class RegularExpressionParserSuite extends AnyFunSuite {
     assert(parse("\\[([A-Z]+)\\]") ===
       RegexSequence(ListBuffer(
         RegexEscaped('['),
-        RegexGroup(capture = true,
+        RegexGroup(RegexGroup.Capturing,
           RegexSequence(ListBuffer(
             RegexRepetition(
               RegexCharacterClass(negated = false, ListBuffer(
                 RegexCharacterRange(RegexChar('A'), RegexChar('Z')))),
               SimpleQuantifier('+')
             )
-          )), None
+          ))
         ),
         RegexEscaped(']')
       ))
@@ -203,24 +215,29 @@ class RegularExpressionParserSuite extends AnyFunSuite {
 
   test("repetition with group containing simple repetition") {
     assert(parse("(3?)+") ===
-      RegexSequence(ListBuffer(RegexRepetition(RegexGroup(capture = true, 
+      RegexSequence(ListBuffer(RegexRepetition(RegexGroup(RegexGroup.Capturing,
           RegexSequence(ListBuffer(RegexRepetition(RegexChar('3'), 
-          SimpleQuantifier('?')))), None),SimpleQuantifier('+')))))
+          SimpleQuantifier('?'))))),SimpleQuantifier('+')))))
   }
 
   test("repetition with group containing escape character") {
     assert(parse(raw"(\A)+") ===
-      RegexSequence(ListBuffer(RegexRepetition(RegexGroup(capture = true,
-          RegexSequence(ListBuffer(RegexEscaped('A'))), None),
+      RegexSequence(ListBuffer(RegexRepetition(RegexGroup(RegexGroup.Capturing,
+          RegexSequence(ListBuffer(RegexEscaped('A')))),
+          SimpleQuantifier('+'))))
+    )
+    assert(parse(raw"(?:\A)+") ===
+      RegexSequence(ListBuffer(RegexRepetition(RegexGroup(RegexGroup.NonCapturing,
+          RegexSequence(ListBuffer(RegexEscaped('A')))),
           SimpleQuantifier('+'))))
     )
   }
 
   test("group containing choice with repetition") {
     assert(parse("(\t+|a)") == RegexSequence(ListBuffer(
-      RegexGroup(capture = true, RegexChoice(RegexSequence(ListBuffer(
+      RegexGroup(RegexGroup.Capturing, RegexChoice(RegexSequence(ListBuffer(
         RegexRepetition(RegexChar('\t'),SimpleQuantifier('+')))),
-        RegexSequence(ListBuffer(RegexChar('a')))), None))))
+        RegexSequence(ListBuffer(RegexChar('a'))))))))
   }
 
   test("multiple choice (2)") {
@@ -244,17 +261,17 @@ class RegularExpressionParserSuite extends AnyFunSuite {
     assert(e.getMessage.startsWith("Base expression cannot start with quantifier"))
 
     assert(parse("(?:a?)") === RegexSequence(ListBuffer(
-      RegexGroup(capture = false, RegexSequence(ListBuffer(
-        RegexRepetition(RegexChar('a'), SimpleQuantifier('?')))), None))))
+      RegexGroup(RegexGroup.NonCapturing, RegexSequence(ListBuffer(
+        RegexRepetition(RegexChar('a'), SimpleQuantifier('?'))))))))
   }
 
   test("group not starting with ? is a capturing group") {
     assert(parse("(=a)") === RegexSequence(ListBuffer(
-      RegexGroup(true, RegexSequence(ListBuffer(
-        RegexChar('='), RegexChar('a'))), None))))
+      RegexGroup(RegexGroup.Capturing, RegexSequence(ListBuffer(
+        RegexChar('='), RegexChar('a')))))))
     assert(parse("(!a)") === RegexSequence(ListBuffer(
-      RegexGroup(true, RegexSequence(ListBuffer(
-        RegexChar('!'), RegexChar('a'))), None))))
+      RegexGroup(RegexGroup.Capturing, RegexSequence(ListBuffer(
+        RegexChar('!'), RegexChar('a')))))))
   }
 
   test("complex expression") {
@@ -280,15 +297,15 @@ class RegularExpressionParserSuite extends AnyFunSuite {
       RegexSequence(ListBuffer(RegexChar('^'),
         RegexRepetition(RegexCharacterClass(negated = false, ListBuffer(
           RegexChar('+'), RegexEscaped('-'))), SimpleQuantifier('?')),
-        RegexGroup(capture = true, RegexChoice(RegexSequence(ListBuffer(
-          RegexGroup(capture = true, RegexSequence(ListBuffer(
-            RegexGroup(capture = true, RegexChoice(RegexSequence(ListBuffer(
-              RegexGroup(capture = true, RegexSequence(ListBuffer(
+        RegexGroup(RegexGroup.Capturing, RegexChoice(RegexSequence(ListBuffer(
+          RegexGroup(RegexGroup.Capturing, RegexSequence(ListBuffer(
+            RegexGroup(RegexGroup.Capturing, RegexChoice(RegexSequence(ListBuffer(
+              RegexGroup(RegexGroup.Capturing, RegexSequence(ListBuffer(
                 RegexRepetition(RegexCharacterClass(negated = false, ListBuffer(
                   RegexCharacterRange(RegexChar('0'), RegexChar('9')))), 
-                SimpleQuantifier('+')))), None))),
+                SimpleQuantifier('+'))))))),
               RegexChoice(RegexSequence(ListBuffer(
-                RegexGroup(capture = true, RegexSequence(ListBuffer(
+                RegexGroup(RegexGroup.Capturing, RegexSequence(ListBuffer(
                   RegexRepetition(
                     RegexCharacterClass(negated = false, ListBuffer(
                       RegexCharacterRange(RegexChar('0'), RegexChar('9')))), 
@@ -296,26 +313,26 @@ class RegularExpressionParserSuite extends AnyFunSuite {
                 RegexRepetition(
                     RegexCharacterClass(negated = false, ListBuffer(
                       RegexCharacterRange(RegexChar('0'), RegexChar('9')))),
-                    SimpleQuantifier('+')))), None))), RegexSequence(ListBuffer(
-                RegexGroup(capture = true, RegexSequence(ListBuffer(
+                    SimpleQuantifier('+'))))))), RegexSequence(ListBuffer(
+                RegexGroup(RegexGroup.Capturing, RegexSequence(ListBuffer(
                 RegexRepetition(
                     RegexCharacterClass(negated = false, ListBuffer(
                       RegexCharacterRange(RegexChar('0'), RegexChar('9')))),
                     SimpleQuantifier('+')), RegexEscaped('.'),
                 RegexRepetition(RegexCharacterClass(negated = false,
                     ListBuffer(RegexCharacterRange(RegexChar('0'), RegexChar('9')))),
-                    SimpleQuantifier('*')))), None))))), None),
+                    SimpleQuantifier('*')))))))))),
                   RegexRepetition(
-              RegexGroup(capture = true, RegexSequence(ListBuffer(
+              RegexGroup(RegexGroup.Capturing, RegexSequence(ListBuffer(
                 RegexCharacterClass(negated = false, ListBuffer(RegexChar('e'), RegexChar('E'))),
                   RegexRepetition(RegexCharacterClass(negated = false,
                     ListBuffer(RegexChar('+'), RegexEscaped('-'))),SimpleQuantifier('?')),
                   RegexRepetition(RegexCharacterClass(negated = false,
                   ListBuffer(RegexCharacterRange(RegexChar('0'), RegexChar('9')))),
-                  SimpleQuantifier('+')))), None), SimpleQuantifier('?')),
+                  SimpleQuantifier('+'))))), SimpleQuantifier('?')),
             RegexRepetition(RegexCharacterClass(negated = false, ListBuffer(
               RegexChar('f'), RegexChar('F'), RegexChar('d'), RegexChar('D'))),
-              SimpleQuantifier('?')))), None))),
+              SimpleQuantifier('?'))))))),
           RegexChoice(RegexSequence(ListBuffer(
             RegexChar('I'), RegexChar('n'), RegexChar('f'))),
             RegexSequence(ListBuffer(
@@ -324,7 +341,7 @@ class RegularExpressionParserSuite extends AnyFunSuite {
               RegexCharacterClass(negated = false,
                 ListBuffer(RegexChar('a'), RegexChar('A'))),
               RegexCharacterClass(negated = false,
-                ListBuffer(RegexChar('n'), RegexChar('N'))))))), None),
+                ListBuffer(RegexChar('n'), RegexChar('N')))))))),
     RegexChar('$'))))
   }
   

@@ -308,29 +308,6 @@
         <!-- Note Databricks requires 2 properties -Ddatabricks and -Dbuildver=3*db -->
         <!-- #if scala-2.12 -->
         <profile>
-            <id>release341db</id>
-            <activation>
-                <property>
-                    <name>buildver</name>
-                    <value>341db</value>
-                </property>
-            </activation>
-            <properties>
-                <spark.version.classifier>spark341db</spark.version.classifier>
-                <spark.version>${spark341db.version}</spark.version>
-                <spark.test.version>${spark341db.version}</spark.test.version>
-                <hadoop.client.version>3.3.1</hadoop.client.version>
-                <rat.consoleOutput>true</rat.consoleOutput>
-                <parquet.hadoop.version>1.12.0</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-${spark.version.classifier}</rapids.delta.artifactId1>
-            </properties>
-            <modules>
-                <module>shim-deps/databricks</module>
-                <module>delta-lake/delta-spark341db</module>
-                <module>iceberg/iceberg-stub</module>
-            </modules>
-        </profile>
-        <profile>
             <id>release350db143</id>
             <activation>
                 <property>
@@ -1045,7 +1022,6 @@
         <spark342.version>3.4.2</spark342.version>
         <spark343.version>3.4.3</spark343.version>
         <spark344.version>3.4.4</spark344.version>
-        <spark341db.version>3.4.1-databricks</spark341db.version>
         <spark350db143.version>3.5.0-databricks-143</spark350db143.version>
         <spark350.version>3.5.0</spark350.version>
         <spark351.version>3.5.1</spark351.version>
@@ -1781,8 +1757,8 @@ This will force full Scala code rebuild in downstream modules.
                         <!-- #if scala-2.12 -->
                         <requireProperty>
                           <property>buildver</property>
-                          <regex>^(33[0-4]|34[0-4]|35[0-8]|341db|350db143)$</regex>
-                          <regexMessage>Unsupported buildver value ${buildver} for a Scala 2.12 build. Supported Scala 2.12 buildver values are: 330, 331, 332, 333, 334, 340, 341, 342, 343, 344, 350, 351, 352, 353, 354, 355, 356, 357, 358, 341db, 350db143. For Scala 2.13/Spark 4.x builds, use -f scala2.13/pom.xml with a supported Scala 2.13 buildver such as 350, 400, 403, 404, 412, 413, or 420.</regexMessage>
+                          <regex>^(33[0-4]|34[0-4]|35[0-8]|350db143)$</regex>
+                          <regexMessage>Unsupported buildver value ${buildver} for a Scala 2.12 build. Supported Scala 2.12 buildver values are: 330, 331, 332, 333, 334, 340, 341, 342, 343, 344, 350, 351, 352, 353, 354, 355, 356, 357, 358, 350db143. For Scala 2.13/Spark 4.x builds, use -f scala2.13/pom.xml with a supported Scala 2.13 buildver such as 350, 400, 403, 404, 412, 413, or 420.</regexMessage>
                         </requireProperty>
                         <!-- #endif scala-2.12 -->
                         <!-- #if scala-2.13 --><!--
