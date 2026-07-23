@@ -22,10 +22,12 @@
 {"spark": "401"}
 {"spark": "402"}
 {"spark": "403"}
+{"spark": "404"}
 {"spark": "411"}
 {"spark": "412"}
 {"spark": "413"}
 spark-rapids-shim-json-lines ***/
+
 package org.apache.spark.sql.rapids.execution.python.shims
 
 import java.io.DataOutputStream

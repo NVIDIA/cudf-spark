@@ -23,7 +23,7 @@ from pyspark.sql.window import Window
 import pyspark.sql.functions as f
 from spark_session import is_before_spark_320, is_databricks113_or_later, \
     is_databricks133_or_later, is_spark_350_or_later, spark_version, with_cpu_session, \
-    is_spark_340_or_later, is_spark_420_or_later
+    is_scala212, is_spark_340_or_later, is_spark_420_or_later
 import warnings
 
 # mark this test as ci_1 for mvn verify sanity check in pre-merge CI
@@ -2377,8 +2377,25 @@ _gen_data_for_collect_set_nested = [
 @ignore_order(local=True)
 @allow_non_gpu(*non_utc_allow)
 def test_window_aggs_for_rows_collect_set():
+    data_gen = _gen_data_for_collect_set
+    if is_scala212():
+        # Scala 2.12 CPU window collect_set can retain both signed zeros, while the GPU and
+        # Scala 2.13 treat them as the same value. Exclude -0.0 from this Scala 2.12 test.
+        float_special_cases = [
+            FLOAT_MIN, FLOAT_MAX, 0.0, 1.0, -1.0,
+            float('inf'), float('-inf'), float('nan'), NEG_FLOAT_NAN_MAX_VALUE]
+        double_special_cases = [
+            DOUBLE_MIN, DOUBLE_MAX, 0.0, 1.0, -1.0,
+            float('inf'), float('-inf'), float('nan'), NEG_DOUBLE_NAN_MAX_VALUE]
+        collect_set_fp_gens = {
+            'c_float': RepeatSeqGen(FloatGen(special_cases=float_special_cases), length=15),
+            'c_double': RepeatSeqGen(DoubleGen(special_cases=double_special_cases), length=15)}
+        data_gen = [
+            (name, collect_set_fp_gens[name]) if name in collect_set_fp_gens else (name, gen)
+            for name, gen in data_gen]
+
     assert_gpu_and_cpu_are_equal_sql(
-        lambda spark: gen_df(spark, _gen_data_for_collect_set),
+        lambda spark: gen_df(spark, data_gen),
         "window_collect_table",
         '''
         select a, b,
