@@ -813,30 +813,18 @@ protected case class GpuParquetFileFilterHandler(
     }
   }
 
-  private def isVariantPhysicalType(
-      fileType: Type,
-      isCaseSensitive: Boolean): Boolean = {
-    if (fileType.isPrimitive) {
+  private def isVariantPhysicalType(fileType: Type): Boolean = {
+    if (fileType.isPrimitive || fileType.asGroupType().getFieldCount != 2) {
       false
     } else {
-      val fieldMap = fileType.asGroupType().getFields.asScala.map { field =>
-        val fieldName = if (isCaseSensitive) {
-          field.getName
-        } else {
-          field.getName.toLowerCase(Locale.ROOT)
-        }
-        fieldName -> field
-      }.toMap
-
-      def isBinaryField(name: String): Boolean = {
-        val lookupName = if (isCaseSensitive) name else name.toLowerCase(Locale.ROOT)
-        fieldMap.get(lookupName).exists { field =>
+      val groupType = fileType.asGroupType()
+      Seq("value", "metadata").zipWithIndex.forall { case (name, index) =>
+        val field = groupType.getType(index)
+        field.getName == name &&
+          field.isRepetition(Type.Repetition.REQUIRED) &&
           field.isPrimitive &&
-            field.asPrimitiveType().getPrimitiveTypeName == PrimitiveTypeName.BINARY
-        }
+          field.asPrimitiveType().getPrimitiveTypeName == PrimitiveTypeName.BINARY
       }
-
-      isBinaryField("metadata") && isBinaryField("value")
     }
   }
 
@@ -944,7 +932,7 @@ protected case class GpuParquetFileFilterHandler(
           useFieldId, rootFileType, rootReadType)
 
       case dt if GpuColumnVector.isVariantType(dt) =>
-        if (!isVariantPhysicalType(fileType, isCaseSensitive)) {
+        if (!isVariantPhysicalType(fileType)) {
           errorCallback(rootFileType.getOrElse(fileType), rootReadType.getOrElse(readType))
         }
 

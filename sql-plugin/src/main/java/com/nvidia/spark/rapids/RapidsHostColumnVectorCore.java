@@ -199,11 +199,16 @@ public class RapidsHostColumnVectorCore extends ColumnVector {
   @Override
   public final ColumnVector getChild(int ordinal) {
     if (cachedChildren[ordinal] == null) {
-      StructType st = (StructType) dataType();
-      StructField[] fields = st.fields();
-      for (int i = 0; i < fields.length; i++) {
-        HostColumnVectorCore tmp = cudfCv.getChildColumnView(i);
-        cachedChildren[i] = new RapidsHostColumnVectorCore(fields[i].dataType(), tmp);
+      if (GpuColumnVector.isVariantType(dataType())) {
+        HostColumnVectorCore tmp = cudfCv.getChildColumnView(ordinal);
+        cachedChildren[ordinal] = new RapidsHostColumnVectorCore(DataTypes.BinaryType, tmp);
+      } else {
+        StructType st = (StructType) dataType();
+        StructField[] fields = st.fields();
+        for (int i = 0; i < fields.length; i++) {
+          HostColumnVectorCore tmp = cudfCv.getChildColumnView(i);
+          cachedChildren[i] = new RapidsHostColumnVectorCore(fields[i].dataType(), tmp);
+        }
       }
     }
     return cachedChildren[ordinal];

@@ -15,10 +15,6 @@
  */
 /*** spark-rapids-shim-json-lines
 {"spark": "400"}
-{"spark": "400db173"}
-{"spark": "401"}
-{"spark": "402"}
-{"spark": "411"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
@@ -220,9 +216,20 @@ object GpuTypeShims {
   def additionalCsvSupportedTypes: TypeSig = TypeSig.DAYTIME
 
   /**
-   * Get additional Parquet supported types for this Shim
+   * Get additional Parquet read supported types for this Shim
    */
-  def additionalParquetSupportedTypes: TypeSig = TypeSig.ansiIntervals + TypeSig.VARIANT
+  def additionalParquetReadSupportedTypes: TypeSig = TypeSig.ansiIntervals + TypeSig.VARIANT
+
+  /**
+   * Get additional Parquet write supported types for this Shim
+   */
+  def additionalParquetWriteSupportedTypes: TypeSig = TypeSig.ansiIntervals
+
+  /**
+   * Get additional Parquet supported types in Spark for this Shim
+   */
+  def additionalParquetSupportedTypes: TypeSig =
+    additionalParquetReadSupportedTypes + additionalParquetWriteSupportedTypes
 
   /**
    * Get additional common operators supported types for this Shim

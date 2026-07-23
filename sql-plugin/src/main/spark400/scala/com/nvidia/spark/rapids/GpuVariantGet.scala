@@ -16,23 +16,20 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark": "400"}
-{"spark": "400db173"}
-{"spark": "401"}
-{"spark": "402"}
-{"spark": "411"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids
 
 import java.util.Optional
 
-import ai.rapids.cudf.{ColumnVector, ColumnView, DType}
+import ai.rapids.cudf.{ColumnVector, ColumnView, DType, VariantUtils}
 import com.nvidia.spark.Retryable
 import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.jni.VariantUtils
+import com.nvidia.spark.rapids.RapidsPluginImplicits._
 
 import org.apache.spark.sql.catalyst.expressions.{Expression, Literal}
 import org.apache.spark.sql.catalyst.expressions.variant.VariantGet
-import org.apache.spark.sql.types.{DataType, StringType}
+import org.apache.spark.sql.types.{ByteType, DataType, IntegerType, LongType, ShortType,
+  StringType}
 import org.apache.spark.unsafe.types.UTF8String
 
 class GpuVariantGetMeta(
@@ -49,33 +46,33 @@ class GpuVariantGetMeta(
 
     if (!GpuVariantGet.isSupportedTargetType(expr.targetType)) {
       willNotWorkOnGpu(s"target type ${expr.targetType.simpleString} is not supported; " +
-        "only string targets are enabled until Spark-compatible Variant casts are implemented")
+        "supported types are tinyint, smallint, int, bigint, and string")
     }
 
-    GpuVariantGet.parseSimplePath(expr.path) match {
+    GpuVariantGet.parseSupportedPath(expr.path) match {
       case Some(_) =>
       case None =>
-        willNotWorkOnGpu("path must be a literal single-segment object path like $.field")
+        willNotWorkOnGpu("path must be a literal object-field path like $.field or $.nested.field")
     }
 
     if (expr.failOnError) {
       willNotWorkOnGpu("strict variant_get is not supported; use try_variant_get")
     }
 
-    if (!GpuVariantGet.isVariantJniAvailable) {
-      willNotWorkOnGpu("spark-rapids-jni was built without cuDF Variant extraction APIs")
+    if (!GpuVariantGet.isVariantCudfAvailable) {
+      willNotWorkOnGpu("cuDF Java was built without Variant extraction APIs")
     }
   }
 
   override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression = {
-    val fieldName = GpuVariantGet.parseSimplePath(expr.path).get
-    GpuVariantGet(lhs, fieldName, expr.targetType)
+    val path = GpuVariantGet.parseSupportedPath(expr.path).get
+    GpuVariantGet(lhs, path, expr.targetType)
   }
 }
 
 case class GpuVariantGet(
     child: Expression,
-    fieldName: String,
+    path: String,
     override val dataType: DataType)
   extends GpuUnaryExpression
   with Retryable {
@@ -86,17 +83,14 @@ case class GpuVariantGet(
     val variantStruct = input.getBase
     require(variantStruct.getType == DType.STRUCT,
       s"expected Variant struct input, got ${variantStruct.getType}")
-    require(variantStruct.getNumChildren >= 2,
+    require(variantStruct.getNumChildren == 2,
       s"expected Variant struct with value and metadata children, got " +
         s"${variantStruct.getNumChildren} children")
 
     withResource(variantStruct.getChildColumnView(0)) { value =>
       withResource(variantStruct.getChildColumnView(1)) { metadata =>
-        GpuVariantGet.withCudfVariantView(metadata, value) { cudfVariant =>
-          VariantUtils.extractVariantField(
-            cudfVariant,
-            fieldName,
-            GpuVariantGet.toCudfTargetType(dataType))
+        GpuVariantGet.withCudfVariantView(variantStruct, metadata, value) { cudfVariant =>
+          GpuVariantGet.extractVariantField(cudfVariant, path, dataType)
         }
       }
     }
@@ -108,39 +102,102 @@ case class GpuVariantGet(
 }
 
 object GpuVariantGet {
-  private val SimplePath = """^(?:\$\.)?([A-Za-z_][A-Za-z0-9_]*)$""".r
+  private val ObjectFieldPath = """^\$\.[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$""".r
 
   def isSupportedTargetType(dt: DataType): Boolean = dt match {
-    case StringType => true
+    case ByteType | ShortType | IntegerType | LongType | StringType => true
     case _ => false
   }
 
-  def isVariantJniAvailable: Boolean = {
+  def isVariantCudfAvailable: Boolean = {
     try {
-      VariantUtils.isAvailable()
+      val variantUtils = Class.forName("ai.rapids.cudf.VariantUtils", true,
+        Thread.currentThread().getContextClassLoader)
+      variantUtils.getMethod("getVariantFieldValue", classOf[ColumnView], classOf[String])
+      variantUtils.getMethod("castVariantValue", classOf[ColumnView], classOf[DType])
+      variantUtils.getMethod("extractVariantField", classOf[ColumnView], classOf[String],
+        classOf[DType])
+      true
     } catch {
-      case _: UnsatisfiedLinkError | _: NoClassDefFoundError |
-           _: ExceptionInInitializerError | _: RuntimeException => false
+      case _: ClassNotFoundException | _: NoSuchMethodException | _: LinkageError => false
     }
   }
 
   def toCudfTargetType(dt: DataType): DType = dt match {
+    case ByteType => DType.INT8
+    case ShortType => DType.INT16
+    case IntegerType => DType.INT32
+    case LongType => DType.INT64
     case StringType => DType.STRING
     case other => throw new IllegalArgumentException(s"unsupported variant target type: $other")
   }
 
+  def extractVariantField(cudfVariant: ColumnView, path: String, dt: DataType): ColumnVector = {
+    dt match {
+      case ByteType | StringType =>
+        VariantUtils.extractVariantField(cudfVariant, path, toCudfTargetType(dt))
+      case ShortType =>
+        extractAndWidenInteger(cudfVariant, path, DType.INT16, Seq(DType.INT8))
+      case IntegerType =>
+        extractAndWidenInteger(cudfVariant, path, DType.INT32, Seq(DType.INT16, DType.INT8))
+      case LongType =>
+        extractAndWidenInteger(cudfVariant, path, DType.INT64,
+          Seq(DType.INT32, DType.INT16, DType.INT8))
+      case other =>
+        throw new IllegalArgumentException(s"unsupported variant target type: $other")
+    }
+  }
+
+  private def extractAndWidenInteger(
+      cudfVariant: ColumnView,
+      path: String,
+      targetType: DType,
+      fallbackTypes: Seq[DType]): ColumnVector = {
+    var result: ColumnVector = VariantUtils.extractVariantField(cudfVariant, path, targetType)
+    try {
+      fallbackTypes.foreach { fallbackType =>
+        withResource(VariantUtils.extractVariantField(
+            cudfVariant, path, fallbackType)) { fallback =>
+          withResource(fallback.castTo(targetType)) { widened =>
+            val next = result.replaceNulls(widened)
+            result.safeClose()
+            result = next
+          }
+        }
+      }
+      val ret = result
+      result = null
+      ret
+    } finally {
+      if (result != null) {
+        result.safeClose()
+      }
+    }
+  }
+
   private def withCudfVariantView[T](
+      variantStruct: ColumnView,
       metadata: ColumnView,
       value: ColumnView)(f: ColumnView => T): T = {
     if (metadata.getType == DType.LIST && value.getType == DType.LIST) {
-      withResource(ColumnView.makeStructView(metadata, value))(f)
+      withResource(makeCudfVariantView(variantStruct, metadata, value))(f)
     } else {
       withResource(toByteList(metadata)) { metadataBytes =>
         withResource(toByteList(value)) { valueBytes =>
-          withResource(ColumnView.makeStructView(metadataBytes, valueBytes))(f)
+          withResource(makeCudfVariantView(variantStruct, metadataBytes, valueBytes))(f)
         }
       }
     }
+  }
+
+  private def makeCudfVariantView(
+      variantStruct: ColumnView,
+      metadata: ColumnView,
+      value: ColumnView): ColumnView = {
+    new ColumnView(DType.STRUCT, variantStruct.getRowCount,
+      Optional.of[java.lang.Long](variantStruct.getNullCount), variantStruct.getValid,
+      null.asInstanceOf[ai.rapids.cudf.BaseDeviceMemoryBuffer],
+      Array[ColumnView](metadata, value))
   }
 
   private def toByteList(cv: ColumnView): ColumnVector = {
@@ -158,14 +215,17 @@ object GpuVariantGet {
     }
   }
 
-  def parseSimplePath(pathExpr: Expression): Option[String] = pathExpr match {
-    case Literal(path: UTF8String, _) => parseSimplePath(path.toString)
-    case Literal(path: String, _) => parseSimplePath(path)
+  def parseSupportedPath(pathExpr: Expression): Option[String] = pathExpr match {
+    case Literal(path: UTF8String, _) => parseSupportedPath(path.toString)
+    case Literal(path: String, _) => parseSupportedPath(path)
     case _ => None
   }
 
-  def parseSimplePath(path: String): Option[String] = path match {
-    case SimplePath(fieldName) => Some(fieldName)
-    case _ => None
+  def parseSupportedPath(path: String): Option[String] = {
+    if (ObjectFieldPath.pattern.matcher(path).matches) {
+      Some(path)
+    } else {
+      None
+    }
   }
 }
