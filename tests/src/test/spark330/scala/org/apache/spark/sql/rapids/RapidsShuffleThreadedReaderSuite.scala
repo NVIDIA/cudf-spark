@@ -40,8 +40,10 @@ package org.apache.spark.sql.rapids
 import java.io.{ByteArrayOutputStream, InputStream}
 import java.nio.ByteBuffer
 
-import ai.rapids.cudf.HostMemoryBuffer
-import com.nvidia.spark.rapids.{GpuColumnarBatchSerializer, GpuColumnVector, GpuMetric, LocalGpuMetric, NoopMetric, RapidsConf, SlicedSerializedColumnVector, SparkSessionHolder}
+import ai.rapids.cudf.{HostColumnVector, HostMemoryBuffer}
+import com.nvidia.spark.rapids.{GpuColumnarBatchSerializer, GpuColumnVector, GpuMetric,
+  LocalGpuMetric, NoopMetric, RapidsConf, RapidsHostColumnVector, SlicedSerializedColumnVector,
+  SparkSessionHolder}
 import com.nvidia.spark.rapids.Arm.withResource
 import org.mockito.ArgumentMatchers.{eq => meq}
 import org.mockito.Mockito.{mock, when}
@@ -52,7 +54,10 @@ import org.apache.spark._
 import org.apache.spark.internal.config
 import org.apache.spark.network.buffer.{ManagedBuffer, NioManagedBuffer}
 import org.apache.spark.serializer.SerializerManager
+import org.apache.spark.sql.execution.metric.SQLMetric
+import org.apache.spark.sql.rapids.execution.GpuShuffleExchangeExecBase
 import org.apache.spark.sql.rapids.shims.RapidsShuffleThreadedReader
+import org.apache.spark.sql.types.IntegerType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.storage.{BlockManager, BlockManagerId, ShuffleBlockId}
 
@@ -108,7 +113,11 @@ class RapidsShuffleThreadedReaderSuite
     RapidsShuffleInternalManagerBase.stopThreadPool()
   }
 
-  def runShuffleRead(numReaderThreads: Int, injectError: Boolean = false): Unit = {
+  def runShuffleRead(
+      numReaderThreads: Int,
+      injectError: Boolean = false,
+      maxBytesInFlight: Long = 1024 * 1024,
+      useNonEmptyBatches: Boolean = false): Unit = {
     val testConf = new SparkConf(false)
     // this sets the session and the SparkEnv
     SparkSessionHolder.withSparkSession(testConf, _ => {
@@ -131,12 +140,22 @@ class RapidsShuffleThreadedReaderSuite
       // from each mappers (all mappers return the same shuffle data).
       val byteOutputStream = new ByteArrayOutputStream()
       val serializationStream = serializer.newInstance().serializeStream(byteOutputStream)
-      withResource(GpuColumnVector.emptyBatchFromTypes(Array.empty)) { emptyBatch =>
-        (0 until keyValuePairsPerMap).foreach { i =>
-          serializationStream.writeKey(i)
-          serializationStream.writeValue(GpuColumnVector.incRefCounts(emptyBatch))
+      (0 until keyValuePairsPerMap).foreach { i =>
+        if (useNonEmptyBatches) {
+          val hostColumn = new RapidsHostColumnVector(
+            IntegerType, HostColumnVector.fromInts(i))
+          withResource(new ColumnarBatch(Array(hostColumn), 1)) { batch =>
+            serializationStream.writeKey(i)
+            serializationStream.writeValue(batch)
+          }
+        } else {
+          withResource(GpuColumnVector.emptyBatchFromTypes(Array.empty)) { emptyBatch =>
+            serializationStream.writeKey(i)
+            serializationStream.writeValue(GpuColumnVector.incRefCounts(emptyBatch))
+          }
         }
       }
+      serializationStream.close()
 
       // Setup the mocked BlockManager to return RecordingManagedBuffers.
       val localBlockManagerId = BlockManagerId("test-client", "test-client", 1)
@@ -168,13 +187,17 @@ class RapidsShuffleThreadedReaderSuite
       }
 
       // Create a mocked shuffle handle to pass into HashShuffleReader.
+      val limiterAcquireFailCount = new SQLMetric("sum", 0)
       val shuffleHandle = {
         val dependency = mock(classOf[GpuShuffleDependency[Int, Int, Int]])
         when(dependency.serializer).thenReturn(serializer)
         when(dependency.aggregator).thenReturn(None)
         when(dependency.keyOrdering).thenReturn(None)
         new ShuffleHandleWithMetrics[Int, Int, Int](
-          shuffleId, Map.empty, dependency)
+          shuffleId,
+          Map(GpuShuffleExchangeExecBase.METRIC_THREADED_READER_LIMITER_ACQUIRE_FAIL_COUNT ->
+            limiterAcquireFailCount),
+          dependency)
       }
 
       val serializerManager = new SerializerManager(
@@ -193,7 +216,7 @@ class RapidsShuffleThreadedReaderSuite
         shuffleHandle,
         taskContext,
         metrics,
-        1024 * 1024,
+        maxBytesInFlight,
         serializerManager,
         blockManager,
         mapOutputTracker = mapOutputTracker,
@@ -212,7 +235,17 @@ class RapidsShuffleThreadedReaderSuite
         }
         taskContext.markTaskCompleted(Some(e))
       } else {
-        assert(shuffleReader.read().length === keyValuePairsPerMap * numMaps)
+        val results = shuffleReader.read().toArray
+        try {
+          assert(results.length === keyValuePairsPerMap * numMaps)
+        } finally {
+          results.foreach { result =>
+            result.asInstanceOf[Product2[Any, Any]]._2 match {
+              case batch: ColumnarBatch => batch.close()
+              case _ =>
+            }
+          }
+        }
         taskContext.markTaskCompleted(None)
       }
 
@@ -222,7 +255,15 @@ class RapidsShuffleThreadedReaderSuite
         assert(buffer.callsToRetain === 1)
         assert(buffer.callsToRelease === 1)
       }
+      if (useNonEmptyBatches) {
+        assert(limiterAcquireFailCount.value > 0,
+          "Expected a BlockState to pause when the limiter rejected its next batch")
+      }
     })
+  }
+
+  test("reader pool safely resumes a BlockState after a limiter pause") {
+    runShuffleRead(numReaderThreads = 2, maxBytesInFlight = 128, useNonEmptyBatches = true)
   }
 
   /**
