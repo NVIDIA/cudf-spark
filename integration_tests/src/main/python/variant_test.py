@@ -198,12 +198,30 @@ def test_parquet_variant_try_get_integral_boundaries(spark_tmp_path):
             "try_variant_get(v, '$.smin', 'bigint') AS smin_as_bigint",
             "try_variant_get(v, '$.smax', 'smallint') AS smax",
             "try_variant_get(v, '$.imin', 'int') AS imin",
+            "try_variant_get(v, '$.imin', 'bigint') AS imin_as_bigint",
             "try_variant_get(v, '$.imax', 'int') AS imax",
             "try_variant_get(v, '$.lmin', 'bigint') AS lmin",
             "try_variant_get(v, '$.lmax', 'bigint') AS lmax",
             "try_variant_get(v, '$.byte_overflow', 'tinyint') AS byte_overflow",
             "try_variant_get(v, '$.short_overflow', 'smallint') AS short_overflow",
             "try_variant_get(v, '$.int_overflow', 'int') AS int_overflow"),
+        conf=_variant_parquet_conf)
+
+
+@incompat
+@pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
+def test_parquet_variant_pass_through_filter_project(spark_tmp_path):
+    data_path = spark_tmp_path + '/VARIANT_PASS_THROUGH_PARQUET'
+    with_cpu_session(lambda spark: _write_variant_parquet(spark, data_path))
+
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.parquet(data_path)
+            .selectExpr("v", "try_variant_get(v, '$.x', 'int') AS x")
+            .filter("x IS NULL OR x >= 7")
+            .selectExpr(
+                "try_variant_get(v, '$.n.inner', 'string') AS inner",
+                "try_variant_get(v, '$.m', 'bigint') AS m")
+            .orderBy("inner", "m"),
         conf=_variant_parquet_conf)
 
 
