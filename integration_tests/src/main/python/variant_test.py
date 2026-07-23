@@ -190,8 +190,12 @@ def test_parquet_variant_try_get_integral_boundaries(spark_tmp_path):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.parquet(data_path).selectExpr(
             "try_variant_get(v, '$.bmin', 'tinyint') AS bmin",
+            "try_variant_get(v, '$.bmin', 'int') AS bmin_as_int",
+            "try_variant_get(v, '$.bmin', 'bigint') AS bmin_as_bigint",
             "try_variant_get(v, '$.bmax', 'tinyint') AS bmax",
             "try_variant_get(v, '$.smin', 'smallint') AS smin",
+            "try_variant_get(v, '$.smin', 'int') AS smin_as_int",
+            "try_variant_get(v, '$.smin', 'bigint') AS smin_as_bigint",
             "try_variant_get(v, '$.smax', 'smallint') AS smax",
             "try_variant_get(v, '$.imin', 'int') AS imin",
             "try_variant_get(v, '$.imax', 'int') AS imax",
