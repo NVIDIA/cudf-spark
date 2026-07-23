@@ -811,7 +811,7 @@ class CudfRegexTranspiler(mode: RegexMode) {
   private def getUnsupportedRepetitionBaseOption(e: RegexAST): Option[RegexAST] = {
     e match {
       case RegexEscaped(ch) => ch match {
-        case 'd' | 'w' | 's' | 'S' | 'h' | 'H' | 'v' | 'V' => None
+        case 'd' | 'D' | 'w' | 'W' | 's' | 'S' | 'h' | 'H' | 'v' | 'V' => None
         case _ => Some(e)
       }
       case RegexChar(a) if "$^".contains(a) =>

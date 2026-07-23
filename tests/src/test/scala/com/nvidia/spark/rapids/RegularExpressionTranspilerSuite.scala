@@ -472,6 +472,19 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     assertCpuGpuMatchesRegexpReplace(patterns, inputs)
   }
 
+  test("quantified \\D and \\W") {
+    // see https://github.com/NVIDIA/cudf-spark/issues/15306
+    val inputs = Seq("", "abc", "123", "a1b2", "___", "a_b 1", "!!!", "ab12cd",
+        "a\rb", "1\r2", "1\n2", "1\r\n2", " \t\r\n")
+    val findPatterns = Seq(raw"\D+", raw"\W+", raw"\D*", raw"\W*", raw"\D{2,3}", raw"\W{2,3}",
+        raw"(\D+)", raw"(\W+)")
+    // \D* and \W* omitted from replace: empty-match semantics differ (see issue 4884)
+    val replacePatterns =
+        Seq(raw"\D+", raw"\W+", raw"\D{2,3}", raw"\W{2,3}", raw"(\D+)", raw"(\W+)")
+    assertCpuGpuMatchesRegexpFind(findPatterns, inputs)
+    assertCpuGpuMatchesRegexpReplace(replacePatterns, inputs)
+  }
+
   test("dot matches CR on GPU but not on CPU") {
     // see https://github.com/rapidsai/cudf/issues/9619
     val pattern = "1."

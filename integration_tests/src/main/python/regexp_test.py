@@ -921,6 +921,30 @@ def test_regexp_replace_word():
         ),
         conf=_regexp_conf)
 
+def test_regexp_quantified_digit_word():
+    # https://github.com/NVIDIA/cudf-spark/issues/15306
+    gen = mk_str_gen('[a-d]{1,3}[0-9]{1,3}[ _!]{0,2}[a-d]{0,3}') \
+        .with_special_case('䤫畍킱곂⬡❽ࢅ獰᳌蛫青') \
+        .with_special_case('a\n2\r\n3')
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: unary_op_df(spark, gen).selectExpr(
+            'rlike(a, "\\\\d+")',
+            'rlike(a, "\\\\w+")',
+            'rlike(a, "\\\\D+")',
+            'rlike(a, "\\\\W+")',
+            'rlike(a, "[a-d]+\\\\D+[0-9]+")',
+            'rlike(a, "\\\\D{2,3}")',
+            'rlike(a, "\\\\W{2,3}")',
+            'regexp_extract(a, "(\\\\d+)", 1)',
+            'regexp_extract(a, "(\\\\D+)", 1)',
+            'regexp_extract(a, "([a-d]+)(\\\\D+)([a-d]+)", 2)',
+            'regexp_extract(a, "(\\\\W+)", 1)',
+            'regexp_replace(a, "(\\\\w+)", "#")',
+            'regexp_replace(a, "(\\\\D+)", "#")',
+            'regexp_replace(a, "(\\\\W+)", "@")',
+        ),
+        conf=_regexp_conf)
+
 def test_predefined_character_classes():
     gen = mk_str_gen('[a-zA-Z]{0,2}[\r\n!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~]{0,2}[0-9]{0,2}')
     assert_gpu_and_cpu_are_equal_collect(
