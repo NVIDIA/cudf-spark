@@ -32,7 +32,10 @@ public final class IcebergS3InputFileAccess {
     }
     S3URI uri = ((BaseS3File) inputFile).uri();
     try {
-      return new URI("s3", uri.bucket(), "/" + uri.key(), null);
+      // S3URI.key() is taken from the original location and may already contain
+      // URL escapes. Parse the complete URI rather than treating its key as a
+      // URI component, which would escape '%' a second time.
+      return new URI("s3://" + uri.bucket() + "/" + uri.key());
     } catch (URISyntaxException e) {
       throw new IllegalArgumentException(
           "Invalid S3 URI for bucket=" + uri.bucket() + " key=" + uri.key(), e);
