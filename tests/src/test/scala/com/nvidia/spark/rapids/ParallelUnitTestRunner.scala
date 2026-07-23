@@ -546,6 +546,7 @@ object ParallelUnitTestRunner {
       }
     }
     cleanup(cleanupSparkSessionAndContext())
+    cleanup(clearCachedBatchSerializer())
     cleanup {
       warehouseDirs ++= Option(tmpDir.toFile.listFiles()).getOrElse(Array.empty[File])
           .filter(file => file.isDirectory && file.getName.startsWith(sparkWarehousePrefix))
@@ -568,6 +569,25 @@ object ParallelUnitTestRunner {
   } finally {
     SparkSession.clearActiveSession()
     SparkSession.clearDefaultSession()
+  }
+
+  /**
+   * Reset Spark's JVM-global cached CachedBatchSerializer between suites.
+   *
+   * The first time any suite builds a cached relation, Spark's InMemoryRelation caches the
+   * serializer named by spark.sql.cache.serializer in a JVM-global field and reuses it for the
+   * lifetime of the JVM, ignoring the configuration of later sessions. In a persistent worker a
+   * suite that runs without the RAPIDS serializer would pin Spark's default serializer, so a later
+   * suite such as RapidsCachedTableSuite would observe a serializer that no longer matches its own
+   * spark.sql.cache.serializer and fail ("Cache serializer failed to load!"). Clearing the cache
+   * between suites lets each suite rebuild the serializer from its own configuration.
+   *
+   * Called reflectively because InMemoryRelation.clearSerializer is not part of the public API.
+   */
+  private def clearCachedBatchSerializer(): Unit = {
+    val module = Class.forName("org.apache.spark.sql.execution.columnar.InMemoryRelation$")
+        .getField("MODULE$").get(null)
+    module.getClass.getMethod("clearSerializer").invoke(module)
   }
 
   private def poolWorkerCommand(
