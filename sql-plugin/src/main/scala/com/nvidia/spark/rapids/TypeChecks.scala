@@ -1313,40 +1313,40 @@ class CastChecks extends ExprChecks {
 
   def booleanChecks: TypeSig = integral + fp + BOOLEAN + STRING + DECIMAL_128 +
     CastCheckShims.additionalTypesBooleanCanCastTo
-  def sparkBooleanSig: TypeSig = cpuNumeric + BOOLEAN + STRING +
+  def sparkBooleanSig: TypeSig = cpuNumeric + BOOLEAN + STRING + VARIANT +
     CastCheckShims.additionalTypesBooleanCanCastTo
 
   val integralChecks: TypeSig = gpuNumeric + BOOLEAN + TIMESTAMP + STRING +
       BINARY + CastCheckShims.additionalTypesIntegralCanCastTo
   val sparkIntegralSig: TypeSig = cpuNumeric + BOOLEAN + TIMESTAMP + STRING +
-      BINARY + CastCheckShims.additionalTypesIntegralCanCastTo
+      BINARY + VARIANT + CastCheckShims.additionalTypesIntegralCanCastTo
 
   val fpToStringPsNote: String = s"Conversion may produce different results and requires " +
       s"${RapidsConf.ENABLE_CAST_FLOAT_TO_STRING} to be true."
   val fpChecks: TypeSig = (gpuNumeric + BOOLEAN + TIMESTAMP + STRING)
       .withPsNote(TypeEnum.STRING, fpToStringPsNote)
-  val sparkFpSig: TypeSig = cpuNumeric + BOOLEAN + TIMESTAMP + STRING
+  val sparkFpSig: TypeSig = cpuNumeric + BOOLEAN + TIMESTAMP + STRING + VARIANT
 
   def dateChecks: TypeSig = TIMESTAMP + DATE + STRING +
     CastCheckShims.additionalTypesDateCanCastTo
-  def sparkDateSig: TypeSig = DECIMAL_128 + TIMESTAMP + DATE + STRING +
+  def sparkDateSig: TypeSig = DECIMAL_128 + TIMESTAMP + DATE + STRING + VARIANT +
     CastCheckShims.additionalTypesDateCanCastTo
 
   def timestampChecks: TypeSig = integral + fp + TIMESTAMP + DATE + STRING +
     CastCheckShims.additionalTypesTimestampCanCastTo
-  def sparkTimestampSig: TypeSig = cpuNumeric + TIMESTAMP + DATE + STRING +
+  def sparkTimestampSig: TypeSig = cpuNumeric + TIMESTAMP + DATE + STRING + VARIANT +
     CastCheckShims.additionalTypesTimestampCanCastTo
 
   val stringChecks: TypeSig = gpuNumeric + BOOLEAN + TIMESTAMP + DATE + STRING +
       BINARY + CastCheckShims.additionalTypesStringCanCastTo
   val sparkStringSig: TypeSig = cpuNumeric + BOOLEAN + TIMESTAMP + DATE + CALENDAR + STRING +
-      BINARY + CastCheckShims.additionalTypesStringCanCastTo
+      BINARY + VARIANT + CastCheckShims.additionalTypesStringCanCastTo
 
   val binaryChecks: TypeSig = STRING + BINARY
-  val sparkBinarySig: TypeSig = STRING + BINARY
+  val sparkBinarySig: TypeSig = STRING + BINARY + VARIANT
 
   val decimalChecks: TypeSig = gpuNumeric + STRING
-  val sparkDecimalSig: TypeSig = cpuNumeric + BOOLEAN + TIMESTAMP + STRING
+  val sparkDecimalSig: TypeSig = cpuNumeric + BOOLEAN + TIMESTAMP + STRING + VARIANT
 
   val calendarChecks: TypeSig = none
   val sparkCalendarSig: TypeSig = CALENDAR + STRING
@@ -1357,7 +1357,7 @@ class CastChecks extends ExprChecks {
     psNote(TypeEnum.ARRAY, "The array's child type must also support being cast to the " +
       "desired child type(s)")
 
-  val sparkArraySig: TypeSig = STRING + ARRAY.nested(all)
+  val sparkArraySig: TypeSig = STRING + VARIANT + ARRAY.nested(all)
 
   val mapChecks: TypeSig = MAP.nested(commonCudfTypes + DECIMAL_128 + NULL + ARRAY + BINARY +
       STRUCT + MAP + GpuTypeShims.additionalCommonOperatorSupportedTypes) +
@@ -1373,6 +1373,10 @@ class CastChecks extends ExprChecks {
       psNote(TypeEnum.STRUCT, "the struct's children must also support being cast to the " +
           "desired child type(s)")
   val sparkStructSig: TypeSig = STRING + STRUCT.nested(all)
+
+  val variantChecks: TypeSig = VARIANT
+  val sparkVariantSig: TypeSig = cpuNumeric + BOOLEAN + TIMESTAMP + DATE + STRING + BINARY +
+      DECIMAL_128 + VARIANT + ARRAY.nested(all) + MAP.nested(all) + STRUCT.nested(all)
 
   val udtChecks: TypeSig = none
   val sparkUdtSig: TypeSig = STRING + UDT
@@ -1399,6 +1403,7 @@ class CastChecks extends ExprChecks {
     case _: StructType => (structChecks, sparkStructSig)
     case _: DayTimeIntervalType => getChecksAndSigs(TypeEnum.DAYTIME)
     case _: YearMonthIntervalType => getChecksAndSigs(TypeEnum.YEARMONTH)
+    case dt if GpuColumnVector.isVariantType(dt) => (variantChecks, sparkVariantSig)
     case _ => getChecksAndSigs(TypeEnum.UDT) // default to UDT
   }
 
@@ -1420,6 +1425,7 @@ class CastChecks extends ExprChecks {
     case TypeEnum.UDT => (udtChecks, sparkUdtSig)
     case TypeEnum.DAYTIME => (daytimeChecks, sparkDaytimeChecks)
     case TypeEnum.YEARMONTH => (yearmonthChecks, sparkYearmonthChecks)
+    case TypeEnum.VARIANT => (variantChecks, sparkVariantSig)
   }
 
   override def tagAst(meta: BaseExprMeta[_]): Unit = {
