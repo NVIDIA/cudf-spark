@@ -50,6 +50,22 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
       Seq("example.SuiteTwo")))
   }
 
+  test("worker count is capped by suite batches") {
+    val tasks = Seq(
+      ParallelUnitTestRunner.SuiteTask(
+        1,
+        "org.apache.spark.sql.rapids.suites.RapidsDynamicPartitionPruningV1SuiteAEOff",
+        2.0),
+      ParallelUnitTestRunner.SuiteTask(
+        2,
+        "org.apache.spark.sql.rapids.suites.RapidsDynamicPartitionPruningV1SuiteAEOn",
+        1.0))
+    val batches = ParallelUnitTestRunner.createSuiteBatches(tasks)
+
+    assert(batches.size === 1)
+    assert(ParallelUnitTestRunner.effectiveWorkerCount(4, batches) === 1)
+  }
+
   test("JUnit XML reports are scoped by test wave") {
     val reportsDir = Files.createTempDirectory("parallel-unit-test-reports")
     try {

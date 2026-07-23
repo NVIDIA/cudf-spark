@@ -106,20 +106,20 @@ object ParallelUnitTestRunner {
       println(s"No suites matched wildcardSuites=${wildcardSuites.mkString(",")}; nothing to run")
       return
     }
-    val forkCount = math.min(math.max(requestedForks, 1), discovered.size)
     val suiteTasks = orderSuites(discovered, testClasses)
         .zipWithIndex
         .map { case ((suite, weight), index) => SuiteTask(index + 1, suite, weight) }
     val suiteBatches = createSuiteBatches(suiteTasks)
-    val perForkAllocation = allocationFraction * parallelGpuAllocationRatio / forkCount
-    val perForkMaxAllocation = maxAllocationFraction * parallelGpuAllocationRatio / forkCount
-    val perForkMinAllocation = math.min(minAllocationFraction / forkCount, perForkMaxAllocation)
+    val workerCount = effectiveWorkerCount(requestedForks, suiteBatches)
+    val perForkAllocation = allocationFraction * parallelGpuAllocationRatio / workerCount
+    val perForkMaxAllocation = maxAllocationFraction * parallelGpuAllocationRatio / workerCount
+    val perForkMinAllocation = math.min(minAllocationFraction / workerCount, perForkMaxAllocation)
 
-    println(s"Running ${discovered.size} suites with at most $forkCount concurrent processes")
+    println(s"Running ${discovered.size} suites with at most $workerCount concurrent processes")
     suiteBatches.filter(_.tasks.size > 1).foreach { batch =>
       println(s"  serial suite batch: ${batch.tasks.map(_.suite).mkString(", ")}")
     }
-    println(s"  worker pool: ${suiteBatches.size} batches across $forkCount persistent forks")
+    println(s"  worker pool: ${suiteBatches.size} batches across $workerCount persistent forks")
 
     val failures = sparkConfs.zipWithIndex.flatMap { case (sparkConf, runIndex) =>
       sparkConf.foreach(conf => println(s"Parallel test wave ${runIndex + 1}: SPARK_CONF=$conf"))
@@ -128,7 +128,7 @@ object ParallelUnitTestRunner {
         runId,
         sparkConf,
         suiteBatches,
-        forkCount,
+        workerCount,
         testClasses,
         reportsDir,
         childJvmArgs,
@@ -155,7 +155,7 @@ object ParallelUnitTestRunner {
       runId: Int,
       sparkConf: Option[String],
       suiteBatches: Seq[SuiteBatch],
-      forkCount: Int,
+      workerCount: Int,
       testClasses: Path,
       reportsDir: Path,
       childJvmArgs: Seq[String],
@@ -170,7 +170,7 @@ object ParallelUnitTestRunner {
 
     val taskQueue = new ConcurrentLinkedQueue[SuiteBatch]()
     suiteBatches.foreach(taskQueue.add)
-    val workers = (1 to math.min(forkCount, suiteBatches.size)).map { workerId =>
+    val workers = (1 to workerCount).map { workerId =>
       val thread = new Thread(s"parallel-unit-test-worker-$runId-$workerId") {
         override def run(): Unit = runPoolWorker(
           workerId,
@@ -698,6 +698,12 @@ object ParallelUnitTestRunner {
     val specialSuites = specialBatches.flatMap(_.tasks.map(_.suite)).toSet
     specialBatches ++ tasks.filterNot(task => specialSuites.contains(task.suite))
         .map(task => SuiteBatch(Seq(task)))
+  }
+
+  private[rapids] def effectiveWorkerCount(
+      requestedForks: Int,
+      suiteBatches: Seq[SuiteBatch]): Int = {
+    math.min(requestedForks, suiteBatches.size)
   }
 
   private def discoverSuiteNames(testClasses: Path): Seq[String] = {
