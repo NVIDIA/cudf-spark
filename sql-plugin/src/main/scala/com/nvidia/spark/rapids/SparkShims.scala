@@ -19,6 +19,7 @@ package com.nvidia.spark.rapids
 import org.apache.hadoop.fs.FileStatus
 import org.apache.parquet.schema.MessageType
 
+import org.apache.spark.SparkConf
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{SparkSession => SqlSparkSession}
 import org.apache.spark.sql.catalyst.{InternalRow, TableIdentifier}
@@ -52,6 +53,10 @@ trait SparkShims {
   def int96ParquetRebaseReadKey: String
   def int96ParquetRebaseWriteKey: String
   def isCastingStringToNegDecimalScaleSupported: Boolean = true
+
+  def isRowBasedShuffleChecksumEnabled(sqlConf: SQLConf, sparkConf: SparkConf): Boolean = {
+    RowBasedShuffleChecksumConf.isEnabled(sparkConf)
+  }
 
   // These expressions are stateful only because they reuse mutable scratch buffers. Bridge
   // projection cloning gives every worker its own expression tree and therefore its own buffers.

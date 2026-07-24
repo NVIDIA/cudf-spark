@@ -19,10 +19,11 @@ package org.apache.spark.sql.rapids
 import java.util.Locale
 
 import com.nvidia.spark.rapids._
-import com.nvidia.spark.rapids.shims.ShuffleManagerShimUtils
+import com.nvidia.spark.rapids.shims.{ShuffleManagerShimUtils, SparkShimImpl}
 
 import org.apache.spark.{SparkConf, SparkEnv}
 import org.apache.spark.internal.Logging
+import org.apache.spark.sql.internal.SQLConf
 
 class GpuShuffleEnv(rapidsConf: RapidsConf) extends Logging {
   private var shuffleCatalog: ShuffleBufferCatalog = _
@@ -144,10 +145,7 @@ object GpuShuffleEnv extends Logging {
   // which is for IO-level corruption diagnosis and IS supported by RAPIDS shuffle.
   def isRowBasedChecksumEnabled: Boolean = {
     val conf = SparkEnv.get.conf
-    conf.getBoolean(
-      "spark.sql.shuffle.orderIndependentChecksum.enabled", false) ||
-    conf.getBoolean(
-      "spark.sql.shuffle.orderIndependentChecksum.enableFullRetryOnMismatch", false)
+    SparkShimImpl.isRowBasedShuffleChecksumEnabled(SQLConf.get, conf)
   }
 
   //
