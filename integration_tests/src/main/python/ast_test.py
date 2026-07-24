@@ -81,6 +81,9 @@ def assert_gpu_ast(is_supported, func, conf={}):
         non_exist_classes=non_exist,
         conf=ast_conf)
 
+def assert_gpu_project_without_ast(func, conf={}):
+    assert_gpu_ast(False, func, conf)
+
 def assert_unary_ast(data_descr, func, conf={}):
     (data_gen, is_supported) = data_descr
     assert_gpu_ast(is_supported, lambda spark: func(unary_op_df(spark, data_gen)), conf=conf)
@@ -119,22 +122,16 @@ def test_isnotnull(data_descr):
 def test_bitwise_not(data_descr):
     assert_unary_ast(data_descr, lambda df: df.selectExpr('~a'))
 
-# This just ends up being a pass through.  There is no good way to force
-# a unary positive into a plan, because it gets optimized out, but this
-# verifies that we can handle it.
-@pytest.mark.parametrize('data_descr', [
-    (byte_gen, True),
-    (short_gen, True),
-    (int_gen, True),
-    (long_gen, True),
-    (float_gen, True),
-    (double_gen, True)], ids=idfn)
-def test_unary_positive(data_descr):
-    assert_unary_ast(data_descr, lambda df: df.selectExpr('+a'))
+# Unary positive is optimized to a pass-through, so per-expression AST has nothing to compile.
+@pytest.mark.parametrize(
+    'data_gen', [byte_gen, short_gen, int_gen, long_gen, float_gen, double_gen], ids=idfn)
+def test_unary_positive(data_gen):
+    assert_gpu_project_without_ast(
+        lambda spark: unary_op_df(spark, data_gen).selectExpr('+a'))
 
 def test_unary_positive_for_daytime_interval():
-    data_descr = (DayTimeIntervalGen(), True)
-    assert_unary_ast(data_descr, lambda df: df.selectExpr('+a'))
+    assert_gpu_project_without_ast(
+        lambda spark: unary_op_df(spark, DayTimeIntervalGen()).selectExpr('+a'))
 
 @pytest.mark.parametrize('data_descr', ast_arithmetic_descrs, ids=idfn)
 @disable_ansi_mode
