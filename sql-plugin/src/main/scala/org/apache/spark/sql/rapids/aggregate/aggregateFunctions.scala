@@ -115,7 +115,9 @@ class CudfMergeLists(override val dataType: DataType) extends CudfAggregate {
  * for the non-nested NaN equality in CudfCollectSet and CudfMergeSets.
  * Note that dataType is ArrayType(child.dataType) here.
  */
-class CudfCollectSet(override val dataType: DataType, nullPolicy: NullPolicy) extends CudfAggregate {
+class CudfCollectSet(
+    override val dataType: DataType,
+    nullPolicy: NullPolicy) extends CudfAggregate {
   override lazy val reductionAggregate: cudf.ColumnVector => cudf.Scalar =
     (col: cudf.ColumnVector) => {
       val collectSet = dataType match {
