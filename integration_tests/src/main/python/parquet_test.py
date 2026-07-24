@@ -2013,7 +2013,7 @@ def test_parquet_unknown_type_annotation_default_physical(spark_tmp_path, reader
     def read_and_check_schema(spark):
         df = spark.read.parquet(data_path)
         assert df.schema['void_col'].dataType == IntegerType(), \
-            'expected void_col=IntegerType, got {}'.format(df.schema['void_col'].dataType)
+            f"expected void_col=IntegerType, got {df.schema['void_col'].dataType}"
         return df
 
     assert_gpu_and_cpu_are_equal_collect(read_and_check_schema, conf=conf)
@@ -2038,7 +2038,7 @@ def test_parquet_unknown_type_annotation_respect_nulltype(spark_tmp_path, reader
     def read_and_check_schema(spark):
         df = spark.read.parquet(data_path)
         assert df.schema['void_col'].dataType == NullType(), \
-            'expected void_col=NullType, got {}'.format(df.schema['void_col'].dataType)
+            f"expected void_col=NullType, got {df.schema['void_col'].dataType}"
         return df
 
     # GPU Parquet scan does not support NullType yet; expect CPU fallback.
