@@ -706,8 +706,8 @@ def test_read_case_col_name(spark_tmp_path, spark_tmp_table_factory, read_func, 
 def test_csv_read_gbk_encoded_data(std_input_path):
     # Conf does not work before 4.0.0, so verify even setting to false it should still work.
     legacy_charset = "false"
-    if is_spark_400_or_later() or is_databricks143_or_later():
-        # true from Spark 4.0.0 or DB 143 to pass the test for GBK.
+    if is_spark_400_or_later() or is_databricks_runtime():
+        # true from Spark 4.0.0 or on supported Databricks runtimes to pass the test for GBK.
         # We can not test the "GBK-with-false" case because Spark will fail the
         # current app before running into the GPU world.
         legacy_charset = "true"
