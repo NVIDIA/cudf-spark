@@ -30,15 +30,17 @@ package com.nvidia.spark.rapids
 
 import java.util.Optional
 
-import ai.rapids.cudf.{ColumnVector, ColumnView, DType, VariantUtils}
+import ai.rapids.cudf.{ColumnVector, ColumnView, DType, Scalar, VariantUtils}
 import com.nvidia.spark.Retryable
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 
-import org.apache.spark.sql.catalyst.expressions.{Expression, Literal}
+import org.apache.spark.sql.catalyst.expressions.{BoundReference, Expression, Literal,
+  NamedExpression}
 import org.apache.spark.sql.catalyst.expressions.variant.VariantGet
 import org.apache.spark.sql.types.{ByteType, DataType, IntegerType, LongType, ShortType,
   StringType}
+import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.unsafe.types.UTF8String
 
 class GpuVariantGetMeta(
@@ -49,11 +51,6 @@ class GpuVariantGetMeta(
   extends BinaryExprMeta[VariantGet](expr, conf, parent, rule) {
 
   override def tagExprForGpu(): Unit = {
-    // A Variant's runtime value type is not represented in its Spark data type. cuDF's
-    // extraction API performs exact physical decodes, whereas Spark applies runtime coercions.
-    // Until the full Spark coercion matrix is supported, planning cannot safely enable this.
-    willNotWorkOnGpu("Spark runtime Variant cast coercions are not supported on GPU")
-
     if (!GpuColumnVector.isVariantType(expr.child.dataType)) {
       willNotWorkOnGpu(s"input type ${expr.child.dataType.simpleString} is not VariantType")
     }
@@ -76,22 +73,45 @@ class GpuVariantGetMeta(
     if (!GpuVariantGet.isVariantCudfAvailable) {
       willNotWorkOnGpu("cuDF Java was built without Variant extraction APIs")
     }
+
+    if (!conf.isCpuBridgeEnabled) {
+      willNotWorkOnGpu("Variant extraction requires the CPU bridge for runtime coercion fallback")
+    }
   }
 
   override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression = {
     val path = GpuVariantGet.parseSupportedPath(expr.path).get
-    GpuVariantGet(lhs, path, expr.targetType)
+    val cpuFallback = expr.copy(
+      child = BoundReference(0, expr.child.dataType, expr.child.nullable))
+    GpuVariantGet(lhs, path, expr.targetType, cpuFallback)
   }
 }
 
 case class GpuVariantGet(
     child: Expression,
     path: String,
-    override val dataType: DataType)
+    override val dataType: DataType,
+    cpuFallback: VariantGet)
   extends GpuUnaryExpression
-  with Retryable {
+  with Retryable
+  with GpuMetricsInjectable {
 
   override def nullable: Boolean = true
+  override def hasSideEffects: Boolean = true
+
+  private var bridgeMetrics: Map[String, GpuMetric] = Map.empty
+
+  override def injectMetrics(metrics: Map[String, GpuMetric]): Unit = {
+    bridgeMetrics = metrics
+  }
+
+  @transient private lazy val fallbackBridge = {
+    val inputRef = GpuBoundReference(0, child.dataType, child.nullable)(
+      NamedExpression.newExprId, "_variant")
+    val bridge = GpuCpuBridgeExpression(Seq(inputRef), cpuFallback, dataType, nullable)
+    bridge.injectMetrics(bridgeMetrics)
+    bridge
+  }
 
   override def doColumnar(input: GpuColumnVector): ColumnVector = {
     val variantStruct = input.getBase
@@ -104,7 +124,7 @@ case class GpuVariantGet(
     withResource(variantStruct.getChildColumnView(0)) { value =>
       withResource(variantStruct.getChildColumnView(1)) { metadata =>
         GpuVariantGet.withCudfVariantView(variantStruct, metadata, value) { cudfVariant =>
-          GpuVariantGet.extractVariantField(cudfVariant, path, dataType)
+          GpuVariantGet.extractVariantField(cudfVariant, path, dataType, input, fallbackBridge)
         }
       }
     }
@@ -129,62 +149,126 @@ object GpuVariantGet {
         Thread.currentThread().getContextClassLoader)
       variantUtils.getMethod("getVariantFieldValue", classOf[ColumnView], classOf[String])
       variantUtils.getMethod("castVariantValue", classOf[ColumnView], classOf[DType])
-      variantUtils.getMethod("extractVariantField", classOf[ColumnView], classOf[String],
-        classOf[DType])
       true
     } catch {
       case _: ClassNotFoundException | _: NoSuchMethodException | _: LinkageError => false
     }
   }
 
-  def toCudfTargetType(dt: DataType): DType = dt match {
-    case ByteType => DType.INT8
-    case ShortType => DType.INT16
-    case IntegerType => DType.INT32
-    case LongType => DType.INT64
-    case StringType => DType.STRING
-    case other => throw new IllegalArgumentException(s"unsupported variant target type: $other")
-  }
-
-  def extractVariantField(cudfVariant: ColumnView, path: String, dt: DataType): ColumnVector = {
-    dt match {
-      case ByteType | StringType =>
-        VariantUtils.extractVariantField(cudfVariant, path, toCudfTargetType(dt))
-      case ShortType =>
-        extractAndWidenInteger(cudfVariant, path, DType.INT16, Seq(DType.INT8))
-      case IntegerType =>
-        extractAndWidenInteger(cudfVariant, path, DType.INT32, Seq(DType.INT16, DType.INT8))
-      case LongType =>
-        extractAndWidenInteger(cudfVariant, path, DType.INT64,
-          Seq(DType.INT32, DType.INT16, DType.INT8))
-      case other =>
-        throw new IllegalArgumentException(s"unsupported variant target type: $other")
+  def extractVariantField(
+      cudfVariant: ColumnView,
+      path: String,
+      dt: DataType,
+      input: GpuColumnVector,
+      fallbackBridge: GpuCpuBridgeExpression): ColumnVector = {
+    withResource(VariantUtils.getVariantFieldValue(cudfVariant, path)) { rawValue =>
+      dt match {
+        case StringType =>
+          withResource(VariantUtils.castVariantValue(rawValue, DType.STRING)) { decoded =>
+            if (allRowsCovered(rawValue, Seq(decoded))) {
+              decoded.incRefCount()
+            } else {
+              evaluateOnCpu(input, fallbackBridge)
+            }
+          }
+        case ByteType | ShortType | IntegerType | LongType =>
+          val decoded = Seq(DType.INT8, DType.INT16, DType.INT32, DType.INT64).safeMap {
+            sourceType => VariantUtils.castVariantValue(rawValue, sourceType)
+          }
+          withResource(decoded) { decoded =>
+            if (allRowsCovered(rawValue, decoded)) {
+              withResource(normalizeIntegers(decoded)) { logicalLongs =>
+                narrowInteger(logicalLongs, dt)
+              }
+            } else {
+              evaluateOnCpu(input, fallbackBridge)
+            }
+          }
+        case other =>
+          throw new IllegalArgumentException(s"unsupported variant target type: $other")
+      }
     }
   }
 
-  private def extractAndWidenInteger(
-      cudfVariant: ColumnView,
-      path: String,
-      targetType: DType,
-      fallbackTypes: Seq[DType]): ColumnVector = {
-    var result: ColumnVector = VariantUtils.extractVariantField(cudfVariant, path, targetType)
+  private def allRowsCovered(rawValue: ColumnView, decoded: Seq[ColumnView]): Boolean = {
+    var covered = rawValue.isNull
     try {
-      fallbackTypes.foreach { fallbackType =>
-        withResource(VariantUtils.extractVariantField(
-            cudfVariant, path, fallbackType)) { fallback =>
-          withResource(fallback.castTo(targetType)) { widened =>
-            val next = result.replaceNulls(widened)
-            result.safeClose()
-            result = next
+      decoded.foreach { value =>
+        withResource(value.isNotNull) { decodedValue =>
+          val next = covered.or(decodedValue)
+          covered.close()
+          covered = next
+        }
+      }
+      BoolUtils.isAllValidTrue(covered)
+    } finally {
+      covered.close()
+    }
+  }
+
+  private def normalizeIntegers(decoded: Seq[ColumnVector]): ColumnVector = {
+    require(decoded.length == 4, s"expected four integer decoders, got ${decoded.length}")
+
+    var result: ColumnVector = decoded(3).copyToColumnVector()
+    try {
+      decoded.take(3).reverse.foreach { value =>
+        withResource(value.castTo(DType.INT64)) { widened =>
+          val next = result.replaceNulls(widened)
+          result.close()
+          result = next
+        }
+      }
+      val normalized = result
+      result = null
+      normalized
+    } finally {
+      if (result != null) {
+        result.close()
+      }
+    }
+  }
+
+  private def narrowInteger(input: ColumnVector, dt: DataType): ColumnVector = dt match {
+    case LongType => input.incRefCount()
+    case ByteType =>
+      nullifyOutOfRangeAndCast(input, Byte.MinValue.toLong, Byte.MaxValue.toLong, DType.INT8)
+    case ShortType =>
+      nullifyOutOfRangeAndCast(input, Short.MinValue.toLong, Short.MaxValue.toLong, DType.INT16)
+    case IntegerType =>
+      nullifyOutOfRangeAndCast(input, Int.MinValue.toLong, Int.MaxValue.toLong, DType.INT32)
+    case other =>
+      throw new IllegalArgumentException(s"unsupported integral Variant target type: $other")
+  }
+
+  private def nullifyOutOfRangeAndCast(
+      input: ColumnView,
+      minValue: Long,
+      maxValue: Long,
+      targetType: DType): ColumnVector = {
+    withResource(Scalar.fromLong(minValue)) { min =>
+      withResource(input.greaterOrEqualTo(min)) { aboveMin =>
+        withResource(Scalar.fromLong(maxValue)) { max =>
+          withResource(input.lessOrEqualTo(max)) { belowMax =>
+            withResource(aboveMin.and(belowMax)) { inRange =>
+              withResource(Scalar.fromNull(DType.INT64)) { nullValue =>
+                withResource(inRange.ifElse(input, nullValue)) { masked =>
+                  masked.castTo(targetType)
+                }
+              }
+            }
           }
         }
       }
-      val ret = result
-      result = null
-      ret
-    } finally {
-      if (result != null) {
-        result.safeClose()
+    }
+  }
+
+  private def evaluateOnCpu(
+      input: GpuColumnVector,
+      fallbackBridge: GpuCpuBridgeExpression): ColumnVector = {
+    val inputColumns = Array[org.apache.spark.sql.vectorized.ColumnVector](input.incRefCount())
+    withResource(new ColumnarBatch(inputColumns, input.getBase.getRowCount.toInt)) { batch =>
+      withResource(fallbackBridge.columnarEval(batch)) { result =>
+        result.getBase.incRefCount()
       }
     }
   }
