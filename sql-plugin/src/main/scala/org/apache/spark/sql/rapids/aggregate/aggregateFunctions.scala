@@ -139,11 +139,12 @@ class CudfCollectSet(
 
   override lazy val reductionAggregate: cudf.ColumnVector => cudf.Scalar =
     (col: cudf.ColumnVector) => {
-      if (nullPolicy == NullPolicy.INCLUDE && col.getRowCount > 0) {
+      val rowCount = Math.toIntExact(col.getRowCount)
+      if (nullPolicy == NullPolicy.INCLUDE && rowCount > 0) {
         // cuDF reduction collectSet currently drops nulls for some INCLUDE cases. Use the
         // group-by implementation for single-group reductions to preserve Spark's null semantics.
         withResource(Scalar.fromInt(0)) { keyScalar =>
-          withResource(ColumnVector.fromScalar(keyScalar, col.getRowCount.toInt)) { keys =>
+          withResource(ColumnVector.fromScalar(keyScalar, rowCount)) { keys =>
             withResource(new cudf.Table(keys, col)) { table =>
               withResource(table.groupBy(0).aggregate(groupByAggregate.onColumn(1))) { result =>
                 result.getColumn(1).getScalarElement(0)
