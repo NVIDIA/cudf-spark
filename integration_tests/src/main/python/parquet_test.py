@@ -1991,3 +1991,31 @@ def test_parquet_partition_batch_row_count_only_splitting(spark_tmp_path):
     with_cpu_session(lambda spark: setup_table(spark))
     assert_gpu_and_cpu_are_equal_collect(lambda spark: spark.read.parquet(data_path).select("p"),
                                          conf={"spark.rapids.sql.columnSizeBytes": "100"})
+
+# SPARK-56045: Parquet UNKNOWN logical type annotation. PyArrow null columns are written as
+# INT32 physical + UNKNOWN/Null logical annotation (same shape as Spark's void_in_parquet.parquet).
+@pytest.mark.skipif(not is_spark_412_or_later(),
+                    reason='SPARK-56045 requires Spark 4.1.2+')
+@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+@pytest.mark.parametrize('respect_unknown', ['false', 'true'])
+def test_parquet_unknown_type_annotation(spark_tmp_path, reader_confs, respect_unknown):
+    import pyarrow.parquet as pq
+    data_path = spark_tmp_path + '/PARQUET_UNKNOWN'
+    table = pa.table({
+        'id': pa.array([1, 2, 3], type=pa.int32()),
+        'void_col': pa.array([None, None, None], type=pa.null()),
+    })
+    pq.write_table(table, data_path)
+
+    conf = copy_and_update(reader_confs, {
+        'spark.sql.parquet.reader.respectUnknownTypeAnnotation.enabled': respect_unknown,
+    })
+    expected = NullType() if respect_unknown == 'true' else IntegerType()
+
+    def read_and_check_schema(spark):
+        df = spark.read.parquet(data_path)
+        assert df.schema['void_col'].dataType == expected, \
+            'expected void_col={}, got {}'.format(expected, df.schema['void_col'].dataType)
+        return df
+
+    assert_gpu_and_cpu_are_equal_collect(read_and_check_schema, conf=conf)
