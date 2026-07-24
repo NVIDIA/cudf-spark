@@ -106,6 +106,11 @@ _EXPECTATIONS = {
     "test_multi_arg": (True, 3),
     "test_single": (False, 3),
     "test_none": (False, 1),
+    # Kept in full because a generator argvalues has no recoverable len(), so
+    # _precommit_parametrize_factors bails out. If a future pytest materializes
+    # iterator argvalues into a sized sequence, this case would start reducing
+    # and turn red -- that is an intended signal to re-review the fallback, not
+    # a flaky failure.
     "test_iterator": (False, 6),
 }
 
