@@ -24,7 +24,9 @@ import ai.rapids.cudf.{ColumnView, DType, Table}
 import com.nvidia.spark.rapids.{CastOptions, GpuCast, GpuColumnVector, SchemaUtils}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.shims.parquet.ParquetSchemaClipShims
+import com.nvidia.spark.rapids.shims.parquet.ParquetUnknownTypeAnnotationShims
 import org.apache.parquet.schema._
+import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName
 import org.apache.parquet.schema.Type.Repetition
 
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
@@ -80,15 +82,49 @@ object ParquetSchemaUtils {
         clipParquetGroup(parquetType.asGroupType(), t, caseSensitive, useFieldId)
 
       case _ =>
-        // UDTs and primitive types are not clipped.  For UDTs, a clipped version might not be able
-        // to be mapped to desired user-space types.  So UDTs shouldn't participate schema merging.
-        parquetType
+        // UDTs and primitive types are not clipped structurally. For UNKNOWN logical
+        // annotations, mirror Spark's respectUnknownTypeAnnotation behavior so cuDF sees the
+        // physical type when the annotation should be ignored (SPARK-56045).
+        stripIgnoredUnknownAnnotation(parquetType)
     }
 
     if (useFieldId && parquetType.getId != null) {
       newParquetType.withId(parquetType.getId.intValue())
     } else {
       newParquetType
+    }
+  }
+
+  /**
+   * If Spark is configured to ignore UNKNOWN logical annotations, rebuild the primitive
+   * without that annotation so GPU Parquet reads use the physical type.
+   */
+  @scala.annotation.nowarn("msg=method as in class Builder is deprecated")
+  private def stripIgnoredUnknownAnnotation(parquetType: Type): Type = {
+    if (!parquetType.isPrimitive) {
+      parquetType
+    } else {
+      val primitive = parquetType.asPrimitiveType()
+      val rawAnnotation = primitive.getLogicalTypeAnnotation
+      val effectiveAnnotation =
+        ParquetUnknownTypeAnnotationShims.effectiveLogicalTypeAnnotation(rawAnnotation)
+      if (rawAnnotation == effectiveAnnotation) {
+        parquetType
+      } else {
+        val builder = Types.primitive(primitive.getPrimitiveTypeName, primitive.getRepetition)
+        if (primitive.getPrimitiveTypeName == PrimitiveTypeName.FIXED_LEN_BYTE_ARRAY) {
+          builder.length(primitive.getTypeLength)
+        }
+        if (effectiveAnnotation != null) {
+          builder.as(effectiveAnnotation)
+        }
+        val rebuilt = builder.named(primitive.getName)
+        if (primitive.getId != null) {
+          rebuilt.withId(primitive.getId.intValue())
+        } else {
+          rebuilt
+        }
+      }
     }
   }
 
