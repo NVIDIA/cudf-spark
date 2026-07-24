@@ -2455,16 +2455,31 @@ def test_window_aggs_for_rows_collect_set():
                     reason='collect_set RESPECT NULLS is introduced in Spark 4.2')
 @allow_non_gpu("ShuffleExchangeExec")
 @ignore_order(local=True)
-def test_window_aggs_for_rows_collect_set_respect_nulls():
+@pytest.mark.parametrize('data_type', ['INT', 'FLOAT', 'DOUBLE'], ids=idfn)
+def test_window_aggs_for_rows_collect_set_respect_nulls(data_type):
     def do_it(spark):
-        spark.sql("""
-            SELECT * FROM VALUES
-                (1, 1, 1),
+        if data_type == 'INT':
+            values = """
+                (1, 1, '1'),
                 (1, 2, NULL),
-                (1, 3, 1),
+                (1, 3, '1'),
                 (1, 4, NULL),
                 (2, 1, NULL),
-                (2, 2, 5)
+                (2, 2, '5')
+            """
+        else:
+            values = """
+                (1, 1, '1.0'),
+                (1, 2, NULL),
+                (1, 3, 'NaN'),
+                (1, 4, 'NaN'),
+                (2, 1, NULL),
+                (2, 2, '5.0')
+            """
+        spark.sql(f"""
+            SELECT a, b, CAST(c AS {data_type}) AS c
+            FROM VALUES
+                {values}
             AS tab(a, b, c)
         """).createOrReplaceTempView("window_collect_table")
         return spark.sql("""

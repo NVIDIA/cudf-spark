@@ -118,18 +118,15 @@ class CudfMergeLists(override val dataType: DataType) extends CudfAggregate {
 class CudfCollectSet(
     override val dataType: DataType,
     nullPolicy: NullPolicy) extends CudfAggregate {
-  override lazy val reductionAggregate: cudf.ColumnVector => cudf.Scalar =
-    (col: cudf.ColumnVector) => {
-      val collectSet = dataType match {
-        case ArrayType(FloatType | DoubleType, _) =>
-          ReductionAggregation.collectSet(
-            nullPolicy, NullEquality.EQUAL, TypeUtilsShims.collectSetFloatNanEquality)
-        case _: DataType =>
-          ReductionAggregation.collectSet(
-            nullPolicy, NullEquality.EQUAL, NaNEquality.ALL_EQUAL)
-      }
-      col.reduce(collectSet, DType.LIST)
-    }
+  private lazy val reductionCollectSet: ReductionAggregation = dataType match {
+    case ArrayType(FloatType | DoubleType, _) =>
+      ReductionAggregation.collectSet(
+        nullPolicy, NullEquality.EQUAL, TypeUtilsShims.collectSetFloatNanEquality)
+    case _: DataType =>
+      ReductionAggregation.collectSet(
+        nullPolicy, NullEquality.EQUAL, NaNEquality.ALL_EQUAL)
+  }
+
   override lazy val groupByAggregate: GroupByAggregation = dataType match {
     case ArrayType(FloatType | DoubleType, _) =>
       GroupByAggregation.collectSet(
@@ -139,6 +136,25 @@ class CudfCollectSet(
         nullPolicy, NullEquality.EQUAL, NaNEquality.ALL_EQUAL)
   }
   override val name: String = "CudfCollectSet"
+
+  override lazy val reductionAggregate: cudf.ColumnVector => cudf.Scalar =
+    (col: cudf.ColumnVector) => {
+      if (nullPolicy == NullPolicy.INCLUDE && col.getRowCount > 0) {
+        // cuDF reduction collectSet currently drops nulls for some INCLUDE cases. Use the
+        // group-by implementation for single-group reductions to preserve Spark's null semantics.
+        withResource(Scalar.fromInt(0)) { keyScalar =>
+          withResource(ColumnVector.fromScalar(keyScalar, col.getRowCount.toInt)) { keys =>
+            withResource(new cudf.Table(keys, col)) { table =>
+              withResource(table.groupBy(0).aggregate(groupByAggregate.onColumn(1))) { result =>
+                result.getColumn(1).getScalarElement(0)
+              }
+            }
+          }
+        }
+      } else {
+        col.reduce(reductionCollectSet, DType.LIST)
+      }
+    }
 }
 
 class CudfMergeSets(override val dataType: DataType) extends CudfAggregate {
