@@ -250,6 +250,8 @@ object GpuTypeShims {
   def additionalParquetSupportedTypes: TypeSig =
     additionalParquetReadSupportedTypes + additionalParquetWriteSupportedTypes
 
+  def supportsVariantType: Boolean = false
+
   /**
    * Get additional common operators supported types for this Shim
    * (filter, sample, project, alias, table scan ...... which GPU supports from 330)

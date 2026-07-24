@@ -1760,7 +1760,8 @@ object ExprChecks {
  * Used for generating the support docs.
  */
 object SupportedOpsDocs {
-  private lazy val allSupportedTypes: TypeEnum.ValueSet = TypeEnum.values
+  private lazy val allSupportedTypes: TypeEnum.ValueSet =
+    if (GpuTypeShims.supportsVariantType) TypeEnum.values else TypeEnum.values - TypeEnum.VARIANT
 
   private def execChecksHeaderLine(): Unit = {
     println("<tr>")
@@ -2211,7 +2212,8 @@ object SupportedOpsDocs {
 
 object SupportedOpsForTools {
 
-  private lazy val allSupportedTypes: TypeEnum.ValueSet = TypeEnum.values
+  private lazy val allSupportedTypes: TypeEnum.ValueSet =
+    if (GpuTypeShims.supportsVariantType) TypeEnum.values else TypeEnum.values - TypeEnum.VARIANT
 
   // if a string contains what we are going to use for a delimiter, replace
   // it with something else
