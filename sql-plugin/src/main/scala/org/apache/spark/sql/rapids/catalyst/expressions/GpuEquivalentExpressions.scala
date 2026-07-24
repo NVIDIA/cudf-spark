@@ -275,6 +275,8 @@ class GpuEquivalentExpressions {
 }
 
 object GpuEquivalentExpressions {
+  private case class TierExpression(originalExpression: Expression, expression: Expression)
+
   /**
    * Recursively replaces semantic equal expression with its proxy expression in `substitutionMap`.
    */
@@ -328,16 +330,22 @@ object GpuEquivalentExpressions {
   /**
    * Applies substitutions to all expression tiers.
    */
-  private def doSubstitutions(exprTiers: Seq[Seq[Expression]], currentTier: Seq[Expression],
-      substitutionMap: mutable.HashMap[Expression, Expression]): Seq[Seq[Expression]] = {
+  private def doSubstitutions(
+      exprTiers: Seq[Seq[TierExpression]],
+      currentTier: Seq[TierExpression],
+      substitutionMap: mutable.HashMap[Expression, Expression]): Seq[Seq[TierExpression]] = {
     // Make substitutions in given tiers, filtering out matches from original current tier,
     // but don't filter the last tier - it needs to match original size
     val subTiers = exprTiers.dropRight(1)
     val lastTier = exprTiers.last
+    val currentExpressions = currentTier.map(_.expression)
     val updatedSubTiers = subTiers.map {
-      t => t.filter(e => !currentTier.contains(e)).map(replaceWithCommonRef(_, substitutionMap))
+      t => t.filter(e => !currentExpressions.contains(e.expression))
+          .map(e => e.copy(expression = replaceWithCommonRef(e.expression, substitutionMap)))
     }
-    val updatedLastTier = lastTier.map(replaceWithCommonRef(_, substitutionMap))
+    val updatedLastTier = lastTier.map {
+      e => e.copy(expression = replaceWithCommonRef(e.expression, substitutionMap))
+    }
     updatedSubTiers ++ Seq(updatedLastTier)
   }
 
@@ -345,34 +353,37 @@ object GpuEquivalentExpressions {
    * Apply subexpression substitutions to all tiers.
    */
   @tailrec
-  private def recurseUpdateTiers(exprTiers: Seq[Seq[Expression]],
+  private def recurseUpdateTiers(exprTiers: Seq[Seq[TierExpression]],
       updatedTiers: Seq[Seq[Expression]],
       substitutionMap: mutable.HashMap[Expression, Expression],
-      startIndex: Int): Seq[Seq[Expression]] = {
+      startIndex: Int,
+      rewriteCommonExpression: (Expression, Expression) => Expression): Seq[Seq[Expression]] = {
     exprTiers match {
       case Nil => updatedTiers
       case tier :: tail => {
         // Last tier should already be updated.
         if (tail.isEmpty) {
-          updatedTiers ++ Seq(tier)
+          updatedTiers ++ Seq(tier.map(_.expression))
         } else {
           // Replace expressions in this tier with GpuAlias
           val aliasedTier = tier.zipWithIndex.map {
             case (e, i) =>
-              GpuAlias(e, s"tiered_input_${startIndex + i}")()
+              val tierExpression =
+                rewriteCommonExpression(e.originalExpression, e.expression)
+              GpuAlias(tierExpression, s"tiered_input_${startIndex + i}")()
           }
           // Add them to the map
           tier.zip(aliasedTier).foreach {
             case (expr, alias) => {
-              substitutionMap.get(expr) match {
-                case None => substitutionMap.put(expr, alias.toAttribute)
+              substitutionMap.get(expr.expression) match {
+                case None => substitutionMap.put(expr.expression, alias.toAttribute)
                 case Some(_) =>
               }
             }
           }
           val newUpdatedTiers = doSubstitutions(tail, tier, substitutionMap)
           recurseUpdateTiers(newUpdatedTiers, updatedTiers ++ Seq(aliasedTier),
-            substitutionMap, startIndex + aliasedTier.size)
+            substitutionMap, startIndex + aliasedTier.size, rewriteCommonExpression)
         }
       }
     }
@@ -430,11 +441,29 @@ object GpuEquivalentExpressions {
   }
 
   def getExprTiers(expressions: Seq[Expression]): Seq[Seq[Expression]] = {
+    getExprTiers(expressions, (_, expression) => expression)
+  }
+
+  /**
+   * Creates expression tiers and rewrites common expressions after substitutions.
+   *
+   * The callback receives both the original common expression and its potentially substituted
+   * form.
+   */
+  def getExprTiers(
+      expressions: Seq[Expression],
+      rewriteCommonExpression: (Expression, Expression) => Expression): Seq[Seq[Expression]] = {
     // Get tiers of common expressions
     val expressionTiers = recurseCommonExpressions(expressions, Seq(expressions))
+    val tierExpressions = expressionTiers.map { tier =>
+      tier.map { expression =>
+        TierExpression(expression, expression)
+      }
+    }
     val substitutionMap = mutable.HashMap.empty[Expression, Expression]
     // Update expression with common expressions from previous tiers
-    recurseUpdateTiers(expressionTiers, Seq.empty, substitutionMap, 0)
+    recurseUpdateTiers(
+      tierExpressions, Seq.empty, substitutionMap, 0, rewriteCommonExpression)
   }
 
   // Determine which of the inputAttrs are needed for remaining tiers

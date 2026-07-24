@@ -59,12 +59,16 @@ class GpuProjectExecMeta(
     // Force list to avoid recursive Java serialization of lazy list Seq implementation
     val gpuExprs = childExprs.map(_.convertToGpu().asInstanceOf[NamedExpression]).toList
     val gpuChild = childPlans.head.convertIfNeeded()
-    if (conf.isProjectAstEnabled) {
-      // cuDF requires return column is fixed width
+    val projectList = if (conf.isProjectAstEnabled) {
       val allReturnTypesFixedWidth = gpuExprs.forall(e => GpuBatchUtils.isFixedWidth(e.dataType))
-      if (allReturnTypesFixedWidth && childExprs.forall(_.canThisBeAst)) {
-        return GpuProjectAstExec(gpuExprs, gpuChild)
-      }
+      val astExprs = childExprs.zip(gpuExprs).map { case (meta, expr) =>
+        // cuDF requires return column is fixed width
+        if (GpuBatchUtils.isFixedWidth(expr.dataType) && meta.canThisBeAst) {
+          GpuProjectAstExpression.wrap(expr)
+        } else {
+          expr
+        }
+      }.toList
       // explain AST because this is optional and it is sometimes hard to debug
       if (conf.shouldExplain) {
         val explain = childExprs.map(_.explainAst(conf.shouldExplainAll))
@@ -77,8 +81,11 @@ class GpuProjectExecMeta(
             s"return types: ${gpuExprs.map(_.dataType)}")
         }
       }
+      astExprs
+    } else {
+      gpuExprs
     }
-    GpuProjectExec(gpuExprs, gpuChild)
+    GpuProjectExec(projectList, gpuChild)
   }
 }
 
@@ -132,9 +139,27 @@ object GpuProjectExec {
         // different vector length, thus not able to reuse cached vectors.
         GpuExpressionsUtils.cachedNullVectors.get.clear()
 
-        GpuArrayHofFusion.project(cb, boundExprs).getOrElse {
-          val newColumns = boundExprs.safeMap(_.columnarEval(cb)).toArray[ColumnVector]
-          new ColumnarBatch(newColumns, cb.numRows())
+        def projectWithEvaluator(evaluateExpression: Expression => ColumnVector): ColumnarBatch = {
+          GpuArrayHofFusion.project(cb, boundExprs, evaluateExpression).getOrElse {
+            val newColumns = boundExprs.safeMap(evaluateExpression).toArray[ColumnVector]
+            new ColumnarBatch(newColumns, cb.numRows())
+          }
+        }
+
+        val hasAstExpressions = boundExprs.exists { expression =>
+          GpuProjectAstExpression.extractTopLevel(expression).isDefined
+        }
+        if (hasAstExpressions) {
+          withResource(GpuProjectAstExpression.tableFromBatch(cb)) { table =>
+            projectWithEvaluator { expression =>
+              GpuProjectAstExpression.extractTopLevel(expression) match {
+                case Some(astExpression) => astExpression.computeColumn(table)
+                case None => expression.columnarEval(cb)
+              }
+            }
+          }
+        } else {
+          projectWithEvaluator(_.columnarEval(cb))
         }
       } finally {
         GpuExpressionsUtils.cachedNullVectors.get.clear()
@@ -906,106 +931,6 @@ case class GpuProjectExec(
             numOutputBatches += 1
             numOutputRows += ret.numRows()
             ret
-          }
-        }
-      }
-    }
-  }
-}
-
-/** Use cudf AST expressions to project columnar batches */
-case class GpuProjectAstExec(
-    // NOTE for Scala 2.12.x and below we enforce usage of (eager) List to prevent running
-    // into a deep recursion during serde of lazy lists. See
-    // https://github.com/NVIDIA/spark-rapids/issues/2036
-    //
-    // Whereas a similar issue https://issues.apache.org/jira/browse/SPARK-27100 is resolved
-    // using an Array, we opt in for List because it implements Seq while having non-recursive
-    // serde: https://github.com/scala/scala/blob/2.12.x/src/library/scala/collection/
-    //   immutable/List.scala#L516
-    projectList: List[Expression],
-    child: SparkPlan
-) extends GpuProjectExecLike {
-
-  override def output: Seq[Attribute] = {
-    projectList.collect { case ne: NamedExpression => ne.toAttribute }
-  }
-
-  override def internalDoExecuteColumnar(): RDD[ColumnarBatch] = {
-    child.executeColumnar().mapPartitions(buildRetryableAstIterator)
-  }
-
-  def buildRetryableAstIterator(
-      input: Iterator[ColumnarBatch]): GpuColumnarBatchIterator = {
-    val numOutputRows = gpuLongMetric(NUM_OUTPUT_ROWS)
-    val numOutputBatches = gpuLongMetric(NUM_OUTPUT_BATCHES)
-    val opTime = gpuLongMetric(OP_TIME_LEGACY)
-    val boundProjectList = GpuBindReferences.bindGpuReferences(projectList, child.output,
-      allMetrics)
-    val outputTypes = output.map(_.dataType).toArray
-    new GpuColumnarBatchIterator(true) {
-      private[this] var maybeSplittedItr: Iterator[ColumnarBatch] = Iterator.empty
-      private[this] var compiledAstExprs =
-        NvtxIdWithMetrics(NvtxRegistry.COMPILE_ASTS, opTime) {
-          boundProjectList.safeMap { expr =>
-            // Use intmax for the left table column count since there's only one input table here.
-            expr.convertToAst(Int.MaxValue).compile()
-          }
-        }
-
-      override def hasNext: Boolean = maybeSplittedItr.hasNext || {
-        if (input.hasNext) {
-          true
-        } else {
-          close()
-          false
-        }
-      }
-
-      override def next(): ColumnarBatch = {
-        if (!maybeSplittedItr.hasNext) {
-          val spillable = SpillableColumnarBatch(
-            input.next(), SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
-          // AST currently doesn't support non-deterministic expressions so it's not needed
-          // to check whether compiled expressions are retryable.
-          maybeSplittedItr = withRetry(spillable, splitSpillableInHalfByRows) { spillable =>
-            NvtxIdWithMetrics(NvtxRegistry.PROJECT_AST, opTime) {
-              withResource(spillable.getColumnarBatch()) { cb =>
-                val projectedTable = withResource(tableFromBatch(cb)) { table =>
-                  withResource(
-                    compiledAstExprs.safeMap(_.computeColumn(table))) { projectedColumns =>
-                    new Table(projectedColumns: _*)
-                  }
-                }
-                withResource(projectedTable) { _ =>
-                  GpuColumnVector.from(projectedTable, outputTypes)
-                }
-              }
-            }
-          }
-        }
-
-        val ret = maybeSplittedItr.next()
-        numOutputBatches += 1
-        numOutputRows += ret.numRows()
-        ret
-      }
-
-      override def doClose(): Unit = {
-        compiledAstExprs.safeClose()
-        compiledAstExprs = Nil
-      }
-
-      private def tableFromBatch(cb: ColumnarBatch): Table = {
-        if (cb.numCols != 0) {
-          GpuColumnVector.from(cb)
-        } else {
-          // Count-only batch but cudf Table cannot be created with no columns.
-          // Create the cheapest table we can to evaluate the AST expression.
-          withResource(Scalar.fromBool(false)) { falseScalar =>
-            withResource(cudf.ColumnVector.fromScalar(falseScalar, cb.numRows())) { falseColumn =>
-              new Table(falseColumn)
-            }
           }
         }
       }

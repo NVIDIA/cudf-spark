@@ -68,11 +68,12 @@ ast_acosh_descr = [(double_gen, not (is_spark_403() or is_spark_412_or_later()))
 _project_ast_enabled_conf = {"spark.rapids.sql.projectAstEnabled": "true"}
 
 def assert_gpu_ast(is_supported, func, conf={}):
-    exist = "GpuProjectAstExec"
-    non_exist = "GpuProjectExec"
+    ast_expression = "GpuProjectAstExpression"
+    exist = ast_expression
+    non_exist = ''
     if not is_supported:
         exist = "GpuProjectExec"
-        non_exist = "GpuProjectAstExec"
+        non_exist = ast_expression
     ast_conf = copy_and_update(conf, _project_ast_enabled_conf)
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         func,
@@ -428,14 +429,29 @@ def test_multi_tier_ast():
         func=lambda spark: spark.range(10).withColumn("x", f.col("id")).repartition(1)\
             .selectExpr("x", "(id < x) == (id < (id + x))"))
 
-
-# MUST NOT use GPU AST when project refers to string type(non-fixed-width),
-# or cudf::compute_column will throw error: Invalid, non-fixed-width type
-# ANSI mode is disabled here due to an overflow issue with integer multiplication on Spark 4.0.0.
 @disable_ansi_mode
-@ignore_order(local=True)
-def test_refer_to_non_fixed_width_column():
-    gens = [('col_int', int_gen), ('col_string', string_gen)]
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: gen_df(spark, gens).selectExpr("col_int * col_int", "col_string"),
-        conf=_project_ast_enabled_conf)
+@pytest.mark.parametrize(
+    'tiered_project_enabled', ['true', 'false'], ids=['tiered', 'single_tier'])
+def test_project_ast_mixed_expressions(tiered_project_enabled):
+    def project(spark):
+        df = gen_df(spark, [
+            ('a', int_gen),
+            ('b', int_gen),
+            ('c', int_gen),
+            ('d', int_gen),
+            ('col_string', string_gen)
+        ])
+        shared = f.col('a') + f.col('b')
+        return df.select(
+            (shared * f.col('c')).alias('ast_first'),
+            (shared * f.col('d')).alias('ast_second'),
+            f.greatest(shared, f.col('c')).alias('gpu_shared'),
+            f.length(f.col('col_string')).alias('gpu_string'),
+            f.col('col_string').alias('raw_string'))
+
+    assert_gpu_ast(
+        is_supported=True,
+        func=project,
+        conf={
+            'spark.rapids.sql.tiered.project.enabled': tiered_project_enabled
+        })

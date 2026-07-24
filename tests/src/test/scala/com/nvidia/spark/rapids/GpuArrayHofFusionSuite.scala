@@ -16,9 +16,14 @@
 
 package com.nvidia.spark.rapids
 
+import ai.rapids.cudf.Table
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.RapidsPluginImplicits._
+import org.mockito.ArgumentCaptor
+import org.mockito.Mockito.{spy, verify}
 
 import org.apache.spark.sql.catalyst.expressions.{Expression, ExprId}
+import org.apache.spark.sql.rapids.{GpuAdd, GpuMultiply}
 import org.apache.spark.sql.types.{ArrayType, BooleanType, DataType, IntegerType, LongType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -195,7 +200,8 @@ class GpuArrayHofFusionSuite extends GpuUnitTests {
       alias(executableTransform(301), "right"))
 
     def check(batch: ColumnarBatch): Unit = {
-      val fused = GpuArrayHofFusion.project(batch, exprs)
+      val fused = GpuArrayHofFusion.project(
+        batch, exprs, _.columnarEval(batch))
       assert(fused.isDefined)
       withResource(fused.get) { projected =>
         assertResult(3)(projected.numCols())
@@ -208,5 +214,40 @@ class GpuArrayHofFusionSuite extends GpuUnitTests {
 
     withResource(GpuColumnVector.emptyBatchFromTypes(Array(arrayType)))(check)
     withResource(FuzzerUtils.createColumnarBatch(schema, 8))(check)
+  }
+
+  test("fused HOF project preserves the shared AST input table") {
+    val arrayType = ArrayType(IntegerType, containsNull = true)
+    val schema = FuzzerUtils.createSchema(arrayType, LongType, LongType)
+    val firstAst = spy(GpuProjectAstExpression(GpuAdd(
+      GpuBoundReference(1, LongType, nullable = true)(ExprId(400), "a"),
+      GpuBoundReference(2, LongType, nullable = true)(ExprId(401), "b"),
+      failOnError = false)()))
+    val secondAst = spy(GpuProjectAstExpression(GpuMultiply(
+      GpuBoundReference(1, LongType, nullable = true)(ExprId(402), "a"),
+      GpuBoundReference(2, LongType, nullable = true)(ExprId(403), "b"))()))
+    val expressions = Seq(
+      alias(executableTransform(404), "left"),
+      alias(firstAst, "sum"),
+      alias(secondAst, "product"),
+      alias(executableTransform(405), "right"))
+
+    assertResult(Seq(Seq(0, 3))) {
+      GpuArrayHofFusion.findFusedGroupIndexes(expressions)
+    }
+    withResource(Seq(firstAst, secondAst)) { _ =>
+      withResource(FuzzerUtils.createColumnarBatch(schema, 8)) { batch =>
+        withResource(GpuProjectExec.project(batch, expressions)) { projected =>
+          assertResult(4)(projected.numCols())
+          assertResult(batch.numRows())(projected.numRows())
+        }
+      }
+    }
+
+    val firstTable = ArgumentCaptor.forClass(classOf[Table])
+    val secondTable = ArgumentCaptor.forClass(classOf[Table])
+    verify(firstAst).computeColumn(firstTable.capture())
+    verify(secondAst).computeColumn(secondTable.capture())
+    assert(firstTable.getValue eq secondTable.getValue)
   }
 }

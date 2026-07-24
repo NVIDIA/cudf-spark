@@ -204,8 +204,7 @@ class IntervalArithmeticSuite extends SparkQueryCompareTestSuite {
       spark.createDataFrame(spark.sparkContext.parallelize(data), schema)
     },
     new SparkConf().set(RapidsConf.ENABLE_PROJECT_AST.key, "true"),
-    existClasses = "GpuProjectAstExec",
-    nonExistClasses = "GpuProjectExec"
+    existClasses = "GpuProjectAstExpression"
   ) {
     df => {
       df.selectExpr("+c_year_month1")
