@@ -55,6 +55,8 @@ class RapidsShuffleManagerChecksumSuite extends AnyFunSuite with FQSuiteName {
       ("disabled in SparkConf", sqlConfWithoutChecksumEntries(),
         sparkConfWithChecksums(checksumEnabled = false, fullRetry = false), false)
     ).foreach { case (label, sqlConf, sparkConf, shouldFallback) =>
+      // The fallback decision is private; resolver selection is its simplest observable effect.
+      // Checksum fallback uses the wrapped Spark resolver, while the GPU path uses RAPIDS' resolver.
       val resolver = shuffleBlockResolver(sqlConf, sparkConf)
       if (shouldFallback) {
         assert(resolver.isInstanceOf[IndexShuffleBlockResolver], label)
