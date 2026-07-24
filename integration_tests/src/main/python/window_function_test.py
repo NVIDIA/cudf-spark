@@ -2451,6 +2451,43 @@ def test_window_aggs_for_rows_collect_set():
               'spark.sql.adaptive.enabled': 'false'})
 
 
+@pytest.mark.skipif(not is_spark_420_or_later(),
+                    reason='collect_set RESPECT NULLS is introduced in Spark 4.2')
+@allow_non_gpu("ShuffleExchangeExec")
+@ignore_order(local=True)
+def test_window_aggs_for_rows_collect_set_respect_nulls():
+    def do_it(spark):
+        spark.sql("""
+            SELECT * FROM VALUES
+                (1, 1, 1),
+                (1, 2, NULL),
+                (1, 3, 1),
+                (1, 4, NULL),
+                (2, 1, NULL),
+                (2, 2, 5)
+            AS tab(a, b, c)
+        """).createOrReplaceTempView("window_collect_table")
+        return spark.sql("""
+            SELECT a, b,
+                   sort_array(ignore_set) AS ignore_set,
+                   sort_array(respect_set) AS respect_set
+            FROM (
+                SELECT a, b,
+                       collect_set(c) IGNORE NULLS OVER
+                         (PARTITION BY a ORDER BY b
+                          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS ignore_set,
+                       collect_set(c) RESPECT NULLS OVER
+                         (PARTITION BY a ORDER BY b
+                          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS respect_set
+                FROM window_collect_table
+            ) t
+        """)
+
+    assert_gpu_and_cpu_are_equal_collect(
+        do_it,
+        conf={'spark.rapids.sql.window.collectSet.enabled': True})
+
+
 @ignore_order(local=True)
 @allow_non_gpu(*non_utc_allow)
 def test_window_aggs_for_fully_unbounded_partitioned_collect_set():

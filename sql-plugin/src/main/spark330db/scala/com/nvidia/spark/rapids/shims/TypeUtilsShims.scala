@@ -48,7 +48,7 @@ package com.nvidia.spark.rapids.shims
 import ai.rapids.cudf.NaNEquality
 
 import org.apache.spark.sql.catalyst.analysis.TypeCheckResult
-import org.apache.spark.sql.catalyst.expressions.aggregate.CollectList
+import org.apache.spark.sql.catalyst.expressions.aggregate.{CollectList, CollectSet}
 import org.apache.spark.sql.types.{DataType, NullType, NumericType}
 
 /**
@@ -67,6 +67,8 @@ object TypeUtilsShims {
   val collectSetFloatNanEquality: NaNEquality = NaNEquality.UNEQUAL
 
   def collectListIgnoreNulls(_collectList: CollectList): Boolean = true
+
+  def collectSetIgnoreNulls(_collectSet: CollectSet): Boolean = true
 
   val useImprovedAsinhByDefault: Boolean = false
 

@@ -115,26 +115,26 @@ class CudfMergeLists(override val dataType: DataType) extends CudfAggregate {
  * for the non-nested NaN equality in CudfCollectSet and CudfMergeSets.
  * Note that dataType is ArrayType(child.dataType) here.
  */
-class CudfCollectSet(override val dataType: DataType) extends CudfAggregate {
+class CudfCollectSet(override val dataType: DataType, nullPolicy: NullPolicy) extends CudfAggregate {
   override lazy val reductionAggregate: cudf.ColumnVector => cudf.Scalar =
     (col: cudf.ColumnVector) => {
       val collectSet = dataType match {
         case ArrayType(FloatType | DoubleType, _) =>
           ReductionAggregation.collectSet(
-            NullPolicy.EXCLUDE, NullEquality.EQUAL, TypeUtilsShims.collectSetFloatNanEquality)
+            nullPolicy, NullEquality.EQUAL, TypeUtilsShims.collectSetFloatNanEquality)
         case _: DataType =>
           ReductionAggregation.collectSet(
-            NullPolicy.EXCLUDE, NullEquality.EQUAL, NaNEquality.ALL_EQUAL)
+            nullPolicy, NullEquality.EQUAL, NaNEquality.ALL_EQUAL)
       }
       col.reduce(collectSet, DType.LIST)
     }
   override lazy val groupByAggregate: GroupByAggregation = dataType match {
     case ArrayType(FloatType | DoubleType, _) =>
       GroupByAggregation.collectSet(
-        NullPolicy.EXCLUDE, NullEquality.EQUAL, TypeUtilsShims.collectSetFloatNanEquality)
+        nullPolicy, NullEquality.EQUAL, TypeUtilsShims.collectSetFloatNanEquality)
     case _: DataType =>
       GroupByAggregation.collectSet(
-        NullPolicy.EXCLUDE, NullEquality.EQUAL, NaNEquality.ALL_EQUAL)
+        nullPolicy, NullEquality.EQUAL, NaNEquality.ALL_EQUAL)
   }
   override val name: String = "CudfCollectSet"
 }
@@ -1970,10 +1970,17 @@ case class GpuCollectList(
 case class GpuCollectSet(
     child: Expression,
     mutableAggBufferOffset: Int = 0,
-    inputAggBufferOffset: Int = 0)
+    inputAggBufferOffset: Int = 0,
+    ignoreNulls: Boolean = true)
     extends GpuCollectBase with GpuUnboundedToUnboundedWindowAgg {
 
-  override lazy val updateAggregates: Seq[CudfAggregate] = Seq(new CudfCollectSet(dataType))
+  private lazy val nullPolicy: NullPolicy =
+    if (ignoreNulls) NullPolicy.EXCLUDE else NullPolicy.INCLUDE
+
+  override protected def arrayContainsNull: Boolean = !ignoreNulls
+
+  override lazy val updateAggregates: Seq[CudfAggregate] =
+    Seq(new CudfCollectSet(dataType, nullPolicy))
   override lazy val mergeAggregates: Seq[CudfAggregate] = Seq(new CudfMergeSets(dataType))
   override lazy val evaluateExpression: Expression = outputBuf
   override def aggBufferAttributes: Seq[AttributeReference] = outputBuf :: Nil
@@ -1987,10 +1994,10 @@ case class GpuCollectSet(
   override def windowAggregation(
       inputs: Seq[(ColumnVector, Int)]): RollingAggregationOnColumn = child.dataType match {
     case FloatType | DoubleType =>
-      RollingAggregation.collectSet(NullPolicy.EXCLUDE, NullEquality.EQUAL,
+      RollingAggregation.collectSet(nullPolicy, NullEquality.EQUAL,
         TypeUtilsShims.collectSetFloatNanEquality).onColumn(inputs.head._2)
     case _ =>
-      RollingAggregation.collectSet(NullPolicy.EXCLUDE, NullEquality.EQUAL,
+      RollingAggregation.collectSet(nullPolicy, NullEquality.EQUAL,
         NaNEquality.ALL_EQUAL).onColumn(inputs.head._2)
   }
 
