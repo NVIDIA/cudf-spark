@@ -2485,7 +2485,8 @@ def test_window_aggs_for_rows_collect_set_respect_nulls():
 
     assert_gpu_and_cpu_are_equal_collect(
         do_it,
-        conf={'spark.rapids.sql.window.collectSet.enabled': True})
+        conf={'spark.rapids.sql.window.collectSet.enabled': True,
+              'spark.sql.adaptive.enabled': 'false'})
 
 
 @ignore_order(local=True)
@@ -2553,6 +2554,44 @@ def test_window_aggs_for_fully_unbounded_partitioned_collect_set():
         conf={'spark.rapids.sql.window.collectSet.enabled': True,
               'spark.rapids.sql.window.unboundedAgg.enabled': True,
               'spark.sql.parquet.int96RebaseModeInWrite': 'LEGACY',
+              'spark.sql.adaptive.enabled': 'false'},
+        validate_execs_in_gpu_plan=['GpuUnboundedToUnboundedAggWindowExec'])
+
+
+@pytest.mark.skipif(not is_spark_420_or_later(),
+                    reason='collect_set RESPECT NULLS is introduced in Spark 4.2')
+@allow_non_gpu("ShuffleExchangeExec")
+@ignore_order(local=True)
+def test_window_aggs_for_fully_unbounded_partitioned_collect_set_respect_nulls():
+    assert_gpu_and_cpu_are_equal_sql(
+        lambda spark: spark.sql("""
+            SELECT * FROM VALUES
+                (1, 1, 1),
+                (1, 2, NULL),
+                (1, 3, 1),
+                (1, 4, NULL),
+                (2, 1, NULL),
+                (2, 2, 5)
+            AS tab(a, b, c)
+        """),
+        "window_collect_table",
+        """
+        SELECT a, b,
+               sort_array(ignore_set) AS ignore_set,
+               sort_array(respect_set) AS respect_set
+        FROM (
+            SELECT a, b,
+                   collect_set(c) IGNORE NULLS OVER
+                     (PARTITION BY a ORDER BY b
+                      ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS ignore_set,
+                   collect_set(c) RESPECT NULLS OVER
+                     (PARTITION BY a ORDER BY b
+                      ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS respect_set
+            FROM window_collect_table
+        ) t
+        """,
+        conf={'spark.rapids.sql.window.collectSet.enabled': True,
+              'spark.rapids.sql.window.unboundedAgg.enabled': True,
               'spark.sql.adaptive.enabled': 'false'},
         validate_execs_in_gpu_plan=['GpuUnboundedToUnboundedAggWindowExec'])
 
