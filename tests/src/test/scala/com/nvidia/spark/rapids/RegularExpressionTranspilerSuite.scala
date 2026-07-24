@@ -158,17 +158,53 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
         "\\z is not supported on GPU")
   }
 
-  test("cuDF does not support positive or negative lookahead") {
-    val negPatterns = Seq("a(!b)", "a(!b)c?")
-    negPatterns.foreach(pattern =>
+  test("cuDF does not support positive or negative lookaround") {
+    val posLookaheadPatterns = Seq("a(?=b)", "a(?=b)c?")
+    posLookaheadPatterns.foreach(pattern =>
+      assertUnsupported(pattern, RegexFindMode,
+        "Positive lookahead groups are not supported")
+    )
+
+    val negLookaheadPatterns = Seq("a(?!b)", "a(?!b)c?")
+    negLookaheadPatterns.foreach(pattern =>
       assertUnsupported(pattern, RegexFindMode,
         "Negative lookahead groups are not supported")
     )
 
-    val posPatterns = Seq("a(=b)", "a(=b)c?")
-    posPatterns.foreach(pattern =>
+    val posLookbehindPatterns = Seq("a(?<=b)", "a(?<=b)c?")
+    posLookbehindPatterns.foreach(pattern =>
       assertUnsupported(pattern, RegexFindMode,
-        "Positive lookahead groups are not supported")
+        "Positive lookbehind groups are not supported")
+    )
+
+    val negLookbehindPatterns = Seq("a(?<!b)", "a(?<!b)c?")
+    negLookbehindPatterns.foreach(pattern =>
+      assertUnsupported(pattern, RegexFindMode,
+        "Negative lookbehind groups are not supported")
+    )
+  }
+
+  test("cuDF does not support quantified lookaround, independent, or named capture groups") {
+    val quantifiedPatterns =
+        Seq(raw"a(?>\A)+", raw"a(?=\A)+", raw"a(?!\A)+", raw"a(?<=\A)+", raw"a(?<!\A){2}",
+            raw"a(?<n>\A){1,}")
+    quantifiedPatterns.foreach(pattern =>
+      assertUnsupported(pattern, RegexFindMode,
+        "Repetition of lookaround, independent, or named capture groups is not supported")
+    )
+  }
+
+  test("cuDF does not support independent or named capture groups") {
+    val independentPatterns = Seq("a(?>b)", "a(?>b)c?")
+    independentPatterns.foreach(pattern =>
+      assertUnsupported(pattern, RegexFindMode,
+        "Independent groups are not supported")
+    )
+
+    val namedCapturePatterns = Seq("a(?<name>b)", "a(?<name>b)c?")
+    namedCapturePatterns.foreach(pattern =>
+      assertUnsupported(pattern, RegexFindMode,
+        "Named capture groups are not supported")
     )
   }
 
@@ -176,6 +212,17 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     val patterns = Seq("", "a|", "()")
     patterns.foreach(pattern =>
       assertUnsupported(pattern, RegexFindMode, "Empty sequence not supported")
+    )
+  }
+
+  test("cuDF does not support $ followed by lookaround, independent, or named groups") {
+    val patterns =
+      Seq("$(?=a)", "$(?!a)", "$(?<=a)", "$(?<!a)", "$(?>a)", "$(?<n>a)",
+          raw"\Z(?=a)", raw"\Z(?>a)")
+    patterns.foreach(pattern =>
+      assertUnsupported(pattern, RegexFindMode,
+        "Regex sequence $ followed by a lookaround, independent, or named capture " +
+        "group is not supported")
     )
   }
 
@@ -380,7 +427,7 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
   }
 
   test("line anchor $ - find") {
-    val patterns = Seq("a$", "a$b", "\f$", "$\f","TEST$")
+    val patterns = Seq("a$", "a$b", "\f$", "$\f", "TEST$")
     val inputs = Seq("a", "a\n", "a\r", "a\r\n", "a\f", "\f", "\r", "\u0085", "\u2028",
       "\u2029", "\n", "\r\n", "\r\n\r", "\r\n\u0085", "\n\r",
       "\n\u0085", "\n\u2028", "\n\u2029", "2+|+??wD\n", "a\r\nb",
@@ -470,6 +517,19 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
         "[1a-zA-Z]{0,2}", "A+")
     val inputs = Seq("SS", "DD", "SDSDSDS", "DDDD", "DDDDDD", "ABCDEFG")
     assertCpuGpuMatchesRegexpReplace(patterns, inputs)
+  }
+
+  test("quantified \\D and \\W") {
+    // see https://github.com/NVIDIA/cudf-spark/issues/15306
+    val inputs = Seq("", "abc", "123", "a1b2", "___", "a_b 1", "!!!", "ab12cd",
+        "a\rb", "1\r2", "1\n2", "1\r\n2", " \t\r\n")
+    val findPatterns = Seq(raw"\D+", raw"\W+", raw"\D*", raw"\W*", raw"\D{2,3}", raw"\W{2,3}",
+        raw"(\D+)", raw"(\W+)")
+    // \D* and \W* omitted from replace: empty-match semantics differ (see issue 4884)
+    val replacePatterns =
+        Seq(raw"\D+", raw"\W+", raw"\D{2,3}", raw"\W{2,3}", raw"(\D+)", raw"(\W+)")
+    assertCpuGpuMatchesRegexpFind(findPatterns, inputs)
+    assertCpuGpuMatchesRegexpReplace(replacePatterns, inputs)
   }
 
   test("dot matches CR on GPU but not on CPU") {
@@ -1381,7 +1441,9 @@ class FuzzRegExp(suggestedChars: String, skipKnownIssues: Boolean = true,
   }
 
   private def group(depth: Int) = {
-    RegexGroup(capture = rr.nextBoolean(), generate(depth + 1), None)
+    RegexGroup(
+      if (rr.nextBoolean()) RegexGroup.Capturing else RegexGroup.NonCapturing,
+      generate(depth + 1))
   }
 
   private def repetition(depth: Int) = {

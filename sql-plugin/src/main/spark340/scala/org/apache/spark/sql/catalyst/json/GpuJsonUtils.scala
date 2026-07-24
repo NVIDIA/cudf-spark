@@ -17,7 +17,6 @@
 /*** spark-rapids-shim-json-lines
 {"spark": "340"}
 {"spark": "341"}
-{"spark": "341db"}
 {"spark": "342"}
 {"spark": "343"}
 {"spark": "344"}
@@ -36,10 +35,13 @@
 {"spark": "401"}
 {"spark": "402"}
 {"spark": "403"}
+{"spark": "404"}
 {"spark": "411"}
 {"spark": "412"}
+{"spark": "413"}
 {"spark": "420"}
 spark-rapids-shim-json-lines ***/
+
 package org.apache.spark.sql.catalyst.json
 
 import com.nvidia.spark.rapids.shims.LegacyBehaviorPolicyShim

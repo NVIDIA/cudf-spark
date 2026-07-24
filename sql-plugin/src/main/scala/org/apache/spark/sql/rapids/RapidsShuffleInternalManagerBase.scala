@@ -16,9 +16,10 @@
 
 package org.apache.spark.sql.rapids
 
-import java.io.IOException
-import java.util.concurrent.{Callable, ConcurrentHashMap, ConcurrentLinkedQueue, ExecutionException, Executors, Future, LinkedBlockingQueue, TimeUnit}
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicLong}
+import java.io.{IOException, OutputStream}
+import java.util.concurrent.{Callable, CompletableFuture, ConcurrentHashMap, ConcurrentLinkedQueue,
+  ExecutionException, Executors, ExecutorService, Future, FutureTask, LinkedBlockingQueue, TimeUnit}
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicLong, AtomicReference}
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable
@@ -153,78 +154,33 @@ object RapidsShuffleInternalManagerBase extends Logging {
     case other => other
   }
 
-  /**
-   * "slots" are a thread + queue thin wrapper that is used
-   * to execute tasks that need to be done in sequentially.
-   * This is done such that the threaded shuffle posts
-   * tasks that are for writer_i, or reader_i, which are
-   * guaranteed to be processed sequentially for that writer or reader.
-   * Writers/readers that land in a different slot are working independently
-   * and could perform their work in parallel.
-   * @param slotNum this slot's unique number only used to name its executor
-   */
-  private class Slot(slotNum: Int, slotType: String) {
-    private val p = Executors.newSingleThreadExecutor(new ThreadFactoryBuilder()
-      .setNameFormat(s"rapids-shuffle-$slotType-$slotNum")
-      .setDaemon(true)
-      .build())
-
-    def offer[T](task: Callable[T]): Future[T] = {
-      p.submit(task)
-    }
-
-    def shutdownNow(): Unit = p.shutdownNow()
-  }
-
   // this is set by the executor on startup, when the MULTITHREADED
   // shuffle mode is utilized, as per these configs:
   //   spark.rapids.shuffle.multiThreaded.writer.threads
   //   spark.rapids.shuffle.multiThreaded.reader.threads
-  private var numWriterSlots: Int = 0
-  private var numReaderSlots: Int = 0
-  private var numMergerSlots: Int = 0
-  private lazy val writerSlots = new mutable.HashMap[Int, Slot]()
-  private lazy val readerSlots = new mutable.HashMap[Int, Slot]()
-  private lazy val mergerSlots = new mutable.HashMap[Int, Slot]()
-
-  // used by callers to obtain a unique slot
-  private val writerSlotNumber = new AtomicInteger(0)
-  private val readerSlotNumber= new AtomicInteger(0)
-  private val mergerSlotNumber = new AtomicInteger(0)
+  private var writerPool: ExecutorService = _
+  private var readerPool: ExecutorService = _
+  private var mergerPool: ExecutorService = _
 
   private var mtShuffleInitialized: Boolean = false
 
-  /**
-   * Send a task to a specific write slot.
-   * @param slotNum the slot to submit to
-   * @param task a task to execute
-   * @note there must not be an uncaught exception while calling
-   *      `task`.
-   */
-  def queueWriteTask[T](slotNum: Int, task: Callable[T]): Future[T] = {
-    writerSlots(slotNum % numWriterSlots).offer(task)
+  def queueWriteTask[T](task: FutureTask[T]): Future[T] = {
+    writerPool.execute(task)
+    task
   }
 
-  /**
-   * Send a task to a specific read slot.
-   * @param slotNum the slot to submit to
-   * @param task a task to execute
-   * @note there must not be an uncaught exception while calling
-   *      `task`.
-   */
-  def queueReadTask[T](slotNum: Int, task: Callable[T]): Future[T] = {
-    readerSlots(slotNum % numReaderSlots).offer(task)
+  /** Send a deserialization task to the shared reader pool. */
+  def queueReadTask[T](task: Callable[T]): Future[T] = {
+    readerPool.submit(task)
   }
 
-  /**
-   * Send a task to a specific merger slot.
-   * @param slotNum the slot to submit to
-   * @param task a task to execute
-   * @note there must not be an uncaught exception while calling
-   *      `task`.
-   */
-  def queueMergerTask[T](slotNum: Int, task: Callable[T]): Future[T] = {
-    mergerSlots(slotNum % numMergerSlots).offer(task)
+  def executeMergerTask(task: Runnable): Unit = mergerPool.execute(task)
+
+  private def shutdownNow(pool: ExecutorService): Unit = {
+    pool.shutdownNow().asScala.foreach {
+      case future: Future[_] => future.cancel(false)
+      case _ =>
+    }
   }
 
   def startThreadPoolIfNeeded(
@@ -232,48 +188,42 @@ object RapidsShuffleInternalManagerBase extends Logging {
       numReaderThreads: Int): Unit = synchronized {
     if (!mtShuffleInitialized) {
       mtShuffleInitialized = true
-      numWriterSlots = numWriterThreads
-      numReaderSlots = numReaderThreads
-      // Use same number of merger slots as writer slots
-      numMergerSlots = numWriterThreads
-      if (writerSlots.isEmpty) {
-        (0 until numWriterSlots).foreach { slotNum =>
-          writerSlots.put(slotNum, new Slot(slotNum, "writer"))
-        }
+      if (numWriterThreads > 0) {
+        writerPool = Executors.newFixedThreadPool(numWriterThreads, new ThreadFactoryBuilder()
+          .setNameFormat("rapids-shuffle-writer-%d")
+          .setDaemon(true)
+          .build())
+        mergerPool = Executors.newFixedThreadPool(numWriterThreads, new ThreadFactoryBuilder()
+          .setNameFormat("rapids-shuffle-merger-%d")
+          .setDaemon(true)
+          .build())
       }
-      if (readerSlots.isEmpty) {
-        (0 until numReaderSlots).foreach { slotNum =>
-          readerSlots.put(slotNum, new Slot(slotNum, "reader"))
-        }
-      }
-      if (mergerSlots.isEmpty) {
-        (0 until numMergerSlots).foreach { slotNum =>
-          mergerSlots.put(slotNum, new Slot(slotNum, "merger"))
-        }
+      if (numReaderThreads > 0) {
+        readerPool = Executors.newFixedThreadPool(numReaderThreads, new ThreadFactoryBuilder()
+          .setNameFormat("rapids-shuffle-reader-%d")
+          .setDaemon(true)
+          .build())
       }
     }
   }
 
   def stopThreadPool(): Unit = synchronized {
     mtShuffleInitialized = false
-    writerSlots.values.foreach(_.shutdownNow())
-    writerSlots.clear()
+    if (writerPool != null) {
+      shutdownNow(writerPool)
+      writerPool = null
+    }
 
-    readerSlots.values.foreach(_.shutdownNow())
-    readerSlots.clear()
+    if (readerPool != null) {
+      shutdownNow(readerPool)
+      readerPool = null
+    }
 
-    mergerSlots.values.foreach(_.shutdownNow())
-    mergerSlots.clear()
-
-    // Reset slot counters to ensure clean state for next initialization
-    writerSlotNumber.set(0)
-    readerSlotNumber.set(0)
-    mergerSlotNumber.set(0)
+    if (mergerPool != null) {
+      shutdownNow(mergerPool)
+      mergerPool = null
+    }
   }
-
-  def getNextWriterSlot: Int = Math.abs(writerSlotNumber.incrementAndGet())
-  def getNextReaderSlot: Int = Math.abs(readerSlotNumber.incrementAndGet())
-  def getNextMergerSlot: Int = Math.abs(mergerSlotNumber.incrementAndGet())
 }
 
 trait RapidsShuffleWriterShimHelper {
@@ -343,20 +293,180 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
     remainingQuota: Long)
 
   /**
+   * Cooperatively writes one GPU batch without occupying a merger thread while waiting for work.
+   * At most one step is scheduled for this merger. A step drains all currently ready records and
+   * yields when it reaches an empty queue or an unfinished compression future.
+   */
+  private class BatchMerger(
+      writer: ShuffleMapOutputWriter,
+      partitionRecords: ConcurrentHashMap[Int,
+        ConcurrentLinkedQueue[Future[CompressedRecord]]],
+      maxPartitionIdQueued: AtomicInteger) {
+    val completionFuture = new CompletableFuture[Void]()
+
+    private val scheduled = new AtomicBoolean(false)
+    private val stepFuture = new AtomicReference[FutureTask[Void]]()
+    private var currentPartitionToWrite = 0
+    private var outputStream: OutputStream = _
+
+    private sealed trait WorkState
+    private case object Complete extends WorkState
+    private case object NotReady extends WorkState
+    private case object EmptyPartition extends WorkState
+    private case class ReadyRecord(
+        queue: ConcurrentLinkedQueue[Future[CompressedRecord]],
+        future: Future[CompressedRecord]) extends WorkState
+    private case object FinishedPartition extends WorkState
+
+    def schedule(): Unit = {
+      if (!completionFuture.isDone && scheduled.compareAndSet(false, true)) {
+        val task = new FutureTask[Void](new Callable[Void] {
+          override def call(): Void = {
+            runStep()
+            null
+          }
+        })
+        stepFuture.set(task)
+        try {
+          RapidsShuffleInternalManagerBase.executeMergerTask(task)
+        } catch {
+          case t: Throwable =>
+            stepFuture.compareAndSet(task, null)
+            scheduled.set(false)
+            fail(t)
+        }
+      }
+    }
+
+    def cancel(): Unit = {
+      completionFuture.cancel(true)
+      Option(stepFuture.get()).foreach(_.cancel(true))
+      synchronized {
+        closeOutputStreamQuietly()
+      }
+    }
+
+    private def runStep(): Unit = synchronized {
+      try {
+        var keepDraining = true
+        while (keepDraining && !completionFuture.isDone) {
+          currentWorkState match {
+            case Complete =>
+              completionFuture.complete(null)
+              keepDraining = false
+            case NotReady =>
+              keepDraining = false
+            case EmptyPartition =>
+              // The producer has advanced beyond this partition without adding records.
+              writer.getPartitionWriter(currentPartitionToWrite).openStream().close()
+              currentPartitionToWrite += 1
+            case ReadyRecord(recordQueue, future) =>
+              if (outputStream == null) {
+                outputStream = writer.getPartitionWriter(currentPartitionToWrite).openStream()
+              }
+              recordQueue.poll()
+              writeRecord(future.get())
+            case FinishedPartition =>
+              closeOutputStream()
+              partitionRecords.remove(currentPartitionToWrite)
+              currentPartitionToWrite += 1
+          }
+        }
+
+        if (currentPartitionToWrite >= numPartitions) {
+          completionFuture.complete(null)
+        }
+      } catch {
+        case ee: ExecutionException => fail(ee.getCause)
+        case _: InterruptedException =>
+          Thread.currentThread().interrupt()
+          completionFuture.cancel(true)
+        case t: Throwable => fail(t)
+      } finally {
+        stepFuture.set(null)
+        scheduled.set(false)
+        if (completionFuture.isDone) {
+          closeOutputStreamQuietly()
+        }
+
+        // Recheck after clearing scheduled to avoid losing work queued during the transition.
+        if (!completionFuture.isDone && hasReadyWork) {
+          schedule()
+        }
+      }
+    }
+
+    private def currentWorkState: WorkState = {
+      if (currentPartitionToWrite >= numPartitions) {
+        Complete
+      } else {
+        val maxQueued = maxPartitionIdQueued.get()
+        if (currentPartitionToWrite > maxQueued) {
+          NotReady
+        } else {
+          val recordQueue = partitionRecords.get(currentPartitionToWrite)
+          if (recordQueue == null) {
+            EmptyPartition
+          } else {
+            val future = recordQueue.peek()
+            if (future != null && future.isDone) {
+              ReadyRecord(recordQueue, future)
+            } else if (future == null && currentPartitionToWrite < maxQueued) {
+              FinishedPartition
+            } else {
+              NotReady
+            }
+          }
+        }
+      }
+    }
+
+    private def hasReadyWork: Boolean = currentWorkState != NotReady
+
+    private def writeRecord(record: CompressedRecord): Unit = {
+      if (record.compressedSize > 0) {
+        outputStream.write(record.buffer.getBuf, 0, record.compressedSize.toInt)
+      }
+      record.buffer.close()
+      limiter.release(record.remainingQuota)
+    }
+
+    private def closeOutputStream(): Unit = {
+      if (outputStream != null) {
+        outputStream.close()
+        outputStream = null
+      }
+    }
+
+    private def closeOutputStreamQuietly(): Unit = {
+      try {
+        closeOutputStream()
+      } catch {
+        case _: Exception =>
+      }
+    }
+
+    private def fail(t: Throwable): Unit = {
+      closeOutputStreamQuietly()
+      completionFuture.completeExceptionally(t)
+    }
+  }
+
+  /**
    * Encapsulates all state for processing one GPU batch in the multi-batch shuffle write.
    *
    * In multi-batch mode, each GPU batch gets its own BatchState with independent buffers,
-   * futures, and a dedicated merger thread. This enables pipeline parallelism where:
+   * futures, and a cooperative merger. This enables pipeline parallelism where:
    * - Main thread: processes records and queues compression tasks (non-blocking)
    * - Writer threads: execute compression tasks in parallel (each record gets its own buffer)
-   * - Merger thread: waits for completed compressions and writes partitions sequentially
+   * - Merger steps: write ready partitions sequentially and yield while waiting for work
    *
    * Key design: Each record uses an INDEPENDENT buffer to avoid the 2GB array limit.
    * When a partition has many records, instead of accumulating in one giant buffer,
    * each record's compressed data is in its own small buffer that gets written and
-   * released immediately by the merger thread.
+   * released immediately by a merger step.
    *
-   * The merger thread writes partitions in order (0, 1, 2, ...) because Spark's
+   * The merger writes partitions in order (0, 1, 2, ...) because Spark's
    * ShuffleMapOutputWriter requires sequential partition writes.
    *
    * @param batchId Unique identifier for this batch (for debugging/logging)
@@ -364,11 +474,8 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
    * @param partitionRecords Maps partitionId -> queue of compressed record futures.
    *                         Each future completes with an independent CompressedRecord.
    * @param maxPartitionIdQueued Highest partition ID that main thread has queued tasks for.
-   *                             Merger thread uses this to know when a partition is complete.
-   * @param mergerCondition Condition variable for main thread to wake up merger thread
-   * @param hasNewWork Flag for wait/notify pattern
-   * @param mergerSlotNum The merger thread pool slot assigned to this batch.
-   * @param mergerFuture Future representing the merger task, used to wait for completion.
+   *                             The merger uses this to know when a partition is complete.
+   * @param merger Cooperative merger state and completion future.
    */
   private case class BatchState(
     batchId: Int,
@@ -376,13 +483,11 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
     partitionRecords: ConcurrentHashMap[Int,
       ConcurrentLinkedQueue[Future[CompressedRecord]]],
     maxPartitionIdQueued: AtomicInteger,
-    mergerCondition: Object,
-    // Flag for classic wait/notify pattern: set to true when new work is available,
-    // reset to false after merger thread wakes up and checks actual data state.
-    // This avoids busy-loop polling and provides clear signal for debugging.
-    hasNewWork: AtomicBoolean,
-    mergerSlotNum: Int,
-    mergerFuture: Future[_])
+    merger: BatchMerger) {
+    def mergerFuture: Future[_] = merger.completionFuture
+    def scheduleMerger(): Unit = merger.schedule()
+    def cancelMerger(): Unit = merger.cancel()
+  }
 
   /**
    * Increment the reference count and get the memory size for a value.
@@ -435,148 +540,20 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
       ConcurrentLinkedQueue[Future[CompressedRecord]]]()
 
 
-    // Synchronization strategy for maxPartitionIdQueued and mergerCondition:
-    //
     // maxPartitionIdQueued: Tracks the highest partition ID queued by main thread.
     //   - Main thread: updates via set() after adding futures
-    //   - Merger thread: reads via get() to check if current partition is complete
+    //   - Merger step: reads via get() to check if current partition is complete
     //     (currentPartition < maxPartitionIdQueued means all data for currentPartition
     //     has been queued)
-    //
-    // mergerCondition: Condition variable for merger thread to wait on.
-    //   - Main thread: sets hasNewWork=true and calls notifyAll() after queuing new tasks
-    //   - Merger thread: uses classic flag pattern (while !hasNewWork wait()) to avoid
-    //     busy-loop polling and provide clear debugging signal
     val maxPartitionIdQueued = new AtomicInteger(-1)
-    val mergerCondition = new Object()
-    val hasNewWork = new AtomicBoolean(false)
-
-    // Assign a merger slot for this batch
-    val mergerSlotNum = RapidsShuffleInternalManagerBase.getNextMergerSlot
-
-    // Merger task: writes compressed records to disk in partition order.
-    // Each record has its own buffer. For each partition, we:
-    // 1. Poll compressed records from the queue
-    // 2. Write buffer content to output stream
-    // 3. Close buffer immediately after writing
-    // 4. Release quota to allow more compression tasks to proceed
-    val mergerTask = new Runnable {
-      override def run(): Unit = {
-        var currentPartitionToWrite = 0
-        // Check for thread interruption to allow graceful shutdown
-        while (currentPartitionToWrite < numPartitions && !Thread.currentThread().isInterrupted) {
-          // Check if this partition has been queued by main thread
-          if (currentPartitionToWrite <= maxPartitionIdQueued.get()) {
-            val recordQueue = partitionRecords.get(currentPartitionToWrite)
-
-            if (recordQueue != null) {
-              // Open output stream for this partition (one stream per partition)
-              val outputStream = writer.getPartitionWriter(currentPartitionToWrite).openStream()
-              try {
-                // Process records until partition is complete
-                var partitionComplete = false
-                while (!partitionComplete && !Thread.currentThread().isInterrupted) {
-                  // Check if all data for this partition has been queued
-                  val isLastForPartition = maxPartitionIdQueued.synchronized {
-                    currentPartitionToWrite < maxPartitionIdQueued.get()
-                  }
-
-                  // Process all available records in the queue
-                  var madeProgress = false
-                  var future = recordQueue.poll()
-                  while (future != null) {
-                    madeProgress = true
-                    // Wait for compression to complete and get the record
-                    val record = future.get()
-
-                    // Write compressed data to output stream
-                    if (record.compressedSize > 0) {
-                      outputStream.write(record.buffer.getBuf, 0, record.compressedSize.toInt)
-                    }
-
-                    // Close buffer immediately after writing to release memory
-                    record.buffer.close()
-
-                    // Release quota after data is written to output stream
-                    limiter.release(record.remainingQuota)
-
-                    // Get next record
-                    future = recordQueue.poll()
-                  }
-
-                  if (isLastForPartition && recordQueue.isEmpty) {
-                    // All records for this partition have been processed
-                    partitionComplete = true
-                  } else if (!madeProgress) {
-                    // No records were processed, wait for main thread to queue more.
-                    // Use classic condition flag pattern to avoid busy-loop polling.
-                    // Also check interrupt flag to handle task cancellation gracefully.
-                    mergerCondition.synchronized {
-                      while (!hasNewWork.get() && !Thread.currentThread().isInterrupted) {
-                        try {
-                          mergerCondition.wait()
-                        } catch {
-                          case _: InterruptedException =>
-                            Thread.currentThread().interrupt()
-                            return
-                        }
-                      }
-                      if (Thread.currentThread().isInterrupted) {
-                        return
-                      }
-                      hasNewWork.set(false)
-                    }
-                  }
-                  // If madeProgress, loop back to process more records
-                }
-              } finally {
-                outputStream.close()
-              }
-              partitionRecords.remove(currentPartitionToWrite)
-              currentPartitionToWrite += 1
-            } else {
-              // No records for this partition, write empty partition
-              val partWriter = writer.getPartitionWriter(currentPartitionToWrite)
-              partWriter.openStream().close()
-              currentPartitionToWrite += 1
-            }
-          } else {
-            // Current partition hasn't been queued yet by main thread, wait for it.
-            mergerCondition.synchronized {
-              while (!hasNewWork.get() && !Thread.currentThread().isInterrupted) {
-                try {
-                  mergerCondition.wait()
-                } catch {
-                  case _: InterruptedException =>
-                    Thread.currentThread().interrupt()
-                    return
-                }
-              }
-              if (Thread.currentThread().isInterrupted) {
-                return
-              }
-              hasNewWork.set(false)
-            }
-          }
-        }
-      }
-    }
-
-    val mergerFuture = RapidsShuffleInternalManagerBase.queueMergerTask(
-      mergerSlotNum, () => {
-        mergerTask.run()
-        null
-      })
+    val merger = new BatchMerger(writer, partitionRecords, maxPartitionIdQueued)
 
     BatchState(
       batchId,
       writer,
       partitionRecords,
       maxPartitionIdQueued,
-      mergerCondition,
-      hasNewWork,
-      mergerSlotNum,
-      mergerFuture)
+      merger)
   }
 
   override def write(records: Iterator[Product2[K, V]]): Unit = {
@@ -609,23 +586,23 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
    *    spark.rapids.shuffle.partitioning.maxCpuBatchSize) -> Main thread acquires limiter quota
    * 2. Writer thread: serialize + compress -> OpenByteArrayOutputStream (JVM heap)
    * 3. Writer thread: release excess quota (recordSize - compressedSize)
-   * 4. Merger thread: heap buffer -> ShuffleMapOutputWriter (via SpillablePartialFileHandle)
+   * 4. Merger step: heap buffer -> ShuffleMapOutputWriter (via SpillablePartialFileHandle)
    *    - If MEMORY_WITH_SPILL mode: data may stay in host memory until spill/commit
    *    - If FILE_ONLY mode or spilled: data goes to disk
-   * 5. Merger thread: release remaining quota after writing to output stream
+   * 5. Merger step: release remaining quota after writing to output stream
    * 6. (Multi-batch only) Main thread: mergePartialFiles() combines all batch outputs into
    *    final shuffle file, reading from each SpillablePartialFileHandle sequentially
    *
    * Threading model (same for both scenarios):
    * - Main thread: Processes all records without blocking, queues compression tasks
-   * - Background merger thread(s): Wait for compression tasks to complete and write
-   *   partitions to disk in order
+   * - Merger steps: Run on a shared bounded pool, write ready partitions in order, and yield
+   *   when the next compression task is incomplete
    * - Worker threads: Execute compression tasks in parallel
    *
-   * Single batch: One merger thread writes directly to final output file
+   * Single batch: Cooperative merger steps write directly to the final output file
    *
    * Multi-batch: Detects partition ID decreasing (indicates new batch), creates
-   * independent state for each batch (each with its own merger thread running in parallel),
+   * independent state for each batch (each with its own cooperative merger),
    * then merges all batch outputs into final file.
    */
   private def writePartitionedGpuBatches(
@@ -648,11 +625,6 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
     var currentBatchId: Int = 0
     var previousMaxPartition: Int = -1
     var isMultiBatch: Boolean = false
-
-    // Maps partitionId -> writer slot number. Ensures all compression tasks for the same
-    // partition run serially in the same single-threaded slot, preventing concurrent writes
-    // to the same partition buffer. Different partitions can still run in parallel.
-    val partitionSlots = new ConcurrentHashMap[Int, Int]()
 
     // Create initial batch state
     var currentBatch = createBatchState(currentBatchId, mapOutputWriter)
@@ -685,13 +657,10 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
           // Signal current batch is complete by setting maxPartitionIdQueued to numPartitions.
           // This tells the merger thread that all partitions (0 to numPartitions-1) have been
           // queued, so it can finish writing remaining partitions without waiting.
-          // We notify the merger thread in case it's waiting for more work.
+          // Schedule the merger in case it yielded while waiting for more work.
           // Note: We don't block here - the merger runs in parallel while we start next batch.
           currentBatch.maxPartitionIdQueued.set(numPartitions)
-          currentBatch.mergerCondition.synchronized {
-            currentBatch.hasNewWork.set(true)
-            currentBatch.mergerCondition.notifyAll()
-          }
+          currentBatch.scheduleMerger()
 
           // Add to list for later finalization
           batchStates += currentBatch
@@ -725,53 +694,58 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
         limiter.acquireOrBlock(recordSize)
         waitTimeOnLimiterNs += System.nanoTime() - waitOnLimiterStart
 
-        // Get or assign a slot number for this partition to ensure
-        // all tasks for the same partition run serially in the same slot
-        val slotNum = partitionSlots.computeIfAbsent(reducePartitionId,
-          _ => RapidsShuffleInternalManagerBase.getNextWriterSlot)
-        val future = RapidsShuffleInternalManagerBase.queueWriteTask(slotNum, () => {
-          try {
-            withResource(cb) { _ =>
-              // Create a new buffer for this record.
-              // The buffer is closed by the merger thread after writing to disk.
-              val buffer = new OpenByteArrayOutputStream()
+        val batchForRecord = currentBatch
+        val compressionTask = new FutureTask[CompressedRecord](new Callable[CompressedRecord] {
+          override def call(): CompressedRecord = {
+            try {
+              withResource(cb) { _ =>
+                // Create a new buffer for this record.
+                // The buffer is closed by the merger thread after writing to disk.
+                val buffer = new OpenByteArrayOutputStream()
 
-              // Serialize + compress + encryption to memory buffer
-              val compressedOutputStream = blockManager.serializerManager.wrapStream(
-                ShuffleBlockId(shuffleId, mapId, reducePartitionId), buffer)
+                // Serialize + compress + encryption to memory buffer
+                val compressedOutputStream = blockManager.serializerManager.wrapStream(
+                  ShuffleBlockId(shuffleId, mapId, reducePartitionId), buffer)
 
-              val serializationStream = serializerInstance.serializeStream(
-                compressedOutputStream)
-              withResource(serializationStream) { serializer =>
-                serializer.writeKey(key.asInstanceOf[Any])
-                serializer.writeValue(value.asInstanceOf[Any])
+                val serializationStream = serializerInstance.serializeStream(
+                  compressedOutputStream)
+                withResource(serializationStream) { serializer =>
+                  serializer.writeKey(key.asInstanceOf[Any])
+                  serializer.writeValue(value.asInstanceOf[Any])
+                }
+
+                // Track total written data size (compressed size)
+                val compressedSize = buffer.getCount.toLong
+                totalCompressedSize.addAndGet(compressedSize)
+
+                // Release excess quota immediately after compression.
+                // Data is now in OpenByteArrayOutputStream (heap), only need to hold
+                // compressedSize quota until Merger writes to disk.
+                // Note: excessQuota can be 0 if compression doesn't reduce size (or expands)
+                val excessQuota = math.max(0L, recordSize - compressedSize)
+                if (excessQuota > 0) {
+                  limiter.release(excessQuota)
+                }
+
+                // Return CompressedRecord with buffer and remaining quota for Merger
+                // Total released = excessQuota + remainingQuota should equal recordSize
+                val remainingQuota = recordSize - excessQuota
+                CompressedRecord(buffer, compressedSize, remainingQuota)
               }
-
-              // Track total written data size (compressed size)
-              val compressedSize = buffer.getCount.toLong
-              totalCompressedSize.addAndGet(compressedSize)
-
-              // Release excess quota immediately after compression.
-              // Data is now in OpenByteArrayOutputStream (heap), only need to hold
-              // compressedSize quota until Merger writes to disk.
-              // Note: excessQuota can be 0 if compression doesn't reduce size (or expands)
-              val excessQuota = math.max(0L, recordSize - compressedSize)
-              if (excessQuota > 0) {
-                limiter.release(excessQuota)
-              }
-
-              // Return CompressedRecord with buffer and remaining quota for Merger
-              // Total released = excessQuota + remainingQuota should equal recordSize
-              val remainingQuota = recordSize - excessQuota
-              CompressedRecord(buffer, compressedSize, remainingQuota)
+            } catch {
+              case e: Exception =>
+                throw new IOException(
+                  s"Failed compression task for shuffle $shuffleId, map $mapId, " +
+                    s"partition $reducePartitionId", e)
             }
-          } catch {
-            case e: Exception =>
-              throw new IOException(
-                s"Failed compression task for shuffle $shuffleId, map $mapId, " +
-                  s"partition $reducePartitionId", e)
           }
-        })
+        }) {
+          override def done(): Unit = {
+            // FutureTask invokes done only after isDone becomes true.
+            batchForRecord.scheduleMerger()
+          }
+        }
+        val future = RapidsShuffleInternalManagerBase.queueWriteTask(compressionTask)
 
         currentBatch.maxPartitionIdQueued.synchronized {
           recordQueue.add(future)
@@ -779,13 +753,8 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
             math.max(currentBatch.maxPartitionIdQueued.get(), reducePartitionId))
         }
 
-        // Wake up merger thread to process newly queued compression task.
-        // This enables pipeline parallelism: main thread continues to next record
-        // while merger thread processes completed compressions in parallel.
-        currentBatch.mergerCondition.synchronized {
-          currentBatch.hasNewWork.set(true)
-          currentBatch.mergerCondition.notifyAll()
-        }
+        // Schedule a merger step to process this record when compression is ready.
+        currentBatch.scheduleMerger()
 
         // Reset timer for next iteration's hasNext/next
         inputFetchStart = System.nanoTime()
@@ -794,13 +763,9 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
       inputFetchTimeNs += System.nanoTime() - inputFetchStart
 
       // Mark end of last batch by setting maxPartitionIdQueued to numPartitions.
-      // This signals the merger thread that all partitions have been queued.
-      // Notify ensures merger wakes up to finish any remaining work.
+      // This signals the merger that all partitions have been queued.
       currentBatch.maxPartitionIdQueued.set(numPartitions)
-      currentBatch.mergerCondition.synchronized {
-        currentBatch.hasNewWork.set(true)
-        currentBatch.mergerCondition.notifyAll()
-      }
+      currentBatch.scheduleMerger()
 
       // Add last batch to list
       batchStates += currentBatch
@@ -840,8 +805,8 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
     } finally {
       // Helper to cleanup a single batch
       def cleanupBatch(batch: BatchState): Unit = {
-        // Cancel merger future if still running
-        batch.mergerFuture.cancel(true)
+        // Cancel merger completion and any currently scheduled step.
+        batch.cancelMerger()
 
         // Cancel pending futures and close their buffers
         batch.partitionRecords.values().asScala.foreach { recordQueue =>
@@ -1108,7 +1073,9 @@ class BytesInFlightLimiter(maxBytesInFlight: Long) {
     notifyAll()
   }
 
-  def getBytesInFlight: Long = inFlight
+  def getBytesInFlight: Long = synchronized {
+    inFlight
+  }
 }
 
 abstract class RapidsShuffleThreadedReaderBase[K, C](
@@ -1429,8 +1396,7 @@ abstract class RapidsShuffleThreadedReaderBase[K, C](
     }
 
     private def deserializeTask(blockState: BlockState, acquiredSize: Long): Unit = {
-      val slot = RapidsShuffleInternalManagerBase.getNextReaderSlot
-      futures += RapidsShuffleInternalManagerBase.queueReadTask(slot, () => {
+      futures += RapidsShuffleInternalManagerBase.queueReadTask(() => {
         var success = false
         // Track the size we need to release (starts with the pre-acquired size)
         var sizeToRelease = acquiredSize
