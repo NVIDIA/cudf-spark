@@ -118,12 +118,8 @@ object ParquetSchemaUtils {
         if (effectiveAnnotation != null) {
           builder.as(effectiveAnnotation)
         }
-        val rebuilt = builder.named(primitive.getName)
-        if (primitive.getId != null) {
-          rebuilt.withId(primitive.getId.intValue())
-        } else {
-          rebuilt
-        }
+        // Field IDs are re-applied by clipParquetType after this returns.
+        builder.named(primitive.getName)
       }
     }
   }
