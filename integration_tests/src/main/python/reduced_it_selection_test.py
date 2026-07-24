@@ -214,9 +214,12 @@ def _value_id(item, argname):
 
 def test_reduced_it_each_choice_selection():
     """Run the isolated collection self-test in a subprocess and require success."""
+    # Clear PYTEST_ADDOPTS so a caller's global pytest options (extra plugins,
+    # xdist, etc.) cannot leak into the isolated synthetic collection below.
+    env = {**os.environ, "PYTEST_ADDOPTS": ""}
     result = subprocess.run(
         [sys.executable, os.path.abspath(__file__)],
-        capture_output=True, text=True)
+        capture_output=True, text=True, env=env)
     assert result.returncode == 0, (
         "reduced IT selection self-test failed:\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}")
