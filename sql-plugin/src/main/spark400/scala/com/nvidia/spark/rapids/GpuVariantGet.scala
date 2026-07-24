@@ -47,6 +47,11 @@ class GpuVariantGetMeta(
   extends BinaryExprMeta[VariantGet](expr, conf, parent, rule) {
 
   override def tagExprForGpu(): Unit = {
+    // A Variant's runtime value type is not represented in its Spark data type. cuDF's
+    // extraction API performs exact physical decodes, whereas Spark applies runtime coercions.
+    // Until the full Spark coercion matrix is supported, planning cannot safely enable this.
+    willNotWorkOnGpu("Spark runtime Variant cast coercions are not supported on GPU")
+
     if (!GpuColumnVector.isVariantType(expr.child.dataType)) {
       willNotWorkOnGpu(s"input type ${expr.child.dataType.simpleString} is not VariantType")
     }

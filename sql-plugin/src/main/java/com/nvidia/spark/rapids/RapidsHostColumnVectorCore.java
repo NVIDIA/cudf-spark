@@ -185,6 +185,9 @@ public class RapidsHostColumnVectorCore extends ColumnVector {
 
   @Override
   public final byte[] getBinary(int rowId) {
+    if (cudfCv.getType().equals(DType.STRING)) {
+      return cudfCv.getUTF8(rowId);
+    }
     if (cachedChildren[0] == null) {
       // cache the child data
       HostColumnVectorCore data = cudfCv.getChildColumnView(0);

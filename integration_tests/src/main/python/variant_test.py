@@ -21,7 +21,11 @@ from data_gen import idfn
 from marks import allow_non_gpu, incompat
 from spark_session import is_before_spark_400, with_cpu_session
 
-pytestmark = [pytest.mark.premerge_ci_1]
+# Remove this allowance when VariantGet implements Spark's runtime coercion semantics on GPU.
+pytestmark = [
+    pytest.mark.premerge_ci_1,
+    allow_non_gpu('VariantGet')
+]
 
 _variant_parquet_conf = {
     'spark.rapids.sql.format.parquet.enabled': 'true',
@@ -40,6 +44,22 @@ def _write_variant_parquet(spark, path):
       SELECT parse_json('{"y":"zzz","m":40000}') AS v
       UNION ALL
       SELECT parse_json('{"m":3000000000}') AS v
+    """).write.mode('overwrite').parquet(path)
+
+
+def _write_heterogeneous_variant_parquet(spark, path):
+    spark.sql("""
+      SELECT id, parse_json(json) AS v
+      FROM VALUES
+        (0, '{"x":42}'),
+        (1, '{"x":"42"}'),
+        (2, '{"x":7}'),
+        (3, '{"x":true}'),
+        (4, '{"x":false}'),
+        (5, '{"x":"bad"}'),
+        (6, '{"x":null}'),
+        (7, '{"y":"missing"}')
+      AS source(id, json)
     """).write.mode('overwrite').parquet(path)
 
 
@@ -209,6 +229,7 @@ def test_parquet_variant_try_get_integral_boundaries(spark_tmp_path):
 
 
 @incompat
+@allow_non_gpu('Or', 'IsNull', 'GreaterThanOrEqual', 'VariantGet')
 @pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
 def test_parquet_variant_pass_through_filter_project(spark_tmp_path):
     data_path = spark_tmp_path + '/VARIANT_PASS_THROUGH_PARQUET'
@@ -222,6 +243,55 @@ def test_parquet_variant_pass_through_filter_project(spark_tmp_path):
                 "try_variant_get(v, '$.n.inner', 'string') AS inner",
                 "try_variant_get(v, '$.m', 'bigint') AS m")
             .orderBy("inner", "m"),
+        conf=_variant_parquet_conf)
+
+
+@incompat
+@allow_non_gpu('And', 'IsNotNull', 'GreaterThan', 'VariantGet')
+@pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
+def test_parquet_variant_try_get_direct_filter_falls_back(spark_tmp_path):
+    data_path = spark_tmp_path + '/VARIANT_FILTER_PARQUET'
+    with_cpu_session(lambda spark: _write_variant_parquet(spark, data_path))
+
+    assert_gpu_fallback_collect(
+        lambda spark: spark.read.parquet(data_path)
+            .filter("try_variant_get(v, '$.x', 'int') > 10")
+            .selectExpr("try_variant_get(v, '$.x', 'int') AS x")
+            .orderBy("x"),
+        'VariantGet',
+        conf=_variant_parquet_conf)
+
+
+@incompat
+@allow_non_gpu('HashAggregateExec', 'ShuffleExchangeExec', 'VariantGet')
+@pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
+def test_parquet_variant_try_get_aggregate_falls_back(spark_tmp_path):
+    data_path = spark_tmp_path + '/VARIANT_AGGREGATE_PARQUET'
+    with_cpu_session(lambda spark: _write_variant_parquet(spark, data_path))
+
+    assert_gpu_fallback_collect(
+        lambda spark: spark.read.parquet(data_path).selectExpr(
+            "sum(try_variant_get(v, '$.x', 'int')) AS total"),
+        'VariantGet',
+        conf=_variant_parquet_conf)
+
+
+@incompat
+@pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
+def test_parquet_variant_try_get_heterogeneous_values_fall_back(spark_tmp_path):
+    data_path = spark_tmp_path + '/VARIANT_HETEROGENEOUS_PARQUET'
+    with_cpu_session(lambda spark: _write_heterogeneous_variant_parquet(spark, data_path))
+
+    assert_gpu_fallback_collect(
+        lambda spark: spark.read.parquet(data_path).selectExpr(
+            "id",
+            "try_variant_get(v, '$.x', 'tinyint') AS byte_value",
+            "try_variant_get(v, '$.x', 'smallint') AS short_value",
+            "try_variant_get(v, '$.x', 'int') AS int_value",
+            "try_variant_get(v, '$.x', 'bigint') AS long_value",
+            "try_variant_get(v, '$.x', 'string') AS string_value")
+            .orderBy("id"),
+        'VariantGet',
         conf=_variant_parquet_conf)
 
 
