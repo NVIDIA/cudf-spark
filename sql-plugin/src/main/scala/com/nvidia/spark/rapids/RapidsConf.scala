@@ -20,6 +20,7 @@ import java.util
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable.{HashMap, ListBuffer}
+import scala.util.Try
 
 import ai.rapids.cudf.{Cuda, ParquetWriterOptions}
 import com.nvidia.spark.rapids.jni.RmmSpark.OomInjectionType
@@ -349,6 +350,20 @@ object RapidsConf extends Logging {
     .internal()
     .booleanConf
     .createWithDefault(true)
+
+  val PINNED_POOL_PARALLEL_INIT_THREADS =
+    conf("spark.rapids.memory.pinnedPool.parallelInit.threads")
+      .doc("Number of CPU threads used to initialize the pinned pool's backing memory. " +
+        "Set to 'all' to use the number of executor cores. A value of 1 initializes the backing " +
+        "memory using cudaHostAlloc. Values greater than 1 instead pre-touch pages concurrently " +
+        "before pinning for faster initialization. This does not affect subsequent suballocator " +
+        "behavior.")
+      .startupOnly()
+      .stringConf
+      .transform(_.trim.toLowerCase(java.util.Locale.ROOT))
+      .checkValue(value => value == "all" || Try(value.toInt).map(_ > 0).getOrElse(false),
+        "Pinned-pool initialization threads must be a positive integer or 'all'.")
+      .createWithDefault("1")
 
   val OFF_HEAP_LIMIT_ENABLED = conf("spark.rapids.memory.host.offHeapLimit.enabled")
       .doc("Should the off heap limit be enforced or not.")
@@ -3421,6 +3436,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val pinnedPoolSize: Long = get(PINNED_POOL_SIZE)
 
   lazy val pinnedPoolCuioDefault: Boolean = get(PINNED_POOL_SET_CUIO_DEFAULT)
+
+  lazy val pinnedPoolParallelInitThreads: String = get(PINNED_POOL_PARALLEL_INIT_THREADS)
 
   lazy val offHeapLimitEnabled: Boolean = get(OFF_HEAP_LIMIT_ENABLED)
 
