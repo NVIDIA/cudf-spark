@@ -39,6 +39,13 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.plans.physical.KeyGroupedPartitioning
 
 object KeyGroupedPartitioningShim {
+  def copyWithNewPartitionValues(
+      p: KeyGroupedPartitioning,
+      partitionValues: Seq[InternalRow],
+      isPartiallyClustered: Boolean): KeyGroupedPartitioning = {
+    p.copy(numPartitions = partitionValues.length, partitionValues = partitionValues)
+  }
+
   def getUniquePartitions(p: KeyGroupedPartitioning): Seq[InternalRow] = {
     p.uniquePartitionValues
   }

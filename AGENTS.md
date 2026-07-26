@@ -113,7 +113,7 @@ spark-rapids-shim-json-lines ***/
 - When modifying a shim, update ALL related Spark version shims
   (the same logical change may need different adaptations per
   version — do not blindly copy-paste).
-- `db` suffix (e.g., `330db`, `341db`) = Databricks-specific shim.
+- `db` suffix (e.g., `330db`, `350db143`) = Databricks-specific shim.
 - **Scala 2.12 vs 2.13**: `sql-plugin` shims work identically for
   both Scala versions. After modifying any `pom.xml`, run
   `./build/make-scala-version-build-files.sh 2.13` to sync.

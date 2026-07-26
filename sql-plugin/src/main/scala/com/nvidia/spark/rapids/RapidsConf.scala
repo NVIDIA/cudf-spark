@@ -2206,10 +2206,13 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .createWithDefault(true)
 
   val SHUFFLE_MANAGER_ENABLED = conf("spark.rapids.shuffle.enabled")
-    .doc("Enable or disable the RAPIDS Shuffle Manager at runtime. " +
-      "The [RAPIDS Shuffle Manager](https://docs.nvidia.com/spark-rapids/user-guide/latest" +
-      "/additional-functionality/rapids-shuffle.html) must " +
-      "already be configured. When set to `false`, the built-in Spark shuffle will be used. ")
+    .doc("Enable or disable the RAPIDS Shuffle Manager implementation at runtime. On supported " +
+      "Spark versions, including Spark 4.0.0 and later, the " +
+      "[RAPIDS Shuffle Manager](https://docs.nvidia.com/spark-rapids/user-guide/latest" +
+      "/additional-functionality/rapids-shuffle.html) is configured automatically unless " +
+      "spark.shuffle.manager is explicitly set. On earlier Spark versions, the RAPIDS Shuffle " +
+      "Manager must already be configured. When set to `false`, the built-in Spark shuffle " +
+      "implementation will be used. ")
     .booleanConf
     .createWithDefault(true)
 
@@ -2901,7 +2904,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     conf("spark.rapids.sql.delta.lowShuffleMerge.enabled")
     .doc("Option to turn on the low shuffle merge for Delta Lake. Currently there are some " +
       "limitations for this feature: " +
-      "1. We only support Databricks Runtime 13.3 and Deltalake 2.4. " +
+      "1. We only support Delta Lake 2.4. " +
       s"2. The file scan mode must be set to ${RapidsReaderType.PERFILE} " +
       "3. The deletion vector size must be smaller than " +
       s"${DELTA_LOW_SHUFFLE_MERGE_DEL_VECTOR_BROADCAST_THRESHOLD.key} ")

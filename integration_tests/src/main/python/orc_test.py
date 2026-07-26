@@ -927,7 +927,7 @@ def test_read_hive_fixed_length_char(std_input_path, data_file, reader):
     """
     Test that a file containing CHAR data is readable as STRING.
     The plugin behaviour matches all Spark versions prior to 3.4.0,
-    and Databricks version 13.3 (i.e. 3.4.1) and after.
+    and all supported Databricks versions.
     """
     assert_gpu_and_cpu_are_equal_collect(
         reader(std_input_path + '/' + data_file),
@@ -937,9 +937,9 @@ def test_read_hive_fixed_length_char(std_input_path, data_file, reader):
 @allow_non_gpu("ProjectExec")
 @pytest.mark.skipif(is_before_spark_340(),
                     reason="https://github.com/NVIDIA/spark-rapids/issues/8324")
-@pytest.mark.skipif(is_databricks_version_or_later(13, 3),
+@pytest.mark.skipif(is_databricks_runtime(),
                     reason="The SELECT * query does not involve ProjectExec "
-                           "on Databricks versions >= 13.3. "
+                           "on supported Databricks versions. "
                            "Can't test Project fallback without ProjectExec.")
 @pytest.mark.parametrize('data_file', ['fixed-length-char-column-from-hive.orc'])
 @pytest.mark.parametrize('reader', [read_orc_df, read_orc_sql])
@@ -950,7 +950,7 @@ def test_project_fallback_when_reading_hive_fixed_length_char(std_input_path, da
     Note: This test can be removed when
     https://github.com/NVIDIA/spark-rapids/issues/8324 is resolved.
 
-    This test does not apply to Databricks >= 13.3, because there would be
+    This test does not apply to supported Databricks versions, because there would be
     no ProjectExec to fall back to CPU.
     """
     assert_gpu_fallback_collect(
