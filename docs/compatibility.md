@@ -507,6 +507,9 @@ The following regular expression patterns are not yet supported on the GPU and w
 - Possessive quantifiers, such as `a*+`
 - Character classes that use union, intersection, or subtraction semantics, such as `[a-d[m-p]]`, `[a-z&&[def]]`,
   or `[a-z&&[^bc]]`
+- Lookahead/lookbehind groups: `(?=a)`, `(?!a)`, `(?<=a)`, `(?<!a)`
+- Independent groups: `(?>a)`
+- Named capture groups: `(?<n>a)`
 - Empty groups: `()`
 - Empty pattern: `""`
 

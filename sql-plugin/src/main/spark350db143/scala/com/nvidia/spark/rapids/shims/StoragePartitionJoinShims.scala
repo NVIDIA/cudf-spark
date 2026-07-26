@@ -20,7 +20,9 @@
 {"spark": "401"}
 {"spark": "402"}
 {"spark": "403"}
+{"spark": "404"}
 spark-rapids-shim-json-lines ***/
+
 package com.nvidia.spark.rapids.shims
 
 // Spark 3.5.0-db143, 4.0.x: StoragePartitionJoinParams is in datasources.v2 package
