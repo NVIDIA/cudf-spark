@@ -17,10 +17,10 @@ import os.path
 import pytest
 import re
 
-from spark_session import is_databricks122_or_later, supports_delta_lake_deletion_vectors, is_databricks143_or_later, \
+from spark_session import is_databricks122_or_later, supports_delta_lake_deletion_vectors, \
     is_databricks173_or_later, with_cpu_session, with_gpu_session
 from asserts import assert_equal
-from conftest import spark_jvm
+from conftest import is_databricks_runtime, spark_jvm
 
 delta_meta_allow = [
     "DeserializeToObjectExec",
@@ -61,17 +61,17 @@ if is_databricks173_or_later():
 delta_write = ["RapidsDeltaWrite"]
 
 # Parameterize Deletion Vectors only on runtimes that expose the feature in these tests.
-def deletion_vector_values_with_350DB143_xfail_reasons(enabled_xfail_reason=None, disabled_xfail_reason=None):
-    # Always include the DV-disabled case. On DB 14.3+ the disabled case can be marked xfail
+def deletion_vector_values_with_xfail_reasons(enabled_xfail_reason=None, disabled_xfail_reason=None):
+    # Always include the DV-disabled case. On supported Databricks runtimes it can be marked xfail
     # when the caller needs to document a runtime-specific expectation.
-    if not is_databricks143_or_later() or disabled_xfail_reason is None:
-        enable_deletion_vector = [False]
-    elif disabled_xfail_reason is not None:
+    if is_databricks_runtime() and disabled_xfail_reason is not None:
         enable_deletion_vector = [pytest.param(False, marks=pytest.mark.xfail(reason=disabled_xfail_reason))]
+    else:
+        enable_deletion_vector = [False]
 
-    # Add the DV-enabled case for DB 14.3+. This parameterizes the feature; it does not imply
-    # every later runtime has GPU DV scan coverage.
-    if is_databricks143_or_later():
+    # Add the DV-enabled case on supported Databricks runtimes. This parameterizes the feature;
+    # it does not imply every runtime has GPU DV scan coverage.
+    if is_databricks_runtime():
         if enabled_xfail_reason is None:
             enable_deletion_vector.append(True)
         else:
@@ -79,7 +79,7 @@ def deletion_vector_values_with_350DB143_xfail_reasons(enabled_xfail_reason=None
 
     return enable_deletion_vector
 
-deletion_vector_values = deletion_vector_values_with_350DB143_xfail_reasons()
+deletion_vector_values = deletion_vector_values_with_xfail_reasons()
 
 delta_writes_enabled_conf = {"spark.rapids.sql.format.delta.write.enabled": "true"}
 

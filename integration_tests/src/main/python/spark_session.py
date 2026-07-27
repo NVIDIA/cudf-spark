@@ -243,6 +243,9 @@ def is_spark_351_or_later():
 def is_spark_356_or_later():
     return spark_version() >= "3.5.6"
 
+def is_spark_359():
+    return spark_version() == "3.5.9"
+
 def is_spark_35x():
     return "3.5.0" <= spark_version() < "3.6.0"
 
@@ -266,6 +269,12 @@ def is_spark_401_or_later():
 
 def is_spark_403():
     return spark_version() == "4.0.3"
+
+def is_spark_404():
+    return spark_version() == "4.0.4"
+
+def is_spark_403_or_404():
+    return is_spark_403() or is_spark_404()
 
 def is_spark_411_or_later():
     return spark_version() >= "4.1.1"
@@ -319,17 +328,8 @@ def is_databricks113_or_later():
 def is_databricks122_or_later():
     return is_databricks_version_or_later(12, 2)
 
-def is_databricks133_or_later():
-    return is_databricks_version_or_later(13, 3)
-
-def is_databricks133():
-    return is_databricks_version(13, 3)
-
 def is_databricks143():
     return is_databricks_version(14, 3)
-
-def is_databricks143_or_later():
-    return is_databricks_version_or_later(14, 3)
 
 def is_databricks173_or_later():
     return is_databricks_version_or_later(17, 3)

@@ -17,6 +17,7 @@
 /*** spark-rapids-shim-json-lines
 {"spark": "403"}
 spark-rapids-shim-json-lines ***/
+
 package com.nvidia.spark.rapids.shims.spark403
 
 import com.nvidia.spark.rapids._

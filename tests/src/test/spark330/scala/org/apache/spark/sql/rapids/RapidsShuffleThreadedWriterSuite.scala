@@ -35,17 +35,23 @@
 {"spark": "356"}
 {"spark": "357"}
 {"spark": "358"}
+{"spark": "359"}
 {"spark": "400"}
 {"spark": "401"}
 {"spark": "402"}
 {"spark": "403"}
+{"spark": "404"}
 {"spark": "411"}
 spark-rapids-shim-json-lines ***/
+
 package org.apache.spark.sql.rapids
 
 import java.io._
 import java.nio.ByteBuffer
+import java.util.Optional
 import java.util.UUID
+import java.util.concurrent.{CancellationException, CountDownLatch, Future, FutureTask, TimeUnit}
+import java.util.concurrent.atomic.AtomicInteger
 
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
@@ -67,8 +73,10 @@ import org.apache.spark.executor.{ShuffleWriteMetrics, TaskMetrics}
 import org.apache.spark.internal.Logging
 import org.apache.spark.serializer._
 import org.apache.spark.shuffle.IndexShuffleBlockResolver
-import org.apache.spark.shuffle.api.ShuffleExecutorComponents
-import org.apache.spark.shuffle.sort.io.RapidsLocalDiskShuffleExecutorComponents
+import org.apache.spark.shuffle.api.{ShuffleExecutorComponents, ShuffleMapOutputWriter,
+  ShufflePartitionWriter, WritableByteChannelWrapper}
+import org.apache.spark.shuffle.sort.io.{RapidsLocalDiskShuffleExecutorComponents,
+  RapidsLocalDiskShuffleMapOutputWriter}
 import org.apache.spark.sql.rapids.shims.RapidsShuffleThreadedWriter
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.storage._
@@ -81,6 +89,45 @@ import org.apache.spark.util.Utils
 class TestColumnarBatchSerializer extends Serializer with Serializable {
   override def newInstance(): SerializerInstance = new TestColumnarBatchSerializerInstance()
   override def supportsRelocationOfSerializedObjects: Boolean = true
+}
+
+class FailingTestColumnarBatchSerializer extends TestColumnarBatchSerializer {
+  override def newInstance(): SerializerInstance = new TestColumnarBatchSerializerInstance() {
+    override def serializeStream(s: OutputStream): SerializationStream =
+      new TestColumnarBatchSerializationStream(s) {
+        override def writeValue[T: ClassTag](value: T): SerializationStream =
+          throw new IOException("injected serialization failure")
+      }
+  }
+}
+
+class OutOfOrderTestColumnarBatchSerializer(
+    firstStarted: CountDownLatch,
+    secondSerialized: CountDownLatch,
+    releaseFirst: CountDownLatch) extends TestColumnarBatchSerializer {
+  override def newInstance(): SerializerInstance = new TestColumnarBatchSerializerInstance() {
+    override def serializeStream(s: OutputStream): SerializationStream =
+      new TestColumnarBatchSerializationStream(s) {
+        private var key = -1
+
+        override def writeKey[T: ClassTag](value: T): SerializationStream = {
+          key = value.asInstanceOf[Int]
+          if (key == 0) {
+            firstStarted.countDown()
+            releaseFirst.await()
+          }
+          super.writeKey(value)
+        }
+
+        override def writeValue[T: ClassTag](value: T): SerializationStream = {
+          val result = super.writeValue(value)
+          if (key == 7) {
+            secondSerialized.countDown()
+          }
+          result
+        }
+      }
+  }
 }
 
 class TestColumnarBatchSerializerInstance extends SerializerInstance {
@@ -214,6 +261,129 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
       1024 * 1024, shuffleExecutorComponents, numWriterThreads)
   }
 
+  private def useUncompressedShuffleOutput(): Unit = {
+    conf.set("spark.shuffle.compress", "false")
+    when(blockManager.serializerManager)
+      .thenReturn(new SerializerManager(new TestColumnarBatchSerializer(), conf))
+  }
+
+  private def readPartitionKeys(
+      writer: RapidsShuffleThreadedWriter[Int, ColumnarBatch],
+      partitionId: Int): Seq[Int] = {
+    val lengths = writer.getPartitionLengths
+    val partitionStart = lengths.take(partitionId).sum
+    val partitionEnd = partitionStart + lengths(partitionId)
+    val keys = new ArrayBuffer[Int]()
+    val input = new RandomAccessFile(outputFile, "r")
+    try {
+      input.seek(partitionStart)
+      while (input.getFilePointer < partitionEnd) {
+        keys += input.readInt()
+        val numColumns = input.readInt()
+        (0 until numColumns).foreach { _ =>
+          val size = input.readInt()
+          input.seek(input.getFilePointer + size)
+        }
+      }
+    } finally {
+      input.close()
+    }
+    keys.toSeq
+  }
+
+  private def countThreads(prefix: String): Int = {
+    Thread.getAllStackTraces.keySet().toArray.count {
+      case thread: Thread => thread.isAlive && thread.getName.startsWith(prefix)
+      case _ => false
+    }
+  }
+
+  private def waitForThreadCount(prefix: String, expectedMaximum: Int): Unit = {
+    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+    while (countThreads(prefix) > expectedMaximum && System.nanoTime() < deadline) {
+      Thread.sleep(10)
+    }
+    assert(countThreads(prefix) <= expectedMaximum,
+      s"Threads with prefix $prefix did not fall to $expectedMaximum or fewer")
+  }
+
+  private def submitWriterTask(body: => Unit): FutureTask[Void] = {
+    val task = new FutureTask[Void](() => {
+      body
+      null
+    })
+    RapidsShuffleInternalManagerBase.queueWriteTask(task)
+    task
+  }
+
+  private def submitMergerTask(body: => Unit): FutureTask[Void] = {
+    val task = new FutureTask[Void](() => {
+      body
+      null
+    })
+    RapidsShuffleInternalManagerBase.executeMergerTask(task)
+    task
+  }
+
+  private def assertCancelled(future: Future[_]): Unit = {
+    assert(future.isDone)
+    assert(future.isCancelled)
+    assertThrows[CancellationException](future.get())
+  }
+
+  private def useOutOfOrderBatchCompletion(
+      firstBatchBlocked: CountDownLatch,
+      releaseFirstBatch: CountDownLatch,
+      secondBatchCompleted: CountDownLatch): Unit = {
+    val nextWriterNumber = new AtomicInteger(0)
+    shuffleExecutorComponents = new RapidsLocalDiskShuffleExecutorComponents(
+      conf, blockManager, blockResolver) {
+      override def createMapOutputWriter(
+          shuffleId: Int,
+          mapTaskId: Long,
+          numPartitions: Int): ShuffleMapOutputWriter = {
+        val writerNumber = nextWriterNumber.getAndIncrement()
+        new RapidsLocalDiskShuffleMapOutputWriter(
+          shuffleId, mapTaskId, numPartitions, blockResolver, conf) {
+          override def getPartitionWriter(reducePartitionId: Int): ShufflePartitionWriter = {
+            val delegate = super.getPartitionWriter(reducePartitionId)
+            new ShufflePartitionWriter {
+              override def openStream(): OutputStream = {
+                new FilterOutputStream(delegate.openStream()) {
+                  override def write(bytes: Array[Byte], offset: Int, length: Int): Unit = {
+                    if (writerNumber == 0 && reducePartitionId == 0) {
+                      firstBatchBlocked.countDown()
+                      assert(releaseFirstBatch.await(5, TimeUnit.SECONDS),
+                        "second batch merger did not complete")
+                    }
+                    super.write(bytes, offset, length)
+                  }
+
+                  override def close(): Unit = {
+                    super.close()
+                    if (writerNumber == 1 && reducePartitionId == numPartitions - 1) {
+                      // Batch 1 occupies the other merger thread. This marker cannot run until
+                      // the current batch 2 merger step returns and completes its future.
+                      RapidsShuffleInternalManagerBase.executeMergerTask(() => {
+                        secondBatchCompleted.countDown()
+                        releaseFirstBatch.countDown()
+                      })
+                    }
+                  }
+                }
+              }
+
+              override def openChannelWrapper(): Optional[WritableByteChannelWrapper] =
+                delegate.openChannelWrapper()
+
+              override def getNumBytesWritten(): Long = delegate.getNumBytesWritten
+            }
+          }
+        }
+      }
+    }
+  }
+
   /**
    * Verify write results including partition data presence.
    * @param partitionsWithData Set of partition IDs that should have data
@@ -274,6 +444,7 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
     RapidsShuffleInternalManagerBase.startThreadPoolIfNeeded(numWriterThreads, 0)
     TaskContext.setTaskContext(taskContext)
     MockitoAnnotations.openMocks(this).close()
+    conf.set("spark.shuffle.compress", "true")
     tempDir = Utils.createTempDir()
     outputFile = File.createTempFile("shuffle", null, tempDir)
     taskMetrics = spy(new TaskMetrics)
@@ -485,42 +656,371 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
     verifyWrite(writer, expectedRecords = 7, partitionsWithData = Set(0, 1, 2, 3, 4, 5, 6))
   }
 
-  // ==================== Cancellation Tests ====================
+  // ==================== Merger Pool Tests ====================
 
-  test("merger thread responds to cancellation during write") {
-    // Test that merger thread properly exits when task is cancelled.
-    // This validates the fix for zombie merger thread issue where
-    // merger could get stuck in wait() when task is killed.
+  test("writer pool preserves partition order when compression completes out of order") {
+    useUncompressedShuffleOutput()
+    val firstStarted = new CountDownLatch(1)
+    val secondSerialized = new CountDownLatch(1)
+    val releaseFirst = new CountDownLatch(1)
+    when(dependency.serializer).thenReturn(
+      new OutOfOrderTestColumnarBatchSerializer(firstStarted, secondSerialized, releaseFirst))
     val writer = createWriter()
-
-    // Start writing in a separate thread to simulate async operation
+    @volatile var writeFailure: Throwable = null
     val writeThread = new Thread(() => {
       try {
-        // Write some data that will keep merger busy
-        writer.write(createTestRecords(Iterator(0, 1, 2, 3, 4, 5, 6)))
+        writer.write(createTestRecords(Iterator(0, 7)))
       } catch {
-        case _: Exception => // Expected if cancelled
+        case t: Throwable => writeFailure = t
       }
     })
-    writeThread.start()
 
-    // Give writer time to start processing
-    Thread.sleep(100)
+    try {
+      writeThread.start()
+      assert(firstStarted.await(5, TimeUnit.SECONDS), "first compression task did not start")
+      assert(secondSerialized.await(5, TimeUnit.SECONDS),
+        "second compression task did not complete ahead of the first")
+      releaseFirst.countDown()
+      writeThread.join(5000)
+      assert(!writeThread.isAlive, "writer did not finish")
+      if (writeFailure != null) {
+        throw writeFailure
+      }
+      writer.stop(true)
+      assert(readPartitionKeys(writer, 0) === Seq(0, 7))
+    } finally {
+      releaseFirst.countDown()
+      writer.stop(false)
+      if (writeThread.isAlive) {
+        writeThread.join(5000)
+      }
+    }
+  }
 
-    // Simulate task cancellation by calling stop(false)
-    // This should trigger cleanup and cancel merger futures
-    val stopStartTime = System.currentTimeMillis()
-    writer.stop(false)
-    val stopDuration = System.currentTimeMillis() - stopStartTime
+  test("writer preserves record order when batch mergers complete out of order") {
+    useUncompressedShuffleOutput()
+    val firstBatchBlocked = new CountDownLatch(1)
+    val releaseFirstBatch = new CountDownLatch(1)
+    val secondBatchCompleted = new CountDownLatch(1)
+    useOutOfOrderBatchCompletion(
+      firstBatchBlocked, releaseFirstBatch, secondBatchCompleted)
 
-    // Wait for write thread to finish
-    writeThread.join(5000)
+    val keys = Iterator(0, 6, 7, 14).zipWithIndex.map { case (key, index) =>
+      if (index == 1) {
+        assert(firstBatchBlocked.await(5, TimeUnit.SECONDS), "first batch merger did not block")
+      }
+      key
+    }
+    val writer = createWriter()
+    try {
+      writer.write(createTestRecords(keys))
+      assert(secondBatchCompleted.await(5, TimeUnit.SECONDS),
+        "second batch merger did not finish before the first")
+      writer.stop(true)
+      assert(readPartitionKeys(writer, 0) === Seq(0, 7, 14))
+    } finally {
+      releaseFirstBatch.countDown()
+      writer.stop(false)
+    }
+  }
 
-    // Verify stop() completed in reasonable time (not stuck waiting for merger)
-    // If merger thread was stuck in wait(), stop() would hang
-    assert(stopDuration < 3000,
-      s"stop() took ${stopDuration}ms, suggesting merger thread may be stuck")
-    assert(!writeThread.isAlive, "Write thread should have finished")
+  test("shuffle pools remain bounded across shutdown and reinitialization") {
+    val writerThreads = 2
+    val readerThreads = 3
+    RapidsShuffleInternalManagerBase.stopThreadPool()
+    waitForThreadCount("rapids-shuffle-writer-", 0)
+    waitForThreadCount("rapids-shuffle-reader-", 0)
+    waitForThreadCount("rapids-shuffle-merger-", 0)
+
+    try {
+      RapidsShuffleInternalManagerBase.startThreadPoolIfNeeded(writerThreads, readerThreads)
+      val writerStarted = new CountDownLatch(writerThreads)
+      val readerStarted = new CountDownLatch(readerThreads)
+      val mergerStarted = new CountDownLatch(writerThreads)
+      val releaseTasks = new CountDownLatch(1)
+      val writerTasks = (0 until writerThreads * 2).map { _ =>
+        submitWriterTask {
+          writerStarted.countDown()
+          releaseTasks.await()
+        }
+      }
+      val readerTasks = (0 until readerThreads * 2).map { _ =>
+        RapidsShuffleInternalManagerBase.queueReadTask(() => {
+          readerStarted.countDown()
+          releaseTasks.await()
+          null
+        })
+      }
+      val mergerTasks = (0 until writerThreads * 2).map { _ =>
+        submitMergerTask {
+          mergerStarted.countDown()
+          releaseTasks.await()
+        }
+      }
+
+      assert(writerStarted.await(5, TimeUnit.SECONDS), "writer pool did not reach its limit")
+      assert(readerStarted.await(5, TimeUnit.SECONDS), "reader pool did not reach its limit")
+      assert(mergerStarted.await(5, TimeUnit.SECONDS), "merger pool did not reach its limit")
+      assert(countThreads("rapids-shuffle-writer-") <= writerThreads)
+      assert(countThreads("rapids-shuffle-reader-") <= readerThreads)
+      assert(countThreads("rapids-shuffle-merger-") <= writerThreads)
+
+      releaseTasks.countDown()
+      (writerTasks ++ readerTasks ++ mergerTasks).foreach(_.get(5, TimeUnit.SECONDS))
+      RapidsShuffleInternalManagerBase.stopThreadPool()
+      waitForThreadCount("rapids-shuffle-writer-", 0)
+      waitForThreadCount("rapids-shuffle-reader-", 0)
+      waitForThreadCount("rapids-shuffle-merger-", 0)
+
+      RapidsShuffleInternalManagerBase.startThreadPoolIfNeeded(1, 1)
+      submitWriterTask(()).get(5, TimeUnit.SECONDS)
+      RapidsShuffleInternalManagerBase.queueReadTask(() => null).get(5, TimeUnit.SECONDS)
+      submitMergerTask(()).get(5, TimeUnit.SECONDS)
+      assert(countThreads("rapids-shuffle-writer-") <= 1)
+      assert(countThreads("rapids-shuffle-reader-") <= 1)
+      assert(countThreads("rapids-shuffle-merger-") <= 1)
+    } finally {
+      RapidsShuffleInternalManagerBase.stopThreadPool()
+      RapidsShuffleInternalManagerBase.startThreadPoolIfNeeded(numWriterThreads, 0)
+    }
+  }
+
+  test("mergers yield while producers are blocked") {
+    val producersBlocked = new CountDownLatch(numWriterThreads)
+    val releaseProducers = new CountDownLatch(1)
+    val blockedWriters = (0 until numWriterThreads).map(_ => createWriter())
+    val blockedRecords = (0 until numWriterThreads).map(createTestBatch)
+    val blockedThreads = blockedWriters.zip(blockedRecords).map { case (writer, batch) =>
+      val input = new Iterator[(Int, ColumnarBatch)] {
+        private var hasNextCalls = 0
+        private var recordReturned = false
+
+        override def hasNext: Boolean = {
+          hasNextCalls += 1
+          if (hasNextCalls <= 2) {
+            true
+          } else {
+            producersBlocked.countDown()
+            releaseProducers.await()
+            false
+          }
+        }
+
+        override def next(): (Int, ColumnarBatch) = {
+          require(!recordReturned)
+          recordReturned = true
+          (0, batch)
+        }
+      }
+      new Thread(() => {
+        try {
+          writer.write(input)
+        } catch {
+          case NonFatal(_) => // Expected when the blocked writer is cancelled during cleanup.
+        }
+      })
+    }
+
+    val unrelatedWriter = createWriter()
+    var unrelatedStopped = false
+    @volatile var unrelatedFailure: Throwable = null
+    val unrelatedThread = new Thread(() => {
+      try {
+        unrelatedWriter.write(createTestRecords(Iterator(1)))
+      } catch {
+        case t: Throwable => unrelatedFailure = t
+      }
+    })
+    try {
+      blockedThreads.foreach(_.start())
+      assert(producersBlocked.await(5, TimeUnit.SECONDS), "producers did not block")
+
+      // Wait until both mergers have written their first record. In the old implementation they
+      // then occupy all merger slots waiting for their blocked producers. Cooperative mergers
+      // yield at this point and leave the bounded pool available for unrelated work.
+      val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+      while (blockedWriters.exists(_.getBytesInFlight != 0) && System.nanoTime() < deadline) {
+        Thread.sleep(10)
+      }
+      assert(blockedWriters.forall(_.getBytesInFlight == 0),
+        "blocking mergers did not drain their first records")
+
+      unrelatedThread.start()
+      unrelatedThread.join(5000)
+      assert(!unrelatedThread.isAlive, "unrelated merger was blocked by waiting producers")
+      if (unrelatedFailure != null) {
+        throw unrelatedFailure
+      }
+      unrelatedWriter.stop(true)
+      unrelatedStopped = true
+
+      val mergerThreadCount = Thread.getAllStackTraces.keySet().toArray.count {
+        case thread: Thread => thread.getName.startsWith("rapids-shuffle-merger-")
+        case _ => false
+      }
+      assert(mergerThreadCount <= numWriterThreads,
+        s"Expected at most $numWriterThreads merger threads, found $mergerThreadCount")
+    } finally {
+      if (!unrelatedStopped) {
+        unrelatedWriter.stop(false)
+      }
+      blockedWriters.foreach(_.stop(false))
+      releaseProducers.countDown()
+      blockedThreads.foreach(_.join(5000))
+      if (unrelatedThread.isAlive) {
+        unrelatedThread.join(5000)
+      }
+    }
+  }
+
+  test("merger resumes after compression future completes") {
+    val blockersStarted = new CountDownLatch(numWriterThreads)
+    val releaseBlockers = new CountDownLatch(1)
+    val writerBlockers = (0 until numWriterThreads).map { _ =>
+      submitWriterTask {
+        blockersStarted.countDown()
+        releaseBlockers.await()
+      }
+    }
+    assert(blockersStarted.await(5, TimeUnit.SECONDS), "writer blockers did not start")
+
+    val writer = createWriter()
+    var writerStopped = false
+    @volatile var writeFailure: Throwable = null
+    val writeThread = new Thread(() => {
+      try {
+        writer.write(createTestRecords(Iterator(0)))
+      } catch {
+        case t: Throwable => writeFailure = t
+      }
+    })
+
+    try {
+      writeThread.start()
+      val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+      while (writer.getBytesInFlight == 0 && System.nanoTime() < deadline) {
+        Thread.sleep(10)
+      }
+      assert(writer.getBytesInFlight > 0, "compression future was not queued")
+
+      // The merger has yielded because the compression future is incomplete. FutureTask.done
+      // must schedule another merger step after the writer slot is released.
+      releaseBlockers.countDown()
+      writeThread.join(5000)
+      assert(!writeThread.isAlive, "merger did not resume after compression completed")
+      if (writeFailure != null) {
+        throw writeFailure
+      }
+      writer.stop(true)
+      writerStopped = true
+    } finally {
+      releaseBlockers.countDown()
+      writerBlockers.foreach(_.get(5, TimeUnit.SECONDS))
+      if (!writerStopped) {
+        writer.stop(false)
+      }
+      if (writeThread.isAlive) {
+        writeThread.join(5000)
+      }
+    }
+  }
+
+  test("merger propagates an exceptional compression future without hanging") {
+    val blockersStarted = new CountDownLatch(numWriterThreads)
+    val releaseBlockers = new CountDownLatch(1)
+    val writerBlockers = (0 until numWriterThreads).map { _ =>
+      submitWriterTask {
+        blockersStarted.countDown()
+        releaseBlockers.await()
+      }
+    }
+    assert(blockersStarted.await(5, TimeUnit.SECONDS), "writer blockers did not start")
+
+    when(dependency.serializer).thenReturn(new FailingTestColumnarBatchSerializer())
+    val writer = createWriter()
+    @volatile var writeFailure: Throwable = null
+    val writeThread = new Thread(() => {
+      try {
+        writer.write(createTestRecords(Iterator(0)))
+      } catch {
+        case t: Throwable => writeFailure = t
+      }
+    })
+
+    try {
+      writeThread.start()
+      val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+      while (writer.getBytesInFlight == 0 && System.nanoTime() < deadline) {
+        Thread.sleep(10)
+      }
+      assert(writer.getBytesInFlight > 0, "compression future was not queued")
+
+      releaseBlockers.countDown()
+      writeThread.join(5000)
+      assert(!writeThread.isAlive, "exceptional compression future left the merger waiting")
+      assert(writeFailure.isInstanceOf[IOException],
+        s"Expected IOException, got ${Option(writeFailure).map(_.getClass.getName)}")
+    } finally {
+      releaseBlockers.countDown()
+      writerBlockers.foreach(_.get(5, TimeUnit.SECONDS))
+      writer.stop(false)
+      if (writeThread.isAlive) {
+        writeThread.join(5000)
+      }
+    }
+  }
+
+  // ==================== Cancellation Tests ====================
+
+  test("shuffle pool shutdown cancels queued tasks") {
+    val numReaderThreads = 2
+    RapidsShuffleInternalManagerBase.stopThreadPool()
+    RapidsShuffleInternalManagerBase.startThreadPoolIfNeeded(
+      numWriterThreads, numReaderThreads)
+
+    val writerBlockersStarted = new CountDownLatch(numWriterThreads)
+    val readerBlockersStarted = new CountDownLatch(numReaderThreads)
+    val mergerBlockersStarted = new CountDownLatch(numWriterThreads)
+    val releaseBlockers = new CountDownLatch(1)
+
+    try {
+      (0 until numWriterThreads).foreach { _ =>
+        submitWriterTask {
+          writerBlockersStarted.countDown()
+          releaseBlockers.await()
+        }
+      }
+      (0 until numReaderThreads).foreach { _ =>
+        RapidsShuffleInternalManagerBase.queueReadTask(() => {
+          readerBlockersStarted.countDown()
+          releaseBlockers.await()
+          null
+        })
+      }
+      (0 until numWriterThreads).foreach { _ =>
+        submitMergerTask {
+          mergerBlockersStarted.countDown()
+          releaseBlockers.await()
+        }
+      }
+
+      assert(writerBlockersStarted.await(5, TimeUnit.SECONDS))
+      assert(readerBlockersStarted.await(5, TimeUnit.SECONDS))
+      assert(mergerBlockersStarted.await(5, TimeUnit.SECONDS))
+
+      val queuedWriter = submitWriterTask(())
+      val queuedReader = RapidsShuffleInternalManagerBase.queueReadTask(() => null)
+      val queuedMerger = submitMergerTask(())
+
+      RapidsShuffleInternalManagerBase.stopThreadPool()
+
+      assertCancelled(queuedWriter)
+      assertCancelled(queuedReader)
+      assertCancelled(queuedMerger)
+    } finally {
+      releaseBlockers.countDown()
+      RapidsShuffleInternalManagerBase.stopThreadPool()
+    }
   }
 
   test("merger thread handles interrupt flag correctly") {

@@ -253,7 +253,6 @@ def test_aqe_join_reused_exchange_inequality_condition(spark_tmp_path, join):
 # https://github.com/NVIDIA/spark-rapids/issues/10165 where it has an executor broadcast
 # but the exchange going into the BroadcastHashJoin is an exchange with multiple partitions
 # and goes into AQEShuffleRead that uses CoalescePartitions to go down to a single partition
-db_133_cpu_bnlj_join_allow=["ShuffleExchangeExec"] if is_databricks113_or_later() else []
 @ignore_order(local=True)
 @pytest.mark.skipif(not (is_databricks_runtime()), \
     reason="Executor side broadcast only supported on Databricks")

@@ -1211,7 +1211,7 @@ object GpuRegExpUtils {
           case QuantifierVariableLength(0, _) => true
           case _ => false
         }
-        case RegexGroup(_, term, _) =>
+        case RegexGroup(_, term) =>
           isASTEmptyRepetition(term)
         case RegexSequence(parts) =>
           parts.forall(isASTEmptyRepetition)
@@ -1234,8 +1234,8 @@ object GpuRegExpUtils {
   def countGroups(pattern: String): Int = {
     def countGroups(regexp: RegexAST): Int = {
       regexp match {
-        case RegexGroup(capture, term, _) =>
-          (if (capture) 1 else 0) + countGroups(term)
+        case RegexGroup(groupType, term) =>
+          (if (groupType == RegexGroup.Capturing) 1 else 0) + countGroups(term)
         case other => other.children().map(countGroups).sum
       }
    }
@@ -1244,7 +1244,7 @@ object GpuRegExpUtils {
 
   def getChoicesFromRegex(regex: RegexAST): Option[Seq[String]] = {
     regex match {
-      case RegexGroup(_, t, None) =>
+      case RegexGroup(RegexGroup.Capturing | RegexGroup.NonCapturing, t) =>
         getChoicesFromRegex(t)
       case RegexChoice(a, b) =>
         getChoicesFromRegex(a) match {
