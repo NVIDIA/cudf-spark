@@ -88,7 +88,9 @@ class OrcPerfIOReadSuite extends AnyFunSuite with Matchers with MockitoSugar {
       throw new AssertionError("ORC object bytes must not use an input stream")
   }
 
-  private class ByteArrayChannel(bytes: Array[Byte]) extends SeekableByteChannel {
+  private class ByteArrayChannel(
+      bytes: Array[Byte],
+      onClose: () => Unit = () => ()) extends SeekableByteChannel {
     private var pos = 0
     private var open = true
 
@@ -121,18 +123,27 @@ class OrcPerfIOReadSuite extends AnyFunSuite with Matchers with MockitoSugar {
     override def isOpen: Boolean = open
 
     override def close(): Unit = {
-      open = false
+      if (open) {
+        open = false
+        onClose()
+      }
     }
   }
 
   private class RecordingFileCache extends FileCacheStub {
     val data = scala.collection.mutable.Map.empty[(Long, Long), Array[Byte]]
+    var openChannels = 0
+    var maxOpenChannels = 0
 
     override def getDataRangeChannel(
         inputFile: RapidsInputFile,
         offset: Long,
         length: Long): Option[SeekableByteChannel] = {
-      data.get((offset, length)).map(new ByteArrayChannel(_))
+      data.get((offset, length)).map { bytes =>
+        openChannels += 1
+        maxOpenChannels = maxOpenChannels.max(openChannels)
+        new ByteArrayChannel(bytes, () => openChannels -= 1)
+      }
     }
 
     override def startDataRangeCache(
@@ -171,8 +182,9 @@ class OrcPerfIOReadSuite extends AnyFunSuite with Matchers with MockitoSugar {
     override protected def parseStripeFooter(
         buf: ByteBuffer,
         size: Int): OrcProto.StripeFooter = {
-      OrcProto.StripeFooter.parseFrom(
-        new ByteArrayInputStream(buf.array(), buf.arrayOffset(), size))
+      val bytes = new Array[Byte](size)
+      buf.duplicate().get(bytes)
+      OrcProto.StripeFooter.parseFrom(new ByteArrayInputStream(bytes))
     }
   }
 
@@ -212,6 +224,7 @@ class OrcPerfIOReadSuite extends AnyFunSuite with Matchers with MockitoSugar {
       } finally {
         reader.inputFileForTest.expectedVectoredOutput = None
       }
+      stream.getPos shouldEqual length.toLong
       val bytes = new Array[Byte](length)
       output.getBytes(bytes, 0, 0, length)
       bytes
@@ -406,6 +419,37 @@ class OrcPerfIOReadSuite extends AnyFunSuite with Matchers with MockitoSugar {
       RecordedRange(2, 2, 0),
       RecordedRange(10, 3, 4)))
     result shouldEqual Array[Byte](2, 3, 50, 51, 10, 11, 12)
+  }
+
+  test("cache-hit channels close before the next ORC range is planned") {
+    val fileBytes = Array.tabulate[Byte](32)(_.toByte)
+    val inputFile = new RecordingInputFile(fileBytes)
+    val cache = new RecordingFileCache
+    cache.data((2L, 2L)) = Array[Byte](20, 21)
+    cache.data((10L, 3L)) = Array[Byte](100, 101, 102)
+    val reader = newReader(inputFile, cache)
+    val chunks = new BufferChunkList
+    val firstCachedChunk = new BufferChunk(2, 2)
+    val remoteChunk = new BufferChunk(5, 2)
+    val secondCachedChunk = new BufferChunk(10, 3)
+    chunks.add(firstCachedChunk)
+    chunks.add(remoteChunk)
+    chunks.add(secondCachedChunk)
+
+    reader.readFileData(chunks, false)
+
+    cache.maxOpenChannels shouldEqual 1
+    cache.openChannels shouldEqual 0
+    inputFile.vectoredReads.flatten shouldEqual Seq(RecordedRange(5, 2, 0))
+    val firstCachedBytes = new Array[Byte](2)
+    val remoteBytes = new Array[Byte](2)
+    val secondCachedBytes = new Array[Byte](3)
+    firstCachedChunk.getData.get(firstCachedBytes)
+    remoteChunk.getData.get(remoteBytes)
+    secondCachedChunk.getData.get(secondCachedBytes)
+    firstCachedBytes shouldEqual Array[Byte](20, 21)
+    remoteBytes shouldEqual Array[Byte](5, 6)
+    secondCachedBytes shouldEqual Array[Byte](100, 101, 102)
   }
 
   test("ORC-owned heap and direct buffers remain valid after temporary HMBs close") {

@@ -15,7 +15,7 @@
  */
 package com.nvidia.spark.rapids.shims
 
-import java.io.{Closeable, EOFException, IOException}
+import java.io.{EOFException, IOException}
 import java.nio.ByteBuffer
 import java.nio.channels.SeekableByteChannel
 
@@ -25,7 +25,6 @@ import scala.collection.mutable.ArrayBuffer
 import ai.rapids.cudf.HostMemoryBuffer
 import com.nvidia.spark.rapids.{GpuMetric, HostMemoryOutputStream, NoopMetric}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
-import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.filecache.FileCache
 import com.nvidia.spark.rapids.fileio.hadoop.HadoopFileIO
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile
@@ -56,16 +55,71 @@ abstract class GpuOrcDataReaderBase(
   private var lastStripeFooter: OrcProto.StripeFooter = null
   private var lastStripeFooterInfo: StripeInformation = null
 
-  private case class LocalCopy(
-      channel: SeekableByteChannel,
-      length: Long,
-      outputOffset: Long) extends Closeable {
-    override def close(): Unit = channel.close()
+  /**
+   * A requested ORC disk range after consulting the file cache.
+   *
+   * @param block the ORC range node represented by this read
+   * @param inputOffset the absolute offset in the input file
+   * @param length the number of bytes to read
+   * @param outputOffset the destination offset in the output buffer
+   * @param sequenceIndex the position of this range in the original request
+   */
+  private case class PlannedRead(
+      block: DiskRangeList,
+      inputOffset: Long,
+      length: Int,
+      outputOffset: Long,
+      sequenceIndex: Int)
+
+  /**
+   * Adjacent remote ranges combined into one vectored read.
+   *
+   * first and last identify the ORC range nodes covered by the read, while range describes
+   * where the combined bytes are read from and written to.
+   */
+  private case class CoalescedRemoteRead(
+      first: DiskRangeList,
+      last: DiskRangeList,
+      range: CopyRange)
+
+  private def planReads(
+      rangeGroups: Seq[(Long, DiskRangeList)])(
+      readCached: (DiskRangeList, Int, Long, SeekableByteChannel) => Unit):
+      ArrayBuffer[PlannedRead] = {
+    val plannedReads = new ArrayBuffer[PlannedRead]
+    var sequenceIndex = 0
+    rangeGroups.foreach { case (startPos, ranges) =>
+      var outputOffset = startPos
+      var current = ranges
+      while (current != null) {
+        val length = current.getLength
+        if (length > 0) {
+          val block = current
+          val inputOffset = block.getOffset
+          fileCache.getDataRangeChannel(inputFile, inputOffset, length) match {
+            case Some(channel) =>
+              hitMetric += 1
+              hitSizeMetric += length
+              withResource(channel) { cachedChannel =>
+                readCached(block, length, outputOffset, cachedChannel)
+              }
+            case None =>
+              missMetric += 1
+              missSizeMetric += length
+              plannedReads += PlannedRead(
+                block, inputOffset, length, outputOffset, sequenceIndex)
+          }
+        }
+        outputOffset += length
+        sequenceIndex += 1
+        current = current.next
+      }
+    }
+    plannedReads
   }
   protected trait BlockLoader {
     /** Load data and potentially populate the filecache, returning the next range after last */
     def loadRemoteBlocks(
-        baseOffset: Long,
         first: DiskRangeList,
         last: DiskRangeList,
         data: ByteBuffer): DiskRangeList
@@ -87,43 +141,42 @@ abstract class GpuOrcDataReaderBase(
     }
     val offset = stripe.getOffset + stripe.getIndexLength + stripe.getDataLength
     val tailLength = stripe.getFooterLength.toInt
-    val tailBuf = ByteBuffer.allocate(tailLength)
     val cacheChannel = fileCache.getDataRangeChannel(inputFile, offset, tailLength)
-    if (cacheChannel.isDefined) {
-      withResource(cacheChannel.get) { channel =>
-        hitMetric += 1
-        hitSizeMetric += tailLength
-        readTimeMetric.ns {
-          while (tailBuf.hasRemaining) {
-            if (channel.read(tailBuf) < 0) {
-              throw new EOFException("Unexpected EOF while reading stripe footer")
+    lastStripeFooter = cacheChannel match {
+      case Some(channel) =>
+        withResource(channel) { cachedChannel =>
+          hitMetric += 1
+          hitSizeMetric += tailLength
+          val tailBuf = ByteBuffer.allocate(tailLength)
+          readTimeMetric.ns {
+            while (tailBuf.hasRemaining) {
+              if (cachedChannel.read(tailBuf) < 0) {
+                throw new EOFException("Unexpected EOF while reading stripe footer")
+              }
             }
+            tailBuf.flip()
           }
-          tailBuf.flip()
+          parseStripeFooter(tailBuf, tailLength)
         }
-      }
-    } else {
-      missMetric += 1
-      missSizeMetric += tailLength
-      try {
-        withResource(HostMemoryBuffer.allocate(tailLength, false)) { hmb =>
-          readRangesToHostMemory(hmb, Seq(new CopyRange(offset, tailLength, 0)))
-          hmb.getBytes(tailBuf.array(), tailBuf.arrayOffset(), 0, tailLength)
+      case None =>
+        missMetric += 1
+        missSizeMetric += tailLength
+        try {
+          closeOnExcept(HostMemoryBuffer.allocate(tailLength, false)) { hmb =>
+            readRangesToHostMemory(hmb, Seq(new CopyRange(offset, tailLength, 0)))
+            val footer = parseStripeFooter(hmb.asByteBuffer(0, tailLength), tailLength)
+            fileCache.startDataRangeCache(inputFile, offset, tailLength) match {
+              case Some(token) => token.complete(hmb)
+              case None => hmb.close()
+            }
+            footer
+          }
+        } catch {
+          case e: IOException =>
+            throw new IOException(
+              s"Failed to read stripe footer $filePathString $offset:$tailLength", e)
         }
-      } catch {
-        case e: IOException =>
-          throw new IOException(
-            s"Failed to read stripe footer $filePathString $offset:$tailLength", e)
-      }
-      val cacheToken = fileCache.startDataRangeCache(inputFile, offset, tailLength)
-      cacheToken.foreach { token =>
-        closeOnExcept(HostMemoryBuffer.allocate(tailLength, false)) { hmb =>
-          hmb.setBytes(0, tailBuf.array(), tailBuf.arrayOffset(), tailLength)
-          token.complete(hmb)
-        }
-      }
     }
-    lastStripeFooter = parseStripeFooter(tailBuf, tailLength)
     lastStripeFooterInfo = stripe
     lastStripeFooter
   }
@@ -136,40 +189,17 @@ abstract class GpuOrcDataReaderBase(
 
   def copyFileDataToHostStream(out: HostMemoryOutputStream, ranges: DiskRangeList): Unit = {
     val startPos = out.getPos
-    copyFileDataToHostStream(out, Seq((startPos, ranges)))
     out.seek(startPos + getTotalLength(ranges))
+    copyFileDataToHostStream(out, Seq((startPos, ranges)))
   }
 
   def copyFileDataToHostStream(
       out: HostMemoryOutputStream,
       rangeGroups: Seq[(Long, DiskRangeList)]): Unit = {
-    val remoteCopies = new ArrayBuffer[CopyRange]
-    val originalPos = out.getPos
-    withResource(new ArrayBuffer[LocalCopy]) { localCopies =>
-      rangeGroups.foreach { case (startPos, ranges) =>
-        var outputOffset = startPos
-        var current = ranges
-        while (current != null) {
-          val length = current.getLength
-          if (length > 0) {
-            val channel = fileCache.getDataRangeChannel(inputFile, current.getOffset, length)
-            if (channel.isDefined) {
-              localCopies += LocalCopy(channel.get, length, outputOffset)
-            } else {
-              remoteCopies += new CopyRange(current.getOffset, length, outputOffset)
-            }
-          }
-          outputOffset += length
-          current = current.next
-        }
-      }
-      localCopies.foreach { localCopy =>
-        copyLocal(localCopy, out)
-      }
+    val remoteReads = planReads(rangeGroups) { (_, length, outputOffset, channel) =>
+      copyCachedRange(channel, length, outputOffset, out.buffer)
     }
-    copyRemoteBlocksData(remoteCopies.toSeq, out)
-    // restore output position after ranges were copied out of order
-    out.seek(originalPos)
+    copyRemoteBlocksData(remoteReads.toSeq, out.buffer)
   }
 
   private def getTotalLength(ranges: DiskRangeList): Long = {
@@ -183,71 +213,77 @@ abstract class GpuOrcDataReaderBase(
   }
 
   private def copyRemoteBlocksData(
-      remoteCopies: Seq[CopyRange],
-      out: HostMemoryOutputStream): Unit = {
-    if (remoteCopies.nonEmpty) {
-      val coalescedRanges = coalesceReads(remoteCopies)
+      remoteReads: Seq[PlannedRead],
+      output: HostMemoryBuffer): Unit = {
+    if (remoteReads.nonEmpty) {
+      val coalescedRanges = coalesceRemoteReads(remoteReads).map(_.range)
       try {
-        readRangesToHostMemory(out.buffer, coalescedRanges)
+        readRangesToHostMemory(output, coalescedRanges)
       } catch {
         case e: IOException =>
           val rangeSummary = coalescedRanges.map(r =>
             s"${r.getInputOffset}:${r.getLength}").mkString(",")
           throw new IOException(s"Failed to read $filePathString ranges $rangeSummary", e)
       }
-      remoteCopies.foreach { range =>
-        missMetric += 1
-        missSizeMetric += range.getLength
-        val cacheToken = fileCache.startDataRangeCache(
-          inputFile, range.getInputOffset, range.getLength)
+      remoteReads.foreach { read =>
+        val cacheToken = fileCache.startDataRangeCache(inputFile, read.inputOffset, read.length)
         cacheToken.foreach { token =>
-          token.complete(out.buffer.slice(range.getOutputOffset, range.getLength))
+          token.complete(output.slice(read.outputOffset, read.length))
         }
       }
     }
   }
 
-  private def coalesceReads(ranges: Seq[CopyRange]): Seq[CopyRange] = {
-    val coalesced = new ArrayBuffer[CopyRange](ranges.length)
-    var currentRange: CopyRange = null
-    var currentRangeEnd = 0L
+  private def coalesceRemoteReads(
+      remoteReads: Seq[PlannedRead],
+      maxLength: Long = Long.MaxValue): Seq[CoalescedRemoteRead] = {
+    val coalesced = new ArrayBuffer[CoalescedRemoteRead](remoteReads.length)
+    var current: CoalescedRemoteRead = null
+    var lastSequenceIndex = -1
 
-    def addCurrentRange(): Unit = {
-      if (currentRange != null) {
-        val rangeLength = currentRangeEnd - currentRange.getInputOffset
-        if (rangeLength == currentRange.getLength) {
-          coalesced += currentRange
-        } else {
-          coalesced += new CopyRange(
-            currentRange.getInputOffset, rangeLength, currentRange.getOutputOffset)
-        }
-        currentRange = null
-        currentRangeEnd = 0L
-      }
-    }
-
-    ranges.foreach { range =>
+    remoteReads.foreach { read =>
+      val currentRange = if (current == null) null else current.range
+      val inputIsContiguous = currentRange != null &&
+        currentRange.getInputOffset + currentRange.getLength == read.inputOffset
       val outputIsContiguous = currentRange != null &&
-        currentRange.getOutputOffset + currentRangeEnd - currentRange.getInputOffset ==
-          range.getOutputOffset
-      if (range.getInputOffset == currentRangeEnd && outputIsContiguous) {
-        currentRangeEnd += range.getLength
+        currentRange.getOutputOffset + currentRange.getLength == read.outputOffset
+      val combinedLength = if (currentRange == null) {
+        read.length.toLong
       } else {
-        addCurrentRange()
-        currentRange = range
-        currentRangeEnd = range.getInputOffset + range.getLength
+        currentRange.getLength + read.length
       }
+      if (read.sequenceIndex == lastSequenceIndex + 1 && inputIsContiguous &&
+          outputIsContiguous && combinedLength <= maxLength) {
+        current = CoalescedRemoteRead(current.first, read.block,
+          new CopyRange(currentRange.getInputOffset, combinedLength,
+            currentRange.getOutputOffset))
+      } else {
+        if (current != null) {
+          coalesced += current
+        }
+        current = CoalescedRemoteRead(read.block, read.block,
+          new CopyRange(read.inputOffset, read.length, read.outputOffset))
+      }
+      lastSequenceIndex = read.sequenceIndex
     }
-    addCurrentRange()
+    if (current != null) {
+      coalesced += current
+    }
     coalesced.toSeq
   }
 
-  private def copyLocal(item: LocalCopy, out: HostMemoryOutputStream): Unit = {
-    hitMetric += 1
-    hitSizeMetric += item.length
+  private def copyCachedRange(
+      channel: SeekableByteChannel,
+      length: Int,
+      outputOffset: Long,
+      output: HostMemoryBuffer): Unit = {
     readTimeMetric.ns {
-      out.seek(item.outputOffset)
-      out.copyFromChannel(item.channel, item.length)
+      val outputBuffer = output.asByteBuffer(outputOffset, length)
+      while (outputBuffer.hasRemaining) {
+        if (channel.read(outputBuffer) < 0) {
+          throw new EOFException("Unexpected EOF while reading cached ORC data")
+        }
+      }
     }
   }
 
@@ -273,104 +309,38 @@ abstract class GpuOrcDataReaderBase(
 
   protected def readDiskRanges(
       ranges: DiskRangeList,
-      baseOffset: Long,
       loader: BlockLoader): Unit = {
-    case class RangeState(
-        block: DiskRangeList,
-        cachedChannel: Option[SeekableByteChannel])
-    sealed trait ReadOp
-    case class CachedRead(
-        block: DiskRangeList,
-        channel: SeekableByteChannel) extends ReadOp
-    case class RemoteRead(
-        first: DiskRangeList,
-        last: DiskRangeList,
-        size: Int,
-        outputOffset: Long) extends ReadOp
-
-    val rangeStates = new ArrayBuffer[RangeState]
-    val openedChannels = new ArrayBuffer[SeekableByteChannel]
-    try {
-      var current = ranges
-      while (current != null) {
-        val block = current
-        val offset = block.getOffset + baseOffset
-        val size = block.getLength
-        val cachedChannel = fileCache.getDataRangeChannel(inputFile, offset, size)
-        cachedChannel match {
-          case Some(channel) =>
-            openedChannels += channel
-            hitMetric += 1
-            hitSizeMetric += size
-          case None =>
-            missMetric += 1
-            missSizeMetric += size
-        }
-        rangeStates += RangeState(block, cachedChannel)
-        current = current.next
+    val plannedReads = planReads(Seq((0L, ranges))) { (block, _, _, channel) =>
+      readTimeMetric.ns {
+        loader.loadCachedBlock(block, channel)
       }
-
-      val ops = new ArrayBuffer[ReadOp]
-      var outputOffset = 0L
-      var i = 0
-      while (i < rangeStates.length) {
-        rangeStates(i) match {
-          case RangeState(block, Some(channel)) =>
-            ops += CachedRead(block, channel)
-            i += 1
-          case RangeState(first, None) =>
-            var last = first
-            var currentEnd = first.getEnd
-            var j = i + 1
-            while (j < rangeStates.length &&
-                rangeStates(j).cachedChannel.isEmpty &&
-                rangeStates(j).block.getOffset == currentEnd &&
-                rangeStates(j).block.getEnd - first.getOffset <= Int.MaxValue) {
-              last = rangeStates(j).block
-              currentEnd = currentEnd.max(last.getEnd)
-              j += 1
-            }
-            val size = (currentEnd - first.getOffset).toInt
-            ops += RemoteRead(first, last, size, outputOffset)
-            outputOffset += size
-            i = j
+    }
+    var totalRemoteOutputSize = 0L
+    val packedRemoteReads = plannedReads.map { read =>
+      val packedRead = read.copy(outputOffset = totalRemoteOutputSize)
+      totalRemoteOutputSize += read.length
+      packedRead
+    }
+    val remoteReads = coalesceRemoteReads(packedRemoteReads.toSeq, Int.MaxValue)
+    if (remoteReads.nonEmpty) {
+      require(totalRemoteOutputSize > 0, "Remote ORC read data must not be empty")
+      withResource(HostMemoryBuffer.allocate(totalRemoteOutputSize, false)) { remoteData =>
+        val copyRanges = remoteReads.map(_.range)
+        try {
+          readRangesToHostMemory(remoteData, copyRanges)
+        } catch {
+          case e: IOException =>
+            val rangeSummary = copyRanges.map(r =>
+              s"${r.getInputOffset}:${r.getLength}").mkString(",")
+            throw new IOException(s"Failed to read $filePathString ranges $rangeSummary", e)
+        }
+        remoteReads.foreach { read =>
+          val size = read.range.getLength.toInt
+          val bytes = new Array[Byte](size)
+          remoteData.getBytes(bytes, 0, read.range.getOutputOffset, size)
+          loader.loadRemoteBlocks(read.first, read.last, ByteBuffer.wrap(bytes))
         }
       }
-
-      def loadReads(remoteData: Option[HostMemoryBuffer]): Unit = {
-        ops.foreach {
-          case CachedRead(block, channel) =>
-            readTimeMetric.ns {
-              loader.loadCachedBlock(block, channel)
-            }
-          case RemoteRead(first, last, size, bufferOffset) =>
-            val bytes = new Array[Byte](size)
-            remoteData.get.getBytes(bytes, 0, bufferOffset, size)
-            loader.loadRemoteBlocks(baseOffset, first, last, ByteBuffer.wrap(bytes))
-        }
-      }
-
-      if (outputOffset == 0) {
-        loadReads(None)
-      } else {
-        withResource(HostMemoryBuffer.allocate(outputOffset, false)) { hmb =>
-          val copyRanges = ops.collect {
-            case RemoteRead(first, _, size, bufferOffset) =>
-              new CopyRange(baseOffset + first.getOffset, size, bufferOffset)
-          }
-          try {
-            readRangesToHostMemory(hmb, copyRanges.toSeq)
-          } catch {
-            case e: IOException =>
-              val rangeSummary = copyRanges.map(r =>
-                s"${r.getInputOffset}:${r.getLength}").mkString(",")
-              throw new IOException(s"Failed to read $filePathString ranges $rangeSummary", e)
-          }
-          loadReads(Some(hmb))
-        }
-      }
-    } finally {
-      openedChannels.safeClose()
     }
   }
 

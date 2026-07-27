@@ -34,7 +34,6 @@ abstract class GpuOrcDataReader320Plus(
 
   private class BufferChunkLoader(useDirect: Boolean) extends BlockLoader {
     override def loadRemoteBlocks(
-        baseOffset: Long,
         first: DiskRangeList,
         last: DiskRangeList,
         data: ByteBuffer): DiskRangeList = {
@@ -47,7 +46,7 @@ abstract class GpuOrcDataReader320Plus(
         current.asInstanceOf[BufferChunk].setChunk(buffer)
         // see if the filecache wants any of this data
         val cacheToken = fileCache.startDataRangeCache(inputFile,
-          baseOffset + current.getOffset, current.getLength)
+          current.getOffset, current.getLength)
         cacheToken.foreach { token =>
           val hmb = closeOnExcept(HostMemoryBuffer.allocate(current.getLength, false)) { hmb =>
             hmb.setBytes(0, buffer.array(),
@@ -90,7 +89,7 @@ abstract class GpuOrcDataReader320Plus(
 
   override def readFileData(chunks: BufferChunkList, forceDirect: Boolean): BufferChunkList = {
     if (chunks != null) {
-      readDiskRanges(chunks.get, 0, new BufferChunkLoader(forceDirect))
+      readDiskRanges(chunks.get, new BufferChunkLoader(forceDirect))
     }
     chunks
   }
