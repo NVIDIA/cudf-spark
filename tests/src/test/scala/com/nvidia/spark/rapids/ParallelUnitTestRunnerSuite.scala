@@ -19,7 +19,8 @@ package com.nvidia.spark.rapids
 import java.io.{
   BufferedWriter, ByteArrayInputStream, ByteArrayOutputStream, InputStream, OutputStream, Writer}
 import java.nio.file.{Files, Paths}
-import java.util.concurrent.{CountDownLatch, TimeUnit}
+import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, TimeUnit}
+import java.util.concurrent.atomic.AtomicLong
 
 import org.apache.hadoop.fs.FileUtil
 import org.scalatest.funsuite.AnyFunSuite
@@ -141,6 +142,62 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
     assert(terminated)
     assert(process.forciblyDestroyed)
     assert(!process.isAlive)
+  }
+
+  test("watchdog records a timed-out suite and forcibly terminates its worker") {
+    class TimedOutProcess extends Process {
+      @volatile private var alive = true
+      @volatile var forciblyDestroyed = false
+
+      override def getOutputStream: OutputStream = new ByteArrayOutputStream()
+
+      override def getInputStream: InputStream = new ByteArrayInputStream(Array.empty[Byte])
+
+      override def getErrorStream: InputStream = new ByteArrayInputStream(Array.empty[Byte])
+
+      override def waitFor(): Int = throw new UnsupportedOperationException()
+
+      override def waitFor(timeout: Long, unit: TimeUnit): Boolean = !alive
+
+      override def exitValue(): Int = if (alive) throw new IllegalThreadStateException() else 137
+
+      override def destroy(): Unit = {}
+
+      override def destroyForcibly(): Process = {
+        forciblyDestroyed = true
+        alive = false
+        this
+      }
+
+      override def isAlive: Boolean = alive
+    }
+
+    val process = new TimedOutProcess
+    val failures = new ConcurrentLinkedQueue[String]()
+    val reportsDir = Files.createTempDirectory("parallel-unit-test-watchdog")
+    try {
+      val watchdog = ParallelUnitTestRunner.startSuiteWatchdog(
+        runId = 1,
+        workerId = 2,
+        process = process,
+        reportsDir = reportsDir,
+        failures = failures,
+        deadlineNanos = new AtomicLong(0L),
+        currentSuite = () => Some("example.TimedOutSuite"),
+        suiteTimeoutSeconds = 30)
+      watchdog.join(TimeUnit.SECONDS.toMillis(5))
+
+      assert(!watchdog.isAlive)
+      assert(process.forciblyDestroyed)
+      assert(!process.isAlive)
+      assert(failures.contains(
+        "wave-1 example.TimedOutSuite exceeded the 30s suite timeout in worker-2"))
+    } finally {
+      if (process.isAlive) {
+        process.destroyForcibly()
+      }
+      FileUtil.fullyDelete(reportsDir.toFile)
+    }
   }
 
   test("worker stop request does not block on the command pipe") {

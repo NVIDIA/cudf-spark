@@ -347,7 +347,7 @@ object ParallelUnitTestRunner {
     }
   }
 
-  private def startSuiteWatchdog(
+  private[rapids] def startSuiteWatchdog(
       runId: Int,
       workerId: Int,
       process: Process,
@@ -387,30 +387,21 @@ object ParallelUnitTestRunner {
   private def dumpWorkerThreads(label: String, process: Process, reportsDir: Path): Unit = {
     try {
       val jstack = Paths.get(System.getProperty("java.home"), "bin", "jstack").toString
+      val dumpFile = reportsDir.resolve(s"$label-timeout-jstack.txt")
       // Process.pid() is a Java 9+ API while this module still compiles against the Java 8 API;
       // resolve it reflectively (the test JVMs only ever run on JDK 9+).
       val pid = classOf[Process].getMethod("pid").invoke(process).toString
       val dumper = new ProcessBuilder(jstack, "-l", pid)
           .redirectErrorStream(true)
+          .redirectOutput(dumpFile.toFile)
           .start()
-      val reader = new BufferedReader(new InputStreamReader(dumper.getInputStream))
-      val dump = new StringBuilder
-      try {
-        var line = reader.readLine()
-        while (line != null) {
-          dump.append(line).append('\n')
-          line = reader.readLine()
-        }
-      } finally {
-        reader.close()
-      }
       if (!dumper.waitFor(60, TimeUnit.SECONDS)) {
         dumper.destroyForcibly()
+        dumper.waitFor(10, TimeUnit.SECONDS)
       }
-      val dumpFile = reportsDir.resolve(s"$label-timeout-jstack.txt")
-      Files.write(dumpFile, dump.toString.getBytes(StandardCharsets.UTF_8))
+      val dump = new String(Files.readAllBytes(dumpFile), StandardCharsets.UTF_8)
       println(s"[$label] thread dump of the hung test JVM (also saved to $dumpFile):")
-      print(dump.toString)
+      print(dump)
       System.out.flush()
     } catch {
       case t: Throwable =>
