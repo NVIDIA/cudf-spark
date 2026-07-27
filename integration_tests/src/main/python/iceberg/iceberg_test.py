@@ -653,7 +653,10 @@ def test_iceberg_parquet_read_from_uri_invalid_s3_path(spark_tmp_table_factory, 
     with_cpu_session(setup_iceberg_table)
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.sql(f"SELECT * FROM {table}"),
-        conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
+        conf={
+            'spark.rapids.perfio.s3.enabled': 'true',
+            'spark.rapids.sql.format.parquet.reader.type': reader_type,
+        })
 
 @iceberg
 @ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering
