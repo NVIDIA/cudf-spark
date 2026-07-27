@@ -91,7 +91,13 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
     val batches = ParallelUnitTestRunner.createSuiteBatches(tasks)
 
     assert(batches.size === 1)
-    assert(ParallelUnitTestRunner.effectiveWorkerCount(4, batches) === 1)
+    val workerCount = ParallelUnitTestRunner.effectiveWorkerCount(4, batches)
+    assert(workerCount === 1)
+    val (allocation, maximum, minimum) =
+      ParallelUnitTestRunner.perWorkerGpuAllocations(workerCount, 1.0, 1.0, 0.25)
+    assert(allocation === 0.8)
+    assert(maximum === 0.8)
+    assert(minimum === 0.25)
   }
 
   test("suites are ordered by fully qualified name") {

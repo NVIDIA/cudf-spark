@@ -111,9 +111,12 @@ object ParallelUnitTestRunner {
         .map { case (suite, index) => SuiteTask(index + 1, suite) }
     val suiteBatches = createSuiteBatches(suiteTasks)
     val workerCount = effectiveWorkerCount(requestedForks, suiteBatches)
-    val perForkAllocation = allocationFraction * parallelGpuAllocationRatio / workerCount
-    val perForkMaxAllocation = maxAllocationFraction * parallelGpuAllocationRatio / workerCount
-    val perForkMinAllocation = math.min(minAllocationFraction / workerCount, perForkMaxAllocation)
+    val (perForkAllocation, perForkMaxAllocation, perForkMinAllocation) =
+      perWorkerGpuAllocations(
+        workerCount,
+        allocationFraction,
+        maxAllocationFraction,
+        minAllocationFraction)
 
     println(s"Running ${discovered.size} suites with at most $workerCount concurrent processes")
     suiteBatches.filter(_.tasks.size > 1).foreach { batch =>
@@ -712,6 +715,17 @@ object ParallelUnitTestRunner {
       requestedForks: Int,
       suiteBatches: Seq[SuiteBatch]): Int = {
     math.min(requestedForks, suiteBatches.size)
+  }
+
+  private[rapids] def perWorkerGpuAllocations(
+      workerCount: Int,
+      allocationFraction: Double,
+      maxAllocationFraction: Double,
+      minAllocationFraction: Double): (Double, Double, Double) = {
+    val allocation = allocationFraction * parallelGpuAllocationRatio / workerCount
+    val maximum = maxAllocationFraction * parallelGpuAllocationRatio / workerCount
+    val minimum = math.min(minAllocationFraction / workerCount, maximum)
+    (allocation, maximum, minimum)
   }
 
   private def discoverSuiteNames(testClasses: Path): Seq[String] = {
