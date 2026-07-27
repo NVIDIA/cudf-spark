@@ -1912,8 +1912,6 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
       context: TaskContext,
       metricsReporter: ShuffleWriteMetricsReporter): ShuffleWriter[K, V] = {
     handle match {
-      case gpu: GpuShuffleHandle[_, _] if shouldFallThroughForShuffle =>
-        wrapped.getWriter(gpu.wrapped, mapId, context, metricsReporter)
       case gpu: GpuShuffleHandle[_, _] =>
         registerGpuShuffle(handle.shuffleId)
         new RapidsCachingWriter(
@@ -1972,9 +1970,6 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
       context: TaskContext,
       metrics: ShuffleReadMetricsReporter): ShuffleReader[K, C] = {
     handle match {
-      case gpuHandle: GpuShuffleHandle[_, _] if shouldFallThroughForShuffle =>
-        ShuffleManagerShims.getReader(wrapped, gpuHandle.wrapped, startMapIndex, endMapIndex,
-          startPartition, endPartition, context, metrics)
       case gpuHandle: GpuShuffleHandle[_, _] =>
         logInfo(s"Asking map output tracker for dependency ${gpuHandle.dependency}, " +
           s"map output sizes for: ${gpuHandle.shuffleId}, parts=$startPartition-$endPartition")
