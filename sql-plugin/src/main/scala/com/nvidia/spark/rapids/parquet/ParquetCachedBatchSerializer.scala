@@ -27,7 +27,7 @@ import ai.rapids.cudf._
 import ai.rapids.cudf.ParquetWriterOptions.StatisticsFrequency
 import com.nvidia.spark.GpuCachedBatchSerializer
 import com.nvidia.spark.rapids.{ColumnCastUtil, DecimalUtil, GpuColumnVector, GpuRowToColumnConverter, GpuSemaphore, RapidsConf, RequireSingleBatch, RowToColumnarIterator, SchemaUtils}
-import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuColumnVector.GpuColumnarBatchBuilder
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
@@ -58,7 +58,7 @@ import org.apache.spark.sql.execution.datasources.parquet.rapids.ParquetRecordMa
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.PCBSSchemaHelper
 import org.apache.spark.sql.types._
-import org.apache.spark.sql.vectorized.ColumnarBatch
+import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkColumnVector}
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.unsafe.types.CalendarInterval
 
@@ -365,7 +365,7 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
         .getBase.getDeviceMemorySize / oldGpuCB.numRows()
     }.sum
 
-    val columns = for (i <- 0 until oldGpuCB.numCols()) yield {
+    val columns: Array[SparkColumnVector] = (0 until oldGpuCB.numCols()).toArray.safeMap { i =>
       val gpuVector = oldGpuCB.column(i).asInstanceOf[GpuColumnVector]
       var dataType = origSchema(i).dataType
       val v = ColumnCastUtil.ifTrueThenDeepConvertTypeAtoTypeB(gpuVector.getBase,
@@ -385,7 +385,10 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
       )
       GpuColumnVector.from(v, schema(i).dataType)
     }
-    withResource(new ColumnarBatch(columns.toArray, oldGpuCB.numRows())) { gpuCB =>
+    val newGpuCB = closeOnExcept(columns) { columns =>
+      new ColumnarBatch(columns, oldGpuCB.numRows())
+    }
+    withResource(newGpuCB) { gpuCB =>
       val rowsAllowedInBatch = (bytesAllowedPerBatch / estimatedRowSize).toInt
       val splitIndices = scala.Range(rowsAllowedInBatch, gpuCB.numRows(), rowsAllowedInBatch)
       val buffers = new ListBuffer[ParquetCachedBatch]
