@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids
 
 import java.io.{
   BufferedWriter, ByteArrayInputStream, ByteArrayOutputStream, InputStream, OutputStream, Writer}
-import java.nio.file.{Files, Paths}
+import java.nio.file.{Files, Path, Paths}
 import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.AtomicLong
 
@@ -29,6 +29,35 @@ import org.apache.spark.SparkConf
 import org.apache.spark.sql.SparkSession
 
 class ParallelUnitTestRunnerSuite extends AnyFunSuite {
+  private val fixtureSuiteName = classOf[ParallelUnitTestRunnerFixtureSuite].getName
+
+  private def fixtureRunnerArgs(reportsDir: Path, failFixture: Boolean): Array[String] = {
+    val testClasses = Paths.get(getClass.getProtectionDomain.getCodeSource.getLocation.toURI)
+    val fixtureJvmArgs = if (failFixture) {
+      s"-D${ParallelUnitTestRunnerFixtureSuite.failProperty}=true"
+    } else {
+      ""
+    }
+    Array(
+      s"testClasses=$testClasses",
+      s"reportsDir=$reportsDir",
+      "forkCount=2",
+      s"wildcardSuites=$fixtureSuiteName",
+      "tagsToInclude=",
+      "tagsToExclude=",
+      "suffixes=",
+      "testsFilter=",
+      "argLine=",
+      s"testJvmArgs=$fixtureJvmArgs",
+      "shuffleManagerOverride=true",
+      "allocationFraction=1.0",
+      "maxAllocationFraction=1.0",
+      "minAllocationFraction=0.25",
+      "testFailureIgnore=false",
+      "sparkConfs=",
+      "suiteTimeoutSeconds=30")
+  }
+
   test("special suites are submitted as serial worker batches") {
     val parquetSuite = "com.nvidia.spark.rapids.ParquetWriterSuite"
     val dppOff =
@@ -101,6 +130,33 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
       assert(wave2Reports === reportsDir.resolve("wave-2"))
       assert(Files.isDirectory(wave1Reports))
       assert(Files.isDirectory(wave2Reports))
+    } finally {
+      FileUtil.fullyDelete(reportsDir.toFile)
+    }
+  }
+
+  test("main runs a successful suite in a child JVM and writes its JUnit report") {
+    val reportsDir = Files.createTempDirectory("parallel-unit-test-success")
+    try {
+      ParallelUnitTestRunner.main(fixtureRunnerArgs(reportsDir, failFixture = false))
+
+      assert(Files.isRegularFile(
+        reportsDir.resolve("wave-1").resolve(s"TEST-$fixtureSuiteName.xml")))
+    } finally {
+      FileUtil.fullyDelete(reportsDir.toFile)
+    }
+  }
+
+  test("main propagates a child JVM suite failure") {
+    val reportsDir = Files.createTempDirectory("parallel-unit-test-failure")
+    try {
+      val error = intercept[IllegalStateException] {
+        ParallelUnitTestRunner.main(fixtureRunnerArgs(reportsDir, failFixture = true))
+      }
+
+      assert(error.getMessage.contains(fixtureSuiteName))
+      assert(Files.isRegularFile(
+        reportsDir.resolve("wave-1").resolve(s"TEST-$fixtureSuiteName.xml")))
     } finally {
       FileUtil.fullyDelete(reportsDir.toFile)
     }
@@ -259,5 +315,15 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
       SparkSession.clearDefaultSession()
       FileUtil.fullyDelete(tmpDir.toFile)
     }
+  }
+}
+
+object ParallelUnitTestRunnerFixtureSuite {
+  val failProperty: String = "rapids.parallelUnitTestRunner.fixture.fail"
+}
+
+class ParallelUnitTestRunnerFixtureSuite extends AnyFunSuite {
+  test("configurable fixture") {
+    assert(!java.lang.Boolean.getBoolean(ParallelUnitTestRunnerFixtureSuite.failProperty))
   }
 }
