@@ -64,35 +64,40 @@ case class GpuAtomicCreateTableAsSelectExec(
   override protected def run(): Seq[InternalRow] = {
     if (catalog.tableExists(ident)) {
       if (ifNotExists) {
-        return Nil
-      }
-      throw QueryCompilationErrors.tableAlreadyExistsError(ident)
-    }
-
-    val columns = getV2Columns(query.schema, catalog.useNullableQuerySchema)
-    val table = WriteToDataSourceV2Exec.handleConcurrentCreateExceptions(ifNotExists) {
-      val staged = if (tableSpec.rowFilter.isDefined || tableSpec.columnMasks.isDefined) {
-        import CatalogV2Implicits._
-        catalog.stageCreateWithRowColumnControls(
-          ident,
-          columns.asSchema,
-          partitioning.toArray,
-          properties.asJava,
-          tableSpec.rowFilter.orNull,
-          tableSpec.columnMasks.orNull)
+        Nil
       } else {
-        val tableInfo = new TableInfo.Builder()
-          .withColumns(columns)
-          .withPartitions(partitioning.toArray)
-          .withProperties(properties.asJava)
-          .build()
-        catalog.stageCreate(ident, tableInfo)
+        throw QueryCompilationErrors.tableAlreadyExistsError(ident)
       }
-      Option(staged).getOrElse(loadForInsert())
-    }.getOrElse(return Nil)
+    } else {
+      val columns = getV2Columns(query.schema, catalog.useNullableQuerySchema)
+      val table = WriteToDataSourceV2Exec.handleConcurrentCreateExceptions(ifNotExists) {
+        val staged = if (tableSpec.rowFilter.isDefined || tableSpec.columnMasks.isDefined) {
+          import CatalogV2Implicits._
+          catalog.stageCreateWithRowColumnControls(
+            ident,
+            columns.asSchema,
+            partitioning.toArray,
+            properties.asJava,
+            tableSpec.rowFilter.orNull,
+            tableSpec.columnMasks.orNull)
+        } else {
+          val tableInfo = new TableInfo.Builder()
+            .withColumns(columns)
+            .withPartitions(partitioning.toArray)
+            .withProperties(properties.asJava)
+            .build()
+          catalog.stageCreate(ident, tableInfo)
+        }
+        Option(staged).getOrElse(loadForInsert())
+      }
 
-    GpuAtomicDeltaWriteContext.withAtomicWrite {
-      writeToTable(catalog, table, writeOptions, ident, query, ifNotExists)
+      table match {
+        case Some(stagedTable) =>
+          GpuAtomicDeltaWriteContext.withAtomicWrite {
+            writeToTable(catalog, stagedTable, writeOptions, ident, query, ifNotExists)
+          }
+        case None => Nil
+      }
     }
   }
 

@@ -394,9 +394,123 @@ def test_delta_db173_native_sql_ctas_rtas_legacy_optimized_write(
         spark_tmp_table_factory, True, False, True)
 
 
+@allow_non_gpu('AppendDataExecV1', 'AtomicCreateTableAsSelectExec',
+               'AtomicReplaceTableAsSelectExec', 'EmptyRelationExec',
+               *delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_databricks173_or_later(), reason="DBR 17.3 native write path")
+def test_delta_db173_native_sql_ctas_rtas_empty_input(
+        spark_tmp_table_factory):
+    _run_delta_db173_native_sql_ctas_rtas(
+        spark_tmp_table_factory, False, True, False, empty_input=True)
+
+
+def _assert_db173_gpu_atomic_control_command(
+        do_test, conf, expected_atomic_gpu_class, expected_error=None):
+    """Assert an atomic wrapper for a no-op or expected-error command with no nested write."""
+    jvm = spark_jvm()
+    callback = jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        if expected_error is None:
+            result = with_gpu_session(do_test, conf=conf)
+        else:
+            assert_spark_exception(
+                lambda: with_gpu_session(do_test, conf=conf), expected_error)
+            result = None
+        captured_plans = callback.getResultsWithTimeout(10000)
+        assert any(
+            callback.contains(plan, expected_atomic_gpu_class)
+            for plan in captured_plans
+        ), f"{expected_atomic_gpu_class} is not found in the captured atomic command plans"
+        expected_cpu_class = expected_atomic_gpu_class[3:]
+        assert not any(
+            callback.didFallBack(plan, expected_cpu_class)
+            for plan in captured_plans
+        ), f"Captured atomic command contains CPU {expected_cpu_class}"
+        return result
+    finally:
+        callback.endCapture()
+
+
+@allow_non_gpu('AppendDataExecV1', 'AtomicCreateTableAsSelectExec',
+               'AtomicReplaceTableAsSelectExec',
+               *delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_databricks173_or_later(), reason="DBR 17.3 native write path")
+def test_delta_db173_native_sql_ctas_rtas_existing_table_branches(
+        spark_tmp_table_factory):
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf, {
+        "spark.databricks.delta.optimizeWrite.enabled": "false",
+        "spark.sql.adaptive.enabled": "true",
+    })
+    cpu_table = spark_tmp_table_factory.get() + '_existing_cpu'
+    gpu_table = spark_tmp_table_factory.get() + '_existing_gpu'
+
+    def setup_tables(spark):
+        for table in (cpu_table, gpu_table):
+            spark.sql(
+                f"CREATE TABLE {table} USING DELTA AS "
+                "SELECT 1L AS id, 'original' AS value").collect()
+
+    with_cpu_session(setup_tables, conf=conf)
+
+    def create_if_not_exists(spark, table):
+        spark.sql(
+            f"CREATE TABLE IF NOT EXISTS {table} USING DELTA AS "
+            "SELECT 2L AS id, 'ignored' AS value").collect()
+
+    with_cpu_session(
+        lambda spark: create_if_not_exists(spark, cpu_table), conf=conf)
+    _assert_db173_gpu_atomic_control_command(
+        lambda spark: create_if_not_exists(spark, gpu_table), conf,
+        "GpuAtomicCreateTableAsSelectExec")
+
+    def table_rows(spark, table):
+        return spark.table(table).orderBy("id").collect()
+
+    cpu_rows = with_cpu_session(lambda spark: table_rows(spark, cpu_table), conf=conf)
+    gpu_rows = with_cpu_session(lambda spark: table_rows(spark, gpu_table), conf=conf)
+    assert_equal(cpu_rows, gpu_rows)
+    assert_equal([(row.id, row.value) for row in gpu_rows], [(1, "original")])
+
+    def create_existing(spark, table):
+        spark.sql(
+            f"CREATE TABLE {table} USING DELTA AS "
+            "SELECT 2L AS id, 'duplicate' AS value").collect()
+
+    assert_spark_exception(
+        lambda: with_cpu_session(
+            lambda spark: create_existing(spark, cpu_table), conf=conf),
+        "already exists")
+    _assert_db173_gpu_atomic_control_command(
+        lambda spark: create_existing(spark, gpu_table), conf,
+        "GpuAtomicCreateTableAsSelectExec", expected_error="already exists")
+
+    def replace_existing(spark, table):
+        spark.sql(
+            f"REPLACE TABLE {table} USING DELTA AS "
+            "SELECT 3L AS id, 'replaced' AS value").collect()
+
+    with_cpu_session(lambda spark: replace_existing(spark, cpu_table), conf=conf)
+    assert_db173_gpu_data_writing_command(
+        lambda spark: replace_existing(spark, gpu_table), conf=conf,
+        optimized_write=False,
+        expected_atomic_gpu_class="GpuAtomicReplaceTableAsSelectExec",
+        aqe_enabled=True)
+
+    cpu_rows = with_cpu_session(lambda spark: table_rows(spark, cpu_table), conf=conf)
+    gpu_rows = with_cpu_session(lambda spark: table_rows(spark, gpu_table), conf=conf)
+    assert_equal(cpu_rows, gpu_rows)
+    assert_equal([(row.id, row.value) for row in gpu_rows], [(3, "replaced")])
+    assert_delta_history_equal(conf, cpu_table, gpu_table)
+
+
 def _run_delta_db173_native_sql_ctas_rtas(
         spark_tmp_table_factory, optimized_write, aqe_enabled,
-        expect_legacy_optimized_write):
+        expect_legacy_optimized_write, empty_input=False):
     conf = copy_and_update(writer_confs, delta_writes_enabled_conf, {
         "spark.databricks.delta.optimizeWrite.enabled": str(optimized_write).lower(),
         "spark.sql.adaptive.enabled": str(aqe_enabled).lower(),
@@ -429,10 +543,11 @@ def _run_delta_db173_native_sql_ctas_rtas(
             "carrier_id, carrier_code, carrier_type, carrier_id + 1 AS version"
             if replace else "carrier_id, carrier_code, carrier_type"
         )
+        predicate = " WHERE carrier_id < 0" if empty_input else ""
         spark.sql(
             f"{command} {table} USING DELTA AS "
             f"SELECT /*+ REPARTITION(32, carrier_id) */ {projection} "
-            f"FROM {source_table}").collect()
+            f"FROM {source_table}{predicate}").collect()
 
     with_cpu_session(
         lambda spark: execute_atomic_sql(spark, cpu_ctas_table, False), conf=conf)
@@ -474,6 +589,9 @@ def _run_delta_db173_native_sql_ctas_rtas(
         cpu_state = with_cpu_session(lambda spark: table_state(spark, cpu_table), conf=conf)
         gpu_state = with_cpu_session(lambda spark: table_state(spark, gpu_table), conf=conf)
         assert_equal(cpu_state, gpu_state)
+        if empty_input:
+            assert_equal(cpu_state[0], [])
+            assert_equal(cpu_state[2], [])
         assert_delta_history_equal(conf, cpu_table, gpu_table)
 
     def check_delta_logs(spark):
@@ -483,7 +601,11 @@ def _run_delta_db173_native_sql_ctas_rtas(
             assert_delta_logs_at_paths_equivalent(
                 spark, location(cpu_table), location(gpu_table))
 
-    with_cpu_session(check_delta_logs, conf=conf)
+    # An empty GPU write may produce a valid zero-row Parquet file while DBR's CPU writer
+    # produces no data file. The table-state checks above validate the observable Delta
+    # semantics; require identical physical actions only when the input contains rows.
+    if not empty_input:
+        with_cpu_session(check_delta_logs, conf=conf)
 
 
 @allow_non_gpu(*delta_meta_allow)

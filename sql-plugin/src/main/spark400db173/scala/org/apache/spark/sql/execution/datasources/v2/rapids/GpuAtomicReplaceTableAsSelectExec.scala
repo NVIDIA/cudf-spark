@@ -38,9 +38,10 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 /**
  * GPU wrapper for DBR 17.3 atomic RTAS.
  *
- * DBR's native catalog remains responsible for stage/commit/abort and therefore for Unity
- * Catalog, catalog-owned tables and coordinated commits. The nested AppendData plan is still
- * planned normally and can select the DBR 17.3 native GPU Delta writer.
+ * For qualified operations, DBR's native catalog remains responsible for stage/commit/abort.
+ * Catalog-owned and coordinated-commit table creation remain blocked during GPU tagging until
+ * those paths are qualified. The nested AppendData plan is still planned normally and can select
+ * the DBR 17.3 native GPU Delta writer.
  */
 case class GpuAtomicReplaceTableAsSelectExec(
     override val output: Seq[Attribute],

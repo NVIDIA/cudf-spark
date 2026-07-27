@@ -19,20 +19,23 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.execution.datasources.v2.rapids
 
+import java.util.UUID
+
 import org.apache.spark.SparkContext
 
 /** Limits DBR's nested Delta data-writing command to a validated atomic CTAS/RTAS call stack. */
 object GpuAtomicDeltaWriteContext {
   private val activeKey = "spark.rapids.sql.delta.atomicWrite.active"
+  private val activeToken = UUID.randomUUID().toString
 
   def isActive: Boolean = SparkContext.getActive
-    .exists(_.getLocalProperty(activeKey) == "true")
+    .exists(_.getLocalProperty(activeKey) == activeToken)
 
   def withAtomicWrite[T](body: => T): T = {
     val sparkContext = SparkContext.getActive.getOrElse(
       throw new IllegalStateException("No active SparkContext for atomic Delta write"))
     val previous = sparkContext.getLocalProperty(activeKey)
-    sparkContext.setLocalProperty(activeKey, "true")
+    sparkContext.setLocalProperty(activeKey, activeToken)
     try {
       body
     } finally {
