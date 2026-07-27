@@ -347,9 +347,8 @@ run_iceberg_tests() {
       echo "!!! Running iceberg tests with rest catalog"
       ICEBERG_REST_JARS="org.apache.iceberg:iceberg-spark-runtime-${ICEBERG_SPARK_VER}_${SCALA_BINARY_VER}:${ICEBERG_VERSION},\
 org.apache.iceberg:iceberg-aws-bundle:${ICEBERG_VERSION}"
-          # filecache.enabled is a startup-only config, so it must be set here via
-          # PYSP_TEST_ env var rather than as a session-level Spark config, because
-          # FileCacheManager is initialized at executor startup time.
+          # filecache.enabled and perfio.s3.enabled are startup-only configs, so they must
+          # be set here via PYSP_TEST_ env vars rather than as session-level Spark configs.
           env \
             HOST_NAME=$PROJECT_REPO_HOST \
             EXPECTED_ICEBERG_VERSION=${ICEBERG_VERSION} \
@@ -358,6 +357,7 @@ org.apache.iceberg:iceberg-aws-bundle:${ICEBERG_VERSION}"
             PYSP_TEST_spark_driver_memory=1G \
             PYSP_TEST_spark_executor_memory=2G \
             PYSP_TEST_spark_rapids_filecache_enabled=true \
+            PYSP_TEST_spark_rapids_perfio_s3_enabled=true \
             PYSP_TEST_spark_jars_packages="${ICEBERG_REST_JARS}" \
             PYSP_TEST_spark_jars_ivySettings="${WORKSPACE}/jenkins/ivysettings.xml" \
             PYSP_TEST_spark_sql_extensions="org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions" \

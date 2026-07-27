@@ -651,12 +651,13 @@ def test_iceberg_parquet_read_from_uri_invalid_s3_path(spark_tmp_table_factory, 
                   f"AS SELECT * FROM {tmp_view}")
 
     with_cpu_session(setup_iceberg_table)
+    assert with_gpu_session(
+        lambda spark:
+            spark._jvm.com.nvidia.spark.rapids.fileio.RapidsInputFiles.isS3PerfEnabled()), \
+        "PerfIO S3 must be enabled at Spark startup for REST catalog tests"
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.sql(f"SELECT * FROM {table}"),
-        conf={
-            'spark.rapids.perfio.s3.enabled': 'true',
-            'spark.rapids.sql.format.parquet.reader.type': reader_type,
-        })
+        conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
 @iceberg
 @ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering
