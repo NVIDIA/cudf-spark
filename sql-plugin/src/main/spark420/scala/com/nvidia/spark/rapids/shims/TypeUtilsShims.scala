@@ -21,7 +21,7 @@ package com.nvidia.spark.rapids.shims
 import ai.rapids.cudf.NaNEquality
 
 import org.apache.spark.sql.catalyst.analysis.TypeCheckResult
-import org.apache.spark.sql.catalyst.expressions.aggregate.CollectList
+import org.apache.spark.sql.catalyst.expressions.aggregate.{CollectList, CollectSet}
 import org.apache.spark.sql.types.{DataType, NullType, NumericType}
 
 /**
@@ -41,6 +41,8 @@ object TypeUtilsShims {
   val collectSetFloatNanEquality: NaNEquality = NaNEquality.ALL_EQUAL
 
   def collectListIgnoreNulls(collectList: CollectList): Boolean = collectList.ignoreNulls
+
+  def collectSetIgnoreNulls(collectSet: CollectSet): Boolean = collectSet.ignoreNulls
 
   // Spark 4.2 uses fdlibm asinh, so the default CPU behavior matches the stable cuDF kernel.
   val useImprovedAsinhByDefault: Boolean = true

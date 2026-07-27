@@ -890,6 +890,33 @@ def test_hash_groupby_collect_list_respect_nulls(use_obj_hash_agg):
         conf={'spark.sql.execution.useObjectHashAggregateExec': str(use_obj_hash_agg).lower()})
 
 
+@pytest.mark.skipif(not is_spark_420_or_later(),
+                    reason='collect_set RESPECT NULLS is introduced in Spark 4.2')
+@allow_non_gpu("ProjectExec")
+@ignore_order(local=True)
+@pytest.mark.parametrize('use_obj_hash_agg', [True, False], ids=idfn)
+def test_hash_groupby_collect_set_respect_nulls(use_obj_hash_agg):
+    def doit(spark):
+        return spark.sql("""
+            SELECT a,
+                   sort_array(collect_set(b) IGNORE NULLS) AS ignore_set,
+                   sort_array(collect_set(b) RESPECT NULLS) AS respect_set
+            FROM VALUES
+                (1, 1),
+                (1, NULL),
+                (1, 1),
+                (1, NULL),
+                (2, NULL),
+                (2, 5)
+            AS tab(a, b)
+            GROUP BY a
+        """)
+
+    assert_gpu_and_cpu_are_equal_collect(
+        doit,
+        conf={'spark.sql.execution.useObjectHashAggregateExec': str(use_obj_hash_agg).lower()})
+
+
 @ignore_order(local=True)
 @pytest.mark.parametrize('use_obj_hash_agg', [True, False], ids=idfn)
 def test_hash_groupby_collect_list_of_maps(use_obj_hash_agg):
@@ -953,6 +980,33 @@ def test_hash_reduction_collect_set(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: gen_df(spark, data_gen, length=100)
             .agg(f.sort_array(f.collect_set('b')), f.count('b')))
+
+
+@pytest.mark.skipif(not is_spark_420_or_later(),
+                    reason='collect_set RESPECT NULLS is introduced in Spark 4.2')
+@allow_non_gpu("ProjectExec")
+@ignore_order(local=True)
+def test_hash_reduction_collect_set_respect_nulls():
+    def doit(spark):
+        return spark.sql("""
+            SELECT
+                sort_array(collect_set(i) IGNORE NULLS) AS ignore_int,
+                sort_array(collect_set(i) RESPECT NULLS) AS respect_int,
+                sort_array(collect_set(d) IGNORE NULLS) AS ignore_double,
+                sort_array(collect_set(d) RESPECT NULLS) AS respect_double,
+                sort_array(collect_set(CAST(NULL AS INT)) IGNORE NULLS) AS ignore_all_null,
+                sort_array(collect_set(CAST(NULL AS INT)) RESPECT NULLS) AS respect_all_null
+            FROM VALUES
+                (CAST(1 AS INT), CAST(1.0 AS DOUBLE)),
+                (CAST(NULL AS INT), CAST(NULL AS DOUBLE)),
+                (CAST(1 AS INT), CAST('NaN' AS DOUBLE)),
+                (CAST(NULL AS INT), CAST('NaN' AS DOUBLE)),
+                (CAST(2 AS INT), CAST(2.0 AS DOUBLE))
+            AS tab(i, d)
+        """)
+
+    assert_gpu_and_cpu_are_equal_collect(doit)
+
 
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', _gen_data_for_collect_set_op, ids=idfn)
