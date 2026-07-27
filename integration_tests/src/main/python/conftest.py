@@ -150,8 +150,10 @@ def is_nightly_run():
 def is_precommit_run():
     return _is_precommit_run
 
+
 def is_reduced_it_run():
     return os.environ.get('REDUCED_IT', 'false').lower() == 'true'
+
 
 def is_at_least_precommit_run():
     return _is_nightly_run or _is_precommit_run
@@ -519,6 +521,7 @@ def _maybe_apply_random_select(config, items):
 
 _random_select_config = _parse_random_select_config()
 
+
 def _precommit_parametrize_factors(item):
     factors = []
     for position, mark in enumerate(item.iter_markers(name='parametrize')):
@@ -531,6 +534,7 @@ def _precommit_parametrize_factors(item):
     factors.sort(key=lambda factor: (-factor[0], factor[1]))
     return factors
 
+
 def _combination_for_position(position, factors):
     # Reconstruct the per-decorator value indices from pytest's Cartesian-product ordering.
     indices = {}
@@ -538,6 +542,7 @@ def _combination_for_position(position, factors):
         indices[original_position] = position % size
         position //= size
     return tuple(indices[factor[1]] for factor in factors)
+
 
 def _reduced_it_required_items(items):
     """Return (required_items, each_choice_test_count) for reduced IT selection.
@@ -582,6 +587,7 @@ def _reduced_it_required_items(items):
                 required.add(item)
     return required, each_choice_test_count
 
+
 def _select_precommit_cases(config, items):
     """Select each-choice combinations while covering every parameter value at least once."""
     if not is_precommit_run():
@@ -599,6 +605,7 @@ def _select_precommit_cases(config, items):
                 f"REDUCED_IT active: running {len(items)} of {len(original_items)} tests "
                 f"({len(items) / len(original_items):.1%}); "
                 f"each-choice tests={each_choice_test_count}.")
+
 
 @pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(config, items):
