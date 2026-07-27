@@ -24,46 +24,109 @@ import org.mockito.Mockito.when
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatestplus.mockito.MockitoSugar.mock
 
-import org.apache.spark.{SparkConf, SparkEnv}
-import org.apache.spark.shuffle.IndexShuffleBlockResolver
+import org.apache.spark.{HashPartitioner, SparkConf, SparkContext, SparkEnv}
+import org.apache.spark.rdd.RDD
+import org.apache.spark.serializer.Serializer
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.types.DataType
+import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.storage.BlockManager
 
 class RapidsShuffleManagerChecksumSuite extends AnyFunSuite with FQSuiteName {
   private val checksumEnabledKey = RowBasedShuffleChecksumConf.ChecksumEnabledKey
   private val fullRetryKey = RowBasedShuffleChecksumConf.ChecksumMismatchFullRetryKey
 
-  test("rapids shuffle manager fallback follows row-based checksum sources") {
+  test("rapids shuffle manager handle selection follows row-based checksum sources") {
     Seq(
       ("checksum enabled in SQLConf",
         sqlConfWithChecksums(checksumEnabled = true, fullRetry = false),
-        sparkConfWithChecksums(checksumEnabled = false, fullRetry = false), true),
+        rapidsShuffleConf(checksumEnabled = false, fullRetry = false), true),
       ("full retry enabled in SQLConf",
         sqlConfWithChecksums(checksumEnabled = false, fullRetry = true),
-        sparkConfWithChecksums(checksumEnabled = false, fullRetry = false), true),
+        rapidsShuffleConf(checksumEnabled = false, fullRetry = false), true),
       ("both checksum flags enabled in SQLConf",
         sqlConfWithChecksums(checksumEnabled = true, fullRetry = true),
-        sparkConfWithChecksums(checksumEnabled = false, fullRetry = false), true),
+        rapidsShuffleConf(checksumEnabled = false, fullRetry = false), true),
       ("checksum enabled in SparkConf", sqlConfWithoutChecksumEntries(),
-        sparkConfWithChecksums(checksumEnabled = true, fullRetry = false), true),
+        rapidsShuffleConf(checksumEnabled = true, fullRetry = false), true),
       ("full retry enabled in SparkConf", sqlConfWithoutChecksumEntries(),
-        sparkConfWithChecksums(checksumEnabled = false, fullRetry = true), true),
+        rapidsShuffleConf(checksumEnabled = false, fullRetry = true), true),
       ("both checksum flags enabled in SparkConf", sqlConfWithoutChecksumEntries(),
-        sparkConfWithChecksums(checksumEnabled = true, fullRetry = true), true),
+        rapidsShuffleConf(checksumEnabled = true, fullRetry = true), true),
       ("disabled in SQLConf", sqlConfWithChecksums(checksumEnabled = false, fullRetry = false),
-        sparkConfWithChecksums(checksumEnabled = true, fullRetry = true), false),
+        rapidsShuffleConf(checksumEnabled = true, fullRetry = true), false),
       ("disabled in SparkConf", sqlConfWithoutChecksumEntries(),
-        sparkConfWithChecksums(checksumEnabled = false, fullRetry = false), false)
-    ).foreach { case (label, sqlConf, sparkConf, shouldFallback) =>
-      // The fallback decision is private; resolver selection is its simplest observable effect.
-      // Checksum fallback uses the wrapped Spark resolver, while the GPU path uses RAPIDS' resolver.
-      val resolver = shuffleBlockResolver(sqlConf, sparkConf)
+        rapidsShuffleConf(checksumEnabled = false, fullRetry = false), false)
+    ).zipWithIndex.foreach { case ((label, sqlConf, sparkConf, shouldFallback), idx) =>
+      // The fallback is observable at shuffle registration: when checksum support
+      // forces the Spark path, the manager returns the wrapped Spark handle.
+      val handle = registeredShuffleHandle(sqlConf, sparkConf, idx)
       if (shouldFallback) {
-        assert(resolver.isInstanceOf[IndexShuffleBlockResolver], label)
+        assert(!handle.isInstanceOf[GpuShuffleHandle[_, _]], label)
       } else {
-        assert(resolver.isInstanceOf[GpuShuffleBlockResolverBase], label)
+        assert(handle.isInstanceOf[GpuShuffleHandle[_, _]], label)
       }
     }
+  }
+
+  test("rapids shuffle manager checksum fallback follows dynamic SQLConf") {
+    val sparkConf = rapidsShuffleConf(checksumEnabled = false, fullRetry = false)
+    withTestSparkEnv(sparkConf) {
+      val manager = new RapidsShuffleInternalManagerBase(sparkConf, isDriver = true)
+      try {
+        val gpuHandle = SQLConf.withExistingConf(
+          sqlConfWithChecksums(checksumEnabled = false, fullRetry = false)) {
+          manager.registerShuffle(100, gpuShuffleDependency(shuffleId = 100))
+        }
+        assert(gpuHandle.isInstanceOf[GpuShuffleHandle[_, _]])
+
+        val fallbackHandle = SQLConf.withExistingConf(
+          sqlConfWithChecksums(checksumEnabled = true, fullRetry = true)) {
+          manager.registerShuffle(101, gpuShuffleDependency(shuffleId = 101))
+        }
+        assert(!fallbackHandle.isInstanceOf[GpuShuffleHandle[_, _]])
+
+        val gpuHandleAgain = SQLConf.withExistingConf(
+          sqlConfWithChecksums(checksumEnabled = false, fullRetry = false)) {
+          manager.registerShuffle(102, gpuShuffleDependency(shuffleId = 102))
+        }
+        assert(gpuHandleAgain.isInstanceOf[GpuShuffleHandle[_, _]])
+      } finally {
+        manager.stop()
+      }
+    }
+  }
+
+  private def registeredShuffleHandle(
+      sqlConf: SQLConf,
+      sparkConf: SparkConf,
+      shuffleId: Int) = {
+    withTestSparkEnv(sparkConf) {
+      SQLConf.withExistingConf(sqlConf) {
+        val manager = new RapidsShuffleInternalManagerBase(sparkConf, isDriver = true)
+        try {
+          manager.registerShuffle(shuffleId, gpuShuffleDependency(shuffleId))
+        } finally {
+          manager.stop()
+        }
+      }
+    }
+  }
+
+  private def gpuShuffleDependency(shuffleId: Int) = {
+    val sc = mock[SparkContext]
+    when(sc.newShuffleId()).thenReturn(shuffleId)
+    when(sc.cleaner).thenReturn(None)
+    val rdd = mock[RDD[(Int, ColumnarBatch)]]
+    when(rdd.context).thenReturn(sc)
+
+    new GpuShuffleDependency[Int, ColumnarBatch, ColumnarBatch](
+      rdd,
+      new HashPartitioner(1),
+      Array.empty[DataType],
+      mock[Serializer],
+      useGPUShuffle = true,
+      useMultiThreadedShuffle = false)
   }
 
   private def sqlConfWithChecksums(checksumEnabled: Boolean, fullRetry: Boolean): SQLConf = {
@@ -80,29 +143,12 @@ class RapidsShuffleManagerChecksumSuite extends AnyFunSuite with FQSuiteName {
     sqlConf
   }
 
-  private def sparkConfWithChecksums(checksumEnabled: Boolean, fullRetry: Boolean): SparkConf = {
+  private def rapidsShuffleConf(checksumEnabled: Boolean, fullRetry: Boolean): SparkConf = {
     new SparkConf(loadDefaults = false)
       .set("spark.app.id", "shuffle-checksum-test")
-      .set("spark.rapids.shuffle.mode", "MULTITHREADED")
-      .set("spark.rapids.shuffle.multiThreaded.writer.threads", "0")
-      .set("spark.rapids.shuffle.multiThreaded.reader.threads", "0")
+      .set("spark.rapids.shuffle.mode", "CACHE_ONLY")
       .set(checksumEnabledKey, checksumEnabled.toString)
       .set(fullRetryKey, fullRetry.toString)
-  }
-
-  private def shuffleBlockResolver(sqlConf: SQLConf, sparkConf: SparkConf) = {
-    withTestSparkEnv(sparkConf) {
-      SQLConf.withExistingConf(sqlConf) {
-        val manager = new com.nvidia.spark.rapids.spark420.RapidsShuffleManager(
-          sparkConf,
-          isDriver = true)
-        try {
-          manager.shuffleBlockResolver
-        } finally {
-          manager.stop()
-        }
-      }
-    }
   }
 
   private def withTestSparkEnv[T](conf: SparkConf)(f: => T): T = {
