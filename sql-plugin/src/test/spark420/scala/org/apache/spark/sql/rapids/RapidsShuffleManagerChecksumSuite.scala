@@ -24,11 +24,10 @@ import org.mockito.Mockito.when
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatestplus.mockito.MockitoSugar.mock
 
-import org.apache.spark.{HashPartitioner, SparkConf, SparkContext, SparkEnv}
-import org.apache.spark.{Partition, TaskContext}
+import org.apache.spark.{HashPartitioner, Partition, SparkConf, SparkContext, SparkEnv, TaskContext}
+import org.apache.spark.rdd.RDD
 import org.apache.spark.shuffle.ShuffleManager
 import org.apache.spark.shuffle.api.ShuffleDriverComponents
-import org.apache.spark.rdd.RDD
 import org.apache.spark.serializer.Serializer
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.DataType
@@ -124,7 +123,9 @@ class RapidsShuffleManagerChecksumSuite extends AnyFunSuite with FQSuiteName {
     when(sc.env).thenReturn(SparkEnv.get)
     when(sc.shuffleDriverComponents).thenReturn(mock[ShuffleDriverComponents])
     val rdd = new RDD[(Int, ColumnarBatch)](sc, Nil) {
-      override def compute(split: Partition, context: TaskContext): Iterator[(Int, ColumnarBatch)] = ???
+      override def compute(
+          split: Partition,
+          context: TaskContext): Iterator[(Int, ColumnarBatch)] = Iterator.empty
       override protected def getPartitions: Array[Partition] = Array.empty
     }
 
