@@ -53,7 +53,6 @@ trait SparkShims {
   def int96ParquetRebaseWriteKey: String
   def isCastingStringToNegDecimalScaleSupported: Boolean = true
 
-
   // These expressions are stateful only because they reuse mutable scratch buffers. Bridge
   // projection cloning gives every worker its own expression tree and therefore its own buffers.
   protected def isBridgeCloneSafeStatefulExpression(expr: Expression): Boolean = expr match {
