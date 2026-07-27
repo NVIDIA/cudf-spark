@@ -29,6 +29,13 @@ import org.apache.spark.sql.catalyst.plans.physical.KeyGroupedPartitioning
 import org.apache.spark.sql.catalyst.util.InternalRowComparableWrapper
 
 object KeyGroupedPartitioningShim {
+  def copyWithNewPartitionValues(
+      p: KeyGroupedPartitioning,
+      partitionValues: Seq[InternalRow],
+      isPartiallyClustered: Boolean): KeyGroupedPartitioning = {
+    p.copy(numPartitions = partitionValues.length, partitionValues = partitionValues)
+  }
+
   def getUniquePartitions(p: KeyGroupedPartitioning): Seq[InternalRow] = {
     p.partitionValues
       .map(InternalRowComparableWrapper(_, p.expressions))
