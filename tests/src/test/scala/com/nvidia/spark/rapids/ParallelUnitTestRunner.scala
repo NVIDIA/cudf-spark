@@ -78,8 +78,8 @@ object ParallelUnitTestRunner {
           flag
         }
     require(unsupportedFilters.isEmpty,
-      s"${unsupportedFilters.mkString(" and ")} are not supported with -Dparallel=true; " +
-          "use -DwildcardSuites or run without -Dparallel")
+      s"${unsupportedFilters.mkString(" and ")} are not supported with " +
+          "-Drapids.parallelUnitTests=true; use -DwildcardSuites or run without parallel tests")
     val tagsToInclude = propertyList(config("tagsToInclude"))
     val tagsToExclude = propertyList(config("tagsToExclude"))
     val childJvmArgs = splitJvmArgs(config("argLine")) ++ splitJvmArgs(config("testJvmArgs"))

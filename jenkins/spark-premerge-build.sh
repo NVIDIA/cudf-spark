@@ -46,11 +46,9 @@ if [[ -n "$PARALLEL_UT_FORK_COUNT" &&
     exit 1
 fi
 
-# Only set -Dparallel when opting in: the generic property name is also mapped by other test
-# plugins (maven-surefire-plugin binds ${parallel}), so serial builds must not define it at all.
 MVN_PARALLEL_UT_ARGS=""
 if [[ "$PARALLEL_UT" == "true" ]]; then
-    MVN_PARALLEL_UT_ARGS="-Dparallel=true"
+    MVN_PARALLEL_UT_ARGS="-Drapids.parallelUnitTests=true"
     if [[ -n "$PARALLEL_UT_FORK_COUNT" ]]; then
         MVN_PARALLEL_UT_ARGS+=" -DparallelForkCount=$PARALLEL_UT_FORK_COUNT"
     fi

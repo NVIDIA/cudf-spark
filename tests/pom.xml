@@ -130,7 +130,7 @@
             <id>parallel-unit-tests</id>
             <activation>
                 <property>
-                    <name>parallel</name>
+                    <name>rapids.parallelUnitTests</name>
                     <value>true</value>
                 </property>
             </activation>
