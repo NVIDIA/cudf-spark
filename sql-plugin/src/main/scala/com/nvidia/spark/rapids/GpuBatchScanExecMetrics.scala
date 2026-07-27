@@ -42,6 +42,10 @@ trait GpuBatchScanExecMetrics extends GpuExec {
       createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_ICEBERG_BUILD_ACTION_TIME),
     ICEBERG_POST_PROCESS_TIME ->
       createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_ICEBERG_POST_PROCESS_TIME),
+    PERFIO_S3_ICEBERG_TAIL_READS ->
+      createMetric(MODERATE_LEVEL, DESCRIPTION_PERFIO_S3_ICEBERG_TAIL_READS),
+    PERFIO_S3_ICEBERG_TAIL_READ_BYTES ->
+      createSizeMetric(MODERATE_LEVEL, DESCRIPTION_PERFIO_S3_ICEBERG_TAIL_READ_BYTES),
   ) ++ fileCacheMetrics ++ scanCustomMetrics
 
   lazy val fileCacheMetrics: Map[String, GpuMetric] = createFileCacheMetrics()

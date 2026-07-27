@@ -17,8 +17,10 @@
 package org.apache.iceberg.aws.s3;
 
 import ai.rapids.cudf.HostMemoryBuffer;
+import com.nvidia.spark.rapids.GpuMetric;
 import com.nvidia.spark.rapids.IcebergS3RangeCopier;
 import com.nvidia.spark.rapids.IcebergS3RangeCopier.IcebergS3Client;
+import com.nvidia.spark.rapids.NoopMetric$;
 import com.nvidia.spark.rapids.fileio.RapidsInputFiles;
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
 import com.nvidia.spark.rapids.iceberg.ShimUtils;
@@ -30,6 +32,8 @@ import org.apache.spark.TaskContext;
 import org.apache.spark.sql.rapids.GpuTaskMetrics$;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import scala.Option;
+import scala.collection.immutable.Map;
 
 import java.io.IOException;
 import java.net.URI;
@@ -49,15 +53,24 @@ public final class IcebergS3InputFile implements RapidsInputFile {
   private final IcebergInputFile delegate;
   private final URI s3Uri;
   private final IcebergS3Client icebergS3Client;
+  private final GpuMetric tailReadCount;
+  private final GpuMetric tailReadBytes;
 
   private IcebergS3InputFile(
-      IcebergInputFile delegate, URI s3Uri, IcebergS3Client icebergS3Client) {
+      IcebergInputFile delegate,
+      URI s3Uri,
+      IcebergS3Client icebergS3Client,
+      GpuMetric tailReadCount,
+      GpuMetric tailReadBytes) {
     this.delegate = delegate;
     this.s3Uri = s3Uri;
     this.icebergS3Client = icebergS3Client;
+    this.tailReadCount = tailReadCount;
+    this.tailReadBytes = tailReadBytes;
   }
 
-  public static RapidsInputFile maybeCreate(InputFile inputFile, FileIO fileIO) {
+  public static RapidsInputFile maybeCreate(
+      InputFile inputFile, FileIO fileIO, Map<String, GpuMetric> metrics) {
     // When the gating conf is off (or the file is not an S3 file), return the
     // default IcebergInputFile so the standard Iceberg SeekableInputStream path is used.
     IcebergInputFile delegate = new IcebergInputFile(inputFile);
@@ -82,7 +95,17 @@ public final class IcebergS3InputFile implements RapidsInputFile {
       return delegate;
     }
     LOG.debug("IcebergS3RangeCopier path active for {}", s3Uri);
-    return new IcebergS3InputFile(delegate, s3Uri, icebergS3Client);
+    return new IcebergS3InputFile(
+        delegate,
+        s3Uri,
+        icebergS3Client,
+        getMetric(metrics, GpuMetric.PERFIO_S3_ICEBERG_TAIL_READS()),
+        getMetric(metrics, GpuMetric.PERFIO_S3_ICEBERG_TAIL_READ_BYTES()));
+  }
+
+  private static GpuMetric getMetric(Map<String, GpuMetric> metrics, String name) {
+    Option<GpuMetric> metric = metrics.get(name);
+    return metric.isDefined() ? metric.get() : NoopMetric$.MODULE$;
   }
 
   @Override
@@ -134,5 +157,11 @@ public final class IcebergS3InputFile implements RapidsInputFile {
       throw new IllegalArgumentException("length must be non-negative");
     }
     IcebergS3RangeCopier.copyTailToHMB(icebergS3Client, output, s3Uri, length, /*dstOffset*/ 0L);
+    tailReadCount.add(1L);
+    tailReadBytes.add(length);
+    LOG.info(
+        "PerfIO S3 Iceberg readTail suffix-range GET completed: uri={}, range=bytes=-{}",
+        s3Uri,
+        length);
   }
 }
