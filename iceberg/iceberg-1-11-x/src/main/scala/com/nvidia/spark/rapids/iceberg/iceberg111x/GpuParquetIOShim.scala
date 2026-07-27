@@ -20,7 +20,6 @@ import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile
 import com.nvidia.spark.rapids.iceberg.parquet.converter.ToIcebergShaded
-import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile
 import com.nvidia.spark.rapids.parquet.{HMBInputFile, ParquetFooterUtils}
 import org.apache.hadoop.fs.Path
 import org.apache.iceberg.parquet.GpuParquetIO
@@ -37,13 +36,12 @@ import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader
 object GpuParquetIOShim {
   def openReader(
       inputFile: IcebergInputFile,
-      footerInputFile: RapidsInputFile,
       filePath: Path,
       options: ParquetReadOptions,
       metrics: Map[String, GpuMetric]): ParquetFileReader = {
     val metadata = withResource(ParquetFooterUtils.getFooterBuffer(
-        footerInputFile, metrics,
-        ParquetFooterUtils.readFooterBufferFromInputFile(footerInputFile, filePath))) { hmb =>
+        inputFile, metrics,
+        ParquetFooterUtils.readFooterBufferFromInputFile(inputFile, filePath))) { hmb =>
       val shadedHmbFile = ToIcebergShaded.shade(new HMBInputFile(hmb))
       withResource(shadedHmbFile.newStream()) { hmbStream =>
         ParquetFileReader.readFooter(shadedHmbFile, options, hmbStream)

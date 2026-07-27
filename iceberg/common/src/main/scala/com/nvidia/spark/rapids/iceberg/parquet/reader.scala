@@ -24,9 +24,8 @@ import scala.collection.JavaConverters._
 
 import com.nvidia.spark.rapids.{CombineConf, DateTimeRebaseCorrected, GpuMetric, ThreadPoolConfBuilder}
 import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.fileio.iceberg.{IcebergFileIO, IcebergInputFile}
+import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile
 import com.nvidia.spark.rapids.iceberg.parquet.converter.FromIcebergShaded._
-import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile
 import com.nvidia.spark.rapids.parquet.{GpuParquetUtils, ParquetFileInfoWithBlockMeta}
 import com.nvidia.spark.rapids.shims.PartitionedFileUtilsShim
 import org.apache.hadoop.conf.Configuration
@@ -63,20 +62,8 @@ case class IcebergPartitionedFile(
   }
 
   def newReader(metrics: Map[String, GpuMetric] = Map.empty): ParquetFileReader = {
-    newReader(file, metrics)
-  }
-
-  def newReader(
-      fileIO: IcebergFileIO,
-      metrics: Map[String, GpuMetric]): ParquetFileReader = {
-    newReader(fileIO.newInputFile(file.getDelegate), metrics)
-  }
-
-  private def newReader(
-      footerInputFile: RapidsInputFile,
-      metrics: Map[String, GpuMetric]): ParquetFileReader = {
     try {
-      GpuParquetIO.openReader(file, footerInputFile, path, parquetReadOptions, metrics)
+      GpuParquetIO.openReader(file, path, parquetReadOptions, metrics)
     } catch {
       case e: IOException =>
         throw new UncheckedIOException(s"Failed to newInputFile Parquet file: " +
@@ -159,7 +146,6 @@ case class GpuIcebergParquetReaderConf(
 )
 
 trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable with Logging {
-  def rapidsFileIO: IcebergFileIO
   def conf: GpuIcebergParquetReaderConf
 
   def projectSchema(fileSchema: ShadedMessageType, requiredSchema: Schema):
@@ -217,7 +203,7 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
 
   def filterParquetBlocks(file: IcebergPartitionedFile,
       requiredSchema: Schema): (ParquetFileInfoWithBlockMeta, ShadedMessageType) = {
-    withResource(file.newReader(rapidsFileIO, conf.metrics)) { reader =>
+    withResource(file.newReader(conf.metrics)) { reader =>
       val fileSchema = reader.getFileMetaData.getSchema
       val (typeWithIds, fileReadSchema) = projectSchema(fileSchema, requiredSchema)
       val filteredBlocks = filterRowGroups(reader, requiredSchema, typeWithIds, file.filter)
@@ -244,8 +230,7 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
           }
         }
         if (file.split.isDefined) {
-          withResource(
-              file.copy(split = None).newReader(rapidsFileIO, conf.metrics)) { fullReader =>
+          withResource(file.copy(split = None).newReader(conf.metrics)) { fullReader =>
             populateFromAllBlocks(fullReader.getFooter.getBlocks)
           }
         } else {

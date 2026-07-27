@@ -47,7 +47,7 @@ import java.util.OptionalLong;
  *
  * <p>The package-private S3 file access is isolated in {@link IcebergS3InputFileAccess}.
  */
-public final class IcebergS3InputFile implements RapidsInputFile {
+public final class IcebergS3InputFile extends IcebergInputFile {
   private static final Logger LOG = LoggerFactory.getLogger(IcebergS3InputFile.class);
 
   private final IcebergInputFile delegate;
@@ -62,6 +62,7 @@ public final class IcebergS3InputFile implements RapidsInputFile {
       IcebergS3Client icebergS3Client,
       GpuMetric tailReadCount,
       GpuMetric tailReadBytes) {
+    super(delegate.getDelegate());
     this.delegate = delegate;
     this.s3Uri = s3Uri;
     this.icebergS3Client = icebergS3Client;
@@ -69,7 +70,7 @@ public final class IcebergS3InputFile implements RapidsInputFile {
     this.tailReadBytes = tailReadBytes;
   }
 
-  public static RapidsInputFile maybeCreate(
+  public static IcebergInputFile maybeCreate(
       InputFile inputFile, FileIO fileIO, Map<String, GpuMetric> metrics) {
     // When the gating conf is off (or the file is not an S3 file), return the
     // default IcebergInputFile so the standard Iceberg SeekableInputStream path is used.

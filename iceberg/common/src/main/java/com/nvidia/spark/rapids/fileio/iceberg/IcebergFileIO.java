@@ -65,7 +65,7 @@ public class IcebergFileIO implements RapidsFileIO {
 
 
   @Override
-  public RapidsInputFile newInputFile(String path) throws IOException {
+  public IcebergInputFile newInputFile(String path) throws IOException {
     return newInputFile(delegate.newInputFile(path));
   }
 
@@ -74,7 +74,7 @@ public class IcebergFileIO implements RapidsFileIO {
    *
    * @param inputFile the Iceberg input file to wrap
    */
-  public RapidsInputFile newInputFile(InputFile inputFile) {
+  public IcebergInputFile newInputFile(InputFile inputFile) {
     Objects.requireNonNull(inputFile, "inputFile can't be null");
     return IcebergS3InputFile.maybeCreate(inputFile, delegate, metrics);
   }
