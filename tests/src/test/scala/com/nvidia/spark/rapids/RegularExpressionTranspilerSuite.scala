@@ -295,9 +295,38 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
 
   test("hex digits - find") {
     val patterns = Seq(raw"\x07", raw"\x3f", raw"\x7F", raw"\x7f", raw"\x{7}", raw"\x{0007f}",
-      raw"\x80", raw"\xff", raw"\x{0008f}", raw"\x{10FFFF}", raw"\x{00eeee}")
+      raw"\x80", raw"\xff", raw"\x{0008f}", raw"\x{00eeee}")
+    // NOTE: supplementary codepoints (cp > U+FFFF) such as `\x{1F600}` are
+    // covered below -- they now throw and fall back to CPU before a `.toChar`
+    // rewrite can truncate them.
     assertCpuGpuMatchesRegexpFind(patterns, Seq("", "\u0007", "a\u0007b",
         "\u0007\u003f\u007f", "\u0080", "a\u00fe\u00ffb", "ab\ueeeecd"))
+  }
+
+  test("supplementary codepoint hex escapes fall back to CPU") {
+    // Before the fix, `\x{1F600}` (U+1F600 grinning-face emoji) was
+    // silently truncated to `RegexChar(0x1F600.toChar)` = `RegexChar('')`,
+    // making the GPU match U+F600 instead of the supplementary codepoint.
+    // The parser now throws RegexUnsupportedException for any hex escape whose
+    // codepoint exceeds U+FFFF, so spark-rapids falls back to
+    // the CPU regex engine (which Java's Pattern handles correctly).
+    val supplementaryHexPatterns = Seq(
+      raw"\x{10000}",             // lowest supplementary codepoint
+      raw"\x{1F600}",             // grinning face emoji
+      raw"\x{10FFFF}",            // highest valid Unicode codepoint
+      raw"a\x{1F600}b",           // embedded in a longer pattern
+      raw"[\x{1F600}abc]",        // inside a character class
+      raw"[\x{10000}-\x{10FFFF}]" // range with supplementary endpoints
+    )
+    supplementaryHexPatterns.foreach { p =>
+      assertUnsupported(p, RegexFindMode,
+        "GPU regex hex escapes do not support supplementary codepoints")
+    }
+
+    // BMP boundary U+FFFF must continue to transpile (regression guard).
+    assertCpuGpuMatchesRegexpFind(
+      Seq(raw"\x{FFFF}", raw"\xff"),
+      Seq("", "a", "x￿y", "xÿy", "￿", "ÿ"))
   }
 
   test("hex digit character classes") {
@@ -975,8 +1004,7 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     }
   }
 
-  // Disabled until https://github.com/NVIDIA/cudf-spark/issues/15293 is fixed
-  ignore("string split fuzz - anchor focused") {
+  test("string split fuzz - anchor focused") {
     val (data, patterns) = generateDataAndPatterns(validDataChars = Some("\r\nabc"),
       validPatternChars = "^$\\AZz\r\n()", RegexSplitMode)
     doStringSplitTest(patterns, data, -1)

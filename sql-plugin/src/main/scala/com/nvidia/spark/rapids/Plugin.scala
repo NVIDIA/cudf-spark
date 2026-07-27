@@ -36,6 +36,7 @@ import com.nvidia.spark.rapids.filecache.{FileCache, FileCacheLocalityManager, F
 import com.nvidia.spark.rapids.io.async.TrafficController
 import com.nvidia.spark.rapids.jni.{GpuTimeZoneDB, Hash, JSONUtils, RmmSpark, TaskPriority}
 import com.nvidia.spark.rapids.python.PythonWorkerSemaphore
+import com.nvidia.spark.rapids.shims.ShuffleManagerShimUtils
 import org.apache.commons.lang3.exception.ExceptionUtils
 
 import org.apache.spark.{ExceptionFailure, SparkConf, SparkContext, TaskContext, TaskFailedReason}
@@ -53,6 +54,21 @@ import org.apache.spark.sql.rapids.execution.TrampolineUtil
 class PluginException(msg: String) extends RuntimeException(msg)
 
 case class CudfVersionMismatchException(errorMsg: String) extends PluginException(errorMsg)
+
+object RapidsShuffleManagerAutoConfigurator {
+  private val SHUFFLE_MANAGER_KEY = "spark.shuffle.manager"
+  private val SHUFFLE_DATA_IO_PLUGIN_KEY = "spark.shuffle.sort.io.plugin.class"
+  private val RAPIDS_SHUFFLE_DATA_IO_CLASS_SUFFIX = "RapidsLocalDiskShuffleDataIO"
+
+  def configure(conf: SparkConf): Unit = {
+    if (ShuffleManagerShimUtils.supportsAutoConfiguration &&
+        !conf.contains(SHUFFLE_MANAGER_KEY) &&
+        conf.getOption(SHUFFLE_DATA_IO_PLUGIN_KEY)
+          .forall(_.endsWith(RAPIDS_SHUFFLE_DATA_IO_CLASS_SUFFIX))) {
+      conf.set(SHUFFLE_MANAGER_KEY, ShimLoader.getRapidsShuffleManagerClass)
+    }
+  }
+}
 
 case class ColumnarOverrideRules(sparkSession: SparkSession) extends ColumnarRule with Logging {
   lazy val overrides: Rule[SparkPlan] = GpuOverrides(sparkSession)
@@ -233,6 +249,8 @@ object RapidsPluginUtils extends Logging {
   }
 
   def fixupConfigsOnDriver(conf: SparkConf): Unit = {
+    RapidsShuffleManagerAutoConfigurator.configure(conf)
+
     val plugins = Array(SQL_PLUGIN_NAME, UDF_PLUGIN_NAME, DFUDF_PLUGIN_NAME)
     // First add in the SQL executor plugin because that is what we need at a minimum
     if (conf.contains(SQL_PLUGIN_CONF_KEY)) {

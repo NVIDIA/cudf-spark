@@ -15,6 +15,7 @@
  */
 
 /*** spark-rapids-shim-json-lines
+{"spark": "359"}
 {"spark": "403"}
 {"spark": "404"}
 {"spark": "412"}

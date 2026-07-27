@@ -12,8 +12,8 @@ and the directory that contains the corresponding support code.
 | Iceberg Version | Spark Version              | Directory         |
 |-----------------|----------------------------|-------------------|
 | 1.6.x           | Spark 3.5.0-3.5.3          | `iceberg-1-6-x`  |
-| 1.9.x           | Spark 3.5.4-3.5.8          | `iceberg-1-9-x`  |
-| 1.10.x          | Spark 3.5.4-3.5.8, 4.0.x  | `iceberg-1-10-x` |
+| 1.9.x           | Spark 3.5.4-3.5.9          | `iceberg-1-9-x`  |
+| 1.10.x          | Spark 3.5.4-3.5.9, 4.0.x  | `iceberg-1-10-x` |
 | 1.11.x          | Spark 4.0.2+, 4.1.x        | `iceberg-1-11-x` |
 
 Iceberg GPU acceleration is currently supported on Spark 3.5.x, 4.0.x, and 4.1.x.
