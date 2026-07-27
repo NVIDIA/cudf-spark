@@ -21,6 +21,7 @@ import com.nvidia.spark.rapids.IcebergS3RangeCopier;
 import com.nvidia.spark.rapids.IcebergS3RangeCopier.IcebergS3Client;
 import com.nvidia.spark.rapids.fileio.RapidsInputFiles;
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
+import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputStream;
 import com.nvidia.spark.rapids.iceberg.ShimUtils;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import com.nvidia.spark.rapids.jni.fileio.SeekableInputStream;
@@ -34,7 +35,6 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.net.URI;
 import java.util.List;
-import java.util.OptionalLong;
 
 /**
  * S3-backed {@link RapidsInputFile} that delegates byte-range reads to
@@ -46,15 +46,15 @@ import java.util.OptionalLong;
 public final class IcebergS3InputFile extends IcebergInputFile {
   private static final Logger LOG = LoggerFactory.getLogger(IcebergS3InputFile.class);
 
-  private final IcebergInputFile delegate;
+  private final InputFile delegate;
   private final URI s3Uri;
   private final IcebergS3Client icebergS3Client;
 
   private IcebergS3InputFile(
-      IcebergInputFile delegate,
+      InputFile delegate,
       URI s3Uri,
       IcebergS3Client icebergS3Client) {
-    super(delegate.getDelegate());
+    super(delegate);
     this.delegate = delegate;
     this.s3Uri = s3Uri;
     this.icebergS3Client = icebergS3Client;
@@ -85,12 +85,12 @@ public final class IcebergS3InputFile extends IcebergInputFile {
       return delegate;
     }
     LOG.debug("IcebergS3RangeCopier path active for {}", s3Uri);
-    return new IcebergS3InputFile(delegate, s3Uri, icebergS3Client);
+    return new IcebergS3InputFile(inputFile, s3Uri, icebergS3Client);
   }
 
   @Override
   public String path() {
-    return delegate.path();
+    return delegate.location();
   }
 
   @Override
@@ -99,22 +99,16 @@ public final class IcebergS3InputFile extends IcebergInputFile {
   }
 
   @Override
-  public OptionalLong getLastModificationTime() throws IOException {
-    return delegate.getLastModificationTime();
-  }
-
-  @Override
   public SeekableInputStream open() throws IOException {
-    return delegate.open();
+    return new IcebergInputStream(delegate.newStream());
   }
 
   /**
-   * Returns the underlying Iceberg {@link InputFile}, matching
-   * {@link IcebergInputFile#getDelegate()} for use by iceberg-internal
-   * code paths that need direct access to the iceberg API.
+   * Returns the underlying Iceberg {@link InputFile} for use by
+   * iceberg-internal code paths that need direct access to the iceberg API.
    */
   public InputFile getDelegate() {
-    return delegate.getDelegate();
+    return delegate;
   }
 
   @Override
