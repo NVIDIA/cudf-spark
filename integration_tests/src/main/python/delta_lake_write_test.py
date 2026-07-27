@@ -745,7 +745,8 @@ def test_delta_atomic_create_table_as_select(spark_tmp_table_factory, spark_tmp_
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
 @pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_xfail_reasons(
                             enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12041"), ids=idfn)
-@pytest.mark.xfail(is_spark_356_or_later(), reason="https://github.com/delta-io/delta/issues/4671")
+@pytest.mark.xfail(is_spark_356_or_later() and not is_spark_400_or_later(),
+                   reason="https://github.com/delta-io/delta/issues/4671")
 @pytest.mark.xfail(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
 def test_delta_atomic_replace_table_as_select(spark_tmp_table_factory, spark_tmp_path, enable_deletion_vectors):
     _atomic_write_table_as_select(delta_write_gens, spark_tmp_table_factory, spark_tmp_path,
@@ -816,11 +817,54 @@ def test_delta_ctas_sql(spark_tmp_table_factory, enable_deletion_vectors, use_cd
 @pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_xfail_reasons(
     enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12041"), ids=idfn)
 @pytest.mark.parametrize("use_cdf", [True, False], ids=idfn)
-@pytest.mark.xfail(is_spark_356_or_later(), reason="https://github.com/delta-io/delta/issues/4671")
+@pytest.mark.xfail(is_spark_356_or_later() and not is_spark_400_or_later(),
+                   reason="https://github.com/delta-io/delta/issues/4671")
 @pytest.mark.xfail(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
 def test_delta_rtas_sql(spark_tmp_table_factory, enable_deletion_vectors, use_cdf):
     _atomic_write_table_as_select_sql(delta_write_gens, spark_tmp_table_factory,
                                       True, enable_deletion_vectors, use_cdf)
+
+
+@allow_non_gpu('DataWritingCommandExec', 'WriteFilesExec', *delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_spark_400_or_later(),
+                    reason="Delta Lake 4.0 contains the native truncate capability")
+@pytest.mark.skipif(is_databricks_runtime(), reason="This test covers OSS Delta Lake")
+def test_delta_rtas_truncate_capability(spark_tmp_table_factory):
+    cpu_table = spark_tmp_table_factory.get()
+    gpu_table = spark_tmp_table_factory.get()
+    confs = copy_and_update(writer_confs, delta_writes_enabled_conf)
+
+    def create_initial_tables(spark):
+        for table in [cpu_table, gpu_table]:
+            spark.sql(f"CREATE TABLE {table} USING DELTA AS SELECT id FROM range(10)")
+
+    def replace_table(spark, table):
+        spark.sql(
+            f"CREATE OR REPLACE TABLE {table} USING DELTA "
+            f"AS SELECT id FROM range(20) WHERE id >= 10")
+
+    with_cpu_session(create_initial_tables, conf=confs)
+    with_cpu_session(lambda spark: replace_table(spark, cpu_table), conf=confs)
+
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        with_gpu_session(lambda spark: replace_table(spark, gpu_table), conf=confs)
+        plans = callback.getResultsWithTimeout(10000)
+        assert any(callback.contains(plan, "GpuAtomicReplaceTableAsSelectExec")
+                   for plan in plans), "GpuAtomicReplaceTableAsSelectExec was not executed"
+    finally:
+        callback.endCapture()
+
+    def read_ids(spark, table):
+        return spark.sql(f"SELECT id FROM {table} ORDER BY id").collect()
+
+    cpu_rows = with_cpu_session(lambda spark: read_ids(spark, cpu_table), conf=confs)
+    gpu_rows = with_cpu_session(lambda spark: read_ids(spark, gpu_table), conf=confs)
+    assert_equal(cpu_rows, gpu_rows)
+    assert [row.id for row in gpu_rows] == list(range(10, 20))
 
 
 @allow_non_gpu(*delta_meta_allow)
