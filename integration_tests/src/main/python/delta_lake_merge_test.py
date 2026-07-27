@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
+
 import pyspark.sql.functions as f
 import pytest
 
@@ -138,7 +140,9 @@ def test_delta_merge_check_overflow_in_table_write_error(
     assert_gpu_and_cpu_error(
         do_merge,
         conf=delta_merge_no_cpu_bridge_conf,
-        error_message="DELTA_CAST_OVERFLOW_IN_TABLE_WRITE")
+        error_message=re.compile(
+            r'\[DELTA_CAST_OVERFLOW_IN_TABLE_WRITE\].*"INT".*"TINYINT".*`byteF`',
+            re.DOTALL))
 
 
 @allow_non_gpu(delta_write_fallback_allow, *delta_meta_allow)

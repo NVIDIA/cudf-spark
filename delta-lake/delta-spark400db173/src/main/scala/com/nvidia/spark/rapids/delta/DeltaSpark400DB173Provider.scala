@@ -84,7 +84,7 @@ object DeltaSpark400DB173Provider extends DatabricksDeltaProviderBase {
         (a, conf, p, r) => new GpuWriteIntoDeltaCommandMeta(a, conf, p, r))
     ).map(r => (r.getClassFor.asSubclass(classOf[DataWritingCommand]), r)).toMap
   }
-  
+
   override def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
     val rule = GpuCheckOverflowInTableWrite.exprRule
     super.getExprs + (rule.getClassFor.asSubclass(classOf[Expression]) -> rule)
