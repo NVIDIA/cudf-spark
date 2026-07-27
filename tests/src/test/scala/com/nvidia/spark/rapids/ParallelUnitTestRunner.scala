@@ -34,7 +34,7 @@ import org.apache.spark.sql.rapids.execution.TrampolineUtil
 
 /** Runs ScalaTest suites concurrently in isolated JVMs. */
 object ParallelUnitTestRunner {
-  private[rapids] case class SuiteTask(id: Int, suite: String, weight: Double)
+  private[rapids] case class SuiteTask(id: Int, suite: String)
   private[rapids] case class SuiteBatch(tasks: Seq[SuiteTask]) {
     require(tasks.nonEmpty, "A suite batch must not be empty")
   }
@@ -100,15 +100,15 @@ object ParallelUnitTestRunner {
     Files.createDirectories(reportsDir)
     val allSuites = discoverSuiteNames(testClasses)
     require(allSuites.nonEmpty, "No ScalaTest suites were discovered")
-    val discovered = allSuites.filter(matchesWildcard(_, wildcardSuites)).sorted
+    val discovered = allSuites.filter(matchesWildcard(_, wildcardSuites))
     if (discovered.isEmpty) {
       // Match the serial scalatest plugin: a filter that selects no suites is a successful no-op.
       println(s"No suites matched wildcardSuites=${wildcardSuites.mkString(",")}; nothing to run")
       return
     }
-    val suiteTasks = orderSuites(discovered, testClasses)
+    val suiteTasks = orderSuites(discovered)
         .zipWithIndex
-        .map { case ((suite, weight), index) => SuiteTask(index + 1, suite, weight) }
+        .map { case (suite, index) => SuiteTask(index + 1, suite) }
     val suiteBatches = createSuiteBatches(suiteTasks)
     val workerCount = effectiveWorkerCount(requestedForks, suiteBatches)
     val perForkAllocation = allocationFraction * parallelGpuAllocationRatio / workerCount
@@ -278,8 +278,7 @@ object ParallelUnitTestRunner {
             currentTask.set(Some(task))
             suiteDeadlineNanos.set(
               System.nanoTime() + TimeUnit.SECONDS.toNanos(suiteTimeoutSeconds))
-            println(f"[wave-$runId-worker-$workerId] START ${task.suite} " +
-                f"(estimated weight ${task.weight}%.1f)")
+            println(s"[wave-$runId-worker-$workerId] START ${task.suite}")
             writer.write(s"RUN\t${task.id}\t${task.suite}\n")
             writer.flush()
             true
@@ -693,15 +692,7 @@ object ParallelUnitTestRunner {
     thread
   }
 
-  private def orderSuites(
-      suites: Seq[String],
-      testClasses: Path): Seq[(String, Double)] = {
-    suites.map { suite =>
-      val classFile = testClasses.resolve(suite.replace('.', File.separatorChar) + ".class")
-      val weight = if (Files.exists(classFile)) Files.size(classFile).toDouble else 1.0
-      suite -> weight
-    }.sortBy { case (_, weight) => -weight }
-  }
+  private[rapids] def orderSuites(suites: Seq[String]): Seq[String] = suites.sorted
 
   private[rapids] def createSuiteBatches(tasks: Seq[SuiteTask]): Seq[SuiteBatch] = {
     val taskBySuite = tasks.map(task => task.suite -> task).toMap

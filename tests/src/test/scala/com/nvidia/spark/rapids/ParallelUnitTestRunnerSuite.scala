@@ -65,11 +65,11 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
     val dppOn =
       "org.apache.spark.sql.rapids.suites.RapidsDynamicPartitionPruningV1SuiteAEOn"
     val tasks = Seq(
-      ParallelUnitTestRunner.SuiteTask(1, "example.SuiteOne", 5.0),
-      ParallelUnitTestRunner.SuiteTask(2, dppOn, 4.0),
-      ParallelUnitTestRunner.SuiteTask(3, parquetSuite, 3.0),
-      ParallelUnitTestRunner.SuiteTask(4, dppOff, 2.0),
-      ParallelUnitTestRunner.SuiteTask(5, "example.SuiteTwo", 1.0))
+      ParallelUnitTestRunner.SuiteTask(1, "example.SuiteOne"),
+      ParallelUnitTestRunner.SuiteTask(2, dppOn),
+      ParallelUnitTestRunner.SuiteTask(3, parquetSuite),
+      ParallelUnitTestRunner.SuiteTask(4, dppOff),
+      ParallelUnitTestRunner.SuiteTask(5, "example.SuiteTwo"))
 
     val batches = ParallelUnitTestRunner.createSuiteBatches(tasks)
 
@@ -84,16 +84,21 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
     val tasks = Seq(
       ParallelUnitTestRunner.SuiteTask(
         1,
-        "org.apache.spark.sql.rapids.suites.RapidsDynamicPartitionPruningV1SuiteAEOff",
-        2.0),
+        "org.apache.spark.sql.rapids.suites.RapidsDynamicPartitionPruningV1SuiteAEOff"),
       ParallelUnitTestRunner.SuiteTask(
         2,
-        "org.apache.spark.sql.rapids.suites.RapidsDynamicPartitionPruningV1SuiteAEOn",
-        1.0))
+        "org.apache.spark.sql.rapids.suites.RapidsDynamicPartitionPruningV1SuiteAEOn"))
     val batches = ParallelUnitTestRunner.createSuiteBatches(tasks)
 
     assert(batches.size === 1)
     assert(ParallelUnitTestRunner.effectiveWorkerCount(4, batches) === 1)
+  }
+
+  test("suites are ordered by fully qualified name") {
+    val suites = Seq("example.SuiteZ", "another.SuiteB", "another.SuiteA")
+
+    assert(ParallelUnitTestRunner.orderSuites(suites) ===
+        Seq("another.SuiteA", "another.SuiteB", "example.SuiteZ"))
   }
 
   test("wildcardSuites match by fully qualified name prefix, like ScalaTest -w") {
