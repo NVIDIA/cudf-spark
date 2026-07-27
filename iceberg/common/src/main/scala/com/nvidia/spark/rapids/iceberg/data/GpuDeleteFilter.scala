@@ -22,7 +22,7 @@ import scala.collection.mutable.ArrayBuffer
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric.{JOIN_TIME, OP_TIME_LEGACY}
-import com.nvidia.spark.rapids.fileio.iceberg.{BaseIcebergInputFile, IcebergFileIO}
+import com.nvidia.spark.rapids.fileio.iceberg.{IcebergFileIO, IcebergInputFile}
 import com.nvidia.spark.rapids.iceberg.data.GpuDeleteFilter2._
 import com.nvidia.spark.rapids.iceberg.fieldIndex
 import com.nvidia.spark.rapids.iceberg.parquet.GpuIcebergParquetReaderConf
@@ -41,7 +41,7 @@ import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 class GpuDeleteFilter(
     private val rapidsFileIO: IcebergFileIO,
     private val tableSchema: Schema,
-    val inputFiles: Map[String, BaseIcebergInputFile],
+    val inputFiles: Map[String, IcebergInputFile],
     val parquetConf: GpuIcebergParquetReaderConf,
     private val deletes: Seq[DeleteFile],
     deleteLoaderProvider: => Option[GpuDeleteLoader] = None) extends Logging with AutoCloseable {

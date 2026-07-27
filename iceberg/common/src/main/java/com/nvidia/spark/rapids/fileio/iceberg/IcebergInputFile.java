@@ -16,16 +16,48 @@
 
 package com.nvidia.spark.rapids.fileio.iceberg;
 
+import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
+import com.nvidia.spark.rapids.jni.fileio.SeekableInputStream;
 import org.apache.iceberg.io.InputFile;
 
+import java.io.IOException;
+import java.util.Objects;
+
 /**
- * Default implementation of {@link BaseIcebergInputFile} using the Iceberg {@link InputFile}.
+ * Implementation of {@link RapidsInputFile} using the Iceberg {@link InputFile}.
  * <br/>
  * This class wraps an Iceberg {@link InputFile} and provides methods to get the file length
  * and open a stream for reading.
  */
-public class IcebergInputFile extends BaseIcebergInputFile {
+public class IcebergInputFile implements RapidsInputFile {
+  private final InputFile delegate;
+
   public IcebergInputFile(InputFile delegate) {
-    super(delegate);
+    Objects.requireNonNull(delegate, "delegate can't be null");
+    this.delegate = delegate;
+  }
+
+  @Override
+  public String path() {
+    return delegate.location();
+  }
+
+  @Override
+  public long getLength() throws IOException {
+    return delegate.getLength();
+  }
+
+  @Override
+  public SeekableInputStream open() throws IOException {
+    return new IcebergInputStream(delegate.newStream());
+  }
+
+  /**
+   * Returns the underlying Iceberg InputFile delegate.
+   *
+   * @return the Iceberg InputFile delegate
+   */
+  public InputFile getDelegate() {
+    return delegate;
   }
 }

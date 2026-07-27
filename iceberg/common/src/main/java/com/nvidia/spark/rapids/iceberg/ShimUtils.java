@@ -19,7 +19,7 @@ package com.nvidia.spark.rapids.iceberg;
 import com.nvidia.spark.rapids.GpuMetric;
 import com.nvidia.spark.rapids.RapidsConf;
 import com.nvidia.spark.rapids.ShimLoader;
-import com.nvidia.spark.rapids.fileio.iceberg.BaseIcebergInputFile;
+import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
 
 import org.apache.hadoop.fs.Path;
 import org.apache.iceberg.ContentFile;
@@ -68,7 +68,7 @@ public class ShimUtils {
     }
 
     public static ParquetFileReader openParquetReader(
-            BaseIcebergInputFile inputFile,
+            IcebergInputFile inputFile,
             Path filePath,
             ParquetReadOptions options,
             scala.collection.immutable.Map<String, GpuMetric> metrics) throws IOException {

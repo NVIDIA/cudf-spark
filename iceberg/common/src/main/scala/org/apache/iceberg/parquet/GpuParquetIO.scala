@@ -17,7 +17,7 @@
 package org.apache.iceberg.parquet
 
 import com.nvidia.spark.rapids.GpuMetric
-import com.nvidia.spark.rapids.fileio.iceberg.BaseIcebergInputFile
+import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile
 import com.nvidia.spark.rapids.iceberg.ShimUtils
 import org.apache.hadoop.fs.Path
 import org.apache.iceberg.io.InputFile
@@ -37,7 +37,7 @@ object GpuParquetIO {
    * pre-parsed footer).
    */
   def openReader(
-      inputFile: BaseIcebergInputFile,
+      inputFile: IcebergInputFile,
       filePath: Path,
       options: ParquetReadOptions,
       metrics: Map[String, GpuMetric]): ParquetFileReader = {

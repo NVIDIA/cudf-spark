@@ -22,7 +22,7 @@ import scala.collection.mutable.ArrayBuffer
 import ai.rapids.cudf.{Table => CudfTable}
 import com.nvidia.spark.rapids.{GpuColumnVector, LazySpillableColumnarBatch}
 import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.fileio.iceberg.{BaseIcebergInputFile, IcebergFileIO}
+import com.nvidia.spark.rapids.fileio.iceberg.{IcebergFileIO, IcebergInputFile}
 import com.nvidia.spark.rapids.iceberg.ShimUtils.locationOf
 import com.nvidia.spark.rapids.iceberg.parquet._
 import org.apache.iceberg.{DeleteFile, MetadataColumns, Schema}
@@ -39,7 +39,7 @@ trait GpuDeleteLoader {
 
 class DefaultDeleteLoader(
     private val rapidsFileIO: IcebergFileIO,
-    private val inputFiles: Map[String, BaseIcebergInputFile],
+    private val inputFiles: Map[String, IcebergInputFile],
     private val parquetConf: GpuIcebergParquetReaderConf) extends GpuDeleteLoader {
 
   def loadDeletes(deletes: Seq[DeleteFile],

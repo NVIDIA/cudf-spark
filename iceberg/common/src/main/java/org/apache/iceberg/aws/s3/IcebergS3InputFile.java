@@ -20,10 +20,10 @@ import ai.rapids.cudf.HostMemoryBuffer;
 import com.nvidia.spark.rapids.IcebergS3RangeCopier;
 import com.nvidia.spark.rapids.IcebergS3RangeCopier.IcebergS3Client;
 import com.nvidia.spark.rapids.fileio.RapidsInputFiles;
-import com.nvidia.spark.rapids.fileio.iceberg.BaseIcebergInputFile;
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
 import com.nvidia.spark.rapids.iceberg.ShimUtils;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
+import com.nvidia.spark.rapids.jni.fileio.SeekableInputStream;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.InputFile;
 import org.apache.spark.TaskContext;
@@ -34,6 +34,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.net.URI;
 import java.util.List;
+import java.util.OptionalLong;
 
 /**
  * S3-backed {@link RapidsInputFile} that delegates byte-range reads to
@@ -42,22 +43,24 @@ import java.util.List;
  *
  * <p>The package-private S3 file access is isolated in {@link IcebergS3InputFileAccess}.
  */
-public final class IcebergS3InputFile extends BaseIcebergInputFile {
+public final class IcebergS3InputFile extends IcebergInputFile {
   private static final Logger LOG = LoggerFactory.getLogger(IcebergS3InputFile.class);
 
+  private final IcebergInputFile delegate;
   private final URI s3Uri;
   private final IcebergS3Client icebergS3Client;
 
   private IcebergS3InputFile(
-      InputFile inputFile,
+      IcebergInputFile delegate,
       URI s3Uri,
       IcebergS3Client icebergS3Client) {
-    super(inputFile);
+    super(delegate.getDelegate());
+    this.delegate = delegate;
     this.s3Uri = s3Uri;
     this.icebergS3Client = icebergS3Client;
   }
 
-  public static BaseIcebergInputFile maybeCreate(InputFile inputFile, FileIO fileIO) {
+  public static IcebergInputFile maybeCreate(InputFile inputFile, FileIO fileIO) {
     // When the gating conf is off (or the file is not an S3 file), return the
     // default IcebergInputFile so the standard Iceberg SeekableInputStream path is used.
     IcebergInputFile delegate = new IcebergInputFile(inputFile);
@@ -82,7 +85,36 @@ public final class IcebergS3InputFile extends BaseIcebergInputFile {
       return delegate;
     }
     LOG.debug("IcebergS3RangeCopier path active for {}", s3Uri);
-    return new IcebergS3InputFile(inputFile, s3Uri, icebergS3Client);
+    return new IcebergS3InputFile(delegate, s3Uri, icebergS3Client);
+  }
+
+  @Override
+  public String path() {
+    return delegate.path();
+  }
+
+  @Override
+  public long getLength() throws IOException {
+    return delegate.getLength();
+  }
+
+  @Override
+  public OptionalLong getLastModificationTime() throws IOException {
+    return delegate.getLastModificationTime();
+  }
+
+  @Override
+  public SeekableInputStream open() throws IOException {
+    return delegate.open();
+  }
+
+  /**
+   * Returns the underlying Iceberg {@link InputFile}, matching
+   * {@link IcebergInputFile#getDelegate()} for use by iceberg-internal
+   * code paths that need direct access to the iceberg API.
+   */
+  public InputFile getDelegate() {
+    return delegate.getDelegate();
   }
 
   @Override
