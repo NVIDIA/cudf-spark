@@ -20,7 +20,6 @@ spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims.spark420
 
 import com.nvidia.spark.rapids._
-import com.nvidia.spark.rapids.shims.SparkShimImpl
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.SparkConf
@@ -43,7 +42,7 @@ class SparkShimsSuite extends AnyFunSuite with FQSuiteName {
     val sqlConf = new SQLConf()
     assert(sqlConf.shuffleOrderIndependentChecksumEnabled)
     assert(sqlConf.shuffleChecksumMismatchFullRetryEnabled)
-    assert(SparkShimImpl.isRowBasedShuffleChecksumEnabled(sqlConf, new SparkConf(false)))
+    assert(RowBasedShuffleChecksumConf.isEnabled(sqlConf, new SparkConf(false)))
   }
 
   test("row-based shuffle checksum uses SparkConf when SQLConf is unset") {
@@ -51,7 +50,7 @@ class SparkShimsSuite extends AnyFunSuite with FQSuiteName {
       .set(checksumEnabledKey, "false")
       .set(fullRetryKey, "false")
 
-    assert(!SparkShimImpl.isRowBasedShuffleChecksumEnabled(new SQLConf(), sparkConf))
+    assert(!RowBasedShuffleChecksumConf.isEnabled(new SQLConf(), sparkConf))
   }
 
   test("row-based shuffle checksum uses SQLConf when present") {
@@ -62,7 +61,7 @@ class SparkShimsSuite extends AnyFunSuite with FQSuiteName {
       .set(checksumEnabledKey, "true")
       .set(fullRetryKey, "true")
 
-    assert(!SparkShimImpl.isRowBasedShuffleChecksumEnabled(sqlConf, sparkConf))
+    assert(!RowBasedShuffleChecksumConf.isEnabled(sqlConf, sparkConf))
   }
 
 }

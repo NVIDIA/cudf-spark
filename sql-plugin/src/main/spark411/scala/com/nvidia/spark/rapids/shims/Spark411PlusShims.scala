@@ -25,10 +25,8 @@ package com.nvidia.spark.rapids.shims
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.{HashExprChecks, Murmur3HashExprMeta, XxHash64ExprMeta}
 
-import org.apache.spark.SparkConf
 import org.apache.spark.sql.catalyst.expressions.{CollationAwareMurmur3Hash, CollationAwareXxHash64,
   Expression}
-import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.execution.{OneRowRelationExec, SparkPlan}
 
 /**
@@ -40,16 +38,6 @@ import org.apache.spark.sql.execution.{OneRowRelationExec, SparkPlan}
  * later shim to override only the expressions whose behavior changed.
  */
 trait Spark411PlusShims extends Spark400PlusCommonShims with RebaseShims {
-  override def isRowBasedShuffleChecksumEnabled(
-      sqlConf: SQLConf,
-      sparkConf: SparkConf): Boolean = {
-    RowBasedShuffleChecksumConf.isEnabled(
-      sqlConf,
-      sparkConf,
-      sqlConf.shuffleOrderIndependentChecksumEnabled,
-      sqlConf.shuffleChecksumMismatchFullRetryEnabled)
-  }
-
   override def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
     val shimExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = Seq(
       GpuOverrides.expr[CollationAwareMurmur3Hash](

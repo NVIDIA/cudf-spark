@@ -25,6 +25,9 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatestplus.mockito.MockitoSugar.mock
 
 import org.apache.spark.{HashPartitioner, SparkConf, SparkContext, SparkEnv}
+import org.apache.spark.{Partition, TaskContext}
+import org.apache.spark.shuffle.ShuffleManager
+import org.apache.spark.shuffle.api.ShuffleDriverComponents
 import org.apache.spark.rdd.RDD
 import org.apache.spark.serializer.Serializer
 import org.apache.spark.sql.internal.SQLConf
@@ -117,8 +120,13 @@ class RapidsShuffleManagerChecksumSuite extends AnyFunSuite with FQSuiteName {
     val sc = mock[SparkContext]
     when(sc.newShuffleId()).thenReturn(shuffleId)
     when(sc.cleaner).thenReturn(None)
-    val rdd = mock[RDD[(Int, ColumnarBatch)]]
-    when(rdd.context).thenReturn(sc)
+    when(sc.conf).thenReturn(new SparkConf(loadDefaults = false))
+    when(sc.env).thenReturn(SparkEnv.get)
+    when(sc.shuffleDriverComponents).thenReturn(mock[ShuffleDriverComponents])
+    val rdd = new RDD[(Int, ColumnarBatch)](sc, Nil) {
+      override def compute(split: Partition, context: TaskContext): Iterator[(Int, ColumnarBatch)] = ???
+      override protected def getPartitions: Array[Partition] = Array.empty
+    }
 
     new GpuShuffleDependency[Int, ColumnarBatch, ColumnarBatch](
       rdd,
@@ -158,6 +166,7 @@ class RapidsShuffleManagerChecksumSuite extends AnyFunSuite with FQSuiteName {
     val env = mock[SparkEnv]
     when(env.conf).thenReturn(conf)
     when(env.blockManager).thenReturn(blockManager)
+    when(env.shuffleManager).thenReturn(mock[ShuffleManager])
     SparkEnv.set(env)
     try {
       f
