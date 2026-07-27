@@ -137,18 +137,38 @@ def _run_selftest():
                 handle.write(source)
 
         collected = []
+        selected = []
+        deselected = []
 
         class _Capture:
+            @pytest.hookimpl(hookwrapper=True, tryfirst=True)
             def pytest_collection_modifyitems(self, items):
                 collected.extend(items)
+                yield
+                selected.extend(items)
+
+            def pytest_deselected(self, items):
+                deselected.extend(items)
+
+        class _ReducedIT:
+            def pytest_addoption(self, parser):
+                parser.addoption("--test_oom_injection_mode", default="never")
+
+            @pytest.hookimpl(trylast=True)
+            def pytest_collection_modifyitems(self, config, items):
+                conftest._is_precommit_run = True
+                conftest.pytest_collection_modifyitems(config, items)
 
         # Isolated collection: tmpdir has no conftest, so the integration-test
-        # conftest and the spark plugin are not loaded here.
+        # conftest and the spark plugin are not loaded here. Invoke the real
+        # collection hook through a minimal plugin to exercise reduced-IT
+        # activation, item mutation, and deselection notification.
+        os.environ["REDUCED_IT"] = "true"
         rc = pytest.main(
             [tmpdir, "--collect-only", "-q",
              "--rootdir", tmpdir, "-p", "no:cacheprovider", "-o", "addopts="],
-            plugins=[_Capture()])
-        if rc not in (0, 5):
+            plugins=[_ReducedIT(), _Capture()])
+        if rc != 0:
             return [f"synthetic collection failed with pytest rc={rc}"]
 
         # Group in collection order, exactly like _reduced_it_required_items.
@@ -156,7 +176,12 @@ def _run_selftest():
         for item in collected:
             groups.setdefault(item.nodeid.split("[", 1)[0], []).append(item)
 
-        required, each_choice_test_count = conftest._reduced_it_required_items(collected)
+        required = set(selected)
+        helper_required, each_choice_test_count = conftest._reduced_it_required_items(collected)
+        if helper_required != required:
+            failures.append("collection hook selection differs from the pure reducer")
+        if set(deselected) != set(collected) - required:
+            failures.append("pytest_deselected items differ from the removed collection items")
         reduced_names = set()
 
         for prefix, group_items in groups.items():
