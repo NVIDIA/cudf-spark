@@ -547,7 +547,11 @@ object ParallelUnitTestRunner {
     warehouseDirs.distinct.foreach { warehouseDir =>
       cleanup {
         Option(warehouseDir.listFiles()).getOrElse(Array.empty[File])
-            .foreach(FileUtil.fullyDelete)
+            .foreach { file =>
+              if (!FileUtil.fullyDelete(file)) {
+                throw new IOException(s"Failed to delete warehouse path: $file")
+              }
+            }
       }
     }
     cleanup(SpillFramework.shutdown())

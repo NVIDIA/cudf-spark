@@ -225,7 +225,7 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
     assert(!stopThread.isAlive)
   }
 
-  test("cleanup worker state stops Spark sessions and contexts") {
+  test("cleanup worker state stops Spark sessions and contexts and cleans warehouses") {
     val tmpDir = Files.createTempDirectory("parallel-unit-test-runner")
     val warehouseDir = tmpDir.resolve("spark-warehouse")
     val sparkConf = new SparkConf()
@@ -237,6 +237,8 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
     val spark = SparkSession.builder().config(sparkConf).getOrCreate()
     SparkSession.setActiveSession(spark)
     SparkSession.setDefaultSession(spark)
+    Files.createDirectories(warehouseDir)
+    val warehouseSentinel = Files.createFile(warehouseDir.resolve("sentinel"))
 
     try {
       assert(!spark.sparkContext.isStopped)
@@ -248,6 +250,7 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
       assert(spark.sparkContext.isStopped)
       assert(SparkSession.getActiveSession.isEmpty)
       assert(SparkSession.getDefaultSession.isEmpty)
+      assert(!Files.exists(warehouseSentinel))
     } finally {
       if (!spark.sparkContext.isStopped) {
         spark.stop()
