@@ -42,7 +42,7 @@ class GpuIcebergPartitionReader(private val task: GpuSparkInputPartition,
   
   private lazy val table = GpuSparkScanAccess.table(task.cpuPartition)
   private lazy val fileIO = table.io()
-  private lazy val rapidsFileIO = new IcebergFileIO(fileIO, metrics)
+  private lazy val rapidsFileIO = new IcebergFileIO(fileIO)
   private lazy val conf = newConf()
   private lazy val (inputFiles, tasks) = collectFiles()
   private lazy val gpuDeleteFiterMap: Map[IcebergPartitionedFile, Option[GpuDeleteFilter]] =

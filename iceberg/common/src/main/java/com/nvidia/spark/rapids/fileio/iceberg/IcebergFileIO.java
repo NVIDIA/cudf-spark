@@ -16,15 +16,12 @@
 
 package com.nvidia.spark.rapids.fileio.iceberg;
 
-import com.nvidia.spark.rapids.GpuMetric;
 import com.nvidia.spark.rapids.jni.fileio.RapidsFileIO;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import com.nvidia.spark.rapids.jni.fileio.RapidsOutputFile;
 import org.apache.iceberg.aws.s3.IcebergS3InputFile;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.InputFile;
-import scala.collection.immutable.Map;
-import scala.collection.immutable.Map$;
 
 import java.io.IOException;
 import java.util.Objects;
@@ -37,7 +34,6 @@ import java.util.Objects;
  */
 public class IcebergFileIO implements RapidsFileIO {
   private final FileIO delegate;
-  private final Map<String, GpuMetric> metrics;
 
   /**
    * Constructs an IcebergFileIO with the given Iceberg FileIO delegate.
@@ -47,20 +43,8 @@ public class IcebergFileIO implements RapidsFileIO {
    *                 iceberg table/catalog close.
    */
   public IcebergFileIO(FileIO delegate) {
-    this(delegate, Map$.MODULE$.empty());
-  }
-
-  /**
-   * Constructs an IcebergFileIO with SQL metrics for its read paths.
-   *
-   * @param delegate the Iceberg FileIO to delegate to
-   * @param metrics GPU scan metrics updated by executor-side reads
-   */
-  public IcebergFileIO(FileIO delegate, Map<String, GpuMetric> metrics) {
     Objects.requireNonNull(delegate, "delegate can't be null");
-    Objects.requireNonNull(metrics, "metrics can't be null");
     this.delegate = delegate;
-    this.metrics = metrics;
   }
 
 
@@ -76,7 +60,7 @@ public class IcebergFileIO implements RapidsFileIO {
    */
   public IcebergInputFile newInputFile(InputFile inputFile) {
     Objects.requireNonNull(inputFile, "inputFile can't be null");
-    return IcebergS3InputFile.maybeCreate(inputFile, delegate, metrics);
+    return IcebergS3InputFile.maybeCreate(inputFile, delegate);
   }
 
   /**
