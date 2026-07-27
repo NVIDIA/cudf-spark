@@ -1760,11 +1760,16 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
 
   private def shouldFallThroughForShuffle: Boolean = {
     val rowBasedChecksumFallback = GpuShuffleEnv.isRowBasedChecksumEnabled
-    if (rowBasedChecksumFallback && rowBasedChecksumFallbackLogged.compareAndSet(false, true)) {
-      logWarning("Rapids Shuffle Plugin is falling back to SortShuffleManager because: " +
-        "Detected order-independent checksum enabled " +
-        "(spark.sql.shuffle.orderIndependentChecksum.enabled or enableFullRetryOnMismatch). " +
-        "This Spark 4.1+ feature is not yet supported by Spark-Rapids.")
+    if (rowBasedChecksumFallback) {
+      if (rowBasedChecksumFallbackLogged.compareAndSet(false, true)) {
+        logWarning("Rapids Shuffle Plugin is falling back to SortShuffleManager because: " +
+          "Detected order-independent checksum enabled " +
+          "(spark.sql.shuffle.orderIndependentChecksum.enabled or enableFullRetryOnMismatch). " +
+          "This Spark 4.1+ feature is not yet supported by Spark-Rapids.")
+      }
+    } else {
+      // reset warning, so we warn again if the user re-enables it.
+      rowBasedChecksumFallbackLogged.compareAndSet(true, false)
     }
     shouldFallThroughOnEverything || rowBasedChecksumFallback
   }
