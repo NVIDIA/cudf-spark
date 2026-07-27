@@ -789,19 +789,26 @@ def test_regexp_choice():
         conf=_regexp_conf)
 
 def test_regexp_hexadecimal_digits():
+    # NOTE: supplementary-codepoint hex escapes (cp > U+FFFF) are
+    # exercised by the `test_rlike_supplementary_codepoint_fallback`
+    # / `test_regexp_replace_supplementary_codepoint_fallback` tests below.
+    # They now fall back to CPU before a `.toChar` rewrite can truncate them.
+    # Keeping them out of this projection avoids
+    # the mixed GPU/CPU `ProjectExec` execution path. See
+    # NVIDIA/spark-rapids#14744.
     gen = mk_str_gen(
-        '[abcd]\\\\x00\\\\x7f\\\\x80\\\\xff\\\\x{10ffff}\\\\x{00eeee}[\\\\xa0-\\\\xb0][abcd]')
+        r'[abcd]\\x00\\x7f\\x80\\xff\\x{0000ffff}\\x{00eeee}[\\xa0-\\xb0][abcd]')
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark: unary_op_df(spark, gen).selectExpr(
                 'rlike(a, "\\\\x7f")',
                 'rlike(a, "\\\\x80")',
                 'rlike(a, "[\\\\xa0-\\\\xf0]")',
                 'rlike(a, "\\\\x{00eeee}")',
+                r'rlike(a, "\\x{0000ffff}")',
                 'regexp_extract(a, "([a-d]+)\\\\xa0([a-d]+)", 1)',
                 'regexp_extract(a, "([a-d]+)[\\\\xa0\nabcd]([a-d]+)", 1)',
                 'regexp_replace(a, "\\\\xff", "@")',
                 'regexp_replace(a, "[\\\\xa0-\\\\xb0]", "@")',
-                'regexp_replace(a, "\\\\x{10ffff}", "@")',
                 # Issue #14739: non-braced \xNN followed by another hex digit
                 # used to be greedily consumed and rejected. The cap fix below
                 # makes these patterns run on GPU instead of falling back.
@@ -826,6 +833,44 @@ def test_regexp_hexadecimal_digits():
                 r'rlike(a, "\\x41f")',
                 r'rlike(a, "[\\x41b]")',  # [A,b] char class
             ),
+        conf=_regexp_conf)
+
+@allow_non_gpu('ProjectExec', 'RLike')
+@pytest.mark.parametrize('pattern', [
+    r'\\x{1F600}',    # grinning face emoji
+    r'\\x{10000}',    # lowest supplementary codepoint
+    r'\\x{10FFFF}',   # highest valid Unicode codepoint
+    r'a\\x{1F600}b',  # supplementary codepoint embedded in a literal
+    # Range endpoints go through the same centralized supplementary hex guard.
+    r'[\\x{1F600}-\\x{1F64F}]',
+    r'[\\x{10000}-\\x{10FFFF}]',
+])
+def test_rlike_supplementary_codepoint_fallback(pattern):
+    # Issue NVIDIA/spark-rapids#14744 regression coverage. Before the
+    # fix, hex escapes for supplementary codepoints (cp > U+FFFF) were
+    # silently truncated via `.toChar` on the GPU -- e.g. the pattern
+    # `\x{1F600}` (grinning face 😀) was rewritten as `` (a
+    # private-use BMP codepoint), so the GPU matched the wrong
+    # character. The parser now throws `RegexUnsupportedException`
+    # for these patterns, causing spark-rapids to fall back to the CPU
+    # regex engine -- which Java's `Pattern` handles correctly.
+    gen = mk_str_gen(r'[abcd]\\x{1F600}\\x{10000}\\x{10FFFF}[abcd]')
+    assert_gpu_fallback_collect(
+            lambda spark: unary_op_df(spark, gen).selectExpr(
+                r'rlike(a, "{}")'.format(pattern)),
+            'RLike',
+        conf=_regexp_conf)
+
+@allow_non_gpu('ProjectExec', 'RegExpReplace')
+def test_regexp_replace_supplementary_codepoint_fallback():
+    # Companion to test_rlike_supplementary_codepoint_fallback but
+    # for regexp_replace -- same root cause, same CPU fallback path,
+    # different meta. See NVIDIA/spark-rapids#14744.
+    gen = mk_str_gen(r'[abcd]\\x{1F600}\\x{10000}\\x{10FFFF}[abcd]')
+    assert_gpu_fallback_collect(
+            lambda spark: unary_op_df(spark, gen).selectExpr(
+                r'regexp_replace(a, "\\x{1F600}", "@")'),
+            'RegExpReplace',
         conf=_regexp_conf)
 
 def test_regexp_whitespace():
