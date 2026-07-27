@@ -26,9 +26,9 @@ import org.scalatestplus.mockito.MockitoSugar.mock
 
 import org.apache.spark.{HashPartitioner, Partition, SparkConf, SparkContext, SparkEnv, TaskContext}
 import org.apache.spark.rdd.RDD
+import org.apache.spark.serializer.Serializer
 import org.apache.spark.shuffle.ShuffleManager
 import org.apache.spark.shuffle.api.ShuffleDriverComponents
-import org.apache.spark.serializer.Serializer
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.DataType
 import org.apache.spark.sql.vectorized.ColumnarBatch
