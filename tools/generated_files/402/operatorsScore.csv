@@ -1,5 +1,4 @@
 CPUOperator,Score
-RapidsProcessDeltaMergeJoinExec,3.0
 CoalesceExec,3.0
 CollectLimitExec,3.0
 ExpandExec,3.0
@@ -143,7 +142,6 @@ EqualTo,4
 Exp,4
 Explode,4
 Expm1,4
-Expression,4
 First,4
 Flatten,4
 Floor,4
@@ -170,7 +168,6 @@ If,4
 In,4
 InSet,4
 InSubqueryExec,4
-IncrementMetric,4
 InitCap,4
 InputFileBlockLength,4
 InputFileBlockStart,4
@@ -314,7 +311,6 @@ TransformKeys,4
 TransformValues,4
 TruncDate,4
 TruncTimestamp,4
-UnaryExpression,4
 UnaryMinus,4
 UnaryPositive,4
 UnboundedFollowing$,4

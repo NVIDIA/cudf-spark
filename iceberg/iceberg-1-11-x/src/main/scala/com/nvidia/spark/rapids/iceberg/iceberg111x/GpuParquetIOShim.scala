@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids.iceberg.iceberg111x
 
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric
-import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile
+import com.nvidia.spark.rapids.fileio.iceberg.BaseIcebergInputFile
 import com.nvidia.spark.rapids.iceberg.parquet.converter.ToIcebergShaded
 import com.nvidia.spark.rapids.parquet.{HMBInputFile, ParquetFooterUtils}
 import org.apache.hadoop.fs.Path
@@ -35,7 +35,7 @@ import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader
  */
 object GpuParquetIOShim {
   def openReader(
-      inputFile: IcebergInputFile,
+      inputFile: BaseIcebergInputFile,
       filePath: Path,
       options: ParquetReadOptions,
       metrics: Map[String, GpuMetric]): ParquetFileReader = {

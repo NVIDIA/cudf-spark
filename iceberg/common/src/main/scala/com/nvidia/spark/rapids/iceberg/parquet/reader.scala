@@ -24,7 +24,7 @@ import scala.collection.JavaConverters._
 
 import com.nvidia.spark.rapids.{CombineConf, DateTimeRebaseCorrected, GpuMetric, ThreadPoolConfBuilder}
 import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile
+import com.nvidia.spark.rapids.fileio.iceberg.BaseIcebergInputFile
 import com.nvidia.spark.rapids.iceberg.parquet.converter.FromIcebergShaded._
 import com.nvidia.spark.rapids.parquet.{GpuParquetUtils, ParquetFileInfoWithBlockMeta}
 import com.nvidia.spark.rapids.shims.PartitionedFileUtilsShim
@@ -50,7 +50,7 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 case class IcebergPartitionedFile(
-    file: IcebergInputFile,
+    file: BaseIcebergInputFile,
     split: Option[(Long, Long)] = None,
     filter: Option[Expression] = None) {
 

@@ -19,7 +19,7 @@ package com.nvidia.spark.rapids.iceberg;
 import com.nvidia.spark.rapids.GpuMetric;
 import com.nvidia.spark.rapids.NoopMetric$;
 import com.nvidia.spark.rapids.RapidsConf;
-import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
+import com.nvidia.spark.rapids.fileio.iceberg.BaseIcebergInputFile;
 import org.apache.hadoop.fs.Path;
 import org.apache.iceberg.ContentFile;
 import org.apache.iceberg.FileScanTask;
@@ -79,7 +79,7 @@ public interface IcebergShimUtils {
     Map<String, Map<String, String>> storageCredentialOverlays(FileIO fileIO);
 
     /**
-     * Open a shaded {@link ParquetFileReader} for an iceberg {@link IcebergInputFile}.
+     * Open a shaded {@link ParquetFileReader} for an iceberg {@link BaseIcebergInputFile}.
      *
      * <p>The default impl opens via
      * {@code ParquetFileReader.open(InputFile, ParquetReadOptions)} without footer caching
@@ -92,7 +92,7 @@ public interface IcebergShimUtils {
      * constructor.
      */
     default ParquetFileReader openParquetReader(
-            IcebergInputFile inputFile,
+            BaseIcebergInputFile inputFile,
             Path filePath,
             ParquetReadOptions options,
             scala.collection.immutable.Map<String, GpuMetric> metrics) throws IOException {
