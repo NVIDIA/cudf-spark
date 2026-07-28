@@ -30,7 +30,7 @@ import org.apache.spark.sql.vectorized.ColumnarBatch;
  * footer/decode code. Footer and input-opening callbacks run on shared workers. Planning,
  * metrics, and decode callbacks run on the Spark task thread.</p>
  */
-public interface StagedScanAdapter {
+public interface ParquetReaderAdapter {
   /**
    * Fetches and filters the footer for one file or split.
    *
@@ -59,7 +59,7 @@ public interface StagedScanAdapter {
    */
   Iterator<ColumnarBatch> decodeAndPostProcess(
       ReadSubtask subtask,
-      StagedParquetInput parquetInput) throws Exception;
+      ParquetDecodeInput parquetInput) throws Exception;
 
   /**
    * Reports a sealed subtask immediately before the Spark task thread materializes and decodes

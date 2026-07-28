@@ -40,16 +40,16 @@ import java.util.concurrent.atomic.AtomicInteger;
  * responsible for installing its captured {@code TaskContext} and RAPIDS pool-thread marker once
  * around the fused file job, and removing both in a {@code finally} block.</p>
  */
-public final class StagedScanThreadPools {
-  private static final Logger LOG = LoggerFactory.getLogger(StagedScanThreadPools.class);
+public final class ParquetReaderThreadPool {
+  private static final Logger LOG = LoggerFactory.getLogger(ParquetReaderThreadPool.class);
   private static final long KEEP_ALIVE_SECONDS = 60L;
 
-  private static StagedScanThreadPools singleton;
+  private static ParquetReaderThreadPool singleton;
 
   private final int threads;
   private final ExecutorService executor;
 
-  private StagedScanThreadPools(int threads) {
+  private ParquetReaderThreadPool(int threads) {
     this.threads = threads;
     this.executor = newPool("iceberg-staged-worker", threads);
   }
@@ -61,10 +61,10 @@ public final class StagedScanThreadPools {
    * pool and logs a warning because replacing a pool while tasks own futures would violate
    * cancellation and ownership guarantees.</p>
    */
-  public static synchronized StagedScanThreadPools getOrCreate(int threads) {
+  public static synchronized ParquetReaderThreadPool getOrCreate(int threads) {
     checkPositive("threads", threads);
     if (singleton == null) {
-      singleton = new StagedScanThreadPools(threads);
+      singleton = new ParquetReaderThreadPool(threads);
     } else if (singleton.threads != threads) {
       LOG.warn("Reusing initialized Iceberg staged-read pool with {} threads instead of " +
           "requested {} threads", singleton.threads, threads);

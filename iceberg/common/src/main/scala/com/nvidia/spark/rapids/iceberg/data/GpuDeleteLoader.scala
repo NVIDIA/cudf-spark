@@ -97,6 +97,15 @@ class DefaultDeleteLoader(
         new GpuCoalescingIcebergParquetReader(rapidsFileIO, files,
           _ => Map.empty[Integer, Any].asJava,
           newConf)
+      case StagedMultiThread(multiThread) =>
+        // Staged data scans exclude deletes. If a staged marker ever reaches delete loading,
+        // unwrap it and preserve the existing multithreaded delete-reader behavior.
+        new GpuMultiThreadIcebergParquetReader(
+          rapidsFileIO,
+          files,
+          _ => Map.empty[Integer, Any].asJava,
+          _ => None,
+          newConf.copy(threadConf = multiThread))
     }
   }
 
@@ -115,6 +124,12 @@ class DefaultDeleteLoader(
           hasFilePathMetadata = hasFilePathMetadata,
           hasRowPositionMetadata = hasRowPositionMetadata)
       case SingleFile => SingleFile
+      case StagedMultiThread(threadConf) =>
+        // Delete files always use the upstream reader, never the staged data path.
+        threadConf.copy(
+          disableCombining = hasFilePathMetadata || hasRowPositionMetadata,
+          hasFilePathMetadata = hasFilePathMetadata,
+          hasRowPositionMetadata = hasRowPositionMetadata)
     }
   }
 }

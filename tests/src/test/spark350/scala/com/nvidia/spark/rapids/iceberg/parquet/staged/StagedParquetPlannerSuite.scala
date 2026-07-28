@@ -54,7 +54,7 @@ import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile
 import com.nvidia.spark.rapids.iceberg.parquet.{
   GpuIcebergParquetReaderConf,
   GpuParquetReaderPostProcessor,
-  GpuStagedIcebergParquetReader,
+  GpuAsyncIcebergParquetReader,
   IcebergPartitionedFile,
   MultiThread
 }
@@ -90,14 +90,14 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
 
   override protected def afterEach(): Unit = {
     try {
-      StagedScanThreadPools.resetForTesting()
+      ParquetReaderThreadPool.resetForTesting()
     } finally {
       sourceInputs.clear()
       super.afterEach()
     }
   }
 
-  private abstract class TestAdapter extends StagedScanAdapter {
+  private abstract class TestAdapter extends ParquetReaderAdapter {
     override def openInputFile(file: IcebergPartitionedFile): RapidsInputFile = {
       val input = sourceInputs.get(file)
       require(input != null, s"missing test input for ${file.path}")
@@ -106,7 +106,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
   }
 
   /** Materialize and concatenate the zero-copy segments for byte-layout assertions. */
-  private def materializeParquetBytes(input: StagedParquetInput): Array[Byte] = {
+  private def materializeParquetBytes(input: ParquetDecodeInput): Array[Byte] = {
     val buffers = input.materialize()
     try {
       concatenateParquetBuffers(buffers)
@@ -786,11 +786,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  // These reader-runtime cases use the pre-POC generic RapidsInputFile harness. The production
-  // POC now deliberately requires IcebergS3InputFile plus writable file-cache reservations, so
-  // keep the scenarios as specifications but do not pretend that this old harness exercises the
-  // new I/O path. Cache ownership and dual-sink behavior are covered in cudf-spark-private.
-  ignore("every file coalesces its cache misses into merged vectored reads") {
+  test("every file coalesces its cache misses into merged vectored reads") {
     val sourceCount = 4
     val tracker = new SourceReadTracker(sourceCount)
     val sourceBytes = Array.tabulate[Byte](2048)(index => (index & 0xff).toByte)
@@ -821,7 +817,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
 
       override def decodeAndPostProcess(
           subtask: ReadSubtask,
-          parquetInput: StagedParquetInput): JIterator[ColumnarBatch] = {
+          parquetInput: ParquetDecodeInput): JIterator[ColumnarBatch] = {
         // Header + one owning fragment slice per source + footer: encoded data is represented
         // without a second task-sized assembly allocation.
         assert(parquetInput.getSegmentCount === sourceCount + 2)
@@ -902,7 +898,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  ignore("decode keeps input order even when a later download finishes first") {
+  test("decode keeps input order even when a later download finishes first") {
     val sourceCount = 2
     val tracker = new SourceReadTracker(sourceCount)
     val sourceBytes = Array.tabulate[Byte](1024)(index => (index & 0xff).toByte)
@@ -925,7 +921,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
 
       override def decodeAndPostProcess(
           subtask: ReadSubtask,
-          parquetInput: StagedParquetInput): JIterator[ColumnarBatch] = {
+          parquetInput: ParquetDecodeInput): JIterator[ColumnarBatch] = {
         decoded.add(sourceOrdinal(subtask.getFileSlices.get(0).getFooter.getFile))
         Collections.singletonList(new ColumnarBatch(
           Array.empty[org.apache.spark.sql.vectorized.ColumnVector], 1)).iterator()
@@ -978,7 +974,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  ignore("legacy staged scan retains the GPU semaphore until Spark task completion") {
+  test("staged scan retains the GPU semaphore until Spark task completion") {
     val sourceBytes = Array.tabulate[Byte](1024)(index => (index & 0xff).toByte)
     val secondReadTracker = new SourceReadTracker(expectedSources = 1)
     val first = footerWithInput(
@@ -1006,7 +1002,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
 
       override def decodeAndPostProcess(
           subtask: ReadSubtask,
-          parquetInput: StagedParquetInput): JIterator[ColumnarBatch] = {
+          parquetInput: ParquetDecodeInput): JIterator[ColumnarBatch] = {
         // The production adapter acquires immediately before cuDF decode. Use the captured mock
         // context here because this test deliberately does not initialize a CUDA device.
         GpuSemaphore.acquireIfNecessary(ownerContext)
@@ -1121,7 +1117,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  ignore("completion-order combine gives every admitted result a fresh wait") {
+  test("completion-order combine gives every admitted result a fresh wait") {
     val sourceCount = 3
     val tracker = new SourceReadTracker(sourceCount)
     val sourceBytes = Array.tabulate[Byte](1024)(index => (index & 0xff).toByte)
@@ -1154,7 +1150,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
 
       override def decodeAndPostProcess(
           subtask: ReadSubtask,
-          parquetInput: StagedParquetInput): JIterator[ColumnarBatch] = {
+          parquetInput: ParquetDecodeInput): JIterator[ColumnarBatch] = {
         decoded.add(subtask.getFileSlices.asScala
           .map(slice => sourceOrdinal(slice.getFooter.getFile)).toSeq)
         Collections.singletonList(new ColumnarBatch(
@@ -1204,7 +1200,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  ignore("combine timeout flushes the completed prefix") {
+  test("combine timeout flushes the completed prefix") {
     val sourceCount = 2
     val tracker = new SourceReadTracker(sourceCount)
     val sourceBytes = Array.tabulate[Byte](1024)(index => (index & 0xff).toByte)
@@ -1227,7 +1223,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
 
       override def decodeAndPostProcess(
           subtask: ReadSubtask,
-          parquetInput: StagedParquetInput): JIterator[ColumnarBatch] = {
+          parquetInput: ParquetDecodeInput): JIterator[ColumnarBatch] = {
         decoded.add(subtask.getFileSlices.asScala
           .map(slice => sourceOrdinal(slice.getFooter.getFile)).toSeq)
         Collections.singletonList(new ColumnarBatch(
@@ -1271,7 +1267,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  ignore("a downloaded fragment frees its worker before the task thread consumes it") {
+  test("a downloaded fragment frees its worker before the task thread consumes it") {
     val sourceCount = 3
     val tracker = new SourceReadTracker(sourceCount)
     val sourceBytes = Array.tabulate[Byte](1024)(index => (index & 0xff).toByte)
@@ -1295,7 +1291,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
 
       override def decodeAndPostProcess(
           subtask: ReadSubtask,
-          parquetInput: StagedParquetInput): JIterator[ColumnarBatch] = {
+          parquetInput: ParquetDecodeInput): JIterator[ColumnarBatch] = {
         if (decodeCalls.incrementAndGet() == 1) {
           // Keep the task thread busy inside its first decode, exactly like a long GPU stage,
           // so later completions stay unclaimed while workers publish them.
@@ -1357,7 +1353,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  ignore("independent Spark tasks submit without executor-wide admission") {
+  test("independent Spark tasks submit without executor-wide admission") {
     val tracker = new SourceReadTracker(2)
     val sourceBytes = Array.tabulate[Byte](1024)(index => (index & 0xff).toByte)
     val footers = (0 until 2).map { ordinal =>
@@ -1370,13 +1366,13 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
           ColumnSpec("id", baseOffset + 4L, baseOffset, 4L, 4L))),
         new BlockingVectoredInput(ordinal, sourceBytes, tracker))
     }
-    def adapterFor(footer: FooterResult): StagedScanAdapter =
+    def adapterFor(footer: FooterResult): ParquetReaderAdapter =
       new TestAdapter {
         override def readAndFilterFooter(file: IcebergPartitionedFile): FooterResult = footer
 
         override def decodeAndPostProcess(
           subtask: ReadSubtask,
-          parquetInput: StagedParquetInput): JIterator[ColumnarBatch] = {
+          parquetInput: ParquetDecodeInput): JIterator[ColumnarBatch] = {
           Collections.singletonList(new ColumnarBatch(
             Array.empty[org.apache.spark.sql.vectorized.ColumnVector], 1)).iterator()
         }
@@ -1430,7 +1426,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  ignore("equal file occurrences download independently and combine into one subtask") {
+  test("equal file occurrences download independently and combine into one subtask") {
     val sourceCount = 2
     val tracker = new SourceReadTracker(sourceCount)
     val sourceBytes = Array.tabulate[Byte](1024)(index => (index & 0xff).toByte)
@@ -1468,7 +1464,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
 
       override def decodeAndPostProcess(
           subtask: ReadSubtask,
-          parquetInput: StagedParquetInput): JIterator[ColumnarBatch] = {
+          parquetInput: ParquetDecodeInput): JIterator[ColumnarBatch] = {
         val layout = subtask
         val parquetData = materializeParquetBytes(parquetInput)
         val header = parquetData.take(layout.getHeaderBytes.length)
@@ -1541,7 +1537,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  ignore("close leaves fragment outputs alive until every active writer exits") {
+  test("close leaves fragment outputs alive until every active writer exits") {
     val sourceCount = 2
     val tracker = new SourceReadTracker(sourceCount)
     val sourceBytes = Array.tabulate[Byte](1024)(index => (index & 0xff).toByte)
@@ -1565,7 +1561,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
 
       override def decodeAndPostProcess(
           subtask: ReadSubtask,
-          parquetInput: StagedParquetInput): JIterator[ColumnarBatch] = {
+          parquetInput: ParquetDecodeInput): JIterator[ColumnarBatch] = {
         decodeCalled.set(true)
         Collections.emptyList[ColumnarBatch]().iterator()
       }
@@ -1620,8 +1616,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       CombineConf(1024L, 0),
       disableCombining = false,
       hasFilePathMetadata = false,
-      hasRowPositionMetadata = false,
-      queryUsesInputFile = false)
+      hasRowPositionMetadata = false)
     val readerConf = GpuIcebergParquetReaderConf(
       caseSensitive = true,
       conf = hadoopConf,
@@ -1637,7 +1632,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       threadConf = threadConf,
       expectedSchema = icebergSchema,
       nameMapping = None)
-    val reader = new GpuStagedIcebergParquetReader(
+    val reader = new GpuAsyncIcebergParquetReader(
       rapidsFileIO = null,
       files = Seq.empty,
       constantsProvider = (_: IcebergPartitionedFile) =>
@@ -1654,7 +1649,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  ignore("file downloads start before the last footer resolves") {
+  test("file downloads start before the last footer resolves") {
     val tracker = new SourceReadTracker(2)
     val sourceBytes = Array.tabulate[Byte](1024)(index => (index & 0xff).toByte)
     val input0 = new BlockingVectoredInput(0, sourceBytes, tracker)
@@ -1679,7 +1674,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
 
       override def decodeAndPostProcess(
           subtask: ReadSubtask,
-          parquetInput: StagedParquetInput): JIterator[ColumnarBatch] = {
+          parquetInput: ParquetDecodeInput): JIterator[ColumnarBatch] = {
         val parquetData = materializeParquetBytes(parquetInput)
         logicalRanges(subtask).foreach { range =>
           val actual = parquetData.slice(
@@ -1740,7 +1735,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  ignore("a slow first footer does not block later files' downloads") {
+  test("a slow first footer does not block later files' downloads") {
     val tracker = new SourceReadTracker(2)
     val sourceBytes = Array.tabulate[Byte](1024)(index => (index & 0xff).toByte)
     val input0 = new BlockingVectoredInput(0, sourceBytes, tracker)
@@ -1766,7 +1761,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
 
       override def decodeAndPostProcess(
           subtask: ReadSubtask,
-          parquetInput: StagedParquetInput): JIterator[ColumnarBatch] = {
+          parquetInput: ParquetDecodeInput): JIterator[ColumnarBatch] = {
         Collections.emptyList[ColumnarBatch]().iterator()
       }
     }
@@ -1814,7 +1809,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  ignore("close unblocks a footer wait and ignores a footer that finishes later") {
+  test("close unblocks a footer wait and ignores a footer that finishes later") {
     val input = footer(0, oneColumnParquetSchema, oneColumnReadSchema, Seq.empty)
     val scanFile = input.getFile
     val footerStarted = new CountDownLatch(1)
@@ -1833,7 +1828,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
 
       override def decodeAndPostProcess(
           subtask: ReadSubtask,
-          parquetInput: StagedParquetInput): JIterator[ColumnarBatch] = {
+          parquetInput: ParquetDecodeInput): JIterator[ColumnarBatch] = {
         decodeCalled.set(true)
         throw new AssertionError("empty footer must not produce a decode subtask")
       }

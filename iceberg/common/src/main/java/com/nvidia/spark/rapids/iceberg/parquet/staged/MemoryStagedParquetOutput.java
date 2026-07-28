@@ -116,13 +116,13 @@ final class MemoryStagedParquetOutput extends StagedParquetOutput {
       // directly and materialize hands out slices of it.
       return;
     }
-    // SpillableHostBuffer.apply takes ownership even when construction throws. Clear the
-    // writable reference before transfer so close() can never release the same buffer twice.
+    // The upstream helper transfers ownership only after it creates the spill handle. Keep our
+    // reference until that succeeds so close() still owns the buffer on registration failure.
     HostMemoryBuffer toTransfer = buffer;
-    buffer = null;
     try {
       sealedBuffer = SpillableHostBuffer.apply(
           toTransfer, exactSizeBytes(), SpillPriorities.ACTIVE_BATCHING_PRIORITY());
+      buffer = null;
     } catch (RuntimeException e) {
       throw new IOException("failed to register staged Parquet buffer for spilling", e);
     }
@@ -152,4 +152,3 @@ final class MemoryStagedParquetOutput extends StagedParquetOutput {
     }
   }
 }
-

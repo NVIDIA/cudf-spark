@@ -524,8 +524,8 @@ object SpillableHostBuffer {
    * @note This takes over ownership of buffer, and buffer should not be used after this.
    * @param length the actual length of the data within the host buffer, which
    *               must be <= than buffer.getLength, otherwise this function throws
-   * @param buffer the buffer to make spillable; ownership transfers on invocation and the
-   *               buffer is closed if validation or spill-store registration fails
+   *               and closes `buffer`
+   * @param buffer the buffer to make spillable
    * @param priority the initial spill priority of this buffer
    */
   def apply(buffer: HostMemoryBuffer,
@@ -535,10 +535,8 @@ object SpillableHostBuffer {
       require(length <= buffer.getLength,
         s"Attempted to add a host spillable with a length ${length} B which is " +
           s"greater than the backing host buffer length ${buffer.getLength} B")
-      // Spill-store registration can also fail. Keep ownership guarded until the complete
-      // handle has been constructed so callers never leak the transferred host buffer.
-      new SpillableHostBuffer(SpillableHostBufferHandle(buffer), length)
     }
+    new SpillableHostBuffer(SpillableHostBufferHandle(buffer), length)
   }
 
   def sliceWithRetry(shb: SpillableHostBuffer, start: Long, len: Long): HostMemoryBuffer = {

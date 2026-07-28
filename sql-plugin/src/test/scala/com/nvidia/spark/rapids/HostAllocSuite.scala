@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,7 +22,7 @@ import ai.rapids.cudf.{HostMemoryBuffer, PinnedMemoryPool, Rmm, RmmAllocationMod
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.jni.{RmmSpark, RmmSparkThreadState, TaskPriority, ThreadStateRegistry}
 import com.nvidia.spark.rapids.spill._
-import org.mockito.Mockito.{times, verify, when}
+import org.mockito.Mockito.when
 import org.scalatest.{BeforeAndAfterAll, BeforeAndAfterEach}
 import org.scalatest.concurrent.{Signaler, TimeLimits}
 import org.scalatest.funsuite.AnyFunSuite
@@ -451,39 +451,6 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
 
       withResource(HostAlloc.tryAlloc(4 * 1024 + 1)) { buffer =>
         assert(buffer.isEmpty)
-      }
-    }
-  }
-
-  test("tryAlloc2 ignores RMM retry after one internal allocation cycle") {
-    PinnedMemoryPool.initialize(0)
-    HostAlloc.initialize(4 * 1024)
-
-    withResource(HostAlloc.tryAlloc(4 * 1024, preferPinned = false).get) { _ =>
-      val originalHostStore = SpillFramework.storesInternal.hostStore
-      val hostStore = mock[SpillableHostStore]
-      when(hostStore.spill(1L)).thenReturn(0L)
-      // A live handle keeps the original internal retry loop running for all ten attempts.
-      // tryAlloc2 must then ignore RMM's request to start another internal cycle.
-      when(hostStore.numHandles).thenReturn(1)
-      SpillFramework.storesInternal.hostStore = hostStore
-      val thread = new TaskThread("tryAlloc2", 1)
-      thread.initialize()
-      try {
-        failAfter(Span(10, Seconds)) {
-          val allocation = thread.doIt(new TaskThreadOp[Option[HostMemoryBuffer]] {
-            override def doIt(): Option[HostMemoryBuffer] = {
-              HostAlloc.tryAlloc2(1L, preferPinned = false)
-            }
-          })
-          withResource(allocation.get(timeoutMs, TimeUnit.MILLISECONDS)) { result =>
-            assert(result.isEmpty)
-          }
-        }
-        verify(hostStore, times(10)).spill(1L)
-      } finally {
-        thread.done.get(1, TimeUnit.SECONDS)
-        SpillFramework.storesInternal.hostStore = originalHostStore
       }
     }
   }

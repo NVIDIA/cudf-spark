@@ -343,4 +343,3 @@ abstract class StagedParquetOutput implements AutoCloseable {
     }
   }
 }
-

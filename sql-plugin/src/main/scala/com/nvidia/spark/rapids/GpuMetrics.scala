@@ -143,23 +143,6 @@ object GpuMetric extends Logging {
   val ASYNC_READ_TIME = "shuffleAsyncReadTime"
   val ICEBERG_BUILD_ACTION_TIME = "icebergBuildActionTime"
   val ICEBERG_POST_PROCESS_TIME = "icebergPostProcessTime"
-  val ICEBERG_STAGED_FOOTER_TIME = "icebergStagedFooterTime"
-  val ICEBERG_STAGED_IO_TIME = "icebergStagedIoTime"
-  val ICEBERG_STAGED_COMBINE_TIME = "icebergStagedCombineTime"
-  val ICEBERG_STAGED_WAIT_TIME = "icebergStagedWaitTime"
-  val ICEBERG_STAGED_FOOTER_WAIT_TIME = "icebergStagedFooterWaitTime"
-  val ICEBERG_STAGED_RESULT_WAIT_TIME = "icebergStagedResultWaitTime"
-  val ICEBERG_STAGED_MATERIALIZATION_TIME = "icebergStagedMaterializationTime"
-  val ICEBERG_STAGED_DISK_SUBTASK_COUNT = "icebergStagedDiskSubtaskCount"
-  val ICEBERG_STAGED_DISK_BYTES = "icebergStagedDiskBytes"
-  val ICEBERG_STAGED_IO_ALLOC_TIME = "icebergStagedIoAllocTime"
-  val ICEBERG_STAGED_IO_READ_WAIT_TIME = "icebergStagedIoReadWaitTime"
-  val ICEBERG_STAGED_IO_ROUTE_TIME = "icebergStagedIoRouteTime"
-  val ICEBERG_STAGED_IO_FINALIZE_TIME = "icebergStagedIoFinalizeTime"
-  val ICEBERG_STAGED_IO_REQUEST_COUNT = "icebergStagedIoRequestCount"
-  val ICEBERG_STAGED_IO_READ_BYTES = "icebergStagedIoReadBytes"
-  val ICEBERG_STAGED_ASSEMBLY_CAPACITY = "icebergStagedAssemblyCapacity"
-  val ICEBERG_STAGED_PEAK_ASSEMBLY_CAPACITY = "icebergStagedPeakAssemblyCapacity"
 
   // Metric Descriptions.
   val DESCRIPTION_BUFFER_TIME = "buffer time"
@@ -218,29 +201,6 @@ object GpuMetric extends Logging {
   val DESCRIPTION_ASYNC_READ_TIME = "async read time"
   val DESCRIPTION_ICEBERG_BUILD_ACTION_TIME = "iceberg build action tree time"
   val DESCRIPTION_ICEBERG_POST_PROCESS_TIME = "iceberg post process time"
-  val DESCRIPTION_ICEBERG_STAGED_FOOTER_TIME = "iceberg staged footer/filter worker time"
-  val DESCRIPTION_ICEBERG_STAGED_IO_TIME = "iceberg staged data I/O worker time"
-  val DESCRIPTION_ICEBERG_STAGED_COMBINE_TIME = "iceberg staged combine worker time"
-  val DESCRIPTION_ICEBERG_STAGED_WAIT_TIME = "iceberg staged task wait time"
-  val DESCRIPTION_ICEBERG_STAGED_FOOTER_WAIT_TIME =
-    "iceberg staged footer barrier wait time"
-  val DESCRIPTION_ICEBERG_STAGED_RESULT_WAIT_TIME =
-    "iceberg staged data result wait time"
-  val DESCRIPTION_ICEBERG_STAGED_MATERIALIZATION_TIME =
-    "iceberg staged materialization time"
-  val DESCRIPTION_ICEBERG_STAGED_DISK_SUBTASK_COUNT =
-    "iceberg staged disk-backed subtasks"
-  val DESCRIPTION_ICEBERG_STAGED_DISK_BYTES = "iceberg staged disk-backed bytes"
-  val DESCRIPTION_ICEBERG_STAGED_IO_ALLOC_TIME = "iceberg staged I/O alloc time"
-  val DESCRIPTION_ICEBERG_STAGED_IO_READ_WAIT_TIME = "iceberg staged remote read time"
-  val DESCRIPTION_ICEBERG_STAGED_IO_ROUTE_TIME = "iceberg staged I/O scratch route time"
-  val DESCRIPTION_ICEBERG_STAGED_IO_FINALIZE_TIME = "iceberg staged I/O publish/seal time"
-  val DESCRIPTION_ICEBERG_STAGED_IO_REQUEST_COUNT = "iceberg staged remote read requests"
-  val DESCRIPTION_ICEBERG_STAGED_IO_READ_BYTES = "iceberg staged remote read bytes"
-  val DESCRIPTION_ICEBERG_STAGED_ASSEMBLY_CAPACITY =
-    "iceberg staged partition-reader assembly-buffer capacity"
-  val DESCRIPTION_ICEBERG_STAGED_PEAK_ASSEMBLY_CAPACITY =
-    "iceberg staged peak partition-reader assembly-buffer capacity"
 
   /**
    * Determine if a GpuMetric wraps a TimingMetric or NanoTimingMetric.

@@ -23,6 +23,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 
+import com.nvidia.spark.rapids.reader.ReadPlan;
 import org.apache.parquet.format.Util;
 import org.apache.parquet.format.converter.ParquetMetadataConverter;
 import org.apache.parquet.hadoop.metadata.BlockMetaData;
@@ -43,7 +44,7 @@ import org.apache.parquet.schema.MessageType;
  * defensively copied on access. {@code subtaskId} is unique only within one partition read plan;
  * row counts are rows and sizes and offsets are bytes.</p>
  */
-public final class ReadSubtask {
+public final class ReadSubtask implements ReadPlan {
   private static final byte[] PARQUET_MAGIC = new byte[] {'P', 'A', 'R', '1'};
   private static final int PARQUET_VERSION = 1;
   private static final String PARQUET_CREATOR = "RAPIDS Spark Plugin";

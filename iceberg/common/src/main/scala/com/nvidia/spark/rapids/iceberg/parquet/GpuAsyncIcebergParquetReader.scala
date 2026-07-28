@@ -35,22 +35,7 @@ import com.nvidia.spark.rapids.GpuMetric.{
   FILECACHE_DATA_RANGE_MISSES,
   FILECACHE_DATA_RANGE_MISSES_SIZE,
   FILECACHE_DATA_RANGE_READ_TIME,
-  FILTER_TIME,
-  ICEBERG_STAGED_COMBINE_TIME,
-  ICEBERG_STAGED_DISK_BYTES,
-  ICEBERG_STAGED_DISK_SUBTASK_COUNT,
-  ICEBERG_STAGED_FOOTER_TIME,
-  ICEBERG_STAGED_FOOTER_WAIT_TIME,
-  ICEBERG_STAGED_IO_ALLOC_TIME,
-  ICEBERG_STAGED_IO_FINALIZE_TIME,
-  ICEBERG_STAGED_IO_READ_BYTES,
-  ICEBERG_STAGED_IO_READ_WAIT_TIME,
-  ICEBERG_STAGED_IO_REQUEST_COUNT,
-  ICEBERG_STAGED_IO_ROUTE_TIME,
-  ICEBERG_STAGED_IO_TIME,
-  ICEBERG_STAGED_MATERIALIZATION_TIME,
-  ICEBERG_STAGED_RESULT_WAIT_TIME,
-  ICEBERG_STAGED_WAIT_TIME
+  FILTER_TIME
 }
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
 import com.nvidia.spark.rapids.iceberg.parquet.staged._
@@ -60,6 +45,7 @@ import com.nvidia.spark.rapids.parquet.{
   MakeParquetTableProducer,
   ParquetPartitionReaderBase
 }
+import com.nvidia.spark.rapids.reader.{Decoder, UnifiedReader}
 import org.apache.parquet.schema.MessageType
 
 import org.apache.spark.TaskContext
@@ -74,7 +60,7 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
  * partition order; combine mode admits their completed fragments in completion order, matching
  * the existing multithreaded Iceberg reader.
  */
-class GpuStagedIcebergParquetReader(
+class GpuAsyncIcebergParquetReader(
     val rapidsFileIO: IcebergFileIO,
     val files: Seq[IcebergPartitionedFile],
     val constantsProvider: IcebergPartitionedFile => JMap[Integer, _],
@@ -83,29 +69,31 @@ class GpuStagedIcebergParquetReader(
 
   private val multiThreadConf = conf.threadConf.asInstanceOf[MultiThread]
   private val closed = new AtomicBoolean()
-  private val stagedReaderRef = new AtomicReference[StagedParquetPartitionReader]()
-  private lazy val stagedReader = {
+  private val readerRef =
+    new AtomicReference[
+      UnifiedReader[IcebergPartitionedFile, FooterResult, FileFragment, ParquetDecodeInput]]()
+  private lazy val asyncReader = {
     val reader = createReader()
-    stagedReaderRef.set(reader)
+    readerRef.set(reader)
     // A task-completion close can race lazy construction. Whichever side observes the reader owns
     // the one close; a close that happened before publication is honored here.
-    if (closed.get() && stagedReaderRef.compareAndSet(reader, null)) {
+    if (closed.get() && readerRef.compareAndSet(reader, null)) {
       reader.close()
     }
     reader
   }
 
-  override def hasNext: Boolean = stagedReader.hasNext
+  override def hasNext: Boolean = asyncReader.hasNext
 
-  override def next(): ColumnarBatch = stagedReader.next()
+  override def next(): ColumnarBatch = asyncReader.next()
 
   override def close(): Unit = {
     closed.set(true)
-    Option(stagedReaderRef.getAndSet(null)).foreach(_.close())
+    Option(readerRef.getAndSet(null)).foreach(_.close())
   }
 
   private def createReader()
-  : StagedParquetPartitionReader = {
+  : UnifiedReader[IcebergPartitionedFile, FooterResult, FileFragment, ParquetDecodeInput] = {
     val combineThreshold = if (multiThreadConf.disableCombining) {
       0L
     } else {
@@ -116,19 +104,33 @@ class GpuStagedIcebergParquetReader(
     } else {
       multiThreadConf.combineConf.combineWaitTime.toLong
     }
-    new StagedParquetPartitionReader(
-      files.asJava,
-      new IcebergAdapter,
-      conf.maxBatchSizeRows,
-      conf.maxBatchSizeBytes,
-      combineThreshold,
+    val executor = ParquetReaderThreadPool.getOrCreate(workerThreads).executor()
+    val adapter = new IcebergAdapter
+    val planner = new ParquetReadPlanner(
+      new StableGreedyReadPlanner(
+        conf.maxBatchSizeRows,
+        conf.maxBatchSizeBytes,
+        combineThreshold),
+      new ParquetCombiner,
+      executor,
+      combineThreshold > 0L,
       combineWaitMs,
-      workerThreads,
-      TaskContext.get())
+      closed)
+    new UnifiedReader(
+      files.asJava,
+      new ParquetReadOps(adapter, TaskContext.get(), closed),
+      planner,
+      new Decoder[ParquetDecodeInput] {
+        override def decode(input: ParquetDecodeInput): JIterator[ColumnarBatch] = {
+          adapter.onSubtaskCompleted(input.getPlan, input.getStats)
+          adapter.decodeAndPostProcess(input.getPlan, input)
+        }
+      },
+      executor)
   }
 
   /** Scala operations invoked by the Iceberg-specific Java pipeline. */
-  private class IcebergAdapter extends StagedScanAdapter {
+  private class IcebergAdapter extends ParquetReaderAdapter {
 
     override def readAndFilterFooter(file: IcebergPartitionedFile): FooterResult = {
       val icebergFile = file
@@ -157,57 +159,29 @@ class GpuStagedIcebergParquetReader(
 
     override def onFooterCompleted(footerNanos: Long): Unit = {
       conf.metrics.get(FILTER_TIME).foreach(_ += footerNanos)
-      conf.metrics.get(ICEBERG_STAGED_FOOTER_TIME).foreach(_ += footerNanos)
     }
 
     override def onSubtaskCompleted(
         subtask: ReadSubtask,
         stats: SubtaskStats): Unit = {
-      conf.metrics.get(ICEBERG_STAGED_IO_TIME).foreach(_ += stats.getIoNanos)
-      conf.metrics.get(ICEBERG_STAGED_IO_ALLOC_TIME).foreach(_ += stats.getIoAllocNanos)
-      conf.metrics.get(ICEBERG_STAGED_IO_READ_WAIT_TIME).foreach(_ += stats.getIoReadWaitNanos)
-      conf.metrics.get(ICEBERG_STAGED_IO_ROUTE_TIME).foreach(_ += stats.getIoRouteNanos)
-      conf.metrics.get(ICEBERG_STAGED_IO_FINALIZE_TIME).foreach(_ += stats.getIoFinalizeNanos)
-      conf.metrics.get(ICEBERG_STAGED_IO_REQUEST_COUNT).foreach(_ += stats.getIoRequestCount)
-      conf.metrics.get(ICEBERG_STAGED_IO_READ_BYTES).foreach(_ += stats.getIoRequestedBytes)
-      conf.metrics.get(ICEBERG_STAGED_COMBINE_TIME).foreach(_ += stats.getCombineNanos)
       conf.metrics.get(FILECACHE_DATA_RANGE_HITS).foreach(_ += stats.getCacheHitCount)
       conf.metrics.get(FILECACHE_DATA_RANGE_HITS_SIZE).foreach(_ += stats.getCacheHitBytes)
       conf.metrics.get(FILECACHE_DATA_RANGE_MISSES).foreach(_ += stats.getCacheMissCount)
       conf.metrics.get(FILECACHE_DATA_RANGE_MISSES_SIZE).foreach(_ += stats.getCacheMissBytes)
       conf.metrics.get(FILECACHE_DATA_RANGE_READ_TIME).foreach(_ += stats.getCacheReadNanos)
       conf.metrics.get("readBufferSize").foreach(_ += subtask.getDataSizeBytes)
-      if (stats.isDiskBacked) {
-        conf.metrics.get(ICEBERG_STAGED_DISK_SUBTASK_COUNT).foreach(_ += 1L)
-        conf.metrics.get(ICEBERG_STAGED_DISK_BYTES).foreach(_ += subtask.getTotalSizeBytes)
-      }
-    }
-
-    override def onMaterializationCompleted(materializationNanos: Long): Unit = {
-      conf.metrics.get(ICEBERG_STAGED_MATERIALIZATION_TIME).foreach(_ += materializationNanos)
-    }
-
-    private def recordTaskWait(waitNanos: Long): Unit = {
-      conf.metrics.get(ICEBERG_STAGED_WAIT_TIME).foreach(_ += waitNanos)
-    }
-
-    override def onFooterWait(waitNanos: Long): Unit = {
-      recordTaskWait(waitNanos)
-      conf.metrics.get(ICEBERG_STAGED_FOOTER_WAIT_TIME).foreach(_ += waitNanos)
     }
 
     override def onResultWait(waitNanos: Long): Unit = {
-      recordTaskWait(waitNanos)
       // Match the standard multithreaded reader's critical-path semantics. Per-file worker I/O
-      // spans overlap and belong only in the staged-specific metrics above; BUFFER_TIME records
-      // how long the Spark task was actually blocked waiting for a file result.
+      // spans overlap; BUFFER_TIME records how long the Spark task was actually blocked waiting
+      // for a file result.
       conf.metrics.get(BUFFER_TIME).foreach(_ += waitNanos)
-      conf.metrics.get(ICEBERG_STAGED_RESULT_WAIT_TIME).foreach(_ += waitNanos)
     }
 
     override def decodeAndPostProcess(
         subtask: ReadSubtask,
-        parquetInput: StagedParquetInput): JIterator[ColumnarBatch] = {
+        parquetInput: ParquetDecodeInput): JIterator[ColumnarBatch] = {
       val firstFooter = subtask.getFileSlices.get(0).getFooter
       val postProcessor = firstFooter.getPostProcessor
       val readSchema = firstFooter.getReadSchema
@@ -228,15 +202,12 @@ class GpuStagedIcebergParquetReader(
         .map(_.getFooter.getFile.sparkPartitionedFile)
         .toArray
       val decoded = RmmRapidsRetryIterator.withRetryNoSplit[Iterator[ColumnarBatch]] {
-        val materializeStart = System.nanoTime()
         val attempt = parquetInput.materialize()
-        val materializeNanos = System.nanoTime() - materializeStart
         // A retry receives fresh owning header/footer buffers and fresh owning references to the
         // fragment slices. MakeParquetTableProducer consumes them once invoked; closeOnExcept
         // covers failures before that ownership transfer. CachedGpuBatchIterator eagerly drains
         // the producer, so returned batches no longer depend on staged host storage.
         closeOnExcept(attempt) { hostBuffers =>
-          onMaterializationCompleted(materializeNanos)
           GpuSemaphore.acquireIfNecessary(TaskContext.get())
           val producer = MakeParquetTableProducer(
             conf.useChunkedReader,
@@ -281,9 +252,9 @@ class GpuStagedIcebergParquetReader(
     // copyBufferSize in its trait constructor by calling conf; an override val would still have
     // its JVM default value (null) at that point in Scala 2.12.
     override def fileIO = rapidsFileIO
-    override def conf = GpuStagedIcebergParquetReader.this.conf.conf
-    override def execMetrics = GpuStagedIcebergParquetReader.this.conf.metrics
-    override def isSchemaCaseSensitive = GpuStagedIcebergParquetReader.this.conf.caseSensitive
+    override def conf = GpuAsyncIcebergParquetReader.this.conf.conf
+    override def execMetrics = GpuAsyncIcebergParquetReader.this.conf.metrics
+    override def isSchemaCaseSensitive = GpuAsyncIcebergParquetReader.this.conf.caseSensitive
     override def compressCfg = CpuCompressionConfig.disabled()
 
     def parquetOptions(readSchema: StructType, clippedSchema: MessageType) = {

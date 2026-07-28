@@ -18,8 +18,6 @@ package org.apache.iceberg.aws.s3;
 
 import ai.rapids.cudf.HostMemoryBuffer;
 import com.nvidia.spark.rapids.IcebergS3RangeCopier;
-import com.nvidia.spark.rapids.IcebergS3RangeCopier.FileChannelCopyResult;
-import com.nvidia.spark.rapids.IcebergS3RangeCopier.FileChannelCopyRange;
 import com.nvidia.spark.rapids.IcebergS3RangeCopier.IcebergS3Client;
 import com.nvidia.spark.rapids.fileio.RapidsInputFiles;
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
@@ -60,7 +58,7 @@ public final class IcebergS3InputFile implements RapidsInputFile {
   }
 
   public static RapidsInputFile maybeCreate(InputFile inputFile, FileIO fileIO) {
-    // When resolved PerfIO S3 support is unavailable (or this is not an S3 file), return the
+    // When the gating conf is off (or the file is not an S3 file), return the
     // default IcebergInputFile so the standard Iceberg SeekableInputStream path is used.
     IcebergInputFile delegate = new IcebergInputFile(inputFile);
     if (!RapidsInputFiles.isS3PerfEnabled()) {
@@ -82,9 +80,6 @@ public final class IcebergS3InputFile implements RapidsInputFile {
       }
       LOG.debug("IcebergS3RangeCopier path disabled for {}", s3Uri);
       return delegate;
-    }
-    if (TaskContext.get() != null) {
-      GpuTaskMetrics$.MODULE$.get().recordPerfioS3BackendOnce();
     }
     LOG.debug("IcebergS3RangeCopier path active for {}", s3Uri);
     return new IcebergS3InputFile(delegate, s3Uri, icebergS3Client);
@@ -123,33 +118,6 @@ public final class IcebergS3InputFile implements RapidsInputFile {
   public void readVectored(HostMemoryBuffer output, List<CopyRange> copyRanges)
       throws IOException {
     IcebergS3RangeCopier.copyToHMB(icebergS3Client, output, s3Uri, copyRanges);
-  }
-
-  /**
-   * Downloads S3 ranges directly into positioned regions of caller-owned file
-   * channels. The requests are submitted in list order but execute concurrently
-   * through the same shared async S3 client used by {@link #readVectored}.
-   *
-   * <p>This method blocks until every accepted request finishes. It neither
-   * closes a destination channel nor changes its current position.</p>
-   *
-   * @return total bytes written.
-   */
-  public long readVectoredToFileChannels(List<FileChannelCopyRange> copyRanges)
-      throws IOException {
-    return IcebergS3RangeCopier.copyToFileChannels(
-        icebergS3Client, s3Uri, copyRanges);
-  }
-
-  /**
-   * Downloads each range to its mandatory cache-file destination and optionally mirrors the
-   * same S3 response bytes into host memory. A host-memory failure is reported in the result
-   * without interrupting the cache write.
-   */
-  public FileChannelCopyResult readVectoredToFileChannelsAndHostMemory(
-      List<FileChannelCopyRange> copyRanges) throws IOException {
-    return IcebergS3RangeCopier.copyToFileChannelsAndHostMemory(
-        icebergS3Client, s3Uri, copyRanges);
   }
 
   /**

@@ -27,6 +27,7 @@ import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile
 import com.nvidia.spark.rapids.iceberg.parquet.converter.FromIcebergShaded._
 import com.nvidia.spark.rapids.parquet.{GpuParquetUtils, ParquetFileInfoWithBlockMeta}
+import com.nvidia.spark.rapids.reader.ReadSource
 import com.nvidia.spark.rapids.shims.PartitionedFileUtilsShim
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
@@ -52,7 +53,7 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 case class IcebergPartitionedFile(
     file: IcebergInputFile,
     split: Option[(Long, Long)] = None,
-    filter: Option[Expression] = None) {
+    filter: Option[Expression] = None) extends ReadSource {
 
   lazy val urlEncodedPath: String = new Path(file.getDelegate.location()).toUri.toString
   lazy val path: Path = new Path(new URI(urlEncodedPath))
@@ -120,8 +121,16 @@ case class MultiThread(
     combineConf: CombineConf,
     disableCombining: Boolean,
     hasFilePathMetadata: Boolean,
-    hasRowPositionMetadata: Boolean,
-    queryUsesInputFile: Boolean) extends ThreadConf
+    hasRowPositionMetadata: Boolean) extends ThreadConf
+
+/**
+ * Marks a normal multi-thread configuration for the staged Iceberg reader.
+ *
+ * Keeping the marker separate is intentional: when staged reading is disabled, the reader
+ * factory returns the exact upstream [[MultiThread]] value and the partition reader follows the
+ * exact upstream match arm. No staged fields are added to baseline task objects.
+ */
+case class StagedMultiThread(delegate: MultiThread) extends ThreadConf
 
 case class MultiFile(
     poolConfBuilder: ThreadPoolConfBuilder,

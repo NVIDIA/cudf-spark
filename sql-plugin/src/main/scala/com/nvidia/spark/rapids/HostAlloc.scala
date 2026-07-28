@@ -259,18 +259,6 @@ private class HostAlloc(nonPinnedLimit: Long) extends HostMemoryAllocator with L
     ret
   }
 
-  /**
-   * Run one non-blocking internal allocation cycle and ignore RMM's request for another cycle.
-   * The internal cycle can still spill and retry locally up to ten times.
-   */
-  def tryAlloc2(amount: Long, preferPinned: Boolean = true): Option[HostMemoryBuffer] = {
-    if (canNeverSucceed(amount, preferPinned)) {
-      return None
-    }
-    val (ret, _) = tryAllocInternal(amount, preferPinned, blocking = false)
-    ret
-  }
-
   def alloc(amount: Long, preferPinned: Boolean = true): HostMemoryBuffer = {
     checkSize(amount, preferPinned)
     var ret = Option.empty[HostMemoryBuffer]
@@ -313,14 +301,6 @@ object HostAlloc extends Logging {
 
   def tryAlloc(amount: Long, preferPinned: Boolean = true): Option[HostMemoryBuffer] = {
     getSingleton.tryAlloc(amount, preferPinned)
-  }
-
-  /**
-   * Run one non-blocking internal allocation cycle and ignore RMM's request for another cycle.
-   * The internal cycle can still spill and retry locally up to ten times.
-   */
-  def tryAlloc2(amount: Long, preferPinned: Boolean = true): Option[HostMemoryBuffer] = {
-    getSingleton.tryAlloc2(amount, preferPinned)
   }
 
   def alloc(amount: Long, preferPinned: Boolean = true): HostMemoryBuffer = {

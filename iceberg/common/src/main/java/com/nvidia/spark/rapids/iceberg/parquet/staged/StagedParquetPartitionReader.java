@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids.iceberg.parquet.staged;
 
-import java.io.IOException;
+import java.nio.channels.SeekableByteChannel;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -27,7 +27,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Callable;
@@ -41,18 +40,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import ai.rapids.cudf.HostMemoryBuffer;
-import com.nvidia.spark.rapids.GpuSemaphore$;
 import com.nvidia.spark.rapids.HostAlloc$;
-import com.nvidia.spark.rapids.IcebergS3RangeCopier.FileChannelCopyRange;
-import com.nvidia.spark.rapids.IcebergS3RangeCopier.FileChannelCopyResult;
 import com.nvidia.spark.rapids.filecache.FileCache;
-import com.nvidia.spark.rapids.filecache.FileCacheDataRangeLease;
-import com.nvidia.spark.rapids.filecache.FileCacheDataRangeReservation;
-import com.nvidia.spark.rapids.filecache.FileCacheDataRangeWriter;
+import com.nvidia.spark.rapids.filecache.FileCache.FileCacheStartedToken;
 import com.nvidia.spark.rapids.iceberg.parquet.IcebergPartitionedFile;
 import com.nvidia.spark.rapids.jni.RmmSpark;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
-import org.apache.iceberg.aws.s3.IcebergS3InputFile;
 import org.apache.parquet.hadoop.metadata.BlockMetaData;
 import org.apache.parquet.hadoop.metadata.ColumnChunkMetaData;
 import scala.Option;
@@ -85,13 +78,21 @@ import org.apache.spark.sql.vectorized.ColumnarBatch;
 public final class StagedParquetPartitionReader
     implements Iterator<ColumnarBatch>, AutoCloseable {
   private static final int CLOSED_COMPLETION = -1;
+  /**
+   * Coalescing policy for cache-miss reads within one file, matching the base multithreaded
+   * reader's contiguous-only {@code coalesceReads}: only ranges with a zero source gap merge,
+   * and a contiguous run has no artificial maximum span. Gapped columns remain separate ranges
+   * that the shared S3 client can fetch in parallel. No gap bytes are downloaded, so the scratch
+   * route stays idle.
+   */
+  static final long COALESCE_GAP_LIMIT_BYTES = 0L;
 
   private final List<IcebergPartitionedFile> files;
-  private final StagedScanAdapter adapter;
+  private final ParquetReaderAdapter adapter;
   private final StableGreedyReadPlanner planner;
   private final boolean combineEnabled;
   private final long combineWaitMs;
-  private final StagedScanThreadPools pools;
+  private final ParquetReaderThreadPool pools;
   private final TaskContext taskContext;
   private final long taskAttemptId;
   private final Object lifecycleLock = new Object();
@@ -141,7 +142,7 @@ public final class StagedParquetPartitionReader
    */
   public StagedParquetPartitionReader(
       List<IcebergPartitionedFile> files,
-      StagedScanAdapter adapter,
+      ParquetReaderAdapter adapter,
       int maxRows,
       long maxEstimatedGpuBytes,
       long combineThreshold,
@@ -154,7 +155,7 @@ public final class StagedParquetPartitionReader
         maxRows, maxEstimatedGpuBytes, combineThreshold);
     this.combineEnabled = combineThreshold > 0L;
     this.combineWaitMs = Math.max(combineWaitMs, 0L);
-    this.pools = StagedScanThreadPools.getOrCreate(workerThreads);
+    this.pools = ParquetReaderThreadPool.getOrCreate(workerThreads);
     this.taskContext = taskContext;
     this.taskAttemptId = taskContext == null ? -1L : taskContext.taskAttemptId();
   }
@@ -190,8 +191,10 @@ public final class StagedParquetPartitionReader
           }
         }
 
-        // Waiting below releases an already-held GPU permit only when no file result is ready.
-        // The Scala decode adapter reacquires immediately before entering cuDF.
+        // Match MultiFileCloudParquetPartitionReader: GPU decode acquires the task-wide
+        // semaphore, and the Spark task-completion listener releases it. The reader deliberately
+        // retains that permit while waiting for every later subtask instead of introducing a
+        // staged-only release/reacquire cycle that increases concurrent GPU residency and spill.
         ReadSubtask subtask = nextPlannedSubtask();
         if (subtask == null) {
           closeAllFragmentFutures();
@@ -306,7 +309,7 @@ public final class StagedParquetPartitionReader
         }
         TimedFooter timed = new TimedFooter(result, System.nanoTime() - footerStart);
         footerFuture.complete(timed);
-        return downloadFragment(result);
+        return downloadFragment(result, adapter, closed);
       });
     } catch (Throwable error) {
       throw wrapAsCompletion(error);
@@ -323,15 +326,15 @@ public final class StagedParquetPartitionReader
   /**
    * Download one file's filtered column chunks into a contiguous fragment.
    *
-   * <p>The file cache is the authoritative destination for every selected column chunk. The
-   * worker first reserves every exact range, then makes one bounded host-allocation attempt. If
-   * it succeeds, cache-owner downloads tee the same S3 response into both the mandatory cache
-   * file and the fragment HMB; cache hits and followers are copied from their committed leases.
-   * If it fails, the worker downloads to cache only, waits for every range to become readable,
-   * and only then performs a blocking fragment allocation and copies the ranges from disk.</p>
+   * <p>Runs as one blocking pool job: allocate the exact pinned-preferred fragment, copy cache hits,
+   * hand all cache-miss chunks to the async I/O engine in order, block until every accepted read
+   * is terminal, publish owning cache slices, and seal the fragment as spillable.</p>
    */
-  private FileFragment downloadFragment(FooterResult footer) throws Exception {
-    checkOpen();
+  static FileFragment downloadFragment(
+      FooterResult footer,
+      ParquetReaderAdapter adapter,
+      AtomicBoolean closed) throws Exception {
+    checkOpen(closed);
     long start = System.nanoTime();
     List<BlockMetaData> blocks = footer.getBlocks();
     long[] blockOffsets = FileFragment.computeBlockOffsets(blocks);
@@ -339,60 +342,58 @@ public final class StagedParquetPartitionReader
     if (totalBytes == 0) {
       return new FileFragment(footer, blockOffsets, null,
           new FileFragment.DownloadStats(System.nanoTime() - start,
-              0L, 0L, 0L, 0L, 0L, 0L, false,
-              0L, 0L, 0L, 0L, 0L));
+              0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L));
     }
 
-    List<CacheRange> ranges = new ArrayList<>();
-    List<CacheRange> writerRanges = new ArrayList<>();
-    StagedParquetOutput output = null;
     long cacheHitCount = 0L;
     long cacheHitBytes = 0L;
     long cacheMissCount = 0L;
     long cacheMissBytes = 0L;
     long cacheReadNanos = 0L;
+    List<MissChunk> misses = new ArrayList<>();
+    long allocStart = System.nanoTime();
+    StagedParquetOutput output = StagedParquetOutput.create(totalBytes);
+    long allocNanos = System.nanoTime() - allocStart;
+    HostMemoryBuffer scratch = null;
     try {
       if (closed.get()) {
         throw new CancellationException("staged reader closed before fragment I/O started");
       }
-      RapidsInputFile genericInput = adapter.openInputFile(footer.getFile());
-      if (genericInput == null) {
+      RapidsInputFile input = adapter.openInputFile(footer.getFile());
+      if (input == null) {
         throw new IllegalStateException("input-file adapter returned null");
       }
-      // This POC is deliberately Iceberg/S3-only. Keeping the concrete cast here avoids a
-      // second generic reader abstraction around the mandatory cache-file API.
-      IcebergS3InputFile input = (IcebergS3InputFile) genericInput;
       FileCache fileCache = FileCache.get();
       long fragmentOffset = 0L;
       for (BlockMetaData block : blocks) {
         for (ColumnChunkMetaData column : block.getColumns()) {
-          checkOpen();
+          checkOpen(closed);
           long length = column.getTotalSize();
           long sourceOffset = column.getStartingPos();
-          Optional<FileCacheDataRangeReservation> optionalReservation =
-              fileCache.reserveDataRangeCache(input, sourceOffset, length);
-          if (!optionalReservation.isPresent()) {
-            throw new IOException(
-                "file cache could not reserve mandatory Iceberg range " +
-                    input.path() + " [" + sourceOffset + ", " +
-                    Math.addExact(sourceOffset, length) + ")");
-          }
-          FileCacheDataRangeReservation reservation = optionalReservation.get();
-          Optional<FileCacheDataRangeWriter> optionalWriter = reservation.getWriter();
-          CacheRange range = new CacheRange(
-              sourceOffset,
-              length,
-              fragmentOffset,
-              reservation,
-              optionalWriter.isPresent() ? new OwnedCacheWriter(optionalWriter.get()) : null);
-          ranges.add(range);
-          if (range.writer != null) {
-            writerRanges.add(range);
-          }
-          if (reservation.isCacheHit()) {
-            cacheHitCount += 1L;
-            cacheHitBytes = Math.addExact(cacheHitBytes, length);
+          Option<SeekableByteChannel> cached = fileCache.getDataRangeChannel(
+              input, sourceOffset, length);
+          if (cached.isDefined()) {
+            try (SeekableByteChannel channel = cached.get()) {
+              // Keep hit accounting before the copy, matching GpuParquetScan.copyLocal.
+              cacheHitCount += 1L;
+              cacheHitBytes = Math.addExact(cacheHitBytes, length);
+              // Match GpuParquetScan.copyLocal: time only the byte copy. Closing the cache
+              // channel (including FileCache.finishLocalFileRead bookkeeping) is deliberately
+              // outside this metric even though it remains part of the worker's I/O time.
+              long cacheStart = System.nanoTime();
+              try {
+                output.copyCachedRange(channel, fragmentOffset, length);
+              } finally {
+                cacheReadNanos = Math.addExact(
+                    cacheReadNanos, System.nanoTime() - cacheStart);
+              }
+            }
           } else {
+            MissChunk chunk = new MissChunk(sourceOffset, length, fragmentOffset);
+            Option<FileCacheStartedToken> token = fileCache.startDataRangeCache(
+                input, sourceOffset, length);
+            chunk.token = token.isDefined() ? token.get() : null;
+            misses.add(chunk);
             cacheMissCount += 1L;
             cacheMissBytes = Math.addExact(cacheMissBytes, length);
           }
@@ -400,253 +401,172 @@ public final class StagedParquetPartitionReader
         }
       }
 
-      // The copier coalesces only adjacent ranges in list order. Source sorting keeps the
-      // baseline reader's contiguous-only coalescing without downloading gap bytes.
-      writerRanges.sort(Comparator.comparingLong(range -> range.sourceOffset));
-
-      // Exactly one bounded allocation cycle decides the branch. tryAlloc2 may spill/retry
-      // internally, but it does not start another outer retry cycle for this file.
-      long allocStart = System.nanoTime();
-      Option<HostMemoryBuffer> optionalAllocation =
-          HostAlloc$.MODULE$.tryAlloc2(totalBytes, true);
-      long allocNanos = System.nanoTime() - allocStart;
-      HostMemoryBuffer directHostDestination = null;
-      if (optionalAllocation.isDefined()) {
-        directHostDestination = optionalAllocation.get();
-        output = new MemoryStagedParquetOutput(directHostDestination, totalBytes);
-      }
-
-      List<FileChannelCopyRange> remoteRanges = new ArrayList<>(writerRanges.size());
+      // Merge miss chunks into few ranged reads. Zero-gap merges land directly on their
+      // contiguous packed fragment region; gap-carrying merges read their whole source span
+      // into a transient scratch buffer whose useful segments are routed into the fragment
+      // after the read barrier. Gap bytes are downloaded and discarded — bounded extra
+      // bandwidth traded for far fewer request round-trips.
+      List<MergedRead> mergedReads = mergeMissChunks(misses);
+      List<PlannedReadRange> directRanges = new ArrayList<>();
+      List<RapidsInputFile.CopyRange> scratchRanges = new ArrayList<>();
+      long scratchBytes = 0L;
       long requestedBytes = 0L;
-      for (CacheRange range : writerRanges) {
-        requestedBytes = Math.addExact(requestedBytes, range.length);
-        if (directHostDestination == null) {
-          remoteRanges.add(new FileChannelCopyRange(
-              range.sourceOffset,
-              range.length,
-              range.writer.getChannel(),
-              0L));
+      for (MergedRead read : mergedReads) {
+        requestedBytes = Math.addExact(requestedBytes, read.spanBytes());
+        if (read.isDirect()) {
+          directRanges.add(new PlannedReadRange(
+              footer, read.sourceStart, read.spanBytes(), read.chunks.get(0).fragmentOffset));
         } else {
-          remoteRanges.add(new FileChannelCopyRange(
-              range.sourceOffset,
-              range.length,
-              range.writer.getChannel(),
-              0L,
-              directHostDestination,
-              range.fragmentOffset));
+          read.scratchStart = scratchBytes;
+          scratchRanges.add(new RapidsInputFile.CopyRange(
+              read.sourceStart, read.spanBytes(), scratchBytes));
+          scratchBytes = Math.addExact(scratchBytes, read.spanBytes());
         }
       }
+      if (scratchBytes > 0) {
+        long scratchAllocStart = System.nanoTime();
+        scratch = HostAlloc$.MODULE$.alloc(scratchBytes, false);
+        allocNanos += System.nanoTime() - scratchAllocStart;
+      }
 
-      // Submit each owner range once. The file write is authoritative; host mirroring is best
-      // effort and a failed mirror is repaired from that same committed cache file.
+      // Blocking remote reads on this worker via the same synchronous readVectored the base
+      // multithreaded reader uses; the elapsed span is the remote-read metric compared against
+      // the base reader. The calls return only when every byte has landed.
       long readStart = System.nanoTime();
-      FileChannelCopyResult copyResult =
-          input.readVectoredToFileChannelsAndHostMemory(remoteRanges);
-      if (copyResult.getBytesCopied() != requestedBytes) {
-        throw new IOException(
-            "Iceberg S3 copy wrote " + copyResult.getBytesCopied() +
-                " bytes; expected " + requestedBytes);
+      output.copyRanges(input, directRanges);
+      if (scratch != null) {
+        input.readVectored(scratch, scratchRanges);
       }
       long readWaitNanos = System.nanoTime() - readStart;
-      checkOpen();
+      checkOpen(closed);
 
-      // Publish owners and obtain one independent pinned read lease per exact range. Followers
-      // never issue another S3 read; their future completes after the owner's commit.
-      long finalizeStart = System.nanoTime();
-      for (CacheRange range : writerRanges) {
-        range.writer.commit();
-      }
-      for (CacheRange range : ranges) {
-        range.lease = awaitCacheLease(range.reservation.getCompletionFuture());
-        range.completionClaimed = true;
-      }
-      long finalizeNanos = System.nanoTime() - finalizeStart;
-      checkOpen();
-
-      if (output == null) {
-        // Cache I/O is terminal before this blocking allocation. Host-memory pressure therefore
-        // cannot hold a remote request or one unit of remote-read concurrency open.
-        long blockingAllocStart = System.nanoTime();
-        HostMemoryBuffer allocation = HostAlloc$.MODULE$.alloc(totalBytes, true);
-        allocNanos = Math.addExact(allocNanos, System.nanoTime() - blockingAllocStart);
-        output = new MemoryStagedParquetOutput(allocation, totalBytes);
-      }
-
-      // Disk-first loads every range. The tee branch loads cache hits and followers; if any
-      // best-effort host mirror failed, all owner ranges are conservatively repaired from cache.
-      boolean loadAllWriterRanges =
-          directHostDestination == null || !copyResult.allHostCopiesSucceeded();
+      // Route the useful segments of gap-merged reads into the packed fragment.
       long routeStart = System.nanoTime();
-      for (CacheRange range : ranges) {
-        if (range.writer == null || loadAllWriterRanges) {
-          // This is the same cache-to-HMB work measured by the baseline cache-reader metric.
-          // Include immediate hits, followers, the complete disk-first branch, and tee repair.
-          long cacheStart = System.nanoTime();
-          try {
-            output.copyCachedRange(
-                range.lease.getChannel(), range.fragmentOffset, range.length);
-          } finally {
-            cacheReadNanos = Math.addExact(
-                cacheReadNanos, System.nanoTime() - cacheStart);
+      for (MergedRead read : mergedReads) {
+        if (read.scratchStart >= 0) {
+          for (MissChunk chunk : read.chunks) {
+            output.copyFromHostBuffer(
+                chunk.fragmentOffset,
+                scratch,
+                read.scratchStart + (chunk.sourceOffset - read.sourceStart),
+                chunk.length);
           }
         }
       }
       long routeNanos = System.nanoTime() - routeStart;
 
-      long sealStart = System.nanoTime();
-      for (CacheRange range : ranges) {
-        range.lease.close();
-        range.lease = null;
+      // Publish owning cache slices inline on this worker.
+      long finalizeStart = System.nanoTime();
+      for (MissChunk chunk : misses) {
+        FileCacheStartedToken token = chunk.token;
+        if (token != null) {
+          HostMemoryBuffer data = output.sliceForCache(chunk.fragmentOffset, chunk.length);
+          // Keep the token cancellable until the owning slice exists. complete() consumes the
+          // HMB before it queues cache work, so clear the token before handing over ownership.
+          chunk.token = null;
+          token.complete(data);
+        }
       }
       output.seal();
-      finalizeNanos = Math.addExact(finalizeNanos, System.nanoTime() - sealStart);
       return new FileFragment(footer, blockOffsets, output,
           new FileFragment.DownloadStats(System.nanoTime() - start,
-              allocNanos, readWaitNanos, routeNanos, finalizeNanos,
-              countCoalescedRequests(writerRanges), requestedBytes,
-              directHostDestination == null,
+              allocNanos, readWaitNanos, routeNanos, System.nanoTime() - finalizeStart,
+              directRanges.size() + scratchRanges.size(), requestedBytes,
               cacheHitCount, cacheHitBytes, cacheMissCount, cacheMissBytes, cacheReadNanos));
     } catch (Throwable error) {
-      // The copier drains accepted requests before returning, so partial files are no longer
-      // being written and every nonterminal owner can be cancelled safely.
+      // The blocking reads are terminal on return, so no writer can still touch the output or
+      // scratch here.
       Throwable failure = unwrap(error);
-      for (CacheRange range : writerRanges) {
-        if (!range.writer.isTerminal()) {
+      for (MissChunk chunk : misses) {
+        if (chunk.token != null) {
           try {
-            range.writer.cancel();
+            chunk.token.cancel();
           } catch (Throwable cancelError) {
             failure = addFailure(failure, cancelError);
           }
         }
       }
-
-      // A committed owner or follower can complete after this worker fails. Close claimed
-      // leases now and attach cleanup to every future whose lease has not yet been claimed.
-      for (CacheRange range : ranges) {
-        if (range.lease != null) {
-          try {
-            range.lease.close();
-          } catch (Throwable closeError) {
-            failure = addFailure(failure, closeError);
-          } finally {
-            range.lease = null;
-          }
-        } else if (!range.completionClaimed) {
-          range.reservation.getCompletionFuture().whenComplete((lease, completionError) -> {
-            if (lease != null) {
-              try {
-                lease.close();
-              } catch (Throwable closeError) {
-                recordAsynchronousCleanupFailure(closeError);
-              }
-            }
-          });
-        }
-      }
-      if (output != null) {
-        try {
-          output.close();
-        } catch (Throwable closeError) {
-          failure = addFailure(failure, closeError);
+      try {
+        output.close();
+      } catch (Throwable closeError) {
+        if (closeError != failure) {
+          failure.addSuppressed(closeError);
         }
       }
       throw propagate(failure);
+    } finally {
+      if (scratch != null) {
+        scratch.close();
+      }
     }
   }
 
-  /** One selected column chunk and its mandatory exact-range cache reservation. */
-  private static final class CacheRange {
+  /** One cache-miss column chunk: source range, packed fragment offset, and its cache token. */
+  private static final class MissChunk {
     final long sourceOffset;
     final long length;
     final long fragmentOffset;
-    final FileCacheDataRangeReservation reservation;
-    final OwnedCacheWriter writer;
-    FileCacheDataRangeLease lease;
-    boolean completionClaimed;
+    FileCacheStartedToken token;
 
-    CacheRange(
-        long sourceOffset,
-        long length,
-        long fragmentOffset,
-        FileCacheDataRangeReservation reservation,
-        OwnedCacheWriter writer) {
+    MissChunk(long sourceOffset, long length, long fragmentOffset) {
       this.sourceOffset = sourceOffset;
       this.length = length;
       this.fragmentOffset = fragmentOffset;
-      this.reservation = Objects.requireNonNull(reservation, "reservation");
-      this.writer = writer;
     }
   }
 
-  /** Tracks the exactly-once commit/cancel obligation of one cache-owned writer. */
-  private static final class OwnedCacheWriter {
-    private final FileCacheDataRangeWriter writer;
-    private boolean terminal;
+  /** Consecutive source-sorted miss chunks merged into one ranged read. */
+  private static final class MergedRead {
+    final List<MissChunk> chunks = new ArrayList<>();
+    long sourceStart;
+    long sourceEnd;
+    long scratchStart = -1L;
 
-    OwnedCacheWriter(FileCacheDataRangeWriter writer) {
-      this.writer = Objects.requireNonNull(writer, "writer");
+    long spanBytes() {
+      return sourceEnd - sourceStart;
     }
 
-    java.nio.channels.FileChannel getChannel() {
-      return writer.getChannel();
-    }
-
-    void commit() {
-      if (terminal) {
-        throw new IllegalStateException("cache writer is already terminal");
+    /** Direct reads have no source gaps and land exactly on one packed fragment region. */
+    boolean isDirect() {
+      long expectedSource = sourceStart;
+      long expectedFragment = chunks.get(0).fragmentOffset;
+      for (MissChunk chunk : chunks) {
+        if (chunk.sourceOffset != expectedSource || chunk.fragmentOffset != expectedFragment) {
+          return false;
+        }
+        expectedSource += chunk.length;
+        expectedFragment += chunk.length;
       }
-      // commit owns the terminal transition even if cache publication itself throws.
-      terminal = true;
-      writer.commit();
-    }
-
-    void cancel() {
-      if (!terminal) {
-        terminal = true;
-        writer.cancel();
-      }
-    }
-
-    boolean isTerminal() {
-      return terminal;
+      return true;
     }
   }
 
-  /** Count the contiguous request groups the S3 copier submits for source-sorted ranges. */
-  private static long countCoalescedRequests(List<CacheRange> sortedWriterRanges) {
-    long requests = 0L;
-    long previousEnd = -1L;
-    boolean hasPrevious = false;
-    for (CacheRange range : sortedWriterRanges) {
-      if (range.length == 0L) {
-        continue;
+  /**
+   * Greedily merge contiguous source-sorted miss chunks. This intentionally has no merged-span
+   * cap: the base multithreaded reader coalesces every contiguous run before submitting the
+   * resulting ranges together in one vectored-read call.
+   */
+  private static List<MergedRead> mergeMissChunks(List<MissChunk> misses) {
+    ArrayList<MissChunk> sorted = new ArrayList<>(misses);
+    sorted.sort(Comparator.comparingLong(chunk -> chunk.sourceOffset));
+    ArrayList<MergedRead> merged = new ArrayList<>();
+    MergedRead current = null;
+    for (MissChunk chunk : sorted) {
+      long chunkEnd = Math.addExact(chunk.sourceOffset, chunk.length);
+      if (current != null
+          && chunk.sourceOffset >= current.sourceEnd
+          && chunk.sourceOffset - current.sourceEnd <= COALESCE_GAP_LIMIT_BYTES) {
+        current.chunks.add(chunk);
+        current.sourceEnd = chunkEnd;
+      } else {
+        current = new MergedRead();
+        current.sourceStart = chunk.sourceOffset;
+        current.sourceEnd = chunkEnd;
+        current.chunks.add(chunk);
+        merged.add(current);
       }
-      if (!hasPrevious || range.sourceOffset != previousEnd) {
-        requests += 1L;
-      }
-      previousEnd = Math.addExact(range.sourceOffset, range.length);
-      hasPrevious = true;
     }
-    return requests;
-  }
-
-  private static FileCacheDataRangeLease awaitCacheLease(
-      CompletableFuture<FileCacheDataRangeLease> future) throws Exception {
-    try {
-      return future.get();
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
-      throw e;
-    } catch (ExecutionException e) {
-      Throwable cause = unwrap(e);
-      if (cause instanceof Exception) {
-        throw (Exception) cause;
-      }
-      if (cause instanceof Error) {
-        throw (Error) cause;
-      }
-      throw new RuntimeException(cause);
-    }
+    return merged;
   }
 
   /** Advance baseline-compatible file admission until the next subtask is available. */
@@ -686,18 +606,14 @@ public final class StagedParquetPartitionReader
    */
   private Integer awaitCompletedFile(boolean waitForFirst) throws InterruptedException {
     long waitStart = System.nanoTime();
-    Integer fileIndex = completedFileIndexes.poll();
+    Integer fileIndex;
     try {
-      if (fileIndex == null) {
-        if (waitForFirst) {
-          // Unlike the baseline reader, the staged task thread is not assembling input while it
-          // waits. Do not retain a GPU permit when there is no ready fragment to decode.
-          GpuSemaphore$.MODULE$.releaseIfNecessary(taskContext);
-          fileIndex = completedFileIndexes.take();
-        } else if (combineWaitMs > 0L) {
-          GpuSemaphore$.MODULE$.releaseIfNecessary(taskContext);
-          fileIndex = completedFileIndexes.poll(combineWaitMs, TimeUnit.MILLISECONDS);
-        }
+      if (waitForFirst) {
+        fileIndex = completedFileIndexes.take();
+      } else if (combineWaitMs > 0L) {
+        fileIndex = completedFileIndexes.poll(combineWaitMs, TimeUnit.MILLISECONDS);
+      } else {
+        fileIndex = completedFileIndexes.poll();
       }
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
@@ -721,9 +637,6 @@ public final class StagedParquetPartitionReader
       fragmentFuture = fragmentFutures.get(fileIndex);
     }
 
-    if (!fragmentFuture.isDone()) {
-      GpuSemaphore$.MODULE$.releaseIfNecessary(taskContext);
-    }
     if (combineEnabled) {
       // The completion queue publishes only terminal fragment futures.
       awaitOrCancel(fragmentFuture);
@@ -755,9 +668,6 @@ public final class StagedParquetPartitionReader
       if (future == null) {
         throw new IllegalStateException("subtask references an unconsumed footer");
       }
-      if (!future.isDone()) {
-        GpuSemaphore$.MODULE$.releaseIfNecessary(taskContext);
-      }
       fragments.add(awaitOrCancel(future));
     }
 
@@ -773,11 +683,9 @@ public final class StagedParquetPartitionReader
     long cacheMissCount = 0L;
     long cacheMissBytes = 0L;
     long cacheReadNanos = 0L;
-    boolean diskBacked = false;
     for (FileFragment fragment : fragments) {
-      FileFragment.DownloadStats stats = fragment.getStats();
-      diskBacked |= stats.diskBacked;
       if (statsAttributed.add(fragment)) {
+        FileFragment.DownloadStats stats = fragment.getStats();
         ioNanos = Math.addExact(ioNanos, stats.ioNanos);
         ioAllocNanos = Math.addExact(ioAllocNanos, stats.allocNanos);
         ioReadWaitNanos = Math.addExact(ioReadWaitNanos, stats.readWaitNanos);
@@ -794,11 +702,11 @@ public final class StagedParquetPartitionReader
     }
 
     long assembleStart = System.nanoTime();
-    StagedParquetInput parquetInput = new StagedParquetInput(subtask, fragments);
+    ParquetDecodeInput parquetInput = new ParquetDecodeInput(subtask, fragments);
     long combineNanos = System.nanoTime() - assembleStart;
     adapter.onSubtaskCompleted(subtask, new SubtaskStats(
         ioNanos, ioAllocNanos, ioReadWaitNanos, ioRouteNanos, ioFinalizeNanos,
-        ioRequestCount, ioRequestedBytes, combineNanos, diskBacked,
+        ioRequestCount, ioRequestedBytes, combineNanos, false,
         cacheHitCount, cacheHitBytes, cacheMissCount, cacheMissBytes, cacheReadNanos));
 
     // The adapter eagerly drains cuDF's producer, so no returned batch references the borrowed
@@ -889,6 +797,10 @@ public final class StagedParquetPartitionReader
   }
 
   private void checkOpen() {
+    checkOpen(closed);
+  }
+
+  private static void checkOpen(AtomicBoolean closed) {
     if (closed.get()) {
       throw new CancellationException("staged Parquet reader is closed");
     }

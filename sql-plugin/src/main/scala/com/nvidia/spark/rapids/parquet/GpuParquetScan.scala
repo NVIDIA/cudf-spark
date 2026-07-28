@@ -3345,27 +3345,19 @@ object MakeParquetTableProducer extends Logging {
       debugDumpPrefix: Option[String],
       debugDumpAlways: Boolean
   ): GpuDataProducer[Table] = {
-    def dumpInputIfRequested(): Unit = {
-      debugDumpPrefix.foreach { prefix =>
-        if (debugDumpAlways) {
-          val p = DumpUtils.dumpBuffer(conf, buffers, prefix, ".parquet")
-          logWarning(s"Wrote data for ${splits.mkString(", ")} to $p")
-        }
+    debugDumpPrefix.foreach { prefix =>
+      if (debugDumpAlways) {
+        val p = DumpUtils.dumpBuffer(conf, buffers, prefix, ".parquet")
+        logWarning(s"Wrote data for ${splits.mkString(", ")} to $p")
       }
     }
     if (useChunkedReader) {
-      // The chunked producer owns buffers on success. Keep them guarded through debug dumping and
-      // JNI reader construction so a constructor failure cannot leak caller-transferred buffers.
-      closeOnExcept(buffers) { _ =>
-        dumpInputIfRequested()
-        ParquetTableReader(conf, chunkSizeByteLimit, maxChunkedReaderMemoryUsageSizeBytes,
-          opts, buffers, metrics, dateRebaseMode, timestampRebaseMode,
-          isSchemaCaseSensitive, useFieldId, readDataSchema, clippedParquetSchema,
-          splits, debugDumpPrefix, debugDumpAlways)
-      }
+      ParquetTableReader(conf, chunkSizeByteLimit, maxChunkedReaderMemoryUsageSizeBytes,
+        opts, buffers, metrics, dateRebaseMode, timestampRebaseMode,
+        isSchemaCaseSensitive, useFieldId, readDataSchema, clippedParquetSchema,
+        splits, debugDumpPrefix, debugDumpAlways)
     } else {
       val table = withResource(buffers) { _ =>
-        dumpInputIfRequested()
         try {
           RmmRapidsRetryIterator.withRetryNoSplit[Table] {
             NvtxIdWithMetrics(NvtxRegistry.PARQUET_DECODE, metrics(GPU_DECODE_TIME)) {

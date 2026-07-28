@@ -436,7 +436,7 @@ object RapidsConf extends Logging {
         "an allocation which was failing due to the interim state of memory.")
       .internal()
       .integerConf
-      .createWithDefault(8)
+      .createWithDefault(2)
 
   val ENABLE_R2C_RETRY = conf("spark.rapids.sql.rowToColumnar.retry.enabled")
     .doc("When true (default), the row-to-columnar conversion uses a per-batch retry block " +

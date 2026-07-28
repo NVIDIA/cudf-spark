@@ -24,6 +24,7 @@ import java.util.Objects;
 import com.nvidia.spark.rapids.DateTimeRebaseMode;
 import com.nvidia.spark.rapids.iceberg.parquet.GpuParquetReaderPostProcessor;
 import com.nvidia.spark.rapids.iceberg.parquet.IcebergPartitionedFile;
+import com.nvidia.spark.rapids.reader.ReadFooter;
 import org.apache.parquet.hadoop.metadata.BlockMetaData;
 import org.apache.parquet.schema.MessageType;
 import org.apache.spark.sql.types.StructType;
@@ -40,7 +41,7 @@ import org.apache.spark.sql.types.StructType;
  * schema-evolution and partition-constant work that must run after cuDF decodes a subtask. It is
  * borrowed by planned file slices and remains task-confined during decode.</p>
  */
-public final class FooterResult {
+public final class FooterResult implements ReadFooter {
   private final IcebergPartitionedFile file;
   private final List<BlockMetaData> blocks;
   private final MessageType clippedSchema;

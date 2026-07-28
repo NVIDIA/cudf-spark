@@ -16,7 +16,6 @@
 
 package com.nvidia.spark.rapids.fileio;
 
-import com.nvidia.spark.rapids.PerfIO;
 import com.nvidia.spark.rapids.PerfIOConf;
 import org.apache.spark.SparkEnv;
 
@@ -28,17 +27,17 @@ public final class RapidsInputFiles {
     private RapidsInputFiles() {}
 
     /**
-     * Returns whether the executor's resolved PerfIO state selected an S3 backend.
-     *
-     * <p>The enable configuration is optional: when it is unset, PerfIO opportunistically
-     * enables S3 support if a compatible HTTP client is present. Consult the initialized
-     * PerfIO state instead of reading the raw optional Spark configuration so callers observe
-     * that resolved decision.</p>
+     * True iff {@code spark.rapids.perfio.s3.enabled} is set to {@code true} on
+     * the active SparkConf. Returns false when no {@link SparkEnv} is initialized
+     * (e.g. before driver bring-up) so callers default to the non-PerfIO path.
      */
     public static boolean isS3PerfEnabled() {
-        return !"s3a".equals(PerfIO.s3BackendName());
+        SparkEnv env = SparkEnv.get();
+        if (env == null) {
+            return false;
+        }
+        return env.conf().getBoolean(PerfIOConf.S3PERF_ENABLED().key(), false);
     }
-
     /**
      * True iff {@code spark.rapids.perfio.gcs.enabled} is set to {@code true} on
      * the active SparkConf. Returns false when no {@link SparkEnv} is initialized

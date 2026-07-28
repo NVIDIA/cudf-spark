@@ -18,7 +18,9 @@ package com.nvidia.spark.rapids.iceberg.parquet.staged;
 
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicInteger;
 
+import com.nvidia.spark.rapids.reader.ReadData;
 import org.apache.parquet.hadoop.metadata.BlockMetaData;
 import org.apache.parquet.hadoop.metadata.ColumnChunkMetaData;
 
@@ -28,21 +30,21 @@ import org.apache.parquet.hadoop.metadata.ColumnChunkMetaData;
  * <p>The fragment layout is computed from the file's own footer alone: filtered row groups keep
  * their order and each row group's column chunks are packed back to back — the same
  * (block, column) order {@link ReadSubtask} uses for its synthetic layout. Any consecutive
- * row-group interval of this file therefore occupies one contiguous fragment region. A
- * {@link ReadSubtask.FileSlice} can borrow that region as one reference-counted HMB slice,
- * regardless of how the planner grouped or split the file; combination does not need another
- * data-sized copy.</p>
+ * row-group interval of this file therefore occupies one contiguous fragment region, so
+ * assembling a synthetic Parquet file from fragments is one copy per {@link ReadSubtask.FileSlice}
+ * regardless of how the planner grouped or split the file.</p>
  *
  * <p>The fragment owns its sealed output until {@link #close()}. A fragment may be referenced by
  * several subtasks when the combine threshold splits its file; the reader closes it after the
  * last referencing subtask has been assembled.</p>
  */
-final class FileFragment implements AutoCloseable {
+public final class FileFragment implements ReadData {
   private final FooterResult footer;
   private final long[] blockStartOffsets;
   private final long totalBytes;
   private final StagedParquetOutput data;
   private final DownloadStats stats;
+  private final AtomicInteger referenceCount = new AtomicInteger(1);
 
   FileFragment(
       FooterResult footer,
@@ -104,9 +106,35 @@ final class FileFragment implements AutoCloseable {
     return data;
   }
 
+  /**
+   * Retain this downloaded fragment for one asynchronously combined decoder input.
+   *
+   * <p>A file may be split across several plans. Reference counting lets the planner release its
+   * base ownership after planning while every queued decode input independently keeps the shared
+   * file bytes alive.</p>
+   */
+  FileFragment retain() {
+    int current;
+    do {
+      current = referenceCount.get();
+      if (current == 0) {
+        throw new IllegalStateException("cannot retain a closed file fragment");
+      }
+    } while (!referenceCount.compareAndSet(current, current + 1));
+    return this;
+  }
+
   @Override
   public void close() {
-    if (data != null) {
+    int current;
+    do {
+      current = referenceCount.get();
+      if (current == 0) {
+        return;
+      }
+    } while (!referenceCount.compareAndSet(current, current - 1));
+    int remaining = current - 1;
+    if (remaining == 0 && data != null) {
       data.close();
     }
   }
@@ -115,12 +143,11 @@ final class FileFragment implements AutoCloseable {
    * Immutable per-fragment download measurements, attributed once to a consuming subtask.
    *
    * <p>The download span ({@code ioNanos}) is additionally split into its phases so the
-   * per-file elapsed time can be attributed: fragment allocation, the blocked wait on coalesced
-   * ranged reads, cache-to-HMB routing, and cache publication plus seal. {@code requestCount}
-   * counts the contiguous ranged reads actually issued and {@code requestedBytes} counts the
-   * exact owner-miss bytes; the copier never downloads gaps.
-   * {@code diskBacked} records that the bounded allocation failed and the worker completed the
-   * mandatory cache-file download before performing its blocking HMB allocation.</p>
+   * per-file elapsed time can be attributed: fragment/scratch allocation, the blocked wait on
+   * merged ranged reads, scratch segment routing, and cache publication plus seal.
+   * {@code requestCount} counts the merged ranged reads actually issued and
+   * {@code requestedBytes} the total bytes they span, including gap bytes that are downloaded
+   * and discarded — compare with the cache-miss bytes to see the over-read ratio.</p>
    */
   static final class DownloadStats {
     final long ioNanos;
@@ -130,7 +157,6 @@ final class FileFragment implements AutoCloseable {
     final long finalizeNanos;
     final long requestCount;
     final long requestedBytes;
-    final boolean diskBacked;
     final long cacheHitCount;
     final long cacheHitBytes;
     final long cacheMissCount;
@@ -145,7 +171,6 @@ final class FileFragment implements AutoCloseable {
         long finalizeNanos,
         long requestCount,
         long requestedBytes,
-        boolean diskBacked,
         long cacheHitCount,
         long cacheHitBytes,
         long cacheMissCount,
@@ -158,7 +183,6 @@ final class FileFragment implements AutoCloseable {
       this.finalizeNanos = finalizeNanos;
       this.requestCount = requestCount;
       this.requestedBytes = requestedBytes;
-      this.diskBacked = diskBacked;
       this.cacheHitCount = cacheHitCount;
       this.cacheHitBytes = cacheHitBytes;
       this.cacheMissCount = cacheMissCount;

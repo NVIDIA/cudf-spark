@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.Objects;
 
 import ai.rapids.cudf.HostMemoryBuffer;
+import com.nvidia.spark.rapids.reader.DecodeInput;
 
 /**
  * A zero-copy logical Parquet file presented to cuDF as an ordered set of host buffers.
@@ -31,20 +32,42 @@ import ai.rapids.cudf.HostMemoryBuffer;
  * segments produces exactly the byte layout described by {@link ReadSubtask}, without copying
  * the encoded column chunks into a second task-sized allocation.</p>
  *
- * <p>This object borrows its fragment outputs from the partition reader and is valid only while
- * {@link StagedScanAdapter#decodeAndPostProcess(ReadSubtask, StagedParquetInput)} is executing.
+ * <p>The async combiner gives this object retained references to its fragment outputs. It owns
+ * those references until {@link #close()}, independently of the planner's base ownership.
  * {@link #materialize()} returns a fresh owning buffer array on every call. That lets the RMM
  * retry loop restore spilled fragments and build a new set of input references for each decode
  * attempt, exactly as the base multithreaded Parquet reader does.</p>
  */
-public final class StagedParquetInput {
+public final class ParquetDecodeInput implements DecodeInput {
+  private static final SubtaskStats EMPTY_STATS = new SubtaskStats(
+      0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, false,
+      0L, 0L, 0L, 0L, 0L);
+  private final ReadSubtask plan;
+  private final SubtaskStats stats;
   private final byte[] headerBytes;
   private final byte[] footerBytes;
   private final List<FragmentSlice> dataSlices;
+  private final List<FileFragment> retainedFragments;
+  private boolean closed;
 
-  StagedParquetInput(
+  ParquetDecodeInput(
       ReadSubtask subtask,
       List<FileFragment> fragments) {
+    this(subtask, fragments, EMPTY_STATS, false);
+  }
+
+  ParquetDecodeInput(
+      ReadSubtask subtask,
+      List<FileFragment> fragments,
+      SubtaskStats stats) {
+    this(subtask, fragments, stats, true);
+  }
+
+  private ParquetDecodeInput(
+      ReadSubtask subtask,
+      List<FileFragment> fragments,
+      SubtaskStats stats,
+      boolean retainFragments) {
     Objects.requireNonNull(subtask, "subtask");
     Objects.requireNonNull(fragments, "fragments");
     List<ReadSubtask.FileSlice> fileSlices = subtask.getFileSlices();
@@ -53,25 +76,56 @@ public final class StagedParquetInput {
           "one downloaded fragment is required for every planned file slice");
     }
 
+    this.plan = subtask;
+    this.stats = Objects.requireNonNull(stats, "stats");
     this.headerBytes = subtask.getHeaderBytes();
     this.footerBytes = subtask.getFooterAndTrailerBytes();
     ArrayList<FragmentSlice> slices = new ArrayList<>(fileSlices.size());
+    ArrayList<FileFragment> retained = new ArrayList<>(fragments.size());
     long dataBytes = 0L;
-    for (int index = 0; index < fileSlices.size(); index++) {
-      ReadSubtask.FileSlice planned = fileSlices.get(index);
-      FileFragment fragment = Objects.requireNonNull(fragments.get(index), "fragment");
-      long length = fragment.sliceBytes(planned.getFirstBlock(), planned.getBlockCount());
-      if (length > 0L) {
-        slices.add(new FragmentSlice(
-            fragment.getData(), fragment.blockStartOffset(planned.getFirstBlock()), length));
-        dataBytes = Math.addExact(dataBytes, length);
+    try {
+      for (int index = 0; index < fileSlices.size(); index++) {
+        ReadSubtask.FileSlice planned = fileSlices.get(index);
+        FileFragment fragment = Objects.requireNonNull(fragments.get(index), "fragment");
+        if (retainFragments) {
+          fragment.retain();
+          retained.add(fragment);
+        }
+        long length = fragment.sliceBytes(planned.getFirstBlock(), planned.getBlockCount());
+        if (length > 0L) {
+          slices.add(new FragmentSlice(
+              fragment.getData(), fragment.blockStartOffset(planned.getFirstBlock()), length));
+          dataBytes = Math.addExact(dataBytes, length);
+        }
+      }
+      if (dataBytes != subtask.getDataSizeBytes()) {
+        throw new IllegalArgumentException(
+            "fragment slices do not match the planned synthetic data size");
+      }
+    } catch (Throwable error) {
+      retained.forEach(FileFragment::close);
+      throw error;
+    }
+    this.retainedFragments = retained;
+    this.dataSlices = slices;
+  }
+
+  public ReadSubtask getPlan() {
+    return plan;
+  }
+
+  public SubtaskStats getStats() {
+    return stats;
+  }
+
+  @Override
+  public synchronized void close() {
+    if (!closed) {
+      closed = true;
+      for (FileFragment fragment : retainedFragments) {
+        fragment.close();
       }
     }
-    if (dataBytes != subtask.getDataSizeBytes()) {
-      throw new IllegalArgumentException(
-          "fragment slices do not match the planned synthetic data size");
-    }
-    this.dataSlices = slices;
   }
 
   /**
