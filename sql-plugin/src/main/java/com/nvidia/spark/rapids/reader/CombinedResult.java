@@ -17,7 +17,7 @@
 package com.nvidia.spark.rapids.reader;
 
 /** Owned, combined input that is ready for format decoding. */
-public interface DecodeInput extends AutoCloseable {
+public interface CombinedResult extends AutoCloseable {
   @Override
   void close();
 }

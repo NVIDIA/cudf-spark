@@ -36,12 +36,12 @@ import com.nvidia.spark.rapids.reader.Combiner;
  * or planner contracts.</p>
  */
 public final class ParquetCombiner
-    implements Combiner<ReadSubtask, FileFragment, ParquetDecodeInput> {
+    implements Combiner<ReadSubtask, FileFragment, ParquetCombinedResult> {
   private final Set<FileFragment> attributedFragments =
       Collections.newSetFromMap(new IdentityHashMap<>());
 
   @Override
-  public synchronized CompletableFuture<ParquetDecodeInput> combine(
+  public synchronized CompletableFuture<ParquetCombinedResult> combine(
       ReadSubtask plan,
       List<FileFragment> data,
       ExecutorService executor) {
@@ -58,7 +58,7 @@ public final class ParquetCombiner
     return CompletableFuture.supplyAsync(() -> {
       long start = System.nanoTime();
       SubtaskStats stats = aggregate(metricFragments, System.nanoTime() - start);
-      return new ParquetDecodeInput(plan, fragments, stats);
+      return new ParquetCombinedResult(plan, fragments, stats);
     }, executor);
   }
 

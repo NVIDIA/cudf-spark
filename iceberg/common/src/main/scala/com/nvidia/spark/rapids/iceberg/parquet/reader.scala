@@ -22,8 +22,14 @@ import java.util.Objects
 
 import scala.collection.JavaConverters._
 
-import com.nvidia.spark.rapids.{CombineConf, DateTimeRebaseCorrected, GpuMetric, ThreadPoolConfBuilder}
+import com.nvidia.spark.rapids.{
+  CombineConf,
+  DateTimeRebaseCorrected,
+  GpuMetric,
+  ThreadPoolConfBuilder
+}
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.GpuMetric.DATA_SIZE_AFTER_FILTER
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile
 import com.nvidia.spark.rapids.iceberg.parquet.converter.FromIcebergShaded._
 import com.nvidia.spark.rapids.parquet.{GpuParquetUtils, ParquetFileInfoWithBlockMeta}
@@ -263,6 +269,11 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
         }
       }
       val blocks = clipBlocksToSchema(fileReadSchema, filteredBlocks.map(_._1))
+      val selectedDataBytes = blocks.iterator
+        .flatMap(_.getColumns.asScala)
+        .map(_.getTotalSize)
+        .sum
+      conf.metrics.get(DATA_SIZE_AFTER_FILTER).foreach(_ += selectedDataBytes)
 
       val sqlConf = SQLConf.get
       val partReaderSparkSchema = new ParquetToSparkSchemaConverter(

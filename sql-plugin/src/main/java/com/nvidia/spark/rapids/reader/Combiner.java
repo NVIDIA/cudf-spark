@@ -24,7 +24,7 @@ import java.util.concurrent.ExecutorService;
 public interface Combiner<
     P extends ReadPlan,
     D extends ReadData,
-    C extends DecodeInput> {
+    C extends CombinedResult> {
 
   CompletableFuture<C> combine(P plan, List<D> data, ExecutorService executor);
 }

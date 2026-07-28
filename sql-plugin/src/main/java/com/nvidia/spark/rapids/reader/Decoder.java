@@ -21,6 +21,6 @@ import java.util.Iterator;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
 
 /** Synchronously decodes one combined input on the Spark task thread. */
-public interface Decoder<C extends DecodeInput> {
+public interface Decoder<C extends CombinedResult> {
   Iterator<ColumnarBatch> decode(C input) throws Exception;
 }

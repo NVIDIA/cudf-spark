@@ -16,19 +16,15 @@
 
 package com.nvidia.spark.rapids.reader;
 
-import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.spark.sql.vectorized.ColumnarBatch;
 
@@ -44,7 +40,7 @@ public final class UnifiedReader<
     S extends ReadSource,
     F extends ReadFooter,
     D extends ReadData,
-    C extends DecodeInput>
+    C extends CombinedResult>
     implements Iterator<ColumnarBatch>, AutoCloseable {
 
   private final List<S> sources;
@@ -52,9 +48,8 @@ public final class UnifiedReader<
   private final ReadPlanner<S, F, D, C> planner;
   private final Decoder<C> decoder;
   private final ExecutorService executor;
-  private final AtomicBoolean closed = new AtomicBoolean();
-  private final Object iteratorLock = new Object();
 
+  private boolean closed;
   private boolean initialized;
   private Iterator<ColumnarBatch> currentBatches;
   private C currentInput;
@@ -65,12 +60,7 @@ public final class UnifiedReader<
       ReadPlanner<S, F, D, C> planner,
       Decoder<C> decoder,
       ExecutorService executor) {
-    Objects.requireNonNull(sources, "sources");
-    ArrayList<S> sourceCopy = new ArrayList<>(sources);
-    if (sourceCopy.contains(null)) {
-      throw new IllegalArgumentException("sources must not contain null values");
-    }
-    this.sources = Collections.unmodifiableList(sourceCopy);
+    this.sources = Objects.requireNonNull(sources, "sources");
     this.ops = Objects.requireNonNull(ops, "ops");
     this.planner = Objects.requireNonNull(planner, "planner");
     this.decoder = Objects.requireNonNull(decoder, "decoder");
@@ -79,18 +69,16 @@ public final class UnifiedReader<
 
   @Override
   public boolean hasNext() {
-    if (closed.get()) {
+    if (closed) {
       return false;
     }
     try {
       initializeIfNeeded();
-      while (!closed.get()) {
-        synchronized (iteratorLock) {
-          if (currentBatches != null && currentBatches.hasNext()) {
-            return true;
-          }
-          closeCurrentLocked();
+      while (!closed) {
+        if (currentBatches != null && currentBatches.hasNext()) {
+          return true;
         }
+        closeCurrent();
 
         Optional<C> nextInput = await(planner.nextReady());
         if (!nextInput.isPresent()) {
@@ -104,12 +92,9 @@ public final class UnifiedReader<
         try {
           batches = Objects.requireNonNull(decoder.decode(input),
               "decoder returned null");
-          synchronized (iteratorLock) {
-            checkOpen();
-            currentInput = input;
-            currentBatches = batches;
-            installed = true;
-          }
+          currentInput = input;
+          currentBatches = batches;
+          installed = true;
         } finally {
           if (!installed) {
             closeIterator(batches);
@@ -118,12 +103,6 @@ public final class UnifiedReader<
         }
       }
       return false;
-    } catch (CancellationException cancelled) {
-      if (closed.get()) {
-        return false;
-      }
-      closeAfterFailure(cancelled);
-      throw cancelled;
     } catch (Throwable error) {
       closeAfterFailure(error);
       throw propagate(error);
@@ -136,10 +115,7 @@ public final class UnifiedReader<
       if (!hasNext()) {
         throw new NoSuchElementException("no more unified-reader batches");
       }
-      synchronized (iteratorLock) {
-        checkOpen();
-        return currentBatches.next();
-      }
+      return currentBatches.next();
     } catch (Throwable error) {
       closeAfterFailure(error);
       throw propagate(error);
@@ -150,44 +126,15 @@ public final class UnifiedReader<
     if (initialized) {
       return;
     }
-    checkOpen();
     initialized = true;
-    try {
-      for (int fileId = 0; fileId < sources.size(); fileId++) {
-        checkOpen();
-        S source = sources.get(fileId);
-        CompletableFuture<F> footer = requireFuture(
-            ops.readFooter(source, executor), "readFooter");
-        CompletableFuture<D> data = footer.thenCompose(readyFooter -> requireFuture(
-            ops.readData(source, readyFooter, executor), "readData"));
-        try {
-          planner.addFile(fileId, source, footer, data);
-        } catch (Throwable registrationError) {
-          closeLateData(data);
-          throw registrationError;
-        }
-      }
-      planner.noMoreFiles();
-    } catch (Throwable error) {
-      throw propagate(error);
+    for (int fileId = 0; fileId < sources.size(); fileId++) {
+      S source = sources.get(fileId);
+      CompletableFuture<F> footer = ops.readFooter(source, executor);
+      CompletableFuture<D> data = footer.thenCompose(
+          readyFooter -> ops.readData(source, readyFooter, executor));
+      planner.addFile(fileId, source, footer, data);
     }
-  }
-
-  private static <T> CompletableFuture<T> requireFuture(
-      CompletableFuture<T> future,
-      String operation) {
-    if (future == null) {
-      throw new IllegalStateException(operation + " returned null");
-    }
-    return future;
-  }
-
-  private static <D extends ReadData> void closeLateData(CompletableFuture<D> data) {
-    data.whenComplete((result, error) -> {
-      if (result != null) {
-        result.close();
-      }
-    });
+    planner.noMoreFiles();
   }
 
   private static <T> T await(CompletableFuture<T> future) throws Exception {
@@ -208,12 +155,6 @@ public final class UnifiedReader<
     }
   }
 
-  private void checkOpen() {
-    if (closed.get()) {
-      throw new CancellationException("unified reader is closed");
-    }
-  }
-
   private void closeAfterFailure(Throwable original) {
     try {
       close();
@@ -226,16 +167,15 @@ public final class UnifiedReader<
 
   @Override
   public void close() {
-    if (!closed.compareAndSet(false, true)) {
+    if (closed) {
       return;
     }
+    closed = true;
     Throwable failure = null;
-    synchronized (iteratorLock) {
-      try {
-        closeCurrentLocked();
-      } catch (Throwable error) {
-        failure = error;
-      }
+    try {
+      closeCurrent();
+    } catch (Throwable error) {
+      failure = error;
     }
     try {
       planner.close();
@@ -251,7 +191,7 @@ public final class UnifiedReader<
     }
   }
 
-  private void closeCurrentLocked() throws Exception {
+  private void closeCurrent() throws Exception {
     Iterator<ColumnarBatch> batches = currentBatches;
     C input = currentInput;
     currentBatches = null;

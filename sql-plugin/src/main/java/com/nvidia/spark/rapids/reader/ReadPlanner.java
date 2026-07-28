@@ -31,7 +31,7 @@ public interface ReadPlanner<
     S extends ReadSource,
     F extends ReadFooter,
     D extends ReadData,
-    C extends DecodeInput> extends AutoCloseable {
+    C extends CombinedResult> extends AutoCloseable {
 
   void addFile(
       int fileId,

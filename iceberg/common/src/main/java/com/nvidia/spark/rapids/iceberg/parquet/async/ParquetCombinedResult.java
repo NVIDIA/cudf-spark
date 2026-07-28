@@ -22,7 +22,7 @@ import java.util.List;
 import java.util.Objects;
 
 import ai.rapids.cudf.HostMemoryBuffer;
-import com.nvidia.spark.rapids.reader.DecodeInput;
+import com.nvidia.spark.rapids.reader.CombinedResult;
 
 /**
  * A zero-copy logical Parquet file presented to cuDF as an ordered set of host buffers.
@@ -38,7 +38,7 @@ import com.nvidia.spark.rapids.reader.DecodeInput;
  * retry loop restore spilled fragments and build a new set of input references for each decode
  * attempt, exactly as the base multithreaded Parquet reader does.</p>
  */
-public final class ParquetDecodeInput implements DecodeInput {
+public final class ParquetCombinedResult implements CombinedResult {
   private static final SubtaskStats EMPTY_STATS = new SubtaskStats(
       0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, false,
       0L, 0L, 0L, 0L, 0L);
@@ -50,20 +50,20 @@ public final class ParquetDecodeInput implements DecodeInput {
   private final List<FileFragment> retainedFragments;
   private boolean closed;
 
-  ParquetDecodeInput(
+  ParquetCombinedResult(
       ReadSubtask subtask,
       List<FileFragment> fragments) {
     this(subtask, fragments, EMPTY_STATS, false);
   }
 
-  ParquetDecodeInput(
+  ParquetCombinedResult(
       ReadSubtask subtask,
       List<FileFragment> fragments,
       SubtaskStats stats) {
     this(subtask, fragments, stats, true);
   }
 
-  private ParquetDecodeInput(
+  private ParquetCombinedResult(
       ReadSubtask subtask,
       List<FileFragment> fragments,
       SubtaskStats stats,

@@ -51,23 +51,23 @@ import com.nvidia.spark.rapids.reader.ReadPlanner;
  * a decoder input already handed to the Spark task thread.</p>
  */
 public final class ParquetReadPlanner implements ReadPlanner<
-    IcebergPartitionedFile, FooterResult, FileFragment, ParquetDecodeInput> {
+    IcebergPartitionedFile, FooterResult, FileFragment, ParquetCombinedResult> {
   private static final ScheduledExecutorService TIMER =
       Executors.newSingleThreadScheduledExecutor(new DaemonThreadFactory());
 
   private final StableGreedyReadPlanner.Session session;
-  private final Combiner<ReadSubtask, FileFragment, ParquetDecodeInput> combiner;
+  private final Combiner<ReadSubtask, FileFragment, ParquetCombinedResult> combiner;
   private final ExecutorService executor;
   private final boolean combineEnabled;
   private final long combineWaitMs;
   private final AtomicBoolean closed;
   private final ArrayList<FileState> files = new ArrayList<>();
   private final Map<FooterResult, FileFragment> dataByFooter = new IdentityHashMap<>();
-  private final ArrayDeque<CompletableFuture<Optional<ParquetDecodeInput>>> outputs =
+  private final ArrayDeque<CompletableFuture<Optional<ParquetCombinedResult>>> outputs =
       new ArrayDeque<>();
-  private final ArrayDeque<CompletableFuture<Optional<ParquetDecodeInput>>> waiters =
+  private final ArrayDeque<CompletableFuture<Optional<ParquetCombinedResult>>> waiters =
       new ArrayDeque<>();
-  private final ArrayList<CompletableFuture<ParquetDecodeInput>> combinedInputs =
+  private final ArrayList<CompletableFuture<ParquetCombinedResult>> combinedInputs =
       new ArrayList<>();
 
   private int nextOrderedFile;
@@ -81,7 +81,7 @@ public final class ParquetReadPlanner implements ReadPlanner<
 
   public ParquetReadPlanner(
       StableGreedyReadPlanner planner,
-      Combiner<ReadSubtask, FileFragment, ParquetDecodeInput> combiner,
+      Combiner<ReadSubtask, FileFragment, ParquetCombinedResult> combiner,
       ExecutorService executor,
       boolean combineEnabled,
       long combineWaitMs,
@@ -120,7 +120,7 @@ public final class ParquetReadPlanner implements ReadPlanner<
   }
 
   @Override
-  public synchronized CompletableFuture<Optional<ParquetDecodeInput>> nextReady() {
+  public synchronized CompletableFuture<Optional<ParquetCombinedResult>> nextReady() {
     if (!outputs.isEmpty()) {
       return outputs.removeFirst();
     }
@@ -130,7 +130,7 @@ public final class ParquetReadPlanner implements ReadPlanner<
     if (planningComplete || closed.get()) {
       return CompletableFuture.completedFuture(Optional.empty());
     }
-    CompletableFuture<Optional<ParquetDecodeInput>> waiter = new CompletableFuture<>();
+    CompletableFuture<Optional<ParquetCombinedResult>> waiter = new CompletableFuture<>();
     waiters.addLast(waiter);
     return waiter;
   }
@@ -248,7 +248,7 @@ public final class ParquetReadPlanner implements ReadPlanner<
         }
         fragments.add(fragment);
       }
-      CompletableFuture<ParquetDecodeInput> combined =
+      CompletableFuture<ParquetCombinedResult> combined =
           combiner.combine(plan, fragments, executor);
       combinedInputs.add(combined);
       combined.whenComplete((input, error) -> {
@@ -260,7 +260,7 @@ public final class ParquetReadPlanner implements ReadPlanner<
           input.close();
         }
       });
-      CompletableFuture<Optional<ParquetDecodeInput>> output =
+      CompletableFuture<Optional<ParquetCombinedResult>> output =
           combined.thenApply(Optional::of);
       if (waiters.isEmpty()) {
         outputs.addLast(output);
@@ -308,7 +308,7 @@ public final class ParquetReadPlanner implements ReadPlanner<
       waiters.removeFirst().complete(Optional.empty());
     }
     outputs.clear();
-    for (CompletableFuture<ParquetDecodeInput> combined : combinedInputs) {
+    for (CompletableFuture<ParquetCombinedResult> combined : combinedInputs) {
       combined.whenComplete((input, error) -> {
         if (input != null) {
           input.close();

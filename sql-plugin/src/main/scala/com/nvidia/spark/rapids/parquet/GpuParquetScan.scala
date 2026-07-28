@@ -273,8 +273,13 @@ object GpuParquetScan {
     if (ranges.isEmpty) {
       0L
     } else {
-      metrics.getOrElse(READ_FS_TIME, NoopMetric).ns {
-        inputFile.readVectored(output, ranges.asJava)
+      val ioWaitStart = System.nanoTime()
+      try {
+        metrics.getOrElse(READ_FS_TIME, NoopMetric).ns {
+          inputFile.readVectored(output, ranges.asJava)
+        }
+      } finally {
+        metrics.getOrElse(IO_WAIT_TIME, NoopMetric) += System.nanoTime() - ioWaitStart
       }
       ranges.map(_.getLength).sum
     }
