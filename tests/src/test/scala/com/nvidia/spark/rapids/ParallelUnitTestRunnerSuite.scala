@@ -467,12 +467,16 @@ object ParallelUnitTestRunnerConcurrentFixture {
 
 class ParallelUnitTestRunnerConcurrentFixtureSuiteOne extends AnyFunSuite {
   test("overlaps with the second fixture suite") {
+    assume(System.getProperty(ParallelUnitTestRunnerConcurrentFixture.BARRIER_DIR_PROPERTY) != null,
+      "This fixture is only exercised by ParallelUnitTestRunnerSuite")
     ParallelUnitTestRunnerConcurrentFixture.awaitPeer("one", "two")
   }
 }
 
 class ParallelUnitTestRunnerConcurrentFixtureSuiteTwo extends AnyFunSuite {
   test("overlaps with the first fixture suite") {
+    assume(System.getProperty(ParallelUnitTestRunnerConcurrentFixture.BARRIER_DIR_PROPERTY) != null,
+      "This fixture is only exercised by ParallelUnitTestRunnerSuite")
     ParallelUnitTestRunnerConcurrentFixture.awaitPeer("two", "one")
   }
 }
