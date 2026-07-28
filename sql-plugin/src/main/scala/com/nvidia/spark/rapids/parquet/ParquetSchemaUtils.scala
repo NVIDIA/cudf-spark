@@ -82,13 +82,14 @@ object ParquetSchemaUtils {
         clipParquetGroup(parquetType.asGroupType(), t, caseSensitive, useFieldId)
 
       case _ =>
-        // UDTs and primitive types are not clipped structurally. For UNKNOWN logical
-        // annotations, mirror Spark's respectUnknownTypeAnnotation behavior so cuDF sees the
-        // physical type when the annotation should be ignored (SPARK-56045).
-        stripIgnoredUnknownAnnotation(parquetType)
+        // UDTs, primitive types, and primitive-element arrays/maps are not clipped
+        // structurally. Still normalize UNKNOWN annotations so cuDF sees the physical
+        // type when Spark would ignore the annotation (SPARK-56045).
+        stripIgnoredUnknownAnnotation(parquetType, catalystType)
     }
 
-    if (useFieldId && parquetType.getId != null) {
+    // Nested rebuilds may already carry field IDs; only re-apply when missing.
+    if (useFieldId && parquetType.getId != null && newParquetType.getId == null) {
       newParquetType.withId(parquetType.getId.intValue())
     } else {
       newParquetType
@@ -96,18 +97,57 @@ object ParquetSchemaUtils {
   }
 
   /**
-   * If Spark is configured to ignore UNKNOWN logical annotations, rebuild the primitive
-   * without that annotation so GPU Parquet reads use the physical type.
+   * Leaf Catalyst type used when deciding whether an UNKNOWN annotation should be
+   * stripped for nested array/map groups that bypass structural clipping.
+   */
+  private def unknownAnnotationLeafType(catalystType: DataType): DataType = {
+    catalystType match {
+      case ArrayType(elementType, _) => unknownAnnotationLeafType(elementType)
+      case MapType(_, valueType, _) => unknownAnnotationLeafType(valueType)
+      case other => other
+    }
+  }
+
+  /**
+   * Rebuild primitives without an UNKNOWN logical annotation when Spark would not map
+   * that annotation to NullType for the requested Catalyst type. Recurses through group
+   * nodes so primitive-element lists/maps that skip structural clipping are covered.
+   *
+   * @param preserveFieldId when rebuilding nested primitives (not returning through
+   *   [[clipParquetType]]), copy the original field ID onto the rebuilt type.
    */
   @scala.annotation.nowarn("msg=method as in class Builder is deprecated")
-  private def stripIgnoredUnknownAnnotation(parquetType: Type): Type = {
+  private def stripIgnoredUnknownAnnotation(
+      parquetType: Type,
+      catalystType: DataType,
+      preserveFieldId: Boolean = false): Type = {
     if (!parquetType.isPrimitive) {
-      parquetType
+      val group = parquetType.asGroupType()
+      val leafType = unknownAnnotationLeafType(catalystType)
+      val fields = group.getFields.asScala
+      val strippedFields = fields.map { field =>
+        stripIgnoredUnknownAnnotation(field, leafType, preserveFieldId = true)
+      }
+      if (fields.iterator.zip(strippedFields.iterator).forall {
+            case (original, stripped) => original eq stripped
+          }) {
+        parquetType
+      } else {
+        group.withNewFields(strippedFields.asJava)
+      }
     } else {
       val primitive = parquetType.asPrimitiveType()
       val rawAnnotation = primitive.getLogicalTypeAnnotation
+      val leafType = unknownAnnotationLeafType(catalystType)
+      // Respect conf for inferred/requested NullType; strip UNKNOWN when the requested
+      // type is a non-Null physical type even if respectUnknownTypeAnnotation is true.
       val effectiveAnnotation =
-        ParquetUnknownTypeAnnotationShims.effectiveLogicalTypeAnnotation(rawAnnotation)
+        if (leafType != NullType &&
+            ParquetUnknownTypeAnnotationShims.mapsToNullType(rawAnnotation)) {
+          null
+        } else {
+          ParquetUnknownTypeAnnotationShims.effectiveLogicalTypeAnnotation(rawAnnotation)
+        }
       if (rawAnnotation == effectiveAnnotation) {
         parquetType
       } else {
@@ -118,8 +158,13 @@ object ParquetSchemaUtils {
         if (effectiveAnnotation != null) {
           builder.as(effectiveAnnotation)
         }
-        // Field IDs are re-applied by clipParquetType after this returns.
-        builder.named(primitive.getName)
+        val rebuilt = builder.named(primitive.getName)
+        if (preserveFieldId && primitive.getId != null) {
+          rebuilt.withId(primitive.getId.intValue())
+        } else {
+          // Top-level field IDs are re-applied by clipParquetType after this returns.
+          rebuilt
+        }
       }
     }
   }
