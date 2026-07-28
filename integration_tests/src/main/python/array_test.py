@@ -378,7 +378,7 @@ def test_array_slice_with_zero_start(data_gen, zero_start, valid_length):
         lambda spark: three_col_df(spark, array_all_null_gen, zero_start_gen, valid_length_gen, length=5).selectExpr(
             f"slice(a, {zero_start}, {valid_length})"))
     error = "The value of parameter(s) `start` in `slice` is invalid: Expects a positive or a negative value for `start`, but got"\
-        if is_databricks143_or_later() or is_spark_400_or_later() \
+        if is_databricks_runtime() or is_spark_400_or_later() \
         else "Unexpected value for start in function slice: SQL array indices start at 1."
     # start can not be zero
     assert_gpu_and_cpu_error(
@@ -437,7 +437,7 @@ def test_array_slice_with_negative_length_error_null_scalar_length():
 def test_array_slice_with_negative_length_error(data_gen, valid_start, negative_length):
     negative_length_gen = IntegerGen(nullable=False, min_val=-25, max_val=-1, special_cases=[])
     error = "The value of parameter(s) `length` in `slice` is invalid: Expects `length` greater than or equal to 0"\
-        if is_databricks143_or_later() or is_spark_400_or_later()\
+        if is_databricks_runtime() or is_spark_400_or_later()\
         else 'Unexpected value for length in function slice: length must be greater than or equal to 0.'
     # Non-null start, length can not be negative
     assert_gpu_and_cpu_error(
@@ -455,7 +455,7 @@ def test_array_slice_with_negative_length_error(data_gen, valid_start, negative_
 def test_array_slice_with_negative_length_fails_when_cpu_fails(data_gen, valid_start, negative_length):
     negative_length_gen = IntegerGen(nullable=True, min_val=-25, max_val=-1, special_cases=[])
     maybe_error = "The value of parameter(s) `length` in `slice` is invalid: Expects `length` greater than or equal to 0"\
-        if is_databricks143_or_later() or is_spark_400_or_later()\
+        if is_databricks_runtime() or is_spark_400_or_later()\
         else 'Unexpected value for length in function slice: length must be greater than or equal to 0.'
     # Non-null start, length can not be negative
     assert_gpu_and_cpu_same_data_or_error(

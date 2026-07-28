@@ -1132,7 +1132,6 @@ def test_parquet_read_nano_as_longs_not_configured(std_input_path):
 @pytest.mark.skipif(spark_version() >= '3.2.0' and spark_version() < '3.2.4', reason='New config added in 3.2.4')
 @pytest.mark.skipif(spark_version() >= '3.3.0' and spark_version() < '3.3.2', reason='New config added in 3.3.2')
 @pytest.mark.skipif(is_databricks_runtime() and spark_version() == '3.3.2', reason='Config not in DB 12.2')
-@pytest.mark.skipif(is_databricks_runtime() and spark_version() == '3.4.1', reason='Config not in DB 13.3')
 @allow_non_gpu('FileSourceScanExec, ColumnarToRowExec')
 def test_parquet_read_nano_as_longs_true(std_input_path):
     data_path = "%s/timestamp-nanos.parquet" % (std_input_path)
@@ -1798,7 +1797,7 @@ def test_parquet_decimal_precision_scale_change(spark_tmp_path, from_decimal_gen
     pytest.param(int_gen, long_gen, marks=pytest.mark.skipif(is_before_spark_400(), reason='CPU does not support this on this version')),
     pytest.param(ArrayGen(ArrayGen(int_gen)), ArrayGen(ArrayGen(long_gen)), marks=pytest.mark.skipif(is_before_spark_400(), reason='CPU does not support this on this version')),
     pytest.param(int_gen, double_gen, marks=pytest.mark.skipif(is_before_spark_400(), reason='CPU does not support this on this version')),
-    pytest.param(int_gen, date_gen, marks=pytest.mark.skipif(is_databricks_version(12,2) or is_databricks_version(13,3), reason='older databricks versions compute this differently from open source and newer versions')),
+    pytest.param(int_gen, date_gen, marks=pytest.mark.skipif(is_databricks_version(12, 2), reason='older Databricks versions compute this differently from open source and newer versions')),
     pytest.param(float_gen, double_gen, marks=pytest.mark.skipif(is_before_spark_400(), reason='CPU does not support this on this version')),
     # tzinfo=None makes it timestamp_ntz
     # We don't support reading TimestampNTZ yet, but when we do add it.

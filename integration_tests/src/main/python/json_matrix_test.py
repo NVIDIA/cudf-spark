@@ -1451,7 +1451,7 @@ def test_from_json_string_arrays(std_input_path, input_file):
     "timestamp_tz_formatted_strings.json",
     "scan_emtpy_lines.json"])
 @pytest.mark.parametrize('read_func', [read_json_df]) # we have done so many tests already that we don't need both read func. They are the same
-@pytest.mark.xfail(condition=is_databricks143_or_later(), reason='https://github.com/NVIDIA/spark-rapids/issues/11711')
+@pytest.mark.xfail(condition=is_databricks_runtime(), reason='https://github.com/NVIDIA/spark-rapids/issues/11711')
 def test_scan_json_long_structs(std_input_path, read_func, spark_tmp_table_factory, input_file):
     assert_gpu_and_cpu_are_equal_collect(
         read_func(std_input_path + '/' + input_file,
@@ -1484,7 +1484,7 @@ def test_scan_json_long_structs(std_input_path, read_func, spark_tmp_table_facto
     "timestamp_formatted_strings.json",
     "timestamp_tz_formatted_strings.json"])
 @allow_non_gpu(TEXT_INPUT_EXEC, *non_utc_allow) # https://github.com/NVIDIA/spark-rapids/issues/10453
-@pytest.mark.xfail(condition=is_databricks143_or_later(), reason='https://github.com/NVIDIA/spark-rapids/issues/11711')
+@pytest.mark.xfail(condition=is_databricks_runtime(), reason='https://github.com/NVIDIA/spark-rapids/issues/11711')
 def test_from_json_long_structs(std_input_path, input_file):
     schema = StructType([StructField("data", StructType([StructField("A", LongType()),StructField("B", LongType())]))])
     assert_gpu_and_cpu_are_equal_collect(

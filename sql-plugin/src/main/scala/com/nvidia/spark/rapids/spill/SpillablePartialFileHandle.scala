@@ -59,6 +59,7 @@ object PartialFileStorageMode extends Enumeration {
  * @param memoryThreshold Host memory usage threshold for buffer expansion decisions
  * @param priority Spill priority for memory-based mode
  * @param syncWrites Whether to force outstanding writes to disk
+ * @param bufferedOutputStreamFactory Creates buffered streams for file writes
  * @param capacityHintProvider Optional function that provides capacity hints based on
  *                             current bytes written and required capacity. When provided,
  *                             buffer expansion will use this hint instead of simple doubling.
@@ -73,6 +74,7 @@ class SpillablePartialFileHandle private (
     memoryThreshold: Double,
     priority: Long,
     syncWrites: Boolean,
+    bufferedOutputStreamFactory: FileOutputStream => BufferedOutputStream,
     capacityHintProvider: Option[(Long, Long) => Long])
   extends HostSpillableHandle[ai.rapids.cudf.HostMemoryBuffer] with Logging {
 
@@ -407,7 +409,8 @@ class SpillablePartialFileHandle private (
       return -1  // EOF
     }
 
-    val actualLength = math.min(length, (totalBytesWritten - readPosition).toInt)
+    val actualLength = SpillablePartialFileHandle.boundedReadLengthAsInt(
+      length, totalBytesWritten - readPosition)
 
     def readFromFile(): Int = {
       ensureFileInputStreamOpen()
@@ -475,7 +478,8 @@ class SpillablePartialFileHandle private (
       return -1
     }
 
-    val actualLength = math.min(length, (totalBytesWritten - position).toInt)
+    val actualLength = SpillablePartialFileHandle.boundedReadLengthAsInt(
+      length, totalBytesWritten - position)
     if (actualLength <= 0) {
       return -1
     }
@@ -698,7 +702,7 @@ class SpillablePartialFileHandle private (
     if (fileOutputStream.isEmpty) {
       val fos = new FileOutputStream(file, true)  // append mode
       fileOutputStream = Some(fos)
-      bufferedOutputStream = Some(new BufferedOutputStream(fos, 64 * 1024))
+      bufferedOutputStream = Some(bufferedOutputStreamFactory(fos))
     }
   }
 
@@ -800,6 +804,14 @@ class SpillablePartialFileHandle private (
 
 object SpillablePartialFileHandle extends Logging {
 
+  private val DEFAULT_FILE_BUFFER_SIZE = 64 * 1024
+
+  private[spill] def boundedReadLengthAsInt(requestedLength: Int, remainingBytes: Long): Int = {
+    require(requestedLength >= 0, s"requestedLength must be non-negative: $requestedLength")
+    require(remainingBytes >= 0, s"remainingBytes must be non-negative: $remainingBytes")
+    math.min(requestedLength.toLong, remainingBytes).toInt
+  }
+
   /**
    * Create a file-only handle.
    * Data is written directly to disk without using host memory.
@@ -817,6 +829,24 @@ object SpillablePartialFileHandle extends Logging {
       memoryThreshold = 0.0,
       priority = Long.MinValue,
       syncWrites = syncWrites,
+      bufferedOutputStreamFactory = new BufferedOutputStream(_, DEFAULT_FILE_BUFFER_SIZE),
+      capacityHintProvider = None)
+  }
+
+  private[spill] def createFileOnly(
+      file: File,
+      syncWrites: Boolean,
+      bufferedOutputStreamFactory: FileOutputStream => BufferedOutputStream):
+  SpillablePartialFileHandle = {
+    new SpillablePartialFileHandle(
+      storageMode = PartialFileStorageMode.FILE_ONLY,
+      file = file,
+      initialCapacity = 0L,
+      maxBufferSize = 0L,
+      memoryThreshold = 0.0,
+      priority = Long.MinValue,
+      syncWrites = syncWrites,
+      bufferedOutputStreamFactory = bufferedOutputStreamFactory,
       capacityHintProvider = None)
   }
 
@@ -857,6 +887,7 @@ object SpillablePartialFileHandle extends Logging {
       memoryThreshold = memoryThreshold,
       priority = priority,
       syncWrites = syncWrites,
+      bufferedOutputStreamFactory = new BufferedOutputStream(_, DEFAULT_FILE_BUFFER_SIZE),
       capacityHintProvider = capacityHintProvider)
   }
 }
