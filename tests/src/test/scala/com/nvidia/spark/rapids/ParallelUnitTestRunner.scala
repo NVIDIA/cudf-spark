@@ -25,6 +25,7 @@ import java.util.concurrent.{ConcurrentLinkedQueue, TimeUnit}
 import java.util.concurrent.atomic.{AtomicLong, AtomicReference}
 
 import scala.collection.mutable.ArrayBuffer
+import scala.util.control.NonFatal
 
 import com.nvidia.spark.rapids.spill.SpillFramework
 import org.apache.hadoop.fs.FileUtil
@@ -355,7 +356,7 @@ object ParallelUnitTestRunner {
         failures.add(s"wave-$runId worker-$workerId exited with status ${exitCode.get}")
       }
     } catch {
-      case t: Throwable =>
+      case NonFatal(t) =>
         val unfinishedTasks = currentTask.get.toSeq.map(_.task) ++ remainingBatchTasks
         if (unfinishedTasks.nonEmpty) {
           taskQueue.add(SuiteBatch(unfinishedTasks))
@@ -364,6 +365,17 @@ object ParallelUnitTestRunner {
         // Do not leak a live worker JVM (and its GPU allocation) on coordinator errors.
         if (process != null && process.isAlive) {
           process.destroyForcibly()
+        }
+      case t: Throwable =>
+        failures.add(s"wave-$runId worker-$workerId hit a fatal error: ${t.getMessage}")
+        try {
+          if (process != null && process.isAlive) {
+            process.destroyForcibly()
+          }
+        } finally {
+          System.err.println(s"wave-$runId worker-$workerId hit a fatal error")
+          t.printStackTrace(System.err)
+          throw t
         }
     }
   }
@@ -387,8 +399,11 @@ object ParallelUnitTestRunner {
                 s"$suiteTimeoutSeconds seconds; capturing a thread dump and killing the worker")
             failures.add(s"wave-$runId $suite exceeded the ${suiteTimeoutSeconds}s suite " +
                 s"timeout in worker-$workerId")
-            dumpWorkerThreads(s"wave-$runId-worker-$workerId", process, reportsDir)
-            process.destroyForcibly()
+            try {
+              dumpWorkerThreads(s"wave-$runId-worker-$workerId", process, reportsDir)
+            } finally {
+              process.destroyForcibly()
+            }
             return
           }
           try {
@@ -437,7 +452,7 @@ object ParallelUnitTestRunner {
       print(dump)
       System.out.flush()
     } catch {
-      case t: Throwable =>
+      case NonFatal(t) =>
         System.err.println(s"[$label] failed to capture a thread dump: ${t.getMessage}")
     }
   }
@@ -518,15 +533,14 @@ object ParallelUnitTestRunner {
         tagsToExclude)
       var succeeded = false
       try {
-        succeeded = org.scalatest.tools.Runner.run(runnerArgs.toArray)
-      } catch {
-        case t: Throwable =>
-          t.printStackTrace(System.out)
+        succeeded = runTestSuite {
+          org.scalatest.tools.Runner.run(runnerArgs.toArray)
+        }
       } finally {
         try {
           cleanupWorkerState(Paths.get(System.getProperty("java.io.tmpdir")))
         } catch {
-          case t: Throwable =>
+          case NonFatal(t) =>
             t.printStackTrace(System.out)
             succeeded = false
         }
@@ -537,6 +551,16 @@ object ParallelUnitTestRunner {
     }
     reader.close()
     System.exit(0)
+  }
+
+  private[rapids] def runTestSuite(body: => Boolean): Boolean = {
+    try {
+      body
+    } catch {
+      case NonFatal(t) =>
+        t.printStackTrace(System.out)
+        false
+    }
   }
 
   private def initializeSparkFunctionRegistry(): Unit = {
@@ -561,7 +585,7 @@ object ParallelUnitTestRunner {
     def cleanup(body: => Unit): Unit = try {
       body
     } catch {
-      case t: Throwable => failures += t
+      case NonFatal(t) => failures += t
     }
 
     val sessions = (SparkSession.getActiveSession.toSeq ++

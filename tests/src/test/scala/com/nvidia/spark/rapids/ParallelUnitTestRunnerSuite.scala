@@ -198,6 +198,16 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
     }
   }
 
+  test("test suite wrapper preserves fatal errors") {
+    val fatalError = new LinkageError("fatal fixture error")
+    val thrown = intercept[LinkageError] {
+      ParallelUnitTestRunner.runTestSuite {
+        throw fatalError
+      }
+    }
+    assert(thrown eq fatalError)
+  }
+
   test("a forcibly terminated worker does not count as a test failure") {
     class TimedOutProcess extends Process {
       private var alive = true
