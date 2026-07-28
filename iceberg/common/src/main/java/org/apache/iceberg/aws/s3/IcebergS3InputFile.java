@@ -21,10 +21,8 @@ import com.nvidia.spark.rapids.IcebergS3RangeCopier;
 import com.nvidia.spark.rapids.IcebergS3RangeCopier.IcebergS3Client;
 import com.nvidia.spark.rapids.fileio.RapidsInputFiles;
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
-import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputStream;
 import com.nvidia.spark.rapids.iceberg.ShimUtils;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
-import com.nvidia.spark.rapids.jni.fileio.SeekableInputStream;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.InputFile;
 import org.apache.spark.TaskContext;
@@ -88,29 +86,6 @@ public final class IcebergS3InputFile extends IcebergInputFile {
     }
     LOG.debug("IcebergS3RangeCopier path active for {}", inputFile.location());
     return new IcebergS3InputFile(inputFile, s3Bucket, s3Key, icebergS3Client);
-  }
-
-  @Override
-  public String path() {
-    return delegate.location();
-  }
-
-  @Override
-  public long getLength() throws IOException {
-    return delegate.getLength();
-  }
-
-  @Override
-  public SeekableInputStream open() throws IOException {
-    return new IcebergInputStream(delegate.newStream());
-  }
-
-  /**
-   * Returns the underlying Iceberg {@link InputFile} for use by
-   * iceberg-internal code paths that need direct access to the iceberg API.
-   */
-  public InputFile getDelegate() {
-    return delegate;
   }
 
   @Override
