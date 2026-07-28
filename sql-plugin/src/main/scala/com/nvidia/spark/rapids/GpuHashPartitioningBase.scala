@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids
 
-import ai.rapids.cudf.{DType, PartitionedTable}
+import ai.rapids.cudf.{ColumnVector, DType, PartitionedTable}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.shims.ShimExpression
 
@@ -37,9 +37,25 @@ trait GpuHashPartitioner extends Serializable {
       nvtxId: NvtxId): PartitionedTable = {
     withResource(batch) { cb =>
       val parts = nvtxId {
-        withResource(hashFunc.columnarEval(cb)) { hash =>
-          withResource(GpuScalar.from(numPartitions, IntegerType)) { partsLit =>
-            hash.getBase.pmod(partsLit, DType.INT32)
+        if (hashFunc.children.isEmpty) {
+          // Spark permits HashPartitioning with no expressions. The hash is the initial seed for
+          // every row, so preserve the CPU partition ID and partition count without asking cuDF
+          // to hash zero input columns.
+          val emptyHash = hashFunc match {
+            case GpuMurmur3Hash(_, seed) => seed
+            case GpuHiveHash(_) => 0
+            case other => throw new IllegalStateException(
+              s"Unsupported empty hash expression: ${other.getClass.getSimpleName}")
+          }
+          val partitionId = Math.floorMod(emptyHash, numPartitions)
+          withResource(GpuScalar.from(partitionId, IntegerType)) { partLit =>
+            ColumnVector.fromScalar(partLit, cb.numRows)
+          }
+        } else {
+          withResource(hashFunc.columnarEval(cb)) { hash =>
+            withResource(GpuScalar.from(numPartitions, IntegerType)) { partsLit =>
+              hash.getBase.pmod(partsLit, DType.INT32)
+            }
           }
         }
       }

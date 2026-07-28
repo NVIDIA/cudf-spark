@@ -1635,16 +1635,6 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .checkValue(v => v >= 512, "The stripe size rows must be no less than 512.")
     .createOptional
 
-  val ORC_READ_IGNORE_WRITE_TIMEZONE =
-    conf("spark.rapids.sql.orc.read.ignore.write.timezone")
-      .doc("This is an experimental feature. When set to true, the ORC reader ignores the writer " +
-        "timezones in the stripe footers and use the reader timezone as writer timezone. " +
-        "When set to true, the user should guarantee the the writer timezones in the ORC " +
-        "file is the same as the reader.")
-      .internal()
-      .booleanConf
-      .createWithDefault(false)
-
   val ENABLE_EXPAND_PREPROJECT = conf("spark.rapids.sql.expandPreproject.enabled")
     .doc("When set to false disables the pre-projection for GPU Expand. " +
       "Pre-projection leverages the tiered projection to evaluate expressions that " +
@@ -2206,10 +2196,13 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .createWithDefault(true)
 
   val SHUFFLE_MANAGER_ENABLED = conf("spark.rapids.shuffle.enabled")
-    .doc("Enable or disable the RAPIDS Shuffle Manager at runtime. " +
-      "The [RAPIDS Shuffle Manager](https://docs.nvidia.com/spark-rapids/user-guide/latest" +
-      "/additional-functionality/rapids-shuffle.html) must " +
-      "already be configured. When set to `false`, the built-in Spark shuffle will be used. ")
+    .doc("Enable or disable the RAPIDS Shuffle Manager implementation at runtime. On supported " +
+      "Spark versions, including Spark 4.0.0 and later, the " +
+      "[RAPIDS Shuffle Manager](https://docs.nvidia.com/spark-rapids/user-guide/latest" +
+      "/additional-functionality/rapids-shuffle.html) is configured automatically unless " +
+      "spark.shuffle.manager is explicitly set. On earlier Spark versions, the RAPIDS Shuffle " +
+      "Manager must already be configured. When set to `false`, the built-in Spark shuffle " +
+      "implementation will be used. ")
     .booleanConf
     .createWithDefault(true)
 
@@ -3755,8 +3748,6 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val maxNumOrcFilesParallel: Int = get(ORC_MULTITHREAD_READ_MAX_NUM_FILES_PARALLEL)
 
   lazy val testOrcStripeSizeRows: Option[Integer] = get(TEST_ORC_STRIPE_SIZE_ROWS)
-
-  lazy val orcReadIgnoreWriterTimezone: Boolean = get(ORC_READ_IGNORE_WRITE_TIMEZONE)
 
   lazy val isOrcBoolTypeEnabled: Boolean = get(ENABLE_ORC_BOOL)
 
