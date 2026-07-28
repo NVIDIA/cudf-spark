@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,9 +15,7 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "330db"}
-{"spark": "332db"}
-{"spark": "350db143"}
+{"spark": "400db173"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.execution
 
@@ -65,5 +63,7 @@ class GpuShuffleMeta(
       childParts.head.convertToGpu(),
       newChild,
       shuffle.shuffleOrigin
-    )(shuffle.outputPartitioning)
+    // DBR 17.3 keeps marker partitionings in the target contract while advertising their
+    // physical partitioning as the exchange output. AQE rules use both views.
+    )(shuffle.targetOutputPartitioning)
 }
