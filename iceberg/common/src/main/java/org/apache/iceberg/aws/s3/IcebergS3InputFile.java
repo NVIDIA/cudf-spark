@@ -41,7 +41,6 @@ import java.util.List;
 public final class IcebergS3InputFile extends IcebergInputFile {
   private static final Logger LOG = LoggerFactory.getLogger(IcebergS3InputFile.class);
 
-  private final InputFile delegate;
   private final String s3Bucket;
   private final String s3Key;
   private final IcebergS3Client icebergS3Client;
@@ -52,7 +51,6 @@ public final class IcebergS3InputFile extends IcebergInputFile {
       String s3Key,
       IcebergS3Client icebergS3Client) {
     super(delegate);
-    this.delegate = delegate;
     this.s3Bucket = s3Bucket;
     this.s3Key = s3Key;
     this.icebergS3Client = icebergS3Client;
