@@ -314,7 +314,8 @@ object ParallelUnitTestRunner {
             }
           }
           result match {
-            case Some((activeTask, succeeded)) =>
+            case Some((activeTask, succeeded))
+                if claimSuiteResult(suiteDeadlineNanos) =>
               if (succeeded) {
                 println(s"[wave-$runId-worker-$workerId] PASS ${activeTask.task.suite}")
               } else {
@@ -322,11 +323,10 @@ object ParallelUnitTestRunner {
                   s"wave-$runId ${activeTask.task.suite} failed in worker-$workerId")
               }
               currentTask.set(None)
-              suiteDeadlineNanos.set(Long.MaxValue)
               if (running) {
                 running = sendNextTask()
               }
-            case None =>
+            case _ =>
               println(s"[wave-$runId-worker-$workerId] $line")
           }
         } else {
@@ -381,7 +381,7 @@ object ParallelUnitTestRunner {
       override def run(): Unit = {
         while (process.isAlive) {
           val deadline = deadlineNanos.get()
-          if (deadline != Long.MaxValue && System.nanoTime() - deadline > 0) {
+          if (claimSuiteTimeout(deadlineNanos, deadline, System.nanoTime())) {
             val suite = currentSuite().getOrElse("<unknown suite>")
             System.err.println(s"wave-$runId worker-$workerId: $suite exceeded " +
                 s"$suiteTimeoutSeconds seconds; capturing a thread dump and killing the worker")
@@ -402,6 +402,18 @@ object ParallelUnitTestRunner {
     thread.setDaemon(true)
     thread.start()
     thread
+  }
+
+  private[rapids] def claimSuiteResult(deadlineNanos: AtomicLong): Boolean =
+    deadlineNanos.getAndSet(Long.MaxValue) != Long.MaxValue
+
+  private[rapids] def claimSuiteTimeout(
+      deadlineNanos: AtomicLong,
+      observedDeadline: Long,
+      currentTime: Long): Boolean = {
+    observedDeadline != Long.MaxValue &&
+      currentTime - observedDeadline > 0 &&
+      deadlineNanos.compareAndSet(observedDeadline, Long.MaxValue)
   }
 
   /** Best-effort jstack of a hung test JVM, echoed to the build log and saved to a file. */

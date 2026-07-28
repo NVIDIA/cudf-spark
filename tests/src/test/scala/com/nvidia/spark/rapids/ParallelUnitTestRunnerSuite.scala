@@ -292,6 +292,23 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
     }
   }
 
+  test("suite result and timeout paths atomically claim the active deadline") {
+    val deadlineNanos = new AtomicLong(1L)
+    val observedDeadline = deadlineNanos.get()
+
+    assert(ParallelUnitTestRunner.claimSuiteResult(deadlineNanos))
+    val nextSuiteDeadline = 3L
+    deadlineNanos.set(nextSuiteDeadline)
+    assert(!ParallelUnitTestRunner.claimSuiteTimeout(
+      deadlineNanos, observedDeadline, currentTime = 2L))
+    assert(deadlineNanos.get() === nextSuiteDeadline)
+
+    deadlineNanos.set(1L)
+    assert(ParallelUnitTestRunner.claimSuiteTimeout(
+      deadlineNanos, observedDeadline = 1L, currentTime = 2L))
+    assert(!ParallelUnitTestRunner.claimSuiteResult(deadlineNanos))
+  }
+
   test("worker stop request does not block on the command pipe") {
     val writeStarted = new CountDownLatch(1)
     val releaseWrite = new CountDownLatch(1)
