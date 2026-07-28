@@ -111,6 +111,15 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
     assert(minimum === 0.25)
   }
 
+  test("GPU allocation fractions are divided across workers") {
+    val (allocation, maximum, minimum) =
+      ParallelUnitTestRunner.perWorkerGpuAllocations(4, 1.0, 1.0, 0.25)
+
+    assert(math.abs(allocation - 0.2) < 1e-10)
+    assert(math.abs(maximum - 0.2) < 1e-10)
+    assert(minimum === 0.0625)
+  }
+
   test("suites are ordered by fully qualified name") {
     val suites = Seq("example.SuiteZ", "another.SuiteB", "another.SuiteA")
 
