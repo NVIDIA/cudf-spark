@@ -825,12 +825,14 @@ def test_delta_rtas_sql(spark_tmp_table_factory, enable_deletion_vectors, use_cd
                                       True, enable_deletion_vectors, use_cdf)
 
 
+@allow_non_gpu_conditional(
+    is_databricks_runtime(),
+    'AppendDataExecV1, AtomicCreateTableAsSelectExec, AtomicReplaceTableAsSelectExec')
 @allow_non_gpu('DataWritingCommandExec', 'WriteFilesExec', *delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
 @pytest.mark.skipif(not is_spark_400_or_later(),
                     reason="Delta Lake 4.0 contains the native truncate capability")
-@pytest.mark.skipif(is_databricks_runtime(), reason="This test covers OSS Delta Lake")
 def test_delta_rtas_truncate_capability(spark_tmp_table_factory):
     cpu_table = spark_tmp_table_factory.get()
     gpu_table = spark_tmp_table_factory.get()
