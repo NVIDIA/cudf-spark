@@ -192,9 +192,10 @@ class RegularExpressionParserSuite extends AnyFunSuite {
         RegexCharacterClass(negated = false,
           ListBuffer(RegexChar('A'), RegexChar('b'))))))
 
-    // Braced form must still consume more than 2 hex digits.
-    assert(parse(raw"\x{1F600}") ===
-      RegexSequence(ListBuffer(RegexHexDigit("1F600"))))
+    // Braced form must still consume more than 2 hex digits. Keep this control
+    // within the BMP because supplementary codepoints intentionally fall back.
+    assert(parse(raw"\x{FFFF}") ===
+      RegexSequence(ListBuffer(RegexHexDigit("FFFF"))))
   }
 
   test("octal digit") {
