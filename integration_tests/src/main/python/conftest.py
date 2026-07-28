@@ -525,8 +525,9 @@ _random_select_config = _parse_random_select_config()
 def _precommit_parametrize_factors(item):
     factors = []
     for position, mark in enumerate(item.iter_markers(name='parametrize')):
+        argvalues = mark.args[1] if len(mark.args) > 1 else mark.kwargs['argvalues']
         try:
-            size = len(mark.args[1])
+            size = len(argvalues)
         except TypeError:
             # Pytest accepts iterators here, but their size cannot be recovered after collection.
             return []

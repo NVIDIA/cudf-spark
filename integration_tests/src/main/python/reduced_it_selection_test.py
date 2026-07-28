@@ -77,6 +77,13 @@ import pytest
 def test_multi_arg(a, b, d):
     pass
 ''',
+    "test_keyword_args": '''
+import pytest
+@pytest.mark.parametrize("y", ["y0", "y1"])
+@pytest.mark.parametrize(argnames="x", argvalues=["x0", "x1", "x2"])
+def test_keyword_args(x, y):
+    pass
+''',
     "test_single": '''
 import pytest
 @pytest.mark.parametrize("s", ["s0", "s1", "s2"])
@@ -104,6 +111,7 @@ _EXPECTATIONS = {
     "test_largest_middle": (True, 5),
     "test_module_level": (True, 3),
     "test_multi_arg": (True, 3),
+    "test_keyword_args": (True, 3),
     "test_single": (False, 3),
     "test_none": (False, 1),
     # Kept in full because a generator argvalues has no recoverable len(), so
@@ -189,8 +197,11 @@ def _run_selftest():
             expect_reduced, expect_kept = _EXPECTATIONS[func_name]
             first = group_items[0]
             factors = conftest._precommit_parametrize_factors(first)
-            marks = [(mark.args[0], list(mark.args[1]))
-                     for mark in first.iter_markers(name="parametrize")]
+            marks = [
+                (mark.args[0] if mark.args else mark.kwargs["argnames"],
+                 list(mark.args[1] if len(mark.args) > 1 else mark.kwargs["argvalues"]))
+                for mark in first.iter_markers(name="parametrize")
+            ]
             kept = [item for item in group_items if item in required]
 
             if not expect_reduced:
