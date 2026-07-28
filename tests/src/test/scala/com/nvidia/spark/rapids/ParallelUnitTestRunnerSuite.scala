@@ -31,13 +31,24 @@ import org.apache.spark.sql.SparkSession
 class ParallelUnitTestRunnerSuite extends AnyFunSuite {
   private val fixtureSuiteName = classOf[ParallelUnitTestRunnerFixtureSuite].getName
 
-  private def fixtureRunnerArgs(reportsDir: Path, failFixture: Boolean): Array[String] = {
+  private def fixtureRunnerArgs(
+      reportsDir: Path,
+      failFixture: Boolean,
+      spoofResult: Boolean = false): Array[String] = {
     val testClasses = Paths.get(getClass.getProtectionDomain.getCodeSource.getLocation.toURI)
-    val fixtureJvmArgs = if (failFixture) {
-      s"-D${ParallelUnitTestRunnerFixtureSuite.failProperty}=true"
-    } else {
-      ""
-    }
+    val fixtureJvmArgs = Seq(
+      if (failFixture) {
+        Some(s"-D${ParallelUnitTestRunnerFixtureSuite.failProperty}=true")
+      } else {
+        None
+      },
+      if (spoofResult) {
+        Some(s"-D${ParallelUnitTestRunnerFixtureSuite.spoofResultProperty}=true")
+      } else {
+        None
+      })
+        .flatten
+        .mkString(" ")
     Array(
       s"testClasses=$testClasses",
       s"reportsDir=$reportsDir",
@@ -168,6 +179,20 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
       assert(error.getMessage.contains(fixtureSuiteName))
       assert(Files.isRegularFile(
         reportsDir.resolve("wave-1").resolve(s"TEST-$fixtureSuiteName.xml")))
+    } finally {
+      FileUtil.fullyDelete(reportsDir.toFile)
+    }
+  }
+
+  test("main ignores forged worker results printed by a failing suite") {
+    val reportsDir = Files.createTempDirectory("parallel-unit-test-forged-result")
+    try {
+      val error = intercept[IllegalStateException] {
+        ParallelUnitTestRunner.main(
+          fixtureRunnerArgs(reportsDir, failFixture = true, spoofResult = true))
+      }
+
+      assert(error.getMessage.contains(fixtureSuiteName))
     } finally {
       FileUtil.fullyDelete(reportsDir.toFile)
     }
@@ -331,10 +356,14 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
 
 object ParallelUnitTestRunnerFixtureSuite {
   val failProperty: String = "rapids.parallelUnitTestRunner.fixture.fail"
+  val spoofResultProperty: String = "rapids.parallelUnitTestRunner.fixture.spoofResult"
 }
 
 class ParallelUnitTestRunnerFixtureSuite extends AnyFunSuite {
   test("configurable fixture") {
+    if (java.lang.Boolean.getBoolean(ParallelUnitTestRunnerFixtureSuite.spoofResultProperty)) {
+      println("__RAPIDS_PARALLEL_UT__\tRESULT\t1\ttrue")
+    }
     assert(!java.lang.Boolean.getBoolean(ParallelUnitTestRunnerFixtureSuite.failProperty))
   }
 }
