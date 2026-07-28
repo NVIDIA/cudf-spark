@@ -34,7 +34,8 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
   private def fixtureRunnerArgs(
       reportsDir: Path,
       failFixture: Boolean,
-      spoofResult: Boolean = false): Array[String] = {
+      spoofResult: Boolean = false,
+      sparkConfs: String = ""): Array[String] = {
     val testClasses = Paths.get(getClass.getProtectionDomain.getCodeSource.getLocation.toURI)
     val fixtureJvmArgs = Seq(
       if (failFixture) {
@@ -65,7 +66,7 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
       "maxAllocationFraction=1.0",
       "minAllocationFraction=0.25",
       "testFailureIgnore=false",
-      "sparkConfs=",
+      s"sparkConfs=$sparkConfs",
       "suiteTimeoutSeconds=30")
   }
 
@@ -173,6 +174,23 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
 
       assert(Files.isRegularFile(
         reportsDir.resolve("wave-1").resolve(s"TEST-$fixtureSuiteName.xml")))
+    } finally {
+      FileUtil.fullyDelete(reportsDir.toFile)
+    }
+  }
+
+  test("main runs each configured Spark wave") {
+    val reportsDir = Files.createTempDirectory("parallel-unit-test-waves")
+    try {
+      ParallelUnitTestRunner.main(fixtureRunnerArgs(
+        reportsDir,
+        failFixture = false,
+        sparkConfs = "spark.sql.ansi.enabled=false;spark.sql.ansi.enabled=true"))
+
+      Seq(1, 2).foreach { wave =>
+        assert(Files.isRegularFile(
+          reportsDir.resolve(s"wave-$wave").resolve(s"TEST-$fixtureSuiteName.xml")))
+      }
     } finally {
       FileUtil.fullyDelete(reportsDir.toFile)
     }
