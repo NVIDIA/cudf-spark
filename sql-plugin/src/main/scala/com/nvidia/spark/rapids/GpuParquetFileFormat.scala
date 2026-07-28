@@ -73,6 +73,15 @@ object GpuParquetFileFormat {
       spark: SparkSession,
       options: Map[String, String],
       schema: StructType): Option[GpuParquetFileFormat] = {
+    tagGpuSupport(meta, spark, options, spark.sparkContext.hadoopConfiguration, schema)
+  }
+
+  def tagGpuSupport(
+      meta: RapidsMeta[_, _, _],
+      spark: SparkSession,
+      options: Map[String, String],
+      hadoopConf: Configuration,
+      schema: StructType): Option[GpuParquetFileFormat] = {
 
     val sqlConf = spark.sessionState.conf
 
@@ -81,9 +90,9 @@ object GpuParquetFileFormat {
     // lookup encryption keys in the options, then Hadoop conf, then Spark runtime conf
     def lookupEncryptionConfig(key: String): String = {
       options.getOrElse(key, {
-        val hadoopConf = spark.sparkContext.hadoopConfiguration.get(key, "")
-        if (hadoopConf.nonEmpty) {
-          hadoopConf
+        val hadoopValue = hadoopConf.get(key, "")
+        if (hadoopValue.nonEmpty) {
+          hadoopValue
         } else {
           spark.conf.get(key, "")
         }
