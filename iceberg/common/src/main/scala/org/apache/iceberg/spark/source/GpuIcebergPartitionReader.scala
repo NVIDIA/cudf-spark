@@ -91,7 +91,7 @@ class GpuIcebergPartitionReader(private val task: GpuSparkInputPartition,
           gpuDeleteFiterMap, conf)
       case _: MultiFile =>
         new GpuCoalescingIcebergParquetReader(rapidsFileIO, files, constantsMap, conf)
-      case StagedMultiThread(multiThread) =>
+      case AsyncMultiThread(multiThread) =>
         new GpuAsyncIcebergParquetReader(rapidsFileIO, files, constantsMap,
           conf.copy(threadConf = multiThread), task.multiThreadReadNumThreads)
     }

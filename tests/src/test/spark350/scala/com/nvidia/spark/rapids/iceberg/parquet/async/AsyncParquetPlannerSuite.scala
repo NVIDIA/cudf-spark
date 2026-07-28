@@ -25,7 +25,7 @@
 {"spark": "357"}
 {"spark": "358"}
 spark-rapids-shim-json-lines ***/
-package com.nvidia.spark.rapids.iceberg.parquet.staged
+package com.nvidia.spark.rapids.iceberg.parquet.async
 
 import java.io.ByteArrayInputStream
 import java.util.{Collections, IdentityHashMap, Iterator => JIterator, List => JList}
@@ -84,7 +84,7 @@ import org.apache.spark.{SparkConf, SparkEnv, TaskContext}
 import org.apache.spark.sql.types.{IntegerType, StructField, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
-class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
+class AsyncParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
 
   private val sourceInputs = new IdentityHashMap[IcebergPartitionedFile, RapidsInputFile]()
 
@@ -160,7 +160,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
 
   private val oneColumnParquetSchema = Types.buildMessage()
     .addField(Types.required(INT32).named("id"))
-    .named("staged_test")
+    .named("async_test")
 
   private val oneColumnReadSchema = StructType(Seq(
     StructField("id", IntegerType, nullable = false)))
@@ -168,7 +168,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
   private val twoColumnParquetSchema = Types.buildMessage()
     .addField(Types.required(INT32).named("id"))
     .addField(Types.required(INT32).named("value"))
-    .named("staged_test")
+    .named("async_test")
 
   private val twoColumnReadSchema = StructType(Seq(
     StructField("id", IntegerType, nullable = false),
@@ -246,7 +246,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       readSchema: StructType,
       blocks: Seq[BlockMetaData],
       input: RapidsInputFile): FooterResult = {
-    val path = new Path(s"file:///tmp/staged-planner-$ordinal.parquet")
+    val path = new Path(s"file:///tmp/async-planner-$ordinal.parquet")
     val icebergInput = new IcebergInputFile(HadoopInputFile.fromPath(path, new Configuration()))
     val file = IcebergPartitionedFile(icebergInput)
     sourceInputs.put(file, input)
@@ -266,7 +266,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
 
   private def sourceOrdinal(file: IcebergPartitionedFile): Int = {
     file.path.getName
-      .stripPrefix("staged-planner-")
+      .stripPrefix("async-planner-")
       .stripSuffix(".parquet")
       .toInt
   }
@@ -306,7 +306,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
 
     override def open(): SeekableInputStream = {
       openCalls += 1
-      throw new AssertionError("staged output must use readVectored, not open")
+      throw new AssertionError("asynchronous output must use readVectored, not open")
     }
   }
 
@@ -387,7 +387,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
   }
 
   /**
-   * Blocks the calling reader thread inside readVectored — the synchronous shape the staged
+   * Blocks the calling reader thread inside readVectored — the synchronous shape the asynchronous
    * reader now shares with the base reader — until the test releases this source.
    */
   private final class BlockingVectoredInput(
@@ -427,11 +427,11 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
 
     override def open(): SeekableInputStream =
-      throw new AssertionError("staged output must use readVectored, not open")
+      throw new AssertionError("asynchronous output must use readVectored, not open")
   }
 
   private def recordCopiedRanges(
-      output: StagedParquetOutput,
+      output: ParquetOutput,
       ranges: Seq[PlannedReadRange],
       observed: ArrayBuffer[(PlannedReadRange, Seq[Byte])]): Unit = {
     ranges.foreach { range =>
@@ -715,7 +715,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       new PlannedReadRange(source, 4L, 2L, 5L),
       new PlannedReadRange(source, 9L, 4L, 10L))
     val observed = ArrayBuffer.empty[(PlannedReadRange, Seq[Byte])]
-    val output = new MemoryStagedParquetOutput(HostMemoryBuffer.allocate(16L), 16L)
+    val output = new MemoryParquetOutput(HostMemoryBuffer.allocate(16L), 16L)
 
     try {
       output.copyRanges(input, ranges.asJava)
@@ -754,7 +754,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
         new PlannedReadRange(sources(1), 20L, 5L, 12L),
         new PlannedReadRange(sources(1), 30L, 2L, 20L)))
     val writableBuffer = HostMemoryBuffer.allocate(32L)
-    val output = new MemoryStagedParquetOutput(writableBuffer, 32L)
+    val output = new MemoryParquetOutput(writableBuffer, 32L)
     val workers = Executors.newFixedThreadPool(2)
 
     try {
@@ -846,10 +846,10 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       }
     }
 
-    // Bound the pinned-preferred host allocations that back staged outputs in these tests.
+    // Bound the pinned-preferred host allocations that back asynchronous outputs in these tests.
     HostAlloc.initialize(1L << 26)
     // Enough workers for every footer to chain straight into a concurrently running download.
-    val reader = new StagedParquetPartitionReader(
+    val reader = new AsyncParquetPartitionReader(
       scanFiles.asJava,
       adapter,
       Int.MaxValue,
@@ -868,7 +868,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       assert(tracker.activeCalls.get() === sourceCount)
       assert(tracker.startedCalls.get() === sourceCount)
       assert(tracker.maximumActiveCalls.get() === sourceCount)
-      assert(tracker.threadNames.asScala.forall(_.startsWith("iceberg-staged-worker-")))
+      assert(tracker.threadNames.asScala.forall(_.startsWith("iceberg-async-worker-")))
 
       tracker.release(sourceCount)
       assert(!hasNext.get(10, TimeUnit.SECONDS))
@@ -929,7 +929,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
 
     HostAlloc.initialize(1L << 26)
-    val reader = new StagedParquetPartitionReader(
+    val reader = new AsyncParquetPartitionReader(
       scanFiles.asJava,
       adapter,
       Int.MaxValue,
@@ -974,7 +974,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  test("staged scan retains the GPU semaphore until Spark task completion") {
+  test("asynchronous scan retains the GPU semaphore until Spark task completion") {
     val sourceBytes = Array.tabulate[Byte](1024)(index => (index & 0xff).toByte)
     val secondReadTracker = new SourceReadTracker(expectedSources = 1)
     val first = footerWithInput(
@@ -1034,7 +1034,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     when(testSparkEnv.conf).thenReturn(new SparkConf(false)
       .set("spark.rapids.sql.concurrentGpuTasks", "1"))
     val setSparkEnv = SparkEnv.getClass.getMethod("set", classOf[SparkEnv])
-    var reader: StagedParquetPartitionReader = null
+    var reader: AsyncParquetPartitionReader = null
     var caller: java.util.concurrent.ExecutorService = null
     val continueAfterFirstBatch = new CountDownLatch(1)
     val firstBatchObserved = new CountDownLatch(1)
@@ -1045,7 +1045,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     GpuDeviceManager.setRmmTaskInitEnabled(false)
     setSparkEnv.invoke(SparkEnv, testSparkEnv)
     try {
-      reader = new StagedParquetPartitionReader(
+      reader = new AsyncParquetPartitionReader(
         footers.map(_.getFile).asJava,
         adapter,
         Int.MaxValue,
@@ -1159,7 +1159,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
 
     HostAlloc.initialize(1L << 26)
-    val reader = new StagedParquetPartitionReader(
+    val reader = new AsyncParquetPartitionReader(
       footers.map(_.getFile).asJava,
       adapter,
       Int.MaxValue,
@@ -1233,7 +1233,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
 
     HostAlloc.initialize(1L << 26)
     // File 0 completes first and file 1 stays blocked beyond the fresh 100 ms wait.
-    val reader = new StagedParquetPartitionReader(
+    val reader = new AsyncParquetPartitionReader(
       scanFiles.asJava,
       adapter,
       Int.MaxValue,
@@ -1302,9 +1302,9 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       }
     }
 
-    // Bound the pinned-preferred host allocations that back staged outputs in these tests.
+    // Bound the pinned-preferred host allocations that back asynchronous outputs in these tests.
     HostAlloc.initialize(1L << 26)
-    val reader = new StagedParquetPartitionReader(
+    val reader = new AsyncParquetPartitionReader(
       scanFiles.asJava,
       adapter,
       Int.MaxValue,
@@ -1379,7 +1379,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       }
 
     HostAlloc.initialize(1L << 26)
-    val firstReader = new StagedParquetPartitionReader(
+    val firstReader = new AsyncParquetPartitionReader(
       Seq(footers.head.getFile).asJava,
       adapterFor(footers.head),
       Int.MaxValue,
@@ -1388,7 +1388,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       0L,
       2,
       null)
-    val secondReader = new StagedParquetPartitionReader(
+    val secondReader = new AsyncParquetPartitionReader(
       Seq(footers.last.getFile).asJava,
       adapterFor(footers.last),
       Int.MaxValue,
@@ -1487,7 +1487,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
 
     HostAlloc.initialize(1L << 26)
-    val reader = new StagedParquetPartitionReader(
+    val reader = new AsyncParquetPartitionReader(
       scanFiles.asJava,
       adapter,
       Int.MaxValue,
@@ -1569,7 +1569,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
 
     HostAlloc.initialize(1L << 26)
-    val reader = new StagedParquetPartitionReader(
+    val reader = new AsyncParquetPartitionReader(
       scanFiles.asJava,
       adapter,
       Int.MaxValue,
@@ -1605,7 +1605,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  test("staged decode support has a Hadoop configuration during trait initialization") {
+  test("asynchronous decode support has a Hadoop configuration during trait initialization") {
     val hadoopConf = new Configuration(false)
     hadoopConf.setInt("parquet.read.allocation.size", 12345)
     val icebergSchema = new Schema(
@@ -1643,7 +1643,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
     try {
       // Before the fix, this first access initialized DecodeSupport and failed because the
       // ParquetPartitionReaderBase trait constructor observed an uninitialized override val.
-      assert(reader.stagedParquetOptions(oneColumnReadSchema, oneColumnParquetSchema) != null)
+      assert(reader.asyncParquetOptions(oneColumnReadSchema, oneColumnParquetSchema) != null)
     } finally {
       reader.close()
     }
@@ -1690,10 +1690,10 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       }
     }
 
-    // Bound the pinned-preferred host allocations that back staged outputs in these tests.
+    // Bound the pinned-preferred host allocations that back asynchronous outputs in these tests.
     HostAlloc.initialize(1L << 26)
     // maxRows = 1 closes a subtask per row group, so one fragment serves several subtasks.
-    val reader = new StagedParquetPartitionReader(
+    val reader = new AsyncParquetPartitionReader(
       scanFiles.asJava,
       adapter,
       1,
@@ -1766,9 +1766,9 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
       }
     }
 
-    // Bound the pinned-preferred host allocations that back staged outputs in these tests.
+    // Bound the pinned-preferred host allocations that back asynchronous outputs in these tests.
     HostAlloc.initialize(1L << 26)
-    val reader = new StagedParquetPartitionReader(
+    val reader = new AsyncParquetPartitionReader(
       scanFiles.asJava,
       adapter,
       1,
@@ -1833,7 +1833,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
         throw new AssertionError("empty footer must not produce a decode subtask")
       }
     }
-    val reader = new StagedParquetPartitionReader(
+    val reader = new AsyncParquetPartitionReader(
       Seq(scanFile).asJava,
       adapter,
       Int.MaxValue,
@@ -1848,7 +1848,7 @@ class StagedParquetPlannerSuite extends AnyFunSuite with BeforeAndAfterEach {
         override def call(): Boolean = reader.hasNext()
       })
       assert(footerStarted.await(10, TimeUnit.SECONDS))
-      assert(footerThreadName.get().startsWith("iceberg-staged-worker-"))
+      assert(footerThreadName.get().startsWith("iceberg-async-worker-"))
 
       reader.close()
       assert(!hasNext.get(10, TimeUnit.SECONDS))

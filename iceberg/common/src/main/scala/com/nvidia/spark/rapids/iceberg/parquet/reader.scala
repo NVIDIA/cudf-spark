@@ -124,13 +124,13 @@ case class MultiThread(
     hasRowPositionMetadata: Boolean) extends ThreadConf
 
 /**
- * Marks a normal multi-thread configuration for the staged Iceberg reader.
+ * Marks a normal multi-thread configuration for the asynchronous Iceberg reader.
  *
- * Keeping the marker separate is intentional: when staged reading is disabled, the reader
+ * Keeping the marker separate is intentional: when asynchronous reading is disabled, the reader
  * factory returns the exact upstream [[MultiThread]] value and the partition reader follows the
- * exact upstream match arm. No staged fields are added to baseline task objects.
+ * exact upstream match arm. No asynchronous fields are added to baseline task objects.
  */
-case class StagedMultiThread(delegate: MultiThread) extends ThreadConf
+case class AsyncMultiThread(delegate: MultiThread) extends ThreadConf
 
 case class MultiFile(
     poolConfBuilder: ThreadPoolConfBuilder,

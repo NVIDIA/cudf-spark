@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package com.nvidia.spark.rapids.iceberg.parquet.staged;
+package com.nvidia.spark.rapids.iceberg.parquet.async;
 
 import java.util.Objects;
 import java.util.concurrent.Callable;
@@ -76,7 +76,7 @@ public final class ParquetReadOps
       ExecutorService executor) {
     return CompletableFuture.supplyAsync(() -> run(() -> {
       checkOpen();
-      return StagedParquetPartitionReader.downloadFragment(footer, adapter, closed);
+      return AsyncParquetPartitionReader.downloadFragment(footer, adapter, closed);
     }), executor);
   }
 

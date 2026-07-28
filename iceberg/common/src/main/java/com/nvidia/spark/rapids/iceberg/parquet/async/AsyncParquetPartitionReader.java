@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package com.nvidia.spark.rapids.iceberg.parquet.staged;
+package com.nvidia.spark.rapids.iceberg.parquet.async;
 
 import java.nio.channels.SeekableByteChannel;
 import java.util.ArrayDeque;
@@ -55,7 +55,7 @@ import org.apache.spark.sql.rapids.execution.TrampolineUtil$;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
 
 /**
- * Coordinates the staged Parquet pipeline for one Spark input partition.
+ * Coordinates the asynchronous Parquet pipeline for one Spark input partition.
  *
  * <p>The pipeline matches the Iceberg multithreaded reader's admission order:</p>
  * <ol>
@@ -75,7 +75,7 @@ import org.apache.spark.sql.vectorized.ColumnarBatch;
  *       until consumed; there is no second task-sized assembly allocation.</li>
  * </ol>
  */
-public final class StagedParquetPartitionReader
+public final class AsyncParquetPartitionReader
     implements Iterator<ColumnarBatch>, AutoCloseable {
   private static final int CLOSED_COMPLETION = -1;
   /**
@@ -140,7 +140,7 @@ public final class StagedParquetPartitionReader
    *                      bounds the concurrently downloading files
    * @param taskContext Spark task context captured by the task thread; may be null in tests
    */
-  public StagedParquetPartitionReader(
+  public AsyncParquetPartitionReader(
       List<IcebergPartitionedFile> files,
       ParquetReaderAdapter adapter,
       int maxRows,
@@ -194,7 +194,7 @@ public final class StagedParquetPartitionReader
         // Match MultiFileCloudParquetPartitionReader: GPU decode acquires the task-wide
         // semaphore, and the Spark task-completion listener releases it. The reader deliberately
         // retains that permit while waiting for every later subtask instead of introducing a
-        // staged-only release/reacquire cycle that increases concurrent GPU residency and spill.
+        // reader-specific release/reacquire cycle that increases concurrent GPU residency and spill.
         ReadSubtask subtask = nextPlannedSubtask();
         if (subtask == null) {
           closeAllFragmentFutures();
@@ -236,11 +236,11 @@ public final class StagedParquetPartitionReader
   public ColumnarBatch next() {
     try {
       if (!hasNext()) {
-        throw new NoSuchElementException("no more staged Parquet batches");
+        throw new NoSuchElementException("no more async Parquet batches");
       }
       synchronized (iteratorLock) {
         if (closed.get() || currentBatches == null) {
-          throw new CancellationException("staged Parquet reader was closed before next()");
+          throw new CancellationException("async Parquet reader was closed before next()");
         }
         ColumnarBatch nextBatch = currentBatches.next();
         return nextBatch;
@@ -352,12 +352,12 @@ public final class StagedParquetPartitionReader
     long cacheReadNanos = 0L;
     List<MissChunk> misses = new ArrayList<>();
     long allocStart = System.nanoTime();
-    StagedParquetOutput output = StagedParquetOutput.create(totalBytes);
+    ParquetOutput output = ParquetOutput.create(totalBytes);
     long allocNanos = System.nanoTime() - allocStart;
     HostMemoryBuffer scratch = null;
     try {
       if (closed.get()) {
-        throw new CancellationException("staged reader closed before fragment I/O started");
+        throw new CancellationException("async reader closed before fragment I/O started");
       }
       RapidsInputFile input = adapter.openInputFile(footer.getFile());
       if (input == null) {
@@ -622,7 +622,7 @@ public final class StagedParquetPartitionReader
     adapter.onResultWait(System.nanoTime() - waitStart);
     if (fileIndex != null && fileIndex == CLOSED_COMPLETION) {
       checkOpen();
-      throw new CancellationException("staged Parquet reader completion queue closed");
+      throw new CancellationException("async Parquet reader completion queue closed");
     }
     checkOpen();
     return fileIndex;
@@ -802,7 +802,7 @@ public final class StagedParquetPartitionReader
 
   private static void checkOpen(AtomicBoolean closed) {
     if (closed.get()) {
-      throw new CancellationException("staged Parquet reader is closed");
+      throw new CancellationException("async Parquet reader is closed");
     }
   }
 

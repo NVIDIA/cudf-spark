@@ -1855,9 +1855,9 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .booleanConf
     .createWithDefault(true)
 
-  val ICEBERG_STAGED_READ_ENABLED =
-    conf("spark.rapids.sql.format.iceberg.stagedRead.enabled")
-      .doc("Enables the experimental staged Iceberg Parquet reader. The reader separates " +
+  val ICEBERG_ASYNC_READ_ENABLED =
+    conf("spark.rapids.sql.format.iceberg.asyncRead.enabled")
+      .doc("Enables the experimental asynchronous Iceberg Parquet reader. The reader separates " +
         "footer filtering, I/O, Parquet assembly, and GPU decoding into distinct stages.")
       .startupOnly()
       .internal()
@@ -3817,7 +3817,7 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val isIcebergWriteEnabled: Boolean = get(ENABLE_ICEBERG_WRITE)
 
-  lazy val isIcebergStagedReadEnabled: Boolean = get(ICEBERG_STAGED_READ_ENABLED)
+  lazy val isIcebergAsyncReadEnabled: Boolean = get(ICEBERG_ASYNC_READ_ENABLED)
 
   lazy val isHiveDelimitedTextEnabled: Boolean = get(ENABLE_HIVE_TEXT)
 

@@ -24,7 +24,7 @@ import com.nvidia.spark.rapids.iceberg.parquet.{
   MultiFile,
   MultiThread,
   SingleFile,
-  StagedMultiThread,
+  AsyncMultiThread,
   ThreadConf
 }
 import org.apache.iceberg.{FileFormat, MetadataColumns}
@@ -49,7 +49,7 @@ class GpuReaderFactory(private val metrics: Map[String, GpuMetric],
   private val poolConfBuilder = ThreadPoolConfBuilder(rapidsConf)
   private val combineThresholdSize = rapidsConf.getMultithreadedCombineThreshold
   private val combineWaitTime = rapidsConf.getMultithreadedCombineWaitTime
-  private val icebergStagedReadEnabled = rapidsConf.isIcebergStagedReadEnabled
+  private val icebergAsyncReadEnabled = rapidsConf.isIcebergAsyncReadEnabled
 
   override def createReader(partition: InputPartition): PartitionReader[InternalRow] =
     throw new UnsupportedOperationException("GpuReaderFactory does not support createReader()")
@@ -116,10 +116,10 @@ class GpuReaderFactory(private val metrics: Map[String, GpuMetric],
           hasRowPositionMetadata)
 
         // Keep the disabled path identical to upstream. Only an explicitly enabled and eligible
-        // scan gets the staged marker; the encryption traversal is also avoided when disabled.
-        if (icebergStagedReadEnabled && hasNoDeletes && !queryUsesInputFile &&
+        // scan gets the asynchronous marker; the encryption traversal is also avoided when disabled.
+        if (icebergAsyncReadEnabled && hasNoDeletes && !queryUsesInputFile &&
             !hasRowPositionMetadata && scans.forall(_.file.keyMetadata == null)) {
-          StagedMultiThread(multiThread)
+          AsyncMultiThread(multiThread)
         } else {
           multiThread
         }

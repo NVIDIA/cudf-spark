@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package com.nvidia.spark.rapids.iceberg.parquet.staged;
+package com.nvidia.spark.rapids.iceberg.parquet.async;
 
 import ai.rapids.cudf.HostMemoryBuffer;
 import com.nvidia.spark.rapids.SpillPriorities;
@@ -30,7 +30,7 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * Host-memory implementation of {@link StagedParquetOutput}.
+ * Host-memory implementation of {@link ParquetOutput}.
  *
  * <p>The factory transfers ownership of {@code buffer} to this object. The buffer is allocated
  * pinned-preferred, with HostAlloc's bounded non-pinned fallback; sealing transfers it to a
@@ -38,14 +38,14 @@ import java.util.Objects;
  * participate in normal host spilling. A materialized buffer is a separate, caller-owned
  * reference.</p>
  */
-final class MemoryStagedParquetOutput extends StagedParquetOutput {
+final class MemoryParquetOutput extends ParquetOutput {
   /** Owned only before seal; set to null when ownership moves to {@code sealedBuffer}. */
   private HostMemoryBuffer buffer;
 
   /** Owned only after seal and responsible for spill-framework registration. */
   private SpillableHostBuffer sealedBuffer;
 
-  MemoryStagedParquetOutput(HostMemoryBuffer buffer, long capacityBytes) {
+  MemoryParquetOutput(HostMemoryBuffer buffer, long capacityBytes) {
     super(capacityBytes, false);
     this.buffer = Objects.requireNonNull(buffer, "buffer");
     long bufferLength = buffer.getLength();
@@ -124,7 +124,7 @@ final class MemoryStagedParquetOutput extends StagedParquetOutput {
           toTransfer, exactSizeBytes(), SpillPriorities.ACTIVE_BATCHING_PRIORITY());
       buffer = null;
     } catch (RuntimeException e) {
-      throw new IOException("failed to register staged Parquet buffer for spilling", e);
+      throw new IOException("failed to register Parquet buffer for spilling", e);
     }
   }
 
@@ -136,7 +136,7 @@ final class MemoryStagedParquetOutput extends StagedParquetOutput {
     try {
       return sealedBuffer.getDataHostBuffer();
     } catch (RuntimeException e) {
-      throw new IOException("failed to materialize staged Parquet host buffer", e);
+      throw new IOException("failed to materialize Parquet host buffer", e);
     }
   }
 

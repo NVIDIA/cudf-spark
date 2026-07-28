@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package com.nvidia.spark.rapids.iceberg.parquet.staged;
+package com.nvidia.spark.rapids.iceberg.parquet.async;
 
 import java.io.IOException;
 import java.nio.channels.SeekableByteChannel;
@@ -42,7 +42,7 @@ import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
  * written at once, and zero-copy decode avoids retaining a second task-sized assembly buffer.
  * The planned fragment size is exact, so sealing never needs a second size argument.</p>
  */
-abstract class StagedParquetOutput implements AutoCloseable {
+abstract class ParquetOutput implements AutoCloseable {
   private final long exactSizeBytes;
   private final boolean diskBacked;
   // A read stamp is held around every write so seal and close (exclusive stamps) stay behind
@@ -51,7 +51,7 @@ abstract class StagedParquetOutput implements AutoCloseable {
   private boolean sealed;
   private boolean closed;
 
-  StagedParquetOutput(long exactSizeBytes, boolean diskBacked) {
+  ParquetOutput(long exactSizeBytes, boolean diskBacked) {
     if (exactSizeBytes <= 0) {
       throw new IllegalArgumentException(
           "exactSizeBytes must be positive: " + exactSizeBytes);
@@ -67,13 +67,13 @@ abstract class StagedParquetOutput implements AutoCloseable {
    * It falls back to bounded non-pinned storage and participates in the normal host retry/spill
    * protocol. The caller is a dedicated download worker, so waiting here is backpressure.</p>
    */
-  static StagedParquetOutput create(long exactSizeBytes) throws IOException {
+  static ParquetOutput create(long exactSizeBytes) throws IOException {
     if (exactSizeBytes <= 0) {
       throw new IllegalArgumentException(
           "exactSizeBytes must be positive: " + exactSizeBytes);
     }
     HostMemoryBuffer allocation = HostAlloc$.MODULE$.alloc(exactSizeBytes, true);
-    return new MemoryStagedParquetOutput(allocation, exactSizeBytes);
+    return new MemoryParquetOutput(allocation, exactSizeBytes);
   }
 
   /** Return the exact allocation and final sealed size to subclasses. */
@@ -278,7 +278,7 @@ abstract class StagedParquetOutput implements AutoCloseable {
   private void ensureWritable() {
     ensureOpen();
     if (sealed) {
-      throw new IllegalStateException("staged Parquet output is already sealed");
+      throw new IllegalStateException("Parquet output is already sealed");
     }
   }
 
@@ -286,7 +286,7 @@ abstract class StagedParquetOutput implements AutoCloseable {
   private void ensureSealed() {
     ensureOpen();
     if (!sealed) {
-      throw new IllegalStateException("staged Parquet output has not been sealed");
+      throw new IllegalStateException("Parquet output has not been sealed");
     }
   }
 
@@ -339,7 +339,7 @@ abstract class StagedParquetOutput implements AutoCloseable {
 
   private void ensureOpen() {
     if (closed) {
-      throw new IllegalStateException("staged Parquet output is closed");
+      throw new IllegalStateException("Parquet output is closed");
     }
   }
 }

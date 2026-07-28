@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package com.nvidia.spark.rapids.iceberg.parquet.staged;
+package com.nvidia.spark.rapids.iceberg.parquet.async;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -27,7 +27,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Executor-wide worker pool for the Iceberg staged reader.
+ * Executor-wide worker pool for the Iceberg asynchronous reader.
  *
  * <p>Footer loading/filtering, source-file I/O, and synthetic Parquet finalization all use this
  * pool. Sharing one concurrency budget avoids reserving workers for a stage that is temporarily
@@ -36,7 +36,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * whole-file pipelines; a worker returns to the shared FIFO queue only after its file is complete
  * or has failed.</p>
  *
- * <p>Pool submission does not transfer Spark task context automatically. Each staged callable is
+ * <p>Pool submission does not transfer Spark task context automatically. Each asynchronous callable is
  * responsible for installing its captured {@code TaskContext} and RAPIDS pool-thread marker once
  * around the fused file job, and removing both in a {@code finally} block.</p>
  */
@@ -51,7 +51,7 @@ public final class ParquetReaderThreadPool {
 
   private ParquetReaderThreadPool(int threads) {
     this.threads = threads;
-    this.executor = newPool("iceberg-staged-worker", threads);
+    this.executor = newPool("iceberg-async-worker", threads);
   }
 
   /**
@@ -66,13 +66,13 @@ public final class ParquetReaderThreadPool {
     if (singleton == null) {
       singleton = new ParquetReaderThreadPool(threads);
     } else if (singleton.threads != threads) {
-      LOG.warn("Reusing initialized Iceberg staged-read pool with {} threads instead of " +
+      LOG.warn("Reusing initialized Iceberg asynchronous-read pool with {} threads instead of " +
           "requested {} threads", singleton.threads, threads);
     }
     return singleton;
   }
 
-  /** Return the shared pool used by every staged file job. */
+  /** Return the shared pool used by every asynchronous file job. */
   public ExecutorService executor() {
     return executor;
   }

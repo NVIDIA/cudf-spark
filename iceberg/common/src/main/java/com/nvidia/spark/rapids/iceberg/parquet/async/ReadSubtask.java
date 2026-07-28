@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package com.nvidia.spark.rapids.iceberg.parquet.staged;
+package com.nvidia.spark.rapids.iceberg.parquet.async;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -148,7 +148,7 @@ public final class ReadSubtask implements ReadPlan {
       long syntheticStartingOffset) {
     if (source.isEncrypted()) {
       throw new UnsupportedOperationException(
-          "staged synthetic Parquet does not support encrypted column metadata");
+          "asynchronous synthetic Parquet does not support encrypted column metadata");
     }
     long adjustment = Math.subtractExact(
         syntheticStartingOffset, source.getStartingPos());

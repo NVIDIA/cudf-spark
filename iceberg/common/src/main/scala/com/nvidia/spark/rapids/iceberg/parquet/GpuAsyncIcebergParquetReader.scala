@@ -38,7 +38,7 @@ import com.nvidia.spark.rapids.GpuMetric.{
   FILTER_TIME
 }
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
-import com.nvidia.spark.rapids.iceberg.parquet.staged._
+import com.nvidia.spark.rapids.iceberg.parquet.async._
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile
 import com.nvidia.spark.rapids.parquet.{
   CpuCompressionConfig,
@@ -53,7 +53,7 @@ import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /**
- * Iceberg callbacks and GPU decode for the staged Parquet partition reader.
+ * Iceberg callbacks and GPU decode for the asynchronous Parquet partition reader.
  *
  * The Java reader owns scheduling, I/O, and output lifetime. This small callback boundary remains
  * because footer filtering and GPU decode use existing Scala APIs. File jobs are submitted in
@@ -197,7 +197,7 @@ class GpuAsyncIcebergParquetReader(
           new SingleGpuColumnarBatchIterator(processed))
       }
 
-      val parseOptions = stagedParquetOptions(readSchema, clippedSchema)
+      val parseOptions = asyncParquetOptions(readSchema, clippedSchema)
       val splits = subtask.getFileSlices.asScala
         .map(_.getFooter.getFile.sparkPartitionedFile)
         .toArray
@@ -206,7 +206,7 @@ class GpuAsyncIcebergParquetReader(
         // A retry receives fresh owning header/footer buffers and fresh owning references to the
         // fragment slices. MakeParquetTableProducer consumes them once invoked; closeOnExcept
         // covers failures before that ownership transfer. CachedGpuBatchIterator eagerly drains
-        // the producer, so returned batches no longer depend on staged host storage.
+        // the producer, so returned batches no longer depend on asynchronous host storage.
         closeOnExcept(attempt) { hostBuffers =>
           GpuSemaphore.acquireIfNecessary(TaskContext.get())
           val producer = MakeParquetTableProducer(
@@ -240,7 +240,7 @@ class GpuAsyncIcebergParquetReader(
    * Package visibility lets the initialization-order regression test exercise the same lazy
    * helper used by the decode path without allocating a GPU buffer.
    */
-  private[parquet] def stagedParquetOptions(
+  private[parquet] def asyncParquetOptions(
       readSchema: StructType,
       clippedSchema: MessageType) = {
     DecodeSupport.parquetOptions(readSchema, clippedSchema)

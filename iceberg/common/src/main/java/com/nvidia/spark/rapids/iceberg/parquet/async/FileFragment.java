@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package com.nvidia.spark.rapids.iceberg.parquet.staged;
+package com.nvidia.spark.rapids.iceberg.parquet.async;
 
 import java.util.List;
 import java.util.Objects;
@@ -42,14 +42,14 @@ public final class FileFragment implements ReadData {
   private final FooterResult footer;
   private final long[] blockStartOffsets;
   private final long totalBytes;
-  private final StagedParquetOutput data;
+  private final ParquetOutput data;
   private final DownloadStats stats;
   private final AtomicInteger referenceCount = new AtomicInteger(1);
 
   FileFragment(
       FooterResult footer,
       long[] blockStartOffsets,
-      StagedParquetOutput data,
+      ParquetOutput data,
       DownloadStats stats) {
     this.footer = Objects.requireNonNull(footer, "footer");
     this.blockStartOffsets = Objects.requireNonNull(blockStartOffsets, "blockStartOffsets");
@@ -102,7 +102,7 @@ public final class FileFragment implements ReadData {
   }
 
   /** The sealed fragment data; null only for a fully filtered-out (empty) fragment. */
-  StagedParquetOutput getData() {
+  ParquetOutput getData() {
     return data;
   }
 

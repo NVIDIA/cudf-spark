@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package com.nvidia.spark.rapids.iceberg.parquet.staged;
+package com.nvidia.spark.rapids.iceberg.parquet.async;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -95,7 +95,7 @@ public final class StableGreedyReadPlanner {
    * as soon as its closing decision is made instead of after the complete footer barrier. Any
    * feed order is correct: row groups within one footer always keep their file order, and the
    * compatibility rules hold for every pairing. The feed order determines which sources combine:
-   * the staged reader uses file-list order when combining is disabled, and worker-completion
+   * the asynchronous reader uses file-list order when combining is disabled, and worker-completion
    * order when it is enabled, matching the base multithreaded reader.</p>
    */
   public final class Session {

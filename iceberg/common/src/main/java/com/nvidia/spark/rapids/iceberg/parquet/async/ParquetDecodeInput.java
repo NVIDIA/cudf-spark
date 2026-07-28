@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package com.nvidia.spark.rapids.iceberg.parquet.staged;
+package com.nvidia.spark.rapids.iceberg.parquet.async;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -169,7 +169,7 @@ public final class ParquetDecodeInput implements DecodeInput {
       if (error instanceof Error) {
         throw (Error) error;
       }
-      throw new IOException("failed to materialize staged Parquet input", error);
+      throw new IOException("failed to materialize asynchronous Parquet input", error);
     }
   }
 
@@ -191,11 +191,11 @@ public final class ParquetDecodeInput implements DecodeInput {
 
   /** One immutable range borrowed from a sealed file-fragment output. */
   private static final class FragmentSlice {
-    private final StagedParquetOutput output;
+    private final ParquetOutput output;
     private final long offset;
     private final long length;
 
-    private FragmentSlice(StagedParquetOutput output, long offset, long length) {
+    private FragmentSlice(ParquetOutput output, long offset, long length) {
       this.output = Objects.requireNonNull(output, "output");
       this.offset = offset;
       this.length = length;

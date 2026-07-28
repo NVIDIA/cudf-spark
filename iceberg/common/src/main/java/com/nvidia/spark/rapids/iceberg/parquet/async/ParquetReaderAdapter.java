@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package com.nvidia.spark.rapids.iceberg.parquet.staged;
+package com.nvidia.spark.rapids.iceberg.parquet.async;
 
 import java.util.Iterator;
 
@@ -24,7 +24,7 @@ import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
 
 /**
- * Scala callbacks used by the Java Iceberg staged reader.
+ * Scala callbacks used by the Java Iceberg asynchronous reader.
  *
  * <p>This is the only abstraction between the Java pipeline and the existing Scala Iceberg
  * footer/decode code. Footer and input-opening callbacks run on shared workers. Planning,
@@ -68,7 +68,7 @@ public interface ParquetReaderAdapter {
   default void onSubtaskCompleted(ReadSubtask subtask, SubtaskStats stats) {
   }
 
-  /** Reports successful staged-output materialization time on the Spark task thread. */
+  /** Reports successful output materialization time on the Spark task thread. */
   default void onMaterializationCompleted(long materializationNanos) {
   }
 
