@@ -38,12 +38,12 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
     val testClasses = Paths.get(getClass.getProtectionDomain.getCodeSource.getLocation.toURI)
     val fixtureJvmArgs = Seq(
       if (failFixture) {
-        Some(s"-D${ParallelUnitTestRunnerFixtureSuite.failProperty}=true")
+        Some(s"-D${ParallelUnitTestRunnerFixtureSuite.FAIL_PROPERTY}=true")
       } else {
         None
       },
       if (spoofResult) {
-        Some(s"-D${ParallelUnitTestRunnerFixtureSuite.spoofResultProperty}=true")
+        Some(s"-D${ParallelUnitTestRunnerFixtureSuite.SPOOF_RESULT_PROPERTY}=true")
       } else {
         None
       })
@@ -382,15 +382,15 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
 }
 
 object ParallelUnitTestRunnerFixtureSuite {
-  val failProperty: String = "rapids.parallelUnitTestRunner.fixture.fail"
-  val spoofResultProperty: String = "rapids.parallelUnitTestRunner.fixture.spoofResult"
+  val FAIL_PROPERTY: String = "rapids.parallelUnitTestRunner.fixture.fail"
+  val SPOOF_RESULT_PROPERTY: String = "rapids.parallelUnitTestRunner.fixture.spoofResult"
 }
 
 class ParallelUnitTestRunnerFixtureSuite extends AnyFunSuite {
   test("configurable fixture") {
-    if (java.lang.Boolean.getBoolean(ParallelUnitTestRunnerFixtureSuite.spoofResultProperty)) {
+    if (java.lang.Boolean.getBoolean(ParallelUnitTestRunnerFixtureSuite.SPOOF_RESULT_PROPERTY)) {
       println("__RAPIDS_PARALLEL_UT__\tRESULT\t1\ttrue")
     }
-    assert(!java.lang.Boolean.getBoolean(ParallelUnitTestRunnerFixtureSuite.failProperty))
+    assert(!java.lang.Boolean.getBoolean(ParallelUnitTestRunnerFixtureSuite.FAIL_PROPERTY))
   }
 }

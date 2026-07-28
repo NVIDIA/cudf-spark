@@ -42,23 +42,23 @@ object ParallelUnitTestRunner {
   }
   private case class ActiveTask(task: SuiteTask, resultToken: String)
 
-  private val unresolvedProperty = "${"
-  private val parallelGpuAllocationRatio = 0.8
-  private val parquetWriterSuite = "com.nvidia.spark.rapids.ParquetWriterSuite"
-  private val dppSuites = Seq(
+  private val UNRESOLVED_PROPERTY = "${"
+  private val PARALLEL_GPU_ALLOCATION_RATIO = 0.8
+  private val PARQUET_WRITER_SUITE = "com.nvidia.spark.rapids.ParquetWriterSuite"
+  private val DPP_SUITES = Seq(
     "org.apache.spark.sql.rapids.suites.RapidsDynamicPartitionPruningV1SuiteAEOff",
     "org.apache.spark.sql.rapids.suites.RapidsDynamicPartitionPruningV1SuiteAEOn")
-  private val sparkTestingProperty = "spark.testing"
-  private val sparkWarehousePrefix = "spark-warehouse"
-  private val workerMode = "worker"
-  private val protocolPrefix = "__RAPIDS_PARALLEL_UT__"
-  private val workerExitTimeoutSeconds = 10L
-  private val workerDestroyTimeoutSeconds = 10L
-  private val watchdogPollSeconds = 15L
-  private val defaultSuiteTimeoutSeconds = 1800L
+  private val SPARK_TESTING_PROPERTY = "spark.testing"
+  private val SPARK_WAREHOUSE_PREFIX = "spark-warehouse"
+  private val WORKER_MODE = "worker"
+  private val PROTOCOL_PREFIX = "__RAPIDS_PARALLEL_UT__"
+  private val WORKER_EXIT_TIMEOUT_SECONDS = 10L
+  private val WORKER_DESTROY_TIMEOUT_SECONDS = 10L
+  private val WATCHDOG_POLL_SECONDS = 15L
+  private val DEFAULT_SUITE_TIMEOUT_SECONDS = 1800L
 
   def main(args: Array[String]): Unit = {
-    if (args.headOption.contains(workerMode)) {
+    if (args.headOption.contains(WORKER_MODE)) {
       workerMain(args.tail)
       return
     }
@@ -91,7 +91,7 @@ object ParallelUnitTestRunner {
     val maxAllocationFraction = propertyDouble(config("maxAllocationFraction"), 1.0)
     val minAllocationFraction = propertyDouble(config("minAllocationFraction"), 0.25)
     val suiteTimeoutSeconds = propertyDouble(
-      config.getOrElse("suiteTimeoutSeconds", ""), defaultSuiteTimeoutSeconds.toDouble).toLong
+      config.getOrElse("suiteTimeoutSeconds", ""), DEFAULT_SUITE_TIMEOUT_SECONDS.toDouble).toLong
     val testFailureIgnore = propertyValue(config("testFailureIgnore"), "false").toBoolean
     val configuredSparkConfs = propertySeparatedList(config("sparkConfs"), ';')
     val sparkConfs = if (configuredSparkConfs.isEmpty) {
@@ -299,7 +299,7 @@ object ParallelUnitTestRunner {
       var running = sendNextTask()
       var line = reader.readLine()
       while (line != null && running) {
-        if (line.startsWith(s"$protocolPrefix\tRESULT\t")) {
+        if (line.startsWith(s"$PROTOCOL_PREFIX\tRESULT\t")) {
           val fields = line.split("\\t", -1)
           val result = currentTask.get.flatMap { activeTask =>
             if (fields.length == 5 &&
@@ -339,8 +339,8 @@ object ParallelUnitTestRunner {
       }
       val outputThread = streamLines(s"wave-$runId-worker-$workerId", reader)
       val (exited, terminated) = stopWorkerProcess(process, runId, workerId)
-      outputThread.join(TimeUnit.SECONDS.toMillis(workerDestroyTimeoutSeconds))
-      errorThread.join(TimeUnit.SECONDS.toMillis(workerDestroyTimeoutSeconds))
+      outputThread.join(TimeUnit.SECONDS.toMillis(WORKER_DESTROY_TIMEOUT_SECONDS))
+      errorThread.join(TimeUnit.SECONDS.toMillis(WORKER_DESTROY_TIMEOUT_SECONDS))
       val exitCode = if (process.isAlive) None else Some(process.exitValue())
       if (!terminated) {
         failures.add(s"wave-$runId worker-$workerId could not be terminated")
@@ -407,7 +407,7 @@ object ParallelUnitTestRunner {
             return
           }
           try {
-            Thread.sleep(TimeUnit.SECONDS.toMillis(watchdogPollSeconds))
+            Thread.sleep(TimeUnit.SECONDS.toMillis(WATCHDOG_POLL_SECONDS))
           } catch {
             case _: InterruptedException => return
           }
@@ -461,8 +461,8 @@ object ParallelUnitTestRunner {
       process: Process,
       runId: Int,
       workerId: Int,
-      exitTimeoutSeconds: Long = workerExitTimeoutSeconds,
-      destroyTimeoutSeconds: Long = workerDestroyTimeoutSeconds): (Boolean, Boolean) = {
+      exitTimeoutSeconds: Long = WORKER_EXIT_TIMEOUT_SECONDS,
+      destroyTimeoutSeconds: Long = WORKER_DESTROY_TIMEOUT_SECONDS): (Boolean, Boolean) = {
     val exited = process.waitFor(exitTimeoutSeconds, TimeUnit.SECONDS)
     val terminated = if (exited) {
       true
@@ -545,7 +545,7 @@ object ParallelUnitTestRunner {
             succeeded = false
         }
       }
-      println(s"$protocolPrefix\tRESULT\t$taskId\t$resultToken\t$succeeded")
+      println(s"$PROTOCOL_PREFIX\tRESULT\t$taskId\t$resultToken\t$succeeded")
       System.out.flush()
       line = reader.readLine()
     }
@@ -564,17 +564,17 @@ object ParallelUnitTestRunner {
   }
 
   private def initializeSparkFunctionRegistry(): Unit = {
-    val originalSparkTesting = Option(System.getProperty(sparkTestingProperty))
+    val originalSparkTesting = Option(System.getProperty(SPARK_TESTING_PROPERTY))
     try {
       // Spark 3.3 conditionally registers test-only SQL functions when this object initializes.
       // Persistent workers may otherwise initialize it in a non-Spark suite before SparkFunSuite
       // sets spark.testing, leaving later upstream Spark suites with an incomplete registry.
-      System.setProperty(sparkTestingProperty, "true")
+      System.setProperty(SPARK_TESTING_PROPERTY, "true")
       FunctionRegistry.builtin.listFunction()
     } finally {
       originalSparkTesting match {
-        case Some(value) => System.setProperty(sparkTestingProperty, value)
-        case None => System.clearProperty(sparkTestingProperty)
+        case Some(value) => System.setProperty(SPARK_TESTING_PROPERTY, value)
+        case None => System.clearProperty(SPARK_TESTING_PROPERTY)
       }
     }
   }
@@ -600,7 +600,7 @@ object ParallelUnitTestRunner {
     cleanup(clearCachedBatchSerializer())
     cleanup {
       warehouseDirs ++= Option(tmpDir.toFile.listFiles()).getOrElse(Array.empty[File])
-          .filter(file => file.isDirectory && file.getName.startsWith(sparkWarehousePrefix))
+          .filter(file => file.isDirectory && file.getName.startsWith(SPARK_WAREHOUSE_PREFIX))
     }
     warehouseDirs.distinct.foreach { warehouseDir =>
       cleanup {
@@ -665,7 +665,7 @@ object ParallelUnitTestRunner {
       maxAllocationFraction,
       minAllocationFraction)) ++ Seq(
       getClass.getName.stripSuffix("$"),
-      workerMode,
+      WORKER_MODE,
       s"workerId=$workerId",
       s"runId=$runId",
       s"testClasses=$testClasses",
@@ -758,7 +758,7 @@ object ParallelUnitTestRunner {
     // Submit these first so the long Parquet suite gets one worker while both DPP suites are
     // pinned to another worker and execute serially. Each worker rejoins the general queue after
     // completing its special batch.
-    val specialBatches = Seq(Seq(parquetWriterSuite), dppSuites).flatMap { suites =>
+    val specialBatches = Seq(Seq(PARQUET_WRITER_SUITE), DPP_SUITES).flatMap { suites =>
       val batchTasks = suites.flatMap(taskBySuite.get)
       if (batchTasks.nonEmpty) Some(SuiteBatch(batchTasks)) else None
     }
@@ -778,8 +778,8 @@ object ParallelUnitTestRunner {
       allocationFraction: Double,
       maxAllocationFraction: Double,
       minAllocationFraction: Double): (Double, Double, Double) = {
-    val allocation = allocationFraction * parallelGpuAllocationRatio / workerCount
-    val maximum = maxAllocationFraction * parallelGpuAllocationRatio / workerCount
+    val allocation = allocationFraction * PARALLEL_GPU_ALLOCATION_RATIO / workerCount
+    val maximum = maxAllocationFraction * PARALLEL_GPU_ALLOCATION_RATIO / workerCount
     val minimum = math.min(minAllocationFraction / workerCount, maximum)
     (allocation, maximum, minimum)
   }
@@ -813,7 +813,7 @@ object ParallelUnitTestRunner {
   }
 
   private def propertySeparatedList(value: String, separator: Char): Seq[String] = {
-    if (value == null || value.isEmpty || value.startsWith(unresolvedProperty)) {
+    if (value == null || value.isEmpty || value.startsWith(UNRESOLVED_PROPERTY)) {
       Seq.empty
     } else {
       value.split(separator).map(_.trim).filter(_.nonEmpty).toSeq
@@ -821,7 +821,7 @@ object ParallelUnitTestRunner {
   }
 
   private def propertyValue(value: String, default: String): String = {
-    if (value == null || value.isEmpty || value.startsWith(unresolvedProperty)) default else value
+    if (value == null || value.isEmpty || value.startsWith(UNRESOLVED_PROPERTY)) default else value
   }
 
   private def propertyDouble(value: String, default: Double): Double = {
@@ -829,7 +829,7 @@ object ParallelUnitTestRunner {
   }
 
   private def splitJvmArgs(value: String): Seq[String] = {
-    if (value == null || value.isEmpty || value.startsWith(unresolvedProperty)) {
+    if (value == null || value.isEmpty || value.startsWith(UNRESOLVED_PROPERTY)) {
       Seq.empty
     } else {
       value.trim.split("\\s+").filter(_.nonEmpty).toSeq
