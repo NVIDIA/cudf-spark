@@ -1994,11 +1994,18 @@ def test_parquet_partition_batch_row_count_only_splitting(spark_tmp_path):
                                          conf={"spark.rapids.sql.columnSizeBytes": "100"})
 
 
-def _write_parquet_unknown_null_table(data_path, with_list=False, field_id=None):
+def _write_parquet_unknown_null_table(
+        data_path, with_list=False, with_map=False, field_id=None):
     """Write INT32 physical + UNKNOWN/Null logical annotation (Spark void_in_parquet shape)."""
     if with_list:
         table = pa.table({
             'list_void': pa.array([[None, None], [None], None], type=pa.list_(pa.null())),
+        })
+    elif with_map:
+        table = pa.table({
+            'map_void': pa.array(
+                [{1: None, 2: None}, {3: None}, None],
+                type=pa.map_(pa.int32(), pa.null())),
         })
     elif field_id is not None:
         arrow_schema = pa.schema([
@@ -2143,6 +2150,27 @@ def test_parquet_unknown_type_annotation_list_physical(spark_tmp_path, reader_co
         df = spark.read.parquet(data_path)
         assert df.schema['list_void'].dataType == ArrayType(IntegerType()), \
             f"expected ArrayType(IntegerType), got {df.schema['list_void'].dataType}"
+        return df
+
+    assert_gpu_and_cpu_are_equal_collect(read_and_check_schema, conf=conf)
+
+
+@pytest.mark.skipif(not is_spark_412_or_later(),
+                    reason='SPARK-56045 requires Spark 4.1.2+')
+@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+def test_parquet_unknown_type_annotation_map_physical(spark_tmp_path, reader_confs):
+    """Primitive-value maps bypass structural clipping; UNKNOWN must still be stripped."""
+    data_path = spark_tmp_path + '/PARQUET_UNKNOWN_MAP'
+    _write_parquet_unknown_null_table(data_path, with_map=True)
+
+    conf = copy_and_update(reader_confs, {
+        'spark.sql.parquet.reader.respectUnknownTypeAnnotation.enabled': 'false',
+    })
+
+    def read_and_check_schema(spark):
+        df = spark.read.parquet(data_path)
+        assert df.schema['map_void'].dataType == MapType(IntegerType(), IntegerType()), \
+            f"expected MapType(IntegerType, IntegerType), got {df.schema['map_void'].dataType}"
         return df
 
     assert_gpu_and_cpu_are_equal_collect(read_and_check_schema, conf=conf)

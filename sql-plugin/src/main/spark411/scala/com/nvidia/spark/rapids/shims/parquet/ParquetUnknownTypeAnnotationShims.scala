@@ -22,7 +22,7 @@ package com.nvidia.spark.rapids.shims.parquet
 import org.apache.parquet.schema.LogicalTypeAnnotation
 
 /**
- * Spark 4.1.0/4.1.1 (SPARK-54220) always map Parquet UNKNOWN annotations to NullType.
+ * Spark 4.1.1 (SPARK-54220) always maps Parquet UNKNOWN annotations to NullType.
  * Keep the annotation so [[ParquetSchemaClipShims.convertPrimitiveField]] can return NullType.
  */
 object ParquetUnknownTypeAnnotationShims {
