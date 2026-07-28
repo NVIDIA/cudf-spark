@@ -18,11 +18,10 @@ package com.nvidia.spark.rapids.shims
 
 import java.io.IOException
 
+import org.apache.orc.Reader
 import org.mockito.Mockito.{doAnswer, doThrow, verify}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatestplus.mockito.MockitoSugar
-
-import org.apache.orc.Reader
 
 class OrcShimsSuite extends AnyFunSuite with MockitoSugar {
 
