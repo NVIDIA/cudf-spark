@@ -886,17 +886,17 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       .doc("GPU plans can produce a lot more metrics than CPU plans do. In very large " +
           "queries this can sometimes result in going over the max result size limit for the " +
           "driver. Supported values include " +
-          "DEBUG which will enable all metrics supported and typically only needs to be enabled " +
-          "when debugging the plugin. " +
-          "MODERATE which should output enough metrics to understand how long each part of the " +
-          "query is taking and how much data is going to each part of the query. " +
+          "DEBUG which enables all supported metrics and is the default. " +
+          "MODERATE which reduces the number of metrics while still outputting enough to " +
+          "understand how long each part of the query is taking and how much data is going to " +
+          "each part of the query. " +
           "ESSENTIAL which disables most metrics except those Apache Spark CPU plans will also " +
           "report or their equivalents.")
       .commonlyUsed()
       .stringConf
       .transform(_.toUpperCase(java.util.Locale.ROOT))
       .checkValues(Set("DEBUG", "MODERATE", "ESSENTIAL"))
-      .createWithDefault("MODERATE")
+      .createWithDefault("DEBUG")
 
   val PROFILE_PATH = conf("spark.rapids.profile.pathPrefix")
     .doc("Enables profiling and specifies a URI path to use when writing profile data")
