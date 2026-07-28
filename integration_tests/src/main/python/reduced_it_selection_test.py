@@ -36,6 +36,8 @@ import os
 import subprocess
 import sys
 
+import pytest
+
 # Synthetic layouts. Each source stacks parametrize decorators with distinct
 # value prefixes so a case id like ``[a1-b0-c2]`` reveals every real value.
 _SYNTHETIC_SOURCES = {
@@ -130,8 +132,6 @@ def _run_selftest():
     Only invoked in the subprocess (``__main__``), never during collection.
     """
     import tempfile
-
-    import pytest
 
     conftest_dir = os.path.dirname(os.path.abspath(__file__))
     if conftest_dir not in sys.path:
@@ -251,6 +251,37 @@ def _value_id(item, argname):
     if len(names) == 1:
         return params[names[0]]
     return tuple(params[name] for name in names)
+
+
+@pytest.mark.parametrize(
+    "precommit,reduced_it,expected_path",
+    [
+        (False, "true", "random"),
+        (True, None, "random"),
+        (True, "false", "random"),
+        (True, "true", "reduced"),
+    ])
+def test_reduced_it_activation(monkeypatch, precommit, reduced_it, expected_path):
+    """Require both precommit and REDUCED_IT to activate reduced selection."""
+    import conftest
+
+    monkeypatch.setattr(conftest, "is_precommit_run", lambda: precommit)
+    if reduced_it is None:
+        monkeypatch.delenv("REDUCED_IT", raising=False)
+    else:
+        monkeypatch.setenv("REDUCED_IT", reduced_it)
+
+    selected_paths = []
+    monkeypatch.setattr(
+        conftest, "_select_precommit_cases",
+        lambda config, items: selected_paths.append("reduced"))
+    monkeypatch.setattr(
+        conftest, "_maybe_apply_random_select",
+        lambda config, items: selected_paths.append("random"))
+
+    conftest.pytest_collection_modifyitems(None, [])
+
+    assert selected_paths == [expected_path]
 
 
 def test_reduced_it_each_choice_selection():
