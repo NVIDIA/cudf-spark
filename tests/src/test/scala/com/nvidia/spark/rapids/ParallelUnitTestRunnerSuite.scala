@@ -35,9 +35,11 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
       reportsDir: Path,
       failFixture: Boolean,
       spoofResult: Boolean = false,
-      sparkConfs: String = ""): Array[String] = {
+      sparkConfs: String = "",
+      wildcardSuites: String = fixtureSuiteName,
+      extraJvmArgs: Seq[String] = Seq.empty): Array[String] = {
     val testClasses = Paths.get(getClass.getProtectionDomain.getCodeSource.getLocation.toURI)
-    val fixtureJvmArgs = Seq(
+    val fixtureJvmArgs = (Seq(
       if (failFixture) {
         Some(s"-D${ParallelUnitTestRunnerFixtureSuite.FAIL_PROPERTY}=true")
       } else {
@@ -48,13 +50,13 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
       } else {
         None
       })
-        .flatten
+        .flatten ++ extraJvmArgs)
         .mkString(" ")
     Array(
       s"testClasses=$testClasses",
       s"reportsDir=$reportsDir",
       "forkCount=2",
-      s"wildcardSuites=$fixtureSuiteName",
+      s"wildcardSuites=$wildcardSuites",
       "tagsToInclude=",
       "tagsToExclude=",
       "suffixes=",
@@ -190,6 +192,31 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
       Seq(1, 2).foreach { wave =>
         assert(Files.isRegularFile(
           reportsDir.resolve(s"wave-$wave").resolve(s"TEST-$fixtureSuiteName.xml")))
+      }
+    } finally {
+      FileUtil.fullyDelete(reportsDir.toFile)
+    }
+  }
+
+  test("main runs two suites concurrently in separate child JVMs") {
+    val reportsDir = Files.createTempDirectory("parallel-unit-test-concurrent")
+    val barrierDir = reportsDir.resolve("barrier")
+    Files.createDirectories(barrierDir)
+    try {
+      val fixturePrefix =
+        classOf[ParallelUnitTestRunnerConcurrentFixtureSuiteOne].getName.stripSuffix("One")
+      ParallelUnitTestRunner.main(fixtureRunnerArgs(
+        reportsDir,
+        failFixture = false,
+        wildcardSuites = fixturePrefix,
+        extraJvmArgs = Seq(
+          s"-D${ParallelUnitTestRunnerConcurrentFixture.BARRIER_DIR_PROPERTY}=$barrierDir")))
+
+      Seq(
+        classOf[ParallelUnitTestRunnerConcurrentFixtureSuiteOne].getName,
+        classOf[ParallelUnitTestRunnerConcurrentFixtureSuiteTwo].getName).foreach { suite =>
+        assert(Files.isRegularFile(
+          reportsDir.resolve("wave-1").resolve(s"TEST-$suite.xml")))
       }
     } finally {
       FileUtil.fullyDelete(reportsDir.toFile)
@@ -419,5 +446,33 @@ class ParallelUnitTestRunnerFixtureSuite extends AnyFunSuite {
       println("__RAPIDS_PARALLEL_UT__\tRESULT\t1\ttrue")
     }
     assert(!java.lang.Boolean.getBoolean(ParallelUnitTestRunnerFixtureSuite.FAIL_PROPERTY))
+  }
+}
+
+object ParallelUnitTestRunnerConcurrentFixture {
+  val BARRIER_DIR_PROPERTY: String = "rapids.parallelUnitTestRunner.fixture.barrierDir"
+  private val BARRIER_TIMEOUT_SECONDS = 10L
+
+  def awaitPeer(markerName: String, peerMarkerName: String): Unit = {
+    val barrierDir = Paths.get(System.getProperty(BARRIER_DIR_PROPERTY))
+    Files.createFile(barrierDir.resolve(markerName))
+    val peerMarker = barrierDir.resolve(peerMarkerName)
+    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(BARRIER_TIMEOUT_SECONDS)
+    while (!Files.exists(peerMarker) && System.nanoTime() - deadline < 0) {
+      Thread.sleep(10)
+    }
+    assert(Files.exists(peerMarker), s"Timed out waiting for concurrent suite marker $peerMarker")
+  }
+}
+
+class ParallelUnitTestRunnerConcurrentFixtureSuiteOne extends AnyFunSuite {
+  test("overlaps with the second fixture suite") {
+    ParallelUnitTestRunnerConcurrentFixture.awaitPeer("one", "two")
+  }
+}
+
+class ParallelUnitTestRunnerConcurrentFixtureSuiteTwo extends AnyFunSuite {
+  test("overlaps with the first fixture suite") {
+    ParallelUnitTestRunnerConcurrentFixture.awaitPeer("two", "one")
   }
 }
