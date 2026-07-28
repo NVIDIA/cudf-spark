@@ -191,6 +191,7 @@ class RapidsShuffleHeartbeatEndpoint(pluginContext: PluginContext, conf: RapidsC
     @volatile private var registered = false
     @volatile private var shuffleManagerOpt: Option[RapidsShuffleInternalManagerBase] = None
 
+    @scala.annotation.nowarn("cat=deprecation&origin=org.apache.spark.SparkEnv.shuffleManager")
     override def run(): Unit = {
       try {
         // Try to get shuffle manager if we don't have it yet

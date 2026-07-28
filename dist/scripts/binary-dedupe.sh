@@ -57,7 +57,7 @@ echo "Retrieving class files hashing to a single value ..."
 
 
 echo "$((++STEP))/ SHA1 of all non-META files > tmp-sha1-files.txt"
-find ./parallel-world/spark[34]* -name META-INF -prune -o -name webapps -prune -o \( -type f -print0 \) | \
+find ./parallel-world/spark[345]* -name META-INF -prune -o -name webapps -prune -o \( -type f -print0 \) | \
   xargs --null $SHASUM > tmp-sha1-files.txt
 
 echo "$((++STEP))/ make shim column 1 > tmp-shim-sha-package-files.txt"
@@ -94,7 +94,7 @@ function retain_single_copy() {
   echo "$package_class" >> "from-$shim-to-spark-shared.txt"
   # expanding directories separately because full path
   # glob is broken for class file name including the "$" character
-  for pw in ./parallel-world/spark[34]* ; do
+  for pw in ./parallel-world/spark[345]* ; do
     delete_path="$pw/$package_class"
     [[ -f "$delete_path" ]] && echo "$delete_path" || true
   done >> "$DELETE_DUPLICATES_TXT" || exit 255
@@ -136,7 +136,7 @@ function copy_unshimmed_from_spark_shared() {
 # standalone debugging
 # truncate incremental files
 : > "$DELETE_DUPLICATES_TXT"
-rm -f from-spark[34]*-to-spark-shared.txt
+rm -f from-spark[345]*-to-spark-shared.txt
 rm -rf "$SPARK_SHARED_DIR"
 mkdir -p "$SPARK_SHARED_DIR"
 
@@ -146,7 +146,7 @@ while read -r spark_common_class; do
 done < "$SPARK_SHARED_TXT"
 
 echo "$((++STEP))/ rsyncing common classes to $SPARK_SHARED_DIR"
-for copy_list in from-spark[34]*-to-spark-shared.txt; do
+for copy_list in from-spark[345]*-to-spark-shared.txt; do
   echo Initializing rsync of "$copy_list"
   IFS='-' <<< "$copy_list" read -ra copy_list_parts
   # declare -p copy_list_parts
@@ -165,9 +165,9 @@ copy_unshimmed_from_spark_shared
 #
 # At this point the duplicate classes have not been removed from version-specific jar
 # locations such as parallel-world/spark321.
-# For each unshimmed class file look for all of its copies inside /spark[34]* and
+# For each unshimmed class file look for all of its copies inside /spark[345]* and
 # and count the number of distinct checksums. There are two representative cases
-# 1) The class is contributed to the unshimmed location via the unshimmed-from-each-spark34 list. These are classes
+# 1) The class is contributed to the unshimmed location via the unshimmed-from-each-spark list. These are classes
 #    carrying the shim classifier in their package name such as
 #    com.nvidia.spark.rapids.spark321.RapidsShuffleManager. They are unique by construction,
 #    and will have zero copies in any non-spark321 shims. Although such classes are currently excluded from
@@ -185,7 +185,7 @@ copy_unshimmed_from_spark_shared
 # Determine the list of unshimmed class files
 UNSHIMMED_LIST_TXT=unshimmed-result.txt
 echo "$((++STEP))/ creating sorted list of unshimmed classes > $UNSHIMMED_LIST_TXT"
-find ./parallel-world -name '*.class' -not -path './parallel-world/spark[34-]*' | \
+find ./parallel-world -name '*.class' -not -path './parallel-world/spark[345-]*' | \
   cut -d/ -f 3- | sort > "$UNSHIMMED_LIST_TXT"
 
 function verify_same_sha_for_unshimmed() {
@@ -211,7 +211,7 @@ function verify_same_sha_for_unshimmed() {
   # the class provides concrete implementations for ALL getReader variants,
   # so the JVM resolves the correct one at runtime regardless of which
   # ShuffleManager version the class was compiled against.
-  if [[ ! "$class_file_quoted" =~ com/nvidia/spark/rapids/spark[34].*/.*ShuffleManager.class && \
+  if [[ ! "$class_file_quoted" =~ com/nvidia/spark/rapids/spark[345].*/.*ShuffleManager.class && \
           "$class_file_quoted" != "com/nvidia/spark/ParquetCachedBatchSerializer.class" && \
           ! "$class_file_quoted" =~ org/apache/spark/sql/rapids/ProxyRapidsShuffleInternalManagerBase ]]; then
       if ! grep -q "/spark.\+/$class_file_quoted" "$SPARK_SHARED_TXT"; then
@@ -231,7 +231,7 @@ done < "$UNSHIMMED_LIST_TXT"
 echo "$((++STEP))/ removing duplicates of unshimmed classes"
 
 while read -r unshimmed_class; do
-  for pw in ./parallel-world/spark[34-]* ; do
+  for pw in ./parallel-world/spark[345-]* ; do
     unshimmed_path="$pw/$unshimmed_class"
     [[ -f "$unshimmed_path" ]] && echo "$unshimmed_path" || true
   done >> "$DELETE_DUPLICATES_TXT"

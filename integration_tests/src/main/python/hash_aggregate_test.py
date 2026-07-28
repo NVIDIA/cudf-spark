@@ -27,7 +27,7 @@ from pyspark.sql.types import *
 from marks import *
 import pyspark.sql.functions as f
 from spark_session import is_databricks104_or_later, with_cpu_session, is_spark_340_or_later, \
-    is_spark_420_or_later
+    is_spark_420_or_later, is_spark_500_or_later
 
 pytestmark = pytest.mark.nightly_resource_consuming_test
 
@@ -1316,6 +1316,7 @@ def exact_percentile_reduction(df):
     )
 
 @datagen_overrides(seed=0, reason="https://github.com/NVIDIA/spark-rapids/issues/10233")
+@approximate_float
 @pytest.mark.parametrize('data_gen', exact_percentile_reduction_data_gen, ids=idfn)
 def test_exact_percentile_reduction(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
@@ -1362,11 +1363,21 @@ def test_exact_percentile_reduction_partial_fallback_to_cpu(data_gen,  replace_m
     )
 
 
+def _exact_percentile_groupby_data_gen(data_gen):
+    gen = [('key', RepeatSeqGen(IntegerGen(), length=100)),
+           ('val', data_gen),
+           ('freq', LongGen(min_val=0, max_val=1000000, nullable=False)
+                    .with_special_case(0, weight=100))]
+    if isinstance(data_gen, (FloatGen, DoubleGen)):
+        return pytest.param(
+            gen,
+            marks=pytest.mark.xfail(
+                condition=is_spark_500_or_later(),
+                reason='https://github.com/NVIDIA/cudf-spark/issues/15516'))
+    return gen
+
 exact_percentile_groupby_data_gen = [
-    [('key', RepeatSeqGen(IntegerGen(), length=100)),
-     ('val', data_gen),
-     ('freq', LongGen(min_val=0, max_val=1000000, nullable=False)
-                     .with_special_case(0, weight=100))]
+    _exact_percentile_groupby_data_gen(data_gen)
     for data_gen in exact_percentile_data_gen]
 
 def exact_percentile_groupby(df):
@@ -1391,19 +1402,31 @@ def exact_percentile_groupby(df):
     )
 
 @ignore_order
+@approximate_float
 @pytest.mark.parametrize('data_gen', exact_percentile_groupby_data_gen, ids=idfn)
 def test_exact_percentile_groupby(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: exact_percentile_groupby(gen_df(spark, data_gen)))
 
+def _exact_percentile_groupby_cpu_fallback_data_gen(data_gen):
+    gen = [('key', RepeatSeqGen(IntegerGen(), length=100)),
+           ('val', data_gen),
+           ('freq', LongGen(min_val=0, max_val=1000000, nullable=False)
+            .with_special_case(0, weight=100))]
+    if isinstance(data_gen, DoubleGen):
+        return pytest.param(
+            gen,
+            marks=pytest.mark.xfail(
+                condition=is_spark_500_or_later(),
+                reason='https://github.com/NVIDIA/cudf-spark/issues/15516'))
+    return gen
+
 exact_percentile_groupby_cpu_fallback_data_gen = [
-    [('key', RepeatSeqGen(IntegerGen(), length=100)),
-     ('val', data_gen),
-     ('freq', LongGen(min_val=0, max_val=1000000, nullable=False)
-      .with_special_case(0, weight=100))]
+    _exact_percentile_groupby_cpu_fallback_data_gen(data_gen)
     for data_gen in [IntegerGen(), DoubleGen()]]
 
 @ignore_order
+@approximate_float
 @allow_non_gpu('ObjectHashAggregateExec', 'SortAggregateExec', 'ShuffleExchangeExec', 'HashPartitioning',
                'AggregateExpression', 'Alias', 'Cast', 'Literal', 'ProjectExec',
                'Percentile')

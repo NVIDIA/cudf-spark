@@ -128,7 +128,9 @@ class ProxyRapidsShuffleInternalManagerBase(
 
   def unregisterShuffle(shuffleId: Int): Boolean = realImpl.unregisterShuffle(shuffleId)
 
-  def shuffleBlockResolver: ShuffleBlockResolver = realImpl.shuffleBlockResolver
+  def shuffleBlockResolver: ShuffleBlockResolver =
+    realImpl.getClass.getMethod("shuffleBlockResolver")
+      .invoke(realImpl).asInstanceOf[ShuffleBlockResolver]
 
   def stop(): Unit = realImpl.stop()
 }

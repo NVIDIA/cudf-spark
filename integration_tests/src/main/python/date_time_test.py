@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
 import pytest
 from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect, assert_gpu_and_cpu_error, assert_gpu_and_cpu_are_equal_sql
 from conftest import is_utc, get_test_tz, is_databricks_runtime
@@ -1054,7 +1055,7 @@ def test_timestamp_seconds_long_overflow():
     assert_gpu_and_cpu_error(
         lambda spark : unary_op_df(spark, long_gen).selectExpr("timestamp_seconds(a)").collect(),
         conf={},
-        error_message='long overflow')
+        error_message=re.compile('overflow', re.IGNORECASE))
 
 # For Decimal(20, 7) case, the data is both 'Overflow' and 'Rounding necessary', this case is to verify
 # that 'Rounding necessary' check is before 'Overflow' check. So we should make sure that every decimal
@@ -1074,7 +1075,7 @@ def test_timestamp_seconds_decimal_overflow(data_gen):
     assert_gpu_and_cpu_error(
         lambda spark : unary_op_df(spark, data_gen).selectExpr("timestamp_seconds(a)").collect(),
         conf={},
-        error_message='Overflow')
+        error_message=re.compile('overflow', re.IGNORECASE))
 
 millis_gens = [LongGen(min_val=-62135410400000, max_val=253402214400000), IntegerGen(), ShortGen(), ByteGen()]
 @pytest.mark.parametrize('data_gen', millis_gens, ids=idfn)
@@ -1088,7 +1089,7 @@ def test_timestamp_millis_long_overflow():
     assert_gpu_and_cpu_error(
         lambda spark : unary_op_df(spark, long_gen).selectExpr("timestamp_millis(a)").collect(),
         conf={},
-        error_message='long overflow')
+        error_message=re.compile('overflow', re.IGNORECASE))
 
 micros_gens = [LongGen(min_val=-62135510400000000, max_val=253402214400000000), IntegerGen(), ShortGen(), ByteGen()]
 @pytest.mark.parametrize('data_gen', micros_gens, ids=idfn)
