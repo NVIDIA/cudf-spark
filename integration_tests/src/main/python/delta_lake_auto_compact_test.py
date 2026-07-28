@@ -16,7 +16,7 @@ import pytest
 from asserts import assert_gpu_and_cpu_writes_are_equal_collect, with_gpu_session
 from data_gen import copy_and_update, idfn
 from delta_lake_utils import *
-from marks import allow_non_gpu, delta_lake
+from marks import allow_non_gpu, delta_lake, ignore_order
 from pyspark.sql.functions import *
 from spark_session import is_spark_353_or_later, is_databricks_runtime, \
     is_databricks104_or_later, is_databricks173_or_later, supports_delta_lake_deletion_vectors
@@ -111,6 +111,8 @@ def test_auto_compact_dbr173_inline_uses_gpu(spark_tmp_path):
     with_cpu_session(lambda spark: assert_optimized(spark, data_path), {})
 
 
+# Auto-configured RapidsShuffleManager may change row ordering.
+@ignore_order(local=True)
 @delta_lake
 @allow_non_gpu(*delta_meta_allow)
 @pytest.mark.skipif(not is_databricks_runtime() and not is_spark_353_or_later(),
