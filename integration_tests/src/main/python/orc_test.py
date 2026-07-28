@@ -158,8 +158,6 @@ orc_map_gens_sample = orc_basic_map_gens + [
     MapGen(StructGen([['child0', byte_gen], ['child1', long_gen]], nullable=False),
            StructGen([['child0', byte_gen], ['child1', long_gen]]))]
 
-non_utc_allow_orc_scan=['ColumnarToRowExec', 'FileSourceScanExec', 'BatchScanExec'] if is_not_utc() else []
-
 orc_gens_list = [orc_basic_gens,
     orc_array_gens_sample,
     orc_struct_gens_sample,
@@ -195,7 +193,6 @@ def test_orc_fallback(spark_tmp_path, read_func, disable_conf):
 @pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
 @pytest.mark.parametrize('v1_enabled_list', ['', 'orc'])
 @tz_sensitive_test
-@allow_non_gpu(*non_utc_allow_orc_scan)
 def test_read_round_trip(spark_tmp_path, orc_gens, read_func, reader_confs, v1_enabled_list):
     gen_list = [('_c' + str(i), gen) for i, gen in enumerate(orc_gens)]
     data_path = spark_tmp_path + '/ORC_DATA'
@@ -224,7 +221,6 @@ orc_pred_push_gens = [
 @pytest.mark.parametrize('read_func', [read_orc_df, read_orc_sql])
 @pytest.mark.parametrize('v1_enabled_list', ["", "orc"])
 @pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
-@allow_non_gpu(*non_utc_allow_orc_scan)
 def test_pred_push_round_trip(spark_tmp_path, orc_gen, read_func, v1_enabled_list, reader_confs):
     data_path = spark_tmp_path + '/ORC_DATA'
     # Append two struct columns to verify nested predicate pushdown.
@@ -281,7 +277,6 @@ def test_compress_read_round_trip(spark_tmp_path, compress, v1_enabled_list, rea
 
 @pytest.mark.parametrize('v1_enabled_list', ["", "orc"])
 @pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
-@allow_non_gpu(*non_utc_allow_orc_scan)
 def test_simple_partitioned_read(spark_tmp_path, v1_enabled_list, reader_confs):
     # Once https://github.com/NVIDIA/spark-rapids/issues/131 is fixed
     # we should go with a more standard set of generators
@@ -351,7 +346,6 @@ def test_partitioned_read_just_partitions(spark_tmp_path, v1_enabled_list, reade
 
 @pytest.mark.parametrize('v1_enabled_list', ["", "orc"])
 @pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
-@allow_non_gpu(*non_utc_allow_orc_scan)
 def test_merge_schema_read(spark_tmp_path, v1_enabled_list, reader_confs):
     # Once https://github.com/NVIDIA/spark-rapids/issues/131 is fixed
     # we should go with a more standard set of generators
@@ -693,7 +687,6 @@ def test_read_struct_without_stream(spark_tmp_path):
 @pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
 @pytest.mark.parametrize('v1_enabled_list', ["", "orc"])
 @pytest.mark.parametrize('case_sensitive', ["false", "true"])
-@allow_non_gpu(*non_utc_allow_orc_scan)
 def test_read_with_more_columns(spark_tmp_path, orc_gen, reader_confs, v1_enabled_list, case_sensitive):
     struct_gen = StructGen([('nested_col', orc_gen)])
     # Map is not supported yet.
@@ -878,7 +871,6 @@ def test_orc_read_varchar_as_string(std_input_path):
 @pytest.mark.parametrize('gens', orc_gens_list, ids=idfn)
 @pytest.mark.parametrize('keep_order', [True, pytest.param(False, marks=pytest.mark.ignore_order(local=True))])
 @tz_sensitive_test
-@allow_non_gpu(*non_utc_allow_orc_scan)
 def test_read_round_trip_for_multithreaded_combining(spark_tmp_path, gens, keep_order):
     gen_list = [('_c' + str(i), gen) for i, gen in enumerate(gens)]
     data_path = spark_tmp_path + '/ORC_DATA'
@@ -893,7 +885,6 @@ def test_read_round_trip_for_multithreaded_combining(spark_tmp_path, gens, keep_
 
 
 @pytest.mark.parametrize('keep_order', [True, pytest.param(False, marks=pytest.mark.ignore_order(local=True))])
-@allow_non_gpu(*non_utc_allow_orc_scan)
 def test_simple_partitioned_read_for_multithreaded_combining(spark_tmp_path, keep_order):
     # Use every type except boolean, see https://github.com/NVIDIA/spark-rapids/issues/11762 and
     # https://github.com/rapidsai/cudf/issues/6763 .
@@ -927,7 +918,7 @@ def test_read_hive_fixed_length_char(std_input_path, data_file, reader):
     """
     Test that a file containing CHAR data is readable as STRING.
     The plugin behaviour matches all Spark versions prior to 3.4.0,
-    and Databricks version 13.3 (i.e. 3.4.1) and after.
+    and all supported Databricks versions.
     """
     assert_gpu_and_cpu_are_equal_collect(
         reader(std_input_path + '/' + data_file),
@@ -937,9 +928,9 @@ def test_read_hive_fixed_length_char(std_input_path, data_file, reader):
 @allow_non_gpu("ProjectExec")
 @pytest.mark.skipif(is_before_spark_340(),
                     reason="https://github.com/NVIDIA/spark-rapids/issues/8324")
-@pytest.mark.skipif(is_databricks_version_or_later(13, 3),
+@pytest.mark.skipif(is_databricks_runtime(),
                     reason="The SELECT * query does not involve ProjectExec "
-                           "on Databricks versions >= 13.3. "
+                           "on supported Databricks versions. "
                            "Can't test Project fallback without ProjectExec.")
 @pytest.mark.parametrize('data_file', ['fixed-length-char-column-from-hive.orc'])
 @pytest.mark.parametrize('reader', [read_orc_df, read_orc_sql])
@@ -950,7 +941,7 @@ def test_project_fallback_when_reading_hive_fixed_length_char(std_input_path, da
     Note: This test can be removed when
     https://github.com/NVIDIA/spark-rapids/issues/8324 is resolved.
 
-    This test does not apply to Databricks >= 13.3, because there would be
+    This test does not apply to supported Databricks versions, because there would be
     no ProjectExec to fall back to CPU.
     """
     assert_gpu_fallback_collect(
@@ -1123,21 +1114,45 @@ def test_orc_not_support_timestamp_ltz(std_input_path):
         ----------^^^
     """
     data_path = f"{std_input_path}/timestamp_ltz.orc"
+    expected_error_message = "timestamp with local time zone" \
+        if is_spark_420_or_later() else "ParseException"
     assert_gpu_and_cpu_error(lambda spark: spark.read.orc(data_path).collect(),
                              conf={},
-                             error_message="ParseException")
+                             error_message=expected_error_message)
+
+# Timestamp writes: in UTC the GPU writes on the GPU; in a non-UTC JVM the GPU write must fall
+# back to CPU. cuDF's ORC writer always stamps writerTimezone="UTC" in the stripe footer and
+# cannot record the JVM writer timezone (https://github.com/rapidsai/cudf/issues/23422), so a
+# GPU-written non-UTC file would be read back shifted by the zone offset by a CPU ORC reader.
+# The `tz_sensitive_test` mark runs this in both UTC and non-UTC JVM timezones.
+non_utc_orc_write_allow = ['DataWritingCommandExec'] if is_not_utc() else []
+
+@tz_sensitive_test
+@ignore_order(local=True)
+@allow_non_gpu(*non_utc_orc_write_allow)
+def test_orc_gpu_write_cpu_read_timestamp_in_non_utc_timezone(spark_tmp_path):
+    data_path = spark_tmp_path + "/ORC_GPU_WRITE_TZ"
+    write_func = lambda spark, path: (
+        spark.range(3)
+            .selectExpr("CAST(1593604800 + id AS TIMESTAMP) AS ts")
+            .write.orc(path))
+    read_func = lambda spark, path: spark.read.orc(path)
+    if is_not_utc():
+        # Non-UTC: the timestamp write must fall back to CPU (DataWritingCommandExec).
+        assert_gpu_fallback_write(write_func, read_func, data_path, 'DataWritingCommandExec')
+    else:
+        assert_gpu_and_cpu_writes_are_equal_collect(write_func, read_func, data_path)
+
 
 @pytest.mark.parametrize("reader_confs", reader_opt_confs, ids=idfn)
-# Setting end timestamp as None almost always generate ts >= 2200 year.
-# Setting end timestamp < 2200 to test running columnarly on GPU;
-@pytest.mark.parametrize('end_timestamp', [None, datetime(2199, 1, 1, tzinfo=timezone.utc)], ids=idfn)
 @pytest.mark.parametrize('v1_enabled_list', ["", "orc"])
 @pytest.mark.parametrize("timezone_pair", [("UTC", "Asia/Shanghai"), ("Asia/Shanghai", "UTC"), ("Asia/Shanghai", "America/Los_Angeles")], ids=idfn)
 @tz_sensitive_test
-def test_orc_non_utc_timezone(reader_confs, end_timestamp, spark_tmp_path, v1_enabled_list, timezone_pair):
+def test_orc_reader_writer_the_same_timezone(reader_confs, spark_tmp_path, v1_enabled_list, timezone_pair):
     d_gen = DateGen(start=date(1590, 1, 1))
     # Update start year to 1590 when https://github.com/NVIDIA/spark-rapids/issues/13272 is fixed.
-    ts_gen = TimestampGen(start=datetime(1970, 1, 1, tzinfo=timezone.utc), end=end_timestamp, nullable=True)
+    # The default end covers the full timestamp range through year 9999, including years > 2200.
+    ts_gen = TimestampGen(start=datetime(1970, 1, 2, tzinfo=timezone.utc), nullable=True)
     date_timestamp_gens = [('c1', d_gen), ('c2', ts_gen)]
 
     (write_timezone, read_timezone) = timezone_pair
@@ -1152,14 +1167,13 @@ def test_orc_non_utc_timezone(reader_confs, end_timestamp, spark_tmp_path, v1_en
         'spark.rapids.sql.format.orc.enabled': True,
         'spark.rapids.sql.format.orc.read.enabled': True,
         'spark.sql.session.timeZone': read_timezone,
-        # ignore write timezone when reading, this is for test purpose only
-        # The `tz_sensitive_test` mark guarantees the write and read are in the same timezone
-        'spark.rapids.sql.orc.read.ignore.write.timezone': True
     })
 
     # write on CPU
     cpu_write_path = spark_tmp_path + "/ORC_DATA_CPU"
     with_cpu_session(lambda spark: gen_df(spark, date_timestamp_gens).write.orc(cpu_write_path), conf=write_confs)
+
+    # read on GPU and CPU
     assert_gpu_and_cpu_are_equal_collect(read_orc_df(cpu_write_path), conf=read_confs)
 
 @pytest.mark.skip(reason='https://github.com/NVIDIA/spark-rapids/issues/13272: CPU can not read ORC file generated by GPU when timestamp is less than 1970 year')
