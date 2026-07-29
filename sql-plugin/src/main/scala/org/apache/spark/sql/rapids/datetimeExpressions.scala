@@ -1544,15 +1544,13 @@ case class GpuTruncTimestamp(fmt: Expression, timestamp: Expression, timeZoneId:
   }
 
   override protected def truncate(datetimeVal: GpuScalar, fmtCol: GpuColumnVector): ColumnVector = {
-    // Expand the scalar timestamp to the format column size so overflow checks compare equal
-    // cardinalities. JNI truncate also accepts a one-row timestamp, but comparing that with the
-    // row-wise result fails for multi-row format inputs.
-    withResource(ColumnVector.fromScalar(datetimeVal.getBase, fmtCol.getRowCount.toInt)) {
-      datetimeCol =>
-        closeOnExcept(DateTimeUtils.truncate(datetimeCol, fmtCol.getBase)) { truncated =>
-          TruncTimestampShims.checkOverflow(datetimeCol, truncated)
-          truncated
-        }
+    // Keep the one-row scalar broadcast into JNI truncate, and compare the multi-row result
+    // against the scalar via TruncTimestampShims.checkOverflow(Scalar, ColumnVector).
+    withResource(ColumnVector.fromScalar(datetimeVal.getBase, 1)) { datetimeCol =>
+      closeOnExcept(DateTimeUtils.truncate(datetimeCol, fmtCol.getBase)) { truncated =>
+        TruncTimestampShims.checkOverflow(datetimeVal.getBase, truncated)
+        truncated
+      }
     }
   }
 
@@ -1574,7 +1572,7 @@ case class GpuTruncTimestamp(fmt: Expression, timestamp: Expression, timeZoneId:
       case Some(fmt) =>
         withResource(ColumnVector.fromScalar(datetimeVal.getBase, 1)) { datetimeCol =>
           closeOnExcept(DateTimeUtils.truncate(datetimeCol, fmt)) { truncated =>
-            TruncTimestampShims.checkOverflow(datetimeCol, truncated)
+            TruncTimestampShims.checkOverflow(datetimeVal.getBase, truncated)
             if (numRows == 1) {
               truncated
             } else {

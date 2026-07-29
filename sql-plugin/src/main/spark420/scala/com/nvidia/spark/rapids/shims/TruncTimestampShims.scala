@@ -19,7 +19,7 @@ spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.shims
 
-import ai.rapids.cudf.ColumnVector
+import ai.rapids.cudf.{ColumnVector, Scalar}
 import com.nvidia.spark.rapids.Arm.withResource
 
 object TruncTimestampShims {
@@ -30,10 +30,20 @@ object TruncTimestampShims {
    */
   def checkOverflow(datetimeCol: ColumnVector, truncated: ColumnVector): Unit = {
     withResource(truncated.greaterThan(datetimeCol)) { overflow =>
-      withResource(overflow.any()) { any =>
-        if (any.isValid && any.getBoolean) {
-          throw new ArithmeticException("long overflow")
-        }
+      checkAnyOverflow(overflow)
+    }
+  }
+
+  def checkOverflow(datetime: Scalar, truncated: ColumnVector): Unit = {
+    withResource(truncated.greaterThan(datetime)) { overflow =>
+      checkAnyOverflow(overflow)
+    }
+  }
+
+  private def checkAnyOverflow(overflow: ColumnVector): Unit = {
+    withResource(overflow.any()) { any =>
+      if (any.isValid && any.getBoolean) {
+        throw new ArithmeticException("long overflow")
       }
     }
   }

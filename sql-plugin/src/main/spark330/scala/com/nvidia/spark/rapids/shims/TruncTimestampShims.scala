@@ -48,8 +48,10 @@ spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.shims
 
-import ai.rapids.cudf.ColumnVector
+import ai.rapids.cudf.{ColumnVector, Scalar}
 
 object TruncTimestampShims {
   def checkOverflow(datetimeCol: ColumnVector, truncated: ColumnVector): Unit = {}
+
+  def checkOverflow(datetime: Scalar, truncated: ColumnVector): Unit = {}
 }
