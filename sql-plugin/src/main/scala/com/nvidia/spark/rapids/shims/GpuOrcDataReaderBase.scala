@@ -24,7 +24,7 @@ import scala.collection.mutable.ArrayBuffer
 
 import ai.rapids.cudf.HostMemoryBuffer
 import com.nvidia.spark.rapids.{GpuMetric, HostMemoryOutputStream, NoopMetric}
-import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.filecache.FileCache
 import com.nvidia.spark.rapids.fileio.hadoop.HadoopFileIO
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile
@@ -162,12 +162,11 @@ abstract class GpuOrcDataReaderBase(
         missMetric += 1
         missSizeMetric += tailLength
         try {
-          closeOnExcept(HostMemoryBuffer.allocate(tailLength, false)) { hmb =>
+          withResource(HostMemoryBuffer.allocate(tailLength, false)) { hmb =>
             readRangesToHostMemory(hmb, Seq(new CopyRange(offset, tailLength, 0)))
             val footer = parseStripeFooter(hmb.asByteBuffer(0, tailLength), tailLength)
-            fileCache.startDataRangeCache(inputFile, offset, tailLength) match {
-              case Some(token) => token.complete(hmb)
-              case None => hmb.close()
+            fileCache.startDataRangeCache(inputFile, offset, tailLength).foreach { token =>
+              token.complete(hmb.slice(0, tailLength))
             }
             footer
           }

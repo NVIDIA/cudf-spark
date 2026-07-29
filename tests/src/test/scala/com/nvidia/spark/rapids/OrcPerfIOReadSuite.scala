@@ -164,6 +164,23 @@ class OrcPerfIOReadSuite extends AnyFunSuite with Matchers with MockitoSugar {
     }
   }
 
+  private class FailingFileCache extends FileCacheStub {
+    override def startDataRangeCache(
+        inputFile: RapidsInputFile,
+        offset: Long,
+        length: Long): Option[FileCacheStartedToken] = {
+      Some(new FileCacheStartedToken {
+        override def complete(buffer: HostMemoryBuffer): Unit = {
+          withResource(buffer) { _ =>
+            throw new IOException("cache completion failed")
+          }
+        }
+
+        override def cancel(): Unit = {}
+      })
+    }
+  }
+
   private class TestDataReader(
       props: DataReaderProperties,
       testInputFile: RapidsInputFile,
@@ -360,6 +377,25 @@ class OrcPerfIOReadSuite extends AnyFunSuite with Matchers with MockitoSugar {
 
     reader.readStripeFooter(stripe) shouldEqual footer
     inputFile.vectoredReads shouldBe empty
+  }
+
+  test("stripe footer cache completion failure does not double-close the read buffer") {
+    val footer = OrcProto.StripeFooter.newBuilder()
+      .addStreams(OrcProto.Stream.newBuilder()
+        .setColumn(1).setKind(OrcProto.Stream.Kind.DATA).setLength(2))
+      .build()
+    val footerBytes = footer.toByteArray
+    val fileBytes = Array.fill[Byte](40)(0)
+    Array.copy(footerBytes, 0, fileBytes, 20, footerBytes.length)
+    val reader = newReader(new RecordingInputFile(fileBytes), new FailingFileCache)
+    val stripe = mock[StripeInformation]
+    when(stripe.getOffset).thenReturn(10L)
+    when(stripe.getIndexLength).thenReturn(4L)
+    when(stripe.getDataLength).thenReturn(6L)
+    when(stripe.getFooterLength).thenReturn(footerBytes.length.toLong)
+
+    val error = intercept[IOException](reader.readStripeFooter(stripe))
+    error.getCause.getMessage shouldEqual "cache completion failed"
   }
 
   test("adjacent and non-adjacent misses share one vectored call into the final HMB") {
