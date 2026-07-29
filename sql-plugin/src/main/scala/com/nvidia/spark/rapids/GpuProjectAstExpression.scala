@@ -35,16 +35,22 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 
 object GpuProjectAstExpression {
   private def replaceChild(alias: GpuAlias, child: Expression): GpuAlias = {
-    GpuAlias(child, alias.name)(alias.exprId, alias.qualifier, alias.explicitMetadata)
+    if (child eq alias.child) {
+      alias
+    } else {
+      GpuAlias(child, alias.name)(alias.exprId, alias.qualifier, alias.explicitMetadata)
+    }
   }
 
-  private[rapids] def wrap(expression: NamedExpression): NamedExpression = {
-    expression match {
-      case alias @ GpuAlias(_: GpuProjectAstExpression, _) => alias
-      case alias @ GpuAlias(child: GpuExpression, _) =>
-        replaceChild(alias, GpuProjectAstExpression(child))
-      case other => other
-    }
+  private def asAst(child: GpuExpression): GpuProjectAstExpression = child match {
+    case astExpression: GpuProjectAstExpression => astExpression
+    case other => GpuProjectAstExpression(other)
+  }
+
+  private[rapids] def wrap(expression: NamedExpression): NamedExpression = expression match {
+    case alias @ GpuAlias(child: GpuExpression, _) =>
+      replaceChild(alias, asAst(child))
+    case other => other
   }
 
   @tailrec
@@ -57,17 +63,13 @@ object GpuProjectAstExpression {
   }
 
   private def unwrap(expression: Expression): Expression = expression match {
-    case alias: GpuAlias =>
-      val child = unwrap(alias.child)
-      if (child eq alias.child) alias else replaceChild(alias, child)
+    case alias: GpuAlias => replaceChild(alias, unwrap(alias.child))
     case astExpression: GpuProjectAstExpression => astExpression.child
     case other => other
   }
 
   private def rewrap(expression: Expression): Expression = expression match {
-    case astExpression: GpuProjectAstExpression => astExpression
     case namedExpression: NamedExpression => wrap(namedExpression)
-    case gpuExpression: GpuExpression => GpuProjectAstExpression(gpuExpression)
     case other => other
   }
 
@@ -114,7 +116,8 @@ object GpuProjectAstExpression {
   private[rapids] def buildExprTiers(
       expressions: Seq[Expression],
       conf: SQLConf): Seq[Seq[Expression]] = {
-    val hasAstOutputs = expressions.exists(extractTopLevel(_).isDefined)
+    val astOutputs = expressions.map(extractTopLevel(_).isDefined)
+    val hasAstOutputs = astOutputs.contains(true)
     // CSE must see through the marker so AST and non-AST outputs can share the same tiers.
     val unwrapped = if (hasAstOutputs) expressions.map(unwrap) else expressions
     val replaced = if (RapidsConf.ENABLE_COMBINED_EXPRESSIONS.get(conf)) {
@@ -124,7 +127,6 @@ object GpuProjectAstExpression {
     }
     val tiers = GpuEquivalentExpressions.getExprTiers(replaced)
     if (hasAstOutputs) {
-      val astOutputs = expressions.map(extractTopLevel(_).isDefined)
       rewrapAstTiers(tiers, astOutputs)
     } else {
       tiers

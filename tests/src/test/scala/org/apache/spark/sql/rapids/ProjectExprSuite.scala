@@ -198,6 +198,8 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
     def intermediate: GpuMultiply = GpuMultiply(shared, c)()
     def ast(expression: GpuExpression, name: String): GpuAlias =
       GpuAlias(GpuProjectAstExpression(expression), name)()
+    // [AST((a+b)*c+d) AS first, AST((a+b)*c+e) AS second,
+    //  AST(a+b) AS shared_first, AST(a+b) AS shared_second, greatest(a+b, f) AS regular]
     val expressions = Seq(
       ast(GpuAdd(intermediate, d, failOnError = false)(), "first"),
       ast(GpuAdd(intermediate, e, failOnError = false)(), "second"),
@@ -208,10 +210,16 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
     val tiered = GpuBindReferences.bindGpuReferencesTieredNoMetrics(
       expressions, Seq(a, b, c, d, e, f), new SQLConf())
 
+    // After CSE:
+    // tier 0: [AST(a+b) AS t1]
+    // tier 1: [AST(t1*c) AS t2]
+    // tier 2: [AST(t2+d) AS first, AST(t2+e) AS second,
+    //          t1 AS shared_first, t1 AS shared_second, greatest(t1, f) AS regular]
     assertResult(Seq(1, 1, 2))(tiered.exprTiers.map(astExpressions(_).size))
     assert(astExpressions(tiered.exprTiers.head).head.child.isInstanceOf[GpuAdd])
     assert(astExpressions(tiered.exprTiers(1)).head.child.isInstanceOf[GpuMultiply])
     assertResult(1)(tierReferences(astExpressions(tiered.exprTiers(1)).head).size)
+    // Final references: [t2, t2, t1, t1, t1] (distinct: {t2, t1}).
     val finalReferences = tiered.exprTiers.last.flatMap(tierReferences)
     assertResult(5)(finalReferences.size)
     assertResult(2)(finalReferences.map(_.exprId).distinct.size)

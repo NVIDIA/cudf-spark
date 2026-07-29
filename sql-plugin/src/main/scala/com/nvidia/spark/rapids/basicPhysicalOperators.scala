@@ -60,7 +60,6 @@ class GpuProjectExecMeta(
     val gpuExprs = childExprs.map(_.convertToGpu().asInstanceOf[NamedExpression]).toList
     val gpuChild = childPlans.head.convertIfNeeded()
     val projectList = if (conf.isProjectAstEnabled) {
-      val allReturnTypesFixedWidth = gpuExprs.forall(e => GpuBatchUtils.isFixedWidth(e.dataType))
       val astExprs = childExprs.zip(gpuExprs).map { case (meta, expr) =>
         // cuDF requires return column is fixed width
         if (GpuBatchUtils.isFixedWidth(expr.dataType) && meta.canThisBeAst) {
@@ -71,14 +70,14 @@ class GpuProjectExecMeta(
       }.toList
       // explain AST because this is optional and it is sometimes hard to debug
       if (conf.shouldExplain) {
-        val explain = childExprs.map(_.explainAst(conf.shouldExplainAll))
-            .filter(_.nonEmpty)
+        val explain = (childExprs.iterator.map(_.explainAst(conf.shouldExplainAll))
+            .filter(_.nonEmpty) ++ gpuExprs.iterator.collect {
+          case expr if !GpuBatchUtils.isFixedWidth(expr.dataType) =>
+            s"  $expr cannot be converted to AST because its return type " +
+              s"${expr.dataType} is not fixed-width\n"
+        }).mkString
         if (explain.nonEmpty) {
           logWarning(s"AST PROJECT\n$explain")
-        }
-        if (!allReturnTypesFixedWidth) {
-          logWarning(s"AST PROJECT\n  have non fixed return column, " +
-            s"return types: ${gpuExprs.map(_.dataType)}")
         }
       }
       astExprs
@@ -139,9 +138,9 @@ object GpuProjectExec {
         // different vector length, thus not able to reuse cached vectors.
         GpuExpressionsUtils.cachedNullVectors.get.clear()
 
-        def projectWithEvaluator(evaluateExpression: Expression => ColumnVector): ColumnarBatch = {
-          GpuArrayHofFusion.project(cb, boundExprs, evaluateExpression).getOrElse {
-            val newColumns = boundExprs.safeMap(evaluateExpression).toArray[ColumnVector]
+        def projectWithEval(evalColumn: Expression => ColumnVector): ColumnarBatch = {
+          GpuArrayHofFusion.project(cb, boundExprs, evalColumn).getOrElse {
+            val newColumns = boundExprs.safeMap(evalColumn).toArray[ColumnVector]
             new ColumnarBatch(newColumns, cb.numRows())
           }
         }
@@ -151,7 +150,7 @@ object GpuProjectExec {
         }
         if (hasAstExpressions) {
           withResource(GpuProjectAstExpression.tableFromBatch(cb)) { table =>
-            projectWithEvaluator { expression =>
+            projectWithEval { expression =>
               GpuProjectAstExpression.extractTopLevel(expression) match {
                 case Some(astExpression) => astExpression.computeColumn(table)
                 case None => expression.columnarEval(cb)
@@ -159,7 +158,7 @@ object GpuProjectExec {
             }
           }
         } else {
-          projectWithEvaluator(_.columnarEval(cb))
+          projectWithEval(_.columnarEval(cb))
         }
       } finally {
         GpuExpressionsUtils.cachedNullVectors.get.clear()

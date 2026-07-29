@@ -426,6 +426,7 @@ def test_multi_tier_ast():
         func=lambda spark: spark.range(10).withColumn("x", f.col("id")).repartition(1)\
             .selectExpr("x", "(id < x) == (id < (id + x))"))
 
+# ANSI mode is disabled here due to an overflow issue with integer multiplication on Spark 4.0.0.
 @disable_ansi_mode
 @pytest.mark.parametrize(
     'tiered_project_enabled', ['true', 'false'], ids=['tiered', 'single_tier'])

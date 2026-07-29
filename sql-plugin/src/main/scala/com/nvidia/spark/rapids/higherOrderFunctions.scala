@@ -376,13 +376,13 @@ private[rapids] object GpuArrayHofFusion {
   private[rapids] def project(
       batch: ColumnarBatch,
       boundExprs: Seq[Expression],
-      evaluateExpression: Expression => ColumnVector): Option[ColumnarBatch] = {
+      evalColumn: Expression => ColumnVector): Option[ColumnarBatch] = {
     val fusedGroups = findFusedGroups(boundExprs)
     if (fusedGroups.isEmpty) {
       None
     } else {
       val groupsByStartIndex = fusedGroups.map(group => group.startIndex -> group).toMap
-      Some(projectWithFusedGroups(batch, boundExprs, groupsByStartIndex, evaluateExpression))
+      Some(projectWithFusedGroups(batch, boundExprs, groupsByStartIndex, evalColumn))
     }
   }
 
@@ -483,7 +483,7 @@ private[rapids] object GpuArrayHofFusion {
       batch: ColumnarBatch,
       boundExprs: Seq[Expression],
       groupsByStartIndex: Map[Int, HofGroup],
-      evaluateExpression: Expression => ColumnVector): ColumnarBatch = {
+      evalColumn: Expression => ColumnVector): ColumnarBatch = {
     val outputColumns = new Array[ColumnVector](boundExprs.length)
     closeOnExcept(outputColumns) { _ =>
       boundExprs.indices.foreach { index =>
@@ -492,7 +492,7 @@ private[rapids] object GpuArrayHofFusion {
             case Some(group) =>
               evaluateFusedGroup(batch, group, outputColumns)
             case None =>
-              outputColumns(index) = evaluateExpression(boundExprs(index))
+              outputColumns(index) = evalColumn(boundExprs(index))
           }
         }
       }
