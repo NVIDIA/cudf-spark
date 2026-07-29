@@ -1194,3 +1194,17 @@ def test_date_trunc_long_min_value_overflow(trunc_format):
             "select date_trunc('{0}', timestamp_micros({1}L))".format(
                 trunc_format, _LONG_MIN_TIMESTAMP_MICROS)).collect()
     assert_gpu_and_cpu_error(run, conf={}, error_message='ArithmeticException')
+
+@allow_non_gpu(*non_utc_tz_allow)
+@pytest.mark.skipif(not is_spark_420_or_later(),
+                    reason='date_trunc Long.MinValue overflow is supported on Spark 4.2+')
+def test_date_trunc_long_min_value_overflow_column_format():
+    # Exercise the scalar-timestamp / column-format overload so overflow checks compare
+    # equal-length columns instead of a one-row timestamp against a multi-row result.
+    def run(spark):
+        spark.conf.set('spark.rapids.sql.test.validateExecsInGpuPlan', 'GpuProjectExec')
+        return spark.sql(
+            "select date_trunc(fmt, timestamp_micros({0}L)) "
+            "from values ('YEAR'), ('MILLISECOND') as t(fmt)".format(
+                _LONG_MIN_TIMESTAMP_MICROS)).collect()
+    assert_gpu_and_cpu_error(run, conf={}, error_message='ArithmeticException')
