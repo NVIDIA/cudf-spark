@@ -31,41 +31,11 @@ WORKSPACE=${WORKSPACE:-`pwd`}
 ARTF_ROOT="$WORKSPACE/jars"
 WGET_CMD="wget -q -P $ARTF_ROOT -t 3"
 PROJECT_REPO_HOST=$(sed -E 's#^(.*://)?([^/@]*@)?([^/:]+).*#\3#' <<< "$PROJECT_REPO")
-CLASSIFIER=${CLASSIFIER:-"$CUDA_CLASSIFIER"} # default as CUDA_CLASSIFIER for compatibility
 
 rm -rf $ARTF_ROOT && mkdir -p $ARTF_ROOT
+$WGET_CMD $PROJECT_TEST_REPO/com/nvidia/rapids-4-spark-integration-tests_$SCALA_BINARY_VER/$PROJECT_TEST_VER/rapids-4-spark-integration-tests_$SCALA_BINARY_VER-$PROJECT_TEST_VER-${SHUFFLE_SPARK_SHIM}.jar
 
-IT_BUILDVER=${SHUFFLE_SPARK_SHIM#spark}
-IT_POM="$WORKSPACE/pom.xml"
-IT_TARGET_DIR="$WORKSPACE/integration_tests/target"
-if [[ "$SCALA_BINARY_VER" == "2.13" ]]; then
-    IT_POM="$WORKSPACE/scala2.13/pom.xml"
-    IT_TARGET_DIR="$WORKSPACE/scala2.13/integration_tests/target"
-fi
-
-env -u SPARK_HOME $MVN -U -B ${MVN_URM_MIRROR:-} -f "$IT_POM" \
-    -pl integration_tests clean package \
-    -Dbuildver="$IT_BUILDVER" \
-    -Dcuda.version="$CLASSIFIER" \
-    -DskipTests \
-    -Dmaven.scaladoc.skip \
-    -Dmaven.scalastyle.skip=true \
-    -Drat.skip=true
-
-RAPIDS_TEST_JAR=$(find "$IT_TARGET_DIR" -maxdepth 1 -type f \
-    -name "rapids-4-spark-integration-tests_${SCALA_BINARY_VER}-*-${SHUFFLE_SPARK_SHIM}.jar" \
-    -print -quit)
-RAPIDS_INT_TESTS_TGZ=$(find "$IT_TARGET_DIR" -maxdepth 1 -type f \
-    -name "rapids-4-spark-integration-tests_${SCALA_BINARY_VER}-*-${SHUFFLE_SPARK_SHIM}-pytest.tar.gz" \
-    -print -quit)
-if [[ -z "$RAPIDS_TEST_JAR" || -z "$RAPIDS_INT_TESTS_TGZ" ]]; then
-    echo "Failed to build integration-test artifacts from this branch"
-    exit 1
-fi
-cp "$RAPIDS_TEST_JAR" "$RAPIDS_INT_TESTS_TGZ" "$ARTF_ROOT/"
-RAPIDS_TEST_JAR="$ARTF_ROOT/$(basename "$RAPIDS_TEST_JAR")"
-RAPIDS_INT_TESTS_TGZ="$ARTF_ROOT/$(basename "$RAPIDS_INT_TESTS_TGZ")"
-
+CLASSIFIER=${CLASSIFIER:-"$CUDA_CLASSIFIER"} # default as CUDA_CLASSIFIER for compatibility
 if [ "$CLASSIFIER"x == x ];then
     $WGET_CMD $PROJECT_REPO/com/nvidia/rapids-4-spark_$SCALA_BINARY_VER/$PROJECT_VER/rapids-4-spark_$SCALA_BINARY_VER-${PROJECT_VER}.jar
     export RAPIDS_PLUGIN_JAR=$ARTF_ROOT/rapids-4-spark_${SCALA_BINARY_VER}-${PROJECT_VER}.jar
@@ -73,13 +43,18 @@ else
     $WGET_CMD $PROJECT_REPO/com/nvidia/rapids-4-spark_$SCALA_BINARY_VER/$PROJECT_VER/rapids-4-spark_$SCALA_BINARY_VER-$PROJECT_VER-${CLASSIFIER}.jar
     export RAPIDS_PLUGIN_JAR="$ARTF_ROOT/rapids-4-spark_${SCALA_BINARY_VER}-$PROJECT_VER-${CLASSIFIER}.jar"
 fi
+RAPIDS_TEST_JAR="$ARTF_ROOT/rapids-4-spark-integration-tests_${SCALA_BINARY_VER}-$PROJECT_TEST_VER-$SHUFFLE_SPARK_SHIM.jar"
 
 export INCLUDE_SPARK_AVRO_JAR=${INCLUDE_SPARK_AVRO_JAR:-"true"}
 if [[ "${INCLUDE_SPARK_AVRO_JAR}" == "true" ]]; then
   $WGET_CMD $SPARK_REPO/org/apache/spark/spark-avro_$SCALA_BINARY_VER/$SPARK_VER/spark-avro_$SCALA_BINARY_VER-${SPARK_VER}.jar
 fi
 
+$WGET_CMD $PROJECT_TEST_REPO/com/nvidia/rapids-4-spark-integration-tests_$SCALA_BINARY_VER/$PROJECT_TEST_VER/rapids-4-spark-integration-tests_$SCALA_BINARY_VER-$PROJECT_TEST_VER-pytest.tar.gz
+
 RAPIDS_INT_TESTS_HOME="$ARTF_ROOT/integration_tests/"
+# The version of pytest.tar.gz that is uploaded is the one built against spark330 but its being pushed without classifier for now
+RAPIDS_INT_TESTS_TGZ="$ARTF_ROOT/rapids-4-spark-integration-tests_${SCALA_BINARY_VER}-$PROJECT_TEST_VER-pytest.tar.gz"
 
 tmp_info=${TMP_INFO_FILE:-'/tmp/artifacts-build.info'}
 rm -rf "$tmp_info"
@@ -111,10 +86,10 @@ set -x
 cat "$tmp_info" || true
 
 SKIP_REVISION_CHECK=${SKIP_REVISION_CHECK:-'false'}
-if [[ "$SKIP_REVISION_CHECK" != "true" && \
-      (-z "$p_ver" || -z "$it_ver" || "$it_ver" != "$pt_ver") ]]; then
-    echo "Integration-test artifacts built from this branch are inconsistent!"
-    exit 1
+if [[ "$SKIP_REVISION_CHECK" != "true" && (-z "$p_ver"|| \
+      "$p_ver" != "$it_ver" || "$p_ver" != "$pt_ver") ]]; then
+  echo "Artifacts revisions are inconsistent!"
+  exit 1
 fi
 
 tar xzf "$RAPIDS_INT_TESTS_TGZ" -C $ARTF_ROOT && rm -f "$RAPIDS_INT_TESTS_TGZ"
