@@ -98,8 +98,8 @@ def test_literal(spark_tmp_path, data_gen):
     data_path = spark_tmp_path + '/AST_TEST_DATA'
     with_cpu_session(lambda spark: gen_df(spark, [("a", IntegerGen())]).write.parquet(data_path))
     scalar = with_cpu_session(lambda spark: gen_scalar(data_gen, force_no_nulls=True))
-    assert_gpu_ast(is_supported=True,
-                   func=lambda spark: spark.read.parquet(data_path).select(scalar))
+    assert_gpu_project_without_ast(
+        func=lambda spark: spark.read.parquet(data_path).select(scalar))
 
 @pytest.mark.parametrize('data_gen', [boolean_gen, byte_gen, short_gen, int_gen, long_gen, float_gen, double_gen, timestamp_gen, date_gen], ids=idfn)
 def test_null_literal(spark_tmp_path, data_gen):
@@ -107,8 +107,8 @@ def test_null_literal(spark_tmp_path, data_gen):
     data_path = spark_tmp_path + '/AST_TEST_DATA'
     with_cpu_session(lambda spark: gen_df(spark, [("a", IntegerGen())]).write.parquet(data_path))
     data_type = data_gen.data_type
-    assert_gpu_ast(is_supported=True,
-                   func=lambda spark: spark.read.parquet(data_path).select(f.lit(None).cast(data_type)))
+    assert_gpu_project_without_ast(
+        func=lambda spark: spark.read.parquet(data_path).select(f.lit(None).cast(data_type)))
 
 @pytest.mark.parametrize('data_descr', ast_descrs, ids=idfn)
 def test_isnull(data_descr):
@@ -258,9 +258,18 @@ def test_exp(data_descr):
 def test_expm1(data_descr):
     assert_unary_ast(data_descr, lambda df: df.selectExpr('expm1(a)'))
 
+@pytest.mark.parametrize('data_gen', [float_gen, double_gen], ids=idfn)
+def test_folded_null_literal_stays_on_regular_project(data_gen):
+    assert_gpu_project_without_ast(
+        lambda spark: binary_op_df(spark, data_gen).select(
+            f.col('a') == f.lit(None).cast(data_gen.data_type),
+            f.col('a') == f.col('b')))
+
+# Keep null scalars from folding unsupported comparisons into AST-compatible null literals.
 @pytest.mark.parametrize('data_descr', ast_comparable_descrs, ids=idfn)
 def test_eq(data_descr):
-    (s1, s2) = with_cpu_session(lambda spark: gen_scalars(data_descr[0], 2))
+    (s1, s2) = with_cpu_session(
+        lambda spark: gen_scalars(data_descr[0], 2, force_no_nulls=True))
     assert_binary_ast(data_descr,
         lambda df: df.select(
             f.col('a') == s1,
@@ -269,7 +278,8 @@ def test_eq(data_descr):
 
 @pytest.mark.parametrize('data_descr', ast_comparable_descrs, ids=idfn)
 def test_ne(data_descr):
-    (s1, s2) = with_cpu_session(lambda spark: gen_scalars(data_descr[0], 2))
+    (s1, s2) = with_cpu_session(
+        lambda spark: gen_scalars(data_descr[0], 2, force_no_nulls=True))
     assert_binary_ast(data_descr,
         lambda df: df.select(
             f.col('a') != s1,
@@ -278,7 +288,8 @@ def test_ne(data_descr):
 
 @pytest.mark.parametrize('data_descr', ast_comparable_descrs, ids=idfn)
 def test_lt(data_descr):
-    (s1, s2) = with_cpu_session(lambda spark: gen_scalars(data_descr[0], 2))
+    (s1, s2) = with_cpu_session(
+        lambda spark: gen_scalars(data_descr[0], 2, force_no_nulls=True))
     assert_binary_ast(data_descr,
         lambda df: df.select(
             f.col('a') < s1,
@@ -287,7 +298,8 @@ def test_lt(data_descr):
 
 @pytest.mark.parametrize('data_descr', ast_comparable_descrs, ids=idfn)
 def test_lte(data_descr):
-    (s1, s2) = with_cpu_session(lambda spark: gen_scalars(data_descr[0], 2))
+    (s1, s2) = with_cpu_session(
+        lambda spark: gen_scalars(data_descr[0], 2, force_no_nulls=True))
     assert_binary_ast(data_descr,
         lambda df: df.select(
             f.col('a') <= s1,
@@ -296,7 +308,8 @@ def test_lte(data_descr):
 
 @pytest.mark.parametrize('data_descr', ast_comparable_descrs, ids=idfn)
 def test_gt(data_descr):
-    (s1, s2) = with_cpu_session(lambda spark: gen_scalars(data_descr[0], 2))
+    (s1, s2) = with_cpu_session(
+        lambda spark: gen_scalars(data_descr[0], 2, force_no_nulls=True))
     assert_binary_ast(data_descr,
         lambda df: df.select(
             f.col('a') > s1,
@@ -305,7 +318,8 @@ def test_gt(data_descr):
 
 @pytest.mark.parametrize('data_descr', ast_comparable_descrs, ids=idfn)
 def test_gte(data_descr):
-    (s1, s2) = with_cpu_session(lambda spark: gen_scalars(data_descr[0], 2))
+    (s1, s2) = with_cpu_session(
+        lambda spark: gen_scalars(data_descr[0], 2, force_no_nulls=True))
     assert_binary_ast(data_descr,
         lambda df: df.select(
             f.col('a') >= s1,

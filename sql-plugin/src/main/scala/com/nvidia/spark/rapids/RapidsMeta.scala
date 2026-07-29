@@ -1350,10 +1350,14 @@ abstract class BaseExprMeta[INPUT <: Expression](
   }
 
   protected def willWorkInAstInfo: String = {
-    if (cannotBeAstReasons.isEmpty) {
-      "will run in AST"
-    } else {
+    if (!canThisBeReplaced) {
+      "cannot be converted to GPU AST because it cannot run on GPU"
+    } else if (willUseGpuCpuBridge) {
+      "cannot be converted to GPU AST because it uses the CPU bridge"
+    } else if (cannotBeAstReasons.nonEmpty) {
       s"cannot be converted to GPU AST because ${cannotBeAstReasons.mkString(";")}"
+    } else {
+      "is AST-compatible"
     }
   }
 
@@ -1364,7 +1368,8 @@ abstract class BaseExprMeta[INPUT <: Expression](
    * @param all should all the data be printed or just what does not work in the AST?
    */
   protected def printAst(strBuilder: StringBuilder, depth: Int, all: Boolean): Unit = {
-    if (all || !canThisBeAst) {
+    val selfAstCompatible = canSelfBeAst
+    if (all || !selfAstCompatible) {
       indent(strBuilder, depth)
       strBuilder.append(operationName)
           .append(" <")

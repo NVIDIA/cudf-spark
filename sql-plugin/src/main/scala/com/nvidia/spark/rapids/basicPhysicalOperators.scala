@@ -62,7 +62,9 @@ class GpuProjectExecMeta(
     val projectList = if (conf.isProjectAstEnabled) {
       val astExprs = childExprs.zip(gpuExprs).map { case (meta, expr) =>
         // cuDF requires return column is fixed width
-        if (GpuBatchUtils.isFixedWidth(expr.dataType) && meta.canThisBeAst) {
+        // Top-level literals are cheaper on the regular projection path.
+        if (GpuBatchUtils.isFixedWidth(expr.dataType) && meta.canThisBeAst &&
+            GpuExpressionsUtils.extractGpuLit(expr).isEmpty) {
           GpuProjectAstExpression.wrap(expr)
         } else {
           expr
@@ -75,6 +77,9 @@ class GpuProjectExecMeta(
           case expr if !GpuBatchUtils.isFixedWidth(expr.dataType) =>
             s"  $expr cannot be converted to AST because its return type " +
               s"${expr.dataType} is not fixed-width\n"
+          case expr if GpuExpressionsUtils.extractGpuLit(expr).isDefined =>
+            s"  $expr will use the regular GPU projection because top-level literals " +
+              "are cheaper there\n"
         }).mkString
         if (explain.nonEmpty) {
           logWarning(s"AST PROJECT\n$explain")
