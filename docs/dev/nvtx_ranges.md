@@ -11,7 +11,7 @@ parent: Developer Overview
  > variations
 
 
-# RAPIDS Accelerator for Apache Spark Nvtx Range Glossary
+# NVIDIA cuDF plugin for Apache Spark Nvtx Range Glossary
 The following is the list of Nvtx ranges that are used throughout
 the plugin. To add your own Nvtx range to the code, create an NvtxId
 entry in NvtxRangeWithDoc.scala and create an `NvtxRangeWithDoc` in the
