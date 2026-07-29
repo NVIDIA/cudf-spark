@@ -648,8 +648,8 @@ def test_iceberg_parquet_read_from_uri_invalid_s3_path(spark_tmp_table_factory, 
 
     with_cpu_session(setup_iceberg_table)
     assert with_gpu_session(
-        lambda spark:
-            spark._jvm.com.nvidia.spark.rapids.fileio.RapidsInputFiles.isS3PerfEnabled()), \
+        lambda spark: spark.sparkContext.getConf().get(
+            'spark.rapids.perfio.s3.enabled', 'false') == 'true'), \
         "PerfIO S3 must be enabled at Spark startup for REST catalog tests"
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.sql(f"SELECT * FROM {table}"),
