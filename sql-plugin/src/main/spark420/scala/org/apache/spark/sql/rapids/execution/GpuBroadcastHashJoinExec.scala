@@ -15,29 +15,7 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "340"}
-{"spark": "341"}
-{"spark": "342"}
-{"spark": "343"}
-{"spark": "344"}
-{"spark": "350"}
-{"spark": "351"}
-{"spark": "352"}
-{"spark": "353"}
-{"spark": "354"}
-{"spark": "355"}
-{"spark": "356"}
-{"spark": "357"}
-{"spark": "358"}
-{"spark": "359"}
-{"spark": "400"}
-{"spark": "401"}
-{"spark": "402"}
-{"spark": "403"}
-{"spark": "404"}
-{"spark": "411"}
-{"spark": "412"}
-{"spark": "413"}
+{"spark": "420"}
 spark-rapids-shim-json-lines ***/
 
 package org.apache.spark.sql.rapids.execution
@@ -72,7 +50,8 @@ class GpuBroadcastHashJoinMeta(
       buildSide,
       extractedCondition.joinCondition,
       extractedCondition.left, extractedCondition.right,
-      join.isNullAwareAntiJoin)
+      join.isNullAwareAntiJoin,
+      join.isSkewJoin)
     // For inner joins we can apply a post-join condition for any conditions that cannot be
     // evaluated directly in a mixed join that leverages a cudf AST expression
     val filteredJoinExec =
@@ -89,5 +68,6 @@ case class GpuBroadcastHashJoinExec(
     override val condition: Option[Expression],
     left: SparkPlan,
     right: SparkPlan,
-    isNullAwareAntiJoin: Boolean) extends GpuBroadcastHashJoinExecBase(
+    isNullAwareAntiJoin: Boolean,
+    override val isSkewJoin: Boolean) extends GpuBroadcastHashJoinExecBase(
       leftKeys, rightKeys, joinType, buildSide, condition, left, right, isNullAwareAntiJoin)
