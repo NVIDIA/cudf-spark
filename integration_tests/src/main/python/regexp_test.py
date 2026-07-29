@@ -669,6 +669,18 @@ def test_regexp_extract():
                 'regexp_extract(a, "(a)(b)|(c)(d)", 4)'),
         conf=_regexp_conf)
 
+def test_regexp_extract_case_insensitive_inline_flag():
+    gen = mk_str_gen('[abcABC]{1,3}[0-9]{1,2}[abcABC]{1,3}')
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: unary_op_df(spark, gen).selectExpr(
+                # (?i) folds the capture-group contents but does not change group numbering
+                'regexp_extract(a, "(?i)([a-c]+)([0-9]+)", 1)',
+                'regexp_extract(a, "(?i)([a-c]+)([0-9]+)", 2)',
+                # the flag turns on partway through, so only group 2 is case-insensitive
+                'regexp_extract(a, "([a-c]+)(?i)([a-c]+)", 2)',
+                'regexp_extract(a, "(?i)(abc)", 1)'),
+        conf=_regexp_conf)
+
 def test_regexp_extract_no_match():
     gen = mk_str_gen('[abcd]{1,3}[0-9]{1,3}[abcd]{1,3}')
     assert_gpu_and_cpu_are_equal_collect(
@@ -1114,6 +1126,68 @@ def test_rlike_fallback_possessive_quantifier():
 def test_rlike_fallback_lookarounds_independent_named():
     gen = mk_str_gen('(\u20ac|\\w){0,3}a[|b*.$\r\n]{0,2}c\\w{0,3}')
     for pattern in ['a(?=a*)', 'a(?!a*)', 'a(?<=a)', 'a(?<!a)', 'a(?>a*)', 'a(?<n>a*)']:
+        assert_gpu_fallback_collect(
+            lambda spark, pattern=pattern: unary_op_df(spark, gen).selectExpr(
+                f'a rlike "{pattern}"'),
+            'RLike',
+            conf=_regexp_conf)
+
+def test_rlike_case_insensitive_inline_flag():
+    gen = mk_str_gen('[a-dA-D]{1,4}')
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: unary_op_df(spark, gen).selectExpr(
+                'a rlike "(?i)abc"',
+                'a rlike "(?i)[a-c]"',
+                'a rlike "a(?i)b"',
+                'a rlike "(?i)a(?-i)b"',
+                'a rlike "a|(?i)b"',
+                'a rlike "(?i)(a|b)c"',
+                'a rlike "(?i:abc)"',
+                'a rlike "(?i:a|b)"',
+                'a rlike "(?-i:a)b"',
+                # nested scoped-flags groups
+                'a rlike "(?i:(?-i:a)b)"',
+                'a rlike "(?-i:a(?i:b)c)"',
+                'a rlike "(?i:a(?-i:b(?i:c))d)"',
+                # a bare inline flag inside a scoped-flags group
+                'a rlike "(?i:a(?-i)b)"',
+                'a rlike "(?-i:a(?i)b)"',
+                # a negated non-case-insensitive flag is a no-op (mode off by default)
+                'a rlike "(?-s:abc)"',
+                'a rlike "(?i-s:abc)"'),
+        conf=_regexp_conf)
+
+def test_regexp_replace_case_insensitive_inline_flag():
+    gen = mk_str_gen('[a-cA-C]{0,4}')
+    # case folding must also work in replace mode, including a `$1` backref into a
+    # case-insensitive capture group
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: unary_op_df(spark, gen).selectExpr(
+            'regexp_replace(a, "(?i)abc", "X")',
+            'regexp_replace(a, "(?i:abc)", "Y")',
+            'regexp_replace(a, "(?i)a(?-i)b", "Z")',
+            'regexp_replace(a, "(?i)(abc)", "[$1]")'),
+        conf=_regexp_conf)
+
+@allow_non_gpu('ProjectExec', 'RLike')
+def test_rlike_fallback_unsupported_inline_flags():
+    gen = mk_str_gen('[abcd]{1,3}')
+    # (?m)/(?s) are unsupported (positive) flags; (?i) that precedes a choice alternative cannot
+    # be folded (in Java `a(?i)b|c` makes both `b` and `c` case-insensitive); scoped groups with a
+    # positive non-case-insensitive flag are likewise unsupported
+    for pattern in ['(?m)a', '(?s)a', '(?i)a|b', '(?i)a|b|c', 'a(?i)b|c', '(?m:a)', '(?is:a)']:
+        assert_gpu_fallback_collect(
+            lambda spark, pattern=pattern: unary_op_df(spark, gen).selectExpr(
+                f'a rlike "{pattern}"'),
+            'RLike',
+            conf=_regexp_conf)
+
+@allow_non_gpu('ProjectExec', 'RLike')
+def test_rlike_fallback_inline_flags_with_anchors():
+    gen = mk_str_gen('[abcd]{1,3}')
+    # a zero-width (?i) must not let an otherwise-unsupported anchor context (\n$, $^, ^$, or an
+    # anchors-only sequence) reach the GPU; these all fall back like their flag-free forms
+    for pattern in ['$(?i)^', '^(?i)$', '^(?i)', '(?i)$']:
         assert_gpu_fallback_collect(
             lambda spark, pattern=pattern: unary_op_df(spark, gen).selectExpr(
                 f'a rlike "{pattern}"'),
