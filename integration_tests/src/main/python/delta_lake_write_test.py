@@ -857,6 +857,9 @@ def test_delta_rtas_truncate_capability(spark_tmp_table_factory):
         plans = callback.getResultsWithTimeout(10000)
         assert any(callback.contains(plan, "GpuAtomicReplaceTableAsSelectExec")
                    for plan in plans), "GpuAtomicReplaceTableAsSelectExec was not executed"
+        if not is_databricks_runtime():
+            assert any(callback.contains(plan, "GpuOverwriteByExpressionExecV1")
+                       for plan in plans), "GpuOverwriteByExpressionExecV1 was not executed"
     finally:
         callback.endCapture()
 
