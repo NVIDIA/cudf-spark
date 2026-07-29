@@ -188,6 +188,8 @@ abstract class GpuOrcDataReaderBase(
 
   def copyFileDataToHostStream(out: HostMemoryOutputStream, ranges: DiskRangeList): Unit = {
     val startPos = out.getPos
+    // Cache and remote reads write directly to the backing buffer without advancing the stream.
+    // Reserve the output range first so the stream points to the next write position on return.
     out.seek(startPos + getTotalLength(ranges))
     copyFileDataToHostStream(out, Seq((startPos, ranges)))
   }
@@ -241,27 +243,26 @@ abstract class GpuOrcDataReaderBase(
     var lastSequenceIndex = -1
 
     remoteReads.foreach { read =>
-      val currentRange = if (current == null) null else current.range
-      val inputIsContiguous = currentRange != null &&
-        currentRange.getInputOffset + currentRange.getLength == read.inputOffset
-      val outputIsContiguous = currentRange != null &&
-        currentRange.getOutputOffset + currentRange.getLength == read.outputOffset
-      val combinedLength = if (currentRange == null) {
-        read.length.toLong
-      } else {
-        currentRange.getLength + read.length
-      }
-      if (read.sequenceIndex == lastSequenceIndex + 1 && inputIsContiguous &&
-          outputIsContiguous && combinedLength <= maxLength) {
-        current = CoalescedRemoteRead(current.first, read.block,
-          new CopyRange(currentRange.getInputOffset, combinedLength,
-            currentRange.getOutputOffset))
-      } else {
-        if (current != null) {
-          coalesced += current
-        }
+      if (current == null) {
         current = CoalescedRemoteRead(read.block, read.block,
           new CopyRange(read.inputOffset, read.length, read.outputOffset))
+      } else {
+        val currentRange = current.range
+        val inputIsContiguous =
+          currentRange.getInputOffset + currentRange.getLength == read.inputOffset
+        val outputIsContiguous =
+          currentRange.getOutputOffset + currentRange.getLength == read.outputOffset
+        val combinedLength = currentRange.getLength + read.length
+        if (read.sequenceIndex == lastSequenceIndex + 1 && inputIsContiguous &&
+            outputIsContiguous && combinedLength <= maxLength) {
+          current = CoalescedRemoteRead(current.first, read.block,
+            new CopyRange(currentRange.getInputOffset, combinedLength,
+              currentRange.getOutputOffset))
+        } else {
+          coalesced += current
+          current = CoalescedRemoteRead(read.block, read.block,
+            new CopyRange(read.inputOffset, read.length, read.outputOffset))
+        }
       }
       lastSequenceIndex = read.sequenceIndex
     }
@@ -320,6 +321,8 @@ abstract class GpuOrcDataReaderBase(
       totalRemoteOutputSize += read.length
       packedRead
     }
+    // Each coalesced range is unpacked through a ByteBuffer, whose length is limited to
+    // Int.MaxValue.
     val remoteReads = coalesceRemoteReads(packedRemoteReads.toSeq, Int.MaxValue)
     if (remoteReads.nonEmpty) {
       require(totalRemoteOutputSize > 0, "Remote ORC read data must not be empty")

@@ -19,6 +19,7 @@ package com.nvidia.spark.rapids
 import java.io.{ByteArrayInputStream, IOException}
 import java.nio.ByteBuffer
 import java.nio.channels.SeekableByteChannel
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.util.OptionalLong
 
@@ -35,7 +36,7 @@ import com.nvidia.spark.rapids.shims.GpuOrcDataReader320Plus
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
 import org.apache.hadoop.hive.common.io.DiskRangeList
-import org.apache.orc.{OrcFile, OrcProto, StripeInformation}
+import org.apache.orc.{FileFormatException, OrcFile, OrcProto, StripeInformation}
 import org.apache.orc.impl.{BufferChunk, BufferChunkList, DataReaderProperties}
 import org.mockito.Mockito.when
 import org.scalatest.funsuite.AnyFunSuite
@@ -48,7 +49,8 @@ class OrcPerfIOReadSuite extends AnyFunSuite with Matchers with MockitoSugar {
   private class RecordingInputFile(
       bytes: Array[Byte],
       modificationTime: Long = 1234L,
-      failReads: Boolean = false) extends RapidsInputFile {
+      failReads: Boolean = false,
+      failVectoredReads: Boolean = false) extends RapidsInputFile {
     val vectoredReads = new ArrayBuffer[Seq[RecordedRange]]
     val tailReads = new ArrayBuffer[Long]
     var expectedVectoredOutput: Option[HostMemoryBuffer] = None
@@ -65,7 +67,7 @@ class OrcPerfIOReadSuite extends AnyFunSuite with Matchers with MockitoSugar {
       expectedVectoredOutput.foreach { expected =>
         assert(output eq expected, "readVectored did not receive the final output buffer")
       }
-      if (failReads) {
+      if (failReads || failVectoredReads) {
         throw new IOException("injected vectored read failure")
       }
       val recorded = copyRanges.asScala.map { range =>
@@ -250,28 +252,39 @@ class OrcPerfIOReadSuite extends AnyFunSuite with Matchers with MockitoSugar {
 
   private def makeOrcFile(
       metadataLength: Int,
-      prefixLength: Int = 8): (Array[Byte], Array[Byte]) = {
+      prefixLength: Int = 8,
+      postscriptMagic: Boolean = true,
+      headerMagic: Boolean = false): (Array[Byte], Array[Byte]) = {
     val footer = Array.emptyByteArray
-    val postscript = OrcProto.PostScript.newBuilder()
+    val postscriptBuilder = OrcProto.PostScript.newBuilder()
       .setCompression(OrcProto.CompressionKind.NONE)
       .setFooterLength(footer.length)
       .setMetadataLength(metadataLength)
-      .setMagic(OrcFile.MAGIC)
+    if (postscriptMagic) {
+      postscriptBuilder.setMagic(OrcFile.MAGIC)
+    }
+    val postscript = postscriptBuilder
       .build()
       .toByteArray
     val tail = Array.fill[Byte](metadataLength)(0) ++ footer ++ postscript ++
       Array(postscript.length.toByte)
-    (Array.tabulate[Byte](prefixLength)(_.toByte) ++ tail, tail)
+    val prefix = Array.tabulate[Byte](prefixLength)(_.toByte)
+    if (headerMagic) {
+      val magic = OrcFile.MAGIC.getBytes(StandardCharsets.UTF_8)
+      Array.copy(magic, 0, prefix, 0, magic.length)
+    }
+    (prefix ++ tail, tail)
   }
 
   test("ORC tail uses one suffix read when the complete tail fits in 16 KiB") {
-    val (fileBytes, expectedTail) = makeOrcFile(metadataLength = 32)
+    val (fileBytes, expectedTail) = makeOrcFile(
+      metadataLength = 32, prefixLength = 20 * 1024)
     val inputFile = new RecordingInputFile(fileBytes)
 
     val buffer = GpuOrcTailReader.readOrcTailBuffer(
       new Path(inputFile.path()), inputFile)
 
-    inputFile.tailReads should contain only fileBytes.length.toLong
+    inputFile.tailReads should contain only 16 * 1024L
     buffer.getLong shouldEqual fileBytes.length.toLong
     buffer.getLong shouldEqual 1234L
     val actualTail = new Array[Byte](buffer.remaining())
@@ -291,6 +304,67 @@ class OrcPerfIOReadSuite extends AnyFunSuite with Matchers with MockitoSugar {
     val actualTail = new Array[Byte](buffer.remaining())
     buffer.get(actualTail)
     actualTail shouldEqual expectedTail
+  }
+
+  test("legacy ORC header validation uses one vectored read") {
+    val (fileBytes, expectedTail) = makeOrcFile(
+      metadataLength = 32, postscriptMagic = false, headerMagic = true)
+    val inputFile = new RecordingInputFile(fileBytes)
+
+    val buffer = GpuOrcTailReader.readOrcTailBuffer(
+      new Path(inputFile.path()), inputFile)
+
+    inputFile.vectoredReads shouldEqual Seq(Seq(RecordedRange(0, 3, 0)))
+    buffer.position(2 * java.lang.Long.BYTES)
+    val actualTail = new Array[Byte](buffer.remaining())
+    buffer.get(actualTail)
+    actualTail shouldEqual expectedTail
+  }
+
+  test("ORC tail rejects files without postscript or header magic") {
+    val (fileBytes, _) = makeOrcFile(metadataLength = 32, postscriptMagic = false)
+    val inputFile = new RecordingInputFile(fileBytes)
+
+    val error = intercept[FileFormatException] {
+      GpuOrcTailReader.readOrcTailBuffer(new Path(inputFile.path()), inputFile)
+    }
+
+    inputFile.vectoredReads shouldEqual Seq(Seq(RecordedRange(0, 3, 0)))
+    error.getMessage should include("Invalid postscript")
+  }
+
+  test("ORC header read failures retain the path and requested length") {
+    val (fileBytes, _) = makeOrcFile(
+      metadataLength = 32, postscriptMagic = false, headerMagic = true)
+    val inputFile = new RecordingInputFile(fileBytes, failVectoredReads = true)
+
+    val error = intercept[IOException] {
+      GpuOrcTailReader.readOrcTailBuffer(new Path(inputFile.path()), inputFile)
+    }
+
+    error.getMessage should include(inputFile.path())
+    error.getMessage should include("ORC header")
+    error.getMessage should include("3")
+    error.getCause.getMessage should include("injected vectored read failure")
+  }
+
+  test("ORC tail rejects a declared tail larger than the file") {
+    val postscript = OrcProto.PostScript.newBuilder()
+      .setCompression(OrcProto.CompressionKind.NONE)
+      .setFooterLength(0)
+      .setMetadataLength(1024)
+      .setMagic(OrcFile.MAGIC)
+      .build()
+      .toByteArray
+    val fileBytes = Array.fill[Byte](8)(0) ++ postscript ++ Array(postscript.length.toByte)
+    val inputFile = new RecordingInputFile(fileBytes)
+
+    val error = intercept[FileFormatException] {
+      GpuOrcTailReader.readOrcTailBuffer(new Path(inputFile.path()), inputFile)
+    }
+
+    error.getMessage should include("Tail length")
+    error.getMessage should include("exceeds file length")
   }
 
   test("empty ORC files do not issue object reads") {
@@ -331,6 +405,25 @@ class OrcPerfIOReadSuite extends AnyFunSuite with Matchers with MockitoSugar {
         output.getBytes(result, 0, 0, result.length)
         result shouldEqual Array[Byte](2, 3, 10, 11, 12)
       }
+    } finally {
+      Files.deleteIfExists(file)
+    }
+  }
+
+  test("ORC tail uses the HadoopInputFile readTail fallback") {
+    val file = Files.createTempFile("orc-perfio-tail-fallback", ".orc")
+    val (fileBytes, expectedTail) = makeOrcFile(
+      metadataLength = 32, prefixLength = 20 * 1024)
+    Files.write(file, fileBytes)
+    try {
+      val path = new Path(file.toUri)
+      val inputFile = HadoopInputFile.create(path, new Configuration(false))
+      val buffer = GpuOrcTailReader.readOrcTailBuffer(path, inputFile)
+
+      buffer.position(2 * java.lang.Long.BYTES)
+      val actualTail = new Array[Byte](buffer.remaining())
+      buffer.get(actualTail)
+      actualTail shouldEqual expectedTail
     } finally {
       Files.deleteIfExists(file)
     }
@@ -398,6 +491,17 @@ class OrcPerfIOReadSuite extends AnyFunSuite with Matchers with MockitoSugar {
     error.getCause.getMessage shouldEqual "cache completion failed"
   }
 
+  test("range cache completion failure does not double-close the output buffer") {
+    val inputFile = new RecordingInputFile(Array.tabulate[Byte](32)(_.toByte))
+    val reader = newReader(inputFile, new FailingFileCache)
+
+    val error = intercept[IOException] {
+      readRanges(reader, ranges((2, 4)))
+    }
+
+    error.getMessage shouldEqual "cache completion failed"
+  }
+
   test("adjacent and non-adjacent misses share one vectored call into the final HMB") {
     val fileBytes = Array.tabulate[Byte](32)(_.toByte)
     val inputFile = new RecordingInputFile(fileBytes)
@@ -455,6 +559,13 @@ class OrcPerfIOReadSuite extends AnyFunSuite with Matchers with MockitoSugar {
       RecordedRange(2, 2, 0),
       RecordedRange(10, 3, 4)))
     result shouldEqual Array[Byte](2, 3, 50, 51, 10, 11, 12)
+    cache.data((2L, 2L)) shouldEqual Array[Byte](2, 3)
+    cache.data((10L, 3L)) shouldEqual Array[Byte](10, 11, 12)
+
+    val cachedResult = readRanges(reader, ranges((2, 4), (5, 7), (10, 13)))
+
+    inputFile.vectoredReads should have size 1
+    cachedResult shouldEqual result
   }
 
   test("cache-hit channels close before the next ORC range is planned") {
@@ -486,6 +597,38 @@ class OrcPerfIOReadSuite extends AnyFunSuite with Matchers with MockitoSugar {
     firstCachedBytes shouldEqual Array[Byte](20, 21)
     remoteBytes shouldEqual Array[Byte](5, 6)
     secondCachedBytes shouldEqual Array[Byte](100, 101, 102)
+  }
+
+  test("readFileData coalesces and unpacks multiple remote BufferChunks") {
+    val fileBytes = Array.tabulate[Byte](32)(_.toByte)
+    val inputFile = new RecordingInputFile(fileBytes)
+    val cache = new RecordingFileCache
+    val reader = newReader(inputFile, cache)
+    val chunks = new BufferChunkList
+    val firstAdjacentChunk = new BufferChunk(2, 3)
+    val secondAdjacentChunk = new BufferChunk(5, 2)
+    val nonAdjacentChunk = new BufferChunk(10, 3)
+    chunks.add(firstAdjacentChunk)
+    chunks.add(secondAdjacentChunk)
+    chunks.add(nonAdjacentChunk)
+
+    reader.readFileData(chunks, false)
+
+    inputFile.vectoredReads shouldEqual Seq(Seq(
+      RecordedRange(2, 5, 0),
+      RecordedRange(10, 3, 5)))
+    val firstBytes = new Array[Byte](3)
+    val secondBytes = new Array[Byte](2)
+    val thirdBytes = new Array[Byte](3)
+    firstAdjacentChunk.getData.get(firstBytes)
+    secondAdjacentChunk.getData.get(secondBytes)
+    nonAdjacentChunk.getData.get(thirdBytes)
+    firstBytes shouldEqual Array[Byte](2, 3, 4)
+    secondBytes shouldEqual Array[Byte](5, 6)
+    thirdBytes shouldEqual Array[Byte](10, 11, 12)
+    cache.data((2L, 3L)) shouldEqual firstBytes
+    cache.data((5L, 2L)) shouldEqual secondBytes
+    cache.data((10L, 3L)) shouldEqual thirdBytes
   }
 
   test("ORC-owned heap and direct buffers remain valid after temporary HMBs close") {

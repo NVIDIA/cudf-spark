@@ -839,12 +839,7 @@ trait OrcCommonFunctions extends OrcCodecWritingHelper { self: FilePartitionRead
       out: HostMemoryOutputStream,
       inputDataRanges: DiskRangeList): (Long, DiskRangeList) = {
     val startPos = out.getPos
-    var totalLength = 0L
-    var current = inputDataRanges
-    while (current != null) {
-      totalLength += current.getLength
-      current = current.next
-    }
+    val totalLength = inputDataRanges.getTotalLength()
     out.seek(startPos + totalLength)
     (startPos, inputDataRanges)
   }
@@ -2095,11 +2090,16 @@ private object GpuOrcFileFilterHandler {
     if (!Text.decode(array, offset, magicLength).equals(OrcFile.MAGIC)) {
       // If it isn't there, this may be the 0.11.0 version of ORC.
       // Read the first 3 bytes of the file to check for the header
-      val header = withResource(HostMemoryBuffer.allocate(magicLength, false)) { hmb =>
-        inputFile.readVectored(hmb, Seq(new CopyRange(0, magicLength, 0)).asJava)
-        val bytes = new Array[Byte](magicLength)
-        hmb.getBytes(bytes, 0, 0, magicLength)
-        bytes
+      val header = try {
+        withResource(HostMemoryBuffer.allocate(magicLength, false)) { hmb =>
+          inputFile.readVectored(hmb, Seq(new CopyRange(0, magicLength, 0)).asJava)
+          val bytes = new Array[Byte](magicLength)
+          hmb.getBytes(bytes, 0, 0, magicLength)
+          bytes
+        }
+      } catch {
+        case e: IOException =>
+          throw new IOException(s"Failed to read $path ORC header of length $magicLength", e)
       }
       // if it isn't there, this isn't an ORC file
       if (!Text.decode(header, 0, magicLength).equals(OrcFile.MAGIC)) {
