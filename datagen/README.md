@@ -8,12 +8,11 @@ data between tables for joins. To accomplish this we wrote
 
 ## Setup Environment
 
-To get started with big data generation the first thing you need to do is
-to include the appropriate jar on the classpath for your version of Apache Spark.
-Note that this does not run on the GPU, but it does use parts of the shim framework
-that the RAPIDS Accelerator does. The jar is specific to the version of Spark you
-are using and is not pushed to Maven Central. Because of this you will have to
-build it from source yourself.
+To get started with big data generation the first thing you need to do is to include the appropriate
+jar on the classpath for your version of Apache Spark.  Note that this does not run on the GPU, but
+it does use parts of the shim framework that the NVIDIA cuDF plugin for Apache Spark does. The jar
+is specific to the version of Spark you are using and is not pushed to Maven Central. Because of
+this you will have to build it from source yourself.
 
 ```shell
 cd datagen
@@ -344,7 +343,7 @@ spark.time(fdf.join(ddf).groupBy("agg_key").agg(min("value"),
 Time taken: 890163 ms
 ```
 
-Or you could run it with the RAPIDS Accelerator where the data generations is still
+Or you could run it with the cuDF plugin where the data generations is still
 done on the CPU and cut the time down to just 75,696 ms
 
 But what if we wanted to join on multiple columns, or do an aggregation with

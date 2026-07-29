@@ -2,7 +2,7 @@
 
 ## Overview
 
-Define the code of conduct followed and enforced by the RAPIDS Accelerator for Apache Spark project
+Define the code of conduct followed and enforced by the NVIDIA cuDF plugin for Apache Spark project
 
 ### Intended audience
 
