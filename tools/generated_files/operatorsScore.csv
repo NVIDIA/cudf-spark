@@ -208,6 +208,7 @@ Multiply,4
 MultiplyDTInterval,4
 MultiplyYMInterval,4
 Murmur3Hash,4
+NTile,4
 NaNvl,4
 NamedLambdaVariable,4
 NormalizeNaNAndZero,4
