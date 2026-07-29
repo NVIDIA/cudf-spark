@@ -43,6 +43,13 @@ DEFAULT_EXCLUDES = (
 )
 
 
+# Bound advertised uncompressed class payloads before reading zip entries. These
+# limits are well above expected generated Spark/Scala class sizes while avoiding
+# unbounded decompression from malformed inputs.
+MAX_ZIP_CLASS_ENTRY_BYTES = 64 * 1024 * 1024
+MAX_ZIP_TOTAL_CLASS_BYTES = 1024 * 1024 * 1024
+
+
 ClassInfo = collections.namedtuple("ClassInfo", ("name", "location", "entry", "deps"))
 
 
@@ -162,9 +169,20 @@ def is_version_node(node):
 def iter_class_entries(path):
     if zipfile.is_zipfile(path):
         with zipfile.ZipFile(path) as zf:
-            for name in zf.namelist():
+            total_class_bytes = 0
+            for info in zf.infolist():
+                name = info.filename
                 if name.endswith(".class") and not name.endswith("/module-info.class"):
-                    yield name, zf.read(name)
+                    if info.file_size > MAX_ZIP_CLASS_ENTRY_BYTES:
+                        raise RuntimeError(
+                            "refusing to read oversized class entry %s (%s bytes)" %
+                            (name, info.file_size))
+                    total_class_bytes += info.file_size
+                    if total_class_bytes > MAX_ZIP_TOTAL_CLASS_BYTES:
+                        raise RuntimeError(
+                            "refusing to read zip with oversized class payload "
+                            "(more than %s bytes)" % MAX_ZIP_TOTAL_CLASS_BYTES)
+                    yield name, zf.read(info)
         return
 
     for root, _, files in os.walk(path):
@@ -206,11 +224,14 @@ def resolve_dependency_targets(source_location, dep_name, name_locations):
     if not locations:
         return []
 
-    # Parent/root class loading wins in the current layout. Prefer a conventional
-    # class when one exists, then the source archive, then spark-shared, then the
+    # Parent/root class loading wins in the current layout. When no conventional
+    # class exists, prefer the source archive, then spark-shared, then the
     # remaining version-specific locations.
+    if "root" in locations:
+        return [(dep_name, "root")]
+
     ordered = []
-    for preferred in ("root", source_location, "spark-shared"):
+    for preferred in (source_location, "spark-shared"):
         if preferred in locations and preferred not in ordered:
             ordered.append(preferred)
     ordered.extend(sorted(loc for loc in locations if loc not in ordered))

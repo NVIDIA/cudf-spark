@@ -25,6 +25,7 @@ import argparse
 import fnmatch
 import hashlib
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -33,7 +34,7 @@ import zipfile
 
 
 ARTIFACTS = ("sql-plugin-api", "aggregator")
-
+BUILDVER_RE = re.compile(r"^[0-9][0-9a-z]*$")
 
 def read_patterns(path):
     with path.open() as fh:
@@ -180,8 +181,8 @@ def copy_and_extract_jars(
         from_each):
     parallel_world = target_dir / "parallel-world"
     cache_root = target_dir / "unshim-parallel-world-cache"
-    root_buildver = buildvers[0]
     sorted_buildvers = sorted(buildvers, reverse=True)
+    root_buildver = sorted_buildvers[0]
 
     for buildver in sorted_buildvers:
         classifier = "spark%s" % buildver
@@ -212,16 +213,44 @@ def remove_allowlisted_from_spark_shared(parallel_world, from_single_shim):
     shared_dir = parallel_world / "spark-shared"
     if not shared_dir.is_dir():
         return
+    resolved_shared_dir = shared_dir.resolve()
+
+    def validate_pattern(pattern):
+        pattern_path = Path(pattern)
+        if pattern_path.is_absolute():
+            raise RuntimeError("refusing absolute spark-shared allowlist path: %s" % pattern)
+        if ".." in pattern_path.parts:
+            raise RuntimeError("refusing parent traversal in spark-shared allowlist path: %s" %
+                               pattern)
+
+    def resolve_candidate(path, pattern):
+        if Path(pattern).is_absolute():
+            raise RuntimeError("refusing absolute spark-shared allowlist path: %s" % pattern)
+        resolved = path.resolve()
+        if resolved_shared_dir not in resolved.parents:
+            raise RuntimeError("refusing spark-shared allowlist path outside spark-shared: %s" %
+                               pattern)
+        return resolved
 
     for pattern in from_single_shim:
+        validate_pattern(pattern)
         if has_fnmatch_magic(pattern):
             for path in shared_dir.rglob("*"):
-                if path.is_file() and fnmatch.fnmatch(path.relative_to(shared_dir).as_posix(), pattern):
-                    path.unlink()
+                if fnmatch.fnmatch(path.relative_to(shared_dir).as_posix(), pattern):
+                    resolved = resolve_candidate(path, pattern)
+                    if resolved.is_file():
+                        resolved.unlink()
         else:
             path = shared_dir / pattern
-            if path.is_file():
-                path.unlink()
+            resolved = resolve_candidate(path, pattern)
+            if resolved.is_file():
+                resolved.unlink()
+
+
+def validate_buildvers(buildvers):
+    invalid = [buildver for buildver in buildvers if not BUILDVER_RE.match(buildver)]
+    if invalid:
+        raise RuntimeError("invalid build version token(s): %s" % ", ".join(invalid))
 
 
 def main():
@@ -247,6 +276,7 @@ def main():
 
     if len(buildvers) == 0:
         raise RuntimeError("no build versions were supplied")
+    validate_buildvers(buildvers)
 
     from_single_shim = read_patterns(dist_dir / "unshimmed-common-from-single-shim.txt")
     from_each = read_patterns(dist_dir / "unshimmed-from-each-spark3xx.txt")

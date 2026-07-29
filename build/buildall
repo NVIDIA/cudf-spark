@@ -253,21 +253,24 @@ if [[ "$UNSHIM_ALLOWLIST_ONLY" == "1" ]] && \
         . \
         ':(exclude)dist/unshimmed-common-from-single-shim.txt' \
         ':(exclude)dist/unshimmed-from-each-spark3xx.txt' \
-        ':(exclude)dist/keep-in-spark-shared.txt'
+        ':(exclude)dist/keep-in-spark-shared.txt' \
+        ':(exclude)dist/keep-in-spark-shim-dirs.txt'
       git -C "$SOURCE_DIR" diff --cached --name-only -- \
         . \
         ':(exclude)dist/unshimmed-common-from-single-shim.txt' \
         ':(exclude)dist/unshimmed-from-each-spark3xx.txt' \
-        ':(exclude)dist/keep-in-spark-shared.txt'
+        ':(exclude)dist/keep-in-spark-shared.txt' \
+        ':(exclude)dist/keep-in-spark-shim-dirs.txt'
       git -C "$SOURCE_DIR" ls-files --others --exclude-standard -- \
         . \
         ':(exclude)dist/unshimmed-common-from-single-shim.txt' \
         ':(exclude)dist/unshimmed-from-each-spark3xx.txt' \
-        ':(exclude)dist/keep-in-spark-shared.txt'
+        ':(exclude)dist/keep-in-spark-shared.txt' \
+        ':(exclude)dist/keep-in-spark-shim-dirs.txt'
     } | sort -u
   )
   if [[ -n "$ALLOWLIST_ONLY_DIRTY" ]]; then
-    echo >&2 "--unshim-allowlist-only can only reuse jars when changes are limited to dist/unshimmed*.txt or dist/keep-in-spark-shared.txt"
+    echo >&2 "--unshim-allowlist-only can only reuse jars when changes are limited to dist/unshimmed*.txt or dist/keep-in-spark-*.txt"
     echo >&2 "$ALLOWLIST_ONLY_DIRTY"
     exit 1
   fi
