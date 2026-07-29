@@ -355,9 +355,9 @@ object RapidsConf extends Logging {
     conf("spark.rapids.memory.pinnedPool.parallelInit.threads")
       .doc("Number of CPU threads used to initialize the pinned pool's backing memory. " +
         "Set to 'all' to use the number of executor cores. A value of 1 initializes the backing " +
-        "memory using cudaHostAlloc. Values greater than 1 instead pre-touch pages concurrently " +
-        "before pinning for faster initialization. This does not affect subsequent suballocator " +
-        "behavior.")
+        "memory using cudaHostAlloc. Values greater than 1 instead request transparent huge " +
+        "pages and pre-touch pages concurrently before pinning for faster initialization. " +
+        "This does not affect subsequent suballocator behavior.")
       .startupOnly()
       .stringConf
       .transform(_.trim.toLowerCase(java.util.Locale.ROOT))
