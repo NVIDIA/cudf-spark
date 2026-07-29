@@ -28,7 +28,8 @@ import com.nvidia.spark.rapids.ExprMeta
 import com.nvidia.spark.rapids.GpuOverrides.{extractStringLit, getTimeParserPolicy}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.jni.{Arithmetic, CastStrings, DateTimeUtils, GpuTimeZoneDB}
-import com.nvidia.spark.rapids.shims.{NullIntolerantShim, ShimBinaryExpression, ShimExpression}
+import com.nvidia.spark.rapids.shims.{NullIntolerantShim, ShimBinaryExpression, ShimExpression,
+  TruncTimestampShims}
 
 import org.apache.spark.sql.catalyst.expressions.{BinaryExpression, ExpectsInputTypes, Expression, FromUnixTime, FromUTCTimestamp, ImplicitCastInputTypes, MonthsBetween, TimeZoneAwareExpression, ToUTCTimestamp, TruncDate, TruncTimestamp}
 import org.apache.spark.sql.catalyst.util.DateTimeConstants
@@ -1533,6 +1534,57 @@ case class GpuTruncTimestamp(fmt: Expression, timestamp: Expression, timeZoneId:
   override def dataType: DataType = TimestampType
 
   override def prettyName: String = "date_trunc"
+
+  override protected def truncate(datetimeCol: GpuColumnVector, fmtCol: GpuColumnVector)
+      : ColumnVector = {
+    closeOnExcept(DateTimeUtils.truncate(datetimeCol.getBase, fmtCol.getBase)) { truncated =>
+      TruncTimestampShims.checkOverflow(datetimeCol.getBase, truncated)
+      truncated
+    }
+  }
+
+  override protected def truncate(datetimeVal: GpuScalar, fmtCol: GpuColumnVector): ColumnVector = {
+    withResource(ColumnVector.fromScalar(datetimeVal.getBase, 1)) { datetimeCol =>
+      closeOnExcept(DateTimeUtils.truncate(datetimeCol, fmtCol.getBase)) { truncated =>
+        TruncTimestampShims.checkOverflow(datetimeCol, truncated)
+        truncated
+      }
+    }
+  }
+
+  override protected def truncate(datetimeCol: GpuColumnVector, fmtVal: GpuScalar): ColumnVector = {
+    fmtStr match {
+      case Some(fmt) =>
+        closeOnExcept(DateTimeUtils.truncate(datetimeCol.getBase, fmt)) { truncated =>
+          TruncTimestampShims.checkOverflow(datetimeCol.getBase, truncated)
+          truncated
+        }
+      case None =>
+        GpuColumnVector.columnVectorFromNull(datetimeCol.getRowCount.toInt, dataType)
+    }
+  }
+
+  override protected def truncate(numRows: Int, datetimeVal: GpuScalar, fmtVal: GpuScalar)
+      : ColumnVector = {
+    fmtStr match {
+      case Some(fmt) =>
+        withResource(ColumnVector.fromScalar(datetimeVal.getBase, 1)) { datetimeCol =>
+          closeOnExcept(DateTimeUtils.truncate(datetimeCol, fmt)) { truncated =>
+            TruncTimestampShims.checkOverflow(datetimeCol, truncated)
+            if (numRows == 1) {
+              truncated
+            } else {
+              withResource(truncated) { _ =>
+                withResource(truncated.getScalarElement(0)) { truncatedScalar =>
+                  ColumnVector.fromScalar(truncatedScalar, numRows)
+                }
+              }
+            }
+          }
+        }
+      case None => GpuColumnVector.columnVectorFromNull(numRows, dataType)
+    }
+  }
 
   // Since the input order of this class is opposite compared to the `GpuTruncDate` class,
   // we need to switch `lhs` and `rhs` in the `doColumnar` methods below.
