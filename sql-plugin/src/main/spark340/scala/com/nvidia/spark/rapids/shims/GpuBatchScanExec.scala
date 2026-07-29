@@ -29,6 +29,7 @@
 {"spark": "356"}
 {"spark": "357"}
 {"spark": "358"}
+{"spark": "359"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
@@ -138,7 +139,8 @@ case class GpuBatchScanExec(
         val newPartValues = commonPartitionValues.get.flatMap { case (partValue, numSplits) =>
           Seq.fill(numSplits)(partValue)
         }
-        k.copy(numPartitions = newPartValues.length, partitionValues = newPartValues)
+        KeyGroupedPartitioningShim.copyWithNewPartitionValues(
+          k, newPartValues, applyPartialClustering)
       case p => p
     }
   }
