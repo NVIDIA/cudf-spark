@@ -31,7 +31,7 @@ import org.apache.spark.sql.execution.metric.SQLMetric
 
 /**
  * Spark 4.1+ passes a WriteSummary to BatchWrite.commit. For MERGE, collect metrics from
- * GpuMergeRowsExec the same way Spark CPU collects them from MergeRowsExec.
+ * GpuMergeRowsExec (or a CPU MergeRowsExec fallback child) the same way Spark CPU does.
  *
  * Lives under org.apache.spark.sql so it can construct private[sql] MergeSummaryImpl.
  */
@@ -56,9 +56,10 @@ object GpuV2WriteCommitShims extends AdaptiveSparkPlanHelper {
 
   /** Visible for tests. */
   private[v2] def getWriteSummary(query: SparkPlan): Option[WriteSummary] = {
-    collectFirst(query) { case m: GpuMergeRowsExec => m }.map { mergeRows =>
-      mergeSummaryFromMetrics(mergeRows.metrics)
-    }
+    collectFirst(query) {
+      case m: GpuMergeRowsExec => m.metrics
+      case m: MergeRowsExec => m.metrics
+    }.map(mergeSummaryFromMetrics)
   }
 
   /** Visible for tests. */

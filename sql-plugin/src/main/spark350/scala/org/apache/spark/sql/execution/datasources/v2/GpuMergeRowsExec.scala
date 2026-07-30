@@ -47,7 +47,7 @@ import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm._
 import com.nvidia.spark.rapids.RapidsPluginImplicits.ReallyAGpuExpression
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
-import com.nvidia.spark.rapids.shims.{ShimExpression, ShimUnaryExecNode}
+import com.nvidia.spark.rapids.shims.{GpuMergeRowMetricsShims, ShimExpression, ShimUnaryExecNode}
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
@@ -105,24 +105,35 @@ case class GpuMergeRowsExec(
     AttributeSet.fromAttributeSets(usedExprs.map(_.references)) -- producedAttributes
   }
 
-  override lazy val additionalMetrics: Map[String, GpuMetric] = Map(
-    OP_TIME_LEGACY -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_OP_TIME_LEGACY),
-    NUM_OUTPUT_ROWS -> createMetric(ESSENTIAL_LEVEL, DESCRIPTION_NUM_OUTPUT_ROWS),
-    NUM_OUTPUT_BATCHES -> createMetric(MODERATE_LEVEL, DESCRIPTION_NUM_OUTPUT_BATCHES),
-    NUM_TARGET_ROWS_COPIED -> createMetric(ESSENTIAL_LEVEL,
-      "number of target rows copied unmodified because they did not match any action"),
-    NUM_TARGET_ROWS_INSERTED -> createMetric(ESSENTIAL_LEVEL, "number of target rows inserted"),
-    NUM_TARGET_ROWS_DELETED -> createMetric(ESSENTIAL_LEVEL, "number of target rows deleted"),
-    NUM_TARGET_ROWS_UPDATED -> createMetric(ESSENTIAL_LEVEL, "number of target rows updated"),
-    NUM_TARGET_ROWS_MATCHED_UPDATED -> createMetric(MODERATE_LEVEL,
-      "number of target rows updated by a matched clause"),
-    NUM_TARGET_ROWS_MATCHED_DELETED -> createMetric(MODERATE_LEVEL,
-      "number of target rows deleted by a matched clause"),
-    NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_UPDATED -> createMetric(MODERATE_LEVEL,
-      "number of target rows updated by a not matched by source clause"),
-    NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_DELETED -> createMetric(MODERATE_LEVEL,
-      "number of target rows deleted by a not matched by source clause")
-  )
+  override lazy val additionalMetrics: Map[String, GpuMetric] = {
+    val common = Map(
+      OP_TIME_LEGACY -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_OP_TIME_LEGACY),
+      NUM_OUTPUT_ROWS -> createMetric(ESSENTIAL_LEVEL, DESCRIPTION_NUM_OUTPUT_ROWS),
+      NUM_OUTPUT_BATCHES -> createMetric(MODERATE_LEVEL, DESCRIPTION_NUM_OUTPUT_BATCHES))
+    // MergeSummary fields must stay ESSENTIAL: metrics.level must not change committed
+    // table metadata. Skip registration before Spark 4.1 where WriteSummary is unused.
+    if (GpuMergeRowMetricsShims.writeSummaryEnabled) {
+      common ++ Map(
+        NUM_TARGET_ROWS_COPIED -> createMetric(ESSENTIAL_LEVEL,
+          "number of target rows copied unmodified because they did not match any action"),
+        NUM_TARGET_ROWS_INSERTED -> createMetric(ESSENTIAL_LEVEL,
+          "number of target rows inserted"),
+        NUM_TARGET_ROWS_DELETED -> createMetric(ESSENTIAL_LEVEL,
+          "number of target rows deleted"),
+        NUM_TARGET_ROWS_UPDATED -> createMetric(ESSENTIAL_LEVEL,
+          "number of target rows updated"),
+        NUM_TARGET_ROWS_MATCHED_UPDATED -> createMetric(ESSENTIAL_LEVEL,
+          "number of target rows updated by a matched clause"),
+        NUM_TARGET_ROWS_MATCHED_DELETED -> createMetric(ESSENTIAL_LEVEL,
+          "number of target rows deleted by a matched clause"),
+        NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_UPDATED -> createMetric(ESSENTIAL_LEVEL,
+          "number of target rows updated by a not matched by source clause"),
+        NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_DELETED -> createMetric(ESSENTIAL_LEVEL,
+          "number of target rows deleted by a not matched by source clause"))
+    } else {
+      common
+    }
+  }
 
   override def supportsColumnar: Boolean = true
 
@@ -130,15 +141,19 @@ case class GpuMergeRowsExec(
     val numOutputRows = gpuLongMetric(NUM_OUTPUT_ROWS)
     val numOutputBatches = gpuLongMetric(NUM_OUTPUT_BATCHES)
     val opTime = gpuLongMetric(OP_TIME_LEGACY)
-    val mergeMetrics = MergeRowMetrics(
-      gpuLongMetric(NUM_TARGET_ROWS_COPIED),
-      gpuLongMetric(NUM_TARGET_ROWS_INSERTED),
-      gpuLongMetric(NUM_TARGET_ROWS_DELETED),
-      gpuLongMetric(NUM_TARGET_ROWS_UPDATED),
-      gpuLongMetric(NUM_TARGET_ROWS_MATCHED_UPDATED),
-      gpuLongMetric(NUM_TARGET_ROWS_MATCHED_DELETED),
-      gpuLongMetric(NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_UPDATED),
-      gpuLongMetric(NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_DELETED))
+    val mergeMetrics = if (GpuMergeRowMetricsShims.writeSummaryEnabled) {
+      MergeRowMetrics(
+        gpuLongMetric(NUM_TARGET_ROWS_COPIED),
+        gpuLongMetric(NUM_TARGET_ROWS_INSERTED),
+        gpuLongMetric(NUM_TARGET_ROWS_DELETED),
+        gpuLongMetric(NUM_TARGET_ROWS_UPDATED),
+        gpuLongMetric(NUM_TARGET_ROWS_MATCHED_UPDATED),
+        gpuLongMetric(NUM_TARGET_ROWS_MATCHED_DELETED),
+        gpuLongMetric(NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_UPDATED),
+        gpuLongMetric(NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_DELETED))
+    } else {
+      MergeRowMetrics.noop
+    }
 
     val dataTypes = GpuColumnVector.extractTypes(child.schema)
 
@@ -245,6 +260,18 @@ object GpuMergeRowsExec {
         other.numTargetRowsNotMatchedBySourceDeleted.value
     }
 
+    /** Clear staging counters before a retry attempt. */
+    def reset(): Unit = {
+      numTargetRowsCopied.set(0L)
+      numTargetRowsInserted.set(0L)
+      numTargetRowsDeleted.set(0L)
+      numTargetRowsUpdated.set(0L)
+      numTargetRowsMatchedUpdated.set(0L)
+      numTargetRowsMatchedDeleted.set(0L)
+      numTargetRowsNotMatchedBySourceUpdated.set(0L)
+      numTargetRowsNotMatchedBySourceDeleted.set(0L)
+    }
+
     def record(instruction: GpuInstruction, numRows: Long, sourcePresent: Boolean): Unit = {
       if (numRows > 0) {
         instruction match {
@@ -266,7 +293,12 @@ object GpuMergeRowsExec {
   }
 
   object MergeRowMetrics {
-    /** Per-attempt staging metrics that are discarded on OOM retry. */
+    /** Shared no-op metrics when WriteSummary accounting is disabled (Spark < 4.1). */
+    val noop: MergeRowMetrics = MergeRowMetrics(
+      NoopMetric, NoopMetric, NoopMetric, NoopMetric,
+      NoopMetric, NoopMetric, NoopMetric, NoopMetric)
+
+    /** Per-iterator staging metrics that are reset on each OOM retry attempt. */
     def local(): MergeRowMetrics = MergeRowMetrics(
       new LocalGpuMetric(),
       new LocalGpuMetric(),
@@ -276,6 +308,10 @@ object GpuMergeRowsExec {
       new LocalGpuMetric(),
       new LocalGpuMetric(),
       new LocalGpuMetric())
+
+    def forAttempt(): MergeRowMetrics = {
+      if (GpuMergeRowMetricsShims.writeSummaryEnabled) local() else noop
+    }
   }
 
   sealed trait GpuInstruction extends GpuUnevaluable with ShimExpression {
@@ -356,6 +392,9 @@ class GpuMergeBatchIterator(
 
   import GpuMergeRowsExec.MergeRowMetrics
 
+  // Reused across batches/attempts; reset() clears counts before each retry attempt.
+  private val attemptMetrics: MergeRowMetrics = MergeRowMetrics.forAttempt()
+
   override def hasNext: Boolean = inputIter.hasNext
 
   override def next(): ColumnarBatch = {
@@ -378,10 +417,8 @@ class GpuMergeBatchIterator(
    * reprocesses the same batch.
    */
   private def processBatch(batch: ColumnarBatch): ColumnarBatch = {
-    var attemptMetrics: MergeRowMetrics = null
     val result = withRetryNoSplit(batch) { _ =>
-      // Fresh staging metrics for each attempt so failed retries are discarded.
-      attemptMetrics = MergeRowMetrics.local()
+      attemptMetrics.reset()
       // Evaluate presence flags
       val outputs = new ArrayBuffer[SpillableColumnarBatch](
         matchedInstructionExecs.size + notMatchedInstructionExecs.size

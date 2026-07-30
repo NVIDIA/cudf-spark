@@ -102,21 +102,19 @@ class GpuMergeRowMetricsSuite extends AnyFunSuite with FQSuiteName {
     assert(m.numTargetRowsDeleted.value === 0)
   }
 
-  test("addAll flushes a successful attempt and discards failed-attempt staging") {
+  test("reset clears staging so a reused attempt does not accumulate retries") {
     val published = metrics()
-    val failedAttempt = MergeRowMetrics.local()
-    failedAttempt.record(GpuKeep(trueLit, Nil, ACTION_INSERT), 7, sourcePresent = true)
-    failedAttempt.record(GpuDiscard(trueLit), 4, sourcePresent = true)
-    // Failed OOM retry discards staging; only the successful attempt is flushed.
-    val successAttempt = MergeRowMetrics.local()
-    successAttempt.record(GpuKeep(trueLit, Nil, ACTION_INSERT), 7, sourcePresent = true)
-    successAttempt.record(GpuDiscard(trueLit), 4, sourcePresent = true)
-    published.addAll(successAttempt)
+    val attempt = MergeRowMetrics.local()
+    attempt.record(GpuKeep(trueLit, Nil, ACTION_INSERT), 7, sourcePresent = true)
+    attempt.record(GpuDiscard(trueLit), 4, sourcePresent = true)
+    // Simulate a failed attempt that is discarded by reset before retry.
+    attempt.reset()
+    attempt.record(GpuKeep(trueLit, Nil, ACTION_INSERT), 7, sourcePresent = true)
+    attempt.record(GpuDiscard(trueLit), 4, sourcePresent = true)
+    published.addAll(attempt)
 
     assert(published.numTargetRowsInserted.value === 7)
     assert(published.numTargetRowsDeleted.value === 4)
     assert(published.numTargetRowsMatchedDeleted.value === 4)
-    // Failed attempt was never flushed.
-    assert(failedAttempt.numTargetRowsInserted.value === 7)
   }
 }

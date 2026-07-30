@@ -26,13 +26,13 @@ import com.nvidia.spark.rapids.FQSuiteName
 import com.nvidia.spark.rapids.shims.{GpuMergeRowsKeepShims, GpuV2BatchWriteSummaryCommit}
 import org.scalatest.funsuite.AnyFunSuite
 
-import org.apache.spark.{SparkConf, SparkContext}
-import org.apache.spark.sql.catalyst.expressions.Literal
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Literal}
 import org.apache.spark.sql.catalyst.plans.logical.MergeRows.{Copy, Delete, Insert, Keep, Update}
 import org.apache.spark.sql.connector.write.{BatchWrite, DataWriterFactory, MergeSummary,
   MergeSummaryImpl, PhysicalWriteInfo, WriterCommitMessage, WriteSummary}
 import org.apache.spark.sql.execution.metric.SQLMetrics
-import org.apache.spark.sql.types.{BooleanType, IntegerType}
+import org.apache.spark.sql.types.{BooleanType, IntegerType, LongType}
 
 class GpuV2WriteSummarySuite extends AnyFunSuite with FQSuiteName {
 
@@ -70,12 +70,9 @@ class GpuV2WriteSummarySuite extends AnyFunSuite with FQSuiteName {
     assert(recorder.plainCommitCount === 1)
   }
 
-  test("mergeSummaryFromMetrics reads GpuMergeRowsExec metric names") {
-    val conf = new SparkConf().setMaster("local[1]").setAppName(getClass.getSimpleName)
-      .set("spark.driver.host", "127.0.0.1")
-      .set("spark.ui.enabled", "false")
-    val sc = new SparkContext(conf)
-    try {
+  test("mergeSummaryFromMetrics maps all eight fields and missing-key sentinel") {
+    withSparkSession { spark =>
+      val sc = spark.sparkContext
       val metrics = Map(
         GpuMergeRowsExec.NUM_TARGET_ROWS_COPIED ->
           SQLMetrics.createMetric(sc, "copied"),
@@ -93,14 +90,68 @@ class GpuV2WriteSummarySuite extends AnyFunSuite with FQSuiteName {
           SQLMetrics.createMetric(sc, "nmbsUpdated"),
         GpuMergeRowsExec.NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_DELETED ->
           SQLMetrics.createMetric(sc, "nmbsDeleted"))
-      metrics(GpuMergeRowsExec.NUM_TARGET_ROWS_COPIED).add(10)
-      metrics(GpuMergeRowsExec.NUM_TARGET_ROWS_INSERTED).add(20)
+      metrics(GpuMergeRowsExec.NUM_TARGET_ROWS_COPIED).add(1L)
+      metrics(GpuMergeRowsExec.NUM_TARGET_ROWS_DELETED).add(2L)
+      metrics(GpuMergeRowsExec.NUM_TARGET_ROWS_UPDATED).add(3L)
+      metrics(GpuMergeRowsExec.NUM_TARGET_ROWS_INSERTED).add(4L)
+      metrics(GpuMergeRowsExec.NUM_TARGET_ROWS_MATCHED_UPDATED).add(5L)
+      metrics(GpuMergeRowsExec.NUM_TARGET_ROWS_MATCHED_DELETED).add(6L)
+      metrics(GpuMergeRowsExec.NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_UPDATED).add(7L)
+      metrics(GpuMergeRowsExec.NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_DELETED).add(8L)
       val summary = GpuV2WriteCommitShims.mergeSummaryFromMetrics(metrics)
-      assert(summary.numTargetRowsCopied === 10)
-      assert(summary.numTargetRowsInserted === 20)
-      assert(summary.numTargetRowsDeleted === 0)
-    } finally {
-      sc.stop()
+      assert(summary.numTargetRowsCopied === 1L)
+      assert(summary.numTargetRowsDeleted === 2L)
+      assert(summary.numTargetRowsUpdated === 3L)
+      assert(summary.numTargetRowsInserted === 4L)
+      assert(summary.numTargetRowsMatchedUpdated === 5L)
+      assert(summary.numTargetRowsMatchedDeleted === 6L)
+      assert(summary.numTargetRowsNotMatchedBySourceUpdated === 7L)
+      assert(summary.numTargetRowsNotMatchedBySourceDeleted === 8L)
+
+      val missingDeleted = metrics - GpuMergeRowsExec.NUM_TARGET_ROWS_DELETED
+      val withMissing = GpuV2WriteCommitShims.mergeSummaryFromMetrics(missingDeleted)
+      assert(withMissing.numTargetRowsDeleted === -1L)
+      assert(withMissing.numTargetRowsCopied === 1L)
+    }
+  }
+
+  test("commit traverses GpuMergeRowsExec and uses summary-aware overload") {
+    withSparkSession { spark =>
+      val child = spark.range(1).queryExecution.executedPlan
+      val output = Seq(AttributeReference("id", LongType, nullable = false)())
+      val merge = GpuMergeRowsExec(
+        Literal(true, BooleanType),
+        Literal(true, BooleanType),
+        Nil, Nil, Nil,
+        checkCardinality = false,
+        output,
+        child)
+      seedAllMergeMetrics(merge)
+      val recorder = new RecordingBatchWrite
+      GpuV2WriteCommitShims.commit(recorder, Array.empty, merge)
+      assert(recorder.summaryCommitCount === 1)
+      assert(recorder.plainCommitCount === 0)
+      assertAllMergeSummaryFields(recorder.lastSummary.get.asInstanceOf[MergeSummary])
+    }
+  }
+
+  test("commit preserves summary for CPU MergeRowsExec fallback child") {
+    withSparkSession { spark =>
+      val child = spark.range(1).queryExecution.executedPlan
+      val output = Seq(AttributeReference("id", LongType, nullable = false)())
+      val merge = MergeRowsExec(
+        Literal(true, BooleanType),
+        Literal(true, BooleanType),
+        Nil, Nil, Nil,
+        checkCardinality = false,
+        output,
+        child)
+      seedAllMergeMetrics(merge)
+      val recorder = new RecordingBatchWrite
+      GpuV2WriteCommitShims.commit(recorder, Array.empty, merge)
+      assert(recorder.summaryCommitCount === 1)
+      assert(recorder.plainCommitCount === 0)
+      assertAllMergeSummaryFields(recorder.lastSummary.get.asInstanceOf[MergeSummary])
     }
   }
 
@@ -112,6 +163,42 @@ class GpuV2WriteSummarySuite extends AnyFunSuite with FQSuiteName {
     assert(cpu.summaryCommitCount === 1)
     assert(cpu.lastSummary.get.asInstanceOf[MergeSummary].numTargetRowsCopied === 9)
     assert(cpu.lastSummary.get.asInstanceOf[MergeSummary].numTargetRowsInserted === 1)
+  }
+
+  private def withSparkSession[T](f: SparkSession => T): T = {
+    val spark = SparkSession.builder()
+      .master("local[1]")
+      .appName(getClass.getSimpleName)
+      .config("spark.ui.enabled", "false")
+      .config("spark.driver.host", "127.0.0.1")
+      .getOrCreate()
+    try {
+      f(spark)
+    } finally {
+      spark.stop()
+    }
+  }
+
+  private def seedAllMergeMetrics(plan: org.apache.spark.sql.execution.SparkPlan): Unit = {
+    plan.metrics(GpuMergeRowsExec.NUM_TARGET_ROWS_COPIED).add(1L)
+    plan.metrics(GpuMergeRowsExec.NUM_TARGET_ROWS_DELETED).add(2L)
+    plan.metrics(GpuMergeRowsExec.NUM_TARGET_ROWS_UPDATED).add(3L)
+    plan.metrics(GpuMergeRowsExec.NUM_TARGET_ROWS_INSERTED).add(4L)
+    plan.metrics(GpuMergeRowsExec.NUM_TARGET_ROWS_MATCHED_UPDATED).add(5L)
+    plan.metrics(GpuMergeRowsExec.NUM_TARGET_ROWS_MATCHED_DELETED).add(6L)
+    plan.metrics(GpuMergeRowsExec.NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_UPDATED).add(7L)
+    plan.metrics(GpuMergeRowsExec.NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_DELETED).add(8L)
+  }
+
+  private def assertAllMergeSummaryFields(summary: MergeSummary): Unit = {
+    assert(summary.numTargetRowsCopied === 1L)
+    assert(summary.numTargetRowsDeleted === 2L)
+    assert(summary.numTargetRowsUpdated === 3L)
+    assert(summary.numTargetRowsInserted === 4L)
+    assert(summary.numTargetRowsMatchedUpdated === 5L)
+    assert(summary.numTargetRowsMatchedDeleted === 6L)
+    assert(summary.numTargetRowsNotMatchedBySourceUpdated === 7L)
+    assert(summary.numTargetRowsNotMatchedBySourceDeleted === 8L)
   }
 
   private class RecordingBatchWrite extends BatchWrite {
