@@ -16,16 +16,14 @@
 
 package com.nvidia.spark.rapids.parquet
 
-import java.nio.ByteOrder
 import java.nio.charset.StandardCharsets
-import java.util.{ArrayList, Arrays}
+import java.util.Arrays
 
 import ai.rapids.cudf.HostMemoryBuffer
-import com.nvidia.spark.rapids.{GpuMetric, NoopMetric, NvtxRegistry, RapidsConf}
-import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+import com.nvidia.spark.rapids.{GpuMetric, NoopMetric, NvtxRegistry, PerfIO, RapidsConf}
+import com.nvidia.spark.rapids.Arm.closeOnExcept
 import com.nvidia.spark.rapids.filecache.FileCache
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile
-import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile.CopyRange
 import org.apache.hadoop.fs.Path
 import org.apache.parquet.hadoop.ParquetFileWriter.MAGIC
 
@@ -80,31 +78,8 @@ object ParquetFooterUtils {
   def readFooterBufferFromInputFile(
       inputFile: RapidsInputFile,
       filePath: Path): HostMemoryBuffer = {
-    val fileLen = inputFile.getLength
-    if (fileLen < MAGIC.length + FooterLengthSize + MAGIC.length) {
-      throw new RuntimeException(s"$filePath is not a Parquet file (too small length: $fileLen )")
-    }
     NvtxRegistry.PARQUET_READ_FOOTER_BYTES {
-      val trailerLength = FooterLengthSize + MAGIC.length
-      val (footerLength, magic) = withResource(
-          HostMemoryBuffer.allocate(trailerLength, false)) { trailerBuffer =>
-        inputFile.readTail(trailerLength, trailerBuffer)
-        val view = trailerBuffer.asByteBuffer(0, trailerLength).order(ByteOrder.LITTLE_ENDIAN)
-        val length = view.getInt()
-        val trailerMagic = new Array[Byte](MAGIC.length)
-        view.get(trailerMagic)
-        (length, trailerMagic)
-      }
-      verifyParquetMagic(filePath, magic)
-      val fIdx = footerIndex(filePath, fileLen, footerLength, FooterLengthSize)
-      val tailBytes = Math.toIntExact(fileLen - fIdx)
-      closeOnExcept(HostMemoryBuffer.allocate(tailBytes + MAGIC.length, false)) { outBuffer =>
-        outBuffer.setBytes(0, MAGIC, 0, MAGIC.length)
-        val ranges = new ArrayList[CopyRange](1)
-        ranges.add(new CopyRange(fIdx, tailBytes, MAGIC.length))
-        inputFile.readVectored(outBuffer, ranges)
-        outBuffer
-      }
+      PerfIO.readParquetFooterBuffer(inputFile, filePath, verifyParquetMagic)
     }
   }
 
