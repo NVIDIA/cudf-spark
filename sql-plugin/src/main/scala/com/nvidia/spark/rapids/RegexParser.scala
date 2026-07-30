@@ -203,10 +203,10 @@ class RegexParser(pattern: String) {
             consumeExpected('>')
             RegexGroup.Named(name)
           case _ => throw new RegexUnsupportedException(
-            s"Unexpected character after '<' in group", Some(pos-1))
+            "Unexpected character after '<' in group", Some(pos-1))
         }
         case '<' => throw new RegexUnsupportedException(
-          s"Pattern may not end with trailing '<' in group", Some(pos-1))
+          "Pattern may not end with trailing '<' in group", Some(pos-1))
       }
     } else {
       RegexGroup.Capturing
@@ -252,8 +252,7 @@ class RegexParser(pattern: String) {
               }
           }
         case None =>
-          throw new RegexUnsupportedException(
-                s"Unclosed character class", Some(pos))
+          throw new RegexUnsupportedException("Unclosed character class", Some(pos))
       }
     }
 
@@ -325,7 +324,7 @@ class RegexParser(pattern: String) {
       }
     }
     if (!characterClassComplete) {
-      throw new RegexUnsupportedException(s"Unclosed character class", Some(pos))
+      throw new RegexUnsupportedException("Unclosed character class", Some(pos))
     }
     characterClass
   }
@@ -1592,31 +1591,7 @@ class CudfRegexTranspiler(mode: RegexMode) {
         }
         RegexChoice(ll, rr)
 
-      case g @ RegexGroup(RegexGroup.PositiveLookahead |
-                          RegexGroup.NegativeLookahead |
-                          RegexGroup.PositiveLookbehind |
-                          RegexGroup.NegativeLookbehind |
-                          RegexGroup.Independent |
-                          RegexGroup.Named(_), _) =>
-        val msg = g.groupType match {
-          case RegexGroup.PositiveLookahead =>
-            "Positive lookahead groups are not supported"
-          case RegexGroup.NegativeLookahead =>
-            "Negative lookahead groups are not supported"
-          case RegexGroup.PositiveLookbehind =>
-            "Positive lookbehind groups are not supported"
-          case RegexGroup.NegativeLookbehind =>
-            "Negative lookbehind groups are not supported"
-          case RegexGroup.Independent =>
-            "Independent groups are not supported"
-          case RegexGroup.Named(_) =>
-            "Named capture groups are not supported"
-          case _ =>  // unreachable
-            throw new IllegalStateException(s"Unhandled group type: ${g.groupType}")
-        }
-        throw new RegexUnsupportedException(msg, g.position)
-
-      case RegexGroup(groupType, term) =>
+      case g @ RegexGroup(RegexGroup.Capturing | RegexGroup.NonCapturing, term) =>
         term match {
           case RegexSequence(parts) =>
             parts.foreach { part =>
@@ -1642,7 +1617,26 @@ class CudfRegexTranspiler(mode: RegexMode) {
             }
           case _ =>
         }
-        RegexGroup(groupType, rewrite(term, replacement, None, flags))
+        RegexGroup(g.groupType, rewrite(term, replacement, None, flags))
+
+      case g @ RegexGroup(_, _) =>
+        val msg = g.groupType match {
+          case RegexGroup.PositiveLookahead =>
+            "Positive lookahead groups are not supported"
+          case RegexGroup.NegativeLookahead =>
+            "Negative lookahead groups are not supported"
+          case RegexGroup.PositiveLookbehind =>
+            "Positive lookbehind groups are not supported"
+          case RegexGroup.NegativeLookbehind =>
+            "Negative lookbehind groups are not supported"
+          case RegexGroup.Independent =>
+            "Independent groups are not supported"
+          case RegexGroup.Named(_) =>
+            "Named capture groups are not supported"
+          case _ =>
+            s"Unknown group type: ${g.groupType}"
+        }
+        throw new RegexUnsupportedException(msg, g.position)
 
       case other =>
         throw new RegexUnsupportedException(s"Unhandled expression in transpiler: $other",
