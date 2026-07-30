@@ -38,11 +38,11 @@ spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.execution.datasources.v2
 
 import com.nvidia.spark.rapids.{FQSuiteName, LocalGpuMetric}
+import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.catalyst.expressions.Literal
 import org.apache.spark.sql.execution.datasources.v2.GpuMergeRowsExec._
 import org.apache.spark.sql.types.BooleanType
-import org.scalatest.funsuite.AnyFunSuite
 
 class GpuMergeRowMetricsSuite extends AnyFunSuite with FQSuiteName {
 

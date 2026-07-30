@@ -24,6 +24,7 @@ package org.apache.spark.sql.execution.datasources.v2
 
 import com.nvidia.spark.rapids.FQSuiteName
 import com.nvidia.spark.rapids.shims.{GpuMergeRowsKeepShims, GpuV2BatchWriteSummaryCommit}
+import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.sql.catalyst.expressions.Literal
@@ -32,7 +33,6 @@ import org.apache.spark.sql.connector.write.{BatchWrite, DataWriterFactory, Merg
   MergeSummaryImpl, PhysicalWriteInfo, WriterCommitMessage, WriteSummary}
 import org.apache.spark.sql.execution.metric.SQLMetrics
 import org.apache.spark.sql.types.{BooleanType, IntegerType}
-import org.scalatest.funsuite.AnyFunSuite
 
 class GpuV2WriteSummarySuite extends AnyFunSuite with FQSuiteName {
 
