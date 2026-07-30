@@ -18,7 +18,7 @@ from asserts import *
 from conftest import is_not_utc, is_supported_time_zone, is_dataproc_serverless_runtime
 from data_gen import *
 from spark_session import *
-from marks import allow_non_gpu, approximate_float, datagen_overrides, disable_ansi_mode, tz_sensitive_test
+from marks import allow_non_gpu, approximate_float, disable_ansi_mode, tz_sensitive_test
 from pyspark.sql.types import *
 from spark_init_internal import spark_version
 from datetime import date, datetime, timedelta
@@ -216,7 +216,6 @@ def test_ansi_cast_decimal_to(data_gen, to_type):
 
 
 @disable_ansi_mode  # With ANSI enabled, casting from wider to narrower types will fail.
-@datagen_overrides(seed=0, reason='https://github.com/NVIDIA/spark-rapids/issues/10050')
 @pytest.mark.parametrize('data_gen', [
     DecimalGen(7, 1),
     DecimalGen(9, 9),
@@ -237,7 +236,6 @@ def test_with_ansi_disabled_cast_decimal_to_decimal(data_gen, to_type):
             lambda spark : unary_op_df(spark, data_gen).select(f.col('a').cast(to_type), f.col('a')))
 
 
-@datagen_overrides(seed=0, reason='https://github.com/NVIDIA/spark-rapids/issues/10050')
 @pytest.mark.parametrize('data_gen', [
     DecimalGen(3, 0)], ids=meta_idfn('from:'))
 @pytest.mark.parametrize('to_type', [

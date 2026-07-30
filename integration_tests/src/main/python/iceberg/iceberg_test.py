@@ -15,7 +15,7 @@
 import pytest
 
 from asserts import assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_row_counts_equal, assert_gpu_fallback_collect, assert_spark_exception
-from conftest import is_iceberg_remote_catalog
+from conftest import is_iceberg_remote_catalog, is_iceberg_rest_catalog
 from data_gen import *
 from iceberg import get_full_table_name, iceberg_unsupported_mark, _build_tblprops, \
     _BASE_TBLPROPS_SQL, create_iceberg_table
@@ -627,6 +627,36 @@ def test_iceberg_parquet_read_from_url_encoded_path(spark_tmp_table_factory, rea
     with_cpu_session(setup_iceberg_table)
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.sql("SELECT * FROM {}".format(table)),
+        conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
+
+@iceberg
+@ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+@pytest.mark.skipif(not is_iceberg_rest_catalog(),
+                    reason="S3 path handling is exercised only with the REST catalog")
+def test_iceberg_parquet_read_from_uri_invalid_s3_path(spark_tmp_table_factory, reader_type):
+    table = get_full_table_name(spark_tmp_table_factory)
+    tmp_view = spark_tmp_table_factory.get()
+
+    def setup_iceberg_table(spark):
+        # A raw space is valid in an S3 object key but invalid in a URI. The RAPIDS reader must
+        # retain Iceberg's original key for the S3 request instead of using a URI-encoded path.
+        warehouse = spark.conf.get('spark.sql.catalog.spark_catalog.warehouse').rstrip('/')
+        data_path = f'{warehouse}/{spark_tmp_table_factory.get()} uri invalid path/data'
+        df = two_col_df(spark, long_gen, string_gen).sortWithinPartitions('b')
+        df.createOrReplaceTempView(tmp_view)
+        props = _build_tblprops({'write.data.path': data_path})
+        props_sql = ", ".join(f"'{k}' = '{v}'" for k, v in props.items())
+        spark.sql(f"CREATE TABLE {table} USING ICEBERG TBLPROPERTIES ({props_sql}) "
+                  f"AS SELECT * FROM {tmp_view}")
+
+    with_cpu_session(setup_iceberg_table)
+    assert with_gpu_session(
+        lambda spark:
+            spark._jvm.com.nvidia.spark.rapids.fileio.RapidsInputFiles.isS3PerfEnabled()), \
+        "PerfIO S3 must be enabled at Spark startup for REST catalog tests"
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(f"SELECT * FROM {table}"),
         conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
 @iceberg

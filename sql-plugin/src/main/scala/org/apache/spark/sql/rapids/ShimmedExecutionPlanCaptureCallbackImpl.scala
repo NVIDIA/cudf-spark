@@ -18,6 +18,7 @@ package org.apache.spark.sql.rapids
 
 import scala.collection.convert.ImplicitConversions.`collection AsScalaIterable`
 import scala.collection.mutable.{ArrayBuffer, Map => MutableMap}
+import scala.util.Try
 import scala.util.matching.Regex
 
 import com.nvidia.spark.rapids.{GpuCpuBridgeExpression, PlanShims, PlanUtils, ShimLoaderTemp}
@@ -25,8 +26,9 @@ import com.nvidia.spark.rapids.{GpuCpuBridgeExpression, PlanShims, PlanUtils, Sh
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.execution.{ExecSubqueryExpression, QueryExecution, ReusedSubqueryExec, SparkPlan}
-import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, QueryStageExec}
-import org.apache.spark.sql.execution.exchange.ReusedExchangeExec
+import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, QueryStageExec,
+  ShuffleQueryStageExec}
+import org.apache.spark.sql.execution.exchange.{ReusedExchangeExec, ShuffleExchangeLike}
 
 
 /**
@@ -225,6 +227,47 @@ class ShimmedExecutionPlanCaptureCallbackImpl extends ExecutionPlanCaptureCallba
     containsPlan(gpuPlan, className)
   }
 
+  override def containsShuffleExchangeWithOrigin(
+      plan: SparkPlan,
+      className: String,
+      shuffleOrigin: String): Boolean = {
+    containsPlanMatching(extractExecutedPlan(plan), {
+      case exchange: ShuffleExchangeLike =>
+        PlanUtils.sameClass(exchange, className) &&
+            exchange.shuffleOrigin.toString == shuffleOrigin
+      case _ => false
+    })
+  }
+
+  override def containsFinalAdaptivePlan(plan: SparkPlan): Boolean = {
+    containsPlanMatching(plan, {
+      case adaptive: AdaptiveSparkPlanExec =>
+        // DBR exposes isExecutedPlanFinal while upstream Spark releases use isFinalPlan.
+        // Keep this test-only inspection helper source-compatible with both APIs.
+        Seq("isExecutedPlanFinal", "isFinalPlan").iterator
+          .flatMap(name => Try(adaptive.getClass.getMethod(name)).toOption)
+          .take(1)
+          .exists(_.invoke(adaptive).asInstanceOf[Boolean])
+      case _ => false
+    })
+  }
+
+  override def containsShuffleQueryStageWithExchangeOrigin(
+      plan: SparkPlan,
+      className: String,
+      shuffleOrigin: String): Boolean = {
+    containsPlanMatching(plan, {
+      case stage: ShuffleQueryStageExec =>
+        containsPlanMatching(stage.plan, {
+          case exchange: ShuffleExchangeLike =>
+            PlanUtils.sameClass(exchange, className) &&
+                exchange.shuffleOrigin.toString == shuffleOrigin
+          case _ => false
+        })
+      case _ => false
+    })
+  }
+
   private def containsExpression(exp: Expression, className: String,
       regexMap: MutableMap[String, Regex] // regex memoization
   ): Boolean = exp.find {
@@ -278,4 +321,3 @@ class ShimmedExecutionPlanCaptureCallbackImpl extends ExecutionPlanCaptureCallba
       p.children.exists(plan => containsPlanMatching(plan, f))
   }.nonEmpty
 }
-
