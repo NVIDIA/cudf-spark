@@ -637,23 +637,19 @@ def test_iceberg_parquet_read_from_url_encoded_path(spark_tmp_table_factory, rea
 def test_iceberg_parquet_read_from_uri_invalid_s3_path(spark_tmp_table_factory, reader_type):
     table = get_full_table_name(spark_tmp_table_factory)
     tmp_view = spark_tmp_table_factory.get()
+    partition_gen = StringGen(pattern="(.|\n){1,10}", nullable=False)\
+        .with_special_case('uri invalid path', 1000)
 
     def setup_iceberg_table(spark):
-        # A raw space is valid in an S3 object key but invalid in a URI. The RAPIDS reader must
-        # retain Iceberg's original key for the S3 request instead of using a URI-encoded path.
-        warehouse = spark.conf.get('spark.sql.catalog.spark_catalog.warehouse').rstrip('/')
-        data_path = f'{warehouse}/{spark_tmp_table_factory.get()} uri invalid path/data'
-        df = two_col_df(spark, long_gen, string_gen).sortWithinPartitions('b')
+        df = two_col_df(spark, long_gen, partition_gen).sortWithinPartitions('b')
         df.createOrReplaceTempView(tmp_view)
-        props = _build_tblprops({'write.data.path': data_path})
-        props_sql = ", ".join(f"'{k}' = '{v}'" for k, v in props.items())
-        spark.sql(f"CREATE TABLE {table} USING ICEBERG TBLPROPERTIES ({props_sql}) "
-                  f"AS SELECT * FROM {tmp_view}")
+        spark.sql("CREATE TABLE {} USING ICEBERG PARTITIONED BY (b) ".format(table) +
+                  _NO_FANOUT + " AS SELECT * FROM {}".format(tmp_view))
 
     with_cpu_session(setup_iceberg_table)
     assert with_gpu_session(
-        lambda spark:
-            spark._jvm.com.nvidia.spark.rapids.fileio.RapidsInputFiles.isS3PerfEnabled()), \
+        lambda spark: spark.sparkContext.getConf().get(
+            'spark.rapids.perfio.s3.enabled', 'false') == 'true'), \
         "PerfIO S3 must be enabled at Spark startup for REST catalog tests"
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.sql(f"SELECT * FROM {table}"),
