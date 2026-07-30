@@ -98,8 +98,8 @@ def test_literal(spark_tmp_path, data_gen):
     data_path = spark_tmp_path + '/AST_TEST_DATA'
     with_cpu_session(lambda spark: gen_df(spark, [("a", IntegerGen())]).write.parquet(data_path))
     scalar = with_cpu_session(lambda spark: gen_scalar(data_gen, force_no_nulls=True))
-    assert_gpu_project_without_ast(
-        func=lambda spark: spark.read.parquet(data_path).select(scalar))
+    assert_gpu_ast(is_supported=True,
+                   func=lambda spark: spark.read.parquet(data_path).select(scalar))
 
 @pytest.mark.parametrize('data_gen', [boolean_gen, byte_gen, short_gen, int_gen, long_gen, float_gen, double_gen, timestamp_gen, date_gen], ids=idfn)
 def test_null_literal(spark_tmp_path, data_gen):
@@ -265,7 +265,8 @@ def test_folded_null_literal_stays_on_regular_project(data_gen):
             f.col('a') == f.lit(None).cast(data_gen.data_type),
             f.col('a') == f.col('b')))
 
-# Keep null scalars from folding unsupported comparisons into AST-compatible null literals.
+# Use non-null scalars here because NullPropagation otherwise folds the comparisons into null
+# literals, bypassing the comparison AST compatibility these tests are intended to verify.
 @pytest.mark.parametrize('data_descr', ast_comparable_descrs, ids=idfn)
 def test_eq(data_descr):
     (s1, s2) = with_cpu_session(

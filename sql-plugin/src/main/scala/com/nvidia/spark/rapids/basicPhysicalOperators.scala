@@ -55,6 +55,9 @@ class GpuProjectExecMeta(
     p: Option[RapidsMeta[_, _, _]],
     r: DataFromReplacementRule) extends SparkPlanMeta[ProjectExec](proj, conf, p, r)
     with Logging {
+  private def isTopLevelNullLiteral(expr: Expression): Boolean =
+    GpuExpressionsUtils.extractGpuLit(expr).exists(_.value == null)
+
   override def convertToGpu(): GpuExec = {
     // Force list to avoid recursive Java serialization of lazy list Seq implementation
     val gpuExprs = childExprs.map(_.convertToGpu().asInstanceOf[NamedExpression]).toList
@@ -62,9 +65,9 @@ class GpuProjectExecMeta(
     val projectList = if (conf.isProjectAstEnabled) {
       val astExprs = childExprs.zip(gpuExprs).map { case (meta, expr) =>
         // cuDF requires return column is fixed width
-        // Top-level literals are cheaper on the regular projection path.
+        // Regular projection can reuse its cached null vector across outputs.
         if (GpuBatchUtils.isFixedWidth(expr.dataType) && meta.canThisBeAst &&
-            GpuExpressionsUtils.extractGpuLit(expr).isEmpty) {
+            !isTopLevelNullLiteral(expr)) {
           GpuProjectAstExpression.wrap(expr)
         } else {
           expr
@@ -77,9 +80,9 @@ class GpuProjectExecMeta(
           case expr if !GpuBatchUtils.isFixedWidth(expr.dataType) =>
             s"  $expr cannot be converted to AST because its return type " +
               s"${expr.dataType} is not fixed-width\n"
-          case expr if GpuExpressionsUtils.extractGpuLit(expr).isDefined =>
-            s"  $expr will use the regular GPU projection because top-level literals " +
-              "are cheaper there\n"
+          case expr if isTopLevelNullLiteral(expr) =>
+            s"  $expr will use the regular GPU projection so null outputs can reuse " +
+              "the cached null vector\n"
         }).mkString
         if (explain.nonEmpty) {
           logWarning(s"AST PROJECT\n$explain")
