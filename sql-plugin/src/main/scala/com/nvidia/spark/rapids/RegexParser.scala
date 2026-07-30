@@ -900,6 +900,7 @@ class CudfRegexTranspiler(mode: RegexMode) {
 
     val componentsWithoutLinefeed = components.filterNot {
       case RegexChar(ch) => ch == '\r'
+      case RegexEscaped(ch) => ch == 'r'
       case RegexCharacterRange(startRegex, RegexChar(end)) =>
         val start = startRegex match {
           case RegexChar(ch) => ch

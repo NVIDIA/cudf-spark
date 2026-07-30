@@ -785,6 +785,8 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     test(raw"[^\x0D]", raw"[^\r]")
     test(raw"[^\x{D}]", raw"[^\r]")
     test(raw"[^\015]", raw"[^\r]")
+    test(raw"\S", "[^ \u000b\\n\\t\\r\\f]")
+    test(raw"\V", "[^\u000B\u0085\u2028\u2029\\n\\f\\r]")
   }
 
   test("compare CPU and GPU: regexp replace negated character class") {
