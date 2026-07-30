@@ -195,12 +195,15 @@ class OrcPerfIOReadSuite extends AnyFunSuite with Matchers with MockitoSugar {
 
     override protected def fileCache: FileCache = testFileCache
 
+    var lastStripeFooterBufferWasDirect: Option[Boolean] = None
+
     // Required by Spark 4.x ORC's DataReader; harmless as an extra method on Spark 3.x.
     def releaseAllBuffers(): Unit = {}
 
     override protected def parseStripeFooter(
         buf: ByteBuffer,
         size: Int): OrcProto.StripeFooter = {
+      lastStripeFooterBufferWasDirect = Some(buf.isDirect)
       val bytes = new Array[Byte](size)
       buf.duplicate().get(bytes)
       OrcProto.StripeFooter.parseFrom(new ByteArrayInputStream(bytes))
@@ -447,6 +450,7 @@ class OrcPerfIOReadSuite extends AnyFunSuite with Matchers with MockitoSugar {
     when(stripe.getFooterLength).thenReturn(footerBytes.length.toLong)
 
     reader.readStripeFooter(stripe) shouldEqual footer
+    reader.lastStripeFooterBufferWasDirect shouldEqual Some(false)
     inputFile.vectoredReads.flatten shouldEqual
       Seq(RecordedRange(20, footerBytes.length, 0))
     cache.data((20L, footerBytes.length.toLong)) shouldEqual footerBytes

@@ -164,7 +164,9 @@ abstract class GpuOrcDataReaderBase(
         try {
           withResource(HostMemoryBuffer.allocate(tailLength, false)) { hmb =>
             readRangesToHostMemory(hmb, Seq(new CopyRange(offset, tailLength, 0)))
-            val footer = parseStripeFooter(hmb.asByteBuffer(0, tailLength), tailLength)
+            val tailBuf = ByteBuffer.allocate(tailLength)
+            hmb.getBytes(tailBuf.array(), 0, 0, tailLength)
+            val footer = parseStripeFooter(tailBuf, tailLength)
             fileCache.startDataRangeCache(inputFile, offset, tailLength).foreach { token =>
               token.complete(hmb.slice(0, tailLength))
             }
