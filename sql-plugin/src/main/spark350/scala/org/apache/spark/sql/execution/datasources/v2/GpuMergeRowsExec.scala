@@ -231,6 +231,20 @@ object GpuMergeRowsExec {
       }
     }
 
+    /** Add counts from a successful attempt; used after withRetryNoSplit returns. */
+    def addAll(other: MergeRowMetrics): Unit = {
+      numTargetRowsCopied += other.numTargetRowsCopied.value
+      numTargetRowsInserted += other.numTargetRowsInserted.value
+      numTargetRowsDeleted += other.numTargetRowsDeleted.value
+      numTargetRowsUpdated += other.numTargetRowsUpdated.value
+      numTargetRowsMatchedUpdated += other.numTargetRowsMatchedUpdated.value
+      numTargetRowsMatchedDeleted += other.numTargetRowsMatchedDeleted.value
+      numTargetRowsNotMatchedBySourceUpdated +=
+        other.numTargetRowsNotMatchedBySourceUpdated.value
+      numTargetRowsNotMatchedBySourceDeleted +=
+        other.numTargetRowsNotMatchedBySourceDeleted.value
+    }
+
     def record(instruction: GpuInstruction, numRows: Long, sourcePresent: Boolean): Unit = {
       if (numRows > 0) {
         instruction match {
@@ -249,6 +263,19 @@ object GpuMergeRowsExec {
         }
       }
     }
+  }
+
+  object MergeRowMetrics {
+    /** Per-attempt staging metrics that are discarded on OOM retry. */
+    def local(): MergeRowMetrics = MergeRowMetrics(
+      new LocalGpuMetric(),
+      new LocalGpuMetric(),
+      new LocalGpuMetric(),
+      new LocalGpuMetric(),
+      new LocalGpuMetric(),
+      new LocalGpuMetric(),
+      new LocalGpuMetric(),
+      new LocalGpuMetric())
   }
 
   sealed trait GpuInstruction extends GpuUnevaluable with ShimExpression {
@@ -327,6 +354,8 @@ class GpuMergeBatchIterator(
     opTime: GpuMetric,
     mergeMetrics: GpuMergeRowsExec.MergeRowMetrics) extends Iterator[ColumnarBatch] {
 
+  import GpuMergeRowsExec.MergeRowMetrics
+
   override def hasNext: Boolean = inputIter.hasNext
 
   override def next(): ColumnarBatch = {
@@ -342,10 +371,17 @@ class GpuMergeBatchIterator(
 
   /**
    * Process a single columnar batch, applying merge logic.
+   *
+   * MERGE row metrics are staged per attempt and only flushed after
+   * `withRetryNoSplit` succeeds. Recording into the published metrics inside
+   * the retry callback would double-count rows when a retryable GPU OOM
+   * reprocesses the same batch.
    */
   private def processBatch(batch: ColumnarBatch): ColumnarBatch = {
-
-    withRetryNoSplit(batch) { _ =>
+    var attemptMetrics: MergeRowMetrics = null
+    val result = withRetryNoSplit(batch) { _ =>
+      // Fresh staging metrics for each attempt so failed retries are discarded.
+      attemptMetrics = MergeRowMetrics.local()
       // Evaluate presence flags
       val outputs = new ArrayBuffer[SpillableColumnarBatch](
         matchedInstructionExecs.size + notMatchedInstructionExecs.size
@@ -361,19 +397,19 @@ class GpuMergeBatchIterator(
 
             val matchedMask = sourcePresent.getBase.and(targetPresent.getBase)
             processInstructionSet(inputDataTypes, outputs, batch,
-              matchedMask, matchedInstructionExecs, sourcePresent = true)
+              matchedMask, matchedInstructionExecs, sourcePresent = true, attemptMetrics)
 
             val notMatchedMask = withResource(targetPresent.getBase.not()) { noTargetMask =>
               sourcePresent.getBase.and(noTargetMask)
             }
             processInstructionSet(inputDataTypes, outputs, batch, notMatchedMask,
-                notMatchedInstructionExecs, sourcePresent = true)
+                notMatchedInstructionExecs, sourcePresent = true, attemptMetrics)
 
             val notMatchedBySrcMask = withResource(sourcePresent.getBase.not()) { noSourceMask =>
               targetPresent.getBase.and(noSourceMask)
             }
             processInstructionSet(inputDataTypes, outputs, batch, notMatchedBySrcMask,
-                notMatchedBySourceInstructionExecs, sourcePresent = false)
+                notMatchedBySourceInstructionExecs, sourcePresent = false, attemptMetrics)
           }
         }
       }
@@ -385,6 +421,8 @@ class GpuMergeBatchIterator(
         spillable.get.getColumnarBatch()
       }
     }
+    mergeMetrics.addAll(attemptMetrics)
+    result
   }
 
   /**
@@ -397,7 +435,8 @@ class GpuMergeBatchIterator(
      batch: ColumnarBatch,
      mask: ColumnVector,
      instructionExecs: Seq[GpuInstruction],
-     sourcePresent: Boolean): Unit = {
+     sourcePresent: Boolean,
+     attemptMetrics: MergeRowMetrics): Unit = {
 
     if (instructionExecs.isEmpty) {
       mask.close()
@@ -431,7 +470,7 @@ class GpuMergeBatchIterator(
       withResource(condMask) { _ =>
         val thisFilteredBatch = GpuColumnVector.filter(batch, dataTypes, condMask)
         withResource(thisFilteredBatch) { filtered =>
-          mergeMetrics.record(instructionExec, filtered.numRows(), sourcePresent)
+          attemptMetrics.record(instructionExec, filtered.numRows(), sourcePresent)
           outputs ++= instructionExec.applyOutputs(filtered)
             .map(SpillableColumnarBatch
               .apply(_, SpillPriorities.ACTIVE_ON_DECK_PRIORITY))
@@ -440,7 +479,7 @@ class GpuMergeBatchIterator(
     }
 
     processInstructionSet(dataTypes, outputs, batch, nextMask, instructionExecs.tail,
-      sourcePresent)
+      sourcePresent, attemptMetrics)
   }
 }
 
