@@ -215,7 +215,8 @@ trait GpuV2TableWriteExec extends V2CommandExec with UnaryExecNode with GpuExec 
       postFinalPlanUpdateToSqlUi()
 
       logInfo(s"Data source write support $batchWrite is committing.")
-      batchWrite.commit(messages)
+      // Spark 4.1+ forwards a WriteSummary (e.g. MergeSummary from GpuMergeRowsExec).
+      GpuV2WriteCommitShims.commit(batchWrite, messages, finalQuery)
       logInfo(s"Data source write support $batchWrite committed.")
       commitProgress = Some(StreamWriterCommitProgress(totalNumRowsAccumulator.value))
     } catch {
