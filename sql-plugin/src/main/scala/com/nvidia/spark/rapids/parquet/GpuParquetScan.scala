@@ -574,6 +574,8 @@ protected case class GpuParquetFileFilterHandler(
       val scheme = filePath.toUri.getScheme
       if (scheme != null && scheme.startsWith("s3")) {
         GpuTaskMetrics.get.recordPerfioS3BackendOnce()
+      } else if (result.isDefined && (scheme == "gs" || scheme == "gcs")) {
+        GpuTaskMetrics.get.recordPerfioGCSBackendOnce()
       }
       result.getOrElse(readFooterBufUsingHadoop(fileIO, filePath))
     } else {
