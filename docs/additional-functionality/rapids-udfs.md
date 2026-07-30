@@ -152,7 +152,7 @@ The GPU support for Pandas UDF is an experimental feature, and may change at any
 ---
 
 GPU support for Pandas UDF is built on Apache Spark's [Pandas UDF(user defined
-function)](https://archive.apache.org/dist/spark/docs/3.2.0/api/python/user_guide/sql/arrow_pandas.html#pandas-udfs-a-k-a-vectorized-udfs),
+function)](https://spark.apache.org/docs/3.5.7/api/python/user_guide/sql/arrow_pandas.html#pandas-udfs-a-k-a-vectorized-udfs),
 and has two features:
 
 - **GPU Assignment(Scheduling) in Python Process**: Let the Python process share the same GPU with
@@ -201,12 +201,12 @@ Accelerator has a 1-1 mapping support for each of them.
 
   |Spark Execution Plan|Data Transfer Accelerated|Use Case|
   |----------------------|----------|--------|
-  |ArrowEvalPythonExec|yes|[Series to Series](https://archive.apache.org/dist/spark/docs/3.2.0/api/python/user_guide/sql/arrow_pandas.html#series-to-series), [Iterator of Series to Iterator of Series](https://archive.apache.org/dist/spark/docs/3.2.0/api/python/user_guide/sql/arrow_pandas.html#iterator-of-series-to-iterator-of-series) and [Iterator of Multiple Series to Iterator of Series](https://archive.apache.org/dist/spark/docs/3.2.0/api/python/user_guide/sql/arrow_pandas.html#iterator-of-multiple-series-to-iterator-of-series)|
-  |MapInPandasExec|yes|[Map](https://archive.apache.org/dist/spark/docs/3.2.0/api/python/user_guide/sql/arrow_pandas.html#map)|
-  |WindowInPandasExec|yes|[Window](https://archive.apache.org/dist/spark/docs/3.2.0/api/python/user_guide/sql/arrow_pandas.html#series-to-scalar)|
-  |FlatMapGroupsInPandasExec|yes|[Grouped Map](https://archive.apache.org/dist/spark/docs/3.2.0/api/python/user_guide/sql/arrow_pandas.html#grouped-map)|
-  |AggregateInPandasExec|yes|[Aggregate](https://archive.apache.org/dist/spark/docs/3.2.0/api/python/user_guide/sql/arrow_pandas.html#series-to-scalar)|
-  |FlatMapCoGroupsInPandasExec|yes|[Co-grouped Map](https://archive.apache.org/dist/spark/docs/3.2.0/api/python/user_guide/sql/arrow_pandas.html#co-grouped-map)|
+  |ArrowEvalPythonExec|yes|[Series to Series](https://spark.apache.org/docs/3.5.7/api/python/user_guide/sql/arrow_pandas.html#series-to-series), [Iterator of Series to Iterator of Series](https://spark.apache.org/docs/3.5.7/api/python/user_guide/sql/arrow_pandas.html#iterator-of-series-to-iterator-of-series) and [Iterator of Multiple Series to Iterator of Series](https://spark.apache.org/docs/3.5.7/api/python/user_guide/sql/arrow_pandas.html#iterator-of-multiple-series-to-iterator-of-series)|
+  |MapInPandasExec|yes|[Map](https://spark.apache.org/docs/3.5.7/api/python/user_guide/sql/arrow_pandas.html#map)|
+  |WindowInPandasExec|yes|[Window](https://spark.apache.org/docs/3.5.7/api/python/user_guide/sql/arrow_pandas.html#series-to-scalar)|
+  |FlatMapGroupsInPandasExec|yes|[Grouped Map](https://spark.apache.org/docs/3.5.7/api/python/user_guide/sql/arrow_pandas.html#grouped-map)|
+  |AggregateInPandasExec|yes|[Aggregate](https://spark.apache.org/docs/3.5.7/api/python/user_guide/sql/arrow_pandas.html#series-to-scalar)|
+  |FlatMapCoGroupsInPandasExec|yes|[Co-grouped Map](https://spark.apache.org/docs/3.5.7/api/python/user_guide/sql/arrow_pandas.html#co-grouped-map)|
 
 
 ### Other Configuration

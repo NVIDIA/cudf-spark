@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,9 +19,9 @@ package com.nvidia.spark.udf
 import scala.annotation.tailrec
 
 import javassist.CtClass
+import org.slf4j.LoggerFactory
 
 import org.apache.spark.SparkException
-import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.types._
 
@@ -42,7 +42,7 @@ import org.apache.spark.sql.types._
  *
  * @param function the original Scala UDF provided by the user
  */
-case class CatalystExpressionBuilder(private val function: AnyRef) extends Logging {
+case class CatalystExpressionBuilder(private val function: AnyRef) {
   final private val lambdaReflection: LambdaReflection = LambdaReflection(function)
 
   final private val cfg = CFG(lambdaReflection)
@@ -72,23 +72,28 @@ case class CatalystExpressionBuilder(private val function: AnyRef) extends Loggi
     // pick first of the Basic Blocks, and start recursing
     val entryBlock = cfg.basicBlocks.head
 
-    logDebug(s"[CatalystExpressionBuilder] Attempting to compile: ${function}, " +
-        s"with children: ${children}, " + s"entry block: ${entryBlock}, and " +
-        s"entry state: ${entryState}")
+    if (CatalystExpressionBuilder.log.isDebugEnabled) {
+      CatalystExpressionBuilder.log.debug(
+        s"[CatalystExpressionBuilder] Attempting to compile: ${function}, " +
+            s"with children: ${children}, " + s"entry block: ${entryBlock}, and " +
+            s"entry state: ${entryState}")
+    }
 
     // start recursing
     val compiled = doCompile(List(entryBlock), Map(entryBlock -> entryState)).map { e =>
       if (lambdaReflection.ret == CtClass.booleanType) {
         // JVM bytecode returns an integer value when the return type is
         // boolean, hence the cast.
-        CatalystExpressionBuilder.simplify(Cast(e, BooleanType))
+        CatalystExpressionBuilder.simplify(new Cast(e, BooleanType, None))
       } else {
         e
       }
     }
 
     if (compiled.isEmpty) {
-      logDebug(s"[CatalystExpressionBuilder] failed to compile")
+      if (CatalystExpressionBuilder.log.isDebugEnabled) {
+        CatalystExpressionBuilder.log.debug(s"[CatalystExpressionBuilder] failed to compile")
+      }
     } else {
       val expr = compiled.get
       val internal = expr.find(_.isInstanceOf[Repr.CompilerInternal])
@@ -96,7 +101,10 @@ case class CatalystExpressionBuilder(private val function: AnyRef) extends Loggi
         throw new IllegalStateException(
           s"compiled UDF has compiler internal expression $e: $expr")
       }
-      logDebug(s"[CatalystExpressionBuilder] compiled expression: $expr")
+      if (CatalystExpressionBuilder.log.isDebugEnabled) {
+        CatalystExpressionBuilder.log.debug(
+          s"[CatalystExpressionBuilder] compiled expression: $expr")
+      }
     }
 
     compiled
@@ -156,7 +164,9 @@ case class CatalystExpressionBuilder(private val function: AnyRef) extends Loggi
     // find the state associated with this BB
     val state: State = states(basicBlock)
 
-    logTrace(s"States for basic block ${basicBlock} => ${state}")
+    if (CatalystExpressionBuilder.log.isTraceEnabled) {
+      CatalystExpressionBuilder.log.trace(s"States for basic block ${basicBlock} => ${state}")
+    }
 
     /**
      * Iterate through the instruction table for the BB:
@@ -274,7 +284,9 @@ case class CatalystExpressionBuilder(private val function: AnyRef) extends Loggi
  * simplify a directly translated catalyst expression (from bytecode) into something simpler
  * that the remaining catalyst optimizations can handle.
  */
-object CatalystExpressionBuilder extends Logging {
+object CatalystExpressionBuilder {
+  private val log = LoggerFactory.getLogger(classOf[CatalystExpressionBuilder])
+
   /** simplify: given a raw converted catalyst expression, attempt to match patterns to simplify
    * before handing it over to catalyst optimizers (the LogicalPlan does this later).
    *
@@ -473,8 +485,8 @@ object CatalystExpressionBuilder extends Logging {
           ce.child match {
             case If(c, t, f) =>
           simplifyExpr(If(simplifyExpr(c),
-            simplifyExpr(Cast(t, BooleanType, ce.timeZoneId)),
-            simplifyExpr(Cast(f, BooleanType, ce.timeZoneId))))
+            simplifyExpr(new Cast(t, BooleanType, ce.timeZoneId)),
+            simplifyExpr(new Cast(f, BooleanType, ce.timeZoneId))))
           }
         case If(c, Repr.ArrayBuffer(t), Repr.ArrayBuffer(f)) => Repr.ArrayBuffer(If(c, t, f))
         case If(c, Repr.StringBuilder(t), Repr.StringBuilder(f)) => Repr.StringBuilder(If(c, t, f))
@@ -483,7 +495,10 @@ object CatalystExpressionBuilder extends Logging {
         case If(c, t, f) => If(simplifyExpr(c), simplifyExpr(t), simplifyExpr(f))
         case _ => expr
       }
-      logDebug(s"[CatalystExpressionBuilder] simplify: ${expr} ==> ${res}")
+      if (CatalystExpressionBuilder.log.isDebugEnabled) {
+        CatalystExpressionBuilder.log.debug(
+          s"[CatalystExpressionBuilder] simplify: ${expr} ==> ${res}")
+      }
       res
     }
 

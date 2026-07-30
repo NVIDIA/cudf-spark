@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,9 +22,9 @@ import scala.collection.immutable.{HashMap, SortedMap, SortedSet}
 import CatalystExpressionBuilder.simplify
 import javassist.bytecode.{CodeIterator, ConstPool, InstructionPrinter, Opcode}
 import javassist.bytecode.analysis.Util
+import org.slf4j.LoggerFactory
 
 import org.apache.spark.SparkException
-import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.expressions._
 
 /**
@@ -43,7 +43,7 @@ import org.apache.spark.sql.catalyst.expressions._
  *
  * @param instructionTable
  */
-case class BB(instructionTable: SortedMap[Int, Instruction]) extends Logging {
+case class BB(instructionTable: SortedMap[Int, Instruction]) {
   def offset: Int = instructionTable.head._1
 
   def last: (Int, Instruction) = instructionTable.last
@@ -54,18 +54,24 @@ case class BB(instructionTable: SortedMap[Int, Instruction]) extends Logging {
 
   def propagateState(cfg: CFG, states: Map[BB, State]): Map[BB, State] = {
     val state@State(_, _, cond, expr) = states(this)
-    logDebug(s"[BB.propagateState] propagating condition: ${cond} from state ${state} " +
-        s"onto states: ${states}")
+    if (BB.log.isDebugEnabled) {
+      BB.log.debug(s"[BB.propagateState] propagating condition: ${cond} from state ${state} " +
+          s"onto states: ${states}")
+    }
     lastInstruction.opcode match {
       case Opcode.IF_ICMPEQ | Opcode.IF_ICMPNE | Opcode.IF_ICMPLT |
            Opcode.IF_ICMPGE | Opcode.IF_ICMPGT | Opcode.IF_ICMPLE |
            Opcode.IFLT | Opcode.IFLE | Opcode.IFGT | Opcode.IFGE |
            Opcode.IFEQ | Opcode.IFNE | Opcode.IFNULL | Opcode.IFNONNULL => {
-        logTrace(s"[BB.propagateState] lastInstruction: ${lastInstruction.instructionStr}")
+        if (BB.log.isTraceEnabled) {
+          BB.log.trace(s"[BB.propagateState] lastInstruction: ${lastInstruction.instructionStr}")
+        }
 
         // An if statement has both a false and a true successor
         val (0, falseSucc) :: (1, trueSucc) :: Nil = cfg.successor(this)
-        logTrace(s"[BB.propagateState] falseSucc ${falseSucc} trueSuccc ${trueSucc}")
+        if (BB.log.isTraceEnabled) {
+          BB.log.trace(s"[BB.propagateState] falseSucc ${falseSucc} trueSuccc ${trueSucc}")
+        }
 
         // cond is the entry condition into the condition block, and expr is the
         // actual condition for IF* (see Instruction.ifOp).
@@ -80,7 +86,9 @@ case class BB(instructionTable: SortedMap[Int, Instruction]) extends Logging {
         val falseState = state.copy(cond = simplify(And(cond, Not(expr.get))))
         val trueState = state.copy(cond = simplify(And(cond, expr.get)))
 
-        logDebug(s"[BB.propagateState] States before: ${states}")
+        if (BB.log.isDebugEnabled) {
+          BB.log.debug(s"[BB.propagateState] States before: ${states}")
+        }
 
         // Each successor may already have the state populated if it has
         // multiple predecessors.
@@ -88,7 +96,9 @@ case class BB(instructionTable: SortedMap[Int, Instruction]) extends Logging {
         val newStates = (states
             + (falseSucc -> falseState.merge(states.get(falseSucc)))
             + (trueSucc -> trueState.merge(states.get(trueSucc))))
-        logDebug(s"[BB.propagateState] States after: ${newStates}")
+        if (BB.log.isDebugEnabled) {
+          BB.log.debug(s"[BB.propagateState] States after: ${newStates}")
+        }
         newStates
       }
       case Opcode.TABLESWITCH | Opcode.LOOKUPSWITCH =>
@@ -118,6 +128,10 @@ case class BB(instructionTable: SortedMap[Int, Instruction]) extends Logging {
         states + (successor -> state.merge(states.get(successor)))
     }
   }
+}
+
+object BB {
+  private val log = LoggerFactory.getLogger(classOf[BB])
 }
 
 /**

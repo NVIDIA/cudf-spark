@@ -51,7 +51,7 @@ optimizer rules:
 
 ```scala
 extensions.injectColumnar(_ => ColumnarOverrideRules())
-extensions.injectQueryStagePrepRule(_ => GpuQueryStagePrepOverrides())
+extensions.injectQueryStagePrepRule(_ => new GpuQueryStagePrepOverrides)
 ```
 
 The `ColumnarOverrideRules` are used whether AQE is enabled or not, and the

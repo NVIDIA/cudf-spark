@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,14 +19,13 @@ package com.nvidia.spark.udf
 import ai.rapids.cudf.{NvtxColor, NvtxRange}
 import com.nvidia.spark.rapids.RapidsConf
 
-import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.expressions.{Expression, NamedExpression, ScalaUDF}
 import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, Project}
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.rapids.GpuScalaUDF.getRapidsUDFInstance
 
 
-case class LogicalPlanRules() extends Rule[LogicalPlan] with Logging {
+class LogicalPlanRules extends Rule[LogicalPlan] {
   def replacePartialFunc(plan: LogicalPlan): PartialFunction[Expression, Expression] = {
     case d: Expression => {
       val nvtx = new NvtxRange("replace UDF", NvtxColor.BLUE)

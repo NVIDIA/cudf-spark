@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2022, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,15 +19,15 @@ package com.nvidia.spark.udf
 import scala.util.control.NonFatal
 
 import com.nvidia.spark.rapids.shims.ShimExpression
+import org.slf4j.LoggerFactory
 
 import org.apache.spark.SparkException
-import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Expression, ScalaUDF}
 import org.apache.spark.sql.catalyst.expressions.codegen.{CodegenContext, ExprCode}
 import org.apache.spark.sql.types.DataType
 
-case class GpuScalaUDFLogical(udf: ScalaUDF) extends ShimExpression with Logging {
+case class GpuScalaUDFLogical(udf: ScalaUDF) extends ShimExpression {
   override def nullable: Boolean = udf.nullable
 
   override def eval(input: InternalRow): Any = {
@@ -53,15 +53,21 @@ case class GpuScalaUDFLogical(udf: ScalaUDF) extends ShimExpression with Logging
     } catch {
       case e: SparkException =>
         val udfName = udf.udfName.getOrElse("<unknown>")
-        logDebug(s"UDF $udfName compilation failure: $e")
+        if (GpuScalaUDFLogical.log.isDebugEnabled) {
+          GpuScalaUDFLogical.log.debug(s"UDF $udfName compilation failure: $e")
+        }
         if (isTestEnabled) {
           throw e
         }
         udf
       case NonFatal(e) =>
         val udfName = udf.udfName.getOrElse("<unknown>")
-        logWarning(s"Unable to translate UDF $udfName: $e")
+        GpuScalaUDFLogical.log.warn(s"Unable to translate UDF $udfName: $e")
         udf
     }
   }
+}
+
+object GpuScalaUDFLogical {
+  private val log = LoggerFactory.getLogger(classOf[GpuScalaUDFLogical])
 }

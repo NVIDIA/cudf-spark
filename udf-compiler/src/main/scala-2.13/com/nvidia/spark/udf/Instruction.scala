@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,13 +21,12 @@ import java.nio.charset.Charset
 import com.nvidia.spark.rapids.shims.ShimExpression
 import com.nvidia.spark.udf.CatalystExpressionBuilder.simplify
 import javassist.bytecode.{CodeIterator, Opcode}
+import org.slf4j.LoggerFactory
 
 import org.apache.spark.SparkException
-import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.analysis.TypeCoercion
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.types._
-
 
 private[udf] object Repr {
 
@@ -149,7 +148,7 @@ private[udf] object Repr {
               if (elemType == t) {
                 Seq(args.head)
               } else {
-                Seq(Cast(args.head, t))
+                Seq(new Cast(args.head, t, None))
               }
             }
           }
@@ -211,7 +210,7 @@ private[udf] object Repr {
  * @param opcode
  * @param operand
  */
-case class Instruction(opcode: Int, operand: Int, instructionStr: String) extends Logging {
+case class Instruction(opcode: Int, operand: Int, instructionStr: String) {
   def makeState(lambdaReflection: LambdaReflection, basicBlock: BB, state: State): State = {
     val st = opcode match {
       case Opcode.ALOAD_0 | Opcode.DLOAD_0 | Opcode.FLOAD_0 |
@@ -322,7 +321,10 @@ case class Instruction(opcode: Int, operand: Int, instructionStr: String) extend
         })
       case _ => throw new SparkException("Unsupported instruction: " + instructionStr)
     }
-    logDebug(s"[Instruction] ${instructionStr} got new state: ${st} from state: ${state}")
+    if (Instruction.log.isDebugEnabled) {
+      Instruction.log.debug(
+        s"[Instruction] ${instructionStr} got new state: ${st} from state: ${state}")
+    }
     st
   }
 
@@ -442,7 +444,7 @@ case class Instruction(opcode: Int, operand: Int, instructionStr: String) extend
       state: State,
       dataType: DataType): State = {
     val State(locals, top :: rest, cond, expr) = state
-    State(locals, Cast(top, dataType) :: rest, cond, expr)
+    State(locals, new Cast(top, dataType, None) :: rest, cond, expr)
   }
 
   private def checkcast(lambdaReflection: LambdaReflection, state: State): State = {
@@ -800,13 +802,13 @@ case class Instruction(opcode: Int, operand: Int, instructionStr: String) extend
         EndsWith(args.head, args.last)
       case "equals" =>
         checkArgs(methodName, List(StringType, StringType), args)
-        Cast(EqualNullSafe(args.head, args.last), IntegerType)
+        new Cast(EqualNullSafe(args.head, args.last), IntegerType, None)
       case "equalsIgnoreCase" =>
         checkArgs(methodName, List(StringType, StringType), args)
-        Cast(EqualNullSafe(Upper(args.head), Upper(args.last)), IntegerType)
+        new Cast(EqualNullSafe(Upper(args.head), Upper(args.last)), IntegerType, None)
       case "isEmpty" =>
         checkArgs(methodName, List(StringType), args)
-        Cast(EqualTo(Length(args.head), Literal(0)), IntegerType)
+        new Cast(EqualTo(Length(args.head), Literal(0)), IntegerType, None)
       case "length" =>
         checkArgs(methodName, List(StringType), args)
         Length(args.head)
@@ -862,7 +864,7 @@ case class Instruction(opcode: Int, operand: Int, instructionStr: String) extend
               s"String.${methodName}: " +
               s"${args.head.dataType}")
         }
-        Cast(args.head, StringType)
+        new Cast(args.head, StringType, None)
       case "indexOf" =>
         if (args.length == 2) {
           if (args(1).dataType == StringType) {
@@ -910,10 +912,10 @@ case class Instruction(opcode: Int, operand: Int, instructionStr: String) extend
       case "getBytes" =>
         if (args.length == 1) {
           checkArgs(methodName, List(StringType), args)
-          Encode(args.head, Literal(Charset.defaultCharset.toString))
+          new Encode(args.head, Literal(Charset.defaultCharset.toString))
         } else if (args.length == 2) {
           checkArgs(methodName, List(StringType, StringType), args)
-          Encode(args.head, args.last)
+          new Encode(args.head, args.last)
         } else {
           throw new SparkException(
             s"String.${methodName} operation expects 1 or 2 argument(s), " +
@@ -979,6 +981,8 @@ case class Instruction(opcode: Int, operand: Int, instructionStr: String) extend
  * Ultimately, every opcode will have to be covered here.
  */
 object Instruction {
+  private val log = LoggerFactory.getLogger(classOf[Instruction])
+
   def apply(codeIterator: CodeIterator, offset: Int, instructionStr: String): Instruction = {
     val opcode: Int = codeIterator.byteAt(offset)
     val operand: Int = opcode match {
