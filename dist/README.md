@@ -1,10 +1,10 @@
 ---
 layout: page
-title: RAPIDS Accelerator for Apache Spark Distribution Packaging
+title: NVIDIA cuDF plugin for Apache Spark Distribution Packaging
 nav_order: 1
 parent: Developer Overview
 ---
-# RAPIDS Accelerator for Apache Spark Distribution Packaging
+# NVIDIA cuDF plugin for Apache Spark Distribution Packaging
 
 The distribution module creates a jar with support for the Spark versions you need combined into a single jar.
 

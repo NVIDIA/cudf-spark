@@ -365,6 +365,19 @@ This marker has the following arguments:
                need the special override.
 - `permanent`: forces a test to ignore `DATAGEN_SEED` if True. If False, or if absent, the `DATAGEN_SEED` value always wins.
 
+### Reduced pre-commit parameter combination selection
+
+Add `[reduced-it]` to the pull request title to use deterministic each-choice selection for tests
+with two or more stacked `pytest.mark.parametrize` decorators. The selected combinations include
+every value from every decorator at least once. Tests with zero or one parametrization decorator run
+all cases. Tests whose collected cases do not form the expected Cartesian product also run all
+cases.
+
+Pre-commit runs use the complete Cartesian product by default. Developer and nightly runs are also
+unaffected unless `RANDOM_SELECT` is explicitly configured. `RANDOM_SELECT` is not applied in
+reduced IT mode because a second random selection could remove the only selected occurrence of a
+parameter value.
+
 ### Randomly selecting tests
 
 To shorten feedback cycles, you can ask the harness to execute only a random subset of the collected

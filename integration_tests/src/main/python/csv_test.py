@@ -214,7 +214,7 @@ def read_csv_sql(data_path, schema, spark_tmp_table_factory, options = {}):
     ('trucks-more-comments.csv', _trucks_schema,  {'header': 'true', 'comment': '#'}),
     pytest.param('trucks-missing-quotes.csv', _trucks_schema, {'header': 'true'}, marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/130')),
     pytest.param('trucks-null.csv', _trucks_schema, {'header': 'true', 'nullValue': 'null'}, marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/2068')),
-    pytest.param('trucks-null.csv', _trucks_schema, {'header': 'true'}, marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/1986')),
+    ('trucks-null.csv', _trucks_schema, {'header': 'true'}),
     pytest.param('simple_int_values.csv', _byte_schema, {'header': 'true'}),
     pytest.param('simple_int_values.csv', _short_schema, {'header': 'true'}),
     pytest.param('simple_int_values.csv', _int_schema, {'header': 'true'}),
@@ -255,8 +255,18 @@ def test_basic_csv_read(std_input_path, name, schema, options, read_func, v1_ena
         'spark.sql.sources.useV1SourceList': v1_enabled_list,
         'spark.sql.ansi.enabled': ansi_enabled
     })
-    assert_gpu_and_cpu_are_equal_collect(read_func(std_input_path + '/' + name, schema, spark_tmp_table_factory, options),
-            conf=updated_conf)
+    read = read_func(std_input_path + '/' + name, schema, spark_tmp_table_factory, options)
+    if name == 'trucks-null.csv' and 'nullValue' not in options:
+        if v1_enabled_list == 'csv':
+            gpu_scan = 'GpuFileSourceScanExec'
+        elif read_func is read_csv_sql:
+            gpu_scan = 'GpuFileSourceScanExec'
+        else:
+            gpu_scan = 'GpuBatchScanExec'
+        assert_cpu_and_gpu_are_equal_collect_with_capture(
+            read, exist_classes=gpu_scan, conf=updated_conf)
+    else:
+        assert_gpu_and_cpu_are_equal_collect(read, conf=updated_conf)
 
 @pytest.mark.parametrize('name,schema,options', [
     pytest.param('small_float_values.csv', _float_schema, {'header': 'true'}),
