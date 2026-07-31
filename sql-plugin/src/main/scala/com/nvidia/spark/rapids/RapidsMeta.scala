@@ -1347,6 +1347,7 @@ abstract class BaseExprMeta[INPUT <: Expression](
     if (canSelfBeAst) {
       "is AST-compatible"
     } else {
+      // These reasons must enumerate exactly the conditions checked by canSelfBeAst.
       val reason = if (!canThisBeReplaced) {
         "it cannot run on GPU"
       } else if (willUseGpuCpuBridge) {
