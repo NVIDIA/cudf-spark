@@ -363,8 +363,8 @@ class GpuTaskMetrics extends Serializable with Logging {
     "perfio.s3.iceberg.fallbacks" -> perfioS3IcebergFallbacks,
     "perfio.gcs.http.executors" -> perfioGcsHttpExecutors,
     "perfio.gcs.grpc.executors" -> perfioGcsGrpcExecutors,
-    "totalPerfIORequestWaitTime" -> perfioS3RequestLimiterTotalWaitTime,
-    "maxWaitingPerfIORequests" -> perfioS3RequestLimiterMaxWaitingRequests
+    "perfio.s3.requestLimiter.totalWaitTime" -> perfioS3RequestLimiterTotalWaitTime,
+    "perfio.s3.requestLimiter.maxWaitingRequests" -> perfioS3RequestLimiterMaxWaitingRequests
   )
 
   def register(sc: SparkContext): Unit = {
