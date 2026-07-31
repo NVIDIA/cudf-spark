@@ -2015,7 +2015,7 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
         //   Exchange node.
         baseHandle.dependency match {
           case gpuDep: GpuShuffleDependency[K, C, C]
-              if gpuDep.useMultiThreadedShuffle && !shouldFallThroughForShuffle =>
+              if gpuDep.useMultiThreadedShuffle && !gpuDep.checksumFallback =>
             // We want to use batch fetch in the non-push shuffle case. Spark
             // checks for a config to see if batch fetch is enabled (this check), and
             // it also checks when getting (potentially merged) map status from
