@@ -27,6 +27,7 @@ import com.nvidia.spark.rapids.{IntRangeWithOffset, PerfIO, RangeWithOffset, Suf
 import com.nvidia.spark.rapids.jni.fileio.{RapidsInputFile, SeekableInputStream}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
+import org.apache.spark.sql.rapids.GpuTaskMetrics
 
 /**
  * S3-backed {@link RapidsInputFile} for Hadoop-conf-driven (non-iceberg) reads.
@@ -39,6 +40,12 @@ class S3InputFile private (
     fileUri: URI,
     hadoopConf: Configuration)
   extends RapidsInputFile {
+
+  private val taskMetrics = GpuTaskMetrics.get
+
+  private def recordLimiterMetrics(waitTimeNanos: Long, waitingRequests: Int): Unit = {
+    taskMetrics.recordPerfioS3RequestLimiterWait(waitTimeNanos, waitingRequests)
+  }
 
   override def path(): String = delegate.path()
 
@@ -59,7 +66,8 @@ class S3InputFile private (
       IntRangeWithOffset(r.getInputOffset, r.getLength, r.getOutputOffset)
     }.toSeq
     require(
-      PerfIO.readToHostMemory(hadoopConf, output, fileUri, ranges).isDefined,
+      PerfIO.readToHostMemory(
+        hadoopConf, output, fileUri, ranges, recordLimiterMetrics).isDefined,
       "expected to use PerfIO to read")
   }
 
@@ -78,7 +86,8 @@ class S3InputFile private (
     }
     val ranges = Seq[RangeWithOffset](SuffixRangeWithOffset(length, /*destOffset*/ 0L))
     require(
-      PerfIO.readToHostMemory(hadoopConf, output, fileUri, ranges).isDefined,
+      PerfIO.readToHostMemory(
+        hadoopConf, output, fileUri, ranges, recordLimiterMetrics).isDefined,
       "expected to use PerfIO to read")
   }
 }
