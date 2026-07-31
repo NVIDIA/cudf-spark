@@ -67,6 +67,9 @@ object TypeUtilsShims {
 
   val collectSetFloatNanEquality: NaNEquality = NaNEquality.UNEQUAL
 
+  // Pre-Spark 4.2 CollectSet stores child values directly in the agg buffer.
+  def collectSetCpuBufferElementType(childType: DataType): DataType = childType
+
   def collectListIgnoreNulls(_collectList: CollectList): Boolean = true
 
   def collectSetIgnoreNulls(_collectSet: CollectSet): Boolean = true

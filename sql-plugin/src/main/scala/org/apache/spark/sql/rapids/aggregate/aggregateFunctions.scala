@@ -2080,6 +2080,163 @@ case class GpuToCpuCollectBufferTransition(
 }
 
 /**
+ * CollectSet buffer converters.
+ *
+ * Spark 4.2 changed CollectSet's CPU agg buffer for FloatType/DoubleType to store normalized
+ * bit patterns (IntegerType/LongType) so HashSet can treat NaNs and signed zeros as equal.
+ * GPU CollectSet still stores the logical float/double values, so mixed CPU/GPU aggregation
+ * stages must convert between the two buffer layouts.
+ */
+class CpuToGpuCollectSetBufferConverter(
+    elementType: DataType,
+    containsNull: Boolean = false) extends CpuToGpuAggregateBufferConverter {
+  def createExpression(child: Expression): CpuToGpuBufferTransition = {
+    CpuToGpuCollectSetBufferTransition(child, elementType, containsNull)
+  }
+}
+
+case class CpuToGpuCollectSetBufferTransition(
+    override val child: Expression,
+    private val elementType: DataType,
+    private val containsNull: Boolean) extends CpuToGpuBufferTransition {
+
+  private lazy val row = new UnsafeRow(1)
+  private lazy val cpuElementType: DataType =
+    TypeUtilsShims.collectSetCpuBufferElementType(elementType)
+
+  override def dataType: DataType = ArrayType(elementType, containsNull)
+
+  override protected def nullSafeEval(input: Any): ArrayData = {
+    val bytes = input.asInstanceOf[Array[Byte]]
+    row.pointTo(bytes, bytes.length)
+    val cpuArray = row.getArray(0)
+    if (cpuElementType == elementType) {
+      cpuArray.copy()
+    } else {
+      CollectSetBufferConversions.cpuBitsToGpuValues(cpuArray, elementType, containsNull)
+    }
+  }
+}
+
+class GpuToCpuCollectSetBufferConverter(
+    elementType: DataType,
+    containsNull: Boolean = false) extends GpuToCpuAggregateBufferConverter {
+  def createExpression(child: Expression): GpuToCpuBufferTransition = {
+    GpuToCpuCollectSetBufferTransition(child, elementType, containsNull)
+  }
+}
+
+case class GpuToCpuCollectSetBufferTransition(
+    override val child: Expression,
+    private val elementType: DataType,
+    private val containsNull: Boolean) extends GpuToCpuBufferTransition {
+
+  private lazy val cpuElementType: DataType =
+    TypeUtilsShims.collectSetCpuBufferElementType(elementType)
+  private lazy val cpuBufferType: DataType = ArrayType(cpuElementType, containsNull)
+  private lazy val projection = UnsafeProjection.create(Array[DataType](cpuBufferType))
+
+  override protected def nullSafeEval(input: Any): Array[Byte] = {
+    val arrayData = input.asInstanceOf[ArrayData]
+    val cpuArray = if (cpuElementType == elementType) {
+      arrayData
+    } else {
+      CollectSetBufferConversions.gpuValuesToCpuBits(arrayData, elementType, containsNull)
+    }
+    projection.apply(InternalRow.apply(cpuArray)).getBytes
+  }
+}
+
+object CollectSetBufferConversions {
+  // Matches Spark's NormalizeFloatingNumbers.FLOAT_NORMALIZER / DOUBLE_NORMALIZER.
+  private def normalizeFloat(f: Float): Float = {
+    if (f.isNaN) {
+      Float.NaN
+    } else if (f == -0.0f) {
+      0.0f
+    } else {
+      f
+    }
+  }
+
+  private def normalizeDouble(d: Double): Double = {
+    if (d.isNaN) {
+      Double.NaN
+    } else if (d == -0.0d) {
+      0.0d
+    } else {
+      d
+    }
+  }
+
+  def gpuValuesToCpuBits(
+      arrayData: ArrayData,
+      elementType: DataType,
+      containsNull: Boolean): ArrayData = {
+    val n = arrayData.numElements()
+    val out = new Array[Any](n)
+    var i = 0
+    elementType match {
+      case FloatType =>
+        while (i < n) {
+          if (containsNull && arrayData.isNullAt(i)) {
+            out(i) = null
+          } else {
+            out(i) = java.lang.Float.floatToIntBits(normalizeFloat(arrayData.getFloat(i)))
+          }
+          i += 1
+        }
+      case DoubleType =>
+        while (i < n) {
+          if (containsNull && arrayData.isNullAt(i)) {
+            out(i) = null
+          } else {
+            out(i) = java.lang.Double.doubleToLongBits(normalizeDouble(arrayData.getDouble(i)))
+          }
+          i += 1
+        }
+      case other =>
+        throw new IllegalStateException(
+          s"Unexpected CollectSet GPU-to-CPU buffer conversion for $other")
+    }
+    new GenericArrayData(out)
+  }
+
+  def cpuBitsToGpuValues(
+      arrayData: ArrayData,
+      elementType: DataType,
+      containsNull: Boolean): ArrayData = {
+    val n = arrayData.numElements()
+    val out = new Array[Any](n)
+    var i = 0
+    elementType match {
+      case FloatType =>
+        while (i < n) {
+          if (containsNull && arrayData.isNullAt(i)) {
+            out(i) = null
+          } else {
+            out(i) = java.lang.Float.intBitsToFloat(arrayData.getInt(i))
+          }
+          i += 1
+        }
+      case DoubleType =>
+        while (i < n) {
+          if (containsNull && arrayData.isNullAt(i)) {
+            out(i) = null
+          } else {
+            out(i) = java.lang.Double.longBitsToDouble(arrayData.getLong(i))
+          }
+          i += 1
+        }
+      case other =>
+        throw new IllegalStateException(
+          s"Unexpected CollectSet CPU-to-GPU buffer conversion for $other")
+    }
+    new GenericArrayData(out)
+  }
+}
+
+/**
  * Base class for overriding standard deviation and variance aggregations.
  * This is also a GPU-based implementation of 'CentralMomentAgg' aggregation class in Spark with
  * the fixed 'momentOrder' variable set to '2'.

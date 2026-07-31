@@ -18,6 +18,7 @@ package org.apache.spark.sql.delta.deletionvectors
 
 import ai.rapids.cudf.HostMemoryBuffer
 import com.nvidia.spark.rapids.Arm.closeOnExcept
+import com.nvidia.spark.rapids.jni.fileio.RapidsFileIO
 import org.apache.hadoop.fs.Path
 
 import org.apache.spark.sql.delta.actions.DeletionVectorDescriptor
@@ -26,21 +27,20 @@ import org.apache.spark.sql.delta.actions.DeletionVectorDescriptor
 /**
  * RAPIDS version of [[DeletionVectorStoredBitmap]]. It is simplified and modified to only include
  * the APIs needed to load serialized deletion vectors into host memory.
- *
- * This version does not support inline deletion vectors as they are used only for CDC in Delta IO.
- * See here for details: https://github.com/delta-io/delta/blob/v3.3.0/spark/src/main/scala/org/apache/spark/sql/delta/commands/cdc/CDCReader.scala#L1076-L1083
  */
 // scalastyle:on line.size.limit
 case class RapidsDeletionVectorStoredBitmap(
     dvDescriptor: DeletionVectorDescriptor,
     tableDataPath: Path
 ) {
-  require(dvDescriptor.isOnDisk, "Only on-disk deletion vectors are supported")
-
-  def load(dvStore: RapidsDeletionVectorStore): HostMemoryBuffer = {
+  def load(fileIO: RapidsFileIO): HostMemoryBuffer = {
     val buffer = if (isEmpty) {
       RapidsDeletionVectorStoredBitmap.serializedEmptyBitmap()
+    } else if (isInline) {
+      RapidsInMemoryDeletionVectorStore.load(dvDescriptor.inlineData)
     } else {
+      require(isOnDisk)
+      val dvStore = RapidsDeletionVectorStore.createInstance(fileIO)
       dvStore.load(onDiskPath, dvDescriptor.offset.getOrElse(0), dvDescriptor.sizeInBytes)
     }
 
@@ -48,6 +48,10 @@ case class RapidsDeletionVectorStoredBitmap(
   }
 
   private def isEmpty: Boolean = dvDescriptor.isEmpty
+
+  private def isInline: Boolean = dvDescriptor.isInline
+
+  private def isOnDisk: Boolean = dvDescriptor.isOnDisk
 
   /** The absolute path for on-disk deletion vectors. */
   private lazy val onDiskPath: Path = dvDescriptor.absolutePath(tableDataPath)

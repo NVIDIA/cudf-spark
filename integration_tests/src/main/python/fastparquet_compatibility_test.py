@@ -17,6 +17,7 @@ import pytest
 from asserts import assert_gpu_and_cpu_are_equal_collect
 from data_gen import *
 from fastparquet_utils import get_fastparquet_result_canonicalizer
+from parquet_test_utils import copy_from_local
 from spark_session import is_databricks_runtime, spark_version, with_cpu_session, with_gpu_session
 
 
@@ -245,17 +246,6 @@ def test_reading_file_written_with_gpu(spark_tmp_path, column_gen):
     finally:
         # Clean up local copy of data.
         delete_local_directory(local_base_path)
-
-
-def copy_from_local(spark, local_source, hdfs_target):
-    """
-    Copies contents of local_source to hdfs_target.
-    """
-    sc = spark.sparkContext
-    Path = sc._jvm.org.apache.hadoop.fs.Path
-    config = sc._jsc.hadoopConfiguration()
-    fs = sc._jvm.org.apache.hadoop.fs.FileSystem.get(config)
-    fs.copyFromLocalFile(Path(local_source), Path(hdfs_target))
 
 
 @pytest.mark.skipif(condition=fastparquet_unavailable(),

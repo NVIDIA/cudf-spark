@@ -3859,11 +3859,12 @@ object GpuOverrides extends Logging {
         }
 
         override def createCpuToGpuBufferConverter(): CpuToGpuAggregateBufferConverter =
-          new CpuToGpuCollectBufferConverter(c.child.dataType,
+          new CpuToGpuCollectSetBufferConverter(c.child.dataType,
             !TypeUtilsShims.collectSetIgnoreNulls(c))
 
         override def createGpuToCpuBufferConverter(): GpuToCpuAggregateBufferConverter =
-          new GpuToCpuCollectBufferConverter()
+          new GpuToCpuCollectSetBufferConverter(c.child.dataType,
+            !TypeUtilsShims.collectSetIgnoreNulls(c))
 
         override val supportBufferConversion: Boolean = true
 

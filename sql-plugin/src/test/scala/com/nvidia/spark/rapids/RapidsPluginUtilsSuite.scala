@@ -66,6 +66,15 @@ class RapidsPluginUtilsSuite extends AnyFunSuite {
     assert(!conf.contains("spark.shuffle.manager"))
   }
 
+  test("shuffle manager is not auto-configured on Dataproc") {
+    val conf = new SparkConf(false)
+      .set("spark.dataproc.engine", "lightningEngine")
+
+    RapidsShuffleManagerAutoConfigurator.configure(conf)
+
+    assert(!conf.contains("spark.shuffle.manager"))
+  }
+
   test("shuffle manager runtime setting does not control auto-configuration") {
     val conf = new SparkConf(false)
       .set(RapidsConf.SHUFFLE_MANAGER_ENABLED.key, "false")
