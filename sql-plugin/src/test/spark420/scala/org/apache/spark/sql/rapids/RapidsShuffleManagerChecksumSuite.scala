@@ -63,11 +63,8 @@ class RapidsShuffleManagerChecksumSuite extends AnyFunSuite with FQSuiteName {
       // The fallback is observable at shuffle registration: when checksum support
       // forces the Spark path, the manager returns the wrapped Spark handle.
       val handle = registeredShuffleHandle(sqlConf, sparkConf, idx)
-      if (shouldFallback) {
-        assert(!handle.isInstanceOf[GpuShuffleHandle[_, _]], label)
-      } else {
-        assert(handle.isInstanceOf[GpuShuffleHandle[_, _]], label)
-      }
+      val gpuHandle = handle.asInstanceOf[GpuShuffleHandle[_, _]]
+      assert(gpuHandle.dependency.checksumFallback == shouldFallback, label)
     }
   }
 
@@ -80,19 +77,19 @@ class RapidsShuffleManagerChecksumSuite extends AnyFunSuite with FQSuiteName {
           sqlConfWithChecksums(checksumEnabled = false, fullRetry = false)) {
           manager.registerShuffle(100, gpuShuffleDependency(shuffleId = 100))
         }
-        assert(gpuHandle.isInstanceOf[GpuShuffleHandle[_, _]])
+        assert(!gpuHandle.asInstanceOf[GpuShuffleHandle[_, _]].dependency.checksumFallback)
 
         val fallbackHandle = SQLConf.withExistingConf(
           sqlConfWithChecksums(checksumEnabled = true, fullRetry = true)) {
           manager.registerShuffle(101, gpuShuffleDependency(shuffleId = 101))
         }
-        assert(!fallbackHandle.isInstanceOf[GpuShuffleHandle[_, _]])
+        assert(fallbackHandle.asInstanceOf[GpuShuffleHandle[_, _]].dependency.checksumFallback)
 
         val gpuHandleAgain = SQLConf.withExistingConf(
           sqlConfWithChecksums(checksumEnabled = false, fullRetry = false)) {
           manager.registerShuffle(102, gpuShuffleDependency(shuffleId = 102))
         }
-        assert(gpuHandleAgain.isInstanceOf[GpuShuffleHandle[_, _]])
+        assert(!gpuHandleAgain.asInstanceOf[GpuShuffleHandle[_, _]].dependency.checksumFallback)
       } finally {
         manager.stop()
       }

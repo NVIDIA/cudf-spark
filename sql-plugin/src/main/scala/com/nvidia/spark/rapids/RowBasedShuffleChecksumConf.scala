@@ -29,10 +29,10 @@ object RowBasedShuffleChecksumConf {
   // SQLConf takes priority over SparkConf when explicitly set (e.g. SET command mid-session).
   // SparkConf is checked next for values set at session start or via --conf.
   // If neither is explicitly set, we fall back to Spark's registered config default via
-  // SQLConf.getConfString: on Spark 4.1.1+ both keys default to true (checksums on by
+  // SQLConf.getConfString: on Spark 4.2+ both keys default to true (checksums on by
   // default), so RAPIDS will fall back to SortShuffleManager unless the user explicitly
-  // disables them. On Spark < 4.1.1 these keys are not registered in SQLConf so
-  // getConfString throws and we return false (no checksum, GPU shuffle proceeds normally).
+  // disables them (set both keys to false). On Spark < 4.2 these keys default to false
+  // or are not registered in SQLConf, so GPU shuffle proceeds normally.
   def isEnabled(sqlConf: SQLConf, sparkConf: SparkConf): Boolean = {
     getBoolean(sqlConf, sparkConf, ChecksumEnabledKey) ||
       getBoolean(sqlConf, sparkConf, ChecksumMismatchFullRetryKey)

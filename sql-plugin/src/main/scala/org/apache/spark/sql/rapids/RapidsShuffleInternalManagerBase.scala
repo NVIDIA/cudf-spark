@@ -1767,9 +1767,6 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
           "(spark.sql.shuffle.orderIndependentChecksum.enabled or enableFullRetryOnMismatch). " +
           "This Spark 4.1+ feature is not yet supported by Spark-Rapids.")
       }
-    } else {
-      // reset warning, so we warn again if the user re-enables it.
-      rowBasedChecksumFallbackLogged.compareAndSet(true, false)
     }
     shouldFallThroughOnEverything || rowBasedChecksumFallback
   }
@@ -1860,11 +1857,13 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
     val orig = wrapped.registerShuffle(shuffleId, dependency)
 
     dependency match {
-      case _ if shouldFallThroughForShuffle ||
-        rapidsConf.isMultiThreadedShuffleManagerMode => orig
       case gpuDependency: GpuShuffleDependency[K, V, C] if gpuDependency.useGPUShuffle =>
-        new GpuShuffleHandle(orig,
-          dependency.asInstanceOf[GpuShuffleDependency[K, V, V]])
+        val gpuDep = gpuDependency.asInstanceOf[GpuShuffleDependency[K, V, V]]
+        gpuDep.checksumFallback = shouldFallThroughForShuffle
+        if (rapidsConf.isMultiThreadedShuffleManagerMode) orig
+        else new GpuShuffleHandle(orig, gpuDep)
+      case _ if shouldFallThroughOnEverything ||
+        rapidsConf.isMultiThreadedShuffleManagerMode => orig
       case _ => orig
     }
   }
@@ -1912,6 +1911,8 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
       context: TaskContext,
       metricsReporter: ShuffleWriteMetricsReporter): ShuffleWriter[K, V] = {
     handle match {
+      case gpu: GpuShuffleHandle[_, _] if gpu.dependency.checksumFallback =>
+        wrapped.getWriter(gpu.wrapped, mapId, context, metricsReporter)
       case gpu: GpuShuffleHandle[_, _] =>
         registerGpuShuffle(handle.shuffleId)
         new RapidsCachingWriter(
@@ -1926,7 +1927,7 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
         handle.dependency match {
           case gpuDep: GpuShuffleDependency[_, _, _]
             if gpuDep.useMultiThreadedShuffle &&
-              !shouldFallThroughForShuffle &&
+              !gpuDep.checksumFallback &&
               rapidsConf.shuffleMultiThreadedWriterThreads > 0 =>
             // use the threaded writer if the number of threads specified is 1 or above,
             // with 0 threads we fallback to the Spark-provided writer.
@@ -1970,6 +1971,9 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
       context: TaskContext,
       metrics: ShuffleReadMetricsReporter): ShuffleReader[K, C] = {
     handle match {
+      case gpuHandle: GpuShuffleHandle[_, _] if gpuHandle.dependency.checksumFallback =>
+        ShuffleManagerShims.getReader(wrapped, gpuHandle.wrapped, startMapIndex, endMapIndex,
+          startPartition, endPartition, context, metrics)
       case gpuHandle: GpuShuffleHandle[_, _] =>
         logInfo(s"Asking map output tracker for dependency ${gpuHandle.dependency}, " +
           s"map output sizes for: ${gpuHandle.shuffleId}, parts=$startPartition-$endPartition")

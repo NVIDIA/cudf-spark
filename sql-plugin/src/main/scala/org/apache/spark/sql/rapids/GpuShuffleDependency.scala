@@ -40,5 +40,10 @@ class GpuShuffleDependency[K: ClassTag, V: ClassTag, C: ClassTag](
   extends ShuffleDependency[K, V, C](rdd, partitioner, serializer, keyOrdering,
     aggregator, mapSideCombine, shuffleWriterProcessor) {
 
+  // Set by RapidsShuffleInternalManagerBase.registerShuffle to record the
+  // registration-time checksum fallback decision so writer and reader use
+  // the same path even if SQLConf changes between calls.
+  var checksumFallback: Boolean = false
+
   override def toString: String = "GPU Shuffle Dependency"
 }
