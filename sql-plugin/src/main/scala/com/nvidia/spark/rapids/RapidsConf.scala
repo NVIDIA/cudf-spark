@@ -357,7 +357,9 @@ object RapidsConf extends Logging {
         "Set to 'all' to use the number of executor cores. A value of 1 initializes the backing " +
         "memory using cudaHostAlloc. Values greater than 1 instead pre-touch pages concurrently " +
         "before pinning for faster initialization. This does not affect subsequent suballocator " +
-        "behavior.")
+        "behavior. Note: on multi-NUMA systems, multithreaded initialization can scatter pages " +
+        "across nodes if you do not constrain placement in advance. Pages cannot be migrated " +
+        "once pinned.")
       .startupOnly()
       .stringConf
       .transform(_.trim.toLowerCase(java.util.Locale.ROOT))
