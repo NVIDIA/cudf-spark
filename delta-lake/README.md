@@ -1,4 +1,4 @@
-# RAPIDS Accelerator for Apache Spark Delta Lake Support
+# NVIDIA cuDF plugin for Apache Spark Delta Lake Support
 
 The Delta Lake support is organized into multiple Maven projects, one per Delta Lake minor
 version that is supported. This allows each submodule to build against the Delta Lake minor

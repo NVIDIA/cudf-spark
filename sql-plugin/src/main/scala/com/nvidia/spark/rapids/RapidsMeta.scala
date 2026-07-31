@@ -417,8 +417,6 @@ abstract class RapidsMeta[INPUT <: BASE, BASE, OUTPUT <: BASE](
         "^"  // Special indicator for CPU bridge expressions
       } else if (cannotRunOnGpuBecauseOfSparkPlan) {
         "@"
-      } else if (cannotRunOnGpuBecauseOfCost) {
-        "$"
       } else {
         "*"
       }

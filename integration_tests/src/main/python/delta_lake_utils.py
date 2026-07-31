@@ -247,9 +247,9 @@ def read_delta_logs(spark, path):
     log_data = spark.sparkContext.wholeTextFiles(path).collect()
     return dict([(os.path.basename(x), _decode_jsons(y)) for x, y in log_data])
 
-def assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path):
-    cpu_log_data = spark.sparkContext.wholeTextFiles(data_path + "/CPU/_delta_log/*").collect()
-    gpu_log_data = spark.sparkContext.wholeTextFiles(data_path + "/GPU/_delta_log/*").collect()
+def assert_delta_logs_at_paths_equivalent(spark, cpu_path, gpu_path):
+    cpu_log_data = spark.sparkContext.wholeTextFiles(cpu_path + "/_delta_log/*").collect()
+    gpu_log_data = spark.sparkContext.wholeTextFiles(gpu_path + "/_delta_log/*").collect()
     assert len(cpu_log_data) == len(gpu_log_data), "Different number of Delta log files:\nCPU: {}\nGPU: {}".format(cpu_log_data, gpu_log_data)
     cpu_logs_data = [ (os.path.basename(x), y) for x, y in cpu_log_data if x.endswith(".json") ]
     gpu_logs_dict = dict([ (os.path.basename(x), y) for x, y in gpu_log_data if x.endswith(".json") ])
@@ -261,6 +261,23 @@ def assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path):
         assert len(cpu_jsons) == len(gpu_jsons), "Different line counts in {}:\nCPU: {}\nGPU: {}".format(file, cpu_json_data, gpu_json_data)
         for cpu_json, gpu_json in zip(cpu_jsons, gpu_jsons):
             assert_delta_log_json_equivalent(file, cpu_json, gpu_json)
+
+def assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path):
+    assert_delta_logs_at_paths_equivalent(spark, data_path + "/CPU", data_path + "/GPU")
+
+def assert_delta_add_file_stats_present(spark, path):
+    logs = read_delta_logs(spark, path + "/_delta_log/*.json")
+    add_actions = [
+        action["add"] for actions in logs.values() for action in actions if "add" in action
+    ]
+    assert len(add_actions) > 0, f"No AddFile actions found in {path}"
+    for add in add_actions:
+        assert add.get("stats"), f"Missing AddFile statistics in {path}: {add}"
+        stats = json.loads(add["stats"])
+        assert stats.get("numRecords", 0) > 0, \
+            f"Invalid AddFile numRecords in {path}: {stats}"
+        assert {"minValues", "maxValues", "nullCount"}.issubset(stats), \
+            f"Incomplete AddFile statistics in {path}: {stats}"
 
 def assert_gpu_and_cpu_latest_delta_log_equivalent(spark, data_path):
     cpu_logs = read_delta_logs(spark, data_path + "/CPU/_delta_log/*.json")
@@ -399,6 +416,98 @@ def assert_rapids_delta_write(do_test, conf):
         return result
     finally:
         jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.endCapture()
+
+def assert_db173_gpu_data_writing_command(
+        do_test, conf, optimized_write, expected_atomic_gpu_class, aqe_enabled=None,
+        expect_legacy_optimized_write=False):
+    """Assert DBR 17.3 atomic staging and Delta data writing, including optimize-write scope."""
+    if expect_legacy_optimized_write:
+        assert optimized_write and aqe_enabled is False, \
+            "Legacy optimized write is expected only when optimized write is on and AQE is off"
+    jvm = spark_jvm()
+    callback = jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        result = with_gpu_session(do_test, conf=conf)
+        captured_plans = callback.getResultsWithTimeout(10000)
+        assert len(captured_plans) > 0, "No execution plans captured for Delta write"
+        required_classes = ["GpuDataWritingCommandExec", "GpuWriteFilesExec"]
+        matching_plans = [
+            plan for plan in captured_plans
+            if all(callback.contains(plan, cls) for cls in required_classes)
+        ]
+        assert len(matching_plans) > 0, \
+            f"No captured plan contains all of {required_classes}"
+        assert any(
+            callback.contains(plan, expected_atomic_gpu_class)
+            for plan in captured_plans
+        ), f"{expected_atomic_gpu_class} is not found in the captured atomic write plans"
+
+        gpu_optimized_write = "GpuShuffleExchangeExec"
+        cpu_optimized_write = "ShuffleExchangeExec"
+        optimized_write_origin = "DELTA_OPTIMIZED_WRITE"
+        all_gpu_optimized_plans = [
+            plan for plan in captured_plans
+            if callback.containsShuffleExchangeWithOrigin(
+                plan, gpu_optimized_write, optimized_write_origin)
+        ]
+        write_gpu_optimized_plans = [
+            plan for plan in matching_plans
+            if callback.containsShuffleExchangeWithOrigin(
+                plan, gpu_optimized_write, optimized_write_origin)
+        ]
+        cpu_optimized_plans = [
+            plan for plan in captured_plans
+            if callback.containsShuffleExchangeWithOrigin(
+                plan, cpu_optimized_write, optimized_write_origin)
+        ]
+        legacy_optimized_plans = [
+            plan for plan in captured_plans
+            if callback.didFallBack(plan, "DeltaOptimizedWriterExec")
+        ]
+        if expect_legacy_optimized_write:
+            assert legacy_optimized_plans, \
+                "DBR non-AQE DeltaOptimizedWriterExec was not captured"
+            assert not all_gpu_optimized_plans and not cpu_optimized_plans, \
+                f"Legacy optimized write unexpectedly used {optimized_write_origin}"
+        elif optimized_write:
+            assert write_gpu_optimized_plans, \
+                f"{gpu_optimized_write} is not found for {optimized_write_origin}"
+            assert not legacy_optimized_plans, \
+                "AQE optimized write unexpectedly used DeltaOptimizedWriterExec"
+        else:
+            assert not all_gpu_optimized_plans and not cpu_optimized_plans \
+                and not legacy_optimized_plans, \
+                "Optimize write is disabled but an optimized-write plan was captured"
+        assert not cpu_optimized_plans, \
+            f"DBR {optimized_write_origin} shuffle remained on CPU"
+        # AQE only produces a final adaptive write plan when optimized write inserts its shuffle.
+        if aqe_enabled and optimized_write:
+            final_adaptive_write_plans = [
+                plan for plan in matching_plans
+                if callback.containsFinalAdaptivePlan(plan)
+            ]
+            assert final_adaptive_write_plans, \
+                "AQE is enabled but no final adaptive Delta write plan was captured"
+            if optimized_write:
+                assert any(
+                    callback.containsShuffleQueryStageWithExchangeOrigin(
+                        plan, gpu_optimized_write, optimized_write_origin)
+                    for plan in final_adaptive_write_plans
+                ), (f"AQE is enabled but no final adaptive Delta write plan contains a GPU "
+                    f"{optimized_write_origin} shuffle query stage")
+
+        for plan in captured_plans:
+            for cpu_class in ["DataWritingCommandExec", "WriteFilesExec"]:
+                assert not callback.didFallBack(plan, cpu_class), \
+                    f"Captured GPU Delta write also contains CPU {cpu_class}"
+            for cpu_atomic_class in [
+                    "AtomicCreateTableAsSelectExec", "AtomicReplaceTableAsSelectExec"]:
+                assert not callback.didFallBack(plan, cpu_atomic_class), \
+                    f"Captured Delta write contains CPU {cpu_atomic_class}"
+        return result
+    finally:
+        callback.endCapture()
 
 def assert_rapids_gpu_delete_ran(do_test, conf):
     """

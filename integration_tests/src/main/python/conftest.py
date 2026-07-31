@@ -150,6 +150,11 @@ def is_nightly_run():
 def is_precommit_run():
     return _is_precommit_run
 
+
+def is_reduced_it_run():
+    return os.environ.get('REDUCED_IT', 'false').lower() == 'true'
+
+
 def is_at_least_precommit_run():
     return _is_nightly_run or _is_precommit_run
 
@@ -516,9 +521,99 @@ def _maybe_apply_random_select(config, items):
 
 _random_select_config = _parse_random_select_config()
 
+
+def _precommit_parametrize_factors(item):
+    factors = []
+    for position, mark in enumerate(item.iter_markers(name='parametrize')):
+        argvalues = mark.args[1] if len(mark.args) > 1 else mark.kwargs['argvalues']
+        try:
+            size = len(argvalues)
+        except TypeError:
+            # Pytest accepts iterators here, but their size cannot be recovered after collection.
+            return []
+        factors.append((size, position))
+    factors.sort(key=lambda factor: (-factor[0], factor[1]))
+    return factors
+
+
+def _combination_for_position(position, factors):
+    # Reconstruct the per-decorator value indices from pytest's Cartesian-product ordering.
+    indices = {}
+    for size, original_position in sorted(factors, key=lambda factor: factor[1], reverse=True):
+        indices[original_position] = position % size
+        position //= size
+    return tuple(indices[factor[1]] for factor in factors)
+
+
+def _reduced_it_required_items(items):
+    """Return (required_items, each_choice_test_count) for reduced IT selection.
+
+    ``required_items`` is the subset of ``items`` to keep. Every value of every
+    stacked ``parametrize`` decorator is guaranteed to appear in at least one
+    kept item. Tests with fewer than two parametrize decorators, or whose
+    collected cases do not form the expected Cartesian product (iterator,
+    fixture, or otherwise dynamic parametrization), are kept in full. This is
+    each-choice (1-wise) coverage, not pairwise: parameter interactions are not
+    guaranteed. Kept as a pure helper so it can be unit tested without pytest
+    config or pre-commit gating (see reduced_it_selection_test.py)."""
+    groups = {}
+    for item in items:
+        groups.setdefault(item.nodeid.split('[', 1)[0], []).append(item)
+
+    required = set()
+    each_choice_test_count = 0
+    for group_items in groups.values():
+        first_item = group_items[0]
+        factors = _precommit_parametrize_factors(first_item)
+        expected_group_size = math.prod(factor[0] for factor in factors)
+        if (len(factors) < 2
+                or any(factor[0] == 0 for factor in factors)
+                or len(group_items) != expected_group_size):
+            # Preserve all cases when there is nothing to combine or collection includes
+            # dynamic/fixture parametrization that cannot be mapped safely.
+            required.update(group_items)
+            continue
+
+        selected_combinations = {
+            # Factors are largest-first, so this produces the minimum number of combinations
+            # needed to include every value from every factor.
+            tuple(index % factor[0] for factor in factors)
+            for index in range(factors[0][0])
+        }
+        each_choice_test_count += 1
+
+        for position, item in enumerate(group_items):
+            combination = _combination_for_position(position, factors)
+            if combination in selected_combinations:
+                required.add(item)
+    return required, each_choice_test_count
+
+
+def _select_precommit_cases(config, items):
+    """Select each-choice combinations while covering every parameter value at least once."""
+    if not is_precommit_run():
+        return
+
+    original_items = list(items)
+    required, each_choice_test_count = _reduced_it_required_items(original_items)
+    items[:] = [item for item in original_items if item in required]
+    deselected = [item for item in original_items if item not in required]
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+        reporter = config.pluginmanager.get_plugin('terminalreporter')
+        if reporter:
+            reporter.write_line(
+                f"REDUCED_IT active: running {len(items)} of {len(original_items)} tests "
+                f"({len(items) / len(original_items):.1%}); "
+                f"each-choice tests={each_choice_test_count}.")
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(config, items):
-    _maybe_apply_random_select(config, items)
+    if is_precommit_run() and is_reduced_it_run():
+        _select_precommit_cases(config, items)
+    else:
+        _maybe_apply_random_select(config, items)
     r = random.Random(oom_random_injection_seed)
     for item in items:
         extras = []

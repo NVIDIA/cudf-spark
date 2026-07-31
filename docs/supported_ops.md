@@ -11,14 +11,14 @@ nav_order: 6
 
 
 Apache Spark supports processing various types of data. Not all expressions
-support all data types. The RAPIDS Accelerator for Apache Spark has further
+support all data types. The cuDF plugin has further
 restrictions on what types are supported for processing. This tries
 to document what operations are supported and what data types each operation supports.
 
 # General limitations
 ## `Decimal`
-The `Decimal` type in Spark supports a precision up to 38 digits (128-bits). 
-The RAPIDS Accelerator supports 128-bit starting from version 21.12 and decimals are 
+The `Decimal` type in Spark supports a precision up to 38 digits (128-bits).
+The cuDF plugin supports 128-bit starting from version 21.12 and decimals are
 enabled by default.
 Please check [Decimal Support](compatibility.md#decimal-support) for more details.
 
@@ -51,7 +51,7 @@ operations that Spark can support.
 ## `Timestamp`
 Timestamps in Spark will all be converted to the local time zone before processing
 and are often converted to UTC before being stored, like in Parquet or ORC.
-The RAPIDS Accelerator only supports UTC as the time zone for timestamps.
+The cuDF plugin only supports UTC as the time zone for timestamps.
 
 ## `CalendarInterval`
 In Spark `CalendarInterval`s store three values, months, days, and microseconds.
@@ -60,7 +60,7 @@ only a a subset of the type is supported, like window ranges only support days c
 
 ## Configuration
 There are lots of different configuration values that can impact if an operation
-is supported or not. Some of these are a part of the RAPIDS Accelerator and cover
+is supported or not. Some of these are a part of the cuDF plugin and cover
 the level of compatibility with Apache Spark.  Those are covered [here](configs.md).
 Others are a part of Apache Spark itself and those are a bit harder to document.
 The work of updating this to cover that support is still ongoing.
@@ -97,16 +97,16 @@ the reasons why this particular operator or expression is on the CPU or GPU.
 
 |Value|Description|
 |---------|----------------|
-|S| (Supported) Both Apache Spark and the RAPIDS Accelerator support this type fully.|
-| | (Not Applicable) Neither Spark not the RAPIDS Accelerator support this type in this situation.|
-|_PS_| (Partial Support) Apache Spark supports this type, but the RAPIDS Accelerator only partially supports it. An explanation for what is missing will be included with this.|
-|**NS**| (Not Supported) Apache Spark supports this type but the RAPIDS Accelerator does not.
+|S| (Supported) Both Apache Spark and the cuDF plugin support this type fully.|
+| | (Not Applicable) Neither Spark nor the cuDF plugin support this type in this situation.|
+|_PS_| (Partial Support) Apache Spark supports this type, but the cuDF plugin only partially supports it. An explanation for what is missing will be included with this.|
+|**NS**| (Not Supported) Apache Spark supports this type but the cuDF plugin does not.
 
 # SparkPlan or Executor Nodes
 Apache Spark uses a Directed Acyclic Graph(DAG) of processing to build a query.
 The nodes in this graph are instances of `SparkPlan` and represent various high
-level operations like doing a filter or project. The operations that the RAPIDS
-Accelerator supports are described below.
+level operations like doing a filter or project. The operations that the cuDF 
+plugin supports are described below.
 <table>
 <tr>
 <th>Executor</th>

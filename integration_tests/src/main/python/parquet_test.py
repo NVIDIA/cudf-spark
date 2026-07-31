@@ -13,6 +13,8 @@
 # limitations under the License.
 import os
 import re
+import shutil
+import tempfile
 
 import pytest
 
@@ -22,7 +24,8 @@ from data_gen import *
 from parquet_write_test import parquet_datetime_gen_simple, parquet_nested_datetime_gen, parquet_ts_write_options
 from marks import *
 import pyarrow as pa
-from parquet_test_utils import parquet_row_group_midpoints
+import pyarrow.parquet as pq
+from parquet_test_utils import copy_from_local, parquet_row_group_midpoints
 from pyspark.sql.types import *
 from pyspark.sql.functions import *
 from spark_init_internal import spark_version
@@ -1991,3 +1994,196 @@ def test_parquet_partition_batch_row_count_only_splitting(spark_tmp_path):
     with_cpu_session(lambda spark: setup_table(spark))
     assert_gpu_and_cpu_are_equal_collect(lambda spark: spark.read.parquet(data_path).select("p"),
                                          conf={"spark.rapids.sql.columnSizeBytes": "100"})
+
+
+def _write_parquet_unknown_null_table(
+        data_path, with_list=False, with_map=False, field_id=None):
+    """Write INT32 physical + UNKNOWN/Null logical annotation (Spark void_in_parquet shape).
+
+    PyArrow writes only to the local filesystem, while spark_tmp_path is created via
+    Hadoop FileSystem.mkdirs. On Dataproc the default FS is typically GCS, so writing
+    directly to data_path fails with FileNotFoundError. Write locally then copy.
+    """
+    if with_list:
+        table = pa.table({
+            'list_void': pa.array([[None, None], [None], None], type=pa.list_(pa.null())),
+        })
+    elif with_map:
+        table = pa.table({
+            'map_void': pa.array(
+                [{1: None, 2: None}, {3: None}, None],
+                type=pa.map_(pa.int32(), pa.null())),
+        })
+    elif field_id is not None:
+        arrow_schema = pa.schema([
+            pa.field('void_col', pa.null(), metadata={b'PARQUET:field_id': str(field_id).encode()}),
+        ])
+        table = pa.Table.from_arrays(
+            [pa.array([None, None, None], type=pa.null())], schema=arrow_schema)
+    else:
+        table = pa.table({
+            'id': pa.array([1, 2, 3], type=pa.int32()),
+            'void_col': pa.array([None, None, None], type=pa.null()),
+        })
+    local_dir = tempfile.mkdtemp(prefix='parquet_unknown_')
+    try:
+        local_file = os.path.join(local_dir, 'part.parquet')
+        pq.write_table(table, local_file)
+        with_cpu_session(lambda spark: copy_from_local(spark, local_file, data_path))
+    finally:
+        shutil.rmtree(local_dir, ignore_errors=True)
+
+
+# SPARK-56045 / SPARK-54220: Parquet UNKNOWN logical type annotation. PyArrow null columns are
+# written as INT32 physical + UNKNOWN/Null logical annotation.
+
+@pytest.mark.skipif(is_spark_411_or_later(),
+                    reason='pre-SPARK-54220 physical-type behavior')
+@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+def test_parquet_unknown_type_annotation_pre_411_physical(spark_tmp_path, reader_confs):
+    data_path = spark_tmp_path + '/PARQUET_UNKNOWN_PRE_411'
+    _write_parquet_unknown_null_table(data_path)
+
+    def read_and_check_schema(spark):
+        df = spark.read.parquet(data_path)
+        assert df.schema['void_col'].dataType == IntegerType(), \
+            f"expected void_col=IntegerType, got {df.schema['void_col'].dataType}"
+        return df
+
+    assert_gpu_and_cpu_are_equal_collect(read_and_check_schema, conf=reader_confs)
+
+
+@pytest.mark.skipif(not is_spark_412_or_later(),
+                    reason='SPARK-56045 requires Spark 4.1.2+')
+@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+def test_parquet_unknown_type_annotation_default_physical(spark_tmp_path, reader_confs):
+    data_path = spark_tmp_path + '/PARQUET_UNKNOWN'
+    _write_parquet_unknown_null_table(data_path)
+
+    conf = copy_and_update(reader_confs, {
+        'spark.sql.parquet.reader.respectUnknownTypeAnnotation.enabled': 'false',
+    })
+
+    def read_and_check_schema(spark):
+        df = spark.read.parquet(data_path)
+        assert df.schema['void_col'].dataType == IntegerType(), \
+            f"expected void_col=IntegerType, got {df.schema['void_col'].dataType}"
+        return df
+
+    assert_gpu_and_cpu_are_equal_collect(read_and_check_schema, conf=conf)
+
+
+@pytest.mark.skipif(not is_spark_411_or_later(),
+                    reason='SPARK-54220 requires Spark 4.1.1+')
+@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+@allow_non_gpu('FileSourceScanExec', 'ColumnarToRowExec')
+def test_parquet_unknown_type_annotation_respect_nulltype(spark_tmp_path, reader_confs):
+    data_path = spark_tmp_path + '/PARQUET_UNKNOWN'
+    _write_parquet_unknown_null_table(data_path)
+
+    # Spark 4.1.1 always maps UNKNOWN to NullType; 4.1.2+ needs the conf enabled.
+    conf = reader_confs
+    if is_spark_412_or_later():
+        conf = copy_and_update(reader_confs, {
+            'spark.sql.parquet.reader.respectUnknownTypeAnnotation.enabled': 'true',
+        })
+
+    def read_and_check_schema(spark):
+        df = spark.read.parquet(data_path)
+        assert df.schema['void_col'].dataType == NullType(), \
+            f"expected void_col=NullType, got {df.schema['void_col'].dataType}"
+        return df
+
+    # GPU Parquet scan does not support NullType yet; expect CPU fallback.
+    assert_gpu_fallback_collect(read_and_check_schema, 'FileSourceScanExec', conf=conf)
+
+
+@pytest.mark.skipif(not is_spark_412_or_later(),
+                    reason='SPARK-56045 requires Spark 4.1.2+')
+@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+def test_parquet_unknown_type_annotation_explicit_int_schema(spark_tmp_path, reader_confs):
+    """Explicit non-Null schema should strip UNKNOWN even when respect conf is true."""
+    data_path = spark_tmp_path + '/PARQUET_UNKNOWN_EXPLICIT'
+    _write_parquet_unknown_null_table(data_path)
+
+    read_schema = StructType([
+        StructField('id', IntegerType(), True),
+        StructField('void_col', IntegerType(), True),
+    ])
+    conf = copy_and_update(reader_confs, {
+        'spark.sql.parquet.reader.respectUnknownTypeAnnotation.enabled': 'true',
+    })
+
+    def read_and_check_schema(spark):
+        df = spark.read.schema(read_schema).parquet(data_path)
+        assert df.schema['void_col'].dataType == IntegerType(), \
+            f"expected void_col=IntegerType, got {df.schema['void_col'].dataType}"
+        return df
+
+    assert_gpu_and_cpu_are_equal_collect(read_and_check_schema, conf=conf)
+
+
+@pytest.mark.skipif(not is_spark_412_or_later(),
+                    reason='SPARK-56045 requires Spark 4.1.2+')
+@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+def test_parquet_unknown_type_annotation_preserves_field_id(spark_tmp_path, reader_confs):
+    data_path = spark_tmp_path + '/PARQUET_UNKNOWN_FIELD_ID'
+    _write_parquet_unknown_null_table(data_path, field_id=7)
+
+    read_schema = StructType([
+        StructField('renamed_void', IntegerType(), True, metadata=with_id(7)),
+    ])
+    conf = copy_and_update(
+        reader_confs,
+        enable_parquet_field_id_read,
+        {'spark.sql.parquet.reader.respectUnknownTypeAnnotation.enabled': 'false'})
+
+    def read_and_check_schema(spark):
+        df = spark.read.schema(read_schema).parquet(data_path)
+        assert df.schema['renamed_void'].dataType == IntegerType(), \
+            f"expected renamed_void=IntegerType, got {df.schema['renamed_void'].dataType}"
+        return df
+
+    assert_gpu_and_cpu_are_equal_collect(read_and_check_schema, conf=conf)
+
+
+@pytest.mark.skipif(not is_spark_412_or_later(),
+                    reason='SPARK-56045 requires Spark 4.1.2+')
+@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+def test_parquet_unknown_type_annotation_list_physical(spark_tmp_path, reader_confs):
+    """Primitive-element lists bypass structural clipping; UNKNOWN must still be stripped."""
+    data_path = spark_tmp_path + '/PARQUET_UNKNOWN_LIST'
+    _write_parquet_unknown_null_table(data_path, with_list=True)
+
+    conf = copy_and_update(reader_confs, {
+        'spark.sql.parquet.reader.respectUnknownTypeAnnotation.enabled': 'false',
+    })
+
+    def read_and_check_schema(spark):
+        df = spark.read.parquet(data_path)
+        assert df.schema['list_void'].dataType == ArrayType(IntegerType()), \
+            f"expected ArrayType(IntegerType), got {df.schema['list_void'].dataType}"
+        return df
+
+    assert_gpu_and_cpu_are_equal_collect(read_and_check_schema, conf=conf)
+
+
+@pytest.mark.skipif(not is_spark_412_or_later(),
+                    reason='SPARK-56045 requires Spark 4.1.2+')
+@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+def test_parquet_unknown_type_annotation_map_physical(spark_tmp_path, reader_confs):
+    """Primitive-value maps bypass structural clipping; UNKNOWN must still be stripped."""
+    data_path = spark_tmp_path + '/PARQUET_UNKNOWN_MAP'
+    _write_parquet_unknown_null_table(data_path, with_map=True)
+
+    conf = copy_and_update(reader_confs, {
+        'spark.sql.parquet.reader.respectUnknownTypeAnnotation.enabled': 'false',
+    })
+
+    def read_and_check_schema(spark):
+        df = spark.read.parquet(data_path)
+        assert df.schema['map_void'].dataType == MapType(IntegerType(), IntegerType()), \
+            f"expected MapType(IntegerType, IntegerType), got {df.schema['map_void'].dataType}"
+        return df
+
+    assert_gpu_and_cpu_are_equal_collect(read_and_check_schema, conf=conf)

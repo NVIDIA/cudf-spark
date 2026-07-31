@@ -12,6 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+def copy_from_local(spark, local_source, hdfs_target):
+    """Copy a local path onto the Hadoop FS used by spark_tmp_path (e.g. GCS on Dataproc)."""
+    sc = spark.sparkContext
+    Path = sc._jvm.org.apache.hadoop.fs.Path
+    config = sc._jsc.hadoopConfiguration()
+    fs = sc._jvm.org.apache.hadoop.fs.FileSystem.get(config)
+    fs.copyFromLocalFile(Path(local_source), Path(hdfs_target))
+
+
 def parquet_row_group_midpoints(spark, path):
     """Returns an approximate byte midpoint for each Parquet row group."""
     jvm = spark.sparkContext._jvm
