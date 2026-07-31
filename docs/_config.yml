@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2020, NVIDIA CORPORATION.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,10 +18,10 @@
 remote_theme: pmarsceill/just-the-docs
 
 aux_links:
-  "RAPIDS Accelerator for Apache Spark User Guide":
+  "NVIDIA cuDF plugin for Apache Spark User Guide":
     - "//docs.nvidia.com/spark-rapids/user-guide/latest/index.html"
-  "RAPIDS Accelerator for Apache Spark Plugin on Github":
-    - "//github.com/nvidia/spark-rapids"
+  "NVIDIA cuDF plugin for Apache Spark on Github":
+    - "//github.com/nvidia/cudf-spark"
 
 plugins:
   - jekyll-optional-front-matter # GitHub Pages

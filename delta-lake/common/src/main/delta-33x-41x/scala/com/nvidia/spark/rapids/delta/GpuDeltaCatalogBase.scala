@@ -33,7 +33,7 @@ import org.apache.spark.sql.catalyst.catalog.{CatalogTable, CatalogTableType, Ca
 import org.apache.spark.sql.connector.catalog.{Identifier, StagedTable, StagingTableCatalog, SupportsWrite, Table, TableCapability, TableCatalog, TableChange}
 import org.apache.spark.sql.connector.catalog.TableCapability._
 import org.apache.spark.sql.connector.expressions.Transform
-import org.apache.spark.sql.connector.write.{LogicalWriteInfo, V1Write, WriteBuilder}
+import org.apache.spark.sql.connector.write.{LogicalWriteInfo, SupportsTruncate, V1Write, WriteBuilder}
 import org.apache.spark.sql.delta.{ColumnWithDefaultExprUtils, DeltaConfigs, DeltaErrors, DeltaLog, DeltaOptions}
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
 import org.apache.spark.sql.delta.commands.{TableCreationModes, WriteIntoDelta}
@@ -471,7 +471,7 @@ abstract class GpuDeltaCatalogBase(
     override def abortStagedChanges(): Unit = {}
 
     override def capabilities(): util.Set[TableCapability] = {
-      Set(V1_BATCH_WRITE).asJava
+      Set(V1_BATCH_WRITE, TRUNCATE).asJava
     }
 
     override def newWriteBuilder(info: LogicalWriteInfo): WriteBuilder = {
@@ -482,7 +482,9 @@ abstract class GpuDeltaCatalogBase(
     /*
      * WriteBuilder for creating a Delta table.
      */
-    private class DeltaV1WriteBuilder extends WriteBuilder {
+    private class DeltaV1WriteBuilder extends WriteBuilder with SupportsTruncate {
+      override def truncate(): this.type = this
+
       override def build(): V1Write = new V1Write {
         override def toInsertableRelation(): InsertableRelation = {
           new InsertableRelation {
