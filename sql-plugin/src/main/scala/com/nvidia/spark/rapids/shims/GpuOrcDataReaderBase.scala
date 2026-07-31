@@ -164,6 +164,8 @@ abstract class GpuOrcDataReaderBase(
         try {
           withResource(HostMemoryBuffer.allocate(tailLength, false)) { hmb =>
             readRangesToHostMemory(hmb, Seq(new CopyRange(offset, tailLength, 0)))
+            // A direct ByteBuffer makes ORC use Hadoop's native direct decompressor, whose JNI
+            // implementation may be unavailable. Copy to heap memory to use ORC's portable path.
             val tailBuf = ByteBuffer.allocate(tailLength)
             hmb.getBytes(tailBuf.array(), 0, 0, tailLength)
             val footer = parseStripeFooter(tailBuf, tailLength)
