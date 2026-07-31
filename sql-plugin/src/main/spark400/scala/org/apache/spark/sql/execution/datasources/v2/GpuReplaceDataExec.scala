@@ -27,14 +27,19 @@ spark-rapids-shim-json-lines ***/
 
 package org.apache.spark.sql.execution.datasources.v2
 
-import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+import com.nvidia.spark.rapids.GpuColumnVector
+import com.nvidia.spark.rapids.GpuDsv2WriteMetadata
 import com.nvidia.spark.rapids.GpuWrite
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.GpuProjectingColumnarBatch
+import org.apache.spark.sql.catalyst.ProjectingInternalRow
 import org.apache.spark.sql.catalyst.util.ReplaceDataProjections
+import org.apache.spark.sql.catalyst.util.RowDeltaUtils.{WRITE_OPERATION, WRITE_WITH_METADATA_OPERATION}
 import org.apache.spark.sql.connector.write.DataWriter
 import org.apache.spark.sql.execution.SparkPlan
+import org.apache.spark.sql.execution.datasources.v2.GpuDelteWritingSparkTask.filterByOperation
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 case class GpuReplaceDataExec(
@@ -47,8 +52,16 @@ case class GpuReplaceDataExec(
 
   override def query: SparkPlan = inner
 
-  override lazy val writingTask: GpuWritingSparkTask[_] =
-    GpuReplaceDataWritingSparkTask(projections)
+  override lazy val writingTask: GpuWritingSparkTask[_] = {
+    // Match CPU ReplaceDataExec: use metadata-aware task when metadataProjection is present
+    // (SPARK-50820 / DataAndMetadataWritingSparkTask).
+    projections match {
+      case ReplaceDataProjections(dataProj, Some(metadataProj)) =>
+        GpuDataAndMetadataWritingSparkTask(dataProj, metadataProj)
+      case _ =>
+        GpuReplaceDataWritingSparkTask(projections)
+    }
+  }
 
   override protected def internalDoExecuteColumnar(): RDD[ColumnarBatch] = {
     throw new IllegalStateException(
@@ -70,6 +83,57 @@ case class GpuReplaceDataWritingSparkTask(
       batch: ColumnarBatch): Unit = {
     withResource(rowProjection.project(batch)) { projected =>
       writer.write(projected)
+    }
+  }
+}
+
+/**
+ * GPU counterpart of Spark's DataAndMetadataWritingSparkTask.
+ * Routes WRITE_WITH_METADATA_OPERATION through [[DataWriter.write(Object, Object)]] and
+ * WRITE_OPERATION through [[DataWriter.write(Object)]].
+ */
+case class GpuDataAndMetadataWritingSparkTask(
+    dataProj: ProjectingInternalRow,
+    metadataProj: ProjectingInternalRow)
+  extends GpuWritingSparkTask[DataWriter[ColumnarBatch]] {
+
+  private lazy val rowProjection = GpuProjectingColumnarBatch(dataProj)
+  private lazy val rowDataTypes = dataProj.schema.fields.map(_.dataType)
+  private lazy val metadataProjection = GpuProjectingColumnarBatch(metadataProj)
+  private lazy val metadataDataTypes = metadataProj.schema.fields.map(_.dataType)
+
+  override protected def write(
+      writer: DataWriter[ColumnarBatch],
+      batch: ColumnarBatch): Unit = {
+    val withMetadataFilter = filterByOperation(batch, WRITE_WITH_METADATA_OPERATION)
+    withResource(withMetadataFilter) { _ =>
+      withResource(rowProjection.project(batch)) { rows =>
+        val dataBatch = GpuColumnVector.filter(rows, rowDataTypes, withMetadataFilter)
+        closeOnExcept(dataBatch) { _ =>
+          if (dataBatch.numRows() > 0) {
+            val metadataBatch = withResource(metadataProjection.project(batch)) { metadata =>
+              GpuColumnVector.filter(metadata, metadataDataTypes, withMetadataFilter)
+            }
+            GpuDsv2WriteMetadata.withMetadataSchema(metadataProj.schema) {
+              writer.write(metadataBatch, dataBatch)
+            }
+          } else {
+            dataBatch.close()
+          }
+        }
+      }
+    }
+
+    val writeFilter = filterByOperation(batch, WRITE_OPERATION)
+    withResource(writeFilter) { _ =>
+      withResource(rowProjection.project(batch)) { rows =>
+        val dataBatch = GpuColumnVector.filter(rows, rowDataTypes, writeFilter)
+        if (dataBatch.numRows() > 0) {
+          writer.write(dataBatch)
+        } else {
+          dataBatch.close()
+        }
+      }
     }
   }
 }

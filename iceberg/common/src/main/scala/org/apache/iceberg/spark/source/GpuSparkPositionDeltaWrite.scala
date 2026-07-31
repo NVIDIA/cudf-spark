@@ -444,6 +444,29 @@ trait GpuDeleteAndDataDeltaWriter extends GpuDeltaWriter {
 
   private var closed: Boolean = false
 
+  /**
+   * Match Iceberg DeleteAndDataDeltaWriter: insert routes through reinsert(null, row).
+   */
+  override def insert(row: ColumnarBatch): Unit = reinsert(null, row)
+
+  /**
+   * Match Iceberg reinsert: decorate with row lineage then write data.
+   */
+  override def reinsert(meta: ColumnarBatch, row: ColumnarBatch): Unit = {
+    try {
+      val decorated = GpuRowLineage.decorate(
+        context.dataSchema, meta, context.metadataSparkType, row)
+      insertDecorated(decorated)
+    } finally {
+      if (meta != null) {
+        meta.close()
+      }
+    }
+  }
+
+  /** Insert already-decorated data rows. Takes ownership of `row`. */
+  protected def insertDecorated(row: ColumnarBatch): Unit
+
   override def delete(metadata: ColumnarBatch, rowId: ColumnarBatch): Unit = {
     require(metadata != null, "Metadata batch must be non null")
 
@@ -691,7 +714,7 @@ class GpuUnpartitionedDeltaWriter(
     delegate.writeDelete(batch, spec, partition)
   }
 
-  override def insert(row: ColumnarBatch): Unit = {
+  override protected def insertDecorated(row: ColumnarBatch): Unit = {
     val spillBatch = closeOnExcept(row) { _ =>
       SpillableColumnarBatch(row, ACTIVE_ON_DECK_PRIORITY)
     }
@@ -743,7 +766,7 @@ class GpuPartitionedDeltaWriter(
     delegate.writeDelete(batch, spec, partition)
   }
 
-  override def insert(row: ColumnarBatch): Unit = {
+  override protected def insertDecorated(row: ColumnarBatch): Unit = {
     // Partition the data and write each partition
     dataPartitioner.partition(row)
       .safeConsume { part =>

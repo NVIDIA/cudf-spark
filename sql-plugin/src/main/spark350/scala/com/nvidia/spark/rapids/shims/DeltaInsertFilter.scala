@@ -31,7 +31,10 @@ import ai.rapids.cudf.{ColumnVector => CudfColumnVector, Scalar => CudfScalar}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.GpuColumnVector
 
+import org.apache.spark.sql.catalyst.GpuProjectingColumnarBatch
 import org.apache.spark.sql.catalyst.util.RowDeltaUtils.INSERT_OPERATION
+import org.apache.spark.sql.connector.write.DeltaWriter
+import org.apache.spark.sql.types.DataType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 object DeltaInsertFilter {
@@ -39,5 +42,40 @@ object DeltaInsertFilter {
     withResource(CudfScalar.fromInt(INSERT_OPERATION)) { s =>
       batch.column(0).asInstanceOf[GpuColumnVector].getBase.equalTo(s)
     }
+  }
+
+  /**
+   * Write INSERT_OPERATION rows via [[DeltaWriter.insert]].
+   * Spark 3.5 has no REINSERT_OPERATION path.
+   */
+  def writeInserts(
+      writer: DeltaWriter[ColumnarBatch],
+      batch: ColumnarBatch,
+      rowProjection: GpuProjectingColumnarBatch,
+      rowDataTypes: Array[DataType]): Unit = {
+    val insertFilter = filterInsertRows(batch)
+    withResource(insertFilter) { _ =>
+      withResource(rowProjection.project(batch)) { rows =>
+        val filteredRows = GpuColumnVector.filter(rows, rowDataTypes, insertFilter)
+        if (filteredRows.numRows() > 0) {
+          writer.insert(filteredRows)
+        } else {
+          filteredRows.close()
+        }
+      }
+    }
+  }
+
+  /**
+   * Spark 3.5 does not distinguish REINSERT from INSERT.
+   */
+  def writeReinserts(
+      writer: DeltaWriter[ColumnarBatch],
+      batch: ColumnarBatch,
+      rowProjection: GpuProjectingColumnarBatch,
+      rowDataTypes: Array[DataType],
+      metadataProjection: GpuProjectingColumnarBatch,
+      metadataDataTypes: Array[DataType]): Unit = {
+    // no-op
   }
 }

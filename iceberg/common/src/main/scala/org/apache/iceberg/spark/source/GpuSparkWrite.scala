@@ -392,7 +392,8 @@ class GpuWriterFactory(val tableBroadcast: Broadcast[Table],
       fileIO)
 
     if (spec.isUnpartitioned) {
-      new GpuUnpartitionedDataWriter(writerFactory, outputFileFactory, io, spec, targetFileSize)
+      new GpuUnpartitionedDataWriter(writerFactory, outputFileFactory, io, spec, writeSchema,
+        targetFileSize)
         .asInstanceOf[DataWriter[InternalRow]]
     } else {
       new GpuPartitionedDataWriter(writerFactory, outputFileFactory, io, spec, writeSchema,
@@ -407,6 +408,7 @@ class GpuUnpartitionedDataWriter(
   val fileFactory: OutputFileFactory,
   val io: FileIO,
   val spec: PartitionSpec,
+  val writeSchema: Schema,
   val targetFileSize: Long)
   extends DataWriter[ColumnarBatch] {
   private val delegate = new GpuRollingDataWriter(
@@ -417,12 +419,23 @@ class GpuUnpartitionedDataWriter(
     spec,
     null)
 
+  // Match Iceberg UnpartitionedDataWriter: write(record) delegates to write(null, record).
+  override def write(t: ColumnarBatch): Unit = write(null, t)
 
-  override def write(t: ColumnarBatch): Unit = {
-    val scb = closeOnExcept(t) { _ =>
-      SpillableColumnarBatch(t, ACTIVE_ON_DECK_PRIORITY)
+  override def write(meta: ColumnarBatch, record: ColumnarBatch): Unit = {
+    try {
+      val metaSchema = com.nvidia.spark.rapids.GpuDsv2WriteMetadata.metadataSchema
+        .getOrElse(StructType(Nil))
+      val decorated = GpuRowLineage.decorate(writeSchema, meta, metaSchema, record)
+      val scb = closeOnExcept(decorated) { _ =>
+        SpillableColumnarBatch(decorated, ACTIVE_ON_DECK_PRIORITY)
+      }
+      delegate.write(scb)
+    } finally {
+      if (meta != null) {
+        meta.close()
+      }
     }
-    delegate.write(scb)
   }
 
   override def commit(): WriterCommitMessage = {
@@ -466,11 +479,23 @@ class GpuPartitionedDataWriter(
 
   private val partitioner = new GpuIcebergSpecPartitioner(spec, dataSchema.asStruct())
 
-  override def write(record: ColumnarBatch): Unit = {
-    partitioner.partition(record)
-      .safeConsume { part =>
-        delegate.write(part.batch, spec, part.partition)
+  // Match Iceberg PartitionedDataWriter: write(record) delegates to write(null, record).
+  override def write(record: ColumnarBatch): Unit = write(null, record)
+
+  override def write(meta: ColumnarBatch, record: ColumnarBatch): Unit = {
+    try {
+      val metaSchema = com.nvidia.spark.rapids.GpuDsv2WriteMetadata.metadataSchema
+        .getOrElse(StructType(Nil))
+      val decorated = GpuRowLineage.decorate(dataSchema, meta, metaSchema, record)
+      partitioner.partition(decorated)
+        .safeConsume { part =>
+          delegate.write(part.batch, spec, part.partition)
+        }
+    } finally {
+      if (meta != null) {
+        meta.close()
       }
+    }
   }
 
   override def commit(): WriterCommitMessage = {

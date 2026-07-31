@@ -478,17 +478,11 @@ case class GpuDeltaWritingSparkTask(
           }
         }
 
-        val insertFilter = DeltaInsertFilter.filterInsertRows(batch)
-        withResource(insertFilter) { _ =>
-          withResource(rowProjection.project(batch)) { rows =>
-            val filteredRows = GpuColumnVector.filter(rows, rowDataTypes, insertFilter)
-            if (filteredRows.numRows() > 0) {
-              writer.insert(filteredRows)
-            } else {
-              filteredRows.close()
-            }
-          }
-        }
+        // INSERT and REINSERT must be routed separately (SPARK-50820):
+        // insert(...) vs reinsert(metadata, row).
+        DeltaInsertFilter.writeInserts(writer, batch, rowProjection, rowDataTypes)
+        DeltaInsertFilter.writeReinserts(
+          writer, batch, rowProjection, rowDataTypes, null, null)
       }
     }
   }
@@ -569,16 +563,16 @@ case class GpuDeltaWithMetadataWritingSparkTask(
       }
 
       if (rowProjection != null) {
-        val insertFilter = DeltaInsertFilter.filterInsertRows(batch)
-        withResource(insertFilter) { _ =>
-          withResource(rowProjection.project(batch)) { rows =>
-            val filterRows = GpuColumnVector.filter(rows, rowDataTypes, insertFilter)
-            if (filterRows.numRows() > 0) {
-              writer.insert(filterRows)
-            } else {
-              filterRows.close()
-            }
-          }
+        // INSERT and REINSERT must be routed separately (SPARK-50820):
+        // insert(...) vs reinsert(metadata, row).
+        DeltaInsertFilter.writeInserts(writer, batch, rowProjection, rowDataTypes)
+        if (metadataProjection != null) {
+          DeltaInsertFilter.writeReinserts(
+            writer, batch, rowProjection, rowDataTypes,
+            metadataProjection, metadataDataTypes)
+        } else {
+          DeltaInsertFilter.writeReinserts(
+            writer, batch, rowProjection, rowDataTypes, null, null)
         }
       }
     }

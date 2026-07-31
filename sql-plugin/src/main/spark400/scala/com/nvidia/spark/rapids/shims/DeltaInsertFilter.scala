@@ -28,24 +28,85 @@ spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
 import ai.rapids.cudf.{ColumnVector => CudfColumnVector, Scalar => CudfScalar}
-import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuColumnVector
+import com.nvidia.spark.rapids.GpuDsv2WriteMetadata
 
+import org.apache.spark.sql.catalyst.GpuProjectingColumnarBatch
 import org.apache.spark.sql.catalyst.util.RowDeltaUtils.{INSERT_OPERATION, REINSERT_OPERATION}
+import org.apache.spark.sql.connector.write.DeltaWriter
+import org.apache.spark.sql.types.DataType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 object DeltaInsertFilter {
   def filterInsertRows(batch: ColumnarBatch): CudfColumnVector = {
-    val opCol = batch.column(0).asInstanceOf[GpuColumnVector].getBase
-    val insertMatch = withResource(CudfScalar.fromInt(INSERT_OPERATION)) { s =>
-      opCol.equalTo(s)
+    withResource(CudfScalar.fromInt(INSERT_OPERATION)) { s =>
+      batch.column(0).asInstanceOf[GpuColumnVector].getBase.equalTo(s)
     }
-    withResource(insertMatch) { _ =>
-      val reinsertMatch = withResource(CudfScalar.fromInt(REINSERT_OPERATION)) { s =>
-        opCol.equalTo(s)
+  }
+
+  def filterReinsertRows(batch: ColumnarBatch): CudfColumnVector = {
+    withResource(CudfScalar.fromInt(REINSERT_OPERATION)) { s =>
+      batch.column(0).asInstanceOf[GpuColumnVector].getBase.equalTo(s)
+    }
+  }
+
+  /**
+   * Write INSERT_OPERATION rows via [[DeltaWriter.insert]].
+   * REINSERT_OPERATION rows are handled separately by [[writeReinserts]].
+   */
+  def writeInserts(
+      writer: DeltaWriter[ColumnarBatch],
+      batch: ColumnarBatch,
+      rowProjection: GpuProjectingColumnarBatch,
+      rowDataTypes: Array[DataType]): Unit = {
+    val insertFilter = filterInsertRows(batch)
+    withResource(insertFilter) { _ =>
+      withResource(rowProjection.project(batch)) { rows =>
+        val filteredRows = GpuColumnVector.filter(rows, rowDataTypes, insertFilter)
+        if (filteredRows.numRows() > 0) {
+          writer.insert(filteredRows)
+        } else {
+          filteredRows.close()
+        }
       }
-      withResource(reinsertMatch) { _ =>
-        insertMatch.or(reinsertMatch)
+    }
+  }
+
+  /**
+   * Write REINSERT_OPERATION rows via [[DeltaWriter.reinsert]], matching Spark's
+   * DeltaWritingSparkTask / DeltaWithMetadataWritingSparkTask (SPARK-50820).
+   *
+   * @param metadataProjection metadata projection, or null when metadata is unavailable
+   * @param metadataDataTypes metadata column types when metadataProjection is non-null
+   */
+  def writeReinserts(
+      writer: DeltaWriter[ColumnarBatch],
+      batch: ColumnarBatch,
+      rowProjection: GpuProjectingColumnarBatch,
+      rowDataTypes: Array[DataType],
+      metadataProjection: GpuProjectingColumnarBatch,
+      metadataDataTypes: Array[DataType]): Unit = {
+    val reinsertFilter = filterReinsertRows(batch)
+    withResource(reinsertFilter) { _ =>
+      withResource(rowProjection.project(batch)) { rows =>
+        val filteredRows = GpuColumnVector.filter(rows, rowDataTypes, reinsertFilter)
+        closeOnExcept(filteredRows) { _ =>
+          if (filteredRows.numRows() > 0) {
+            if (metadataProjection != null) {
+              val metadataBatch = withResource(metadataProjection.project(batch)) { metadata =>
+                GpuColumnVector.filter(metadata, metadataDataTypes, reinsertFilter)
+              }
+              GpuDsv2WriteMetadata.withMetadataSchema(metadataProjection.schema) {
+                writer.reinsert(metadataBatch, filteredRows)
+              }
+            } else {
+              writer.reinsert(null, filteredRows)
+            }
+          } else {
+            filteredRows.close()
+          }
+        }
       }
     }
   }
