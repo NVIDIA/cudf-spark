@@ -1736,7 +1736,9 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
   // NOTE: this can be null in the driver side.
   protected lazy val env = SparkEnv.get
   protected lazy val blockManager = env.blockManager
-  protected lazy val shouldFallThroughOnEverything = {
+  // Stable reasons to always fall back to SortShuffleManager, evaluated once at
+  // first shuffle registration.
+  protected lazy val shouldAlwaysFallBack = {
     val fallThroughReasons = new ListBuffer[String]()
     if (!rapidsConf.isMultiThreadedShuffleManagerMode) {
       if (GpuShuffleEnv.isExternalShuffleEnabled) {
@@ -1768,7 +1770,7 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
           "This Spark 4.1+ feature is not yet supported by Spark-Rapids.")
       }
     }
-    shouldFallThroughOnEverything || rowBasedChecksumFallback
+    shouldAlwaysFallBack || rowBasedChecksumFallback
   }
 
   private lazy val localBlockManagerId = blockManager.blockManagerId
@@ -1785,7 +1787,7 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
         "RapidsShuffleManager is configured"))
 
   protected lazy val resolver =
-    if (shouldFallThroughOnEverything) {
+    if (shouldAlwaysFallBack) {
       wrapped.shuffleBlockResolver
     } else if (rapidsConf.isMultiThreadedShuffleManagerMode) {
       // MULTITHREADED mode: use GpuShuffleBlockResolver
@@ -1862,7 +1864,7 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
         gpuDep.checksumFallback = shouldFallThroughForShuffle
         if (rapidsConf.isMultiThreadedShuffleManagerMode) orig
         else new GpuShuffleHandle(orig, gpuDep)
-      case _ if shouldFallThroughOnEverything ||
+      case _ if shouldAlwaysFallBack ||
         rapidsConf.isMultiThreadedShuffleManagerMode => orig
       case _ => orig
     }
