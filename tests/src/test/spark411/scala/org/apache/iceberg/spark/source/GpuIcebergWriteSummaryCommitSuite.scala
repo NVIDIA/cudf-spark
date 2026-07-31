@@ -16,9 +16,6 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark": "411"}
-{"spark": "412"}
-{"spark": "413"}
-{"spark": "420"}
 spark-rapids-shim-json-lines ***/
 package org.apache.iceberg.spark.source
 
@@ -30,7 +27,7 @@ import org.apache.spark.sql.connector.write.{BatchWrite, DataWriterFactory, Delt
 
 /**
  * Verifies production Iceberg GPU BatchWrite types forward WriteSummary via
- * GpuV2BatchWriteSummaryCommit (not only a synthetic trait mixin).
+ * GpuV2BatchWriteSummaryCommit (Spark 4.1.1 only; later shims use iceberg-stub).
  */
 class GpuIcebergWriteSummaryCommitSuite extends AnyFunSuite {
 
