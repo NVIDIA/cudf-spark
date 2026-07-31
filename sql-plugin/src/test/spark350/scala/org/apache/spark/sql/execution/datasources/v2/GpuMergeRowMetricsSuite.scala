@@ -38,6 +38,7 @@ spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.execution.datasources.v2
 
 import com.nvidia.spark.rapids.{FQSuiteName, LocalGpuMetric}
+import com.nvidia.spark.rapids.shims.GpuMergeRowMetricsShims
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.catalyst.expressions.Literal
@@ -102,19 +103,23 @@ class GpuMergeRowMetricsSuite extends AnyFunSuite with FQSuiteName {
     assert(m.numTargetRowsDeleted.value === 0)
   }
 
-  test("reset clears staging so a reused attempt does not accumulate retries") {
-    val published = metrics()
-    val attempt = MergeRowMetrics.local()
-    attempt.record(GpuKeep(trueLit, Nil, ACTION_INSERT), 7, sourcePresent = true)
-    attempt.record(GpuDiscard(trueLit), 4, sourcePresent = true)
-    // Simulate a failed attempt that is discarded by reset before retry.
-    attempt.reset()
-    attempt.record(GpuKeep(trueLit, Nil, ACTION_INSERT), 7, sourcePresent = true)
-    attempt.record(GpuDiscard(trueLit), 4, sourcePresent = true)
-    published.addAll(attempt)
-
-    assert(published.numTargetRowsInserted.value === 7)
-    assert(published.numTargetRowsDeleted.value === 4)
-    assert(published.numTargetRowsMatchedDeleted.value === 4)
+  test("forAttempt respects writeSummaryEnabled capability") {
+    val attempt = MergeRowMetrics.forAttempt()
+    if (GpuMergeRowMetricsShims.writeSummaryEnabled) {
+      assert(attempt ne MergeRowMetrics.NOOP)
+      attempt.record(GpuKeep(trueLit, Nil, ACTION_INSERT), 7, sourcePresent = true)
+      attempt.record(GpuDiscard(trueLit), 4, sourcePresent = true)
+      // Simulate a failed attempt that is discarded by reset before retry.
+      attempt.reset()
+      attempt.record(GpuKeep(trueLit, Nil, ACTION_INSERT), 7, sourcePresent = true)
+      attempt.record(GpuDiscard(trueLit), 4, sourcePresent = true)
+      val published = metrics()
+      published.addAll(attempt)
+      assert(published.numTargetRowsInserted.value === 7)
+      assert(published.numTargetRowsDeleted.value === 4)
+      assert(published.numTargetRowsMatchedDeleted.value === 4)
+    } else {
+      assert(attempt eq MergeRowMetrics.NOOP)
+    }
   }
 }

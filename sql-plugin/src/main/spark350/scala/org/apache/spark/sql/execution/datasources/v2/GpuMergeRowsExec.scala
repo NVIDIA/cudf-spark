@@ -152,7 +152,7 @@ case class GpuMergeRowsExec(
         gpuLongMetric(NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_UPDATED),
         gpuLongMetric(NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_DELETED))
     } else {
-      MergeRowMetrics.noop
+      MergeRowMetrics.NOOP
     }
 
     val dataTypes = GpuColumnVector.extractTypes(child.schema)
@@ -294,7 +294,7 @@ object GpuMergeRowsExec {
 
   object MergeRowMetrics {
     /** Shared no-op metrics when WriteSummary accounting is disabled (Spark < 4.1). */
-    val noop: MergeRowMetrics = MergeRowMetrics(
+    val NOOP: MergeRowMetrics = MergeRowMetrics(
       NoopMetric, NoopMetric, NoopMetric, NoopMetric,
       NoopMetric, NoopMetric, NoopMetric, NoopMetric)
 
@@ -309,8 +309,9 @@ object GpuMergeRowsExec {
       new LocalGpuMetric(),
       new LocalGpuMetric())
 
+    /** Staging metrics for one retry attempt; NOOP when WriteSummary is unused. */
     def forAttempt(): MergeRowMetrics = {
-      if (GpuMergeRowMetricsShims.writeSummaryEnabled) local() else noop
+      if (GpuMergeRowMetricsShims.writeSummaryEnabled) local() else NOOP
     }
   }
 
@@ -392,6 +393,8 @@ class GpuMergeBatchIterator(
 
   import GpuMergeRowsExec.MergeRowMetrics
 
+  // Skip staging/publish work before Spark 4.1 where WriteSummary is unused.
+  private val writeSummaryEnabled: Boolean = GpuMergeRowMetricsShims.writeSummaryEnabled
   // Reused across batches/attempts; reset() clears counts before each retry attempt.
   private val attemptMetrics: MergeRowMetrics = MergeRowMetrics.forAttempt()
 
@@ -418,7 +421,9 @@ class GpuMergeBatchIterator(
    */
   private def processBatch(batch: ColumnarBatch): ColumnarBatch = {
     val result = withRetryNoSplit(batch) { _ =>
-      attemptMetrics.reset()
+      if (writeSummaryEnabled) {
+        attemptMetrics.reset()
+      }
       // Evaluate presence flags
       val outputs = new ArrayBuffer[SpillableColumnarBatch](
         matchedInstructionExecs.size + notMatchedInstructionExecs.size
@@ -458,7 +463,9 @@ class GpuMergeBatchIterator(
         spillable.get.getColumnarBatch()
       }
     }
-    mergeMetrics.addAll(attemptMetrics)
+    if (writeSummaryEnabled) {
+      mergeMetrics.addAll(attemptMetrics)
+    }
     result
   }
 
@@ -507,7 +514,9 @@ class GpuMergeBatchIterator(
       withResource(condMask) { _ =>
         val thisFilteredBatch = GpuColumnVector.filter(batch, dataTypes, condMask)
         withResource(thisFilteredBatch) { filtered =>
-          attemptMetrics.record(instructionExec, filtered.numRows(), sourcePresent)
+          if (writeSummaryEnabled) {
+            attemptMetrics.record(instructionExec, filtered.numRows(), sourcePresent)
+          }
           outputs ++= instructionExec.applyOutputs(filtered)
             .map(SpillableColumnarBatch
               .apply(_, SpillPriorities.ACTIVE_ON_DECK_PRIORITY))

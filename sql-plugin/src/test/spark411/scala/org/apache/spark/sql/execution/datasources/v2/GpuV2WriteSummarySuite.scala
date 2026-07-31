@@ -22,8 +22,8 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.execution.datasources.v2
 
-import com.nvidia.spark.rapids.FQSuiteName
-import com.nvidia.spark.rapids.shims.{GpuMergeRowsKeepShims, GpuV2BatchWriteSummaryCommit}
+import com.nvidia.spark.rapids.{FQSuiteName, GpuRowToColumnarExec, RapidsConf, TargetSize}
+import com.nvidia.spark.rapids.shims.GpuMergeRowsKeepShims
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.SparkSession
@@ -31,6 +31,7 @@ import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Literal}
 import org.apache.spark.sql.catalyst.plans.logical.MergeRows.{Copy, Delete, Insert, Keep, Update}
 import org.apache.spark.sql.connector.write.{BatchWrite, DataWriterFactory, MergeSummary,
   MergeSummaryImpl, PhysicalWriteInfo, WriterCommitMessage, WriteSummary}
+import org.apache.spark.sql.execution.ProjectExec
 import org.apache.spark.sql.execution.metric.SQLMetrics
 import org.apache.spark.sql.types.{BooleanType, IntegerType, LongType}
 
@@ -115,7 +116,7 @@ class GpuV2WriteSummarySuite extends AnyFunSuite with FQSuiteName {
     }
   }
 
-  test("commit traverses GpuMergeRowsExec and uses summary-aware overload") {
+  test("commit finds GpuMergeRowsExec under an ancestor via plan traversal") {
     withSparkSession { spark =>
       val child = spark.range(1).queryExecution.executedPlan
       val output = Seq(AttributeReference("id", LongType, nullable = false)())
@@ -127,15 +128,17 @@ class GpuV2WriteSummarySuite extends AnyFunSuite with FQSuiteName {
         output,
         child)
       seedAllMergeMetrics(merge)
+      // Root is not the MERGE node; commit must walk descendants.
+      val root = ProjectExec(merge.output, merge)
       val recorder = new RecordingBatchWrite
-      GpuV2WriteCommitShims.commit(recorder, Array.empty, merge)
+      GpuV2WriteCommitShims.commit(recorder, Array.empty, root)
       assert(recorder.summaryCommitCount === 1)
       assert(recorder.plainCommitCount === 0)
       assertAllMergeSummaryFields(recorder.lastSummary.get.asInstanceOf[MergeSummary])
     }
   }
 
-  test("commit preserves summary for CPU MergeRowsExec fallback child") {
+  test("commit finds CPU MergeRowsExec under GpuRowToColumnarExec fallback wrapper") {
     withSparkSession { spark =>
       val child = spark.range(1).queryExecution.executedPlan
       val output = Seq(AttributeReference("id", LongType, nullable = false)())
@@ -147,22 +150,14 @@ class GpuV2WriteSummarySuite extends AnyFunSuite with FQSuiteName {
         output,
         child)
       seedAllMergeMetrics(merge)
+      // Mixed plan: GPU writer above a CPU MERGE child wrapped for columnar output.
+      val root = GpuRowToColumnarExec(merge, TargetSize(1L << 20))
       val recorder = new RecordingBatchWrite
-      GpuV2WriteCommitShims.commit(recorder, Array.empty, merge)
+      GpuV2WriteCommitShims.commit(recorder, Array.empty, root)
       assert(recorder.summaryCommitCount === 1)
       assert(recorder.plainCommitCount === 0)
       assertAllMergeSummaryFields(recorder.lastSummary.get.asInstanceOf[MergeSummary])
     }
-  }
-
-  test("GpuV2BatchWriteSummaryCommit forwards summary to CPU delegate") {
-    val cpu = new RecordingBatchWrite
-    val gpu = new ForwardingGpuBatchWrite(cpu)
-    val summary: WriteSummary = MergeSummaryImpl(9, 0, 0, 1, 0, 0, 0, 0)
-    gpu.commit(Array.empty, summary)
-    assert(cpu.summaryCommitCount === 1)
-    assert(cpu.lastSummary.get.asInstanceOf[MergeSummary].numTargetRowsCopied === 9)
-    assert(cpu.lastSummary.get.asInstanceOf[MergeSummary].numTargetRowsInserted === 1)
   }
 
   private def withSparkSession[T](f: SparkSession => T): T = {
@@ -171,6 +166,8 @@ class GpuV2WriteSummarySuite extends AnyFunSuite with FQSuiteName {
       .appName(getClass.getSimpleName)
       .config("spark.ui.enabled", "false")
       .config("spark.driver.host", "127.0.0.1")
+      // ESSENTIAL must still expose all MergeSummary fields used as commit metadata.
+      .config(RapidsConf.METRICS_LEVEL.key, "ESSENTIAL")
       .getOrCreate()
     try {
       f(spark)
@@ -180,6 +177,19 @@ class GpuV2WriteSummarySuite extends AnyFunSuite with FQSuiteName {
   }
 
   private def seedAllMergeMetrics(plan: org.apache.spark.sql.execution.SparkPlan): Unit = {
+    // Under ESSENTIAL, every MergeSummary field must still be present (not NoopMetric).
+    Seq(
+      GpuMergeRowsExec.NUM_TARGET_ROWS_COPIED,
+      GpuMergeRowsExec.NUM_TARGET_ROWS_DELETED,
+      GpuMergeRowsExec.NUM_TARGET_ROWS_UPDATED,
+      GpuMergeRowsExec.NUM_TARGET_ROWS_INSERTED,
+      GpuMergeRowsExec.NUM_TARGET_ROWS_MATCHED_UPDATED,
+      GpuMergeRowsExec.NUM_TARGET_ROWS_MATCHED_DELETED,
+      GpuMergeRowsExec.NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_UPDATED,
+      GpuMergeRowsExec.NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_DELETED).foreach { name =>
+      assert(plan.metrics.contains(name),
+        s"$name missing from plan.metrics at ESSENTIAL metrics level")
+    }
     plan.metrics(GpuMergeRowsExec.NUM_TARGET_ROWS_COPIED).add(1L)
     plan.metrics(GpuMergeRowsExec.NUM_TARGET_ROWS_DELETED).add(2L)
     plan.metrics(GpuMergeRowsExec.NUM_TARGET_ROWS_UPDATED).add(3L)
@@ -220,18 +230,5 @@ class GpuV2WriteSummarySuite extends AnyFunSuite with FQSuiteName {
     }
 
     override def abort(messages: Array[WriterCommitMessage]): Unit = ()
-  }
-
-  private class ForwardingGpuBatchWrite(cpu: BatchWrite)
-    extends BatchWrite with GpuV2BatchWriteSummaryCommit {
-    override protected def summaryCommitDelegate: BatchWrite = cpu
-
-    override def createBatchWriterFactory(info: PhysicalWriteInfo): DataWriterFactory = {
-      cpu.createBatchWriterFactory(info)
-    }
-
-    override def commit(messages: Array[WriterCommitMessage]): Unit = cpu.commit(messages)
-
-    override def abort(messages: Array[WriterCommitMessage]): Unit = cpu.abort(messages)
   }
 }
