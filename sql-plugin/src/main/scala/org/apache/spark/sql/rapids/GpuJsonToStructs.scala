@@ -33,28 +33,33 @@ import org.apache.spark.sql.types._
 /**
  * GPU implementation of Spark's `from_json` (`JsonToStructs`).
  *
- * For a `MAP<STRING, ARRAY<STRING>>` (and `MAP<STRING, STRING>`) schema the map is extracted as a
- * "raw" map: keys, values and array elements are raw JSON byte ranges (surrounding quotes stripped
- * but NOT JSON-unescaped). Verified against Spark 3.5.5, the output diverges from Spark CPU on
- * three documented corner cases (see docs/compatibility.md):
- *  - escape sequences (e.g. `\"`, `\\`, `\\uXXXX`) are kept verbatim rather than
- *    unescaped/normalized;
- *  - for `ARRAY<STRING>`, object / nested-array elements are returned as their raw JSON substring
- *    rather than Spark's re-serialized form;
- *  - numeric elements keep their raw JSON token; Spark re-renders numbers, so non-canonical
- *    spellings differ (`007` -> `"7"` with `allowNumericLeadingZeros`, `1.00000` -> `"1.0"`,
- *    `1e2` -> `"100.0"`), and non-numeric numbers stay bare while Spark quotes them (`NaN` ->
- *    `"NaN"`, `Infinity` -> `"Infinity"`).
- * All of these differ from Spark on ALL versions, including 4.0.0+: `from_json` on a string column
- * parses via a Reader (Spark's `CreateJacksonParser.utf8String`), so Spark 4.0.0's
+ * For a `MAP<STRING, STRING>` or `MAP<STRING, ARRAY<STRING>>` schema the map's keys, values and
+ * array elements are rendered to match Spark CPU's Jackson output (see docs/compatibility.md):
+ * string tokens are de-quoted and JSON-unescaped; numbers are re-rendered canonically (integer
+ * leading zeros and `-0` stripped, floats in Java `Double.toString` form); the `NaN`/`Infinity`
+ * spellings accepted with `allowNonNumericNumbers` render as their quoted canonical forms; nested
+ * object/array values and elements are re-serialized compactly in document order. A map value that
+ * is the JSON `null` literal keeps its pair and yields a SQL NULL value (for `ARRAY<STRING>`, a
+ * null inner list), while for `ARRAY<STRING>` a value that is non-null but not a JSON array (a
+ * scalar or object) nulls the whole row (PERMISSIVE bad-record). A number the JSON parser refuses
+ * nulls the whole row the same way: the parser caps a number's digit count (signs, `.`, `e`/`E`,
+ * and leading zeros excluded) and applies that cap to integers and floats alike, so a number past
+ * it makes the record a Spark bad record whether it is a value, an array element, or buried inside
+ * a nested value. Duplicate keys are kept in document order on every supported Spark version:
+ * `JacksonParser.convertMap` builds `ArrayBasedMapData` directly, so `spark.sql.mapKeyDedupPolicy`
+ * never applies to `from_json`.
+ *
+ * The rendering is the same on every Spark version, including 4.0.0+: `from_json` on a string
+ * column parses via a Reader (Spark's `CreateJacksonParser.utf8String`), so Spark 4.0.0's
  * `spark.sql.json.enableExactStringParsing` (default `true`) does not apply. Its raw-source-byte
  * path (`JacksonParser`) fires only for `Array[Byte]` / file sources (e.g. `spark.read.json`),
- * never a Reader, so the CPU always re-serializes non-string tokens (cases 2/3, via
- * `copyCurrentStructure`) and always unescapes string tokens (case 1, via `getText`).
- * The following MATCH Spark and are NOT divergences: canonical elements whose raw text already
- * equals Spark's rendering (e.g. `1`, `1.5`, `true`); a map value that is not a JSON array and not
- * the JSON `null` literal nulls the whole row (PERMISSIVE bad-record); duplicate keys kept in
- * document order (matches Spark 3.5.x; later Spark may de-dup per `spark.sql.mapKeyDedupPolicy`).
+ * never a Reader, so the CPU always re-serializes non-string tokens (via `copyCurrentStructure`)
+ * and always unescapes string tokens (via `getText`) -- the same rendering produced here. Known
+ * caveats (docs/compatibility.md): invalid UTF-8 is out of scope (Spark's `InputStreamReader`
+ * replaces invalid byte sequences with U+FFFD while the GPU copies raw bytes through unchanged),
+ * and float parse fidelity matches the `get_json_object` path (mantissas beyond 2^53 are not
+ * correctly rounded, so an adversarial double can differ by 1 ULP and re-render to a different
+ * shortest string).
  */
 case class GpuJsonToStructs(
     schema: DataType,
@@ -75,8 +80,7 @@ case class GpuJsonToStructs(
   override protected def doColumnar(input: GpuColumnVector): cudf.ColumnVector = {
     NvtxRegistry.JSON_TO_STRUCTS {
       schema match {
-        // Raw extraction (no unescaping, duplicate keys kept, non-string elements as raw text) --
-        // see the class doc and docs/compatibility.md.
+        // The JNI name keeps its historical "Raw"; the output here is Spark-rendered, not raw.
         case MapType(StringType, ArrayType(StringType, _), _) =>
           JSONUtils.extractRawMapFromJsonString(input.getBase, cudfOptions,
             JSONUtils.MapValueType.ARRAY_OF_STRING)

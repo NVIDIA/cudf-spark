@@ -728,7 +728,7 @@ def test_from_json_map_with_invalid():
 @pytest.mark.parametrize('allow_single_quotes', ['true', 'false'])
 @pytest.mark.parametrize('allow_non_numeric_numbers', ['true', 'false'])
 @pytest.mark.parametrize('allow_unquoted_chars', ['true', 'false'])
-def test_from_json_map_with_options(allow_single_quotes,  
+def test_from_json_map_with_options(allow_single_quotes,
                                     allow_non_numeric_numbers,
                                     allow_unquoted_chars):
     # Test the input with:
@@ -743,14 +743,56 @@ def test_from_json_map_with_options(allow_single_quotes,
         .with_special_pattern(r'{"a": [+-]?(INF|Infinity|NaN)}', weight=50) \
         .with_special_pattern(r'{"(a|a\r\n\tb)": "(xyz|01\r\n\t23)"}', weight=50)
     options = {"allowSingleQuotes": allow_single_quotes,
-                # Cannot test `allowNumericLeadingZeros==true` because the GPU output always has
-                # leading zeros while the CPU output does not, thus test will always fail.
+               # Kept at false instead of crossing the matrix: the flag only gates number-token
+               # acceptance, independent of the other options, so the leading-zero rows here test
+               # both engines rejecting alike; test_from_json_map_numeric covers true.
                "allowNumericLeadingZeros": "false",
                "allowNonNumericNumbers": allow_non_numeric_numbers,
                "allowUnquotedControlChars": allow_unquoted_chars}
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark : unary_op_df(spark, json_string_gen, length=20) \
             .select(f.from_json(f.col('a'), 'MAP<STRING,STRING>', options)),
+        conf=_enable_all_types_conf)
+
+@allow_non_gpu(*non_utc_allow)
+def test_from_json_map_numeric():
+    # allowNumericLeadingZeros makes 007 parseable; the GPU re-renders number tokens canonically,
+    # matching Spark CPU (007 -> 7, -007 -> -7, 1.00000 -> 1.0, 1e-2 -> 0.01). Mirrors
+    # test_from_json_map_with_arrays_numeric for the MAP<STRING,STRING> value path; compared via
+    # map_entries because the plain-map compare in asserts.py does not check map contents.
+    schema = StructType([StructField("a", StringType())])
+    data = [
+        ['{"a": 007, "b": -007}'],         # leading zeros: both render 7 / -7
+        ['{"a": -0, "b": -0.0}'],          # signed zero: -0 renders 0, -0.0 keeps the sign
+        ['{"a": 1.00000, "b": -1.00000}'], # float re-render: both render 1.0 / -1.0
+        ['{"a": 1e2, "b": 1e-2}'],         # exponents: both render 100.0 / 0.01
+    ]
+    options = {"allowNumericLeadingZeros": "true"}
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark : spark.createDataFrame(data, schema=schema) \
+            .select(f.map_entries(f.from_json(f.col('a'), 'MAP<STRING,STRING>', options))),
+        conf=_enable_all_types_conf)
+
+@allow_non_gpu(*non_utc_allow)
+def test_from_json_map_render():
+    # The MAP<STRING,STRING> value path renders every value kind the class doc claims, mirroring
+    # the test_from_json_map_with_arrays_* tests that cover the array-element path: strings
+    # unescaped, non-numeric numbers quoted, nested values re-serialized compactly, a JSON null
+    # value keeping its pair as a SQL NULL, and duplicate keys kept in document order. Numbers:
+    # test_from_json_map_numeric.
+    schema = StructType([StructField("a", StringType())])
+    data = [
+        ['{"a": "x\\"y", "b": "p\\\\q"}'], # escaped quote / backslash resolved
+        ['{"a": "\\u00e9"}'],              # unicode escape resolved
+        ['{"a": NaN, "b": Infinity, "c": -Infinity}'], # non-numeric tokens rendered quoted
+        ['{"a": {"x": 1}, "b": [1, 2]}'],  # nested values re-serialized compactly
+        ['{"a": null, "b": "z"}'],         # JSON null keeps its pair as a SQL NULL value
+        ['{"a": "1", "a": "2"}'],          # duplicate keys: every occurrence kept, document order
+    ]
+    options = {"allowNonNumericNumbers": "true"}
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark : spark.createDataFrame(data, schema=schema) \
+            .select(f.map_entries(f.from_json(f.col('a'), 'MAP<STRING,STRING>', options))),
         conf=_enable_all_types_conf)
 
 @allow_non_gpu('ProjectExec', 'JsonToStructs')
@@ -784,8 +826,8 @@ def test_from_json_map_with_arrays_corner_cases():
     # map_entries(...) -- an array of <key,value> structs -- because the map-equality path in
     # asserts.py only checks row-level null-ness, not the keys/values. Entry order is JSON document
     # order on both engines (matching test_map_entries in map_test.py), so no sort is needed. Keys
-    # within a row are kept distinct; duplicate-key, escape, and non-string-element divergences live
-    # in the *_xfail probes below. All cases here are expected to match Spark CPU exactly.
+    # within a row are kept distinct; duplicate-key, escape, and non-string-element cases live in
+    # the dedicated tests below. All cases here are expected to match Spark CPU exactly.
     schema = StructType([StructField("a", StringType())])
     many_keys = '{' + ', '.join('"k{}": ["v{}"]'.format(i, i) for i in range(10)) + '}'
     wide_inner = '{"a": [' + ', '.join('"e{}"'.format(i) for i in range(50)) + ']}'
@@ -821,7 +863,7 @@ def test_from_json_map_with_arrays_corner_cases():
         ['{"a": ["x", "y", "z"]}'],      # basic multi-element
         ['{"a": [null, "x"]}'],          # literal-null element + non-null sibling
         ['{"a": [""]}'],                 # empty-string element
-        ['{"a": [1, 22, 333, 1.5, true, false]}'],   # scalar number/bool/decimal elements: raw text == Spark string coercion (verified xpass)
+        ['{"a": [1, 22, 333, 1.5, true, false]}'],   # scalar elements: canonical spellings match
         ['{"a": ["é", "日本"]}'],  # literal UTF-8 elements (no escape sequences)
         ['{ "a" : [ "x" , "y" ] }'],     # surrounding whitespace
         ['{"": ["x"]}'],                 # empty key
@@ -835,16 +877,9 @@ def test_from_json_map_with_arrays_corner_cases():
         conf=_enable_all_types_conf)
 
 @allow_non_gpu(*non_utc_allow)
-@pytest.mark.xfail(reason="GPU keeps map array string elements as raw JSON (escapes not "
-                          "unescaped) while Spark unescapes them. This differs on all Spark "
-                          "versions: string elements are VALUE_STRING tokens unescaped via "
-                          "getText, so Spark 4.0 enableExactStringParsing does not apply. "
-                          "docs/compatibility.md 'JSON Normalization (String Types)'; "
-                          "https://github.com/NVIDIA/cudf-spark/issues/15240",
-                   strict=False)
-def test_from_json_map_with_arrays_escaped_xfail():
-    # Escaped quote/backslash and \\u escape sequences inside string elements: GPU keeps them
-    # verbatim, Spark unescapes -> documented divergence.
+def test_from_json_map_with_arrays_escaped():
+    # Escaped quote/backslash and \\u escape sequences inside string elements: the GPU unescapes
+    # them, matching Spark CPU.
     schema = StructType([StructField("a", StringType())])
     data = [
         ['{"a": ["x\\"y", "p\\\\q"]}'],
@@ -856,13 +891,9 @@ def test_from_json_map_with_arrays_escaped_xfail():
         conf=_enable_all_types_conf)
 
 @allow_non_gpu(*non_utc_allow)
-@pytest.mark.xfail(reason="Duplicate map keys: GPU keeps every occurrence (dense). On Spark 3.5.x "
-                          "from_json also keeps duplicates so this currently XPASSES under map_entries, "
-                          "but the behavior is mapKeyDedupPolicy/version-sensitive (later Spark may "
-                          "last-wins or raise), so it is left as a non-strict probe rather than a hard "
-                          "assertion. docs/compatibility.md duplicate-key note.",
-                   strict=False)
-def test_from_json_map_with_arrays_duplicate_keys_xfail():
+def test_from_json_map_with_arrays_duplicate_keys():
+    # Duplicate map keys: both the GPU and Spark from_json keep every occurrence in JSON document
+    # order, so the map_entries outputs match. docs/compatibility.md duplicate-key note.
     schema = StructType([StructField("a", StringType())])
     data = [['{"a": ["1"], "a": ["2", "3"]}']]
     assert_gpu_and_cpu_are_equal_collect(
@@ -871,16 +902,9 @@ def test_from_json_map_with_arrays_duplicate_keys_xfail():
         conf=_enable_all_types_conf)
 
 @allow_non_gpu(*non_utc_allow)
-@pytest.mark.xfail(reason="Nested object/array elements: the GPU returns each element's raw JSON "
-                          "substring, while Spark re-serializes them (whitespace and key formatting "
-                          "normalized). This differs on ALL Spark versions: from_json on a string "
-                          "column parses via a Reader (CreateJacksonParser.utf8String), so Spark "
-                          "4.0's enableExactStringParsing raw-bytes path (which requires a "
-                          "byte[]/file source) is unreachable and the CPU always re-serializes "
-                          "non-string tokens. docs/compatibility.md 'from_json Function'; "
-                          "https://github.com/NVIDIA/cudf-spark/issues/15240",
-                   strict=False)
-def test_from_json_map_with_arrays_nested_elements_xfail():
+def test_from_json_map_with_arrays_nested_elements():
+    # Nested object/array elements: the GPU re-serializes them compactly (whitespace and key
+    # formatting normalized), matching Spark CPU's re-serialization.
     schema = StructType([StructField("a", StringType())])
     data = [
         ['{"a": [{"x": 1}]}'],
@@ -894,23 +918,15 @@ def test_from_json_map_with_arrays_nested_elements_xfail():
 @allow_non_gpu(*non_utc_allow)
 @pytest.mark.skipif(is_before_spark_400(),
                     reason="spark.sql.json.enableExactStringParsing exists only in Spark 4.0+")
-@pytest.mark.xfail(reason="Regression guard that enableExactStringParsing is a no-op for from_json "
-                          "on a string column: with the option explicitly false the GPU raw "
-                          "elements diverge from the CPU exactly as they do with the default true, "
-                          "because from_json parses via a Reader (CreateJacksonParser.utf8String) "
-                          "and the option's raw-bytes path only applies to byte[]/file sources. "
-                          "docs/compatibility.md 'from_json Function'; "
-                          "https://github.com/NVIDIA/cudf-spark/issues/15240",
-                   strict=False)
-def test_from_json_map_with_arrays_exact_string_parsing_off_xfail():
+def test_from_json_map_with_arrays_exact_string_parsing_off():
     # Spark 4.0+ only: force enableExactStringParsing=false to confirm the option is a no-op for
-    # from_json on a string column -- the CPU re-serializes non-string tokens (so the GPU raw
-    # elements still diverge) exactly as with the default true, because the option's raw-bytes path
-    # is unreachable for a Reader source.
+    # from_json on a string column -- the GPU normalizes non-string tokens and matches the CPU
+    # exactly as with the default true, because the option's raw-bytes path is unreachable for a
+    # Reader source.
     schema = StructType([StructField("a", StringType())])
     data = [
-        ['{"a": [{"x": 1}]}'],       # nested object: GPU raw vs CPU re-serialized
-        ['{"a": [007, 1.00000]}'],   # numbers: GPU raw token vs CPU re-rendered
+        ['{"a": [{"x": 1}]}'],       # nested object: both re-serialize compactly
+        ['{"a": [007, 1.00000]}'],   # numbers: both re-render canonically
     ]
     options = {"allowNumericLeadingZeros": "true"}
     conf = copy_and_update(_enable_all_types_conf,
@@ -921,21 +937,15 @@ def test_from_json_map_with_arrays_exact_string_parsing_off_xfail():
         conf=conf)
 
 @allow_non_gpu(*non_utc_allow)
-@pytest.mark.xfail(reason="GPU keeps raw JSON number tokens; Spark re-renders them, so "
-                          "non-canonical spellings differ (007->7, 1.00000->1.0, 1e2->100.0). "
-                          "This differs on ALL Spark versions: from_json on a string column parses "
-                          "via a Reader (CreateJacksonParser.utf8String), so Spark 4.0's "
-                          "enableExactStringParsing raw-bytes path (which requires a byte[]/file "
-                          "source) is unreachable and the CPU always re-renders numbers via "
-                          "copyCurrentStructure. docs/compatibility.md 'from_json Function'; "
-                          "https://github.com/NVIDIA/cudf-spark/issues/15240",
-                   strict=False)
-def test_from_json_map_with_arrays_numeric_xfail():
-    # allowNumericLeadingZeros makes 007 parseable; floats diverge under default options.
+def test_from_json_map_with_arrays_numeric():
+    # allowNumericLeadingZeros makes 007 parseable; the GPU re-renders number tokens canonically,
+    # matching Spark CPU (007 -> 7, 1.00000 -> 1.0, 1e2 -> 100.0).
     schema = StructType([StructField("a", StringType())])
     data = [
-        ['{"a": [007]}'],            # leading zeros: GPU "007" vs Spark "7"
-        ['{"a": [1.00000, 1e2]}'],   # float re-render: GPU "1.00000"/"1e2" vs Spark "1.0"/"100.0"
+        ['{"a": [007]}'],            # leading zeros: both render 7
+        ['{"a": [-007]}'],           # negative leading zeros: sign kept, both render -7
+        ['{"a": [1.00000, 1e2]}'],   # float re-render: both render 1.0 / 100.0
+        ['{"a": [-1.00000, 1e-2]}'], # negative float / negative exponent: -1.0 / 0.01
     ]
     options = {"allowNumericLeadingZeros": "true"}
     assert_gpu_and_cpu_are_equal_collect(
@@ -951,9 +961,9 @@ def test_from_json_map_with_arrays_options(allow_single_quotes, allow_unquoted_c
     # MAP<STRING,ARRAY<STRING>> dispatch, proving the parser options reach the array path. Inputs
     # exercise single-quoted strings and literal control chars in elements; when an option is off
     # both engines reject its input alike (bad record -> null), so every combo stays GPU==CPU.
-    # allowNumericLeadingZeros stays false and allowNonNumericNumbers is not toggled here: where
-    # either would accept the token the GPU keeps it raw while Spark re-renders/quotes it -- the
-    # test_from_json_map_with_arrays_numeric_xfail / _nonnumeric_xfail probes cover those.
+    # allowNumericLeadingZeros stays false and allowNonNumericNumbers is not toggled here: the
+    # test_from_json_map_with_arrays_numeric / _nonnumeric tests cover the rendering of tokens
+    # those options accept.
     json_string_gen = StringGen(r'{"a": \["[0-9]{0,5}"\]}') \
         .with_special_pattern(r"""{'a': \['[0-9]{0,5}'\]}""", weight=50) \
         .with_special_pattern(r'{"(a|a\r\n\tb)": \["(xyz|01\r\n\t23)"\]}', weight=50)
@@ -965,19 +975,9 @@ def test_from_json_map_with_arrays_options(allow_single_quotes, allow_unquoted_c
         conf=_enable_all_types_conf)
 
 @allow_non_gpu(*non_utc_allow)
-@pytest.mark.xfail(reason="GPU keeps the bare NaN/Infinity token under allowNonNumericNumbers; "
-                          "Spark re-serializes non-numeric numbers as quoted strings (NaN -> "
-                          "'NaN', Infinity -> 'Infinity'), so the elements differ. This differs on "
-                          "ALL Spark versions: from_json on a string column parses via a Reader "
-                          "(CreateJacksonParser.utf8String), so Spark 4.0's enableExactStringParsing "
-                          "raw-bytes path (which requires a byte[]/file source) is unreachable and "
-                          "the CPU always re-serializes non-string tokens. docs/compatibility.md "
-                          "'from_json Function'; "
-                          "https://github.com/NVIDIA/cudf-spark/issues/15240",
-                   strict=False)
-def test_from_json_map_with_arrays_nonnumeric_xfail():
-    # allowNonNumericNumbers=true makes NaN/Infinity parseable; the GPU emits the bare token whereas
-    # Spark quotes it (verified GPU ['NaN','Infinity'] vs CPU ['"NaN"','"Infinity"']).
+def test_from_json_map_with_arrays_nonnumeric():
+    # allowNonNumericNumbers=true makes NaN/Infinity parseable; the GPU re-serializes the bare
+    # token as a quoted string (NaN -> "NaN", Infinity -> "Infinity"), matching Spark CPU.
     schema = StructType([StructField("a", StringType())])
     data = [
         ['{"a": [NaN, Infinity]}'],   # bare non-numeric tokens
