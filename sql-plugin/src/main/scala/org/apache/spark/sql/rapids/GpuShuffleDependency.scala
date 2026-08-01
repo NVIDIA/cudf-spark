@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2022, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -39,6 +39,11 @@ class GpuShuffleDependency[K: ClassTag, V: ClassTag, C: ClassTag](
     val metrics: Map[String, SQLMetric] = Map.empty)
   extends ShuffleDependency[K, V, C](rdd, partitioner, serializer, keyOrdering,
     aggregator, mapSideCombine, shuffleWriterProcessor) {
+
+  // Set by RapidsShuffleInternalManagerBase.registerShuffle to record the
+  // registration-time checksum fallback decision so writer and reader use
+  // the same path even if SQLConf changes between calls.
+  var checksumFallback: Boolean = false
 
   override def toString: String = "GPU Shuffle Dependency"
 }
