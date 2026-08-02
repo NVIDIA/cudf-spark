@@ -324,6 +324,18 @@ class RegExpUtilsSuite extends AnyFunSuite {
     assert(conv2 == open + "1}3",
       s"expected user `$$13` to back off to `$${1}3`, got `$conv2`")
   }
+
+  test("isSupportedStringReplacePattern classifies regex patterns correctly") {
+    val cases = Seq(
+      "A" -> true,
+      "A*" -> false,
+      "(A)" -> false,
+      "A+" -> false)
+
+    cases.foreach { case (pattern, expected) =>
+      assert(GpuOverrides.isSupportedStringReplacePattern(pattern) == expected)
+    }
+  }
 }
 
 /*

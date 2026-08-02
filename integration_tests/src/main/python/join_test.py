@@ -1112,15 +1112,15 @@ def test_broadcast_join_right_struct_mixed_key(data_gen, join_type):
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
 # After 3.1.0 is the min spark version we can drop this
 @ignore_order(local=True)
-@pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/2140')
 @pytest.mark.parametrize('data_gen', [basic_struct_gen_with_floats], ids=idfn)
 @pytest.mark.parametrize('join_type', ['Inner', 'Left', 'Right', 'Cross', 'LeftSemi', 'LeftAnti'], ids=idfn)
 def test_sortmerge_join_struct_with_floats_key(data_gen, join_type):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 500, 250)
         return left.join(right, left.a == right.r_a, join_type)
-    conf = copy_and_update(_sortmerge_join_conf,
-                           {})
+    conf = copy_and_update(_sortmerge_join_conf, {
+        'spark.sql.adaptive.enabled': 'false'  # Disable AQE as it can change the join type.
+    })
     assert_gpu_and_cpu_are_equal_collect(do_join, conf=conf)
 
 @allow_non_gpu('SortMergeJoinExec', 'SortExec', 'NormalizeNaNAndZero', 'CreateNamedStruct',

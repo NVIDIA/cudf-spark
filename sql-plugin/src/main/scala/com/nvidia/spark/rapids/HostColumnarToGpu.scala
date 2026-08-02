@@ -36,7 +36,6 @@ import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.vectorized.WritableColumnVector
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.{ArrowColumnVector, ColumnarBatch, ColumnVector}
-import org.apache.spark.sql.vectorized.rapids.AccessibleArrowColumnVector
 
 object HostColumnarToGpu extends Logging {
 
@@ -80,8 +79,6 @@ object HostColumnarToGpu extends Logging {
             throw new IllegalStateException("Trying to read from a ArrowColumnVector but can't " +
               "access its Arrow ValueVector", e)
         }
-      case av: AccessibleArrowColumnVector =>
-        av.getArrowValueVector
       case _ =>
         throw new IllegalStateException(s"Illegal column vector type: ${cv.getClass}")
     }
@@ -243,8 +240,7 @@ class HostToGpuCoalesceIterator(iter: Iterator[ColumnarBatch],
     // having a column
     if (useArrowCopyOpt && batch.numCols() > 0 &&
       arrowTypesSupported(schema) &&
-      (batch.column(0).isInstanceOf[ArrowColumnVector] ||
-        batch.column(0).isInstanceOf[AccessibleArrowColumnVector])) {
+      batch.column(0).isInstanceOf[ArrowColumnVector]) {
       logDebug("Using GpuArrowColumnarBatchBuilder")
       batchBuilder = new GpuColumnVector.GpuArrowColumnarBatchBuilder(schema)
     } else {

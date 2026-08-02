@@ -362,7 +362,7 @@ object RapidsDeletionVectors extends Logging {
       scalaBitmap: RoaringBitmapArray,
       rowGroupOffsets: Array[Long],
       rowGroupNumRows: Array[Int]): Long = {
-    RapidsDeletionVectorRowCountUtils.countDeletedRows(
+    RapidsDeletionVectorRowCountUtils.countMarkedRows(
       scalaBitmap.cardinality, rowGroupOffsets, rowGroupNumRows) { countDeletedRow =>
         scalaBitmap.forEach { deletedIndex: Long =>
           countDeletedRow(deletedIndex)

@@ -69,7 +69,7 @@ import org.apache.spark.sql.rapids.catalyst.expressions.GpuRand
 import org.apache.spark.sql.rapids.execution._
 import org.apache.spark.sql.rapids.execution.python._
 import org.apache.spark.sql.rapids.execution.python.GpuFlatMapGroupsInPandasExecMeta
-import org.apache.spark.sql.rapids.shims.{GpuAscii, GpuMapInPandasExecMeta}
+import org.apache.spark.sql.rapids.shims.{GpuAscii, GpuMapInPandasExecMeta, SparkSessionUtils}
 import org.apache.spark.sql.rapids.zorder.ZOrderRules
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.{CalendarInterval, UTF8String}
@@ -469,7 +469,7 @@ object GpuOverrides extends Logging {
   private[this] lazy val regexList: Seq[String] = Seq("\\", "\u0000", "\\x", "\t", "\n", "\r",
     "\f", "\\a", "\\e", "\\cx", "[", "]", "^", "&", ".", "*", "\\d", "\\D", "\\h", "\\H", "\\s",
     "\\S", "\\v", "\\V", "\\w", "\\w", "\\p", "$", "\\b", "\\B", "\\A", "\\G", "\\Z", "\\z", "\\R",
-    "?", "|", "(", ")", "{", "}", "\\k", "\\Q", "\\E", ":", "!", "<=", ">")
+    "?", "+", "|", "(", ")", "{", "}", "\\k", "\\Q", "\\E", ":", "!", "<=", ">")
   val regexMetaChars = ".$^[]\\|?*+(){}"
   /**
    * Provides a way to log an info message about how long an operation took in milliseconds.
@@ -3805,7 +3805,8 @@ object GpuOverrides extends Logging {
         }
 
         override def convertToGpu(childExprs: Seq[Expression]): GpuExpression =
-          GpuCollectList(childExprs.head, c.mutableAggBufferOffset, c.inputAggBufferOffset)
+          GpuCollectList(childExprs.head, c.mutableAggBufferOffset, c.inputAggBufferOffset,
+            TypeUtilsShims.collectListIgnoreNulls(c))
 
         override def aggBufferAttribute: AttributeReference = {
           val aggBuffer = c.aggBufferAttributes.head
@@ -3813,7 +3814,8 @@ object GpuOverrides extends Logging {
         }
 
         override def createCpuToGpuBufferConverter(): CpuToGpuAggregateBufferConverter =
-          new CpuToGpuCollectBufferConverter(c.child.dataType)
+          new CpuToGpuCollectBufferConverter(c.child.dataType,
+            !TypeUtilsShims.collectListIgnoreNulls(c))
 
         override def createGpuToCpuBufferConverter(): GpuToCpuAggregateBufferConverter =
           new GpuToCpuCollectBufferConverter()
@@ -3848,7 +3850,8 @@ object GpuOverrides extends Logging {
         }
 
         override def convertToGpu(childExprs: Seq[Expression]): GpuExpression =
-          GpuCollectSet(childExprs.head, c.mutableAggBufferOffset, c.inputAggBufferOffset)
+          GpuCollectSet(childExprs.head, c.mutableAggBufferOffset, c.inputAggBufferOffset,
+            TypeUtilsShims.collectSetIgnoreNulls(c))
 
         override def aggBufferAttribute: AttributeReference = {
           val aggBuffer = c.aggBufferAttributes.head
@@ -3856,10 +3859,12 @@ object GpuOverrides extends Logging {
         }
 
         override def createCpuToGpuBufferConverter(): CpuToGpuAggregateBufferConverter =
-          new CpuToGpuCollectBufferConverter(c.child.dataType)
+          new CpuToGpuCollectSetBufferConverter(c.child.dataType,
+            !TypeUtilsShims.collectSetIgnoreNulls(c))
 
         override def createGpuToCpuBufferConverter(): GpuToCpuAggregateBufferConverter =
-          new GpuToCpuCollectBufferConverter()
+          new GpuToCpuCollectSetBufferConverter(c.child.dataType,
+            !TypeUtilsShims.collectSetIgnoreNulls(c))
 
         override val supportBufferConversion: Boolean = true
 
@@ -4430,7 +4435,8 @@ object GpuOverrides extends Logging {
 
   val dataWriteCmds: Map[Class[_ <: DataWritingCommand],
       DataWritingCommandRule[_ <: DataWritingCommand]] =
-    commonDataWriteCmds ++ GpuHiveOverrides.dataWriteCmds ++ SparkShimImpl.getDataWriteCmds
+    commonDataWriteCmds ++ GpuHiveOverrides.dataWriteCmds ++ SparkShimImpl.getDataWriteCmds ++
+      ExternalSource.dataWriteCmds
 
   def runnableCmd[INPUT <: RunnableCommand](
       desc: String,
@@ -4991,6 +4997,16 @@ protected class ExplainPlanImpl extends ExplainPlanBase {
 
 // work around any GpuOverride failures
 object GpuOverrideUtil extends Logging {
+  def withActiveSession[T](sparkSession: SparkSession)(body: => T): T = {
+    if (sparkSession == null) {
+      // A session is only captured for rules registered through ColumnarOverrideRules.
+      // Direct callers (including tests) intentionally preserve the existing unscoped behavior.
+      body
+    } else {
+      SparkSessionUtils.withActiveSession(sparkSession)(body)
+    }
+  }
+
   def tryOverride(fn: SparkPlan => SparkPlan): SparkPlan => SparkPlan = { plan =>
     val planOriginal = plan.clone()
     val failOnError = TEST_CONF.get(plan.conf) || !SUPPRESS_PLANNING_FAILURE.get(plan.conf)
@@ -5008,25 +5024,32 @@ object GpuOverrideUtil extends Logging {
 }
 
 /** Tag the initial plan when AQE is enabled */
-case class GpuQueryStagePrepOverrides() extends Rule[SparkPlan] with Logging {
-  override def apply(sparkPlan: SparkPlan): SparkPlan = GpuOverrideUtil.tryOverride { plan =>
-    // Exposing a bare exchange at the root is only valid while AQE is preparing a
-    // query stage. Tag the exchanges seen in this rule so transition cleanup can
-    // distinguish that path from final adaptive plan execution.
-    GpuTransitionOverrides.tagAqeQueryStageExchanges(plan)
-    // Note that we disregard the GPU plan returned here and instead rely on side effects of
-    // tagging the underlying SparkPlan.
-    GpuOverrides().applyWithContext(plan, Some("AQE Query Stage Prep"))
-    // return the original plan which is now modified as a side-effect of invoking GpuOverrides
-    plan
-  }(sparkPlan)
+case class GpuQueryStagePrepOverrides(sparkSession: SparkSession)
+    extends Rule[SparkPlan] with Logging {
+  override def apply(sparkPlan: SparkPlan): SparkPlan =
+      GpuOverrideUtil.withActiveSession(sparkSession) {
+    GpuOverrideUtil.tryOverride { plan =>
+      // Exposing a bare exchange at the root is only valid while AQE is preparing a
+      // query stage. Tag the exchanges seen in this rule so transition cleanup can
+      // distinguish that path from final adaptive plan execution.
+      GpuTransitionOverrides.tagAqeQueryStageExchanges(plan)
+      // Note that we disregard the GPU plan returned here and instead rely on side effects of
+      // tagging the underlying SparkPlan.
+      GpuOverrides().applyWithContext(plan, Some("AQE Query Stage Prep"))
+      // return the original plan which is now modified as a side-effect of invoking GpuOverrides
+      plan
+    }(sparkPlan)
+  }
 }
 
-case class GpuOverrides() extends Rule[SparkPlan] with Logging {
+case class GpuOverrides(sparkSession: SparkSession = null) extends Rule[SparkPlan] with Logging {
 
   // Spark calls this method once for the whole plan when AQE is off. When AQE is on, it
   // gets called once for each query stage (where a query stage is an `Exchange`).
-  override def apply(sparkPlan: SparkPlan): SparkPlan = applyWithContext(sparkPlan, None)
+  override def apply(sparkPlan: SparkPlan): SparkPlan =
+    GpuOverrideUtil.withActiveSession(sparkSession) {
+      applyWithContext(sparkPlan, None)
+    }
 
   def applyWithContext(sparkPlan: SparkPlan, context: Option[String]): SparkPlan =
       GpuOverrideUtil.tryOverride { plan =>

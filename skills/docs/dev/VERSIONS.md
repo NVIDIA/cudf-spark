@@ -1,5 +1,7 @@
 # Version Update Guide
 
+Before updating, verify that the exact `rapids-4-spark_<scala>` POM and the JAR for the selected CUDA classifier are published in Maven Central.
+
 ## Files To Update
 
 ### udf-gen-test Maven template
@@ -24,9 +26,12 @@ Update this default value:
 
 - `CUDA_VERSION` must match the CUDA toolkit version spark-rapids is built against (the same version the native build uses on the host).
 
-**Note:** The pre-merge CI image `skills/ci/Dockerfile.pre-merge` is a mirror of this toolchain, plus python dependencies. Keep its `CUDA_VERSION`, `CMAKE_VERSION`, `TOOLSET_VERSION`, `MAVEN_VERSION`, and `CCACHE_VERSION` in sync with this file.
+**Note:** The pre-merge CI image `skills/ci/Dockerfile.pre-merge` is a mirror of this toolchain, plus python dependencies. Keep its CUDA base image tag, `CMAKE_VERSION`, `TOOLSET_VERSION`, `MAVEN_VERSION`, and `CCACHE_VERSION` in sync with this file.
 
-After changing `skills/ci/Dockerfile.pre-merge`, **rebuild and publish** the CI image so pre-merge jobs can pull the updated environment.
+Keep these native build requirements aligned when their versions change:
+
+- The CMake minimum in `skills/udf-convert-to-cuda/templates/cuda/native/src/main/cpp/CMakeLists.txt`, `skills/udf-convert-to-cuda/SKILL.md`, and `skills/udf-convert-to-cuda/references/NATIVE_BUILD_ENV.md`
+- The JDK version in the Maven compiler properties, both CUDA Dockerfiles, and `skills/udf-convert-to-cuda/references/NATIVE_BUILD_ENV.md`
 
 ### Native CUDA dependency extraction
 

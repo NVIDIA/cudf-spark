@@ -17,12 +17,12 @@ import re
 import pytest
 
 from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect, \
-    assert_gpu_and_cpu_error, \
+    assert_gpu_and_cpu_error, assert_gpu_and_cpu_same_data_or_error, \
     assert_gpu_sql_fallback_collect
 from data_gen import *
 from marks import *
 from pyspark.sql.types import *
-from spark_session import is_before_spark_320, is_before_spark_350, is_before_spark_400, is_jvm_charset_utf8, is_databricks_runtime, spark_version, with_cpu_session, with_gpu_session
+from spark_session import is_before_spark_320, is_before_spark_350, is_before_spark_400, is_jvm_charset_utf8, with_cpu_session, with_gpu_session
 
 if not is_jvm_charset_utf8():
     pytestmark = [pytest.mark.regexp, pytest.mark.skip(reason=str("Current locale doesn't support UTF-8, regexp support is disabled"))]
@@ -309,6 +309,7 @@ def test_re_replace_repetition():
                 'REGEXP_REPLACE(a, "A{0,}", "PROD")',
                 'REGEXP_REPLACE(a, "T?E?", "PROD")',
                 'REGEXP_REPLACE(a, "A*", "PROD")',
+                'REGEXP_REPLACE(a, "A+", "PROD")',
                 'REGEXP_REPLACE(a, "A{0,5}", "PROD")',
                 'REGEXP_REPLACE(a, "(A*)", "PROD")',
                 'REGEXP_REPLACE(a, "(((A*)))", "PROD")',
@@ -492,9 +493,9 @@ def test_regexp_replace_backslash_digit_is_literal():
 
 
 @allow_non_gpu('ProjectExec', 'RegExpReplace')
-def test_regexp_replace_trailing_backslash_throws():
+def test_regexp_replace_trailing_backslash_matches_cpu():
     from pyspark.sql.functions import regexp_replace, col
-    assert_gpu_and_cpu_error(
+    assert_gpu_and_cpu_same_data_or_error(
         lambda spark: spark.createDataFrame([("a",)], ["a"]).select(
             regexp_replace(col("a"), "a", "\\")).collect(),
         conf=_regexp_conf,
@@ -502,9 +503,9 @@ def test_regexp_replace_trailing_backslash_throws():
 
 
 @allow_non_gpu('ProjectExec', 'RegExpReplace')
-def test_regexp_replace_dollar_non_digit_throws():
+def test_regexp_replace_dollar_non_digit_matches_cpu():
     from pyspark.sql.functions import regexp_replace, col
-    assert_gpu_and_cpu_error(
+    assert_gpu_and_cpu_same_data_or_error(
         lambda spark: spark.createDataFrame([("a",)], ["a"]).select(
             regexp_replace(col("a"), "a", "$x")).collect(),
         conf=_regexp_conf,
@@ -682,7 +683,7 @@ def test_regexp_extract_no_match():
 # Spark take care of the error handling
 @allow_non_gpu('ProjectExec', 'RegExpExtract')
 def test_regexp_extract_idx_negative():
-    message = "The specified group index cannot be less than zero" if is_before_spark_350() and not (is_databricks_runtime() and spark_version() == "3.4.1") else \
+    message = "The specified group index cannot be less than zero" if is_before_spark_350() else \
         "[INVALID_PARAMETER_VALUE.REGEX_GROUP_INDEX] The value of parameter(s) `idx` in `regexp_extract` is invalid"
 
     gen = mk_str_gen('[abcd]{1,3}[0-9]{1,3}[abcd]{1,3}')
@@ -696,7 +697,7 @@ def test_regexp_extract_idx_negative():
 # Spark take care of the error handling
 @allow_non_gpu('ProjectExec', 'RegExpExtract')
 def test_regexp_extract_idx_out_of_bounds():
-    message = "Regex group count is 3, but the specified group index is 4" if is_before_spark_350() and not (is_databricks_runtime() and spark_version() == "3.4.1") else \
+    message = "Regex group count is 3, but the specified group index is 4" if is_before_spark_350() else \
         "[INVALID_PARAMETER_VALUE.REGEX_GROUP_INDEX] The value of parameter(s) `idx` in `regexp_extract` is invalid: Expects group index between 0 and 3, but got 4."
     gen = mk_str_gen('[abcd]{1,3}[0-9]{1,3}[abcd]{1,3}')
     assert_gpu_and_cpu_error(
@@ -705,7 +706,7 @@ def test_regexp_extract_idx_out_of_bounds():
             error_message = message,
             conf=_regexp_conf)
 
-    non_capturing_message = "Regex group count is 1, but the specified group index is 2" if is_before_spark_350() and not (is_databricks_runtime() and spark_version() == "3.4.1") else \
+    non_capturing_message = "Regex group count is 1, but the specified group index is 2" if is_before_spark_350() else \
         "[INVALID_PARAMETER_VALUE.REGEX_GROUP_INDEX] The value of parameter(s) `idx` in `regexp_extract` is invalid: Expects group index between 0 and 1, but got 2."
     assert_gpu_and_cpu_error(
             lambda spark: unary_op_df(spark, gen).selectExpr(
@@ -788,19 +789,26 @@ def test_regexp_choice():
         conf=_regexp_conf)
 
 def test_regexp_hexadecimal_digits():
+    # NOTE: supplementary-codepoint hex escapes (cp > U+FFFF) are
+    # exercised by the `test_rlike_supplementary_codepoint_fallback`
+    # / `test_regexp_replace_supplementary_codepoint_fallback` tests below.
+    # They now fall back to CPU before a `.toChar` rewrite can truncate them.
+    # Keeping them out of this projection avoids
+    # the mixed GPU/CPU `ProjectExec` execution path. See
+    # NVIDIA/spark-rapids#14744.
     gen = mk_str_gen(
-        '[abcd]\\\\x00\\\\x7f\\\\x80\\\\xff\\\\x{10ffff}\\\\x{00eeee}[\\\\xa0-\\\\xb0][abcd]')
+        r'[abcd]\\x00\\x7f\\x80\\xff\\x{0000ffff}\\x{00eeee}[\\xa0-\\xb0][abcd]')
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark: unary_op_df(spark, gen).selectExpr(
                 'rlike(a, "\\\\x7f")',
                 'rlike(a, "\\\\x80")',
                 'rlike(a, "[\\\\xa0-\\\\xf0]")',
                 'rlike(a, "\\\\x{00eeee}")',
+                r'rlike(a, "\\x{0000ffff}")',
                 'regexp_extract(a, "([a-d]+)\\\\xa0([a-d]+)", 1)',
                 'regexp_extract(a, "([a-d]+)[\\\\xa0\nabcd]([a-d]+)", 1)',
                 'regexp_replace(a, "\\\\xff", "@")',
                 'regexp_replace(a, "[\\\\xa0-\\\\xb0]", "@")',
-                'regexp_replace(a, "\\\\x{10ffff}", "@")',
                 # Issue #14739: non-braced \xNN followed by another hex digit
                 # used to be greedily consumed and rejected. The cap fix below
                 # makes these patterns run on GPU instead of falling back.
@@ -825,6 +833,44 @@ def test_regexp_hexadecimal_digits():
                 r'rlike(a, "\\x41f")',
                 r'rlike(a, "[\\x41b]")',  # [A,b] char class
             ),
+        conf=_regexp_conf)
+
+@allow_non_gpu('ProjectExec', 'RLike')
+@pytest.mark.parametrize('pattern', [
+    r'\\x{1F600}',    # grinning face emoji
+    r'\\x{10000}',    # lowest supplementary codepoint
+    r'\\x{10FFFF}',   # highest valid Unicode codepoint
+    r'a\\x{1F600}b',  # supplementary codepoint embedded in a literal
+    # Range endpoints go through the same centralized supplementary hex guard.
+    r'[\\x{1F600}-\\x{1F64F}]',
+    r'[\\x{10000}-\\x{10FFFF}]',
+])
+def test_rlike_supplementary_codepoint_fallback(pattern):
+    # Issue NVIDIA/spark-rapids#14744 regression coverage. Before the
+    # fix, hex escapes for supplementary codepoints (cp > U+FFFF) were
+    # silently truncated via `.toChar` on the GPU -- e.g. the pattern
+    # `\x{1F600}` (grinning face 😀) was rewritten as `` (a
+    # private-use BMP codepoint), so the GPU matched the wrong
+    # character. The parser now throws `RegexUnsupportedException`
+    # for these patterns, causing spark-rapids to fall back to the CPU
+    # regex engine -- which Java's `Pattern` handles correctly.
+    gen = mk_str_gen(r'[abcd]\\x{1F600}\\x{10000}\\x{10FFFF}[abcd]')
+    assert_gpu_fallback_collect(
+            lambda spark: unary_op_df(spark, gen).selectExpr(
+                r'rlike(a, "{}")'.format(pattern)),
+            'RLike',
+        conf=_regexp_conf)
+
+@allow_non_gpu('ProjectExec', 'RegExpReplace')
+def test_regexp_replace_supplementary_codepoint_fallback():
+    # Companion to test_rlike_supplementary_codepoint_fallback but
+    # for regexp_replace -- same root cause, same CPU fallback path,
+    # different meta. See NVIDIA/spark-rapids#14744.
+    gen = mk_str_gen(r'[abcd]\\x{1F600}\\x{10000}\\x{10FFFF}[abcd]')
+    assert_gpu_fallback_collect(
+            lambda spark: unary_op_df(spark, gen).selectExpr(
+                r'regexp_replace(a, "\\x{1F600}", "@")'),
+            'RegExpReplace',
         conf=_regexp_conf)
 
 def test_regexp_whitespace():
@@ -917,6 +963,30 @@ def test_regexp_replace_word():
             'regexp_replace(a, "\\\\W", "x")',
             'regexp_replace(a, "[a-zA-Z_0-9]", "x")',
             'regexp_replace(a, "[^a-zA-Z_0-9]", "x")',
+        ),
+        conf=_regexp_conf)
+
+def test_regexp_quantified_digit_word():
+    # https://github.com/NVIDIA/cudf-spark/issues/15306
+    gen = mk_str_gen('[a-d]{1,3}[0-9]{1,3}[ _!]{0,2}[a-d]{0,3}') \
+        .with_special_case('䤫畍킱곂⬡❽ࢅ獰᳌蛫青') \
+        .with_special_case('a\n2\r\n3')
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: unary_op_df(spark, gen).selectExpr(
+            'rlike(a, "\\\\d+")',
+            'rlike(a, "\\\\w+")',
+            'rlike(a, "\\\\D+")',
+            'rlike(a, "\\\\W+")',
+            'rlike(a, "[a-d]+\\\\D+[0-9]+")',
+            'rlike(a, "\\\\D{2,3}")',
+            'rlike(a, "\\\\W{2,3}")',
+            'regexp_extract(a, "(\\\\d+)", 1)',
+            'regexp_extract(a, "(\\\\D+)", 1)',
+            'regexp_extract(a, "([a-d]+)(\\\\D+)([a-d]+)", 2)',
+            'regexp_extract(a, "(\\\\W+)", 1)',
+            'regexp_replace(a, "(\\\\w+)", "#")',
+            'regexp_replace(a, "(\\\\D+)", "#")',
+            'regexp_replace(a, "(\\\\W+)", "@")',
         ),
         conf=_regexp_conf)
 
@@ -1040,6 +1110,16 @@ def test_rlike_fallback_possessive_quantifier():
             'RLike',
             conf=_regexp_conf)
 
+@allow_non_gpu('ProjectExec', 'RLike')
+def test_rlike_fallback_lookarounds_independent_named():
+    gen = mk_str_gen('(\u20ac|\\w){0,3}a[|b*.$\r\n]{0,2}c\\w{0,3}')
+    for pattern in ['a(?=a*)', 'a(?!a*)', 'a(?<=a)', 'a(?<!a)', 'a(?>a*)', 'a(?<n>a*)']:
+        assert_gpu_fallback_collect(
+            lambda spark, pattern=pattern: unary_op_df(spark, gen).selectExpr(
+                f'a rlike "{pattern}"'),
+            'RLike',
+            conf=_regexp_conf)
+
 def test_regexp_extract_all_idx_zero():
     gen = mk_str_gen('[abcd]{0,3}[0-9]{0,3}-[0-9]{0,3}[abcd]{1,3}')
     assert_gpu_and_cpu_are_equal_collect(
@@ -1076,7 +1156,7 @@ def test_regexp_extract_all_idx_positive(slices):
 
 @allow_non_gpu('ProjectExec', 'RegExpExtractAll')
 def test_regexp_extract_all_idx_negative():
-    message = "The specified group index cannot be less than zero" if is_before_spark_350() and not (is_databricks_runtime() and spark_version() == "3.4.1") else \
+    message = "The specified group index cannot be less than zero" if is_before_spark_350() else \
         "[INVALID_PARAMETER_VALUE.REGEX_GROUP_INDEX] The value of parameter(s) `idx` in `regexp_extract_all` is invalid"
 
     gen = mk_str_gen('[abcd]{0,3}')
@@ -1089,7 +1169,7 @@ def test_regexp_extract_all_idx_negative():
 
 @allow_non_gpu('ProjectExec', 'RegExpExtractAll')
 def test_regexp_extract_all_idx_out_of_bounds():
-    message = "Regex group count is 2, but the specified group index is 3" if is_before_spark_350() and not (is_databricks_runtime() and spark_version() == "3.4.1") else \
+    message = "Regex group count is 2, but the specified group index is 3" if is_before_spark_350() else \
         "[INVALID_PARAMETER_VALUE.REGEX_GROUP_INDEX] The value of parameter(s) `idx` in `regexp_extract_all` is invalid: Expects group index between 0 and 2, but got 3."
     gen = mk_str_gen('[a-d]{1,2}.{0,1}[0-9]{1,2}')
     assert_gpu_and_cpu_error(
@@ -1099,7 +1179,7 @@ def test_regexp_extract_all_idx_out_of_bounds():
         error_message=message,
         conf=_regexp_conf)
 
-    non_capturing_message = "Regex group count is 1, but the specified group index is 2" if is_before_spark_350() and not (is_databricks_runtime() and spark_version() == "3.4.1") else \
+    non_capturing_message = "Regex group count is 1, but the specified group index is 2" if is_before_spark_350() else \
         "[INVALID_PARAMETER_VALUE.REGEX_GROUP_INDEX] The value of parameter(s) `idx` in `regexp_extract_all` is invalid: Expects group index between 0 and 1, but got 2."
     assert_gpu_and_cpu_error(
             lambda spark: unary_op_df(spark, gen).selectExpr(

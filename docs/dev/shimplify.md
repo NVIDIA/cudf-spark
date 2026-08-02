@@ -260,9 +260,9 @@ its file with the list of buildvers.
 
 See [CPD user doc][7] for more details about the options you can pass inside `cpd.argLine`.
 
-[1]: https://github.com/NVIDIA/spark-rapids/issues/3223
-[2]: https://github.com/NVIDIA/spark-rapids/blob/b7b1a5d544b6a3ac35ed064b5c32ee0d63c78845/build/shimplify.py#L15-L79
-[3]: https://github.com/NVIDIA/spark-rapids/blob/74ce729ca1306db01359e68f7f0b7cc31cd3d850/pom.xml#L494-L500
+[1]: https://github.com/NVIDIA/cudf-spark/issues/3223
+[2]: https://github.com/NVIDIA/cudf-spark/blob/b7b1a5d544b6a3ac35ed064b5c32ee0d63c78845/build/shimplify.py#L15-L79
+[3]: https://github.com/NVIDIA/cudf-spark/blob/74ce729ca1306db01359e68f7f0b7cc31cd3d850/pom.xml#L494-L500
 [4]: https://jsonlines.org/
 [5]: https://spark.apache.org/versioning-policy.html
 [6]: https://plugins.jetbrains.com/plugin/16429-idea-resolve-symlinks

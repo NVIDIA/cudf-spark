@@ -27,4 +27,7 @@ class MockTaskContext(taskAttemptId: Long, partitionId: Int)
 
   override def addTaskInterruptListener(
       listener: TaskInterruptListener): TaskContext = this
+
+  // Databricks 17.3 uses a parenthesized method unlike Apache Spark 4.2's getter.
+  override private[spark] def getTaskFailure(): Option[Throwable] = None
 }

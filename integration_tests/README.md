@@ -263,7 +263,7 @@ individually, so you don't risk running unit tests along with the integration te
 http://www.scalatest.org/user_guide/using_the_scalatest_shell
 
 ```shell
-spark-shell --jars rapids-4-spark-tests_2.12-26.08.0-SNAPSHOT-tests.jar,rapids-4-spark-integration-tests_2.12-26.08.0-SNAPSHOT-tests.jar,scalatest_2.12-3.0.5.jar,scalactic_2.12-3.0.5.jar
+spark-shell --jars rapids-4-spark-tests_2.12-26.10.0-SNAPSHOT-tests.jar,rapids-4-spark-integration-tests_2.12-26.10.0-SNAPSHOT-tests.jar,scalatest_2.12-3.0.5.jar,scalactic_2.12-3.0.5.jar
 ```
 
 First you import the `scalatest_shell` and tell the tests where they can find the test files you
@@ -286,7 +286,7 @@ If you just want to verify the SQL replacement is working you will need to add t
 assumes CUDA 12 is being used and the Spark distribution is built with Scala 2.12.
 
 ```
-$SPARK_HOME/bin/spark-submit --jars "rapids-4-spark_2.12-26.08.0-SNAPSHOT-cuda12.jar" ./runtests.py
+$SPARK_HOME/bin/spark-submit --jars "rapids-4-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar" ./runtests.py
 ```
 
 You don't have to enable the plugin for this to work, the test framework will do that for you.
@@ -364,6 +364,19 @@ This marker has the following arguments:
 - `condition`: is used to gate when the override is appropriate, usually used to say that specific shims
                need the special override.
 - `permanent`: forces a test to ignore `DATAGEN_SEED` if True. If False, or if absent, the `DATAGEN_SEED` value always wins.
+
+### Reduced pre-commit parameter combination selection
+
+Add `[reduced-it]` to the pull request title to use deterministic each-choice selection for tests
+with two or more stacked `pytest.mark.parametrize` decorators. The selected combinations include
+every value from every decorator at least once. Tests with zero or one parametrization decorator run
+all cases. Tests whose collected cases do not form the expected Cartesian product also run all
+cases.
+
+Pre-commit runs use the complete Cartesian product by default. Developer and nightly runs are also
+unaffected unless `RANDOM_SELECT` is explicitly configured. `RANDOM_SELECT` is not applied in
+reduced IT mode because a second random selection could remove the only selected occurrence of a
+parameter value.
 
 ### Randomly selecting tests
 
@@ -507,7 +520,7 @@ To run cudf_udf tests, need following configuration changes:
 As an example, here is the `spark-submit` command with the cudf_udf parameter on CUDA 12:
 
 ```
-$SPARK_HOME/bin/spark-submit --jars "rapids-4-spark_2.12-26.08.0-SNAPSHOT-cuda12.jar,rapids-4-spark-tests_2.12-26.08.0-SNAPSHOT.jar" --conf spark.rapids.memory.gpu.allocFraction=0.3 --conf spark.rapids.python.memory.gpu.allocFraction=0.3 --conf spark.rapids.python.concurrentPythonWorkers=2 --py-files "rapids-4-spark_2.12-26.08.0-SNAPSHOT-cuda12.jar" --conf spark.executorEnv.PYTHONPATH="rapids-4-spark_2.12-26.08.0-SNAPSHOT-cuda12.jar" ./runtests.py --cudf_udf
+$SPARK_HOME/bin/spark-submit --jars "rapids-4-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar,rapids-4-spark-tests_2.12-26.10.0-SNAPSHOT.jar" --conf spark.rapids.memory.gpu.allocFraction=0.3 --conf spark.rapids.python.memory.gpu.allocFraction=0.3 --conf spark.rapids.python.concurrentPythonWorkers=2 --py-files "rapids-4-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar" --conf spark.executorEnv.PYTHONPATH="rapids-4-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar" ./runtests.py --cudf_udf
 ```
 
 ### Enabling fuzz tests
@@ -563,13 +576,17 @@ partition type to keep memory usage manageable.
 
 #### Iceberg REST catalog write compression
 
-Some REST catalog deployments can apply a catalog-side default Parquet compression codec that
-is not supported by the RAPIDS GPU writer. The REST catalog CI sets table defaults for data
-and delete files to use `zstd`, which is supported by the GPU writer:
+Older Iceberg REST clients, including 1.6.x, do not apply client-side
+`spark.sql.catalog.*.table-default.*` settings when creating REST tables. The resulting tables
+can use a default Parquet compression codec that is not supported by the RAPIDS GPU writer.
+REST catalog tests therefore add explicit table properties for data and delete files to use
+`zstd`, which is supported by the GPU writer:
 
-```shell
-"PYSP_TEST_spark_sql_catalog_spark__catalog_table-default_write_parquet_compression-codec=zstd"
-"PYSP_TEST_spark_sql_catalog_spark__catalog_table-default_write_delete_parquet_compression-codec=zstd"
+```sql
+TBLPROPERTIES (
+  'write.parquet.compression-codec' = 'zstd',
+  'write.delete.parquet.compression-codec' = 'zstd'
+)
 ```
 
 ### Run Apache iceberg s3tables tests

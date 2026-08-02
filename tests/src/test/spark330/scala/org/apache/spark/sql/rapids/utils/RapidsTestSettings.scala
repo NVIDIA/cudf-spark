@@ -95,7 +95,6 @@ class RapidsTestSettings extends BackendTestSettings {
     .exclude("cast string to timestamp", KNOWN_ISSUE("https://github.com/NVIDIA/spark-rapids/blob/main/docs/compatibility.md#string-to-timestamp"))
     .exclude("cast string to date", KNOWN_ISSUE("https://github.com/NVIDIA/spark-rapids/issues/10771"))
   enableSuite[RapidsUnwrapCastInComparisonEndToEndSuite]
-    .exclude("cases when literal is max", KNOWN_ISSUE("https://github.com/NVIDIA/spark-rapids/issues/15004"))
   enableSuite[RapidsCollectionExpressionsSuite]
     .exclude("Array Intersect", ADJUST_UT("Replaced by testRapids version that doesn't check the order of the elements in the result array. See https://github.com/NVIDIA/spark-rapids/issues/13696 for more details."))
     .exclude("Shuffle", ADJUST_UT("Replaced by testRapids version that adjusts the expected results to match the running by --master local[2]."))
@@ -168,6 +167,17 @@ class RapidsTestSettings extends BackendTestSettings {
     .exclude("SPARK-24596 Non-cascading Cache Invalidation - verify cached data reuse", ADJUST_UT("Replaced by testRapids version that checks non-cascading cache invalidation reuses loaded cached data without re-evaluating the UDF."))
     .exclude("SPARK-26708 Cache data and cached plan should stay consistent", ADJUST_UT("Replaced by testRapids version that checks loaded and unloaded dependent caches keep consistent cached plans under RAPIDS."))
   enableSuite[RapidsDatasetPrimitiveSuite]
+  enableSuite[RapidsBasicCharVarcharTestSuite]
+  enableSuite[RapidsFileSourceCharVarcharTestSuite]
+  enableSuite[RapidsDSV2CharVarcharTestSuite]
+  enableSuite[RapidsDataFrameTungstenSuite]
+  enableSuite[RapidsDataFrameImplicitsSuite]
+  enableSuite[RapidsDatasetOptimizationSuite]
+  enableSuite[RapidsDataFrameWriterV2Suite]
+  enableSuite[RapidsUserDefinedTypeSuite]
+  enableSuite[RapidsDeprecatedAPISuite]
+  enableSuite[RapidsDeprecatedDatasetAggregatorSuite]
+  enableSuite[RapidsStatisticsCollectionSuite]
   enableSuite[RapidsFileSourceStrategySuite]
     .exclude("partitioned table - after scan filters", ADJUST_UT("Replaced by testRapids version that checks GpuFilterExec residual filters."))
     .exclude("[SPARK-16818] partition pruned file scans implement sameResult correctly", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15161"))

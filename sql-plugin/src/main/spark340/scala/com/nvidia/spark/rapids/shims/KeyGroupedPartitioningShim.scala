@@ -16,7 +16,6 @@
 /*** spark-rapids-shim-json-lines
 {"spark": "340"}
 {"spark": "341"}
-{"spark": "341db"}
 {"spark": "342"}
 {"spark": "343"}
 {"spark": "344"}
@@ -30,6 +29,13 @@ import org.apache.spark.sql.catalyst.plans.physical.KeyGroupedPartitioning
 import org.apache.spark.sql.catalyst.util.InternalRowComparableWrapper
 
 object KeyGroupedPartitioningShim {
+  def copyWithNewPartitionValues(
+      p: KeyGroupedPartitioning,
+      partitionValues: Seq[InternalRow],
+      isPartiallyClustered: Boolean): KeyGroupedPartitioning = {
+    p.copy(numPartitions = partitionValues.length, partitionValues = partitionValues)
+  }
+
   def getUniquePartitions(p: KeyGroupedPartitioning): Seq[InternalRow] = {
     p.partitionValues
       .map(InternalRowComparableWrapper(_, p.expressions))

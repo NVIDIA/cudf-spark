@@ -23,7 +23,7 @@ from pyspark.sql.types import FloatType, DoubleType, BinaryType
 
 import pytest
 
-from conftest import spark_jvm
+from conftest import is_iceberg_rest_catalog, spark_jvm
 from data_gen import *
 from spark_session import is_iceberg_supported_spark, with_cpu_session
 
@@ -297,9 +297,18 @@ def schema_to_ddl(spark, schema):
 
 
 # Base table properties applied to every Iceberg test table.
-# Disables the fanout writer to prevent OOM in CI.  S3TablesCatalog does not
+# Disables the fanout writer to prevent OOM in CI. S3TablesCatalog does not
 # honor catalog-level table-default properties, so this must be set per table.
 _BASE_TBLPROPS = {'write.spark.fanout.enabled': False}
+
+# Older Iceberg REST clients, including 1.6.x, do not apply catalog table-default
+# properties when creating a table. Apply supported codecs directly to REST test
+# tables so writes do not fall back to gzip and then to CPU.
+if is_iceberg_rest_catalog():
+    _BASE_TBLPROPS.update({
+        'write.parquet.compression-codec': 'zstd',
+        'write.delete.parquet.compression-codec': 'zstd',
+    })
 
 
 def _to_tblprops_str(props: dict) -> dict:
