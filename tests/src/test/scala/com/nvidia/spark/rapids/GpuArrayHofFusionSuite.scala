@@ -225,7 +225,8 @@ class GpuArrayHofFusionSuite extends GpuUnitTests {
       failOnError = false)()))
     val secondAst = spy(GpuProjectAstExpression(GpuMultiply(
       GpuBoundReference(1, LongType, nullable = true)(ExprId(402), "a"),
-      GpuBoundReference(2, LongType, nullable = true)(ExprId(403), "b"))()))
+      GpuBoundReference(2, LongType, nullable = true)(ExprId(403), "b"),
+      failOnError = false)())) // Prevent side effects in ANSI mode.
     val expressions = Seq(
       alias(executableTransform(404), "left"),
       alias(firstAst, "sum"),
