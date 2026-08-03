@@ -14,14 +14,16 @@
 
 import pytest
 
-from asserts import assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_row_counts_equal, assert_gpu_fallback_collect, assert_spark_exception
+from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, \
+    assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect, \
+    assert_gpu_and_cpu_row_counts_equal, assert_gpu_fallback_collect, assert_spark_exception
 from conftest import is_iceberg_remote_catalog, is_iceberg_rest_catalog
 from data_gen import *
 from iceberg import get_full_table_name, iceberg_unsupported_mark, _build_tblprops, \
     _BASE_TBLPROPS_SQL, create_iceberg_table
 from marks import allow_non_gpu, iceberg, ignore_order
-from spark_session import is_databricks_runtime, with_cpu_session, \
-    with_gpu_session
+from spark_session import is_databricks_runtime, is_spark_35x, is_spark_40x, is_spark_41x, \
+    spark_version, with_cpu_session, with_gpu_session
 
 iceberg_map_gens = [MapGen(f(nullable=False), f()) for f in [
     BooleanGen, ByteGen, ShortGen, IntegerGen, LongGen, FloatGen, DoubleGen, DateGen, TimestampGen ]] + \
@@ -46,6 +48,117 @@ rapids_reader_types = ['PERFILE', 'MULTITHREADED', 'COALESCING']
 _NO_FANOUT = _BASE_TBLPROPS_SQL
 
 pytestmark = iceberg_unsupported_mark
+
+
+def _is_spark_patch_at_least(version, minimum):
+    patch = version.split(".")[2].split("-", 1)[0]
+    return int(patch) >= minimum
+
+
+@pytest.mark.parametrize("version, minimum, expected", [
+    ("3.5.9", 9, True),
+    ("3.5.9-SNAPSHOT", 9, True),
+    ("4.1.2-amzn-0", 2, True),
+    ("3.5.8-SNAPSHOT", 9, False),
+])
+def test_is_spark_patch_at_least(version, minimum, expected):
+    assert _is_spark_patch_at_least(version, minimum) == expected
+
+
+def _collect_plan_nodes(plan):
+    nodes = [plan]
+    children = plan.children().iterator()
+    while children.hasNext():
+        nodes.extend(_collect_plan_nodes(children.next()))
+    return nodes
+
+
+def _assert_partial_clustering_spj_plan(plan):
+    nodes = _collect_plan_nodes(plan)
+
+    def nodes_of_class(class_name):
+        return [node for node in nodes if node.getClass().getSimpleName() == class_name]
+
+    scans = nodes_of_class("GpuBatchScanExec")
+    joins = nodes_of_class("GpuShuffledSymmetricHashJoinExec")
+    exchanges = nodes_of_class("GpuShuffleExchangeExec")
+
+    assert len(scans) == 2, f"Expected two GPU batch scans, found {len(scans)}:\n{plan}"
+    assert len(joins) == 1, f"Expected one GPU SPJ join, found {len(joins)}:\n{plan}"
+    assert len(exchanges) == 1, \
+        f"Expected one post-join GPU shuffle, found {len(exchanges)}:\n{plan}"
+    assert any(scan.outputPartitioning().isPartiallyClustered() for scan in scans), \
+        f"Expected at least one partially clustered GPU batch scan:\n{plan}"
+
+    join_nodes = _collect_plan_nodes(joins[0])
+    join_exchanges = [
+        node for node in join_nodes
+        if node.getClass().getSimpleName() == "GpuShuffleExchangeExec"
+    ]
+    assert not join_exchanges, f"Expected shuffle-free SPJ inputs:\n{plan}"
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.skipif(
+    not (
+        (is_spark_35x() and _is_spark_patch_at_least(spark_version(), 9))
+        or (is_spark_40x() and _is_spark_patch_at_least(spark_version(), 3))
+        or (is_spark_41x() and _is_spark_patch_at_least(spark_version(), 2))
+    ),
+    reason="Requires Spark's partial-clustering correctness fix and GPU Iceberg scan support")
+def test_iceberg_spj_partial_clustering_distinct(spark_tmp_table_factory):
+    left_table = get_full_table_name(spark_tmp_table_factory)
+    right_table = get_full_table_name(spark_tmp_table_factory)
+    table_props = _build_tblprops({
+        # Keep separate INSERTs as separate scan splits so that id=1 is partially clustered.
+        "read.split.target-size": "1",
+        "read.split.open-file-cost": "1",
+    })
+    table_props_sql = ", ".join(f"'{k}' = '{v}'" for k, v in table_props.items())
+
+    def setup_iceberg_tables(spark):
+        spark.sql(
+            f"CREATE TABLE {left_table} (id INT, price DOUBLE) USING ICEBERG "
+            f"PARTITIONED BY (id) TBLPROPERTIES ({table_props_sql})")
+        spark.sql(
+            f"CREATE TABLE {right_table} (id INT, value STRING) USING ICEBERG "
+            f"PARTITIONED BY (id) TBLPROPERTIES ({table_props_sql})")
+
+        # The two id=1 rows land in different files. Partial clustering assigns them to
+        # different join tasks and replicates the matching row from the other side. The missing
+        # id=3 on the right also pads that scan with an empty partition.
+        spark.sql(f"INSERT INTO {left_table} VALUES (1, 40.0), (2, 10.0), (3, 15.5)")
+        spark.sql(f"INSERT INTO {left_table} VALUES (1, 41.0)")
+        spark.sql(f"INSERT INTO {right_table} VALUES (1, 'a'), (2, 'b')")
+
+    with_cpu_session(setup_iceberg_tables)
+
+    conf = {
+        "spark.sql.adaptive.enabled": "false",
+        "spark.sql.autoBroadcastJoinThreshold": "-1",
+        "spark.sql.sources.v2.bucketing.enabled": "true",
+        "spark.sql.sources.v2.bucketing.pushPartValues.enabled": "true",
+        "spark.sql.sources.v2.bucketing.partiallyClusteredDistribution.enabled": "true",
+        "spark.sql.iceberg.planning.preserve-data-grouping": "true",
+    }
+
+    def distinct_after_spj(spark):
+        return spark.sql(
+            f"""
+            SELECT DISTINCT l.id
+            FROM {left_table} l
+            JOIN {right_table} r ON l.id = r.id
+            """)
+
+    # The SPJ itself is shuffle-free, so the distinct introduces a post-join shuffle.
+    # Comparing the results also exercises the replicated and padded scan partitions.
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        distinct_after_spj,
+        conf=conf,
+        require_non_empty=True,
+        gpu_plan_assertion=_assert_partial_clustering_spj_plan)
+
 
 @allow_non_gpu("BatchScanExec")
 @iceberg
