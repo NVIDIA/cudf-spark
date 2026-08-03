@@ -30,6 +30,7 @@ import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuColumnVector
 import com.nvidia.spark.rapids.GpuDsv2WriteMetadata
 import com.nvidia.spark.rapids.GpuWrite
+import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.GpuProjectingColumnarBatch
@@ -104,33 +105,37 @@ case class GpuDataAndMetadataWritingSparkTask(
   override protected def write(
       writer: DataWriter[ColumnarBatch],
       batch: ColumnarBatch): Unit = {
-    val withMetadataFilter = filterByOperation(batch, WRITE_WITH_METADATA_OPERATION)
-    withResource(withMetadataFilter) { _ =>
-      withResource(rowProjection.project(batch)) { rows =>
-        val dataBatch = GpuColumnVector.filter(rows, rowDataTypes, withMetadataFilter)
-        closeOnExcept(dataBatch) { _ =>
-          if (dataBatch.numRows() > 0) {
-            val metadataBatch = withResource(metadataProjection.project(batch)) { metadata =>
-              GpuColumnVector.filter(metadata, metadataDataTypes, withMetadataFilter)
+    // Match GpuDelta*WritingSparkTask: projection/filter/write allocate on GPU and must
+    // participate in spill-and-retry. withRetryNoSplit closes `batch` on success.
+    withRetryNoSplit(batch) { _ =>
+      val withMetadataFilter = filterByOperation(batch, WRITE_WITH_METADATA_OPERATION)
+      withResource(withMetadataFilter) { _ =>
+        withResource(rowProjection.project(batch)) { rows =>
+          val dataBatch = GpuColumnVector.filter(rows, rowDataTypes, withMetadataFilter)
+          closeOnExcept(dataBatch) { _ =>
+            if (dataBatch.numRows() > 0) {
+              val metadataBatch = withResource(metadataProjection.project(batch)) { metadata =>
+                GpuColumnVector.filter(metadata, metadataDataTypes, withMetadataFilter)
+              }
+              GpuDsv2WriteMetadata.withMetadataSchema(metadataProj.schema) {
+                writer.write(metadataBatch, dataBatch)
+              }
+            } else {
+              dataBatch.close()
             }
-            GpuDsv2WriteMetadata.withMetadataSchema(metadataProj.schema) {
-              writer.write(metadataBatch, dataBatch)
-            }
-          } else {
-            dataBatch.close()
           }
         }
       }
-    }
 
-    val writeFilter = filterByOperation(batch, WRITE_OPERATION)
-    withResource(writeFilter) { _ =>
-      withResource(rowProjection.project(batch)) { rows =>
-        val dataBatch = GpuColumnVector.filter(rows, rowDataTypes, writeFilter)
-        if (dataBatch.numRows() > 0) {
-          writer.write(dataBatch)
-        } else {
-          dataBatch.close()
+      val writeFilter = filterByOperation(batch, WRITE_OPERATION)
+      withResource(writeFilter) { _ =>
+        withResource(rowProjection.project(batch)) { rows =>
+          val dataBatch = GpuColumnVector.filter(rows, rowDataTypes, writeFilter)
+          if (dataBatch.numRows() > 0) {
+            writer.write(dataBatch)
+          } else {
+            dataBatch.close()
+          }
         }
       }
     }
