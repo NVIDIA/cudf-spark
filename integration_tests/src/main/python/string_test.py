@@ -1150,3 +1150,41 @@ def test_multi_contains_conditional(ansi):
                     ELSE CAST(a AS LONG)
                 END as result'''),
             conf = conf)
+
+
+# SPARK-57507 / #15383: reverse must clamp truncated trailing UTF-8 to the row boundary.
+# Neighbor sentinel rows make an over-read observable. Expected values are Spark's fixed
+# semantics (golden), so the test does not depend on whether the running Spark CPU build
+# already contains SPARK-57507.
+@pytest.mark.parametrize('hex_in,expected_hex', [
+    ('41CE', 'CE41'),                 # A + truncated 2-byte lead
+    ('41E4B8', 'E4B841'),             # A + truncated 3-byte lead
+    ('41F090', 'F09041'),             # A + truncated 4-byte lead
+    ('E4B896CE', 'CEE4B896'),         # complete 世 + orphan 2-byte lead
+    ('41C3A9', 'C3A941'),             # well-formed 2-byte control
+    ('41E4B896', 'E4B89641'),         # well-formed 3-byte control
+    ('41F0908D88', 'F0908D8841'),     # well-formed 4-byte control
+], ids=idfn)
+def test_reverse_truncated_trailing_utf8(hex_in, expected_hex):
+    def do_it(spark):
+        # Keep target + sentinel neighbors adjacent in one partition so an over-read
+        # into the next row is observable. Avoid ORDER BY (CPU shuffle) and unhex
+        # (not allowed in GpuCpuBridge); feed raw bytes via BINARY then cast to STRING.
+        df = spark.createDataFrame(
+            [
+                (bytearray.fromhex(hex_in),),
+                (bytearray.fromhex('FFFFFFFF'),),
+                (bytearray.fromhex('414243'),),
+            ],
+            'b BINARY'
+        ).coalesce(1).selectExpr('CAST(b AS STRING) AS v')
+        out = df.selectExpr('hex(reverse(v)) as h')
+        # Collect first so AQE finalizes and RAPIDS replacements appear in the plan.
+        rows = out.collect()
+        plan = out._jdf.queryExecution().executedPlan().toString()
+        # Expression trees render as lowercase "gpureverse(...)", not the class name.
+        assert 'gpureverse' in plan.lower(), 'expected GpuReverse in plan, got:\n' + plan
+        return rows
+
+    rows = with_gpu_session(do_it)
+    assert rows[0]['h'] == expected_hex
