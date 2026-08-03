@@ -59,9 +59,11 @@ object RapidsShuffleManagerAutoConfigurator {
   private val SHUFFLE_MANAGER_KEY = "spark.shuffle.manager"
   private val SHUFFLE_DATA_IO_PLUGIN_KEY = "spark.shuffle.sort.io.plugin.class"
   private val RAPIDS_SHUFFLE_DATA_IO_CLASS_SUFFIX = "RapidsLocalDiskShuffleDataIO"
+  private val DATAPROC_ENGINE_KEY = "spark.dataproc.engine"
 
   def configure(conf: SparkConf): Unit = {
     if (ShuffleManagerShimUtils.supportsAutoConfiguration &&
+        !conf.contains(DATAPROC_ENGINE_KEY) &&
         !conf.contains(SHUFFLE_MANAGER_KEY) &&
         conf.getOption(SHUFFLE_DATA_IO_PLUGIN_KEY)
           .forall(_.endsWith(RAPIDS_SHUFFLE_DATA_IO_CLASS_SUFFIX))) {
