@@ -166,11 +166,13 @@ abstract class DeltaProviderBase extends DeltaIOProvider {
     def pruneMetadataProject(
         project: GpuProjectExec,
         scan: GpuFileSourceScanExec): SparkPlan = {
+      // Data and partition columns precede metadata columns in the scan output.
       val dataAndPartitionOutput = scan.originalOutput.take(
         scan.requiredSchema.length + scan.relation.partitionSchema.length)
       project.copy(projectList = project.projectList.filterNot(_.name == "_metadata"))
         .withNewChildren(Seq(
           scan.copy(
+            // Drop the temporary row index along with the unused metadata struct.
             originalOutput =
               dataAndPartitionOutput.filterNot(_.name == "_tmp_metadata_row_index"),
             requiredSchema = StructType(

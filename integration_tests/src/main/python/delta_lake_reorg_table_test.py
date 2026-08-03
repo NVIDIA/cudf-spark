@@ -28,6 +28,7 @@ from spark_session import (
     supports_delta_lake_deletion_vectors,
     with_cpu_session,
     with_gpu_session,
+    with_spark_session,
 )
 
 
@@ -72,6 +73,35 @@ def assert_gpu_reorg_plans(plan_callback, captured_plans):
         assert any(plan_callback.contains(plan, class_name) for plan in captured_plans), \
             "{} is not found in captured REORG plans:\n{}".format(
                 class_name, "\n".join(str(plan) for plan in captured_plans))
+
+
+def with_gpu_session_no_test(func, conf):
+    gpu_conf = copy_and_update(conf, {
+        "spark.rapids.sql.enabled": "true",
+        "spark.rapids.sql.test.enabled": "false",
+    })
+    return with_spark_session(func, conf=gpu_conf)
+
+
+def assert_reorg_fallback(cpu_target, gpu_target, sql_func, read_func):
+    with_cpu_session(lambda spark: spark.sql(sql_func(cpu_target)).collect(), conf=_reorg_conf)
+
+    plan_callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    plan_callback.startCapture()
+    try:
+        with_gpu_session_no_test(
+            lambda spark: spark.sql(sql_func(gpu_target)).collect(), conf=_reorg_conf)
+        plan_callback.assertCapturedAndGpuFellBack(["ExecutedCommandExec"], 10000)
+    finally:
+        plan_callback.endCapture()
+
+    cpu_rows = with_cpu_session(
+        lambda spark: read_func(spark, cpu_target).orderBy("id", "p").collect(),
+        conf=_reorg_conf)
+    gpu_rows = with_cpu_session(
+        lambda spark: read_func(spark, gpu_target).orderBy("id", "p").collect(),
+        conf=_reorg_conf)
+    assert_equal(cpu_rows, gpu_rows)
 
 
 def latest_reorg_version(spark, path):
@@ -149,3 +179,61 @@ def test_delta_reorg_table_purge(spark_tmp_path, partitioned):
         assert before == after
 
     with_gpu_session(assert_second_reorg_is_noop, conf=_reorg_conf)
+
+
+@delta_lake
+@allow_non_gpu(*_reorg_metadata_allow)
+@pytest.mark.skipif(not (is_before_spark_353() or is_spark_401_or_later()),
+                    reason="This test covers Spark versions where GPU REORG is disabled")
+def test_delta_reorg_table_unsupported_version_fallback(spark_tmp_path):
+    if not is_apache_runtime():
+        pytest.skip("GPU REORG TABLE currently supports Apache Delta Lake only")
+    if not supports_delta_lake_deletion_vectors():
+        pytest.skip("REORG TABLE PURGE requires deletion vector support")
+
+    cpu_path = spark_tmp_path + "/CPU"
+    gpu_path = spark_tmp_path + "/GPU"
+    with_cpu_session(lambda spark: setup_reorg_table(spark, cpu_path, False), conf=_reorg_conf)
+    with_cpu_session(lambda spark: setup_reorg_table(spark, gpu_path, False), conf=_reorg_conf)
+
+    assert_reorg_fallback(
+        cpu_path,
+        gpu_path,
+        lambda path: reorg_sql(path, False),
+        lambda spark, path: spark.read.format("delta").load(path))
+
+
+@delta_lake
+@allow_non_gpu(*_reorg_metadata_allow)
+def test_delta_reorg_table_unsupported_mode_uniform_iceberg_fallback(spark_tmp_path):
+    if not is_apache_runtime():
+        pytest.skip("GPU REORG TABLE currently supports Apache Delta Lake only")
+    if is_before_spark_353() or is_spark_401_or_later():
+        pytest.skip("Unsupported Spark versions are covered by the version fallback test")
+
+    path = spark_tmp_path + "/TABLE"
+
+    def setup_table(spark):
+        (spark.range(256)
+         .selectExpr("id", "CAST(id % 4 AS INT) AS p")
+         .repartition(4)
+         .write
+         .format("delta")
+         .save(path))
+
+    with_cpu_session(setup_table, conf=_reorg_conf)
+
+    sql = ("REORG TABLE delta.`{}` APPLY "
+           "(UPGRADE UNIFORM(ICEBERG_COMPAT_VERSION=3))").format(path)
+
+    plan_callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    plan_callback.startCapture()
+    try:
+        def assert_unsupported_version(spark):
+            with pytest.raises(Exception, match="COMPAT_VERSION_NOT_SUPPORTED"):
+                spark.sql(sql).collect()
+
+        with_gpu_session_no_test(assert_unsupported_version, conf=_reorg_conf)
+        plan_callback.assertCapturedAndGpuFellBack(["ExecutedCommandExec"], 10000)
+    finally:
+        plan_callback.endCapture()

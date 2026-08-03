@@ -46,8 +46,9 @@ class DeltaReorgTableCommandMeta(
     conf: RapidsConf,
     parent: Option[RapidsMeta[_, _, _]],
     rule: DataFromReplacementRule)
-  extends RunnableCommandMeta[DeltaReorgTableCommand](cmd, conf, parent, rule)
-    with DeltaCommand {
+  extends RunnableCommandMeta[DeltaReorgTableCommand](cmd, conf, parent, rule) {
+
+  private object DeltaCmdProxy extends DeltaCommand
 
   override def tagSelfForGpu(): Unit = {
     if (!conf.isDeltaWriteEnabled) {
@@ -67,7 +68,7 @@ class DeltaReorgTableCommandMeta(
       willNotWorkOnGpu("Only Delta REORG TABLE APPLY (PURGE) is supported on GPU")
     }
 
-    val table = getDeltaTable(cmd.target, "REORG")
+    val table = DeltaCmdProxy.getDeltaTable(cmd.target, "REORG")
     val snapshot = table.deltaLog.unsafeVolatileSnapshot
     FileFormatChecks.tag(this, snapshot.schema, ParquetFormatType, ReadFileOp)
     RapidsDeltaUtils.tagForDeltaWrite(
