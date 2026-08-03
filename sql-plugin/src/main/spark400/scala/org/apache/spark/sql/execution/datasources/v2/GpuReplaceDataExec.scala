@@ -31,8 +31,8 @@ import com.nvidia.spark.rapids.GpuColumnVector
 import com.nvidia.spark.rapids.GpuDsv2WriteMetadata
 import com.nvidia.spark.rapids.GpuWrite
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
-import com.nvidia.spark.rapids.SpillPriorities
 import com.nvidia.spark.rapids.SpillableColumnarBatch
+import com.nvidia.spark.rapids.SpillPriorities
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.GpuProjectingColumnarBatch
