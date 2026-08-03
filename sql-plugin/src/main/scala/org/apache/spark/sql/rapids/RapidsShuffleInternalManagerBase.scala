@@ -189,7 +189,7 @@ object RapidsShuffleInternalManagerBase extends Logging {
       terminated = pool.awaitTermination(5, TimeUnit.SECONDS)
     } catch {
       case e: Throwable =>
-        logWarning(s"Exception during shutdown whiel terminating pool ${poolName}", e)
+        logWarning(s"Exception during shutdown while terminating pool ${poolName}", e)
     } finally {
       if (!terminated) {
         logWarning(s"Thread pool ${poolName} did not terminate within 5 seconds after shutdown")
