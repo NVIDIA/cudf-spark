@@ -606,7 +606,6 @@ def test_window_aggs_for_range_numeric_date(data_gen, batch_size):
 # In a distributed setup the order of the partitions returned might be different, so we must ignore the order
 # but small batch sizes can make sort very slow, so do the final order by locally
 @ignore_order(local=True)
-@datagen_overrides(seed=0, reason="https://github.com/NVIDIA/spark-rapids/issues/9682")
 @pytest.mark.parametrize('batch_size', ['1000', '1g'], ids=idfn) # set the batch size so we can test multiple stream batches
 @pytest.mark.parametrize('data_gen', [_grpkey_longs_with_no_nulls,
                                       _grpkey_longs_with_nulls,

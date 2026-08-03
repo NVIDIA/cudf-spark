@@ -13,36 +13,27 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 /*** spark-rapids-shim-json-lines
 {"spark": "411"}
 {"spark": "412"}
 {"spark": "413"}
+{"spark": "420"}
 spark-rapids-shim-json-lines ***/
+package com.nvidia.spark.rapids.shims
 
-package com.nvidia.spark.rapids.iceberg;
+import org.apache.spark.sql.connector.write.{BatchWrite, WriterCommitMessage, WriteSummary}
 
-import org.apache.spark.sql.catalyst.InternalRow;
-import org.apache.spark.unsafe.types.GeographyVal;
-import org.apache.spark.unsafe.types.GeometryVal;
-import org.apache.spark.unsafe.types.VariantVal;
+/**
+ * Forward [[BatchWrite.commit]] with a [[WriteSummary]] to the CPU delegate.
+ *
+ * Without this override, the default interface method calls `commit(messages)` and drops the
+ * summary, so Iceberg/Delta commit metadata would miss DML metrics on the GPU path.
+ */
+trait GpuV2BatchWriteSummaryCommit { this: BatchWrite =>
+  protected def summaryCommitDelegate: BatchWrite
 
-public class GpuInternalRow extends GpuInternalRowBase {
-  public GpuInternalRow(InternalRow row) {
-    super(row);
-  }
-
-  @Override
-  public VariantVal getVariant(int ordinal) {
-    return getWrapped().getVariant(ordinal);
-  }
-
-  @Override
-  public GeometryVal getGeometry(int ordinal) {
-    return getWrapped().getGeometry(ordinal);
-  }
-
-  @Override
-  public GeographyVal getGeography(int ordinal) {
-    return getWrapped().getGeography(ordinal);
+  override def commit(messages: Array[WriterCommitMessage], summary: WriteSummary): Unit = {
+    summaryCommitDelegate.commit(messages, summary)
   }
 }

@@ -13,36 +13,26 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 /*** spark-rapids-shim-json-lines
 {"spark": "411"}
 {"spark": "412"}
 {"spark": "413"}
+{"spark": "420"}
 spark-rapids-shim-json-lines ***/
+package com.nvidia.spark.rapids.shims
 
-package com.nvidia.spark.rapids.iceberg;
+import org.apache.spark.sql.catalyst.plans.logical.MergeRows.{Copy, Delete, Insert, Keep, Update}
+import org.apache.spark.sql.execution.datasources.v2.GpuMergeRowsExec
 
-import org.apache.spark.sql.catalyst.InternalRow;
-import org.apache.spark.unsafe.types.GeographyVal;
-import org.apache.spark.unsafe.types.GeometryVal;
-import org.apache.spark.unsafe.types.VariantVal;
-
-public class GpuInternalRow extends GpuInternalRowBase {
-  public GpuInternalRow(InternalRow row) {
-    super(row);
-  }
-
-  @Override
-  public VariantVal getVariant(int ordinal) {
-    return getWrapped().getVariant(ordinal);
-  }
-
-  @Override
-  public GeometryVal getGeometry(int ordinal) {
-    return getWrapped().getGeometry(ordinal);
-  }
-
-  @Override
-  public GeographyVal getGeography(int ordinal) {
-    return getWrapped().getGeography(ordinal);
+/**
+ * Map Spark 4.1+ Keep.context onto GpuKeep action tags used for MergeSummary metrics.
+ */
+object GpuMergeRowsKeepShims {
+  def actionOf(keep: Keep): String = keep.context match {
+    case Copy => GpuMergeRowsExec.ACTION_COPY
+    case Insert => GpuMergeRowsExec.ACTION_INSERT
+    case Update => GpuMergeRowsExec.ACTION_UPDATE
+    case Delete => GpuMergeRowsExec.ACTION_DELETE
   }
 }
