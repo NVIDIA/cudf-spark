@@ -575,7 +575,7 @@ protected case class GpuParquetFileFilterHandler(
         filePath,
         conf,
         verifyParquetMagic,
-        taskMetrics.recordPerfioS3RequestLimiterWait)
+        taskMetrics.perfioS3RequestLimiterMetricsRecorder)
       val scheme = filePath.toUri.getScheme
       if (scheme != null && scheme.startsWith("s3")) {
         taskMetrics.recordPerfioS3BackendOnce()

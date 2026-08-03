@@ -24,7 +24,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
 import ai.rapids.cudf.{NvtxColor, NvtxRange}
-import com.nvidia.spark.rapids.{NvtxId, NvtxRegistry, PerfIO}
+import com.nvidia.spark.rapids.{LimiterMetricsRecorder, NvtxId, NvtxRegistry, PerfIO}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
 import com.nvidia.spark.rapids.jni.RmmSpark
@@ -559,12 +559,18 @@ class GpuTaskMetrics extends Serializable with Logging {
     perfioS3IcebergFallbacks.add(1L)
   }
 
-  def recordPerfioS3RequestLimiterWait(
-      waitTimeNanos: Long,
-      waitingRequests: Int): Unit = {
-    perfioS3RequestLimiterTotalWaitTime.add(waitTimeNanos)
-    perfioS3RequestLimiterMaxWaitingRequests.add(waitingRequests.toLong)
+  @transient private lazy val requestLimiterMetricsRecorder = new LimiterMetricsRecorder {
+    override def recordWaitTime(waitTimeNanos: Long): Unit = {
+      perfioS3RequestLimiterTotalWaitTime.add(waitTimeNanos)
+    }
+
+    override def recordWaitingRequests(waitingRequests: Int): Unit = {
+      perfioS3RequestLimiterMaxWaitingRequests.add(waitingRequests.toLong)
+    }
   }
+
+  def perfioS3RequestLimiterMetricsRecorder: LimiterMetricsRecorder =
+    requestLimiterMetricsRecorder
 }
 
 /**

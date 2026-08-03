@@ -44,10 +44,6 @@ class S3InputFile private (
 
   private val taskMetrics = GpuTaskMetrics.get
 
-  private def recordLimiterMetrics(waitTimeNanos: Long, waitingRequests: Int): Unit = {
-    taskMetrics.recordPerfioS3RequestLimiterWait(waitTimeNanos, waitingRequests)
-  }
-
   override def path(): String = delegate.path()
 
   @throws[IOException]
@@ -68,7 +64,8 @@ class S3InputFile private (
     }.toSeq
     require(
       PerfIO.readToHostMemory(
-        hadoopConf, output, fileUri, ranges, recordLimiterMetrics).isDefined,
+        hadoopConf, output, fileUri, ranges,
+        taskMetrics.perfioS3RequestLimiterMetricsRecorder).isDefined,
       "expected to use PerfIO to read")
   }
 
@@ -88,7 +85,8 @@ class S3InputFile private (
     val ranges = Seq[RangeWithOffset](SuffixRangeWithOffset(length, /*destOffset*/ 0L))
     require(
       PerfIO.readToHostMemory(
-        hadoopConf, output, fileUri, ranges, recordLimiterMetrics).isDefined,
+        hadoopConf, output, fileUri, ranges,
+        taskMetrics.perfioS3RequestLimiterMetricsRecorder).isDefined,
       "expected to use PerfIO to read")
   }
 }
