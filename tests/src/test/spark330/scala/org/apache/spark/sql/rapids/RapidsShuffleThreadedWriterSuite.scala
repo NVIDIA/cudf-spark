@@ -499,6 +499,7 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
 
   override def afterEach(): Unit = {
     TaskContext.unset()
+    RapidsShuffleInternalManagerBase.stopThreadPool()
     SpillFramework.shutdown()
     blockIdToFileMap.clear()
     temporaryFilesCreated.clear()
@@ -507,7 +508,6 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
       try { buf.close() } catch { case NonFatal(_) => }
     }
     slicedBuffersToClean.clear()
-    RapidsShuffleInternalManagerBase.stopThreadPool()
     try { Utils.deleteRecursively(tempDir) } catch { case NonFatal(_) => }
   }
 
