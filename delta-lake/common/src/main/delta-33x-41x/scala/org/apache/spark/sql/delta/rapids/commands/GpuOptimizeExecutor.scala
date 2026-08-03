@@ -70,10 +70,9 @@ class GpuOptimizeExecutor(
   private def ensureDeletionVectorDisabled(): Unit = {
     val dvFeatureEnabled = DeletionVectorUtils.deletionVectorsWritable(snapshot)
 
-    // Currently optimize executor will only be triggered by auto compaction, and we should
-    // already fallback to cpu when deletion vector enabled. This check ensures that the fallback
-    // actually works.
-    if (dvFeatureEnabled) {
+    // Ordinary OPTIMIZE must fall back when deletion vectors are enabled. REORG PURGE is
+    // different: it reads existing deletion vectors and writes replacement files without them.
+    if (dvFeatureEnabled && optimizeContext.reorg.isEmpty) {
       throw new IllegalStateException("Deletion vector not supported in gpu, we should have " +
         "fallback to cpu in GpuOptimizeExecutor")
     }

@@ -456,7 +456,9 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
     // Prune the output of the Scan so it only includes things that the referenceList will
     // actually read
     val neededExprIds = referenceList.flatMap(extractAttrReferences).map(_.exprId).toSet
-    val partOutAttrs = fss.output.drop(fss.requiredSchema.length)
+    val partOutAttrs = fss.output.slice(
+      fss.requiredSchema.length,
+      fss.requiredSchema.length + fss.relation.partitionSchema.length)
     val neededPartIndexes = partOutAttrs.zipWithIndex.collect{
       case (provided, index) if neededExprIds.contains(provided.exprId) => index
     }
@@ -949,6 +951,7 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
         var updatedPlan = DeltaProvider().pruneFileMetadata(plan)
         if (DeltaProvider().isPushDVPredicateDownEnabled(rapidsConf)) {
           updatedPlan = DeltaProvider().tryPushDVPredicateDownToScan(updatedPlan)
+          updatedPlan = DeltaProvider().pruneFileMetadata(updatedPlan)
         }
         updatedPlan = insertHashOptimizeSorts(updatedPlan)
         updatedPlan = updateScansForInputAndOrder(updatedPlan)

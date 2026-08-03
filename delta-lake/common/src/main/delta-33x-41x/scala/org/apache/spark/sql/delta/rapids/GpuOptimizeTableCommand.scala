@@ -34,7 +34,7 @@ import org.apache.spark.sql.execution.command.RunnableCommand
 import org.apache.spark.sql.types.StringType
 
 /**
- * GPU version of Delta Lake OptimizeTableCommand (compaction mode only).
+ * GPU version of Delta Lake OptimizeTableCommand for compaction and REORG PURGE.
  *
  * Mirrors the CPU command's input shape and output schema, but delegates execution
  * to the shared GpuOptimizeExecutor.
