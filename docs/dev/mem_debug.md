@@ -12,11 +12,11 @@ The JVM uses a garbage collector that is generally triggered based off of the JV
 of free space. This means that if we rely on GC to free unused GPU memory or off heap memory we
 are going to effectively leak that memory. This is because the JVM's GC will not be triggered if
 we run out of GPU memory or off heap memory. Instead, we make everything that can hold a reference
-to memory that is not tracked directly by the JVM an 
+to memory that is not tracked directly by the JVM an
 [AutoClosable](https://docs.oracle.com/javase/8/docs/api/java/lang/AutoCloseable.html). In many
 cases we extend this to include reference counting too. But all of this results in a lot of
-complexity and potentially bugs. To deal with these bugs inside the CUDF java code we 
-[track](https://github.com/rapidsai/cudf/blob/main/java/src/main/java/ai/rapids/cudf/MemoryCleaner.java) 
+complexity and potentially bugs. To deal with these bugs inside the CUDF java code we
+[track](https://github.com/rapidsai/cudf/blob/main/java/src/main/java/ai/rapids/cudf/MemoryCleaner.java)
 each of these objects and if the garbage collector causes the memory to be freed instead of a proper
 close we will output a warning like the following in the logs.
 
@@ -67,7 +67,7 @@ ai.rapids.cudf.ColumnVector.incRefCountInternal(ColumnVector.java:298)
 ai.rapids.cudf.ColumnVector.<init>(ColumnVector.java:120)
 ```
 
-or 
+or
 
 ```
 ERROR MemoryCleaner: double free ColumnVector{rows=6, type=INT32, nullCount=Optional[0], offHeap=(ID: 15 0)} (ID: 15): 2023-12-27 20:12:34.0607 GMT: INC
@@ -96,7 +96,7 @@ double free or a leak.
 
 ### Bookkeeping each thread's memory allocation
 
-Sometimes we'll encounter exceptions like "com.nvidia.spark.rapids.jni.CpuSplitAndRetryOOM: 
+Sometimes we'll encounter exceptions like "com.nvidia.spark.rapids.jni.CpuSplitAndRetryOOM:
 CPU OutOfMemory: could not split inputs and retry." This is because the CPU memory is exhausted and
 they cannot be spilled. But theoretically, we have a OOM state machine to fallback most of the
 threads to a state where everything is spillable. So such kind of exception is not indeed expected.
@@ -107,18 +107,18 @@ We can enable the following system property:
 -Dai.rapids.memory.bookkeep=true
 ```
 
-or 
+or
 
 ```
 -Dai.rapids.memory.bookkeep=true
 -Dai.rapids.memory.bookkeep.callstack=true
 ```
 
-The first option will log how much CPU is allocated by each thread but not freed, at the time 
-when the OOM state machine decides that one of the threads need to be spitted and retried, which 
-is not very often and usually means something went wrong. The second option will take a step 
-further and log where each piece of memory is allocated. This is very useful for debugging, but 
-it will generate a lot of overhead in bookkeeping, so it's not recommended to enable it in 
+The first option will log how much CPU is allocated by each thread but not freed, at the time
+when the OOM state machine decides that one of the threads need to be spitted and retried, which
+is not very often and usually means something went wrong. The second option will take a step
+further and log where each piece of memory is allocated. This is very useful for debugging, but
+it will generate a lot of overhead in bookkeeping, so it's not recommended to enable it in
 production.
 
 ## Low Level GPU Allocation Logging.
@@ -168,7 +168,7 @@ allocation, and then have buffers that show up in java that reference a subsecti
 allocation.
 
 This cannot answer a lot of questions directly, but we can write some simple scripts to parse
-the log and answer questions. We can answer questions like "What is the amount of GPU memory 
+the log and answer questions. We can answer questions like "What is the amount of GPU memory
 allocated at any point in time?" With that we can look to see when an allocation failed and get
 an idea of how bad fragmentation is by seeing how large the allocation is vs the amount of memory
 that should be available on the GPU. We could go even further and track the address and size of
@@ -181,19 +181,19 @@ don't need to free a nullptr if the allocation size was 0.
 ### Missing Functionality
 
 We are still missing some functionality that would be helpful with debugging issues in addition to
-tracking [Scalar](https://github.com/rapidsai/cudf/issues/8227) and 
-[Table](https://github.com/rapidsai/cudf/issues/14677) values. 
+tracking [Scalar](https://github.com/rapidsai/cudf/issues/8227) and
+[Table](https://github.com/rapidsai/cudf/issues/14677) values.
 
-We don't have any [host memory logging](https://github.com/NVIDIA/spark-rapids/issues/10102) like 
+We don't have any [host memory logging](https://github.com/NVIDIA/cudf-spark/issues/10102) like
 we do for RMM. This might change when/if we go to RMM for host memory allocation too, but for now
 if you need this you probably are going to have to write something yourself.
 
-We don't have a good way to [track spill](https://github.com/NVIDIA/spark-rapids/issues/8752)/log 
+We don't have a good way to [track spill](https://github.com/NVIDIA/cudf-spark/issues/8752)/log
 what is or is not spillable. The spill framework typically will use reference counting to know
 when it is the only one holding a reference to memory and then make the data spillable at that
 point.  This means that if we don't get the reference counting right we end up never spilling
 
-We also don't have a way to 
-[log exactly what was spilled](https://github.com/NVIDIA/spark-rapids/issues/10103)
+We also don't have a way to
+[log exactly what was spilled](https://github.com/NVIDIA/cudf-spark/issues/10103)
 and what was read back. We can probably guess that this is happening from other logs, but it
 would be really nice to have a way to actually capture it.

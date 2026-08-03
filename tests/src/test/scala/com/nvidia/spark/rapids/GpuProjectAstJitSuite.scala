@@ -46,6 +46,7 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     val jit = wrapped.head.asInstanceOf[GpuAlias].child.asInstanceOf[GpuAstJitExpression]
     assert(jit.child.isInstanceOf[GpuMultiply])
     assert(jit.child.find(_.isInstanceOf[GpuAstJitExpression]).isEmpty)
+    assert(GpuProjectAstExpressionBase.extractTopLevel(wrapped.head).contains(jit))
   }
 
   test("project AST JIT wraps maximal nested subtrees independently") {
@@ -60,6 +61,7 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
 
     val wrapped = GpuAstJitExpression.wrapProjectExpressions(List(expression))
     val subtract = wrapped.head.asInstanceOf[GpuAlias].child.asInstanceOf[GpuSubtract]
+    assert(GpuAstJitExpression.contains(wrapped.head))
     assert(subtract.left.asInstanceOf[GpuAstJitExpression].child.isInstanceOf[GpuAdd])
     assert(subtract.right.asInstanceOf[GpuAstJitExpression].child.isInstanceOf[GpuMultiply])
   }

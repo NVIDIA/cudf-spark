@@ -21,12 +21,19 @@
 {"spark": "401"}
 {"spark": "402"}
 {"spark": "403"}
+{"spark": "404"}
 {"spark": "411"}
 {"spark": "412"}
+{"spark": "413"}
 {"spark": "420"}
 spark-rapids-shim-json-lines ***/
+
 package com.nvidia.spark.rapids.shims
 
 object ShuffleManagerShimUtils {
-  def eagerlyInitialized = true  
+  def eagerlyInitialized = true
+
+  // Spark 4.0+ and Databricks 14.3 initialize driver plugins before the shuffle manager
+  // (SPARK-45762 or its backport), so plugin initialization can configure the manager.
+  def supportsAutoConfiguration = true
 }

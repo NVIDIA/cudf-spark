@@ -22,8 +22,8 @@ from pyspark.sql.types import DateType, TimestampType, NumericType
 from pyspark.sql.window import Window
 import pyspark.sql.functions as f
 from spark_session import is_before_spark_320, is_databricks113_or_later, \
-    is_databricks133_or_later, is_spark_350_or_later, spark_version, with_cpu_session, \
-    is_spark_340_or_later, is_spark_420_or_later
+    is_spark_350_or_later, spark_version, with_cpu_session, \
+    is_scala212, is_spark_340_or_later, is_spark_420_or_later
 import warnings
 
 # mark this test as ci_1 for mvn verify sanity check in pre-merge CI
@@ -606,7 +606,6 @@ def test_window_aggs_for_range_numeric_date(data_gen, batch_size):
 # In a distributed setup the order of the partitions returned might be different, so we must ignore the order
 # but small batch sizes can make sort very slow, so do the final order by locally
 @ignore_order(local=True)
-@datagen_overrides(seed=0, reason="https://github.com/NVIDIA/spark-rapids/issues/9682")
 @pytest.mark.parametrize('batch_size', ['1000', '1g'], ids=idfn) # set the batch size so we can test multiple stream batches
 @pytest.mark.parametrize('data_gen', [_grpkey_longs_with_no_nulls,
                                       _grpkey_longs_with_nulls,
@@ -2377,8 +2376,25 @@ _gen_data_for_collect_set_nested = [
 @ignore_order(local=True)
 @allow_non_gpu(*non_utc_allow)
 def test_window_aggs_for_rows_collect_set():
+    data_gen = _gen_data_for_collect_set
+    if is_scala212():
+        # Scala 2.12 CPU window collect_set can retain both signed zeros, while the GPU and
+        # Scala 2.13 treat them as the same value. Exclude -0.0 from this Scala 2.12 test.
+        float_special_cases = [
+            FLOAT_MIN, FLOAT_MAX, 0.0, 1.0, -1.0,
+            float('inf'), float('-inf'), float('nan'), NEG_FLOAT_NAN_MAX_VALUE]
+        double_special_cases = [
+            DOUBLE_MIN, DOUBLE_MAX, 0.0, 1.0, -1.0,
+            float('inf'), float('-inf'), float('nan'), NEG_DOUBLE_NAN_MAX_VALUE]
+        collect_set_fp_gens = {
+            'c_float': RepeatSeqGen(FloatGen(special_cases=float_special_cases), length=15),
+            'c_double': RepeatSeqGen(DoubleGen(special_cases=double_special_cases), length=15)}
+        data_gen = [
+            (name, collect_set_fp_gens[name]) if name in collect_set_fp_gens else (name, gen)
+            for name, gen in data_gen]
+
     assert_gpu_and_cpu_are_equal_sql(
-        lambda spark: gen_df(spark, _gen_data_for_collect_set),
+        lambda spark: gen_df(spark, data_gen),
         "window_collect_table",
         '''
         select a, b,
@@ -2430,6 +2446,59 @@ def test_window_aggs_for_rows_collect_set():
         ) t
         ''',
         # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
+        conf={'spark.rapids.sql.window.collectSet.enabled': True,
+              'spark.sql.adaptive.enabled': 'false'})
+
+
+@pytest.mark.skipif(not is_spark_420_or_later(),
+                    reason='collect_set RESPECT NULLS is introduced in Spark 4.2')
+@allow_non_gpu("ShuffleExchangeExec")
+@ignore_order(local=True)
+@pytest.mark.parametrize('data_type', ['INT', 'FLOAT', 'DOUBLE'], ids=idfn)
+def test_window_aggs_for_rows_collect_set_respect_nulls(data_type):
+    def do_it(spark):
+        if data_type == 'INT':
+            values = """
+                (1, 1, '1'),
+                (1, 2, NULL),
+                (1, 3, '1'),
+                (1, 4, NULL),
+                (2, 1, NULL),
+                (2, 2, '5')
+            """
+        else:
+            values = """
+                (1, 1, '1.0'),
+                (1, 2, NULL),
+                (1, 3, 'NaN'),
+                (1, 4, 'NaN'),
+                (2, 1, NULL),
+                (2, 2, '5.0')
+            """
+        spark.sql(f"""
+            SELECT a, b, CAST(c AS {data_type}) AS c
+            FROM VALUES
+                {values}
+            AS tab(a, b, c)
+        """).createOrReplaceTempView("window_collect_table")
+        return spark.sql("""
+            SELECT a, b,
+                   sort_array(ignore_set) AS ignore_set,
+                   sort_array(respect_set) AS respect_set
+            FROM (
+                SELECT a, b,
+                       collect_set(c) IGNORE NULLS OVER
+                         (PARTITION BY a ORDER BY b
+                          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS ignore_set,
+                       collect_set(c) RESPECT NULLS OVER
+                         (PARTITION BY a ORDER BY b
+                          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS respect_set
+                FROM window_collect_table
+            ) t
+        """)
+
+    assert_gpu_and_cpu_are_equal_collect(
+        do_it,
         conf={'spark.rapids.sql.window.collectSet.enabled': True,
               'spark.sql.adaptive.enabled': 'false'})
 
@@ -2499,6 +2568,44 @@ def test_window_aggs_for_fully_unbounded_partitioned_collect_set():
         conf={'spark.rapids.sql.window.collectSet.enabled': True,
               'spark.rapids.sql.window.unboundedAgg.enabled': True,
               'spark.sql.parquet.int96RebaseModeInWrite': 'LEGACY',
+              'spark.sql.adaptive.enabled': 'false'},
+        validate_execs_in_gpu_plan=['GpuUnboundedToUnboundedAggWindowExec'])
+
+
+@pytest.mark.skipif(not is_spark_420_or_later(),
+                    reason='collect_set RESPECT NULLS is introduced in Spark 4.2')
+@allow_non_gpu("ShuffleExchangeExec")
+@ignore_order(local=True)
+def test_window_aggs_for_fully_unbounded_partitioned_collect_set_respect_nulls():
+    assert_gpu_and_cpu_are_equal_sql(
+        lambda spark: spark.sql("""
+            SELECT * FROM VALUES
+                (1, 1, 1),
+                (1, 2, NULL),
+                (1, 3, 1),
+                (1, 4, NULL),
+                (2, 1, NULL),
+                (2, 2, 5)
+            AS tab(a, b, c)
+        """),
+        "window_collect_table",
+        """
+        SELECT a, b,
+               sort_array(ignore_set) AS ignore_set,
+               sort_array(respect_set) AS respect_set
+        FROM (
+            SELECT a, b,
+                   collect_set(c) IGNORE NULLS OVER
+                     (PARTITION BY a ORDER BY b
+                      ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS ignore_set,
+                   collect_set(c) RESPECT NULLS OVER
+                     (PARTITION BY a ORDER BY b
+                      ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS respect_set
+            FROM window_collect_table
+        ) t
+        """,
+        conf={'spark.rapids.sql.window.collectSet.enabled': True,
+              'spark.rapids.sql.window.unboundedAgg.enabled': True,
               'spark.sql.adaptive.enabled': 'false'},
         validate_execs_in_gpu_plan=['GpuUnboundedToUnboundedAggWindowExec'])
 
@@ -3017,9 +3124,8 @@ def test_window_aggs_for_batched_finite_row_windows_fallback(data_gen):
     assert_query_runs_on(exec='GpuBatchedBoundedWindowExec', conf=conf_200)
 
 
-@pytest.mark.skipif(condition=not (is_spark_350_or_later() or is_databricks133_or_later()),
-                    reason="WindowGroupLimit not available for spark.version < 3.5 "
-                           "and Databricks version < 13.3")
+@pytest.mark.skipif(condition=not is_spark_350_or_later(),
+                    reason="WindowGroupLimit not available for spark.version < 3.5")
 @ignore_order(local=True)
 @approximate_float
 @pytest.mark.parametrize('batch_size', ['1k', '1g'], ids=idfn)
@@ -3068,9 +3174,8 @@ def test_window_group_limits_for_ranking_functions(data_gen, batch_size, rank_cl
         conf=conf)
 
 
-@pytest.mark.skipif(condition=not (is_spark_350_or_later() or is_databricks133_or_later()),
-                    reason="WindowGroupLimit not available for spark.version < 3.5 "
-                           "and Databricks version < 13.3")
+@pytest.mark.skipif(condition=not is_spark_350_or_later(),
+                    reason="WindowGroupLimit not available for spark.version < 3.5")
 @ignore_order(local=True)
 @approximate_float
 @pytest.mark.parametrize('batch_size', ['1k', '1g'], ids=idfn)
@@ -3127,9 +3232,8 @@ def test_window_group_limits_filter_patterns(data_gen, batch_size, rank_clause, 
         conf=conf)
 
 
-@pytest.mark.skipif(condition=not (is_spark_350_or_later() or is_databricks133_or_later()),
-                    reason="WindowGroupLimit not available for spark.version < 3.5 "
-                           "and Databricks version < 13.3")
+@pytest.mark.skipif(condition=not is_spark_350_or_later(),
+                    reason="WindowGroupLimit not available for spark.version < 3.5")
 @ignore_order(local=True)
 @approximate_float
 @pytest.mark.parametrize('batch_size', ['1k'], ids=idfn)

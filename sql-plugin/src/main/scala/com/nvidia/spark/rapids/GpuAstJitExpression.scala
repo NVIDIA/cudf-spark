@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids
 
-import ai.rapids.cudf.{Scalar, Table}
+import ai.rapids.cudf.Table
 import ai.rapids.cudf.ast.CompiledExpression
 import com.nvidia.spark.Retryable
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
@@ -46,11 +46,14 @@ object GpuAstJitExpression {
       expressions: List[NamedExpression]): List[NamedExpression] = {
     expressions.map(wrapMaximalSubtrees(_).asInstanceOf[NamedExpression])
   }
+
+  private[rapids] def contains(expression: Expression): Boolean =
+    expression.find(_.isInstanceOf[GpuAstJitExpression]).isDefined
 }
 
-case class GpuAstJitExpression(child: Expression)
-    extends ShimUnaryExpression with GpuExpression with Retryable with AutoCloseable {
-  require(child.isInstanceOf[GpuExpression], "AST JIT child must be a GPU expression")
+case class GpuAstJitExpression(child: GpuExpression)
+    extends ShimUnaryExpression with GpuProjectAstExpressionBase
+        with Retryable with AutoCloseable {
 
   @transient private[this] var compiledExpression: CompiledExpression = _
   @transient private[this] var completionRegistered = false
@@ -75,17 +78,19 @@ case class GpuAstJitExpression(child: Expression)
   override def close(): Unit = closeCompiledExpression()
 
   override def columnarEval(batch: ColumnarBatch): GpuColumnVector = {
-    withResource(tableFromBatch(batch)) { table =>
-      closeOnExcept(getCompiledExpression.computeColumnJit(table)) { result =>
-        GpuColumnVector.from(result, dataType)
-      }
+    withResource(GpuProjectAstExpression.tableFromBatch(batch)) { table =>
+      computeColumn(table)
     }
   }
 
+  private[rapids] override def computeColumn(table: Table): GpuColumnVector =
+    closeOnExcept(getCompiledExpression.computeColumnJit(table)) { result =>
+      GpuColumnVector.from(result, dataType)
+    }
+
   private def getCompiledExpression: CompiledExpression = synchronized {
     if (compiledExpression == null) {
-      compiledExpression = child.asInstanceOf[GpuExpression]
-        .convertToAst(Int.MaxValue)
+      compiledExpression = child.convertToAst(Int.MaxValue)
         .compile()
     }
     if (!completionRegistered) {
@@ -102,17 +107,5 @@ case class GpuAstJitExpression(child: Expression)
   private def closeCompiledExpression(): Unit = synchronized {
     Option(compiledExpression).foreach(_.safeClose())
     compiledExpression = null
-  }
-
-  private def tableFromBatch(batch: ColumnarBatch): Table = {
-    if (batch.numCols() != 0) {
-      GpuColumnVector.from(batch)
-    } else {
-      withResource(Scalar.fromBool(false)) { falseScalar =>
-        withResource(ai.rapids.cudf.ColumnVector.fromScalar(falseScalar, batch.numRows())) {
-          falseColumn => new Table(falseColumn)
-        }
-      }
-    }
   }
 }

@@ -19,9 +19,11 @@
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
+import com.databricks.sql.transaction.tahoe.perf.DeltaOptimizedWritePartitioning
 import com.nvidia.spark.rapids._
 
 import org.apache.spark.sql.catalyst.expressions.{CollationAwareMurmur3Hash, CollationAwareXxHash64, Expression}
+import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.execution.{OneRowRelationExec, SparkPlan}
 
 object SparkShimImpl extends Spark400PlusDBShims {
@@ -52,5 +54,26 @@ object SparkShimImpl extends Spark400PlusDBShims {
       )
     ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
     super.getExprs ++ shimExprs
+  }
+
+  override def getPartitionings: Map[Class[_ <: Partitioning],
+      PartRule[_ <: Partitioning]] = {
+    val shimPartitionings = Seq(
+      GpuOverrides.part[DeltaOptimizedWritePartitioning](
+        "Delta optimized write partitioning",
+        PartChecks(),
+        (partitioning, conf, parent, rule) =>
+          new PartMeta[DeltaOptimizedWritePartitioning](
+              partitioning, conf, parent, rule) {
+            // Keep DBR's marker as targetOutputPartitioning on the converted exchange so its
+            // DELTA_OPTIMIZED_WRITE AQE/skew rules still see the native contract. The exchange
+            // advertises and executes the equivalent physical hash partitioning on GPU.
+            override val childParts: Seq[PartMeta[_]] = Seq(GpuOverrides.wrapPart(
+              partitioning.getPhysicalPartitioning, this.conf, Some(this)))
+
+            override def convertToGpu(): GpuPartitioning = childParts.head.convertToGpu()
+          })
+    ).map(r => (r.getClassFor.asSubclass(classOf[Partitioning]), r)).toMap
+    super.getPartitionings ++ shimPartitionings
   }
 }

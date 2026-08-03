@@ -25,14 +25,18 @@
 {"spark": "356"}
 {"spark": "357"}
 {"spark": "358"}
+{"spark": "359"}
 {"spark": "400"}
 {"spark": "401"}
 {"spark": "402"}
 {"spark": "403"}
+{"spark": "404"}
 {"spark": "411"}
 {"spark": "412"}
+{"spark": "413"}
 {"spark": "420"}
 spark-rapids-shim-json-lines ***/
+
 package org.apache.spark.sql.execution.datasources.v2
 
 import scala.util.control.NonFatal
@@ -211,7 +215,8 @@ trait GpuV2TableWriteExec extends V2CommandExec with UnaryExecNode with GpuExec 
       postFinalPlanUpdateToSqlUi()
 
       logInfo(s"Data source write support $batchWrite is committing.")
-      batchWrite.commit(messages)
+      // Spark 4.1+ forwards a WriteSummary (e.g. MergeSummary from GpuMergeRowsExec).
+      GpuV2WriteCommitShims.commit(batchWrite, messages, finalQuery)
       logInfo(s"Data source write support $batchWrite committed.")
       commitProgress = Some(StreamWriterCommitProgress(totalNumRowsAccumulator.value))
     } catch {

@@ -1,11 +1,11 @@
 ---
 layout: page
-title: RAPIDS Per Stage Flame Graph
+title: NVIDIA cuDF plugin for Apache Spark Per Stage Flame Graph
 parent: Additional Functionality
 nav_order: 5
 ---
-# RAPIDS Per Stage Flame Graph
-The RAPIDS Accelerator for Apache Spark provides a way to generate flame graphs for each stage of a Spark job. This can be useful for performance tuning and understanding where time is being spent in your Spark application.
+# NVIDIA cuDF plugin for Apache Spark Per Stage Flame Graph
+The cuDF plugin provides a way to generate flame graphs for each stage of a Spark job. This can be useful for performance tuning and understanding where time is being spent in your Spark application.
 
 To enable this feature you simply need to set the config called `spark.rapids.flameGraph.pathPrefix`, which plays as a toggle for the Per Stage Flamegraph feature. Besides this config, we also have several other configs:
 
