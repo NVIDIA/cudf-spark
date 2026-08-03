@@ -59,7 +59,8 @@ import scala.reflect.ClassTag
 import scala.util.control.NonFatal
 
 import ai.rapids.cudf.HostMemoryBuffer
-import com.nvidia.spark.rapids.SlicedSerializedColumnVector
+import com.nvidia.spark.rapids.{RapidsConf, SlicedSerializedColumnVector}
+import com.nvidia.spark.rapids.spill.SpillFramework
 import org.mockito.{Mock, MockitoAnnotations}
 import org.mockito.Answers.RETURNS_SMART_NULLS
 import org.mockito.ArgumentMatchers.{any, anyInt, anyLong}
@@ -441,6 +442,7 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
 
   override def beforeEach(): Unit = {
     super.beforeEach()
+    SpillFramework.initialize(new RapidsConf(conf))
     RapidsShuffleInternalManagerBase.startThreadPoolIfNeeded(numWriterThreads, 0)
     TaskContext.setTaskContext(taskContext)
     MockitoAnnotations.openMocks(this).close()
@@ -497,6 +499,7 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
 
   override def afterEach(): Unit = {
     TaskContext.unset()
+    SpillFramework.shutdown()
     blockIdToFileMap.clear()
     temporaryFilesCreated.clear()
     // Close sliced buffers to release the refCount added by incRefCountAndGetSize
