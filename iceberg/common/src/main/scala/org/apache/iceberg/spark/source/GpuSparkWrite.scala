@@ -410,7 +410,7 @@ class GpuUnpartitionedDataWriter(
   val spec: PartitionSpec,
   val writeSchema: Schema,
   val targetFileSize: Long)
-  extends DataWriter[ColumnarBatch] {
+  extends GpuMetadataAwareDataWriter {
   private val delegate = new GpuRollingDataWriter(
     fileWriterFactory,
     fileFactory,
@@ -419,10 +419,9 @@ class GpuUnpartitionedDataWriter(
     spec,
     null)
 
-  // Match Iceberg UnpartitionedDataWriter: write(record) delegates to write(null, record).
-  override def write(t: ColumnarBatch): Unit = write(null, t)
-
-  override def write(meta: ColumnarBatch, record: ColumnarBatch): Unit = {
+  // write(record) / write(meta, record) are provided by GpuMetadataAwareDataWriter so the same
+  // sources compile on Spark 3.5 (no two-arg write) and Spark 4.0+ (default two-arg write).
+  override protected def doWrite(meta: ColumnarBatch, record: ColumnarBatch): Unit = {
     try {
       val metaSchema = com.nvidia.spark.rapids.GpuDsv2WriteMetadata.metadataSchema
         .getOrElse(StructType(Nil))
@@ -466,7 +465,7 @@ class GpuPartitionedDataWriter(
   val dataSparkType: StructType,
   val targetFileSize: Long,
   val fanoutEnabled: Boolean,
-) extends DataWriter[ColumnarBatch] {
+) extends GpuMetadataAwareDataWriter {
 
   private val delegate: PartitioningWriter[SpillableColumnarBatch, DataWriteResult] =
     if (fanoutEnabled) {
@@ -479,10 +478,8 @@ class GpuPartitionedDataWriter(
 
   private val partitioner = new GpuIcebergSpecPartitioner(spec, dataSchema.asStruct())
 
-  // Match Iceberg PartitionedDataWriter: write(record) delegates to write(null, record).
-  override def write(record: ColumnarBatch): Unit = write(null, record)
-
-  override def write(meta: ColumnarBatch, record: ColumnarBatch): Unit = {
+  // write(record) / write(meta, record) are provided by GpuMetadataAwareDataWriter.
+  override protected def doWrite(meta: ColumnarBatch, record: ColumnarBatch): Unit = {
     try {
       val metaSchema = com.nvidia.spark.rapids.GpuDsv2WriteMetadata.metadataSchema
         .getOrElse(StructType(Nil))

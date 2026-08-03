@@ -19,7 +19,6 @@ package org.apache.iceberg.spark.source
 import ai.rapids.cudf.{ColumnVector => CudfColumnVector, DType, Scalar}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuColumnVector
-import org.apache.iceberg.MetadataColumns
 import org.apache.iceberg.Schema
 
 import org.apache.spark.sql.types.{LongType, StructType}
@@ -31,10 +30,14 @@ import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
  * When the write schema requires row lineage columns, appends `_row_id` and
  * `_last_updated_sequence_number` from the metadata batch (or nulls when metadata
  * is absent) onto the data batch.
+ *
+ * Field names are hard-coded (not [[org.apache.iceberg.MetadataColumns]]) so this
+ * compiles against Iceberg 1.6.x, which does not yet expose those constants.
  */
 object GpuRowLineage {
-  private val rowIdName: String = MetadataColumns.ROW_ID.name()
-  private val lastUpdatedName: String = MetadataColumns.LAST_UPDATED_SEQUENCE_NUMBER.name()
+  // Keep in sync with Iceberg MetadataColumns.ROW_ID / LAST_UPDATED_SEQUENCE_NUMBER.
+  private val rowIdName: String = "_row_id"
+  private val lastUpdatedName: String = "_last_updated_sequence_number"
 
   def isRequired(writeSchema: Schema): Boolean = {
     writeSchema.findField(rowIdName) != null

@@ -421,8 +421,11 @@ class GpuBasePositionDeltaWriter(
 /**
  * Base trait for delta writers that handle both deletes and data writes.
  * This is the GPU equivalent of Java's DeleteAndDataDeltaWriter.
+ *
+ * Extends [[GpuMetadataAwareDeltaWriter]] so `insert`/`reinsert` compile on both Spark 3.5
+ * (no reinsert API) and Spark 4.0+ (default reinsert).
  */
-trait GpuDeleteAndDataDeltaWriter extends GpuDeltaWriter {
+trait GpuDeleteAndDataDeltaWriter extends GpuMetadataAwareDeltaWriter with GpuDeltaWriter {
   protected val table: Table
   protected val delegate: GpuBasePositionDeltaWriter
   protected val io: FileIO
@@ -445,14 +448,10 @@ trait GpuDeleteAndDataDeltaWriter extends GpuDeltaWriter {
   private var closed: Boolean = false
 
   /**
-   * Match Iceberg DeleteAndDataDeltaWriter: insert routes through reinsert(null, row).
-   */
-  override def insert(row: ColumnarBatch): Unit = reinsert(null, row)
-
-  /**
    * Match Iceberg reinsert: decorate with row lineage then write data.
+   * insert/reinsert entry points live on [[GpuMetadataAwareDeltaWriter]].
    */
-  override def reinsert(meta: ColumnarBatch, row: ColumnarBatch): Unit = {
+  override protected def doReinsert(meta: ColumnarBatch, row: ColumnarBatch): Unit = {
     try {
       val decorated = GpuRowLineage.decorate(
         context.dataSchema, meta, context.metadataSparkType, row)
