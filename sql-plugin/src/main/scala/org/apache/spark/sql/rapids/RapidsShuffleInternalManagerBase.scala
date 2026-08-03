@@ -188,6 +188,9 @@ object RapidsShuffleInternalManagerBase extends Logging {
     try {
       terminated = pool.awaitTermination(5, TimeUnit.SECONDS)
     } catch {
+      case ie: InterruptedException =>
+        Thread.currentThread.interrupt()
+        logWarning(s"Interrupted while waiting for thread pool ${poolName} to terminate", ie)
       case e: Throwable =>
         logWarning(s"Exception during shutdown while terminating pool ${poolName}", e)
     } finally {
