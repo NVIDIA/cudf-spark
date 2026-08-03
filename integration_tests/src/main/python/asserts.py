@@ -503,7 +503,18 @@ def assert_cpu_and_gpu_are_equal_collect_with_capture(func,
         exist_classes='',
         non_exist_classes='',
         conf={},
-        require_non_empty=False):
+        require_non_empty=False,
+        gpu_plan_assertion=None):
+    """Compare collected CPU/GPU results and validate the executed GPU plan.
+
+    :param func: Function that creates the dataframe to collect in each Spark session.
+    :param exist_classes: Comma-separated class names required in the GPU plan.
+    :param non_exist_classes: Comma-separated class names forbidden in the GPU plan.
+    :param conf: Spark configuration used for both executions.
+    :param require_non_empty: Require the collected CPU result to contain at least one row.
+    :param gpu_plan_assertion: Optional callback invoked after GPU collection with the
+        dataframe's executed JVM plan.
+    """
     (bring_back, collect_type) = _prep_func_for_compare(func, 'COLLECT_WITH_DATAFRAME')
 
     conf = _prep_incompat_conf(conf)
@@ -518,6 +529,8 @@ def assert_cpu_and_gpu_are_equal_collect_with_capture(func,
     gpu_start = time.time()
     from_gpu, gpu_df = with_gpu_session(bring_back, conf=conf)
     gpu_end = time.time()
+    if gpu_plan_assertion:
+        gpu_plan_assertion(gpu_df._jdf.queryExecution().executedPlan())
     jvm = spark_jvm()
     if exist_classes:
         for clz in exist_classes.split(','):
