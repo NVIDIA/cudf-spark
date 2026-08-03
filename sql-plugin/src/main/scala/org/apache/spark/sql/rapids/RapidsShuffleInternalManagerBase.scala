@@ -183,6 +183,17 @@ object RapidsShuffleInternalManagerBase extends Logging {
     }
   }
 
+  private def awaitTermination(poolName: String, pool: ExecutorService): Unit = {
+    var terminated = false
+    try {
+      terminated = pool.awaitTermination(5, TimeUnit.SECONDS)
+    } finally {
+      if (!terminated) {
+        logWarning(s"Thread pool ${poolName} did not terminate within 30 seconds after shutdown")
+      }
+    }
+  }
+
   def startThreadPoolIfNeeded(
       numWriterThreads: Int,
       numReaderThreads: Int): Unit = synchronized {
@@ -209,18 +220,27 @@ object RapidsShuffleInternalManagerBase extends Logging {
 
   def stopThreadPool(): Unit = synchronized {
     mtShuffleInitialized = false
+    // Interrupt all pools first so workers receive the signal concurrently.
     if (writerPool != null) {
       shutdownNow(writerPool)
-      writerPool = null
     }
-
     if (readerPool != null) {
       shutdownNow(readerPool)
-      readerPool = null
     }
-
     if (mergerPool != null) {
       shutdownNow(mergerPool)
+    }
+    // Then wait for each pool to drain before releasing shared resources.
+    if (writerPool != null) {
+      awaitTermination("shuffle writer", writerPool)
+      writerPool = null
+    }
+    if (readerPool != null) {
+      awaitTermination("shuffle reader", readerPool)
+      readerPool = null
+    }
+    if (mergerPool != null) {
+      awaitTermination("shuffle merge", mergerPool)
       mergerPool = null
     }
   }
