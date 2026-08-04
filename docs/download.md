@@ -2,7 +2,6 @@
 layout: page
 title: Download
 nav_order: 3
-has_children: true
 ---
 
 [NVIDIA cuDF plugin for Apache Spark](https://github.com/NVIDIA/cudf-spark) provides a set of
@@ -58,9 +57,6 @@ The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Ho
 		Databricks 14.3 ML LTS (GPU, Scala 2.12, Spark 3.5.0)
 		Databricks 17.3 ML LTS (GPU, Scala 2.13, Spark 4.0.0)
 
-See the [Databricks support matrix](./databricks-support.md) for runtime-specific Spark, Scala,
-CUDA, and Delta Lake feature support details.
-
 	Supported Dataproc versions (Debian/Ubuntu/Rocky):
 		GCP Dataproc 2.1
 		GCP Dataproc 2.2
@@ -77,6 +73,57 @@ for your hardware's minimum driver version.
 
 *For EMR support, please refer to the
 [Distributions](https://docs.nvidia.com/spark-rapids/user-guide/latest/faq.html#which-distributions-are-supported) section of the FAQ.
+
+### Databricks Runtime Compatibility
+
+Databricks runtime images provide the JVM and system libraries for each row; use
+the runtime-provided JDK unless a Databricks support note explicitly instructs
+otherwise.
+
+| Databricks Runtime | Apache Spark | Scala | JDK runtime | CUDA jar variants | Minimum NVIDIA driver |
+|---------------------|--------------|-------|-------------|-------------------|-----------------------|
+| 14.3 ML LTS GPU | 3.5.0 | 2.12 | Databricks runtime default | CUDA 12, CUDA 13 | R525+ |
+| 17.3 ML LTS GPU | 4.0.0 | 2.13 | Databricks runtime default | CUDA 12, CUDA 13 | R525+ |
+
+Use the Scala artifact that matches the Databricks runtime's Spark/Scala line.
+The CUDA classifier controls which cuDF native libraries are bundled in the
+plugin jar; it does not change the Spark or Scala compatibility of the
+artifact.
+
+#### Delta Lake GPU Support on Databricks
+
+`GPU` means the operation is expected to run on the GPU when the rest of the
+query plan is also GPU-compatible. `CPU fallback` means the cuDF plugin leaves
+that Delta operation on the CPU for that runtime.
+
+| Delta feature | DBR 14.3 | DBR 17.3 |
+|---------------|----------|----------|
+| Reads without deletion vectors | GPU | GPU |
+| Deletion vector reads | CPU fallback | GPU with metadata row index and cuDF plugin deletion-vector predicate pushdown |
+| Delta writes | GPU for append, overwrite, CTAS, and RTAS | GPU for append, overwrite, CTAS, and RTAS |
+| Delta writes with deletion vectors | CPU fallback | CPU fallback for paths that create persistent deletion vectors |
+| DELETE and UPDATE | GPU for copy-on-write. Operations that write deletion vectors fall back to CPU. | GPU for copy-on-write, including liquid-clustered tables. Operations that write persistent deletion vectors fall back to CPU. |
+| MERGE | GPU, including liquid clustering | GPU, including liquid clustering. Persistent deletion-vector writes fall back to CPU. |
+| OPTIMIZE | CPU fallback | GPU for supported standard and ordinary liquid-clustering paths |
+| Auto compaction | GPU when triggered by supported GPU writes | GPU for supported inline, deletion-vector-free paths |
+| Liquid clustering | GPU | GPU for writes, DELETE, UPDATE, MERGE, and ordinary OPTIMIZE |
+
+DBR 17.3 liquid-clustering support keeps Databricks-native planning,
+transaction, and commit semantics on the CPU while accelerating supported
+data-file rewrites on the GPU. DBR 17.3 CTAS and RTAS retain native catalog and
+staged-table semantics while keeping supported query and Delta write paths
+GPU-eligible. See [#15278](https://github.com/NVIDIA/cudf-spark/pull/15278) and
+[#15320](https://github.com/NVIDIA/cudf-spark/pull/15320) for the qualified
+paths and expected fallback cases.
+
+Databricks may patch existing runtime versions without changing the public
+runtime line. Runtime patch changes can surface as binary compatibility
+failures such as `NoSuchMethodError` against Spark or Databricks-internal
+classes. If this happens, first verify the cuDF plugin release and Databricks
+runtime combination against this page and the release notes. Delta feature
+support is operation-specific; use
+`spark.rapids.sql.explain=NOT_ON_GPU` to confirm whether a particular query plan
+stayed on the GPU or fell back to CPU.
 
 ### cuDF Plugin Support Policy for Apache Spark
 The cuDF plugin maintains support for Apache Spark versions available for download from [Apache Spark](https://spark.apache.org/downloads.html)
