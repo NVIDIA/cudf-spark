@@ -22,8 +22,9 @@ from marks import allow_non_gpu, delta_lake, ignore_order
 from parquet_test import reader_opt_confs_no_native
 from parquet_test_utils import parquet_row_group_midpoints
 from spark_session import with_cpu_session, with_gpu_session, is_databricks_runtime, \
-    is_spark_320_or_later, is_spark_340_or_later, supports_delta_lake_deletion_vectors, is_spark_401_or_later, \
-    is_before_spark_353, is_databricks173_or_later
+    is_spark_320_or_later, is_spark_340_or_later, is_spark_40x, \
+    supports_delta_lake_deletion_vectors, is_spark_401_or_later, \
+    gpu_supports_delta_dv_scan, is_before_spark_353, is_databricks173_or_later
 
 _conf = {'spark.rapids.sql.explain': 'ALL'}
 
@@ -198,15 +199,8 @@ def test_delta_deletion_vector_read(spark_tmp_path, chunk_size, use_cdf, dv_pred
 cdf_fallback = ["RowDataSourceScanExec"]
 
 
-@allow_non_gpu(*cdf_fallback, *delta_meta_allow)
-@delta_lake
-@ignore_order(local=True)
-@pytest.mark.parametrize("chunk_size", ["2000", "4000", None], ids=idfn)
-@pytest.mark.parametrize("parquet_reader_type", ["PERFILE", "COALESCING", "MULTITHREADED"], ids=idfn)
-@pytest.mark.skipif(not supports_delta_lake_deletion_vectors(),
-                    reason="Delta Lake deletion vector support is required")
-@pytest.mark.skipif(is_databricks_runtime(), reason="https://github.com/NVIDIA/cudf-spark/issues/15365")
-def test_delta_deletion_vector_read_with_cdf(spark_tmp_path, chunk_size, parquet_reader_type):
+def _test_delta_deletion_vector_read_with_cdf(
+        spark_tmp_path, chunk_size, parquet_reader_type, expect_fallback):
     data_path = spark_tmp_path + "/DELTA_DATA"
     conf = {"spark.databricks.delta.delete.deletionVectors.persistent": "true",
             "spark.rapids.sql.reader.chunked": f"{chunk_size is not None}",
@@ -220,10 +214,46 @@ def test_delta_deletion_vector_read_with_cdf(spark_tmp_path, chunk_size, parquet
         "DELETE FROM delta.`{}` WHERE a = 1".format(data_path)
     ])
 
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: read_delta_path_with_cdf(spark, data_path),
-        conf=conf
-    )
+    def read_cdf(spark):
+        return read_delta_path_with_cdf(spark, data_path)
+
+    if expect_fallback:
+        # DeltaCDFRelation hides its internal file scan behind this V1 CPU scan.
+        assert_gpu_fallback_collect(
+            read_cdf,
+            "RowDataSourceScanExec",
+            conf=conf)
+    else:
+        assert_gpu_and_cpu_are_equal_collect(read_cdf, conf=conf)
+
+
+@allow_non_gpu(*cdf_fallback, *delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.parametrize("chunk_size", ["2000", "4000", None], ids=idfn)
+@pytest.mark.parametrize("parquet_reader_type", ["PERFILE", "COALESCING", "MULTITHREADED"], ids=idfn)
+@pytest.mark.skipif(not gpu_supports_delta_dv_scan(),
+                    reason="GPU Delta deletion vector scan support is required")
+@pytest.mark.skipif(is_databricks_runtime(), reason="https://github.com/NVIDIA/cudf-spark/issues/15365")
+def test_delta_deletion_vector_read_with_cdf(spark_tmp_path, chunk_size, parquet_reader_type):
+    _test_delta_deletion_vector_read_with_cdf(
+        spark_tmp_path, chunk_size, parquet_reader_type, expect_fallback=False)
+
+
+@allow_non_gpu("ColumnarToRowExec", *cdf_fallback, *delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.parametrize("chunk_size", ["2000", "4000", None], ids=idfn)
+@pytest.mark.parametrize("parquet_reader_type", ["PERFILE", "COALESCING", "MULTITHREADED"], ids=idfn)
+@pytest.mark.skipif(not supports_delta_lake_deletion_vectors(),
+                    reason="Delta Lake deletion vector feature is required")
+@pytest.mark.skipif(gpu_supports_delta_dv_scan(),
+                    reason="GPU Delta deletion vector scans are supported")
+@pytest.mark.skipif(is_databricks_runtime(), reason="https://github.com/NVIDIA/cudf-spark/issues/15365")
+def test_delta_deletion_vector_read_with_cdf_fallback(
+        spark_tmp_path, chunk_size, parquet_reader_type):
+    _test_delta_deletion_vector_read_with_cdf(
+        spark_tmp_path, chunk_size, parquet_reader_type, expect_fallback=True)
 
 
 def _create_delta_cdf_mixed_filter_files(spark, data_path, second_file_partition):
@@ -591,10 +621,10 @@ def test_delta_deletion_vector_multithreaded_combine_count_star(
         conf=conf)
 
 
-@allow_non_gpu("FileSourceScanExec", "ColumnarToRowExec", *delta_meta_allow)
+@allow_non_gpu(*delta_meta_allow)
 @delta_lake
-@pytest.mark.skipif(not supports_delta_lake_deletion_vectors(),
-                    reason="Delta Lake deletion vector support is required")
+@pytest.mark.skipif(not gpu_supports_delta_dv_scan(),
+                    reason="GPU Delta deletion vector scan support is required")
 @pytest.mark.skipif(is_databricks_runtime(),
                     reason="This test targets the OSS multithreaded Delta reader")
 def test_delta_deletion_vector_multithreaded_combine_count_star_mixed_dv_no_dv(
@@ -823,8 +853,9 @@ def test_delta_scan_split_with_DV_disabled_with_DVs(spark_tmp_path, pushdown_dv_
                     reason="Deletion vector scan is not supported on Databricks")
 @pytest.mark.skipif(is_before_spark_353(),
                     reason="Spark-RAPIDS supports scan with deletion vectors starting in Spark 3.5.3")
-@pytest.mark.skipif(is_spark_401_or_later(),
-                    reason="REORG is not supported in Spark 4.0.1+ (https://github.com/delta-io/delta/issues/5690)")
+@pytest.mark.skipif(is_spark_40x() and is_spark_401_or_later(),
+                    reason="Delta 4.0.0 REORG is incompatible with Spark 4.0.1+ in Spark 4.0.x "
+                           "profiles (https://github.com/delta-io/delta/issues/5690)")
 def test_delta_scan_split_with_DV_enabled_after_DVs_materialized(spark_tmp_path):
     def do_delete_and_reorg(spark, data_path):
         num_deleted = spark.sql(f"DELETE FROM delta.`{data_path}` WHERE a = 0").collect()[0][0]

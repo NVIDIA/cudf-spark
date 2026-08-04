@@ -49,8 +49,17 @@ public class IcebergFileIO implements RapidsFileIO {
 
 
   @Override
-  public RapidsInputFile newInputFile(String path) throws IOException {
-    InputFile inputFile = delegate.newInputFile(path);
+  public IcebergInputFile newInputFile(String path) throws IOException {
+    return newInputFile(delegate.newInputFile(path));
+  }
+
+  /**
+   * Wraps an existing Iceberg input file, preserving any decryption performed by Iceberg.
+   *
+   * @param inputFile the Iceberg input file to wrap
+   */
+  public IcebergInputFile newInputFile(InputFile inputFile) {
+    Objects.requireNonNull(inputFile, "inputFile can't be null");
     return IcebergS3InputFile.maybeCreate(inputFile, delegate);
   }
 

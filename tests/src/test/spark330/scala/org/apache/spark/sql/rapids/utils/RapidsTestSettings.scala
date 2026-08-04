@@ -178,6 +178,66 @@ class RapidsTestSettings extends BackendTestSettings {
   enableSuite[RapidsDeprecatedAPISuite]
   enableSuite[RapidsDeprecatedDatasetAggregatorSuite]
   enableSuite[RapidsStatisticsCollectionSuite]
+  enableSuite[RapidsWriteDistributionAndOrderingSuite]
+  enableSuite[RapidsOrcSourceV1Suite]
+    .exclude("Propagate Hadoop configs from orc options to underlying file system",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/11602. " +
+        "Recovery trigger: GPU ORC writes propagate data-source options; P1."))
+    .exclude("Write Spark version into ORC file metadata",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15468. " +
+        "Recovery trigger: GPU ORC files include Spark version metadata; P1."))
+    .exclude("SPARK-31238: compatibility with Spark 2.4 in reading dates",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15470. " +
+        "Recovery trigger: GPU ORC legacy date rebasing matches Spark CPU; P0."))
+    .exclude("SPARK-31284: compatibility with Spark 2.4 in reading timestamps",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15471. " +
+        "Recovery trigger: GPU ORC legacy timestamp reads match Spark CPU; P0."))
+    .exclude("SPARK-31284, SPARK-31423: rebasing timestamps in write",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15473. " +
+        "Recovery trigger: GPU ORC legacy timestamp round trips match Spark CPU; P0."))
+    .exclude("Enforce direct encoding column-wise selectively",
+      WONT_FIX_ISSUE("GPU ORC uses valid libcudf-selected encodings rather than the Spark ORC " +
+        "selective direct-encoding option. See https://github.com/NVIDIA/cudf-spark/issues/15469. " +
+        "Recovery trigger: the GPU writer supports this tuning contract or falls back; P2."))
+    .exclude("SPARK-36663: OrcUtils.toCatalystSchema should correctly handle " +
+      "a column name which consists of only numbers",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15472. " +
+        "Recovery trigger: GPU ORC reader handles numeric-only field names; P0."))
+  enableSuite[RapidsOrcSourceV2Suite]
+    .exclude("Propagate Hadoop configs from orc options to underlying file system",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/11602. " +
+        "Recovery trigger: GPU ORC writes propagate data-source options; P1."))
+    .exclude("Write Spark version into ORC file metadata",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15468. " +
+        "Recovery trigger: GPU ORC files include Spark version metadata; P1."))
+    .exclude("SPARK-31238: compatibility with Spark 2.4 in reading dates",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15470. " +
+        "Recovery trigger: GPU ORC legacy date rebasing matches Spark CPU; P0."))
+    .exclude("SPARK-31284: compatibility with Spark 2.4 in reading timestamps",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15471. " +
+        "Recovery trigger: GPU ORC legacy timestamp reads match Spark CPU; P0."))
+    .exclude("SPARK-31284, SPARK-31423: rebasing timestamps in write",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15473. " +
+        "Recovery trigger: GPU ORC legacy timestamp round trips match Spark CPU; P0."))
+    .exclude("Enforce direct encoding column-wise selectively",
+      WONT_FIX_ISSUE("GPU ORC uses valid libcudf-selected encodings rather than the Spark ORC " +
+        "selective direct-encoding option. See https://github.com/NVIDIA/cudf-spark/issues/15469. " +
+        "Recovery trigger: the GPU writer supports this tuning contract or falls back; P2."))
+    .exclude("SPARK-36663: OrcUtils.toCatalystSchema should correctly handle " +
+      "a column name which consists of only numbers",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15472. " +
+        "Recovery trigger: GPU ORC reader handles numeric-only field names; P0."))
+  enableSuite[RapidsKeyGroupedPartitioningSuite]
+  enableSuite[RapidsDataSourceV2DataFrameSuite]
+  enableSuite[RapidsBucketedWriteWithoutHiveSupportSuite]
+  enableSuite[RapidsCreateTableAsSelectSuite]
+  enableSuite[RapidsFileDataSourceV2FallBackSuite]
+    .exclude("Fallback Parquet V2 to V1",
+      ADJUST_UT("Replaced by a testRapids version that preserves V1 fallback assertions and " +
+        "checks GpuFileSourceScanExec. See https://github.com/NVIDIA/cudf-spark/issues/15465. " +
+        "Recovery trigger: the Spark test accepts the GPU V1 scan node; P2."))
+  enableSuite[RapidsV1ReadFallbackWithDataFrameReaderSuite]
+  enableSuite[RapidsV1ReadFallbackWithCatalogSuite]
   enableSuite[RapidsFileSourceStrategySuite]
     .exclude("partitioned table - after scan filters", ADJUST_UT("Replaced by testRapids version that checks GpuFilterExec residual filters."))
     .exclude("[SPARK-16818] partition pruned file scans implement sameResult correctly", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15161"))
