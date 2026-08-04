@@ -40,6 +40,10 @@ _reorg_conf = copy_and_update(delta_writes_enabled_conf, {
     "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true",
 })
 
+_iceberg_compatible_reorg_conf = copy_and_update(_reorg_conf, {
+    "spark.databricks.delta.properties.defaults.enableDeletionVectors": "false",
+})
+
 _reorg_metadata_allow = delta_meta_allow + ["ExecutedCommandExec"]
 
 
@@ -54,6 +58,28 @@ def setup_reorg_table(spark, path, partitioned):
         writer = writer.partitionBy("p")
     writer.save(path)
     spark.sql("DELETE FROM delta.`{}` WHERE pmod(id, 17) = 0".format(path)).collect()
+
+
+def setup_iceberg_compatible_reorg_table(spark, path):
+    spark.sql("""
+        CREATE TABLE delta.`{}` (id BIGINT, p INT)
+        USING DELTA
+        TBLPROPERTIES (
+          'delta.enableDeletionVectors' = 'false',
+          'delta.enableIcebergCompatV2' = 'true')
+        """.format(path))
+    (spark.range(256)
+     .selectExpr("id", "CAST(id % 4 AS INT) AS p")
+     .repartition(4)
+     .write
+     .format("delta")
+     .mode("append")
+     .save(path))
+
+    adds = (spark.read.text(path + "/_delta_log/*.json")
+            .where("get_json_object(value, '$.add.path') IS NOT NULL"))
+    assert adds.where(
+        "get_json_object(value, '$.add.tags.ICEBERG_COMPAT_VERSION') = '2'").count() > 0
 
 
 def assert_table_has_deletion_vectors(spark, path):
@@ -194,6 +220,30 @@ def test_delta_reorg_table_unsupported_version_fallback(spark_tmp_path):
     gpu_path = spark_tmp_path + "/GPU"
     with_cpu_session(lambda spark: setup_reorg_table(spark, cpu_path, False), conf=_reorg_conf)
     with_cpu_session(lambda spark: setup_reorg_table(spark, gpu_path, False), conf=_reorg_conf)
+
+    assert_reorg_fallback(
+        cpu_path,
+        gpu_path,
+        lambda path: reorg_sql(path, False),
+        lambda spark, path: spark.read.format("delta").load(path))
+
+
+@delta_lake
+@allow_non_gpu(*_reorg_metadata_allow)
+def test_delta_reorg_table_iceberg_compatible_table_fallback(spark_tmp_path):
+    if not is_apache_runtime():
+        pytest.skip("GPU REORG TABLE currently supports Apache Delta Lake only")
+    if is_before_spark_353():
+        pytest.skip("Unsupported Spark versions are covered by the version fallback test")
+
+    cpu_path = spark_tmp_path + "/CPU"
+    gpu_path = spark_tmp_path + "/GPU"
+    with_cpu_session(
+        lambda spark: setup_iceberg_compatible_reorg_table(spark, cpu_path),
+        conf=_iceberg_compatible_reorg_conf)
+    with_cpu_session(
+        lambda spark: setup_iceberg_compatible_reorg_table(spark, gpu_path),
+        conf=_iceberg_compatible_reorg_conf)
 
     assert_reorg_fallback(
         cpu_path,
