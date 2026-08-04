@@ -86,6 +86,7 @@
                                  <source>${spark.rapids.source.basedir}/delta-lake/common/src/main/delta-io/scala</source>
                                  <source>${spark.rapids.source.basedir}/delta-lake/common/src/main/delta-33x-41x/scala</source>
                                  <source>${spark.rapids.source.basedir}/delta-lake/common/src/main/delta-40x-41x/scala</source>
+                                 <source>${spark.rapids.source.basedir}/delta-lake/common/src/main/${spark.version.classifier}/scala</source>
                             </sources>
                         </configuration>
                     </execution>
