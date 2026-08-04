@@ -1,10 +1,10 @@
 ---
 layout: page
-title: Adaptive Query Execution with the RAPIDS Accelerator for Apache Spark
+title: Adaptive Query Execution with the NVIDIA cuDF plugin for Apache Spark
 nav_order: 1
 parent: Developer Overview
 ---
-# Adaptive Query Execution with the RAPIDS Accelerator for Apache Spark
+# Adaptive Query Execution with the NVIDIA cuDF plugin for Apache Spark
 
 The benefits of AQE are not specific to CPU execution and can provide
 additional performance improvements in conjunction with GPU-acceleration.
@@ -37,7 +37,7 @@ optimization rules to be provided, to support columnar plans.
 
 However, Spark considers the final output of`AdaptiveSparkPlanExec` to be
 row-based. The `supportsColumnar` method always returns `false`, and calling
-`doExecuteColumnar` will throw an exception. For this reason, the RAPIDS
+`doExecuteColumnar` will throw an exception. For this reason, the cuDF plugin
 optimizer will insert a columnar-to-row transition as the root node, if
 necessary. In the case where the adaptive plan is wrapped in a write to a
 columnar source, then there is special handling at runtime to avoid an
@@ -63,7 +63,7 @@ There are four sets of optimizer rules used by AQE.
 
 This set of rules is applied once before any query stages are created and is
 also applied once for each re-optimization of the plan, after one or more query
-stages have completed. The RAPIDS Accelerator `GpuQueryStagePrepOverrides` rule
+stages have completed. The cuDF plugin `GpuQueryStagePrepOverrides` rule
 is applied as part of this rule set.
 
 This rule does not directly transform the plan into a new plan but tags nodes
@@ -76,7 +76,7 @@ so we rely on the plan being tagged upfront.
 
 This set of rules is applied to an Exchange node when creating a query stage
 and will result in a `BroadcastQueryStageLike` or `ShuffleQueryStageLike` node
-being created. This set of rules does not involve the RAPIDS Accelerator and
+being created. This set of rules does not involve the cuDF plugin and
 applies optimizations such as optimizing skewed joins and coalescing
 shuffle partitions.
 

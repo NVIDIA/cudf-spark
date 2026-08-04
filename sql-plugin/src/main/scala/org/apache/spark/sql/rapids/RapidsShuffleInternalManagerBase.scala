@@ -183,6 +183,23 @@ object RapidsShuffleInternalManagerBase extends Logging {
     }
   }
 
+  private def awaitTermination(poolName: String, pool: ExecutorService): Unit = {
+    var terminated = false
+    try {
+      terminated = pool.awaitTermination(5, TimeUnit.SECONDS)
+    } catch {
+      case ie: InterruptedException =>
+        Thread.currentThread.interrupt()
+        logWarning(s"Interrupted while waiting for thread pool ${poolName} to terminate", ie)
+      case e: Throwable =>
+        logWarning(s"Exception during shutdown while terminating pool ${poolName}", e)
+    } finally {
+      if (!terminated) {
+        logWarning(s"Thread pool ${poolName} did not terminate within 5 seconds after shutdown")
+      }
+    }
+  }
+
   def startThreadPoolIfNeeded(
       numWriterThreads: Int,
       numReaderThreads: Int): Unit = synchronized {
@@ -209,18 +226,27 @@ object RapidsShuffleInternalManagerBase extends Logging {
 
   def stopThreadPool(): Unit = synchronized {
     mtShuffleInitialized = false
+    // Interrupt all pools first so workers receive the signal concurrently.
     if (writerPool != null) {
       shutdownNow(writerPool)
-      writerPool = null
     }
-
     if (readerPool != null) {
       shutdownNow(readerPool)
-      readerPool = null
     }
-
     if (mergerPool != null) {
       shutdownNow(mergerPool)
+    }
+    // Then wait for each pool to drain before releasing shared resources.
+    if (writerPool != null) {
+      awaitTermination("shuffle writer", writerPool)
+      writerPool = null
+    }
+    if (readerPool != null) {
+      awaitTermination("shuffle reader", readerPool)
+      readerPool = null
+    }
+    if (mergerPool != null) {
+      awaitTermination("shuffle merge", mergerPool)
       mergerPool = null
     }
   }
@@ -1736,7 +1762,9 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
   // NOTE: this can be null in the driver side.
   protected lazy val env = SparkEnv.get
   protected lazy val blockManager = env.blockManager
-  protected lazy val shouldFallThroughOnEverything = {
+  // Stable reasons to always fall back to SortShuffleManager, evaluated once at
+  // first shuffle registration.
+  protected lazy val shouldAlwaysFallBack = {
     val fallThroughReasons = new ListBuffer[String]()
     if (!rapidsConf.isMultiThreadedShuffleManagerMode) {
       if (GpuShuffleEnv.isExternalShuffleEnabled) {
@@ -1749,17 +1777,26 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
     if (rapidsConf.isSqlExplainOnlyEnabled) {
       fallThroughReasons += "Plugin is in explain only mode"
     }
-    if (GpuShuffleEnv.isRowBasedChecksumEnabled) {
-      fallThroughReasons += "Detected order-independent checksum enabled " +
-        "(spark.sql.shuffle.orderIndependentChecksum.enabled or " +
-        "enableFullRetryOnMismatch). " +
-        "This Spark 4.1+ feature is not yet supported by Spark-Rapids."
-    }
     if (fallThroughReasons.nonEmpty) {
       logWarning(s"Rapids Shuffle Plugin is falling back to SortShuffleManager " +
         s"because: ${fallThroughReasons.mkString(", ")}")
     }
     fallThroughReasons.nonEmpty
+  }
+
+  private val rowBasedChecksumFallbackLogged = new AtomicBoolean(false)
+
+  private def shouldFallThroughForShuffle: Boolean = {
+    val rowBasedChecksumFallback = GpuShuffleEnv.isRowBasedChecksumEnabled
+    if (rowBasedChecksumFallback) {
+      if (rowBasedChecksumFallbackLogged.compareAndSet(false, true)) {
+        logWarning("Rapids Shuffle Plugin is falling back to SortShuffleManager because: " +
+          "Detected order-independent checksum enabled " +
+          "(spark.sql.shuffle.orderIndependentChecksum.enabled or enableFullRetryOnMismatch). " +
+          "This Spark 4.1+ feature is not yet supported by Spark-Rapids.")
+      }
+    }
+    shouldAlwaysFallBack || rowBasedChecksumFallback
   }
 
   private lazy val localBlockManagerId = blockManager.blockManagerId
@@ -1776,7 +1813,7 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
         "RapidsShuffleManager is configured"))
 
   protected lazy val resolver =
-    if (shouldFallThroughOnEverything) {
+    if (shouldAlwaysFallBack) {
       wrapped.shuffleBlockResolver
     } else if (rapidsConf.isMultiThreadedShuffleManagerMode) {
       // MULTITHREADED mode: use GpuShuffleBlockResolver
@@ -1848,11 +1885,13 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
     val orig = wrapped.registerShuffle(shuffleId, dependency)
 
     dependency match {
-      case _ if shouldFallThroughOnEverything ||
-        rapidsConf.isMultiThreadedShuffleManagerMode => orig
       case gpuDependency: GpuShuffleDependency[K, V, C] if gpuDependency.useGPUShuffle =>
-        new GpuShuffleHandle(orig,
-          dependency.asInstanceOf[GpuShuffleDependency[K, V, V]])
+        val gpuDep = gpuDependency.asInstanceOf[GpuShuffleDependency[K, V, V]]
+        gpuDep.checksumFallback = shouldFallThroughForShuffle
+        if (rapidsConf.isMultiThreadedShuffleManagerMode) orig
+        else new GpuShuffleHandle(orig, gpuDep)
+      case _ if shouldAlwaysFallBack ||
+        rapidsConf.isMultiThreadedShuffleManagerMode => orig
       case _ => orig
     }
   }
@@ -1900,6 +1939,8 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
       context: TaskContext,
       metricsReporter: ShuffleWriteMetricsReporter): ShuffleWriter[K, V] = {
     handle match {
+      case gpu: GpuShuffleHandle[_, _] if gpu.dependency.checksumFallback =>
+        wrapped.getWriter(gpu.wrapped, mapId, context, metricsReporter)
       case gpu: GpuShuffleHandle[_, _] =>
         registerGpuShuffle(handle.shuffleId)
         new RapidsCachingWriter(
@@ -1914,6 +1955,7 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
         handle.dependency match {
           case gpuDep: GpuShuffleDependency[_, _, _]
             if gpuDep.useMultiThreadedShuffle &&
+              !gpuDep.checksumFallback &&
               rapidsConf.shuffleMultiThreadedWriterThreads > 0 =>
             // use the threaded writer if the number of threads specified is 1 or above,
             // with 0 threads we fallback to the Spark-provided writer.
@@ -1957,6 +1999,9 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
       context: TaskContext,
       metrics: ShuffleReadMetricsReporter): ShuffleReader[K, C] = {
     handle match {
+      case gpuHandle: GpuShuffleHandle[_, _] if gpuHandle.dependency.checksumFallback =>
+        ShuffleManagerShims.getReader(wrapped, gpuHandle.wrapped, startMapIndex, endMapIndex,
+          startPartition, endPartition, context, metrics)
       case gpuHandle: GpuShuffleHandle[_, _] =>
         logInfo(s"Asking map output tracker for dependency ${gpuHandle.dependency}, " +
           s"map output sizes for: ${gpuHandle.shuffleId}, parts=$startPartition-$endPartition")
@@ -1995,7 +2040,8 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
         //   would need to be made to deal with missing metrics, for example, for a regular
         //   Exchange node.
         baseHandle.dependency match {
-          case gpuDep: GpuShuffleDependency[K, C, C] if gpuDep.useMultiThreadedShuffle =>
+          case gpuDep: GpuShuffleDependency[K, C, C]
+              if gpuDep.useMultiThreadedShuffle && !gpuDep.checksumFallback =>
             // We want to use batch fetch in the non-push shuffle case. Spark
             // checks for a config to see if batch fetch is enabled (this check), and
             // it also checks when getting (potentially merged) map status from

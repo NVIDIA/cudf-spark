@@ -606,7 +606,7 @@ case class GpuSubstring(str: Expression, pos: Expression, len: Expression)
     }
   }
 
-  private[this] def substringColumn(strs: ColumnView, starts: ColumnView,
+  private[this] def substringColumn(strs: ColumnVector, starts: ColumnView,
       ends: ColumnView): ColumnVector = {
     // cudf does not allow nulls in starts and ends.
     val noNullStarts = new ColumnView(starts.getType, starts.getRowCount, Optional.of(0L),

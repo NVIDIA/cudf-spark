@@ -21,8 +21,8 @@
 
     <groupId>com.nvidia</groupId>
     <artifactId>rapids-4-spark-parent_2.12</artifactId>
-    <name>RAPIDS Accelerator for Apache Spark Root Project</name>
-    <description>The root project of the RAPIDS Accelerator for Apache Spark</description>
+    <name>NVIDIA cuDF plugin for Apache Spark Root Project</name>
+    <description>The root project of the NVIDIA cuDF plugin for Apache Spark</description>
     <version>26.10.0-SNAPSHOT</version>
     <packaging>pom</packaging>
 
@@ -35,10 +35,10 @@
         </license>
     </licenses>
     <scm>
-        <connection>scm:git:https://github.com/NVIDIA/spark-rapids.git</connection>
-        <developerConnection>scm:git:git@github.com:NVIDIA/spark-rapids.git</developerConnection>
+        <connection>scm:git:https://github.com/NVIDIA/cudf-spark.git</connection>
+        <developerConnection>scm:git:git@github.com:NVIDIA/cudf-spark.git</developerConnection>
         <tag>HEAD</tag>
-        <url>https://github.com/NVIDIA/spark-rapids</url>
+        <url>https://github.com/NVIDIA/cudf-spark</url>
     </scm>
     <developers>
         <developer>

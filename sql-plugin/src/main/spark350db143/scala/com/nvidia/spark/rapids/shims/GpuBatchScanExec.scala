@@ -137,8 +137,10 @@ case class GpuBatchScanExec(
           case Some(projectionPositions) => projectionPositions.map(i => k.expressions(i))
           case _ => k.expressions
         }
-        k.copy(expressions = expressions, numPartitions = newPartValues.length,
-          partitionValues = newPartValues)
+        KeyGroupedPartitioningShim.copyWithNewPartitionValues(
+          k.copy(expressions = expressions),
+          newPartValues,
+          spjParams.applyPartialClustering)
       case p => p
     }
   }
