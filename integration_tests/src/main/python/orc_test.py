@@ -954,9 +954,8 @@ def test_project_fallback_when_reading_hive_fixed_length_char(std_input_path, da
 @pytest.mark.parametrize('v1_enabled_list', ["", "orc"])
 @pytest.mark.parametrize('orc_impl', ["native", "hive"])
 @pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
-@pytest.mark.parametrize('col_name', ['K0', 'k0', 'K3', 'k3', 'V0', 'v0'], ids=idfn)
 @ignore_order
-def test_read_case_col_name(spark_tmp_path, read_func, v1_enabled_list, orc_impl, reader_confs, col_name):
+def test_read_case_col_name(spark_tmp_path, read_func, v1_enabled_list, orc_impl, reader_confs):
     all_confs = copy_and_update(reader_confs, {
         'spark.sql.sources.useV1SourceList': v1_enabled_list,
         'spark.sql.orc.impl': orc_impl})
@@ -976,7 +975,7 @@ def test_read_case_col_name(spark_tmp_path, read_func, v1_enabled_list, orc_impl
             lambda spark : gen_df(spark, gen).write.partitionBy('k0', 'k1', 'k2', 'k3').orc(data_path))
 
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : reader(spark).selectExpr(col_name),
+            lambda spark : reader(spark).selectExpr('K0', 'k0', 'K3', 'k3', 'V0', 'v0'),
             conf=all_confs)
 
 @pytest.mark.parametrize("reader_confs", reader_opt_confs, ids=idfn)
