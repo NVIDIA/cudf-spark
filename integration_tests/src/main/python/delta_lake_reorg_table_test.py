@@ -24,7 +24,6 @@ from delta_lake_utils import (
 from marks import allow_non_gpu, delta_lake, ignore_order
 from spark_session import (
     is_before_spark_353,
-    is_spark_401_or_later,
     supports_delta_lake_deletion_vectors,
     with_cpu_session,
     with_gpu_session,
@@ -128,8 +127,8 @@ def assert_reorg_adds_have_no_deletion_vectors(spark, path, version):
 def test_delta_reorg_table_purge(spark_tmp_path, partitioned):
     if not is_apache_runtime():
         pytest.skip("GPU REORG TABLE currently supports Apache Delta Lake only")
-    if is_before_spark_353() or is_spark_401_or_later():
-        pytest.skip("GPU REORG TABLE is supported with Spark 3.5.3 through 4.0.0")
+    if is_before_spark_353():
+        pytest.skip("GPU REORG TABLE requires Spark 3.5.3 or later")
     if not supports_delta_lake_deletion_vectors():
         pytest.skip("REORG TABLE PURGE requires deletion vector support")
 
@@ -183,7 +182,7 @@ def test_delta_reorg_table_purge(spark_tmp_path, partitioned):
 
 @delta_lake
 @allow_non_gpu(*_reorg_metadata_allow)
-@pytest.mark.skipif(not (is_before_spark_353() or is_spark_401_or_later()),
+@pytest.mark.skipif(not is_before_spark_353(),
                     reason="This test covers Spark versions where GPU REORG is disabled")
 def test_delta_reorg_table_unsupported_version_fallback(spark_tmp_path):
     if not is_apache_runtime():
@@ -208,7 +207,7 @@ def test_delta_reorg_table_unsupported_version_fallback(spark_tmp_path):
 def test_delta_reorg_table_unsupported_mode_uniform_iceberg_fallback(spark_tmp_path):
     if not is_apache_runtime():
         pytest.skip("GPU REORG TABLE currently supports Apache Delta Lake only")
-    if is_before_spark_353() or is_spark_401_or_later():
+    if is_before_spark_353():
         pytest.skip("Unsupported Spark versions are covered by the version fallback test")
 
     path = spark_tmp_path + "/TABLE"

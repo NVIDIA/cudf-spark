@@ -27,7 +27,6 @@ from delta_lake_reorg_table_test import (
 from marks import allow_non_gpu, delta_lake, ignore_order
 from spark_session import (
     is_before_spark_353,
-    is_spark_401_or_later,
     supports_delta_lake_deletion_vectors,
     with_cpu_session,
     with_gpu_session,
@@ -62,8 +61,8 @@ def clustering_columns(spark, path):
 def test_delta_reorg_table_purge_liquid_clustered(spark_tmp_path):
     if not is_apache_runtime():
         pytest.skip("GPU REORG TABLE currently supports Apache Delta Lake only")
-    if is_before_spark_353() or is_spark_401_or_later():
-        pytest.skip("GPU REORG TABLE is supported with Spark 3.5.3 through 4.0.0")
+    if is_before_spark_353():
+        pytest.skip("GPU REORG TABLE requires Spark 3.5.3 or later")
     if not supports_delta_lake_deletion_vectors():
         pytest.skip("REORG TABLE PURGE requires deletion vector support")
 

@@ -59,9 +59,6 @@ class DeltaReorgTableCommandMeta(
     if (VersionUtils.cmpSparkVersion(3, 5, 3) < 0) {
       willNotWorkOnGpu("Delta REORG on GPU requires Spark 3.5.3 or later")
     }
-    if (VersionUtils.cmpSparkVersion(4, 0, 1) >= 0) {
-      willNotWorkOnGpu("Delta REORG is not supported with Spark 4.0.1 or later")
-    }
 
     if (cmd.reorgTableSpec.reorgTableMode != DeltaReorgTableMode.PURGE ||
         cmd.reorgTableSpec.icebergCompatVersionOpt.nonEmpty) {
