@@ -266,4 +266,4 @@ See [CPD user doc][7] for more details about the options you can pass inside `cp
 [4]: https://jsonlines.org/
 [5]: https://spark.apache.org/versioning-policy.html
 [6]: https://plugins.jetbrains.com/plugin/16429-idea-resolve-symlinks
-[7]: https://docs.pmd-code.org/latest/pmd_userdocs_cpd.html
+[7]: https://pmd.github.io/pmd/pmd_userdocs_cpd.html

@@ -23,7 +23,7 @@ from pyspark.sql.types import *
 from spark_session import (is_before_spark_320, is_databricks_runtime, spark_version,
                            supports_delta_lake_deletion_vectors, is_before_spark_353,
                            is_spark_400_or_later, is_databricks143,
-                           is_databricks173_or_later)
+                           is_databricks173_or_later, is_spark_41x)
 
 delta_merge_enabled_conf = copy_and_update(delta_writes_enabled_conf,
                                            {"spark.rapids.sql.command.MergeIntoCommand": "true",
@@ -189,6 +189,8 @@ def test_delta_merge_fallback_with_deletion_vectors(spark_tmp_path, spark_tmp_ta
 @ignore_order
 @pytest.mark.skipif(is_databricks_runtime() and spark_version() < "3.3.2", reason="NOT MATCHED BY SOURCE added in DBR 12.2")
 @pytest.mark.skipif((not is_databricks_runtime()) and is_before_spark_340(), reason="NOT MATCHED BY SOURCE added in Delta Lake 2.4")
+@pytest.mark.skipif(is_spark_41x(),
+                    reason="NOT MATCHED BY SOURCE is supported on the GPU with OSS Delta 4.1")
 @pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_xfail_reasons(
                             enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
 def test_delta_merge_not_matched_by_source_fallback(spark_tmp_path, spark_tmp_table_factory, enable_deletion_vectors):
@@ -209,6 +211,44 @@ def test_delta_merge_not_matched_by_source_fallback(spark_tmp_path, spark_tmp_ta
                          dest_table_func=lambda spark: binary_op_df(spark, SetValuesGen(IntegerType(), range(20, 30))),
                          merge_sql=merge_sql,
                          check_func=checker)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_spark_41x(),
+                    reason="NOT MATCHED BY SOURCE is supported on the GPU with OSS Delta 4.1")
+@pytest.mark.parametrize("use_cdf", [False, True], ids=idfn)
+def test_delta_merge_not_matched_by_source(spark_tmp_path, spark_tmp_table_factory, use_cdf):
+    def src_table_func(spark):
+        return spark.createDataFrame([(1, 100), (5, 500)], "a INT, b INT")
+
+    def dest_table_func(spark):
+        return spark.createDataFrame(
+            [(1, 10), (2, 20), (3, 30), (4, -1)], "a INT, b INT")
+
+    merge_sql = "MERGE INTO {dest_table} AS dest " \
+                "USING {src_table} AS src " \
+                "ON src.a == dest.a " \
+                "WHEN MATCHED THEN UPDATE SET dest.b = src.b " \
+                "WHEN NOT MATCHED THEN INSERT (a, b) VALUES (src.a, src.b) " \
+                "WHEN NOT MATCHED BY SOURCE AND dest.a = 3 THEN DELETE " \
+                "WHEN NOT MATCHED BY SOURCE AND dest.b > 0 THEN UPDATE SET dest.b = 0"
+
+    assert_delta_sql_merge_collect(
+        spark_tmp_path, spark_tmp_table_factory,
+        use_cdf=use_cdf, enable_deletion_vectors=False,
+        src_table_func=src_table_func, dest_table_func=dest_table_func,
+        merge_sql=merge_sql, compare_logs=False, conf=delta_merge_enabled_conf)
+
+    expected = [(1, 100), (2, 0), (4, -1), (5, 500)]
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    for run in ["CPU", "GPU"]:
+        actual = with_cpu_session(
+            lambda spark: [tuple(row) for row in
+                           read_delta_path(spark, data_path + "/" + run).orderBy("a").collect()],
+            conf=delta_merge_enabled_conf)
+        assert_equal(expected, actual)
 
 @allow_non_gpu("BroadcastHashJoinExec,ColumnarToRowExec,BroadcastExchangeExec,"
                "UnionExec,UnionWithLocalDataExec,RangeExec",

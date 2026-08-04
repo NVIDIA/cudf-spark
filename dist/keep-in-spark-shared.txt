@@ -1,0 +1,12 @@
+# Patterns for common spark-shared class files that must not be promoted to
+# the root layout even when binary dedupe marks them bitwise-identical.
+#
+# Add entries only when a class must remain in the parallel-world layout
+# for compatibility, packaging, or follow-up validation reasons. New common
+# classes should normally stay unshimmed by default.
+
+# These rule containers are loaded through ShimLoader and instantiate
+# shim-sensitive GpuOverrides.class. Keep the containers in the parallel-world
+# layout so the shim classloader resolves GpuOverrides from the selected shim.
+com/nvidia/spark/rapids/ColumnarOverrideRules*.class
+com/nvidia/spark/rapids/GpuQueryStagePrepOverrides*.class

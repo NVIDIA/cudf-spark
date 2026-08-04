@@ -1072,7 +1072,7 @@ def test_from_json_struct_decimal():
     # integral
     pytest.param("[0-9]{1,5}", marks=pytest.mark.xfail(reason="https://github.com/NVIDIA/spark-rapids/issues/9664")),
     # floating-point
-    "[0-9]{0,2}\\.[0-9]{1,2}"
+    "[0-9]{0,2}\\.[0-9]{1,2}",
     # boolean
     "(true|false)"
 ])
@@ -1146,7 +1146,7 @@ def test_from_json_struct_date_fallback_non_default_format(date_gen, date_format
     pytest.param("[0-9]{1,5}", marks=pytest.mark.xfail(reason="https://github.com/NVIDIA/spark-rapids/issues/4940")),
     pytest.param("[1-9]{1,8}", marks=pytest.mark.xfail(reason="https://github.com/NVIDIA/spark-rapids/issues/4940")),
     # floating-point
-    r"[0-9]{0,2}\.[0-9]{1,2}"
+    r"[0-9]{0,2}\.[0-9]{1,2}",
     # boolean
     "(true|false)"
 ])
