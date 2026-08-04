@@ -124,7 +124,9 @@ class SpillablePartialFileHandle private (
       case e: Exception =>
         logWarning(s"Failed to allocate initial buffer of $initialCapacity bytes, " +
           s"falling back to file-based storage", e)
-        // Fallback to file-based if allocation fails
+        // Close the buffer if it was allocated before the failure so it isn't leaked.
+        host.foreach(_.close())
+        host = None
         spilledToDisk = true
         currentBufferCapacity = 0L
     }
