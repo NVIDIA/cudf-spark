@@ -27,7 +27,6 @@ spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.execution.datasources.v2
 
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
-import com.nvidia.spark.rapids.GpuDsv2WriteMetadata
 import com.nvidia.spark.rapids.GpuWrite
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 
@@ -91,7 +90,7 @@ case class GpuReplaceDataWritingSparkTask(
  * GPU counterpart of Spark's DataAndMetadataWritingSparkTask.
  * Routes WRITE_WITH_METADATA_OPERATION through [[DataWriter.write(Object, Object)]] and
  * WRITE_OPERATION through [[DataWriter.write(Object)]], preserving contiguous operation
- * order so partitioned Iceberg writers do not revisit a closed partition.
+ * order so partition-clustered writers do not revisit a closed partition.
  */
 case class GpuDataAndMetadataWritingSparkTask(
     dataProj: ProjectingInternalRow,
@@ -128,9 +127,7 @@ case class GpuDataAndMetadataWritingSparkTask(
     closeOnExcept(dataBatch) { _ =>
       if (dataBatch.numRows() > 0) {
         val metadataBatch = metadataProjection.project(batch)
-        GpuDsv2WriteMetadata.withMetadataSchema(metadataProj.schema) {
-          writer.write(metadataBatch, dataBatch)
-        }
+        writer.write(metadataBatch, dataBatch)
       } else {
         dataBatch.close()
       }

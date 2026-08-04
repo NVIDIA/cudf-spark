@@ -421,11 +421,8 @@ class GpuBasePositionDeltaWriter(
 /**
  * Base trait for delta writers that handle both deletes and data writes.
  * This is the GPU equivalent of Java's DeleteAndDataDeltaWriter.
- *
- * Extends [[GpuMetadataAwareDeltaWriter]] so `insert`/`reinsert` compile on both Spark 3.5
- * (no reinsert API) and Spark 4.0+ (default reinsert).
  */
-trait GpuDeleteAndDataDeltaWriter extends GpuMetadataAwareDeltaWriter with GpuDeltaWriter {
+trait GpuDeleteAndDataDeltaWriter extends GpuDeltaWriter {
   protected val table: Table
   protected val delegate: GpuBasePositionDeltaWriter
   protected val io: FileIO
@@ -446,25 +443,6 @@ trait GpuDeleteAndDataDeltaWriter extends GpuMetadataAwareDeltaWriter with GpuDe
   private val partitioners: mutable.Map[Int, GpuIcebergPartitioner] = mutable.Map()
 
   private var closed: Boolean = false
-
-  /**
-   * Match Iceberg reinsert: decorate with row lineage then write data.
-   * insert/reinsert entry points live on [[GpuMetadataAwareDeltaWriter]].
-   */
-  override protected def doReinsert(meta: ColumnarBatch, row: ColumnarBatch): Unit = {
-    try {
-      val decorated = GpuRowLineage.decorate(
-        context.dataSchema, meta, context.metadataSparkType, row)
-      insertDecorated(decorated)
-    } finally {
-      if (meta != null) {
-        meta.close()
-      }
-    }
-  }
-
-  /** Insert already-decorated data rows. Takes ownership of `row`. */
-  protected def insertDecorated(row: ColumnarBatch): Unit
 
   override def delete(metadata: ColumnarBatch, rowId: ColumnarBatch): Unit = {
     require(metadata != null, "Metadata batch must be non null")
@@ -713,7 +691,7 @@ class GpuUnpartitionedDeltaWriter(
     delegate.writeDelete(batch, spec, partition)
   }
 
-  override protected def insertDecorated(row: ColumnarBatch): Unit = {
+  override def insert(row: ColumnarBatch): Unit = {
     val spillBatch = closeOnExcept(row) { _ =>
       SpillableColumnarBatch(row, ACTIVE_ON_DECK_PRIORITY)
     }
@@ -765,7 +743,7 @@ class GpuPartitionedDeltaWriter(
     delegate.writeDelete(batch, spec, partition)
   }
 
-  override protected def insertDecorated(row: ColumnarBatch): Unit = {
+  override def insert(row: ColumnarBatch): Unit = {
     // Partition the data and write each partition
     dataPartitioner.partition(row)
       .safeConsume { part =>

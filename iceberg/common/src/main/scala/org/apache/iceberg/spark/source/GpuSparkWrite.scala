@@ -392,8 +392,7 @@ class GpuWriterFactory(val tableBroadcast: Broadcast[Table],
       fileIO)
 
     if (spec.isUnpartitioned) {
-      new GpuUnpartitionedDataWriter(writerFactory, outputFileFactory, io, spec, writeSchema,
-        targetFileSize)
+      new GpuUnpartitionedDataWriter(writerFactory, outputFileFactory, io, spec, targetFileSize)
         .asInstanceOf[DataWriter[InternalRow]]
     } else {
       new GpuPartitionedDataWriter(writerFactory, outputFileFactory, io, spec, writeSchema,
@@ -408,9 +407,8 @@ class GpuUnpartitionedDataWriter(
   val fileFactory: OutputFileFactory,
   val io: FileIO,
   val spec: PartitionSpec,
-  val writeSchema: Schema,
   val targetFileSize: Long)
-  extends GpuMetadataAwareDataWriter {
+  extends DataWriter[ColumnarBatch] {
   private val delegate = new GpuRollingDataWriter(
     fileWriterFactory,
     fileFactory,
@@ -419,22 +417,12 @@ class GpuUnpartitionedDataWriter(
     spec,
     null)
 
-  // write(record) / write(meta, record) are provided by GpuMetadataAwareDataWriter so the same
-  // sources compile on Spark 3.5 (no two-arg write) and Spark 4.0+ (default two-arg write).
-  override protected def doWrite(meta: ColumnarBatch, record: ColumnarBatch): Unit = {
-    try {
-      val metaSchema = com.nvidia.spark.rapids.GpuDsv2WriteMetadata.metadataSchema
-        .getOrElse(StructType(Nil))
-      val decorated = GpuRowLineage.decorate(writeSchema, meta, metaSchema, record)
-      val scb = closeOnExcept(decorated) { _ =>
-        SpillableColumnarBatch(decorated, ACTIVE_ON_DECK_PRIORITY)
-      }
-      delegate.write(scb)
-    } finally {
-      if (meta != null) {
-        meta.close()
-      }
+
+  override def write(t: ColumnarBatch): Unit = {
+    val scb = closeOnExcept(t) { _ =>
+      SpillableColumnarBatch(t, ACTIVE_ON_DECK_PRIORITY)
     }
+    delegate.write(scb)
   }
 
   override def commit(): WriterCommitMessage = {
@@ -465,7 +453,7 @@ class GpuPartitionedDataWriter(
   val dataSparkType: StructType,
   val targetFileSize: Long,
   val fanoutEnabled: Boolean,
-) extends GpuMetadataAwareDataWriter {
+) extends DataWriter[ColumnarBatch] {
 
   private val delegate: PartitioningWriter[SpillableColumnarBatch, DataWriteResult] =
     if (fanoutEnabled) {
@@ -478,21 +466,11 @@ class GpuPartitionedDataWriter(
 
   private val partitioner = new GpuIcebergSpecPartitioner(spec, dataSchema.asStruct())
 
-  // write(record) / write(meta, record) are provided by GpuMetadataAwareDataWriter.
-  override protected def doWrite(meta: ColumnarBatch, record: ColumnarBatch): Unit = {
-    try {
-      val metaSchema = com.nvidia.spark.rapids.GpuDsv2WriteMetadata.metadataSchema
-        .getOrElse(StructType(Nil))
-      val decorated = GpuRowLineage.decorate(dataSchema, meta, metaSchema, record)
-      partitioner.partition(decorated)
-        .safeConsume { part =>
-          delegate.write(part.batch, spec, part.partition)
-        }
-    } finally {
-      if (meta != null) {
-        meta.close()
+  override def write(record: ColumnarBatch): Unit = {
+    partitioner.partition(record)
+      .safeConsume { part =>
+        delegate.write(part.batch, spec, part.partition)
       }
-    }
   }
 
   override def commit(): WriterCommitMessage = {

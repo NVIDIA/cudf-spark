@@ -29,7 +29,7 @@ package org.apache.spark.sql.execution.datasources.v2
 import java.io.IOException
 
 import ai.rapids.cudf.ColumnVector
-import com.nvidia.spark.rapids.{GpuColumnVector, GpuDsv2WriteMetadata, RmmSparkRetrySuiteBase}
+import com.nvidia.spark.rapids.{GpuColumnVector, RmmSparkRetrySuiteBase}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.jni.GpuRetryOOM
 import com.nvidia.spark.rapids.shims.DeltaInsertFilter
@@ -51,22 +51,22 @@ class GpuDsv2MetadataWriteSuite extends RmmSparkRetrySuiteBase {
   private val rowSchema = StructType(Seq(
     StructField("id", IntegerType),
     StructField("v", LongType)))
-  private val metaSchema = StructType(Seq(StructField("_row_id", LongType)))
+  private val metaSchema = StructType(Seq(StructField("meta", LongType)))
 
   private def projectingRow(schema: StructType, ordinals: Seq[Int]): ProjectingInternalRow = {
     ProjectingInternalRow(schema, ordinals.toIndexedSeq)
   }
 
   private def buildOperationBatch(ops: Array[Int], ids: Array[Int],
-      values: Array[Long], rowIds: Array[Long]): ColumnarBatch = {
+      values: Array[Long], metadataValues: Array[Long]): ColumnarBatch = {
     require(ops.length == ids.length && ids.length == values.length &&
-      values.length == rowIds.length)
+      values.length == metadataValues.length)
     new ColumnarBatch(
       Array(
         GpuColumnVector.from(ColumnVector.fromInts(ops: _*), IntegerType),
         GpuColumnVector.from(ColumnVector.fromInts(ids: _*), IntegerType),
         GpuColumnVector.from(ColumnVector.fromLongs(values: _*), LongType),
-        GpuColumnVector.from(ColumnVector.fromLongs(rowIds: _*), LongType)),
+        GpuColumnVector.from(ColumnVector.fromLongs(metadataValues: _*), LongType)),
       ops.length)
   }
 
@@ -97,16 +97,6 @@ class GpuDsv2MetadataWriteSuite extends RmmSparkRetrySuiteBase {
         GpuReplaceDataWritingSparkTask(projections)
     }
     assert(task.isInstanceOf[GpuReplaceDataWritingSparkTask])
-  }
-
-  test("GpuDsv2WriteMetadata ThreadLocal schema is visible to nested calls") {
-    val schema = StructType(Seq(StructField("_row_id", LongType)))
-    assert(GpuDsv2WriteMetadata.metadataSchema.isEmpty)
-    val seen = GpuDsv2WriteMetadata.withMetadataSchema(schema) {
-      GpuDsv2WriteMetadata.metadataSchema
-    }
-    assert(seen.contains(schema))
-    assert(GpuDsv2WriteMetadata.metadataSchema.isEmpty)
   }
 
   test("ordinary-row OOM does not replay a completed metadata write") {
@@ -160,7 +150,6 @@ class GpuDsv2MetadataWriteSuite extends RmmSparkRetrySuiteBase {
     assert(writer.insertedRows === 2)
     assert(writer.reinsertedRows === 1)
     assert(writer.reinsertMetadataRows === 1)
-    assert(writer.reinsertSchema.contains(metaSchema))
   }
 
   private class RecordingDataWriter(failOrdinaryOnce: Boolean = false)
@@ -199,7 +188,6 @@ class GpuDsv2MetadataWriteSuite extends RmmSparkRetrySuiteBase {
     var insertedRows = 0
     var reinsertedRows = 0
     var reinsertMetadataRows = 0
-    var reinsertSchema: Option[StructType] = None
 
     override def delete(metadata: ColumnarBatch, id: ColumnarBatch): Unit =
       throw new UnsupportedOperationException
@@ -218,7 +206,6 @@ class GpuDsv2MetadataWriteSuite extends RmmSparkRetrySuiteBase {
         if (metadata != null) {
           withResource(metadata) { m =>
             reinsertMetadataRows += m.numRows()
-            reinsertSchema = GpuDsv2WriteMetadata.metadataSchema
           }
         }
       }

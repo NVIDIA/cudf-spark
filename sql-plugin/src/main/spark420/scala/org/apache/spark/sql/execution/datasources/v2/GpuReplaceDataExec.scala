@@ -20,7 +20,6 @@ spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.execution.datasources.v2
 
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
-import com.nvidia.spark.rapids.GpuDsv2WriteMetadata
 import com.nvidia.spark.rapids.GpuWrite
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 
@@ -119,9 +118,7 @@ case class GpuDataAndMetadataWritingSpark420Task(
     closeOnExcept(dataBatch) { _ =>
       if (dataBatch.numRows() > 0) {
         val metadataBatch = metadataProjection.project(batch)
-        GpuDsv2WriteMetadata.withMetadataSchema(metadataProj.schema) {
-          writer.write(metadataBatch, dataBatch)
-        }
+        writer.write(metadataBatch, dataBatch)
       } else {
         dataBatch.close()
       }

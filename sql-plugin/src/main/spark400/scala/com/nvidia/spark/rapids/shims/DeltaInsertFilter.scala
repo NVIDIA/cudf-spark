@@ -30,7 +30,6 @@ package com.nvidia.spark.rapids.shims
 import ai.rapids.cudf.{ColumnVector => CudfColumnVector, Scalar => CudfScalar}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuColumnVector
-import com.nvidia.spark.rapids.GpuDsv2WriteMetadata
 
 import org.apache.spark.sql.catalyst.GpuProjectingColumnarBatch
 import org.apache.spark.sql.catalyst.util.RowDeltaUtils.{INSERT_OPERATION, REINSERT_OPERATION}
@@ -97,9 +96,7 @@ object DeltaInsertFilter {
               val metadataBatch = withResource(metadataProjection.project(batch)) { metadata =>
                 GpuColumnVector.filter(metadata, metadataDataTypes, reinsertFilter)
               }
-              GpuDsv2WriteMetadata.withMetadataSchema(metadataProjection.schema) {
-                writer.reinsert(metadataBatch, filteredRows)
-              }
+              writer.reinsert(metadataBatch, filteredRows)
             } else {
               writer.reinsert(null, filteredRows)
             }
