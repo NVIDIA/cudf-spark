@@ -17,9 +17,14 @@ import sys
 import getopt
 import time
 import os
+import shlex
 import subprocess
 from clusterutils import ClusterUtils
 import params
+
+def shell_join(args):
+  """Return shell-escaped command arguments."""
+  return ' '.join(shlex.quote(arg) for arg in args)
 
 def main():
   master_addr = ClusterUtils.cluster_get_master_addr(params.workspace, params.clusterid, params.token)
@@ -29,29 +34,44 @@ def main():
   print("Master node address is: %s" % master_addr)
 
   print("Copying script")
-  ssh_args = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2200 -i %s" % params.private_key_file
-  rsync_command = "rsync -I -Pave \"ssh %s\" %s ubuntu@%s:%s" % (ssh_args, params.local_script, master_addr, params.script_dest)
-  print("rsync command: %s" % rsync_command)
-  subprocess.check_call(rsync_command, shell = True)
+  ssh_args = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+              "-p", "2200", "-i", params.private_key_file]
+  rsync_ssh = shell_join(["ssh"] + ssh_args)
+  rsync_command = ["rsync", "-I", "-Pave", rsync_ssh, "--", params.local_script,
+                   "ubuntu@%s:%s" % (master_addr, params.script_dest)]
+  print("rsync command: %s" % shell_join(rsync_command))
+  subprocess.check_call(rsync_command)
 
   print("Copying source")
-  rsync_command = "rsync -I -Pave \"ssh %s\" %s ubuntu@%s:%s" % (ssh_args, params.source_tgz, master_addr, params.tgz_dest)
-  print("rsync command: %s" % rsync_command)
-  subprocess.check_call(rsync_command, shell = True)
+  rsync_command = ["rsync", "-I", "-Pave", rsync_ssh, "--", params.source_tgz,
+                   "ubuntu@%s:%s" % (master_addr, params.tgz_dest)]
+  print("rsync command: %s" % shell_join(rsync_command))
+  subprocess.check_call(rsync_command)
 
-  ssh_command = "ssh %s ubuntu@%s " % (ssh_args, master_addr) + \
-        "'SPARKSRCTGZ=%s BASE_SPARK_VERSION=%s BASE_SPARK_VERSION_TO_INSTALL_DATABRICKS_JARS=%s MVN_OPT=%s EXTRA_ENVS=%s \
-        bash %s %s 2>&1 | tee buildout; if [ `echo ${PIPESTATUS[0]}` -ne 0 ]; then false; else true; fi'" % \
-        (params.tgz_dest, params.base_spark_pom_version, params.base_spark_version_to_install_databricks_jars, params.mvn_opt, params.extra_envs, params.script_dest, ' '.join(params.script_args))
-  print("ssh command: %s" % ssh_command)
-  subprocess.check_call(ssh_command, shell = True)
+  build_command = shell_join([
+      "env",
+      "SPARKSRCTGZ=%s" % params.tgz_dest,
+      "BASE_SPARK_VERSION=%s" % params.base_spark_pom_version,
+      "BASE_SPARK_VERSION_TO_INSTALL_DATABRICKS_JARS=%s" %
+      params.base_spark_version_to_install_databricks_jars,
+      "MVN_OPT=%s" % params.mvn_opt,
+      "EXTRA_ENVS=%s" % params.extra_envs,
+      "bash",
+      params.script_dest,
+  ] + params.script_args)
+  remote_command = "%s 2>&1 | tee buildout; exit ${PIPESTATUS[0]}" % build_command
+  ssh_command = ["ssh"] + ssh_args + ["ubuntu@%s" % master_addr,
+                                       "bash -c %s" % shlex.quote(remote_command)]
+  print("ssh command: %s" % shell_join(ssh_command))
+  subprocess.check_call(ssh_command)
 
   # Only the nightly build needs to copy the spark-rapids-built.tgz back
   if params.test_type == 'nightly':
       print("Copying built tarball back")
-      rsync_command = "rsync -I -Pave \"ssh %s\" ubuntu@%s:/home/ubuntu/spark-rapids-built.tgz ./" % (ssh_args, master_addr)
-      print("rsync command to get built tarball: %s" % rsync_command)
-      subprocess.check_call(rsync_command, shell = True)
+      rsync_command = ["rsync", "-I", "-Pave", rsync_ssh, "--",
+                       "ubuntu@%s:/home/ubuntu/spark-rapids-built.tgz" % master_addr, "./"]
+      print("rsync command to get built tarball: %s" % shell_join(rsync_command))
+      subprocess.check_call(rsync_command)
 
 if __name__ == '__main__':
   main()
