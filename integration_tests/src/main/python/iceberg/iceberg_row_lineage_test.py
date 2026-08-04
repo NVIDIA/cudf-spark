@@ -65,14 +65,13 @@ ROW_LINEAGE_COLS = "_row_id, _last_updated_sequence_number"
 
 def _iceberg_has_row_lineage_metadata_columns():
     """True when the Iceberg runtime exposes row-lineage metadata columns (1.9+)."""
-    try:
-        meta = spark_jvm().org.apache.iceberg.MetadataColumns
-        return meta.ROW_ID is not None and meta.LAST_UPDATED_SEQUENCE_NUMBER is not None
-    except Exception:
-        return False
+    meta_class = spark_jvm().java.lang.Class.forName(
+        "org.apache.iceberg.MetadataColumns")
+    field_names = {field.getName() for field in meta_class.getFields()}
+    return {"ROW_ID", "LAST_UPDATED_SEQUENCE_NUMBER"}.issubset(field_names)
 
 
-def _create_v3_table(table_name, table_properties, df_gen=None):
+def _create_v3_table(table_name, table_properties, partition_col_sql=None, df_gen=None):
     """Create a format-version 3 Iceberg table, skipping when V3 is unsupported."""
     if not _iceberg_has_row_lineage_metadata_columns():
         pytest.skip("Iceberg runtime does not expose row-lineage metadata columns")
@@ -86,7 +85,8 @@ def _create_v3_table(table_name, table_properties, df_gen=None):
     props.update(table_properties or {})
 
     try:
-        create_iceberg_table(table_name, table_prop=props, df_gen=df_gen)
+        create_iceberg_table(table_name, partition_col_sql=partition_col_sql,
+                             table_prop=props, df_gen=df_gen)
     except Exception as e:
         msg = str(e).lower()
         if 'format version' in msg or 'format-version' in msg:
@@ -112,13 +112,13 @@ def _empty_df_gen(spark):
     return spark.createDataFrame([], "id INT, val STRING")
 
 
-def do_row_lineage_update_test(spark_tmp_table_factory):
+def do_row_lineage_update_test(spark_tmp_table_factory, partition_col_sql):
     base = get_full_table_name(spark_tmp_table_factory)
     cpu_table = f"{base}_cpu"
     gpu_table = f"{base}_gpu"
 
-    _create_v3_table(cpu_table, {}, df_gen=_empty_df_gen)
-    _create_v3_table(gpu_table, {}, df_gen=_empty_df_gen)
+    _create_v3_table(cpu_table, {}, partition_col_sql, df_gen=_empty_df_gen)
+    _create_v3_table(gpu_table, {}, partition_col_sql, df_gen=_empty_df_gen)
 
     rows = [(i, f"v{i}") for i in range(1, 11)]
     _insert_rows(cpu_table, rows)
@@ -143,6 +143,7 @@ def do_row_lineage_update_test(spark_tmp_table_factory):
 @allow_non_gpu(*_ROW_LINEAGE_ALLOW_NON_GPU)
 @iceberg
 @ignore_order(local=True)
-def test_iceberg_row_lineage_update_cow(spark_tmp_table_factory):
+@pytest.mark.parametrize("partition_col_sql", [None, "id"])
+def test_iceberg_row_lineage_update_cow(spark_tmp_table_factory, partition_col_sql):
     """CoW UPDATE on V3 tables must preserve/nullify row-lineage metadata like CPU."""
-    do_row_lineage_update_test(spark_tmp_table_factory)
+    do_row_lineage_update_test(spark_tmp_table_factory, partition_col_sql)

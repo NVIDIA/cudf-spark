@@ -39,10 +39,12 @@ spark-rapids-shim-json-lines ***/
 
 package org.apache.spark.sql.execution.datasources.v2
 
+import scala.collection.mutable.ArrayBuffer
 import scala.util.control.NonFatal
 
 import ai.rapids.cudf.{ColumnVector => CudfColumnVector, Scalar => CudfScalar}
-import com.nvidia.spark.rapids.{GpuColumnarToRowExec, GpuColumnVector, GpuDeltaWrite, GpuExec, GpuMetric, GpuWrite}
+import com.nvidia.spark.rapids.{GpuColumnarToRowExec, GpuColumnVector, GpuColumnVectorFromBuffer,
+  GpuDeltaWrite, GpuExec, GpuMetric, GpuWrite, SpillableColumnarBatch, SpillPriorities}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.shims.DeltaInsertFilter
@@ -357,6 +359,9 @@ trait GpuWritingSparkTask[W <: DataWriter[ColumnarBatch]] extends Logging with S
 
   protected def write(writer: W, row: ColumnarBatch): Unit
 
+  /** Package-private entry for unit tests that need to exercise [[write]]. */
+  private[v2] def writeBatchForTest(writer: W, batch: ColumnarBatch): Unit = write(writer, batch)
+
   def run(
     writerFactory: DataWriterFactory,
     context: TaskContext,
@@ -445,44 +450,66 @@ case class GpuDeltaWritingSparkTask(
   private lazy val rowIdDataTypes = rowIdProjection.schema.fields.map(_.dataType)
 
   override protected def write(writer: DeltaWriter[ColumnarBatch], batch: ColumnarBatch): Unit = {
-    withRetryNoSplit(batch) { _ =>
-      val deleteFilter = filterByOperation(batch, DELETE_OPERATION)
-      withResource(deleteFilter) { _ =>
-        withResource(rowIdProjection.project(batch)) { rowIds =>
-          val rowIdBatch = GpuColumnVector.filter(rowIds, rowIdDataTypes, deleteFilter)
-          if (rowIdBatch.numRows() > 0) {
-            writer.delete(null, rowIdBatch)
-          } else {
-            rowIdBatch.close()
+    // Separate retry scopes per writer side-effect so a later OOM does not replay
+    // delete/update/insert/reinsert calls that already succeeded.
+    withResource(SpillableColumnarBatch(batch, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)) { scb =>
+      withRetryNoSplit {
+        withResource(scb.getColumnarBatch())(writeDeletes(writer, _))
+      }
+      withRetryNoSplit {
+        withResource(scb.getColumnarBatch())(writeUpdates(writer, _))
+      }
+      withRetryNoSplit {
+        withResource(scb.getColumnarBatch()) { b =>
+          if (rowProjection != null) {
+            DeltaInsertFilter.writeInserts(writer, b, rowProjection, rowDataTypes)
           }
         }
       }
-
-      if (rowProjection != null) {
-        val updateFilter = filterByOperation(batch, UPDATE_OPERATION)
-        withResource(updateFilter) { _ =>
-          val rowIds = withResource(rowIdProjection.project(batch)) { rowIds =>
-            GpuColumnVector.filter(rowIds, rowIdDataTypes, updateFilter)
-          }
-
-          closeOnExcept(rowIds) { _ =>
-            if (rowIds.numRows() > 0) {
-              val rows = withResource(rowProjection.project(batch)) { rows =>
-                GpuColumnVector.filter(rows, rowDataTypes, updateFilter)
-              }
-
-              writer.update(null, rowIds, rows)
-            } else {
-              rowIds.close()
-            }
+      withRetryNoSplit {
+        withResource(scb.getColumnarBatch()) { b =>
+          if (rowProjection != null) {
+            DeltaInsertFilter.writeReinserts(
+              writer, b, rowProjection, rowDataTypes, null, null)
           }
         }
+      }
+    }
+  }
 
-        // INSERT and REINSERT must be routed separately (SPARK-50820):
-        // insert(...) vs reinsert(metadata, row).
-        DeltaInsertFilter.writeInserts(writer, batch, rowProjection, rowDataTypes)
-        DeltaInsertFilter.writeReinserts(
-          writer, batch, rowProjection, rowDataTypes, null, null)
+  private def writeDeletes(writer: DeltaWriter[ColumnarBatch], batch: ColumnarBatch): Unit = {
+    val deleteFilter = filterByOperation(batch, DELETE_OPERATION)
+    withResource(deleteFilter) { _ =>
+      withResource(rowIdProjection.project(batch)) { rowIds =>
+        val rowIdBatch = GpuColumnVector.filter(rowIds, rowIdDataTypes, deleteFilter)
+        if (rowIdBatch.numRows() > 0) {
+          writer.delete(null, rowIdBatch)
+        } else {
+          rowIdBatch.close()
+        }
+      }
+    }
+  }
+
+  private def writeUpdates(writer: DeltaWriter[ColumnarBatch], batch: ColumnarBatch): Unit = {
+    if (rowProjection != null) {
+      val updateFilter = filterByOperation(batch, UPDATE_OPERATION)
+      withResource(updateFilter) { _ =>
+        val rowIds = withResource(rowIdProjection.project(batch)) { rowIds =>
+          GpuColumnVector.filter(rowIds, rowIdDataTypes, updateFilter)
+        }
+
+        closeOnExcept(rowIds) { _ =>
+          if (rowIds.numRows() > 0) {
+            val rows = withResource(rowProjection.project(batch)) { rows =>
+              GpuColumnVector.filter(rows, rowDataTypes, updateFilter)
+            }
+
+            writer.update(null, rowIds, rows)
+          } else {
+            rowIds.close()
+          }
+        }
       }
     }
   }
@@ -513,66 +540,86 @@ case class GpuDeltaWithMetadataWritingSparkTask(
     .orNull
 
   override protected def write(writer: DeltaWriter[ColumnarBatch], batch: ColumnarBatch): Unit = {
-    withRetryNoSplit(batch) { _ =>
-      if (metadataProjection != null) {
-        val deleteFilter = filterByOperation(batch, DELETE_OPERATION)
-        withResource(deleteFilter) { _ =>
-          val rowIds = withResource(rowIdProjection.project(batch)) { rowIds =>
-            GpuColumnVector.filter(rowIds, rowIdDataTypes, deleteFilter)
+    // Separate retry scopes per writer side-effect so a later OOM does not replay
+    // delete/update/insert/reinsert calls that already succeeded.
+    withResource(SpillableColumnarBatch(batch, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)) { scb =>
+      withRetryNoSplit {
+        withResource(scb.getColumnarBatch())(writeDeletes(writer, _))
+      }
+      withRetryNoSplit {
+        withResource(scb.getColumnarBatch())(writeUpdates(writer, _))
+      }
+      withRetryNoSplit {
+        withResource(scb.getColumnarBatch()) { b =>
+          if (rowProjection != null) {
+            DeltaInsertFilter.writeInserts(writer, b, rowProjection, rowDataTypes)
           }
-
-          closeOnExcept(rowIds) { _ =>
-            if (rowIds.numRows() > 0) {
-              val metadataBatch = withResource(metadataProjection.project(batch)) { metaBatch =>
-                GpuColumnVector.filter(metaBatch, metadataDataTypes, deleteFilter)
-              }
-
-              writer.delete(metadataBatch, rowIds)
+        }
+      }
+      withRetryNoSplit {
+        withResource(scb.getColumnarBatch()) { b =>
+          if (rowProjection != null) {
+            if (metadataProjection != null) {
+              DeltaInsertFilter.writeReinserts(
+                writer, b, rowProjection, rowDataTypes,
+                metadataProjection, metadataDataTypes)
             } else {
-              rowIds.close()
+              DeltaInsertFilter.writeReinserts(
+                writer, b, rowProjection, rowDataTypes, null, null)
             }
           }
         }
       }
+    }
+  }
 
-      if (rowProjection != null && metadataProjection != null) {
-        val updateFilter = filterByOperation(batch, UPDATE_OPERATION)
-        withResource(updateFilter) { _ =>
-          val rowIds = withResource(rowIdProjection.project(batch)) { rowIds =>
-            GpuColumnVector.filter(rowIds, rowIdDataTypes, updateFilter)
-          }
+  private def writeDeletes(writer: DeltaWriter[ColumnarBatch], batch: ColumnarBatch): Unit = {
+    if (metadataProjection != null) {
+      val deleteFilter = filterByOperation(batch, DELETE_OPERATION)
+      withResource(deleteFilter) { _ =>
+        val rowIds = withResource(rowIdProjection.project(batch)) { rowIds =>
+          GpuColumnVector.filter(rowIds, rowIdDataTypes, deleteFilter)
+        }
 
-          closeOnExcept(rowIds) { _ =>
-            if (rowIds.numRows() > 0) {
-              val rows = withResource(rowProjection.project(batch)) { rows =>
-                GpuColumnVector.filter(rows, rowDataTypes, updateFilter)
-              }
-
-              closeOnExcept(rows) { _ =>
-                val metadataBatch = withResource(metadataProjection.project(batch)) { metadata =>
-                  GpuColumnVector.filter(metadata, metadataDataTypes, updateFilter)
-                }
-
-                writer.update(metadataBatch, rowIds, rows)
-              }
-            } else {
-              rowIds.close()
+        closeOnExcept(rowIds) { _ =>
+          if (rowIds.numRows() > 0) {
+            val metadataBatch = withResource(metadataProjection.project(batch)) { metaBatch =>
+              GpuColumnVector.filter(metaBatch, metadataDataTypes, deleteFilter)
             }
+
+            writer.delete(metadataBatch, rowIds)
+          } else {
+            rowIds.close()
           }
         }
       }
+    }
+  }
 
-      if (rowProjection != null) {
-        // INSERT and REINSERT must be routed separately (SPARK-50820):
-        // insert(...) vs reinsert(metadata, row).
-        DeltaInsertFilter.writeInserts(writer, batch, rowProjection, rowDataTypes)
-        if (metadataProjection != null) {
-          DeltaInsertFilter.writeReinserts(
-            writer, batch, rowProjection, rowDataTypes,
-            metadataProjection, metadataDataTypes)
-        } else {
-          DeltaInsertFilter.writeReinserts(
-            writer, batch, rowProjection, rowDataTypes, null, null)
+  private def writeUpdates(writer: DeltaWriter[ColumnarBatch], batch: ColumnarBatch): Unit = {
+    if (rowProjection != null && metadataProjection != null) {
+      val updateFilter = filterByOperation(batch, UPDATE_OPERATION)
+      withResource(updateFilter) { _ =>
+        val rowIds = withResource(rowIdProjection.project(batch)) { rowIds =>
+          GpuColumnVector.filter(rowIds, rowIdDataTypes, updateFilter)
+        }
+
+        closeOnExcept(rowIds) { _ =>
+          if (rowIds.numRows() > 0) {
+            val rows = withResource(rowProjection.project(batch)) { rows =>
+              GpuColumnVector.filter(rows, rowDataTypes, updateFilter)
+            }
+
+            closeOnExcept(rows) { _ =>
+              val metadataBatch = withResource(metadataProjection.project(batch)) { metadata =>
+                GpuColumnVector.filter(metadata, metadataDataTypes, updateFilter)
+              }
+
+              writer.update(metadataBatch, rowIds, rows)
+            }
+          } else {
+            rowIds.close()
+          }
         }
       }
     }
@@ -583,6 +630,65 @@ object GpuDelteWritingSparkTask {
   private[v2] def filterByOperation(batch: ColumnarBatch, op: Int): CudfColumnVector = {
     withResource(CudfScalar.fromInt(op)) { cudfOp =>
       batch.column(0).asInstanceOf[GpuColumnVector].getBase.equalTo(cudfOp)
+    }
+  }
+
+  /**
+   * Split `batch` into contiguous runs of equal `__row_operation` (column 0).
+   * Takes ownership of `batch`. Does not regroup equal ops that are non-adjacent.
+   */
+  private[v2] def splitIntoContiguousOperationRuns(
+      batch: ColumnarBatch): Array[SpillableColumnarBatch] = {
+    withResource(batch) { _ =>
+      if (batch.numRows() == 0) {
+        Array.empty
+      } else {
+        val dataTypes = GpuColumnVector.extractTypes(batch)
+        val boundaries = contiguousOperationBoundaries(batch)
+        if (boundaries.isEmpty) {
+          Array(SpillableColumnarBatch(
+            GpuColumnVector.incRefCounts(batch),
+            SpillPriorities.ACTIVE_ON_DECK_PRIORITY))
+        } else {
+          withResource(GpuColumnVector.from(batch)) { table =>
+            withResource(table.contiguousSplit(boundaries: _*)) { cts =>
+              closeOnExcept(new ArrayBuffer[SpillableColumnarBatch](cts.length)) { out =>
+                var i = 0
+                while (i < cts.length) {
+                  out += SpillableColumnarBatch(
+                    GpuColumnVectorFromBuffer.from(cts(i), dataTypes),
+                    SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+                  i += 1
+                }
+                out.toArray
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  /** Row indices where column 0 changes relative to the previous row. */
+  private def contiguousOperationBoundaries(batch: ColumnarBatch): Array[Int] = {
+    withResource(batch.column(0).asInstanceOf[GpuColumnVector].getBase.copyToHost()) { host =>
+      val bounds = new ArrayBuffer[Int]()
+      var i = 1
+      val n = host.getRowCount.toInt
+      while (i < n) {
+        if (host.getInt(i) != host.getInt(i - 1)) {
+          bounds += i
+        }
+        i += 1
+      }
+      bounds.toArray
+    }
+  }
+
+  private[v2] def firstOperation(batch: ColumnarBatch): Int = {
+    withResource(batch.column(0).asInstanceOf[GpuColumnVector].getBase.copyToHost()) { host =>
+      require(host.getRowCount > 0, "expected a non-empty operation run")
+      host.getInt(0)
     }
   }
 }
