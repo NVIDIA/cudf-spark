@@ -1933,6 +1933,7 @@ def test_multi_types_window_aggs_for_rows(a_b_gen, c_gen):
     assert_gpu_and_cpu_are_equal_collect(do_it, conf={'spark.sql.adaptive.enabled': 'false'})
 
 
+@validate_execs_in_gpu_plan("GpuRunningWindowExec", "GpuCachedDoublePassWindowExec")
 def test_percent_rank_ntile_no_part_multiple_batches():
     data_gen = [('a', long_gen)]
     # The goal of this is to have multiple batches so we can verify that the code
@@ -1947,6 +1948,7 @@ def test_percent_rank_ntile_no_part_multiple_batches():
     assert_gpu_and_cpu_are_equal_collect(do_it, conf = {'spark.rapids.sql.batchSizeBytes': '100',
                                                         'spark.sql.adaptive.enabled': 'false'})
 
+@validate_execs_in_gpu_plan("GpuRunningWindowExec", "GpuCachedDoublePassWindowExec")
 def test_percent_rank_ntile_single_part_multiple_batches():
     data_gen = [('a', long_gen)]
     # The goal of this is to have multiple batches so we can verify that the code
