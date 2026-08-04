@@ -28,10 +28,9 @@ provider discovery mechanism
 [ParallelWorldClassloader](https://github.com/openjdk/jdk/blob/jdk8-b120/jaxws/src/share/jaxws_classes/com/sun/istack/internal/tools/ParallelWorldClassLoader.java)) 
 for each version of Spark supported in the jar, i.e., spark330/, spark341/, etc.
 
-If you have to change the contents of the uber jar the following files control what goes into the base jar as classes that are not shaded.
+If you have to change the contents of the uber jar, the packaging flow can optionally promote common classes to the base jar when binary dedupe proves they are bitwise-identical across shims. That default promotion path is gated by `UNSHIM_PROMOTE_DEFAULT_SPARK_SHARED_CLASSES=1`; normal packaging still uses the explicit allowlists below.
 
-1. `unshimmed-common-from-single-shim.txt` - This has classes and files that should go into the base jar with their normal
-package name (not shaded). This includes user visible classes (i.e., com/nvidia/spark/SQLPlugin), python files,
-and other files that aren't version specific. Uses Spark 3.2.0 built jar for these base classes as explained above.
-2. `unshimmed-from-each-spark3xx.txt` - This is applied to all the individual Spark specific version jars to pull
-any files that need to go into the base of the jar and not into the Spark specific directory.
+1. `keep-in-spark-shared.txt` - Patterns for bitwise-identical common `spark-shared` class files that must stay in `spark-shared` when optional default promotion is enabled. This should stay small; add entries only for compatibility or packaging exceptions.
+2. `keep-in-spark-shim-dirs.txt` - Patterns for bitwise-identical class files that must remain duplicated in each Spark-version directory instead of being consolidated into `spark-shared` or, when optional default promotion is enabled, promoted to the base jar. This is for classes that are loaded through a selected shim and need same-loader visibility to other shim-only classes.
+3. `unshimmed-common-from-single-shim.txt` - Files that must go into the base jar from one representative shim, such as root `META-INF` resources and Python worker files. Avoid adding class files here unless they need special root-layout treatment outside optional bitwise-identical promotion.
+4. `unshimmed-from-each-spark3xx.txt` - This is applied to all the individual Spark specific version jars to pull any files that need to go into the base of the jar and not into the Spark specific directory. These are per-shim root artifacts rather than common `spark-shared` classes.

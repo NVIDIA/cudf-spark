@@ -37,6 +37,8 @@ import java.util.List;
  * S3-backed {@link RapidsInputFile} that delegates byte-range reads to
  * {@link IcebergS3RangeCopier}. The supplied {@link FileIO} is only used for
  * its property map and any per-prefix storage-credential overlays.
+ *
+ * <p>The package-private S3 file access is isolated in {@link IcebergS3InputFileAccess}.
  */
 public final class IcebergS3InputFile extends IcebergInputFile {
   private static final Logger LOG = LoggerFactory.getLogger(IcebergS3InputFile.class);
@@ -63,12 +65,12 @@ public final class IcebergS3InputFile extends IcebergInputFile {
     if (!RapidsInputFiles.isS3PerfEnabled()) {
       return delegate;
     }
-    if (!(inputFile instanceof BaseS3File)) {
+    String[] s3BucketAndKey = IcebergS3InputFileAccess.s3BucketAndKey(inputFile);
+    if (s3BucketAndKey == null) {
       return delegate;
     }
-    S3URI s3Uri = ((BaseS3File) inputFile).uri();
-    String s3Bucket = s3Uri.bucket();
-    String s3Key = s3Uri.key();
+    String s3Bucket = s3BucketAndKey[0];
+    String s3Key = s3BucketAndKey[1];
     // Iceberg < 1.7 does not have SupportsStorageCredentials; ShimUtils returns
     // the per-prefix credential overlays (or an empty map on 1.6).
     IcebergS3Client icebergS3Client = IcebergS3RangeCopier.resolveClient(

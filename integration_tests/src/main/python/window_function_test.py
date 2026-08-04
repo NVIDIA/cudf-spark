@@ -1932,7 +1932,8 @@ def test_multi_types_window_aggs_for_rows(a_b_gen, c_gen):
     assert_gpu_and_cpu_are_equal_collect(do_it, conf={'spark.sql.adaptive.enabled': 'false'})
 
 
-def test_percent_rank_no_part_multiple_batches():
+@validate_execs_in_gpu_plan("GpuRunningWindowExec", "GpuCachedDoublePassWindowExec")
+def test_percent_rank_ntile_no_part_multiple_batches():
     data_gen = [('a', long_gen)]
     # The goal of this is to have multiple batches so we can verify that the code
     # is working properly, but not so large that it takes forever to run.
@@ -1940,12 +1941,14 @@ def test_percent_rank_no_part_multiple_batches():
 
     def do_it(spark):
         return gen_df(spark, data_gen, length=8000) \
-                .withColumn('percent_rank_val', f.percent_rank().over(baseWindowSpec))
+                .withColumn('percent_rank_val', f.percent_rank().over(baseWindowSpec)) \
+                .withColumn('ntile_val', f.ntile(7).over(baseWindowSpec))
     # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
     assert_gpu_and_cpu_are_equal_collect(do_it, conf = {'spark.rapids.sql.batchSizeBytes': '100',
                                                         'spark.sql.adaptive.enabled': 'false'})
 
-def test_percent_rank_single_part_multiple_batches():
+@validate_execs_in_gpu_plan("GpuRunningWindowExec", "GpuCachedDoublePassWindowExec")
+def test_percent_rank_ntile_single_part_multiple_batches():
     data_gen = [('a', long_gen)]
     # The goal of this is to have multiple batches so we can verify that the code
     # is working properly, but not so large that it takes forever to run.
@@ -1954,12 +1957,34 @@ def test_percent_rank_single_part_multiple_batches():
     def do_it(spark):
         return gen_df(spark, data_gen, length=8000) \
                 .withColumn('b', f.lit(1)) \
-                .withColumn('percent_rank_val', f.percent_rank().over(baseWindowSpec))
+                .withColumn('percent_rank_val', f.percent_rank().over(baseWindowSpec)) \
+                .withColumn('ntile_val', f.ntile(7).over(baseWindowSpec))
     assert_gpu_and_cpu_are_equal_collect(
         do_it,
         conf = {'spark.rapids.sql.batchSizeBytes': '100',
                 # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
                 'spark.sql.adaptive.enabled': 'false'})
+
+@ignore_order(local=True)
+@pytest.mark.parametrize('buckets', [1, 2, 4, 8])
+def test_ntile_edge_cases(buckets):
+    def data(spark):
+        return spark.range(13).select(
+            f.when(f.col('id') < 6, 0)
+                .when(f.col('id') < 11, 1)
+                .otherwise(2)
+                .alias('p'),
+            'id')
+
+    assert_gpu_and_cpu_are_equal_sql(
+        data,
+        'ntile_table',
+        f'''
+        SELECT p, id, NTILE({buckets}) OVER (PARTITION BY p ORDER BY id) AS bucket
+        FROM ntile_table
+        ''',
+        conf={'spark.sql.adaptive.enabled': 'false'})
+
 
 @pytest.mark.skipif(is_before_spark_320(), reason="Only in Spark 3.2.0 is IGNORE NULLS supported for lead and lag by Spark")
 @allow_non_gpu('WindowExec', 'Alias', 'WindowExpression', 'Lead', 'WindowSpecDefinition', 'SpecifiedWindowFrame', *non_utc_allow)
