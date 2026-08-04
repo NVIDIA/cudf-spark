@@ -75,10 +75,13 @@ EOF
     echo "</project>"
   } > "$pom_file"
 
-  $MVN -q -B -f "$pom_file" dependency:copy-dependencies \
-    -DincludeScope=runtime \
-    -DincludeTypes=jar \
-    -DoutputDirectory="$dependency_dir/jars" >&2 || return 1
+  (
+    cd "$WORKSPACE"
+    $MVN -q -B -f "$pom_file" dependency:copy-dependencies \
+      -DincludeScope=runtime \
+      -DincludeTypes=jar \
+      -DoutputDirectory="$dependency_dir/jars"
+  ) >&2 || return 1
 
   mapfile -d '' -t jars < <(
     find "$dependency_dir/jars" -maxdepth 1 -type f -name '*.jar' -print0 | sort -z
