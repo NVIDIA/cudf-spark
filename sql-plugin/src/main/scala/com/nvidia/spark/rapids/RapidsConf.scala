@@ -2200,9 +2200,11 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       "Spark versions, including Spark 4.0.0 and later, the " +
       "[RAPIDS Shuffle Manager](https://docs.nvidia.com/spark-rapids/user-guide/latest" +
       "/additional-functionality/rapids-shuffle.html) is configured automatically unless " +
-      "spark.shuffle.manager is explicitly set. On earlier Spark versions, the RAPIDS Shuffle " +
-      "Manager must already be configured. When set to `false`, the built-in Spark shuffle " +
-      "implementation will be used. ")
+      "spark.shuffle.manager is explicitly set. This automatic configuration is skipped on " +
+      "Dataproc runtimes that set spark.dataproc.engine, including Lightning Engine runtimes; " +
+      "on those runtimes, spark.shuffle.manager remains unset unless explicitly configured. " +
+      "On earlier Spark versions, the RAPIDS Shuffle Manager must already be configured. When " +
+      "set to `false`, the built-in Spark shuffle implementation will be used. ")
     .booleanConf
     .createWithDefault(true)
 
