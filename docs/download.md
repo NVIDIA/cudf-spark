@@ -2,6 +2,7 @@
 layout: page
 title: Download
 nav_order: 3
+has_children: true
 ---
 
 [NVIDIA cuDF plugin for Apache Spark](https://github.com/NVIDIA/cudf-spark) provides a set of
@@ -56,6 +57,9 @@ The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Ho
 	Supported Databricks runtime versions for Azure and AWS:
 		Databricks 14.3 ML LTS (GPU, Scala 2.12, Spark 3.5.0)
 		Databricks 17.3 ML LTS (GPU, Scala 2.13, Spark 4.0.0)
+
+See the [Databricks support matrix](./databricks-support.md) for runtime-specific Spark, Scala,
+CUDA, and Delta Lake feature support details.
 
 	Supported Dataproc versions (Debian/Ubuntu/Rocky):
 		GCP Dataproc 2.1
