@@ -53,7 +53,7 @@ SPARK_SHIM_DIRS=()
 if [[ "${UNSHIM_FAST:-0}" == "1" ]]; then
   while IFS= read -r shim_dir; do
     SPARK_SHIM_DIRS+=("$shim_dir")
-  done < <(find ./parallel-world -maxdepth 1 -mindepth 1 -type d -name 'spark[34]*' | sort)
+  done < <(find ./parallel-world -maxdepth 1 -mindepth 1 -type d -name 'spark[345]*' | sort)
 fi
 
 DEDUPE_CACHE_DIR="${UNSHIM_DEDUPE_CACHE_DIR:-}"
@@ -106,19 +106,13 @@ elif [[ "${UNSHIM_FAST:-0}" == "1" && "${#SPARK_SHIM_DIRS[@]}" == "1" ]]; then
     sort | sed 's|^\./parallel-world||' > "$SPARK_SHARED_TXT"
 else
   echo "$((++STEP))/ SHA1 of all non-META files > tmp-sha1-files.txt"
-  find ./parallel-world/spark[34]* -name META-INF -prune -o -name webapps -prune -o \( -type f -print0 \) | \
+  find ./parallel-world/spark[345]* -name META-INF -prune -o -name webapps -prune -o \( -type f -print0 \) | \
     xargs --null $SHASUM > tmp-sha1-files.txt
 
-<<<<<<< HEAD
-echo "$((++STEP))/ SHA1 of all non-META files > tmp-sha1-files.txt"
-find ./parallel-world/spark[345]* -name META-INF -prune -o -name webapps -prune -o \( -type f -print0 \) | \
-  xargs --null $SHASUM > tmp-sha1-files.txt
-=======
   echo "$((++STEP))/ make shim column 1 > tmp-shim-sha-package-files.txt"
   < tmp-sha1-files.txt awk -F/ '$1=$1' | \
     awk '{checksum=$1; shim=$4; $1=shim; $2=$3=""; $4=checksum;  print $0}' | \
     tr -s  ' ' > tmp-shim-sha-package-files.txt
->>>>>>> NVDA/main
 
   echo "$((++STEP))/ sort by path, sha1; output first from each group > tmp-count-shim-sha-package-files.txt"
   sort -k3 -k2,2 -u tmp-shim-sha-package-files.txt | \
@@ -202,7 +196,7 @@ function retain_single_copy() {
   class_resource="$1"
   # example input: /spark320/com/nvidia/spark/udf/Repr$UnknownCapturedArg$.class
 
-  IFS='/' <<< "$class_resource" read -ra path_parts
+  IFS='/' read -ra path_parts <<< "$class_resource"
   # declare -p path_parts
   # declare -a path_parts='([0]="" [1]="spark320" [2]="com" [3]="nvidia" [4]="spark" [5]="udf" [6]="Repr\$UnknownCapturedArg\$.class")'
   shim="${path_parts[1]}"
@@ -370,15 +364,15 @@ awk -F/ "
   NF >= 3 {
     shim = \$2
     package_class = \$0
-    sub(\"^/spark[34][^/]*/\", \"\", package_class)
+    sub(\"^/spark[345][^/]*/\", \"\", package_class)
     print package_class >> (\"from-\" shim \"-to-spark-shared.txt\")
   }
 " "$SPARK_SHARED_TXT"
-for pw in ./parallel-world/spark[34]* ; do
+for pw in ./parallel-world/spark[345]* ; do
   awk -v pw="$pw" "
     {
       package_class = \$0
-      sub(\"^/spark[34][^/]*/\", \"\", package_class)
+      sub(\"^/spark[345][^/]*/\", \"\", package_class)
       print pw \"/\" package_class
     }
   " "$SPARK_SHARED_TXT"
@@ -387,7 +381,7 @@ done >> "$DELETE_DUPLICATES_TXT"
 echo "$((++STEP))/ rsyncing common classes to $SPARK_SHARED_DIR"
 for copy_list in from-spark[345]*-to-spark-shared.txt; do
   echo Initializing rsync of "$copy_list"
-  IFS='-' <<< "$copy_list" read -ra copy_list_parts
+  IFS='-' read -ra copy_list_parts <<< "$copy_list"
   # declare -p copy_list_parts
   shim="${copy_list_parts[1]}"
   # use rsync to reduce process forking
@@ -406,7 +400,7 @@ copy_unshimmed_from_spark_shared
 # locations such as parallel-world/spark321.
 # For each unshimmed class file look for all of its copies inside /spark[345]* and
 # and count the number of distinct checksums. There are two representative cases
-# 1) The class is contributed to the unshimmed location via the unshimmed-from-each-spark list. These are classes
+# 1) The class is contributed to the unshimmed location via the unshimmed-from-each-spark345 list. These are classes
 #    carrying the shim classifier in their package name such as
 #    com.nvidia.spark.rapids.spark321.RapidsShuffleManager. They are unique by construction,
 #    and will have zero copies in any non-spark321 shims. Although such classes are currently excluded from
@@ -423,15 +417,10 @@ copy_unshimmed_from_spark_shared
 
 # Determine the list of unshimmed class files
 UNSHIMMED_LIST_TXT=unshimmed-result.txt
-<<<<<<< HEAD
-echo "$((++STEP))/ creating sorted list of unshimmed classes > $UNSHIMMED_LIST_TXT"
-find ./parallel-world -name '*.class' -not -path './parallel-world/spark[345-]*' | \
-=======
 echo "$((++STEP))/ creating sorted list of root-layout unshimmed classes > $UNSHIMMED_LIST_TXT"
 find ./parallel-world -name '*.class' \
-  -not -path './parallel-world/spark[34-]*' \
+  -not -path './parallel-world/spark[345-]*' \
   -not -path './parallel-world/spark-shared/*' | \
->>>>>>> NVDA/main
   cut -d/ -f 3- | sort > "$UNSHIMMED_LIST_TXT"
 
 echo "$((++STEP))/ creating sorted list of spark-shared classes > $SPARK_SHARED_CLASSES_TXT"
@@ -449,29 +438,10 @@ function unshimmed_class_needs_shared_identity() {
   # SparkRapidsBuildInfoEvent is root-loaded during plugin initialization along
   # with root-level build-info resources; Databricks shim metadata can differ.
   #
-<<<<<<< HEAD
-  # TODO ParquetCachedBatchSerializer is not bitwise-identical after 411, 
-  # but it is compatible with previous versions because it merely adds a new method.
-  # we might need to replace this strict check with MiMa
-  # https://github.com/apache/spark/blob/7011706a0a8dbec6adb5b5b121921b29b314335f/sql/core/src/main/scala/org/apache/spark/sql/columnar/CachedBatchSerializer.scala#L75-L95
-  # ProxyRapidsShuffleInternalManagerBase is not bitwise-identical when
-  # DB 17.3 is included because ShuffleManager.getReader signature differs
-  # (8-param with prismMapStatusEnabled vs 7-param). This is safe because
-  # the class provides concrete implementations for ALL getReader variants,
-  # so the JVM resolves the correct one at runtime regardless of which
-  # ShuffleManager version the class was compiled against.
-  if [[ ! "$class_file_quoted" =~ com/nvidia/spark/rapids/spark[345].*/.*ShuffleManager.class && \
-          "$class_file_quoted" != "com/nvidia/spark/ParquetCachedBatchSerializer.class" && \
-          ! "$class_file_quoted" =~ org/apache/spark/sql/rapids/ProxyRapidsShuffleInternalManagerBase ]]; then
-      if ! grep -q "/spark.\+/$class_file_quoted" "$SPARK_SHARED_TXT"; then
-        echo >&2 "$class_file is not bitwise-identical across shims"
-        exit 255
-      fi
-=======
   # Keep this list narrow. Do not add a class here when it can stay in
   # spark-shared without being referenced from root-loaded code.
   class_file_quoted=$(printf "%q" "$class_file")
-  if [[ "$class_file_quoted" =~ com/nvidia/spark/rapids/spark[34].*/.*ShuffleManager.class || \
+  if [[ "$class_file_quoted" =~ com/nvidia/spark/rapids/spark[345].*/.*ShuffleManager.class || \
           "$class_file_quoted" == "com/nvidia/spark/ParquetCachedBatchSerializer.class" || \
           "$class_file_quoted" =~ org/apache/spark/sql/rapids/ProxyRapidsShuffleInternalManagerBase || \
           "$class_file_quoted" =~ com/nvidia/spark/rapids/SparkRapidsBuildInfoEvent.*\.class || \
@@ -491,7 +461,6 @@ function unshimmed_class_needs_shared_identity() {
           "$class_file_quoted" == "org/apache/spark/sql/rapids/shims/RapidsErrorUtils.class" || \
           "$class_file_quoted" == "org/apache/spark/sql/rapids/execution/python/shims/WindowInPandasExecTypeShim.class" ]]; then
       return 1
->>>>>>> NVDA/main
   fi
   return 0
 }
@@ -514,22 +483,12 @@ fi
 # Remove unshimmed classes from parallel worlds
 # TODO rework with low priority, only a few classes.
 echo "$((++STEP))/ removing duplicates of unshimmed classes"
-<<<<<<< HEAD
-
-while read -r unshimmed_class; do
-  for pw in ./parallel-world/spark[345-]* ; do
-    unshimmed_path="$pw/$unshimmed_class"
-    [[ -f "$unshimmed_path" ]] && echo "$unshimmed_path" || true
-  done >> "$DELETE_DUPLICATES_TXT"
-done < "$UNSHIMMED_LIST_TXT"
-=======
 {
   sed "s|^|./parallel-world/spark-shared/|" "$UNSHIMMED_LIST_TXT"
-  for pw in ./parallel-world/spark[34-]* ; do
+  for pw in ./parallel-world/spark[345-]* ; do
     awk -v pw="$pw" "{ print pw \"/\" \$0 }" "$UNSHIMMED_LIST_TXT"
   done
 } >> "$DELETE_DUPLICATES_TXT"
->>>>>>> NVDA/main
 
 echo "$((++STEP))/ deleting all class files listed in $DELETE_DUPLICATES_TXT"
 < "$DELETE_DUPLICATES_TXT" sort -u | xargs rm -f
