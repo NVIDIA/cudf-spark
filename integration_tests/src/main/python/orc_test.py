@@ -89,6 +89,19 @@ reader_opt_confs = __reader_opt_confs_no_chunked + __reader_opt_confs_chunked
 # The Count result can not be sorted, so local sort can not be used.
 reader_opt_confs_for_count = __reader_opt_confs_common + [__multithreaded_orc_file_reader_combine_unordered_conf_no_chunked]
 
+def _param_with_reader_conf(*values):
+    """Build a joint parameter while preserving marks attached to a reader configuration."""
+    reader_conf = values[-1]
+    if hasattr(reader_conf, 'values') and hasattr(reader_conf, 'marks'):
+        return pytest.param(*values[:-1], reader_conf.values[0], marks=reader_conf.marks)
+    return values
+
+def _orc_param_id(value):
+    """Return stable IDs for callables so xdist workers collect identical test names."""
+    if value is read_orc_df or value is read_orc_sql:
+        return value.__name__
+    return idfn(value)
+
 non_utc_allow_orc_file_source_scan=['ColumnarToRowExec', 'FileSourceScanExec', 'BatchScanExec'] if is_not_utc() else []
 
 @pytest.mark.parametrize('name', ['timestamp-date-test.orc'])
@@ -216,11 +229,24 @@ orc_pred_push_gens = [
         # timestamp_gen
         orc_timestamp_gen]
 
+# Exercise every predicate type with the default reader, then exercise the full reader/source/API
+# matrix with one representative type. This preserves coverage of every independent input while
+# avoiding the redundant Cartesian product between them.
+orc_pred_push_params = [
+    _param_with_reader_conf(orc_gen, read_orc_df, "", reader_opt_confs[0])
+    for orc_gen in orc_pred_push_gens
+] + [
+    _param_with_reader_conf(orc_pred_push_gens[0], read_func, v1_enabled_list, reader_confs)
+    for read_func in [read_orc_df, read_orc_sql]
+    for v1_enabled_list in ["", "orc"]
+    for reader_confs in reader_opt_confs
+    if not (read_func is read_orc_df and v1_enabled_list == "" and
+            reader_confs is reader_opt_confs[0])
+]
+
 @pytest.mark.order(2)
-@pytest.mark.parametrize('orc_gen', orc_pred_push_gens, ids=idfn)
-@pytest.mark.parametrize('read_func', [read_orc_df, read_orc_sql])
-@pytest.mark.parametrize('v1_enabled_list', ["", "orc"])
-@pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
+@pytest.mark.parametrize('orc_gen,read_func,v1_enabled_list,reader_confs',
+                         orc_pred_push_params, ids=_orc_param_id)
 def test_pred_push_round_trip(spark_tmp_path, orc_gen, read_func, v1_enabled_list, reader_confs):
     data_path = spark_tmp_path + '/ORC_DATA'
     # Append two struct columns to verify nested predicate pushdown.
@@ -683,10 +709,23 @@ def test_read_struct_without_stream(spark_tmp_path):
             lambda spark : spark.read.orc(data_path))
 
 
-@pytest.mark.parametrize('orc_gen', flattened_orc_gens, ids=idfn)
-@pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
-@pytest.mark.parametrize('v1_enabled_list', ["", "orc"])
-@pytest.mark.parametrize('case_sensitive', ["false", "true"])
+# Exercise every schema type with the default reader, then exercise the full reader/source/case
+# matrix with one representative type. Schema evolution and reader selection are independent code
+# paths, so their full Cartesian product only repeats the same branches.
+read_with_more_columns_params = [
+    _param_with_reader_conf(orc_gen, "", "false", reader_opt_confs[0])
+    for orc_gen in flattened_orc_gens
+] + [
+    _param_with_reader_conf(flattened_orc_gens[0], v1_enabled_list, case_sensitive, reader_confs)
+    for v1_enabled_list in ["", "orc"]
+    for case_sensitive in ["false", "true"]
+    for reader_confs in reader_opt_confs
+    if not (v1_enabled_list == "" and case_sensitive == "false" and
+            reader_confs is reader_opt_confs[0])
+]
+
+@pytest.mark.parametrize('orc_gen,v1_enabled_list,case_sensitive,reader_confs',
+                         read_with_more_columns_params, ids=idfn)
 def test_read_with_more_columns(spark_tmp_path, orc_gen, reader_confs, v1_enabled_list, case_sensitive):
     struct_gen = StructGen([('nested_col', orc_gen)])
     # Map is not supported yet.
