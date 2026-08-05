@@ -726,7 +726,7 @@ abstract class GpuBroadcastNestedLoopJoinExecBase(
       Some(buildDataSize))
   }
 
-  private def buildSidePostProjection: Option[ColumnarBatch => ColumnarBatch] = {
+  private[execution] def buildSidePostProjection: Option[ColumnarBatch => ColumnarBatch] = {
     buildPlan match {
       case p: GpuProjectExec =>
         // Need to manually do project columnar execution other than calling child's
@@ -735,7 +735,9 @@ abstract class GpuBroadcastNestedLoopJoinExecBase(
         val proj = GpuBindReferences.bindGpuProjectReferencesTiered(
           postBuildCondition, p.child.output, conf, allMetrics)
         val fn = (batch: ColumnarBatch) => {
-          withResource(batch)(proj.project)
+          val spillableBatch = SpillableColumnarBatch(
+            batch, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+          proj.projectAndCloseWithRetrySingleBatch(spillableBatch)
         }
         Some(fn)
       case _ =>
