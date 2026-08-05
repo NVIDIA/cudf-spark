@@ -908,8 +908,8 @@ case class GpuProjectExec(
     val opTime = gpuLongMetric(OP_TIME_LEGACY)
     val numPreSplit = gpuLongMetric(KEY_NUM_PRE_SPLIT)
     
-    val boundProjectList = GpuBindReferences.bindGpuReferencesTiered(projectList, child.output,
-      conf, allMetrics)
+    val boundProjectList = GpuBindReferences.bindGpuProjectReferencesTiered(
+      projectList, child.output, conf, allMetrics)
     val localEnablePreSplit = enablePreSplit
 
     val rdd = child.executeColumnar()

@@ -405,11 +405,28 @@ def test_jit_add_multiply(data_gen):
 
 @pytest.mark.parametrize('data_gen', [int_gen, long_gen], ids=idfn)
 @disable_ansi_mode
-def test_jit_mixed_nested_subexpressions(data_gen):
+def test_jit_does_not_split_unique_unsupported_expression(data_gen):
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: binary_op_df(spark, data_gen).select(
             (f.col('a') + f.col('b')) - (f.col('a') * f.col('b'))),
-        exist_classes=r"GpuProject.*AST_JIT.*- AST_JIT",
+        exist_classes="GpuProject",
+        non_exist_classes="AST_JIT,GpuProjectAst",
+        conf=_project_ast_jit_enabled_conf)
+
+@pytest.mark.parametrize('data_gen', [int_gen, long_gen], ids=idfn)
+@disable_ansi_mode
+def test_jit_cse_shared_subexpression(data_gen):
+    def project_shared_expression(spark):
+        df = binary_op_df(spark, data_gen)
+        shared = f.col('a') + f.col('b')
+        return df.select(
+            shared.alias('shared'),
+            (shared - f.col('a')).alias('left'),
+            (shared - f.col('b')).alias('right'))
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        project_shared_expression,
+        exist_classes=r"GpuProject.*AST_JIT.*AS shared.*AS left.*AS right",
         non_exist_classes="GpuProjectAst",
         conf=_project_ast_jit_enabled_conf)
 
@@ -421,8 +438,8 @@ def test_jit_mixed_project_expressions(data_gen):
             (f.col('a') + f.col('b')).alias('jit'),
             (f.col('a') - f.col('b')).alias('gpu'),
             ((f.col('a') * f.col('b')) - f.col('a')).alias('mixed')),
-        exist_classes=r"GpuProject.*AST_JIT.*AS jit.*AS gpu.*AST_JIT.*AS mixed",
-        non_exist_classes="GpuProjectAst",
+        exist_classes=r"GpuProject.*AST_JIT.*AS jit.*AS gpu.*AS mixed",
+        non_exist_classes=r"GpuProjectAst,AS gpu.*AST_JIT",
         conf=_project_ast_jit_enabled_conf)
 
 @pytest.mark.parametrize('data_gen', [int_gen, long_gen], ids=idfn)
@@ -436,7 +453,8 @@ def test_jit_and_legacy_ast_mixed_project_expressions(data_gen):
                 (f.col('a') * f.col('b'))).alias('mixed')),
         exist_classes=(
             r"GpuProject.*AST_JIT.*AS jit.*AST\(.*AS legacy.*"
-            r"AST_JIT.*- AST_JIT.*AS mixed,GpuProjectAstExpression"),
+            r"AST\(.*AS mixed,GpuProjectAstExpression"),
+        non_exist_classes=r"AS legacy.*AST_JIT",
         conf=_project_ast_jit_and_legacy_enabled_conf)
 
 

@@ -1250,7 +1250,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
   val ENABLE_PROJECT_AST_JIT = conf("spark.rapids.sql.projectAstJitEnabled")
       .doc("Enable the experimental cuDF JIT backend for supported project AST expressions. " +
         "When both project AST backends are enabled, JIT takes precedence for supported " +
-        "subexpressions.")
+        "expressions within each projection tier.")
       .internal()
       .booleanConf
       .createWithDefault(false)

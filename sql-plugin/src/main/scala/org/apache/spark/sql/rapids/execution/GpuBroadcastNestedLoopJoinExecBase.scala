@@ -732,7 +732,7 @@ abstract class GpuBroadcastNestedLoopJoinExecBase(
         // Need to manually do project columnar execution other than calling child's
         // internalDoExecuteColumnar. This is to workaround especial handle to build broadcast
         // batch.
-        val proj = GpuBindReferences.bindGpuReferencesTiered(
+        val proj = GpuBindReferences.bindGpuProjectReferencesTiered(
           postBuildCondition, p.child.output, conf, allMetrics)
         val fn = (batch: ColumnarBatch) => {
           withResource(batch)(proj.project)

@@ -50,7 +50,7 @@ object GpuProjectAstExpressionBase {
 }
 
 object GpuProjectAstExpression {
-  private def replaceChild(alias: GpuAlias, child: Expression): GpuAlias = {
+  private[rapids] def replaceChild(alias: GpuAlias, child: Expression): GpuAlias = {
     if (child eq alias.child) {
       alias
     } else {
@@ -78,9 +78,11 @@ object GpuProjectAstExpression {
     }
   }
 
-  private def unwrap(expression: Expression): Expression = expression match {
-    case alias: GpuAlias => replaceChild(alias, unwrap(alias.child))
-    case astExpression: GpuProjectAstExpression => astExpression.child
+  private def unwrap(expression: Expression, unwrapJit: Boolean): Expression = expression match {
+    case alias: GpuAlias => replaceChild(alias, unwrap(alias.child, unwrapJit))
+    case astExpression: GpuProjectAstExpression => unwrap(astExpression.child, unwrapJit)
+    case jitExpression: GpuAstJitExpression if unwrapJit =>
+      unwrap(jitExpression.child, unwrapJit)
     case other => other
   }
 
@@ -89,63 +91,81 @@ object GpuProjectAstExpression {
     case other => other
   }
 
-  private def rewrapAstTiers(
+  private def rewrapBackendTiers(
       tiers: Seq[Seq[Expression]],
-      astOutputs: Seq[Boolean]): Seq[Seq[Expression]] = {
+      backendOutputs: Seq[Boolean],
+      wrapExpression: Expression => Expression): Seq[Seq[Expression]] = {
     val finalTier = tiers.last
-    require(finalTier.size == astOutputs.size,
+    require(finalTier.size == backendOutputs.size,
       "The final expression tier must preserve the project output count")
-    val astReferences = finalTier.iterator.zip(astOutputs.iterator)
+    val backendReferences = finalTier.iterator.zip(backendOutputs.iterator)
         .collect { case (expression, true) => expression }
         .flatMap(_.references.iterator)
         .map(_.exprId)
         .toSet
 
-    // Tier aliases are the dataflow graph after CSE, so follow them backwards from AST outputs.
+    // Tier aliases are the dataflow graph after CSE, so follow them backwards from the outputs.
     val (commonTiers, _) = tiers.dropRight(1).foldRight(
-      (List.empty[Seq[Expression]], astReferences)) {
+      (List.empty[Seq[Expression]], backendReferences)) {
       case (tier, (rewrittenTiers, requiredExprIds)) =>
-        val astAliases = tier.collect {
+        val backendAliases = tier.collect {
           case alias: GpuAlias if requiredExprIds.contains(alias.exprId) => alias
         }
-        val astAliasIds = astAliases.iterator.map(_.exprId).toSet
-        val dependencies = astAliases.iterator
+        val backendAliasIds = backendAliases.iterator.map(_.exprId).toSet
+        val dependencies = backendAliases.iterator
             .flatMap(_.references.iterator)
             .map(_.exprId)
             .toSet
         val rewrittenTier = tier.map {
           case alias: GpuAlias
-              if astAliasIds.contains(alias.exprId) &&
+              if backendAliasIds.contains(alias.exprId) &&
                 GpuBatchUtils.isFixedWidth(alias.dataType) =>
-            rewrap(alias)
+            wrapExpression(alias)
           case expression => expression
         }
         (rewrittenTier :: rewrittenTiers, requiredExprIds ++ dependencies)
     }
 
-    commonTiers :+ finalTier.zip(astOutputs).map {
-      case (expression, true) => rewrap(expression)
+    commonTiers :+ finalTier.zip(backendOutputs).map {
+      case (expression, true) => wrapExpression(expression)
       case (expression, false) => expression
     }
   }
 
   private[rapids] def buildExprTiers(
       expressions: Seq[Expression],
-      conf: SQLConf): Seq[Seq[Expression]] = {
+      conf: SQLConf,
+      enableProjectAstJit: Boolean = false): Seq[Seq[Expression]] = {
     val astOutputs = expressions.map(extractTopLevel(_).isDefined)
     val hasAstOutputs = astOutputs.contains(true)
-    // CSE must see through the marker so AST and non-AST outputs can share the same tiers.
-    val unwrapped = if (hasAstOutputs) expressions.map(unwrap) else expressions
+    val jitOutputs = expressions.map { expression =>
+      GpuProjectAstExpressionBase.extractTopLevel(expression)
+        .exists(_.isInstanceOf[GpuAstJitExpression])
+    }
+    val hasJitOutputs = jitOutputs.contains(true)
+    // CSE must see through backend markers so all outputs can share the same tiers.
+    val unwrapped = if (hasAstOutputs || hasJitOutputs) {
+      expressions.map(unwrap(_, unwrapJit = true))
+    } else {
+      expressions
+    }
     val replaced = if (RapidsConf.ENABLE_COMBINED_EXPRESSIONS.get(conf)) {
       GpuEquivalentExpressions.replaceMultiExpressions(unwrapped, conf)
     } else {
       unwrapped
     }
     val tiers = GpuEquivalentExpressions.getExprTiers(replaced)
-    if (hasAstOutputs) {
-      rewrapAstTiers(tiers, astOutputs)
+    val astTiers = if (hasAstOutputs) {
+      rewrapBackendTiers(tiers, astOutputs, rewrap)
     } else {
       tiers
+    }
+    if (enableProjectAstJit) {
+      astTiers.map(_.map(GpuAstJitExpression.wrapTierExpression))
+    } else if (hasJitOutputs) {
+      rewrapBackendTiers(astTiers, jitOutputs, GpuAstJitExpression.wrapTierExpression)
+    } else {
+      astTiers
     }
   }
 

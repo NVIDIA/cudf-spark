@@ -129,13 +129,15 @@ object GpuBindReferences extends Logging {
    * from SparkPlan nodes. Use the public API that requires metrics instead, except
    * when absolutely needed.
    */
-  def bindGpuReferencesTieredNoMetrics[A <: Expression](
+  private def bindGpuReferencesTieredNoMetricsInternal[A <: Expression](
       expressions: Seq[A],
       input: AttributeSeq,
-      conf: SQLConf): GpuTieredProject = {
+      conf: SQLConf,
+      enableProjectAstJit: Boolean): GpuTieredProject = {
 
     if (RapidsConf.ENABLE_TIERED_PROJECT.get(conf)) {
-      val exprTiers = GpuProjectAstExpression.buildExprTiers(expressions, conf)
+      val exprTiers = GpuProjectAstExpression.buildExprTiers(
+        expressions, conf, enableProjectAstJit)
       val inputTiers = GpuEquivalentExpressions.getInputTiers(exprTiers, input)
       // Update ExprTiers to include the columns that are pass through and drop unneeded columns
       val newExprTiers = exprTiers.zipWithIndex.map {
@@ -174,8 +176,30 @@ object GpuBindReferences extends Logging {
       }
       GpuTieredProject(tiered)
     } else {
-      GpuTieredProject(Seq(GpuBindReferences.bindGpuReferencesNoMetrics(expressions, input)))
+      val projectExpressions = if (enableProjectAstJit) {
+        expressions.map(GpuAstJitExpression.wrapTierExpression)
+      } else {
+        expressions
+      }
+      GpuTieredProject(Seq(
+        GpuBindReferences.bindGpuReferencesNoMetrics(projectExpressions, input)))
     }
+  }
+
+  def bindGpuReferencesTieredNoMetrics[A <: Expression](
+      expressions: Seq[A],
+      input: AttributeSeq,
+      conf: SQLConf): GpuTieredProject = {
+    bindGpuReferencesTieredNoMetricsInternal(
+      expressions, input, conf, enableProjectAstJit = false)
+  }
+
+  private[rapids] def bindGpuProjectReferencesTieredNoMetrics[A <: Expression](
+      expressions: Seq[A],
+      input: AttributeSeq,
+      conf: SQLConf): GpuTieredProject = {
+    bindGpuReferencesTieredNoMetricsInternal(
+      expressions, input, conf, RapidsConf.ENABLE_PROJECT_AST_JIT.get(conf))
   }
 
   // ========== Public "Front Door" APIs (for use by SparkPlan nodes) ==========
@@ -254,6 +278,16 @@ object GpuBindReferences extends Logging {
       conf: SQLConf,
       metrics: Map[String, GpuMetric]): GpuTieredProject = {
     val bound = bindGpuReferencesTieredNoMetrics(expressions, input, conf)
+    bound.injectMetrics(metrics)
+    bound
+  }
+
+  def bindGpuProjectReferencesTiered[A <: Expression](
+      expressions: Seq[A],
+      input: AttributeSeq,
+      conf: SQLConf,
+      metrics: Map[String, GpuMetric]): GpuTieredProject = {
+    val bound = bindGpuProjectReferencesTieredNoMetrics(expressions, input, conf)
     bound.injectMetrics(metrics)
     bound
   }

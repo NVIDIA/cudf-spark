@@ -30,21 +30,22 @@ import org.apache.spark.sql.types.DataType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 object GpuAstJitExpression {
-  private def wrapMaximalSubtrees(expression: Expression): Expression = expression match {
-    case gpuExpression: GpuExpression
-        if gpuExpression.supportsAstJit && gpuExpression.containsAstJitOperator =>
-      GpuAstJitExpression(gpuExpression)
-    case gpuExpression: GpuExpression =>
-      gpuExpression.mapChildren {
-        case child: GpuExpression => wrapMaximalSubtrees(child)
-        case child => child
-      }
+  private def canUseAstJit(expression: GpuExpression): Boolean =
+    GpuBatchUtils.isFixedWidth(expression.dataType) &&
+      expression.supportsAstJit && expression.containsAstJitOperator
+
+  private[rapids] def wrapTierExpression(expression: Expression): Expression = expression match {
+    case alias @ GpuAlias(astExpression: GpuProjectAstExpression, _)
+        if canUseAstJit(astExpression.child) =>
+      GpuProjectAstExpression.replaceChild(alias, GpuAstJitExpression(astExpression.child))
+    case alias @ GpuAlias(child: GpuExpression, _) if canUseAstJit(child) =>
+      GpuProjectAstExpression.replaceChild(alias, GpuAstJitExpression(child))
     case other => other
   }
 
   private[rapids] def wrapProjectExpressions(
       expressions: List[NamedExpression]): List[NamedExpression] = {
-    expressions.map(wrapMaximalSubtrees(_).asInstanceOf[NamedExpression])
+    expressions.map(wrapTierExpression(_).asInstanceOf[NamedExpression])
   }
 
   private[rapids] def contains(expression: Expression): Boolean =
