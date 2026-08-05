@@ -31,7 +31,7 @@ import java.io.IOException
 import ai.rapids.cudf.ColumnVector
 import com.nvidia.spark.rapids.{GpuColumnVector, RmmSparkRetrySuiteBase}
 import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.jni.GpuRetryOOM
+import com.nvidia.spark.rapids.jni.{GpuRetryOOM, RmmSpark}
 import com.nvidia.spark.rapids.shims.DeltaInsertFilter
 
 import org.apache.spark.sql.catalyst.GpuProjectingColumnarBatch
@@ -113,6 +113,26 @@ class GpuDsv2MetadataWriteSuite extends RmmSparkRetrySuiteBase {
     }
     assert(writer.metadataWriteCount === 1)
     assert(writer.ordinaryWriteCount === 1)
+  }
+
+  test("operation splitting retries before writer side effects") {
+    val rowProj = projectingRow(rowSchema, Seq(1, 2))
+    val metaProj = projectingRow(metaSchema, Seq(3))
+    val task = GpuDataAndMetadataWritingSparkTask(rowProj, metaProj)
+    val writer = new RecordingDataWriter()
+    val batch = buildOperationBatch(
+      Array(WRITE_WITH_METADATA_OPERATION, WRITE_OPERATION, WRITE_WITH_METADATA_OPERATION),
+      Array(1, 2, 3),
+      Array(10L, 20L, 30L),
+      Array(100L, 200L, 300L))
+    RmmSpark.forceRetryOOM(
+      RmmSpark.getCurrentThreadId,
+      1,
+      RmmSpark.OomInjectionType.GPU.ordinal,
+      0)
+    task.writeBatchForTest(writer, batch)
+    assert(RmmSpark.getAndResetNumRetryThrow(/* taskId = */ 1) > 0)
+    assert(writer.writeKinds === Seq("metadata", "ordinary", "metadata"))
   }
 
   test("contiguous operation runs preserve interleaved metadata and ordinary order") {

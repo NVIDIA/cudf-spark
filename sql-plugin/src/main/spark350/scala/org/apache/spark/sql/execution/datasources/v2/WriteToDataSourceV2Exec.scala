@@ -635,32 +635,38 @@ object GpuDelteWritingSparkTask {
 
   /**
    * Split `batch` into contiguous runs of equal `__row_operation` (column 0).
-   * Takes ownership of `batch`. Does not regroup equal ops that are non-adjacent.
+   * Takes ownership of `batch`, makes it spillable, and retries any GPU allocation failures
+   * before writer side effects begin. Does not regroup equal ops that are non-adjacent.
    */
   private[v2] def splitIntoContiguousOperationRuns(
       batch: ColumnarBatch): Array[SpillableColumnarBatch] = {
-    withResource(batch) { _ =>
-      if (batch.numRows() == 0) {
-        Array.empty
-      } else {
-        val dataTypes = GpuColumnVector.extractTypes(batch)
-        val boundaries = contiguousOperationBoundaries(batch)
-        if (boundaries.isEmpty) {
-          Array(SpillableColumnarBatch(
-            GpuColumnVector.incRefCounts(batch),
-            SpillPriorities.ACTIVE_ON_DECK_PRIORITY))
-        } else {
-          withResource(GpuColumnVector.from(batch)) { table =>
-            withResource(table.contiguousSplit(boundaries: _*)) { cts =>
-              closeOnExcept(new ArrayBuffer[SpillableColumnarBatch](cts.length)) { out =>
-                var i = 0
-                while (i < cts.length) {
-                  out += SpillableColumnarBatch(
-                    GpuColumnVectorFromBuffer.from(cts(i), dataTypes),
-                    SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
-                  i += 1
+    withResource(
+      SpillableColumnarBatch(batch, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)) { scb =>
+      withRetryNoSplit {
+        withResource(scb.getColumnarBatch()) { attempt =>
+          if (attempt.numRows() == 0) {
+            Array.empty
+          } else {
+            val dataTypes = GpuColumnVector.extractTypes(attempt)
+            val boundaries = contiguousOperationBoundaries(attempt)
+            if (boundaries.isEmpty) {
+              Array(SpillableColumnarBatch(
+                GpuColumnVector.incRefCounts(attempt),
+                SpillPriorities.ACTIVE_ON_DECK_PRIORITY))
+            } else {
+              withResource(GpuColumnVector.from(attempt)) { table =>
+                withResource(table.contiguousSplit(boundaries: _*)) { cts =>
+                  closeOnExcept(new ArrayBuffer[SpillableColumnarBatch](cts.length)) { out =>
+                    var i = 0
+                    while (i < cts.length) {
+                      out += SpillableColumnarBatch(
+                        GpuColumnVectorFromBuffer.from(cts(i), dataTypes),
+                        SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+                      i += 1
+                    }
+                    out.toArray
+                  }
                 }
-                out.toArray
               }
             }
           }
