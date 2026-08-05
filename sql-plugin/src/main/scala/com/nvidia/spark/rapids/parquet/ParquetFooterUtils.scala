@@ -16,14 +16,16 @@
 
 package com.nvidia.spark.rapids.parquet
 
+import java.nio.ByteOrder
 import java.nio.charset.StandardCharsets
 import java.util.Arrays
 
 import ai.rapids.cudf.HostMemoryBuffer
-import com.nvidia.spark.rapids.{GpuMetric, NoopMetric, NvtxRegistry, PerfIO, RapidsConf}
-import com.nvidia.spark.rapids.Arm.closeOnExcept
+import com.nvidia.spark.rapids.{GpuMetric, HostAlloc, NoopMetric, NvtxRegistry, RapidsConf}
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.filecache.FileCache
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile
+import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile.CopyRange
 import org.apache.hadoop.fs.Path
 import org.apache.parquet.hadoop.ParquetFileWriter.MAGIC
 
@@ -78,8 +80,36 @@ object ParquetFooterUtils {
   def readFooterBufferFromInputFile(
       inputFile: RapidsInputFile,
       filePath: Path): HostMemoryBuffer = {
+    val fileLen = inputFile.getLength
+    if (fileLen < MAGIC.length + FooterLengthSize + MAGIC.length) {
+      throw new RuntimeException(s"$filePath is not a Parquet file (too small length: $fileLen)")
+    }
     NvtxRegistry.PARQUET_READ_FOOTER_BYTES {
-      PerfIO.readParquetFooterBuffer(inputFile, filePath, verifyParquetMagic)
+      val trailerLen = FooterLengthSize + MAGIC.length
+      val (footerLength, trailerMagic) = withResource(
+          HostAlloc.alloc(trailerLen, preferPinned = false)) { trailerBuf =>
+        inputFile.readTail(trailerLen, trailerBuf)
+        val view = trailerBuf.asByteBuffer(0, trailerLen).order(ByteOrder.LITTLE_ENDIAN)
+        val len = view.getInt()
+        val magic = new Array[Byte](MAGIC.length)
+        view.get(magic)
+        (len, magic)
+      }
+      verifyParquetMagic(filePath, trailerMagic)
+      val footerLengthIndex = fileLen - trailerLen
+      val footerIndex = footerLengthIndex - footerLength
+      if (footerIndex < MAGIC.length || footerIndex >= footerLengthIndex) {
+        throw new RuntimeException(s"corrupted file $filePath: the footer index is not within " +
+          s"the file: $footerIndex")
+      }
+      val hmbLength = (fileLen - footerIndex).toInt
+      closeOnExcept(HostAlloc.alloc(hmbLength + MAGIC.length, preferPinned = false)) { outBuffer =>
+        outBuffer.asByteBuffer(0, MAGIC.length).put(MAGIC)
+        val ranges = new java.util.ArrayList[CopyRange](1)
+        ranges.add(new CopyRange(footerIndex, hmbLength, MAGIC.length))
+        inputFile.readVectored(outBuffer, ranges)
+        outBuffer
+      }
     }
   }
 

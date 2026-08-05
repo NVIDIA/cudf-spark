@@ -14,18 +14,19 @@
  * limitations under the License.
  */
 
-/*** spark-rapids-shim-json-lines
-{"spark": "411"}
-{"spark": "412"}
-{"spark": "413"}
-{"spark": "420"}
-{"spark": "500"}
-spark-rapids-shim-json-lines ***/
-package com.nvidia.spark.rapids.shims
+package com.nvidia.spark.rapids.delta.delta41x
 
-/**
- * Spark 4.1+ forwards MergeSummary via BatchWrite.commit(messages, summary).
- */
-object GpuMergeRowMetricsShims {
-  val writeSummaryEnabled: Boolean = true
+import com.nvidia.spark.rapids.{DataFromReplacementRule, RapidsConf, RapidsMeta}
+
+import org.apache.spark.sql.delta.commands.MergeIntoCommand
+
+class MergeIntoCommandMeta(
+    mergeCmd: MergeIntoCommand,
+    conf: RapidsConf,
+    parent: Option[RapidsMeta[_, _, _]],
+    rule: DataFromReplacementRule)
+  extends com.nvidia.spark.rapids.delta.common.MergeIntoCommandMeta(
+    mergeCmd, conf, parent, rule) {
+
+  override protected def supportsNotMatchedBySourceClauses: Boolean = true
 }
