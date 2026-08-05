@@ -16,18 +16,42 @@
 
 package com.nvidia.spark.rapids
 
+import ai.rapids.cudf.ast.{AstExpression, CompiledExpression}
+import org.mockito.Mockito.{doThrow, mock, times, verify, when}
 import org.scalatest.funsuite.AnyFunSuite
 
+import org.apache.spark.TaskContext
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Expression}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.{GpuAdd, GpuGreatest, GpuMultiply, GpuSubtract}
+import org.apache.spark.sql.rapids.execution.TrampolineUtil
+import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 import org.apache.spark.sql.types.{FloatType, IntegerType, LongType}
+import org.apache.spark.util.TaskCompletionListener
 
 class GpuProjectAstJitSuite extends AnyFunSuite {
   private def reference(ordinal: Int, dataType: org.apache.spark.sql.types.DataType) =
     AttributeReference(s"c$ordinal", dataType, nullable = true)()
 
   private def alias(expression: GpuExpression, name: String) = GpuAlias(expression, name)()
+
+  private def mockJitExpression(compiled: CompiledExpression): GpuAstJitExpression = {
+    val child = mock(classOf[GpuExpression])
+    val ast = mock(classOf[AstExpression])
+    when(child.convertToAst(Int.MaxValue)).thenReturn(ast)
+    when(ast.compile()).thenReturn(compiled)
+    GpuAstJitExpression(child)
+  }
+
+  private def withTaskContext[T](taskContext: TaskContext)(body: => T): T = {
+    TrampolineUtil.setTaskContext(taskContext)
+    try {
+      body
+    } finally {
+      TrampolineUtil.unsetTaskContext()
+      ScalableTaskCompletion.reset()
+    }
+  }
 
   private def jitExpressions(expressions: Seq[Expression]): Seq[GpuAstJitExpression] = {
     expressions.flatMap(_.collect {
@@ -218,5 +242,48 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     val wrapped = GpuAstJitExpression.wrapProjectExpressions(expressions)
 
     assert(jitExpressions(wrapped).isEmpty)
+  }
+
+  test("project AST JIT cleans up when task completion registration fails") {
+    val registrationFailure = new RuntimeException("task completion registration failed")
+    val closeFailure = new RuntimeException("compiled expression close failed")
+    val taskContext = new MockTaskContext(taskAttemptId = 1, partitionId = 0) {
+      override def addTaskCompletionListener(listener: TaskCompletionListener): TaskContext =
+        throw registrationFailure
+    }
+    val compiled = mock(classOf[CompiledExpression])
+    doThrow(closeFailure).when(compiled).close()
+    val jit = mockJitExpression(compiled)
+
+    withTaskContext(taskContext) {
+      val thrown = intercept[RuntimeException] {
+        jit.checkpoint()
+      }
+      assert(thrown eq registrationFailure)
+      assertResult(Seq(closeFailure))(thrown.getSuppressed.toSeq)
+      jit.close()
+      verify(compiled, times(1)).close()
+    }
+  }
+
+  test("project AST JIT rejects a cleanup callback consumed during registration") {
+    val taskContext = new MockTaskContext(taskAttemptId = 1, partitionId = 0) {
+      override def addTaskCompletionListener(listener: TaskCompletionListener): TaskContext = {
+        listener.onTaskCompletion(this)
+        this
+      }
+    }
+    val compiled = mock(classOf[CompiledExpression])
+    val jit = mockJitExpression(compiled)
+
+    withTaskContext(taskContext) {
+      val thrown = intercept[IllegalStateException] {
+        jit.checkpoint()
+      }
+      assertResult("Task completed while registering the AST JIT cleanup callback")(
+        thrown.getMessage)
+      jit.close()
+      verify(compiled, times(1)).close()
+    }
   }
 }

@@ -96,17 +96,34 @@ case class GpuAstJitExpression(child: GpuExpression)
     }
     if (!completionRegistered) {
       Option(TaskContext.get()).foreach { taskContext =>
-        onTaskCompletion(taskContext) {
-          close()
-        }
         completionRegistered = true
+        try {
+          onTaskCompletion(taskContext) {
+            closeAtTaskCompletion()
+          }
+          if (!completionRegistered) {
+            throw new IllegalStateException(
+              "Task completed while registering the AST JIT cleanup callback")
+          }
+        } catch {
+          case t: Throwable =>
+            completionRegistered = false
+            closeCompiledExpression(t)
+            throw t
+        }
       }
     }
     compiledExpression
   }
 
-  private def closeCompiledExpression(): Unit = synchronized {
-    Option(compiledExpression).foreach(_.safeClose())
+  private def closeAtTaskCompletion(): Unit = synchronized {
+    completionRegistered = false
+    closeCompiledExpression()
+  }
+
+  private def closeCompiledExpression(error: Throwable = null): Unit = synchronized {
+    val toClose = compiledExpression
     compiledExpression = null
+    Option(toClose).foreach(_.safeClose(error))
   }
 }
