@@ -22,7 +22,8 @@ import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsPluginImplicits.ReallyAGpuExpression
 import com.nvidia.spark.rapids.jni.Aggregation64Utils
-import com.nvidia.spark.rapids.shims.{GpuDeterministicFirstLastCollectShim, ShimExpression, TypeUtilsShims}
+import com.nvidia.spark.rapids.shims.{GpuDeterministicFirstLastCollectShim, HashUtils, ShimExpression,
+  TypeUtilsShims}
 import com.nvidia.spark.rapids.window._
 
 import org.apache.spark.sql.catalyst.InternalRow
@@ -1924,6 +1925,15 @@ trait GpuCollectBase
   def child: Expression
   protected def arrayContainsNull: Boolean = false
 
+  /**
+   * Element type stored in the aggregation buffer. Defaults to the result element type.
+   * Spark 4.2+ CollectSet overrides this for float/double to store normalized bit keys.
+   */
+  protected def bufferElementType: DataType = child.dataType
+
+  protected final def bufferDataType: DataType =
+    ArrayType(bufferElementType, containsNull = arrayContainsNull)
+
   override def nullable: Boolean = false
 
   override def dataType: DataType = ArrayType(child.dataType, containsNull = arrayContainsNull)
@@ -1931,16 +1941,16 @@ trait GpuCollectBase
   override def children: Seq[Expression] = child :: Nil
 
   // WINDOW FUNCTION
-  override val windowInputProjection: Seq[Expression] = Seq(child)
+  override lazy val windowInputProjection: Seq[Expression] = Seq(child)
 
-  override val initialValues: Seq[Expression] = {
-    Seq(GpuLiteral.create(new GenericArrayData(Array.empty[Any]), dataType))
+  override lazy val initialValues: Seq[Expression] = {
+    Seq(GpuLiteral.create(new GenericArrayData(Array.empty[Any]), bufferDataType))
   }
 
-  override val inputProjection: Seq[Expression] = Seq(child)
+  override lazy val inputProjection: Seq[Expression] = Seq(child)
 
   protected final lazy val outputBuf: AttributeReference =
-    AttributeReference("inputBuf", dataType)()
+    AttributeReference("inputBuf", bufferDataType)()
 }
 
 /**
@@ -1985,6 +1995,11 @@ case class GpuCollectList(
  *
  * The two 'offset' parameters are not used by GPU version, but are here for the compatibility
  * with the CPU version and automated checks.
+ *
+ * On Spark 4.2+, CollectSet stores float/double aggregation buffers as normalized bit patterns
+ * (INT/LONG) so HashSet can treat NaNs and signed zeros as equal. GPU CollectSet mirrors that
+ * by normalizing and bit-keying in [[inputProjection]], so mixed CPU/GPU aggregate stages share
+ * the same buffer layout without host-side per-row float↔bits converters.
  */
 case class GpuCollectSet(
     child: Expression,
@@ -1998,10 +2013,36 @@ case class GpuCollectSet(
 
   override protected def arrayContainsNull: Boolean = !ignoreNulls
 
+  // Spark 4.2+ float/double buffers use normalized bit keys (see TypeUtilsShims).
+  override protected def bufferElementType: DataType =
+    TypeUtilsShims.collectSetCpuBufferElementType(child.dataType)
+
+  private lazy val useNormalizedBitKeys: Boolean = bufferElementType != child.dataType
+
+  override lazy val inputProjection: Seq[Expression] = {
+    if (useNormalizedBitKeys) {
+      Seq(GpuCollectSetNormalizedBitKey(child))
+    } else {
+      Seq(child)
+    }
+  }
+
+  // Window collect_set emits the result array directly from rolling aggregation, so normalize
+  // floats in-place rather than switching the window input to bit keys.
+  override lazy val windowInputProjection: Seq[Expression] = {
+    if (useNormalizedBitKeys) {
+      Seq(GpuNormalizeFloatingPointForCollectSet(child))
+    } else {
+      Seq(child)
+    }
+  }
+
   override lazy val updateAggregates: Seq[CudfAggregate] =
-    Seq(new CudfCollectSet(dataType, nullPolicy))
-  override lazy val mergeAggregates: Seq[CudfAggregate] = Seq(new CudfMergeSets(dataType))
-  override lazy val evaluateExpression: Expression = outputBuf
+    Seq(new CudfCollectSet(bufferDataType, nullPolicy))
+  override lazy val mergeAggregates: Seq[CudfAggregate] = Seq(new CudfMergeSets(bufferDataType))
+  override lazy val evaluateExpression: Expression =
+    if (useNormalizedBitKeys) GpuCollectSetBitKeysToValues(outputBuf) else outputBuf
+
   override def aggBufferAttributes: Seq[AttributeReference] = outputBuf :: Nil
 
   override def prettyName: String = "collect_set"
@@ -2025,6 +2066,97 @@ case class GpuCollectSet(
   // A `COLLECT_SET` window aggregation over (2, -1) should yield an empty array [],
   // not null, for the first row.
   override def getMinPeriods: Int = 0
+}
+
+/**
+ * Helpers matching Spark's NormalizeFloatingNumbers for CollectSet float/double keys:
+ * canonicalize NaN payloads and map -0.0 to +0.0.
+ */
+object CollectSetFloatingNormalize {
+  def normalize(cv: ColumnVector): ColumnVector = {
+    val dtype = cv.getType
+    require(dtype == DType.FLOAT32 || dtype == DType.FLOAT64,
+      s"CollectSet floating normalize expects FLOAT32/FLOAT64, found $dtype")
+    // Canonicalize NaN payloads first (Spark FLOAT_NORMALIZER / DOUBLE_NORMALIZER), then
+    // reuse HashUtils for signed-zero normalization (-0.0 -> +0.0).
+    val withCanonNan = withResource(cv.isNan) { isNan =>
+      withResource(nanScalar(dtype)) { nan =>
+        isNan.ifElse(nan, cv)
+      }
+    }
+    withResource(withCanonNan) { normalizedNan =>
+      HashUtils.normalizeInput(normalizedNan)
+    }
+  }
+
+  private def nanScalar(dtype: DType): Scalar =
+    if (dtype == DType.FLOAT32) {
+      Scalar.fromFloat(Float.NaN)
+    } else {
+      Scalar.fromDouble(Double.NaN)
+    }
+}
+
+/** Normalize float/double values for CollectSet without changing the logical type. */
+case class GpuNormalizeFloatingPointForCollectSet(child: Expression) extends GpuUnaryExpression {
+  override def dataType: DataType = child.dataType
+
+  override def doColumnar(input: GpuColumnVector): ColumnVector =
+    CollectSetFloatingNormalize.normalize(input.getBase)
+}
+
+/**
+ * Normalize float/double and bit-cast to the Spark 4.2 CollectSet buffer key type
+ * (Float -> Int, Double -> Long).
+ */
+case class GpuCollectSetNormalizedBitKey(child: Expression) extends GpuUnaryExpression {
+  override def dataType: DataType = {
+    val keyType = TypeUtilsShims.collectSetCpuBufferElementType(child.dataType)
+    if (keyType == child.dataType) {
+      throw new IllegalStateException(
+        s"CollectSet bit-key conversion only applies when buffer keys differ, found $keyType")
+    }
+    keyType
+  }
+
+  override def doColumnar(input: GpuColumnVector): ColumnVector = {
+    withResource(CollectSetFloatingNormalize.normalize(input.getBase)) { normalized =>
+      val bitsType = GpuColumnVector.getNonNestedRapidsType(dataType)
+      withResource(normalized.bitCastTo(bitsType)) { bits =>
+        bits.copyToColumnVector()
+      }
+    }
+  }
+}
+
+/**
+ * Convert a CollectSet aggregation buffer of normalized bit keys back to float/double values.
+ * Int keys -> Float, Long keys -> Double.
+ */
+case class GpuCollectSetBitKeysToValues(child: Expression) extends GpuUnaryExpression {
+  override def dataType: DataType = child.dataType match {
+    case ArrayType(IntegerType, containsNull) => ArrayType(FloatType, containsNull)
+    case ArrayType(LongType, containsNull) => ArrayType(DoubleType, containsNull)
+    case t =>
+      throw new IllegalStateException(
+        s"CollectSet bit-key buffer must be ArrayType(IntegerType|LongType), found $t")
+  }
+
+  override def doColumnar(input: GpuColumnVector): ColumnVector = {
+    val list = input.getBase
+    withResource(list.getChildColumnView(0)) { bitsView =>
+      val outDType = bitsView.getType match {
+        case DType.INT32 => DType.FLOAT32
+        case DType.INT64 => DType.FLOAT64
+        case t => throw new IllegalStateException(s"Unexpected CollectSet bit-key cudf type $t")
+      }
+      withResource(bitsView.bitCastTo(outDType)) { valuesView =>
+        withResource(list.replaceListChild(valuesView)) { replaced =>
+          replaced.copyToColumnVector()
+        }
+      }
+    }
+  }
 }
 
 class CpuToGpuCollectBufferConverter(
@@ -2076,163 +2208,6 @@ case class GpuToCpuCollectBufferTransition(
     // in ArrayData(UnsafeArrayData).
     val arrayData = input.asInstanceOf[ArrayData]
     projection.apply(InternalRow.apply(arrayData)).getBytes
-  }
-}
-
-/**
- * CollectSet buffer converters.
- *
- * Spark 4.2 changed CollectSet's CPU agg buffer for FloatType/DoubleType to store normalized
- * bit patterns (IntegerType/LongType) so HashSet can treat NaNs and signed zeros as equal.
- * GPU CollectSet still stores the logical float/double values, so mixed CPU/GPU aggregation
- * stages must convert between the two buffer layouts.
- */
-class CpuToGpuCollectSetBufferConverter(
-    elementType: DataType,
-    containsNull: Boolean = false) extends CpuToGpuAggregateBufferConverter {
-  def createExpression(child: Expression): CpuToGpuBufferTransition = {
-    CpuToGpuCollectSetBufferTransition(child, elementType, containsNull)
-  }
-}
-
-case class CpuToGpuCollectSetBufferTransition(
-    override val child: Expression,
-    private val elementType: DataType,
-    private val containsNull: Boolean) extends CpuToGpuBufferTransition {
-
-  private lazy val row = new UnsafeRow(1)
-  private lazy val cpuElementType: DataType =
-    TypeUtilsShims.collectSetCpuBufferElementType(elementType)
-
-  override def dataType: DataType = ArrayType(elementType, containsNull)
-
-  override protected def nullSafeEval(input: Any): ArrayData = {
-    val bytes = input.asInstanceOf[Array[Byte]]
-    row.pointTo(bytes, bytes.length)
-    val cpuArray = row.getArray(0)
-    if (cpuElementType == elementType) {
-      cpuArray.copy()
-    } else {
-      CollectSetBufferConversions.cpuBitsToGpuValues(cpuArray, elementType, containsNull)
-    }
-  }
-}
-
-class GpuToCpuCollectSetBufferConverter(
-    elementType: DataType,
-    containsNull: Boolean = false) extends GpuToCpuAggregateBufferConverter {
-  def createExpression(child: Expression): GpuToCpuBufferTransition = {
-    GpuToCpuCollectSetBufferTransition(child, elementType, containsNull)
-  }
-}
-
-case class GpuToCpuCollectSetBufferTransition(
-    override val child: Expression,
-    private val elementType: DataType,
-    private val containsNull: Boolean) extends GpuToCpuBufferTransition {
-
-  private lazy val cpuElementType: DataType =
-    TypeUtilsShims.collectSetCpuBufferElementType(elementType)
-  private lazy val cpuBufferType: DataType = ArrayType(cpuElementType, containsNull)
-  private lazy val projection = UnsafeProjection.create(Array[DataType](cpuBufferType))
-
-  override protected def nullSafeEval(input: Any): Array[Byte] = {
-    val arrayData = input.asInstanceOf[ArrayData]
-    val cpuArray = if (cpuElementType == elementType) {
-      arrayData
-    } else {
-      CollectSetBufferConversions.gpuValuesToCpuBits(arrayData, elementType, containsNull)
-    }
-    projection.apply(InternalRow.apply(cpuArray)).getBytes
-  }
-}
-
-object CollectSetBufferConversions {
-  // Matches Spark's NormalizeFloatingNumbers.FLOAT_NORMALIZER / DOUBLE_NORMALIZER.
-  private def normalizeFloat(f: Float): Float = {
-    if (f.isNaN) {
-      Float.NaN
-    } else if (f == -0.0f) {
-      0.0f
-    } else {
-      f
-    }
-  }
-
-  private def normalizeDouble(d: Double): Double = {
-    if (d.isNaN) {
-      Double.NaN
-    } else if (d == -0.0d) {
-      0.0d
-    } else {
-      d
-    }
-  }
-
-  def gpuValuesToCpuBits(
-      arrayData: ArrayData,
-      elementType: DataType,
-      containsNull: Boolean): ArrayData = {
-    val n = arrayData.numElements()
-    val out = new Array[Any](n)
-    var i = 0
-    elementType match {
-      case FloatType =>
-        while (i < n) {
-          if (containsNull && arrayData.isNullAt(i)) {
-            out(i) = null
-          } else {
-            out(i) = java.lang.Float.floatToIntBits(normalizeFloat(arrayData.getFloat(i)))
-          }
-          i += 1
-        }
-      case DoubleType =>
-        while (i < n) {
-          if (containsNull && arrayData.isNullAt(i)) {
-            out(i) = null
-          } else {
-            out(i) = java.lang.Double.doubleToLongBits(normalizeDouble(arrayData.getDouble(i)))
-          }
-          i += 1
-        }
-      case other =>
-        throw new IllegalStateException(
-          s"Unexpected CollectSet GPU-to-CPU buffer conversion for $other")
-    }
-    new GenericArrayData(out)
-  }
-
-  def cpuBitsToGpuValues(
-      arrayData: ArrayData,
-      elementType: DataType,
-      containsNull: Boolean): ArrayData = {
-    val n = arrayData.numElements()
-    val out = new Array[Any](n)
-    var i = 0
-    elementType match {
-      case FloatType =>
-        while (i < n) {
-          if (containsNull && arrayData.isNullAt(i)) {
-            out(i) = null
-          } else {
-            out(i) = java.lang.Float.intBitsToFloat(arrayData.getInt(i))
-          }
-          i += 1
-        }
-      case DoubleType =>
-        while (i < n) {
-          if (containsNull && arrayData.isNullAt(i)) {
-            out(i) = null
-          } else {
-            out(i) = java.lang.Double.longBitsToDouble(arrayData.getLong(i))
-          }
-          i += 1
-        }
-      case other =>
-        throw new IllegalStateException(
-          s"Unexpected CollectSet CPU-to-GPU buffer conversion for $other")
-    }
-    new GenericArrayData(out)
   }
 }
 

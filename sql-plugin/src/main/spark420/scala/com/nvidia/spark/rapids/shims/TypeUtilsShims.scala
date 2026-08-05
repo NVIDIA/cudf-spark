@@ -42,6 +42,7 @@ object TypeUtilsShims {
   val collectSetFloatNanEquality: NaNEquality = NaNEquality.ALL_EQUAL
 
   // Spark 4.2 CollectSet keys float/double by normalized bit patterns in the agg buffer.
+  // GPU CollectSet uses the same buffer element types so mixed CPU/GPU stages match.
   def collectSetCpuBufferElementType(childType: DataType): DataType = childType match {
     case FloatType => IntegerType
     case DoubleType => LongType
