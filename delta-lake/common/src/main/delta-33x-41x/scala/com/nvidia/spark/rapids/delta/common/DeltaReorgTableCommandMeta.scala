@@ -57,10 +57,6 @@ class DeltaReorgTableCommandMeta(
         s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
     }
 
-    if (VersionUtils.cmpSparkVersion(3, 5, 3) < 0) {
-      willNotWorkOnGpu("Delta REORG on GPU requires Spark 3.5.3 or later")
-    }
-
     if (cmd.reorgTableSpec.reorgTableMode != DeltaReorgTableMode.PURGE ||
         cmd.reorgTableSpec.icebergCompatVersionOpt.nonEmpty) {
       willNotWorkOnGpu("Only Delta REORG TABLE APPLY (PURGE) is supported on GPU")
