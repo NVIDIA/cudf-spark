@@ -24,7 +24,9 @@ from marks import *
 from pyspark.sql.types import *
 import pyspark.sql.utils
 import pyspark.sql.functions as f
-from spark_session import with_cpu_session, with_gpu_session, is_databricks104_or_later, is_databricks_version_or_later, is_before_spark_320, is_spark_400_or_later, is_before_spark_340
+from spark_session import with_cpu_session, with_gpu_session, is_databricks104_or_later, \
+    is_databricks_version_or_later, is_before_spark_320, is_spark_400_or_later, \
+    is_before_spark_340, spark_version
 
 _regexp_conf = { 'spark.rapids.sql.regexp.enabled': 'true' }
 
@@ -1153,9 +1155,16 @@ def test_multi_contains_conditional(ansi):
 
 
 # SPARK-57507 / #15383: reverse must clamp truncated trailing UTF-8 to the row boundary.
-# Neighbor sentinel rows make an over-read observable. Expected values are Spark's fixed
-# semantics (golden), so the test does not depend on whether the running Spark CPU build
-# already contains SPARK-57507.
+# Neighbor sentinel rows make an over-read observable.
+def _cpu_reverse_has_spark_57507():
+    version = spark_version()
+    # The fix was backported to the 4.0.4, 4.1.3, and 4.2.0 release lines.
+    return ('4.0.4' <= version < '4.1.0'
+            or '4.1.3' <= version < '4.2.0'
+            or version >= '4.2.0')
+
+
+@ignore_order(local=True)
 @pytest.mark.parametrize('hex_in,expected_hex', [
     ('41CE', 'CE41'),                 # A + truncated 2-byte lead
     ('41E4B8', 'E4B841'),             # A + truncated 3-byte lead
@@ -1178,14 +1187,22 @@ def test_reverse_truncated_trailing_utf8(hex_in, expected_hex):
             ],
             'row_id INT, b BINARY'
         ).coalesce(1).selectExpr('row_id', 'CAST(b AS STRING) AS v')
-        out = df.selectExpr('row_id', 'hex(reverse(v)) as h')
-        # Collect first so AQE finalizes and RAPIDS replacements appear in the plan.
-        rows = out.collect()
-        plan = out._jdf.queryExecution().executedPlan().toString()
-        # Expression trees render as lowercase "gpureverse(...)", not the class name.
-        assert 'gpureverse' in plan.lower(), 'expected GpuReverse in plan, got:\n' + plan
-        return rows
+        return df.selectExpr('row_id', 'hex(reverse(v)) as h')
 
-    rows = with_gpu_session(do_it)
-    rows_by_id = {row['row_id']: row['h'] for row in rows}
-    assert rows_by_id[0] == expected_hex
+    if _cpu_reverse_has_spark_57507():
+        assert_cpu_and_gpu_are_equal_collect_with_capture(
+            do_it, exist_classes='GpuReverse', require_non_empty=True)
+    else:
+        # Older CPU builds over-read malformed trailing UTF-8, so validate the GPU result
+        # against Spark's corrected semantics instead of asserting CPU/GPU equality.
+        def collect_gpu(spark):
+            out = do_it(spark)
+            rows = out.collect()
+            plan = out._jdf.queryExecution().executedPlan().toString()
+            # Expression trees render as lowercase "gpureverse(...)", not the class name.
+            assert 'gpureverse' in plan.lower(), 'expected GpuReverse in plan, got:\n' + plan
+            return rows
+
+        rows = with_gpu_session(collect_gpu)
+        rows_by_id = {row['row_id']: row['h'] for row in rows}
+        assert rows_by_id[0] == expected_hex
