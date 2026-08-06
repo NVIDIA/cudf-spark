@@ -1172,13 +1172,13 @@ def test_reverse_truncated_trailing_utf8(hex_in, expected_hex):
         # (not allowed in GpuCpuBridge); feed raw bytes via BINARY then cast to STRING.
         df = spark.createDataFrame(
             [
-                (bytearray.fromhex(hex_in),),
-                (bytearray.fromhex('FFFFFFFF'),),
-                (bytearray.fromhex('414243'),),
+                (0, bytearray.fromhex(hex_in)),
+                (1, bytearray.fromhex('FFFFFFFF')),
+                (2, bytearray.fromhex('414243')),
             ],
-            'b BINARY'
-        ).coalesce(1).selectExpr('CAST(b AS STRING) AS v')
-        out = df.selectExpr('hex(reverse(v)) as h')
+            'row_id INT, b BINARY'
+        ).coalesce(1).selectExpr('row_id', 'CAST(b AS STRING) AS v')
+        out = df.selectExpr('row_id', 'hex(reverse(v)) as h')
         # Collect first so AQE finalizes and RAPIDS replacements appear in the plan.
         rows = out.collect()
         plan = out._jdf.queryExecution().executedPlan().toString()
@@ -1187,4 +1187,5 @@ def test_reverse_truncated_trailing_utf8(hex_in, expected_hex):
         return rows
 
     rows = with_gpu_session(do_it)
-    assert rows[0]['h'] == expected_hex
+    rows_by_id = {row['row_id']: row['h'] for row in rows}
+    assert rows_by_id[0] == expected_hex
