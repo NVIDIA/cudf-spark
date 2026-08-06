@@ -18,6 +18,7 @@ package com.nvidia.spark.rapids.iceberg
 
 import com.nvidia.spark.rapids.{RapidsConf, RapidsMeta}
 import org.apache.iceberg.{Table, TableProperties}
+
 import org.apache.spark.sql.execution.SparkPlan
 
 /** Common planning gate for Iceberg table format versions. */
