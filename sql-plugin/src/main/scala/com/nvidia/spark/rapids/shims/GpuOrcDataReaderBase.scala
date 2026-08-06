@@ -193,9 +193,9 @@ abstract class GpuOrcDataReaderBase(
   def copyFileDataToHostStream(out: HostMemoryOutputStream, ranges: DiskRangeList): Unit = {
     val startPos = out.getPos
     // Cache and remote reads write directly to the backing buffer without advancing the stream.
-    // Reserve the output range first so the stream points to the next write position on return.
-    out.seek(startPos + getTotalLength(ranges))
     copyFileDataToHostStream(out, Seq((startPos, ranges)))
+    // Advance the stream after the data is written so it points to the next write position.
+    out.seek(startPos + getTotalLength(ranges))
   }
 
   def copyFileDataToHostStream(
