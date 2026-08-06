@@ -52,6 +52,8 @@ object ParallelUnitTestRunner {
   private val SPARK_WAREHOUSE_PREFIX = "spark-warehouse"
   private val WORKER_MODE = "worker"
   private val PROTOCOL_PREFIX = "__RAPIDS_PARALLEL_UT__"
+  private val ONE_TEST_FAILED_SUMMARY = "*** 1 TEST FAILED ***"
+  private val ANSI_COLOR_ESCAPE = "\u001b\\[[0-9;]*m".r
   private val WORKER_EXIT_TIMEOUT_SECONDS = 10L
   private val WORKER_DESTROY_TIMEOUT_SECONDS = 10L
   private val WATCHDOG_POLL_SECONDS = 15L
@@ -93,6 +95,7 @@ object ParallelUnitTestRunner {
     val suiteTimeoutSeconds = propertyDouble(
       config.getOrElse("suiteTimeoutSeconds", ""), DEFAULT_SUITE_TIMEOUT_SECONDS.toDouble).toLong
     val testFailureIgnore = propertyValue(config("testFailureIgnore"), "false").toBoolean
+    val expectedFailureOutputPrefix = config.getOrElse("expectedFailureOutputPrefix", "")
     val configuredSparkConfs = propertySeparatedList(config("sparkConfs"), ';')
     val sparkConfs = if (configuredSparkConfs.isEmpty) {
       Seq(None)
@@ -144,6 +147,7 @@ object ParallelUnitTestRunner {
         perForkAllocation,
         perForkMaxAllocation,
         perForkMinAllocation,
+        expectedFailureOutputPrefix,
         suiteTimeoutSeconds)
     }
 
@@ -171,6 +175,7 @@ object ParallelUnitTestRunner {
       allocationFraction: Double,
       maxAllocationFraction: Double,
       minAllocationFraction: Double,
+      expectedFailureOutputPrefix: String,
       suiteTimeoutSeconds: Long): Seq[String] = {
     val failures = new ConcurrentLinkedQueue[String]()
 
@@ -193,6 +198,7 @@ object ParallelUnitTestRunner {
           allocationFraction,
           maxAllocationFraction,
           minAllocationFraction,
+          expectedFailureOutputPrefix,
           suiteTimeoutSeconds)
       }
       thread.start()
@@ -230,6 +236,7 @@ object ParallelUnitTestRunner {
       allocationFraction: Double,
       maxAllocationFraction: Double,
       minAllocationFraction: Double,
+      expectedFailureOutputPrefix: String,
       suiteTimeoutSeconds: Long): Unit = {
     val tmpDir = reportsDir.resolve(s"tmp-wave-$runId-worker-$workerId")
     Files.createDirectories(tmpDir)
@@ -257,8 +264,10 @@ object ParallelUnitTestRunner {
     var process: Process = null
     try {
       process = processBuilder.start()
-      val errorThread = streamLines(s"wave-$runId-worker-$workerId",
-        new BufferedReader(new InputStreamReader(process.getErrorStream)))
+      val errorThread = streamLines(
+        s"wave-$runId-worker-$workerId",
+        new BufferedReader(new InputStreamReader(process.getErrorStream)),
+        expectedFailureOutputPrefix)
       val writer = new BufferedWriter(new OutputStreamWriter(process.getOutputStream))
       val reader = new BufferedReader(new InputStreamReader(process.getInputStream))
       // A hung suite would otherwise block this thread in readLine() until the CI job timeout;
@@ -328,16 +337,19 @@ object ParallelUnitTestRunner {
                 running = sendNextTask()
               }
             case _ =>
-              println(s"[wave-$runId-worker-$workerId] $line")
+              println(s"[wave-$runId-worker-$workerId] " +
+                prefixExpectedFailureSummary(line, expectedFailureOutputPrefix))
           }
         } else {
-          println(s"[wave-$runId-worker-$workerId] $line")
+          println(s"[wave-$runId-worker-$workerId] " +
+            prefixExpectedFailureSummary(line, expectedFailureOutputPrefix))
         }
         if (running) {
           line = reader.readLine()
         }
       }
-      val outputThread = streamLines(s"wave-$runId-worker-$workerId", reader)
+      val outputThread = streamLines(
+        s"wave-$runId-worker-$workerId", reader, expectedFailureOutputPrefix)
       val (exited, terminated) = stopWorkerProcess(process, runId, workerId)
       outputThread.join(TimeUnit.SECONDS.toMillis(WORKER_DESTROY_TIMEOUT_SECONDS))
       errorThread.join(TimeUnit.SECONDS.toMillis(WORKER_DESTROY_TIMEOUT_SECONDS))
@@ -563,6 +575,11 @@ object ParallelUnitTestRunner {
     }
   }
 
+  private[rapids] def prefixExpectedFailureSummary(line: String, prefix: String): String = {
+    val plainLine = ANSI_COLOR_ESCAPE.replaceAllIn(line, "")
+    if (prefix.nonEmpty && plainLine == ONE_TEST_FAILED_SUMMARY) s"$prefix$line" else line
+  }
+
   private def initializeSparkFunctionRegistry(): Unit = {
     val originalSparkTesting = Option(System.getProperty(SPARK_TESTING_PROPERTY))
     try {
@@ -713,12 +730,16 @@ object ParallelUnitTestRunner {
     runnerArgs
   }
 
-  private def streamLines(label: String, reader: BufferedReader): Thread = {
+  private def streamLines(
+      label: String,
+      reader: BufferedReader,
+      expectedFailureOutputPrefix: String): Thread = {
     val thread = new Thread(s"parallel-unit-test-output-$label") {
       override def run(): Unit = try {
         var line = reader.readLine()
         while (line != null) {
-          println(s"[$label] $line")
+          println(s"[$label] " +
+            prefixExpectedFailureSummary(line, expectedFailureOutputPrefix))
           line = reader.readLine()
         }
       } catch {

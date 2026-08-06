@@ -15,13 +15,14 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "412"}
-{"spark": "413"}
+{"spark": "330"}
 spark-rapids-shim-json-lines ***/
-package com.nvidia.spark.rapids.shims
+package org.apache.spark.sql.rapids.suites
 
-/**
- * SparkShimImpl for Spark 4.1.2.
- * Extends Spark411PlusShims with 4.1.2 specific overrides.
- */
-object SparkShimImpl extends Spark411PlusShims with HyperbolicExpressionShims
+import org.apache.spark.sql.{DSV2SQLInsertTestSuite, FileSourceSQLInsertTestSuite}
+import org.apache.spark.sql.rapids.utils.RapidsSQLTestsTrait
+
+class RapidsFileSourceSQLInsertTestSuite
+    extends FileSourceSQLInsertTestSuite with RapidsSQLTestsTrait
+
+class RapidsDSV2SQLInsertTestSuite extends DSV2SQLInsertTestSuite with RapidsSQLTestsTrait
