@@ -111,7 +111,7 @@ def test_insert_overwrite_dynamic_v3_table_fallback(spark_tmp_table_factory):
         df.createOrReplaceTempView(view_name)
         return spark.sql(f"INSERT OVERWRITE TABLE {table_name} SELECT * FROM {view_name}")
 
-    with_cpu_session(lambda spark: insert_data(spark, INITIAL_DATA_SEED))
+    with_cpu_session(lambda spark: insert_data(spark, INITIAL_DATA_SEED).collect())
     assert_gpu_fallback_collect(
         lambda spark: insert_data(spark, None),
         "OverwritePartitionsDynamicExec",

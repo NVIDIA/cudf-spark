@@ -149,9 +149,11 @@ def test_iceberg_delete_v3_table_fallback(
         table_properties={"format-version": "3"},
         delete_mode=delete_mode)
 
+    def delete_data(spark, table_name):
+        spark.sql(f"DELETE FROM {table_name} WHERE _c2 % 3 = 0")
+
     assert_gpu_fallback_write_sql(
-        lambda spark, table_name: spark.sql(
-            f"DELETE FROM {table_name} WHERE _c2 % 3 = 0"),
+        delete_data,
         lambda spark, table_name: spark.sql(f"SELECT * FROM {table_name}"),
         base_table_name,
         [fallback_exec],

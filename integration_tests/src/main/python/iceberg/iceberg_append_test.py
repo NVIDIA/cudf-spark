@@ -83,9 +83,11 @@ def test_insert_into_v3_table_fallback(spark_tmp_table_factory):
     with_cpu_session(lambda spark: create_table(spark, f"{base_table_name}_cpu"))
     with_cpu_session(lambda spark: create_table(spark, f"{base_table_name}_gpu"))
 
+    def insert_data(spark, table_name):
+        spark.sql(f"INSERT INTO {table_name} VALUES (1, 'a'), (2, 'b'), (3, 'c')")
+
     assert_gpu_fallback_write_sql(
-        lambda spark, table_name: spark.sql(
-            f"INSERT INTO {table_name} VALUES (1, 'a'), (2, 'b'), (3, 'c')"),
+        insert_data,
         lambda spark, table_name: spark.sql(f"SELECT * FROM {table_name}"),
         base_table_name,
         ["AppendDataExec"],

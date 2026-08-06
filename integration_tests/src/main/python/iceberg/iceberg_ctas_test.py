@@ -115,7 +115,7 @@ def test_ctas_unpartitioned_table(spark_tmp_table_factory):
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @ignore_order(local=True)
-@allow_non_gpu("AtomicCreateTableAsSelectExec")
+@allow_non_gpu("AtomicCreateTableAsSelectExec", "AppendDataExec")
 def test_ctas_v3_fallback(spark_tmp_table_factory):
     def run_ctas(spark):
         target = get_full_table_name(spark_tmp_table_factory)

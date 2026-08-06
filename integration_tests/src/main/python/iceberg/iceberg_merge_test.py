@@ -207,7 +207,7 @@ def test_iceberg_merge_v3_table_fallback(
         merge_mode=merge_mode)
 
     def merge_data(spark, target_table):
-        return spark.sql(f"""
+        spark.sql(f"""
             MERGE INTO {target_table} t
             USING {source_table} s
             ON t._c0 = s._c0

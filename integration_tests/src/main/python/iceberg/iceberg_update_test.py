@@ -147,9 +147,11 @@ def test_iceberg_update_v3_table_fallback(
         table_properties={"format-version": "3"},
         update_mode=update_mode)
 
+    def update_data(spark, table_name):
+        spark.sql(f"UPDATE {table_name} SET _c2 = _c2 + 100 WHERE _c2 % 3 = 0")
+
     assert_gpu_fallback_write_sql(
-        lambda spark, table_name: spark.sql(
-            f"UPDATE {table_name} SET _c2 = _c2 + 100 WHERE _c2 % 3 = 0"),
+        update_data,
         lambda spark, table_name: spark.sql(f"SELECT * FROM {table_name}"),
         base_table_name,
         [fallback_exec],

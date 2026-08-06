@@ -18,6 +18,7 @@ package com.nvidia.spark.rapids.iceberg
 
 import com.nvidia.spark.rapids.{RapidsConf, RapidsMeta}
 import org.apache.iceberg.{Table, TableProperties}
+import org.apache.spark.sql.execution.SparkPlan
 
 /** Common planning gate for Iceberg table format versions. */
 object IcebergFormatVersionSupport {
@@ -36,8 +37,28 @@ object IcebergFormatVersionSupport {
 
   private def tagForFormatVersion(formatVersion: Int, meta: RapidsMeta[_, _, _]): Unit = {
     if (formatVersion > MaxSupportedFormatVersion && !meta.conf.isIcebergV3Enabled) {
-      meta.willNotWorkOnGpu(s"Iceberg table format version $formatVersion is not supported. " +
-        s"To enable set ${RapidsConf.ENABLE_ICEBERG_V3} to true")
+      val reason = s"Iceberg table format version $formatVersion is not supported. " +
+        s"To enable set ${RapidsConf.ENABLE_ICEBERG_V3} to true"
+      meta.willNotWorkOnGpu(reason)
+
+      // A scan is tagged before its enclosing SparkPlan nodes. Keep MergeRowsExec on CPU with a
+      // v3 target because v3 row-lineage metadata changes the row schemas it processes. This is
+      // especially important with AQE, where the CPU V2 write and its query can be planned in
+      // separate passes.
+      tagMergeRowsAncestor(meta.parent, reason)
     }
+  }
+
+  private def tagMergeRowsAncestor(
+      meta: Option[RapidsMeta[_, _, _]],
+      reason: String): Unit = meta match {
+    case Some(current) =>
+      current.wrapped match {
+        case plan: SparkPlan if plan.getClass.getSimpleName == "MergeRowsExec" =>
+          plan.setTagValue(RapidsMeta.gpuSupportedTag,
+            plan.getTagValue(RapidsMeta.gpuSupportedTag).getOrElse(Set.empty) + reason)
+        case _ => tagMergeRowsAncestor(current.parent, reason)
+      }
+    case None =>
   }
 }
