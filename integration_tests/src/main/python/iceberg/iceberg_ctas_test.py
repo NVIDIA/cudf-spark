@@ -147,7 +147,7 @@ def test_ctas_catalog_v3_fallback(spark_tmp_table_factory,
                                   catalog_id,
                                   catalog_property,
                                   table_prop):
-    catalog_name = f"ctas_v3_{catalog_id}"
+    catalog_name = f"ctas_v3_{catalog_id}_{spark_tmp_table_factory.get()}"
     catalog_prefix = f"spark.sql.catalog.{catalog_name}"
     conf = copy_and_update(iceberg_write_enabled_conf, {
         catalog_prefix: "org.apache.iceberg.spark.SparkCatalog",
