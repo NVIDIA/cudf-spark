@@ -22,7 +22,7 @@ more details.
 Note: The NVIDIA cuDF plugin for Apache Spark was formerly known as the RAPIDS Accelerator for Apache Spark.  The RAPIDS name will be sunset over time.  Github links from
 `spark-rapids` will redirect to `cudf-spark`.  Artifact names will remain the same for now.
 
-## Release v26.06.1
+## Release v26.08.0
 ### Hardware Requirements:
 
 The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Hopper and Blackwell generation datacenter GPUs.  The plugin jar is tested on the following GPUs:
@@ -48,9 +48,10 @@ The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Ho
 		Apache Spark 3.4.0, 3.4.1, 3.4.2, 3.4.3, 3.4.4
 		Apache Spark 3.5.0, 3.5.1, 3.5.2, 3.5.3, 3.5.4, 3.5.5, 3.5.6, 3.5.7, 3.5.8, 3.5.9
 		Apache Spark 4.0.0, 4.0.1, 4.0.2, 4.0.3, 4.0.4
-		Apache Spark 4.1.1
+		Apache Spark 4.1.1, 4.1.2, 4.1.3
+		Apache Spark 4.2.0
 		Scala 2.12: Spark 3.3.0 through 3.5.9
-		Scala 2.13: Spark 3.5.0 through 3.5.9, and Spark 4.0.0, 4.0.1, 4.0.2, 4.0.3, 4.0.4, and 4.1.1
+		Scala 2.13: Spark 3.5.0 through 3.5.9, and Spark 4.0.0 through 4.0.4, Spark 4.1.1 through 4.1.3, and Spark 4.2.0
 	
 	Supported Databricks runtime versions for Azure and AWS:
 		Databricks 14.3 ML LTS (GPU, Scala 2.12, Spark 3.5.0)
@@ -73,29 +74,71 @@ for your hardware's minimum driver version.
 *For EMR support, please refer to the
 [Distributions](https://docs.nvidia.com/spark-rapids/user-guide/latest/faq.html#which-distributions-are-supported) section of the FAQ.
 
+### Databricks Support
+
+#### Runtime Compatibility
+
+Use the JDK provided by the Databricks runtime.
+
+| Databricks Runtime | Apache Spark | Scala | JDK runtime | CUDA jar variants | Minimum NVIDIA driver |
+|---------------------|--------------|-------|-------------|-------------------|-----------------------|
+| 14.3 ML LTS GPU | 3.5.0 | 2.12 | Databricks runtime default | CUDA 12, CUDA 13 | R525+ |
+| 17.3 ML LTS GPU | 4.0.0 | 2.13 | Databricks runtime default | CUDA 12, CUDA 13 | R525+ |
+
+Use the Scala artifact that matches the runtime's Spark/Scala line. The CUDA
+classifier selects the bundled cuDF native libraries.
+
+#### Delta Lake GPU Support on Databricks
+
+| Delta feature | DBR 14.3 | DBR 17.3 |
+|---------------|----------|----------|
+| Reads without deletion vectors | GPU | GPU |
+| Deletion vector reads | CPU fallback | GPU with metadata row index and cuDF plugin deletion-vector predicate pushdown |
+| Delta writes | GPU for append, overwrite, CTAS, and RTAS | GPU for append, overwrite, CTAS, and RTAS |
+| Delta writes with deletion vectors | CPU fallback | CPU fallback for paths that create persistent deletion vectors |
+| DELETE and UPDATE | GPU for copy-on-write. Operations that write deletion vectors fall back to CPU. | GPU for copy-on-write, including liquid-clustered tables. Operations that write persistent deletion vectors fall back to CPU. |
+| MERGE | GPU, including liquid clustering | GPU, including liquid clustering. Persistent deletion-vector writes fall back to CPU. |
+| OPTIMIZE | CPU fallback | GPU for supported standard and ordinary liquid-clustering paths |
+| Auto compaction | GPU when triggered by supported GPU writes | GPU for supported inline, deletion-vector-free paths |
+| Liquid clustering | GPU | GPU for writes, DELETE, UPDATE, MERGE, and ordinary OPTIMIZE |
+
+DBR 17.3 supports GPU data-file writes for qualified liquid-clustering,
+CTAS, and RTAS paths while retaining Databricks-native planning and commit
+semantics. See [#15278](https://github.com/NVIDIA/cudf-spark/pull/15278) and
+[#15320](https://github.com/NVIDIA/cudf-spark/pull/15320) for details and
+expected fallback cases.
+
+Databricks may patch existing runtime versions without changing the public
+runtime line. If a binary compatibility error such as `NoSuchMethodError`
+occurs, verify the cuDF plugin and Databricks runtime combination against this
+page and the release notes.
+
+Support is operation-specific; use `spark.rapids.sql.explain=NOT_ON_GPU` to
+identify CPU fallback in a query plan.
+
 ### cuDF Plugin Support Policy for Apache Spark
 The cuDF plugin maintains support for Apache Spark versions available for download from [Apache Spark](https://spark.apache.org/downloads.html)
 
-### Download the NVIDIA cuDF plugin for Apache Spark v26.06.1
+### Download the NVIDIA cuDF plugin for Apache Spark v26.08.0
 
 #### CUDA 12
 
 | Processor | Scala Version | Download Jar | Download Signature | Download From Maven |
 |-----------|---------------|--------------|--------------------|---------------------|
-| x86_64    | Scala 2.12    | [cuDF plugin v26.06.1](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.12/26.06.1/rapids-4-spark_2.12-26.06.1.jar) | [Signature](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.12/26.06.1/rapids-4-spark_2.12-26.06.1.jar.asc) | <pre>&lt;dependency&gt;<br/>    &lt;groupId&gt;com.nvidia&lt;/groupId&gt;<br/>    &lt;artifactId&gt;rapids-4-spark_2.12&lt;/artifactId&gt;<br/>    &lt;version&gt;26.06.1&lt;/version&gt;<br/>&lt;/dependency&gt;</pre> |
-| x86_64    | Scala 2.13    | [cuDF plugin v26.06.1](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.13/26.06.1/rapids-4-spark_2.13-26.06.1.jar) | [Signature](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.13/26.06.1/rapids-4-spark_2.13-26.06.1.jar.asc) | <pre>&lt;dependency&gt;<br/>    &lt;groupId&gt;com.nvidia&lt;/groupId&gt;<br/>    &lt;artifactId&gt;rapids-4-spark_2.13&lt;/artifactId&gt;<br/>    &lt;version&gt;26.06.1&lt;/version&gt;<br/>&lt;/dependency&gt;</pre> |
-| arm64     | Scala 2.12    | [cuDF plugin v26.06.1](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.12/26.06.1/rapids-4-spark_2.12-26.06.1-cuda12-arm64.jar) | [Signature](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.12/26.06.1/rapids-4-spark_2.12-26.06.1-cuda12-arm64.jar.asc) | <pre>&lt;dependency&gt;<br/>    &lt;groupId&gt;com.nvidia&lt;/groupId&gt;<br/>    &lt;artifactId&gt;rapids-4-spark_2.12&lt;/artifactId&gt;<br/>    &lt;version&gt;26.06.1&lt;/version&gt;<br/>    &lt;classifier&gt;cuda12-arm64&lt;/classifier&gt;<br/>&lt;/dependency&gt;</pre> |
-| arm64     | Scala 2.13    | [cuDF plugin v26.06.1](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.13/26.06.1/rapids-4-spark_2.13-26.06.1-cuda12-arm64.jar) | [Signature](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.13/26.06.1/rapids-4-spark_2.13-26.06.1-cuda12-arm64.jar.asc) | <pre>&lt;dependency&gt;<br/>    &lt;groupId&gt;com.nvidia&lt;/groupId&gt;<br/>    &lt;artifactId&gt;rapids-4-spark_2.13&lt;/artifactId&gt;<br/>    &lt;version&gt;26.06.1&lt;/version&gt;<br/>    &lt;classifier&gt;cuda12-arm64&lt;/classifier&gt;<br/>&lt;/dependency&gt;</pre> |
+| x86_64    | Scala 2.12    | [cuDF plugin v26.08.0](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.12/26.08.0/rapids-4-spark_2.12-26.08.0.jar) | [Signature](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.12/26.08.0/rapids-4-spark_2.12-26.08.0.jar.asc) | <pre>&lt;dependency&gt;<br/>    &lt;groupId&gt;com.nvidia&lt;/groupId&gt;<br/>    &lt;artifactId&gt;rapids-4-spark_2.12&lt;/artifactId&gt;<br/>    &lt;version&gt;26.08.0&lt;/version&gt;<br/>&lt;/dependency&gt;</pre> |
+| x86_64    | Scala 2.13    | [cuDF plugin v26.08.0](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.13/26.08.0/rapids-4-spark_2.13-26.08.0.jar) | [Signature](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.13/26.08.0/rapids-4-spark_2.13-26.08.0.jar.asc) | <pre>&lt;dependency&gt;<br/>    &lt;groupId&gt;com.nvidia&lt;/groupId&gt;<br/>    &lt;artifactId&gt;rapids-4-spark_2.13&lt;/artifactId&gt;<br/>    &lt;version&gt;26.08.0&lt;/version&gt;<br/>&lt;/dependency&gt;</pre> |
+| arm64     | Scala 2.12    | [cuDF plugin v26.08.0](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.12/26.08.0/rapids-4-spark_2.12-26.08.0-cuda12-arm64.jar) | [Signature](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.12/26.08.0/rapids-4-spark_2.12-26.08.0-cuda12-arm64.jar.asc) | <pre>&lt;dependency&gt;<br/>    &lt;groupId&gt;com.nvidia&lt;/groupId&gt;<br/>    &lt;artifactId&gt;rapids-4-spark_2.12&lt;/artifactId&gt;<br/>    &lt;version&gt;26.08.0&lt;/version&gt;<br/>    &lt;classifier&gt;cuda12-arm64&lt;/classifier&gt;<br/>&lt;/dependency&gt;</pre> |
+| arm64     | Scala 2.13    | [cuDF plugin v26.08.0](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.13/26.08.0/rapids-4-spark_2.13-26.08.0-cuda12-arm64.jar) | [Signature](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.13/26.08.0/rapids-4-spark_2.13-26.08.0-cuda12-arm64.jar.asc) | <pre>&lt;dependency&gt;<br/>    &lt;groupId&gt;com.nvidia&lt;/groupId&gt;<br/>    &lt;artifactId&gt;rapids-4-spark_2.13&lt;/artifactId&gt;<br/>    &lt;version&gt;26.08.0&lt;/version&gt;<br/>    &lt;classifier&gt;cuda12-arm64&lt;/classifier&gt;<br/>&lt;/dependency&gt;</pre> |
 
 
 #### CUDA 13
 
 | Processor | Scala Version | Download Jar | Download Signature | Download From Maven |
 |-----------|---------------|--------------|--------------------|---------------------|
-| x86_64    | Scala 2.12    | [cuDF plugin v26.06.1](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.12/26.06.1/rapids-4-spark_2.12-26.06.1-cuda13.jar) | [Signature](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.12/26.06.1/rapids-4-spark_2.12-26.06.1-cuda13.jar.asc) | <pre>&lt;dependency&gt;<br/>    &lt;groupId&gt;com.nvidia&lt;/groupId&gt;<br/>    &lt;artifactId&gt;rapids-4-spark_2.12&lt;/artifactId&gt;<br/>    &lt;version&gt;26.06.1&lt;/version&gt;<br/>    &lt;classifier&gt;cuda13&lt;/classifier&gt;<br/>&lt;/dependency&gt;</pre> |
-| x86_64    | Scala 2.13    | [cuDF plugin v26.06.1](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.13/26.06.1/rapids-4-spark_2.13-26.06.1-cuda13.jar) | [Signature](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.13/26.06.1/rapids-4-spark_2.13-26.06.1-cuda13.jar.asc) | <pre>&lt;dependency&gt;<br/>    &lt;groupId&gt;com.nvidia&lt;/groupId&gt;<br/>    &lt;artifactId&gt;rapids-4-spark_2.13&lt;/artifactId&gt;<br/>    &lt;version&gt;26.06.1&lt;/version&gt;<br/>    &lt;classifier&gt;cuda13&lt;/classifier&gt;<br/>&lt;/dependency&gt;</pre> |
-| arm64     | Scala 2.12    | [cuDF plugin v26.06.1](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.12/26.06.1/rapids-4-spark_2.12-26.06.1-cuda13-arm64.jar) | [Signature](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.12/26.06.1/rapids-4-spark_2.12-26.06.1-cuda13-arm64.jar.asc) | <pre>&lt;dependency&gt;<br/>    &lt;groupId&gt;com.nvidia&lt;/groupId&gt;<br/>    &lt;artifactId&gt;rapids-4-spark_2.12&lt;/artifactId&gt;<br/>    &lt;version&gt;26.06.1&lt;/version&gt;<br/>    &lt;classifier&gt;cuda13-arm64&lt;/classifier&gt;<br/>&lt;/dependency&gt;</pre> |
-| arm64     | Scala 2.13    | [cuDF plugin v26.06.1](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.13/26.06.1/rapids-4-spark_2.13-26.06.1-cuda13-arm64.jar) | [Signature](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.13/26.06.1/rapids-4-spark_2.13-26.06.1-cuda13-arm64.jar.asc) | <pre>&lt;dependency&gt;<br/>    &lt;groupId&gt;com.nvidia&lt;/groupId&gt;<br/>    &lt;artifactId&gt;rapids-4-spark_2.13&lt;/artifactId&gt;<br/>    &lt;version&gt;26.06.1&lt;/version&gt;<br/>    &lt;classifier&gt;cuda13-arm64&lt;/classifier&gt;<br/>&lt;/dependency&gt;</pre> |
+| x86_64    | Scala 2.12    | [cuDF plugin v26.08.0](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.12/26.08.0/rapids-4-spark_2.12-26.08.0-cuda13.jar) | [Signature](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.12/26.08.0/rapids-4-spark_2.12-26.08.0-cuda13.jar.asc) | <pre>&lt;dependency&gt;<br/>    &lt;groupId&gt;com.nvidia&lt;/groupId&gt;<br/>    &lt;artifactId&gt;rapids-4-spark_2.12&lt;/artifactId&gt;<br/>    &lt;version&gt;26.08.0&lt;/version&gt;<br/>    &lt;classifier&gt;cuda13&lt;/classifier&gt;<br/>&lt;/dependency&gt;</pre> |
+| x86_64    | Scala 2.13    | [cuDF plugin v26.08.0](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.13/26.08.0/rapids-4-spark_2.13-26.08.0-cuda13.jar) | [Signature](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.13/26.08.0/rapids-4-spark_2.13-26.08.0-cuda13.jar.asc) | <pre>&lt;dependency&gt;<br/>    &lt;groupId&gt;com.nvidia&lt;/groupId&gt;<br/>    &lt;artifactId&gt;rapids-4-spark_2.13&lt;/artifactId&gt;<br/>    &lt;version&gt;26.08.0&lt;/version&gt;<br/>    &lt;classifier&gt;cuda13&lt;/classifier&gt;<br/>&lt;/dependency&gt;</pre> |
+| arm64     | Scala 2.12    | [cuDF plugin v26.08.0](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.12/26.08.0/rapids-4-spark_2.12-26.08.0-cuda13-arm64.jar) | [Signature](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.12/26.08.0/rapids-4-spark_2.12-26.08.0-cuda13-arm64.jar.asc) | <pre>&lt;dependency&gt;<br/>    &lt;groupId&gt;com.nvidia&lt;/groupId&gt;<br/>    &lt;artifactId&gt;rapids-4-spark_2.12&lt;/artifactId&gt;<br/>    &lt;version&gt;26.08.0&lt;/version&gt;<br/>    &lt;classifier&gt;cuda13-arm64&lt;/classifier&gt;<br/>&lt;/dependency&gt;</pre> |
+| arm64     | Scala 2.13    | [cuDF plugin v26.08.0](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.13/26.08.0/rapids-4-spark_2.13-26.08.0-cuda13-arm64.jar) | [Signature](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.13/26.08.0/rapids-4-spark_2.13-26.08.0-cuda13-arm64.jar.asc) | <pre>&lt;dependency&gt;<br/>    &lt;groupId&gt;com.nvidia&lt;/groupId&gt;<br/>    &lt;artifactId&gt;rapids-4-spark_2.13&lt;/artifactId&gt;<br/>    &lt;version&gt;26.08.0&lt;/version&gt;<br/>    &lt;classifier&gt;cuda13-arm64&lt;/classifier&gt;<br/>&lt;/dependency&gt;</pre> |
 
 
 The above packages are built against CUDA 12.9 or CUDA 13.1. They are tested on V100, T4, A10, A100, L4, H100 and GB100 GPUs.
@@ -104,28 +147,23 @@ The above packages are built against CUDA 12.9 or CUDA 13.1. They are tested on 
 * Download the [PUB_KEY](https://keys.openpgp.org/search?q=sw-spark@nvidia.com).
 * Import the public key: `gpg --import PUB_KEY`
 * Verify the signature for Scala 2.12 jar:
-    `gpg --verify rapids-4-spark_2.12-26.06.1.jar.asc rapids-4-spark_2.12-26.06.1.jar`
+    `gpg --verify rapids-4-spark_2.12-26.08.0.jar.asc rapids-4-spark_2.12-26.08.0.jar`
 * Verify the signature for Scala 2.13 jar:
-    `gpg --verify rapids-4-spark_2.13-26.06.1.jar.asc rapids-4-spark_2.13-26.06.1.jar`
+    `gpg --verify rapids-4-spark_2.13-26.08.0.jar.asc rapids-4-spark_2.13-26.08.0.jar`
 
 The output of signature verify:
 
 	gpg: Good signature from "NVIDIA Spark (For the signature of spark-rapids release jars) <sw-spark@nvidia.com>"
 
 ### Release Notes
-v26.06.1 is a hotfix release on top of v26.06.0 with the following fixes:
-* Use the configured `parquet.read.allocation.size` copy buffer for Hadoop vectored reads, restoring the 8 MiB default for S3A, GCS, and other Hadoop-backed filesystem fallbacks ([#15164](https://github.com/NVIDIA/cudf-spark/pull/15164))
-* Restore Databricks 17.3 build compatibility after the `SessionCatalog` partition-listing API change ([#15211](https://github.com/NVIDIA/cudf-spark/pull/15211))
-
-The full v26.06.0 release notes are also included below.
-
-v26.06.0 includes the following updates:
-* Databricks 17.3 ML LTS Delta Lake support now includes native deletion vector reads, Delta writes, DELETE, UPDATE, MERGE, OPTIMIZE, and auto compaction on GPU ([#14787](https://github.com/NVIDIA/cudf-spark/pull/14787), [#14716](https://github.com/NVIDIA/cudf-spark/pull/14716), [#14810](https://github.com/NVIDIA/cudf-spark/pull/14810), [#14820](https://github.com/NVIDIA/cudf-spark/pull/14820), [#14847](https://github.com/NVIDIA/cudf-spark/pull/14847))
-* Iceberg support adds nested and binary GPU writes, read-path optimizations, per-table scan-option overrides, and fixes for newly-added nested MAP/LIST fields ([#14611](https://github.com/NVIDIA/cudf-spark/pull/14611), [#14674](https://github.com/NVIDIA/cudf-spark/pull/14674), [#14754](https://github.com/NVIDIA/cudf-spark/pull/14754), [#14880](https://github.com/NVIDIA/cudf-spark/pull/14880))
-* Added GPU support for array aggregate SUM, PRODUCT, MAX, MIN, ALL, and ANY, plus additional string expression support for `replace(col, targetExpr, replExpr)` and GBK `StringDecode` ([#14652](https://github.com/NVIDIA/cudf-spark/pull/14652), [#14623](https://github.com/NVIDIA/cudf-spark/pull/14623), [#14545](https://github.com/NVIDIA/cudf-spark/pull/14545))
-* Improved expression performance for timestamp parsing, complex type casts, null handling, `hypot`, `format_number`, regex extract, and substring operations ([#14706](https://github.com/NVIDIA/cudf-spark/pull/14706), [#14842](https://github.com/NVIDIA/cudf-spark/pull/14842), [#14817](https://github.com/NVIDIA/cudf-spark/pull/14817), [#14818](https://github.com/NVIDIA/cudf-spark/pull/14818), [#14830](https://github.com/NVIDIA/cudf-spark/pull/14830), [#14586](https://github.com/NVIDIA/cudf-spark/pull/14586), [#14647](https://github.com/NVIDIA/cudf-spark/pull/14647), [#14819](https://github.com/NVIDIA/cudf-spark/pull/14819))
-* Improved retry and resource handling for GPU project execution, row-to-column transitions, asynchronous cloud output writes, and host column extraction ([#14724](https://github.com/NVIDIA/cudf-spark/pull/14724), [#14865](https://github.com/NVIDIA/cudf-spark/pull/14865), [#14759](https://github.com/NVIDIA/cudf-spark/pull/14759))
-* Fixed several query correctness and compatibility issues, including join conditions with casts, non-deterministic expression preservation, JSON/CSV path decoding, and row transitions for final AQE exchanges ([#14793](https://github.com/NVIDIA/cudf-spark/pull/14793), [#14792](https://github.com/NVIDIA/cudf-spark/pull/14792), [#14778](https://github.com/NVIDIA/cudf-spark/pull/14778), [#14914](https://github.com/NVIDIA/cudf-spark/pull/14914))
+v26.08.0 includes the following updates:
+* Added support for Apache Spark 3.5.9, 4.0.3, 4.0.4, 4.1.2, 4.1.3, and 4.2.0; Databricks 13.3 ML LTS is no longer supported ([#15286](https://github.com/NVIDIA/cudf-spark/pull/15286), [#15151](https://github.com/NVIDIA/cudf-spark/pull/15151), [#15313](https://github.com/NVIDIA/cudf-spark/pull/15313), [#15071](https://github.com/NVIDIA/cudf-spark/pull/15071), [#15310](https://github.com/NVIDIA/cudf-spark/pull/15310), [#15279](https://github.com/NVIDIA/cudf-spark/pull/15279), [#15276](https://github.com/NVIDIA/cudf-spark/pull/15276))
+* Added full CPU/GPU bridge support and re-enabled the accelerated columnar-to-row path, allowing unsupported portions of a query to fall back while surrounding operators remain accelerated ([#14132](https://github.com/NVIDIA/cudf-spark/pull/14132), [#14651](https://github.com/NVIDIA/cudf-spark/pull/14651))
+* Added Iceberg 1.11 support for Spark 4.x, accelerated incremental append scans, optimized S3 Parquet footer reads, and exposed Parquet writer dictionary controls ([#14881](https://github.com/NVIDIA/cudf-spark/pull/14881), [#14882](https://github.com/NVIDIA/cudf-spark/pull/14882), [#14883](https://github.com/NVIDIA/cudf-spark/pull/14883), [#15174](https://github.com/NVIDIA/cudf-spark/pull/15174), [#15384](https://github.com/NVIDIA/cudf-spark/pull/15384), [#14878](https://github.com/NVIDIA/cudf-spark/pull/14878))
+* Expanded GPU SQL support with default-comparator `array_sort`, array and map inputs for `array_aggregate`, nested map/array output for `from_json`, multiple ORDER BY columns in RANGE windows, and additional regex compatibility fixes ([#15108](https://github.com/NVIDIA/cudf-spark/pull/15108), [#15149](https://github.com/NVIDIA/cudf-spark/pull/15149), [#15134](https://github.com/NVIDIA/cudf-spark/pull/15134), [#14961](https://github.com/NVIDIA/cudf-spark/pull/14961), [#14862](https://github.com/NVIDIA/cudf-spark/pull/14862))
+* Expanded Delta Lake support on Databricks 17.3 with liquid clustering and CTAS/RTAS, and improved OSS Delta deletion-vector reads and GPU MERGE commit summaries ([#15278](https://github.com/NVIDIA/cudf-spark/pull/15278), [#15320](https://github.com/NVIDIA/cudf-spark/pull/15320), [#15368](https://github.com/NVIDIA/cudf-spark/pull/15368), [#15429](https://github.com/NVIDIA/cudf-spark/pull/15429))
+* Improved shuffle, spill, and memory reliability by auto-configuring the shuffle manager, preventing multithreaded shuffle-merger and RMM pool-wait deadlocks, and hardening handling of batches and spill files larger than 2 GiB ([#15285](https://github.com/NVIDIA/cudf-spark/pull/15285), [#15208](https://github.com/NVIDIA/cudf-spark/pull/15208), [#15104](https://github.com/NVIDIA/cudf-spark/pull/15104), [#14967](https://github.com/NVIDIA/cudf-spark/pull/14967), [#15327](https://github.com/NVIDIA/cudf-spark/pull/15327))
+* Improved SQL UI and History Server visibility for GPU V2 writes and corrected operator-time accounting around file writes and shuffle reads ([#14975](https://github.com/NVIDIA/cudf-spark/pull/14975), [#15089](https://github.com/NVIDIA/cudf-spark/pull/15089), [#14901](https://github.com/NVIDIA/cudf-spark/pull/14901), [#14936](https://github.com/NVIDIA/cudf-spark/pull/14936))
 
 For a detailed list of changes, please refer to the
 [CHANGELOG](https://github.com/NVIDIA/cudf-spark/blob/main/CHANGELOG.md).

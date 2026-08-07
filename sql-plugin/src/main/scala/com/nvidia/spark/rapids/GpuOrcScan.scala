@@ -23,6 +23,7 @@ import java.nio.channels.Channels
 import java.nio.charset.StandardCharsets
 import java.time.ZoneId
 import java.util
+import java.util.TimeZone
 import java.util.regex.Pattern
 
 import scala.annotation.tailrec
@@ -322,8 +323,7 @@ object GpuOrcScan {
       case (DType.BOOL8 | DType.INT8 | DType.INT16 | DType.INT32 | DType.INT64,
       DType.TIMESTAMP_MICROSECONDS) =>
         withResource(OrcCastingShims.castIntegerToTimestamp(col, fromDt)) { timestamp =>
-          GpuTimeZoneDB.fromTimestampToUtcTimestamp(
-            timestamp, ZoneId.systemDefault().normalized())
+          GpuTimeZoneDB.convertOrcFromUtc(timestamp, ZoneId.systemDefault().getId)
         }
 
       // float to bool/integral
@@ -382,16 +382,19 @@ object GpuOrcScan {
         // Math.round half up can be implemented in terms of floor
         // Math.round(x) = n iff x is in [n-0.5, n+0.5) iff x+0.5 is in [n,n+1) iff floor(x+0.5) = n
         //
-        val milliseconds = withResource(Scalar.fromDouble(DateTimeConstants.MILLIS_PER_SECOND)) {
-          thousand =>
-          // ORC assumes value is in seconds
-          withResource(col.mul(thousand, DType.FLOAT64)) { doubleMillis =>
-            withResource(Scalar.fromDouble(0.5)) { half =>
-              withResource(doubleMillis.add(half)) { doubleMillisPlusHalf =>
-                withResource(doubleMillisPlusHalf.floor()) { millis =>
-                  withResource(getOverflowFlags(doubleMillis, millis)) { overflowFlags =>
-                    withResource(Scalar.fromNull(millis.getType)) { nullVal =>
-                      overflowFlags.ifElse(millis, nullVal)
+        val milliseconds = withResource(col.castTo(DType.FLOAT64)) { doubleSeconds =>
+          withResource(convertOrcFloatingPointSeconds(doubleSeconds)) { convertedSeconds =>
+            withResource(Scalar.fromDouble(DateTimeConstants.MILLIS_PER_SECOND)) { thousand =>
+              // ORC applies timezone conversion while the value is still in seconds.
+              withResource(convertedSeconds.mul(thousand, DType.FLOAT64)) { doubleMillis =>
+                withResource(Scalar.fromDouble(0.5)) { half =>
+                  withResource(doubleMillis.add(half)) { doubleMillisPlusHalf =>
+                    withResource(doubleMillisPlusHalf.floor()) { millis =>
+                      withResource(getOverflowFlags(doubleMillis, millis)) { overflowFlags =>
+                        withResource(Scalar.fromNull(millis.getType)) { nullVal =>
+                          overflowFlags.ifElse(millis, nullVal)
+                        }
+                      }
                     }
                   }
                 }
@@ -419,12 +422,11 @@ object GpuOrcScan {
           }
           withResource(Scalar.fromDouble(DateTimeConstants.MICROS_PER_MILLIS)) { thousand =>
             withResource(milliseconds.mul(thousand)) { microseconds =>
-                withResource(microseconds.castTo(DType.INT64)) { longVec =>
-                  withResource(longVec.castTo(DType.TIMESTAMP_MICROSECONDS)) { timestamp =>
-                    GpuTimeZoneDB.fromTimestampToUtcTimestamp(
-                      timestamp, ZoneId.systemDefault().normalized())
-                  }
+              withResource(microseconds.castTo(DType.INT64)) { longVec =>
+                withResource(longVec.castTo(DType.TIMESTAMP_MICROSECONDS)) { timestamp =>
+                  timestamp.incRefCount()
                 }
+              }
             }
           }
         }
@@ -441,6 +443,59 @@ object GpuOrcScan {
       // TODO more types, tracked in https://github.com/NVIDIA/spark-rapids/issues/5895
       case (f, t) =>
         throw new QueryExecutionException(s"Unsupported type casting: $f -> $t")
+    }
+  }
+
+  /**
+   * Apply ORC's offset lookup ordering before its millisecond rounding and overflow check.
+   * ORC looks up the offset at `(localMillis - rawOffset)`, while Spark materializes the final
+   * timestamp with java.time rules. Apply only that integral timezone delta to the original
+   * floating-point value so both the DST and historical behavior match Spark's CPU ORC path.
+   */
+  private def convertOrcFloatingPointSeconds(seconds: ColumnVector): ColumnVector = {
+    if (GpuOverrides.isUTCTimezone(ZoneId.systemDefault())) {
+      return seconds.incRefCount()
+    }
+    withResource(Scalar.fromDouble(DateTimeConstants.MICROS_PER_SECOND)) { microsPerSecond =>
+      val localTimestamp = withResource(
+          Scalar.fromDouble(DateTimeConstants.MILLIS_PER_SECOND)) { millisPerSecond =>
+        withResource(seconds.mul(millisPerSecond, DType.FLOAT64)) { doubleMillis =>
+          withResource(doubleMillis.castTo(DType.INT64)) { localMillis =>
+            withResource(localMillis.bitCastTo(DType.TIMESTAMP_MILLISECONDS)) {
+              localMillisTimestamp =>
+              localMillisTimestamp.castTo(DType.TIMESTAMP_MICROSECONDS)
+            }
+          }
+        }
+      }
+      withResource(localTimestamp) { _ =>
+        withResource(localTimestamp.bitCastTo(DType.INT64)) { localMicros =>
+          val rawOffsetMicros = TimeZone.getDefault.getRawOffset.toLong *
+            DateTimeConstants.MICROS_PER_MILLIS
+          withResource(Scalar.fromLong(rawOffsetMicros)) { rawOffset =>
+            withResource(localMicros.sub(rawOffset)) { offsetLookupMicros =>
+              withResource(offsetLookupMicros.castTo(DType.TIMESTAMP_MICROSECONDS)) {
+                offsetLookupTimestamp =>
+                val localAtLookup = GpuTimeZoneDB.fromUtcTimestampToTimestamp(
+                  offsetLookupTimestamp, ZoneId.systemDefault().normalized())
+                withResource(localAtLookup) { _ =>
+                  withResource(localAtLookup.bitCastTo(DType.INT64)) { localAtLookupMicros =>
+                    val offsetSeconds = withResource(
+                        localAtLookupMicros.sub(offsetLookupMicros)) { offsetMicros =>
+                      withResource(offsetMicros.castTo(DType.FLOAT64)) { doubleOffsetMicros =>
+                        doubleOffsetMicros.div(microsPerSecond, DType.FLOAT64)
+                      }
+                    }
+                    withResource(offsetSeconds) { _ =>
+                      seconds.sub(offsetSeconds, DType.FLOAT64)
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 

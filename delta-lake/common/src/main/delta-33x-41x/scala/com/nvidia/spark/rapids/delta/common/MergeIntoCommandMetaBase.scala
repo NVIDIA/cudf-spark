@@ -31,12 +31,14 @@ abstract class MergeIntoCommandMetaBase(
     rule: DataFromReplacementRule)
   extends RunnableCommandMeta[MergeIntoCommand](mergeCmd, conf, parent, rule) with Logging {
 
+  protected def supportsNotMatchedBySourceClauses: Boolean = false
+
   override def tagSelfForGpu(): Unit = {
     if (!conf.isDeltaWriteEnabled) {
       willNotWorkOnGpu("Delta Lake output acceleration has been disabled. To enable set " +
         s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
     }
-    if (mergeCmd.notMatchedBySourceClauses.nonEmpty) {
+    if (!supportsNotMatchedBySourceClauses && mergeCmd.notMatchedBySourceClauses.nonEmpty) {
       // https://github.com/NVIDIA/spark-rapids/issues/8415
       willNotWorkOnGpu("notMatchedBySourceClauses not supported on GPU")
     }

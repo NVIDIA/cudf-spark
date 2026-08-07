@@ -21,6 +21,106 @@ class as a tight entry point for interacting with the host Spark runtime.
 
 In the following we provide recipes for typical scenarios addressed by the Shim layer.
 
+## One-way Shim Module Boundary
+
+This section describes the shim-facing module boundary rather than the full project module layout.
+Shim source can be split between three layers when the implementation does not have to live
+in the same module as the Spark-version-specific API reference.
+
+1. `sql-plugin-api` contains the narrow shared types that both sides can see. These types must
+   not depend on `sql-plugin` implementation classes.
+2. `sql-plugin-shims` depends on `sql-plugin-api` and Spark. It may reference Spark classes whose
+   source or binary shape varies by build version, but it must not reference implementation types
+   such as `GpuOverrides`, `RapidsMeta`, `ExprRule`, `ExecRule`, or GPU meta classes.
+3. `sql-plugin` depends on `sql-plugin-shims`. It turns API-level shim descriptors into concrete
+   plugin rules and owns the RAPIDS metadata factories.
+
+For replacement rules, use descriptor objects when the shim only needs to identify a Spark class
+and provide stable rule metadata. For example, `ShimDataWritingCommandRule`,
+`ShimRunnableCommandRule`, and `ShimExecRule` live in `sql-plugin-api`; versioned objects in
+`sql-plugin-shims` instantiate those descriptors with Spark-specific class tags; `sql-plugin`
+then calls the corresponding `GpuOverrides.*FromShim` method and supplies the actual `RapidsMeta`
+factory. This keeps the call direction one-way: shared plugin code can consume shim descriptors,
+while shim code cannot call back into shared plugin implementation.
+
+Classes whose `spark-rapids-shim-json-lines` entries cover all build versions can be unshimmed
+into a common source root when there is no special-version sibling and the source is truly
+compatible across the supported Spark APIs. When a file has Databricks-specific, Spark 4.1-specific,
+or otherwise divergent siblings, keep the version-specific source and move only the API-safe part
+behind the one-way boundary.
+
+## Reducing Parallel-World Classes
+
+The long-term goal is to maximize bytecode in the conventional jar layout and shrink the amount
+of code that must be loaded through the parallel-world mechanism. A class can move from
+`spark-shared` to the conventional layout only when it has no static dependency path to
+Spark-version-specific bytecode. The dependency path matters transitively: a `spark-shared` class
+that calls another `spark-shared` class that eventually calls a `sparkXYZ` class is not root-safe.
+
+`dist/unshimmed-common-from-single-shim.txt` names classes and resources that are allowed to be
+stored in the conventional layout after the dist jar is assembled. During `binary-dedupe.sh`, files
+from that allowlist may be promoted out of `spark-shared` into the root layout before the final
+identity sanity check runs. The script then verifies that root-layout class files that require shared
+identity are present in the bitwise-identical `spark-shared` set, unless covered by a narrow
+compatibility exception in `unshimmed_class_needs_shared_identity`. This proves byte-for-byte
+identity; it does not replace analyzer-based dependency-path review for root-safety. This is
+important for profiles where the highest Spark build contributes only a stub module, while a lower
+Spark build contributes the real implementation. For example, root-safe Iceberg helpers can still be
+placed in the conventional layout even when the Spark 4.1 shim uses the Iceberg stub.
+
+Use a small bootstrap allowlist for classes that are allowed to refer to packages generated with
+`$_spark.version.classifier_`, such as `com.nvidia.spark.rapids.spark330.RapidsShuffleManager`.
+Ordinary shared implementation classes should not have direct static dependencies on those
+classifier packages. They should instead call through stable contracts in `sql-plugin-api` or
+through descriptor objects in `sql-plugin-shims`.
+
+For an inventory of a released artifact, download the complete dist jar from Maven Central and run
+the dependency analyzer directly against the jar:
+
+```bash
+VERSION=26.04.2
+curl -fL -o /tmp/rapids-4-spark_2.12-${VERSION}-cuda12.jar \
+  https://repo.maven.apache.org/maven2/com/nvidia/rapids-4-spark_2.12/${VERSION}/rapids-4-spark_2.12-${VERSION}-cuda12.jar
+
+python3 dist/scripts/analyze-parallel-world-deps.py \
+  /tmp/rapids-4-spark_2.12-${VERSION}-cuda12.jar \
+  --show-topo
+```
+
+Run the same command for the Scala 2.13 artifact when checking Spark 4.x coverage. Internal
+snapshot artifacts can be analyzed the same way after downloading a timestamped dist jar from the
+configured artifact repository; keep repository credentials in local Maven or environment
+configuration rather than embedding them in scripts or docs.
+
+For local branch validation, build representative two-shim dist jars that span the widest
+differences in each Scala line:
+
+```bash
+./build/buildall --profile=350,411 --scala213 --module=dist
+python3 dist/scripts/analyze-parallel-world-deps.py \
+  scala2.13/dist/target/parallel-world \
+  --show-topo
+
+./build/buildall --profile=330,358 --module=dist
+python3 dist/scripts/analyze-parallel-world-deps.py \
+  dist/target/parallel-world \
+  --show-topo
+```
+
+The analyzer reports:
+
+1. direct classifier-package dependencies, which should remain limited to bootstrap/facade code;
+2. root or `spark-shared` classes with transitive paths to version-specific classes;
+3. root-safe `spark-shared` strongly connected components in dependency-first order.
+
+Use `--format=json` when comparing safe components across artifacts or build outputs. JSON output
+keeps counts exact and bounds example sections with `--limit`.
+Shortest paths explain why a class is blocked and usually identify the adapter boundary to cut.
+Strongly connected components, not shortest paths, provide the migration ordering because classes in
+the same component have to move or be refactored together. See
+[Parallel World Unshimming Algorithm](parallel-world-unshimming.md) for the SCC model and migration
+workflow.
+
 ## Method signature discrepancies
 
 It's among the easiest issues to resolve. We define a method in SparkShims

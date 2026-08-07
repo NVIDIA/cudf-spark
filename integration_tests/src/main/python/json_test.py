@@ -1072,7 +1072,7 @@ def test_from_json_struct_decimal():
     # integral
     pytest.param("[0-9]{1,5}", marks=pytest.mark.xfail(reason="https://github.com/NVIDIA/spark-rapids/issues/9664")),
     # floating-point
-    "[0-9]{0,2}\\.[0-9]{1,2}"
+    "[0-9]{0,2}\\.[0-9]{1,2}",
     # boolean
     "(true|false)"
 ])
@@ -1146,7 +1146,7 @@ def test_from_json_struct_date_fallback_non_default_format(date_gen, date_format
     pytest.param("[0-9]{1,5}", marks=pytest.mark.xfail(reason="https://github.com/NVIDIA/spark-rapids/issues/4940")),
     pytest.param("[1-9]{1,8}", marks=pytest.mark.xfail(reason="https://github.com/NVIDIA/spark-rapids/issues/4940")),
     # floating-point
-    r"[0-9]{0,2}\.[0-9]{1,2}"
+    r"[0-9]{0,2}\.[0-9]{1,2}",
     # boolean
     "(true|false)"
 ])
@@ -1705,6 +1705,27 @@ def test_structs_to_json_fallback_pretty():
 
     assert_gpu_fallback_collect(
         lambda spark : struct_to_json(spark),
+        structs_to_json_fallback_class,
+        conf=conf)
+
+@pytest.mark.skipif(not is_spark_420_or_later(),
+                    reason='sortKeys option was added in Spark 4.2.0')
+@allow_non_gpu(*structs_to_json_fallback_allow)
+@pytest.mark.parametrize('sort_keys_option', ['sortKeys', 'sortkeys'])
+def test_structs_to_json_fallback_sort_keys(sort_keys_option):
+    def struct_to_json(spark):
+        return spark.range(3).select(
+            f.to_json(
+                f.struct(
+                    f.col('id').alias('b'),
+                    (f.col('id') + 1).alias('a')),
+                {sort_keys_option: True}).alias('my_json'))
+
+    conf = copy_and_update(_enable_all_types_conf,
+                           {'spark.rapids.sql.expression.StructsToJson': True})
+
+    assert_gpu_fallback_collect(
+        lambda spark: struct_to_json(spark),
         structs_to_json_fallback_class,
         conf=conf)
 
