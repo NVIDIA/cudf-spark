@@ -17,7 +17,7 @@
 package com.nvidia.spark.rapids.iceberg
 
 import com.nvidia.spark.rapids.{RapidsConf, RapidsMeta}
-import org.apache.iceberg.{Table, TableProperties}
+import org.apache.iceberg.{CatalogProperties, Table, TableProperties}
 
 import org.apache.spark.sql.execution.SparkPlan
 
@@ -33,6 +33,29 @@ object IcebergFormatVersionSupport {
       properties: Map[String, String],
       meta: RapidsMeta[_, _, _]): Unit = {
     val formatVersion = properties.get(TableProperties.FORMAT_VERSION).map(_.toInt).getOrElse(2)
+    tagForFormatVersion(formatVersion, meta)
+  }
+
+  def tagForCreateOrReplaceFormatVersion(
+      catalogProperties: Map[String, String],
+      statementProperties: Map[String, String],
+      existingTable: Option[Table],
+      meta: RapidsMeta[_, _, _]): Unit = {
+    val formatVersionKey = TableProperties.FORMAT_VERSION
+    val defaultFormatVersion = catalogProperties.get(
+      CatalogProperties.TABLE_DEFAULT_PREFIX + formatVersionKey)
+    val overrideFormatVersion = catalogProperties.get(
+      CatalogProperties.TABLE_OVERRIDE_PREFIX + formatVersionKey)
+
+    // BaseMetastoreCatalog applies table defaults first, statement properties second, and table
+    // overrides last. A replacement with no format-version from those sources retains the current
+    // table format version.
+    val formatVersion = overrideFormatVersion
+      .orElse(statementProperties.get(formatVersionKey))
+      .orElse(defaultFormatVersion)
+      .map(_.toInt)
+      .orElse(existingTable.map(ShimUtils.formatVersion))
+      .getOrElse(2)
     tagForFormatVersion(formatVersion, meta)
   }
 

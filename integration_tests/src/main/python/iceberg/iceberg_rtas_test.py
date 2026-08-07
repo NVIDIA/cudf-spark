@@ -115,13 +115,11 @@ def test_rtas_unpartitioned_table(spark_tmp_table_factory):
 @ignore_order(local=True)
 @allow_non_gpu("AtomicReplaceTableAsSelectExec")
 def test_rtas_v3_fallback(spark_tmp_table_factory):
-    table_prop = {"format-version": "3"}
-
     def run_rtas(spark):
         target = get_full_table_name(spark_tmp_table_factory)
         create_iceberg_table(
             target,
-            table_prop=table_prop,
+            table_prop={"format-version": "3"},
             df_gen=lambda sp: gen_df(
                 sp, list(zip(iceberg_base_table_cols, iceberg_gens_list))))
         return _execute_rtas(
@@ -129,7 +127,7 @@ def test_rtas_v3_fallback(spark_tmp_table_factory):
             target,
             spark_tmp_table_factory,
             lambda sp: gen_df(sp, list(zip(iceberg_base_table_cols, iceberg_gens_list))),
-            table_prop)
+            {})
 
     assert_gpu_fallback_collect(
         run_rtas,

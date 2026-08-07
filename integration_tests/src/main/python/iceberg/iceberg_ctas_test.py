@@ -132,6 +132,46 @@ def test_ctas_v3_fallback(spark_tmp_table_factory):
         conf=iceberg_write_enabled_conf)
 
 
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Requires a local Hadoop catalog")
+@ignore_order(local=True)
+@allow_non_gpu("AtomicCreateTableAsSelectExec", "AppendDataExec")
+@pytest.mark.parametrize("catalog_id,catalog_property,table_prop", [
+    pytest.param("default", "table-default.format-version", {}, id="catalog_default"),
+    pytest.param("override", "table-override.format-version", {"format-version": "2"},
+                 id="catalog_override"),
+])
+def test_ctas_catalog_v3_fallback(spark_tmp_table_factory,
+                                  catalog_id,
+                                  catalog_property,
+                                  table_prop):
+    catalog_name = f"ctas_v3_{catalog_id}"
+    catalog_prefix = f"spark.sql.catalog.{catalog_name}"
+    conf = copy_and_update(iceberg_write_enabled_conf, {
+        catalog_prefix: "org.apache.iceberg.spark.SparkCatalog",
+        f"{catalog_prefix}.type": "hadoop",
+        f"{catalog_prefix}.{catalog_property}": "3",
+    })
+
+    def run_ctas(spark):
+        spark.conf.set(
+            f"{catalog_prefix}.warehouse",
+            spark.conf.get("spark.sql.catalog.spark_catalog.warehouse"))
+        target = f"{catalog_name}.default.{spark_tmp_table_factory.get()}"
+        return _execute_ctas(
+            spark,
+            target,
+            spark_tmp_table_factory,
+            lambda sp: gen_df(sp, list(zip(iceberg_base_table_cols, iceberg_gens_list))),
+            table_prop)
+
+    assert_gpu_fallback_collect(
+        run_ctas,
+        "AtomicCreateTableAsSelectExec",
+        conf=conf)
+
+
 def _do_test_ctas_partitioned_table(spark_tmp_table_factory, partition_col_sql, table_prop=None):
     """Helper function for partitioned table CTAS tests."""
     if table_prop is None:
