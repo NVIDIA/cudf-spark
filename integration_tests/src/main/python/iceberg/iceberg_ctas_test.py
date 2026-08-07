@@ -17,7 +17,8 @@ from typing import Callable, Dict, Optional
 import pytest
 from pyspark.sql.types import ArrayType, BinaryType
 
-from asserts import assert_equal_with_local_sort, assert_gpu_fallback_collect
+from asserts import (assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect,
+                     assert_gpu_fallback_collect)
 from conftest import is_iceberg_remote_catalog
 from data_gen import gen_df, copy_and_update, RepeatSeqGen
 from iceberg import (create_iceberg_table,
@@ -136,7 +137,7 @@ def test_ctas_v3_fallback(spark_tmp_table_factory):
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Requires a local Hadoop catalog")
 @ignore_order(local=True)
-@allow_non_gpu("AtomicCreateTableAsSelectExec", "AppendDataExec")
+@allow_non_gpu("AppendDataExec")
 @pytest.mark.parametrize("catalog_id,catalog_property,table_prop", [
     pytest.param("default", "table-default.format-version", {}, id="catalog_default"),
     pytest.param("override", "table-override.format-version", {"format-version": "2"},
@@ -166,10 +167,7 @@ def test_ctas_catalog_v3_fallback(spark_tmp_table_factory,
             lambda sp: gen_df(sp, list(zip(iceberg_base_table_cols, iceberg_gens_list))),
             table_prop)
 
-    assert_gpu_fallback_collect(
-        run_ctas,
-        "AtomicCreateTableAsSelectExec",
-        conf=conf)
+    assert_gpu_and_cpu_are_equal_collect(run_ctas, conf=conf)
 
 
 def _do_test_ctas_partitioned_table(spark_tmp_table_factory, partition_col_sql, table_prop=None):

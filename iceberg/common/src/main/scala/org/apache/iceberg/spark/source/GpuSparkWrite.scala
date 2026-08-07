@@ -26,9 +26,7 @@ import com.nvidia.spark.rapids.Arm.closeOnExcept
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableSeq
 import com.nvidia.spark.rapids.SpillPriorities.ACTIVE_ON_DECK_PRIORITY
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
-import com.nvidia.spark.rapids.iceberg.{GpuIcebergSpecPartitioner, IcebergFormatVersionSupport,
-  ShimUtils}
-import com.nvidia.spark.rapids.iceberg.spark.source.RapidsSparkTable
+import com.nvidia.spark.rapids.iceberg.{GpuIcebergSpecPartitioner, IcebergFormatVersionSupport}
 import com.nvidia.spark.rapids.shims.parquet.ParquetFieldIdShims
 import org.apache.hadoop.mapreduce.Job
 import org.apache.iceberg._
@@ -36,7 +34,6 @@ import org.apache.iceberg.io._
 import org.apache.iceberg.spark.{GpuTypeToSparkType, Spark3Util, SparkSchemaUtil}
 import org.apache.iceberg.spark.functions.{GpuFieldTransform, GpuTransform}
 import org.apache.iceberg.spark.source.GpuWriteContext.positionDeleteSparkType
-import org.apache.iceberg.util.PropertyUtil
 
 import org.apache.spark.api.java.JavaSparkContext
 import org.apache.spark.broadcast.Broadcast
@@ -160,44 +157,6 @@ class GpuSparkWrite(cpu: Write) extends GpuWrite with RequiresDistributionAndOrd
 }
 
 object GpuSparkWrite {
-  private def catalogProperties(
-      catalog: org.apache.spark.sql.connector.catalog.StagingTableCatalog): Map[String, String] = {
-    catalog match {
-      case icebergCatalog: HasIcebergCatalog =>
-        GpuCatalogPropertiesAccess.properties(icebergCatalog.icebergCatalog()).asScala.toMap
-      case _ => Map.empty
-    }
-  }
-
-  private def existingIcebergTable(
-      cpuExec: AtomicReplaceTableAsSelectExec): Option[Table] = {
-    if (!cpuExec.catalog.tableExists(cpuExec.ident)) {
-      None
-    } else {
-      cpuExec.catalog.loadTable(cpuExec.ident) match {
-        case table: SparkTable => Some(table.table())
-        case table: RapidsSparkTable => Some(table.delegate().table())
-        case _ => None
-      }
-    }
-  }
-
-  private def effectiveCreateOrReplaceProperties(
-      catalog: org.apache.spark.sql.connector.catalog.StagingTableCatalog,
-      statementProperties: Map[String, String],
-      existingTable: Option[Table]): Map[String, String] = {
-    val catalogProps = catalogProperties(catalog)
-    val defaultProperties = PropertyUtil.propertiesWithPrefix(
-      catalogProps.asJava, CatalogProperties.TABLE_DEFAULT_PREFIX).asScala.toMap
-    val overrideProperties = PropertyUtil.propertiesWithPrefix(
-      catalogProps.asJava, CatalogProperties.TABLE_OVERRIDE_PREFIX).asScala.toMap
-    val existingFormatVersion = existingTable.map { table =>
-      Map(TableProperties.FORMAT_VERSION -> ShimUtils.formatVersion(table).toString)
-    }.getOrElse(Map.empty)
-
-    existingFormatVersion ++ defaultProperties ++ statementProperties ++ overrideProperties
-  }
-
   def supports(cpuClass: Class[_ <: Write]): Boolean = {
     GpuSparkWriteAccess.supports(cpuClass)
   }
@@ -339,11 +298,9 @@ object GpuSparkWrite {
   def tagForGpuCtas(
       cpuExec: AtomicCreateTableAsSelectExec,
       meta: SparkPlanMeta[_]): Unit = {
-    val rebuiltProperties: Map[String, String] = Spark3Util
+    val properties: Map[String, String] = Spark3Util
       .rebuildCreateProperties(cpuExec.tableSpec.properties.asJava)
       .asScala.toMap
-    val properties = effectiveCreateOrReplaceProperties(
-      cpuExec.catalog, rebuiltProperties, None)
     IcebergFormatVersionSupport.tagForFormatVersion(properties, meta)
     val fileFormatStr = properties.getOrElse(TableProperties.DEFAULT_FILE_FORMAT,
       TableProperties.DEFAULT_FILE_FORMAT_DEFAULT)
@@ -372,11 +329,9 @@ object GpuSparkWrite {
   def tagForGpuRtas(
       cpuExec: AtomicReplaceTableAsSelectExec,
       meta: SparkPlanMeta[_]): Unit = {
-    val rebuiltProperties: Map[String, String] = Spark3Util
+    val properties: Map[String, String] = Spark3Util
       .rebuildCreateProperties(cpuExec.tableSpec.properties.asJava)
       .asScala.toMap
-    val properties = effectiveCreateOrReplaceProperties(
-      cpuExec.catalog, rebuiltProperties, existingIcebergTable(cpuExec))
     IcebergFormatVersionSupport.tagForFormatVersion(properties, meta)
     val fileFormatStr = properties.getOrElse(TableProperties.DEFAULT_FILE_FORMAT,
       TableProperties.DEFAULT_FILE_FORMAT_DEFAULT)
