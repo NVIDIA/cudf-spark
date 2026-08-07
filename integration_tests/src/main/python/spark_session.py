@@ -343,6 +343,13 @@ def supports_delta_lake_deletion_vectors():
     else:
         return is_spark_340_or_later()
 
+def gpu_supports_delta_dv_scan():
+    """Whether RAPIDS supports scanning Delta deletion vectors on the GPU."""
+    if is_databricks_runtime():
+        return is_databricks173_or_later()
+    else:
+        return is_spark_353_or_later()
+
 def is_support_default_values_in_schema():
     # Spark 340 + and Databricks 330 + support
     return is_spark_340_or_later() or is_databricks113_or_later()
