@@ -456,7 +456,6 @@ def test_cached_groupby_sum_version_specific(enable_vectorized_conf):
 
     assert_gpu_and_cpu_are_equal_collect(do_it, conf=enable_vectorized_conf)
 
-# Regression for https://github.com/NVIDIA/spark-rapids/issues/15305: InMemoryTableScanExec used to
 # reject NullType output (nested or top-level) and fall back to CPU. The PCBS serializer is a static
 # conf, so gate on the lane's launch env var PYSP_TEST_spark_sql_cache_serializer.
 _pcbs_serializer = 'com.nvidia.spark.ParquetCachedBatchSerializer'
