@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,11 +16,10 @@
 
 package org.apache.spark.sql.hive.rapids
 
-import java.nio.charset.Charset
+import java.nio.charset.{Charset, StandardCharsets}
 import java.util.Locale
 
 import ai.rapids.cudf.{CompressionType, CSVWriterOptions, DType, ParquetWriterOptions, QuoteStyle, Scalar, Table, TableWriter => CudfTableWriter}
-import com.google.common.base.Charsets
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.jni.CastStrings
@@ -183,7 +182,7 @@ object GpuHiveFileFormat extends Logging {
 
     val charset = Charset.forName(
       storage.properties.getOrElse("serialization.encoding", "UTF-8"))
-    if (!charset.equals(Charsets.UTF_8)) {
+    if (!charset.equals(StandardCharsets.UTF_8)) {
       meta.willNotWorkOnGpu("only UTF-8 is supported as the charset")
     }
 
@@ -200,13 +199,25 @@ object GpuHiveFileFormat extends Logging {
 }
 
 class GpuHiveParquetFileFormat(compType: CompressionType) extends ColumnarFileFormat
-    with Serializable {
+    with Logging with Serializable {
 
   override def prepareWrite(sparkSession: SparkSession, job: Job,
       options: Map[String, String], dataSchema: StructType): ColumnarOutputWriterFactory = {
 
     // Avoid referencing the outer object.
     val compressionType = compType
+    GpuParquetFileFormat.parquetBlockSizeWarning(job.getConfiguration, options).foreach {
+      warning => logWarning(warning)
+    }
+    val parquetWriterRowGroupSizeRows =
+      RapidsConf.PARQUET_WRITER_ROW_GROUP_SIZE_ROWS.get(sparkSession.sessionState.conf)
+    val parquetWriterRowGroupSizeBytes =
+      RapidsConf.PARQUET_WRITER_ROW_GROUP_SIZE_BYTES.get(sparkSession.sessionState.conf)
+    val parquetWriterMaxDictionarySize =
+      RapidsConf.PARQUET_WRITER_MAX_DICTIONARY_SIZE.get(sparkSession.sessionState.conf)
+    val parquetWriterDictionaryPolicy =
+      RapidsConf.PARQUET_WRITER_DICTIONARY_POLICY.get(sparkSession.sessionState.conf)
+        .map(ParquetWriterOptions.DictionaryPolicy.valueOf)
     new ColumnarOutputWriterFactory {
       override def getFileExtension(context: TaskAttemptContext): String =
         compressionType match {
@@ -221,8 +232,12 @@ class GpuHiveParquetFileFormat(compType: CompressionType) extends ColumnarFileFo
           debugOutputPath: Option[String],
           fileIO: RapidsFileIO): ColumnarOutputWriter = {
         new GpuHiveParquetWriter(path, dataSchema, context, compressionType, statsTrackers,
-          debugOutputPath, fileIO)
+          debugOutputPath, parquetWriterRowGroupSizeRows, parquetWriterRowGroupSizeBytes,
+          parquetWriterMaxDictionarySize, parquetWriterDictionaryPolicy, fileIO)
       }
+
+      override def partitionFlushSize(context: TaskAttemptContext): Long =
+        parquetWriterRowGroupSizeBytes.getOrElse(super.partitionFlushSize(context))
     }
   }
 }
@@ -231,6 +246,10 @@ class GpuHiveParquetWriter(override val path: String, dataSchema: StructType,
     context: TaskAttemptContext, compType: CompressionType,
     statsTrackers: Seq[ColumnarWriteTaskStatsTracker],
     debugOutputPath: Option[String],
+    parquetWriterRowGroupSizeRows: Option[Integer],
+    parquetWriterRowGroupSizeBytes: Option[Long],
+    parquetWriterMaxDictionarySize: Option[Long],
+    parquetWriterDictionaryPolicy: Option[ParquetWriterOptions.DictionaryPolicy],
     fileIO: RapidsFileIO)
   extends ColumnarOutputWriter(context, dataSchema, NvtxRegistry.FILE_FORMAT_WRITE, true,
     statsTrackers, debugOutputPath, false, false, fileIO) {
@@ -242,6 +261,18 @@ class GpuHiveParquetWriter(override val path: String, dataSchema: StructType,
         writeInt96 = true,      // Hive 1.2 write timestamp as INT96
         parquetFieldIdEnabled = false)
       .withCompressionType(compType)
+    parquetWriterRowGroupSizeRows.foreach { rowGroupSizeRows =>
+      optionsBuilder.withRowGroupSizeRows(rowGroupSizeRows)
+    }
+    parquetWriterRowGroupSizeBytes.foreach { rowGroupSizeBytes =>
+      optionsBuilder.withRowGroupSizeBytes(rowGroupSizeBytes)
+    }
+    parquetWriterMaxDictionarySize.foreach { maxDictionarySize =>
+      optionsBuilder.withMaxDictionarySize(maxDictionarySize)
+    }
+    parquetWriterDictionaryPolicy.foreach { dictionaryPolicy =>
+      optionsBuilder.withDictionaryPolicy(dictionaryPolicy)
+    }
     Table.writeParquetChunked(optionsBuilder.build(), this)
   }
 

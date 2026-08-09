@@ -17,7 +17,6 @@
 /*** spark-rapids-shim-json-lines
 {"spark": "330db"}
 {"spark": "332db"}
-{"spark": "341db"}
 {"spark": "350db143"}
 {"spark": "400db173"}
 spark-rapids-shim-json-lines ***/
@@ -90,5 +89,11 @@ class RapidsErrorUtilsBase extends RapidsErrorUtilsFor330plus {
 
   def invalidInputSyntaxForBooleanError(s: UTF8String): RuntimeException = {
     QueryExecutionErrors.invalidInputSyntaxForBooleanError(s, null)
+  }
+
+  def invalidInputSyntaxForBooleanError(
+      s: UTF8String,
+      errorContext: SQLQueryContext): RuntimeException = {
+    QueryExecutionErrors.invalidInputSyntaxForBooleanError(s, errorContext)
   }
 }

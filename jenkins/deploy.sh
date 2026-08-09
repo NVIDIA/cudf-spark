@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Copyright (c) 2020-2025, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@
 #   SIGN_TOOL:      Tool to sign files, e.g., gpg, nvsec, only required when $1 is 'true'
 #   GPG_PASSPHRASE: gpg passphrase to sign artifacts, only required when <SIGN_TOOL> is gpg
 #   MVN_SETTINGS:   Maven configuration file
+#   PARENT_POM:     Comma-separated parent pom files to be deployed
 #   POM_FILE:       Project pom file to be deployed
 #   OUT_PATH:       The path where jar files are
 #   CUDA_CLASSIFIERS:    Comma separated classifiers, e.g., "cuda12"
@@ -102,17 +103,17 @@ if [ "$SIGN_FILE" == true ]; then
             ;;
     esac
 else
-    DEPLOY_CMD="$MVN -B deploy:deploy-file -s jenkins/settings.xml"
+    DEPLOY_CMD="$MVN -B deploy:deploy-file"
 fi
 DEPLOY_CMD="$DEPLOY_CMD -Durl=$SERVER_URL -DrepositoryId=$SERVER_ID"
 echo "Deploy CMD: $DEPLOY_CMD"
 
-###### Deploy the parent pom file ######
-$DEPLOY_CMD -Dfile=./pom.xml -DpomFile=./pom.xml
-
-###### Deploy the jdk-profile pom file ######
-JDK_PROFILES=${JDK_PROFILES:-"jdk-profiles"}
-$DEPLOY_CMD -Dfile=$JDK_PROFILES/pom.xml -DpomFile=$JDK_PROFILES/pom.xml
+###### Deploy the parent pom file(s) ######
+PARENT_POM=${PARENT_POM:-"./pom.xml"}
+IFS=',' read -ra parent_arr <<< "$PARENT_POM"
+for parent in "${parent_arr[@]}"; do
+    $DEPLOY_CMD -Dfile="$parent" -DpomFile="$parent"
+done
 
 ###### Deploy the artifact jar(s) ######
 $DEPLOY_CMD -DpomFile=$POM_FILE \

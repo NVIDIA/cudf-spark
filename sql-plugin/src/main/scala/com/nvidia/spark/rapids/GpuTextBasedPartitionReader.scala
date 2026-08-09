@@ -16,6 +16,7 @@
 
 package com.nvidia.spark.rapids
 
+import java.net.URI
 import java.nio.charset.{Charset, StandardCharsets}
 import java.time.DateTimeException
 import java.util
@@ -384,7 +385,9 @@ abstract class GpuTextBasedPartitionReader[BUFF <: LineBufferer, FACT <: LineBuf
   metrics = execMetrics
 
   private lazy val estimatedHostBufferSize: Long = {
-    val rawPath = new Path(partFile.filePath.toString())
+    // URI-decode the file path so paths containing escaped glob metacharacters (e.g.
+    // `%5Babc%5D` for `[abc]`) resolve to a real FileStatus instead of FileNotFound.
+    val rawPath = new Path(new URI(partFile.filePath.toString()))
     val fs = rawPath.getFileSystem(conf)
     val path = fs.makeQualified(rawPath)
     val fileSize = fs.getFileStatus(path).getLen

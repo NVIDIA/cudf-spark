@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -777,9 +777,9 @@ class GpuEquivalentExpressionsSuite extends AnyFunSuite with Logging {
     val inputAttrs = AttributeSeq(Seq(customer, quantity, price))
 
     val product = GpuDecimalMultiply(
-      GpuCast(quantity, DecimalType(10, 0)), price, DecimalType(18,2))
+      GpuCast(quantity, DecimalType(10, 0))(), price, DecimalType(18,2))
     val nullCheck = GpuIsNull(product)
-    val castProduct = GpuCast(product, DecimalType(28,2))
+    val castProduct = GpuCast(product, DecimalType(28,2))()
     val extract0 = GpuExtractChunk32(castProduct, 0, replaceNullsWithZero = true)
     val extract1 = GpuExtractChunk32(castProduct, 1, replaceNullsWithZero = true)
     val extract2 = GpuExtractChunk32(castProduct, 2, replaceNullsWithZero = true)

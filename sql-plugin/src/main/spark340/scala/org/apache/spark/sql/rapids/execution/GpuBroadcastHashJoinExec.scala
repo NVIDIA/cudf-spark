@@ -29,11 +29,17 @@
 {"spark": "356"}
 {"spark": "357"}
 {"spark": "358"}
+{"spark": "359"}
 {"spark": "400"}
 {"spark": "401"}
 {"spark": "402"}
+{"spark": "403"}
+{"spark": "404"}
 {"spark": "411"}
+{"spark": "412"}
+{"spark": "413"}
 spark-rapids-shim-json-lines ***/
+
 package org.apache.spark.sql.rapids.execution
 
 import com.nvidia.spark.rapids._
@@ -50,13 +56,9 @@ class GpuBroadcastHashJoinMeta(
     rule: DataFromReplacementRule) extends GpuBroadcastHashJoinMetaBase(join, conf, parent, rule) {
 
   override def convertToGpu(): GpuExec = {
-    val condition = conditionMeta.map(_.convertToGpu())
-    val (joinCondition, filterCondition) = if (conditionMeta.forall(_.canThisBeAst)) {
-      (condition, None)
-    } else {
-      (None, condition)
-    }
     val Seq(left, right) = childPlans.map(_.convertIfNeeded())
+    val extractedCondition = GpuHashJoin.extractJoinConditionIfNeeded(
+      conditionMeta, join.joinType, left, right)
     // The broadcast part of this must be a BroadcastExchangeExec
     val buildSideMeta = buildSide match {
       case GpuBuildLeft => left
@@ -68,12 +70,14 @@ class GpuBroadcastHashJoinMeta(
       rightKeys.map(_.convertToGpu()),
       join.joinType,
       buildSide,
-      joinCondition,
-      left, right,
+      extractedCondition.joinCondition,
+      extractedCondition.left, extractedCondition.right,
       join.isNullAwareAntiJoin)
     // For inner joins we can apply a post-join condition for any conditions that cannot be
     // evaluated directly in a mixed join that leverages a cudf AST expression
-    filterCondition.map(c => GpuFilterExec(c, joinExec)()).getOrElse(joinExec)
+    val filteredJoinExec =
+      extractedCondition.filterCondition.map(c => GpuFilterExec(c, joinExec)()).getOrElse(joinExec)
+    extractedCondition.projectIfNeeded(filteredJoinExec)
   }
 }
 

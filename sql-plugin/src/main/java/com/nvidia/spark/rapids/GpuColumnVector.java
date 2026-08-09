@@ -1072,12 +1072,30 @@ public class GpuColumnVector extends GpuColumnVectorBase {
         }
         Cuda.DEFAULT_STREAM.sync();
       } catch (Exception e) {
-        for (RapidsHostColumnVector hostCol : hostCols) {
-          if (hostCol != null) {
-            try {
-              hostCol.close();
-            } catch (Exception suppressed) {
-              e.addSuppressed(suppressed);
+        // Async D->H copies may still be in flight into the host buffers owned
+        // by hostCols; sync before closing to avoid a use-after-free on pinned
+        // memory.
+        boolean drained = false;
+        try {
+          Cuda.DEFAULT_STREAM.sync();
+          drained = true;
+        } catch (Exception syncEx) {
+          e.addSuppressed(syncEx);
+        }
+        // If the recovery sync threw, the CUDA stream is in an error state
+        // and there is no guarantee that pending DMA writes into the host
+        // buffers have completed. Closing them now risks the DMA engine
+        // writing into freed memory. Leak the host buffers instead — the
+        // process is already in a broken state (sticky CUDA error typically
+        // requires a restart), and a leak is preferable to silent corruption.
+        if (drained) {
+          for (RapidsHostColumnVector hostCol : hostCols) {
+            if (hostCol != null) {
+              try {
+                hostCol.close();
+              } catch (Exception suppressed) {
+                e.addSuppressed(suppressed);
+              }
             }
           }
         }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,7 +36,6 @@ import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.vectorized.WritableColumnVector
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.{ArrowColumnVector, ColumnarBatch, ColumnVector}
-import org.apache.spark.sql.vectorized.rapids.AccessibleArrowColumnVector
 
 object HostColumnarToGpu extends Logging {
 
@@ -80,8 +79,6 @@ object HostColumnarToGpu extends Logging {
             throw new IllegalStateException("Trying to read from a ArrowColumnVector but can't " +
               "access its Arrow ValueVector", e)
         }
-      case av: AccessibleArrowColumnVector =>
-        av.getArrowValueVector
       case _ =>
         throw new IllegalStateException(s"Illegal column vector type: ${cv.getClass}")
     }
@@ -144,6 +141,8 @@ object HostColumnarToGpu extends Logging {
         ColumnarCopyHelper.doubleCopy(cv, b, rows)
       case StringType =>
         ColumnarCopyHelper.stringCopy(cv, b, rows)
+      case BinaryType =>
+        ColumnarCopyHelper.binaryCopy(cv, b, rows)
       case dt: DecimalType =>
         cv match {
           case wcv: WritableColumnVector =>
@@ -241,8 +240,7 @@ class HostToGpuCoalesceIterator(iter: Iterator[ColumnarBatch],
     // having a column
     if (useArrowCopyOpt && batch.numCols() > 0 &&
       arrowTypesSupported(schema) &&
-      (batch.column(0).isInstanceOf[ArrowColumnVector] ||
-        batch.column(0).isInstanceOf[AccessibleArrowColumnVector])) {
+      batch.column(0).isInstanceOf[ArrowColumnVector]) {
       logDebug("Using GpuArrowColumnarBatchBuilder")
       batchBuilder = new GpuColumnVector.GpuArrowColumnarBatchBuilder(schema)
     } else {

@@ -35,6 +35,9 @@ env:
     -Daether.connector.http.connectionMaxTtl=30
     -Drapids.secondaryCacheDir=$HOME/.m2/repository/.sbt/1.0/zinc/org.scala-sbt
 
+permissions:
+  contents: read
+
 jobs:
   cache-dependencies:
     runs-on: ubuntu-latest

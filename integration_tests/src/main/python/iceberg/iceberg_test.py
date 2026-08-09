@@ -14,13 +14,16 @@
 
 import pytest
 
-from asserts import assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_row_counts_equal, assert_gpu_fallback_collect, assert_spark_exception
-from conftest import is_iceberg_remote_catalog
+from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, \
+    assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect, \
+    assert_gpu_and_cpu_row_counts_equal, assert_gpu_fallback_collect, assert_spark_exception
+from conftest import is_iceberg_remote_catalog, is_iceberg_rest_catalog
 from data_gen import *
-from iceberg import get_full_table_name, iceberg_unsupported_mark, _build_tblprops, _BASE_TBLPROPS_SQL
+from iceberg import get_full_table_name, iceberg_unsupported_mark, _build_tblprops, \
+    _BASE_TBLPROPS_SQL, create_iceberg_table
 from marks import allow_non_gpu, iceberg, ignore_order
-from spark_session import is_databricks_runtime, with_cpu_session, \
-    with_gpu_session
+from spark_session import is_databricks_runtime, is_spark_35x, is_spark_40x, is_spark_41x, \
+    spark_version, with_cpu_session, with_gpu_session
 
 iceberg_map_gens = [MapGen(f(nullable=False), f()) for f in [
     BooleanGen, ByteGen, ShortGen, IntegerGen, LongGen, FloatGen, DoubleGen, DateGen, TimestampGen ]] + \
@@ -45,6 +48,117 @@ rapids_reader_types = ['PERFILE', 'MULTITHREADED', 'COALESCING']
 _NO_FANOUT = _BASE_TBLPROPS_SQL
 
 pytestmark = iceberg_unsupported_mark
+
+
+def _is_spark_patch_at_least(version, minimum):
+    patch = version.split(".")[2].split("-", 1)[0]
+    return int(patch) >= minimum
+
+
+@pytest.mark.parametrize("version, minimum, expected", [
+    ("3.5.9", 9, True),
+    ("3.5.9-SNAPSHOT", 9, True),
+    ("4.1.2-amzn-0", 2, True),
+    ("3.5.8-SNAPSHOT", 9, False),
+])
+def test_is_spark_patch_at_least(version, minimum, expected):
+    assert _is_spark_patch_at_least(version, minimum) == expected
+
+
+def _collect_plan_nodes(plan):
+    nodes = [plan]
+    children = plan.children().iterator()
+    while children.hasNext():
+        nodes.extend(_collect_plan_nodes(children.next()))
+    return nodes
+
+
+def _assert_partial_clustering_spj_plan(plan):
+    nodes = _collect_plan_nodes(plan)
+
+    def nodes_of_class(class_name):
+        return [node for node in nodes if node.getClass().getSimpleName() == class_name]
+
+    scans = nodes_of_class("GpuBatchScanExec")
+    joins = nodes_of_class("GpuShuffledSymmetricHashJoinExec")
+    exchanges = nodes_of_class("GpuShuffleExchangeExec")
+
+    assert len(scans) == 2, f"Expected two GPU batch scans, found {len(scans)}:\n{plan}"
+    assert len(joins) == 1, f"Expected one GPU SPJ join, found {len(joins)}:\n{plan}"
+    assert len(exchanges) == 1, \
+        f"Expected one post-join GPU shuffle, found {len(exchanges)}:\n{plan}"
+    assert any(scan.outputPartitioning().isPartiallyClustered() for scan in scans), \
+        f"Expected at least one partially clustered GPU batch scan:\n{plan}"
+
+    join_nodes = _collect_plan_nodes(joins[0])
+    join_exchanges = [
+        node for node in join_nodes
+        if node.getClass().getSimpleName() == "GpuShuffleExchangeExec"
+    ]
+    assert not join_exchanges, f"Expected shuffle-free SPJ inputs:\n{plan}"
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.skipif(
+    not (
+        (is_spark_35x() and _is_spark_patch_at_least(spark_version(), 9))
+        or (is_spark_40x() and _is_spark_patch_at_least(spark_version(), 3))
+        or (is_spark_41x() and _is_spark_patch_at_least(spark_version(), 2))
+    ),
+    reason="Requires Spark's partial-clustering correctness fix and GPU Iceberg scan support")
+def test_iceberg_spj_partial_clustering_distinct(spark_tmp_table_factory):
+    left_table = get_full_table_name(spark_tmp_table_factory)
+    right_table = get_full_table_name(spark_tmp_table_factory)
+    table_props = _build_tblprops({
+        # Keep separate INSERTs as separate scan splits so that id=1 is partially clustered.
+        "read.split.target-size": "1",
+        "read.split.open-file-cost": "1",
+    })
+    table_props_sql = ", ".join(f"'{k}' = '{v}'" for k, v in table_props.items())
+
+    def setup_iceberg_tables(spark):
+        spark.sql(
+            f"CREATE TABLE {left_table} (id INT, price DOUBLE) USING ICEBERG "
+            f"PARTITIONED BY (id) TBLPROPERTIES ({table_props_sql})")
+        spark.sql(
+            f"CREATE TABLE {right_table} (id INT, value STRING) USING ICEBERG "
+            f"PARTITIONED BY (id) TBLPROPERTIES ({table_props_sql})")
+
+        # The two id=1 rows land in different files. Partial clustering assigns them to
+        # different join tasks and replicates the matching row from the other side. The missing
+        # id=3 on the right also pads that scan with an empty partition.
+        spark.sql(f"INSERT INTO {left_table} VALUES (1, 40.0), (2, 10.0), (3, 15.5)")
+        spark.sql(f"INSERT INTO {left_table} VALUES (1, 41.0)")
+        spark.sql(f"INSERT INTO {right_table} VALUES (1, 'a'), (2, 'b')")
+
+    with_cpu_session(setup_iceberg_tables)
+
+    conf = {
+        "spark.sql.adaptive.enabled": "false",
+        "spark.sql.autoBroadcastJoinThreshold": "-1",
+        "spark.sql.sources.v2.bucketing.enabled": "true",
+        "spark.sql.sources.v2.bucketing.pushPartValues.enabled": "true",
+        "spark.sql.sources.v2.bucketing.partiallyClusteredDistribution.enabled": "true",
+        "spark.sql.iceberg.planning.preserve-data-grouping": "true",
+    }
+
+    def distinct_after_spj(spark):
+        return spark.sql(
+            f"""
+            SELECT DISTINCT l.id
+            FROM {left_table} l
+            JOIN {right_table} r ON l.id = r.id
+            """)
+
+    # The SPJ itself is shuffle-free, so the distinct introduces a post-join shuffle.
+    # Comparing the results also exercises the replicated and padded scan partitions.
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        distinct_after_spj,
+        conf=conf,
+        require_non_empty=True,
+        gpu_plan_assertion=_assert_partial_clustering_spj_plan)
+
 
 @allow_non_gpu("BatchScanExec")
 @iceberg
@@ -339,7 +453,7 @@ def test_iceberg_read_timetravel(spark_tmp_table_factory, reader_type):
                          "ORDER BY committed_at").head()[0]
     first_snapshot_id = with_cpu_session(setup_snapshots)
     assert_gpu_and_cpu_are_equal_collect(
-        lambda spark : spark.read.option("snapshot-id", first_snapshot_id) \
+        lambda spark : spark.read.option("versionAsOf", first_snapshot_id) \
             .format("iceberg").load("{}".format(full_table)),
         conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
@@ -631,6 +745,32 @@ def test_iceberg_parquet_read_from_url_encoded_path(spark_tmp_table_factory, rea
 @iceberg
 @ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
+@pytest.mark.skipif(not is_iceberg_rest_catalog(),
+                    reason="S3 path handling is exercised only with the REST catalog")
+def test_iceberg_parquet_read_from_uri_invalid_s3_path(spark_tmp_table_factory, reader_type):
+    table = get_full_table_name(spark_tmp_table_factory)
+    tmp_view = spark_tmp_table_factory.get()
+    partition_gen = StringGen(pattern="(.|\n){1,10}", nullable=False)\
+        .with_special_case('uri invalid path', 1000)
+
+    def setup_iceberg_table(spark):
+        df = two_col_df(spark, long_gen, partition_gen).sortWithinPartitions('b')
+        df.createOrReplaceTempView(tmp_view)
+        spark.sql("CREATE TABLE {} USING ICEBERG PARTITIONED BY (b) ".format(table) +
+                  _NO_FANOUT + " AS SELECT * FROM {}".format(tmp_view))
+
+    with_cpu_session(setup_iceberg_table)
+    assert with_gpu_session(
+        lambda spark: spark.sparkContext.getConf().get(
+            'spark.rapids.perfio.s3.enabled', 'false') == 'true'), \
+        "PerfIO S3 must be enabled at Spark startup for REST catalog tests"
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(f"SELECT * FROM {table}"),
+        conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
+
+@iceberg
+@ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
 def test_iceberg_read_metadata_columns_with_partition_evolution(spark_tmp_table_factory, reader_type):
     """
     Test reading Iceberg metadata columns (_file, _pos, _spec_id, _partition) with partition evolution.
@@ -665,4 +805,217 @@ def test_iceberg_read_metadata_columns_with_partition_evolution(spark_tmp_table_
     # Test reading all metadata columns along with data columns
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.sql(f"SELECT a, b, c, _file, _pos, _spec_id, _partition FROM {table}"),
+        conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+def test_iceberg_read_pos_with_split_file(spark_tmp_table_factory, reader_type):
+    # Writes a single Parquet data file containing many row groups, then forces
+    # Iceberg's planner to split that file across multiple scan tasks at row-group
+    # byte boundaries via a tiny row-group size, a tiny split target, and a zero
+    # per-file open cost. The query projects Iceberg's _pos metadata column; the
+    # GPU result must match CPU regardless of how the planner splits the file.
+    # Note: with the COALESCING reader_type, GpuReaderFactory routes _pos scans
+    # away from the coalescing reader (canUseCoalescing excludes
+    # hasRowPositionMetadata), so that parametrization actually exercises the
+    # per-file/multi-thread path. The split-file _pos correctness assertion still
+    # holds in whichever reader is chosen.
+    table = get_full_table_name(spark_tmp_table_factory)
+    def setup_iceberg_table(spark):
+        spark.sql(f"CREATE TABLE {table} (id BIGINT) USING ICEBERG {_NO_FANOUT}")
+        spark.sql(
+            f"ALTER TABLE {table} SET TBLPROPERTIES ("
+            "'write.parquet.row-group-size-bytes' = '4096', "
+            "'read.split.target-size'             = '4096', "
+            "'read.split.open-file-cost'          = '0')")
+        spark.range(0, 1500).coalesce(1).writeTo(table).append()
+    with_cpu_session(setup_iceberg_table)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(f"SELECT id, _pos FROM {table}"),
+        conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+def test_iceberg_read_mor_with_pos_deletes_split_file(spark_tmp_table_factory, reader_type):
+    # Same split-file conditions as test_iceberg_read_pos_with_split_file, but on
+    # a v2 Merge-on-Read table with positional delete files. The query does not
+    # project _pos; the Iceberg reader still adds it internally to match against
+    # the positional delete list. The test deletes a scattered subset by id and
+    # asserts CPU and GPU return the same surviving rows.
+    # Note: the COALESCING reader_type does not actually exercise the coalescing
+    # reader here either — GpuReaderFactory.canUseCoalescing already excludes any
+    # scan with delete files (`hasNoDeletes` is false), so the test runs against
+    # the per-file/multi-thread reader regardless of the requested reader_type.
+    table = get_full_table_name(spark_tmp_table_factory)
+    def setup_iceberg_table(spark):
+        spark.sql(
+            f"CREATE TABLE {table} (id BIGINT) USING ICEBERG TBLPROPERTIES ("
+            "'format-version'                     = '2', "
+            "'write.delete.mode'                  = 'merge-on-read', "
+            "'write.spark.fanout.enabled'         = 'false', "
+            "'write.parquet.row-group-size-bytes' = '4096', "
+            "'read.split.target-size'             = '4096', "
+            "'read.split.open-file-cost'          = '0')")
+        spark.range(0, 1500).coalesce(1).writeTo(table).append()
+        spark.sql(f"DELETE FROM {table} WHERE id % 7 = 3")
+    with_cpu_session(setup_iceberg_table)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(f"SELECT id FROM {table}"),
+        conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+def test_iceberg_small_file_combine_with_schema_evolution(spark_tmp_table_factory, reader_type):
+    table = get_full_table_name(spark_tmp_table_factory)
+    schema_evolution_gens_v1 = [('a', long_gen), ('b', int_gen)]
+    schema_evolution_gens_v2 = schema_evolution_gens_v1 + [('c', string_gen)]
+    base_seed = get_datagen_seed()
+    create_iceberg_table(
+        table,
+        partition_col_sql='bucket(2, a)',
+        df_gen=lambda spark: gen_df(spark, schema_evolution_gens_v1))
+
+    def setup_iceberg_table(spark):
+        for seed_offset in range(4):
+            gen_df(
+                spark,
+                schema_evolution_gens_v1,
+                length=64,
+                seed=base_seed + seed_offset,
+                num_slices=1).writeTo(table).append()
+
+        spark.sql(f"ALTER TABLE {table} ADD COLUMN c STRING")
+        for seed_offset in range(4):
+            gen_df(
+                spark,
+                schema_evolution_gens_v2,
+                length=64,
+                seed=base_seed + 100 + seed_offset,
+                num_slices=1).writeTo(table).append()
+
+        spark.sql(
+            f"ALTER TABLE {table} SET TBLPROPERTIES ("
+            "'read.split.target-size' = '268435456', "
+            "'read.split.planning-lookback' = '100')")
+        spark.sql(f"REFRESH TABLE {table}")
+
+    with_cpu_session(setup_iceberg_table)
+
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(f"SELECT a, b, c FROM {table}"),
+        conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+def test_iceberg_small_file_combine_with_partition_spec_evolution(
+        spark_tmp_table_factory, reader_type):
+    table = get_full_table_name(spark_tmp_table_factory)
+    partition_evolution_gens = [('a', long_gen), ('b', int_gen), ('c', string_gen)]
+    base_seed = get_datagen_seed()
+    create_iceberg_table(
+        table,
+        partition_col_sql='bucket(10, a)',
+        df_gen=lambda spark: gen_df(spark, partition_evolution_gens))
+
+    def setup_iceberg_table(spark):
+        for seed_offset in range(4):
+            gen_df(
+                spark,
+                partition_evolution_gens,
+                length=64,
+                seed=base_seed + seed_offset,
+                num_slices=1).writeTo(table).append()
+
+        spark.sql(f"ALTER TABLE {table} ADD PARTITION FIELD bucket(10, b)")
+        for seed_offset in range(4):
+            gen_df(
+                spark,
+                partition_evolution_gens,
+                length=64,
+                seed=base_seed + 100 + seed_offset,
+                num_slices=1).writeTo(table).append()
+
+        spark.sql(f"ALTER TABLE {table} DROP PARTITION FIELD bucket(10, a)")
+        for seed_offset in range(4):
+            gen_df(
+                spark,
+                partition_evolution_gens,
+                length=64,
+                seed=base_seed + 200 + seed_offset,
+                num_slices=1).writeTo(table).append()
+
+        spark.sql(
+            f"ALTER TABLE {table} SET TBLPROPERTIES ("
+            "'read.split.target-size' = '268435456', "
+            "'read.split.planning-lookback' = '100')")
+        spark.sql(f"REFRESH TABLE {table}")
+
+    with_cpu_session(setup_iceberg_table)
+
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(f"SELECT a, b, c, _spec_id, _partition FROM {table}"),
+        conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason = "S3tables catalog is managed")
+def test_iceberg_small_file_combine_with_add_files_identity_partition(
+        spark_tmp_table_factory, reader_type):
+    target_table = get_full_table_name(spark_tmp_table_factory)
+    source_table = get_full_table_name(spark_tmp_table_factory)
+    create_iceberg_table(
+        target_table,
+        partition_col_sql='a',
+        df_gen=lambda spark: spark.createDataFrame([], 'a long, b string'))
+
+    def setup_imported_table(spark):
+        spark.sql(
+            f"CREATE TABLE {source_table} (a BIGINT, b STRING) "
+            "USING PARQUET "
+            "PARTITIONED BY (a)")
+        source_columns = spark.table(source_table).columns
+
+        partition_values = [2451350, 2452349, 2452323]
+        for batch_id in range(4):
+            batch_gens = [
+                ('a', RepeatSeqGen(partition_values * 2, data_type=long_gen.data_type)),
+                ('b', RepeatSeqGen(
+                    [f"batch-{batch_id}-row-{row_idx}" for row_idx in range(6)],
+                    data_type=string_gen.data_type))
+            ]
+            (gen_df(
+                spark,
+                batch_gens,
+                length=6,
+                num_slices=1)
+                .select(*source_columns)
+                .write
+                .mode('append')
+                .insertInto(source_table))
+
+        spark.sql(
+            f"CALL spark_catalog.system.add_files("
+            f"table => '{target_table}', "
+            f"source_table => '{source_table}')")
+        spark.sql(
+            f"ALTER TABLE {target_table} SET TBLPROPERTIES ("
+            "'read.split.target-size' = '268435456', "
+            "'read.split.planning-lookback' = '100')")
+        spark.sql(f"REFRESH TABLE {target_table}")
+
+    with_cpu_session(setup_imported_table)
+
+    # Imported partitioned Parquet files materialize `a` from the path, not the file payload.
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(f"SELECT a, b FROM {target_table}"),
         conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})

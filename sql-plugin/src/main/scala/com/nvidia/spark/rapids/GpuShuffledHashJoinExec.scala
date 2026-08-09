@@ -56,6 +56,21 @@ class GpuShuffledHashJoinMeta(
   override val namedChildExprs: Map[String, Seq[BaseExprMeta[_]]] =
     JoinTypeChecks.equiJoinMeta(leftKeys, rightKeys, conditionMeta)
 
+  override protected def runChildExprBridgeOptimization(): Unit = {
+    GpuCpuBridgeOptimizer.checkAndOptimizeExpressionMetas(leftKeys ++ rightKeys)
+    conditionMeta.foreach { cond =>
+      val leftExprIds = join.left.output.map(_.exprId)
+      val rightExprIds = join.right.output.map(_.exprId)
+      if (AstUtil.canExtractNonAstConditionIfNeed(cond, leftExprIds, rightExprIds)) {
+        GpuCpuBridgeOptimizer.checkAndOptimizeNonAstSubtrees(cond)
+      } else {
+        // Inner joins can consume a bridged post-filter. Joins that require an AST condition
+        // will call requireAstForGpuOn later and reject GPU execution if the bridge remains.
+        GpuCpuBridgeOptimizer.checkAndOptimizeExpressionMetas(Seq(cond))
+      }
+    }
+  }
+
   // This is used by shuffled hash join
   def tagBuildSide(meta: SparkPlanMeta[_], joinType: JoinType, buildSide: GpuBuildSide): Unit = {
     buildSide match {
@@ -89,13 +104,9 @@ class GpuShuffledHashJoinMeta(
   }
 
   override def convertToGpu(): GpuExec = {
-    val condition = conditionMeta.map(_.convertToGpu())
-    val (joinCondition, filterCondition) = if (conditionMeta.forall(_.canThisBeAst)) {
-      (condition, None)
-    } else {
-      (None, condition)
-    }
     val Seq(left, right) = childPlans.map(_.convertIfNeeded())
+    val extractedCondition = GpuHashJoin.extractJoinConditionIfNeeded(
+      conditionMeta, join.joinType, left, right)
     val useSizedJoin = GpuShuffledSizedHashJoinExec.useSizedJoin(conf, join.joinType,
       join.leftKeys, join.rightKeys)
     val readOpt = CoalesceReadOption(conf)
@@ -105,9 +116,9 @@ class GpuShuffledHashJoinMeta(
           join.joinType,
           leftKeys.map(_.convertToGpu()),
           rightKeys.map(_.convertToGpu()),
-          joinCondition,
-          left,
-          right,
+          extractedCondition.joinCondition,
+          extractedCondition.left,
+          extractedCondition.right,
           conf.isGPUShuffle,
           conf.gpuTargetBatchSizeBytes,
           conf.sizedJoinPartitionAmplification,
@@ -121,9 +132,9 @@ class GpuShuffledHashJoinMeta(
           join.joinType,
           leftKeys.map(_.convertToGpu()),
           rightKeys.map(_.convertToGpu()),
-          joinCondition,
-          left,
-          right,
+          extractedCondition.joinCondition,
+          extractedCondition.left,
+          extractedCondition.right,
           conf.isGPUShuffle,
           conf.gpuTargetBatchSizeBytes,
           conf.sizedJoinPartitionAmplification,
@@ -137,9 +148,9 @@ class GpuShuffledHashJoinMeta(
           rightKeys.map(_.convertToGpu()),
           join.joinType,
           buildSide,
-          joinCondition,
-          left,
-          right,
+          extractedCondition.joinCondition,
+          extractedCondition.left,
+          extractedCondition.right,
           readOpt,
           isSkewJoin = false)(
           join.leftKeys,
@@ -147,8 +158,9 @@ class GpuShuffledHashJoinMeta(
     }
     // For inner joins we can apply a post-join condition for any conditions that cannot be
     // evaluated directly in a mixed join that leverages a cudf AST expression
-    filterCondition.map(c => GpuFilterExec(c,
+    val filteredJoinExec = extractedCondition.filterCondition.map(c => GpuFilterExec(c,
       joinExec)()).getOrElse(joinExec)
+    extractedCondition.projectIfNeeded(filteredJoinExec)
   }
 }
 
@@ -190,11 +202,16 @@ case class GpuShuffledHashJoinExec(
     BUILD_DATA_SIZE -> createSizeMetric(ESSENTIAL_LEVEL, DESCRIPTION_BUILD_DATA_SIZE),
     BUILD_TIME -> createNanoTimingMetric(ESSENTIAL_LEVEL, DESCRIPTION_BUILD_TIME),
     STREAM_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_STREAM_TIME),
-    JOIN_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_JOIN_TIME))
+    JOIN_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_JOIN_TIME),
+    CPU_BRIDGE_PROCESSING_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
+      DESCRIPTION_CPU_BRIDGE_PROCESSING_TIME),
+    CPU_BRIDGE_WAIT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
+      DESCRIPTION_CPU_BRIDGE_WAIT_TIME))
 
   override def requiredChildDistribution: Seq[Distribution] =
     Seq(GpuHashPartitioning.getDistribution(cpuLeftKeys),
       GpuHashPartitioning.getDistribution(cpuRightKeys))
+
 
   override protected def doExecute(): RDD[InternalRow] = {
     throw new UnsupportedOperationException(
@@ -542,4 +559,3 @@ object GpuShuffledHashJoinExec extends Logging {
     retIter
   }
 }
-

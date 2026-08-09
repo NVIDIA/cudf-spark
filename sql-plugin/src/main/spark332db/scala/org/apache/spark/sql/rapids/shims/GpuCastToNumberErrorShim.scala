@@ -18,7 +18,6 @@
 {"spark": "332db"}
 {"spark": "340"}
 {"spark": "341"}
-{"spark": "341db"}
 {"spark": "342"}
 {"spark": "343"}
 {"spark": "344"}
@@ -32,14 +31,22 @@
 {"spark": "356"}
 {"spark": "357"}
 {"spark": "358"}
+{"spark": "359"}
 {"spark": "400"}
 {"spark": "400db173"}
 {"spark": "401"}
 {"spark": "402"}
+{"spark": "403"}
+{"spark": "404"}
 {"spark": "411"}
+{"spark": "412"}
+{"spark": "413"}
+{"spark": "420"}
 spark-rapids-shim-json-lines ***/
+
 package org.apache.spark.sql.rapids.shims
 
+import org.apache.spark.sql.catalyst.trees.SQLQueryContext
 import org.apache.spark.sql.errors.QueryExecutionErrors
 import org.apache.spark.sql.types.DataType
 import org.apache.spark.unsafe.types.UTF8String
@@ -49,7 +56,7 @@ object GpuCastToNumberErrorShim {
   def invalidInputInCastToNumberError(
       to: DataType,
       s: UTF8String,
-      errorContext: String = ""): NumberFormatException = {
-    QueryExecutionErrors.invalidInputInCastToNumberError(to, s, null)
+      errorContext: SQLQueryContext = null): NumberFormatException = {
+    QueryExecutionErrors.invalidInputInCastToNumberError(to, s, errorContext)
   }
 }

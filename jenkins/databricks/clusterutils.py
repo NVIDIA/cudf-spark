@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2024, NVIDIA CORPORATION.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -82,7 +82,7 @@ class ClusterUtils(object):
             print(clusterid + " state:" + current_state, file=printLoc)
             if current_state in ['RUNNING']:
                 break
-            if current_state in ['INTERNAL_ERROR', 'SKIPPED', 'TERMINATED'] or p >= 60:
+            if current_state in ['INTERNAL_ERROR', 'SKIPPED', 'TERMINATED'] or p >= 150:
                 if p >= retries:
                    print("Waited %d times already, stopping" % p)
                 # Output the cluster ID to stdout so a calling script can get it easily

@@ -3,6 +3,7 @@ com/nvidia/spark/rapids/AvroProvider.class
 com/nvidia/spark/rapids/HiveProvider.class
 com/nvidia/spark/rapids/iceberg/IcebergProvider.class
 com/nvidia/spark/rapids/iceberg/IcebergProvider$.class
+com/nvidia/spark/rapids/iceberg/IcebergProviderAccess.class
 com/nvidia/spark/rapids/iceberg/IcebergProbe.class
 com/nvidia/spark/rapids/delta/DeltaProbe.class
 com/nvidia/spark/rapids/delta/DeltaProvider.class

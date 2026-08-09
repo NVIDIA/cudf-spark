@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Copyright (c) 2023-2025, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2023-2026, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -78,6 +78,11 @@ for f in $(git ls-files '**pom.xml'); do
     echo "Skipping $f"
     continue
   fi
+  # Skills package their own pom.xml templates. Ignore those.
+  if [[ $f == skills/* ]]; then
+    echo "Skipping $f"
+    continue
+  fi
   echo $f
   tof="$TO_DIR/$f"
   mkdir -p $(dirname $tof)
@@ -106,6 +111,20 @@ sed_i '/<spark\-rapids\-jni\.version>/,/<scala\.binary\.version>[0-9]*\.[0-9]*</
 
 # Update <scala.version> in parent POM
 # Match any scala version to ensure idempotency
-SCALA_VERSION=$(mvn help:evaluate -Pscala-${TO_VERSION} -Dexpression=scala.version -q -DforceStdout)
+SCALA_VERSION=$(awk -v profile="scala-${TO_VERSION}" '
+  /<profile>/ { in_profile = 1; found = 0 }
+  in_profile && index($0, "<id>" profile "</id>") { found = 1 }
+  found && /<scala[.]version>/ {
+    gsub(/.*<scala[.]version>|<\/scala[.]version>.*/, "")
+    print
+    exit
+  }
+  /<\/profile>/ { in_profile = 0; found = 0 }
+' "$BASEDIR/pom.xml")
+if [[ -z "$SCALA_VERSION" ]]; then
+  echo "Could not find scala.version for profile scala-${TO_VERSION}" >&2
+  exit 1
+fi
+
 sed_i '/<spark\-rapids\-jni\.version>/,/<scala.version>[0-9]*\.[0-9]*\.[0-9]*</s/<scala\.version>[0-9]*\.[0-9]*\.[0-9]*</<scala.version>'$SCALA_VERSION'</' \
   "$TO_DIR/pom.xml"

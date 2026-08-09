@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,11 +16,12 @@
 
 package com.databricks.sql.transaction.tahoe.rapids
 
-import com.databricks.sql.transaction.tahoe.{DeltaLog, OptimisticTransaction}
+import com.databricks.sql.transaction.tahoe.{DeltaLog, OptimisticTransaction, Snapshot}
 import com.nvidia.spark.rapids.RapidsConf
 import org.apache.hadoop.fs.Path
 
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.util.Clock
 
 class GpuDeltaLog(val deltaLog: DeltaLog, rapidsConf: RapidsConf) {
@@ -43,6 +44,22 @@ class GpuDeltaLog(val deltaLog: DeltaLog, rapidsConf: RapidsConf) {
   }
 
   /**
+   * Returns a new [[GpuOptimisticTransaction]] that can be used to read the current state of the
+   * log and then commit updates. The reads and updates will be checked for logical conflicts with
+   * any concurrent writes, and post-commit hooks can notify the table's catalog about schema
+   * changes.
+   *
+   * @param catalogTableOpt The [[CatalogTable]] for the table this transaction updates. Passing
+   *                        None asserts this is a path-based table with no catalog entry.
+   * @param snapshotOpt     The [[Snapshot]] this transaction should use, if not latest.
+   */
+  def startTransaction(
+      catalogTableOpt: Option[CatalogTable],
+      snapshotOpt: Option[Snapshot] = None): GpuOptimisticTransaction = {
+    new GpuOptimisticTransaction(deltaLog, catalogTableOpt, snapshotOpt, rapidsConf)
+  }
+
+  /**
    * Execute a piece of code within a new GpuOptimisticTransaction. Reads/write sets will
    * be recorded for this table, and all other tables will be read
    * at a snapshot that is pinned on the first access.
@@ -53,6 +70,26 @@ class GpuDeltaLog(val deltaLog: DeltaLog, rapidsConf: RapidsConf) {
   def withNewTransaction[T](thunk: GpuOptimisticTransaction => T): T = {
     try {
       val txn = startTransaction()
+      OptimisticTransaction.setActive(txn)
+      thunk(txn)
+    } finally {
+      OptimisticTransaction.clearActive()
+    }
+  }
+
+  /**
+   * Execute a piece of code within a new [[GpuOptimisticTransaction]].
+   *
+   * @param catalogTableOpt The [[CatalogTable]] for the table this transaction updates. Passing
+   *                        None asserts this is a path-based table with no catalog entry.
+   * @param snapshotOpt     The [[Snapshot]] this transaction should use, if not latest.
+   */
+  def withNewTransaction[T](
+      catalogTableOpt: Option[CatalogTable],
+      snapshotOpt: Option[Snapshot] = None)(
+      thunk: GpuOptimisticTransaction => T): T = {
+    try {
+      val txn = startTransaction(catalogTableOpt, snapshotOpt)
       OptimisticTransaction.setActive(txn)
       thunk(txn)
     } finally {

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * This file was derived from DeltaDataSource.scala in the
  * Delta Lake project at https://github.com/delta-io/delta.
@@ -22,28 +22,27 @@
 package com.nvidia.spark.rapids.delta.delta40x
 
 import com.nvidia.spark.rapids.RapidsConf
-import com.nvidia.spark.rapids.delta.GpuDeltaCatalogBase
 
 import org.apache.spark.sql.SaveMode
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
 import org.apache.spark.sql.delta.commands.TableCreationModes
-import org.apache.spark.sql.delta.rapids.GpuWriteIntoDelta
+import org.apache.spark.sql.delta.rapids.{GpuCreateDeltaTableCommand40x41xBase, GpuDeltaCatalog4x, GpuWriteIntoDelta}
 import org.apache.spark.sql.delta.rapids.delta40x.GpuCreateDeltaTableCommand
 
 class GpuDeltaCatalog(
     cpuCatalog: DeltaCatalog,
     rapidsConf: RapidsConf)
-  extends GpuDeltaCatalogBase(cpuCatalog, rapidsConf) {
+  extends GpuDeltaCatalog4x(cpuCatalog, rapidsConf) {
 
-  override protected def createGpuCreateDeltaTableCommand(
+  override protected def buildGpuCreateDeltaTableCommand(
       withDb: CatalogTable,
       existingTableOpt: Option[CatalogTable],
       mode: SaveMode,
       writer: Option[GpuWriteIntoDelta],
       operation: TableCreationModes.CreationMode,
       isByPath: Boolean,
-      tableCreateFunc: Option[CatalogTable => Unit]): Unit = {
+      tableCreateFunc: Option[CatalogTable => Unit]): GpuCreateDeltaTableCommand40x41xBase = {
     GpuCreateDeltaTableCommand(
       withDb,
       existingTableOpt,
@@ -51,6 +50,6 @@ class GpuDeltaCatalog(
       writer,
       operation,
       tableByPath = isByPath,
-      createTableFunc = tableCreateFunc)(rapidsConf).run(spark)
+      createTableFunc = tableCreateFunc)(rapidsConf)
   }
 }

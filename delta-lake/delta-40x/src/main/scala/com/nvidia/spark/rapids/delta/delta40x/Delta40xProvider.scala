@@ -17,6 +17,8 @@
 package com.nvidia.spark.rapids.delta.delta40x
 
 import com.nvidia.spark.rapids._
+import com.nvidia.spark.rapids.delta.common.{DeleteCommandMeta, DeltaDynamicPartitionOverwriteCommandMeta, MergeIntoCommandMeta, OptimizeTableCommandMeta, UpdateCommandMeta}
+import com.nvidia.spark.rapids.delta.common.{GpuDelta4xParquetFileFormat, GpuDeltaParquetFileFormat2}
 import com.nvidia.spark.rapids.delta.common.DeltaProviderBase
 
 import org.apache.spark.internal.Logging
@@ -24,18 +26,19 @@ import org.apache.spark.sql.connector.catalog.SupportsWrite
 import org.apache.spark.sql.delta.{DeltaDynamicPartitionOverwriteCommand, DeltaParquetFileFormat}
 import org.apache.spark.sql.delta.catalog.DeltaTableV2
 import org.apache.spark.sql.delta.commands.{DeleteCommand, MergeIntoCommand, OptimizeTableCommand, UpdateCommand}
+import org.apache.spark.sql.delta.rapids.GpuDeltaCatalog4x
 import org.apache.spark.sql.execution.command.RunnableCommand
 import org.apache.spark.sql.execution.datasources.FileFormat
-import org.apache.spark.sql.execution.datasources.v2.AppendDataExecV1
+import org.apache.spark.sql.execution.datasources.v2.{AppendDataExecV1, OverwriteByExpressionExecV1}
 
 object Delta40xProvider extends DeltaProviderBase with Logging {
 
   override def isSupportedWrite(write: Class[_ <: SupportsWrite]): Boolean = {
-    write == classOf[DeltaTableV2] || write == classOf[GpuDeltaCatalog#GpuStagedDeltaTableV2]
+    write == classOf[DeltaTableV2] || write == classOf[GpuDeltaCatalog4x#GpuStagedDeltaTableV2]
   }
 
   override def isSupportedFormat(format: Class[_ <: FileFormat]): Boolean =
-    super.isSupportedFormat(format) || format == classOf[GpuDelta40xParquetFileFormat]
+    super.isSupportedFormat(format) || format == classOf[GpuDelta4xParquetFileFormat]
 
   override def tagForGpu(
       cpuExec: AppendDataExecV1,
@@ -47,7 +50,22 @@ object Delta40xProvider extends DeltaProviderBase with Logging {
 
     cpuExec.table match {
       case _: DeltaTableV2 => super.tagForGpu(cpuExec, meta)
-      case _: GpuDeltaCatalog#GpuStagedDeltaTableV2 =>
+      case _: GpuDeltaCatalog4x#GpuStagedDeltaTableV2 =>
+      case _ => meta.willNotWorkOnGpu(s"${cpuExec.table} table class not supported on GPU")
+    }
+  }
+
+  override def tagForGpu(
+      cpuExec: OverwriteByExpressionExecV1,
+      meta: OverwriteByExpressionExecV1Meta): Unit = {
+    if (!meta.conf.isDeltaWriteEnabled) {
+      meta.willNotWorkOnGpu("Delta Lake output acceleration has been disabled. To enable set " +
+        s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
+    }
+
+    cpuExec.table match {
+      case _: DeltaTableV2 => super.tagForGpu(cpuExec, meta)
+      case _: GpuDeltaCatalog4x#GpuStagedDeltaTableV2 =>
       case _ => meta.willNotWorkOnGpu(s"${cpuExec.table} table class not supported on GPU")
     }
   }
@@ -75,10 +93,8 @@ object Delta40xProvider extends DeltaProviderBase with Logging {
 
   override protected def toGpuParquetFileFormat(conf: RapidsConf, fmt: DeltaParquetFileFormat)
   : FileFormat = {
-    if (canPushDVPredicateDownToScan(conf)) {
-      // Pushing down deletion vector predicates is currently only supported
-      // when the metadata row index is enabled.
-      GpuDelta40xParquetFileFormat2(
+    if (isPushDVPredicateDownEnabled(conf)) {
+      GpuDeltaParquetFileFormat2(
         protocol = fmt.protocol,
         metadata = fmt.metadata,
         nullableRowTrackingFields = false,
@@ -97,7 +113,7 @@ object Delta40xProvider extends DeltaProviderBase with Logging {
       } else {
         fmt.optimizationsEnabled
       }
-      GpuDelta40xParquetFileFormat(
+      GpuDelta4xParquetFileFormat(
         protocol = fmt.protocol,
         metadata = fmt.metadata,
         nullableRowTrackingFields = false,
@@ -113,8 +129,21 @@ object Delta40xProvider extends DeltaProviderBase with Logging {
     cpuExec.table match {
       case _: DeltaTableV2 =>
         super.convertToGpu(cpuExec, meta)
-      case _: GpuDeltaCatalog#GpuStagedDeltaTableV2 =>
+      case _: GpuDeltaCatalog4x#GpuStagedDeltaTableV2 =>
         GpuAppendDataExecV1(cpuExec.table, cpuExec.plan, cpuExec.refreshCache, cpuExec.write)
+      case unknown => throw new IllegalStateException(s"$unknown doesn't match any of the known ")
+    }
+  }
+
+  override def convertToGpu(
+      cpuExec: OverwriteByExpressionExecV1,
+      meta: OverwriteByExpressionExecV1Meta): GpuExec = {
+    cpuExec.table match {
+      case _: DeltaTableV2 =>
+        super.convertToGpu(cpuExec, meta)
+      case _: GpuDeltaCatalog4x#GpuStagedDeltaTableV2 =>
+        GpuOverwriteByExpressionExecV1(
+          cpuExec.table, cpuExec.plan, cpuExec.refreshCache, cpuExec.write)
       case unknown => throw new IllegalStateException(s"$unknown doesn't match any of the known ")
     }
   }

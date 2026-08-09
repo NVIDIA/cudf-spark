@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -95,6 +95,26 @@ class RegularExpressionRewriteSuite extends AnyFunSuite {
       MultipleContains(Seq("abc", "def").map(UTF8String.fromString)),
       MultipleContains(Seq("火花", "急流").map(UTF8String.fromString))
     )
+    verifyRewritePattern(patterns, excepted)
+  }
+
+  test("regex rewrite ignores unsupported group types") {
+    import RegexOptimizationType._
+    // Lookaround, independent, and named-capture groups are not supported on the GPU. They
+    // now parse successfully, so the rewrite optimizer must treat them as opaque (only
+    // capturing/non-capturing groups may be unwrapped) and never mistake them for a simple
+    // contains/multiple-contains/prefix pattern.
+    val patterns = Seq(
+      "(?=abc)",
+      "(?!abc)",
+      "(?<=abc)",
+      "(?<!abc)",
+      "(?>abc)",
+      "(?<n>abc)",
+      "(?<n>abc|def)",
+      "(?>.*)abc"
+    )
+    val excepted = Seq.fill(patterns.length)(NoOptimization)
     verifyRewritePattern(patterns, excepted)
   }
 }

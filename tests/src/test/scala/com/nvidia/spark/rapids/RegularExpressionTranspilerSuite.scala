@@ -158,17 +158,53 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
         "\\z is not supported on GPU")
   }
 
-  test("cuDF does not support positive or negative lookahead") {
-    val negPatterns = Seq("a(!b)", "a(!b)c?")
-    negPatterns.foreach(pattern =>
+  test("cuDF does not support positive or negative lookaround") {
+    val posLookaheadPatterns = Seq("a(?=b)", "a(?=b)c?")
+    posLookaheadPatterns.foreach(pattern =>
+      assertUnsupported(pattern, RegexFindMode,
+        "Positive lookahead groups are not supported")
+    )
+
+    val negLookaheadPatterns = Seq("a(?!b)", "a(?!b)c?")
+    negLookaheadPatterns.foreach(pattern =>
       assertUnsupported(pattern, RegexFindMode,
         "Negative lookahead groups are not supported")
     )
 
-    val posPatterns = Seq("a(=b)", "a(=b)c?")
-    posPatterns.foreach(pattern =>
+    val posLookbehindPatterns = Seq("a(?<=b)", "a(?<=b)c?")
+    posLookbehindPatterns.foreach(pattern =>
       assertUnsupported(pattern, RegexFindMode,
-        "Positive lookahead groups are not supported")
+        "Positive lookbehind groups are not supported")
+    )
+
+    val negLookbehindPatterns = Seq("a(?<!b)", "a(?<!b)c?")
+    negLookbehindPatterns.foreach(pattern =>
+      assertUnsupported(pattern, RegexFindMode,
+        "Negative lookbehind groups are not supported")
+    )
+  }
+
+  test("cuDF does not support quantified lookaround, independent, or named capture groups") {
+    val quantifiedPatterns =
+        Seq(raw"a(?>\A)+", raw"a(?=\A)+", raw"a(?!\A)+", raw"a(?<=\A)+", raw"a(?<!\A){2}",
+            raw"a(?<n>\A){1,}")
+    quantifiedPatterns.foreach(pattern =>
+      assertUnsupported(pattern, RegexFindMode,
+        "Repetition of lookaround, independent, or named capture groups is not supported")
+    )
+  }
+
+  test("cuDF does not support independent or named capture groups") {
+    val independentPatterns = Seq("a(?>b)", "a(?>b)c?")
+    independentPatterns.foreach(pattern =>
+      assertUnsupported(pattern, RegexFindMode,
+        "Independent groups are not supported")
+    )
+
+    val namedCapturePatterns = Seq("a(?<name>b)", "a(?<name>b)c?")
+    namedCapturePatterns.foreach(pattern =>
+      assertUnsupported(pattern, RegexFindMode,
+        "Named capture groups are not supported")
     )
   }
 
@@ -176,6 +212,17 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     val patterns = Seq("", "a|", "()")
     patterns.foreach(pattern =>
       assertUnsupported(pattern, RegexFindMode, "Empty sequence not supported")
+    )
+  }
+
+  test("cuDF does not support $ followed by lookaround, independent, or named groups") {
+    val patterns =
+      Seq("$(?=a)", "$(?!a)", "$(?<=a)", "$(?<!a)", "$(?>a)", "$(?<n>a)",
+          raw"\Z(?=a)", raw"\Z(?>a)")
+    patterns.foreach(pattern =>
+      assertUnsupported(pattern, RegexFindMode,
+        "Regex sequence $ followed by a lookaround, independent, or named capture " +
+        "group is not supported")
     )
   }
 
@@ -202,6 +249,18 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     Seq("(3*)+").foreach(pattern =>
       assertUnsupported(pattern, RegexFindMode,
         "cuDF does not support repetition of group containing: 3*"))
+  }
+
+  test("repetition base validation recurses into choices") {
+    Seq("(3?|a)+", "(a|3?)+").foreach { pattern =>
+      assertUnsupported(pattern, RegexFindMode,
+        "cuDF does not support repetition of group containing: 3?")
+    }
+    Seq(
+      "(3|a)+" -> "(3|a)+",
+      raw"(a|\d)+" -> "(a|[0-9])+").foreach { case (pattern, expected) =>
+      assert(transpile(pattern, RegexFindMode) === expected)
+    }
   }
 
   test("cuDF does not support OR at BOL / EOL") {
@@ -236,9 +295,38 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
 
   test("hex digits - find") {
     val patterns = Seq(raw"\x07", raw"\x3f", raw"\x7F", raw"\x7f", raw"\x{7}", raw"\x{0007f}",
-      raw"\x80", raw"\xff", raw"\x{0008f}", raw"\x{10FFFF}", raw"\x{00eeee}")
+      raw"\x80", raw"\xff", raw"\x{0008f}", raw"\x{00eeee}")
+    // NOTE: supplementary codepoints (cp > U+FFFF) such as `\x{1F600}` are
+    // covered below -- they now throw and fall back to CPU before a `.toChar`
+    // rewrite can truncate them.
     assertCpuGpuMatchesRegexpFind(patterns, Seq("", "\u0007", "a\u0007b",
         "\u0007\u003f\u007f", "\u0080", "a\u00fe\u00ffb", "ab\ueeeecd"))
+  }
+
+  test("supplementary codepoint hex escapes fall back to CPU") {
+    // Before the fix, `\x{1F600}` (U+1F600 grinning-face emoji) was
+    // silently truncated to `RegexChar(0x1F600.toChar)` = `RegexChar('')`,
+    // making the GPU match U+F600 instead of the supplementary codepoint.
+    // The parser now throws RegexUnsupportedException for any hex escape whose
+    // codepoint exceeds U+FFFF, so spark-rapids falls back to
+    // the CPU regex engine (which Java's Pattern handles correctly).
+    val supplementaryHexPatterns = Seq(
+      raw"\x{10000}",             // lowest supplementary codepoint
+      raw"\x{1F600}",             // grinning face emoji
+      raw"\x{10FFFF}",            // highest valid Unicode codepoint
+      raw"a\x{1F600}b",           // embedded in a longer pattern
+      raw"[\x{1F600}abc]",        // inside a character class
+      raw"[\x{10000}-\x{10FFFF}]" // range with supplementary endpoints
+    )
+    supplementaryHexPatterns.foreach { p =>
+      assertUnsupported(p, RegexFindMode,
+        "GPU regex hex escapes do not support supplementary codepoints")
+    }
+
+    // BMP boundary U+FFFF must continue to transpile (regression guard).
+    assertCpuGpuMatchesRegexpFind(
+      Seq(raw"\x{FFFF}", raw"\xff"),
+      Seq("", "a", "x￿y", "xÿy", "￿", "ÿ"))
   }
 
   test("hex digit character classes") {
@@ -339,8 +427,36 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
       "End of line/string anchor is not supported in this context")
   }
 
+  test("issue-14746: anchors inside character classes are literals") {
+    val patterns = Seq(
+      """[$\n]""",
+      """[$^]""",
+      """[$]\n""",
+      """\n[$]""",
+      """(?:[$])\n""",
+      """[a^]$""",
+      """(?:[a^])$""")
+    val inputs = Seq("", "$", "^", "\n", "$\n", "\n$", "a^", "a^\n", "a\nb")
+
+    assertCpuGpuMatchesRegexpFind(patterns, inputs)
+    assertCpuGpuMatchesRegexpReplace(patterns, inputs)
+
+    // Character-class components are alternatives, not a sequence with anchor context.
+    val characterClass = RegexCharacterClass(
+      negated = false, ListBuffer(RegexChar('$'), RegexChar('\n')))
+    val (transpiledClass, _) = new CudfRegexTranspiler(RegexReplaceMode)
+      .getTranspiledAST(characterClass, None, None)
+    assert(transpiledClass === characterClass)
+
+    // Real anchors outside a class must still detect newlines inside the adjacent class.
+    Seq("""[\r\n]$""", """$[\r\n]""").foreach { pattern =>
+      assertUnsupported(pattern, RegexReplaceMode,
+        "End of line/string anchor is not supported in this context")
+    }
+  }
+
   test("line anchor $ - find") {
-    val patterns = Seq("a$", "a$b", "\f$", "$\f","TEST$")
+    val patterns = Seq("a$", "a$b", "\f$", "$\f", "TEST$")
     val inputs = Seq("a", "a\n", "a\r", "a\r\n", "a\f", "\f", "\r", "\u0085", "\u2028",
       "\u2029", "\n", "\r\n", "\r\n\r", "\r\n\u0085", "\n\r",
       "\n\u0085", "\n\u2028", "\n\u2029", "2+|+??wD\n", "a\r\nb",
@@ -432,6 +548,19 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     assertCpuGpuMatchesRegexpReplace(patterns, inputs)
   }
 
+  test("quantified \\D and \\W") {
+    // see https://github.com/NVIDIA/cudf-spark/issues/15306
+    val inputs = Seq("", "abc", "123", "a1b2", "___", "a_b 1", "!!!", "ab12cd",
+        "a\rb", "1\r2", "1\n2", "1\r\n2", " \t\r\n")
+    val findPatterns = Seq(raw"\D+", raw"\W+", raw"\D*", raw"\W*", raw"\D{2,3}", raw"\W{2,3}",
+        raw"(\D+)", raw"(\W+)")
+    // \D* and \W* omitted from replace: empty-match semantics differ (see issue 4884)
+    val replacePatterns =
+        Seq(raw"\D+", raw"\W+", raw"\D{2,3}", raw"\W{2,3}", raw"(\D+)", raw"(\W+)")
+    assertCpuGpuMatchesRegexpFind(findPatterns, inputs)
+    assertCpuGpuMatchesRegexpReplace(replacePatterns, inputs)
+  }
+
   test("dot matches CR on GPU but not on CPU") {
     // see https://github.com/rapidsai/cudf/issues/9619
     val pattern = "1."
@@ -466,7 +595,7 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     doTranspileTest(TIMESTAMP_TRUNCATE_REGEX,
       TIMESTAMP_TRUNCATE_REGEX
         .replaceAll("\\.", "[^\n\r\u0085\u2028\u2029]")
-        .replaceAll("\\\\Z", "(?:\r\n)?\\$"))
+        .replaceAll("\\\\Z", "\\$"))
   }
 
   test("transpile \\A repetitions") {
@@ -479,12 +608,9 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     assertUnsupported("abc\\z", RegexFindMode, "")
   }
 
-  test("transpile $") {
-    doTranspileTest("a$", "a(?:\r\n)?$")
-  }
-
   test("transpile \\Z") {
-    val expected = "a(?:\r\n)?$"
+    val expected = "a$"
+    doTranspileTest("a$", expected)
     doTranspileTest("a\\Z", expected)
     doTranspileTest("a\\Z+", expected)
     doTranspileTest("a\\Z{1}", expected)
@@ -522,6 +648,10 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     doTranspileTest("(ab)+(c)(d)", "(ab)+(?:c)(?:d)", 1)
     doTranspileTest("(ab)+(c)(d)", "(?:ab)+(c)(?:d)", 2)
     doTranspileTest("([a-z0-9]((([abcd](\\d?)))))", "(?:[a-z0-9](?:((?:[abcd](?:[0-9]?)))))", 3)
+    doTranspileTest("(a)|(b)", "(?:a)|(b)", 2)
+    doTranspileTest("(?:(a)(b))", "(?:(?:a)(b))", 2)
+    doTranspileTest("((a)|(b))", "(?:(?:a)|(b))", 3)
+    doTranspileTest("(a)(b)|(c)(d)", "(?:a)(?:b)|(c)(?:d)", 3)
     doTranspileTest("ab", "ab", 1)
   }
 
@@ -767,6 +897,33 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
       assertNoTranspileToSplittableString(patterns)
       doStringSplitTest(patterns, data, limit)
     }
+  }
+
+  test("issue-14746: string split treats anchors in character classes as literals") {
+    val patterns = Set(
+      """[$\n]""",
+      """[$^]""",
+      """[$]\n""",
+      "^a$",
+      """\na$""",
+      """[\r\n]a$""")
+    val data = Seq("", "$", "^", "a", "\na", "\r\na", "$\n", "\n$", "a\nb")
+    doStringSplitTest(patterns, data, -1)
+
+    Seq("""[\r\n]$""", """$[\r\n]""").foreach { pattern =>
+      assertUnsupported(pattern, RegexSplitMode,
+        "End of line/string anchor is not supported in this context")
+    }
+
+    val optionalPrefixError = intercept[RegexUnsupportedException] {
+      transpile("a?bc$", RegexSplitMode)
+    }
+    assert(optionalPrefixError.getMessage.endsWith("near index 4"),
+      s"Unexpected split anchor position: ${optionalPrefixError.getMessage}")
+  }
+
+  test("issue-14748: word boundaries are not literal split delimiters") {
+    assertNoTranspileToSplittableString(Set(raw"\b", raw"\B"))
   }
 
   test("regexp_split - character class repetition - ? and *") {
@@ -1021,7 +1178,9 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
       input: Seq[String]): Array[String] = {
     val result = new Array[String](input.length)
     val replace = GpuRegExpUtils.unescapeReplaceString(replaceString)
-    val (hasBackrefs, converted) = GpuRegExpUtils.backrefConversion(replace)
+    // Pass -1 to opt out of Java-spec greedy-with-backoff; the REPLACE_STRING used by this
+    // helper contains no `$N` backrefs, so the legacy behavior is sufficient here.
+    val (hasBackrefs, converted) = GpuRegExpUtils.backrefConversion(replace, -1)
     withResource(ColumnVector.fromStrings(input: _*)) { cv =>
       val c = if (hasBackrefs) {
         cv.stringReplaceWithBackrefs(new RegexProgram(cudfPattern,
@@ -1310,7 +1469,9 @@ class FuzzRegExp(suggestedChars: String, skipKnownIssues: Boolean = true,
   }
 
   private def group(depth: Int) = {
-    RegexGroup(capture = rr.nextBoolean(), generate(depth + 1), None)
+    RegexGroup(
+      if (rr.nextBoolean()) RegexGroup.Capturing else RegexGroup.NonCapturing,
+      generate(depth + 1))
   }
 
   private def repetition(depth: Int) = {

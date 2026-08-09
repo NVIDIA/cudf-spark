@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -355,16 +355,22 @@ object AsyncProfilerOnExecutor extends Logging {
                 // Compress the temp file first
                 val compressedTempPath = Files.createTempFile("compressed-jfr", ".gz")
                 if (compressJfrFile(tempFilePath, compressedTempPath)) {
-                  fs.copyFromLocalFile(new Path(compressedTempPath.toString), outPath)
+                  withResource(fs.create(outPath, false)) { out =>
+                    Files.copy(compressedTempPath, out)
+                  }
                   compressedTempPath.toFile.delete() // delete compressed temp file
                 } else {
                   // If compression fails, copy the original file
                   log.warn("JFR compression failed, copying uncompressed file")
-                  fs.copyFromLocalFile(new Path(tempFilePath.toString), 
-                    new Path(asyncProfilerPrefix.get, baseFileName))
+                  withResource(
+                    fs.create(new Path(asyncProfilerPrefix.get, baseFileName), false)) { out =>
+                    Files.copy(tempFilePath, out)
+                  }
                 }
               } else {
-                fs.copyFromLocalFile(new Path(tempFilePath.toString), outPath)
+                withResource(fs.create(outPath, false)) { out =>
+                  Files.copy(tempFilePath, out)
+                }
               }
               tempFilePath.toFile.delete() // delete the original temp file after moving
             } else {

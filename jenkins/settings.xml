@@ -18,43 +18,43 @@
     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <servers>
     <server>
-      <username>${env.URM_CREDS_USR}</username>
-      <password>${env.URM_CREDS_PSW}</password>
+      <username>${env.ART_CREDS_USR}</username>
+      <password>${env.ART_CREDS_PSW}</password>
       <id>central</id>
     </server>
     <server>
-      <username>${env.URM_CREDS_USR}</username>
-      <password>${env.URM_CREDS_PSW}</password>
+      <username>${env.ART_CREDS_USR}</username>
+      <password>${env.ART_CREDS_PSW}</password>
       <id>snapshots</id>
     </server>
     <server>
-      <username>${env.URM_CREDS_USR}</username>
-      <password>${env.URM_CREDS_PSW}</password>
+      <username>${env.ART_CREDS_USR}</username>
+      <password>${env.ART_CREDS_PSW}</password>
       <id>cloudera-repo-fallback</id>
     </server>
     <server>
-      <username>${env.URM_CREDS_USR}</username>
-      <password>${env.URM_CREDS_PSW}</password>
+      <username>${env.ART_CREDS_USR}</username>
+      <password>${env.ART_CREDS_PSW}</password>
       <id>apache.snapshots</id>
     </server>
     <server>
-      <username>${env.URM_CREDS_USR}</username>
-      <password>${env.URM_CREDS_PSW}</password>
+      <username>${env.ART_CREDS_USR}</username>
+      <password>${env.ART_CREDS_PSW}</password>
       <id>apache.snapshots.https</id>
     </server>
     <server>
-      <username>${env.URM_CREDS_USR}</username>
-      <password>${env.URM_CREDS_PSW}</password>
+      <username>${env.ART_CREDS_USR}</username>
+      <password>${env.ART_CREDS_PSW}</password>
       <id>apache-snapshots-repo</id>
     </server>
     <server>
-      <username>${env.URM_CREDS_USR}</username>
-      <password>${env.URM_CREDS_PSW}</password>
+      <username>${env.ART_CREDS_USR}</username>
+      <password>${env.ART_CREDS_PSW}</password>
       <id>snapshots-repo</id>
     </server>
     <server>
-      <username>${env.URM_CREDS_USR}</username>
-      <password>${env.URM_CREDS_PSW}</password>
+      <username>${env.ART_CREDS_USR}</username>
+      <password>${env.ART_CREDS_PSW}</password>
       <id>cloudera-repo</id>
     </server>
     <server>
@@ -70,7 +70,7 @@
         <repository>
           <id>central</id>
           <name>sw-spark-maven</name>
-          <url>${env.URM_URL}</url>
+          <url>${env.ART_URL}</url>
           <snapshots>
             <enabled>false</enabled>
           </snapshots>
@@ -78,7 +78,7 @@
         <repository>
           <id>snapshots</id>
           <name>sw-spark-maven</name>
-          <url>${env.URM_URL}</url>
+          <url>${env.ART_URL}</url>
           <snapshots />
         </repository>
       </repositories>
@@ -86,7 +86,7 @@
         <pluginRepository>
           <id>central</id>
           <name>sw-spark-maven</name>
-          <url>${env.URM_URL}</url>
+          <url>${env.ART_URL}</url>
           <snapshots>
             <enabled>false</enabled>
           </snapshots>
@@ -94,51 +94,51 @@
         <pluginRepository>
           <id>snapshots</id>
           <name>sw-spark-maven</name>
-          <url>${env.URM_URL}</url>
+          <url>${env.ART_URL}</url>
           <snapshots />
         </pluginRepository>
       </pluginRepositories>
     </profile>
-    <!-- Maps upstream repo ids (POM mirrors) to URM; id kept for -P mirror-apache-to-urm in Jenkins -->
+    <!-- Maps upstream repo ids (POM mirrors) to Artifactory; id kept for -P mirror-apache-to-urm in Jenkins -->
     <profile>
       <id>mirror-apache-to-urm</id>
       <repositories>
         <repository>
           <id>apache.snapshots</id>
           <name>sw-spark-maven</name>
-          <url>${env.URM_URL}</url>
+          <url>${env.ART_URL}</url>
         </repository>
         <repository>
           <id>apache.snapshots.https</id>
           <name>sw-spark-maven</name>
-          <url>${env.URM_URL}</url>
+          <url>${env.ART_URL}</url>
         </repository>
         <repository>
           <id>apache-snapshots-repo</id>
           <name>sw-spark-maven</name>
-          <url>${env.URM_URL}</url>
+          <url>${env.ART_URL}</url>
         </repository>
         <repository>
           <id>snapshots-repo</id>
           <name>sw-spark-maven</name>
-          <url>${env.URM_URL}</url>
+          <url>${env.ART_URL}</url>
         </repository>
         <repository>
           <id>cloudera-repo</id>
           <name>sw-spark-maven</name>
-          <url>${env.URM_URL}</url>
+          <url>${env.ART_URL}</url>
         </repository>
         <repository>
           <id>cloudera-repo-fallback</id>
           <name>sw-spark-maven</name>
-          <url>${env.URM_URL}</url>
+          <url>${env.ART_URL}</url>
         </repository>
       </repositories>
     </profile>
     <profile>
       <id>deploy-to-urm</id>
       <properties>
-        <altDeploymentRepository>snapshots::default::${env.URM_URL}-local</altDeploymentRepository>
+        <altDeploymentRepository>snapshots::default::${env.ART_URL}-local</altDeploymentRepository>
       </properties>
     </profile>
   </profiles>

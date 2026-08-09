@@ -18,7 +18,8 @@
 set -ex
 
 ## MVN_OPT : maven options environment, e.g. MVN_OPT='-Dspark-rapids-jni.version=xxx' to specify spark-rapids-jni dependency's version.
-export MVN="mvn -Dmaven.wagon.http.retryHandler.count=3 -DretryFailedDeploymentCount=3 ${MVN_OPT} -Psource-javadoc"
+MVN_SETTINGS=${MVN_SETTINGS:-"jenkins/settings.xml"}
+export MVN="mvn -s $MVN_SETTINGS -Dmaven.wagon.http.retryHandler.count=3 -DretryFailedDeploymentCount=3 ${MVN_OPT} -Psource-javadoc"
 
 . jenkins/version-def.sh
 
@@ -26,7 +27,7 @@ export MVN="mvn -Dmaven.wagon.http.retryHandler.count=3 -DretryFailedDeploymentC
 # scala2.12 and scala2.13 (with maven.compiler.source as 1.8)
 export JAVA_HOME=$(echo /usr/lib/jvm/java-1.17.0-*)
 update-java-alternatives --set $JAVA_HOME
-mvn -version
+$MVN -version
 
 DIST_PL="dist"
 DIST_PATH="$DIST_PL" # The path of the dist module is used only outside of the mvn cmd
@@ -244,7 +245,7 @@ if [[ $SKIP_DEPLOY != 'true' ]]; then
         mv ${TMP_PATH}/${ART_ID}-${ART_VER}-*.jar ${DIST_PATH}/target/
     fi
     # Deploy dist jars in the final step to ensure that the POM files are not overwritten
-    SERVER_URL=${SERVER_URL:-"$URM_URL"} SERVER_ID=${SERVER_ID:-"snapshots"} jenkins/deploy.sh
+    SERVER_URL=${SERVER_URL:-"$ART_URL"} SERVER_ID=${SERVER_ID:-"snapshots"} jenkins/deploy.sh
 fi
 
 # Parse Spark files from local mvn repo

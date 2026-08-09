@@ -18,12 +18,14 @@ package com.nvidia.spark.rapids
 
 import java.io.IOException
 import java.nio.charset.{Charset, StandardCharsets}
+import java.util.Locale
 
 import scala.collection.JavaConverters._
 
 import ai.rapids.cudf
 import ai.rapids.cudf.{ColumnVector, DType, Scalar, Schema, Table}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+import com.nvidia.spark.rapids.jni.CastStrings
 import com.nvidia.spark.rapids.shims.{ColumnDefaultValuesShims, ShimFilePartitionReaderFactory}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
@@ -101,6 +103,9 @@ object GpuCSVScan extends Logging {
   }
 
   def isUTF8Charset(charset: Charset): Boolean = utf8Charsets.contains(charset)
+
+  def unsupportedLocaleForDecimalMessage(locale: Locale): String =
+    s"GpuCSVScan only supports Locale.US decimal parsing, got $locale"
 
   def tagSupport(scanMeta: ScanMeta[CSVScan]) : Unit = {
     val scan = scanMeta.wrapped
@@ -198,8 +203,9 @@ object GpuCSVScan extends Logging {
         meta.willNotWorkOnGpu(s"the positive infinity value '${parsedOptions.positiveInf}'" +
             s" is not supported'")
     }
-    // parsedOptions.maxCharsPerColumn does not impact the final output it is a performance
-    // improvement if you know the maximum size
+    if (parsedOptions.maxCharsPerColumn != -1) {
+      meta.willNotWorkOnGpu("GpuCSVScan does not support maxCharsPerColumn")
+    }
 
     // parsedOptions.maxColumns was originally a performance optimization but is not used any more
 
@@ -260,6 +266,10 @@ object GpuCSVScan extends Logging {
     if (!meta.conf.isCsvDecimalReadEnabled && types.exists(_.isInstanceOf[DecimalType])) {
       meta.willNotWorkOnGpu("CSV reading is not 100% compatible when reading decimals. " +
         s"To enable it please set ${RapidsConf.ENABLE_READ_CSV_DECIMALS} to true.")
+    }
+
+    if (parsedOptions.locale != Locale.US && types.exists(_.isInstanceOf[DecimalType])) {
+      meta.willNotWorkOnGpu(GpuCSVScan.unsupportedLocaleForDecimalMessage(parsedOptions.locale))
     }
 
     if (ColumnDefaultValuesShims.hasExistenceDefaultValues(readSchema)) {
@@ -406,6 +416,21 @@ abstract class CSVPartitionReaderBase[BUFF <: LineBufferer, FACT <: LineBufferer
       withResource(Scalar.fromNull(DType.BOOL8)) {
         isValidBool.ifElse(isTrue, _)
       }
+    }
+  }
+
+  override def castStringToDecimal(input: ColumnVector, dt: DecimalType): ColumnVector = {
+    if (parsedOptions.locale == Locale.US) {
+      withResource(Scalar.fromString(",")) { groupingSeparator =>
+        withResource(Scalar.fromString("")) { emptyString =>
+          withResource(input.stringReplace(groupingSeparator, emptyString)) { withoutGrouping =>
+            CastStrings.toDecimal(withoutGrouping, false, dt.precision, -dt.scale)
+          }
+        }
+      }
+    } else {
+      throw new IllegalStateException(
+        GpuCSVScan.unsupportedLocaleForDecimalMessage(parsedOptions.locale))
     }
   }
 

@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2025, NVIDIA CORPORATION.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -24,9 +24,72 @@ from marks import *
 from pyspark.sql.types import *
 import pyspark.sql.utils
 import pyspark.sql.functions as f
-from spark_session import with_cpu_session, with_gpu_session, is_databricks104_or_later, is_databricks_version_or_later, is_before_spark_320, is_before_spark_330, is_spark_400_or_later, is_before_spark_340
+from spark_session import with_cpu_session, with_gpu_session, is_databricks104_or_later, \
+    is_databricks_version_or_later, is_before_spark_320, is_spark_400_or_later, \
+    is_before_spark_340, spark_version
 
 _regexp_conf = { 'spark.rapids.sql.regexp.enabled': 'true' }
+
+_gbk_edge_cases = [
+    bytearray(b''),                        # empty
+    bytearray(b'\xc4\xe3\xba\xc3'),       # "你好" in GBK
+    bytearray(b'\xff\xff'),                # invalid lead bytes
+    bytearray(b'\x81'),                    # truncated lead byte (no second byte)
+    bytearray(b'\x81\xff'),               # lead + 0xFF (consumed as pair, maps to FFFD)
+    bytearray(b'\x81\x30'),               # lead + invalid second byte (< 0x40)
+    bytearray(b'Hi\xc4\xe3\xba\xc3World'), # mixed ASCII and Chinese
+]
+
+@pytest.mark.parametrize('data_gen', [
+    # Random CJK ideographs encoded as GBK — tests normal decode path
+    BinaryGen(min_length=0, max_length=50, min_val=0x4E00, max_val=0x9FA5, encoding='gbk'),
+    # Raw random bytes — tests error handling and edge cases
+    BinaryGen(min_length=0, max_length=50),
+], ids=['gbk_chinese', 'random_bytes'])
+def test_string_decode_gbk(data_gen):
+    gen = data_gen
+    for sc in _gbk_edge_cases:
+        gen = gen.with_special_case(sc)
+    # javaCharsets=true lets the CPU accept GBK (it is not in the default allow-list);
+    # codingErrorAction=true keeps the CPU in REPLACE mode so U+FFFD matches the GPU.
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: unary_op_df(spark, gen, length=2048)
+            .selectExpr("decode(a, 'GBK')"),
+        conf={
+            'spark.sql.legacy.javaCharsets': 'true',
+            'spark.sql.legacy.codingErrorAction': 'true',
+        })
+
+
+# codingErrorAction=false is Spark 4.0+: malformed bytes raise MALFORMED_CHARACTER_CODING
+# on the CPU, and the GPU must raise the same error instead of falling back.
+@pytest.mark.skipif(not is_spark_400_or_later(), reason="codingErrorAction introduced in Spark 4.0")
+def test_string_decode_gbk_report_mode_clean():
+    # Only valid GBK pairs -> both CPU and GPU must succeed.
+    gen = BinaryGen(min_length=0, max_length=50, min_val=0x4E00, max_val=0x9FA5, encoding='gbk')
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: unary_op_df(spark, gen, length=2048)
+            .selectExpr("decode(a, 'GBK')"),
+        conf={
+            'spark.sql.legacy.javaCharsets': 'true',
+            'spark.sql.legacy.codingErrorAction': 'false',
+        })
+
+
+@pytest.mark.skipif(not is_spark_400_or_later(), reason="codingErrorAction introduced in Spark 4.0")
+def test_string_decode_gbk_report_mode_malformed():
+    # Input with malformed GBK bytes -> CPU and GPU must both raise MALFORMED_CHARACTER_CODING.
+    gen = BinaryGen(min_length=0, max_length=50)
+    for sc in _gbk_edge_cases:
+        gen = gen.with_special_case(sc)
+    assert_gpu_and_cpu_error(
+        lambda spark: unary_op_df(spark, gen, length=2048)
+            .selectExpr("decode(a, 'GBK')").collect(),
+        conf={
+            'spark.sql.legacy.javaCharsets': 'true',
+            'spark.sql.legacy.codingErrorAction': 'false',
+        },
+        error_message='MALFORMED_CHARACTER_CODING')
 
 def mk_str_gen(pattern):
     return StringGen(pattern).with_special_case('').with_special_pattern('.{0,10}')
@@ -104,7 +167,7 @@ def test_substring_index(data_gen,delim):
                 f.substring_index(f.col('a'), delim, -4)))
 
 
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('SubstringIndex')
 @pytest.mark.parametrize('data_gen', [mk_str_gen('([ABC]{0,3}_?){0,7}')], ids=idfn)
 def test_unsupported_fallback_substring_index(data_gen):
     delim_gen = StringGen(pattern="_")
@@ -138,7 +201,7 @@ def test_lpad():
                 'LPAD(a, -1, "G")'))
 
 
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('StringLPad')
 def test_unsupported_fallback_lpad():
     gen = mk_str_gen('.{0,5}')
     pad_gen = StringGen(pattern="G")
@@ -171,7 +234,7 @@ def test_rpad():
                 'RPAD(a, -1, "G")'))
 
 
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('StringRPad')
 def test_unsupported_fallback_rpad():
     gen = mk_str_gen('.{0,5}')
     pad_gen = StringGen(pattern="G")
@@ -215,7 +278,7 @@ def test_locate():
                 'locate("_", a, NULL)'))
 
 
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('StringLocate')
 def test_unsupported_fallback_locate():
     gen = mk_str_gen('.{0,3}Z_Z.{0,3}A.{0,3}')
     pos_gen = IntegerGen()
@@ -230,7 +293,7 @@ def test_unsupported_fallback_locate():
     assert_gpu_did_fallback('locate(a, a, pos)')
     assert_gpu_did_fallback('locate(a, "a", pos)')
 
-# There is no contains function exposed in Spark. You can turn it into a
+# There is no contains function exposed in older versions of Spark. You can turn it into a
 # LIKE %FOO% or we have seen some use instr > 0 to do the same thing.
 # Spark optimizes LIKE to be a contains, we also optimize instr to do
 # something similar.
@@ -258,7 +321,7 @@ def test_instr():
                 'instr(NULL, NULL)'))
 
 
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('StringInstr')
 def test_unsupported_fallback_instr():
     gen = mk_str_gen('.{0,3}Z_Z.{0,3}A.{0,3}')
 
@@ -282,16 +345,24 @@ def test_contains():
                 f.col('a').contains(''),
                 f.col('a').contains(None)))
 
-@allow_non_gpu('ProjectExec')
-def test_unsupported_fallback_contains():
-    gen = StringGen(pattern='[a-z]')
-    def assert_gpu_did_fallback(op):
-        assert_gpu_fallback_collect(lambda spark:
-            unary_op_df(spark, gen, length=10).select(op),
-            'Contains')
+def test_contains_col_search():
+    gen = mk_str_gen('.{0,3}Z?_Z?.{0,3}A?.{0,3}')
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: unary_op_df(spark, gen, length=10).select(
+                f.lit('Z').contains(f.col('a')),
+                f.col('a').contains(f.col('a'))))
 
-    assert_gpu_did_fallback(f.lit('Z').contains(f.col('a')))
-    assert_gpu_did_fallback(f.col('a').contains(f.col('a')))
+def test_contains_col_search_with_nulls():
+    src_gen = StringGen(pattern='[a-z]{0,5}').with_special_case('').with_special_case(None)
+    search_gen = StringGen(pattern='[a-c]{0,3}').with_special_case('').with_special_case(None)
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: gen_df(spark, [('src', src_gen), ('search', search_gen)], length=100)
+                .selectExpr(
+                    'contains(src, search)',
+                    'contains(src, "")',
+                    'contains("abc", search)',
+                    'contains(CAST(NULL AS STRING), search)',
+                    'contains(src, CAST(NULL AS STRING))'))
 
 
 @pytest.mark.parametrize('data_gen', [mk_str_gen('[Ab \ud720]{0,3}A.{0,3}Z[ Ab]{0,3}'), StringGen('')])
@@ -339,7 +410,7 @@ def test_startswith():
                 f.col('a').startswith(None),
                 f.col('a').startswith('A\ud720')))
 
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('StartsWith')
 def test_unsupported_fallback_startswith():
     gen = StringGen(pattern='[a-z]')
 
@@ -368,7 +439,7 @@ def test_endswith():
                 f.col('a').endswith('A\ud720')))
 
 
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('EndsWith')
 def test_unsupported_fallback_endswith():
     gen = StringGen(pattern='[a-z]')
 
@@ -642,20 +713,18 @@ def test_replace():
                 'REPLACE(a, "T", "")'))
 
 
-@allow_non_gpu('ProjectExec')
-def test_unsupported_fallback_replace():
-    gen = mk_str_gen('.{0,5}TEST[\ud720 A]{0,5}')
-    def assert_gpu_did_fallback(sql_text):
-        assert_gpu_fallback_collect(lambda spark:
-            unary_op_df(spark, gen, length=10).selectExpr(sql_text),
-            'StringReplace')
-
-    assert_gpu_did_fallback('REPLACE(a, "TEST", a)')
-    assert_gpu_did_fallback('REPLACE(a, a, "TEST")')
-    assert_gpu_did_fallback('REPLACE(a, a, a)')
-    assert_gpu_did_fallback('REPLACE("TEST", "TEST", a)')
-    assert_gpu_did_fallback('REPLACE("TEST", a, "TEST")')
-    assert_gpu_did_fallback('REPLACE("TEST", a, a)')
+def test_replace_col_args_with_nulls():
+    src_gen = StringGen(pattern='[a-z]{0,5}').with_special_case('')
+    search_gen = StringGen(pattern='[a-c]{0,3}').with_special_case('')
+    replace_gen = StringGen(pattern='[X-Z]{0,3}').with_special_case('')
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: gen_df(spark,
+                [('src', src_gen), ('search', search_gen), ('repl', replace_gen)], length=100)
+                .selectExpr(
+                    'REPLACE(src, search, repl)',
+                    'REPLACE(src, search, "")',
+                    'REPLACE(src, "", repl)',
+                    'REPLACE("abcabc", search, repl)'))
 
 
 @incompat
@@ -673,7 +742,7 @@ def test_translate():
                 'translate("AaBbCc", "abc", "1")'))
 
 @incompat
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('StringTranslate')
 def test_unsupported_fallback_translate():
     gen = mk_str_gen('.{0,5}TEST[\ud720 A]{0,5}')
     def assert_gpu_did_fallback(sql_text):
@@ -782,7 +851,7 @@ def test_like():
                 f.col('a').like('_?|}{_%'),
                 f.col('a').like('%a{3}%')))
 
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('Like')
 def test_unsupported_fallback_like():
     gen = StringGen('[a-z]')
     def assert_gpu_did_fallback(sql_text):
@@ -794,7 +863,7 @@ def test_unsupported_fallback_like():
     assert_gpu_did_fallback("a like a")
 
 
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('RLike')
 def test_unsupported_fallback_rlike():
     gen = StringGen('\/lit\/')
 
@@ -1055,7 +1124,6 @@ def test_conv_with_str_cv_all_nulls():
         "tab",
         f"select conv(str_cv, 3, 5) from tab")
 
-@pytest.mark.skipif(is_before_spark_330(), reason='contains is not exposed until 3.3.0')
 @pytest.mark.parametrize('ansi', [True, False], ids=["ANSI", "NO_ANSI"])
 def test_multi_contains_basic(ansi):
     data_gen = StringGen(r'\d{0,10}')
@@ -1065,7 +1133,6 @@ def test_multi_contains_basic(ansi):
                 'or(contains(a, "100"), contains(a, "200")) as result'),
             conf = conf)
 
-@pytest.mark.skipif(is_before_spark_330(), reason='contains is not exposed until 3.3.0')
 @pytest.mark.parametrize('ansi', [True, False], ids=["ANSI", "NO_ANSI"])
 def test_multi_contains_conditional(ansi):
     """
@@ -1085,3 +1152,57 @@ def test_multi_contains_conditional(ansi):
                     ELSE CAST(a AS LONG)
                 END as result'''),
             conf = conf)
+
+
+# SPARK-57507 / #15383: reverse must clamp truncated trailing UTF-8 to the row boundary.
+# Neighbor sentinel rows make an over-read observable.
+def _cpu_reverse_has_spark_57507():
+    version = spark_version()
+    # The fix was backported to the 4.0.4, 4.1.3, and 4.2.0 release lines.
+    return ('4.0.4' <= version < '4.1.0'
+            or '4.1.3' <= version < '4.2.0'
+            or version >= '4.2.0')
+
+
+@ignore_order(local=True)
+@pytest.mark.parametrize('hex_in,expected_hex', [
+    ('41CE', 'CE41'),                 # A + truncated 2-byte lead
+    ('41E4B8', 'E4B841'),             # A + truncated 3-byte lead
+    ('41F090', 'F09041'),             # A + truncated 4-byte lead
+    ('E4B896CE', 'CEE4B896'),         # complete 世 + orphan 2-byte lead
+    ('41C3A9', 'C3A941'),             # well-formed 2-byte control
+    ('41E4B896', 'E4B89641'),         # well-formed 3-byte control
+    ('41F0908D88', 'F0908D8841'),     # well-formed 4-byte control
+], ids=idfn)
+def test_reverse_truncated_trailing_utf8(hex_in, expected_hex):
+    def do_it(spark):
+        # Keep target + sentinel neighbors adjacent in one partition so an over-read
+        # into the next row is observable. Avoid ORDER BY (CPU shuffle) and unhex
+        # (not allowed in GpuCpuBridge); feed raw bytes via BINARY then cast to STRING.
+        df = spark.createDataFrame(
+            [
+                (0, bytearray.fromhex(hex_in)),
+                (1, bytearray.fromhex('FFFFFFFF')),
+                (2, bytearray.fromhex('414243')),
+            ],
+            'row_id INT, b BINARY'
+        ).coalesce(1).selectExpr('row_id', 'CAST(b AS STRING) AS v')
+        return df.selectExpr('row_id', 'hex(reverse(v)) as h')
+
+    if _cpu_reverse_has_spark_57507():
+        assert_cpu_and_gpu_are_equal_collect_with_capture(
+            do_it, exist_classes='GpuReverse', require_non_empty=True)
+    else:
+        # Older CPU builds over-read malformed trailing UTF-8, so validate the GPU result
+        # against Spark's corrected semantics instead of asserting CPU/GPU equality.
+        def collect_gpu(spark):
+            out = do_it(spark)
+            rows = out.collect()
+            plan = out._jdf.queryExecution().executedPlan().toString()
+            # Expression trees render as lowercase "gpureverse(...)", not the class name.
+            assert 'gpureverse' in plan.lower(), 'expected GpuReverse in plan, got:\n' + plan
+            return rows
+
+        rows = with_gpu_session(collect_gpu)
+        rows_by_id = {row['row_id']: row['h'] for row in rows}
+        assert rows_by_id[0] == expected_hex

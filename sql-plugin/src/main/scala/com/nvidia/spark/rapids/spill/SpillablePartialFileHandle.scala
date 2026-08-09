@@ -20,6 +20,7 @@ import java.io.{BufferedInputStream, BufferedOutputStream, File, FileInputStream
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 
+import ai.rapids.cudf.HostMemoryBuffer
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.HostAlloc
 
@@ -58,6 +59,7 @@ object PartialFileStorageMode extends Enumeration {
  * @param memoryThreshold Host memory usage threshold for buffer expansion decisions
  * @param priority Spill priority for memory-based mode
  * @param syncWrites Whether to force outstanding writes to disk
+ * @param bufferedOutputStreamFactory Creates buffered streams for file writes
  * @param capacityHintProvider Optional function that provides capacity hints based on
  *                             current bytes written and required capacity. When provided,
  *                             buffer expansion will use this hint instead of simple doubling.
@@ -72,6 +74,7 @@ class SpillablePartialFileHandle private (
     memoryThreshold: Double,
     priority: Long,
     syncWrites: Boolean,
+    bufferedOutputStreamFactory: FileOutputStream => BufferedOutputStream,
     capacityHintProvider: Option[(Long, Long) => Long])
   extends HostSpillableHandle[ai.rapids.cudf.HostMemoryBuffer] with Logging {
 
@@ -121,7 +124,9 @@ class SpillablePartialFileHandle private (
       case e: Exception =>
         logWarning(s"Failed to allocate initial buffer of $initialCapacity bytes, " +
           s"falling back to file-based storage", e)
-        // Fallback to file-based if allocation fails
+        // Close the buffer if it was allocated before the failure so it isn't leaked.
+        host.foreach(_.close())
+        host = None
         spilledToDisk = true
         currentBufferCapacity = 0L
     }
@@ -239,6 +244,7 @@ class SpillablePartialFileHandle private (
         throw new IllegalStateException("Host buffer is null")
     }
   }
+
 
   /**
    * Spill current buffer content to file and switch to file-based mode.
@@ -405,7 +411,8 @@ class SpillablePartialFileHandle private (
       return -1  // EOF
     }
 
-    val actualLength = math.min(length, (totalBytesWritten - readPosition).toInt)
+    val actualLength = SpillablePartialFileHandle.boundedReadLengthAsInt(
+      length, totalBytesWritten - readPosition)
 
     def readFromFile(): Int = {
       ensureFileInputStreamOpen()
@@ -473,7 +480,8 @@ class SpillablePartialFileHandle private (
       return -1
     }
 
-    val actualLength = math.min(length, (totalBytesWritten - position).toInt)
+    val actualLength = SpillablePartialFileHandle.boundedReadLengthAsInt(
+      length, totalBytesWritten - position)
     if (actualLength <= 0) {
       return -1
     }
@@ -571,13 +579,33 @@ class SpillablePartialFileHandle private (
   private var spillInProgress: Boolean = false
 
   /**
-   * Spill memory buffer to disk.
+   * Spill memory buffer to disk, as part of the shuffle commit
+   */
+  def spillForCommit(): Long = {
+    spillInternal(commit = true)
+  }
+
+  /**
+   * Spill memory buffer to disk, as part of memory pressure
+   */
+  override def spill(): Long = {
+    spillInternal(commit = false)
+  }
+
+  /**
+   * This method spills this handle to disk, and optionally tracks the time
+   * and bytes written as a spill metric given it is caused by memory pressure,
+   * which is signaled by commit = false.
    *
    * Following SpillFramework pattern: all state checks inside synchronized block.
    * IO operations are performed outside the synchronized block to allow
    * concurrent read() access to the buffer during the file write.
+   *
+   * @param commit if true, the spill is happening due to a shuffle commit phase
+   *               do not track the time/bytes in our spill metric.
+   * @return the number of bytes written to disk, or 0 if spilling was skipped
    */
-  override def spill(): Long = {
+  private def spillInternal(commit: Boolean): Long = {
     if (storageMode != PartialFileStorageMode.MEMORY_WITH_SPILL) {
       return 0L  // Nothing to spill for FILE_ONLY mode
     }
@@ -597,32 +625,14 @@ class SpillablePartialFileHandle private (
       }
     }
 
-    // Perform IO outside lock - read() can still access buffer during this time
-    // Wrap with spillToDiskTime to track spill timing metrics
-    GpuTaskMetrics.get.spillToDiskTime {
-      try {
-        val fos = new FileOutputStream(file)
-        try {
-          val channel = fos.getChannel
-          val bb = bufferToSpill.asByteBuffer()
-          bb.limit(totalBytesWritten.toInt)
-          while (bb.hasRemaining) {
-            channel.write(bb)
-          }
-          if (syncWrites) {
-            channel.force(true)
-          }
-        } finally {
-          fos.close()
-        }
-      } catch {
-        case e: Exception =>
-          // IO failed, reset flag and propagate
-          synchronized {
-            spillInProgress = false
-            notifyAll()  // Wake up any waiting doClose()
-          }
-          throw e
+
+    if (commit) {
+      doSpill(bufferToSpill)
+    } else {
+      // we are spilling due to memory pressure. Lets measure the doSpill
+      // time since it's not part of the regular shuffle commit.
+      GpuTaskMetrics.get.spillToDiskTime {
+        doSpill(bufferToSpill)
       }
     }
 
@@ -643,13 +653,46 @@ class SpillablePartialFileHandle private (
       bufferToSpill.close()
       host = None
 
-      // Record spill bytes metric
-      TrampolineUtil.incTaskMetricsDiskBytesSpilled(totalBytesWritten)
+      if (!commit) {
+        // if we are not committing, we want to account for these bytes
+        // in the spill to disk metric, otherwise we are going to account
+        // for them in the shuffle write metric.
+        TrampolineUtil.incTaskMetricsDiskBytesSpilled(totalBytesWritten)
+      }
 
       logDebug(s"Spilled to ${file.getAbsolutePath} " +
         s"($totalBytesWritten bytes)")
 
       totalBytesWritten
+    }
+  }
+
+  // Performs IO outside lock - read() can still access buffer during this time
+  // Only to be called from spillInternal!
+  private def doSpill(bufferToSpill: HostMemoryBuffer): Unit = {
+    try {
+      val fos = new FileOutputStream(file)
+      try {
+        val channel = fos.getChannel
+        val bb = bufferToSpill.asByteBuffer()
+        bb.limit(totalBytesWritten.toInt)
+        while (bb.hasRemaining) {
+          channel.write(bb)
+        }
+        if (syncWrites) {
+          channel.force(true)
+        }
+      } finally {
+        fos.close()
+      }
+    } catch {
+      case e: Exception =>
+        // IO failed, reset flag and propagate
+        synchronized {
+          spillInProgress = false
+          notifyAll() // Wake up any waiting doClose()
+        }
+        throw e
     }
   }
 
@@ -661,7 +704,7 @@ class SpillablePartialFileHandle private (
     if (fileOutputStream.isEmpty) {
       val fos = new FileOutputStream(file, true)  // append mode
       fileOutputStream = Some(fos)
-      bufferedOutputStream = Some(new BufferedOutputStream(fos, 64 * 1024))
+      bufferedOutputStream = Some(bufferedOutputStreamFactory(fos))
     }
   }
 
@@ -763,6 +806,14 @@ class SpillablePartialFileHandle private (
 
 object SpillablePartialFileHandle extends Logging {
 
+  private val DEFAULT_FILE_BUFFER_SIZE = 64 * 1024
+
+  private[spill] def boundedReadLengthAsInt(requestedLength: Int, remainingBytes: Long): Int = {
+    require(requestedLength >= 0, s"requestedLength must be non-negative: $requestedLength")
+    require(remainingBytes >= 0, s"remainingBytes must be non-negative: $remainingBytes")
+    math.min(requestedLength.toLong, remainingBytes).toInt
+  }
+
   /**
    * Create a file-only handle.
    * Data is written directly to disk without using host memory.
@@ -780,6 +831,24 @@ object SpillablePartialFileHandle extends Logging {
       memoryThreshold = 0.0,
       priority = Long.MinValue,
       syncWrites = syncWrites,
+      bufferedOutputStreamFactory = new BufferedOutputStream(_, DEFAULT_FILE_BUFFER_SIZE),
+      capacityHintProvider = None)
+  }
+
+  private[spill] def createFileOnly(
+      file: File,
+      syncWrites: Boolean,
+      bufferedOutputStreamFactory: FileOutputStream => BufferedOutputStream):
+  SpillablePartialFileHandle = {
+    new SpillablePartialFileHandle(
+      storageMode = PartialFileStorageMode.FILE_ONLY,
+      file = file,
+      initialCapacity = 0L,
+      maxBufferSize = 0L,
+      memoryThreshold = 0.0,
+      priority = Long.MinValue,
+      syncWrites = syncWrites,
+      bufferedOutputStreamFactory = bufferedOutputStreamFactory,
       capacityHintProvider = None)
   }
 
@@ -820,6 +889,7 @@ object SpillablePartialFileHandle extends Logging {
       memoryThreshold = memoryThreshold,
       priority = priority,
       syncWrites = syncWrites,
+      bufferedOutputStreamFactory = new BufferedOutputStream(_, DEFAULT_FILE_BUFFER_SIZE),
       capacityHintProvider = capacityHintProvider)
   }
 }

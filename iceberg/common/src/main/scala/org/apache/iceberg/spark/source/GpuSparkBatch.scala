@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,15 +18,14 @@ package org.apache.iceberg.spark.source
 
 import java.util.Objects
 
-import org.apache.hadoop.shaded.org.apache.commons.lang3.reflect.FieldUtils
-import org.apache.iceberg.{Schema, SchemaParser}
+import org.apache.iceberg.SchemaParser
 
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.connector.read.{Batch, InputPartition, PartitionReaderFactory}
 import org.apache.spark.util.SerializableConfiguration
 
 class GpuSparkBatch(
-    val cpuBatch: SparkBatch,
+    val cpuBatch: Batch,
     val parentScan: GpuSparkScan,
 ) extends Batch  {
   override def createReaderFactory(): PartitionReaderFactory = {
@@ -37,8 +36,7 @@ class GpuSparkBatch(
   }
 
   override def planInputPartitions(): Array[InputPartition] = {
-    val expectedSchema = FieldUtils.readField(cpuBatch, "expectedSchema", true)
-      .asInstanceOf[Schema]
+    val expectedSchema = GpuSparkScanAccess.expectedSchema(cpuBatch)
     val expectedSchemaString = SchemaParser.toJson(expectedSchema)
 
     val sparkContext = SparkSession.getActiveSession.get.sparkContext
@@ -46,7 +44,7 @@ class GpuSparkBatch(
       new SerializableConfiguration(sparkContext.hadoopConfiguration))
 
     cpuBatch.planInputPartitions().map { partition =>
-      new GpuSparkInputPartition(partition.asInstanceOf[SparkInputPartition],
+      new GpuSparkInputPartition(partition,
         parentScan.rapidsConf,
         hadoopConf,
         expectedSchemaString)

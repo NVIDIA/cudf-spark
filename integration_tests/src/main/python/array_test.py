@@ -163,7 +163,6 @@ def test_array_item_ansi_fail_invalid_index(index):
         error_message=message)
 
 
-@pytest.mark.skipif(is_before_spark_330(), reason="try_element_at is not supported before Spark 3.3.0")
 @pytest.mark.parametrize('data_gen', array_item_test_gens, ids=idfn)
 def test_try_element_at_basic(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
@@ -176,7 +175,6 @@ def test_try_element_at_basic(data_gen):
             'try_element_at(a, b)'))
 
 
-@pytest.mark.skipif(is_before_spark_330(), reason="try_element_at is not supported before Spark 3.3.0")
 @pytest.mark.parametrize('index', [-2, 100, array_out_index_gen], ids=idfn)
 def test_try_element_at_invalid_index(index):
     if isinstance(index, int):
@@ -191,7 +189,6 @@ def test_try_element_at_invalid_index(index):
     assert_gpu_and_cpu_are_equal_collect(test_func, conf=ansi_enabled_conf)
 
 
-@pytest.mark.skipif(is_before_spark_330(), reason="try_element_at is not supported before Spark 3.3.0")
 @pytest.mark.parametrize('index', [0, array_zero_index_gen], ids=idfn)
 def test_try_element_at_zero_index_throws_error(index):
     if is_spark_340_or_later():
@@ -381,7 +378,7 @@ def test_array_slice_with_zero_start(data_gen, zero_start, valid_length):
         lambda spark: three_col_df(spark, array_all_null_gen, zero_start_gen, valid_length_gen, length=5).selectExpr(
             f"slice(a, {zero_start}, {valid_length})"))
     error = "The value of parameter(s) `start` in `slice` is invalid: Expects a positive or a negative value for `start`, but got"\
-        if is_databricks143_or_later() or is_spark_400_or_later() \
+        if is_databricks_runtime() or is_spark_400_or_later() \
         else "Unexpected value for start in function slice: SQL array indices start at 1."
     # start can not be zero
     assert_gpu_and_cpu_error(
@@ -440,7 +437,7 @@ def test_array_slice_with_negative_length_error_null_scalar_length():
 def test_array_slice_with_negative_length_error(data_gen, valid_start, negative_length):
     negative_length_gen = IntegerGen(nullable=False, min_val=-25, max_val=-1, special_cases=[])
     error = "The value of parameter(s) `length` in `slice` is invalid: Expects `length` greater than or equal to 0"\
-        if is_databricks143_or_later() or is_spark_400_or_later()\
+        if is_databricks_runtime() or is_spark_400_or_later()\
         else 'Unexpected value for length in function slice: length must be greater than or equal to 0.'
     # Non-null start, length can not be negative
     assert_gpu_and_cpu_error(
@@ -458,7 +455,7 @@ def test_array_slice_with_negative_length_error(data_gen, valid_start, negative_
 def test_array_slice_with_negative_length_fails_when_cpu_fails(data_gen, valid_start, negative_length):
     negative_length_gen = IntegerGen(nullable=True, min_val=-25, max_val=-1, special_cases=[])
     maybe_error = "The value of parameter(s) `length` in `slice` is invalid: Expects `length` greater than or equal to 0"\
-        if is_databricks143_or_later() or is_spark_400_or_later()\
+        if is_databricks_runtime() or is_spark_400_or_later()\
         else 'Unexpected value for length in function slice: length must be greater than or equal to 0.'
     # Non-null start, length can not be negative
     assert_gpu_and_cpu_same_data_or_error(
@@ -487,7 +484,7 @@ def test_array_element_at(data_gen):
 @pytest.mark.parametrize('index', [100, array_out_index_gen], ids=idfn)
 @disable_ansi_mode
 def test_array_element_at_ansi_fail_invalid_index(index):
-    message = "ArrayIndexOutOfBoundsException" if is_before_spark_330() or not is_before_spark_400() else "SparkArrayIndexOutOfBoundsException"
+    message = "ArrayIndexOutOfBoundsException" if not is_before_spark_400() else "SparkArrayIndexOutOfBoundsException"
     if isinstance(index, int):
         test_func = lambda spark: unary_op_df(spark, ArrayGen(int_gen)).select(
             element_at(col('a'), index)).collect()

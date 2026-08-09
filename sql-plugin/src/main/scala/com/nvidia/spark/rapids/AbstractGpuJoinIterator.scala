@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -140,7 +140,6 @@ abstract class AbstractGpuJoinIterator(
   private def nextCbFromGatherer(): Option[ColumnarBatch] = {
     NvtxIdWithMetrics(gatherNvtxId, joinTime) {
       val minTargetSize = Math.min(targetSize, 64L * 1024 * 1024)
-      val targetSizeWrapper = AutoCloseableTargetSize(targetSize, minTargetSize)
       val ret = gathererStore.map { gather =>
         // This withRetry block will always return an iterator with one ColumnarBatch.
         // The gatherer tracks how many rows we have used already.  The withRestoreOnRetry
@@ -148,6 +147,9 @@ abstract class AbstractGpuJoinIterator(
         // GpuSplitAndRetryOOM, we retry with a smaller (halved) targetSize, so we are taking
         // less from the gatherer, but because the gatherer tracks how much is used, the
         // next call to this function will start in the right place.
+        val estimatedDataSize = (gather.numRowsLeft * gather.realCheapPerRowSizeEstimate).toLong
+        val targetSizeWrapper = AutoCloseableTargetSize(targetSize, minTargetSize,
+          estimatedDataSize)
         gather.checkpoint()
         withRetry(targetSizeWrapper, splitTargetSizeInHalfGpu) { attempt =>
           withRestoreOnRetry(gather) {

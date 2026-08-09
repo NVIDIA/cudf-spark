@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,20 +22,22 @@ import com.nvidia.spark.rapids.RapidsConf
 import org.apache.iceberg.{PartitionScanTask, ScanTaskGroup}
 import org.apache.iceberg.types.Types
 
+import org.apache.spark.sql.connector.read.Scan
 import org.apache.spark.sql.connector.read.SupportsReportPartitioning
 import org.apache.spark.sql.connector.read.partitioning.Partitioning
 
 abstract class GpuSparkPartitioningAwareScan[T <: PartitionScanTask](
-    override val cpuScan: SparkPartitioningAwareScan[T],
+    override val cpuScan: Scan,
     override val rapidsConf: RapidsConf,
     override val queryUsesInputFile: Boolean,
 ) extends GpuSparkScan(cpuScan, rapidsConf, queryUsesInputFile) with SupportsReportPartitioning  {
 
   override def outputPartitioning(): Partitioning = {
-    cpuScan.outputPartitioning()
+    cpuScan.asInstanceOf[SupportsReportPartitioning].outputPartitioning()
   }
 
-  override def groupingKeyType(): Types.StructType = cpuScan.groupingKeyType()
+  override def groupingKeyType(): Types.StructType = GpuSparkScanAccess.groupingKeyType(cpuScan)
 
-  override def taskGroups(): Seq[_ <: ScanTaskGroup[_]] = cpuScan.taskGroups().asScala.toSeq
+  override def taskGroups(): Seq[_ <: ScanTaskGroup[_]] =
+    GpuSparkScanAccess.taskGroups(cpuScan).asScala.toSeq
 }

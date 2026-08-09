@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -158,10 +158,17 @@ case class GpuHiveTableScanExec(requestedAttributes: Seq[Attribute],
         val normalizedFilters = partitionPruningPredicate.map(_.transform {
           case a: AttributeReference => originalAttributes(a)
         })
-        sparkSession.sessionState.catalog
-          .listPartitionsByFilter(hiveTableRelation.tableMeta.identifier, normalizedFilters)
+        SparkShimImpl.listPartitionsByFilter(
+          sparkSession,
+          hiveTableRelation.tableMeta.identifier,
+          normalizedFilters,
+          Some(hiveTableRelation.tableMeta))
       } else {
-        sparkSession.sessionState.catalog.listPartitions(hiveTableRelation.tableMeta.identifier)
+        SparkShimImpl.listPartitions(
+          sparkSession,
+          hiveTableRelation.tableMeta.identifier,
+          None,
+          Some(hiveTableRelation.tableMeta))
       }
     prunedPartitions.map(HiveClientImpl.toHivePartition(_, hiveQlTable))
   }

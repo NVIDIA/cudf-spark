@@ -502,7 +502,19 @@ def assert_gpu_fallback_write_sql(write_func,
 def assert_cpu_and_gpu_are_equal_collect_with_capture(func,
         exist_classes='',
         non_exist_classes='',
-        conf={}):
+        conf={},
+        require_non_empty=False,
+        gpu_plan_assertion=None):
+    """Compare collected CPU/GPU results and validate the executed GPU plan.
+
+    :param func: Function that creates the dataframe to collect in each Spark session.
+    :param exist_classes: Comma-separated class names required in the GPU plan.
+    :param non_exist_classes: Comma-separated class names forbidden in the GPU plan.
+    :param conf: Spark configuration used for both executions.
+    :param require_non_empty: Require the collected CPU result to contain at least one row.
+    :param gpu_plan_assertion: Optional callback invoked after GPU collection with the
+        dataframe's executed JVM plan.
+    """
     (bring_back, collect_type) = _prep_func_for_compare(func, 'COLLECT_WITH_DATAFRAME')
 
     conf = _prep_incompat_conf(conf)
@@ -511,10 +523,14 @@ def assert_cpu_and_gpu_are_equal_collect_with_capture(func,
     cpu_start = time.time()
     from_cpu, cpu_df = with_cpu_session(bring_back, conf=conf)
     cpu_end = time.time()
+    if require_non_empty:
+        assert len(from_cpu) > 0, "Expected non-empty result"
     print('### GPU RUN ###')
     gpu_start = time.time()
     from_gpu, gpu_df = with_gpu_session(bring_back, conf=conf)
     gpu_end = time.time()
+    if gpu_plan_assertion:
+        gpu_plan_assertion(gpu_df._jdf.queryExecution().executedPlan())
     jvm = spark_jvm()
     if exist_classes:
         for clz in exist_classes.split(','):
@@ -721,7 +737,9 @@ def assert_gpu_and_cpu_row_counts_equal(func, conf={}, is_cpu_first=True):
     """
     _assert_gpu_and_cpu_are_equal(func, 'COUNT', conf=conf, is_cpu_first=is_cpu_first)
 
-def assert_gpu_and_cpu_are_equal_sql(df_fun, table_name, sql, conf=None, debug=False, is_cpu_first=True, validate_execs_in_gpu_plan=[]):
+def assert_gpu_and_cpu_are_equal_sql(df_fun, table_name, sql, conf=None, debug=False,
+        is_cpu_first=True, validate_execs_in_gpu_plan=[],
+        result_canonicalize_func_before_compare=None):
     """
     Assert that the specified SQL query produces equal results on CPU and GPU.
     :param df_fun: a function that will create the dataframe
@@ -731,6 +749,8 @@ def assert_gpu_and_cpu_are_equal_sql(df_fun, table_name, sql, conf=None, debug=F
     :param debug: Boolean to indicate if the SQL output should be printed
     :param is_cpu_first: Boolean to indicate if the CPU should be run first or not
     :param validate_execs_in_gpu_plan: String list of expressions to be validated in the GPU plan.
+    :param result_canonicalize_func_before_compare: Function to canonicalize the CPU and GPU
+        results before comparison.
     :return: Assertion failure, if results from CPU and GPU do not match.
     """
     if conf is None:
@@ -745,7 +765,8 @@ def assert_gpu_and_cpu_are_equal_sql(df_fun, table_name, sql, conf=None, debug=F
             return data_gen.debug_df(spark.sql(sql))
         else:
             return spark.sql(sql)
-    assert_gpu_and_cpu_are_equal_collect(do_it_all, conf, is_cpu_first=is_cpu_first)
+    assert_gpu_and_cpu_are_equal_collect(do_it_all, conf, is_cpu_first=is_cpu_first,
+        result_canonicalize_func_before_compare=result_canonicalize_func_before_compare)
 
 
 def check_exception(actual_error, error_message):

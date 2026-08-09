@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids
 
 import scala.collection.mutable
 
-import ai.rapids.cudf.{ast, ColumnVector, ColumnView, DType, Scalar}
+import ai.rapids.cudf.{ast, BinaryOp, ColumnVector, ColumnView, DType, Scalar}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.shims.ShimExpression
@@ -28,15 +28,26 @@ import org.apache.spark.sql.types.{DataType, DoubleType, FloatType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 object GpuNvl {
+  // For non-nested types, use the fused replaceNulls kernel directly.
+  // Otherwise fall back to isNotNull+ifElse (backed by copy_if_else which
+  // supports nested types).
   def apply(lhs: ColumnVector, rhs: ColumnVector): ColumnVector = {
-    withResource(lhs.isNotNull) { isLhsNotNull =>
-      isLhsNotNull.ifElse(lhs, rhs)
+    if (lhs.getType.isNestedType) {
+      withResource(lhs.isNotNull) { isLhsNotNull =>
+        isLhsNotNull.ifElse(lhs, rhs)
+      }
+    } else {
+      lhs.replaceNulls(rhs)
     }
   }
 
   def apply(lhs: ColumnVector, rhs: Scalar): ColumnVector = {
-    withResource(lhs.isNotNull) { isLhsNotNull =>
-      isLhsNotNull.ifElse(lhs, rhs)
+    if (lhs.getType.isNestedType) {
+      withResource(lhs.isNotNull) { isLhsNotNull =>
+        isLhsNotNull.ifElse(lhs, rhs)
+      }
+    } else {
+      lhs.replaceNulls(rhs)
     }
   }
 }
@@ -320,20 +331,7 @@ object NullUtilities {
    * return the row from the "dataCol".
    */
   def mergeNulls(dataCol: ColumnVector, nullFlagCol: ColumnView): ColumnVector = {
-    withResource(nullFlagCol.isNull) { isNull =>
-      // if we have at least 1 null, we need to merge nulls, else
-      // it is a noop
-      val needsToChange = withResource(isNull.any) { tmp =>
-        tmp.isValid && tmp.getBoolean
-      }
-      if (needsToChange) {
-        withResource(Scalar.fromNull(dataCol.getType)) { nullScalar =>
-          isNull.ifElse(nullScalar, dataCol)
-        }
-      } else {
-        dataCol.incRefCount()
-      }
-    }
+    dataCol.mergeAndSetValidity(BinaryOp.BITWISE_AND, nullFlagCol)
   }
 
   /**
@@ -343,24 +341,6 @@ object NullUtilities {
   def mergeNulls(dataCol: ColumnVector,
                  nullFlagCol1: ColumnView,
                  nullFlagCol2: ColumnView): ColumnVector = {
-    val nullFlag = withResource(nullFlagCol1.isNull) { isNull1 =>
-      withResource(nullFlagCol2.isNull) { isNull2 =>
-        isNull1.or(isNull2)
-      }
-    }
-    withResource(nullFlag) { _ =>
-      // if we have at least 1 null, we need to merge nulls, else
-      // it is a noop
-      val needsToChange = withResource(nullFlag.any) { tmp =>
-        tmp.isValid && tmp.getBoolean
-      }
-      if (needsToChange) {
-        withResource(Scalar.fromNull(dataCol.getType)) { nullScalar =>
-          nullFlag.ifElse(nullScalar, dataCol)
-        }
-      } else {
-        dataCol.incRefCount()
-      }
-    }
+    dataCol.mergeAndSetValidity(BinaryOp.BITWISE_AND, nullFlagCol1, nullFlagCol2)
   }
 }

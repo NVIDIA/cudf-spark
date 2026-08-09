@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,10 +18,15 @@ package org.apache.iceberg.spark.source
 
 import scala.collection.JavaConverters._
 
-import com.nvidia.spark.rapids.{GpuMetric, MultiFileReaderUtils, RapidsConf, ThreadPoolConfBuilder}
+import com.nvidia.spark.rapids.{CombineConf, GpuMetric, MultiFileReaderUtils, RapidsConf, ThreadPoolConfBuilder}
 import com.nvidia.spark.rapids.iceberg.ShimUtils.locationOf
-import com.nvidia.spark.rapids.iceberg.parquet.{MultiFile, MultiThread, SingleFile, ThreadConf}
-import org.apache.iceberg.{FileFormat, ScanTask, ScanTaskGroup}
+import com.nvidia.spark.rapids.iceberg.parquet.{
+  MultiFile,
+  MultiThread,
+  SingleFile,
+  ThreadConf
+}
+import org.apache.iceberg.{FileFormat, MetadataColumns}
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.read.{InputPartition, PartitionReader, PartitionReaderFactory}
@@ -38,10 +43,11 @@ class GpuReaderFactory(private val metrics: Map[String, GpuMetric],
   // Here ignores the "ignoreCorruptFiles" comparing to the code in
   // "GpuParquetMultiFilePartitionReaderFactory", since "ignoreCorruptFiles" is
   // not honored by Iceberg.
-  private val canUseParquetCoalescing = rapidsConf.isParquetCoalesceFileReadEnabled &&
-    !queryUsesInputFile
+  private val canUseParquetCoalescing = rapidsConf.isParquetCoalesceFileReadEnabled
 
   private val poolConfBuilder = ThreadPoolConfBuilder(rapidsConf)
+  private val combineThresholdSize = rapidsConf.getMultithreadedCombineThreshold
+  private val combineWaitTime = rapidsConf.getMultithreadedCombineWaitTime
 
   override def createReader(partition: InputPartition): PartitionReader[InternalRow] =
     throw new UnsupportedOperationException("GpuReaderFactory does not support createReader()")
@@ -59,15 +65,17 @@ class GpuReaderFactory(private val metrics: Map[String, GpuMetric],
   override def supportColumnarReads(partition: InputPartition) = true
 
   private def calcThreadConf(partition: GpuSparkInputPartition): ThreadConf = {
-    val scans = partition
-      .cpuPartition
-      .taskGroup()
-      .asInstanceOf[ScanTaskGroup[ScanTask]]
+    val scans = GpuSparkScanAccess
+      .taskGroup(partition.cpuPartition)
       .tasks
       .asScala
       .map(_.asFileScanTask())
 
     val hasNoDeletes = scans.forall(_.deletes.isEmpty)
+    val hasFilePathMetadata =
+      partition.expectedSchema.findField(MetadataColumns.FILE_PATH.fieldId()) != null
+    val hasRowPositionMetadata =
+      partition.expectedSchema.findField(MetadataColumns.ROW_POSITION.fieldId()) != null
 
     val allParquet = scans.forall(_.file.format == FileFormat.PARQUET)
 
@@ -78,7 +86,15 @@ class GpuReaderFactory(private val metrics: Map[String, GpuMetric],
       }
 
       val canUseMultiThread = canUseParquetMultiThread
-      val canUseCoalescing = canUseParquetCoalescing && hasNoDeletes
+      // `_pos` must be file-global. The coalescing reader's parent
+      // (MultiFileCoalescingPartitionReaderBase.populateCurrentBlockChunk) can merge blocks
+      // from multiple Iceberg splits of the same physical Parquet file into one chunk and
+      // finalize the whole chunk with the first split's per-file post-processor, which
+      // would emit wrong `_pos` for any rows past the first split. Route `_pos`-projecting
+      // scans to the multi-thread/single-file readers instead — those finalize batches per
+      // `IcebergPartitionedFile`, so each split's own post-processor handles its own rows.
+      val canUseCoalescing = canUseParquetCoalescing && hasNoDeletes && !queryUsesInputFile &&
+        !hasRowPositionMetadata
 
       val files = scans.map(s => locationOf(s.file)).toArray
 
@@ -86,9 +102,18 @@ class GpuReaderFactory(private val metrics: Map[String, GpuMetric],
         canUseMultiThread, files, allCloudSchemes)
 
       if (useMultiThread) {
-        MultiThread(poolConfBuilder, partition.maxNumParquetFilesParallel)
+        // Delete filtering is still file-specific for the multi-thread reader, so any delete file
+        // must keep combining off.
+        val disableCombining =
+          queryUsesInputFile || hasFilePathMetadata || hasRowPositionMetadata ||
+            !hasNoDeletes
+        MultiThread(poolConfBuilder, partition.maxNumParquetFilesParallel,
+          CombineConf(combineThresholdSize, combineWaitTime),
+          disableCombining,
+          hasFilePathMetadata,
+          hasRowPositionMetadata)
       } else {
-        MultiFile(poolConfBuilder)
+        MultiFile(poolConfBuilder, hasFilePathMetadata, hasRowPositionMetadata)
       }
     } else {
       throw new UnsupportedOperationException("Currently only parquet format is supported")

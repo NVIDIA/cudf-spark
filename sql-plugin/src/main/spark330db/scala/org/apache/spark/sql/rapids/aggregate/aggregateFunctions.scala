@@ -19,7 +19,6 @@
 {"spark": "332db"}
 {"spark": "340"}
 {"spark": "341"}
-{"spark": "341db"}
 {"spark": "342"}
 {"spark": "343"}
 {"spark": "344"}
@@ -33,12 +32,19 @@
 {"spark": "356"}
 {"spark": "357"}
 {"spark": "358"}
+{"spark": "359"}
 {"spark": "400"}
 {"spark": "400db173"}
 {"spark": "401"}
 {"spark": "402"}
+{"spark": "403"}
+{"spark": "404"}
 {"spark": "411"}
+{"spark": "412"}
+{"spark": "413"}
+{"spark": "420"}
 spark-rapids-shim-json-lines ***/
+
 package org.apache.spark.sql.rapids.aggregate
 
 import com.nvidia.spark.rapids.GpuCast
@@ -56,8 +62,8 @@ abstract class GpuDecimalAverage(child: Expression, sumDataType: DecimalType, fa
   // This is to conform with Spark's behavior in the Average aggregate function.
   override lazy val evaluateExpression: Expression = {
     GpuCast(
-      GpuDecimalDivide(sum, GpuCast(count, DecimalType.LongDecimal), dataType,
-        failOnError = failOnError, failOnDivideByZero = false), dataType, ansiMode = failOnError)
+      GpuDecimalDivide(sum, GpuCast(count, DecimalType.LongDecimal)(), dataType,
+        failOnError = failOnError, failOnDivideByZero = false), dataType, ansiMode = failOnError)()
   }
 
   // Window
@@ -68,7 +74,7 @@ abstract class GpuDecimalAverage(child: Expression, sumDataType: DecimalType, fa
     val sum = GpuWindowExpression(GpuSum(child, sumDataType,
       failOnErrorOverride = failOnError), spec)
     GpuCast(
-      GpuDecimalDivide(sum, GpuCast(count, DecimalType.LongDecimal), dataType,
-        failOnError = failOnError, failOnDivideByZero = false), dataType, ansiMode = failOnError)
+      GpuDecimalDivide(sum, GpuCast(count, DecimalType.LongDecimal)(), dataType,
+        failOnError = failOnError, failOnDivideByZero = false), dataType, ansiMode = failOnError)()
   }
 }

@@ -18,7 +18,7 @@ from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_co
     assert_gpu_sql_fallback_collect, assert_gpu_and_cpu_are_equal_sql
 from data_gen import *
 from marks import allow_non_gpu, allow_non_gpu_conditional
-from spark_session import is_before_spark_400, is_databricks173_or_later
+from spark_session import is_before_spark_400, is_databricks173_or_later, is_spark_40x
 
 
 ####################################################################################################
@@ -34,7 +34,8 @@ _non_utf8_binary_collations = ["UNICODE", "UTF8_LCASE", "UNICODE_CI"]
 
 # test Collate, currently does not have GPU version for Collate
 @pytest.mark.skipif(is_before_spark_400(), reason="Spark versions before 400 do not support collate")
-@allow_non_gpu("ProjectExec")
+@allow_non_gpu_conditional(is_spark_40x(), "ProjectExec")
+@allow_non_gpu("Collate", "ResolvedCollation")
 def test_collate_expr_fallback():
     data_gen = [("c1", string_gen)]
     assert_gpu_fallback_collect(
@@ -164,9 +165,8 @@ def test_constraint_char_varchar_preserve_enabled_fallback(spark_tmp_path, char_
 
 
 # Test `preserveCharVarcharTypeInfo` is false(default value); char type
-# The CPU plan is: Contains(static_invoke(CharVarcharCodegenUtils.readSidePadding(char_col#8, 5)), a)
-# Spark scan treats char as StringType.
-# Contains falls back because the child `static_invoke` is not supported by GPU.
+# Spark scan treats char as StringType and injects read-side padding in ProjectExec.
+# `static_invoke` (readSidePadding) has no GPU implementation, so ProjectExec falls back.
 @pytest.mark.skipif(is_before_spark_400(),
                     reason="Spark 32x, 33x do not support char/varchar type; Spark 34x, 35x throw exception")
 @allow_non_gpu_conditional(not is_databricks173_or_later(), "ProjectExec")
@@ -193,7 +193,7 @@ def test_constraint_char_preserve_disabled_fallback(spark_tmp_path):
         assert_gpu_and_cpu_are_equal_collect(read_func)
     else:
         assert_gpu_fallback_collect(read_func,
-            cpu_fallback_class_name="StaticInvoke")
+            cpu_fallback_class_name="ProjectExec")
 
 
 # Test `preserveCharVarcharTypeInfo` is false(default value); varchar type

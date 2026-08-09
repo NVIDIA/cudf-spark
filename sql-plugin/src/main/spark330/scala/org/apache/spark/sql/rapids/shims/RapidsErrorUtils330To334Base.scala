@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -83,5 +83,19 @@ trait RapidsErrorUtils330To334Base extends RapidsErrorUtilsFor330plus with Rapid
 
   def invalidInputSyntaxForBooleanError(s: UTF8String): RuntimeException = {
     QueryExecutionErrors.invalidInputSyntaxForBooleanError(s, "")
+  }
+
+  def invalidInputSyntaxForBooleanError(
+      s: UTF8String,
+      errorContext: String): RuntimeException = {
+    QueryExecutionErrors.invalidInputSyntaxForBooleanError(s, errorContext)
+  }
+
+  def invalidInputInCastToDatetimeError(
+      value: Any,
+      from: DataType,
+      to: DataType,
+      errorContext: String): Throwable = {
+    QueryExecutionErrors.invalidInputInCastToDatetimeError(value, from, to, errorContext)
   }
 }
