@@ -1371,19 +1371,26 @@ def test_delta_dv_pushdown_keeps_alias_producer(spark_tmp_path, spark_tmp_table_
             )
             GROUP BY order_num, item_sk
         """)
-        is_gpu = str(spark.conf.get("spark.rapids.sql.enabled", "false")).lower() == "true"
-        if is_gpu:
-            _assert_db173_gpu_delta_scan_if_enabled(spark, df)
-            explain_str = str(df._jdf.queryExecution().executedPlan())
-            # The DV pushdown pass must have run for this test to exercise
-            # mergeIdenticalProjects: the internal skip-row columns are gone.
-            assert "__delta_internal_is_row_deleted" not in explain_str
-            if is_databricks173_or_later():
-                assert "_databricks_internal_edge_computed_column_skip_row" not in explain_str
         return df
 
+    def assert_dv_pushdown_plan(plan):
+        from conftest import spark_jvm
+
+        # Inspect the plan after collection so an adaptive plan has been finalized.
+        # The DV pushdown pass must have run for this test to exercise
+        # mergeIdenticalProjects: the internal skip-row columns are gone.
+        callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+        explain_str = str(callback.extractExecutedPlan(plan))
+        assert "__delta_internal_is_row_deleted" not in explain_str
+        if is_databricks173_or_later():
+            assert "_databricks_internal_edge_computed_column_skip_row" not in explain_str
+
     with_cpu_session(create_delta, conf=conf)
-    assert_gpu_and_cpu_are_equal_collect(read_table, conf=conf)
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        read_table,
+        exist_classes=r"Gpu(FileSourceScanExec|FileGpuScan)",
+        conf=conf,
+        gpu_plan_assertion=assert_dv_pushdown_plan)
 
 
 def _test_delta_dv_filter_after_native_scan(spark_tmp_path, cpu_bridge_enabled):
