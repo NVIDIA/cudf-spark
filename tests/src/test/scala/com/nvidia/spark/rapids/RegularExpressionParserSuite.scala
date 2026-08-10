@@ -90,6 +90,12 @@ class RegularExpressionParserSuite extends AnyFunSuite {
           RegexGroup(RegexGroup.NegativeLookbehind, RegexSequence(ListBuffer(RegexChar('d')))),
           RegexGroup(RegexGroup.Independent, RegexSequence(ListBuffer(RegexChar('e')))),
           RegexGroup(RegexGroup.Named("n"), RegexSequence(ListBuffer(RegexChar('f')))))))
+      assert(parse("(:a)(?::b)") ===
+        RegexSequence(ListBuffer(
+          RegexGroup(RegexGroup.Capturing,
+                     RegexSequence(ListBuffer(RegexChar(':'), RegexChar('a')))),
+          RegexGroup(RegexGroup.NonCapturing,
+                     RegexSequence(ListBuffer(RegexChar(':'), RegexChar('b')))))))
   }
 
   test("flags") {

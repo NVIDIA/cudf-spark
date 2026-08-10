@@ -193,62 +193,57 @@ class RegexParser(pattern: String) {
   }
 
   private def parseGroup(): RegexAST = {
-    val groupType = if (peek().contains('?')) {
+    def parseGroupBody(groupType: RegexGroup.Type): RegexGroup = {
+      val term = parseUntil(() => peek().contains(')'))
+      if (eof()) throw new RegexUnsupportedException("Unclosed group", Some(pos))
+      consumeExpected(')')
+      RegexGroup(groupType, term)
+    }
+    if (peek().contains('?')) {
       consumeExpected('?')
       peek() match {
         case None => throw new RegexUnsupportedException("Unterminated inline flags", Some(pos))
-        case Some(ch) if ":!=<>".contains(ch) => consumeExpected(ch) match {
-          // guaranteed exhaustive by the contains call above
-          case ':' => RegexGroup.NonCapturing
-          case '!' => RegexGroup.NegativeLookahead
-          case '=' => RegexGroup.PositiveLookahead
-          case '>' => RegexGroup.Independent
-          case '<' if pos < pattern.length => consume() match {
-            case '!' => RegexGroup.NegativeLookbehind
-            case '=' => RegexGroup.PositiveLookbehind
-            case ch if isLetter(ch) =>
-              val nameStart = pos-1
-              while (!eof() && peek().exists(c => isLetter(c) || isAsciiDigit(c))) {
-                skip()
-              }
-              val name = pattern.substring(nameStart, pos)
-              if (!peek().contains('>')) {
-                throw new RegexUnsupportedException(
-                  "Illegal named capture group: malformed <name>", Some(nameStart-1))
-              }
-              consumeExpected('>')
-              RegexGroup.Named(name)
-            case _ => throw new RegexUnsupportedException(
-              "Unexpected character after '<' in group", Some(pos-1))
+        case Some(ch) if ":!=<>".contains(ch) =>
+          val groupType = consumeExpected(ch) match {
+            // guaranteed exhaustive by the contains call above
+            case ':' => RegexGroup.NonCapturing
+            case '!' => RegexGroup.NegativeLookahead
+            case '=' => RegexGroup.PositiveLookahead
+            case '>' => RegexGroup.Independent
+            case '<' if pos < pattern.length => consume() match {
+              case '!' => RegexGroup.NegativeLookbehind
+              case '=' => RegexGroup.PositiveLookbehind
+              case ch if isLetter(ch) =>
+                val nameStart = pos-1
+                while (!eof() && peek().exists(c => isLetter(c) || isAsciiDigit(c))) {
+                  skip()
+                }
+                val name = pattern.substring(nameStart, pos)
+                if (!peek().contains('>')) {
+                  throw new RegexUnsupportedException(
+                    "Illegal named capture group: malformed <name>", Some(nameStart-1))
+                }
+                consumeExpected('>')
+                RegexGroup.Named(name)
+              case _ => throw new RegexUnsupportedException(
+                "Unexpected character after '<' in group", Some(pos-1))
+            }
+            case '<' => throw new RegexUnsupportedException(
+              "Pattern may not end with trailing '<' in group", Some(pos-1))
           }
-          case '<' => throw new RegexUnsupportedException(
-            "Pattern may not end with trailing '<' in group", Some(pos-1))
-        }
+          parseGroupBody(groupType)
         case Some(_) =>
           val flags = parseFlags()
-          // Leave the ':' to distinguish scoped flags from inline flags.
-          peek() match {
-            case Some(':') | Some(')') | None =>
-            case Some(ch) =>
-              throw new RegexUnsupportedException(s"Unexpected inline flag '$ch'", Some(pos))
+          if (eof()) throw new RegexUnsupportedException("Unterminated inline flags", Some(pos))
+          consume() match {
+            case ')' => RegexInlineFlags(flags)
+            case ':' => parseGroupBody(RegexGroup.ScopedFlags(flags))
+            case ch =>
+              throw new RegexUnsupportedException(s"Unexpected inline flag '$ch'", Some(pos-1))
           }
-          RegexGroup.ScopedFlags(flags)
       }
     } else {
-      RegexGroup.Capturing
-    }
-    (peek(), groupType) match {
-      case (None, RegexGroup.ScopedFlags(_)) =>
-        throw new RegexUnsupportedException("Unterminated inline flags", Some(pos))
-      case (None, _) => throw new RegexUnsupportedException("Unclosed group", Some(pos))
-      case (Some(')'), RegexGroup.ScopedFlags(flags)) =>
-        consumeExpected(')')
-        RegexInlineFlags(flags)
-      case (Some(ch), _) =>
-        if (ch == ':') consumeExpected(':')
-        val term = parseUntil(() => peek().contains(')'))
-        consumeExpected(')')
-        RegexGroup(groupType, term)
+      parseGroupBody(RegexGroup.Capturing)
     }
   }
 
