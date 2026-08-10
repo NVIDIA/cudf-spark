@@ -238,6 +238,53 @@ class RapidsTestSettings extends BackendTestSettings {
         "Recovery trigger: the Spark test accepts the GPU V1 scan node; P2."))
   enableSuite[RapidsV1ReadFallbackWithDataFrameReaderSuite]
   enableSuite[RapidsV1ReadFallbackWithCatalogSuite]
+  enableSuite[RapidsFileMetadataStructSuite]
+  enableSuite[RapidsDisableUnnecessaryBucketedScanWithoutHiveSupportSuite]
+    .exclude("SPARK-32859: disable unnecessary bucketed table scan - basic test",
+      ADJUST_UT("Replaced by GPU-aware testRapids coverage. See " +
+        "https://github.com/NVIDIA/cudf-spark/issues/15512. Recovery trigger: upstream Spark " +
+        "plan assertions become implementation agnostic; P2."))
+    .exclude("SPARK-32859: disable unnecessary bucketed table scan - multiple joins test",
+      ADJUST_UT("Replaced by GPU-aware testRapids coverage. See " +
+        "https://github.com/NVIDIA/cudf-spark/issues/15512. Recovery trigger: upstream Spark " +
+        "plan assertions become implementation agnostic; P2."))
+    .exclude(
+      "SPARK-32859: disable unnecessary bucketed table scan - multiple bucketed columns test",
+      ADJUST_UT("Replaced by GPU-aware testRapids coverage. See " +
+        "https://github.com/NVIDIA/cudf-spark/issues/15512. Recovery trigger: upstream Spark " +
+        "plan assertions become implementation agnostic; P2."))
+    .exclude("SPARK-32859: disable unnecessary bucketed table scan - other operators test",
+      ADJUST_UT("Replaced by GPU-aware testRapids coverage. See " +
+        "https://github.com/NVIDIA/cudf-spark/issues/15512. Recovery trigger: upstream Spark " +
+        "plan assertions become implementation agnostic; P2."))
+    .exclude("SPARK-33075: not disable bucketed table scan for cached query",
+      ADJUST_UT("Replaced by testRapids coverage that checks CPU and GPU shuffle nodes. " +
+        "See https://github.com/NVIDIA/cudf-spark/issues/15512. Recovery trigger: upstream " +
+        "Spark plan assertions become implementation agnostic; P2."))
+    .exclude("Aggregates with no groupby over tables having 1 BUCKET, return multiple rows",
+      ADJUST_UT("Replaced by GPU-aware testRapids coverage. See " +
+        "https://github.com/NVIDIA/cudf-spark/issues/15512. Recovery trigger: upstream Spark " +
+        "plan assertions become implementation agnostic; P2."))
+  enableSuite[RapidsDisableUnnecessaryBucketedScanWithoutHiveSupportSuiteAE]
+  enableSuite[RapidsOrcPartitionDiscoverySuite]
+  enableSuite[RapidsOrcV1PartitionDiscoverySuite]
+  enableSuite[RapidsFileFormatWriterSuite]
+  enableSuite[RapidsFileSourceSQLInsertTestSuite]
+  enableSuite[RapidsDSV2SQLInsertTestSuite]
+  enableSuite[RapidsMetadataCacheV1Suite]
+    .exclude("SPARK-16336,SPARK-27961 Suggest fixing FileNotFoundException",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15511. " +
+        "Recovery trigger: GPU ORC V1 missing-file errors include Spark-equivalent recreate " +
+        "guidance; P1."))
+    .exclude("SPARK-16337 temporary view refresh",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15511. " +
+        "Recovery trigger: GPU ORC V1 missing-file errors include Spark-equivalent REFRESH " +
+        "and recreate guidance; P1."))
+  enableSuite[RapidsMetadataCacheV2Suite]
+    .exclude("SPARK-16336,SPARK-27961 Suggest fixing FileNotFoundException",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15511. " +
+        "Recovery trigger: GPU ORC V2 missing-file errors include Spark-equivalent recreate " +
+        "guidance; P1."))
   enableSuite[RapidsFileSourceStrategySuite]
     .exclude("partitioned table - after scan filters", ADJUST_UT("Replaced by testRapids version that checks GpuFilterExec residual filters."))
     .exclude("[SPARK-16818] partition pruned file scans implement sameResult correctly", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15161"))

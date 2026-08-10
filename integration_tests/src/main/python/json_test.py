@@ -1705,6 +1705,27 @@ def test_structs_to_json_fallback_pretty():
         structs_to_json_fallback_class,
         conf=conf)
 
+@pytest.mark.skipif(not is_spark_420_or_later(),
+                    reason='sortKeys option was added in Spark 4.2.0')
+@allow_non_gpu(*structs_to_json_fallback_allow)
+@pytest.mark.parametrize('sort_keys_option', ['sortKeys', 'sortkeys'])
+def test_structs_to_json_fallback_sort_keys(sort_keys_option):
+    def struct_to_json(spark):
+        return spark.range(3).select(
+            f.to_json(
+                f.struct(
+                    f.col('id').alias('b'),
+                    (f.col('id') + 1).alias('a')),
+                {sort_keys_option: True}).alias('my_json'))
+
+    conf = copy_and_update(_enable_all_types_conf,
+                           {'spark.rapids.sql.expression.StructsToJson': True})
+
+    assert_gpu_fallback_collect(
+        lambda spark: struct_to_json(spark),
+        structs_to_json_fallback_class,
+        conf=conf)
+
 #####################################################
 # Some from_json tests ported over from Apache Spark
 #####################################################
