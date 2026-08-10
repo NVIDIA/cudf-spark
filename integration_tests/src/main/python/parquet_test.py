@@ -13,6 +13,8 @@
 # limitations under the License.
 import os
 import re
+import shutil
+import tempfile
 
 import pytest
 
@@ -23,7 +25,7 @@ from parquet_write_test import parquet_datetime_gen_simple, parquet_nested_datet
 from marks import *
 import pyarrow as pa
 import pyarrow.parquet as pq
-from parquet_test_utils import parquet_row_group_midpoints
+from parquet_test_utils import copy_from_local, parquet_row_group_midpoints
 from pyspark.sql.types import *
 from pyspark.sql.functions import *
 from spark_init_internal import spark_version
@@ -1996,7 +1998,12 @@ def test_parquet_partition_batch_row_count_only_splitting(spark_tmp_path):
 
 def _write_parquet_unknown_null_table(
         data_path, with_list=False, with_map=False, field_id=None):
-    """Write INT32 physical + UNKNOWN/Null logical annotation (Spark void_in_parquet shape)."""
+    """Write INT32 physical + UNKNOWN/Null logical annotation (Spark void_in_parquet shape).
+
+    PyArrow writes only to the local filesystem, while spark_tmp_path is created via
+    Hadoop FileSystem.mkdirs. On Dataproc the default FS is typically GCS, so writing
+    directly to data_path fails with FileNotFoundError. Write locally then copy.
+    """
     if with_list:
         table = pa.table({
             'list_void': pa.array([[None, None], [None], None], type=pa.list_(pa.null())),
@@ -2018,7 +2025,13 @@ def _write_parquet_unknown_null_table(
             'id': pa.array([1, 2, 3], type=pa.int32()),
             'void_col': pa.array([None, None, None], type=pa.null()),
         })
-    pq.write_table(table, data_path)
+    local_dir = tempfile.mkdtemp(prefix='parquet_unknown_')
+    try:
+        local_file = os.path.join(local_dir, 'part.parquet')
+        pq.write_table(table, local_file)
+        with_cpu_session(lambda spark: copy_from_local(spark, local_file, data_path))
+    finally:
+        shutil.rmtree(local_dir, ignore_errors=True)
 
 
 # SPARK-56045 / SPARK-54220: Parquet UNKNOWN logical type annotation. PyArrow null columns are

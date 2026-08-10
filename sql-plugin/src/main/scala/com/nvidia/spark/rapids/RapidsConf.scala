@@ -1012,7 +1012,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .createWithDefault("*")
 
   val ASYNC_PROFILER_PROFILE_OPTIONS = conf("spark.rapids.flameGraph.asyncProfiler.options")
-    .doc("Spark-RAPIDS plugin uses the async profiler to generate flame graphs. " +
+    .doc("The cuDF plugin uses the async profiler to generate flame graphs. " +
       "You can specify profiler options via this property. " +
       "The plugin supports all options except for the 'file' option listed in " +
       "https://github.com/async-profiler/async-profiler/blob/" +
@@ -1045,12 +1045,12 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .createWithDefault(true)
 
   val SQL_MODE = conf("spark.rapids.sql.mode")
-    .doc("Set the mode for the Rapids Accelerator. The supported modes are explainOnly and " +
+    .doc("Set the mode for the cuDF plugin. The supported modes are explainOnly and " +
          "executeOnGPU. This config can not be changed at runtime, you must restart the " +
          "application for it to take affect. The default mode is executeOnGPU, which means " +
-         "the RAPIDS Accelerator plugin convert the Spark operations and execute them on the " +
+         "the cuDF plugin converts Spark operations and executes them on the " +
          "GPU when possible. The explainOnly mode allows running queries on the CPU and the " +
-         "RAPIDS Accelerator will evaluate the queries as if it was going to run on the GPU. " +
+         "cuDF plugin will evaluate the queries as if it was going to run on the GPU. " +
          "The explanations of what would have run on the GPU and why are output in log " +
          "messages. When using explainOnly mode, the default explain output is ALL, this can " +
          "be changed by setting spark.rapids.sql.explain. See that config for more details.")
@@ -1776,7 +1776,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
 
   val ENABLE_READ_JSON_DECIMALS = conf("spark.rapids.sql.json.read.decimal.enabled")
     .doc("When reading a quoted string as a decimal Spark supports reading non-ascii " +
-        "unicode digits, and the RAPIDS Accelerator does not.")
+        "unicode digits, and the cuDF plugin does not.")
     .booleanConf
     .createWithDefault(true)
 
@@ -1865,7 +1865,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
   val ICEBERG_S3_ASYNC_MAX_CONCURRENCY =
     conf("spark.rapids.iceberg.s3.async.max-concurrency")
       .doc("Max concurrent connections for the AwsCrtAsyncHttpClient used by the " +
-        "spark-rapids Iceberg S3 byte-range reader. Used only when the Iceberg " +
+        "cuDF plugin Iceberg S3 byte-range reader. Used only when the Iceberg " +
         "FileIO property `s3.crt.max-concurrency` is not set.")
       .startupOnly()
       .integerConf
@@ -1874,7 +1874,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
   val ICEBERG_S3_ASYNC_CONNECTION_MAX_IDLE_MS =
     conf("spark.rapids.iceberg.s3.async.connection-max-idle-time-ms")
       .doc("Connection-max-idle-time (ms) for the AwsCrtAsyncHttpClient used by the " +
-        "spark-rapids Iceberg S3 byte-range reader. No equivalent Iceberg property.")
+        "cuDF plugin Iceberg S3 byte-range reader. No equivalent Iceberg property.")
       .startupOnly()
       .longConf
       .createWithDefault(5L * 60 * 1000)
@@ -1882,7 +1882,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
   val ICEBERG_S3_ASYNC_TCP_KEEPALIVE_INTERVAL_MS =
     conf("spark.rapids.iceberg.s3.async.tcp-keepalive-interval-ms")
       .doc("TCP keep-alive probe interval (ms) for the AwsCrtAsyncHttpClient used by " +
-        "the spark-rapids Iceberg S3 byte-range reader. No equivalent Iceberg property.")
+        "the cuDF plugin Iceberg S3 byte-range reader. No equivalent Iceberg property.")
       .startupOnly()
       .longConf
       .createWithDefault(60L * 1000)
@@ -1890,7 +1890,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
   val ICEBERG_S3_ASYNC_TCP_KEEPALIVE_TIMEOUT_MS =
     conf("spark.rapids.iceberg.s3.async.tcp-keepalive-timeout-ms")
       .doc("TCP keep-alive probe timeout (ms) for the AwsCrtAsyncHttpClient used by " +
-        "the spark-rapids Iceberg S3 byte-range reader. No equivalent Iceberg property.")
+        "the cuDF plugin Iceberg S3 byte-range reader. No equivalent Iceberg property.")
       .startupOnly()
       .longConf
       .createWithDefault(30L * 1000)
@@ -1929,7 +1929,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
   val ENABLE_READ_HIVE_DECIMALS = conf("spark.rapids.sql.format.hive.text.read.decimal.enabled")
       .doc("Hive text file reading is not 100% compatible when reading decimals. Hive has " +
           "more limitations on what is valid compared to the GPU implementation in some corner " +
-          "cases. See https://github.com/NVIDIA/spark-rapids/issues/7246")
+          "cases. See https://github.com/NVIDIA/cudf-spark/issues/7246")
       .booleanConf
       .createWithDefault(true)
 
@@ -2167,7 +2167,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
   // This config name is the same as HybridPluginWrapper in Hybrid jar,
   // can not refer to Hybrid jar because of the jar is optional.
   val LOAD_HYBRID_BACKEND = conf("spark.rapids.sql.hybrid.loadBackend")
-    .doc("Load hybrid backend as an extra plugin of spark-rapids during launch time")
+    .doc("Load hybrid backend as an extra plugin of cuDF plugin during launch time")
     .internal()
     .startupOnly()
     .booleanConf
@@ -2217,9 +2217,11 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       "Spark versions, including Spark 4.0.0 and later, the " +
       "[RAPIDS Shuffle Manager](https://docs.nvidia.com/spark-rapids/user-guide/latest" +
       "/additional-functionality/rapids-shuffle.html) is configured automatically unless " +
-      "spark.shuffle.manager is explicitly set. On earlier Spark versions, the RAPIDS Shuffle " +
-      "Manager must already be configured. When set to `false`, the built-in Spark shuffle " +
-      "implementation will be used. ")
+      "spark.shuffle.manager is explicitly set. This automatic configuration is skipped on " +
+      "Dataproc runtimes that set spark.dataproc.engine, including Lightning Engine runtimes; " +
+      "on those runtimes, spark.shuffle.manager remains unset unless explicitly configured. " +
+      "On earlier Spark versions, the RAPIDS Shuffle Manager must already be configured. When " +
+      "set to `false`, the built-in Spark shuffle implementation will be used. ")
     .booleanConf
     .createWithDefault(true)
 
@@ -2433,7 +2435,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
         "than Spark's default maxBytesInFlight (48MB). The larger this setting is, the " +
         "more compressed shuffle chunks are processed concurrently. In practice, " +
         "care needs to be taken to not go over the amount of off-heap memory that Netty has " +
-        "available. See https://github.com/NVIDIA/spark-rapids/issues/9153.")
+        "available. See https://github.com/NVIDIA/cudf-spark/issues/9153.")
       .startupOnly()
       .bytesConf(ByteUnit.BYTE)
       .createWithDefault(128 * 1024 * 1024)
@@ -2568,7 +2570,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       "If you are using a custom Spark version such as Spark 3.2.0 then this can be used to " +
       "specify the shims provider that matches the base Spark version of Spark 3.2.0, i.e.: " +
       "com.nvidia.spark.rapids.shims.spark320.SparkShimServiceProvider. If you modified Spark " +
-      "then there is no guarantee the RAPIDS Accelerator will function properly." +
+      "then there is no guarantee the cuDF plugin will function properly." +
       "When tested in a combined jar with other Shims, it's expected that the provided " +
       "implementation follows the same convention as existing Spark shims. If its class" +
       " name has the form com.nvidia.spark.rapids.shims.<shimId>.YourSparkShimServiceProvider. " +
@@ -2582,9 +2584,9 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
   val CUDF_VERSION_OVERRIDE = conf("spark.rapids.cudfVersionOverride")
     .internal()
     .startupOnly()
-    .doc("Overrides the cudf version compatibility check between cudf jar and RAPIDS Accelerator " +
+    .doc("Overrides the cudf version compatibility check between cudf jar and cuDF plugin " +
       "jar. If you are sure that the cudf jar which is mentioned in the classpath is compatible " +
-      "with the RAPIDS Accelerator version, then set this to true.")
+      "with the cuDF plugin version, then set this to true.")
     .booleanConf
     .createWithDefault(false)
 
@@ -3168,7 +3170,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       println("---")
       MarkdownUtils.printApacheSparkVersion("RapidsConf.helpCommon")
       // scalastyle:off line.size.limit
-      println("""# RAPIDS Accelerator for Apache Spark Configuration
+      println("""# NVIDIA cuDF plugin for Apache Spark Configuration
         |The following is the list of options that `rapids-plugin-4-spark` supports.
         |
         |On startup use: `--conf [conf key]=[conf value]`. For example:
@@ -3195,7 +3197,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       println("Name | Description | Default Value | Applicable at")
       println("-----|-------------|--------------|--------------")
     } else {
-      println("Commonly Used Rapids Configs:")
+      println("Commonly Used cuDF plugin Configs:")
     }
     val allConfs = registeredConfs.clone()
     allConfs.append(RapidsPrivateUtil.getPrivateConfigs(): _*)
@@ -3204,7 +3206,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     if (asTable) {
       // scalastyle:off line.size.limit
       println("""
-        |For more advanced configs, please refer to the [RAPIDS Accelerator for Apache Spark Advanced Configuration](./additional-functionality/advanced_configs.md) page.
+        |For more advanced configs, please refer to the [NVIDIA cuDF plugin for Apache Spark Advanced Configuration](./additional-functionality/advanced_configs.md) page.
         |""".stripMargin)
       // scalastyle:on line.size.limit
     }
@@ -3221,14 +3223,14 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       println("---")
       MarkdownUtils.printApacheSparkVersion("RapidsConf.helpAdvanced")
       // scalastyle:off line.size.limit
-      println("""# RAPIDS Accelerator for Apache Spark Advanced Configuration
+      println("""# NVIDIA cuDF plugin for Apache Spark Advanced Configuration
         |Most users will not need to modify the configuration options listed below.
         |They are documented here for completeness and advanced usage.
         |
-        |The following configuration options are supported by the RAPIDS Accelerator for Apache Spark.
+        |The following configuration options are supported by the cuDF plugin.
         |
         |For commonly used configurations and examples of setting options, please refer to the
-        |[RAPIDS Accelerator for Configuration](../configs.md) page.
+        |[NVIDIA cuDF plugin for Apache Spark Configuration](../configs.md) page.
         |""".stripMargin)
       // scalastyle:on line.size.limit
       println("\n## Advanced Configuration\n")
@@ -3236,7 +3238,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       println("Name | Description | Default Value | Applicable at")
       println("-----|-------------|--------------|--------------")
     } else {
-      println("Advanced Rapids Configs:")
+      println("Advanced cuDF Plugin Configs:")
     }
     val allConfs = registeredConfs.clone()
     allConfs.append(RapidsPrivateUtil.getPrivateConfigs(): _*)
@@ -3246,7 +3248,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       println("")
       // scalastyle:off line.size.limit
       println("""## Supported GPU Operators and Fine Tuning
-        |_The RAPIDS Accelerator for Apache Spark_ can be configured to enable or disable specific
+        |The cuDF plugin can be configured to enable or disable specific
         |GPU accelerated expressions.  Enabled expressions are candidates for GPU execution. If the
         |expression is configured as disabled, the accelerator plugin will not attempt replacement,
         |and it will run on the CPU.

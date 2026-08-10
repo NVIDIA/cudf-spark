@@ -15,7 +15,7 @@ wants to tune scan behavior across an existing Spark session — for example
 before a benchmark run, or to try different split sizes against existing tables
 without modifying them.
 
-The RAPIDS Accelerator ships a thin Iceberg session-catalog wrapper that lets
+The NVIDIA cuDF plugin for Apache Spark ships a thin Iceberg session-catalog wrapper that lets
 these options be set via session conf at three scopes — per-table, per-catalog,
 and global. The wrapper is opt-in and a pure pass-through for any table whose
 conf is not set at any scope, so enabling it does not change behavior for
@@ -35,7 +35,7 @@ DataFrame level via `.option(...)`, you do not need this feature.
 
 ## Enabling
 
-Replace Iceberg's session catalog with the RAPIDS drop-in. For the default
+Replace Iceberg's session catalog with the cuDF plugin drop-in. For the default
 catalog (`spark_catalog`):
 
 ```
@@ -130,7 +130,7 @@ spark.read.format("iceberg")
 ```
 
 Tables for which no `spark.rapids.iceberg.<…>.*` conf is set at any scope and
-no matching `TBLPROPERTIES` is configured behave exactly as if the RAPIDS
+no matching `TBLPROPERTIES` is configured behave exactly as if the cuDF plugin
 catalog wrapper were not in use.
 
 ## Caveats

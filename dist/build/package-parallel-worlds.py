@@ -26,6 +26,30 @@ def shell_exec(shell_cmd):
         self.fail("failed to execute %s" % shell_cmd)
 
 
+def has_fnmatch_magic(pattern):
+    return "*" in pattern or "?" in pattern or "[" in pattern
+
+
+def select_matching_members(namelist, patterns):
+    if os.environ.get("UNSHIM_FAST") != "1":
+        matching_members = []
+        for pat in patterns:
+            matching_members += fnmatch.filter(namelist, pat)
+        return matching_members
+
+    names_by_entry = {}
+    for name in namelist:
+        names_by_entry.setdefault(name, []).append(name)
+
+    matching_members = []
+    for pat in patterns:
+        if has_fnmatch_magic(pat):
+            matching_members += fnmatch.filter(namelist, pat)
+        else:
+            matching_members += names_by_entry.get(pat, [])
+    return matching_members
+
+
 artifacts = attributes.get('artifact_csv').split(',')
 buildver_list = re.sub(r'\s+', '', project.getProperty('included_buildvers'),
                        flags=re.UNICODE).split(',')
@@ -40,6 +64,12 @@ top_dist_jar_dir = os.sep.join([project_build_dir, 'parallel-world'])
 art_url = project.getProperty('env.ART_URL')
 jenkins_settings = os.sep.join([source_basedir, 'jenkins', 'settings.xml'])
 repo_local = project.getProperty('maven.repo.local')
+dist_dir = os.sep.join([source_basedir, 'dist'])
+with open(os.sep.join([dist_dir, 'unshimmed-common-from-single-shim.txt']), 'r') as f:
+    from_single_shim = f.read().splitlines()
+with open(os.sep.join([dist_dir, 'unshimmed-from-each-spark3xx.txt']), 'r') as f:
+    from_each = f.read().splitlines()
+from_single_shim_or_each = from_single_shim + from_each
 
 for bv in buildver_list:
     classifier = 'spark' + bv
@@ -73,11 +103,6 @@ for bv in buildver_list:
                 mvn_cmd.append('='.join(['-Dmaven.repo.local', repo_local]))
             shell_exec(mvn_cmd)
 
-        dist_dir = os.sep.join([source_basedir, 'dist'])
-        with open(os.sep.join([dist_dir, 'unshimmed-common-from-single-shim.txt']), 'r') as f:
-            from_single_shim = f.read().splitlines()
-        with open(os.sep.join([dist_dir, 'unshimmed-from-each-spark3xx.txt']), 'r') as f:
-            from_each = f.read().splitlines()
         with zipfile.ZipFile(os.sep.join([deps_dir, art_jar]), 'r') as zip_handle:
             if project.getProperty('should.build.conventional.jar'):
                 zip_handle.extractall(path=top_dist_jar_dir)
@@ -88,9 +113,6 @@ for bv in buildver_list:
                     zip_handle.extractall(path=top_dist_jar_dir)
                 # TODO deprecate
                 namelist = zip_handle.namelist()
-                matching_members = []
-                glob_list = from_single_shim + from_each if bv == buildver_list[0] else from_each
-                for pat in glob_list:
-                    new_matches = fnmatch.filter(namelist, pat)
-                    matching_members += new_matches
+                glob_list = from_single_shim_or_each if bv == buildver_list[0] else from_each
+                matching_members = select_matching_members(namelist, glob_list)
                 zip_handle.extractall(path=top_dist_jar_dir, members=matching_members)

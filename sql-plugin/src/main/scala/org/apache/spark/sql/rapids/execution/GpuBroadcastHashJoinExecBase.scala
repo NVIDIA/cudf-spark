@@ -120,6 +120,13 @@ abstract class GpuBroadcastHashJoinExecBase(
     isNullAwareAntiJoin: Boolean) extends ShimBinaryExecNode with GpuHashJoin {
   import GpuMetric._
 
+  // Mirror Spark BroadcastHashJoinExec: show skew status in plan strings after AQE
+  // OptimizeSkewedJoin (Spark 4.2+). Subclasses override isSkewJoin when propagating
+  // the CPU flag; older Spark versions keep the GpuHashJoin default of false.
+  override def nodeName: String = {
+    if (isSkewJoin) super.nodeName + "(skew=true)" else super.nodeName
+  }
+
   // Same checks as Spark
   if (isNullAwareAntiJoin) {
     require(leftKeys.length == 1, "leftKeys length should be 1")

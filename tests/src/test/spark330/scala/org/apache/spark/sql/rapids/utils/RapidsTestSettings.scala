@@ -167,6 +167,124 @@ class RapidsTestSettings extends BackendTestSettings {
     .exclude("SPARK-24596 Non-cascading Cache Invalidation - verify cached data reuse", ADJUST_UT("Replaced by testRapids version that checks non-cascading cache invalidation reuses loaded cached data without re-evaluating the UDF."))
     .exclude("SPARK-26708 Cache data and cached plan should stay consistent", ADJUST_UT("Replaced by testRapids version that checks loaded and unloaded dependent caches keep consistent cached plans under RAPIDS."))
   enableSuite[RapidsDatasetPrimitiveSuite]
+  enableSuite[RapidsBasicCharVarcharTestSuite]
+  enableSuite[RapidsFileSourceCharVarcharTestSuite]
+  enableSuite[RapidsDSV2CharVarcharTestSuite]
+  enableSuite[RapidsDataFrameTungstenSuite]
+  enableSuite[RapidsDataFrameImplicitsSuite]
+  enableSuite[RapidsDatasetOptimizationSuite]
+  enableSuite[RapidsDataFrameWriterV2Suite]
+  enableSuite[RapidsUserDefinedTypeSuite]
+  enableSuite[RapidsDeprecatedAPISuite]
+  enableSuite[RapidsDeprecatedDatasetAggregatorSuite]
+  enableSuite[RapidsStatisticsCollectionSuite]
+  enableSuite[RapidsWriteDistributionAndOrderingSuite]
+  enableSuite[RapidsOrcSourceV1Suite]
+    .exclude("Propagate Hadoop configs from orc options to underlying file system",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/11602. " +
+        "Recovery trigger: GPU ORC writes propagate data-source options; P1."))
+    .exclude("Write Spark version into ORC file metadata",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15468. " +
+        "Recovery trigger: GPU ORC files include Spark version metadata; P1."))
+    .exclude("SPARK-31238: compatibility with Spark 2.4 in reading dates",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15470. " +
+        "Recovery trigger: GPU ORC legacy date rebasing matches Spark CPU; P0."))
+    .exclude("SPARK-31284: compatibility with Spark 2.4 in reading timestamps",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15471. " +
+        "Recovery trigger: GPU ORC legacy timestamp reads match Spark CPU; P0."))
+    .exclude("SPARK-31284, SPARK-31423: rebasing timestamps in write",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15473. " +
+        "Recovery trigger: GPU ORC legacy timestamp round trips match Spark CPU; P0."))
+    .exclude("Enforce direct encoding column-wise selectively",
+      WONT_FIX_ISSUE("GPU ORC uses valid libcudf-selected encodings rather than the Spark ORC " +
+        "selective direct-encoding option. See https://github.com/NVIDIA/cudf-spark/issues/15469. " +
+        "Recovery trigger: the GPU writer supports this tuning contract or falls back; P2."))
+    .exclude("SPARK-36663: OrcUtils.toCatalystSchema should correctly handle " +
+      "a column name which consists of only numbers",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15472. " +
+        "Recovery trigger: GPU ORC reader handles numeric-only field names; P0."))
+  enableSuite[RapidsOrcSourceV2Suite]
+    .exclude("Propagate Hadoop configs from orc options to underlying file system",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/11602. " +
+        "Recovery trigger: GPU ORC writes propagate data-source options; P1."))
+    .exclude("Write Spark version into ORC file metadata",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15468. " +
+        "Recovery trigger: GPU ORC files include Spark version metadata; P1."))
+    .exclude("SPARK-31238: compatibility with Spark 2.4 in reading dates",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15470. " +
+        "Recovery trigger: GPU ORC legacy date rebasing matches Spark CPU; P0."))
+    .exclude("SPARK-31284: compatibility with Spark 2.4 in reading timestamps",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15471. " +
+        "Recovery trigger: GPU ORC legacy timestamp reads match Spark CPU; P0."))
+    .exclude("SPARK-31284, SPARK-31423: rebasing timestamps in write",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15473. " +
+        "Recovery trigger: GPU ORC legacy timestamp round trips match Spark CPU; P0."))
+    .exclude("Enforce direct encoding column-wise selectively",
+      WONT_FIX_ISSUE("GPU ORC uses valid libcudf-selected encodings rather than the Spark ORC " +
+        "selective direct-encoding option. See https://github.com/NVIDIA/cudf-spark/issues/15469. " +
+        "Recovery trigger: the GPU writer supports this tuning contract or falls back; P2."))
+    .exclude("SPARK-36663: OrcUtils.toCatalystSchema should correctly handle " +
+      "a column name which consists of only numbers",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15472. " +
+        "Recovery trigger: GPU ORC reader handles numeric-only field names; P0."))
+  enableSuite[RapidsKeyGroupedPartitioningSuite]
+  enableSuite[RapidsDataSourceV2DataFrameSuite]
+  enableSuite[RapidsBucketedWriteWithoutHiveSupportSuite]
+  enableSuite[RapidsCreateTableAsSelectSuite]
+  enableSuite[RapidsFileDataSourceV2FallBackSuite]
+    .exclude("Fallback Parquet V2 to V1",
+      ADJUST_UT("Replaced by a testRapids version that preserves V1 fallback assertions and " +
+        "checks GpuFileSourceScanExec. See https://github.com/NVIDIA/cudf-spark/issues/15465. " +
+        "Recovery trigger: the Spark test accepts the GPU V1 scan node; P2."))
+  enableSuite[RapidsV1ReadFallbackWithDataFrameReaderSuite]
+  enableSuite[RapidsV1ReadFallbackWithCatalogSuite]
+  enableSuite[RapidsFileMetadataStructSuite]
+  enableSuite[RapidsDisableUnnecessaryBucketedScanWithoutHiveSupportSuite]
+    .exclude("SPARK-32859: disable unnecessary bucketed table scan - basic test",
+      ADJUST_UT("Replaced by GPU-aware testRapids coverage. See " +
+        "https://github.com/NVIDIA/cudf-spark/issues/15512. Recovery trigger: upstream Spark " +
+        "plan assertions become implementation agnostic; P2."))
+    .exclude("SPARK-32859: disable unnecessary bucketed table scan - multiple joins test",
+      ADJUST_UT("Replaced by GPU-aware testRapids coverage. See " +
+        "https://github.com/NVIDIA/cudf-spark/issues/15512. Recovery trigger: upstream Spark " +
+        "plan assertions become implementation agnostic; P2."))
+    .exclude(
+      "SPARK-32859: disable unnecessary bucketed table scan - multiple bucketed columns test",
+      ADJUST_UT("Replaced by GPU-aware testRapids coverage. See " +
+        "https://github.com/NVIDIA/cudf-spark/issues/15512. Recovery trigger: upstream Spark " +
+        "plan assertions become implementation agnostic; P2."))
+    .exclude("SPARK-32859: disable unnecessary bucketed table scan - other operators test",
+      ADJUST_UT("Replaced by GPU-aware testRapids coverage. See " +
+        "https://github.com/NVIDIA/cudf-spark/issues/15512. Recovery trigger: upstream Spark " +
+        "plan assertions become implementation agnostic; P2."))
+    .exclude("SPARK-33075: not disable bucketed table scan for cached query",
+      ADJUST_UT("Replaced by testRapids coverage that checks CPU and GPU shuffle nodes. " +
+        "See https://github.com/NVIDIA/cudf-spark/issues/15512. Recovery trigger: upstream " +
+        "Spark plan assertions become implementation agnostic; P2."))
+    .exclude("Aggregates with no groupby over tables having 1 BUCKET, return multiple rows",
+      ADJUST_UT("Replaced by GPU-aware testRapids coverage. See " +
+        "https://github.com/NVIDIA/cudf-spark/issues/15512. Recovery trigger: upstream Spark " +
+        "plan assertions become implementation agnostic; P2."))
+  enableSuite[RapidsDisableUnnecessaryBucketedScanWithoutHiveSupportSuiteAE]
+  enableSuite[RapidsOrcPartitionDiscoverySuite]
+  enableSuite[RapidsOrcV1PartitionDiscoverySuite]
+  enableSuite[RapidsFileFormatWriterSuite]
+  enableSuite[RapidsFileSourceSQLInsertTestSuite]
+  enableSuite[RapidsDSV2SQLInsertTestSuite]
+  enableSuite[RapidsMetadataCacheV1Suite]
+    .exclude("SPARK-16336,SPARK-27961 Suggest fixing FileNotFoundException",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15511. " +
+        "Recovery trigger: GPU ORC V1 missing-file errors include Spark-equivalent recreate " +
+        "guidance; P1."))
+    .exclude("SPARK-16337 temporary view refresh",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15511. " +
+        "Recovery trigger: GPU ORC V1 missing-file errors include Spark-equivalent REFRESH " +
+        "and recreate guidance; P1."))
+  enableSuite[RapidsMetadataCacheV2Suite]
+    .exclude("SPARK-16336,SPARK-27961 Suggest fixing FileNotFoundException",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15511. " +
+        "Recovery trigger: GPU ORC V2 missing-file errors include Spark-equivalent recreate " +
+        "guidance; P1."))
   enableSuite[RapidsFileSourceStrategySuite]
     .exclude("partitioned table - after scan filters", ADJUST_UT("Replaced by testRapids version that checks GpuFilterExec residual filters."))
     .exclude("[SPARK-16818] partition pruned file scans implement sameResult correctly", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15161"))

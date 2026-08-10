@@ -27,6 +27,7 @@ import ai.rapids.cudf.NaNEquality
 
 import org.apache.spark.sql.catalyst.expressions.aggregate.{CollectList, CollectSet}
 import org.apache.spark.sql.catalyst.util.TypeUtils
+import org.apache.spark.sql.types.DataType
 
 /**
  * Reimplement the function `checkForNumericExpr` which has been removed since
@@ -36,6 +37,9 @@ object TypeUtilsShims {
   val checkForNumericExpr = TypeUtils.checkForNumericExpr _
 
   val collectSetFloatNanEquality: NaNEquality = NaNEquality.UNEQUAL
+
+  // Pre-Spark 4.2 CollectSet stores child values directly in the agg buffer.
+  def collectSetCpuBufferElementType(childType: DataType): DataType = childType
 
   def collectListIgnoreNulls(_collectList: CollectList): Boolean = true
 
