@@ -100,8 +100,9 @@ _decimal_10_3_schema = StructType([
 _date_schema = StructType([
     StructField('number', DateType())])
 
-# dateFormat only affects date parsing. Pair it with the date schema explicitly instead of
-# multiplying every non-date schema by an option that cannot change its execution path.
+# dateFormat only affects date parsing. Pair it with the date schema
+# explicitly instead of multiplying every non-date schema by an option
+# that cannot change its execution path.
 _basic_json_schema_date_formats = [
     (schema, None) for schema in [
         _bool_schema, _byte_schema, _short_schema, _int_schema, _long_schema,
