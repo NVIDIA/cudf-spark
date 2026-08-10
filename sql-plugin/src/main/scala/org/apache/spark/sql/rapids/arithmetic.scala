@@ -317,8 +317,6 @@ abstract class GpuAddBase extends CudfBinaryArithmetic with Serializable {
   override def selfSupportsAstJit: Boolean =
     !failOnError && (dataType == IntegerType || dataType == LongType)
 
-  override def selfIsAstJitOperator: Boolean = selfSupportsAstJit
-
   override def hasSideEffects: Boolean =
     (failOnError && GpuAnsi.needBasicOpOverflowCheck(dataType)) || super.hasSideEffects
 
@@ -775,8 +773,6 @@ case class GpuMultiply(
 
   override def selfSupportsAstJit: Boolean =
     !failOnError && (dataType == IntegerType || dataType == LongType)
-
-  override def selfIsAstJitOperator: Boolean = selfSupportsAstJit
 
   private def multiplyOverflowError(msg: String): ArithmeticException = {
     RapidsErrorUtils.arithmeticOverflowError(msg, origin)

@@ -29,6 +29,7 @@ import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanExec
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
+import org.apache.spark.sql.rapids.metrics.source.MockTaskContextBase
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /** A collection of utility methods useful in tests. */
@@ -43,6 +44,24 @@ object TestUtils extends Assertions {
   def getTempDir(basename: String): File = new File(
     System.getProperty("test.build.data", System.getProperty("java.io.tmpdir", "/tmp")),
     basename)
+
+  def withTaskContext[T](
+      taskContext: MockTaskContextBase,
+      markTaskComplete: Boolean = false)(body: => T): T = {
+    TrampolineUtil.setTaskContext(taskContext)
+    try {
+      body
+    } finally {
+      try {
+        if (markTaskComplete) {
+          taskContext.markTaskComplete()
+        }
+      } finally {
+        TrampolineUtil.unsetTaskContext()
+        ScalableTaskCompletion.reset()
+      }
+    }
+  }
 
   // Spark caches the configured serializer in a JVM-global singleton, so suites that select a
   // different serializer must reset it at suite boundaries.

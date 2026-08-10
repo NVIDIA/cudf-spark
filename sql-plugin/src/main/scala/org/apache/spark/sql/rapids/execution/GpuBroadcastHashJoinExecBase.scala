@@ -189,9 +189,8 @@ abstract class GpuBroadcastHashJoinExecBase(
       }
       Some((batch: ColumnarBatch) => boundProjects.foldLeft(batch) {
         case (currentBatch, boundProject) =>
-          val spillableBatch = SpillableColumnarBatch(
-            currentBatch, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
-          boundProject.projectAndCloseWithRetrySingleBatch(spillableBatch)
+          boundProject.projectAndCloseWithRetrySingleBatch(
+            SpillableColumnarBatch(currentBatch, SpillPriorities.ACTIVE_ON_DECK_PRIORITY))
       })
     } else {
       None

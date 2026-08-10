@@ -78,11 +78,10 @@ object GpuProjectAstExpression {
     }
   }
 
-  private def unwrap(expression: Expression, unwrapJit: Boolean): Expression = expression match {
-    case alias: GpuAlias => replaceChild(alias, unwrap(alias.child, unwrapJit))
-    case astExpression: GpuProjectAstExpression => unwrap(astExpression.child, unwrapJit)
-    case jitExpression: GpuAstJitExpression if unwrapJit =>
-      unwrap(jitExpression.child, unwrapJit)
+  private def unwrap(expression: Expression): Expression = expression match {
+    case alias: GpuAlias => replaceChild(alias, unwrap(alias.child))
+    case astExpression: GpuProjectAstExpression => astExpression.child
+    case jitExpression: GpuAstJitExpression => jitExpression.child
     case other => other
   }
 
@@ -138,14 +137,10 @@ object GpuProjectAstExpression {
       enableProjectAstJit: Boolean = false): Seq[Seq[Expression]] = {
     val astOutputs = expressions.map(extractTopLevel(_).isDefined)
     val hasAstOutputs = astOutputs.contains(true)
-    val jitOutputs = expressions.map { expression =>
-      GpuProjectAstExpressionBase.extractTopLevel(expression)
-        .exists(_.isInstanceOf[GpuAstJitExpression])
-    }
-    val hasJitOutputs = jitOutputs.contains(true)
+    val hasJitOutputs = expressions.exists(GpuAstJitExpression.contains)
     // CSE must see through backend markers so all outputs can share the same tiers.
     val unwrapped = if (hasAstOutputs || hasJitOutputs) {
-      expressions.map(unwrap(_, unwrapJit = true))
+      expressions.map(unwrap)
     } else {
       expressions
     }
@@ -161,10 +156,10 @@ object GpuProjectAstExpression {
       tiers
     }
     if (enableProjectAstJit) {
+      // Project binding selects JIT after CSE so newly exposed tiers are eligible.
       astTiers.map(_.map(GpuAstJitExpression.wrapTierExpression))
-    } else if (hasJitOutputs) {
-      rewrapBackendTiers(astTiers, jitOutputs, GpuAstJitExpression.wrapTierExpression)
     } else {
+      // Only the Project-specific binder selects JIT after CSE.
       astTiers
     }
   }

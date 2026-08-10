@@ -24,7 +24,6 @@ import org.apache.spark.TaskContext
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Expression}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.{GpuAdd, GpuGreatest, GpuMultiply, GpuSubtract}
-import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 import org.apache.spark.sql.types.{FloatType, IntegerType, LongType}
 import org.apache.spark.util.TaskCompletionListener
@@ -41,16 +40,6 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     when(child.convertToAst(Int.MaxValue)).thenReturn(ast)
     when(ast.compile()).thenReturn(compiled)
     GpuAstJitExpression(child)
-  }
-
-  private def withTaskContext[T](taskContext: TaskContext)(body: => T): T = {
-    TrampolineUtil.setTaskContext(taskContext)
-    try {
-      body
-    } finally {
-      TrampolineUtil.unsetTaskContext()
-      ScalableTaskCompletion.reset()
-    }
   }
 
   private def jitExpressions(expressions: Seq[Expression]): Seq[GpuAstJitExpression] = {
@@ -86,9 +75,11 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
 
     val wrapped = GpuAstJitExpression.wrapProjectExpressions(List(expression))
     val jit = wrapped.head.asInstanceOf[GpuAlias].child.asInstanceOf[GpuAstJitExpression]
+    val wrappedAgain = GpuAstJitExpression.wrapProjectExpressions(wrapped)
     assert(jit.child.isInstanceOf[GpuMultiply])
     assert(jit.child.find(_.isInstanceOf[GpuAstJitExpression]).isEmpty)
-    assert(GpuProjectAstExpressionBase.extractTopLevel(wrapped.head).contains(jit))
+    assert(GpuAstJitExpression.contains(wrapped.head))
+    assert(wrappedAgain.head eq wrapped.head)
   }
 
   test("project AST JIT only wraps a fully supported top-level expression") {
@@ -119,6 +110,8 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
         alias(GpuSubtract(shared, third, failOnError = false)(), "legacy")),
       alias(GpuGreatest(Seq(shared, fourth)), "regular"))
 
+    // Inputs: AST((left + right) - third), greatest(left + right, fourth).
+    // Tier 0 computes AST_JIT(left + right); tier 1 consumes that shared result in both outputs.
     val tiered = GpuBindReferences.bindGpuProjectReferencesTieredNoMetrics(
       expressions, Seq(left, right, third, fourth), projectConf())
 
@@ -166,34 +159,6 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
 
     assert(jitExpressions(generic.exprTiers.flatten).isEmpty)
     assertResult(1)(jitExpressions(project.exprTiers.flatten).size)
-  }
-
-  test("the generic binder preserves only the preselected JIT dataflow") {
-    val left = reference(0, IntegerType)
-    val right = reference(1, IntegerType)
-    val shared = GpuAdd(left, right, failOnError = false)()
-    val preselected = GpuAstJitExpression.wrapProjectExpressions(List(
-      alias(shared, "jit"))).head
-    val firstUse = alias(GpuSubtract(shared, left, failOnError = false)(), "first_use")
-    val secondUse = alias(GpuSubtract(shared, right, failOnError = false)(), "second_use")
-    val unrelated = alias(GpuMultiply(left, right, failOnError = false)(), "unrelated")
-
-    val generic = GpuBindReferences.bindGpuReferencesTieredNoMetrics(
-      Seq(preselected, firstUse, secondUse, unrelated), Seq(left, right), projectConf())
-
-    assertResult(2)(generic.exprTiers.size)
-    withClue(generic.exprTiers.mkString("\n")) {
-      assertResult(Seq(1, 0))(generic.exprTiers.map(jitExpressions(_).size))
-    }
-    assert(jitExpressions(generic.exprTiers.head).head.child.isInstanceOf[GpuAdd])
-    assert(generic.exprTiers.last.forall(
-      GpuProjectAstExpressionBase.extractTopLevel(_).isEmpty))
-    val sharedReferences = generic.exprTiers.last.flatMap(_.collect {
-      case reference: GpuBoundReference if reference.name.startsWith("tiered_input_") =>
-        reference
-    })
-    assertResult(3)(sharedReferences.size)
-    assertResult(1)(sharedReferences.map(_.exprId).distinct.size)
   }
 
   test("the project binder respects a disabled JIT setting") {
@@ -244,6 +209,38 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     assert(jitExpressions(wrapped).isEmpty)
   }
 
+  test("project backend explanation follows the final wrapper") {
+    val left = reference(0, IntegerType)
+    val right = reference(1, IntegerType)
+    val add = alias(GpuAdd(left, right, failOnError = false)(), "jit")
+    val subtract = alias(GpuSubtract(left, right, failOnError = false)(), "regular")
+    val jit = GpuAstJitExpression.wrapProjectExpressions(List(add)).head
+    val legacy = GpuProjectAstExpression.wrap(subtract)
+
+    assertResult("Project AST JIT")(GpuProjectExecMeta.explainBackend(jit))
+    assertResult("legacy Project AST")(GpuProjectExecMeta.explainBackend(legacy))
+    assertResult("the regular GPU projection")(GpuProjectExecMeta.explainBackend(subtract))
+  }
+
+  test("project AST JIT keeps its compiled expression across retry") {
+    val taskContext = new MockTaskContext(taskAttemptId = 1, partitionId = 0)
+    val child = mock(classOf[GpuExpression])
+    val ast = mock(classOf[AstExpression])
+    val compiled = mock(classOf[CompiledExpression])
+    when(child.convertToAst(Int.MaxValue)).thenReturn(ast)
+    when(ast.compile()).thenReturn(compiled)
+    val jit = GpuAstJitExpression(child)
+
+    TestUtils.withTaskContext(taskContext) {
+      jit.checkpoint()
+      jit.restore()
+      jit.checkpoint()
+      verify(ast, times(1)).compile()
+      verify(compiled, times(0)).close()
+    }
+    verify(compiled, times(1)).close()
+  }
+
   test("project AST JIT cleans up when task completion registration fails") {
     val registrationFailure = new RuntimeException("task completion registration failed")
     val closeFailure = new RuntimeException("compiled expression close failed")
@@ -255,7 +252,7 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     doThrow(closeFailure).when(compiled).close()
     val jit = mockJitExpression(compiled)
 
-    withTaskContext(taskContext) {
+    TestUtils.withTaskContext(taskContext) {
       val thrown = intercept[RuntimeException] {
         jit.checkpoint()
       }
@@ -276,7 +273,7 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     val compiled = mock(classOf[CompiledExpression])
     val jit = mockJitExpression(compiled)
 
-    withTaskContext(taskContext) {
+    TestUtils.withTaskContext(taskContext) {
       val thrown = intercept[IllegalStateException] {
         jit.checkpoint()
       }

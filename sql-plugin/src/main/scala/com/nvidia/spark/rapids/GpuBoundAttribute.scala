@@ -124,10 +124,9 @@ object GpuBindReferences extends Logging {
   }
 
   /**
-   * Binding method for tiered expressions without metric injection.
-   * This is for use by GpuBind implementations and should not be called directly
-   * from SparkPlan nodes. Use the public API that requires metrics instead, except
-   * when absolutely needed.
+   * Shared implementation for generic and Project-specific tiered binding.
+   *
+   * @param enableProjectAstJit whether eligible tiers may use Project AST JIT
    */
   private def bindGpuReferencesTieredNoMetricsInternal[A <: Expression](
       expressions: Seq[A],
@@ -186,6 +185,12 @@ object GpuBindReferences extends Logging {
     }
   }
 
+  /**
+   * Binding method for tiered expressions without metric injection.
+   * This is for use by GpuBind implementations and should not be called directly
+   * from SparkPlan nodes. Use the public API that requires metrics instead, except
+   * when absolutely needed.
+   */
   def bindGpuReferencesTieredNoMetrics[A <: Expression](
       expressions: Seq[A],
       input: AttributeSeq,
@@ -194,6 +199,10 @@ object GpuBindReferences extends Logging {
       expressions, input, conf, enableProjectAstJit = false)
   }
 
+  /**
+   * Project-specific tiered binding without metric injection. Unlike the generic binder,
+   * this path allows configured Project AST JIT selection.
+   */
   private[rapids] def bindGpuProjectReferencesTieredNoMetrics[A <: Expression](
       expressions: Seq[A],
       input: AttributeSeq,
@@ -282,6 +291,14 @@ object GpuBindReferences extends Logging {
     bound
   }
 
+  /**
+   * Bind Project expressions in a tiered manner and inject metrics. Project AST JIT selection is
+   * confined to this entry point so generic tiered binders do not enable it for other operators.
+   * @param expressions The expressions to bind
+   * @param input The input schema
+   * @param conf SQL configuration
+   * @param metrics Metrics to inject into the bound expressions
+   */
   def bindGpuProjectReferencesTiered[A <: Expression](
       expressions: Seq[A],
       input: AttributeSeq,

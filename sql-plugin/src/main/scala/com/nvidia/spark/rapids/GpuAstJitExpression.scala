@@ -20,6 +20,7 @@ import ai.rapids.cudf.Table
 import ai.rapids.cudf.ast.CompiledExpression
 import com.nvidia.spark.Retryable
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+import com.nvidia.spark.rapids.GpuMetric.OP_TIME_LEGACY
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
 import com.nvidia.spark.rapids.shims.ShimUnaryExpression
@@ -35,6 +36,7 @@ object GpuAstJitExpression {
       expression.supportsAstJit && expression.containsAstJitOperator
 
   private[rapids] def wrapTierExpression(expression: Expression): Expression = expression match {
+    case alias @ GpuAlias(_: GpuAstJitExpression, _) => alias
     case alias @ GpuAlias(astExpression: GpuProjectAstExpression, _)
         if canUseAstJit(astExpression.child) =>
       GpuProjectAstExpression.replaceChild(alias, GpuAstJitExpression(astExpression.child))
@@ -49,32 +51,34 @@ object GpuAstJitExpression {
   }
 
   private[rapids] def contains(expression: Expression): Boolean =
-    expression.find(_.isInstanceOf[GpuAstJitExpression]).isDefined
+    GpuProjectAstExpressionBase.extractTopLevel(expression)
+      .exists(_.isInstanceOf[GpuAstJitExpression])
 }
 
 case class GpuAstJitExpression(child: GpuExpression)
     extends ShimUnaryExpression with GpuProjectAstExpressionBase
-        with Retryable with AutoCloseable {
+        with GpuMetricsInjectable with Retryable with AutoCloseable {
 
   @transient private[this] var compiledExpression: CompiledExpression = _
   @transient private[this] var completionRegistered = false
+  private[this] var opTime: GpuMetric = NoopMetric
 
   override def dataType: DataType = child.dataType
 
   override def nullable: Boolean = child.nullable
 
-  override def disableTieredProjectCombine: Boolean = true
-
   override def toString: String = s"AST_JIT($child)"
+
+  override def injectMetrics(metrics: Map[String, GpuMetric]): Unit = {
+    opTime = metrics.getOrElse(OP_TIME_LEGACY, NoopMetric)
+  }
 
   override def checkpoint(): Unit = {
     getCompiledExpression
   }
 
-  override def restore(): Unit = {
-    // The existing task callback closes the expression recompiled after a retry.
-    closeCompiledExpression()
-  }
+  // Compiled ASTs are immutable and remain valid across retry attempts.
+  override def restore(): Unit = ()
 
   override def close(): Unit = closeCompiledExpression()
 
@@ -84,22 +88,28 @@ case class GpuAstJitExpression(child: GpuExpression)
     }
   }
 
-  private[rapids] override def computeColumn(table: Table): GpuColumnVector =
-    closeOnExcept(getCompiledExpression.computeColumnJit(table)) { result =>
-      GpuColumnVector.from(result, dataType)
+  private[rapids] override def computeColumn(table: Table): GpuColumnVector = {
+    val compiled = getCompiledExpression
+    NvtxIdWithMetrics(NvtxRegistry.PROJECT_AST, opTime) {
+      closeOnExcept(compiled.computeColumnJit(table)) { result =>
+        GpuColumnVector.from(result, dataType)
+      }
     }
+  }
 
   private def getCompiledExpression: CompiledExpression = synchronized {
     if (compiledExpression == null) {
-      compiledExpression = child.convertToAst(Int.MaxValue)
-        .compile()
+      compiledExpression = NvtxIdWithMetrics(NvtxRegistry.COMPILE_ASTS, opTime) {
+        // Force every bound reference to the left table; Project AST has one input table.
+        child.convertToAst(Int.MaxValue).compile()
+      }
     }
     if (!completionRegistered) {
       Option(TaskContext.get()).foreach { taskContext =>
         completionRegistered = true
         try {
           onTaskCompletion(taskContext) {
-            closeAtTaskCompletion()
+            clearRegistrationAndClose()
           }
           if (!completionRegistered) {
             throw new IllegalStateException(
@@ -107,8 +117,7 @@ case class GpuAstJitExpression(child: GpuExpression)
           }
         } catch {
           case t: Throwable =>
-            completionRegistered = false
-            closeCompiledExpression(t)
+            clearRegistrationAndClose(t)
             throw t
         }
       }
@@ -116,14 +125,20 @@ case class GpuAstJitExpression(child: GpuExpression)
     compiledExpression
   }
 
-  private def closeAtTaskCompletion(): Unit = synchronized {
-    completionRegistered = false
-    closeCompiledExpression()
-  }
+  private def clearRegistrationAndClose(error: Throwable = null): Unit =
+    closeCompiledExpression(error, clearRegistration = true)
 
-  private def closeCompiledExpression(error: Throwable = null): Unit = synchronized {
-    val toClose = compiledExpression
-    compiledExpression = null
+  private def closeCompiledExpression(
+      error: Throwable = null,
+      clearRegistration: Boolean = false): Unit = {
+    val toClose = synchronized {
+      if (clearRegistration) {
+        completionRegistered = false
+      }
+      val current = compiledExpression
+      compiledExpression = null
+      current
+    }
     Option(toClose).foreach(_.safeClose(error))
   }
 }

@@ -734,12 +734,10 @@ abstract class GpuBroadcastNestedLoopJoinExecBase(
         // batch.
         val proj = GpuBindReferences.bindGpuProjectReferencesTiered(
           postBuildCondition, p.child.output, conf, allMetrics)
-        val fn = (batch: ColumnarBatch) => {
-          val spillableBatch = SpillableColumnarBatch(
-            batch, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
-          proj.projectAndCloseWithRetrySingleBatch(spillableBatch)
+        Some { batch: ColumnarBatch =>
+          proj.projectAndCloseWithRetrySingleBatch(
+            SpillableColumnarBatch(batch, SpillPriorities.ACTIVE_ON_DECK_PRIORITY))
         }
-        Some(fn)
       case _ =>
         None
     }

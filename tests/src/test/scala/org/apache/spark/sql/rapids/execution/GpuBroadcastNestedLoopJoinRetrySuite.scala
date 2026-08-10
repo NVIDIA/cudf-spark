@@ -27,7 +27,6 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, NamedExpression}
 import org.apache.spark.sql.catalyst.plans.Inner
 import org.apache.spark.sql.execution.{LeafExecNode, SparkPlan}
-import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.{GpuAdd, GpuMultiply, GpuSubtract}
 import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 import org.apache.spark.sql.types.IntegerType
@@ -95,58 +94,53 @@ class GpuBroadcastNestedLoopJoinRetrySuite extends RmmSparkRetrySuiteBase {
   }
 
   test("BNLJ build-side shared JIT tier retries GpuRetryOOM") {
-    val conf = new SQLConf()
-    conf.setConfString(RapidsConf.ENABLE_TIERED_PROJECT.key, "true")
-    conf.setConfString(RapidsConf.ENABLE_COMBINED_EXPRESSIONS.key, "true")
-    conf.setConfString(RapidsConf.ENABLE_PROJECT_AST_JIT.key, "true")
-    conf.setConfString(RapidsConf.PROJECT_SPLIT_RETRY_ENABLED.key, "true")
+    val spark = SparkSession.builder()
+        .master("local[1]")
+        .appName("GpuBroadcastNestedLoopJoinRetrySuite")
+        .config(RapidsConf.ENABLE_TIERED_PROJECT.key, "true")
+        .config(RapidsConf.ENABLE_COMBINED_EXPRESSIONS.key, "true")
+        .config(RapidsConf.ENABLE_PROJECT_AST_JIT.key, "true")
+        .config(RapidsConf.PROJECT_SPLIT_RETRY_ENABLED.key, "true")
+        .getOrCreate()
+    val conf = spark.sessionState.conf
     val expressions = postBuildExpressions
     val buildProject = GpuProjectExec(expressions, TestLeafExec(buildAttributes))
     val join = TestBroadcastNestedLoopJoin(
       TestLeafExec(Seq.empty), buildProject, expressions)
     val taskContext = new MockTaskContext(taskAttemptId = 1, partitionId = 0)
-    val spark = SparkSession.builder()
-        .master("local[1]")
-        .appName("GpuBroadcastNestedLoopJoinRetrySuite")
-        .getOrCreate()
 
-    TrampolineUtil.setTaskContext(taskContext)
-    try {
-      SQLConf.withExistingConf(conf) {
-        val boundProject = GpuBindReferences.bindGpuProjectReferencesTiered(
-          expressions, buildAttributes, conf, Map.empty)
-        val jitExpressions = boundProject.exprTiers.flatten.flatMap(_.collect {
-          case expression: GpuAstJitExpression => expression
-        })
-        assertResult(2)(boundProject.exprTiers.size)
-        assertResult(1)(jitExpressions.size)
-        assert(jitExpressions.head.child.isInstanceOf[GpuMultiply])
-        assert(jitExpressions.head.child.find(_.isInstanceOf[GpuAdd]).isDefined)
+    TestUtils.withTaskContext(taskContext, markTaskComplete = true) {
+      // Input: x=[1,2,3], y=[4,5,6], z=[2,3,4]. CSE produces a first tier that
+      // passes through x/y/z and computes AST_JIT((x+y)*z), followed by the five final outputs
+      // [shared-x, shared-y, x, y, z].
+      val boundProject = GpuBindReferences.bindGpuProjectReferencesTiered(
+        expressions, buildAttributes, conf, Map.empty)
+      val jitExpressions = boundProject.exprTiers.flatten.flatMap(_.collect {
+        case expression: GpuAstJitExpression => expression
+      })
+      assertResult(Seq(4, 5))(boundProject.exprTiers.map(_.size))
+      assertResult(1)(jitExpressions.size)
+      assert(jitExpressions.head.child.isInstanceOf[GpuMultiply])
+      assert(jitExpressions.head.child.find(_.isInstanceOf[GpuAdd]).isDefined)
 
-        val projectBuildSide = join.buildSidePostProjection.get
-        // Compile before arming the OOM so the retry is exercised by computeColumnJit.
-        withResource(projectBuildSide(buildBatch())) { _ => }
+      val projectBuildSide = join.buildSidePostProjection.get
+      // Warm up computeColumnJit so first-use JIT setup cannot consume the injected OOM; the
+      // next call exercises retry during query execution.
+      withResource(projectBuildSide(buildBatch())) { _ => }
 
-        val retryInput = buildBatch()
-        RmmSpark.getAndResetNumRetryThrow(/* taskId */ 1)
-        RmmSpark.getAndResetNumSplitRetryThrow(/* taskId */ 1)
-        RmmSpark.forceRetryOOM(RmmSpark.getCurrentThreadId, 1,
-          RmmSpark.OomInjectionType.GPU.ordinal, 0)
-        withResource(projectBuildSide(retryInput)) { output =>
-          assertResult(Seq(9, 19, 33))(collectInts(output, 0))
-          assertResult(Seq(6, 16, 30))(collectInts(output, 1))
-        }
-        assert(RmmSpark.getAndResetNumRetryThrow(/* taskId */ 1) > 0)
-        assertResult(0)(RmmSpark.getAndResetNumSplitRetryThrow(/* taskId */ 1))
+      val retryInput = buildBatch()
+      RmmSpark.getAndResetNumRetryThrow(/* taskId */ 1)
+      RmmSpark.getAndResetNumSplitRetryThrow(/* taskId */ 1)
+      RmmSpark.forceRetryOOM(RmmSpark.getCurrentThreadId, 1,
+        RmmSpark.OomInjectionType.GPU.ordinal, 0)
+      withResource(projectBuildSide(retryInput)) { output =>
+        assertResult(3)(output.numRows())
+        assertResult(5)(output.numCols())
+        assertResult(Seq(9, 19, 33))(collectInts(output, 0))
+        assertResult(Seq(6, 16, 30))(collectInts(output, 1))
       }
-    } finally {
-      try {
-        taskContext.markTaskComplete()
-      } finally {
-        TrampolineUtil.unsetTaskContext()
-        ScalableTaskCompletion.reset()
-        spark.stop()
-      }
+      assert(RmmSpark.getAndResetNumRetryThrow(/* taskId */ 1) > 0)
+      assertResult(0)(RmmSpark.getAndResetNumSplitRetryThrow(/* taskId */ 1))
     }
   }
 }

@@ -49,6 +49,16 @@ import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 import org.apache.spark.unsafe.types.UTF8String
 import org.apache.spark.util.random.BernoulliCellSampler
 
+object GpuProjectExecMeta {
+  private[rapids] def explainBackend(expression: Expression): String = {
+    GpuProjectAstExpressionBase.extractTopLevel(expression) match {
+      case Some(_: GpuAstJitExpression) => "Project AST JIT"
+      case Some(_: GpuProjectAstExpression) => "legacy Project AST"
+      case _ => "the regular GPU projection"
+    }
+  }
+}
+
 class GpuProjectExecMeta(
     proj: ProjectExec,
     conf: RapidsConf,
@@ -68,7 +78,7 @@ class GpuProjectExecMeta(
       gpuExprs
     }
     val projectList = if (conf.isProjectAstEnabled) {
-      val astExprs = childExprs.zip(jitExprs).map { case (meta, expr) =>
+      childExprs.zip(jitExprs).map { case (meta, expr) =>
         // cuDF requires return column is fixed width
         // Regular projection can reuse its cached null vector across outputs.
         if (!GpuAstJitExpression.contains(expr) &&
@@ -79,24 +89,40 @@ class GpuProjectExecMeta(
           expr
         }
       }.toList
-      // explain AST because this is optional and it is sometimes hard to debug
-      if (conf.shouldExplain) {
-        val explain = (childExprs.iterator.map(_.explainAst(conf.shouldExplainAll))
-            .filter(_.nonEmpty) ++ gpuExprs.iterator.collect {
-          case expr if !GpuBatchUtils.isFixedWidth(expr.dataType) =>
-            s"  $expr cannot be converted to AST because its return type " +
-              s"${expr.dataType} is not fixed-width\n"
-          case expr if isTopLevelNullLiteral(expr) =>
-            s"  $expr will use the regular GPU projection so null outputs can reuse " +
-              "the cached null vector\n"
-        }).mkString
-        if (explain.nonEmpty) {
-          logWarning(s"AST PROJECT\n$explain")
-        }
-      }
-      astExprs
     } else {
       jitExprs
+    }
+    // Explain the planned top-level backend because both AST backends are optional and can be
+    // difficult to distinguish from the regular projection in a transformed plan.
+    if (conf.shouldExplain && (conf.isProjectAstEnabled || conf.isProjectAstJitEnabled)) {
+      val backendExplain = projectList.iterator.map { expression =>
+        s"  $expression will use ${GpuProjectExecMeta.explainBackend(expression)}\n"
+      }
+      val legacyExplain = if (conf.isProjectAstEnabled) {
+        childExprs.iterator.zip(projectList.iterator).collect {
+          case (meta, expression)
+              if GpuProjectAstExpressionBase.extractTopLevel(expression).isEmpty =>
+            meta.explainAst(conf.shouldExplainAll)
+        }.filter(_.nonEmpty)
+      } else {
+        Iterator.empty
+      }
+      val regularExplain = gpuExprs.iterator.zip(projectList.iterator).collect {
+        case (expr, expression)
+            if GpuProjectAstExpressionBase.extractTopLevel(expression).isEmpty &&
+              !GpuBatchUtils.isFixedWidth(expr.dataType) =>
+          s"  $expr cannot be converted to AST because its return type " +
+            s"${expr.dataType} is not fixed-width\n"
+        case (expr, expression)
+            if GpuProjectAstExpressionBase.extractTopLevel(expression).isEmpty &&
+              isTopLevelNullLiteral(expr) =>
+          s"  $expr will use the regular GPU projection so null outputs can reuse " +
+            "the cached null vector\n"
+      }
+      val explain = (backendExplain ++ legacyExplain ++ regularExplain).mkString
+      if (explain.nonEmpty) {
+        logWarning(s"AST PROJECT\n$explain")
+      }
     }
     GpuProjectExec(projectList, gpuChild)
   }

@@ -431,8 +431,10 @@ def test_jit_cse_shared_subexpression(data_gen):
         conf=_project_ast_jit_enabled_conf)
 
 @pytest.mark.parametrize('data_gen', [int_gen, long_gen], ids=idfn)
+@pytest.mark.parametrize(
+    'tiered_project_enabled', ['true', 'false'], ids=['tiered', 'single_tier'])
 @disable_ansi_mode
-def test_jit_mixed_project_expressions(data_gen):
+def test_jit_mixed_project_expressions(data_gen, tiered_project_enabled):
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: binary_op_df(spark, data_gen).select(
             (f.col('a') + f.col('b')).alias('jit'),
@@ -440,7 +442,9 @@ def test_jit_mixed_project_expressions(data_gen):
             ((f.col('a') * f.col('b')) - f.col('a')).alias('mixed')),
         exist_classes=r"GpuProject.*AST_JIT.*AS jit.*AS gpu.*AS mixed",
         non_exist_classes=r"GpuProjectAst,AS gpu.*AST_JIT",
-        conf=_project_ast_jit_enabled_conf)
+        conf=copy_and_update(_project_ast_jit_enabled_conf, {
+            'spark.rapids.sql.tiered.project.enabled': tiered_project_enabled
+        }))
 
 @pytest.mark.parametrize('data_gen', [int_gen, long_gen], ids=idfn)
 @disable_ansi_mode
