@@ -1305,6 +1305,87 @@ def test_delta_filter_out_metadata_col(spark_tmp_path, dv_predicate_pushdown):
         assert_gpu_and_cpu_are_equal_collect(read_table, conf=conf)
 
 
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not supports_delta_lake_deletion_vectors(),
+                    reason="Delta Lake deletion vector support is required")
+@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
+                    reason="Deletion vector scan is not supported on Databricks before 17.3")
+@pytest.mark.skipif(is_before_spark_353(),
+                    reason="Spark-RAPIDS supports scan with deletion vectors starting in Spark 3.5.3")
+def test_delta_dv_pushdown_keeps_alias_producer(spark_tmp_path, spark_tmp_table_factory):
+    """
+    Regression test for https://github.com/NVIDIA/cudf-spark/issues/15598:
+    DVPredicatePushdown.mergeIdenticalProjects treated a pass-through project over an
+    alias-computing project as identical because their exprId sets are equal, and dropped
+    the alias's only producer, failing at execution with "Couldn't find <attr>". A
+    same-name decimal-to-double cast under a reordering aggregate reproduces that shape.
+    """
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    view_name = spark_tmp_table_factory.get()
+    conf = {
+        "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true",
+        "spark.databricks.delta.delete.deletionVectors.persistent": "true",
+        "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true"
+    }
+
+    def create_delta(spark):
+        spark.range(2000).selectExpr(
+            "CAST(id AS INT) AS order_num",
+            "CAST(id % 13 AS INT) AS item_sk",
+            "CAST(id AS DECIMAL(38,6)) AS net_paid",
+            "CAST(id % 500 AS INT) AS ship_date_sk",
+            "id % 7 = 0 AS ingest_deleted"
+        ).coalesce(1).write.format("delta") \
+            .option("delta.enableDeletionVectors", "true") \
+            .save(data_path)
+        count = spark.sql(
+            f"DELETE FROM delta.`{data_path}` WHERE ingest_deleted AND order_num % 2 = 0") \
+            .collect()[0][0]
+        assert count > 100, "Expected enough rows to be deleted to create deletion vectors"
+
+    def read_table(spark):
+        # The view supplies the soft-delete filter and column pruning; its expansion
+        # layers the projects that mergeIdenticalProjects later inspects.
+        spark.sql(f"""
+            CREATE OR REPLACE TEMPORARY VIEW {view_name} AS
+            SELECT order_num, item_sk, net_paid, ship_date_sk
+            FROM delta.`{data_path}`
+            WHERE NOT ingest_deleted
+        """)
+        # The same-name cast-alias with the group keys reordered puts a pass-through
+        # project over the alias-computing project; the aggregate feeds a shuffle where
+        # the unguarded merge caused the bind failure.
+        df = spark.sql(f"""
+            SELECT order_num, item_sk,
+                   SUM(net_paid) AS net_paid,
+                   concat_ws(',', sort_array(collect_list(CAST(ship_date_sk AS STRING))))
+                       AS ship_dates
+            FROM (
+                SELECT ship_date_sk,
+                       CAST(net_paid AS DOUBLE) AS net_paid,
+                       order_num, item_sk
+                FROM {view_name}
+                WHERE order_num IS NOT NULL AND item_sk IS NOT NULL
+            )
+            GROUP BY order_num, item_sk
+        """)
+        is_gpu = str(spark.conf.get("spark.rapids.sql.enabled", "false")).lower() == "true"
+        if is_gpu:
+            _assert_db173_gpu_delta_scan_if_enabled(spark, df)
+            explain_str = str(df._jdf.queryExecution().executedPlan())
+            # The DV pushdown pass must have run for this test to exercise
+            # mergeIdenticalProjects: the internal skip-row columns are gone.
+            assert "__delta_internal_is_row_deleted" not in explain_str
+            if is_databricks173_or_later():
+                assert "_databricks_internal_edge_computed_column_skip_row" not in explain_str
+        return df
+
+    with_cpu_session(create_delta, conf=conf)
+    assert_gpu_and_cpu_are_equal_collect(read_table, conf=conf)
+
+
 def _test_delta_dv_filter_after_native_scan(spark_tmp_path, cpu_bridge_enabled):
     data_path = spark_tmp_path + "/DELTA_DATA"
     conf = {
