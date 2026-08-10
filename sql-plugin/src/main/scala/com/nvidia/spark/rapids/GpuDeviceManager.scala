@@ -476,8 +476,9 @@ object GpuDeviceManager extends Logging {
       logWarning("The default cuDF host pool was already configured")
     }
     if (!PinnedMemoryPool.isInitialized && pinnedSize > 0) {
-      val initThreads = if (conf.pinnedPoolParallelInitThreads == "all") numCores
+      val requestedInitThreads = if (conf.pinnedPoolParallelInitThreads == "all") numCores
         else conf.pinnedPoolParallelInitThreads.toInt
+      val initThreads = math.min(requestedInitThreads, numCores)
       val logDetails =
         if (initThreads > 1) s" using ${initThreads} parallel pre-touch threads" else ""
       logInfo(s"Initializing pinned memory pool (${pinnedSize / 1024 / 1024.0} MiB)${logDetails}")

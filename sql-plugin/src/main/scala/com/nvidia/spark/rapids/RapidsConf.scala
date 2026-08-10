@@ -353,13 +353,13 @@ object RapidsConf extends Logging {
 
   val PINNED_POOL_PARALLEL_INIT_THREADS =
     conf("spark.rapids.memory.pinnedPool.parallelInit.threads")
-      .doc("Number of CPU threads used to initialize the pinned pool's backing memory. " +
-        "Set to 'all' to use the number of executor cores. A value of 1 initializes the backing " +
-        "memory using cudaHostAlloc. Values greater than 1 instead pre-touch pages concurrently " +
-        "before pinning for faster initialization. This does not affect subsequent suballocator " +
-        "behavior. Note: on multi-NUMA systems, multithreaded initialization can scatter pages " +
-        "across nodes if you do not constrain placement in advance. Pages cannot be migrated " +
-        "once pinned.")
+      .doc("Number of CPU threads used to initialize the pinned pool's backing memory, capped at " +
+        "the number of executor cores. Set to 'all' to use the number of executor cores. A value " +
+        "of 1 initializes the backing memory using cudaHostAlloc. Values greater than 1 instead " +
+        "pre-touch pages concurrently before pinning for faster initialization. This does not " +
+        "affect subsequent suballocator behavior. Note: on multi-NUMA systems, multithreaded " +
+        "initialization can scatter pages across nodes if you do not constrain placement in " +
+        "advance. Pages cannot be migrated once pinned.")
       .startupOnly()
       .stringConf
       .transform(_.trim.toLowerCase(java.util.Locale.ROOT))
