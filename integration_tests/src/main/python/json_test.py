@@ -425,6 +425,29 @@ def test_basic_from_json(std_input_path, filename, schema, allow_non_numeric_num
         conf=updated_conf)
 
 
+@approximate_float
+@pytest.mark.parametrize('read_func', [read_json_df, read_json_sql])
+def test_json_read_invalid_float_ansi(
+        std_input_path, read_func, spark_tmp_table_factory):
+    conf = copy_and_update(_enable_all_types_conf, {'spark.sql.ansi.enabled': 'true'})
+    assert_gpu_and_cpu_are_equal_collect(
+        read_func(std_input_path + '/floats_invalid.json',
+                  _float_schema,
+                  spark_tmp_table_factory,
+                  {}),
+        conf=conf)
+
+
+@approximate_float
+@allow_non_gpu(TEXT_INPUT_EXEC)
+def test_from_json_invalid_float_ansi(std_input_path):
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.text(std_input_path + '/floats_invalid.json').
+          selectExpr("value as json").
+          select(f.col("json"), f.from_json(f.col("json"), _float_schema)),
+        conf=copy_and_update(_enable_all_types_conf, {'spark.sql.ansi.enabled': 'true'}))
+
+
 @ignore_order
 @pytest.mark.parametrize('filename', [
     'malformed1.ndjson',
