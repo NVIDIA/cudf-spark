@@ -89,7 +89,12 @@ case class GpuGroupPartitionsExec(
     @transient groupInfo: GpuGroupPartitionsExecInfo)
     extends ShimUnaryExecNode with GpuExec {
 
-  override lazy val allMetrics: Map[String, GpuMetric] = Map.empty
+  // This operator only changes RDD partition grouping, so it cannot report output row or batch
+  // counts directly. It still needs an op-time metric for parent operators' descendant-time
+  // accounting.
+  override lazy val allMetrics: Map[String, GpuMetric] = Map(
+    GpuMetric.OP_TIME_NEW ->
+      createNanoTimingMetric(GpuMetric.MODERATE_LEVEL, GpuMetric.DESCRIPTION_OP_TIME_NEW))
 
   override def output = child.output
 

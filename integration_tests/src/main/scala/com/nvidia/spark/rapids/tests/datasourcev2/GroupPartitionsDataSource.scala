@@ -74,7 +74,9 @@ class GroupPartitionsDataSource extends TableProvider {
     val partitions = Option(options.get("side")) match {
       case Some("left") => GroupPartitionsDataSource.leftPartitions
       case Some("right") => GroupPartitionsDataSource.rightPartitions
-      case other => throw new IllegalArgumentException(s"Expected side=left or side=right, found $other")
+      case other =>
+        throw new IllegalArgumentException(
+          s"Expected side=left or side=right, found $other")
     }
     new GroupPartitionsTable(partitions)
   }
