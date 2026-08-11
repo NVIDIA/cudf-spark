@@ -49,6 +49,10 @@
         <rapids.default.jar.phase>none</rapids.default.jar.phase>
         <rapids.jni.unpack.skip>false</rapids.jni.unpack.skip>
         <rapids.source.jar.phase>none</rapids.source.jar.phase>
+        <dist.native.chunking.enabled>true</dist.native.chunking.enabled>
+        <dist.native.chunking.minimum.size>256M</dist.native.chunking.minimum.size>
+        <dist.native.chunking.chunk.size>32M</dist.native.chunking.chunk.size>
+        <dist.native.chunking.metadata.dir>${project.build.directory}/native-chunks</dist.native.chunking.metadata.dir>
     </properties>
     <profiles>
         <profile>
@@ -263,6 +267,7 @@
                                     <fileset dir="${project.build.directory}" includes="*.jar"/>
                                 </delete>
                                 <delete dir="${project.build.directory}/deps" includeemptydirs="true"/>
+                                <delete dir="${dist.native.chunking.metadata.dir}" includeemptydirs="true"/>
                                 <mkdir dir="${project.build.directory}/deps"/>
                             </target>
                         </configuration>
@@ -305,6 +310,59 @@
                                     <else>
                                         <fail>Re-execute build with the default `-Drapids.jni.unpack.skip=false`</fail>
                                     </else>
+                                </ac:if>
+                            </target>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>chunk-native-libraries</id>
+                        <phase>process-resources</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <taskdef resource="net/sf/antcontrib/antcontrib.properties"/>
+                                <scriptdef name="chunkNativeLibraries" language="jython"
+                                           src="${spark.rapids.source.basedir}/${rapids.module}/build/chunk-native-libraries.py">
+                                    <attribute name="root_dir"/>
+                                    <attribute name="metadata_dir"/>
+                                    <attribute name="minimum_size"/>
+                                    <attribute name="chunk_size"/>
+                                </scriptdef>
+                                <ac:if xmlns:ac="antlib:net.sf.antcontrib">
+                                    <and>
+                                        <istrue value="${dist.native.chunking.enabled}"/>
+                                        <istrue value="${dist.jar.compress}"/>
+                                    </and>
+                                    <then>
+                                        <chunkNativeLibraries
+                                            root_dir="${project.build.directory}/parallel-world"
+                                            metadata_dir="${dist.native.chunking.metadata.dir}"
+                                            minimum_size="${dist.native.chunking.minimum.size}"
+                                            chunk_size="${dist.native.chunking.chunk.size}"/>
+                                    </then>
+                                </ac:if>
+                            </target>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>verify-native-library-chunks</id>
+                        <phase>verify</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <taskdef resource="net/sf/antcontrib/antcontrib.properties"/>
+                                <scriptdef name="verifyNativeLibraryChunks" language="jython"
+                                           src="${spark.rapids.source.basedir}/${rapids.module}/build/verify-native-library-chunks.py">
+                                    <attribute name="jar_path"/>
+                                    <attribute name="metadata_dir"/>
+                                </scriptdef>
+                                <ac:if xmlns:ac="antlib:net.sf.antcontrib">
+                                    <available file="${dist.native.chunking.metadata.dir}/enabled"/>
+                                    <then>
+                                        <verifyNativeLibraryChunks
+                                            jar_path="${dist.jar.name}"
+                                            metadata_dir="${dist.native.chunking.metadata.dir}"/>
+                                    </then>
                                 </ac:if>
                             </target>
                         </configuration>
