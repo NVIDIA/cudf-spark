@@ -723,11 +723,16 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
         val batchForRecord = currentBatch
         // Tracks how much quota this task still owes back to the limiter. Initialized to
         // the full recordSize; decremented when excessQuota is released early on the success
-        // path. getAndSet(0) in the catch block or done() atomically claims whatever remains,
-        // so exactly one path releases the quota even when cancel(true) races with call().
+        // path. getAndSet(0) in the catch block atomically claims whatever remains,
+        // ensuring quota is only released after call() has freed its resources.
         val quotaToRelease = new AtomicLong(recordSize)
+        // Set to true as the very first act of call(). done() uses this to distinguish
+        // "cancelled before call() ever ran" (safe to release quota there) from
+        // "cancelled while call() was executing" (catch block releases after resources freed).
+        val callableStarted = new java.util.concurrent.atomic.AtomicBoolean(false)
         val compressionTask = new FutureTask[CompressedRecord](new Callable[CompressedRecord] {
           override def call(): CompressedRecord = {
+            callableStarted.set(true)
             try {
               withResource(cb) { _ =>
                 // Create a new buffer for this record.
@@ -786,10 +791,10 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
           }
         }) {
           override def done(): Unit = {
-            // For cancelled tasks, atomically claim and release whatever quota remains.
-            // getAndSet(0) ensures exactly one of the catch block and done() releases,
-            // even when cancel(true) races with an executing call().
-            if (isCancelled) {
+            // Only release quota here if call() never started. If call() did start,
+            // its catch block releases quota after withResource(cb) closes the buffer,
+            // ensuring quota is not freed while resources are still held.
+            if (isCancelled && !callableStarted.get) {
               val toRelease = quotaToRelease.getAndSet(0)
               if (toRelease > 0) {
                 limiter.release(toRelease)
