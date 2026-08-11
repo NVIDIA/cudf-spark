@@ -20,7 +20,8 @@ from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, \
 from conftest import is_iceberg_remote_catalog, is_iceberg_rest_catalog
 from data_gen import *
 from iceberg import get_full_table_name, iceberg_unsupported_mark, _build_tblprops, \
-    _BASE_TBLPROPS_SQL, create_iceberg_table
+    _BASE_TBLPROPS_SQL, create_iceberg_table, supports_iceberg_v3, \
+    ICEBERG_V3_UNSUPPORTED_REASON
 from marks import allow_non_gpu, iceberg, ignore_order
 from spark_session import is_databricks_runtime, is_spark_35x, is_spark_40x, is_spark_41x, \
     spark_version, with_cpu_session, with_gpu_session
@@ -285,6 +286,28 @@ def test_iceberg_read_fallback(spark_tmp_table_factory, disable_conf):
         lambda spark : spark.sql(f"SELECT * FROM {full_table}"),
         "BatchScanExec",
         conf = {disable_conf : "false"})
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@allow_non_gpu("BatchScanExec", "ColumnarToRowExec")
+@ignore_order(local=True)
+def test_iceberg_v3_read_fallback(spark_tmp_table_factory):
+    table_name = get_full_table_name(spark_tmp_table_factory)
+    props = _build_tblprops({"format-version": "3"})
+    props_sql = ", ".join(f"'{key}' = '{value}'" for key, value in props.items())
+
+    def setup_table(spark):
+        spark.sql(
+            f"CREATE TABLE {table_name} (id BIGINT, data STRING) USING ICEBERG "
+            f"TBLPROPERTIES ({props_sql})")
+        spark.sql(f"INSERT INTO {table_name} VALUES (1, 'a'), (2, 'b'), (3, 'c')")
+
+    with_cpu_session(setup_table)
+    assert_gpu_fallback_collect(
+        lambda spark: spark.sql(f"SELECT * FROM {table_name}"),
+        "BatchScanExec")
+
 
 @iceberg
 @ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering
