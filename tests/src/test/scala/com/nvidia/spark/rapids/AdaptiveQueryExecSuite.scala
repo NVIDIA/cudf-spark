@@ -643,10 +643,20 @@ class AdaptiveQueryExecSuite
 
     withGpuSparkSession(spark => {
       setupTestData(spark)
+      // Keep the filtered lowerCaseData side small enough for one SMJ -> BHJ conversion,
+      // but make the third input large enough that AQE cannot also broadcast the second
+      // join. With the tiny shared testData3, both joins can become BHJ depending on
+      // runtime shuffle stats (https://github.com/NVIDIA/cudf-spark/issues/15591).
+      import spark.implicits._
+      val largeThird = (0 until 10000).map(i => (i % 3 + 1, Some(i): Option[Int]))
+        .toDF("a", "b")
+        .repartition(col("a"))
+      registerAsParquetTable(spark, largeThird, "testData3Large")
+
       val (plan, adaptivePlan) = runAdaptiveAndVerifyResult(spark,
         """
           |SELECT * FROM lowerCaseData t1 join testData2 t2
-          |ON t1.n = t2.a join testData3 t3 on t2.a = t3.a
+          |ON t1.n = t2.a join testData3Large t3 on t2.a = t3.a
           |where t1.l = 1
         """.stripMargin)
 

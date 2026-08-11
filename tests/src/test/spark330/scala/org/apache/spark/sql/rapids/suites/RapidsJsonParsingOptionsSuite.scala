@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,12 +14,14 @@
  * limitations under the License.
  */
 
-package org.apache.iceberg.spark.source;
+/*** spark-rapids-shim-json-lines
+{"spark": "330"}
+spark-rapids-shim-json-lines ***/
+package org.apache.spark.sql.rapids.suites
 
-import org.apache.iceberg.types.Types;
+import org.apache.spark.sql.execution.datasources.json.JsonParsingOptionsSuite
+import org.apache.spark.sql.rapids.utils.RapidsSQLTestsTrait
 
-public class GpuStructInternalRow extends  StructInternalRow {
-  public GpuStructInternalRow(Types.StructType type) {
-    super(type);
-  }
-}
+class RapidsJsonParsingOptionsSuite
+  extends JsonParsingOptionsSuite
+  with RapidsSQLTestsTrait

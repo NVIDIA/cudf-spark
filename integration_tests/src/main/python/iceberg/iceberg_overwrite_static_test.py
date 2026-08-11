@@ -23,7 +23,8 @@ from iceberg import create_iceberg_table, \
     iceberg_base_table_cols, iceberg_gens_list, \
     get_full_table_name, iceberg_full_gens_list, iceberg_nested_write_gens_list, \
     iceberg_write_enabled_conf, iceberg_unsupported_mark, _build_tblprops, \
-    overwrite_static_partition_transforms
+    overwrite_static_partition_transforms, supports_iceberg_v3, \
+    ICEBERG_V3_UNSUPPORTED_REASON
 from marks import iceberg, ignore_order, allow_non_gpu, datagen_overrides
 from spark_session import with_gpu_session, with_cpu_session
 
@@ -89,6 +90,30 @@ def test_insert_overwrite_unpartitioned_table(spark_tmp_table_factory):
     do_test_insert_overwrite_table_sql(
         spark_tmp_table_factory,
         lambda table_name: create_iceberg_table(table_name, table_prop=table_prop))
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@ignore_order(local=True)
+@allow_non_gpu("OverwriteByExpressionExec", "ShuffleExchangeExec", "SortExec", "ProjectExec")
+def test_insert_overwrite_v3_table_fallback(spark_tmp_table_factory):
+    table_name = get_full_table_name(spark_tmp_table_factory)
+    create_iceberg_table(table_name, table_prop={"format-version": "3"})
+
+    def insert_data(spark, seed):
+        df = gen_df(
+            spark,
+            list(zip(iceberg_base_table_cols, iceberg_gens_list)),
+            seed=seed)
+        view_name = spark_tmp_table_factory.get()
+        df.createOrReplaceTempView(view_name)
+        return spark.sql(f"INSERT OVERWRITE TABLE {table_name} SELECT * FROM {view_name}")
+
+    with_cpu_session(lambda spark: insert_data(spark, INITIAL_INSERT_SEED).collect())
+    assert_gpu_fallback_collect(
+        lambda spark: insert_data(spark, None),
+        "OverwriteByExpressionExec",
+        conf=iceberg_static_overwrite_conf)
 
 
 @iceberg

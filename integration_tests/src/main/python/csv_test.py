@@ -576,26 +576,45 @@ def test_csv_read_count(spark_tmp_path):
     assert_gpu_and_cpu_row_counts_equal(lambda spark: spark.read.csv(data_path),
         conf = {'spark.rapids.sql.explain': 'ALL'})
 
+spark_350_timestamp_inference_xfail_formats = {
+    ('yyyy-MM-dd', ''),
+    ('yyyy-MM', ''),
+    ('yyyy-MM-dd', "'T'HH:mm:ss"),
+    ('yyyy-MM-dd', "'T'HH:mm"),
+}
+
+def run_csv_infer_schema_timestamp_ntz(
+        spark_tmp_path, date_format, ts_part, timestamp_type, v1_enabled_list, cpu_scan_class):
+    try:
+        csv_infer_schema_timestamp_ntz(
+            spark_tmp_path, date_format, ts_part, timestamp_type, v1_enabled_list,
+            cpu_scan_class)
+    except Exception:
+        if (is_spark_350()
+                and timestamp_type == 'TIMESTAMP_LTZ'
+                and (date_format, ts_part) in spark_350_timestamp_inference_xfail_formats):
+            pytest.xfail(reason="https://github.com/NVIDIA/spark-rapids/issues/9325")
+        raise
+
 @allow_non_gpu('FileSourceScanExec', 'ProjectExec', 'CollectLimitExec', 'DeserializeToObjectExec')
 @pytest.mark.skipif(is_before_spark_341(), reason='`TIMESTAMP_NTZ` is only supported in PySpark 341+')
 @pytest.mark.parametrize('date_format', csv_supported_date_formats)
 @pytest.mark.parametrize('ts_part', csv_supported_ts_parts)
-@pytest.mark.parametrize("timestamp_type", [
-    pytest.param('TIMESTAMP_LTZ', marks=pytest.mark.xfail(is_spark_350_or_later(), reason="https://github.com/NVIDIA/spark-rapids/issues/9325")),
-    "TIMESTAMP_NTZ"])
+@pytest.mark.parametrize('timestamp_type', ['TIMESTAMP_LTZ', 'TIMESTAMP_NTZ'])
 def test_csv_infer_schema_timestamp_ntz_v1(spark_tmp_path, date_format, ts_part, timestamp_type):
-    csv_infer_schema_timestamp_ntz(spark_tmp_path, date_format, ts_part, timestamp_type, 'csv', 'FileSourceScanExec')
+    run_csv_infer_schema_timestamp_ntz(
+        spark_tmp_path, date_format, ts_part, timestamp_type, 'csv', 'FileSourceScanExec')
 
 @allow_non_gpu('BatchScanExec', 'FileSourceScanExec', 'ProjectExec', 'CollectLimitExec', 'DeserializeToObjectExec')
-@pytest.mark.skip(reason="https://github.com/NVIDIA/spark-rapids/issues/9325")
+@pytest.mark.skipif(is_databricks_runtime(),
+    reason="https://github.com/NVIDIA/spark-rapids/issues/9325")
 @pytest.mark.skipif(is_before_spark_341(), reason='`TIMESTAMP_NTZ` is only supported in PySpark 341+')
 @pytest.mark.parametrize('date_format', csv_supported_date_formats)
 @pytest.mark.parametrize('ts_part', csv_supported_ts_parts)
-@pytest.mark.parametrize("timestamp_type", [
-    pytest.param('TIMESTAMP_LTZ', marks=pytest.mark.xfail(is_spark_350_or_later(), reason="https://github.com/NVIDIA/spark-rapids/issues/9325")),
-    "TIMESTAMP_NTZ"])
+@pytest.mark.parametrize('timestamp_type', ['TIMESTAMP_LTZ', 'TIMESTAMP_NTZ'])
 def test_csv_infer_schema_timestamp_ntz_v2(spark_tmp_path, date_format, ts_part, timestamp_type):
-    csv_infer_schema_timestamp_ntz(spark_tmp_path, date_format, ts_part, timestamp_type, '', 'BatchScanExec')
+    run_csv_infer_schema_timestamp_ntz(
+        spark_tmp_path, date_format, ts_part, timestamp_type, '', 'BatchScanExec')
 
 def csv_infer_schema_timestamp_ntz(spark_tmp_path, date_format, ts_part, timestamp_type, v1_enabled_list, cpu_scan_class):
     full_format = date_format + ts_part
