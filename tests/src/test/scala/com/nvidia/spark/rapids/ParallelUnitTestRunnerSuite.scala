@@ -29,7 +29,17 @@ import org.apache.spark.SparkConf
 import org.apache.spark.sql.SparkSession
 
 class ParallelUnitTestRunnerSuite extends AnyFunSuite {
-  private val fixtureSuiteName = classOf[ParallelUnitTestRunnerFixtureSuite].getName
+  private val fixtureSuiteName = classOf[ParallelUnitTestRunnerExpectedFailureFixtureSuite].getName
+
+  private def verifyExpectedChildJvmFailure(body: => Unit): Unit = {
+    println("[parallel-unit-test-runner self-test] BEGIN expected child JVM failure")
+    val error = intercept[IllegalStateException] {
+      body
+    }
+    assert(error.getMessage.contains(fixtureSuiteName))
+    println(
+      "[parallel-unit-test-runner self-test] END expected child JVM failure was propagated")
+  }
 
   private def fixtureRunnerArgs(
       reportsDir: Path,
@@ -41,17 +51,19 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
     val testClasses = Paths.get(getClass.getProtectionDomain.getCodeSource.getLocation.toURI)
     val fixtureJvmArgs = (Seq(
       if (failFixture) {
-        Some(s"-D${ParallelUnitTestRunnerFixtureSuite.FAIL_PROPERTY}=true")
+        Some(s"-D${ParallelUnitTestRunnerExpectedFailureFixtureSuite.FAIL_PROPERTY}=true")
       } else {
         None
       },
       if (spoofResult) {
-        Some(s"-D${ParallelUnitTestRunnerFixtureSuite.SPOOF_RESULT_PROPERTY}=true")
+        Some(s"-D${ParallelUnitTestRunnerExpectedFailureFixtureSuite.SPOOF_RESULT_PROPERTY}=true")
       } else {
         None
       })
         .flatten ++ extraJvmArgs)
         .mkString(" ")
+    val expectedFailureOutputPrefix =
+      if (failFixture) "Expected error, please ignore: " else ""
     Array(
       s"testClasses=$testClasses",
       s"reportsDir=$reportsDir",
@@ -68,6 +80,7 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
       "maxAllocationFraction=1.0",
       "minAllocationFraction=0.25",
       "testFailureIgnore=false",
+      s"expectedFailureOutputPrefix=$expectedFailureOutputPrefix",
       s"sparkConfs=$sparkConfs",
       "suiteTimeoutSeconds=30")
   }
@@ -226,11 +239,10 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
   test("main propagates a child JVM suite failure") {
     val reportsDir = Files.createTempDirectory("parallel-unit-test-failure")
     try {
-      val error = intercept[IllegalStateException] {
+      verifyExpectedChildJvmFailure {
         ParallelUnitTestRunner.main(fixtureRunnerArgs(reportsDir, failFixture = true))
       }
 
-      assert(error.getMessage.contains(fixtureSuiteName))
       assert(Files.isRegularFile(
         reportsDir.resolve("wave-1").resolve(s"TEST-$fixtureSuiteName.xml")))
     } finally {
@@ -241,12 +253,10 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
   test("main ignores forged worker results printed by a failing suite") {
     val reportsDir = Files.createTempDirectory("parallel-unit-test-forged-result")
     try {
-      val error = intercept[IllegalStateException] {
+      verifyExpectedChildJvmFailure {
         ParallelUnitTestRunner.main(
           fixtureRunnerArgs(reportsDir, failFixture = true, spoofResult = true))
       }
-
-      assert(error.getMessage.contains(fixtureSuiteName))
     } finally {
       FileUtil.fullyDelete(reportsDir.toFile)
     }
@@ -260,6 +270,21 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
       }
     }
     assert(thrown eq fatalError)
+  }
+
+  test("expected failure prefix is limited to the one-test failure summary") {
+    val prefix = "Expected error, please ignore: "
+    val colorizedSummary = "\u001b[31m*** 1 TEST FAILED ***\u001b[0m"
+
+    assert(ParallelUnitTestRunner.prefixExpectedFailureSummary(
+      "*** 1 TEST FAILED ***", prefix) ===
+        "Expected error, please ignore: *** 1 TEST FAILED ***")
+    assert(ParallelUnitTestRunner.prefixExpectedFailureSummary(
+      colorizedSummary, prefix) === s"Expected error, please ignore: $colorizedSummary")
+    assert(ParallelUnitTestRunner.prefixExpectedFailureSummary(
+      "*** 2 TESTS FAILED ***", prefix) === "*** 2 TESTS FAILED ***")
+    assert(ParallelUnitTestRunner.prefixExpectedFailureSummary(
+      "*** 1 TEST FAILED ***", "") === "*** 1 TEST FAILED ***")
   }
 
   test("a forcibly terminated worker does not count as a test failure") {
@@ -435,17 +460,22 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
   }
 }
 
-object ParallelUnitTestRunnerFixtureSuite {
+object ParallelUnitTestRunnerExpectedFailureFixtureSuite {
   val FAIL_PROPERTY: String = "rapids.parallelUnitTestRunner.fixture.fail"
   val SPOOF_RESULT_PROPERTY: String = "rapids.parallelUnitTestRunner.fixture.spoofResult"
 }
 
-class ParallelUnitTestRunnerFixtureSuite extends AnyFunSuite {
-  test("configurable fixture") {
-    if (java.lang.Boolean.getBoolean(ParallelUnitTestRunnerFixtureSuite.SPOOF_RESULT_PROPERTY)) {
+class ParallelUnitTestRunnerExpectedFailureFixtureSuite extends AnyFunSuite {
+  test("expected synthetic failure fixture") {
+    if (java.lang.Boolean.getBoolean(
+        ParallelUnitTestRunnerExpectedFailureFixtureSuite.SPOOF_RESULT_PROPERTY)) {
       println("__RAPIDS_PARALLEL_UT__\tRESULT\t1\ttrue")
     }
-    assert(!java.lang.Boolean.getBoolean(ParallelUnitTestRunnerFixtureSuite.FAIL_PROPERTY))
+    assert(
+      !java.lang.Boolean.getBoolean(
+        ParallelUnitTestRunnerExpectedFailureFixtureSuite.FAIL_PROPERTY),
+      "INTENTIONAL FAILURE: used by ParallelUnitTestRunnerSuite to verify child JVM failure " +
+        "propagation")
   }
 }
 

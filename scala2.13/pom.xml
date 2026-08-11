@@ -824,14 +824,15 @@
                 <spark.test.version>${spark413.version}</spark.test.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
                 <rapids.delta.artifactId1>rapids-4-spark-delta-41x</rapids.delta.artifactId1>
-                <iceberg.artifact.suffix>${spark40x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
-                <iceberg.runtime.version>${iceberg.110x.version}</iceberg.runtime.version>
+                <iceberg.artifact.suffix>${spark41x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
+                <iceberg.runtime.version>${iceberg.111x.version}</iceberg.runtime.version>
+                <rapids.iceberg.artifactId>rapids-4-spark-iceberg-1-11-x</rapids.iceberg.artifactId>
                 <slf4j.version>2.0.7</slf4j.version>
                 <scala.javac.args>-Xlint:all,-serial,-path,-try,-processing,-options|-Werror</scala.javac.args>
             </properties>
             <modules>
                 <module>delta-lake/delta-41x</module>
-                <module>iceberg/iceberg-stub</module>
+                <module>iceberg/iceberg-1-11-x</module>
             </modules>
             <build>
                 <pluginManagement>

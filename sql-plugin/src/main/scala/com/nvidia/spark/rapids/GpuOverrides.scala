@@ -27,7 +27,9 @@ import com.nvidia.spark.rapids.RapidsConf.{SUPPRESS_PLANNING_FAILURE, TEST_CONF}
 import com.nvidia.spark.rapids.jni.GpuTimeZoneDB
 import com.nvidia.spark.rapids.lore.GpuLore
 import com.nvidia.spark.rapids.shims._
-import com.nvidia.spark.rapids.window.{GpuDenseRank, GpuLag, GpuLead, GpuPercentRank, GpuRank, GpuRowNumber, GpuSpecialFrameBoundary, GpuWindowExecMeta, GpuWindowSpecDefinitionMeta}
+import com.nvidia.spark.rapids.window.{GpuDenseRank, GpuLag, GpuLead, GpuNTileMeta,
+  GpuPercentRank, GpuRank, GpuRowNumber, GpuSpecialFrameBoundary, GpuWindowExecMeta,
+  GpuWindowSpecDefinitionMeta}
 import org.apache.hadoop.fs.Path
 
 import org.apache.spark.internal.Logging
@@ -1118,6 +1120,11 @@ object GpuOverrides extends Logging {
         override def convertToGpuImpl(): GpuExpression =
           GpuPercentRank(childExprs.map(_.convertToGpu()))
       }),
+    expr[NTile](
+      "Window function that divides the rows in each partition into buckets",
+      ExprChecks.windowOnly(TypeSig.INT, TypeSig.INT,
+        Seq(ParamCheck("buckets", TypeSig.lit(TypeEnum.INT), TypeSig.lit(TypeEnum.INT)))),
+      GpuNTileMeta),
     expr[Lead](
       "Window function that returns N entries ahead of this one",
       ExprChecks.windowOnly(
@@ -4786,8 +4793,9 @@ object GpuOverrides extends Logging {
       (mapPy, conf, p, r) => new GpuMapInPandasExecMeta(mapPy, conf, p, r)),
     exec[InMemoryTableScanExec](
       "Implementation of InMemoryTableScanExec to use GPU accelerated caching",
-      ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.STRUCT + TypeSig.ARRAY +
-          TypeSig.MAP + GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(), TypeSig.all),
+      ExecChecks((TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128 + TypeSig.STRUCT +
+          TypeSig.ARRAY + TypeSig.MAP + GpuTypeShims.additionalCommonOperatorSupportedTypes)
+          .nested(), TypeSig.all),
       (scan, conf, p, r) => new InMemoryTableScanMeta(scan, conf, p, r)),
     neverReplaceExec[AlterNamespaceSetPropertiesExec]("Namespace metadata operation"),
     neverReplaceExec[CreateNamespaceExec]("Namespace metadata operation"),

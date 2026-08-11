@@ -42,6 +42,11 @@ import java.util.Map;
 /** Iceberg 1.10.x shim: uses {@code SparkUtil::internalToSpark} and a cache-aware footer path. */
 public class ShimUtilsImpl implements IcebergShimUtils {
     @Override
+    public int formatVersion(Table table) {
+        return TableUtil.formatVersion(table);
+    }
+
+    @Override
     public String locationOf(ContentFile<?> f) {
         return f.location();
     }

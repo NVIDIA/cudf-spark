@@ -32,6 +32,68 @@ ARTF_ROOT="$WORKSPACE/jars"
 WGET_CMD="wget -q -P $ARTF_ROOT -t 3"
 PROJECT_REPO_HOST=$(sed -E 's#^(.*://)?([^/@]*@)?([^/:]+).*#\3#' <<< "$PROJECT_REPO")
 
+download_maven_jars() {
+  local coordinates=$1
+  local coordinate
+  local group_id
+  local artifact_id
+  local version
+  local dependency_dir
+  local pom_file
+  local -a coordinates_array
+  local -a jars
+
+  dependency_dir=$(mktemp -d "$ARTF_ROOT/maven-dependencies-XXXXXX")
+  pom_file="$dependency_dir/pom.xml"
+  IFS=',' read -ra coordinates_array <<< "$coordinates"
+  {
+    cat <<EOF
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.nvidia.spark.rapids.tests</groupId>
+  <artifactId>extra-classpath-dependencies</artifactId>
+  <version>1.0</version>
+  <repositories>
+    <repository>
+      <id>central</id>
+      <url>$SPARK_REPO</url>
+    </repository>
+  </repositories>
+  <dependencies>
+EOF
+    for coordinate in "${coordinates_array[@]}"; do
+      IFS=':' read -r group_id artifact_id version <<< "$coordinate"
+      cat <<EOF
+    <dependency>
+      <groupId>$group_id</groupId>
+      <artifactId>$artifact_id</artifactId>
+      <version>$version</version>
+    </dependency>
+EOF
+    done
+    echo "  </dependencies>"
+    echo "</project>"
+  } > "$pom_file"
+
+  (
+    cd "$WORKSPACE"
+    $MVN -q -B -f "$pom_file" dependency:copy-dependencies \
+      -DincludeScope=runtime \
+      -DincludeTypes=jar \
+      -DoutputDirectory="$dependency_dir/jars"
+  ) >&2 || return 1
+
+  mapfile -d '' -t jars < <(
+    find "$dependency_dir/jars" -maxdepth 1 -type f -name '*.jar' -print0 | sort -z
+  )
+  if [[ ${#jars[@]} -eq 0 ]]; then
+    echo "No Maven dependencies were resolved for: $coordinates" >&2
+    return 1
+  fi
+  local IFS=:
+  echo "${jars[*]}"
+}
+
 rm -rf $ARTF_ROOT && mkdir -p $ARTF_ROOT
 $WGET_CMD $PROJECT_TEST_REPO/com/nvidia/rapids-4-spark-integration-tests_$SCALA_BINARY_VER/$PROJECT_TEST_VER/rapids-4-spark-integration-tests_$SCALA_BINARY_VER-$PROJECT_TEST_VER-${SHUFFLE_SPARK_SHIM}.jar
 
@@ -359,19 +421,19 @@ run_iceberg_tests() {
       echo "!!! Running iceberg tests with rest catalog"
       ICEBERG_REST_JARS="org.apache.iceberg:iceberg-spark-runtime-${ICEBERG_SPARK_VER}_${SCALA_BINARY_VER}:${ICEBERG_VERSION},\
 org.apache.iceberg:iceberg-aws-bundle:${ICEBERG_VERSION}"
+      ICEBERG_REST_EXTRA_CLASSPATH=$(download_maven_jars "$ICEBERG_REST_JARS")
           # filecache.enabled and perfio.s3.enabled are startup-only configs, so they must
           # be set here via PYSP_TEST_ env vars rather than as session-level Spark configs.
           env \
             HOST_NAME=$PROJECT_REPO_HOST \
             EXPECTED_ICEBERG_VERSION=${ICEBERG_VERSION} \
+            ICEBERG_EXTRA_CLASSPATH="${ICEBERG_REST_EXTRA_CLASSPATH}" \
             ICEBERG_TEST_CATALOG_TYPE="rest" \
             ICEBERG_TEST_REMOTE_CATALOG=1 \
             PYSP_TEST_spark_driver_memory=1G \
             PYSP_TEST_spark_executor_memory=2G \
             PYSP_TEST_spark_rapids_filecache_enabled=true \
             PYSP_TEST_spark_rapids_perfio_s3_enabled=true \
-            PYSP_TEST_spark_jars_packages="${ICEBERG_REST_JARS}" \
-            PYSP_TEST_spark_jars_ivySettings="${WORKSPACE}/jenkins/ivysettings.xml" \
             PYSP_TEST_spark_sql_extensions="org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions" \
             PYSP_TEST_spark_sql_catalog_spark__catalog="org.apache.iceberg.spark.SparkSessionCatalog" \
             "PYSP_TEST_spark_sql_catalog_spark__catalog_catalog-impl=org.apache.iceberg.rest.RESTCatalog" \
@@ -404,6 +466,7 @@ software.amazon.awssdk:url-connection-client:${AWS_SDK_VERSION},\
 software.amazon.awssdk:s3tables:${AWS_SDK_VERSION},\
 org.apache.hadoop:hadoop-aws:${HADOOP_AWS_VERSION},\
 com.amazonaws:aws-java-sdk-bundle:${AWS_SDK_BUNDLE_VERSION}"
+      ICEBERG_S3TABLES_EXTRA_CLASSPATH=$(download_maven_jars "$ICEBERG_S3TABLES_JARS")
 
       # Requires to setup s3 buckets and namespaces to run iceberg s3tables tests.
       # These steps are included in the test pipeline.
@@ -414,12 +477,11 @@ com.amazonaws:aws-java-sdk-bundle:${AWS_SDK_BUNDLE_VERSION}"
       env \
         HOST_NAME=$PROJECT_REPO_HOST \
         EXPECTED_ICEBERG_VERSION=${ICEBERG_VERSION} \
+        ICEBERG_EXTRA_CLASSPATH="${ICEBERG_S3TABLES_EXTRA_CLASSPATH}" \
         ICEBERG_TEST_REMOTE_CATALOG=1 \
         PYSP_TEST_spark_driver_memory=1G \
         PYSP_TEST_spark_executor_memory=2G \
         PYSP_TEST_spark_rapids_filecache_enabled=true \
-        PYSP_TEST_spark_jars_packages="${ICEBERG_S3TABLES_JARS}" \
-        PYSP_TEST_spark_jars_ivySettings="${WORKSPACE}/jenkins/ivysettings.xml" \
         PYSP_TEST_spark_sql_extensions="org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions" \
         PYSP_TEST_spark_sql_catalog_spark__catalog="org.apache.iceberg.spark.SparkSessionCatalog" \
         "PYSP_TEST_spark_sql_catalog_spark__catalog_catalog-impl=software.amazon.s3tables.iceberg.S3TablesCatalog" \
