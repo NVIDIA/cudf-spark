@@ -1001,7 +1001,11 @@
         https://github.com/openjdk/jdk17/blob/4afbcaf55383ec2f5da53282a1547bac3d099e9d/src/jdk.compiler/share/classes/com/sun/tools/javac/resources/compiler.properties#L1993-L1994
         -->
         <scala.javac.args>-Xlint:all,-serial,-path,-try,-processing|-Werror</scala.javac.args>
-        <ucx.baseVersion>1.19.1-rc2</ucx.baseVersion>
+        <!-- NOTE: upstream republished the UCX 1.22.0 JUCX artifact as 1.22.0-1; the original
+             org.openucx:jucx:1.22.0 jar contains an rc1 build. See the "Known issues" section of
+             https://github.com/openucx/ucx/releases/tag/v1.22.0. The native UCX installed by the
+             Dockerfiles is plain 1.22.0 (the GitHub release tag) - this mismatch is intentional. -->
+        <ucx.baseVersion>1.22.0-1</ucx.baseVersion>
         <roaringbitmap.version>1.0.6</roaringbitmap.version>
         <!-- ucx x86 is just the base version (implied), arm is specified under arm64 profile. -->
         <ucx.version>${ucx.baseVersion}</ucx.version>
