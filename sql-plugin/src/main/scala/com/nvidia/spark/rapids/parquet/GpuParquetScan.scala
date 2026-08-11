@@ -575,7 +575,8 @@ protected case class GpuParquetFileFilterHandler(
     if (fileIO.isInstanceOf[HadoopFileIO]) {
       // We should remove this after https://github.com/NVIDIA/spark-rapids/issues/13306 is
       // implemented.
-      val result = PerfIO.readParquetFooterBuffer(filePath, conf, verifyParquetMagic)
+      val result = PerfIO.readParquetFooterBuffer(
+        filePath, conf, (path, magic) => verifyParquetMagic(path, magic))
       val scheme = filePath.toUri.getScheme
       if (scheme != null && scheme.startsWith("s3")) {
         GpuTaskMetrics.get.recordPerfioS3BackendOnce()
@@ -2921,7 +2922,8 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
   private class ReadBatchRunner(
       file: PartitionedFile,
       filterFunc: PartitionedFile => ParquetFileInfoWithBlockMeta,
-      taskContext: TaskContext) extends MemoryBoundedAsyncRunner[BufferInfo] with Logging {
+      taskContext: TaskContext)
+    extends MemoryBoundedAsyncRunner[BufferInfo] with Logging {
 
     // Set TaskContext in terms of an AsyncRunner
     override def sparkTaskContext: Option[TaskContext] = Some(taskContext)
@@ -2985,10 +2987,13 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
       val hostBuffers = new ArrayBuffer[SingleHMBAndMeta]
       var filterTime = 0L
       var bufferStartTime = 0L
+      var filteredDataBytes = 0L
       val result = try {
         val filterStartTime = System.nanoTime()
         val fileBlockMeta = filterFunc(file)
         filterTime = System.nanoTime() - filterStartTime
+        filteredDataBytes = fileBlockMeta.blocks.flatMap(
+          _.getColumns.asScala).map(_.getTotalSize).sum
         bufferStartTime = System.nanoTime()
         if (fileBlockMeta.blocks.isEmpty) {
           val bytesRead = fileSystemBytesRead() - startingBytesRead
@@ -3046,6 +3051,7 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
           throw e
       }
       val bufferTime = System.nanoTime() - bufferStartTime
+      PartitionFileReadHistogram.record(filteredDataBytes, bufferTime)
       result.setExecutionTime(filterTime, bufferTime)
       result
     }

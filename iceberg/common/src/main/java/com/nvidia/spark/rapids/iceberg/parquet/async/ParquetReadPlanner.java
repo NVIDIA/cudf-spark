@@ -18,11 +18,13 @@ package com.nvidia.spark.rapids.iceberg.parquet.async;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
@@ -34,7 +36,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.nvidia.spark.rapids.iceberg.parquet.IcebergPartitionedFile;
-import com.nvidia.spark.rapids.reader.Combiner;
 import com.nvidia.spark.rapids.reader.ReadPlanner;
 
 /**
@@ -43,26 +44,27 @@ import com.nvidia.spark.rapids.reader.ReadPlanner;
  * <p>Footer and data futures notify this object directly. With combining enabled, files are fed
  * to the stable greedy planner in data-completion order; otherwise they are fed in input order.
  * Every admitted file that leaves an open group starts a fresh combine timeout. Closed plans are
- * immediately submitted to the injected combiner, while {@link #nextReady()} exposes those
- * futures in plan-emission order even when combine workers finish out of order.</p>
+ * immediately combined on the reader executor, while {@link #nextReady()} exposes those futures
+ * in plan-emission order even when workers finish out of order.</p>
  *
  * <p>This class owns every successful {@link FileFragment} after {@link #addFile} returns.
  * Combined inputs retain their own fragment references, so closing the planner cannot invalidate
  * a decoder input already handed to the Spark task thread.</p>
  */
-public final class ParquetReadPlanner implements ReadPlanner<
+public abstract class ParquetReadPlanner implements ReadPlanner<
     IcebergPartitionedFile, FooterResult, FileFragment, ParquetCombinedResult> {
   private static final ScheduledExecutorService TIMER =
       Executors.newSingleThreadScheduledExecutor(new DaemonThreadFactory());
 
   private final StableGreedyReadPlanner.Session session;
-  private final Combiner<ReadSubtask, FileFragment, ParquetCombinedResult> combiner;
   private final ExecutorService executor;
   private final boolean combineEnabled;
   private final long combineWaitMs;
   private final AtomicBoolean closed;
   private final ArrayList<FileState> files = new ArrayList<>();
   private final Map<FooterResult, FileFragment> dataByFooter = new IdentityHashMap<>();
+  private final Set<FileFragment> attributedFragments =
+      Collections.newSetFromMap(new IdentityHashMap<>());
   private final ArrayDeque<CompletableFuture<Optional<ParquetCombinedResult>>> outputs =
       new ArrayDeque<>();
   private final ArrayDeque<CompletableFuture<Optional<ParquetCombinedResult>>> waiters =
@@ -81,13 +83,11 @@ public final class ParquetReadPlanner implements ReadPlanner<
 
   public ParquetReadPlanner(
       StableGreedyReadPlanner planner,
-      Combiner<ReadSubtask, FileFragment, ParquetCombinedResult> combiner,
       ExecutorService executor,
       boolean combineEnabled,
       long combineWaitMs,
       AtomicBoolean closed) {
     this.session = Objects.requireNonNull(planner, "planner").newSession();
-    this.combiner = Objects.requireNonNull(combiner, "combiner");
     this.executor = Objects.requireNonNull(executor, "executor");
     this.combineEnabled = combineEnabled;
     this.combineWaitMs = Math.max(0L, combineWaitMs);
@@ -97,14 +97,14 @@ public final class ParquetReadPlanner implements ReadPlanner<
   @Override
   public synchronized void addFile(
       int fileId,
-      IcebergPartitionedFile source,
       CompletableFuture<FooterResult> footer,
       CompletableFuture<FileFragment> data) {
     checkAccepting();
     if (fileId != files.size()) {
       throw new IllegalArgumentException("file IDs must be registered contiguously");
     }
-    FileState state = new FileState(fileId, source, footer, data);
+    Objects.requireNonNull(data, "data");
+    FileState state = new FileState(footer);
     // Publish the state before callbacks are attached: CompletableFuture invokes callbacks
     // inline when an already-completed future is registered.
     files.add(state);
@@ -249,7 +249,7 @@ public final class ParquetReadPlanner implements ReadPlanner<
         fragments.add(fragment);
       }
       CompletableFuture<ParquetCombinedResult> combined =
-          combiner.combine(plan, fragments, executor);
+          combine(plan, fragments);
       combinedInputs.add(combined);
       combined.whenComplete((input, error) -> {
         if (error != null) {
@@ -268,6 +268,60 @@ public final class ParquetReadPlanner implements ReadPlanner<
         pipe(output, waiters.removeFirst());
       }
     }
+  }
+
+  /** Build a zero-copy logical Parquet input and attribute each fragment's metrics once. */
+  private synchronized CompletableFuture<ParquetCombinedResult> combine(
+      ReadSubtask plan,
+      List<FileFragment> data) {
+    ArrayList<FileFragment> fragments = new ArrayList<>(data);
+    ArrayList<FileFragment> metricFragments = new ArrayList<>();
+    for (FileFragment fragment : fragments) {
+      if (attributedFragments.add(fragment)) {
+        metricFragments.add(fragment);
+      }
+    }
+    return CompletableFuture.supplyAsync(() -> {
+      long start = System.nanoTime();
+      SubtaskStats stats = aggregate(metricFragments, System.nanoTime() - start);
+      return new ParquetCombinedResult(plan, fragments, stats);
+    }, executor);
+  }
+
+  private static SubtaskStats aggregate(
+      List<FileFragment> fragments,
+      long combineNanos) {
+    long ioNanos = 0L;
+    long allocNanos = 0L;
+    long readWaitNanos = 0L;
+    long routeNanos = 0L;
+    long finalizeNanos = 0L;
+    long requestCount = 0L;
+    long requestedBytes = 0L;
+    long hitCount = 0L;
+    long hitBytes = 0L;
+    long missCount = 0L;
+    long missBytes = 0L;
+    long cacheReadNanos = 0L;
+    for (FileFragment fragment : fragments) {
+      FileFragment.DownloadStats stats = fragment.getStats();
+      ioNanos = Math.addExact(ioNanos, stats.ioNanos);
+      allocNanos = Math.addExact(allocNanos, stats.allocNanos);
+      readWaitNanos = Math.addExact(readWaitNanos, stats.readWaitNanos);
+      routeNanos = Math.addExact(routeNanos, stats.routeNanos);
+      finalizeNanos = Math.addExact(finalizeNanos, stats.finalizeNanos);
+      requestCount = Math.addExact(requestCount, stats.requestCount);
+      requestedBytes = Math.addExact(requestedBytes, stats.requestedBytes);
+      hitCount = Math.addExact(hitCount, stats.cacheHitCount);
+      hitBytes = Math.addExact(hitBytes, stats.cacheHitBytes);
+      missCount = Math.addExact(missCount, stats.cacheMissCount);
+      missBytes = Math.addExact(missBytes, stats.cacheMissBytes);
+      cacheReadNanos = Math.addExact(cacheReadNanos, stats.cacheReadNanos);
+    }
+    return new SubtaskStats(
+        ioNanos, allocNanos, readWaitNanos, routeNanos, finalizeNanos,
+        requestCount, requestedBytes, combineNanos,
+        hitCount, hitBytes, missCount, missBytes, cacheReadNanos);
   }
 
   private void fail(Throwable error) {
@@ -358,24 +412,14 @@ public final class ParquetReadPlanner implements ReadPlanner<
   }
 
   private static final class FileState {
-    private final int fileId;
-    private final IcebergPartitionedFile source;
     private final CompletableFuture<FooterResult> footer;
-    private final CompletableFuture<FileFragment> data;
     private FooterResult footerValue;
     private FileFragment dataValue;
     private boolean admitted;
     private boolean baseReferenceClosed;
 
-    private FileState(
-        int fileId,
-        IcebergPartitionedFile source,
-        CompletableFuture<FooterResult> footer,
-        CompletableFuture<FileFragment> data) {
-      this.fileId = fileId;
-      this.source = Objects.requireNonNull(source, "source");
+    private FileState(CompletableFuture<FooterResult> footer) {
       this.footer = Objects.requireNonNull(footer, "footer");
-      this.data = Objects.requireNonNull(data, "data");
     }
   }
 

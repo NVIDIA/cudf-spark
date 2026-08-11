@@ -40,7 +40,7 @@ import com.nvidia.spark.rapids.reader.CombinedResult;
  */
 public final class ParquetCombinedResult implements CombinedResult {
   private static final SubtaskStats EMPTY_STATS = new SubtaskStats(
-      0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, false,
+      0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L,
       0L, 0L, 0L, 0L, 0L);
   private final ReadSubtask plan;
   private final SubtaskStats stats;

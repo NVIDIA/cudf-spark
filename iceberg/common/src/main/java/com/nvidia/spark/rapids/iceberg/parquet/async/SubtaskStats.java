@@ -31,7 +31,6 @@ public final class SubtaskStats {
   private final long ioRequestCount;
   private final long ioRequestedBytes;
   private final long combineNanos;
-  private final boolean diskBacked;
   private final long cacheHitCount;
   private final long cacheHitBytes;
   private final long cacheMissCount;
@@ -49,7 +48,6 @@ public final class SubtaskStats {
    * @param ioRequestCount merged ranged reads issued
    * @param ioRequestedBytes total bytes spanned by merged reads, including discarded gap bytes
    * @param combineNanos elapsed combine-stage time in nanoseconds
-   * @param diskBacked whether the sealed result uses an executor-local file
    * @param cacheHitCount column-chunk data-cache hits
    * @param cacheHitBytes bytes copied from data-cache hits
    * @param cacheMissCount column-chunk data-cache misses
@@ -65,7 +63,6 @@ public final class SubtaskStats {
       long ioRequestCount,
       long ioRequestedBytes,
       long combineNanos,
-      boolean diskBacked,
       long cacheHitCount,
       long cacheHitBytes,
       long cacheMissCount,
@@ -94,7 +91,6 @@ public final class SubtaskStats {
     this.ioRequestCount = ioRequestCount;
     this.ioRequestedBytes = ioRequestedBytes;
     this.combineNanos = combineNanos;
-    this.diskBacked = diskBacked;
     this.cacheHitCount = cacheHitCount;
     this.cacheHitBytes = cacheHitBytes;
     this.cacheMissCount = cacheMissCount;
@@ -132,10 +128,6 @@ public final class SubtaskStats {
 
   public long getCombineNanos() {
     return combineNanos;
-  }
-
-  public boolean isDiskBacked() {
-    return diskBacked;
   }
 
   public long getCacheHitCount() {

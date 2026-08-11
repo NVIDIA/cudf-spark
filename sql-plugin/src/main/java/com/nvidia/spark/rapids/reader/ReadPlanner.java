@@ -16,16 +16,24 @@
 
 package com.nvidia.spark.rapids.reader;
 
+import java.util.Iterator;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+
+import org.apache.spark.sql.vectorized.ColumnarBatch;
 
 /**
- * Event-driven planning and combination coordinator.
+ * Format-specific operations and event-driven planning coordinator.
  *
- * <p>The reader registers every source together with its footer and data futures. Implementations
- * observe both futures, form format-specific plans, and submit combination work. Calls to
- * {@link #nextReady()} are fulfilled in planner-defined output order. Ownership of a successful
- * data future transfers to the planner when {@link #addFile} returns normally.</p>
+ * <p>The unified reader asks this component to read each footer and its filtered data, then
+ * registers both futures back with it. Implementations observe the futures, form format-specific
+ * plans, submit combination work, and decode each combined result. Keeping these operations
+ * together avoids splitting one format's pipeline across collaborators that share the same
+ * planning state and lifecycle.</p>
+ *
+ * <p>Calls to {@link #nextReady()} are fulfilled in planner-defined output order. Ownership of a
+ * successful data future transfers to the planner when {@link #addFile} returns normally.</p>
  */
 public interface ReadPlanner<
     S extends ReadSource,
@@ -33,9 +41,15 @@ public interface ReadPlanner<
     D extends ReadData,
     C extends CombinedResult> extends AutoCloseable {
 
+  CompletableFuture<F> readFooter(S source, ExecutorService executor);
+
+  CompletableFuture<D> readData(S source, F footer, ExecutorService executor);
+
+  /** Synchronously decode one combined input on the Spark task thread. */
+  Iterator<ColumnarBatch> decode(C input) throws Exception;
+
   void addFile(
       int fileId,
-      S source,
       CompletableFuture<F> footer,
       CompletableFuture<D> data);
 

@@ -107,15 +107,15 @@ public final class ParquetDataReader {
       }
 
       List<MergedRead> mergedReads = mergeMissChunks(misses);
-      List<PlannedReadRange> directRanges = new ArrayList<>();
+      List<RapidsInputFile.CopyRange> directRanges = new ArrayList<>();
       List<RapidsInputFile.CopyRange> scratchRanges = new ArrayList<>();
       long scratchBytes = 0L;
       long requestedBytes = 0L;
       for (MergedRead read : mergedReads) {
         requestedBytes = Math.addExact(requestedBytes, read.spanBytes());
         if (read.isDirect()) {
-          directRanges.add(new PlannedReadRange(
-              footer, read.sourceStart, read.spanBytes(), read.chunks.get(0).fragmentOffset));
+          directRanges.add(new RapidsInputFile.CopyRange(
+              read.sourceStart, read.spanBytes(), read.chunks.get(0).fragmentOffset));
         } else {
           read.scratchStart = scratchBytes;
           scratchRanges.add(new RapidsInputFile.CopyRange(

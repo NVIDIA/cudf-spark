@@ -32,9 +32,9 @@ import org.apache.spark.sql.vectorized.ColumnarBatch;
  * Format-neutral asynchronous reader coordinator.
  *
  * <p>The reader constructs a footer-to-data future chain for every source and immediately
- * registers both futures with an injected event-driven planner. The planner owns planning and
- * combination. Consequently, the Spark task thread only waits for a combined decoder input and
- * iterates the resulting batches.</p>
+ * registers both futures with an injected event-driven planner. The planner owns the
+ * format-specific read, planning, combination, and decode operations. Consequently, the Spark
+ * task thread only waits for a combined input and iterates the resulting batches.</p>
  */
 public final class UnifiedReader<
     S extends ReadSource,
@@ -44,9 +44,7 @@ public final class UnifiedReader<
     implements Iterator<ColumnarBatch>, AutoCloseable {
 
   private final List<S> sources;
-  private final ReadOps<S, F, D> ops;
   private final ReadPlanner<S, F, D, C> planner;
-  private final Decoder<C> decoder;
   private final ExecutorService executor;
 
   private boolean closed;
@@ -56,14 +54,10 @@ public final class UnifiedReader<
 
   public UnifiedReader(
       List<S> sources,
-      ReadOps<S, F, D> ops,
       ReadPlanner<S, F, D, C> planner,
-      Decoder<C> decoder,
       ExecutorService executor) {
     this.sources = Objects.requireNonNull(sources, "sources");
-    this.ops = Objects.requireNonNull(ops, "ops");
     this.planner = Objects.requireNonNull(planner, "planner");
-    this.decoder = Objects.requireNonNull(decoder, "decoder");
     this.executor = Objects.requireNonNull(executor, "executor");
   }
 
@@ -90,8 +84,8 @@ public final class UnifiedReader<
         Iterator<ColumnarBatch> batches = null;
         boolean installed = false;
         try {
-          batches = Objects.requireNonNull(decoder.decode(input),
-              "decoder returned null");
+          batches = Objects.requireNonNull(planner.decode(input),
+              "planner returned a null decoded iterator");
           currentInput = input;
           currentBatches = batches;
           installed = true;
@@ -129,10 +123,10 @@ public final class UnifiedReader<
     initialized = true;
     for (int fileId = 0; fileId < sources.size(); fileId++) {
       S source = sources.get(fileId);
-      CompletableFuture<F> footer = ops.readFooter(source, executor);
+      CompletableFuture<F> footer = planner.readFooter(source, executor);
       CompletableFuture<D> data = footer.thenCompose(
-          readyFooter -> ops.readData(source, readyFooter, executor));
-      planner.addFile(fileId, source, footer, data);
+          readyFooter -> planner.readData(source, readyFooter, executor));
+      planner.addFile(fileId, footer, data);
     }
     planner.noMoreFiles();
   }

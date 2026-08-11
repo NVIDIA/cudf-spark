@@ -46,7 +46,7 @@ import com.nvidia.spark.rapids.parquet.{
   MakeParquetTableProducer,
   ParquetPartitionReaderBase
 }
-import com.nvidia.spark.rapids.reader.{Decoder, ReadOps, UnifiedReader}
+import com.nvidia.spark.rapids.reader.UnifiedReader
 import org.apache.parquet.schema.MessageType
 
 import org.apache.spark.TaskContext
@@ -106,27 +106,30 @@ class GpuAsyncIcebergParquetReader(
       multiThreadConf.combineConf.combineWaitTime.toLong
     }
     val executor = ParquetReaderThreadPool.getOrCreate(workerThreads).executor()
-    val planner = new ParquetReadPlanner(
+    val planner = new IcebergParquetReadPlanner(
+      TaskContext.get(),
       new StableGreedyReadPlanner(
         conf.maxBatchSizeRows,
         conf.maxBatchSizeBytes,
         combineThreshold),
-      new ParquetCombiner,
       executor,
       combineThreshold > 0L,
-      combineWaitMs,
-      closed)
+      combineWaitMs)
     new UnifiedReader(
       files.asJava,
-      new IcebergParquetReadOps(TaskContext.get()),
       planner,
-      new ParquetDecoder,
       executor)
   }
 
-  /** Concrete asynchronous footer and encoded-data operations for Iceberg Parquet files. */
-  private class IcebergParquetReadOps(taskContext: TaskContext)
-      extends ReadOps[IcebergPartitionedFile, FooterResult, FileFragment] {
+  /** All format-specific operations and event-driven planning for Iceberg Parquet files. */
+  private class IcebergParquetReadPlanner(
+      taskContext: TaskContext,
+      planner: StableGreedyReadPlanner,
+      executor: ExecutorService,
+      combineEnabled: Boolean,
+      combineWaitMs: Long)
+      extends ParquetReadPlanner(
+        planner, executor, combineEnabled, combineWaitMs, closed) {
     private val taskAttemptId = if (taskContext == null) -1L else taskContext.taskAttemptId()
 
     override def readFooter(
@@ -170,35 +173,6 @@ class GpuAsyncIcebergParquetReader(
       }, executor)
     }
 
-    private def checkOpen(): Unit = {
-      if (closed.get()) {
-        throw new java.util.concurrent.CancellationException("Parquet reader is closed")
-      }
-    }
-
-    private def runAsTask[T](operation: => T): T = {
-      try {
-        if (taskContext == null) {
-          operation
-        } else {
-          TrampolineUtil.setTaskContext(taskContext)
-          RmmSpark.poolThreadWorkingOnTask(taskAttemptId)
-          try {
-            operation
-          } finally {
-            RmmSpark.poolThreadFinishedForTask(taskAttemptId)
-            TrampolineUtil.unsetTaskContext()
-          }
-        }
-      } catch {
-        case error: CompletionException => throw error
-        case error: Throwable => throw new CompletionException(error)
-      }
-    }
-  }
-
-  /** Concrete GPU decoder and Iceberg post-processing for one combined Parquet result. */
-  private class ParquetDecoder extends Decoder[ParquetCombinedResult] {
     override def decode(parquetInput: ParquetCombinedResult): JIterator[ColumnarBatch] = {
       val subtask = parquetInput.getPlan
       val stats = parquetInput.getStats
@@ -258,6 +232,32 @@ class GpuAsyncIcebergParquetReader(
         }
       }
       new PostProcessingJavaBatchIterator(decoded, postProcessor)
+    }
+
+    private def checkOpen(): Unit = {
+      if (closed.get()) {
+        throw new java.util.concurrent.CancellationException("Parquet reader is closed")
+      }
+    }
+
+    private def runAsTask[T](operation: => T): T = {
+      try {
+        if (taskContext == null) {
+          operation
+        } else {
+          TrampolineUtil.setTaskContext(taskContext)
+          RmmSpark.poolThreadWorkingOnTask(taskAttemptId)
+          try {
+            operation
+          } finally {
+            RmmSpark.poolThreadFinishedForTask(taskAttemptId)
+            TrampolineUtil.unsetTaskContext()
+          }
+        }
+      } catch {
+        case error: CompletionException => throw error
+        case error: Throwable => throw new CompletionException(error)
+      }
     }
   }
 

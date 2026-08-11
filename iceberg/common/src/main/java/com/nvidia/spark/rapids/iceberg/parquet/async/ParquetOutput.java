@@ -16,16 +16,20 @@
 
 package com.nvidia.spark.rapids.iceberg.parquet.async;
 
+import java.io.EOFException;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.channels.SeekableByteChannel;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.locks.StampedLock;
 
 import ai.rapids.cudf.HostMemoryBuffer;
 import com.nvidia.spark.rapids.HostAlloc$;
+import com.nvidia.spark.rapids.SpillPriorities;
+import com.nvidia.spark.rapids.SpillableHostBuffer;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
+import com.nvidia.spark.rapids.spill.SpillFramework$;
 
 /**
  * Exact-sized writable storage for one file's packed Parquet column chunks.
@@ -42,22 +46,33 @@ import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
  * written at once, and zero-copy decode avoids retaining a second task-sized assembly buffer.
  * The planned fragment size is exact, so sealing never needs a second size argument.</p>
  */
-abstract class ParquetOutput implements AutoCloseable {
+final class ParquetOutput implements AutoCloseable {
   private final long exactSizeBytes;
-  private final boolean diskBacked;
   // A read stamp is held around every write so seal and close (exclusive stamps) stay behind
   // all writers even if a caller ever writes concurrently from another thread.
   private final StampedLock operationLock = new StampedLock();
+  /** Owned only before seal; set to null when ownership moves to {@code sealedBuffer}. */
+  private HostMemoryBuffer buffer;
+  /** Owned only after seal and responsible for spill-framework registration. */
+  private SpillableHostBuffer sealedBuffer;
   private boolean sealed;
   private boolean closed;
 
-  ParquetOutput(long exactSizeBytes, boolean diskBacked) {
+  private ParquetOutput(HostMemoryBuffer buffer, long exactSizeBytes) {
     if (exactSizeBytes <= 0) {
       throw new IllegalArgumentException(
           "exactSizeBytes must be positive: " + exactSizeBytes);
     }
     this.exactSizeBytes = exactSizeBytes;
-    this.diskBacked = diskBacked;
+    this.buffer = Objects.requireNonNull(buffer, "buffer");
+    long bufferLength = buffer.getLength();
+    if (bufferLength < exactSizeBytes) {
+      buffer.close();
+      this.buffer = null;
+      throw new IllegalArgumentException(
+          "host buffer length " + bufferLength +
+              " is less than capacity " + exactSizeBytes);
+    }
   }
 
   /**
@@ -73,17 +88,7 @@ abstract class ParquetOutput implements AutoCloseable {
           "exactSizeBytes must be positive: " + exactSizeBytes);
     }
     HostMemoryBuffer allocation = HostAlloc$.MODULE$.alloc(exactSizeBytes, true);
-    return new MemoryParquetOutput(allocation, exactSizeBytes);
-  }
-
-  /** Return the exact allocation and final sealed size to subclasses. */
-  final long exactSizeBytes() {
-    return exactSizeBytes;
-  }
-
-  /** Return whether this output uses an executor-local file. */
-  final boolean isDiskBacked() {
-    return diskBacked;
+    return new ParquetOutput(allocation, exactSizeBytes);
   }
 
   /**
@@ -94,22 +99,19 @@ abstract class ParquetOutput implements AutoCloseable {
    */
   final void copyRanges(
       RapidsInputFile input,
-      List<PlannedReadRange> ranges) throws IOException {
+      List<RapidsInputFile.CopyRange> ranges) throws IOException {
     Objects.requireNonNull(input, "input");
     Objects.requireNonNull(ranges, "ranges");
     if (ranges.isEmpty()) {
       return;
     }
-    List<RapidsInputFile.CopyRange> copies = new ArrayList<>(ranges.size());
-    for (PlannedReadRange range : ranges) {
+    for (RapidsInputFile.CopyRange range : ranges) {
       Objects.requireNonNull(range, "range");
       checkWriteBounds(range.getOutputOffset(), range.getLength());
-      copies.add(new RapidsInputFile.CopyRange(
-          range.getInputOffset(), range.getLength(), range.getOutputOffset()));
     }
     long writeStamp = beginConcurrentWrite();
     try {
-      readVectoredStorage(input, copies);
+      input.readVectored(buffer, ranges);
     } finally {
       endConcurrentWrite(writeStamp);
     }
@@ -124,7 +126,23 @@ abstract class ParquetOutput implements AutoCloseable {
     long writeStamp = beginConcurrentWrite();
     try {
       checkWriteBounds(outputOffset, length);
-      copyCachedRangeStorage(source, outputOffset, length);
+      long copied = 0L;
+      while (copied < length) {
+        int amount = (int) Math.min(length - copied, Integer.MAX_VALUE);
+        ByteBuffer destination = buffer.asByteBuffer(outputOffset + copied, amount);
+        while (destination.hasRemaining()) {
+          int read = source.read(destination);
+          if (read < 0) {
+            throw new EOFException(
+                "cached data range ended with " + destination.remaining() +
+                    " bytes remaining");
+          }
+          if (read == 0) {
+            Thread.yield();
+          }
+        }
+        copied += amount;
+      }
     } finally {
       endConcurrentWrite(writeStamp);
     }
@@ -140,7 +158,7 @@ abstract class ParquetOutput implements AutoCloseable {
     long writeStamp = beginConcurrentWrite();
     try {
       checkWriteBounds(outputOffset, length);
-      return sliceForCacheStorage(outputOffset, length);
+      return buffer.slice(outputOffset, length);
     } finally {
       endConcurrentWrite(writeStamp);
     }
@@ -161,7 +179,7 @@ abstract class ParquetOutput implements AutoCloseable {
     long writeStamp = beginExclusiveWrite();
     try {
       checkWriteBounds(outputOffset, length);
-      writeBytesStorage(outputOffset, source, sourceOffset, length);
+      buffer.setBytes(outputOffset, source, sourceOffset, length);
     } finally {
       endExclusiveWrite(writeStamp);
     }
@@ -186,7 +204,7 @@ abstract class ParquetOutput implements AutoCloseable {
     long writeStamp = beginConcurrentWrite();
     try {
       checkWriteBounds(outputOffset, length);
-      copyFromHostBufferStorage(outputOffset, source, sourceOffset, length);
+      buffer.copyFromHostBuffer(outputOffset, source, sourceOffset, length);
     } finally {
       endConcurrentWrite(writeStamp);
     }
@@ -196,7 +214,18 @@ abstract class ParquetOutput implements AutoCloseable {
   final void seal() throws IOException {
     long writeStamp = beginExclusiveWrite();
     try {
-      sealStorage();
+      if (SpillFramework$.MODULE$.storesInternal() != null) {
+        // SpillableHostBuffer transfers ownership only after it creates the spill handle. Keep
+        // our reference until registration succeeds so close() still owns it on failure.
+        HostMemoryBuffer toTransfer = buffer;
+        try {
+          sealedBuffer = SpillableHostBuffer.apply(
+              toTransfer, exactSizeBytes, SpillPriorities.ACTIVE_BATCHING_PRIORITY());
+          buffer = null;
+        } catch (RuntimeException e) {
+          throw new IOException("failed to register Parquet buffer for spilling", e);
+        }
+      }
       sealed = true;
     } finally {
       endExclusiveWrite(writeStamp);
@@ -211,7 +240,14 @@ abstract class ParquetOutput implements AutoCloseable {
     long stamp = operationLock.readLock();
     try {
       ensureSealed();
-      return materializeStorage();
+      if (sealedBuffer == null) {
+        return buffer.slice(0L, exactSizeBytes);
+      }
+      try {
+        return sealedBuffer.getDataHostBuffer();
+      } catch (RuntimeException e) {
+        throw new IOException("failed to materialize Parquet host buffer", e);
+      }
     } finally {
       operationLock.unlockRead(stamp);
     }
@@ -226,53 +262,18 @@ abstract class ParquetOutput implements AutoCloseable {
         return;
       }
       closed = true;
-      closeStorage();
+      if (sealedBuffer != null) {
+        sealedBuffer.close();
+        sealedBuffer = null;
+      }
+      if (buffer != null) {
+        buffer.close();
+        buffer = null;
+      }
     } finally {
       operationLock.unlockWrite(stamp);
     }
   }
-
-  /**
-   * Perform one blocking vectored read whose destination is this output's backing store. Called
-   * while a concurrent-write stamp is held; the read is terminal when this returns.
-   */
-  abstract void readVectoredStorage(
-      RapidsInputFile input,
-      List<RapidsInputFile.CopyRange> copies) throws IOException;
-
-  /** Copy one bounds-checked cached range into the backing store under a write stamp. */
-  abstract void copyCachedRangeStorage(
-      SeekableByteChannel source,
-      long outputOffset,
-      long length) throws IOException;
-
-  /** Create an owning bounds-checked view of a completed range for the data cache. */
-  abstract HostMemoryBuffer sliceForCacheStorage(
-      long outputOffset,
-      long length) throws IOException;
-
-  /** Write bounds-checked combine-stage bytes while the exclusive write stamp is held. */
-  abstract void writeBytesStorage(
-      long outputOffset,
-      byte[] source,
-      int sourceOffset,
-      int length) throws IOException;
-
-  /** Copy one bounds-checked host-buffer range into the backing store under a write stamp. */
-  abstract void copyFromHostBufferStorage(
-      long outputOffset,
-      HostMemoryBuffer source,
-      long sourceOffset,
-      long length) throws IOException;
-
-  /** Perform the backing-store transition while the exclusive lifecycle lock is held. */
-  abstract void sealStorage() throws IOException;
-
-  /** Create an owning sealed-buffer reference while close is excluded. */
-  abstract HostMemoryBuffer materializeStorage() throws IOException;
-
-  /** Release backing-store resources while the exclusive lifecycle lock is held. */
-  abstract void closeStorage();
 
   /** Verify that an operation is permitted only before sealing. */
   private void ensureWritable() {
