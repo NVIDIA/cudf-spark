@@ -41,6 +41,15 @@ For more information about using scalatest with Maven please refer to the
 and the the
 [source code](https://github.com/scalatest/scalatest-maven-plugin/blob/383f396162b7654930758b76a0696d3aa2ce5686/src/main/java/org/scalatest/tools/maven/AbstractScalaTestMojo.java#L34).
 
+In addition to the ScalaTest suites, the `tests` module contains a single Java unit test,
+[`TestHashedPriorityQueue`](src/test/java/com/nvidia/spark/rapids/TestHashedPriorityQueue.java),
+implemented with JUnit 5. It is executed by the Maven Surefire plugin as part of the regular
+`mvn package -pl tests -am ...` and `mvn test` runs described above. To run only this test,
+use the Surefire `-Dtest` option, e.g.
+
+```bash
+mvn package -pl tests -am -Dbuildver=330 -Dtest=com.nvidia.spark.rapids.TestHashedPriorityQueue
+```
 
 #### Running Unit Tests Against Specific Apache Spark Versions
 You can run the unit tests against different versions of Spark using the different profiles. The
