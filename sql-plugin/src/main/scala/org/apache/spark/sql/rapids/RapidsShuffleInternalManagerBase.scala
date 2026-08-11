@@ -729,7 +729,7 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
         // Set to true as the very first act of call(). done() uses this to distinguish
         // "cancelled before call() ever ran" (safe to release quota there) from
         // "cancelled while call() was executing" (catch block releases after resources freed).
-        val callableStarted = new java.util.concurrent.atomic.AtomicBoolean(false)
+        val callableStarted = new AtomicBoolean(false)
         val compressionTask = new FutureTask[CompressedRecord](new Callable[CompressedRecord] {
           override def call(): CompressedRecord = {
             callableStarted.set(true)
