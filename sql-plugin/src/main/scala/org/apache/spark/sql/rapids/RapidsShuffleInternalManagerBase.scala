@@ -763,9 +763,8 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
                 // Note: excessQuota can be 0 if compression doesn't reduce size (or expands)
                 val excessQuota = math.max(0L, recordSize - compressedSize)
                 if (excessQuota > 0) {
-                  // addAndGet returns negative if done() already claimed quota via getAndSet(0).
-                  // In that case skip the direct release; the merger will also see a negative
-                  // getAndSet(0) and skip its release, preventing double-release on the success path.
+                  // addAndGet returns negative if done() already claimed quota via getAndSet(0);
+                  // skip the direct release. The merger also sees negative and skips.
                   val remaining = quotaToRelease.addAndGet(-excessQuota)
                   if (remaining >= 0) {
                     limiter.release(excessQuota)
