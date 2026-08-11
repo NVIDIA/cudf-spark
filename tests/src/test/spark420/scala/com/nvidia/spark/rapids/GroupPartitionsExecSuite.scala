@@ -22,10 +22,11 @@ package com.nvidia.spark.rapids
 import java.util.Collections
 
 import com.nvidia.spark.rapids.shims.{GpuGroupPartitionsExec, GpuGroupPartitionsExecInfo,
-  GroupPartitionsExecMeta}
+  GpuGroupPartitionsExecMeta}
 
 import org.apache.spark.SparkConf
-import org.apache.spark.sql.catalyst.plans.physical.UnknownPartitioning
+import org.apache.spark.sql.catalyst.expressions.{Ascending, AttributeReference, SortOrder}
+import org.apache.spark.sql.catalyst.plans.physical.{HashPartitioning, UnknownPartitioning}
 import org.apache.spark.sql.connector.catalog.{Column, Identifier, InMemoryCatalog}
 import org.apache.spark.sql.connector.distributions.Distributions
 import org.apache.spark.sql.connector.expressions.Expressions
@@ -66,16 +67,16 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
       s"GroupPartitionsExec unexpectedly fell back to CPU:\n$gpuPlan")
     assert(gpuPlan.collect { case exchange: Exchange => exchange }.isEmpty,
       s"Storage-partitioned join unexpectedly contains an exchange:\n$gpuPlan")
-    assert(gpuGroups.exists(_.groupedPartitions.exists(_._2.size > 1)),
+    assert(gpuGroups.exists(_.partitionGroups.exists(_.size > 1)),
       "Expected at least one key to coalesce multiple input partitions")
-    assert(gpuGroups.exists(_.groupedPartitions.exists(_._2.isEmpty)),
+    assert(gpuGroups.exists(_.partitionGroups.exists(_.isEmpty)),
       "Expected a missing key to produce an empty padded partition group")
-    val groupWithExpectedKeys = gpuGroups.find(_.expectedPartitionKeys.nonEmpty).getOrElse {
+    val groupWithExpectedKeys = gpuGroups.find(_.expectedPartitionKeyCount.nonEmpty).getOrElse {
       fail("Expected a GPU group with expected partition keys")
     }
     val summary = groupWithExpectedKeys.simpleString(maxFields = 1)
     assert(summary.contains(
-      s"ExpectedPartitionKeys: ${groupWithExpectedKeys.expectedPartitionKeys.get.size}"))
+      s"ExpectedPartitionKeys: ${groupWithExpectedKeys.expectedPartitionKeyCount.get}"))
     assert(summary.length < 256, s"GPU plan summary is unexpectedly long: $summary")
   }
 
@@ -92,7 +93,7 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
     assert(gpuGroups.nonEmpty, s"Expected GpuGroupPartitionsExec in plan:\n$gpuPlan")
     assert(gpuPlan.exists(_.isInstanceOf[GpuRowToColumnarExec]),
       s"Expected GpuRowToColumnarExec in plan:\n$gpuPlan")
-    assert(gpuGroups.exists(_.groupedPartitions.exists(_._2.size > 1)),
+    assert(gpuGroups.exists(_.partitionGroups.exists(_.size > 1)),
       "Expected grouping metadata from the original CPU child")
   }
 
@@ -104,16 +105,80 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
           UnknownPartitioning(0),
           Seq.empty,
           Seq.empty,
-          isGrouped = true,
           joinKeyPositions = None,
-          expectedPartitionKeys = None,
-          reducers = None,
+          expectedPartitionKeyCount = None,
+          reducerNames = None,
           distributePartitions = false))
 
       assert(groupPartitions.allMetrics.keySet == Set(GpuMetric.OP_TIME_NEW))
       assert(groupPartitions.getOpTimeNewMetric.nonEmpty)
       assert(groupPartitions.executeColumnar().partitions.isEmpty)
     }
+  }
+
+  test("GpuGroupPartitionsExec drops unsafe batching guarantees when coalescing") {
+    val singleBatchChild = GpuRowToColumnarExec(
+      LocalTableScanExec(Nil, Nil, None),
+      RequireSingleBatch)
+    val groupInfo = GpuGroupPartitionsExecInfo(
+      UnknownPartitioning(1),
+      Seq.empty,
+      Seq(Seq(0, 1)),
+      joinKeyPositions = None,
+      expectedPartitionKeyCount = None,
+      reducerNames = None,
+      distributePartitions = false)
+
+    assert(GpuGroupPartitionsExec(singleBatchChild, groupInfo).outputBatching == null)
+    assert(GpuGroupPartitionsExec(
+      singleBatchChild,
+      groupInfo.copy(partitionGroups = Seq(Seq(0)))).outputBatching == RequireSingleBatch)
+
+    val target = TargetSize(1024)
+    val targetSizeChild = GpuRowToColumnarExec(
+      LocalTableScanExec(Nil, Nil, None),
+      target)
+    assert(GpuGroupPartitionsExec(targetSizeChild, groupInfo).outputBatching == target)
+  }
+
+  test("GpuGroupPartitionsExec canonicalizes captured output expressions") {
+    def newPlan(): GpuGroupPartitionsExec = {
+      val attr = AttributeReference("id", IntegerType, nullable = false)()
+      GpuGroupPartitionsExec(
+        LocalTableScanExec(Seq(attr), Nil, None),
+        GpuGroupPartitionsExecInfo(
+          HashPartitioning(Seq(attr), 2),
+          Seq(SortOrder(attr, Ascending)),
+          Seq(Seq(0)),
+          joinKeyPositions = None,
+          expectedPartitionKeyCount = None,
+          reducerNames = None,
+          distributePartitions = false))
+    }
+
+    val first = newPlan()
+    val second = newPlan()
+    assert(first != second)
+    assert(first.canonicalized == second.canonicalized)
+  }
+
+  test("GpuGroupPartitionsExec summary includes all grouping metadata") {
+    val groupPartitions = GpuGroupPartitionsExec(
+      LocalTableScanExec(Nil, Nil, None),
+      GpuGroupPartitionsExecInfo(
+        UnknownPartitioning(1),
+        Seq.empty,
+        Seq(Seq(0)),
+        joinKeyPositions = Some(Seq(0, 2)),
+        expectedPartitionKeyCount = Some(3),
+        reducerNames = Some(Seq("bucket", "identity")),
+        distributePartitions = true))
+
+    val summary = groupPartitions.simpleString(maxFields = 10)
+    assert(summary.contains("JoinKeyPositions: [0, 2]"))
+    assert(summary.contains("ExpectedPartitionKeys: 3"))
+    assert(summary.contains("Reducers: [bucket, identity]"))
+    assert(summary.contains("DistributePartitions: true"))
   }
 
   test("sorted-merge GroupPartitionsExec keeps the original CPU subtree") {
@@ -124,11 +189,11 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
       groupPartitions,
       new RapidsConf(Map.empty[String, String]))
 
-    assert(meta.isInstanceOf[GroupPartitionsExecMeta])
+    assert(meta.isInstanceOf[GpuGroupPartitionsExecMeta])
     assert(!meta.canThisBeReplaced)
     assert(meta.explain(false).contains(
       "Sorted-merge GroupPartitionsExec is not supported on GPU"))
-    assert(meta.asInstanceOf[GroupPartitionsExecMeta].convertToCpu().eq(groupPartitions))
+    assert(meta.asInstanceOf[GpuGroupPartitionsExecMeta].convertToCpu().eq(groupPartitions))
   }
 
   private def createStoragePartitionedJoin(spark: SparkSession) = {

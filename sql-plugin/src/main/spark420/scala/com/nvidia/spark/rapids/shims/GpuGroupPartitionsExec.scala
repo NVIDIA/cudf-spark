@@ -23,16 +23,16 @@ import com.nvidia.spark.rapids._
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.SortOrder
+import org.apache.spark.sql.catalyst.expressions.{Expression, SortOrder}
+import org.apache.spark.sql.catalyst.plans.QueryPlan
 import org.apache.spark.sql.catalyst.plans.physical.Partitioning
-import org.apache.spark.sql.catalyst.util.{truncatedString, InternalRowComparableWrapper}
-import org.apache.spark.sql.connector.catalog.functions.Reducer
+import org.apache.spark.sql.catalyst.util.truncatedString
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.datasources.v2.{GroupedPartitionCoalescer,
   GroupPartitionsExec}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
-class GroupPartitionsExecMeta(
+class GpuGroupPartitionsExecMeta(
     groupPartitions: GroupPartitionsExec,
     conf: RapidsConf,
     parent: Option[RapidsMeta[_, _, _]],
@@ -63,11 +63,10 @@ class GroupPartitionsExecMeta(
 case class GpuGroupPartitionsExecInfo(
     outputPartitioning: Partitioning,
     outputOrdering: Seq[SortOrder],
-    groupedPartitions: Seq[(InternalRowComparableWrapper, Seq[Int])],
-    isGrouped: Boolean,
+    partitionGroups: Seq[Seq[Int]],
     joinKeyPositions: Option[Seq[Int]],
-    expectedPartitionKeys: Option[Seq[(InternalRowComparableWrapper, Int)]],
-    reducers: Option[Seq[Option[Reducer[_, _]]]],
+    expectedPartitionKeyCount: Option[Int],
+    reducerNames: Option[Seq[String]],
     distributePartitions: Boolean)
 
 object GpuGroupPartitionsExecInfo {
@@ -75,11 +74,11 @@ object GpuGroupPartitionsExecInfo {
     GpuGroupPartitionsExecInfo(
       groupPartitions.outputPartitioning,
       groupPartitions.outputOrdering,
-      groupPartitions.groupedPartitions,
-      groupPartitions.isGrouped,
+      groupPartitions.groupedPartitions.map(_._2),
       groupPartitions.joinKeyPositions,
-      groupPartitions.expectedPartitionKeys,
-      groupPartitions.reducers,
+      groupPartitions.expectedPartitionKeys.map(_.size),
+      groupPartitions.reducers.map(
+        _.map(_.map(_.displayName()).getOrElse("identity"))),
       groupPartitions.distributePartitions)
   }
 }
@@ -102,17 +101,39 @@ case class GpuGroupPartitionsExec(
 
   override def outputOrdering: Seq[SortOrder] = groupInfo.outputOrdering
 
-  override def outputBatching: CoalesceGoal = GpuExec.outputBatching(child)
+  // Combining parent partitions can turn one batch per parent task into multiple batches per
+  // grouped task. Only TargetSize remains valid because it constrains each batch independently.
+  override def outputBatching: CoalesceGoal = {
+    val childBatching = GpuExec.outputBatching(child)
+    if (partitionGroups.exists(_.size > 1)) {
+      childBatching match {
+        case target: TargetSize => target
+        case _ => null
+      }
+    } else {
+      childBatching
+    }
+  }
 
   override val coalesceAfter: Boolean = true
 
-  def groupedPartitions: Seq[(InternalRowComparableWrapper, Seq[Int])] =
-    groupInfo.groupedPartitions
+  def partitionGroups: Seq[Seq[Int]] = groupInfo.partitionGroups
 
-  def isGrouped: Boolean = groupInfo.isGrouped
+  def expectedPartitionKeyCount: Option[Int] = groupInfo.expectedPartitionKeyCount
 
-  def expectedPartitionKeys: Option[Seq[(InternalRowComparableWrapper, Int)]] =
-    groupInfo.expectedPartitionKeys
+  override protected def doCanonicalize(): SparkPlan = {
+    val normalizedPartitioning = groupInfo.outputPartitioning match {
+      case p: (Partitioning with Expression) =>
+        QueryPlan.normalizeExpressions(p, child.output)
+      case other => other
+    }
+    copy(
+      child = child.canonicalized,
+      groupInfo = groupInfo.copy(
+        outputPartitioning = normalizedPartitioning,
+        outputOrdering =
+          groupInfo.outputOrdering.map(QueryPlan.normalizeExpressions(_, child.output))))
+  }
 
   override protected def doExecute(): RDD[InternalRow] = {
     throw new UnsupportedOperationException(
@@ -120,12 +141,12 @@ case class GpuGroupPartitionsExec(
   }
 
   override protected def internalDoExecuteColumnar(): RDD[ColumnarBatch] = {
-    if (groupedPartitions.isEmpty) {
+    if (partitionGroups.isEmpty) {
       sparkContext.emptyRDD
     } else {
-      val partitionCoalescer = new GroupedPartitionCoalescer(groupedPartitions.map(_._2))
+      val partitionCoalescer = new GroupedPartitionCoalescer(partitionGroups)
       child.executeColumnar().coalesce(
-        groupedPartitions.size,
+        partitionGroups.size,
         shuffle = false,
         Some(partitionCoalescer))
     }
@@ -141,10 +162,10 @@ case class GpuGroupPartitionsExec(
     val joinKeyStr = groupInfo.joinKeyPositions.map { positions =>
       s"JoinKeyPositions: ${truncatedString(positions, "[", ", ", "]", joinKeyMaxFields)}"
     }.iterator
-    val expectedStr =
-      groupInfo.expectedPartitionKeys.map(keys => s"ExpectedPartitionKeys: ${keys.size}")
-    val reducersStr = groupInfo.reducers.map { values =>
-      val names = values.map(_.map(_.displayName()).getOrElse("identity"))
+    val expectedStr = groupInfo.expectedPartitionKeyCount.map { count =>
+      s"ExpectedPartitionKeys: $count"
+    }
+    val reducersStr = groupInfo.reducerNames.map { names =>
       s"Reducers: ${truncatedString(names, "[", ", ", "]", joinKeyMaxFields)}"
     }
     val distributeStr = Iterator(s"DistributePartitions: ${groupInfo.distributePartitions}")

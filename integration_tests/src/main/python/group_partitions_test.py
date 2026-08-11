@@ -62,6 +62,8 @@ def _assert_partial_clustering_spj_plan(plan):
         if node.getClass().getSimpleName() == "GpuShuffleExchangeExec"
     ]
     assert not join_exchanges, f"Expected shuffle-free SPJ inputs:\n{plan}"
+    assert not nodes_of_class("GpuShuffleExchangeExec"), \
+        f"Expected keyed partitioning to remain shuffle-free through DISTINCT:\n{plan}"
     assert nodes_of_class("GpuRowToColumnarExec"), \
         f"Expected transitions above the CPU batch scans:\n{plan}"
     if is_spark_420_or_later():
