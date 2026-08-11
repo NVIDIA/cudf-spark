@@ -102,6 +102,16 @@ class FailingTestColumnarBatchSerializer extends TestColumnarBatchSerializer {
   }
 }
 
+class InterruptingTestColumnarBatchSerializer extends TestColumnarBatchSerializer {
+  override def newInstance(): SerializerInstance = new TestColumnarBatchSerializerInstance() {
+    override def serializeStream(s: OutputStream): SerializationStream =
+      new TestColumnarBatchSerializationStream(s) {
+        override def writeValue[T: ClassTag](value: T): SerializationStream =
+          throw new InterruptedException("injected interruption during serialization")
+      }
+  }
+}
+
 class OutOfOrderTestColumnarBatchSerializer(
     firstStarted: CountDownLatch,
     secondSerialized: CountDownLatch,
@@ -966,6 +976,93 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
     } finally {
       releaseBlockers.countDown()
       writerBlockers.foreach(_.get(5, TimeUnit.SECONDS))
+      writer.stop(false)
+      if (writeThread.isAlive) {
+        writeThread.join(5000)
+      }
+    }
+  }
+
+  // Regression test for https://github.com/NVIDIA/cudf-spark/issues/15611
+  test("compression failure must release bytes-in-flight quota or producer deadlocks") {
+    // Scenario: producer acquires quota for record 0 (64 bytes), queues its compression task.
+    // maxBytesInFlight=100 means record 1 (65 bytes) cannot be acquired: 64+65=129>100, so
+    // the producer blocks on acquireOrBlock. The compression task for record 0 then fails.
+    // Bug: the failure path did not release the 64-byte quota, so the producer blocked forever.
+    // Fix: on compression failure the stranded quota must be released to wake the producer.
+    when(dependency.serializer).thenReturn(new FailingTestColumnarBatchSerializer())
+    val writer = new RapidsShuffleThreadedWriter[Int, ColumnarBatch](
+      blockManager, shuffleHandle, 0L, conf,
+      new ThreadSafeShuffleWriteMetricsReporter(taskContext.taskMetrics().shuffleWriteMetrics),
+      100L, // record 0 = 64 bytes, record 1 = 65 bytes; 64+65=129 > 100 -> record 1 blocks
+      shuffleExecutorComponents, numWriterThreads)
+
+    @volatile var writeFailure: Throwable = null
+    val writeThread = new Thread(() => {
+      try {
+        writer.write(createTestRecords(Iterator(0, 1)))
+      } catch {
+        case t: Throwable => writeFailure = t
+      }
+    })
+
+    try {
+      writeThread.start()
+      writeThread.join(5000)
+      assert(!writeThread.isAlive,
+        "producer deadlocked: compression failure did not release bytes-in-flight quota")
+      assert(writeFailure != null,
+        "expected write() to throw IOException after compression failure")
+      assert(writeFailure.isInstanceOf[IOException],
+        s"expected IOException but got ${writeFailure.getClass.getName}: " +
+          writeFailure.getMessage)
+      assert(writer.getBytesInFlight == 0,
+        s"bytes in flight leaked after failure: ${writer.getBytesInFlight}")
+    } finally {
+      writer.stop(false)
+      if (writeThread.isAlive) {
+        writeThread.join(5000)
+      }
+    }
+  }
+
+  
+  test("InterruptedException in compression releases bytes-in-flight quota") {
+    // Same deadlock scenario as the IOException test: record 0 acquires 64 bytes,
+    // record 1 (65 bytes) blocks because 64+65=129 > maxBytesInFlight=100.
+    // The compression task throws InterruptedException. The quota for record 0
+    // must be released to unblock the producer, and the IOException must wrap
+    // the original InterruptedException.
+    when(dependency.serializer).thenReturn(new InterruptingTestColumnarBatchSerializer())
+    val writer = new RapidsShuffleThreadedWriter[Int, ColumnarBatch](
+      blockManager, shuffleHandle, 0L, conf,
+      new ThreadSafeShuffleWriteMetricsReporter(taskContext.taskMetrics().shuffleWriteMetrics),
+      100L, // record 0 = 64 bytes in flight; record 1 (65 bytes) blocks until released
+      shuffleExecutorComponents, numWriterThreads)
+
+    @volatile var writeFailure: Throwable = null
+    val writeThread = new Thread(() => {
+      try {
+        writer.write(createTestRecords(Iterator(0, 1)))
+      } catch {
+        case t: Throwable => writeFailure = t
+      }
+    })
+
+    try {
+      writeThread.start()
+      writeThread.join(5000)
+      assert(!writeThread.isAlive,
+        "producer deadlocked: InterruptedException did not release bytes-in-flight quota")
+      assert(writeFailure != null,
+        "expected write() to throw after injected InterruptedException")
+      assert(writeFailure.isInstanceOf[IOException],
+        s"expected IOException but got ${writeFailure.getClass.getName}")
+      assert(writeFailure.getCause.isInstanceOf[InterruptedException],
+        "expected IOException to wrap the original InterruptedException")
+      assert(writer.getBytesInFlight == 0,
+        s"bytes in flight leaked after InterruptedException: ${writer.getBytesInFlight}")
+    } finally {
       writer.stop(false)
       if (writeThread.isAlive) {
         writeThread.join(5000)

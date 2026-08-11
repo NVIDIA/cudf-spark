@@ -721,6 +721,11 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
         waitTimeOnLimiterNs += System.nanoTime() - waitOnLimiterStart
 
         val batchForRecord = currentBatch
+        // Tracks how much quota this task still owes back to the limiter. Initialized to
+        // the full recordSize; decremented when excessQuota is released early on the success
+        // path. getAndSet(0) in the catch block or done() atomically claims whatever remains,
+        // so exactly one path releases the quota even when cancel(true) races with call().
+        val quotaToRelease = new AtomicLong(recordSize)
         val compressionTask = new FutureTask[CompressedRecord](new Callable[CompressedRecord] {
           override def call(): CompressedRecord = {
             try {
@@ -751,6 +756,7 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
                 val excessQuota = math.max(0L, recordSize - compressedSize)
                 if (excessQuota > 0) {
                   limiter.release(excessQuota)
+                  quotaToRelease.addAndGet(-excessQuota)
                 }
 
                 // Return CompressedRecord with buffer and remaining quota for Merger
@@ -759,7 +765,20 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
                 CompressedRecord(buffer, compressedSize, remainingQuota)
               }
             } catch {
+              case e: InterruptedException =>
+                Thread.currentThread().interrupt()
+                val toRelease = quotaToRelease.getAndSet(0)
+                if (toRelease > 0) {
+                  limiter.release(toRelease)
+                }
+                throw new IOException(
+                  s"Failed compression task for shuffle $shuffleId, map $mapId, " +
+                    s"partition $reducePartitionId", e)
               case e: Exception =>
+                val toRelease = quotaToRelease.getAndSet(0)
+                if (toRelease > 0) {
+                  limiter.release(toRelease)
+                }
                 throw new IOException(
                   s"Failed compression task for shuffle $shuffleId, map $mapId, " +
                     s"partition $reducePartitionId", e)
@@ -767,7 +786,15 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
           }
         }) {
           override def done(): Unit = {
-            // FutureTask invokes done only after isDone becomes true.
+            // For cancelled tasks, atomically claim and release whatever quota remains.
+            // getAndSet(0) ensures exactly one of the catch block and done() releases,
+            // even when cancel(true) races with an executing call().
+            if (isCancelled) {
+              val toRelease = quotaToRelease.getAndSet(0)
+              if (toRelease > 0) {
+                limiter.release(toRelease)
+              }
+            }
             batchForRecord.scheduleMerger()
           }
         }
