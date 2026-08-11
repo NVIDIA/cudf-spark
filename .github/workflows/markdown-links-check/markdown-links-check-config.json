@@ -1,0 +1,32 @@
+{
+  "ignorePatterns": [
+    {
+      "pattern": "https://github.com/NVIDIA/spark-rapids/pull/*"
+    },
+    {
+      "pattern": "https://github.com/NVIDIA/spark-rapids/issues/*"
+    },
+    {
+      "pattern": "https://github.com/NVIDIA/cudf-spark/pull/*"
+    },
+    {
+      "pattern": "https://github.com/NVIDIA/cudf-spark/issues/*"
+    },
+    {
+      "pattern": "/docs/archives"
+    },
+    {
+      "pattern": "http://localhost*"
+    },
+    {
+      "pattern": "https://www.nvidia.com/en-us/security/pgp-key"
+    },
+    {
+      "pattern": "https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.*"
+    }
+  ],
+  "timeout": "15s",
+  "retryOn429": true,
+  "retryCount":30,
+  "aliveStatusCodes": [200, 403]
+} 

@@ -1,0 +1,15 @@
+{"data":1,"data":0}
+{"data":-1,"data":50}
+{"data":0,"data":"string"}
+{"data":127,"data":"127"}
+{"data":100,"data":200}
+{"data":null,"data":200}
+{"data":100,"data":null}
+{"data":null,"data":false}
+{"data":true,"data":false}
+{"data":100.012,"data":null}
+{"data":100,"data":{"a":50,"a":100}}
+{"data":{"b":100},"data":{"a":200}}
+{"data":{"a":100},"data":{"b":200}}
+{"data":{"a":101,"a":102},"data":null}
+{"data":{"a":100},"data":"test"}

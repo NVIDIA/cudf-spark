@@ -1,0 +1,173 @@
+<?xml version="1.0"?>
+<!--
+  Copyright (c) 2021-2026, NVIDIA CORPORATION.
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
+<project name="maven-antrun" xmlns:ac="antlib:net.sf.antcontrib" xmlns:if="ant:if">
+    <!--
+        - Generates shim service discovery META-INF entries for ShimLoader
+
+        - Creates per-spark-build shim root directories (parallel worlds) from versioned aggregators
+
+        - Uses whichever aggregator from included_buildvers earliest in the list can contribute to
+          the conventional class file locations (shared world) without overwriting them. This is just
+          for deterministic retracing what aggregator contributed a particular file. The shared world
+          files should be bitwise-identical as a rough approximation of binary compatibility.
+          If we keep buildvers in a consistent order across all profiles, we should be able to fix many
+          issues in one shot. The only anticipated issue is the violation of the bitwise identity check
+          in the binary-dedupe script below.
+
+        - Verifies that all public classes in the shared world can indeed be safely shared because they
+          are bitwise-identical for all Spark version dependencies
+
+        - binary-dedupe ensures that only one bitwise-identical copy per class is stored in the final jar.
+
+        This ant script emulates compile and resource generation phases such that its output
+        can be passed to the maven-jar-plugin to fit well into conventional maven execution logic
+        after side-stepping it in this script.
+
+        The script is in a dedicated file because we can't use ant refid across different maven-antrun-plugin
+        executions, let alone maven profiles. It should be kept as general as possible w.r.t. to a particular
+        shim mix, such that it can generically be called from any profile.
+
+        TODO Once the caller pom is cleaned up enough it should be possible to have a single invocation of this
+        ant script outside profiles, and profiles will just set different values for input properties. At this
+        point it can be inlined again in pom.
+    -->
+    <taskdef resource="net/sf/antcontrib/antcontrib.properties"/>
+
+    <target name="init-properties">
+        <property environment="env"/>
+        <echo level="info">Preparing parallel worlds with params:
+            included_buildvers=${included_buildvers}
+            project.basedir=${project.basedir}
+            project.build.directory=${project.build.directory}
+            spark.version.classifier=${spark.version.classifier}
+            ART_URL=${env.ART_URL}
+            maven.repo.local=${maven.repo.local}
+        </echo>
+        <property name="shimServiceRsrc" value="META-INF/services/com.nvidia.spark.rapids.SparkShimServiceProvider"/>
+        <property name="shimServiceFile" value="${project.build.directory}/extra-resources/${shimServiceRsrc}"/>
+
+        <condition property="should.build.conventional.jar">
+            <and>
+                <not><contains string="${included_buildvers}" substring=","/></not>
+                <istrue value="${allowConventionalDistJar}"/>
+            </and>
+        </condition>
+        <echo level="info">Determined should.build.conventional.jar: ${should.build.conventional.jar}</echo>
+    </target>
+
+    <target name="copy-dependencies"
+            depends="init-properties">
+        <scriptdef
+            name="doCopyDependencies"
+            language="jython"
+            src="${spark.rapids.source.basedir}/${rapids.module}/build/package-parallel-worlds.py">
+            <attribute name="artifact_csv"/>
+        </scriptdef>
+        <doCopyDependencies artifact_csv="sql-plugin-api,aggregator"/>
+    </target>
+    <target name="build-parallel-worlds"
+            depends="copy-dependencies"
+            unless="should.build.conventional.jar">
+        <truncate file="${shimServiceFile}" create="true" mkdirs="true"/>
+        <concat destfile="${shimServiceFile}">
+            <fileset dir="${project.build.directory}/parallel-world" includes="spark*/${shimServiceRsrc}"/>
+        </concat>
+
+        <!-- check shims revisions -->
+        <exec executable="${spark.rapids.source.basedir}/${rapids.module}/scripts/check-shims-revisions.sh"
+              dir="${project.build.directory}"
+              resultproperty="build-parallel-worlds.checkRevisionsExitCode"
+              errorproperty="build-parallel-worlds.checkRevisionsErrorMsg"
+              failonerror="false">
+            <arg value="${included_buildvers}"/>
+        </exec>
+        <ac:if>
+            <not>
+                <equals arg1="${build-parallel-worlds.checkRevisionsExitCode}" arg2="0"/>
+            </not>
+            <ac:then>
+                <property
+                    name="checkShimRevisionsError"
+                    value="check-shims-revisions.sh failed: exitCode=${build-parallel-worlds.checkRevisionsExitCode} error=${build-parallel-worlds.checkRevisionsErrorMsg}"
+                />
+                <ac:if>
+                    <istrue value="${ignore.shim.revisions.check}"/>
+                    <ac:then>
+                        <echo>ignore.shim.revisions.check=${ignore.shim.revisions.check}: Ignoring shim revision check failure ${checkShimRevisionsError}</echo>
+                    </ac:then>
+                    <ac:else>
+                        <fail>${checkShimRevisionsError}</fail>
+                    </ac:else>
+                </ac:if>
+            </ac:then>
+        </ac:if>
+
+        <exec executable="${spark.rapids.source.basedir}/${rapids.module}/scripts/binary-dedupe.sh"
+              dir="${project.build.directory}"
+              resultproperty="build-parallel-worlds.dedupeExitCode"
+              errorproperty="build-parallel-worlds.dedupeErrorMsg"
+              failonerror="false">
+            <env key="UNSHIMMED_COMMON_FROM_SINGLE_SHIM_TXT"
+                 value="${spark.rapids.source.basedir}/${rapids.module}/unshimmed-common-from-single-shim.txt"/>
+            <env key="KEEP_IN_SPARK_SHARED_TXT"
+                 value="${spark.rapids.source.basedir}/${rapids.module}/keep-in-spark-shared.txt"/>
+            <env key="KEEP_IN_SPARK_SHIM_DIRS_TXT"
+                 value="${spark.rapids.source.basedir}/${rapids.module}/keep-in-spark-shim-dirs.txt"/>
+            <env key="UNSHIM_ANALYZER_SCRIPT"
+                 value="${spark.rapids.source.basedir}/${rapids.module}/scripts/analyze-parallel-world-deps.py"/>
+        </exec>
+        <fail message="exec binary-dedupe.sh failed, exit code is ${build-parallel-worlds.dedupeExitCode}, error msg is ${build-parallel-worlds.dedupeErrorMsg}">
+            <condition>
+                <not>
+                    <equals arg1="${build-parallel-worlds.dedupeExitCode}" arg2="0"/>
+                </not>
+            </condition>
+        </fail>
+
+        <!-- Remove explicitly promoted non-class files from the common directory -->
+        <delete>
+            <fileset dir="${project.build.directory}/parallel-world/spark-shared"
+                     includesfile="${spark.rapids.source.basedir}/${rapids.module}/unshimmed-common-from-single-shim.txt"/>
+        </delete>
+    </target>
+    <target name="remove-dependencies-from-pom" depends="build-parallel-worlds"
+            unless="rapids.parallel.world.skip.reduced.pom">
+        <echo level="info">Generating dependency-reduced-pom.xml</echo>
+        <resources id="aggregatorDependencyRegexWithoutWhitespace">
+            <string>&lt;dependency&gt;</string>
+            <string>&lt;groupId&gt;com.nvidia&lt;/groupId&gt;</string>
+            <string>&lt;artifactId&gt;rapids-4-spark-aggregator_\S+?&lt;/artifactId&gt;</string>
+            <string>&lt;version&gt;\S+?&lt;/version&gt;</string>
+            <string>&lt;classifier&gt;\S+?&lt;/classifier&gt;</string>
+            <string>&lt;scope&gt;\S+?&lt;/scope&gt;</string>
+            <string>&lt;/dependency&gt;</string>
+        </resources>
+        <pathconvert property="aggregatorDependencyRegex" refid="aggregatorDependencyRegexWithoutWhitespace" pathsep="\s+?"/>
+
+        <echo level="info">Generated regex to remove aggregator dependencies:
+        ${aggregatorDependencyRegex}
+        </echo>
+        <copy file="${project.basedir}/pom.xml"
+            tofile="${project.build.directory}/parallel-world/META-INF/maven/${project.groupId}/${project.artifactId}/pom.xml"
+            overwrite="true">
+            <filterchain>
+                <replaceregex flags="gs" byline="false" replace=""
+                              pattern="${aggregatorDependencyRegex}"/>
+            </filterchain>
+        </copy>
+    </target>
+</project>

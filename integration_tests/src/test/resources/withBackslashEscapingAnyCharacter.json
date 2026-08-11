@@ -1,0 +1,13 @@
+{"str": "value"}
+{"str": "value \u0035"}
+{"\str": "value"}
+{"st\r": "value"}
+{"str\": "value"}
+{"str": "\value"}
+{"str": "v\alue"}
+{"str": "va\lue"}
+{"str": "val\ue"}
+{"str": "valu\e"}
+{"str": "\$value"}
+{"str"\: "value"}
+{"str": "value"\}

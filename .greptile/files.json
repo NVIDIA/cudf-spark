@@ -1,0 +1,54 @@
+{
+  "files": [
+    {
+      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/GpuOverrides.scala",
+      "description": "GPU operator override registry and fallback rules"
+    },
+    {
+      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/RapidsConf.scala",
+      "description": "Configuration keys and defaults"
+    },
+    {
+      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/Arm.scala",
+      "description": "ARM pattern (withResource/closeOnExcept) for GPU resource management"
+    },
+    {
+      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/RmmRapidsRetryIterator.scala",
+      "description": "OOM retry framework (withRetry/withRetryNoSplit) for GPU memory allocation"
+    },
+    {
+      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/SpillableColumnarBatch.scala",
+      "description": "GPU memory spill framework for columnar batches"
+    },
+    {
+      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/GpuSemaphore.scala",
+      "description": "GPU access semaphore and deadlock prevention"
+    },
+    {
+      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/spill/SpillFramework.scala",
+      "description": "GPU memory spill-to-host/disk framework"
+    },
+    {
+      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/SpillPriorities.scala",
+      "description": "Spill priority definitions for GPU memory management"
+    },
+    {
+      "path": "integration_tests/src/main/python/asserts.py",
+      "description": "GPU vs CPU comparison assertions for Python integration tests",
+      "scope": ["integration_tests/**"]
+    },
+    {
+      "path": "integration_tests/src/main/python/data_gen.py",
+      "description": "Seeded data generation framework for test reproducibility",
+      "scope": ["integration_tests/**"]
+    },
+    {
+      "path": "CONTRIBUTING.md",
+      "description": "Contribution guidelines"
+    },
+    {
+      "path": ".github/PULL_REQUEST_TEMPLATE.md",
+      "description": "PR checklist template"
+    }
+  ]
+}

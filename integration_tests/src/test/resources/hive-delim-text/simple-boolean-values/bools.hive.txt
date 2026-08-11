@@ -1,0 +1,25 @@
+"booleans"
+true
+false
+\N
+True
+False
+TRUE
+FALSE
+BAD
+y
+n
+yes
+no
+1
+0
+t
+f
+ true
+true 
+ false
+false 
+ 1
+1 
+ 0
+0 

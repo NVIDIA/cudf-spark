@@ -1,0 +1,484 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Copyright (c) 2020-2026, NVIDIA CORPORATION.
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.nvidia</groupId>
+        <artifactId>rapids-4-spark-parent_2.13</artifactId>
+        <version>26.10.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+    <artifactId>rapids-4-spark_2.13</artifactId>
+    <name>RAPIDS Accelerator for Apache Spark Distribution</name>
+    <description>Creates the distribution package of the RAPIDS plugin for Apache Spark</description>
+    <version>26.10.0-SNAPSHOT</version>
+    <dependencies>
+        <dependency>
+            <groupId>com.nvidia</groupId>
+            <artifactId>rapids-4-spark-aggregator_${scala.binary.version}</artifactId>
+            <version>${project.version}</version>
+            <classifier>${spark.version.classifier}</classifier>
+            <scope>compile</scope>
+        </dependency>
+    </dependencies>
+
+    <properties>
+        <!-- skip by default -->
+        <dyn.shim.include.buildvers.skip>true</dyn.shim.include.buildvers.skip>
+        <rapids.module>dist</rapids.module>
+        <target.classifier/>
+        <dist.jar.name>${project.build.directory}/${project.build.finalName}-${jni.classifier}.jar</dist.jar.name>
+        <dist.jar.pom.url>jar:file:${dist.jar.name}!/META-INF/maven/${project.groupId}/${project.artifactId}/pom.xml</dist.jar.pom.url>
+        <rapids.default.jar.phase>none</rapids.default.jar.phase>
+        <rapids.jni.unpack.skip>false</rapids.jni.unpack.skip>
+        <rapids.source.jar.phase>none</rapids.source.jar.phase>
+    </properties>
+    <profiles>
+        <profile>
+            <id>noSnapshotsWithDatabricks</id>
+            <properties>
+                <dyn.shim.include.buildvers.skip>false</dyn.shim.include.buildvers.skip>
+                <dyn.shim.buildver>no_snap_with_databricks</dyn.shim.buildver>
+            </properties>
+        </profile>
+        <profile>
+            <id>snapshotsWithDatabricks</id>
+            <properties>
+                <dyn.shim.include.buildvers.skip>false</dyn.shim.include.buildvers.skip>
+                <dyn.shim.buildver>snap_and_no_snap_with_databricks</dyn.shim.buildver>
+            </properties>
+        </profile>
+        <profile>
+            <id>noSnapshots</id>
+            <properties>
+                <dyn.shim.include.buildvers.skip>false</dyn.shim.include.buildvers.skip>
+                <dyn.shim.buildver>no_snapshots</dyn.shim.buildver>
+            </properties>
+        </profile>
+        <profile>
+            <id>snapshots</id>
+            <properties>
+                <dyn.shim.include.buildvers.skip>false</dyn.shim.include.buildvers.skip>
+                <dyn.shim.buildver>snap_and_no_snap</dyn.shim.buildver>
+            </properties>
+        </profile>
+        <profile>
+            <id>databricks</id>
+            <properties>
+                <dyn.shim.include.buildvers.skip>false</dyn.shim.include.buildvers.skip>
+                <dyn.shim.buildver>databricks</dyn.shim.buildver>
+            </properties>
+        </profile>
+        <profile>
+            <id>premergeUT1</id>
+            <properties>
+                <included_buildvers>
+                    ${premergeUT1.buildvers}
+                </included_buildvers>
+            </properties>
+        </profile>
+        <profile>
+            <id>premergeUT2</id>
+            <properties>
+                <included_buildvers>
+                    ${premergeUT2.buildvers}
+                </included_buildvers>
+            </properties>
+        </profile>
+        <profile>
+            <id>premergeUTF8</id>
+            <properties>
+                <included_buildvers>
+                    ${premergeUTF8.buildvers}
+                </included_buildvers>
+            </properties>
+        </profile>
+        <profile>
+            <id>premergeScala213</id>
+            <properties>
+                <included_buildvers>
+                    ${premergeScala213.buildvers}
+                </included_buildvers>
+            </properties>
+        </profile>
+        <profile>
+            <id>jdk11-test</id>
+            <properties>
+                <included_buildvers>
+                    ${jdk11.buildvers}
+                </included_buildvers>
+            </properties>
+        </profile>
+        <profile>
+            <id>jdk17-scala213-test</id>
+            <properties>
+                <included_buildvers>
+                    ${jdk17.scala213.buildvers}
+                </included_buildvers>
+            </properties>
+        </profile>
+        <profile>
+            <id>jdk17-test</id>
+            <properties>
+                <included_buildvers>
+                    ${jdk17.buildvers}
+                </included_buildvers>
+            </properties>
+        </profile>
+        <profile>
+            <!--
+            https://spark.apache.org/versioning-policy.html
+            Spark's semantic versioning [MAJOR].[FEATURE].[MAINTENANCE]
+
+            The plugin support begins with MAJOR=3
+
+            Most problems with the shim support occur when we cross into the next
+            FEATURE version and when we deal with distributions
+
+            Maintain a representative sample one of each:
+                - 3.x upstream versions
+                - a downstream distro
+                - a snapshot
+            for testing while minimizing the build time
+            -->
+            <id>minimumFeatureVersionMix</id>
+            <properties>
+                <included_buildvers>
+                    330
+                </included_buildvers>
+            </properties>
+        </profile>
+        <profile>
+            <id>individual</id>
+            <activation>
+                <activeByDefault>true</activeByDefault>
+            </activation>
+            <properties>
+                <included_buildvers>${buildver}</included_buildvers>
+            </properties>
+        </profile>
+        <profile>
+            <id>pre-merge</id>
+            <properties>
+                <included_buildvers>${buildver}</included_buildvers>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>exec-maven-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>if_modified_files</id>
+                                <phase>package</phase>
+                                <goals>
+                                    <goal>exec</goal>
+                                </goals>
+                                <configuration>
+                                    <executable>bash</executable>
+                                     <commandlineArgs>-c 'export MODIFIED=$(git status --porcelain | grep "^ M"); [[ -z $MODIFIED ]] &amp;&amp; exit 0 || { echo -e "found modified files during mvn verify:\n$MODIFIED"; exit 1;}'</commandlineArgs>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+    <build>
+        <resources>
+          <resource>
+            <directory>${project.build.directory}/extra-resources</directory>
+          </resource>
+        </resources>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-resources-plugin</artifactId>
+                <version>3.2.0</version>
+                <executions>
+                    <execution>
+                        <id>default-resources</id>
+                        <phase>process-resources</phase>
+                        <configuration>
+                            <outputDirectory>${project.build.directory}/parallel-world</outputDirectory>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <configuration>
+                    <classifier>${jni.classifier}</classifier>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>create-parallel-worlds-jar</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>jar</goal>
+                        </goals>
+                        <configuration>
+                            <archive><compress>${dist.jar.compress}</compress></archive>
+                            <classesDirectory>${project.build.directory}/parallel-world</classesDirectory>
+                            <classifier>${jni.classifier}</classifier>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-antrun-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <!-- ensure a phase preceding create-parallel-world and copy-current -->
+                        <phase>initialize</phase>
+                        <goals>
+                            <goal>run</goal>
+                        </goals>
+                        <id>clean-any-prior-output</id>
+                        <configuration>
+                            <target>
+                                <delete dir="${project.build.directory}/parallel-world"
+                                        includeemptydirs="true"/>
+                                <delete>
+                                    <fileset dir="${project.build.directory}" includes="*.jar"/>
+                                </delete>
+                                <delete dir="${project.build.directory}/deps" includeemptydirs="true"/>
+                                <mkdir dir="${project.build.directory}/deps"/>
+                            </target>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <phase>generate-resources</phase>
+                        <goals>
+                            <goal>run</goal>
+                        </goals>
+                        <id>create-parallel-world</id>
+                        <configuration>
+                            <target>
+                                <property name="project.basedir" value="${project.basedir}"/>
+                                <property name="project.build.directory" value="${project.build.directory}"/>
+                                <property name="project.version" value="${project.version}"/>
+                                <property name="scala.binary.version" value="${scala.binary.version}"/>
+                                <property name="included_buildvers" value="${included_buildvers}"/>
+                                <ant
+                                    antfile="${spark.rapids.source.basedir}/${rapids.module}/maven-antrun/build-parallel-worlds.xml"
+                                    target="remove-dependencies-from-pom"
+                                />
+                            </target>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>copy-jni-and-ucx-classes</id>
+                        <!-- after optional unpack -->
+                        <phase>process-resources</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <taskdef resource="net/sf/antcontrib/antcontrib.properties"/>
+                                <ac:if xmlns:ac="antlib:net.sf.antcontrib">
+                                    <available file="${project.build.directory}/jni-deps" type="dir"/>
+                                    <then>
+                                        <copy todir="${project.build.directory}/parallel-world">
+                                            <fileset dir="${project.build.directory}/jni-deps"/>
+                                        </copy>
+                                    </then>
+                                    <else>
+                                        <fail>Re-execute build with the default `-Drapids.jni.unpack.skip=false`</fail>
+                                    </else>
+                                </ac:if>
+                            </target>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>run</goal>
+                        </goals>
+                        <id>check-pom-dependencies-empty</id>
+                        <configuration>
+                            <target>
+                                <scriptdef name="validateReducedPom" language="jython">
+<![CDATA[
+import xml.etree.ElementTree as ET
+
+self.log("Verifying pom.xml in distribution jar has zero dependencies ...")
+pom_xml = project.getProperty("pomXmlInJar")
+ns = 'http://maven.apache.org/POM/4.0.0'
+root = ET.fromstring(pom_xml)
+# verify: either no child element dependencies or it is empty
+deps = root.findall('{%s}dependencies' % ns)
+assert len(deps) == 0 or len(deps) == 1 and len(deps[0]) == 0, \
+       "Dist pom must not have dependencies"
+self.log("... OK")
+]]>
+                                </scriptdef>
+                                <loadresource property="pomXmlInJar">
+                                    <url url="${dist.jar.pom.url}"/>
+                                </loadresource>
+                                <validateReducedPom/>
+                            </target>
+                        </configuration>
+                    </execution>
+                </executions>
+                <dependencies>
+                    <dependency>
+                        <groupId>com.nvidia</groupId>
+                        <artifactId>rapids-4-spark-aggregator_${scala.binary.version}</artifactId>
+                        <version>${project.version}</version>
+                        <classifier>${spark.version.classifier}</classifier>
+                    </dependency>
+                </dependencies>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.rat</groupId>
+                <artifactId>apache-rat-plugin</artifactId>
+                <configuration>
+                    <excludes>
+                        <exclude>com.nvidia.spark.rapids.SparkShimServiceProvider.*</exclude>
+                        <exclude>dependency-reduced-pom*.xml</exclude>
+                        <exclude>*.txt</exclude>
+                        <exclude>*.md</exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
+            <plugin>
+                <!-- The dependency scopes of spark-rapids-jni and jucx are `provided` in aggregator submodule,
+                 this will skip the dedupe processing in `create-parallel-world`.
+                 Unpack spark-rapids-jni and jucx jars to `parallel-world` directory after `create-parallel-world`,
+                 then `parallel-world` will be packaged.
+                 Note all Shims use the same version of spark-rapids-jni and jucx -->
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>unpack-spark-rapids-jni-and-ucx</id>
+                        <!-- run after `create-parallel-world`, the phase equals to the phase of the `create-parallel-world` -->
+                        <phase>generate-resources</phase>
+                        <goals>
+                            <goal>unpack</goal>
+                        </goals>
+                        <configuration>
+                            <skip>${rapids.jni.unpack.skip}</skip>
+                            <artifactItems>
+                                <!-- if add new artifacts, should set `overWrite` as true -->
+                                <artifactItem>
+                                    <groupId>com.nvidia</groupId>
+                                    <artifactId>spark-rapids-jni</artifactId>
+                                    <classifier>${jni.classifier}</classifier>
+                                    <excludes>META-INF/**</excludes>
+                                    <outputDirectory>${project.build.directory}/jni-deps</outputDirectory>
+                                    <overWrite>true</overWrite>
+                                </artifactItem>
+                                <artifactItem>
+                                    <groupId>org.openucx</groupId>
+                                    <artifactId>jucx</artifactId>
+                                    <excludes>META-INF/**</excludes>
+                                    <outputDirectory>${project.build.directory}/jni-deps</outputDirectory>
+                                    <overWrite>true</overWrite>
+                                </artifactItem>
+                            </artifactItems>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-install-plugin</artifactId>
+                <version>3.0.1</version>
+                <executions>
+                    <execution>
+                        <id>default-install</id>
+                        <phase>none</phase>
+                    </execution>
+                    <execution>
+                        <id>install-parallel-worlds-jar</id>
+                        <phase>install</phase>
+                        <goals>
+                            <goal>install-file</goal>
+                        </goals>
+                        <configuration>
+                            <file>${dist.jar.name}</file>
+                            <artifactId>${project.artifactId}</artifactId>
+                            <classifier>${jni.classifier}</classifier>
+                            <groupId>${project.groupId}</groupId>
+                            <version>${project.version}</version>
+                            <packaging>jar</packaging>
+                            <!-- pomFile will be taken from META-INF in jar
+                            https://github.com/apache/maven-install-plugin/blob/9f77fb95ab2a95b1d8d0c34c39c6f088f9f690ab/src/main/java/org/apache/maven/plugins/install/InstallFileMojo.java#L309
+                            -->
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-deploy-plugin</artifactId>
+                <version>3.0.0</version>
+                <executions>
+                    <execution>
+                        <id>default-deploy</id>
+                        <phase>none</phase>
+                    </execution>
+                    <execution>
+                        <id>deploy-parallel-worlds-jar</id>
+                        <phase>deploy</phase>
+                        <goals>
+                            <goal>deploy-file</goal>
+                        </goals>
+                        <configuration>
+                            <file>${dist.jar.name}</file>
+                            <url>file://${java.io.tmpdir}/m2-repo</url>
+                            <artifactId>${project.artifactId}</artifactId>
+                            <classifier>${jni.classifier}</classifier>
+                            <groupId>${project.groupId}</groupId>
+                            <packaging>jar</packaging>
+                            <!-- pomFile will be taken from META-INF in jar
+                            https://github.com/apache/maven-deploy-plugin/blob/4a72d8e9778c1878058435bdb919d40d65c879dd/src/main/java/org/apache/maven/plugins/deploy/DeployFileMojo.java#L186
+                            -->
+                            <version>${project.version}</version>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-antrun-plugin</artifactId>
+                <version>3.1.0</version>
+                <executions>
+                    <execution>
+                        <id>set-included-buidlvers</id>
+                        <goals><goal>run</goal></goals>
+                        <phase>generate-sources</phase>
+                        <configuration>
+                            <skip>${dyn.shim.include.buildvers.skip}</skip>
+                            <target xmlns:ac="antlib:net.sf.antcontrib">
+                                <script language="jython" src="${spark.rapids.source.basedir}/build/dyn_shim_detection.py"/>
+                            </target>
+                            <exportAntProperties>true</exportAntProperties>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

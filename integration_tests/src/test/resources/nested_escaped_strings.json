@@ -1,0 +1,55 @@
+{"data": {"a": "ABCDEFGHIJKLMNOPQRSTUVWXYZ"}}
+{"data": {"a": "\a"}}
+{"data": {"a": "\b"}}
+{"data": {"a": "\c"}}
+{"data": {"a": "\d"}}
+{"data": {"a": "\e"}}
+{"data": {"a": "\f"}}
+{"data": {"a": "\g"}}
+{"data": {"a": "\h"}}
+{"data": {"a": "\i"}}
+{"data": {"a": "\j"}}
+{"data": {"a": "\k"}}
+{"data": {"a": "\l"}}
+{"data": {"a": "\m"}}
+{"data": {"a": "\n"}}
+{"data": {"a": "\o"}}
+{"data": {"a": "\p"}}
+{"data": {"a": "\q"}}
+{"data": {"a": "\r"}}
+{"data": {"a": "\s"}}
+{"data": {"a": "\t"}}
+{"data": {"a": "\u"}}
+{"data": {"a": "\v"}}
+{"data": {"a": "\w"}}
+{"data": {"a": "\x"}}
+{"data": {"a": "\y"}}
+{"data": {"a": "\z"}}
+{"data": {"a": "\\"}}
+{"data": {"a": "\""}}
+{"data": {"a": "\'"}}
+{"data": {"a": "\u0000"}}
+{"data": {"a": "\u0001"}}
+{"data": {"a": "\u0002"}}
+{"data": {"a": "\u0003"}}
+{"data": {"a": "\u0004"}}
+{"data": {"a": "This\ris\nA\ttest\u0009to\u000Asee\u000awhat\u000Bhappens"}}
+{"data": {"a": "\u0031\u0034"}}
+{"data": {"a": "\u0031\u0034\u002E\u0030\u0031"}}
+{"data": {"a": "\'TESTING\'"}}
+{"data": {"a": "This is a simple string"}}
+{"data": {"a": "This string contains a newline character\n"}}
+{"data": {"a": "This string contains a tab character\t"}}
+{"data": {"a": "This string contains a backslash \\"}}
+{"data": {"a": "This string contains a double quote \""}}
+{"data": {"a": "This string contains a unicode character \u00A9"}}
+{"data": {"a": "This string contains a smiley face \u263A"}}
+{"data": {"a": "This string contains a backspace character\b"}}
+{"data": {"a": "This string contains a form feed character\f"}}
+{"data": {"a": "This string contains a form feed character\u000C"}}
+{"data": {"a": "This string contains a carriage return\r"}}
+{"data": {"a": "This string contains a carriage return\u000D"}}
+{"data": {"a": "This string contains an illegal control character \u0007 (bell)"}}
+{"data": {"a": "This string contains an illegal character \u001F (unit separator)"}}
+{"data": {"a": "This string contains a mix of normal and escaped characters: \n \" \t \u0041"}}
+{"data": {"a": "This string contains an illegal control character directly: \u0001"}}

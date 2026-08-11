@@ -1,0 +1,44 @@
+// Copyright (c) 2020, NVIDIA CORPORATION.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+include "ShuffleCommon.fbs";
+
+namespace com.nvidia.spark.rapids.format;
+
+enum TransferState: byte {
+  /// UCX transfer initiated on sender-side
+  STARTED = 0,
+
+  /// Data has been compressed and requires meta update
+  BUFFER_META_UPDATED = 1
+}
+
+table BufferTransferResponse {
+  /// ID of the requested buffer
+  buffer_id: int;
+
+  /// state of the transfer
+  state: TransferState;
+
+  /// new metadata for the buffer if state is BUFFER_META_UPDATED
+  buffer_meta: BufferMeta;
+}
+
+/// Flat buffer for Rapids UCX Shuffle Transfer Response.
+table TransferResponse {
+  /// array of buffer responses, one for each requested
+  responses: [BufferTransferResponse];
+}
+
+root_type TransferResponse;

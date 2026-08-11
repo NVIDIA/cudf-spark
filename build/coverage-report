@@ -1,0 +1,58 @@
+#!/bin/bash
+
+#
+# Copyright (c) 2020-2025, NVIDIA CORPORATION. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+set -e
+JVER=${JACOCO_VERSION:-"0.8.5"}
+JDEST=${JACOCO_DEST:-"./target/jacococli.jar"}
+TMP_CLASS=${TEMP_CLASS_LOC:-"./target/jacoco_classes/"}
+HTML_LOC=${HTML_LOCATION:="./target/jacoco-report/"}
+XML_LOC=${XML_LOCATION:="${HTML_LOC}"}
+DIST_JAR=${RAPIDS_DIST_JAR:-$(ls ./dist/target/rapids-4-spark_2.12-*cuda*.jar | grep -v test | head -1 | xargs readlink -f)}
+SPK_VER=${JACOCO_SPARK_VER:-"330"}
+UDF_JAR=${RAPIDS_UDF_JAR:-$(ls ./udf-compiler/target/spark${SPK_VER}/rapids-4-spark-udf_2.12-*-SNAPSHOT-spark${SPK_VER}.jar | grep -v test | head -1 | xargs readlink -f)}
+SOURCE_DIRS=${SOURCE_DIRS:-"./sql-plugin/src/main/scala/:./sql-plugin/src/main/java/:./shuffle-plugin/src/main/scala/:./udf-compiler/src/main/scala/"}
+
+SOURCE_WITH_ARGS="--sourcefiles "$(echo $SOURCE_DIRS | sed -e 's/:/ --sourcefiles /g')
+
+# Clean up the classes so we can build the report cleanly
+rm -rf "$TMP_CLASS"
+mkdir -p "$TMP_CLASS"
+pushd "$TMP_CLASS"
+jar xf "$DIST_JAR" com org rapids spark-shared "spark${SPK_VER}/"
+# extract the .class files in udf jar and replace the existing ones in spark3xx-ommon and spark$SPK_VER
+# because the class files in udf jar will be modified in aggregator's shade phase
+jar xf "$UDF_JAR" com/nvidia/spark/udf
+rm -rf com/nvidia/shaded/ org/openucx/ spark-shared/com/nvidia/spark/udf/ spark${SPK_VER}/com/nvidia/spark/udf/
+popd
+
+if [ ! -f "$JDEST" ]; then
+  # get the jacoco jar
+  mvn dependency:get -DgroupId=org.jacoco -DartifactId=org.jacoco.cli -Dclassifier=nodeps -Dversion="$JVER" -Ddest="$JDEST"
+fi
+
+if [ "$#" != "0" ]; then
+  ARGS=("$@")
+else
+  ARGS=($(find . -name "jacoco.exec" -printf "%p "))
+fi
+
+mkdir -p $XML_LOC
+# run the report
+java -jar "$JDEST" report --classfiles "$TMP_CLASS" --html "$HTML_LOC" --xml "$XML_LOC/jacoco.xml" $SOURCE_WITH_ARGS "${ARGS[@]}"
+
+echo "The report is at file://"$(readlink -f "$HTML_LOC"/index.html)

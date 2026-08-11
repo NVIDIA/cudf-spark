@@ -1,0 +1,4 @@
+{"str": /* Hello */ "World"}
+{"str": /*TEST "TEST"*/ "TEST2"}
+{"str": "TEST3"} // COMMENT AFTER THE DATA
+{"str": "DATA"}

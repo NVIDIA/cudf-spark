@@ -1,0 +1,232 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Copyright (c) 2020-2026, NVIDIA CORPORATION.
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.nvidia</groupId>
+        <artifactId>rapids-4-spark-shim-deps-parent_2.13</artifactId>
+        <version>26.10.0-SNAPSHOT</version>
+        <relativePath>../shim-deps/pom.xml</relativePath>
+    </parent>
+    <artifactId>rapids-4-spark-sql_2.13</artifactId>
+    <name>RAPIDS Accelerator for Apache Spark SQL Plugin</name>
+    <description>The RAPIDS SQL plugin for Apache Spark</description>
+    <version>26.10.0-SNAPSHOT</version>
+
+    <properties>
+        <rapids.module>sql-plugin</rapids.module>
+        <rapids.compressed.artifact>false</rapids.compressed.artifact>
+        <rapids.default.jar.excludePattern>**/*</rapids.default.jar.excludePattern>
+        <rapids.shim.jar.phase>package</rapids.shim.jar.phase>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>me.bechberger</groupId>
+            <artifactId>ap-loader-all</artifactId>
+            <version>${ap.loader.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.nvidia</groupId>
+            <artifactId>spark-rapids-jni</artifactId>
+            <classifier>${jni.classifier}</classifier>
+        </dependency>
+        <dependency>
+            <groupId>com.nvidia</groupId>
+            <artifactId>rapids-4-spark-private_${scala.binary.version}</artifactId>
+            <version>${spark-rapids-private.version}</version>
+            <classifier>${spark.version.classifier}</classifier>
+        </dependency>
+        <dependency>
+            <groupId>com.nvidia</groupId>
+            <artifactId>rapids-4-spark-sql-plugin-api_${scala.binary.version}</artifactId>
+            <version>${project.version}</version>
+            <classifier>${spark.version.classifier}</classifier>
+        </dependency>
+        <dependency>
+            <groupId>org.scala-lang</groupId>
+            <artifactId>scala-library</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.scalatest</groupId>
+            <artifactId>scalatest_${scala.binary.version}</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.scalatestplus</groupId>
+            <artifactId>mockito-4-11_${scala.binary.version}</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Flat buffers is a small jar, it's appropriate to use a fixed version -->
+        <!-- Shade and relocate it in the aggregator module-->
+        <dependency>
+            <groupId>com.google.flatbuffers</groupId>
+            <artifactId>flatbuffers-java</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.roaringbitmap</groupId>
+            <artifactId>RoaringBitmap</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>com.nvidia</groupId>
+            <artifactId>rapids-4-spark-hybrid_${scala.binary.version}</artifactId>
+            <version>${spark-rapids-hybrid.version}</version>
+            <scope>provided</scope>
+        </dependency>
+    </dependencies>
+    <!-- #if scala-2.13 -->
+    <profiles>
+        <profile>
+            <id>release400</id>
+            <activation>
+                <property>
+                    <name>buildver</name>
+                    <value>400</value>
+                </property>
+            </activation>
+        </profile>
+    </profiles>
+    <!-- #endif scala-2.13 -->
+    <build>
+        <resources>
+          <resource>
+            <!-- Include the properties file to provide the build information. -->
+            <directory>${project.build.directory}/extra-resources</directory>
+            <filtering>true</filtering>
+          </resource>
+        </resources>
+        <plugins>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>build-helper-maven-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>add-license-notice-resources</id>
+                        <phase>generate-resources</phase>
+                        <goals>
+                            <goal>add-resource</goal>
+                        </goals>
+                        <configuration>
+                            <resources>
+                                <resource>
+                                    <directory>${spark.rapids.source.basedir}</directory>
+                                    <targetPath>META-INF</targetPath>
+                                    <includes>
+                                        <!-- The NOTICE will be taken care of by the antrun task below -->
+                                        <include>LICENSE</include>
+                                        <include>NOTICE</include>
+                                    </includes>
+                                </resource>
+                                <resource>
+                                    <directory>${spark.rapids.source.basedir}/python</directory>
+                                </resource>
+                            </resources>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+              <artifactId>maven-antrun-plugin</artifactId>
+              <executions>
+                <execution>
+                  <id>copy-notice</id>
+                  <goals>
+                    <goal>run</goal>
+                  </goals>
+                  <phase>process-resources</phase>
+                  <configuration>
+                    <target>
+                      <!-- copy NOTICE-binary to NOTICE -->
+                      <copy
+                          todir="${project.build.outputDirectory}/META-INF/"
+                          verbose="true">
+                        <fileset dir="${spark.rapids.source.basedir}">
+                          <include name="NOTICE-binary"/>
+                        </fileset>
+                        <mapper type="glob" from="*-binary" to="*"/>
+                      </copy>
+                    </target>
+                  </configuration>
+                </execution>
+                <execution>
+                  <id>generate-shim-service</id>
+                  <phase>generate-resources</phase>
+                  <goals>
+                      <goal>run</goal>
+                  </goals>
+                  <configuration>
+                    <target>
+                        <taskdef resource="net/sf/antcontrib/antcontrib.properties" />
+                        <property name="servicesDir"
+                            value="${project.build.outputDirectory}/META-INF/services" />
+                        <property name="serviceFile"
+                            value="${servicesDir}/com.nvidia.spark.rapids.SparkShimServiceProvider"/>
+                        <property name="shimServiceClass"
+                            value="com.nvidia.spark.rapids.shims.${spark.version.classifier}.SparkShimServiceProvider"/>
+                        <ac:if xmlns:ac="antlib:net.sf.antcontrib">
+                            <available file="${serviceFile}" type="file"/>
+                            <then>
+                                <loadfile property="currentServiceClass"
+                                    srcFile="${serviceFile}"
+                                    failonerror="false"
+                                    quiet="${nonfail.errors.quiet}"/>
+                            </then>
+                            <else>
+                                <property name="currentServiceClass" value="N/A"/>
+                            </else>
+                        </ac:if>
+                        <ac:if xmlns:ac="antlib:net.sf.antcontrib">
+                            <equals arg1="${currentServiceClass}" arg2="${shimServiceClass}${line.separator}"/>
+                            <then>
+                                <echo>Skipping shim service file generation, already exists</echo>
+                            </then>
+                            <else>
+                                <echo>Recreating shim service file</echo>
+                                <mkdir dir="${servicesDir}"/>
+                                <echo file="${serviceFile}" message="${shimServiceClass}${line.separator}"/>
+                            </else>
+                        </ac:if>
+                    </target>
+                  </configuration>
+                </execution>
+              </executions>
+            </plugin>
+            <plugin>
+                <groupId>net.alchim31.maven</groupId>
+                <artifactId>scala-maven-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.rat</groupId>
+                <artifactId>apache-rat-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <groupId>org.scalatest</groupId>
+                <artifactId>scalatest-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>

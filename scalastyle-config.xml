@@ -1,0 +1,179 @@
+<!--
+  Copyright (c) 2020-2026, NVIDIA CORPORATION. All Rights Reserved.
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
+<!--
+
+If you wish to turn off checking for a section of code, you can put a comment in the source
+before and after the section, with the following syntax:
+
+  // scalastyle:off
+  ...  // stuff that breaks the styles
+  // scalastyle:on
+
+You can also disable only one rule, by specifying its rule id, as specified in:
+  http://www.scalastyle.org/rules-0.7.0.html
+
+  // scalastyle:off no.finalize
+  override def finalize(): Unit = ...
+  // scalastyle:on no.finalize
+
+-->
+
+<scalastyle>
+    <name>RAPIDS Plugin for Spark Scalastyle configuration</name>
+
+    <!-- ================================================================================ -->
+    <!--                               rules we enforce                                   -->
+    <!-- ================================================================================ -->
+
+    <check level="error" class="org.scalastyle.file.FileTabChecker" enabled="true"/>
+
+    <check level="error" class="org.scalastyle.file.FileLineLengthChecker" enabled="true">
+        <parameters>
+            <parameter name="maxLineLength"><![CDATA[100]]></parameter>
+            <parameter name="tabSize"><![CDATA[2]]></parameter>
+            <parameter name="ignoreImports">true</parameter>
+        </parameters>
+    </check>
+
+    <check level="error" class="org.scalastyle.scalariform.ImportOrderChecker" enabled="true">
+        <parameters>
+            <parameter name="groups">java,scala,3rdParty,spark</parameter>
+            <parameter name="group.java">javax?\..*</parameter>
+            <parameter name="group.scala">scala\..*</parameter>
+            <parameter name="group.3rdParty">(?!org\.apache\.spark\.).*</parameter>
+            <parameter name="group.spark">org\.apache\.spark\..*</parameter>
+        </parameters>
+    </check>
+
+    <check level="error" class="org.scalastyle.scalariform.ClassNamesChecker" enabled="true">
+        <parameters>
+            <parameter name="regex"><![CDATA[[A-Z][A-Za-z]*]]></parameter>
+        </parameters>
+    </check>
+
+    <check level="error" class="org.scalastyle.scalariform.ObjectNamesChecker" enabled="true">
+        <parameters>
+            <parameter name="regex"><![CDATA[(config|[A-Z][A-Za-z]*)]]></parameter>
+        </parameters>
+    </check>
+
+    <check level="error" class="org.scalastyle.scalariform.PackageObjectNamesChecker"
+           enabled="true">
+        <parameters>
+            <parameter name="regex"><![CDATA[^[a-z][A-Za-z]*$]]></parameter>
+        </parameters>
+    </check>
+
+    <check level="error" class="org.scalastyle.scalariform.NoFinalizeChecker" enabled="true"/>
+
+    <check level="error" class="org.scalastyle.scalariform.CovariantEqualsChecker" enabled="true"/>
+
+    <check level="error" class="org.scalastyle.scalariform.StructuralTypeChecker" enabled="true"/>
+
+    <check level="error" class="org.scalastyle.scalariform.UppercaseLChecker" enabled="true"/>
+
+    <check level="error" class="org.scalastyle.scalariform.IfBraceChecker" enabled="true">
+        <parameters>
+            <parameter name="singleLineAllowed"><![CDATA[true]]></parameter>
+            <parameter name="doubleLineAllowed"><![CDATA[true]]></parameter>
+        </parameters>
+    </check>
+
+    <!-- ??? usually shouldn't be checked into the code base. -->
+    <check level="error" class="org.scalastyle.scalariform.NotImplementedErrorUsage"
+           enabled="true"/>
+
+    <check customId="NoScalaDoc" level="error" class="org.scalastyle.file.RegexChecker"
+           enabled="true">
+        <parameters>
+            <parameter name="regex">(?m)^(\s*)/[*][*].*$(\r|)\n^\1  [*]</parameter>
+        </parameters>
+        <customMessage>Use Javadoc style indentation for multiline comments</customMessage>
+    </check>
+
+    
+    <!-- ================================================================================ -->
+    <!--       rules for enforcing cross-build between Scala 2.12 and 2.13                -->
+    <!-- ================================================================================ -->
+
+    <check level="error" class="org.scalastyle.scalariform.IllegalImportsChecker" enabled="true">
+        <parameters><parameter name="illegalImports"><![CDATA[scala.collection.Seq,scala.collection.IndexedSeq]]></parameter></parameters>
+        <customMessage><![CDATA[
+        Don't import scala.collection.Seq and scala.collection.IndexedSeq as it may bring some problems with cross-build between Scala 2.12 and 2.13.
+
+        Please refer below page to see the details of changes around Seq / IndexedSeq.
+        https://docs.scala-lang.org/overviews/core/collections-migration-213.html
+
+        If you really need to use scala.collection.Seq or scala.collection.IndexedSeq, please use the fully-qualified name instead.
+        ]]></customMessage>
+    </check>
+
+    <check level="error" class="org.scalastyle.file.RegexChecker" enabled="true">
+        <parameters>
+            <parameter name="regex">def this\((.*)\) \{</parameter>
+            <parameter name="line">false</parameter>
+        </parameters>
+        <customMessage>procedure syntax is deprecated for constructors in Scala 2.13: add `=`, as in method definition</customMessage>
+    </check>
+
+    <check level="error" class="org.scalastyle.scalariform.ProcedureDeclarationChecker" enabled="true">
+        <customMessage>procedure syntax is deprecated in Scala 2.13: add return type `: Unit` and `=`</customMessage>
+    </check>
+
+    <check level="error" class="org.scalastyle.file.RegexChecker" enabled="true">
+        <parameters>
+            <parameter name="regex">ArrayBuilder.make\[(.+)\]\(\)</parameter>
+            <parameter name="line">false</parameter>
+        </parameters>
+        <customMessage>ArrayBuilder.make does not accept parens anymore in Scala 2.13</customMessage>
+    </check>
+
+    <check level="error" class="org.scalastyle.file.RegexChecker" enabled="true">
+        <parameters>
+            <parameter name="regex">\('[a-zA-Z_][a-zA-Z0-9_]*\)</parameter>
+            <parameter name="line">true</parameter>
+        </parameters>
+        <customMessage><![CDATA[Symbol literals are deprecated in Scala 2.13. Use col("name") or $"name" instead of 'name.
+        For non-Spark contexts, use Symbol("name") instead of 'name if Symbol usage is required.]]></customMessage>
+    </check>
+
+    <check level="error" class="org.scalastyle.file.RegexChecker" enabled="true">
+        <parameters>
+            <parameter name="regex">⇒</parameter>
+            <parameter name="line">true</parameter>
+        </parameters>
+        <customMessage>Unicode arrow ⇒ is deprecated in Scala 2.13. Use => instead.</customMessage>
+    </check>
+
+    <check level="warning" class="org.scalastyle.file.RegexChecker" enabled="false">
+        <parameters>
+            <parameter name="regex">(: |\[)(Indexed)?Seq\[[A-Za-z0-9_]+\]</parameter>
+            <parameter name="line">false</parameter>
+        </parameters>
+        <customMessage><![CDATA[NOTE: Scala 2.12 defaults scala.(Indexed)Seq to scala.collection.(Indexed)Seq while Scala 2.13 defaults
+        scala.(Indexed)Seq to scala.collection.immutable.(Indexed)Seq
+
+        Please refer below page to see the details of changes around Seq / IndexedSeq.
+        https://docs.scala-lang.org/overviews/core/collections-migration-213.html
+        ]]></customMessage>
+    </check>
+
+    <!-- ================================================================================ -->
+    <!--       rules we'd like to enforce, but haven't cleaned up the codebase yet        -->
+    <!-- ================================================================================ -->
+    <check enabled="false" class="org.scalastyle.scalariform.ScalaDocChecker" level="warning"/>
+
+</scalastyle>

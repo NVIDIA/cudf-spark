@@ -1,0 +1,43 @@
+#
+# Copyright (c) 2022-2025, NVIDIA CORPORATION. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Sample Dockerfile to install UCX in a Rocky Linux 8 image with RDMA support.
+#
+# The parameters are:
+#   - CUDA_VER: 13.0.1 by default - CUDA runtime version installed in the container
+#   - UCX_VER, UCX_CUDA_VER, and UCX_ARCH:
+#       Used to pick a package matching a specific UCX version and
+#       CUDA runtime from the UCX github repo. UCX_CUDA_VER is the CUDA version
+#       that UCX is built for (can be older than CUDA_VER due to backwards compatibility).
+#       See: https://github.com/openucx/ucx/releases/
+#   - ROCKY_VER: Rocky Linux OS version
+
+ARG CUDA_VER=13.0.1
+ARG UCX_VER=1.19.1-rc2
+ARG UCX_CUDA_VER=13
+ARG UCX_ARCH=x86_64
+ARG ROCKY_VER=8
+FROM nvidia/cuda:${CUDA_VER}-runtime-rockylinux${ROCKY_VER}
+ARG ROCKY_VER
+ARG UCX_VER
+ARG UCX_CUDA_VER
+ARG UCX_ARCH
+
+RUN yum update -y && yum install -y wget bzip2 rdma-core numactl-libs libgomp libibverbs librdmacm
+RUN mkdir /tmp/ucx_install && cd /tmp/ucx_install && \
+  wget https://github.com/openucx/ucx/releases/download/v$UCX_VER/ucx-$UCX_VER-rocky$ROCKY_VER-mofed24.10-cuda$UCX_CUDA_VER-$UCX_ARCH.tar.bz2 && \
+  tar -xvf *.bz2 && \
+  rpm -i `ls ucx-[0-9]*.rpm ucx-cuda-[0-9]*.rpm ucx-ib-[0-9]*.rpm ucx-rdmacm-[0-9]*.rpm` --nodeps && \
+  rm -rf /tmp/ucx_install

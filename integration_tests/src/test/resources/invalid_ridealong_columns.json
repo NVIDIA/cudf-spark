@@ -1,0 +1,42 @@
+{"ride-along-bool": TRUE, "data": "BAD BOOL TRUE"}
+{"data": "BAD BOOL FALSE", "ride-along-bool": FALSE}
+{"data": "BAD BOOL T", "ride-along-bool": T}
+{"data": "BAD BOOL F", "ride-along-bool": F}
+{"data": "BAD BOOL t", "ride-along-bool": t}
+{"data": "BAD BOOL f", "ride-along-bool": f}
+{"data": "GOOD BOOL true", "ride-along-bool": true}
+{"data": "GOOD BOOL false", "ride-along-bool": false}
+{"data": "BAD NUM 1.", "ride-along-num": 1.}
+{"data": "BAD NUM 1f", "ride-along-num": 1f}
+{"data": "BAD NUM .7f", "ride-along-num": .7f}
+{"data": "BAD NUM 0xA", "ride-along-num": 0xA}
+{"data": "BAD NUM -.1", "ride-along-num": -.1}
+{"data": "BAD NUM +1", "ride-along-num": +1}
+{"data": "BAD NUM 01", "ride-along-num": 01}
+{"data": "BAD NUM 00.1", "ride-along-num": 00.1}
+{"data": "BAD NUM 1,000", "ride-along-num": 1,000}
+{"data": "BAD NUM 1e", "ride-along-num": 1e}
+{"data": "BAD NUM 1ee2", "ride-along-num": 1ee2}
+{"data": "BAD NUM 1ex2", "ride-along-num": 1ex2}
+{"data": "BAD NUM NaN", "ride-along-num": NaN}
+{"data": "BAD NUM nan", "ride-along-num": nan}
+{"data": "BAD NUM INF", "ride-along-num": INF}
+{"data": "BAD NUM +INF", "ride-along-num": +INF}
+{"data": "BAD NUM -INF", "ride-along-num": -INF}
+{"data": "BAD NUM -Infinity", "ride-along-num": -Infinity}
+{"data": "BAD NUM Infinity", "ride-along-num": Infinity}
+{"data": "BAD NUM +Infinity", "ride-along-num": +Infinity}
+{"data": "GOOD NUM 1", "ride-along-num": 1}
+{"data": "GOOD NUM 1e10", "ride-along-num": 1e10}
+{"data": "GOOD NUM 1E10", "ride-along-num": 1E10}
+{"data": "GOOD NUM 1e+10", "ride-along-num": 1e+10}
+{"data": "GOOD NUM 1E-10", "ride-along-num": 1E-10}
+{"data": "GOOD NUM 0.1", "ride-along-num": 0.1}
+{"data": "BAD STRING BACKSLASH V", "ride-along-str": "TEST \V"}
+{"data": "BAD STRING BACKSLASH z", "ride-along-str": "TEST \z"}
+{"data": "GOOD STRING TAB", "ride-along-str": "TEST  AFTER"}
+{"data": "GOOD STRING TEST", "ride-along-str": "TEST"}
+{"data": "GOOD null", "ride-along-bool": null}
+{"data": "BAD NULL", "ride-along-bool": NULL}
+{"data": "BAD empty (1)", "ride-along-bool": ,"other": "TEST"}
+{"data": "BAD empty (2)", "ride-along-bool": }

@@ -1,0 +1,591 @@
+#!/usr/local/env groovy
+/*
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/**
+ *
+ * Jenkinsfile for building rapids-plugin on blossom
+ *
+ */
+import hudson.model.Result
+import hudson.model.Run
+import jenkins.model.CauseOfInterruption.UserInterruption
+
+@Library('blossom-lib')
+@Library('blossom-github-lib@master')
+import ipp.blossom.*
+
+def githubHelper // blossom github helper
+def TEMP_IMAGE_BUILD = true
+def CUDA_NAME = 'cuda12.0.1' // hardcode cuda version for docker build part
+def PREMERGE_DOCKERFILE = 'jenkins/Dockerfile-blossom.ubuntu'
+def IMAGE_PREMERGE // temp image for premerge test
+def IMAGE_DB = pod.getCPUYAML("${common.ARTIFACTORY_NAME}/sw-spark-docker/spark:rapids-databricks-ubuntu22")
+// Skills uses a separate Rocky 8 toolchain. Keep this in sync with the Skills Dockerfile
+// and the Docker Manager stable image tag.
+def SKILLS_CUDA_VERSION = '12.9.1'
+def SKILLS_PREMERGE_DOCKERFILE = 'skills/ci/Dockerfile.pre-merge'
+def IMAGE_SKILLS = "${common.ARTIFACTORY_NAME}/sw-spark-docker/plugin:" +
+    "skills-premerge-rockylinux8-cuda${SKILLS_CUDA_VERSION}-blossom-dev"
+def PREMERGE_TAG
+def SKILLS_PREMERGE_TAG
+def skipped = false
+def db_build = false
+def skills_build = false
+def TEMP_SKILLS_IMAGE_BUILD = false
+def normal_build = true
+def sourcePattern = 'shuffle-plugin/src/main/scala/,udf-compiler/src/main/scala/,' +
+    'sql-plugin/src/main/java/,sql-plugin/src/main/scala/'
+// The path where the CI_PART1 job shares rapids plugin built tars with the CI_PART job
+def plugin_built_dir = "dbfs:/cicd/$BUILD_TAG"
+
+pipeline {
+    agent {
+        kubernetes {
+            label "premerge-init-${BUILD_TAG}"
+            cloud "${common.CLOUD_NAME}"
+            yaml "${IMAGE_DB}"
+        }
+    }
+
+    options {
+        ansiColor('xterm')
+        buildDiscarder(logRotator(numToKeepStr: '50'))
+        skipDefaultCheckout true
+        timeout(time: 12, unit: 'HOURS')
+    }
+
+    parameters {
+        // Put a default value for REF to avoid error when running the pipeline manually
+        string(name: 'REF', defaultValue: 'main',
+            description: 'Merged commit of specific PR')
+        string(name: 'GITHUB_DATA', defaultValue: '',
+            description: 'Json-formatted github data from upstream blossom-ci')
+    }
+
+    environment {
+        JENKINS_ROOT = 'jenkins'
+        PREMERGE_SCRIPT = '$JENKINS_ROOT/spark-premerge-build.sh'
+        LIBCUDF_KERNEL_CACHE_PATH = '/tmp/.cudf'
+        GITHUB_TOKEN = credentials("github-token")
+
+        ART_URL = "https://${common.ARTIFACTORY_NAME}/artifactory/sw-spark-maven"
+        MVN_URM_MIRROR = '-s jenkins/settings.xml -P mirror-apache-to-urm'
+        // v2 instance for CI images usage
+        ART_CREDS = credentials("urm_creds")
+        ARTIFACTORY_NAME = "${common.ARTIFACTORY_NAME}"
+
+        CUSTOM_WORKSPACE = "/home/jenkins/agent/workspace/${BUILD_TAG}"
+        CLASSIFIER = 'cuda12'
+    }
+
+    stages {
+        stage("Init githubHelper") {
+            steps {
+                script {
+                    githubHelper = GithubHelper.getInstance("${GITHUB_TOKEN}", params.GITHUB_DATA)
+                    // desc contains the PR ID and can be accessed from different builds
+                    currentBuild.description = githubHelper.getBuildDescription()
+                    try {
+                        // quiet period here in case the first build of two close dup triggers has not set desc
+                        sleep(time: 30, unit: "SECONDS")
+                        // abort duplicate running builds of the same PR (based on build desc)
+                        abortDupBuilds()
+                    } catch (e) { // do not block following build if abort failure
+                        echo "failed to try abort duplicate builds: " + e.toString()
+                    }
+
+                    def title = githubHelper.getIssue().title.toLowerCase()
+                    env.PARALLEL_UT = title.contains('[fast-ut]') ? 'true' : 'false'
+                    echo "Parallel unit tests enabled by PR title: ${env.PARALLEL_UT}"
+                    env.REDUCED_IT = (title ==~ /.*\[reduced-it\].*/).toString()
+                    if (title ==~ /.*\[skip ci\].*/) {
+                        githubHelper.updateCommitStatus("", "Skipped", GitHubCommitState.SUCCESS)
+                        currentBuild.result == "SUCCESS"
+                        skipped = true
+                        return
+                    }
+                    githubHelper.updateCommitStatus("", "Running", GitHubCommitState.PENDING)
+                    checkoutCode(githubHelper.getCloneUrl(), githubHelper.getMergedSHA())
+
+                    def changedFilesOutput = sh(returnStdout: true,
+                        script: 'git -c core.quotePath=false --no-pager diff ' +
+                            '--name-only --no-renames HEAD^1 HEAD').trim()
+                    def changedFiles = changedFilesOutput ? changedFilesOutput.readLines() : []
+                    if (changedFiles) {
+                        skills_build = changedFiles.any { it.startsWith('skills/') }
+                        normal_build = changedFiles.any { !it.startsWith('skills/') }
+                        TEMP_SKILLS_IMAGE_BUILD = changedFiles.contains(SKILLS_PREMERGE_DOCKERFILE)
+                    }
+                    echo "Changed files: ${changedFiles ?: 'none detected'}"
+                    echo "Premerge selection: normal=${normal_build}, skills=${skills_build}, " +
+                        "skillsImage=${TEMP_SKILLS_IMAGE_BUILD}"
+
+                    // check if need trigger databricks CI build
+                    if (title ==~ /.*\[databricks\].*/ ||
+                            (normal_build && databricksCodeChanged())) {
+                        db_build = true
+                    }
+                }
+            }
+        } // end of Init githubHelper
+
+        stage('Build docker image') {
+            when {
+                beforeAgent true
+                expression {
+                    !skipped && normal_build
+                }
+            }
+
+            agent {
+                kubernetes {
+                    label "premerge-docker-${BUILD_TAG}"
+                    cloud "${common.CLOUD_NAME}"
+                    yaml pod.getDockerBuildYAML()
+                }
+            }
+
+            steps {
+                script {
+                    unstash "source_tree"
+                    container('cpu') {
+                        // check if pre-merge dockerfile modified
+                        def dockerfileModified = sh(returnStdout: true,
+script: """BASE=\$(git --no-pager log --oneline -1 | awk \'{ print \$NF }\')
+git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true""").trim()
+                        echo "$dockerfileModified"
+
+                        if (!dockerfileModified?.trim()) {
+                            TEMP_IMAGE_BUILD = false
+                        }
+
+                        if (TEMP_IMAGE_BUILD) {
+                            IMAGE_TAG = "dev-ubuntu22-${CUDA_NAME}"
+                            PREMERGE_TAG = "${IMAGE_TAG}-${BUILD_TAG}"
+                            IMAGE_PREMERGE = "${ARTIFACTORY_NAME}/sw-spark-docker-local/plugin:${PREMERGE_TAG}"
+                            def CUDA_VER = "$CUDA_NAME" - "cuda"
+                            docker.build(IMAGE_PREMERGE, "--network=host -f ${PREMERGE_DOCKERFILE} --build-arg CUDA_VER=$CUDA_VER -t $IMAGE_PREMERGE .")
+                            uploadDocker(IMAGE_PREMERGE)
+                        } else {
+                            // if no pre-merge dockerfile change, use nightly image
+                            IMAGE_PREMERGE = "$ARTIFACTORY_NAME/sw-spark-docker-local/plugin:dev-ubuntu22-$CUDA_NAME-blossom-dev"
+                        }
+                    }
+                }
+            }
+        } // end of Build docker image
+
+        stage('Build Skills docker image') {
+            when {
+                beforeAgent true
+                expression {
+                    !skipped && TEMP_SKILLS_IMAGE_BUILD
+                }
+            }
+
+            agent {
+                kubernetes {
+                    label "skills-premerge-docker-${BUILD_TAG}"
+                    cloud "${common.CLOUD_NAME}"
+                    yaml pod.getDockerBuildYAML()
+                }
+            }
+
+            steps {
+                script {
+                    unstash "source_tree"
+                    container('cpu') {
+                        SKILLS_PREMERGE_TAG = "skills-premerge-rockylinux8-" +
+                            "cuda${SKILLS_CUDA_VERSION}-${BUILD_TAG}"
+                        IMAGE_SKILLS = "${ARTIFACTORY_NAME}/sw-spark-docker-local/plugin:" +
+                            "${SKILLS_PREMERGE_TAG}"
+                        docker.build(IMAGE_SKILLS,
+                            "--network=host -f ${SKILLS_PREMERGE_DOCKERFILE} .")
+                        uploadDocker(IMAGE_SKILLS)
+                    }
+                }
+            }
+        } // end of Build Skills docker image
+
+        stage('Premerge Test') {
+            when {
+                beforeAgent true
+                beforeOptions true
+                expression {
+                    !skipped && (normal_build || skills_build)
+                }
+            }
+            // Parallel run mvn verify (build and integration tests) and unit tests (for multiple Spark versions)
+            // If any one is failed will abort another if not finish yet and will upload failure log to Github
+            failFast true
+            parallel {
+                stage('Skills Premerge Test') {
+                    when {
+                        beforeAgent true
+                        beforeOptions true
+                        expression {
+                            skills_build
+                        }
+                    }
+
+                    options {
+                        lock(label: "${params.GPU_POOL}", quantity: 1, variable: 'GPU_RESOURCE')
+                    }
+
+                    agent {
+                        kubernetes {
+                            label "skills-premerge-${BUILD_TAG}"
+                            cloud "${common.CLOUD_NAME}"
+                            yaml pod.getGPUYAML("${IMAGE_SKILLS}", "${env.GPU_RESOURCE}", '8', '32Gi')
+                            customWorkspace "${CUSTOM_WORKSPACE}-skills"
+                        }
+                    }
+
+                    steps {
+                        script {
+                            unstash "source_tree"
+                            container('gpu') {
+                                timeout(time: 90, unit: 'MINUTES') {
+                                    try {
+                                        common.resolveIncompatibleDriverIssue(this)
+                                        common.restoreM2Cache(this)
+                                        common.prepareArtNetrc(this)
+                                        sh '''
+                                            mkdir -p "$HOME/.m2"
+                                            cp jenkins/settings.xml "$HOME/.m2/settings.xml"
+                                        '''
+                                        sh "skills/ci/pre-merge.sh"
+                                    } catch(e) {
+                                        common.printJVMCoreDumps(this)
+                                        common.uploadDebugBundle(this, 'spark-rapids', 'skills')
+                                        throw e
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } // end of Skills Premerge Test
+
+                stage('mvn verify') {
+                    when {
+                        beforeAgent true
+                        beforeOptions true
+                        expression {
+                            normal_build
+                        }
+                    }
+
+                    options {
+                        // We have to use params to pass the resource label in options block,
+                        // this is a limitation of declarative pipeline. And we need to lock resource before agent start
+                        lock(label: "${params.GPU_POOL}", quantity: 1, variable: 'GPU_RESOURCE')
+                    }
+                    agent {
+                        kubernetes {
+                            label "premerge-ci-1-${BUILD_TAG}"
+                            cloud "${common.CLOUD_NAME}"
+                            yaml pod.getGPUYAML("${IMAGE_PREMERGE}", "${env.GPU_RESOURCE}", '8', '32Gi')
+                            customWorkspace "${CUSTOM_WORKSPACE}"
+                        }
+                    }
+
+                    steps {
+                        script {
+                            unstash "source_tree"
+                            container('gpu') {
+                                timeout(time: 6, unit: 'HOURS') { // step only timeout for test run
+                                    try {
+                                        common.resolveIncompatibleDriverIssue(this)
+                                        common.restoreM2Cache(this)
+                                        common.prepareArtNetrc(this)
+                                        sh "$PREMERGE_SCRIPT mvn_verify"
+                                        step([$class                : 'JacocoPublisher',
+                                              execPattern           : '**/target/jacoco.exec',
+                                              classPattern          : 'target/jacoco_classes/',
+                                              sourceInclusionPattern: '**/*.java,**/*.scala',
+                                              sourcePattern         : sourcePattern
+                                        ])
+                                    } catch(e) {
+                                        common.printJVMCoreDumps(this)
+                                        common.uploadDebugBundle(this, 'spark-rapids', 'mvn-verify')
+                                        throw e
+                                    } finally {
+                                        common.publishPytestResult(this, "${STAGE_NAME}")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } // end of mvn verify stage
+
+                stage('Premerge CI 2') {
+                    when {
+                        beforeAgent true
+                        beforeOptions true
+                        expression {
+                            normal_build
+                        }
+                    }
+
+                    options {
+                        lock(label: "${params.GPU_POOL}", quantity: 1, variable: 'GPU_RESOURCE')
+                    }
+                    agent {
+                        kubernetes {
+                            label "premerge-ci-2-${BUILD_TAG}"
+                            cloud "${common.CLOUD_NAME}"
+                            yaml pod.getGPUYAML("${IMAGE_PREMERGE}", "${env.GPU_RESOURCE}", '8', '32Gi')
+                            customWorkspace "${CUSTOM_WORKSPACE}-ci-2" // Use different workspace to avoid conflict with IT
+                        }
+                    }
+
+                    steps {
+                        script {
+                            unstash "source_tree"
+                            container('gpu') {
+                                timeout(time: 6, unit: 'HOURS') {
+                                    try {
+                                        common.resolveIncompatibleDriverIssue(this)
+                                        common.restoreM2Cache(this)
+                                        common.prepareArtNetrc(this)
+                                        sh "$PREMERGE_SCRIPT ci_2"
+                                    } catch(e) {
+                                        common.printJVMCoreDumps(this)
+                                        common.uploadDebugBundle(this, 'spark-rapids', 'ci-2')
+                                        throw e
+                                    } finally {
+                                        common.publishPytestResult(this, "${STAGE_NAME}")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } // end of Unit Test stage
+
+                stage('CI scala 2.13') {
+                    when {
+                        beforeAgent true
+                        beforeOptions true
+                        expression {
+                            normal_build
+                        }
+                    }
+
+                     options {
+                        lock(label: "${params.GPU_POOL}", quantity: 1, variable: 'GPU_RESOURCE')
+                    }
+                    agent {
+                        kubernetes {
+                            label "ci-scala213-${BUILD_TAG}"
+                            cloud "${common.CLOUD_NAME}"
+                            yaml pod.getGPUYAML("${IMAGE_PREMERGE}", "${env.GPU_RESOURCE}", '8', '32Gi')
+                            customWorkspace "${CUSTOM_WORKSPACE}-scala-213" // Use different workspace to avoid conflict with IT
+                        }
+                    }
+
+                    steps {
+                        script {
+                            unstash "source_tree"
+                            container('gpu') {
+                                timeout(time: 6, unit: 'HOURS') {
+                                    try {
+                                        common.resolveIncompatibleDriverIssue(this)
+                                        common.restoreM2Cache(this)
+                                        common.prepareArtNetrc(this)
+                                        sh "$PREMERGE_SCRIPT ci_scala213"
+                                    } catch(e) {
+                                        common.printJVMCoreDumps(this)
+                                        common.uploadDebugBundle(this, 'spark-rapids', 'scala-213')
+                                        throw e
+                                    } finally {
+                                        common.publishPytestResult(this, "${STAGE_NAME}")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } // end of Unit Test stage
+
+                stage('Databricks IT part1') {
+                    when {
+                        expression { db_build }
+                    }
+                    steps {
+                        script {
+                            githubHelper.updateCommitStatus("", "Running - includes databricks", GitHubCommitState.PENDING)
+                            //CI_PART1 upload plugin buit tars to PLUGIN_BUILT_DIR for CI_PART2
+                            def DBJob = build(job: 'rapids-databricks_premerge-github',
+                                propagate: false, wait: true,
+                                parameters: [
+                                        string(name: 'REF', value: params.REF),
+                                        string(name: 'GITHUB_DATA', value: params.GITHUB_DATA),
+                                        string(name: 'TEST_MODE', value: 'CI_PART1'),
+                                        string(name: 'PLUGIN_BUILT_DIR', value: "$plugin_built_dir"),
+                                ])
+                            if ( DBJob.result != 'SUCCESS' ) {
+                                // Output Databricks failure logs to uploaded onto the pre-merge PR
+                                print(DBJob.getRawBuild().getLog())
+                                // Fail the pipeline
+                                error "Databricks part1 result : " + DBJob.result
+                            }
+                        }
+                    }
+                } // end of Databricks IT part1
+
+                stage('Databricks IT part2') {
+                    when {
+                        expression { db_build }
+                    }
+                    steps {
+                        script {
+                            githubHelper.updateCommitStatus("", "Running - includes databricks", GitHubCommitState.PENDING)
+                            def DBJob = build(job: 'rapids-databricks_premerge-github',
+                                propagate: false, wait: true,
+                                parameters: [
+                                        string(name: 'REF', value: params.REF),
+                                        string(name: 'GITHUB_DATA', value: params.GITHUB_DATA),
+                                        string(name: 'TEST_MODE', value: 'CI_PART2'),
+                                        string(name: 'PLUGIN_BUILT_DIR', value: "$plugin_built_dir"),
+                                ])
+                            if ( DBJob.result != 'SUCCESS' ) {
+                                // Output Databricks failure logs to uploaded onto the pre-merge PR
+                                print(DBJob.getRawBuild().getLog())
+                                // Fail the pipeline
+                                error "Databricks part2 result : " + DBJob.result
+                            }
+                        }
+                    }
+                } // end of Databricks IT part2
+
+                stage('Dummy stage: blue ocean log view') {
+                    steps {
+                        echo "workaround for blue ocean bug https://issues.jenkins.io/browse/JENKINS-48879"
+                    }
+                } // Dummy stage
+            } // end of parallel
+        } // end of Premerge Test
+    } // end of stages
+
+    post {
+        always {
+            script {
+                if (skipped) {
+                    return
+                }
+
+                if (currentBuild.currentResult == "SUCCESS") {
+                    githubHelper.updateCommitStatus("", "Success", GitHubCommitState.SUCCESS)
+                } else {
+                    // upload log only in case of build failure
+                    def guardWords = ["gitlab.*?\\.com", "urm.*?\\.com",
+                                      "dbc.*?azuredatabricks\\.net", "adb.*?databricks\\.com"]
+                    guardWords.add("nvidia-smi(?s)(.*?)(?=jenkins/version-def.sh)") // hide GPU info
+                    guardWords.add("sc-ipp*") // hide cloud info
+                    githubHelper.uploadParallelLogs(this, env.JOB_NAME, env.BUILD_NUMBER, null, guardWords)
+
+                    if (currentBuild.currentResult != "ABORTED") { // skip ABORTED result to avoid status overwrite
+                        githubHelper.updateCommitStatus("", "Fail", GitHubCommitState.FAILURE)
+                    }
+                }
+
+                if (normal_build && TEMP_IMAGE_BUILD) {
+                    container('cpu') {
+                        deleteDockerTempTag("${PREMERGE_TAG}") // clean premerge temp image
+                    }
+                }
+                if (TEMP_SKILLS_IMAGE_BUILD) {
+                    container('cpu') {
+                        deleteDockerTempTag(SKILLS_PREMERGE_TAG)
+                    }
+                }
+            }
+        }
+    }
+
+} // end of pipeline
+
+void uploadDocker(String IMAGE_NAME) {
+    def DOCKER_CMD = "docker --config $WORKSPACE/.docker"
+    retry(3) {
+        sleep(time: 10, unit: "SECONDS")
+        sh """
+            echo $ART_CREDS_PSW | $DOCKER_CMD login $ARTIFACTORY_NAME -u $ART_CREDS_USR --password-stdin
+            $DOCKER_CMD push $IMAGE_NAME
+            $DOCKER_CMD logout $ARTIFACTORY_NAME
+        """
+    }
+}
+
+void deleteDockerTempTag(String tag) {
+    if (!tag?.trim()) { // return if the tag is null or empty
+        return
+    }
+    sh "curl -u $ART_CREDS_USR:$ART_CREDS_PSW -XDELETE https://${ARTIFACTORY_NAME}/artifactory/sw-spark-docker-local/plugin/${tag} || true"
+}
+
+void abortDupBuilds() {
+    Run prevBuild = currentBuild.rawBuild.getPreviousBuildInProgress()
+    while (prevBuild != null) {
+        if (prevBuild.isInProgress()) {
+            def prevDesc = prevBuild.description?.trim()
+            if (prevDesc && prevDesc == currentBuild.description?.trim()) {
+                def prevExecutor = prevBuild.getExecutor()
+                if (prevExecutor != null) {
+                    echo "...Aborting duplicate Build #${prevBuild.number}"
+                    prevExecutor.interrupt(Result.ABORTED,
+                            new UserInterruption("Build #${currentBuild.number}"))
+                }
+            }
+        }
+        prevBuild = prevBuild.getPreviousBuildInProgress()
+    }
+}
+
+void checkoutCode(String url, String sha) {
+    checkout(
+        changelog: false,
+        poll: true,
+        scm: [
+            $class           : 'GitSCM', branches: [[name: sha]],
+            userRemoteConfigs: [[
+                                    credentialsId: 'github-token',
+                                    url          : url,
+                                    refspec      : '+refs/pull/*/merge:refs/remotes/origin/pr/*']],
+             extensions      : [[$class: 'CloneOption', shallow: true, depth: 10]]
+        ]
+    )
+    sh "git submodule update --init"
+    if (!common.isSubmoduleInit(this)) {
+        error "Failed to clone submodule : thirdparty/parquet-testing"
+    }
+
+    stash(name: "source_tree", includes: "**,.git/**", useDefaultExcludes: false)
+}
+
+boolean databricksCodeChanged() {
+    def output = sh(script: '''
+            # get merge BASE from merged pull request. Log message e.g. "Merge HEAD into BASE"
+            BASE_REF=$(git --no-pager log --oneline -1 | awk '{ print $NF }')
+            git --no-pager diff --name-only ${BASE_REF} HEAD | grep -lE 'sql-plugin/src/main/.*[0-9x-]db/|databricks' || true
+        ''', returnStdout: true).trim()
+
+    if (output) {
+        echo "Found databricks-related changed files"
+        return true
+    }
+    return false
+}

@@ -1,0 +1,65 @@
+# Copyright (c) 2024-2026, NVIDIA CORPORATION.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# A workflow to check copyright/license header
+name: license header check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  license-header-check:
+    runs-on: ubuntu-latest
+    if: "!contains(github.event.pull_request.title, '[bot]')"
+    steps:
+      - name: Get checkout depth
+        run: |
+          echo "PR_FETCH_DEPTH=$(( ${{ github.event.pull_request.commits }} + 10 ))" >> $GITHUB_ENV
+
+      - name: Checkout code
+        uses: NVIDIA/spark-rapids-common/checkout@main
+        with:
+          fetch-depth: ${{ env.PR_FETCH_DEPTH }}
+
+      - name: license-header-check
+        uses: NVIDIA/spark-rapids-common/license-header-check@main
+        with:
+          included_file_patterns: |
+            *.yml,
+            *.yaml,
+            *.sh,
+            *.xml,
+            *.properties,
+            *.scala,
+            *.py,
+            build/*,
+            *.cpp,
+            *.cu,
+            *.hpp,
+            *Dockerfile*,
+            *CMakeLists.txt,
+            *Jenkinsfile*,
+            *.ini,
+            *.java,
+            *.fbs,
+            *.sql,
+            *.toml
+          excluded_file_patterns: |
+            *target/*,
+            thirdparty/*,
+            sql-plugin/src/main/java/com/nvidia/spark/rapids/format/*

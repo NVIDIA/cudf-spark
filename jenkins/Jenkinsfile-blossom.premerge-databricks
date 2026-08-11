@@ -1,0 +1,231 @@
+#!/usr/local/env groovy
+/*
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/**
+ *
+ * Jenkinsfile for building rapids-plugin on Databricks cluster
+ *
+ */
+
+@Library('blossom-lib')
+@Library('blossom-github-lib@master')
+
+import ipp.blossom.*
+
+def githubHelper // blossom github helper
+def IMAGE_DB = pod.getCPUYAML("${common.ARTIFACTORY_NAME}/sw-spark-docker/spark:rapids-databricks-ubuntu22")
+
+pipeline {
+    agent {
+        kubernetes {
+            label "premerge-init-${BUILD_TAG}"
+            cloud "${common.CLOUD_NAME}"
+            yaml "${IMAGE_DB}"
+        }
+    }
+
+    options {
+        ansiColor('xterm')
+        buildDiscarder(logRotator(numToKeepStr: '50'))
+        skipDefaultCheckout true
+        timeout(time: 12, unit: 'HOURS')
+    }
+
+    parameters {
+        // Put a default value for REF to avoid error when running the pipeline manually
+        string(name: 'REF', defaultValue: 'main',
+            description: 'Merged commit of specific PR')
+        string(name: 'GITHUB_DATA', defaultValue: '',
+            description: 'Json-formatted github data from upstream blossom-ci')
+        choice(name: 'TEST_MODE', choices: ['CI_PART1', 'CI_PART2'],
+            description: 'Separate integration tests into 2 parts, and run each part in parallell')
+        string(name: 'PLUGIN_BUILT_DIR', defaultValue: 'dbfs:/cicd',
+            description: 'CI_PART1 uploads spark-rapids built tgz for CI_PART2')
+    }
+
+    environment {
+        GITHUB_TOKEN = credentials("github-token")
+        CUSTOM_WORKSPACE = "/home/jenkins/agent/workspace/${BUILD_TAG}"
+        // DB related ENVs
+        IDLE_TIMEOUT = '390' // 6.5 hours
+        NUM_WORKERS = '0'
+        DB_TYPE = getDbType()
+        DATABRICKS_HOST = DbUtils.getHost("$DB_TYPE")
+        DATABRICKS_TOKEN = credentials("${DbUtils.getToken("$DB_TYPE")}")
+        DATABRICKS_PUBKEY = credentials("SPARK_DATABRICKS_PUBKEY")
+        DATABRICKS_DRIVER = DbUtils.getDriver("$DB_TYPE")
+        DATABRICKS_WORKER = DbUtils.getWorker("$DB_TYPE")
+        TEST_TYPE = 'pre-commit'
+    }
+
+    stages {
+        stage("Init githubHelper") {
+            steps {
+                script {
+                    githubHelper = GithubHelper.getInstance("${GITHUB_TOKEN}", params.GITHUB_DATA)
+                    // desc contains the PR ID and can be accessed from different builds
+                    currentBuild.description = githubHelper.getBuildDescription() + " | $TEST_MODE"
+                    def title = githubHelper.getIssue().title.toLowerCase()
+                    env.REDUCED_IT = (title ==~ /.*\[reduced-it\].*/).toString()
+                    checkoutCode(githubHelper.getCloneUrl(), githubHelper.getMergedSHA())
+                }
+            }
+        } // end of Init githubHelper
+
+        stage('Databricks') {
+            failFast true // Abort running if one branch failed
+            matrix {
+                axes {
+                    axis {
+                        // 'name' and 'value' only supprt literal string in the declarative Jenkins
+                        // Refer to Jenkins issue https://issues.jenkins.io/browse/JENKINS-62127
+                        name 'DB_RUNTIME'
+                        values '14.3', '17.3'
+                    }
+                }
+                stages {
+                    stage('Build') {
+                        agent {
+                            kubernetes {
+                                label "premerge-ci-${DB_RUNTIME}-${BUILD_NUMBER}"
+                                cloud "${common.CLOUD_NAME}"
+                                yaml "${IMAGE_DB}"
+                                customWorkspace "${CUSTOM_WORKSPACE}-${DB_RUNTIME}-${BUILD_NUMBER}"
+                            }
+                        }
+                        environment {
+                            DATABRICKS_RUNTIME = DbUtils.getRuntime("$DB_RUNTIME")
+                            BASE_SPARK_VERSION = DbUtils.getSparkVer("$DB_RUNTIME")
+                            BASE_SPARK_VERSION_TO_INSTALL_DATABRICKS_JARS = DbUtils.getInstallVer("$DB_RUNTIME")
+                            INIT_SCRIPTS = DbUtils.getInitScripts("$DB_RUNTIME")
+                            INIT_SCRIPTS_DIR = "/databricks/init_scripts/${BUILD_TAG}-${DB_RUNTIME}"
+                            EXTRA_ENVS = "TEST_MODE=$TEST_MODE,REDUCED_IT=$REDUCED_IT"
+                        }
+                        steps {
+                            script {
+                                container('cpu') {
+                                    try {
+                                        unstash('source_tree')
+                                        databricksBuild()
+                                    } catch (e) {
+                                        common.uploadDebugBundle(this, 'spark-rapids', "databricks-${DB_RUNTIME}")
+                                        throw e
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } // end of matrix
+        } // end of stage Databricks
+    } // end of stages
+} // end of pipeline
+
+// params.DATABRICKS_TYPE: 'aws' or 'azure', param can be defined through the jenkins webUI
+String getDbType() {
+    return params.DATABRICKS_TYPE ? params.DATABRICKS_TYPE : 'aws'
+}
+
+void databricksBuild() {
+    def CLUSTER_ID = ''
+    def SPARK_MAJOR = BASE_SPARK_VERSION_TO_INSTALL_DATABRICKS_JARS.replace('.', '')
+    def dbStep = ''
+    def pluginBuiltTar = "$PLUGIN_BUILT_DIR/$DB_RUNTIME/spark-rapids-built.tgz"
+    // Map DBFS path to the local path into the cluster
+    def buildArgs = (params.TEST_MODE == 'CI_PART1') ? pluginBuiltTar.replace('dbfs:/', '/dbfs/') : ''
+    def testArgs = (params.TEST_MODE == 'CI_PART2') ?  pluginBuiltTar.replace('dbfs:/', '/dbfs/') : ''
+
+    try {
+        // wait for all the rapids plugin tars built in CI_PART1 to be ready
+        if (params.TEST_MODE == 'CI_PART2') {
+            // Check if the comma-separated files exist in the Databricks DBFS path within timeout minutes
+            if (DbUtils.filesExist(this, "$pluginBuiltTar", 60)) {
+                println('Rapids plugin built tars are ready for CI_PART2')
+            } else {
+                println('Rapids plugin built tars are not ready, CI_PART2 starts building them')
+                testArgs = '' // To let CI_PART2 build rapids plugin after the timeout
+                buildArgs = '' // To let CI_PART2 NOT upload plugin tars
+            }
+        }
+
+        stage("Create $SPARK_MAJOR DB") {
+            dbStep = 'CREATE'
+            // Add the init_script parameter, e.g. oo.sh,bar.sh --> /path/foo.sh,/path/bar.sh
+            def input_params = env.INIT_SCRIPTS ? " -f " + DbUtils.uploadFiles(this, env.INIT_SCRIPTS, env.INIT_SCRIPTS_DIR) : ''
+            def CREATE_PARAMS = DbUtils.getParameters(this, dbStep, input_params)
+            CLUSTER_ID = sh(script: "python3 ./jenkins/databricks/create.py $CREATE_PARAMS", returnStdout: true).trim()
+            echo CLUSTER_ID
+        }
+
+        if (params.TEST_MODE == 'CI_PART1' || (params.TEST_MODE == 'CI_PART2' && testArgs == '')) {
+            stage("Build against $SPARK_MAJOR DB") {
+                sh "rm -rf spark-rapids-ci.tgz"
+                sh "tar -zcf spark-rapids-ci.tgz * .git"
+                dbStep = 'BUILD'
+                withCredentials([file(credentialsId: 'SPARK_DATABRICKS_PRIVKEY', variable: 'DATABRICKS_PRIVKEY')]) {
+                    def BUILD_PARAMS = DbUtils.getParameters(this, dbStep, "-c $CLUSTER_ID")
+                    retry(3) {
+                        // Back-up built tar to the path "$buildArgs" on Databricks cluster
+                        // Refer to https://github.com/NVIDIA/spark-rapids/pull/11788/files#diff-dd60414e554e6bed881c3a7e14de334f3e52f36f81643412cd2497c275f8aee9R190-R194
+                        sh "python3 ./jenkins/databricks/run-build.py $BUILD_PARAMS $buildArgs"
+                    }
+                }
+                sh "rm spark-rapids-ci.tgz"
+            }
+        }
+
+        stage("Test against $SPARK_MAJOR DB") {
+            dbStep = 'TEST'
+            withCredentials([file(credentialsId: 'SPARK_DATABRICKS_PRIVKEY', variable: 'DATABRICKS_PRIVKEY')]) {
+                def TEST_PARAMS = DbUtils.getParameters(this, dbStep, "-c $CLUSTER_ID")
+                // Get built tar from the path "$testArgs" on Databricks cluster
+                // Refer to https://github.com/NVIDIA/spark-rapids/pull/11788/files#diff-db28879431d57d0e454a2c7ee89fdda9abdec463c61771333d6a6565bf96c062R52-R55
+                sh "python3 ./jenkins/databricks/run-tests.py $TEST_PARAMS $testArgs"
+            }
+        }
+    } finally {
+        if (CLUSTER_ID) {
+            (dbStep == 'TEST') ? common.publishPytestResult(this, "Test against $SPARK_MAJOR DB") : ''
+            retry(3) {
+                params.TEST_MODE == 'CI_PART2' ? DbUtils.cleanUp(this, "$PLUGIN_BUILT_DIR/$DB_RUNTIME") : ''
+                env.INIT_SCRIPTS ? DbUtils.cleanUp(this, env.INIT_SCRIPTS_DIR) : ''
+                sh "python3 ./jenkins/databricks/shutdown.py -s $DATABRICKS_HOST -t $DATABRICKS_TOKEN -c $CLUSTER_ID -d"
+            }
+        }
+    }
+}
+
+void checkoutCode(String url, String sha) {
+    checkout(
+        changelog: false,
+        poll: true,
+        scm: [
+            $class           : 'GitSCM', branches: [[name: sha]],
+            userRemoteConfigs: [[
+                                    credentialsId: 'github-token',
+                                    url          : url,
+                                    refspec      : '+refs/pull/*/merge:refs/remotes/origin/pr/*']],
+             extensions      : [[$class: 'CloneOption', shallow: true, depth: 10]]
+        ]
+    )
+    sh "git submodule update --init"
+    if (!common.isSubmoduleInit(this)) {
+        error "Failed to clone submodule : thirdparty/parquet-testing"
+    }
+
+    stash(name: 'source_tree', includes: '**,.git/**', useDefaultExcludes: false)
+}

@@ -1,0 +1,33 @@
+# Copyright (c) 2020-2026, NVIDIA CORPORATION.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# A workflow to keep BASE branch up-to-date from HEAD branch
+name: auto-merge HEAD to BASE
+
+on:
+  pull_request_target:
+    branches:
+      - release/*
+    types: [closed]
+
+jobs:
+  auto-merge:
+    if: github.event.pull_request.merged == true
+    uses: NVIDIA/spark-rapids-common/.github/workflows/auto-merge.yml@main
+    with:
+      owner: ${{ github.repository_owner }}
+      repo: ${{ github.event.repository.name }}
+      branch: ${{ github.event.pull_request.base.ref }}
+    secrets:
+      token: ${{ secrets.AUTOMERGE_TOKEN }}

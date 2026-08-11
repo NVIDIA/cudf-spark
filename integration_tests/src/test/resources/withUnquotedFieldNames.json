@@ -1,0 +1,4 @@
+{str: "World"}
+{str: "TEST2"}
+{"str": "TEST3", other: "MORE"}
+{"str": "DATA"}

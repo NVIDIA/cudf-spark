@@ -1,0 +1,9 @@
+{ "var0": "hello", "var1": 3.141, "var2": true }
+ "var0": "hello", "var1": 3.141, "var2": true }
+{ "var0": "hello", "var1": true, "var2": "hello" }
+{ "var0": true, "var1": "hello",  "hello" }
+{ "var0": true, "var1": "hello", "var2": "hello" } { "var0": true, "var1": "hello", "var2": "hello" }
+{ "var0": true, "var1": "hello", "var2" }
+{ "var0": 123, "var1": true, "var2" true }
+{ "var0": 123, "var1": true "var2": true
+{ "var0": "hello", "var1": "hello", "var2": "hello" }

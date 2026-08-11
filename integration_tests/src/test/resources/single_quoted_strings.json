@@ -1,0 +1,5 @@
+{"data":'test'}
+{"data":'"test'}
+{'data':"test"}
+{'data':"'test"}
+{"data":"test",'other':'other test'}

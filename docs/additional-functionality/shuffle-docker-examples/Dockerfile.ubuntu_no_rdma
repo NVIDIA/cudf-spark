@@ -1,0 +1,56 @@
+#
+# Copyright (c) 2021-2025, NVIDIA CORPORATION. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Sample Dockerfile to install UCX in a Ubuntu 22.04 image
+#
+# The parameters are: 
+#   - CUDA_VER: 13.0.1 by default
+#   - UCX_VER, UCX_CUDA_VER, and UCX_ARCH: 
+#       Used to pick a package matching a specific UCX version and
+#       CUDA runtime from the UCX github repo.
+#       See: https://github.com/openucx/ucx/releases/
+#   - UBUNTU_VER: 22.04 by default
+#
+
+ARG CUDA_VER=13.0.1
+ARG UCX_VER=1.19.1-rc2
+ARG UCX_CUDA_VER=13
+ARG UCX_ARCH=x86_64
+ARG UBUNTU_VER=22.04
+
+FROM nvidia/cuda:${CUDA_VER}-runtime-ubuntu${UBUNTU_VER}
+ARG UCX_VER
+ARG UCX_CUDA_VER
+ARG UBUNTU_VER
+ARG UCX_ARCH
+
+# https repo require install ca-certificates first
+RUN apt-get update && apt-get install -y ca-certificates
+# ubuntu22
+RUN sed -i -e 's|http://archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+           -e 's|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g' \
+           /etc/apt/sources.list
+# ubuntu24+
+RUN find /etc/apt/sources.list.d/ -name '*.sources' -exec sed -i \
+           -e "s|http://archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g" \
+           -e "s|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g" {} +
+
+RUN apt-get update
+RUN apt-get install -y wget bzip2 libgomp1
+RUN mkdir /tmp/ucx_install && cd /tmp/ucx_install && \
+  wget https://github.com/openucx/ucx/releases/download/v$UCX_VER/ucx-$UCX_VER-ubuntu$UBUNTU_VER-mofed5-cuda$UCX_CUDA_VER-$UCX_ARCH.tar.bz2 && \
+  tar -xvf ucx-$UCX_VER-ubuntu$UBUNTU_VER-mofed5-cuda$UCX_CUDA_VER-$UCX_ARCH.tar.bz2 && \
+  apt install -y /tmp/ucx_install/*.deb && \
+  rm -rf /tmp/ucx_install

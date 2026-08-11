@@ -1,0 +1,3 @@
+{ "number": true }
+{ "number": "not a float" }
+{ "number": "" }

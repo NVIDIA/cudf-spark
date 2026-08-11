@@ -1,0 +1,303 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Copyright (c) 2021-2026, NVIDIA CORPORATION.
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.nvidia</groupId>
+        <artifactId>rapids-4-spark-parent_2.12</artifactId>
+        <version>26.10.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+    <artifactId>rapids-4-spark-aggregator_2.12</artifactId>
+    <name>RAPIDS Accelerator for Apache Spark Aggregator</name>
+    <description>Creates an aggregated shaded package of the RAPIDS plugin for Apache Spark</description>
+    <version>26.10.0-SNAPSHOT</version>
+
+    <properties>
+        <rapids.module>aggregator</rapids.module>
+        <!--
+        we store ASM-relocated packages in /spark3xx parallel worlds in dist
+        and they are auto-deduped using binary diff
+        -->
+        <rapids.shade.package>com.nvidia.shaded.spark</rapids.shade.package>
+        <rapids.shade.package.path>com/nvidia/shaded/spark</rapids.shade.package.path>
+        <rapids.compressed.artifact>false</rapids.compressed.artifact>
+        <rapids.shim.jar.test.phase>none</rapids.shim.jar.test.phase>
+        <rapids.default.jar.excludePattern>**/*</rapids.default.jar.excludePattern>
+        <rapids.default.jar.phase>initialize</rapids.default.jar.phase>
+        <!-- Maven to register attached artifact , which we later replace -->
+        <rapids.shim.jar.phase>initialize</rapids.shim.jar.phase>
+        <rapids.source.jar.phase>none</rapids.source.jar.phase>
+    </properties>
+    <dependencies>
+        <dependency>
+            <groupId>com.nvidia</groupId>
+            <artifactId>rapids-4-spark-sql_${scala.binary.version}</artifactId>
+            <classifier>${spark.version.classifier}</classifier>
+            <scope>compile</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.nvidia</groupId>
+            <artifactId>rapids-4-spark-shuffle_${scala.binary.version}</artifactId>
+            <version>${project.version}</version>
+            <classifier>${spark.version.classifier}</classifier>
+        </dependency>
+        <dependency>
+            <groupId>com.nvidia</groupId>
+            <artifactId>rapids-4-spark-udf_${scala.binary.version}</artifactId>
+            <version>${project.version}</version>
+            <classifier>${spark.version.classifier}</classifier>
+        </dependency>
+        <dependency>
+            <groupId>com.nvidia</groupId>
+            <artifactId>rapids-4-spark-private_${scala.binary.version}</artifactId>
+            <version>${spark-rapids-private.version}</version>
+            <classifier>${spark.version.classifier}</classifier>
+        </dependency>
+        <!--
+            Placeholders for the maximum number of delta-lake shims per Spark shim:
+            If a Shim needs only N it uses rapids.delta.artifactIdN+1 = rapids.delta.artifactIdN
+        -->
+        <dependency>
+            <groupId>com.nvidia</groupId>
+            <artifactId>${rapids.delta.artifactId1}_${scala.binary.version}</artifactId>
+            <version>${project.version}</version>
+            <classifier>${spark.version.classifier}</classifier>
+        </dependency>
+        <dependency>
+            <groupId>com.nvidia</groupId>
+            <artifactId>${rapids.delta.artifactId2}_${scala.binary.version}</artifactId>
+            <version>${project.version}</version>
+            <classifier>${spark.version.classifier}</classifier>
+        </dependency>
+        <dependency>
+            <groupId>com.nvidia</groupId>
+            <artifactId>${rapids.delta.artifactId3}_${scala.binary.version}</artifactId>
+            <version>${project.version}</version>
+            <classifier>${spark.version.classifier}</classifier>
+        </dependency>
+        <!--
+            Placeholders for iceberg shims per Spark shim:
+            If a Shim needs only 1 it uses rapids.iceberg.artifactId2 = rapids.iceberg.artifactId
+        -->
+        <dependency>
+            <groupId>com.nvidia</groupId>
+            <artifactId>${rapids.iceberg.artifactId}_${scala.binary.version}</artifactId>
+            <version>${project.version}</version>
+            <classifier>${spark.version.classifier}</classifier>
+        </dependency>
+        <dependency>
+            <groupId>com.nvidia</groupId>
+            <artifactId>${rapids.iceberg.artifactId2}_${scala.binary.version}</artifactId>
+            <version>${project.version}</version>
+            <classifier>${spark.version.classifier}</classifier>
+        </dependency>
+    </dependencies>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <configuration>
+                    <shadedArtifactAttached>true</shadedArtifactAttached>
+                    <artifactSet>
+                        <excludes>
+                            <exclude>org.slf4j:*</exclude>
+                            <!-- excludes spark-rapids-jni and jucx, will package them in the dist submodule -->
+                            <exclude>com.nvidia:spark-rapids-jni:*</exclude>
+                            <exclude>org.openucx:jucx:*</exclude>
+                        </excludes>
+                    </artifactSet>
+                    <transformers>
+                        <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                            <manifestEntries>
+                                <Multi-Release>true</Multi-Release>
+                            </manifestEntries>
+                        </transformer>
+                        <transformer
+                                implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                    </transformers>
+                    <relocations>
+                        <!-- relocate multi-release packages -->
+                        <relocation>
+                            <pattern>META-INF/versions/(\d+)/org/roaringbitmap</pattern>
+                            <shadedPattern>META-INF/versions/$1/${rapids.shade.package.path}/org/roaringbitmap</shadedPattern>
+                            <rawString>true</rawString>
+                        </relocation>
+                        <relocation>
+                            <pattern>com.google.flatbuffers</pattern>
+                            <shadedPattern>${rapids.shade.package}.com.google.flatbuffers</shadedPattern>
+                        </relocation>
+                        <relocation>
+                            <pattern>org.roaringbitmap</pattern>
+                            <shadedPattern>${rapids.shade.package}.org.roaringbitmap</shadedPattern>
+                        </relocation>
+                    </relocations>
+                    <filters>
+                        <filter>
+                            <artifact>com.nvidia:rapids-4-spark-aggregator_${scala.binary.version}</artifact>
+                            <includes>
+                                <include>META-INF/**</include>
+                            </includes>
+                            <excludes>
+                                <exclude>META-INF/services/**</exclude>
+                            </excludes>
+                        </filter>
+                    </filters>
+                    <createDependencyReducedPom>false</createDependencyReducedPom>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>main-${spark.version.classifier}</id>
+                        <phase>compile</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-antrun-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>init-dirs</id>
+                        <phase>initialize</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <mkdir dir="${project.build.outputDirectory}"/>
+                            </target>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>generate-build-info</id>
+                        <phase>none</phase>
+                    </execution>
+                    <execution>
+                        <id>create-aggregator-for-downstream-if-content-changed</id>
+                        <goals><goal>run</goal></goals>
+                        <phase>process-classes</phase>
+                        <configuration>
+                            <target>
+                                <taskdef resource="net/sf/antcontrib/antcontrib.properties"/>
+                                <property name="realAggJar"
+                                          location="${project.build.outputDirectory}/../${project.build.finalName}-shaded.jar"/>
+                                <property name="aggJarForDownstream"
+                                          location="${project.build.outputDirectory}/../${project.build.finalName}-${spark.version.classifier}.jar"/>
+                                <property name="newClassesDir" location="${project.build.outputDirectory}/../new-classes"/>
+                                <property name="oldClassesDir" location="${project.build.outputDirectory}/../old-classes"/>
+                                <echo>Checking if need to recreate: ${aggJarForDownstream}</echo>
+                                <!-- using diff instead of checksum to deal with the expected zip metadata diff -->
+
+                                <!-- make sure we start with a clean new dir -->
+                                <mkdir dir="${newClassesDir}"/>
+                                <delete dir="${newClassesDir}"/>
+                                <unzip src="${realAggJar}" dest="${newClassesDir}"/>
+                                <ac:if xmlns:ac="antlib:net.sf.antcontrib">
+                                    <available file="${oldClassesDir}" type="dir"/>
+                                    <then>
+                                        <exec executable="diff"
+                                            resultproperty="diff.result"
+                                            discardOutput="${nonfail.errors.quiet}"
+                                            discardError="${nonfail.errors.quiet}">
+                                            <arg value="-q"/>
+                                            <arg value="-r"/>
+                                            <arg value="${oldClassesDir}"/>
+                                            <arg value="${newClassesDir}"/>
+                                        </exec>
+                                    </then>
+                                    <else>
+                                        <echo>Clean build? Skipping diff because ${oldClassesDir} does not exist</echo>
+                                    </else>
+                                </ac:if>
+
+                                <ac:if xmlns:ac="antlib:net.sf.antcontrib">
+                                    <equals arg1="0" arg2="${diff.result}"/>
+                                    <then>
+                                        <echo>Aggregator jar unchanged</echo>
+                                    </then>
+                                    <else>
+                                        <echo>Aggregator jar changed, recreating final jar</echo>
+                                        <delete dir="${oldClassesDir}"/>
+                                        <move file="${newClassesDir}" tofile="${oldClassesDir}"/>
+                                        <copy file="${realAggJar}" tofile="${aggJarForDownstream}"/>
+                                    </else>
+                                </ac:if>
+                            </target>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>prepare-agent</id>
+                        <goals>
+                            <goal>prepare-agent</goal>
+                        </goals>
+                        <phase>none</phase>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>default-test</id>
+                        <phase>none</phase>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.rat</groupId>
+                <artifactId>apache-rat-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <!-- keep for the case dependency-reduced pom is enabled -->
+                <artifactId>maven-clean-plugin</artifactId>
+                <version>${maven.clean.plugin.version}</version>
+                <executions>
+                    <execution>
+                        <id>clean-reduced-dependency-poms</id>
+                        <phase>clean</phase>
+                        <goals>
+                            <goal>clean</goal>
+                        </goals>
+                        <configuration>
+                            <skip>${skipDrpClean}</skip>
+                            <filesets>
+                                <fileset>
+                                    <directory>${project.basedir}</directory>
+                                    <includes>
+                                        <include>dependency-reduced-pom*.xml</include>
+                                    </includes>
+                                </fileset>
+                            </filesets>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

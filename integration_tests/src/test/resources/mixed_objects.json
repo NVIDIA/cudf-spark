@@ -1,0 +1,35 @@
+{"id": 1,"name": "John","tags": ["developer", "python"],"details": {"age": 30,"address": {"city": "San Francisco","zip": "94105"}}}
+{"user": { "profile": { "username": "jane_doe","email": "jane.doe@example.com"},"skills": ["java", "spark", "sql"],"projects": [{"name": "Project X", "status": "completed"},{"name": "Project Y", "status": "ongoing"}]}}
+{"departments": [{"name": "Engineering","employees": [{"id": 101, "name": "Alice"},{"id": 102, "name": "Bob"}]},{"name": "Sales","employees": [{"id": 201, "name": "Charlie"},{"id": 202, "name": "David"}]}]}
+{"data": {"numeric": 123, "text": "example", "flag": true, "details": { "timestamp": "2024-08-22T10:00:00Z","list": [1, 2, 3]}}}
+{"company": {"departments": [{"department_name": "HR","employees": [{"name": "Emily", "role": "Recruiter"},{"name": "Frank", "role": "HR Manager"}]},{"department_name": "IT","employees": [{"name": "Grace", "role": "Software Engineer"},{"name": "Hank", "role": "System Admin"}]}]}}
+{"id": 2, "name": "Alice", "tags": ["data scientist", "R"], "details": {"age": 28, "address": {"city": "New York", "zip": "10001"}}}
+{"user": {"profile": {"username": "bob_smith", "email": "bob.smith@example.com"}, "skills": ["javascript", "node.js"], "projects": [{"name": "Project A", "status": "completed"}, {"name": "Project B", "status": "pending"}]}}
+{"departments": [{"name": "Marketing", "employees": [{"id": 301, "name": "Tom"}, {"id": 302, "name": "Jerry"}]}, {"name": "Finance", "employees": [{"id": 401, "name": "Mickey"}, {"id": 402, "name": "Donald"}]}]}
+{"data": {"numeric": 456, "text": "sample", "flag": false, "details": {"timestamp": "2024-08-23T11:00:00Z", "list": [4, 5, 6]}}}
+{"company": {"departments": [{"department_name": "Sales", "employees": [{"name": "Olivia", "role": "Sales Manager"}, {"name": "Liam", "role": "Sales Associate"}]}, {"department_name": "Engineering", "employees": [{"name": "Noah", "role": "DevOps Engineer"}, {"name": "Emma", "role": "Frontend Developer"}]}]}}
+{"id": 3, "name": "Robert", "tags": ["backend", "java"], "details": {"age": 35, "address": {"city": "Seattle", "zip": "98101"}}}
+{"user": {"profile": {"username": "carol_jones", "email": "carol.jones@example.com"}, "skills": ["python", "machine learning"], "projects": [{"name": "Project Z", "status": "ongoing"}, {"name": "Project W", "status": "completed"}]}}
+{"departments": [{"name": "HR", "employees": [{"id": 501, "name": "Sophia"}, {"id": 502, "name": "Jackson"}]}, {"name": "IT", "employees": [{"id": 601, "name": "Aiden"}, {"id": 602, "name": "Lucas"}]}]}
+{"data": {"numeric": 789, "text": "test", "flag": true, "details": {"timestamp": "2024-08-24T12:00:00Z", "list": [7, 8, 9]}}}
+{"company": {"departments": [{"department_name": "Customer Support", "employees": [{"name": "Mia", "role": "Support Specialist"}, {"name": "Ethan", "role": "Support Manager"}]}, {"department_name": "Development", "employees": [{"name": "Isabella", "role": "Backend Developer"}, {"name": "James", "role": "Frontend Developer"}]}]}}
+{"id": 4, "name": "Emily", "tags": ["UI/UX", "design"], "details": {"age": 29, "address": {"city": "Los Angeles", "zip": "90001"}}}
+{"user": {"profile": {"username": "david_clark", "email": "david.clark@example.com"}, "skills": ["sql", "data analysis"], "projects": [{"name": "Project M", "status": "completed"}, {"name": "Project N", "status": "pending"}]}}
+{"departments": [{"name": "Operations", "employees": [{"id": 701, "name": "Ella"}, {"id": 702, "name": "Liam"}]}, {"name": "Legal", "employees": [{"id": 801, "name": "Ava"}, {"id": 802, "name": "William"}]}]}
+{"data": {"numeric": 321, "text": "data", "flag": false, "details": {"timestamp": "2024-08-25T13:00:00Z", "list": [3, 2, 1]}}}
+{"company": {"departments": [{"department_name": "Product", "employees": [{"name": "Jack", "role": "Product Manager"}, {"name": "Sophia", "role": "Product Designer"}]}, {"department_name": "Marketing", "employees": [{"name": "Oliver", "role": "Content Writer"}, {"name": "Charlotte", "role": "SEO Specialist"}]}]}}
+{"id": 5, "name": "Michael", "tags": ["full-stack", "ruby"], "details": {"age": 32, "address": {"city": "Austin", "zip": "73301"}}}
+{"user": {"profile": {"username": "lisa_white", "email": "lisa.white@example.com"}, "skills": ["php", "web development"], "projects": [{"name": "Project O", "status": "completed"}, {"name": "Project P", "status": "ongoing"}]}}
+{"departments": [{"name": "Research", "employees": [{"id": 901, "name": "Benjamin"}, {"id": 902, "name": "Mia"}]}, {"name": "Training", "employees": [{"id": 1001, "name": "Zoe"}, {"id": 1002, "name": "Ryan"}]}]}
+{"data": {"numeric": 654, "text": "example", "flag": true, "details": {"timestamp": "2024-08-26T14:00:00Z", "list": [6, 5, 4]}}}
+{"company": {"departments": [{"department_name": "Finance", "employees": [{"name": "Lucas", "role": "Financial Analyst"}, {"name": "Emma", "role": "Finance Director"}]}, {"department_name": "Legal", "employees": [{"name": "Liam", "role": "Legal Counsel"}, {"name": "Olivia", "role": "Paralegal"}]}]}}
+{"id": 6, "name": "Sophia", "tags": ["cloud", "AWS"], "details": {"age": 31, "address": {"city": "San Diego", "zip": "92101"}}}
+{"user": {"profile": {"username": "aaron_lee", "email": "aaron.lee@example.com"}, "skills": ["c++", "system programming"], "projects": [{"name": "Project Q", "status": "ongoing"}, {"name": "Project R", "status": "completed"}]}}
+{"departments": [{"name": "Design", "employees": [{"id": 1101, "name": "Ella"}, {"id": 1102, "name": "Jack"}]}, {"name": "Strategy", "employees": [{"id": 1201, "name": "Mason"}, {"id": 1202, "name": "Ava"}]}]}
+{"data": {"numeric": 987, "text": "test", "flag": false, "details": {"timestamp": "2024-08-27T15:00:00Z", "list": [9, 8, 7]}}}
+{"company": {"departments": [{"department_name": "Sales", "employees": [{"name": "Aiden", "role": "Sales Director"}, {"name": "Emily", "role": "Sales Representative"}]}, {"department_name": "Development", "employees": [{"name": "James", "role": "Lead Developer"}, {"name": "Mia", "role": "Junior Developer"}]}]}}
+{"id": 7, "name": "David", "tags": ["embedded systems", "IoT"], "details": {"age": 34, "address": {"city": "Boston", "zip": "02101"}}}
+{"user": {"profile": {"username": "nina_garcia", "email": "nina.garcia@example.com"}, "skills": ["ruby", "backend"], "projects": [{"name": "Project S", "status": "completed"}, {"name": "Project T", "status": "pending"}]}}
+{"departments": [{"name": "Customer Support", "employees": [{"id": 1301, "name": "Daniel"}, {"id": 1302, "name": "Sophia"}]}, {"name": "Administration", "employees": [{"id": 1401, "name": "Olivia"}, {"id": 1402, "name": "Ethan"}]}]}
+{"data": {"numeric": 111, "text": "sample", "flag": true, "details": {"timestamp": "2024-08-28T16:00:00Z", "list": [1, 1, 1]}}}
+{"company": {"departments": [{"department_name": "Operations", "employees": [{"name": "Ryan", "role": "Operations Manager"}, {"name": "Emma", "role": "Operations Analyst"}]}, {"department_name": "Product", "employees": [{"name": "Olivia", "role": "Product Owner"}, {"name": "Mason", "role": "Product Designer"}]}]}}

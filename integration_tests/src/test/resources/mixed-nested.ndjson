@@ -1,0 +1,10 @@
+{ "var0": true, "var1": 123.45, "var2": [{ "var0": 123.45, "var1": "hello", "var2": 123.45 }, { "var0": null, "var1": "hello", "var2": null }, 123.45] }
+{ "var0": true, "var1": 123.45, "var2": [{ "var0": true, "var1": "hello", "var2": true }, "hello", true] }
+{ "var0": null, "var1": true, "var2": "hello" }
+{ "var0": "hello", "var1": null, "var2": [true, { "var0": true, "var1": "hello", "var2": null }, null] }
+{ "var0": [null, true, null], "var1": "hello", "var2": [[123.45, true, 123.45], { "var0": true, "var1": true, "var2": "hello" }, { "var0": null, "var1": 123.45, "var2": 123.45 }] }
+{ "var0": null, "var1": { "var0": [null, 123.45, true], "var1": "hello", "var2": "hello" }, "var2": 123.45 }
+{ "var0": null, "var1": { "var0": null, "var1": "hello", "var2": 123.45 }, "var2": 123.45 }
+{ "var0": true, "var1": true, "var2": [[123.45, null, 123.45], { "var0": true, "var1": null, "var2": 123.45 }, ["hello", true, "hello"]] }
+{ "var0": true, "var1": [{ "var0": true, "var1": "hello", "var2": null }, null, [true, null, null]], "var2": [[123.45, null, true], 123.45, { "var0": null, "var1": 123.45, "var2": "hello" }] }
+{ "var0": 123.45, "var1": "hello", "var2": 123.45 }

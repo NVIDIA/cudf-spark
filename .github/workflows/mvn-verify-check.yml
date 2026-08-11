@@ -1,0 +1,432 @@
+# Copyright (c) 2022-2026, NVIDIA CORPORATION.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# A workflow to run mvn verify check
+name: mvn[compile,RAT,scalastyle,docgen]
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  COMMON_MVN_FLAGS: >-
+    -Ddist.jar.compress=false
+    -DskipTests
+    -Dmaven.scaladoc.skip
+    -Dmaven.artifact.threads=10
+    --batch-mode
+    -Dmaven.wagon.http.retryHandler.count=3
+    -Dmaven.wagon.httpconnectionManager.ttlSeconds=30
+    -Daether.connector.http.connectionMaxTtl=30
+    -Drapids.secondaryCacheDir=$HOME/.m2/repository/.sbt/1.0/zinc/org.scala-sbt
+
+permissions:
+  contents: read
+
+jobs:
+  cache-dependencies:
+    runs-on: ubuntu-latest
+    outputs:
+      dailyCacheKey: ${{ steps.generateCacheKey.outputs.dailyCacheKey }}
+      defaultSparkVersion: ${{ steps.all212ShimVersionsStep.outputs.defaultSparkVersion }}
+      sparkTailVersions: ${{ steps.all212ShimVersionsStep.outputs.tailVersions }}
+      sparkJDKVersions: ${{ steps.all212ShimVersionsStep.outputs.jdkVersions }}
+    steps:
+      - uses: NVIDIA/spark-rapids-common/checkout@main # refs/pull/:prNumber/merge
+      - uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: 17
+      - name: Generate daily cache key
+        id: generateCacheKey
+        run: |
+          set -x
+          depsSHA1=$(. .github/workflows/mvn-verify-check/get-deps-sha1.sh 2.12)
+          hashfile=$(echo ${{ hashFiles('**/pom.xml') }})
+          md5sum=$(echo -n "$depsSHA1-$hashfile" | md5sum | awk '{print $1}')
+          cacheKey="${{ runner.os }}-maven-${{ github.event.pull_request.base.ref }}-${md5sum}"
+          echo "dailyCacheKey=$cacheKey" | tee $GITHUB_ENV $GITHUB_OUTPUT
+      - name: Cache local Maven repository
+        id: cache
+        continue-on-error: true
+        uses: actions/cache@v5
+        with:
+          path: ~/.m2
+          key: ${{ env.dailyCacheKey }}
+          restore-keys: ${{ runner.os }}-maven-
+      - name: populate-daily-cache
+        timeout-minutes: 30
+        continue-on-error: true
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          SCALA_VER: '2.12'
+        run: |
+          . .github/workflows/mvn-verify-check/populate-daily-cache.sh
+      - name: all shim versions
+        id: all212ShimVersionsStep
+        run: |
+          set -x
+          . jenkins/version-def.sh
+          svArrBodyNoSnapshot=$(printf ",{\"spark-version\":\"%s\",\"isSnapshot\":false}" "${SPARK_SHIM_VERSIONS_NOSNAPSHOTS_TAIL[@]}")
+          svArrBodyNoSnapshot=${svArrBodyNoSnapshot:1}
+
+          # get private artifact version
+          privateVer=$(mvn help:evaluate -q -pl dist -Dexpression=spark-rapids-private.version -DforceStdout)
+          # do not add empty snapshot versions or when private version is released one (does not include snapshot shims)
+          if [[ ${#SPARK_SHIM_VERSIONS_SNAPSHOTS_ONLY[@]} -gt 0 && $privateVer == *"-SNAPSHOT" ]]; then
+            svArrBodySnapshot=$(printf ",{\"spark-version\":\"%s\",\"isSnapshot\":true}" "${SPARK_SHIM_VERSIONS_SNAPSHOTS_ONLY[@]}")
+            svArrBodySnapshot=${svArrBodySnapshot:1}
+            svJsonStr=$(printf {\"include\":[%s]} $svArrBodyNoSnapshot,$svArrBodySnapshot)
+          else
+            svJsonStr=$(printf {\"include\":[%s]} $svArrBodyNoSnapshot)
+          fi
+
+          echo "tailVersions=$svJsonStr" >> $GITHUB_OUTPUT
+          # default version
+          echo "defaultSparkVersion=${SPARK_BASE_SHIM_VERSION}" >> $GITHUB_OUTPUT
+          # jdk17
+          jdk17VersionArrBody=$(printf ",{\"spark-version\":\"%s\",\"java-version\":17}" "${SPARK_SHIM_VERSIONS_JDK17[@]}")
+          # jdk
+          jdkVersionArrBody=$jdk17VersionArrBody
+          jdkVersionArrBody=${jdkVersionArrBody:1}
+          jdkVersionJsonStr=$(printf {\"include\":[%s]} $jdkVersionArrBody)
+          echo "jdkVersions=$jdkVersionJsonStr" >> $GITHUB_OUTPUT
+
+
+  package-tests:
+    needs: cache-dependencies
+    continue-on-error: ${{ matrix.isSnapshot }}
+    strategy:
+      matrix: ${{ fromJSON(needs.cache-dependencies.outputs.sparkTailVersions) }}
+      fail-fast: false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: NVIDIA/spark-rapids-common/checkout@main # refs/pull/:prNumber/merge
+
+      - name: Setup Java and Maven Env
+        uses: actions/setup-java@v5
+        with:
+          distribution: adopt
+          java-version: 17
+
+      - name: Cache local Maven repository
+        continue-on-error: true
+        uses: actions/cache@v5
+        with:
+          path: ~/.m2
+          key: ${{ needs.cache-dependencies.outputs.dailyCacheKey }}
+
+      - name: check runtime before tests
+        run: |
+          env | grep JAVA
+          java -version && mvn --version && echo "ENV JAVA_HOME: $JAVA_HOME, PATH: $PATH"
+
+      - name: package tests check
+        run: |
+          # https://github.com/NVIDIA/spark-rapids/issues/8847
+          # specify expected versions
+          export JAVA_HOME=${JAVA_HOME_17_X64}
+          export PATH=${JAVA_HOME}/bin:${PATH}
+          java -version && mvn --version && echo "ENV JAVA_HOME: $JAVA_HOME, PATH: $PATH"
+          # test command, will retry for 3 times if failed.
+          max_retry=3; delay=30; i=1
+          while true; do
+            mvn package \
+              -pl integration_tests,tests,tools -am -P 'individual,pre-merge' \
+              -Dbuildver=${{ matrix.spark-version }} -Dmaven.scalastyle.skip=true \
+              -Drat.skip=true ${{ env.COMMON_MVN_FLAGS }} && break || {
+            if [[ $i -le $max_retry ]]; then
+              echo "mvn command failed. Retry $i/$max_retry."; ((i++)); sleep $delay; ((delay=delay*2))
+            else
+              echo "mvn command failed. Exit 1"; exit 1
+            fi
+          }
+          done
+
+  cache-dependencies-scala213:
+    runs-on: ubuntu-latest
+    outputs:
+      scala213dailyCacheKey: ${{ steps.generateCacheKey.outputs.scala213dailyCacheKey }}
+      scala213Versions: ${{ steps.all213ShimVersionsStep.outputs.scala213Versions }}
+      sparkJDK17Versions: ${{ steps.all213ShimVersionsStep.outputs.jdkVersions }}
+    steps:
+      - uses: NVIDIA/spark-rapids-common/checkout@main # refs/pull/:prNumber/merge
+      - uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: 17
+      - name: Generate daily cache key
+        id: generateCacheKey
+        run: |
+          set -x
+          depsSHA1=$(. .github/workflows/mvn-verify-check/get-deps-sha1.sh 2.13)
+          hashfile=$(echo ${{ hashFiles('**/pom.xml') }})
+          md5sum=$(echo -n "$depsSHA1-$hashfile" | md5sum | awk '{print $1}')
+          cacheKey="${{ runner.os }}-maven-${{ github.event.pull_request.base.ref }}-${md5sum}"
+          echo "scala213dailyCacheKey=$cacheKey" | tee $GITHUB_ENV $GITHUB_OUTPUT
+      - name: Cache local Maven repository
+        id: cache
+        continue-on-error: true
+        uses: actions/cache@v5
+        with:
+          path: ~/.m2
+          key: ${{ env.scala213dailyCacheKey }}
+          restore-keys: ${{ runner.os }}-maven-
+      - name: populate-daily-cache
+        timeout-minutes: 30
+        continue-on-error: true
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          SCALA_VER: '2.13'
+        run: |
+          . .github/workflows/mvn-verify-check/populate-daily-cache.sh
+      - name: all 213 shim verions
+        id: all213ShimVersionsStep
+        run: |
+          set -x
+          SCALA_BINARY_VER=2.13
+          . jenkins/version-def.sh
+          svArrBodyNoSnapshot=$(printf ",{\"spark-version\":\"%s\",\"isSnapshot\":false}" "${SPARK_SHIM_VERSIONS_NOSNAPSHOTS[@]}")
+          svArrBodyNoSnapshot=${svArrBodyNoSnapshot:1}
+          # get private artifact version
+          privateVer=$(mvn help:evaluate -q -pl dist -Dexpression=spark-rapids-private.version -DforceStdout)
+          svJsonStr=$(printf {\"include\":[%s]} $svArrBodyNoSnapshot)
+
+          echo "scala213Versions=$svJsonStr" >> $GITHUB_OUTPUT
+
+          # jdk17
+          jdk17VersionArrBody=$(printf ",{\"spark-version\":\"%s\",\"java-version\":17}" "${SPARK_SHIM_VERSIONS_JDK17_SCALA213[@]}")
+
+          jdkVersionArrBody=$jdk17VersionArrBody
+          jdkVersionArrBody=${jdkVersionArrBody:1}
+          jdkVersionJsonStr=$(printf {\"include\":[%s]} $jdkVersionArrBody)
+          echo "jdkVersions=$jdkVersionJsonStr" >> $GITHUB_OUTPUT
+
+
+  package-tests-scala213:
+    needs: cache-dependencies-scala213
+    continue-on-error: ${{ matrix.isSnapshot }}
+    strategy:
+      matrix: ${{ fromJSON(needs.cache-dependencies-scala213.outputs.scala213Versions) }}
+      fail-fast: false
+    runs-on: ubuntu-latest
+    steps:
+
+      - uses: NVIDIA/spark-rapids-common/checkout@main # refs/pull/:prNumber/merge
+
+      - name: Setup Java and Maven Env
+        uses: actions/setup-java@v5
+        with:
+          distribution: adopt
+          java-version: 17
+
+      - name: Cache local Maven repository
+        continue-on-error: true
+        uses: actions/cache@v5
+        with:
+          path: ~/.m2
+          key: ${{ needs.cache-dependencies-scala213.outputs.scala213dailyCacheKey }}
+
+      - name: check runtime before tests
+        run: |
+          env | grep JAVA
+          java -version && mvn --version && echo "ENV JAVA_HOME: $JAVA_HOME, PATH: $PATH"
+
+      - name: package tests check
+        run: |
+          # https://github.com/NVIDIA/spark-rapids/issues/8847
+          # specify expected versions
+          export JAVA_HOME=${JAVA_HOME_17_X64}
+          export PATH=${JAVA_HOME}/bin:${PATH}
+          java -version && mvn --version && echo "ENV JAVA_HOME: $JAVA_HOME, PATH: $PATH"
+          # verify Scala 2.13 build files
+          ./build/make-scala-version-build-files.sh 2.13
+          # verify git status
+          if [ -n "$(echo -n $(git status -s | grep 'scala2.13'))" ]; then
+              git add -N scala2.13/* && git diff 'scala2.13/*'
+              echo "Generated Scala 2.13 build files don't match what's in repository"
+              exit 1
+          fi
+          # test command, will retry for 3 times if failed.
+          max_retry=3; delay=30; i=1
+          while true; do
+            mvn package -f scala2.13/ \
+              -pl integration_tests,tests,tools -am -P 'individual,pre-merge' \
+              -Dbuildver=${{ matrix.spark-version }} -Dmaven.scalastyle.skip=true \
+              -Drat.skip=true ${{ env.COMMON_MVN_FLAGS }} && break || {
+            if [[ $i -le $max_retry ]]; then
+              echo "mvn command failed. Retry $i/$max_retry."; ((i++)); sleep $delay; ((delay=delay*2))
+            else
+              echo "mvn command failed. Exit 1"; exit 1
+            fi
+          }
+          done
+
+  verify-213-modules:
+    needs: cache-dependencies-scala213
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJSON(needs.cache-dependencies-scala213.outputs.sparkJDK17Versions) }}
+    steps:
+      - uses: NVIDIA/spark-rapids-common/checkout@main # refs/pull/:prNumber/merge
+
+      - name: Setup Java and Maven Env
+        uses: actions/setup-java@v5
+        with:
+          distribution: adopt
+          java-version: 17
+
+      - name: Cache local Maven repository
+        continue-on-error: true
+        uses: actions/cache@v5
+        with:
+          path: ~/.m2
+          key: ${{ needs.cache-dependencies-scala213.outputs.scala213dailyCacheKey }}
+
+      - name: check runtime before tests
+        run: |
+          env | grep JAVA
+          java -version && mvn --version && echo "ENV JAVA_HOME: $JAVA_HOME, PATH: $PATH"
+
+      - name: Build JDK
+        run: |
+          # https://github.com/NVIDIA/spark-rapids/issues/8847
+          # specify expected versions
+          export JAVA_HOME=${JAVA_HOME_${{ matrix.java-version }}_X64}
+          export PATH=${JAVA_HOME}/bin:${PATH}
+          java -version && mvn --version && echo "ENV JAVA_HOME: $JAVA_HOME, PATH: $PATH"
+           # verify Scala 2.13 build files
+          ./build/make-scala-version-build-files.sh 2.13
+          # verify git status
+          if [ -n "$(echo -n $(git status -s | grep 'scala2.13'))" ]; then
+              git add -N scala2.13/* && git diff 'scala2.13/*'
+              echo "Generated Scala 2.13 build files don't match what's in repository"
+              exit 1
+          fi
+          # test command, will retry for 3 times if failed.
+          max_retry=3; delay=30; i=1
+          while true; do
+            mvn verify -f scala2.13/ \
+              -P "individual,pre-merge,source-javadoc" -Dbuildver=${{ matrix.spark-version }} \
+              ${{ env.COMMON_MVN_FLAGS }} && break || {
+            if [[ $i -le $max_retry ]]; then
+              echo "mvn command failed. Retry $i/$max_retry."; ((i++)); sleep $delay; ((delay=delay*2))
+            else
+              echo "mvn command failed. Exit 1"; exit 1
+            fi
+          }
+          done
+
+  verify-all-212-modules:
+    needs: cache-dependencies
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJSON(needs.cache-dependencies.outputs.sparkJDKVersions) }}
+    steps:
+      - uses: NVIDIA/spark-rapids-common/checkout@main # refs/pull/:prNumber/merge
+
+      - name: Setup Java and Maven Env
+        uses: actions/setup-java@v5
+        with:
+          distribution: adopt
+          java-version: ${{ matrix.java-version }}
+
+      - name: Cache local Maven repository
+        continue-on-error: true
+        uses: actions/cache@v5
+        with:
+          path: ~/.m2
+          key: ${{ needs.cache-dependencies.outputs.dailyCacheKey }}
+
+      - name: check runtime before tests
+        run: |
+          env | grep JAVA
+          java -version && mvn --version && echo "ENV JAVA_HOME: $JAVA_HOME, PATH: $PATH"
+
+      - name: Build JDK
+        run: |
+          # https://github.com/NVIDIA/spark-rapids/issues/8847
+          # specify expected versions
+          export JAVA_HOME=${JAVA_HOME_${{ matrix.java-version }}_X64}
+          export PATH=${JAVA_HOME}/bin:${PATH}
+          java -version && mvn --version && echo "ENV JAVA_HOME: $JAVA_HOME, PATH: $PATH"
+          # test command, will retry for 3 times if failed.
+          max_retry=3; delay=30; i=1
+          while true; do
+            mvn verify \
+              -P "individual,pre-merge" -Dbuildver=${{ matrix.spark-version }} \
+              ${{ env.COMMON_MVN_FLAGS }} && break || {
+            if [[ $i -le $max_retry ]]; then
+              echo "mvn command failed. Retry $i/$max_retry."; ((i++)); sleep $delay; ((delay=delay*2))
+            else
+              echo "mvn command failed. Exit 1"; exit 1
+            fi
+          }
+          done
+
+  install-modules:
+    needs: cache-dependencies
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        maven-version: [3.6.3, 3.8.8, 3.9.3]
+    steps:
+      - uses: NVIDIA/spark-rapids-common/checkout@main # refs/pull/:prNumber/merge
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: adopt
+          java-version: 11
+
+      - name: Cache local Maven repository
+        continue-on-error: true
+        uses: actions/cache@v5
+        with:
+          path: ~/.m2
+          key: ${{ needs.cache-dependencies.outputs.dailyCacheKey }}
+
+      - name: Setup Maven Wrapper
+        run: mvn wrapper:wrapper -Dmaven=${{ matrix.maven-version }}
+
+      - name: check runtime before tests
+        run: |
+          env | grep JAVA
+          java -version && mvn --version && echo "ENV JAVA_HOME: $JAVA_HOME, PATH: $PATH"
+
+      - name: Install with Maven ${{ matrix.maven-version }}
+        run: |
+          # https://github.com/NVIDIA/spark-rapids/issues/8847
+          # specify expected versions
+          export JAVA_HOME=${JAVA_HOME_17_X64}
+          export PATH=${JAVA_HOME}/bin:${PATH}
+          java -version && mvn --version && echo "ENV JAVA_HOME: $JAVA_HOME, PATH: $PATH"
+          # test command, will retry for 3 times if failed.
+          max_retry=3; delay=30; i=1
+          while true; do
+            ./mvnw install \
+              -P "individual,pre-merge" \
+              -Dbuildver=${{ needs.cache-dependencies.outputs.defaultSparkVersion }} \
+              ${{ env.COMMON_MVN_FLAGS }} && break || {
+            if [[ $i -le $max_retry ]]; then
+              echo "mvn command failed. Retry $i/$max_retry."; ((i++)); sleep $delay; ((delay=delay*2))
+            else
+              echo "mvn command failed. Exit 1"; exit 1
+            fi
+          }
+          done

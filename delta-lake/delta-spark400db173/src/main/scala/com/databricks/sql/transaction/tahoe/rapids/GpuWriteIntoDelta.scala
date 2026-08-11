@@ -1,0 +1,45 @@
+/*
+ * Copyright (c) 2026, NVIDIA CORPORATION.
+ *
+ * This file was derived from WriteIntoDelta.scala
+ * in the Delta Lake project at https://github.com/delta-io/delta.
+ *
+ * Copyright (2021) The Delta Lake Project Authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.databricks.sql.transaction.tahoe.rapids
+
+import com.databricks.sql.transaction.tahoe.{DeltaOperations, OptimisticTransaction}
+import com.databricks.sql.transaction.tahoe.DeltaCommitTag._
+import com.databricks.sql.transaction.tahoe.actions.Action
+import com.databricks.sql.transaction.tahoe.commands.{DMLUtils, WriteIntoDeltaEdge}
+
+/** GPU version of Delta Lake's WriteIntoDelta. */
+case class GpuWriteIntoDelta(
+    gpuDeltaLog: GpuDeltaLog,
+    cpuWrite: WriteIntoDeltaEdge)
+    extends GpuWriteIntoDeltaBase(gpuDeltaLog, cpuWrite) {
+
+  override protected def commitActions(
+      txn: OptimisticTransaction,
+      actions: Seq[Action],
+      operation: DeltaOperations.Operation): Unit = {
+    // Plain writes never copy existing rows; replaceWhere may, so only stamp
+    // NoRowsCopiedTag when no predicate is set.
+    val tagged = DMLUtils.TaggedCommitData(actions)
+      .withTag(NoRowsCopiedTag, cpuWrite.options.replaceWhere.isEmpty)
+    txn.commit(tagged.actions, operation, tagged.stringTags)
+  }
+}

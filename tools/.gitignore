@@ -1,0 +1,10 @@
+.idea
+*.iml
+target
+event_log_profiling.log
+## ignore qual-ui static files
+**/ui/assets/
+**/ui-dependencies-cache/
+**/ui/js/data-output.js
+## ignore output folders of the test scripts
+**/dev/qualification-output/

@@ -1,0 +1,7 @@
+empty-0space,,end
+empty-0space-quoted,"",end
+empty-1space, ,end
+empty-1space-quoted," ",end
+empty-2space,  ,end
+empty-2space-quoted,"  ",end
+no-null,3,end
