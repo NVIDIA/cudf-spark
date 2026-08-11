@@ -1156,6 +1156,123 @@ def test_hash_groupby_collect_partial_replace_fallback(data_gen,
         non_exist_classes=','.join(non_exist_clz),
         conf=conf)
 
+
+@pytest.mark.skipif(not is_spark_420_or_later(),
+                    reason='collect_set float/double bit-key buffers and RESPECT NULLS need Spark 4.2+')
+@ignore_order(local=True)
+@allow_non_gpu('ObjectHashAggregateExec', 'SortAggregateExec',
+               'ShuffleExchangeExec', 'HashPartitioning', 'SortExec',
+               'SortArray', 'Alias', 'Literal', 'CollectSet',
+               'AggregateExpression', 'ProjectExec', 'Cast', *non_utc_allow)
+@pytest.mark.parametrize('replace_mode', _replace_modes_non_distinct, ids=idfn)
+@pytest.mark.parametrize('fp_type', ['FLOAT', 'DOUBLE'], ids=idfn)
+def test_hash_groupby_collect_partial_replace_respect_nulls_float_double(replace_mode, fp_type):
+    """Mixed CPU/GPU CollectSet for Float/Double with IGNORE/RESPECT NULLS on Spark 4.2+."""
+    conf = {'spark.rapids.sql.hashAgg.replaceMode': replace_mode,
+            'spark.sql.adaptive.enabled': 'false',
+            'spark.sql.execution.useObjectHashAggregateExec': 'false'}
+
+    cpu_clz, gpu_clz = ['CollectSet'], ['GpuCollectSet']
+    if is_databricks_runtime():
+        if replace_mode == 'partial':
+            exist_clz, non_exist_clz = cpu_clz, gpu_clz
+        else:
+            exist_clz, non_exist_clz = gpu_clz, cpu_clz
+    else:
+        exist_clz = cpu_clz + gpu_clz
+        non_exist_clz = []
+
+    # Mixed-null and all-null groups exercise containsNull on the Spark 4.2 bit-key buffer.
+    sql = f"""
+        SELECT a,
+               sort_array(collect_set(b) IGNORE NULLS) AS ignore_set,
+               sort_array(collect_set(b) RESPECT NULLS) AS respect_set
+        FROM VALUES
+            (1, CAST(1.0 AS {fp_type})),
+            (1, CAST(NULL AS {fp_type})),
+            (1, CAST(1.0 AS {fp_type})),
+            (1, CAST(NULL AS {fp_type})),
+            (2, CAST(NULL AS {fp_type})),
+            (2, CAST(NULL AS {fp_type})),
+            (3, CAST(5.0 AS {fp_type})),
+            (3, CAST(NULL AS {fp_type}))
+        AS tab(a, b)
+        GROUP BY a
+    """
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.sql(sql),
+        exist_classes=','.join(exist_clz),
+        non_exist_classes=','.join(non_exist_clz),
+        conf=conf)
+
+
+@pytest.mark.skipif(not is_spark_420_or_later(),
+                    reason='collect_set float/double normalized bit-key buffers need Spark 4.2+')
+@ignore_order(local=True)
+@allow_non_gpu('ObjectHashAggregateExec', 'SortAggregateExec',
+               'ShuffleExchangeExec', 'HashPartitioning', 'SortExec',
+               'SortArray', 'Alias', 'Literal', 'CollectSet',
+               'AggregateExpression', 'ProjectExec', 'Cast', *non_utc_allow)
+@pytest.mark.parametrize('replace_mode', _replace_modes_non_distinct, ids=idfn)
+@pytest.mark.parametrize('fp_type', ['FLOAT', 'DOUBLE'], ids=idfn)
+def test_hash_groupby_collect_partial_replace_float_double_edge_cases(replace_mode, fp_type):
+    """Deterministic +0/-0/NaN/inf/null CollectSet round-trip across mixed CPU/GPU stages."""
+    conf = {'spark.rapids.sql.hashAgg.replaceMode': replace_mode,
+            'spark.sql.adaptive.enabled': 'false',
+            'spark.sql.execution.useObjectHashAggregateExec': 'false'}
+
+    cpu_clz, gpu_clz = ['CollectSet'], ['GpuCollectSet']
+    if is_databricks_runtime():
+        if replace_mode == 'partial':
+            exist_clz, non_exist_clz = cpu_clz, gpu_clz
+        else:
+            exist_clz, non_exist_clz = gpu_clz, cpu_clz
+    else:
+        exist_clz = cpu_clz + gpu_clz
+        non_exist_clz = []
+
+    # Put +0, -0, multiple NaN payloads, +/-inf and null in the same group so
+    # normalization/dedup is forced rather than relying on RepeatSeqGen sampling.
+    sql = f"""
+        SELECT a, sort_array(collect_set(b)) AS s
+        FROM VALUES
+            (1, CAST(0.0 AS {fp_type})),
+            (1, CAST(-0.0 AS {fp_type})),
+            (1, CAST('NaN' AS {fp_type})),
+            (1, CAST('NaN' AS {fp_type})),
+            (1, CAST('Infinity' AS {fp_type})),
+            (1, CAST('-Infinity' AS {fp_type})),
+            (1, CAST(NULL AS {fp_type})),
+            (1, CAST(1.5 AS {fp_type})),
+            (2, CAST(NULL AS {fp_type})),
+            (2, CAST(NULL AS {fp_type}))
+        AS tab(a, b)
+        GROUP BY a
+    """
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.sql(sql),
+        exist_classes=','.join(exist_clz),
+        non_exist_classes=','.join(non_exist_clz),
+        conf=conf)
+
+
+@pytest.mark.skipif(not is_spark_420_or_later(),
+                    reason='collect_set float/double normalized bit-key buffers need Spark 4.2+')
+@ignore_order(local=True)
+@allow_non_gpu('ProjectExec', 'Cast', *non_utc_allow)
+@pytest.mark.parametrize('fp_type', ['FLOAT', 'DOUBLE'], ids=idfn)
+def test_hash_reduction_collect_set_float_double_empty(fp_type):
+    """Empty typed Float/Double collect_set must return an empty array, not null."""
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(f"""
+            SELECT sort_array(collect_set(b)) AS s
+            FROM VALUES (CAST(1.0 AS {fp_type})) AS tab(b)
+            WHERE 1 = 0
+        """))
+
+
 # The special case is to test when the physical plan is being re-written due to the re-optimize
 # of AQE taking effect, which is rare in real world scenarios. So far, this kind of problem only
 # has encountered when there exists a local aggregate ahead of the TypedImperativeAggregate. Then,

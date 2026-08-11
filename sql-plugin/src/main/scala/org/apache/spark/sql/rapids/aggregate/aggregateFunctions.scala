@@ -22,7 +22,7 @@ import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsPluginImplicits.ReallyAGpuExpression
 import com.nvidia.spark.rapids.jni.Aggregation64Utils
-import com.nvidia.spark.rapids.shims.{GpuDeterministicFirstLastCollectShim, HashUtils, ShimExpression,
+import com.nvidia.spark.rapids.shims.{GpuDeterministicFirstLastCollectShim, ShimExpression,
   TypeUtilsShims}
 import com.nvidia.spark.rapids.window._
 
@@ -2019,6 +2019,11 @@ case class GpuCollectSet(
 
   private lazy val useNormalizedBitKeys: Boolean = bufferElementType != child.dataType
 
+  // Bit-key inputProjection is incompatible with GpuUnboundedToUnboundedAggWindowExec, which only
+  // accepts BoundReference/Literal projections and never applies evaluateExpression. Keep the
+  // Spark 4.2+ float/double path on regular GpuWindowExec (windowInputProjection + rolling).
+  override def supportsUnboundedToUnboundedWindowExec: Boolean = !useNormalizedBitKeys
+
   override lazy val inputProjection: Seq[Expression] = {
     if (useNormalizedBitKeys) {
       Seq(GpuCollectSetNormalizedBitKey(child))
@@ -2031,7 +2036,7 @@ case class GpuCollectSet(
   // floats in-place rather than switching the window input to bit keys.
   override lazy val windowInputProjection: Seq[Expression] = {
     if (useNormalizedBitKeys) {
-      Seq(GpuNormalizeFloatingPointForCollectSet(child))
+      Seq(GpuNormalizeNaNAndZero(child))
     } else {
       Seq(child)
     }
@@ -2069,45 +2074,9 @@ case class GpuCollectSet(
 }
 
 /**
- * Helpers matching Spark's NormalizeFloatingNumbers for CollectSet float/double keys:
- * canonicalize NaN payloads and map -0.0 to +0.0.
- */
-object CollectSetFloatingNormalize {
-  def normalize(cv: ColumnVector): ColumnVector = {
-    val dtype = cv.getType
-    require(dtype == DType.FLOAT32 || dtype == DType.FLOAT64,
-      s"CollectSet floating normalize expects FLOAT32/FLOAT64, found $dtype")
-    // Canonicalize NaN payloads first (Spark FLOAT_NORMALIZER / DOUBLE_NORMALIZER), then
-    // reuse HashUtils for signed-zero normalization (-0.0 -> +0.0).
-    val withCanonNan = withResource(cv.isNan) { isNan =>
-      withResource(nanScalar(dtype)) { nan =>
-        isNan.ifElse(nan, cv)
-      }
-    }
-    withResource(withCanonNan) { normalizedNan =>
-      HashUtils.normalizeInput(normalizedNan)
-    }
-  }
-
-  private def nanScalar(dtype: DType): Scalar =
-    if (dtype == DType.FLOAT32) {
-      Scalar.fromFloat(Float.NaN)
-    } else {
-      Scalar.fromDouble(Double.NaN)
-    }
-}
-
-/** Normalize float/double values for CollectSet without changing the logical type. */
-case class GpuNormalizeFloatingPointForCollectSet(child: Expression) extends GpuUnaryExpression {
-  override def dataType: DataType = child.dataType
-
-  override def doColumnar(input: GpuColumnVector): ColumnVector =
-    CollectSetFloatingNormalize.normalize(input.getBase)
-}
-
-/**
  * Normalize float/double and bit-cast to the Spark 4.2 CollectSet buffer key type
- * (Float -> Int, Double -> Long).
+ * (Float -> Int, Double -> Long). Uses cuDF normalizeNANsAndZeros (same as
+ * [[GpuNormalizeNaNAndZero]]) for NaN payload and signed-zero canonicalization.
  */
 case class GpuCollectSetNormalizedBitKey(child: Expression) extends GpuUnaryExpression {
   override def dataType: DataType = {
@@ -2120,7 +2089,7 @@ case class GpuCollectSetNormalizedBitKey(child: Expression) extends GpuUnaryExpr
   }
 
   override def doColumnar(input: GpuColumnVector): ColumnVector = {
-    withResource(CollectSetFloatingNormalize.normalize(input.getBase)) { normalized =>
+    withResource(input.getBase.normalizeNANsAndZeros()) { normalized =>
       val bitsType = GpuColumnVector.getNonNestedRapidsType(dataType)
       withResource(normalized.bitCastTo(bitsType)) { bits =>
         bits.copyToColumnVector()
