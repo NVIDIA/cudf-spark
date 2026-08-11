@@ -316,7 +316,7 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
   private case class CompressedRecord(
     buffer: OpenByteArrayOutputStream,
     compressedSize: Long,
-    remainingQuota: Long)
+    quotaToRelease: AtomicLong)
 
   /**
    * Cooperatively writes one GPU batch without occupying a merger thread while waiting for work.
@@ -454,7 +454,10 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
         outputStream.write(record.buffer.getBuf, 0, record.compressedSize.toInt)
       }
       record.buffer.close()
-      limiter.release(record.remainingQuota)
+      val toRelease = record.quotaToRelease.getAndSet(0)
+      if (toRelease > 0) {
+        limiter.release(toRelease)
+      }
     }
 
     private def closeOutputStream(): Unit = {
@@ -760,14 +763,18 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
                 // Note: excessQuota can be 0 if compression doesn't reduce size (or expands)
                 val excessQuota = math.max(0L, recordSize - compressedSize)
                 if (excessQuota > 0) {
-                  limiter.release(excessQuota)
-                  quotaToRelease.addAndGet(-excessQuota)
+                  // addAndGet returns negative if done() already claimed quota via getAndSet(0).
+                  // In that case skip the direct release; the merger will also see a negative
+                  // getAndSet(0) and skip its release, preventing double-release on the success path.
+                  val remaining = quotaToRelease.addAndGet(-excessQuota)
+                  if (remaining >= 0) {
+                    limiter.release(excessQuota)
+                  }
                 }
 
-                // Return CompressedRecord with buffer and remaining quota for Merger
-                // Total released = excessQuota + remainingQuota should equal recordSize
-                val remainingQuota = recordSize - excessQuota
-                CompressedRecord(buffer, compressedSize, remainingQuota)
+                // Return CompressedRecord carrying quotaToRelease so writeRecord can use
+                // getAndSet(0) to release the remainder — or skip if done() claimed it.
+                CompressedRecord(buffer, compressedSize, quotaToRelease)
               }
             } catch {
               case e: InterruptedException =>
