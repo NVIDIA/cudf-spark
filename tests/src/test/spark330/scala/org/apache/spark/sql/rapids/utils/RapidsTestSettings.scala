@@ -30,6 +30,45 @@ class RapidsTestSettings extends BackendTestSettings {
   enableSuite[RapidsApproximatePercentileQuerySuite]
     .exclude("percentile_approx(col, ...), input rows contains null, with group by", KNOWN_ISSUE("https://github.com/NVIDIA/spark-rapids/issues/14634"))
     .exclude("SPARK-32908: maximum target error in percentile_approx", KNOWN_ISSUE("https://github.com/NVIDIA/spark-rapids/issues/14635"))
+  enableSuite[RapidsDataFrameReaderWriterSuite]
+  enableSuite[RapidsInsertSuite]
+    .exclude("Throw exceptions on inserting out-of-range int value with ANSI casting policy", ADJUST_UT("Replaced by a testRapids version that verifies the GPU ANSI overflow failure family and no partial write."))
+    .exclude("Throw exceptions on inserting out-of-range long value with ANSI casting policy", ADJUST_UT("Replaced by a testRapids version that verifies the GPU ANSI overflow failure family and no partial write."))
+    .exclude("Stop task set if FileAlreadyExistsException was thrown", ADJUST_UT("Replaced by a testRapids version that verifies both fast-fail settings preserve the FileAlreadyExistsException failure family."))
+  enableSuite[RapidsBucketedReadWithoutHiveSupportSuite]
+    .exclude("read partitioning bucketed tables with bucket pruning filters", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15452; Recovery: add GPU scan-aware bucket pruning assertions; P1"))
+    .exclude("read non-partitioning bucketed tables with bucket pruning filters", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15452; Recovery: add GPU scan-aware bucket pruning assertions; P1"))
+    .exclude("read partitioning bucketed tables having null in bucketing key", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15452; Recovery: add GPU scan-aware bucket pruning assertions; P1"))
+    .exclude("bucket pruning support IsNaN", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15452; Recovery: add GPU scan-aware bucket pruning assertions; P1"))
+    .exclude("read partitioning bucketed tables having composite filters", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15452; Recovery: add GPU scan-aware bucket pruning assertions; P1"))
+    .exclude("read bucketed table without filters", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15452; Recovery: add GPU scan-aware bucketing assertions; P1"))
+    .exclude("error if there exists any malformed bucket files", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15452; Recovery: accept the equivalent GPU malformed-bucket exception family; P1"))
+    .exclude("disable bucketing when the output doesn't contain all bucketing columns", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15452; Recovery: add GPU scan-aware bucketing assertions; P1"))
+    .exclude("SPARK-29655 Read bucketed tables obeys spark.sql.shuffle.partitions", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15452; Recovery: replace CPU SortMergeJoinExec assertion with a GPU join contract; P1"))
+    .exclude("SPARK-32767 Bucket join should work if SHUFFLE_PARTITIONS larger than bucket number", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15452; Recovery: replace CPU SortMergeJoinExec assertion with a GPU join contract; P1"))
+    .exclude("bucket coalescing eliminates shuffle", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15452; Recovery: replace CPU SortMergeJoinExec assertion with a GPU join contract; P1"))
+    .exclude("bucket coalescing is applied when join expressions match with partitioning expressions", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15452; Recovery: add GPU scan-aware coalesced bucket assertions; P1"))
+  enableSuite[RapidsInMemoryColumnarQuerySuite]
+    .exclude("primitive type with nullability:true", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15452; Recovery: adapt CPU CachedBatch serializer assertions for RAPIDS cache; P1"))
+    .exclude("primitive type with nullability:false", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15452; Recovery: adapt CPU CachedBatch serializer assertions for RAPIDS cache; P1"))
+    .exclude("non-primitive type with nullability:true", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15452; Recovery: adapt CPU CachedBatch serializer assertions for RAPIDS cache; P1"))
+    .exclude("non-primitive type with nullability:false", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15452; Recovery: adapt CPU CachedBatch serializer assertions for RAPIDS cache; P1"))
+    .exclude("simple columnar query", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15452; Recovery: adapt CPU CachedBatch serializer assertions for RAPIDS cache; P1"))
+    .exclude("projection", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15452; Recovery: adapt CPU CachedBatch serializer assertions for RAPIDS cache; P1"))
+    .exclude("SPARK-1436 regression: in-memory columns must be able to be accessed multiple times", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15452; Recovery: adapt CPU CachedBatch serializer assertions for RAPIDS cache; P1"))
+    .exclude("test different data types", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15452; Recovery: adapt CPU CachedBatch serializer assertions for RAPIDS cache; P1"))
+    .exclude("SPARK-17549: cached table size should be correctly calculated", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15452; Recovery: define RAPIDS cache size-stat contract; P1"))
+    .exclude("cached row count should be calculated", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15452; Recovery: load the RAPIDS cache serializer before validating row-count stats; P1"))
+    .exclude("SPARK-22348: table cache should do partition batch pruning (whole-stage-codegen off)", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15452; Recovery: add RAPIDS cache batch-pruning metrics assertion; P1"))
+    .exclude("SPARK-22348: table cache should do partition batch pruning (whole-stage-codegen on)", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15452; Recovery: add RAPIDS cache batch-pruning metrics assertion; P1"))
+    .exclude("SPARK-22673: InMemoryRelation should utilize existing stats of the plan to be cached", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15452; Recovery: define RAPIDS cache statistics expectation; P1"))
+  enableSuite[RapidsPathFilterSuite]
+  enableSuite[RapidsDataSourceV2Suite]
+    .exclude("partitioning reporting", ADJUST_UT("Replaced by a testRapids version that checks ShuffleExchangeLike for CPU and GPU plans."))
+  enableSuite[RapidsJsonParsingOptionsSuite]
+  enableSuite[RapidsPartitionedWriteSuite]
+  enableSuite[RapidsV1WriteFallbackSuite]
+  enableSuite[RapidsGlobalTempViewSuite]
   enableSuite[RapidsDataFrameJoinSuite]
     .exclude("SPARK-24690 enables star schema detection even if CBO disabled", KNOWN_ISSUE("https://github.com/NVIDIA/spark-rapids/issues/14653"))
   enableSuite[RapidsBroadcastJoinSuite]

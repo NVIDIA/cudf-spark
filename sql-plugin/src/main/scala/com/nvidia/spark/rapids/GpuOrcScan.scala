@@ -3155,6 +3155,8 @@ case class OrcTableReader(
   private[this] val reader = new ORCChunkedReader(chunkSizeByteLimit,
     maxChunkedReaderMemoryUsageSizeBytes, parseOpts, buffer, offset, bufferSize)
 
+  private[this] lazy val catalystTableSchema = SchemaUtils.toCatalystSchema(tableSchema)
+
   private[this] lazy val splitsString = splits.mkString("; ")
 
   override def hasNext: Boolean = reader.hasNext
@@ -3185,7 +3187,7 @@ case class OrcTableReader(
     }
     metrics(NUM_OUTPUT_BATCHES) += 1
     val rebased = GpuOrcTimezoneUtils.rebaseOrcTimestamps(table, writerTimezone)
-    SchemaUtils.evolveSchemaIfNeededAndClose(rebased, tableSchema,
+    SchemaUtils.evolveSchemaIfNeededAndClose(rebased, catalystTableSchema,
       readDataSchema, isSchemaCaseSensitive, Some(GpuOrcScan.castColumnTo))
   }
 
