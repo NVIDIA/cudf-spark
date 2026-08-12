@@ -58,7 +58,7 @@ import org.apache.hadoop.mapreduce._
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat
 import org.apache.hadoop.mapreduce.task.TaskAttemptContextImpl
 
-import org.apache.spark.{SparkException, TaskContext}
+import org.apache.spark.{SparkException, TaskContext, TaskOutputFileAlreadyExistException}
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.io.{FileCommitProtocol, SparkHadoopWriterUtils}
 import org.apache.spark.shuffle.FetchFailedException
@@ -500,6 +500,8 @@ trait GpuFileFormatWriterBase extends Serializable with Logging {
         })
       } catch {
         case e: FetchFailedException =>
+          throw e
+        case e: TaskOutputFileAlreadyExistException =>
           throw e
         case t: Throwable =>
           throw new SparkException("Task failed while writing rows.", t)

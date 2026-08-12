@@ -25,7 +25,8 @@ from iceberg import (create_iceberg_table,
                      iceberg_nested_write_gens_list,
                      get_full_table_name, iceberg_write_enabled_conf,
                      iceberg_unsupported_mark, _build_tblprops,
-                     rtas_partition_transforms)
+                     rtas_partition_transforms, supports_iceberg_v3,
+                     ICEBERG_V3_UNSUPPORTED_REASON)
 from marks import iceberg, ignore_order, allow_non_gpu, allow_non_gpu_conditional, datagen_overrides
 from spark_session import with_gpu_session, with_cpu_session, is_spark_400_or_later
 
@@ -107,6 +108,31 @@ def test_rtas_unpartitioned_table(spark_tmp_table_factory):
     df_gen = lambda spark: gen_df(spark, list(zip(iceberg_base_table_cols, iceberg_gens_list)))
 
     _assert_gpu_equals_cpu_rtas(spark_tmp_table_factory, df_gen, table_prop)
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@ignore_order(local=True)
+@allow_non_gpu("AtomicReplaceTableAsSelectExec")
+def test_rtas_v3_fallback(spark_tmp_table_factory):
+    def run_rtas(spark):
+        target = get_full_table_name(spark_tmp_table_factory)
+        create_iceberg_table(
+            target,
+            table_prop={"format-version": "3"},
+            df_gen=lambda sp: gen_df(
+                sp, list(zip(iceberg_base_table_cols, iceberg_gens_list))))
+        return _execute_rtas(
+            spark,
+            target,
+            spark_tmp_table_factory,
+            lambda sp: gen_df(sp, list(zip(iceberg_base_table_cols, iceberg_gens_list))),
+            {})
+
+    assert_gpu_fallback_collect(
+        run_rtas,
+        "AtomicReplaceTableAsSelectExec",
+        conf=iceberg_write_enabled_conf)
 
 
 def _do_test_rtas_partitioned_table(spark_tmp_table_factory, partition_col_sql, table_prop=None):
