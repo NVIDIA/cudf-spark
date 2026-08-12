@@ -20,6 +20,7 @@ import java.util
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable.{HashMap, ListBuffer}
+import scala.util.Try
 
 import ai.rapids.cudf.{Cuda, ParquetWriterOptions}
 import com.nvidia.spark.rapids.jni.RmmSpark.OomInjectionType
@@ -349,6 +350,22 @@ object RapidsConf extends Logging {
     .internal()
     .booleanConf
     .createWithDefault(true)
+
+  val PINNED_POOL_PARALLEL_INIT_THREADS =
+    conf("spark.rapids.memory.pinnedPool.parallelInit.threads")
+      .doc("Number of CPU threads used to initialize the pinned pool's backing memory, capped at " +
+        "the number of executor cores. Set to 'all' to use the number of executor cores. A value " +
+        "of 1 initializes the backing memory using cudaHostAlloc. Values greater than 1 instead " +
+        "pre-touch pages concurrently before pinning for faster initialization. This does not " +
+        "affect subsequent suballocator behavior. Note: on multi-NUMA systems, multithreaded " +
+        "initialization can scatter pages across nodes if you do not constrain placement in " +
+        "advance. Pages cannot be migrated once pinned.")
+      .startupOnly()
+      .stringConf
+      .transform(_.trim.toLowerCase(java.util.Locale.ROOT))
+      .checkValue(value => value == "all" || Try(value.toInt).map(_ > 0).getOrElse(false),
+        "Pinned-pool initialization threads must be a positive integer or 'all'.")
+      .createWithDefault("1")
 
   val OFF_HEAP_LIMIT_ENABLED = conf("spark.rapids.memory.host.offHeapLimit.enabled")
       .doc("Should the off heap limit be enforced or not.")
@@ -1839,6 +1856,14 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .doc("When set to false disables Iceberg input acceleration")
     .booleanConf
     .createWithDefault(true)
+
+  val ENABLE_ICEBERG_V3 = conf("spark.rapids.sql.format.iceberg.v3.enabled")
+    .doc("Internal temporary configuration to allow Iceberg table format versions greater " +
+      "than 2 to use GPU paths while v3 support is under development. This configuration " +
+      "will be removed after most Iceberg v3 features are supported.")
+    .internal()
+    .booleanConf
+    .createWithDefault(false)
 
   val ENABLE_ICEBERG_WRITE = conf("spark.rapids.sql.format.iceberg.write.enabled")
     .doc("When set to false disables Iceberg write acceleration")
@@ -3424,6 +3449,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val pinnedPoolCuioDefault: Boolean = get(PINNED_POOL_SET_CUIO_DEFAULT)
 
+  lazy val pinnedPoolParallelInitThreads: String = get(PINNED_POOL_PARALLEL_INIT_THREADS)
+
   lazy val offHeapLimitEnabled: Boolean = get(OFF_HEAP_LIMIT_ENABLED)
 
   lazy val offHeapLimit: Option[Long] = get(OFF_HEAP_LIMIT_SIZE)
@@ -3798,6 +3825,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val isIcebergEnabled: Boolean = get(ENABLE_ICEBERG)
 
   lazy val isIcebergReadEnabled: Boolean = get(ENABLE_ICEBERG_READ)
+
+  lazy val isIcebergV3Enabled: Boolean = get(ENABLE_ICEBERG_V3)
 
   lazy val isIcebergWriteEnabled: Boolean = get(ENABLE_ICEBERG_WRITE)
 

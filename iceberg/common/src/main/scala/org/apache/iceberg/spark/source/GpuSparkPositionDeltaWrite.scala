@@ -27,7 +27,8 @@ import com.nvidia.spark.rapids.RapidsPluginImplicits.{AutoCloseableProducingArra
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.SpillPriorities.ACTIVE_ON_DECK_PRIORITY
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
-import com.nvidia.spark.rapids.iceberg.{ColumnarBatchWithPartition, GpuIcebergPartitioner, GpuIcebergSpecPartitioner}
+import com.nvidia.spark.rapids.iceberg.{ColumnarBatchWithPartition, GpuIcebergPartitioner,
+  GpuIcebergSpecPartitioner, IcebergFormatVersionSupport}
 import com.nvidia.spark.rapids.iceberg.utils.GpuStructProjection
 import org.apache.hadoop.mapreduce.Job
 import org.apache.iceberg._
@@ -171,6 +172,8 @@ object GpuSparkPositionDeltaWrite {
 
     val table: Table = tableOf(deltaWrite)
     val partitionSpec = table.spec()
+
+    IcebergFormatVersionSupport.tagForFormatVersion(table, meta)
 
     // Iceberg's delta write is similar to normal write, but will write position deletes
     // additionally. Position deletes have only two data types: string + int. So it's
