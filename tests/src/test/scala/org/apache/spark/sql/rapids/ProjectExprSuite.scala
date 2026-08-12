@@ -22,34 +22,20 @@ import java.nio.file.Files
 import ai.rapids.cudf.Table
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.ProjectAstTestUtils.{collectExpressions, tierReferences}
 import com.nvidia.spark.rapids.jni.RmmSpark
 import org.mockito.Mockito.{never, spy, verify}
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.Row
-import org.apache.spark.sql.catalyst.expressions.{
-  AttributeReference, Expression, Literal, NamedExpression}
+import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Literal, NamedExpression}
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.rapids.execution.TrampolineUtil
-import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims._
 import org.apache.spark.sql.tests.datagen.DataGenExprShims
 import org.apache.spark.sql.types._
 
 class ProjectExprSuite extends SparkQueryCompareTestSuite {
-  private def astExpressions(expressions: Seq[Expression]): Seq[GpuProjectAstExpression] = {
-    expressions.flatMap(_.collect {
-      case astExpression: GpuProjectAstExpression => astExpression
-    })
-  }
-
-  private def tierReferences(expression: Expression): Seq[GpuBoundReference] = {
-    expression.collect {
-      case reference: GpuBoundReference if reference.name.startsWith("tiered_input_") => reference
-    }
-  }
-
   def forceHostColumnarToGpu(): SparkConf = {
     // turns off BatchScanExec, so we get a CPU BatchScanExec together with a HostColumnarToGpu
     new SparkConf().set("spark.rapids.sql.exec.BatchScanExec", "false")
@@ -215,10 +201,12 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
     // tier 1: [AST(t1*c) AS t2]
     // tier 2: [AST(t2+d) AS first, AST(t2+e) AS second,
     //          t1 AS shared_first, t1 AS shared_second, greatest(t1, f) AS regular]
-    assertResult(Seq(1, 1, 2))(tiered.exprTiers.map(astExpressions(_).size))
-    assert(astExpressions(tiered.exprTiers.head).head.child.isInstanceOf[GpuAdd])
-    assert(astExpressions(tiered.exprTiers(1)).head.child.isInstanceOf[GpuMultiply])
-    assertResult(1)(tierReferences(astExpressions(tiered.exprTiers(1)).head).size)
+    val astExpressionTiers = tiered.exprTiers.map(
+      collectExpressions[GpuProjectAstExpression])
+    assertResult(Seq(1, 1, 2))(astExpressionTiers.map(_.size))
+    assert(astExpressionTiers.head.head.child.isInstanceOf[GpuAdd])
+    assert(astExpressionTiers(1).head.child.isInstanceOf[GpuMultiply])
+    assertResult(1)(tierReferences(astExpressionTiers(1).head).size)
     // Final references: [t2, t2, t1, t1, t1] (distinct: {t2, t1}).
     val finalReferences = tiered.exprTiers.last.flatMap(tierReferences)
     assertResult(5)(finalReferences.size)
@@ -226,24 +214,21 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
   }
 
   test("AST compiled expression closes at task completion") {
-    val context = new MockTaskContext(taskAttemptId = 1, partitionId = 0)
     val astExpression = spy(GpuProjectAstExpression(GpuAdd(
       GpuBoundReference(0, LongType, true)(NamedExpression.newExprId, "a"),
       GpuBoundReference(1, LongType, true)(NamedExpression.newExprId, "b"), false)()))
-    TrampolineUtil.setTaskContext(context)
     try {
-      withResource(buildProjectBatch()) { spillableBatch =>
-        withResource(spillableBatch.getColumnarBatch()) { inputBatch =>
-          withResource(GpuProjectExec.project(
-            inputBatch, Seq(GpuAlias(astExpression, "sum")()))) { _ => }
+      TestUtils.withMockTaskContext(completesTask = true) {
+        withResource(buildProjectBatch()) { spillableBatch =>
+          withResource(spillableBatch.getColumnarBatch()) { inputBatch =>
+            withResource(GpuProjectExec.project(
+              inputBatch, Seq(GpuAlias(astExpression, "sum")()))) { _ => }
+          }
         }
+        verify(astExpression, never()).close()
       }
-      verify(astExpression, never()).close()
-      context.markTaskComplete()
       verify(astExpression).close()
     } finally {
-      TrampolineUtil.unsetTaskContext()
-      ScalableTaskCompletion.reset()
       astExpression.close()
     }
   }

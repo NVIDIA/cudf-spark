@@ -314,7 +314,7 @@ abstract class GpuAddBase extends CudfBinaryArithmetic with Serializable {
   override def binaryOp: BinaryOp = BinaryOp.ADD
   override def astOperator: Option[BinaryOperator] = Some(ast.BinaryOperator.ADD)
 
-  override def selfSupportsAstJit: Boolean =
+  override protected def astJitCompatible: Boolean =
     !failOnError && (dataType == IntegerType || dataType == LongType)
 
   override def hasSideEffects: Boolean =
@@ -771,7 +771,7 @@ case class GpuMultiply(
   override def binaryOp: BinaryOp = BinaryOp.MUL
   override def astOperator: Option[BinaryOperator] = Some(ast.BinaryOperator.MUL)
 
-  override def selfSupportsAstJit: Boolean =
+  override protected def astJitCompatible: Boolean =
     !failOnError && (dataType == IntegerType || dataType == LongType)
 
   private def multiplyOverflowError(msg: String): ArithmeticException = {

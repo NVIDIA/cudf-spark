@@ -42,6 +42,19 @@ trait GpuBind {
 
 object GpuBindReferences extends Logging {
 
+  private def explainFinalProjectAstJitSelection(
+      tieredProject: GpuTieredProject,
+      conf: SQLConf): Unit = {
+    val explain = RapidsConf.EXPLAIN.get(conf)
+    if (!explain.equalsIgnoreCase("NONE")) {
+      val explanation = GpuAstJitExpression.explainFinalSelections(
+        tieredProject.exprTiers, explain.equalsIgnoreCase("ALL"))
+      if (explanation.nonEmpty) {
+        logWarning(s"FINAL PROJECT AST JIT SELECTION\n$explanation")
+      }
+    }
+  }
+
   /**
    * An alternative to `Expression.transformDown`, but when a result is returned by `rule` it is
    * assumed that it handled processing exp and all of its children, so rule will not be called on
@@ -134,7 +147,7 @@ object GpuBindReferences extends Logging {
       conf: SQLConf,
       enableProjectAstJit: Boolean): GpuTieredProject = {
 
-    if (RapidsConf.ENABLE_TIERED_PROJECT.get(conf)) {
+    val tieredProject = if (RapidsConf.ENABLE_TIERED_PROJECT.get(conf)) {
       val exprTiers = GpuProjectAstExpression.buildExprTiers(
         expressions, conf, enableProjectAstJit)
       val inputTiers = GpuEquivalentExpressions.getInputTiers(exprTiers, input)
@@ -183,6 +196,10 @@ object GpuBindReferences extends Logging {
       GpuTieredProject(Seq(
         GpuBindReferences.bindGpuReferencesNoMetrics(projectExpressions, input)))
     }
+    if (enableProjectAstJit) {
+      explainFinalProjectAstJitSelection(tieredProject, conf)
+    }
+    tieredProject
   }
 
   /**

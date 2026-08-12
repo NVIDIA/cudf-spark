@@ -17,11 +17,12 @@
 package com.nvidia.spark.rapids
 
 import ai.rapids.cudf.ast.{AstExpression, CompiledExpression}
+import com.nvidia.spark.rapids.ProjectAstTestUtils.{collectExpressions, tierReferences}
 import org.mockito.Mockito.{doThrow, mock, times, verify, when}
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.TaskContext
-import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Expression}
+import org.apache.spark.sql.catalyst.expressions.AttributeReference
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.{GpuAdd, GpuGreatest, GpuMultiply, GpuSubtract}
 import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
@@ -40,12 +41,6 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     when(child.convertToAst(Int.MaxValue)).thenReturn(ast)
     when(ast.compile()).thenReturn(compiled)
     GpuAstJitExpression(child)
-  }
-
-  private def jitExpressions(expressions: Seq[Expression]): Seq[GpuAstJitExpression] = {
-    expressions.flatMap(_.collect {
-      case expression: GpuAstJitExpression => expression
-    })
   }
 
   private def projectConf(
@@ -78,7 +73,7 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     val wrappedAgain = GpuAstJitExpression.wrapProjectExpressions(wrapped)
     assert(jit.child.isInstanceOf[GpuMultiply])
     assert(jit.child.find(_.isInstanceOf[GpuAstJitExpression]).isEmpty)
-    assert(GpuAstJitExpression.contains(wrapped.head))
+    assert(GpuAstJitExpression.extractTopLevel(wrapped.head).contains(jit))
     assert(wrappedAgain.head eq wrapped.head)
   }
 
@@ -94,7 +89,7 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
 
     val wrapped = GpuAstJitExpression.wrapProjectExpressions(List(expression))
     val subtract = wrapped.head.asInstanceOf[GpuAlias].child.asInstanceOf[GpuSubtract]
-    assert(jitExpressions(wrapped).isEmpty)
+    assert(wrapped.forall(GpuAstJitExpression.extractTopLevel(_).isEmpty))
     assert(subtract.left.isInstanceOf[GpuAdd])
     assert(subtract.right.isInstanceOf[GpuMultiply])
   }
@@ -105,27 +100,50 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     val third = reference(2, IntegerType)
     val fourth = reference(3, IntegerType)
     val shared = GpuAdd(left, right, failOnError = false)()
+    // [AST((left+right)-third) AS legacy, greatest(left+right, fourth) AS regular]
     val expressions = Seq(
       GpuProjectAstExpression.wrap(
         alias(GpuSubtract(shared, third, failOnError = false)(), "legacy")),
       alias(GpuGreatest(Seq(shared, fourth)), "regular"))
 
-    // Inputs: AST((left + right) - third), greatest(left + right, fourth).
-    // Tier 0 computes AST_JIT(left + right); tier 1 consumes that shared result in both outputs.
     val tiered = GpuBindReferences.bindGpuProjectReferencesTieredNoMetrics(
       expressions, Seq(left, right, third, fourth), projectConf())
 
-    assertResult(2)(tiered.exprTiers.size)
-    assertResult(Seq(1, 0))(tiered.exprTiers.map(jitExpressions(_).size))
-    assert(jitExpressions(tiered.exprTiers.head).head.child.isInstanceOf[GpuAdd])
-    assert(GpuProjectAstExpressionBase.extractTopLevel(tiered.exprTiers.last.head)
-      .exists(_.isInstanceOf[GpuProjectAstExpression]))
-    assert(GpuProjectAstExpressionBase.extractTopLevel(tiered.exprTiers.last(1)).isEmpty)
-    val finalTierReferences = tiered.exprTiers.last.flatMap(_.collect {
-      case reference: GpuBoundReference if reference.name.startsWith("tiered_input_") => reference
-    })
+    // after CSE:
+    // tier 0: [AST_JIT(left+right) AS t1]
+    // tier 1: [AST(t1-third) AS legacy, greatest(t1, fourth) AS regular]
+    val jitExpressionTiers = tiered.exprTiers.map(collectExpressions[GpuAstJitExpression])
+    assertResult(Seq(1, 0))(jitExpressionTiers.map(_.size))
+    assert(jitExpressionTiers.head.head.child.isInstanceOf[GpuAdd])
+    assert(GpuProjectAstExpression.extractTopLevel(tiered.exprTiers.last.head).isDefined)
+    assert(GpuProjectAstExpression.extractTopLevel(tiered.exprTiers.last(1)).isEmpty)
+    // Final references: [t1, t1] (distinct: {t1}).
+    val finalTierReferences = tiered.exprTiers.last.flatMap(tierReferences)
     assertResult(2)(finalTierReferences.size)
     assertResult(1)(finalTierReferences.map(_.exprId).distinct.size)
+  }
+
+  test("final JIT explanation includes a shared expression selected in an earlier tier") {
+    val left = reference(0, IntegerType)
+    val right = reference(1, IntegerType)
+    val third = reference(2, IntegerType)
+    val fourth = reference(3, IntegerType)
+    val shared = GpuAdd(left, right, failOnError = false)()
+    val expressions = Seq(
+      alias(GpuSubtract(shared, third, failOnError = false)(), "first"),
+      alias(GpuSubtract(shared, fourth, failOnError = false)(), "second"))
+
+    val tiered = GpuBindReferences.bindGpuProjectReferencesTieredNoMetrics(
+      expressions, Seq(left, right, third, fourth), projectConf())
+    val all = GpuAstJitExpression.explainFinalSelections(tiered.exprTiers, all = true)
+
+    assert(all.contains("TIER 0"), all)
+    assert(all.contains("AST_JIT"), all)
+    assert(all.contains("final backend: Project AST JIT"), all)
+    assert(all.contains("TIER 1"), all)
+    assert(all.contains("final backend: the regular GPU projection"), all)
+    assertResult("")(
+      GpuAstJitExpression.explainFinalSelections(tiered.exprTiers, all = false))
   }
 
   test("project JIT takes precedence while unsupported legacy AST falls back") {
@@ -140,10 +158,8 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
       Seq(jitCandidate, legacyCandidate), Seq(left, right), projectConf(legacy = true))
     val outputs = tiered.exprTiers.last
 
-    assert(GpuProjectAstExpressionBase.extractTopLevel(outputs.head)
-      .exists(_.isInstanceOf[GpuAstJitExpression]))
-    assert(GpuProjectAstExpressionBase.extractTopLevel(outputs(1))
-      .exists(_.isInstanceOf[GpuProjectAstExpression]))
+    assert(GpuAstJitExpression.extractTopLevel(outputs.head).isDefined)
+    assert(GpuProjectAstExpression.extractTopLevel(outputs(1)).isDefined)
   }
 
   test("only the project binder selects the JIT backend") {
@@ -157,8 +173,8 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     val project = GpuBindReferences.bindGpuProjectReferencesTieredNoMetrics(
       Seq(expression), Seq(left, right), conf)
 
-    assert(jitExpressions(generic.exprTiers.flatten).isEmpty)
-    assertResult(1)(jitExpressions(project.exprTiers.flatten).size)
+    assert(collectExpressions[GpuAstJitExpression](generic.exprTiers.flatten).isEmpty)
+    assertResult(1)(collectExpressions[GpuAstJitExpression](project.exprTiers.flatten).size)
   }
 
   test("the project binder respects a disabled JIT setting") {
@@ -169,7 +185,7 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     val project = GpuBindReferences.bindGpuProjectReferencesTieredNoMetrics(
       Seq(expression), Seq(left, right), projectConf(jit = false))
 
-    assert(jitExpressions(project.exprTiers.flatten).isEmpty)
+    assert(collectExpressions[GpuAstJitExpression](project.exprTiers.flatten).isEmpty)
   }
 
   test("project JIT remains available when tiered projection is disabled") {
@@ -181,7 +197,7 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
       Seq(expression), Seq(left, right), projectConf(tiered = false))
 
     assertResult(1)(project.exprTiers.size)
-    assertResult(1)(jitExpressions(project.exprTiers.head).size)
+    assertResult(1)(collectExpressions[GpuAstJitExpression](project.exprTiers.head).size)
   }
 
   test("project AST JIT excludes ANSI and floating point arithmetic") {
@@ -206,24 +222,38 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
 
     val wrapped = GpuAstJitExpression.wrapProjectExpressions(expressions)
 
-    assert(jitExpressions(wrapped).isEmpty)
+    assert(wrapped.forall(GpuAstJitExpression.extractTopLevel(_).isEmpty))
   }
 
-  test("project backend explanation follows the final wrapper") {
+  test("final JIT explanation reports only unselected JIT candidates by default") {
     val left = reference(0, IntegerType)
     val right = reference(1, IntegerType)
+    val third = reference(2, IntegerType)
     val add = alias(GpuAdd(left, right, failOnError = false)(), "jit")
-    val subtract = alias(GpuSubtract(left, right, failOnError = false)(), "regular")
+    val subtract = alias(
+      GpuSubtract(
+        GpuAdd(left, right, failOnError = false)(),
+        third,
+        failOnError = false)(),
+      "regular")
     val jit = GpuAstJitExpression.wrapProjectExpressions(List(add)).head
     val legacy = GpuProjectAstExpression.wrap(subtract)
+    val selections = Seq(Seq(jit, legacy, subtract))
 
-    assertResult("Project AST JIT")(GpuProjectExecMeta.explainBackend(jit))
-    assertResult("legacy Project AST")(GpuProjectExecMeta.explainBackend(legacy))
-    assertResult("the regular GPU projection")(GpuProjectExecMeta.explainBackend(subtract))
+    val all = GpuAstJitExpression.explainFinalSelections(selections, all = true)
+    assert(all.contains("final backend: Project AST JIT"), all)
+    assert(all.contains("final backend: legacy Project AST"), all)
+    assert(all.contains("final backend: the regular GPU projection"), all)
+    assertResult("")(
+      GpuAstJitExpression.explainFinalSelections(Seq(Seq(jit)), all = false))
+
+    val notOnGpu = GpuAstJitExpression.explainFinalSelections(selections, all = false)
+    assert(!notOnGpu.contains("final backend: Project AST JIT"), notOnGpu)
+    assert(notOnGpu.contains("final backend: legacy Project AST"), notOnGpu)
+    assert(notOnGpu.contains("final backend: the regular GPU projection"), notOnGpu)
   }
 
   test("project AST JIT keeps its compiled expression across retry") {
-    val taskContext = new MockTaskContext(taskAttemptId = 1, partitionId = 0)
     val child = mock(classOf[GpuExpression])
     val ast = mock(classOf[AstExpression])
     val compiled = mock(classOf[CompiledExpression])
@@ -231,7 +261,7 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     when(ast.compile()).thenReturn(compiled)
     val jit = GpuAstJitExpression(child)
 
-    TestUtils.withTaskContext(taskContext) {
+    TestUtils.withMockTaskContext() {
       jit.checkpoint()
       jit.restore()
       jit.checkpoint()

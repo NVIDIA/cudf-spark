@@ -38,6 +38,7 @@ DoubleBatchedWindow_PRE|Pre-processing for double-batched window operation
 GpuGenerate project split|Splitting projection in generate operation
 parquet parse filter footer|Parsing and filtering Parquet footer by range
 Compile ASTs|Compiling abstract syntax trees for expression evaluation
+Compile AST JIT|Compiling an AST expression for JIT evaluation
 parquet filter blocks|Filtering Parquet row group blocks based on predicates
 PageableH2D|Copying from pageable host memory to device
 TOP N|Computing top N rows
@@ -134,6 +135,7 @@ single build batch concat|Concatenating batches for single build batch
 sort copy boundaries|Copying boundary data for sort operation
 WaitingForWrites|Rapids Shuffle Manager (multi threaded) is waiting for any queued writes to finish before finalizing the map output writer
 Project AST|Applying AST-based projection to batch
+Project AST JIT|Applying JIT-compiled AST projection to batch
 ORC readBatches|Reading ORC batches
 Shuffle Transfer Request|Handling shuffle data transfer request
 consumeWindow|Consuming transfer window

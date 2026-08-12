@@ -327,6 +327,12 @@ object NvtxRegistry {
   val COMPILE_ASTS: NvtxId = NvtxId("Compile ASTs", NvtxColor.ORANGE,
     "Compiling abstract syntax trees for expression evaluation")
 
+  val PROJECT_AST_JIT: NvtxId = NvtxId("Project AST JIT", NvtxColor.CYAN,
+    "Applying JIT-compiled AST projection to batch")
+
+  val COMPILE_AST_JIT: NvtxId = NvtxId("Compile AST JIT", NvtxColor.ORANGE,
+    "Compiling an AST expression for JIT evaluation")
+
   // Aggregate operations
   val COMPUTE_AGGREGATE: NvtxId = NvtxId("computeAggregate", NvtxColor.CYAN,
     "Computing aggregation on input batch")
@@ -759,6 +765,8 @@ object NvtxRegistry {
     register(PROJECT_EXEC)
     register(PROJECT_AST)
     register(COMPILE_ASTS)
+    register(PROJECT_AST_JIT)
+    register(COMPILE_AST_JIT)
     register(COMPUTE_AGGREGATE)
     register(FINALIZE_AGG)
     register(POST_PROCESS_AGG)

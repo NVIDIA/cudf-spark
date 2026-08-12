@@ -35,13 +35,16 @@ object GpuAstJitExpression {
     GpuBatchUtils.isFixedWidth(expression.dataType) &&
       expression.supportsAstJit && expression.containsAstJitOperator
 
+  private def asAstJit(child: GpuExpression): Option[GpuAstJitExpression] = child match {
+    case jitExpression: GpuAstJitExpression => Some(jitExpression)
+    case astExpression: GpuProjectAstExpression => asAstJit(astExpression.child)
+    case other if canUseAstJit(other) => Some(GpuAstJitExpression(other))
+    case _ => None
+  }
+
   private[rapids] def wrapTierExpression(expression: Expression): Expression = expression match {
-    case alias @ GpuAlias(_: GpuAstJitExpression, _) => alias
-    case alias @ GpuAlias(astExpression: GpuProjectAstExpression, _)
-        if canUseAstJit(astExpression.child) =>
-      GpuProjectAstExpression.replaceChild(alias, GpuAstJitExpression(astExpression.child))
-    case alias @ GpuAlias(child: GpuExpression, _) if canUseAstJit(child) =>
-      GpuProjectAstExpression.replaceChild(alias, GpuAstJitExpression(child))
+    case alias @ GpuAlias(child: GpuExpression, _) =>
+      asAstJit(child).map(GpuProjectAstExpression.replaceChild(alias, _)).getOrElse(alias)
     case other => other
   }
 
@@ -50,9 +53,42 @@ object GpuAstJitExpression {
     expressions.map(wrapTierExpression(_).asInstanceOf[NamedExpression])
   }
 
-  private[rapids] def contains(expression: Expression): Boolean =
-    GpuProjectAstExpressionBase.extractTopLevel(expression)
-      .exists(_.isInstanceOf[GpuAstJitExpression])
+  /** Extracts a Project AST JIT wrapper after unwrapping any top-level aliases. */
+  private[rapids] def extractTopLevel(expression: Expression): Option[GpuAstJitExpression] =
+    GpuProjectAstExpressionBase.extractTopLevel(expression).collect {
+      case jitExpression: GpuAstJitExpression => jitExpression
+    }
+
+  private def hasJitCandidate(expression: Expression): Boolean = expression.find {
+    case gpuExpression: GpuExpression =>
+      gpuExpression.supportsAstJit && gpuExpression.containsAstJitOperator
+    case _ => false
+  }.isDefined
+
+  private def finalBackend(expression: Expression): String = {
+    GpuProjectAstExpressionBase.extractTopLevel(expression) match {
+      case Some(_: GpuAstJitExpression) => "Project AST JIT"
+      case Some(_: GpuProjectAstExpression) => "legacy Project AST"
+      case _ => "the regular GPU projection"
+    }
+  }
+
+  private[rapids] def explainFinalSelections(
+      expressionTiers: Seq[Seq[Expression]],
+      all: Boolean): String = {
+    expressionTiers.zipWithIndex.flatMap { case (expressions, tier) =>
+      val explanations = expressions.iterator.collect {
+        case expression if all ||
+            (extractTopLevel(expression).isEmpty && hasJitCandidate(expression)) =>
+          s"    $expression final backend: ${finalBackend(expression)}\n"
+      }.mkString
+      if (explanations.nonEmpty) {
+        Some(s"  TIER $tier\n$explanations")
+      } else {
+        None
+      }
+    }.mkString
+  }
 }
 
 case class GpuAstJitExpression(child: GpuExpression)
@@ -60,7 +96,6 @@ case class GpuAstJitExpression(child: GpuExpression)
         with GpuMetricsInjectable with Retryable with AutoCloseable {
 
   @transient private[this] var compiledExpression: CompiledExpression = _
-  @transient private[this] var completionRegistered = false
   private[this] var opTime: GpuMetric = NoopMetric
 
   override def dataType: DataType = child.dataType
@@ -70,6 +105,7 @@ case class GpuAstJitExpression(child: GpuExpression)
   override def toString: String = s"AST_JIT($child)"
 
   override def injectMetrics(metrics: Map[String, GpuMetric]): Unit = {
+    // OP_TIME_LEGACY is the owning operator's non-RDD timing metric, not a legacy AST metric.
     opTime = metrics.getOrElse(OP_TIME_LEGACY, NoopMetric)
   }
 
@@ -80,7 +116,14 @@ case class GpuAstJitExpression(child: GpuExpression)
   // Compiled ASTs are immutable and remain valid across retry attempts.
   override def restore(): Unit = ()
 
-  override def close(): Unit = closeCompiledExpression()
+  override def close(): Unit = {
+    val toClose = synchronized {
+      val current = compiledExpression
+      compiledExpression = null
+      current
+    }
+    Option(toClose).foreach(_.safeClose())
+  }
 
   override def columnarEval(batch: ColumnarBatch): GpuColumnVector = {
     withResource(GpuProjectAstExpression.tableFromBatch(batch)) { table =>
@@ -90,7 +133,7 @@ case class GpuAstJitExpression(child: GpuExpression)
 
   private[rapids] override def computeColumn(table: Table): GpuColumnVector = {
     val compiled = getCompiledExpression
-    NvtxIdWithMetrics(NvtxRegistry.PROJECT_AST, opTime) {
+    NvtxIdWithMetrics(NvtxRegistry.PROJECT_AST_JIT, opTime) {
       closeOnExcept(compiled.computeColumnJit(table)) { result =>
         GpuColumnVector.from(result, dataType)
       }
@@ -99,46 +142,25 @@ case class GpuAstJitExpression(child: GpuExpression)
 
   private def getCompiledExpression: CompiledExpression = synchronized {
     if (compiledExpression == null) {
-      compiledExpression = NvtxIdWithMetrics(NvtxRegistry.COMPILE_ASTS, opTime) {
+      val compiled = NvtxIdWithMetrics(NvtxRegistry.COMPILE_AST_JIT, opTime) {
         // Force every bound reference to the left table; Project AST has one input table.
         child.convertToAst(Int.MaxValue).compile()
       }
-    }
-    if (!completionRegistered) {
-      Option(TaskContext.get()).foreach { taskContext =>
-        completionRegistered = true
-        try {
+      closeOnExcept(compiled) { _ =>
+        var completed = false
+        Option(TaskContext.get()).foreach { taskContext =>
           onTaskCompletion(taskContext) {
-            clearRegistrationAndClose()
+            completed = true
+            close()
           }
-          if (!completionRegistered) {
-            throw new IllegalStateException(
-              "Task completed while registering the AST JIT cleanup callback")
-          }
-        } catch {
-          case t: Throwable =>
-            clearRegistrationAndClose(t)
-            throw t
         }
+        if (completed) {
+          throw new IllegalStateException(
+            "Task completed while registering the AST JIT cleanup callback")
+        }
+        compiledExpression = compiled
       }
     }
     compiledExpression
-  }
-
-  private def clearRegistrationAndClose(error: Throwable = null): Unit =
-    closeCompiledExpression(error, clearRegistration = true)
-
-  private def closeCompiledExpression(
-      error: Throwable = null,
-      clearRegistration: Boolean = false): Unit = {
-    val toClose = synchronized {
-      if (clearRegistration) {
-        completionRegistered = false
-      }
-      val current = compiledExpression
-      compiledExpression = null
-      current
-    }
-    Option(toClose).foreach(_.safeClose(error))
   }
 }

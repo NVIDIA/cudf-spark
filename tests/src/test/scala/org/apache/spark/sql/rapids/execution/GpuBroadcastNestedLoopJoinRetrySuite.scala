@@ -19,6 +19,7 @@ package org.apache.spark.sql.rapids.execution
 import ai.rapids.cudf.Table
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.ProjectAstTestUtils.collectExpressions
 import com.nvidia.spark.rapids.jni.RmmSpark
 
 import org.apache.spark.rdd.RDD
@@ -28,11 +29,11 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference,
 import org.apache.spark.sql.catalyst.plans.Inner
 import org.apache.spark.sql.execution.{LeafExecNode, SparkPlan}
 import org.apache.spark.sql.rapids.{GpuAdd, GpuMultiply, GpuSubtract}
-import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 import org.apache.spark.sql.types.IntegerType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 class GpuBroadcastNestedLoopJoinRetrySuite extends RmmSparkRetrySuiteBase {
+  private val taskId = 1
   private val x = AttributeReference("x", IntegerType, nullable = false)()
   private val y = AttributeReference("y", IntegerType, nullable = false)()
   private val z = AttributeReference("z", IntegerType, nullable = false)()
@@ -59,8 +60,8 @@ class GpuBroadcastNestedLoopJoinRetrySuite extends RmmSparkRetrySuiteBase {
   }
 
   override def afterEach(): Unit = {
-    RmmSpark.getAndResetNumRetryThrow(/* taskId */ 1)
-    RmmSpark.getAndResetNumSplitRetryThrow(/* taskId */ 1)
+    RmmSpark.getAndResetNumRetryThrow(taskId)
+    RmmSpark.getAndResetNumSplitRetryThrow(taskId)
     super.afterEach()
   }
 
@@ -96,28 +97,27 @@ class GpuBroadcastNestedLoopJoinRetrySuite extends RmmSparkRetrySuiteBase {
   test("BNLJ build-side shared JIT tier retries GpuRetryOOM") {
     val spark = SparkSession.builder()
         .master("local[1]")
-        .appName("GpuBroadcastNestedLoopJoinRetrySuite")
+        .appName(this.getClass.getSimpleName)
         .config(RapidsConf.ENABLE_TIERED_PROJECT.key, "true")
         .config(RapidsConf.ENABLE_COMBINED_EXPRESSIONS.key, "true")
         .config(RapidsConf.ENABLE_PROJECT_AST_JIT.key, "true")
         .config(RapidsConf.PROJECT_SPLIT_RETRY_ENABLED.key, "true")
         .getOrCreate()
     val conf = spark.sessionState.conf
+    // x=[1,2,3], y=[4,5,6], z=[2,3,4]
+    // [((x+y)*z)-x AS shared_minus_x, ((x+y)*z)-y AS shared_minus_y, x, y, z]
     val expressions = postBuildExpressions
     val buildProject = GpuProjectExec(expressions, TestLeafExec(buildAttributes))
     val join = TestBroadcastNestedLoopJoin(
       TestLeafExec(Seq.empty), buildProject, expressions)
-    val taskContext = new MockTaskContext(taskAttemptId = 1, partitionId = 0)
 
-    TestUtils.withTaskContext(taskContext, markTaskComplete = true) {
-      // Input: x=[1,2,3], y=[4,5,6], z=[2,3,4]. CSE produces a first tier that
-      // passes through x/y/z and computes AST_JIT((x+y)*z), followed by the five final outputs
-      // [shared-x, shared-y, x, y, z].
+    TestUtils.withMockTaskContext(completesTask = true) {
       val boundProject = GpuBindReferences.bindGpuProjectReferencesTiered(
         expressions, buildAttributes, conf, Map.empty)
-      val jitExpressions = boundProject.exprTiers.flatten.flatMap(_.collect {
-        case expression: GpuAstJitExpression => expression
-      })
+      // after CSE:
+      // tier 0: [x, y, z, AST_JIT((x+y)*z) AS t1]
+      // tier 1: [t1-x AS shared_minus_x, t1-y AS shared_minus_y, x, y, z]
+      val jitExpressions = collectExpressions[GpuAstJitExpression](boundProject.exprTiers.flatten)
       assertResult(Seq(4, 5))(boundProject.exprTiers.map(_.size))
       assertResult(1)(jitExpressions.size)
       assert(jitExpressions.head.child.isInstanceOf[GpuMultiply])
@@ -129,8 +129,8 @@ class GpuBroadcastNestedLoopJoinRetrySuite extends RmmSparkRetrySuiteBase {
       withResource(projectBuildSide(buildBatch())) { _ => }
 
       val retryInput = buildBatch()
-      RmmSpark.getAndResetNumRetryThrow(/* taskId */ 1)
-      RmmSpark.getAndResetNumSplitRetryThrow(/* taskId */ 1)
+      RmmSpark.getAndResetNumRetryThrow(taskId)
+      RmmSpark.getAndResetNumSplitRetryThrow(taskId)
       RmmSpark.forceRetryOOM(RmmSpark.getCurrentThreadId, 1,
         RmmSpark.OomInjectionType.GPU.ordinal, 0)
       withResource(projectBuildSide(retryInput)) { output =>
@@ -139,8 +139,8 @@ class GpuBroadcastNestedLoopJoinRetrySuite extends RmmSparkRetrySuiteBase {
         assertResult(Seq(9, 19, 33))(collectInts(output, 0))
         assertResult(Seq(6, 16, 30))(collectInts(output, 1))
       }
-      assert(RmmSpark.getAndResetNumRetryThrow(/* taskId */ 1) > 0)
-      assertResult(0)(RmmSpark.getAndResetNumSplitRetryThrow(/* taskId */ 1))
+      assert(RmmSpark.getAndResetNumRetryThrow(taskId) > 0)
+      assertResult(0)(RmmSpark.getAndResetNumSplitRetryThrow(taskId))
     }
   }
 }
