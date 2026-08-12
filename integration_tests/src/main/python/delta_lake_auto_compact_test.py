@@ -40,7 +40,7 @@ def write_to_delta(enable_deletion_vectors, num_rows=30, is_partitioned=False, n
             else input_data.repartition(1)
         writer = input_data.write.format("delta").mode("append")
         if supports_delta_lake_deletion_vectors():
-           writer.option("delta.enableDeletionVectors", str(enable_deletion_vectors).lower())
+            writer.option("delta.enableDeletionVectors", str(enable_deletion_vectors).lower())
         for _ in range(num_writes):
             writer.save(table_path)
 
