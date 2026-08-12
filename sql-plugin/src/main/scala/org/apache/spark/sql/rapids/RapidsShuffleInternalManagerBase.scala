@@ -737,9 +737,10 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
         val compressionTask = new FutureTask[CompressedRecord](new Callable[CompressedRecord] {
           override def call(): CompressedRecord = {
             if (!cbOwner.compareAndSet(false, true)) {
-              // done() already closed cb and released quota; FutureTask state is
-              // already CANCELLED/INTERRUPTED so set(null) fails silently.
-              return null
+              // done() already closed cb and released quota; bail out.
+              throw new IOException(
+                s"Failed compression task for shuffle $shuffleId, map $mapId, " +
+                  s"partition $reducePartitionId: cancelled before starting")
             }
             try {
               withResource(cb) { _ =>
