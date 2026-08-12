@@ -464,6 +464,30 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
       ProtobufDefaultValue.EnumValue(1, "EN")))
   }
 
+  test("extractor supplies the implicit first-declared enum default") {
+    val enumMeta = ProtobufEnumMetadata(Seq(
+      ProtobufEnumValue(10, "TEN"),
+      ProtobufEnumValue(1, "ONE"),
+      ProtobufEnumValue(5, "FIVE")))
+    val msgDesc = FakeMessageDescriptor(
+      syntax = "PROTO2",
+      fields = Map(
+        "status" -> FakeFieldDescriptor(
+          name = "status",
+          fieldNumber = 1,
+          protoTypeName = "ENUM",
+          defaultValue = None,
+          enumMetadata = Some(enumMeta))))
+    val schema = StructType(Seq(StructField("status", StringType, nullable = true)))
+
+    val infos = ProtobufSchemaExtractor.analyzeAllFields(
+      schema, msgDesc, enumsAsInts = false, "test.Message")
+
+    assert(infos.isRight)
+    assert(infos.toOption.get("status").defaultValue.contains(
+      ProtobufDefaultValue.EnumValue(10, "TEN")))
+  }
+
   test("enum metadata sorts values and names by number") {
     val enumMeta = ProtobufEnumMetadata(Seq(
       ProtobufEnumValue(10, "TEN"),

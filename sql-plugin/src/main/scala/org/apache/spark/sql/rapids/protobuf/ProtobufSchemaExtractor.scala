@@ -69,8 +69,14 @@ object ProtobufSchemaExtractor {
     }
 
     val defaultValue = fieldDescriptor.defaultValueResult match {
-      case Right(value) =>
-        value
+      case Right(Some(value)) =>
+        Some(value)
+      case Right(None) if fieldDescriptor.protoTypeName == "ENUM" && !fieldDescriptor.isRepeated =>
+        fieldDescriptor.enumMetadata.flatMap(_.values.headOption).map { value =>
+          ProtobufDefaultValue.EnumValue(value.number, value.name)
+        }
+      case Right(None) =>
+        None
       case Left(_) if !isSupported =>
         // Preserve the primary unsupported reason from checkFieldSupport for fields that are
         // already known to be unsupported. Reflection/default extraction errors on those fields

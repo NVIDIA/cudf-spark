@@ -853,11 +853,7 @@ def _build_repeated_enum_descriptor_set_bytes(spark):
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
 def test_from_protobuf_repeated_enum_invalid_permissive(local_tmp_path, from_protobuf_fn):
-    """Repeated enum with invalid values in PERMISSIVE mode.
-
-    Row with any invalid enum value should become null (entire struct row),
-    while rows with all-valid enum values decode normally.
-    """
+    """Unknown proto2 enum occurrences are omitted from repeated fields."""
     desc_path, desc_bytes = _setup_protobuf_desc(
         local_tmp_path, "repeated_enum.desc", _build_repeated_enum_descriptor_set_bytes)
     message_name = "test.WithRepeatedEnum"
@@ -885,9 +881,9 @@ def test_from_protobuf_repeated_enum_invalid_permissive(local_tmp_path, from_pro
 
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
-def test_from_protobuf_repeated_enum_string_invalid_permissive_nulls_sibling_fields(
+def test_from_protobuf_repeated_enum_string_invalid_permissive_drops_unknown_values(
         local_tmp_path, from_protobuf_fn):
-    """Repeated enum string mode must null sibling fields when any enum value is invalid."""
+    """String enum mode drops unknown values without invalidating sibling fields."""
     desc_path, desc_bytes = _setup_protobuf_desc(
         local_tmp_path, "repeated_enum.desc", _build_repeated_enum_descriptor_set_bytes)
     message_name = "test.WithRepeatedEnum"
@@ -1453,6 +1449,65 @@ def test_from_protobuf_pruned_known_scalar_wrong_wire_type(
         return df.select(
             decoded.getField("b").alias("b"),
             decoded.getField("i32").alias("i32"))
+
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+
+
+@pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
+@pytest.mark.parametrize("mode", ["PERMISSIVE", "FAILFAST"], ids=idfn)
+@ignore_order(local=True)
+def test_from_protobuf_visible_known_field_wrong_wire_type_is_skipped(
+        local_tmp_path, from_protobuf_fn, mode):
+    desc_path, desc_bytes = _setup_protobuf_desc(
+        local_tmp_path, "simple.desc", _build_simple_descriptor_set_bytes)
+    row = (_encode_tag(2, 0) + _encode_varint(7) +
+           _encode_tag(2, 5) + bytes([77, 0, 0, 0]) +
+           _encode_tag(2, 0) + _encode_varint(42) +
+           _encode_tag(6, 2) + _encode_varint(2) + b"ok")
+
+    def run_on_spark(spark):
+        df = spark.createDataFrame([(row,)], schema="bin binary")
+        decoded = _call_from_protobuf(
+            from_protobuf_fn, f.col("bin"), "test.Simple", desc_path, desc_bytes,
+            options={"mode": mode})
+        return df.select(decoded.alias("decoded"))
+
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+
+
+@pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
+@ignore_order(local=True)
+def test_from_protobuf_noncanonical_raw32_tag_and_length(
+        local_tmp_path, from_protobuf_fn):
+    desc_path, desc_bytes = _setup_protobuf_desc(
+        local_tmp_path, "simple.desc", _build_simple_descriptor_set_bytes)
+    overlong_i32_tag = bytes([0x90] + [0x80] * 8 + [0])
+    overlong_zero = bytes([0x80] * 9 + [0])
+    row = (overlong_i32_tag + _encode_varint(42) +
+           _encode_tag(6, 2) + overlong_zero)
+
+    def run_on_spark(spark):
+        df = spark.createDataFrame([(row,)], schema="bin binary")
+        decoded = _call_from_protobuf(
+            from_protobuf_fn, f.col("bin"), "test.Simple", desc_path, desc_bytes)
+        return df.select(decoded.alias("decoded"))
+
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+
+
+@pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
+@ignore_order(local=True)
+def test_from_protobuf_proto2_invalid_utf8_is_repaired(
+        local_tmp_path, from_protobuf_fn):
+    desc_path, desc_bytes = _setup_protobuf_desc(
+        local_tmp_path, "simple.desc", _build_simple_descriptor_set_bytes)
+    row = _encode_tag(6, 2) + _encode_varint(1) + b"\xff"
+
+    def run_on_spark(spark):
+        df = spark.createDataFrame([(row,)], schema="bin binary")
+        decoded = _call_from_protobuf(
+            from_protobuf_fn, f.col("bin"), "test.Simple", desc_path, desc_bytes)
+        return df.select(decoded.getField("s").alias("s"))
 
     assert_gpu_and_cpu_are_equal_collect(run_on_spark)
 
