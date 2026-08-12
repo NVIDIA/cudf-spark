@@ -13,6 +13,33 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+/*** spark-rapids-shim-json-lines
+{"spark": "330"}
+{"spark": "330db"}
+{"spark": "331"}
+{"spark": "332"}
+{"spark": "332db"}
+{"spark": "333"}
+{"spark": "334"}
+{"spark": "340"}
+{"spark": "341"}
+{"spark": "341db"}
+{"spark": "342"}
+{"spark": "343"}
+{"spark": "344"}
+{"spark": "350"}
+{"spark": "350db143"}
+{"spark": "351"}
+{"spark": "352"}
+{"spark": "353"}
+{"spark": "354"}
+{"spark": "355"}
+{"spark": "356"}
+{"spark": "357"}
+{"spark": "358"}
+{"spark": "359"}
+{"spark": "400db173"}
+spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
 import ai.rapids.cudf
@@ -210,9 +237,22 @@ object GpuTypeShims {
   def additionalCsvSupportedTypes: TypeSig = TypeSig.DAYTIME
 
   /**
+   * Get additional Parquet read supported types for this Shim
+   */
+  def additionalParquetReadSupportedTypes: TypeSig = TypeSig.ansiIntervals
+
+  /**
+   * Get additional Parquet write supported types for this Shim
+   */
+  def additionalParquetWriteSupportedTypes: TypeSig = TypeSig.ansiIntervals
+
+  /**
    * Get additional Parquet supported types for this Shim
    */
-  def additionalParquetSupportedTypes: TypeSig = TypeSig.ansiIntervals
+  def additionalParquetSupportedTypes: TypeSig =
+    additionalParquetReadSupportedTypes + additionalParquetWriteSupportedTypes
+
+  def supportsVariantType: Boolean = false
 
   /**
    * Get additional common operators supported types for this Shim

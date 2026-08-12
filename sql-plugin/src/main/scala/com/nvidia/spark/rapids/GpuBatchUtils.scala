@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -88,6 +88,12 @@ object GpuBatchUtils {
         dt.fields.map { f =>
           minGpuMemory(f.dataType, f.nullable, rowCount, includeOffset)
         }.sum
+      case dt if GpuColumnVector.isVariantType(dt) =>
+        if (includeOffset) {
+          calculateOffsetBufferSize(rowCount) * 2
+        } else {
+          0L
+        }
       case dt =>
         dt.defaultSize * rowCount
     }
@@ -122,6 +128,8 @@ object GpuBatchUtils {
         dt.fields.map { f =>
           estimateGpuMemory(f.dataType, f.nullable, rowCount)
         }.sum
+      case dt if GpuColumnVector.isVariantType(dt) =>
+        calculateOffsetBufferSize(rowCount) * 2 + dt.defaultSize * rowCount
       case dt =>
         dt.defaultSize * rowCount
     }
@@ -165,6 +173,7 @@ object GpuBatchUtils {
   def isVariableWidth(dt: DataType): Boolean = !isFixedWidth(dt)
 
   def isFixedWidth(dt: DataType): Boolean = dt match {
+    case variantType if GpuColumnVector.isVariantType(variantType) => false
     case DataTypes.StringType | DataTypes.BinaryType => false
     case _: ArrayType  => false
     case _: StructType  => false

@@ -533,6 +533,8 @@ protected case class GpuParquetFileFilterHandler(
           schemaBuilder.addChild(field.name, convertToParquetNative(field.dataType))
         }
         schemaBuilder.build()
+      case dt if GpuColumnVector.isVariantType(dt) =>
+        new ParquetFooter.ValueElement()
       case _: NumericType | BinaryType | BooleanType | DateType | TimestampType | StringType =>
         new ParquetFooter.ValueElement()
       case at: ArrayType =>
@@ -818,6 +820,21 @@ protected case class GpuParquetFileFilterHandler(
     }
   }
 
+  private def isVariantPhysicalType(fileType: Type): Boolean = {
+    if (fileType.isPrimitive || fileType.asGroupType().getFieldCount != 2) {
+      false
+    } else {
+      val groupType = fileType.asGroupType()
+      Seq("value", "metadata").zipWithIndex.forall { case (name, index) =>
+        val field = groupType.getType(index)
+        field.getName == name &&
+          field.isRepetition(Type.Repetition.REQUIRED) &&
+          field.isPrimitive &&
+          field.asPrimitiveType().getPrimitiveTypeName == PrimitiveTypeName.BINARY
+      }
+    }
+  }
+
   /**
    * Recursively check if the read schema is compatible with the file schema. The errorCallback
    * will be invoked to throw an exception once any incompatible type pairs are found.
@@ -920,6 +937,11 @@ protected case class GpuParquetFileFilterHandler(
           rootFileType, rootReadType)
         checkSchemaCompat(parquetMapValue, map.valueType, errorCallback, isCaseSensitive,
           useFieldId, rootFileType, rootReadType)
+
+      case dt if GpuColumnVector.isVariantType(dt) =>
+        if (!isVariantPhysicalType(fileType)) {
+          errorCallback(rootFileType.getOrElse(fileType), rootReadType.getOrElse(readType))
+        }
 
       case dt =>
         checkPrimitiveCompat(fileType.asPrimitiveType(),
