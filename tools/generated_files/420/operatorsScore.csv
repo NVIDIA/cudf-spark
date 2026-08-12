@@ -324,6 +324,7 @@ Upper,4
 Uuid,4
 VariancePop,4
 VarianceSamp,4
+VariantGet,4
 WeekDay,4
 WindowExpression,4
 WindowSpecDefinition,4
