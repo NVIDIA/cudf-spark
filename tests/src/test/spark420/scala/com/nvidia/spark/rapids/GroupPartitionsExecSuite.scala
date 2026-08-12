@@ -21,11 +21,19 @@ package com.nvidia.spark.rapids
 
 import java.util.Collections
 
+import ai.rapids.cudf.ColumnVector
+import com.nvidia.spark.rapids.Arm.closeOnExcept
+import com.nvidia.spark.rapids.jni.RmmSpark
 import com.nvidia.spark.rapids.shims.{GpuGroupPartitionsExec, GpuGroupPartitionsExecInfo,
   GpuGroupPartitionsExecMeta}
+import com.nvidia.spark.rapids.shims.ShimLeafExecNode
+import org.mockito.Mockito.{doReturn, mock, spy, when}
 
 import org.apache.spark.SparkConf
-import org.apache.spark.sql.catalyst.expressions.{Ascending, AttributeReference, SortOrder}
+import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, AttributeReference,
+  Descending, NullsLast, SortOrder}
 import org.apache.spark.sql.catalyst.plans.physical.{HashPartitioning, UnknownPartitioning}
 import org.apache.spark.sql.connector.catalog.{Column, Identifier, InMemoryCatalog}
 import org.apache.spark.sql.connector.distributions.Distributions
@@ -35,7 +43,8 @@ import org.apache.spark.sql.execution.datasources.v2.GroupPartitionsExec
 import org.apache.spark.sql.execution.exchange.Exchange
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.SparkSession
-import org.apache.spark.sql.types.IntegerType
+import org.apache.spark.sql.types.{IntegerType, LongType}
+import org.apache.spark.sql.vectorized.ColumnarBatch
 
 class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
 
@@ -105,10 +114,12 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
           UnknownPartitioning(0),
           Seq.empty,
           Seq.empty,
+          Seq.empty,
           joinKeyPositions = None,
           expectedPartitionKeyCount = None,
           reducerNames = None,
-          distributePartitions = false))
+          distributePartitions = false,
+          enableSortedMerge = false))
 
       assert(groupPartitions.allMetrics.keySet == Set(GpuMetric.OP_TIME_NEW))
       assert(groupPartitions.getOpTimeNewMetric.nonEmpty)
@@ -123,11 +134,13 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
     val groupInfo = GpuGroupPartitionsExecInfo(
       UnknownPartitioning(1),
       Seq.empty,
+      Seq.empty,
       Seq(Seq(0, 1)),
       joinKeyPositions = None,
       expectedPartitionKeyCount = None,
       reducerNames = None,
-      distributePartitions = false)
+      distributePartitions = false,
+      enableSortedMerge = false)
 
     assert(GpuGroupPartitionsExec(singleBatchChild, groupInfo).outputBatching == null)
     assert(GpuGroupPartitionsExec(
@@ -149,11 +162,13 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
         GpuGroupPartitionsExecInfo(
           HashPartitioning(Seq(attr), 2),
           Seq(SortOrder(attr, Ascending)),
+          Seq(SortOrder(attr, Ascending)),
           Seq(Seq(0)),
           joinKeyPositions = None,
           expectedPartitionKeyCount = None,
           reducerNames = None,
-          distributePartitions = false))
+          distributePartitions = false,
+          enableSortedMerge = false))
     }
 
     val first = newPlan()
@@ -168,11 +183,13 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
       GpuGroupPartitionsExecInfo(
         UnknownPartitioning(1),
         Seq.empty,
+        Seq.empty,
         Seq(Seq(0)),
         joinKeyPositions = Some(Seq(0, 2)),
         expectedPartitionKeyCount = Some(3),
         reducerNames = Some(Seq("bucket", "identity")),
-        distributePartitions = true))
+        distributePartitions = true,
+        enableSortedMerge = false))
 
     val summary = groupPartitions.simpleString(maxFields = 10)
     assert(summary.contains("JoinKeyPositions: [0, 2]"))
@@ -181,19 +198,262 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
     assert(summary.contains("DistributePartitions: true"))
   }
 
-  test("sorted-merge GroupPartitionsExec keeps the original CPU subtree") {
+  test("GpuGroupPartitionsExec configures sorted-merge execution") {
+    val attr = AttributeReference("id", IntegerType, nullable = false)()
+    val ordering = Seq(SortOrder(attr, Ascending))
+    val groupPartitions = GpuGroupPartitionsExec(
+      GpuRowToColumnarExec(
+        LocalTableScanExec(Seq(attr), Nil, None),
+        RequireSingleBatch),
+      GpuGroupPartitionsExecInfo(
+        HashPartitioning(Seq(attr), 1),
+        ordering,
+        ordering,
+        Seq(Seq(0, 1)),
+        joinKeyPositions = None,
+        expectedPartitionKeyCount = None,
+        reducerNames = None,
+        distributePartitions = false,
+        enableSortedMerge = true))
+
+    assert(groupPartitions.enableSortedMerge)
+    assert(groupPartitions.outputBatching == null)
+    assert(!groupPartitions.coalesceAfter)
+    assert(groupPartitions.allMetrics.keySet == Set(
+      GpuMetric.NUM_OUTPUT_ROWS,
+      GpuMetric.NUM_OUTPUT_BATCHES,
+      GpuMetric.OP_TIME_LEGACY,
+      GpuMetric.OP_TIME_NEW,
+      GpuMetric.SORT_TIME))
+
+    val noCoalescing = groupPartitions.copy(
+      groupInfo = groupPartitions.groupInfo.copy(partitionGroups = Seq(Seq(0))))
+    assert(noCoalescing.outputBatching == RequireSingleBatch)
+    assert(noCoalescing.coalesceAfter)
+    assert(noCoalescing.allMetrics.keySet == Set(GpuMetric.OP_TIME_NEW))
+  }
+
+  test("GpuGroupPartitionsExecMeta propagates child output type conversions") {
+    val attr = AttributeReference("id", IntegerType, nullable = false)()
+    val convertedAttr = AttributeReference(
+      attr.name,
+      LongType,
+      attr.nullable,
+      attr.metadata)(attr.exprId, attr.qualifier)
+    val groupPartitions = GroupPartitionsExec(
+      LocalTableScanExec(Seq(attr), Nil, None),
+      enableSortedMerge = false)
+    val originalMeta = new GpuGroupPartitionsExecMeta(
+      groupPartitions,
+      new RapidsConf(Map.empty[String, String]),
+      None,
+      new NoRuleDataFromReplacementRule)
+    assert(originalMeta.availableRuntimeDataTransition ==
+      originalMeta.childPlans.head.availableRuntimeDataTransition)
+
+    val childMeta = mock(classOf[SparkPlanMeta[SparkPlan]])
+    when(childMeta.availableRuntimeDataTransition).thenReturn(true)
+    when(childMeta.outputAttributes).thenReturn(Seq(convertedAttr))
+    val meta = spy(originalMeta)
+    doReturn(Seq(childMeta)).when(meta).childPlans
+
+    assert(meta.outputAttributes == Seq(convertedAttr))
+  }
+
+  test("GroupPartitionsExec fallback keeps the original CPU subtree") {
     val groupPartitions = GroupPartitionsExec(
       LocalTableScanExec(Nil, Nil, None),
-      enableSortedMerge = true)
+      enableSortedMerge = false)
     val meta = GpuOverrides.wrapAndTagPlan(
       groupPartitions,
       new RapidsConf(Map.empty[String, String]))
+      .asInstanceOf[GpuGroupPartitionsExecMeta]
 
-    assert(meta.isInstanceOf[GpuGroupPartitionsExecMeta])
+    meta.willNotWorkOnGpu("test-only fallback")
     assert(!meta.canThisBeReplaced)
-    assert(meta.explain(false).contains(
-      "Sorted-merge GroupPartitionsExec is not supported on GPU"))
-    assert(meta.asInstanceOf[GpuGroupPartitionsExecMeta].convertToCpu().eq(groupPartitions))
+    assert(meta.convertToCpu().eq(groupPartitions))
+  }
+
+  Seq(
+    (Ascending, (0L until 8L)),
+    (Descending, (0L until 8L).reverse)
+  ).foreach { case (direction, expected) =>
+    test(s"GpuGroupPartitionsExec sorted merge orders rows $direction") {
+      withGpuSparkSession { spark =>
+        spark.conf.set(RapidsConf.METRICS_LEVEL.key, "DEBUG")
+        val attr = AttributeReference("id", LongType, nullable = false)()
+        val ordering = Seq(SortOrder(attr, direction))
+        val child = GpuRangeExec(
+          start = 0,
+          end = 8,
+          step = 1,
+          numSlices = 2,
+          output = Seq(attr),
+          targetSizeBytes = 1024)
+        val groupPartitions = GpuGroupPartitionsExec(
+          child,
+          GpuGroupPartitionsExecInfo(
+            UnknownPartitioning(1),
+            ordering,
+            ordering,
+            // Reverse the two input partitions so the ascending case is not already ordered.
+            Seq(Seq(1, 0)),
+            joinKeyPositions = None,
+            expectedPartitionKeyCount = None,
+            reducerNames = None,
+            distributePartitions = false,
+            enableSortedMerge = true))
+
+        val actual = GpuColumnarToRowExec(groupPartitions)
+          .executeCollect()
+          .map(_.getLong(0))
+          .toSeq
+        assert(actual == expected)
+        assert(groupPartitions.metrics(GpuMetric.SORT_TIME).value > 0)
+        assert(groupPartitions.allMetrics(GpuMetric.NUM_OUTPUT_ROWS).value == expected.size)
+      }
+    }
+  }
+
+  test("GpuGroupPartitionsExec sorted merge handles padded and single-input groups") {
+    withGpuSparkSession { spark =>
+      spark.conf.set(RapidsConf.METRICS_LEVEL.key, "DEBUG")
+      val attr = AttributeReference("value", IntegerType, nullable = false)()
+      val ordering = Seq(SortOrder(attr, Ascending))
+      val child = GroupPartitionsTestGpuLeaf(
+        Seq(attr),
+        Seq(
+          Seq[Integer](1, 3),
+          Seq[Integer](2, 4),
+          Seq[Integer](5, 6)),
+        ordering)
+      val groupPartitions = GpuGroupPartitionsExec(
+        child,
+        GpuGroupPartitionsExecInfo(
+          UnknownPartitioning(3),
+          ordering,
+          ordering,
+          Seq(Seq.empty, Seq(0, 1), Seq(2)),
+          joinKeyPositions = None,
+          expectedPartitionKeyCount = None,
+          reducerNames = None,
+          distributePartitions = false,
+          enableSortedMerge = true))
+
+      val actual = GpuColumnarToRowExec(groupPartitions)
+        .execute()
+        .mapPartitionsWithIndex { case (index, rows) =>
+          Iterator.single(index -> rows.map(_.getInt(0)).toSeq)
+        }
+        .collect()
+        .sortBy(_._1)
+        .map(_._2)
+        .toSeq
+      assert(actual == Seq(Seq.empty, Seq(1, 2, 3, 4), Seq(5, 6)))
+      assert(groupPartitions.allMetrics(GpuMetric.NUM_OUTPUT_ROWS).value == 6)
+      assert(groupPartitions.allMetrics(GpuMetric.NUM_OUTPUT_BATCHES).value == 2)
+      assert(groupPartitions.allMetrics(GpuMetric.SORT_TIME).value > 0)
+    }
+  }
+
+  test("GpuGroupPartitionsExec sorted merge emits target-sized batches") {
+    withGpuSparkSession { spark =>
+      spark.conf.set(RapidsConf.GPU_BATCH_SIZE_BYTES.key, (16 * 1024).toString)
+      spark.conf.set(RapidsConf.METRICS_LEVEL.key, "DEBUG")
+      val attr = AttributeReference("id", LongType, nullable = false)()
+      val ordering = Seq(SortOrder(attr, Ascending))
+      val child = GpuRangeExec(
+        start = 0,
+        end = 10000,
+        step = 1,
+        numSlices = 4,
+        output = Seq(attr),
+        targetSizeBytes = 16 * 1024)
+      val groupPartitions = GpuGroupPartitionsExec(
+        child,
+        GpuGroupPartitionsExecInfo(
+          UnknownPartitioning(1),
+          ordering,
+          ordering,
+          Seq(Seq(3, 2, 1, 0)),
+          joinKeyPositions = None,
+          expectedPartitionKeyCount = None,
+          reducerNames = None,
+          distributePartitions = false,
+          enableSortedMerge = true))
+
+      val actual = GpuColumnarToRowExec(groupPartitions)
+        .executeCollect()
+        .map(_.getLong(0))
+        .toSeq
+      assert(actual == (0L until 10000L))
+      assert(groupPartitions.allMetrics(GpuMetric.NUM_OUTPUT_BATCHES).value > 1)
+    }
+  }
+
+  test("GpuGroupPartitionsExec sorted merge honors non-default null ordering") {
+    withGpuSparkSession { _ =>
+      val attr = AttributeReference("value", IntegerType, nullable = true)()
+      val ordering = Seq(SortOrder(attr, Ascending, NullsLast, Seq.empty))
+      val child = GroupPartitionsTestGpuLeaf(
+        Seq(attr),
+        Seq(
+          Seq[Integer](1, 3, null),
+          Seq[Integer](2, 4, null)),
+        ordering)
+      val groupPartitions = GpuGroupPartitionsExec(
+        child,
+        GpuGroupPartitionsExecInfo(
+          UnknownPartitioning(1),
+          ordering,
+          ordering,
+          Seq(Seq(0, 1)),
+          joinKeyPositions = None,
+          expectedPartitionKeyCount = None,
+          reducerNames = None,
+          distributePartitions = false,
+          enableSortedMerge = true))
+
+      val actual = GpuColumnarToRowExec(groupPartitions)
+        .executeCollect()
+        .map { row =>
+          if (row.isNullAt(0)) None else Some(row.getInt(0))
+        }
+        .toSeq
+      assert(actual == Seq(Some(1), Some(2), Some(3), Some(4), None, None))
+    }
+  }
+
+  test("GpuGroupPartitionsExec sorted merge retries GPU OOM") {
+    withGpuSparkSession { _ =>
+      val attr = AttributeReference("value", IntegerType, nullable = false)()
+      val ordering = Seq(SortOrder(attr, Ascending))
+      val child = GroupPartitionsTestGpuLeaf(
+        Seq(attr),
+        Seq(
+          Seq[Integer](1, 3),
+          Seq[Integer](2, 4)),
+        ordering,
+        injectRetry = true)
+      val groupPartitions = GpuGroupPartitionsExec(
+        child,
+        GpuGroupPartitionsExecInfo(
+          UnknownPartitioning(1),
+          ordering,
+          ordering,
+          Seq(Seq(0, 1)),
+          joinKeyPositions = None,
+          expectedPartitionKeyCount = None,
+          reducerNames = None,
+          distributePartitions = false,
+          enableSortedMerge = true))
+
+      val actual = GpuColumnarToRowExec(groupPartitions)
+        .executeCollect()
+        .map(_.getInt(0))
+        .toSeq
+      assert(actual == Seq(1, 2, 3, 4))
+    }
   }
 
   private def createStoragePartitionedJoin(spark: SparkSession) = {
@@ -235,5 +495,35 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
       None,
       None,
       numRowsPerSplit = 1)
+  }
+}
+
+private case class GroupPartitionsTestGpuLeaf(
+    override val output: Seq[Attribute],
+    partitionValues: Seq[Seq[Integer]],
+    override val outputOrdering: Seq[SortOrder],
+    injectRetry: Boolean = false)
+    extends ShimLeafExecNode with GpuExec {
+  override def outputPartitioning = UnknownPartitioning(partitionValues.size)
+
+  override protected def doExecute(): RDD[InternalRow] =
+    throw new UnsupportedOperationException("Row execution is not supported")
+
+  override protected def internalDoExecuteColumnar(): RDD[ColumnarBatch] = {
+    sparkContext.parallelize(partitionValues, partitionValues.size).mapPartitions { parts =>
+      val values = parts.flatten.toArray
+      val gpuColumn = GpuColumnVector.from(ColumnVector.fromBoxedInts(values: _*), IntegerType)
+      val batch = closeOnExcept(gpuColumn) { _ =>
+        if (injectRetry) {
+          RmmSpark.forceRetryOOM(
+            RmmSpark.getCurrentThreadId,
+            1,
+            RmmSpark.OomInjectionType.GPU.ordinal,
+            0)
+        }
+        new ColumnarBatch(Array(gpuColumn), values.length)
+      }
+      Iterator.single(batch)
+    }
   }
 }
