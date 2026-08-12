@@ -191,40 +191,26 @@ object GpuVariantGet {
   }
 
   private def allRowsCovered(rawValue: ColumnView, decoded: Seq[ColumnView]): Boolean = {
-    var covered = rawValue.isNull
-    try {
+    withResource(new CloseableHolder(rawValue.isNull)) { covered =>
       decoded.foreach { value =>
         withResource(value.isNotNull) { decodedValue =>
-          val next = covered.or(decodedValue)
-          covered.close()
-          covered = next
+          covered.setAndCloseOld(covered.get.or(decodedValue))
         }
       }
-      BoolUtils.isAllValidTrue(covered)
-    } finally {
-      covered.close()
+      BoolUtils.isAllValidTrue(covered.get)
     }
   }
 
   private def normalizeIntegers(decoded: Seq[ColumnVector]): ColumnVector = {
     require(decoded.length == 4, s"expected four integer decoders, got ${decoded.length}")
 
-    var result: ColumnVector = decoded(3).copyToColumnVector()
-    try {
+    withResource(new CloseableHolder(decoded(3).copyToColumnVector())) { result =>
       decoded.take(3).reverse.foreach { value =>
         withResource(value.castTo(DType.INT64)) { widened =>
-          val next = result.replaceNulls(widened)
-          result.close()
-          result = next
+          result.setAndCloseOld(result.get.replaceNulls(widened))
         }
       }
-      val normalized = result
-      result = null
-      normalized
-    } finally {
-      if (result != null) {
-        result.close()
-      }
+      result.get.incRefCount()
     }
   }
 
