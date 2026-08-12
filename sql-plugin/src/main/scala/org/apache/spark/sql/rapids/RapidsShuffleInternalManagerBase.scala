@@ -450,13 +450,17 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
     private def hasReadyWork: Boolean = currentWorkState != NotReady
 
     private def writeRecord(record: CompressedRecord): Unit = {
-      if (record.compressedSize > 0) {
-        outputStream.write(record.buffer.getBuf, 0, record.compressedSize.toInt)
-      }
-      record.buffer.close()
-      val toRelease = record.quotaToRelease.getAndSet(0)
-      if (toRelease > 0) {
-        limiter.release(toRelease)
+      try {
+        withResource(record.buffer) { buffer =>
+          if (record.compressedSize > 0) {
+            outputStream.write(buffer.getBuf, 0, record.compressedSize.toInt)
+          }
+        }
+      } finally {
+        val toRelease = record.quotaToRelease.getAndSet(0)
+        if (toRelease > 0) {
+          limiter.release(toRelease)
+        }
       }
     }
 
