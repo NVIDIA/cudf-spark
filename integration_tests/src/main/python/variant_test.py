@@ -17,13 +17,11 @@ import pytest
 from asserts import (assert_gpu_and_cpu_are_equal_collect,
                      assert_gpu_fallback_write,
                      assert_gpu_fallback_collect)
-from conftest import is_databricks_runtime
 from data_gen import idfn
 from marks import allow_non_gpu, incompat
 from spark_session import is_before_spark_400, with_cpu_session
 
-pytestmark = [pytest.mark.premerge_ci_1,
-              pytest.mark.skipif(is_databricks_runtime(), reason='Enabled in a follow-up PR')]
+pytestmark = [pytest.mark.premerge_ci_1]
 
 _variant_parquet_conf = {
     'spark.rapids.sql.format.parquet.enabled': 'true',
