@@ -405,7 +405,6 @@ def test_columnar_pow(data_descr):
 
 @pytest.mark.parametrize('data_gen', boolean_gens, ids=idfn)
 def test_and(data_gen):
-    data_type = data_gen.data_type
     assert_gpu_ast(is_supported=True,
         func=lambda spark: binary_op_df(spark, data_gen).select(
             f.col('a') & f.lit(True),
@@ -414,7 +413,6 @@ def test_and(data_gen):
 
 @pytest.mark.parametrize('data_gen', boolean_gens, ids=idfn)
 def test_or(data_gen):
-    data_type = data_gen.data_type
     assert_gpu_ast(is_supported=True,
                    func=lambda spark: binary_op_df(spark, data_gen).select(
                        f.col('a') | f.lit(True),
