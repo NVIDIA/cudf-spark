@@ -889,10 +889,10 @@ object GpuOverrides extends Logging {
     (DeltaFormatType, FileFormatChecks(
       cudfRead = (TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.STRUCT +
           TypeSig.ARRAY + TypeSig.MAP + TypeSig.BINARY +
-          GpuTypeShims.additionalParquetWriteSupportedTypes).nested(),
+          GpuTypeShims.additionalParquetReadWriteSupportedTypes).nested(),
       cudfWrite = (TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.STRUCT +
           TypeSig.ARRAY + TypeSig.MAP + TypeSig.BINARY +
-          GpuTypeShims.additionalParquetWriteSupportedTypes).nested(),
+          GpuTypeShims.additionalParquetReadWriteSupportedTypes).nested(),
       sparkSig = (TypeSig.cpuAtomics + TypeSig.STRUCT + TypeSig.ARRAY + TypeSig.MAP +
           TypeSig.UDT + GpuTypeShims.additionalParquetSupportedTypes).nested())),
     (ParquetFormatType, FileFormatChecks(
@@ -925,10 +925,11 @@ object GpuOverrides extends Logging {
         TypeSig.UDT).nested())),
     (IcebergFormatType, FileFormatChecks(
       cudfRead = (TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.STRUCT + TypeSig.BINARY +
-          TypeSig.ARRAY + TypeSig.MAP + GpuTypeShims.additionalParquetWriteSupportedTypes).nested(),
+          TypeSig.ARRAY + TypeSig.MAP +
+          GpuTypeShims.additionalParquetReadWriteSupportedTypes).nested(),
       cudfWrite = (TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.STRUCT +
           TypeSig.ARRAY + TypeSig.MAP + TypeSig.BINARY +
-          GpuTypeShims.additionalParquetWriteSupportedTypes).nested(),
+          GpuTypeShims.additionalParquetReadWriteSupportedTypes).nested(),
       sparkSig = (TypeSig.cpuAtomics + TypeSig.STRUCT + TypeSig.ARRAY + TypeSig.MAP +
           TypeSig.BINARY + TypeSig.UDT + GpuTypeShims.additionalParquetSupportedTypes).nested())))
 

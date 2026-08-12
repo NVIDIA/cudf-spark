@@ -237,14 +237,19 @@ object GpuTypeShims {
   def additionalCsvSupportedTypes: TypeSig = TypeSig.DAYTIME
 
   /**
+   * Get additional types supported for both Parquet reads and writes for this Shim
+   */
+  def additionalParquetReadWriteSupportedTypes: TypeSig = TypeSig.ansiIntervals
+
+  /**
    * Get additional Parquet read supported types for this Shim
    */
-  def additionalParquetReadSupportedTypes: TypeSig = TypeSig.ansiIntervals
+  def additionalParquetReadSupportedTypes: TypeSig = additionalParquetReadWriteSupportedTypes
 
   /**
    * Get additional Parquet write supported types for this Shim
    */
-  def additionalParquetWriteSupportedTypes: TypeSig = TypeSig.ansiIntervals
+  def additionalParquetWriteSupportedTypes: TypeSig = additionalParquetReadWriteSupportedTypes
 
   /**
    * Get additional Parquet supported types for this Shim
