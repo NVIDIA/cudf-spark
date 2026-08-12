@@ -32,17 +32,18 @@ class CudfComparisonTest extends AnyFunSuite with BeforeAndAfterAll {
   def registerRapidsUDF(spark: SparkSession, udfName: String): Unit = ???
 
   test("UDF vs RapidsUDF") {
-    val testDF = UnitTest.createTestData(spark).repartition(1)
+    // Repartition down to 2 tasks to ensure we exercise multi-row columns.
+    val testDF = UnitTest.createTestData(spark).repartition(2)
 
     // Run CPU UDF
     UnitTest.registerUDF(spark, "placeholder_udf_name")
     val cpuResultDF = UnitTest.executeUDF(spark, "placeholder_udf_name", testDF)
-    UnitTest.verifyUDFResults(cpuResultDF, testDF)
+    UnitTest.assertUDFResults(cpuResultDF, testDF)
 
     // Run RapidsUDF
     registerRapidsUDF(spark, "placeholder_rapids_udf_name")
     val gpuResultDF = UnitTest.executeUDF(spark, "placeholder_rapids_udf_name", testDF)
-    UnitTest.verifyUDFResults(gpuResultDF, testDF)
+    UnitTest.assertUDFResults(gpuResultDF, testDF)
 
     // Compare
     TestUtils.assertDataFrameEquals(actual = gpuResultDF, expected = cpuResultDF)

@@ -244,6 +244,13 @@ abstract class GpuShuffleExchangeExecBase(
   @transient lazy val inputBatchRDD: RDD[ColumnarBatch] = child.executeColumnar()
 
   /**
+   * Returns the GPU partitioning used to build the shuffle dependency. Distributions whose
+   * physical partition count depends on the input RDD can override this hook.
+   */
+  protected def gpuOutputPartitioningForShuffle(inputNumPartitions: Int): GpuPartitioning =
+    gpuOutputPartitioning
+
+  /**
    * A `ShuffleDependency` that will partition columnar batches of its child based on
    * the partitioning scheme defined in `newPartitioning`. Those partitions of
    * the returned ShuffleDependency will be the input of shuffle.
@@ -252,11 +259,13 @@ abstract class GpuShuffleExchangeExecBase(
   lazy val shuffleDependencyColumnar : ShuffleDependency[Int, ColumnarBatch, ColumnarBatch] = {
     val descendantOpTimeMetrics = getDescendantOpTimeMetrics
     val opTimeNewShuffleWrite = allMetrics.get(OP_TIME_NEW_SHUFFLE_WRITE)
+    val shuffleOutputPartitioning =
+      gpuOutputPartitioningForShuffle(inputBatchRDD.getNumPartitions)
     
     GpuShuffleExchangeExecBase.prepareBatchShuffleDependency(
       inputBatchRDD,
       child.output,
-      gpuOutputPartitioning,
+      shuffleOutputPartitioning,
       sparkTypes,
       serializer,
       useGPUShuffle,

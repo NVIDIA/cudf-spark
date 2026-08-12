@@ -27,7 +27,7 @@ class IcebergProbeImpl extends IcebergProbe with Logging {
     ShimLoader.getShimVersion match {
       case _: SparkShimVersion =>
         VersionUtils.cmpSparkVersion(3, 5, 0) >= 0 &&
-        VersionUtils.cmpSparkVersion(4, 1, 0) < 0
+        VersionUtils.cmpSparkVersion(4, 2, 0) < 0
       case _ => false
     }
   }
@@ -42,7 +42,8 @@ class IcebergProbeImpl extends IcebergProbe with Logging {
     "f40208ae6fb2f33e578c2637d3dea1db18739f31" -> "1.9.1",
     "071d5606bc6199a0be9b3f274ec7fbf111d88821" -> "1.9.2",
     "2114bf631e49af532d66e2ce148ee49dd1dd1f1f" -> "1.10.0",
-    "ccb8bc435062171e64bc8b7e5f56e6aed9c5b934" -> "1.10.1"
+    "ccb8bc435062171e64bc8b7e5f56e6aed9c5b934" -> "1.10.1",
+    "6976e020b894f6a6777704df2b8c4458cb291ae9" -> "1.11.0"
   )
 
   // e.g. iceberg-spark-runtime-3.5_2.12-1.10.0-*.jar -> "1.10.0"
@@ -76,7 +77,8 @@ class IcebergProbeImpl extends IcebergProbe with Logging {
   private val icebergVersionToShim: Map[String, String] = Map(
     "1.6" -> "iceberg16x",
     "1.9" -> "iceberg19x",
-    "1.10" -> "iceberg110x"
+    "1.10" -> "iceberg110x",
+    "1.11" -> "iceberg111x"
   )
 
   override def shimPackage: String = {

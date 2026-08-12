@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2025, NVIDIA CORPORATION.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@
 
 import pytest
 
-from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_are_equal_sql
+from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_are_equal_sql, assert_cpu_and_gpu_are_equal_collect_with_capture
 from data_gen import *
 from spark_session import is_before_spark_320, is_jvm_charset_utf8, is_before_spark_400
 from pyspark.sql.types import *
@@ -158,6 +158,25 @@ def test_coalesce_constant_output():
     # can deal with it.  (This means something like + will get two constant scalar values)
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : spark.range(1, 100).selectExpr("4 + coalesce(5, id) as nine"))
+
+def test_coalesce_foldable_non_literal():
+    # A foldable coalesce(cast(null as T), lit) can reach the planner unfolded (e.g. when AQE
+    # regenerates it; the AQE-time optimizer runs neither ConstantFolding nor NullPropagation).
+    # Reproduced deterministically by excluding both rules so the coalesce survives to tagging.
+    # It must still run on GPU rather than forcing the project onto the CPU.
+    conf = {
+        'spark.sql.optimizer.excludedRules':
+            'org.apache.spark.sql.catalyst.optimizer.ConstantFolding,'
+            'org.apache.spark.sql.catalyst.optimizer.NullPropagation',
+        'spark.sql.adaptive.enabled': 'false',  # deterministic plan capture
+    }
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+            lambda spark : spark.range(0, 100).selectExpr(
+                'coalesce(cast(null as bigint), -1001) as c0',
+                'coalesce(cast(null as int), 100) as c1',
+                'id'),
+            exist_classes='GpuCoalesce',
+            conf=conf)
 
 @pytest.mark.parametrize('data_gen', all_basic_gens + decimal_gens, ids=idfn)
 # https://github.com/NVIDIA/spark-rapids/issues/12019

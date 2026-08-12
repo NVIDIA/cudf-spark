@@ -1,4 +1,4 @@
-# RAPIDS Accelerator for Apache Spark Delta Lake Support
+# NVIDIA cuDF plugin for Apache Spark Delta Lake Support
 
 The Delta Lake support is organized into multiple Maven projects, one per Delta Lake minor
 version that is supported. This allows each submodule to build against the Delta Lake minor
@@ -19,7 +19,6 @@ and directory contains the corresponding support code.
 | 3.3.x              | Spark 3.5.[3-]  | `delta-33x`        |
 | 4.0.x              | Spark 4.0.x     | `delta-40x`        |
 | 4.1.x              | Spark 4.1.x     | `delta-41x`        |
-| Databricks 13.3    | Databricks 13.3 | `delta-spark341db` |
 | Databricks 14.3    | Databricks 14.3 | `delta-spark350db143` |
 
 

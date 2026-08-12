@@ -50,15 +50,17 @@ class ParseDateTimeSuite extends SparkQueryCompareTestSuite with BeforeAndAfterE
     GpuOverrides.removeAllListeners()
   }
 
-  testSparkResultsAreEqual("to_date dd/MM/yy (fall back)",
-    datesAsStrings,
-    conf = new SparkConf().set(SQLConf.LEGACY_TIME_PARSER_POLICY.key, "CORRECTED")
+  testGpuFallback("to_date dd/MM/yy (fall back to CPU for two-digit years)",
+      "GetTimestamp",
+      datesAsStrings,
+      new SparkConf().set(SQLConf.LEGACY_TIME_PARSER_POLICY.key, "CORRECTED")
         .set(RapidsConf.INCOMPATIBLE_DATE_FORMATS.key, "true")
-        .set("spark.sql.ansi.enabled", "false")
-        // until we fix https://github.com/NVIDIA/spark-rapids/issues/2118 we need to fall
-        // back to CPU when parsing two-digit years
-        .set(RapidsConf.TEST_ALLOWED_NONGPU.key,
-          "ProjectExec,Alias,Cast,GetTimestamp,UnixTimestamp,Literal,ShuffleExchangeExec")) {
+        .set("spark.sql.ansi.enabled", "false"),
+      // The ProjectExec is needed only if the gpu cpu bridge is disabled.
+      execsAllowedNonGpu = Seq("ProjectExec", "Alias", "GetTimestamp", 
+        "UnixTimestamp", "ShuffleExchangeExec")) {
+    // until we fix https://github.com/NVIDIA/spark-rapids/issues/2118 we need to fall
+    // back to CPU when parsing two-digit years
     df => df.withColumn("c1", to_date(col("c0"), "dd/MM/yy"))
   }
 
@@ -178,12 +180,13 @@ class ParseDateTimeSuite extends SparkQueryCompareTestSuite with BeforeAndAfterE
     df => df.withColumn("c1", unix_timestamp(col("c0"), "yyyy/MM/dd HH:mm:ss"))
   }
 
-  testSparkResultsAreEqual("unix_timestamp parse timestamp millis (fall back to CPU)",
-    timestampsAsStrings,
-    new SparkConf().set(SQLConf.LEGACY_TIME_PARSER_POLICY.key, "CORRECTED")
-      .set(RapidsConf.TEST_ALLOWED_NONGPU.key,
-        "ProjectExec,Alias,UnixTimestamp,Literal,ShuffleExchangeExec")
-      .set("spark.sql.ansi.enabled", "false")) {
+  testGpuFallback("unix_timestamp parse timestamp millis (fall back to CPU)",
+      "UnixTimestamp",
+      timestampsAsStrings,
+      new SparkConf().set(SQLConf.LEGACY_TIME_PARSER_POLICY.key, "CORRECTED")
+        .set("spark.sql.ansi.enabled", "false"),
+      // The ProjectExec is needed only if the gpu cpu bridge is disabled.
+      execsAllowedNonGpu = Seq("ProjectExec", "Alias", "UnixTimestamp")) {
     df => df.withColumn("c1", unix_timestamp(col("c0"), "yyyy-MM-dd HH:mm:ss.SSS"))
   }
 
@@ -193,18 +196,17 @@ class ParseDateTimeSuite extends SparkQueryCompareTestSuite with BeforeAndAfterE
     df => df.withColumn("c1", unix_timestamp(col("c0")))
   }
 
-  test("fall back to CPU when policy is LEGACY and unsupported format is used") {
-    val e = intercept[IllegalArgumentException] {
-      val df = withGpuSparkSession(spark => {
-        val formatString = "u" // we do not support this legacy format on GPU
-        timestampsAsStrings(spark)
-            .repartition(2)
-            .withColumn("c1", unix_timestamp(col("c0"), formatString))
-      }, LEGACY_TIME_PARSER_POLICY_CONF)
-      df.collect()
+  testGpuFallback("fall back to CPU when policy is LEGACY and unsupported format is used",
+      "UnixTimestamp",
+      timestampsAsStrings,
+      LEGACY_TIME_PARSER_POLICY_CONF,
+      repart = 1,
+      // The ProjectExec is needed only if the gpu cpu bridge is disabled.
+      execsAllowedNonGpu = Seq("ProjectExec", "Alias", "UnixTimestamp")) {
+    df => {
+      val formatString = "u" // we do not support this legacy format on GPU
+      df.withColumn("c1", unix_timestamp(col("c0"), formatString))
     }
-    assert(e.getMessage.contains(
-      "Part of the plan is not columnar class org.apache.spark.sql.execution.ProjectExec"))
   }
 
   test("unsupported format") {
@@ -224,8 +226,10 @@ class ParseDateTimeSuite extends SparkQueryCompareTestSuite with BeforeAndAfterE
       }, CORRECTED_TIME_PARSER_POLICY)
       df.collect()
     }
-    assert(e.getMessage.contains(
-      "Part of the plan is not columnar class org.apache.spark.sql.execution.ProjectExec"))
+    // With the bridge feature, the error message might be about bridge expressions
+    // instead of ProjectExec, so we check for both possibilities
+    assert(e.getMessage.contains("Part of the plan is not columnar") ||
+      e.getMessage.contains("GpuCpuBridgeExpression contains disallowed CPU expressions"))
 
     val planStr = plans.last.toString
     assert(planStr.contains("Failed to convert Unsupported character: F"))

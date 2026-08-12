@@ -190,14 +190,13 @@ def test_delta_write_disabled_fallback(spark_tmp_path, disable_conf, enable_dele
         conf=copy_and_update(writer_confs, disable_conf))
 
 # unsupported WriteIntoDeltaCommand tracked by https://github.com/NVIDIA/spark-rapids/issues/11169
-@allow_non_gpu_conditional(is_databricks143_or_later(), "DataWritingCommandExec, WriteFilesExec")
+@allow_non_gpu_conditional(is_databricks_runtime(), "DataWritingCommandExec, WriteFilesExec")
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
-@pytest.mark.xfail(is_databricks143_or_later(), reason="https://github.com/NVIDIA/spark-rapids/issues/13106")
-@pytest.mark.xfail(is_databricks133_or_later(), reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
-@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_350DB143_xfail_reasons(
-    enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12027"), ids=idfn)
+@pytest.mark.xfail(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/13106")
+@pytest.mark.xfail(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
+@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values, ids=idfn)
 def test_delta_write_round_trip_managed(spark_tmp_table_factory, enable_deletion_vectors):
     gen_list = [("c" + str(i), gen) for i, gen in enumerate(delta_write_gens)]
     conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
@@ -212,12 +211,407 @@ def test_delta_write_round_trip_managed(spark_tmp_table_factory, enable_deletion
     assert_delta_history_equal(conf, cpu_table, gpu_table)
 
 
+@allow_non_gpu('AppendDataExecV1', 'AtomicCreateTableAsSelectExec',
+               'AtomicReplaceTableAsSelectExec',
+               *delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_databricks173_or_later(), reason="DBR 17.3 native write path")
+@pytest.mark.parametrize("enable_deletion_vectors,column_mapping", [
+    pytest.param(None, None, id="dv_default-no_mapping"),
+    pytest.param(False, None, id="dv_false-no_mapping"),
+    pytest.param(True, None, id="dv_true-no_mapping"),
+    pytest.param(None, "name", id="dv_default-name_mapping"),
+    pytest.param(None, "id", id="dv_default-id_mapping"),
+])
+@pytest.mark.parametrize("optimized_write", [False, True], ids=idfn)
+def test_delta_db173_native_managed_ctas_rtas(
+        spark_tmp_table_factory, enable_deletion_vectors, column_mapping, optimized_write):
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf, {
+        "spark.databricks.delta.optimizeWrite.enabled": str(optimized_write).lower(),
+        "spark.sql.adaptive.enabled": "true",
+        "spark.sql.execution.sortBeforeRepartition": "true",
+    })
+    if column_mapping is not None:
+        conf = copy_and_update(conf, {
+            "spark.databricks.delta.properties.defaults.columnMapping.mode": column_mapping,
+            "spark.databricks.delta.properties.defaults.minReaderVersion": "2",
+            "spark.databricks.delta.properties.defaults.minWriterVersion": "5",
+            "spark.sql.parquet.fieldId.read.enabled": "true",
+            "spark.sql.parquet.fieldId.write.enabled": "true",
+        })
+    cpu_table = spark_tmp_table_factory.get() + '_cpu'
+    gpu_table = spark_tmp_table_factory.get() + '_gpu'
+    source_table = spark_tmp_table_factory.get() + '_source'
+
+    source_conf = copy_and_update(conf, {
+        "spark.databricks.delta.properties.defaults.columnMapping.mode": "none"
+    })
+    with_cpu_session(
+        lambda spark: spark.range(4096).selectExpr(
+            "id AS carrier_id",
+            "concat('CARRIER-', id) AS carrier_code",
+            "CAST(id % 7 AS INT) AS carrier_type") \
+            .write.format("delta").mode("overwrite").saveAsTable(source_table),
+        conf=source_conf)
+
+    def write_table(spark, table, replace):
+        effective_optimize_write = spark.conf.get(
+            "spark.databricks.delta.optimizeWrite.enabled")
+        assert effective_optimize_write.lower() == str(optimized_write).lower()
+        # A managed Delta scan preserves pass-through ExprIds like the customer projections do.
+        source = spark.table(source_table).coalesce(1)
+        if replace:
+            source = source.selectExpr(
+                "carrier_code", "carrier_id", "carrier_type", "carrier_id + 1 AS version")
+        # DBR's staged Delta output may retain fresh target ExprIds while Catalyst removes
+        # no-op aliases and exposes the underlying query ExprIds. Exercise the safe ordinal
+        # mapping used when the names and types still match exactly.
+        source = source.selectExpr(*[f"`{column}` AS `{column}`" for column in source.columns])
+        writer = source.write.format("delta").mode("overwrite") \
+            .option("overwriteSchema", "true")
+        if enable_deletion_vectors is not None:
+            writer = writer.option(
+                "delta.enableDeletionVectors", str(enable_deletion_vectors).lower())
+        writer.saveAsTable(table)
+
+    with_cpu_session(lambda spark: write_table(spark, cpu_table, False), conf=conf)
+    assert_db173_gpu_data_writing_command(
+        lambda spark: write_table(spark, gpu_table, False), conf=conf,
+        optimized_write=optimized_write,
+        expected_atomic_gpu_class="GpuAtomicReplaceTableAsSelectExec",
+        aqe_enabled=True)
+
+    with_cpu_session(lambda spark: write_table(spark, cpu_table, True), conf=conf)
+    assert_db173_gpu_data_writing_command(
+        lambda spark: write_table(spark, gpu_table, True), conf=conf,
+        optimized_write=optimized_write,
+        expected_atomic_gpu_class="GpuAtomicReplaceTableAsSelectExec",
+        aqe_enabled=True)
+
+    def table_state(spark, table):
+        rows = spark.table(table).orderBy("carrier_id").collect()
+        schema = [
+            (field.name, field.dataType.json(), field.nullable)
+            for field in spark.table(table).schema.fields
+        ]
+        version_zero = spark.sql(
+            f"SELECT * FROM {table} VERSION AS OF 0 ORDER BY carrier_id").collect()
+        detail = spark.sql(f"DESCRIBE DETAIL {table}").select(
+            "format", "partitionColumns", "properties",
+            "minReaderVersion", "minWriterVersion").first().asDict(recursive=True)
+        return rows, schema, version_zero, detail
+
+    def normalized_add_actions(spark, table):
+        schema = spark.table(table).schema
+        physical_to_logical = {
+            field.metadata.get("delta.columnMapping.physicalName", field.name): field.name
+            for field in schema.fields
+        }
+        location = spark.sql(f"DESCRIBE DETAIL {table}").select("location").first()[0]
+        logs = read_delta_logs(spark, location + "/_delta_log/*.json")
+        ignored_tags = {
+            "INSERTION_TIME", "MAX_INSERTION_TIME", "MIN_INSERTION_TIME", "ZCUBE_ID",
+            "compactedInto", "optimizeCommandId"
+        }
+        normalized = {}
+        for version, actions in logs.items():
+            add_actions = []
+            for action in actions:
+                if "add" not in action:
+                    continue
+                add = action["add"]
+                stats = json.loads(add["stats"])
+                for key in ("minValues", "maxValues", "nullCount"):
+                    stats[key] = {
+                        physical_to_logical.get(name, name): value
+                        for name, value in stats[key].items()
+                    }
+                tags = {
+                    key: value for key, value in add.get("tags", {}).items()
+                    if key not in ignored_tags
+                }
+                add_actions.append({
+                    "partitionValues": add["partitionValues"],
+                    "stats": stats,
+                    "tags": tags,
+                })
+            normalized[version] = sorted(
+                add_actions, key=lambda value: json.dumps(value, sort_keys=True))
+        return normalized
+
+    def check_delta_logs(spark):
+        def location(table):
+            return spark.sql(f"DESCRIBE DETAIL {table}").select("location").first()[0]
+
+        cpu_path = location(cpu_table)
+        gpu_path = location(gpu_table)
+        assert_delta_add_file_stats_present(spark, cpu_path)
+        assert_delta_add_file_stats_present(spark, gpu_path)
+        if column_mapping is None:
+            assert_delta_logs_at_paths_equivalent(spark, cpu_path, gpu_path)
+        else:
+            assert_equal(
+                normalized_add_actions(spark, cpu_table),
+                normalized_add_actions(spark, gpu_table))
+
+    cpu_state = with_cpu_session(lambda spark: table_state(spark, cpu_table), conf=conf)
+    gpu_state = with_cpu_session(lambda spark: table_state(spark, gpu_table), conf=conf)
+    assert_equal(cpu_state, gpu_state)
+    assert_delta_history_equal(conf, cpu_table, gpu_table)
+    with_cpu_session(check_delta_logs, conf=conf)
+
+
+@allow_non_gpu('AppendDataExecV1', 'AtomicCreateTableAsSelectExec',
+               'AtomicReplaceTableAsSelectExec',
+               *delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_databricks173_or_later(), reason="DBR 17.3 native write path")
+@pytest.mark.parametrize("optimized_write,aqe_enabled", [
+    pytest.param(False, False, id="optimize_off-aqe_off"),
+    pytest.param(False, True, id="optimize_off-aqe_on"),
+    pytest.param(True, True, id="optimize_on-aqe_on"),
+])
+def test_delta_db173_native_sql_ctas_rtas(
+        spark_tmp_table_factory, optimized_write, aqe_enabled):
+    _run_delta_db173_native_sql_ctas_rtas(
+        spark_tmp_table_factory, optimized_write, aqe_enabled, False)
+
+
+@allow_non_gpu('AppendDataExecV1', 'AtomicCreateTableAsSelectExec',
+               'AtomicReplaceTableAsSelectExec', 'DeltaOptimizedWriterExec',
+               *delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_databricks173_or_later(), reason="DBR 17.3 native write path")
+def test_delta_db173_native_sql_ctas_rtas_legacy_optimized_write(
+        spark_tmp_table_factory):
+    # DBR 17.3 uses its row-only DeltaOptimizedWriterExec when AQE is disabled. This is a
+    # correctness test for that expected mixed fallback; GPU optimized write requires AQE.
+    _run_delta_db173_native_sql_ctas_rtas(
+        spark_tmp_table_factory, True, False, True)
+
+
+@allow_non_gpu('AppendDataExecV1', 'AtomicCreateTableAsSelectExec',
+               'AtomicReplaceTableAsSelectExec', 'EmptyRelationExec',
+               *delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_databricks173_or_later(), reason="DBR 17.3 native write path")
+def test_delta_db173_native_sql_ctas_rtas_empty_input(
+        spark_tmp_table_factory):
+    _run_delta_db173_native_sql_ctas_rtas(
+        spark_tmp_table_factory, False, True, False, empty_input=True)
+
+
+def _assert_db173_gpu_atomic_control_command(
+        do_test, conf, expected_atomic_gpu_class, expected_error=None):
+    """Assert an atomic wrapper for a no-op or expected-error command with no nested write."""
+    jvm = spark_jvm()
+    callback = jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        if expected_error is None:
+            result = with_gpu_session(do_test, conf=conf)
+        else:
+            assert_spark_exception(
+                lambda: with_gpu_session(do_test, conf=conf), expected_error)
+            result = None
+        captured_plans = callback.getResultsWithTimeout(10000)
+        assert any(
+            callback.contains(plan, expected_atomic_gpu_class)
+            for plan in captured_plans
+        ), f"{expected_atomic_gpu_class} is not found in the captured atomic command plans"
+        expected_cpu_class = expected_atomic_gpu_class[3:]
+        assert not any(
+            callback.didFallBack(plan, expected_cpu_class)
+            for plan in captured_plans
+        ), f"Captured atomic command contains CPU {expected_cpu_class}"
+        return result
+    finally:
+        callback.endCapture()
+
+
+@allow_non_gpu('AppendDataExecV1', 'AtomicCreateTableAsSelectExec',
+               'AtomicReplaceTableAsSelectExec',
+               *delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_databricks173_or_later(), reason="DBR 17.3 native write path")
+def test_delta_db173_native_sql_ctas_rtas_existing_table_branches(
+        spark_tmp_table_factory):
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf, {
+        "spark.databricks.delta.optimizeWrite.enabled": "false",
+        "spark.sql.adaptive.enabled": "true",
+    })
+    cpu_table = spark_tmp_table_factory.get() + '_existing_cpu'
+    gpu_table = spark_tmp_table_factory.get() + '_existing_gpu'
+
+    def setup_tables(spark):
+        for table in (cpu_table, gpu_table):
+            spark.sql(
+                f"CREATE TABLE {table} USING DELTA AS "
+                "SELECT 1L AS id, 'original' AS value").collect()
+
+    with_cpu_session(setup_tables, conf=conf)
+
+    def create_if_not_exists(spark, table):
+        spark.sql(
+            f"CREATE TABLE IF NOT EXISTS {table} USING DELTA AS "
+            "SELECT 2L AS id, 'ignored' AS value").collect()
+
+    with_cpu_session(
+        lambda spark: create_if_not_exists(spark, cpu_table), conf=conf)
+    _assert_db173_gpu_atomic_control_command(
+        lambda spark: create_if_not_exists(spark, gpu_table), conf,
+        "GpuAtomicCreateTableAsSelectExec")
+
+    def table_rows(spark, table):
+        return spark.table(table).orderBy("id").collect()
+
+    cpu_rows = with_cpu_session(lambda spark: table_rows(spark, cpu_table), conf=conf)
+    gpu_rows = with_cpu_session(lambda spark: table_rows(spark, gpu_table), conf=conf)
+    assert_equal(cpu_rows, gpu_rows)
+    assert_equal([(row.id, row.value) for row in gpu_rows], [(1, "original")])
+
+    def create_existing(spark, table):
+        spark.sql(
+            f"CREATE TABLE {table} USING DELTA AS "
+            "SELECT 2L AS id, 'duplicate' AS value").collect()
+
+    assert_spark_exception(
+        lambda: with_cpu_session(
+            lambda spark: create_existing(spark, cpu_table), conf=conf),
+        "already exists")
+    _assert_db173_gpu_atomic_control_command(
+        lambda spark: create_existing(spark, gpu_table), conf,
+        "GpuAtomicCreateTableAsSelectExec", expected_error="already exists")
+
+    def replace_existing(spark, table):
+        spark.sql(
+            f"REPLACE TABLE {table} USING DELTA AS "
+            "SELECT 3L AS id, 'replaced' AS value").collect()
+
+    with_cpu_session(lambda spark: replace_existing(spark, cpu_table), conf=conf)
+    assert_db173_gpu_data_writing_command(
+        lambda spark: replace_existing(spark, gpu_table), conf=conf,
+        optimized_write=False,
+        expected_atomic_gpu_class="GpuAtomicReplaceTableAsSelectExec",
+        aqe_enabled=True)
+
+    cpu_rows = with_cpu_session(lambda spark: table_rows(spark, cpu_table), conf=conf)
+    gpu_rows = with_cpu_session(lambda spark: table_rows(spark, gpu_table), conf=conf)
+    assert_equal(cpu_rows, gpu_rows)
+    assert_equal([(row.id, row.value) for row in gpu_rows], [(3, "replaced")])
+    assert_delta_history_equal(conf, cpu_table, gpu_table)
+
+
+def _run_delta_db173_native_sql_ctas_rtas(
+        spark_tmp_table_factory, optimized_write, aqe_enabled,
+        expect_legacy_optimized_write, empty_input=False):
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf, {
+        "spark.databricks.delta.optimizeWrite.enabled": str(optimized_write).lower(),
+        "spark.sql.adaptive.enabled": str(aqe_enabled).lower(),
+        "spark.sql.adaptive.coalescePartitions.enabled": "true",
+        "spark.sql.shuffle.partitions": "32",
+        "spark.sql.execution.sortBeforeRepartition": "true",
+    })
+    cpu_ctas_table = spark_tmp_table_factory.get() + '_sql_ctas_cpu'
+    gpu_ctas_table = spark_tmp_table_factory.get() + '_sql_ctas_gpu'
+    cpu_rtas_table = spark_tmp_table_factory.get() + '_sql_rtas_cpu'
+    gpu_rtas_table = spark_tmp_table_factory.get() + '_sql_rtas_gpu'
+    source_table = spark_tmp_table_factory.get() + '_sql_source'
+
+    with_cpu_session(
+        lambda spark: spark.range(81920).selectExpr(
+            "id AS carrier_id",
+            "concat('CARRIER-', id) AS carrier_code",
+            "CAST(id % 7 AS INT) AS carrier_type")
+            .write.format("delta").mode("overwrite").saveAsTable(source_table),
+        conf=conf)
+
+    def execute_atomic_sql(spark, table, replace):
+        effective_optimize_write = spark.conf.get(
+            "spark.databricks.delta.optimizeWrite.enabled")
+        assert effective_optimize_write.lower() == str(optimized_write).lower()
+        effective_aqe = spark.conf.get("spark.sql.adaptive.enabled")
+        assert effective_aqe.lower() == str(aqe_enabled).lower()
+        command = "CREATE OR REPLACE TABLE" if replace else "CREATE TABLE"
+        projection = (
+            "carrier_id, carrier_code, carrier_type, carrier_id + 1 AS version"
+            if replace else "carrier_id, carrier_code, carrier_type"
+        )
+        predicate = " WHERE carrier_id < 0" if empty_input else ""
+        spark.sql(
+            f"{command} {table} USING DELTA AS "
+            f"SELECT /*+ REPARTITION(32, carrier_id) */ {projection} "
+            f"FROM {source_table}{predicate}").collect()
+
+    with_cpu_session(
+        lambda spark: execute_atomic_sql(spark, cpu_ctas_table, False), conf=conf)
+    assert_db173_gpu_data_writing_command(
+        lambda spark: execute_atomic_sql(spark, gpu_ctas_table, False), conf=conf,
+        optimized_write=optimized_write,
+        expected_atomic_gpu_class="GpuAtomicCreateTableAsSelectExec",
+        aqe_enabled=aqe_enabled,
+        expect_legacy_optimized_write=expect_legacy_optimized_write)
+
+    with_cpu_session(
+        lambda spark: execute_atomic_sql(spark, cpu_rtas_table, True), conf=conf)
+    assert_db173_gpu_data_writing_command(
+        lambda spark: execute_atomic_sql(spark, gpu_rtas_table, True), conf=conf,
+        optimized_write=optimized_write,
+        expected_atomic_gpu_class="GpuAtomicReplaceTableAsSelectExec",
+        aqe_enabled=aqe_enabled,
+        expect_legacy_optimized_write=expect_legacy_optimized_write)
+
+    def table_state(spark, table):
+        df = spark.table(table)
+        rows = df.orderBy("carrier_id").collect()
+        schema = [
+            (field.name, field.dataType.json(), field.nullable)
+            for field in df.schema.fields
+        ]
+        version_zero = spark.sql(
+            f"SELECT * FROM {table} VERSION AS OF 0 ORDER BY carrier_id").collect()
+        detail = spark.sql(f"DESCRIBE DETAIL {table}").select(
+            "format", "partitionColumns", "properties",
+            "minReaderVersion", "minWriterVersion").first().asDict(recursive=True)
+        return rows, schema, version_zero, detail
+
+    table_pairs = [
+        (cpu_ctas_table, gpu_ctas_table),
+        (cpu_rtas_table, gpu_rtas_table),
+    ]
+    for cpu_table, gpu_table in table_pairs:
+        cpu_state = with_cpu_session(lambda spark: table_state(spark, cpu_table), conf=conf)
+        gpu_state = with_cpu_session(lambda spark: table_state(spark, gpu_table), conf=conf)
+        assert_equal(cpu_state, gpu_state)
+        if empty_input:
+            assert_equal(cpu_state[0], [])
+            assert_equal(cpu_state[2], [])
+        assert_delta_history_equal(conf, cpu_table, gpu_table)
+
+    def check_delta_logs(spark):
+        def location(table):
+            return spark.sql(f"DESCRIBE DETAIL {table}").select("location").first()[0]
+        for cpu_table, gpu_table in table_pairs:
+            assert_delta_logs_at_paths_equivalent(
+                spark, location(cpu_table), location(gpu_table))
+
+    # An empty GPU write may produce a valid zero-row Parquet file while DBR's CPU writer
+    # produces no data file. The table-state checks above validate the observable Delta
+    # semantics; require identical physical actions only when the input contains rows.
+    if not empty_input:
+        with_cpu_session(check_delta_logs, conf=conf)
+
+
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
-@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_350DB143_xfail_reasons(
-                            enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12027"), ids=idfn)
+@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values, ids=idfn)
 def test_delta_write_round_trip_unmanaged(spark_tmp_path, enable_deletion_vectors):
     gen_list = [("c" + str(i), gen) for i, gen in enumerate(delta_write_gens)]
     data_path = spark_tmp_path + "/DELTA_DATA"
@@ -297,8 +691,7 @@ def do_update_round_trip_managed(spark_tmp_path, mode, enable_deletion_vectors):
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
-@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_350DB143_xfail_reasons(
-                            enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12027"), ids=idfn)
+@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values, ids=idfn)
 def test_delta_overwrite_round_trip_unmanaged(spark_tmp_path, enable_deletion_vectors):
     do_update_round_trip_managed(spark_tmp_path, "overwrite", enable_deletion_vectors)
 
@@ -306,8 +699,7 @@ def test_delta_overwrite_round_trip_unmanaged(spark_tmp_path, enable_deletion_ve
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
-@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_350DB143_xfail_reasons(
-                            enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12027"), ids=idfn)
+@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values, ids=idfn)
 def test_delta_append_round_trip_unmanaged(spark_tmp_path, enable_deletion_vectors):
     do_update_round_trip_managed(spark_tmp_path, "append", enable_deletion_vectors)
 
@@ -335,9 +727,9 @@ def _atomic_write_table_as_select(gens, spark_tmp_table_factory, spark_tmp_path,
 @delta_lake
 @ignore_order(local=True)
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
-@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_350DB143_xfail_reasons(
+@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_xfail_reasons(
                             enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12041"), ids=idfn)
-@pytest.mark.xfail(is_databricks133_or_later(), reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
+@pytest.mark.xfail(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
 def test_delta_atomic_create_table_as_select(spark_tmp_table_factory, spark_tmp_path, enable_deletion_vectors):
     _atomic_write_table_as_select(delta_write_gens, spark_tmp_table_factory, spark_tmp_path,
                                   overwrite=False,
@@ -347,10 +739,11 @@ def test_delta_atomic_create_table_as_select(spark_tmp_table_factory, spark_tmp_
 @delta_lake
 @ignore_order(local=True)
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
-@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_350DB143_xfail_reasons(
+@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_xfail_reasons(
                             enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12041"), ids=idfn)
-@pytest.mark.xfail(is_spark_356_or_later(), reason="https://github.com/delta-io/delta/issues/4671")
-@pytest.mark.xfail(is_databricks133_or_later(), reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
+@pytest.mark.xfail(is_spark_356_or_later() and not is_spark_400_or_later(),
+                   reason="https://github.com/delta-io/delta/issues/4671")
+@pytest.mark.xfail(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
 def test_delta_atomic_replace_table_as_select(spark_tmp_table_factory, spark_tmp_path, enable_deletion_vectors):
     _atomic_write_table_as_select(delta_write_gens, spark_tmp_table_factory, spark_tmp_path,
                                   overwrite=True, enable_deletion_vectors=enable_deletion_vectors)
@@ -405,10 +798,10 @@ def _atomic_write_table_as_select_sql(gens, spark_tmp_table_factory, replace,
 @delta_lake
 @ignore_order(local=True)
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
-@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_350DB143_xfail_reasons(
+@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_xfail_reasons(
     enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12041"), ids=idfn)
 @pytest.mark.parametrize("use_cdf", [True, False], ids=idfn)
-@pytest.mark.xfail(is_databricks133_or_later(), reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
+@pytest.mark.xfail(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
 def test_delta_ctas_sql(spark_tmp_table_factory, enable_deletion_vectors, use_cdf):
     _atomic_write_table_as_select_sql(delta_write_gens, spark_tmp_table_factory,
                                       False, enable_deletion_vectors, use_cdf)
@@ -417,14 +810,62 @@ def test_delta_ctas_sql(spark_tmp_table_factory, enable_deletion_vectors, use_cd
 @delta_lake
 @ignore_order(local=True)
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
-@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_350DB143_xfail_reasons(
+@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_xfail_reasons(
     enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12041"), ids=idfn)
 @pytest.mark.parametrize("use_cdf", [True, False], ids=idfn)
-@pytest.mark.xfail(is_spark_356_or_later(), reason="https://github.com/delta-io/delta/issues/4671")
-@pytest.mark.xfail(is_databricks133_or_later(), reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
+@pytest.mark.xfail(is_spark_356_or_later() and not is_spark_400_or_later(),
+                   reason="https://github.com/delta-io/delta/issues/4671")
+@pytest.mark.xfail(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
 def test_delta_rtas_sql(spark_tmp_table_factory, enable_deletion_vectors, use_cdf):
     _atomic_write_table_as_select_sql(delta_write_gens, spark_tmp_table_factory,
                                       True, enable_deletion_vectors, use_cdf)
+
+
+@allow_non_gpu_conditional(
+    is_databricks_runtime(),
+    'AppendDataExecV1, AtomicCreateTableAsSelectExec, AtomicReplaceTableAsSelectExec')
+@allow_non_gpu('DataWritingCommandExec', 'WriteFilesExec', *delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_spark_400_or_later(),
+                    reason="Delta Lake 4.0 contains the native truncate capability")
+def test_delta_rtas_truncate_capability(spark_tmp_table_factory):
+    cpu_table = spark_tmp_table_factory.get()
+    gpu_table = spark_tmp_table_factory.get()
+    confs = copy_and_update(writer_confs, delta_writes_enabled_conf)
+
+    def create_initial_tables(spark):
+        for table in [cpu_table, gpu_table]:
+            spark.sql(f"CREATE TABLE {table} USING DELTA AS SELECT id FROM range(10)")
+
+    def replace_table(spark, table):
+        spark.sql(
+            f"CREATE OR REPLACE TABLE {table} USING DELTA "
+            f"AS SELECT id FROM range(20) WHERE id >= 10")
+
+    with_cpu_session(create_initial_tables, conf=confs)
+    with_cpu_session(lambda spark: replace_table(spark, cpu_table), conf=confs)
+
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        with_gpu_session(lambda spark: replace_table(spark, gpu_table), conf=confs)
+        plans = callback.getResultsWithTimeout(10000)
+        assert any(callback.contains(plan, "GpuAtomicReplaceTableAsSelectExec")
+                   for plan in plans), "GpuAtomicReplaceTableAsSelectExec was not executed"
+        if not is_databricks_runtime():
+            assert any(callback.contains(plan, "GpuOverwriteByExpressionExecV1")
+                       for plan in plans), "GpuOverwriteByExpressionExecV1 was not executed"
+    finally:
+        callback.endCapture()
+
+    def read_ids(spark, table):
+        return spark.sql(f"SELECT id FROM {table} ORDER BY id").collect()
+
+    cpu_rows = with_cpu_session(lambda spark: read_ids(spark, cpu_table), conf=confs)
+    gpu_rows = with_cpu_session(lambda spark: read_ids(spark, gpu_table), conf=confs)
+    assert_equal(cpu_rows, gpu_rows)
+    assert [row.id for row in gpu_rows] == list(range(10, 20))
 
 
 @allow_non_gpu(*delta_meta_allow)
@@ -497,7 +938,7 @@ def test_delta_overwrite_dynamic_by_name(spark_tmp_path):
 @delta_lake
 @ignore_order(local=True)
 @pytest.mark.skipif(is_before_spark_340() and not is_databricks_runtime(), reason="Schema evolution fixed in later releases")
-@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_350DB143_xfail_reasons(
+@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_xfail_reasons(
                             enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
 def test_delta_overwrite_schema_evolution_arrays(spark_tmp_path, enable_deletion_vectors):
     data_path = spark_tmp_path + "/DELTA_DATA"
@@ -579,10 +1020,7 @@ def test_delta_overwrite_mixed_clause(spark_tmp_table_factory, spark_tmp_path, m
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
-@pytest.mark.skipif(is_databricks_runtime() and is_before_spark_330(),
-                    reason="Databricks 10.4 does not properly handle options passed during DataFrame API write")
-@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_350DB143_xfail_reasons(
-                            enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12027"), ids=idfn)
+@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values, ids=idfn)
 def test_delta_write_round_trip_cdf_write_opt(spark_tmp_path, enable_deletion_vectors):
     gen_list = [("ints", int_gen)]
     data_path = spark_tmp_path + "/DELTA_DATA"
@@ -1030,8 +1468,7 @@ def test_delta_write_multiple_identity_columns_sql(spark_tmp_path):
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
-@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_350DB143_xfail_reasons(
-                            enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12027"), ids=idfn)
+@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values, ids=idfn)
 def test_delta_write_aqe_join(spark_tmp_path, enable_deletion_vectors):
     data_path = spark_tmp_path + "/DELTA_DATA"
     confs=copy_and_update(delta_writes_enabled_conf, {"spark.sql.adaptive.enabled": "true"})
@@ -1369,7 +1806,7 @@ if is_databricks_runtime():
 @allow_non_gpu(compaction_allow, *delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_350DB143_xfail_reasons(
+@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_xfail_reasons(
                             enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
 def test_delta_compaction(spark_tmp_path, enable_deletion_vectors):
     from delta.tables import DeltaTable

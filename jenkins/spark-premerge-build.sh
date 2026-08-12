@@ -31,7 +31,34 @@ CUDA_CLASSIFIER=${CUDA_CLASSIFIER:-'cuda12'}
 CLASSIFIER=${CLASSIFIER:-"$CUDA_CLASSIFIER"} # default as CUDA_CLASSIFIER for compatibility
 MVN_SETTINGS=${MVN_SETTINGS:-"jenkins/settings.xml"}
 MVN=${MVN:-"mvn -s $MVN_SETTINGS -Dmaven.wagon.http.retryHandler.count=3"}
-MVN_BUILD_ARGS="-Drat.skip=true -Dmaven.scaladoc.skip -Dmaven.scalastyle.skip=true -Dcuda.version=$CLASSIFIER"
+# Jenkins enables this when the PR title contains [fast-ut]. Keep local/manual runs serial by default.
+PARALLEL_UT=${PARALLEL_UT:-false}
+PARALLEL_UT_FORK_COUNT=${PARALLEL_UT_FORK_COUNT:-}
+
+if [[ "$PARALLEL_UT" != "true" && "$PARALLEL_UT" != "false" ]]; then
+    >&2 echo "ERROR: PARALLEL_UT must be true or false"
+    exit 1
+fi
+
+if [[ -n "$PARALLEL_UT_FORK_COUNT" &&
+      ! "$PARALLEL_UT_FORK_COUNT" =~ ^([2-9]|[1-9][0-9]+)$ ]]; then
+    >&2 echo "ERROR: PARALLEL_UT_FORK_COUNT must be an integer greater than 1"
+    exit 1
+fi
+
+MVN_PARALLEL_UT_ARGS=""
+if [[ "$PARALLEL_UT" == "true" ]]; then
+    MVN_PARALLEL_UT_ARGS="-Drapids.parallelUnitTests=true"
+    if [[ -n "$PARALLEL_UT_FORK_COUNT" ]]; then
+        MVN_PARALLEL_UT_ARGS+=" -DparallelForkCount=$PARALLEL_UT_FORK_COUNT"
+    fi
+fi
+
+MVN_BUILD_ARGS="-Drat.skip=true -Dmaven.scaladoc.skip -Dmaven.scalastyle.skip=true \
+  -Dcuda.version=$CLASSIFIER $MVN_PARALLEL_UT_ARGS"
+
+echo "Parallel unit tests: enabled=$PARALLEL_UT, \
+forks=${PARALLEL_UT_FORK_COUNT:-Maven default}"
 
 mvn_verify() {
     echo "Run mvn verify..."
@@ -88,7 +115,8 @@ mvn_verify() {
 
     # Here run Python integration tests tagged with 'premerge_ci_1' only, that would help balance test duration and memory
     # consumption from two k8s pods running in parallel, which executes 'mvn_verify()' and 'ci_2()' respectively.
-    $MVN -B $MVN_URM_MIRROR $PREMERGE_PROFILES clean verify -Dpytest.TEST_TAGS="premerge_ci_1" \
+    $MVN -B $MVN_URM_MIRROR $PREMERGE_PROFILES clean verify $MVN_PARALLEL_UT_ARGS \
+        -Dpytest.TEST_TAGS="premerge_ci_1" \
         -Dpytest.TEST_TYPE="pre-commit" -Dcuda.version=$CLASSIFIER
 
     # The jacoco coverage should have been collected, but because of how the shade plugin
@@ -161,16 +189,25 @@ run_iceberg_version_detect_tests() {
     local spark_patch_ver
     spark_patch_ver=$(echo "$spark_ver" | cut -d. -f3)
 
-    if [[ "$iceberg_spark_ver" != "3.5" && "$iceberg_spark_ver" != "4.0" ]]; then
+    if [[ "$iceberg_spark_ver" != "3.5" && "$iceberg_spark_ver" != "4.0" \
+          && "$iceberg_spark_ver" != "4.1" ]]; then
         echo "!!!! Skipping Iceberg version detection. Not supported on Spark $iceberg_spark_ver"
         return 0
     fi
 
-    # Supported Iceberg versions per Spark version — must stay in sync with
-    # run_iceberg_tests() in spark-tests.sh.
+    # Supported Iceberg versions per Spark version. The 3.5.x / 4.0.x rows mirror
+    # run_iceberg_tests() in spark-tests.sh. The Spark 4.1 -> 1.11.0 row is kept here
+    # for callers that explicitly test Spark 4.1, while the regular pre-merge job
+    # below runs on Spark 4.0.1. Spark 4.1 is covered by nightly run_iceberg_tests().
     local iceberg_versions
-    if [[ "$iceberg_spark_ver" == "4.0" ]]; then
-        iceberg_versions="1.10.1"
+    if [[ "$iceberg_spark_ver" == "4.1" ]]; then
+        iceberg_versions="1.11.0"
+    elif [[ "$iceberg_spark_ver" == "4.0" ]]; then
+        if [[ "$spark_patch_ver" -ge 2 ]]; then
+            iceberg_versions="1.10.1 1.11.0"
+        else
+            iceberg_versions="1.10.1"
+        fi
     elif [[ "$spark_patch_ver" -le 3 ]]; then
         iceberg_versions="1.6.1"
     else
@@ -187,6 +224,31 @@ run_iceberg_version_detect_tests() {
             PYSP_TEST_spark_sql_catalog_spark__catalog_warehouse="/tmp/spark-warehouse-$RANDOM" \
             ./integration_tests/run_pyspark_from_build.sh -m iceberg --iceberg -k test_iceberg_version_detection
     done
+}
+
+run_iceberg_extra_classpath_tests() {
+    local spark_ver=${1:?'spark_ver is required'}
+    local scala_ver=${2:?'scala_ver is required'}
+    local iceberg_version=${3:?'iceberg_version is required'}
+    local iceberg_spark_ver
+    iceberg_spark_ver=$(echo "$spark_ver" | cut -d. -f1,2)
+    local iceberg_runtime_artifact="iceberg-spark-runtime-${iceberg_spark_ver}_${scala_ver}"
+    local iceberg_extra_classpath_dir="$ARTF_ROOT/iceberg-extra-classpath"
+    local iceberg_runtime_jar="${iceberg_extra_classpath_dir}/${iceberg_runtime_artifact}-${iceberg_version}.jar"
+
+    mkdir -p "$iceberg_extra_classpath_dir"
+    wget -q -O "$iceberg_runtime_jar" \
+        "$SPARK_REPO/org/apache/iceberg/${iceberg_runtime_artifact}/${iceberg_version}/${iceberg_runtime_artifact}-${iceberg_version}.jar"
+
+    # Loading Iceberg from extraClassPath creates the app/shim classloader split.
+    echo "!!! Running targeted Iceberg extraClassPath tests for Iceberg $iceberg_version"
+    ICEBERG_EXTRA_CLASSPATH="${iceberg_runtime_jar}" \
+        PYSP_TEST_spark_sql_extensions="org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions" \
+        PYSP_TEST_spark_sql_catalog_spark__catalog="org.apache.iceberg.spark.SparkSessionCatalog" \
+        PYSP_TEST_spark_sql_catalog_spark__catalog_type="hadoop" \
+        PYSP_TEST_spark_sql_catalog_spark__catalog_warehouse="/tmp/spark-warehouse-$RANDOM" \
+        ./integration_tests/run_pyspark_from_build.sh -m iceberg --iceberg \
+        -k test_iceberg_read_appended_table
 }
 
 ci_2() {
@@ -263,6 +325,10 @@ ci_scala213() {
     # Moved out of spark-tests.sh DEFAULT mode where JDK 8 causes
     # UnsupportedClassVersionError for Iceberg 1.9+ runtime JARs.
     run_iceberg_version_detect_tests $SPARK_VER 2.13
+    if [[ "$SPARK_VER" == 4.0.* ]]; then
+        run_iceberg_extra_classpath_tests $SPARK_VER 2.13 1.10.1
+    fi
+
 }
 
 prepare_spark() {

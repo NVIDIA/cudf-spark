@@ -390,7 +390,10 @@ object DVPredicatePushdown extends ShimPredicateHelper {
       GpuProjectExec(projList2, child, enablePreSplit1), enablePreSplit2) =>
         val projSet1 = projList1.map(_.exprId).toSet
         val projSet2 = projList2.map(_.exprId).toSet
-        if (projSet1 == projSet2) {
+        // An Alias carries the exprId it defines, so equal exprId sets do not imply
+        // identical projections: merging over an alias-computing child would drop the
+        // alias's only producer ("Couldn't find <attr>"). Merge only pure pass-throughs.
+        if (projSet1 == projSet2 && projList2.forall(_.isInstanceOf[AttributeReference])) {
           GpuProjectExec(projList1, child, enablePreSplit1 && enablePreSplit2)
         } else {
           p

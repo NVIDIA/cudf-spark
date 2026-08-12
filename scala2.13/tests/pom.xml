@@ -21,18 +21,26 @@
     <parent>
         <groupId>com.nvidia</groupId>
         <artifactId>rapids-4-spark-shim-deps-parent_2.13</artifactId>
-        <version>26.08.0-SNAPSHOT</version>
+        <version>26.10.0-SNAPSHOT</version>
         <relativePath>../shim-deps/pom.xml</relativePath>
     </parent>
     <artifactId>rapids-4-spark-tests_2.13</artifactId>
     <name>RAPIDS Accelerator for Apache Spark Tests</name>
     <description>RAPIDS plugin for Apache Spark integration tests</description>
-    <version>26.08.0-SNAPSHOT</version>
+    <version>26.10.0-SNAPSHOT</version>
 
     <properties>
         <rapids.module>tests</rapids.module>
         <rapids.default.jar.excludePattern>**/*</rapids.default.jar.excludePattern>
         <rapids.shim.jar.phase>package</rapids.shim.jar.phase>
+        <parallelForkCount>4</parallelForkCount>
+        <parallelSparkConfs/>
+        <!-- Per-suite hang watchdog: a suite exceeding this many seconds gets a thread dump
+             captured and its JVM killed, failing the run instead of hanging it. -->
+        <parallelSuiteTimeout>1800</parallelSuiteTimeout>
+        <!-- Default for the parallel runner's exec execution: unlike the scalatest plugin,
+             exec:exec does not honor -DskipTests on its own, so it is wired up explicitly. -->
+        <skipTests>false</skipTests>
     </properties>
 
     <dependencies>
@@ -119,6 +127,80 @@
 
     <profiles>
         <profile>
+            <id>parallel-unit-tests</id>
+            <activation>
+                <property>
+                    <name>rapids.parallelUnitTests</name>
+                    <value>true</value>
+                </property>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.scalatest</groupId>
+                        <artifactId>scalatest-maven-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>test</id>
+                                <phase>none</phase>
+                            </execution>
+                            <execution>
+                                <id>test-ansi-off</id>
+                                <phase>none</phase>
+                            </execution>
+                            <execution>
+                                <id>test-ansi-on</id>
+                                <phase>none</phase>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>exec-maven-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>parallel-unit-tests</id>
+                                <phase>test</phase>
+                                <goals>
+                                    <goal>exec</goal>
+                                </goals>
+                                <configuration>
+                                    <!-- exec:exec does not honor -DskipTests; mirror it here so
+                                         package/install builds that skip tests stay test-free. -->
+                                    <skip>${skipTests}</skip>
+                                    <executable>${java.home}/bin/java</executable>
+                                    <classpathScope>test</classpathScope>
+                                    <arguments>
+                                        <argument>-Xmx512m</argument>
+                                        <argument>-cp</argument>
+                                        <classpath/>
+                                        <argument>com.nvidia.spark.rapids.ParallelUnitTestRunner</argument>
+                                        <argument>testClasses=${project.build.testOutputDirectory}</argument>
+                                        <argument>reportsDir=${project.build.directory}/surefire-reports</argument>
+                                        <argument>forkCount=${parallelForkCount}</argument>
+                                        <argument>wildcardSuites=${wildcardSuites}</argument>
+                                        <argument>tagsToInclude=${test.include.tags}</argument>
+                                        <argument>tagsToExclude=${test.exclude.tags}</argument>
+                                        <argument>suffixes=${suffixes}</argument>
+                                        <argument>testsFilter=${tests}</argument>
+                                        <argument>argLine=${argLine}</argument>
+                                        <argument>testJvmArgs=-ea -Xmx4g -Xss4m ${extraJavaTestArgs}</argument>
+                                        <argument>shuffleManagerOverride=${rapids.shuffle.manager.override}</argument>
+                                        <argument>allocationFraction=${rapids.test.gpu.allocFraction}</argument>
+                                        <argument>maxAllocationFraction=${rapids.test.gpu.maxAllocFraction}</argument>
+                                        <argument>minAllocationFraction=${rapids.test.gpu.minAllocFraction}</argument>
+                                        <argument>testFailureIgnore=${maven.test.failure.ignore}</argument>
+                                        <argument>sparkConfs=${parallelSparkConfs}</argument>
+                                        <argument>suiteTimeoutSeconds=${parallelSuiteTimeout}</argument>
+                                    </arguments>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
             <id>release330</id>
             <activation>
                 <property>
@@ -171,6 +253,11 @@
                     <value>400</value>
                 </property>
             </activation>
+            <properties>
+                <parallelSparkConfs>
+                    spark.sql.ansi.enabled=false;spark.sql.ansi.enabled=true
+                </parallelSparkConfs>
+            </properties>
             <build>
                 <plugins>
                     <plugin>
@@ -217,6 +304,52 @@
                 <property>
                     <name>buildver</name>
                     <value>411</value>
+                </property>
+            </activation>
+            <dependencies>
+                <dependency>
+                    <groupId>io.delta</groupId>
+                    <artifactId>${delta41x.spark.artifactId}</artifactId>
+                    <version>${delta41x.version}</version>
+                    <scope>test</scope>
+                    <exclusions>
+                        <exclusion>
+                            <groupId>io.unitycatalog</groupId>
+                            <artifactId>unitycatalog-client</artifactId>
+                        </exclusion>
+                    </exclusions>
+                </dependency>
+            </dependencies>
+        </profile>
+        <profile>
+            <id>release412</id>
+            <activation>
+                <property>
+                    <name>buildver</name>
+                    <value>412</value>
+                </property>
+            </activation>
+            <dependencies>
+                <dependency>
+                    <groupId>io.delta</groupId>
+                    <artifactId>${delta41x.spark.artifactId}</artifactId>
+                    <version>${delta41x.version}</version>
+                    <scope>test</scope>
+                    <exclusions>
+                        <exclusion>
+                            <groupId>io.unitycatalog</groupId>
+                            <artifactId>unitycatalog-client</artifactId>
+                        </exclusion>
+                    </exclusions>
+                </dependency>
+            </dependencies>
+        </profile>
+        <profile>
+            <id>release413</id>
+            <activation>
+                <property>
+                    <name>buildver</name>
+                    <value>413</value>
                 </property>
             </activation>
             <dependencies>

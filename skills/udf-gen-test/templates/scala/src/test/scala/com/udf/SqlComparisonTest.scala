@@ -30,19 +30,20 @@ class SqlComparisonTest extends AnyFunSuite with BeforeAndAfterAll {
   }
 
   test("UDF vs SQL expression") {
-    val testDF = UnitTest.createTestData(spark).repartition(1)
+    // Repartition down to 2 tasks to ensure we exercise multi-row columns.
+    val testDF = UnitTest.createTestData(spark).repartition(2)
 
     // Run CPU UDF
     UnitTest.registerUDF(spark, "placeholder_udf_name")
     val udfResultDF = UnitTest.executeUDF(spark, "placeholder_udf_name", testDF)
-    UnitTest.verifyUDFResults(udfResultDF, testDF)
+    UnitTest.assertUDFResults(udfResultDF, testDF)
 
     // Read and execute SQL expression
     testDF.createOrReplaceTempView("test_table")
     val sqlSource = scala.io.Source.fromFile("src/main/resources/placeholder_udf_name.sql")
     val sqlContent = try sqlSource.mkString finally sqlSource.close()
     val sqlResultDF = spark.sql(sqlContent)
-    UnitTest.verifyUDFResults(sqlResultDF, testDF)
+    UnitTest.assertUDFResults(sqlResultDF, testDF)
 
     // Compare results
     TestUtils.assertDataFrameEquals(actual = sqlResultDF, expected = udfResultDF)

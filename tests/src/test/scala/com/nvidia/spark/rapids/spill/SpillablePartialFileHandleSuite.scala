@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids.spill
 
-import java.io.File
+import java.io.{BufferedOutputStream, File, FileOutputStream}
 import java.util.Arrays
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 
@@ -24,8 +24,10 @@ import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsConf
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.funsuite.AnyFunSuite
+import org.scalatestplus.mockito.MockitoSugar
 
-class SpillablePartialFileHandleSuite extends AnyFunSuite with BeforeAndAfterEach {
+class SpillablePartialFileHandleSuite
+    extends AnyFunSuite with BeforeAndAfterEach with MockitoSugar {
 
   // Use 1GB max buffer size for tests to avoid memory issues on test machines
   private val testMaxBufferSize = 1L * 1024 * 1024 * 1024
@@ -386,6 +388,37 @@ class SpillablePartialFileHandleSuite extends AnyFunSuite with BeforeAndAfterEac
     }
   }
 
+  test("FILE_ONLY mode: read with logical size larger than Int.MaxValue") {
+    val testData = "dummy shuffle bytes".getBytes("UTF-8")
+    val tempFile = createTempFileWithData("test-file-only-large-logical-", testData)
+
+    withLargeLogicalFileOnlyHandle(tempFile) { handle =>
+      val readBuffer = new Array[Byte](testData.length)
+      assert(handle.read(readBuffer, 0, readBuffer.length) == readBuffer.length)
+      assert(readBuffer.sameElements(testData))
+    }
+  }
+
+  test("FILE_ONLY mode: readAt with logical size larger than Int.MaxValue") {
+    val testData = "dummy shuffle bytes".getBytes("UTF-8")
+    val tempFile = createTempFileWithData("test-file-only-large-logical-random-", testData)
+
+    withLargeLogicalFileOnlyHandle(tempFile) { handle =>
+      val readBuffer = new Array[Byte](testData.length)
+      assert(handle.readAt(0, readBuffer, 0, readBuffer.length) == readBuffer.length)
+      assert(readBuffer.sameElements(testData))
+    }
+  }
+
+  test("boundedReadLength requires non-negative inputs") {
+    assertThrows[IllegalArgumentException] {
+      SpillablePartialFileHandle.boundedReadLengthAsInt(-1, 1L)
+    }
+    assertThrows[IllegalArgumentException] {
+      SpillablePartialFileHandle.boundedReadLengthAsInt(1, -1L)
+    }
+  }
+
   test("Error handling: write after finish should fail") {
     val tempFile = File.createTempFile("test-error-", ".tmp")
 
@@ -671,6 +704,34 @@ class SpillablePartialFileHandleSuite extends AnyFunSuite with BeforeAndAfterEac
       assert(handle.getTotalBytesWritten == largeData.length)
       assert(handle.isSpilled)
     }
+  }
+
+  private def withLargeLogicalFileOnlyHandle(tempFile: File)(
+      testBody: SpillablePartialFileHandle => Unit): Unit = {
+    val outputStream = mock[BufferedOutputStream]
+    withResource(SpillablePartialFileHandle.createFileOnly(
+      file = tempFile,
+      syncWrites = false,
+      bufferedOutputStreamFactory = _ => outputStream)) { handle =>
+      val ignored = new Array[Byte](1)
+      val expectedLogicalSize = Int.MaxValue.toLong + 4096L
+      handle.write(ignored, 0, Int.MaxValue)
+      handle.write(ignored, 0, 4096)
+      handle.finishWrite()
+      assert(handle.getTotalBytesWritten == expectedLogicalSize)
+      testBody(handle)
+    }
+  }
+
+  private def createTempFileWithData(prefix: String, data: Array[Byte]): File = {
+    val tempFile = File.createTempFile(prefix, ".tmp")
+    val out = new FileOutputStream(tempFile)
+    try {
+      out.write(data)
+    } finally {
+      out.close()
+    }
+    tempFile
   }
 
   // ----- Shuffle read-lease lifecycle: acquireRead / releaseRead / deferred close --------------

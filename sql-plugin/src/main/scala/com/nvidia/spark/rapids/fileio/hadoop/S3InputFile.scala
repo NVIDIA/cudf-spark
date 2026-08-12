@@ -28,6 +28,8 @@ import com.nvidia.spark.rapids.jni.fileio.{RapidsInputFile, SeekableInputStream}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
 
+import org.apache.spark.sql.rapids.GpuTaskMetrics
+
 /**
  * S3-backed {@link RapidsInputFile} for Hadoop-conf-driven (non-iceberg) reads.
  * {@code readVectored} issues batched byte-range GETs through the optimized
@@ -39,6 +41,8 @@ class S3InputFile private (
     fileUri: URI,
     hadoopConf: Configuration)
   extends RapidsInputFile {
+
+  private val taskMetrics = GpuTaskMetrics.get
 
   override def path(): String = delegate.path()
 
@@ -59,7 +63,9 @@ class S3InputFile private (
       IntRangeWithOffset(r.getInputOffset, r.getLength, r.getOutputOffset)
     }.toSeq
     require(
-      PerfIO.readToHostMemory(hadoopConf, output, fileUri, ranges).isDefined,
+      PerfIO.readToHostMemory(
+        hadoopConf, output, fileUri, ranges,
+        taskMetrics.perfioS3RequestLimiterMetricsRecorder).isDefined,
       "expected to use PerfIO to read")
   }
 
@@ -78,7 +84,9 @@ class S3InputFile private (
     }
     val ranges = Seq[RangeWithOffset](SuffixRangeWithOffset(length, /*destOffset*/ 0L))
     require(
-      PerfIO.readToHostMemory(hadoopConf, output, fileUri, ranges).isDefined,
+      PerfIO.readToHostMemory(
+        hadoopConf, output, fileUri, ranges,
+        taskMetrics.perfioS3RequestLimiterMetricsRecorder).isDefined,
       "expected to use PerfIO to read")
   }
 }
