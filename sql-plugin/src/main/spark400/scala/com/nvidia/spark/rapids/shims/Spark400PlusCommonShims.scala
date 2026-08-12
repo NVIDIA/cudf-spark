@@ -32,6 +32,7 @@ import com.nvidia.spark.rapids._
 
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.expressions.objects.Invoke
+import org.apache.spark.sql.catalyst.expressions.variant.VariantGet
 import org.apache.spark.sql.rapids.shims.InvokeExprMeta
 
 /**
@@ -47,7 +48,17 @@ trait Spark400PlusCommonShims extends Spark350PlusNonDBShims {
           "replaced by Invoke(Literal(StructsToJsonEvaluator), evaluate, string_type, arguments)",
         InvokeCheck,
         InvokeExprMeta)
-        .note("The supported types are not deterministic since it's a dynamic expression")
+        .note("The supported types are not deterministic since it's a dynamic expression"),
+      GpuOverrides.expr[VariantGet](
+        "Extracts a field from a Variant value by path",
+        ExprChecks.binaryProject(
+          TypeSig.integral + TypeSig.STRING,
+          TypeSig.integral + TypeSig.STRING,
+          ("variant", TypeSig.VARIANT, TypeSig.VARIANT),
+          ("path", TypeSig.lit(TypeEnum.STRING), TypeSig.STRING)),
+        (expr, conf, p, r) => new GpuVariantGetMeta(expr, conf, p, r))
+        .incompat("cuDF Variant extraction currently decodes exact physical Variant types; " +
+          "Spark try_variant_get cast semantics can return different values")
     ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
     super.getExprs ++ shimExprs
   }
