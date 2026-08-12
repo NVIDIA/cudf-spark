@@ -1026,7 +1026,6 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
     }
   }
 
-  
   test("InterruptedException in compression releases bytes-in-flight quota") {
     // Same deadlock scenario as the IOException test: record 0 acquires 64 bytes,
     // record 1 (65 bytes) blocks because 64+65=129 > maxBytesInFlight=100.

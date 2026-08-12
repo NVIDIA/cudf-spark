@@ -729,13 +729,18 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
         // path. getAndSet(0) in the catch block atomically claims whatever remains,
         // ensuring quota is only released after call() has freed its resources.
         val quotaToRelease = new AtomicLong(recordSize)
-        // Set to true as the very first act of call(). done() uses this to distinguish
-        // "cancelled before call() ever ran" (safe to release quota there) from
-        // "cancelled while call() was executing" (catch block releases after resources freed).
-        val callableStarted = new AtomicBoolean(false)
+        // CAS gate shared between call() and done(). Whoever wins compareAndSet(false, true)
+        // is responsible for closing cb and releasing quota. This prevents both a cb leak
+        // (done() fires for a cancelled-before-start task and cb is never closed) and
+        // double-close (done() and call() both try to close cb in the race window).
+        val cbOwner = new AtomicBoolean(false)
         val compressionTask = new FutureTask[CompressedRecord](new Callable[CompressedRecord] {
           override def call(): CompressedRecord = {
-            callableStarted.set(true)
+            if (!cbOwner.compareAndSet(false, true)) {
+              // done() already closed cb and released quota; FutureTask state is
+              // already CANCELLED/INTERRUPTED so set(null) fails silently.
+              return null
+            }
             try {
               withResource(cb) { _ =>
                 // Create a new buffer for this record.
@@ -797,10 +802,19 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
           }
         }) {
           override def done(): Unit = {
-            // Only release quota here if call() never started. If call() did start,
-            // its catch block releases quota after withResource(cb) closes the buffer,
-            // ensuring quota is not freed while resources are still held.
-            if (isCancelled && !callableStarted.get) {
+            // If call() never ran, win the CAS to close cb (prevents the ref-count leak
+            // from incRefCountAndGetSize). Quota is handled separately below.
+            if (cbOwner.compareAndSet(false, true)) {
+              cb.close()
+            }
+            // On cancellation, release any remaining quota regardless of whether call()
+            // ran. Three cases:
+            //  1. call() never ran: quotaToRelease = recordSize, released here.
+            //  2. call() failed: catch block already claimed via getAndSet(0); returns 0.
+            //  3. call() succeeded but result was discarded (cancel(true) fired and the
+            //     interrupt was ignored): set(result) silently fails, merger never runs
+            //     writeRecord, so quota would otherwise leak. getAndSet(0) captures it.
+            if (isCancelled) {
               val toRelease = quotaToRelease.getAndSet(0)
               if (toRelease > 0) {
                 limiter.release(toRelease)
@@ -877,12 +891,20 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
           var future = recordQueue.poll()
           while (future != null) {
             future.cancel(true)
-            // If future already completed, try to close the buffer
+            // If future completed normally (merger never processed it), release the
+            // remaining quota and close the buffer. Quota release comes first so that a
+            // buffer close failure does not leave the limiter stranded.
+            // Cancelled futures are handled by done().
             if (future.isDone && !future.isCancelled) {
               try {
-                future.get().buffer.close()
+                val record = future.get()
+                val toRelease = record.quotaToRelease.getAndSet(0)
+                if (toRelease > 0) {
+                  limiter.release(toRelease)
+                }
+                try { record.buffer.close() } catch { case _: Exception => }
               } catch {
-                case _: Exception => // Ignore cleanup errors
+                case _: Exception => // future.get() threw (e.g. failed compression task)
               }
             }
             future = recordQueue.poll()
