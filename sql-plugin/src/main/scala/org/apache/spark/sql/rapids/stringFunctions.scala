@@ -1864,11 +1864,7 @@ trait BasePad
   override def doColumnar(str: GpuColumnVector, len: GpuScalar, pad: GpuScalar): ColumnVector = {
     if (len.isValid && pad.isValid) {
       val l = math.max(0, len.getValue.asInstanceOf[Int])
-      val padStr = if (pad.isValid) {
-        pad.getValue.asInstanceOf[UTF8String].toString
-      } else {
-        null
-      }
+      val padStr = pad.getValue.asInstanceOf[UTF8String].toString
       withResource(str.getBase.pad(l, direction, padStr)) { padded =>
         padded.substring(0, l)
       }
