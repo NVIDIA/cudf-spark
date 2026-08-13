@@ -971,8 +971,8 @@ case class GpuStringTranslate(
   private def buildLists(fromExpr: GpuScalar, toExpr: GpuScalar): (List[String], List[String]) = {
     val fromString = fromExpr.getValue.asInstanceOf[UTF8String].toString
     val toString = toExpr.getValue.asInstanceOf[UTF8String].toString
-    var fromCharsArray = Array[String]()
-    var toCharsArray = Array[String]()
+    val fromCharsArray = ArrayBuffer[String]()
+    val toCharsArray = ArrayBuffer[String]()
     var i = 0
     var j = 0
     while (i < fromString.length) {
@@ -987,8 +987,8 @@ case class GpuStringTranslate(
       val matchCharCount = Character.charCount(fromString.codePointAt(i))
       val matchStr = fromString.substring(i, i + matchCharCount)
       i += matchCharCount
-      fromCharsArray :+= matchStr
-      toCharsArray :+= replaceStr
+      fromCharsArray += matchStr
+      toCharsArray += replaceStr
     }
     (fromCharsArray.toList, toCharsArray.toList)
   }
