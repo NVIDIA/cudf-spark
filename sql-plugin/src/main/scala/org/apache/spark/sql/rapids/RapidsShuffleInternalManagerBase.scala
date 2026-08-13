@@ -482,9 +482,10 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
     private def fail(t: Throwable): Unit = {
       closeOutputStreamQuietly()
       completionFuture.completeExceptionally(t)
-      // Release quota for futures that already completed normally but were never
-      // processed by writeRecord. This unblocks any producer thread waiting in
-      // acquireOrBlock for quota that writeRecord will never release.
+      // Signal the limiter so any producer blocked in acquireOrBlock wakes up and
+      // throws, allowing the write loop to exit and cleanupBatch to release all quotas.
+      limiter.signalFailure()
+      // Also release quota for already-completed futures that writeRecord will never see.
       partitionRecords.values().asScala.foreach { recordQueue =>
         val future = recordQueue.peek()
         if (future != null && future.isDone && !future.isCancelled) {
@@ -740,7 +741,13 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
 
         // Acquire limiter and process compression task immediately
         val waitOnLimiterStart = System.nanoTime()
-        limiter.acquireOrBlock(recordSize)
+        try {
+          limiter.acquireOrBlock(recordSize)
+        } catch {
+          case e: Exception =>
+            cb.close()  // prevent ref-count leak from incRefCountAndGetSize
+            throw e
+        }
         waitTimeOnLimiterNs += System.nanoTime() - waitOnLimiterStart
 
         val batchForRecord = currentBatch
@@ -1142,6 +1149,7 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
 
 class BytesInFlightLimiter(maxBytesInFlight: Long) {
   private var inFlight: Long = 0L
+  private var failed: Boolean = false
 
   def acquire(sz: Long): Boolean = {
     if (sz == 0) {
@@ -1163,6 +1171,9 @@ class BytesInFlightLimiter(maxBytesInFlight: Long) {
     if (!acquired) {
       synchronized {
         while (!acquired) {
+          if (failed) {
+            throw new IOException("Compression batch failed; quota acquisition aborted")
+          }
           acquired = acquire(sz)
           if (!acquired) {
             wait()
@@ -1170,6 +1181,11 @@ class BytesInFlightLimiter(maxBytesInFlight: Long) {
         }
       }
     }
+  }
+
+  def signalFailure(): Unit = synchronized {
+    failed = true
+    notifyAll()
   }
 
   def release(sz: Long): Unit = synchronized {
