@@ -241,6 +241,8 @@ abstract class DeltaProviderBase extends DeltaIOProvider {
             dvFilter.withNewChildren(Seq(
               colToRow.withNewChildren(Seq(
                 pruneMetadataProject(dvFilterInput, fsse)))))))))
+      // Liquid clustering can leave an outer CPU project in the mixed plan. Preserve it while
+      // pruning unused metadata from the GPU scan subtree.
       case root @ ProjectExec(outputList, child)
         if !outputList.flatMap(_.references).exists(_.name == "_metadata") =>
         pruneUnusedMetadata(child)

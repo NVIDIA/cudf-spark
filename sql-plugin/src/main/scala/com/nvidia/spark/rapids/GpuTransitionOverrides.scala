@@ -952,6 +952,7 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
         var updatedPlan = DeltaProvider().pruneFileMetadata(plan)
         if (DeltaProvider().isPushDVPredicateDownEnabled(rapidsConf)) {
           updatedPlan = DeltaProvider().tryPushDVPredicateDownToScan(updatedPlan)
+          // Predicate pushdown can remove the DV filter and expose newly unused metadata columns.
           updatedPlan = DeltaProvider().pruneFileMetadata(updatedPlan)
         }
         updatedPlan = insertHashOptimizeSorts(updatedPlan)
