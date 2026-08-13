@@ -482,6 +482,22 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
     private def fail(t: Throwable): Unit = {
       closeOutputStreamQuietly()
       completionFuture.completeExceptionally(t)
+      // Release quota for futures that already completed normally but were never
+      // processed by writeRecord. This unblocks any producer thread waiting in
+      // acquireOrBlock for quota that writeRecord will never release.
+      partitionRecords.values().asScala.foreach { recordQueue =>
+        val future = recordQueue.peek()
+        if (future != null && future.isDone && !future.isCancelled) {
+          try {
+            val toRelease = future.get().quotaToRelease.getAndSet(0)
+            if (toRelease > 0) {
+              limiter.release(toRelease)
+            }
+          } catch {
+            case _: Exception => // quota was released in the compression catch block
+          }
+        }
+      }
     }
   }
 
@@ -812,14 +828,11 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
             if (cbOwner.compareAndSet(false, true)) {
               cb.close()
             }
-            // On cancellation, release any remaining quota regardless of whether call()
-            // ran. Three cases:
-            //  1. call() never ran: quotaToRelease = recordSize, released here.
-            //  2. call() failed: catch block already claimed via getAndSet(0); returns 0.
-            //  3. call() succeeded but result was discarded (cancel(true) fired and the
-            //     interrupt was ignored): set(result) silently fails, merger never runs
-            //     writeRecord, so quota would otherwise leak. getAndSet(0) captures it.
-            if (isCancelled) {
+            // Release quota when cancelled, or when the merger has already failed (so
+            // writeRecord will never be called for this future's CompressedRecord).
+            // getAndSet(0) is idempotent: fail() may have already claimed it; returns 0.
+            if (isCancelled ||
+                batchForRecord.merger.completionFuture.isCompletedExceptionally) {
               val toRelease = quotaToRelease.getAndSet(0)
               if (toRelease > 0) {
                 limiter.release(toRelease)
