@@ -1370,7 +1370,7 @@ case class GpuContainsAny(input: Expression, targets: Seq[UTF8String])
 
   def multiOrsAst: ast.AstExpression = {
     (1 until targets.length)
-    .foldLeft(new ast.ColumnReference(0).asInstanceOf[ast.AstExpression]) { (acc, id) =>
+    .foldLeft[ast.AstExpression](new ast.ColumnReference(0)) { (acc, id) =>
       new ast.BinaryOperation(ast.BinaryOperator.NULL_LOGICAL_OR, acc, new ast.ColumnReference(id))
     }
   }
