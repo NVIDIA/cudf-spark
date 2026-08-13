@@ -28,6 +28,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: add-to-project
-        uses: NVIDIA/spark-rapids-common/add-to-project@main
+        uses: NVIDIA/spark-rapids-common/add-to-project@auto-roadmap-from-pom
         with:
           token: ${{ secrets.PROJECT_TOKEN }}
