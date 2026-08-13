@@ -496,7 +496,7 @@ The tests can be enabled by just appending the option `--cudf_udf` to the comman
 cudf_udf tests needs a couple of different settings, they may need to run separately.
 
 To enable cudf_udf tests, need following pre requirements:
-   * Install cuDF Python library on all the nodes running executors. The instruction could be found at [here](https://docs.rapids.ai/install/). Please follow the steps to choose the version based on your environment and install the cuDF library via Conda or use other ways like building from source.
+   * Install the cuDF Python library on all executor nodes. Use the [RAPIDS install selector](https://docs.rapids.ai/install#selector) to choose the version for your environment and install cuDF with Conda, or build it from source.
    * Disable the GPU exclusive mode on all the nodes running executors. The sample command is `sudo nvidia-smi -c DEFAULT`
 
 To run cudf_udf tests, need following configuration changes:
