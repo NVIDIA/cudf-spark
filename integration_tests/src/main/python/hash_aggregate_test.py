@@ -701,7 +701,7 @@ def test_hash_grpby_pivot_collation_fallback(collation):
         spark.createDataFrame(
             [(1, 'SALES', 100), (1, 'sales', 50), (1, None, 20)],
             ['emp_id', 'dept', 'amount']).createOrReplaceTempView('collation_pivot_input')
-        return spark.sql(
+        df = spark.sql(
             f"""
             SELECT * FROM (
               SELECT emp_id, COLLATE(dept, '{collation}') AS dept, amount
@@ -709,6 +709,11 @@ def test_hash_grpby_pivot_collation_fallback(collation):
             )
             PIVOT (SUM(amount) FOR dept IN ('sales' AS sales))
             """)
+        explain = spark.sparkContext._jvm.com.nvidia.spark.rapids.ExplainPlan \
+            .explainPotentialGpuPlan(df._jdf, 'ALL')
+        assert ('PivotFirst does not support non-UTF8_BINARY string collations on the GPU'
+                in explain)
+        return df
 
     assert_gpu_fallback_collect(
         do_pivot,
