@@ -1176,7 +1176,9 @@ class BytesInFlightLimiter(maxBytesInFlight: Long) {
           }
           acquired = acquire(sz)
           if (!acquired) {
-            wait()
+            // Use a timeout so the failed flag is rechecked periodically even if
+            // signalFailure()'s notifyAll() arrives before this wait() starts.
+            wait(100)
           }
         }
       }
