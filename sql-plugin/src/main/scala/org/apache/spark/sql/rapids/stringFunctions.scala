@@ -119,9 +119,7 @@ case class GpuStringLocate(substr: Expression, col: Expression, start: Expressio
   override def doColumnar(val0: GpuScalar, val1: GpuColumnVector,
       val2: GpuScalar): ColumnVector = {
     if (!val2.isValid) {
-      withResource(Scalar.fromInt(0)) { zeroScalar =>
-        ColumnVector.fromScalar(zeroScalar, val1.getRowCount().toInt)
-      }
+      GpuColumnVector.columnVectorFromNull(val1.getRowCount().toInt, IntegerType)
     } else if (!val0.isValid) {
       //if null substring // or null column? <-- needs to be looked for/tested
       GpuColumnVector.columnVectorFromNull(val1.getRowCount().toInt, IntegerType)
