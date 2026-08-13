@@ -112,6 +112,28 @@ class InterruptingTestColumnarBatchSerializer extends TestColumnarBatchSerialize
   }
 }
 
+// Fails writeValue for the record with key 0 (partition 0); succeeds for all others.
+// Deterministically triggers a merger failure on partition 0 while leaving other
+// partitions' CompressedRecords alive in the queue.
+class FailKeyZeroTestColumnarBatchSerializer extends TestColumnarBatchSerializer {
+  override def newInstance(): SerializerInstance = new TestColumnarBatchSerializerInstance() {
+    override def serializeStream(s: OutputStream): SerializationStream =
+      new TestColumnarBatchSerializationStream(s) {
+        private var currentKey = -1
+        override def writeKey[T: ClassTag](key: T): SerializationStream = {
+          currentKey = key.asInstanceOf[Int]
+          super.writeKey(key)
+        }
+        override def writeValue[T: ClassTag](value: T): SerializationStream =
+          if (currentKey == 0) {
+            throw new IOException("injected failure for key 0 (partition 0)")
+          } else {
+            super.writeValue(value)
+          }
+      }
+  }
+}
+
 class OutOfOrderTestColumnarBatchSerializer(
     firstStarted: CountDownLatch,
     secondSerialized: CountDownLatch,
@@ -1061,6 +1083,51 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
         "expected IOException to wrap the original InterruptedException")
       assert(writer.getBytesInFlight == 0,
         s"bytes in flight leaked after InterruptedException: ${writer.getBytesInFlight}")
+    } finally {
+      writer.stop(false)
+      if (writeThread.isAlive) {
+        writeThread.join(5000)
+      }
+    }
+  }
+
+
+  test("producer unblocks when merger fails and a successful future holds quota") {
+    // Rishi's scenario: record 0 fails (merger dies), record 1 succeeds and holds quota,
+    // record 2 then blocks on acquireOrBlock because maxBytesInFlight is exhausted.
+    // Without a fix the producer hangs forever: it is blocked before reaching
+    // mergerFuture.get() and cleanupBatch, so record 1's quota is never released.
+    //   record 0 = 64 bytes (key 0, fails)    -> inFlight: 64
+    //   record 1 = 65 bytes (key 1, succeeds) -> inFlight: 64+65=129 > 100, blocks;
+    //              record 0 releases 64 on fail -> record 1 unblocks -> inFlight: 65
+    //   record 2 = 66 bytes (key 2, succeeds) -> 65+66=131 > 100, BLOCKS
+    //              merger already dead; record 1 quota never released -> DEADLOCK
+    useUncompressedShuffleOutput()
+    when(dependency.serializer).thenReturn(new FailKeyZeroTestColumnarBatchSerializer())
+    val writer = new RapidsShuffleThreadedWriter[Int, ColumnarBatch](
+      blockManager, shuffleHandle, 0L, conf,
+      new ThreadSafeShuffleWriteMetricsReporter(taskContext.taskMetrics().shuffleWriteMetrics),
+      100L, shuffleExecutorComponents, numWriterThreads)
+
+    @volatile var writeFailure: Throwable = null
+    val writeThread = new Thread(() => {
+      try {
+        writer.write(createTestRecords(Iterator(0, 1, 2)))
+      } catch {
+        case t: Throwable => writeFailure = t
+      }
+    })
+
+    try {
+      writeThread.start()
+      writeThread.join(5000)
+      assert(!writeThread.isAlive,
+        "producer deadlocked: successful future's quota was never released after merger died")
+      assert(writeFailure != null, "expected write() to throw after merger failure")
+      assert(writeFailure.isInstanceOf[IOException],
+        s"expected IOException but got ${writeFailure.getClass.getName}")
+      assert(writer.getBytesInFlight == 0,
+        s"quota leaked after merger failure: ${writer.getBytesInFlight} bytes in flight")
     } finally {
       writer.stop(false)
       if (writeThread.isAlive) {
