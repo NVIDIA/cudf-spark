@@ -2228,6 +2228,14 @@ object GpuOverrides extends Logging {
           TypeSig.all))),
       (pivot, conf, p, r) => new ImperativeAggExprMeta[PivotFirst](pivot, conf, p, r) {
         override def tagAggForGpu(): Unit = {
+          pivot.pivotColumn.dataType match {
+            // `StringType` is the UTF8_BINARY singleton, while `st` may be another
+            // StringType instance whose collation differs from UTF8_BINARY in Spark 4.x.
+            case st: StringType if st != StringType =>
+              willNotWorkOnGpu(
+                "PivotFirst does not support non-UTF8_BINARY string collations on the GPU")
+            case _ =>
+          }
           // If pivotColumnValues doesn't have distinct values, fall back to CPU
           if (pivot.pivotColumnValues.distinct.lengthCompare(pivot.pivotColumnValues.length) != 0) {
             willNotWorkOnGpu("PivotFirst does not work on the GPU when there are duplicate" +

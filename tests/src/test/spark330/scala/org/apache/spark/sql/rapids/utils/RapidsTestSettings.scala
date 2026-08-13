@@ -277,6 +277,44 @@ class RapidsTestSettings extends BackendTestSettings {
         "Recovery trigger: the Spark test accepts the GPU V1 scan node; P2."))
   enableSuite[RapidsV1ReadFallbackWithDataFrameReaderSuite]
   enableSuite[RapidsV1ReadFallbackWithCatalogSuite]
+  enableSuite[RapidsFileSourceCharVarcharDDLTestSuite]
+    .exclude("SPARK-33901: ctas should should not change table's schema",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15549. " +
+        "Recovery trigger: GPU V1 CTAS preserves raw CHAR/VARCHAR schema metadata; P0."))
+    .exclude("SPARK-37160: CREATE TABLE AS SELECT with CHAR_AS_VARCHAR",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15549. " +
+        "Recovery trigger: GPU V1 CTAS applies CHAR_AS_VARCHAR to raw schema metadata; P0."))
+  enableSuite[RapidsDSV2CharVarcharDDLTestSuite]
+  enableSuite[RapidsParquetCodecSuite]
+    .exclude("write and read - file source parquet - codec: lz4",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15550. " +
+        "Recovery trigger: GPU Parquet supports Hadoop LZ4 or safely falls back; P1."))
+  enableSuite[RapidsOrcCodecSuite]
+    .exclude("write and read - file source orc - codec: lzo",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15551. " +
+        "Recovery trigger: GPU ORC supports LZO or safely falls back; P1."))
+  enableSuite[RapidsSaveLoadSuite]
+  enableSuite[RapidsTableScanSuite]
+  enableSuite[RapidsDataSourceV2DataFrameSessionCatalogSuite]
+  enableSuite[RapidsTextV1Suite]
+  enableSuite[RapidsTextV2Suite]
+  enableSuite[RapidsBinaryFileFormatSuite]
+    .exclude("BinaryFileFormat methods",
+      ADJUST_UT("https://github.com/NVIDIA/cudf-spark/issues/15552. " +
+        "Recovery trigger: add equivalent query-level RAPIDS coverage or a GPU-owned hook; P2."))
+    .exclude("createFilterFunction",
+      ADJUST_UT("https://github.com/NVIDIA/cudf-spark/issues/15552. " +
+        "Recovery trigger: add equivalent query-level RAPIDS coverage or a GPU-owned hook; P2."))
+    .exclude("buildReader",
+      ADJUST_UT("https://github.com/NVIDIA/cudf-spark/issues/15552. " +
+        "Recovery trigger: add equivalent query-level RAPIDS coverage or a GPU-owned hook; P2."))
+    .exclude("column pruning",
+      ADJUST_UT("https://github.com/NVIDIA/cudf-spark/issues/15552. " +
+        "Recovery trigger: add equivalent query-level RAPIDS coverage or a GPU-owned hook; P2."))
+    .exclude("column pruning - non-readable file",
+      ADJUST_UT("https://github.com/NVIDIA/cudf-spark/issues/15552. " +
+        "Recovery trigger: replace the chmod-based unreadability setup with filesystem-independent " +
+        "fault injection while preserving query-level count coverage; P2."))
   enableSuite[RapidsFileMetadataStructSuite]
   enableSuite[RapidsDisableUnnecessaryBucketedScanWithoutHiveSupportSuite]
     .exclude("SPARK-32859: disable unnecessary bucketed table scan - basic test",
