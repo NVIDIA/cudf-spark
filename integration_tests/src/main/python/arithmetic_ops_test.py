@@ -640,6 +640,9 @@ def test_hypot(data_gen):
             'hypot(a, b)',
         ))
 
+# Keep integral and decimal floor/ceil under the default ANSI setting. Double inputs are
+# split out because Spark 5 ANSI mode throws for generated NaN/Infinity/overflow cases
+# before this parity test can compare CPU and GPU results.
 _floor_ceil_integral_decimal_gens = [long_gen] + _arith_decimal_gens_no_neg_scale + [
     DecimalGen(30, 15)]
 
@@ -648,7 +651,6 @@ def test_floor(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : unary_op_df(spark, data_gen).selectExpr('floor(a)'))
 
-# Spark 5 default ANSI paths throw for double special values/overflow cases here.
 @disable_ansi_mode
 @pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
 def test_floor_double(data_gen):
@@ -671,7 +673,6 @@ def test_ceil(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : unary_op_df(spark, data_gen).selectExpr('ceil(a)'))
 
-# Spark 5 default ANSI paths throw for double special values/overflow cases here.
 @disable_ansi_mode
 @pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
 def test_ceil_double(data_gen):
