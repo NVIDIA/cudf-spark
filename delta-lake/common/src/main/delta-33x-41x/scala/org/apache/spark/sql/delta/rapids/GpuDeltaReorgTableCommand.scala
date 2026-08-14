@@ -26,6 +26,10 @@ import org.apache.spark.sql.catalyst.plans.logical.{IgnoreCachedData, LeafComman
 import org.apache.spark.sql.delta.commands.{DeltaOptimizeContext, DeltaPurgeOperation,
   DeltaReorgOperation, OptimizeTableCommandBase}
 
+/**
+ * Implements Delta REORG TABLE APPLY (PURGE) by delegating file rewriting to
+ * [[GpuOptimizeTableCommand]].
+ */
 case class GpuDeltaReorgTableCommand(target: LogicalPlan)(val predicates: Seq[String])
   extends OptimizeTableCommandBase with LeafCommand with IgnoreCachedData {
 

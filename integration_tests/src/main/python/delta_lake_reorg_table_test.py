@@ -146,6 +146,15 @@ def assert_reorg_adds_have_no_deletion_vectors(spark, path, version):
         "get_json_object(value, '$.add.deletionVector') IS NOT NULL").count() == 0
 
 
+def assert_reorg_adds_match_partition(spark, path, version, expected_partition):
+    log_path = "{}/_delta_log/{:020d}.json".format(path, version)
+    partitions = (spark.read.text(log_path)
+                  .where("get_json_object(value, '$.add.path') IS NOT NULL")
+                  .selectExpr("get_json_object(value, '$.add.partitionValues.p') AS p"))
+    assert partitions.count() > 0
+    assert partitions.where("p IS NULL OR p != '{}'".format(expected_partition)).count() == 0
+
+
 @pytest.mark.parametrize("partitioned", [False, True], ids=["unpartitioned", "partitioned"])
 @ignore_order(local=True)
 @delta_lake
@@ -170,18 +179,23 @@ def test_delta_reorg_table_purge(spark_tmp_path, partitioned):
             assert_table_has_deletion_vectors(spark, gpu_path)),
         conf=_reorg_conf)
 
-    with_cpu_session(lambda spark: spark.sql(reorg_sql(cpu_path, partitioned)).collect(),
-                     conf=_reorg_conf)
+    cpu_result = with_cpu_session(
+        lambda spark: spark.sql(reorg_sql(cpu_path, partitioned)).collect(), conf=_reorg_conf)
 
     plan_callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
     plan_callback.startCapture()
     try:
-        with_gpu_session(
+        gpu_result = with_gpu_session(
             lambda spark: spark.sql(reorg_sql(gpu_path, partitioned)).collect(),
             conf=_reorg_conf)
         assert_gpu_reorg_plans(plan_callback, plan_callback.getResultsWithTimeout(10000))
     finally:
         plan_callback.endCapture()
+
+    assert len(cpu_result) == 1
+    assert len(gpu_result) == 1
+    assert str(cpu_result[0][0]).rstrip('/').endswith('/CPU')
+    assert str(gpu_result[0][0]).rstrip('/').endswith('/GPU')
 
     cpu_rows = with_cpu_session(
         lambda spark: spark.read.format("delta").load(cpu_path).orderBy("id", "p").collect(),
@@ -197,6 +211,12 @@ def test_delta_reorg_table_purge(spark_tmp_path, partitioned):
         lambda spark: assert_reorg_adds_have_no_deletion_vectors(
             spark, gpu_path, gpu_reorg_version),
         conf=_reorg_conf)
+    if partitioned:
+        with_cpu_session(
+            lambda spark: assert_reorg_adds_match_partition(
+                spark, gpu_path, gpu_reorg_version, "0"),
+            conf=_reorg_conf)
+
     def assert_second_reorg_is_noop(spark):
         before = spark.sql("DESCRIBE HISTORY delta.`{}`".format(gpu_path)).count()
         spark.sql(reorg_sql(gpu_path, partitioned)).collect()

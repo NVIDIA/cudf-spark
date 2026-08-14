@@ -23,6 +23,7 @@ from delta_lake_reorg_table_test import (
     assert_reorg_adds_have_no_deletion_vectors,
     assert_table_has_deletion_vectors,
     latest_reorg_version,
+    reorg_sql,
 )
 from marks import allow_non_gpu, delta_lake, ignore_order
 from spark_session import (
@@ -113,4 +114,36 @@ def test_delta_reorg_table_purge_liquid_clustered(spark_tmp_path):
     with_cpu_session(
         lambda spark: assert_reorg_adds_have_no_deletion_vectors(
             spark, gpu_path, gpu_reorg_version),
+        conf=_reorg_conf)
+
+
+@delta_lake
+@allow_non_gpu(*_reorg_metadata_allow)
+def test_delta_reorg_table_purge_liquid_clustered_predicate_rejected(spark_tmp_path):
+    if not is_apache_runtime():
+        pytest.skip("GPU REORG TABLE currently supports Apache Delta Lake only")
+    if is_before_spark_353():
+        pytest.skip("GPU REORG TABLE requires Spark 3.5.3 or later")
+    if not supports_delta_lake_deletion_vectors():
+        pytest.skip("REORG TABLE PURGE requires deletion vector support")
+
+    cpu_path = spark_tmp_path + "/CPU"
+    gpu_path = spark_tmp_path + "/GPU"
+    with_cpu_session(lambda spark: setup_liquid_clustered_reorg_table(spark, cpu_path),
+                     conf=_reorg_conf)
+    with_cpu_session(lambda spark: setup_liquid_clustered_reorg_table(spark, gpu_path),
+                     conf=_reorg_conf)
+
+    def assert_predicate_rejected(spark, path):
+        with pytest.raises(Exception, match="DELTA_CLUSTERING_WITH_PARTITION_PREDICATE"):
+            spark.sql(reorg_sql(path, True)).collect()
+
+    with_cpu_session(lambda spark: assert_predicate_rejected(spark, cpu_path), conf=_reorg_conf)
+    with_gpu_session(lambda spark: assert_predicate_rejected(spark, gpu_path), conf=_reorg_conf)
+
+    # A rejected predicate must not silently trigger a full-table rewrite.
+    with_cpu_session(
+        lambda spark: (
+            assert_table_has_deletion_vectors(spark, cpu_path),
+            assert_table_has_deletion_vectors(spark, gpu_path)),
         conf=_reorg_conf)

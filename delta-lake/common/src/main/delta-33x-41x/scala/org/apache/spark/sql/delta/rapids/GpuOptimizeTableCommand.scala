@@ -25,7 +25,7 @@ import org.apache.spark.sql.{Encoders, Row, SparkSession}
 import org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, Expression}
 import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, UnaryNode}
-import org.apache.spark.sql.delta.{DeltaErrors, Snapshot}
+import org.apache.spark.sql.delta.{DeltaErrors, IcebergCompat, Snapshot, UniversalFormat}
 import org.apache.spark.sql.delta.commands.{DeltaCommand, DeltaOptimizeContext}
 import org.apache.spark.sql.delta.commands.optimize.OptimizeMetrics
 import org.apache.spark.sql.delta.rapids.commands.GpuOptimizeExecutor
@@ -61,6 +61,14 @@ case class GpuOptimizeTableCommand(
     val snapshot: Snapshot = table.update()
     if (snapshot.version == -1) {
       throw DeltaErrors.notADeltaTableException(table.deltaLog.dataPath.toString)
+    }
+
+    // REORG was checked during GPU planning, but the table metadata may have changed since then.
+    if (optimizeContext.reorg.nonEmpty &&
+        (IcebergCompat.isAnyEnabled(snapshot.metadata) ||
+          UniversalFormat.icebergEnabled(snapshot.metadata))) {
+      throw new UnsupportedOperationException(
+        "GPU Delta REORG TABLE does not support Iceberg-compatible tables")
     }
 
     // Sanity checks
