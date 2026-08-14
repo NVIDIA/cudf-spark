@@ -646,16 +646,21 @@ def test_hypot(data_gen):
 _floor_ceil_integral_decimal_gens = [long_gen] + _arith_decimal_gens_no_neg_scale + [
     DecimalGen(30, 15)]
 
+def _floor_ceil_double_conf():
+    if is_spark_500_or_later():
+        return {'spark.sql.ansi.enabled': 'false'}
+    return {}
+
 @pytest.mark.parametrize('data_gen', _floor_ceil_integral_decimal_gens, ids=idfn)
 def test_floor(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : unary_op_df(spark, data_gen).selectExpr('floor(a)'))
 
-@disable_ansi_mode
 @pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
 def test_floor_double(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('floor(a)'))
+            lambda spark : unary_op_df(spark, data_gen).selectExpr('floor(a)'),
+            conf=_floor_ceil_double_conf())
 
 @pytest.mark.parametrize('data_gen', [long_gen] + _arith_decimal_gens_no_neg_scale, ids=idfn)
 def test_floor_scale_zero(data_gen):
@@ -673,11 +678,11 @@ def test_ceil(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : unary_op_df(spark, data_gen).selectExpr('ceil(a)'))
 
-@disable_ansi_mode
 @pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
 def test_ceil_double(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('ceil(a)'))
+            lambda spark : unary_op_df(spark, data_gen).selectExpr('ceil(a)'),
+            conf=_floor_ceil_double_conf())
 
 @pytest.mark.parametrize('data_gen', [long_gen] + _arith_decimal_gens_no_neg_scale, ids=idfn)
 def test_ceil_scale_zero(data_gen):
