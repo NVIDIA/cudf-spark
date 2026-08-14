@@ -100,6 +100,15 @@ _decimal_10_3_schema = StructType([
 _date_schema = StructType([
     StructField('number', DateType())])
 
+# dateFormat only affects date parsing. Pair it with the date schema
+# explicitly instead of multiplying every non-date schema by an option
+# that cannot change its execution path.
+_basic_json_schema_date_formats = [
+    (schema, None) for schema in [
+        _bool_schema, _byte_schema, _short_schema, _int_schema, _long_schema,
+        _float_schema, _double_schema, _decimal_10_2_schema, _decimal_10_3_schema]
+] + [(_date_schema, None), (_date_schema, 'yyyy-MM-dd')]
+
 _timestamp_schema = StructType([
     StructField('number', TimestampType())])
 
@@ -346,23 +355,18 @@ def json_ts_formats_round_trip_ntz(spark_tmp_path, timestamp_format, timestamp_t
     'dates.json',
     'dates_invalid.json',
 ])
-@pytest.mark.parametrize('schema', [_bool_schema, _byte_schema, _short_schema, _int_schema, _long_schema, \
-                                    _float_schema, _double_schema, _decimal_10_2_schema, _decimal_10_3_schema, \
-                                    _date_schema], ids=idfn)
+@pytest.mark.parametrize('schema,date_format', _basic_json_schema_date_formats, ids=idfn)
 @pytest.mark.parametrize('read_func', [read_json_df, read_json_sql])
 @pytest.mark.parametrize('allow_non_numeric_numbers', ['true', 'false'])
 @pytest.mark.parametrize('allow_numeric_leading_zeros', [
     'true',
     'false'
 ])
-@pytest.mark.parametrize('ansi_enabled', ["true", "false"])
 @allow_non_gpu(*not_utc_allow_for_test_json_scan)
-@pytest.mark.parametrize('date_format', [None, 'yyyy-MM-dd'])
 def test_basic_json_read(std_input_path, filename, schema, read_func, allow_non_numeric_numbers, \
-        allow_numeric_leading_zeros, ansi_enabled, spark_tmp_table_factory, date_format):
+        allow_numeric_leading_zeros, spark_tmp_table_factory, date_format):
     updated_conf = copy_and_update(_enable_all_types_conf,
-        {'spark.sql.ansi.enabled': ansi_enabled,
-         'spark.sql.legacy.timeParserPolicy': 'CORRECTED',
+        {'spark.sql.legacy.timeParserPolicy': 'CORRECTED',
          'spark.rapids.sql.json.read.datetime.enabled': 'true'})
     options = {"allowNonNumericNumbers": allow_non_numeric_numbers,
            "allowNumericLeadingZeros": allow_numeric_leading_zeros,
@@ -395,22 +399,17 @@ def test_basic_json_read(std_input_path, filename, schema, read_func, allow_non_
     'dates.json',
     'dates_invalid.json',
 ])
-@pytest.mark.parametrize('schema', [_bool_schema, _byte_schema, _short_schema, _int_schema, _long_schema, \
-                                    _float_schema, _double_schema, _decimal_10_2_schema, _decimal_10_3_schema, \
-                                    _date_schema], ids=idfn)
+@pytest.mark.parametrize('schema,date_format', _basic_json_schema_date_formats, ids=idfn)
 @pytest.mark.parametrize('allow_non_numeric_numbers', ['true', 'false'])
 @pytest.mark.parametrize('allow_numeric_leading_zeros', [
     'true',
     'false'
 ])
-@pytest.mark.parametrize('ansi_enabled', ["true", "false"])
 @allow_non_gpu(TEXT_INPUT_EXEC, *non_utc_project_allow)
-@pytest.mark.parametrize('date_format', [None, 'yyyy-MM-dd'])
 def test_basic_from_json(std_input_path, filename, schema, allow_non_numeric_numbers, \
-        allow_numeric_leading_zeros, ansi_enabled, date_format):
+        allow_numeric_leading_zeros, date_format):
     updated_conf = copy_and_update(_enable_all_types_conf,
-        {'spark.sql.ansi.enabled': ansi_enabled,
-         'spark.sql.legacy.timeParserPolicy': 'CORRECTED',
+        {'spark.sql.legacy.timeParserPolicy': 'CORRECTED',
          'spark.rapids.sql.json.read.datetime.enabled': 'true'})
     options = {"allowNonNumericNumbers": allow_non_numeric_numbers,
            "allowNumericLeadingZeros": allow_numeric_leading_zeros,
@@ -424,6 +423,29 @@ def test_basic_from_json(std_input_path, filename, schema, allow_non_numeric_num
           selectExpr("value as json").
           select(f.col("json"), f.from_json(f.col("json"), schema, options)),
         conf=updated_conf)
+
+
+@approximate_float
+@pytest.mark.parametrize('read_func', [read_json_df, read_json_sql])
+def test_json_read_invalid_float_ansi(
+        std_input_path, read_func, spark_tmp_table_factory):
+    conf = copy_and_update(_enable_all_types_conf, {'spark.sql.ansi.enabled': 'true'})
+    assert_gpu_and_cpu_are_equal_collect(
+        read_func(std_input_path + '/floats_invalid.json',
+                  _float_schema,
+                  spark_tmp_table_factory,
+                  {}),
+        conf=conf)
+
+
+@approximate_float
+@allow_non_gpu(TEXT_INPUT_EXEC, *non_utc_project_allow)
+def test_from_json_invalid_float_ansi(std_input_path):
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.text(std_input_path + '/floats_invalid.json').
+          selectExpr("value as json").
+          select(f.col("json"), f.from_json(f.col("json"), _float_schema)),
+        conf=copy_and_update(_enable_all_types_conf, {'spark.sql.ansi.enabled': 'true'}))
 
 
 @ignore_order
@@ -1162,16 +1184,14 @@ def test_from_json_struct_date_fallback_non_default_format(date_gen, date_format
     pytest.param("LEGACY", marks=pytest.mark.allow_non_gpu('JsonToStructs')),
     pytest.param("CORRECTED", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/10535'))
 ])
-@pytest.mark.parametrize('ansi_enabled', [ True, False ])
-def test_from_json_struct_timestamp(timestamp_gen, timestamp_format, time_parser_policy, ansi_enabled):
+def test_from_json_struct_timestamp(timestamp_gen, timestamp_format, time_parser_policy):
     json_string_gen = StringGen(r'{ "a": ' + timestamp_gen + ' }') \
         .with_special_case('{ "a": null }') \
         .with_special_case('{ "a": "6395-12-21T56:86:40.205705Z" }') \
         .with_special_case('null')
     options = { 'timestampFormat': timestamp_format } if timestamp_format else { }
     conf = copy_and_update(_enable_all_types_conf, {
-        'spark.sql.legacy.timeParserPolicy': time_parser_policy, 
-        'spark.sql.ansi.enabled': ansi_enabled})
+        'spark.sql.legacy.timeParserPolicy': time_parser_policy})
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark : unary_op_df(spark, json_string_gen) \
             .select(f.col('a'), f.from_json('a', 'struct<a:timestamp>', options)),
@@ -1705,6 +1725,27 @@ def test_structs_to_json_fallback_pretty():
 
     assert_gpu_fallback_collect(
         lambda spark : struct_to_json(spark),
+        structs_to_json_fallback_class,
+        conf=conf)
+
+@pytest.mark.skipif(not is_spark_420_or_later(),
+                    reason='sortKeys option was added in Spark 4.2.0')
+@allow_non_gpu(*structs_to_json_fallback_allow)
+@pytest.mark.parametrize('sort_keys_option', ['sortKeys', 'sortkeys'])
+def test_structs_to_json_fallback_sort_keys(sort_keys_option):
+    def struct_to_json(spark):
+        return spark.range(3).select(
+            f.to_json(
+                f.struct(
+                    f.col('id').alias('b'),
+                    (f.col('id') + 1).alias('a')),
+                {sort_keys_option: True}).alias('my_json'))
+
+    conf = copy_and_update(_enable_all_types_conf,
+                           {'spark.rapids.sql.expression.StructsToJson': True})
+
+    assert_gpu_fallback_collect(
+        lambda spark: struct_to_json(spark),
         structs_to_json_fallback_class,
         conf=conf)
 

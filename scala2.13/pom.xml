@@ -95,6 +95,14 @@
                 <rapids.delta.artifactId2>rapids-4-spark-delta-22x</rapids.delta.artifactId2>
                 <rapids.delta.artifactId3>rapids-4-spark-delta-23x</rapids.delta.artifactId3>
             </properties>
+            <dependencies>
+                <dependency>
+                    <groupId>com.h2database</groupId>
+                    <artifactId>h2</artifactId>
+                    <version>2.1.210</version>
+                    <scope>test</scope>
+                </dependency>
+            </dependencies>
             <modules>
                 <module>delta-lake/delta-21x</module>
                 <module>delta-lake/delta-22x</module>
@@ -785,14 +793,14 @@
                 <spark.version>${spark412.version}</spark.version>
                 <spark.test.version>${spark412.version}</spark.test.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-41x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>rapids-4-spark-delta-stub</rapids.delta.artifactId1>
                 <iceberg.artifact.suffix>${spark40x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.runtime.version>${iceberg.110x.version}</iceberg.runtime.version>
                 <slf4j.version>2.0.7</slf4j.version>
                 <scala.javac.args>-Xlint:all,-serial,-path,-try,-processing,-options|-Werror</scala.javac.args>
             </properties>
             <modules>
-                <module>delta-lake/delta-41x</module>
+                <module>delta-lake/delta-stub</module>
                 <module>iceberg/iceberg-stub</module>
             </modules>
             <build>
@@ -823,15 +831,16 @@
                 <spark.version>${spark413.version}</spark.version>
                 <spark.test.version>${spark413.version}</spark.test.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-41x</rapids.delta.artifactId1>
-                <iceberg.artifact.suffix>${spark40x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
-                <iceberg.runtime.version>${iceberg.110x.version}</iceberg.runtime.version>
+                <rapids.delta.artifactId1>rapids-4-spark-delta-stub</rapids.delta.artifactId1>
+                <iceberg.artifact.suffix>${spark41x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
+                <iceberg.runtime.version>${iceberg.111x.version}</iceberg.runtime.version>
+                <rapids.iceberg.artifactId>rapids-4-spark-iceberg-1-11-x</rapids.iceberg.artifactId>
                 <slf4j.version>2.0.7</slf4j.version>
                 <scala.javac.args>-Xlint:all,-serial,-path,-try,-processing,-options|-Werror</scala.javac.args>
             </properties>
             <modules>
-                <module>delta-lake/delta-41x</module>
-                <module>iceberg/iceberg-stub</module>
+                <module>delta-lake/delta-stub</module>
+                <module>iceberg/iceberg-1-11-x</module>
             </modules>
             <build>
                 <pluginManagement>
@@ -1000,7 +1009,11 @@
         https://github.com/openjdk/jdk17/blob/4afbcaf55383ec2f5da53282a1547bac3d099e9d/src/jdk.compiler/share/classes/com/sun/tools/javac/resources/compiler.properties#L1993-L1994
         -->
         <scala.javac.args>-Xlint:all,-serial,-path,-try,-processing|-Werror</scala.javac.args>
-        <ucx.baseVersion>1.19.1-rc2</ucx.baseVersion>
+        <!-- NOTE: upstream republished the UCX 1.22.0 JUCX artifact as 1.22.0-1; the original
+             org.openucx:jucx:1.22.0 jar contains an rc1 build. See the "Known issues" section of
+             https://github.com/openucx/ucx/releases/tag/v1.22.0. The native UCX installed by the
+             Dockerfiles is plain 1.22.0 (the GitHub release tag) - this mismatch is intentional. -->
+        <ucx.baseVersion>1.22.0-1</ucx.baseVersion>
         <roaringbitmap.version>1.0.6</roaringbitmap.version>
         <!-- ucx x86 is just the base version (implied), arm is specified under arm64 profile. -->
         <ucx.version>${ucx.baseVersion}</ucx.version>
