@@ -31,7 +31,7 @@ object SparkShimImpl extends Spark411PlusShims with HyperbolicExpressionShims {
       "Groups data source partitions with the same partition key",
       ExecChecks(TypeSig.all, TypeSig.all),
       (groupPartitions, conf, parent, rule) =>
-        new GroupPartitionsExecMeta(groupPartitions, conf, parent, rule))
+        new GpuGroupPartitionsExecMeta(groupPartitions, conf, parent, rule))
   ).map(rule => (rule.getClassFor.asSubclass(classOf[SparkPlan]), rule)).toMap
 
   override def getExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] =

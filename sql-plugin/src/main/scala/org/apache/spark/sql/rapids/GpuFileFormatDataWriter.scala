@@ -28,9 +28,10 @@ import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.fileio.hadoop.HadoopFileIO
 import com.nvidia.spark.rapids.shims.GpuFileFormatDataWriterShim
-import org.apache.hadoop.fs.Path
+import org.apache.hadoop.fs.{FileAlreadyExistsException, Path}
 import org.apache.hadoop.mapreduce.TaskAttemptContext
 
+import org.apache.spark.TaskOutputFileAlreadyExistException
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.io.FileCommitProtocol
 import org.apache.spark.sql.catalyst.InternalRow
@@ -39,6 +40,7 @@ import org.apache.spark.sql.catalyst.catalog.CatalogTypes.TablePartitionSpec
 import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, AttributeSet, Cast, Concat, Expression, HiveHash, Literal, Murmur3Hash, NullsFirst, ScalaUDF, UnsafeProjection}
 import org.apache.spark.sql.connector.write.DataWriter
 import org.apache.spark.sql.execution.datasources.{BucketingUtils, PartitioningUtils, WriteTaskResult}
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.GpuFileFormatDataWriter._
 import org.apache.spark.sql.rapids.GpuFileFormatWriter.GpuConcurrentOutputWriterSpec
 import org.apache.spark.sql.rapids.shims.FileCommitProtocolShims
@@ -177,10 +179,13 @@ abstract class GpuFileFormatDataWriter(
   }
 
   /** Write an iterator of column batch. */
-  def writeWithIterator(iterator: Iterator[ColumnarBatch]): Unit = {
+  def writeWithIterator(iterator: Iterator[ColumnarBatch]): Unit = try {
     while (iterator.hasNext) {
       write(iterator.next())
     }
+  } catch {
+    case f: FileAlreadyExistsException if SQLConf.get.fastFailFileFormatOutput =>
+      throw new TaskOutputFileAlreadyExistException(f)
   }
 
   /** Writes a columnar batch of records */

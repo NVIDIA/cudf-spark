@@ -273,7 +273,9 @@ run_delta_lake_tests() {
   SPARK_34X_PATTERN="(3\.4\.[0-9])"
   SPARK_35X_PATTERN="(3\.5\.[3-9])"
   SPARK_40X_PATTERN="(4\.0\.[0-9])"
-  SPARK_41X_PATTERN="(4\.1\.[0-9])"
+  # Delta 4.1.0 is binary-incompatible with Spark 4.1.2+ after Spark changed internal
+  # Catalyst and Parquet APIs. Keep coverage on the compatible Spark patch releases.
+  SPARK_41_0_1_PATTERN="^(4\.1\.[0-1])$"
 
   if [[ $SPARK_VER =~ $SPARK_32X_PATTERN ]]; then
     # There are multiple versions of deltalake that support SPARK 3.2.X
@@ -302,7 +304,7 @@ run_delta_lake_tests() {
     fi
   fi
 
-  if [[ $SPARK_VER =~ $SPARK_41X_PATTERN ]]; then
+  if [[ $SPARK_VER =~ $SPARK_41_0_1_PATTERN ]]; then
     # Delta 4.1.x only supports Scala 2.13 (Spark 4.1 requirement)
     if [[ "$SCALA_BINARY_VER" == "2.13" ]]; then
       DELTA_LAKE_VERSIONS="4.1.0"

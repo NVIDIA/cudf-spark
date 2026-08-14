@@ -640,9 +640,18 @@ def test_hypot(data_gen):
             'hypot(a, b)',
         ))
 
-@pytest.mark.parametrize('data_gen', double_n_long_gens + _arith_decimal_gens_no_neg_scale + [DecimalGen(30, 15)], ids=idfn)
-@disable_ansi_mode
+_floor_ceil_integral_decimal_gens = [long_gen] + _arith_decimal_gens_no_neg_scale + [
+    DecimalGen(30, 15)]
+
+@pytest.mark.parametrize('data_gen', _floor_ceil_integral_decimal_gens, ids=idfn)
 def test_floor(data_gen):
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark : unary_op_df(spark, data_gen).selectExpr('floor(a)'))
+
+# Spark 5 default ANSI paths throw for double special values/overflow cases here.
+@disable_ansi_mode
+@pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
+def test_floor_double(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : unary_op_df(spark, data_gen).selectExpr('floor(a)'))
 
@@ -657,9 +666,15 @@ def test_floor_scale_nonzero(data_gen):
     assert_gpu_fallback_collect(
             lambda spark : unary_op_df(spark, data_gen).selectExpr('floor(a, -1)'), 'RoundFloor')
 
-@pytest.mark.parametrize('data_gen', double_n_long_gens + _arith_decimal_gens_no_neg_scale + [DecimalGen(30, 15)], ids=idfn)
-@disable_ansi_mode
+@pytest.mark.parametrize('data_gen', _floor_ceil_integral_decimal_gens, ids=idfn)
 def test_ceil(data_gen):
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark : unary_op_df(spark, data_gen).selectExpr('ceil(a)'))
+
+# Spark 5 default ANSI paths throw for double special values/overflow cases here.
+@disable_ansi_mode
+@pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
+def test_ceil_double(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : unary_op_df(spark, data_gen).selectExpr('ceil(a)'))
 

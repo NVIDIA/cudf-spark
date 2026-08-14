@@ -28,8 +28,9 @@ import org.apache.orc.OrcConf
 import org.apache.orc.OrcConf._
 import org.apache.orc.mapred.OrcStruct
 
+import org.apache.spark.SPARK_VERSION_SHORT
 import org.apache.spark.internal.Logging
-import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.{SPARK_VERSION_METADATA_KEY, SparkSession}
 import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
 import org.apache.spark.sql.execution.datasources.FileFormat
 import org.apache.spark.sql.execution.datasources.orc.{OrcFileFormat, OrcOptions, OrcUtils}
@@ -232,6 +233,7 @@ class GpuOrcWriter(
   override val tableWriter: TableWriter = {
     val builder = SchemaUtils
       .writerOptionsFromSchema(ORCWriterOptions.builder(), dataSchema, nullable = false)
+      .withMetadata(SPARK_VERSION_METADATA_KEY, SPARK_VERSION_SHORT)
       .withCompressionType(CompressionType.valueOf(OrcConf.COMPRESS.getString(conf)))
     orcStripeSizeRows.foreach { ss =>
       builder.withStripeSizeRows(ss)
