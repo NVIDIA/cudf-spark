@@ -1487,15 +1487,8 @@ exact_percentile_reduction_cpu_fallback_data_gen = [
       .with_special_case(0, weight=100))]
     for data_gen in [IntegerGen(), DoubleGen()]]
 
-@allow_non_gpu('ObjectHashAggregateExec', 'SortAggregateExec', 'ShuffleExchangeExec', 'HashPartitioning',
-               'AggregateExpression', 'Alias', 'Cast', 'Literal', 'ProjectExec',
-               'Percentile')
-@pytest.mark.parametrize('data_gen', exact_percentile_reduction_cpu_fallback_data_gen, ids=idfn)
-@pytest.mark.parametrize('replace_mode', ['partial', 'final|complete'], ids=idfn)
-@pytest.mark.parametrize('use_obj_hash_agg', ['false', 'true'], ids=idfn)
-@pytest.mark.xfail(condition=is_databricks104_or_later(), reason='https://github.com/NVIDIA/spark-rapids/issues/9494')
-def test_exact_percentile_reduction_partial_fallback_to_cpu(data_gen,  replace_mode,
-                                                            use_obj_hash_agg):
+def _assert_exact_percentile_reduction_partial_fallback_to_cpu(
+        data_gen, replace_mode, use_obj_hash_agg):
     cpu_clz, gpu_clz = ['Percentile'], ['GpuPercentileDefault']
     exist_clz, non_exist_clz = [], []
     # For aggregations without distinct, Databricks runtime removes the partial Aggregate stage (
@@ -1520,6 +1513,35 @@ def test_exact_percentile_reduction_partial_fallback_to_cpu(data_gen,  replace_m
         conf={'spark.rapids.sql.hashAgg.replaceMode': replace_mode,
               'spark.sql.execution.useObjectHashAggregateExec': use_obj_hash_agg}
     )
+
+@pytest.mark.skipif(is_spark_500_or_later(),
+                    reason='Spark 5 exact percentile coverage uses the Spark 500 variant')
+@allow_non_gpu('ObjectHashAggregateExec', 'SortAggregateExec', 'ShuffleExchangeExec', 'HashPartitioning',
+               'AggregateExpression', 'Alias', 'Cast', 'Literal', 'ProjectExec',
+               'Percentile')
+@pytest.mark.parametrize('data_gen', exact_percentile_reduction_cpu_fallback_data_gen, ids=idfn)
+@pytest.mark.parametrize('replace_mode', ['partial', 'final|complete'], ids=idfn)
+@pytest.mark.parametrize('use_obj_hash_agg', ['false', 'true'], ids=idfn)
+@pytest.mark.xfail(condition=is_databricks104_or_later(), reason='https://github.com/NVIDIA/spark-rapids/issues/9494')
+def test_exact_percentile_reduction_partial_fallback_to_cpu(data_gen,  replace_mode,
+                                                            use_obj_hash_agg):
+    _assert_exact_percentile_reduction_partial_fallback_to_cpu(
+        data_gen, replace_mode, use_obj_hash_agg)
+
+@pytest.mark.skipif(not is_spark_500_or_later(),
+                    reason='Spark 5 exact percentile result tolerance')
+@approximate_float
+@allow_non_gpu('ObjectHashAggregateExec', 'SortAggregateExec', 'ShuffleExchangeExec', 'HashPartitioning',
+               'AggregateExpression', 'Alias', 'Cast', 'Literal', 'ProjectExec',
+               'Percentile')
+@pytest.mark.parametrize('data_gen', exact_percentile_reduction_cpu_fallback_data_gen, ids=idfn)
+@pytest.mark.parametrize('replace_mode', ['partial', 'final|complete'], ids=idfn)
+@pytest.mark.parametrize('use_obj_hash_agg', ['false', 'true'], ids=idfn)
+@pytest.mark.xfail(condition=is_databricks104_or_later(), reason='https://github.com/NVIDIA/spark-rapids/issues/9494')
+def test_exact_percentile_reduction_partial_fallback_to_cpu_spark500(
+        data_gen, replace_mode, use_obj_hash_agg):
+    _assert_exact_percentile_reduction_partial_fallback_to_cpu(
+        data_gen, replace_mode, use_obj_hash_agg)
 
 
 def _exact_percentile_groupby_gen(data_gen):
