@@ -110,14 +110,14 @@ public class GpuColumnVector extends GpuColumnVectorBase {
         nullable, new HostColumnVector.BasicType(false, DType.UINT8));
   }
 
-  public static HostColumnVector.DataType[] variantHostChildren() {
+  static HostColumnVector.DataType[] variantHostChildren() {
     return new HostColumnVector.DataType[] {
         variantByteListType(true),
         variantByteListType(true)
     };
   }
 
-  public static HostColumnVector.StructType variantHostType(boolean nullable) {
+  private static HostColumnVector.StructType variantHostType(boolean nullable) {
     return new HostColumnVector.StructType(nullable, variantHostChildren());
   }
 
