@@ -26,7 +26,7 @@ import com.nvidia.spark.rapids.ArrayIndexUtils.firstIndexAndNumElementUnchecked
 import com.nvidia.spark.rapids.BoolUtils.isAllValidTrue
 import com.nvidia.spark.rapids.GpuListUtils
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
-import com.nvidia.spark.rapids.jni.{GpuListSliceUtils, MapUtils}
+import com.nvidia.spark.rapids.jni.{GpuListSliceUtils, MapUtils, StringUtils}
 import com.nvidia.spark.rapids.shims.{GetSequenceSize, NullIntolerantShim, ShimExpression}
 
 import org.apache.spark.sql.catalyst.analysis.{TypeCheckResult, TypeCoercion}
@@ -674,7 +674,14 @@ case class GpuReverse(child: Expression) extends GpuUnaryExpression {
   override def dataType: DataType = child.dataType
 
   override protected def doColumnar(input: GpuColumnVector): ColumnVector = {
-    input.getBase.reverseStringsOrLists()
+    // Strings use Spark UTF8String.reverse semantics (SPARK-57507): clamp truncated trailing
+    // multi-byte UTF-8 widths to the bytes remaining in each row. libcudf reverse can
+    // over-read into the next row for malformed Spark StringType values.
+    if (child.dataType.isInstanceOf[StringType]) {
+      StringUtils.reverseStrings(input.getBase)
+    } else {
+      input.getBase.reverseStringsOrLists()
+    }
   }
 }
 

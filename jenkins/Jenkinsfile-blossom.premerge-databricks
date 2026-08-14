@@ -79,6 +79,8 @@ pipeline {
                     githubHelper = GithubHelper.getInstance("${GITHUB_TOKEN}", params.GITHUB_DATA)
                     // desc contains the PR ID and can be accessed from different builds
                     currentBuild.description = githubHelper.getBuildDescription() + " | $TEST_MODE"
+                    def title = githubHelper.getIssue().title.toLowerCase()
+                    env.REDUCED_IT = (title ==~ /.*\[reduced-it\].*/).toString()
                     checkoutCode(githubHelper.getCloneUrl(), githubHelper.getMergedSHA())
                 }
             }
@@ -111,7 +113,7 @@ pipeline {
                             BASE_SPARK_VERSION_TO_INSTALL_DATABRICKS_JARS = DbUtils.getInstallVer("$DB_RUNTIME")
                             INIT_SCRIPTS = DbUtils.getInitScripts("$DB_RUNTIME")
                             INIT_SCRIPTS_DIR = "/databricks/init_scripts/${BUILD_TAG}-${DB_RUNTIME}"
-                            EXTRA_ENVS = "TEST_MODE=$TEST_MODE"
+                            EXTRA_ENVS = "TEST_MODE=$TEST_MODE,REDUCED_IT=$REDUCED_IT"
                         }
                         steps {
                             script {

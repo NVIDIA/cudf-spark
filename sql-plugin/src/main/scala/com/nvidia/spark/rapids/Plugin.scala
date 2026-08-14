@@ -59,9 +59,11 @@ object RapidsShuffleManagerAutoConfigurator {
   private val SHUFFLE_MANAGER_KEY = "spark.shuffle.manager"
   private val SHUFFLE_DATA_IO_PLUGIN_KEY = "spark.shuffle.sort.io.plugin.class"
   private val RAPIDS_SHUFFLE_DATA_IO_CLASS_SUFFIX = "RapidsLocalDiskShuffleDataIO"
+  private val DATAPROC_ENGINE_KEY = "spark.dataproc.engine"
 
   def configure(conf: SparkConf): Unit = {
     if (ShuffleManagerShimUtils.supportsAutoConfiguration &&
+        !conf.contains(DATAPROC_ENGINE_KEY) &&
         !conf.contains(SHUFFLE_MANAGER_KEY) &&
         conf.getOption(SHUFFLE_DATA_IO_PLUGIN_KEY)
           .forall(_.endsWith(RAPIDS_SHUFFLE_DATA_IO_CLASS_SUFFIX))) {
@@ -154,11 +156,11 @@ object RapidsPluginUtils extends Logging {
     val possibleRapidsJarURLs = classloader.getResources(propName).asScala.toSet.toSeq.filter {
       url => {
         val urlPath = url.toString
-        // Filter out submodule jars, e.g. rapids-4-spark-aggregator_2.12-26.08.0-spark341.jar,
+        // Filter out submodule jars, e.g. rapids-4-spark-aggregator_2.12-26.10.0-spark341.jar,
         // and files stored under subdirs of '!/', e.g.
-        // rapids-4-spark_2.12-26.08.0-cuda12.jar!/spark330/rapids4spark-version-info.properties
+        // rapids-4-spark_2.12-26.10.0-cuda12.jar!/spark330/rapids4spark-version-info.properties
         // We only want to find the main jar, e.g.
-        // rapids-4-spark_2.12-26.08.0-cuda12.jar!/rapids4spark-version-info.properties
+        // rapids-4-spark_2.12-26.10.0-cuda12.jar!/rapids4spark-version-info.properties
         !urlPath.contains("rapids-4-spark-") && urlPath.endsWith("!/" + propName)
       }
     }

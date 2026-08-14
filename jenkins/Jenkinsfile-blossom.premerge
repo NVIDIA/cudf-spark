@@ -109,6 +109,9 @@ pipeline {
                     }
 
                     def title = githubHelper.getIssue().title.toLowerCase()
+                    env.PARALLEL_UT = title.contains('[fast-ut]') ? 'true' : 'false'
+                    echo "Parallel unit tests enabled by PR title: ${env.PARALLEL_UT}"
+                    env.REDUCED_IT = (title ==~ /.*\[reduced-it\].*/).toString()
                     if (title ==~ /.*\[skip ci\].*/) {
                         githubHelper.updateCommitStatus("", "Skipped", GitHubCommitState.SUCCESS)
                         currentBuild.result == "SUCCESS"
@@ -133,7 +136,7 @@ pipeline {
 
                     // check if need trigger databricks CI build
                     if (title ==~ /.*\[databricks\].*/ ||
-                            (normal_build && databricksCodeChanged())) {
+                            (normal_build && databricksTestNeeded())) {
                         db_build = true
                     }
                 }
@@ -489,6 +492,7 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                 } else {
                     // upload log only in case of build failure
                     def guardWords = ["gitlab.*?\\.com", "urm.*?\\.com",
+                                      "artifactory.*?\\.com", "sonar.*?\\.com",
                                       "dbc.*?azuredatabricks\\.net", "adb.*?databricks\\.com"]
                     guardWords.add("nvidia-smi(?s)(.*?)(?=jenkins/version-def.sh)") // hide GPU info
                     guardWords.add("sc-ipp*") // hide cloud info
@@ -573,15 +577,19 @@ void checkoutCode(String url, String sha) {
     stash(name: "source_tree", includes: "**,.git/**", useDefaultExcludes: false)
 }
 
-boolean databricksCodeChanged() {
+boolean databricksTestNeeded() {
     def output = sh(script: '''
             # get merge BASE from merged pull request. Log message e.g. "Merge HEAD into BASE"
             BASE_REF=$(git --no-pager log --oneline -1 | awk '{ print $NF }')
-            git --no-pager diff --name-only ${BASE_REF} HEAD | grep -lE 'sql-plugin/src/main/.*[0-9x-]db/|databricks' || true
+            # Search for Databricks/Delta-related paths, including:
+            # - numbered shim directories such as spark330db/ and spark350db143/
+            # - all Delta Lake paths such as delta-lake/delta-33x/ and scala2.13/delta-lake/
+            # - any path containing "databricks", such as jenkins/databricks/
+            git --no-pager diff --name-only ${BASE_REF} HEAD | grep -E 'sql-plugin/src/main/.*[0-9x-]db[0-9]*/|(^|/)delta-lake/|databricks' || true
         ''', returnStdout: true).trim()
 
     if (output) {
-        echo "Found databricks-related changed files"
+        echo "Found databricks/delta-related files changed"
         return true
     }
     return false

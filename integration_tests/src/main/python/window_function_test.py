@@ -606,7 +606,6 @@ def test_window_aggs_for_range_numeric_date(data_gen, batch_size):
 # In a distributed setup the order of the partitions returned might be different, so we must ignore the order
 # but small batch sizes can make sort very slow, so do the final order by locally
 @ignore_order(local=True)
-@datagen_overrides(seed=0, reason="https://github.com/NVIDIA/spark-rapids/issues/9682")
 @pytest.mark.parametrize('batch_size', ['1000', '1g'], ids=idfn) # set the batch size so we can test multiple stream batches
 @pytest.mark.parametrize('data_gen', [_grpkey_longs_with_no_nulls,
                                       _grpkey_longs_with_nulls,
@@ -1933,7 +1932,8 @@ def test_multi_types_window_aggs_for_rows(a_b_gen, c_gen):
     assert_gpu_and_cpu_are_equal_collect(do_it, conf={'spark.sql.adaptive.enabled': 'false'})
 
 
-def test_percent_rank_no_part_multiple_batches():
+@validate_execs_in_gpu_plan("GpuRunningWindowExec", "GpuCachedDoublePassWindowExec")
+def test_percent_rank_ntile_no_part_multiple_batches():
     data_gen = [('a', long_gen)]
     # The goal of this is to have multiple batches so we can verify that the code
     # is working properly, but not so large that it takes forever to run.
@@ -1941,12 +1941,14 @@ def test_percent_rank_no_part_multiple_batches():
 
     def do_it(spark):
         return gen_df(spark, data_gen, length=8000) \
-                .withColumn('percent_rank_val', f.percent_rank().over(baseWindowSpec))
+                .withColumn('percent_rank_val', f.percent_rank().over(baseWindowSpec)) \
+                .withColumn('ntile_val', f.ntile(7).over(baseWindowSpec))
     # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
     assert_gpu_and_cpu_are_equal_collect(do_it, conf = {'spark.rapids.sql.batchSizeBytes': '100',
                                                         'spark.sql.adaptive.enabled': 'false'})
 
-def test_percent_rank_single_part_multiple_batches():
+@validate_execs_in_gpu_plan("GpuRunningWindowExec", "GpuCachedDoublePassWindowExec")
+def test_percent_rank_ntile_single_part_multiple_batches():
     data_gen = [('a', long_gen)]
     # The goal of this is to have multiple batches so we can verify that the code
     # is working properly, but not so large that it takes forever to run.
@@ -1955,12 +1957,34 @@ def test_percent_rank_single_part_multiple_batches():
     def do_it(spark):
         return gen_df(spark, data_gen, length=8000) \
                 .withColumn('b', f.lit(1)) \
-                .withColumn('percent_rank_val', f.percent_rank().over(baseWindowSpec))
+                .withColumn('percent_rank_val', f.percent_rank().over(baseWindowSpec)) \
+                .withColumn('ntile_val', f.ntile(7).over(baseWindowSpec))
     assert_gpu_and_cpu_are_equal_collect(
         do_it,
         conf = {'spark.rapids.sql.batchSizeBytes': '100',
                 # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
                 'spark.sql.adaptive.enabled': 'false'})
+
+@ignore_order(local=True)
+@pytest.mark.parametrize('buckets', [1, 2, 4, 8])
+def test_ntile_edge_cases(buckets):
+    def data(spark):
+        return spark.range(13).select(
+            f.when(f.col('id') < 6, 0)
+                .when(f.col('id') < 11, 1)
+                .otherwise(2)
+                .alias('p'),
+            'id')
+
+    assert_gpu_and_cpu_are_equal_sql(
+        data,
+        'ntile_table',
+        f'''
+        SELECT p, id, NTILE({buckets}) OVER (PARTITION BY p ORDER BY id) AS bucket
+        FROM ntile_table
+        ''',
+        conf={'spark.sql.adaptive.enabled': 'false'})
+
 
 @pytest.mark.skipif(is_before_spark_320(), reason="Only in Spark 3.2.0 is IGNORE NULLS supported for lead and lag by Spark")
 @allow_non_gpu('WindowExec', 'Alias', 'WindowExpression', 'Lead', 'WindowSpecDefinition', 'SpecifiedWindowFrame', *non_utc_allow)
@@ -2451,6 +2475,59 @@ def test_window_aggs_for_rows_collect_set():
               'spark.sql.adaptive.enabled': 'false'})
 
 
+@pytest.mark.skipif(not is_spark_420_or_later(),
+                    reason='collect_set RESPECT NULLS is introduced in Spark 4.2')
+@allow_non_gpu("ShuffleExchangeExec")
+@ignore_order(local=True)
+@pytest.mark.parametrize('data_type', ['INT', 'FLOAT', 'DOUBLE'], ids=idfn)
+def test_window_aggs_for_rows_collect_set_respect_nulls(data_type):
+    def do_it(spark):
+        if data_type == 'INT':
+            values = """
+                (1, 1, '1'),
+                (1, 2, NULL),
+                (1, 3, '1'),
+                (1, 4, NULL),
+                (2, 1, NULL),
+                (2, 2, '5')
+            """
+        else:
+            values = """
+                (1, 1, '1.0'),
+                (1, 2, NULL),
+                (1, 3, 'NaN'),
+                (1, 4, 'NaN'),
+                (2, 1, NULL),
+                (2, 2, '5.0')
+            """
+        spark.sql(f"""
+            SELECT a, b, CAST(c AS {data_type}) AS c
+            FROM VALUES
+                {values}
+            AS tab(a, b, c)
+        """).createOrReplaceTempView("window_collect_table")
+        return spark.sql("""
+            SELECT a, b,
+                   sort_array(ignore_set) AS ignore_set,
+                   sort_array(respect_set) AS respect_set
+            FROM (
+                SELECT a, b,
+                       collect_set(c) IGNORE NULLS OVER
+                         (PARTITION BY a ORDER BY b
+                          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS ignore_set,
+                       collect_set(c) RESPECT NULLS OVER
+                         (PARTITION BY a ORDER BY b
+                          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS respect_set
+                FROM window_collect_table
+            ) t
+        """)
+
+    assert_gpu_and_cpu_are_equal_collect(
+        do_it,
+        conf={'spark.rapids.sql.window.collectSet.enabled': True,
+              'spark.sql.adaptive.enabled': 'false'})
+
+
 @ignore_order(local=True)
 @allow_non_gpu(*non_utc_allow)
 def test_window_aggs_for_fully_unbounded_partitioned_collect_set():
@@ -2459,7 +2536,15 @@ def test_window_aggs_for_fully_unbounded_partitioned_collect_set():
     runs through the `GpuUnboundedToUnboundedAggWindowExec` (which optimizes it to run via sort-based group-by
     aggregations).
     Note: This optimization only holds for the partitioned case.  Unpartitioned windows are not supported yet.
+
+    On Spark 4.2+, Float/Double CollectSet uses a bit-key hash-agg projection that is incompatible with
+    GpuUnboundedToUnboundedAggWindowExec. Mixed-type unbounded windows that include Float/Double therefore
+    fall back to regular GpuWindowExec for the whole Window node (allBatched=false). Float/Double-only
+    unbounded coverage is in test_window_aggs_for_fully_unbounded_partitioned_collect_set_float_double_spark420.
     """
+    # On Spark 4.2+ float/double force the mixed WindowExec onto GpuWindowExec.
+    expected_exec = (['GpuWindowExec'] if is_spark_420_or_later()
+                     else ['GpuUnboundedToUnboundedAggWindowExec'])
     assert_gpu_and_cpu_are_equal_sql(
         lambda spark: gen_df(spark, _gen_data_for_collect_set, length=2048),
         "window_collect_table",
@@ -2516,6 +2601,90 @@ def test_window_aggs_for_fully_unbounded_partitioned_collect_set():
         conf={'spark.rapids.sql.window.collectSet.enabled': True,
               'spark.rapids.sql.window.unboundedAgg.enabled': True,
               'spark.sql.parquet.int96RebaseModeInWrite': 'LEGACY',
+              'spark.sql.adaptive.enabled': 'false'},
+        validate_execs_in_gpu_plan=expected_exec)
+
+
+@pytest.mark.skipif(not is_spark_420_or_later(),
+                    reason='Spark 4.2 float/double CollectSet uses bit-key hash path incompatible '
+                           'with GpuUnboundedToUnboundedAggWindowExec')
+@ignore_order(local=True)
+@allow_non_gpu('ShuffleExchangeExec')
+@pytest.mark.parametrize('fp_type', ['FLOAT', 'DOUBLE'], ids=idfn)
+def test_window_aggs_for_fully_unbounded_partitioned_collect_set_float_double_spark420(fp_type):
+    """
+    Spark 4.2+ Float/Double collect_set over fully unbounded frames must fall back to
+    GpuWindowExec (normalize in-place) rather than the unbounded group-by shortcut.
+    """
+    assert_gpu_and_cpu_are_equal_sql(
+        lambda spark: spark.sql(f"""
+            SELECT * FROM VALUES
+                (1, 1, CAST(0.0 AS {fp_type})),
+                (1, 2, CAST(-0.0 AS {fp_type})),
+                (1, 3, CAST('NaN' AS {fp_type})),
+                (1, 4, CAST('NaN' AS {fp_type})),
+                (1, 5, CAST(NULL AS {fp_type})),
+                (1, 6, CAST('Infinity' AS {fp_type})),
+                (2, 1, CAST(1.5 AS {fp_type})),
+                (2, 2, CAST(NULL AS {fp_type}))
+            AS tab(a, b, c)
+        """),
+        "window_collect_table",
+        """
+        SELECT a, b,
+               sort_array(ignore_set) AS ignore_set,
+               sort_array(respect_set) AS respect_set
+        FROM (
+            SELECT a, b,
+                   collect_set(c) IGNORE NULLS OVER
+                     (PARTITION BY a ORDER BY b
+                      ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS ignore_set,
+                   collect_set(c) RESPECT NULLS OVER
+                     (PARTITION BY a ORDER BY b
+                      ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS respect_set
+            FROM window_collect_table
+        ) t
+        """,
+        conf={'spark.rapids.sql.window.collectSet.enabled': True,
+              'spark.rapids.sql.window.unboundedAgg.enabled': True,
+              'spark.sql.adaptive.enabled': 'false'},
+        validate_execs_in_gpu_plan=['GpuWindowExec'])
+
+
+@pytest.mark.skipif(not is_spark_420_or_later(),
+                    reason='collect_set RESPECT NULLS is introduced in Spark 4.2')
+@allow_non_gpu("ShuffleExchangeExec")
+@ignore_order(local=True)
+def test_window_aggs_for_fully_unbounded_partitioned_collect_set_respect_nulls():
+    assert_gpu_and_cpu_are_equal_sql(
+        lambda spark: spark.sql("""
+            SELECT * FROM VALUES
+                (1, 1, 1),
+                (1, 2, NULL),
+                (1, 3, 1),
+                (1, 4, NULL),
+                (2, 1, NULL),
+                (2, 2, 5)
+            AS tab(a, b, c)
+        """),
+        "window_collect_table",
+        """
+        SELECT a, b,
+               sort_array(ignore_set) AS ignore_set,
+               sort_array(respect_set) AS respect_set
+        FROM (
+            SELECT a, b,
+                   collect_set(c) IGNORE NULLS OVER
+                     (PARTITION BY a ORDER BY b
+                      ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS ignore_set,
+                   collect_set(c) RESPECT NULLS OVER
+                     (PARTITION BY a ORDER BY b
+                      ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS respect_set
+            FROM window_collect_table
+        ) t
+        """,
+        conf={'spark.rapids.sql.window.collectSet.enabled': True,
+              'spark.rapids.sql.window.unboundedAgg.enabled': True,
               'spark.sql.adaptive.enabled': 'false'},
         validate_execs_in_gpu_plan=['GpuUnboundedToUnboundedAggWindowExec'])
 

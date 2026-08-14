@@ -57,6 +57,11 @@ class RegexParser(pattern: String) {
     // Validate if the pattern is compatible with Java, as this would throw an error otherwise
     Pattern.compile(pattern)
 
+    parseUnchecked()
+  }
+
+  // Package-visible so tests can exercise parser-only behavior without host-JDK validation.
+  private[rapids] def parseUnchecked(): RegexAST = {
     val ast = parseUntil(() => eof())
     if (!eof()) {
       throw new RegexUnsupportedException("Failed to parse full regex. Last character parsed was",
@@ -655,7 +660,13 @@ class RegexParser(pattern: String) {
     if (start == pos) {
       None
     } else {
-      Some(pattern.substring(start, pos).toInt)
+      try {
+        Some(pattern.substring(start, pos).toInt)
+      } catch {
+        case _: NumberFormatException =>
+          throw new RegexUnsupportedException(
+            "Regex quantifier exceeds supported integer range", Some(start))
+      }
     }
   }
 

@@ -21,17 +21,17 @@ SPDX-License-Identifier: Apache-2.0
         <project.reporting.sourceEncoding>UTF-8</project.reporting.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
         <scala.binary.version>2.12</scala.binary.version>
-        <scala.version>2.12.15</scala.version>
+        <scala.version>2.12.21</scala.version>
         <!-- Spark/RAPIDS versions -->
-        <spark.version>3.5.5</spark.version>
-        <rapids4spark.version>26.04.0</rapids4spark.version>
+        <spark.version>3.5.8</spark.version>
+        <rapids4spark.version>26.06.0</rapids4spark.version>
         <jacoco.version>0.8.14</jacoco.version>
         <scoverage.plugin.version>2.1.0</scoverage.plugin.version>
         <scoverage.scalac.plugin.version>2.0.11</scoverage.scalac.plugin.version>
         <scalatest.jvm.args>${test.jvm.args}</scalatest.jvm.args>
         <cuda.version>cuda12</cuda.version>
-        <cudf.git.branch>v26.04.00</cudf.git.branch>
-        <rapids.cmake.branch>v26.04.00</rapids.cmake.branch>
+        <cudf.git.branch>v26.06.00</cudf.git.branch>
+        <rapids.cmake.branch>v26.06.00</rapids.cmake.branch>
         <!-- Memory leak debugging -->
         <!-- SLF4J logs are off by default, enable cuDF logs if memory leak debugging is enabled -->
         <debug.memory.leaks>false</debug.memory.leaks>

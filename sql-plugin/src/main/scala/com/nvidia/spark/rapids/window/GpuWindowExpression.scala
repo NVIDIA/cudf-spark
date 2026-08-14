@@ -33,7 +33,9 @@ import org.apache.spark.sql.catalyst.analysis.TypeCheckResult
 import org.apache.spark.sql.catalyst.analysis.TypeCheckResult.{TypeCheckFailure, TypeCheckSuccess}
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, AggregateFunction, Average, CollectList, CollectSet, Count, Max, Min, Sum}
-import org.apache.spark.sql.rapids.{AddOverflowChecks, GpuAnsi, GpuCreateNamedStruct, GpuDivide, GpuSubtract}
+import org.apache.spark.sql.rapids.{AddOverflowChecks, GpuAdd, GpuAnsi, GpuCreateNamedStruct,
+  GpuDivide, GpuGreatest, GpuIntegralDivide, GpuLessThanOrEqual, GpuMultiply, GpuRemainder,
+  GpuSubtract}
 import org.apache.spark.sql.rapids.aggregate.{GpuAggregateExpression, GpuAggregateFunction, GpuCount}
 import org.apache.spark.sql.rapids.shims.RapidsErrorUtils
 import org.apache.spark.sql.types._
@@ -983,8 +985,13 @@ trait GpuUnboundToUnboundWindowWithFixer {
 /**
  * This is used to tag a GpuAggregateFunction that it has been tested to work properly
  * with `GpuUnboundedToUnboundedAggWindowExec`.
+ *
+ * Implementations may opt out when their hash-agg [[GpuAggregateFunction.inputProjection]]
+ * is incompatible with the unbounded-agg shortcut (which only accepts BoundReference/Literal).
  */
-trait GpuUnboundedToUnboundedWindowAgg extends GpuAggregateFunction
+trait GpuUnboundedToUnboundedWindowAgg extends GpuAggregateFunction {
+  def supportsUnboundedToUnboundedWindowExec: Boolean = true
+}
 
 /**
  * Fixes up a count operation for unbounded preceding to unbounded following
@@ -2151,5 +2158,59 @@ case class GpuPercentRank(children: Seq[Expression]) extends GpuReplaceWindowFun
     val countMinusOne = GpuCast(GpuSubtract(count, GpuLiteral(1L), isAnsi)(), DoubleType, isAnsi)()
     val divided = GpuDivide(rankMinusOne, countMinusOne, isAnsi)()
     GpuCoalesce(Seq(divided, GpuLiteral(0.0)))
+  }
+}
+
+case class GpuNTileMeta(
+    nTile: NTile,
+    override val conf: RapidsConf,
+    parentMetaOpt: Option[RapidsMeta[_, _, _]],
+    rule: DataFromReplacementRule)
+  extends ExprMeta[NTile](nTile, conf, parentMetaOpt, rule) {
+
+  override def convertToGpuImpl(): GpuExpression = GpuNTile(childExprs.head.convertToGpu())
+}
+
+/**
+ * Rewrites ntile into row_number, a full-partition count, and integer arithmetic.
+ */
+case class GpuNTile(buckets: Expression) extends GpuReplaceWindowFunction {
+  override def children: Seq[Expression] = Seq(buckets)
+  override def nullable: Boolean = false
+  override def dataType: DataType = IntegerType
+
+  override def windowReplacement(spec: GpuWindowSpecDefinition): Expression = {
+    val isAnsi = false
+    val one = GpuLiteral(1L)
+    val fullUnboundedFrame = GpuSpecifiedWindowFrame(RowFrame,
+      GpuSpecialFrameBoundary(UnboundedPreceding),
+      GpuSpecialFrameBoundary(UnboundedFollowing))
+    val fullUnboundedSpec = GpuWindowSpecDefinition(spec.partitionSpec, spec.orderSpec,
+      fullUnboundedFrame)
+    val count = GpuWindowExpression(GpuCount(Seq(GpuLiteral(1))), fullUnboundedSpec)
+    val rowNumber = GpuCast(GpuWindowExpression(GpuRowNumber, spec), LongType, isAnsi)()
+    val numBuckets = GpuCast(buckets, LongType, isAnsi)()
+    val bucketSize = GpuIntegralDivide(count, numBuckets, isAnsi)()
+    val bucketsWithPadding = GpuRemainder(count, numBuckets, isAnsi)
+    val paddedBucketSize = GpuAdd(bucketSize, one, isAnsi)()
+    val bucketThreshold = GpuMultiply(paddedBucketSize, bucketsWithPadding, isAnsi)()
+    val rowIndex = GpuSubtract(rowNumber, one, isAnsi)()
+    val paddedBucket = GpuAdd(
+      GpuIntegralDivide(rowIndex, paddedBucketSize, isAnsi)(), one, isAnsi)()
+    val unpaddedBucketSize = GpuGreatest(Seq(bucketSize, one))
+    val unpaddedBucket = GpuAdd(
+      GpuAdd(bucketsWithPadding, one, isAnsi)(),
+      GpuIntegralDivide(
+        GpuSubtract(rowIndex, bucketThreshold, isAnsi)(),
+        unpaddedBucketSize,
+        isAnsi)(),
+      isAnsi)()
+    GpuCast(
+      GpuIf(
+        GpuLessThanOrEqual(rowNumber, bucketThreshold),
+        paddedBucket,
+        unpaddedBucket),
+      IntegerType,
+      isAnsi)()
   }
 }
