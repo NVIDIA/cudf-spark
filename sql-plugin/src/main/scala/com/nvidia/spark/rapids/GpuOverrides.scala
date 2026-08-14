@@ -2228,6 +2228,14 @@ object GpuOverrides extends Logging {
           TypeSig.all))),
       (pivot, conf, p, r) => new ImperativeAggExprMeta[PivotFirst](pivot, conf, p, r) {
         override def tagAggForGpu(): Unit = {
+          pivot.pivotColumn.dataType match {
+            // `StringType` is the UTF8_BINARY singleton, while `st` may be another
+            // StringType instance whose collation differs from UTF8_BINARY in Spark 4.x.
+            case st: StringType if st != StringType =>
+              willNotWorkOnGpu(
+                "PivotFirst does not support non-UTF8_BINARY string collations on the GPU")
+            case _ =>
+          }
           // If pivotColumnValues doesn't have distinct values, fall back to CPU
           if (pivot.pivotColumnValues.distinct.lengthCompare(pivot.pivotColumnValues.length) != 0) {
             willNotWorkOnGpu("PivotFirst does not work on the GPU when there are duplicate" +
@@ -3862,16 +3870,23 @@ object GpuOverrides extends Logging {
 
         override def aggBufferAttribute: AttributeReference = {
           val aggBuffer = c.aggBufferAttributes.head
-          aggBuffer.copy(dataType = c.dataType)(aggBuffer.exprId, aggBuffer.qualifier)
+          // Match Spark 4.2+ CollectSet buffer layout for float/double (normalized bit keys).
+          val ignoreNulls = TypeUtilsShims.collectSetIgnoreNulls(c)
+          val bufferElementType =
+            TypeUtilsShims.collectSetCpuBufferElementType(c.child.dataType)
+          aggBuffer.copy(dataType = ArrayType(bufferElementType, !ignoreNulls))(
+            aggBuffer.exprId, aggBuffer.qualifier)
         }
 
-        override def createCpuToGpuBufferConverter(): CpuToGpuAggregateBufferConverter =
-          new CpuToGpuCollectSetBufferConverter(c.child.dataType,
-            !TypeUtilsShims.collectSetIgnoreNulls(c))
+        override def createCpuToGpuBufferConverter(): CpuToGpuAggregateBufferConverter = {
+          val ignoreNulls = TypeUtilsShims.collectSetIgnoreNulls(c)
+          new CpuToGpuCollectBufferConverter(
+            TypeUtilsShims.collectSetCpuBufferElementType(c.child.dataType),
+            !ignoreNulls)
+        }
 
         override def createGpuToCpuBufferConverter(): GpuToCpuAggregateBufferConverter =
-          new GpuToCpuCollectSetBufferConverter(c.child.dataType,
-            !TypeUtilsShims.collectSetIgnoreNulls(c))
+          new GpuToCpuCollectBufferConverter()
 
         override val supportBufferConversion: Boolean = true
 

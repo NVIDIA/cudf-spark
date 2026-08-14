@@ -439,7 +439,7 @@ def test_json_read_invalid_float_ansi(
 
 
 @approximate_float
-@allow_non_gpu(TEXT_INPUT_EXEC)
+@allow_non_gpu(TEXT_INPUT_EXEC, *non_utc_project_allow)
 def test_from_json_invalid_float_ansi(std_input_path):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.text(std_input_path + '/floats_invalid.json').

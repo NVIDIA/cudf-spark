@@ -277,6 +277,44 @@ class RapidsTestSettings extends BackendTestSettings {
         "Recovery trigger: the Spark test accepts the GPU V1 scan node; P2."))
   enableSuite[RapidsV1ReadFallbackWithDataFrameReaderSuite]
   enableSuite[RapidsV1ReadFallbackWithCatalogSuite]
+  enableSuite[RapidsFileSourceCharVarcharDDLTestSuite]
+    .exclude("SPARK-33901: ctas should should not change table's schema",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15549. " +
+        "Recovery trigger: GPU V1 CTAS preserves raw CHAR/VARCHAR schema metadata; P0."))
+    .exclude("SPARK-37160: CREATE TABLE AS SELECT with CHAR_AS_VARCHAR",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15549. " +
+        "Recovery trigger: GPU V1 CTAS applies CHAR_AS_VARCHAR to raw schema metadata; P0."))
+  enableSuite[RapidsDSV2CharVarcharDDLTestSuite]
+  enableSuite[RapidsParquetCodecSuite]
+    .exclude("write and read - file source parquet - codec: lz4",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15550. " +
+        "Recovery trigger: GPU Parquet supports Hadoop LZ4 or safely falls back; P1."))
+  enableSuite[RapidsOrcCodecSuite]
+    .exclude("write and read - file source orc - codec: lzo",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15551. " +
+        "Recovery trigger: GPU ORC supports LZO or safely falls back; P1."))
+  enableSuite[RapidsSaveLoadSuite]
+  enableSuite[RapidsTableScanSuite]
+  enableSuite[RapidsDataSourceV2DataFrameSessionCatalogSuite]
+  enableSuite[RapidsTextV1Suite]
+  enableSuite[RapidsTextV2Suite]
+  enableSuite[RapidsBinaryFileFormatSuite]
+    .exclude("BinaryFileFormat methods",
+      ADJUST_UT("https://github.com/NVIDIA/cudf-spark/issues/15552. " +
+        "Recovery trigger: add equivalent query-level RAPIDS coverage or a GPU-owned hook; P2."))
+    .exclude("createFilterFunction",
+      ADJUST_UT("https://github.com/NVIDIA/cudf-spark/issues/15552. " +
+        "Recovery trigger: add equivalent query-level RAPIDS coverage or a GPU-owned hook; P2."))
+    .exclude("buildReader",
+      ADJUST_UT("https://github.com/NVIDIA/cudf-spark/issues/15552. " +
+        "Recovery trigger: add equivalent query-level RAPIDS coverage or a GPU-owned hook; P2."))
+    .exclude("column pruning",
+      ADJUST_UT("https://github.com/NVIDIA/cudf-spark/issues/15552. " +
+        "Recovery trigger: add equivalent query-level RAPIDS coverage or a GPU-owned hook; P2."))
+    .exclude("column pruning - non-readable file",
+      ADJUST_UT("https://github.com/NVIDIA/cudf-spark/issues/15552. " +
+        "Recovery trigger: replace the chmod-based unreadability setup with filesystem-independent " +
+        "fault injection while preserving query-level count coverage; P2."))
   enableSuite[RapidsFileMetadataStructSuite]
   enableSuite[RapidsDisableUnnecessaryBucketedScanWithoutHiveSupportSuite]
     .exclude("SPARK-32859: disable unnecessary bucketed table scan - basic test",
@@ -345,7 +383,9 @@ class RapidsTestSettings extends BackendTestSettings {
   enableSuite[RapidsJsonExpressionsSuite]
     .exclude("from_json - invalid data", ADJUST_UT("Replaced by testRapids version that expects a SparkException instead of TestFailedException"))
   enableSuite[RapidsJsonFunctionsSuite]
-    .exclude("SPARK-33134: return partial results only for root JSON objects", KNOWN_ISSUE("https://github.com/NVIDIA/spark-rapids/issues/14088"))
+    .exclude("SPARK-33134: return partial results only for root JSON objects",
+      ADJUST_UT("Inherited test also exercises unsupported root ArrayType and " +
+        "MapType[String, StructType]; supported root StructType cases use testRapids"))
   enableSuite[RapidsJsonSuite]
   enableSuite[RapidsMathExpressionsSuite]
     .exclude("round/bround/floor/ceil", KNOWN_ISSUE("https://github.com/NVIDIA/spark-rapids/issues/13747"))
@@ -527,5 +567,29 @@ class RapidsTestSettings extends BackendTestSettings {
     .exclude("SPARK-33084: Add jar support Ivy URI in SQL -- jar contains udf class", ADJUST_UT("Replaced by testRapids version that uses testFile() to access Spark test resources instead of getContextClassLoader"))
     .exclude("SPARK-33482: Fix FileScan canonicalization", ADJUST_UT("Replaced by testRapids version using V1 sources with AQE and broadcast disabled to assert ReusedExchangeExec directly"))
     .exclude("SPARK-36093: RemoveRedundantAliases should not change expression's name", ADJUST_UT("Replaced by testRapids version that checks the partition column name of the GpuInsertIntoHadoopFsRelationCommand"))
+  enableSuite[RapidsCTEInlineSuiteAEOff]
+  enableSuite[RapidsCTEInlineSuiteAEOn]
+  enableSuite[RapidsFilteredScanSuite]
+    .excludeByPrefix(
+      "PushDown Returns ",
+      KNOWN_ISSUE(
+        "The Spark helper directly executes the CPU RowDataSourceScanExec instead of the " +
+          "query-level plan. See https://github.com/NVIDIA/cudf-spark/issues/15566. " +
+          "Recovery trigger: add query-level RAPIDS coverage for equivalent pushdown and " +
+          "column-pruning assertions; P2."))
+  enableSuite[RapidsPrunedScanSuite]
+    .excludeByPrefix(
+      "Columns output ",
+      KNOWN_ISSUE(
+        "The Spark helper directly executes the CPU RowDataSourceScanExec instead of the " +
+          "query-level plan. See https://github.com/NVIDIA/cudf-spark/issues/15567. " +
+          "Recovery trigger: add query-level RAPIDS coverage for equivalent column-pruning " +
+          "assertions; P2."))
+  enableSuite[RapidsSupportsCatalogOptionsSuite]
+  enableSuite[RapidsLocalTempViewTestSuite]
+  enableSuite[RapidsGlobalTempViewTestSuite]
+  enableSuite[RapidsPersistedViewTestSuite]
+  enableSuite[RapidsRowDataSourceStrategySuite]
+  enableSuite[RapidsConfigBehaviorSuite]
 }
 // scalastyle:on line.size.limit
