@@ -752,10 +752,14 @@ def test_word_boundaries():
         conf=_regexp_conf)
 
 def test_character_classes():
-    gen = mk_str_gen('[abcd]{1,3}[0-9]{1,3}[abcd]{1,3}[ \n\t\r]{0,2}')
+    gen = (mk_str_gen('[abcd]{1,3}[0-9]{1,3}[abcd]{1,3}[ \n\t\r]{0,2}')
+        .with_special_case(']^_')
+        .with_special_case('^')
+        .with_special_case('-'))
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark: unary_op_df(spark, gen).selectExpr(
                 'rlike(a, "[abcd]")',
+                'rlike(a, "[]-_]")',
                 'rlike(a, "[^\n\r]")',
                 'rlike(a, "[\n-\\]")',
                 'rlike(a, "[+--]")',
