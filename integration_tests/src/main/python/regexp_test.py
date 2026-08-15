@@ -22,7 +22,7 @@ from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_co
 from data_gen import *
 from marks import *
 from pyspark.sql.types import *
-from spark_session import is_before_spark_320, is_before_spark_350, is_before_spark_400, is_jvm_charset_utf8, with_cpu_session, with_gpu_session
+from spark_session import is_before_spark_320, is_before_spark_350, is_before_spark_400, is_databricks_runtime, is_databricks143, is_jvm_charset_utf8, with_cpu_session, with_gpu_session
 
 if not is_jvm_charset_utf8():
     pytestmark = [pytest.mark.regexp, pytest.mark.skip(reason=str("Current locale doesn't support UTF-8, regexp support is disabled"))]
@@ -1048,36 +1048,53 @@ def test_predefined_character_classes():
         conf=_regexp_conf)
 
 def test_rlike():
-    gen = mk_str_gen('[a-dA-D]{1,4}')
+    # deterministic mixed-case inputs so the case-insensitive cases don't rely on the RNG
+    gen = mk_str_gen('[a-dA-D]{1,4}') \
+        .with_special_case('A').with_special_case('AA').with_special_case('ABC')
+    exprs = [
+        'a rlike "a{2}"',
+        'a rlike "a{1,3}"',
+        'a rlike "a{1,}"',
+        'a rlike "a[bc]d"',
+        'a rlike "a[bc]d"',
+        'a rlike "^[a-d]*$"',
+        # case-insensitive inline flag
+        'a rlike "(?i)abc"',
+        'a rlike "(?i)[a-c]"',
+        'a rlike "(?i)a(?-i)b"',
+        'a rlike "(?i)(a|b)c"',
+        'a rlike "(?i:abc)"',
+        'a rlike "(?i:a|b)"',
+        'a rlike "(?-i:a)b"',
+        # nested scoped-flags groups
+        'a rlike "(?i:(?-i:a)b)"',
+        'a rlike "(?-i:a(?i:b)c)"',
+        'a rlike "(?i:a(?-i:b(?i:c))d)"',
+        # a bare inline flag inside a scoped-flags group
+        'a rlike "(?i:a(?-i)b)"',
+        'a rlike "(?-i:a(?i)b)"',
+        # a negated non-case-insensitive flag is a no-op (mode off by default)
+        'a rlike "(?-s:abc)"',
+        'a rlike "(?i-s:abc)"',
+    ]
+    # Databricks 14.3 uses Java 8, which serializes Patterns with position-sensitive inline flags
+    # incorrectly (JDK-8194667), changing the CPU result. Exclude those patterns to avoid the bug.
+    # The bug is fixed in Java 11, so DBR 17.3 and Apache Spark are unaffected.
+    if not is_databricks143():
+        exprs += [
+            'a rlike "a(?i)b"',
+            'a rlike "a|(?i)b"',
+        ]
+    conf = _regexp_conf
+    if is_databricks_runtime():
+        # Databricks' SimplifyRLike optimizer rule rewrites `RLIKE '(?i)<const>'` into
+        # `Contains(lower(...))`, which bridges `Lower` to the CPU instead of exercising the GPU
+        # regex rewrite this change adds. Exclude it so these cases stay on GpuRLike.
+        conf = {**_regexp_conf,
+                'spark.sql.optimizer.excludedRules': 'com.databricks.sql.optimizer.SimplifyRLike'}
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark: unary_op_df(spark, gen).selectExpr(
-                'a rlike "a{2}"',
-                'a rlike "a{1,3}"',
-                'a rlike "a{1,}"',
-                'a rlike "a[bc]d"',
-                'a rlike "a[bc]d"',
-                'a rlike "^[a-d]*$"',
-                # case-insensitive inline flag
-                'a rlike "(?i)abc"',
-                'a rlike "(?i)[a-c]"',
-                'a rlike "a(?i)b"',
-                'a rlike "(?i)a(?-i)b"',
-                'a rlike "a|(?i)b"',
-                'a rlike "(?i)(a|b)c"',
-                'a rlike "(?i:abc)"',
-                'a rlike "(?i:a|b)"',
-                'a rlike "(?-i:a)b"',
-                # nested scoped-flags groups
-                'a rlike "(?i:(?-i:a)b)"',
-                'a rlike "(?-i:a(?i:b)c)"',
-                'a rlike "(?i:a(?-i:b(?i:c))d)"',
-                # a bare inline flag inside a scoped-flags group
-                'a rlike "(?i:a(?-i)b)"',
-                'a rlike "(?-i:a(?i)b)"',
-                # a negated non-case-insensitive flag is a no-op (mode off by default)
-                'a rlike "(?-s:abc)"',
-                'a rlike "(?i-s:abc)"'),
-        conf=_regexp_conf)
+        lambda spark: unary_op_df(spark, gen).selectExpr(*exprs),
+        conf=conf)
 
 def test_rlike_embedded_null():
     gen = mk_str_gen('[abcd]{1,3}')\
