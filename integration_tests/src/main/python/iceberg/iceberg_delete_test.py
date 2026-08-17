@@ -21,9 +21,10 @@ from iceberg import (create_iceberg_table, get_full_table_name, iceberg_write_en
                      iceberg_base_table_cols, iceberg_gens_list, iceberg_nested_write_gens_list,
                      iceberg_unsupported_mark, delete_partition_transforms_distributed,
                      _build_tblprops, assert_iceberg_files_use_codec,
-                     supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON)
+                     supports_iceberg_v3, runtime_iceberg_version,
+                     ICEBERG_V3_UNSUPPORTED_REASON)
 from marks import allow_non_gpu, allow_non_gpu_conditional, iceberg, ignore_order, datagen_overrides
-from spark_session import is_spark_400_or_later, with_cpu_session, with_gpu_session
+from spark_session import is_spark_35x, is_spark_400_or_later, with_cpu_session, with_gpu_session
 
 pytestmark = iceberg_unsupported_mark
 
@@ -38,6 +39,7 @@ iceberg_delete_mor_enabled_conf = copy_and_update(iceberg_write_enabled_conf, {}
 # would be DeleteFromTableExec.
 DELETE_TEST_SEED = 42
 DELETE_TEST_SEED_OVERRIDE_REASON = "Ensure reproducible test data for DELETE operations"
+ICEBERG_V3_COW_DELETE_XFAIL_VERSIONS = ("1.10.0", "1.10.1", "1.10.2", "1.11.0")
 
 def create_iceberg_table_with_data(table_name: str, 
                                    partition_col_sql=None,
@@ -133,7 +135,14 @@ def test_iceberg_delete_unpartitioned_table(spark_tmp_table_factory, delete_mode
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @ignore_order(local=True)
 @pytest.mark.parametrize('delete_mode,fallback_exec', [
-    pytest.param('copy-on-write', 'ReplaceDataExec', id='cow'),
+    pytest.param(
+        'copy-on-write',
+        'ReplaceDataExec',
+        marks=pytest.mark.xfail(
+            condition=(is_spark_35x() and
+                       runtime_iceberg_version in ICEBERG_V3_COW_DELETE_XFAIL_VERSIONS),
+            reason="https://github.com/NVIDIA/cudf-spark/issues/15680"),
+        id='cow'),
     pytest.param('merge-on-read', 'WriteDeltaExec', id='mor')
 ])
 @allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")

@@ -25,17 +25,25 @@ import pytest
 
 from conftest import is_iceberg_rest_catalog, spark_jvm
 from data_gen import *
-from spark_session import is_iceberg_supported_spark, with_cpu_session
-
-iceberg_unsupported_mark = pytest.mark.skipif(
-    not is_iceberg_supported_spark(),
-    reason="Iceberg acceleration requires Spark 3.5.x, 4.0.x, or 4.1.x")
-
+from spark_session import is_iceberg_supported_spark, is_spark_35x, with_cpu_session
 
 runtime_iceberg_version = os.environ.get("EXPECTED_ICEBERG_VERSION")
+runtime_iceberg_major_minor = (
+    tuple(int(part) for part in runtime_iceberg_version.split(".")[:2])
+    if runtime_iceberg_version is not None else None)
+spark_35x_unsupported_iceberg_version = (
+    is_spark_35x() and
+    runtime_iceberg_major_minor is not None and
+    runtime_iceberg_major_minor >= (1, 11))
+
+iceberg_unsupported_mark = pytest.mark.skipif(
+    not is_iceberg_supported_spark() or spark_35x_unsupported_iceberg_version,
+    reason="Unsupported Spark and Iceberg version combination")
+
+
 supports_iceberg_v3 = (
-    runtime_iceberg_version is not None and
-    tuple(int(part) for part in runtime_iceberg_version.split(".")[:2]) >= (1, 9) and
+    runtime_iceberg_major_minor is not None and
+    runtime_iceberg_major_minor >= (1, 9) and
     not is_iceberg_rest_catalog())
 ICEBERG_V3_UNSUPPORTED_REASON = (
     "Iceberg v3 requires Iceberg 1.9.0 or later and a catalog backend with v3 support")
