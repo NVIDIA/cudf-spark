@@ -15,7 +15,7 @@ wants to tune scan behavior across an existing Spark session — for example
 before a benchmark run, or to try different split sizes against existing tables
 without modifying them.
 
-The RAPIDS Accelerator ships a thin Iceberg session-catalog wrapper that lets
+The NVIDIA cuDF plugin for Apache Spark ships a thin Iceberg session-catalog wrapper that lets
 these options be set via session conf at three scopes — per-table, per-catalog,
 and global. The wrapper is opt-in and a pure pass-through for any table whose
 conf is not set at any scope, so enabling it does not change behavior for
@@ -35,7 +35,7 @@ DataFrame level via `.option(...)`, you do not need this feature.
 
 ## Enabling
 
-Replace Iceberg's session catalog with the RAPIDS drop-in. For the default
+Replace Iceberg's session catalog with the cuDF plugin drop-in. For the default
 catalog (`spark_catalog`):
 
 ```
@@ -80,7 +80,7 @@ Three suffixes are recognized at every scope:
 | `read-split-planning-lookback`  | `SparkReadOptions.LOOKBACK`            | `read.split.planning-lookback`  | int         |
 | `read-split-open-file-cost`     | `SparkReadOptions.FILE_OPEN_COST`      | `read.split.open-file-cost`     | bytes (long)|
 
-The suffix names mirror the iceberg `TableProperties` keys (the token after
+The suffix names mirror the Iceberg `TableProperties` keys (the token after
 `read.split.`) with `-` instead of `.`, so the dot-separated session-conf
 path remains unambiguous.
 
@@ -117,7 +117,7 @@ to lowest:
    (`spark.rapids.iceberg.catalog-setting.<catalog>.<suffix>`)
 3. **Global** — global session conf
    (`spark.rapids.iceberg.global-setting.<suffix>`)
-4. **Table itself** — iceberg `TBLPROPERTIES`
+4. **Table itself** — Iceberg `TBLPROPERTIES`
    (e.g. `read.split.target-size`, set via `ALTER TABLE … SET TBLPROPERTIES`)
 
 If none of the four is set, Iceberg's built-in default applies. An explicit
@@ -130,7 +130,7 @@ spark.read.format("iceberg")
 ```
 
 Tables for which no `spark.rapids.iceberg.<…>.*` conf is set at any scope and
-no matching `TBLPROPERTIES` is configured behave exactly as if the RAPIDS
+no matching `TBLPROPERTIES` is configured behave exactly as if the cuDF plugin
 catalog wrapper were not in use.
 
 ## Caveats
@@ -151,7 +151,7 @@ catalog wrapper were not in use.
   conf is set against such an identifier, the wrapper throws an
   `IllegalArgumentException` from `RapidsSparkTable` rather than silently
   picking the wrong override; in that case, either rename the identifier,
-  switch to a catalog- or global-scoped conf, or set the iceberg
+  switch to a catalog- or global-scoped conf, or set the Iceberg
   `read.split.*` table property directly.
 - The wrapper applies to scans only. Writes go through the underlying Iceberg
   `SparkTable.newWriteBuilder` unchanged.
