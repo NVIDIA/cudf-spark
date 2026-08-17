@@ -16,19 +16,11 @@
 
 package com.nvidia.spark.rapids
 
-import ai.rapids.cudf.Table
+import ai.rapids.cudf.{ColumnVector, Table}
 import ai.rapids.cudf.ast.CompiledExpression
 import com.nvidia.spark.Retryable
-import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
-import com.nvidia.spark.rapids.GpuMetric.OP_TIME_LEGACY
-import com.nvidia.spark.rapids.RapidsPluginImplicits._
-import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
-import com.nvidia.spark.rapids.shims.ShimUnaryExpression
 
-import org.apache.spark.TaskContext
 import org.apache.spark.sql.catalyst.expressions.{Expression, NamedExpression}
-import org.apache.spark.sql.types.DataType
-import org.apache.spark.sql.vectorized.ColumnarBatch
 
 object GpuAstJitExpression {
   private def canUseAstJit(expression: GpuExpression): Boolean =
@@ -44,7 +36,7 @@ object GpuAstJitExpression {
 
   private[rapids] def wrapTierExpression(expression: Expression): Expression = expression match {
     case alias @ GpuAlias(child: GpuExpression, _) =>
-      asAstJit(child).map(GpuProjectAstExpression.replaceChild(alias, _)).getOrElse(alias)
+      asAstJit(child).map(GpuProjectAstExpressionBase.replaceChild(alias, _)).getOrElse(alias)
     case other => other
   }
 
@@ -92,22 +84,19 @@ object GpuAstJitExpression {
 }
 
 case class GpuAstJitExpression(child: GpuExpression)
-    extends ShimUnaryExpression with GpuProjectAstExpressionBase
-        with GpuMetricsInjectable with Retryable with AutoCloseable {
+    extends GpuProjectAstExpressionBase with Retryable {
 
-  @transient private[this] var compiledExpression: CompiledExpression = _
-  private[this] var opTime: GpuMetric = NoopMetric
+  override protected def backendName: String = "AST JIT"
 
-  override def dataType: DataType = child.dataType
+  override protected def compileNvtxId: NvtxId = NvtxRegistry.COMPILE_AST_JIT
 
-  override def nullable: Boolean = child.nullable
+  override protected def computeNvtxId: NvtxId = NvtxRegistry.PROJECT_AST_JIT
+
+  override protected def evaluate(
+      compiled: CompiledExpression,
+      table: Table): ColumnVector = compiled.computeColumnJit(table)
 
   override def toString: String = s"AST_JIT($child)"
-
-  override def injectMetrics(metrics: Map[String, GpuMetric]): Unit = {
-    // OP_TIME_LEGACY is the owning operator's non-RDD timing metric, not a legacy AST metric.
-    opTime = metrics.getOrElse(OP_TIME_LEGACY, NoopMetric)
-  }
 
   override def checkpoint(): Unit = {
     getCompiledExpression
@@ -115,52 +104,4 @@ case class GpuAstJitExpression(child: GpuExpression)
 
   // Compiled ASTs are immutable and remain valid across retry attempts.
   override def restore(): Unit = ()
-
-  override def close(): Unit = {
-    val toClose = synchronized {
-      val current = compiledExpression
-      compiledExpression = null
-      current
-    }
-    Option(toClose).foreach(_.safeClose())
-  }
-
-  override def columnarEval(batch: ColumnarBatch): GpuColumnVector = {
-    withResource(GpuProjectAstExpression.tableFromBatch(batch)) { table =>
-      computeColumn(table)
-    }
-  }
-
-  private[rapids] override def computeColumn(table: Table): GpuColumnVector = {
-    val compiled = getCompiledExpression
-    NvtxIdWithMetrics(NvtxRegistry.PROJECT_AST_JIT, opTime) {
-      closeOnExcept(compiled.computeColumnJit(table)) { result =>
-        GpuColumnVector.from(result, dataType)
-      }
-    }
-  }
-
-  private def getCompiledExpression: CompiledExpression = synchronized {
-    if (compiledExpression == null) {
-      val compiled = NvtxIdWithMetrics(NvtxRegistry.COMPILE_AST_JIT, opTime) {
-        // Force every bound reference to the left table; Project AST has one input table.
-        child.convertToAst(Int.MaxValue).compile()
-      }
-      closeOnExcept(compiled) { _ =>
-        var completed = false
-        Option(TaskContext.get()).foreach { taskContext =>
-          onTaskCompletion(taskContext) {
-            completed = true
-            close()
-          }
-        }
-        if (completed) {
-          throw new IllegalStateException(
-            "Task completed while registering the AST JIT cleanup callback")
-        }
-        compiledExpression = compiled
-      }
-    }
-    compiledExpression
-  }
 }

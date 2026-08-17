@@ -2553,6 +2553,12 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .stringConf
     .createWithDefault("NOT_ON_GPU")
 
+  private[rapids] def shouldExplain(explain: String): Boolean =
+    !explain.equalsIgnoreCase("NONE")
+
+  private[rapids] def shouldExplainAll(explain: String): Boolean =
+    explain.equalsIgnoreCase("ALL")
+
   val SHIMS_PROVIDER_OVERRIDE = conf("spark.rapids.shims-provider-override")
     .internal()
     .startupOnly()
@@ -3546,9 +3552,9 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val explain: String = get(EXPLAIN)
 
-  lazy val shouldExplain: Boolean = !explain.equalsIgnoreCase("NONE")
+  lazy val shouldExplain: Boolean = RapidsConf.shouldExplain(explain)
 
-  lazy val shouldExplainAll: Boolean = explain.equalsIgnoreCase("ALL")
+  lazy val shouldExplainAll: Boolean = RapidsConf.shouldExplainAll(explain)
 
   lazy val chunkedReaderEnabled: Boolean = get(CHUNKED_READER)
 

@@ -84,15 +84,12 @@ class GpuProjectExecMeta(
     }
     // Legacy Project AST eligibility is decided here. JIT selection is reported after tiering.
     if (conf.shouldExplain && conf.isProjectAstEnabled) {
-      val legacyExplain = childExprs.iterator.zip(projectList.iterator).collect {
+      val legacyExplain = childExprs.iterator.zip(projectList.iterator).flatMap {
         case (meta, expression) if GpuAstJitExpression.extractTopLevel(expression).isEmpty =>
-          val explanation = meta.explainAst(conf.shouldExplainAll)
-          if (explanation.nonEmpty) {
-            s"  Legacy Project AST eligibility:\n$explanation"
-          } else {
-            ""
-          }
-      }.filter(_.nonEmpty)
+          Some(meta.explainAst(conf.shouldExplainAll)).filter(_.nonEmpty)
+              .map(explanation => s"  Legacy Project AST eligibility:\n$explanation")
+        case _ => None
+      }
       val regularExplain = gpuExprs.iterator.zip(projectList.iterator).collect {
         case (expr, expression)
             if GpuProjectAstExpressionBase.extractTopLevel(expression).isEmpty &&
@@ -175,7 +172,7 @@ object GpuProjectExec {
           GpuProjectAstExpressionBase.extractTopLevel(expression).isDefined
         }
         if (hasAstExpressions) {
-          withResource(GpuProjectAstExpression.tableFromBatch(cb)) { table =>
+          withResource(GpuProjectAstExpressionBase.tableFromBatch(cb)) { table =>
             projectWithEval { expression =>
               GpuProjectAstExpressionBase.extractTopLevel(expression) match {
                 case Some(astExpression) => astExpression.computeColumn(table)

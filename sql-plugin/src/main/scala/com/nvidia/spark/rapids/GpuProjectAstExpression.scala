@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids
 
 import scala.annotation.tailrec
 
-import ai.rapids.cudf.{Scalar, Table}
+import ai.rapids.cudf.{ColumnVector, Scalar, Table}
 import ai.rapids.cudf.ast.CompiledExpression
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric.OP_TIME_LEGACY
@@ -33,8 +33,74 @@ import org.apache.spark.sql.rapids.catalyst.expressions.GpuEquivalentExpressions
 import org.apache.spark.sql.types.DataType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
-trait GpuProjectAstExpressionBase extends GpuExpression {
-  private[rapids] def computeColumn(table: Table): GpuColumnVector
+trait GpuProjectAstExpressionBase
+    extends ShimUnaryExpression with GpuExpression with GpuMetricsInjectable with AutoCloseable {
+  override def child: GpuExpression
+
+  protected def backendName: String
+  protected def compileNvtxId: NvtxId
+  protected def computeNvtxId: NvtxId
+  protected def evaluate(compiled: CompiledExpression, table: Table): ColumnVector
+
+  @transient private[this] var compiledExpression: CompiledExpression = _
+  private[this] var opTime: GpuMetric = NoopMetric
+
+  override final def dataType: DataType = child.dataType
+
+  override final def nullable: Boolean = child.nullable
+
+  override final def injectMetrics(metrics: Map[String, GpuMetric]): Unit = {
+    // OP_TIME_LEGACY is the owning operator's non-RDD timing metric, not a legacy AST metric.
+    opTime = metrics.getOrElse(OP_TIME_LEGACY, NoopMetric)
+  }
+
+  override final def close(): Unit = {
+    val toClose = synchronized {
+      val current = compiledExpression
+      compiledExpression = null
+      current
+    }
+    Option(toClose).foreach(_.safeClose())
+  }
+
+  override final def columnarEval(batch: ColumnarBatch): GpuColumnVector = {
+    withResource(GpuProjectAstExpressionBase.tableFromBatch(batch)) { table =>
+      computeColumn(table)
+    }
+  }
+
+  private[rapids] final def computeColumn(table: Table): GpuColumnVector = {
+    val compiled = getCompiledExpression
+    NvtxIdWithMetrics(computeNvtxId, opTime) {
+      closeOnExcept(evaluate(compiled, table)) { result =>
+        GpuColumnVector.from(result, dataType)
+      }
+    }
+  }
+
+  protected final def getCompiledExpression: CompiledExpression = synchronized {
+    if (compiledExpression == null) {
+      val compiled = NvtxIdWithMetrics(compileNvtxId, opTime) {
+        // Force every bound reference to the left table; Project AST has one input table.
+        child.convertToAst(Int.MaxValue).compile()
+      }
+      closeOnExcept(compiled) { _ =>
+        var completed = false
+        Option(TaskContext.get()).foreach { taskContext =>
+          onTaskCompletion(taskContext) {
+            completed = true
+            close()
+          }
+        }
+        if (completed) {
+          throw new IllegalStateException(
+            s"Task completed while registering the $backendName cleanup callback")
+        }
+        compiledExpression = compiled
+      }
+    }
+    compiledExpression
+  }
 }
 
 object GpuProjectAstExpressionBase {
@@ -47,35 +113,12 @@ object GpuProjectAstExpressionBase {
       case _ => None
     }
   }
-}
 
-object GpuProjectAstExpression {
   private[rapids] def replaceChild(alias: GpuAlias, child: Expression): GpuAlias = {
     if (child eq alias.child) {
       alias
     } else {
       GpuAlias(child, alias.name)(alias.exprId, alias.qualifier, alias.explicitMetadata)
-    }
-  }
-
-  private def asAst(child: GpuExpression): GpuProjectAstExpression = child match {
-    case astExpression: GpuProjectAstExpression => astExpression
-    case other => GpuProjectAstExpression(other)
-  }
-
-  private[rapids] def wrap(expression: NamedExpression): NamedExpression = expression match {
-    case alias @ GpuAlias(child: GpuExpression, _) =>
-      replaceChild(alias, asAst(child))
-    case other => other
-  }
-
-  /** Extracts a legacy Project AST wrapper after unwrapping any top-level aliases. */
-  @tailrec
-  private[rapids] def extractTopLevel(expression: Expression): Option[GpuProjectAstExpression] = {
-    expression match {
-      case alias: GpuAlias => extractTopLevel(alias.child)
-      case astExpression: GpuProjectAstExpression => Some(astExpression)
-      case _ => None
     }
   }
 
@@ -86,12 +129,78 @@ object GpuProjectAstExpression {
     case other => other
   }
 
+  private[rapids] def buildExprTiers(
+      expressions: Seq[Expression],
+      conf: SQLConf,
+      enableProjectAstJit: Boolean = false): Seq[Seq[Expression]] = {
+    val astOutputs = expressions.map(GpuProjectAstExpression.extractTopLevel(_).isDefined)
+    val hasAstOutputs = astOutputs.contains(true)
+    val hasJitOutputs = expressions.exists(GpuAstJitExpression.extractTopLevel(_).isDefined)
+    // CSE must see through backend markers so all outputs can share the same tiers.
+    val unwrapped = if (hasAstOutputs || hasJitOutputs) {
+      expressions.map(unwrap)
+    } else {
+      expressions
+    }
+    val replaced = if (RapidsConf.ENABLE_COMBINED_EXPRESSIONS.get(conf)) {
+      GpuEquivalentExpressions.replaceMultiExpressions(unwrapped, conf)
+    } else {
+      unwrapped
+    }
+    val tiers = GpuEquivalentExpressions.getExprTiers(replaced)
+    val astTiers = if (hasAstOutputs) {
+      GpuProjectAstExpression.rewrapAstTiers(tiers, astOutputs)
+    } else {
+      tiers
+    }
+    if (enableProjectAstJit) {
+      // Project binding selects JIT after CSE so newly exposed tiers are eligible.
+      astTiers.map(_.map(GpuAstJitExpression.wrapTierExpression))
+    } else {
+      // Only the Project-specific binder selects JIT after CSE.
+      astTiers
+    }
+  }
+
+  private[rapids] def tableFromBatch(batch: ColumnarBatch): Table = {
+    if (batch.numCols() != 0) {
+      GpuColumnVector.from(batch)
+    } else {
+      // cuDF cannot represent a row-count-only table, so use a dummy fixed-width column.
+      withResource(Scalar.fromBool(false)) { falseScalar =>
+        withResource(ai.rapids.cudf.ColumnVector.fromScalar(falseScalar, batch.numRows())) {
+          falseColumn => new Table(falseColumn)
+        }
+      }
+    }
+  }
+}
+
+object GpuProjectAstExpression {
+
+  private def asAst(child: GpuExpression): GpuProjectAstExpression = child match {
+    case astExpression: GpuProjectAstExpression => astExpression
+    case other => GpuProjectAstExpression(other)
+  }
+
+  private[rapids] def wrap(expression: NamedExpression): NamedExpression = expression match {
+    case alias @ GpuAlias(child: GpuExpression, _) =>
+      GpuProjectAstExpressionBase.replaceChild(alias, asAst(child))
+    case other => other
+  }
+
+  /** Extracts a legacy Project AST wrapper after unwrapping any top-level aliases. */
+  private[rapids] def extractTopLevel(expression: Expression): Option[GpuProjectAstExpression] =
+    GpuProjectAstExpressionBase.extractTopLevel(expression).collect {
+      case astExpression: GpuProjectAstExpression => astExpression
+    }
+
   private def rewrap(expression: Expression): Expression = expression match {
     case namedExpression: NamedExpression => wrap(namedExpression)
     case other => other
   }
 
-  private def rewrapAstTiers(
+  private[rapids] def rewrapAstTiers(
       tiers: Seq[Seq[Expression]],
       astOutputs: Seq[Boolean]): Seq[Seq[Expression]] = {
     val finalTier = tiers.last
@@ -127,114 +236,20 @@ object GpuProjectAstExpression {
     }
   }
 
-  private[rapids] def buildExprTiers(
-      expressions: Seq[Expression],
-      conf: SQLConf,
-      enableProjectAstJit: Boolean = false): Seq[Seq[Expression]] = {
-    val astOutputs = expressions.map(extractTopLevel(_).isDefined)
-    val hasAstOutputs = astOutputs.contains(true)
-    val hasJitOutputs = expressions.exists(GpuAstJitExpression.extractTopLevel(_).isDefined)
-    // CSE must see through backend markers so all outputs can share the same tiers.
-    val unwrapped = if (hasAstOutputs || hasJitOutputs) {
-      expressions.map(unwrap)
-    } else {
-      expressions
-    }
-    val replaced = if (RapidsConf.ENABLE_COMBINED_EXPRESSIONS.get(conf)) {
-      GpuEquivalentExpressions.replaceMultiExpressions(unwrapped, conf)
-    } else {
-      unwrapped
-    }
-    val tiers = GpuEquivalentExpressions.getExprTiers(replaced)
-    val astTiers = if (hasAstOutputs) {
-      rewrapAstTiers(tiers, astOutputs)
-    } else {
-      tiers
-    }
-    if (enableProjectAstJit) {
-      // Project binding selects JIT after CSE so newly exposed tiers are eligible.
-      astTiers.map(_.map(GpuAstJitExpression.wrapTierExpression))
-    } else {
-      // Only the Project-specific binder selects JIT after CSE.
-      astTiers
-    }
-  }
-
-  private[rapids] def tableFromBatch(batch: ColumnarBatch): Table = {
-    if (batch.numCols() != 0) {
-      GpuColumnVector.from(batch)
-    } else {
-      // cuDF cannot represent a row-count-only table, so use a dummy fixed-width column.
-      withResource(Scalar.fromBool(false)) { falseScalar =>
-        withResource(ai.rapids.cudf.ColumnVector.fromScalar(falseScalar, batch.numRows())) {
-          falseColumn => new Table(falseColumn)
-        }
-      }
-    }
-  }
 }
 
 case class GpuProjectAstExpression(child: GpuExpression)
-    extends ShimUnaryExpression with GpuProjectAstExpressionBase
-        with GpuMetricsInjectable with AutoCloseable {
-  @transient private[this] var compiledExpression: CompiledExpression = _
-  private[this] var opTime: GpuMetric = NoopMetric
+    extends GpuProjectAstExpressionBase {
 
-  override def dataType: DataType = child.dataType
+  override protected def backendName: String = "Project AST"
 
-  override def nullable: Boolean = child.nullable
+  override protected def compileNvtxId: NvtxId = NvtxRegistry.COMPILE_ASTS
+
+  override protected def computeNvtxId: NvtxId = NvtxRegistry.PROJECT_AST
+
+  override protected def evaluate(
+      compiled: CompiledExpression,
+      table: Table): ColumnVector = compiled.computeColumn(table)
 
   override def toString: String = s"AST($child)"
-
-  override def injectMetrics(metrics: Map[String, GpuMetric]): Unit = {
-    opTime = metrics.getOrElse(OP_TIME_LEGACY, NoopMetric)
-  }
-
-  override def close(): Unit = {
-    val toClose = synchronized {
-      val current = compiledExpression
-      compiledExpression = null
-      current
-    }
-    Option(toClose).foreach(_.safeClose())
-  }
-
-  override def columnarEval(batch: ColumnarBatch): GpuColumnVector = {
-    withResource(GpuProjectAstExpression.tableFromBatch(batch)) { table =>
-      computeColumn(table)
-    }
-  }
-
-  private[rapids] override def computeColumn(table: Table): GpuColumnVector = {
-    val compiled = getCompiledExpression
-    NvtxIdWithMetrics(NvtxRegistry.PROJECT_AST, opTime) {
-      closeOnExcept(compiled.computeColumn(table)) { result =>
-        GpuColumnVector.from(result, dataType)
-      }
-    }
-  }
-
-  private def getCompiledExpression: CompiledExpression = synchronized {
-    if (compiledExpression == null) {
-      val compiled = NvtxIdWithMetrics(NvtxRegistry.COMPILE_ASTS, opTime) {
-        // Force every bound reference to the left table; Project AST has one input table.
-        child.convertToAst(Int.MaxValue).compile()
-      }
-      closeOnExcept(compiled) { _ =>
-        var completed = false
-        Option(TaskContext.get()).foreach { taskContext =>
-          onTaskCompletion(taskContext) {
-            completed = true
-            close()
-          }
-        }
-        if (completed) {
-          throw new IllegalStateException(
-            "Task completed while registering the Project AST cleanup callback")
-        }
-        compiledExpression = compiled
-      }
-    }
-    compiledExpression
-  }
 }

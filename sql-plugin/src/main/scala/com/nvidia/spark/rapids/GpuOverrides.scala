@@ -4927,8 +4927,7 @@ object GpuOverrides extends Logging {
     } else {
       wrap.runAfterTagRules()
       wrap.tagForExplain()
-      val shouldExplainAll = explain.equalsIgnoreCase("ALL")
-      wrap.explain(shouldExplainAll)
+      wrap.explain(RapidsConf.shouldExplainAll(explain))
     }
   }
 

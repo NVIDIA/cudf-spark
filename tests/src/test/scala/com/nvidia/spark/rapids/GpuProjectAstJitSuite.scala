@@ -16,6 +16,7 @@
 
 package com.nvidia.spark.rapids
 
+import ai.rapids.cudf.Table
 import ai.rapids.cudf.ast.{AstExpression, CompiledExpression}
 import com.nvidia.spark.rapids.ProjectAstTestUtils.{collectExpressions, tierReferences}
 import org.mockito.Mockito.{doThrow, mock, times, verify, when}
@@ -35,13 +36,16 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
 
   private def alias(expression: GpuExpression, name: String) = GpuAlias(expression, name)()
 
-  private def mockJitExpression(compiled: CompiledExpression): GpuAstJitExpression = {
+  private def mockCompiledChild(compiled: CompiledExpression): GpuExpression = {
     val child = mock(classOf[GpuExpression])
     val ast = mock(classOf[AstExpression])
     when(child.convertToAst(Int.MaxValue)).thenReturn(ast)
     when(ast.compile()).thenReturn(compiled)
-    GpuAstJitExpression(child)
+    child
   }
+
+  private def mockJitExpression(compiled: CompiledExpression): GpuAstJitExpression =
+    GpuAstJitExpression(mockCompiledChild(compiled))
 
   private def projectConf(
       tiered: Boolean = true,
@@ -310,6 +314,27 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
       assertResult("Task completed while registering the AST JIT cleanup callback")(
         thrown.getMessage)
       jit.close()
+      verify(compiled, times(1)).close()
+    }
+  }
+
+  test("legacy project AST rejects a cleanup callback consumed during registration") {
+    val taskContext = new MockTaskContext(taskAttemptId = 1, partitionId = 0) {
+      override def addTaskCompletionListener(listener: TaskCompletionListener): TaskContext = {
+        listener.onTaskCompletion(this)
+        this
+      }
+    }
+    val compiled = mock(classOf[CompiledExpression])
+    val astExpression = GpuProjectAstExpression(mockCompiledChild(compiled))
+
+    TestUtils.withTaskContext(taskContext) {
+      val thrown = intercept[IllegalStateException] {
+        astExpression.computeColumn(mock(classOf[Table]))
+      }
+      assertResult("Task completed while registering the Project AST cleanup callback")(
+        thrown.getMessage)
+      astExpression.close()
       verify(compiled, times(1)).close()
     }
   }

@@ -23,9 +23,8 @@ import org.apache.spark.sql.catalyst.expressions.Expression
 object ProjectAstTestUtils {
   def collectExpressions[T <: Expression : ClassTag](
       expressions: Seq[Expression]): Seq[T] = {
-    val runtimeClass = implicitly[ClassTag[T]].runtimeClass
     expressions.flatMap(_.collect {
-      case expression if runtimeClass.isInstance(expression) => expression.asInstanceOf[T]
+      case expression: T => expression
     })
   }
 

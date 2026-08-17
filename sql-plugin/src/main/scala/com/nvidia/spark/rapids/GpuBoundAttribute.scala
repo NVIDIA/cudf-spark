@@ -46,9 +46,9 @@ object GpuBindReferences extends Logging {
       tieredProject: GpuTieredProject,
       conf: SQLConf): Unit = {
     val explain = RapidsConf.EXPLAIN.get(conf)
-    if (!explain.equalsIgnoreCase("NONE")) {
+    if (RapidsConf.shouldExplain(explain)) {
       val explanation = GpuAstJitExpression.explainFinalSelections(
-        tieredProject.exprTiers, explain.equalsIgnoreCase("ALL"))
+        tieredProject.exprTiers, RapidsConf.shouldExplainAll(explain))
       if (explanation.nonEmpty) {
         logWarning(s"FINAL PROJECT AST JIT SELECTION\n$explanation")
       }
@@ -148,7 +148,7 @@ object GpuBindReferences extends Logging {
       enableProjectAstJit: Boolean): GpuTieredProject = {
 
     val tieredProject = if (RapidsConf.ENABLE_TIERED_PROJECT.get(conf)) {
-      val exprTiers = GpuProjectAstExpression.buildExprTiers(
+      val exprTiers = GpuProjectAstExpressionBase.buildExprTiers(
         expressions, conf, enableProjectAstJit)
       val inputTiers = GpuEquivalentExpressions.getInputTiers(exprTiers, input)
       // Update ExprTiers to include the columns that are pass through and drop unneeded columns
