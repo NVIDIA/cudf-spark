@@ -689,6 +689,38 @@ def test_hash_grpby_pivot(data_gen, conf):
             .agg(f.sum('c')),
         conf = copy_and_update(conf, {'spark.sql.ansi.enabled': False}))
 
+
+@pytest.mark.skipif(not is_spark_420_or_later(),
+                    reason='collation-aware PivotFirst is fixed in Spark 4.2')
+@pytest.mark.parametrize('collation', ['UNICODE', 'UTF8_LCASE', 'UNICODE_CI'])
+@allow_non_gpu('ProjectExec', 'Collate', 'ResolvedCollation', 'HashAggregateExec',
+               'SortAggregateExec', 'SortExec', 'PivotFirst', 'AggregateExpression',
+               'Alias', 'GetArrayItem', 'Literal', 'ShuffleExchangeExec', 'HashPartitioning')
+def test_hash_grpby_pivot_collation_fallback(collation):
+    def do_pivot(spark):
+        spark.createDataFrame(
+            [(1, 'SALES', 100), (1, 'sales', 50), (1, None, 20)],
+            ['emp_id', 'dept', 'amount']).createOrReplaceTempView('collation_pivot_input')
+        df = spark.sql(
+            f"""
+            SELECT * FROM (
+              SELECT emp_id, COLLATE(dept, '{collation}') AS dept, amount
+              FROM collation_pivot_input
+            )
+            PIVOT (SUM(amount) FOR dept IN ('sales' AS sales))
+            """)
+        explain = spark.sparkContext._jvm.com.nvidia.spark.rapids.ExplainPlan \
+            .explainPotentialGpuPlan(df._jdf, 'ALL')
+        assert ('PivotFirst does not support non-UTF8_BINARY string collations on the GPU'
+                in explain)
+        return df
+
+    assert_gpu_fallback_collect(
+        do_pivot,
+        'PivotFirst',
+        conf={'spark.sql.adaptive.enabled': False})
+
+
 @approximate_float
 @ignore_order(local=True)
 @incompat

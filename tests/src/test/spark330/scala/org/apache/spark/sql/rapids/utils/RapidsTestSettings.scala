@@ -217,6 +217,38 @@ class RapidsTestSettings extends BackendTestSettings {
   enableSuite[RapidsDeprecatedAPISuite]
   enableSuite[RapidsDeprecatedDatasetAggregatorSuite]
   enableSuite[RapidsStatisticsCollectionSuite]
+  enableSuite[RapidsDataFrameCallbackSuite]
+    .exclude("get numRows metrics by callback",
+      ADJUST_UT("Replaced by a testRapids version that locates numOutputRows across the GPU " +
+        "plan instead of assuming a CPU WholeStageCodegen root. Original contract: " +
+        "https://github.com/apache/spark/blob/v3.3.0/sql/core/src/test/scala/org/apache/" +
+        "spark/sql/util/DataFrameCallbackSuite.scala#L98-L130; P1."))
+    .exclude("execute callback functions for DataFrameWriter",
+      ADJUST_UT("Replaced by a testRapids version that identifies callback commands by type " +
+        "instead of fixed positions. Original contract: https://github.com/apache/spark/blob/" +
+        "v3.3.0/sql/core/src/test/scala/org/apache/spark/sql/util/" +
+        "DataFrameCallbackSuite.scala#L181-L238; P1."))
+    .exclude("get observable metrics by callback",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/14152. Recovery trigger: " +
+        "CollectMetricsExec aggregation expressions no longer fail GPU override tagging; P0."))
+    .exclude("SPARK-35296: observe should work even if a task contains multiple partitions",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/14152. Recovery trigger: " +
+        "CollectMetricsExec supports multi-partition observation under RAPIDS; P0."))
+    .exclude("SPARK-35695: get observable metrics with persist by callback",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/14152. Recovery trigger: " +
+        "CollectMetricsExec supports persisted observations under RAPIDS; P0."))
+    .exclude("SPARK-35695: get observable metrics with adaptive execution by callback",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/14152. Recovery trigger: " +
+        "CollectMetricsExec supports adaptive observations under RAPIDS; P0."))
+  enableSuite[RapidsInMemoryTableMetricSuite]
+  enableSuite[RapidsOptimizeMetadataOnlyQuerySuite]
+  enableSuite[RapidsQueryExecutionErrorsSuite]
+    .exclude("INCONSISTENT_BEHAVIOR_CROSS_VERSION: " +
+      "compatibility with Spark 2.4/3.2 in reading/writing dates",
+      ADJUST_UT("Replaced by a testRapids version that expands the Spark test resource with " +
+        "testFile() before reading it. Original contract: https://github.com/apache/spark/blob/" +
+        "v3.3.0/sql/core/src/test/scala/org/apache/spark/sql/errors/" +
+        "QueryExecutionErrorsSuite.scala#L171-L232; P1."))
   enableSuite[RapidsWriteDistributionAndOrderingSuite]
   enableSuite[RapidsOrcSourceV1Suite]
     .exclude("Propagate Hadoop configs from orc options to underlying file system",
@@ -567,5 +599,29 @@ class RapidsTestSettings extends BackendTestSettings {
     .exclude("SPARK-33084: Add jar support Ivy URI in SQL -- jar contains udf class", ADJUST_UT("Replaced by testRapids version that uses testFile() to access Spark test resources instead of getContextClassLoader"))
     .exclude("SPARK-33482: Fix FileScan canonicalization", ADJUST_UT("Replaced by testRapids version using V1 sources with AQE and broadcast disabled to assert ReusedExchangeExec directly"))
     .exclude("SPARK-36093: RemoveRedundantAliases should not change expression's name", ADJUST_UT("Replaced by testRapids version that checks the partition column name of the GpuInsertIntoHadoopFsRelationCommand"))
+  enableSuite[RapidsCTEInlineSuiteAEOff]
+  enableSuite[RapidsCTEInlineSuiteAEOn]
+  enableSuite[RapidsFilteredScanSuite]
+    .excludeByPrefix(
+      "PushDown Returns ",
+      KNOWN_ISSUE(
+        "The Spark helper directly executes the CPU RowDataSourceScanExec instead of the " +
+          "query-level plan. See https://github.com/NVIDIA/cudf-spark/issues/15566. " +
+          "Recovery trigger: add query-level RAPIDS coverage for equivalent pushdown and " +
+          "column-pruning assertions; P2."))
+  enableSuite[RapidsPrunedScanSuite]
+    .excludeByPrefix(
+      "Columns output ",
+      KNOWN_ISSUE(
+        "The Spark helper directly executes the CPU RowDataSourceScanExec instead of the " +
+          "query-level plan. See https://github.com/NVIDIA/cudf-spark/issues/15567. " +
+          "Recovery trigger: add query-level RAPIDS coverage for equivalent column-pruning " +
+          "assertions; P2."))
+  enableSuite[RapidsSupportsCatalogOptionsSuite]
+  enableSuite[RapidsLocalTempViewTestSuite]
+  enableSuite[RapidsGlobalTempViewTestSuite]
+  enableSuite[RapidsPersistedViewTestSuite]
+  enableSuite[RapidsRowDataSourceStrategySuite]
+  enableSuite[RapidsConfigBehaviorSuite]
 }
 // scalastyle:on line.size.limit

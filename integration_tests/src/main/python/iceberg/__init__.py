@@ -35,8 +35,10 @@ iceberg_unsupported_mark = pytest.mark.skipif(
 runtime_iceberg_version = os.environ.get("EXPECTED_ICEBERG_VERSION")
 supports_iceberg_v3 = (
     runtime_iceberg_version is not None and
-    tuple(int(part) for part in runtime_iceberg_version.split(".")[:2]) >= (1, 9))
-ICEBERG_V3_UNSUPPORTED_REASON = "Iceberg v3 only supported after iceberg 1.9.0"
+    tuple(int(part) for part in runtime_iceberg_version.split(".")[:2]) >= (1, 9) and
+    not is_iceberg_rest_catalog())
+ICEBERG_V3_UNSUPPORTED_REASON = (
+    "Iceberg v3 requires Iceberg 1.9.0 or later and a catalog backend with v3 support")
 
 # iceberg supported types
 iceberg_table_gen = MappingProxyType({
