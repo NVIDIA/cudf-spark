@@ -1464,8 +1464,14 @@ def exact_percentile_reduction(df):
         'percentile(val, array(0, 0.0001, 0.5, 0.9999, 1), abs(freq))'
     )
 
+_exact_percentile_issue = 'https://github.com/NVIDIA/cudf-spark/issues/15516'
+_exact_percentile_strict_skip_reason = \
+    f'{_exact_percentile_issue}: Spark 5 exact percentile coverage uses the Spark 500 variant'
+_exact_percentile_tolerance_reason = \
+    f'{_exact_percentile_issue}: Spark 5 exact percentile result tolerance'
+
 @pytest.mark.skipif(is_spark_500_or_later(),
-                    reason='Spark 5 exact percentile coverage uses the Spark 500 variant')
+                    reason=_exact_percentile_strict_skip_reason)
 @datagen_overrides(seed=0, reason="https://github.com/NVIDIA/spark-rapids/issues/10233")
 @pytest.mark.parametrize('data_gen', exact_percentile_reduction_data_gen, ids=idfn)
 def test_exact_percentile_reduction(data_gen):
@@ -1473,7 +1479,7 @@ def test_exact_percentile_reduction(data_gen):
         lambda spark: exact_percentile_reduction(gen_df(spark, data_gen)))
 
 @pytest.mark.skipif(not is_spark_500_or_later(),
-                    reason='Spark 5 exact percentile result tolerance')
+                    reason=_exact_percentile_tolerance_reason)
 @datagen_overrides(seed=0, reason="https://github.com/NVIDIA/spark-rapids/issues/10233")
 @approximate_float
 @pytest.mark.parametrize('data_gen', exact_percentile_reduction_data_gen, ids=idfn)
@@ -1515,7 +1521,7 @@ def _assert_exact_percentile_reduction_partial_fallback_to_cpu(
     )
 
 @pytest.mark.skipif(is_spark_500_or_later(),
-                    reason='Spark 5 exact percentile coverage uses the Spark 500 variant')
+                    reason=_exact_percentile_strict_skip_reason)
 @allow_non_gpu('ObjectHashAggregateExec', 'SortAggregateExec', 'ShuffleExchangeExec', 'HashPartitioning',
                'AggregateExpression', 'Alias', 'Cast', 'Literal', 'ProjectExec',
                'Percentile')
@@ -1529,7 +1535,7 @@ def test_exact_percentile_reduction_partial_fallback_to_cpu(data_gen,  replace_m
         data_gen, replace_mode, use_obj_hash_agg)
 
 @pytest.mark.skipif(not is_spark_500_or_later(),
-                    reason='Spark 5 exact percentile result tolerance')
+                    reason=_exact_percentile_tolerance_reason)
 @approximate_float
 @allow_non_gpu('ObjectHashAggregateExec', 'SortAggregateExec', 'ShuffleExchangeExec', 'HashPartitioning',
                'AggregateExpression', 'Alias', 'Cast', 'Literal', 'ProjectExec',
@@ -1594,7 +1600,7 @@ def exact_percentile_groupby(df):
 
 @ignore_order
 @pytest.mark.skipif(is_spark_500_or_later(),
-                    reason='Spark 5 exact percentile coverage uses the Spark 500 variant')
+                    reason=_exact_percentile_strict_skip_reason)
 @pytest.mark.parametrize('data_gen', exact_percentile_groupby_data_gen, ids=idfn)
 def test_exact_percentile_groupby(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
@@ -1602,7 +1608,7 @@ def test_exact_percentile_groupby(data_gen):
 
 @ignore_order
 @pytest.mark.skipif(not is_spark_500_or_later(),
-                    reason='Spark 5 exact percentile result tolerance')
+                    reason=_exact_percentile_tolerance_reason)
 @approximate_float
 @pytest.mark.parametrize('data_gen', exact_percentile_groupby_spark500_data_gen, ids=idfn)
 def test_exact_percentile_groupby_spark500(data_gen):
@@ -1638,7 +1644,7 @@ exact_percentile_groupby_cpu_fallback_spark500_data_gen = [
 
 @ignore_order
 @pytest.mark.skipif(is_spark_500_or_later(),
-                    reason='Spark 5 exact percentile coverage uses the Spark 500 variant')
+                    reason=_exact_percentile_strict_skip_reason)
 @allow_non_gpu('ObjectHashAggregateExec', 'SortAggregateExec', 'ShuffleExchangeExec', 'HashPartitioning',
                'AggregateExpression', 'Alias', 'Cast', 'Literal', 'ProjectExec',
                'Percentile')
@@ -1674,7 +1680,7 @@ def test_exact_percentile_groupby_partial_fallback_to_cpu(data_gen, replace_mode
 
 @ignore_order
 @pytest.mark.skipif(not is_spark_500_or_later(),
-                    reason='Spark 5 exact percentile result tolerance')
+                    reason=_exact_percentile_tolerance_reason)
 @approximate_float
 @allow_non_gpu('ObjectHashAggregateExec', 'SortAggregateExec', 'ShuffleExchangeExec', 'HashPartitioning',
                'AggregateExpression', 'Alias', 'Cast', 'Literal', 'ProjectExec',

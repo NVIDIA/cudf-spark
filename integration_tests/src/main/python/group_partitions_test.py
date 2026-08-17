@@ -92,7 +92,8 @@ def _assert_partial_clustering_spj_plan(plan):
     reason="Requires Spark's partial-clustering correctness fix")
 @pytest.mark.xfail(
     condition=is_spark_500_or_later(),
-    reason="Spark 5 requires KeyedPartitionings in a PartitioningCollection to share keys")
+    reason="https://github.com/NVIDIA/cudf-spark/issues/15688: Spark 5 requires "
+           "KeyedPartitionings in a PartitioningCollection to share keys")
 def test_group_partitions_partial_clustering_distinct():
     def distinct_after_spj(spark):
         # A JVM V2 source is required to report KeyGroupedPartitioning and per-partition keys.
