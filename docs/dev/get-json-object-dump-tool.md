@@ -8,12 +8,12 @@ parent: Developer Overview
 # Dump tool for get_json_object
 
 ## Overview
-In order to help debug the issues with the `get_json_object` function, the RAPIDS Accelerator provides a
-dump tool to save debug information to try and reproduce the issues. Note, the dumped data will be masked
-to protect the customer data.
+In order to help debug the issues with the `get_json_object` function, the NVIDIA cuDF plugin for
+Apache Spark provides a dump tool to save debug information to try and reproduce the issues. Note,
+the dumped data will be masked to protect the customer data.
 
 ## How to enable
-This assumes that the RAPIDs Accelerator has already been enabled.
+This assumes that the cuDF plugin has already been enabled.
 
 The `get_json_object` expression may be off by default so enable it first
 ```
@@ -45,7 +45,7 @@ This config can be skipped, because default value works.
 Please note that this cannot currently be disabled.
 This tool should not dump the original input data.
 The goal is to find out what types of issues are showing up, and ideally 
-give the RAPIDS team enough information to reproduce it.
+give the cuDF team enough information to reproduce it.
 
 Digits `[0-9]` will be remapped to `[0-9]`, the mapping is chosen
 randomly for each instance of the expression. This is done to preserve

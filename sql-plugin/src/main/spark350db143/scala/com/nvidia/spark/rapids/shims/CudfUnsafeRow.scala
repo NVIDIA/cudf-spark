@@ -20,26 +20,9 @@ spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
 import org.apache.spark.sql.catalyst.expressions.Attribute
-import org.apache.spark.unsafe.types.VariantVal
-import org.apache.spark.unsafe.types.geo._
-
 
 final class CudfUnsafeRow(
    attributes: Array[Attribute],
-   remapping: Array[Int]) extends CudfUnsafeRowBase(attributes, remapping) {
-
-  def getGeography(x$1: Int): GeographyVal = {
-    throw new UnsupportedOperationException("Not Implemented yet")
-  }
-
-  def getGeometry(x$1: Int): GeometryVal = {
-    throw new UnsupportedOperationException("Not Implemented yet")
-  }
-
-  def getVariant(x$1: Int): VariantVal = {
-    throw new UnsupportedOperationException("Not Implemented yet")
-  }
-
-}
+   remapping: Array[Int]) extends CudfUnsafeRowBase(attributes, remapping)
 
 object CudfUnsafeRow extends CudfUnsafeRowTrait

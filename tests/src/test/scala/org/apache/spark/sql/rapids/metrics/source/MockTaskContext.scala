@@ -116,11 +116,4 @@ abstract class MockTaskContextBase(taskAttemptId: Long, partitionId: Int) extend
   private[spark] def createResourceUninterruptibly[T <: Closeable](
       resourceBuilder: => T): T = resourceBuilder
 
-  /**
-   * These below methods were introduced in Spark-4.1 / Databricks 17.3. Not shimmed and added
-   * to the common class by removing the override keyword.
-   * Note: addTaskInterruptListener is omitted because TaskInterruptListener type does not exist
-   * in Spark <= 4.0.
-   */
-  private[spark] def getTaskFailure(): Option[Throwable] = None
 }

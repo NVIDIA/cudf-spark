@@ -18,13 +18,14 @@ package org.apache.iceberg.spark.source
 
 import scala.collection.JavaConverters._
 
-import com.nvidia.spark.rapids.{CombineConf, GpuMetric, MultiFileReaderUtils, RapidsConf, ThreadPoolConfBuilder}
+import com.nvidia.spark.rapids.{CombineConf, GpuMetric, MultiFileReaderUtils, RapidsConf,
+  ThreadPoolConfBuilder}
 import com.nvidia.spark.rapids.iceberg.ShimUtils.locationOf
 import com.nvidia.spark.rapids.iceberg.parquet.{
+  AsyncMultiThread,
   MultiFile,
   MultiThread,
   SingleFile,
-  AsyncMultiThread,
   ThreadConf
 }
 import org.apache.iceberg.{FileFormat, MetadataColumns}
@@ -116,7 +117,8 @@ class GpuReaderFactory(private val metrics: Map[String, GpuMetric],
           hasRowPositionMetadata)
 
         // Keep the disabled path identical to upstream. Only an explicitly enabled and eligible
-        // scan gets the asynchronous marker; the encryption traversal is also avoided when disabled.
+        // scan gets the asynchronous marker; the encryption traversal is also avoided when
+        // disabled.
         if (icebergAsyncReadEnabled && hasNoDeletes && !queryUsesInputFile &&
             !hasRowPositionMetadata && scans.forall(_.file.keyMetadata == null)) {
           AsyncMultiThread(multiThread)

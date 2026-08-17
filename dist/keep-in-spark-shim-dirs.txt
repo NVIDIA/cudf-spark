@@ -1,0 +1,55 @@
+# Patterns for class files that must remain duplicated in each Spark-version
+# directory even when binary dedupe marks them bitwise-identical.
+#
+# Add entries only when a class must be loaded from the selected shim directory
+# and needs same-loader visibility to other shim-only classes. New common
+# classes should normally stay unshimmed by default.
+
+# These shim rule containers are inherited by SparkShimImpl and instantiate
+# shim-only rule metadata. Keeping them in each selected shim directory avoids
+# loading a shared parent trait from a classloader that cannot see its shim-only
+# dependencies.
+com/nvidia/spark/rapids/shims/AnsiCastRuleShims*.class
+com/nvidia/spark/rapids/shims/AggregateInPandasExecShims*.class
+com/nvidia/spark/rapids/shims/Spark*PlusShims*.class
+com/nvidia/spark/rapids/shims/Spark*PlusNonDBShims*.class
+com/nvidia/spark/rapids/shims/Spark*PlusDBShims*.class
+com/nvidia/spark/rapids/shims/RoundingShims*.class
+com/nvidia/spark/rapids/shims/MapInPandasExecShims*.class
+com/nvidia/spark/rapids/shims/PythonMapInArrowExecShims*.class
+com/nvidia/spark/rapids/shims/RangeExecShims*.class
+com/nvidia/spark/rapids/shims/ScanExecShims*.class
+
+# These aggregate families have shim-local abstract bases or concrete implementations.
+# Keep bases, companions, and concrete implementations in the same selected shim loader.
+org/apache/spark/sql/rapids/aggregate/Gpu*Average*.class
+org/apache/spark/sql/rapids/aggregate/Gpu*Sum*.class
+
+# These arithmetic families have version-specific concrete classes and common bases.
+# Keep the bases, helpers, companions, and concrete implementations together.
+org/apache/spark/sql/rapids/GpuAdd*.class
+org/apache/spark/sql/rapids/GpuSubtract*.class
+org/apache/spark/sql/rapids/GpuMultiply*.class
+org/apache/spark/sql/rapids/GpuDivModLike*.class
+org/apache/spark/sql/rapids/GpuDivide*.class
+org/apache/spark/sql/rapids/GpuIntegralDivide*.class
+org/apache/spark/sql/rapids/GpuDecimalDivide*.class
+org/apache/spark/sql/rapids/GpuRemainder*.class
+org/apache/spark/sql/rapids/GpuPmod*.class
+
+org/apache/spark/sql/rapids/GpuBitwiseAnd*.class
+org/apache/spark/sql/rapids/GpuBitwiseOr*.class
+org/apache/spark/sql/rapids/GpuBitwiseXor*.class
+
+# Project exec has a shim-local Like trait; keep its companion with that trait so
+# extractor pattern matching resolves in the selected shim loader.
+com/nvidia/spark/rapids/GpuProjectExecLike*.class
+
+# Broadcast exchange has a shim-local base; keep the base, companion, and
+# concrete implementation together in the selected shim loader.
+org/apache/spark/sql/rapids/execution/GpuBroadcastExchangeExec*.class
+
+# Transition rule bytecode has generated helpers that pattern-match shim-local GPU
+# exchange execs. Keep the rule and helpers in the selected shim loader.
+com/nvidia/spark/rapids/GpuTransitionOverrides.class
+com/nvidia/spark/rapids/GpuTransitionOverrides$$*.class

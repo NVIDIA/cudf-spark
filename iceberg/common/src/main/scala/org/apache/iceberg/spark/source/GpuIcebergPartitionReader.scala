@@ -20,7 +20,7 @@ import scala.collection.JavaConverters._
 
 import com.nvidia.spark.rapids.GpuMetric
 import com.nvidia.spark.rapids.MapUtil.toMapStrict
-import com.nvidia.spark.rapids.fileio.iceberg.{IcebergFileIO, IcebergInputFile}
+import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
 import com.nvidia.spark.rapids.iceberg.ShimUtils
 import com.nvidia.spark.rapids.iceberg.ShimUtils.locationOf
 import com.nvidia.spark.rapids.iceberg.data.GpuDeleteFilter
@@ -113,7 +113,7 @@ class GpuIcebergPartitionReader(private val task: GpuSparkInputPartition,
     val inputFiles = table.encryption()
       .decrypt(encryptedFiles.asJava)
       .asScala
-      .map(f => f.location() -> new IcebergInputFile(f))
+      .map(f => f.location() -> rapidsFileIO.newInputFile(f))
       .toMap
 
     val taskMap = toMapStrict(tasks.map(t => {

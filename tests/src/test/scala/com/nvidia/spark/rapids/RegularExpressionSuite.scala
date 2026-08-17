@@ -16,6 +16,9 @@
 package com.nvidia.spark.rapids
 
 import java.nio.charset.Charset
+import java.util.regex.Pattern
+
+import scala.util.Try
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims._
@@ -77,6 +80,17 @@ class RegularExpressionSuite extends SparkQueryCompareTestSuite {
     nullableStringsFromCsv, execsAllowedNonGpu = Seq("ProjectExec", "Alias",
       "RegExpReplace", "AttributeReference"), conf = conf) {
     frame => frame.selectExpr("regexp_replace(strings,'','D')")
+  }
+
+  testGpuFallback("String regexp_replace oversized quantifier cpu fall back",
+    "RegExpReplace",
+    nullableStringsFromCsv, execsAllowedNonGpu = Seq("ProjectExec", "Alias",
+      "RegExpReplace", "AttributeReference"), conf = conf) { frame =>
+    // JDK 11 accepts this pattern while newer JDKs reject it before RAPIDS parsing.
+    val pattern = "a{9999999999999999999999999999}"
+    assume(Try(Pattern.compile(pattern)).isSuccess,
+      "Java regex validation rejects the oversized quantifier")
+    frame.selectExpr(s"regexp_replace(strings, '$pattern', 'replacement')")
   }
 
   testSparkResultsAreEqual("String regexp_replace regex 1",

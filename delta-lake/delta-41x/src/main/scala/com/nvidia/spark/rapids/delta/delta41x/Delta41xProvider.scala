@@ -17,7 +17,7 @@
 package com.nvidia.spark.rapids.delta.delta41x
 
 import com.nvidia.spark.rapids._
-import com.nvidia.spark.rapids.delta.common.{DeleteCommandMeta, DeltaDynamicPartitionOverwriteCommandMeta, MergeIntoCommandMeta, OptimizeTableCommandMeta, UpdateCommandMeta}
+import com.nvidia.spark.rapids.delta.common.{DeleteCommandMeta, DeltaDynamicPartitionOverwriteCommandMeta, OptimizeTableCommandMeta, UpdateCommandMeta}
 import com.nvidia.spark.rapids.delta.common.{GpuDelta4xParquetFileFormat, GpuDeltaParquetFileFormat2}
 import com.nvidia.spark.rapids.delta.common.DeltaProviderBase
 
@@ -29,7 +29,7 @@ import org.apache.spark.sql.delta.commands.{DeleteCommand, MergeIntoCommand, Opt
 import org.apache.spark.sql.delta.rapids.GpuDeltaCatalog4x
 import org.apache.spark.sql.execution.command.RunnableCommand
 import org.apache.spark.sql.execution.datasources.FileFormat
-import org.apache.spark.sql.execution.datasources.v2.AppendDataExecV1
+import org.apache.spark.sql.execution.datasources.v2.{AppendDataExecV1, OverwriteByExpressionExecV1}
 
 object Delta41xProvider extends DeltaProviderBase with Logging {
 
@@ -43,6 +43,21 @@ object Delta41xProvider extends DeltaProviderBase with Logging {
   override def tagForGpu(
       cpuExec: AppendDataExecV1,
       meta: AppendDataExecV1Meta): Unit = {
+    if (!meta.conf.isDeltaWriteEnabled) {
+      meta.willNotWorkOnGpu("Delta Lake output acceleration has been disabled. To enable set " +
+        s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
+    }
+
+    cpuExec.table match {
+      case _: DeltaTableV2 => super.tagForGpu(cpuExec, meta)
+      case _: GpuDeltaCatalog4x#GpuStagedDeltaTableV2 =>
+      case _ => meta.willNotWorkOnGpu(s"${cpuExec.table} table class not supported on GPU")
+    }
+  }
+
+  override def tagForGpu(
+      cpuExec: OverwriteByExpressionExecV1,
+      meta: OverwriteByExpressionExecV1Meta): Unit = {
     if (!meta.conf.isDeltaWriteEnabled) {
       meta.willNotWorkOnGpu("Delta Lake output acceleration has been disabled. To enable set " +
         s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
@@ -116,6 +131,19 @@ object Delta41xProvider extends DeltaProviderBase with Logging {
         super.convertToGpu(cpuExec, meta)
       case _: GpuDeltaCatalog4x#GpuStagedDeltaTableV2 =>
         GpuAppendDataExecV1(cpuExec.table, cpuExec.plan, cpuExec.refreshCache, cpuExec.write)
+      case unknown => throw new IllegalStateException(s"$unknown doesn't match any of the known ")
+    }
+  }
+
+  override def convertToGpu(
+      cpuExec: OverwriteByExpressionExecV1,
+      meta: OverwriteByExpressionExecV1Meta): GpuExec = {
+    cpuExec.table match {
+      case _: DeltaTableV2 =>
+        super.convertToGpu(cpuExec, meta)
+      case _: GpuDeltaCatalog4x#GpuStagedDeltaTableV2 =>
+        GpuOverwriteByExpressionExecV1(
+          cpuExec.table, cpuExec.plan, cpuExec.refreshCache, cpuExec.write)
       case unknown => throw new IllegalStateException(s"$unknown doesn't match any of the known ")
     }
   }

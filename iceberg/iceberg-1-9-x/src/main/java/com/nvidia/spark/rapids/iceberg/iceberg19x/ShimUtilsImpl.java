@@ -19,14 +19,12 @@ package com.nvidia.spark.rapids.iceberg.iceberg19x;
 import com.nvidia.spark.rapids.RapidsConf;
 import com.nvidia.spark.rapids.iceberg.IcebergShimUtils;
 import org.apache.iceberg.*;
-import org.apache.iceberg.data.IdentityPartitionConverters;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.StorageCredential;
 import org.apache.iceberg.io.SupportsStorageCredentials;
+import org.apache.iceberg.spark.SparkUtil;
 import org.apache.iceberg.spark.source.GpuSparkCopyOnWriteV1Scan;
 import org.apache.iceberg.spark.source.GpuSparkScan;
-import org.apache.iceberg.spark.source.GpuStructInternalRow;
-import org.apache.iceberg.types.Type;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.PartitionUtil;
 import org.apache.spark.sql.connector.read.Scan;
@@ -35,21 +33,16 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
-/** Iceberg 1.9.x shim: uses {@code IdentityPartitionConverters::convertConstant}. */
+/** Iceberg 1.9.x shim: uses {@code SparkUtil::internalToSpark}. */
 public class ShimUtilsImpl implements IcebergShimUtils {
+    @Override
+    public int formatVersion(Table table) {
+        return TableUtil.formatVersion(table);
+    }
+
     @Override
     public String locationOf(ContentFile<?> f) {
         return f.location();
-    }
-
-    private static Object convertConstant(Type type, Object value) {
-        Object converted = IdentityPartitionConverters.convertConstant(type, value);
-        if (converted instanceof StructLike && type instanceof Types.StructType) {
-            GpuStructInternalRow row = new GpuStructInternalRow((Types.StructType) type);
-            row.setStruct((StructLike) converted);
-            return row;
-        }
-        return converted;
     }
 
     @Override
@@ -58,10 +51,10 @@ public class ShimUtilsImpl implements IcebergShimUtils {
             Types.StructType partitionType = Partitioning.partitionType(table);
             return PartitionUtil.constantsMap(task,
                     partitionType,
-                    ShimUtilsImpl::convertConstant);
+                    SparkUtil::internalToSpark);
         } else {
             return PartitionUtil.constantsMap(task,
-                    ShimUtilsImpl::convertConstant);
+                    SparkUtil::internalToSpark);
         }
     }
 

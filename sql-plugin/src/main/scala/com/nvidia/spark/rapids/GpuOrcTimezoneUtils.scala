@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,136 +16,171 @@
 
 package com.nvidia.spark.rapids
 
+import java.time.{DateTimeException, ZoneId}
+import java.util.Optional
+
+import scala.collection.mutable.ArrayBuffer
+
 import ai.rapids.cudf.{ColumnView, DType, Scalar, Table}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingSeq
-import java.time.{LocalDateTime, ZoneId}
-import java.util.Optional
-import scala.collection.mutable.ArrayBuffer
+import com.nvidia.spark.rapids.jni.GpuTimeZoneDB
 
 object GpuOrcTimezoneUtils {
 
-  /**
-   * Get the offset in microseconds for 2025-01-01 between JVM timezone and UTC timezone.
-   * @param jvmTz the JVM timezone to calculate the offset for
-   * @return the offset in microseconds
-   *         between the JVM timezone and UTC timezone for 2025-01-01
-   *         This is used to rebase the timestamp columns in the input table.
-   */
-  private def getOffsetForJanuaryFirst2015(jvmTz: ZoneId): Long = {
-    val t1 = LocalDateTime.of(2015, 1, 1, 0, 0, 0).atZone(jvmTz).toInstant.getEpochSecond
-    val t2 = LocalDateTime.of(2015, 1, 1, 0, 0, 0).atZone(ZoneId.of("UTC")).toInstant.getEpochSecond
-    val diffMicros: Long = (t2 - t1) * 1000000L // convert seconds to microseconds
-    diffMicros
+  /** Resolve an ORC stripe footer timezone once at the metadata boundary. */
+  private[rapids] def resolveWriterTimezone(writerTimezone: String): ZoneId = {
+    if (writerTimezone.isEmpty) {
+      ZoneId.systemDefault()
+    } else {
+      try {
+        ZoneId.of(writerTimezone, ZoneId.SHORT_IDS)
+      } catch {
+        case e: DateTimeException =>
+          throw new IllegalArgumentException(
+            s"Unrecognized writer timezone in ORC stripe footer: '$writerTimezone'", e)
+      }
+    }
+  }
+
+  /** Return whether every timezone has the same rules. */
+  private[rapids] def writerTimezonesShareRules(writerTimezones: Iterable[ZoneId]): Boolean = {
+    writerTimezones.headOption.forall { head =>
+      writerTimezones.forall(_.getRules == head.getRules)
+    }
   }
 
   /**
-   * Recursively rebase the timestamp columns in the input column view to the target timezone.
-   * It handles nested types: list and struct.
-   * The rebase logic is simple: just subtract the offset in microseconds between the
-   * target timezone and UTC timezone.
-   * For more details about the rebase logic, please refer to:
-   * https://github.com/apache/orc/blob/rel/release-1.9.1/
-   * java/core/src/java/org/apache/orc/impl/TreeReaderFactory.java#L1157
-   * `TimestampTreeReader.getBaseTimestamp` generates the base timestamp with JVM default timezone.
-   * `threadLocalDateFormat.get().setTimeZone(writerTimeZone);`
-   * The above writerTimeZone is not the timezone in the ORC file stripe footer,
-   * it is the default JVM timezone.
-   * `TimestampTreeReader.readTimestamp` applies the diff:
-   *   `long millis = (data.next() + base_timestamp)`
-   * Note: the input timestamp columns are read as in the UTC timezone.
+   * Rebase ORC timestamps considering writer and reader timezones.
    *
+   * Uses the JNI kernel `GpuTimeZoneDB.convertOrcTimezones` for both same- and cross-timezone
+   * reads. Even when the timezone rules match, the kernel must reconstruct the writer-specific
+   * ORC 2015 base before deciding whether to apply the negative nanos borrow.
+   *
+   * @param input the input table (timestamps read as UTC via ignoreTimezoneInStripeFooter)
+   * @param writerTimezone the resolved writer timezone from the ORC stripe footer
+   * @return table with rebased timestamp columns; input is closed
    */
-  private def rebaseTimestampRecursively(
-                                          col: ColumnView,
-                                          toZoneId: ZoneId,
-                                          toClose: ArrayBuffer[ColumnView],
-                                          diffMicros: Long): ColumnView = {
+  def rebaseOrcTimestamps(input: Table, writerTimezone: ZoneId): Table = {
+    rebaseWithWriterTimezone(input, writerTimezone.getId, ZoneId.systemDefault().getId)
+  }
 
-    // Util function to add a view to the buffer "toClose".
-    val addToClose = (v: ColumnView) => {
-      toClose += v
-      v
+  /**
+   * Rebase timestamps using the writer and reader timezones.
+   *
+   * cuDF reads ORC timestamps with `ignoreTimezoneInStripeFooter`, so the base_timestamp
+   * is computed in UTC. ORC Java computes base_timestamp in the *writer* timezone, so the
+   * millis passed to `convertBetweenTimezones` already encode the writer TZ base offset.
+   *
+   * To match ORC Java, the JNI `convertOrcTimezones` kernel first applies the writer TZ base
+   * offset and recomputes the negative nanos borrow, then applies any writer-to-reader TZ delta.
+   */
+  private def rebaseWithWriterTimezone(
+      input: Table, writerTz: String, readerTz: String): Table = {
+    val readerZone = ZoneId.of(readerTz, ZoneId.SHORT_IDS)
+    withResource(input) { _ =>
+      withResource(GpuTimeZoneDB.buildOrcTimezoneContext(writerTz, readerTz)) { tzCtx =>
+        val newColumns = (0 until input.getNumberOfColumns).safeMap { colIdx =>
+          val col = input.getColumn(colIdx)
+          val dType = col.getType
+          if (dType.hasTimeResolution) {
+            convertOrcTimestamp(col, tzCtx, readerZone)
+          } else if (dType == DType.LIST || dType == DType.STRUCT) {
+            withResource(new ArrayBuffer[ColumnView]) { toClose =>
+              val rebased = rebaseNestedWithWriterTimezone(col, tzCtx, readerZone, toClose)
+              if (rebased eq col) {
+                col.incRefCount()
+              } else {
+                toClose += rebased
+                rebased.copyToColumnVector()
+              }
+            }
+          } else {
+            col.incRefCount()
+          }
+        }
+        withResource(newColumns) { _ =>
+          new Table(newColumns: _*)
+        }
+      }
     }
+  }
 
-    val dType = col.getType
-    if (dType.hasTimeResolution) {
-      assert(dType == DType.TIMESTAMP_MICROSECONDS,
-        s"Only TIMESTAMP_MICROSECONDS is supported, but got $dType")
-
-      // 1. timestamp type, rebase timestamp column
-      withResource(col.bitCastTo(DType.INT64)) { longs =>
-        withResource(Scalar.fromLong(diffMicros)) { offsetScalar =>
-          withResource(longs.sub(offsetScalar)) { rebased =>
-            rebased.castTo(DType.TIMESTAMP_MICROSECONDS)
+  /**
+   * Match the full Spark ORC timestamp path. Apache ORC uses java.util.TimeZone while decoding,
+   * but Spark materializes the resulting java.sql.Timestamp using java.time rules. Those rule
+   * sets can differ for historical and projected timestamps.
+   */
+  private def convertOrcTimestamp(
+      col: ColumnView,
+      tzCtx: GpuTimeZoneDB.OrcTimezoneContext,
+      readerZone: ZoneId): ai.rapids.cudf.ColumnVector = {
+    withResource(GpuTimeZoneDB.convertOrcTimezones(col, tzCtx)) { orcTimestamp =>
+      val firstTransitionUs = tzCtx.getReaderFirstTransitionUs
+      if (firstTransitionUs == Long.MinValue) {
+        orcTimestamp.incRefCount()
+      } else {
+        val utilMicros = withResource(
+            GpuTimeZoneDB.convertOrcFromUtc(orcTimestamp, tzCtx)) { utilUtc =>
+          utilUtc.castTo(DType.INT64)
+        }
+        withResource(utilMicros) { _ =>
+          val ruleCorrection = withResource(GpuTimeZoneDB.fromTimestampToUtcTimestamp(
+              orcTimestamp, readerZone.normalized())) { zoneUtc =>
+            withResource(zoneUtc.castTo(DType.INT64)) { zoneMicros =>
+              zoneMicros.sub(utilMicros)
+            }
+          }
+          withResource(ruleCorrection) { _ =>
+            val correctedTimestamp = withResource(orcTimestamp.castTo(DType.INT64)) { orcMicros =>
+              withResource(orcMicros.add(ruleCorrection)) { corrected =>
+                corrected.castTo(DType.TIMESTAMP_MICROSECONDS)
+              }
+            }
+            withResource(correctedTimestamp) { _ =>
+              withResource(Scalar.timestampFromLong(
+                  DType.TIMESTAMP_MICROSECONDS, firstTransitionUs)) { firstTransition =>
+                withResource(orcTimestamp.lessThan(firstTransition)) { needsCorrection =>
+                  needsCorrection.ifElse(correctedTimestamp, orcTimestamp)
+                }
+              }
+            }
           }
         }
       }
+    }
+  }
+
+  private def rebaseNestedWithWriterTimezone(
+      col: ColumnView,
+      tzCtx: GpuTimeZoneDB.OrcTimezoneContext,
+      readerZone: ZoneId,
+      toClose: ArrayBuffer[ColumnView]): ColumnView = {
+    val addToClose = (v: ColumnView) => { toClose += v; v }
+    val dType = col.getType
+
+    if (dType.hasTimeResolution) {
+      convertOrcTimestamp(col, tzCtx, readerZone)
     } else if (dType == DType.LIST) {
-      // 2. nest list type
       val child = addToClose(col.getChildColumnView(0))
-      val newChild = rebaseTimestampRecursively(child, toZoneId, toClose, diffMicros)
-      if (newChild != child) {
+      val newChild = rebaseNestedWithWriterTimezone(child, tzCtx, readerZone, toClose)
+      if (newChild ne child) {
         col.replaceListChild(addToClose(newChild))
       } else {
         col
       }
     } else if (dType == DType.STRUCT) {
-      // 3. nest struct type
-      val newViews = (0 until col.getNumChildren).safeMap { i =>
+      val newViews = (0 until col.getNumChildren).map { i =>
         val child = addToClose(col.getChildColumnView(i))
-        val newChild = rebaseTimestampRecursively(child, toZoneId, toClose, diffMicros)
-        if (newChild != child) {
-          addToClose(newChild)
-        }
+        val newChild = rebaseNestedWithWriterTimezone(child, tzCtx, readerZone, toClose)
+        if (newChild ne child) addToClose(newChild)
         newChild
       }
       val opNullCount = Optional.of(col.getNullCount.asInstanceOf[java.lang.Long])
       new ColumnView(col.getType, col.getRowCount, opNullCount, col.getValid,
         col.getOffsets, newViews.toArray)
     } else {
-      // 4. other types, no need to rebase
       col
-    }
-  }
-
-  /**
-   * Rebase the timestamp columns in the input table to the system default timezone.
-   * If the system's default timezone is UTC, it returns the input table as it is.
-   *
-   * @param input the input table, it will be closed after returning
-   * @return a new table with rebased timestamp columns
-   */
-  def rebaseTimeZone(input: Table): Table = {
-    val toZoneId = ZoneId.systemDefault()
-
-    if (toZoneId == ZoneId.of("UTC")) {
-      // UTC timezone, no need to rebase
-      return input
-    }
-
-    // get the offset in microseconds for 2015-01-01 between JVM timezone and UTC timezone
-    val diffMicros = getOffsetForJanuaryFirst2015(toZoneId)
-
-    withResource(input) { _ =>
-      val newColumns = (0 until input.getNumberOfColumns).safeMap { colIdx =>
-        val col = input.getColumn(colIdx)
-        withResource(new ArrayBuffer[ColumnView]) { toClose =>
-          val rebased = rebaseTimestampRecursively(col, toZoneId, toClose, diffMicros)
-          if (col == rebased) {
-            // no change
-            col.incRefCount()
-          } else {
-            // rebased, copy the new column
-            toClose += rebased
-            rebased.copyToColumnVector()
-          }
-        }
-      }
-
-      withResource(newColumns) { _ =>
-        new Table(newColumns: _*)
-      }
     }
   }
 }

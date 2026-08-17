@@ -1027,7 +1027,7 @@ def test_get_json_object_child_formats(std_input_path, input_file):
     "int_struct_formatted_problematic_rows.json",
     "int_mixed_array_struct_formatted.json",
     "bad_whitespace.json",
-    pytest.param("escaped_strings.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/11386')),
+    "escaped_strings.json",
     pytest.param("nested_escaped_strings.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/11387')),
     pytest.param("repeated_columns.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/11361')),
     "mixed_objects.json",
@@ -1062,7 +1062,7 @@ def test_from_json_bools(std_input_path, input_file):
 @approximate_float()
 @pytest.mark.parametrize('input_file', [
     "int_formatted.json",
-    pytest.param("float_formatted.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/10481')),
+    "float_formatted.json",
     "sci_formatted.json",
     "int_formatted_strings.json",
     "float_formatted_strings.json",
@@ -1093,7 +1093,7 @@ def test_scan_json_floats(std_input_path, read_func, spark_tmp_table_factory, in
 @approximate_float()
 @pytest.mark.parametrize('input_file', [
     "int_formatted.json",
-    pytest.param("float_formatted.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/10481')),
+    "float_formatted.json",
     "sci_formatted.json",
     "int_formatted_strings.json",
     "float_formatted_strings.json",
@@ -1122,7 +1122,7 @@ def test_from_json_floats(std_input_path, input_file):
 @approximate_float()
 @pytest.mark.parametrize('input_file', [
     "int_formatted.json",
-    pytest.param("float_formatted.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/10481')),
+    "float_formatted.json",
     "sci_formatted.json",
     "int_formatted_strings.json",
     "float_formatted_strings.json",
@@ -1153,7 +1153,7 @@ def test_scan_json_doubles(std_input_path, read_func, spark_tmp_table_factory, i
 @approximate_float()
 @pytest.mark.parametrize('input_file', [
     "int_formatted.json",
-    pytest.param("float_formatted.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/10481')),
+    "float_formatted.json",
     "sci_formatted.json",
     "int_formatted_strings.json",
     "float_formatted_strings.json",
@@ -1451,7 +1451,7 @@ def test_from_json_string_arrays(std_input_path, input_file):
     "timestamp_tz_formatted_strings.json",
     "scan_emtpy_lines.json"])
 @pytest.mark.parametrize('read_func', [read_json_df]) # we have done so many tests already that we don't need both read func. They are the same
-@pytest.mark.xfail(condition=is_databricks143_or_later(), reason='https://github.com/NVIDIA/spark-rapids/issues/11711')
+@pytest.mark.xfail(condition=is_databricks_runtime(), reason='https://github.com/NVIDIA/spark-rapids/issues/11711')
 def test_scan_json_long_structs(std_input_path, read_func, spark_tmp_table_factory, input_file):
     assert_gpu_and_cpu_are_equal_collect(
         read_func(std_input_path + '/' + input_file,
@@ -1484,7 +1484,7 @@ def test_scan_json_long_structs(std_input_path, read_func, spark_tmp_table_facto
     "timestamp_formatted_strings.json",
     "timestamp_tz_formatted_strings.json"])
 @allow_non_gpu(TEXT_INPUT_EXEC, *non_utc_allow) # https://github.com/NVIDIA/spark-rapids/issues/10453
-@pytest.mark.xfail(condition=is_databricks143_or_later(), reason='https://github.com/NVIDIA/spark-rapids/issues/11711')
+@pytest.mark.xfail(condition=is_databricks_runtime(), reason='https://github.com/NVIDIA/spark-rapids/issues/11711')
 def test_from_json_long_structs(std_input_path, input_file):
     schema = StructType([StructField("data", StructType([StructField("A", LongType()),StructField("B", LongType())]))])
     assert_gpu_and_cpu_are_equal_collect(

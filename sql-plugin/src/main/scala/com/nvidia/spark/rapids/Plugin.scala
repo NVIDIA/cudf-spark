@@ -37,6 +37,7 @@ import com.nvidia.spark.rapids.io.async.TrafficController
 import com.nvidia.spark.rapids.jni.{GpuTimeZoneDB, Hash, JSONUtils, RmmSpark, TaskPriority}
 import com.nvidia.spark.rapids.parquet.PartitionFileReadHistogram
 import com.nvidia.spark.rapids.python.PythonWorkerSemaphore
+import com.nvidia.spark.rapids.shims.ShuffleManagerShimUtils
 import org.apache.commons.lang3.exception.ExceptionUtils
 
 import org.apache.spark.{ExceptionFailure, SparkConf, SparkContext, TaskContext, TaskFailedReason}
@@ -44,6 +45,7 @@ import org.apache.spark.api.plugin.{DriverPlugin, ExecutorPlugin, PluginContext,
 import org.apache.spark.internal.Logging
 import org.apache.spark.rapids.hybrid.HybridExecutionUtils
 import org.apache.spark.serializer.{JavaSerializer, KryoSerializer}
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.internal.StaticSQLConf
@@ -54,9 +56,26 @@ class PluginException(msg: String) extends RuntimeException(msg)
 
 case class CudfVersionMismatchException(errorMsg: String) extends PluginException(errorMsg)
 
-case class ColumnarOverrideRules() extends ColumnarRule with Logging {
-  lazy val overrides: Rule[SparkPlan] = GpuOverrides()
-  lazy val overrideTransitions: Rule[SparkPlan] = new GpuTransitionOverrides()
+object RapidsShuffleManagerAutoConfigurator {
+  private val SHUFFLE_MANAGER_KEY = "spark.shuffle.manager"
+  private val SHUFFLE_DATA_IO_PLUGIN_KEY = "spark.shuffle.sort.io.plugin.class"
+  private val RAPIDS_SHUFFLE_DATA_IO_CLASS_SUFFIX = "RapidsLocalDiskShuffleDataIO"
+  private val DATAPROC_ENGINE_KEY = "spark.dataproc.engine"
+
+  def configure(conf: SparkConf): Unit = {
+    if (ShuffleManagerShimUtils.supportsAutoConfiguration &&
+        !conf.contains(DATAPROC_ENGINE_KEY) &&
+        !conf.contains(SHUFFLE_MANAGER_KEY) &&
+        conf.getOption(SHUFFLE_DATA_IO_PLUGIN_KEY)
+          .forall(_.endsWith(RAPIDS_SHUFFLE_DATA_IO_CLASS_SUFFIX))) {
+      conf.set(SHUFFLE_MANAGER_KEY, ShimLoader.getRapidsShuffleManagerClass)
+    }
+  }
+}
+
+case class ColumnarOverrideRules(sparkSession: SparkSession) extends ColumnarRule with Logging {
+  lazy val overrides: Rule[SparkPlan] = GpuOverrides(sparkSession)
+  lazy val overrideTransitions: Rule[SparkPlan] = new GpuTransitionOverrides(sparkSession)
 
   override def preColumnarTransitions : Rule[SparkPlan] = overrides
 
@@ -138,11 +157,11 @@ object RapidsPluginUtils extends Logging {
     val possibleRapidsJarURLs = classloader.getResources(propName).asScala.toSet.toSeq.filter {
       url => {
         val urlPath = url.toString
-        // Filter out submodule jars, e.g. rapids-4-spark-aggregator_2.12-26.08.0-spark341.jar,
+        // Filter out submodule jars, e.g. rapids-4-spark-aggregator_2.12-26.10.0-spark341.jar,
         // and files stored under subdirs of '!/', e.g.
-        // rapids-4-spark_2.12-26.08.0-cuda12.jar!/spark330/rapids4spark-version-info.properties
+        // rapids-4-spark_2.12-26.10.0-cuda12.jar!/spark330/rapids4spark-version-info.properties
         // We only want to find the main jar, e.g.
-        // rapids-4-spark_2.12-26.08.0-cuda12.jar!/rapids4spark-version-info.properties
+        // rapids-4-spark_2.12-26.10.0-cuda12.jar!/rapids4spark-version-info.properties
         !urlPath.contains("rapids-4-spark-") && urlPath.endsWith("!/" + propName)
       }
     }
@@ -233,6 +252,8 @@ object RapidsPluginUtils extends Logging {
   }
 
   def fixupConfigsOnDriver(conf: SparkConf): Unit = {
+    RapidsShuffleManagerAutoConfigurator.configure(conf)
+
     val plugins = Array(SQL_PLUGIN_NAME, UDF_PLUGIN_NAME, DFUDF_PLUGIN_NAME)
     // First add in the SQL executor plugin because that is what we need at a minimum
     if (conf.contains(SQL_PLUGIN_CONF_KEY)) {
