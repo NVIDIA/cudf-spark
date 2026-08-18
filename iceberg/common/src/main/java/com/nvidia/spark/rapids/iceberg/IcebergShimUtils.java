@@ -45,6 +45,9 @@ import java.util.Map;
  * {@link ShimUtils} based on the detected Iceberg version.
  */
 public interface IcebergShimUtils {
+    /** Returns the Iceberg table format version from the table's current metadata. */
+    int formatVersion(Table table);
+
     /**
      * Returns the fully qualified location URI of an Iceberg {@link ContentFile},
      * e.g. {@code "s3://bucket/path/to/file.parquet"} or {@code "file:/path/to/file.parquet"}.

@@ -308,6 +308,7 @@ else
 
     RUN_TESTS_COMMAND=(
         "$SCRIPTPATH"/runtests.py
+        -c "$LOCAL_ROOTDIR/pytest.ini"
         --rootdir "$LOCAL_ROOTDIR"
     )
     if [[ "${TESTS}" == "" ]]; then

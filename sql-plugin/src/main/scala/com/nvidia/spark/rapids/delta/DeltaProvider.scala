@@ -21,6 +21,7 @@ import com.nvidia.spark.rapids.{
   AtomicCreateTableAsSelectExecMeta,
   AtomicReplaceTableAsSelectExecMeta,
   CreatableRelationProviderRule,
+  DataWritingCommandRule,
   ExecRule,
   ExprRule,
   GpuExec,
@@ -34,7 +35,7 @@ import com.nvidia.spark.rapids.{
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.connector.catalog.{StagingTableCatalog, SupportsWrite}
 import org.apache.spark.sql.execution.{FileSourceScanExec, SparkPlan, SparkStrategy}
-import org.apache.spark.sql.execution.command.RunnableCommand
+import org.apache.spark.sql.execution.command.{DataWritingCommand, RunnableCommand}
 import org.apache.spark.sql.execution.datasources.{FileFormat, HadoopFsRelation}
 import org.apache.spark.sql.execution.datasources.v2.{AppendDataExecV1, AtomicCreateTableAsSelectExec, AtomicReplaceTableAsSelectExec, OverwriteByExpressionExecV1}
 import org.apache.spark.sql.sources.CreatableRelationProvider
@@ -53,6 +54,9 @@ trait DeltaProvider {
 
   def getRunnableCommandRules: Map[Class[_ <: RunnableCommand],
       RunnableCommandRule[_ <: RunnableCommand]]
+
+  def getDataWritingCommandRules: Map[Class[_ <: DataWritingCommand],
+      DataWritingCommandRule[_ <: DataWritingCommand]] = Map.empty
 
   def getStrategyRules: Seq[SparkStrategy]
 

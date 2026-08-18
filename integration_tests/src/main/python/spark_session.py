@@ -243,6 +243,9 @@ def is_spark_351_or_later():
 def is_spark_356_or_later():
     return spark_version() >= "3.5.6"
 
+def is_spark_359():
+    return spark_version() == "3.5.9"
+
 def is_spark_35x():
     return "3.5.0" <= spark_version() < "3.6.0"
 
@@ -251,6 +254,9 @@ def is_spark_40x():
 
 def is_spark_41x():
     return "4.1.0" <= spark_version() < "4.2.0"
+
+def is_spark_420_or_later():
+    return spark_version() >= "4.2.0"
 
 def is_iceberg_supported_spark():
     return is_spark_35x() or is_spark_40x() or is_spark_41x()
@@ -263,6 +269,12 @@ def is_spark_401_or_later():
 
 def is_spark_403():
     return spark_version() == "4.0.3"
+
+def is_spark_404():
+    return spark_version() == "4.0.4"
+
+def is_spark_403_or_404():
+    return is_spark_403() or is_spark_404()
 
 def is_spark_411_or_later():
     return spark_version() >= "4.1.1"
@@ -316,17 +328,8 @@ def is_databricks113_or_later():
 def is_databricks122_or_later():
     return is_databricks_version_or_later(12, 2)
 
-def is_databricks133_or_later():
-    return is_databricks_version_or_later(13, 3)
-
-def is_databricks133():
-    return is_databricks_version(13, 3)
-
 def is_databricks143():
     return is_databricks_version(14, 3)
-
-def is_databricks143_or_later():
-    return is_databricks_version_or_later(14, 3)
 
 def is_databricks173_or_later():
     return is_databricks_version_or_later(17, 3)
@@ -349,10 +352,18 @@ def is_spark_protobuf_descriptor_runtime_available():
         return False
 
 def supports_delta_lake_deletion_vectors():
+    """Whether the current Delta Lake runtime provides the deletion-vector feature."""
     if is_databricks_runtime():
         return is_databricks122_or_later()
     else:
         return is_spark_340_or_later()
+
+def gpu_supports_delta_dv_scan():
+    """Whether RAPIDS supports scanning Delta deletion vectors on the GPU."""
+    if is_databricks_runtime():
+        return is_databricks173_or_later()
+    else:
+        return is_spark_353_or_later()
 
 def is_support_default_values_in_schema():
     # Spark 340 + and Databricks 330 + support

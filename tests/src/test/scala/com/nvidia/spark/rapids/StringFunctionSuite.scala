@@ -199,6 +199,18 @@ class StringOperatorsSuite extends SparkQueryCompareTestSuite {
 }
 
 class RegExpUtilsSuite extends AnyFunSuite {
+  test("countGroups ignores non-capturing groups") {
+    val cases = Seq(
+      "(?:(a))" -> 1,
+      "(?:(a)(b))" -> 2,
+      "(?:(a)|(b))" -> 2,
+      "(x)(?:(a)|(b))(y)" -> 4)
+
+    cases.foreach { case (pattern, expected) =>
+      assert(GpuRegExpUtils.countGroups(pattern) == expected)
+    }
+  }
+
   test("get list of choices from regexp for multi-replace") {
     val regexChoices = Map(
       "aa|bb" -> Seq("aa", "bb"),
@@ -209,6 +221,9 @@ class RegExpUtilsSuite extends AnyFunSuite {
       "(aa|bb)|(cc|dd)" -> Seq("aa", "bb", "cc", "dd"),
       "aa|bb|cc|dd|ee" -> Seq("aa", "bb", "cc", "dd", "ee"),
       "aa|bb|cc|dd|ee|ff" -> Seq("aa", "bb", "cc", "dd", "ee", "ff"),
+      "foo(cat)" -> Seq("foocat"),
+      "(foo)(cat)" -> Seq("foocat"),
+      "(foo)(cat)|(bar)(dog)" -> Seq("foocat", "bardog"),
       "a\n|b\t|c\r" -> Seq("a\n", "b\t", "c\r")
     )
 
@@ -218,6 +233,17 @@ class RegExpUtilsSuite extends AnyFunSuite {
       val result = GpuRegExpUtils.getChoicesFromRegex(ast)
       assert(result.isDefined && result.forall(_ == choices))
     }
+
+    Seq("foo(cat|dog)", "(cat|dog)foo").foreach { pattern =>
+      val (ast, _) = (new CudfRegexTranspiler(RegexReplaceMode)).getTranspiledAST(pattern,
+        None, Some(""))
+      assert(GpuRegExpUtils.getChoicesFromRegex(ast).isEmpty,
+        s"mixed sequence must not use stringReplaceMulti: $pattern")
+    }
+
+    val emptySequence = RegexSequence(
+      scala.collection.mutable.ListBuffer.empty[RegexAST])
+    assert(GpuRegExpUtils.getChoicesFromRegex(emptySequence).isEmpty)
 
   }
 
@@ -239,12 +265,16 @@ class RegExpUtilsSuite extends AnyFunSuite {
       (2, "$2", true, open + "2}"),
       // 0 groups, "$1": legacy path -- emit ${1} so cuDF surfaces the error.
       (0, "$1", true, open + "1}"),
-      // Same shape with backslash backref.
-      (2, "\\12", true, open + "1}2"),
+      // Java replacement strings treat `\digit` as the literal digit, not a backref.
+      (2, "\\12", false, "\\12"),
       // No digits after `$` -- literal `$`.
       (2, "$a", false, "$a"),
       // `$0` is the whole-match backref and is always valid (cuDF supports group 0).
       (2, "$0", true, open + "0}"),
+      // Leading zeroes participate in the Java greedy-with-backoff parse.
+      (1, "$09", true, open + "0}9"),
+      (0, "$01", true, open + "0}1"),
+      (2, "$001", true, open + "1}"),
       // Numbers in the middle: "x$12y" with 2 groups -> "x${1}2y".
       (2, "x$12y", true, "x" + open + "1}2y"),
       // First digit alone would already exceed the count: fall back to the legacy
@@ -293,6 +323,18 @@ class RegExpUtilsSuite extends AnyFunSuite {
     assert(has2)
     assert(conv2 == open + "1}3",
       s"expected user `$$13` to back off to `$${1}3`, got `$conv2`")
+  }
+
+  test("isSupportedStringReplacePattern classifies regex patterns correctly") {
+    val cases = Seq(
+      "A" -> true,
+      "A*" -> false,
+      "(A)" -> false,
+      "A+" -> false)
+
+    cases.foreach { case (pattern, expected) =>
+      assert(GpuOverrides.isSupportedStringReplacePattern(pattern) == expected)
+    }
   }
 }
 

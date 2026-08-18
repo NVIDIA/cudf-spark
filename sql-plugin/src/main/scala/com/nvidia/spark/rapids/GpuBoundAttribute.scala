@@ -136,12 +136,7 @@ object GpuBindReferences extends Logging {
       conf: SQLConf): GpuTieredProject = {
 
     if (RapidsConf.ENABLE_TIERED_PROJECT.get(conf)) {
-      val replaced = if (RapidsConf.ENABLE_COMBINED_EXPRESSIONS.get(conf)) {
-        GpuEquivalentExpressions.replaceMultiExpressions(expressions, conf)
-      } else {
-        expressions
-      }
-      val exprTiers = GpuEquivalentExpressions.getExprTiers(replaced)
+      val exprTiers = GpuProjectAstExpression.buildExprTiers(expressions, conf)
       val inputTiers = GpuEquivalentExpressions.getInputTiers(exprTiers, input)
       // Update ExprTiers to include the columns that are pass through and drop unneeded columns
       val newExprTiers = exprTiers.zipWithIndex.map {
