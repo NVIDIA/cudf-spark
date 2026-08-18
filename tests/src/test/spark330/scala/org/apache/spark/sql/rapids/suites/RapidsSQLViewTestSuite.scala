@@ -15,16 +15,16 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "411"}
+{"spark": "330"}
 spark-rapids-shim-json-lines ***/
-package com.nvidia.spark.rapids
+package org.apache.spark.sql.rapids.suites
 
-import com.nvidia.spark.rapids.delta.{DeltaProvider, NoDeltaProvider}
+import org.apache.spark.sql.execution.{GlobalTempViewTestSuite, LocalTempViewTestSuite,
+  PersistedViewTestSuite}
+import org.apache.spark.sql.rapids.utils.RapidsSQLTestsTrait
 
-class DeltaLakeQuerySuiteSpark411 extends SparkQueryCompareTestSuite {
-  test("delta provider resolves to a real implementation on spark 411") {
-    val provider = DeltaProvider()
-    assert(provider ne NoDeltaProvider)
-    assert(provider.getClass.getName.contains("Delta41xProvider"))
-  }
-}
+class RapidsLocalTempViewTestSuite extends LocalTempViewTestSuite with RapidsSQLTestsTrait
+
+class RapidsGlobalTempViewTestSuite extends GlobalTempViewTestSuite with RapidsSQLTestsTrait
+
+class RapidsPersistedViewTestSuite extends PersistedViewTestSuite with RapidsSQLTestsTrait

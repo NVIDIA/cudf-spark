@@ -526,6 +526,20 @@ def test_str_to_map_expr_with_all_regex_delimiters():
             'str_to_map(a, "[,]{1,10}", "[:]{1,10}") as m5'
         ), conf={'spark.sql.mapKeyDedupPolicy': 'LAST_WIN'})
 
+    # test case-insensitive delimiters
+    flag_rows = [
+        ('k1xv1PAIRk2xv2',),
+        ('k1Xv1pairk2xv2',),
+        ('k1Xv1PAIRk2xv2',),
+        (None,),
+    ]
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.createDataFrame(flag_rows, ['a']).selectExpr(
+            'str_to_map(a, "(?i)pair", "x") as inline_pair',
+            'str_to_map(a, "pair", "(?i)x") as inline_key_value',
+            'str_to_map(a, "(?i:pair)", "(?i:x)") as scoped_both'),
+        conf={'spark.sql.mapKeyDedupPolicy': 'LAST_WIN'})
+
 
 @pytest.mark.parametrize('empty_type', all_empty_string_types)
 def test_str_to_map_input_all_empty(empty_type):

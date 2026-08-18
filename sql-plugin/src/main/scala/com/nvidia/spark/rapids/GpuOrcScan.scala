@@ -326,7 +326,7 @@ object GpuOrcScan {
       case (DType.BOOL8 | DType.INT8 | DType.INT16 | DType.INT32 | DType.INT64,
       DType.TIMESTAMP_MICROSECONDS) =>
         withResource(OrcCastingShims.castIntegerToTimestamp(col, fromDt)) { timestamp =>
-          GpuTimeZoneDB.convertOrcFromUtc(timestamp, ZoneId.systemDefault().getId)
+          GpuOrcTimezoneUtils.convertOrcIntegerTimestamp(timestamp, ZoneId.systemDefault())
         }
 
       // float to bool/integral
