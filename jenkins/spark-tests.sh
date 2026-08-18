@@ -34,6 +34,7 @@ PROJECT_REPO_HOST=$(sed -E 's#^(.*://)?([^/@]*@)?([^/:]+).*#\3#' <<< "$PROJECT_R
 
 download_maven_jars() {
   local coordinates=$1
+  local exclude_group_ids=${2:-}
   local coordinate
   local group_id
   local artifact_id
@@ -41,6 +42,7 @@ download_maven_jars() {
   local dependency_dir
   local pom_file
   local -a coordinates_array
+  local -a dependency_copy_args
   local -a jars
 
   dependency_dir=$(mktemp -d "$ARTF_ROOT/maven-dependencies-XXXXXX")
@@ -75,12 +77,19 @@ EOF
     echo "</project>"
   } > "$pom_file"
 
+  dependency_copy_args=(
+    -DincludeScope=runtime
+    -DincludeTypes=jar
+    "-DoutputDirectory=$dependency_dir/jars"
+  )
+  if [[ -n "$exclude_group_ids" ]]; then
+    dependency_copy_args+=("-DexcludeGroupIds=$exclude_group_ids")
+  fi
+
   (
     cd "$WORKSPACE"
     $MVN -q -B -f "$pom_file" dependency:copy-dependencies \
-      -DincludeScope=runtime \
-      -DincludeTypes=jar \
-      -DoutputDirectory="$dependency_dir/jars"
+      "${dependency_copy_args[@]}"
   ) >&2 || return 1
 
   mapfile -d '' -t jars < <(
@@ -468,7 +477,16 @@ software.amazon.awssdk:url-connection-client:${AWS_SDK_VERSION},\
 software.amazon.awssdk:s3tables:${AWS_SDK_VERSION},\
 org.apache.hadoop:hadoop-aws:${HADOOP_AWS_VERSION},\
 com.amazonaws:aws-java-sdk-bundle:${AWS_SDK_BUNDLE_VERSION}"
-      ICEBERG_S3TABLES_EXTRA_CLASSPATH=$(download_maven_jars "$ICEBERG_S3TABLES_JARS")
+
+      # Spark 4.1 uses Netty 4.2, which cannot coexist with the Netty 4.1 jars pulled in by
+      # AWS SDK 2.x. Let AWS use the Netty version provided by Spark instead.
+      local exclude_group_ids=""
+      if [[ "$ICEBERG_SPARK_VER" == "4.1" ]]; then
+        exclude_group_ids="io.netty"
+      fi
+      ICEBERG_S3TABLES_EXTRA_CLASSPATH=$(
+        download_maven_jars "$ICEBERG_S3TABLES_JARS" "$exclude_group_ids"
+      )
 
       # Requires to setup s3 buckets and namespaces to run iceberg s3tables tests.
       # These steps are included in the test pipeline.

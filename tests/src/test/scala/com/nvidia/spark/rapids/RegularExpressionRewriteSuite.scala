@@ -117,4 +117,46 @@ class RegularExpressionRewriteSuite extends AnyFunSuite {
     val excepted = Seq.fill(patterns.length)(NoOptimization)
     verifyRewritePattern(patterns, excepted)
   }
+
+  test("regex rewrite case-sensitive scoped inline flags") {
+    import RegexOptimizationType._
+    // A scoped-flags group with no positive flag is a no-op (flags are off by default),
+    // so it is equivalent to a plain group and may be optimized. A positive flag changes
+    // matching, so `(?i:...)`, `(?m:...)` and `(?x:...)` fall through as NoOptimization.
+    val patterns = Seq(
+      "(?-i:abc)",
+      "(?-s:abc)",
+      "(?-m:abc)",
+      "(?-x:abc)",
+      "(?-d:abc)",
+      "(?-u:abc)",
+      "(?-U:abc)",
+      "(?-dimsuxU:abc)",
+      "(?-x:a b c)",
+      ".*(?-i:abc).*",
+      "^(?-i:abc)",
+      "(?-i:abc)|(?-s:def)",
+      "(?i:abc)",
+      "(?m:abc)",
+      "(?x:abc)"
+    )
+    val excepted = Seq(
+      Contains("abc"),
+      Contains("abc"),
+      Contains("abc"),
+      Contains("abc"),
+      Contains("abc"),
+      Contains("abc"),
+      Contains("abc"),
+      Contains("abc"),
+      Contains("a b c"),
+      Contains("abc"),
+      StartsWith("abc"),
+      MultipleContains(Seq("abc", "def").map(UTF8String.fromString)),
+      NoOptimization,
+      NoOptimization,
+      NoOptimization
+    )
+    verifyRewritePattern(patterns, excepted)
+  }
 }
