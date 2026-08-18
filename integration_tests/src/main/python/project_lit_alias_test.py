@@ -1,4 +1,4 @@
-# Copyright (c) 2021-2022, NVIDIA CORPORATION.
+# Copyright (c) 2021-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,10 +14,12 @@
 
 import pytest
 
-from asserts import assert_gpu_and_cpu_are_equal_collect
+from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect
 from data_gen import *
+from marks import allow_non_gpu
 from pyspark.sql.types import *
 import pyspark.sql.functions as f
+from spark_session import is_before_spark_400
 
 @pytest.mark.parametrize('data_gen', [decimal_gen_128bit], ids=idfn)
 def test_project_alias(data_gen):
@@ -29,3 +31,18 @@ def test_project_alias(data_gen):
             f.lit(dec)))
 
 
+@allow_non_gpu('ProjectExec')
+@pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
+def test_non_null_variant_literal_falls_back():
+    # Spark constant-folds parse_json with a literal input into a non-null Variant literal.
+    def canonicalize_variant(rows):
+        return [row.v.toJson() for row in rows]
+
+    assert_gpu_fallback_collect(
+        lambda spark: spark.sql("""
+            SELECT parse_json('{"x":1}') AS v
+            FROM range(2)
+        """),
+        'ProjectExec',
+        result_canonicalize_func_before_compare=lambda cpu, gpu:
+            (canonicalize_variant(cpu), canonicalize_variant(gpu)))
