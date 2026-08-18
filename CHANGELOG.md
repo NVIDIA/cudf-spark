@@ -1,5 +1,5 @@
 # Change log
-Generated on 2026-08-11
+Generated on 2026-08-14
 
 ## Release 26.08
 
@@ -78,6 +78,9 @@ Generated on 2026-08-11
 ### PRs
 |||
 |:---|:---|
+|[#15667](https://github.com/NVIDIA/cudf-spark/pull/15667)|Clarify Databricks shuffle config and fix install link [skip ci]|
+|[#15654](https://github.com/NVIDIA/cudf-spark/pull/15654)|Fix Iceberg support for Spark 4.1.2 and 4.1.3 [fast-ut]|
+|[#15548](https://github.com/NVIDIA/cudf-spark/pull/15548)|Update changelog for the v26.08 release [skip ci]|
 |[#15595](https://github.com/NVIDIA/cudf-spark/pull/15595)|Stabilize AQE SMJ-to-BHJ local-shuffle-reader unit test [fast-ut] [reduced-ci]|
 |[#15547](https://github.com/NVIDIA/cudf-spark/pull/15547)|Update dependency version JNI, private, hybrid to 26.08.0|
 |[#15599](https://github.com/NVIDIA/cudf-spark/pull/15599)|Fix mergeIdenticalProjects dropping alias-producing GpuProjects in DV predicate pushdown|

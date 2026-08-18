@@ -21,7 +21,7 @@ import java.util.Optional
 
 import scala.collection.mutable.ArrayBuffer
 
-import ai.rapids.cudf.{ColumnView, DType, Scalar, Table}
+import ai.rapids.cudf.{ColumnVector, ColumnView, DType, Scalar, Table}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingSeq
 import com.nvidia.spark.rapids.jni.GpuTimeZoneDB
@@ -47,6 +47,39 @@ object GpuOrcTimezoneUtils {
   private[rapids] def writerTimezonesShareRules(writerTimezones: Iterable[ZoneId]): Boolean = {
     writerTimezones.headOption.forall { head =>
       writerTimezones.forall(_.getRules == head.getRules)
+    }
+  }
+
+  /**
+   * Convert an integer-derived local timestamp using the same timezone semantics as Spark's
+   * ORC schema-evolution reader.
+   *
+   * Apache ORC uses java.util.TimeZone for this conversion, while Spark materializes the
+   * resulting java.sql.Timestamp using java.time rules. Before the reader timezone's first
+   * recorded transition those rule sets can differ, so use java.time for historical values and
+   * retain ORC's conversion for all later values, including DST gaps and overlaps.
+   */
+  private[rapids] def convertOrcIntegerTimestamp(
+      timestamp: ColumnVector,
+      readerZone: ZoneId): ColumnVector = {
+    val readerTz = readerZone.getId
+    withResource(GpuTimeZoneDB.buildOrcTimezoneContext(readerTz, readerTz)) { tzCtx =>
+      withResource(GpuTimeZoneDB.convertOrcFromUtc(timestamp, tzCtx)) { orcTimestamp =>
+        val firstTransitionUs = tzCtx.getReaderFirstTransitionUs
+        if (firstTransitionUs == Long.MinValue) {
+          orcTimestamp.incRefCount()
+        } else {
+          withResource(GpuTimeZoneDB.fromTimestampToUtcTimestamp(
+              timestamp, readerZone.normalized())) { javaTimeTimestamp =>
+            withResource(Scalar.timestampFromLong(
+                DType.TIMESTAMP_MICROSECONDS, firstTransitionUs)) { firstTransition =>
+              withResource(timestamp.lessThan(firstTransition)) { isHistorical =>
+                isHistorical.ifElse(javaTimeTimestamp, orcTimestamp)
+              }
+            }
+          }
+        }
+      }
     }
   }
 

@@ -1062,7 +1062,7 @@ def test_from_json_bools(std_input_path, input_file):
 @approximate_float()
 @pytest.mark.parametrize('input_file', [
     "int_formatted.json",
-    pytest.param("float_formatted.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/10481')),
+    "float_formatted.json",
     "sci_formatted.json",
     "int_formatted_strings.json",
     "float_formatted_strings.json",
@@ -1093,7 +1093,7 @@ def test_scan_json_floats(std_input_path, read_func, spark_tmp_table_factory, in
 @approximate_float()
 @pytest.mark.parametrize('input_file', [
     "int_formatted.json",
-    pytest.param("float_formatted.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/10481')),
+    "float_formatted.json",
     "sci_formatted.json",
     "int_formatted_strings.json",
     "float_formatted_strings.json",
@@ -1122,7 +1122,7 @@ def test_from_json_floats(std_input_path, input_file):
 @approximate_float()
 @pytest.mark.parametrize('input_file', [
     "int_formatted.json",
-    pytest.param("float_formatted.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/10481')),
+    "float_formatted.json",
     "sci_formatted.json",
     "int_formatted_strings.json",
     "float_formatted_strings.json",
@@ -1153,7 +1153,7 @@ def test_scan_json_doubles(std_input_path, read_func, spark_tmp_table_factory, i
 @approximate_float()
 @pytest.mark.parametrize('input_file', [
     "int_formatted.json",
-    pytest.param("float_formatted.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/10481')),
+    "float_formatted.json",
     "sci_formatted.json",
     "int_formatted_strings.json",
     "float_formatted_strings.json",

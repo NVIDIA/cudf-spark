@@ -110,10 +110,9 @@ def assert_equal_with_local_sort(cpu, gpu):
     _sort_locally(cpu, gpu)
     assert_equal(cpu, gpu)
 
-def assert_equal(cpu, gpu):
-    """Verify that the result from the CPU and the GPU are equal"""
+def _assert_equal_with_float_check(cpu, gpu, float_check):
     try:
-        _assert_equal(cpu, gpu, float_check=get_float_check(), path=[])
+        _assert_equal(cpu, gpu, float_check=float_check, path=[])
     except:
         def to_txt(data):
             try:
@@ -129,6 +128,26 @@ def assert_equal(cpu, gpu):
             fromfile='CPU OUTPUT',
             tofile='GPU OUTPUT'))
         raise
+
+def assert_equal(cpu, gpu):
+    """Verify that the result from the CPU and the GPU are equal"""
+    _assert_equal_with_float_check(cpu, gpu, get_float_check())
+
+def assert_equal_with_signed_zero(cpu, gpu):
+    """Verify equality recursively while distinguishing positive and negative floating zero."""
+    default_float_check = get_float_check()
+
+    def signed_zero_float_check(cpu_value, gpu_value):
+        if cpu_value == 0.0 and gpu_value == 0.0:
+            return math.copysign(1.0, cpu_value) == math.copysign(1.0, gpu_value)
+        return default_float_check(cpu_value, gpu_value)
+
+    _assert_equal_with_float_check(cpu, gpu, signed_zero_float_check)
+
+def assert_contains_ansi_cast(df):
+    """Verify that a DataFrame's executed plan contains a shim-aware ANSI cast."""
+    spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback \
+        .assertContainsAnsiCast(df._jdf)
 
 def _has_incompat_conf(conf):
     return ('spark.rapids.sql.incompatibleOps.enabled' in conf and
