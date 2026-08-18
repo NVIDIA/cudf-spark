@@ -33,6 +33,19 @@ import org.apache.spark.sql.delta.skipping.clustering.{ClusteredTableUtils, Clus
 import org.apache.spark.sql.execution.command.RunnableCommand
 import org.apache.spark.sql.types.StringType
 
+object GpuOptimizeTableCommand {
+  private[rapids] def assertReorgSupported(
+      snapshot: Snapshot,
+      optimizeContext: DeltaOptimizeContext): Unit = {
+    if (optimizeContext.reorg.nonEmpty &&
+        (IcebergCompat.isAnyEnabled(snapshot.metadata) ||
+          UniversalFormat.icebergEnabled(snapshot.metadata))) {
+      throw new UnsupportedOperationException(
+        "GPU Delta REORG TABLE does not support Iceberg-compatible tables")
+    }
+  }
+}
+
 /**
  * GPU version of Delta Lake OptimizeTableCommand for compaction and REORG PURGE.
  *
@@ -64,12 +77,7 @@ case class GpuOptimizeTableCommand(
     }
 
     // REORG was checked during GPU planning, but the table metadata may have changed since then.
-    if (optimizeContext.reorg.nonEmpty &&
-        (IcebergCompat.isAnyEnabled(snapshot.metadata) ||
-          UniversalFormat.icebergEnabled(snapshot.metadata))) {
-      throw new UnsupportedOperationException(
-        "GPU Delta REORG TABLE does not support Iceberg-compatible tables")
-    }
+    GpuOptimizeTableCommand.assertReorgSupported(snapshot, optimizeContext)
 
     // Sanity checks
     if (zOrderBy.nonEmpty) {
