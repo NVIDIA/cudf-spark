@@ -22,7 +22,7 @@ import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.delta.RapidsDeltaUtils
 
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.delta.{IcebergCompat, UniversalFormat}
+import org.apache.spark.sql.delta.{IcebergCompat, RowTracking, UniversalFormat}
 import org.apache.spark.sql.delta.commands.{DeltaCommand, DeltaReorgTableCommand,
   DeltaReorgTableMode}
 import org.apache.spark.sql.delta.rapids.GpuDeltaReorgTableCommand
@@ -68,6 +68,10 @@ class DeltaReorgTableCommandMeta(
         UniversalFormat.icebergEnabled(snapshot.metadata)) {
       willNotWorkOnGpu(
         "Delta REORG TABLE is not supported on GPU for Iceberg-compatible tables")
+    }
+    if (RowTracking.isEnabled(snapshot.protocol, snapshot.metadata)) {
+      willNotWorkOnGpu(
+        "Delta REORG TABLE is not supported on GPU for row-tracking tables")
     }
 
     FileFormatChecks.tag(this, snapshot.schema, ParquetFormatType, ReadFileOp)

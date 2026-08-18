@@ -25,7 +25,8 @@ import org.apache.spark.sql.{Encoders, Row, SparkSession}
 import org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, Expression}
 import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, UnaryNode}
-import org.apache.spark.sql.delta.{DeltaErrors, IcebergCompat, Snapshot, UniversalFormat}
+import org.apache.spark.sql.delta.{DeltaErrors, IcebergCompat, RowTracking, Snapshot,
+  UniversalFormat}
 import org.apache.spark.sql.delta.commands.{DeltaCommand, DeltaOptimizeContext}
 import org.apache.spark.sql.delta.commands.optimize.OptimizeMetrics
 import org.apache.spark.sql.delta.rapids.commands.GpuOptimizeExecutor
@@ -37,11 +38,16 @@ object GpuOptimizeTableCommand {
   private[rapids] def assertReorgSupported(
       snapshot: Snapshot,
       optimizeContext: DeltaOptimizeContext): Unit = {
-    if (optimizeContext.reorg.nonEmpty &&
-        (IcebergCompat.isAnyEnabled(snapshot.metadata) ||
-          UniversalFormat.icebergEnabled(snapshot.metadata))) {
-      throw new UnsupportedOperationException(
-        "GPU Delta REORG TABLE does not support Iceberg-compatible tables")
+    if (optimizeContext.reorg.nonEmpty) {
+      if (IcebergCompat.isAnyEnabled(snapshot.metadata) ||
+          UniversalFormat.icebergEnabled(snapshot.metadata)) {
+        throw new UnsupportedOperationException(
+          "GPU Delta REORG TABLE does not support Iceberg-compatible tables")
+      }
+      if (RowTracking.isEnabled(snapshot.protocol, snapshot.metadata)) {
+        throw new UnsupportedOperationException(
+          "GPU Delta REORG TABLE does not support row-tracking tables")
+      }
     }
   }
 }

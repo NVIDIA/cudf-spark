@@ -263,10 +263,9 @@ def test_delta_reorg_table_purge(spark_tmp_path, partitioned):
     with_gpu_session(assert_second_reorg_is_noop, conf=_reorg_conf)
 
 
-@ignore_order(local=True)
 @delta_lake
 @allow_non_gpu(*_reorg_metadata_allow)
-def test_delta_reorg_table_purge_preserves_row_tracking(spark_tmp_path):
+def test_delta_reorg_table_row_tracking_fallback(spark_tmp_path):
     if not is_apache_runtime():
         pytest.skip("GPU REORG TABLE currently supports Apache Delta Lake only")
     if is_before_spark_353():
@@ -280,23 +279,21 @@ def test_delta_reorg_table_purge_preserves_row_tracking(spark_tmp_path):
                      conf=_reorg_conf)
     with_cpu_session(lambda spark: setup_row_tracking_reorg_table(spark, gpu_path),
                      conf=_reorg_conf)
+    with_cpu_session(lambda spark: assert_table_has_deletion_vectors(spark, cpu_path),
+                     conf=_reorg_conf)
+    with_cpu_session(lambda spark: assert_table_has_deletion_vectors(spark, gpu_path),
+                     conf=_reorg_conf)
 
     cpu_before = with_cpu_session(
         lambda spark: read_row_tracking_rows(spark, cpu_path), conf=_reorg_conf)
     gpu_before = with_cpu_session(
         lambda spark: read_row_tracking_rows(spark, gpu_path), conf=_reorg_conf)
 
-    with_cpu_session(
-        lambda spark: spark.sql(reorg_sql(cpu_path, False)).collect(), conf=_reorg_conf)
-
-    plan_callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
-    plan_callback.startCapture()
-    try:
-        with_gpu_session(
-            lambda spark: spark.sql(reorg_sql(gpu_path, False)).collect(), conf=_reorg_conf)
-        assert_gpu_reorg_plans(plan_callback, plan_callback.getResultsWithTimeout(10000))
-    finally:
-        plan_callback.endCapture()
+    assert_reorg_fallback(
+        cpu_path,
+        gpu_path,
+        lambda path: reorg_sql(path, False),
+        lambda spark, path: spark.read.format("delta").load(path))
 
     cpu_after = with_cpu_session(
         lambda spark: read_row_tracking_rows(spark, cpu_path), conf=_reorg_conf)
@@ -332,6 +329,33 @@ def test_delta_reorg_table_execution_guard_rejects_iceberg(spark_tmp_path):
             gpu_command.run(spark._jsparkSession)
 
     with_gpu_session_no_test(assert_execution_guard, conf=_iceberg_compatible_reorg_conf)
+
+
+@delta_lake
+@allow_non_gpu(*_reorg_metadata_allow)
+def test_delta_reorg_table_execution_guard_rejects_row_tracking(spark_tmp_path):
+    if not is_apache_runtime():
+        pytest.skip("GPU REORG TABLE currently supports Apache Delta Lake only")
+    if is_before_spark_353():
+        pytest.skip("GPU REORG TABLE requires Spark 3.5.3 or later")
+
+    path = spark_tmp_path + "/TABLE"
+
+    def assert_execution_guard(spark):
+        spark.sql("""
+            CREATE TABLE delta.`{}` (id BIGINT, p INT)
+            USING DELTA
+            TBLPROPERTIES ('delta.enableDeletionVectors' = 'false')
+            """.format(path))
+        gpu_command = create_converted_gpu_reorg_command(spark, path)
+        spark.sql("""
+            ALTER TABLE delta.`{}` SET TBLPROPERTIES
+              ('delta.enableRowTracking' = 'true')
+            """.format(path))
+        with pytest.raises(Exception, match="does not support row-tracking tables"):
+            gpu_command.run(spark._jsparkSession)
+
+    with_gpu_session_no_test(assert_execution_guard, conf=_reorg_conf)
 
 
 @delta_lake
