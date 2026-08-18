@@ -66,9 +66,9 @@ class GpuColumnVectorVariantSuite extends AnyFunSuite {
     }
   }
 
-  test("Variant detection is null-safe and excluded from the GPU cache path") {
+  test("Variant detection uses the Spark type and is excluded from the GPU cache path") {
     assert(GpuColumnVector.isVariantType(VariantType))
-    assert(!GpuColumnVector.isVariantType(null))
+    assert(!GpuColumnVector.isVariantType(StringType))
     val serializer = new ParquetCachedBatchSerializer()
     assert(!serializer.isSupportedByCudf(VariantType))
     assert(!serializer.isSupportedByCudf(ArrayType(VariantType, containsNull = true)))

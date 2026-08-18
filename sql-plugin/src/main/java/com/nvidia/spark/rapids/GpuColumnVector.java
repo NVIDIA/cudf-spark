@@ -18,6 +18,7 @@ package com.nvidia.spark.rapids;
 
 import ai.rapids.cudf.*;
 import com.nvidia.spark.rapids.shims.GpuTypeShims;
+import com.nvidia.spark.rapids.shims.VariantTypeShims;
 import org.apache.arrow.memory.ReferenceManager;
 
 import org.apache.spark.sql.catalyst.expressions.Attribute;
@@ -101,12 +102,9 @@ public class GpuColumnVector extends GpuColumnVectorBase {
     TableDebug.get().debug(name, hostCol);
   }
 
-  /**
-   * VariantType is unavailable before Spark 4, so common code identifies it by its stable type
-   * name instead of taking a static dependency on the Spark 4 class.
-   */
+  /** Returns true when the Spark data type is VariantType. */
   public static boolean isVariantType(DataType sparkType) {
-    return sparkType != null && "variant".equals(sparkType.typeName());
+    return VariantTypeShims.isVariantType(sparkType);
   }
 
   private static HostColumnVector.ListType variantByteListType(boolean nullable) {
