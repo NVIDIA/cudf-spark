@@ -18,6 +18,7 @@ package com.nvidia.spark.rapids
 import java.util.regex.PatternSyntaxException
 
 import scala.collection.mutable.ListBuffer
+import scala.util.Random
 
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -51,6 +52,36 @@ class RegularExpressionParserSuite extends AnyFunSuite {
     assert(parse("a{1}") ===
       RegexSequence(ListBuffer(
       RegexRepetition(RegexChar('a'), QuantifierFixedLength(1)))))
+  }
+
+  // Regression test for https://github.com/NVIDIA/cudf-spark/issues/15495
+  test("quantifier integer boundaries") {
+    val supportedBoundaries: Seq[(String, RegexQuantifier)] = Seq(
+      s"a{${Int.MaxValue}}" -> QuantifierFixedLength(Int.MaxValue),
+      s"a{${Int.MaxValue},}" -> QuantifierVariableLength(Int.MaxValue, None),
+      s"a{1,${Int.MaxValue}}" -> QuantifierVariableLength(1, Some(Int.MaxValue)))
+    supportedBoundaries.foreach { case (pattern, quantifier) =>
+      assert(new RegexParser(pattern).parseUnchecked() ===
+        RegexSequence(ListBuffer(RegexRepetition(RegexChar('a'), quantifier))))
+    }
+
+    val firstUnsupported = (Int.MaxValue.toLong + 1).toString
+    val random = new Random(15495L)
+    val seededOversized = Seq.fill(8) {
+      (random.nextInt(9) + 1).toString + Seq.fill(31)(random.nextInt(10)).mkString
+    }
+    (firstUnsupported +: seededOversized).flatMap { count =>
+      Seq(
+        s"a{$count}" -> 2,
+        s"a{$count,}" -> 2,
+        s"a{1,$count}" -> 4)
+    }.foreach { case (pattern, index) =>
+      val e = intercept[RegexUnsupportedException] {
+        new RegexParser(pattern).parseUnchecked()
+      }
+      assert(e.getMessage ===
+        s"Regex quantifier exceeds supported integer range near index $index")
+    }
   }
 
   test("not a quantifier") {
@@ -90,6 +121,37 @@ class RegularExpressionParserSuite extends AnyFunSuite {
           RegexGroup(RegexGroup.NegativeLookbehind, RegexSequence(ListBuffer(RegexChar('d')))),
           RegexGroup(RegexGroup.Independent, RegexSequence(ListBuffer(RegexChar('e')))),
           RegexGroup(RegexGroup.Named("n"), RegexSequence(ListBuffer(RegexChar('f')))))))
+      assert(parse("(:a)(?::b)") ===
+        RegexSequence(ListBuffer(
+          RegexGroup(RegexGroup.Capturing,
+                     RegexSequence(ListBuffer(RegexChar(':'), RegexChar('a')))),
+          RegexGroup(RegexGroup.NonCapturing,
+                     RegexSequence(ListBuffer(RegexChar(':'), RegexChar('b')))))))
+  }
+
+  test("flags") {
+    assert(parse("(?i)(?m-s)(?-duxU)(?)(?i-)(?-)") ===
+      RegexSequence(ListBuffer(
+        RegexInlineFlags(RegexFlagSet(Set(RegexFlag.CaseInsensitive), Set())),
+        RegexInlineFlags(RegexFlagSet(Set(RegexFlag.Multiline), Set(RegexFlag.DotAll))),
+        RegexInlineFlags(RegexFlagSet(Set(),
+          Set(RegexFlag.UnixLines, RegexFlag.UnicodeCase, RegexFlag.Comments,
+            RegexFlag.UnicodeClasses))),
+        RegexInlineFlags(RegexFlagSet(Set(), Set())),
+        RegexInlineFlags(RegexFlagSet(Set(RegexFlag.CaseInsensitive), Set())),
+        RegexInlineFlags(RegexFlagSet(Set(), Set())))))
+  }
+
+  test("scoped inline flags") {
+    assert(parse("(?i:ab)") ===
+      RegexSequence(ListBuffer(
+        RegexGroup(RegexGroup.ScopedFlags(RegexFlagSet(Set(RegexFlag.CaseInsensitive), Set())),
+          RegexSequence(ListBuffer(RegexChar('a'), RegexChar('b')))))))
+    assert(parse("(?i-s:a)") ===
+      RegexSequence(ListBuffer(
+        RegexGroup(RegexGroup.ScopedFlags(
+          RegexFlagSet(Set(RegexFlag.CaseInsensitive), Set(RegexFlag.DotAll))),
+          RegexSequence(ListBuffer(RegexChar('a')))))))
   }
 
   test("character class") {
@@ -126,6 +188,27 @@ class RegularExpressionParserSuite extends AnyFunSuite {
       RegexSequence(ListBuffer(
         RegexCharacterClass(negated = false,
           ListBuffer(RegexChar('a'))), RegexEscaped(']'))))
+  }
+
+  test("character class ranges beginning with ] or ^") {
+    // https://github.com/NVIDIA/cudf-spark/issues/15564
+    val cases = Seq(
+      raw"[]-_]" -> RegexCharacterClass(negated = false,
+        ListBuffer(RegexCharacterRange(RegexChar(']'), RegexChar('_')))),
+      raw"[^]-_]" -> RegexCharacterClass(negated = true,
+        ListBuffer(RegexCharacterRange(RegexChar(']'), RegexChar('_')))),
+      raw"[^^-_]" -> RegexCharacterClass(negated = true,
+        ListBuffer(RegexCharacterRange(RegexChar('^'), RegexChar('_')))),
+      raw"[a^-_]" -> RegexCharacterClass(negated = false,
+        ListBuffer(RegexChar('a'), RegexCharacterRange(RegexChar('^'), RegexChar('_')))),
+      raw"[\^-_]" -> RegexCharacterClass(negated = false,
+        ListBuffer(RegexCharacterRange(RegexEscaped('^'), RegexChar('_')))))
+
+    cases.foreach { case (pattern, expected) =>
+      val ast = parse(pattern)
+      assert(ast === RegexSequence(ListBuffer(expected)))
+      assert(ast.toRegexString === pattern)
+    }
   }
 
   test("escaped brackets") {
@@ -256,14 +339,12 @@ class RegularExpressionParserSuite extends AnyFunSuite {
   }
 
   test("group containing quantifier") {
-    val e = intercept[RegexUnsupportedException] {
-      parse("(?)")
-    }
-    assert(e.getMessage.startsWith("Base expression cannot start with quantifier"))
-
     assert(parse("(?:a?)") === RegexSequence(ListBuffer(
       RegexGroup(RegexGroup.NonCapturing, RegexSequence(ListBuffer(
         RegexRepetition(RegexChar('a'), SimpleQuantifier('?'))))))))
+    assert(parse("(?i:a)") === RegexSequence(ListBuffer(
+      RegexGroup(RegexGroup.ScopedFlags(RegexFlagSet(Set(RegexFlag.CaseInsensitive), Set())),
+        RegexSequence(ListBuffer(RegexChar('a')))))))
   }
 
   test("group not starting with ? is a capturing group") {

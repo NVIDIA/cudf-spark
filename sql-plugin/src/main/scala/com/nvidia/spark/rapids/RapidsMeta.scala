@@ -417,8 +417,6 @@ abstract class RapidsMeta[INPUT <: BASE, BASE, OUTPUT <: BASE](
         "^"  // Special indicator for CPU bridge expressions
       } else if (cannotRunOnGpuBecauseOfSparkPlan) {
         "@"
-      } else if (cannotRunOnGpuBecauseOfCost) {
-        "$"
       } else {
         "*"
       }
@@ -1291,13 +1289,7 @@ abstract class BaseExprMeta[INPUT <: Expression](
    */
   final def mustBeAstExpression: Boolean = mustBeAst
 
-  final def canThisBeAst: Boolean = {
-    tagForAst()
-    // An expression cannot be AST if it cannot be replaced (disabled), uses CPU bridge,
-    // or has AST-specific issues
-    canThisBeReplaced && !willUseGpuCpuBridge &&
-      childExprs.forall(_.canThisBeAst) && cannotBeAstReasons.isEmpty
-  }
+  final def canThisBeAst: Boolean = canSelfBeAst && childExprs.forall(_.canThisBeAst)
 
   /**
    * Check whether this node itself can be converted to AST. It will not recursively check its
@@ -1307,8 +1299,8 @@ abstract class BaseExprMeta[INPUT <: Expression](
   // undoBridgeOptimization() after a first read, so caching would return a stale answer.
   final def canSelfBeAst: Boolean = {
     tagForAst()
-    // Not AST-able if disabled, bridged (a GpuCpuBridgeExpression has no AST form), or it has
-    // AST-specific issues.
+    // An expression cannot be AST if it cannot be replaced (disabled), uses CPU bridge
+    // (a GpuCpuBridgeExpression has no AST form), or has AST-specific issues.
     canThisBeReplaced && !willUseGpuCpuBridge && cannotBeAstReasons.isEmpty
   }
 
@@ -1350,10 +1342,19 @@ abstract class BaseExprMeta[INPUT <: Expression](
   }
 
   protected def willWorkInAstInfo: String = {
-    if (cannotBeAstReasons.isEmpty) {
-      "will run in AST"
+    if (canSelfBeAst) {
+      "is AST-compatible"
     } else {
-      s"cannot be converted to GPU AST because ${cannotBeAstReasons.mkString(";")}"
+      // These reasons must enumerate exactly the conditions checked by canSelfBeAst.
+      val reason = if (!canThisBeReplaced) {
+        "it cannot run on GPU"
+      } else if (willUseGpuCpuBridge) {
+        "it uses the CPU bridge"
+      } else {
+        assert(cannotBeAstReasons.nonEmpty)
+        cannotBeAstReasons.mkString(";")
+      }
+      s"cannot be converted to GPU AST because $reason"
     }
   }
 
@@ -1364,7 +1365,7 @@ abstract class BaseExprMeta[INPUT <: Expression](
    * @param all should all the data be printed or just what does not work in the AST?
    */
   protected def printAst(strBuilder: StringBuilder, depth: Int, all: Boolean): Unit = {
-    if (all || !canThisBeAst) {
+    if (all || !canSelfBeAst) {
       indent(strBuilder, depth)
       strBuilder.append(operationName)
           .append(" <")

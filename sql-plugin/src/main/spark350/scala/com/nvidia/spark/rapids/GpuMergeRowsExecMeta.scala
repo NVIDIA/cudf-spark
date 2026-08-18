@@ -39,6 +39,8 @@ spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids
 
+import com.nvidia.spark.rapids.shims.GpuMergeRowsKeepShims
+
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans.logical.MergeRows.{Discard, Instruction, Keep, Split}
 import org.apache.spark.sql.execution.datasources.v2.{GpuMergeRowsExec, MergeRowsExec}
@@ -79,7 +81,7 @@ class GpuKeepInstructionMeta(
   override def convertToGpuImpl(): GpuExpression = {
     val gpuCondition = childExprs.head.convertToGpu()
     val gpuOutputs = childExprs.tail.map(_.convertToGpu())
-    GpuKeep(gpuCondition, gpuOutputs)
+    GpuKeep(gpuCondition, gpuOutputs, GpuMergeRowsKeepShims.actionOf(keep))
   }
 }
 

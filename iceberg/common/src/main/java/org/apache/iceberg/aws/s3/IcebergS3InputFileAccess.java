@@ -16,26 +16,36 @@
 
 package org.apache.iceberg.aws.s3;
 
-import java.net.URI;
-import java.net.URISyntaxException;
-
 import org.apache.iceberg.io.InputFile;
 
-/** Package-local access to Iceberg S3 file internals. */
+/**
+ * Root-loadable bridge for package-private Iceberg S3 APIs.
+ *
+ * <p>The JVM defines a runtime package by both its package name and defining classloader.
+ * When Iceberg runtime jars are supplied through {@code extraClassPath}, Iceberg classes such as
+ * {@link BaseS3File} can be loaded by the app classloader while RAPIDS shim classes are loaded by
+ * Spark's {@code MutableURLClassLoader}. Direct access from a shim class would therefore fail with
+ * {@link IllegalAccessError}, despite both classes having the same Java package name.
+ *
+ * <p>This class must remain root-loadable via {@code unshimmed-common-from-single-shim.txt}, and
+ * all access to {@link BaseS3File} and {@link S3URI} must remain isolated here. Moving that access
+ * into {@link IcebergS3InputFile} will reintroduce the classloader access failure.
+ */
 public final class IcebergS3InputFileAccess {
   private IcebergS3InputFileAccess() {
   }
 
-  public static URI s3Uri(InputFile inputFile) {
+  /**
+   * Returns the raw S3 bucket and key, in that order, or {@code null} for a non-S3 input file.
+   *
+   * <p>The values are intentionally returned without constructing a URI so reserved characters in
+   * the object key are not percent-encoded or double-escaped before the S3 request is issued.
+   */
+  public static String[] s3BucketAndKey(InputFile inputFile) {
     if (!(inputFile instanceof BaseS3File)) {
       return null;
     }
     S3URI uri = ((BaseS3File) inputFile).uri();
-    try {
-      return new URI("s3", uri.bucket(), "/" + uri.key(), null);
-    } catch (URISyntaxException e) {
-      throw new IllegalArgumentException(
-          "Invalid S3 URI for bucket=" + uri.bucket() + " key=" + uri.key(), e);
-    }
+    return new String[] {uri.bucket(), uri.key()};
   }
 }

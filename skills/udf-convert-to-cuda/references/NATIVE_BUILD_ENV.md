@@ -11,7 +11,7 @@ The native build uses the RAPIDS JAR already resolved by Maven. The `cuda-native
 
 No separate manual JAR download is required. Maven should resolve the RAPIDS dependency declared in `pom.xml`; the native profile reuses the same coordinates and copies the resolved JAR into `target/rapids-jar`.
 
-The profile first tries the CUDA-classified artifact (`-cuda12`) and then the unclassified artifact. If extraction fails, the selected JAR probably does not contain Linux native CUDA libraries or the Maven cache/repository is inconsistent with the generated version properties.
+The profile first tries the CUDA-classified artifact (e.g. `-cuda12`) and then the unclassified artifact. If extraction fails, the selected JAR probably does not contain Linux native CUDA libraries or the Maven cache/repository is inconsistent with the generated version properties.
 
 ## Required Tools
 

@@ -28,6 +28,8 @@ import com.nvidia.spark.rapids.jni.fileio.{RapidsInputFile, SeekableInputStream}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
 
+import org.apache.spark.sql.rapids.GpuTaskMetrics
+
 /**
  * GCS-backed {@link RapidsInputFile} for Hadoop-conf-driven (non-iceberg) reads.
  * {@code readVectored} issues batched byte-range reads through the optimized
@@ -79,6 +81,7 @@ class GCSInputFile private (
     if (PerfIO.readToHostMemory(hadoopConf, output, fileUri, ranges).isEmpty) {
       throw new IOException(s"expected PerfIO to read GCS file ${fileUri.toString}")
     }
+    GpuTaskMetrics.get.recordPerfioGCSBackendOnce()
   }
 }
 

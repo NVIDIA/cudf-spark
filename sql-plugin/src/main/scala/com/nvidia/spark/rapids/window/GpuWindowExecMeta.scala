@@ -557,8 +557,10 @@ object GpuWindowExecMeta {
         false // Must be both unbounded, and have a group by specification.
       } else {
         func match {
-          case _: GpuUnboundedToUnboundedWindowAgg => true
-          case GpuAggregateExpression(_: GpuUnboundedToUnboundedWindowAgg, _, _, _, _) => true
+          case a: GpuUnboundedToUnboundedWindowAgg =>
+            a.supportsUnboundedToUnboundedWindowExec
+          case GpuAggregateExpression(a: GpuUnboundedToUnboundedWindowAgg, _, _, _, _) =>
+            a.supportsUnboundedToUnboundedWindowExec
           case _ => false
         }
       }

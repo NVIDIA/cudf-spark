@@ -15,14 +15,16 @@ from typing import Callable, Any
 
 import pytest
 
-from asserts import assert_equal_with_local_sort, assert_gpu_fallback_collect
+from asserts import assert_equal_with_local_sort, assert_gpu_fallback_collect, \
+    assert_gpu_fallback_write_sql
 from conftest import is_iceberg_remote_catalog
 from data_gen import gen_df, copy_and_update
 from iceberg import create_iceberg_table, \
     iceberg_base_table_cols, iceberg_gens_list, get_full_table_name, \
     iceberg_full_gens_list, \
     iceberg_write_enabled_conf, iceberg_unsupported_mark, _build_tblprops, \
-    full_coverage_partition_transforms, assert_iceberg_files_use_codec
+    full_coverage_partition_transforms, assert_iceberg_files_use_codec, \
+    supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON
 from marks import iceberg, ignore_order, allow_non_gpu, datagen_overrides
 from spark_session import with_gpu_session, with_cpu_session
 
@@ -62,6 +64,35 @@ def test_insert_into_unpartitioned_table(spark_tmp_table_factory):
     do_test_insert_into_table_sql(
         spark_tmp_table_factory,
         lambda table_name: create_iceberg_table(table_name, table_prop=table_prop))
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@ignore_order(local=True)
+@allow_non_gpu("AppendDataExec")
+def test_insert_into_v3_table_fallback(spark_tmp_table_factory):
+    base_table_name = get_full_table_name(spark_tmp_table_factory)
+    props = _build_tblprops({"format-version": "3"})
+    props_sql = ", ".join(f"'{key}' = '{value}'" for key, value in props.items())
+
+    def create_table(spark, table_name):
+        spark.sql(
+            f"CREATE TABLE {table_name} (id BIGINT, data STRING) USING ICEBERG "
+            f"TBLPROPERTIES ({props_sql})")
+
+    with_cpu_session(lambda spark: create_table(spark, f"{base_table_name}_cpu"))
+    with_cpu_session(lambda spark: create_table(spark, f"{base_table_name}_gpu"))
+
+    def insert_data(spark, table_name):
+        spark.sql(f"INSERT INTO {table_name} VALUES (1, 'a'), (2, 'b'), (3, 'c')")
+
+    assert_gpu_fallback_write_sql(
+        insert_data,
+        lambda spark, table_name: spark.sql(f"SELECT * FROM {table_name}"),
+        base_table_name,
+        ["AppendDataExec"],
+        conf=iceberg_write_enabled_conf)
+
 
 @iceberg
 @ignore_order(local=True)
