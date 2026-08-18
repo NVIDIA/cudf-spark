@@ -40,8 +40,8 @@ import org.apache.spark.sql.delta.commands.{Batch, Bin, ClusteringStrategy, Dele
 import org.apache.spark.sql.delta.commands.optimize._
 import org.apache.spark.sql.delta.files.SQLMetricsReporting
 import org.apache.spark.sql.delta.logging.DeltaLogKeys
-import org.apache.spark.sql.delta.rapids.{GpuDeltaLog, GpuOptimizeTableCommand,
-  GpuOptimisticTransactionBase}
+import org.apache.spark.sql.delta.rapids.{GpuDeltaLog, GpuOptimisticTransactionBase,
+  GpuOptimizeTableCommand}
 import org.apache.spark.sql.delta.rapids.DeltaMdcShims.mdc
 import org.apache.spark.sql.delta.skipping.MultiDimClustering
 import org.apache.spark.sql.delta.skipping.clustering.{ClusteredTableUtils, ClusteringColumnInfo}
