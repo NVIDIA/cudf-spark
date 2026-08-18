@@ -154,7 +154,7 @@ class GpuDeltaParquetFileFormatBase2(
 
   def hasTablePath: Boolean = tablePath.isDefined
 
-  private def computeNumRowsAlive(
+  private def computeNumRowsAliveWithDeletionVector(
       serializedBitmap: HostMemoryBuffer,
       filterTypeOpt: Option[RowIndexFilterType],
       rowGroupOffsets: Array[Long],
@@ -312,7 +312,7 @@ class GpuDeltaParquetFileFormatBase2(
               fileIO, dvDescriptorOpt, filterTypeOpt, tablePath.get)) { serializedBitmap =>
             val (rowGroupOffsets, rowGroupNumRows) =
               RapidsDeletionVectors.getRowGroupMetadata(chunkedBlocks)
-            Math.toIntExact(computeNumRowsAlive(serializedBitmap, filterTypeOpt,
+            Math.toIntExact(computeNumRowsAliveWithDeletionVector(serializedBitmap, filterTypeOpt,
               rowGroupOffsets, rowGroupNumRows, maxReadBatchSizeRows))
           }
         }
@@ -418,7 +418,7 @@ class GpuDeltaParquetFileFormatBase2(
         rowGroupOffsets: Array[Long],
         rowGroupNumRows: Array[Int],
         maxChunkRows: Int): SpillableDeletionVectorInfo = {
-      val numRowsAlive = computeNumRowsAlive(
+      val numRowsAlive = computeNumRowsAliveWithDeletionVector(
         serializedBitmap, filterTypeOpt, rowGroupOffsets, rowGroupNumRows, maxChunkRows)
       new SpillableDeletionVectorInfo(
         SpillableHostBuffer(
@@ -1224,7 +1224,7 @@ class GpuDeltaParquetFileFormatBase2(
                   totalRows
                 } else {
                   withResource(gpuBitmap.getDataHostBuffer()) { bitmap =>
-                    computeNumRowsAlive(bitmap, entry.filterTypeOpt,
+                    computeNumRowsAliveWithDeletionVector(bitmap, entry.filterTypeOpt,
                       entry.rowGroupOffsets, entry.rowGroupNumRows, maxReadBatchSizeRows)
                   }
                 }
