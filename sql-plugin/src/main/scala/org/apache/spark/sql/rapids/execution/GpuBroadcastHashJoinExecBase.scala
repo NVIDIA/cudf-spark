@@ -20,6 +20,7 @@ import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.shims.{GpuBroadcastJoinMeta, ShimBinaryExecNode}
 
+import org.apache.spark.TaskContext
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.Expression
@@ -142,8 +143,9 @@ abstract class GpuBroadcastHashJoinExecBase(
     OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY),
     STREAM_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_STREAM_TIME),
     JOIN_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_JOIN_TIME),
-    BUILD_SIDE_CACHE_BUILDS -> createMetric(DEBUG_LEVEL, DESCRIPTION_BUILD_SIDE_CACHE_BUILDS),
-    BUILD_SIDE_CACHE_HITS -> createMetric(DEBUG_LEVEL, DESCRIPTION_BUILD_SIDE_CACHE_HITS),
+    HASH_TABLE_BUILDS -> createMetric(DEBUG_LEVEL, DESCRIPTION_HASH_TABLE_BUILDS),
+    HASH_TABLE_REBUILDS -> createMetric(DEBUG_LEVEL, DESCRIPTION_HASH_TABLE_REBUILDS),
+    HASH_TABLE_REUSES -> createMetric(DEBUG_LEVEL, DESCRIPTION_HASH_TABLE_REUSES),
     CPU_BRIDGE_PROCESSING_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
       DESCRIPTION_CPU_BRIDGE_PROCESSING_TIME),
     CPU_BRIDGE_WAIT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
@@ -186,8 +188,8 @@ abstract class GpuBroadcastHashJoinExecBase(
       val boundProjects = projects.map { project =>
         // Match GpuProjectExec's tiered binding so build-side extraction has the same
         // splitting and retry behavior as a normal project.
-        GpuBindReferences.bindGpuReferencesTiered(
-          project.projectList, project.child.output, conf, allMetrics)
+        GpuBindReferences.bindGpuReferencesTieredNoMetrics(
+          project.projectList, project.child.output, conf)
       }
       Some((batch: ColumnarBatch) => boundProjects.foldLeft(batch) {
         case (currentBatch, boundProject) =>
@@ -197,6 +199,12 @@ abstract class GpuBroadcastHashJoinExecBase(
       })
     } else {
       None
+    }
+  }
+
+  protected def buildSidePostProjectionKey: Seq[Seq[Expression]] = {
+    splitBroadcastPlan(buildPlan)._2.reverse.map { project =>
+      project.projectList.map(_.canonicalized)
     }
   }
 
@@ -210,19 +218,29 @@ abstract class GpuBroadcastHashJoinExecBase(
     val opTime = gpuLongMetric(OP_TIME_LEGACY)
     val streamTime = gpuLongMetric(STREAM_TIME)
     val joinTime = gpuLongMetric(JOIN_TIME)
-    val buildSideCacheBuilds = gpuLongMetric(BUILD_SIDE_CACHE_BUILDS)
-    val buildSideCacheHits = gpuLongMetric(BUILD_SIDE_CACHE_HITS)
+    val hashTableBuilds = gpuLongMetric(HASH_TABLE_BUILDS)
+    val hashTableRebuilds = gpuLongMetric(HASH_TABLE_REBUILDS)
+    val hashTableReuses = gpuLongMetric(HASH_TABLE_REUSES)
 
     val targetSize = RapidsConf.GPU_BATCH_SIZE_BYTES.get(conf)
     val joinOptions = RapidsConf.getJoinOptions(conf, targetSize)
-    val enableBuildSideReuse = RapidsConf.BROADCAST_HASH_TABLE_REUSE.get(conf)
+    val enableHashTableReuse = RapidsConf.HASH_TABLE_REUSE.get(conf)
 
     val broadcastRelation = broadcastExchange.executeColumnarBroadcast[Any]()
 
     val rdd = streamedPlan.executeColumnar()
     val buildSchema = getBroadcastPlan(buildPlan).schema
     val postProjectionAndClose = buildSidePostProjection
+    // Cache entries can outlive the task that creates them. Bind their key expressions separately
+    // so construction and rebuild do not retain or update that task's operator metrics.
+    val cachedBoundBuildKeys = if (enableHashTableReuse) {
+      GpuBindReferences.bindGpuReferencesNoMetrics(buildKeys, buildPlan.output)
+    } else {
+      Seq.empty[GpuExpression]
+    }
+    val postProjectionKey = buildSidePostProjectionKey
     val localIsNullAwareAntiJoin = isNullAwareAntiJoin
+    val localJoinId = id
     rdd.mapPartitions { it =>
       val (broadcastBuiltBatch, streamIter) =
         GpuBroadcastHelper.getBroadcastBuiltBatchAndStreamIter(
@@ -233,6 +251,23 @@ abstract class GpuBroadcastHashJoinExecBase(
       val broadcastBatch = broadcastRelation.value match {
         case batch: SerializeConcatHostBuffersDeserializeBatch => Some(batch)
         case _ => None
+      }
+      val hashBackendProvider = if (enableHashTableReuse) {
+        broadcastBatch.map { batch =>
+          val taskContext = TaskContext.get()
+          val demandId = HashBuildDemandId(
+            localJoinId,
+            taskContext.stageId(),
+            taskContext.stageAttemptNumber())
+          val filterOutNulls = GpuHashJoin.buildSideNeedsNullFilter(
+            joinType, compareNullsEqual, buildSide, buildKeys)
+          new CachedHashBackendProvider(
+            batch.offerHashBuild(buildSide, demandId, postProjectionKey, cachedBoundBuildKeys,
+              compareNullsEqual, filterOutNulls, postProjectionAndClose),
+            HashBuildMetrics(hashTableBuilds, hashTableRebuilds, hashTableReuses))
+        }.getOrElse(OnDemandHashBackendProvider)
+      } else {
+        OnDemandHashBackendProvider
       }
       val builtBatch = postProjectionAndClose.map(_(broadcastBuiltBatch))
           .getOrElse(broadcastBuiltBatch)
@@ -256,18 +291,12 @@ abstract class GpuBroadcastHashJoinExecBase(
               boundStreamKeys)
           }
           doJoin(builtBatch, nullFilteredStreamIter, joinOptions, numOutputRows,
-            numOutputBatches, opTime, joinTime, enableBuildSideReuse,
-            broadcastBatch = broadcastBatch,
-            buildSideCacheBuilds = buildSideCacheBuilds,
-            buildSideCacheHits = buildSideCacheHits)
+            numOutputBatches, opTime, joinTime, hashBackendProvider)
         }
       } else {
         // builtBatch will be closed in doJoin
         doJoin(builtBatch, streamIter, joinOptions, numOutputRows, numOutputBatches, opTime,
-          joinTime, enableBuildSideReuse,
-          broadcastBatch = broadcastBatch,
-          buildSideCacheBuilds = buildSideCacheBuilds,
-          buildSideCacheHits = buildSideCacheHits)
+          joinTime, hashBackendProvider)
       }
     }
   }

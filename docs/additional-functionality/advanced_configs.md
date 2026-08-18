@@ -139,6 +139,7 @@ Name | Description | Default Value | Applicable at
 <a name="sql.join.cross.enabled"></a>spark.rapids.sql.join.cross.enabled|When set to true cross joins are enabled on the GPU|true|Runtime
 <a name="sql.join.existence.enabled"></a>spark.rapids.sql.join.existence.enabled|When set to true existence joins are enabled on the GPU|true|Runtime
 <a name="sql.join.fullOuter.enabled"></a>spark.rapids.sql.join.fullOuter.enabled|When set to true full outer joins are enabled on the GPU|true|Runtime
+<a name="sql.join.hashTable.reuse"></a>spark.rapids.sql.join.hashTable.reuse|Enable reuse of hash tables across GPU hash-join probes. The initial implementation supports executor-local reuse of broadcast hash tables. With AUTO build-side selection, resident or in-flight tables are reused, while cold or evicted tables use an executor-local rent-or-buy heuristic. FIXED and SMALLEST selection retain their configured behavior.|false|Runtime
 <a name="sql.join.inner.enabled"></a>spark.rapids.sql.join.inner.enabled|When set to true inner joins are enabled on the GPU|true|Runtime
 <a name="sql.join.leftAnti.enabled"></a>spark.rapids.sql.join.leftAnti.enabled|When set to true left anti joins are enabled on the GPU|true|Runtime
 <a name="sql.join.leftOuter.enabled"></a>spark.rapids.sql.join.leftOuter.enabled|When set to true left outer joins are enabled on the GPU|true|Runtime

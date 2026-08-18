@@ -391,10 +391,10 @@ object NvtxRegistry {
     "Processing batch for existence join")
 
   val BUILD_JOIN_TABLE: NvtxId = NvtxId("build join table", NvtxColor.GREEN,
-    "Building hash table for join operation")
+    "Materializing broadcast build-side data for a join")
 
-  val BROADCAST_HASH_TABLE_BUILD: NvtxId = NvtxId("broadcast hash table build",
-    NvtxColor.GREEN, "Building cuDF hash table for broadcast hash join")
+  val HASH_TABLE_BUILD: NvtxId = NvtxId("hash table build",
+    NvtxColor.GREEN, "Building reusable cuDF hash state for a join")
 
   // Window operations
   val WINDOW: NvtxId = NvtxId("window", NvtxColor.CYAN,
@@ -783,7 +783,7 @@ object NvtxRegistry {
     register(EXISTENCE_JOIN_SCATTER_MAP)
     register(EXISTENCE_JOIN_BATCH)
     register(BUILD_JOIN_TABLE)
-    register(BROADCAST_HASH_TABLE_BUILD)
+    register(HASH_TABLE_BUILD)
     register(WINDOW)
     register(RUNNING_WINDOW)
     register(DOUBLE_BATCHED_WINDOW_PRE)

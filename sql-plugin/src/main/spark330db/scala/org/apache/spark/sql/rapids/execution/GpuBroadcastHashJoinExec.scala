@@ -95,8 +95,9 @@ case class GpuBroadcastHashJoinExec(
     NUM_INPUT_ROWS -> createMetric(DEBUG_LEVEL, DESCRIPTION_NUM_INPUT_ROWS),
     NUM_INPUT_BATCHES -> createMetric(DEBUG_LEVEL, DESCRIPTION_NUM_INPUT_BATCHES),
     CONCAT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_CONCAT_TIME),
-    BUILD_SIDE_CACHE_BUILDS -> createMetric(MODERATE_LEVEL, DESCRIPTION_BUILD_SIDE_CACHE_BUILDS),
-    BUILD_SIDE_CACHE_HITS -> createMetric(MODERATE_LEVEL, DESCRIPTION_BUILD_SIDE_CACHE_HITS),
+    HASH_TABLE_BUILDS -> createMetric(DEBUG_LEVEL, DESCRIPTION_HASH_TABLE_BUILDS),
+    HASH_TABLE_REBUILDS -> createMetric(DEBUG_LEVEL, DESCRIPTION_HASH_TABLE_REBUILDS),
+    HASH_TABLE_REUSES -> createMetric(DEBUG_LEVEL, DESCRIPTION_HASH_TABLE_REUSES),
   )
 
   override def requiredChildDistribution: Seq[Distribution] = {
@@ -175,7 +176,6 @@ case class GpuBroadcastHashJoinExec(
 
     val targetSize = RapidsConf.GPU_BATCH_SIZE_BYTES.get(conf)
     val joinOptions = RapidsConf.getJoinOptions(conf, targetSize)
-    val enableBuildSideReuse = RapidsConf.BROADCAST_HASH_TABLE_REUSE.get(conf)
 
     // Get all the broadcast data from the shuffle coalesced into a single partition 
     val partitionSpecs = Seq(CoalescedPartitionSpec(0, shuffleExchange.numPartitions))
@@ -216,12 +216,12 @@ case class GpuBroadcastHashJoinExec(
               boundStreamKeys)
           }
           doJoin(builtBatch, nullFilteredStreamIter, joinOptions, numOutputRows,
-            numOutputBatches, opTime, joinTime, enableBuildSideReuse)
+            numOutputBatches, opTime, joinTime)
         }
       } else {
         // builtBatch will be closed in doJoin
         doJoin(builtBatch, streamIter, joinOptions, numOutputRows, numOutputBatches, opTime,
-          joinTime, enableBuildSideReuse)
+          joinTime)
       }
     }
   }

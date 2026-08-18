@@ -41,7 +41,7 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.launcher.SparkLauncher
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.Attribute
+import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression}
 import org.apache.spark.sql.catalyst.plans.logical.Statistics
 import org.apache.spark.sql.catalyst.plans.physical.{BroadcastMode, BroadcastPartitioning, Partitioning}
 import org.apache.spark.sql.execution.{SparkPlan, SQLExecution}
@@ -80,17 +80,16 @@ class SerializeConcatHostBuffersDeserializeBatch(
 
   // used for memoization of deserialization to GPU on Executor
   @transient private var batchInternal: SpillableColumnarBatch = null
-  // executor-local cache for build-side state
-  @transient private var cachedBuildSideCache:
-      mutable.HashMap[BroadcastCachedBuildSideKey, CachedBuildSide] = null
+  // executor-local owner of derived hash-build state
+  @transient private var hashBuildCacheInternal: HashBuildCache = null
 
   private def maybeGpuBatch: Option[SpillableColumnarBatch] = Option(batchInternal)
 
-  private def cachedBuildSides: mutable.HashMap[BroadcastCachedBuildSideKey, CachedBuildSide] = {
-    if (cachedBuildSideCache == null) {
-      cachedBuildSideCache = mutable.HashMap.empty
+  private def hashBuildCache: HashBuildCache = this.synchronized {
+    if (hashBuildCacheInternal == null) {
+      hashBuildCacheInternal = new HashBuildCache
     }
-    cachedBuildSideCache
+    hashBuildCacheInternal
   }
 
   def batch: SpillableColumnarBatch = this.synchronized {
@@ -158,41 +157,27 @@ class SerializeConcatHostBuffersDeserializeBatch(
     }
   }
 
-  /**
-   * Get or create executor-local reusable build-side state for this broadcast/key projection.
-   *
-   * Broadcast hash joins can reuse a cuDF hash table because each task on an executor uses the
-   * same deserialized broadcast payload and probes it with different stream-side batches.
-   * We cache the derived hash table on the shared broadcast payload, keyed by the projected
-   * build keys and null-handling semantics, so concurrent tasks build at most one hash table per
-   * key and then acquire shared leases for probing.
-   *
-   * The scope is limited to broadcast hash joins. Shuffled hash joins build from per-partition
-   * data instead of a shared payload, so they do not use this cache.
-   */
-  def getOrCreateCachedBuildSide(
+  /** Offer executor-local reusable build state derived from this broadcast payload. */
+  def offerHashBuild(
+      side: GpuBuildSide,
+      demandId: HashBuildDemandId,
+      sourceProjection: Seq[Seq[Expression]],
       boundBuiltKeys: Seq[GpuExpression],
       compareNullsEqual: Boolean,
       filterOutNulls: Boolean,
-      cacheBuilds: GpuMetric = NoopMetric,
-      cacheHits: GpuMetric = NoopMetric): CachedBuildSide = this.synchronized {
-    val cacheKey = BroadcastCachedBuildSide.key(
-      boundBuiltKeys,
-      compareNullsEqual,
-      filterOutNulls)
-    cachedBuildSides.get(cacheKey).map { cached =>
-      cacheHits += 1
-      cached
-    }.getOrElse {
-      cacheBuilds += 1
-      val cached = BroadcastCachedBuildSide.create(
-        batch,
-        boundBuiltKeys,
-        compareNullsEqual,
-        filterOutNulls)
-      cachedBuildSides.put(cacheKey, cached)
-      cached
-    }
+      prepareBatch: Option[ColumnarBatch => ColumnarBatch]): HashBuildCacheEntry = {
+    // Resolve the synchronized broadcast batch before publishing the build closure. Cache shutdown
+    // waits for in-flight builders while holding this object's monitor.
+    val buildBatch = batch
+    val key = HashBuildKey.fromExpressions(
+      sourceProjection, boundBuiltKeys, compareNullsEqual, filterOutNulls)
+    hashBuildCache.offer(
+      side,
+      HashBuildCost.hasNumericKeys(boundBuiltKeys),
+      demandId,
+      key,
+      () => HashBuildFactory.create(
+        buildBatch, boundBuiltKeys, compareNullsEqual, filterOutNulls, prepareBatch))
   }
 
   private def writeObject(out: ObjectOutputStream): Unit = {
@@ -292,11 +277,10 @@ class SerializeConcatHostBuffersDeserializeBatch(
    * Public for tests.
    */
   def closeInternal(): Unit = this.synchronized {
-    Seq(data, batchInternal).safeClose()
-    Option(cachedBuildSideCache).foreach(cache => cache.values.toSeq.safeClose())
+    Seq(hashBuildCacheInternal, data, batchInternal).safeClose()
     data = null
     batchInternal = null
-    cachedBuildSideCache = null
+    hashBuildCacheInternal = null
   }
 
   @scala.annotation.nowarn("msg=method finalize in class Object is deprecated")

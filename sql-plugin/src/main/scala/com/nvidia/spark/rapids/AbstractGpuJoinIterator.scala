@@ -205,17 +205,29 @@ abstract class SplittableJoinIterator(
   // If the join explodes this holds batches from the stream side split into smaller pieces.
   private val pendingSplits = scala.collection.mutable.Queue[LazySpillableColumnarBatch]()
 
-  protected def computeNumJoinRows(cb: LazySpillableColumnarBatch): Long
+  /**
+   * Per-stream-batch state prepared before deciding whether the batch must be split. Join
+   * implementations may carry additional state from sizing through gather-map creation so a
+   * decision made for a batch is not recomputed later.
+   */
+  protected trait PreparedJoinBatch extends AutoCloseable {
+    def numJoinRows: Long
+    override def close(): Unit = {}
+  }
+
+  protected case class EstimatedJoinBatch(numJoinRows: Long) extends PreparedJoinBatch
+
+  protected def prepareJoinBatch(cb: LazySpillableColumnarBatch): PreparedJoinBatch
 
   /**
    * Create a join gatherer.
    * @param cb next column batch from the streaming side of the join
-   * @param numJoinRows if present, the number of join output rows computed for this batch
+   * @param prepared if present, the state prepared for this stream batch
    * @return some gatherer to use next or None if there is no next gatherer or the loop should try
    *         to build the gatherer again (e.g.: to skip a degenerate join result batch)
    */
   protected def createGatherer(cb: LazySpillableColumnarBatch,
-      numJoinRows: Option[Long]): Option[JoinGatherer]
+      prepared: Option[PreparedJoinBatch]): Option[JoinGatherer]
 
   override def hasNextStreamBatch: Boolean = {
     isInitialJoin || pendingSplits.nonEmpty || stream.hasNext
@@ -232,24 +244,26 @@ abstract class SplittableJoinIterator(
       }
       opTime.ns {
         withResource(scb) { scb =>
-          val numJoinRows = computeNumJoinRows(scb)
+          withResource(prepareJoinBatch(scb)) { prepared =>
+            val numJoinRows = prepared.numJoinRows
 
-          // We want the gather maps size to be around the target size. There are two gather maps
-          // that are made up of ints, so compute how many rows on the stream side will produce the
-          // desired gather maps size.
-          val maxJoinRows = Math.max(1, targetSize / (2 * Integer.BYTES))
-          if (numJoinRows > maxJoinRows && scb.numRows > 1) {
-            // Need to split the batch to reduce the gather maps size. This takes a simplistic
-            // approach of assuming the data is uniformly distributed in the stream table.
-            val numSplits = Math.min(scb.numRows,
-              Math.ceil(numJoinRows.toDouble / maxJoinRows).toInt)
-            splitAndSave(scb.getBatch, numSplits)
+            // We want the gather maps size to be around the target size. There are two gather maps
+            // that are made up of ints, so compute how many rows on the stream side will produce
+            // the desired gather maps size.
+            val maxJoinRows = Math.max(1, targetSize / (2 * Integer.BYTES))
+            if (numJoinRows > maxJoinRows && scb.numRows > 1) {
+              // Need to split the batch to reduce the gather maps size. This takes a simplistic
+              // approach of assuming the data is uniformly distributed in the stream table.
+              val numSplits = Math.min(scb.numRows,
+                Math.ceil(numJoinRows.toDouble / maxJoinRows).toInt)
+              splitAndSave(scb.getBatch, numSplits)
 
-            // Return no gatherer so the outer loop will try again
-            return None
+              // Return no gatherer so the outer loop will try again
+              return None
+            }
+
+            createGatherer(scb, Some(prepared))
           }
-
-          createGatherer(scb, Some(numJoinRows))
         }
       }
     } else {

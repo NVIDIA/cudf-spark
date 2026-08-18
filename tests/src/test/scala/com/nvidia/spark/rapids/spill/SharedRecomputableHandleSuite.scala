@@ -21,8 +21,9 @@ import java.util.concurrent.{Callable, CountDownLatch, Executors, TimeUnit}
 import scala.collection.mutable.ArrayBuffer
 
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.SpillPriorities
 
-class SharedRecomputableDeviceHandleSuite extends SpillUnitTestBase {
+class SharedRecomputableHandleSuite extends SpillUnitTestBase {
   private class TestResource(val id: Int, closedIds: ArrayBuffer[Int]) extends AutoCloseable {
     private var closed = false
 
@@ -47,14 +48,17 @@ class SharedRecomputableDeviceHandleSuite extends SpillUnitTestBase {
     }
 
     withResource(
-      new SharedRecomputableDeviceHandle(1024L, buildResource(), () => buildResource())) {
+      new SharedRecomputableHandle(1024L, buildResource(), () => buildResource())) {
       handle =>
         SpillFramework.stores.deviceStore.track(handle)
         assertResult(1)(SpillFramework.stores.deviceStore.numHandles)
+        assertResult(SpillPriorities.RECOMPUTABLE_CACHE_PRIORITY)(handle.taskPriority)
+        assert(handle.isReady)
         assert(handle.spillable)
 
         withResource(handle.acquire()) { lease =>
           assertResult(1)(lease.resource.id)
+          assert(!lease.rebuilt)
           assert(!handle.spillable)
           assertResult(0L)(SpillFramework.stores.deviceStore.spill(handle.approxSizeInBytes))
         }
@@ -64,13 +68,16 @@ class SharedRecomputableDeviceHandleSuite extends SpillUnitTestBase {
           SpillFramework.stores.deviceStore.spill(handle.approxSizeInBytes))
         assertResult(Seq(1))(closedIds.toSeq)
         assertResult(0)(SpillFramework.stores.deviceStore.numHandles)
+        assert(!handle.isReady)
 
         withResource(handle.acquire()) { lease =>
           assertResult(2)(lease.resource.id)
+          assert(lease.rebuilt)
           assert(!lease.resource.isClosed)
         }
 
         assertResult(2)(buildCount)
+        assert(handle.isReady)
         assertResult(1)(SpillFramework.stores.deviceStore.numHandles)
     }
 
@@ -87,7 +94,7 @@ class SharedRecomputableDeviceHandleSuite extends SpillUnitTestBase {
     }
 
     withResource(
-      new SharedRecomputableDeviceHandle(1024L, buildResource(), () => buildResource())) {
+      new SharedRecomputableHandle(1024L, buildResource(), () => buildResource())) {
       handle =>
         SpillFramework.stores.deviceStore.track(handle)
         assertResult(handle.approxSizeInBytes)(handle.spill())
@@ -110,6 +117,25 @@ class SharedRecomputableDeviceHandleSuite extends SpillUnitTestBase {
     assertResult(Seq(1, 2, 3))(closedIds.sorted.toSeq)
   }
 
+  test("close waits for the last lease") {
+    val closedIds = ArrayBuffer[Int]()
+    val resource = new TestResource(1, closedIds)
+    val handle = new SharedRecomputableHandle(1024L, resource,
+      () => new TestResource(2, closedIds))
+    SpillFramework.stores.deviceStore.track(handle)
+
+    val lease = handle.acquire()
+    handle.close()
+    assert(!resource.isClosed)
+    assertResult(1)(SpillFramework.stores.deviceStore.numHandles)
+    intercept[IllegalStateException](handle.acquire())
+
+    lease.close()
+    assert(resource.isClosed)
+    assertResult(Seq(1))(closedIds.toSeq)
+    assertResult(0)(SpillFramework.stores.deviceStore.numHandles)
+  }
+
   test("concurrent acquires only rebuild once after eviction") {
     val closedIds = ArrayBuffer[Int]()
     var buildCount = 0
@@ -127,7 +153,7 @@ class SharedRecomputableDeviceHandleSuite extends SpillUnitTestBase {
     }
 
     withResource(
-      new SharedRecomputableDeviceHandle(1024L, buildResource(), () => buildResource())) {
+      new SharedRecomputableHandle(1024L, buildResource(), () => buildResource())) {
       handle =>
         SpillFramework.stores.deviceStore.track(handle)
         assertResult(handle.approxSizeInBytes)(handle.spill())
@@ -135,10 +161,10 @@ class SharedRecomputableDeviceHandleSuite extends SpillUnitTestBase {
         val pool = Executors.newFixedThreadPool(2)
         try {
           val futures = (0 until 2).map { _ =>
-            pool.submit(new Callable[Int] {
-              override def call(): Int = {
+            pool.submit(new Callable[(Int, Boolean)] {
+              override def call(): (Int, Boolean) = {
                 withResource(handle.acquire()) { lease =>
-                  lease.resource.id
+                  (lease.resource.id, lease.rebuilt)
                 }
               }
             })
@@ -147,8 +173,10 @@ class SharedRecomputableDeviceHandleSuite extends SpillUnitTestBase {
           assert(rebuildStarted.await(30, TimeUnit.SECONDS))
           allowRebuild.countDown()
 
-          val ids = futures.map(_.get(30, TimeUnit.SECONDS)).sorted
+          val results = futures.map(_.get(30, TimeUnit.SECONDS))
+          val ids = results.map(_._1).sorted
           assertResult(Seq(2, 2))(ids)
+          assertResult(1)(results.count(_._2))
           assertResult(2)(buildCount)
         } finally {
           pool.shutdownNow()

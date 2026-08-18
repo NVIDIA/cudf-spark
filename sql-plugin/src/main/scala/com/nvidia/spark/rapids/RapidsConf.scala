@@ -797,7 +797,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       "which is distinct from the data movement build side (which side is materialized/" +
       "buffered/broadcast, determined by the query plan). Options are: " +
       "AUTO (default) - automatically determine the best physical build side using heuristics, " +
-      "currently behaves the same as SMALLEST but may evolve to use additional factors; " +
+      "including reusable hash-build residency and observed executor-local demand; " +
       "FIXED - use the build side as suggested by the query plan without dynamic selection; " +
       "SMALLEST - always select the side with the smallest row count as the physical build side, " +
       "determined on a batch-by-batch basis at join time. When AUTO or SMALLEST is used, " +
@@ -808,14 +808,13 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .checkValues(JoinBuildSideSelection.values.map(_.toString))
     .createWithDefault(JoinBuildSideSelection.AUTO.toString)
 
-  val BROADCAST_HASH_TABLE_REUSE =
-    conf("spark.rapids.sql.join.broadcastHashTable.reuse")
-      .doc("Enable reuse of the broadcast-side hash table for broadcast hash joins. " +
-        "When enabled, the hash table is built once per broadcast and shared across all " +
-        "stream batches within a task and across all tasks that consume the same broadcast " +
-        "on an executor. Reuse pins the physical build side to the broadcast side for the " +
-        "lifetime of each cached join, overriding the dynamic build-side selection " +
-        s"heuristic configured by ${JOIN_BUILD_SIDE.key}.")
+  val HASH_TABLE_REUSE =
+    conf("spark.rapids.sql.join.hashTable.reuse")
+      .doc("Enable reuse of hash tables across GPU hash-join probes. The initial implementation " +
+        "supports executor-local reuse of broadcast hash tables. With AUTO build-side selection, " +
+        "resident or in-flight tables are reused, while cold or evicted tables use an " +
+        "executor-local rent-or-buy heuristic. FIXED and SMALLEST selection retain their " +
+        "configured behavior.")
       .booleanConf
       .createWithDefault(false)
 
@@ -3429,7 +3428,7 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val joinGathererSizeEstimateThreshold: Double = get(JOIN_GATHERER_SIZE_ESTIMATE_THRESHOLD)
 
-  lazy val broadcastHashTableReuse: Boolean = get(BROADCAST_HASH_TABLE_REUSE)
+  lazy val hashTableReuse: Boolean = get(HASH_TABLE_REUSE)
 
   /**
    * Get join options based on the current configuration.

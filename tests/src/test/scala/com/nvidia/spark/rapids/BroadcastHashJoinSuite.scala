@@ -19,17 +19,24 @@ package com.nvidia.spark.rapids
 import com.nvidia.spark.rapids.TestUtils.findOperator
 
 import org.apache.spark.SparkConf
-import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.execution.exchange.ReusedExchangeExec
-import org.apache.spark.sql.functions.broadcast
+import org.apache.spark.sql.functions.{broadcast, col}
 import org.apache.spark.sql.rapids.execution.{GpuBroadcastHashJoinExec, GpuHashJoin}
+import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.{DataFrame, SparkSession}
 
 class BroadcastHashJoinSuite extends SparkQueryCompareTestSuite {
   private def broadcastReuseConf: SparkConf = new SparkConf()
     .set("spark.sql.adaptive.enabled", "false")
     .set("spark.sql.autoBroadcastJoinThreshold", "-1")
-    .set("spark.rapids.sql.join.broadcastHashTable.reuse", "true")
+    .set("spark.rapids.sql.join.hashTable.reuse", "true")
+    .set("spark.rapids.sql.join.buildSide", "FIXED")
     .set("spark.rapids.sql.batchSizeBytes", "1")
+
+  private def broadcastAutoReuseConf: SparkConf = new SparkConf()
+    .set("spark.sql.adaptive.enabled", "false")
+    .set("spark.sql.autoBroadcastJoinThreshold", "-1")
+    .set("spark.rapids.sql.join.hashTable.reuse", "true")
+    .set("spark.rapids.sql.metrics.level", "DEBUG")
 
   private def streamedProbeDf(spark: SparkSession): DataFrame =
     spark.range(0, 128).selectExpr(
@@ -161,6 +168,22 @@ class BroadcastHashJoinSuite extends SparkQueryCompareTestSuite {
   }
 
   IGNORE_ORDER_testSparkResultsAreEqual2(
+    "broadcast hash join reuse non-distinct left outer build right",
+    streamedProbeDf,
+    nonDistinctBuildDf,
+    conf = broadcastReuseConf) {
+    (probe, build) => probe.join(broadcast(build), Seq("join_key"), "left")
+  }
+
+  IGNORE_ORDER_testSparkResultsAreEqual2(
+    "broadcast hash join reuse non-distinct right outer build left",
+    nonDistinctBuildDf,
+    streamedProbeDf,
+    conf = broadcastReuseConf) {
+    (build, probe) => broadcast(build).join(probe, Seq("join_key"), "right")
+  }
+
+  IGNORE_ORDER_testSparkResultsAreEqual2(
     "broadcast hash join reuse non-distinct left semi build right",
     streamedProbeDf,
     nonDistinctBuildDf,
@@ -184,6 +207,58 @@ class BroadcastHashJoinSuite extends SparkQueryCompareTestSuite {
     (probe, build) => probe.join(broadcast(build), Seq("join_key"), "inner")
   }
 
+  IGNORE_ORDER_testSparkResultsAreEqual2(
+    "broadcast hash join reuse conditional inner build right",
+    streamedProbeDf,
+    nonDistinctBuildDf,
+    conf = broadcastReuseConf) {
+    (probe, build) =>
+      probe.alias("p").join(
+        broadcast(build.alias("b")),
+        col("p.join_key") === col("b.join_key") &&
+          col("p.probe_value") > col("b.build_value"),
+        "inner")
+  }
+
+  IGNORE_ORDER_testSparkResultsAreEqual2(
+    "broadcast hash join reuse conditional distinct inner build right",
+    streamedProbeDf,
+    distinctBuildDf,
+    conf = broadcastReuseConf) {
+    (probe, build) =>
+      probe.alias("p").join(
+        broadcast(build.alias("b")),
+        col("p.join_key") === col("b.join_key") &&
+          col("p.probe_value") > col("b.build_value"),
+        "inner")
+  }
+
+  IGNORE_ORDER_testSparkResultsAreEqual2(
+    "broadcast hash join reuse conditional distinct left semi build right",
+    streamedProbeDf,
+    distinctBuildDf,
+    conf = broadcastReuseConf) {
+    (probe, build) =>
+      probe.alias("p").join(
+        broadcast(build.alias("b")),
+        col("p.join_key") === col("b.join_key") &&
+          col("p.probe_value") > col("b.build_value"),
+        "leftsemi")
+  }
+
+  IGNORE_ORDER_testSparkResultsAreEqual2(
+    "broadcast hash join reuse conditional left outer build right",
+    streamedProbeDf,
+    nonDistinctBuildDf,
+    conf = broadcastReuseConf) {
+    (probe, build) =>
+      probe.alias("p").join(
+        broadcast(build.alias("b")),
+        col("p.join_key") === col("b.join_key") &&
+          col("p.probe_value") > col("b.build_value"),
+        "left")
+  }
+
   test("broadcast hash join reuse same broadcast in multiple joins plan") {
     val conf = broadcastReuseConf.clone()
       .set("spark.sql.exchange.reuse", "true")
@@ -204,10 +279,28 @@ class BroadcastHashJoinSuite extends SparkQueryCompareTestSuite {
       assertResult(2)(bhjs.size)
       assert(reusedExchanges.nonEmpty)
 
-      val totalBuilds = bhjs.map(_.metrics("buildSideCacheBuilds").value).sum
-      val totalHits = bhjs.map(_.metrics("buildSideCacheHits").value).sum
+      val totalBuilds = bhjs.map(_.metrics("hashTableBuilds").value).sum
+      val totalReuses = bhjs.map(_.metrics("hashTableReuses").value).sum
       assertResult(1L)(totalBuilds)
-      assert(totalHits > 0L, s"expected at least one cache hit, got $totalHits")
+      assert(totalReuses > 0L, s"expected at least one hash-table reuse, got $totalReuses")
     }, conf)
+  }
+
+  test("AUTO admits a cold broadcast hash build after repeated smaller numeric probes") {
+    withGpuSparkSession(spark => {
+      val probe = spark.range(0, 512, 1, 8).selectExpr(
+        "CAST(id % 256 AS INT) AS join_key",
+        "CAST(id AS INT) AS probe_value")
+      val build = spark.range(0, 2048, 1, 1).selectExpr(
+        "CAST(id % 256 AS INT) AS join_key",
+        "CAST(id AS INT) AS build_value")
+      val joined = probe.join(broadcast(build), Seq("join_key"), "inner")
+
+      assertResult(4096)(joined.collect().length)
+      val bhj = findOperator(joined.queryExecution.executedPlan,
+        _.isInstanceOf[GpuBroadcastHashJoinExec]).get
+      assertResult(1L)(bhj.metrics("hashTableBuilds").value)
+      assert(bhj.metrics("hashTableReuses").value > 0L)
+    }, broadcastAutoReuseConf)
   }
 }

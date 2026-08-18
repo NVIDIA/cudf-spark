@@ -381,6 +381,25 @@ def test_broadcast_join_right_table(data_gen, join_type):
     conf = {'spark.sql.adaptive.enabled': 'false'}
     assert_gpu_and_cpu_are_equal_collect(do_join, conf = conf)
 
+
+@ignore_order(local=True)
+@validate_execs_in_gpu_plan('GpuBroadcastHashJoinExec')
+def test_broadcast_hash_join_reuses_build_across_stream_partitions():
+    def do_join(spark):
+        stream = spark.range(0, 4096, 1, 8).select(
+            (col('id') % 128).alias('key'), col('id').alias('stream_value'))
+        build = spark.range(0, 256, 1, 1).select(
+            (col('id') % 128).alias('key'), col('id').alias('build_value'))
+        return stream.join(broadcast(build), 'key')
+
+    conf = {
+        'spark.sql.adaptive.enabled': 'false',
+        'spark.rapids.sql.join.buildSide': 'FIXED',
+        'spark.rapids.sql.join.hashTable.reuse': 'true',
+    }
+    assert_gpu_and_cpu_are_equal_collect(do_join, conf=conf)
+
+
 @ignore_order(local=True)
 @pytest.mark.parametrize('rows', ['(1)', '(1), (null)', '()'], ids=['no_nulls', 'has_nulls', 'empty'])
 def test_broadcast_join_null_aware_anti(rows):

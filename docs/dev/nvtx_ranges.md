@@ -39,6 +39,7 @@ GpuGenerate project split|Splitting projection in generate operation
 parquet parse filter footer|Parsing and filtering Parquet footer by range
 Compile ASTs|Compiling abstract syntax trees for expression evaluation
 parquet filter blocks|Filtering Parquet row group blocks based on predicates
+hash table build|Building reusable cuDF hash state for a join
 PageableH2D|Copying from pageable host memory to device
 TOP N|Computing top N rows
 zstd post process|Post-processing ZSTD compressed data

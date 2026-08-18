@@ -28,9 +28,9 @@ import scala.collection.mutable
 
 import ai.rapids.cudf._
 import com.nvidia.spark.rapids.{GpuColumnVector, GpuColumnVectorFromBuffer,
-  GpuCompressedColumnVector, GpuDeviceManager, HashedPriorityQueue, HostAlloc,
+  GpuCompressedColumnVector, GpuDeviceManager, GpuSemaphore, HashedPriorityQueue, HostAlloc,
   HostMemoryOutputStream, MemoryBufferToHostByteBufferIterator, NvtxId, NvtxRegistry,
-  RapidsConf, RapidsHostColumnVector, TaskRegistryTracker}
+  RapidsConf, RapidsHostColumnVector, SpillPriorities, TaskRegistryTracker}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableSeq
 import com.nvidia.spark.rapids.format.TableMeta
@@ -329,7 +329,7 @@ trait DeviceSpillableHandle[T <: AutoCloseable] extends DeviceStoreHandle {
   }
 }
 
-object SharedRecomputableDeviceHandle {
+object RecomputableHandle {
   /**
    * A scoped lease that pins a shared recomputable device object.
    * Holding a lease prevents the object from being closed.
@@ -338,8 +338,9 @@ object SharedRecomputableDeviceHandle {
    * @param resource the object that the lease is on
    */
   final class Lease[T <: AutoCloseable] private[spill] (
-      handle: SharedRecomputableDeviceHandle[T],
-      val resource: T) extends AutoCloseable {
+      handle: RecomputableHandle[T],
+      val resource: T,
+      val rebuilt: Boolean) extends AutoCloseable {
     private[this] var closed = false
 
     override def close(): Unit = synchronized {
@@ -347,17 +348,36 @@ object SharedRecomputableDeviceHandle {
         throw new IllegalStateException("Close called too many times on recomputable handle lease")
       }
       closed = true
-      handle.releasePin()
+      handle.releaseLease()
     }
   }
+}
+
+/**
+ * A device object that can be leased and recreated after eviction.
+ *
+ * The interface does not require sharing. [[SharedRecomputableHandle]] is the executor-shared
+ * implementation used by the broadcast hash-build store; a task-local implementation can use
+ * the same contract in the future.
+ */
+trait RecomputableHandle[T <: AutoCloseable] extends AutoCloseable {
+  def isReady: Boolean
+  def acquire(): RecomputableHandle.Lease[T]
+  private[spill] def releaseLease(): Unit
+}
+
+object SharedRecomputableHandle {
 
   def apply[T <: AutoCloseable](
       approxSizeInBytes: Long,
       initialValue: T)(
-      rebuild: => T): SharedRecomputableDeviceHandle[T] = {
-    val handle = new SharedRecomputableDeviceHandle(approxSizeInBytes, initialValue, () => rebuild)
-    SpillFramework.stores.deviceStore.track(handle)
-    handle
+      rebuild: => T): SharedRecomputableHandle[T] = {
+    closeOnExcept(initialValue) { value =>
+      Cuda.DEFAULT_STREAM.sync()
+      val handle = new SharedRecomputableHandle(approxSizeInBytes, value, () => rebuild)
+      SpillFramework.stores.deviceStore.track(handle)
+      handle
+    }
   }
 }
 
@@ -376,16 +396,22 @@ object SharedRecomputableDeviceHandle {
  * The `rebuild` function is used to recreate the device object after it has been evicted. It is
  * called by the first thread that calls `acquire` after a successful spill.
  */
-class SharedRecomputableDeviceHandle[T <: AutoCloseable] private[spill] (
+class SharedRecomputableHandle[T <: AutoCloseable] private[spill] (
     override val approxSizeInBytes: Long,
     initialValue: T,
-    rebuild: () => T) extends DeviceStoreHandle with Logging {
-  import SharedRecomputableDeviceHandle.Lease
+    rebuild: () => T) extends DeviceStoreHandle with RecomputableHandle[T] with Logging {
+  import RecomputableHandle.Lease
+
+  taskPriority = SpillPriorities.RECOMPUTABLE_CACHE_PRIORITY
 
   private[spill] var dev: Option[T] = Some(initialValue)
   private[this] var pendingRelease: Seq[T] = Seq.empty
   private[this] var pinCount: Int = 0
   private[this] var rebuilding: Boolean = false
+
+  override def isReady: Boolean = synchronized {
+    !closed && dev.isDefined
+  }
 
   private[spill] override def spillable: Boolean = synchronized {
     super.spillable && dev.isDefined && pinCount == 0
@@ -400,65 +426,107 @@ class SharedRecomputableDeviceHandle[T <: AutoCloseable] private[spill] (
    */
   def acquire(): Lease[T] = {
     var materialized: Option[T] = None
-    var shouldBuild = false
+    var rebuiltByCaller = false
     while (materialized.isEmpty) {
-      shouldBuild = synchronized {
+      val (shouldBuild, shouldWait) = synchronized {
         if (closed) {
           throw new IllegalStateException("attempting to materialize a closed handle")
         } else if (dev.isDefined) {
           pinCount += 1
           materialized = dev
-          false
+          (false, false)
         } else if (rebuilding) {
-          wait()
-          false
+          (false, true)
         } else {
           rebuilding = true
-          true
+          (true, false)
+        }
+      }
+
+      if (shouldWait) {
+        val taskContext = TaskContext.get()
+        GpuSemaphore.releaseIfNecessary(taskContext)
+        try {
+          synchronized {
+            while (!closed && rebuilding && dev.isEmpty) {
+              wait()
+            }
+          }
+        } finally {
+          GpuSemaphore.acquireIfNecessary(taskContext)
         }
       }
 
       if (shouldBuild) {
         var rebuilt: Option[T] = None
+        var published = false
         try {
           rebuilt = Some(rebuild())
-          var shouldTrack = false
+          Cuda.DEFAULT_STREAM.sync()
           synchronized {
-            rebuilding = false
             if (closed) {
-              notifyAll()
               throw new IllegalStateException("attempting to materialize a closed handle")
             }
+            // Keep the handle lock while publishing to the store so a spill cannot remove this
+            // generation before it is tracked.
+            SpillFramework.stores.deviceStore.track(this)
             dev = rebuilt
             pinCount += 1
             materialized = rebuilt
-            shouldTrack = true
+            rebuiltByCaller = true
+            published = true
+            rebuilding = false
             notifyAll()
-          }
-          if (shouldTrack) {
-            SpillFramework.stores.deviceStore.track(this)
           }
         } catch {
           case t: Throwable =>
             // Rebuild failed; release any rebuilt object, clear rebuilding,
             // and notify waiters before rethrowing
-            rebuilt.foreach(_.close())
-            synchronized {
-              rebuilding = false
-              notifyAll()
+            try {
+              if (!published) {
+                rebuilt.foreach(_.close())
+              }
+            } catch {
+              case closeError: Throwable => t.addSuppressed(closeError)
+            } finally {
+              synchronized {
+                rebuilding = false
+                notifyAll()
+              }
             }
             throw t
         }
       }
     }
-    new Lease(this, materialized.get)
+    new Lease(this, materialized.get, rebuiltByCaller)
   }
 
-  private[spill] def releasePin(): Unit = synchronized {
-    if (pinCount <= 0) {
-      throw new IllegalStateException("releasePin called without a matching acquire")
+  private[spill] override def releaseLease(): Unit = {
+    val shouldClose = synchronized {
+      if (pinCount <= 0) {
+        throw new IllegalStateException("releaseLease called without a matching acquire")
+      }
+      pinCount -= 1
+      closed && pinCount == 0 && !spilling
     }
-    pinCount -= 1
+    if (shouldClose) {
+      doClose()
+    }
+  }
+
+  override def close(): Unit = {
+    val shouldClose = synchronized {
+      if (closed) {
+        false
+      } else {
+        closed = true
+        notifyAll()
+        pinCount == 0 && !spilling
+      }
+    }
+    if (shouldClose) {
+      doClose()
+    }
   }
 
   override def spill(): Long = {
@@ -468,19 +536,21 @@ class SharedRecomputableDeviceHandle[T <: AutoCloseable] private[spill] (
         spilling = true
         evicted = dev
         dev = None
+        // Keep removal in the same critical section as clearing dev. Otherwise a concurrent
+        // rebuild can publish a new generation and this spill can remove that generation.
+        SpillFramework.removeFromDeviceStore(this)
         true
       } else {
         false
       }
     }
     if (thisThreadSpills) {
-      SpillFramework.removeFromDeviceStore(this)
       var shouldClose = false
       executeSpill {
         synchronized {
           pendingRelease = pendingRelease ++ evicted.toSeq
           spilling = false
-          shouldClose = closed
+          shouldClose = closed && pinCount == 0
         }
         0L
       }

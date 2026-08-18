@@ -607,7 +607,7 @@ trait GpuSubPartitionHashJoin extends Logging { self: GpuHashJoin =>
           }
           // Leverage the original join iterators
           val joinIter = doJoin(buildCb, streamIter, joinOptions,
-            numOutputRows, numOutputBatches, opTime, joinTime, enableBuildSideReuse = false)
+            numOutputRows, numOutputBatches, opTime, joinTime)
           Some(joinIter)
         }
       }
