@@ -490,6 +490,16 @@ class HMBInputFile(buffer: HostMemoryBuffer) extends InputFile {
     getLength)
 }
 
+private[parquet] object GpuParquetFileFilterHandler {
+  def canUseNativeFooterReader(schema: StructType): Boolean =
+    !TrampolineUtil.dataTypeExistsRecursively(schema, t => GpuColumnVector.isVariantType(t))
+
+  def useNativeFooterReader(
+      configuredReader: ParquetFooterReaderType.Value,
+      schema: StructType): Boolean =
+    configuredReader == ParquetFooterReaderType.NATIVE && canUseNativeFooterReader(schema)
+}
+
 protected case class GpuParquetFileFilterHandler(
     @transient sqlConf: SQLConf,
     metrics: Map[String, GpuMetric]) extends Logging {
@@ -534,7 +544,7 @@ protected case class GpuParquetFileFilterHandler(
         }
         schemaBuilder.build()
       case dt if GpuColumnVector.isVariantType(dt) =>
-        new ParquetFooter.ValueElement()
+        throw new UnsupportedOperationException("Variant must use the Java Parquet footer reader")
       case _: NumericType | BinaryType | BooleanType | DateType | TimestampType | StringType =>
         new ParquetFooter.ValueElement()
       case at: ArrayType =>
@@ -704,7 +714,8 @@ protected case class GpuParquetFileFilterHandler(
       }
       val footer: ParquetMetadata = try {
         footerReader match {
-          case ParquetFooterReaderType.NATIVE =>
+          case reader
+              if GpuParquetFileFilterHandler.useNativeFooterReader(reader, readDataSchema) =>
             val (serialized, rowIndexOffsets) = withResource(readAndFilterFooter(fileIO, file,
               conf, readDataSchema, filePath)) { tableFooter =>
                 if (tableFooter.getNumColumns <= 0) {

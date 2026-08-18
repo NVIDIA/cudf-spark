@@ -101,8 +101,12 @@ public class GpuColumnVector extends GpuColumnVectorBase {
     TableDebug.get().debug(name, hostCol);
   }
 
-  public static boolean isVariantType(DataType spark) {
-    return spark != null && "variant".equals(spark.typeName());
+  /**
+   * VariantType is unavailable before Spark 4, so common code identifies it by its stable type
+   * name instead of taking a static dependency on the Spark 4 class.
+   */
+  public static boolean isVariantType(DataType sparkType) {
+    return sparkType != null && "variant".equals(sparkType.typeName());
   }
 
   private static HostColumnVector.ListType variantByteListType(boolean nullable) {
@@ -488,7 +492,9 @@ public class GpuColumnVector extends GpuColumnVectorBase {
   }
 
   public static boolean isNonNestedSupportedType(DataType type) {
-    return toRapidsOrNull(type) != null;
+    // Variant is atomic in Spark but nested in cuDF, so callers that require a physical
+    // non-nested type (notably the GPU cache serializer) cannot handle it.
+    return !isVariantType(type) && toRapidsOrNull(type) != null;
   }
 
   public static DType getNonNestedRapidsType(DataType type) {
@@ -690,7 +696,9 @@ public class GpuColumnVector extends GpuColumnVectorBase {
   static boolean typeConversionAllowed(ColumnView cv, DataType colType) {
     DType dt = cv.getType();
     if (isVariantType(colType)) {
-      return isVariantColumn(cv);
+      // The logical-type check above prevents an ordinary two-field Spark struct from being
+      // mistaken for Variant; this helper only validates Variant's physical cuDF layout.
+      return hasVariantPhysicalLayout(cv);
     }
     if (!dt.isNestedType()) {
       return getNonNestedRapidsType(colType).equals(dt);
@@ -756,7 +764,7 @@ public class GpuColumnVector extends GpuColumnVectorBase {
     }
   }
 
-  private static boolean isVariantColumn(ColumnView cv) {
+  private static boolean hasVariantPhysicalLayout(ColumnView cv) {
     if (!cv.getType().equals(DType.STRUCT) || cv.getNumChildren() != 2) {
       return false;
     }

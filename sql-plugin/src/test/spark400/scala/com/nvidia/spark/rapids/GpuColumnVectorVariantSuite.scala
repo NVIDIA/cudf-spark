@@ -33,7 +33,7 @@ import java.util.Arrays
 
 import ai.rapids.cudf.{ColumnVector, DType, HostColumnVector}
 import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.parquet.ParquetSchemaUtils
+import com.nvidia.spark.rapids.parquet.{ParquetCachedBatchSerializer, ParquetSchemaUtils}
 import org.apache.parquet.schema.{MessageTypeParser, Type}
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -60,8 +60,22 @@ class GpuColumnVectorVariantSuite extends AnyFunSuite {
       withResource(new RapidsHostColumnVector(VariantType, variant.copyToHost())) { host =>
         assert(host.getChild(0).getBinary(0).sameElements(valueBytes))
         assert(host.getChild(1).getBinary(0).sameElements(metadataBytes))
+        assert(host.getVariant(0).getValue.sameElements(valueBytes))
+        assert(host.getVariant(0).getMetadata.sameElements(metadataBytes))
       }
     }
+  }
+
+  test("Variant detection is null-safe and excluded from the GPU cache path") {
+    assert(GpuColumnVector.isVariantType(VariantType))
+    assert(!GpuColumnVector.isVariantType(null))
+    val serializer = new ParquetCachedBatchSerializer()
+    assert(!serializer.isSupportedByCudf(VariantType))
+    assert(!serializer.isSupportedByCudf(ArrayType(VariantType, containsNull = true)))
+    assert(!serializer.isSupportedByCudf(
+      MapType(StringType, VariantType, valueContainsNull = true)))
+    assert(!serializer.isSupportedByCudf(
+      StructType(Seq(StructField("v", VariantType, nullable = true)))))
   }
 
   test("Variant conversion requires value and metadata byte children") {
