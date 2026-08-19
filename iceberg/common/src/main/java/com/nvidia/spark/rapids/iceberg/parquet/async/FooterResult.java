@@ -50,6 +50,7 @@ public final class FooterResult implements ReadFooter {
   private final DateTimeRebaseMode timestampRebaseMode;
   private final boolean hasInt96Timestamps;
   private final GpuParquetReaderPostProcessor postProcessor;
+  private final ParquetReaderThreadPool.FilePermit filePermit;
 
   /**
    * Creates a fully filtered footer result.
@@ -72,6 +73,20 @@ public final class FooterResult implements ReadFooter {
       DateTimeRebaseMode timestampRebaseMode,
       boolean hasInt96Timestamps,
       GpuParquetReaderPostProcessor postProcessor) {
+    this(file, blocks, clippedSchema, readSchema, dateRebaseMode, timestampRebaseMode,
+        hasInt96Timestamps, postProcessor, null);
+  }
+
+  FooterResult(
+      IcebergPartitionedFile file,
+      List<BlockMetaData> blocks,
+      MessageType clippedSchema,
+      StructType readSchema,
+      DateTimeRebaseMode dateRebaseMode,
+      DateTimeRebaseMode timestampRebaseMode,
+      boolean hasInt96Timestamps,
+      GpuParquetReaderPostProcessor postProcessor,
+      ParquetReaderThreadPool.FilePermit filePermit) {
     this.file = Objects.requireNonNull(file, "file");
     this.blocks = immutableCopy(blocks, "blocks");
     this.clippedSchema = Objects.requireNonNull(clippedSchema, "clippedSchema");
@@ -81,6 +96,7 @@ public final class FooterResult implements ReadFooter {
         timestampRebaseMode, "timestampRebaseMode");
     this.hasInt96Timestamps = hasInt96Timestamps;
     this.postProcessor = Objects.requireNonNull(postProcessor, "postProcessor");
+    this.filePermit = filePermit;
   }
 
   private static <T> List<T> immutableCopy(List<T> values, String name) {
@@ -122,5 +138,12 @@ public final class FooterResult implements ReadFooter {
 
   public GpuParquetReaderPostProcessor getPostProcessor() {
     return postProcessor;
+  }
+
+  /** Release this file's executor-wide admission slot after data finalization is terminal. */
+  void releaseFilePermit() {
+    if (filePermit != null) {
+      filePermit.close();
+    }
   }
 }

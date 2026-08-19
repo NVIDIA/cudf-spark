@@ -21,13 +21,14 @@ import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 
 import scala.collection.JavaConverters._
 
+import com.nvidia.spark.rapids.RapidsConf
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
 import com.nvidia.spark.rapids.iceberg.parquet.async._
 import com.nvidia.spark.rapids.parquet.{CpuCompressionConfig, ParquetPartitionReaderBase}
 import com.nvidia.spark.rapids.reader.UnifiedReader
 import org.apache.parquet.schema.MessageType
 
-import org.apache.spark.TaskContext
+import org.apache.spark.{SparkEnv, TaskContext}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -42,8 +43,7 @@ class GpuAsyncIcebergParquetReader(
     val rapidsFileIO: IcebergFileIO,
     val files: Seq[IcebergPartitionedFile],
     val constantsProvider: IcebergPartitionedFile => JMap[Integer, _],
-    override val conf: GpuIcebergParquetReaderConf,
-    workerThreads: Int) extends GpuIcebergParquetReader {
+    override val conf: GpuIcebergParquetReaderConf) extends GpuIcebergParquetReader {
 
   private val closed = new AtomicBoolean()
   private val readerRef =
@@ -71,8 +71,12 @@ class GpuAsyncIcebergParquetReader(
 
   private def createReader()
   : UnifiedReader[IcebergPartitionedFile, FooterResult, FileFragment, ParquetCombinedResult] = {
-    val executor = ParquetReaderThreadPool.getOrCreate(workerThreads).executor()
-    val planner = new IcebergParquetPlanner(this, TaskContext.get(), executor, closed)
+    val rapidsConf = new RapidsConf(SparkEnv.get.conf)
+    val readerPool = ParquetReaderThreadPool.getOrCreate(
+      rapidsConf.icebergAsyncReadWorkerThreads,
+      rapidsConf.icebergAsyncReadMaxInFlightFiles)
+    val executor = readerPool.executor()
+    val planner = new IcebergParquetPlanner(this, TaskContext.get(), readerPool, closed)
     new UnifiedReader(
       files.asJava,
       planner,

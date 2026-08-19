@@ -16,10 +16,14 @@
 
 package com.nvidia.spark.rapids.iceberg.parquet.async;
 
+import java.io.IOException;
 import java.nio.channels.SeekableByteChannel;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import ai.rapids.cudf.HostMemoryBuffer;
@@ -34,90 +38,213 @@ import scala.Option;
  * Reads the filtered column chunks for one Iceberg Parquet file.
  *
  * <p>This is deliberately a concrete format implementation rather than a callback layer. The
- * caller opens the Iceberg input file and runs this blocking operation on the shared reader
- * executor. Cache hits and remote ranges are copied into one spillable packed fragment.</p>
+ * caller opens the Iceberg input file and composes this operation on the shared reader executor.
+ * Cache hits and remote ranges are copied into one spillable packed fragment, but an Iceberg S3
+ * request does not retain a worker while the AWS future is incomplete.</p>
  */
 public final class ParquetDataReader {
   private ParquetDataReader() {
   }
 
-  public static FileFragment read(
+  /**
+   * Prepare, asynchronously fetch, and finalize one filtered Parquet file.
+   *
+   * <p>Preparation and finalization run on {@code executor}. Only the middle S3 stage runs on the
+   * AWS async client. The future is deliberately not cancelled on reader close: the destination
+   * buffer remains alive until every response writer is terminal, after which finalization notices
+   * the closed flag and releases it safely.</p>
+   */
+  public static CompletableFuture<FileFragment> readAsync(
       FooterResult footer,
       RapidsInputFile input,
       AtomicBoolean closed,
-      long requestSizeBytes) throws Exception {
+      long requestSizeBytes,
+      Executor executor) {
     if (requestSizeBytes <= 0L) {
       throw new IllegalArgumentException("requestSizeBytes must be positive");
     }
-    checkOpen(closed);
-    long start = System.nanoTime();
-    List<BlockMetaData> blocks = footer.getBlocks();
-    long[] blockOffsets = FileFragment.computeBlockOffsets(blocks);
-    long totalBytes = blockOffsets[blocks.size()];
-    if (totalBytes == 0) {
-      return new FileFragment(footer, blockOffsets, null,
-          new FileFragment.DownloadStats(System.nanoTime() - start,
-              0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L));
+    if (executor == null) {
+      throw new NullPointerException("executor");
+    }
+    long startNanos = System.nanoTime();
+    return CompletableFuture.supplyAsync(() -> {
+      try {
+        return PendingFileRead.prepare(
+            footer, input, closed, requestSizeBytes, startNanos);
+      } catch (Throwable error) {
+        throw asCompletionException(error);
+      }
+    }, executor).thenCompose(pending -> {
+      CompletableFuture<Long> remote;
+      try {
+        remote = pending.startRemoteRead(executor);
+      } catch (Throwable error) {
+        remote = failedFuture(error);
+      }
+      return remote.handleAsync((ignored, error) -> {
+        if (error != null) {
+          throw pending.cleanupAndWrap(unwrap(error));
+        }
+        try {
+          return pending.finish();
+        } catch (Throwable finishError) {
+          throw pending.cleanupAndWrap(finishError);
+        }
+      }, executor);
+    });
+  }
+
+  /** Owns every resource between preparation and terminal finalization of one file read. */
+  private static final class PendingFileRead {
+    private final FooterResult footer;
+    private final RapidsInputFile input;
+    private final AtomicBoolean closed;
+    private final long startNanos;
+    private final long[] blockOffsets;
+    private final List<SourceRange> misses;
+    private final List<RapidsInputFile.CopyRange> reads;
+    private final long allocNanos;
+    private final long requestedBytes;
+    private final long cacheHitCount;
+    private final long cacheHitBytes;
+    private final long cacheMissCount;
+    private final long cacheMissBytes;
+    private final long cacheReadNanos;
+
+    private ParquetOutput output;
+    private volatile long readWaitNanos;
+
+    private PendingFileRead(
+        FooterResult footer,
+        RapidsInputFile input,
+        AtomicBoolean closed,
+        long startNanos,
+        long[] blockOffsets,
+        ParquetOutput output,
+        List<SourceRange> misses,
+        List<RapidsInputFile.CopyRange> reads,
+        long allocNanos,
+        long requestedBytes,
+        long cacheHitCount,
+        long cacheHitBytes,
+        long cacheMissCount,
+        long cacheMissBytes,
+        long cacheReadNanos) {
+      this.footer = footer;
+      this.input = input;
+      this.closed = closed;
+      this.startNanos = startNanos;
+      this.blockOffsets = blockOffsets;
+      this.output = output;
+      this.misses = misses;
+      this.reads = reads;
+      this.allocNanos = allocNanos;
+      this.requestedBytes = requestedBytes;
+      this.cacheHitCount = cacheHitCount;
+      this.cacheHitBytes = cacheHitBytes;
+      this.cacheMissCount = cacheMissCount;
+      this.cacheMissBytes = cacheMissBytes;
+      this.cacheReadNanos = cacheReadNanos;
     }
 
-    long cacheHitCount = 0L;
-    long cacheHitBytes = 0L;
-    long cacheMissCount = 0L;
-    long cacheMissBytes = 0L;
-    long cacheReadNanos = 0L;
-    List<SourceRange> misses = new ArrayList<>();
-    long allocStart = System.nanoTime();
-    ParquetOutput output = ParquetOutput.create(totalBytes);
-    long allocNanos = System.nanoTime() - allocStart;
-    try {
+    static PendingFileRead prepare(
+        FooterResult footer,
+        RapidsInputFile input,
+        AtomicBoolean closed,
+        long requestSizeBytes,
+        long startNanos) throws Exception {
       checkOpen(closed);
-      FileCache fileCache = FileCache.get();
-      long fragmentOffset = 0L;
-      for (BlockMetaData block : blocks) {
-        for (ColumnChunkMetaData column : block.getColumns()) {
-          checkOpen(closed);
-          long length = column.getTotalSize();
-          long sourceOffset = column.getStartingPos();
-          Option<SeekableByteChannel> cached = fileCache.getDataRangeChannel(
-              input, sourceOffset, length);
-          if (cached.isDefined()) {
-            try (SeekableByteChannel channel = cached.get()) {
-              cacheHitCount++;
-              cacheHitBytes = Math.addExact(cacheHitBytes, length);
-              long cacheStart = System.nanoTime();
-              try {
-                output.copyCachedRange(channel, fragmentOffset, length);
-              } finally {
-                cacheReadNanos = Math.addExact(
-                    cacheReadNanos, System.nanoTime() - cacheStart);
-              }
-            }
-          } else {
-            SourceRange chunk = new SourceRange(sourceOffset, length, fragmentOffset);
-            Option<FileCacheStartedToken> token = fileCache.startDataRangeCache(
+      List<BlockMetaData> blocks = footer.getBlocks();
+      long[] blockOffsets = FileFragment.computeBlockOffsets(blocks);
+      long totalBytes = blockOffsets[blocks.size()];
+      if (totalBytes == 0L) {
+        return new PendingFileRead(footer, input, closed, startNanos, blockOffsets, null,
+            new ArrayList<>(), new ArrayList<>(), 0L, 0L,
+            0L, 0L, 0L, 0L, 0L);
+      }
+
+      List<SourceRange> misses = new ArrayList<>();
+      ParquetOutput output = null;
+      long cacheHitCount = 0L;
+      long cacheHitBytes = 0L;
+      long cacheMissCount = 0L;
+      long cacheMissBytes = 0L;
+      long cacheReadNanos = 0L;
+      long allocStart = System.nanoTime();
+      try {
+        output = ParquetOutput.create(totalBytes);
+        long allocNanos = System.nanoTime() - allocStart;
+        FileCache fileCache = FileCache.get();
+        long fragmentOffset = 0L;
+        for (BlockMetaData block : blocks) {
+          for (ColumnChunkMetaData column : block.getColumns()) {
+            checkOpen(closed);
+            long length = column.getTotalSize();
+            long sourceOffset = column.getStartingPos();
+            Option<SeekableByteChannel> cached = fileCache.getDataRangeChannel(
                 input, sourceOffset, length);
-            chunk.token = token.isDefined() ? token.get() : null;
-            misses.add(chunk);
-            cacheMissCount++;
-            cacheMissBytes = Math.addExact(cacheMissBytes, length);
+            if (cached.isDefined()) {
+              try (SeekableByteChannel channel = cached.get()) {
+                cacheHitCount++;
+                cacheHitBytes = Math.addExact(cacheHitBytes, length);
+                long cacheStart = System.nanoTime();
+                try {
+                  output.copyCachedRange(channel, fragmentOffset, length);
+                } finally {
+                  cacheReadNanos = Math.addExact(
+                      cacheReadNanos, System.nanoTime() - cacheStart);
+                }
+              }
+            } else {
+              SourceRange chunk = new SourceRange(sourceOffset, length, fragmentOffset);
+              Option<FileCacheStartedToken> token = fileCache.startDataRangeCache(
+                  input, sourceOffset, length);
+              chunk.token = token.isDefined() ? token.get() : null;
+              misses.add(chunk);
+              cacheMissCount++;
+              cacheMissBytes = Math.addExact(cacheMissBytes, length);
+            }
+            fragmentOffset = Math.addExact(fragmentOffset, length);
           }
-          fragmentOffset = Math.addExact(fragmentOffset, length);
         }
-      }
 
-      List<RapidsInputFile.CopyRange> reads = planRanges(misses, requestSizeBytes);
-      long requestedBytes = 0L;
-      for (RapidsInputFile.CopyRange read : reads) {
-        requestedBytes = Math.addExact(requestedBytes, read.getLength());
+        List<RapidsInputFile.CopyRange> reads = planRanges(misses, requestSizeBytes);
+        long requestedBytes = 0L;
+        for (RapidsInputFile.CopyRange read : reads) {
+          requestedBytes = Math.addExact(requestedBytes, read.getLength());
+        }
+        return new PendingFileRead(footer, input, closed, startNanos, blockOffsets, output,
+            misses, reads, allocNanos, requestedBytes,
+            cacheHitCount, cacheHitBytes, cacheMissCount, cacheMissBytes, cacheReadNanos);
+      } catch (Throwable error) {
+        Throwable failure = cleanup(error, output, misses);
+        if (failure instanceof Exception) {
+          throw (Exception) failure;
+        }
+        if (failure instanceof Error) {
+          throw (Error) failure;
+        }
+        throw new RuntimeException(failure);
       }
+    }
 
-      long readStart = System.nanoTime();
-      // readVectored submits every range before it waits, so all exact slices for this file are
-      // visible to the executor-wide PerfIO/CRT scheduler in one wave.
-      output.copyRanges(input, reads);
-      long readWaitNanos = System.nanoTime() - readStart;
+    CompletableFuture<Long> startRemoteRead(Executor fallbackExecutor) throws IOException {
+      if (output == null || reads.isEmpty()) {
+        return CompletableFuture.completedFuture(0L);
+      }
       checkOpen(closed);
+      long readStart = System.nanoTime();
+      return output.copyRangesAsync(input, reads, fallbackExecutor)
+          .whenComplete((ignored, error) -> readWaitNanos = System.nanoTime() - readStart);
+    }
 
+    FileFragment finish() throws Exception {
+      checkOpen(closed);
+      if (output == null) {
+        return new FileFragment(footer, blockOffsets, null,
+            new FileFragment.DownloadStats(System.nanoTime() - startNanos,
+                0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L));
+      }
       long finalizeStart = System.nanoTime();
       for (SourceRange chunk : misses) {
         FileCacheStartedToken token = chunk.token;
@@ -128,24 +255,45 @@ public final class ParquetDataReader {
         }
       }
       output.seal();
-      return new FileFragment(footer, blockOffsets, output,
-          new FileFragment.DownloadStats(System.nanoTime() - start,
+      ParquetOutput completedOutput = output;
+      FileFragment result = new FileFragment(footer, blockOffsets, completedOutput,
+          new FileFragment.DownloadStats(System.nanoTime() - startNanos,
               allocNanos, readWaitNanos, 0L, System.nanoTime() - finalizeStart,
               reads.size(), requestedBytes,
               cacheHitCount, cacheHitBytes, cacheMissCount, cacheMissBytes, cacheReadNanos));
-    } catch (Throwable error) {
-      Throwable failure = error;
-      for (SourceRange chunk : misses) {
-        if (chunk.token != null) {
-          try {
-            chunk.token.cancel();
-          } catch (Throwable cancelError) {
-            if (failure != cancelError) {
-              failure.addSuppressed(cancelError);
-            }
+      output = null;
+      return result;
+    }
+
+    CompletionException cleanupAndWrap(Throwable error) {
+      return asCompletionException(cleanup(error, output, misses));
+    }
+  }
+
+  private static <T> CompletableFuture<T> failedFuture(Throwable error) {
+    CompletableFuture<T> failed = new CompletableFuture<>();
+    failed.completeExceptionally(error);
+    return failed;
+  }
+
+  private static Throwable cleanup(
+      Throwable error,
+      ParquetOutput output,
+      List<SourceRange> misses) {
+    Throwable failure = error;
+    for (SourceRange chunk : misses) {
+      if (chunk.token != null) {
+        try {
+          chunk.token.cancel();
+          chunk.token = null;
+        } catch (Throwable cancelError) {
+          if (failure != cancelError) {
+            failure.addSuppressed(cancelError);
           }
         }
       }
+    }
+    if (output != null) {
       try {
         output.close();
       } catch (Throwable closeError) {
@@ -153,14 +301,22 @@ public final class ParquetDataReader {
           failure.addSuppressed(closeError);
         }
       }
-      if (failure instanceof Exception) {
-        throw (Exception) failure;
-      }
-      if (failure instanceof Error) {
-        throw (Error) failure;
-      }
-      throw new RuntimeException(failure);
     }
+    return failure;
+  }
+
+  private static CompletionException asCompletionException(Throwable error) {
+    return error instanceof CompletionException
+        ? (CompletionException) error
+        : new CompletionException(error);
+  }
+
+  private static Throwable unwrap(Throwable error) {
+    Throwable current = error;
+    while (current instanceof CompletionException && current.getCause() != null) {
+      current = current.getCause();
+    }
+    return current;
   }
 
   private static void checkOpen(AtomicBoolean closed) {

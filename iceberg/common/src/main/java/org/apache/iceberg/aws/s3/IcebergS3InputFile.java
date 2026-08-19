@@ -32,6 +32,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * S3-backed {@link RapidsInputFile} that delegates byte-range reads to
@@ -96,6 +97,18 @@ public final class IcebergS3InputFile extends IcebergInputFile {
   }
 
   /**
+   * Submit vectored S3 reads without occupying an Iceberg reader worker while the responses are
+   * in flight. The future completes only after every response has finished writing to
+   * {@code output}.
+   */
+  public CompletableFuture<Long> readVectoredAsync(
+      HostMemoryBuffer output,
+      List<CopyRange> copyRanges) {
+    return IcebergS3RangeCopier.copyToHMBAsync(
+        icebergS3Client, output, s3Bucket, s3Key, copyRanges);
+  }
+
+  /**
    * Issue a single suffix-range {@code GetObject} ({@code Range: bytes=-N}) for
    * the last {@code length} bytes. Avoids the {@code getLength()} round-trip the
    * default {@link RapidsInputFile#readTail} would make.
@@ -116,5 +129,22 @@ public final class IcebergS3InputFile extends IcebergInputFile {
         s3Bucket,
         s3Key,
         length);
+  }
+
+  /**
+   * Submit a suffix-range S3 read without blocking a reader worker.
+   *
+   * @return a future containing the number of bytes S3 returned, which may be less than
+   *     {@code length} when the object itself is shorter.
+   */
+  public CompletableFuture<Long> readTailAsync(
+      long length,
+      HostMemoryBuffer output,
+      long outputOffset) {
+    if (length < 0) {
+      throw new IllegalArgumentException("length must be non-negative");
+    }
+    return IcebergS3RangeCopier.copyTailToHMBAsync(
+        icebergS3Client, output, s3Bucket, s3Key, length, outputOffset);
   }
 }

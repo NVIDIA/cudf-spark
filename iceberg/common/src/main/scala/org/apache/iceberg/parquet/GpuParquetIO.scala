@@ -16,6 +16,7 @@
 
 package org.apache.iceberg.parquet
 
+import ai.rapids.cudf.HostMemoryBuffer
 import com.nvidia.spark.rapids.GpuMetric
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile
 import com.nvidia.spark.rapids.iceberg.ShimUtils
@@ -42,5 +43,16 @@ object GpuParquetIO {
       options: ParquetReadOptions,
       metrics: Map[String, GpuMetric]): ParquetFileReader = {
     ShimUtils.openParquetReader(inputFile, filePath, options, metrics)
+  }
+
+  /** Open a reader from a footer buffer that an asynchronous loader already populated. */
+  def openReaderWithFooter(
+      inputFile: IcebergInputFile,
+      filePath: Path,
+      options: ParquetReadOptions,
+      metrics: Map[String, GpuMetric],
+      footerBuffer: HostMemoryBuffer): ParquetFileReader = {
+    ShimUtils.openParquetReaderWithFooter(
+      inputFile, filePath, options, metrics, footerBuffer)
   }
 }

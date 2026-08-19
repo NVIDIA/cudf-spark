@@ -20,6 +20,9 @@ import java.io.IOException;
 import java.nio.channels.SeekableByteChannel;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.Executor;
 import java.util.concurrent.locks.StampedLock;
 
 import ai.rapids.cudf.HostMemoryBuffer;
@@ -29,14 +32,15 @@ import com.nvidia.spark.rapids.SpillPriorities;
 import com.nvidia.spark.rapids.SpillableHostBuffer;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import com.nvidia.spark.rapids.spill.SpillFramework$;
+import org.apache.iceberg.aws.s3.IcebergS3InputFile;
 
 /**
  * Exact-sized writable storage for one file's packed Parquet column chunks.
  *
- * <p>The output has a strict lifecycle: {@code WRITABLE -> SEALED -> CLOSED}. The owning worker
- * writes it with one blocking vectored read and cached-range copies. After its reads return, the
- * worker seals the output. The Spark task thread then obtains an independent host-buffer reference
- * with {@link #materialize()} before closing this output.</p>
+ * <p>The output has a strict lifecycle: {@code WRITABLE -> SEALED -> CLOSED}. Cache copies run on
+ * workers, while Iceberg S3 responses write directly into this buffer. After every response is
+ * terminal, a worker seals the output. The Spark task thread then obtains an independent
+ * host-buffer reference with {@link #materialize()} before closing this output.</p>
  *
  * <p>Storage uses the same pinned-preferred host allocation policy as the base multithreaded
  * Parquet reader. HostAlloc falls back to bounded non-pinned memory when the pinned pool cannot
@@ -78,7 +82,7 @@ final class ParquetOutput implements AutoCloseable {
    *
    * <p>The allocation is pinned-preferred and blocking, matching the base reader's destination.
    * It falls back to bounded non-pinned storage and participates in the normal host retry/spill
-   * protocol. The caller is a dedicated download worker, so waiting here is backpressure.</p>
+ * protocol. Waiting for this allocation on a compute worker provides memory backpressure.</p>
    */
   static ParquetOutput create(long exactSizeBytes) throws IOException {
     if (exactSizeBytes <= 0) {
@@ -90,29 +94,55 @@ final class ParquetOutput implements AutoCloseable {
   }
 
   /**
-   * Copy all cache-miss ranges for one file with one blocking vectored read, mirroring the base
-   * multithreaded reader's synchronous {@code readVectored} call on its pool workers. The call
-   * returns only when every byte has landed, so close() never races an in-flight writer on this
-   * path.
+   * Asynchronously copy all remote ranges into this output.
+   *
+   * <p>The Iceberg S3 path submits directly to the AWS async client and does not occupy
+   * {@code fallbackExecutor}. Other input-file implementations retain the old blocking behavior
+   * on that executor so local tests and non-S3 fallbacks continue to work without widening the
+   * JNI {@link RapidsInputFile} API.</p>
+   *
+   * <p>A shared write stamp remains held until the returned future is terminal. Therefore
+   * {@link #seal()} and {@link #close()} cannot race an S3 response that is still writing into the
+   * host buffer.</p>
    */
-  final void copyRanges(
+  final CompletableFuture<Long> copyRangesAsync(
       RapidsInputFile input,
-      List<RapidsInputFile.CopyRange> ranges) throws IOException {
+      List<RapidsInputFile.CopyRange> ranges,
+      Executor fallbackExecutor) throws IOException {
     Objects.requireNonNull(input, "input");
     Objects.requireNonNull(ranges, "ranges");
+    Objects.requireNonNull(fallbackExecutor, "fallbackExecutor");
     if (ranges.isEmpty()) {
-      return;
+      return CompletableFuture.completedFuture(0L);
     }
+    long expectedBytes = 0L;
     for (RapidsInputFile.CopyRange range : ranges) {
       Objects.requireNonNull(range, "range");
       checkWriteBounds(range.getOutputOffset(), range.getLength());
+      expectedBytes = Math.addExact(expectedBytes, range.getLength());
     }
+
     long writeStamp = beginConcurrentWrite();
+    CompletableFuture<Long> read;
     try {
-      input.readVectored(buffer, ranges);
-    } finally {
+      if (input instanceof IcebergS3InputFile) {
+        read = ((IcebergS3InputFile) input).readVectoredAsync(buffer, ranges);
+      } else {
+        final long bytes = expectedBytes;
+        read = CompletableFuture.supplyAsync(() -> {
+          try {
+            input.readVectored(buffer, ranges);
+            return bytes;
+          } catch (IOException error) {
+            throw new CompletionException(error);
+          }
+        }, fallbackExecutor);
+      }
+    } catch (RuntimeException | Error error) {
       endConcurrentWrite(writeStamp);
+      throw error;
     }
+    return read.whenComplete((ignored, error) -> endConcurrentWrite(writeStamp));
   }
 
   /** Copy one cached column chunk from its positioned channel into the synthetic output. */

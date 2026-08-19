@@ -1889,6 +1889,28 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       .checkValue(_ > 0L, "The request size must be positive.")
       .createWithDefault(ByteUnit.MiB.toBytes(8L))
 
+  val ICEBERG_ASYNC_READ_WORKER_THREADS =
+    conf("spark.rapids.sql.format.iceberg.asyncRead.workerThreads")
+      .doc("Number of executor-wide CPU workers used by the experimental Iceberg reader for " +
+        "footer filtering, read preparation/finalization, and combining. S3 requests do not " +
+        "retain these workers while in flight.")
+      .startupOnly()
+      .internal()
+      .integerConf
+      .checkValue(_ > 0, "The worker-thread count must be positive.")
+      .createWithDefault(64)
+
+  val ICEBERG_ASYNC_READ_MAX_IN_FLIGHT_FILES =
+    conf("spark.rapids.sql.format.iceberg.asyncRead.maxInFlightFiles")
+      .doc("Maximum number of footer-to-data file pipelines that the experimental Iceberg " +
+        "reader may have active at once. This bounds destination-buffer admission separately " +
+        "from the CPU worker count and S3 client connection concurrency.")
+      .startupOnly()
+      .internal()
+      .integerConf
+      .checkValue(_ > 0, "The in-flight file count must be positive.")
+      .createWithDefault(200)
+
   val ICEBERG_S3_ASYNC_MAX_CONCURRENCY =
     conf("spark.rapids.iceberg.s3.async.max-concurrency")
       .doc("Max concurrent connections for the AwsCrtAsyncHttpClient used by the " +
@@ -3855,6 +3877,10 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val isIcebergAsyncReadEnabled: Boolean = get(ICEBERG_ASYNC_READ_ENABLED)
 
   lazy val icebergAsyncReadRequestSize: Long = get(ICEBERG_ASYNC_READ_REQUEST_SIZE)
+
+  lazy val icebergAsyncReadWorkerThreads: Int = get(ICEBERG_ASYNC_READ_WORKER_THREADS)
+
+  lazy val icebergAsyncReadMaxInFlightFiles: Int = get(ICEBERG_ASYNC_READ_MAX_IN_FLIGHT_FILES)
 
   lazy val isHiveDelimitedTextEnabled: Boolean = get(ENABLE_HIVE_TEXT)
 

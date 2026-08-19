@@ -82,8 +82,7 @@ class AsyncParquetPlannerSuite extends AnyFunSuite {
       files = Seq.empty,
       constantsProvider = (_: IcebergPartitionedFile) =>
         Collections.emptyMap[Integer, Object](),
-      conf = readerConf,
-      workerThreads = 1)
+      conf = readerConf)
     val readSchema = StructType(Seq(
       StructField("id", IntegerType, nullable = false)))
     val parquetSchema = Types.buildMessage()
@@ -142,5 +141,26 @@ class AsyncParquetPlannerSuite extends AnyFunSuite {
     val plan = ParquetDataReader.planRanges(ranges.asJava, 8L * MiB)
     assert(plan.size() == 80)
     assert(plan.asScala.forall(_.getLength == 8L * MiB))
+  }
+
+  test("file-pipeline admission is asynchronous and executor-wide") {
+    ParquetReaderThreadPool.resetForTesting()
+    val pool = ParquetReaderThreadPool.getOrCreate(1, 2)
+    val first = pool.acquireFilePermit().join()
+    val second = pool.acquireFilePermit().join()
+    val waiting = pool.acquireFilePermit()
+    var third: ParquetReaderThreadPool.FilePermit = null
+
+    try {
+      assert(!waiting.isDone)
+      first.close()
+      third = waiting.join()
+      assert(third != null)
+    } finally {
+      first.close()
+      second.close()
+      Option(third).foreach(_.close())
+      ParquetReaderThreadPool.resetForTesting()
+    }
   }
 }
