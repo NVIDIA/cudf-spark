@@ -31,7 +31,7 @@ def test_project_alias(data_gen):
             f.lit(dec)))
 
 
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('ProjectExec', 'Literal')
 @pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
 def test_non_null_variant_literal_falls_back():
     # Spark constant-folds parse_json with a literal input into a non-null Variant literal.
@@ -43,6 +43,6 @@ def test_non_null_variant_literal_falls_back():
             SELECT parse_json('{"x":1}') AS v
             FROM range(2)
         """),
-        'ProjectExec',
+        'Literal',
         result_canonicalize_func_before_compare=lambda cpu, gpu:
             (canonicalize_variant(cpu), canonicalize_variant(gpu)))
