@@ -51,7 +51,7 @@ class RapidsConfSuite extends AnyFunSuite {
       .booleanConf
       .createWithDefault(false)
 
-    assertResult("21.10.0")(entry.versionInfo.sinceVersion)
+    assertResult("0.1.0")(entry.versionInfo.sinceVersion)
   }
 
   test("unknown config version metadata remains explicit") {
