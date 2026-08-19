@@ -12,9 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from decimal import Decimal
+
 import pytest
 
-from asserts import assert_gpu_and_cpu_are_equal_collect
+from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, \
+    assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect
 from conftest import is_not_utc
 from data_gen import *
 from spark_session import with_cpu_session, is_before_spark_313
@@ -328,6 +331,85 @@ def test_in(data_gen):
     scalars = with_cpu_session(lambda spark: list(gen_scalars(data_gen, num_entries, force_no_nulls=not isinstance(data_gen, NullGen))))
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : unary_op_df(spark, data_gen).select(f.col('a').isin(scalars)))
+
+@pytest.mark.parametrize('data_type, rows', [
+    ('int', [
+        (1, 1, 7),
+        (2, 1, 2),
+        (3, None, 4),
+        (3, None, None),
+        (None, 1, 2),
+    ]),
+    ('float', [
+        (float('nan'), 1.0, float('nan')),
+        (1.0, float('nan'), 2.0),
+        (3.0, None, 4.0),
+        (None, 1.0, 2.0),
+    ]),
+    ('double', [
+        (float('nan'), float('nan'), 1.0),
+        (2.0, 1.0, 2.0),
+        (3.0, None, 4.0),
+        (None, 1.0, 2.0),
+    ]),
+    ('decimal(10, 2)', [
+        (Decimal('1.00'), Decimal('1.00'), Decimal('7.00')),
+        (Decimal('2.00'), Decimal('1.00'), Decimal('2.00')),
+        (Decimal('3.00'), None, Decimal('4.00')),
+        (None, Decimal('1.00'), Decimal('2.00')),
+    ]),
+], ids=['int', 'float', 'double', 'decimal'])
+def test_dynamic_in(data_type, rows):
+    def do_it(spark):
+        return spark.createDataFrame(rows, f'a {data_type}, b {data_type}, c {data_type}') \
+            .selectExpr(
+                'a IN (b) AS single_result',
+                'a IN (b, c) AS dynamic_result',
+                'a IN (-10, -9, -8, -7, -6, -5, -4, -3, -2, -1, 1, b, NULL, c) '
+                'AS mixed_result')
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it,
+        exist_classes='GpuIn')
+
+
+def test_dynamic_in_mixed_ast_support():
+    def do_it(spark):
+        return spark.createDataFrame([
+            (1, 1, 7, 1.0, 1.0, 7.0),
+            (2, 1, 2, float('nan'), 1.0, float('nan')),
+            (3, None, 4, 3.0, None, 4.0),
+            (None, 1, 2, None, 1.0, 2.0),
+        ], 'a int, b int, c int, x float, y float, z float').selectExpr(
+            'a IN (b, c) AS ast_result',
+            'x IN (y, z) AS regular_result')
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it,
+        exist_classes='GpuIn')
+
+
+@allow_non_gpu('ProjectExec')
+def test_nondeterministic_dynamic_in_fallback():
+    def do_it(spark):
+        return spark.createDataFrame([(1.0, 2.0)], 'a double, b double') \
+            .selectExpr('a IN (b, rand(1)) AS result')
+
+    assert_gpu_fallback_collect(
+        do_it,
+        'ProjectExec')
+
+
+@allow_non_gpu('In', 'Cast')
+def test_ansi_side_effecting_dynamic_in_fallback():
+    def do_it(spark):
+        return spark.createDataFrame([(1, 1, 'invalid')], 'a int, b int, c string') \
+            .selectExpr('a IN (b, CAST(c AS INT)) AS result')
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it,
+        exist_classes='GpuCpuBridgeExpression',
+        conf={'spark.sql.ansi.enabled': 'true'})
 
 # We avoid testing inset with NaN in Spark < 3.1.3 since it has issue with NaN comparisons.
 # See https://github.com/NVIDIA/spark-rapids/issues/9687.

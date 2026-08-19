@@ -2078,11 +2078,37 @@ object GpuOverrides extends Logging {
         Seq(ParamCheck("value", TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128,
           TypeSig.comparable)),
         Some(RepeatingParamCheck("list",
-          (TypeSig.commonCudfTypes + TypeSig.DECIMAL_128).withAllLit(),
+          TypeSig.commonCudfTypes + TypeSig.DECIMAL_128,
           TypeSig.comparable))),
       (in, conf, p, r) => new ExprMeta[In](in, conf, p, r) {
-        override def convertToGpuImpl(): GpuExpression =
-          GpuInSet(childExprs.head.convertToGpu(), in.list.asInstanceOf[Seq[Literal]].map(_.value))
+        private val allListItemsAreLiterals = in.list.forall(_.isInstanceOf[Literal])
+
+        override def tagExprForGpu(): Unit = {
+          if (!allListItemsAreLiterals) {
+            if (!in.deterministic) {
+              willNotWorkOnGpu("dynamic IN expressions must be deterministic")
+            } else if (childExprs.forall(_.canExprTreeBeReplaced) &&
+                childExprs.iterator.map(_.convertToGpu()).exists {
+                  case gpuExpression: GpuExpression => gpuExpression.hasSideEffects
+                  case _ => false
+                }) {
+              willNotWorkOnGpu("dynamic IN expressions with side effects are not supported")
+            }
+          }
+        }
+
+        override def convertToGpuImpl(): GpuExpression = {
+          val gpuChildren = childExprs.map(_.convertToGpu())
+          if (allListItemsAreLiterals) {
+            GpuInSet(gpuChildren.head, in.list.asInstanceOf[Seq[Literal]].map(_.value))
+          } else {
+            val literalValues = in.list.collect { case literal: Literal => literal.value }
+            val dynamicExpressions = in.list.zip(gpuChildren.tail).collect {
+              case (expression, gpuExpression) if !expression.isInstanceOf[Literal] => gpuExpression
+            }
+            GpuIn(gpuChildren.head, literalValues, dynamicExpressions)
+          }
+        }
       }),
     expr[InSet](
       "INSET operator",
