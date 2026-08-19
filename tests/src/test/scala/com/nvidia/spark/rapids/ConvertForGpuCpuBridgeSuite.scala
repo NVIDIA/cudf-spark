@@ -355,6 +355,34 @@ class ConvertForGpuCpuBridgeSuite extends AnyFunSuite {
     }.forall(_ == 0))
   }
 
+  test("convertForGpuCpuBridge - uses GPU input nullability for a captured attribute") {
+    val array = AttributeReference(
+      "array", ArrayType(IntegerType), nullable = true)()
+    val nonNullableCapture = array.withNullability(false)
+    val element = NamedLambdaVariable("x", IntegerType, nullable = true)
+    val predicate = LessThanOrEqual(element, Size(nonNullableCapture))
+    val expr = ArrayFilter(array, LambdaFunction(predicate, Seq(element)))
+
+    assert(array.exprId == nonNullableCapture.exprId)
+    assert(array.semanticEquals(nonNullableCapture))
+    assert(array.nullable)
+    assert(!nonNullableCapture.nullable)
+
+    val exprMeta = createExprMeta(expr)
+    exprMeta.moveToCpuBridge()
+
+    val bridge = exprMeta.convertForGpuCpuBridge().asInstanceOf[GpuCpuBridgeExpression]
+    assert(bridge.gpuInputs.length == 1)
+    assert(bridge.gpuInputs.head.semanticEquals(array))
+    assert(bridge.gpuInputs.head.nullable)
+    assert(!bridge.cpuExpression.exists(_.isInstanceOf[AttributeReference]))
+    val boundReferences = bridge.cpuExpression.collect {
+      case ref: BoundReference => ref
+    }
+    assert(boundReferences.length == 2)
+    assert(boundReferences.forall(ref => ref.ordinal == 0 && ref.nullable))
+  }
+
   test("convertForGpuCpuBridge - binds attributes captured by a nested lambda") {
     val arrays = AttributeReference(
       "arrays", ArrayType(ArrayType(IntegerType)), nullable = false)()

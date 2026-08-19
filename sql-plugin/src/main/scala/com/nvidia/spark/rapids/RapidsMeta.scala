@@ -1655,7 +1655,7 @@ abstract class BaseExprMeta[INPUT <: Expression](
           allGpuInputs += attr
           newIndex
         })
-        BoundReference(inputIndex, attr.dataType, attr.nullable)
+        BoundReference(inputIndex, attr.dataType, allGpuInputs(inputIndex).nullable)
     }
 
     val bridgeExpression = GpuCpuBridgeExpression(
