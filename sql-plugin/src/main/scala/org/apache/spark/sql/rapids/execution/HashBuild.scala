@@ -449,7 +449,7 @@ private final class CachedHashProbeBackend(
  * Executor-local cache of reusable hash-build artifacts.
  *
  * The cache stores [[HashArtifact]] objects accessed by [[HashBuildKey]]. Upon the first get
- * the cache enforces build-once semantics where one thread builds and others wait, producing a
+ * the cache ensures one builder at a time while other threads wait. The build produces a
  * [[SharedRecomputableHandle]] that is held by the constructed HashArtifact.
  *
  * Additionally the cache tracks `demand`, a count of the number of probes and total probe rows
@@ -618,8 +618,8 @@ final class HashBuildCache extends AutoCloseable {
     if (shouldReleaseSemaphore) {
       GpuSemaphore.releaseIfNecessary(taskContext)
     }
-    // Wait for futures to complete and then close them so that an artifact
-    // isn't abandoned after the cache is closed.
+    // Wait for futures to complete and then close the completed results so that an
+    // artifact isn't abandoned after the cache is closed.
     try {
       futures.foreach { future =>
         var waiting = true

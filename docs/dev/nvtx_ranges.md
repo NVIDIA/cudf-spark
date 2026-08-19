@@ -39,7 +39,6 @@ GpuGenerate project split|Splitting projection in generate operation
 parquet parse filter footer|Parsing and filtering Parquet footer by range
 Compile ASTs|Compiling abstract syntax trees for expression evaluation
 parquet filter blocks|Filtering Parquet row group blocks based on predicates
-hash table build|Building reusable cuDF hash state for a join
 PageableH2D|Copying from pageable host memory to device
 TOP N|Computing top N rows
 zstd post process|Post-processing ZSTD compressed data
@@ -66,6 +65,7 @@ computeAggregate|Computing aggregation on input batch
 concat pending|Concatenating pending batches
 RepartitionAggregateIterator.next|Fetching next batch from repartition aggregate iterator
 copy compressed buffers|Copying compressed buffer data
+hash table build|Building reusable cuDF hash state for a join
 GpuCoalesceBatches: collect|GPU combining of small batches post-kernel processing
 Round robin partition|Partitioning data using round-robin strategy
 Sub-join part|Hash partitioning for sub-join operation
@@ -165,7 +165,7 @@ Handle Meta Request|Handling metadata request on shuffle server
 filter batch|Filtering rows from a columnar batch
 shuffle fetch first batch|Fetching first batch in shuffle coalesce operation
 windowExec|Executing window operation on batch
-build join table|Building hash table for join operation
+build join table|Materializing broadcast build-side data for a join
 join first stream batch|Fetching and processing first batch from stream side of join
 GpuGenerateIterator|Iterating through generated data
 finalize agg|Finalizing aggregation results
