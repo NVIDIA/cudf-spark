@@ -145,6 +145,9 @@ object GpuMetric extends Logging {
   val ASYNC_READ_TIME = "shuffleAsyncReadTime"
   val ICEBERG_BUILD_ACTION_TIME = "icebergBuildActionTime"
   val ICEBERG_POST_PROCESS_TIME = "icebergPostProcessTime"
+  val ICEBERG_ASYNC_FILE_READ_TIME = "icebergAsyncFileReadTime"
+  val ICEBERG_ASYNC_REQUEST_COUNT = "icebergAsyncRequestCount"
+  val ICEBERG_ASYNC_REQUESTED_BYTES = "icebergAsyncRequestedBytes"
 
   // Metric Descriptions.
   val DESCRIPTION_BUFFER_TIME = "buffer time"
@@ -205,6 +208,9 @@ object GpuMetric extends Logging {
   val DESCRIPTION_ASYNC_READ_TIME = "async read time"
   val DESCRIPTION_ICEBERG_BUILD_ACTION_TIME = "iceberg build action tree time"
   val DESCRIPTION_ICEBERG_POST_PROCESS_TIME = "iceberg post process time"
+  val DESCRIPTION_ICEBERG_ASYNC_FILE_READ_TIME = "iceberg async file read elapsed time"
+  val DESCRIPTION_ICEBERG_ASYNC_REQUEST_COUNT = "iceberg async S3 range requests"
+  val DESCRIPTION_ICEBERG_ASYNC_REQUESTED_BYTES = "iceberg async S3 requested bytes"
 
   /**
    * Determine if a GpuMetric wraps a TimingMetric or NanoTimingMetric.

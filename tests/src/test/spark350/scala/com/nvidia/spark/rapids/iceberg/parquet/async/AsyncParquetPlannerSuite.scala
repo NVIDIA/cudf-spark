@@ -29,6 +29,8 @@ package com.nvidia.spark.rapids.iceberg.parquet.async
 
 import java.util.Collections
 
+import scala.collection.JavaConverters._
+
 import com.nvidia.spark.rapids.{CombineConf, ThreadPoolConfBuilder}
 import com.nvidia.spark.rapids.iceberg.parquet.{
   GpuAsyncIcebergParquetReader,
@@ -46,6 +48,8 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.apache.spark.sql.types.{IntegerType, StructField, StructType}
 
 class AsyncParquetPlannerSuite extends AnyFunSuite {
+  private val MiB = 1024L * 1024L
+
   test("asynchronous decode support has a Hadoop configuration during trait initialization") {
     val hadoopConf = new Configuration(false)
     hadoopConf.setInt("parquet.read.allocation.size", 12345)
@@ -91,5 +95,52 @@ class AsyncParquetPlannerSuite extends AnyFunSuite {
     } finally {
       reader.close()
     }
+  }
+
+  test("latency range planner coalesces adjacent chunks but never fetches holes") {
+    val ranges = Seq(
+      new ParquetDataReader.SourceRange(0L, 2L * MiB, 0L),
+      new ParquetDataReader.SourceRange(2L * MiB, 3L * MiB, 2L * MiB),
+      new ParquetDataReader.SourceRange(6L * MiB, 2L * MiB, 5L * MiB),
+      new ParquetDataReader.SourceRange(8L * MiB, 1L * MiB, 7L * MiB))
+
+    val plan = ParquetDataReader.planRanges(ranges.asJava, 64L * MiB)
+    assert(plan.size() == 2)
+    assert(plan.asScala.map(_.getInputOffset) == Seq(0L, 6L * MiB))
+    assert(plan.asScala.map(_.getLength) == Seq(5L * MiB, 3L * MiB))
+    assert(plan.asScala.map(_.getOutputOffset) == Seq(0L, 5L * MiB))
+    assert(plan.asScala.map(_.getLength).sum == 8L * MiB)
+    assert(plan.get(0).getInputOffset == 0L)
+    assert(plan.get(1).getInputOffset == 6L * MiB)
+  }
+
+  test("latency range planner splits a coalesced run at the request-size ceiling") {
+    val ranges = Seq(
+      new ParquetDataReader.SourceRange(0L, 5L * MiB, 0L),
+      new ParquetDataReader.SourceRange(5L * MiB, 7L * MiB, 5L * MiB),
+      new ParquetDataReader.SourceRange(12L * MiB, 6L * MiB, 12L * MiB))
+
+    val plan = ParquetDataReader.planRanges(ranges.asJava, 8L * MiB).asScala
+    assert(plan.map(_.getInputOffset) == Seq(0L, 8L * MiB, 16L * MiB))
+    assert(plan.map(_.getLength) == Seq(8L * MiB, 8L * MiB, 2L * MiB))
+    assert(plan.map(_.getOutputOffset) == Seq(0L, 8L * MiB, 16L * MiB))
+  }
+
+  test("latency range planner preserves footer order instead of sorting") {
+    val ranges = Seq(
+      new ParquetDataReader.SourceRange(32L * MiB, 2L * MiB, 0L),
+      new ParquetDataReader.SourceRange(0L, 2L * MiB, 2L * MiB))
+
+    assertThrows[IllegalArgumentException] {
+      ParquetDataReader.planRanges(ranges.asJava, 8L * MiB)
+    }
+  }
+
+  test("latency range planner has no request-count limit") {
+    val ranges = Seq(new ParquetDataReader.SourceRange(0L, 640L * MiB, 0L))
+
+    val plan = ParquetDataReader.planRanges(ranges.asJava, 8L * MiB)
+    assert(plan.size() == 80)
+    assert(plan.asScala.forall(_.getLength == 8L * MiB))
   }
 }

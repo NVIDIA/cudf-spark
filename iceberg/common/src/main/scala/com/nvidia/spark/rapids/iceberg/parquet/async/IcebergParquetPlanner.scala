@@ -38,6 +38,7 @@ import scala.collection.JavaConverters._
 import com.nvidia.spark.rapids.{
   CachedGpuBatchIterator,
   GpuSemaphore,
+  RapidsConf,
   RmmRapidsRetryIterator,
   SingleGpuColumnarBatchIterator
 }
@@ -49,6 +50,9 @@ import com.nvidia.spark.rapids.GpuMetric.{
   FILECACHE_DATA_RANGE_MISSES_SIZE,
   FILECACHE_DATA_RANGE_READ_TIME,
   FILTER_TIME,
+  ICEBERG_ASYNC_FILE_READ_TIME,
+  ICEBERG_ASYNC_REQUEST_COUNT,
+  ICEBERG_ASYNC_REQUESTED_BYTES,
   IO_WAIT_TIME
 }
 import com.nvidia.spark.rapids.iceberg.parquet.{
@@ -61,7 +65,7 @@ import com.nvidia.spark.rapids.jni.RmmSpark
 import com.nvidia.spark.rapids.parquet.MakeParquetTableProducer
 import com.nvidia.spark.rapids.reader.ReadPlanner
 
-import org.apache.spark.TaskContext
+import org.apache.spark.{SparkEnv, TaskContext}
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -94,6 +98,8 @@ final class IcebergParquetPlanner(
       ParquetCombinedResult] {
 
   private val conf = reader.conf
+  private val rapidsConf = new RapidsConf(SparkEnv.get.conf)
+  private val requestSizeBytes = rapidsConf.icebergAsyncReadRequestSize
   private val multiThreadConf = conf.threadConf.asInstanceOf[MultiThread]
   private val combineThreshold = if (multiThreadConf.disableCombining) {
     0L
@@ -168,7 +174,7 @@ final class IcebergParquetPlanner(
     CompletableFuture.supplyAsync(() => runAsTask {
       checkOpen()
       val input = reader.rapidsFileIO.newInputFile(file.file.getDelegate.location())
-      ParquetDataReader.read(footer, input, closed)
+      ParquetDataReader.read(footer, input, closed, requestSizeBytes)
     }, executor)
   }
 
@@ -181,6 +187,9 @@ final class IcebergParquetPlanner(
     conf.metrics.get(FILECACHE_DATA_RANGE_MISSES_SIZE).foreach(_ += stats.getCacheMissBytes)
     conf.metrics.get(FILECACHE_DATA_RANGE_READ_TIME).foreach(_ += stats.getCacheReadNanos)
     conf.metrics.get(IO_WAIT_TIME).foreach(_ += stats.getIoReadWaitNanos)
+    conf.metrics.get(ICEBERG_ASYNC_FILE_READ_TIME).foreach(_ += stats.getIoNanos)
+    conf.metrics.get(ICEBERG_ASYNC_REQUEST_COUNT).foreach(_ += stats.getIoRequestCount)
+    conf.metrics.get(ICEBERG_ASYNC_REQUESTED_BYTES).foreach(_ += stats.getIoRequestedBytes)
     conf.metrics.get("readBufferSize").foreach(_ += subtask.getDataSizeBytes)
     val firstFooter = subtask.getFileSlices.get(0).getFooter
     val postProcessor = firstFooter.getPostProcessor

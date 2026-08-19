@@ -1879,6 +1879,16 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       .booleanConf
       .createWithDefault(false)
 
+  val ICEBERG_ASYNC_READ_REQUEST_SIZE =
+    conf("spark.rapids.sql.format.iceberg.asyncRead.range.requestSize")
+      .doc("Maximum size of each exact byte-range request produced by the experimental " +
+        "latency-oriented Iceberg reader. Requests never include unneeded gap bytes.")
+      .startupOnly()
+      .internal()
+      .bytesConf(ByteUnit.BYTE)
+      .checkValue(_ > 0L, "The request size must be positive.")
+      .createWithDefault(ByteUnit.MiB.toBytes(8L))
+
   val ICEBERG_S3_ASYNC_MAX_CONCURRENCY =
     conf("spark.rapids.iceberg.s3.async.max-concurrency")
       .doc("Max concurrent connections for the AwsCrtAsyncHttpClient used by the " +
@@ -3843,6 +3853,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val isIcebergWriteEnabled: Boolean = get(ENABLE_ICEBERG_WRITE)
 
   lazy val isIcebergAsyncReadEnabled: Boolean = get(ICEBERG_ASYNC_READ_ENABLED)
+
+  lazy val icebergAsyncReadRequestSize: Long = get(ICEBERG_ASYNC_READ_REQUEST_SIZE)
 
   lazy val isHiveDelimitedTextEnabled: Boolean = get(ENABLE_HIVE_TEXT)
 

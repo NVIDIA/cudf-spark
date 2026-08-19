@@ -18,13 +18,11 @@ package com.nvidia.spark.rapids.iceberg.parquet.async;
 
 import java.nio.channels.SeekableByteChannel;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import ai.rapids.cudf.HostMemoryBuffer;
-import com.nvidia.spark.rapids.HostAlloc$;
 import com.nvidia.spark.rapids.filecache.FileCache;
 import com.nvidia.spark.rapids.filecache.FileCache.FileCacheStartedToken;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
@@ -40,15 +38,17 @@ import scala.Option;
  * executor. Cache hits and remote ranges are copied into one spillable packed fragment.</p>
  */
 public final class ParquetDataReader {
-  private static final long COALESCE_GAP_LIMIT_BYTES = 0L;
-
   private ParquetDataReader() {
   }
 
   public static FileFragment read(
       FooterResult footer,
       RapidsInputFile input,
-      AtomicBoolean closed) throws Exception {
+      AtomicBoolean closed,
+      long requestSizeBytes) throws Exception {
+    if (requestSizeBytes <= 0L) {
+      throw new IllegalArgumentException("requestSizeBytes must be positive");
+    }
     checkOpen(closed);
     long start = System.nanoTime();
     List<BlockMetaData> blocks = footer.getBlocks();
@@ -65,11 +65,10 @@ public final class ParquetDataReader {
     long cacheMissCount = 0L;
     long cacheMissBytes = 0L;
     long cacheReadNanos = 0L;
-    List<MissChunk> misses = new ArrayList<>();
+    List<SourceRange> misses = new ArrayList<>();
     long allocStart = System.nanoTime();
     ParquetOutput output = ParquetOutput.create(totalBytes);
     long allocNanos = System.nanoTime() - allocStart;
-    HostMemoryBuffer scratch = null;
     try {
       checkOpen(closed);
       FileCache fileCache = FileCache.get();
@@ -94,7 +93,7 @@ public final class ParquetDataReader {
               }
             }
           } else {
-            MissChunk chunk = new MissChunk(sourceOffset, length, fragmentOffset);
+            SourceRange chunk = new SourceRange(sourceOffset, length, fragmentOffset);
             Option<FileCacheStartedToken> token = fileCache.startDataRangeCache(
                 input, sourceOffset, length);
             chunk.token = token.isDefined() ? token.get() : null;
@@ -106,53 +105,21 @@ public final class ParquetDataReader {
         }
       }
 
-      List<MergedRead> mergedReads = mergeMissChunks(misses);
-      List<RapidsInputFile.CopyRange> directRanges = new ArrayList<>();
-      List<RapidsInputFile.CopyRange> scratchRanges = new ArrayList<>();
-      long scratchBytes = 0L;
+      List<RapidsInputFile.CopyRange> reads = planRanges(misses, requestSizeBytes);
       long requestedBytes = 0L;
-      for (MergedRead read : mergedReads) {
-        requestedBytes = Math.addExact(requestedBytes, read.spanBytes());
-        if (read.isDirect()) {
-          directRanges.add(new RapidsInputFile.CopyRange(
-              read.sourceStart, read.spanBytes(), read.chunks.get(0).fragmentOffset));
-        } else {
-          read.scratchStart = scratchBytes;
-          scratchRanges.add(new RapidsInputFile.CopyRange(
-              read.sourceStart, read.spanBytes(), scratchBytes));
-          scratchBytes = Math.addExact(scratchBytes, read.spanBytes());
-        }
-      }
-      if (scratchBytes > 0) {
-        long scratchAllocStart = System.nanoTime();
-        scratch = HostAlloc$.MODULE$.alloc(scratchBytes, false);
-        allocNanos += System.nanoTime() - scratchAllocStart;
+      for (RapidsInputFile.CopyRange read : reads) {
+        requestedBytes = Math.addExact(requestedBytes, read.getLength());
       }
 
       long readStart = System.nanoTime();
-      output.copyRanges(input, directRanges);
-      if (scratch != null) {
-        input.readVectored(scratch, scratchRanges);
-      }
+      // readVectored submits every range before it waits, so all exact slices for this file are
+      // visible to the executor-wide PerfIO/CRT scheduler in one wave.
+      output.copyRanges(input, reads);
       long readWaitNanos = System.nanoTime() - readStart;
       checkOpen(closed);
 
-      long routeStart = System.nanoTime();
-      for (MergedRead read : mergedReads) {
-        if (read.scratchStart >= 0) {
-          for (MissChunk chunk : read.chunks) {
-            output.copyFromHostBuffer(
-                chunk.fragmentOffset,
-                scratch,
-                read.scratchStart + (chunk.sourceOffset - read.sourceStart),
-                chunk.length);
-          }
-        }
-      }
-      long routeNanos = System.nanoTime() - routeStart;
-
       long finalizeStart = System.nanoTime();
-      for (MissChunk chunk : misses) {
+      for (SourceRange chunk : misses) {
         FileCacheStartedToken token = chunk.token;
         if (token != null) {
           HostMemoryBuffer data = output.sliceForCache(chunk.fragmentOffset, chunk.length);
@@ -163,12 +130,12 @@ public final class ParquetDataReader {
       output.seal();
       return new FileFragment(footer, blockOffsets, output,
           new FileFragment.DownloadStats(System.nanoTime() - start,
-              allocNanos, readWaitNanos, routeNanos, System.nanoTime() - finalizeStart,
-              directRanges.size() + scratchRanges.size(), requestedBytes,
+              allocNanos, readWaitNanos, 0L, System.nanoTime() - finalizeStart,
+              reads.size(), requestedBytes,
               cacheHitCount, cacheHitBytes, cacheMissCount, cacheMissBytes, cacheReadNanos));
     } catch (Throwable error) {
       Throwable failure = error;
-      for (MissChunk chunk : misses) {
+      for (SourceRange chunk : misses) {
         if (chunk.token != null) {
           try {
             chunk.token.cancel();
@@ -193,10 +160,6 @@ public final class ParquetDataReader {
         throw (Error) failure;
       }
       throw new RuntimeException(failure);
-    } finally {
-      if (scratch != null) {
-        scratch.close();
-      }
     }
   }
 
@@ -206,63 +169,87 @@ public final class ParquetDataReader {
     }
   }
 
-  private static final class MissChunk {
+  /** One filtered column chunk that must appear in the packed output. */
+  static final class SourceRange {
     final long sourceOffset;
     final long length;
     final long fragmentOffset;
     FileCacheStartedToken token;
 
-    MissChunk(long sourceOffset, long length, long fragmentOffset) {
+    SourceRange(long sourceOffset, long length, long fragmentOffset) {
       this.sourceOffset = sourceOffset;
       this.length = length;
       this.fragmentOffset = fragmentOffset;
     }
   }
 
-  private static final class MergedRead {
-    final List<MissChunk> chunks = new ArrayList<>();
-    long sourceStart;
-    long sourceEnd;
-    long scratchStart = -1L;
-
-    long spanBytes() {
-      return sourceEnd - sourceStart;
+  /**
+   * Build exact requests from the selected column chunks in Parquet-footer order.
+   *
+   * <p>Consecutive column chunks are first coalesced into a maximal useful run. Each run is then
+   * split into requests no larger than {@code requestSizeBytes}. A gap always ends a run, so no
+   * request contains bytes that footer filtering excluded. The footer is expected to retain
+   * physical file order; rejecting overlap or backwards movement is safer than silently sorting
+   * malformed input.</p>
+   */
+  static List<RapidsInputFile.CopyRange> planRanges(
+      List<SourceRange> misses,
+      long requestSizeBytes) {
+    if (requestSizeBytes <= 0L) {
+      throw new IllegalArgumentException("requestSizeBytes must be positive");
     }
-
-    boolean isDirect() {
-      long expectedSource = sourceStart;
-      long expectedFragment = chunks.get(0).fragmentOffset;
-      for (MissChunk chunk : chunks) {
-        if (chunk.sourceOffset != expectedSource || chunk.fragmentOffset != expectedFragment) {
-          return false;
-        }
-        expectedSource += chunk.length;
-        expectedFragment += chunk.length;
+    ArrayList<RapidsInputFile.CopyRange> reads = new ArrayList<>();
+    long runSourceOffset = 0L;
+    long runOutputOffset = 0L;
+    long runLength = 0L;
+    long previousSourceEnd = -1L;
+    long previousOutputEnd = -1L;
+    for (SourceRange range : misses) {
+      if (range.sourceOffset < 0L || range.length <= 0L || range.fragmentOffset < 0L) {
+        throw new IllegalArgumentException(
+            "source and output offsets must be non-negative and ranges must be non-empty");
       }
-      return true;
+      long sourceEnd = Math.addExact(range.sourceOffset, range.length);
+      long outputEnd = Math.addExact(range.fragmentOffset, range.length);
+      if (previousSourceEnd >= 0L && range.sourceOffset < previousSourceEnd) {
+        throw new IllegalArgumentException(
+            "source ranges must be in footer order and must not overlap");
+      }
+      if (previousOutputEnd >= 0L && range.fragmentOffset < previousOutputEnd) {
+        throw new IllegalArgumentException("output ranges must be in packing order");
+      }
+
+      if (runLength > 0L
+          && range.sourceOffset == previousSourceEnd
+          && range.fragmentOffset == previousOutputEnd) {
+        runLength = Math.addExact(runLength, range.length);
+      } else {
+        appendSplitRequests(
+            reads, runSourceOffset, runOutputOffset, runLength, requestSizeBytes);
+        runSourceOffset = range.sourceOffset;
+        runOutputOffset = range.fragmentOffset;
+        runLength = range.length;
+      }
+      previousSourceEnd = sourceEnd;
+      previousOutputEnd = outputEnd;
     }
+    appendSplitRequests(reads, runSourceOffset, runOutputOffset, runLength, requestSizeBytes);
+    return reads;
   }
 
-  private static List<MergedRead> mergeMissChunks(List<MissChunk> misses) {
-    ArrayList<MissChunk> sorted = new ArrayList<>(misses);
-    sorted.sort(Comparator.comparingLong(chunk -> chunk.sourceOffset));
-    ArrayList<MergedRead> merged = new ArrayList<>();
-    MergedRead current = null;
-    for (MissChunk chunk : sorted) {
-      long chunkEnd = Math.addExact(chunk.sourceOffset, chunk.length);
-      if (current != null
-          && chunk.sourceOffset >= current.sourceEnd
-          && chunk.sourceOffset - current.sourceEnd <= COALESCE_GAP_LIMIT_BYTES) {
-        current.chunks.add(chunk);
-        current.sourceEnd = chunkEnd;
-      } else {
-        current = new MergedRead();
-        current.sourceStart = chunk.sourceOffset;
-        current.sourceEnd = chunkEnd;
-        current.chunks.add(chunk);
-        merged.add(current);
-      }
+  private static void appendSplitRequests(
+      List<RapidsInputFile.CopyRange> reads,
+      long sourceOffset,
+      long outputOffset,
+      long runLength,
+      long requestSizeBytes) {
+    for (long offset = 0L; offset < runLength; ) {
+      long length = Math.min(requestSizeBytes, runLength - offset);
+      reads.add(new RapidsInputFile.CopyRange(
+          Math.addExact(sourceOffset, offset),
+          length,
+          Math.addExact(outputOffset, offset)));
+      offset = Math.addExact(offset, length);
     }
-    return merged;
   }
 }

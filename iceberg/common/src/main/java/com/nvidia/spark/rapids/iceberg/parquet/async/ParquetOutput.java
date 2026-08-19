@@ -16,9 +16,7 @@
 
 package com.nvidia.spark.rapids.iceberg.parquet.async;
 
-import java.io.EOFException;
 import java.io.IOException;
-import java.nio.ByteBuffer;
 import java.nio.channels.SeekableByteChannel;
 import java.util.List;
 import java.util.Objects;
@@ -26,6 +24,7 @@ import java.util.concurrent.locks.StampedLock;
 
 import ai.rapids.cudf.HostMemoryBuffer;
 import com.nvidia.spark.rapids.HostAlloc$;
+import com.nvidia.spark.rapids.HostMemoryOutputStream;
 import com.nvidia.spark.rapids.SpillPriorities;
 import com.nvidia.spark.rapids.SpillableHostBuffer;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
@@ -35,10 +34,9 @@ import com.nvidia.spark.rapids.spill.SpillFramework$;
  * Exact-sized writable storage for one file's packed Parquet column chunks.
  *
  * <p>The output has a strict lifecycle: {@code WRITABLE -> SEALED -> CLOSED}. The owning worker
- * writes it with blocking vectored reads, cached-range copies, and scratch segment routing;
- * disjoint ranges may also be written concurrently. After its reads return, the worker seals the
- * output. The Spark task thread then obtains an independent host-buffer reference with
- * {@link #materialize()} before closing this output.</p>
+ * writes it with one blocking vectored read and cached-range copies. After its reads return, the
+ * worker seals the output. The Spark task thread then obtains an independent host-buffer reference
+ * with {@link #materialize()} before closing this output.</p>
  *
  * <p>Storage uses the same pinned-preferred host allocation policy as the base multithreaded
  * Parquet reader. HostAlloc falls back to bounded non-pinned memory when the pinned pool cannot
@@ -126,23 +124,12 @@ final class ParquetOutput implements AutoCloseable {
     long writeStamp = beginConcurrentWrite();
     try {
       checkWriteBounds(outputOffset, length);
-      long copied = 0L;
-      while (copied < length) {
-        int amount = (int) Math.min(length - copied, Integer.MAX_VALUE);
-        ByteBuffer destination = buffer.asByteBuffer(outputOffset + copied, amount);
-        while (destination.hasRemaining()) {
-          int read = source.read(destination);
-          if (read < 0) {
-            throw new EOFException(
-                "cached data range ended with " + destination.remaining() +
-                    " bytes remaining");
-          }
-          if (read == 0) {
-            Thread.yield();
-          }
-        }
-        copied += amount;
-      }
+      // Use the base Parquet reader's cache-copy primitive verbatim. Besides avoiding a second
+      // implementation of the channel-to-host loop, this keeps both readers on the same JITted
+      // copy path and gives them identical EOF and large-range behavior.
+      HostMemoryOutputStream output = new HostMemoryOutputStream(buffer);
+      output.seek(outputOffset);
+      output.copyFromChannel(source, length);
     } finally {
       endConcurrentWrite(writeStamp);
     }
@@ -188,26 +175,6 @@ final class ParquetOutput implements AutoCloseable {
   /** Write an entire byte array at an absolute synthetic-file offset. */
   final void writeBytes(long outputOffset, byte[] source) throws IOException {
     writeBytes(outputOffset, source, 0, source.length);
-  }
-
-  /**
-   * Copy bytes from a host buffer into a bounds-checked output range. Used by the owning worker
-   * to route the useful segments of a gap-merged read from its scratch buffer into the packed
-   * output; disjoint ranges may be written concurrently with other writers.
-   */
-  final void copyFromHostBuffer(
-      long outputOffset,
-      HostMemoryBuffer source,
-      long sourceOffset,
-      long length) throws IOException {
-    Objects.requireNonNull(source, "source");
-    long writeStamp = beginConcurrentWrite();
-    try {
-      checkWriteBounds(outputOffset, length);
-      buffer.copyFromHostBuffer(outputOffset, source, sourceOffset, length);
-    } finally {
-      endConcurrentWrite(writeStamp);
-    }
   }
 
   /** Seal the exact-sized output after every source writer is terminal. */
