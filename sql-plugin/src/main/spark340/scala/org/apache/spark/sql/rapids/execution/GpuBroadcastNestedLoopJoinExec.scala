@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,8 +27,20 @@
 {"spark": "354"}
 {"spark": "355"}
 {"spark": "356"}
+{"spark": "357"}
+{"spark": "358"}
+{"spark": "359"}
 {"spark": "400"}
+{"spark": "401"}
+{"spark": "402"}
+{"spark": "403"}
+{"spark": "404"}
+{"spark": "411"}
+{"spark": "412"}
+{"spark": "413"}
+{"spark": "420"}
 spark-rapids-shim-json-lines ***/
+
 package org.apache.spark.sql.rapids.execution
 
 import com.nvidia.spark.rapids._
@@ -60,8 +72,8 @@ class GpuBroadcastNestedLoopJoinMeta(
 
     if (isAstCondition) {
       // Try to extract non-ast-able conditions from join conditions
-      val (remains, leftExpr, rightExpr) = AstUtil.extractNonAstFromJoinCond(conditionMeta,
-        left.output, right.output, true)
+      val (remains, leftExpr, rightExpr) = AstUtil.extractNonAstFromJoinCond(
+        conditionMeta, left.output, right.output)
 
       // Reconstruct the child with wrapped project node if needed.
       val leftChild =

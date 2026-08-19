@@ -20,7 +20,7 @@ import java.util.concurrent.{ExecutionException, Future, LinkedBlockingQueue, Ti
 
 import ai.rapids.cudf.{HostMemoryBuffer, PinnedMemoryPool, Rmm, RmmAllocationMode}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
-import com.nvidia.spark.rapids.jni.{RmmSpark, RmmSparkThreadState, TaskPriority}
+import com.nvidia.spark.rapids.jni.{RmmSpark, RmmSparkThreadState, TaskPriority, ThreadStateRegistry}
 import com.nvidia.spark.rapids.spill._
 import org.mockito.Mockito.when
 import org.scalatest.{BeforeAndAfterAll, BeforeAndAfterEach}
@@ -690,6 +690,8 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
 
   test("split should not happen immediately after fallback on memory contention") {
 
+    ThreadStateRegistry.enablePrintStackTraceCausingThreadBlocked()
+
     // It allocates a small piece of memory (1024) as a warmup, sleep 1s,
     // then allocates a large piece of memory
     class AllocOnAnotherThreadWithWarmup(override val thread: TaskThread,
@@ -702,18 +704,19 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
           val w = SpillableHostBuffer.apply(HostAlloc.alloc(1024, preferPinned),
             1024, SpillPriorities.ACTIVE_BATCHING_PRIORITY)
 
-          // Why can't we just use Thread.sleep here? Because TIMED_WAITING is a special state
-          // treated as BUFN in spark_resource_adaptor::is_thread_bufn_or_above, this will cause
-          // issues like https://github.com/NVIDIA/spark-rapids/issues/12883
-          val startTime = System.currentTimeMillis
-          while (System.currentTimeMillis < startTime + 100) {
-            Thread.`yield`() // when yielding, the thread is in RUNNABLE state
-          }
-
           // let's say we will do sth with the shuffle data read, e.g. concat them
           // for simplicity, we just have one SpillableHostBuffer as input, in real case there
           // should be multiple SpillableHostBuffer as input
           withResource(w.getHostBuffer()) { _ =>
+
+            // Why can't we just use Thread.sleep here? Because TIMED_WAITING is a special state
+            // treated as BUFN in spark_resource_adaptor::is_thread_bufn_or_above, this will cause
+            // issues like https://github.com/NVIDIA/spark-rapids/issues/12883
+            val startTime = System.currentTimeMillis
+            while (System.currentTimeMillis < startTime + 100) {
+              Thread.`yield`() // when yielding, the thread is in RUNNABLE state
+            }
+
             // create another buffer as destination for concat
             val tmp = HostAlloc.alloc(size, preferPinned)
             synchronized {
@@ -759,6 +762,8 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
       } finally {
         thread1.done.get(1, TimeUnit.SECONDS)
         thread2.done.get(1, TimeUnit.SECONDS)
+
+        ThreadStateRegistry.disablePrintStackTraceCausingThreadBlocked()
       }
     }
   }

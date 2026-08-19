@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ import scala.collection.mutable.ArrayBuffer
 import ai.rapids.cudf.{NvtxColor, Table}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+import com.nvidia.spark.rapids.AssertUtils.assertInTests
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
 
@@ -127,7 +128,7 @@ class RapidsProcessDeltaMergeJoinMeta(
   private def convertExprToGpu(e: Expression): Expression = {
     val meta = GpuOverrides.wrapExpr(e, conf, None)
     meta.tagForGpu()
-    assert(meta.canExprTreeBeReplaced, meta.toString)
+    assertInTests(meta.canExprTreeBeReplaced, meta.toString)
     meta.convertToGpu()
   }
 }
@@ -173,11 +174,11 @@ case class GpuRapidsProcessDeltaMergeJoinExec(
 
   override lazy val additionalMetrics: Map[String, GpuMetric] = {
     import GpuMetric._
-    Map(OP_TIME -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_OP_TIME))
+    Map(OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY))
   }
 
   private def bindForGpu(e: Expression): GpuExpression = {
-    GpuBindReferences.bindGpuReference(e, child.output)
+    GpuBindReferences.bindGpuReference(e, child.output, allMetrics)
   }
 
   override protected def doExecute(): RDD[InternalRow] = {
@@ -237,7 +238,7 @@ class GpuRapidsProcessDeltaMergeJoinIterator(
 
   private[this] val intermediateTypes: Array[DataType] = noopCopyOutput.map(_.dataType).toArray
   private[this] var nextBatch: Option[ColumnarBatch] = None
-  private[this] val opTime = metrics.getOrElse(GpuMetric.OP_TIME, NoopMetric)
+  private[this] val opTime = metrics.getOrElse(GpuMetric.OP_TIME_LEGACY, NoopMetric)
   private[this] val numOutputRows = metrics.getOrElse(GpuMetric.NUM_OUTPUT_ROWS, NoopMetric)
 
   // Don't install the callback if in a unit test

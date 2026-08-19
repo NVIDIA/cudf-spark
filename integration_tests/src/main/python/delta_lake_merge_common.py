@@ -47,11 +47,21 @@ def delta_sql_merge_test(spark_tmp_path, spark_tmp_table_factory, use_cdf, enabl
     with_cpu_session(setup_tables)
     check_func(data_path, do_merge)
 
-def assert_collect(do_merge, read_delta_path, data_path, conf):
+def assert_collect(do_merge, data_path, conf, expect_write=True):
+    """
+    Execute the do_merge function in both CPU and GPU sessions and compare the results.
+    :param do_merge: A function that takes a Spark session and a path, performs a merge operation, and returns the result.
+    :param data_path: The base path where CPU and GPU data are stored.
+    :param conf: Configuration settings for the Spark sessions.
+    :param expect_write: A boolean indicating whether to expect a write operation in the GPU session.
+    """
     cpu_path = data_path + "/CPU"
     gpu_path = data_path + "/GPU"
     cpu_result = with_cpu_session(lambda spark: do_merge(spark, cpu_path), conf=conf)
-    gpu_result = with_gpu_session(lambda spark: do_merge(spark, gpu_path), conf=conf)
+    if expect_write:
+        gpu_result = assert_rapids_delta_write(lambda spark: do_merge(spark, gpu_path), conf=conf)
+    else:
+        gpu_result = with_gpu_session(lambda spark: do_merge(spark, gpu_path), conf=conf)
     assert_equal(cpu_result, gpu_result)
 
 # This method is used for making sure ExecutedCommand fallsback for Spark 3.5.3
@@ -64,7 +74,8 @@ def assert_fallback(fallback_class):
 
 def assert_delta_sql_merge_collect(spark_tmp_path, spark_tmp_table_factory, use_cdf, enable_deletion_vectors,
                                    src_table_func, dest_table_func, merge_sql,
-                                   compare_logs, assert_func=assert_collect, partition_columns=None, conf=None):
+                                   compare_logs, assert_func=assert_collect, partition_columns=None, conf=None,
+                                   expect_write=True):
     assert conf is not None, "conf must be set"
         
     def read_data(spark, path):
@@ -76,7 +87,7 @@ def assert_delta_sql_merge_collect(spark_tmp_path, spark_tmp_table_factory, use_
         cpu_path = data_path + "/CPU"
         gpu_path = data_path + "/GPU"
         # compare resulting dataframe from the merge operation (some older Spark versions return empty here)
-        assert_func(do_merge, read_delta_path, data_path, conf)
+        assert_func(do_merge, data_path, conf, expect_write=expect_write)
         # compare merged table data results, read both via CPU to make sure GPU write can be read by CPU
         cpu_result = with_cpu_session(lambda spark: read_data(spark, cpu_path).collect(), conf=conf)
         gpu_result = with_cpu_session(lambda spark: read_data(spark, gpu_path).collect(), conf=conf)
@@ -104,7 +115,7 @@ def do_test_delta_merge_not_match_insert_only(spark_tmp_path, spark_tmp_table_fa
 
 def do_test_delta_merge_match_delete_only(spark_tmp_path, spark_tmp_table_factory, table_ranges,
                                           use_cdf, enable_deletion_vectors, partition_columns, num_slices, compare_logs,
-                                          conf, assert_func=assert_collect):
+                                          conf, assert_func=assert_collect, expect_write=True):
     src_range, dest_range = table_ranges
     src_table_func = lambda spark: make_df(spark, SetValuesGen(IntegerType(), src_range), num_slices)
     dest_table_func = lambda spark: make_df(spark, SetValuesGen(IntegerType(), dest_range), num_slices)
@@ -112,7 +123,7 @@ def do_test_delta_merge_match_delete_only(spark_tmp_path, spark_tmp_table_factor
                 " WHEN MATCHED THEN DELETE"
     assert_delta_sql_merge_collect(spark_tmp_path, spark_tmp_table_factory, use_cdf, enable_deletion_vectors,
                                    src_table_func, dest_table_func, merge_sql, compare_logs, assert_func,
-                                   partition_columns, conf=conf)
+                                   partition_columns, conf=conf, expect_write=expect_write)
 
 
 def do_test_delta_merge_standard_upsert(spark_tmp_path, spark_tmp_table_factory, use_cdf, enable_deletion_vectors,
@@ -139,7 +150,8 @@ def do_test_delta_merge_upsert_with_condition(spark_tmp_path, spark_tmp_table_fa
 
 def do_test_delta_merge_upsert_with_unmatchable_match_condition(spark_tmp_path,
                                                                 spark_tmp_table_factory, use_cdf, enable_deletion_vectors,
-                                                                num_slices, compare_logs, conf, assert_func=assert_collect):
+                                                                num_slices, compare_logs, conf, assert_func=assert_collect,
+                                                                expect_write=True):
     # Need to eliminate duplicate keys in the source table otherwise update semantics are ambiguous
     src_table_func = lambda spark: two_col_df(spark, int_gen, string_gen, num_slices=num_slices).groupBy("a").agg(f.max("b").alias("b"))
     dest_table_func = lambda spark: two_col_df(spark, SetValuesGen(IntegerType(), range(100)), string_gen, seed=1, num_slices=num_slices)
@@ -147,7 +159,7 @@ def do_test_delta_merge_upsert_with_unmatchable_match_condition(spark_tmp_path,
                 " WHEN MATCHED AND {dest_table}.a > 100 THEN UPDATE SET *"
     assert_delta_sql_merge_collect(spark_tmp_path, spark_tmp_table_factory, use_cdf, enable_deletion_vectors,
                                    src_table_func, dest_table_func, merge_sql, compare_logs, assert_func,
-                                   conf=conf)
+                                   conf=conf, expect_write=expect_write)
 
 
 def do_test_delta_merge_update_with_aggregation(spark_tmp_path, spark_tmp_table_factory, use_cdf, enable_deletion_vectors,

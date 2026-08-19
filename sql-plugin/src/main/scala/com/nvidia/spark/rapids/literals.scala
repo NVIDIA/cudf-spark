@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package com.nvidia.spark.rapids
 
 import java.lang.{Boolean => JBoolean, Byte => JByte, Double => JDouble, Float => JFloat, Long => JLong, Short => JShort}
 import java.math.BigInteger
+import java.time.{LocalDate, OffsetDateTime}
 import java.util
 import java.util.{List => JList, Objects}
 
@@ -41,6 +42,8 @@ import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.unsafe.types.UTF8String
+
+
 
 object GpuScalar extends Logging {
 
@@ -257,8 +260,10 @@ object GpuScalar extends Logging {
         case vd: Double => Decimal(vd)
         case vs: String => Decimal(vs)
         case bd: BigDecimal => Decimal(bd)
+        case jbd: java.math.BigDecimal => Decimal(jbd)
         case _ => throw new IllegalArgumentException(s"'$v: ${v.getClass}' is not supported" +
-          s" for DecimalType, expecting Decimal, Int, Long, Double, String, or BigDecimal.")
+          s" for DecimalType, expecting Decimal, Int, Long, Double, String, BigDecimal, or " +
+          s" java.math.BigDecimal")
       }
       convertDecimalTo(dec, decType) match {
         case element: Int => Scalar.fromDecimal(-decType.scale, element)
@@ -285,8 +290,12 @@ object GpuScalar extends Logging {
       // calculations. But cuDF native does not support these for timestamp type, needing to
       // cast to long type.
       case l: Long => Scalar.timestampFromLong(DType.TIMESTAMP_MICROSECONDS, l)
+      case t: OffsetDateTime =>
+        val instant = t.toInstant
+        val micros = instant.getEpochSecond * 1000000L + instant.getNano / 1000L
+        Scalar.timestampFromLong(DType.TIMESTAMP_MICROSECONDS, micros)
       case _ => throw new IllegalArgumentException(s"'$v: ${v.getClass}' is not supported" +
-        s" for TimestampType, expecting Long.")
+        s" for TimestampType, expecting Long or OffsetDateTime")
     }
     case IntegerType => v match {
       case i: Int =>  Scalar.fromInt(i)
@@ -300,8 +309,9 @@ object GpuScalar extends Logging {
       // calculations. But cuDF native does not support these for timestamp days type, needing
       // to cast to int type.
       case i: Int =>  Scalar.timestampDaysFromInt(i)
+      case t: LocalDate => Scalar.timestampDaysFromInt(t.toEpochDay.toInt)
       case _ => throw new IllegalArgumentException(s"'$v: ${v.getClass}' is not supported" +
-        s" for DateType, expecting Int.")
+        s" for DateType, expecting Int or LocalDate")
     }
     case FloatType => v match {
       case f: Float => Scalar.fromFloat(f)
@@ -753,7 +763,7 @@ class LiteralExprMeta(
   def withNewLiteral(newLiteral: Literal): LiteralExprMeta =
     new LiteralExprMeta(newLiteral, conf, p, r)
 
-  override def convertToGpu(): GpuExpression = GpuLiteral(lit.value, lit.dataType)
+  override def convertToGpuImpl(): GpuExpression = GpuLiteral(lit.value, lit.dataType)
 
   // There are so many of these that we don't need to print them out, unless it
   // will not work on the GPU

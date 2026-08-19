@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import ai.rapids.cudf
 import ai.rapids.cudf.{GroupByAggregation, NullPolicy, OrderByArg}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.AssertUtils.assertInTests
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
 import com.nvidia.spark.rapids.python.PythonWorkerSemaphore
@@ -33,19 +34,19 @@ import org.apache.spark.api.python.{ChainedPythonFunctions, PythonEvalType}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.plans.physical.{AllTuples, ClusteredDistribution, Distribution, Partitioning}
-import org.apache.spark.sql.execution.python._
 import org.apache.spark.sql.rapids.aggregate.GpuAggregateExpression
-import org.apache.spark.sql.rapids.execution.python.shims.{GpuArrowPythonRunner, PythonArgumentUtils}
+import org.apache.spark.sql.rapids.execution.python.shims.{GpuWindowPythonRunnerFactory, PythonArgumentUtils, WindowBoundTypeConfShims}
+import org.apache.spark.sql.rapids.execution.python.shims.WindowInPandasExecTypeShim.WindowInPandasExecType
 import org.apache.spark.sql.rapids.shims.{ArrowUtilsShim, DataTypeUtilsShim}
 import org.apache.spark.sql.types.{IntegerType, StructField, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 abstract class GpuWindowInPandasExecMetaBase(
-    winPandas: WindowInPandasExec,
+    winPandas: WindowInPandasExecType,
     conf: RapidsConf,
     parent: Option[RapidsMeta[_, _, _]],
     rule: DataFromReplacementRule)
-  extends SparkPlanMeta[WindowInPandasExec](winPandas, conf, parent, rule) {
+  extends SparkPlanMeta[WindowInPandasExecType](winPandas, conf, parent, rule) {
 
   override def replaceMessage: String = "partially run on GPU"
   override def noReplacementPossibleMessage(reasons: String): String =
@@ -101,7 +102,7 @@ class GroupingIterator(
     groupBatches.clear()
   }
 
-  override def hasNext(): Boolean = groupBatches.nonEmpty || wrapped.hasNext
+  override def hasNext: Boolean = groupBatches.nonEmpty || wrapped.hasNext
 
   override def next(): ColumnarBatch = {
     if (groupBatches.nonEmpty) {
@@ -232,7 +233,7 @@ trait GpuWindowInPandasExecBase extends ShimUnaryExecNode with GpuPythonExecBase
   protected object UnboundedWindow extends WindowBoundType("unbounded")
   protected object BoundedWindow extends WindowBoundType("bounded")
 
-  protected val windowBoundTypeConf = "pandas_window_bound_types"
+  protected val windowBoundTypeConf = WindowBoundTypeConfShims.windowBoundTypeConf
 
   protected def collectFunctions(
       udf: GpuPythonFunction): ((ChainedPythonFunctions, Long), Seq[Expression]) = {
@@ -242,7 +243,7 @@ trait GpuWindowInPandasExecBase extends ShimUnaryExecNode with GpuPythonExecBase
         ((ChainedPythonFunctions(chained.funcs ++ Seq(udf.func)), udf.resultId.id), children)
       case children =>
         // There should not be any other UDFs, or the children can't be evaluated directly.
-        assert(children.forall(_.find(_.isInstanceOf[GpuPythonFunction]).isEmpty))
+        assertInTests(children.forall(_.find(_.isInstanceOf[GpuPythonFunction]).isEmpty))
         ((ChainedPythonFunctions(Seq(udf.func)), udf.resultId.id), udf.children)
     }
   }
@@ -492,14 +493,17 @@ trait GpuWindowInPandasExecBase extends ShimUnaryExecNode with GpuPythonExecBase
     // UDF contains multiple columns.
     val pythonOutputSchema = DataTypeUtilsShim.fromAttributes(udfExpressions.map(_.resultAttribute))
     val childOutput = child.output
+    val localMetrics = allMetrics
 
     // 8) Start processing.
     child.executeColumnar().mapPartitions { inputIter =>
       val context = TaskContext.get()
 
-      val boundDataRefs = GpuBindReferences.bindGpuReferences(udfArgs.flattenedArgs, childOutput)
+      val boundDataRefs = GpuBindReferences.bindGpuReferences(udfArgs.flattenedArgs,
+        childOutput, localMetrics)
       // Re-batching the input data by GroupingIterator
-      val boundPartitionRefs = GpuBindReferences.bindGpuReferences(gpuPartitionSpec, childOutput)
+      val boundPartitionRefs = GpuBindReferences.bindGpuReferences(gpuPartitionSpec,
+        childOutput, localMetrics)
       val batchProducer = new BatchProducer(
         new GroupingIterator(inputIter, boundPartitionRefs, numInputRows, numInputBatches))
       val pyInputIterator = batchProducer.asIterator.map { batch =>
@@ -517,7 +521,7 @@ trait GpuWindowInPandasExecBase extends ShimUnaryExecNode with GpuPythonExecBase
       }
 
       if (pyInputIterator.hasNext) {
-        val pyRunner = new GpuArrowPythonRunner(
+        val pyRunner = GpuWindowPythonRunnerFactory.createRunner(
           pyFuncs,
           PythonEvalType.SQL_WINDOW_AGG_PANDAS_UDF,
           udfArgs.argOffsets,

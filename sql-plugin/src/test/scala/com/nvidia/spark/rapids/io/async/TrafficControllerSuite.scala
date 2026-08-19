@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -119,7 +119,7 @@ class TrafficControllerSuite extends AnyFunSuite with BeforeAndAfterEach with Ti
     while (controller.numScheduledTasks == 0) {
       Thread.sleep(100)
     }
-    assert(futures(0).isDone)
+    futures(0).get(1, TimeUnit.SECONDS)
     assertResult(1)(controller.numScheduledTasks)
     assertResult(throttle.tasksScheduled.head)(tasks(0))
 
@@ -129,7 +129,7 @@ class TrafficControllerSuite extends AnyFunSuite with BeforeAndAfterEach with Ti
     while (controller.numScheduledTasks == 0) {
       Thread.sleep(100)
     }
-    assert(futures(1).isDone)
+    futures(1).get(1, TimeUnit.SECONDS)
     assertResult(1)(controller.numScheduledTasks)
     assertResult(throttle.tasksScheduled(1))(tasks(1))
 
@@ -139,7 +139,7 @@ class TrafficControllerSuite extends AnyFunSuite with BeforeAndAfterEach with Ti
     while (controller.numScheduledTasks == 0) {
       Thread.sleep(100)
     }
-    assert(futures(2).isDone)
+    futures(2).get(1, TimeUnit.SECONDS)
     assertResult(1)(controller.numScheduledTasks)
     assertResult(throttle.tasksScheduled(2))(tasks(2))
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,8 +16,7 @@
 
 package org.apache.spark.sql.rapids.zorder
 
-import ai.rapids.cudf.{NvtxColor, NvtxRange}
-import com.nvidia.spark.rapids.{GpuColumnVector, GpuExpression, GpuProjectExec}
+import com.nvidia.spark.rapids.{GpuColumnVector, GpuExpression, GpuProjectExec, NvtxRegistry}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.jni.ZOrder
 import com.nvidia.spark.rapids.shims.ShimExpression
@@ -44,7 +43,7 @@ case class GpuHilbertLongIndex(numBits: Int, children: Seq[Expression])
 
   override def columnarEval(batch: ColumnarBatch): GpuColumnVector = {
     val ret = withResource(GpuProjectExec.project(batch, children)) { inputs =>
-      withResource(new NvtxRange("HILBERT INDEX", NvtxColor.PURPLE)) { _ =>
+      NvtxRegistry.HILBERT_INDEX {
         val bases = GpuColumnVector.extractBases(inputs)
         // Null values are replaced with 0 as a part of interleaveBits to match what delta does,
         // but null values should never show up in practice because this is fed by

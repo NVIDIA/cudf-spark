@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,8 +15,8 @@
  */
 package org.apache.spark.sql.rapids.execution
 
-import ai.rapids.cudf.{ColumnVector, GatherMap, NvtxColor, Scalar, Table}
-import com.nvidia.spark.rapids.{GpuColumnVector, GpuMetric, LazySpillableColumnarBatch, NvtxWithMetrics, TaskAutoCloseableResource}
+import ai.rapids.cudf.{ColumnVector, GatherMap, Scalar, Table}
+import com.nvidia.spark.rapids.{GpuColumnVector, GpuMetric, LazySpillableColumnarBatch, NvtxIdWithMetrics, NvtxRegistry, TaskAutoCloseableResource}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{withRestoreOnRetry, withRetryNoSplit}
 
@@ -74,7 +74,7 @@ abstract class ExistenceJoinIterator(
 
   override def next(): ColumnarBatch = {
     withResource(lazyStream.next()) { lazyBatch =>
-      withResource(new NvtxWithMetrics("existence join batch", NvtxColor.ORANGE, joinTime)) { _ =>
+      NvtxIdWithMetrics(NvtxRegistry.EXISTENCE_JOIN_BATCH, joinTime) {
         opTime.ns {
           val ret = existenceJoinNextBatch(lazyBatch)
           spillableBuiltBatch.allowSpilling()

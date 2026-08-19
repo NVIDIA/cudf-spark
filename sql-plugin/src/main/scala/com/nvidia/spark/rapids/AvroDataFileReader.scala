@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -185,7 +185,7 @@ abstract class AvroFileReader(si: SeekableInput) extends AutoCloseable {
     var l = vin.readMapStart().toInt
     if (l > 0) {
       do {
-        for (i <- 1 to l) {
+        for (_ <- 1 to l) {
           val key = vin.readString(null).toString
           val value = vin.readBytes(null)
           val bb = new Array[Byte](value.remaining())

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,17 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark": "400"}
+{"spark": "400db173"}
+{"spark": "401"}
+{"spark": "402"}
+{"spark": "403"}
+{"spark": "404"}
+{"spark": "411"}
+{"spark": "412"}
+{"spark": "413"}
+{"spark": "420"}
 spark-rapids-shim-json-lines ***/
+
 package org.apache.spark.sql.rapids.shims
 
 import org.apache.spark.sql.classic.SparkSession
@@ -29,5 +39,9 @@ object SparkSessionUtils {
 
   def leafNodeDefaultParallelism(ss: SparkSession): Int = {
     ss.leafNodeDefaultParallelism
+  }
+
+  def withActiveSession[T](ss: org.apache.spark.sql.SparkSession)(body: => T): T = {
+    ss.asInstanceOf[SparkSession].withActive(body)
   }
 }

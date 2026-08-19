@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,18 +17,20 @@
 package org.apache.spark.sql.rapids.aggregate
 
 import ai.rapids.cudf
-import ai.rapids.cudf.{Aggregation128Utils, BinaryOp, ColumnVector, DType, GroupByAggregation, GroupByScanAggregation, NaNEquality, NullEquality, NullPolicy, NvtxColor, NvtxRange, ReductionAggregation, ReplacePolicy, RollingAggregation, RollingAggregationOnColumn, Scalar, ScanAggregation}
+import ai.rapids.cudf.{Aggregation128Utils, BinaryOp, ColumnVector, DType, GroupByAggregation, GroupByScanAggregation, NaNEquality, NullEquality, NullPolicy, ReductionAggregation, ReplacePolicy, RollingAggregation, RollingAggregationOnColumn, Scalar, ScanAggregation}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsPluginImplicits.ReallyAGpuExpression
 import com.nvidia.spark.rapids.jni.Aggregation64Utils
-import com.nvidia.spark.rapids.shims.{GpuDeterministicFirstLastCollectShim, ShimExpression, TypeUtilsShims}
+import com.nvidia.spark.rapids.shims.{GpuDeterministicFirstLastCollectShim, ShimExpression,
+  TypeUtilsShims}
 import com.nvidia.spark.rapids.window._
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.TypeCheckResult
 import org.apache.spark.sql.catalyst.analysis.TypeCheckResult.TypeCheckSuccess
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Expression, ImplicitCastInputTypes, Literal, UnsafeProjection, UnsafeRow}
+import org.apache.spark.sql.catalyst.trees.{CurrentOrigin, Origin}
 import org.apache.spark.sql.catalyst.util.{ArrayData, GenericArrayData, TypeUtils}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids._
@@ -89,11 +91,12 @@ object CudfAll {
   def apply(): CudfAggregate = new CudfMin(BooleanType)
 }
 
-class CudfCollectList(override val dataType: DataType) extends CudfAggregate {
+class CudfCollectList(override val dataType: DataType, nullPolicy: NullPolicy)
+    extends CudfAggregate {
   override lazy val reductionAggregate: cudf.ColumnVector => cudf.Scalar =
-    (col: cudf.ColumnVector) => col.reduce(ReductionAggregation.collectList(), DType.LIST)
+    (col: cudf.ColumnVector) => col.reduce(ReductionAggregation.collectList(nullPolicy), DType.LIST)
   override lazy val groupByAggregate: GroupByAggregation =
-    GroupByAggregation.collectList()
+    GroupByAggregation.collectList(nullPolicy)
   override val name: String = "CudfCollectList"
 }
 
@@ -109,31 +112,51 @@ class CudfMergeLists(override val dataType: DataType) extends CudfAggregate {
  * Spark handles NaN's equality by different way for non-nested float/double and float/double
  * in nested types. When we use non-nested versions of floats and doubles, NaN values are
  * considered unequal, but when we collect sets of nested versions, NaNs are considered equal
- * on the CPU. So we set NaNEquality dynamically in CudfCollectSet and CudfMergeSets.
+ * on the CPU. Spark 4.2 changed non-nested NaNs to be equal too, so use a shim helper
+ * for the non-nested NaN equality in CudfCollectSet and CudfMergeSets.
  * Note that dataType is ArrayType(child.dataType) here.
  */
-class CudfCollectSet(override val dataType: DataType) extends CudfAggregate {
-  override lazy val reductionAggregate: cudf.ColumnVector => cudf.Scalar =
-    (col: cudf.ColumnVector) => {
-      val collectSet = dataType match {
-        case ArrayType(FloatType | DoubleType, _) =>
-          ReductionAggregation.collectSet(
-            NullPolicy.EXCLUDE, NullEquality.EQUAL, NaNEquality.UNEQUAL)
-        case _: DataType =>
-          ReductionAggregation.collectSet(
-            NullPolicy.EXCLUDE, NullEquality.EQUAL, NaNEquality.ALL_EQUAL)
-      }
-      col.reduce(collectSet, DType.LIST)
-    }
+class CudfCollectSet(
+    override val dataType: DataType,
+    nullPolicy: NullPolicy) extends CudfAggregate {
+  private lazy val reductionCollectSet: ReductionAggregation = dataType match {
+    case ArrayType(FloatType | DoubleType, _) =>
+      ReductionAggregation.collectSet(
+        nullPolicy, NullEquality.EQUAL, TypeUtilsShims.collectSetFloatNanEquality)
+    case _: DataType =>
+      ReductionAggregation.collectSet(
+        nullPolicy, NullEquality.EQUAL, NaNEquality.ALL_EQUAL)
+  }
+
   override lazy val groupByAggregate: GroupByAggregation = dataType match {
     case ArrayType(FloatType | DoubleType, _) =>
       GroupByAggregation.collectSet(
-        NullPolicy.EXCLUDE, NullEquality.EQUAL, NaNEquality.UNEQUAL)
+        nullPolicy, NullEquality.EQUAL, TypeUtilsShims.collectSetFloatNanEquality)
     case _: DataType =>
       GroupByAggregation.collectSet(
-        NullPolicy.EXCLUDE, NullEquality.EQUAL, NaNEquality.ALL_EQUAL)
+        nullPolicy, NullEquality.EQUAL, NaNEquality.ALL_EQUAL)
   }
   override val name: String = "CudfCollectSet"
+
+  override lazy val reductionAggregate: cudf.ColumnVector => cudf.Scalar =
+    (col: cudf.ColumnVector) => {
+      val rowCount = Math.toIntExact(col.getRowCount)
+      if (nullPolicy == NullPolicy.INCLUDE && rowCount > 0) {
+        // cuDF reduction collectSet currently drops nulls for some INCLUDE cases. Use the
+        // group-by implementation for single-group reductions to preserve Spark's null semantics.
+        withResource(Scalar.fromInt(0)) { keyScalar =>
+          withResource(ColumnVector.fromScalar(keyScalar, rowCount)) { keys =>
+            withResource(new cudf.Table(keys, col)) { table =>
+              withResource(table.groupBy(0).aggregate(groupByAggregate.onColumn(1))) { result =>
+                result.getColumn(1).getScalarElement(0)
+              }
+            }
+          }
+        }
+      } else {
+        col.reduce(reductionCollectSet, DType.LIST)
+      }
+    }
 }
 
 class CudfMergeSets(override val dataType: DataType) extends CudfAggregate {
@@ -141,7 +164,8 @@ class CudfMergeSets(override val dataType: DataType) extends CudfAggregate {
     (col: cudf.ColumnVector) => {
       val mergeSets = dataType match {
         case ArrayType(FloatType | DoubleType, _) =>
-          ReductionAggregation.mergeSets(NullEquality.EQUAL, NaNEquality.UNEQUAL)
+          ReductionAggregation.mergeSets(
+            NullEquality.EQUAL, TypeUtilsShims.collectSetFloatNanEquality)
         case _: DataType =>
           ReductionAggregation.mergeSets(NullEquality.EQUAL, NaNEquality.ALL_EQUAL)
       }
@@ -149,7 +173,7 @@ class CudfMergeSets(override val dataType: DataType) extends CudfAggregate {
     }
   override lazy val groupByAggregate: GroupByAggregation = dataType match {
     case ArrayType(FloatType | DoubleType, _) =>
-      GroupByAggregation.mergeSets(NullEquality.EQUAL, NaNEquality.UNEQUAL)
+      GroupByAggregation.mergeSets(NullEquality.EQUAL, TypeUtilsShims.collectSetFloatNanEquality)
     case _: DataType =>
       GroupByAggregation.mergeSets(NullEquality.EQUAL, NaNEquality.ALL_EQUAL)
   }
@@ -236,7 +260,7 @@ class CudfM2 extends CudfAggregate {
 class CudfMergeM2 extends CudfAggregate {
   override lazy val reductionAggregate: cudf.ColumnVector => cudf.Scalar =
     (col: cudf.ColumnVector) => {
-      withResource(new NvtxRange("reduction-merge-m2", NvtxColor.ORANGE)) { _ =>
+      NvtxRegistry.REDUCTION_MERGE_M2 {
         withResource(col.copyToHost()) { hcv =>
           withResource(hcv.getChildColumnView(0)) { partialN =>
             withResource(hcv.getChildColumnView(1)) { partialMean =>
@@ -250,11 +274,18 @@ class CudfMergeM2 extends CudfAggregate {
                   if (n > 0) {
                     val mean = partialMean.getDouble(i)
                     val m2 = partialM2.getDouble(i)
-                    val delta = mean - mergeMean
-                    val newN = n + mergeN
-                    mergeM2 += m2 + delta * delta * n * mergeN / newN
-                    mergeMean = (mergeMean * mergeN + mean * n) / newN
-                    mergeN = newN
+                    if (mergeN == 0.0) {
+                      mergeN = n
+                      mergeMean = mean
+                      mergeM2 = m2
+                    } else {
+                      val delta = mean - mergeMean
+                      val newN = mergeN + n
+                      val deltaN = delta / newN
+                      mergeM2 += m2 + delta * deltaN * mergeN * n
+                      mergeMean += deltaN * n
+                      mergeN = newN
+                    }
                   }
                 }
 
@@ -830,36 +861,52 @@ case class GpuCheckOverflowAfterSum(
 
   override def sql: String = data.sql
 
-  override def columnarEval(batch: ColumnarBatch): GpuColumnVector = {
-    withResource(data.columnarEval(batch)) { dataCol =>
-      val dataBase = dataCol.getBase
-      withResource(GpuCast.checkNFixDecimalBounds(dataBase, dataType, !nullOnOverflow)) {
-        fixedData =>
-          withResource(isEmpty.columnarEval(batch)) { isEmptyCol =>
-            val isEmptyBase = isEmptyCol.getBase
-            if (!nullOnOverflow) {
-              // ANSI mode
-              val problem = withResource(fixedData.isNull) { isNull =>
-                withResource(isEmptyBase.not()) { notEmpty =>
-                  isNull.and(notEmpty)
-                }
-              }
-              withResource(problem) { problem =>
-                withResource(problem.any()) { anyProblem =>
-                  if (anyProblem.isValid && anyProblem.getBoolean) {
-                    throw new ArithmeticException("Overflow in sum of decimals.")
+  // SPARK-39190: snapshot the Origin at construction so the SQL query context survives the
+  // reflection-based plan reconstruction that resets `origin`.  GpuDecimalSum.evaluateExpression
+  // (and friends) construct this node inside `CurrentOrigin.withOrigin(capturedOrigin)`, so the
+  // origin field has the parser-set SQL string at construction time.
+  val capturedOrigin: Origin = origin
+
+  // Defensive: re-enter the captured origin around the case-class copy.  Spark's `withNewChildren`
+  // and `makeCopy` already wrap with `CurrentOrigin.withOrigin(this.origin)`, but if any future
+  // reconstruction path (e.g. direct reflection) bypasses that wrap, this override keeps the
+  // parser-set SQL context attached to the rebound instance.
+  override def withNewChildrenInternal(newChildren: IndexedSeq[Expression]): Expression =
+    CurrentOrigin.withOrigin(capturedOrigin) {
+      copy(data = newChildren(0), isEmpty = newChildren(1))
+    }
+
+  override def columnarEval(batch: ColumnarBatch): GpuColumnVector =
+    CurrentOrigin.withOrigin(capturedOrigin) {
+      withResource(data.columnarEval(batch)) { dataCol =>
+        val dataBase = dataCol.getBase
+        withResource(GpuCast.checkNFixDecimalBounds(dataBase, dataType, !nullOnOverflow)) {
+          fixedData =>
+            withResource(isEmpty.columnarEval(batch)) { isEmptyCol =>
+              val isEmptyBase = isEmptyCol.getBase
+              if (!nullOnOverflow) {
+                // ANSI mode
+                val problem = withResource(fixedData.isNull) { isNull =>
+                  withResource(isEmptyBase.not()) { notEmpty =>
+                    isNull.and(notEmpty)
                   }
                 }
+                withResource(problem) { problem =>
+                  withResource(problem.any()) { anyProblem =>
+                    if (anyProblem.isValid && anyProblem.getBoolean) {
+                      throw new ArithmeticException("Overflow in sum of decimals.")
+                    }
+                  }
+                }
+                // No problems fall through...
               }
-              // No problems fall through...
+              withResource(GpuScalar.from(null, dataType)) { nullScale =>
+                GpuColumnVector.from(isEmptyBase.ifElse(nullScale, fixedData), dataType)
+              }
             }
-            withResource(GpuScalar.from(null, dataType)) { nullScale =>
-              GpuColumnVector.from(isEmptyBase.ifElse(nullScale, fixedData), dataType)
-            }
-          }
+        }
       }
     }
-  }
 
   override def children: Seq[Expression] = Seq(data, isEmpty)
 }
@@ -946,7 +993,7 @@ abstract class GpuSum(
   override lazy val initialValues: Seq[GpuLiteral] = Seq(GpuLiteral(null, resultType))
 
   def inputProjectionImpl: Seq[Expression] = if (child.dataType != resultType) {
-    Seq(GpuCast(child, resultType, ansiMode = failOnErrorOverride))
+    Seq(GpuCast(child, resultType, ansiMode = failOnErrorOverride)())
   } else {
     Seq(child)
   }
@@ -959,7 +1006,7 @@ abstract class GpuSum(
   override lazy val updateAggregates: Seq[CudfAggregate] = updateAggregatesImpl
 
   def postUpdateImpl: Seq[Expression] =
-    Seq(GpuCast(updateAggregates.head.attr, resultType, ansiMode = failOnErrorOverride))
+    Seq(GpuCast(updateAggregates.head.attr, resultType, ansiMode = failOnErrorOverride)())
   override lazy val postUpdate: Seq[Expression] = postUpdateImpl
 
   // output of GpuSum
@@ -987,7 +1034,7 @@ abstract class GpuSum(
 
   override lazy val windowInputProjection: Seq[Expression] = {
     if (child.dataType != internalSumForWindowDataType) {
-      Seq(GpuCast(child, internalSumForWindowDataType, ansiMode = failOnErrorOverride))
+      Seq(GpuCast(child, internalSumForWindowDataType, ansiMode = failOnErrorOverride)())
     } else {
       Seq(child)
     }
@@ -1059,7 +1106,7 @@ case class GpuBasicSum(
 
   override lazy val inputProjection: Seq[Expression] = if (needsLongOverflowCheck) {
     (0 until 2).map {
-      GpuExtractChunk32(GpuCast(child, LongType), _, replaceNullsWithZero = false)
+      GpuExtractChunk32(GpuCast(child, LongType)(), _, replaceNullsWithZero = false)
     }
   } else {
     inputProjectionImpl
@@ -1119,7 +1166,7 @@ abstract class GpuDecimalSum(
   override lazy val inputProjection: Seq[Expression] = {
     // Spark tracks null columns through a second column isEmpty for decimal. So null values
     // are replaced with 0, and a separate boolean column for isNull is added
-    Seq(GpuIf(GpuIsNull(child), zeroDec, GpuCast(child, dt)), GpuIsNull(child))
+    Seq(GpuIf(GpuIsNull(child), zeroDec, GpuCast(child, dt)()), GpuIsNull(child))
   }
 
   protected lazy val updateIsEmpty: CudfAggregate = new CudfMin(BooleanType)
@@ -1134,7 +1181,13 @@ abstract class GpuDecimalSum(
     Seq(sum, isEmpty)
   }
 
-  override lazy val postUpdate: Seq[Expression] = {
+  // SPARK-39190: snapshot the Origin at construction (driver-side, inside RapidsMeta's
+  // `CurrentOrigin.withOrigin(wrapped.origin)` wrap so the SQL text is populated).  This val
+  // survives the reflection-based plan reconstruction that resets `origin` to its default,
+  // letting the lazy vals below propagate the SQL context to GpuCheckOverflowAfterSum.
+  val capturedOrigin: Origin = origin
+
+  override lazy val postUpdate: Seq[Expression] = CurrentOrigin.withOrigin(capturedOrigin) {
     if (failOnErrorOverride) {
       Seq(GpuCheckOverflowAfterSum(updateSum.attr, updateIsEmpty.attr, dt, !failOnErrorOverride),
         updateIsEmpty.attr)
@@ -1157,7 +1210,7 @@ abstract class GpuDecimalSum(
     Seq(mergeSum, mergeIsEmpty, mergeIsOverflow)
   }
 
-  override lazy val postMerge: Seq[Expression] = {
+  override lazy val postMerge: Seq[Expression] = CurrentOrigin.withOrigin(capturedOrigin) {
     if (failOnErrorOverride) {
       Seq(
         GpuCheckOverflowAfterSum(mergeSum.attr, mergeIsEmpty.attr, dt, !failOnErrorOverride),
@@ -1169,7 +1222,7 @@ abstract class GpuDecimalSum(
     }
   }
 
-  override lazy val evaluateExpression: Expression = {
+  override lazy val evaluateExpression: Expression = CurrentOrigin.withOrigin(capturedOrigin) {
     GpuCheckOverflowAfterSum(sum, isEmpty, dt, !failOnErrorOverride)
   }
 
@@ -1245,7 +1298,7 @@ case class GpuDecimal128Sum(
 
   override lazy val inputProjection: Seq[Expression] = {
     val chunks = (0 until 4).map {
-      GpuExtractChunk32(GpuCast(child, dt), _, replaceNullsWithZero = true)
+      GpuExtractChunk32(GpuCast(child, dt)(), _, replaceNullsWithZero = true)
     }
     // Spark tracks null columns through a second column isEmpty for decimal. So null values
     // are replaced with 0, and a separate boolean column for isNull is added
@@ -1307,7 +1360,7 @@ case class GpuDecimal128Sum(
       spec)
     val highOrderDigitsSum = GpuWindowExpression(
       GpuSum(
-        GpuDecimalSumHighDigits(GpuCast(child, dt), child.dataType.asInstanceOf[DecimalType]),
+        GpuDecimalSumHighDigits(GpuCast(child, dt)(), child.dataType.asInstanceOf[DecimalType]),
         higherDigitsCheckType,
         failOnErrorOverride = failOnErrorOverride),
       spec)
@@ -1422,7 +1475,7 @@ case class GpuCount(children: Seq[Expression],
   override lazy val updateAggregates: Seq[CudfAggregate] = Seq(cudfCountUpdate)
 
   // Integer->Long before we are done with the update aggregate
-  override lazy val postUpdate: Seq[Expression] = Seq(GpuCast(cudfCountUpdate.attr, dataType))
+  override lazy val postUpdate: Seq[Expression] = Seq(GpuCast(cudfCountUpdate.attr, dataType)())
 
   override lazy val mergeAggregates: Seq[CudfAggregate] = Seq(new CudfSum(dataType))
 
@@ -1516,9 +1569,9 @@ abstract class GpuAverage(child: Expression, sumDataType: DataType,
     // decimal aggregations.  The null gets inserted back in with evaluateExpression where
     // a divide by 0 gets replaced with a null.
     val castedForSum = GpuCoalesce(Seq(
-      GpuCast(child, sumDataType),
+      GpuCast(child, sumDataType)(),
       GpuLiteral.default(sumDataType)))
-    val forCount = GpuCast(GpuIsNotNull(child), LongType)
+    val forCount = GpuCast(GpuIsNotNull(child), LongType)()
     Seq(castedForSum, forCount)
   }
 
@@ -1553,7 +1606,7 @@ abstract class GpuAverage(child: Expression, sumDataType: DataType,
   // divide-by-zero exceptions, even when ansi mode is enabled in Spark.
   // This is to conform with Spark's behavior in the Average aggregate function.
   override lazy val evaluateExpression: Expression =
-      GpuDivide(sum, GpuCast(count, DoubleType), failOnError = false)
+      GpuDivide(sum, GpuCast(count, DoubleType)(), failOnError = false)()
 
   // Window
   // Replace average with SUM/COUNT. This lets us run average in running window mode without
@@ -1561,8 +1614,8 @@ abstract class GpuAverage(child: Expression, sumDataType: DataType,
   override def windowReplacement(spec: GpuWindowSpecDefinition): Expression = {
     val count = GpuWindowExpression(GpuCount(Seq(child)), spec)
     val sum = GpuWindowExpression(
-      GpuSum(GpuCast(child, dataType), dataType, failOnErrorOverride = failOnError), spec)
-    GpuDivide(sum, GpuCast(count, dataType), failOnError = false)
+      GpuSum(GpuCast(child, dataType)(), dataType, failOnErrorOverride = failOnError), spec)
+    GpuDivide(sum, GpuCast(count, dataType)(), failOnError = false)()
   }
 
   // Copied from Average
@@ -1583,9 +1636,15 @@ case class GpuBasicAverage(child: Expression, dt: DataType, failOnError: Boolean
 abstract class GpuDecimalAverageBase(child: Expression, sumDataType: DecimalType,
                                      failOnError: Boolean)
   extends GpuAverage(child, sumDataType, failOnError) {
-  override lazy val postUpdate: Seq[Expression] =
-      Seq(GpuCheckOverflow(updateSum.attr, sumDataType, nullOnOverflow = !failOnError),
-        updateCount.attr)
+
+  // SPARK-39190: snapshot Origin at construction so GpuCheckOverflow nodes built in the lazy
+  // vals below inherit the SQL query context.  See GpuDecimalSum for the matching pattern.
+  val capturedOrigin: Origin = origin
+
+  override lazy val postUpdate: Seq[Expression] = CurrentOrigin.withOrigin(capturedOrigin) {
+    Seq(GpuCheckOverflow(updateSum.attr, sumDataType, nullOnOverflow = !failOnError),
+      updateCount.attr)
+  }
 
   // To be able to do decimal overflow detection, we need a CudfSum that does **not** ignore nulls.
   // Cudf does not have such an aggregation, so for merge we have to work around that with an extra
@@ -1597,11 +1656,13 @@ abstract class GpuDecimalAverageBase(child: Expression, sumDataType: DecimalType
 
   override lazy val mergeAggregates: Seq[CudfAggregate] = Seq(mergeSum, mergeCount, mergeIsOverflow)
 
-  override lazy val postMerge: Seq[Expression] = Seq(
-    GpuCheckOverflow(
-      GpuIf(mergeIsOverflow.attr, GpuLiteral.create(null, sumDataType), mergeSum.attr),
-          sumDataType, nullOnOverflow = !failOnError),
-    mergeCount.attr)
+  override lazy val postMerge: Seq[Expression] = CurrentOrigin.withOrigin(capturedOrigin) {
+    Seq(
+      GpuCheckOverflow(
+        GpuIf(mergeIsOverflow.attr, GpuLiteral.create(null, sumDataType), mergeSum.attr),
+            sumDataType, nullOnOverflow = !failOnError),
+      mergeCount.attr)
+  }
 
   // This is here to be bug for bug compatible with Spark. They round in the divide and then cast
   // the result to the final value. This loses some data in many cases and we need to be able to
@@ -1631,9 +1692,9 @@ case class GpuDecimal128Average(child: Expression, dt: DecimalType, failOnError:
 
   override lazy val inputProjection: Seq[Expression] = {
     val chunks = (0 until 4).map {
-      GpuExtractChunk32(GpuCast(child, dt), _, replaceNullsWithZero = true)
+      GpuExtractChunk32(GpuCast(child, dt)(), _, replaceNullsWithZero = true)
     }
-    val forCount = GpuCast(GpuIsNotNull(child), LongType)
+    val forCount = GpuCast(GpuIsNotNull(child), LongType)()
     chunks :+ forCount
   }
 
@@ -1641,7 +1702,7 @@ case class GpuDecimal128Average(child: Expression, dt: DecimalType, failOnError:
 
   override lazy val updateAggregates: Seq[CudfAggregate] = updateSumChunks :+ updateCount
 
-  override lazy val postUpdate: Seq[Expression] = {
+  override lazy val postUpdate: Seq[Expression] = CurrentOrigin.withOrigin(capturedOrigin) {
     val assembleExpr = GpuAssembleSumChunks(updateSumChunks.map(_.attr), dt,
       nullOnOverflow = !failOnError, None)
     Seq(GpuCheckOverflow(assembleExpr, dt, nullOnOverflow = !failOnError), updateCount.attr)
@@ -1663,7 +1724,7 @@ case class GpuDecimal128Average(child: Expression, dt: DecimalType, failOnError:
   override lazy val mergeAggregates: Seq[CudfAggregate] =
     mergeSumChunks ++ Seq(mergeCount, mergeIsOverflow)
 
-  override lazy val postMerge: Seq[Expression] = {
+  override lazy val postMerge: Seq[Expression] = CurrentOrigin.withOrigin(capturedOrigin) {
     val assembleExpr = GpuAssembleSumChunks(mergeSumChunks.map(_.attr), dt,
       nullOnOverflow = !failOnError, Some(mergeIsOverflow.attr))
     Seq(
@@ -1695,7 +1756,7 @@ case class GpuFirst(child: Expression, ignoreNulls: Boolean)
   private lazy val valueSet = AttributeReference("valueSet", BooleanType)()
 
   override lazy val inputProjection: Seq[Expression] =
-    Seq(child, GpuLiteral(ignoreNulls, BooleanType))
+    Seq(child, GpuLiteral(!ignoreNulls, BooleanType))
 
   private lazy val commonExpressions: Seq[CudfAggregate] = if (ignoreNulls) {
     Seq(CudfNthLikeAggregate.newFirstExcludeNulls(cudfFirst.dataType),
@@ -1862,24 +1923,34 @@ trait GpuCollectBase
   with GpuAggregateWindowFunction {
 
   def child: Expression
+  protected def arrayContainsNull: Boolean = false
+
+  /**
+   * Element type stored in the aggregation buffer. Defaults to the result element type.
+   * Spark 4.2+ CollectSet overrides this for float/double to store normalized bit keys.
+   */
+  protected def bufferElementType: DataType = child.dataType
+
+  protected final def bufferDataType: DataType =
+    ArrayType(bufferElementType, containsNull = arrayContainsNull)
 
   override def nullable: Boolean = false
 
-  override def dataType: DataType = ArrayType(child.dataType, containsNull = false)
+  override def dataType: DataType = ArrayType(child.dataType, containsNull = arrayContainsNull)
 
   override def children: Seq[Expression] = child :: Nil
 
   // WINDOW FUNCTION
-  override val windowInputProjection: Seq[Expression] = Seq(child)
+  override lazy val windowInputProjection: Seq[Expression] = Seq(child)
 
-  override val initialValues: Seq[Expression] = {
-    Seq(GpuLiteral.create(new GenericArrayData(Array.empty[Any]), dataType))
+  override lazy val initialValues: Seq[Expression] = {
+    Seq(GpuLiteral.create(new GenericArrayData(Array.empty[Any]), bufferDataType))
   }
 
-  override val inputProjection: Seq[Expression] = Seq(child)
+  override lazy val inputProjection: Seq[Expression] = Seq(child)
 
   protected final lazy val outputBuf: AttributeReference =
-    AttributeReference("inputBuf", dataType)()
+    AttributeReference("inputBuf", bufferDataType)()
 }
 
 /**
@@ -1891,10 +1962,17 @@ trait GpuCollectBase
 case class GpuCollectList(
     child: Expression,
     mutableAggBufferOffset: Int = 0,
-    inputAggBufferOffset: Int = 0)
+    inputAggBufferOffset: Int = 0,
+    ignoreNulls: Boolean = true)
     extends GpuCollectBase {
 
-  override lazy val updateAggregates: Seq[CudfAggregate] = Seq(new CudfCollectList(dataType))
+  private lazy val nullPolicy: NullPolicy =
+    if (ignoreNulls) NullPolicy.EXCLUDE else NullPolicy.INCLUDE
+
+  override protected def arrayContainsNull: Boolean = !ignoreNulls
+
+  override lazy val updateAggregates: Seq[CudfAggregate] =
+    Seq(new CudfCollectList(dataType, nullPolicy))
   override lazy val mergeAggregates: Seq[CudfAggregate] = Seq(new CudfMergeLists(dataType))
   override lazy val evaluateExpression: Expression = outputBuf
   override def aggBufferAttributes: Seq[AttributeReference] = outputBuf :: Nil
@@ -1903,7 +1981,7 @@ case class GpuCollectList(
 
   override def windowAggregation(
       inputs: Seq[(ColumnVector, Int)]): RollingAggregationOnColumn =
-    RollingAggregation.collectList().onColumn(inputs.head._2)
+    RollingAggregation.collectList(nullPolicy).onColumn(inputs.head._2)
 
   // minPeriods should be 0.
   // Consider the following rows: v = [ 0, 1, 2, 3, 4, 5 ]
@@ -1917,16 +1995,59 @@ case class GpuCollectList(
  *
  * The two 'offset' parameters are not used by GPU version, but are here for the compatibility
  * with the CPU version and automated checks.
+ *
+ * On Spark 4.2+, CollectSet stores float/double aggregation buffers as normalized bit patterns
+ * (INT/LONG) so HashSet can treat NaNs and signed zeros as equal. GPU CollectSet mirrors that
+ * by normalizing and bit-keying in [[inputProjection]], so mixed CPU/GPU aggregate stages share
+ * the same buffer layout without host-side per-row float↔bits converters.
  */
 case class GpuCollectSet(
     child: Expression,
     mutableAggBufferOffset: Int = 0,
-    inputAggBufferOffset: Int = 0)
+    inputAggBufferOffset: Int = 0,
+    ignoreNulls: Boolean = true)
     extends GpuCollectBase with GpuUnboundedToUnboundedWindowAgg {
 
-  override lazy val updateAggregates: Seq[CudfAggregate] = Seq(new CudfCollectSet(dataType))
-  override lazy val mergeAggregates: Seq[CudfAggregate] = Seq(new CudfMergeSets(dataType))
-  override lazy val evaluateExpression: Expression = outputBuf
+  private lazy val nullPolicy: NullPolicy =
+    if (ignoreNulls) NullPolicy.EXCLUDE else NullPolicy.INCLUDE
+
+  override protected def arrayContainsNull: Boolean = !ignoreNulls
+
+  // Spark 4.2+ float/double buffers use normalized bit keys (see TypeUtilsShims).
+  override protected def bufferElementType: DataType =
+    TypeUtilsShims.collectSetCpuBufferElementType(child.dataType)
+
+  private lazy val useNormalizedBitKeys: Boolean = bufferElementType != child.dataType
+
+  // Bit-key inputProjection is incompatible with GpuUnboundedToUnboundedAggWindowExec, which only
+  // accepts BoundReference/Literal projections and never applies evaluateExpression. Keep the
+  // Spark 4.2+ float/double path on regular GpuWindowExec (windowInputProjection + rolling).
+  override def supportsUnboundedToUnboundedWindowExec: Boolean = !useNormalizedBitKeys
+
+  override lazy val inputProjection: Seq[Expression] = {
+    if (useNormalizedBitKeys) {
+      Seq(GpuCollectSetNormalizedBitKey(child))
+    } else {
+      Seq(child)
+    }
+  }
+
+  // Window collect_set emits the result array directly from rolling aggregation, so normalize
+  // floats in-place rather than switching the window input to bit keys.
+  override lazy val windowInputProjection: Seq[Expression] = {
+    if (useNormalizedBitKeys) {
+      Seq(GpuNormalizeNaNAndZero(child))
+    } else {
+      Seq(child)
+    }
+  }
+
+  override lazy val updateAggregates: Seq[CudfAggregate] =
+    Seq(new CudfCollectSet(bufferDataType, nullPolicy))
+  override lazy val mergeAggregates: Seq[CudfAggregate] = Seq(new CudfMergeSets(bufferDataType))
+  override lazy val evaluateExpression: Expression =
+    if (useNormalizedBitKeys) GpuCollectSetBitKeysToValues(outputBuf) else outputBuf
+
   override def aggBufferAttributes: Seq[AttributeReference] = outputBuf :: Nil
 
   override def prettyName: String = "collect_set"
@@ -1934,14 +2055,14 @@ case class GpuCollectSet(
   // Spark handles NaN's equality by different way for non-nested float/double and float/double
   // in nested types. When we use non-nested versions of floats and doubles, NaN values are
   // considered unequal, but when we collect sets of nested versions, NaNs are considered equal
-  // on the CPU. So we set NaNEquality dynamically here.
+  // on the CPU. Spark 4.2 changed non-nested NaNs to be equal too, so use a shim helper here.
   override def windowAggregation(
       inputs: Seq[(ColumnVector, Int)]): RollingAggregationOnColumn = child.dataType match {
     case FloatType | DoubleType =>
-      RollingAggregation.collectSet(NullPolicy.EXCLUDE, NullEquality.EQUAL,
-        NaNEquality.UNEQUAL).onColumn(inputs.head._2)
+      RollingAggregation.collectSet(nullPolicy, NullEquality.EQUAL,
+        TypeUtilsShims.collectSetFloatNanEquality).onColumn(inputs.head._2)
     case _ =>
-      RollingAggregation.collectSet(NullPolicy.EXCLUDE, NullEquality.EQUAL,
+      RollingAggregation.collectSet(nullPolicy, NullEquality.EQUAL,
         NaNEquality.ALL_EQUAL).onColumn(inputs.head._2)
   }
 
@@ -1952,20 +2073,77 @@ case class GpuCollectSet(
   override def getMinPeriods: Int = 0
 }
 
+/**
+ * Normalize float/double and bit-cast to the Spark 4.2 CollectSet buffer key type
+ * (Float -> Int, Double -> Long). Uses cuDF normalizeNANsAndZeros (same as
+ * [[GpuNormalizeNaNAndZero]]) for NaN payload and signed-zero canonicalization.
+ */
+case class GpuCollectSetNormalizedBitKey(child: Expression) extends GpuUnaryExpression {
+  override def dataType: DataType = {
+    val keyType = TypeUtilsShims.collectSetCpuBufferElementType(child.dataType)
+    if (keyType == child.dataType) {
+      throw new IllegalStateException(
+        s"CollectSet bit-key conversion only applies when buffer keys differ, found $keyType")
+    }
+    keyType
+  }
+
+  override def doColumnar(input: GpuColumnVector): ColumnVector = {
+    withResource(input.getBase.normalizeNANsAndZeros()) { normalized =>
+      val bitsType = GpuColumnVector.getNonNestedRapidsType(dataType)
+      withResource(normalized.bitCastTo(bitsType)) { bits =>
+        bits.copyToColumnVector()
+      }
+    }
+  }
+}
+
+/**
+ * Convert a CollectSet aggregation buffer of normalized bit keys back to float/double values.
+ * Int keys -> Float, Long keys -> Double.
+ */
+case class GpuCollectSetBitKeysToValues(child: Expression) extends GpuUnaryExpression {
+  override def dataType: DataType = child.dataType match {
+    case ArrayType(IntegerType, containsNull) => ArrayType(FloatType, containsNull)
+    case ArrayType(LongType, containsNull) => ArrayType(DoubleType, containsNull)
+    case t =>
+      throw new IllegalStateException(
+        s"CollectSet bit-key buffer must be ArrayType(IntegerType|LongType), found $t")
+  }
+
+  override def doColumnar(input: GpuColumnVector): ColumnVector = {
+    val list = input.getBase
+    withResource(list.getChildColumnView(0)) { bitsView =>
+      val outDType = bitsView.getType match {
+        case DType.INT32 => DType.FLOAT32
+        case DType.INT64 => DType.FLOAT64
+        case t => throw new IllegalStateException(s"Unexpected CollectSet bit-key cudf type $t")
+      }
+      withResource(bitsView.bitCastTo(outDType)) { valuesView =>
+        withResource(list.replaceListChild(valuesView)) { replaced =>
+          replaced.copyToColumnVector()
+        }
+      }
+    }
+  }
+}
+
 class CpuToGpuCollectBufferConverter(
-    elementType: DataType) extends CpuToGpuAggregateBufferConverter {
+    elementType: DataType,
+    containsNull: Boolean = false) extends CpuToGpuAggregateBufferConverter {
   def createExpression(child: Expression): CpuToGpuBufferTransition = {
-    CpuToGpuCollectBufferTransition(child, elementType)
+    CpuToGpuCollectBufferTransition(child, elementType, containsNull)
   }
 }
 
 case class CpuToGpuCollectBufferTransition(
     override val child: Expression,
-    private val elementType: DataType) extends CpuToGpuBufferTransition {
+    private val elementType: DataType,
+    private val containsNull: Boolean) extends CpuToGpuBufferTransition {
 
   private lazy val row = new UnsafeRow(1)
 
-  override def dataType: DataType = ArrayType(elementType, containsNull = false)
+  override def dataType: DataType = ArrayType(elementType, containsNull)
 
   override protected def nullSafeEval(input: Any): ArrayData = {
     // Converts binary buffer into UnSafeArrayData, according to the deserialize method of Collect.
@@ -2048,7 +2226,7 @@ abstract class GpuM2(child: Expression, nullOnDivideByZero: Boolean)
   override lazy val postUpdate: Seq[Expression] = {
     val bufferAvgNoNulls = GpuCoalesce(Seq(cudfMean.attr, GpuLiteral(0.0, DoubleType)))
     val bufferM2NoNulls = GpuCoalesce(Seq(cudfM2.attr, GpuLiteral(0.0, DoubleType)))
-    GpuCast(cudfCountN.attr, DoubleType) :: bufferAvgNoNulls :: bufferM2NoNulls :: Nil
+    GpuCast(cudfCountN.attr, DoubleType)() :: bufferAvgNoNulls :: bufferM2NoNulls :: Nil
   }
 
   protected lazy val bufferN: AttributeReference =
@@ -2088,7 +2266,7 @@ case class GpuStddevPop(child: Expression, nullOnDivideByZero: Boolean)
 
   override lazy val evaluateExpression: Expression = {
     // stddev_pop = sqrt(m2 / n).
-    val stddevPop = GpuSqrt(GpuDivide(bufferM2, bufferN, failOnError = false))
+    val stddevPop = GpuSqrt(GpuDivide(bufferM2, bufferN, failOnError = false)())
 
     // Set nulls for the rows where n == 0.
     GpuIf(GpuEqualTo(bufferN, GpuLiteral(0.0)), GpuLiteral(null, DoubleType), stddevPop)
@@ -2122,8 +2300,8 @@ case class GpuStddevSamp(child: Expression, nullOnDivideByZero: Boolean)
   override lazy val evaluateExpression: Expression = {
     // stddev_samp = sqrt(m2 / (n - 1.0)).
     val stddevSamp =
-      GpuSqrt(GpuDivide(bufferM2, GpuSubtract(bufferN, GpuLiteral(1.0), failOnError = false),
-        failOnError = false))
+      GpuSqrt(GpuDivide(bufferM2, GpuSubtract(bufferN, GpuLiteral(1.0), failOnError = false)(),
+        failOnError = false)())
 
     // Set nulls for the rows where n == 0, and set nulls (or NaN) for the rows where n == 1.
     GpuIf(GpuEqualTo(bufferN, GpuLiteral(1.0)), divideByZeroEvalResult,
@@ -2134,7 +2312,7 @@ case class GpuStddevSamp(child: Expression, nullOnDivideByZero: Boolean)
 
   override def windowReplacement(spec: GpuWindowSpecDefinition): Expression = {
     // calculate n
-    val count = GpuCast(GpuWindowExpression(GpuCount(Seq(child)), spec), DoubleType)
+    val count = GpuCast(GpuWindowExpression(GpuCount(Seq(child)), spec), DoubleType)()
     val stddev = GpuWindowExpression(WindowStddevSamp(child, nullOnDivideByZero), spec)
     // if (n == 0.0)
     GpuIf(GpuEqualTo(count, GpuLiteral(0.0)),
@@ -2154,7 +2332,7 @@ case class GpuVariancePop(child: Expression, nullOnDivideByZero: Boolean)
 
   override lazy val evaluateExpression: Expression = {
     // var_pop = m2 / n.
-    val varPop = GpuDivide(bufferM2, bufferN, failOnError = false)
+    val varPop = GpuDivide(bufferM2, bufferN, failOnError = false)()
 
     // Set nulls for the rows where n == 0.
     GpuIf(GpuEqualTo(bufferN, GpuLiteral(0.0)), GpuLiteral(null, DoubleType), varPop)
@@ -2168,8 +2346,8 @@ case class GpuVarianceSamp(child: Expression, nullOnDivideByZero: Boolean)
 
   override lazy val evaluateExpression: Expression = {
     // var_samp = m2 / (n - 1.0).
-    val varSamp = GpuDivide(bufferM2, GpuSubtract(bufferN, GpuLiteral(1.0), failOnError = false),
-      failOnError = false)
+    val varSamp = GpuDivide(bufferM2, GpuSubtract(bufferN, GpuLiteral(1.0), failOnError = false)(),
+      failOnError = false)()
 
     // Set nulls for the rows where n == 0, and set nulls (or NaN) for the rows where n == 1.
     GpuIf(GpuEqualTo(bufferN, GpuLiteral(1.0)), divideByZeroEvalResult,

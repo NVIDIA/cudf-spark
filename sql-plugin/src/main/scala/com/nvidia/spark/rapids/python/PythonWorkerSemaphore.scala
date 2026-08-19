@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,8 @@
 package com.nvidia.spark.rapids.python
 
 import java.util.concurrent.{ConcurrentHashMap, Semaphore}
+
+import scala.annotation.nowarn
 
 import com.nvidia.spark.rapids.RapidsConf
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
@@ -117,9 +119,11 @@ private final class PythonWorkerSemaphore(tasksPerGpu: Int) extends Logging {
   def releaseIfNecessary(context: TaskContext): Unit = {
     val taskAttemptId = context.taskAttemptId()
     val refs = activeTasks.get(taskAttemptId)
-    if (refs != null && refs.getValue > 0) {
+    if (refs != null &&
+        (refs.getValue > 0: @nowarn("msg=getValue in class MutableInt is deprecated"))) {
       logDebug(s"Task $taskAttemptId releasing GPU for python worker")
-      semaphore.release(refs.getValue)
+      (semaphore.release(
+        refs.getValue): @nowarn("msg=getValue in class MutableInt is deprecated"))
       refs.setValue(0)
     }
   }
@@ -130,9 +134,10 @@ private final class PythonWorkerSemaphore(tasksPerGpu: Int) extends Logging {
     if (refs == null) {
       throw new IllegalStateException(s"Completion of unknown task $taskAttemptId")
     }
-    if (refs.getValue > 0) {
+    if ((refs.getValue > 0: @nowarn("msg=getValue in class MutableInt is deprecated"))) {
       logDebug(s"Task $taskAttemptId releasing all GPU resources for python worker")
-      semaphore.release(refs.getValue)
+      (semaphore.release(
+        refs.getValue): @nowarn("msg=getValue in class MutableInt is deprecated"))
     }
   }
 

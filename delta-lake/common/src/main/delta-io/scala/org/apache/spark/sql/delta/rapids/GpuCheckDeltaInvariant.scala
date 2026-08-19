@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION.
  *
  * This file was derived from CheckDeltaInvariant.scala in the
  * Delta Lake project at https://github.com/delta-io/delta.
@@ -54,9 +54,10 @@ case class GpuCheckDeltaInvariant(
   override def foldable: Boolean = false
   override def nullable: Boolean = true
 
-  def withBoundReferences(input: AttributeSeq): GpuCheckDeltaInvariant = {
+  def withBoundReferences(input: AttributeSeq, 
+    metrics: Map[String, GpuMetric]): GpuCheckDeltaInvariant = {
     GpuCheckDeltaInvariant(
-      GpuBindReferences.bindReference(child, input),
+      GpuBindReferences.bindReference(child, input, metrics),
       columnExtractors.map {
         case (column, extractor) => column -> BindReferences.bindReference(extractor, input)
       },
@@ -128,7 +129,12 @@ case class GpuCheckDeltaInvariant(
 object GpuCheckDeltaInvariant extends Logging {
   private val exprRule = GpuOverrides.expr[CheckDeltaInvariant](
     "checks a Delta Lake invariant expression",
-    ExprChecks.unaryProject(TypeSig.all, TypeSig.all, TypeSig.all, TypeSig.all),
+    ExprChecks.projectOnly(
+      TypeSig.all,
+      TypeSig.all,
+      paramCheck = Seq(ParamCheck("input", TypeSig.all, TypeSig.all)),
+      repeatingParamCheck = Some(RepeatingParamCheck("extra", TypeSig.all, TypeSig.all))
+    ),
     (c, conf, p, r) => new GpuCheckDeltaInvariantMeta(c, conf, p, r))
 
   def maybeConvertToGpu(
@@ -161,7 +167,7 @@ class GpuCheckDeltaInvariantMeta(
     conf: RapidsConf,
     parent: Option[RapidsMeta[_, _, _]],
     rule: DataFromReplacementRule)
-    extends UnaryExprMeta[CheckDeltaInvariant](check, conf, parent, rule) {
+    extends ExprMeta[CheckDeltaInvariant](check, conf, parent, rule) {
 
   override def tagExprForGpu(): Unit = {
     wrapped.constraint match {
@@ -170,10 +176,14 @@ class GpuCheckDeltaInvariantMeta(
     }
   }
 
-  override def convertToGpu(child: Expression): GpuExpression = {
+  override def convertToGpuImpl(): GpuExpression = {
+    val child = childExprs.head.convertToGpu()
+    // Delta 4.0 provides columnExtractors as Seq[(String, Expression)] while older
+    // versions provide Map[String, Expression]. Normalize to Map for GPU version.
+    val colExtractorsAsMap: Map[String, Expression] = wrapped.columnExtractors.toMap
     GpuCheckDeltaInvariant(
       child,
-      wrapped.columnExtractors,  // leave these on CPU
+      colExtractorsAsMap,
       wrapped.constraint)
   }
 }

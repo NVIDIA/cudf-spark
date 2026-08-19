@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Copyright (c) 2021-2025, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2021-2026, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,8 +20,8 @@
 
 set -ex
 
-CUDF_VER=${CUDF_VER:-25.10}
-CUDA_VER=${CUDA_VER:-11.8}
+CUDF_VER=${CUDF_VER:-26.10.0-SNAPSHOT}
+CUDA_VER=${CUDA_VER:-12.9}
 
 # Need to explicitly add conda into PATH environment, to activate conda environment.
 export PATH=/databricks/conda/bin:$PATH
@@ -34,7 +34,7 @@ if [[ "$(printf '%s\n' "3.10" "${PYTHON_VERSION}" | sort -V | head -n1)" == "3.1
     [[ -n "$(which lsb_release)" ]] && mv $(which lsb_release) $(which lsb_release)"-bak"
 else
     echo "Rapids 24.10+ drops python 3.9 or below versions of conda packages"
-    exit -1
+    exit 255
 fi
 
 REQUIRED_PACKAGES=(
@@ -61,9 +61,9 @@ if command -v conda >/dev/null 2>&1; then
   ${base}/envs/cudf-udf/bin/mamba remove -y c-ares zstd libprotobuf pandas || true
 
   REQUIRED_PACKAGES=(
-    cuda-version=$CUDA_VER
-    cudf=$CUDF_VER
-    ${REQUIRED_PACKAGES[@]}
+    "cuda-version=$CUDA_VER"
+    "cudf=$CUDF_VER"
+    "${REQUIRED_PACKAGES[@]}"
   )
 
   ${base}/envs/cudf-udf/bin/mamba install -y \
@@ -77,12 +77,12 @@ else
   PYTHON_SITE_PACKAGES="/databricks/python-bootstrap/envs/cudf-udf/$PYTHON_VERSION/lib/site-packages"
   pip install --target=${PYTHON_SITE_PACKAGES} \
       --extra-index-url=https://pypi.anaconda.org/rapidsai-wheels-nightly/simple \
-      "cudf-cu11>=${CUDF_VER}.0a0,<=${CUDF_VER}"
+      "cudf-cu12>=${CUDF_VER}.0a0,<=${CUDF_VER}"
 
   REQUIRED_PACKAGES=(
-    ${REQUIRED_PACKAGES[@]}
+    "${REQUIRED_PACKAGES[@]}"
     scipy
     numexpr
   )
-  pip install --target=${PYTHON_SITE_PACKAGES} ${REQUIRED_PACKAGES[@]}
+  pip install --target=${PYTHON_SITE_PACKAGES} "${REQUIRED_PACKAGES[@]}"
 fi

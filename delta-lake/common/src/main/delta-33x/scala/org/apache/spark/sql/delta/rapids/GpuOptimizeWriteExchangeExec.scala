@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * This file was derived from OptimizeWriteExchange.scala
  * in the Delta Lake project at https://github.com/delta-io/delta
@@ -26,6 +26,7 @@ import scala.concurrent.Future
 import scala.concurrent.duration.Duration
 
 import com.nvidia.spark.rapids.{GpuColumnarBatchSerializer, GpuExec, GpuMetric, GpuPartitioning, GpuRoundRobinPartitioning, RapidsConf}
+import com.nvidia.spark.rapids.GpuMetric._
 import com.nvidia.spark.rapids.delta.RapidsDeltaSQLConf
 import com.nvidia.spark.rapids.shims.GpuHashPartitioning
 
@@ -58,7 +59,6 @@ case class GpuOptimizeWriteExchangeExec(
     partitioning: GpuPartitioning,
     override val child: SparkPlan,
     @transient deltaLog: DeltaLog) extends Exchange with GpuExec with DeltaLogging {
-  import GpuMetric._
 
   // Use 150% of target file size hint config considering parquet compression.
   // Still the result file can be smaller/larger than the config due to data skew or
@@ -84,6 +84,10 @@ case class GpuOptimizeWriteExchangeExec(
 
   override lazy val allMetrics: Map[String, GpuMetric] = {
     Map(
+      OP_TIME_NEW_SHUFFLE_WRITE ->
+        createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_OP_TIME_NEW_SHUFFLE_WRITE),
+      OP_TIME_NEW_SHUFFLE_READ ->
+        createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_OP_TIME_NEW_SHUFFLE_READ),
       PARTITION_SIZE -> createMetric(ESSENTIAL_LEVEL, DESCRIPTION_PARTITION_SIZE),
       NUM_PARTITIONS -> createMetric(ESSENTIAL_LEVEL, DESCRIPTION_NUM_PARTITIONS),
       NUM_OUTPUT_ROWS -> createMetric(ESSENTIAL_LEVEL, DESCRIPTION_NUM_OUTPUT_ROWS),
@@ -91,36 +95,42 @@ case class GpuOptimizeWriteExchangeExec(
     ) ++ additionalMetrics
   }
 
+  override def getOpTimeNewMetric: Option[GpuMetric] = allMetrics.get(OP_TIME_NEW_SHUFFLE_READ)
+
   private lazy val serializer: Serializer =
     new GpuColumnarBatchSerializer(allMetrics,
       child.output.map(_.dataType).toArray,
-      RapidsConf.ShuffleKudoMode.withName(RapidsConf.SHUFFLE_KUDO_MODE.get(child.conf)),
+      RapidsConf.ShuffleKudoMode.withName(RapidsConf.SHUFFLE_KUDO_WRITE_MODE.get(child.conf)),
       RapidsConf.SHUFFLE_KUDO_SERIALIZER_ENABLED.get(child.conf),
       RapidsConf.SHUFFLE_KUDO_SERIALIZER_MEASURE_BUFFER_COPY_ENABLED.get(child.conf))
 
   @transient lazy val inputRDD: RDD[ColumnarBatch] = child.executeColumnar()
 
+  @transient private lazy val childNumPartitions = inputRDD.getNumPartitions
+
   @transient lazy val mapOutputStatisticsFuture: Future[MapOutputStatistics] = {
-    if (inputRDD.getNumPartitions == 0) {
+    if (childNumPartitions == 0) {
       Future.successful(null)
     } else {
       sparkContext.submitMapStage(shuffleDependency)
     }
   }
 
-  private lazy val childNumPartitions = inputRDD.getNumPartitions
-
-  private lazy val actualNumPartitions: Int = {
-    val targetShuffleBlocks = conf.getConf(DeltaSQLConf.DELTA_OPTIMIZE_WRITE_SHUFFLE_BLOCKS)
-    math.min(
-      math.max(targetShuffleBlocks / childNumPartitions, 1),
-      conf.getConf(DeltaSQLConf.DELTA_OPTIMIZE_WRITE_MAX_SHUFFLE_PARTITIONS))
+  @transient private lazy val actualNumPartitions: Int = {
+    if (childNumPartitions == 0) {
+      0
+    } else {
+      val targetShuffleBlocks = conf.getConf(DeltaSQLConf.DELTA_OPTIMIZE_WRITE_SHUFFLE_BLOCKS)
+      math.min(
+        math.max(targetShuffleBlocks / childNumPartitions, 1),
+        conf.getConf(DeltaSQLConf.DELTA_OPTIMIZE_WRITE_MAX_SHUFFLE_PARTITIONS))
+    }
   }
 
   // The actual partitioning to use for the shuffle exchange. The input partition count can be
   // adjusted based on the number of partitions in the input RDD and the target number of shuffle
   // blocks.
-  private lazy val actualPartitioning: GpuPartitioning = partitioning match {
+  @transient private lazy val actualPartitioning: GpuPartitioning = partitioning match {
     // Currently only hash and round-robin partitioning are supported.
     // See DeltaShufflePartitionsUtil.partitioningForRebalance() for more details.
     case p: GpuHashPartitioning => p.copy(numPartitions = actualNumPartitions)
@@ -128,6 +138,10 @@ case class GpuOptimizeWriteExchangeExec(
   }
 
   @transient lazy val shuffleDependency: ShuffleDependency[Int, ColumnarBatch, ColumnarBatch] = {
+    // Get OP_TIME_NEW metrics from all descendants for exclusion (with deduplication)
+    val descendantOpTimeMetrics = getDescendantOpTimeMetrics
+    val opTimeNewShuffleWriteMetric = allMetrics.get(OP_TIME_NEW_SHUFFLE_WRITE)
+    
     val dep = GpuShuffleExchangeExecBase.prepareBatchShuffleDependency(
       inputRDD,
       child.output,
@@ -138,7 +152,9 @@ case class GpuOptimizeWriteExchangeExec(
       useMultiThreadedShuffle=actualPartitioning.usesMultiThreadedShuffle,
       metrics=allMetrics,
       writeMetrics=writeMetrics,
-      additionalMetrics=additionalMetrics)
+      additionalMetrics=additionalMetrics,
+      opTimeNewShuffleWrite=opTimeNewShuffleWriteMetric,
+      descendantOpTimeMetrics=descendantOpTimeMetrics)
     metrics("numPartitions").set(dep.partitioner.numPartitions)
     val executionId = sparkContext.getLocalProperty(SQLExecution.EXECUTION_ID_KEY)
     SQLMetrics.postDriverMetricUpdates(

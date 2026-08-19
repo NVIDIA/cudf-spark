@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,6 @@
 
 package com.nvidia.spark.rapids.window
 
-import ai.rapids.cudf.NvtxColor
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
@@ -62,7 +61,11 @@ trait GpuWindowBaseExec extends ShimUnaryExecNode with GpuExec {
   import GpuMetric._
 
   override lazy val additionalMetrics: Map[String, GpuMetric] = Map(
-    OP_TIME -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_OP_TIME))
+    OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY),
+    CPU_BRIDGE_PROCESSING_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
+      DESCRIPTION_CPU_BRIDGE_PROCESSING_TIME),
+    CPU_BRIDGE_WAIT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
+      DESCRIPTION_CPU_BRIDGE_WAIT_TIME))
 
   override def output: Seq[Attribute] = windowOps.map(_.toAttribute)
 
@@ -125,7 +128,7 @@ class GpuWindowIterator(
     }
     withRetryNoSplit(cbSpillable) { _ =>
       withResource(cbSpillable.getColumnarBatch()) { cb =>
-        withResource(new NvtxWithMetrics("window", NvtxColor.CYAN, opTime)) { _ =>
+        NvtxIdWithMetrics(NvtxRegistry.WINDOW_EXEC, opTime) {
           val ret = withResource(computeBasicWindow(cb)) { cols =>
             convertToBatch(outputTypes, cols)
           }
@@ -164,11 +167,14 @@ case class GpuWindowExec(
   override protected def internalDoExecuteColumnar(): RDD[ColumnarBatch] = {
     val numOutputBatches = gpuLongMetric(GpuMetric.NUM_OUTPUT_BATCHES)
     val numOutputRows = gpuLongMetric(GpuMetric.NUM_OUTPUT_ROWS)
-    val opTime = gpuLongMetric(GpuMetric.OP_TIME)
+    val opTime = gpuLongMetric(GpuMetric.OP_TIME_LEGACY)
 
-    val boundWindowOps = GpuBindReferences.bindGpuReferences(windowOps, child.output)
-    val boundPartitionSpec = GpuBindReferences.bindGpuReferences(gpuPartitionSpec, child.output)
-    val boundOrderSpec = GpuBindReferences.bindReferences(gpuOrderSpec, child.output)
+    val boundWindowOps = GpuBindReferences.bindGpuReferences(windowOps, child.output,
+      allMetrics)
+    val boundPartitionSpec = GpuBindReferences.bindGpuReferences(gpuPartitionSpec,
+      child.output, allMetrics)
+    val boundOrderSpec = GpuBindReferences.bindReferences(gpuOrderSpec, child.output,
+      allMetrics)
 
     child.executeColumnar().mapPartitions { iter =>
       new GpuWindowIterator(iter, boundWindowOps, boundPartitionSpec, boundOrderSpec,

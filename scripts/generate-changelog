@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-# Copyright (c) 2020-2025, NVIDIA CORPORATION.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,8 +22,8 @@ and issues that include the labels `bug`, `feature request`, `SQL`, `performance
 minus any issues with the labels `wontfix`, `invalid` or `duplicate`.
 
 For each project there should be an issue subsection for,
-Features: all issues with label `feature request` + `SQL`
-Performance: all issues with label `performance` + `shuffle`
+Features: all issues with label `feature request` + `SQL` + `shuffle`
+Performance: all issues with label `performance`
 Bugs fixed: all issues with label `bug`
 
 To deduplicate section, the priority should be `Bugs fixed > Performance > Features`
@@ -55,8 +55,10 @@ Usage:
 """
 import os
 import sys
+import subprocess
 from argparse import ArgumentParser
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from dateutil.relativedelta import relativedelta
 
@@ -75,8 +77,10 @@ PRS = 'PRs'
 # Labels
 LABEL_WONTFIX, LABEL_INVALID, LABEL_DUPLICATE = 'wontfix', 'invalid', 'duplicate'
 LABEL_BUG = 'bug'
-LABEL_PERFORMANCE, LABEL_SHUFFLE = 'performance', 'shuffle'
-LABEL_FEATURE, LABEL_SQL = 'feature request', 'SQL'
+LABEL_PERFORMANCE = 'performance'
+LABEL_FEATURE, LABEL_SQL, LABEL_SHUFFLE = 'feature request', 'SQL', 'shuffle'
+# The release version from which the release branch changes (e.g., branch-YY.MM --> release/YY.MM)
+FROM_RELEASE = '25.12'
 # Queries
 query_pr = """
 query ($baseRefName: String!, $after: String) {
@@ -148,7 +152,116 @@ query ($after: String, $since: DateTime) {
   }
 }
 """
+query_pr_by_commit = """
+query ($sha: String!) {
+  repository(name: "spark-rapids", owner: "NVIDIA") {
+    commit: object(expression: $sha) {
+      ... on Commit {
+        abbreviatedOid
+        associatedPullRequests(first: 10) {
+          edges {
+            node {
+              title
+              number
+              state
+              url
+              baseRefName
+              labels(first: 10) {
+                nodes {
+                  name
+                }
+              }
+              mergedAt
+              projectItems(first: 10) {
+                nodes {
+                  roadmap: fieldValueByName(name: "Roadmap") {
+                    ... on ProjectV2ItemFieldSingleSelectValue {
+                      name
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
 
+# Get the previous release version string(YY.MM format, 2 months before the current version)
+#   from the current version, e.g. YY.MM2[current] --> YY.MM1[previous]
+# param current_ver: the current version, e.g. YY.MM2
+# return: the previous version, e.g. YY.MM1,
+def get_prev_release_version(current_ver: str):
+    year, month = map(int, current_ver.split("."))
+    if month > 2:
+        new_year = year
+        new_month = month - 2
+    else:
+        new_year = year - 1
+        new_month = month + 10
+    prev_ver = f"{new_year:02d}.{new_month:02d}"
+    return prev_ver
+
+# Get the commit hashes between two branches or release tags.
+# param releases: set of release versions, e.g. {'YY.MM2', 'YY.MM1'}
+# return: dict of commit hashes, e.g. {YY.MM2: [sha1, sha2, ...], YY.MM1: [shaX, shaY, ...]}
+def get_commits(releases: set):
+    rel_list = list(releases)
+    ver_commits = {}
+    count = len(rel_list)  # descending version order assured
+    for i, to_rel in enumerate(rel_list):
+        to_branch = f"origin/release/{to_rel}"
+        # commits of releases[YY.MM2, YY.MM1] --> git log "YY.MM2..YY.MM1" for YY.MM2, "YY.MM1..YY.MM0" for YY.MM1
+        if i + 1 < count:
+            from_rel = rel_list[i + 1]
+        else:
+            from_rel = get_prev_release_version(to_rel)
+        based_rel = float(from_rel)
+        if based_rel < float(FROM_RELEASE):
+            from_branch = f"origin/branch-{from_rel}"
+        else:
+            from_branch = f"origin/release/{from_rel}"
+
+        # Get all commit hashes. Automated PRs are filtered using the actual PR title later.
+        git_log_args = [
+            "git", "--no-pager", "log",
+            f"{from_branch}..{to_branch}", "--pretty=format:%h"
+        ]
+
+        # Use check=True to raise exception if git fails, making errors explicit
+        result = subprocess.run(git_log_args, capture_output=True, text=True, check=True)
+
+        commits = result.stdout.splitlines()
+        ver_commits[to_rel] = commits
+    return ver_commits
+
+# Get the PR list from commit hashes
+# param ver_commits, e.g. {v1: [sha1, sha2, ...], v2: [shaX, shaY, ...]}
+# param token: the token for the API
+# return: list of PRs associated with the commit hashes, e.g. [{PR1 info}, {PR2 info}, ...]
+def get_pr_via_commits(ver_commits: set, token: str):
+    pr_list = []
+    for version, commits in ver_commits.items():
+        # Fetch the PRs for each commit in parallel, yields results in the input order
+        with ThreadPoolExecutor(max_workers=10) as ex:
+            pr_iterators = ex.map(lambda sha: post(query=query_pr_by_commit, token=token, variable={'sha': sha}), commits)
+        for res in pr_iterators:
+            commit = ''
+            try:
+                data = res.json()
+                commit = data['data']['repository']['commit']['abbreviatedOid']
+                pr_item = data['data']['repository']['commit']['associatedPullRequests']['edges'][0]['node']
+                pr_item['ver'] = version
+                # Handle the case of multiple commits being associated with the same PR
+                if pr_item not in pr_list and pr_item['mergedAt'] is not None:
+                    pr_list.append(pr_item)
+            except Exception as e:
+                print(f"Exception: {e}, commit sha '{commit}' does not have the associated Pull Request")
+                continue
+    return pr_list
 
 def process_changelog(resource_type: str, changelog: dict, releases: set, projects: set, token: str):
     if resource_type == PULL_REQUESTS:
@@ -173,6 +286,11 @@ def process_changelog(resource_type: str, changelog: dict, releases: set, projec
                 continue
         else:
             ver = item["projectItems"]["nodes"][0]['roadmap']['name']
+            project = f"{RELEASE} {ver}"
+
+        # Overwrite project version after the {FROM_RELEASE} if provided
+        if item.get('ver') is not None:
+            ver = item['ver']
             project = f"{RELEASE} {ver}"
 
         if not release_project(project, projects):
@@ -207,11 +325,30 @@ def process_changelog(resource_type: str, changelog: dict, releases: set, projec
         })
 
 
+# Get the PRs based on the release versions
 def process_pr(releases: set, token: str):
     pr = []
-    for rel in releases:
+    current_ver = list(releases)[0]
+    current_ver_float = float(current_ver)
+    based_rel = float(FROM_RELEASE)
+
+    # Note: only the last 2 releases are supported/included in the changelog
+    # Both releases are after {FROM_RELEASE}
+    if current_ver_float > based_rel:
+        ver_commits = get_commits(releases)
+        pr = get_pr_via_commits(ver_commits, token)
+    # One release is the {FROM_RELEASE}, the other is before the {FROM_RELEASE}
+    elif current_ver_float == based_rel:
+        ver_commits = get_commits({FROM_RELEASE})
+        pr = get_pr_via_commits(ver_commits, token)
+        prev_ver = get_prev_release_version(current_ver=FROM_RELEASE)
         pr.extend(fetch(resource_type=PULL_REQUESTS, token=token,
-                        variables={'baseRefName': f"branch-{rel}"}))
+                        variables={'baseRefName': f"branch-{prev_ver}"}))
+    # Both releases are before the {FROM_RELEASE}
+    else:
+        for rel in releases:
+            pr.extend(fetch(resource_type=PULL_REQUESTS, token=token,
+                            variables={'baseRefName': f"branch-{rel}"}))
     return pr
 
 
@@ -259,9 +396,9 @@ def rules(labels: set):
         return INVALID
     if LABEL_BUG in labels:
         return BUGS_FIXED
-    if LABEL_PERFORMANCE in labels or LABEL_SHUFFLE in labels:
+    if LABEL_PERFORMANCE in labels:
         return PERFORMANCE
-    if LABEL_FEATURE in labels or LABEL_SQL in labels:
+    if LABEL_FEATURE in labels or LABEL_SQL in labels or LABEL_SHUFFLE in labels:
         return FEATURES
     return INVALID
 
@@ -301,6 +438,8 @@ def main(rels: str, path: str, token: str):
     try:
         changelog = {}  # changelog dict
         releases = {x.strip() for x in rels.split(',')}
+        # Sort releases in descending order for the follow-up operations
+        releases = sorted(releases, reverse=True)
         projects = {f"{RELEASE} {rel}" for rel in releases}
 
         print('Processing pull requests ...')

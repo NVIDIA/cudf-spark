@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -186,6 +186,44 @@ object RmmRapidsRetryIterator extends Logging {
     val attemptIter = new NoInputSpliterator(fn)
     drainSingleWithVerification(
       new RmmRapidsRetryAutoCloseableIterator(attemptIter))
+  }
+
+  /**
+   * Execute `fn` inside a retry block where host/GPU allocations throw retryable
+   * OOM exceptions instead of fatal errors. Unlike `withRetryNoSplit`, this does
+   * NOT automatically retry — the caller manages its own retry logic within `fn`.
+   *
+   * Use this for incremental operations (e.g. row-by-row accumulation) where
+   * partial progress is valuable and the standard atomic-retry model doesn't fit.
+   *
+   * @param fn the work to perform inside the retry block
+   * @tparam T result type
+   * @return the result of `fn`
+   */
+  def withRetryBlock[T](fn: => T): T = {
+    RmmSpark.currentThreadStartRetryBlock()
+    try {
+      fn
+    } finally {
+      RmmSpark.currentThreadEndRetryBlock()
+    }
+  }
+
+  /**
+   * Block the current thread until memory is freed, following the standard
+   * protocol of exiting and re-entering the retry block around the blocking call.
+   *
+   * Must be called from within an active retry block (i.e. inside `withRetryBlock`).
+   * After this call returns, the retry block is re-entered and the caller can retry
+   * the failed operation.
+   */
+  def blockUntilMemoryFreed(): Unit = {
+    RmmSpark.currentThreadEndRetryBlock()
+    try {
+      RmmSpark.blockThreadUntilReady()
+    } finally {
+      RmmSpark.currentThreadStartRetryBlock()
+    }
   }
 
   /**
@@ -456,6 +494,11 @@ object RmmRapidsRetryIterator extends Logging {
     private def closeInternal(): Unit = {
       attemptStack.safeClose()
       attemptStack.clear()
+      // Only the single-item wrapper owns input that has not been pulled.
+      input match {
+        case single: SingleItemAutoCloseableIteratorInternal[_] => single.close()
+        case _ =>
+      }
     }
 
     // Don't install the callback if in a unit test
@@ -487,8 +530,6 @@ object RmmRapidsRetryIterator extends Logging {
         }
       }
       val curAttempt = attemptStack.pop()
-      // Get the info before running the split, since the attempt may be closed after splitting.
-      val attemptAsString = closeOnExcept(curAttempt)(_.toString)
       val splitted = try {
         // splitPolicy must take ownership of the argument
         splitPolicy(curAttempt)
@@ -497,25 +538,33 @@ object RmmRapidsRetryIterator extends Logging {
           // same type to provide more context for the OOM.
           // This looks a little odd, because we can not change the type of root exception.
           // Otherwise, some unit tests will fail due to the wrong exception type returned.
+          //
+          // Stringify the attempt lazily (only on failure) to avoid O(n) cost on the
+          // hot path when splits succeed. The attempt has not been closed yet at this
+          // point because splitPolicy threw before taking ownership.
         case go: GpuRetryOOM =>
+          val attemptAsString = curAttempt.toString
           throw new GpuRetryOOM(
             s"GPU OutOfMemory: " +
               s"Current threadCountBlockedUntilReady: ${threadCountBlockedUntilReady}. " +
               s"Could not split the current attempt: {$attemptAsString}"
           ).initCause(go)
         case go: GpuSplitAndRetryOOM =>
+          val attemptAsString = curAttempt.toString
           throw new GpuSplitAndRetryOOM(
             s"GPU OutOfMemory: " +
               s"Current threadCountBlockedUntilReady: ${threadCountBlockedUntilReady}. " +
               s"Could not split the current attempt: {$attemptAsString}"
           ).initCause(go)
         case co: CpuRetryOOM =>
+          val attemptAsString = curAttempt.toString
           throw new CpuRetryOOM(
             s"CPU OutOfMemory: " +
               s"Current threadCountBlockedUntilReady: ${threadCountBlockedUntilReady}. " +
               s"Could not split the current attempt: {$attemptAsString}"
           ).initCause(co)
         case co: CpuSplitAndRetryOOM =>
+          val attemptAsString = curAttempt.toString
           throw new CpuSplitAndRetryOOM(
             s"CPU OutOfMemory: " +
               s"Current threadCountBlockedUntilReady: ${threadCountBlockedUntilReady}. " +
@@ -567,13 +616,21 @@ object RmmRapidsRetryIterator extends Logging {
       attemptIter: Spliterator[K])
       extends RmmRapidsRetryIterator[T, K](attemptIter) {
 
-    override def hasNext: Boolean = super.hasNext
+    override def hasNext: Boolean = {
+      try {
+        RetryStateTracker.enterRetryBlock()
+        super.hasNext
+      } finally {
+        RetryStateTracker.exitRetryBlock()
+      }
+    }
 
     override def next(): K = {
       if (!hasNext) {
         throw new NoSuchElementException("Closed called on an empty iterator.")
       }
       try {
+        RetryStateTracker.enterRetryBlock()
         super.next()
       } catch {
         case t: Throwable =>
@@ -581,6 +638,8 @@ object RmmRapidsRetryIterator extends Logging {
           // we close our attempts (which includes the item we last attempted)
           attemptIter.close()
           throw t
+      } finally {
+        RetryStateTracker.exitRetryBlock()
       }
     }
   }
@@ -619,7 +678,7 @@ object RmmRapidsRetryIterator extends Logging {
       }
     }
 
-    override def next(): K = {
+    override def next(): K = try {
       // this is set on the first exception, and we add suppressed if there are others
       // during the retry attempts
       var lastException: Throwable = null
@@ -701,7 +760,8 @@ object RmmRapidsRetryIterator extends Logging {
                 splitReason = SplitReason.CPU_OOM
               }
               logInfo("splitReason is set " +
-                s"to ${splitReason} after checking isRetryOrSplitAndRetry, related exception:", ex)
+                s"to ${splitReason} after checking isRetryOrSplitAndRetry, related exception:",
+                ex)
             }
 
             // handle any retries that are wrapped in a different top-level exception
@@ -747,12 +807,13 @@ object RmmRapidsRetryIterator extends Logging {
           // else another exception wrapped a retry. So we are going to try again
         }
       }
-      RetryStateTracker.clearCurThreadRetrying()
       if (result.isEmpty) {
         // then lastException must be set, throw it.
         throw lastException
       }
       result.get
+    } finally {
+      RetryStateTracker.clearCurThreadRetrying()
     }
   }
 
@@ -804,7 +865,14 @@ object RmmRapidsRetryIterator extends Logging {
   private def splitTargetSizeInHalfInternal(
       target: AutoCloseableTargetSize, isGpu: Boolean): Seq[AutoCloseableTargetSize] = {
     withResource(target) { _ =>
-      val newTarget = target.targetSize / 2
+      // If dataSize is known and smaller than targetSize/2, halving targetSize would still
+      // exceed the data, making the retry a no-op. Use dataSize/2 instead to force
+      // processing roughly half the data per attempt.
+      val newTarget = if (target.dataSize > 0 && target.dataSize <= target.targetSize / 2) {
+        target.dataSize / 2
+      } else {
+        target.targetSize / 2
+      }
       if (newTarget < target.minSize) {
         if (isGpu) {
           throw new GpuSplitAndRetryOOM(
@@ -816,7 +884,7 @@ object RmmRapidsRetryIterator extends Logging {
                 s" minimum: ${target.minSize}")
         }
       }
-      Seq(AutoCloseableTargetSize(newTarget, target.minSize))
+      Seq(AutoCloseableTargetSize(newTarget, target.minSize, target.dataSize))
     }
   }
 
@@ -913,7 +981,9 @@ object RmmRapidsRetryIterator extends Logging {
  * `CpuSplitAndRetryOOM`, a split policy like `splitTargetSizeInHalfGpu` or
  * `splitTargetSizeInHalfCpu` can be used to retry the block with a smaller target size.
  */
-case class AutoCloseableTargetSize(targetSize: Long, minSize: Long) extends AutoCloseable {
+case class AutoCloseableTargetSize(targetSize: Long, minSize: Long,
+    dataSize: Long = 0) extends AutoCloseable {
+  def this(targetSize: Long, minSize: Long) = this(targetSize, minSize, 0)
   override def close(): Unit = ()
 }
 
@@ -924,15 +994,60 @@ case class AutoCloseableTargetSize(targetSize: Long, minSize: Long) extends Auto
  */
 object RetryStateTracker {
   private val localIsRetrying = new ThreadLocal[java.lang.Boolean]()
+  // Track if the current thread is executing inside a retry framework block (withRetry*).
+  // Use a depth counter to correctly handle nested retry blocks.
+  private val localRetryBlockDepth = new ThreadLocal[java.lang.Integer]()
+  // Gate retry-block tracking behind the retry coverage debug flag to avoid overhead when unused.
+  private val trackRetryBlock: Boolean = AllocationRetryCoverageTracker.ENABLED
 
   def isCurThreadRetrying: Boolean = {
     val ret = localIsRetrying.get()
     ret != null && ret
   }
 
+  /**
+   * True if the current thread is executing inside a retry framework block (e.g. withRetry).
+   */
+  def isInRetryBlock: Boolean = {
+    if (!trackRetryBlock) {
+      false
+    } else {
+      val depth = localRetryBlockDepth.get()
+      depth != null && depth.intValue() > 0
+    }
+  }
+
   def setCurThreadRetrying(retrying: Boolean): Unit = localIsRetrying.set(retrying)
 
   def clearCurThreadRetrying(): Unit = localIsRetrying.remove()
+
+  /**
+   * Mark entering a retry framework block on the current thread.
+   */
+  def enterRetryBlock(): Unit = {
+    if (trackRetryBlock) {
+      val depth = localRetryBlockDepth.get()
+      if (depth == null) {
+        localRetryBlockDepth.set(1)
+      } else {
+        localRetryBlockDepth.set(depth.intValue() + 1)
+      }
+    }
+  }
+
+  /**
+   * Mark leaving a retry framework block on the current thread.
+   */
+  def exitRetryBlock(): Unit = {
+    if (trackRetryBlock) {
+      val depth = localRetryBlockDepth.get()
+      if (depth == null || depth.intValue() <= 1) {
+        localRetryBlockDepth.remove()
+      } else {
+        localRetryBlockDepth.set(depth.intValue() - 1)
+      }
+    }
+  }
 }
 
 object SplitReason extends Enumeration {

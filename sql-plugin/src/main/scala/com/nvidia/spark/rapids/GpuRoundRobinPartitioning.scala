@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,9 +18,7 @@ package com.nvidia.spark.rapids
 
 import java.util.Random
 
-import ai.rapids.cudf.{NvtxColor, NvtxRange}
 import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.shims.ShimExpression
 
 import org.apache.spark.TaskContext
@@ -57,20 +55,17 @@ case class GpuRoundRobinPartitioning(numPartitions: Int)
         }
       }
     } else {
-      withRetryNoSplit(
-        SpillableColumnarBatch(batch, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)) { sb =>
-        withResource(sb.getColumnarBatch()) { b =>
-          withResource(GpuColumnVector.from(b)) { table =>
-            withResource(table.
-              roundRobinPartition(numPartitions, getStartPartition)) { partedTable =>
-              val parts = partedTable.getPartitions
-              val columns = (0 until partedTable.getNumberOfColumns.toInt).zip(sparkTypes).map {
-                case (idx, sparkType) =>
-                  GpuColumnVector
-                    .from(partedTable.getColumn(idx).incRefCount(), sparkType)
-              }.toArray
-              (parts, columns)
-            }
+      withResource(batch) { b =>
+        withResource(GpuColumnVector.from(b)) { table =>
+          withResource(table.
+            roundRobinPartition(numPartitions, getStartPartition)) { partedTable =>
+            val parts = partedTable.getPartitions
+            val columns = (0 until partedTable.getNumberOfColumns.toInt).zip(sparkTypes).map {
+              case (idx, sparkType) =>
+                GpuColumnVector
+                  .from(partedTable.getColumn(idx).incRefCount(), sparkType)
+            }.toArray
+            (parts, columns)
           }
         }
       }
@@ -81,20 +76,20 @@ case class GpuRoundRobinPartitioning(numPartitions: Int)
     if (batch.numCols() <= 0) {
       return Array(batch).zipWithIndex
     }
-    val totalRange = new NvtxRange("Round Robin partition", NvtxColor.PURPLE)
+    NvtxRegistry.ROUND_ROBIN_PARTITION.push()
     try {
       val numRows = batch.numRows
       val (partitionIndexes, partitionColumns) = {
-        val partitionRange = new NvtxRange("partition", NvtxColor.BLUE)
+        NvtxRegistry.ROUND_ROBIN_PARTITION_SLICE.push()
         try {
           partitionInternalWithClose(batch)
         } finally {
-          partitionRange.close()
+          NvtxRegistry.ROUND_ROBIN_PARTITION_SLICE.pop()
         }
       }
       sliceInternalGpuOrCpuAndClose(numRows, partitionIndexes, partitionColumns)
     } finally {
-      totalRange.close()
+      NvtxRegistry.ROUND_ROBIN_PARTITION.pop()
     }
   }
 

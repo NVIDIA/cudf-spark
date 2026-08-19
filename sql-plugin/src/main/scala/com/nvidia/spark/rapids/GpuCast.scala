@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,21 +22,20 @@ import java.util.Optional
 import scala.collection.mutable.ArrayBuffer
 
 import ai.rapids.cudf.{BinaryOp, CaptureGroups, ColumnVector, ColumnView, DType, RegexProgram, Scalar}
-import ai.rapids.cudf
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
-import com.nvidia.spark.rapids.jni.{CastException, CastStrings, DecimalUtils, GpuTimeZoneDB}
+import com.nvidia.spark.rapids.jni.{Arithmetic, CastException, CastStrings, DecimalUtils, GpuTimeZoneDB, RoundMode}
 import com.nvidia.spark.rapids.shims.{AnsiUtil, CastTimeToIntShim, GpuCastShims, GpuIntervalUtils, GpuTypeShims, NullIntolerantShim, SparkShimImpl}
 import org.apache.commons.text.StringEscapeUtils
 
 import org.apache.spark.sql.catalyst.analysis.TypeCheckResult
 import org.apache.spark.sql.catalyst.expressions.{Cast, Expression, TimeZoneAwareExpression}
-import org.apache.spark.sql.catalyst.trees.UnaryLike
+import org.apache.spark.sql.catalyst.trees.{CurrentOrigin, Origin, UnaryLike}
 import org.apache.spark.sql.catalyst.util.DateTimeConstants.MICROS_PER_SECOND
 import org.apache.spark.sql.catalyst.util.DateTimeUtils
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.RoundingErrorUtil
-import org.apache.spark.sql.rapids.shims.{GpuCastToNumberErrorShim, RapidsErrorUtils}
+import org.apache.spark.sql.rapids.shims.{GpuCastToNumberErrorShim, OriginContextShim, RapidsErrorUtils}
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.UTF8String
 
@@ -72,7 +71,7 @@ final class CastExprMeta[INPUT <: UnaryLike[Expression] with TimeZoneAwareExpres
 
   override def convertToGpu(child: Expression): GpuExpression =
     GpuCast(child, toType, evalMode == GpuEvalMode.ANSI, cast.timeZoneId,
-      legacyCastComplexTypesToString, stringToAnsiDate)
+      legacyCastComplexTypesToString, stringToAnsiDate)(cast.origin)
 
 }
 
@@ -555,8 +554,10 @@ object GpuCast {
             GpuColumnVector.getNonNestedRapidsType(toDataType))
         }
       case (StringType, FloatType | DoubleType) =>
-        CastStrings.toFloat(input, ansiMode,
-          GpuColumnVector.getNonNestedRapidsType(toDataType))
+        fixupStrToNumException(input, toDataType) { strings =>
+          CastStrings.toFloat(strings, ansiMode,
+            GpuColumnVector.getNonNestedRapidsType(toDataType))
+        }
       case (StringType, BooleanType) =>
         withResource(input.strip()) { trimmed => castStringToBool(trimmed, ansiMode) }
       case (StringType, TimestampType) =>
@@ -651,7 +652,22 @@ object GpuCast {
         val s = withResource(input.getScalarElement(c.getRowWithError)) { errScalar =>
           errScalar.getJavaString
         }
-        throw RapidsErrorUtils.cannotChangeDecimalPrecisionError(Decimal(s), to)
+        val ctx = OriginContextShim.queryContext(CurrentOrigin.get)
+        // CPU parity: unparseable strings raise CAST_INVALID_INPUT, but
+        // parseable values that don't fit the target precision raise
+        // NUMERIC_VALUE_OUT_OF_RANGE via cannotChangeDecimalPrecisionError.
+        // Spark trims strings before decimal parsing. Preserve the original
+        // value for malformed-input error reporting below.
+        val parsed = try Some(Decimal(s.trim)) catch {
+          case _: NumberFormatException | _: ArithmeticException => None
+        }
+        parsed match {
+          case Some(d) =>
+            throw RapidsErrorUtils.cannotChangeDecimalPrecisionError(d, to, ctx)
+          case None =>
+            throw GpuCastToNumberErrorShim.invalidInputInCastToNumberError(
+              to, UTF8String.fromString(s), ctx)
+        }
     }
   }
 
@@ -663,7 +679,8 @@ object GpuCast {
         val s = withResource(input.getScalarElement(c.getRowWithError)) { errScalar =>
           UTF8String.fromString(errScalar.getJavaString)
         }
-        throw GpuCastToNumberErrorShim.invalidInputInCastToNumberError(to, s)
+        throw GpuCastToNumberErrorShim.invalidInputInCastToNumberError(
+          to, s, OriginContextShim.queryContext(CurrentOrigin.get))
     }
   }
 
@@ -690,7 +707,8 @@ object GpuCast {
       withResource(values.isNan()) { valuesIsNan =>
         withResource(valuesIsNan.any()) { anyNan =>
           if (anyNan.isValid && anyNan.getBoolean) {
-            throw RapidsErrorUtils.arithmeticOverflowError(errorMsg)
+            throw RapidsErrorUtils.arithmeticOverflowError(
+              errorMsg, "", OriginContextShim.queryContext(CurrentOrigin.get))
           }
         }
       }
@@ -701,7 +719,8 @@ object GpuCast {
           !inclusiveMin && ord.compare(minInput, minValue) <= 0 ||
           inclusiveMax && ord.compare(maxInput, maxValue) > 0 ||
           !inclusiveMax && ord.compare(maxInput, maxValue) >= 0) {
-        throw RapidsErrorUtils.arithmeticOverflowError(errorMsg)
+        throw RapidsErrorUtils.arithmeticOverflowError(
+          errorMsg, "", OriginContextShim.queryContext(CurrentOrigin.get))
       }
     }
 
@@ -736,7 +755,7 @@ object GpuCast {
     case DateType => input.asStrings("%Y-%m-%d")
     case TimestampType if options.castToJsonString => castTimestampToJson(input)
     case TimestampType => castTimestampToString(input)
-    case FloatType | DoubleType => CastStrings.fromFloat(input)
+    case FloatType | DoubleType => CastStrings.fromFloat(input, options.castToJsonString)
     case BinaryType => castBinToString(input, options)
     case _: DecimalType => GpuCastShims.CastDecimalToString(input, options.useDecimalPlainString)
     case StructType(fields) => castStructToString(input, fields, options)
@@ -836,19 +855,15 @@ object GpuCast {
           _.replaceNulls(nullRep)
         }
       } else {
-        // add a space string to each non-null element
-        val (strChild, childNotNull, numElements) =
-          withResource(input.getChildColumnView(0)) { childCol =>
-            closeOnExcept(childCol.replaceNulls(nullRep)) {
-              (_, childCol.isNotNull(), childCol.getRowCount.toInt)
-            }
+        // Prepend a space to each non-null element, letting the concat propagate nulls
+        // from the child column, then fill those nulls with nullRep.
+        withResource(input.getChildColumnView(0)) { childCol =>
+          val numElements = childCol.getRowCount.toInt
+          val withSpaces = withResource(ColumnVector.fromScalar(space, numElements)) { spaceCol =>
+            ColumnVector.stringConcatenate(Array(spaceCol, childCol))
           }
-        withResource(Seq(strChild, childNotNull)) { _ =>
-          val hasSpaces = withResource(ColumnVector.fromScalar(space, numElements)) { spaceCol =>
-            ColumnVector.stringConcatenate(Array(spaceCol, strChild))
-          }
-          withResource(hasSpaces) {
-            childNotNull.ifElse(_, strChild)
+          withResource(withSpaces) { _ =>
+            withSpaces.replaceNulls(nullRep)
           }
         }
       }
@@ -890,10 +905,8 @@ object GpuCast {
       Seq(leftStr, rightStr, emptyStr, options.nullString).safeMap(Scalar.fromString)
     ){ case Seq(left, right, empty, nullRep) =>
       val strChildContainsNull = withResource(input.getChildColumnView(0)) {child =>
-        doCast(
-          child, elementType, StringType, options)
+        doCast(child, elementType, StringType, options)
       }
-
       val concatenated = withResource(strChildContainsNull) { _ =>
         withResource(input.replaceListChild(strChildContainsNull)) {
           concatenateStringArrayElements(_, options, castingBinaryData)
@@ -1108,15 +1121,10 @@ object GpuCast {
                   attrColumns += attrValue.incRefCount()
             }
             // now concatenate
-            val jsonAttr = withResource(Scalar.fromString("")) { emptyString =>
-              ColumnVector.stringConcatenate(emptyString, emptyString, attrColumns.toArray)
-            }
             // add an empty string or the attribute
-            withResource(jsonAttr) { _ =>
-              withResource(cv.isNull) { isNull =>
-                withResource(Scalar.fromNull(DType.STRING)) { nullScalar =>
-                  isNull.ifElse(nullScalar, jsonAttr)
-                }
+            withResource(Scalar.fromString("")) { emptyString =>
+              withResource(Scalar.fromNull(DType.STRING)) { nullScalar =>
+                ColumnVector.stringConcatenate(emptyString, nullScalar, attrColumns.toArray)
               }
             }
           } else {
@@ -1241,7 +1249,8 @@ object GpuCast {
             withResource(validBools.all()) { isAllBool =>
               if (isAllBool.isValid && !isAllBool.getBoolean) {
                 throw RapidsErrorUtils.invalidInputSyntaxForBooleanError(
-                  UTF8String.fromString("in the input column has atleast one invalid value"))
+                  UTF8String.fromString("in the input column has atleast one invalid value"),
+                  OriginContextShim.queryContext(CurrentOrigin.get))
               }
             }
           }
@@ -1278,7 +1287,9 @@ object GpuCast {
       if (failOnInvalid) {
         withResource(isValidDate.all()) { all =>
           if (all.isValid && !all.getBoolean) {
-            throw new DateTimeException("One or more values is not a valid date")
+            throw new DateTimeException(
+              "One or more values is not a valid date" +
+                OriginContextShim.contextSummary(CurrentOrigin.get))
           }
         }
       }
@@ -1329,7 +1340,8 @@ object GpuCast {
     val result = CastStrings.toDate(input, ansiMode)
     if (ansiMode && result == null) {
       // All the errors of Spark 32x, 33x, 34x, 35x contains "DateTimeException"
-      throw new DateTimeException("DateTimeException")
+      throw new DateTimeException(
+        "DateTimeException" + OriginContextShim.contextSummary(CurrentOrigin.get))
     } else {
       result
     }
@@ -1367,7 +1379,9 @@ object GpuCast {
     // The kernel will handle the different behaviors between Spark versions/platforms.
     closeOnExcept(CastStrings.toTimestamp(input, normalizedTZ, ansiMode, versionForJni)) { result =>
       if (ansiMode && result == null) {
-        throw new DateTimeException("One or more values is not a valid timestamp")
+        throw new DateTimeException(
+          "One or more values is not a valid timestamp" +
+            OriginContextShim.contextSummary(CurrentOrigin.get))
       } else {
         result
       }
@@ -1481,18 +1495,21 @@ object GpuCast {
           case _ => throw new IllegalArgumentException(s"unsupported type $fromType")
         }
       }
-      throw RapidsErrorUtils.cannotChangeDecimalPrecisionError(Decimal(failedVal), dt)
+      throw RapidsErrorUtils.cannotChangeDecimalPrecisionError(
+        Decimal(failedVal), dt, OriginContextShim.queryContext(CurrentOrigin.get))
     }
     converted.result
   }
 
   def fixDecimalBounds(input: ColumnView,
       outOfBounds: ColumnView,
+      targetType: DecimalType,
       ansiMode: Boolean): ColumnVector = {
     if (ansiMode) {
       withResource(outOfBounds.any()) { isAny =>
         if (isAny.isValid && isAny.getBoolean) {
-          throw RapidsErrorUtils.arithmeticOverflowError(OVERFLOW_MESSAGE)
+          throw RoundingErrorUtil.cannotChangeDecimalPrecisionError(
+            input, outOfBounds, targetType)
         }
       }
       input.copyToColumnVector()
@@ -1509,13 +1526,12 @@ object GpuCast {
       ansiMode: Boolean): ColumnVector = {
     assert(input.getType.isDecimalType)
     withResource(DecimalUtil.outOfBounds(input, to)) { outOfBounds =>
-      fixDecimalBounds(input, outOfBounds, ansiMode)
+      fixDecimalBounds(input, outOfBounds, to, ansiMode)
     }
   }
 
   private def checkNFixDecimalBounds(
       input: ColumnView,
-      fromType: DecimalType,
       toType: DecimalType,
       ansiMode: Boolean,
       originCol: ColumnView): ColumnVector = {
@@ -1525,7 +1541,7 @@ object GpuCast {
         withResource(outOfBounds.any()) { isAny =>
           if (isAny.isValid && isAny.getBoolean) {
             throw RoundingErrorUtil.cannotChangeDecimalPrecisionError(originCol, outOfBounds,
-              fromType, toType)
+              toType)
           }
         }
         input.copyToColumnVector()
@@ -1568,7 +1584,7 @@ object GpuCast {
       val rounded = if (!isScaleUpcast) {
         // We have to round the data to the desired scale. Spark uses HALF_UP rounding in
         // this case so we need to also.
-        input.round(to.scale, cudf.RoundMode.HALF_UP)
+        Arithmetic.round(input, to.scale, RoundMode.HALF_UP)
       } else {
         input.copyToColumnVector()
       }
@@ -1578,7 +1594,7 @@ object GpuCast {
           // We need to check for out of bound values.
           // The wholeNumberUpcast is obvious why we have to check, but we also have to check it
           // when we rounded, because rounding can add a digit to the effective precision.
-          checkNFixDecimalBounds(rounded, from, to, ansiMode, input)
+          checkNFixDecimalBounds(rounded, to, ansiMode, input)
         } else {
           rounded.incRefCount()
         }
@@ -1637,8 +1653,11 @@ case class GpuCast(
     ansiMode: Boolean = false,
     timeZoneId: Option[String] = None,
     legacyCastComplexTypesToString: Boolean = false,
-    stringToDateAnsiModeEnabled: Boolean = false)
+    stringToDateAnsiModeEnabled: Boolean = false)(
+    override val origin: Origin = CurrentOrigin.get)
   extends GpuUnaryExpression with TimeZoneAwareExpression with NullIntolerantShim {
+
+  override def otherCopyArgs: Seq[AnyRef] = origin :: Nil
 
   import GpuCast._
 
@@ -1693,7 +1712,7 @@ case class GpuCast(
   override def nullable: Boolean = Cast.forceNullable(child.dataType, dataType) || child.nullable
 
   override def withTimeZone(timeZoneId: String): TimeZoneAwareExpression =
-    copy(timeZoneId = Option(timeZoneId))
+    copy(timeZoneId = Option(timeZoneId))(origin)
 
   // When this cast involves TimeZone, it's only resolved if the timeZoneId is set;
   // Otherwise behave like Expression.resolved.
@@ -1710,6 +1729,12 @@ case class GpuCast(
     case _ => s"CAST(${child.sql} AS ${dataType.sql})"
   }
 
-  override def doColumnar(input: GpuColumnVector): ColumnVector =
-    doCast(input.getBase, input.dataType(), dataType, options)
+  override def doColumnar(input: GpuColumnVector): ColumnVector = {
+    // Wrap the cast in the CPU expression's origin so any ANSI error thrown by
+    // the static `doCast` helpers picks up the SQL query context via
+    // `OriginContextShim.queryContext(CurrentOrigin.get)` (see error-site helpers in this file).
+    CurrentOrigin.withOrigin(origin) {
+      doCast(input.getBase, input.dataType(), dataType, options)
+    }
+  }
 }

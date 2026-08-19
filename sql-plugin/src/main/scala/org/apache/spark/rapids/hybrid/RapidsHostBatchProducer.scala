@@ -20,9 +20,7 @@ import java.util.concurrent.locks.ReentrantLock
 
 import scala.collection.mutable
 
-import ai.rapids.cudf.NvtxColor
-import com.nvidia.spark.rapids.{GpuMetric, NvtxWithMetrics}
-import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.{GpuMetric, NvtxIdWithMetrics, NvtxRegistry}
 import com.nvidia.spark.rapids.hybrid.RapidsHostColumn
 import com.nvidia.spark.rapids.jni.RmmSpark
 
@@ -183,7 +181,7 @@ class PrefetchHostBatchProducer(
   override def hasNext: Boolean = {
     // Lazy Init of the actual producer
     if (!isInit) {
-      withResource(new NvtxWithMetrics("waitForCPU", NvtxColor.RED, waitTimeMetric)) { _ =>
+      NvtxIdWithMetrics(NvtxRegistry.WAIT_FOR_CPU, waitTimeMetric) {
         if (!base.hasNext) {
           return false
         }
@@ -210,7 +208,7 @@ class PrefetchHostBatchProducer(
       return
     }
     // Waiting for "emptyLock"
-    withResource(new NvtxWithMetrics("waitForCPU", NvtxColor.RED, waitTimeMetric)) { _ =>
+    NvtxIdWithMetrics(NvtxRegistry.WAIT_FOR_CPU, waitTimeMetric) {
       do {
         emptyLock.synchronized {
           if (writeIndex == readIndex) {

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,7 +25,7 @@ import scala.concurrent.ExecutionContext
 import scala.ref.WeakReference
 import scala.util.control.NonFatal
 
-import ai.rapids.cudf.{HostMemoryBuffer, JCudfSerialization, NvtxColor, NvtxRange}
+import ai.rapids.cudf.{HostMemoryBuffer, JCudfSerialization}
 import ai.rapids.cudf.JCudfSerialization.HostConcatResult
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
@@ -33,7 +33,7 @@ import com.nvidia.spark.rapids.GpuMetric._
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.lore.{GpuLoreDumpRDD, SimpleRDD}
 import com.nvidia.spark.rapids.lore.GpuLore.LORE_DUMP_RDD_TAG
-import com.nvidia.spark.rapids.shims.{ShimBroadcastExchangeLike, ShimUnaryExecNode, SparkShimImpl}
+import com.nvidia.spark.rapids.shims.{BroadcastExchangeShims, ShimBroadcastExchangeLike, ShimUnaryExecNode, SparkShimImpl}
 
 import org.apache.spark.SparkException
 import org.apache.spark.broadcast.Broadcast
@@ -46,7 +46,6 @@ import org.apache.spark.sql.catalyst.plans.logical.Statistics
 import org.apache.spark.sql.catalyst.plans.physical.{BroadcastMode, BroadcastPartitioning, Partitioning}
 import org.apache.spark.sql.execution.{SparkPlan, SQLExecution}
 import org.apache.spark.sql.execution.exchange.{BroadcastExchangeExec, Exchange}
-import org.apache.spark.sql.execution.exchange.BroadcastExchangeExec.MAX_BROADCAST_TABLE_BYTES
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, BroadcastNestedLoopJoinExec}
 import org.apache.spark.sql.execution.metric.SQLMetrics
 import org.apache.spark.sql.internal.{SQLConf, StaticSQLConf}
@@ -86,7 +85,7 @@ class SerializeConcatHostBuffersDeserializeBatch(
 
   def batch: SpillableColumnarBatch = this.synchronized {
     maybeGpuBatch.getOrElse {
-      withResource(new NvtxRange("broadcast manifest batch", NvtxColor.PURPLE)) { _ =>
+      NvtxRegistry.BROADCAST_MANIFEST_BATCH {
         val spillable =
           if (data == null || data.getTableHeader.getNumColumns == 0) {
             // If `data` is null or there are no columns, this is a rows-only batch
@@ -134,7 +133,7 @@ class SerializeConcatHostBuffersDeserializeBatch(
         new ColumnarBatch(hostColumns, numRows)
       }
     }.getOrElse {
-      withResource(new NvtxRange("broadcast manifest batch", NvtxColor.PURPLE)) { _ =>
+      NvtxRegistry.BROADCAST_MANIFEST_BATCH {
         if (data == null) {
           new ColumnarBatch(Array.empty, numRows)
         } else {
@@ -212,7 +211,7 @@ class SerializeConcatHostBuffersDeserializeBatch(
   def doReadObject(in: ObjectInputStream): Unit = this.synchronized {
     // no-op if we already have `batchInternal` or `data` set
     if (batchInternal == null && data == null) {
-      withResource(new NvtxRange("DeserializeBatch", NvtxColor.PURPLE)) { _ =>
+      NvtxRegistry.DESERIALIZE_BATCH {
         val (header, buffer) = SerializedHostTableUtils.readTableHeaderAndBuffer(in)
         withResource(buffer) { _ =>
           dataTypes = if (header.getNumColumns > 0) {
@@ -274,7 +273,7 @@ class SerializeBatchDeserializeHostBuffer(batch: ColumnarBatch)
   @transient private var numRows = batch.numRows()
 
   private def writeObject(out: ObjectOutputStream): Unit = {
-    withResource(new NvtxRange("SerializeBatch", NvtxColor.PURPLE)) { _ =>
+    NvtxRegistry.SERIALIZE_BROADCAST_BATCH {
       if (buffer != null) {
         throw new IllegalStateException("Cannot re-serialize a batch this way...")
       } else {
@@ -291,7 +290,7 @@ class SerializeBatchDeserializeHostBuffer(batch: ColumnarBatch)
   }
 
   private def readObject(in: ObjectInputStream): Unit = {
-    withResource(new NvtxRange("HostDeserializeBatch", NvtxColor.PURPLE)) { _ =>
+    NvtxRegistry.HOST_DESERIALIZE_BATCH {
       val (h, b) = SerializedHostTableUtils.readTableHeaderAndBuffer(in)
       // buffer will only be cleaned up on GC, so cannot warn about leaks
       b.noWarnLeakExpected()
@@ -346,8 +345,10 @@ class GpuBroadcastMeta(
   }
 
   override def convertToGpu(): GpuExec = {
-    GpuBroadcastExchangeExec(exchange.mode, childPlans.head.convertIfNeeded())(
+    val gpuBroadcast = GpuBroadcastExchangeExec(exchange.mode, childPlans.head.convertIfNeeded())(
       exchange.canonicalized.asInstanceOf[BroadcastExchangeExec])
+    GpuTransitionOverrides.copyAqeQueryStageExchangeTag(exchange, gpuBroadcast)
+    gpuBroadcast
   }
 }
 
@@ -395,8 +396,7 @@ abstract class GpuBroadcastExchangeExecBase(
           interruptOnCancel = true)
         val broadcastResult = {
           val collected =
-            withResource(new NvtxWithMetrics("broadcast collect", NvtxColor.GREEN,
-              collectTime)) { _ =>
+            NvtxIdWithMetrics(NvtxRegistry.BROADCAST_COLLECT, collectTime) {
               val childRdd = child.executeColumnar()
 
               // collect batches from the executors
@@ -405,8 +405,7 @@ abstract class GpuBroadcastExchangeExecBase(
               })
               data.collect()
             }
-          withResource(new NvtxWithMetrics("broadcast build", NvtxColor.DARK_GREEN,
-            buildTime)) { _ =>
+          NvtxIdWithMetrics(NvtxRegistry.BROADCAST_BUILD, buildTime) {
             val emptyRelation = if (collected.isEmpty) {
               SparkShimImpl.tryTransformIfEmptyRelation(mode)
             } else {
@@ -414,13 +413,12 @@ abstract class GpuBroadcastExchangeExecBase(
             }
             emptyRelation.getOrElse {
               GpuBroadcastExchangeExecBase.makeBroadcastBatch(
-                collected, output, numOutputBatches, numOutputRows, dataSize)
+                collected, output, numOutputBatches, numOutputRows, dataSize, conf)
             }
           }
         }
         val broadcasted =
-          withResource(new NvtxWithMetrics("broadcast", NvtxColor.CYAN,
-              broadcastTime)) { _ =>
+          NvtxIdWithMetrics(NvtxRegistry.BROADCAST, broadcastTime) {
             // Broadcast the relation
             sparkContext.broadcast(broadcastResult)
         }
@@ -523,6 +521,12 @@ abstract class GpuBroadcastExchangeExecBase(
       rowCount = Some(metrics(GpuMetric.NUM_OUTPUT_ROWS).value))
   }
 
+  override def resetMetrics(): Unit = {
+    // no-op
+    // BroadcastExchangeExec after materialized won't be materialized again, so we should not
+    // reset the metrics. Otherwise, we will lose the metrics collected in the broadcast job.
+  }
+
   override protected def internalDoExecuteColumnar(): RDD[ColumnarBatch] = {
     throw new IllegalStateException(s"Internal Error ${this.getClass} has column support" +
         s" mismatch:\n$this")
@@ -546,12 +550,13 @@ object GpuBroadcastExchangeExecBase {
     }
   }
 
-  protected def checkSizeLimit(sizeInBytes: Long) = {
-    // Spark restricts the size of broadcast relations to be less than 8GB
-    if (sizeInBytes >= MAX_BROADCAST_TABLE_BYTES) {
+  protected def checkSizeLimit(sizeInBytes: Long, conf: SQLConf) = {
+    // Spark restricts the size of broadcast relations
+    val maxBytes = BroadcastExchangeShims.getMaxBroadcastTableBytes(conf)
+    if (sizeInBytes >= maxBytes) {
       throw new SparkException(
         s"Cannot broadcast the table that is larger than" +
-            s"${MAX_BROADCAST_TABLE_BYTES >> 30}GB: ${sizeInBytes >> 30} GB")
+            s"${maxBytes >> 30}GB: ${sizeInBytes >> 30} GB")
     }
   }
 
@@ -566,7 +571,8 @@ object GpuBroadcastExchangeExecBase {
       output: Seq[Attribute],
       numOutputBatches: GpuMetric,
       numOutputRows: GpuMetric,
-      dataSize: GpuMetric): SerializeConcatHostBuffersDeserializeBatch = {
+      dataSize: GpuMetric,
+      conf: SQLConf): SerializeConcatHostBuffersDeserializeBatch = {
     val rowsOnly = buffers.isEmpty || buffers.head.header.getNumColumns == 0
     var numRows = 0
     var dataLen: Long = 0
@@ -586,7 +592,7 @@ object GpuBroadcastExchangeExecBase {
       }
       closeOnExcept(hostConcatResult) { _ =>
         checkRowLimit(hostConcatResult.getTableHeader.getNumRows)
-        checkSizeLimit(hostConcatResult.getTableHeader.getDataLen)
+        checkSizeLimit(hostConcatResult.getTableHeader.getDataLen, conf)
       }
       // this result will be GC'ed later, so we mark it as such
       hostConcatResult.getHostBuffer.noWarnLeakExpected()

@@ -18,7 +18,7 @@ package org.apache.spark.sql.rapids.execution
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 
-import com.nvidia.spark.rapids.{GpuBatchUtils, GpuColumnVector, GpuExpression, GpuHashPartitioner, GpuMetric, RmmRapidsRetryIterator, SpillableColumnarBatch, SpillPriorities, TaskAutoCloseableResource}
+import com.nvidia.spark.rapids.{GpuBatchUtils, GpuColumnVector, GpuExpression, GpuHashPartitioner, GpuMetric, NvtxRegistry, RmmRapidsRetryIterator, SpillableColumnarBatch, SpillPriorities, TaskAutoCloseableResource}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 
@@ -181,7 +181,8 @@ class GpuBatchSubPartitioner(
       if (gpuBatch.numRows() > 0 && gpuBatch.numCols() > 0) {
         val types = GpuColumnVector.extractTypes(gpuBatch)
         // 1) Hash partition on the batch
-        val partedTable = hashPartitionAndClose(gpuBatch, realNumPartitions, "Sub-join part")
+        val partedTable = hashPartitionAndClose(gpuBatch, realNumPartitions,
+            NvtxRegistry.SUB_JOIN_PART)
         val (spillBatch, partitions) = withResource(partedTable) { _ =>
           // Convert to SpillableColumnarBatch for the following retry.
           (SpillableColumnarBatch(GpuColumnVector.from(partedTable.getTable, types),
@@ -564,7 +565,7 @@ trait GpuSubPartitionHashJoin extends Logging { self: GpuHashJoin =>
   def doJoinBySubPartition(
       builtIter: Iterator[ColumnarBatch],
       streamIter: Iterator[ColumnarBatch],
-      targetSize: Long,
+      joinOptions: JoinOptions,
       numPartitions: Int,
       numOutputRows: GpuMetric,
       numOutputBatches: GpuMetric,
@@ -576,7 +577,7 @@ trait GpuSubPartitionHashJoin extends Logging { self: GpuHashJoin =>
       s"in task ${TaskContext.get().taskAttemptId()}")
 
     new BaseSubHashJoinIterator(builtIter, boundBuildKeys, streamIter,
-        boundStreamKeys, numPartitions, targetSize, opTime) {
+        boundStreamKeys, numPartitions, joinOptions.targetSize, opTime) {
 
       private[this] def canOptimizeOut(pair: PartitionPair): Boolean = {
         val (build, stream) = pair.get
@@ -605,7 +606,7 @@ trait GpuSubPartitionHashJoin extends Logging { self: GpuHashJoin =>
             }
           }
           // Leverage the original join iterators
-          val joinIter = doJoin(buildCb, streamIter, targetSize, 
+          val joinIter = doJoin(buildCb, streamIter, joinOptions,
             numOutputRows, numOutputBatches, opTime, joinTime)
           Some(joinIter)
         }

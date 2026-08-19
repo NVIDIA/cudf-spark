@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -209,7 +209,7 @@ class GpuCoalesceBatchesRetrySuite
     var refCount = 1
     override def numRows(): Int = 0
     override def setSpillPriority(priority: Long): Unit = {}
-    override def getColumnarBatch: ColumnarBatch = {
+    override def getColumnarBatch(): ColumnarBatch = {
       throw new GpuSplitAndRetryOOM()
     }
     override def sizeInBytes: Long = 0

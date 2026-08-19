@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,15 +19,31 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.utils
 
+import java.io.File
+
 trait RapidsTestsBaseTrait {
 
-  protected val rootPath: String = getClass.getResource("/").getPath
-  protected val basePath: String = rootPath + "unit-tests-working-home"
+  protected val basePath: String =
+    new File(System.getProperty("java.io.tmpdir"), "unit-tests-working-home").getAbsolutePath
 
   protected val warehouse: String = basePath + "/spark-warehouse"
   protected val metaStorePathAbsolute: String = basePath + "/meta"
 
   def shouldRun(testName: String): Boolean = {
     BackendTestSettings.shouldRun(getClass.getCanonicalName, testName)
+  }
+
+  protected def getJavaMajorVersion(): Int = {
+    val version = System.getProperty("java.version")
+    // Allow these formats:
+    // 1.8.0_72-ea
+    // 9-ea
+    // 9
+    // 11.0.1
+    val versionRegex = """(1\.)?(\d+)([._].+)?""".r
+    version match {
+      case versionRegex(_, major, _) => major.toInt
+      case _ => throw new IllegalStateException(s"Cannot parse java version: $version")
+    }
   }
 }

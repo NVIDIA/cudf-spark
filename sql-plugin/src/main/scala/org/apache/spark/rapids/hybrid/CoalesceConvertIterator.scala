@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,8 +16,7 @@
 
 package org.apache.spark.rapids.hybrid
 
-import ai.rapids.cudf.NvtxColor
-import com.nvidia.spark.rapids.{GpuColumnVector, GpuMetric, GpuSemaphore, NvtxWithMetrics}
+import com.nvidia.spark.rapids.{GpuColumnVector, GpuMetric, GpuSemaphore, NvtxIdWithMetrics, NvtxRegistry}
 import com.nvidia.spark.rapids.Arm._
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.hybrid.{CoalesceBatchConverter => NativeConverter, HybridHostRetryAllocator, RapidsHostColumn}
@@ -60,7 +59,7 @@ class CoalesceConvertIterator(cpuScanIter: Iterator[ColumnarBatch],
     batch
   }
 
-  override def hasNext(): Boolean = {
+  override def hasNext: Boolean = {
     // isDeckFilled means if there is unconverted source data remained on the deck.
     // hasProceedingBuilders means if there exists working target vectors not being flushed yet.
     val selfHoldData = Option(converterImpl).exists { c =>
@@ -175,8 +174,7 @@ object CoalesceConvertIterator extends Logging {
         hostProducer.waitForNext()
         // Then, acquires GpuSemaphore
         Option(TaskContext.get()).foreach { ctx =>
-          withResource(new NvtxWithMetrics("gpuAcquireC2C", NvtxColor.GREEN,
-            metrics("GpuAcquireTime"))) { _ =>
+          NvtxIdWithMetrics(NvtxRegistry.GPU_ACQUIRE_C2C, metrics("GpuAcquireTime")) {
             GpuSemaphore.acquireIfNecessary(ctx)
           }
         }
@@ -188,16 +186,17 @@ object CoalesceConvertIterator extends Logging {
         // 2. Transferring Stage
         val deviceVectors: Array[ColumnVector] = hostColumns.zip(dataTypes).safeMap {
           case (RapidsHostColumn(hcv, isPinned, totalBytes), dt) =>
-            val nvtxMetric = if (isPinned) {
-              metrics("PinnedH2DSize") += totalBytes
-              new NvtxWithMetrics("pinnedH2D", NvtxColor.DARK_GREEN, metrics("PinnedH2DTime"))
-            } else {
-              metrics("PageableH2DSize") += totalBytes
-              new NvtxWithMetrics("PageableH2D", NvtxColor.GREEN, metrics("PageableH2DTime"))
-            }
             withResource(hcv) { _ =>
-              withResource(nvtxMetric) { _ =>
-                GpuColumnVector.from(hcv.copyToDevice(), dt)
+              if (isPinned) {
+                metrics("PinnedH2DSize") += totalBytes
+                NvtxIdWithMetrics(NvtxRegistry.PINNED_H2D, metrics("PinnedH2DTime")) {
+                  GpuColumnVector.from(hcv.copyToDevice(), dt)
+                }
+              } else {
+                metrics("PageableH2DSize") += totalBytes
+                NvtxIdWithMetrics(NvtxRegistry.PAGEABLE_H2D, metrics("PageableH2DTime")) {
+                  GpuColumnVector.from(hcv.copyToDevice(), dt)
+                }
               }
             }
         }

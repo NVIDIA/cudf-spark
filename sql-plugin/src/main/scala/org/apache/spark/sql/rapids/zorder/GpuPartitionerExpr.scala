@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,8 +16,8 @@
 
 package org.apache.spark.sql.rapids.zorder
 
-import ai.rapids.cudf.{ColumnVector, NvtxColor, NvtxRange}
-import com.nvidia.spark.rapids.{GpuColumnVector, GpuRangePartitioner, GpuUnaryExpression}
+import ai.rapids.cudf.ColumnVector
+import com.nvidia.spark.rapids.{GpuColumnVector, GpuRangePartitioner, GpuUnaryExpression, NvtxRegistry}
 import com.nvidia.spark.rapids.Arm.withResource
 
 import org.apache.spark.sql.catalyst.expressions.Expression
@@ -32,7 +32,7 @@ case class GpuPartitionerExpr(child: Expression, partitioner: GpuRangePartitione
   override def nullable: Boolean = false
 
   override protected def doColumnar(input: GpuColumnVector): ColumnVector = {
-    withResource(new NvtxRange("GpuPartitioner", NvtxColor.GREEN)) { _ =>
+    NvtxRegistry.GPU_PARTITIONER {
       withResource(new ColumnarBatch(Array(input.incRefCount()))) { cb =>
         cb.setNumRows(input.getRowCount.toInt)
         partitioner.computePartitionIndexes(cb)

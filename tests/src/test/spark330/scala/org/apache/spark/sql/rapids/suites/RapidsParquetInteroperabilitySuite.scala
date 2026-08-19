@@ -38,7 +38,7 @@ import org.apache.spark.sql.rapids.utils.RapidsSQLTestsBaseTrait
 class RapidsParquetInteroperabilitySuite
   extends ParquetInteroperabilitySuite
   with RapidsSQLTestsBaseTrait {
-  test("parquet timestamp conversion Rapids"){
+  testRapids("parquet timestamp conversion"){
     // Make a table with one parquet file written by impala, and one parquet file written by spark.
     // We should only adjust the timestamps in the impala file, and only if the conf is set
     val impalaFile = "test-data/impala_timestamp.parq"

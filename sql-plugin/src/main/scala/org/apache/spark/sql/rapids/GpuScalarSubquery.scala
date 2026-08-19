@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,7 @@
 package org.apache.spark.sql.rapids
 
 import com.nvidia.spark.rapids.{GpuColumnVector, GpuExpression, GpuExpressionsUtils, GpuScalar}
-import com.nvidia.spark.rapids.shims.ShimExpression
+import com.nvidia.spark.rapids.shims.{GpuScalarSubqueryShims, ShimExpression}
 
 import org.apache.spark.sql.catalyst.expressions.{Expression, ExprId}
 import org.apache.spark.sql.execution.{BaseSubqueryExec, ExecSubqueryExpression}
@@ -33,7 +33,8 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 case class GpuScalarSubquery(
     plan: BaseSubqueryExec,
     exprId: ExprId)
-  extends ExecSubqueryExpression with GpuExpression with ShimExpression {
+  extends ExecSubqueryExpression with GpuExpression with ShimExpression
+    with GpuScalarSubqueryShims {
 
   override def dataType: DataType = plan.schema.fields.head.dataType
   override def children: Seq[Expression] = Seq.empty
@@ -43,12 +44,14 @@ case class GpuScalarSubquery(
 
   // the first column in first row from `query`.
   @volatile private var result: Any = _
-  @volatile private var updated: Boolean = false
+  @volatile protected var updated: Boolean = false
 
   override def updateResult(): Unit = {
     val rows = plan.executeCollect()
     if (rows.length > 1) {
-      sys.error(s"more than one row returned by a subquery used as an expression:\n$plan")
+      throw new IllegalStateException(
+        s"more than one row returned by a subquery" +
+          s" used as an expression:\n$plan")
     } else if (rows.length == 1) {
       assert(rows.head.numFields == 1,
         s"Expects 1 field, but got ${rows.head.numFields}; something went wrong in analysis")

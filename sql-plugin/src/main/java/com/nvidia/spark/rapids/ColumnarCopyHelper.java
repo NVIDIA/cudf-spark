@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,212 +27,260 @@ import org.apache.spark.sql.vectorized.ColumnVector;
  */
 public class ColumnarCopyHelper {
 
-  public static void nullCopy(RapidsHostColumnBuilder b, int rows) {
+  public static long nullCopy(RapidsHostColumnBuilder b, int rows) {
+    long bytesCopied = 0L;
     for (int i = 0; i < rows; i++) {
-      b.appendNull();
+      bytesCopied += b.appendNull();
     }
+    return bytesCopied;
   }
 
-  public static void booleanCopy(ColumnVector cv, RapidsHostColumnBuilder b, int rows) {
+  public static long booleanCopy(ColumnVector cv, RapidsHostColumnBuilder b, int rows) {
+    long bytesCopied = 0L;
     if (!cv.hasNull()) {
       for (int i = 0; i < rows; i++) {
-        b.append(cv.getBoolean(i));
+        bytesCopied += b.append(cv.getBoolean(i));
       }
-      return;
+      return bytesCopied;
     }
     for (int i = 0; i < rows; i++) {
       if (cv.isNullAt(i)) {
-        b.appendNull();
+        bytesCopied += b.appendNull();
       } else {
-        b.append(cv.getBoolean(i));
+        bytesCopied += b.append(cv.getBoolean(i));
       }
     }
+    return bytesCopied;
   }
 
-  public static void byteCopy(ColumnVector cv, RapidsHostColumnBuilder b, int rows) {
+  public static long byteCopy(ColumnVector cv, RapidsHostColumnBuilder b, int rows) {
+    long bytesCopied = 0L;
     if (!cv.hasNull()) {
       for (int i = 0; i < rows; i++) {
-        b.append(cv.getByte(i));
+        bytesCopied += b.append(cv.getByte(i));
       }
-      return;
+      return bytesCopied;
     }
     for (int i = 0; i < rows; i++) {
       if (cv.isNullAt(i)) {
-        b.appendNull();
+        bytesCopied += b.appendNull();
       } else {
-        b.append(cv.getByte(i));
+        bytesCopied += b.append(cv.getByte(i));
       }
     }
+    return bytesCopied;
   }
 
-  public static void shortCopy(ColumnVector cv, RapidsHostColumnBuilder b, int rows) {
+  public static long shortCopy(ColumnVector cv, RapidsHostColumnBuilder b, int rows) {
+    long bytesCopied = 0L;
     if (!cv.hasNull()) {
       for (int i = 0; i < rows; i++) {
-        b.append(cv.getShort(i));
+        bytesCopied += b.append(cv.getShort(i));
       }
-      return;
+      return bytesCopied;
     }
     for (int i = 0; i < rows; i++) {
       if (cv.isNullAt(i)) {
-        b.appendNull();
+        bytesCopied += b.appendNull();
       } else {
-        b.append(cv.getShort(i));
+        bytesCopied += b.append(cv.getShort(i));
       }
     }
+    return bytesCopied;
   }
 
-  public static void intCopy(ColumnVector cv, RapidsHostColumnBuilder b, int rows) {
+  public static long intCopy(ColumnVector cv, RapidsHostColumnBuilder b, int rows) {
+    long bytesCopied = 0L;
     if (!cv.hasNull()) {
       for (int i = 0; i < rows; i++) {
-        b.append(cv.getInt(i));
+        bytesCopied += b.append(cv.getInt(i));
       }
-      return;
+      return bytesCopied;
     }
     for (int i = 0; i < rows; i++) {
       if (cv.isNullAt(i)) {
-        b.appendNull();
+        bytesCopied += b.appendNull();
       } else {
-        b.append(cv.getInt(i));
+        bytesCopied += b.append(cv.getInt(i));
       }
     }
+    return bytesCopied;
   }
 
-  public static void longCopy(ColumnVector cv, RapidsHostColumnBuilder b, int rows) {
+  public static long longCopy(ColumnVector cv, RapidsHostColumnBuilder b, int rows) {
+    long bytesCopied = 0L;
     if (!cv.hasNull()) {
       for (int i = 0; i < rows; i++) {
-        b.append(cv.getLong(i));
+        bytesCopied += b.append(cv.getLong(i));
       }
-      return;
+      return bytesCopied;
     }
     for (int i = 0; i < rows; i++) {
       if (cv.isNullAt(i)) {
-        b.appendNull();
+        bytesCopied += b.appendNull();
       } else {
-        b.append(cv.getLong(i));
+        bytesCopied += b.append(cv.getLong(i));
       }
     }
+    return bytesCopied;
   }
 
-  public static void floatCopy(ColumnVector cv, RapidsHostColumnBuilder b, int rows) {
+  public static long floatCopy(ColumnVector cv, RapidsHostColumnBuilder b, int rows) {
+    long bytesCopied = 0L;
     if (!cv.hasNull()) {
       for (int i = 0; i < rows; i++) {
-        b.append(cv.getFloat(i));
+        bytesCopied += b.append(cv.getFloat(i));
       }
-      return;
+      return bytesCopied;
     }
     for (int i = 0; i < rows; i++) {
       if (cv.isNullAt(i)) {
-        b.appendNull();
+        bytesCopied += b.appendNull();
       } else {
-        b.append(cv.getFloat(i));
+        bytesCopied += b.append(cv.getFloat(i));
       }
     }
+    return bytesCopied;
   }
 
-  public static void doubleCopy(ColumnVector cv, RapidsHostColumnBuilder b, int rows) {
+  public static long doubleCopy(ColumnVector cv, RapidsHostColumnBuilder b, int rows) {
+    long bytesCopied = 0L;
     if (!cv.hasNull()) {
       for (int i = 0; i < rows; i++) {
-        b.append(cv.getDouble(i));
+        bytesCopied += b.append(cv.getDouble(i));
       }
-      return;
+      return bytesCopied;
     }
     for (int i = 0; i < rows; i++) {
       if (cv.isNullAt(i)) {
-        b.appendNull();
+        bytesCopied += b.appendNull();
       } else {
-        b.append(cv.getDouble(i));
+        bytesCopied += b.append(cv.getDouble(i));
       }
     }
+    return bytesCopied;
   }
 
-  public static void stringCopy(ColumnVector cv, RapidsHostColumnBuilder b, int rows) {
+  public static long stringCopy(ColumnVector cv, RapidsHostColumnBuilder b, int rows) {
+    long bytesCopied = 0L;
     if (!cv.hasNull()) {
       for (int i = 0; i < rows; i++) {
-        b.appendUTF8String(cv.getUTF8String(i).getBytes());
+        bytesCopied += b.appendUTF8String(cv.getUTF8String(i).getBytes());
       }
-      return;
+      return bytesCopied;
     }
     for (int i = 0; i < rows; i++) {
       if (cv.isNullAt(i)) {
-        b.appendNull();
+        bytesCopied += b.appendNull();
       } else {
-        b.appendUTF8String(cv.getUTF8String(i).getBytes());
+        bytesCopied += b.appendUTF8String(cv.getUTF8String(i).getBytes());
       }
     }
+    return bytesCopied;
   }
 
-  public static void decimal32Copy(WritableColumnVector cv, RapidsHostColumnBuilder b, int rows) {
-    intCopy(cv, b, rows);
-  }
-
-  public static void decimal64Copy(WritableColumnVector cv, RapidsHostColumnBuilder b, int rows) {
-    longCopy(cv, b, rows);
-  }
-
-  public static void decimal128Copy(WritableColumnVector cv, RapidsHostColumnBuilder b, int rows) {
+  public static long binaryCopy(ColumnVector cv, RapidsHostColumnBuilder b, int rows) {
+    long bytesCopied = 0L;
     if (!cv.hasNull()) {
       for (int i = 0; i < rows; i++) {
-        b.appendDecimal128(cv.getBinary(i));
+        byte[] value = cv.getBinary(i);
+        b.appendByteList(value);
+        bytesCopied += value.length + Integer.BYTES;
       }
-      return;
+      return bytesCopied;
     }
     for (int i = 0; i < rows; i++) {
       if (cv.isNullAt(i)) {
-        b.appendNull();
+        bytesCopied += b.appendNull();
       } else {
-        b.appendDecimal128(cv.getBinary(i));
+        byte[] value = cv.getBinary(i);
+        b.appendByteList(value);
+        bytesCopied += value.length + Integer.BYTES;
       }
     }
+    return bytesCopied;
   }
 
-  public static void decimal32Copy(ColumnVector cv, RapidsHostColumnBuilder b, int rows,
+  public static long decimal32Copy(WritableColumnVector cv, RapidsHostColumnBuilder b, int rows) {
+    return intCopy(cv, b, rows);
+  }
+
+  public static long decimal64Copy(WritableColumnVector cv, RapidsHostColumnBuilder b, int rows) {
+    return longCopy(cv, b, rows);
+  }
+
+  public static long decimal128Copy(WritableColumnVector cv, RapidsHostColumnBuilder b, int rows) {
+    long bytesCopied = 0L;
+    if (!cv.hasNull()) {
+      for (int i = 0; i < rows; i++) {
+        bytesCopied += b.appendDecimal128(cv.getBinary(i));
+      }
+      return bytesCopied;
+    }
+    for (int i = 0; i < rows; i++) {
+      if (cv.isNullAt(i)) {
+        bytesCopied += b.appendNull();
+      } else {
+        bytesCopied += b.appendDecimal128(cv.getBinary(i));
+      }
+    }
+    return bytesCopied;
+  }
+
+  public static long decimal32Copy(ColumnVector cv, RapidsHostColumnBuilder b, int rows,
       int precision, int scale) {
+    long bytesCopied = 0L;
     if (!cv.hasNull()) {
       for (int i = 0; i < rows; i++) {
-        b.append((int) cv.getDecimal(i, precision, scale).toUnscaledLong());
+        bytesCopied += b.append((int) cv.getDecimal(i, precision, scale).toUnscaledLong());
       }
-      return;
+      return bytesCopied;
     }
     for (int i = 0; i < rows; i++) {
       if (cv.isNullAt(i)) {
-        b.appendNull();
+        bytesCopied += b.appendNull();
       } else {
-        b.append((int) cv.getDecimal(i, precision, scale).toUnscaledLong());
+        bytesCopied += b.append((int) cv.getDecimal(i, precision, scale).toUnscaledLong());
       }
     }
+    return bytesCopied;
   }
 
-  public static void decimal64Copy(ColumnVector cv, RapidsHostColumnBuilder b, int rows,
+  public static long decimal64Copy(ColumnVector cv, RapidsHostColumnBuilder b, int rows,
       int precision, int scale) {
+    long bytesCopied = 0L;
     if (!cv.hasNull()) {
       for (int i = 0; i < rows; i++) {
-        b.append(cv.getDecimal(i, precision, scale).toUnscaledLong());
+        bytesCopied += b.append(cv.getDecimal(i, precision, scale).toUnscaledLong());
       }
-      return;
+      return bytesCopied;
     }
     for (int i = 0; i < rows; i++) {
       if (cv.isNullAt(i)) {
-        b.appendNull();
+        bytesCopied += b.appendNull();
       } else {
-        b.append(cv.getDecimal(i, precision, scale).toUnscaledLong());
+        bytesCopied += b.append(cv.getDecimal(i, precision, scale).toUnscaledLong());
       }
     }
+    return bytesCopied;
   }
 
-  public static void decimal128Copy(ColumnVector cv, RapidsHostColumnBuilder b, int rows,
+  public static long decimal128Copy(ColumnVector cv, RapidsHostColumnBuilder b, int rows,
       int precision, int scale) {
+    long bytesCopied = 0L;
     if (!cv.hasNull()) {
       for (int i = 0; i < rows; i++) {
-        b.append(cv.getDecimal(i, precision, scale).toJavaBigDecimal());
+        bytesCopied += b.append(cv.getDecimal(i, precision, scale).toJavaBigDecimal());
       }
-      return;
+      return bytesCopied;
     }
     for (int i = 0; i < rows; i++) {
       if (cv.isNullAt(i)) {
-        b.appendNull();
+        bytesCopied += b.appendNull();
       } else {
-        b.append(cv.getDecimal(i, precision, scale).toJavaBigDecimal());
+        bytesCopied += b.append(cv.getDecimal(i, precision, scale).toJavaBigDecimal());
       }
     }
+    return bytesCopied;
   }
 }

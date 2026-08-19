@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,8 +22,8 @@ import scala.collection.JavaConverters._
 import scala.collection.immutable.HashSet
 import scala.collection.mutable
 
-import ai.rapids.cudf.{CaptureGroups, ColumnVector, DType, NvtxColor, RegexProgram, Scalar, Schema, Table}
-import com.nvidia.spark.rapids.{ColumnarPartitionReaderWithPartitionValues, CSVPartitionReaderBase, DateUtils, GpuColumnVector, GpuExec, GpuMetric, HostStringColBufferer, HostStringColBuffererFactory, NvtxWithMetrics, PartitionReaderIterator, PartitionReaderWithBytesRead, RapidsConf}
+import ai.rapids.cudf.{CaptureGroups, ColumnVector, DType, RegexProgram, Scalar, Schema, Table}
+import com.nvidia.spark.rapids.{ColumnarPartitionReaderWithPartitionValues, CSVPartitionReaderBase, DateUtils, GpuColumnVector, GpuExec, GpuMetric, HostStringColBufferer, HostStringColBuffererFactory, NvtxIdWithMetrics, NvtxRegistry, PartitionReaderIterator, PartitionReaderWithBytesRead, RapidsConf}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric._
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingSeq
@@ -158,10 +158,17 @@ case class GpuHiveTableScanExec(requestedAttributes: Seq[Attribute],
         val normalizedFilters = partitionPruningPredicate.map(_.transform {
           case a: AttributeReference => originalAttributes(a)
         })
-        sparkSession.sessionState.catalog
-          .listPartitionsByFilter(hiveTableRelation.tableMeta.identifier, normalizedFilters)
+        SparkShimImpl.listPartitionsByFilter(
+          sparkSession,
+          hiveTableRelation.tableMeta.identifier,
+          normalizedFilters,
+          Some(hiveTableRelation.tableMeta))
       } else {
-        sparkSession.sessionState.catalog.listPartitions(hiveTableRelation.tableMeta.identifier)
+        SparkShimImpl.listPartitions(
+          sparkSession,
+          hiveTableRelation.tableMeta.identifier,
+          None,
+          Some(hiveTableRelation.tableMeta))
       }
     prunedPartitions.map(HiveClientImpl.toHivePartition(_, hiveQlTable))
   }
@@ -176,8 +183,8 @@ case class GpuHiveTableScanExec(requestedAttributes: Seq[Attribute],
     GPU_DECODE_TIME -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_GPU_DECODE_TIME),
     BUFFER_TIME -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_BUFFER_TIME),
     FILTER_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_FILTER_TIME),
-    BUFFER_TIME_WITH_SEM -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_BUFFER_TIME_WITH_SEM),
-    FILTER_TIME_WITH_SEM -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_FILTER_TIME_WITH_SEM),
+    BUFFER_TIME_BUBBLE -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_BUFFER_TIME_BUBBLE),
+    FILTER_TIME_BUBBLE -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_FILTER_TIME_BUBBLE),
     SCAN_TIME -> createNanoTimingMetric(ESSENTIAL_LEVEL, DESCRIPTION_SCAN_TIME)
   )
 
@@ -496,8 +503,7 @@ class GpuHiveDelimitedTextPartitionReader(conf: Configuration,
                            cudfReadDataSchema: Schema,
                            isFirstChunk: Boolean,
                            decodeTime: GpuMetric): Table = {
-    withResource(new NvtxWithMetrics(getFileFormatShortName + " decode",
-      NvtxColor.DARK_GREEN, decodeTime)) { _ =>
+    NvtxIdWithMetrics(NvtxRegistry.HIVE_DECODE, decodeTime) {
       // The delimiter is currently hard coded to ^A. This should be able to support any format
       //  but we don't want to test that yet
       val splitTable = withResource(dataBufferer.getColumnAndRelease) { cv =>

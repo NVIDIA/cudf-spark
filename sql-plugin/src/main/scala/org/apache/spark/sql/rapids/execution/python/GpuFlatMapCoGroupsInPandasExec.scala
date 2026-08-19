@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -153,9 +153,9 @@ case class GpuFlatMapCoGroupsInPandasExec(
       if (leftIter.isEmpty && rightIter.isEmpty) Iterator.empty else {
         // project and group for left and right
         val leftGroupedIter = projectAndGroup(leftIter, left.output, leftDedupAttrs,
-          leftGroupingOffsets, numInputRows, numInputBatches)
+          leftGroupingOffsets, numInputRows, numInputBatches, allMetrics)
         val rightGroupedIter = projectAndGroup(rightIter, right.output, rightDedupAttrs,
-          rightGroupingOffsets, numInputRows, numInputBatches)
+          rightGroupingOffsets, numInputRows, numInputBatches, allMetrics)
         // Cogroup the data
         val pyInputIter = new CoGroupedIterator(leftGroupedIter, leftDedupAttrs,
           leftGroupingOffsets, rightGroupedIter, rightDedupAttrs,  rightGroupingOffsets)

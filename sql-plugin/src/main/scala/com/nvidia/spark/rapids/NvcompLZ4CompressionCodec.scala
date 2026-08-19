@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,9 +16,9 @@
 
 package com.nvidia.spark.rapids
 
-import ai.rapids.cudf.{BaseDeviceMemoryBuffer, ContiguousTable, Cuda, DeviceMemoryBuffer, NvtxColor, NvtxRange}
+import ai.rapids.cudf.{BaseDeviceMemoryBuffer, ContiguousTable, Cuda, DeviceMemoryBuffer}
 import ai.rapids.cudf.nvcomp.{BatchedLZ4Compressor, BatchedLZ4Decompressor}
-import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+import com.nvidia.spark.rapids.Arm.closeOnExcept
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.format.{BufferMeta, CodecType}
 
@@ -58,7 +58,7 @@ class BatchedNvcompLZ4Compressor(maxBatchMemorySize: Long,
       buffer
     }
     closeOnExcept(batchCompressor.compress(inputBuffers, stream)) { compressedBuffers =>
-      withResource(new NvtxRange("lz4 post process", NvtxColor.YELLOW)) { _ =>
+      NvtxRegistry.LZ4_POST_PROCESS {
         require(compressedBuffers.length == tables.length,
           s"expected ${tables.length} buffers, but compress() returned ${compressedBuffers.length}")
         compressedBuffers.zip(tables).map { case (buffer, table) =>
@@ -99,7 +99,7 @@ class BatchedNvcompLZ4Decompressor(maxBatchMemory: Long,
   private def allocateOutputBuffers(
       inputBuffers: Array[BaseDeviceMemoryBuffer],
       bufferMetas: Array[BufferMeta]): Array[DeviceMemoryBuffer] = {
-    withResource(new NvtxRange("alloc output bufs", NvtxColor.YELLOW)) { _ =>
+    NvtxRegistry.ALLOC_OUTPUT_BUFS {
       bufferMetas.zip(inputBuffers).safeMap { case (meta, input) =>
         // cudf decompressor guarantees that close will be called for 'inputBuffers' and will not
         // throw before doing so, but this interface does not close inputs so we need to increment

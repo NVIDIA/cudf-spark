@@ -1,4 +1,4 @@
-# Copyright (c) 2023-2025, NVIDIA CORPORATION.
+# Copyright (c) 2023-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -76,7 +76,7 @@ def test_xxhash64_8_depth():
         lambda spark: unary_op_df(spark, gen_8_depth).selectExpr("a", "xxhash64(a)"))
 
 
-@allow_non_gpu("ProjectExec")
+@allow_non_gpu("XxHash64")
 def test_xxhash64_fallback_exceeds_stack_size_array_of_structure():
     gen_9_depth = (
         ArrayGen(  # depth += 1
@@ -94,10 +94,10 @@ def test_xxhash64_fallback_exceeds_stack_size_array_of_structure():
             max_length=1))
     assert_gpu_fallback_collect(
         lambda spark: unary_op_df(spark, gen_9_depth).selectExpr("a", "xxhash64(a)"),
-        "ProjectExec")
+        "XxHash64")
 
 
-@allow_non_gpu("ProjectExec")
+@allow_non_gpu("XxHash64")
 def test_xxhash64_array_of_other():
     gen_9_depth = (
         ArrayGen(  # array(other: not struct): depth += 0
@@ -125,7 +125,7 @@ def test_xxhash64_array_of_other():
         {"spark.sql.legacy.allowHashOnMapType": True})
 
 
-@allow_non_gpu("ProjectExec")
+@allow_non_gpu("XxHash64")
 def test_xxhash64_fallback_exceeds_stack_size_structure():
     gen_9_depth = (
         StructGen([('l1',  # level 1
@@ -139,10 +139,10 @@ def test_xxhash64_fallback_exceeds_stack_size_structure():
                                                                                                         int_gen)]))]))]))]))]))]))]))]))  # level 9
     assert_gpu_fallback_collect(
         lambda spark: unary_op_df(spark, gen_9_depth).selectExpr("a", "xxhash64(a)"),
-        "ProjectExec")
+        "XxHash64")
 
 
-@allow_non_gpu("ProjectExec")
+@allow_non_gpu("XxHash64")
 def test_xxhash64_fallback_exceeds_stack_size_map():
     gen_9_depth = (
         MapGen(  # depth += 2
@@ -160,7 +160,7 @@ def test_xxhash64_fallback_exceeds_stack_size_map():
             max_length=1))
     assert_gpu_fallback_collect(
         lambda spark: unary_op_df(spark, gen_9_depth).selectExpr("a", "xxhash64(a)"),
-        "ProjectExec",
+        "XxHash64",
         {"spark.sql.legacy.allowHashOnMapType": True})
 
 def test_binary_sha1():
@@ -175,3 +175,28 @@ def test_str_special_characters_sha1():
     special_string_gen = StringGen().with_special_case('好').with_special_case('吃')
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: unary_op_df(spark, special_string_gen).selectExpr('sha1(a)'))
+
+
+@pytest.mark.parametrize("datagen", [binary_gen, string_gen])
+@pytest.mark.parametrize("bitlength", [-20, 0, 123, 224, 256, 384, 512], ids=idfn)
+def test_sha2_with_literal_bitlengths(bitlength, datagen):
+    """
+    Tests sha2 with bitlengths provided as literals, for string and binary inputs.
+    For bitlength==0, the output is the same as with 256.  Should run on the GPU.
+    For bitlength ∈ [-1, 123], the output should be nulls.  Should still run on the GPU.
+    All the other bitlengths are valid and should run on the GPU.
+    """
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: unary_op_df(spark, datagen).selectExpr(f'SHA2(a, {bitlength})'))
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: unary_op_df(spark, datagen).selectExpr(f'SHA2("asdf", {bitlength})'))
+
+
+@allow_non_gpu("Sha2", "Cast", "Length")
+def test_sha2_bitlength_fallback():
+    """
+    Verifies that sha2 falls back to the CPU when the bitlength argument is not a literal.
+    """
+    assert_gpu_fallback_collect(
+        lambda spark: unary_op_df(spark, string_gen).selectExpr('SHA2(a, LENGTH(a))'),
+        "Sha2")

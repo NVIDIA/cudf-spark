@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,7 +20,7 @@ import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 
 import ai.rapids.cudf
-import ai.rapids.cudf.{NvtxColor, Scalar}
+import ai.rapids.cudf.Scalar
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource, withResourceIfAllowed}
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{splitSpillableInHalfByRows, withRetry}
@@ -309,8 +309,7 @@ class GpuCachedDoublePassWindowIterator(
         postProcessedIter = Some(withRetry(getReadyForPostProcessing(),
           splitSpillableInHalfByRows) { sb =>
           withResource(sb.getColumnarBatch()) { cb =>
-            val ret = withResource(
-              new NvtxWithMetrics("DoubleBatchedWindow_POST", NvtxColor.BLUE, opTime)) { _ =>
+            val ret = NvtxIdWithMetrics(NvtxRegistry.DOUBLE_BATCHED_WINDOW_POST, opTime) {
               postProcess(cb)
             }
             numOutputBatches += 1
@@ -334,8 +333,7 @@ class GpuCachedDoublePassWindowIterator(
       } else {
         val cb = waitingForFirstPass.get
         waitingForFirstPass = None
-        withResource(
-          new NvtxWithMetrics("DoubleBatchedWindow_PRE", NvtxColor.CYAN, opTime)) { _ =>
+        NvtxIdWithMetrics(NvtxRegistry.DOUBLE_BATCHED_WINDOW_PRE, opTime) {
           // firstPassComputeAndCache takes ownership of the batch passed to it
           firstPassComputeAndCache(cb)
         }
@@ -370,11 +368,14 @@ case class GpuCachedDoublePassWindowExec(
   override protected def internalDoExecuteColumnar(): RDD[ColumnarBatch] = {
     val numOutputBatches = gpuLongMetric(GpuMetric.NUM_OUTPUT_BATCHES)
     val numOutputRows = gpuLongMetric(GpuMetric.NUM_OUTPUT_ROWS)
-    val opTime = gpuLongMetric(GpuMetric.OP_TIME)
+    val opTime = gpuLongMetric(GpuMetric.OP_TIME_LEGACY)
 
-    val boundWindowOps = GpuBindReferences.bindGpuReferences(windowOps, child.output)
-    val boundPartitionSpec = GpuBindReferences.bindGpuReferences(gpuPartitionSpec, child.output)
-    val boundOrderSpec = GpuBindReferences.bindReferences(gpuOrderSpec, child.output)
+    val boundWindowOps = GpuBindReferences.bindGpuReferences(windowOps, child.output,
+      allMetrics)
+    val boundPartitionSpec = GpuBindReferences.bindGpuReferences(gpuPartitionSpec,
+      child.output, allMetrics)
+    val boundOrderSpec = GpuBindReferences.bindReferences(gpuOrderSpec, child.output,
+      allMetrics)
 
     child.executeColumnar().mapPartitions { iter =>
       new GpuCachedDoublePassWindowIterator(iter, boundWindowOps, boundPartitionSpec,

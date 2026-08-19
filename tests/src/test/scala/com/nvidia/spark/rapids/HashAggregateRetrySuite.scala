@@ -59,7 +59,7 @@ class HashAggregateRetrySuite
     when(mockMetrics.numAggOps).thenReturn(NoopMetric)
     val aggHelper = spy(new AggHelper(
       Seq.empty, Seq.empty, Seq.empty,
-      forceMerge = false, new SQLConf(), isSorted = false))
+      forceMerge = false, new SQLConf(), isSorted = false, Map.empty[String, GpuMetric]))
 
     // mock out a reduction on the first column
     val aggs = new ArrayBuffer[CudfAggregate]()
@@ -78,7 +78,7 @@ class HashAggregateRetrySuite
     val aggHelper = spy(new AggHelper(
       Seq.empty, Seq.empty, Seq.empty,
       forceMerge = forceMerge, new SQLConf(),
-      isSorted = false))
+      isSorted = false, Map.empty[String, GpuMetric]))
 
     // mock out a group by with the first column as key, and second column
     // as a group by sum

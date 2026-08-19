@@ -16,6 +16,8 @@
 
 package com.nvidia.spark.rapids.lore
 
+import scala.util.control.NonFatal
+
 import com.nvidia.spark.rapids.{DumpUtils, GpuColumnVector, GpuExec, KudoSerializedTableColumn, SerializedTableColumn}
 import com.nvidia.spark.rapids.GpuCoalesceExec.EmptyPartition
 import com.nvidia.spark.rapids.jni.kudo.KudoSerializer
@@ -35,19 +37,29 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.util.SerializableConfiguration
 
 
-case class LoreDumpRDDInfo(idxInParent: Int, loreOutputInfo: LoreOutputInfo, attrs: Seq[Attribute],
-    hadoopConf: Broadcast[SerializableConfiguration])
+case class LoreDumpRDDInfo(
+    idxInParent: Int,
+    loreOutputInfo: LoreOutputInfo,
+    attrs: Seq[Attribute],
+    hadoopConf: Broadcast[SerializableConfiguration],
+    useOriginalSchemaNames: Boolean = false,
+    nonStrictMode: Boolean = false)
 
 class GpuLoreDumpRDD(info: LoreDumpRDDInfo, input: RDD[ColumnarBatch])
-  extends RDD[ColumnarBatch](input) with GpuLoreRDD {
+  extends RDD[ColumnarBatch](input) with GpuLoreRDD with Logging {
   override def rootPath: Path = pathOfChild(info.loreOutputInfo.path, info.idxInParent)
   private val factDataTypes = info.attrs.map(_.dataType)
   lazy val kudoSerializer: KudoSerializer = new KudoSerializer(
     GpuColumnVector.from(factDataTypes.toArray))
 
   def saveMeta(): Unit = {
-    val meta = LoreRDDMeta(input.getNumPartitions, this.getPartitions.map(_.index), info.attrs)
-    GpuLore.dumpObject(meta, pathOfMeta, this.context.hadoopConfiguration)
+    try {
+      val meta = LoreRDDMeta(input.getNumPartitions, this.getPartitions.map(_.index), info.attrs)
+      GpuLore.dumpObject(meta, pathOfMeta, this.context.hadoopConfiguration)
+    } catch {
+      case NonFatal(e) if (info.nonStrictMode) =>
+        logWarning(s"Failed to save LORE RDD meta to $pathOfMeta: ${e.getMessage}", e)
+    }
   }
 
   override def compute(split: Partition, context: TaskContext): Iterator[ColumnarBatch] = {
@@ -69,26 +81,45 @@ class GpuLoreDumpRDD(info: LoreDumpRDDInfo, input: RDD[ColumnarBatch])
           loadNextBatch()
           if (!hasNext) {
             // This is the last batch, save the partition meta
-            val isFromShuffle = ret.numCols() == 1 &&
-              (ret.column(0).isInstanceOf[SerializedTableColumn] || ret.column(0)
-                .isInstanceOf[KudoSerializedTableColumn])
-            val partitionMeta = if (isFromShuffle) {
-              // get the array of dataType from the info.attrs
-              LoreRDDPartitionMeta(batchIdx, factDataTypes)
-            } else {
-              LoreRDDPartitionMeta(batchIdx, GpuColumnVector.extractTypes(ret))
+            try {
+              val isFromShuffle = ret.numCols() == 1 &&
+                (ret.column(0).isInstanceOf[SerializedTableColumn] || ret.column(0)
+                  .isInstanceOf[KudoSerializedTableColumn])
+              val partitionMeta = if (isFromShuffle) {
+                // get the array of dataType from the info.attrs
+                LoreRDDPartitionMeta(batchIdx, factDataTypes)
+              } else {
+                LoreRDDPartitionMeta(batchIdx, GpuColumnVector.extractTypes(ret))
+              }
+              GpuLore.dumpObject(partitionMeta, pathOfPartitionMeta(split.index),
+                info.hadoopConf.value.value)
+            } catch {
+              case NonFatal(e) if (info.nonStrictMode) =>
+                logWarning(s"Failed to save LORE partition meta for partition ${split.index}: " +
+                  s"${e.getMessage}", e)
             }
-            GpuLore.dumpObject(partitionMeta, pathOfPartitionMeta(split.index),
-              info.hadoopConf.value.value)
           }
           ret
         }
 
         private def dumpCurrentBatch(): ColumnarBatch = {
-          val outputPath = pathOfBatch(split.index, batchIdx)
-          val outputStream = outputPath.getFileSystem(info.hadoopConf.value.value)
-            .create(outputPath, true)
-          DumpUtils.dumpToParquet(nextBatch.get, outputStream, Some(kudoSerializer))
+          try {
+            val outputPath = pathOfBatch(split.index, batchIdx)
+            val outputStream = outputPath.getFileSystem(info.hadoopConf.value.value)
+              .create(outputPath, true)
+            if (info.useOriginalSchemaNames) {
+              val colNames = info.attrs.map(_.name)
+              val sparkTypes = info.attrs.map(_.dataType)
+              DumpUtils.dumpToParquet(nextBatch.get, outputStream, colNames, sparkTypes,
+                Some(kudoSerializer))
+            } else {
+              DumpUtils.dumpToParquet(nextBatch.get, outputStream, Some(kudoSerializer))
+            }
+          } catch {
+            case NonFatal(e) if (info.nonStrictMode) =>
+              logWarning(s"Failed to dump LORE batch ${batchIdx} for partition ${split.index}: " +
+                s"${e.getMessage}", e)
+          }
           nextBatch.get
         }
 

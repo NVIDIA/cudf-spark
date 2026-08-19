@@ -188,6 +188,7 @@ MapConcat,4
 MapEntries,4
 MapFilter,4
 MapFromArrays,4
+MapFromEntries,4
 MapKeys,4
 MapValues,4
 MapZipWith,4
@@ -260,6 +261,7 @@ SpecifiedWindowFrame,4
 Sqrt,4
 Stack,4
 StartsWith,4
+StaticInvoke,4
 StddevPop,4
 StddevSamp,4
 StringInstr,4
@@ -297,6 +299,7 @@ UnboundedPreceding$,4
 UnixTimestamp,4
 UnscaledValue,4
 Upper,4
+Uuid,4
 VariancePop,4
 VarianceSamp,4
 WeekDay,4

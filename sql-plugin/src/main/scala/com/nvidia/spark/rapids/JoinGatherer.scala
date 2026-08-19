@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2024, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2021-2025, NVIDIA CORPORATION. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids
 
-import ai.rapids.cudf.{ColumnVector, ColumnView, DeviceMemoryBuffer, DType, GatherMap, NvtxColor, NvtxRange, OrderByArg, OutOfBoundsPolicy, Scalar, Table}
+import ai.rapids.cudf.{ColumnVector, ColumnView, DeviceMemoryBuffer, DType, GatherMap, OrderByArg, OutOfBoundsPolicy, Scalar, Table}
 import com.nvidia.spark.Retryable
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
@@ -158,8 +158,9 @@ object JoinGatherer {
     MultiJoinGather(left, right)
   }
 
-  def getRowsInNextBatch(gatherer: JoinGatherer, targetSize: Long): Int = {
-    withResource(new NvtxRange("calc gather size", NvtxColor.YELLOW)) { _ =>
+  def getRowsInNextBatch(gatherer: JoinGatherer, targetSize: Long,
+      sizeEstimateThreshold: Double = 0.75): Int = {
+    NvtxRegistry.CALC_GATHER_SIZE {
       val rowsLeft = gatherer.numRowsLeft
       val rowEstimate: Long = gatherer.getFixedWidthBitSize match {
         case Some(fixedBitSize) =>
@@ -167,7 +168,8 @@ object JoinGatherer {
           Math.max(1, (targetSize / fixedBitSize) * 8)
         case None =>
           // Heuristic to see if we need to do the expensive calculation
-          if (rowsLeft * gatherer.realCheapPerRowSizeEstimate <= targetSize * 0.75) {
+          if ((rowsLeft * gatherer.realCheapPerRowSizeEstimate) <= 
+            (targetSize * sizeEstimateThreshold)) {
             rowsLeft
           } else {
             gatherer.gatherRowEstimate(targetSize)
@@ -284,7 +286,7 @@ class LazySpillableColumnarBatchImpl(
 
   override def getBatch: ColumnarBatch = {
     if (cached.isEmpty) {
-      withResource(new NvtxRange("get batch " + name, NvtxColor.RED)) { _ =>
+      NvtxRegistry.GET_JOIN_BATCH {
         cached = spill.map(_.getColumnarBatch())
       }
     }
@@ -301,7 +303,7 @@ class LazySpillableColumnarBatchImpl(
 
   override def allowSpilling(): Unit = {
     if (spill.isEmpty && cached.isDefined) {
-      withResource(new NvtxRange("spill batch " + name, NvtxColor.RED)) { _ =>
+      NvtxRegistry.SPILL_JOIN_BATCH {
         // First time we need to allow for spilling
         try {
           spill = Some(SpillableColumnarBatch(cached.get,
@@ -375,7 +377,7 @@ class LazySpillableGatherMapImpl(
 
   private def getBuffer = {
     if (cached.isEmpty) {
-      withResource(new NvtxRange("get map " + name, NvtxColor.RED)) { _ =>
+      NvtxRegistry.GET_JOIN_MAP {
         cached = spill.map { sb =>
           GpuSemaphore.acquireIfNecessary(TaskContext.get())
           RmmRapidsRetryIterator.withRetryNoSplit {
@@ -389,7 +391,7 @@ class LazySpillableGatherMapImpl(
 
   override def allowSpilling(): Unit = {
     if (spill.isEmpty && cached.isDefined) {
-      withResource(new NvtxRange("spill map " + name, NvtxColor.RED)) { _ =>
+      NvtxRegistry.SPILL_JOIN_MAP {
         try {
           // First time we need to allow for spilling
           spill = Some(SpillableBuffer(cached.get,

@@ -21,8 +21,13 @@ package org.apache.spark.sql.rapids.suites
 
 import java.util.TimeZone
 
-import org.apache.spark.sql.catalyst.expressions.JsonExpressionsSuite
+import org.apache.spark.SparkException
+import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.expressions.{JsonExpressionsSuite, JsonToStructs, Literal}
+import org.apache.spark.sql.catalyst.util.DateTimeTestUtils.UTC_OPT
+import org.apache.spark.sql.catalyst.util.FailFastMode
 import org.apache.spark.sql.rapids.utils.{RapidsJsonConfTrait, RapidsTestsTrait}
+import org.apache.spark.sql.types.{IntegerType, StructField, StructType}
 
 class RapidsJsonExpressionsSuite
     extends JsonExpressionsSuite with RapidsTestsTrait with RapidsJsonConfTrait {
@@ -36,5 +41,24 @@ class RapidsJsonExpressionsSuite
   override def afterAll(): Unit = {
     TimeZone.setDefault(originalTimeZone)
     super.afterAll()
+  }
+
+  testRapids("from_json - invalid data") {
+    val jsonData = """{"a" 1}"""
+    val schema = StructType(StructField("a", IntegerType) :: Nil)
+    checkEvaluation(
+      JsonToStructs(schema, Map.empty, Literal(jsonData), UTC_OPT),
+      InternalRow(null)
+    )
+
+    val exception = intercept[SparkException] {
+      checkEvaluation(
+        JsonToStructs(schema, Map("mode" -> FailFastMode.name), Literal(jsonData), UTC_OPT),
+        InternalRow(null)
+      )
+    }
+    assert(exception.isInstanceOf[SparkException])
+    assert(exception.getMessage.contains(
+      "Malformed records are detected in record parsing. Parse Mode: FAILFAST"))
   }
 }

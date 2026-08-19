@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,9 +20,10 @@ import ai.rapids.cudf.ColumnVector
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm._
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
-import com.nvidia.spark.rapids.jni.ParseURI
+import com.nvidia.spark.rapids.jni.{ExceptionWithRowIndex, ParseURI}
 import com.nvidia.spark.rapids.shims.ShimExpression
 
+import org.apache.spark.SparkException
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -48,7 +49,7 @@ object GpuParseUrl {
   }
 }
 
-case class GpuParseUrl(children: Seq[Expression]) 
+case class GpuParseUrl(children: Seq[Expression], failOnError: Boolean)
   extends GpuExpression with ShimExpression with ExpectsInputTypes {
 
   override def nullable: Boolean = true
@@ -62,18 +63,30 @@ case class GpuParseUrl(children: Seq[Expression])
     val part = partToExtract.getValue.asInstanceOf[UTF8String].toString
     part match {
       case PROTOCOL =>
-        ParseURI.parseURIProtocol(url.getBase)
+        ParseURI.parseURIProtocol(url.getBase, failOnError)
       case HOST =>
-        ParseURI.parseURIHost(url.getBase)
+        ParseURI.parseURIHost(url.getBase, failOnError)
       case QUERY =>
-        ParseURI.parseURIQuery(url.getBase)
+        ParseURI.parseURIQuery(url.getBase, failOnError)
       case PATH =>
-        ParseURI.parseURIPath(url.getBase)
+        ParseURI.parseURIPath(url.getBase, failOnError)
       case REF | FILE | AUTHORITY | USERINFO =>
         throw new UnsupportedOperationException(s"$this is not supported partToExtract=$part. " +
             s"Only PROTOCOL, HOST, QUERY and PATH are supported")
       case _ =>
-        return GpuColumnVector.columnVectorFromNull(url.getRowCount.toInt, StringType)
+        // For invalid parts, we still need to validate the URL first in ANSI mode
+        // If the URL is invalid, the parsing should fail and throw an error
+        // If the URL is valid, then we return NULL for the invalid part
+        if (failOnError) {
+          // Try to parse with PROTOCOL to validate the URL, but ignore the result
+          // This will throw an exception if the URL is invalid
+          withResource(ParseURI.parseURIProtocol(url.getBase, failOnError)) { _ =>
+            // URL is valid, return NULL for invalid part
+            GpuColumnVector.columnVectorFromNull(url.getRowCount.toInt, StringType)
+          }
+        } else {
+          GpuColumnVector.columnVectorFromNull(url.getRowCount.toInt, StringType)
+        }
     }
   }
 
@@ -84,7 +97,7 @@ case class GpuParseUrl(children: Seq[Expression])
       return GpuColumnVector.columnVectorFromNull(col.getRowCount.toInt, StringType)
     }
     val keyStr = key.getValue.asInstanceOf[UTF8String].toString
-    ParseURI.parseURIQueryWithLiteral(col.getBase, keyStr)
+    ParseURI.parseURIQueryWithLiteral(col.getBase, keyStr, failOnError)
   }
 
   def doColumnar(col: GpuColumnVector, partToExtract: GpuScalar, 
@@ -94,7 +107,14 @@ case class GpuParseUrl(children: Seq[Expression])
       // return a null columnvector
       return GpuColumnVector.columnVectorFromNull(col.getRowCount.toInt, StringType)
     }
-    ParseURI.parseURIQueryWithColumn(col.getBase, key.getBase)
+    ParseURI.parseURIQueryWithColumn(col.getBase, key.getBase, failOnError)
+  }
+
+  private def parseUrlException(rowException: ExceptionWithRowIndex,
+                                  part: String): Nothing = {
+    val errorRowIndex = rowException.getRowIndex
+    throw new SparkException(
+      s"[INVALID_URL] The url is invalid: $part at row $errorRowIndex")
   }
 
   override def columnarEval(batch: ColumnarBatch): GpuColumnVector = {
@@ -104,7 +124,14 @@ case class GpuParseUrl(children: Seq[Expression])
         withResourceIfAllowed(partToExtract.columnarEvalAny(batch)) { parts =>
           parts match {
             case partScalar: GpuScalar =>
-              GpuColumnVector.from(doColumnar(urls, partScalar), dataType)
+              try {
+                GpuColumnVector.from(doColumnar(urls, partScalar), dataType)
+              } catch {
+                case rowException: ExceptionWithRowIndex if failOnError =>
+                  val urlValue = ColumnViewUtils.getElementStringFromColumnView(
+                    urls.getBase, rowException.getRowIndex)
+                  parseUrlException(rowException, s"'$urlValue'")
+              }
             case _ =>
               throw new UnsupportedOperationException(
                 s"Cannot columnar evaluate expression: $this")
@@ -120,9 +147,23 @@ case class GpuParseUrl(children: Seq[Expression])
           withResourceIfAllowed(key.columnarEvalAny(batch)) { keys =>
             (urls, parts, keys) match {
               case (urlCv: GpuColumnVector, partScalar: GpuScalar, keyScalar: GpuScalar) =>
-                GpuColumnVector.from(doColumnar(urlCv, partScalar, keyScalar), dataType)
+                try {
+                  GpuColumnVector.from(doColumnar(urlCv, partScalar, keyScalar), dataType)
+                } catch {
+                  case rowException: ExceptionWithRowIndex if failOnError =>
+                    val urlValue = ColumnViewUtils.getElementStringFromColumnView(
+                      urlCv.getBase, rowException.getRowIndex)
+                    parseUrlException(rowException, s"'$urlValue'")
+                }
               case (urlCv: GpuColumnVector, partScalar: GpuScalar, keyCv: GpuColumnVector) =>
-                GpuColumnVector.from(doColumnar(urlCv, partScalar, keyCv), dataType)
+                try {
+                  GpuColumnVector.from(doColumnar(urlCv, partScalar, keyCv), dataType)
+                } catch {
+                  case rowException: ExceptionWithRowIndex if failOnError =>
+                    val urlValue = ColumnViewUtils.getElementStringFromColumnView(
+                      urlCv.getBase, rowException.getRowIndex)
+                    parseUrlException(rowException, s"'$urlValue'")
+                }
               case _ =>
                 throw new 
                     UnsupportedOperationException(s"Cannot columnar evaluate expression: $this")

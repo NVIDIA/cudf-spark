@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,8 +18,6 @@ package com.nvidia.spark.rapids
 import scala.collection.mutable
 import scala.util.Random
 
-import ai.rapids.cudf.NvtxColor
-import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.GpuMetric._
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
 import com.nvidia.spark.rapids.shims.ShimUnaryExecNode
@@ -87,9 +85,12 @@ case class GpuExpandExec(
   override val outputBatchesLevel: MetricsLevel = MODERATE_LEVEL
   override lazy val additionalMetrics: Map[String, GpuMetric] = Map(
     PRE_PROJECT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, "pre-projection time"),
-    OP_TIME -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_OP_TIME),
+    OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY),
     NUM_INPUT_ROWS -> createMetric(DEBUG_LEVEL, DESCRIPTION_NUM_INPUT_ROWS),
-    NUM_INPUT_BATCHES -> createMetric(DEBUG_LEVEL, DESCRIPTION_NUM_INPUT_BATCHES))
+    NUM_INPUT_BATCHES -> createMetric(DEBUG_LEVEL, DESCRIPTION_NUM_INPUT_BATCHES),
+    CPU_BRIDGE_PROCESSING_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
+      DESCRIPTION_CPU_BRIDGE_PROCESSING_TIME),
+    CPU_BRIDGE_WAIT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_CPU_BRIDGE_WAIT_TIME))
 
   // The GroupExpressions can output data with arbitrary partitioning, so set it
   // as UNKNOWN partitioning
@@ -109,13 +110,12 @@ case class GpuExpandExec(
     if (preprojectEnabled) {
       // Tiered projection is enabled, check if pre-projection is needed.
       val boundPreprojections = GpuBindReferences.bindGpuReferencesTiered(
-        preprojectionList, child.output, conf)
+        preprojectionList, child.output, conf, metricsMap)
       if (boundPreprojections.exprTiers.size > 1) {
         logDebug("GPU expanding with pre-projection.")
-        // We got some nested expressions, so pre-projection is good to enable.
         projectionsForBind = preprojectedProjections
         attributesForBind = preprojectionList.map(_.toAttribute)
-        val opMetric = metricsMap(OP_TIME)
+        val opMetric = metricsMap(OP_TIME_LEGACY)
         val preproMetric = metricsMap(PRE_PROJECT_TIME)
         preprojectIter = (iter: Iterator[ColumnarBatch]) => iter.map(cb =>
           GpuMetric.ns(opMetric, preproMetric) {
@@ -127,7 +127,7 @@ case class GpuExpandExec(
     }
 
     val boundProjections = projectionsForBind.map { pl =>
-      GpuBindReferences.bindGpuReferencesTiered(pl, attributesForBind, conf)
+      GpuBindReferences.bindGpuReferencesTiered(pl, attributesForBind, conf, metricsMap)
     }
 
     child.executeColumnar().mapPartitions { it =>
@@ -204,7 +204,7 @@ class GpuExpandIterator(
   private val numOutputBatches = metrics(NUM_OUTPUT_BATCHES)
   private val numInputRows = metrics(NUM_INPUT_ROWS)
   private val numOutputRows = metrics(NUM_OUTPUT_ROWS)
-  private val opTime = metrics(OP_TIME)
+  private val opTime = metrics(OP_TIME_LEGACY)
 
   // Don't install the callback if in a unit test
   Option(TaskContext.get()).foreach { tc =>
@@ -224,8 +224,7 @@ class GpuExpandIterator(
       sb = Some(SpillableColumnarBatch(cb, SpillPriorities.ACTIVE_ON_DECK_PRIORITY))
     }
 
-    val projectedBatch = withResource(new NvtxWithMetrics(
-      "ExpandExec projections", NvtxColor.GREEN, opTime)) { _ =>
+    val projectedBatch = NvtxIdWithMetrics(NvtxRegistry.EXPAND_EXEC_PROJECTIONS, opTime) {
       boundProjections(projectionIndex).projectWithRetrySingleBatch(sb.get)
     }
 

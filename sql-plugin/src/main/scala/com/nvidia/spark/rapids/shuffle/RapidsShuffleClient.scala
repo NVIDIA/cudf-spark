@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,7 +20,7 @@ import java.util.concurrent.{ConcurrentHashMap, Executor}
 
 import scala.collection.mutable.ArrayBuffer
 
-import ai.rapids.cudf.{DeviceMemoryBuffer, NvtxColor, NvtxRange}
+import ai.rapids.cudf.DeviceMemoryBuffer
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.format.{MetadataResponse, TableMeta, TransferState}
@@ -174,7 +174,7 @@ class RapidsShuffleClient(
   def doFetch(shuffleRequests: Seq[ShuffleBlockBatchId],
               handler: RapidsShuffleFetchHandler): Unit = {
     try {
-      withResource(new NvtxRange("Client.fetch", NvtxColor.PURPLE)) { _ =>
+      NvtxRegistry.CLIENT_FETCH {
         require(shuffleRequests.nonEmpty, "Sending empty blockIds in the MetadataRequest?")
 
         val metaReq = new RefCountedDirectByteBuffer(
@@ -213,7 +213,7 @@ class RapidsShuffleClient(
         tx.getStatus match {
           case TransactionStatus.Success =>
             withResource(tx.releaseMessage()) { resp =>
-              withResource(new NvtxRange("Client.handleMeta", NvtxColor.CYAN)) { _ =>
+              NvtxRegistry.CLIENT_HANDLE_META {
                 try {
                   // start the receives
                   val metadataResponse =
@@ -377,7 +377,7 @@ class RapidsShuffleClient(
       withResource(tx) { _ =>
         tx.getStatus match {
           case TransactionStatus.Success =>
-            withResource(new NvtxRange("Buffer Callback", NvtxColor.RED)) { _ =>
+            NvtxRegistry.BUFFER_CALLBACK {
               // consume buffers, which will non empty for batches that are ready
               // to be handed off to the catalog
               val buffMetas = bufferReceiveState.consumeWindow()

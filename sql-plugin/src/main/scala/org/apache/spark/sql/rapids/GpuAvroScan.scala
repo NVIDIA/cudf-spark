@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,19 +18,19 @@ package org.apache.spark.sql.rapids
 
 import java.io.{FileNotFoundException, IOException, OutputStream}
 import java.net.URI
-import java.util.concurrent.{Callable}
 
 import scala.annotation.tailrec
 import scala.collection.JavaConverters.mapAsScalaMapConverter
 import scala.collection.mutable.{ArrayBuffer, LinkedHashMap}
 import scala.language.implicitConversions
 
-import ai.rapids.cudf.{AvroOptions => CudfAvroOptions,HostMemoryBuffer, NvtxColor, NvtxRange, Table}
+import ai.rapids.cudf.{AvroOptions => CudfAvroOptions,HostMemoryBuffer, Table}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric.{BUFFER_TIME, FILTER_TIME, GPU_DECODE_TIME, NUM_OUTPUT_BATCHES, READ_FS_TIME, SCAN_TIME, WRITE_BUFFER_TIME}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
+import com.nvidia.spark.rapids.io.async.{AsyncRunner, UnboundedAsyncRunner}
 import com.nvidia.spark.rapids.jni.RmmSpark
 import com.nvidia.spark.rapids.shims.ShimFilePartitionReaderFactory
 import org.apache.avro.Schema
@@ -123,9 +123,10 @@ case class GpuAvroScan(
         dataSchema, readDataSchema, readPartitionSchema, parsedOptions, metrics,
         options.asScala.toMap)
     } else {
+      val poolConfBuilder = ThreadPoolConfBuilder(rapidsConf)
       GpuAvroMultiFilePartitionReaderFactory(sparkSession.sessionState.conf,
         rapidsConf, broadcastedConf, dataSchema, readDataSchema, readPartitionSchema,
-        parsedOptions, metrics, pushedFilters, queryUsesInputFile)
+        parsedOptions, metrics, pushedFilters, poolConfBuilder, queryUsesInputFile)
     }
   }
 
@@ -136,7 +137,7 @@ case class GpuAvroScan(
   override def equals(obj: Any): Boolean = obj match {
     case a: GpuAvroScan =>
       super.equals(a) && dataSchema == a.dataSchema && options == a.options &&
-          equivalentFilters(pushedFilters, a.pushedFilters) && rapidsConf == a.rapidsConf &&
+          equivalentFilters(pushedFilters, a.pushedFilters) &&
           queryUsesInputFile == a.queryUsesInputFile
     case _ => false
   }
@@ -203,6 +204,7 @@ case class GpuAvroMultiFilePartitionReaderFactory(
     options: AvroOptions,
     metrics: Map[String, GpuMetric],
     filters: Array[Filter],
+    poolConfBuilder: ThreadPoolConfBuilder,
     queryUsesInputFile: Boolean)
   extends MultiFilePartitionReaderFactoryBase(sqlConf, broadcastedConf, rapidsConf) {
 
@@ -211,7 +213,6 @@ case class GpuAvroMultiFilePartitionReaderFactory(
   private val ignoreMissingFiles = sqlConf.ignoreMissingFiles
   private val ignoreCorruptFiles = sqlConf.ignoreCorruptFiles
 
-  private val numThreads = rapidsConf.multiThreadReadNumThreads
   private val maxNumFileProcessed = rapidsConf.maxNumAvroFilesParallel
 
   // we can't use the coalescing files reader when InputFileName, InputFileBlockStart,
@@ -242,8 +243,9 @@ case class GpuAvroMultiFilePartitionReaderFactory(
     } else {
       partFiles.filter(_.filePath.toString().endsWith(".avro"))
     }
+    val poolConf = poolConfBuilder.build()
     val reader = new GpuMultiFileCloudAvroPartitionReader(
-      conf, files, numThreads, maxNumFileProcessed,
+      conf, files, poolConf, maxNumFileProcessed,
       filters, metrics, ignoreCorruptFiles, ignoreMissingFiles, debugDumpPrefix, debugDumpAlways,
       readDataSchema, partitionSchema, maxReadBatchSizeRows, maxReadBatchSizeBytes,
       maxGpuColumnSizeBytes)
@@ -301,9 +303,10 @@ case class GpuAvroMultiFilePartitionReaderFactory(
         }
       }
     }
+    val poolConf = poolConfBuilder.build()
     new GpuMultiFileAvroPartitionReader(conf, files, clippedBlocks.toSeq, readDataSchema,
       partitionSchema, maxReadBatchSizeRows, maxReadBatchSizeBytes, maxGpuColumnSizeBytes,
-      numThreads, debugDumpPrefix, debugDumpAlways, metrics, mapPathHeader.toMap)
+      poolConf, debugDumpPrefix, debugDumpAlways, metrics, mapPathHeader.toMap)
   }
 
 }
@@ -345,8 +348,7 @@ trait GpuAvroReaderBase extends Logging { self: FilePartitionReaderBase =>
 
     val table = try {
       RmmRapidsRetryIterator.withRetryNoSplit[Table] {
-        withResource(new NvtxWithMetrics("Avro decode",
-          NvtxColor.DARK_GREEN, metrics(GPU_DECODE_TIME))) { _ =>
+        NvtxIdWithMetrics(NvtxRegistry.AVRO_DECODE, metrics(GPU_DECODE_TIME)) {
           Table.readAvro(readOpts, hostBuf, 0, bufSize)
         }
       }
@@ -441,7 +443,7 @@ trait GpuAvroReaderBase extends Logging { self: FilePartitionReaderBase =>
       blocks: Seq[BlockInfo],
       headerSize: Long,
       conf: Configuration): (SpillableHostBuffer, Long) = {
-    withResource(new NvtxRange("Avro buffer file split", NvtxColor.YELLOW)) { _ =>
+    NvtxRegistry.AVRO_BUFFER_FILE_SPLIT {
       if (blocks.isEmpty) {
         // No need to check the header here since it can not be null when blocks is not empty.
         return (null, 0L)
@@ -591,7 +593,7 @@ class GpuAvroPartitionReader(
   }
 
   private def readBatch(): Option[ColumnarBatch] = {
-    withResource(new NvtxRange("Avro readBatch", NvtxColor.GREEN)) { _ =>
+    NvtxRegistry.AVRO_READ_BATCH {
       val currentChunkedBlocks = populateCurrentBlockChunk(blockIterator,
         maxReadBatchSizeRows, maxReadBatchSizeBytes)
       if (readDataSchema.isEmpty) {
@@ -630,7 +632,7 @@ class GpuAvroPartitionReader(
  *
  * @param conf the Hadoop configuration
  * @param files the partitioned files to read
- * @param numThreads the size of the threadpool
+ * @param poolConf thread pool configurations
  * @param maxNumFileProcessed threshold to control the maximum file number to be
  *                            submitted to threadpool
  * @param filters filters passed into the filterHandler
@@ -648,7 +650,7 @@ class GpuAvroPartitionReader(
 class GpuMultiFileCloudAvroPartitionReader(
     override val conf: Configuration,
     files: Array[PartitionedFile],
-    numThreads: Int,
+    poolConf: ThreadPoolConf,
     maxNumFileProcessed: Int,
     filters: Array[Filter],
     execMetrics: Map[String, GpuMetric],
@@ -661,7 +663,8 @@ class GpuMultiFileCloudAvroPartitionReader(
     maxReadBatchSizeRows: Integer,
     maxReadBatchSizeBytes: Long,
     maxGpuColumnSizeBytes: Long)
-  extends MultiFileCloudPartitionReaderBase(conf, files, numThreads, maxNumFileProcessed, filters,
+  extends MultiFileCloudPartitionReaderBase(conf,
+    files, poolConf, maxNumFileProcessed, filters,
     execMetrics, maxReadBatchSizeRows, maxReadBatchSizeBytes,
     ignoreCorruptFiles) with MultiFileReaderFunctions with GpuAvroReaderBase {
 
@@ -710,7 +713,7 @@ class GpuMultiFileCloudAvroPartitionReader(
       tc: TaskContext,
       file: PartitionedFile,
       config: Configuration,
-      filters: Array[Filter]): Callable[HostMemoryBuffersWithMetaDataBase] =
+      filters: Array[Filter]): AsyncRunner[HostMemoryBuffersWithMetaDataBase] =
     new ReadBatchRunner(tc, file, config, filters)
 
   /** Two utils classes */
@@ -723,9 +726,9 @@ class GpuMultiFileCloudAvroPartitionReader(
       taskContext: TaskContext,
       partFile: PartitionedFile,
       config: Configuration,
-      filters: Array[Filter]) extends Callable[HostMemoryBuffersWithMetaDataBase] with Logging {
+      filters: Array[Filter]) extends UnboundedAsyncRunner[BufferInfo] with Logging {
 
-    override def call(): HostMemoryBuffersWithMetaDataBase = {
+    override def callImpl(): BufferInfo = {
       TrampolineUtil.setTaskContext(taskContext)
       // Mark the async thread as a pool thread within the RetryFramework
       RmmSpark.poolThreadWorkingOnTask(taskContext.taskAttemptId())
@@ -867,11 +870,11 @@ class GpuMultiFileCloudAvroPartitionReader(
               } // end of while
 
               val bufAndSize: Array[SingleHMBAndMeta] = if (readDataSchema.isEmpty) {
-                hostBuffers.flatMap(_.hmbs).safeClose()
+                hostBuffers.safeClose()
                 Array(SingleHMBAndMeta.empty(totalRowsNum))
               } else if (isDone) {
                 // got close before finishing, return null buffer and zero size
-                hostBuffers.flatMap(_.hmbs).safeClose()
+                hostBuffers.safeClose()
                 Array(SingleHMBAndMeta.empty())
               } else {
                 hostBuffers.toArray
@@ -879,14 +882,14 @@ class GpuMultiFileCloudAvroPartitionReader(
               createBufferAndMeta(bufAndSize, startingBytesRead)
             } catch {
               case e: Throwable =>
-                hostBuffers.flatMap(_.hmbs).safeClose(e)
+                hostBuffers.safeClose(e)
                 throw e
             }
           }
         } // end of withResource(reader)
       val bufferTime = System.nanoTime() - bufferStartTime
       // multi-file avro scanner does not filter and then buffer, it just buffers
-      result.setMetrics(0, bufferTime)
+      result.setExecutionTime(0, bufferTime)
       result
     } // end of doRead
   } // end of Class ReadBatchRunner
@@ -907,14 +910,14 @@ class GpuMultiFileAvroPartitionReader(
     maxReadBatchSizeRows: Integer,
     maxReadBatchSizeBytes: Long,
     maxGpuColumnSizeBytes: Long,
-    numThreads: Int,
+    poolConf: ThreadPoolConf,
     override val debugDumpPrefix: Option[String],
     override val debugDumpAlways: Boolean,
     execMetrics: Map[String, GpuMetric],
     mapPathHeader: Map[Path, Header])
   extends MultiFileCoalescingPartitionReaderBase(conf, clippedBlocks,
-    partitionSchema, maxReadBatchSizeRows, maxReadBatchSizeBytes, maxGpuColumnSizeBytes, numThreads,
-    execMetrics) with GpuAvroReaderBase {
+    partitionSchema, maxReadBatchSizeRows, maxReadBatchSizeBytes, maxGpuColumnSizeBytes,
+    poolConf, execMetrics) with GpuAvroReaderBase {
 
   override def checkIfNeedToSplitDataBlock(
       currentBlockInfo: SingleDataBlockInfo,
@@ -994,7 +997,7 @@ class GpuMultiFileAvroPartitionReader(
       outhmb: HostMemoryBuffer,
       blocks: ArrayBuffer[DataBlockBase],
       offset: Long,
-      batchContext: BatchContext): Callable[(Seq[DataBlockBase], Long)] =
+      batchContext: BatchContext): AsyncRunner[(Seq[DataBlockBase], Long)] =
     new AvroCopyBlocksRunner(tc, file, outhmb, blocks, offset, batchContext)
 
   // The runner to copy blocks to offset of HostMemoryBuffer
@@ -1004,12 +1007,14 @@ class GpuMultiFileAvroPartitionReader(
       outhmb: HostMemoryBuffer,
       blocks: ArrayBuffer[DataBlockBase],
       offset: Long,
-      batchContext: BatchContext) extends Callable[(Seq[DataBlockBase], Long)] {
+      batchContext: BatchContext) extends UnboundedAsyncRunner[(Seq[DataBlockBase], Long)] {
 
     private val headerSync = Some(batchContext.mergedHeader.sync)
 
-    override def call(): (Seq[DataBlockBase], Long) = {
+    override def callImpl(): (Seq[DataBlockBase], Long) = {
       TrampolineUtil.setTaskContext(taskContext)
+      // Mark the async thread as a pool thread within the RetryFramework
+      RmmSpark.poolThreadWorkingOnTask(taskContext.taskAttemptId())
       try {
         val startBytesRead = fileSystemBytesRead()
         val res = withResource(outhmb) { _ =>
@@ -1022,6 +1027,7 @@ class GpuMultiFileAvroPartitionReader(
         val bytesRead = fileSystemBytesRead() - startBytesRead
         (res, bytesRead)
       } finally {
+        RmmSpark.poolThreadFinishedForTask(taskContext.taskAttemptId())
         TrampolineUtil.unsetTaskContext()
       }
     }

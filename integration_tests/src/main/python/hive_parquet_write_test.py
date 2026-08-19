@@ -1,4 +1,4 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.
+# Copyright (c) 2024-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@ from conftest import is_databricks_runtime
 from data_gen import *
 from hive_write_test import _restricted_timestamp
 from marks import allow_non_gpu, ignore_order
-from spark_session import with_cpu_session, with_gpu_session, is_before_spark_320, is_spark_350_or_later, is_before_spark_330, is_spark_330_or_later, is_databricks122_or_later
+from spark_session import with_cpu_session, with_gpu_session, is_before_spark_320, is_spark_350_or_later, is_spark_330_or_later, is_databricks122_or_later
 
 # Disable the meta conversion from Hive write to FrameData write in Spark, to test
 # "GpuInsertIntoHiveTable" for Parquet write.
@@ -206,7 +206,7 @@ def test_write_compressed_parquet_into_hive_table(spark_tmp_table_factory, comp_
 
 
 @allow_non_gpu(*non_utc_allow)
-@pytest.mark.skipif(is_before_spark_330() or (is_databricks_runtime() and not is_databricks122_or_later()),
+@pytest.mark.skipif(is_databricks_runtime() and not is_databricks122_or_later(),
                     reason="InsertIntoHiveTable supports bucketed write since Spark 330")
 def test_insert_hive_bucketed_table(spark_tmp_table_factory):
     num_rows = 2048

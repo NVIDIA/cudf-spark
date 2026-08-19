@@ -273,7 +273,10 @@ case class GpuIf(
     val colTypes = GpuColumnVector.extractTypes(batch)
 
     withResource(GpuColumnVector.from(batch)) { tbl =>
-      withResource(pred.getBase.unaryOp(UnaryOp.NOT)) { inverted =>
+      // Use boolInverted instead of NOT so null predicates become true,
+      // routing null-condition rows to the false branch (matching CPU
+      // semantics where null is treated as "not true").
+      withResource(boolInverted(pred.getBase)) { inverted =>
         // evaluate true expression against true batch
         val tt = withResource(filterBatch(tbl, pred.getBase, colTypes)) { trueBatch =>
           gpuTrueExpr.columnarEvalAny(trueBatch)

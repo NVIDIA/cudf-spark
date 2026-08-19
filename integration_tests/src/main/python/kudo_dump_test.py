@@ -27,6 +27,8 @@ def test_kudo_serializer_debug_dump(spark_tmp_path):
     dump_prefix = spark_tmp_path + "/kudo_dump/"
     conf = {
         "spark.rapids.shuffle.kudo.serializer.enabled": "true",
+        # only cpu mode is supported for the debug dump feature
+        "spark.rapids.shuffle.kudo.serializer.read.mode": "CPU",
         "spark.rapids.shuffle.kudo.serializer.debug.mode": "ALWAYS",
         "spark.rapids.shuffle.kudo.serializer.debug.dump.path.prefix": dump_prefix
     }

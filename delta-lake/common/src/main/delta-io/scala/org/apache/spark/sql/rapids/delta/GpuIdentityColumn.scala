@@ -23,13 +23,13 @@ package org.apache.spark.sql.rapids.delta
 
 import com.nvidia.spark.rapids.delta.GpuDeltaIdentityColumnStatsTracker
 
-import org.apache.spark.sql.{Column, Dataset, SparkSession}
-import org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans.logical.LocalRelation
 import org.apache.spark.sql.delta.DeltaColumnMapping
 import org.apache.spark.sql.delta.sources.DeltaSourceUtils
-import org.apache.spark.sql.functions.{array, max, min, to_json}
+import org.apache.spark.sql.functions.{array, col, max, min, to_json}
+import org.apache.spark.sql.rapids.shims.TrampolineConnectShims
+import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.SparkSession
 import org.apache.spark.sql.types.StructType
 
 object GpuIdentityColumn {
@@ -74,13 +74,13 @@ object GpuIdentityColumn {
     // The expression will be: to_json(array(max(id1), min(id2)))
     val aggregates = identityColumnInfo.map {
       case (name, positiveStep) =>
-        val col = Column(UnresolvedAttribute.quoted(name))
-        if (positiveStep) max(col) else min(col)
+        val column = col(name)
+        if (positiveStep) max(column) else min(column)
     }
     val unresolvedExpr = to_json(array(aggregates: _*))
     // Resolve the collection expression by constructing a query to select the expression from a
     // table with the statsSchema and get the analyzed expression.
-    val resolvedExpr = Dataset.ofRows(spark, LocalRelation(statsDataSchema))
+    val resolvedExpr = TrampolineConnectShims.createDataFrame(spark, LocalRelation(statsDataSchema))
       .select(unresolvedExpr).queryExecution.analyzed.expressions.head
     Some(new GpuDeltaIdentityColumnStatsTracker(
       statsDataSchema,

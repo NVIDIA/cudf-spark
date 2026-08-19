@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -44,7 +44,22 @@ trait ExecutionPlanCaptureCallbackBase {
       timeoutMs: Long): Unit
   def assertCapturedAndGpuFellBack(fallbackCpuClass: String, timeoutMs: Long = 2000): Unit
   def assertSchemataMatch(cpuDf: DataFrame, gpuDf: DataFrame, expectedSchema: String): Unit
+  /** Returns true if any node in the plan tree fell back to the named CPU class, including
+   * CPU expressions wrapped inside a GpuCpuBridgeExpression. */
   def didFallBack(plan: SparkPlan, fallbackCpuClass: String): Boolean
+  def contains(gpuPlan: SparkPlan, className: String): Boolean
+  /** Returns true if an exchange of the named class has the requested shuffle origin. */
+  def containsShuffleExchangeWithOrigin(
+      plan: SparkPlan,
+      className: String,
+      shuffleOrigin: String): Boolean
+  /** Returns true if a shuffle query stage contains the requested exchange and origin. */
+  def containsShuffleQueryStageWithExchangeOrigin(
+      plan: SparkPlan,
+      className: String,
+      shuffleOrigin: String): Boolean
+  /** Returns true if the captured tree contains a final adaptive plan. */
+  def containsFinalAdaptivePlan(plan: SparkPlan): Boolean
 }
 
 object ExecutionPlanCaptureCallback extends ExecutionPlanCaptureCallbackBase {
@@ -109,6 +124,24 @@ object ExecutionPlanCaptureCallback extends ExecutionPlanCaptureCallbackBase {
 
   override def didFallBack(plan: SparkPlan, fallbackCpuClass: String): Boolean =
     impl.didFallBack(plan, fallbackCpuClass)
+
+  override def contains(gpuPlan: SparkPlan, className: String): Boolean =
+    impl.contains(gpuPlan, className)
+
+  override def containsShuffleExchangeWithOrigin(
+      plan: SparkPlan,
+      className: String,
+      shuffleOrigin: String): Boolean =
+    impl.containsShuffleExchangeWithOrigin(plan, className, shuffleOrigin)
+
+  override def containsShuffleQueryStageWithExchangeOrigin(
+      plan: SparkPlan,
+      className: String,
+      shuffleOrigin: String): Boolean =
+    impl.containsShuffleQueryStageWithExchangeOrigin(plan, className, shuffleOrigin)
+
+  override def containsFinalAdaptivePlan(plan: SparkPlan): Boolean =
+    impl.containsFinalAdaptivePlan(plan)
 }
 
 /**

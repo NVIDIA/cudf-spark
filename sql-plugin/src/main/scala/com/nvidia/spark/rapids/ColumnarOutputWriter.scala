@@ -20,12 +20,13 @@ import java.io.{BufferedOutputStream, DataOutputStream, OutputStream}
 
 import scala.collection.mutable
 
-import ai.rapids.cudf.{HostBufferConsumer, HostMemoryBuffer, JCudfSerialization, NvtxColor, NvtxRange, TableWriter}
+import ai.rapids.cudf.{HostBufferConsumer, HostMemoryBuffer, JCudfSerialization, TableWriter}
 import com.nvidia.spark.Retryable
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{splitSpillableInHalfByRows, withRestoreOnRetry, withRetry, withRetryNoSplit}
 import com.nvidia.spark.rapids.io.async.{AsyncOutputStream, TrafficController}
+import com.nvidia.spark.rapids.jni.fileio.{RapidsFileIO, RapidsOutputFile}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
 import org.apache.hadoop.mapreduce.TaskAttemptContext
@@ -63,7 +64,8 @@ abstract class ColumnarOutputWriterFactory extends Serializable {
       dataSchema: StructType,
       context: TaskAttemptContext,
       statsTrackers: Seq[ColumnarWriteTaskStatsTracker],
-      debugOutputPath: Option[String]): ColumnarOutputWriter
+      debugOutputPath: Option[String],
+      fileIO: RapidsFileIO): ColumnarOutputWriter
 }
 
 /**
@@ -73,18 +75,25 @@ abstract class ColumnarOutputWriterFactory extends Serializable {
  */
 abstract class ColumnarOutputWriter(context: TaskAttemptContext,
     dataSchema: StructType,
-    rangeName: String,
+    nvtxId: NvtxId,
     includeRetry: Boolean,
     statsTrackers: Seq[ColumnarWriteTaskStatsTracker],
     debugDumpPath: Option[String],
     holdGpuBetweenBatches: Boolean = false,
-    useAsyncWrite: Boolean = false) extends HostBufferConsumer with Logging {
+    useAsyncWrite: Boolean = false,
+    rapidsFileIO: RapidsFileIO) extends HostBufferConsumer with Logging {
+
+  // Length of the file written so far. This is used to track the size of the file
+  private var fileLength: Long = 0L
+
+  /** Returns length of the file written so far. */
+  def getFileLength: Long = fileLength
 
   protected val tableWriter: TableWriter
   private lazy val debugDumpOutputStream: Option[OutputStream] = try {
     debugDumpPath.map { path =>
       val tc = TaskContext.get()
-      logWarning(s"DEBUG FILE OUTPUT $rangeName FOR " +
+      logWarning(s"DEBUG FILE OUTPUT ${nvtxId.name} FOR " +
         s"STAGE ${tc.stageId()} TASK ${tc.taskAttemptId()} is $path")
       val hadoopPath = new Path(path)
       val fs = hadoopPath.getFileSystem(conf)
@@ -119,10 +128,8 @@ abstract class ColumnarOutputWriter(context: TaskAttemptContext,
 
   private val trafficController: TrafficController = TrafficController.getWriteInstance
 
-  private def openOutputStream(): OutputStream = {
-    val hadoopPath = new Path(path)
-    val fs = hadoopPath.getFileSystem(conf)
-    fs.create(hadoopPath, false)
+  private def openOutputFile(): RapidsOutputFile = {
+    rapidsFileIO.newOutputFile(path())
   }
 
   // This is implemented as a method to make it easier to subclass
@@ -130,9 +137,9 @@ abstract class ColumnarOutputWriter(context: TaskAttemptContext,
   protected def getOutputStream: OutputStream = {
     if (useAsyncWrite) {
       logWarning("Async output write enabled")
-      AsyncOutputStream(() => openOutputStream(), trafficController, statsTrackers)
+      AsyncOutputStream(() => openOutputFile().create(false), trafficController, statsTrackers)
     } else {
-      openOutputStream()
+      openOutputFile().create(false)
     }
   }
 
@@ -143,8 +150,10 @@ abstract class ColumnarOutputWriter(context: TaskAttemptContext,
   private[this] val buffers = mutable.Queue[(HostMemoryBuffer, Long)]()
 
   override
-  def handleBuffer(buffer: HostMemoryBuffer, len: Long): Unit =
+  def handleBuffer(buffer: HostMemoryBuffer, len: Long): Unit = {
     buffers += Tuple2(buffer, len)
+    fileLength += len
+  }
 
   def writeBufferedData(): Long = {
     val start = System.nanoTime()
@@ -232,7 +241,7 @@ abstract class ColumnarOutputWriter(context: TaskAttemptContext,
   // protected for testing
   protected[this] def bufferBatchAndClose(batch: ColumnarBatch): Long = {
     val startTimestamp = System.nanoTime
-    withResource(new NvtxRange(s"GPU $rangeName write", NvtxColor.BLUE)) { _ =>
+    nvtxId {
       withResource(transformAndClose(batch)) { maybeTransformed =>
         encodeAndBufferToHost(maybeTransformed)
       }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -124,7 +124,7 @@ case class GpuRunnableCommandExec(cmd: GpuRunnableCommand, child: SparkPlan)
   override def executeCollect(): Array[InternalRow] = throw new UnsupportedOperationException(
     s"${getClass.getCanonicalName} does not support row-based execution")
 
-  override def executeToIterator: Iterator[InternalRow] = throw new UnsupportedOperationException(
+  override def executeToIterator(): Iterator[InternalRow] = throw new UnsupportedOperationException(
     s"${getClass.getCanonicalName} does not support row-based execution")
 
   override def executeTake(limit: Int): Array[InternalRow] =

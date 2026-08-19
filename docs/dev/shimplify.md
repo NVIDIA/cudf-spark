@@ -37,8 +37,8 @@ in a source-code level comment instead of the shared directories.
 
 ```scala
 /*** spark-rapids-shim-json-lines
-{"spark": "320"}
-{"spark": "323"}
+{"spark": "330"}
+{"spark": "331"}
 spark-rapids-shim-json-lines ***/
 ```
 
@@ -210,15 +210,15 @@ work on resolving potential compilation failures manually.
 
 ## Deleting a Shim
 
-Every Spark build is de-supported eventually. To drop a build say 320 you can run
+Every Spark build is de-supported eventually. To drop a build say 330 you can run
 
 ```bash
 mvn generate-sources -Dshimplify=true -Dshimplify.move=true \
-    -Dshimplify.remove.shim=320
+    -Dshimplify.remove.shim=330
 ```
 
-This command will remove the comment line `{"spark": "320"}` from all source files contributing to
-the 320 shim. If a file belongs exclusively to 320 it will be removed.
+This command will remove the comment line `{"spark": "330"}` from all source files contributing to
+the 330 shim. If a file belongs exclusively to 330 it will be removed.
 
 After adding or deleting shims you should sanity-check the diff in the local git repo and
 run the integration tests above.
@@ -260,10 +260,10 @@ its file with the list of buildvers.
 
 See [CPD user doc][7] for more details about the options you can pass inside `cpd.argLine`.
 
-[1]: https://github.com/NVIDIA/spark-rapids/issues/3223
-[2]: https://github.com/NVIDIA/spark-rapids/blob/b7b1a5d544b6a3ac35ed064b5c32ee0d63c78845/build/shimplify.py#L15-L79
-[3]: https://github.com/NVIDIA/spark-rapids/blob/74ce729ca1306db01359e68f7f0b7cc31cd3d850/pom.xml#L494-L500
+[1]: https://github.com/NVIDIA/cudf-spark/issues/3223
+[2]: https://github.com/NVIDIA/cudf-spark/blob/b7b1a5d544b6a3ac35ed064b5c32ee0d63c78845/build/shimplify.py#L15-L79
+[3]: https://github.com/NVIDIA/cudf-spark/blob/74ce729ca1306db01359e68f7f0b7cc31cd3d850/pom.xml#L494-L500
 [4]: https://jsonlines.org/
 [5]: https://spark.apache.org/versioning-policy.html
 [6]: https://plugins.jetbrains.com/plugin/16429-idea-resolve-symlinks
-[7]: https://docs.pmd-code.org/latest/pmd_userdocs_cpd.html
+[7]: https://pmd.github.io/pmd/pmd_userdocs_cpd.html

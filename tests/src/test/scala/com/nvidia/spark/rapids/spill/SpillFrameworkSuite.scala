@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,169 +16,17 @@
 
 package com.nvidia.spark.rapids.spill
 
-import java.io.File
-import java.math.RoundingMode
-
 import scala.collection.mutable.ArrayBuffer
 
 import ai.rapids.cudf._
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
-import com.nvidia.spark.rapids.format.CodecType
-import org.mockito.Mockito.when
 import org.scalatest.BeforeAndAfterAll
-import org.scalatestplus.mockito.MockitoSugar
 
 import org.apache.spark.SparkConf
-import org.apache.spark.sql.rapids.RapidsDiskBlockManager
-import org.apache.spark.sql.types._
-import org.apache.spark.sql.vectorized.ColumnarBatch
+import org.apache.spark.sql.types.DataType
 
-class SpillFrameworkSuite
-  extends FunSuiteWithTempDir
-    with MockitoSugar
-    with BeforeAndAfterAll {
-
-  override def beforeEach(): Unit = {
-    super.beforeEach()
-    val sc = new SparkConf
-    sc.set(RapidsConf.HOST_SPILL_STORAGE_SIZE.key, "1024")
-    sc.set(RapidsConf.OFF_HEAP_LIMIT_ENABLED.key, "false")
-    SpillFramework.initialize(new RapidsConf(sc))
-  }
-
-  override def afterEach(): Unit = {
-    super.afterEach()
-    SpillFramework.shutdown()
-  }
-
-  private def buildContiguousTable(): (ContiguousTable, Array[DataType]) = {
-    val (tbl, dataTypes) = buildTable()
-    withResource(tbl) { _ =>
-      (tbl.contiguousSplit()(0), dataTypes)
-    }
-  }
-
-  private def buildTableOfLongs(numRows: Int): (ContiguousTable, Array[DataType])= {
-    val vals = (0 until numRows).map(_.toLong)
-    withResource(HostColumnVector.fromLongs(vals: _*)) { hcv =>
-      withResource(hcv.copyToDevice()) { cv =>
-        withResource(new Table(cv)) { table =>
-          (table.contiguousSplit()(0), Array[DataType](LongType))
-        }
-      }
-    }
-  }
-
-  private def buildNonContiguousTableOfLongs(
-      numRows: Int): (Table, Array[DataType])= {
-    val vals = (0 until numRows).map(_.toLong)
-    withResource(HostColumnVector.fromLongs(vals: _*)) { hcv =>
-      withResource(hcv.copyToDevice()) { cv =>
-        (new Table(cv), Array[DataType](LongType))
-      }
-    }
-  }
-
-  private def buildTable(): (Table, Array[DataType]) = {
-    val tbl = new Table.TestBuilder()
-      .column(5, null.asInstanceOf[java.lang.Integer], 3, 1)
-      .column("five", "two", null, null)
-      .column(5.0, 2.0, 3.0, 1.0)
-      .decimal64Column(-5, RoundingMode.UNNECESSARY, 0, null, -1.4, 10.123)
-      .build()
-    val types: Array[DataType] =
-      Seq(IntegerType, StringType, DoubleType, DecimalType(10, 5)).toArray
-    (tbl, types)
-  }
-
-  private def buildTableWithDuplicate(): (Table, Array[DataType]) = {
-    withResource(ColumnVector.fromInts(5, null.asInstanceOf[java.lang.Integer], 3, 1)) { intCol =>
-      withResource(ColumnVector.fromStrings("five", "two", null, null)) { stringCol =>
-        withResource(ColumnVector.fromDoubles(5.0, 2.0, 3.0, 1.0)) { doubleCol =>
-          // add intCol twice
-          (new Table(intCol, intCol, stringCol, doubleCol),
-            Array(IntegerType, IntegerType, StringType, DoubleType))
-        }
-      }
-    }
-  }
-
-  private def buildEmptyTable(): (Table, Array[DataType]) = {
-    val (tbl, types) = buildTable()
-    val emptyTbl = withResource(tbl) { _ =>
-      withResource(ColumnVector.fromBooleans(false, false, false, false)) { mask =>
-        tbl.filter(mask) // filter all out
-      }
-    }
-    (emptyTbl, types)
-  }
-
-  private def testBufferFileDeletion(canShareDiskPaths: Boolean): Unit = {
-    val (_, handle, _) = addContiguousTableToFramework()
-    var path: File = null
-    withResource(handle) { _ =>
-      SpillFramework.stores.deviceStore.spill(handle.approxSizeInBytes)
-      SpillFramework.stores.hostStore.spill(handle.approxSizeInBytes)
-      assert(handle.host.isDefined)
-      assert(handle.host.map(_.disk.isDefined).get)
-      path = SpillFramework.stores.diskStore.getFile(handle.host.flatMap(_.disk).get.blockId)
-      assert(path.exists)
-    }
-    assert(!path.exists)
-  }
-
-  private def addContiguousTableToFramework(): (
-    Long, SpillableColumnarBatchFromBufferHandle, Array[DataType]) = {
-    val (ct, dataTypes) = buildContiguousTable()
-    val bufferSize = ct.getBuffer.getLength
-    val handle = SpillableColumnarBatchFromBufferHandle(ct, dataTypes)
-    (bufferSize, handle, dataTypes)
-  }
-
-  private def addTableToFramework(): (SpillableColumnarBatchHandle, Array[DataType]) = {
-    // store takes ownership of the table
-    val (tbl, dataTypes) = buildTable()
-    val cb = withResource(tbl) { _ => GpuColumnVector.from(tbl, dataTypes) }
-    val handle = SpillableColumnarBatchHandle(cb)
-    (handle, dataTypes)
-  }
-
-  private def addZeroRowsTableToFramework(): (SpillableColumnarBatchHandle, Array[DataType]) = {
-    val (table, dataTypes) = buildEmptyTable()
-    val cb = withResource(table) { _ => GpuColumnVector.from(table, dataTypes) }
-    val handle = SpillableColumnarBatchHandle(cb)
-    (handle, dataTypes)
-  }
-
-  private def buildHostBatch(): (ColumnarBatch, Array[DataType]) = {
-    val (ct, dataTypes) = buildContiguousTable()
-    val hostCols = withResource(ct) { _ =>
-      withResource(ct.getTable) { tbl =>
-        (0 until tbl.getNumberOfColumns)
-          .map(c => tbl.getColumn(c).copyToHost())
-      }
-    }.toArray
-    (new ColumnarBatch(
-      hostCols.zip(dataTypes).map { case (hostCol, dataType) =>
-        new RapidsHostColumnVector(dataType, hostCol)
-      }, hostCols.head.getRowCount.toInt), dataTypes)
-  }
-
-  private def buildHostBatchWithDuplicate(): (ColumnarBatch, Array[DataType]) = {
-    val (ct, dataTypes) = buildContiguousTable()
-    val hostCols = withResource(ct) { _ =>
-      withResource(ct.getTable) { tbl =>
-        (0 until tbl.getNumberOfColumns)
-          .map(c => tbl.getColumn(c).copyToHost())
-      }
-    }.toArray
-    hostCols.foreach(_.incRefCount())
-    (new ColumnarBatch(
-      (hostCols ++ hostCols).zip(dataTypes ++ dataTypes).map { case (hostCol, dataType) =>
-        new RapidsHostColumnVector(dataType, hostCol)
-      }, hostCols.head.getRowCount.toInt), dataTypes)
-  }
+class SpillFrameworkSuite extends SpillUnitTestBase with BeforeAndAfterAll {
 
   test("add table registers with device store") {
     val (ct, dataTypes) = buildContiguousTable()
@@ -292,52 +140,6 @@ class SpillFrameworkSuite
         assert(!handle.spillable)
       }
       assert(handle.spillable)
-    }
-  }
-
-  private def buildContiguousTable(start: Int, numRows: Int): ContiguousTable = {
-    val vals = (0 until numRows).map(_.toLong + start)
-    withResource(HostColumnVector.fromLongs(vals: _*)) { hcv =>
-      withResource(hcv.copyToDevice()) { cv =>
-        withResource(HostColumnVector.decimalFromLongs(-3, vals: _*)) { decHcv =>
-          withResource(decHcv.copyToDevice()) { decCv =>
-            withResource(new Table(cv, decCv)) { table =>
-              table.contiguousSplit()(0)
-            }
-          }
-        }
-      }
-    }
-  }
-
-  private def buildCompressedBatch(start: Int, numRows: Int): ColumnarBatch = {
-    val codec = TableCompressionCodec.getCodec(
-      CodecType.NVCOMP_LZ4, TableCompressionCodec.makeCodecConfig(new RapidsConf(new SparkConf)))
-    withResource(codec.createBatchCompressor(0, Cuda.DEFAULT_STREAM)) { compressor =>
-      compressor.addTableToCompress(buildContiguousTable(start, numRows))
-      withResource(compressor.finish()) { compressed =>
-        GpuCompressedColumnVector.from(compressed.head)
-      }
-    }
-  }
-
-  private def decompressBatch(cb: ColumnarBatch): ColumnarBatch = {
-    val schema = new StructType().add("i", LongType)
-      .add("j", DecimalType(ai.rapids.cudf.DType.DECIMAL64_MAX_PRECISION, 3))
-    val sparkTypes = GpuColumnVector.extractTypes(schema)
-    val codec = TableCompressionCodec.getCodec(
-      CodecType.NVCOMP_LZ4, TableCompressionCodec.makeCodecConfig(new RapidsConf(new SparkConf)))
-    withResource(codec.createBatchDecompressor(0, Cuda.DEFAULT_STREAM)) { decompressor =>
-      val gcv = cb.column(0).asInstanceOf[GpuCompressedColumnVector]
-      // we need to incRefCount since the decompressor closes its inputs
-      gcv.getTableBuffer.incRefCount()
-      decompressor.addBufferToDecompress(gcv.getTableBuffer, gcv.getTableMeta.bufferMeta())
-      withResource(decompressor.finishAsync()) { decompressed =>
-        MetaUtils.getBatchFromMeta(
-          decompressed.head,
-          MetaUtils.dropCodecs(gcv.getTableMeta),
-          sparkTypes)
-      }
     }
   }
 
@@ -510,9 +312,9 @@ class SpillFrameworkSuite
   }
 
   test("host originated: get host memory buffer") {
-    val spillPriority = -10
     val hmb = HostMemoryBuffer.allocate(1L * 1024)
-    val spillableBuffer = SpillableHostBuffer(hmb, hmb.getLength, spillPriority)
+    val spillableBuffer = SpillableHostBuffer(hmb, hmb.getLength,
+      SpillPriorities.ACTIVE_BATCHING_PRIORITY)
     withResource(spillableBuffer) { _ =>
       // the refcount of 1 is the store
       assertResult(1)(hmb.getRefCount)
@@ -525,12 +327,11 @@ class SpillFrameworkSuite
   }
 
   test("host originated: get host memory buffer after spill to disk") {
-    val spillPriority = -10
     val hmb = HostMemoryBuffer.allocate(1L * 1024)
     val spillableBuffer = SpillableHostBuffer(
       hmb,
       hmb.getLength,
-      spillPriority)
+      SpillPriorities.ACTIVE_BATCHING_PRIORITY)
     assertResult(1)(hmb.getRefCount)
     //  we spill it
     SpillFramework.stores.hostStore.spill(hmb.getLength)
@@ -544,9 +345,9 @@ class SpillFrameworkSuite
   }
 
   test("host originated: a buffer is not spillable when we leak it") {
-    val spillPriority = -10
     val hmb = HostMemoryBuffer.allocate(1L * 1024)
-    withResource(SpillableHostBuffer(hmb, hmb.getLength, spillPriority)) { spillableBuffer =>
+    withResource(SpillableHostBuffer(hmb, hmb.getLength,
+        SpillPriorities.ACTIVE_BATCHING_PRIORITY)) { spillableBuffer =>
       withResource(spillableBuffer.getHostBuffer()) { _ =>
         assertResult(0)(SpillFramework.stores.hostStore.spill(hmb.getLength))
       }
@@ -753,10 +554,6 @@ class SpillFrameworkSuite
     }
   }
 
-  // -1 disables the host store limit
-  val hostSpillStorageSizes = Seq("-1", "1MB", "16MB")
-  val spillToDiskBounceBuffers = Seq("128KB", "2MB", "128MB")
-  val chunkedPackBounceBuffers = Seq("1MB", "8MB", "128MB")
   hostSpillStorageSizes.foreach { hostSpillStorageSize =>
     spillToDiskBounceBuffers.foreach { spillToDiskBounceBufferSize =>
       chunkedPackBounceBuffers.foreach { chunkedPackBounceBufferSize =>
@@ -933,38 +730,6 @@ class SpillFrameworkSuite
     readWriteTestWithBatches(new SparkConf(), true, true)
   }
 
-  private def readWriteTestWithBatches(conf: SparkConf, shareDiskPaths: Boolean*) = {
-    assert(shareDiskPaths.nonEmpty)
-    val mockDiskBlockManager = mock[RapidsDiskBlockManager]
-    when(mockDiskBlockManager.getSerializerManager())
-      .thenReturn(new RapidsSerializerManager(conf))
-
-    shareDiskPaths.foreach { _ =>
-      val (_, handle, dataTypes) = addContiguousTableToFramework()
-      withResource(handle) { _ =>
-        val expectedCt = withResource(handle.materialize(dataTypes)) { devbatch =>
-          withResource(GpuColumnVector.from(devbatch)) { tmpTbl =>
-            tmpTbl.contiguousSplit()(0)
-          }
-        }
-        withResource(expectedCt) { _ =>
-          val expectedBatch = withResource(expectedCt.getTable) { expectedTbl =>
-            GpuColumnVector.from(expectedTbl, dataTypes)
-          }
-          withResource(expectedBatch) { _ =>
-            assertResult(true)(
-              SpillFramework.stores.deviceStore.spill(handle.approxSizeInBytes) > 0)
-            assertResult(true)(
-              SpillFramework.stores.hostStore.spill(handle.approxSizeInBytes) > 0)
-            withResource(handle.materialize(dataTypes)) { actualBatch =>
-              TestUtils.compareBatches(expectedBatch, actualBatch)
-            }
-          }
-        }
-      }
-    }
-  }
-
   test("skip host: spill device memory buffer to disk") {
     SpillFramework.shutdown()
     try {
@@ -1106,36 +871,6 @@ class SpillFrameworkSuite
 
   test("shared spill files are not deleted when a buffer is deleted") {
     testBufferFileDeletion(canShareDiskPaths = true)
-  }
-
-  def testCloseWhileSpilling[T <: SpillableHandle](handle: T, store: SpillableStore[T],
-                                                   sleepBeforeCloseNanos: Long): Unit = {
-    assert(handle.spillable)
-    assertResult(1)(store.numHandles)
-    val t1 = new Thread (() => {
-      // cannot assert how much is spills because it depends on whether the handle
-      // is already closed or not and we're trying to force both conditions
-      // in this test to show that it handles potential races correctly
-      store.spill(handle.approxSizeInBytes)
-    })
-    t1.start()
-
-    // we observed that the race will typically trigger if sleeping between 0.1 and 1 millis
-    Thread.sleep(sleepBeforeCloseNanos / 1000000L, (sleepBeforeCloseNanos % 1000000L).toInt)
-    handle.close()
-    t1.join()
-    assertResult(0)(store.numHandles)
-  }
-
-  // This is a small monte carlo simulation where we test overlaying
-  // closing buffers and spilling at difference delay points to tease out possible
-  // race conditions. There's only one param/variable in the simulation, but it could
-  // be extended to N params if needed
-  def monteCarlo(oneIteration: Long => Unit): Unit = {
-    for (i <- 1L to 10L) {
-      val nanos: Long = i * 100 * 1000
-      oneIteration(nanos)
-    }
   }
 
   test("a non-contiguous table close while spilling") {

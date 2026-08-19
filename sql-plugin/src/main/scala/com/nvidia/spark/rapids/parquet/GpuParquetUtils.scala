@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,11 +16,11 @@
 
 package com.nvidia.spark.rapids.parquet
 
-
 import java.util.Locale
 
 import scala.collection.JavaConverters._
 
+import com.nvidia.spark.rapids.shims.parquet.GpuParquetUtilsShims
 import org.apache.parquet.hadoop.metadata.{BlockMetaData, ColumnChunkMetaData, ColumnPath}
 import org.apache.parquet.schema.MessageType
 
@@ -58,30 +58,20 @@ object GpuParquetUtils extends Logging {
         oldBlock.getColumns.asScala.filter(c =>
           pathSet.contains(c.getPath.toDotString.toLowerCase(Locale.ROOT)))
       }
-      newBlockMeta(oldBlock.getRowCount, newColumns.toSeq)
+      newBlockMeta(oldBlock, newColumns.toSeq)
     }
   }
 
   /**
-   * Build a new BlockMetaData
+   * Build a new BlockMetaData from an existing one, but with a new set of column chunks metadata.
    *
-   * @param rowCount the number of rows in this block
+   * @param existingMetadata the existing BlockMetaData to copy row count and row index offset from
    * @param columns the new column chunks to reference in the new BlockMetaData
    * @return the new BlockMetaData
    */
   def newBlockMeta(
-      rowCount: Long,
+      existingMetadata: BlockMetaData,
       columns: Seq[ColumnChunkMetaData]): BlockMetaData = {
-    val block = new BlockMetaData
-    block.setRowCount(rowCount)
-
-    var totalSize: Long = 0
-    columns.foreach { column =>
-      block.addColumn(column)
-      totalSize += column.getTotalUncompressedSize
-    }
-    block.setTotalByteSize(totalSize)
-
-    block
+    GpuParquetUtilsShims.newBlockMeta(existingMetadata, columns)
   }
 }

@@ -23,7 +23,7 @@ package com.nvidia.spark.rapids.delta
 
 import scala.collection.mutable
 
-import com.nvidia.spark.rapids.delta.shims.ShimJoinedProjection
+import com.nvidia.spark.rapids.delta.shims.{ShimJoinedProjection, StatsExprShim}
 import org.apache.hadoop.fs.Path
 
 import org.apache.spark.sql.catalyst.InternalRow
@@ -103,9 +103,12 @@ class GpuDeltaTaskStatisticsTracker(
   // This executes the whole statsColExpr in order to compute the final stats value for the file.
   // In order to evaluate it, we have to replace its aggregate functions with the corresponding
   // aggregates' evaluateExpressions that basically just return the results stored in aggBuffer.
-  private val resultExpr: Expression = statsColExpr.transform {
-    case ae: AggregateExpression if ae.aggregateFunction.isInstanceOf[DeclarativeAggregate] =>
-      ae.aggregateFunction.asInstanceOf[DeclarativeAggregate].evaluateExpression
+  private val resultExpr: Expression = {
+    val evaluatedAggs = statsColExpr.transform {
+      case ae: AggregateExpression if ae.aggregateFunction.isInstanceOf[DeclarativeAggregate] =>
+        ae.aggregateFunction.asInstanceOf[DeclarativeAggregate].evaluateExpression
+    }
+    StatsExprShim.unwrapRuntimeReplaceable(evaluatedAggs)
   }
 
   // See resultExpr above

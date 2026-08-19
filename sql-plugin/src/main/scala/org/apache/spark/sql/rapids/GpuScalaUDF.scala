@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,10 +34,11 @@ case class GpuScalaUDF(
     udfName: Option[String],
     nullable: Boolean,
     udfDeterministic: Boolean) extends GpuUserDefinedFunction {
-  override def toString: String = s"${udfName.getOrElse("UDF")}(${children.mkString(", ")})"
+  override def toString: String = s"${name}(${children.mkString(", ")})"
 
   /** name of the UDF function */
-  override val name: String = udfName.getOrElse("???")
+  override val name: String = udfName.map(cpuName => s"gpu_$cpuName")
+    .getOrElse(this.getClass.getSimpleName)
 }
 
 object GpuScalaUDFMeta {
@@ -62,7 +63,7 @@ object GpuScalaUDFMeta {
         }
       }
 
-      override def convertToGpu(): GpuExpression = {
+      override def convertToGpuImpl(): GpuExpression = {
         // It can come here only when at least one option as below is true.
         //   1. UDF implements a RAPIDS accelerated interface.
         //   2. The conf "spark.rapids.sql.rowBasedUDF.enabled" is enabled.
@@ -151,7 +152,8 @@ case class GpuRowBasedScalaUDF(
   override def toString: String = s"$name(${children.mkString(", ")})"
 
   /** name of the UDF function */
-  override val name: String = udfName.getOrElse(this.getClass.getSimpleName)
+  override val name: String = udfName.map(cpuName => s"gpu_row_based_$cpuName")
+    .getOrElse(this.getClass.getSimpleName)
 
   /** The input `row` consists of only child columns. */
   override final protected def evaluateRow(childrenRow: InternalRow): Any =

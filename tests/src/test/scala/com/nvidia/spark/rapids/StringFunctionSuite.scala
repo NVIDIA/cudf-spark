@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -199,6 +199,18 @@ class StringOperatorsSuite extends SparkQueryCompareTestSuite {
 }
 
 class RegExpUtilsSuite extends AnyFunSuite {
+  test("countGroups ignores non-capturing groups") {
+    val cases = Seq(
+      "(?:(a))" -> 1,
+      "(?:(a)(b))" -> 2,
+      "(?:(a)|(b))" -> 2,
+      "(x)(?:(a)|(b))(y)" -> 4)
+
+    cases.foreach { case (pattern, expected) =>
+      assert(GpuRegExpUtils.countGroups(pattern) == expected)
+    }
+  }
+
   test("get list of choices from regexp for multi-replace") {
     val regexChoices = Map(
       "aa|bb" -> Seq("aa", "bb"),
@@ -209,6 +221,9 @@ class RegExpUtilsSuite extends AnyFunSuite {
       "(aa|bb)|(cc|dd)" -> Seq("aa", "bb", "cc", "dd"),
       "aa|bb|cc|dd|ee" -> Seq("aa", "bb", "cc", "dd", "ee"),
       "aa|bb|cc|dd|ee|ff" -> Seq("aa", "bb", "cc", "dd", "ee", "ff"),
+      "foo(cat)" -> Seq("foocat"),
+      "(foo)(cat)" -> Seq("foocat"),
+      "(foo)(cat)|(bar)(dog)" -> Seq("foocat", "bardog"),
       "a\n|b\t|c\r" -> Seq("a\n", "b\t", "c\r")
     )
 
@@ -219,6 +234,107 @@ class RegExpUtilsSuite extends AnyFunSuite {
       assert(result.isDefined && result.forall(_ == choices))
     }
 
+    Seq("foo(cat|dog)", "(cat|dog)foo").foreach { pattern =>
+      val (ast, _) = (new CudfRegexTranspiler(RegexReplaceMode)).getTranspiledAST(pattern,
+        None, Some(""))
+      assert(GpuRegExpUtils.getChoicesFromRegex(ast).isEmpty,
+        s"mixed sequence must not use stringReplaceMulti: $pattern")
+    }
+
+    val emptySequence = RegexSequence(
+      scala.collection.mutable.ListBuffer.empty[RegexAST])
+    assert(GpuRegExpUtils.getChoicesFromRegex(emptySequence).isEmpty)
+
+  }
+
+  test("issue-14743: backrefConversion greedy-with-backoff per Java spec") {
+    // (numCaptureGroups, replacement, expectedHasBackref, expectedConverted).
+    // Java's `Matcher.appendReplacement` reads digits one at a time and stops as
+    // soon as the running group index would exceed the capture-group count.
+    // Note: literal "${...}" tokens are spelled with concatenation so scalastyle
+    // doesn't flag them as missing string interpolation.
+    val open = "$" + "{"
+    val cases: Seq[(Int, String, Boolean, String)] = Seq(
+      // 2 groups, "$12": stop after "1" (because 12 > 2); remaining "2" is literal.
+      (2, "$12", true, open + "1}2"),
+      // 20 groups, "$12": both digits consumed (12 <= 20).
+      (20, "$12", true, open + "12}"),
+      // 2 groups, "$123": stop after "1"; "23" trail as literals.
+      (2, "$123", true, open + "1}23"),
+      // 2 groups, "$2": one digit consumed.
+      (2, "$2", true, open + "2}"),
+      // 0 groups, "$1": legacy path -- emit ${1} so cuDF surfaces the error.
+      (0, "$1", true, open + "1}"),
+      // Java replacement strings treat `\digit` as the literal digit, not a backref.
+      (2, "\\12", false, "\\12"),
+      // No digits after `$` -- literal `$`.
+      (2, "$a", false, "$a"),
+      // `$0` is the whole-match backref and is always valid (cuDF supports group 0).
+      (2, "$0", true, open + "0}"),
+      // Leading zeroes participate in the Java greedy-with-backoff parse.
+      (1, "$09", true, open + "0}9"),
+      (0, "$01", true, open + "0}1"),
+      (2, "$001", true, open + "1}"),
+      // Numbers in the middle: "x$12y" with 2 groups -> "x${1}2y".
+      (2, "x$12y", true, "x" + open + "1}2y"),
+      // First digit alone would already exceed the count: fall back to the legacy
+      // eagerly-greedy path so cuDF errors out as before (covered by
+      // test_re_replace_backrefs_idx_out_of_bounds in regexp_test.py).
+      (4, "[$5]", true, "[" + open + "5}]"),
+      // Negative numCaptureGroups disables the greedy-with-backoff check (legacy
+      // behavior preserved for callers that don't know the group count).
+      (-1, "$12", true, open + "12}")
+    )
+    cases.foreach { case (numGroups, rep, expectedHas, expectedConv) =>
+      val (hasBackref, converted) = GpuRegExpUtils.backrefConversion(rep, numGroups)
+      assert(hasBackref == expectedHas,
+        s"hasBackref mismatch for ($numGroups, $rep): got $hasBackref, want $expectedHas")
+      assert(converted == expectedConv,
+        s"converted mismatch for ($numGroups, $rep): got '$converted', want '$expectedConv'")
+    }
+  }
+
+  test("line-anchor `$` no longer injects a synthetic capture group or generated backref " +
+      "(#15006, cuDF #22763)") {
+    // cuDF #22763 makes EXT_NEWLINE treat `\r\n` as a single line terminator for `$`, so the
+    // transpiler emits a bare `$` instead of the old synthetic `(\r\n)?$` capture group. With no
+    // synthetic group there is no internally-generated backref appended to the replacement, and a
+    // user pattern ending in `$` no longer shifts backref numbering: user `$N` parses against the
+    // real user group count (Java spec).
+    val open = "$" + "{"
+    val userPattern = "(T)(E)(S)(T)(T)(E)(S)(T)(T)(E)(S)(T)$"
+    val userNumCaptureGroups =
+      java.util.regex.Pattern.compile(userPattern).matcher("").groupCount()
+    assert(userNumCaptureGroups == 12)
+
+    // user replacement `$123$2` -> `$12` + literal `3` + `$2`, with no trailing generated group.
+    val (_, repl1) = new CudfRegexTranspiler(RegexReplaceMode)
+      .getTranspiledAST(userPattern, None, Some("$123$2"))
+    val (has1, conv1) =
+      GpuRegExpUtils.backrefConversion(repl1.get.toRegexString, userNumCaptureGroups)
+    assert(has1)
+    assert(conv1 == open + "12}3" + open + "2}")
+
+    // user replacement `$13` with only 12 user groups MUST back off to `$1` + literal `3`.
+    val (_, repl2) = new CudfRegexTranspiler(RegexReplaceMode)
+      .getTranspiledAST(userPattern, None, Some("$13"))
+    val (has2, conv2) =
+      GpuRegExpUtils.backrefConversion(repl2.get.toRegexString, userNumCaptureGroups)
+    assert(has2)
+    assert(conv2 == open + "1}3",
+      s"expected user `$$13` to back off to `$${1}3`, got `$conv2`")
+  }
+
+  test("isSupportedStringReplacePattern classifies regex patterns correctly") {
+    val cases = Seq(
+      "A" -> true,
+      "A*" -> false,
+      "(A)" -> false,
+      "A+" -> false)
+
+    cases.foreach { case (pattern, expected) =>
+      assert(GpuOverrides.isSupportedStringReplacePattern(pattern) == expected)
+    }
   }
 }
 
@@ -274,13 +390,13 @@ class StringOperatorsDiagnostics extends SparkQueryCompareTestSuite {
 
         val codepoint = TestCodepoints.validCodepointIndices(i)
         print(f"(${codepoint.toChar.toString} $codepoint[$codepoint%04x]) ($cpu_str ")
-        print(f"${cpu_str.map(_.toInt.formatted("%d")).mkString(",")}")
+        print(f"${cpu_str.map(c => "%d".format(c.toInt)).mkString(",")}")
         print("[")
-        print(f"${cpu_str.map(_.toInt.formatted("%04x")).mkString(",")}")
+        print(f"${cpu_str.map(c => "%04x".format(c.toInt)).mkString(",")}")
         print(f"]) ($gpu_str ")
-        print(f"${gpu_str.map(_.toInt.formatted("%d")).mkString(",")}")
+        print(f"${gpu_str.map(c => "%d".format(c.toInt)).mkString(",")}")
         print("[");
-        print(f"${gpu_str.map(_.toInt.formatted("%04x")).mkString(",")}")
+        print(f"${gpu_str.map(c => "%04x".format(c.toInt)).mkString(",")}")
         println("])");
       }
     }

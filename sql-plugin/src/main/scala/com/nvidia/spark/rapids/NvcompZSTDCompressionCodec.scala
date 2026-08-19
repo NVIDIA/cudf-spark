@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids
 
-import ai.rapids.cudf.{BaseDeviceMemoryBuffer, ContiguousTable, Cuda, DeviceMemoryBuffer, NvtxColor, NvtxRange}
+import ai.rapids.cudf.{BaseDeviceMemoryBuffer, ContiguousTable, Cuda, DeviceMemoryBuffer}
 import ai.rapids.cudf.nvcomp.{BatchedZstdCompressor, BatchedZstdDecompressor}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingArray
@@ -53,7 +53,7 @@ class BatchedNvcompZSTDCompressor(maxBatchMemorySize: Long,
     // Increase ref count to keep inputs alive since cudf compressor will close input buffers.
     val inputBufs = DeviceBuffersUtils.incRefCount(tables.map(_.getBuffer))
     closeOnExcept(batchCompressor.compress(inputBufs, stream)) { compressedBufs =>
-      withResource(new NvtxRange("zstd post process", NvtxColor.YELLOW)) { _ =>
+      NvtxRegistry.ZSTD_POST_PROCESS {
         require(compressedBufs.length == tables.length,
           s"expected ${tables.length} buffers, but compress() returned ${compressedBufs.length}")
         compressedBufs.zip(tables).map { case (buffer, table) =>
@@ -81,7 +81,7 @@ class BatchedNvcompZSTDDecompressor(maxBatchMemory: Long,
     // Increase ref count to keep inputs alive since cudf decompressor will close the inputs.
     val compressedBufs = DeviceBuffersUtils.incRefCount(inputBufs)
     val outputBufs = closeOnExcept(compressedBufs) { _ =>
-      withResource(new NvtxRange("alloc output bufs", NvtxColor.YELLOW)) { _ =>
+      NvtxRegistry.ALLOC_OUTPUT_BUFS {
         DeviceBuffersUtils.allocateBuffers(bufMetas.map(_.uncompressedSize()))
       }
     }

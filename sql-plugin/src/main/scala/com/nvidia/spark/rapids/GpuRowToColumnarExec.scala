@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,9 +16,9 @@
 
 package com.nvidia.spark.rapids
 
-import ai.rapids.cudf.{NvtxColor, NvtxRange}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.GpuColumnVector.GpuColumnarBatchBuilder
+import com.nvidia.spark.rapids.jni.{CpuRetryOOM, CpuSplitAndRetryOOM, GpuRetryOOM, GpuSplitAndRetryOOM}
 import com.nvidia.spark.rapids.shims.{CudfUnsafeRow, GpuTypeShims, ShimUnaryExecNode}
 
 import org.apache.spark.TaskContext
@@ -26,7 +26,7 @@ import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.{Attribute, BoundReference, SortOrder, SpecializedGetters, UnsafeRow}
+import org.apache.spark.sql.catalyst.expressions.{Attribute, BoundReference, SortOrder, SpecializedGetters, UnsafeProjection, UnsafeRow}
 import org.apache.spark.sql.catalyst.expressions.codegen.{CodeAndComment, CodeFormatter, CodegenContext, CodeGenerator, GenerateUnsafeProjection}
 import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.execution.SparkPlan
@@ -67,7 +67,7 @@ private class GpuRowToColumnConverter(schema: StructType) extends Serializable {
   }
 }
 
-private[rapids] object GpuRowToColumnConverter {
+object GpuRowToColumnConverter {
   // Sizes estimates for different things
   /*
    * size of an offset entry.  In general we have 1 more offset entry than rows, so
@@ -77,24 +77,10 @@ private[rapids] object GpuRowToColumnConverter {
   private[this] val VALIDITY = 0.125 // 1/8th of a byte (1 bit)
   private[this] val VALIDITY_N_OFFSET = OFFSET + VALIDITY
 
-  private[rapids] abstract class TypeConverter extends Serializable {
-    /** Append row value to the column builder and return the number of data bytes written */
-    def append(row: SpecializedGetters,
-      column: Int,
-      builder: RapidsHostColumnBuilder): Double
-
-    /**
-     * This is here for structs.  When you append a null to a struct the size is not known
-     * ahead of time.  Also because structs push nulls down to the children this size should
-     * assume a validity even if the schema says it cannot be null.
-     */
-    def getNullSize: Double
-  }
-
   private def getConverterFor(field: StructField): TypeConverter =
     getConverterForType(field.dataType, field.nullable)
 
-  private[rapids] def getConverterForType(dataType: DataType, nullable: Boolean): TypeConverter = {
+  def getConverterForType(dataType: DataType, nullable: Boolean): TypeConverter = {
     (dataType, nullable) match {
       case (BooleanType, true) => BooleanConverter
       case (BooleanType, false) => NotNullBooleanConverter
@@ -138,7 +124,10 @@ private[rapids] object GpuRowToColumnConverter {
       case (MapType(k, v, vcn), false) =>
         NotNullMapConverter(getConverterForType(k, nullable = false),
           getConverterForType(v, vcn))
-      case (NullType, true) =>
+      case (NullType, _) =>
+        // nullable=false appears only as a synthetic child of empty nested
+        // containers (e.g. MapType(NullType, NullType) from an empty map),
+        // where no row is ever appended, so NullConverter is safe either way.
         NullConverter
       // check special Shims types, such as DayTimeIntervalType
       case (otherType, nullable) if GpuTypeShims.hasConverterForType(otherType) =>
@@ -591,6 +580,7 @@ class RowToColumnarIterator(
     localGoal: CoalesceSizeGoal,
     batchSizeBytes: Long,
     converters: GpuRowToColumnConverter,
+    enableRetry: Boolean = true,
     numInputRows: GpuMetric = NoopMetric,
     numOutputRows: GpuMetric = NoopMetric,
     numOutputBatches: GpuMetric = NoopMetric,
@@ -602,49 +592,133 @@ class RowToColumnarIterator(
   private var targetRows = 0
   private var totalOutputBytes: Long = 0
   private var totalOutputRows: Long = 0
+  private lazy val rowCopyProjection: UnsafeProjection = UnsafeProjection.create(localSchema)
 
-  override def hasNext: Boolean = rowIter.hasNext
+  // Carries a failed row across batch boundaries when OOM interrupted conversion.
+  private var pendingRow: InternalRow = _
+
+  override def hasNext: Boolean = {
+    if (pendingRow != null) {
+      true
+    } else {
+      val start = System.nanoTime()
+      val result = rowIter.hasNext
+      streamTime += System.nanoTime() - start
+      result
+    }
+  }
 
   override def next(): ColumnarBatch = {
-    if (!rowIter.hasNext) {
+    if (!hasNext) {
       throw new NoSuchElementException
     }
     buildBatch()
   }
 
-  private def buildBatch(): ColumnarBatch = {
-    withResource(new NvtxRange("RowToColumnar", NvtxColor.CYAN)) { _ =>
-      val streamStart = System.nanoTime()
-      // estimate the size of the first batch based on the schema
-      if (targetRows == 0) {
-        if (localSchema.fields.isEmpty) {
-          // if there are no columns then we just default to a small number
-          // of rows for the first batch
-          // TODO do we even need to allocate anything here?
-          targetRows = 1024
-          initialRows = targetRows
-        } else {
-          val sampleRows = GpuBatchUtils.VALIDITY_BUFFER_BOUNDARY_ROWS
-          val sampleBytes = GpuBatchUtils.estimateGpuMemory(localSchema, sampleRows)
-          targetRows = GpuBatchUtils.estimateRowCount(targetSizeBytes, sampleBytes, sampleRows)
-          initialRows = GpuBatchUtils.estimateRowCount(batchSizeBytes, sampleBytes, sampleRows)
+  private def copyRow(row: InternalRow): InternalRow = row match {
+    case unsafe: UnsafeRow => unsafe.copy()
+    case other => rowCopyProjection.apply(other).copy()
+  }
+
+  /** Consume the pending row if available, otherwise advance the iterator. */
+  private def nextRow(): InternalRow = {
+    if (pendingRow != null) {
+      val r = pendingRow
+      pendingRow = null
+      r
+    } else {
+      rowIter.next()
+    }
+  }
+
+  /**
+   * Core conversion loop. When retry is enabled, runs inside a single RMM retry block
+   * so host allocations throw retryable OOMs instead of fatal OutOfMemoryError.
+   *
+   * OOM strategy (retry enabled):
+   *  - Has rows to emit (and not RequireSingleBatch) → emit partial batch, save failed row
+   *  - No rows yet + RetryOOM → block until memory freed, then while loop retries
+   *  - No rows yet + SplitAndRetryOOM → propagate (can't split a single row)
+   */
+  private def convertRows(builders: GpuColumnarBatchBuilder): (Int, Double) = {
+    var rowCount = 0
+    var byteCount: Double = 0
+
+    if (enableRetry) {
+      var batchDone = false
+      RmmRapidsRetryIterator.withRetryBlock {
+        while (!batchDone && hasNext &&
+            (rowCount == 0 || rowCount < targetRows && byteCount < targetSizeBytes)) {
+          val snapshots = builders.captureState()
+          var row: InternalRow = null
+          try {
+            row = nextRow()
+            byteCount += converters.convert(row, builders)
+            rowCount += 1
+          } catch {
+            case oom @ (_: CpuRetryOOM | _: CpuSplitAndRetryOOM |
+                        _: GpuRetryOOM | _: GpuSplitAndRetryOOM) =>
+              builders.restoreState(snapshots)
+              if (rowCount > 0 && !localGoal.isInstanceOf[RequireSingleBatchLike]) {
+                // Emit partial batch. This also handles SplitAndRetryOOM: emitting
+                // a smaller batch IS the right response to memory pressure, and
+                // tryBuild() has its own withRetryNoSplit to handle GPU OOM.
+                if (row != null) {
+                  pendingRow = copyRow(row)
+                }
+                batchDone = true
+              } else {
+                // No rows to emit — must retry or fail.
+                oom match {
+                  case _: CpuSplitAndRetryOOM | _: GpuSplitAndRetryOOM => throw oom
+                  case _ =>
+                    if (row != null) {
+                      pendingRow = copyRow(row)
+                    }
+                    RmmRapidsRetryIterator.blockUntilMemoryFreed()
+                }
+              }
+          }
         }
       }
+    } else {
+      while (hasNext && (rowCount == 0 || rowCount < targetRows && byteCount < targetSizeBytes)) {
+        val row = nextRow()
+        byteCount += converters.convert(row, builders)
+        rowCount += 1
+      }
+    }
+    (rowCount, byteCount)
+  }
+
+  private def estimateInitialTargetRows(): Unit = {
+    // estimate the size of the first batch based on the schema
+    if (targetRows == 0) {
+      if (localSchema.fields.isEmpty) {
+        // if there are no columns then we just default to a small number
+        // of rows for the first batch
+        targetRows = 1024
+        initialRows = targetRows
+      } else {
+        val sampleRows = GpuBatchUtils.VALIDITY_BUFFER_BOUNDARY_ROWS
+        val sampleBytes = GpuBatchUtils.estimateGpuMemory(localSchema, sampleRows)
+        targetRows = GpuBatchUtils.estimateRowCount(targetSizeBytes, sampleBytes, sampleRows)
+        initialRows = GpuBatchUtils.estimateRowCount(batchSizeBytes, sampleBytes, sampleRows)
+      }
+    }
+  }
+
+  private def buildBatch(): ColumnarBatch = {
+    NvtxRegistry.ROW_TO_COLUMNAR {
+      val streamStart = System.nanoTime()
+      estimateInitialTargetRows()
 
       withResource(new GpuColumnarBatchBuilder(localSchema, initialRows)) { builders =>
-        var rowCount = 0
-        // Double because validity can be < 1 byte, and this is just an estimate anyways
-        var byteCount: Double = 0
-        // read at least one row
-        while (rowIter.hasNext &&
-            (rowCount == 0 || rowCount < targetRows && byteCount < targetSizeBytes)) {
-          val row = rowIter.next()
-          byteCount += converters.convert(row, builders)
-          rowCount += 1
-        }
+        val (rowCount, _) = convertRows(builders)
 
         // enforce RequireSingleBatch limit
-        if (rowIter.hasNext && localGoal.isInstanceOf[RequireSingleBatchLike]) {
+        if ((pendingRow != null || rowIter.hasNext) &&
+            localGoal.isInstanceOf[RequireSingleBatchLike]) {
           throw new IllegalStateException("A single batch is required for this operation." +
               " Please try increasing your partition count.")
         }
@@ -657,8 +731,7 @@ class RowToColumnarIterator(
         Option(TaskContext.get())
             .foreach(ctx => GpuSemaphore.acquireIfNecessary(ctx))
 
-        val ret = withResource(new NvtxWithMetrics("RowToColumnar", NvtxColor.GREEN,
-            opTime)) { _ =>
+        val ret = NvtxIdWithMetrics(NvtxRegistry.ROW_TO_COLUMNAR, opTime) {
           RmmRapidsRetryIterator.withRetryNoSplit[ColumnarBatch] {
             builders.tryBuild(rowCount)
           }
@@ -680,6 +753,7 @@ class RowToColumnarIterator(
       }
     }
   }
+
 }
 
 object GeneratedInternalRowToCudfRowIterator extends Logging {
@@ -831,6 +905,10 @@ object GeneratedInternalRowToCudfRowIterator extends Logging {
          |            input.hasNext());
          |      }
          |    }
+         |    // A cudf LIST column requires a terminal offset equal to the child data size, else
+         |    // offsets-reading consumers (e.g. chunked_pack when the batch spills) see a corrupt
+         |    // child extent. On the pending-row exit the slot already holds dataOffset (no-op).
+         |    offsetsBuffer.setInt((long) currentRow * 4, dataOffset);
          |    return new int[] {dataOffset, currentRow};
          |  }
          |
@@ -884,7 +962,7 @@ case class GpuRowToColumnarExec(child: SparkPlan, goal: CoalesceSizeGoal)
   }
 
   override lazy val additionalMetrics: Map[String, GpuMetric] = Map(
-    OP_TIME -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_OP_TIME),
+    OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY),
     STREAM_TIME -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_STREAM_TIME),
     NUM_INPUT_ROWS -> createMetric(DEBUG_LEVEL, DESCRIPTION_NUM_INPUT_ROWS)
   )
@@ -896,7 +974,7 @@ case class GpuRowToColumnarExec(child: SparkPlan, goal: CoalesceSizeGoal)
     val numOutputBatches = gpuLongMetric(NUM_OUTPUT_BATCHES)
     val numOutputRows = gpuLongMetric(NUM_OUTPUT_ROWS)
     val streamTime = gpuLongMetric(STREAM_TIME)
-    val opTime = gpuLongMetric(OP_TIME)
+    val opTime = gpuLongMetric(OP_TIME_LEGACY)
     val localGoal = goal
     val rowBased = child.execute()
 
@@ -909,7 +987,7 @@ case class GpuRowToColumnarExec(child: SparkPlan, goal: CoalesceSizeGoal)
     // increase this number. Spark by default limits codegen to 100 fields
     // "spark.sql.codegen.maxFields".
     if ((1 until 100000000).contains(output.length) &&
-        CudfRowTransitions.areAllSupported(output)) {
+        CudfRowTransitions.areAllR2CSupported(output)) {
       val localOutput = output
       rowBased.mapPartitions(rowIter => GeneratedInternalRowToCudfRowIterator(
         rowIter, localOutput.toArray, localGoal, streamTime, opTime,
@@ -918,8 +996,9 @@ case class GpuRowToColumnarExec(child: SparkPlan, goal: CoalesceSizeGoal)
       val converters = new GpuRowToColumnConverter(localSchema)
       val conf = new RapidsConf(child.conf)
       val batchSizeBytes = conf.gpuTargetBatchSizeBytes
+      val enableR2cRetry = conf.isR2cRetryEnabled
       rowBased.mapPartitions(rowIter => new RowToColumnarIterator(rowIter,
-        localSchema, localGoal, batchSizeBytes, converters,
+        localSchema, localGoal, batchSizeBytes, converters, enableR2cRetry,
         numInputRows, numOutputRows, numOutputBatches, streamTime, opTime))
     }
   }

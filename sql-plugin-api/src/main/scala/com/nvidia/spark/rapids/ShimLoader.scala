@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ import java.net.URL
 import scala.collection.JavaConverters.enumerationAsScalaIteratorConverter
 import scala.util.Try
 
+import com.nvidia.spark.GpuCachedBatchSerializer
 import org.apache.commons.lang3.reflect.MethodUtils
 
 import org.apache.spark.{SPARK_BRANCH, SPARK_BUILD_DATE, SPARK_BUILD_USER, SPARK_REPO_URL, SPARK_REVISION, SPARK_VERSION, SparkConf, SparkEnv}
@@ -47,11 +48,11 @@ import org.apache.spark.util.MutableURLClassLoader
     Each shim can see a consistent parallel world without conflicts by referencing
     only one conflicting directory.
     E.g., Spark 3.2.0 Shim will use
-    jar:file:/home/spark/rapids-4-spark_2.12-25.10.0.jar!/spark-shared/
-    jar:file:/home/spark/rapids-4-spark_2.12-25.10.0.jar!/spark320/
+    jar:file:/home/spark/rapids-4-spark_2.12-26.10.0.jar!/spark-shared/
+    jar:file:/home/spark/rapids-4-spark_2.12-26.10.0.jar!/spark320/
     Spark 3.3.1 will use
-    jar:file:/home/spark/rapids-4-spark_2.12-25.10.0.jar!/spark-shared/
-    jar:file:/home/spark/rapids-4-spark_2.12-25.10.0.jar!/spark331/
+    jar:file:/home/spark/rapids-4-spark_2.12-26.10.0.jar!/spark-shared/
+    jar:file:/home/spark/rapids-4-spark_2.12-26.10.0.jar!/spark331/
     Using these Jar URL's allows referencing different bytecode produced from identical sources
     by incompatible Scala / Spark dependencies.
  */
@@ -284,7 +285,7 @@ object ShimLoader {
         s"This RAPIDS Plugin build does not support Spark build ${sparkVersion}. " +
           s"Supported Spark versions: ${supportedVersions}. " +
           "Consult the Release documentation at " +
-          "https://nvidia.github.io/spark-rapids/docs/download.html")
+          "https://nvidia.github.io/cudf-spark/docs/download.html")
     }
   }
 
@@ -338,12 +339,17 @@ object ShimLoader {
     ShimReflectionUtils.newInstanceOf("com.nvidia.spark.rapids.RapidsExecutorPlugin")
   }
 
-  def newColumnarOverrideRules(): ColumnarRule = {
-    ShimReflectionUtils.newInstanceOf("com.nvidia.spark.rapids.ColumnarOverrideRules")
+  def newColumnarOverrideRules(ss: SparkSession): ColumnarRule = {
+    val clz = ShimReflectionUtils.loadClass("com.nvidia.spark.rapids.ColumnarOverrideRules")
+    val constructor = clz.getConstructor(classOf[SparkSession])
+    constructor.newInstance(ss).asInstanceOf[ColumnarRule]
   }
 
-  def newGpuQueryStagePrepOverrides(): Rule[SparkPlan] = {
-    ShimReflectionUtils.newInstanceOf("com.nvidia.spark.rapids.GpuQueryStagePrepOverrides")
+  def newGpuQueryStagePrepOverrides(ss: SparkSession): Rule[SparkPlan] = {
+    val clz = ShimReflectionUtils.loadClass(
+      "com.nvidia.spark.rapids.GpuQueryStagePrepOverrides")
+    val constructor = clz.getConstructor(classOf[SparkSession])
+    constructor.newInstance(ss).asInstanceOf[Rule[SparkPlan]]
   }
 
   def newGpuPostHocResolutionOverrides(ss: SparkSession): Rule[LogicalPlan] = {
@@ -382,4 +388,10 @@ object ShimLoader {
   def loadGpuColumnVector(): Class[_] = {
     ShimReflectionUtils.loadClass("com.nvidia.spark.rapids.GpuColumnVector")
   }
+
+  def newParquetCachedBatchSerializer(): GpuCachedBatchSerializer = {
+    ShimReflectionUtils.newInstanceOf(
+      "com.nvidia.spark.rapids.parquet.ParquetCachedBatchSerializer")
+  }
+
 }

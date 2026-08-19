@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2020-2025, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -53,11 +53,17 @@ RUN add-apt-repository ppa:deadsnakes/ppa && \
     openjdk-8-jdk openjdk-11-jdk openjdk-17-jdk tzdata git wget
 
 # Install maven 3.8+ to be compatible with JDK17 on Ubuntu
+# maintain also specific version in the internal artifactory to accelerate the build
 ARG MAVEN_VERSION=3.8.4
-RUN wget https://archive.apache.org/dist/maven/maven-3/$MAVEN_VERSION/binaries/apache-maven-$MAVEN_VERSION-bin.tar.gz && \
-    tar xf apache-maven-$MAVEN_VERSION-bin.tar.gz -C /usr/local/ && \
-    rm -rf apache-maven-$MAVEN_VERSION-bin.tar.gz && \
-    ln -sf /usr/local/apache-maven-$MAVEN_VERSION/bin/mvn /usr/bin/mvn
+ARG MAVEN_BASE_URL=https://archive.apache.org/dist/maven/maven-3
+
+ENV MAVEN_TGZ=apache-maven-${MAVEN_VERSION}-bin.tar.gz
+ENV MAVEN_URL=${MAVEN_BASE_URL}/${MAVEN_VERSION}/binaries/${MAVEN_TGZ}
+
+RUN wget "$MAVEN_URL" -O "/tmp/${MAVEN_TGZ}" && \
+    tar xf "/tmp/${MAVEN_TGZ}" -C /usr/local/ && \
+    rm -f "/tmp/${MAVEN_TGZ}" && \
+    ln -sf "/usr/local/apache-maven-${MAVEN_VERSION}/bin/mvn" /usr/bin/mvn
 
 # Set default jdk as 1.8.0
 RUN update-java-alternatives --set /usr/lib/jvm/java-1.8.0-openjdk-amd64
@@ -67,18 +73,14 @@ RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86
     rm -f ~/miniconda.sh
 ENV PATH="/opt/conda/bin:$MAVEN_HOME/bin:${PATH}"
 ENV CONDA_PLUGINS_AUTO_ACCEPT_TOS="yes"
-RUN conda init && conda install -n base -c conda-forge mamba
+RUN conda init && conda config --set channel_priority strict
 
-# 'pyarrow' and 'pandas' will be installed as the dependencies of cudf below
-RUN export CUDA_VER=`echo ${CUDA_VER} | cut -d '.' -f 1,2` && \
-    mamba install -y -c rapidsai -c rapidsai-nightly -c nvidia -c conda-forge -c defaults \
-        cudf=${CUDF_VER} python=3.10 cuda-version=${CUDA_VER} && \
-    mamba install -y spacy && python -m spacy download en_core_web_sm && \
-    mamba install -y -c anaconda pytest requests && \
-    mamba install -y -c conda-forge sre_yield && \
-    mamba clean -ay
-# install pytest plugins for xdist parallel run
-RUN python -m pip install findspark pytest-xdist pytest-order fastparquet==2024.5.0
+# Base python version as 3.10 to keep compatibility with spark330
+RUN conda install -y -c conda-forge -c anaconda -c defaults \
+        python=3.10 && \
+    conda clean -ay
+COPY integration_tests/requirements.txt /tmp/requirements.txt
+RUN pip install -r /tmp/requirements.txt
 
 RUN apt install -y inetutils-ping expect
 

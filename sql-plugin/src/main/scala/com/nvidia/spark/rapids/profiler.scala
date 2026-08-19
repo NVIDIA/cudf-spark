@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,6 +33,10 @@ import org.apache.spark.io.CompressionCodec
 import org.apache.spark.scheduler.{SparkListener, SparkListenerJobEnd, SparkListenerStageCompleted}
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.util.SerializableConfiguration
+
+/**
+ * For profiling with com.nvidia.spark.rapids.jni.Profiler
+ */
 
 object ProfilerOnExecutor extends Logging {
   private val jobPattern = raw"SPARK_.*_JId_([0-9]+).*".r
@@ -72,24 +76,37 @@ object ProfilerOnExecutor extends Logging {
     }
     writer = conf.profilePath.flatMap { pathPrefix =>
       val executorId = pluginCtx.executorID()
+      var profileWriter: ProfileWriter = null
       if (shouldProfile(executorId, conf)) {
-        logInfo("Initializing profiler")
-        if (jobRanges.nonEmpty) {
-          // Need caller context enabled to get the job ID of a task on the executor
-          TrampolineUtil.getSparkHadoopUtilConf.setBoolean("hadoop.caller.context.enabled", true)
+        try {
+          logInfo("Initializing profiler")
+          if (jobRanges.nonEmpty) {
+            // Need caller context enabled to get the job ID of a task on the executor
+            TrampolineUtil.getSparkHadoopUtilConf.setBoolean("hadoop.caller.context.enabled", true)
+          }
+          val codec = conf.profileCompression match {
+            case "none" => None
+            case c => Some(TrampolineUtil.createCodec(pluginCtx.conf(), c))
+          }
+          profileWriter = new ProfileWriter(pluginCtx, pathPrefix, codec)
+          val profilerConf = new Profiler.Config.Builder()
+            .withWriteBufferSize(conf.profileWriteBufferSize)
+            .withFlushPeriodMillis(conf.profileFlushPeriodMillis)
+            .withAllocAsyncCapturing(conf.profileAsyncAllocCapture)
+            .build()
+          Profiler.init(profileWriter, profilerConf)
+          Some(profileWriter)
+        } catch {
+          case l: Exception =>
+            logWarning("Unable to launch profiler, we will abort profiling session.",l)
+            pluginCtx.send(ProfileErrorMsg(executorId, s"error launching profiler: $l"))
+            // failed to initialize, lets close the writer, and try to shutdown.
+            if (profileWriter != null) {
+              Profiler.shutdown()
+              profileWriter.close()
+            }
+            None
         }
-        val codec = conf.profileCompression match {
-          case "none" => None
-          case c => Some(TrampolineUtil.createCodec(pluginCtx.conf(), c))
-        }
-        val w = new ProfileWriter(pluginCtx, pathPrefix, codec)
-        val profilerConf = new Profiler.Config.Builder()
-          .withWriteBufferSize(conf.profileWriteBufferSize)
-          .withFlushPeriodMillis(conf.profileFlushPeriodMillis)
-          .withAllocAsyncCapturing(conf.profileAsyncAllocCapture)
-          .build()
-        Profiler.init(w, profilerConf)
-        Some(w)
       } else {
         None
       }
@@ -356,11 +373,15 @@ object ProfilerOnDriver extends Logging {
   private val completedJobs = new ConcurrentHashMap[Int, Unit]()
   private val completedStages = new ConcurrentHashMap[Int, Unit]()
   private var isJobsStageProfilingComplete = false
+  // did an executor fail to profile, if so we will log once
+  private var profilerErrored: Boolean = false
 
   def init(sc: SparkContext, conf: RapidsConf): Unit = {
+    // Even if conf.profilePath is not set, we still might need it in AsyncProfiler
+    hadoopConf = new SerializableConfiguration(sc.hadoopConfiguration)
+
     // if no profile path, profiling is disabled and nothing to do
     conf.profilePath.foreach { _ =>
-      hadoopConf = new SerializableConfiguration(sc.hadoopConfiguration)
       jobRanges = new RangeConfMatcher(conf, RapidsConf.PROFILE_JOBS)
       stageRanges = new RangeConfMatcher(conf, RapidsConf.PROFILE_STAGES)
       if (jobRanges.nonEmpty || stageRanges.nonEmpty) {
@@ -389,6 +410,14 @@ object ProfilerOnDriver extends Logging {
         throw new IllegalStateException("Hadoop configuration not set")
       }
       hadoopConf
+    case ProfileErrorMsg(executorId, msg) =>
+      if (profilerErrored) {
+        logDebug(s"Profiling: Error starting profiler from $executorId: $msg")
+      } else {
+        logError(s"Profiling: Error starting profiler from $executorId: $msg. Suppressing others.")
+      }
+      profilerErrored = true
+      null
     case ProfileStatusMsg(executorId, msg) =>
       logWarning(s"Profiling: Executor $executorId: $msg")
       null
@@ -428,6 +457,7 @@ trait ProfileMsg
 
 case class ProfileInitMsg(executorId: String, path: String) extends ProfileMsg
 case class ProfileStatusMsg(executorId: String, msg: String) extends ProfileMsg
+case class ProfileErrorMsg(executorId: String, msg: String) extends ProfileMsg
 case class ProfileEndMsg(executorId: String, path: String) extends ProfileMsg
 
 // Reply is a tuple of:

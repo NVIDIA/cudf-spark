@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,8 +16,8 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark": "332db"}
-{"spark": "341db"}
 {"spark": "350db143"}
+{"spark": "400db173"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
@@ -64,6 +64,8 @@ trait Spark332PlusDBShims extends Spark330PlusDBShims {
     DataWritingCommandRule[_ <: DataWritingCommand]] = {
     Map.empty
   }
+
+  override def hasGpuWriteFiles: Boolean = true
 
   override def getRunnableCmds: Map[Class[_ <: RunnableCommand],
     RunnableCommandRule[_ <: RunnableCommand]] = {

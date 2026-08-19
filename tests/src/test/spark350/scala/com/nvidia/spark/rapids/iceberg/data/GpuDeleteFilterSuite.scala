@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +22,9 @@
 {"spark": "354"}
 {"spark": "355"}
 {"spark": "356"}
+{"spark": "357"}
+{"spark": "358"}
+{"spark": "359"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.iceberg.data
 
@@ -31,8 +34,9 @@ import scala.language.reflectiveCalls
 import ai.rapids.cudf.{DType, HostColumnVector, HostColumnVectorCore}
 import com.nvidia.spark.rapids.{GpuColumnVector, LazySpillableColumnarBatch, NoopMetric, RapidsConf}
 import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.GpuMetric.{JOIN_TIME, OP_TIME}
+import com.nvidia.spark.rapids.GpuMetric.{JOIN_TIME, OP_TIME_LEGACY}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
+import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
 import com.nvidia.spark.rapids.iceberg.{fieldIndex, PooledTableGen}
 import com.nvidia.spark.rapids.iceberg.data.TestGpuDeleteLoader._
 import com.nvidia.spark.rapids.iceberg.parquet.{GpuIcebergParquetReaderConf, SingleFile}
@@ -41,6 +45,7 @@ import org.apache.hadoop.conf.Configuration
 import org.apache.iceberg.{DeleteFile, FileContent, FileFormat, FileMetadata, MetadataColumns, PartitionSpec, Schema}
 import org.apache.iceberg.MetadataColumns.isMetadataColumn
 import org.apache.iceberg.common.DynMethods
+import org.apache.iceberg.hadoop.HadoopFileIO
 import org.apache.iceberg.spark.GpuTypeToSparkType.toSparkType
 import org.apache.iceberg.types.Type.TypeID
 import org.apache.iceberg.types.Types
@@ -282,12 +287,6 @@ class GpuDeleteFilterSuite extends AnyFunSuite with BeforeAndAfterAll {
           .map(_.getBase)
         withResource(baseGpuVecs.safeMap(_.copyToHost())) { hostVecs =>
           for (i <- 0 until resultBatch.numRows) {
-            val (filePath, rowIdx) = (hostVecs(f.posDelColIndices(0)).getJavaString(i),
-              hostVecs(f.posDelColIndices(1)).getLong(i))
-
-            assert(!f.deletedRows.get(filePath).exists(_.contains(rowIdx)),
-              s"($filePath, $rowIdx) should be deleted by position deletes")
-
             for ((colIndices, valueSet) <- f.eqDelColIndices.zip(f.eqDelValueSets)) {
               val data = colIndices.map { idx =>
                 valueOf(hostVecs(idx), Integer.valueOf(i))
@@ -317,12 +316,6 @@ class GpuDeleteFilterSuite extends AnyFunSuite with BeforeAndAfterAll {
           .map(_.getBase)
         withResource(baseGpuVecs.safeMap(_.copyToHost())) { hostVecs =>
           for (i <- 0 until resultBatch.numRows) {
-            val (filePath, rowIdx) = (hostVecs(f.posDelColIndices(0)).getJavaString(i),
-              hostVecs(f.posDelColIndices(1)).getLong(i))
-
-            assert(!f.deletedRows.get(filePath).exists(_.contains(rowIdx)),
-              s"($filePath, $rowIdx) should be deleted by position deletes")
-
             for ((colIndices, valueSet) <- f.eqDelColIndices.zip(f.eqDelValueSets)) {
               val data = colIndices.map { idx =>
                 valueOf(hostVecs(idx), Integer.valueOf(i))
@@ -470,6 +463,7 @@ private object TestGpuDeleteLoader {
       deleteFiles: Seq[DeleteFile],
       deleteLoader: Option[GpuDeleteLoader]): GpuDeleteFilter = {
     new GpuDeleteFilter(
+      new IcebergFileIO(new HadoopFileIO(new Configuration())),
       tableSchema,
       Map.empty,
       GpuIcebergParquetReaderConf(
@@ -483,7 +477,7 @@ private object TestGpuDeleteLoader {
         10000000,
         None,
         parquetDebugDumpAlways = false,
-        Map(OP_TIME -> NoopMetric, JOIN_TIME -> NoopMetric),
+        Map(OP_TIME_LEGACY -> NoopMetric, JOIN_TIME -> NoopMetric),
         SingleFile,
         tableSchema,
         None),

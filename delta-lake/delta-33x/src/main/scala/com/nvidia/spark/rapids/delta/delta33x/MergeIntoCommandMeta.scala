@@ -16,16 +16,12 @@
 
 package com.nvidia.spark.rapids.delta.delta33x
 
-import com.nvidia.spark.rapids.{DataFromReplacementRule, RapidsConf, RapidsMeta, RunnableCommandMeta}
-import com.nvidia.spark.rapids.delta.RapidsDeltaUtils
+import com.nvidia.spark.rapids.{DataFromReplacementRule, RapidsConf, RapidsMeta}
+import com.nvidia.spark.rapids.delta.common.MergeIntoCommandMetaBase
 
-import org.apache.spark.internal.Logging
-import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.delta.commands.{DeletionVectorUtils, MergeIntoCommand}
+import org.apache.spark.sql.delta.commands.MergeIntoCommand
 import org.apache.spark.sql.delta.rapids.GpuDeltaLog
 import org.apache.spark.sql.delta.rapids.delta33x.GpuMergeIntoCommand
-import org.apache.spark.sql.delta.skipping.clustering.ClusteredTableUtils
-import org.apache.spark.sql.delta.sources.DeltaSQLConf
 import org.apache.spark.sql.execution.command.RunnableCommand
 
 class MergeIntoCommandMeta(
@@ -33,37 +29,7 @@ class MergeIntoCommandMeta(
     conf: RapidsConf,
     parent: Option[RapidsMeta[_, _, _]],
     rule: DataFromReplacementRule)
-  extends RunnableCommandMeta[MergeIntoCommand](mergeCmd, conf, parent, rule) with Logging {
-
-  override def tagSelfForGpu(): Unit = {
-    if (!conf.isDeltaWriteEnabled) {
-      willNotWorkOnGpu("Delta Lake output acceleration has been disabled. To enable set " +
-        s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
-    }
-    if (mergeCmd.notMatchedBySourceClauses.nonEmpty) {
-      // https://github.com/NVIDIA/spark-rapids/issues/8415
-      willNotWorkOnGpu("notMatchedBySourceClauses not supported on GPU")
-    }
-    val deltaLog = mergeCmd.targetFileIndex.deltaLog
-    val dvFeatureEnabled =
-      DeletionVectorUtils.deletionVectorsWritable(deltaLog.unsafeVolatileSnapshot)
-
-    if (dvFeatureEnabled && mergeCmd.conf.getConf(
-      DeltaSQLConf.MERGE_USE_PERSISTENT_DELETION_VECTORS)) {
-      // https://github.com/NVIDIA/spark-rapids/issues/8654
-      willNotWorkOnGpu("Deletion vectors are not supported on GPU")
-    }
-
-    val isClusteredTable = ClusteredTableUtils.getClusterBySpecOptional(
-      mergeCmd.targetFileIndex.deltaLog.unsafeVolatileSnapshot).isDefined
-    if (isClusteredTable) {
-      willNotWorkOnGpu("Liquid clustering is not supported on GPU")
-    }
-
-    val targetSchema = mergeCmd.migratedSchema.getOrElse(mergeCmd.target.schema)
-    RapidsDeltaUtils.tagForDeltaWrite(this, targetSchema, Some(deltaLog), Map.empty,
-      SparkSession.active)
-  }
+  extends MergeIntoCommandMetaBase(mergeCmd, conf, parent, rule) {
 
   override def convertToGpu(): RunnableCommand = {
     GpuMergeIntoCommand(

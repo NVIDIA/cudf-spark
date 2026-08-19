@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,7 +19,6 @@
 {"spark": "332db"}
 {"spark": "340"}
 {"spark": "341"}
-{"spark": "341db"}
 {"spark": "342"}
 {"spark": "343"}
 {"spark": "344"}
@@ -31,8 +30,21 @@
 {"spark": "354"}
 {"spark": "355"}
 {"spark": "356"}
+{"spark": "357"}
+{"spark": "358"}
+{"spark": "359"}
 {"spark": "400"}
+{"spark": "400db173"}
+{"spark": "401"}
+{"spark": "402"}
+{"spark": "403"}
+{"spark": "404"}
+{"spark": "411"}
+{"spark": "412"}
+{"spark": "413"}
+{"spark": "420"}
 spark-rapids-shim-json-lines ***/
+
 package org.apache.spark.sql.rapids
 
 import scala.math.{max, min}
@@ -46,6 +58,7 @@ import com.nvidia.spark.rapids.shims.NullIntolerantShim
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.analysis.TypeCheckResult
 import org.apache.spark.sql.catalyst.expressions.Expression
+import org.apache.spark.sql.catalyst.trees.{CurrentOrigin, Origin}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.shims.RapidsErrorUtils
 import org.apache.spark.sql.types._
@@ -65,7 +78,7 @@ abstract class CudfBinaryArithmetic extends CudfBinaryOperator with NullIntolera
       resultDecimalType(p1, s1, p2, s2)
     case _ => lhs.dataType
   }
-  override def dataType: DataType = dataTypeInternal(left, right)
+  override lazy val dataType: DataType = dataTypeInternal(left, right)
 
   protected def resultDecimalType(p1: Int, s1: Int, p2: Int, s2: Int): DecimalType = {
     throw new IllegalStateException(
@@ -204,7 +217,10 @@ trait GpuAddSub extends CudfBinaryArithmetic {
 case class GpuAdd(
     left: Expression,
     right: Expression,
-    failOnError: Boolean) extends GpuAddBase with GpuAddSub {
+    failOnError: Boolean)(
+    override val origin: Origin = CurrentOrigin.get)
+    extends GpuAddBase with GpuAddSub {
+  override def otherCopyArgs: Seq[AnyRef] = origin :: Nil
 
   def do128BitOperation(
       castLhs: ColumnView,
@@ -217,7 +233,11 @@ case class GpuAdd(
 case class GpuSubtract(
     left: Expression,
     right: Expression,
-    failOnError: Boolean) extends GpuSubtractBase with GpuAddSub {
+    failOnError: Boolean)(
+    override val origin: Origin = CurrentOrigin.get)
+    extends GpuSubtractBase with GpuAddSub {
+  override def otherCopyArgs: Seq[AnyRef] = origin :: Nil
+
   def do128BitOperation(
       castLhs: ColumnView,
       castRhs: ColumnView,
@@ -421,11 +441,13 @@ object GpuDecimalDivide {
 case class GpuDecimalDivide(
     left: Expression,
     right: Expression,
-    override val dataType: DecimalType,
+    dt: DecimalType,
     override val failOnError: Boolean,
     override val failOnDivideByZero: Boolean)
     extends CudfBinaryArithmetic with GpuDecimalDivideBase {
   override def inputType: AbstractDataType = DecimalType
+
+  override lazy val dataType: DecimalType = dt
 
   override def symbol: String = "/"
 
@@ -463,11 +485,13 @@ case class GpuDecimalDivide(
 case class GpuDecimalMultiply(
     left: Expression,
     right: Expression,
-    override val dataType: DecimalType,
+    dt: DecimalType,
     useLongMultiply: Boolean = false,
     failOnError: Boolean = SQLConf.get.ansiEnabled) extends CudfBinaryArithmetic
     with GpuDecimalMultiplyBase {
   override def inputType: AbstractDataType = DecimalType
+
+  override lazy val dataType: DecimalType = dt
 
   override def symbol: String = "*"
 
@@ -504,7 +528,11 @@ case class GpuDecimalMultiply(
 case class GpuIntegralDivide(
     left: Expression,
     right: Expression,
-    failOnError: Boolean = SQLConf.get.ansiEnabled) extends GpuIntegralDivideParent(left, right) {
+    failOnError: Boolean = SQLConf.get.ansiEnabled)(
+    override val origin: Origin = CurrentOrigin.get)
+    extends GpuIntegralDivideParent(left, right) {
+  override def otherCopyArgs: Seq[AnyRef] = origin :: Nil
+
   assert(!left.dataType.isInstanceOf[DecimalType] ||
          !right.dataType.isInstanceOf[DecimalType],
     "DecimalType integral divides need to be handled by GpuIntegralDecimalDivide")
@@ -521,7 +549,7 @@ case class GpuIntegralDecimalDivide(
 
   def integerDivide: Boolean = true
 
-  override def dataType: DataType = LongType
+  override lazy val dataType: DataType = LongType
 
   override def symbol: String = "/"
 

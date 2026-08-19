@@ -37,8 +37,9 @@ public class SlicedSerializedColumnVector extends ColumnVector {
 
   /**
    * Sets up the data type of this column vector.
+   * Visible for testing
    */
-  protected SlicedSerializedColumnVector(HostMemoryBuffer w, int start, int end) {
+  public SlicedSerializedColumnVector(HostMemoryBuffer w, int start, int end) {
     super(NullType);
     this.wrap = w.slice(start, end - start);
     assert start >= 0;

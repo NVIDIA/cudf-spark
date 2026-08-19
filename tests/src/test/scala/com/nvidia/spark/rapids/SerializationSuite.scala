@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@ import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.catalyst.expressions.AttributeReference
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.execution.{GpuBroadcastExchangeExecBase, SerializeBatchDeserializeHostBuffer, SerializeConcatHostBuffersDeserializeBatch}
 import org.apache.spark.sql.types.{DoubleType, FloatType, IntegerType, StringType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
@@ -101,7 +102,7 @@ class SerializationSuite extends AnyFunSuite
     val attrs = GpuColumnVector.extractTypes(gpuBatch).map(t => AttributeReference("", t)())
     if (gpuBatch.numRows() == 0 && gpuBatch.numCols == 0) {
       GpuBroadcastExchangeExecBase.makeBroadcastBatch(
-        Array.empty, Seq.empty, NoopMetric, NoopMetric, NoopMetric)
+        Array.empty, Seq.empty, NoopMetric, NoopMetric, NoopMetric, SQLConf.get)
     } else if (gpuBatch.numCols() == 0) {
       new SerializeConcatHostBuffersDeserializeBatch(
         null,
@@ -112,7 +113,7 @@ class SerializationSuite extends AnyFunSuite
       val buffer = createDeserializedHostBuffer(gpuBatch)
       // makeBroadcastBatch consumes `buffer`
       GpuBroadcastExchangeExecBase.makeBroadcastBatch(
-        Array(buffer), attrs, NoopMetric, NoopMetric, NoopMetric)
+        Array(buffer), attrs, NoopMetric, NoopMetric, NoopMetric, SQLConf.get)
     }
   }
 
@@ -321,6 +322,27 @@ class SerializationSuite extends AnyFunSuite
           withResource(materialized.batch.getColumnarBatch) { gpuBatch =>
             TestUtils.compareBatches(gpuExpected, gpuBatch)
           }
+        }
+      }
+    }
+  }
+
+  test("GpuSerializableBatch round-trips a GPU batch through Java serialization") {
+    // buildBatch() makes a fresh batch each call; GpuSerializableBatch.writeObject consumes
+    // (closes) the batch it wraps, so wrap an independent copy and compare against `expected`.
+    withResource(buildBatch()) { expected =>
+      val baos = new ByteArrayOutputStream()
+      withResource(new org.apache.spark.sql.rapids.GpuSerializableBatch(buildBatch())) {
+        serializable =>
+          withResource(new ObjectOutputStream(baos)) { oos =>
+            oos.writeObject(serializable)
+          }
+      }
+      withResource(new ObjectInputStream(new ByteArrayInputStream(baos.toByteArray))) { ois =>
+        val deserialized =
+          ois.readObject().asInstanceOf[org.apache.spark.sql.rapids.GpuSerializableBatch]
+        withResource(deserialized) { d =>
+          TestUtils.compareBatches(expected, d.getBatch)
         }
       }
     }

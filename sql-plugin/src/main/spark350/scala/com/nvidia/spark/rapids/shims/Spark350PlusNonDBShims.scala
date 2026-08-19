@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,23 +22,77 @@
 {"spark": "354"}
 {"spark": "355"}
 {"spark": "356"}
+{"spark": "357"}
+{"spark": "358"}
+{"spark": "359"}
 {"spark": "400"}
+{"spark": "401"}
+{"spark": "402"}
+{"spark": "403"}
+{"spark": "404"}
+{"spark": "411"}
+{"spark": "412"}
+{"spark": "413"}
+{"spark": "420"}
 spark-rapids-shim-json-lines ***/
+
 package com.nvidia.spark.rapids.shims
 
 import com.nvidia.spark.rapids._
+import com.nvidia.spark.rapids.GpuOverrides.exec
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Expression, PythonUDAF, ToPrettyString}
+import org.apache.spark.sql.catalyst.plans.logical.MergeRows.{Discard, Keep, Split}
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.adaptive.TableCacheQueryStageExec
-import org.apache.spark.sql.execution.columnar.InMemoryTableScanExec
 import org.apache.spark.sql.execution.datasources.{FileFormat, FilePartition, FileScanRDD, PartitionedFile}
+import org.apache.spark.sql.execution.datasources.v2.{AppendDataExec, MergeRowsExec, OverwriteByExpressionExec, OverwritePartitionsDynamicExec, ReplaceDataExec, WriteDeltaExec}
 import org.apache.spark.sql.execution.window.WindowGroupLimitExec
 import org.apache.spark.sql.rapids.execution.python.GpuPythonUDAF
 import org.apache.spark.sql.types.{StringType, StructType}
+
+class TableCacheQueryStageExecMeta(
+    tcqs: TableCacheQueryStageExec,
+    conf: RapidsConf,
+    parent: Option[RapidsMeta[_, _, _]],
+    rule: DataFromReplacementRule)
+    extends SparkPlanMeta[TableCacheQueryStageExec](tcqs, conf, parent, rule) {
+
+  override val childPlans: Seq[SparkPlanMeta[SparkPlan]] =
+    Seq(GpuOverrides.wrapPlan(tcqs.plan, conf, Some(this)))
+
+  override def tagPlanForGpu(): Unit = {
+    willNotWorkOnGpu("TableCacheQueryStageExec wrapper stays on CPU for Spark AQE compatibility; " +
+      "child plan may run on GPU")
+  }
+
+  override def convertToGpu(): GpuExec = {
+    throw new IllegalStateException("TableCacheQueryStageExec should not be converted to GPU")
+  }
+
+  override def convertToCpu(): SparkPlan = {
+    val wrappedPlan = childPlans.head.convertIfNeeded()
+
+    // If the wrapped plan wasn't converted, return the original TableCacheQueryStageExec
+    if (wrappedPlan == tcqs.plan) {
+      return tcqs
+    }
+
+    // The wrapped plan was converted to GPU - check if we can safely wrap it
+    if (InMemoryTableScanUtils.canTableCacheWrapGpuInMemoryTableScan) {
+      // For Spark 3.5.2+: GPU InMemoryTableScan implements InMemoryTableScanLike,
+      // so TableCacheQueryStageExec can safely wrap it and pass Spark's validation
+      tcqs.copy(plan = wrappedPlan)
+    } else {
+      // For Spark 3.5.0-3.5.1: Missing InMemoryTableScanLike trait causes validation issues.
+      // Keep the original CPU plan to avoid AQE complications.
+      tcqs
+    }
+  }
+}
 
 trait Spark350PlusNonDBShims extends Spark340PlusNonDBShims {
   override def getFileScanRDD(
@@ -93,29 +147,43 @@ trait Spark350PlusNonDBShims extends Spark340PlusNonDBShims {
           override def noReplacementPossibleMessage(reasons: String): String =
             s"blocks running on GPU because $reasons"
 
-          override def convertToGpu(): GpuExpression =
+          override def convertToGpuImpl(): GpuExpression =
             GpuPythonUDAF(a.name, a.func, a.dataType,
               childExprs.map(_.convertToGpu()),
               a.evalType, a.udfDeterministic, a.resultId)
-        })
+        }),
+      GpuOverrides.expr[Keep](
+        "Keep instruction for MERGE operations - keeps/updates rows based on condition",
+        ExprChecks.projectOnly(
+          TypeSig.all,
+          TypeSig.all,
+          Seq(ParamCheck("condition", TypeSig.all, TypeSig.all)),
+          Some(RepeatingParamCheck("outputs", TypeSig.all, TypeSig.all))
+        ),
+        (keep, conf, p, r) => new GpuKeepInstructionMeta(keep, conf, p, r)),
+      GpuOverrides.expr[Discard](
+        "Discard instruction for MERGE operations - discards rows based on condition",
+        ExprChecks.projectOnly(
+          TypeSig.all,
+          TypeSig.all,
+          Seq(ParamCheck("condition", TypeSig.all, TypeSig.all))),
+        (discard, conf, p, r) => new GpuDiscardInstructionMeta(discard, conf, p, r)),
+      GpuOverrides.expr[Split](
+        "Split instruction for MERGE operations - splits rows into multiple outputs",
+        ExprChecks.projectOnly(
+          TypeSig.all,
+          TypeSig.all,
+          Seq(ParamCheck("condition", TypeSig.all, TypeSig.all)),
+          Some(RepeatingParamCheck("outputs", TypeSig.all, TypeSig.all))),
+        (split, conf, p, r) => new GpuSplitInstructionMeta(split, conf, p, r))
     ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
     super.getExprs ++ shimExprs
   }
 
   override def getExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = {
-    val imtsKey = classOf[InMemoryTableScanExec].asSubclass(classOf[SparkPlan])
-    // To avoid code duplication we are reusing the rule from GpuOverrides
-    // but we disable it by default
-    val imtsRule = GpuOverrides.commonExecs.getOrElse(imtsKey,
-        throw new IllegalStateException("InMemoryTableScan should be overridden by default before" +
-        " Spark 3.5.0")).
-      disabledByDefault(
-        """there could be complications when using it with AQE with Spark-3.5.0 and Spark-3.5.1.
-          |For more details please check
-          |https://github.com/NVIDIA/spark-rapids/issues/10603""".stripMargin.replaceAll("\n", " "))
-
     val shimExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = Seq(
-      imtsRule,
+      // Use version-specific InMemoryTableScan rule (disabledByDefault for 3.5.0-3.5.1)
+      InMemoryTableScanUtils.getInMemoryTableScanExecRule,
       GpuOverrides.exec[WindowGroupLimitExec](
         "Apply group-limits for row groups destined for rank-based window functions like " +
           "row_number(), rank(), and dense_rank()",
@@ -124,8 +192,60 @@ trait Spark350PlusNonDBShims extends Spark340PlusNonDBShims {
             TypeSig.STRUCT + TypeSig.ARRAY + TypeSig.MAP).nested(),
           TypeSig.all),
         (limit, conf, p, r) => new GpuWindowGroupLimitExecMeta(limit, conf, p, r)),
-      GpuOverrides.neverReplaceExec[TableCacheQueryStageExec]("Table cache query stage")
+      exec[AppendDataExec](
+        "Append data into a datasource V2 table",
+        ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 +
+          TypeSig.STRUCT + TypeSig.MAP + TypeSig.ARRAY + TypeSig.BINARY +
+          GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
+          TypeSig.all),
+        (p, conf, parent, r) => new AppendDataExecMeta(p, conf, parent, r)),
+      exec[OverwritePartitionsDynamicExec](
+        "Overwrite partitions dynamically in a datasource V2 table",
+        ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 +
+          TypeSig.STRUCT + TypeSig.MAP + TypeSig.ARRAY + TypeSig.BINARY +
+          GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
+          TypeSig.all),
+        (p, conf, parent, r) => new OverwritePartitionsDynamicExecMeta(p, conf, parent, r)),
+      exec[OverwriteByExpressionExec](
+        "Overwrite data in a datasource V2 table",
+        ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 +
+          TypeSig.STRUCT + TypeSig.MAP + TypeSig.ARRAY + TypeSig.BINARY +
+          GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
+          TypeSig.all),
+        (p, conf, parent, r) => new OverwriteByExpressionExecMeta(p, conf, parent, r)),
+      exec[ReplaceDataExec](
+        "Replace data in a datasource V2 table (for copy-on-write DELETE operations)",
+        ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 +
+          TypeSig.STRUCT + TypeSig.MAP + TypeSig.ARRAY + TypeSig.BINARY +
+          GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
+          TypeSig.all),
+        (p, conf, parent, r) => new ReplaceDataExecMeta(p, conf, parent, r)),
+      exec[MergeRowsExec](
+        "Process merge rows for copy-on-write MERGE operations",
+        ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 +
+          TypeSig.STRUCT + TypeSig.MAP + TypeSig.ARRAY + TypeSig.BINARY +
+          GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
+          TypeSig.all),
+        (p, conf, parent, r) => new GpuMergeRowsExecMeta(p, conf, parent, r)),
+      exec[WriteDeltaExec](
+        "Write delta (position deletes) in a datasource V2 table " +
+          "(for merge-on-read DELETE operations)",
+        ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 +
+          TypeSig.STRUCT + TypeSig.MAP + TypeSig.ARRAY + TypeSig.BINARY +
+          GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
+          TypeSig.all),
+        (p, conf, parent, r) => new WriteDeltaExecMeta(p, conf, parent, r))
+        .disabledByDefault("Merge on read support for iceberg is experimental"),
+      InMemoryTableScanUtils.getTableCacheQueryStageExecRule
     ).map(r => (r.getClassFor.asSubclass(classOf[SparkPlan]), r)).toMap
+
     super.getExecs ++ shimExecs
+  }
+
+  override def getTableCacheNonQueryStagePlan(plan: SparkPlan): Option[SparkPlan] = {
+    plan match {
+      case tcqs: TableCacheQueryStageExec => Some(tcqs.plan)
+      case _ => None
+    }
   }
 }

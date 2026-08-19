@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2020-2025, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,17 +19,17 @@
 # Build the image for rapids-plugin development environment
 #
 # Arguments:
-#       CUDA_VER=[11.X.Y,12.X.Y]
+#       CUDA_VER=[12.X.Y,13.X.Y]
 #       UBUNTU_VER=[22.04,24.04]
-#       UCX_VER=1.18.1
+#       UCX_VER=1.22.0
 #       TARGETPLATFORM=[linux/amd64,linux/arm64]
 #       ARCH=[amd64,arm64]
 #       UCX_ARCH=[x86_64,aarch64]
 ###
 
-ARG CUDA_VER=12.0.1
+ARG CUDA_VER=13.0.1
 ARG UBUNTU_VER=22.04
-ARG UCX_VER=1.18.1
+ARG UCX_VER=1.22.0
 ARG TARGETPLATFORM=linux/amd64
 # multi-platform build with: docker buildx build --platform linux/arm64,linux/amd64 <ARGS> on either amd64 or arm64 host
 # check available official arm-based docker images at https://hub.docker.com/r/nvidia/cuda/tags (OS/ARCH)
@@ -77,7 +77,8 @@ RUN UCX_CUDA_VER=`echo ${CUDA_VER} | cut -d '.' -f1` && \
     cd /tmp/ucx && \
     wget https://github.com/openucx/ucx/releases/download/v${UCX_VER}/ucx-${UCX_VER}-ubuntu${UBUNTU_VER}-mofed5-cuda${UCX_CUDA_VER}-${UCX_ARCH}.tar.bz2 && \
     tar -xvf *.bz2 && \
-    apt install -y /tmp/ucx/*.deb && \
+    apt install -y --no-install-recommends $(ls /tmp/ucx/*.deb | grep -v ucx-cuda) && \
+    dpkg -i --force-depends /tmp/ucx/ucx-cuda-*.deb && \
     rm -rf /tmp/ucx
 
 # export JAVA_HOME for mvn option 'source-javadoc'

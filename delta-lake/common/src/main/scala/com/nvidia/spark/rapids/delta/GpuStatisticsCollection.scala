@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * This file was derived from StatisticsCollection.scala
  * in the Delta Lake project at https://github.com/delta-io/delta.
@@ -30,8 +30,7 @@ import com.nvidia.spark.rapids.delta.shims.{ShimDeltaColumnMapping, ShimDeltaUDF
 
 import org.apache.spark.sql.{Column, SparkSession}
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute
-import org.apache.spark.sql.functions.{count, lit, max, min, struct, sum, when}
+import org.apache.spark.sql.functions.{col, count, lit, max, min, struct, sum, when}
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -111,7 +110,7 @@ trait GpuStatisticsCollection extends ShimUsesMetadataFields {
         case (_, _, false) => count(new Column("*"))
       }) ++ tightBoundsColOpt
 
-    struct(statCols: _*).as('stats)
+    struct(statCols: _*).as("stats")
   }
 
   /**
@@ -167,7 +166,7 @@ trait GpuStatisticsCollection extends ShimUsesMetadataFields {
       schema.flatMap {
         case f @ StructField(name, s: StructType, _, _) =>
           val column = parent.map(_.getItem(name))
-              .getOrElse(new Column(UnresolvedAttribute.quoted(name)))
+              .getOrElse(col(name))
           val stats = collectStats(s, Some(column), parentFields :+ name, function)
           if (stats.nonEmpty) {
             Some(struct(stats: _*) as ShimDeltaColumnMapping.getPhysicalName(f))
@@ -177,7 +176,7 @@ trait GpuStatisticsCollection extends ShimUsesMetadataFields {
         case f @ StructField(name, _, _, _) =>
           val fieldPath = parentFields :+ name
           val column = parent.map(_.getItem(name))
-              .getOrElse(new Column(UnresolvedAttribute.quoted(name)))
+              .getOrElse(col(name))
           // Note: explodedDataSchema comes from dataSchema. In the read path, dataSchema comes
           // from the table's metadata.dataSchema, which is the same as tableDataSchema. In the
           // write path, dataSchema comes from the DataFrame schema. We then assume

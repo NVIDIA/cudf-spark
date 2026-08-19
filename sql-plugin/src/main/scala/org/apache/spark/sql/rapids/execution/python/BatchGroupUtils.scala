@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -158,6 +158,7 @@ private[python] object BatchGroupUtils {
    * @param groupingOffsetsInDedup the grouping column indices in the 'dedupAttrs'
    * @param inputRows a metric to record the input rows.
    * @param inputBatches a metric to record the input batches.
+   * @param metrics metrics to inject into bound expressions
    * @return an iterator of the group batches, meaning each batch contains only one group.
    */
   def projectAndGroup(
@@ -166,8 +167,9 @@ private[python] object BatchGroupUtils {
       dedupAttrs: Seq[Attribute],
       groupingOffsetsInDedup: Seq[Int],
       inputRows: GpuMetric,
-      inputBatches: GpuMetric): Iterator[ColumnarBatch] = {
-    val dedupRefs = GpuBindReferences.bindReferences(dedupAttrs, inputAttrs)
+      inputBatches: GpuMetric,
+      metrics: Map[String, GpuMetric]): Iterator[ColumnarBatch] = {
+    val dedupRefs = GpuBindReferences.bindReferences(dedupAttrs, inputAttrs, metrics)
     val dedupIter = inputIter.map { batch =>
       // Close the original input batches.
       withResource(batch) { b =>
@@ -580,8 +582,10 @@ class CoGroupedIterator(
       schema: Seq[Attribute],
       groupKeys: Seq[Int]): ColumnarBatch = {
 
+    // Using Internal method: groupAttrs are simple attribute selections by index
     val groupAttrs = groupKeys.map(schema(_))
-    val keyRefs = GpuBindReferences.bindGpuReferences(groupAttrs, schema)
+    // No metrics are injected here because the keys are simple attribute references
+    val keyRefs = GpuBindReferences.bindGpuReferencesNoMetrics(groupAttrs, schema)
     val oneRowKeyTable = withResource(GpuProjectExec.project(batch, keyRefs)) { keyBatch =>
       withResource(GpuColumnVector.from(keyBatch)) { keyTable =>
         // The group batch will not be empty, since an empty group will be skipped when

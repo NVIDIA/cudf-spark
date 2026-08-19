@@ -137,6 +137,7 @@ case class HybridFileSourceScanExec(originPlan: FileSourceScanExec
 
   override lazy val allMetrics: Map[String, GpuMetric] = {
     val mapBuilder = Map.newBuilder[String, GpuMetric]
+    mapBuilder += OP_TIME_NEW -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_OP_TIME_NEW)
     mapBuilder += SCAN_TIME -> createNanoTimingMetric(ESSENTIAL_LEVEL, "TotalTime")
     // Add common embedded metrics
     hybridCommonMetrics.foreach { case (key, generator) =>

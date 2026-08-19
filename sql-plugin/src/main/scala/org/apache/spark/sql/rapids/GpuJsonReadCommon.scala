@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,9 +18,9 @@ package org.apache.spark.sql.rapids
 
 import java.util.Locale
 
-import ai.rapids.cudf.{ColumnVector, ColumnView, DType, NvtxColor, NvtxRange, Schema, Table}
+import ai.rapids.cudf.{ColumnVector, ColumnView, DType, Schema, Table}
 import com.fasterxml.jackson.core.JsonParser
-import com.nvidia.spark.rapids.{ColumnCastUtil, GpuColumnVector, GpuScalar, GpuTextBasedPartitionReader}
+import com.nvidia.spark.rapids.{ColumnCastUtil, GpuColumnVector, GpuScalar, GpuTextBasedPartitionReader, NvtxRegistry}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingArray
 import com.nvidia.spark.rapids.jni.JSONUtils
@@ -155,7 +155,7 @@ object GpuJsonReadCommon {
   def convertTableToDesiredType(table: Table,
       desired: StructType,
       options: JSONOptions): Array[ColumnVector] = {
-    withResource(new NvtxRange("convertTableToDesiredType", NvtxColor.RED)) { _ =>
+    NvtxRegistry.JSON_CONVERT_TABLE {
       val dataTypes = desired.fields.map(_.dataType)
       dataTypes.zipWithIndex.safeMap {
         case (dt, i) =>
@@ -174,7 +174,7 @@ object GpuJsonReadCommon {
   def convertDateTimeType(inputCv: ColumnVector,
       topLevelType: DataType,
       options: JSONOptions): ColumnVector = {
-    withResource(new NvtxRange("convertDateTimeType", NvtxColor.RED)) { _ =>
+    NvtxRegistry.JSON_CONVERT_DATETIME {
       ColumnCastUtil.deepTransform(inputCv, Some(topLevelType),
         Some(nestedColumnViewMismatchTransform)) {
         case (cv, Some(DateType)) if cv.getType == DType.STRING =>

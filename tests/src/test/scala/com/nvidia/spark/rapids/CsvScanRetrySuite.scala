@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,9 +16,16 @@
 
 package com.nvidia.spark.rapids
 
-import ai.rapids.cudf.CSVOptions
-import com.nvidia.spark.rapids.jni.RmmSpark
+import java.nio.charset.StandardCharsets
+import java.nio.file.Files
 
+import ai.rapids.cudf.{CSVOptions, Table}
+import com.nvidia.spark.rapids.jni.RmmSpark
+import com.nvidia.spark.rapids.shims.PartitionedFileUtilsShim
+import org.apache.hadoop.conf.Configuration
+
+import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.csv.{CSVOptions => SparkCSVOptions}
 import org.apache.spark.sql.types._
 
 class CsvScanRetrySuite extends RmmSparkRetrySuiteBase {
@@ -37,4 +44,45 @@ class CsvScanRetrySuite extends RmmSparkRetrySuiteBase {
     // We don't have any good way to verify that the retry was thrown, but we are going to trust
     // that it was.
   }
+
+  test("cast table to desired types is retried on OOM") {
+    val dataSchema = StructType(Seq(
+      StructField("a", IntegerType),
+      StructField("b", IntegerType)))
+    val csvFile = Files.createTempFile("csv-cast-retry", ".csv")
+    Files.write(csvFile, "1,2\n".getBytes(StandardCharsets.UTF_8))
+    var reader: CSVPartitionReader = null
+    try {
+      reader = new CSVPartitionReader(
+          new Configuration(),
+          PartitionedFileUtilsShim.newPartitionedFile(
+            InternalRow.empty, csvFile.toString, 0, Files.size(csvFile)),
+          dataSchema, dataSchema,
+          new SparkCSVOptions(Map.empty, false, "UTC"),
+          1024, 128 * 1024,
+          Map[String, GpuMetric]().withDefaultValue(NoopMetric)) {
+
+        override def castToOutputTypesWithRetryAndClose(table: Table,
+            readSchema: StructType): Table = {
+          // inject a GPU OOM before running into the actual operation.
+          RmmSpark.forceRetryOOM(RmmSpark.getCurrentThreadId, 1,
+            RmmSpark.OomInjectionType.GPU.ordinal, 0)
+
+          super.castToOutputTypesWithRetryAndClose(table, readSchema)
+        }
+      }
+      assert(reader.next())
+      Arm.withResource(reader.get()) { cb =>
+        assert(cb.numRows() == 1)
+        assert(cb.numCols() == 2)
+      }
+    } finally {
+      if (reader != null) {
+        reader.close()
+        reader = null
+      }
+      Files.deleteIfExists(csvFile)
+    }
+  }
+
 }

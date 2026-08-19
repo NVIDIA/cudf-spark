@@ -1,4 +1,4 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.
+# Copyright (c) 2024-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,6 +19,9 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
+permissions:
+  contents: read
+
 jobs:
   license-header-check:
     runs-on: ubuntu-latest
@@ -29,7 +32,7 @@ jobs:
           echo "PR_FETCH_DEPTH=$(( ${{ github.event.pull_request.commits }} + 10 ))" >> $GITHUB_ENV
 
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: NVIDIA/spark-rapids-common/checkout@main
         with:
           fetch-depth: ${{ env.PR_FETCH_DEPTH }}
 
@@ -46,13 +49,17 @@ jobs:
             *.py,
             build/*,
             *.cpp,
+            *.cu,
+            *.hpp,
             *Dockerfile*,
+            *CMakeLists.txt,
             *Jenkinsfile*,
             *.ini,
             *.java,
-            *.fbs
+            *.fbs,
+            *.sql,
+            *.toml
           excluded_file_patterns: |
             *target/*,
             thirdparty/*,
             sql-plugin/src/main/java/com/nvidia/spark/rapids/format/*
- 

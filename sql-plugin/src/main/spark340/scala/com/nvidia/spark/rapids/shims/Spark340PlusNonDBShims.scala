@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,15 +27,29 @@
 {"spark": "354"}
 {"spark": "355"}
 {"spark": "356"}
+{"spark": "357"}
+{"spark": "358"}
+{"spark": "359"}
 {"spark": "400"}
+{"spark": "401"}
+{"spark": "402"}
+{"spark": "403"}
+{"spark": "404"}
+{"spark": "411"}
+{"spark": "412"}
+{"spark": "413"}
+{"spark": "420"}
 spark-rapids-shim-json-lines ***/
+
 package com.nvidia.spark.rapids.shims
 
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.GpuOverrides.{exec, pluginSupportedOrderableSig}
 
 import org.apache.spark.rapids.shims.GpuShuffleExchangeExec
-import org.apache.spark.sql.catalyst.expressions.{Empty2Null, Expression, KnownNullable, NamedExpression, SortOrder}
+import org.apache.spark.sql.catalyst.expressions.{Empty2Null, Expression, KnownNullable,
+  NamedExpression, SortOrder}
+import org.apache.spark.sql.catalyst.expressions.objects.{ExternalMapToCatalyst, InvokeLike}
 import org.apache.spark.sql.catalyst.plans.physical.SinglePartition
 import org.apache.spark.sql.execution.{CollectLimitExec, GlobalLimitExec, SparkPlan, TakeOrderedAndProjectExec}
 import org.apache.spark.sql.execution.command.{CreateDataSourceTableAsSelectCommand, DataWritingCommand, RunnableCommand}
@@ -45,6 +59,10 @@ import org.apache.spark.sql.rapids.GpuElementAtMeta
 import org.apache.spark.sql.rapids.GpuV1WriteUtils.GpuEmpty2Null
 
 trait Spark340PlusNonDBShims extends Spark331PlusNonDBShims {
+  override def isExpressionStateful(expr: Expression): Boolean = expr match {
+    case _: InvokeLike | _: ExternalMapToCatalyst => true
+    case _ => expr.stateful && !isBridgeCloneSafeStatefulExpression(expr)
+  }
 
   private val shimExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = Seq(
     GpuOverrides.exec[GlobalLimitExec](
@@ -112,12 +130,7 @@ trait Spark340PlusNonDBShims extends Spark331PlusNonDBShims {
         TypeSig.all),
       (collectLimit, conf, p, r) => new GpuCollectLimitMeta(collectLimit, conf, p, r) {
         override def convertToGpu(): GpuExec =
-          GpuGlobalLimitExec(collectLimit.limit,
-            GpuShuffleExchangeExec(
-              GpuSinglePartitioning,
-              GpuLocalLimitExec(collectLimit.limit, childPlans.head.convertIfNeeded()),
-              ENSURE_REQUIREMENTS
-            )(SinglePartition), collectLimit.offset)
+          buildCollectLimitGpu(collectLimit.offset)
       }
     ).disabledByDefault("Collect Limit replacement can be slower on the GPU, if huge number " +
         "of rows in a batch it could help by limiting the number of rows transferred from " +
@@ -167,6 +180,8 @@ trait Spark340PlusNonDBShims extends Spark331PlusNonDBShims {
       DataWritingCommandRule[_ <: DataWritingCommand]] = {
     Map.empty
   }
+
+  override def hasGpuWriteFiles: Boolean = true
 
   override def getRunnableCmds: Map[Class[_ <: RunnableCommand],
       RunnableCommandRule[_ <: RunnableCommand]] = {

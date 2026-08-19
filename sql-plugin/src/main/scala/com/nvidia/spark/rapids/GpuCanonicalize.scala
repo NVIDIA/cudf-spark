@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -79,9 +79,11 @@ object GpuCanonicalize {
   /** Rearrange expressions that are commutative or associative. */
   private def expressionReorder(e: Expression): Expression = e match {
     case a @ GpuAdd(_, _, f) =>
-      orderCommutative(a, { case GpuAdd(l, r, _) => Seq(l, r) }).reduce(GpuAdd(_, _, f))
+      orderCommutative(a, { case GpuAdd(l, r, _) => Seq(l, r) })
+        .reduce((l, r) => GpuAdd(l, r, f)(a.origin))
     case m @ GpuMultiply(_, _, f) =>
-      orderCommutative(m, { case GpuMultiply(l, r, _) => Seq(l, r) }).reduce(GpuMultiply(_, _, f))
+      orderCommutative(m, { case GpuMultiply(l, r, _) => Seq(l, r) })
+        .reduce((l, r) => GpuMultiply(l, r, f)(m.origin))
     case o: GpuOr =>
       orderCommutative(o, { case GpuOr(l, r) if l.deterministic && r.deterministic => Seq(l, r) })
           .reduce(GpuOr)
@@ -112,7 +114,12 @@ object GpuCanonicalize {
     case GpuNot(GpuLessThanOrEqual(l, r)) => GpuGreaterThan(l, r)
 
     // order the list in the In operator
-    case GpuInSet(value, list) if list.length > 1 => GpuInSet(value, list.sortBy(_.hashCode()))
+    case GpuInSet(value, list) if list.length > 1 =>
+      val orderedList = list.sortBy {
+        case null => 0
+        case nonNull => nonNull.hashCode()
+      }
+      GpuInSet(value, orderedList)
 
     case g: GpuGreatest =>
       val newChildren = orderCommutative(g, { case GpuGreatest(children) => children })

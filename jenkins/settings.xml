@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Copyright (c) 2020-2025, NVIDIA CORPORATION. All rights reserved.
+  Copyright (c) 2020-2026, NVIDIA CORPORATION. All rights reserved.
 
   Licensed under the Apache License, Version 2.0 (the "License");
   you may not use this file except in compliance with the License.
@@ -18,14 +18,44 @@
     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <servers>
     <server>
-      <username>${env.URM_CREDS_USR}</username>
-      <password>${env.URM_CREDS_PSW}</password>
+      <username>${env.ART_CREDS_USR}</username>
+      <password>${env.ART_CREDS_PSW}</password>
       <id>central</id>
     </server>
     <server>
-      <username>${env.URM_CREDS_USR}</username>
-      <password>${env.URM_CREDS_PSW}</password>
+      <username>${env.ART_CREDS_USR}</username>
+      <password>${env.ART_CREDS_PSW}</password>
       <id>snapshots</id>
+    </server>
+    <server>
+      <username>${env.ART_CREDS_USR}</username>
+      <password>${env.ART_CREDS_PSW}</password>
+      <id>cloudera-repo-fallback</id>
+    </server>
+    <server>
+      <username>${env.ART_CREDS_USR}</username>
+      <password>${env.ART_CREDS_PSW}</password>
+      <id>apache.snapshots</id>
+    </server>
+    <server>
+      <username>${env.ART_CREDS_USR}</username>
+      <password>${env.ART_CREDS_PSW}</password>
+      <id>apache.snapshots.https</id>
+    </server>
+    <server>
+      <username>${env.ART_CREDS_USR}</username>
+      <password>${env.ART_CREDS_PSW}</password>
+      <id>apache-snapshots-repo</id>
+    </server>
+    <server>
+      <username>${env.ART_CREDS_USR}</username>
+      <password>${env.ART_CREDS_PSW}</password>
+      <id>snapshots-repo</id>
+    </server>
+    <server>
+      <username>${env.ART_CREDS_USR}</username>
+      <password>${env.ART_CREDS_PSW}</password>
+      <id>cloudera-repo</id>
     </server>
     <server>
       <id>ossrh</id>
@@ -35,104 +65,86 @@
   </servers>
   <profiles>
     <profile>
+      <id>artifactory</id>
       <repositories>
         <repository>
+          <id>central</id>
+          <name>sw-spark-maven</name>
+          <url>${env.ART_URL}</url>
           <snapshots>
             <enabled>false</enabled>
           </snapshots>
-          <id>central</id>
-          <name>sw-spark-maven</name>
-          <url>${env.URM_URL}</url>
         </repository>
         <repository>
-          <snapshots />
           <id>snapshots</id>
           <name>sw-spark-maven</name>
-          <url>${env.URM_URL}</url>
+          <url>${env.ART_URL}</url>
+          <snapshots />
         </repository>
       </repositories>
       <pluginRepositories>
         <pluginRepository>
+          <id>central</id>
+          <name>sw-spark-maven</name>
+          <url>${env.ART_URL}</url>
           <snapshots>
             <enabled>false</enabled>
           </snapshots>
-          <id>central</id>
-          <name>sw-spark-maven</name>
-          <url>${env.URM_URL}</url>
         </pluginRepository>
         <pluginRepository>
-          <snapshots />
           <id>snapshots</id>
           <name>sw-spark-maven</name>
-          <url>${env.URM_URL}</url>
+          <url>${env.ART_URL}</url>
+          <snapshots />
         </pluginRepository>
       </pluginRepositories>
-      <id>artifactory</id>
     </profile>
+    <!-- Maps upstream repo ids (POM mirrors) to Artifactory; id kept for -P mirror-apache-to-urm in Jenkins -->
     <profile>
       <id>mirror-apache-to-urm</id>
       <repositories>
         <repository>
           <id>apache.snapshots</id>
           <name>sw-spark-maven</name>
-          <url>${env.URM_URL}</url>
+          <url>${env.ART_URL}</url>
         </repository>
-      </repositories>
-    </profile>
-    <profile>
-      <id>mirror-apache-https-to-urm</id>
-      <repositories>
         <repository>
           <id>apache.snapshots.https</id>
           <name>sw-spark-maven</name>
-          <url>${env.URM_URL}</url>
+          <url>${env.ART_URL}</url>
         </repository>
-      </repositories>
-    </profile>
-    <profile>
-      <id>mirror-apache2-to-urm</id>
-      <repositories>
         <repository>
           <id>apache-snapshots-repo</id>
           <name>sw-spark-maven</name>
-          <url>${env.URM_URL}</url>
+          <url>${env.ART_URL}</url>
         </repository>
-      </repositories>
-    </profile>
-    <profile>
-      <id>mirror-cloudera-to-urm</id>
-      <repositories>
+        <repository>
+          <id>snapshots-repo</id>
+          <name>sw-spark-maven</name>
+          <url>${env.ART_URL}</url>
+        </repository>
         <repository>
           <id>cloudera-repo</id>
           <name>sw-spark-maven</name>
-          <url>${env.URM_URL}</url>
+          <url>${env.ART_URL}</url>
         </repository>
-      </repositories>
-    </profile>
-    <profile>
-      <id>mirror-cloudera-fallback-to-urm</id>
-      <repositories>
         <repository>
           <id>cloudera-repo-fallback</id>
           <name>sw-spark-maven</name>
-          <url>${env.URM_URL}</url>
+          <url>${env.ART_URL}</url>
         </repository>
       </repositories>
     </profile>
     <profile>
       <id>deploy-to-urm</id>
       <properties>
-          <altDeploymentRepository>snapshots::default::${env.URM_URL}-local</altDeploymentRepository>
+        <altDeploymentRepository>snapshots::default::${env.ART_URL}-local</altDeploymentRepository>
       </properties>
-     </profile>
+    </profile>
   </profiles>
   <activeProfiles>
     <activeProfile>artifactory</activeProfile>
     <activeProfile>mirror-apache-to-urm</activeProfile>
-    <activeProfile>mirror-apache-https-to-urm</activeProfile>
-    <activeProfile>mirror-apache2-to-urm</activeProfile>
-    <activeProfile>mirror-cloudera-to-urm</activeProfile>
-    <activeProfile>mirror-cloudera-fallback-to-urm</activeProfile>
     <activeProfile>deploy-to-urm</activeProfile>
   </activeProfiles>
 </settings>

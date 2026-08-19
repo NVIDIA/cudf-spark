@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@
 /*** spark-rapids-shim-json-lines
 {"spark": "340"}
 {"spark": "341"}
-{"spark": "341db"}
 {"spark": "342"}
 {"spark": "343"}
 {"spark": "344"}
@@ -28,10 +27,14 @@
 {"spark": "354"}
 {"spark": "355"}
 {"spark": "356"}
+{"spark": "357"}
+{"spark": "358"}
+{"spark": "359"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
 import com.google.common.base.Objects
+import com.nvidia.spark.rapids.AssertUtils.assertInTests
 import com.nvidia.spark.rapids.GpuScan
 
 import org.apache.spark.SparkException
@@ -136,7 +139,8 @@ case class GpuBatchScanExec(
         val newPartValues = commonPartitionValues.get.flatMap { case (partValue, numSplits) =>
           Seq.fill(numSplits)(partValue)
         }
-        k.copy(numPartitions = newPartValues.length, partitionValues = newPartValues)
+        KeyGroupedPartitioningShim.copyWithNewPartitionValues(
+          k, newPartValues, applyPartialClustering)
       case p => p
     }
   }
@@ -155,7 +159,7 @@ case class GpuBatchScanExec(
         case p: KeyGroupedPartitioning =>
           if (conf.v2BucketingPushPartValuesEnabled &&
             conf.v2BucketingPartiallyClusteredDistributionEnabled) {
-            assert(filteredPartitions.forall(_.size == 1),
+            assertInTests(filteredPartitions.forall(_.size == 1),
               "Expect partitions to be not grouped when " +
                 s"${SQLConf.V2_BUCKETING_PARTIALLY_CLUSTERED_DISTRIBUTION_ENABLED.key} " +
                 "is enabled")
@@ -233,7 +237,8 @@ case class GpuBatchScanExec(
         case _ =>
       }
 
-      new GpuDataSourceRDD(sparkContext, filteredPartitions, readerFactory)
+      // Use the finalized partitions so padded and replicated inputs match outputPartitioning.
+      new GpuDataSourceRDD(sparkContext, finalPartitions, readerFactory)
     }
     postDriverMetrics()
     rdd

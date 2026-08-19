@@ -1,4 +1,4 @@
-# RAPIDS Accelerator for Apache Spark Delta Lake Support
+# NVIDIA cuDF plugin for Apache Spark Delta Lake Support
 
 The Delta Lake support is organized into multiple Maven projects, one per Delta Lake minor
 version that is supported. This allows each submodule to build against the Delta Lake minor
@@ -17,13 +17,16 @@ and directory contains the corresponding support code.
 | 2.3.x              | Spark 3.3.x     | `delta-23x`        |
 | 2.4.x              | Spark 3.4.x     | `delta-24x`        |
 | 3.3.x              | Spark 3.5.[3-]  | `delta-33x`        |
-| Databricks 12.2    | Databricks 12.2 | `delta-spark332db` |
-| Databricks 13.3    | Databricks 13.3 | `delta-spark341db` |
+| 4.0.x              | Spark 4.0.x     | `delta-40x`        |
+| 4.1.0              | Spark 4.1.0, 4.1.1 | `delta-41x`     |
 | Databricks 14.3    | Databricks 14.3 | `delta-spark350db143` |
-
 
 Delta Lake is not supported on all Spark versions, and for Spark versions where it is not
 supported the `delta-stub` project is used.
+
+The Delta Lake 4.1.0 restriction to Spark 4.1.0 and 4.1.1 is caused by an upstream binary
+incompatibility in open source Delta Lake with Spark 4.1.2 and later, not by the NVIDIA cuDF
+plugin for Apache Spark.
 
 ## Code Shared Between Modules
 

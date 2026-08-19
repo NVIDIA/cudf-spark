@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,8 +20,8 @@ import java.io.{IOException, ObjectInputStream, ObjectOutputStream}
 
 import scala.collection.mutable
 
-import ai.rapids.cudf.{JCudfSerialization, NvtxColor, NvtxRange}
-import com.nvidia.spark.rapids.{GpuBindReferences, GpuBuildLeft, GpuColumnVector, GpuExec, GpuExpression, GpuMetric, GpuSemaphore, LazySpillableColumnarBatch, MetricsLevel}
+import ai.rapids.cudf.JCudfSerialization
+import com.nvidia.spark.rapids.{GpuBindReferences, GpuBuildLeft, GpuColumnVector, GpuExec, GpuExpression, GpuMetric, GpuSemaphore, LazySpillableColumnarBatch, MetricsLevel, NvtxRegistry, RapidsConf}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
@@ -51,7 +51,7 @@ class GpuSerializableBatch(batch: ColumnarBatch)
   }
 
   private def writeObject(out: ObjectOutputStream): Unit = {
-    withResource(new NvtxRange("SerializeBatch", NvtxColor.PURPLE)) { _ =>
+    NvtxRegistry.CARTESIAN_PRODUCT_SERIALIZE {
       if (internalBatch == null) {
         throw new IllegalStateException("Cannot re-serialize a batch this way...")
       } else {
@@ -75,7 +75,7 @@ class GpuSerializableBatch(batch: ColumnarBatch)
     // There is no good way to tie this object deserialization to a specific metric, and I am not
     // sure it is worth trying.
     GpuSemaphore.acquireIfNecessary(TaskContext.get())
-    withResource(new NvtxRange("DeserializeBatch", NvtxColor.PURPLE)) { _ =>
+    NvtxRegistry.CARTESIAN_PRODUCT_DESERIALIZE {
       val schemaArray = in.readObject().asInstanceOf[Array[DataType]]
       withResource(JCudfSerialization.readTableFrom(in)) { tableInfo =>
         val tmp = tableInfo.getTable
@@ -120,6 +120,7 @@ class GpuCartesianRDD(
     numFirstTableColumns: Int,
     streamAttributes: Seq[Attribute],
     targetSize: Long,
+    sizeEstimateThreshold: Double,
     opTime: GpuMetric,
     joinTime: GpuMetric,
     numOutputRows: GpuMetric,
@@ -188,7 +189,7 @@ class GpuCartesianRDD(
 
       GpuBroadcastNestedLoopJoinExecBase.nestedLoopJoin(
         Cross, GpuBuildLeft, numFirstTableColumns, batch, streamIterator, streamAttributes,
-        targetSize, boundCondition,
+        targetSize, sizeEstimateThreshold, boundCondition,
         numOutputRows = numOutputRows,
         numOutputBatches = numOutputBatches,
         opTime = opTime,
@@ -233,7 +234,7 @@ case class GpuCartesianProductExec(
   protected override val outputRowsLevel: MetricsLevel = ESSENTIAL_LEVEL
   protected override val outputBatchesLevel: MetricsLevel = MODERATE_LEVEL
   override lazy val additionalMetrics: Map[String, GpuMetric] = Map(
-    OP_TIME -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_OP_TIME),
+    OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY),
     JOIN_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_JOIN_TIME))
 
   protected override def doExecute(): RDD[InternalRow] =
@@ -243,9 +244,10 @@ case class GpuCartesianProductExec(
     val numOutputRows = gpuLongMetric(NUM_OUTPUT_ROWS)
     val numOutputBatches = gpuLongMetric(NUM_OUTPUT_BATCHES)
     val joinTime = gpuLongMetric(JOIN_TIME)
-    val opTime = gpuLongMetric(OP_TIME)
+    val opTime = gpuLongMetric(OP_TIME_LEGACY)
 
-    val boundCondition = condition.map(GpuBindReferences.bindGpuReference(_, output))
+    val boundCondition = condition.map(GpuBindReferences.bindGpuReference(_, output,
+      allMetrics))
 
     if (output.isEmpty && boundCondition.isEmpty) {
       // special case for crossJoin.count.  Doing it this way
@@ -270,12 +272,14 @@ case class GpuCartesianProductExec(
         numOutputBatches)
     } else {
       val numFirstTableColumns = left.output.size
+      val sizeEstimateThreshold = RapidsConf.JOIN_GATHERER_SIZE_ESTIMATE_THRESHOLD.get(conf)
 
       new GpuCartesianRDD(sparkContext,
         boundCondition,
         numFirstTableColumns,
         right.output,
         targetSizeBytes,
+        sizeEstimateThreshold,
         opTime,
         joinTime,
         numOutputRows,

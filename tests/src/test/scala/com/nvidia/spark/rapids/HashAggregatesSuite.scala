@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -446,6 +446,100 @@ class HashAggregatesSuite extends SparkQueryCompareTestSuite {
       count("*"),
       avg("longs"),
       avg(col("more_longs") + lit("10")))
+  }
+
+  /*
+   * REDUCTION PATH TESTS (no groupBy)
+   *
+   * GPU aggregate functions have separate code paths for reduction vs groupBy.
+   * These tests ensure the reduction path (df.agg(...) without groupBy) is correct.
+   * Motivated by https://github.com/NVIDIA/spark-rapids/issues/14168 where first()
+   * reduction returned null due to a valueSet flag bug.
+   * Tracked by https://github.com/NVIDIA/spark-rapids/issues/14560
+   */
+
+  IGNORE_ORDER_testMatrixSparkResultsAreEqual(
+      "last reduction ignoreNulls=false",
+      reductionNonNullDf,
+      skipCanonicalizationCheck = true) {
+    frame => frame.agg(last("b", ignoreNulls = false))
+  }
+
+  // Direct regression test for #14168: first(ignoreNulls=false) on all-non-null data.
+  // A "valueSet flag" bug would cause GPU to return null here even though no nulls exist.
+  IGNORE_ORDER_testMatrixSparkResultsAreEqual(
+      "first reduction ignoreNulls=false non-null",
+      reductionNonNullDf,
+      skipCanonicalizationCheck = true) {
+    frame => frame.agg(first("b", ignoreNulls = false))
+  }
+
+  IGNORE_ORDER_testMatrixSparkResultsAreEqual(
+      "first reduction ignoreNulls=true",
+      reductionMixedNullDf,
+      skipCanonicalizationCheck = true) {
+    frame => frame.agg(first("b", ignoreNulls = true))
+  }
+
+  IGNORE_ORDER_testMatrixSparkResultsAreEqual(
+      "last reduction ignoreNulls=true",
+      reductionMixedNullDf,
+      skipCanonicalizationCheck = true) {
+    frame => frame.agg(last("b", ignoreNulls = true))
+  }
+
+  IGNORE_ORDER_testMatrixSparkResultsAreEqual(
+      "first/last reduction mixed nulls",
+      reductionMixedNullDf,
+      skipCanonicalizationCheck = true) {
+    frame => frame.agg(
+      first("b", ignoreNulls = false),
+      last("b", ignoreNulls = false),
+      first("b", ignoreNulls = true),
+      last("b", ignoreNulls = true))
+  }
+
+  IGNORE_ORDER_testMatrixSparkResultsAreEqual(
+      "min/max reduction non-null",
+      reductionNonNullDf) {
+    frame => frame.agg(min("a"), max("a"), min("c"), max("c"))
+  }
+
+  IGNORE_ORDER_testMatrixSparkResultsAreEqual(
+      "min/max reduction mixed nulls",
+      reductionMixedNullDf) {
+    frame => frame.agg(min("a"), max("a"), min("c"), max("c"))
+  }
+
+  IGNORE_ORDER_testMatrixSparkResultsAreEqual(
+      "sum/avg/count reduction non-null",
+      reductionNonNullDf,
+      conf = floatAggConf) {
+    frame => frame.agg(sum("a"), avg("a"), count("a"), sum("c"), avg("c"), count("*"))
+  }
+
+  IGNORE_ORDER_testMatrixSparkResultsAreEqual(
+      "sum/avg/count reduction mixed nulls",
+      reductionMixedNullDf,
+      conf = floatAggConf) {
+    frame => frame.agg(sum("a"), avg("a"), count("a"), sum("c"), avg("c"), count("*"))
+  }
+
+  // Note: variance/stddev reduction is NOT supported on GPU (falls back to CPU).
+  // GroupBy variance/stddev is GPU-accelerated and tested elsewhere.
+
+  IGNORE_ORDER_testMatrixSparkResultsAreEqual(
+      "collect_list/collect_set reduction non-null",
+      reductionNonNullDf,
+      skipCanonicalizationCheck = true) {
+    frame => frame.agg(sort_array(collect_list("b")), sort_array(collect_set("b")))
+  }
+
+  IGNORE_ORDER_testMatrixSparkResultsAreEqual(
+      "collect_list/collect_set reduction mixed nulls",
+      reductionMixedNullDf,
+      skipCanonicalizationCheck = true) {
+    frame => frame.agg(sort_array(collect_list("b")), sort_array(collect_set("b")))
   }
 
   IGNORE_ORDER_testMatrixSparkResultsAreEqual("distinct", datesCsvDf, conf = enableCsvConf()) {
@@ -957,9 +1051,36 @@ class HashAggregatesSuite extends SparkQueryCompareTestSuite {
     frame => frame.groupBy(col("more_ints")).agg(first("ints", false))
   }
 
+  IGNORE_ORDER_testMatrixSparkResultsAreEqual(
+      "first reduction ignoreNulls=false",
+      firstReductionDf,
+      skipCanonicalizationCheck = true) {
+    // skip canonicalization check because Spark uses SortAggregate for this reduction case, while
+    // we replace it with HashAggregate on the GPU.
+    frame => frame.agg(first("b", ignoreNulls = false))
+  }
+
+  IGNORE_ORDER_testMatrixSparkResultsAreEqual(
+      "first reduction ignoreNulls=false null-leading",
+      firstReductionNullDf,
+      skipCanonicalizationCheck = true) {
+    // skip canonicalization check because Spark uses SortAggregate for this reduction case, while
+    // we replace it with HashAggregate on the GPU.
+    frame => frame.agg(first("b", ignoreNulls = false))
+  }
+
   IGNORE_ORDER_testMatrixSparkResultsAreEqual("last ignoreNulls=false", intCsvDf,
     conf = enableCsvConf()) {
     frame => frame.groupBy(col("more_ints")).agg(last("ints", false))
+  }
+
+  IGNORE_ORDER_testMatrixSparkResultsAreEqual(
+      "last reduction ignoreNulls=false null-trailing",
+      lastReductionDf,
+      skipCanonicalizationCheck = true) {
+    // skip canonicalization check because Spark uses SortAggregate for this reduction case, while
+    // we replace it with HashAggregate on the GPU.
+    frame => frame.agg(last("b", ignoreNulls = false))
   }
 
   IGNORE_ORDER_testMatrixSparkResultsAreEqual("first/last ints column", intCsvDf,
@@ -1053,10 +1174,65 @@ class HashAggregatesSuite extends SparkQueryCompareTestSuite {
     ).toDF("c0", "c1")
   }
 
+  private def firstReductionDf(spark: SparkSession): DataFrame = {
+    import spark.implicits._
+    Seq(
+      (2, "z", 1000.0),
+      (5, "x", 1500.0),
+      (3, "y", 1200.0)
+    ).toDF("a", "b", "c")
+  }
+
+  private def firstReductionNullDf(spark: SparkSession): DataFrame = {
+    import spark.implicits._
+    Seq[(Int, String, Double)](
+      (1, null, 900.0),
+      (2, "z", 1000.0),
+      (5, "x", 1500.0),
+      (3, "y", 1200.0)
+    ).toDF("a", "b", "c")
+  }
+
+  private def lastReductionDf(spark: SparkSession): DataFrame = {
+    import spark.implicits._
+    Seq[(Int, String, Double)](
+      (2, "z", 1000.0),
+      (5, "x", 1500.0),
+      (3, "y", 1200.0),
+      (6, null, 1800.0)
+    ).toDF("a", "b", "c")
+  }
+
   private def randomDF(dataType: DataType)(spark: SparkSession) : DataFrame = {
     val schema = FuzzerUtils.createSchema(Seq(DataTypes.StringType, dataType))
     FuzzerUtils.generateDataFrame(spark, schema, rowCount = 1000,
       options = FuzzerOptions(maxStringLen = 2))
+  }
+
+  // Test data for reduction path tests (no groupBy).
+  // All non-null: catches bugs where null results mask incorrect behavior (e.g. first() #14168).
+  private def reductionNonNullDf(spark: SparkSession): DataFrame = {
+    import spark.implicits._
+    Seq(
+      (2, "z", 1000.0),
+      (5, "x", 1500.0),
+      (3, "y", 1200.0),
+      (1, "w", 800.0),
+      (4, "v", 2000.0)
+    ).toDF("a", "b", "c")
+  }
+
+  // Mixed nulls: null at first row, middle, and last row.
+  private def reductionMixedNullDf(spark: SparkSession): DataFrame = {
+    import spark.implicits._
+    Seq[(java.lang.Integer, java.lang.String, java.lang.Double)](
+      (null, null, null),
+      (5, "x", 1500.0),
+      (null, "y", null),
+      (1, null, 800.0),
+      (4, "v", 2000.0),
+      (null, null, null)
+    ).toDF("a", "b", "c")
   }
 
   FLOAT_TEST_testMatrixSparkResultsAreEqual("empty df: reduction count", floatCsvDf,

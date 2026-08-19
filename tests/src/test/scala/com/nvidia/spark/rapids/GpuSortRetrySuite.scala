@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,7 +30,7 @@ class GpuSortRetrySuite extends RmmSparkRetrySuiteBase with MockitoSugar {
   private val ref = GpuBoundReference(0, IntegerType, nullable = false)(ExprId(0), "a")
   private val sortOrder = SortOrder(ref, Ascending)
   private val attrs = AttributeReference(ref.name, ref.dataType, ref.nullable)()
-  private val gpuSorter = new GpuSorter(Seq(sortOrder), Array(attrs))
+  private val gpuSorter = new GpuSorter(Seq(sortOrder), Array(attrs), Map.empty[String, GpuMetric])
   private val NUM_ROWS = 100
 
   private def batchIter(batches: Int): Iterator[ColumnarBatch] =

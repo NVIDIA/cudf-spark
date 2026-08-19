@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,10 +16,10 @@
 
 package com.nvidia.spark.rapids
 
-import ai.rapids.cudf.{ContiguousTable, Cuda, DeviceMemoryBuffer, HostMemoryBuffer}
+import ai.rapids.cudf.{ContiguousTable, Cuda, DeviceMemoryBuffer, HostMemoryBuffer, Table}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{withRetryNoSplit, SizeProvider}
-import com.nvidia.spark.rapids.spill.{SpillableColumnarBatchFromBufferHandle, SpillableColumnarBatchHandle, SpillableCompressedColumnarBatchHandle, SpillableDeviceBufferHandle, SpillableHostBufferHandle, SpillableHostColumnarBatchHandle}
+import com.nvidia.spark.rapids.spill.{SpillableColumnarBatchFromBufferHandle, SpillableColumnarBatchHandle, SpillableCompressedColumnarBatchHandle, SpillableDeviceBufferHandle, SpillableHostBufferHandle, SpillableHostColumnarBatchHandle, SpillableTableHandle}
 
 import org.apache.spark.TaskContext
 import org.apache.spark.sql.types.DataType
@@ -543,5 +543,55 @@ object SpillableHostBuffer {
     withRetryNoSplit[HostMemoryBuffer] {
       withResource(shb.getHostBuffer())(_.slice(start, len))
     }
+  }
+}
+
+/**
+ * Holds a cuDF Table that the backing buffers on it can be spilled.
+ * @note the table should be in the cache by the time this is created and this is taking
+ *       over ownership of the life cycle of the table. So don't call this constructor
+ *       directly please use `SpillableTable.apply` instead.
+ */
+class SpillableTable(
+    handle: SpillableTableHandle,
+    rowCount: Long,
+    columnCount: Int) extends AutoCloseable with SizeProvider {
+  /** The number of rows stored in this table. */
+  def numRows(): Long = rowCount
+
+  /** The number of columns in this table. */
+  def numCols(): Int = columnCount
+
+  override lazy val sizeInBytes: Long = handle.approxSizeInBytes
+
+  /**
+   * Get the table.
+   * @note It is the responsibility of the caller to close the returned table.
+   */
+  def getTable(): Table = {
+    GpuSemaphore.acquireIfNecessary(TaskContext.get())
+    handle.materialize()
+  }
+
+  /** Remove the `Table` from the cache. */
+  override def close(): Unit = handle.close()
+
+  override def toString: String =
+    s"SpillableTable size:$sizeInBytes, handle:$handle, rows:$rowCount, columns:$columnCount"
+}
+
+object SpillableTable {
+  /**
+   * Create a new SpillableTable.
+   *
+   * @note This takes over ownership of table, and table should not be used after this.
+   * @param table         the table to make spillable
+   * @param priority      the initial spill priority of this table
+   */
+  def apply(table: Table, priority: Long): SpillableTable = {
+    Cuda.DEFAULT_STREAM.sync()
+    val handle = SpillableTableHandle(table)
+    // TODO: handle.setSpillPriority(priority) when priority support is implemented
+    new SpillableTable(handle, table.getRowCount, table.getNumberOfColumns)
   }
 }

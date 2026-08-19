@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,6 @@
 {"spark": "332db"}
 {"spark": "340"}
 {"spark": "341"}
-{"spark": "341db"}
 {"spark": "342"}
 {"spark": "343"}
 {"spark": "344"}
@@ -30,14 +29,30 @@
 {"spark": "354"}
 {"spark": "355"}
 {"spark": "356"}
+{"spark": "357"}
+{"spark": "358"}
+{"spark": "359"}
 {"spark": "400"}
+{"spark": "400db173"}
+{"spark": "401"}
+{"spark": "402"}
+{"spark": "403"}
+{"spark": "404"}
+{"spark": "411"}
+{"spark": "412"}
+{"spark": "413"}
+{"spark": "420"}
 spark-rapids-shim-json-lines ***/
+
 package org.apache.spark.sql.execution.datasources
 
 import java.util.Date
 
-import com.nvidia.spark.rapids.{DataFromReplacementRule, GpuExec, RapidsConf, RapidsMeta, SparkPlanMeta}
+import com.nvidia.spark.rapids.{DataFromReplacementRule, GpuExec, GpuMetric, RapidsConf, RapidsMeta, SparkPlanMeta}
 import com.nvidia.spark.rapids.shims.ShimUnaryExecNode
+import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.mapreduce.{TaskAttemptContext, TaskAttemptID, TaskID, TaskType}
+import org.apache.hadoop.mapreduce.task.TaskAttemptContextImpl
 
 import org.apache.spark.{SparkException, TaskContext}
 import org.apache.spark.internal.io.{FileCommitProtocol, SparkHadoopWriterUtils}
@@ -139,6 +154,15 @@ case class GpuWriteFilesExec(
     val committer = writeFilesSpec.committer
     val jobTrackerID = SparkHadoopWriterUtils.createJobTrackerID(new Date())
     val localBaseOutputDebugPath = baseOutputDebugPath
+    // The op_time metrics of this node and every descendant. They are forwarded
+    // to GpuFileFormatWriter.executeTask so that the parent Insert command's
+    // `.ns(excludeMetrics)` wrap subtracts child op_time deltas. The
+    // pre-WriteFilesExec path in GpuFileFormatWriter.write computes the same
+    // list via a `plan match { case gpuExec: GpuExec => ... }` block; without
+    // this argument, the wrap defaults to Seq.empty and Insert's op_time
+    // double-counts the entire upstream pipeline.
+    val excludeMetrics: Seq[GpuMetric] =
+      getOpTimeNewMetric.toSeq ++ getDescendantOpTimeMetrics
 
     rddWithNonEmptyPartitions.mapPartitionsInternal { iterator =>
       val sparkStageId = TaskContext.get().stageId()
@@ -153,7 +177,8 @@ case class GpuWriteFilesExec(
         committer,
         iterator,
         concurrentOutputWriterSpec,
-        localBaseOutputDebugPath)
+        localBaseOutputDebugPath,
+        excludeMetrics)
 
       Iterator(ret)
     }
@@ -195,5 +220,33 @@ object GpuWriteFiles {
     p.collectFirst {
       case w: GpuWriteFilesExec => w
     }
+  }
+
+  /**
+   * Create hadoop task attempt context from current spark task context and given hadoop conf.
+   * <br/>
+   *
+   * Note that the given hadoop conf will be modified to set necessary configs.
+   * @param hadoopConf Hadoop configuration
+   * @return Hadoop task attempt context
+   */
+  def calcHadoopTaskAttemptContext(hadoopConf: Configuration): TaskAttemptContext = {
+    val tc = TaskContext.get()
+    if (tc == null) {
+      throw new IllegalStateException("TaskContext is not available")
+    }
+
+    val jobTrackerID = SparkHadoopWriterUtils.createJobTrackerID(new Date())
+    val jobId = SparkHadoopWriterUtils.createJobID(jobTrackerID, tc.stageId())
+    val taskId = new TaskID(jobId, TaskType.MAP, tc.partitionId())
+    val taskAttemptId = new TaskAttemptID(taskId, tc.attemptNumber())
+
+    hadoopConf.set("mapreduce.job.id", jobId.toString)
+    hadoopConf.set("mapreduce.task.id",  taskAttemptId.getTaskID.toString)
+    hadoopConf.set("mapreduce.task.attempt.id", taskAttemptId.toString)
+    hadoopConf.setBoolean("mapreduce.task.ismap", true)
+    hadoopConf.setInt("mapreduce.task.partition", 0)
+
+    new TaskAttemptContextImpl(hadoopConf, taskAttemptId)
   }
 }

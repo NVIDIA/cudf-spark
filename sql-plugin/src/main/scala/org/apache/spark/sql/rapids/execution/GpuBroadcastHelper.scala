@@ -16,9 +16,8 @@
 
 package org.apache.spark.sql.rapids.execution
 
-import ai.rapids.cudf.{NvtxColor, NvtxRange}
-import com.nvidia.spark.rapids.{CloseableBufferedIterator, GpuColumnVector, GpuMetric, GpuSemaphore, NvtxWithMetrics, RmmRapidsRetryIterator}
-import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+import com.nvidia.spark.rapids.{CloseableBufferedIterator, GpuColumnVector, GpuMetric, GpuSemaphore, NvtxIdWithMetrics, NvtxRegistry, RmmRapidsRetryIterator}
+import com.nvidia.spark.rapids.Arm.closeOnExcept
 import com.nvidia.spark.rapids.shims.SparkShimImpl
 
 import org.apache.spark.{SparkContext, TaskContext}
@@ -46,7 +45,7 @@ object GpuBroadcastHelper {
     broadcastRelation.value match {
       case broadcastBatch: SerializeConcatHostBuffersDeserializeBatch =>
         RmmRapidsRetryIterator.withRetryNoSplit {
-          withResource(new NvtxRange("getBroadcastBatch", NvtxColor.YELLOW)) { _ =>
+          NvtxRegistry.GET_BROADCAST_BATCH {
             val spillable = broadcastBatch.batch
             spillable.getColumnarBatch()
           }
@@ -121,7 +120,7 @@ object GpuBroadcastHelper {
       // on the host before acquiring the semaphore.
       broadcastRelation.value
 
-      withResource(new NvtxRange("first stream batch", NvtxColor.RED)) { _ =>
+      NvtxRegistry.FIRST_STREAM_BATCH {
         if (bufferedStreamIter.hasNext) {
           bufferedStreamIter.head
         } else {
@@ -129,8 +128,7 @@ object GpuBroadcastHelper {
         }
       }
 
-      val batch = withResource(new NvtxWithMetrics(
-        "build join table", NvtxColor.GREEN, buildTime.toSeq: _*)) { _ =>
+      val batch = NvtxIdWithMetrics(NvtxRegistry.BUILD_JOIN_TABLE, buildTime.toSeq: _*) {
         GpuBroadcastHelper.getBroadcastBatch(broadcastRelation, buildSchema)
       }
       buildDataSize.foreach(_.add(GpuColumnVector.getTotalDeviceMemoryUsed(batch)))

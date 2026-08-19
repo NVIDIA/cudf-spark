@@ -42,6 +42,7 @@ do
       b) basebranch=${OPTARG};;
       t) tag=${OPTARG};;
       c) commonancestor=${OPTARG};;
+      *) echo "Unknown option: $flag"; exit 1;;
   esac
 done
 
@@ -99,13 +100,14 @@ else
     git log --oneline HEAD...$commonancestor -- sql/core/src/main sql/catalyst/src/main  > currentVersion.log
 
     ## Below steps filter commit header messages, sorts and saves only uniq commits that needs to be audited in commits.to.audit.3.3 file
-    cat previousVersion.log | awk '{$1 = "";print $0}' > previousVersion.filter.log
-    cat currentVersion.log | awk '{$1 = "";print $0}' > currentVersion.filter.log
-    cat currentVersion.filter.log previousVersion.filter.log | sort | uniq -c | sort | awk '{$1=$1;print}' > uniqsort.log
-    cat uniqsort.log | awk '/^1/{$1 = "";print $0}' > uniqcommits.log
-    cat previousVersion.filter.log | sort > previousVersion.filter.sorted.log
-    cat currentVersion.filter.log | sort > currentVersion.filter.sorted.log
-    cat uniqcommits.log | sort > uniqcommits.sorted.log
+    awk '{$1=""; print}' previousVersion.log > previousVersion.filter.log
+    awk '{$1=""; print}' currentVersion.log > currentVersion.filter.log
+    sort previousVersion.filter.log currentVersion.filter.log | uniq -c | sort | awk '{$1=$1; print}' > uniqsort.log
+    awk '$1=="1" {$1=""; print}' uniqsort.log > uniqcommits.log
+    sort previousVersion.filter.log > previousVersion.filter.sorted.log
+    sort currentVersion.filter.log > currentVersion.filter.sorted.log
+    sort uniqcommits.log > uniqcommits.sorted.log
+
     comm -12 previousVersion.filter.sorted.log uniqcommits.sorted.log | wc -l
     comm -12 currentVersion.filter.sorted.log uniqcommits.sorted.log > commits.to.audit.currentVersion
     sed -i 's/\[/\\[/g' commits.to.audit.currentVersion

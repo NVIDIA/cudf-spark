@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -57,7 +57,7 @@ class CloseableBufferedIterator[T <: AutoCloseable](wrapped: Iterator[T])
     }
   }
 
-  override def next: T = if (hd.isDefined) {
+  override def next(): T = if (hd.isDefined) {
     val res = hd.get
     hd = None
     res

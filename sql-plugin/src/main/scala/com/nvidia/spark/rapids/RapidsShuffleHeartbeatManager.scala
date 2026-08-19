@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package com.nvidia.spark.rapids
 
 import java.util.concurrent.{Executors, ScheduledExecutorService, TimeUnit}
 
+import scala.annotation.nowarn
 import scala.collection.mutable.ArrayBuffer
 
 import com.nvidia.spark.rapids.jni.RmmSpark
@@ -110,7 +111,8 @@ class RapidsShuffleHeartbeatManager(heartbeatIntervalMillis: Long,
       while (iter.hasNext && !done) {
         val entry = iter.next()
 
-        if (entry.registrationOrder >= lastRegistration.lastRegistrationOrderSeen.getValue) {
+        if (entry.registrationOrder >= (lastRegistration.lastRegistrationOrderSeen.getValue:
+            @nowarn("msg=getValue in class MutableLong is deprecated"))) {
           if (entry.id != id) {
             logDebug(s"Found new executor (to $id): $entry while handling a heartbeat.")
             newExecutors += entry.id
@@ -126,7 +128,8 @@ class RapidsShuffleHeartbeatManager(heartbeatIntervalMillis: Long,
       // update this executor's registration with a new heartbeat time, and that last order
       // from the executors list, indicating the order we should stop at next time
       lastRegistration.lastHeartbeatMillis.setValue(getCurrentTimeMillis)
-      lastRegistration.lastRegistrationOrderSeen.setValue(registrationOrder)
+      (lastRegistration.lastRegistrationOrderSeen.setValue(
+        registrationOrder): @nowarn("msg=getValue in class MutableLong is deprecated"))
 
       // since we updated our heartbeat, update our min-heap
       leastRecentHeartbeat.priorityUpdated(lastRegistration.id)
@@ -143,12 +146,14 @@ class RapidsShuffleHeartbeatManager(heartbeatIntervalMillis: Long,
   private def removeDeadExecutors(currentTime: Long): Unit = {
     val leastRecentHb = leastRecentHeartbeat.peek() // look at the executor that is lagging most
     if (leastRecentHb != null &&
-        isStaleHeartbeat(
-          executorRegistrations.get(leastRecentHb).lastHeartbeatMillis.getValue, currentTime)) {
+        (isStaleHeartbeat(
+          executorRegistrations.get(leastRecentHb).lastHeartbeatMillis.getValue,
+          currentTime): @nowarn("msg=getValue in class MutableLong is deprecated"))) {
       // make a new buffer of alive executors and replace the old one
       val aliveExecutors = new ArrayBuffer[ExecutorRegistration]()
       executors.foreach { e =>
-        if (isStaleHeartbeat(e.lastHeartbeatMillis.getValue, currentTime)) {
+        if ((isStaleHeartbeat(e.lastHeartbeatMillis.getValue,
+            currentTime): @nowarn("msg=getValue in class MutableLong is deprecated"))) {
           logDebug(s"Stale exec, removing $e")
           executorRegistrations.remove(e.id)
           leastRecentHeartbeat.remove(e.id)
@@ -176,34 +181,65 @@ class RapidsShuffleHeartbeatEndpoint(pluginContext: PluginContext, conf: RapidsC
         null,
         () => RmmSpark.removeAllCurrentThreadAssociation()))
 
-  private class InitializeShuffleManager(ctx: PluginContext,
-      shuffleManager: RapidsShuffleInternalManagerBase) extends Runnable {
+  /**
+   * Handles both registration and heartbeats. On each tick:
+   * - If shuffle manager not available yet, wait for next tick
+   * - If not registered, try to register
+   * - If registered, send heartbeat
+   */
+  private class HeartbeatTask(ctx: PluginContext) extends Runnable {
+    @volatile private var registered = false
+    @volatile private var shuffleManagerOpt: Option[RapidsShuffleInternalManagerBase] = None
+
     override def run(): Unit = {
       try {
-        val serverId = shuffleManager.getServerId
-        logInfo(s"Registering executor $serverId with driver")
-        ctx.ask(RapidsExecutorStartupMsg(shuffleManager.getServerId)) match {
-          case RapidsExecutorUpdateMsg(peers) => updatePeers(shuffleManager, peers)
+        // Try to get shuffle manager if we don't have it yet
+        if (shuffleManagerOpt.isEmpty) {
+          val shuffleManager = SparkEnv.get.shuffleManager
+          if (shuffleManager == null) {
+            logDebug("Shuffle manager not available yet, will retry on next heartbeat")
+            return
+          }
+
+          shuffleManager match {
+            case proxy: ProxyRapidsShuffleInternalManagerBase =>
+              shuffleManagerOpt = Some(proxy.getRealImpl
+                .asInstanceOf[RapidsShuffleInternalManagerBase])
+            case _ =>
+              logWarning(s"Unexpected shuffle manager type: ${shuffleManager.getClass}. " +
+                "Disabling heartbeat.")
+              // Cancel this scheduled task by throwing an exception
+              throw new IllegalStateException("Unexpected shuffle manager type")
+          }
         }
-        val heartbeat = new Runnable {
-          override def run(): Unit = {
-            try {
-              logTrace("Performing executor heartbeat to driver")
-              ctx.ask(RapidsExecutorHeartbeatMsg(shuffleManager.getServerId)) match {
-                case RapidsExecutorUpdateMsg(peers) => updatePeers(shuffleManager, peers)
-              }
-            } catch {
-              case t: Throwable => logError("Error during heartbeat", t)
+
+        shuffleManagerOpt.foreach { rapidsShuffleManager =>
+          val serverId = rapidsShuffleManager.getServerId
+          if (!registered) {
+            // Try to register
+            logInfo(s"Registering executor $serverId with driver")
+            ctx.ask(RapidsExecutorStartupMsg(serverId)) match {
+              case RapidsExecutorUpdateMsg(peers) =>
+                updatePeers(rapidsShuffleManager, peers)
+                registered = true
+              case other =>
+                logWarning(s"Unexpected response from driver: $other, " +
+                  "will retry on next heartbeat")
+            }
+          } else {
+            // Already registered, send heartbeat
+            logTrace("Performing executor heartbeat to driver")
+            ctx.ask(RapidsExecutorHeartbeatMsg(serverId)) match {
+              case RapidsExecutorUpdateMsg(peers) =>
+                updatePeers(rapidsShuffleManager, peers)
+              case other =>
+                logWarning(s"Unexpected response from driver: $other")
             }
           }
         }
-        executorService.scheduleWithFixedDelay(
-          heartbeat,
-          0,
-          heartbeatIntervalMillis,
-          TimeUnit.MILLISECONDS)
       } catch {
-        case t: Throwable => logError("Error initializing shuffle", t)
+        case t: Throwable =>
+          logError("Error during shuffle heartbeat", t)
       }
     }
   }
@@ -217,14 +253,17 @@ class RapidsShuffleHeartbeatEndpoint(pluginContext: PluginContext, conf: RapidsC
   }
 
   def registerShuffleHeartbeat(): Unit = {
-    val rapidsShuffleManagerProxy = SparkEnv.get.shuffleManager
-      .asInstanceOf[ProxyRapidsShuffleInternalManagerBase]
-    val rapidsShuffleManager = rapidsShuffleManagerProxy.getRealImpl
-      .asInstanceOf[RapidsShuffleInternalManagerBase]
-    if (rapidsShuffleManager.isDriver) {
+    // Detect driver mode (local mode) using executor ID instead of shuffle manager
+    val executorId = SparkEnv.get.executorId
+    if (executorId == "driver") {
       logDebug("Local mode detected. Skipping shuffle heartbeat registration.")
     } else {
-      executorService.submit(new InitializeShuffleManager(pluginContext, rapidsShuffleManager))
+      // Start the heartbeat loop - it will handle registration on first successful tick
+      executorService.scheduleWithFixedDelay(
+        new HeartbeatTask(pluginContext),
+        0,
+        heartbeatIntervalMillis,
+        TimeUnit.MILLISECONDS)
     }
   }
 

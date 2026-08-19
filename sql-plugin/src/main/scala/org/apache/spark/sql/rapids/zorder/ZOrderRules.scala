@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 
 package org.apache.spark.sql.rapids.zorder
 
-import com.nvidia.spark.rapids.{ExprChecks, ExprMeta, ExprRule, GpuExpression, GpuRangePartitioner, GpuSorter, RepeatingParamCheck, ShimReflectionUtils, TypeSig, UnaryExprMeta}
+import com.nvidia.spark.rapids.{ExprChecks, ExprMeta, ExprRule, GpuExpression, GpuMetric, GpuRangePartitioner, GpuSorter, RepeatingParamCheck, ShimReflectionUtils, TypeSig, UnaryExprMeta}
 import com.nvidia.spark.rapids.GpuOverrides.{expr, pluginSupportedOrderableSig}
 
 import org.apache.spark.sql.catalyst.InternalRow
@@ -79,7 +79,8 @@ object ZOrderRules {
           val sortCol = AttributeReference("sort_col", child.dataType, child.nullable)()
           val ourSortOrder =
             SortOrder(sortCol, singleOrder.direction, singleOrder.nullOrdering, Seq.empty)
-          val sorter = new GpuSorter(Seq(ourSortOrder), Array(sortCol))
+          val sorter = new GpuSorter(Seq(ourSortOrder), Array(sortCol),
+            Map.empty[String, GpuMetric])
           val gpuPart = new GpuRangePartitioner(rangeBounds, sorter)
           GpuPartitionerExpr(child, gpuPart)
         }
@@ -100,7 +101,7 @@ object ZOrderRules {
               TypeSig.INT,
               TypeSig.INT))),
         (a, conf, p, r) => new ExprMeta[Expression](a, conf, p, r) {
-          override def convertToGpu(): GpuExpression =
+          override def convertToGpuImpl(): GpuExpression =
             GpuInterleaveBits(childExprs.map(_.convertToGpu()))
         })
 
@@ -132,7 +133,7 @@ object ZOrderRules {
               TypeSig.INT,
               TypeSig.INT))),
         (a, conf, p, r) => new ExprMeta[Expression](a, conf, p, r) {
-          override def convertToGpu(): GpuExpression = {
+          override def convertToGpuImpl(): GpuExpression = {
             val numBitsField = hilbertClazz.getDeclaredField("numBits")
             numBitsField.setAccessible(true)
             val numBits = numBitsField.get(a).asInstanceOf[java.lang.Integer]

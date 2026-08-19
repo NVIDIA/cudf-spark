@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,8 +17,8 @@
 /*** spark-rapids-shim-json-lines
 {"spark": "330db"}
 {"spark": "332db"}
-{"spark": "341db"}
 {"spark": "350db143"}
+{"spark": "400db173"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
@@ -87,7 +87,7 @@ case class GpuWindowInPandasExec(
     val unboundToRefMap = allExpressions.zip(references).toMap
     // Bound the project list for GPU
     GpuBindReferences.bindGpuReferences(
-      projectList.map(_.transform(unboundToRefMap)), child.output)
+      projectList.map(_.transform(unboundToRefMap)), child.output, allMetrics)
   }
 
   // Override internalDoExecuteColumnar so we use the correct GpuArrowPythonRunner
@@ -185,14 +185,17 @@ case class GpuWindowInPandasExec(
     // UDF contains multiple columns.
     val pythonOutputSchema = DataTypeUtilsShim.fromAttributes(udfExpressions.map(_.resultAttribute))
     val childOutput = child.output
+    val localMetrics = allMetrics
 
     // 8) Start processing.
     child.executeColumnar().mapPartitions { inputIter =>
       val context = TaskContext.get()
 
-      val boundDataRefs = GpuBindReferences.bindGpuReferences(udfArgs.flattenedArgs, childOutput)
+      val boundDataRefs = GpuBindReferences.bindGpuReferences(udfArgs.flattenedArgs, childOutput,
+        localMetrics)
       // Re-batching the input data by GroupingIterator
-      val boundPartitionRefs = GpuBindReferences.bindGpuReferences(gpuPartitionSpec, childOutput)
+      val boundPartitionRefs = GpuBindReferences.bindGpuReferences(gpuPartitionSpec, childOutput,
+        localMetrics)
       val batchProducer = new BatchProducer(
         new GroupingIterator(inputIter, boundPartitionRefs, numInputRows, numInputBatches))
       val pyInputIterator = batchProducer.asIterator.map { batch =>

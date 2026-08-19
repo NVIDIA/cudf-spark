@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 package org.apache.spark.sql.rapids
 
 import ai.rapids.cudf.{Rmm, RmmAllocationMode, TableWriter}
-import com.nvidia.spark.rapids.{ColumnarOutputWriter, ColumnarOutputWriterFactory, GpuColumnVector, GpuLiteral, RapidsConf, ScalableTaskCompletion}
+import com.nvidia.spark.rapids.{ColumnarOutputWriter, ColumnarOutputWriterFactory, GpuColumnVector, GpuLiteral, NvtxId, NvtxRegistry, RapidsConf, ScalableTaskCompletion}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.jni.{GpuRetryOOM, GpuSplitAndRetryOOM}
 import com.nvidia.spark.rapids.spill.SpillFramework
@@ -53,15 +53,18 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
   class NoTransformColumnarOutputWriter(
       context: TaskAttemptContext,
       dataSchema: StructType,
-      rangeName: String,
+      nvtxId: NvtxId,
       includeRetry: Boolean)
         extends ColumnarOutputWriter(
           context,
           dataSchema,
-          rangeName,
+          nvtxId,
           includeRetry,
           mockJobDescription.statsTrackers.map(_.newTaskInstance()),
-          None) {
+          None,
+          false,
+          false,
+          mockJobDescription.fileIO) {
 
     // this writer (for tests) doesn't do anything and passes through the
     // batch passed to it when asked to transform, which is done to
@@ -93,9 +96,9 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
     mockOutputWriter = spy(new NoTransformColumnarOutputWriter(
       mockTaskAttemptContext,
       types,
-      "",
+      NvtxRegistry.FILE_FORMAT_WRITE,
       includeRetry))
-    when(mockOutputWriterFactory.newInstance(any(), any(), any(), any(), any()))
+    when(mockOutputWriterFactory.newInstance(any(), any(), any(), any(), any(), any()))
         .thenAnswer(_ => mockOutputWriter)
   }
 
@@ -518,6 +521,27 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
         verify(dynamicConcurrentWriter, times(5)).newWriter(any(), any(), any())
         // 5 files written because this is the single writer mode
         verify(mockOutputWriter, times(5)).close()
+      }
+    }
+  }
+
+  test("dynamic partition concurrent data writer fallback after cache flush") {
+    resetMocksWithAndWithoutRetry {
+      val cb = buildBatchWithPartitionedCol(1, 2)
+      val cb2 = buildBatchWithPartitionedCol(1, 2, 3)
+      val cbs = Seq(spy(cb), spy(cb2))
+      withColumnarBatchesVerifyClosed(cbs) {
+        // Force the first batch to flush the two open writer caches. The second batch then hits
+        // the writer limit and falls back, so previously flushed empty caches must be skipped.
+        when(mockJobDescription.concurrentWriterPartitionFlushSize).thenReturn(1)
+        when(mockJobDescription.maxRecordsPerFile).thenReturn(0)
+        val dynamicConcurrentWriter =
+          prepareDynamicPartitionConcurrentWriter(maxWriters = 2, batchSize = 1)
+        dynamicConcurrentWriter.writeWithIterator(cbs.iterator)
+        dynamicConcurrentWriter.commit()
+
+        verify(mockOutputWriter, times(5))
+            .writeSpillableAndClose(any())
       }
     }
   }

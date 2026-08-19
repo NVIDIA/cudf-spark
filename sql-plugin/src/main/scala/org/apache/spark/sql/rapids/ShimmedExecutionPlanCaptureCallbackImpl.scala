@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,20 +18,22 @@ package org.apache.spark.sql.rapids
 
 import scala.collection.convert.ImplicitConversions.`collection AsScalaIterable`
 import scala.collection.mutable.{ArrayBuffer, Map => MutableMap}
+import scala.util.Try
 import scala.util.matching.Regex
 
-import com.nvidia.spark.rapids.{PlanShims, PlanUtils, ShimLoaderTemp}
+import com.nvidia.spark.rapids.{GpuCpuBridgeExpression, PlanShims, PlanUtils, ShimLoaderTemp}
 
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.execution.{ExecSubqueryExpression, QueryExecution, ReusedSubqueryExec, SparkPlan}
-import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, QueryStageExec}
-import org.apache.spark.sql.execution.exchange.ReusedExchangeExec
+import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, QueryStageExec,
+  ShuffleQueryStageExec}
+import org.apache.spark.sql.execution.exchange.{ReusedExchangeExec, ShuffleExchangeLike}
 
 
 /**
  * Note that the name is prefixed with "Shimmed" such that wildcard rules
- * under unshimmed-common-from-spark320.txt don't get confused and pick this class to be
+ * under unshimmed-common-from-single-shim.txt don't get confused and pick this class to be
  * un-shimmed.
  */
 class ShimmedExecutionPlanCaptureCallbackImpl extends ExecutionPlanCaptureCallbackBase {
@@ -145,19 +147,15 @@ class ShimmedExecutionPlanCaptureCallbackImpl extends ExecutionPlanCaptureCallba
   }
 
   override def assertDidFallBack(gpuPlans: Array[SparkPlan], fallbackCpuClass: String): Unit = {
-    val executedPlans = gpuPlans.map(extractExecutedPlan)
     // Verify at least one of the plans has the fallback class
-    val found = executedPlans.exists { executedPlan =>
-      executedPlan.find(didFallBack(_, fallbackCpuClass)).isDefined
-    }
-    assert(found, s"Could not find $fallbackCpuClass in the GPU plans:\n" +
-        executedPlans.mkString("\n"))
+    assert(gpuPlans.exists(didFallBack(_, fallbackCpuClass)),
+      s"Could not find $fallbackCpuClass in the GPU plans:\n" +
+          gpuPlans.map(extractExecutedPlan).mkString("\n"))
   }
 
   override def assertDidFallBack(gpuPlan: SparkPlan, fallbackCpuClass: String): Unit = {
-    val executedPlan = extractExecutedPlan(gpuPlan)
-    assert(executedPlan.find(didFallBack(_, fallbackCpuClass)).isDefined,
-      s"Could not find $fallbackCpuClass in the GPU plan\n$executedPlan")
+    assert(didFallBack(gpuPlan, fallbackCpuClass),
+      s"Could not find $fallbackCpuClass in the GPU plan\n${extractExecutedPlan(gpuPlan)}")
   }
 
   override def assertDidFallBack(df: DataFrame, fallbackCpuClass: String): Unit = {
@@ -193,25 +191,98 @@ class ShimmedExecutionPlanCaptureCallbackImpl extends ExecutionPlanCaptureCallba
   }
 
   private def didFallBack(exp: Expression, fallbackCpuClass: String): Boolean = {
-    !exp.getClass.getCanonicalName.equals("com.nvidia.spark.rapids.GpuExpression") &&
-        PlanUtils.getBaseNameFromClass(exp.getClass.getName) == fallbackCpuClass ||
-        exp.children.exists(didFallBack(_, fallbackCpuClass))
+    exp match {
+      case bridge: GpuCpuBridgeExpression =>
+        // Check if the CPU expression inside the bridge matches the fallback class
+        didFallBackInCpuExpression(bridge.cpuExpression, fallbackCpuClass)
+      case _ =>
+        !exp.getClass.getCanonicalName.equals("com.nvidia.spark.rapids.GpuExpression") &&
+            PlanUtils.getBaseNameFromClass(exp.getClass.getName) == fallbackCpuClass ||
+            exp.children.exists(didFallBack(_, fallbackCpuClass))
+    }
+  }
+
+  private def didFallBackInCpuExpression(exp: Expression, fallbackCpuClass: String): Boolean = {
+    PlanUtils.getBaseNameFromClass(exp.getClass.getName) == fallbackCpuClass ||
+        exp.children.exists(didFallBackInCpuExpression(_, fallbackCpuClass))
   }
 
   override def didFallBack(plan: SparkPlan, fallbackCpuClass: String): Boolean = {
-    val executedPlan = extractExecutedPlan(plan)
-    !executedPlan.getClass.getCanonicalName.equals("com.nvidia.spark.rapids.GpuExec") &&
-        PlanUtils.sameClass(executedPlan, fallbackCpuClass) ||
-        executedPlan.expressions.exists(didFallBack(_, fallbackCpuClass))
+    // Recurse through AQE wrappers explicitly. extractExecutedPlan only unwraps a single
+    // node, and AdaptiveSparkPlanExec/QueryStageExec are leaves for tree traversal, so a
+    // plain SparkPlan.find cannot descend into the plan they wrap (e.g. a Databricks Delta
+    // write command nested inside a ResultQueryStageExec).
+    extractExecutedPlan(plan) match {
+      case p: AdaptiveSparkPlanExec => didFallBack(p.executedPlan, fallbackCpuClass)
+      case p: QueryStageExec => didFallBack(p.plan, fallbackCpuClass)
+      case node =>
+        (!node.getClass.getCanonicalName.equals("com.nvidia.spark.rapids.GpuExec") &&
+            PlanUtils.sameClass(node, fallbackCpuClass)) ||
+            node.expressions.exists(didFallBack(_, fallbackCpuClass)) ||
+            node.children.exists(didFallBack(_, fallbackCpuClass))
+    }
+  }
+
+  override def contains(gpuPlan: SparkPlan, className: String): Boolean = {
+    containsPlan(gpuPlan, className)
+  }
+
+  override def containsShuffleExchangeWithOrigin(
+      plan: SparkPlan,
+      className: String,
+      shuffleOrigin: String): Boolean = {
+    containsPlanMatching(extractExecutedPlan(plan), {
+      case exchange: ShuffleExchangeLike =>
+        PlanUtils.sameClass(exchange, className) &&
+            exchange.shuffleOrigin.toString == shuffleOrigin
+      case _ => false
+    })
+  }
+
+  override def containsFinalAdaptivePlan(plan: SparkPlan): Boolean = {
+    containsPlanMatching(plan, {
+      case adaptive: AdaptiveSparkPlanExec =>
+        // DBR exposes isExecutedPlanFinal while upstream Spark releases use isFinalPlan.
+        // Keep this test-only inspection helper source-compatible with both APIs.
+        Seq("isExecutedPlanFinal", "isFinalPlan").iterator
+          .flatMap(name => Try(adaptive.getClass.getMethod(name)).toOption)
+          .take(1)
+          .exists(_.invoke(adaptive).asInstanceOf[Boolean])
+      case _ => false
+    })
+  }
+
+  override def containsShuffleQueryStageWithExchangeOrigin(
+      plan: SparkPlan,
+      className: String,
+      shuffleOrigin: String): Boolean = {
+    containsPlanMatching(plan, {
+      case stage: ShuffleQueryStageExec =>
+        containsPlanMatching(stage.plan, {
+          case exchange: ShuffleExchangeLike =>
+            PlanUtils.sameClass(exchange, className) &&
+                exchange.shuffleOrigin.toString == shuffleOrigin
+          case _ => false
+        })
+      case _ => false
+    })
   }
 
   private def containsExpression(exp: Expression, className: String,
       regexMap: MutableMap[String, Regex] // regex memoization
   ): Boolean = exp.find {
     case e if PlanUtils.getBaseNameFromClass(e.getClass.getName) == className => true
+    case bridge: GpuCpuBridgeExpression => 
+      containsCpuExpression(bridge.cpuExpression, className)
     case e: ExecSubqueryExpression => containsPlan(e.plan, className, regexMap)
     case _ => false
   }.nonEmpty
+
+  private def containsCpuExpression(exp: Expression, className: String): Boolean = {
+    exp.find { e =>
+      PlanUtils.getBaseNameFromClass(e.getClass.getName) == className
+    }.nonEmpty
+  }
 
   private def containsPlan(plan: SparkPlan, className: String,
       regexMap: MutableMap[String, Regex] = MutableMap.empty // regex memoization
@@ -249,6 +320,4 @@ class ShimmedExecutionPlanCaptureCallbackImpl extends ExecutionPlanCaptureCallba
     case p =>
       p.children.exists(plan => containsPlanMatching(plan, f))
   }.nonEmpty
-
 }
-

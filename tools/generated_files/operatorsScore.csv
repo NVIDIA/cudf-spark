@@ -21,10 +21,12 @@ SortAggregateExec,3.0
 InMemoryTableScanExec,3.0
 DataWritingCommandExec,3.0
 ExecutedCommandExec,3.0
+AppendDataExec,3.0
 AppendDataExecV1,3.0
 AtomicCreateTableAsSelectExec,3.0
 AtomicReplaceTableAsSelectExec,3.0
 BatchScanExec,3.0
+OverwriteByExpressionExec,3.0
 OverwriteByExpressionExecV1,3.0
 BroadcastExchangeExec,3.0
 ShuffleExchangeExec,4.2
@@ -38,6 +40,7 @@ ArrowEvalPythonExec,1.2
 FlatMapCoGroupsInPandasExec,3.0
 FlatMapGroupsInPandasExec,1.2
 MapInPandasExec,1.2
+PythonMapInArrowExec,3.0
 WindowInPandasExec,1.2
 WindowExec,3.0
 HiveTableScanExec,3.0
@@ -49,6 +52,7 @@ AggregateExpression,4
 Alias,4
 And,4
 ApproximatePercentile,4
+ArrayAggregate,4
 ArrayContains,4
 ArrayDistinct,4
 ArrayExcept,4
@@ -61,6 +65,7 @@ ArrayMin,4
 ArrayPosition,4
 ArrayRemove,4
 ArrayRepeat,4
+ArraySort,4
 ArrayTransform,4
 ArrayUnion,4
 ArraysOverlap,4
@@ -84,6 +89,8 @@ BitwiseCount,4
 BitwiseNot,4
 BitwiseOr,4
 BitwiseXor,4
+BloomFilterAggregate,4
+BloomFilterMightContain,4
 BoundReference,4
 CaseWhen,4
 Cbrt,4
@@ -114,6 +121,8 @@ DayOfWeek,4
 DayOfYear,4
 DenseRank,4
 Divide,4
+DivideDTInterval,4
+DivideYMInterval,4
 DynamicPruningExpression,4
 ElementAt,4
 EndsWith,4
@@ -137,6 +146,7 @@ GetTimestamp,4
 GreaterThan,4
 GreaterThanOrEqual,4
 Greatest,4
+Hex,4
 HiveGenericUDF,4
 HiveHash,4
 HiveSimpleUDF,4
@@ -146,6 +156,7 @@ Hypot,4
 If,4
 In,4
 InSet,4
+InSubqueryExec,4
 InitCap,4
 InputFileBlockLength,4
 InputFileBlockStart,4
@@ -180,6 +191,7 @@ MapConcat,4
 MapEntries,4
 MapFilter,4
 MapFromArrays,4
+MapFromEntries,4
 MapKeys,4
 MapValues,4
 MapZipWith,4
@@ -195,7 +207,10 @@ MonotonicallyIncreasingID,4
 Month,4
 MonthsBetween,4
 Multiply,4
+MultiplyDTInterval,4
+MultiplyYMInterval,4
 Murmur3Hash,4
+NTile,4
 NaNvl,4
 NamedLambdaVariable,4
 NormalizeNaNAndZero,4
@@ -226,6 +241,8 @@ ReplicateRows,4
 Reverse,4
 Rint,4
 Round,4
+RoundCeil,4
+RoundFloor,4
 RowNumber,4
 ScalaUDF,4
 ScalarSubquery,4
@@ -233,6 +250,7 @@ Second,4
 SecondsToTimestamp,4
 Sequence,4
 Sha1,4
+Sha2,4
 ShiftLeft,4
 ShiftRight,4
 ShiftRightUnsigned,4
@@ -248,8 +266,10 @@ SpecifiedWindowFrame,4
 Sqrt,4
 Stack,4
 StartsWith,4
+StaticInvoke,4
 StddevPop,4
 StddevSamp,4
+StringDecode,4
 StringInstr,4
 StringLPad,4
 StringLocate,4
@@ -285,6 +305,7 @@ UnboundedPreceding$,4
 UnixTimestamp,4
 UnscaledValue,4
 Upper,4
+Uuid,4
 VariancePop,4
 VarianceSamp,4
 WeekDay,4

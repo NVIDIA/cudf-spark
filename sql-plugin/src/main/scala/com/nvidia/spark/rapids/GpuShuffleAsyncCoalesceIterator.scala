@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,6 @@ package com.nvidia.spark.rapids
 
 import java.util.concurrent.{Callable, Future, TimeUnit}
 
-import ai.rapids.cudf.{NvtxColor, NvtxRange}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
 import com.nvidia.spark.rapids.io.async.{ThrottlingExecutor, TrafficController}
@@ -64,16 +63,11 @@ class GpuShuffleAsyncCoalesceIterator(iter: Iterator[CoalescedHostResult],
     executor.shutdownNow(10, TimeUnit.SECONDS)
   }
 
-  // don't try to call TaskContext.get().taskAttemptId() in the backend thread
-  private val taskAttemptID = Option(TaskContext.get()).
-    map(_.taskAttemptId().toString).getOrElse("unknown")
-
   private lazy val readCallable = new Callable[CoalescedHostResult]() {
     // The actual async read, including the host batches read and concatenation in
     // "HostCoalesceIteratorBase.next()".
     override def call(): CoalescedHostResult = {
-      val nvRangeName = s"Task ${taskAttemptID} - Async Read Batch (Backend)"
-      withResource(new NvtxRange(nvRangeName, NvtxColor.BLUE)) { _ =>
+      NvtxRegistry.ASYNC_SHUFFLE_READ {
         iter.next()
       }
     }
@@ -81,7 +75,7 @@ class GpuShuffleAsyncCoalesceIterator(iter: Iterator[CoalescedHostResult],
 
   private var readFutureOpt: Option[Future[CoalescedHostResult]] = None
 
-  override def hasNext(): Boolean = GpuMetric.ns(asyncReadTimeMetric, opTimeMetric) {
+  override def hasNext: Boolean = GpuMetric.ns(asyncReadTimeMetric, opTimeMetric) {
     readFutureOpt.isDefined || {
       // No async read is running when it comes here, so no need synchronization
       // when accessing the input iterator. "iter.hasNext" should be lightweight
@@ -91,11 +85,10 @@ class GpuShuffleAsyncCoalesceIterator(iter: Iterator[CoalescedHostResult],
   }
 
   override def next(): ColumnarBatch = {
-    if (!hasNext()) {
+    if (!hasNext) {
       throw new NoSuchElementException("No more batches")
     }
-    val nvRangeName = s"Task ${taskAttemptID} - Async Read Batch (Frontend)"
-    withResource(new NvtxRange(nvRangeName, NvtxColor.BLUE)) { _ =>
+    NvtxRegistry.ASYNC_SHUFFLE_READ {
       val hostConcatedRet = GpuMetric.ns(asyncReadTimeMetric, opTimeMetric) {
         readFutureOpt.map { readFuture =>
           // An async read is running, waiting for the result

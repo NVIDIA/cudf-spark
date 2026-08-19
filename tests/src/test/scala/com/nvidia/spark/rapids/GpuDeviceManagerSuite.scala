@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,6 +32,19 @@ object TestMemoryChecker extends MemoryChecker {
   override def getAvailableMemoryBytes(rapidsConf: RapidsConf): Option[Long] = availMemBytes
 
   def setAvailableMemoryBytes(b: Option[Long]): Unit = availMemBytes = b
+}
+
+/**
+ * Helper to create CudaMemInfo objects for testing using reflection
+ */
+object TestCudaMemInfo {
+  import ai.rapids.cudf.CudaMemInfo
+
+  def create(free: Long, total: Long): CudaMemInfo = {
+    val constructor = classOf[CudaMemInfo].getDeclaredConstructor(classOf[Long], classOf[Long])
+    constructor.setAccessible(true)
+    constructor.newInstance(total.asInstanceOf[Object], free.asInstanceOf[Object])
+  }
 }
 
 class GpuDeviceManagerSuite extends AnyFunSuite with BeforeAndAfter {
@@ -85,7 +98,11 @@ class GpuDeviceManagerSuite extends AnyFunSuite with BeforeAndAfter {
     val rapidsConf = new RapidsConf(Map(
       RapidsConf.RMM_ALLOC_RESERVE.key -> "0",
       RapidsConf.RMM_ALLOC_FRACTION.key -> "0.3",
-      RapidsConf.RMM_ALLOC_MAX_FRACTION.key -> "0.3"))
+      RapidsConf.RMM_ALLOC_MAX_FRACTION.key -> "0.3",
+      // This test validates that equal allocation and maximum fractions are accepted. Keep the
+      // minimum independent of whole-device capacity so the test also works when other test JVMs
+      // are using the GPU.
+      RapidsConf.RMM_ALLOC_MIN_FRACTION.key -> "0.01"))
     try {
       SparkSession.builder().master("local[1]").getOrCreate()
       GpuDeviceManager.initializeMemory(None, Some(rapidsConf))
@@ -282,5 +299,210 @@ class GpuDeviceManagerSuite extends AnyFunSuite with BeforeAndAfter {
 
     assertResult(0)(pinnedSize)
     assertResult(expectedNonPinned)(nonPinnedSize)
+  }
+
+  test("computeRmmPoolSize with integrated GPU") {
+    val totalGpuMem = 16L * 1024 * 1024 * 1024 // 16GB
+    val freeGpuMem = 12L * 1024 * 1024 * 1024  // 12GB free
+    val integratedGpuFraction = 0.6 // 60% of physical memory allocated to GPU
+
+    val rapidsConf = new RapidsConf(Map(
+      RapidsConf.RMM_ALLOC_FRACTION.key -> "0.8",
+      RapidsConf.RMM_ALLOC_MIN_FRACTION.key -> "0.01",
+      RapidsConf.RMM_ALLOC_MAX_FRACTION.key -> "0.9",
+      RapidsConf.RMM_ALLOC_RESERVE.key -> "0",
+      RapidsConf.INTEGRATED_GPU_MEMORY_FRACTION.key -> integratedGpuFraction.toString
+    ))
+
+    def truncateToAlignment(x: Long): Long = x & ~511L
+
+    try {
+      // Force integrated GPU behavior
+      GpuDeviceManager.setForceIntegratedGpuForTesting(true)
+
+      val memInfo = TestCudaMemInfo.create(totalGpuMem, freeGpuMem)
+      val effectiveGpuTotal = (totalGpuMem * integratedGpuFraction).toLong
+      val reserveAmount = rapidsConf.rmmAllocReserve
+      val expectedPoolSize = truncateToAlignment(
+        (rapidsConf.rmmAllocFraction * (Math.min(memInfo.free, effectiveGpuTotal) - reserveAmount))
+        .toLong)
+
+      val poolSize = GpuDeviceManager.computeRmmPoolSize(rapidsConf, memInfo)
+
+      assertResult(expectedPoolSize)(poolSize)
+    } finally {
+      GpuDeviceManager.resetForceIntegratedGpuForTesting()
+    }
+  }
+
+  test("computeRmmPoolSize with discrete GPU") {
+    val totalGpuMem = 8L * 1024 * 1024 * 1024  // 8GB
+    val freeGpuMem = 6L * 1024 * 1024 * 1024   // 6GB free
+
+    val rapidsConf = new RapidsConf(Map(
+      RapidsConf.RMM_ALLOC_FRACTION.key -> "0.8",
+      RapidsConf.RMM_ALLOC_MIN_FRACTION.key -> "0.01",
+      RapidsConf.RMM_ALLOC_MAX_FRACTION.key -> "0.9",
+      RapidsConf.RMM_ALLOC_RESERVE.key -> "0"
+    ))
+
+    try {
+      // Force discrete GPU behavior
+      GpuDeviceManager.setForceIntegratedGpuForTesting(false)
+
+      val memInfo = TestCudaMemInfo.create(totalGpuMem, freeGpuMem)
+      val poolSize = GpuDeviceManager.computeRmmPoolSize(rapidsConf, memInfo)
+
+      // For discrete GPU, effective total = total = 8GB
+      // Pool allocation = allocFraction * min(free, total) = 0.8 * min(6GB, 8GB) =
+      // 0.8 * 6GB = 4.8GB
+      // Then truncate to 512-byte alignment
+      val rawPoolSize = (0.8 * Math.min(freeGpuMem, totalGpuMem)).toLong
+      val expectedPoolSize = rawPoolSize & ~511L
+
+      assertResult(expectedPoolSize)(poolSize)
+    } finally {
+      GpuDeviceManager.resetForceIntegratedGpuForTesting()
+    }
+  }
+
+  test("computeRmmPoolSize integrated GPU with reserve memory") {
+    val totalGpuMem = 16L * 1024 * 1024 * 1024 // 16GB
+    val freeGpuMem = 14L * 1024 * 1024 * 1024  // 14GB free
+    val reserveMem = 1L * 1024 * 1024 * 1024    // 1GB reserve
+    val integratedGpuFraction = 0.5             // 50% of physical memory allocated to GPU
+
+    val rapidsConf = new RapidsConf(Map(
+      RapidsConf.RMM_ALLOC_FRACTION.key -> "0.8",
+      RapidsConf.RMM_ALLOC_RESERVE.key -> reserveMem.toString,
+      RapidsConf.INTEGRATED_GPU_MEMORY_FRACTION.key -> integratedGpuFraction.toString
+    ))
+
+    def truncateToAlignment(x: Long): Long = x & ~511L
+
+    try {
+      // Force integrated GPU behavior
+      GpuDeviceManager.setForceIntegratedGpuForTesting(true)
+
+      val memInfo = TestCudaMemInfo.create(totalGpuMem, freeGpuMem)
+      val effectiveGpuTotal = (totalGpuMem * integratedGpuFraction).toLong
+      val reserveAmount = rapidsConf.rmmAllocReserve
+      val expectedPoolSize = truncateToAlignment(
+        (rapidsConf.rmmAllocFraction * (Math.min(memInfo.free, effectiveGpuTotal) - reserveAmount))
+        .toLong)
+
+      val poolSize = GpuDeviceManager.computeRmmPoolSize(rapidsConf, memInfo)
+
+      assertResult(expectedPoolSize)(poolSize)
+    } finally {
+      GpuDeviceManager.resetForceIntegratedGpuForTesting()
+    }
+  }
+
+  test("get host memory limits with integrated GPU") {
+    val deviceCount = 1
+    val pySparkOverheadStr = "2g"
+    val heapSizeStr = "2g"
+    val hostMemBytes = 32L * 1024 * 1024 * 1024 // 32GB
+    val integratedGpuFraction = 0.6
+
+    val sparkConf = new SparkConf()
+      .set("spark.executor.pyspark.memory", pySparkOverheadStr)
+      .set("spark.executor.memory", heapSizeStr)
+    val rapidsConf = new RapidsConf(Map(
+      RapidsConf.OFF_HEAP_LIMIT_ENABLED.key -> "true",
+      RapidsConf.INTEGRATED_GPU_MEMORY_FRACTION.key -> integratedGpuFraction.toString
+    ))
+
+    TestMemoryChecker.setAvailableMemoryBytes(Some(hostMemBytes))
+
+    try {
+      // Force integrated GPU behavior
+      GpuDeviceManager.setForceIntegratedGpuForTesting(true)
+
+      val (pinnedSize, nonPinnedSize) =
+        GpuDeviceManager.getPinnedPoolAndOffHeapLimits(rapidsConf, sparkConf, deviceCount,
+          TestMemoryChecker)
+
+      val pySparkOverhead = toBytes(pySparkOverheadStr)
+      val heapSize = toBytes(heapSizeStr)
+      val totalOverhead = toBytes("15m") // default
+
+      // For integrated GPU, available host memory = hostMem * (1 - integratedGpuFraction)
+      val expectedAvailableHostMem = (hostMemBytes * (1.0 - integratedGpuFraction)).toLong
+      val expectedNonPinned = (.8 * (expectedAvailableHostMem - heapSize - pySparkOverhead))
+        .toLong - totalOverhead
+
+      assertResult(0)(pinnedSize)
+      assertResult(expectedNonPinned)(nonPinnedSize)
+    } finally {
+      GpuDeviceManager.resetForceIntegratedGpuForTesting()
+      TestMemoryChecker.setAvailableMemoryBytes(None)
+    }
+  }
+
+  test("MT read limit should be 90% of total off heap when off heap limit disabled") {
+    val deviceCount = 1
+    val availableHostMem = 32L * 1024 * 1024 * 1024  // 32 GiB
+    val heapSize = toBytes("1g")  // default spark.executor.memory
+
+    val sparkConf = new SparkConf()
+    val rapidsConf = new RapidsConf(Map(
+      RapidsConf.OFF_HEAP_LIMIT_ENABLED.key -> "false"))
+
+    TestMemoryChecker.setAvailableMemoryBytes(Some(availableHostMem))
+
+    try {
+      val mtLimit = GpuDeviceManager.computeMtReadLimit(
+        pinnedSize = 0L, nonPinnedLimit = -1L,
+        rapidsConf, sparkConf, deviceCount, TestMemoryChecker)
+
+      // When off-heap limit is disabled, the effective total off-heap should be derived
+      // from hardware (same 80% formula used in the enabled path), and MT read limit = 90% of that.
+      val effectiveOffHeap = (0.8 * (availableHostMem - heapSize)).toLong
+      val expectedMtLimit = (0.9 * effectiveOffHeap).toLong
+      assertResult(expectedMtLimit)(mtLimit)
+    } finally {
+      TestMemoryChecker.setAvailableMemoryBytes(None)
+    }
+  }
+
+  test("get host memory limits with discrete GPU") {
+    val deviceCount = 1
+    val pySparkOverheadStr = "2g"
+    val heapSizeStr = "2g"
+    val hostMemBytes = 32L * 1024 * 1024 * 1024 // 32GB
+
+    val sparkConf = new SparkConf()
+      .set("spark.executor.pyspark.memory", pySparkOverheadStr)
+      .set("spark.executor.memory", heapSizeStr)
+    val rapidsConf = new RapidsConf(Map(
+      RapidsConf.OFF_HEAP_LIMIT_ENABLED.key -> "true"
+    ))
+
+    TestMemoryChecker.setAvailableMemoryBytes(Some(hostMemBytes))
+
+    try {
+      // Force discrete GPU behavior
+      GpuDeviceManager.setForceIntegratedGpuForTesting(false)
+
+      val (pinnedSize, nonPinnedSize) =
+        GpuDeviceManager.getPinnedPoolAndOffHeapLimits(rapidsConf, sparkConf, deviceCount,
+          TestMemoryChecker)
+
+      val pySparkOverhead = toBytes(pySparkOverheadStr)
+      val heapSize = toBytes(heapSizeStr)
+      val totalOverhead = toBytes("15m") // default
+
+      // For discrete GPU, available host memory = hostMem (no fraction applied)
+      val expectedNonPinned = (.8 * (hostMemBytes - heapSize - pySparkOverhead))
+        .toLong - totalOverhead
+
+      assertResult(0)(pinnedSize)
+      assertResult(expectedNonPinned)(nonPinnedSize)
+    } finally {
+      GpuDeviceManager.resetForceIntegratedGpuForTesting()
+      TestMemoryChecker.setAvailableMemoryBytes(None)
+    }
   }
 }

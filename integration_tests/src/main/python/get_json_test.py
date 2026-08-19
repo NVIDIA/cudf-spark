@@ -1,4 +1,4 @@
-# Copyright (c) 2021-2025, NVIDIA CORPORATION.
+# Copyright (c) 2021-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ from data_gen import *
 from pyspark.sql.types import *
 from marks import *
 from spark_init_internal import spark_version
+from conftest import is_dataproc_runtime, is_dataproc_serverless_runtime
 from spark_session import is_before_spark_400, is_databricks113_or_later, is_databricks_runtime
 
 def mk_json_str_gen(pattern):
@@ -122,6 +123,8 @@ def test_get_json_object_normalize_non_string_output():
             f.col('jsonStr'),
             f.get_json_object('jsonStr', '$')))
 
+@pytest.mark.xfail(condition=is_dataproc_runtime() or is_dataproc_serverless_runtime(),
+    reason="https://github.com/NVIDIA/spark-rapids/issues/14290")
 def test_get_json_object_quoted_question():
     schema = StructType([StructField("jsonStr", StringType())])
     data = [[r'{"?":"QUESTION"}']]
@@ -311,7 +314,7 @@ def test_get_json_object_deep_nested_json():
             f.get_json_object('jsonStr', '$.a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p').alias('p')
             ))
 
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('GetJsonObject')
 def test_get_json_object_deep_nested_json_fallback():
     schema = StructType([StructField("jsonStr", StringType())])
     data = [['{"a":{"b":{"c":{"d":{"e":{"f":{"g":{"h":{"i":{"j":{"k":{"l":{"m":{"n":{"o":{"p":{"q":{"r":{"s":{"t":{"u":{"v":{"w":{"x":{"y":{"z":"A"}}'
@@ -321,7 +324,7 @@ def test_get_json_object_deep_nested_json_fallback():
             f.get_json_object('jsonStr', '$.a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q.r.s.t.u.v.w.x.y.z').alias('z')),
         'GetJsonObject')
 
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('GetJsonObject')
 @pytest.mark.parametrize('json_str_pattern', [r'\{"store": \{"fruit": \[\{"weight":\d,"type":"[a-z]{1,9}"\}\], ' \
                    r'"bicycle":\{"price":[1-9]\d\.\d\d,"color":"[a-z]{0,4}"\}\},' \
                    r'"email":"[a-z]{1,5}\@[a-z]{3,10}\.com","owner":"[a-z]{3,8}"\}',

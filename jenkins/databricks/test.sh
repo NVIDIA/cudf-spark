@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Copyright (c) 2020-2025, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -45,7 +45,8 @@ set -ex
 # - DELTA_LAKE_ONLY: delta_lake tests only
 # - MULTITHREADED_SHUFFLE: shuffle tests only
 # - PYARROW_ONLY: pyarrow tests only
-# - CI_PART1 or CI_PART2 : part1 or part2 of the tests run in parallel from CI
+# - CI_PART1 or CI_PART2 : part1 or part2 of the tests run in parallel from CI.
+#   CI_PART2 includes nightly resource-consuming tests to keep the split runtimes closer.
 TEST_MODE=${TEST_MODE:-'DEFAULT'}
 
 # CI_PART2 untars the spark-rapids tgz built by C1_PART1 instead of rebuilding it
@@ -63,6 +64,21 @@ source jenkins/databricks/setup.sh
 source jenkins/databricks/common_vars.sh
 
 BASE_SPARK_VERSION=${BASE_SPARK_VERSION:-$(< /databricks/spark/VERSION)}
+
+# For Spark 4.x (Scala 2.13), the upstream base shim is 350 (Spark 3.5.0).
+# For Spark 3.x (Scala 2.12), the upstream base shim is 330 (Spark 3.3.0).
+if [[ "$BASE_SPARK_VERSION" == 4.* ]]; then
+    # TODO: Revisit UPSTREAM_SHIM_VER when new Spark 4.x Databricks runtimes are introduced
+    # that may pair with a different upstream shim (e.g., spark360).
+    UPSTREAM_SPARK_VERSION="3.5.0"
+    UPSTREAM_SHIM_VER="spark350"
+    UPSTREAM_SPARK_SCALA_SUFFIX="-scala2.13"
+else
+    UPSTREAM_SPARK_VERSION="3.3.0"
+    UPSTREAM_SHIM_VER="spark330"
+    UPSTREAM_SPARK_SCALA_SUFFIX=""
+fi
+
 WITH_DEFAULT_UPSTREAM_SHIM=${WITH_DEFAULT_UPSTREAM_SHIM:-1}
 
 IS_SPARK_321_OR_LATER=0
@@ -89,25 +105,62 @@ run_pyarrow_tests() {
         bash integration_tests/run_pyspark_from_build.sh -m pyarrow_test --pyarrow_test --runtime_env="databricks" --test_type=$TEST_TYPE
 }
 
+# Move selected tests to CI_PART2 so the split CI jobs finish closer together.
+# Keep DEFAULT unchanged so manual/default runs still cover everything in the historical order.
+CI_PART2_BALANCED_TESTS="json_test orc_test parquet_test sort_test window_function_test"
+CI_PART2_BALANCED_TEST_EXPR="${CI_PART2_BALANCED_TESTS// / or }"
+
 ## Separate the integration tests into "CI_PART1" and "CI_PART2", run each part in parallel on separate Databricks clusters to speed up the testing process.
 if [[ $TEST_MODE == "DEFAULT" || $TEST_MODE == "CI_PART1" ]]; then
     # Run two-shim smoke test with the base Spark build
     if [[ "$WITH_DEFAULT_UPSTREAM_SHIM" != "0" ]]; then
-        if [[ ! -d $HOME/spark-3.2.0-bin-hadoop3.2 ]]; then
-            wget https://archive.apache.org/dist/spark/spark-3.2.0/spark-3.2.0-bin-hadoop3.2.tgz -P /tmp
-            tar xf /tmp/spark-3.2.0-bin-hadoop3.2.tgz -C $HOME
-            rm -f /tmp/spark-3.2.0-bin-hadoop3.2.tgz
+        if [[ ! -d $HOME/spark-${UPSTREAM_SPARK_VERSION}-bin-hadoop3${UPSTREAM_SPARK_SCALA_SUFFIX} ]]; then
+            # DBFS cache for Spark
+            DBFS_CACHE_DIR=${DBFS_CACHE_DIR:-"/dbfs/cached_jars"}
+            JAR_FILE_NAME=${JAR_FILE_NAME:-"spark-${UPSTREAM_SPARK_VERSION}-bin-hadoop3${UPSTREAM_SPARK_SCALA_SUFFIX}.tgz"}
+            SPARK_CACHE_FILE=${SPARK_CACHE_FILE:-"$DBFS_CACHE_DIR/$JAR_FILE_NAME"}
+            SPARK_URL=${SPARK_URL:-"https://archive.apache.org/dist/spark/spark-${UPSTREAM_SPARK_VERSION}/$JAR_FILE_NAME"}
+            # Create cache directory if it doesn't exist
+            mkdir -p "$DBFS_CACHE_DIR"
+            # Check if file exists in DBFS cache
+            if [[ -f "$SPARK_CACHE_FILE" ]]; then
+                echo "Found Spark in DBFS cache, copying to /tmp..."
+                cp "$SPARK_CACHE_FILE" "/tmp/$JAR_FILE_NAME"
+            else
+                echo "Spark not found in DBFS cache, downloading from archive.apache.org..."
+                if wget "$SPARK_URL" -P /tmp; then
+                    echo "Download successful, caching to DBFS..."
+                    cp "/tmp/$JAR_FILE_NAME" "$SPARK_CACHE_FILE" || true
+                else
+                    echo "Download failed"
+                    exit 1
+                fi
+            fi
+            tar xf "/tmp/$JAR_FILE_NAME" -C $HOME
+            rm -f "/tmp/$JAR_FILE_NAME"
         fi
-        SPARK_HOME=$HOME/spark-3.2.0-bin-hadoop3.2 \
+        SPARK_HOME=$HOME/spark-${UPSTREAM_SPARK_VERSION}-bin-hadoop3${UPSTREAM_SPARK_SCALA_SUFFIX} \
         SPARK_SHELL_SMOKE_TEST=1 \
-        PYSP_TEST_spark_shuffle_manager=com.nvidia.spark.rapids.spark320.RapidsShuffleManager \
+        PYSP_TEST_spark_shuffle_manager=com.nvidia.spark.rapids.${UPSTREAM_SHIM_VER}.RapidsShuffleManager \
             bash integration_tests/run_pyspark_from_build.sh
     fi
-    bash integration_tests/run_pyspark_from_build.sh --runtime_env="databricks" --test_type=$TEST_TYPE
+    if [[ "$TEST_MODE" == "CI_PART1" ]]; then
+        bash integration_tests/run_pyspark_from_build.sh --runtime_env="databricks" \
+            --test_type=$TEST_TYPE -k "not ($CI_PART2_BALANCED_TEST_EXPR)"
+    else
+        bash integration_tests/run_pyspark_from_build.sh --runtime_env="databricks" --test_type=$TEST_TYPE
+    fi
 fi
 
 ## Run tests with jars building from the spark-rapids source code
 if [[ "$(pwd)" == "$SOURCE_PATH" ]]; then
+    if [[ "$TEST_MODE" == "CI_PART2" ]]; then
+        ## Run the balanced integration tests moved out of CI_PART1
+        TESTS="${CI_PART2_BALANCED_TESTS// /.py }.py" \
+            bash integration_tests/run_pyspark_from_build.sh --runtime_env="databricks" \
+                --test_type=$TEST_TYPE
+    fi
+
     ## Run cache tests
     if [[ "$IS_SPARK_321_OR_LATER" -eq "1" && ("$TEST_MODE" == "DEFAULT" || $TEST_MODE == "CI_PART2") ]]; then
         PYSP_TEST_spark_sql_cache_serializer=${PCBS_CONF} \
@@ -117,7 +170,8 @@ if [[ "$(pwd)" == "$SOURCE_PATH" ]]; then
     if [[ "$TEST_MODE" == "DEFAULT" || $TEST_MODE == "CI_PART2" || "$TEST_MODE" == "DELTA_LAKE_ONLY" ]]; then
         ## Run Delta Lake tests
         DRIVER_MEMORY="4g" \
-            bash integration_tests/run_pyspark_from_build.sh --runtime_env="databricks"  -m "delta_lake" --delta_lake --test_type=$TEST_TYPE
+            bash integration_tests/run_pyspark_from_build.sh --runtime_env="databricks" \
+                -m "delta_lake" --delta_lake --test_type=$TEST_TYPE
     fi
 
     if [[ "$TEST_MODE" == "DEFAULT" || $TEST_MODE == "CI_PART2" || "$TEST_MODE" == "MULTITHREADED_SHUFFLE" ]]; then

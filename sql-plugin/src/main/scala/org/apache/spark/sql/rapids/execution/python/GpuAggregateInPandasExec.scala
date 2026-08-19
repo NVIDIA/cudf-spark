@@ -19,6 +19,7 @@ package org.apache.spark.sql.rapids.execution.python
 import ai.rapids.cudf
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.AssertUtils.assertInTests
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.python.PythonWorkerSemaphore
 import com.nvidia.spark.rapids.shims.ShimUnaryExecNode
@@ -80,7 +81,7 @@ case class GpuAggregateInPandasExec(
         ((ChainedPythonFunctions(chained.funcs ++ Seq(udf.func)), udf.resultId.id), children)
       case children =>
         // There should not be any other UDFs, or the children can't be evaluated directly.
-        assert(children.forall(_.find(_.isInstanceOf[GpuPythonFunction]).isEmpty))
+        assertInTests(children.forall(_.find(_.isInstanceOf[GpuPythonFunction]).isEmpty))
         ((ChainedPythonFunctions(Seq(udf.func)), udf.resultId.id), udf.children)
     }
   }
@@ -133,8 +134,10 @@ case class GpuAggregateInPandasExec(
       // First projects the input batches to (groupingExpressions + allInputs), which is minimum
       // necessary for the following processes.
       // Doing this can reduce the data size to be split, probably getting a better performance.
-      val groupingRefs = GpuBindReferences.bindGpuReferences(gpuGroupingExpressions, childOutput)
-      val pyInputRefs = GpuBindReferences.bindGpuReferences(udfArgs.flattenedArgs, childOutput)
+      val groupingRefs = GpuBindReferences.bindGpuReferences(gpuGroupingExpressions,
+        childOutput, allMetrics)
+      val pyInputRefs = GpuBindReferences.bindGpuReferences(udfArgs.flattenedArgs,
+        childOutput, allMetrics)
       val miniIter = inputIter.map { batch =>
         mNumInputBatches += 1
         mNumInputRows += batch.numRows()
@@ -199,7 +202,8 @@ case class GpuAggregateInPandasExec(
         val pyOutputIterator = pyRunner.compute(pyInputIter, context.partitionId(), context)
 
         val combinedAttrs = gpuGroupingExpressions.map(_.toAttribute) ++ pyOutAttributes
-        val resultRefs = GpuBindReferences.bindGpuReferences(resultExprs, combinedAttrs)
+        val resultRefs = GpuBindReferences.bindGpuReferences(resultExprs, combinedAttrs,
+          allMetrics)
         // Gets the combined batch for each group and projects for the output.
         new CombiningIterator(batchProducer.getBatchQueue, pyOutputIterator,
             pyRunner.asInstanceOf[GpuArrowOutput], mNumOutputRows,

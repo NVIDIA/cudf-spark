@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,7 +19,6 @@
 {"spark": "332db"}
 {"spark": "340"}
 {"spark": "341"}
-{"spark": "341db"}
 {"spark": "342"}
 {"spark": "343"}
 {"spark": "344"}
@@ -31,11 +30,26 @@
 {"spark": "354"}
 {"spark": "355"}
 {"spark": "356"}
+{"spark": "357"}
+{"spark": "358"}
+{"spark": "359"}
 {"spark": "400"}
+{"spark": "400db173"}
+{"spark": "401"}
+{"spark": "402"}
+{"spark": "403"}
+{"spark": "404"}
+{"spark": "411"}
+{"spark": "412"}
+{"spark": "413"}
 spark-rapids-shim-json-lines ***/
+
 package com.nvidia.spark.rapids.shims
 
+import ai.rapids.cudf.NaNEquality
+
 import org.apache.spark.sql.catalyst.analysis.TypeCheckResult
+import org.apache.spark.sql.catalyst.expressions.aggregate.{CollectList, CollectSet}
 import org.apache.spark.sql.types.{DataType, NullType, NumericType}
 
 /**
@@ -50,4 +64,17 @@ object TypeUtilsShims {
       TypeCheckResult.TypeCheckFailure(s"$caller requires numeric types, not ${dt.catalogString}")
     }
   }
+
+  val collectSetFloatNanEquality: NaNEquality = NaNEquality.UNEQUAL
+
+  // Pre-Spark 4.2 CollectSet stores child values directly in the agg buffer.
+  def collectSetCpuBufferElementType(childType: DataType): DataType = childType
+
+  def collectListIgnoreNulls(_collectList: CollectList): Boolean = true
+
+  def collectSetIgnoreNulls(_collectSet: CollectSet): Boolean = true
+
+  val useImprovedAsinhByDefault: Boolean = false
+
+  def isUnsupportedArrowAggregatePythonEvalType(evalType: Int): Boolean = false
 }

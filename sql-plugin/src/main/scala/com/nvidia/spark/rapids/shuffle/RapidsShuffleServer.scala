@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,8 +20,8 @@ import java.util.concurrent.{ConcurrentLinkedQueue, Executor}
 
 import scala.collection.mutable.ArrayBuffer
 
-import ai.rapids.cudf.{Cuda, MemoryBuffer, NvtxColor, NvtxRange}
-import com.nvidia.spark.rapids.{RapidsConf, RapidsShuffleHandle, ShuffleMetadata}
+import ai.rapids.cudf.{Cuda, MemoryBuffer}
+import com.nvidia.spark.rapids.{NvtxRegistry, RapidsConf, RapidsShuffleHandle, ShuffleMetadata}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.format.TableMeta
 
@@ -228,7 +228,7 @@ class RapidsShuffleServer(transport: RapidsShuffleTransport,
   private def registerRequestHandler(messageType: MessageType.Value): Unit = {
     logDebug(s"Registering ${messageType} request callback")
     serverConnection.registerRequestHandler(messageType, tx => {
-      withResource(new NvtxRange("Handle Meta Request", NvtxColor.PURPLE)) { _ =>
+      NvtxRegistry.HANDLE_META_REQUEST {
         messageType match {
           case MessageType.MetadataRequest =>
             asyncOrBlock(HandleMeta(tx))
@@ -254,7 +254,7 @@ class RapidsShuffleServer(transport: RapidsShuffleTransport,
    */
   def doHandleMetadataRequest(tx: Transaction): Unit = {
     withResource(tx) { _ =>
-      withResource(new NvtxRange("doHandleMeta", NvtxColor.PURPLE)) { _ =>
+      NvtxRegistry.DO_HANDLE_META {
         withResource(tx.releaseMessage()) { mtb =>
           if (tx.getStatus == TransactionStatus.Error) {
             logError("error getting metadata request: " + tx)
@@ -325,7 +325,7 @@ class RapidsShuffleServer(transport: RapidsShuffleTransport,
       var toTryAgain: ArrayBuffer[BufferSendState] = null
       var supressedErrors: ArrayBuffer[Throwable] = null
       bufferSendStates.foreach { bufferSendState =>
-        withResource(new NvtxRange(s"doHandleTransferRequest", NvtxColor.CYAN)) { _ =>
+        NvtxRegistry.SHUFFLE_TRANSFER_REQUEST {
           require(bufferSendState.hasMoreSends, "Attempting to handle a complete transfer request.")
 
           // For each `BufferSendState` we ask for a bounce buffer fill up

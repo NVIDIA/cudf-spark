@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids
 
-import ai.rapids.cudf.{DType, NvtxColor, NvtxRange, PartitionedTable}
+import ai.rapids.cudf.{ColumnVector, DType, PartitionedTable}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.shims.ShimExpression
 
@@ -34,21 +34,34 @@ trait GpuHashPartitioner extends Serializable {
   protected def hashFunc: GpuHashExpression
 
   protected final def hashPartitionAndClose(batch: ColumnarBatch, numPartitions: Int,
-      nvtxName: String): PartitionedTable = {
-    val sb = SpillableColumnarBatch(batch, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
-    RmmRapidsRetryIterator.withRetryNoSplit(sb) { sb =>
-      withResource(sb.getColumnarBatch()) { cb =>
-        val parts = withResource(new NvtxRange(nvtxName, NvtxColor.CYAN)) { _ =>
+      nvtxId: NvtxId): PartitionedTable = {
+    withResource(batch) { cb =>
+      val parts = nvtxId {
+        if (hashFunc.children.isEmpty) {
+          // Spark permits HashPartitioning with no expressions. The hash is the initial seed for
+          // every row, so preserve the CPU partition ID and partition count without asking cuDF
+          // to hash zero input columns.
+          val emptyHash = hashFunc match {
+            case GpuMurmur3Hash(_, seed) => seed
+            case GpuHiveHash(_) => 0
+            case other => throw new IllegalStateException(
+              s"Unsupported empty hash expression: ${other.getClass.getSimpleName}")
+          }
+          val partitionId = Math.floorMod(emptyHash, numPartitions)
+          withResource(GpuScalar.from(partitionId, IntegerType)) { partLit =>
+            ColumnVector.fromScalar(partLit, cb.numRows)
+          }
+        } else {
           withResource(hashFunc.columnarEval(cb)) { hash =>
             withResource(GpuScalar.from(numPartitions, IntegerType)) { partsLit =>
               hash.getBase.pmod(partsLit, DType.INT32)
             }
           }
         }
-        withResource(parts) { parts =>
-          withResource(GpuColumnVector.from(cb)) { table =>
-            table.partition(parts, numPartitions)
-          }
+      }
+      withResource(parts) { parts =>
+        withResource(GpuColumnVector.from(cb)) { table =>
+          table.partition(parts, numPartitions)
         }
       }
     }
@@ -68,9 +81,11 @@ abstract class GpuHashPartitioningBase(expressions: Seq[Expression], numPartitio
 
   def partitionInternalAndClose(batch: ColumnarBatch): (Array[Int], Array[GpuColumnVector]) = {
     val types = GpuColumnVector.extractTypes(batch)
-    val partedTable = hashPartitionAndClose(batch, numPartitions, "Calculate part")
+    val partedTable = hashPartitionAndClose(batch, numPartitions, NvtxRegistry.CALCULATE_PART)
     withResource(partedTable) { partedTable =>
-      val parts = partedTable.getPartitions
+      // Table.partition() returns numPartitions + 1 elements (last is total row count),
+      // but downstream code expects numPartitions elements, so drop the last one
+      val parts = partedTable.getPartitions.dropRight(1)
       val tp = partedTable.getTable
       val columns = (0 until partedTable.getNumberOfColumns.toInt).zip(types).map {
         case (index, sparkType) =>
@@ -82,10 +97,10 @@ abstract class GpuHashPartitioningBase(expressions: Seq[Expression], numPartitio
 
   override def columnarEvalAny(batch: ColumnarBatch): Any = {
     //  We are doing this here because the cudf partition command is at this level
-    withResource(new NvtxRange("Hash partition", NvtxColor.PURPLE)) { _ =>
+    NvtxRegistry.HASH_PARTITION {
       val numRows = batch.numRows
       val (partitionIndexes, partitionColumns) = {
-        withResource(new NvtxRange("partition", NvtxColor.BLUE)) { _ =>
+        NvtxRegistry.HASH_PARTITION_SLICE {
           partitionInternalAndClose(batch)
         }
       }

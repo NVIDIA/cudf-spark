@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -47,7 +47,8 @@ object DateUtils {
   val unsupportedWordParseFromString = unsupportedWord ++ Set("yy")
 
   val conversionMap = Map(
-    "MM" -> "%m", "LL" -> "%m", "dd" -> "%d", "mm" -> "%M", "ss" -> "%S", "HH" -> "%H",
+    "MM" -> "%m", "LL" -> "%m", "dd" -> "%d", "mm" -> "%M", "ss" -> "%S",
+    "HH" -> "%H", "a" -> "%p",
     "yy" -> "%y", "yyyy" -> "%Y", "SSS" -> "%3f", "SSSSSS" -> "%6f")
 
   val ONE_SECOND_MICROSECONDS = 1000000
@@ -136,12 +137,13 @@ object DateUtils {
    * %S Second of the minute: 00-59
    * %f 6-digit microsecond: 000000-999999
    *
-   * reported bugs
-   * https://github.com/rapidsai/cudf/issues/4160 after the bug is fixed this method
-   * should also support
-   * "hh" -> "%I" (12 hour clock)
-   * "a" -> "%p" ('AM', 'PM')
-   * "DDD" -> "%j" (Day of the year)
+   * cuDF issue https://github.com/rapidsai/cudf/issues/4160 (closed 2020-02)
+   * previously blocked the following; "a" -> "%p" is now supported.
+   * Not yet mapped to cuDF specifiers:
+   * "hh" -> "%I" (12-hour clock) — NOTE: "hh" is not in
+   *   unsupportedWord, so it silently passes through as a literal
+   *   instead of being rejected. This is a pre-existing gap.
+   * "DDD" -> "%j" (day of year) — blocked by unsupportedWord
    *
    * @param format Java time format string
    * @param parseString True if we're parsing a string
@@ -218,8 +220,14 @@ object DateUtils {
       meta: RapidsMeta[_, _, _],
       sparkFormat: String,
       parseString: Boolean,
-      inputFormat: Option[String] = None): String = {
+      inputFormat: Option[String] = None,
+      allowLegacyFormattingOnlyFormats: Boolean = false): String = {
     val formatToConvert = inputFormat.getOrElse(sparkFormat)
+    val legacyCompatibleFormats = if (allowLegacyFormattingOnlyFormats) {
+      GpuToTimestamp.LEGACY_FORMATTING_COMPATIBLE_FORMATS
+    } else {
+      GpuToTimestamp.LEGACY_COMPATIBLE_FORMATS
+    }
     var strfFormat: String = null
     if (GpuOverrides.getTimeParserPolicy == LegacyTimeParserPolicy) {
       try {
@@ -227,7 +235,7 @@ object DateUtils {
         // the format contains unsupported characters or words
         strfFormat = toStrf(formatToConvert, parseString)
         // format parsed ok but we have no 100% compatible formats in LEGACY mode
-        if (GpuToTimestamp.LEGACY_COMPATIBLE_FORMATS.contains(formatToConvert)) {
+        if (legacyCompatibleFormats.contains(formatToConvert)) {
           // LEGACY support has a number of issues that mean we cannot guarantee
           // compatibility with CPU
           // - we can only support 4 digit years but Spark supports a wider range

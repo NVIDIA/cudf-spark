@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -41,3 +41,47 @@ trait RapidsShuffleHeartbeatHandler {
   /** Called when a new peer is seen via heartbeats */
   def addPeer(peer: BlockManagerId): Unit
 }
+
+// ============================================================================
+// Shuffle Cleanup RPC Messages
+// ============================================================================
+
+/**
+ * Statistics for a single shuffle cleanup operation.
+ *
+ * @param shuffleId the shuffle ID that was cleaned up
+ * @param bytesFromMemory bytes that were read from memory (never spilled to disk)
+ * @param bytesFromDisk bytes that were read from disk (spilled at some point)
+ * @param numExpansions number of buffer expansions that occurred
+ * @param numSpills number of buffers that were spilled to disk
+ * @param numForcedFileOnly number of buffers that used forced file-only mode
+ */
+case class ShuffleCleanupStats(
+    shuffleId: Int,
+    bytesFromMemory: Long,
+    bytesFromDisk: Long,
+    numExpansions: Int = 0,
+    numSpills: Int = 0,
+    numForcedFileOnly: Int = 0) extends Serializable
+
+/**
+ * Executor polls driver for shuffles that need to be cleaned up.
+ *
+ * @param executorId identifier for the executor
+ */
+case class RapidsShuffleCleanupPollMsg(executorId: String)
+
+/**
+ * Driver response with shuffle IDs that need cleanup.
+ *
+ * @param shuffleIds list of shuffle IDs to clean up
+ */
+case class RapidsShuffleCleanupResponseMsg(shuffleIds: Array[Int])
+
+/**
+ * Executor reports cleanup statistics to driver.
+ *
+ * @param executorId identifier for the executor
+ * @param stats cleanup statistics for each shuffle
+ */
+case class RapidsShuffleCleanupStatsMsg(executorId: String, stats: Array[ShuffleCleanupStats])

@@ -20,7 +20,7 @@
 
 set -e
 
-spark_version=${1:-"3.2.0"}
+spark_version=${1:-"3.3.0"}
 scala_version=${2:-"2.12"}
 # Split spark version into base version (e.g. 3.3.0) and suffix (e.g. SNAPSHOT)
 PRE_IFS=$IFS

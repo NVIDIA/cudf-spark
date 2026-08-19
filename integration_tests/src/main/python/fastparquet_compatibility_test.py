@@ -1,4 +1,4 @@
-# Copyright (c) 2023-2025, NVIDIA CORPORATION.
+# Copyright (c) 2023-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,7 +17,8 @@ import pytest
 from asserts import assert_gpu_and_cpu_are_equal_collect
 from data_gen import *
 from fastparquet_utils import get_fastparquet_result_canonicalizer
-from spark_session import is_databricks_runtime, is_databricks133_or_later, spark_version, with_cpu_session, with_gpu_session
+from parquet_test_utils import copy_from_local
+from spark_session import is_databricks_runtime, spark_version, with_cpu_session, with_gpu_session
 
 
 def fastparquet_unavailable():
@@ -94,9 +95,6 @@ def read_parquet(data_path, local_data_path):
     return read_with_fastparquet_or_plugin
 
 
-@pytest.mark.skipif(condition=is_databricks_runtime() and not is_databricks133_or_later(),
-                    reason="Fastparquet is incompatible with Databricks versions < 13.3. "
-                           "(https://github.com/NVIDIA/spark-rapids/issues/13197)")
 @pytest.mark.skipif(condition=fastparquet_unavailable(),
                     reason="fastparquet is required for testing fastparquet compatibility")
 @pytest.mark.skipif(condition=spark_version() < "3.4.0",
@@ -174,9 +172,6 @@ def test_reading_file_written_by_spark_cpu(data_gen, spark_tmp_path):
         delete_local_directory(local_base_path)
 
 
-@pytest.mark.skipif(condition=is_databricks_runtime() and not is_databricks133_or_later(),
-                    reason="Fastparquet is incompatible with Databricks versions < 13.3. "
-                           "(https://github.com/NVIDIA/spark-rapids/issues/13197)")
 @pytest.mark.skipif(condition=fastparquet_unavailable(),
                     reason="fastparquet is required for testing fastparquet compatibility")
 @pytest.mark.skipif(condition=spark_version() < "3.4.0",
@@ -232,35 +227,27 @@ def test_reading_file_written_with_gpu(spark_tmp_path, column_gen):
     gen = StructGen([('a', column_gen),
                      ('part', IntegerGen(nullable=False))
                      ], nullable=False)
+
+    # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
+    conf = copy_and_update(rebase_write_corrected_conf, {'spark.sql.adaptive.enabled': 'false'})
+
     # Write data out with Spark RAPIDS plugin.
     with_gpu_session(
         lambda spark: gen_df(spark, gen, 2048).repartition(1).write.mode('overwrite').parquet(data_path),
-        conf=rebase_write_corrected_conf
+        conf=conf
     )
 
     try:
         # For now, this compares the results of reading back the GPU-written data, via fastparquet and GPU.
         assert_gpu_and_cpu_are_equal_collect(read_parquet(data_path=data_path, local_data_path=local_data_path),
-                                             conf=rebase_write_corrected_conf)
+                                             conf=conf,
+                                             result_canonicalize_func_before_compare=
+                                             get_fastparquet_result_canonicalizer())
     finally:
         # Clean up local copy of data.
         delete_local_directory(local_base_path)
 
 
-def copy_from_local(spark, local_source, hdfs_target):
-    """
-    Copies contents of local_source to hdfs_target.
-    """
-    sc = spark.sparkContext
-    Path = sc._jvm.org.apache.hadoop.fs.Path
-    config = sc._jsc.hadoopConfiguration()
-    fs = sc._jvm.org.apache.hadoop.fs.FileSystem.get(config)
-    fs.copyFromLocalFile(Path(local_source), Path(hdfs_target))
-
-
-@pytest.mark.skipif(condition=is_databricks_runtime() and not is_databricks133_or_later(),
-                    reason="Fastparquet is incompatible with Databricks versions < 13.3. "
-                           "(https://github.com/NVIDIA/spark-rapids/issues/13197)")
 @pytest.mark.skipif(condition=fastparquet_unavailable(),
                     reason="fastparquet is required for testing fastparquet compatibility")
 @pytest.mark.parametrize('column_gen', [
@@ -354,9 +341,6 @@ def test_reading_file_written_with_fastparquet(column_gen, spark_tmp_path):
         rebase_write_corrected_conf)
 
 
-@pytest.mark.skipif(condition=is_databricks_runtime() and not is_databricks133_or_later(),
-                    reason="Fastparquet is incompatible with Databricks versions < 13.3. "
-                           "(https://github.com/NVIDIA/spark-rapids/issues/13197)")
 @pytest.mark.skipif(condition=fastparquet_unavailable(),
                     reason="fastparquet is required for testing fastparquet compatibility")
 @pytest.mark.parametrize('column_gen, time_format', [

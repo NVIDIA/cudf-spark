@@ -1,8 +1,8 @@
 <!--
 
-Thank you for contributing to RAPIDS Accelerator for Apache Spark!
+Thank you for contributing to the NVIDIA cuDF plugin for Apache Spark!
 
-Please read https://github.com/NVIDIA/spark-rapids/blob/HEAD/CONTRIBUTING.md#creating-a-pull-request before making this PR.
+Please read https://github.com/NVIDIA/cudf-spark/blob/HEAD/CONTRIBUTING.md#creating-a-pull-request before making this PR.
 
 The following are the guidelines to help the review process go smoothly. Please read them carefully and fill out relevant information as much as possible.
 
@@ -28,15 +28,21 @@ Please provide a description of the changes proposed in this pull request. Here 
 
 ### Checklists
 
-<!-- Check the items below by putting "x" in the brackets for what is done. Not all of these items may be relevant to every PR. -->
+<!-- 
+For each category, check the one item that applies by putting "x" in the brackets.
+-->
 
-This PR has:
+Documentation
+- [ ] Updated for new or modified user-facing features or behaviors
+- [ ] No user-facing change
 
-- [ ] added documentation for new or modified features or behaviors.
-- [ ] updated the license in the source code files when it is required.
-- [ ] added new tests or modified existing tests to cover new code paths.
-      (Please explain in the PR description how the new code paths are tested, such as names of the new/existing tests that cover them.)
+Testing
+- [ ] Added or modified tests to cover new code paths
+- [ ] Covered by existing tests
+      (Please provide the names of the existing tests in the PR description.)
+- [ ] Not required
 
-Please select one of the following options:
-- [ ] Performance testing has been performed and its results are added in the PR description.
-- [ ] An issue is filed for performance testing and its link is added in the PR description. (Select this if performance testing will not be completed before the PR is submitted.)
+Performance
+- [ ] Tests ran and results are added in the PR description
+- [ ] Issue filed with a link in the PR description
+- [ ] Not required

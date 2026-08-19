@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,6 @@
 
 package com.nvidia.spark.rapids
 
-import ai.rapids.cudf.{NvtxColor, NvtxRange}
 import com.nvidia.spark.rapids.shims.ShimUnaryExecNode
 
 import org.apache.spark.TaskContext
@@ -42,13 +41,13 @@ case class GpuBringBackToHost(child: SparkPlan) extends ShimUnaryExecNode with G
   override protected def internalDoExecuteColumnar(): RDD[ColumnarBatch] = {
     // Both GPU and CPU code expects this to close the incoming batch.
     AutoCloseColumnBatchIterator.map[ColumnarBatch](child.executeColumnar(), b => {
-      val range = new NvtxRange("BringBackToHost", NvtxColor.RED)
+      NvtxRegistry.BRING_BACK_TO_HOST.push()
       try {
         val hostColumns = (0 until b.numCols()).map(
           i => b.column(i).asInstanceOf[GpuColumnVector].copyToHost())
         new ColumnarBatch(hostColumns.toArray, b.numRows())
       } finally {
-        range.close()
+        NvtxRegistry.BRING_BACK_TO_HOST.pop()
         b.close()
         // Leaving the GPU for a while
         GpuSemaphore.releaseIfNecessary(TaskContext.get())

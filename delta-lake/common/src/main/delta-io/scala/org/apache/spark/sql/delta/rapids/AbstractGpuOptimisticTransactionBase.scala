@@ -64,7 +64,8 @@ abstract class AbstractGpuOptimisticTransactionBase(
         GpuDeltaInvariantCheckerExec(gpuPlan, gpuInvariants)
       case None =>
         val cpuPlan = convertToCpu(plan)
-        DeltaInvariantCheckerExec(cpuPlan, constraints)
+        // Delegate to per-version shim because the CPU exec constructor differs across versions
+        ShimDeltaInvariantCheckerExec(cpuPlan, constraints, cpuInvariants)
     }
   }
 

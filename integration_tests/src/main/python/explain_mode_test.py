@@ -1,4 +1,4 @@
-# Copyright (c) 2022, NVIDIA CORPORATION.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -42,7 +42,9 @@ all_gen = [StringGen(), ByteGen()]
 @pytest.mark.parametrize('data_gen', all_gen, ids=idfn)
 @pytest.mark.parametrize('join_type', all_join_types, ids=idfn)
 def test_explain_only_sortmerge_join(data_gen, join_type):
+    # Disable AQE as it can change the plan and use a different join algorithm than the sort merge join.
+    conf=copy_and_update(_explain_mode_conf, {'spark.sql.adaptive.enabled': 'false'})
     def do_join(spark):
         left, right = create_df(spark, data_gen, 500, 500)
         return left.join(right, left.a == right.r_a, join_type)
-    assert_gpu_fallback_collect(do_join, 'SortMergeJoinExec', conf=_explain_mode_conf)
+    assert_gpu_fallback_collect(do_join, 'SortMergeJoinExec', conf=conf)

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -442,5 +442,121 @@ class WindowFunctionSuite extends SparkQueryCompareTestSuite {
           |""".stripMargin)
       // scalastyle:on line.size.limit
     }
+  }
+
+  testSparkResultsAreEqual(
+    "[Window] [ROWS] mixed running and bounded windows preserve pre-projected inputs",
+    spark => {
+      import spark.implicits._
+
+      spark.range(0, 100).select(
+        $"id".cast("int").as("id"),
+        ($"id" % 5).cast("int").as("grp"),
+        ($"id" % 7).cast("int").as("cat"),
+        (($"id" % 17).cast("double") + 0.5d).as("val_dbl"),
+        ($"id" * 13L).as("val_long"))
+    },
+    conf = new SparkConf().set("spark.sql.adaptive.enabled", "false"),
+    existClasses = "GpuRunningWindowExec,GpuBatchedBoundedWindowExec") {
+    (df: DataFrame) =>
+      df.createOrReplaceTempView("mixed_window_bug")
+      // scalastyle:off line.size.limit
+      df.sparkSession.sql(
+        """
+          |SELECT id, grp, cat, val_dbl, val_long,
+          |  SUM(val_dbl + cat) OVER (
+          |    PARTITION BY grp ORDER BY id + cat
+          |    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_sum,
+          |  SUM(val_dbl + cat) OVER (
+          |    PARTITION BY grp ORDER BY id + cat
+          |    ROWS BETWEEN 5 PRECEDING AND 5 FOLLOWING) AS bounded_sum,
+          |  AVG(val_dbl + cat) OVER (
+          |    PARTITION BY grp ORDER BY id + cat
+          |    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_avg,
+          |  AVG(val_dbl + cat) OVER (
+          |    PARTITION BY grp ORDER BY id + cat
+          |    ROWS BETWEEN 3 PRECEDING AND 3 FOLLOWING) AS bounded_avg,
+          |  RANK() OVER (PARTITION BY grp ORDER BY val_dbl + cat) AS rnk,
+          |  DENSE_RANK() OVER (PARTITION BY grp ORDER BY val_dbl + cat) AS d_rnk
+          |FROM mixed_window_bug
+          |ORDER BY id
+          |""".stripMargin)
+      // scalastyle:on line.size.limit
+  }
+
+  testSparkResultsAreEqual(
+    "[Window] [ROWS] mixed unbounded agg and bounded windows preserve pre-projected inputs",
+    spark => {
+      import spark.implicits._
+
+      spark.range(0, 40).select(
+        $"id".cast("int").as("id"),
+        ($"id" % 4).cast("int").as("grp"),
+        ($"id" % 7).cast("int").as("cat"),
+        (($"id" % 17).cast("double") + 0.5d).as("val_dbl"),
+        ($"id" * 13L).as("val_long"))
+    },
+    conf = new SparkConf()
+      .set("spark.sql.adaptive.enabled", "false")
+      .set("spark.rapids.sql.window.collectSet.enabled", "true")
+      .set("spark.rapids.sql.window.unboundedAgg.enabled", "true"),
+    existClasses = "GpuUnboundedToUnboundedAggWindowExec,GpuBatchedBoundedWindowExec") {
+    (df: DataFrame) =>
+      df.createOrReplaceTempView("mixed_unbounded_window_bug")
+      // scalastyle:off line.size.limit
+      df.sparkSession.sql(
+        """
+          |SELECT id, grp, cat, val_dbl,
+          |  SORT_ARRAY(COLLECT_SET(cat + 1) OVER (
+          |    PARTITION BY grp ORDER BY id
+          |    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)) AS full_collect,
+          |  SUM(val_dbl + cat) OVER (
+          |    PARTITION BY grp ORDER BY id + cat
+          |    ROWS BETWEEN 2 PRECEDING AND 2 FOLLOWING) AS bounded_sum,
+          |  AVG(val_dbl + cat) OVER (
+          |    PARTITION BY grp ORDER BY id + cat
+          |    ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS bounded_avg
+          |FROM mixed_unbounded_window_bug
+          |ORDER BY id
+          |""".stripMargin)
+      // scalastyle:on line.size.limit
+  }
+
+  testSparkResultsAreEqual(
+    "[Window] [ROWS] mixed double-pass and bounded windows preserve pre-projected inputs",
+    spark => {
+      import spark.implicits._
+
+      spark.range(0, 100).select(
+        $"id".cast("int").as("id"),
+        ($"id" % 5).cast("int").as("grp"),
+        ($"id" % 7).cast("int").as("cat"),
+        (($"id" % 17).cast("double") + 0.5d).as("val_dbl"),
+        ($"id" * 13L).as("val_long"))
+    },
+    conf = new SparkConf().set("spark.sql.adaptive.enabled", "false"),
+    existClasses = "GpuCachedDoublePassWindowExec,GpuBatchedBoundedWindowExec") {
+    (df: DataFrame) =>
+      df.createOrReplaceTempView("mixed_double_pass_window_bug")
+      // scalastyle:off line.size.limit
+      df.sparkSession.sql(
+        """
+          |SELECT id, grp, cat, val_dbl, val_long,
+          |  MIN(val_long) OVER (
+          |    PARTITION BY grp ORDER BY id
+          |    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS full_min,
+          |  MAX(val_long) OVER (
+          |    PARTITION BY grp ORDER BY id
+          |    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS full_max,
+          |  COUNT(val_dbl) OVER (
+          |    PARTITION BY grp ORDER BY id
+          |    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS full_count,
+          |  SUM(val_dbl + cat) OVER (
+          |    PARTITION BY grp ORDER BY id + cat
+          |    ROWS BETWEEN 4 PRECEDING AND 4 FOLLOWING) AS bounded_sum
+          |FROM mixed_double_pass_window_bug
+          |ORDER BY id
+          |""".stripMargin)
+      // scalastyle:on line.size.limit
   }
 }

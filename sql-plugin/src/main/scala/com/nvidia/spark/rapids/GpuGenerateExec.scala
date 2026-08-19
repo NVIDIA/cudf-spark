@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids
 
 import scala.collection.mutable.ArrayBuffer
 
-import ai.rapids.cudf.{ColumnVector, DType, NvtxColor, NvtxRange, OrderByArg, Scalar, Table}
+import ai.rapids.cudf.{ColumnVector, DType, OrderByArg, Scalar, Table}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuOverrides.extractLit
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingArray
@@ -33,6 +33,7 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeSet, Expre
 import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.execution.{GenerateExec, SparkPlan}
 import org.apache.spark.sql.rapids.GpuCreateArray
+import org.apache.spark.sql.rapids.execution.GpuSubPartitionHashJoin.safeIteratorFromSeq
 import org.apache.spark.sql.types.{ArrayType, DataType, IntegerType, MapType, StructField, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -108,7 +109,7 @@ class GpuStackMeta(
   override val childExprs: Seq[BaseExprMeta[_]] = stack.children
       .map(GpuOverrides.wrapExpr(_, conf, Some(this)))
   
-  override def convertToGpu(): GpuExpression = {
+  override def convertToGpuImpl(): GpuExpression = {
     // There is no need to implement convertToGpu() here, because GpuGenerateExec will handle
     // stack logic in terms of GpuExpandExec, no convertToGpu() will be called during the process
     throw new UnsupportedOperationException(s"Should not be here: $this")
@@ -134,7 +135,7 @@ abstract class ReplicateRowsExprMeta[INPUT <: ReplicateRows](
     rule: DataFromReplacementRule)
     extends GeneratorExprMeta[INPUT](gen, conf, parent, rule) {
 
-  override final def convertToGpu(): GpuExpression =
+  override final def convertToGpuImpl(): GpuExpression =
     convertToGpu(childExprs.map(_.convertToGpu()))
 
   def convertToGpu(childExprs: Seq[Expression]): GpuExpression
@@ -333,10 +334,7 @@ abstract class GpuExplodeBase extends GpuUnevaluableUnaryExpression with GpuGene
       if (outer) {
         // for outer, empty arrays and null arrays will produce a row
         withResource(GpuScalar.from(1, IntegerType)) { one =>
-          val noNulls = withResource(arrayLengths.isNotNull) { isLhsNotNull =>
-            isLhsNotNull.ifElse(arrayLengths, one)
-          }
-          withResource(noNulls) { _ =>
+          withResource(arrayLengths.replaceNulls(one)) { noNulls =>
             withResource(noNulls.greaterOrEqualTo(one)) { isGeOne =>
               isGeOne.ifElse(noNulls, one)
             }
@@ -352,7 +350,7 @@ abstract class GpuExplodeBase extends GpuUnevaluableUnaryExpression with GpuGene
   }
 
   private def getRowByteCount(column: Seq[ColumnVector]): ColumnVector = {
-    withResource(new NvtxRange("getRowByteCount", NvtxColor.GREEN)) { _ =>
+    NvtxRegistry.GENERATE_GET_ROW_BYTE_COUNT {
       val bits = withResource(new Table(column: _*)) { tbl =>
         tbl.rowBitCount()
       }
@@ -402,9 +400,15 @@ abstract class GpuExplodeBase extends GpuUnevaluableUnaryExpression with GpuGene
       val numSplitsForTargetSize =
         math.min(inputRows,
           math.ceil(estimatedOutputSizeBytes / targetSizeBytes).toInt)
-      GpuBatchUtils.generateSplitIndices(inputRows, numSplitsForTargetSize).distinct
+      if (numSplitsForTargetSize == 0) {
+        // estimatedOutputSizeBytes is 0 when every exploding row is empty/null,
+        // so no further splitting is needed. Matches the else-branch guard below.
+        Array.empty[Int]
+      } else {
+        GpuBatchUtils.generateSplitIndices(inputRows, numSplitsForTargetSize).distinct
+      }
     } else {
-      withResource(new NvtxRange("EstimateRepetition", NvtxColor.BLUE)) { _ =>
+      NvtxRegistry.GENERATE_ESTIMATE_REPETITION {
         // get the # of repetitions per row of the input for this explode
         val perRowRepetition = getPerRowRepetition(explodingColumn, outer)
         val repeatingColumns = vectors.slice(0, generatorOffset)
@@ -796,7 +800,7 @@ abstract class GpuExplodeBase extends GpuUnevaluableUnaryExpression with GpuGene
       }
 
       override def next(): ColumnarBatch = {
-        withResource(new NvtxWithMetrics("GpuGenerateExec", NvtxColor.PURPLE, opTime)) { _ =>
+        NvtxIdWithMetrics(NvtxRegistry.GPU_GENERATE_EXEC, opTime) {
           val boundExprs = if (position) {
             boundOthersProjectList ++ Seq(GpuLiteral.create(indexIntoData, IntegerType),
               boundLazyProjectList(indexIntoData))
@@ -834,7 +838,11 @@ case class GpuGenerateExec(
   import GpuMetric._
 
   override lazy val additionalMetrics: Map[String, GpuMetric] = Map(
-    OP_TIME -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_OP_TIME)
+    OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY),
+    CPU_BRIDGE_PROCESSING_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
+      DESCRIPTION_CPU_BRIDGE_PROCESSING_TIME),
+    CPU_BRIDGE_WAIT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
+      DESCRIPTION_CPU_BRIDGE_WAIT_TIME)
   )
 
   override def output: Seq[Attribute] = requiredChildOutput ++ generatorOutput
@@ -852,16 +860,17 @@ case class GpuGenerateExec(
   override def internalDoExecuteColumnar(): RDD[ColumnarBatch] = {
     val numOutputRows = gpuLongMetric(NUM_OUTPUT_ROWS)
     val numOutputBatches = gpuLongMetric(NUM_OUTPUT_BATCHES)
-    val opTime = gpuLongMetric(OP_TIME)
+    val opTime = gpuLongMetric(OP_TIME_LEGACY)
+    val cbTargetSize = new RapidsConf(conf).gpuTargetBatchSizeBytes
 
     generator.fixedLenLazyExpressions match {
       // If lazy expressions can be extracted from generator,
       // perform optimized lazy generation via `generator.fixedLenLazyArrayGenerate`
       case expressions if expressions.nonEmpty =>
         val boundLazyProjectList =
-          GpuBindReferences.bindGpuReferences(expressions, child.output).toArray
+          GpuBindReferences.bindGpuReferences(expressions, child.output, allMetrics).toArray
         val boundOthersProjectList =
-          GpuBindReferences.bindGpuReferences(requiredChildOutput, child.output).toArray
+          GpuBindReferences.bindGpuReferences(requiredChildOutput, child.output, allMetrics).toArray
         val outputSchema = output.map(_.dataType).toArray
 
         child.executeColumnar().mapPartitions { iter =>
@@ -878,12 +887,12 @@ case class GpuGenerateExec(
       // Otherwise, perform common generation via `generator.generate`
       case _ =>
         val genProjectList: Seq[GpuExpression] =
-          GpuBindReferences.bindGpuReferences(generator.children, child.output)
+          GpuBindReferences.bindGpuReferences(generator.children, child.output, allMetrics)
         val othersProjectList: Seq[GpuExpression] =
-          GpuBindReferences.bindGpuReferences(requiredChildOutput, child.output)
+          GpuBindReferences.bindGpuReferences(requiredChildOutput, child.output, allMetrics)
 
         child.executeColumnar().flatMap { inputFromChild =>
-          doGenerateAndClose(inputFromChild, genProjectList, othersProjectList,
+          doGenerateAndClose(inputFromChild, genProjectList, othersProjectList, cbTargetSize,
             numOutputRows, numOutputBatches, opTime)
         }
     }
@@ -892,33 +901,44 @@ case class GpuGenerateExec(
   private def doGenerateAndClose(input: ColumnarBatch,
       genProjectList: Seq[GpuExpression],
       othersProjectList: Seq[GpuExpression],
+      batchTargetSize: Long,
       numOutputRows: GpuMetric,
       numOutputBatches: GpuMetric,
       opTime: GpuMetric): Iterator[ColumnarBatch] = {
-    val splits = withResource(new NvtxWithMetrics("GpuGenerate project split",
-      NvtxColor.PURPLE, opTime)) { _ =>
-      // Project input columns, setting other columns ahead of generator's input columns.
-      // With the projected batches and an offset, generators can extract input columns or
-      // other required columns separately.
-      val projectedInput = GpuProjectExec.projectAndCloseWithRetrySingleBatch(
+    // Project input columns, setting other columns ahead of generator's input columns.
+    // With the projected batches and an offset, generators can extract input columns or
+    // other required columns separately.
+    val projectedInput = NvtxIdWithMetrics(NvtxRegistry.GPU_GENERATE_PROJECT_SPLIT, opTime) {
+      GpuProjectExec.projectAndCloseWithRetrySingleBatch(
         SpillableColumnarBatch(input, SpillPriorities.ACTIVE_ON_DECK_PRIORITY),
         othersProjectList ++ genProjectList)
-      getSplits(projectedInput, othersProjectList, new RapidsConf(conf).gpuTargetBatchSizeBytes)
     }
+    val splits = GpuGenerateUtils.getSplitsWithRetryAndClose(projectedInput, generator,
+      othersProjectList.length, outer, batchTargetSize, opTime)
     new GpuGenerateIterator(splits, generator, othersProjectList.length, outer,
       numOutputRows, numOutputBatches, opTime)
   }
+}
 
-  // Split up the input batch and call generate on each split.
-  private def getSplits(cb: ColumnarBatch,
-      othersProjectList: Seq[GpuExpression],
-      targetSize: Long): Seq[SpillableColumnarBatch] = {
-    withResource(cb) { _ =>
-      // compute split indices of input batch
-      val splitIndices = generator.inputSplitIndices(
-      cb, othersProjectList.length, outer, targetSize)
-      // split up input batch with indices
-      makeSplits(cb, splitIndices)
+object GpuGenerateUtils {
+  /**
+   * Split up the input batch to call generate on each split.
+   * (Move it out of the GpuGenerateExec class for unit tests)
+   */
+  private[rapids] def getSplitsWithRetryAndClose(cb: ColumnarBatch, generator: GpuGenerator,
+      generatorOffset: Int, outer: Boolean, targetSize: Long,
+      opTime: GpuMetric): Iterator[Array[SpillableColumnarBatch]] = {
+    val spillableBatch = SpillableColumnarBatch(cb, SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+    withRetry(spillableBatch, splitSpillableInHalfByRows) { attempt =>
+      NvtxIdWithMetrics(NvtxRegistry.GPU_GENERATE_PROJECT_SPLIT, opTime) {
+        // compute split indices of input batch
+        withResource(attempt.getColumnarBatch()) { attemptCB =>
+          val splitIndices = generator.inputSplitIndices(attemptCB,
+            generatorOffset, outer, targetSize)
+          // split up input batch with indices
+          makeSplits(attemptCB, splitIndices)
+        }
+      }
     }
   }
 
@@ -958,25 +978,30 @@ class BatchToGenerate(val fixUpOffset: Long, val spillable: SpillableColumnarBat
 }
 
 class GpuGenerateIterator(
-    inputs: Seq[SpillableColumnarBatch],
+    inputs: Iterator[Array[SpillableColumnarBatch]],
     generator: GpuGenerator,
     generatorOffset: Int,
     outer: Boolean,
     numOutputRows: GpuMetric,
     numOutputBatches: GpuMetric,
-    opTime: GpuMetric) extends Iterator[ColumnarBatch] with TaskAutoCloseableResource {
-  // Need to ensure these are closed in case of failure.
-  inputs.foreach(scb => use(scb))
+    opTime: GpuMetric) extends Iterator[ColumnarBatch] {
+  private var generateIter: Iterator[ColumnarBatch] = Iterator.empty
 
-  // apply generation on each (sub)batch
-  private val generateIter = {
-    generator.generate(inputs.iterator, generatorOffset, outer)
+  override def hasNext: Boolean = generateIter.hasNext || {
+    // generateIter is empty, try to get the next bundle of batches
+    if (inputs.hasNext) {
+      val scbs = inputs.next()
+      generateIter = generator.generate(
+        safeIteratorFromSeq(scbs.toSeq), generatorOffset, outer)
+    }
+    generateIter.hasNext
   }
 
-  override def hasNext: Boolean = generateIter.hasNext
-
   override def next(): ColumnarBatch = {
-    withResource(new NvtxWithMetrics("GpuGenerateIterator", NvtxColor.PURPLE, opTime)) { _ =>
+    if (!this.hasNext) {
+      throw new NoSuchElementException("no more batches")
+    }
+    NvtxIdWithMetrics(NvtxRegistry.GPU_GENERATE_ITERATOR, opTime) {
       val cb = generateIter.next()
       numOutputBatches += 1
       numOutputRows += cb.numRows()

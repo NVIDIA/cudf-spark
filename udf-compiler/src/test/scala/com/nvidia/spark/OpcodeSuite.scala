@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -74,7 +74,7 @@ class OpcodeSuite extends AnyFunSuite {
     val myudf: Boolean => Boolean = { x => !x }
     val u = makeUdf(myudf)
     val dataset = List(true, false, true, false).toDS().repartition(1)
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val equiv = dataset.withColumn("new", not(col("value")))
     checkEquiv(result, equiv)
   }
@@ -125,11 +125,11 @@ class OpcodeSuite extends AnyFunSuite {
     }
     val u = makeUdf(myudf)
     val dataset = List(2.0f).toDS()
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val ref = dataset.withColumn("new", lit(27.300001f))
     checkEquiv(result, ref)
     val dataset2 = List(4.0f).toDS()
-    val result2 = dataset2.withColumn("new", u('value))
+    val result2 = dataset2.withColumn("new", u(col("value")))
     val ref2 = dataset2.withColumn("new", lit(6.3f))
     checkEquiv(result2, ref2)
   }
@@ -146,11 +146,11 @@ class OpcodeSuite extends AnyFunSuite {
     }
     val u = makeUdf(myudf)
     val dataset = List(1.0).toDS()
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val ref = dataset.withColumn("new", lit(4.5))
     checkEquiv(result, ref)
     val dataset2 = List(2.0).toDS()
-    val result2 = dataset2.withColumn("new", u('value))
+    val result2 = dataset2.withColumn("new", u(col("value")))
     val ref2 = dataset2.withColumn("new", lit(27.2))
     checkEquiv(result2, ref2)
   }
@@ -167,11 +167,11 @@ class OpcodeSuite extends AnyFunSuite {
     }
     val u = makeUdf(myudf)
     val dataset = List(2).toDS()
-    val result = dataset.withColumn("new",u('value))
+    val result = dataset.withColumn("new",u(col("value")))
     val ref = dataset.withColumn("new", lit(15))
     checkEquiv(result, ref)
     val dataset2 = List(8).toDS()
-    val result2 = dataset2.withColumn("new", u('value))
+    val result2 = dataset2.withColumn("new", u(col("value")))
     val ref2 = dataset2.withColumn("new", lit(25))
     checkEquiv(result2, ref2)
   }
@@ -188,11 +188,11 @@ class OpcodeSuite extends AnyFunSuite {
     }
     val u = makeUdf(myudf)
     val dataset = List(2L).toDS()
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val ref = dataset.withColumn("new", lit(15L))
     checkEquiv(result, ref)
     val dataset2 = List(8L).toDS()
-    val result2 = dataset2.withColumn("new", u('value))
+    val result2 = dataset2.withColumn("new", u(col("value")))
     val ref2 = dataset2.withColumn("new", lit(25L))
     checkEquiv(result2, ref2)
   }
@@ -460,7 +460,8 @@ class OpcodeSuite extends AnyFunSuite {
     val myudf4: Double => Double = x => { math.asin(x) }
     val u4 = makeUdf(myudf4)
     val dataset = List(1.0,2.0,3.0).toDS()
-    val result = dataset.withColumn("new", u1('value)+u2('value)+u3('value)+u4('value))
+    val result = dataset.withColumn("new",
+      u1(col("value")) + u2(col("value")) + u3(col("value")) + u4(col("value")))
     val ref = dataset.withColumn("new",
       cos(col("value"))+sin(col("value"))+acos(col("value"))+asin(col("value")))
     checkEquiv(result, ref)
@@ -476,7 +477,8 @@ class OpcodeSuite extends AnyFunSuite {
     val myudf4: Double => Double = x => { math.tanh(x) }
     val u4 = makeUdf(myudf4)
     val dataset = List(1.0,2.0,3.0).toDS()
-    val result = dataset.withColumn("new", u1('value)+u2('value)+u3('value)+u4('value))
+    val result = dataset.withColumn("new",
+      u1(col("value")) + u2(col("value")) + u3(col("value")) + u4(col("value")))
     val ref = dataset.withColumn("new",
       tan(col("value")) + atan(col("value")) + cosh(col("value")) + tanh(col("value")))
     checkEquiv(result, ref)
@@ -490,7 +492,7 @@ class OpcodeSuite extends AnyFunSuite {
     val myudf3: Double => Double = x => { math.floor(x) }
     val u3 = makeUdf(myudf3)
     val dataset = List(-0.5,0.5).toDS()
-    val result = dataset.withColumn("new", u2(u1('value))+u3(u1('value)))
+    val result = dataset.withColumn("new", u2(u1(col("value")))+u3(u1(col("value"))))
     val ref = dataset.withColumn("new", ceil(abs(col("value"))) + floor(abs(col("value"))))
     checkEquiv(result, ref)
   }
@@ -505,7 +507,8 @@ class OpcodeSuite extends AnyFunSuite {
     val myudf4: Double => Double = x => { math.sqrt(x) }
     val u4 = makeUdf(myudf4)
     val dataset = List(2.0,5.0).toDS()
-    val result = dataset.withColumn("new", u1('value)+u2('value)+u3('value)+u4('value))
+    val result = dataset.withColumn("new",
+      u1(col("value")) + u2(col("value")) + u3(col("value")) + u4(col("value")))
     val ref = dataset.withColumn("new",
       exp(col("value"))+logalias(col("value"))+log10(col("value"))+sqrt(col("value")))
     checkEquiv(result, ref)
@@ -899,7 +902,7 @@ class OpcodeSuite extends AnyFunSuite {
     }
     val u = makeUdf(myudf)
     val dataset = List(2).toDS()
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val ref = dataset.withColumn("new", lit(18))
     checkEquiv(result, ref)
   }
@@ -908,7 +911,7 @@ class OpcodeSuite extends AnyFunSuite {
     val myudf1: Double => Double = x => { math.log1p(x) }
     val u1 = makeUdf(myudf1)
     val dataset = List(2.0,5.0).toDS()
-    val result = dataset.withColumn("new", u1('value))
+    val result = dataset.withColumn("new", u1(col("value")))
     val ref = dataset.withColumn("new", logalias(col("value")+1.0))
     checkEquivNotCompiled(result, ref)
   }
@@ -926,7 +929,7 @@ class OpcodeSuite extends AnyFunSuite {
 
     val u1 = makeUdf(myudf1)
     val dataset = List(1, 5, 3, 7).toDS()
-    val result = dataset.withColumn("new", u1('value))
+    val result = dataset.withColumn("new", u1(col("value")))
     val ref = dataset.withColumn("new", col("value"))
     checkEquivNotCompiled(result, ref)
   }
@@ -943,11 +946,11 @@ class OpcodeSuite extends AnyFunSuite {
     }
     val u = makeUdf(myudf)
     val dataset = List(1.0).toDS()
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val ref = dataset.withColumn("new", lit(7.2))
     checkEquiv(result, ref)
     val dataset2 = List(3.0).toDS()
-    val result2 = dataset2.withColumn("new", u('value))
+    val result2 = dataset2.withColumn("new", u(col("value")))
     val ref2 = dataset2.withColumn("new", lit(8.2))
     checkEquiv(result2, ref2)
   }
@@ -964,11 +967,11 @@ class OpcodeSuite extends AnyFunSuite {
     }
     val u = makeUdf(myudf)
     val dataset = List(1.0).toDS()
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val ref = dataset.withColumn("new", lit(7.2))
     checkEquiv(result, ref)
     val dataset2 = List(3.0).toDS()
-    val result2 = dataset2.withColumn("new", u('value))
+    val result2 = dataset2.withColumn("new", u(col("value")))
     val ref2 = dataset2.withColumn("new", lit(8.2))
     checkEquiv(result2, ref2)
   }
@@ -985,11 +988,11 @@ class OpcodeSuite extends AnyFunSuite {
     }
     val u = makeUdf(myudf)
     val dataset = List(1.0).toDS()
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val ref = dataset.withColumn("new", lit(8.2))
     checkEquiv(result, ref)
     val dataset2 = List(4.0).toDS()
-    val result2 = dataset2.withColumn("new", u('value))
+    val result2 = dataset2.withColumn("new", u(col("value")))
     val ref2 = dataset2.withColumn("new", lit(7.2))
     checkEquiv(result2, ref2)
   }
@@ -1006,11 +1009,11 @@ class OpcodeSuite extends AnyFunSuite {
     }
     val u = makeUdf(myudf)
     val dataset = List(1).toDS()
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val ref = dataset.withColumn("new", lit(9))
     checkEquiv(result, ref)
     val dataset2 = List(2).toDS()
-    val result2 = dataset2.withColumn("new", u('value))
+    val result2 = dataset2.withColumn("new", u(col("value")))
     val ref2 = dataset2.withColumn("new", lit(7))
     checkEquiv(result2, ref2)
   }
@@ -1027,11 +1030,11 @@ class OpcodeSuite extends AnyFunSuite {
     }
     val u = makeUdf(myudf)
     val dataset = List(1).toDS()
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val ref = dataset.withColumn("new", lit(8))
     checkEquiv(result, ref)
     val dataset2 = List(2).toDS()
-    val result2 = dataset2.withColumn("new", u('value))
+    val result2 = dataset2.withColumn("new", u(col("value")))
     val ref2 = dataset2.withColumn("new", lit(6))
     checkEquiv(result2, ref2)
   }
@@ -1043,11 +1046,11 @@ class OpcodeSuite extends AnyFunSuite {
     }
     val u = makeUdf(myudf)
     val dataset = List(-8.0).toDS()
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val ref = dataset.withColumn("new", lit(0.0))
     checkEquiv(result, ref)
     val dataset2 = List(-9.0).toDS()
-    val result2 = dataset2.withColumn("new", u('value))
+    val result2 = dataset2.withColumn("new", u(col("value")))
     val ref2 = dataset2.withColumn("new", lit(0.5))
     checkEquiv(result2, ref2)
   }
@@ -1060,11 +1063,11 @@ class OpcodeSuite extends AnyFunSuite {
     }
     val u = makeUdf(myudf)
     val dataset = List(-8.0f).toDS()
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val ref = dataset.withColumn("new", lit(0.0f))
     checkEquiv(result, ref)
     val dataset2 = List(-9.0f).toDS()
-    val result2 = dataset2.withColumn("new", u('value))
+    val result2 = dataset2.withColumn("new", u(col("value")))
     val ref2 = dataset2.withColumn("new", lit(0.5f))
     checkEquiv(result2, ref2)
   }
@@ -1078,11 +1081,11 @@ class OpcodeSuite extends AnyFunSuite {
     }
     val u = makeUdf(myudf)
     val dataset = List(-8).toDS()
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val ref = dataset.withColumn("new", lit(0))
     checkEquiv(result, ref)
     val dataset2 = List(-10).toDS()
-    val result2 = dataset2.withColumn("new", u('value))
+    val result2 = dataset2.withColumn("new", u(col("value")))
     val ref2 = dataset2.withColumn("new", lit(1))
     checkEquiv(result2, ref2)
   }
@@ -1095,11 +1098,11 @@ class OpcodeSuite extends AnyFunSuite {
     }
     val u = makeUdf(myudf)
     val dataset = List(-8L).toDS()
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val ref = dataset.withColumn("new", lit(0L))
     checkEquiv(result, ref)
     val dataset2 = List(-10L).toDS()
-    val result2 = dataset2.withColumn("new", u('value))
+    val result2 = dataset2.withColumn("new", u(col("value")))
     val ref2 = dataset2.withColumn("new", lit(1L))
     checkEquiv(result2, ref2)
   }
@@ -1113,7 +1116,7 @@ class OpcodeSuite extends AnyFunSuite {
     }
     val u = makeUdf(myudf)
     val dataset = List(16).toDS()
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val ref = dataset.withColumn("new", lit(16))
     checkEquiv(result, ref)
   }
@@ -1125,7 +1128,7 @@ class OpcodeSuite extends AnyFunSuite {
     }
     val u = makeUdf(myudf)
     val dataset = List(16L).toDS()
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val ref = dataset.withColumn("new", lit(16L))
     checkEquiv(result, ref)
   }
@@ -1141,15 +1144,15 @@ class OpcodeSuite extends AnyFunSuite {
 
     val u = makeUdf(myudf)
     val dataset = List(2).toDS()
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val ref = dataset.withColumn("new", lit(4))
     checkEquiv(result, ref)
     val dataset2 = List(3).toDS()
-    val result2 = dataset2.withColumn("new", u('value))
+    val result2 = dataset2.withColumn("new", u(col("value")))
     val ref2 = dataset2.withColumn("new", lit(9))
     checkEquiv(result2, ref2)
     val dataset3 = List(4).toDS()
-    val result3 = dataset3.withColumn("new", u('value))
+    val result3 = dataset3.withColumn("new", u(col("value")))
     val ref3 = dataset3.withColumn("new", lit(0))
     checkEquiv(result3, ref3)
   }
@@ -1165,15 +1168,15 @@ class OpcodeSuite extends AnyFunSuite {
 
     val u = makeUdf(myudf)
     val dataset = List(1).toDS()
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val ref = dataset.withColumn("new", lit(2))
     checkEquiv(result, ref)
     val dataset2 = List(100).toDS()
-    val result2 = dataset2.withColumn("new", u('value))
+    val result2 = dataset2.withColumn("new", u(col("value")))
     val ref2 = dataset2.withColumn("new", lit(10000))
     checkEquiv(result2, ref2)
     val dataset3 = List(4).toDS()
-    val result3 = dataset3.withColumn("new", u('value))
+    val result3 = dataset3.withColumn("new", u(col("value")))
     val ref3 = dataset3.withColumn("new", lit(0))
     checkEquiv(result3, ref3)
   }
@@ -1185,7 +1188,7 @@ class OpcodeSuite extends AnyFunSuite {
     }
     val u = makeUdf(myudf)
     val dataset = List(1.0f).toDS()
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val ref = dataset.withColumn("new", lit(2.0f))
     checkEquiv(result, ref)
   }
@@ -1197,7 +1200,7 @@ class OpcodeSuite extends AnyFunSuite {
     }
     val u = makeUdf(myudf)
     val dataset = List(1).toDS()
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val ref = dataset.withColumn("new", lit(2))
     checkEquiv(result, ref)
   }
@@ -1214,11 +1217,11 @@ class OpcodeSuite extends AnyFunSuite {
     }
     val u = makeUdf(myudf)
     val dataset = List(0).toDS()
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val ref = dataset.withColumn("new", lit(7))
     checkEquiv(result, ref)
     val dataset2 = List(2).toDS()
-    val result2 = dataset2.withColumn("new", u('value))
+    val result2 = dataset2.withColumn("new", u(col("value")))
     val ref2 = dataset2.withColumn("new", lit(8))
     checkEquiv(result2, ref2)
   }
@@ -1235,11 +1238,11 @@ class OpcodeSuite extends AnyFunSuite {
     }
     val u = makeUdf(myudf)
     val dataset = List(1).toDS()
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val ref = dataset.withColumn("new", lit(7))
     checkEquiv(result, ref)
     val dataset2 = List(2).toDS()
-    val result2 = dataset2.withColumn("new", u('value))
+    val result2 = dataset2.withColumn("new", u(col("value")))
     val ref2 = dataset2.withColumn("new", lit(8))
     checkEquiv(result2, ref2)
   }
@@ -1256,11 +1259,11 @@ class OpcodeSuite extends AnyFunSuite {
     }
     val u = makeUdf(myudf)
     val dataset = List(1).toDS()
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val ref = dataset.withColumn("new", lit(7))
     checkEquiv(result, ref)
     val dataset2 = List(2).toDS()
-    val result2 = dataset2.withColumn("new", u('value))
+    val result2 = dataset2.withColumn("new", u(col("value")))
     val ref2 = dataset2.withColumn("new", lit(8))
     checkEquiv(result2, ref2)
   }
@@ -1277,11 +1280,11 @@ class OpcodeSuite extends AnyFunSuite {
     }
     val u = makeUdf(myudf)
     val dataset = List(0).toDS()
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val ref = dataset.withColumn("new", lit(8))
     checkEquiv(result, ref)
     val dataset2 = List(4).toDS()
-    val result2 = dataset2.withColumn("new", u('value))
+    val result2 = dataset2.withColumn("new", u(col("value")))
     val ref2 = dataset2.withColumn("new", lit(7))
     checkEquiv(result2, ref2)
   }
@@ -1299,11 +1302,11 @@ class OpcodeSuite extends AnyFunSuite {
     }
     val u = makeUdf(myudf)
     val dataset = List(0).toDS()
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val ref = dataset.withColumn("new", lit(8))
     checkEquiv(result, ref)
     val dataset2 = List(3).toDS()
-    val result2 = dataset2.withColumn("new", u('value))
+    val result2 = dataset2.withColumn("new", u(col("value")))
     val ref2 = dataset2.withColumn("new", lit(7))
     checkEquiv(result2, ref2)
   }
@@ -1320,11 +1323,11 @@ class OpcodeSuite extends AnyFunSuite {
     }
     val u = makeUdf(myudf)
     val dataset = List(0).toDS()
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val ref = dataset.withColumn("new", lit(7))
     checkEquiv(result, ref)
     val dataset2 = List(4).toDS()
-    val result2 = dataset2.withColumn("new", u('value))
+    val result2 = dataset2.withColumn("new", u(col("value")))
     val ref2 = dataset2.withColumn("new", lit(8))
     checkEquiv(result2, ref2)
   }
@@ -1341,11 +1344,11 @@ class OpcodeSuite extends AnyFunSuite {
     }
     val u = makeUdf(myudf)
     val dataset = List(0L).toDS()
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val ref = dataset.withColumn("new", lit(7L))
     checkEquiv(result, ref)
     val dataset2 = List(2L).toDS()
-    val result2 = dataset2.withColumn("new", u('value))
+    val result2 = dataset2.withColumn("new", u(col("value")))
     val ref2 = dataset2.withColumn("new", lit(8L))
     checkEquiv(result2, ref2)
   }
@@ -1362,11 +1365,11 @@ class OpcodeSuite extends AnyFunSuite {
     }
     val u = makeUdf(myudf)
     val dataset = List(1L).toDS()
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val ref = dataset.withColumn("new", lit(7L))
     checkEquiv(result, ref)
     val dataset2 = List(2L).toDS()
-    val result2 = dataset2.withColumn("new", u('value))
+    val result2 = dataset2.withColumn("new", u(col("value")))
     val ref2 = dataset2.withColumn("new", lit(8L))
     checkEquiv(result2, ref2)
   }
@@ -1383,11 +1386,11 @@ class OpcodeSuite extends AnyFunSuite {
     }
     val u = makeUdf(myudf)
     val dataset = List(1L).toDS()
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val ref = dataset.withColumn("new", lit(7L))
     checkEquiv(result, ref)
     val dataset2 = List(2L).toDS()
-    val result2 = dataset2.withColumn("new", u('value))
+    val result2 = dataset2.withColumn("new", u(col("value")))
     val ref2 = dataset2.withColumn("new", lit(8L))
     checkEquiv(result2, ref2)
   }
@@ -1404,11 +1407,11 @@ class OpcodeSuite extends AnyFunSuite {
     }
     val u = makeUdf(myudf)
     val dataset = List(0L).toDS()
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val ref = dataset.withColumn("new", lit(8L))
     checkEquiv(result, ref)
     val dataset2 = List(4L).toDS()
-    val result2 = dataset2.withColumn("new", u('value))
+    val result2 = dataset2.withColumn("new", u(col("value")))
     val ref2 = dataset2.withColumn("new", lit(7L))
     checkEquiv(result2, ref2)
   }
@@ -1425,11 +1428,11 @@ class OpcodeSuite extends AnyFunSuite {
     }
     val u = makeUdf(myudf)
     val dataset = List(0L).toDS()
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val ref = dataset.withColumn("new", lit(8L))
     checkEquiv(result, ref)
     val dataset2 = List(3L).toDS()
-    val result2 = dataset2.withColumn("new", u('value))
+    val result2 = dataset2.withColumn("new", u(col("value")))
     val ref2 = dataset2.withColumn("new", lit(7L))
     checkEquiv(result2, ref2)
   }
@@ -1446,11 +1449,11 @@ class OpcodeSuite extends AnyFunSuite {
     }
     val u = makeUdf(myudf)
     val dataset = List(0L).toDS()
-    val result = dataset.withColumn("new", u('value))
+    val result = dataset.withColumn("new", u(col("value")))
     val ref = dataset.withColumn("new", lit(7L))
     checkEquiv(result, ref)
     val dataset2 = List(4L).toDS()
-    val result2 = dataset2.withColumn("new", u('value))
+    val result2 = dataset2.withColumn("new", u(col("value")))
     val ref2 = dataset2.withColumn("new", lit(8L))
     checkEquiv(result2, ref2)
   }
@@ -2377,7 +2380,7 @@ class OpcodeSuite extends AnyFunSuite {
       }
       val u = makeUdf(myudf)
       val dataset = List(2, 20).toDS()
-      val result = dataset.withColumn("new", u('value))
+      val result = dataset.withColumn("new", u(col("value")))
       val ref = dataset.withColumn("new", lit(true))
       checkEquiv(result, ref)
     }
@@ -2429,7 +2432,7 @@ class OpcodeSuite extends AnyFunSuite {
     val dataset = List(("######hello", null),
       ("world", "######hello"),
       ("", "@@@@target")).toDF("x", "y")
-    val result = dataset.withColumn("new", u('x, 'y, lit(true)))
+    val result = dataset.withColumn("new", u(col("x"), col("y"), lit(true)))
     val ref = List(("######hello", null, Array("######hello", "@@@@hello")),
       ("world", "######hello", Array("world", "######hello", "@@@@hello")),
       ("", "@@@@target", Array("", "@@@@target", "######target", null))).toDF

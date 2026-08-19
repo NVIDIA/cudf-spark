@@ -67,15 +67,15 @@ belongs to. Lines are sorted by the Spark `buildver` lexicographically.
 Each line is assumed to be a JSON to keep it extensible.
 
 /*** spark-rapids-shim-json-lines
-{"spark": "320"}
-{"spark": "323"}
+{"spark": "330"}
+{"spark": "331"}
 spark-rapids-shim-json-lines ***/
 
 The canonical location of a source file shared by multiple shims is
 src/main/<top_buildver_in_the_comment>
 
-You can find all shim files for a particular shim, e.g. 320, easily by executing:
-git grep '{"spark": "320"}' '*.java' '*.scala'
+You can find all shim files for a particular shim, e.g. 330, easily by executing:
+git grep '{"spark": "330"}' '*.java' '*.scala'
 """
 
 import errno
@@ -249,7 +249,7 @@ def __delete_prior_comment_if_allowed(contents, tag, filename):
 def __git_rename_or_copy(shim_file, owner_shim, from_shim=None):
     __log.debug("git rename %s to the canonical dir of %s", shim_file, owner_shim)
     parent_pom_dir = __ant_proj_prop('spark.rapids.source.basedir')
-    # sql-plugin/src/main/320+-nondb/scala/org/apache/spark/...
+    # sql-plugin/src/main/330/scala/org/apache/spark/...
     rel_path = os.path.relpath(shim_file, parent_pom_dir)
     __log.debug("spark-rapids root dir: %s", parent_pom_dir)
     __log.debug("shim file path relative to root dir: %s", rel_path)

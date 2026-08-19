@@ -20,7 +20,7 @@ import java.util.{Comparator, LinkedList, PriorityQueue}
 
 import scala.collection.mutable.ArrayBuffer
 
-import ai.rapids.cudf.{ColumnVector, ContiguousTable, NvtxColor, NvtxRange, Table}
+import ai.rapids.cudf.{ColumnVector, ContiguousTable, Table}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric._
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingSeq
@@ -122,16 +122,16 @@ case class GpuSortExec(
 
   override lazy val additionalMetrics: Map[String, GpuMetric] =
     Map(
-      OP_TIME -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_OP_TIME),
+      OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY),
       SORT_TIME -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_SORT_TIME))
 
   private lazy val targetSize = GpuSortExec.targetSize(conf)
 
   override def internalDoExecuteColumnar(): RDD[ColumnarBatch] = {
-    val sorter = new GpuSorter(gpuSortOrder, output)
+    val sorter = new GpuSorter(gpuSortOrder, output, allMetrics)
 
     val sortTime = gpuLongMetric(SORT_TIME)
-    val opTime = gpuLongMetric(OP_TIME)
+    val opTime = gpuLongMetric(OP_TIME_LEGACY)
     val outputBatch = gpuLongMetric(NUM_OUTPUT_BATCHES)
     val outputRows = gpuLongMetric(NUM_OUTPUT_ROWS)
     val outOfCore = sortType == OutOfCoreSort
@@ -335,13 +335,13 @@ case class GpuOutOfCoreSortIterator(
    */
   private def convertBoundaries(tab: Table): Array[UnsafeRow] = {
     import scala.collection.JavaConverters._
-    val cb = withResource(new NvtxRange("COPY BOUNDARIES", NvtxColor.PURPLE)) { _ =>
+    val cb = NvtxRegistry.SORT_COPY_BOUNDARIES {
       new ColumnarBatch(
         GpuColumnVector.extractColumns(tab, sorter.projectedBatchTypes).map(_.copyToHost()),
         tab.getRowCount.toInt)
     }
     withResource(cb) { cb =>
-      withResource(new NvtxRange("TO UNSAFE ROW", NvtxColor.RED)) { _ =>
+      NvtxRegistry.SORT_TO_UNSAFE_ROW {
         cb.rowIterator().asScala.map(unsafeProjection).map(_.copy().asInstanceOf[UnsafeRow]).toArray
       }
     }
@@ -401,7 +401,7 @@ case class GpuOutOfCoreSortIterator(
       }
 
       val lowerBoundaries =
-        withResource(new NvtxRange("lower boundaries", NvtxColor.ORANGE)) { _ =>
+        NvtxRegistry.SORT_LOWER_BOUNDARIES {
           withResource(ColumnVector.fromInts(lowerGatherIndexes: _*)) { gatherMap =>
             withResource(sortedTbl.gather(gatherMap)) { boundariesTab =>
               convertBoundaries(boundariesTab)
@@ -464,7 +464,7 @@ case class GpuOutOfCoreSortIterator(
    * merging.
    */
   private final def splitOneSortedBatch(scb: SpillableColumnarBatch): Unit = {
-    withResource(new NvtxWithMetrics("split input batch", NvtxColor.CYAN, opTime)) { _ =>
+    NvtxIdWithMetrics(NvtxRegistry.SPLIT_INPUT_BATCH, opTime) {
       val ret = withRetryNoSplit(scb) { attempt =>
         onFirstPassSplit()
         splitAfterSort(attempt)
@@ -623,7 +623,7 @@ case class GpuOutOfCoreSortIterator(
           }
         }
       }
-      withResource(new NvtxWithMetrics("Sort next output batch", NvtxColor.CYAN, opTime)) { _ =>
+      NvtxIdWithMetrics(NvtxRegistry.SORT_NEXT_OUTPUT_BATCH, opTime) {
         val ret = mergeSortEnoughToOutput().getOrElse(concatOutput())
 
         outputBatches += 1

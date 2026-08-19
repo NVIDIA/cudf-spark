@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -1873,7 +1873,7 @@ object JsonColumnStats {
         output.append(JsonLevel(currentPath.toArray, "ARRAY", length, ""))
         parser.nextToken()
       case JsonToken.FIELD_NAME =>
-        currentPath.append(JsonPathElement(parser.getCurrentName, is_array = false))
+        currentPath.append(JsonPathElement(parser.currentName, is_array = false))
         parser.nextToken()
         processNext(parser, currentPath, output)
         currentPath.remove(currentPath.length - 1)

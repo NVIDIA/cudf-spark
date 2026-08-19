@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,9 +16,7 @@
 
 package com.nvidia.spark.rapids
 
-import scala.collection.mutable.ArrayBuffer
-
-import ai.rapids.cudf.{NvtxColor, Table}
+import ai.rapids.cudf.Table
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric._
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
@@ -35,12 +33,14 @@ import org.apache.spark.sql.catalyst.plans.physical.{AllTuples, Distribution, Pa
 import org.apache.spark.sql.catalyst.util.truncatedString
 import org.apache.spark.sql.execution.{CollectLimitExec, LimitExec, SparkPlan, TakeOrderedAndProjectExec}
 import org.apache.spark.sql.execution.exchange.ENSURE_REQUIREMENTS
+import org.apache.spark.sql.types.{DataType, StructField, StructType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
 class GpuBaseLimitIterator(
     input: Iterator[ColumnarBatch],
     limit: Int,
     offset: Int,
+    dataTypes : Array[DataType],
     opTime: GpuMetric,
     numOutputBatches: GpuMetric,
     numOutputRows: GpuMetric) extends Iterator[ColumnarBatch] {
@@ -55,7 +55,6 @@ class GpuBaseLimitIterator(
     }
 
     var batch = input.next()
-    val numCols = batch.numCols()
 
     // In each partition, we need to skip `offset` rows
     while (batch != null && remainingOffset >= batch.numRows()) {
@@ -71,11 +70,14 @@ class GpuBaseLimitIterator(
     // If the last batch is null, then we have offset >= numRows in this partition.
     // In such case, we should return an empty batch
     if (batch == null || batch.numRows() == 0) {
-      return new ColumnarBatch(new ArrayBuffer[GpuColumnVector](numCols).toArray, 0)
+      val fields = dataTypes.zipWithIndex.map {
+        case (dt, idx) => StructField(s"_col$idx", dt, nullable = true)
+      }
+      return GpuColumnVector.emptyBatch(StructType(fields))
     }
 
     // Here 0 <= remainingOffset < batch.numRow(), we need to get batch[remainingOffset:]
-    withResource(new NvtxWithMetrics("limit and offset", NvtxColor.ORANGE, opTime)) { _ =>
+    NvtxIdWithMetrics(NvtxRegistry.LIMIT_AND_OFFSET, opTime) {
       var result: ColumnarBatch = null
       // limit < 0 (limit == -1) denotes there is no limitation, so when
       // (remainingOffset == 0 && (remainingLimit >= batch.numRows() || limit < 0)) is true,
@@ -130,7 +132,7 @@ class GpuBaseLimitIterator(
 trait GpuBaseLimitExec extends LimitExec with GpuExec with ShimUnaryExecNode {
 
   override lazy val additionalMetrics: Map[String, GpuMetric] = Map(
-    OP_TIME -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_OP_TIME)
+    OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY)
   )
 
   override def output: Seq[Attribute] = child.output
@@ -152,11 +154,12 @@ trait GpuBaseLimitExec extends LimitExec with GpuExec with ShimUnaryExecNode {
   }
 
   protected def sliceRDD(rdd: RDD[ColumnarBatch], limit: Int, offset: Int): RDD[ColumnarBatch] = {
-    val opTime = gpuLongMetric(OP_TIME)
+    val opTime = gpuLongMetric(OP_TIME_LEGACY)
     val numOutputRows = gpuLongMetric(NUM_OUTPUT_ROWS)
     val numOutputBatches = gpuLongMetric(NUM_OUTPUT_BATCHES)
     rdd.mapPartitions { iter =>
-      new GpuBaseLimitIterator(iter, limit, offset, opTime, numOutputBatches, numOutputRows)
+      new GpuBaseLimitIterator(iter, limit, offset, output.map(_.dataType).toArray,
+        opTime, numOutputBatches, numOutputRows)
     }
   }
 
@@ -190,20 +193,49 @@ class GpuCollectLimitMeta(
   override val childParts: scala.Seq[PartMeta[_]] =
     Seq(GpuOverrides.wrapPart(collectLimit.outputPartitioning, conf, Some(this)))
 
-  override def convertToGpu(): GpuExec =
+  override def tagPlanForGpu(): Unit = {
+    // Use full class name to avoid compile errors on Spark versions
+    // where CommandResultExec (added in 3.2) does not exist.
+    val childClass = collectLimit.child.getClass.getName
+    if (childClass.endsWith(
+          ".execution.CommandResultExec") ||
+        childClass.endsWith(
+          ".execution.command.ExecutedCommandExec")) {
+      willNotWorkOnGpu(
+        s"child ${collectLimit.child.getClass.getSimpleName}" +
+        " already provides pre-computed results; replacing" +
+        " CollectLimit would trigger an unnecessary Spark job")
+    }
+    // When the child cannot run on GPU, fall back the entire
+    // CollectLimit to CPU. CPU CollectLimitExec.doExecute() applies
+    // per-partition .take(limit) that stops upstream iterators early,
+    // which is strictly better than row-to-columnar conversion
+    // followed by GPU limiting.
+    if (!childPlans.head.canThisBeReplaced) {
+      willNotWorkOnGpu(
+        "child cannot run on GPU; falling back entire" +
+        " CollectLimit to CPU to preserve per-partition" +
+        " row-level .take(limit) optimization")
+    }
+  }
+
+  protected def buildCollectLimitGpu(offset: Int): GpuExec = {
     GpuGlobalLimitExec(collectLimit.limit,
       GpuShuffleExchangeExec(
         GpuSinglePartitioning,
         GpuLocalLimitExec(collectLimit.limit, childPlans.head.convertIfNeeded()),
         ENSURE_REQUIREMENTS
-      )(SinglePartition), 0)
+      )(SinglePartition), offset)
+  }
+
+  override def convertToGpu(): GpuExec = buildCollectLimitGpu(0)
 }
 
 object GpuTopN {
   private[this] def concatAndClose(a: ColumnarBatch,
       b: ColumnarBatch,
       concatTime: GpuMetric): ColumnarBatch = {
-    withResource(new NvtxWithMetrics("readNConcat", NvtxColor.CYAN, concatTime)) { _ =>
+    NvtxIdWithMetrics(NvtxRegistry.READ_N_CONCAT, concatTime) {
       val dataTypes = GpuColumnVector.extractTypes(b)
       val aTable = withResource(a) { a =>
         GpuColumnVector.from(a)
@@ -289,7 +321,7 @@ object GpuTopN {
             SpillableColumnarBatch(cb, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
           }
           withRetry(inputScb, splitSpillableInHalfByRows) { attempt =>
-            withResource(new NvtxWithMetrics("TOP N", NvtxColor.ORANGE, opTime)) { _ =>
+            NvtxIdWithMetrics(NvtxRegistry.TOP_N, opTime) {
               val inputCb = attempt.getColumnarBatch()
               if (pending.isEmpty) {
                 sortAndTakeNClose(limit, sorter, inputCb, sortTime)
@@ -324,7 +356,7 @@ object GpuTopN {
         pending = None
         val ret = if (offset > 0) {
           val retCb = RmmRapidsRetryIterator.withRetryNoSplit(tempScb) { _ =>
-            withResource(new NvtxWithMetrics("TOP N Offset", NvtxColor.ORANGE, opTime)) { _ =>
+            NvtxIdWithMetrics(NvtxRegistry.TOP_N_OFFSET, opTime) {
               withResource(tempScb.getColumnarBatch()) { tempCb =>
                 applyOffset(tempCb, offset)
               }
@@ -367,15 +399,20 @@ case class GpuTopN(
   override lazy val additionalMetrics: Map[String, GpuMetric] = Map(
     NUM_INPUT_ROWS -> createMetric(DEBUG_LEVEL, DESCRIPTION_NUM_INPUT_ROWS),
     NUM_INPUT_BATCHES -> createMetric(DEBUG_LEVEL, DESCRIPTION_NUM_INPUT_BATCHES),
-    OP_TIME -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_OP_TIME),
+    OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY),
     SORT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_SORT_TIME),
-    CONCAT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_CONCAT_TIME)
+    CONCAT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_CONCAT_TIME),
+    CPU_BRIDGE_PROCESSING_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
+      DESCRIPTION_CPU_BRIDGE_PROCESSING_TIME),
+    CPU_BRIDGE_WAIT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
+      DESCRIPTION_CPU_BRIDGE_WAIT_TIME)
   )
 
   override def internalDoExecuteColumnar(): RDD[ColumnarBatch] = {
-    val sorter = new GpuSorter(gpuSortOrder, child.output)
-    val boundProjectExprs = GpuBindReferences.bindGpuReferences(projectList, child.output)
-    val opTime = gpuLongMetric(OP_TIME)
+    val sorter = new GpuSorter(gpuSortOrder, child.output, allMetrics)
+    val boundProjectExprs = GpuBindReferences.bindGpuReferences(projectList, child.output,
+      allMetrics)
+    val opTime = gpuLongMetric(OP_TIME_LEGACY)
     val inputBatches = gpuLongMetric(NUM_INPUT_BATCHES)
     val inputRows = gpuLongMetric(NUM_INPUT_ROWS)
     val outputBatches = gpuLongMetric(NUM_OUTPUT_BATCHES)

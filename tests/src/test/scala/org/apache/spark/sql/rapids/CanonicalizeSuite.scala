@@ -30,8 +30,8 @@ class CanonicalizeSuite extends AnyFunSuite {
     Seq(GpuEqualTo, GpuEqualNullSafe, GpuGreaterThan,
         GpuLessThan, GpuGreaterThanOrEqual, GpuLessThanOrEqual)
       .foreach( bc => {
-        assert(bc(GpuAdd($"a", $"b", true), Literal(10))
-            .semanticEquals(bc(GpuAdd($"b", $"a", true), Literal(10))))
+        assert(bc(GpuAdd($"a", $"b", true)(), Literal(10))
+            .semanticEquals(bc(GpuAdd($"b", $"a", true)(), Literal(10))))
       })
   }
 }

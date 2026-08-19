@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,9 +16,15 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark": "400"}
+{"spark": "401"}
+{"spark": "402"}
+{"spark": "403"}
+{"spark": "404"}
 spark-rapids-shim-json-lines ***/
+
 package org.apache.spark.sql.execution.datasources.v2.rapids
 
+import scala.annotation.nowarn
 import scala.collection.JavaConverters._
 
 import com.nvidia.spark.rapids.GpuExec
@@ -68,12 +74,14 @@ case class GpuAtomicReplaceTableAsSelectExec(
       invalidateCache(catalog, table, ident)
     }
     val staged = if (orCreate) {
-      catalog.stageCreateOrReplace(
-        ident, columns, partitioning.toArray, properties.asJava)
+      (catalog.stageCreateOrReplace(
+        ident, columns, partitioning.toArray, properties.asJava
+      ): @nowarn("msg=stageCreateOrReplace in trait StagingTableCatalog is deprecated"))
     } else if (catalog.tableExists(ident)) {
       try {
-        catalog.stageReplace(
-          ident, columns, partitioning.toArray, properties.asJava)
+        (catalog.stageReplace(
+          ident, columns, partitioning.toArray, properties.asJava
+        ): @nowarn("msg=stageReplace in trait StagingTableCatalog is deprecated"))
       } catch {
         case e: NoSuchTableException =>
           throw QueryCompilationErrors.cannotReplaceMissingTableError(ident, Some(e))

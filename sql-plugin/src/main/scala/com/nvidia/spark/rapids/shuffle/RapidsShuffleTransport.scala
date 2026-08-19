@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,8 +20,8 @@ import java.nio.{ByteBuffer, ByteOrder}
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
 
-import ai.rapids.cudf.{MemoryBuffer, NvtxColor, NvtxRange}
-import com.nvidia.spark.rapids.{RapidsConf, ShimReflectionUtils}
+import ai.rapids.cudf.MemoryBuffer
+import com.nvidia.spark.rapids.{NvtxRegistry, RapidsConf, ShimReflectionUtils}
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.rapids.storage.RapidsStorageUtils
@@ -528,14 +528,14 @@ object TransportUtils {
   }
 
   def copyBuffer(src: ByteBuffer, dst: ByteBuffer, size: Int): Unit = {
-    val copyMetaRange = new NvtxRange("Transport.CopyBuffer", NvtxColor.RED)
+    NvtxRegistry.TRANSPORT_COPY_BUFFER.push()
     try {
       val ro = src.asReadOnlyBuffer()
       ro.limit(ro.position() + size) // make sure we only copy size bytes
       // copy from position to remaining = (limit - position)
       dst.put(ro) // bulk put
     } finally {
-      copyMetaRange.close()
+      NvtxRegistry.TRANSPORT_COPY_BUFFER.pop()
     }
   }
 

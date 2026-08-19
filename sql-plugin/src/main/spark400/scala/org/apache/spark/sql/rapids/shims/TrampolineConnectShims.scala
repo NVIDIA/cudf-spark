@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,8 +14,18 @@
  * limitations under the License.
  */
 
+
 /*** spark-rapids-shim-json-lines
 {"spark": "400"}
+{"spark": "400db173"}
+{"spark": "401"}
+{"spark": "402"}
+{"spark": "403"}
+{"spark": "404"}
+{"spark": "411"}
+{"spark": "412"}
+{"spark": "413"}
+{"spark": "420"}
 spark-rapids-shim-json-lines ***/
 
 package org.apache.spark.sql.rapids.shims
@@ -24,30 +34,30 @@ import org.apache.avro.NameValidator
 import org.apache.avro.Schema
 
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
-import org.apache.spark.sql.classic.{DataFrame, Dataset, SparkSession}
-
 object TrampolineConnectShims {
 
   type SparkSession = org.apache.spark.sql.classic.SparkSession
   type DataFrame = org.apache.spark.sql.classic.DataFrame
   type Dataset = org.apache.spark.sql.classic.Dataset[org.apache.spark.sql.Row]
 
-  def cleanupAnyExistingSession(): Unit = SparkSession.cleanupAnyExistingSession()
-
-  def createDataFrame(spark: SparkSession, plan: LogicalPlan): DataFrame = {
-    Dataset.ofRows(spark, plan)
+  def cleanupAnyExistingSession(): Unit = {
+    org.apache.spark.sql.classic.SparkSession.cleanupAnyExistingSession()
   }
 
-  def getBuilder(): SparkSession.Builder = {
-    SparkSession.builder()
+  def createDataFrame(spark: SparkSession, plan: LogicalPlan): DataFrame = {
+    org.apache.spark.sql.classic.Dataset.ofRows(spark, plan)
+  }
+
+  def getBuilder(): org.apache.spark.sql.classic.SparkSession.Builder = {
+    org.apache.spark.sql.classic.SparkSession.builder()
   }
 
   def hasActiveSession: Boolean = {
-    SparkSession.getActiveSession.isDefined
+    org.apache.spark.sql.classic.SparkSession.getActiveSession.isDefined
   }
 
   def getActiveSession: SparkSession = {
-    SparkSession.getActiveSession.getOrElse(
+    org.apache.spark.sql.classic.SparkSession.getActiveSession.getOrElse(
       throw new IllegalStateException("No active SparkSession found")
     )
   }

@@ -50,7 +50,7 @@ class LogOperatorUnitTestSuite extends GpuExpressionTestSuite {
     }
 
     checkEvaluateGpuUnaryMathExpression(GpuLog(GpuAdd(childExpr, GpuLiteral(1d,
-      DataTypes.DoubleType), false)), expectedFun, schema)
+      DataTypes.DoubleType), false)()), expectedFun, schema)
   }
 
   test("log2") {

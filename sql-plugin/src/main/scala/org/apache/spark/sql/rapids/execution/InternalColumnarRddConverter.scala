@@ -690,6 +690,14 @@ object InternalColumnarRddConverter extends Logging {
                 rowConversionRdd.prev match {
                   case c2rRdd: GpuColumnToRowMapPartitionsRDD =>
                     batch = Some(c2rRdd.prev)
+                  case opTimeRdd: GpuOpTimeTrackingRDD[_] =>
+                    opTimeRdd.prev match {
+                      case c2rRdd: GpuColumnToRowMapPartitionsRDD =>
+                        batch = Some(c2rRdd.prev)
+                      case rdd =>
+                        logDebug("Cannot extract columnar RDD directly. " +
+                          s"(column to row not found $rdd)")
+                    }
                   case rdd =>
                     logDebug("Cannot extract columnar RDD directly. " +
                       s"(column to row not found $rdd)")

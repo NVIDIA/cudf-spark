@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -47,6 +47,11 @@ object PathInstruction {
 }
 
 object JsonPathParser extends RegexParsers {
+  // Mirrors JSONUtils.MAX_PATH_DEPTH from spark-rapids-jni (get_json_object.hpp).
+  // Duplicated here to avoid triggering JNI native library loading during
+  // Driver-side plan conversion (see github.com/NVIDIA/spark-rapids/issues/14184).
+  val MAX_PATH_DEPTH: Int = 16
+
   import PathInstruction._
 
   def root: Parser[Char] = '$'
@@ -103,7 +108,7 @@ object JsonPathParser extends RegexParsers {
     }
 
   def fallbackCheck(instructions: List[PathInstruction]): Boolean =
-    instructions.length > JSONUtils.MAX_PATH_DEPTH
+    instructions.length > JsonPathParser.MAX_PATH_DEPTH
 
   def unzipInstruction(instruction: PathInstruction): (String, String, Long) = {
     instruction match {
@@ -165,7 +170,7 @@ class GpuGetJsonObjectMeta(
       val updated = instructions.map(JsonPathParser.filterInstructionsForJni)
       if (updated.exists(JsonPathParser.fallbackCheck)) {
         willNotWorkOnGpu(s"get_json_object on GPU does not support more " +
-          s"than ${JSONUtils.MAX_PATH_DEPTH} nested paths." +
+          s"than ${JsonPathParser.MAX_PATH_DEPTH} nested paths." +
           instructions.map(i => s" (Found ${i.length})").getOrElse(""))
       }
     }
@@ -451,7 +456,7 @@ case class GpuGetJsonObject(
   }
 
   override def doColumnar(numRows: Int, lhs: GpuScalar, rhs: GpuScalar): ColumnVector = {
-    withResource(GpuColumnVector.from(lhs, numRows, left.dataType)) { expandedLhs =>
+    withResource(GpuColumnVector.from(lhs, numRows)) { expandedLhs =>
       doColumnar(expandedLhs, rhs)
     }
   }

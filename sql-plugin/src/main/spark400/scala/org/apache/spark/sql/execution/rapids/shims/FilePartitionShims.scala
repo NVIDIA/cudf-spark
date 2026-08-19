@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,16 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark": "400"}
+{"spark": "401"}
+{"spark": "402"}
+{"spark": "403"}
+{"spark": "404"}
+{"spark": "411"}
+{"spark": "412"}
+{"spark": "413"}
+{"spark": "420"}
 spark-rapids-shim-json-lines ***/
+
 package org.apache.spark.sql.execution.rapids.shims
 
 import org.apache.spark.sql.execution.PartitionedFileUtil
@@ -29,5 +38,19 @@ object FilePartitionShims extends SplitFiles {
         PartitionedFileUtil.getPartitionedFile(f, f.getPath, p.values, 0, f.getLen)
       }
     }
+  }
+
+  // Methods for FilePartition (overloaded)
+  def getFiles(p: FilePartition): Array[PartitionedFile] = p.files
+
+  def copyWithFiles(p: FilePartition, newFiles: Array[PartitionedFile]): FilePartition = {
+    p.copy(files = newFiles)
+  }
+
+  def getFilePartitions(
+      relation: HadoopFsRelation,
+      splitFiles: Seq[PartitionedFile],
+      maxSplitBytes: Long): Seq[FilePartition] = {
+    FilePartition.getFilePartitions(relation.sparkSession, splitFiles, maxSplitBytes)
   }
 }

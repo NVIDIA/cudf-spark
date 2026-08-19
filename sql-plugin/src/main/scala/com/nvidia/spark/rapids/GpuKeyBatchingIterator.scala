@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@ package com.nvidia.spark.rapids
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 
-import ai.rapids.cudf.{ColumnVector, NvtxColor, Table}
+import ai.rapids.cudf.{ColumnVector, Table}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingArray
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
@@ -124,7 +124,7 @@ class GpuKeyBatchingIterator(
     pendingSize = 0
     spillableBuffers.appendAll(last)
     RmmRapidsRetryIterator.withRetryNoSplit(spillableBuffers.toSeq) { attempt =>
-      withResource(new NvtxWithMetrics("concat pending", NvtxColor.CYAN, concatTime)) { _ =>
+      NvtxIdWithMetrics(NvtxRegistry.CONCAT_PENDING, concatTime) {
         withResource(mutable.ArrayBuffer[Table]()) { toConcat =>
           attempt.foreach { spillable =>
             withResource(spillable.getColumnarBatch()) { cb =>
@@ -235,8 +235,9 @@ object GpuKeyBatchingIterator {
       numOutputRows: GpuMetric,
       numOutputBatches: GpuMetric,
       concatTime: GpuMetric,
-      opTime: GpuMetric): Iterator[ColumnarBatch] => GpuKeyBatchingIterator = {
-    val sorter = new GpuSorter(unboundOrderSpec, schema)
+      opTime: GpuMetric,
+      metrics: Map[String, GpuMetric]): Iterator[ColumnarBatch] => GpuKeyBatchingIterator = {
+    val sorter = new GpuSorter(unboundOrderSpec, schema, metrics)
     val types = schema.map(_.dataType)
     def makeIter(iter: Iterator[ColumnarBatch]): GpuKeyBatchingIterator = {
       new GpuKeyBatchingIterator(iter, sorter, types, targetSizeBytes,

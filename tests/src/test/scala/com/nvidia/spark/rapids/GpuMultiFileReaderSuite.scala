@@ -16,10 +16,9 @@
 
 package com.nvidia.spark.rapids
 
-import java.util.concurrent.Callable
-
 import ai.rapids.cudf.HostMemoryBuffer
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.io.async.AsyncRunner
 import com.nvidia.spark.rapids.shims.PartitionedFileUtilsShim
 import org.apache.hadoop.conf.Configuration
 import org.scalatest.funsuite.AnyFunSuite
@@ -34,15 +33,22 @@ class GpuMultiFileReaderSuite extends AnyFunSuite with RmmSparkRetrySuiteBase {
 
   test("avoid infinite loop when host buffers empty") {
     val conf = new Configuration(false)
-    val membuffers = {
+    val memBuffers: Array[SingleHMBAndMeta] = {
       val singleBuf = SpillableHostBuffer(HostMemoryBuffer.allocate(0), 0,
         SpillPriorities.ACTIVE_BATCHING_PRIORITY)
       Array(SingleHMBAndMeta(Array(singleBuf), 0L, 0, Seq.empty))
     }
+    val poolConf = new ThreadPoolConfBuilder(
+      maxThreadNumber = 1,
+      isMemoryBounded = true,
+      memoryCapacityFromDriver =  1L << 20,
+      timeoutMs = 10 * 1000L, // 10 seconds
+      stageLevelPool = false
+    ).build()
     val multiFileReader = new MultiFileCloudPartitionReaderBase(
       conf,
       inputFiles = Array.empty,
-      numThreads = 1,
+      poolConf = poolConf,
       maxNumFileProcessed = 1,
       filters = Array.empty,
       execMetrics = Map.empty,
@@ -53,7 +59,7 @@ class GpuMultiFileReaderSuite extends AnyFunSuite with RmmSparkRetrySuiteBase {
       currentFileHostBuffers = Some(new HostMemoryBuffersWithMetaDataBase {
         override def partitionedFile: PartitionedFile =
           PartitionedFileUtilsShim.newPartitionedFile(InternalRow.empty, "", 0, 0)
-        override def memBuffersAndSizes: Array[SingleHMBAndMeta] = membuffers
+        override def memBuffersAndSizes: Array[SingleHMBAndMeta] = memBuffers
         override def bytesRead: Long = 0
       })
 
@@ -61,8 +67,8 @@ class GpuMultiFileReaderSuite extends AnyFunSuite with RmmSparkRetrySuiteBase {
           tc: TaskContext,
           file: PartitionedFile,
           conf: Configuration,
-          filters: Array[Filter]): Callable[HostMemoryBuffersWithMetaDataBase] = {
-        () => null
+          filters: Array[Filter]): AsyncRunner[HostMemoryBuffersWithMetaDataBase] = {
+        AsyncRunner.newUnboundedTask(() => null)
       }
 
       override def readBatches(h: HostMemoryBuffersWithMetaDataBase): Iterator[ColumnarBatch] =

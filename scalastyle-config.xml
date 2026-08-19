@@ -1,5 +1,5 @@
 <!--
-  Copyright (c) 2020-2023, NVIDIA CORPORATION. All Rights Reserved.
+  Copyright (c) 2020-2026, NVIDIA CORPORATION. All Rights Reserved.
 
   Licensed under the Apache License, Version 2.0 (the "License");
   you may not use this file except in compliance with the License.
@@ -139,6 +139,23 @@ You can also disable only one rule, by specifying its rule id, as specified in:
             <parameter name="line">false</parameter>
         </parameters>
         <customMessage>ArrayBuilder.make does not accept parens anymore in Scala 2.13</customMessage>
+    </check>
+
+    <check level="error" class="org.scalastyle.file.RegexChecker" enabled="true">
+        <parameters>
+            <parameter name="regex">\('[a-zA-Z_][a-zA-Z0-9_]*\)</parameter>
+            <parameter name="line">true</parameter>
+        </parameters>
+        <customMessage><![CDATA[Symbol literals are deprecated in Scala 2.13. Use col("name") or $"name" instead of 'name.
+        For non-Spark contexts, use Symbol("name") instead of 'name if Symbol usage is required.]]></customMessage>
+    </check>
+
+    <check level="error" class="org.scalastyle.file.RegexChecker" enabled="true">
+        <parameters>
+            <parameter name="regex">⇒</parameter>
+            <parameter name="line">true</parameter>
+        </parameters>
+        <customMessage>Unicode arrow ⇒ is deprecated in Scala 2.13. Use => instead.</customMessage>
     </check>
 
     <check level="warning" class="org.scalastyle.file.RegexChecker" enabled="false">

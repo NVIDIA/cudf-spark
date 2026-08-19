@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -78,6 +78,76 @@ public final class RapidsHostColumnBuilder implements AutoCloseable {
 
     for (int i = 0; i < dataType.getNumChildren(); i++) {
       childBuilders.add(new RapidsHostColumnBuilder(dataType.getChild(i), estimatedRows));
+    }
+  }
+
+  /**
+   * Immutable snapshot of a builder and all of its children so the state can be restored
+   * if an exception happens while appending a row.
+   */
+  public static final class BuilderSnapshot {
+    private final long rows;
+    private final long currentIndex;
+    private final long currentStringByteIndex;
+    private final BuilderSnapshot[] childStates;
+
+    private BuilderSnapshot(long rows,
+        long currentIndex,
+        long currentStringByteIndex,
+        BuilderSnapshot[] childStates) {
+      this.rows = rows;
+      this.currentIndex = currentIndex;
+      this.currentStringByteIndex = currentStringByteIndex;
+      this.childStates = childStates;
+    }
+  }
+
+  private BuilderSnapshot[] captureChildStates() {
+    if (childBuilders.isEmpty()) {
+      return null;
+    }
+    BuilderSnapshot[] childStates = new BuilderSnapshot[childBuilders.size()];
+    for (int i = 0; i < childBuilders.size(); i++) {
+      childStates[i] = childBuilders.get(i).captureState();
+    }
+    return childStates;
+  }
+
+  /**
+   * Capture the current state of this builder and all of its children. This is intended to be
+   * inexpensive state used to rollback partial row additions if host memory allocation fails
+   * while materializing the row.
+   */
+  public BuilderSnapshot captureState() {
+    return new BuilderSnapshot(rows, currentIndex, currentStringByteIndex, captureChildStates());
+  }
+
+  /**
+   * Restore the builder to a previously captured snapshot. This will also restore child builders
+   * to their corresponding snapshots.
+   *
+   * @param snapshot the snapshot captured earlier via {@link #captureState()}
+   */
+  public void restoreState(BuilderSnapshot snapshot) {
+    if (snapshot == null) {
+      throw new IllegalArgumentException("snapshot cannot be null");
+    }
+    this.rows = snapshot.rows;
+    this.currentIndex = snapshot.currentIndex;
+    this.currentStringByteIndex = Math.toIntExact(snapshot.currentStringByteIndex);
+    // Note: nullCount is intentionally NOT restored because setNullAt() is idempotent.
+    // It only increments nullCount if the validity bit was previously valid (1).
+    // Since we restore currentIndex and replay the same row, setNullAt will be called
+    // at the same index with the bit already set to null (0), so it returns 0 and
+    // nullCount isn't double-incremented.
+    if (snapshot.childStates != null) {
+      if (snapshot.childStates.length != childBuilders.size()) {
+        throw new IllegalStateException(
+            "Mismatch between snapshot child count and current child builders");
+      }
+      for (int i = 0; i < snapshot.childStates.length; i++) {
+        childBuilders.get(i).restoreState(snapshot.childStates[i]);
+      }
     }
   }
 
@@ -367,7 +437,7 @@ public final class RapidsHostColumnBuilder implements AutoCloseable {
     long bucket = index / 8;
     byte currentByte = valid.getByte(bucket);
     int bitmask = ~(1 << (index % 8));
-    int ret = (currentByte >> index) & 0x1;
+    int ret = (currentByte >> (index % 8)) & 0x1;
     currentByte &= bitmask;
     valid.setByte(bucket, currentByte);
     return ret;
@@ -383,26 +453,30 @@ public final class RapidsHostColumnBuilder implements AutoCloseable {
     nullCount += setNullAt(valid, index);
   }
 
-  public final RapidsHostColumnBuilder appendNull() {
+  public final long appendNull() {
+    final long prevValidSize = valid == null ? 0L : valid.getLength();
     nullHandler.run();
-    return this;
+    return valid.getLength() - prevValidSize;
   }
 
   //For structs
-  private RapidsHostColumnBuilder append(HostColumnVector.StructData structData) {
+  private long append(HostColumnVector.StructData structData) {
     assert type.isNestedType();
     if (type.equals(DType.STRUCT)) {
       if (structData == null || structData.isNull()) {
         return appendNull();
       } else {
+        long bytesAppended = 0;
         for (int i = 0; i < structData.getNumFields(); i++) {
           RapidsHostColumnBuilder childBuilder = childBuilders.get(i);
-          appendChildOrNull(childBuilder, structData.getField(i));
+          bytesAppended += appendChildOrNull(childBuilder, structData.getField(i));
         }
         endStruct();
+        return bytesAppended;
       }
+    } else {
+      return 0;
     }
-    return this;
   }
 
   private boolean allChildrenHaveSameIndex() {
@@ -450,48 +524,49 @@ public final class RapidsHostColumnBuilder implements AutoCloseable {
   }
 
   // For lists
-  private <T> RapidsHostColumnBuilder append(List<T> inputList) {
+  private <T> long append(List<T> inputList) {
     if (inputList == null) {
-      appendNull();
+      return appendNull();
     } else {
+      long bytesAppended = 0;
       RapidsHostColumnBuilder childBuilder = childBuilders.get(0);
       for (Object listElement : inputList) {
-        appendChildOrNull(childBuilder, listElement);
+        bytesAppended += appendChildOrNull(childBuilder, listElement);
       }
       endList();
+      return bytesAppended;
     }
-    return this;
   }
 
-  private void appendChildOrNull(RapidsHostColumnBuilder childBuilder, Object listElement) {
+  private long appendChildOrNull(RapidsHostColumnBuilder childBuilder, Object listElement) {
     if (listElement == null) {
-      childBuilder.appendNull();
+      return childBuilder.appendNull();
     } else if (listElement instanceof Integer) {
-      childBuilder.append((Integer) listElement);
+      return childBuilder.append((Integer) listElement);
     } else if (listElement instanceof String) {
-      childBuilder.append((String) listElement);
+      return childBuilder.append((String) listElement);
     } else if (listElement instanceof Double) {
-      childBuilder.append((Double) listElement);
+      return childBuilder.append((Double) listElement);
     } else if (listElement instanceof Float) {
-      childBuilder.append((Float) listElement);
+      return childBuilder.append((Float) listElement);
     } else if (listElement instanceof Boolean) {
-      childBuilder.append((Boolean) listElement);
+      return childBuilder.append((Boolean) listElement);
     } else if (listElement instanceof Long) {
-      childBuilder.append((Long) listElement);
+      return childBuilder.append((Long) listElement);
     } else if (listElement instanceof Byte) {
-      childBuilder.append((Byte) listElement);
+      return childBuilder.append((Byte) listElement);
     } else if (listElement instanceof Short) {
-      childBuilder.append((Short) listElement);
+      return childBuilder.append((Short) listElement);
     } else if (listElement instanceof BigDecimal) {
-      childBuilder.append((BigDecimal) listElement);
+      return childBuilder.append((BigDecimal) listElement);
     } else if (listElement instanceof BigInteger) {
-      childBuilder.append((BigInteger) listElement);
+      return childBuilder.append((BigInteger) listElement);
     } else if (listElement instanceof List) {
-      childBuilder.append((List<?>) listElement);
+      return childBuilder.append((List<?>) listElement);
     } else if (listElement instanceof HostColumnVector.StructData) {
-      childBuilder.append((HostColumnVector.StructData) listElement);
+      return childBuilder.append((HostColumnVector.StructData) listElement);
     } else if (listElement instanceof byte[]) {
-      childBuilder.appendUTF8String((byte[]) listElement);
+      return childBuilder.appendUTF8String((byte[]) listElement);
     } else {
       throw new IllegalStateException("Unexpected element type: " + listElement.getClass());
     }
@@ -511,63 +586,63 @@ public final class RapidsHostColumnBuilder implements AutoCloseable {
     return currentStringByteIndex;
   }
 
-  public final RapidsHostColumnBuilder append(byte value) {
+  public final long append(byte value) {
     growFixedWidthBuffersAndRows();
     assert type.isBackedByByte();
     assert currentIndex < rows;
     data.setByte(currentIndex++ << bitShiftBySize, value);
-    return this;
+    return 1;
   }
 
-  public final RapidsHostColumnBuilder append(short value) {
+  public final long append(short value) {
     growFixedWidthBuffersAndRows();
     assert type.isBackedByShort();
     assert currentIndex < rows;
     data.setShort(currentIndex++ << bitShiftBySize, value);
-    return this;
+    return 2;
   }
 
-  public final RapidsHostColumnBuilder append(int value) {
+  public final long append(int value) {
     growFixedWidthBuffersAndRows();
     assert type.isBackedByInt();
     assert currentIndex < rows;
     data.setInt(currentIndex++ << bitShiftBySize, value);
-    return this;
+    return 4;
   }
 
-  public final RapidsHostColumnBuilder append(long value) {
+  public final long append(long value) {
     growFixedWidthBuffersAndRows();
     assert type.isBackedByLong();
     assert currentIndex < rows;
     data.setLong(currentIndex++ << bitShiftBySize, value);
-    return this;
+    return 8;
   }
 
-  public final RapidsHostColumnBuilder append(float value) {
+  public final long append(float value) {
     growFixedWidthBuffersAndRows();
     assert type.equals(DType.FLOAT32);
     assert currentIndex < rows;
     data.setFloat(currentIndex++ << bitShiftBySize, value);
-    return this;
+    return 4;
   }
 
-  public final RapidsHostColumnBuilder append(double value) {
+  public final long append(double value) {
     growFixedWidthBuffersAndRows();
     assert type.equals(DType.FLOAT64);
     assert currentIndex < rows;
     data.setDouble(currentIndex++ << bitShiftBySize, value);
-    return this;
+    return 8;
   }
 
-  public final RapidsHostColumnBuilder append(boolean value) {
+  public final long append(boolean value) {
     growFixedWidthBuffersAndRows();
     assert type.equals(DType.BOOL8);
     assert currentIndex < rows;
     data.setBoolean(currentIndex++ << bitShiftBySize, value);
-    return this;
+    return 1;
   }
 
-  public RapidsHostColumnBuilder append(BigDecimal value) {
+  public long append(BigDecimal value) {
     return append(value.setScale(-type.getScale(), RoundingMode.UNNECESSARY).unscaledValue());
   }
 
@@ -586,33 +661,35 @@ public final class RapidsHostColumnBuilder implements AutoCloseable {
     return finalBytes;
   }
 
-  public RapidsHostColumnBuilder append(BigInteger unscaledVal) {
+  public long append(BigInteger unscaledVal) {
     growFixedWidthBuffersAndRows();
     assert currentIndex < rows;
     if (type.getTypeId() == DType.DTypeEnum.DECIMAL32) {
       data.setInt(currentIndex++ << bitShiftBySize, unscaledVal.intValueExact());
+      return 4;
     } else if (type.getTypeId() == DType.DTypeEnum.DECIMAL64) {
       data.setLong(currentIndex++ << bitShiftBySize, unscaledVal.longValueExact());
+      return 8;
     } else if (type.getTypeId() == DType.DTypeEnum.DECIMAL128) {
       byte[] unscaledValueBytes = unscaledVal.toByteArray();
       byte[] result = convertDecimal128FromJavaToCudf(unscaledValueBytes);
       data.setBytes(currentIndex++ << bitShiftBySize, result, 0, result.length);
+      return result.length;
     } else {
       throw new IllegalStateException(type + " is not a supported decimal type.");
     }
-    return this;
   }
 
-  public RapidsHostColumnBuilder append(String value) {
+  public long append(String value) {
     assert value != null : "appendNull must be used to append null strings";
     return appendUTF8String(value.getBytes(StandardCharsets.UTF_8));
   }
 
-  public RapidsHostColumnBuilder appendUTF8String(byte[] value) {
+  public long appendUTF8String(byte[] value) {
     return appendUTF8String(value, 0, value.length);
   }
 
-  public RapidsHostColumnBuilder appendUTF8String(byte[] value, int srcOffset, int length) {
+  public long appendUTF8String(byte[] value, int srcOffset, int length) {
     assert value != null : "appendNull must be used to append null strings";
     assert srcOffset >= 0;
     assert length >= 0;
@@ -625,7 +702,7 @@ public final class RapidsHostColumnBuilder implements AutoCloseable {
     }
     currentStringByteIndex += length;
     offsets.setInt(++currentIndex << bitShiftByOffset, currentStringByteIndex);
-    return this;
+    return length;
   }
 
   /**
@@ -670,14 +747,14 @@ public final class RapidsHostColumnBuilder implements AutoCloseable {
    * This method is more efficient than `append(BigInteger unscaledVal)` if we can directly access the
    * two's-complement representation of a BigDecimal without encoding via the method `toByteArray`.
    */
-  public RapidsHostColumnBuilder appendDecimal128(byte[] binary) {
+  public long appendDecimal128(byte[] binary) {
     growFixedWidthBuffersAndRows();
     assert type.getTypeId().equals(DType.DTypeEnum.DECIMAL128);
     assert currentIndex < rows;
     assert binary.length <= type.getSizeInBytes();
     byte[] cuBinary = convertDecimal128FromJavaToCudf(binary);
     data.setBytes(currentIndex++ << bitShiftBySize, cuBinary, 0, cuBinary.length);
-    return this;
+    return cuBinary.length;
   }
 
   public RapidsHostColumnBuilder getChild(int index) {

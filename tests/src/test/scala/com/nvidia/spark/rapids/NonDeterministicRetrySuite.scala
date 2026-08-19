@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -75,12 +75,12 @@ class NonDeterministicRetrySuite extends RmmSparkRetrySuiteBase {
       conf.setConfString(RapidsConf.ENABLE_TIERED_PROJECT.key, useTieredProject.toString)
       // expression should be retryable
       val boundProjectRand = GpuBindReferences.bindGpuReferencesTiered(projectRand(),
-        batchAttrs, conf)
+        batchAttrs, conf, Map.empty)
       assert(boundProjectRand.areAllRetryable)
       // project with and without retry
       val batches = Seq(true, false).safeMap { forceRetry =>
         val boundProjectList = GpuBindReferences.bindGpuReferencesTiered(
-          projectRand() ++ batchAttrs, batchAttrs, conf)
+          projectRand() ++ batchAttrs, batchAttrs, conf, Map.empty)
         assert(boundProjectList.areAllRetryable)
 
         val sb = closeOnExcept(buildBatch()) { cb =>
@@ -120,7 +120,7 @@ class NonDeterministicRetrySuite extends RmmSparkRetrySuiteBase {
       // filter with and without retry
       val tables = Seq(true, false).safeMap { forceRetry =>
         val boundCondition = GpuBindReferences.bindGpuReferencesTiered(filterRand(),
-          batchAttrs, conf)
+          batchAttrs, conf, Map.empty)
         assert(boundCondition.areAllRetryable)
 
         val cb = buildBatch()
@@ -161,7 +161,7 @@ class NonDeterministicRetrySuite extends RmmSparkRetrySuiteBase {
     // We dont check the output correctness, so it is ok to reuse the bound expressions.
     val boundCheckExprs = GpuBindReferences.bindGpuReferences(
       Seq(GpuAlias(newGpuRand(true), "rand")()),
-      batchAttrs)
+      batchAttrs, Map.empty)
 
     // 1) Context check + no-retry + no checkpoint-restore
     assertThrows[IllegalStateException] {
@@ -191,7 +191,7 @@ class NonDeterministicRetrySuite extends RmmSparkRetrySuiteBase {
     // We dont check the output correctness, so it is ok to reuse the bound expressions.
     val boundExprs = GpuBindReferences.bindGpuReferences(
       Seq(GpuAlias(newGpuRand(false), "rand")()),
-      batchAttrs)
+      batchAttrs, Map.empty)
 
     // 1) No context check + no retry + no checkpoint-restore
     //    It works but not the expected usage for the GPU Rand

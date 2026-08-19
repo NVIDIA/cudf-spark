@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2025, NVIDIA CORPORATION.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,11 +16,14 @@ import pytest
 from _pytest.mark.structures import ParameterSet
 from pyspark.sql.functions import array_contains, broadcast, col, lit
 from pyspark.sql.types import *
-from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_row_counts_equal, assert_gpu_fallback_collect, assert_cpu_and_gpu_are_equal_collect_with_capture
-from conftest import is_emr_runtime
+from asserts import (assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_row_counts_equal,
+                     assert_gpu_fallback_collect, assert_cpu_and_gpu_are_equal_collect_with_capture,
+                     assert_cpu_and_gpu_are_equal_sql_with_capture, assert_gpu_and_cpu_are_equal_sql)
+from conftest import is_dataproc_runtime, is_dataproc_serverless_runtime, is_emr_runtime
 from data_gen import *
-from marks import ignore_order, allow_non_gpu, incompat, validate_execs_in_gpu_plan, disable_ansi_mode
-from spark_session import with_cpu_session, is_before_spark_330, is_databricks_runtime
+from marks import (allow_non_gpu, disable_ansi_mode, ignore_order, incompat,
+                   validate_execs_in_gpu_plan)
+from spark_session import with_cpu_session, is_databricks_runtime, is_spark_400_or_later, is_spark_411_or_later
 from src.main.python.spark_session import with_gpu_session
 
 # mark this test as ci_1 for mvn verify sanity check in pre-merge CI
@@ -99,11 +102,9 @@ _hash_join_conf = {'spark.sql.autoBroadcastJoinThreshold': '160',
                    'spark.sql.shuffle.partitions': '2',
                   }
 
-kudo_enabled_conf_key = "spark.rapids.shuffle.kudo.serializer.enabled"
-
-def create_df(spark, data_gen, left_length, right_length):
-    left = binary_op_df(spark, data_gen, length=left_length)
-    right = binary_op_df(spark, data_gen, length=right_length).withColumnRenamed("a", "r_a")\
+def create_df(spark, data_gen, left_length, right_length, num_slices=None):
+    left = binary_op_df(spark, data_gen, length=left_length, num_slices=num_slices)
+    right = binary_op_df(spark, data_gen, length=right_length, num_slices=num_slices).withColumnRenamed("a", "r_a")\
             .withColumnRenamed("b", "r_b")
     return left, right
 
@@ -130,86 +131,76 @@ def join_batch_size_test_params(*args):
 @ignore_order(local=True)
 @pytest.mark.parametrize('join_type', ['Left', 'Inner', 'LeftSemi', 'LeftAnti'], ids=idfn)
 @pytest.mark.parametrize("aqe_enabled", ["true", "false"], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 # https://github.com/NVIDIA/spark-rapids/issues/11100
 @allow_non_gpu('EmptyRelationExec')
-def test_right_broadcast_nested_loop_join_without_condition_empty(join_type, aqe_enabled, kudo_enabled):
+def test_right_broadcast_nested_loop_join_without_condition_empty(join_type, aqe_enabled):
     def do_join(spark):
         left, right = create_df(spark, long_gen, 50, 0)
         return left.join(broadcast(right), how=join_type)
     assert_gpu_and_cpu_are_equal_collect(do_join, conf={
         "spark.sql.adaptive.enabled": aqe_enabled,
-        kudo_enabled_conf_key: kudo_enabled
     })
 
 @ignore_order(local=True)
 @pytest.mark.parametrize('join_type', ['Left', 'Inner', 'LeftSemi', 'LeftAnti'], ids=idfn)
 @pytest.mark.parametrize("aqe_enabled", ["true", "false"], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 # https://github.com/NVIDIA/spark-rapids/issues/11100
 @allow_non_gpu('EmptyRelationExec')
-def test_left_broadcast_nested_loop_join_without_condition_empty(join_type, aqe_enabled, kudo_enabled):
+def test_left_broadcast_nested_loop_join_without_condition_empty(join_type, aqe_enabled):
     def do_join(spark):
         left, right = create_df(spark, long_gen, 0, 50)
         return left.join(broadcast(right), how=join_type)
     assert_gpu_and_cpu_are_equal_collect(do_join, conf={
         "spark.sql.adaptive.enabled": aqe_enabled,
-        kudo_enabled_conf_key: kudo_enabled
     })
 
 @ignore_order(local=True)
 @pytest.mark.parametrize('join_type', ['Left', 'Inner', 'LeftSemi', 'LeftAnti'], ids=idfn)
 @pytest.mark.parametrize("aqe_enabled", ["true", "false"], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 # https://github.com/NVIDIA/spark-rapids/issues/11100
 @allow_non_gpu('EmptyRelationExec')
-def test_broadcast_nested_loop_join_without_condition_empty(join_type, aqe_enabled, kudo_enabled):
+def test_broadcast_nested_loop_join_without_condition_empty(join_type, aqe_enabled):
     def do_join(spark):
         left, right = create_df(spark, long_gen, 0, 0)
         return left.join(broadcast(right), how=join_type)
     assert_gpu_and_cpu_are_equal_collect(do_join, conf={
         "spark.sql.adaptive.enabled": aqe_enabled,
-        kudo_enabled_conf_key: kudo_enabled
     })
 
 @ignore_order(local=True)
 @pytest.mark.parametrize('join_type', ['Left', 'Inner', 'LeftSemi', 'LeftAnti'], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 # https://github.com/NVIDIA/spark-rapids/issues/11100
 @allow_non_gpu('EmptyRelationExec')
-def test_right_broadcast_nested_loop_join_without_condition_empty_small_batch(join_type, kudo_enabled):
+def test_right_broadcast_nested_loop_join_without_condition_empty_small_batch(join_type):
     def do_join(spark):
         left, right = create_df(spark, long_gen, 50, 0)
         return left.join(broadcast(right), how=join_type)
     assert_gpu_and_cpu_are_equal_collect(do_join, conf={
         'spark.sql.adaptive.enabled': 'true',
-        kudo_enabled_conf_key: kudo_enabled
     })
 
 @ignore_order(local=True)
 @pytest.mark.parametrize('join_type', ['Left', 'Right', 'Inner', 'LeftSemi', 'LeftAnti'], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 # https://github.com/NVIDIA/spark-rapids/issues/11100
 @allow_non_gpu('EmptyRelationExec')
-def test_empty_broadcast_hash_join(join_type, kudo_enabled):
+def test_empty_broadcast_hash_join(join_type):
     def do_join(spark):
         left, right = create_df(spark, long_gen, 50, 0)
         return left.join(right.hint("broadcast"), left.a == right.r_a, join_type)
     assert_gpu_and_cpu_are_equal_collect(do_join, conf={
         'spark.sql.adaptive.enabled': 'true',
-        kudo_enabled_conf_key: kudo_enabled
     })
 
 @pytest.mark.parametrize('join_type', ['Left', 'Inner', 'LeftSemi', 'LeftAnti'], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_broadcast_hash_join_constant_keys(join_type, kudo_enabled):
+# https://github.com/NVIDIA/spark-rapids/issues/11100
+@allow_non_gpu('EmptyRelationExec')
+def test_broadcast_hash_join_constant_keys(join_type):
     def do_join(spark):
         left = spark.range(10).withColumn("s", lit(1))
         right = spark.range(10000).withColumn("r_s", lit(1))
         return left.join(right.hint("broadcast"), left.s == right.r_s, join_type)
     assert_gpu_and_cpu_row_counts_equal(do_join, conf={
         'spark.sql.adaptive.enabled': 'true',
-        kudo_enabled_conf_key: kudo_enabled
     })
 
 
@@ -220,27 +211,25 @@ def test_broadcast_hash_join_constant_keys(join_type, kudo_enabled):
     (all_gen, '1g'),
     (join_small_batch_gens, '1000')), ids=idfn)
 @pytest.mark.parametrize('join_type', all_join_types, ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_sortmerge_join(data_gen, join_type, batch_size, kudo_enabled):
+def test_sortmerge_join(data_gen, join_type, batch_size):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 500, 500)
         return left.join(right, left.a == right.r_a, join_type)
     conf = copy_and_update(_sortmerge_join_conf, {
         'spark.rapids.sql.batchSizeBytes': batch_size,
-        kudo_enabled_conf_key: kudo_enabled
+        'spark.sql.adaptive.enabled': 'false' # disable AQE as it can change the join type
     })
     assert_gpu_and_cpu_are_equal_collect(do_join, conf=conf)
 
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', basic_nested_gens + [decimal_gen_128bit], ids=idfn)
 @pytest.mark.parametrize('join_type', all_join_types, ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_sortmerge_join_ridealong(data_gen, join_type, kudo_enabled):
+def test_sortmerge_join_ridealong(data_gen, join_type):
     def do_join(spark):
         left, right = create_ridealong_df(spark, short_gen, data_gen, 500, 500)
         return left.join(right, left.key == right.r_key, join_type)
     conf = copy_and_update(_sortmerge_join_conf, {
-        kudo_enabled_conf_key: kudo_enabled
+        'spark.sql.adaptive.enabled': 'false' # disable AQE as it can change the join type
     })
     assert_gpu_and_cpu_are_equal_collect(do_join, conf=conf)
 
@@ -252,13 +241,12 @@ def test_sortmerge_join_ridealong(data_gen, join_type, kudo_enabled):
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', single_level_array_gens + [binary_gen], ids=idfn)
 @pytest.mark.parametrize('join_type', all_join_types, ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_sortmerge_join_wrong_key_fallback(data_gen, join_type, kudo_enabled):
+def test_sortmerge_join_wrong_key_fallback(data_gen, join_type):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 500, 500)
         return left.join(right, left.a == right.r_a, join_type)
     conf = copy_and_update(_sortmerge_join_conf, {
-        kudo_enabled_conf_key: kudo_enabled
+        'spark.sql.adaptive.enabled': 'false' # disable AQE as it can change the join type
     })
     assert_gpu_fallback_collect(do_join, 'SortMergeJoinExec', conf=conf)
 
@@ -282,12 +270,11 @@ def hash_join_ridealong(data_gen, join_type, confs):
 @pytest.mark.parametrize('data_gen', basic_nested_gens + [decimal_gen_128bit], ids=idfn)
 @pytest.mark.parametrize('join_type', all_non_sized_join_types, ids=idfn)
 @pytest.mark.parametrize('sub_part_enabled', ['false', 'true'], ids=['SubPartition_OFF', 'SubPartition_ON'])
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_hash_join_ridealong_non_sized(data_gen, join_type, sub_part_enabled, kudo_enabled):
+def test_hash_join_ridealong_non_sized(data_gen, join_type, sub_part_enabled):
     confs = {
         "spark.rapids.sql.test.subPartitioning.enabled": sub_part_enabled,
-        kudo_enabled_conf_key: kudo_enabled
+        'spark.sql.adaptive.enabled': 'false' # Disable AQE as it can change the query plan
     }
     hash_join_ridealong(data_gen, join_type, confs)
 
@@ -295,12 +282,11 @@ def test_hash_join_ridealong_non_sized(data_gen, join_type, sub_part_enabled, ku
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', basic_nested_gens + [decimal_gen_128bit], ids=idfn)
 @pytest.mark.parametrize('join_type', all_symmetric_sized_join_types, ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_hash_join_ridealong_symmetric(data_gen, join_type, kudo_enabled):
+def test_hash_join_ridealong_symmetric(data_gen, join_type):
     confs = {
         "spark.rapids.sql.join.useShuffledSymmetricHashJoin": "true",
-        kudo_enabled_conf_key: kudo_enabled
+        'spark.sql.adaptive.enabled': 'false' # Disable AQE as it can change the query plan
     }
     hash_join_ridealong(data_gen, join_type, confs)
 
@@ -308,12 +294,11 @@ def test_hash_join_ridealong_symmetric(data_gen, join_type, kudo_enabled):
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', basic_nested_gens + [decimal_gen_128bit], ids=idfn)
 @pytest.mark.parametrize('join_type', all_asymmetric_sized_join_types, ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_hash_join_ridealong_asymmetric(data_gen, join_type, kudo_enabled):
+def test_hash_join_ridealong_asymmetric(data_gen, join_type):
     confs = {
         "spark.rapids.sql.join.useShuffledAsymmetricHashJoin": "true",
-        kudo_enabled_conf_key: kudo_enabled
+        'spark.sql.adaptive.enabled': 'false' # Disable AQE as it can change the query plan
     }
     hash_join_ridealong(data_gen, join_type, confs)
 
@@ -340,12 +325,12 @@ def hash_join_side_is_build_side(data_gen, join_type, confs):
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', basic_nested_gens + [decimal_gen_128bit], ids=idfn)
 @pytest.mark.parametrize('join_type', all_asymmetric_sized_join_types, ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_hash_join_side_is_build_side_asymmetric(data_gen, join_type, kudo_enabled):
+def test_hash_join_side_is_build_side_asymmetric(data_gen, join_type):
+    # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
     confs = {
         "spark.rapids.sql.join.useShuffledAsymmetricHashJoin": "true",
-        kudo_enabled_conf_key: kudo_enabled
+        'spark.sql.adaptive.enabled': 'false'
     }
     hash_join_side_is_build_side(data_gen, join_type, confs)
 
@@ -377,7 +362,8 @@ def test_hash_join_side_is_build_side_basic(join_type):
             return left.join(right.hint("SHUFFLE_HASH"), "name", join_type).select(left.id, left.name, right.id, right.name)
         else:
             raise RuntimeError("Only supports left join and right join")
-    assert_gpu_and_cpu_are_equal_collect(_do_join)
+    # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
+    assert_gpu_and_cpu_are_equal_collect(_do_join, conf={'spark.sql.adaptive.enabled': 'false'})
 
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
 # After 3.1.0 is the min spark version we can drop this
@@ -386,29 +372,78 @@ def test_hash_join_side_is_build_side_basic(join_type):
 # Not all join types can be translated to a broadcast join, but this tests them to be sure we
 # can handle what spark is doing
 @pytest.mark.parametrize('join_type', all_join_types, ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_broadcast_join_right_table(data_gen, join_type, kudo_enabled):
+def test_broadcast_join_right_table(data_gen, join_type):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 500, 250)
         return left.join(broadcast(right), left.a == right.r_a, join_type)
-    conf = {kudo_enabled_conf_key: kudo_enabled}
+    # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
+    conf = {'spark.sql.adaptive.enabled': 'false'}
     assert_gpu_and_cpu_are_equal_collect(do_join, conf = conf)
+
+@ignore_order(local=True)
+@pytest.mark.parametrize('rows', ['(1)', '(1), (null)', '()'], ids=['no_nulls', 'has_nulls', 'empty'])
+def test_broadcast_join_null_aware_anti(rows):
+    sub_condition = ''
+    if rows == '()':
+        # 'VALUES()' is not supported by SQL, so leverage 'WHERE false' to produce
+        # an empty right table.
+        sub_condition = ' WHERE false'
+        rows = '(1)'
+    # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
+    conf = {'spark.sql.adaptive.enabled': 'false',
+            'spark.sql.optimizeNullAwareAntiJoin': 'true'}
+    assert_cpu_and_gpu_are_equal_sql_with_capture(
+        lambda spark: two_col_df(spark, string_gen, int_gen, length=100),
+        sql="SELECT * FROM null_aware_anti_table WHERE b NOT IN ("
+            f"SELECT b FROM VALUES {rows} AS sub_right(b){sub_condition})",
+        table_name='null_aware_anti_table',
+        exist_classes='GpuBroadcastHashJoinExec',
+        conf=conf)
+
+@ignore_order(local=True)
+def test_broadcast_nested_loop_join_degen_left_outer_build_no_columns():
+    def gen_df_func(spark):
+        spark.sql("create or replace temp view right_tbl(r1) as values (22),(33);")
+        return unary_op_df(spark, int_gen, length=300)
+
+    # The sql is from https://github.com/NVIDIA/spark-rapids/issues/13731.
+    # The degenerate left-outer join (no columns in the build side) only appears
+    # from Spark 4.0.0, but ok to test against all the Spark versions.
+    assert_gpu_and_cpu_are_equal_sql(gen_df_func,
+        sql="SELECT * FROM left_tbl WHERE EXISTS "
+            "(SELECT COUNT(*) FROM right_tbl WHERE left_tbl.a = 1);",
+        table_name='left_tbl',
+                                     # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
+                                     conf={'spark.sql.adaptive.enabled': 'false'})
+
+@ignore_order(local=True)
+@pytest.mark.skipif(is_databricks_runtime(),
+                    reason="GPU does not support InSubqueryExec on Databricks")
+@pytest.mark.parametrize('a_val', ['1', '10'], ids=idfn)  # 1: in t1, 10: not in t1
+def test_broadcast_nested_loop_join_degen_left_outer_stream_no_columns(a_val):
+    def degen_join_func(spark):
+        # This repro case is from https://github.com/NVIDIA/spark-rapids/issues/13708.
+        # And here does some change to cover more cases.
+        spark.sql(f"create or replace temp view t0 as select {a_val} as a;")
+        spark.sql("create or replace temp view t1(b) as values (1),(2);")
+        spark.sql("create or replace temp view t2(c) as values (22),(33),(44);")
+        return spark.sql("select a, cast(c as string) from t0 left join t2 on (a in (select b from t1));")
+
+    assert_gpu_and_cpu_are_equal_collect(degen_join_func)
 
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', basic_nested_gens + [decimal_gen_128bit], ids=idfn)
 # Not all join types can be translated to a broadcast join, but this tests them to be sure we
 # can handle what spark is doing
 @pytest.mark.parametrize('join_type', all_join_types, ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_broadcast_join_right_table_ridealong(data_gen, join_type, kudo_enabled):
+def test_broadcast_join_right_table_ridealong(data_gen, join_type):
     def do_join(spark):
         left, right = create_ridealong_df(spark, short_gen, data_gen, 500, 500)
         return left.join(broadcast(right), left.key == right.r_key, join_type)
 
-    conf = {kudo_enabled_conf_key: kudo_enabled}
-    assert_gpu_and_cpu_are_equal_collect(do_join, conf = conf)
+    assert_gpu_and_cpu_are_equal_collect(do_join)
 
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
 # After 3.1.0 is the min spark version we can drop this
@@ -417,16 +452,50 @@ def test_broadcast_join_right_table_ridealong(data_gen, join_type, kudo_enabled)
 # Not all join types can be translated to a broadcast join, but this tests them to be sure we
 # can handle what spark is doing
 @pytest.mark.parametrize('join_type', all_join_types, ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_broadcast_join_right_table_with_job_group(data_gen, join_type, kudo_enabled):
+def test_broadcast_join_right_table_with_job_group(data_gen, join_type):
     with_cpu_session(lambda spark : spark.sparkContext.setJobGroup("testjob1", "test", False))
     def do_join(spark):
         left, right = create_df(spark, data_gen, 500, 250)
         return left.join(broadcast(right), left.a == right.r_a, join_type)
 
-    conf = {kudo_enabled_conf_key: kudo_enabled}
+    conf = {'spark.sql.adaptive.enabled': 'false' # disable AQE as it can change the join type
+            }
     assert_gpu_and_cpu_are_equal_collect(do_join, conf = conf)
+
+# because this infers the schema for CSV we need to allow some ops to be on the CPU
+@allow_non_gpu("CollectLimitExec", "FileSourceScanExec", "DeserializeToObjectExec")
+def test_empty_cross_side_with_limit(std_input_path):
+    def do_join(spark):
+        t0 = spark.read.csv(std_input_path + '/t0.csv', header=True, inferSchema=True)
+        t1 = spark.read.csv(std_input_path + '/t1.csv', header=True, inferSchema=True)
+        return t0.crossJoin(t1).limit(21)
+    assert_gpu_and_cpu_are_equal_collect(
+        do_join,
+        # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
+        conf={'spark.sql.adaptive.enabled': 'false'})
+
+@allow_non_gpu('CollectLimitExec')
+def test_empty_right_outer_side_with_limit(std_input_path):
+    built_csv_path = std_input_path + '/t1.csv'
+    stream_csv_path = std_input_path + '/t0.csv'
+
+    def create_views(spark):
+        spark.read.csv(built_csv_path, header=True, inferSchema=True).createOrReplaceTempView("built_table")
+        spark.read.csv(stream_csv_path, header=True, inferSchema=True).createOrReplaceTempView("stream_table")
+
+    # create views first on CPU
+    with_cpu_session(lambda spark: create_views(spark))
+
+    # limit to 10 rows to produce `LocalLimitExec` node
+    def do_join(spark):
+        return spark.sql("""
+            SELECT '1', CAST(CAST(stream_table.c0 AS int) as string)
+            FROM built_table
+            RIGHT OUTER JOIN stream_table
+            ON TRUE limit 10
+        """)
+    assert_gpu_and_cpu_are_equal_collect(do_join)
 
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
 # After 3.1.0 is the min spark version we can drop this
@@ -435,15 +504,13 @@ def test_broadcast_join_right_table_with_job_group(data_gen, join_type, kudo_ena
 @pytest.mark.parametrize('data_gen,batch_size', join_batch_size_test_params(
     (all_gen + basic_nested_gens, '1g'),
     (join_small_batch_gens + [basic_struct_gen, ArrayGen(string_gen)], '100')), ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_cartesian_join(data_gen, batch_size, kudo_enabled):
+def test_cartesian_join(data_gen, batch_size):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 50, 25)
         return left.crossJoin(right)
     assert_gpu_and_cpu_are_equal_collect(do_join, conf={
         'spark.rapids.sql.batchSizeBytes': batch_size,
-        kudo_enabled_conf_key: kudo_enabled
     })
 
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
@@ -453,14 +520,12 @@ def test_cartesian_join(data_gen, batch_size, kudo_enabled):
 @pytest.mark.xfail(condition=is_databricks_runtime(),
     reason='https://github.com/NVIDIA/spark-rapids/issues/334')
 @pytest.mark.parametrize('batch_size', ['100', '1g'], ids=idfn) # set the batch size so we can test multiple stream batches
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_cartesian_join_special_case_count(batch_size, kudo_enabled):
+def test_cartesian_join_special_case_count(batch_size):
     def do_join(spark):
         left, right = create_df(spark, int_gen, 50, 25)
         return left.crossJoin(right).selectExpr('COUNT(*)')
     assert_gpu_and_cpu_are_equal_collect(do_join, conf={
         'spark.rapids.sql.batchSizeBytes': batch_size,
-        kudo_enabled_conf_key: kudo_enabled
     })
 
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
@@ -470,14 +535,12 @@ def test_cartesian_join_special_case_count(batch_size, kudo_enabled):
 @pytest.mark.xfail(condition=is_databricks_runtime(),
     reason='https://github.com/NVIDIA/spark-rapids/issues/334')
 @pytest.mark.parametrize('batch_size', ['1000', '1g'], ids=idfn) # set the batch size so we can test multiple stream batches
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_cartesian_join_special_case_group_by_count(batch_size, kudo_enabled):
+def test_cartesian_join_special_case_group_by_count(batch_size):
     def do_join(spark):
         left, right = create_df(spark, int_gen, 50, 25)
         return left.crossJoin(right).groupBy('a').count()
     assert_gpu_and_cpu_are_equal_collect(do_join, conf={
         'spark.rapids.sql.batchSizeBytes': batch_size,
-        kudo_enabled_conf_key: kudo_enabled
     })
 
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
@@ -487,9 +550,8 @@ def test_cartesian_join_special_case_group_by_count(batch_size, kudo_enabled):
 @pytest.mark.parametrize('data_gen,batch_size', join_batch_size_test_params(
     (all_gen, '1g'),
     (join_small_batch_gens, '100')), ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_cartesian_join_with_condition(data_gen, batch_size, kudo_enabled):
+def test_cartesian_join_with_condition(data_gen, batch_size):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 50, 25)
         # This test is impacted by https://github.com/NVIDIA/spark-rapids/issues/294
@@ -499,7 +561,6 @@ def test_cartesian_join_with_condition(data_gen, batch_size, kudo_enabled):
         return left.join(right, left.b >= right.r_b, "cross")
     conf = copy_and_update(_sortmerge_join_conf, {
         'spark.rapids.sql.batchSizeBytes': batch_size,
-        kudo_enabled_conf_key: kudo_enabled
     })
     assert_gpu_and_cpu_are_equal_collect(do_join, conf=conf)
 
@@ -509,29 +570,25 @@ def test_cartesian_join_with_condition(data_gen, batch_size, kudo_enabled):
 @pytest.mark.parametrize('data_gen,batch_size', join_batch_size_test_params(
     (all_gen + basic_nested_gens, '1g'),
     (join_small_batch_gens, '100')), ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_broadcast_nested_loop_join(data_gen, batch_size, kudo_enabled):
+def test_broadcast_nested_loop_join(data_gen, batch_size):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 50, 25)
         return left.crossJoin(broadcast(right))
     assert_gpu_and_cpu_are_equal_collect(do_join, conf={
         'spark.rapids.sql.batchSizeBytes': batch_size,
-        kudo_enabled_conf_key: kudo_enabled
     })
 
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
 # After 3.1.0 is the min spark version we can drop this
 @ignore_order(local=True)
 @pytest.mark.parametrize('batch_size', ['100', '1g'], ids=idfn) # set the batch size so we can test multiple stream batches
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_broadcast_nested_loop_join_special_case_count(batch_size, kudo_enabled):
+def test_broadcast_nested_loop_join_special_case_count(batch_size):
     def do_join(spark):
         left, right = create_df(spark, int_gen, 50, 25)
         return left.crossJoin(broadcast(right)).selectExpr('COUNT(*)')
     assert_gpu_and_cpu_are_equal_collect(do_join, conf={
         'spark.rapids.sql.batchSizeBytes': batch_size,
-        kudo_enabled_conf_key: kudo_enabled
     })
 
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
@@ -540,14 +597,12 @@ def test_broadcast_nested_loop_join_special_case_count(batch_size, kudo_enabled)
 @pytest.mark.xfail(condition=is_databricks_runtime(),
     reason='https://github.com/NVIDIA/spark-rapids/issues/334')
 @pytest.mark.parametrize('batch_size', ['1000', '1g'], ids=idfn) # set the batch size so we can test multiple stream batches
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_broadcast_nested_loop_join_special_case_group_by_count(batch_size, kudo_enabled):
+def test_broadcast_nested_loop_join_special_case_group_by_count(batch_size):
     def do_join(spark):
         left, right = create_df(spark, int_gen, 50, 25)
         return left.crossJoin(broadcast(right)).groupBy('a').count()
     assert_gpu_and_cpu_are_equal_collect(do_join, conf={
         'spark.rapids.sql.batchSizeBytes': batch_size,
-        kudo_enabled_conf_key: kudo_enabled
     })
 
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
@@ -557,9 +612,8 @@ def test_broadcast_nested_loop_join_special_case_group_by_count(batch_size, kudo
     (join_ast_gen, '1g'),
     ([int_gen], 100)), ids=idfn)
 @pytest.mark.parametrize('join_type', ['Left', 'Inner', 'LeftSemi', 'LeftAnti', 'Cross'], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_right_broadcast_nested_loop_join_with_ast_condition(data_gen, join_type, batch_size, kudo_enabled):
+def test_right_broadcast_nested_loop_join_with_ast_condition(data_gen, join_type, batch_size):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 50, 25)
         # This test is impacted by https://github.com/NVIDIA/spark-rapids/issues/294
@@ -569,16 +623,14 @@ def test_right_broadcast_nested_loop_join_with_ast_condition(data_gen, join_type
         return left.join(broadcast(right), (left.b >= right.r_b), join_type)
     assert_gpu_and_cpu_are_equal_collect(do_join, conf={
         'spark.rapids.sql.batchSizeBytes': batch_size,
-        kudo_enabled_conf_key: kudo_enabled
     })
 
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
 # After 3.1.0 is the min spark version we can drop this
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', join_ast_gen, ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_left_broadcast_nested_loop_join_with_ast_condition(data_gen, kudo_enabled):
+def test_left_broadcast_nested_loop_join_with_ast_condition(data_gen):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 50, 25)
         # This test is impacted by https://github.com/NVIDIA/spark-rapids/issues/294
@@ -586,15 +638,14 @@ def test_left_broadcast_nested_loop_join_with_ast_condition(data_gen, kudo_enabl
         # but these take a long time to verify so we run with smaller numbers by default
         # that do not expose the error
         return broadcast(left).join(right, (left.b >= right.r_b), 'Right')
-    assert_gpu_and_cpu_are_equal_collect(do_join, conf = {kudo_enabled_conf_key: kudo_enabled})
+    assert_gpu_and_cpu_are_equal_collect(do_join)
 
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
 # After 3.1.0 is the min spark version we can drop this
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', [IntegerGen(), LongGen(), pytest.param(FloatGen(), marks=[incompat]), pytest.param(DoubleGen(), marks=[incompat])], ids=idfn)
 @pytest.mark.parametrize('join_type', ['Inner', 'Cross'], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_broadcast_nested_loop_join_with_condition_post_filter(data_gen, join_type, kudo_enabled):
+def test_broadcast_nested_loop_join_with_condition_post_filter(data_gen, join_type):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 50, 25)
         # This test is impacted by https://github.com/NVIDIA/spark-rapids/issues/294
@@ -603,15 +654,14 @@ def test_broadcast_nested_loop_join_with_condition_post_filter(data_gen, join_ty
         # that do not expose the error
         # AST does not support cast or logarithm yet, so this must be implemented as a post-filter
         return left.join(broadcast(right), left.a > f.log(right.r_a), join_type)
-    assert_gpu_and_cpu_are_equal_collect(do_join, conf = {kudo_enabled_conf_key: kudo_enabled})
+    assert_gpu_and_cpu_are_equal_collect(do_join)
 
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', [IntegerGen(), LongGen(), pytest.param(FloatGen(), marks=[incompat]), pytest.param(DoubleGen(), marks=[incompat])], ids=idfn)
 @pytest.mark.parametrize('join_type', ['Cross', 'Left', 'LeftSemi', 'LeftAnti'], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 # https://github.com/NVIDIA/spark-rapids/issues/12700
 @disable_ansi_mode
-def test_broadcast_nested_loop_join_with_condition(data_gen, join_type, kudo_enabled):
+def test_broadcast_nested_loop_join_with_condition(data_gen, join_type):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 50, 25)
         # AST does not support cast or logarithm yet which is supposed to be extracted into child
@@ -624,44 +674,41 @@ def test_broadcast_nested_loop_join_with_condition(data_gen, join_type, kudo_ena
         return left.join(broadcast(right), f.round(left.a).cast('integer') > f.round(f.log(right.r_a).cast('integer')), join_type)
     assert_gpu_and_cpu_are_equal_collect(do_join, conf={
         "spark.rapids.sql.castFloatToIntegralTypes.enabled": True,
-        kudo_enabled_conf_key: kudo_enabled
     })
 
 @allow_non_gpu('BroadcastExchangeExec', 'BroadcastNestedLoopJoinExec', 'Cast', 'GreaterThan', 'Log')
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', [IntegerGen(), LongGen(), pytest.param(FloatGen(), marks=[incompat]), pytest.param(DoubleGen(), marks=[incompat])], ids=idfn)
 @pytest.mark.parametrize('join_type', ['Left', 'Right', 'FullOuter', 'LeftSemi', 'LeftAnti'], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_broadcast_nested_loop_join_with_condition_fallback(data_gen, join_type, kudo_enabled):
+def test_broadcast_nested_loop_join_with_condition_fallback(data_gen, join_type):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 50, 25)
         # AST does not support double type which is not split-able into child nodes.
         return broadcast(left).join(right, left.a > f.log(right.r_a), join_type)
     assert_gpu_fallback_collect(do_join, 'BroadcastNestedLoopJoinExec',
-                                conf = {kudo_enabled_conf_key: kudo_enabled})
+                                conf = {# disable AQE as it can change the join type
+                                        "spark.sql.adaptive.enabled": "false"})
 
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', [byte_gen, short_gen, int_gen, long_gen,
                                       float_gen, double_gen,
                                       string_gen, boolean_gen, date_gen, timestamp_gen], ids=idfn)
 @pytest.mark.parametrize('join_type', ['Left', 'Right', 'FullOuter', 'LeftSemi', 'LeftAnti'], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_broadcast_nested_loop_join_with_array_contains(data_gen, join_type, kudo_enabled):
+def test_broadcast_nested_loop_join_with_array_contains(data_gen, join_type):
     arr_gen = ArrayGen(data_gen)
     literal = with_cpu_session(lambda spark: gen_scalar(data_gen))
     def do_join(spark):
         left, right = create_df(spark, arr_gen, 50, 25)
         # Array_contains will be pushed down into project child nodes
         return broadcast(left).join(right, array_contains(left.a, literal.cast(data_gen.data_type)) < array_contains(right.r_a, literal.cast(data_gen.data_type)))
-    assert_gpu_and_cpu_are_equal_collect(do_join, conf = {kudo_enabled_conf_key: kudo_enabled})
+    assert_gpu_and_cpu_are_equal_collect(do_join)
 
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', all_gen, ids=idfn)
 @pytest.mark.parametrize('join_type', ['Left', 'LeftSemi', 'LeftAnti'], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_right_broadcast_nested_loop_join_condition_missing(data_gen, join_type, kudo_enabled):
+def test_right_broadcast_nested_loop_join_condition_missing(data_gen, join_type):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 50, 25)
         # This test is impacted by https://github.com/NVIDIA/spark-rapids/issues/294
@@ -671,14 +718,16 @@ def test_right_broadcast_nested_loop_join_condition_missing(data_gen, join_type,
         # Compute the distinct of the join result to verify the join produces a proper dataframe
         # for downstream processing.
         return left.join(broadcast(right), how=join_type).distinct()
-    assert_gpu_and_cpu_are_equal_collect(do_join, conf = {kudo_enabled_conf_key: kudo_enabled})
+    assert_gpu_and_cpu_are_equal_collect(
+        do_join,
+        conf = {'spark.sql.adaptive.enabled': 'false' # disable AQE as it can change the join type
+                })
 
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', all_gen, ids=idfn)
 @pytest.mark.parametrize('join_type', ['Right'], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_left_broadcast_nested_loop_join_condition_missing(data_gen, join_type, kudo_enabled):
+def test_left_broadcast_nested_loop_join_condition_missing(data_gen, join_type):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 50, 25)
         # This test is impacted by https://github.com/NVIDIA/spark-rapids/issues/294
@@ -688,52 +737,49 @@ def test_left_broadcast_nested_loop_join_condition_missing(data_gen, join_type, 
         # Compute the distinct of the join result to verify the join produces a proper dataframe
         # for downstream processing.
         return broadcast(left).join(right, how=join_type).distinct()
-    assert_gpu_and_cpu_are_equal_collect(do_join, conf = {kudo_enabled_conf_key: kudo_enabled})
+    assert_gpu_and_cpu_are_equal_collect(do_join)
 
 @pytest.mark.parametrize('data_gen', all_gen + single_level_array_gens + [binary_gen], ids=idfn)
 @pytest.mark.parametrize('join_type', ['Left', 'LeftSemi', 'LeftAnti'], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_right_broadcast_nested_loop_join_condition_missing_count(data_gen, join_type, kudo_enabled):
+def test_right_broadcast_nested_loop_join_condition_missing_count(data_gen, join_type):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 50, 25)
         return left.join(broadcast(right), how=join_type).selectExpr('COUNT(*)')
-    assert_gpu_and_cpu_are_equal_collect(do_join, conf = {kudo_enabled_conf_key: kudo_enabled})
+    # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
+    assert_gpu_and_cpu_are_equal_collect(do_join, conf = {'spark.sql.adaptive.enabled': 'false'
+                                                          })
 
 @pytest.mark.parametrize('data_gen', all_gen + single_level_array_gens + [binary_gen], ids=idfn)
 @pytest.mark.parametrize('join_type', ['Right'], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_left_broadcast_nested_loop_join_condition_missing_count(data_gen, join_type, kudo_enabled):
+def test_left_broadcast_nested_loop_join_condition_missing_count(data_gen, join_type):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 50, 25)
         return broadcast(left).join(right, how=join_type).selectExpr('COUNT(*)')
-    assert_gpu_and_cpu_are_equal_collect(do_join, conf = {kudo_enabled_conf_key: kudo_enabled})
+    assert_gpu_and_cpu_are_equal_collect(do_join)
 
 @allow_non_gpu('BroadcastExchangeExec', 'BroadcastNestedLoopJoinExec', 'GreaterThanOrEqual', *non_utc_allow)
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', all_gen, ids=idfn)
 @pytest.mark.parametrize('join_type', ['LeftOuter', 'LeftSemi', 'LeftAnti', 'FullOuter'], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_broadcast_nested_loop_join_with_conditionals_build_left_fallback(data_gen, join_type,
-                                                                          kudo_enabled):
+def test_broadcast_nested_loop_join_with_conditionals_build_left_fallback(data_gen, join_type):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 50, 25)
         return broadcast(left).join(right, (left.b >= right.r_b), join_type)
     assert_gpu_fallback_collect(do_join, 'BroadcastNestedLoopJoinExec',
-                                conf = {kudo_enabled_conf_key: kudo_enabled})
+                                conf = {'spark.sql.adaptive.enabled': 'false' # disable AQE as it can change the join type
+                                        })
 
 @allow_non_gpu('BroadcastExchangeExec', 'BroadcastNestedLoopJoinExec', 'GreaterThanOrEqual', *non_utc_allow)
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', all_gen, ids=idfn)
 @pytest.mark.parametrize('join_type', ['RightOuter', 'FullOuter'], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_broadcast_nested_loop_with_conditionals_build_right_fallback(data_gen, join_type, kudo_enabled):
+def test_broadcast_nested_loop_with_conditionals_build_right_fallback(data_gen, join_type):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 50, 25)
         return left.join(broadcast(right), (left.b >= right.r_b), join_type)
-    assert_gpu_fallback_collect(do_join, 'BroadcastNestedLoopJoinExec',
-                                conf = {kudo_enabled_conf_key: kudo_enabled})
+    assert_gpu_fallback_collect(do_join, 'BroadcastNestedLoopJoinExec')
 
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
 # After 3.1.0 is the min spark version we can drop this
@@ -745,13 +791,13 @@ def test_broadcast_nested_loop_with_conditionals_build_right_fallback(data_gen, 
 # Specify 200 shuffle partitions to test cases where streaming side is empty
 # as in https://github.com/NVIDIA/spark-rapids/issues/7516
 @pytest.mark.parametrize('shuffle_conf', [{}, {'spark.sql.shuffle.partitions': 200}], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_broadcast_join_left_table(data_gen, join_type, shuffle_conf, kudo_enabled):
+def test_broadcast_join_left_table(data_gen, join_type, shuffle_conf):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 250, 500)
         return broadcast(left).join(right, left.a == right.r_a, join_type)
-    conf = copy_and_update(shuffle_conf, {kudo_enabled_conf_key: kudo_enabled})
+    # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
+    conf = copy_and_update(shuffle_conf, {'spark.sql.adaptive.enabled': 'false'})
     assert_gpu_and_cpu_are_equal_collect(do_join, conf=conf)
 
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
@@ -759,14 +805,14 @@ def test_broadcast_join_left_table(data_gen, join_type, shuffle_conf, kudo_enabl
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', join_ast_gen, ids=idfn)
 @pytest.mark.parametrize('join_type', all_join_types, ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_broadcast_join_with_conditionals(data_gen, join_type, kudo_enabled):
+def test_broadcast_join_with_conditionals(data_gen, join_type):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 500, 250)
         return left.join(broadcast(right),
                    (left.a == right.r_a) & (left.b >= right.r_b), join_type)
-    assert_gpu_and_cpu_are_equal_collect(do_join, conf = {kudo_enabled_conf_key: kudo_enabled})
+    # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
+    assert_gpu_and_cpu_are_equal_collect(do_join, conf = {'spark.sql.adaptive.enabled': 'false'})
 
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
 # After 3.1.0 is the min spark version we can drop this
@@ -774,15 +820,15 @@ def test_broadcast_join_with_conditionals(data_gen, join_type, kudo_enabled):
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', [long_gen], ids=idfn)
 @pytest.mark.parametrize('join_type', ['Left', 'Right', 'FullOuter', 'LeftSemi', 'LeftAnti'], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_broadcast_join_with_condition_ast_op_fallback(data_gen, join_type, kudo_enabled):
+def test_broadcast_join_with_condition_ast_op_fallback(data_gen, join_type):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 50, 25)
         # AST does not support cast or logarithm yet
         return left.join(broadcast(right),
                          (left.a == right.r_a) & (left.b > f.log(right.r_b)), join_type)
     exec = 'SortMergeJoinExec' if join_type in ['Right', 'FullOuter'] else 'BroadcastHashJoinExec'
-    assert_gpu_fallback_collect(do_join, exec, conf = {kudo_enabled_conf_key: kudo_enabled})
+    # Disable AQE as it changes the query plan
+    assert_gpu_fallback_collect(do_join, exec, conf = {'spark.sql.adaptive.enabled': 'false'})
 
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
 # After 3.1.0 is the min spark version we can drop this
@@ -790,41 +836,44 @@ def test_broadcast_join_with_condition_ast_op_fallback(data_gen, join_type, kudo
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', join_no_ast_gen, ids=idfn)
 @pytest.mark.parametrize('join_type', ['Left', 'Right', 'FullOuter', 'LeftSemi', 'LeftAnti'], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_broadcast_join_with_condition_ast_type_fallback(data_gen, join_type, kudo_enabled):
+def test_broadcast_join_with_condition_ast_type_fallback(data_gen, join_type):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 50, 25)
         # AST does not support cast or logarithm yet
         return left.join(broadcast(right),
                          (left.a == right.r_a) & (left.b > right.r_b), join_type)
     exec = 'SortMergeJoinExec' if join_type in ['Right', 'FullOuter'] else 'BroadcastHashJoinExec'
-    assert_gpu_fallback_collect(do_join, exec, conf = {kudo_enabled_conf_key: kudo_enabled})
+    # Disable AQE as it changes the query plan
+    assert_gpu_fallback_collect(do_join, exec, conf = {'spark.sql.adaptive.enabled': 'false'})
 
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
 # After 3.1.0 is the min spark version we can drop this
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', join_no_ast_gen, ids=idfn)
 @pytest.mark.parametrize('join_type', ['Inner', 'Cross'], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_broadcast_join_with_condition_post_filter(data_gen, join_type, kudo_enabled):
+def test_broadcast_join_with_condition_post_filter(data_gen, join_type):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 500, 250)
         return left.join(broadcast(right),
                          (left.a == right.r_a) & (left.b > right.r_b), join_type)
-    assert_gpu_and_cpu_are_equal_collect(do_join, conf = {kudo_enabled_conf_key: kudo_enabled})
+    assert_gpu_and_cpu_are_equal_collect(
+        do_join,
+        conf = {'spark.sql.adaptive.enabled': 'false' # disable AQE as it can change the join type
+                })
 
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
 # After 3.1.0 is the min spark version we can drop this
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', join_ast_gen, ids=idfn)
 @pytest.mark.parametrize('join_type', ['Left', 'Right', 'Inner', 'FullOuter', 'LeftSemi', 'LeftAnti'], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_sortmerge_join_with_condition_ast(data_gen, join_type, kudo_enabled):
+def test_sortmerge_join_with_condition_ast(data_gen, join_type):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 500, 250)
         return left.join(right, (left.a == right.r_a) & (left.b >= right.r_b), join_type)
-    conf = copy_and_update(_sortmerge_join_conf, {kudo_enabled_conf_key: kudo_enabled})
+    conf = copy_and_update(_sortmerge_join_conf, {
+        'spark.sql.adaptive.enabled': 'false' # disable AQE as it can change the join type
+    })
     assert_gpu_and_cpu_are_equal_collect(do_join, conf=conf)
 
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
@@ -833,13 +882,14 @@ def test_sortmerge_join_with_condition_ast(data_gen, join_type, kudo_enabled):
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', [long_gen], ids=idfn)
 @pytest.mark.parametrize('join_type', ['Left', 'Right', 'FullOuter', 'LeftSemi', 'LeftAnti'], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_sortmerge_join_with_condition_ast_op_fallback(data_gen, join_type, kudo_enabled):
+def test_sortmerge_join_with_condition_ast_op_fallback(data_gen, join_type):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 500, 250)
         # AST does not support cast or logarithm yet
         return left.join(right, (left.a == right.r_a) & (left.b > f.log(right.r_b)), join_type)
-    conf = copy_and_update(_sortmerge_join_conf, {kudo_enabled_conf_key: kudo_enabled})
+    conf = copy_and_update(_sortmerge_join_conf, {
+        'spark.sql.adaptive.enabled': 'false' # disable AQE as it can change the join type
+    })
     assert_gpu_fallback_collect(do_join, 'SortMergeJoinExec', conf=conf)
 
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
@@ -848,12 +898,13 @@ def test_sortmerge_join_with_condition_ast_op_fallback(data_gen, join_type, kudo
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', join_no_ast_gen, ids=idfn)
 @pytest.mark.parametrize('join_type', ['Left', 'Right', 'FullOuter', 'LeftSemi', 'LeftAnti'], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_sortmerge_join_with_condition_ast_type_fallback(data_gen, join_type, kudo_enabled):
+def test_sortmerge_join_with_condition_ast_type_fallback(data_gen, join_type):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 500, 250)
         return left.join(right, (left.a == right.r_a) & (left.b > right.r_b), join_type)
-    conf = copy_and_update(_sortmerge_join_conf, {kudo_enabled_conf_key: kudo_enabled})
+    conf = copy_and_update(_sortmerge_join_conf, {
+        'spark.sql.adaptive.enabled': 'false' # disable AQE as it can change the join type
+    })
     assert_gpu_fallback_collect(do_join, 'SortMergeJoinExec', conf=conf)
 
 
@@ -865,22 +916,21 @@ _mixed_df2_with_nulls = [('a', RepeatSeqGen(LongGen(nullable=(True, 20.0)), leng
 
 @ignore_order
 @pytest.mark.parametrize('join_type', ['Left', 'Right', 'Inner', 'LeftSemi', 'LeftAnti', 'FullOuter', 'Cross'], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_broadcast_join_mixed(join_type, kudo_enabled):
+def test_broadcast_join_mixed(join_type):
     def do_join(spark):
         left = gen_df(spark, _mixed_df1_with_nulls, length=500)
         right = gen_df(spark, _mixed_df2_with_nulls, length=500).withColumnRenamed("a", "r_a")\
                 .withColumnRenamed("b", "r_b").withColumnRenamed("c", "r_c")
         return left.join(broadcast(right), left.a.eqNullSafe(right.r_a), join_type)
-    assert_gpu_and_cpu_are_equal_collect(do_join, conf={kudo_enabled_conf_key: kudo_enabled})
+    # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
+    assert_gpu_and_cpu_are_equal_collect(do_join, conf={'spark.sql.adaptive.enabled': 'false'})
 
 @ignore_order
 @allow_non_gpu('DataWritingCommandExec,ExecutedCommandExec,WriteFilesExec')
 @pytest.mark.xfail(condition=is_emr_runtime(),
     reason='https://github.com/NVIDIA/spark-rapids/issues/821')
 @pytest.mark.parametrize('repartition', ["true", "false"], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_join_bucketed_table(repartition, spark_tmp_table_factory, kudo_enabled):
+def test_join_bucketed_table(repartition, spark_tmp_table_factory):
     def do_join(spark):
         table_name = spark_tmp_table_factory.get()
         data = [("http://fooblog.com/blog-entry-116.html", "https://fooblog.com/blog-entry-116.html"),
@@ -897,7 +947,6 @@ def test_join_bucketed_table(repartition, spark_tmp_table_factory, kudo_enabled)
                 return testurls.join(resolved, "Url", "inner")
     assert_gpu_and_cpu_are_equal_collect(do_join, conf={
         'spark.sql.autoBroadcastJoinThreshold': '-1',
-        kudo_enabled_conf_key: kudo_enabled
     })
 
 
@@ -947,9 +996,8 @@ def test_bucket_join_io_precache(spark_tmp_table_factory, join_type, aqe_enabled
 @pytest.mark.parametrize('join_type', ['Left', 'Right', 'Inner', 'LeftSemi', 'LeftAnti'], ids=idfn)
 @pytest.mark.parametrize('cache_side', ['cache_left', 'cache_right'], ids=idfn)
 @pytest.mark.parametrize('cpu_side', ['cache', 'not_cache'], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @disable_ansi_mode
-def test_half_cache_join(join_type, cache_side, cpu_side, kudo_enabled):
+def test_half_cache_join(join_type, cache_side, cpu_side):
     left_gen = [('a', SetValuesGen(LongType(), range(500))), ('b', IntegerGen())]
     right_gen = [('r_a', SetValuesGen(LongType(), range(500))), ('c', LongGen())]
     def do_join(spark):
@@ -983,7 +1031,6 @@ def test_half_cache_join(join_type, cache_side, cpu_side, kudo_enabled):
     # we tell it to, this is just to be safe
     assert_gpu_and_cpu_are_equal_collect(do_join, {
         'spark.sql.autoBroadcastJoinThreshold': '1',
-        'spark.rapids.shuffle.kudo.serializer.enabled': kudo_enabled
     })
 
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
@@ -991,13 +1038,14 @@ def test_half_cache_join(join_type, cache_side, cpu_side, kudo_enabled):
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', struct_gens, ids=idfn)
 @pytest.mark.parametrize('join_type', ['Inner', 'Left', 'Right', 'Cross', 'LeftSemi', 'LeftAnti'], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_sortmerge_join_struct_as_key(data_gen, join_type, kudo_enabled):
+def test_sortmerge_join_struct_as_key(data_gen, join_type):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 500, 250)
         return left.join(right, left.a == right.r_a, join_type)
-    conf = copy_and_update(_sortmerge_join_conf, {kudo_enabled_conf_key: kudo_enabled})
+    conf = copy_and_update(_sortmerge_join_conf, {
+        'spark.sql.adaptive.enabled': 'false' # disable AQE as it can change the join type
+    })
     assert_gpu_and_cpu_are_equal_collect(do_join, conf=conf)
 
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
@@ -1005,14 +1053,15 @@ def test_sortmerge_join_struct_as_key(data_gen, join_type, kudo_enabled):
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', struct_gens, ids=idfn)
 @pytest.mark.parametrize('join_type', ['Inner', 'Left', 'Right', 'Cross', 'LeftSemi', 'LeftAnti'], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_sortmerge_join_struct_mixed_key(data_gen, join_type, kudo_enabled):
+def test_sortmerge_join_struct_mixed_key(data_gen, join_type):
     def do_join(spark):
         left = two_col_df(spark, data_gen, int_gen, length=500)
         right = two_col_df(spark, data_gen, int_gen, length=500)
         return left.join(right, (left.a == right.a) & (left.b == right.b), join_type)
-    conf = copy_and_update(_sortmerge_join_conf, {kudo_enabled_conf_key: kudo_enabled})
+    conf = copy_and_update(_sortmerge_join_conf, {
+        'spark.sql.adaptive.enabled': 'false' # disable AQE as it can change the join type
+    })
     assert_gpu_and_cpu_are_equal_collect(do_join, conf=conf)
 
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
@@ -1020,16 +1069,16 @@ def test_sortmerge_join_struct_mixed_key(data_gen, join_type, kudo_enabled):
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', struct_gens, ids=idfn)
 @pytest.mark.parametrize('join_type', ['Inner', 'Left', 'Right', 'Cross', 'LeftSemi', 'LeftAnti'], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_sortmerge_join_struct_mixed_key_with_null_filter(data_gen, join_type, kudo_enabled):
+def test_sortmerge_join_struct_mixed_key_with_null_filter(data_gen, join_type):
     def do_join(spark):
         left = two_col_df(spark, data_gen, int_gen, length=500)
         right = two_col_df(spark, data_gen, int_gen, length=500)
         return left.join(right, (left.a == right.a) & (left.b == right.b), join_type)
     # Disable constraintPropagation to test null filter on built table with nullable structures.
+    # Disable AQE as it can change the join type
     conf = {'spark.sql.constraintPropagation.enabled': 'false',
-            'spark.rapids.shuffle.kudo.serializer.enabled': kudo_enabled,
+            'spark.sql.adaptive.enabled': 'false',
             **_sortmerge_join_conf}
     assert_gpu_and_cpu_are_equal_collect(do_join, conf=conf)
 
@@ -1038,41 +1087,40 @@ def test_sortmerge_join_struct_mixed_key_with_null_filter(data_gen, join_type, k
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', struct_gens, ids=idfn)
 @pytest.mark.parametrize('join_type', ['Inner', 'Left', 'Right', 'Cross', 'LeftSemi', 'LeftAnti'], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_broadcast_join_right_struct_as_key(data_gen, join_type, kudo_enabled):
+def test_broadcast_join_right_struct_as_key(data_gen, join_type):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 500, 250)
         return left.join(broadcast(right), left.a == right.r_a, join_type)
-    assert_gpu_and_cpu_are_equal_collect(do_join, conf = {kudo_enabled_conf_key: kudo_enabled})
+    # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
+    assert_gpu_and_cpu_are_equal_collect(do_join, conf = {'spark.sql.adaptive.enabled': 'false'})
 
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
 # After 3.1.0 is the min spark version we can drop this
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', struct_gens, ids=idfn)
 @pytest.mark.parametrize('join_type', ['Inner', 'Left', 'Right', 'Cross', 'LeftSemi', 'LeftAnti'], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_broadcast_join_right_struct_mixed_key(data_gen, join_type, kudo_enabled):
+def test_broadcast_join_right_struct_mixed_key(data_gen, join_type):
     def do_join(spark):
         left = two_col_df(spark, data_gen, int_gen, length=500)
         right = two_col_df(spark, data_gen, int_gen, length=250)
         return left.join(broadcast(right), (left.a == right.a) & (left.b == right.b), join_type)
-    assert_gpu_and_cpu_are_equal_collect(do_join, conf = {kudo_enabled_conf_key: kudo_enabled})
+    # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
+    assert_gpu_and_cpu_are_equal_collect(do_join, conf = {'spark.sql.adaptive.enabled': 'false'})
 
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
 # After 3.1.0 is the min spark version we can drop this
 @ignore_order(local=True)
-@pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/2140')
 @pytest.mark.parametrize('data_gen', [basic_struct_gen_with_floats], ids=idfn)
 @pytest.mark.parametrize('join_type', ['Inner', 'Left', 'Right', 'Cross', 'LeftSemi', 'LeftAnti'], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_sortmerge_join_struct_with_floats_key(data_gen, join_type, kudo_enabled):
+def test_sortmerge_join_struct_with_floats_key(data_gen, join_type):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 500, 250)
         return left.join(right, left.a == right.r_a, join_type)
-    conf = copy_and_update(_sortmerge_join_conf,
-                           {kudo_enabled_conf_key: kudo_enabled})
+    conf = copy_and_update(_sortmerge_join_conf, {
+        'spark.sql.adaptive.enabled': 'false'  # Disable AQE as it can change the join type.
+    })
     assert_gpu_and_cpu_are_equal_collect(do_join, conf=conf)
 
 @allow_non_gpu('SortMergeJoinExec', 'SortExec', 'NormalizeNaNAndZero', 'CreateNamedStruct',
@@ -1081,19 +1129,18 @@ def test_sortmerge_join_struct_with_floats_key(data_gen, join_type, kudo_enabled
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', struct_gens, ids=idfn)
 @pytest.mark.parametrize('join_type', ['FullOuter'], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_sortmerge_join_struct_as_key_fallback(data_gen, join_type, kudo_enabled):
+def test_sortmerge_join_struct_as_key_fallback(data_gen, join_type):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 500, 500)
         return left.join(right, left.a == right.r_a, join_type)
     conf = copy_and_update(_sortmerge_join_conf,
-                           {kudo_enabled_conf_key: kudo_enabled})
+                           {# disable AQE as it can change the join type
+                            'spark.sql.adaptive.enabled': 'false'})
     assert_gpu_fallback_collect(do_join, 'SortMergeJoinExec', conf=conf)
 
 # Regression test for https://github.com/NVIDIA/spark-rapids/issues/3775
 @ignore_order(local=True)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_struct_self_join(spark_tmp_table_factory, kudo_enabled):
+def test_struct_self_join(spark_tmp_table_factory):
     def do_join(spark):
         data = [
             (("Adam ", "", "Green"), "1", "M", 1000),
@@ -1120,7 +1167,7 @@ def test_struct_self_join(spark_tmp_table_factory, kudo_enabled):
         resultdf.createOrReplaceTempView(resultdf_name)
         return spark.sql("select a.* from {} a, {} b where a.name=b.name".format(
             resultdf_name, resultdf_name))
-    assert_gpu_and_cpu_are_equal_collect(do_join, conf = {kudo_enabled_conf_key: kudo_enabled})
+    assert_gpu_and_cpu_are_equal_collect(do_join)
 
 # ExistenceJoin occurs in the context of existential subqueries (which is rewritten to SemiJoin) if
 # there is an additional condition that may qualify left records even though they don't have
@@ -1140,9 +1187,8 @@ def test_struct_self_join(spark_tmp_table_factory, kudo_enabled):
 ])
 @pytest.mark.parametrize('conditionalJoin', [False, True], ids=['ast:off', 'ast:on'])
 @pytest.mark.parametrize('forceBroadcastHashJoin', [False, True], ids=['broadcastHJ:off', 'broadcastHJ:on'])
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 def test_existence_join(numComplementsToExists, aqeEnabled, conditionalJoin,
-                        forceBroadcastHashJoin, spark_tmp_table_factory, kudo_enabled):
+                        forceBroadcastHashJoin, spark_tmp_table_factory):
     leftTable = spark_tmp_table_factory.get()
     rightTable = spark_tmp_table_factory.get()
     def do_join(spark):
@@ -1193,13 +1239,11 @@ def test_existence_join(numComplementsToExists, aqeEnabled, conditionalJoin,
         conf={
             "spark.sql.adaptive.enabled": aqeEnabled,
             "spark.sql.autoBroadcastJoinThreshold": bhjThreshold,
-            kudo_enabled_conf_key: kudo_enabled
         })
 
 @ignore_order
 @pytest.mark.parametrize('aqeEnabled', [True, False], ids=['aqe:on', 'aqe:off'])
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_existence_join_in_broadcast_nested_loop_join(spark_tmp_table_factory, aqeEnabled, kudo_enabled):
+def test_existence_join_in_broadcast_nested_loop_join(spark_tmp_table_factory, aqeEnabled):
     left_table_name = spark_tmp_table_factory.get()
     right_table_name = spark_tmp_table_factory.get()
 
@@ -1219,13 +1263,11 @@ def test_existence_join_in_broadcast_nested_loop_join(spark_tmp_table_factory, a
 
     capture_regexp = r"GpuBroadcastNestedLoopJoin ExistenceJoin\(exists#[0-9]+\),"
     assert_cpu_and_gpu_are_equal_collect_with_capture(do_join, capture_regexp,
-                                                      conf={"spark.sql.adaptive.enabled": aqeEnabled,
-                                                            kudo_enabled_conf_key: kudo_enabled})
+                                                      conf={"spark.sql.adaptive.enabled": aqeEnabled})
 
 @ignore_order
 @pytest.mark.parametrize('aqeEnabled', [True, False], ids=['aqe:on', 'aqe:off'])
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_degenerate_broadcast_nested_loop_existence_join(spark_tmp_table_factory, aqeEnabled, kudo_enabled):
+def test_degenerate_broadcast_nested_loop_existence_join(spark_tmp_table_factory, aqeEnabled):
     left_table_name = spark_tmp_table_factory.get()
     right_table_name = spark_tmp_table_factory.get()
 
@@ -1245,15 +1287,13 @@ def test_degenerate_broadcast_nested_loop_existence_join(spark_tmp_table_factory
 
     capture_regexp = r"GpuBroadcastNestedLoopJoin ExistenceJoin\(exists#[0-9]+\),"
     assert_cpu_and_gpu_are_equal_collect_with_capture(do_join, capture_regexp,
-                                                      conf={"spark.sql.adaptive.enabled": aqeEnabled,
-                                                            kudo_enabled_conf_key: kudo_enabled})
+                                                      conf={"spark.sql.adaptive.enabled": aqeEnabled})
 
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', [StringGen(), IntegerGen()], ids=idfn)
 @pytest.mark.parametrize("aqe_enabled", [True, False], ids=idfn)
 @pytest.mark.parametrize("join_reorder_enabled", [True, False], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_multi_table_hash_join(data_gen, aqe_enabled, join_reorder_enabled, kudo_enabled):
+def test_multi_table_hash_join(data_gen, aqe_enabled, join_reorder_enabled):
     def do_join(spark):
         t1 = binary_op_df(spark, data_gen, length=1000)
         t2 = binary_op_df(spark, data_gen, length=800)
@@ -1265,14 +1305,13 @@ def test_multi_table_hash_join(data_gen, aqe_enabled, join_reorder_enabled, kudo
     conf = copy_and_update(_hash_join_conf, {
         'spark.sql.adaptive.enabled': aqe_enabled,
         'spark.rapids.sql.optimizer.joinReorder.enabled': join_reorder_enabled,
-        kudo_enabled_conf_key: kudo_enabled
     })
     assert_gpu_and_cpu_are_equal_collect(do_join, conf=conf)
 
 
 limited_integral_gens = [byte_gen, ShortGen(max_val=BYTE_MAX), IntegerGen(max_val=BYTE_MAX), LongGen(max_val=BYTE_MAX)]
 
-def hash_join_different_key_integral_types(left_gen, right_gen, join_type, kudo_enabled):
+def hash_join_different_key_integral_types(left_gen, right_gen, join_type):
     def do_join(spark):
         left = unary_op_df(spark, left_gen, length=50)
         right = unary_op_df(spark, right_gen, length=500)
@@ -1281,7 +1320,7 @@ def hash_join_different_key_integral_types(left_gen, right_gen, join_type, kudo_
         "spark.rapids.sql.join.useShuffledSymmetricHashJoin": "true",
         "spark.rapids.sql.join.useShuffledAsymmetricHashJoin": "true",
         "spark.rapids.sql.test.subPartitioning.enabled": True,
-        kudo_enabled_conf_key: kudo_enabled
+        'spark.sql.adaptive.enabled': 'false' # disable AQE as it can change the join type
     })
     assert_gpu_and_cpu_are_equal_collect(do_join, conf=_all_conf)
 
@@ -1290,27 +1329,24 @@ def hash_join_different_key_integral_types(left_gen, right_gen, join_type, kudo_
 @pytest.mark.parametrize('left_gen', limited_integral_gens, ids=idfn)
 @pytest.mark.parametrize('right_gen', limited_integral_gens, ids=idfn)
 @pytest.mark.parametrize('join_type', all_non_sized_join_types, ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_hash_join_different_key_integral_types_non_sized(left_gen, right_gen, join_type, kudo_enabled):
-    hash_join_different_key_integral_types(left_gen, right_gen, join_type, kudo_enabled)
+def test_hash_join_different_key_integral_types_non_sized(left_gen, right_gen, join_type):
+    hash_join_different_key_integral_types(left_gen, right_gen, join_type)
 
 @validate_execs_in_gpu_plan('GpuShuffledSymmetricHashJoinExec')
 @ignore_order(local=True)
 @pytest.mark.parametrize('left_gen', limited_integral_gens, ids=idfn)
 @pytest.mark.parametrize('right_gen', limited_integral_gens, ids=idfn)
 @pytest.mark.parametrize('join_type', all_symmetric_sized_join_types, ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_hash_join_different_key_integral_types_symmetric(left_gen, right_gen, join_type, kudo_enabled):
-    hash_join_different_key_integral_types(left_gen, right_gen, join_type, kudo_enabled)
+def test_hash_join_different_key_integral_types_symmetric(left_gen, right_gen, join_type):
+    hash_join_different_key_integral_types(left_gen, right_gen, join_type)
 
 @validate_execs_in_gpu_plan('GpuShuffledAsymmetricHashJoinExec')
 @ignore_order(local=True)
 @pytest.mark.parametrize('left_gen', limited_integral_gens, ids=idfn)
 @pytest.mark.parametrize('right_gen', limited_integral_gens, ids=idfn)
 @pytest.mark.parametrize('join_type', all_asymmetric_sized_join_types, ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_hash_join_different_key_integral_types_asymmetric(left_gen, right_gen, join_type, kudo_enabled):
-    hash_join_different_key_integral_types(left_gen, right_gen, join_type, kudo_enabled)
+def test_hash_join_different_key_integral_types_asymmetric(left_gen, right_gen, join_type):
+    hash_join_different_key_integral_types(left_gen, right_gen, join_type)
 
 
 bloom_filter_confs = {
@@ -1320,14 +1356,30 @@ bloom_filter_confs = {
     "spark.sql.optimizer.runtime.bloomFilter.enabled": "true"
 }
 
-def check_bloom_filter_join(confs, expected_classes, is_multi_column):
+# Dataproc uses Cast instead of XxHash64 for runtime bloom filter probe keys.
+dataproc_bloom_filter_probe_allow = (
+    ("Cast",)
+    if is_dataproc_runtime() or is_dataproc_serverless_runtime()
+    else ()
+)
+
+def check_bloom_filter_join(confs, expected_classes, is_multi_column, probe_gen=None):
     def do_join(spark):
+        left = spark.range(100000)
+        if probe_gen is not None:
+            corner_values = list(probe_gen.list_of_special_cases)
+            if probe_gen.nullable:
+                corner_values.append(None)
+            corner_schema = StructType([
+                StructField("id", probe_gen.data_type, nullable=probe_gen.nullable)])
+            corner_rows = spark.createDataFrame(
+                [(value,) for value in corner_values], schema=corner_schema)
+            left = left.unionByName(corner_rows)
         if is_multi_column:
-            left = spark.range(100000).withColumn("second_id", col("id") % 5)
+            left = left.withColumn("second_id", col("id") % 5)
             right = spark.range(10).withColumn("id2", col("id").cast("string")).withColumn("second_id", col("id") % 5)
             return right.filter("cast(id2 as bigint) % 3 = 0").join(left, (left.id == right.id) & (left.second_id == right.second_id), "inner")
         else:
-            left = spark.range(100000)
             right = spark.range(10).withColumn("id2", col("id").cast("string"))
             return right.filter("cast(id2 as bigint) % 3 = 0").join(left, left.id == right.id, "inner")
     all_confs = copy_and_update(bloom_filter_confs, confs)
@@ -1336,25 +1388,27 @@ def check_bloom_filter_join(confs, expected_classes, is_multi_column):
 @ignore_order(local=True)
 @pytest.mark.parametrize("batch_size", ['1g', '1000'], ids=idfn)
 @pytest.mark.parametrize("is_multi_column", [False, True], ids=idfn)
+@pytest.mark.parametrize("probe_gen", [
+    LongGen(special_cases=[LONG_MIN, LONG_MAX, 0, 1, -1])
+], ids=idfn)
 @pytest.mark.skipif(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/8921")
-@pytest.mark.skipif(is_before_spark_330(), reason="Bloom filter joins added in Spark 3.3.0")
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_bloom_filter_join(batch_size, is_multi_column, kudo_enabled):
-    conf = {"spark.rapids.sql.batchSizeBytes": batch_size,
-            kudo_enabled_conf_key: kudo_enabled}
+def test_bloom_filter_join(batch_size, is_multi_column, probe_gen):
+    # Runtime bloom-filter rewriting inserts might_contain(...) on the large probe side.
+    conf = {"spark.rapids.sql.batchSizeBytes": batch_size}
     check_bloom_filter_join(confs=conf,
                             expected_classes="GpuBloomFilterMightContain,GpuBloomFilterAggregate",
-                            is_multi_column=is_multi_column)
+                            is_multi_column=is_multi_column,
+                            probe_gen=probe_gen)
 
-@allow_non_gpu("FilterExec", "ShuffleExchangeExec")
+@allow_non_gpu(
+    "ShuffleExchangeExec", "And", "BloomFilterMightContain", "GetStructField",
+    "ScalarSubquery", "XxHash64", "Remainder",
+    *dataproc_bloom_filter_probe_allow)
 @ignore_order(local=True)
 @pytest.mark.parametrize("is_multi_column", [False, True], ids=idfn)
 @pytest.mark.skipif(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/8921")
-@pytest.mark.skipif(is_before_spark_330(), reason="Bloom filter joins added in Spark 3.3.0")
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_bloom_filter_join_cpu_probe(is_multi_column, kudo_enabled):
-    conf = {"spark.rapids.sql.expression.BloomFilterMightContain": "false",
-            kudo_enabled_conf_key: kudo_enabled}
+def test_bloom_filter_join_cpu_probe(is_multi_column):
+    conf = {"spark.rapids.sql.expression.BloomFilterMightContain": "false"}
     check_bloom_filter_join(confs=conf,
                             expected_classes="BloomFilterMightContain,GpuBloomFilterAggregate",
                             is_multi_column=is_multi_column)
@@ -1363,11 +1417,8 @@ def test_bloom_filter_join_cpu_probe(is_multi_column, kudo_enabled):
 @ignore_order(local=True)
 @pytest.mark.parametrize("is_multi_column", [False, True], ids=idfn)
 @pytest.mark.skipif(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/8921")
-@pytest.mark.skipif(is_before_spark_330(), reason="Bloom filter joins added in Spark 3.3.0")
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_bloom_filter_join_cpu_build(is_multi_column, kudo_enabled):
-    conf = {"spark.rapids.sql.expression.BloomFilterAggregate": "false",
-            kudo_enabled_conf_key: kudo_enabled}
+def test_bloom_filter_join_cpu_build(is_multi_column):
+    conf = {"spark.rapids.sql.expression.BloomFilterAggregate": "false"}
     check_bloom_filter_join(confs=conf,
                             expected_classes="GpuBloomFilterMightContain,BloomFilterAggregate",
                             is_multi_column=is_multi_column)
@@ -1377,28 +1428,22 @@ def test_bloom_filter_join_cpu_build(is_multi_column, kudo_enabled):
 @pytest.mark.parametrize("agg_replace_mode", ["partial", "final"])
 @pytest.mark.parametrize("is_multi_column", [False, True], ids=idfn)
 @pytest.mark.skipif(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/8921")
-@pytest.mark.skipif(is_before_spark_330(), reason="Bloom filter joins added in Spark 3.3.0")
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_bloom_filter_join_split_cpu_build(agg_replace_mode, is_multi_column, kudo_enabled):
-    conf = {"spark.rapids.sql.hashAgg.replaceMode": agg_replace_mode,
-            kudo_enabled_conf_key: kudo_enabled}
+def test_bloom_filter_join_split_cpu_build(agg_replace_mode, is_multi_column):
+    conf = {"spark.rapids.sql.hashAgg.replaceMode": agg_replace_mode}
     check_bloom_filter_join(confs=conf,
                             expected_classes="GpuBloomFilterMightContain,BloomFilterAggregate,GpuBloomFilterAggregate",
                             is_multi_column=is_multi_column)
 
 @ignore_order(local=True)
 @pytest.mark.skipif(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/8921")
-@pytest.mark.skipif(is_before_spark_330(), reason="Bloom filter joins added in Spark 3.3.0")
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_bloom_filter_join_with_merge_some_null_filters(spark_tmp_path, kudo_enabled):
+def test_bloom_filter_join_with_merge_some_null_filters(spark_tmp_path):
     data_path1 = spark_tmp_path + "/BLOOM_JOIN_DATA1"
     data_path2 = spark_tmp_path + "/BLOOM_JOIN_DATA2"
     with_cpu_session(lambda spark: spark.range(100000).coalesce(1).write.parquet(data_path1))
     with_cpu_session(lambda spark: spark.range(100000).withColumn("id2", col("id").cast("string"))\
                      .coalesce(1).write.parquet(data_path2))
     confs = copy_and_update(bloom_filter_confs,
-                            {"spark.sql.files.maxPartitionBytes": "1000",
-                             kudo_enabled_conf_key: kudo_enabled})
+                            {"spark.sql.files.maxPartitionBytes": "1000"})
     def do_join(spark):
         left = spark.read.parquet(data_path1)
         right = spark.read.parquet(data_path2)
@@ -1407,9 +1452,7 @@ def test_bloom_filter_join_with_merge_some_null_filters(spark_tmp_path, kudo_ena
 
 @ignore_order(local=True)
 @pytest.mark.skipif(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/8921")
-@pytest.mark.skipif(is_before_spark_330(), reason="Bloom filter joins added in Spark 3.3.0")
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_bloom_filter_join_with_merge_all_null_filters(spark_tmp_path, kudo_enabled):
+def test_bloom_filter_join_with_merge_all_null_filters(spark_tmp_path):
     data_path1 = spark_tmp_path + "/BLOOM_JOIN_DATA1"
     data_path2 = spark_tmp_path + "/BLOOM_JOIN_DATA2"
     with_cpu_session(lambda spark: spark.range(100000).write.parquet(data_path1))
@@ -1419,15 +1462,17 @@ def test_bloom_filter_join_with_merge_all_null_filters(spark_tmp_path, kudo_enab
         left = spark.read.parquet(data_path1)
         right = spark.read.parquet(data_path2)
         return right.filter("cast(id2 as bigint) % 3 = 4").join(left, left.id == right.id, "inner")
-    conf = copy_and_update(bloom_filter_confs, {kudo_enabled_conf_key: kudo_enabled})
+    conf = copy_and_update(
+        bloom_filter_confs,
+        {'spark.sql.adaptive.enabled': 'false'} # disable AQE as it can change the join type
+    )
     assert_gpu_and_cpu_are_equal_collect(do_join, conf)
 
 
 @ignore_order(local=True)
 @allow_non_gpu("ProjectExec", "FilterExec", "BroadcastHashJoinExec", "ColumnarToRowExec", "BroadcastExchangeExec", "BatchScanExec")
 @pytest.mark.parametrize("disable_build", [True, False])
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_broadcast_hash_join_fix_fallback_by_inputfile(spark_tmp_path, disable_build, kudo_enabled):
+def test_broadcast_hash_join_fix_fallback_by_inputfile(spark_tmp_path, disable_build):
     data_path_parquet = spark_tmp_path + "/parquet"
     data_path_orc = spark_tmp_path + "/orc"
     # The smaller one (orc) will be the build side (a broadcast)
@@ -1458,14 +1503,14 @@ def test_broadcast_hash_join_fix_fallback_by_inputfile(spark_tmp_path, disable_b
         conf={"spark.sql.autoBroadcastJoinThreshold": "10M",
               "spark.sql.sources.useV1SourceList": "",
               "spark.rapids.sql.input." + scan_name: False,
-              kudo_enabled_conf_key: kudo_enabled})
+              'spark.sql.adaptive.enabled': 'false'} # disable AQE as it can change the join type
+    )
 
 
 @ignore_order(local=True)
 @allow_non_gpu("ProjectExec", "BroadcastNestedLoopJoinExec", "ColumnarToRowExec", "BroadcastExchangeExec", "BatchScanExec")
 @pytest.mark.parametrize("disable_build", [True, False])
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_broadcast_nested_join_fix_fallback_by_inputfile(spark_tmp_path, disable_build, kudo_enabled):
+def test_broadcast_nested_join_fix_fallback_by_inputfile(spark_tmp_path, disable_build):
     data_path_parquet = spark_tmp_path + "/parquet"
     data_path_orc = spark_tmp_path + "/orc"
     # The smaller one (orc) will be the build side (a broadcast)
@@ -1495,16 +1540,15 @@ def test_broadcast_nested_join_fix_fallback_by_inputfile(spark_tmp_path, disable
         conf={"spark.sql.autoBroadcastJoinThreshold": "-1",
               "spark.sql.sources.useV1SourceList": "",
               "spark.rapids.sql.input." + scan_name: False,
-              kudo_enabled_conf_key: kudo_enabled})
+              'spark.sql.adaptive.enabled': 'false'} # disable AQE as it can change the join type
+    )
 
 @ignore_order(local=True)
 @pytest.mark.parametrize("join_type", ["Inner", "LeftOuter", "RightOuter"], ids=idfn)
 @pytest.mark.parametrize("batch_size", ["500", "1g"], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_distinct_join(join_type, batch_size, kudo_enabled):
+def test_distinct_join(join_type, batch_size):
     join_conf = {
         "spark.rapids.sql.batchSizeBytes": batch_size,
-        kudo_enabled_conf_key: kudo_enabled
     }
     def do_join(spark):
         left_df = spark.range(1024).withColumn("x", f.col("id") + 1)
@@ -1518,15 +1562,15 @@ def test_distinct_join(join_type, batch_size, kudo_enabled):
 @pytest.mark.parametrize("is_right_host_shuffle", [False, True], ids=idfn)
 @pytest.mark.parametrize("is_left_smaller", [False, True], ids=idfn)
 @pytest.mark.parametrize("batch_size", ["1024", "1g"], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 def test_sized_join(join_type, is_left_host_shuffle, is_right_host_shuffle,
-                    is_left_smaller, batch_size, kudo_enabled):
+                    is_left_smaller, batch_size):
+    # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
     join_conf = {
         "spark.rapids.sql.join.useShuffledSymmetricHashJoin": "true",
         "spark.rapids.sql.join.useShuffledAsymmetricHashJoin": "true",
         "spark.sql.autoBroadcastJoinThreshold": "1",
         "spark.rapids.sql.batchSizeBytes": batch_size,
-        kudo_enabled_conf_key: kudo_enabled
+        'spark.sql.adaptive.enabled': 'false'
     }
     left_size, right_size = (2048, 1024) if is_left_smaller else (1024, 2048)
     def do_join(spark):
@@ -1553,54 +1597,52 @@ def test_sized_join(join_type, is_left_host_shuffle, is_right_host_shuffle,
 
 @ignore_order(local=True)
 @pytest.mark.parametrize("join_type", ["Inner", "FullOuter", "LeftOuter", "RightOuter"], ids=idfn)
-@pytest.mark.parametrize("is_left_smaller", [False, True], ids=idfn)
-@pytest.mark.parametrize("is_ast_supported", [False, True], ids=idfn)
+@pytest.mark.parametrize("is_left_smaller", [False, True], ids=["LEFT_SMALLER", "RIGHT_SMALLER"])
+@pytest.mark.parametrize("is_ast_supported", [False, True], ids=["AST_OFF", "AST_ON"])
 @pytest.mark.parametrize("batch_size", ["1024", "1g"], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_sized_join_conditional(join_type, is_ast_supported, is_left_smaller, batch_size, kudo_enabled):
+def test_sized_join_conditional(join_type, is_ast_supported, is_left_smaller, batch_size):
     if join_type != "Inner" and not is_ast_supported:
         pytest.skip("Only inner joins support a non-AST condition")
+    # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
     join_conf = {
         "spark.rapids.sql.join.useShuffledSymmetricHashJoin": "true",
         "spark.rapids.sql.join.useShuffledAsymmetricHashJoin": "true",
-        "spark.rapids.sql.join.use"
         "spark.sql.autoBroadcastJoinThreshold": "1",
         "spark.rapids.sql.batchSizeBytes": batch_size,
-        kudo_enabled_conf_key: kudo_enabled
+        'spark.sql.adaptive.enabled': 'false'
     }
     left_size, right_size = (2048, 1024) if is_left_smaller else (1024, 2048)
     def do_join(spark):
         left_df = gen_df(spark, [
-            ("key1", RepeatSeqGen([1, 2, 3, 4, None], data_type=IntegerType())),
-            ("ints", RepeatSeqGen(IntegerGen(), length = 5)),
-            ("key2", RepeatSeqGen([5, 6, 7, None], data_type=LongType())),
-            ("floats", float_gen)], left_size)
+            ("l_key1", RepeatSeqGen([1, 2, 3, 4, None], data_type=IntegerType())),
+            ("l_ints", RepeatSeqGen(IntegerGen(), length = 5)),
+            ("l_key2", RepeatSeqGen([5, 6, 7, None], data_type=LongType())),
+            ("l_floats", float_gen)], left_size)
         right_df = gen_df(spark, [
-            ("key2", RepeatSeqGen([5, 7, None, 8], data_type=LongType())),
-            ("ints", RepeatSeqGen(IntegerGen(), length = 3)),
-            ("key1", RepeatSeqGen([1, 2, 3, 5, 7, None], data_type=IntegerType()))], right_size)
-        cond = [left_df.key1 == right_df.key1, left_df.key2 == right_df.key2]
+            ("r_key2", RepeatSeqGen([5, 7, None, 8], data_type=LongType())),
+            ("r_ints", RepeatSeqGen(IntegerGen(), length = 3)),
+            ("r_key1", RepeatSeqGen([1, 2, 3, 5, 7, None], data_type=IntegerType()))], right_size)
+        cond = [left_df.l_key1 == right_df.r_key1, left_df.l_key2 == right_df.r_key2]
         if is_ast_supported:
-            cond.append(left_df.ints >= right_df.ints)
+            cond.append(left_df.l_ints >= right_df.r_ints)
         else:
             # AST does not support logarithm yet
-            cond.append(left_df.ints >= f.log(right_df.ints))
+            cond.append(left_df.l_ints >= f.log(right_df.r_ints))
         return left_df.join(right_df, cond, join_type)
     assert_gpu_and_cpu_are_equal_collect(do_join, conf=join_conf)
 
 @pytest.mark.parametrize("join_type", ["LeftOuter", "RightOuter"], ids=idfn)
-@pytest.mark.parametrize("is_left_replicated", [False, True], ids=idfn)
-@pytest.mark.parametrize("is_conditional", [False, True], ids=idfn)
-@pytest.mark.parametrize("is_outer_side_small", [False, True], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
+@pytest.mark.parametrize("is_left_replicated", [False, True], ids=["LEFT_REPLICATED_OFF", "LEFT_REPLICATED_ON"])
+@pytest.mark.parametrize("is_conditional", [False, True], ids=["CONDITIONAL_OFF", "CONDITIONAL_ON"])
+@pytest.mark.parametrize("is_outer_side_small", [False, True], ids=["OUTER_LARGER_SIDE", "OUTER_SMALLER_SIDE"])
 def test_sized_join_high_key_replication(join_type, is_left_replicated, is_conditional,
-                                         is_outer_side_small, kudo_enabled):
+                                         is_outer_side_small):
+    # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
     join_conf = {
         "spark.rapids.sql.join.useShuffledSymmetricHashJoin": "true",
         "spark.rapids.sql.join.useShuffledAsymmetricHashJoin": "true",
-        "spark.rapids.sql.join.use"
         "spark.sql.autoBroadcastJoinThreshold": "1",
-        kudo_enabled_conf_key: kudo_enabled
+        'spark.sql.adaptive.enabled': 'false'
     }
     left_size, right_size = (30000, 40000)
     left_key_gen, right_key_gen = (
@@ -1627,3 +1669,180 @@ def test_sized_join_high_key_replication(join_type, is_left_replicated, is_condi
             cond.append(left_df.ints >= right_df.ints2)
         return left_df.join(right_df, cond, join_type)
     assert_gpu_and_cpu_row_counts_equal(do_join, conf=join_conf)
+
+@ignore_order(local=True)
+@pytest.mark.parametrize("join_type", ["Inner", "LeftOuter", "RightOuter", "LeftSemi", "LeftAnti"], ids=idfn)
+@pytest.mark.parametrize("threshold", [0.0, 0.75, 1.0, 2.0], ids=["THRESHOLD_0.0", "THRESHOLD_0.75", "THRESHOLD_1.0", "THRESHOLD_2.0"])
+@pytest.mark.parametrize("batch_size", ["1m", "1g"], ids=idfn)
+def test_join_gatherer_size_estimate_threshold(join_type, threshold, batch_size):
+    """Test that different gatherer size estimate thresholds work correctly and don't crash."""
+    # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
+    join_conf = {
+        "spark.rapids.sql.join.gatherer.sizeEstimateThreshold": str(threshold),
+        "spark.rapids.sql.batchSizeBytes": batch_size,
+        'spark.sql.adaptive.enabled': 'false'
+    }
+    # This join explodes but should only produce a small output (about 210,125 rows)
+    # We need to use a variable width type to make the specific heuristic kick in.
+    def do_join(spark):
+        left_df, right_df = create_df(spark, StructGen([
+            ("a", RepeatSeqGen([1, 2, 3, 4, None], data_type=IntegerType())),
+            ("b", RepeatSeqGen(StringGen(pattern="[abc]{1,5}"), length = 5))], nullable=False), 1024, 1024)
+        return left_df.join(right_df, left_df.a == right_df.r_a, join_type)
+    assert_gpu_and_cpu_are_equal_collect(do_join, conf=join_conf)
+
+
+@ignore_order(local=True)
+@pytest.mark.parametrize("join_type", ["Inner", "LeftOuter", "RightOuter"], ids=idfn)
+@pytest.mark.parametrize("build_side", ["AUTO", "FIXED", "SMALLEST"], ids=idfn)
+@pytest.mark.parametrize("is_left_smaller", [True, False], ids=["LEFT_SMALLER", "RIGHT_SMALLER"])
+def test_join_build_side_selection(join_type, build_side, is_left_smaller):
+    """Test that different build side selection strategies work correctly."""
+    # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
+    join_conf = {
+        "spark.rapids.sql.join.buildSide": build_side,
+        "spark.rapids.sql.join.useShuffledSymmetricHashJoin": "true",
+        "spark.rapids.sql.join.useShuffledAsymmetricHashJoin": "true",
+        "spark.sql.autoBroadcastJoinThreshold": "1",
+        'spark.sql.adaptive.enabled': 'false'
+    }
+    left_size, right_size = (512, 2048) if is_left_smaller else (2048, 512)
+    def do_join(spark):
+        left_df = gen_df(spark, [
+            ("l_key", RepeatSeqGen([1, 2, 3, 4, None], data_type=IntegerType())),
+            ("l_ints", int_gen),
+        ], left_size)
+        right_df = gen_df(spark, [
+            ("r_key", RepeatSeqGen([1, 2, 3, 4, None], data_type=IntegerType())),
+            ("r_ints", int_gen),
+        ], right_size)
+        return left_df.join(right_df, left_df.l_key == right_df.r_key, join_type)
+    assert_gpu_and_cpu_are_equal_collect(do_join, conf=join_conf)
+
+
+@ignore_order(local=True)
+@pytest.mark.parametrize("join_type", ["Inner"], ids=idfn)
+@pytest.mark.parametrize("build_side", ["AUTO", "FIXED", "SMALLEST"], ids=idfn)
+@pytest.mark.parametrize("is_left_smaller", [True, False], ids=["LEFT_SMALLER", "RIGHT_SMALLER"])
+def test_join_build_side_selection_conditional(join_type, build_side, is_left_smaller):
+    """Test build side selection with conditional (AST) joins."""
+    join_conf = {
+        "spark.rapids.sql.join.buildSide": build_side,
+        "spark.rapids.sql.join.useShuffledSymmetricHashJoin": "true",
+        "spark.rapids.sql.join.useShuffledAsymmetricHashJoin": "true",
+        "spark.sql.autoBroadcastJoinThreshold": "1",
+    }
+    left_size, right_size = (512, 2048) if is_left_smaller else (2048, 512)
+    def do_join(spark):
+        left_df = gen_df(spark, [
+            ("l_key", RepeatSeqGen([1, 2, 3, 4, None], data_type=IntegerType())),
+            ("l_ints", RepeatSeqGen(IntegerGen(), length=5)),
+        ], left_size)
+        right_df = gen_df(spark, [
+            ("r_key", RepeatSeqGen([1, 2, 3, 4, None], data_type=IntegerType())),
+            ("r_ints", RepeatSeqGen(IntegerGen(), length=5)),
+        ], right_size)
+        # Use an AST-supported inequality condition (comparing integers)
+        return left_df.join(right_df, 
+            (left_df.l_key == right_df.r_key) & (left_df.l_ints < right_df.r_ints), 
+            join_type)
+    assert_gpu_and_cpu_are_equal_collect(do_join, conf=join_conf)
+
+
+@ignore_order(local=True)
+@pytest.mark.parametrize("join_type", ["Inner", "FullOuter"], ids=idfn)
+@pytest.mark.parametrize("build_side", ["AUTO", "FIXED", "SMALLEST"], ids=idfn)
+@pytest.mark.parametrize("batch_size", ["1024", "1g"], ids=idfn)
+def test_join_build_side_selection_symmetric(join_type, build_side, batch_size):
+    """Test build side selection for symmetric joins with different batch sizes."""
+    # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
+    join_conf = {
+        "spark.rapids.sql.join.buildSide": build_side,
+        "spark.rapids.sql.join.useShuffledSymmetricHashJoin": "true",
+        "spark.sql.autoBroadcastJoinThreshold": "1",
+        "spark.rapids.sql.batchSizeBytes": batch_size,
+        'spark.sql.adaptive.enabled': 'false'
+    }
+    left_size, right_size = (1024, 2048)
+    def do_join(spark):
+        left_df = gen_df(spark, [
+            ("key1", RepeatSeqGen([1, 2, 3, 4, None], data_type=IntegerType())),
+            ("ints", int_gen),
+        ], left_size)
+        right_df = gen_df(spark, [
+            ("key1", RepeatSeqGen([1, 2, 3, 4, None], data_type=IntegerType())),
+            ("ints", int_gen),
+        ], right_size)
+        return left_df.join(right_df, ["key1"], join_type)
+    assert_gpu_and_cpu_are_equal_collect(do_join, conf=join_conf)
+
+
+@ignore_order(local=True)
+@pytest.mark.parametrize("join_type", ["LeftOuter", "RightOuter"], ids=idfn)
+def test_join_degenerate_outer(join_type):
+    # A degenerate join shows up with one side of the join (build or probe) has no columns
+    # This can happen when a condition only deals with a single side of the join.
+    # and the other side has no columns (only rows), because none of the columns
+    # are output. The empty side must be the oposite of the condition side, or there
+    # would be at least one column output by the join (the condition column).
+    if join_type == "LeftOuter":
+        empty_side = "right"
+        condition_side = "left"
+    else:
+        # RightOuter
+        empty_side = "left"
+        condition_side = "right"
+    left_size, right_size = (100, 100)
+    def do_join(spark):
+        left_df = gen_df(spark, [("l_key", RepeatSeqGen([1, 2, 3, 4, None], data_type=IntegerType())), 
+          ("l_value", IntegerGen())], left_size)
+        right_df = gen_df(spark, [("r_key", RepeatSeqGen([1, 2, 3, 4, None], data_type=IntegerType())),
+          ("r_value", IntegerGen())], right_size)
+        if condition_side == "left":
+            cond = [left_df.l_key.cast("boolean")]
+        else:
+            cond = [right_df.r_key.cast("boolean")]
+        temp_df = left_df.join(right_df, cond, join_type)
+        if empty_side == "right":
+            return temp_df.selectExpr("l_key", "l_value")
+        else:
+            return temp_df.selectExpr("r_key", "r_value")
+    assert_gpu_and_cpu_are_equal_collect(do_join)
+
+
+# Struct keys with different field names should fall back to CPU
+# https://github.com/NVIDIA/spark-rapids/issues/13100
+@ignore_order(local=True)
+@allow_non_gpu('BroadcastExchangeExec', 'BroadcastHashJoinExec', 'ShuffleExchangeExec',
+               'ShuffledHashJoinExec', 'SortMergeJoinExec', 'EqualTo')
+@pytest.mark.skipif(not is_spark_400_or_later(),
+                    reason="SPARK-51738 relaxed struct field name matching only in Spark 4.0+")
+@pytest.mark.parametrize('join_type', ['Inner', 'LeftOuter', 'RightOuter', 'LeftSemi', 'LeftAnti'], ids=idfn)
+def test_hash_join_struct_keys_different_field_names_fallback(join_type):
+    """
+    Test that joins with struct keys having different field names fall back to CPU.
+
+    Spark 4.0+ (SPARK-51738) allows struct comparisons where field names differ but types match.
+    The GPU implementation currently requires matching field names, so we fall back to CPU.
+    This test ensures no crash occurs and results are correct.
+    """
+    def do_join(spark):
+        # Create left table with struct key having field names 'a' and 'b'
+        left_df = spark.range(1, 5).selectExpr(
+            "id as left_id",
+            "struct(id as a, id * 10 as b) as key"
+        )
+        # Create right table with struct key having field names 'x' and 'y'
+        # (different names but same types)
+        right_df = spark.range(2, 6).selectExpr(
+            "id as right_id",
+            "struct(id as x, id * 10 as y) as key"
+        )
+        return left_df.join(right_df, left_df.key == right_df.key, join_type)
+
+    # The join should fall back to CPU due to different struct field names
+    assert_gpu_fallback_collect(
+        do_join,
+        'BroadcastHashJoinExec',
+        conf={'spark.sql.adaptive.enabled': 'false'}  # disable AQE as it can change the join type
+    )

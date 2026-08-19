@@ -19,8 +19,8 @@ package com.nvidia.spark.rapids
 import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
 
-import org.apache.spark.sql.catalyst.expressions.{AttributeSeq, Expression, ExprId, NamedExpression}
-import org.apache.spark.sql.rapids.catalyst.expressions.{GpuEquivalentExpressions, GpuExpressionEquals}
+import org.apache.spark.sql.catalyst.expressions.{AttributeReference, AttributeSeq, Expression, ExprId, NamedExpression}
+import org.apache.spark.sql.rapids.catalyst.expressions.GpuExpressionEquals
 
 
 object AstUtil {
@@ -35,15 +35,15 @@ object AstUtil {
   def canExtractNonAstConditionIfNeed(expr: BaseExprMeta[_], left: Seq[ExprId],
       right: Seq[ExprId]): Boolean = {
     if (!expr.canSelfBeAst) {
-      // It needs to be split since not ast-able. Check itself and childerns to ensure
-      // pushing-down can be made, which doesn't need attributions from both sides.
+      // This expression cannot be AST. We will extract the entire sub-tree (this expression
+      // and all its children). Check if this entire sub-tree only uses one side of the join.
       val exprRef = expr.wrapped.asInstanceOf[Expression]
-      val leftTree = exprRef.references.exists(r => left.contains(r.exprId))
-      val rightTree = exprRef.references.exists(r => right.contains(r.exprId))
-      // Can't extract a condition involving columns from both sides
-      !(rightTree && leftTree)
+      val hasLeft = exprRef.references.exists(r => left.contains(r.exprId))
+      val hasRight = exprRef.references.exists(r => right.contains(r.exprId))
+      // Can extract if it doesn't use both sides (entire sub-tree will be extracted)
+      !(hasLeft && hasRight)
     } else {
-      // Check whether any child contains the case not able to split
+      // This node is AST-able, so recursively check all children
       expr.childExprs.isEmpty || expr.childExprs.forall(
         canExtractNonAstConditionIfNeed(_, left, right))
     }
@@ -52,70 +52,105 @@ object AstUtil {
   /**
    * Extract non-AST functions from join conditions and update the original join condition. Based
    * on the attributes, it decides which side the split condition belongs to. The replaced
-   * condition is wrapped with GpuAlias with new intermediate attributes.
+   * condition is wrapped with GpuAlias with new intermediate attributes. It is assumed that
+   * `canExtractNonAstConditionIfNeed` was already called and returned true.
    *
    * @param condition to be split if needed
    * @param left attributions from left child
    * @param right attributions from right child
-   * @param skipCheck whether skip split-able check
    * @return a tuple of [[Expression]] for remained expressions, List of [[NamedExpression]] for
    *         left child if any, List of [[NamedExpression]] for right child if any
    */
   def extractNonAstFromJoinCond(condition: Option[BaseExprMeta[_]],
-      left: AttributeSeq, right: AttributeSeq, skipCheck: Boolean):
+                                left: AttributeSeq, right: AttributeSeq):
   (Option[Expression], List[NamedExpression], List[NamedExpression]) = {
-    // Choose side with smaller key size. Use expr ID to check the side which project expr
-    // belonging to.
-    val (exprIds, isLeft) = if (left.attrs.size < right.attrs.size) {
-      (left.attrs.map(_.exprId), true)
-    } else {
-      (right.attrs.map(_.exprId), false)
+    
+    condition match {
+      case None => (None, List.empty, List.empty)
+      case Some(cond) =>
+        // List of expression pushing down to left side child
+        val leftExprs: ListBuffer[NamedExpression] = ListBuffer.empty
+        // List of expression pushing down to right side child
+        val rightExprs: ListBuffer[NamedExpression] = ListBuffer.empty
+        // Deduplication map to avoid processing the same expression multiple times
+        val processed = mutable.HashMap.empty[GpuExpressionEquals, Expression]
+
+        val leftExprIds = left.attrs.map(_.exprId).toSet
+        val rightExprIds = right.attrs.map(_.exprId).toSet
+
+        // Extract and convert in a single pass
+        val updatedCondition = extractAndConvert(cond, leftExprIds, rightExprIds,
+          leftExprs, rightExprs, processed)
+
+        (Some(updatedCondition), leftExprs.toList, rightExprs.toList)
     }
-    // List of expression pushing down to left side child
-    val leftExprs: ListBuffer[NamedExpression] = ListBuffer.empty
-    // List of expression pushing down to right side child
-    val rightExprs: ListBuffer[NamedExpression] = ListBuffer.empty
-    // Substitution map used to replace targeted expressions based on semantic equality
-    val substitutionMap = mutable.HashMap.empty[GpuExpressionEquals, Expression]
-
-    // 1st step to construct 1) left expr list; 2) right expr list; 3) substitutionMap
-    // No need to consider common sub-expressions here since project node will use tiered execution
-    condition.foreach(c =>
-      if (skipCheck || canExtractNonAstConditionIfNeed(c, left.attrs.map(_.exprId), right.attrs
-          .map(_.exprId))) {
-        splitNonAstInternal(c, exprIds, leftExprs, rightExprs, substitutionMap, isLeft)
-      })
-
-    // 2nd step to replace expression pushing down to child plans in depth first fashion
-    (condition.map(
-      _.convertToGpu().mapChildren(
-        GpuEquivalentExpressions.replaceWithSemanticCommonRef(_,
-          substitutionMap))), leftExprs.toList, rightExprs.toList)
   }
 
-  private[this] def splitNonAstInternal(condition: BaseExprMeta[_], childAtt: Seq[ExprId],
-      left: ListBuffer[NamedExpression], right: ListBuffer[NamedExpression],
-      substitutionMap: mutable.HashMap[GpuExpressionEquals, Expression], isLeft: Boolean): Unit = {
-    for (child <- condition.childExprs) {
-      if (!child.canSelfBeAst) {
-        val exprRef = child.wrapped.asInstanceOf[Expression]
-        val gpuProj = child.convertToGpu()
-        val alias = substitutionMap.get(GpuExpressionEquals(gpuProj)) match {
-          case Some(_) => None
-          case None =>
-            if (exprRef.references.exists(r => childAtt.contains(r.exprId)) ^ isLeft) {
-              val alias = GpuAlias(gpuProj, s"_agpu_non_ast_r_${left.size}")()
-              right += alias
-              Some(alias)
-            } else {
-              val alias = GpuAlias(gpuProj, s"_agpu_non_ast_l_${left.size}")()
-              left += alias
-              Some(alias)
-            }
-        }
-        alias.foreach(a => substitutionMap.put(GpuExpressionEquals(gpuProj), a.toAttribute))
+  /**
+   * Recursively extract non-AST expressions and convert to GPU in a single pass.
+   * 
+   * @param expr the expression to process
+   * @param leftExprIds expression IDs from the left side
+   * @param rightExprIds expression IDs from the right side
+   * @param leftExprs buffer to collect expressions for left child
+   * @param rightExprs buffer to collect expressions for right child
+   * @param processed map to avoid processing duplicates
+   * @return the converted GPU expression with non-AST sub-trees replaced
+   */
+  private[this] def extractAndConvert(
+      expr: BaseExprMeta[_],
+      leftExprIds: Set[ExprId],
+      rightExprIds: Set[ExprId],
+      leftExprs: ListBuffer[NamedExpression],
+      rightExprs: ListBuffer[NamedExpression],
+      processed: mutable.HashMap[GpuExpressionEquals, Expression]): Expression = {
+    if (!expr.canSelfBeAst) {
+      // This expression cannot be converted to AST - extract the entire sub-tree
+      val exprRef = expr.wrapped.asInstanceOf[Expression]
+      val gpuExpr = expr.convertToGpu()
+      
+      // Check if we've already processed this expression (for deduplication)
+      processed.get(GpuExpressionEquals(gpuExpr)) match {
+        case Some(replacement) => 
+          replacement
+        case None =>
+          // Determine which side this expression belongs to based on its references
+          val referencedExprIds = exprRef.references.map(_.exprId).toSet
+          val referencesLeft = referencedExprIds.exists(leftExprIds.contains)
+          val referencesRight = referencedExprIds.exists(rightExprIds.contains)
+          
+          // Create an alias and add to appropriate side
+          // Note: if it references both sides or neither, it shouldn't happen if 
+          // canExtractNonAstConditionIfNeed passed, but we'll default to left
+          val alias = if (referencesRight && !referencesLeft) {
+            val a = GpuAlias(gpuExpr, s"_agpu_non_ast_r_${rightExprs.size}")()
+            rightExprs += a
+            a
+          } else {
+            val a = GpuAlias(gpuExpr, s"_agpu_non_ast_l_${leftExprs.size}")()
+            leftExprs += a
+            a
+          }
+          
+          // Create an AttributeReference explicitly to avoid issues with unresolved aliases
+          val attributeRef = AttributeReference(alias.name, gpuExpr.dataType, 
+            gpuExpr.nullable, alias.metadata)(alias.exprId, alias.qualifier)
+          processed.put(GpuExpressionEquals(gpuExpr), attributeRef)
+          attributeRef
+      }
+    } else {
+      // This expression can be converted to AST
+      // Recursively process children, then convert this node to GPU
+      val convertedChildren = expr.childExprs.map { child =>
+        extractAndConvert(child, leftExprIds, rightExprIds, leftExprs, rightExprs, processed)
+      }
+      
+      // Convert to GPU and replace children with the processed versions
+      val gpuExpr = expr.convertToGpu()
+      if (convertedChildren.isEmpty) {
+        gpuExpr
       } else {
-        splitNonAstInternal(child, childAtt, left, right, substitutionMap, isLeft)
+        gpuExpr.withNewChildren(convertedChildren)
       }
     }
   }

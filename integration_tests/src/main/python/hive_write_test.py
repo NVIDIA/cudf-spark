@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@
 import pytest
 
 from asserts import *
-from conftest import spark_jvm, is_not_utc
+from conftest import is_utc
 from data_gen import *
 from datetime import date, datetime, timezone
 from marks import *
@@ -36,6 +36,10 @@ _basic_gens = [byte_gen, short_gen, int_gen, long_gen, float_gen, double_gen,
                      string_gen, DateGen(start=date(1590, 1, 1)),
                      _restricted_timestamp()
                ] + decimal_gens
+_write_gens_no_dates_ts = [[gen] for gen in _basic_gens
+                            if gen != _restricted_timestamp() and not isinstance(gen, DateGen)]
+
+_write_gens_dates_ts_only = [[_restricted_timestamp(), DateGen(start=date(1590, 1, 1))]]
 
 _basic_struct_gen = StructGen([['child'+str(ind), sub_gen] for ind, sub_gen in enumerate(_basic_gens)])
 
@@ -60,11 +64,19 @@ _map_gens = [simple_string_to_string_map_gen] + [MapGen(f(nullable=False), f()) 
 
 _write_gens = [_basic_gens, _struct_gens, _array_gens, _map_gens]
 
+# Every entry in _write_gens contains a DATE column. Keep PARQUET coverage strict while
+# allowing the expected CPU writer only for the two ORC storage modes.
+_orc_date_write_allow = ['DataWritingCommandExec', 'ExecutedCommandExec', 'WriteFilesExec']
+_storage_formats = [
+    "PARQUET",
+    pytest.param("nativeorc", marks=allow_non_gpu_conditional(True, *_orc_date_write_allow)),
+    pytest.param("hiveorc", marks=allow_non_gpu_conditional(True, *_orc_date_write_allow))]
+
 # There appears to be a race when computing tasks for writing, order can be different even on CPU
 @ignore_order(local=True)
 @pytest.mark.skipif(not is_hive_available(), reason="Hive is missing")
 @pytest.mark.parametrize("gens", _write_gens, ids=idfn)
-@pytest.mark.parametrize("storage", ["PARQUET", "nativeorc", "hiveorc"])
+@pytest.mark.parametrize("storage", _storage_formats)
 @allow_non_gpu(*non_utc_allow)
 def test_optimized_hive_ctas_basic(gens, storage, spark_tmp_table_factory):
     data_table = spark_tmp_table_factory.get()
@@ -80,6 +92,8 @@ def test_optimized_hive_ctas_basic(gens, storage, spark_tmp_table_factory):
         "spark.sql.legacy.parquet.datetimeRebaseModeInWrite": "CORRECTED",
         "spark.sql.legacy.parquet.int96RebaseModeInWrite": "CORRECTED"
     }
+    if storage.endswith("orc"):
+        conf["orc.proleptic.gregorian"] = "true"
     if storage == "nativeorc":
         conf["spark.sql.orc.impl"] = "native"
     elif storage == "hiveorc":
@@ -89,30 +103,63 @@ def test_optimized_hive_ctas_basic(gens, storage, spark_tmp_table_factory):
 @allow_non_gpu('DataWritingCommandExec,ExecutedCommandExec,WriteFilesExec')
 @pytest.mark.skipif(not is_hive_available(), reason="Hive is missing")
 @pytest.mark.parametrize("gens", [_basic_gens], ids=idfn)
-@pytest.mark.parametrize("storage_with_confs", [
-    ("PARQUET", {"parquet.encryption.footer.key": "k1",
-                 "parquet.encryption.column.keys": "k2:a"}),
-    ("PARQUET", {"spark.sql.parquet.compression.codec": "gzip"}),
-    ("PARQUET", {"spark.sql.parquet.writeLegacyFormat": "true"}),
-    ("ORC", {"spark.sql.orc.compression.codec": "zlib"})], ids=idfn)
-def test_optimized_hive_ctas_configs_fallback(gens, storage_with_confs, spark_tmp_table_factory):
+@pytest.mark.parametrize("parquet_confs", [
+    {"parquet.encryption.footer.key": "k1",
+     "parquet.encryption.column.keys": "k2:a"},
+    {"spark.sql.parquet.compression.codec": "gzip"},
+    {"spark.sql.parquet.writeLegacyFormat": "true"}
+], ids=idfn)
+def test_optimized_hive_ctas_configs_fallback_parquet(gens, parquet_confs, spark_tmp_table_factory):
     data_table = spark_tmp_table_factory.get()
     gen_list = [('c' + str(i), gen) for i, gen in enumerate(gens)]
     with_cpu_session(lambda spark: gen_df(spark, gen_list).createOrReplaceTempView(data_table))
-    storage, confs = storage_with_confs
     fallback_class = "ExecutedCommandExec" if is_spark_340_or_later() or is_databricks122_or_later() else "DataWritingCommandExec"
     assert_gpu_fallback_collect(
-        lambda spark: spark.sql("CREATE TABLE {} STORED AS {} AS SELECT * FROM {}".format(
-            spark_tmp_table_factory.get(), storage, data_table)),
-        fallback_class, conf=confs)
+        lambda spark: spark.sql("CREATE TABLE {} STORED AS PARQUET AS SELECT * FROM {}".format(
+            spark_tmp_table_factory.get(), data_table)),
+        fallback_class, conf=parquet_confs)
+
+
+@pytest.mark.skipif(not is_hive_available(), reason="Hive is missing")
+@pytest.mark.parametrize("gens", _write_gens_no_dates_ts, ids=idfn)
+@pytest.mark.parametrize("orc_confs", [
+    {"spark.sql.orc.compression.codec": "zlib"}
+], ids=idfn)
+@ignore_order(local=True)
+def test_optimized_hive_ctas_configs_orc(gens, orc_confs, spark_tmp_table_factory):
+    data_table = spark_tmp_table_factory.get()
+    gen_list = [('c' + str(i), gen) for i, gen in enumerate(gens)]
+    with_cpu_session(lambda spark: gen_df(spark, gen_list).createOrReplaceTempView(data_table))
+    assert_gpu_and_cpu_sql_writes_are_equal_collect(
+        spark_tmp_table_factory,
+        lambda spark, table_name: "CREATE TABLE {} STORED AS ORC AS SELECT * FROM {}".format(
+            table_name, data_table),
+        conf=orc_confs)
+
+@pytest.mark.skipif(not is_hive_available(), reason="Hive is missing")
+@pytest.mark.skipif(is_utc(), reason="TZ is UTC")
+@allow_non_gpu('DataWritingCommandExec,ExecutedCommandExec,WriteFilesExec')
+@pytest.mark.parametrize("gens", _write_gens_dates_ts_only, ids=idfn)
+@pytest.mark.parametrize("orc_confs", [
+    {"spark.sql.orc.compression.codec": "zlib"}
+], ids=idfn)
+@ignore_order(local=True)
+def test_optimized_hive_ctas_configs_orc_fallback(gens, orc_confs, spark_tmp_table_factory):
+    data_table = spark_tmp_table_factory.get()
+    gen_list = [('c' + str(i), gen) for i, gen in enumerate(gens)]
+    with_cpu_session(lambda spark: gen_df(spark, gen_list).createOrReplaceTempView(data_table))
+    fallback_class = "ExecutedCommandExec" if is_spark_340_or_later() or is_databricks122_or_later() else "DataWritingCommandExec"
+    assert_gpu_fallback_collect(
+        lambda spark: spark.sql("CREATE TABLE {} STORED AS ORC AS SELECT * FROM {}".format(
+            spark_tmp_table_factory.get(), data_table)), fallback_class,
+        conf=orc_confs)
 
 @allow_non_gpu('DataWritingCommandExec,ExecutedCommandExec,WriteFilesExec')
 @pytest.mark.skipif(not is_hive_available(), reason="Hive is missing")
 @pytest.mark.parametrize("gens", [_basic_gens], ids=idfn)
 @pytest.mark.parametrize("storage_with_opts", [
     ("PARQUET", {"parquet.encryption.footer.key": "k1",
-                 "parquet.encryption.column.keys": "k2:a"}),
-    ("ORC", {"orc.compress": "zlib"})], ids=idfn)
+                 "parquet.encryption.column.keys": "k2:a"})], ids=idfn)
 def test_optimized_hive_ctas_options_fallback(gens, storage_with_opts, spark_tmp_table_factory):
     data_table = spark_tmp_table_factory.get()
     gen_list = [('c' + str(i), gen) for i, gen in enumerate(gens)]
@@ -165,7 +212,6 @@ def do_hive_copy(spark_tmp_table_factory, gen, type1, type2):
             'spark.sql.ansi.enabled': 'true',
             'spark.sql.storeAssignmentPolicy': 'ANSI'})
 
-    jvm = spark_jvm()
-    jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.assertContainsAnsiCast(cpu_df._jdf)
-    jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.assertContainsAnsiCast(gpu_df._jdf)
+    assert_contains_ansi_cast(cpu_df)
+    assert_contains_ansi_cast(gpu_df)
     assert_equal(from_cpu, from_gpu)

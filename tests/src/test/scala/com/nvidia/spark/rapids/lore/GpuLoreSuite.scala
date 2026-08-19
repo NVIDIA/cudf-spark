@@ -16,26 +16,28 @@
 
 package com.nvidia.spark.rapids.lore
 
-import com.nvidia.spark.rapids.{FunSuiteWithTempDir, GpuColumnarToRowExec, RapidsConf, ShimLoader, SparkQueryCompareTestSuite}
+import com.nvidia.spark.rapids.{FunSuiteWithTempDir, GpuColumnarToRowExec, GpuProjectExec, RapidsConf, ShimLoader, SparkQueryCompareTestSuite}
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.shims.SparkShimImpl
 import org.apache.hadoop.fs.Path
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.{functions, DataFrame, SparkSession}
 import org.apache.spark.sql.execution.SQLExecution
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.rapids.GpuFileSourceScanExec
 
 class GpuLoreSuite extends SparkQueryCompareTestSuite with FunSuiteWithTempDir with Logging {
   /**
-   * Check if the current version should be skipped for GpuInsertIntoHiveTable test
+   * Check if the current version should be skipped for GpuInsertIntoHiveTable test.
+   * Skip whenever the shim enables GPU WriteFiles because LORE dumping will fail.
    */
-  private def skipIfUnsupportedVersion(testName: String): Unit = {
+  private def skipIfGpuWriteFilesEnabled(testName: String): Unit = {
     val version = ShimLoader.getShimVersion
-    val unsupportedVersions = GpuLore.getGpuWriteFilesUnsupportedVersions
+    val hasGpuWriteFiles = SparkShimImpl.hasGpuWriteFiles
 
-    // Skip this test if the current version is in unsupported versions
-    assume(!unsupportedVersions.contains(version),
-      s"Skipping $testName for version $version as it's in the unsupported versions list")
+    assume(!hasGpuWriteFiles,
+      s"Skipping $testName for version $version because GPU WriteFiles is enabled on this shim")
   }
 
   // Reusable Derby cleanup function
@@ -224,6 +226,99 @@ class GpuLoreSuite extends SparkQueryCompareTestSuite with FunSuiteWithTempDir w
     }
   }
 
+  test("Non-empty lore dump path with non-strict mode") {
+    withGpuSparkSession { spark =>
+      val dumpDir = new java.io.File(TEST_FILES_ROOT,
+        s"non-strict-non-empty-${System.nanoTime()}")
+      val dumpPath = new Path(dumpDir.getAbsolutePath)
+      val fs = dumpPath.getFileSystem(spark.sparkContext.hadoopConfiguration)
+      if (fs.exists(dumpPath)) {
+        fs.delete(dumpPath, true)
+      }
+      fs.mkdirs(dumpPath)
+      val leftover = new Path(dumpPath, "existing.file")
+      withResource(fs.create(leftover, true)) { _ => }
+
+      try {
+        spark.conf.set(RapidsConf.LORE_DUMP_PATH.key, dumpDir.getAbsolutePath)
+        spark.conf.set(RapidsConf.LORE_DUMP_IDS.key, "3[*]")
+        spark.conf.set(RapidsConf.LORE_NON_STRICT_MODE.key, "true")
+
+        val df = spark.range(0, 1000, 1, 100)
+          .selectExpr("id % 10 as key", "id % 100 as value")
+
+        assert(1000 == df.collect().length)
+      } finally {
+        spark.conf.unset(RapidsConf.LORE_NON_STRICT_MODE.key)
+        spark.conf.unset(RapidsConf.LORE_DUMP_IDS.key)
+        spark.conf.unset(RapidsConf.LORE_DUMP_PATH.key)
+      }
+    }
+  }
+
+  test("Non-strict mode skips unsupported lore ids") {
+    withGpuSparkSession { spark =>
+      val inputDir = new java.io.File(TEST_FILES_ROOT,
+        s"non-strict-input-${System.nanoTime()}")
+      val inputPath = new Path(inputDir.getAbsolutePath).toString
+      spark.range(0, 10, 1, 1)
+        .write
+        .mode("overwrite")
+        .parquet(inputPath)
+
+      def buildDf(): DataFrame = {
+        spark.read.parquet(inputPath)
+          .selectExpr("id", "id + 1 as id_plus_one")
+      }
+
+      val probeDf = buildDf()
+      assert(10 == probeDf.collect().length)
+      val executedPlan = probeDf.queryExecution.executedPlan
+
+      val scanLoreId = executedPlan.collectFirst {
+        case scan: GpuFileSourceScanExec => GpuLore.loreIdOf(scan)
+      }.flatten.getOrElse(fail("Expected a GpuFileSourceScanExec lore id"))
+
+      val projectLoreId = executedPlan.collectFirst {
+        case proj: GpuProjectExec => GpuLore.loreIdOf(proj)
+      }.flatten.getOrElse(fail("Expected a GpuProjectExec lore id"))
+
+      val idsConfig = s"$projectLoreId[*],$scanLoreId[*]"
+      val strictDumpDir = new java.io.File(TEST_FILES_ROOT,
+        s"non-strict-strict-${System.nanoTime()}").getAbsolutePath
+      val nonStrictDumpDir = new java.io.File(TEST_FILES_ROOT,
+        s"non-strict-success-${System.nanoTime()}").getAbsolutePath
+
+      try {
+        spark.conf.set(RapidsConf.LORE_DUMP_IDS.key, idsConfig)
+
+        spark.conf.set(RapidsConf.LORE_DUMP_PATH.key, strictDumpDir)
+        val strictDf = buildDf()
+        val err = intercept[UnsupportedOperationException] {
+          strictDf.collect()
+        }
+        assert(err.getMessage.contains("Currently we don't support dumping input"))
+        spark.conf.unset(RapidsConf.LORE_DUMP_PATH.key)
+
+        spark.conf.set(RapidsConf.LORE_NON_STRICT_MODE.key, "true")
+        spark.conf.set(RapidsConf.LORE_DUMP_PATH.key, nonStrictDumpDir)
+        val nonStrictDf = buildDf()
+        assert(10 == nonStrictDf.collect().length)
+
+        val fs = new Path(nonStrictDumpDir)
+          .getFileSystem(spark.sparkContext.hadoopConfiguration)
+        val projectPath = new Path(nonStrictDumpDir, s"loreId-$projectLoreId")
+        assert(fs.exists(projectPath))
+        val scanPath = new Path(nonStrictDumpDir, s"loreId-$scanLoreId")
+        assert(!fs.exists(scanPath))
+      } finally {
+        spark.conf.unset(RapidsConf.LORE_NON_STRICT_MODE.key)
+        spark.conf.unset(RapidsConf.LORE_DUMP_PATH.key)
+        spark.conf.unset(RapidsConf.LORE_DUMP_IDS.key)
+      }
+    }
+  }
+
   test("Skip dumping plan") {
     withGpuSparkSession{ spark =>
       spark.conf.set(RapidsConf.LORE_DUMP_PATH.key, TEST_FILES_ROOT.getAbsolutePath)
@@ -286,7 +381,7 @@ class GpuLoreSuite extends SparkQueryCompareTestSuite with FunSuiteWithTempDir w
     */
 
     // Skip this test for versions that are in unsupportedHiveInsertVersions
-    skipIfUnsupportedVersion("GpuInsertIntoHiveTable with LoRE dump and replay")
+    skipIfGpuWriteFilesEnabled("GpuInsertIntoHiveTable with LoRE dump and replay")
     // Clean up before test starts
     cleanupDerbyFiles()
     // Create unique metastore location for this test run
@@ -390,11 +485,9 @@ class GpuLoreSuite extends SparkQueryCompareTestSuite with FunSuiteWithTempDir w
   test("LORE dump should throw exception for GpuDataWritingCommandExec on unsupported versions") {
     // Only run this test for versions that are in unsupported versions
     val currentShimVersion = ShimLoader.getShimVersion
-    val unsupportedVersions = GpuLore.getGpuWriteFilesUnsupportedVersions
-
-    // Skip this test if the current version is NOT in unsupported versions
-    assume(unsupportedVersions.contains(currentShimVersion),
-      s"Skipping test for version $currentShimVersion as it's not in the unsupported versions list")
+    // Skip this test if GPU WriteFiles is disabled on the current shim
+    assume(SparkShimImpl.hasGpuWriteFiles,
+      s"Skipping test for version $currentShimVersion because GPU WriteFiles is disabled")
 
     // Clean up before test starts
     cleanupDerbyFiles()
@@ -429,11 +522,53 @@ class GpuLoreSuite extends SparkQueryCompareTestSuite with FunSuiteWithTempDir w
         // Verify the exception message contains the expected information
         assert(exception.getMessage.contains("LORE dump is not supported for" +
           " GpuDataWritingCommandExec"))
-        assert(exception.getMessage.contains("Unsupported versions:"))
+        assert(exception.getMessage.contains("because GPU WriteFiles is enabled on this shim"))
       }
     } finally {
       // Clean up Derby files after test completes
       cleanupDerbyFiles()
+    }
+  }
+
+  test("Parquet original schema names") {
+    withGpuSparkSession { spark =>
+      // Enable LORE dump with original schema names for parquet
+      spark.conf.set(RapidsConf.LORE_DUMP_PATH.key, TEST_FILES_ROOT.getAbsolutePath)
+      spark.conf.set(RapidsConf.LORE_DUMP_IDS.key, "5[*]")
+      // Build a dataframe containing various nested types to validate naming
+      val df = spark.range(0, 100, 1, 10)
+        .selectExpr(
+          "id as id_col",
+          "named_struct('a', id, 'b', id + 1) as s_col",
+          "array(id, id + 2) as arr_col",
+          "map(id, id + 3) as map_col")
+        .groupBy("id_col")
+        .agg(
+          functions.first("s_col", ignoreNulls = true).as("s_first"),
+          functions.collect_list("arr_col").as("arr_list"),
+          functions.first("map_col", ignoreNulls = true).as("map_first")
+        )
+
+      // Trigger execution to produce LORE dump
+      val _ = df.collect().length
+
+      // Inspect dumped parquet under loreId-5/input-0
+      val inputRoot = new Path(s"${TEST_FILES_ROOT.getAbsolutePath}/loreId-5/input-0")
+      val fs = inputRoot.getFileSystem(spark.sparkContext.hadoopConfiguration)
+
+      // Read expected names from rdd.meta
+      val metaPath = new Path(inputRoot, "rdd.meta")
+      val meta = GpuLore.loadObject[LoreRDDMeta](metaPath, spark.sparkContext.hadoopConfiguration)
+      val expectedNames = meta.attrs.map(_.name)
+
+      // Find a parquet batch file in one partition folder and verify column names
+      val partDir = fs.listStatus(inputRoot).map(_.getPath)
+        .find(p => p.getName.startsWith("partition-")).get
+      val parquetFile = fs.listStatus(partDir).map(_.getPath)
+        .find(p => p.getName.endsWith(".parquet")).get
+
+      val directDf = spark.read.parquet(parquetFile.toString)
+      assert(directDf.columns.toSeq == expectedNames)
     }
   }
 

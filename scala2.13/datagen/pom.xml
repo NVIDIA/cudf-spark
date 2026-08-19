@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Copyright (c) 2023-2025 NVIDIA CORPORATION.
+  Copyright (c) 2023-2026 NVIDIA CORPORATION.
 
   Licensed under the Apache License, Version 2.0 (the "License");
   you may not use this file except in compliance with the License.
@@ -21,13 +21,13 @@
     <parent>
         <groupId>com.nvidia</groupId>
         <artifactId>rapids-4-spark-shim-deps-parent_2.13</artifactId>
-        <version>25.10.0-SNAPSHOT</version>
+        <version>26.10.0-SNAPSHOT</version>
         <relativePath>../shim-deps/pom.xml</relativePath>
     </parent>
     <artifactId>datagen_2.13</artifactId>
     <name>Data Generator</name>
     <description>Tools for generating large amounts of data</description>
-    <version>25.10.0-SNAPSHOT</version>
+    <version>26.10.0-SNAPSHOT</version>
     <properties>
         <rapids.module>datagen</rapids.module>
         <target.classifier/>
@@ -48,11 +48,6 @@
         <dependency>
             <groupId>org.scala-lang</groupId>
             <artifactId>scala-library</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.spark</groupId>
-            <artifactId>spark-sql_${scala.binary.version}</artifactId>
-            <version>${spark.test.version}</version>
         </dependency>
         <!-- https://mvnrepository.com/artifact/com.github.scopt/scopt -->
         <dependency>

@@ -82,4 +82,17 @@ class RapidsDataFrameAggregateSuite extends DataFrameAggregateSuite with RapidsS
     checkAnswer(df.select(sort_array(collect_set("a")) cast ArrayType(FloatType, false)),
       Seq(Row(Seq(1.0, 2.0))))
   }
+
+  testRapids("SPARK-24788: RelationalGroupedDataset.toString " +
+    "with unresolved exprs should not fail") {
+    // Checks if these raise no exception
+    val expected = if (getJavaMajorVersion() >= 11) "" else "GroupBy"
+    assert(testData.groupBy($"key").toString.contains(
+      s"[grouping expressions: [key], value: [key: int, value: string], type: ${expected}]"))
+    assert(testData.groupBy(col("key")).toString.contains(
+      s"[grouping expressions: [key], value: [key: int, value: string], type: ${expected}]"))
+    assert(testData.groupBy(current_date()).toString.contains(
+      "grouping expressions: [current_date(None)], value: [key: int, value: string], " +
+        s"type: ${expected}]"))
+  }
 }

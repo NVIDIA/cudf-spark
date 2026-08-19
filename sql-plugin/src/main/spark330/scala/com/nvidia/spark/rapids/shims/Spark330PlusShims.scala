@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,10 +16,8 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark": "330"}
-{"spark": "330cdh"}
 {"spark": "331"}
 {"spark": "332"}
-{"spark": "332cdh"}
 {"spark": "333"}
 {"spark": "334"}
 {"spark": "340"}
@@ -34,8 +32,20 @@
 {"spark": "354"}
 {"spark": "355"}
 {"spark": "356"}
+{"spark": "357"}
+{"spark": "358"}
+{"spark": "359"}
 {"spark": "400"}
+{"spark": "401"}
+{"spark": "402"}
+{"spark": "403"}
+{"spark": "404"}
+{"spark": "411"}
+{"spark": "412"}
+{"spark": "413"}
+{"spark": "420"}
 spark-rapids-shim-json-lines ***/
+
 package com.nvidia.spark.rapids.shims
 
 import com.nvidia.spark.rapids._
@@ -47,7 +57,6 @@ import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.datasources.{FileFormat, FilePartition, FileScanRDD, PartitionedFile}
 import org.apache.spark.sql.execution.datasources.v2.{AppendDataExec, OverwriteByExpressionExec}
-import org.apache.spark.sql.rapids.shims.{GpuDivideYMInterval, GpuMultiplyYMInterval}
 import org.apache.spark.sql.types.StructType
 
 trait Spark330PlusShims extends Spark321PlusShims with Spark320PlusNonDBShims {
@@ -65,43 +74,11 @@ trait Spark330PlusShims extends Spark321PlusShims with Spark320PlusNonDBShims {
   }
 
   // GPU support ANSI interval types from 330
-  override def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
-    val map: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = Seq(
-      GpuOverrides.expr[MultiplyYMInterval](
-        "Year-month interval * number",
-        ExprChecks.binaryProject(
-          TypeSig.YEARMONTH,
-          TypeSig.YEARMONTH,
-          ("lhs", TypeSig.YEARMONTH, TypeSig.YEARMONTH),
-          ("rhs", TypeSig.gpuNumeric - TypeSig.DECIMAL_128, TypeSig.gpuNumeric)),
-        (a, conf, p, r) => new BinaryExprMeta[MultiplyYMInterval](a, conf, p, r) {
-          override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression =
-            GpuMultiplyYMInterval(lhs, rhs)
-        }),
-      GpuOverrides.expr[DivideYMInterval](
-        "Year-month interval * operator",
-        ExprChecks.binaryProject(
-          TypeSig.YEARMONTH,
-          TypeSig.YEARMONTH,
-          ("lhs", TypeSig.YEARMONTH, TypeSig.YEARMONTH),
-          ("rhs", TypeSig.gpuNumeric - TypeSig.DECIMAL_128, TypeSig.gpuNumeric)),
-        (a, conf, p, r) => new BinaryExprMeta[DivideYMInterval](a, conf, p, r) {
-          override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression =
-            GpuDivideYMInterval(lhs, rhs)
-        })
-    ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
-    super.getExprs ++ map ++ DayTimeIntervalShims.exprs ++ RoundingShims.exprs
-  }
+  override def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] =
+    super.getExprs ++ YearMonthIntervalShims.exprs ++ DayTimeIntervalShims.exprs ++
+      RoundingShims.exprs
 
   override def getExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = {
-    val overwriteByExpressionRule = GpuOverrides.exec[OverwriteByExpressionExec](
-      "Overwrite into a datasource V2 table",
-      ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 +
-        TypeSig.STRUCT + TypeSig.MAP + TypeSig.ARRAY + TypeSig.BINARY +
-        GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
-        TypeSig.all),
-      (p, conf, parent, r) => new OverwriteByExpressionExecMeta(p, conf, parent, r))
-
     val appendDataRule = GpuOverrides.exec[AppendDataExec](
       "Append data into a datasource V2 table",
       ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 +
@@ -110,16 +87,20 @@ trait Spark330PlusShims extends Spark321PlusShims with Spark320PlusNonDBShims {
         TypeSig.all),
       (p, conf, parent, r) => new AppendDataExecMeta(p, conf, parent, r))
 
-    // Create a sequence of tuples, explicitly casting to the common type,
-    // because we got some compile errors without this
-    val newExecs: Seq[(Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan])] = Seq(
-      (overwriteByExpressionRule.getClassFor.asSubclass(classOf[SparkPlan]),
-        overwriteByExpressionRule),
-      (appendDataRule.getClassFor.asSubclass(classOf[SparkPlan]), appendDataRule)
-    )
+    val overwriteByExpressionRule = GpuOverrides.exec[OverwriteByExpressionExec](
+      "Overwrite data in a datasource V2 table",
+      ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 +
+        TypeSig.STRUCT + TypeSig.MAP + TypeSig.ARRAY + TypeSig.BINARY +
+        GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
+        TypeSig.all),
+      (p, conf, parent, r) => new OverwriteByExpressionExecMeta(p, conf, parent, r))
 
-    val newExecsMap = newExecs.toMap
-    super.getExecs ++ PythonMapInArrowExecShims.execs ++ newExecsMap
+    val v2WriteRules: Seq[(Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan])] = Seq(
+      (appendDataRule.getClassFor.asSubclass(classOf[SparkPlan]), appendDataRule),
+      (overwriteByExpressionRule.getClassFor.asSubclass(classOf[SparkPlan]),
+        overwriteByExpressionRule))
+
+    super.getExecs ++ PythonMapInArrowExecShims.execs ++ v2WriteRules.toMap
   }
 
 }

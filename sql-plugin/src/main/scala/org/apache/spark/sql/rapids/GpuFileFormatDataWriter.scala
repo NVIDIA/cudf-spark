@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,10 +26,12 @@ import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
+import com.nvidia.spark.rapids.fileio.hadoop.HadoopFileIO
 import com.nvidia.spark.rapids.shims.GpuFileFormatDataWriterShim
-import org.apache.hadoop.fs.Path
+import org.apache.hadoop.fs.{FileAlreadyExistsException, Path}
 import org.apache.hadoop.mapreduce.TaskAttemptContext
 
+import org.apache.spark.TaskOutputFileAlreadyExistException
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.io.FileCommitProtocol
 import org.apache.spark.sql.catalyst.InternalRow
@@ -38,8 +40,10 @@ import org.apache.spark.sql.catalyst.catalog.CatalogTypes.TablePartitionSpec
 import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, AttributeSet, Cast, Concat, Expression, HiveHash, Literal, Murmur3Hash, NullsFirst, ScalaUDF, UnsafeProjection}
 import org.apache.spark.sql.connector.write.DataWriter
 import org.apache.spark.sql.execution.datasources.{BucketingUtils, PartitioningUtils, WriteTaskResult}
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.GpuFileFormatDataWriter._
 import org.apache.spark.sql.rapids.GpuFileFormatWriter.GpuConcurrentOutputWriterSpec
+import org.apache.spark.sql.rapids.shims.FileCommitProtocolShims
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.util.SerializableConfiguration
@@ -175,14 +179,26 @@ abstract class GpuFileFormatDataWriter(
   }
 
   /** Write an iterator of column batch. */
-  def writeWithIterator(iterator: Iterator[ColumnarBatch]): Unit = {
+  def writeWithIterator(iterator: Iterator[ColumnarBatch]): Unit = try {
     while (iterator.hasNext) {
       write(iterator.next())
     }
+  } catch {
+    case f: FileAlreadyExistsException if SQLConf.get.fastFailFileFormatOutput =>
+      throw new TaskOutputFileAlreadyExistException(f)
   }
 
   /** Writes a columnar batch of records */
   def write(batch: ColumnarBatch): Unit
+
+  /** Get the operator time metric for timing collection */
+  def operatorTimeMetric: GpuMetric = {
+    statsTrackers.find(_.isInstanceOf[GpuWriteTaskStatsTracker]) match {
+      case Some(tracker: GpuWriteTaskStatsTracker) =>
+        tracker.opTimeNew
+      case _ => NoopMetric
+    }
+  }
 
   protected val reportSingleWriter = true
 
@@ -246,16 +262,14 @@ class GpuSingleDirectoryDataWriter(
   // Initialize currentWriter and statsTrackers
   newOutputWriter()
 
-  @scala.annotation.nowarn(
-    "msg=method newTaskTempFile in class FileCommitProtocol is deprecated"
-  )
   private def newOutputWriter(): Unit = {
     currentWriterStatus.recordsInFile = 0
     val fileCounter = currentWriterStatus.fileCounter
     releaseResources()
 
     val ext = description.outputWriterFactory.getFileExtension(taskAttemptContext)
-    val currentPath = committer.newTaskTempFile(
+    val currentPath = FileCommitProtocolShims.newTaskTempFile(
+      committer,
       taskAttemptContext,
       None,
       f"-c$fileCounter%03d" + ext)
@@ -270,7 +284,8 @@ class GpuSingleDirectoryDataWriter(
       dataSchema = description.dataColumns.toStructType,
       context = taskAttemptContext,
       statsTrackers = statsTrackers,
-      debugOutputPath = debugOutputPath)
+      debugOutputPath = debugOutputPath,
+      fileIO = description.fileIO)
 
     statsTrackers.foreach(_.newFile(currentPath))
   }
@@ -372,7 +387,9 @@ class GpuDynamicPartitionDataSingleWriter(
 
   /** Extracts the partition values out of an input batch. */
   private lazy val getPartitionColumnsAsBatch: ColumnarBatch => ColumnarBatch = {
-    val expressions = GpuBindReferences.bindGpuReferences(
+    // Using Internal method: this is a simple column projection in data writer context
+    // where metrics are not available (runs on executors after serialization).
+    val expressions = GpuBindReferences.bindGpuReferencesNoMetrics(
       description.partitionColumns,
       description.allColumns)
     cb => {
@@ -381,7 +398,9 @@ class GpuDynamicPartitionDataSingleWriter(
   }
 
   private lazy val getBucketIdColumnAsBatch: ColumnarBatch => ColumnarBatch = {
-    val expressions = GpuBindReferences.bindGpuReferences(
+    // Using Internal method: this is a simple projection in data writer context
+    // where metrics are not available (runs on executors after serialization).
+    val expressions = GpuBindReferences.bindGpuReferencesNoMetrics(
       Seq(description.bucketSpec.get.bucketIdExpression),
       description.allColumns)
     cb => {
@@ -412,7 +431,9 @@ class GpuDynamicPartitionDataSingleWriter(
 
   /** Extracts the output values of an input batch. */
   protected lazy val getDataColumnsAsBatch: ColumnarBatch => ColumnarBatch = {
-    val expressions = GpuBindReferences.bindGpuReferences(
+    // Using Internal method: this is a simple column projection in data writer context
+    // where metrics are not available (runs on executors after serialization).
+    val expressions = GpuBindReferences.bindGpuReferencesNoMetrics(
       description.dataColumns,
       description.allColumns)
     cb => {
@@ -574,9 +595,6 @@ class GpuDynamicPartitionDataSingleWriter(
    *                    currently does not support `bucketId`, it's always None
    * @param fileCounter integer indicating the number of files to be written to `partDir`
    */
-  @scala.annotation.nowarn(
-    "msg=method newTaskTempFile.* in class FileCommitProtocol is deprecated"
-  )
   def newWriter(partValues: Option[InternalRow], bucketId: Option[Int],
       fileCounter: Int): ColumnarOutputWriter = {
     val partDir = partValues.map(getPartitionPath(_))
@@ -593,9 +611,10 @@ class GpuDynamicPartitionDataSingleWriter(
     }
 
     val currentPath = if (customPath.isDefined) {
-      committer.newTaskTempFileAbsPath(taskAttemptContext, customPath.get, ext)
+      FileCommitProtocolShims.newTaskTempFileAbsPath(
+        committer, taskAttemptContext, customPath.get, ext)
     } else {
-      committer.newTaskTempFile(taskAttemptContext, partDir, ext)
+      FileCommitProtocolShims.newTaskTempFile(committer, taskAttemptContext, partDir, ext)
     }
 
     val debugOutputPath = debugOutputBasePath.map { base =>
@@ -614,7 +633,8 @@ class GpuDynamicPartitionDataSingleWriter(
       dataSchema = description.dataColumns.toStructType,
       context = taskAttemptContext,
       statsTrackers = statsTrackers,
-      debugOutputPath = debugOutputPath)
+      debugOutputPath = debugOutputPath,
+      description.fileIO)
 
     statsTrackers.foreach(_.newFile(currentPath))
     outWriter
@@ -770,7 +790,8 @@ class GpuDynamicPartitionDataConcurrentWriter(
         }.getOrElse((NoopMetric, NoopMetric))
 
       val sortIter = GpuOutOfCoreSortIterator(pendingCbsIter ++ iterator,
-        new GpuSorter(spec.sortOrder, spec.output), GpuSortExec.targetSize(spec.batchSize),
+        new GpuSorter(spec.sortOrder, spec.output, Map.empty[String, GpuMetric]),
+        GpuSortExec.targetSize(spec.batchSize),
         sortOpTime, sortMetric, NoopMetric, NoopMetric)
       while (sortIter.hasNext) {
         // write with sort-based sequential writer
@@ -823,8 +844,9 @@ class GpuDynamicPartitionDataConcurrentWriter(
     // Write the cached batches
     val writeFunc: (WriterIndex, WriterStatusWithBatches) => Unit =
       if (pendingBatches.nonEmpty) {
-        // Flush all the caches before going into sorted sequential write
-        writeOneCacheAndClose
+        // Flush all non-empty caches before going into sorted sequential write. Some writers may
+        // have been flushed previously, but are kept open for possible reuse during fallback.
+        writeOneCacheIfNeededAndClose
       } else {
         // Still the concurrent write, so write out only partitions that size > threshold.
         (wi, ws) =>
@@ -834,6 +856,13 @@ class GpuDynamicPartitionDataConcurrentWriter(
       }
     concurrentWriters.foreach { case (writerIdx, writerStatus) =>
       writeFunc(writerIdx, writerStatus)
+    }
+  }
+
+  private def writeOneCacheIfNeededAndClose(writerId: WriterIndex,
+      status: WriterStatusWithBatches): Unit = {
+    if (status.tableCaches.nonEmpty) {
+      writeOneCacheAndClose(writerId, status)
     }
   }
 
@@ -974,6 +1003,8 @@ class GpuWriteJobDescription(
     val statsTrackers: Seq[ColumnarWriteJobStatsTracker],
     val concurrentWriterPartitionFlushSize: Long)
   extends Serializable {
+
+  lazy val fileIO: HadoopFileIO = new HadoopFileIO(serializableHadoopConf.value)
 
   assert(AttributeSet(allColumns) == AttributeSet(partitionColumns ++ dataColumns),
     s"""

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -109,14 +109,23 @@ object SparkSessionHolder extends Logging {
   }
 
   def sparkSession: SparkSession = {
-    if (!hasActiveSession) {
+    // If there is no active session or the cached one is already stopped, re-init
+    val needsReinit = try {
+      !hasActiveSession || spark.sparkContext.isStopped
+    } catch {
+      case _: Throwable => true
+    }
+    if (needsReinit) {
       reinitSession()
     }
     spark
   }
 
   def resetSparkSessionConf(): Unit = {
-    if (!hasActiveSession) {
+    val needsReinit = try { !hasActiveSession || spark.sparkContext.isStopped } catch {
+      case _: Throwable => true
+    }
+    if (needsReinit) {
       reinitSession()
     } else {
       setAllConfs(origConf.toArray)
@@ -2177,7 +2186,7 @@ trait SparkQueryCompareTestSuite extends AnyFunSuite with BeforeAndAfterAll {
     val schema = df.schema
     // modify [[StructField] with name `cn`
     val newSchema = StructType(schema.map {
-      case StructField(c, t, _, m) ⇒ StructField(c, t, nullable = nullable, m)
+      case StructField(c, t, _, m) => StructField(c, t, nullable = nullable, m)
     })
     // apply new schema
     df.sparkSession.createDataFrame(df.rdd, newSchema)

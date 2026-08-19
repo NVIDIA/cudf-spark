@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 
 package org.apache.spark.sql.rapids.execution
 
-import java.util.concurrent.{ScheduledExecutorService, ThreadPoolExecutor}
+import java.util.concurrent.{ExecutorService, ScheduledExecutorService, ThreadPoolExecutor}
 
 import org.apache.hadoop.conf.Configuration
 import org.json4s.JsonAST
@@ -37,6 +37,7 @@ import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans.physical.BroadcastMode
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.rapids.GpuTaskMetrics
 import org.apache.spark.sql.rapids.shims.DataTypeUtilsShim
 import org.apache.spark.sql.rapids.shims.SparkUpgradeExceptionShims
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims
@@ -115,7 +116,10 @@ object TrampolineUtil {
    * @param amountSpilled amount of memory spilled in bytes
    */
   def incTaskMetricsMemoryBytesSpilled(amountSpilled: Long): Unit = {
-    Option(TaskContext.get).foreach(_.taskMetrics().incMemoryBytesSpilled(amountSpilled))
+    Option(TaskContext.get).foreach { tc =>
+      tc.taskMetrics().incMemoryBytesSpilled(amountSpilled)
+      GpuTaskMetrics.get.recordSpillToHost(amountSpilled)
+    }
   }
 
   /**
@@ -129,6 +133,7 @@ object TrampolineUtil {
       if (metrics != null) {
         metrics.incDiskBytesSpilled(amountSpilled)
       }
+      GpuTaskMetrics.get.recordSpillToDisk(amountSpilled)
     })
   }
 
@@ -235,6 +240,10 @@ object TrampolineUtil {
     ThreadUtils.newDaemonCachedThreadPool(prefix, maxThreadNumber, keepAliveSeconds)
   }
 
+  def newDaemonSingleThreadExecutor(threadName: String): ExecutorService = {
+    ThreadUtils.newDaemonSingleThreadExecutor(threadName)
+  }
+
   def newDaemonSingleThreadScheduledExecutor(threadName: String): ScheduledExecutorService = {
     ThreadUtils.newDaemonSingleThreadScheduledExecutor(threadName)
   }
@@ -245,6 +254,12 @@ object TrampolineUtil {
 
   def getSparkHadoopUtilConf: Configuration = SparkHadoopUtil.get.conf
 
+  def markTaskFailed(ctx: TaskContext, error: Throwable): Unit = {
+    ctx.markTaskFailed(error)
+  }
+
+  /** Get the key for spark.shuffle.service.enabled config (which is private[spark]) */
+  def shuffleServiceEnabledKey: String = config.SHUFFLE_SERVICE_ENABLED.key
 }
 
 /**

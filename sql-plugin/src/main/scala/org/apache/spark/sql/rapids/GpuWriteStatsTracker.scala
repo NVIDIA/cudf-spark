@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 
 package org.apache.spark.sql.rapids
 
-import com.nvidia.spark.rapids.{GpuDataWritingCommand, GpuMetric, GpuMetricFactory, MetricsLevel, RapidsConf}
+import com.nvidia.spark.rapids.{GpuDataWritingCommand, GpuMetric, GpuMetricFactory, MetricsLevel, NoopMetric, RapidsConf}
 import org.apache.hadoop.conf.Configuration
 
 import org.apache.spark.SparkContext
@@ -64,6 +64,8 @@ class GpuWriteTaskStatsTracker(
     taskMetrics(GpuWriteJobStatsTracker.ASYNC_WRITE_MIN_THROTTLE_TIME_KEY).set(minNs)
     taskMetrics(GpuWriteJobStatsTracker.ASYNC_WRITE_MAX_THROTTLE_TIME_KEY).set(maxNs)
   }
+
+  def opTimeNew: GpuMetric = taskMetrics(GpuWriteJobStatsTracker.OP_TIME_NEW_KEY)
 }
 
 /**
@@ -80,6 +82,17 @@ class GpuWriteJobStatsTracker(
   override def newTaskInstance(): ColumnarWriteTaskStatsTracker = {
     new GpuWriteTaskStatsTracker(serializableHadoopConf.value, taskMetrics)
   }
+
+  /**
+   * Exposes the Insert command's op_time metric on the job-level stats
+   * tracker. Needed by `GpuFileFormatWriter.executeTask` so it can activate
+   * its `.ns(excludeMetrics)` wrap before constructing the dataWriter --
+   * the dataWriter constructor (or its caller's empty-partition check)
+   * would otherwise consume the iterator outside the wrap and leak
+   * descendant op_time updates.
+   */
+  def opTimeNewMetric: GpuMetric =
+    taskMetrics.getOrElse(GpuWriteJobStatsTracker.OP_TIME_NEW_KEY, NoopMetric)
 }
 
 object GpuWriteJobStatsTracker {
@@ -88,6 +101,7 @@ object GpuWriteJobStatsTracker {
   val SORT_TIME_KEY = "writeSortTime"
   val SORT_OP_TIME_KEY = "writeSortOpTime"
   val WRITE_IO_TIME_KEY = "writeIOTime"
+  val OP_TIME_NEW_KEY = "operatorTime"
   val ASYNC_WRITE_TOTAL_THROTTLE_TIME_KEY = "asyncWriteTotalThrottleTime"
   val ASYNC_WRITE_AVG_THROTTLE_TIME_KEY = "asyncWriteAvgThrottleTime"
   val ASYNC_WRITE_MIN_THROTTLE_TIME_KEY = "asyncWriteMinThrottleTime"
@@ -111,6 +125,8 @@ object GpuWriteJobStatsTracker {
         "GPU sort time"),
       WRITE_IO_TIME_KEY -> metricFactory.createNanoTiming(GpuMetric.DEBUG_LEVEL,
         "write I/O time"),
+      OP_TIME_NEW_KEY -> metricFactory.createNanoTiming(GpuMetric.MODERATE_LEVEL,
+        "op time"),
       TASK_COMMIT_TIME -> basicMetrics(TASK_COMMIT_TIME),
       ASYNC_WRITE_TOTAL_THROTTLE_TIME_KEY -> metricFactory.createNanoTiming(
         GpuMetric.DEBUG_LEVEL, "total throttle time"),

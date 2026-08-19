@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,15 +18,15 @@ package org.apache.spark.sql.rapids
 
 import java.util.Optional
 
-import ai.rapids.cudf.{BinaryOp, ColumnVector, ColumnView, DType}
-import com.nvidia.spark.rapids.{GpuColumnVector, GpuExpression, GpuProjectExec, GpuUnaryExpression}
+import ai.rapids.cudf.{BinaryOp, ColumnVector, ColumnView, DType, Scalar}
+import com.nvidia.spark.rapids.{BinaryExprMeta, DataFromReplacementRule, GpuBinaryExpression, GpuColumnVector, GpuExpression, GpuLiteral, GpuProjectExec, GpuScalar, GpuUnaryExpression, RapidsConf, RapidsMeta}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.jni.Hash
 import com.nvidia.spark.rapids.shims.{HashUtils, NullIntolerantShim, ShimExpression}
 
 import org.apache.spark.sql.catalyst.analysis.TypeCheckResult
-import org.apache.spark.sql.catalyst.expressions.{Expression, ImplicitCastInputTypes}
+import org.apache.spark.sql.catalyst.expressions.{Expression, ImplicitCastInputTypes, Sha2}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -71,6 +71,99 @@ case class GpuSha1(child: Expression)
         fullResult.mergeAndSetValidity(BinaryOp.BITWISE_AND, normalizedStringCV)
       }
     }
+  }
+}
+
+/**
+ * GPU implementation of the SHA2 hash function set.
+ * Note:
+ *   - Only bit lengths of 0, 224, 256, 384, and 512 are supported.
+ *   - A bit length of 0 is treated as 256, following Spark behaviour.
+ *   - For the GPU implementation, the bit length must be provided as a literal.
+ *   - For unsupported (including negative) bit lengths, SHA2 returns null.
+ *     This differs from the CPU implementation, where the bit length can differ
+ *     per row.
+ * @see https://spark.apache.org/docs/latest/api/sql/index.html#sha2
+ * @param left The BINARY input column to be hashed.
+ * @param right The INTEGER literal bitlength for hashing.
+ */
+case class GpuSha2(left: Expression, right: Expression)
+  extends GpuBinaryExpression with ImplicitCastInputTypes with NullIntolerantShim {
+  private val childExpr: Expression = left
+  private val bitLengthExpr: Expression = right
+  override def toString: String = s"sha2($childExpr, $bitLength)"
+  override def inputTypes: Seq[AbstractDataType] = Seq(BinaryType, IntegerType)
+  override def dataType: DataType = StringType
+
+  private val bitLength: Option[Int] = bitLengthExpr match {
+    case lit: GpuLiteral if lit.value.isInstanceOf[Int] =>
+      lit.value.asInstanceOf[Int] match {
+        case 224 | 256 | 384 | 512 => Some(lit.value.asInstanceOf[Int])
+        case 0 => Some(256) // Spark default
+        case _ => None // SHA2 returns null for other bit lengths.
+      }
+    case _ => None
+  }
+
+  override def nullable: Boolean = childExpr.nullable || bitLength.isEmpty
+
+  override def doColumnar(lhs: GpuColumnVector, rhs: GpuScalar): ColumnVector = {
+    if (bitLength.isEmpty) {
+      // SHA2 returns null for "unsupported" bit lengths.
+      withResource(Scalar.fromNull(DType.STRING)) { nullStringExemplar =>
+        ColumnVector.fromScalar(nullStringExemplar, lhs.getRowCount.toInt)
+      }
+    } else {
+      bitLength match {
+        case Some(224) => withResource(GpuSha2.getStringViewOfBinaryColumn(lhs.getBase)) {
+          Hash.sha224NullsPreserved
+        }
+        case Some(256) => withResource(GpuSha2.getStringViewOfBinaryColumn(lhs.getBase)) {
+          Hash.sha256NullsPreserved
+        }
+        case Some(384) => withResource(GpuSha2.getStringViewOfBinaryColumn(lhs.getBase)) {
+          Hash.sha384NullsPreserved
+        }
+        case Some(512) => withResource(GpuSha2.getStringViewOfBinaryColumn(lhs.getBase)) {
+          Hash.sha512NullsPreserved
+        }
+        case unexpected =>
+          throw new UnsupportedOperationException(s"Unsupported bit length for SHA2: $unexpected")
+      }
+    }
+  }
+
+  override def doColumnar(numRows: Int, lhs: GpuScalar, rhs: GpuScalar): ColumnVector = {
+    withResource(GpuColumnVector.from(lhs, numRows)) {
+      doColumnar(_, rhs)
+    }
+  }
+
+  override def doColumnar(lhs: GpuColumnVector, rhs: GpuColumnVector): ColumnVector = {
+    throw new UnsupportedOperationException("Only literal bit lengths are supported for SHA2")
+  }
+
+  override def doColumnar(lhs: GpuScalar, rhs: GpuColumnVector): ColumnVector = {
+    throw new UnsupportedOperationException("Only literal bit lengths are supported for SHA2")
+  }
+}
+
+object GpuSha2 {
+
+  private def getStringViewOfBinaryColumn(col: ColumnView): ColumnView = {
+    withResource(col.getChildColumnView(0)) { dataCol =>
+      new ColumnView(DType.STRING, col.getRowCount,
+        Optional.of[java.lang.Long](col.getNullCount),
+        dataCol.getData, col.getValid, col.getOffsets)
+    }
+  }
+
+  class Meta(e: Sha2,
+              conf: RapidsConf,
+              p: Option[RapidsMeta[_, _, _]],
+              r: DataFromReplacementRule)
+    extends BinaryExprMeta[Sha2](e, conf, p, r) {
+    override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression = GpuSha2(lhs, rhs)
   }
 }
 
@@ -139,6 +232,11 @@ case class GpuXxHash64(children: Seq[Expression], seed: Long) extends GpuHashExp
 }
 
 object XxHash64Utils {
+  // Mirrors Hash.MAX_STACK_DEPTH from spark-rapids-jni (hash.hpp).
+  // Duplicated here to avoid triggering JNI native library loading during
+  // Driver-side plan conversion (see github.com/NVIDIA/spark-rapids/issues/14184).
+  val MAX_STACK_DEPTH: Int = 8
+
   /**
    * Compute the max stack size that `inputType` will use,
    * refer to the function `check_nested_depth` in src/main/cpp/src/xxhash64.cu

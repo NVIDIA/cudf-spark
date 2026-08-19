@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,4 +23,25 @@ case class SparkRapidsBuildInfoEvent(
   sparkRapidsJniBuildInfo: Map[String, String],
   cudfBuildInfo: Map[String, String],
   sparkRapidsPrivateBuildInfo: Map[String, String]
+) extends SparkListenerEvent
+
+/**
+ * Event posted when a shuffle is unregistered, containing disk I/O savings statistics.
+ * This tracks how much data stayed in memory throughout the shuffle lifecycle,
+ * avoiding disk writes compared to the baseline implementation.
+ *
+ * @param shuffleId The shuffle ID being unregistered
+ * @param bytesFromMemory Bytes that were read from memory (never spilled to disk)
+ * @param bytesFromDisk Bytes that were read from disk (spilled at some point)
+ * @param numExpansions Number of buffer expansions that occurred
+ * @param numSpills Number of buffers that were spilled to disk
+ * @param numForcedFileOnly Number of buffers that used forced file-only mode
+ */
+case class SparkRapidsShuffleDiskSavingsEvent(
+  shuffleId: Int,
+  bytesFromMemory: Long,
+  bytesFromDisk: Long,
+  numExpansions: Int = 0,
+  numSpills: Int = 0,
+  numForcedFileOnly: Int = 0
 ) extends SparkListenerEvent

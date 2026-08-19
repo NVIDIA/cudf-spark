@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,9 +20,7 @@ import scala.collection.mutable.ArrayBuffer
 import scala.util.hashing.byteswap32
 
 import ai.rapids.cudf
-import ai.rapids.cudf.{NvtxColor, NvtxRange}
 import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.shims.ShimExpression
 
 import org.apache.spark.rdd.{PartitionPruningRDD, RDD}
@@ -200,27 +198,27 @@ case class GpuRangePartitioner(
 
   def computeBoundsAndCloseWithRetry(batch: ColumnarBatch): (Array[Int], Array[GpuColumnVector]) = {
     val types = GpuColumnVector.extractTypes(batch)
-    withRetryNoSplit(SpillableColumnarBatch(batch, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)) { sb =>
-      val partedTable = withResource(sb.getColumnarBatch()) { cb =>
-        val parts = withResource(new NvtxRange("Calculate part", NvtxColor.CYAN)) { _ =>
-          computePartitionIndexes(cb)
-        }
-        withResource(parts) { parts =>
-          withResource(GpuColumnVector.from(cb)) { table =>
-            table.partition(parts, numPartitions)
-          }
+    val partedTable = withResource(batch) { cb =>
+      val parts = NvtxRegistry.CALCULATE_PART {
+        computePartitionIndexes(cb)
+      }
+      withResource(parts) { parts =>
+        withResource(GpuColumnVector.from(cb)) { table =>
+          table.partition(parts, numPartitions)
         }
       }
+    }
 
-      withResource(partedTable) { partedTable =>
-        val parts = partedTable.getPartitions
-        val tp = partedTable.getTable
-        val columns = (0 until partedTable.getNumberOfColumns.toInt).zip(types).map {
-          case (index, sparkType) =>
-            GpuColumnVector.from(tp.getColumn(index).incRefCount(), sparkType)
-        }
-        (parts, columns.toArray)
+    withResource(partedTable) { partedTable =>
+      // Table.partition() returns numPartitions + 1 elements (last is total row count),
+      // but downstream code expects numPartitions elements, so drop the last one
+      val parts = partedTable.getPartitions.dropRight(1)
+      val tp = partedTable.getTable
+      val columns = (0 until partedTable.getNumberOfColumns.toInt).zip(types).map {
+        case (index, sparkType) =>
+          GpuColumnVector.from(tp.getColumn(index).incRefCount(), sparkType)
       }
+      (parts, columns.toArray)
     }
   }
 

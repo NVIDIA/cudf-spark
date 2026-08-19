@@ -1,14 +1,14 @@
 ---
 layout: page
-title: RAPIDS Accelerated User-Defined Functions
+title: NVIDIA cuDF plugin for Apache Spark Accelerated User-Defined Functions
 parent: Additional Functionality
 nav_order: 3
 ---
-# RAPIDS Accelerated User-Defined Functions
+# NVIDIA cuDF plugin for Apache Spark Accelerated User-Defined Functions
 
-This document describes how UDFs can provide a RAPIDS accelerated
+This document describes how UDFs can provide a cuDF plugin accelerated
 implementation alongside the CPU implementation, enabling the
-RAPIDS Accelerator to perform the user-defined operation on the GPU.
+cuDF plugin to perform the user-defined operation on the GPU.
 
 Note that there are other potential solutions to performing user-defined
 operations on the GPU. See the 
@@ -20,17 +20,17 @@ on UDFs for more details.
 User-defined functions can perform almost arbitrary operations and thus are
 very difficult to translate automatically into GPU operations. UDFs can
 prevent potentially expensive portions of a query from being automatically
-accelerated by the RAPIDS Accelerator due to the inability to perform the
+accelerated by the cuDF plugin due to the inability to perform the
 custom operation on the GPU.
 
 One possible solution is the UDF providing a GPU implementation compatible
-with the RAPIDS Accelerator. This implementation can then be invoked by the
-RAPIDS Accelerator when a corresponding query step using the UDF executes
+with the cuDF plugin. This implementation can then be invoked by the
+cuDF plugin when a corresponding query step using the UDF executes
 on the GPU.
 
-## Limitations of RAPIDS Accelerated UDFs
+## Limitations of cuDF plugin UDFs
 
-The RAPIDS Accelerator only supports RAPIDS accelerated forms of the
+The cuDF plugin only supports accelerated forms of the
 following UDF types:
 - Scala UDFs implementing a `Function` interface and registered via `SparkSession.udf.register`
 - Java UDFs implementing
@@ -50,9 +50,9 @@ Other forms of Spark UDFs are not supported, such as:
 
 ## Adding GPU Implementations to UDFs
 
-For supported UDFs, the RAPIDS Accelerator will detect a GPU implementation
+For supported UDFs, the cuDF plugin will detect a GPU implementation
 if the UDF class implements the
-[RapidsUDF](https://github.com/NVIDIA/spark-rapids/blob/main/sql-plugin-api/src/main/java/com/nvidia/spark/RapidsUDF.java)
+[RapidsUDF](https://github.com/NVIDIA/cudf-spark/blob/main/sql-plugin-api/src/main/java/com/nvidia/spark/RapidsUDF.java)
 interface. Unlike the CPU UDF which processes data one row at a time, the
 GPU version processes a columnar batch of rows. This reduces invocation
 overhead and enables parallel processing of the data by the GPU.
@@ -69,7 +69,7 @@ of rows.
 
 ### Interpreting Inputs
 
-The RAPIDS Accelerator will pass columnar forms of the same inputs for the
+The cuDF plugin will pass columnar forms of the same inputs for the
 CPU version of the UDF. For example, if the CPU UDF expects two inputs, a
 `String` and an `Integer`, then the `evaluateColumnar` method will be invoked
 with an array of two cudf `ColumnVector` instances. The first instance will
@@ -79,7 +79,7 @@ must not make any assumptions on the number of input rows.
 
 #### Scalar Inputs
 
-Passing scalar inputs to a RAPIDS accelerated UDF is supported with
+Passing scalar inputs to a cuDF plugin UDF is supported with
 limitations. The scalar value will be replicated into a full column before
 being passed to `evaluateColumnar`. Therefore the UDF implementation cannot
 easily detect the difference between a scalar input and a columnar input.
@@ -89,7 +89,7 @@ easily detect the difference between a scalar input and a columnar input.
 GPU memory is a limited resource and can become exhausted when not managed
 properly. The UDF is responsible for freeing any intermediate GPU results
 computed during the processing of the UDF. The inputs to the UDF will be
-closed by the RAPIDS Accelerator, so the UDF only needs to close any
+closed by the cuDF plugin, so the UDF only needs to close any
 intermediate data generated while producing the final result that is
 returned.
 
@@ -99,7 +99,7 @@ The `evaluateColumnar` method must return a `ColumnVector` of an appropriate
 cudf type to match the result type of the original UDF. The following table
 shows the mapping of Spark types to equivalent cudf columnar types.
 
-Spark Type      | RAPIDS cudf Type
+Spark Type      | cuDF Type
 --------------- | ----------------
 `BooleanType`   | `BOOL8`
 `ByteType`      | `INT8`
@@ -123,23 +123,24 @@ return a column of type `LIST(LIST(STRUCT(STRING,STRING)))`.
 
 #### Returning Decimal Types
 
-The RAPIDS cudf equivalent type for a Spark `DecimalType` depends on the precision
+The cudf equivalent type for a Spark `DecimalType` depends on the precision
 of the decimal.
 
-`DecimalType` Precision           | RAPIDS cudf Type
+`DecimalType` Precision           | cuDF Type
 --------------------------------- | ----------------
 precision <= 9 digits             | `DECIMAL32`
 9 digits < precision <= 18 digits | `DECIMAL64`
-18 digits < precision             | Unsupported
+18 digits < precision <= 38 digits| `DECIMAL128`
+38 digits < precision             | Unsupported
 
-Note that RAPIDS cudf decimals use a negative scale relative to Spark `DecimalType`.
-For example, Spark `DecimalType(precision=11, scale=2)` would translate to RAPIDS cudf
+Note that cuDF decimals use a negative scale relative to Spark `DecimalType`.
+For example, Spark `DecimalType(precision=11, scale=2)` would translate to cuDF
 type `DECIMAL64(scale=-2)`.
 
-## RAPIDS Accelerated UDF Examples
+## cuDF plugin UDF Examples
 
 <!-- Note: should update the branch name to tag when releasing-->
-Source code for examples of RAPIDS accelerated UDFs is provided in the [udf-examples](https://github.com/NVIDIA/spark-rapids-examples/tree/main/examples/UDF-Examples/RAPIDS-accelerated-UDFs) project.
+Source code for examples of RAPIDS accelerated UDFs is provided in the [udf-examples](https://github.com/NVIDIA/cudf-spark-examples/tree/main/examples/UDF-Examples/RAPIDS-accelerated-UDFs) project.
 
 ## GPU Support for Pandas UDF
 
@@ -173,7 +174,7 @@ exclusive mode to assign GPUs under Spark. To disable exclusive mode, use
     nvidia-smi -i 0 -c Default # Set GPU 0 to default mode, run as root.
     ```
 
-2. Currently, the Python files are packed into the RAPIDS Accelerator jar.
+2. Currently, the Python files are packed into the cuDF plugin jar.
 
     On Yarn, you need to add
     ```shell
@@ -195,8 +196,8 @@ exclusive mode to assign GPUs under Spark. To disable exclusive mode, use
     --conf spark.rapids.sql.python.gpu.enabled=true \
     ```
 
-Please note: every type of Pandas UDF on Spark is run by a specific Spark execution plan. RAPIDS
-Accelerator has a 1-1 mapping support for each of them.
+Please note: every type of Pandas UDF on Spark is run by a specific Spark execution plan. The cuDF
+plugin has a 1-1 mapping support for each of them.
 
   |Spark Execution Plan|Data Transfer Accelerated|Use Case|
   |----------------------|----------|--------|
@@ -246,7 +247,7 @@ The following configuration settings are also relevant for GPU scheduling for Pa
     df_3 = df_2.mapInPandas(udf_3, schema_3)
     df_3.explain(True)
     ```
-    The RAPIDS Accelerator query explain:
+    The cuDF plugin query explain:
     ```
     ...
       *Exec <MapInPandasExec> could partially run on GPU
@@ -285,10 +286,10 @@ The following configuration settings are also relevant for GPU scheduling for Pa
     of them are waiting for their second semaphore.
 
 To find details on the above Python configuration settings, please see the 
-[RAPIDS Accelerator for Apache Spark Configuration Guide](../configs.md). 
+[NVIDIA cuDF plugin for Apache Spark Configuration Guide](../configs.md). 
 Search 'pandas' for a quick navigation jump.
 
 
 ### mapInArrow
 [mapInArrow](https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.mapInArrow.html#pyspark.sql.DataFrame.mapInArrow) is a PySpark API introduced in Spark 3.3.0.
-The RAPIDS Accelerator supports acceleration for `mapInArrow` in the same way as Pandas UDF.
+The cuDF plugin supports acceleration for `mapInArrow` in the same way as Pandas UDF.

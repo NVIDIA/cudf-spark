@@ -23,12 +23,14 @@ import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
 import scala.util.Random
 
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuColumnVector.GpuColumnarBatchBuilder
+import com.nvidia.spark.rapids.RapidsPluginImplicits._
 
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims._
-import org.apache.spark.sql.types.{ArrayType, DataType, DataTypes, DecimalType, MapType, StructField, StructType}
-import org.apache.spark.sql.vectorized.ColumnarBatch
+import org.apache.spark.sql.types._
+import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 import org.apache.spark.unsafe.types.CalendarInterval
 
 /**
@@ -65,6 +67,32 @@ object FuzzerUtils {
       rowCount: Int,
       options: FuzzerOptions = DEFAULT_OPTIONS,
       seed: Long = 0): ColumnarBatch = {
+    
+    // Check if schema contains nested types
+    val hasNestedTypes = schema.fields.exists { field =>
+      field.dataType match {
+        case _: ArrayType | _: MapType | _: StructType => true
+        case _ => false
+      }
+    }
+    
+    if (hasNestedTypes) {
+      // Use Row-based approach for nested types
+      createColumnarBatchFromRows(schema, rowCount, options, seed)
+    } else {
+      // Use efficient builder approach for primitive types
+      createColumnarBatchWithBuilder(schema, rowCount, options, seed)
+    }
+  }
+  
+  /**
+   * Creates a ColumnarBatch using GpuColumnarBatchBuilder (for primitive types only)
+   */
+  private def createColumnarBatchWithBuilder(
+      schema: StructType,
+      rowCount: Int,
+      options: FuzzerOptions,
+      seed: Long): ColumnarBatch = {
     val rand = new Random(seed)
     val r = new EnhancedRandom(rand, options)
     val builders = new GpuColumnarBatchBuilder(schema, rowCount)
@@ -75,56 +103,56 @@ object FuzzerUtils {
         field.dataType match {
           case DataTypes.ByteType =>
             rows.foreach(_ => {
-              maybeNull(rand, r.nextByte()) match {
+              maybeNull(rand, field.nullable, r.nextByte()) match {
                 case Some(value) => builder.append(value)
                 case None => builder.appendNull()
               }
             })
           case DataTypes.ShortType =>
             rows.foreach(_ => {
-              maybeNull(rand, r.nextShort) match {
+              maybeNull(rand, field.nullable, r.nextShort) match {
                 case Some(value) => builder.append(value)
                 case None => builder.appendNull()
               }
             })
           case DataTypes.IntegerType =>
             rows.foreach(_ => {
-              maybeNull(rand, r.nextInt()) match {
+              maybeNull(rand, field.nullable, r.nextInt()) match {
                 case Some(value) => builder.append(value)
                 case None => builder.appendNull()
               }
             })
           case DataTypes.LongType =>
             rows.foreach(_ => {
-              maybeNull(rand, r.nextLong()) match {
+              maybeNull(rand, field.nullable, r.nextLong()) match {
                 case Some(value) => builder.append(value)
                 case None => builder.appendNull()
               }
             })
           case DataTypes.FloatType =>
             rows.foreach(_ => {
-              maybeNull(rand, r.nextFloat()) match {
+              maybeNull(rand, field.nullable, r.nextFloat()) match {
                 case Some(value) => builder.append(value)
                 case None => builder.appendNull()
               }
             })
           case DataTypes.DoubleType =>
             rows.foreach(_ => {
-              maybeNull(rand, r.nextDouble()) match {
+              maybeNull(rand, field.nullable, r.nextDouble()) match {
                 case Some(value) => builder.append(value)
                 case None => builder.appendNull()
               }
             })
           case DataTypes.StringType =>
             rows.foreach(_ => {
-              maybeNull(rand, r.nextString()) match {
+              maybeNull(rand, field.nullable, r.nextString()) match {
                 case Some(value) => builder.append(value)
                 case None => builder.appendNull()
               }
             })
           case dt: DecimalType =>
             rows.foreach(_ => {
-              maybeNull(rand, r.nextLong()) match {
+              maybeNull(rand, field.nullable, r.nextLong()) match {
                 case Some(value) =>
                   // bounding unscaledValue with precision
                   val invScale = (dt.precision to ai.rapids.cudf.DType.DECIMAL64_MAX_PRECISION)
@@ -133,9 +161,176 @@ object FuzzerUtils {
                 case None => builder.appendNull()
               }
             })
+          case DataTypes.BinaryType =>
+            rows.foreach(_ => {
+              maybeNull(rand, field.nullable, r.nextBytes()) match {
+                case Some(value) => builder.appendByteList(value, 0, value.length)
+                case None => builder.appendNull()
+              }
+            })
+          // For nested types (array, map, struct), we fall back to Row-based approach
+          // since GpuColumnarBatchBuilder doesn't support these directly
+          case _: ArrayType | _: MapType | _: StructType =>
+            throw new IllegalStateException(
+              s"GpuColumnarBatchBuilder does not support nested type ${field.dataType}")
         }
     }
     builders.build(rowCount)
+  }
+  
+  /**
+   * Creates a ColumnarBatch from Rows (supports nested types)
+   */
+  private def createColumnarBatchFromRows(
+      schema: StructType,
+      rowCount: Int,
+      options: FuzzerOptions,
+      seed: Long): ColumnarBatch = {
+    val rand = new Random(seed)
+    val rows = (0 until rowCount).map { _ =>
+      generateRow(schema.fields, rand, options)
+    }
+    
+    // Convert rows to columnar batch using cuDF column builders    
+    val columns = schema.fields.safeMap { field =>
+      val columnData = rows.map(row => {
+        val idx = schema.fieldIndex(field.name)
+        if (row.isNullAt(idx)) null else row.get(idx)
+      })
+      buildCudfColumn(field.dataType, columnData, field.nullable)
+    }
+
+    closeOnExcept(columns.toArray) { rawColumns =>
+      closeOnExcept(rawColumns.zip(schema.fields).safeMap { case (cudfCol, field) =>
+        GpuColumnVector.from(cudfCol, field.dataType).asInstanceOf[ColumnVector]
+      }.toArray) { gpuCols =>
+        new org.apache.spark.sql.vectorized.ColumnarBatch(gpuCols, rowCount)
+      }
+    }
+  }
+  
+  /**
+   * Builds a cuDF column from Scala data
+   */
+  private def buildCudfColumn(
+      dataType: DataType,
+      data: Seq[Any],
+      nullable: Boolean): ai.rapids.cudf.ColumnVector = {
+    import ai.rapids.cudf.{ColumnVector => CudfColumnVector}
+    
+    dataType match {
+      case LongType =>
+        val values = data.map(v => if (v == null) null else Long.box(v.asInstanceOf[Long]))
+        CudfColumnVector.fromBoxedLongs(values: _*)
+      case IntegerType =>
+        val values = data.map(v => if (v == null) null else Int.box(v.asInstanceOf[Int]))
+        CudfColumnVector.fromBoxedInts(values: _*)
+      case DoubleType =>
+        val values = data.map(v => if (v == null) null else Double.box(v.asInstanceOf[Double]))
+        CudfColumnVector.fromBoxedDoubles(values: _*)
+      case FloatType =>
+        val values = data.map(v => if (v == null) null else Float.box(v.asInstanceOf[Float]))
+        CudfColumnVector.fromBoxedFloats(values: _*)
+      case BooleanType =>
+        val values = data.map(v => if (v == null) null else Boolean.box(v.asInstanceOf[Boolean]))
+        CudfColumnVector.fromBoxedBooleans(values: _*)
+      case StringType =>
+        val values = data.map(v => if (v == null) null else v.asInstanceOf[String])
+        CudfColumnVector.fromStrings(values: _*)
+      case ArrayType(elementType, containsNull) =>
+        val listType = createHostListType(elementType, nullable, containsNull)
+        val javaLists = data.map { v =>
+          if (v == null) null
+          else v.asInstanceOf[Seq[_]].map(boxValue).asJava
+        }
+        CudfColumnVector.fromLists(listType, javaLists: _*)
+      case structType: StructType =>
+        val childColumns = structType.fields.safeMap { field =>
+          val childData = data.map { v =>
+            if (v == null) null
+            else {
+              val row = v.asInstanceOf[org.apache.spark.sql.Row]
+              val idx = structType.fieldIndex(field.name)
+              if (row.isNullAt(idx)) null else row.get(idx)
+            }
+          }
+          buildCudfColumn(field.dataType, childData, field.nullable)
+        }
+        withResource(childColumns) { cols =>
+          CudfColumnVector.makeStruct(data.length, cols: _*)
+        }
+      case MapType(keyType, valueType, valueContainsNull) =>
+        // Map is represented as list<struct<key, value>> in cuDF
+        // Build it using fromLists by converting each map to a list of struct data
+        import ai.rapids.cudf.HostColumnVector
+        
+        val structType = new HostColumnVector.StructType(true, Seq(
+          createHostColumnType(keyType, false),  // Keys are not nullable
+          createHostColumnType(valueType, valueContainsNull)
+        ).asJava)
+        
+        val listType = new HostColumnVector.ListType(nullable, structType)
+        
+        val javaLists = data.map { v =>
+          if (v == null) null
+          else {
+            val map = v.asInstanceOf[Map[Any, Any]]
+            map.map { case (k, v) =>
+              new HostColumnVector.StructData(
+                boxValue(k).asInstanceOf[Object],
+                boxValue(v).asInstanceOf[Object])
+            }.toList.asJava
+          }
+        }
+        CudfColumnVector.fromLists(listType, javaLists: _*)
+      case _ =>
+        throw new IllegalArgumentException(s"Unsupported data type: $dataType")
+    }
+  }
+  
+  /**
+   * Creates a HostColumnVector type descriptor for lists
+   */
+  private def createHostListType(
+      elementType: DataType,
+      listNullable: Boolean,
+      elementNullable: Boolean): ai.rapids.cudf.HostColumnVector.DataType = {
+    import ai.rapids.cudf.HostColumnVector
+
+    new HostColumnVector.ListType(
+      listNullable,
+      createHostColumnType(elementType, elementNullable))
+  }
+  
+  /**
+   * Creates a HostColumnVector type descriptor for any data type
+   */
+  private def createHostColumnType(
+      dataType: DataType,
+      nullable: Boolean): ai.rapids.cudf.HostColumnVector.DataType = {
+    import ai.rapids.cudf.{DType, HostColumnVector}
+    
+    dataType match {
+      case LongType => new HostColumnVector.BasicType(nullable, DType.INT64)
+      case IntegerType => new HostColumnVector.BasicType(nullable, DType.INT32)
+      case DoubleType => new HostColumnVector.BasicType(nullable, DType.FLOAT64)
+      case FloatType => new HostColumnVector.BasicType(nullable, DType.FLOAT32)
+      case BooleanType => new HostColumnVector.BasicType(nullable, DType.BOOL8)
+      case StringType => new HostColumnVector.BasicType(nullable, DType.STRING)
+      case _ => throw new IllegalArgumentException(s"Unsupported type: $dataType")
+    }
+  }
+  
+  /**
+   * Boxes primitive values for Java interop
+   */
+  private def boxValue(v: Any): Any = v match {
+    case l: Long => Long.box(l)
+    case i: Int => Int.box(i)
+    case d: Double => Double.box(d)
+    case f: Float => Float.box(f)
+    case b: Boolean => Boolean.box(b)
+    case other => other
   }
 
   /**
@@ -160,8 +355,8 @@ object FuzzerUtils {
   }
 
 
-  private def maybeNull[T](r: Random, nonNullValue: => T): Option[T] = {
-    if (r.nextFloat() < 0.2) {
+  private def maybeNull[T](r: Random, nullable: Boolean, nonNullValue: => T): Option[T] = {
+    if (nullable && r.nextFloat() < 0.2) {
       None
     }  else {
       Some(nonNullValue)
@@ -357,11 +552,19 @@ class EnhancedRandom(protected val r: Random, protected val options: FuzzerOptio
     b.toString
   }
 
+  def nextBytes(): Array[Byte] = {
+    val length = r.nextInt(options.maxBytesLen)
+    val bytes = new Array[Byte](length)
+    r.nextBytes(bytes)
+    bytes
+  }
+
 }
 
 case class FuzzerOptions(
     validStringChars: Option[String] = None,
     maxStringLen: Int = 64,
+    maxBytesLen: Int = 64,
     intMin: Int = Int.MinValue,
     intMax: Int = Int.MaxValue,
     longMin: Long = Long.MinValue,

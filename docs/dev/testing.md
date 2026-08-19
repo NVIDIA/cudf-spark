@@ -5,5 +5,5 @@ nav_order: 2
 parent: Developer Overview
 ---
 An overview of testing can be found within the repository at:
-* [Unit tests](https://github.com/NVIDIA/spark-rapids/tree/branch-25.10/tests#readme)
-* [Integration testing](https://github.com/NVIDIA/spark-rapids/tree/branch-25.10/integration_tests#readme)
+* [Unit tests](https://github.com/NVIDIA/cudf-spark/tree/main/tests#readme)
+* [Integration testing](https://github.com/NVIDIA/cudf-spark/tree/main/integration_tests#readme)

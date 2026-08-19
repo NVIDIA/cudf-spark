@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,63 +17,25 @@
 package com.nvidia.spark.rapids.delta.delta33x
 
 import com.nvidia.spark.rapids._
-import com.nvidia.spark.rapids.delta.{DeltaIOProvider, GpuDeltaDataSource, RapidsDeltaUtils}
-import org.apache.hadoop.fs.Path
-import scala.collection.JavaConverters._
+import com.nvidia.spark.rapids.delta.common.DeltaProviderBase
 
-import org.apache.spark.sql.SparkSession
+import org.apache.spark.internal.Logging
 import org.apache.spark.sql.connector.catalog.SupportsWrite
-import org.apache.spark.sql.delta.{DeltaLog, DeltaParquetFileFormat}
-import org.apache.spark.sql.delta.DeltaParquetFileFormat.{IS_ROW_DELETED_COLUMN_NAME, ROW_INDEX_COLUMN_NAME}
-import org.apache.spark.sql.delta.catalog.{DeltaCatalog, DeltaTableV2}
-import org.apache.spark.sql.delta.commands.{DeleteCommand, MergeIntoCommand, UpdateCommand}
-import org.apache.spark.sql.delta.rapids.DeltaRuntimeShim
-import org.apache.spark.sql.delta.skipping.clustering.ClusteredTableUtils.PROP_CLUSTERING_COLUMNS
-import org.apache.spark.sql.delta.skipping.clustering.temp.ClusterByTransform
-import org.apache.spark.sql.delta.sources.DeltaDataSource
-import org.apache.spark.sql.execution.FileSourceScanExec
+import org.apache.spark.sql.delta.{DeltaDynamicPartitionOverwriteCommand, DeltaParquetFileFormat}
+import org.apache.spark.sql.delta.catalog.DeltaTableV2
+import org.apache.spark.sql.delta.commands.{DeleteCommand, MergeIntoCommand, OptimizeTableCommand, UpdateCommand}
 import org.apache.spark.sql.execution.command.RunnableCommand
-import org.apache.spark.sql.execution.datasources.{FileFormat, HadoopFsRelation, SaveIntoDataSourceCommand}
-import org.apache.spark.sql.execution.datasources.v2.{AppendDataExecV1, AtomicCreateTableAsSelectExec, AtomicReplaceTableAsSelectExec, OverwriteByExpressionExecV1}
-import org.apache.spark.sql.execution.datasources.v2.rapids.{GpuAtomicCreateTableAsSelectExec, GpuAtomicReplaceTableAsSelectExec}
-import org.apache.spark.sql.rapids.ExternalSource
-import org.apache.spark.sql.sources.CreatableRelationProvider
+import org.apache.spark.sql.execution.datasources.FileFormat
+import org.apache.spark.sql.execution.datasources.v2.{AppendDataExecV1, OverwriteByExpressionExecV1}
 
-object Delta33xProvider extends DeltaIOProvider {
-
-  override def getCreatableRelationRules: Map[Class[_ <: CreatableRelationProvider],
-    CreatableRelationProviderRule[_ <: CreatableRelationProvider]] = {
-    Seq(
-      ExternalSource.toCreatableRelationProviderRule[DeltaDataSource](
-        "Write to Delta Lake table",
-        (a, conf, p, r) => {
-          require(p.isDefined, "Must provide parent meta")
-          new DeltaCreatableRelationProviderMeta(a, conf, p, r)
-        })
-    ).map(r => (r.getClassFor.asSubclass(classOf[CreatableRelationProvider]), r)).toMap
-  }
+object Delta33xProvider extends DeltaProviderBase with Logging {
 
   override def isSupportedWrite(write: Class[_ <: SupportsWrite]): Boolean = {
     write == classOf[DeltaTableV2] || write == classOf[GpuDeltaCatalog#GpuStagedDeltaTableV2]
   }
 
-  override def tagForGpu(cpuExec: AtomicCreateTableAsSelectExec,
-      meta: AtomicCreateTableAsSelectExecMeta): Unit = {
-    super.tagForGpu(cpuExec, meta)
-
-    if (cpuExec.partitioning.exists(_.isInstanceOf[ClusterByTransform])) {
-      meta.willNotWorkOnGpu("Delta Lake liquid clustering not supported on gpu yet.")
-    }
-  }
-
-  override def tagForGpu(cpuExec: AtomicReplaceTableAsSelectExec,
-      meta: AtomicReplaceTableAsSelectExecMeta): Unit = {
-    super.tagForGpu(cpuExec, meta)
-
-    if (cpuExec.partitioning.exists(_.isInstanceOf[ClusterByTransform])) {
-      meta.willNotWorkOnGpu("Delta Lake liquid clustering not supported on gpu yet.")
-    }
-  }
+  override def isSupportedFormat(format: Class[_ <: FileFormat]): Boolean =
+    super.isSupportedFormat(format) || format == classOf[GpuDelta33xParquetFileFormat]
 
   override def tagForGpu(
       cpuExec: AppendDataExecV1,
@@ -83,10 +45,6 @@ object Delta33xProvider extends DeltaIOProvider {
         s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
     }
 
-    if (cpuExec.table.properties().containsKey(PROP_CLUSTERING_COLUMNS)) {
-      meta.willNotWorkOnGpu("Delta Lake liquid clustering not supported on gpu yet.")
-    }
-
     cpuExec.table match {
       case _: DeltaTableV2 => super.tagForGpu(cpuExec, meta)
       case _: GpuDeltaCatalog#GpuStagedDeltaTableV2 =>
@@ -94,12 +52,18 @@ object Delta33xProvider extends DeltaIOProvider {
     }
   }
 
-  override def tagForGpu(cpuExec: OverwriteByExpressionExecV1,
+  override def tagForGpu(
+      cpuExec: OverwriteByExpressionExecV1,
       meta: OverwriteByExpressionExecV1Meta): Unit = {
-    super.tagForGpu(cpuExec, meta)
+    if (!meta.conf.isDeltaWriteEnabled) {
+      meta.willNotWorkOnGpu("Delta Lake output acceleration has been disabled. To enable set " +
+        s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
+    }
 
-    if (cpuExec.table.properties().containsKey(PROP_CLUSTERING_COLUMNS)) {
-      meta.willNotWorkOnGpu("Delta Lake liquid clustering not supported on gpu yet.")
+    cpuExec.table match {
+      case _: DeltaTableV2 => super.tagForGpu(cpuExec, meta)
+      case _: GpuDeltaCatalog#GpuStagedDeltaTableV2 =>
+      case _ => meta.willNotWorkOnGpu(s"${cpuExec.table} table class not supported on GPU")
     }
   }
 
@@ -114,61 +78,39 @@ object Delta33xProvider extends DeltaIOProvider {
           (a, conf, p, r) => new UpdateCommandMeta(a, conf, p, r)),
       GpuOverrides.runnableCmd[MergeIntoCommand](
           "Merge of a source query/table into a Delta Lake table",
-          (a, conf, p, r) => new MergeIntoCommandMeta(a, conf, p, r))
+          (a, conf, p, r) => new MergeIntoCommandMeta(a, conf, p, r)),
+      GpuOverrides.runnableCmd[OptimizeTableCommand](
+          "Optimize a Delta Lake table",
+          (a, conf, p, r) => new OptimizeTableCommandMeta(a, conf, p, r)),
+      GpuOverrides.runnableCmd[DeltaDynamicPartitionOverwriteCommand](
+        "Dynamic partition overwrite to a Delta Lake table",
+        (a, conf, p, r) => new DeltaDynamicPartitionOverwriteCommandMeta(a, conf, p, r))
     ).map(r => (r.getClassFor.asSubclass(classOf[RunnableCommand]), r)).toMap
   }
 
-  override def tagSupportForGpuFileSourceScan(meta: SparkPlanMeta[FileSourceScanExec]): Unit = {
-    val format = meta.wrapped.relation.fileFormat
-    if (format.getClass == classOf[DeltaParquetFileFormat]) {
-      val requiredSchema = meta.wrapped.requiredSchema
-      if (requiredSchema.exists(_.name == IS_ROW_DELETED_COLUMN_NAME)) {
-        meta.willNotWorkOnGpu(
-          s"reading metadata column $IS_ROW_DELETED_COLUMN_NAME is not supported")
-      }
-      if (requiredSchema.exists(_.name == ROW_INDEX_COLUMN_NAME)) {
-        meta.willNotWorkOnGpu(
-          s"reading metadata column $ROW_INDEX_COLUMN_NAME is not supported")
-      }
-      GpuReadParquetFileFormat.tagSupport(meta)
+  override protected def toGpuParquetFileFormat(conf: RapidsConf, fmt: DeltaParquetFileFormat)
+  : FileFormat = {
+    if (isPushDVPredicateDownEnabled(conf)) {
+      // Pushing down deletion vector predicates is currently only supported
+      // when the metadata row index is enabled.
+      GpuDelta33xParquetFileFormat2(fmt.protocol, fmt.metadata, fmt.nullableRowTrackingFields,
+        fmt.optimizationsEnabled, fmt.tablePath, fmt.isCDCRead)
     } else {
-      meta.willNotWorkOnGpu(s"format ${format.getClass} is not supported")
+      val optimizationsEnabled = if (fmt.hasTablePath) {
+        logWarning("Input Delta table has deletion vectors. Optimizations such as file " +
+          "splitting and predicate pushdown are currently not supported for this table " +
+          "(https://github.com/NVIDIA/spark-rapids/issues/13999). If you see performance " +
+          "issues, consider disabling deletion vectors and running the optimize command on " +
+          "the table. " +
+          "See https://docs.delta.io/delta-deletion-vectors/#apply-changes-to-parquet-data-files " +
+          "for more details about how to apply delete changes to physical files.")
+        false
+      } else {
+        fmt.optimizationsEnabled
+      }
+      GpuDelta33xParquetFileFormat(fmt.protocol, fmt.metadata, fmt.nullableRowTrackingFields,
+        optimizationsEnabled, fmt.tablePath, fmt.isCDCRead)
     }
-  }
-
-  override def getReadFileFormat(relation: HadoopFsRelation): FileFormat = {
-    val fmt = relation.fileFormat.asInstanceOf[DeltaParquetFileFormat]
-    GpuDelta33xParquetFileFormat(fmt.protocol, fmt.metadata, fmt.nullableRowTrackingFields,
-      fmt.optimizationsEnabled, fmt.tablePath, fmt.isCDCRead)
-  }
-
-  override def convertToGpu(
-    cpuExec: AtomicCreateTableAsSelectExec,
-    meta: AtomicCreateTableAsSelectExecMeta): GpuExec = {
-    val cpuCatalog = cpuExec.catalog.asInstanceOf[DeltaCatalog]
-    GpuAtomicCreateTableAsSelectExec(
-      DeltaRuntimeShim.getGpuDeltaCatalog(cpuCatalog, meta.conf),
-      cpuExec.ident,
-      cpuExec.partitioning,
-      cpuExec.query,
-      cpuExec.tableSpec,
-      cpuExec.writeOptions,
-      cpuExec.ifNotExists)
-  }
-
-  override def convertToGpu(
-    cpuExec: AtomicReplaceTableAsSelectExec,
-    meta: AtomicReplaceTableAsSelectExecMeta): GpuExec = {
-    val cpuCatalog = cpuExec.catalog.asInstanceOf[DeltaCatalog]
-    GpuAtomicReplaceTableAsSelectExec(
-      DeltaRuntimeShim.getGpuDeltaCatalog(cpuCatalog, meta.conf),
-      cpuExec.ident,
-      cpuExec.partitioning,
-      cpuExec.query,
-      cpuExec.tableSpec,
-      cpuExec.writeOptions,
-      cpuExec.orCreate,
-      cpuExec.invalidateCache)
   }
 
   override def convertToGpu(
@@ -182,41 +124,17 @@ object Delta33xProvider extends DeltaIOProvider {
       case unknown => throw new IllegalStateException(s"$unknown doesn't match any of the known ")
     }
   }
-}
 
-class DeltaCreatableRelationProviderMeta(
-    source: DeltaDataSource,
-    conf: RapidsConf,
-    parent: Option[RapidsMeta[_, _, _]],
-    rule: DataFromReplacementRule)
-  extends CreatableRelationProviderMeta[DeltaDataSource](source, conf, parent, rule) {
-  require(parent.isDefined, "Must provide parent meta")
-  private val saveCmd = parent.get.wrapped match {
-    case s: SaveIntoDataSourceCommand => s
-    case s =>
-      throw new IllegalStateException(s"Expected SaveIntoDataSourceCommand, found ${s.getClass}")
-  }
-
-  override def tagSelfForGpu(): Unit = {
-    if (!conf.isDeltaWriteEnabled) {
-      willNotWorkOnGpu("Delta Lake output acceleration has been disabled. To enable set " +
-        s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
+  override def convertToGpu(
+      cpuExec: OverwriteByExpressionExecV1,
+      meta: OverwriteByExpressionExecV1Meta): GpuExec = {
+    cpuExec.table match {
+      case _: DeltaTableV2 =>
+        super.convertToGpu(cpuExec, meta)
+      case _: GpuDeltaCatalog#GpuStagedDeltaTableV2 =>
+        GpuOverwriteByExpressionExecV1(
+          cpuExec.table, cpuExec.plan, cpuExec.refreshCache, cpuExec.write)
+      case unknown => throw new IllegalStateException(s"$unknown doesn't match any of the known ")
     }
-    val path = saveCmd.options.get("path")
-    if (path.isDefined) {
-      val deltaLog = DeltaLog.forTable(SparkSession.active, new Path(path.get), saveCmd.options)
-      RapidsDeltaUtils.tagForDeltaWrite(this, saveCmd.query.schema, Some(deltaLog),
-        saveCmd.options, SparkSession.active)
-
-      val table = source.getTable(saveCmd.schema, Array.empty, saveCmd.options.asJava)
-      if (table.properties().containsKey(PROP_CLUSTERING_COLUMNS)) {
-        willNotWorkOnGpu("Delta Lake liquid clustering not supported on gpu yet.")
-      }
-    } else {
-      willNotWorkOnGpu("no path specified for Delta Lake table")
-    }
-
   }
-
-  override def convertToGpu(): GpuCreatableRelationProvider = new GpuDeltaDataSource(conf)
 }

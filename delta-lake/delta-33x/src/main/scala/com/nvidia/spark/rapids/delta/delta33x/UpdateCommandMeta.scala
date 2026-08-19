@@ -16,14 +16,12 @@
 
 package com.nvidia.spark.rapids.delta.delta33x
 
-import com.nvidia.spark.rapids.{DataFromReplacementRule, RapidsConf, RapidsMeta, RunnableCommandMeta}
-import com.nvidia.spark.rapids.delta.RapidsDeltaUtils
+import com.nvidia.spark.rapids.{DataFromReplacementRule, RapidsConf, RapidsMeta}
+import com.nvidia.spark.rapids.delta.common.UpdateCommandMetaBase
 
-import org.apache.spark.sql.delta.commands.{DeletionVectorUtils, UpdateCommand}
+import org.apache.spark.sql.delta.commands.UpdateCommand
 import org.apache.spark.sql.delta.rapids.GpuDeltaLog
 import org.apache.spark.sql.delta.rapids.delta33x.GpuUpdateCommand
-import org.apache.spark.sql.delta.skipping.clustering.ClusteredTableUtils
-import org.apache.spark.sql.delta.sources.DeltaSQLConf
 import org.apache.spark.sql.execution.command.RunnableCommand
 
 class UpdateCommandMeta(
@@ -31,33 +29,7 @@ class UpdateCommandMeta(
     conf: RapidsConf,
     parent: Option[RapidsMeta[_, _, _]],
     rule: DataFromReplacementRule)
-    extends RunnableCommandMeta[UpdateCommand](updateCmd, conf, parent, rule) {
-
-  override def tagSelfForGpu(): Unit = {
-    if (!conf.isDeltaWriteEnabled) {
-      willNotWorkOnGpu("Delta Lake output acceleration has been disabled. To enable set " +
-          s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
-    }
-
-    val dvFeatureEnabled = DeletionVectorUtils.deletionVectorsWritable(
-      updateCmd.tahoeFileIndex.deltaLog.unsafeVolatileSnapshot)
-
-    if (dvFeatureEnabled && updateCmd.conf.getConf(
-      DeltaSQLConf.DELETE_USE_PERSISTENT_DELETION_VECTORS)) {
-      // https://github.com/NVIDIA/spark-rapids/issues/8554
-      willNotWorkOnGpu("Deletion vectors are not supported on GPU")
-    }
-
-    val isClusteredTable = ClusteredTableUtils.getClusterBySpecOptional(
-      updateCmd.tahoeFileIndex.deltaLog.unsafeVolatileSnapshot).isDefined
-    if (isClusteredTable) {
-      willNotWorkOnGpu("Liquid clustering is not supported on GPU")
-    }
-
-    RapidsDeltaUtils.tagForDeltaWrite(this, updateCmd.target.schema,
-      Some(updateCmd.tahoeFileIndex.deltaLog),
-      Map.empty, updateCmd.tahoeFileIndex.spark)
-  }
+    extends UpdateCommandMetaBase(updateCmd, conf, parent, rule) {
 
   override def convertToGpu(): RunnableCommand = {
     GpuUpdateCommand(

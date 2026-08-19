@@ -27,8 +27,12 @@ AppendDataExecV1,3.0
 AtomicCreateTableAsSelectExec,3.0
 AtomicReplaceTableAsSelectExec,3.0
 BatchScanExec,3.0
+MergeRowsExec,3.0
 OverwriteByExpressionExec,3.0
 OverwriteByExpressionExecV1,3.0
+OverwritePartitionsDynamicExec,3.0
+ReplaceDataExec,3.0
+WriteDeltaExec,3.0
 BroadcastExchangeExec,3.0
 ShuffleExchangeExec,4.2
 BroadcastHashJoinExec,5.1
@@ -54,6 +58,7 @@ AggregateExpression,4
 Alias,4
 And,4
 ApproximatePercentile,4
+ArrayAggregate,4
 ArrayContains,4
 ArrayDistinct,4
 ArrayExcept,4
@@ -66,6 +71,7 @@ ArrayMin,4
 ArrayPosition,4
 ArrayRemove,4
 ArrayRepeat,4
+ArraySort,4
 ArrayTransform,4
 ArrayUnion,4
 ArraysOverlap,4
@@ -120,6 +126,7 @@ DayOfMonth,4
 DayOfWeek,4
 DayOfYear,4
 DenseRank,4
+Discard,4
 Divide,4
 DivideDTInterval,4
 DivideYMInterval,4
@@ -147,6 +154,7 @@ GetTimestamp,4
 GreaterThan,4
 GreaterThanOrEqual,4
 Greatest,4
+Hex,4
 HiveGenericUDF,4
 HiveHash,4
 HiveSimpleUDF,4
@@ -167,6 +175,7 @@ IsNotNull,4
 IsNull,4
 JsonToStructs,4
 JsonTuple,4
+Keep,4
 KnownFloatingPointNormalized,4
 KnownNotNull,4
 KnownNullable,4
@@ -192,6 +201,7 @@ MapConcat,4
 MapEntries,4
 MapFilter,4
 MapFromArrays,4
+MapFromEntries,4
 MapKeys,4
 MapValues,4
 MapZipWith,4
@@ -210,6 +220,7 @@ Multiply,4
 MultiplyDTInterval,4
 MultiplyYMInterval,4
 Murmur3Hash,4
+NTile,4
 NaNvl,4
 NamedLambdaVariable,4
 NormalizeNaNAndZero,4
@@ -249,6 +260,7 @@ Second,4
 SecondsToTimestamp,4
 Sequence,4
 Sha1,4
+Sha2,4
 ShiftLeft,4
 ShiftRight,4
 ShiftRightUnsigned,4
@@ -261,11 +273,14 @@ SortArray,4
 SortOrder,4
 SparkPartitionID,4
 SpecifiedWindowFrame,4
+Split,4
 Sqrt,4
 Stack,4
 StartsWith,4
+StaticInvoke,4
 StddevPop,4
 StddevSamp,4
+StringDecode,4
 StringInstr,4
 StringLPad,4
 StringLocate,4
@@ -301,6 +316,7 @@ UnboundedPreceding$,4
 UnixTimestamp,4
 UnscaledValue,4
 Upper,4
+Uuid,4
 VariancePop,4
 VarianceSamp,4
 WeekDay,4

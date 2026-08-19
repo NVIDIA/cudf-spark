@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids.delta
 
 import com.databricks.sql.transaction.tahoe.{DeltaColumnMapping, DeltaColumnMappingMode, NameMapping, NoMapping}
 import com.databricks.sql.transaction.tahoe.schema.SchemaMergingUtils
-import com.nvidia.spark.rapids.{GpuMetric, GpuReadParquetFileFormat}
+import com.nvidia.spark.rapids.{GpuMetric, GpuReadParquetFileFormat, ThreadPoolConfBuilder}
 import  com.nvidia.spark.rapids.parquet.GpuParquetMultiFilePartitionReaderFactory
 import org.apache.hadoop.conf.Configuration
 
@@ -55,6 +55,7 @@ abstract class GpuDeltaParquetFileFormatBase extends GpuReadParquetFileFormat {
       broadcastedConf: Broadcast[SerializableConfiguration],
       pushedFilters: Array[Filter],
       fileScan: GpuFileSourceScanExec): PartitionReaderFactory = {
+    val poolConfBuilder = ThreadPoolConfBuilder(fileScan.rapidsConf)
     GpuParquetMultiFilePartitionReaderFactory(
       fileScan.conf,
       broadcastedConf,
@@ -63,6 +64,7 @@ abstract class GpuDeltaParquetFileFormatBase extends GpuReadParquetFileFormat {
       prepareSchema(fileScan.readPartitionSchema),
       pushedFilters,
       fileScan.rapidsConf,
+      poolConfBuilder,
       fileScan.allMetrics,
       fileScan.queryUsesInputFile)
   }
