@@ -3242,7 +3242,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
         |
         |The following configuration options are supported by the RAPIDS Accelerator for Apache Spark.
         |
-        |The "Since Version" column shows the first RAPIDS Accelerator release known to support
+        |The "Since Version" column shows the first cuDF plugin release known to support
         |the config. "Unreleased" means the config exists on this branch but is not in a tagged
         |release yet. "Unknown" means the metadata has not been recorded yet.
         |
