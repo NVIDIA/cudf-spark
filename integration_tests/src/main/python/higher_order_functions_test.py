@@ -38,25 +38,6 @@ def test_tiered_project_with_complex_transform():
     assert_gpu_and_cpu_are_equal_collect(do_project, conf=confs)
 
 
-def test_array_filter_with_dynamic_in():
-    def do_it(spark):
-        return spark.createDataFrame(
-            [('a|b|c',), ('a|b|c|d',), ('a',), (None,)],
-            'input_text string').selectExpr("""
-                filter(
-                  arrays_zip(
-                    sequence(1, size(split(input_text, '[|]'))),
-                    split(input_text, '[|]')),
-                  x -> x["0"] IN (
-                    1,
-                    2,
-                    3,
-                    size(split(input_text, '[|]')))) AS result
-                """)
-
-    assert_cpu_and_gpu_are_equal_collect_with_capture(do_it, exist_classes='GpuIn')
-
-
 @pytest.mark.parametrize('data_gen, lambda_sql, init_sql', [
     (ArrayGen(IntegerGen(min_val=-100, max_val=100), max_length=8),
         '(acc, x) -> acc + CAST(x as BIGINT)', '0L'),

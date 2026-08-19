@@ -37,6 +37,9 @@ case class GpuIn(value: Expression, literals: Seq[Any], dynamicList: Seq[Express
 
   private val resultCount = dynamicList.length + (if (literals.nonEmpty) 1 else 0)
 
+  // AST OR avoids materializing intermediate OR columns and benchmarks faster than chaining GpuOr.
+  // Fuse supported equalities too, but keep one dynamic comparison on GpuEqualTo to avoid AST
+  // compilation overhead.
   private val shouldFuseEqualities =
     TypeSig.comparisonAstTypes.isSupportedByPlugin(value.dataType) &&
       (literals.nonEmpty || dynamicList.length > 1)

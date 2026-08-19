@@ -374,6 +374,8 @@ def test_dynamic_in(data_type, rows):
 
 
 def test_dynamic_in_mixed_ast_support():
+    # Integral equality can be fused into the AST, while floating-point equality must be
+    # materialized first to preserve Spark's NaN semantics.
     def do_it(spark):
         return spark.createDataFrame([
             (1, 1, 7, 1.0, 1.0, 7.0),
@@ -391,6 +393,8 @@ def test_dynamic_in_mixed_ast_support():
 
 @allow_non_gpu('ProjectExec')
 def test_nondeterministic_dynamic_in_fallback():
+    # GpuIn groups literals and eagerly projects dynamic candidates, so it cannot preserve
+    # Spark's evaluation order for nondeterministic expressions.
     def do_it(spark):
         return spark.createDataFrame([(1.0, 2.0)], 'a double, b double') \
             .selectExpr('a IN (b, rand(1)) AS result')
