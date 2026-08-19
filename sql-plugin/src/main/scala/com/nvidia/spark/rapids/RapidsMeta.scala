@@ -1639,9 +1639,28 @@ abstract class BaseExprMeta[INPUT <: Expression](
     }
     val boundCpuExpression = expr.withNewChildren(boundChildren)
 
+    // CPU-resident subtrees can still contain attributes below the direct-child boundary.
+    // LambdaFunctions are the primary example: their NamedLambdaVariables must stay on the CPU,
+    // but attributes captured from the outer input must cross the bridge like any other GPU input.
+    import org.apache.spark.sql.rapids.catalyst.expressions.GpuExpressionEquals
+    val allGpuInputs = mutable.ListBuffer[Expression]() ++= deduplicatedGpuInputs
+    val gpuInputIndices = mutable.Map[GpuExpressionEquals, Int]()
+    allGpuInputs.zipWithIndex.foreach { case (gpuInput, index) =>
+      gpuInputIndices(GpuExpressionEquals(gpuInput)) = index
+    }
+    val fullyBoundCpuExpression = boundCpuExpression.transformDown {
+      case attr: AttributeReference =>
+        val inputIndex = gpuInputIndices.getOrElseUpdate(GpuExpressionEquals(attr), {
+          val newIndex = allGpuInputs.length
+          allGpuInputs += attr
+          newIndex
+        })
+        BoundReference(inputIndex, attr.dataType, attr.nullable)
+    }
+
     val bridgeExpression = GpuCpuBridgeExpression(
-      gpuInputs = deduplicatedGpuInputs,
-      cpuExpression = boundCpuExpression,
+      gpuInputs = allGpuInputs.toSeq,
+      cpuExpression = fullyBoundCpuExpression,
       outputDataType = expr.dataType,
       outputNullable = expr.nullable)
 
