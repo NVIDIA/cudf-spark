@@ -206,9 +206,8 @@ abstract class SplittableJoinIterator(
   private val pendingSplits = scala.collection.mutable.Queue[LazySpillableColumnarBatch]()
 
   /**
-   * Per-stream-batch state prepared before deciding whether the batch must be split. Join
-   * implementations may carry additional state from sizing through gather-map creation so a
-   * decision made for a batch is not recomputed later.
+   * Holds join state for a single stream-side batch, used for output sizing and join execution.
+   * At the minimum it includes an estimated or exact output row count.
    */
   protected trait PreparedJoinBatch extends AutoCloseable {
     def numJoinRows: Long

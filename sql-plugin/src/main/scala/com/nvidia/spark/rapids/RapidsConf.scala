@@ -797,7 +797,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       "which is distinct from the data movement build side (which side is materialized/" +
       "buffered/broadcast, determined by the query plan). Options are: " +
       "AUTO (default) - automatically determine the best physical build side using heuristics, " +
-      "including reusable hash-build residency and observed executor-local demand; " +
+      "based on build and stream-side row counts and whether a cached build-side is available; " +
       "FIXED - use the build side as suggested by the query plan without dynamic selection; " +
       "SMALLEST - always select the side with the smallest row count as the physical build side, " +
       "determined on a batch-by-batch basis at join time. When AUTO or SMALLEST is used, " +
@@ -810,11 +810,10 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
 
   val HASH_TABLE_REUSE =
     conf("spark.rapids.sql.join.hashTable.reuse")
-      .doc("Enable reuse of hash tables across GPU hash-join probes. The initial implementation " +
-        "supports executor-local reuse of broadcast hash tables. With AUTO build-side selection, " +
-        "resident or in-flight tables are reused, while cold or evicted tables use an " +
-        "executor-local rent-or-buy heuristic. FIXED and SMALLEST selection retain their " +
-        "configured behavior.")
+      .doc("Enable reuse of hash tables across GPU hash-join probes. Currently this supports " +
+        "caching broadcast hash tables. With AUTO build-side selection a heuristic is used to " +
+        "determine whether to use the cached broadcast-side or rebuild with the stream-side. " +
+        "FIXED and SMALLEST retain their configured behavior.")
       .booleanConf
       .createWithDefault(false)
 

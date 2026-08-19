@@ -53,170 +53,77 @@ class HashBuildPlannerSuite extends AnyFunSuite {
     filterOutNulls = false)
   private val demandId = HashBuildDemandId(joinId = 1, stageId = 2, stageAttempt = 0)
 
-  test("hash-build cost classifies numeric and non-numeric key families") {
+  test("hash-build planner classifies numeric and non-numeric key families") {
     val numericTypes = Seq(BooleanType, ByteType, ShortType, IntegerType, LongType,
       FloatType, DoubleType)
     numericTypes.zipWithIndex.foreach { case (dataType, ordinal) =>
-      assert(HashBuildCost.hasNumericKeys(Seq(keyExpression(ordinal, dataType))))
+      assert(HashBuildPlanner.hasNumericKeys(Seq(keyExpression(ordinal, dataType))))
     }
-    assert(HashBuildCost.hasNumericKeys(Seq(
+    assert(HashBuildPlanner.hasNumericKeys(Seq(
       keyExpression(0, LongType), keyExpression(1, DoubleType))))
 
     val nonNumericTypes = Seq(
       DecimalType(10, 2), DateType, TimestampType, StringType,
       StructType(Seq(StructField("child", IntegerType))))
     nonNumericTypes.zipWithIndex.foreach { case (dataType, ordinal) =>
-      assert(!HashBuildCost.hasNumericKeys(Seq(keyExpression(ordinal, dataType))))
+      assert(!HashBuildPlanner.hasNumericKeys(Seq(keyExpression(ordinal, dataType))))
     }
-    assert(!HashBuildCost.hasNumericKeys(Seq(
+    assert(!HashBuildPlanner.hasNumericKeys(Seq(
       keyExpression(0, IntegerType), keyExpression(1, StringType))))
-    assert(!HashBuildCost.hasNumericKeys(Seq.empty))
-    assertResult(0.4)(HashBuildCost.NumericProbeCost)
-    assertResult(1.0)(HashBuildCost.NonNumericProbeCost)
+    assert(!HashBuildPlanner.hasNumericKeys(Seq.empty))
   }
 
-  test("AUTO prefers a compatible resident build") {
-    assertResult(GpuBuildRight) {
+  test("hash-build planner selects sides across policy states and cost boundaries") {
+    val streamRows = 70959L
+    val broadcastRows = 1700000L
+
+    def select(
+        selection: JoinBuildSideSelection.JoinBuildSideSelection = JoinBuildSideSelection.AUTO,
+        planBuildSide: GpuBuildSide = GpuBuildRight,
+        leftRows: Long = streamRows,
+        rightRows: Long = broadcastRows,
+        status: BuildStatus = BuildStatus.Cold,
+        numericKeys: Boolean = true,
+        demand: BuildDemand = BuildDemand.Empty): GpuBuildSide = {
       HashBuildPlanner.select(
-        JoinBuildSideSelection.AUTO,
-        GpuBuildRight,
-        leftRowCount = 1,
-        rightRowCount = 100,
+        selection,
+        planBuildSide,
+        leftRowCount = leftRows,
+        rightRowCount = rightRows,
         offeredSide = GpuBuildRight,
-        status = BuildStatus.Ready,
-        numericKeys = true,
-        demand = BuildDemand.Empty)
+        status = status,
+        numericKeys = numericKeys,
+        demand = demand)
     }
-  }
 
-  test("AUTO does not prefer a cold or evicted build without enough observed demand") {
+    assertResult(GpuBuildRight)(select(status = BuildStatus.Ready))
+    assertResult(GpuBuildRight)(select(status = BuildStatus.Building))
     Seq(BuildStatus.Cold, BuildStatus.Evicted).foreach { status =>
-      assertResult(GpuBuildLeft) {
-        HashBuildPlanner.select(
-          JoinBuildSideSelection.AUTO,
-          GpuBuildRight,
-          leftRowCount = 1,
-          rightRowCount = 100,
-          offeredSide = GpuBuildRight,
-          status = status,
-          numericKeys = true,
-          demand = BuildDemand.Empty)
-      }
-    }
-  }
-
-  test("AUTO admits a cold numeric build at the observed production-shape boundary") {
-    val streamRows = 70959L
-    val broadcastRows = 1700000L
-
-    assertResult(GpuBuildLeft) {
-      HashBuildPlanner.select(
-        JoinBuildSideSelection.AUTO,
-        GpuBuildRight,
-        leftRowCount = streamRows,
-        rightRowCount = broadcastRows,
-        offeredSide = GpuBuildRight,
-        status = BuildStatus.Cold,
-        numericKeys = true,
-        demand = BuildDemand(probeCount = 2L, probeRows = 2L * streamRows))
-    }
-    assertResult(GpuBuildRight) {
-      HashBuildPlanner.select(
-        JoinBuildSideSelection.AUTO,
-        GpuBuildRight,
-        leftRowCount = streamRows,
-        rightRowCount = broadcastRows,
-        offeredSide = GpuBuildRight,
-        status = BuildStatus.Cold,
-        numericKeys = true,
-        demand = BuildDemand(probeCount = 3L, probeRows = 3L * streamRows))
-    }
-  }
-
-  test("AUTO buys at the cold non-numeric rent-or-buy equality boundary") {
-    val streamRows = 70959L
-    val broadcastRows = 1700000L
-
-    assertResult(GpuBuildRight) {
-      HashBuildPlanner.select(
-        JoinBuildSideSelection.AUTO,
-        GpuBuildRight,
-        leftRowCount = streamRows,
-        rightRowCount = broadcastRows,
-        offeredSide = GpuBuildRight,
-        status = BuildStatus.Cold,
-        numericKeys = false,
-        demand = BuildDemand(probeCount = 1L, probeRows = streamRows))
-    }
-    assertResult(GpuBuildRight) {
-      HashBuildPlanner.select(
-        JoinBuildSideSelection.AUTO,
-        GpuBuildRight,
-        leftRowCount = streamRows,
-        rightRowCount = broadcastRows,
-        offeredSide = GpuBuildRight,
-        status = BuildStatus.Cold,
-        numericKeys = false,
-        demand = BuildDemand(probeCount = 2L, probeRows = 2L * streamRows))
-    }
-  }
-
-  test("AUTO joins an in-flight build once another task has chosen to buy") {
-    assertResult(GpuBuildRight) {
-      HashBuildPlanner.select(
-        JoinBuildSideSelection.AUTO,
-        GpuBuildRight,
-        leftRowCount = 1,
-        rightRowCount = 100,
-        offeredSide = GpuBuildRight,
-        status = BuildStatus.Building,
-        numericKeys = false,
-        demand = BuildDemand(probeCount = 100L, probeRows = 100L))
-    }
-  }
-
-  test("FIXED and SMALLEST ignore resident-build preference") {
-    assertResult(GpuBuildLeft) {
-      HashBuildPlanner.select(
-        JoinBuildSideSelection.FIXED,
-        GpuBuildLeft,
-        leftRowCount = 100,
-        rightRowCount = 1,
-        offeredSide = GpuBuildRight,
-        status = BuildStatus.Ready,
-        numericKeys = true,
-        demand = BuildDemand(probeCount = 10L, probeRows = 10L))
+      assertResult(GpuBuildLeft)(select(status = status))
     }
     assertResult(GpuBuildLeft) {
-      HashBuildPlanner.select(
-        JoinBuildSideSelection.SMALLEST,
-        GpuBuildRight,
-        leftRowCount = 1,
-        rightRowCount = 100,
-        offeredSide = GpuBuildRight,
-        status = BuildStatus.Ready,
-        numericKeys = true,
-        demand = BuildDemand(probeCount = 10L, probeRows = 10L))
+      select(demand = BuildDemand(probeCount = 2L, probeRows = 2L * streamRows))
     }
-  }
-
-  test("hash-build cache accumulates executor-local probe demand") {
-    val cache = new HashBuildCache
-    try {
-      assertResult(BuildDemand.Empty)(cache.demand(key, demandId))
-      assertResult(BuildDemand.Empty)(cache.observeProbe(key, demandId, 0L))
-      assertResult(BuildDemand(1L, 70959L))(cache.observeProbe(key, demandId, 70959L))
-      assertResult(BuildDemand(2L, 141918L))(cache.observeProbe(key, demandId, 70959L))
-      assertResult(BuildDemand(2L, 141918L))(cache.demand(key, demandId))
-      val nextJoin = demandId.copy(stageId = demandId.stageId + 1)
-      assertResult(BuildDemand.Empty)(cache.demand(key, nextJoin))
-      assertResult(BuildDemand(1L, 10L))(cache.observeProbe(key, nextJoin, 10L))
-      assertResult(BuildDemand(2L, 141918L))(cache.demand(key, demandId))
-      cache.resetDemands(key)
-      assertResult(BuildDemand.Empty)(cache.demand(key, demandId))
-      assertResult(BuildDemand.Empty)(cache.demand(key, nextJoin))
-    } finally {
-      cache.close()
+    assertResult(GpuBuildRight) {
+      select(demand = BuildDemand(probeCount = 3L, probeRows = 3L * streamRows))
+    }
+    assertResult(GpuBuildRight) {
+      select(numericKeys = false, demand = BuildDemand(1L, streamRows))
+    }
+    assertResult(GpuBuildLeft) {
+      select(
+        selection = JoinBuildSideSelection.FIXED,
+        planBuildSide = GpuBuildLeft,
+        leftRows = 100L,
+        rightRows = 1L,
+        status = BuildStatus.Ready)
+    }
+    assertResult(GpuBuildLeft) {
+      select(
+        selection = JoinBuildSideSelection.SMALLEST,
+        leftRows = 1L,
+        rightRows = 100L,
+        status = BuildStatus.Ready)
     }
   }
 
@@ -230,27 +137,33 @@ class HashBuildPlannerSuite extends AnyFunSuite {
 
     try {
       val futures = (0 until 2).map { _ =>
-        pool.submit(new Callable[HashArtifactLookup] {
-          override def call(): HashArtifactLookup = cache.getOrBuild(key, HashBuildMetrics()) {
-            createCount.incrementAndGet()
-            buildStarted.countDown()
-            assert(allowBuild.await(30, TimeUnit.SECONDS))
-            artifact
+        pool.submit(new Callable[(HashArtifact, Boolean)] {
+          override def call(): (HashArtifact, Boolean) = {
+            cache.getOrBuild(key, HashBuildMetrics()) {
+              createCount.incrementAndGet()
+              buildStarted.countDown()
+              assert(allowBuild.await(30, TimeUnit.SECONDS))
+              artifact
+            }
           }
         })
       }
 
       assert(buildStarted.await(30, TimeUnit.SECONDS))
       assertResult(BuildStatus.Building)(cache.status(key))
-      cache.observeProbe(key, demandId, 100L)
+      val nextStage = demandId.copy(stageId = demandId.stageId + 1)
+      assertResult(BuildDemand.Empty)(cache.observeProbe(key, demandId, 0L))
+      assertResult(BuildDemand(1L, 100L))(cache.observeProbe(key, demandId, 100L))
+      assertResult(BuildDemand(1L, 10L))(cache.observeProbe(key, nextStage, 10L))
       allowBuild.countDown()
 
       val results = futures.map(_.get(30, TimeUnit.SECONDS))
-      assert(results.forall(_.artifact eq artifact))
-      assertResult(1)(results.count(_.reused))
+      assert(results.forall(_._1 eq artifact))
+      assertResult(1)(results.count(_._2))
       assertResult(1)(createCount.get())
       assertResult(BuildStatus.Ready)(cache.status(key))
       assertResult(BuildDemand.Empty)(cache.demand(key, demandId))
+      assertResult(BuildDemand.Empty)(cache.demand(key, nextStage))
 
       artifact.ready = false
       assertResult(BuildStatus.Evicted)(cache.status(key))
@@ -273,11 +186,13 @@ class HashBuildPlannerSuite extends AnyFunSuite {
     val pool = Executors.newFixedThreadPool(2)
 
     try {
-      val build = pool.submit(new Callable[HashArtifactLookup] {
-        override def call(): HashArtifactLookup = cache.getOrBuild(key, HashBuildMetrics()) {
-          buildStarted.countDown()
-          assert(allowBuild.await(30, TimeUnit.SECONDS))
-          artifact
+      val build = pool.submit(new Callable[(HashArtifact, Boolean)] {
+        override def call(): (HashArtifact, Boolean) = {
+          cache.getOrBuild(key, HashBuildMetrics()) {
+            buildStarted.countDown()
+            assert(allowBuild.await(30, TimeUnit.SECONDS))
+            artifact
+          }
         }
       })
       assert(buildStarted.await(30, TimeUnit.SECONDS))
@@ -315,7 +230,8 @@ class HashBuildPlannerSuite extends AnyFunSuite {
         }
       }
       assertResult(BuildStatus.Cold)(cache.status(key))
-      assert(cache.getOrBuild(key, HashBuildMetrics())(artifact).artifact eq artifact)
+      val (rebuiltArtifact, _) = cache.getOrBuild(key, HashBuildMetrics())(artifact)
+      assert(rebuiltArtifact eq artifact)
       assertResult(BuildStatus.Ready)(cache.status(key))
     } finally {
       cache.close()

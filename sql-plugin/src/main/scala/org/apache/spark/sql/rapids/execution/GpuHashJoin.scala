@@ -1173,6 +1173,9 @@ case class JoinBuildSideStats(streamMagnificationFactor: Double, isDistinct: Boo
 
 object JoinBuildSideStats {
   def fromTable(buildKeys: Table): JoinBuildSideStats = {
+    // Based off of the keys on the build side guess at how many output rows there
+    // will be for each input row on the stream side. This does not take into account
+    // the join type, data skew or even if the keys actually match.
     val builtCount = buildKeys.distinctCount(NullEquality.EQUAL)
     val isDistinct = builtCount == buildKeys.getRowCount
     val magnificationFactor = buildKeys.getRowCount.toDouble / builtCount
@@ -1183,9 +1186,6 @@ object JoinBuildSideStats {
                 boundBuildKeys: Seq[GpuExpression]): JoinBuildSideStats = {
     // This is okay because the build keys must be deterministic
     withResource(GpuProjectExec.project(batch, boundBuildKeys)) { buildKeys =>
-      // Based off of the keys on the build side guess at how many output rows there
-      // will be for each input row on the stream side. This does not take into account
-      // the join type, data skew or even if the keys actually match.
       withResource(GpuColumnVector.from(buildKeys)) { keysTable =>
         fromTable(keysTable)
       }
@@ -1193,6 +1193,11 @@ object JoinBuildSideStats {
   }
 }
 
+/**
+ * Describes the physical join strategy selected for one stream-side batch.
+ * `exactCountIsFinal` indicates whether the primitive's exact match count
+ * is also the final output row count and can be used for sizing.
+ */
 private[execution] sealed trait HashJoinRecipe {
   def primitive: Option[HashJoinPrimitive]
   def exactCountIsFinal: Boolean = false
@@ -1282,6 +1287,10 @@ abstract class BaseHashJoinIterator(
 
   private[this] var cachedBackendsDisabled = false
 
+  /**
+   * Holds hash join state for one stream-side batch. Recipes backed by a
+   * [[HashJoinPrimitive]] also include a [[ResolvedHashJoin]] that owns the selected backend.
+   */
   protected final class HashJoinBatch(
       override val numJoinRows: Long,
       val recipe: HashJoinRecipe,
@@ -1309,6 +1318,7 @@ abstract class BaseHashJoinIterator(
       availableProvider.backend(probe, primitive)
     } catch {
       case unavailable: CachedHashBuildUnavailable =>
+        // If a cached build failed fall back to on-demand for this task.
         cachedBackendsDisabled = true
         logWarning("Reusable hash build failed; using per-batch hash builds for this task",
           unavailable.getCause)
@@ -1324,6 +1334,9 @@ abstract class BaseHashJoinIterator(
       cb: LazySpillableColumnarBatch,
       backend: HashProbeBackend,
       primitive: HashJoinPrimitive): Option[Long] = {
+    // If we have a cached backend we can get the exact output count of the hash primitive.
+    // This is an optional sizing optimization; for unsupported operations or on-demand backends
+    // we fall back to None.
     if (!backend.isCached || primitive.exactCountJoinType.isEmpty) {
       None
     } else {
@@ -1357,6 +1370,7 @@ abstract class BaseHashJoinIterator(
     }
   }
 
+  /* Prepare hash-specific state for this stream batch. */
   override def prepareJoinBatch(cb: LazySpillableColumnarBatch): PreparedJoinBatch = {
     val fallback = estimateNumJoinRows(cb)
     val (leftRows, rightRows) = buildSide match {
@@ -1365,12 +1379,15 @@ abstract class BaseHashJoinIterator(
     }
     val recipe = selectHashJoinRecipe(leftRows, rightRows)
     val operation = recipe.primitive.map { primitive =>
+      // Resolve the backend once to produce a ResolvedHashJoin.
       val backend = hashBackend(leftRows, rightRows, primitive)
       closeOnExcept(backend) { _ =>
         val exactRows = exactOutputRowCount(cb, backend, primitive)
         new ResolvedHashJoin(backend, primitive, exactRows)
       }
     }
+    // We can use the exact count for sizing unless there is postprocessing
+    // that would change cardinality. In the latter case fall back to the estimate.
     val numJoinRows = if (recipe.exactCountIsFinal) {
       operation.flatMap(_.exactOutputRows).getOrElse(fallback)
     } else {
@@ -1717,6 +1734,7 @@ class HashJoinIterator(
   override protected def selectHashJoinRecipe(
       leftRowCount: Long,
       rightRowCount: Long): HashJoinRecipe = {
+    // Distinct join optimization takes priority over all other strategies
     if (buildStats.isDistinct) {
       DistinctHashRecipe(joinType, buildSide)
     } else {
@@ -1729,6 +1747,7 @@ class HashJoinIterator(
         rightRowCount) match {
         case JoinStrategy.INNER_HASH_WITH_POST => InnerHashRecipe(joinType)
         case JoinStrategy.INNER_SORT_WITH_POST =>
+          // Check if sort join is supported (no ARRAY/STRUCT types)
           if (isSortJoinSupported(boundBuiltKeys) && isSortJoinSupported(boundStreamKeys)) {
             SortJoinRecipe
           } else {
@@ -1883,6 +1902,7 @@ class ConditionalHashJoinIterator(
       case JoinStrategy.INNER_HASH_WITH_POST =>
         InnerHashRecipe(joinType, useExactForSizing = false)
       case JoinStrategy.INNER_SORT_WITH_POST =>
+        // Check if sort join is supported (no ARRAY/STRUCT types)
         if (isSortJoinSupported(boundBuiltKeys) && isSortJoinSupported(boundStreamKeys)) {
           SortJoinRecipe
         } else {
@@ -1895,8 +1915,11 @@ class ConditionalHashJoinIterator(
     }
   }
 
-  // Hash operations compile the AST for their resolved physical build side. Sort and fused mixed
-  // recipes retain their existing strategy-specific AST orientation.
+  // The AST condition is compiled based on the selected recipe.
+  // - INNER_HASH_WITH_POST compiles for the backend's resolved physical build side.
+  // - INNER_SORT_WITH_POST compiles for the data-movement build side because post-filtering uses
+  //   stable left/right gather-map semantics regardless of a sort join's physical build side.
+  // - Mixed InnerLike joins select a physical build side per batch and use the AST for that side.
   override protected def joinGathererLeftRight(
       leftKeys: Table,
       leftData: LazySpillableColumnarBatch,
@@ -1989,6 +2012,8 @@ class ConditionalHashJoinIterator(
 
     val result = joinType match {
       case _: InnerLike =>
+        // Mixed joins do not use a ResolvedHashJoin, so select the physical build side here and
+        // use the condition compiled for that side.
         val selectedBuildSide = JoinBuildSideSelection.selectPhysicalBuildSide(
           joinOptions.buildSideSelection, buildSide,
           leftKeys.getRowCount, rightKeys.getRowCount)
@@ -2099,10 +2124,8 @@ class HashJoinStreamSideIterator(
       throw new IllegalStateException(s"unsupported join type $t with $buildSide")
   }
 
-  // The cudf API build side is determined by subJoinType, not the original buildSide:
-  // - LeftOuter uses leftOuterHashJoinBuildRight (expects BuildRight AST)
-  // - RightOuter uses rightOuterHashJoinBuildLeft (expects BuildLeft AST)
-  // - Inner uses innerHashJoinBuildRight (expects BuildRight AST)
+  // Sort and mixed subjoin paths use a cuDF orientation derived from subJoinType. Hash recipes
+  // carry their own build-side constraints, and DistinctHashRecipe uses the original buildSide.
   private val cudfBuildSide: GpuBuildSide = subJoinType match {
     case LeftOuter => GpuBuildRight
     case RightOuter => GpuBuildLeft
@@ -2113,9 +2136,12 @@ class HashJoinStreamSideIterator(
   override protected def selectHashJoinRecipe(
       leftRowCount: Long,
       rightRowCount: Long): HashJoinRecipe = {
+    // Distinct outer primitives produce only one gather map, but this iterator needs both maps for
+    // build-side tracking. The Inner distinct primitive produces both maps.
     if (buildStats.isDistinct && subJoinType == Inner && lazyCompiledCondition.isEmpty) {
       DistinctHashRecipe(subJoinType, buildSide)
     } else {
+      // Select for the subjoin executed against each stream batch, not the original outer join.
       JoinStrategy.selectStrategy(
         joinOptions.strategy,
         subJoinType,
@@ -2126,6 +2152,7 @@ class HashJoinStreamSideIterator(
         case JoinStrategy.INNER_HASH_WITH_POST =>
           InnerHashRecipe(subJoinType, useExactForSizing = lazyCompiledCondition.isEmpty)
         case JoinStrategy.INNER_SORT_WITH_POST =>
+          // Check if sort join is supported (no ARRAY/STRUCT types)
           if (isSortJoinSupported(boundBuiltKeys) && isSortJoinSupported(boundStreamKeys)) {
             SortJoinRecipe
           } else {
@@ -2348,6 +2375,8 @@ class HashJoinStreamSideIterator(
         JoinImpl.rightOuterHashJoinBuildLeft(leftKeys, rightKeys, leftTable, rightTable,
           lazyCondition.getForBuildLeft, nullEquality)
       case Inner =>
+        // This mixed path bypasses ResolvedHashJoin. Use the subjoin's cuDF orientation as the
+        // FIXED plan-side choice; AUTO and SMALLEST may still select either physical side.
         val selectedBuildSide = JoinBuildSideSelection.selectPhysicalBuildSide(
           joinOptions.buildSideSelection, cudfBuildSide,
           leftKeys.getRowCount, rightKeys.getRowCount)

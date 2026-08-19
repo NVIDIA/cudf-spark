@@ -38,7 +38,7 @@ class SharedRecomputableHandleSuite extends SpillUnitTestBase {
     }
   }
 
-  test("recomputable handle uses pin count for spillability and rebuilds after spill") {
+  test("recomputable handle manages pinning, spill, rebuild, and deferred close") {
     val closedIds = ArrayBuffer[Int]()
     var buildCount = 0
 
@@ -60,80 +60,98 @@ class SharedRecomputableHandleSuite extends SpillUnitTestBase {
           assertResult(1)(lease.resource.id)
           assert(!lease.rebuilt)
           assert(!handle.spillable)
-          assertResult(0L)(SpillFramework.stores.deviceStore.spill(handle.approxSizeInBytes))
+          assertResult(0L)(handle.spill())
         }
 
         assert(handle.spillable)
-        assertResult(handle.approxSizeInBytes)(
-          SpillFramework.stores.deviceStore.spill(handle.approxSizeInBytes))
-        assertResult(Seq(1))(closedIds.toSeq)
+        assertResult(handle.approxSizeInBytes)(handle.spill())
+        assert(closedIds.isEmpty)
         assertResult(0)(SpillFramework.stores.deviceStore.numHandles)
         assert(!handle.isReady)
 
-        withResource(handle.acquire()) { lease =>
-          assertResult(2)(lease.resource.id)
-          assert(lease.rebuilt)
-          assert(!lease.resource.isClosed)
+        val rebuiltLease = handle.acquire()
+        try {
+          val rebuiltResource = rebuiltLease.resource
+          assertResult(2)(rebuiltResource.id)
+          assert(rebuiltLease.rebuilt)
+          assert(!rebuiltResource.isClosed)
+          assertResult(1)(SpillFramework.stores.deviceStore.numHandles)
+
+          handle.releaseSpilled()
+          assertResult(Seq(1))(closedIds.toSeq)
+          assert(!rebuiltResource.isClosed)
+
+          handle.close()
+          assert(!rebuiltResource.isClosed)
+          assertResult(1)(SpillFramework.stores.deviceStore.numHandles)
+          intercept[IllegalStateException](handle.acquire())
+        } finally {
+          rebuiltLease.close()
         }
 
         assertResult(2)(buildCount)
-        assert(handle.isReady)
-        assertResult(1)(SpillFramework.stores.deviceStore.numHandles)
+        assertResult(0)(SpillFramework.stores.deviceStore.numHandles)
     }
 
     assertResult(Seq(1, 2))(closedIds.sorted.toSeq)
   }
 
-  test("releaseSpilled only closes evicted generations") {
+  test("close waits for an in-flight rebuild") {
     val closedIds = ArrayBuffer[Int]()
     var buildCount = 0
+    val rebuildStarted = new CountDownLatch(1)
+    val allowRebuild = new CountDownLatch(1)
 
-    def buildResource(): TestResource = {
+    def buildResource(): TestResource = synchronized {
       buildCount += 1
-      new TestResource(buildCount, closedIds)
+      val id = buildCount
+      if (id > 1) {
+        rebuildStarted.countDown()
+        assert(allowRebuild.await(30, TimeUnit.SECONDS))
+      }
+      new TestResource(id, closedIds)
     }
 
-    withResource(
-      new SharedRecomputableHandle(1024L, buildResource(), () => buildResource())) {
-      handle =>
-        SpillFramework.stores.deviceStore.track(handle)
-        assertResult(handle.approxSizeInBytes)(handle.spill())
-
-        withResource(handle.acquire()) { lease =>
-          assertResult(2)(lease.resource.id)
-          assert(!lease.resource.isClosed)
-        }
-
-        assertResult(handle.approxSizeInBytes)(handle.spill())
-        handle.releaseSpilled()
-        assertResult(Seq(1, 2))(closedIds.toSeq.sorted)
-
-        withResource(handle.acquire()) { lease =>
-          assertResult(3)(lease.resource.id)
-          assert(!lease.resource.isClosed)
-        }
-    }
-
-    assertResult(Seq(1, 2, 3))(closedIds.sorted.toSeq)
-  }
-
-  test("close waits for the last lease") {
-    val closedIds = ArrayBuffer[Int]()
-    val resource = new TestResource(1, closedIds)
-    val handle = new SharedRecomputableHandle(1024L, resource,
-      () => new TestResource(2, closedIds))
+    val handle = new SharedRecomputableHandle(1024L, buildResource(), () => buildResource())
     SpillFramework.stores.deviceStore.track(handle)
+    assertResult(handle.approxSizeInBytes)(
+      SpillFramework.stores.deviceStore.spill(handle.approxSizeInBytes))
 
-    val lease = handle.acquire()
-    handle.close()
-    assert(!resource.isClosed)
-    assertResult(1)(SpillFramework.stores.deviceStore.numHandles)
-    intercept[IllegalStateException](handle.acquire())
+    val pool = Executors.newFixedThreadPool(2)
+    try {
+      val acquire = pool.submit(new Callable[Unit] {
+        override def call(): Unit = {
+          intercept[IllegalStateException] {
+            withResource(handle.acquire())(_ => ())
+          }
+        }
+      })
+      assert(rebuildStarted.await(30, TimeUnit.SECONDS))
 
-    lease.close()
-    assert(resource.isClosed)
-    assertResult(Seq(1))(closedIds.toSeq)
-    assertResult(0)(SpillFramework.stores.deviceStore.numHandles)
+      val close = pool.submit(new Callable[Unit] {
+        override def call(): Unit = handle.close()
+      })
+      handle.synchronized {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
+        while (!handle.closed && System.nanoTime() < deadline) {
+          handle.wait(100)
+        }
+        assert(handle.closed)
+      }
+      assert(!close.isDone)
+
+      allowRebuild.countDown()
+      acquire.get(30, TimeUnit.SECONDS)
+      close.get(30, TimeUnit.SECONDS)
+
+      assertResult(Seq(1, 2))(closedIds.sorted.toSeq)
+      assertResult(0)(SpillFramework.stores.deviceStore.numHandles)
+    } finally {
+      allowRebuild.countDown()
+      handle.close()
+      pool.shutdownNow()
+      assert(pool.awaitTermination(30, TimeUnit.SECONDS))
+    }
   }
 
   test("concurrent acquires only rebuild once after eviction") {

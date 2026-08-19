@@ -24,6 +24,7 @@ import java.util
 import java.util.UUID
 import java.util.concurrent.ArrayBlockingQueue
 
+import scala.annotation.tailrec
 import scala.collection.mutable
 
 import ai.rapids.cudf._
@@ -329,7 +330,12 @@ trait DeviceSpillableHandle[T <: AutoCloseable] extends DeviceStoreHandle {
   }
 }
 
-object RecomputableHandle {
+object SharedRecomputableHandle {
+  private sealed trait AcquireAction[+T]
+  private final case class UseResident[T](resource: T) extends AcquireAction[T]
+  private case object WaitForRebuild extends AcquireAction[Nothing]
+  private case object Rebuild extends AcquireAction[Nothing]
+
   /**
    * A scoped lease that pins a shared recomputable device object.
    * Holding a lease prevents the object from being closed.
@@ -338,7 +344,7 @@ object RecomputableHandle {
    * @param resource the object that the lease is on
    */
   final class Lease[T <: AutoCloseable] private[spill] (
-      handle: RecomputableHandle[T],
+      handle: SharedRecomputableHandle[T],
       val resource: T,
       val rebuilt: Boolean) extends AutoCloseable {
     private[this] var closed = false
@@ -351,22 +357,6 @@ object RecomputableHandle {
       handle.releaseLease()
     }
   }
-}
-
-/**
- * A device object that can be leased and recreated after eviction.
- *
- * The interface does not require sharing. [[SharedRecomputableHandle]] is the executor-shared
- * implementation used by the broadcast hash-build store; a task-local implementation can use
- * the same contract in the future.
- */
-trait RecomputableHandle[T <: AutoCloseable] extends AutoCloseable {
-  def isReady: Boolean
-  def acquire(): RecomputableHandle.Lease[T]
-  private[spill] def releaseLease(): Unit
-}
-
-object SharedRecomputableHandle {
 
   def apply[T <: AutoCloseable](
       approxSizeInBytes: Long,
@@ -399,8 +389,8 @@ object SharedRecomputableHandle {
 class SharedRecomputableHandle[T <: AutoCloseable] private[spill] (
     override val approxSizeInBytes: Long,
     initialValue: T,
-    rebuild: () => T) extends DeviceStoreHandle with RecomputableHandle[T] with Logging {
-  import RecomputableHandle.Lease
+    rebuild: () => T) extends DeviceStoreHandle with Logging {
+  import SharedRecomputableHandle.{AcquireAction, Lease, Rebuild, UseResident, WaitForRebuild}
 
   taskPriority = SpillPriorities.RECOMPUTABLE_CACHE_PRIORITY
 
@@ -409,7 +399,7 @@ class SharedRecomputableHandle[T <: AutoCloseable] private[spill] (
   private[this] var pinCount: Int = 0
   private[this] var rebuilding: Boolean = false
 
-  override def isReady: Boolean = synchronized {
+  def isReady: Boolean = synchronized {
     !closed && dev.isDefined
   }
 
@@ -424,84 +414,91 @@ class SharedRecomputableHandle[T <: AutoCloseable] private[spill] (
    * - If `dev` is missing and no other thread is rebuilding, set `rebuilding=true` (exclusively)
    *   and rebuild the object. After rebuild, set `dev`, notify waiters, and track the handle.
    */
-  def acquire(): Lease[T] = {
-    var materialized: Option[T] = None
-    var rebuiltByCaller = false
-    while (materialized.isEmpty) {
-      val (shouldBuild, shouldWait) = synchronized {
+  @tailrec
+  final def acquire(): Lease[T] = {
+    // All threads decide whether to build, wait, or reuse under the lock.
+    val action: AcquireAction[T] = synchronized {
+      if (closed) {
+        throw new IllegalStateException("attempting to materialize a closed handle")
+      }
+      dev match {
+        case Some(resource) =>
+          pinCount += 1
+          UseResident(resource)
+        case None if rebuilding =>
+          WaitForRebuild
+        case None =>
+          rebuilding = true
+          Rebuild
+      }
+    }
+
+    action match {
+      case UseResident(resource) =>
+        new Lease(this, resource, rebuilt = false)
+      case WaitForRebuild =>
+        awaitRebuild()
+        acquire()
+      case Rebuild =>
+        rebuildAndAcquire()
+    }
+  }
+
+  private def awaitRebuild(): Unit = {
+    // Release the semaphore while waiting to prevent deadlocks.
+    val taskContext = TaskContext.get()
+    GpuSemaphore.releaseIfNecessary(taskContext)
+    try {
+      synchronized {
+        while (!closed && rebuilding && dev.isEmpty) {
+          wait()
+        }
+      }
+    } finally {
+      GpuSemaphore.acquireIfNecessary(taskContext)
+    }
+  }
+
+  private def rebuildAndAcquire(): Lease[T] = {
+    var candidate: Option[T] = None
+    var published = false
+    try {
+      // Call rebuild and sync the stream to ensure the GPU rebuild completes.
+      candidate = Some(rebuild())
+      Cuda.DEFAULT_STREAM.sync()
+      val lease = new Lease(this, candidate.get, rebuilt = true)
+      synchronized {
         if (closed) {
           throw new IllegalStateException("attempting to materialize a closed handle")
-        } else if (dev.isDefined) {
-          pinCount += 1
-          materialized = dev
-          (false, false)
-        } else if (rebuilding) {
-          (false, true)
-        } else {
-          rebuilding = true
-          (true, false)
         }
+        SpillFramework.stores.deviceStore.track(this)
+        dev = candidate
+        pinCount += 1
+        published = true
+        rebuilding = false
+        notifyAll()
       }
-
-      if (shouldWait) {
-        val taskContext = TaskContext.get()
-        GpuSemaphore.releaseIfNecessary(taskContext)
+      lease
+    } catch {
+      case t: Throwable =>
+        // Rebuild failed; release and notify waiters before rethrowing
         try {
-          synchronized {
-            while (!closed && rebuilding && dev.isEmpty) {
-              wait()
-            }
+          if (!published) {
+            candidate.foreach(_.close())
           }
+        } catch {
+          case closeError: Throwable => t.addSuppressed(closeError)
         } finally {
-          GpuSemaphore.acquireIfNecessary(taskContext)
-        }
-      }
-
-      if (shouldBuild) {
-        var rebuilt: Option[T] = None
-        var published = false
-        try {
-          rebuilt = Some(rebuild())
-          Cuda.DEFAULT_STREAM.sync()
           synchronized {
-            if (closed) {
-              throw new IllegalStateException("attempting to materialize a closed handle")
-            }
-            // Keep the handle lock while publishing to the store so a spill cannot remove this
-            // generation before it is tracked.
-            SpillFramework.stores.deviceStore.track(this)
-            dev = rebuilt
-            pinCount += 1
-            materialized = rebuilt
-            rebuiltByCaller = true
-            published = true
             rebuilding = false
             notifyAll()
           }
-        } catch {
-          case t: Throwable =>
-            // Rebuild failed; release any rebuilt object, clear rebuilding,
-            // and notify waiters before rethrowing
-            try {
-              if (!published) {
-                rebuilt.foreach(_.close())
-              }
-            } catch {
-              case closeError: Throwable => t.addSuppressed(closeError)
-            } finally {
-              synchronized {
-                rebuilding = false
-                notifyAll()
-              }
-            }
-            throw t
         }
-      }
+        throw t
     }
-    new Lease(this, materialized.get, rebuiltByCaller)
   }
 
-  private[spill] override def releaseLease(): Unit = {
+  private[spill] def releaseLease(): Unit = {
     val shouldClose = synchronized {
       if (pinCount <= 0) {
         throw new IllegalStateException("releaseLease called without a matching acquire")
@@ -514,18 +511,55 @@ class SharedRecomputableHandle[T <: AutoCloseable] private[spill] (
     }
   }
 
+  private def awaitRebuildForClose(): Unit = {
+    // Wait for an in-flight rebuilt to complete before closing.
+    // Release the semaphore while waiting to prevent deadlocks.
+    val taskContext = TaskContext.get()
+    var interrupted = false
+    GpuSemaphore.releaseIfNecessary(taskContext)
+    try {
+      synchronized {
+        while (rebuilding) {
+          try {
+            wait()
+          } catch {
+            case _: InterruptedException => interrupted = true
+          }
+        }
+      }
+    } finally {
+      try {
+        GpuSemaphore.acquireIfNecessary(taskContext)
+      } finally {
+        if (interrupted) {
+          Thread.currentThread().interrupt()
+        }
+      }
+    }
+  }
+
   override def close(): Unit = {
-    val shouldClose = synchronized {
+    val (firstClose, shouldWaitForRebuild) = synchronized {
       if (closed) {
-        false
+        (false, rebuilding)
       } else {
         closed = true
         notifyAll()
-        pinCount == 0 && !spilling
+        (true, rebuilding)
       }
     }
-    if (shouldClose) {
-      doClose()
+    if (shouldWaitForRebuild) {
+      // Wait for an in-flight rebuilt to exit, so that the caller can
+      // close input resources captured by the rebuild callback.
+      awaitRebuildForClose()
+    }
+    if (firstClose) {
+      val shouldClose = synchronized {
+        pinCount == 0 && !spilling
+      }
+      if (shouldClose) {
+        doClose()
+      }
     }
   }
 
@@ -536,8 +570,6 @@ class SharedRecomputableHandle[T <: AutoCloseable] private[spill] (
         spilling = true
         evicted = dev
         dev = None
-        // Keep removal in the same critical section as clearing dev. Otherwise a concurrent
-        // rebuild can publish a new generation and this spill can remove that generation.
         SpillFramework.removeFromDeviceStore(this)
         true
       } else {

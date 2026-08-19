@@ -29,7 +29,7 @@ import com.nvidia.spark.rapids.{GpuBuildLeft, GpuBuildRight, GpuBuildSide, GpuCo
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableSeq
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
-import com.nvidia.spark.rapids.spill.{RecomputableHandle, SharedRecomputableHandle}
+import com.nvidia.spark.rapids.spill.SharedRecomputableHandle
 
 import org.apache.spark.TaskContext
 import org.apache.spark.sql.catalyst.expressions.Expression
@@ -44,10 +44,9 @@ case class HashBuildMetrics(
     reuses: GpuMetric = NoopMetric)
 
 /**
- * Identifies derived hash-build state within a cache.
- *
- * A cache owner can contain multiple projections of the same data, so the projection type and
- * nullability are included along with its canonical expression.
+ * Identifies derived hash-build state within a [[HashBuildCache]].
+ * The same build-side data can be cached and reused by multiple joins. The key includes the
+ * projection, canonicalized join keys, and null-handling semantics to disambiguate.
  */
 case class HashBuildKey(
     sourceProjection: Seq[Seq[Expression]],
@@ -69,7 +68,12 @@ object HashBuildKey {
   }
 }
 
-/** The cuDF hash primitive selected for one stream batch. */
+/**
+ * The cuDF hash primitive selected for one stream batch. `requiredBuildSide` specifies
+ * if the join has a physical side constraint e.g. left or right outer/semi/anti.
+ * `exactCountJoinType` specifies when the primitive can provide an exact output count
+ * before execution, and which JoinType will provide it.
+ */
 sealed trait HashJoinPrimitive {
   def requiredBuildSide: Option[GpuBuildSide]
   def exactCountJoinType: Option[JoinType]
@@ -110,6 +114,7 @@ private[execution] object HashJoinPrimitive {
     override val exactCountJoinType: Option[JoinType] = None
   }
 
+  /** Map a directly executed Catalyst join type to its cuDF hash primitive. */
   def direct(joinType: JoinType): HashJoinPrimitive = joinType match {
     case _: InnerLike => Inner
     case org.apache.spark.sql.catalyst.plans.LeftOuter => LeftOuter
@@ -120,7 +125,9 @@ private[execution] object HashJoinPrimitive {
   }
 }
 
-/** A hash primitive, backend, and exact primitive count resolved once for a stream batch. */
+/**
+ * A hash operation resolved once for a stream batch. This owns the selected [[HashProbeBackend]].
+ */
 private[execution] final class ResolvedHashJoin(
     private val backend: HashProbeBackend,
     primitive: HashJoinPrimitive,
@@ -131,6 +138,7 @@ private[execution] final class ResolvedHashJoin(
     backend.execute(primitive, leftKeys, rightKeys, exactOutputRows)
   }
 
+  // Apply a post-join condition using the AST orientation for the resolved physical build side.
   def filterInner(
       innerMaps: GatherMapsResult,
       leftTable: Table,
@@ -148,7 +156,10 @@ private[execution] final class ResolvedHashJoin(
   override def close(): Unit = backend.close()
 }
 
-/** A build implementation selected once for a probe operation. */
+/**
+ * The physical build implementation of a hash probe selected once for a stream batch.
+ * The caller owns the backend until `close()`.
+ */
 sealed trait HashProbeBackend extends AutoCloseable {
   def buildSide: GpuBuildSide
   def isCached: Boolean
@@ -163,6 +174,10 @@ sealed trait HashProbeBackend extends AutoCloseable {
   def outputRowCount(joinType: JoinType, probeKeys: Table): Option[Long]
 }
 
+/**
+ * Ephemeral backend that executes directly from the two key tables without retaining a native
+ * artifact. It cannot provide an exact count ahead of execution and has no resources to close.
+ */
 private final class OnDemandHashProbeBackend(
     override val buildSide: GpuBuildSide,
     compareNullsEqual: Boolean) extends HashProbeBackend {
@@ -234,6 +249,11 @@ private final class OnDemandHashProbeBackend(
   override def close(): Unit = {}
 }
 
+/**
+ * Cache-owned native hash state that can provide leased probe backends.
+ * Implementations retain immutable build statistics and a [[SharedRecomputableHandle]]. Calling
+ * `backend` acquires a lease and transfers ownership of that lease to the returned backend.
+ */
 private[execution] trait HashArtifact extends AutoCloseable {
   def stats: JoinBuildSideStats
   def isReady: Boolean
@@ -243,11 +263,10 @@ private[execution] trait HashArtifact extends AutoCloseable {
       onRebuild: () => Unit): HashProbeBackend
 }
 
-private[execution] case class HashArtifactLookup(artifact: HashArtifact, reused: Boolean)
-
+/** Recomputable non-distinct cuDF hash table owned by a [[HashBuildCache]]. */
 private final class HashJoinArtifact(
     override val stats: JoinBuildSideStats,
-    handle: RecomputableHandle[CudfHashJoin]) extends HashArtifact {
+    handle: SharedRecomputableHandle[CudfHashJoin]) extends HashArtifact {
   override def isReady: Boolean = handle.isReady
 
   override def backend(
@@ -267,9 +286,10 @@ private final class HashJoinArtifact(
   override def close(): Unit = handle.close()
 }
 
+/** Recomputable cuDF distinct hash table owned by a [[HashBuildCache]]. */
 private final class DistinctHashJoinArtifact(
     override val stats: JoinBuildSideStats,
-    handle: RecomputableHandle[CudfDistinctHashJoin]) extends HashArtifact {
+    handle: SharedRecomputableHandle[CudfDistinctHashJoin]) extends HashArtifact {
   override def isReady: Boolean = handle.isReady
 
   override def backend(
@@ -289,10 +309,14 @@ private final class DistinctHashJoinArtifact(
   override def close(): Unit = handle.close()
 }
 
+/**
+ * Backend that holds a lease on a reusable cuDF hash artifact until `close()`. This probes a
+ * pre-built native table and can compute exact inner/outer counts for non-distinct artifacts.
+ */
 private final class CachedHashProbeBackend(
     override val buildSide: GpuBuildSide,
-    artifact: Either[RecomputableHandle.Lease[CudfHashJoin],
-      RecomputableHandle.Lease[CudfDistinctHashJoin]]) extends HashProbeBackend {
+    artifact: Either[SharedRecomputableHandle.Lease[CudfHashJoin],
+      SharedRecomputableHandle.Lease[CudfDistinctHashJoin]]) extends HashProbeBackend {
   override val isCached: Boolean = true
 
   private def withHashJoin[T](f: CudfHashJoin => T): T = artifact match {
@@ -424,31 +448,31 @@ private final class CachedHashProbeBackend(
 /**
  * Executor-local cache of reusable hash-build artifacts.
  *
- * All mutable cache and demand state is guarded by this object's monitor. Initial construction is
- * single-flight per key: the first caller publishes an incomplete future under the monitor, builds
- * outside it, and completes the future when the artifact is ready. Concurrent callers wait on that
- * future without holding either this monitor or the GPU semaphore. Once published, the artifact's
- * [[RecomputableHandle]] independently coordinates leases, spill, and post-eviction rebuilds.
+ * The cache stores [[HashArtifact]] objects accessed by [[HashBuildKey]]. Upon the first get
+ * the cache enforces build-once semantics where one thread builds and others wait, producing a
+ * [[SharedRecomputableHandle]] that is held by the constructed HashArtifact.
+ *
+ * Additionally the cache tracks `demand`, a count of the number of probes and total probe rows
+ * for a given hash build that has not been cached yet, tracked via `observeProbe`. This is used
+ * for heuristics to decide when to cache a hash build based on the cost of the probes we have
+ * seen in a stream so far.
  */
 final class HashBuildCache extends AutoCloseable {
-  private[this] val builds = mutable.HashMap.empty[HashBuildKey,
-    CompletableFuture[HashArtifact]]
+  private[this] val builds = mutable.HashMap.empty[HashBuildKey, CompletableFuture[HashArtifact]]
   private[this] val demands = mutable.HashMap.empty[(HashBuildKey, HashBuildDemandId), BuildDemand]
   private[this] var closed = false
-
-  // This is only a retention bound to keep metadata from growing indefinitely. Reaching it
-  // requires the same hash-build key to be used by this many distinct join/stage attempts without
-  // a successful build clearing demand, at which point we start dropping old entries.
-  private[this] val maxTrackedDemandIdsPerKey = 100
-
-  private def saturatedAdd(left: Long, right: Long): Long = {
-    if (right > Long.MaxValue - left) Long.MaxValue else left + right
-  }
 
   private def futureFor(key: HashBuildKey): Option[CompletableFuture[HashArtifact]] = synchronized {
     builds.get(key)
   }
 
+  /**
+   * Return a snapshot for `key`:
+   *  - `Cold` means no usable cache entry
+   *  - `Bulding` means initial construction is in flight
+   *  - `Ready` means the native artifact is resident
+   *  - `Evicted` means the cached handle exists but must be rebuilt on the next acquisition
+   */
   def status(key: HashBuildKey): BuildStatus = futureFor(key) match {
     case None => BuildStatus.Cold
     case Some(future) if !future.isDone => BuildStatus.Building
@@ -457,6 +481,7 @@ final class HashBuildCache extends AutoCloseable {
       if (future.getNow(null).isReady) BuildStatus.Ready else BuildStatus.Evicted
   }
 
+  /** Return build statistics for a `key` only if it has a resident artifact. */
   def readyStats(key: HashBuildKey): Option[JoinBuildSideStats] = futureFor(key).flatMap { future =>
     if (future.isDone && !future.isCompletedExceptionally) {
       val artifact = future.getNow(null)
@@ -466,6 +491,7 @@ final class HashBuildCache extends AutoCloseable {
     }
   }
 
+  /** Return accumulated probe demand for this key and demand scope, or an empty value if unseen. */
   private[execution] def demand(
       key: HashBuildKey,
       demandId: HashBuildDemandId): BuildDemand = synchronized {
@@ -474,8 +500,7 @@ final class HashBuildCache extends AutoCloseable {
 
   /**
    * Atomically records non-empty probe demand for one join/stage attempt. Demand is kept separate
-   * across attempts, bounded to avoid retaining stale generations, and reset once the corresponding
-   * reusable artifact has been successfully built.
+   * across attempts and reset once the reusable artifact has been successfully built.
    */
   private[execution] def observeProbe(
       key: HashBuildKey,
@@ -487,43 +512,34 @@ final class HashBuildCache extends AutoCloseable {
       if (probeRows == 0) {
         demands.getOrElse(demandKey, BuildDemand.Empty)
       } else {
-        if (!demands.contains(demandKey)) {
-          val generations = demands.keysIterator.filter(_._1 == key).toSeq
-          if (generations.size >= maxTrackedDemandIdsPerKey) {
-            val oldest = generations.minBy { case (_, id) =>
-              (id.stageId, id.stageAttempt, id.joinId)
-            }
-            demands.remove(oldest)
-          }
-        }
         val previous = demands.getOrElse(demandKey, BuildDemand.Empty)
-        val updated = BuildDemand(
-          saturatedAdd(previous.probeCount, 1L),
-          saturatedAdd(previous.probeRows, probeRows))
+        val updated = BuildDemand(previous.probeCount + 1L, previous.probeRows + probeRows)
         demands.put(demandKey, updated)
         updated
       }
     }
   }
 
+  /** Clear demand for all join/stage-attempt scopes associated with `key`. */
   private[execution] def resetDemands(key: HashBuildKey): Unit = synchronized {
     demands.keysIterator.filter(_._1 == key).toSeq.foreach(demands.remove)
   }
 
   /**
-   * Returns the artifact lookup for `key`, constructing it exactly once for concurrent callers.
+   * Returns the artifact for `key` and whether it was reused, with single-flight construction
+   * for concurrent callers. The winning caller installs the future under the lock, and then
+   * completes the future outside the lock, while others wait. If construction fails the
+   * entry is removed so a later caller can retry.
    *
-   * The winning caller installs the future while synchronized and performs the expensive GPU build
-   * outside the monitor. Other callers share the future and release the GPU semaphore before
-   * waiting so the builder can make progress. A failed build completes all waiters exceptionally
-   * and removes the entry so a later caller may retry. The lookup records whether this caller
-   * reused an existing entry so reuse is counted only after its native lease is acquired. If the
-   * cache closes during construction, the newly built artifact is discarded instead of being
-   * published.
+   * @param key the HashBuildKey uniquely describing the particular build artifact
+   * @param metrics the hash build metrics to update
+   * @param create a by-name parameter that creates the GPU hash artifact
+   * @return the artifact, and whether an existing entry was reused
    */
   private[execution] def getOrBuild(
       key: HashBuildKey,
-      metrics: HashBuildMetrics)(create: => HashArtifact): HashArtifactLookup = {
+      metrics: HashBuildMetrics)(create: => HashArtifact): (HashArtifact, Boolean) = {
+    // All threads decide whether to build or wait under the lock.
     val (future, shouldBuild) = synchronized {
       if (closed) {
         throw new IllegalStateException("attempting to use a closed hash-build cache")
@@ -531,8 +547,7 @@ final class HashBuildCache extends AutoCloseable {
       builds.get(key) match {
         case Some(existing) => (existing, false)
         case None =>
-          // Publish the placeholder before leaving the monitor so no second caller can build the
-          // same key while construction is in flight.
+          // Publish a placeholder under the monitor to indicate that this thread builds.
           val pending = new CompletableFuture[HashArtifact]()
           builds.put(key, pending)
           (pending, true)
@@ -540,9 +555,8 @@ final class HashBuildCache extends AutoCloseable {
     }
 
     if (shouldBuild) {
-      // GPU construction can be slow and may itself need shared executor resources, so never run it
-      // while holding the cache monitor.
       try {
+        // Call create to build the artifact, and publish it to the future if successful.
         closeOnExcept(create) { artifact =>
           val keepArtifact = synchronized {
             if (closed) {
@@ -584,19 +598,11 @@ final class HashBuildCache extends AutoCloseable {
         GpuSemaphore.acquireIfNecessary(taskContext)
       }
     }
-    HashArtifactLookup(artifact, reused = !shouldBuild)
-  }
-
-  private[execution] def offer(
-      side: GpuBuildSide,
-      numericKeys: Boolean,
-      demandId: HashBuildDemandId,
-      key: HashBuildKey,
-      create: () => HashArtifact): HashBuildCacheEntry = {
-    new HashBuildCacheEntry(side, numericKeys, demandId, this, key, create)
+    (artifact, !shouldBuild)
   }
 
   override def close(): Unit = {
+    // Mark the cache as closed and clear both maps.
     val futures = synchronized {
       closed = true
       val pending = builds.values.toSeq
@@ -606,11 +612,14 @@ final class HashBuildCache extends AutoCloseable {
     }
     var interrupted = false
     val artifacts = mutable.ArrayBuffer.empty[HashArtifact]
+    // Release the semaphore if a build is pending, before we wait on futures.
     val taskContext = TaskContext.get()
     val shouldReleaseSemaphore = futures.exists(!_.isDone)
     if (shouldReleaseSemaphore) {
       GpuSemaphore.releaseIfNecessary(taskContext)
     }
+    // Wait for futures to complete and then close them so that an artifact
+    // isn't abandoned after the cache is closed.
     try {
       futures.foreach { future =>
         var waiting = true
@@ -639,39 +648,11 @@ final class HashBuildCache extends AutoCloseable {
   }
 }
 
-/** A source-owned view of one reusable hash-build cache entry. */
-final class HashBuildCacheEntry private[execution] (
-    val side: GpuBuildSide,
-    private[execution] val numericKeys: Boolean,
-    demandId: HashBuildDemandId,
-    cache: HashBuildCache,
-    key: HashBuildKey,
-    create: () => HashArtifact) {
-  def status: BuildStatus = cache.status(key)
-  def readyStats: Option[JoinBuildSideStats] = cache.readyStats(key)
-  private[execution] def demand: BuildDemand = cache.demand(key, demandId)
-  private[execution] def observeProbe(probeRows: Long): BuildDemand = {
-    cache.observeProbe(key, demandId, probeRows)
-  }
-  private[execution] def acquireBackend(
-      buildSide: GpuBuildSide,
-      metrics: HashBuildMetrics,
-      onRebuild: () => Unit): HashProbeBackend = {
-    val lookup = cache.getOrBuild(key, metrics)(create())
-    val backend = lookup.artifact.backend(buildSide, metrics, onRebuild)
-    closeOnExcept(backend) { _ =>
-      if (lookup.reused) {
-        metrics.reuses += 1
-      }
-      backend
-    }
-  }
-  private[execution] def resetDemand(): Unit = cache.resetDemands(key)
-}
-
 /**
- * Pluggable provider of hash-probe backends. Join iterators ask it to resolve the backend for the
- * current probe without branching on cache availability.
+ * Provider of [[HashProbeBackend]]. At the start of the join, the join iterator creates one
+ * provider before processing stream batches. For each stream batch, it asks the provider to decide
+ * which backend to use (describing which side to build and whether to reuse an artifact or build
+ * on-demand).
  */
 sealed trait HashBackendProvider {
   def readyStats: Option[JoinBuildSideStats]
@@ -681,7 +662,7 @@ sealed trait HashBackendProvider {
       primitive: HashJoinPrimitive): HashProbeBackend
 }
 
-/** All per-batch inputs needed to select a physical hash-build implementation. */
+/** Per-batch inputs used to select a physical hash-build implementation. */
 case class HashProbeContext(
     selection: JoinBuildSideSelection.JoinBuildSideSelection,
     planBuildSide: GpuBuildSide,
@@ -692,6 +673,7 @@ case class HashProbeContext(
 private[execution] final class CachedHashBuildUnavailable(cause: Throwable)
     extends RuntimeException("reusable hash build is unavailable", cause)
 
+/** Default provider that creates a fresh on-demand backend for every stream batch. */
 object OnDemandHashBackendProvider extends HashBackendProvider {
   override val readyStats: Option[JoinBuildSideStats] = None
 
@@ -708,43 +690,67 @@ object OnDemandHashBackendProvider extends HashBackendProvider {
   }
 }
 
-final class CachedHashBackendProvider(
-    entry: HashBuildCacheEntry,
+/**
+ * Selects between a reusable build and the ordinary on-demand backend for each probe batch.
+ * This provider holds the reusable build's cache identity, demand scope, and deferred
+ * construction function. The [[HashBuildCache]] owns any constructed artifacts.
+ * The `offeredSide` is the side that this provider can construct and reuse. E.g. for
+ * broadcast joins it is the plan's broadcast build side.
+ */
+final class CachedHashBackendProvider private[execution] (
+    offeredSide: GpuBuildSide,
+    numericKeys: Boolean,
+    demandId: HashBuildDemandId,
+    cache: HashBuildCache,
+    key: HashBuildKey,
+    create: () => HashArtifact,
     metrics: HashBuildMetrics) extends HashBackendProvider {
-  override def readyStats: Option[JoinBuildSideStats] = entry.readyStats
+  override def readyStats: Option[JoinBuildSideStats] = cache.readyStats(key)
 
+  /**
+   * Resolve the backend for one probe batch. Resolution is as follows:
+   * - if the primitive has a required build side, that side takes precedence
+   * - otherwise if build side selection is AUTO, record demand and defer to [[HashBuildPlanner]]
+   * Selecting the offered side lazily constructs or acquires its cached artifact; selecting
+   * the other side returns an on-demand backend.
+   */
   override def backend(
       probe: HashProbeContext,
       primitive: HashJoinPrimitive): HashProbeBackend = {
+    // If the primitive has a required build side, bypass policy selection.
     val selectedSide = primitive.requiredBuildSide.getOrElse {
-      val observedStatus = entry.status
-      val probeRows = if (entry.side == GpuBuildLeft) {
+      val observedStatus = cache.status(key)
+      val probeRows = if (offeredSide == GpuBuildLeft) {
         probe.rightRowCount
       } else {
         probe.leftRowCount
       }
-      val shouldRent = probe.selection == JoinBuildSideSelection.AUTO &&
+      // Record the probe demand if the build cache is cold or evicted. Otherwise,
+      // get the current demand for this hash build.
+      val recordDemand = probe.selection == JoinBuildSideSelection.AUTO &&
         (observedStatus == BuildStatus.Cold || observedStatus == BuildStatus.Evicted)
-      val demand = if (shouldRent) {
-        entry.observeProbe(probeRows)
+      val demand = if (recordDemand) {
+        cache.observeProbe(key, demandId, probeRows)
       } else {
-        entry.demand
+        cache.demand(key, demandId)
       }
-      // Re-read after recording rent so a concurrent build publication is treated as a sunk cost.
-      val currentStatus = entry.status
+      // Re-read after recording rent in case a build was just published.
+      val currentStatus = cache.status(key)
+      // Pass the probe context and the accumulated demand for this build to the
+      // planner and let it select the build side to use.
       HashBuildPlanner.select(
         probe.selection,
         probe.planBuildSide,
         probe.leftRowCount,
         probe.rightRowCount,
-        entry.side,
+        offeredSide,
         currentStatus,
-        entry.numericKeys,
+        numericKeys,
         demand)
     }
-    if (selectedSide == entry.side) {
+    if (selectedSide == offeredSide) {
       try {
-        entry.acquireBackend(selectedSide, metrics, () => entry.resetDemand())
+        acquireCachedBackend(selectedSide)
       } catch {
         case e: InterruptedException =>
           Thread.currentThread().interrupt()
@@ -756,9 +762,21 @@ final class CachedHashBackendProvider(
       new OnDemandHashProbeBackend(selectedSide, probe.compareNullsEqual)
     }
   }
+
+  private def acquireCachedBackend(buildSide: GpuBuildSide): HashProbeBackend = {
+    val (artifact, reused) = cache.getOrBuild(key, metrics)(create())
+    val backend = artifact.backend(
+      buildSide, metrics, () => cache.resetDemands(key))
+    closeOnExcept(backend) { _ =>
+      if (reused) {
+        metrics.reuses += 1
+      }
+      backend
+    }
+  }
 }
 
-/** Builds the native artifact represented by a source-owned cache entry. */
+/** Builds a native hash artifact from a source-owned batch. */
 object HashBuildFactory {
   private def withBuildKeys[T](
       buildBatch: SpillableColumnarBatch,
@@ -799,6 +817,7 @@ object HashBuildFactory {
     }
   }
 
+  /** Build the initial native artifact and capture the recipe needed to rebuild it. */
   private[execution] def create(
       buildBatch: SpillableColumnarBatch,
       boundKeys: Seq[GpuExpression],

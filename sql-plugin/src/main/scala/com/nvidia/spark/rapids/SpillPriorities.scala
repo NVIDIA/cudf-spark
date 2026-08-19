@@ -23,9 +23,7 @@ package com.nvidia.spark.rapids
  */
 object SpillPriorities {
   /**
-   * Priority for device objects that can be recreated instead of copied to host or disk.
-   * These should be the first objects selected for spilling regardless of which task created
-   * them.
+   * Priority for device objects that can be recomputed instead of copied to host or disk.
    */
   val RECOMPUTABLE_CACHE_PRIORITY: Long = Long.MinValue
 

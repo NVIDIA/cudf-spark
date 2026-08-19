@@ -231,8 +231,8 @@ abstract class GpuBroadcastHashJoinExecBase(
     val rdd = streamedPlan.executeColumnar()
     val buildSchema = getBroadcastPlan(buildPlan).schema
     val postProjectionAndClose = buildSidePostProjection
-    // Cache entries can outlive the task that creates them. Bind their key expressions separately
-    // so construction and rebuild do not retain or update that task's operator metrics.
+    // Cached artifacts can outlive the task that creates them. Bind their key expressions
+    // separately so construction and rebuild do not retain or update that task's operator metrics.
     val cachedBoundBuildKeys = if (enableHashTableReuse) {
       GpuBindReferences.bindGpuReferencesNoMetrics(buildKeys, buildPlan.output)
     } else {
@@ -255,15 +255,12 @@ abstract class GpuBroadcastHashJoinExecBase(
       val hashBackendProvider = if (enableHashTableReuse) {
         broadcastBatch.map { batch =>
           val taskContext = TaskContext.get()
-          val demandId = HashBuildDemandId(
-            localJoinId,
-            taskContext.stageId(),
+          val demandId = HashBuildDemandId(localJoinId, taskContext.stageId(),
             taskContext.stageAttemptNumber())
           val filterOutNulls = GpuHashJoin.buildSideNeedsNullFilter(
             joinType, compareNullsEqual, buildSide, buildKeys)
-          new CachedHashBackendProvider(
-            batch.offerHashBuild(buildSide, demandId, postProjectionKey, cachedBoundBuildKeys,
-              compareNullsEqual, filterOutNulls, postProjectionAndClose),
+          batch.createCachedHashBackendProvider(buildSide, demandId, postProjectionKey,
+            cachedBoundBuildKeys, compareNullsEqual, filterOutNulls, postProjectionAndClose,
             HashBuildMetrics(hashTableBuilds, hashTableRebuilds, hashTableReuses))
         }.getOrElse(OnDemandHashBackendProvider)
       } else {

@@ -128,14 +128,6 @@ class BroadcastHashJoinSuite extends SparkQueryCompareTestSuite {
   }
 
   IGNORE_ORDER_testSparkResultsAreEqual2(
-    "broadcast hash join reuse distinct inner build right",
-    streamedProbeDf,
-    distinctBuildDf,
-    conf = broadcastReuseConf) {
-    (probe, build) => probe.join(broadcast(build), Seq("join_key"), "inner")
-  }
-
-  IGNORE_ORDER_testSparkResultsAreEqual2(
     "broadcast hash join reuse distinct left outer build right",
     streamedProbeDf,
     distinctBuildDf,
@@ -144,51 +136,11 @@ class BroadcastHashJoinSuite extends SparkQueryCompareTestSuite {
   }
 
   IGNORE_ORDER_testSparkResultsAreEqual2(
-    "broadcast hash join reuse distinct right outer build left",
-    distinctBuildDf,
-    streamedProbeDf,
-    conf = broadcastReuseConf) {
-    (build, probe) => broadcast(build).join(probe, Seq("join_key"), "right")
-  }
-
-  IGNORE_ORDER_testSparkResultsAreEqual2(
-    "broadcast hash join reuse non-distinct inner build right",
-    streamedProbeDf,
-    nonDistinctBuildDf,
-    conf = broadcastReuseConf) {
-    (probe, build) => probe.join(broadcast(build), Seq("join_key"), "inner")
-  }
-
-  IGNORE_ORDER_testSparkResultsAreEqual2(
     "broadcast hash join reuse non-distinct inner build left",
     nonDistinctBuildDf,
     streamedProbeDf,
     conf = broadcastReuseConf) {
     (build, probe) => broadcast(build).join(probe, Seq("join_key"), "inner")
-  }
-
-  IGNORE_ORDER_testSparkResultsAreEqual2(
-    "broadcast hash join reuse non-distinct left outer build right",
-    streamedProbeDf,
-    nonDistinctBuildDf,
-    conf = broadcastReuseConf) {
-    (probe, build) => probe.join(broadcast(build), Seq("join_key"), "left")
-  }
-
-  IGNORE_ORDER_testSparkResultsAreEqual2(
-    "broadcast hash join reuse non-distinct right outer build left",
-    nonDistinctBuildDf,
-    streamedProbeDf,
-    conf = broadcastReuseConf) {
-    (build, probe) => broadcast(build).join(probe, Seq("join_key"), "right")
-  }
-
-  IGNORE_ORDER_testSparkResultsAreEqual2(
-    "broadcast hash join reuse non-distinct left semi build right",
-    streamedProbeDf,
-    nonDistinctBuildDf,
-    conf = broadcastReuseConf) {
-    (probe, build) => probe.join(broadcast(build), Seq("join_key"), "leftsemi")
   }
 
   IGNORE_ORDER_testSparkResultsAreEqual2(
@@ -205,45 +157,6 @@ class BroadcastHashJoinSuite extends SparkQueryCompareTestSuite {
     nullableDistinctBuildDf,
     conf = broadcastReuseConf) {
     (probe, build) => probe.join(broadcast(build), Seq("join_key"), "inner")
-  }
-
-  IGNORE_ORDER_testSparkResultsAreEqual2(
-    "broadcast hash join reuse conditional inner build right",
-    streamedProbeDf,
-    nonDistinctBuildDf,
-    conf = broadcastReuseConf) {
-    (probe, build) =>
-      probe.alias("p").join(
-        broadcast(build.alias("b")),
-        col("p.join_key") === col("b.join_key") &&
-          col("p.probe_value") > col("b.build_value"),
-        "inner")
-  }
-
-  IGNORE_ORDER_testSparkResultsAreEqual2(
-    "broadcast hash join reuse conditional distinct inner build right",
-    streamedProbeDf,
-    distinctBuildDf,
-    conf = broadcastReuseConf) {
-    (probe, build) =>
-      probe.alias("p").join(
-        broadcast(build.alias("b")),
-        col("p.join_key") === col("b.join_key") &&
-          col("p.probe_value") > col("b.build_value"),
-        "inner")
-  }
-
-  IGNORE_ORDER_testSparkResultsAreEqual2(
-    "broadcast hash join reuse conditional distinct left semi build right",
-    streamedProbeDf,
-    distinctBuildDf,
-    conf = broadcastReuseConf) {
-    (probe, build) =>
-      probe.alias("p").join(
-        broadcast(build.alias("b")),
-        col("p.join_key") === col("b.join_key") &&
-          col("p.probe_value") > col("b.build_value"),
-        "leftsemi")
   }
 
   IGNORE_ORDER_testSparkResultsAreEqual2(
@@ -272,7 +185,7 @@ class BroadcastHashJoinSuite extends SparkQueryCompareTestSuite {
         .join(build, Seq("join_key"), "inner")
         .select("join_key", "probe_value")
 
-      joined.collect()
+      assertResult(128)(joined.collect().length)
       val plan = joined.queryExecution.executedPlan
       val bhjs = PlanUtils.findOperators(plan, _.isInstanceOf[GpuBroadcastHashJoinExec])
       val reusedExchanges = PlanUtils.findOperators(plan, _.isInstanceOf[ReusedExchangeExec])

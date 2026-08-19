@@ -36,39 +36,66 @@ private[execution] object BuildDemand {
   val Empty: BuildDemand = BuildDemand(0L, 0L)
 }
 
-/** Identifies one executor-local run of a join for rent-or-buy accounting. */
+/** Identifies one executor-local run of a join to track build demands. */
 case class HashBuildDemandId(joinId: Int, stageId: Int, stageAttempt: Int)
 
 /**
- * Cost comparison for deciding when repeated on-demand builds justify constructing a reusable
- * offered build. For accumulated demand `(probeCount, probeRows)` and relative per-row probe cost
- * `q`, the alternatives are:
+ * Selects the physical build side for one probe. FIXED or SMALLEST selection modes retain their
+ * ordinary choice. Under AUTO, if we already have a cached build, or if the offered side is
+ * the smaller side, that side is used. Otherwise, we use a heuristic described below.
  *
- *   reusable = offeredRows + q * probeRows
- *   on-demand = probeRows + q * offeredRows * probeCount
+ * When there is no build in the cache we have two choices. Define the following:
  *
- * Admission occurs once the reusable alternative is no more expensive than continuing to build
- * each probe batch independently.
+ *   B = total number of rows in the broadcast side
+ *   S_i = number of rows in each stream side batch
+ *   M = number of stream side batches
+ *   q = normalized cost of probing one row, relative to building one row
+ *
+ * At the start of the join, our two choices are to 1) build B once and probe with each S_i,
+ * or 2) build each S_i and probe with B. The cumulative costs for these two options are:
+ *
+ *   reuse = B + q * sum(S_i)
+ *   onDemand = sum(S_i + q * B)
+ *
+ * We do not know the values of M nor sum(S_i) upfront. So instead we store accumulators for
+ * M and sum(S_i) via `probeCount` and `probeRows` respectively, and use a rent-or-buy
+ * heuristic. For a single batch, we compute the additional cost of renting instead of
+ * using an already-built broadcast table as:
+ *
+ *   rent_i = onDemand_i - reuse_i
+ *          = (S_i + q * B) - q * S_i
+ *          = (1 - q) * S_i + q * B
+ *
+ * When the rent exceeds the cost of buying, i.e. sum(rent_i) >= B, we will switch from
+ * doing onDemand builds to building and caching the broadcast side.
  */
-private[execution] object HashBuildCost {
-  // Calibrated from local reusable hash-join build/probe benchmarks. Hash construction is
-  // normalized to 1.0 per row and q estimates probe cost relative to construction cost.
-  val NumericProbeCost: Double = 0.4
-  val NonNumericProbeCost: Double = 1.0
+object HashBuildPlanner {
+  // WARNING: Magic numbers below.
+  // These values are based on cuDF hash build/probe benchmarks. Assuming the cost of building
+  // a hash table is 1.0 per row, q estimates the relative cost of probing one row. This assumes
+  // the build and probe costs scale linearly in the number of rows. There is a difference in
+  // numeric vs. non-numeric build keys because numeric keys can go through a faster primitive
+  // probe path in cuDF.
+  private[execution] val NumericProbeCost: Double = 0.4
+  private[execution] val NonNumericProbeCost: Double = 1.0
 
-  def hasNumericKeys(keys: Seq[GpuExpression]): Boolean = keys.nonEmpty && keys.forall { key =>
-    key.dataType match {
-      case BooleanType | ByteType | ShortType | IntegerType | LongType | FloatType | DoubleType =>
-        true
-      case _ => false
+  private[execution] def hasNumericKeys(keys: Seq[GpuExpression]): Boolean = {
+    keys.nonEmpty && keys.forall { key =>
+      key.dataType match {
+        case BooleanType | ByteType | ShortType | IntegerType | LongType | FloatType | DoubleType =>
+          true
+        case _ => false
+      }
     }
   }
 
+  // Currently probeCost just depends on numericKeys since that was found to be the principal
+  // component of variance, but can depend on other factors (such as distinct vs. non-distinct).
   private def probeCost(numericKeys: Boolean): Double = {
     if (numericKeys) NumericProbeCost else NonNumericProbeCost
   }
 
-  def admit(
+  private def admit(
       offeredRows: Long,
       demand: BuildDemand,
       numericKeys: Boolean): Boolean = {
@@ -81,15 +108,7 @@ private[execution] object HashBuildCost {
       storedCost <= onDemandCost
     }
   }
-}
 
-/**
- * Selects the physical build side for one probe. Explicit selection modes retain their ordinary
- * choice. AUTO immediately uses an offered build that is already resident/in flight, or that is
- * the ordinary choice; a cold or evicted non-ordinary offer is admitted only after observed demand
- * satisfies [[HashBuildCost]].
- */
-object HashBuildPlanner {
   def select(
       selection: JoinBuildSideSelection.JoinBuildSideSelection,
       planBuildSide: GpuBuildSide,
@@ -110,7 +129,7 @@ object HashBuildPlanner {
       }
       status match {
         case BuildStatus.Ready | BuildStatus.Building => offeredSide
-        case BuildStatus.Cold | BuildStatus.Evicted if HashBuildCost.admit(
+        case BuildStatus.Cold | BuildStatus.Evicted if admit(
             offeredRows, demand, numericKeys) => offeredSide
         case _ => ordinarySide
       }
