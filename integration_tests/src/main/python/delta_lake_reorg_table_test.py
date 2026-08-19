@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+
 import pytest
 
 from asserts import assert_equal
@@ -58,6 +60,47 @@ def setup_reorg_table(spark, path, partitioned):
         writer = writer.partitionBy("p")
     writer.save(path)
     spark.sql("DELETE FROM delta.`{}` WHERE pmod(id, 17) = 0".format(path)).collect()
+
+    # Add files after the DELETE so PURGE must leave these non-DV files untouched.
+    writer = (spark.range(4096, 5120)
+              .selectExpr("id", "CAST(id % 4 AS INT) AS p")
+              .repartition(4)
+              .write
+              .format("delta")
+              .mode("append"))
+    if partitioned:
+        writer = writer.partitionBy("p")
+    writer.save(path)
+
+
+def setup_dropped_column_reorg_table(spark, path):
+    spark.sql("""
+        CREATE TABLE delta.`{}` (id BIGINT, kept STRING, dropped STRING)
+        USING DELTA
+        TBLPROPERTIES (
+          'delta.enableDeletionVectors' = 'false',
+          'delta.columnMapping.mode' = 'name')
+        """.format(path))
+    (spark.range(1024)
+     .selectExpr("id", "CAST(id AS STRING) AS kept", "concat('drop-', id) AS dropped")
+     .repartition(4)
+     .write
+     .format("delta")
+     .mode("append")
+     .save(path))
+
+    schema_strings = (spark.read.text(path + "/_delta_log/*.json")
+                      .selectExpr("get_json_object(value, '$.metaData.schemaString') AS schema")
+                      .where("schema IS NOT NULL")
+                      .collect())
+    assert len(schema_strings) == 1
+    fields = json.loads(schema_strings[0][0])["fields"]
+    physical_name = next(field["metadata"]["delta.columnMapping.physicalName"]
+                         for field in fields if field["name"] == "dropped")
+    files_before = active_file_names(spark, path)
+    assert physical_name in parquet_field_names(spark, files_before)
+    spark.sql("ALTER TABLE delta.`{}` DROP COLUMN dropped".format(path)).collect()
+    return physical_name, files_before
 
 
 def setup_row_tracking_reorg_table(spark, path):
@@ -123,6 +166,12 @@ def assert_table_has_deletion_vectors(spark, path):
     assert (spark.read.text(path + "/_delta_log/*.json")
             .where("get_json_object(value, '$.add.deletionVector') IS NOT NULL")
             .count()) > 0
+
+
+def assert_table_has_no_deletion_vectors(spark, path):
+    assert (spark.read.text(path + "/_delta_log/*.json")
+            .where("get_json_object(value, '$.add.deletionVector') IS NOT NULL")
+            .count()) == 0
 
 
 def reorg_sql(path, partitioned):
@@ -192,6 +241,19 @@ def assert_reorg_adds_match_partition(spark, path, version, expected_partition):
     assert partitions.where("p IS NULL OR p != '{}'".format(expected_partition)).count() == 0
 
 
+def active_file_names(spark, path, predicate=None):
+    df = spark.read.format("delta").load(path)
+    if predicate is not None:
+        df = df.where(predicate)
+    return set(row[0] for row in
+               df.selectExpr("input_file_name() AS file").distinct().collect())
+
+
+def parquet_field_names(spark, files):
+    assert files
+    return set(spark.read.parquet(*sorted(files)).schema.fieldNames())
+
+
 @pytest.mark.parametrize("partitioned", [False, True], ids=["unpartitioned", "partitioned"])
 @ignore_order(local=True)
 @delta_lake
@@ -208,13 +270,24 @@ def test_delta_reorg_table_purge(spark_tmp_path, partitioned):
     gpu_path = spark_tmp_path + "/GPU"
     with_cpu_session(lambda spark: setup_reorg_table(spark, cpu_path, partitioned),
                      conf=_reorg_conf)
-    with_gpu_session(lambda spark: setup_reorg_table(spark, gpu_path, partitioned),
+    with_cpu_session(lambda spark: setup_reorg_table(spark, gpu_path, partitioned),
                      conf=_reorg_conf)
     with_cpu_session(
         lambda spark: (
             assert_table_has_deletion_vectors(spark, cpu_path),
             assert_table_has_deletion_vectors(spark, gpu_path)),
         conf=_reorg_conf)
+
+    selection_predicate = "id < 4096 AND p = 0" if partitioned else "id < 4096"
+    gpu_files_before = with_cpu_session(
+        lambda spark: active_file_names(spark, gpu_path), conf=_reorg_conf)
+    gpu_dv_files_to_purge = with_cpu_session(
+        lambda spark: active_file_names(spark, gpu_path, selection_predicate), conf=_reorg_conf)
+    gpu_non_dv_files = with_cpu_session(
+        lambda spark: active_file_names(spark, gpu_path, "id >= 4096"), conf=_reorg_conf)
+    assert gpu_dv_files_to_purge
+    assert gpu_non_dv_files
+    assert gpu_dv_files_to_purge.isdisjoint(gpu_non_dv_files)
 
     cpu_result = with_cpu_session(
         lambda spark: spark.sql(reorg_sql(cpu_path, partitioned)).collect(), conf=_reorg_conf)
@@ -242,6 +315,12 @@ def test_delta_reorg_table_purge(spark_tmp_path, partitioned):
         conf=_reorg_conf)
     assert_equal(cpu_rows, gpu_rows)
 
+    gpu_files_after = with_cpu_session(
+        lambda spark: active_file_names(spark, gpu_path), conf=_reorg_conf)
+    assert gpu_dv_files_to_purge.isdisjoint(gpu_files_after)
+    assert gpu_non_dv_files.issubset(gpu_files_after)
+    assert gpu_files_after - gpu_files_before
+
     gpu_reorg_version = with_cpu_session(
         lambda spark: latest_reorg_version(spark, gpu_path), conf=_reorg_conf)
     with_cpu_session(
@@ -261,6 +340,56 @@ def test_delta_reorg_table_purge(spark_tmp_path, partitioned):
         assert before == after
 
     with_gpu_session(assert_second_reorg_is_noop, conf=_reorg_conf)
+
+
+@delta_lake
+@allow_non_gpu(*_reorg_metadata_allow)
+def test_delta_reorg_table_purge_physically_dropped_column(spark_tmp_path):
+    if not is_apache_runtime():
+        pytest.skip("GPU REORG TABLE currently supports Apache Delta Lake only")
+    if is_before_spark_353():
+        pytest.skip("GPU REORG TABLE requires Spark 3.5.3 or later")
+
+    cpu_path = spark_tmp_path + "/CPU"
+    gpu_path = spark_tmp_path + "/GPU"
+    with_cpu_session(lambda spark: setup_dropped_column_reorg_table(spark, cpu_path),
+                     conf=_reorg_conf)
+    gpu_physical_name, gpu_files_before = with_cpu_session(
+        lambda spark: setup_dropped_column_reorg_table(spark, gpu_path),
+        conf=_reorg_conf)
+    with_cpu_session(
+        lambda spark: (
+            assert_table_has_no_deletion_vectors(spark, cpu_path),
+            assert_table_has_no_deletion_vectors(spark, gpu_path)),
+        conf=_reorg_conf)
+
+    with_cpu_session(
+        lambda spark: spark.sql(reorg_sql(cpu_path, False)).collect(), conf=_reorg_conf)
+
+    plan_callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    plan_callback.startCapture()
+    try:
+        with_gpu_session(
+            lambda spark: spark.sql(reorg_sql(gpu_path, False)).collect(),
+            conf=_reorg_conf)
+        assert_gpu_reorg_plans(plan_callback, plan_callback.getResultsWithTimeout(10000))
+    finally:
+        plan_callback.endCapture()
+
+    cpu_rows = with_cpu_session(
+        lambda spark: spark.read.format("delta").load(cpu_path).orderBy("id").collect(),
+        conf=_reorg_conf)
+    gpu_rows = with_cpu_session(
+        lambda spark: spark.read.format("delta").load(gpu_path).orderBy("id").collect(),
+        conf=_reorg_conf)
+    assert_equal(cpu_rows, gpu_rows)
+
+    gpu_files_after = with_cpu_session(
+        lambda spark: active_file_names(spark, gpu_path), conf=_reorg_conf)
+    assert gpu_files_before.isdisjoint(gpu_files_after)
+    gpu_fields_after = with_cpu_session(
+        lambda spark: parquet_field_names(spark, gpu_files_after), conf=_reorg_conf)
+    assert gpu_physical_name not in gpu_fields_after
 
 
 @delta_lake
