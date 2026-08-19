@@ -38,7 +38,6 @@ DoubleBatchedWindow_PRE|Pre-processing for double-batched window operation
 GpuGenerate project split|Splitting projection in generate operation
 parquet parse filter footer|Parsing and filtering Parquet footer by range
 Compile ASTs|Compiling abstract syntax trees for expression evaluation
-Compile AST JIT|Compiling an AST expression for JIT evaluation
 parquet filter blocks|Filtering Parquet row group blocks based on predicates
 PageableH2D|Copying from pageable host memory to device
 TOP N|Computing top N rows
@@ -116,6 +115,7 @@ ProjectExec|Executing projection operation on columnar batch
 Columnar batch serialize row only|Serializing row-only batch (no GPU data)
 disk spill|Spilling data from host memory to disk
 Async Shuffle Buffer|Asynchronous shuffle buffering operation
+Compile AST JIT|Compiling an AST expression for JIT evaluation
 CSV decode|Decoding CSV data
 get batch|Getting join batch
 Spark Task|Spark task execution range for stage and task tracking
@@ -135,7 +135,6 @@ single build batch concat|Concatenating batches for single build batch
 sort copy boundaries|Copying boundary data for sort operation
 WaitingForWrites|Rapids Shuffle Manager (multi threaded) is waiting for any queued writes to finish before finalizing the map output writer
 Project AST|Applying AST-based projection to batch
-Project AST JIT|Applying JIT-compiled AST projection to batch
 ORC readBatches|Reading ORC batches
 Shuffle Transfer Request|Handling shuffle data transfer request
 consumeWindow|Consuming transfer window
@@ -192,6 +191,7 @@ Join gather|Gathering join results
 waitForCPU|Waiting for CPU batch in hybrid execution
 parquet get blocks with filter|Retrieving Parquet blocks after applying filters
 dynamic sort heuristic|Applying dynamic sort heuristic for aggregation
+Project AST JIT|Applying JIT-compiled AST projection to batch
 shuffle concat load batch|Concatenating and loading batch in shuffle operation
 parquet read footer bytes|Reading raw footer bytes from Parquet file
 spill batch|Spilling join batch
