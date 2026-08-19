@@ -25,7 +25,7 @@ import com.nvidia.spark.rapids.Arm.{withResource, withResourceIfAllowed}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.FileUtil.fullyDelete
 import org.apache.hadoop.fs.Path
-import org.apache.orc.{OrcFile, StripeInformation}
+import org.apache.orc.{OrcConf, OrcFile, StripeInformation}
 import org.apache.orc.impl.RecordReaderImpl
 
 import org.apache.spark.{SPARK_VERSION_SHORT, SparkConf, SparkContext}
@@ -69,6 +69,32 @@ class OrcQuerySuite extends SparkQueryCompareTestSuite {
         frame.write.mode("overwrite").orc(tempFile.getAbsolutePath)
       } finally {
         fullyDelete(tempFile)
+      }
+    }
+  }
+
+  Seq("orc", "").foreach { v1List =>
+    val sparkConf = new SparkConf().set("spark.sql.sources.useV1SourceList", v1List)
+    Seq(false, true).foreach { prolepticGregorian =>
+      Seq(
+        "struct" -> "named_struct('date', CAST('1001-01-01' AS DATE)) AS value",
+        "array" -> "array(CAST('1001-01-01' AS DATE)) AS value"
+      ).foreach { case (nestedType, selectExpr) =>
+        testGpuWriteFallback(
+          s"ORC date write falls back without calendar metadata, source list is ($v1List), " +
+            s"proleptic=$prolepticGregorian, nested type=$nestedType",
+          "DataWritingCommandExec",
+          spark => spark.range(1).selectExpr(selectExpr),
+          execsAllowedNonGpu = Seq(
+            "DataWritingCommandExec", "WriteFilesExec", "ShuffleExchangeExec"),
+          conf = sparkConf
+        ) { frame =>
+          withTempPath { outputPath =>
+            frame.write.mode("overwrite")
+              .option(OrcConf.PROLEPTIC_GREGORIAN.getAttribute, prolepticGregorian.toString)
+              .orc(outputPath.getCanonicalPath)
+          }
+        }
       }
     }
   }
