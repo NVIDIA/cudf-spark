@@ -167,7 +167,7 @@ is used to automatically generate the
 [plugin configuration documentation](../configs.md) and 
 [plugin advanced configuration documentation](../additional-functionality/advanced_configs.md).
 When adding or changing a configuration, add version metadata with
-`sinceVersion(...)` when the first supported RAPIDS Accelerator version is
+`sinceVersion(...)` when the first supported cuDF plugin version is
 known. If version metadata is not recorded, the generated docs infer the value
 from git history when possible, and otherwise show `Unknown` in the
 `Since Version` column.
