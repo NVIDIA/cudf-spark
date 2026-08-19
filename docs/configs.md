@@ -10,13 +10,13 @@ nav_order: 4
  > variations
 
 
-# RAPIDS Accelerator for Apache Spark Configuration
+# NVIDIA cuDF plugin for Apache Spark Configuration
 The following is the list of options that `rapids-plugin-4-spark` supports.
 
 On startup use: `--conf [conf key]=[conf value]`. For example:
 
 ```
-${SPARK_HOME}/bin/spark-shell --jars rapids-4-spark_2.12-26.08.0-SNAPSHOT-cuda12.jar \
+${SPARK_HOME}/bin/spark-shell --jars rapids-4-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar \
 --conf spark.plugins=com.nvidia.spark.SQLPlugin \
 --conf spark.rapids.sql.concurrentGpuTasks=2
 ```
@@ -32,29 +32,25 @@ scala> spark.conf.set("spark.rapids.sql.concurrentGpuTasks", 2)
  when the config can be set. "Startup" means only valid on startup, "Runtime" means
  valid on both startup and runtime.
 
-The "Since Version" column shows the first cuDF plugin release known to support
-the config. "Unreleased" means the config exists on this branch but is not in a tagged
-release yet. "Unknown" means the metadata has not been recorded yet.
-
 
 ## General Configuration
 
 Name | Description | Default Value | Applicable at | Since Version
------|-------------|--------------|---------------|--------------
-<a name="cloudSchemes"></a>spark.rapids.cloudSchemes|Comma separated list of additional URI schemes that are to be considered cloud based filesystems. Schemes already included: abfs, abfss, dbfs, gs, s3, s3a, s3n, wasbs, cosn. Cloud based stores generally would be total separate from the executors and likely have a higher I/O read cost. Many times the cloud filesystems also get better throughput when you have multiple readers in parallel. This is used with spark.rapids.sql.format.parquet.reader.type|None|Runtime|v21.06.0
-<a name="filecache.enabled"></a>spark.rapids.filecache.enabled|Controls whether the caching of input files is enabled. When enabled, input datais cached to the same local directories configured for the Spark application. The cache will use up to half the available space by default. To set an absolute cache size limit, see the spark.rapids.filecache.maxBytes configuration setting. Currently only data from Parquet files are cached.|false|Startup|v23.06.0
-<a name="memory.gpu.maxAllocFraction"></a>spark.rapids.memory.gpu.maxAllocFraction|The fraction of total GPU memory that limits the maximum size of the RMM pool. The value must be greater than or equal to the setting for spark.rapids.memory.gpu.allocFraction. Note that this limit will be reduced by the reserve memory configured in spark.rapids.memory.gpu.reserve.|1.0|Startup|v21.06.0
-<a name="memory.gpu.minAllocFraction"></a>spark.rapids.memory.gpu.minAllocFraction|The fraction of total GPU memory that limits the minimum size of the RMM pool. The value must be less than or equal to the setting for spark.rapids.memory.gpu.allocFraction.|0.25|Startup|v21.06.0
-<a name="memory.host.spillStorageSize"></a>spark.rapids.memory.host.spillStorageSize|Amount of off-heap host memory to use for buffering spilled GPU data before spilling to local disk. Use -1 to set the amount to the combined size of pinned and pageable memory pools. This config is deprecated in favor of spark.rapids.memory.host.offHeapLimit.enabled/spark.rapids.memory.host.offHeapLimit.size, which will take precedence if set.|-1|Startup|v21.06.0
-<a name="memory.pinnedPool.size"></a>spark.rapids.memory.pinnedPool.size|The size of the pinned memory pool in bytes unless otherwise specified. Use 0 to disable the pool.|0|Startup|v0.1.0
-<a name="sql.batchSizeBytes"></a>spark.rapids.sql.batchSizeBytes|Set the target number of bytes for a GPU batch. Splits sizes for input data is covered by separate configs.|1073741824|Runtime|v0.1.0
-<a name="sql.enabled"></a>spark.rapids.sql.enabled|Enable (true) or disable (false) sql operations on the GPU|true|Runtime|v0.1.0
-<a name="sql.explain"></a>spark.rapids.sql.explain|Explain why some parts of a query were not placed on a GPU or not. Possible values are ALL: print everything, NONE: print nothing, NOT_ON_GPU: print only parts of a query that did not go on the GPU|NOT_ON_GPU|Runtime|v0.1.0
-<a name="sql.metrics.level"></a>spark.rapids.sql.metrics.level|GPU plans can produce a lot more metrics than CPU plans do. In very large queries this can sometimes result in going over the max result size limit for the driver. Supported values include DEBUG which will enable all metrics supported and typically only needs to be enabled when debugging the plugin. MODERATE which should output enough metrics to understand how long each part of the query is taking and how much data is going to each part of the query. ESSENTIAL which disables most metrics except those Apache Spark CPU plans will also report or their equivalents.|MODERATE|Runtime|v21.06.0
-<a name="sql.multiThreadedRead.numThreads"></a>spark.rapids.sql.multiThreadedRead.numThreads|The maximum number of threads on each executor to use for reading small files in parallel. This can not be changed at runtime after the executor has started. Used with COALESCING and MULTITHREADED readers, see spark.rapids.sql.format.parquet.reader.type, spark.rapids.sql.format.orc.reader.type, or spark.rapids.sql.format.avro.reader.type for a discussion of reader types. If it is not set explicitly and spark.executor.cores is set, it will be tried to assign value of `max(MULTITHREAD_READ_NUM_THREADS_DEFAULT, spark.executor.cores)`, where MULTITHREAD_READ_NUM_THREADS_DEFAULT = 20.|20|Startup|v22.08.0
-<a name="sql.reader.batchSizeBytes"></a>spark.rapids.sql.reader.batchSizeBytes|Soft limit on the maximum number of bytes the reader reads per batch. The readers will read chunks of data until this limit is met or exceeded. Note that the reader may estimate the number of bytes that will be used on the GPU in some cases based on the schema and number of rows in each batch.|2147483647|Runtime|v0.1.0
-<a name="sql.reader.batchSizeRows"></a>spark.rapids.sql.reader.batchSizeRows|Soft limit on the maximum number of rows the reader will read per batch. The orc and parquet readers will read row groups until this limit is met or exceeded. The limit is respected by the csv reader.|2147483647|Runtime|v0.1.0
-<a name="sql.udfCompiler.enabled"></a>spark.rapids.sql.udfCompiler.enabled|When set to true, Scala UDFs will be considered for compilation as Catalyst expressions|false|Runtime|v21.06.0
+-----|-------------|--------------|--------------|--------------
+<a name="cloudSchemes"></a>spark.rapids.cloudSchemes|Comma separated list of additional URI schemes that are to be considered cloud based filesystems. Schemes already included: abfs, abfss, dbfs, gs, s3, s3a, s3n, wasbs, cosn. Cloud based stores generally would be total separate from the executors and likely have a higher I/O read cost. Many times the cloud filesystems also get better throughput when you have multiple readers in parallel. This is used with spark.rapids.sql.format.parquet.reader.type|None|Runtime|21.06.0
+<a name="filecache.enabled"></a>spark.rapids.filecache.enabled|Controls whether the caching of input files is enabled. When enabled, input datais cached to the same local directories configured for the Spark application. The cache will use up to half the available space by default. To set an absolute cache size limit, see the spark.rapids.filecache.maxBytes configuration setting. Currently only data from Parquet files are cached.|false|Startup|23.06.0
+<a name="memory.gpu.maxAllocFraction"></a>spark.rapids.memory.gpu.maxAllocFraction|The fraction of total GPU memory that limits the maximum size of the RMM pool. The value must be greater than or equal to the setting for spark.rapids.memory.gpu.allocFraction. Note that this limit will be reduced by the reserve memory configured in spark.rapids.memory.gpu.reserve.|1.0|Startup|21.06.0
+<a name="memory.gpu.minAllocFraction"></a>spark.rapids.memory.gpu.minAllocFraction|The fraction of total GPU memory that limits the minimum size of the RMM pool. The value must be less than or equal to the setting for spark.rapids.memory.gpu.allocFraction.|0.25|Startup|21.06.0
+<a name="memory.host.spillStorageSize"></a>spark.rapids.memory.host.spillStorageSize|Amount of off-heap host memory to use for buffering spilled GPU data before spilling to local disk. Use -1 to set the amount to the combined size of pinned and pageable memory pools. This config is deprecated in favor of spark.rapids.memory.host.offHeapLimit.enabled/spark.rapids.memory.host.offHeapLimit.size, which will take precedence if set.|-1|Startup|21.06.0
+<a name="memory.pinnedPool.size"></a>spark.rapids.memory.pinnedPool.size|The size of the pinned memory pool in bytes unless otherwise specified. Use 0 to disable the pool.|0|Startup|0.1.0
+<a name="sql.batchSizeBytes"></a>spark.rapids.sql.batchSizeBytes|Set the target number of bytes for a GPU batch. Splits sizes for input data is covered by separate configs.|1073741824|Runtime|0.1.0
+<a name="sql.enabled"></a>spark.rapids.sql.enabled|Enable (true) or disable (false) sql operations on the GPU|true|Runtime|0.1.0
+<a name="sql.explain"></a>spark.rapids.sql.explain|Explain why some parts of a query were not placed on a GPU or not. Possible values are ALL: print everything, NONE: print nothing, NOT_ON_GPU: print only parts of a query that did not go on the GPU|NOT_ON_GPU|Runtime|0.1.0
+<a name="sql.metrics.level"></a>spark.rapids.sql.metrics.level|GPU plans can produce a lot more metrics than CPU plans do. In very large queries this can sometimes result in going over the max result size limit for the driver. Supported values include DEBUG which will enable all metrics supported and typically only needs to be enabled when debugging the plugin. MODERATE which should output enough metrics to understand how long each part of the query is taking and how much data is going to each part of the query. ESSENTIAL which disables most metrics except those Apache Spark CPU plans will also report or their equivalents.|MODERATE|Runtime|21.06.0
+<a name="sql.multiThreadedRead.numThreads"></a>spark.rapids.sql.multiThreadedRead.numThreads|The maximum number of threads on each executor to use for reading small files in parallel. This can not be changed at runtime after the executor has started. Used with COALESCING and MULTITHREADED readers, see spark.rapids.sql.format.parquet.reader.type, spark.rapids.sql.format.orc.reader.type, or spark.rapids.sql.format.avro.reader.type for a discussion of reader types. If it is not set explicitly and spark.executor.cores is set, it will be tried to assign value of `max(MULTITHREAD_READ_NUM_THREADS_DEFAULT, spark.executor.cores)`, where MULTITHREAD_READ_NUM_THREADS_DEFAULT = 20.|20|Startup|22.08.0
+<a name="sql.reader.batchSizeBytes"></a>spark.rapids.sql.reader.batchSizeBytes|Soft limit on the maximum number of bytes the reader reads per batch. The readers will read chunks of data until this limit is met or exceeded. Note that the reader may estimate the number of bytes that will be used on the GPU in some cases based on the schema and number of rows in each batch.|2147483647|Runtime|0.1.0
+<a name="sql.reader.batchSizeRows"></a>spark.rapids.sql.reader.batchSizeRows|Soft limit on the maximum number of rows the reader will read per batch. The orc and parquet readers will read row groups until this limit is met or exceeded. The limit is respected by the csv reader.|2147483647|Runtime|0.1.0
+<a name="sql.udfCompiler.enabled"></a>spark.rapids.sql.udfCompiler.enabled|When set to true, Scala UDFs will be considered for compilation as Catalyst expressions|false|Runtime|21.06.0
 
-For more advanced configs, please refer to the [RAPIDS Accelerator for Apache Spark Advanced Configuration](./additional-functionality/advanced_configs.md) page.
+For more advanced configs, please refer to the [NVIDIA cuDF plugin for Apache Spark Advanced Configuration](./additional-functionality/advanced_configs.md) page.
 

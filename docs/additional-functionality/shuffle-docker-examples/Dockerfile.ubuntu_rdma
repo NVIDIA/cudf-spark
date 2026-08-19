@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2021-2025, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2021-2026, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@
 # limitations under the License.
 
 
-# Sample Dockerfile to install UCX in a Unbuntu 22.04 image with RDMA support.
+# Sample Dockerfile to install UCX in a Ubuntu 22.04 image with RDMA support.
 #
 # The parameters are: 
 #   - RDMA_CORE_VERSION: Set to 32.1 to match the rdma-core line in the latest
@@ -27,7 +27,7 @@
 #   - UBUNTU_VER: 22.04 by default
 #
 # The Dockerfile first fetches and builds `rdma-core` to satisfy requirements for
-# the ucx-ib and ucx-rdma RPMs.
+# the ucx-ib and ucx-rdma DEBs.
 #
 # Note that tzdata has to be installed with a time zone configuration, and UTC has been picked in this container
 #
@@ -35,7 +35,7 @@
 
 ARG RDMA_CORE_VERSION=32.1
 ARG CUDA_VER=13.0.1
-ARG UCX_VER=1.19.1-rc2
+ARG UCX_VER=1.22.0
 ARG UCX_CUDA_VER=13
 ARG UCX_ARCH=x86_64
 ARG UBUNTU_VER=22.04
@@ -95,5 +95,6 @@ RUN apt-get install -y wget bzip2 libgomp1
 RUN cd /tmp/ucx_install && \
   wget https://github.com/openucx/ucx/releases/download/v$UCX_VER/ucx-$UCX_VER-ubuntu$UBUNTU_VER-mofed5-cuda$UCX_CUDA_VER-$UCX_ARCH.tar.bz2 && \
   tar -xvf ucx-$UCX_VER-ubuntu$UBUNTU_VER-mofed5-cuda$UCX_CUDA_VER-$UCX_ARCH.tar.bz2 && \
-  apt install -y /tmp/ucx_install/*.deb && \
+  apt install -y --no-install-recommends $(ls /tmp/ucx_install/*.deb | grep -v ucx-cuda) && \
+  dpkg -i --force-depends /tmp/ucx_install/ucx-cuda-*.deb && \
   rm -rf /tmp/ucx_install

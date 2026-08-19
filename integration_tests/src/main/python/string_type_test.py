@@ -18,7 +18,7 @@ from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_co
     assert_gpu_sql_fallback_collect, assert_gpu_and_cpu_are_equal_sql
 from data_gen import *
 from marks import allow_non_gpu, allow_non_gpu_conditional
-from spark_session import is_before_spark_400, is_databricks173_or_later
+from spark_session import is_before_spark_400, is_databricks173_or_later, is_spark_40x
 
 
 ####################################################################################################
@@ -34,7 +34,8 @@ _non_utf8_binary_collations = ["UNICODE", "UTF8_LCASE", "UNICODE_CI"]
 
 # test Collate, currently does not have GPU version for Collate
 @pytest.mark.skipif(is_before_spark_400(), reason="Spark versions before 400 do not support collate")
-@allow_non_gpu("ProjectExec", "Collate", "ResolvedCollation")
+@allow_non_gpu_conditional(is_spark_40x(), "ProjectExec")
+@allow_non_gpu("Collate", "ResolvedCollation")
 def test_collate_expr_fallback():
     data_gen = [("c1", string_gen)]
     assert_gpu_fallback_collect(

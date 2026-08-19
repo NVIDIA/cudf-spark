@@ -16,7 +16,9 @@ do **two** things:
    the rule.
 2. Assert a **per-rule plan marker** that appears only when the rule fires, so
    the test FAILS if the conf flip is a no-op (wrong conf, wrong query shape, or
-   the private jar is not loaded).
+   the private jar is not loaded). A runtime-specific no-op path instead uses
+   `assert_rule_skipped` with a required marker proving that the guarded plan
+   shape was reached.
 
 ## Layout
 
@@ -51,7 +53,12 @@ All modules carry `@pytest.mark.private_optimizer`, so the whole area runs with:
      such as broadcast thresholds or AQE toggles).
    - `assert_rule_fires(fn, on_conf, off_conf, marker, physical=False)`
      — runs the OFF-CPU vs ON-GPU comparison and the plan-marker check.
-3. **Decorate** the test with `@pytest.mark.private_optimizer`. Add `@approximate_float` only when the rule
+   - `assert_rule_skipped(fn, on_conf, off_conf, marker, physical=False,
+     required_on_markers=())`
+     — runs the same comparison but asserts a runtime-specific no-op path where
+     the marker is absent from both plans.
+3. **Decorate** the test with `@pytest.mark.private_optimizer`. Add
+   `@approximate_float` only when the rule
    changes floating-point evaluation order — that is enough for floating-point
    tolerance, since `assert_rule_fires` routes result comparison through
    `assert_equal_with_local_sort`, whose `get_float_check()` honors it.
@@ -95,6 +102,12 @@ executed plan); otherwise the optimized plan is checked. Examples in this area:
 `named_struct(c_0,` (merged subquery scan), `coalesced and skewed` (skew
 reader).
 
+When a known runtime or plan shape intentionally skips a rule, add a separate
+test with `assert_rule_skipped` instead of weakening the positive marker test.
+That skipped-path test must explain the runtime/shape reason, still compare
+OFF-CPU vs ON-GPU results, and use `required_on_markers` to prove the expected
+plan shape was reached.
+
 ### When a row-count / aggregate-only check is acceptable
 
 The default is a full row-by-row `OFF-CPU == ON-GPU` comparison. A reduced check
@@ -109,8 +122,13 @@ rule actually ran. Do **not** weaken the marker check to make a test pass.
 ### Compatibility across Spark versions and runtimes
 
 The private plugin is built for **Spark 3.3.0 and later** (private core build
-matrix: 330..411 plus the `400db173` Databricks buildver). Within that matrix all four current rules apply on every
-runtime, including Databricks, so we do **not** add per-runtime skips.
+matrix: 330..411 plus Databricks buildvers). The rules are loaded throughout
+that matrix, but a rule can intentionally guard a specific runtime plan shape.
+For example, `OptimizeSkewedBHJJoinRule` skips Databricks executor-broadcast
+joins because its streamed-side skew rewrite does not apply to that shape.
+Keep positive rule-fire coverage on supported shapes and add a separate
+`assert_rule_skipped` test for an intentional guard; do not skip the runtime's
+coverage entirely.
 
 If a future rule is genuinely unsupported on some runtime/version, express it
 where the source actually gates it:

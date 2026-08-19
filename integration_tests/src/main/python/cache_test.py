@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import pytest
 
-from asserts import assert_gpu_and_cpu_are_equal_collect, assert_equal
+from asserts import (assert_gpu_and_cpu_are_equal_collect,
+    assert_cpu_and_gpu_are_equal_collect_with_capture, assert_equal)
 from conftest import is_not_utc
 from data_gen import *
 from pyspark import StorageLevel
@@ -453,3 +455,49 @@ def test_cached_groupby_sum_version_specific(enable_vectorized_conf):
         return df
 
     assert_gpu_and_cpu_are_equal_collect(do_it, conf=enable_vectorized_conf)
+
+_pcbs_serializer = 'com.nvidia.spark.ParquetCachedBatchSerializer'
+_pcbs_enabled = os.environ.get('PYSP_TEST_spark_sql_cache_serializer', '') == _pcbs_serializer
+
+# Each builder makes a single-partition frame (stable order) whose cached output carries NullType.
+_nulltype_cache_builders = {
+    'top_level': lambda spark: spark.range(0, 20, 1, 1).selectExpr('id', 'null as code'),
+    'struct_child': lambda spark: spark.range(0, 20, 1, 1).selectExpr(
+        'id', "named_struct('a', id, 'code', null) as properties"),
+    'array_child': lambda spark: spark.range(0, 20, 1, 1).selectExpr('id', 'array(null) as arr'),
+    'map_value': lambda spark: spark.range(0, 20, 1, 1).selectExpr('id', 'map(1, null) as m'),
+    # Doubly-nested cases: .nested() propagates NULL to every level, so these stay on GPU too.
+    'array_of_struct': lambda spark: spark.range(0, 20, 1, 1).selectExpr(
+        'id', "array(named_struct('a', id, 'code', null)) as arr_of_struct"),
+    'struct_of_array': lambda spark: spark.range(0, 20, 1, 1).selectExpr(
+        'id', "named_struct('a', id, 'arr', array(null)) as s"),
+    'struct_of_map': lambda spark: spark.range(0, 20, 1, 1).selectExpr(
+        'id', "named_struct('a', id, 'm', map(1, null)) as s"),
+    'map_of_struct': lambda spark: spark.range(0, 20, 1, 1).selectExpr(
+        'id', "map(1, named_struct('a', id, 'code', null)) as m"),
+    'array_of_array': lambda spark: spark.range(0, 20, 1, 1).selectExpr(
+        'id', 'array(array(null)) as arr_of_arr'),
+}
+
+@pytest.mark.skipif(not _pcbs_enabled,
+    reason="requires PCBS lane: "
+           "PYSP_TEST_spark_sql_cache_serializer=com.nvidia.spark.ParquetCachedBatchSerializer")
+# No @ignore_order: single-partition data already collects in a stable order, and its server-side
+# sort would push a CPU ShuffleExchangeExec and cannot order the MAP<INT, VOID> value. The trailing
+# collect transfers GPU columns to rows, so only that may be off the GPU.
+@allow_non_gpu('ColumnarToRowExec')
+@pytest.mark.parametrize('data_desc', list(_nulltype_cache_builders))
+@pytest.mark.parametrize('enable_vectorized_conf', enable_vectorized_confs, ids=idfn)
+def test_cache_nulltype_on_gpu(data_desc, enable_vectorized_conf):
+    build_df = _nulltype_cache_builders[data_desc]
+    def func(spark):
+        cached = build_df(spark).cache()
+        cached.count()  # populate the cache so the read hits InMemoryTableScanExec
+        return cached
+    # InMemoryTableScanExec is disabled by default on Spark 3.5.0/3.5.1 (AQE, #10603). Force it on
+    # and disable AQE so the scan stays on the GPU across all shims.
+    dyn_conf = copy_and_update(enable_vectorized_conf,
+        {'spark.rapids.sql.exec.InMemoryTableScanExec': 'true',
+         'spark.sql.adaptive.enabled': 'false'})
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        func, exist_classes='GpuInMemoryTableScanExec', conf=dyn_conf)

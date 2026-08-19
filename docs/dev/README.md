@@ -5,7 +5,7 @@ nav_order: 11
 has_children: true
 permalink: /developer-overview/
 ---
-# RAPIDS Plugin for Apache Spark Developer Overview
+# NVIDIA cuDF plugin for Apache Spark Developer Overview
 This document provides a developer overview of the project and covers the
 following topics:
 * [Spark SQL and Query Plans](#spark-sql-and-query-plans)
@@ -79,7 +79,7 @@ turn will need to pull values from the input nodes, chaining all the way down
 the tree until eventually the iterator of the leaf nodes is pulled and causes
 the reading of rows from the raw input data.
 
-## How the RAPIDS Plugin Works
+## How the cuDF Plugin Works
 The plugin leverages two main features in Spark.  The first is a
 plugin interface in [Catalyst](https://databricks.com/glossary/catalyst-optimizer)
 that allows the optimizer to be extended.  The plugin is a Catalyst extension
@@ -90,7 +90,7 @@ which allows extensions to operate on Spark SQL data in a `ColumnarBatch` form.
 Processing columnar data is much more GPU friendly than row-by-row processing.
 
 For example, the same query plan shown above becomes the following plan after
-being processed by the RAPIDS plugin:
+being processed by the cuDF plugin:
 ```
 *(5) Sort [o_orderpriority#5 ASC NULLS FIRST], true, 0
 +- Exchange rangepartitioning(o_orderpriority#5 ASC NULLS FIRST, 200), true, [id=#611]
@@ -181,7 +181,7 @@ scala> import com.nvidia.spark.rapids.RapidsConf
 import com.nvidia.spark.rapids.RapidsConf
 
 scala> RapidsConf.help(true)
-# Rapids Plugin 4 Spark Configuration
+# cuDF Plugin Configuration
 The following is the list of options that `rapids-plugin-4-spark` supports.
 
 On startup use: `--conf [conf key]=[conf value]`. For example:

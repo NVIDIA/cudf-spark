@@ -27,7 +27,9 @@ import com.nvidia.spark.rapids.RapidsConf.{SUPPRESS_PLANNING_FAILURE, TEST_CONF}
 import com.nvidia.spark.rapids.jni.GpuTimeZoneDB
 import com.nvidia.spark.rapids.lore.GpuLore
 import com.nvidia.spark.rapids.shims._
-import com.nvidia.spark.rapids.window.{GpuDenseRank, GpuLag, GpuLead, GpuPercentRank, GpuRank, GpuRowNumber, GpuSpecialFrameBoundary, GpuWindowExecMeta, GpuWindowSpecDefinitionMeta}
+import com.nvidia.spark.rapids.window.{GpuDenseRank, GpuLag, GpuLead, GpuNTileMeta,
+  GpuPercentRank, GpuRank, GpuRowNumber, GpuSpecialFrameBoundary, GpuWindowExecMeta,
+  GpuWindowSpecDefinitionMeta}
 import org.apache.hadoop.fs.Path
 
 import org.apache.spark.internal.Logging
@@ -69,7 +71,7 @@ import org.apache.spark.sql.rapids.catalyst.expressions.GpuRand
 import org.apache.spark.sql.rapids.execution._
 import org.apache.spark.sql.rapids.execution.python._
 import org.apache.spark.sql.rapids.execution.python.GpuFlatMapGroupsInPandasExecMeta
-import org.apache.spark.sql.rapids.shims.{GpuAscii, GpuMapInPandasExecMeta}
+import org.apache.spark.sql.rapids.shims.{GpuAscii, GpuMapInPandasExecMeta, SparkSessionUtils}
 import org.apache.spark.sql.rapids.zorder.ZOrderRules
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.{CalendarInterval, UTF8String}
@@ -469,7 +471,7 @@ object GpuOverrides extends Logging {
   private[this] lazy val regexList: Seq[String] = Seq("\\", "\u0000", "\\x", "\t", "\n", "\r",
     "\f", "\\a", "\\e", "\\cx", "[", "]", "^", "&", ".", "*", "\\d", "\\D", "\\h", "\\H", "\\s",
     "\\S", "\\v", "\\V", "\\w", "\\w", "\\p", "$", "\\b", "\\B", "\\A", "\\G", "\\Z", "\\z", "\\R",
-    "?", "|", "(", ")", "{", "}", "\\k", "\\Q", "\\E", ":", "!", "<=", ">")
+    "?", "+", "|", "(", ")", "{", "}", "\\k", "\\Q", "\\E", ":", "!", "<=", ">")
   val regexMetaChars = ".$^[]\\|?*+(){}"
   /**
    * Provides a way to log an info message about how long an operation took in milliseconds.
@@ -1118,6 +1120,11 @@ object GpuOverrides extends Logging {
         override def convertToGpuImpl(): GpuExpression =
           GpuPercentRank(childExprs.map(_.convertToGpu()))
       }),
+    expr[NTile](
+      "Window function that divides the rows in each partition into buckets",
+      ExprChecks.windowOnly(TypeSig.INT, TypeSig.INT,
+        Seq(ParamCheck("buckets", TypeSig.lit(TypeEnum.INT), TypeSig.lit(TypeEnum.INT)))),
+      GpuNTileMeta),
     expr[Lead](
       "Window function that returns N entries ahead of this one",
       ExprChecks.windowOnly(
@@ -2221,6 +2228,14 @@ object GpuOverrides extends Logging {
           TypeSig.all))),
       (pivot, conf, p, r) => new ImperativeAggExprMeta[PivotFirst](pivot, conf, p, r) {
         override def tagAggForGpu(): Unit = {
+          pivot.pivotColumn.dataType match {
+            // `StringType` is the UTF8_BINARY singleton, while `st` may be another
+            // StringType instance whose collation differs from UTF8_BINARY in Spark 4.x.
+            case st: StringType if st != StringType =>
+              willNotWorkOnGpu(
+                "PivotFirst does not support non-UTF8_BINARY string collations on the GPU")
+            case _ =>
+          }
           // If pivotColumnValues doesn't have distinct values, fall back to CPU
           if (pivot.pivotColumnValues.distinct.lengthCompare(pivot.pivotColumnValues.length) != 0) {
             willNotWorkOnGpu("PivotFirst does not work on the GPU when there are duplicate" +
@@ -3805,7 +3820,8 @@ object GpuOverrides extends Logging {
         }
 
         override def convertToGpu(childExprs: Seq[Expression]): GpuExpression =
-          GpuCollectList(childExprs.head, c.mutableAggBufferOffset, c.inputAggBufferOffset)
+          GpuCollectList(childExprs.head, c.mutableAggBufferOffset, c.inputAggBufferOffset,
+            TypeUtilsShims.collectListIgnoreNulls(c))
 
         override def aggBufferAttribute: AttributeReference = {
           val aggBuffer = c.aggBufferAttributes.head
@@ -3813,7 +3829,8 @@ object GpuOverrides extends Logging {
         }
 
         override def createCpuToGpuBufferConverter(): CpuToGpuAggregateBufferConverter =
-          new CpuToGpuCollectBufferConverter(c.child.dataType)
+          new CpuToGpuCollectBufferConverter(c.child.dataType,
+            !TypeUtilsShims.collectListIgnoreNulls(c))
 
         override def createGpuToCpuBufferConverter(): GpuToCpuAggregateBufferConverter =
           new GpuToCpuCollectBufferConverter()
@@ -3848,15 +3865,25 @@ object GpuOverrides extends Logging {
         }
 
         override def convertToGpu(childExprs: Seq[Expression]): GpuExpression =
-          GpuCollectSet(childExprs.head, c.mutableAggBufferOffset, c.inputAggBufferOffset)
+          GpuCollectSet(childExprs.head, c.mutableAggBufferOffset, c.inputAggBufferOffset,
+            TypeUtilsShims.collectSetIgnoreNulls(c))
 
         override def aggBufferAttribute: AttributeReference = {
           val aggBuffer = c.aggBufferAttributes.head
-          aggBuffer.copy(dataType = c.dataType)(aggBuffer.exprId, aggBuffer.qualifier)
+          // Match Spark 4.2+ CollectSet buffer layout for float/double (normalized bit keys).
+          val ignoreNulls = TypeUtilsShims.collectSetIgnoreNulls(c)
+          val bufferElementType =
+            TypeUtilsShims.collectSetCpuBufferElementType(c.child.dataType)
+          aggBuffer.copy(dataType = ArrayType(bufferElementType, !ignoreNulls))(
+            aggBuffer.exprId, aggBuffer.qualifier)
         }
 
-        override def createCpuToGpuBufferConverter(): CpuToGpuAggregateBufferConverter =
-          new CpuToGpuCollectBufferConverter(c.child.dataType)
+        override def createCpuToGpuBufferConverter(): CpuToGpuAggregateBufferConverter = {
+          val ignoreNulls = TypeUtilsShims.collectSetIgnoreNulls(c)
+          new CpuToGpuCollectBufferConverter(
+            TypeUtilsShims.collectSetCpuBufferElementType(c.child.dataType),
+            !ignoreNulls)
+        }
 
         override def createGpuToCpuBufferConverter(): GpuToCpuAggregateBufferConverter =
           new GpuToCpuCollectBufferConverter()
@@ -4042,9 +4069,10 @@ object GpuOverrides extends Logging {
       "Returns a struct value with the given `jsonStr` and `schema`",
       ExprChecks.projectOnly(
         TypeSig.STRUCT.nested(jsonStructReadTypes) +
-          TypeSig.MAP.nested(TypeSig.STRING).withPsNote(TypeEnum.MAP,
-          "MAP only supports keys and values that are of STRING type " +
-            "and is only supported at the top level"),
+          TypeSig.MAP.nested(TypeSig.STRING + TypeSig.ARRAY.nested(TypeSig.STRING))
+            .withPsNote(TypeEnum.MAP,
+          "MAP only supports keys of STRING type and values that are of STRING type " +
+            "or ARRAY of STRING type, and is only supported at the top level"),
         (TypeSig.STRUCT + TypeSig.MAP + TypeSig.ARRAY).nested(TypeSig.all),
         Seq(ParamCheck("jsonStr", TypeSig.STRING, TypeSig.STRING))),
       (a, conf, p, r) => new UnaryExprMeta[JsonToStructs](a, conf, p, r) {
@@ -4063,7 +4091,14 @@ object GpuOverrides extends Logging {
 
         override def tagExprForGpu(): Unit = {
           a.schema match {
+            // from_json to a MAP is a "raw" extraction: values (and, for ARRAY<STRING>, array
+            // elements) are raw JSON text. Verified vs Spark 3.5.5, it diverges on only two cases:
+            // escapes are not unescaped, and object/nested-array elements stay as raw JSON
+            // substrings. Scalar elements, whole-row null on a non-array value, and
+            // document-order duplicate keys all match Spark. See docs/compatibility.md and
+            // GpuJsonToStructs.
             case MapType(StringType, StringType, _) => ()
+            case MapType(StringType, ArrayType(StringType, _), _) => ()
             case st: StructType =>
               if (hasDuplicateFieldNames(st)) {
                 willNotWorkOnGpu("from_json on GPU does not support duplicate field " +
@@ -4075,8 +4110,8 @@ object GpuOverrides extends Logging {
                   "Set `spark.rapids.sql.json.read.datetime.enabled` to `true` to enable them.")
               }
             case _ =>
-              willNotWorkOnGpu("from_json on GPU only supports MapType<StringType, StringType> " +
-                "or StructType schema")
+              willNotWorkOnGpu("from_json on GPU only supports MapType<StringType, StringType>, " +
+                "MapType<StringType, ArrayType[StringType]>, or StructType schema")
           }
           GpuJsonScan.tagSupport(SQLConf.get, JsonToStructsReaderType, a.dataType, a.dataType,
             a.options, this)
@@ -4422,7 +4457,8 @@ object GpuOverrides extends Logging {
 
   val dataWriteCmds: Map[Class[_ <: DataWritingCommand],
       DataWritingCommandRule[_ <: DataWritingCommand]] =
-    commonDataWriteCmds ++ GpuHiveOverrides.dataWriteCmds ++ SparkShimImpl.getDataWriteCmds
+    commonDataWriteCmds ++ GpuHiveOverrides.dataWriteCmds ++ SparkShimImpl.getDataWriteCmds ++
+      ExternalSource.dataWriteCmds
 
   def runnableCmd[INPUT <: RunnableCommand](
       desc: String,
@@ -4772,8 +4808,9 @@ object GpuOverrides extends Logging {
       (mapPy, conf, p, r) => new GpuMapInPandasExecMeta(mapPy, conf, p, r)),
     exec[InMemoryTableScanExec](
       "Implementation of InMemoryTableScanExec to use GPU accelerated caching",
-      ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.STRUCT + TypeSig.ARRAY +
-          TypeSig.MAP + GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(), TypeSig.all),
+      ExecChecks((TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128 + TypeSig.STRUCT +
+          TypeSig.ARRAY + TypeSig.MAP + GpuTypeShims.additionalCommonOperatorSupportedTypes)
+          .nested(), TypeSig.all),
       (scan, conf, p, r) => new InMemoryTableScanMeta(scan, conf, p, r)),
     neverReplaceExec[AlterNamespaceSetPropertiesExec]("Namespace metadata operation"),
     neverReplaceExec[CreateNamespaceExec]("Namespace metadata operation"),
@@ -4983,6 +5020,16 @@ protected class ExplainPlanImpl extends ExplainPlanBase {
 
 // work around any GpuOverride failures
 object GpuOverrideUtil extends Logging {
+  def withActiveSession[T](sparkSession: SparkSession)(body: => T): T = {
+    if (sparkSession == null) {
+      // A session is only captured for rules registered through ColumnarOverrideRules.
+      // Direct callers (including tests) intentionally preserve the existing unscoped behavior.
+      body
+    } else {
+      SparkSessionUtils.withActiveSession(sparkSession)(body)
+    }
+  }
+
   def tryOverride(fn: SparkPlan => SparkPlan): SparkPlan => SparkPlan = { plan =>
     val planOriginal = plan.clone()
     val failOnError = TEST_CONF.get(plan.conf) || !SUPPRESS_PLANNING_FAILURE.get(plan.conf)
@@ -5000,25 +5047,32 @@ object GpuOverrideUtil extends Logging {
 }
 
 /** Tag the initial plan when AQE is enabled */
-case class GpuQueryStagePrepOverrides() extends Rule[SparkPlan] with Logging {
-  override def apply(sparkPlan: SparkPlan): SparkPlan = GpuOverrideUtil.tryOverride { plan =>
-    // Exposing a bare exchange at the root is only valid while AQE is preparing a
-    // query stage. Tag the exchanges seen in this rule so transition cleanup can
-    // distinguish that path from final adaptive plan execution.
-    GpuTransitionOverrides.tagAqeQueryStageExchanges(plan)
-    // Note that we disregard the GPU plan returned here and instead rely on side effects of
-    // tagging the underlying SparkPlan.
-    GpuOverrides().applyWithContext(plan, Some("AQE Query Stage Prep"))
-    // return the original plan which is now modified as a side-effect of invoking GpuOverrides
-    plan
-  }(sparkPlan)
+case class GpuQueryStagePrepOverrides(sparkSession: SparkSession)
+    extends Rule[SparkPlan] with Logging {
+  override def apply(sparkPlan: SparkPlan): SparkPlan =
+      GpuOverrideUtil.withActiveSession(sparkSession) {
+    GpuOverrideUtil.tryOverride { plan =>
+      // Exposing a bare exchange at the root is only valid while AQE is preparing a
+      // query stage. Tag the exchanges seen in this rule so transition cleanup can
+      // distinguish that path from final adaptive plan execution.
+      GpuTransitionOverrides.tagAqeQueryStageExchanges(plan)
+      // Note that we disregard the GPU plan returned here and instead rely on side effects of
+      // tagging the underlying SparkPlan.
+      GpuOverrides().applyWithContext(plan, Some("AQE Query Stage Prep"))
+      // return the original plan which is now modified as a side-effect of invoking GpuOverrides
+      plan
+    }(sparkPlan)
+  }
 }
 
-case class GpuOverrides() extends Rule[SparkPlan] with Logging {
+case class GpuOverrides(sparkSession: SparkSession = null) extends Rule[SparkPlan] with Logging {
 
   // Spark calls this method once for the whole plan when AQE is off. When AQE is on, it
   // gets called once for each query stage (where a query stage is an `Exchange`).
-  override def apply(sparkPlan: SparkPlan): SparkPlan = applyWithContext(sparkPlan, None)
+  override def apply(sparkPlan: SparkPlan): SparkPlan =
+    GpuOverrideUtil.withActiveSession(sparkSession) {
+      applyWithContext(sparkPlan, None)
+    }
 
   def applyWithContext(sparkPlan: SparkPlan, context: Option[String]): SparkPlan =
       GpuOverrideUtil.tryOverride { plan =>

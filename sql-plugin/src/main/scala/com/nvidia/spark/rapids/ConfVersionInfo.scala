@@ -56,6 +56,7 @@ object ConfVersionInfo {
     "spark.rapids.memory.gpu.state.debug" -> "v23.04.0",
     "spark.rapids.memory.gpu.unspill.enabled" -> "v21.06.0",
     "spark.rapids.memory.host.spillStorageSize" -> "v21.06.0",
+    "spark.rapids.memory.pinnedPool.parallelInit.threads" -> "Unreleased",
     "spark.rapids.memory.pinnedPool.size" -> "v0.1.0",
     "spark.rapids.perfio.gcs.enabled" -> "Unreleased",
     "spark.rapids.perfio.s3.enabled" -> "v24.04.0",
@@ -316,6 +317,7 @@ object ConfVersionInfo {
     "spark.rapids.sql.expression.NamedLambdaVariable" -> "v21.10.0",
     "spark.rapids.sql.expression.NormalizeNaNAndZero" -> "v0.1.0",
     "spark.rapids.sql.expression.Not" -> "v0.1.0",
+    "spark.rapids.sql.expression.NTile" -> "Unreleased",
     "spark.rapids.sql.expression.NthValue" -> "v22.08.0",
     "spark.rapids.sql.expression.OctetLength" -> "v22.04.0",
     "spark.rapids.sql.expression.Or" -> "v0.1.0",
@@ -514,7 +516,7 @@ object ConfVersionInfo {
     "spark.rapids.sql.window.range.int.enabled" -> "v21.06.0",
     "spark.rapids.sql.window.range.long.enabled" -> "v21.06.0",
     "spark.rapids.sql.window.range.short.enabled" -> "v21.06.0",
-  )
+  ).map { case (key, version) => key -> version.stripPrefix("v") }
 
   def forKey(key: String): ConfVersionInfo = {
     ConfVersionInfo(sinceVersions.getOrElse(key, UNKNOWN_VERSION))
