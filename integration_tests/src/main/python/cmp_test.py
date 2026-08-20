@@ -348,6 +348,8 @@ def test_in(data_gen):
     ]),
     ('double', [
         (float('nan'), float('nan'), 1.0),
+        # In returns NULL when NaN misses every candidate but the list contains NULL.
+        (float('nan'), 2.0, 3.0),
         (2.0, 1.0, 2.0),
         (3.0, None, 4.0),
         (None, 1.0, 2.0),
@@ -365,12 +367,11 @@ def test_dynamic_in(data_type, rows):
             .selectExpr(
                 'a IN (b) AS single_result',
                 'a IN (b, c) AS dynamic_result',
+                'a IN (NULL, 1) AS literal_result',
                 'a IN (-10, -9, -8, -7, -6, -5, -4, -3, -2, -1, 1, b, NULL, c) '
                 'AS mixed_result')
 
-    assert_cpu_and_gpu_are_equal_collect_with_capture(
-        do_it,
-        exist_classes='GpuIn')
+    assert_gpu_and_cpu_are_equal_collect(do_it)
 
 
 def test_dynamic_in_mixed_ast_support():

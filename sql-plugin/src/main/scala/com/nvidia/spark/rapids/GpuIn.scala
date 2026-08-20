@@ -103,7 +103,8 @@ case class GpuIn(value: Expression, literals: Seq[Any], dynamicList: Seq[Express
     withResource(GpuProjectExec.project(batch, children)) { projected =>
       val valueColumn = projected.column(0).asInstanceOf[GpuColumnVector]
       val literalComparison = if (literals.nonEmpty) {
-        Some(closeOnExcept(GpuInSet(value, literals).doColumnar(valueColumn)) { result =>
+        Some(closeOnExcept(
+          GpuInSet(value, literals, useInSetSemantics = false).doColumnar(valueColumn)) { result =>
           GpuColumnVector.from(result, BooleanType)
         })
       } else {

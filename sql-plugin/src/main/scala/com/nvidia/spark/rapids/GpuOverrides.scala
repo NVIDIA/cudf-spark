@@ -2100,7 +2100,8 @@ object GpuOverrides extends Logging {
         override def convertToGpuImpl(): GpuExpression = {
           val gpuChildren = childExprs.map(_.convertToGpu())
           if (allListItemsAreLiterals) {
-            GpuInSet(gpuChildren.head, in.list.asInstanceOf[Seq[Literal]].map(_.value))
+            GpuInSet(gpuChildren.head, in.list.asInstanceOf[Seq[Literal]].map(_.value),
+              useInSetSemantics = false)
           } else {
             val literalValues = in.list.collect { case literal: Literal => literal.value }
             val dynamicExpressions = in.list.zip(gpuChildren.tail).collect {
