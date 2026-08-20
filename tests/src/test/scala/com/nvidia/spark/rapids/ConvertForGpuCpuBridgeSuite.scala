@@ -355,20 +355,26 @@ class ConvertForGpuCpuBridgeSuite extends AnyFunSuite {
     }.forall(_ == 0))
   }
 
-  test("convertForGpuCpuBridge - uses GPU input nullability for a captured attribute") {
+  test("convertForGpuCpuBridge - widens GPU input nullability for a captured attribute") {
     val array = AttributeReference(
-      "array", ArrayType(IntegerType), nullable = true)()
-    val nonNullableCapture = array.withNullability(false)
+      "array", ArrayType(IntegerType), nullable = false)()
+    val nullableCapture = array.withNullability(true)
     val element = NamedLambdaVariable("x", IntegerType, nullable = true)
-    val predicate = LessThanOrEqual(element, Size(nonNullableCapture))
+    val predicate = LessThanOrEqual(element, Size(nullableCapture))
     val expr = ArrayFilter(array, LambdaFunction(predicate, Seq(element)))
 
-    assert(array.exprId == nonNullableCapture.exprId)
-    assert(array.semanticEquals(nonNullableCapture))
-    assert(array.nullable)
-    assert(!nonNullableCapture.nullable)
+    assert(array.exprId == nullableCapture.exprId)
+    assert(array.semanticEquals(nullableCapture))
+    assert(!array.nullable)
+    assert(nullableCapture.nullable)
+    assert(expr.collect {
+      case attr: AttributeReference if attr.exprId == array.exprId => attr.nullable
+    } == Seq(false, true))
 
     val exprMeta = createExprMeta(expr)
+    assert(exprMeta.wrapped.collect {
+      case attr: AttributeReference if attr.exprId == array.exprId => attr.nullable
+    } == Seq(false, true))
     exprMeta.moveToCpuBridge()
 
     val bridge = exprMeta.convertForGpuCpuBridge().asInstanceOf[GpuCpuBridgeExpression]
