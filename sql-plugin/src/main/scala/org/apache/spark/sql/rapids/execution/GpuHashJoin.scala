@@ -315,6 +315,14 @@ object JoinImpl {
     GatherMapsResult(arrayRet(1), arrayRet(0))
   }
 
+  /**
+   * Do an inner hash join on a pre-built left side hash table.
+   *
+   * @param rightKeys the right equality join keys
+   * @param leftHashJoin hash table built from the left equality join keys
+   * @param outputRowCount optional pre-computed exact output row count
+   * @return the gather maps to use
+   */
   def innerHashJoinBuildLeft(
       rightKeys: Table,
       leftHashJoin: CudfHashJoin,
@@ -363,6 +371,14 @@ object JoinImpl {
     GatherMapsResult(arrayRet(0), arrayRet(1))
   }
 
+  /**
+   * Do an inner hash join on a pre-built right side hash table.
+   *
+   * @param leftKeys the left equality join keys
+   * @param rightHashJoin hash table built from the right equality join keys
+   * @param outputRowCount optional pre-computed exact output row count
+   * @return the gather maps to use
+   */
   def innerHashJoinBuildRight(
       leftKeys: Table,
       rightHashJoin: CudfHashJoin,
@@ -494,6 +510,14 @@ object JoinImpl {
     GatherMapsResult(arrayRet(0), arrayRet(1))
   }
 
+  /**
+   * Do a left outer hash join on a pre-built right side hash table.
+   *
+   * @param leftKeys the left equality join keys
+   * @param rightHashJoin hash table built from the right equality join keys
+   * @param outputRowCount optional pre-computed exact output row count
+   * @return the gather maps to use
+   */
   def leftOuterHashJoinBuildRight(
       leftKeys: Table,
       rightHashJoin: CudfHashJoin,
@@ -538,6 +562,14 @@ object JoinImpl {
     GatherMapsResult(arrayRet(1), arrayRet(0))
   }
 
+  /**
+   * Do a right outer hash join on a pre-built left side hash table.
+   *
+   * @param rightKeys the right equality join keys
+   * @param leftHashJoin hash table built from the left equality join keys
+   * @param outputRowCount optional pre-computed exact output row count
+   * @return the gather maps to use
+   */
   def rightOuterHashJoinBuildLeft(
       rightKeys: Table,
       leftHashJoin: CudfHashJoin,
@@ -635,6 +667,13 @@ object JoinImpl {
     GatherMapsResult.makeFromLeft(leftRet)
   }
 
+  /**
+   * Do an inner distinct hash join on a pre-built left side hash table.
+   *
+   * @param rightKeys the right equality join keys
+   * @param leftHashJoin distinct hash table built from the left equality join keys
+   * @return the gather maps to use
+   */
   def innerDistinctHashJoinBuildLeft(
       rightKeys: Table,
       leftHashJoin: CudfDistinctHashJoin): GatherMapsResult = {
@@ -642,6 +681,13 @@ object JoinImpl {
     GatherMapsResult(arrayRet(1), arrayRet(0))
   }
 
+  /**
+   * Do an inner distinct hash join on a pre-built right side hash table.
+   *
+   * @param leftKeys the left equality join keys
+   * @param rightHashJoin distinct hash table built from the right equality join keys
+   * @return the gather maps to use
+   */
   def innerDistinctHashJoinBuildRight(
       leftKeys: Table,
       rightHashJoin: CudfDistinctHashJoin): GatherMapsResult = {
@@ -649,6 +695,13 @@ object JoinImpl {
     GatherMapsResult(arrayRet(0), arrayRet(1))
   }
 
+  /**
+   * Do a left outer distinct hash join on a pre-built right side hash table.
+   *
+   * @param leftKeys the left equality join keys
+   * @param rightHashJoin distinct hash table built from the right equality join keys
+   * @return the gather map for the right table
+   */
   def leftOuterDistinctHashJoinBuildRight(
       leftKeys: Table,
       rightHashJoin: CudfDistinctHashJoin): GatherMapsResult = {
@@ -656,6 +709,13 @@ object JoinImpl {
     GatherMapsResult.makeFromRight(rightRet)
   }
 
+  /**
+   * Do a right outer distinct hash join on a pre-built left side hash table.
+   *
+   * @param rightKeys the right equality join keys
+   * @param leftHashJoin distinct hash table built from the left equality join keys
+   * @return the gather map for the left table
+   */
   def rightOuterDistinctHashJoinBuildLeft(
       rightKeys: Table,
       leftHashJoin: CudfDistinctHashJoin): GatherMapsResult = {
@@ -1120,7 +1180,7 @@ object JoinBuildSideSelection extends Enumeration {
     selection match {
       case FIXED => planBuildSide
       case AUTO | SMALLEST =>
-        // Provider-specific AUTO heuristics are applied before this fallback.
+        // This is the ordinary non-cache-aware choice. Providers may override AUTO afterward.
         if (leftRowCount < rightRowCount) GpuBuildLeft else GpuBuildRight
     }
   }
@@ -1195,42 +1255,44 @@ object JoinBuildSideStats {
 
 /**
  * Describes the physical join strategy selected for one stream-side batch.
- * `exactCountIsFinal` indicates whether the primitive's exact match count
- * is also the final output row count and can be used for sizing.
+ * `backendRequest` is defined when the plan can execute through [[HashProbeBackend]].
+ * `exactCountIsFinal` indicates whether that operation's exact match count is also the final
+ * output row count and can be used for sizing.
  */
-private[execution] sealed trait HashJoinRecipe {
-  def primitive: Option[HashJoinPrimitive]
+private[execution] sealed trait HashJoinPlan {
+  def backendRequest: Option[BackendJoinRequest]
   def exactCountIsFinal: Boolean = false
 }
 
-private[execution] case class InnerHashRecipe(
+private[execution] case class InnerHashPlan(
     targetJoinType: JoinType,
     isFallback: Boolean = false,
     useExactForSizing: Boolean = true)
-    extends HashJoinRecipe {
-  override val primitive: Option[HashJoinPrimitive] = Some(HashJoinPrimitive.Inner)
+    extends HashJoinPlan {
+  override val backendRequest: Option[BackendJoinRequest] = Some(BackendJoinRequest.Inner)
   override val exactCountIsFinal: Boolean =
     useExactForSizing && targetJoinType.isInstanceOf[InnerLike]
 }
 
-private[execution] case class DirectHashRecipe(joinType: JoinType) extends HashJoinRecipe {
-  override val primitive: Option[HashJoinPrimitive] = Some(HashJoinPrimitive.direct(joinType))
+private[execution] case class DirectHashPlan(joinType: JoinType) extends HashJoinPlan {
+  override val backendRequest: Option[BackendJoinRequest] =
+    Some(BackendJoinRequest.direct(joinType))
   override val exactCountIsFinal: Boolean =
     joinType.isInstanceOf[InnerLike] || joinType == LeftOuter || joinType == RightOuter
 }
 
-private[execution] case class DistinctHashRecipe(joinType: JoinType, buildSide: GpuBuildSide)
-    extends HashJoinRecipe {
-  override val primitive: Option[HashJoinPrimitive] =
-    Some(HashJoinPrimitive.Distinct(joinType, buildSide))
+private[execution] case class DistinctHashPlan(joinType: JoinType, buildSide: GpuBuildSide)
+    extends HashJoinPlan {
+  override val backendRequest: Option[BackendJoinRequest] =
+    Some(BackendJoinRequest.Distinct(joinType, buildSide))
 }
 
-private[execution] case object SortJoinRecipe extends HashJoinRecipe {
-  override val primitive: Option[HashJoinPrimitive] = None
+private[execution] case object SortJoinPlan extends HashJoinPlan {
+  override val backendRequest: Option[BackendJoinRequest] = None
 }
 
-private[execution] case object MixedJoinRecipe extends HashJoinRecipe {
-  override val primitive: Option[HashJoinPrimitive] = None
+private[execution] case object MixedJoinPlan extends HashJoinPlan {
+  override val backendRequest: Option[BackendJoinRequest] = None
 }
 
 /**
@@ -1288,24 +1350,24 @@ abstract class BaseHashJoinIterator(
   private[this] var cachedBackendsDisabled = false
 
   /**
-   * Holds hash join state for one stream-side batch. Recipes backed by a
-   * [[HashJoinPrimitive]] also include a [[ResolvedHashJoin]] that owns the selected backend.
+   * Holds hash join state for one stream-side batch. Plans with a [[BackendJoinRequest]] also
+   * include a [[ResolvedHashJoin]] that owns the selected backend.
    */
   protected final class HashJoinBatch(
       override val numJoinRows: Long,
-      val recipe: HashJoinRecipe,
+      val plan: HashJoinPlan,
       val operation: Option[ResolvedHashJoin]) extends PreparedJoinBatch {
     override def close(): Unit = operation.foreach(_.close())
   }
 
-  protected def selectHashJoinRecipe(
+  protected def selectHashJoinPlan(
       leftRowCount: Long,
-      rightRowCount: Long): HashJoinRecipe
+      rightRowCount: Long): HashJoinPlan
 
   private def hashBackend(
       leftRowCount: Long,
       rightRowCount: Long,
-      primitive: HashJoinPrimitive): HashProbeBackend = {
+      request: BackendJoinRequest): HashProbeBackend = {
     val probe = HashProbeContext(
       joinOptions.buildSideSelection,
       buildSide,
@@ -1315,14 +1377,14 @@ abstract class BaseHashJoinIterator(
     val availableProvider =
       if (cachedBackendsDisabled) OnDemandHashBackendProvider else hashBackendProvider
     try {
-      availableProvider.backend(probe, primitive)
+      availableProvider.backend(probe, request)
     } catch {
       case unavailable: CachedHashBuildUnavailable =>
         // If a cached build failed fall back to on-demand for this task.
         cachedBackendsDisabled = true
         logWarning("Reusable hash build failed; using per-batch hash builds for this task",
           unavailable.getCause)
-        OnDemandHashBackendProvider.backend(probe, primitive)
+        OnDemandHashBackendProvider.backend(probe, request)
     }
   }
 
@@ -1333,11 +1395,11 @@ abstract class BaseHashJoinIterator(
   private def exactOutputRowCount(
       cb: LazySpillableColumnarBatch,
       backend: HashProbeBackend,
-      primitive: HashJoinPrimitive): Option[Long] = {
-    // If we have a cached backend we can get the exact output count of the hash primitive.
+      request: BackendJoinRequest): Option[Long] = {
+    // If we have a cached backend we can get the exact output count of the hash operation.
     // This is an optional sizing optimization; for unsupported operations or on-demand backends
     // we fall back to None.
-    if (!backend.isCached || primitive.exactCountJoinType.isEmpty) {
+    if (!backend.isCached || request.exactCountJoinType.isEmpty) {
       None
     } else {
       cb.checkpoint()
@@ -1346,7 +1408,7 @@ abstract class BaseHashJoinIterator(
           withRestoreOnRetry(cb) {
             withResource(GpuProjectExec.project(cb.getBatch, boundStreamKeys)) { streamKeys =>
               withResource(GpuColumnVector.from(streamKeys)) { probeKeys =>
-                backend.outputRowCount(primitive.exactCountJoinType.get, probeKeys)
+                backend.outputRowCount(request.exactCountJoinType.get, probeKeys)
               }
             }
           }
@@ -1361,7 +1423,7 @@ abstract class BaseHashJoinIterator(
 
   protected def estimateNumJoinRows(cb: LazySpillableColumnarBatch): Long = {
     // Exact counts are currently available only for reusable CudfHashJoin backends. Other
-    // backends and composed join recipes use this sizing estimate.
+    // backends and composed join plans use this sizing estimate.
     joinType match {
       // Full Outer join is implemented via LeftOuter/RightOuter, so use same estimate.
       case _: InnerLike | LeftOuter | RightOuter | FullOuter =>
@@ -1377,23 +1439,23 @@ abstract class BaseHashJoinIterator(
       case GpuBuildLeft => (built.numRows.toLong, cb.numRows.toLong)
       case GpuBuildRight => (cb.numRows.toLong, built.numRows.toLong)
     }
-    val recipe = selectHashJoinRecipe(leftRows, rightRows)
-    val operation = recipe.primitive.map { primitive =>
+    val plan = selectHashJoinPlan(leftRows, rightRows)
+    val operation = plan.backendRequest.map { backendRequest =>
       // Decide which backend to use (cached or on-demand) to produce a ResolvedHashJoin.
-      val backend = hashBackend(leftRows, rightRows, primitive)
+      val backend = hashBackend(leftRows, rightRows, backendRequest)
       closeOnExcept(backend) { _ =>
-        val exactRows = exactOutputRowCount(cb, backend, primitive)
-        new ResolvedHashJoin(backend, primitive, exactRows)
+        val exactRows = exactOutputRowCount(cb, backend, backendRequest)
+        new ResolvedHashJoin(backend, backendRequest, exactRows)
       }
     }
     // We can use the exact count for sizing unless there is postprocessing
     // that would change cardinality. In the latter case fall back to the estimate.
-    val numJoinRows = if (recipe.exactCountIsFinal) {
+    val numJoinRows = if (plan.exactCountIsFinal) {
       operation.flatMap(_.exactOutputRows).getOrElse(fallback)
     } else {
       fallback
     }
-    new HashJoinBatch(numJoinRows, recipe, operation)
+    new HashJoinBatch(numJoinRows, plan, operation)
   }
 
   /**
@@ -1731,12 +1793,12 @@ class HashJoinIterator(
       opTime = opTime,
       joinTime = joinTime) {
 
-  override protected def selectHashJoinRecipe(
+  override protected def selectHashJoinPlan(
       leftRowCount: Long,
-      rightRowCount: Long): HashJoinRecipe = {
+      rightRowCount: Long): HashJoinPlan = {
     // Distinct join optimization takes priority over all other strategies
     if (buildStats.isDistinct) {
-      DistinctHashRecipe(joinType, buildSide)
+      DistinctHashPlan(joinType, buildSide)
     } else {
       JoinStrategy.selectStrategy(
         joinOptions.strategy,
@@ -1745,18 +1807,18 @@ class HashJoinIterator(
         joinOptions.buildSideSelection,
         leftRowCount,
         rightRowCount) match {
-        case JoinStrategy.INNER_HASH_WITH_POST => InnerHashRecipe(joinType)
+        case JoinStrategy.INNER_HASH_WITH_POST => InnerHashPlan(joinType)
         case JoinStrategy.INNER_SORT_WITH_POST =>
           // Check if sort join is supported (no ARRAY/STRUCT types)
           if (isSortJoinSupported(boundBuiltKeys) && isSortJoinSupported(boundStreamKeys)) {
-            SortJoinRecipe
+            SortJoinPlan
           } else {
             logWarning("INNER_SORT_WITH_POST strategy requested but join keys contain ARRAY or " +
               "STRUCT types which are not supported for sort joins. Falling back to " +
               "INNER_HASH_WITH_POST strategy.")
-            InnerHashRecipe(joinType, isFallback = true)
+            InnerHashPlan(joinType, isFallback = true)
           }
-        case _ => DirectHashRecipe(joinType)
+        case _ => DirectHashPlan(joinType)
       }
     }
   }
@@ -1773,21 +1835,21 @@ class HashJoinIterator(
         (leftKeys.getRowCount == 0 || rightKeys.getRowCount == 0)) {
         None
       } else {
-        // Dispatch the selected recipe for this batch and return the gatherer.
-        val maps = hashBatch.recipe match {
-          case _: DistinctHashRecipe =>
+        // Dispatch the selected plan for this batch and return the gatherer.
+        val maps = hashBatch.plan match {
+          case _: DistinctHashPlan =>
             val result = computeDistinctJoin(
               leftKeys, rightKeys, hashBatch.operation.get)
             logJoinCompletion()
             result
-          case recipe: InnerHashRecipe =>
+          case plan: InnerHashPlan =>
             computeNonCondInnerHashWithPost(
-              leftKeys, rightKeys, hashBatch.operation.get, recipe.isFallback)
-          case SortJoinRecipe => computeNonCondInnerSortWithPost(leftKeys, rightKeys)
-          case _: DirectHashRecipe =>
+              leftKeys, rightKeys, hashBatch.operation.get, plan.isFallback)
+          case SortJoinPlan => computeNonCondInnerSortWithPost(leftKeys, rightKeys)
+          case _: DirectHashPlan =>
             computeWithHashJoin(leftKeys, rightKeys, hashBatch.operation.get)
-          case MixedJoinRecipe =>
-            throw new IllegalStateException("unexpected mixed recipe for an unconditional join")
+          case MixedJoinPlan =>
+            throw new IllegalStateException("unexpected mixed plan for an unconditional join")
         }
 
         makeGatherer(maps, leftData, rightData, joinType)
@@ -1890,9 +1952,9 @@ class ConditionalHashJoinIterator(
       opTime = opTime,
       joinTime = joinTime) {
 
-  override protected def selectHashJoinRecipe(
+  override protected def selectHashJoinPlan(
       leftRowCount: Long,
-      rightRowCount: Long): HashJoinRecipe = {
+      rightRowCount: Long): HashJoinPlan = {
     JoinStrategy.selectStrategy(
       joinOptions.strategy,
       joinType,
@@ -1901,22 +1963,22 @@ class ConditionalHashJoinIterator(
       leftRowCount,
       rightRowCount) match {
       case JoinStrategy.INNER_HASH_WITH_POST =>
-        InnerHashRecipe(joinType, useExactForSizing = false)
+        InnerHashPlan(joinType, useExactForSizing = false)
       case JoinStrategy.INNER_SORT_WITH_POST =>
         // Check if sort join is supported (no ARRAY/STRUCT types)
         if (isSortJoinSupported(boundBuiltKeys) && isSortJoinSupported(boundStreamKeys)) {
-          SortJoinRecipe
+          SortJoinPlan
         } else {
           logWarning("INNER_SORT_WITH_POST strategy requested but join keys contain ARRAY or " +
             "STRUCT types which are not supported for sort joins. Falling back to " +
             "INNER_HASH_WITH_POST strategy.")
-          InnerHashRecipe(joinType, isFallback = true, useExactForSizing = false)
+          InnerHashPlan(joinType, isFallback = true, useExactForSizing = false)
         }
-      case _ => MixedJoinRecipe
+      case _ => MixedJoinPlan
     }
   }
 
-  // The AST condition is compiled based on the selected recipe.
+  // The AST condition is compiled based on the selected plan.
   // - INNER_HASH_WITH_POST compiles for the backend's resolved physical build side.
   // - INNER_SORT_WITH_POST compiles for the data-movement build side because post-filtering uses
   //   stable left/right gather-map semantics regardless of a sort join's physical build side.
@@ -1931,17 +1993,17 @@ class ConditionalHashJoinIterator(
     NvtxIdWithMetrics(NvtxRegistry.HASH_JOIN_GATHER_MAP, joinTime) {
       withResource(GpuColumnVector.from(leftData.getBatch)) { leftTable =>
         withResource(GpuColumnVector.from(rightData.getBatch)) { rightTable =>
-          // Dispatch the selected recipe for this batch and return the gatherer.
-          val maps = hashBatch.recipe match {
-            case recipe: InnerHashRecipe =>
+          // Dispatch the selected plan for this batch and return the gatherer.
+          val maps = hashBatch.plan match {
+            case plan: InnerHashPlan =>
               computeInnerHashWithPost(leftKeys, rightKeys, leftTable, rightTable,
-                hashBatch.operation.get, recipe.isFallback)
-            case SortJoinRecipe =>
+                hashBatch.operation.get, plan.isFallback)
+            case SortJoinPlan =>
               computeInnerSortWithPost(leftKeys, rightKeys, leftTable, rightTable, nullEquality)
-            case MixedJoinRecipe =>
+            case MixedJoinPlan =>
               computeWithMixedJoin(leftKeys, rightKeys, leftTable, rightTable, nullEquality)
             case other =>
-              throw new IllegalStateException(s"unexpected conditional join recipe $other")
+              throw new IllegalStateException(s"unexpected conditional join plan $other")
           }
           makeGatherer(maps, leftData, rightData, joinType)
         }
@@ -2126,8 +2188,12 @@ class HashJoinStreamSideIterator(
       throw new IllegalStateException(s"unsupported join type $t with $buildSide")
   }
 
-  // Sort and mixed subjoin paths use a cuDF orientation derived from subJoinType. Hash recipes
-  // carry their own build-side constraints, and DistinctHashRecipe uses the original buildSide.
+  // This is used by sort and mixed join plans, which bypass ResolvedHashJoin. Derive
+  // their default cuDF/AST orientation based on the subJoinType, not the original buildSide:
+  // - LeftOuter expects BuildRight
+  // - RightOuter expects BuildLeft
+  // - Inner defaults to BuildRight
+  // Hash plans that go through the ResolvedHashJoin backend resolve their build side separately.
   private val cudfBuildSide: GpuBuildSide = subJoinType match {
     case LeftOuter => GpuBuildRight
     case RightOuter => GpuBuildLeft
@@ -2135,13 +2201,12 @@ class HashJoinStreamSideIterator(
     case t => throw new IllegalStateException(s"unexpected subJoinType: $t")
   }
 
-  override protected def selectHashJoinRecipe(
+  override protected def selectHashJoinPlan(
       leftRowCount: Long,
-      rightRowCount: Long): HashJoinRecipe = {
-    // Distinct outer primitives produce only one gather map, but this iterator needs both maps for
-    // build-side tracking. The Inner distinct primitive produces both maps.
-    if (buildStats.isDistinct && subJoinType == Inner && lazyCompiledCondition.isEmpty) {
-      DistinctHashRecipe(subJoinType, buildSide)
+      rightRowCount: Long): HashJoinPlan = {
+    // Optimization for distinct unconditional joins
+    if (buildStats.isDistinct && lazyCompiledCondition.isEmpty) {
+      DistinctHashPlan(subJoinType, buildSide)
     } else {
       // Select for the subjoin executed against each stream batch, not the original outer join.
       JoinStrategy.selectStrategy(
@@ -2152,22 +2217,22 @@ class HashJoinStreamSideIterator(
         leftRowCount,
         rightRowCount) match {
         case JoinStrategy.INNER_HASH_WITH_POST =>
-          InnerHashRecipe(subJoinType, useExactForSizing = lazyCompiledCondition.isEmpty)
+          InnerHashPlan(subJoinType, useExactForSizing = lazyCompiledCondition.isEmpty)
         case JoinStrategy.INNER_SORT_WITH_POST =>
           // Check if sort join is supported (no ARRAY/STRUCT types)
           if (isSortJoinSupported(boundBuiltKeys) && isSortJoinSupported(boundStreamKeys)) {
-            SortJoinRecipe
+            SortJoinPlan
           } else {
             logWarning("INNER_SORT_WITH_POST strategy requested but join keys contain ARRAY or " +
               "STRUCT types which are not supported for sort joins. Falling back to " +
               "INNER_HASH_WITH_POST strategy.")
-            InnerHashRecipe(
+            InnerHashPlan(
               subJoinType,
               isFallback = true,
               useExactForSizing = lazyCompiledCondition.isEmpty)
           }
-        case _ if lazyCompiledCondition.isDefined => MixedJoinRecipe
-        case _ => DirectHashRecipe(subJoinType)
+        case _ if lazyCompiledCondition.isDefined => MixedJoinPlan
+        case _ => DirectHashPlan(subJoinType)
       }
     }
   }
@@ -2198,20 +2263,20 @@ class HashJoinStreamSideIterator(
     // Pass the original joinType if it was transformed to subJoinType
     val originalJoinType = if (joinType != subJoinType) Some(joinType) else None
 
-    hashBatch.recipe match {
-      case _: DistinctHashRecipe =>
+    hashBatch.plan match {
+      case _: DistinctHashPlan =>
         computeUnconditionalDistinctJoin(
           leftKeys, rightKeys, originalJoinType, hashBatch.operation.get)
-      case recipe: InnerHashRecipe =>
+      case plan: InnerHashPlan =>
         computeUnconditionalInnerHashWithPost(
-          leftKeys, rightKeys, originalJoinType, hashBatch.operation.get, recipe.isFallback)
-      case SortJoinRecipe =>
+          leftKeys, rightKeys, originalJoinType, hashBatch.operation.get, plan.isFallback)
+      case SortJoinPlan =>
         computeUnconditionalInnerSortWithPost(leftKeys, rightKeys, originalJoinType)
-      case _: DirectHashRecipe =>
+      case _: DirectHashPlan =>
         computeUnconditionalHashJoin(
           leftKeys, rightKeys, originalJoinType, hashBatch.operation.get)
-      case MixedJoinRecipe =>
-        throw new IllegalStateException("unexpected mixed recipe for an unconditional join")
+      case MixedJoinPlan =>
+        throw new IllegalStateException("unexpected mixed plan for an unconditional join")
     }
   }
 
@@ -2282,18 +2347,18 @@ class HashJoinStreamSideIterator(
     
     withResource(GpuColumnVector.from(leftData.getBatch)) { leftTable =>
       withResource(GpuColumnVector.from(rightData.getBatch)) { rightTable =>
-        hashBatch.recipe match {
-          case recipe: InnerHashRecipe =>
+        hashBatch.plan match {
+          case plan: InnerHashPlan =>
             computeConditionalInnerHashWithPost(leftKeys, rightKeys, leftTable, rightTable,
-              lazyCondition, originalJoinType, hashBatch.operation.get, recipe.isFallback)
-          case SortJoinRecipe =>
+              lazyCondition, originalJoinType, hashBatch.operation.get, plan.isFallback)
+          case SortJoinPlan =>
             computeConditionalInnerSortWithPost(leftKeys, rightKeys, leftTable, rightTable,
               lazyCondition, originalJoinType)
-          case MixedJoinRecipe =>
+          case MixedJoinPlan =>
             computeConditionalMixedJoin(leftKeys, rightKeys, leftTable, rightTable,
               lazyCondition, originalJoinType)
           case other =>
-            throw new IllegalStateException(s"unexpected conditional join recipe $other")
+            throw new IllegalStateException(s"unexpected conditional join plan $other")
         }
       }
     }
@@ -2411,21 +2476,58 @@ class HashJoinStreamSideIterator(
       }
       
       withResource(maps) { _ =>
-        val lazyLeftMap = LazySpillableGatherMap(maps.left, "left_map")
-        val lazyRightMap = LazySpillableGatherMap(maps.right, "right_map")
-        NvtxIdWithMetrics(NvtxRegistry.UPDATE_TRACKING_MASK, joinTime) {
-          closeOnExcept(Seq(lazyLeftMap, lazyRightMap)) { _ =>
-            updateTrackingMask(if (buildSide == GpuBuildRight) lazyRightMap else lazyLeftMap)
+        val lazyLeftMap = if (maps.hasLeft) {
+          Some(LazySpillableGatherMap(maps.left, "left_map"))
+        } else {
+          None
+        }
+        val lazyRightMap = closeOnExcept(lazyLeftMap.toSeq) { _ =>
+          if (maps.hasRight) {
+            Some(LazySpillableGatherMap(maps.right, "right_map"))
+          } else {
+            None
           }
         }
-        val (leftOutOfBoundsPolicy, rightOutOfBoundsPolicy) = subJoinType match {
-          case LeftOuter => (OutOfBoundsPolicy.DONT_CHECK, OutOfBoundsPolicy.NULLIFY)
-          case RightOuter => (OutOfBoundsPolicy.NULLIFY, OutOfBoundsPolicy.DONT_CHECK)
-          case Inner => (OutOfBoundsPolicy.DONT_CHECK, OutOfBoundsPolicy.DONT_CHECK)
-          case t => throw new IllegalStateException(s"unsupported join type $t")
+        val lazyMaps = lazyLeftMap.toSeq ++ lazyRightMap.toSeq
+        val (leftOutOfBoundsPolicy, rightOutOfBoundsPolicy) = closeOnExcept(lazyMaps) { _ =>
+          NvtxIdWithMetrics(NvtxRegistry.UPDATE_TRACKING_MASK, joinTime) {
+            val buildMap = if (buildSide == GpuBuildRight) lazyRightMap else lazyLeftMap
+            updateTrackingMask(buildMap.getOrElse {
+              throw new IllegalStateException("join did not produce a build-side gather map")
+            })
+          }
+          subJoinType match {
+            case LeftOuter => (OutOfBoundsPolicy.DONT_CHECK, OutOfBoundsPolicy.NULLIFY)
+            case RightOuter => (OutOfBoundsPolicy.NULLIFY, OutOfBoundsPolicy.DONT_CHECK)
+            case Inner => (OutOfBoundsPolicy.DONT_CHECK, OutOfBoundsPolicy.DONT_CHECK)
+            case t => throw new IllegalStateException(s"unsupported join type $t")
+          }
         }
-        val gatherer = JoinGatherer(lazyLeftMap, leftData, lazyRightMap, rightData,
-          leftOutOfBoundsPolicy, rightOutOfBoundsPolicy)
+        // A distinct outer join omits the stream-side map because that side remains in input order.
+        // Represent the implicit identity map via JoinGathererSameTable without materializing it.
+        val leftGatherer = closeOnExcept(lazyRightMap.toSeq) { _ =>
+          lazyLeftMap.map { map =>
+            closeOnExcept(map) { _ =>
+              JoinGatherer(map, leftData, leftOutOfBoundsPolicy)
+            }
+          }.getOrElse {
+            require(subJoinType == LeftOuter, s"missing left gather map for $subJoinType join")
+            new JoinGathererSameTable(leftData)
+          }
+        }
+        val rightGatherer = closeOnExcept(leftGatherer) { _ =>
+          lazyRightMap.map { map =>
+            closeOnExcept(map) { _ =>
+              JoinGatherer(map, rightData, rightOutOfBoundsPolicy)
+            }
+          }.getOrElse {
+            require(subJoinType == RightOuter, s"missing right gather map for $subJoinType join")
+            new JoinGathererSameTable(rightData)
+          }
+        }
+        val gatherer = closeOnExcept(Seq(leftGatherer, rightGatherer)) { _ =>
+          MultiJoinGather(leftGatherer, rightGatherer)
+        }
         if (gatherer.isDone) {
           // Nothing matched...
           gatherer.close()

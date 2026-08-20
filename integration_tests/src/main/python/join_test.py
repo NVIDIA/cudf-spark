@@ -1561,6 +1561,42 @@ def test_distinct_join(join_type, batch_size):
         return left_df.join(right_df, ["x"], join_type)
     assert_gpu_and_cpu_are_equal_collect(do_join, conf=join_conf)
 
+@validate_execs_in_gpu_plan("GpuShuffledHashJoinExec")
+@ignore_order(local=True)
+@pytest.mark.parametrize(
+    "build_side", ["left", "right"], ids=["BUILD_LEFT", "BUILD_RIGHT"])
+def test_distinct_full_outer_join(build_side):
+    join_conf = {
+        "spark.sql.adaptive.enabled": "false",
+        "spark.sql.autoBroadcastJoinThreshold": "-1",
+        "spark.sql.join.preferSortMergeJoin": "false",
+        "spark.sql.shuffle.partitions": "2",
+        # Exercise the stream-side iterator across multiple batches.
+        "spark.rapids.sql.batchSizeBytes": "1",
+        "spark.rapids.sql.join.useShuffledSymmetricHashJoin": "false",
+    }
+
+    def do_join(spark):
+        left_df = spark.createDataFrame([
+            (None, "left_null"),
+            (1, "left_match"),
+            (2, "left_only"),
+            (4, "left_match_2"),
+        ], ["join_key", "left_value"])
+        right_df = spark.createDataFrame([
+            (None, "right_null"),
+            (1, "right_match"),
+            (3, "right_only"),
+            (4, "right_match_2"),
+        ], ["join_key", "right_value"])
+        if build_side == "left":
+            left_df = left_df.hint("SHUFFLE_HASH")
+        else:
+            right_df = right_df.hint("SHUFFLE_HASH")
+        return left_df.join(right_df, ["join_key"], "fullouter")
+
+    assert_gpu_and_cpu_are_equal_collect(do_join, conf=join_conf)
+
 @ignore_order(local=True)
 @pytest.mark.parametrize("join_type", ["Inner", "FullOuter", "LeftOuter", "RightOuter"], ids=idfn)
 @pytest.mark.parametrize("is_left_host_shuffle", [False, True], ids=idfn)

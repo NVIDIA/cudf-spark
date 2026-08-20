@@ -182,15 +182,12 @@ abstract class GpuBroadcastHashJoinExecBase(
     case reused: ReusedExchangeExec => reused.child.asInstanceOf[GpuBroadcastExchangeExec]
   }
 
-  protected def buildSidePostProjection: Option[ColumnarBatch => ColumnarBatch] = {
+  private def makeBuildSidePostProjection(
+      bindProject: GpuProjectExec => GpuTieredProject):
+      Option[ColumnarBatch => ColumnarBatch] = {
     val projects = splitBroadcastPlan(buildPlan)._2.reverse
     if (projects.nonEmpty) {
-      val boundProjects = projects.map { project =>
-        // Match GpuProjectExec's tiered binding so build-side extraction has the same
-        // splitting and retry behavior as a normal project.
-        GpuBindReferences.bindGpuReferencesTieredNoMetrics(
-          project.projectList, project.child.output, conf)
-      }
+      val boundProjects = projects.map(bindProject)
       Some((batch: ColumnarBatch) => boundProjects.foldLeft(batch) {
         case (currentBatch, boundProject) =>
           val spillableBatch = SpillableColumnarBatch(
@@ -199,6 +196,24 @@ abstract class GpuBroadcastHashJoinExecBase(
       })
     } else {
       None
+    }
+  }
+
+  protected def buildSidePostProjection: Option[ColumnarBatch => ColumnarBatch] = {
+    makeBuildSidePostProjection { project =>
+      // Match GpuProjectExec's tiered binding so build-side extraction has the same
+      // splitting, retry, and metric behavior as a normal project.
+      GpuBindReferences.bindGpuReferencesTiered(
+        project.projectList, project.child.output, conf, allMetrics)
+    }
+  }
+
+  private def cachedBuildSidePostProjection: Option[ColumnarBatch => ColumnarBatch] = {
+    makeBuildSidePostProjection { project =>
+      // For a post-projection that will be cached, do not include metrics
+      // since the projection can outlive the task that creates it.
+      GpuBindReferences.bindGpuReferencesTieredNoMetrics(
+        project.projectList, project.child.output, conf)
     }
   }
 
@@ -231,14 +246,18 @@ abstract class GpuBroadcastHashJoinExecBase(
     val rdd = streamedPlan.executeColumnar()
     val buildSchema = getBroadcastPlan(buildPlan).schema
     val postProjectionAndClose = buildSidePostProjection
-    // Cached artifacts can outlive the task that creates them. Bind their key expressions
-    // separately so construction and rebuild do not retain or update that task's operator metrics.
-    val cachedBoundBuildKeys = if (enableHashTableReuse) {
-      GpuBindReferences.bindGpuReferencesNoMetrics(buildKeys, buildPlan.output)
-    } else {
-      Seq.empty[GpuExpression]
-    }
-    val postProjectionKey = buildSidePostProjectionKey
+    // The cache needs the build and post projection keys to identify a cached build side, and uses
+    // the post projection function during construction and rebuilds. We bind these without metrics,
+    // since they can outlive the task that creates the cached artifact.
+    val (cachedPostProjectionAndClose, cachedPostProjectionKey, cachedBoundBuildKeys) =
+      if (enableHashTableReuse) {
+        (
+          cachedBuildSidePostProjection,
+          buildSidePostProjectionKey,
+          GpuBindReferences.bindGpuReferencesNoMetrics(buildKeys, buildPlan.output))
+      } else {
+        (None, Seq.empty[Seq[Expression]], Seq.empty[GpuExpression])
+      }
     val localIsNullAwareAntiJoin = isNullAwareAntiJoin
     val localJoinId = id
     rdd.mapPartitions { it =>
@@ -259,8 +278,9 @@ abstract class GpuBroadcastHashJoinExecBase(
             taskContext.stageAttemptNumber())
           val filterOutNulls = GpuHashJoin.buildSideNeedsNullFilter(
             joinType, compareNullsEqual, buildSide, buildKeys)
-          batch.createCachedHashBackendProvider(buildSide, demandId, postProjectionKey,
-            cachedBoundBuildKeys, compareNullsEqual, filterOutNulls, postProjectionAndClose,
+          batch.createCachedHashBackendProvider(buildSide, demandId, cachedPostProjectionKey,
+            cachedBoundBuildKeys, compareNullsEqual, filterOutNulls,
+            cachedPostProjectionAndClose,
             HashBuildMetrics(hashTableBuilds, hashTableRebuilds, hashTableReuses))
         }.getOrElse(OnDemandHashBackendProvider)
       } else {

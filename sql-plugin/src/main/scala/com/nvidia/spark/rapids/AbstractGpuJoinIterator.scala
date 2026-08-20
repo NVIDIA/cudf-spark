@@ -207,7 +207,7 @@ abstract class SplittableJoinIterator(
 
   /**
    * Holds join state for a single stream-side batch, used for output sizing and join execution.
-   * At the minimum it includes an estimated or exact output row count.
+   * At the minimum it holds an estimated or exact output row count.
    */
   protected trait PreparedJoinBatch extends AutoCloseable {
     def numJoinRows: Long
@@ -216,6 +216,7 @@ abstract class SplittableJoinIterator(
 
   protected case class EstimatedJoinBatch(numJoinRows: Long) extends PreparedJoinBatch
 
+  /** Prepare the state for this stream side batch. */
   protected def prepareJoinBatch(cb: LazySpillableColumnarBatch): PreparedJoinBatch
 
   /**

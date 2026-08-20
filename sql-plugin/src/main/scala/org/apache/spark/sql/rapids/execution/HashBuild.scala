@@ -69,59 +69,59 @@ object HashBuildKey {
 }
 
 /**
- * The cuDF hash primitive selected for one stream batch. `requiredBuildSide` specifies
- * if the join has a physical side constraint e.g. left or right outer/semi/anti.
- * `exactCountJoinType` specifies when the primitive can provide an exact output count
- * before execution, and which JoinType will provide it.
+ * A request to execute one equi-hash join operation through [[HashProbeBackend]].
+ * `requiredBuildSide` specifies whether the requested operation has a physical side constraint,
+ * e.g. left or right outer/semi/anti. `exactCountJoinType` specifies when the backend can provide
+ * an exact output count before execution, and which JoinType requests that count.
  */
-sealed trait HashJoinPrimitive {
+sealed trait BackendJoinRequest {
   def requiredBuildSide: Option[GpuBuildSide]
   def exactCountJoinType: Option[JoinType]
 }
 
-private[execution] object HashJoinPrimitive {
-  case object Inner extends HashJoinPrimitive {
+private[execution] object BackendJoinRequest {
+  case object Inner extends BackendJoinRequest {
     override val requiredBuildSide: Option[GpuBuildSide] = None
     override val exactCountJoinType: Option[JoinType] =
       Some(org.apache.spark.sql.catalyst.plans.Inner)
   }
 
-  case object LeftOuter extends HashJoinPrimitive {
+  case object LeftOuter extends BackendJoinRequest {
     override val requiredBuildSide: Option[GpuBuildSide] = Some(GpuBuildRight)
     override val exactCountJoinType: Option[JoinType] =
       Some(org.apache.spark.sql.catalyst.plans.LeftOuter)
   }
 
-  case object RightOuter extends HashJoinPrimitive {
+  case object RightOuter extends BackendJoinRequest {
     override val requiredBuildSide: Option[GpuBuildSide] = Some(GpuBuildLeft)
     override val exactCountJoinType: Option[JoinType] =
       Some(org.apache.spark.sql.catalyst.plans.RightOuter)
   }
 
-  case object LeftSemi extends HashJoinPrimitive {
+  case object LeftSemi extends BackendJoinRequest {
     override val requiredBuildSide: Option[GpuBuildSide] = Some(GpuBuildRight)
     override val exactCountJoinType: Option[JoinType] = None
   }
 
-  case object LeftAnti extends HashJoinPrimitive {
+  case object LeftAnti extends BackendJoinRequest {
     override val requiredBuildSide: Option[GpuBuildSide] = Some(GpuBuildRight)
     override val exactCountJoinType: Option[JoinType] = None
   }
 
   final case class Distinct(joinType: JoinType, planBuildSide: GpuBuildSide)
-      extends HashJoinPrimitive {
+      extends BackendJoinRequest {
     override val requiredBuildSide: Option[GpuBuildSide] = Some(planBuildSide)
     override val exactCountJoinType: Option[JoinType] = None
   }
 
-  /** Map a directly executed Catalyst join type to its cuDF hash primitive. */
-  def direct(joinType: JoinType): HashJoinPrimitive = joinType match {
+  /** Map a directly executed Catalyst join type to its backend request. */
+  def direct(joinType: JoinType): BackendJoinRequest = joinType match {
     case _: InnerLike => Inner
     case org.apache.spark.sql.catalyst.plans.LeftOuter => LeftOuter
     case org.apache.spark.sql.catalyst.plans.RightOuter => RightOuter
     case org.apache.spark.sql.catalyst.plans.LeftSemi => LeftSemi
     case org.apache.spark.sql.catalyst.plans.LeftAnti => LeftAnti
-    case other => throw new IllegalStateException(s"unsupported hash join primitive $other")
+    case other => throw new IllegalStateException(s"unsupported backend join request $other")
   }
 }
 
@@ -130,12 +130,12 @@ private[execution] object HashJoinPrimitive {
  */
 private[execution] final class ResolvedHashJoin(
     private val backend: HashProbeBackend,
-    primitive: HashJoinPrimitive,
+    request: BackendJoinRequest,
     val exactOutputRows: Option[Long]) extends AutoCloseable {
   def isCached: Boolean = backend.isCached
 
   def execute(leftKeys: Table, rightKeys: Table): GatherMapsResult = {
-    backend.execute(primitive, leftKeys, rightKeys, exactOutputRows)
+    backend.execute(request, leftKeys, rightKeys, exactOutputRows)
   }
 
   // Apply a post-join condition using the AST orientation for the resolved physical build side.
@@ -165,7 +165,7 @@ sealed trait HashProbeBackend extends AutoCloseable {
   def isCached: Boolean
 
   def execute(
-      primitive: HashJoinPrimitive,
+      request: BackendJoinRequest,
       leftKeys: Table,
       rightKeys: Table,
       outputRowCount: Option[Long] = None): GatherMapsResult
@@ -184,16 +184,16 @@ private final class OnDemandHashProbeBackend(
   override val isCached: Boolean = false
 
   override def execute(
-      primitive: HashJoinPrimitive,
+      request: BackendJoinRequest,
       leftKeys: Table,
       rightKeys: Table,
-      outputRowCount: Option[Long]): GatherMapsResult = primitive match {
-    case HashJoinPrimitive.Inner => inner(leftKeys, rightKeys)
-    case HashJoinPrimitive.LeftOuter => leftOuter(leftKeys, rightKeys)
-    case HashJoinPrimitive.RightOuter => rightOuter(leftKeys, rightKeys)
-    case HashJoinPrimitive.LeftSemi => leftSemi(leftKeys, rightKeys)
-    case HashJoinPrimitive.LeftAnti => leftAnti(leftKeys, rightKeys)
-    case HashJoinPrimitive.Distinct(joinType, _) => distinct(joinType, leftKeys, rightKeys)
+      outputRowCount: Option[Long]): GatherMapsResult = request match {
+    case BackendJoinRequest.Inner => inner(leftKeys, rightKeys)
+    case BackendJoinRequest.LeftOuter => leftOuter(leftKeys, rightKeys)
+    case BackendJoinRequest.RightOuter => rightOuter(leftKeys, rightKeys)
+    case BackendJoinRequest.LeftSemi => leftSemi(leftKeys, rightKeys)
+    case BackendJoinRequest.LeftAnti => leftAnti(leftKeys, rightKeys)
+    case BackendJoinRequest.Distinct(joinType, _) => distinct(joinType, leftKeys, rightKeys)
   }
 
   private def inner(
@@ -330,16 +330,16 @@ private final class CachedHashProbeBackend(
   }
 
   override def execute(
-      primitive: HashJoinPrimitive,
+      request: BackendJoinRequest,
       leftKeys: Table,
       rightKeys: Table,
-      outputRowCount: Option[Long]): GatherMapsResult = primitive match {
-    case HashJoinPrimitive.Inner => inner(leftKeys, rightKeys, outputRowCount)
-    case HashJoinPrimitive.LeftOuter => leftOuter(leftKeys, rightKeys, outputRowCount)
-    case HashJoinPrimitive.RightOuter => rightOuter(leftKeys, rightKeys, outputRowCount)
-    case HashJoinPrimitive.LeftSemi => leftSemi(leftKeys, rightKeys)
-    case HashJoinPrimitive.LeftAnti => leftAnti(leftKeys, rightKeys)
-    case HashJoinPrimitive.Distinct(joinType, _) => distinct(joinType, leftKeys, rightKeys)
+      outputRowCount: Option[Long]): GatherMapsResult = request match {
+    case BackendJoinRequest.Inner => inner(leftKeys, rightKeys, outputRowCount)
+    case BackendJoinRequest.LeftOuter => leftOuter(leftKeys, rightKeys, outputRowCount)
+    case BackendJoinRequest.RightOuter => rightOuter(leftKeys, rightKeys, outputRowCount)
+    case BackendJoinRequest.LeftSemi => leftSemi(leftKeys, rightKeys)
+    case BackendJoinRequest.LeftAnti => leftAnti(leftKeys, rightKeys)
+    case BackendJoinRequest.Distinct(joinType, _) => distinct(joinType, leftKeys, rightKeys)
   }
 
   private def inner(
@@ -659,7 +659,7 @@ sealed trait HashBackendProvider {
 
   def backend(
       probe: HashProbeContext,
-      primitive: HashJoinPrimitive): HashProbeBackend
+      request: BackendJoinRequest): HashProbeBackend
 }
 
 /** Per-batch inputs used to select a physical hash-build implementation. */
@@ -679,8 +679,8 @@ object OnDemandHashBackendProvider extends HashBackendProvider {
 
   override def backend(
       probe: HashProbeContext,
-      primitive: HashJoinPrimitive): HashProbeBackend = {
-    val side = primitive.requiredBuildSide.getOrElse(
+      request: BackendJoinRequest): HashProbeBackend = {
+    val side = request.requiredBuildSide.getOrElse(
       JoinBuildSideSelection.selectPhysicalBuildSide(
         probe.selection,
         probe.planBuildSide,
@@ -709,16 +709,16 @@ final class CachedHashBackendProvider private[execution] (
 
   /**
    * Resolve the backend for one probe batch. Resolution is as follows:
-   * - if the primitive has a required build side, that side takes precedence
+   * - if the request has a required build side, that side takes precedence
    * - otherwise if build side selection is AUTO, record demand and defer to [[HashBuildPlanner]]
    * Selecting the offered side lazily constructs or acquires its cached artifact; selecting
    * the other side returns an on-demand backend.
    */
   override def backend(
       probe: HashProbeContext,
-      primitive: HashJoinPrimitive): HashProbeBackend = {
-    // If the primitive has a required build side, bypass policy selection.
-    val selectedSide = primitive.requiredBuildSide.getOrElse {
+      request: BackendJoinRequest): HashProbeBackend = {
+    // If the request has a required build side, bypass policy selection.
+    val selectedSide = request.requiredBuildSide.getOrElse {
       val observedStatus = cache.status(key)
       val probeRows = if (offeredSide == GpuBuildLeft) {
         probe.rightRowCount
@@ -817,7 +817,7 @@ object HashBuildFactory {
     }
   }
 
-  /** Build the initial native artifact and capture the recipe needed to rebuild it. */
+  /** Build the initial native artifact and capture the inputs needed to rebuild it. */
   private[execution] def create(
       buildBatch: SpillableColumnarBatch,
       boundKeys: Seq[GpuExpression],
