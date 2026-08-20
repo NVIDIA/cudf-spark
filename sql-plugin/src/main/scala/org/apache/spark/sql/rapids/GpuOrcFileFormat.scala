@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,8 +28,9 @@ import org.apache.orc.OrcConf
 import org.apache.orc.OrcConf._
 import org.apache.orc.mapred.OrcStruct
 
+import org.apache.spark.SPARK_VERSION_SHORT
 import org.apache.spark.internal.Logging
-import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.{SPARK_VERSION_METADATA_KEY, SparkSession}
 import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
 import org.apache.spark.sql.execution.datasources.FileFormat
 import org.apache.spark.sql.execution.datasources.orc.{OrcFileFormat, OrcOptions, OrcUtils}
@@ -80,25 +81,33 @@ object GpuOrcFileFormat extends Logging {
         "If bloom filter is not required, unset \"orc.bloom.filter.columns\"")
     }
 
-    val types = schema.map(_.dataType).toSet
     val hasBools = schema.exists { field =>
       TrampolineUtil.dataTypeExistsRecursively(field.dataType, t =>
         t.isInstanceOf[BooleanType])
     }
 
-    if (!meta.conf.orcReadIgnoreWriterTimezone) {
-      // For timestamp type, timezone needs to be checked.
-      // This is because JVM timezone and UTC timezone offset is considered when
-      // reading timestamp type from ORC file.
-      if (types.exists(GpuOverrides.isOrContainsTimestamp)) {
-        if (!GpuOverrides.isUTCTimezone()) {
-          meta.willNotWorkOnGpu("Only UTC timezone is supported for ORC. " +
-            s"Current timezone settings: (JVM : ${ZoneId.systemDefault()}, " +
-            s"session: ${SQLConf.get.sessionLocalTimeZone}). ")
-        }
-      }
-    } else {
-      // Ignore the write timezones in the stripe footers, we support, skip the checks.
+    // cuDF's ORC writer always stamps writerTimezone="UTC" in the stripe footer and cannot
+    // record the actual JVM writer timezone (https://github.com/rapidsai/cudf/issues/23422).
+    // Because ORC's `timestamp` type is timezone-agnostic, a file written on the GPU in a
+    // non-UTC JVM is read back shifted by the zone offset by a CPU ORC reader. Fall back to CPU
+    // for non-UTC timestamp writes so the output stays interoperable. Reads use the JVM default
+    // (systemDefault) zone, so the write-side gate matches the reader on the same check.
+    val types = schema.map(_.dataType).toSet
+    val hasDates = types.exists { dataType =>
+      TrampolineUtil.dataTypeExistsRecursively(dataType, _.isInstanceOf[DateType])
+    }
+    if (hasDates) {
+      // The cuDF writer does not emit ORC calendar metadata. Without it, readers choose the
+      // calendar from orc.proleptic.gregorian.default and can reinterpret pre-1582 dates.
+      meta.willNotWorkOnGpu("Writing ORC dates is not supported on GPU because the cuDF " +
+        "writer does not emit calendar metadata")
+    }
+
+    if (types.exists(GpuOverrides.isOrContainsTimestamp) &&
+        !GpuOverrides.isUTCTimezone(ZoneId.systemDefault())) {
+      meta.willNotWorkOnGpu("Writing ORC timestamps is only supported in the UTC timezone " +
+        s"(JVM: ${ZoneId.systemDefault()}, session: ${SQLConf.get.sessionLocalTimeZone}). " +
+        "See https://github.com/rapidsai/cudf/issues/23422")
     }
 
     if (hasBools && !meta.conf.isOrcBoolTypeEnabled) {
@@ -234,6 +243,7 @@ class GpuOrcWriter(
   override val tableWriter: TableWriter = {
     val builder = SchemaUtils
       .writerOptionsFromSchema(ORCWriterOptions.builder(), dataSchema, nullable = false)
+      .withMetadata(SPARK_VERSION_METADATA_KEY, SPARK_VERSION_SHORT)
       .withCompressionType(CompressionType.valueOf(OrcConf.COMPRESS.getString(conf)))
     orcStripeSizeRows.foreach { ss =>
       builder.withStripeSizeRows(ss)

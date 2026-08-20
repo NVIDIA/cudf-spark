@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.
+# Copyright (c) 2023-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -76,7 +76,11 @@ def get_pyarrow_type(data_gen):
         return pa.date32()
     elif isinstance(data_gen, TimestampGen):
         # use us, because Spark does not support ns
-        return pa.timestamp('us')
+        # Use UTC-adjusted timestamps for Spark TimestampType to avoid
+        # TimestampNTZ inference.
+        if data_gen._tzinfo is None:
+            return pa.timestamp('us')
+        return pa.timestamp('us', tz='UTC')
     elif isinstance(data_gen, BinaryGen):
         return pa.binary()
     elif isinstance(data_gen, StringGen):

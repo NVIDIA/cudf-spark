@@ -85,20 +85,19 @@ object MicroBenchRunner {
   def executeCpu(data: Array[AnyRef], numRows: Int): Unit = ???
 
   /**
-   * TODO: Execute the GPU UDF via evaluateColumnar.
+   * TODO: Execute the GPU UDF via evaluateColumnar and close its result.
    *
    * Example:
    * {{{
    *   val udf = new com.udf.PlaceholderRapidsUDFName()
-   *   udf.evaluateColumnar(numRows,
-   *     table.getColumn(0), table.getColumn(1))
+   *   withResource(udf.evaluateColumnar(numRows,
+   *     table.getColumn(0), table.getColumn(1))) { _ => }
    * }}}
    *
    * @param table   the dataset loaded on GPU
    * @param numRows number of rows in the dataset
-   * @return result ColumnVector (NOTE: caller must close)
    */
-  def executeGpu(table: Table, numRows: Int): ColumnVector = ???
+  def executeGpu(table: Table, numRows: Int): Unit = ???
 
   def main(args: Array[String]): Unit = {
     val parsed = parseArgs(args)
@@ -165,7 +164,7 @@ object MicroBenchRunner {
       if (runGpu) {
         try {
           val times = runBenchmark(warmup, measured, profile = profile) {
-            withResource(executeGpu(table, numRows)) { _ => }
+            executeGpu(table, numRows)
           }
           val medianMs = times(times.length / 2) / 1e6
           val minMs = times(0) / 1e6

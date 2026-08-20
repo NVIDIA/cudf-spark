@@ -37,11 +37,10 @@ def _is_write_node(name):
 def test_v2_write_sql_ui_shows_gpu_child_operators(spark_tmp_table_factory):
     """Regression test: the SQL UI / History Server must show the GPU child
     operators under a DataSource V2 table write (GpuV2TableWriteExec), not just
-    the write node. GpuV2TableWriteExec wraps its query in an AdaptiveSparkPlanExec;
-    it must execute that original AQE (via finalPhysicalPlan) so Spark's own
-    per-query-stage plan updates post the GPU plan to the SQL UI. Otherwise the
-    write execution's plan graph contains only the write node and the GPU operators
-    under it are missing. See GpuV2TableWriteExec.finalQuery."""
+    the write node. GpuV2TableWriteExec executes a columnar copy of the query's
+    AdaptiveSparkPlanExec and re-posts the settled final graph after execution.
+    Otherwise the write execution's plan graph can show only the write node or
+    the wrong child plan."""
     table_name = get_full_table_name(spark_tmp_table_factory)
 
     def run(spark):
@@ -115,13 +114,10 @@ def test_v2_write_sql_ui_shows_gpu_child_operators(spark_tmp_table_factory):
 def test_v2_write_sql_ui_gpu_child_operator_metrics_are_visible(spark_tmp_table_factory):
     """Regression test: the SQL UI / History Server must show metric values (op
     times) on the GPU child operators of a DataSource V2 table write, not just
-    their names. GpuV2TableWriteExec executes the query's AdaptiveSparkPlanExec;
-    the GPU operators' SQLMetric accumulator ids must reach Spark's SQL listener
-    (via AQE's per-query-stage plan updates) BEFORE each stage's job starts. If
-    they do not, the listener never registers those ids and drops every matching
-    task accumulator update, leaving op times blank on the plan nodes. Here we
-    assert the GPU child 'op time' metric ids are present in the execution's
-    metric-value map (i.e. their task updates were joined back to the plan)."""
+    their names. GpuV2TableWriteExec executes a columnar copy of the query's
+    AdaptiveSparkPlanExec; the copy must register its SQLMetric accumulator ids
+    before each stage job starts, otherwise Spark's SQL listener drops the task
+    accumulator updates."""
     table_name = get_full_table_name(spark_tmp_table_factory)
 
     def run(spark):

@@ -32,6 +32,77 @@ ARTF_ROOT="$WORKSPACE/jars"
 WGET_CMD="wget -q -P $ARTF_ROOT -t 3"
 PROJECT_REPO_HOST=$(sed -E 's#^(.*://)?([^/@]*@)?([^/:]+).*#\3#' <<< "$PROJECT_REPO")
 
+download_maven_jars() {
+  local coordinates=$1
+  local exclude_group_ids=${2:-}
+  local coordinate
+  local group_id
+  local artifact_id
+  local version
+  local dependency_dir
+  local pom_file
+  local -a coordinates_array
+  local -a dependency_copy_args
+  local -a jars
+
+  dependency_dir=$(mktemp -d "$ARTF_ROOT/maven-dependencies-XXXXXX")
+  pom_file="$dependency_dir/pom.xml"
+  IFS=',' read -ra coordinates_array <<< "$coordinates"
+  {
+    cat <<EOF
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.nvidia.spark.rapids.tests</groupId>
+  <artifactId>extra-classpath-dependencies</artifactId>
+  <version>1.0</version>
+  <repositories>
+    <repository>
+      <id>central</id>
+      <url>$SPARK_REPO</url>
+    </repository>
+  </repositories>
+  <dependencies>
+EOF
+    for coordinate in "${coordinates_array[@]}"; do
+      IFS=':' read -r group_id artifact_id version <<< "$coordinate"
+      cat <<EOF
+    <dependency>
+      <groupId>$group_id</groupId>
+      <artifactId>$artifact_id</artifactId>
+      <version>$version</version>
+    </dependency>
+EOF
+    done
+    echo "  </dependencies>"
+    echo "</project>"
+  } > "$pom_file"
+
+  dependency_copy_args=(
+    -DincludeScope=runtime
+    -DincludeTypes=jar
+    "-DoutputDirectory=$dependency_dir/jars"
+  )
+  if [[ -n "$exclude_group_ids" ]]; then
+    dependency_copy_args+=("-DexcludeGroupIds=$exclude_group_ids")
+  fi
+
+  (
+    cd "$WORKSPACE"
+    $MVN -q -B -f "$pom_file" dependency:copy-dependencies \
+      "${dependency_copy_args[@]}"
+  ) >&2 || return 1
+
+  mapfile -d '' -t jars < <(
+    find "$dependency_dir/jars" -maxdepth 1 -type f -name '*.jar' -print0 | sort -z
+  )
+  if [[ ${#jars[@]} -eq 0 ]]; then
+    echo "No Maven dependencies were resolved for: $coordinates" >&2
+    return 1
+  fi
+  local IFS=:
+  echo "${jars[*]}"
+}
+
 rm -rf $ARTF_ROOT && mkdir -p $ARTF_ROOT
 $WGET_CMD $PROJECT_TEST_REPO/com/nvidia/rapids-4-spark-integration-tests_$SCALA_BINARY_VER/$PROJECT_TEST_VER/rapids-4-spark-integration-tests_$SCALA_BINARY_VER-$PROJECT_TEST_VER-${SHUFFLE_SPARK_SHIM}.jar
 
@@ -211,6 +282,9 @@ run_delta_lake_tests() {
   SPARK_34X_PATTERN="(3\.4\.[0-9])"
   SPARK_35X_PATTERN="(3\.5\.[3-9])"
   SPARK_40X_PATTERN="(4\.0\.[0-9])"
+  # Delta 4.1.0 is binary-incompatible with Spark 4.1.2+ after Spark changed internal
+  # Catalyst and Parquet APIs. Keep coverage on the compatible Spark patch releases.
+  SPARK_41_0_1_PATTERN="^(4\.1\.[0-1])$"
 
   if [[ $SPARK_VER =~ $SPARK_32X_PATTERN ]]; then
     # There are multiple versions of deltalake that support SPARK 3.2.X
@@ -239,16 +313,30 @@ run_delta_lake_tests() {
     fi
   fi
 
+  if [[ $SPARK_VER =~ $SPARK_41_0_1_PATTERN ]]; then
+    # Delta 4.1.x only supports Scala 2.13 (Spark 4.1 requirement)
+    if [[ "$SCALA_BINARY_VER" == "2.13" ]]; then
+      DELTA_LAKE_VERSIONS="4.1.0"
+    else
+      echo "Skipping Delta Lake 4.1.x tests for Scala $SCALA_BINARY_VER (requires Scala 2.13)"
+    fi
+  fi
+
   if [ -z "$DELTA_LAKE_VERSIONS" ]; then
     echo "Skipping Delta Lake tests. $SPARK_VER"
   else
     for v in $DELTA_LAKE_VERSIONS; do
       echo "Running Delta Lake tests for Delta Lake version $v"
-      if [[ "$v" == "3.3.0" || "$v" == "4.0.0" ]]; then
-        DELTA_JAR="io.delta:delta-spark_${SCALA_BINARY_VER}:$v"
-      else 
-        DELTA_JAR="io.delta:delta-core_${SCALA_BINARY_VER}:$v"
-      fi 
+      if [[ "$v" == "4.1.0" ]]; then
+        DELTA_MAIN_JAR="io.delta:delta-spark_4.1_${SCALA_BINARY_VER}:$v"
+      elif [[ "$v" == "3.3.0" || "$v" == "4.0.0" ]]; then
+        DELTA_MAIN_JAR="io.delta:delta-spark_${SCALA_BINARY_VER}:$v"
+      else
+        DELTA_MAIN_JAR="io.delta:delta-core_${SCALA_BINARY_VER}:$v"
+      fi
+      # Delta Lake 1.2+ moved LogStore implementations into delta-storage.
+      # All versions tested here are 2.0+, so include it explicitly.
+      DELTA_JAR="${DELTA_MAIN_JAR},io.delta:delta-storage:$v"
       HOST_NAME=$PROJECT_REPO_HOST \
         PYSP_TEST_spark_jars_packages=${DELTA_JAR} \
         PYSP_TEST_spark_jars_ivySettings="${WORKSPACE}/jenkins/ivysettings.xml" \
@@ -265,7 +353,8 @@ run_iceberg_tests() {
   # get the patch version of Spark
   SPARK_PATCH_VER=$(echo "$SPARK_VER" | cut -d. -f3)
 
-  if [[ "$ICEBERG_SPARK_VER" != "3.5" && "$ICEBERG_SPARK_VER" != "4.0" ]]; then
+  if [[ "$ICEBERG_SPARK_VER" != "3.5" && "$ICEBERG_SPARK_VER" != "4.0" \
+        && "$ICEBERG_SPARK_VER" != "4.1" ]]; then
     echo "!!!! Skipping Iceberg tests. GPU acceleration of Iceberg is not supported on $ICEBERG_SPARK_VER"
     return 0
   fi
@@ -273,14 +362,26 @@ run_iceberg_tests() {
   # Supported Iceberg versions per Spark patch version:
   # Spark 3.5.0-3.5.3 -> Iceberg 1.6.1
   # Spark 3.5.4+       -> Iceberg 1.9.2, 1.10.1
-  # Spark 4.0.x        -> Iceberg 1.10.1
+  # Spark 4.0.0-4.0.1 -> Iceberg 1.10.1
+  # Spark 4.0.2+       -> Iceberg 1.10.1, 1.11.0
+  # Spark 4.1.x        -> Iceberg 1.11.0
   local supported_versions
-  if [[ "$ICEBERG_SPARK_VER" == "4.0" ]]; then
+  if [[ "$ICEBERG_SPARK_VER" == "4.1" ]]; then
+    if [[ "$SCALA_BINARY_VER" != "2.13" ]]; then
+      echo "!!!! Skipping Iceberg tests. Spark 4.1 Iceberg tests require Scala 2.13"
+      return 0
+    fi
+    supported_versions="1.11.0"
+  elif [[ "$ICEBERG_SPARK_VER" == "4.0" ]]; then
     if [[ "$SCALA_BINARY_VER" != "2.13" ]]; then
       echo "!!!! Skipping Iceberg tests. Spark 4.0 Iceberg tests require Scala 2.13"
       return 0
     fi
-    supported_versions="1.10.1"
+    if [[ "$SPARK_PATCH_VER" -ge 2 ]]; then
+      supported_versions="1.10.1 1.11.0"
+    else
+      supported_versions="1.10.1"
+    fi
   elif [[ "$SPARK_PATCH_VER" -le 3 ]]; then
     supported_versions="1.6.1"
   else
@@ -299,7 +400,9 @@ run_iceberg_tests() {
     echo "Using user-specified ICEBERG_VERSIONS=$ICEBERG_VERSIONS"
   else
     # Default: test one representative version per Spark patch range
-    if [[ "$ICEBERG_SPARK_VER" == "4.0" ]]; then
+    if [[ "$ICEBERG_SPARK_VER" == "4.1" ]]; then
+      ICEBERG_VERSIONS="1.11.0"
+    elif [[ "$ICEBERG_SPARK_VER" == "4.0" ]]; then
       ICEBERG_VERSIONS="1.10.1"
     elif [[ "$SPARK_PATCH_VER" -le 3 ]]; then
       ICEBERG_VERSIONS="1.6.1"
@@ -329,19 +432,19 @@ run_iceberg_tests() {
       echo "!!! Running iceberg tests with rest catalog"
       ICEBERG_REST_JARS="org.apache.iceberg:iceberg-spark-runtime-${ICEBERG_SPARK_VER}_${SCALA_BINARY_VER}:${ICEBERG_VERSION},\
 org.apache.iceberg:iceberg-aws-bundle:${ICEBERG_VERSION}"
-          # filecache.enabled is a startup-only config, so it must be set here via
-          # PYSP_TEST_ env var rather than as a session-level Spark config, because
-          # FileCacheManager is initialized at executor startup time.
+      ICEBERG_REST_EXTRA_CLASSPATH=$(download_maven_jars "$ICEBERG_REST_JARS")
+          # filecache.enabled and perfio.s3.enabled are startup-only configs, so they must
+          # be set here via PYSP_TEST_ env vars rather than as session-level Spark configs.
           env \
             HOST_NAME=$PROJECT_REPO_HOST \
             EXPECTED_ICEBERG_VERSION=${ICEBERG_VERSION} \
+            ICEBERG_EXTRA_CLASSPATH="${ICEBERG_REST_EXTRA_CLASSPATH}" \
             ICEBERG_TEST_CATALOG_TYPE="rest" \
             ICEBERG_TEST_REMOTE_CATALOG=1 \
             PYSP_TEST_spark_driver_memory=1G \
             PYSP_TEST_spark_executor_memory=2G \
             PYSP_TEST_spark_rapids_filecache_enabled=true \
-            PYSP_TEST_spark_jars_packages="${ICEBERG_REST_JARS}" \
-            PYSP_TEST_spark_jars_ivySettings="${WORKSPACE}/jenkins/ivysettings.xml" \
+            PYSP_TEST_spark_rapids_perfio_s3_enabled=true \
             PYSP_TEST_spark_sql_extensions="org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions" \
             PYSP_TEST_spark_sql_catalog_spark__catalog="org.apache.iceberg.spark.SparkSessionCatalog" \
             "PYSP_TEST_spark_sql_catalog_spark__catalog_catalog-impl=org.apache.iceberg.rest.RESTCatalog" \
@@ -375,6 +478,16 @@ software.amazon.awssdk:s3tables:${AWS_SDK_VERSION},\
 org.apache.hadoop:hadoop-aws:${HADOOP_AWS_VERSION},\
 com.amazonaws:aws-java-sdk-bundle:${AWS_SDK_BUNDLE_VERSION}"
 
+      # Spark 4.1 uses Netty 4.2, which cannot coexist with the Netty 4.1 jars pulled in by
+      # AWS SDK 2.x. Let AWS use the Netty version provided by Spark instead.
+      local exclude_group_ids=""
+      if [[ "$ICEBERG_SPARK_VER" == "4.1" ]]; then
+        exclude_group_ids="io.netty"
+      fi
+      ICEBERG_S3TABLES_EXTRA_CLASSPATH=$(
+        download_maven_jars "$ICEBERG_S3TABLES_JARS" "$exclude_group_ids"
+      )
+
       # Requires to setup s3 buckets and namespaces to run iceberg s3tables tests.
       # These steps are included in the test pipeline.
       # Please refer to integration_tests/README.md#run-apache-iceberg-s3tables-tests
@@ -384,12 +497,11 @@ com.amazonaws:aws-java-sdk-bundle:${AWS_SDK_BUNDLE_VERSION}"
       env \
         HOST_NAME=$PROJECT_REPO_HOST \
         EXPECTED_ICEBERG_VERSION=${ICEBERG_VERSION} \
+        ICEBERG_EXTRA_CLASSPATH="${ICEBERG_S3TABLES_EXTRA_CLASSPATH}" \
         ICEBERG_TEST_REMOTE_CATALOG=1 \
         PYSP_TEST_spark_driver_memory=1G \
         PYSP_TEST_spark_executor_memory=2G \
         PYSP_TEST_spark_rapids_filecache_enabled=true \
-        PYSP_TEST_spark_jars_packages="${ICEBERG_S3TABLES_JARS}" \
-        PYSP_TEST_spark_jars_ivySettings="${WORKSPACE}/jenkins/ivysettings.xml" \
         PYSP_TEST_spark_sql_extensions="org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions" \
         PYSP_TEST_spark_sql_catalog_spark__catalog="org.apache.iceberg.spark.SparkSessionCatalog" \
         "PYSP_TEST_spark_sql_catalog_spark__catalog_catalog-impl=software.amazon.s3tables.iceberg.S3TablesCatalog" \
@@ -542,7 +654,7 @@ if [[ "$TEST_MODE" == "CUDF_UDF_ONLY" ]]; then
   CUDF_VER=$(echo "${PROJECT_VER}" | cut -d '.' -f 1,2)
   CUDA_VER_FOR_CUDF=${CUDA_VER_FOR_CUDF:-'12.9'}
 
-  conda create -y -n ${CUDF_UDF_ENV} -c rapidsai-nightly -c nvidia -c conda-forge -c defaults \
+  conda create -y -n ${CUDF_UDF_ENV} -c rapidsai-nightly -c conda-forge -c nvidia -c defaults \
     python=${CUDF_UDF_PYTHON_VER} pip cudf=${CUDF_VER} cuda-version=${CUDA_VER_FOR_CUDF}
 
   # Activate the cudf_udf env and reset PYTHONPATH to use the new env's site-packages
@@ -563,6 +675,7 @@ if [[ "$TEST_MODE" == "CUDF_UDF_ONLY" ]]; then
     PYSP_TEST_spark_rapids_memory_gpu_minAllocFraction=0 \
     PYSP_TEST_spark_rapids_python_memory_gpu_allocFraction=0.1 \
     PYSP_TEST_spark_rapids_python_concurrentPythonWorkers=2 \
+    PYSP_TEST_spark_executorEnv_CONDA_PREFIX=${CONDA_PREFIX} \
     PYSP_TEST_spark_executorEnv_PYTHONPATH=${RAPIDS_PLUGIN_JAR} \
     ./run_pyspark_from_build.sh -m cudf_udf --cudf_udf
 

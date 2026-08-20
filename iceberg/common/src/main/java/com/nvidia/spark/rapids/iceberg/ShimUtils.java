@@ -58,6 +58,10 @@ public class ShimUtils {
         return IMPL.locationOf(f);
     }
 
+    public static int formatVersion(Table table) {
+        return IMPL.formatVersion(table);
+    }
+
     public static Map<Integer, ?> constantsMap(FileScanTask task, Schema readSchema,
                                                     Table table) {
         return IMPL.constantsMap(task, readSchema, table);

@@ -165,3 +165,25 @@ def test_host_columnar_transition(spark_tmp_path, data_gen):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.parquet(data_path).filter("a IS NOT NULL"),
         conf={ 'spark.rapids.sql.exec.FileSourceScanExec' : 'false'})
+
+
+# BinaryType is intentionally NOT in the gen list: CudfRowTransitions
+# .isC2RSupportedType has no BinaryType branch, so including it would route
+# the scan through the fallback (non-Cudf) ColumnarToRowIterator and
+# contribute 0 LC to the target class.
+def test_cudf_unsafe_row_primitive_sweep(spark_tmp_path):
+    data_path = spark_tmp_path + "/cudf_unsafe_row"
+    gen_list = [(f'c{i}', gen) for i, gen in enumerate(all_gen)]
+    with_cpu_session(lambda spark:
+        gen_df(spark, gen_list, length=200).write.mode("overwrite").parquet(data_path),
+        conf={
+            'spark.sql.parquet.datetimeRebaseModeInWrite': 'CORRECTED',
+            'spark.sql.parquet.int96RebaseModeInWrite': 'CORRECTED',
+        })
+    # Pin acceleratedColumnarToRow so a future default flip or local conf
+    # override cannot silently route the test through the slow CPU
+    # ColumnarToRowIterator (which would still pass the equality check but
+    # contribute 0 LC to CudfUnsafeRowBase).
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.parquet(data_path),
+        conf={'spark.rapids.sql.acceleratedColumnarToRow.enabled': 'true'})

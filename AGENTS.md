@@ -13,6 +13,7 @@ This document provides context for AI coding agents (Claude Code, GitHub Copilot
 - **No rebase during review** — if a PR is under review, do not rebase; merge the base branch instead to preserve reviewer comment context
 - **Scala 2.13 sync** — after modifying any `pom.xml`, run `./build/make-scala-version-build-files.sh 2.13`
 - **PR title tags** — `[databricks]` triggers Databricks pre-merge CI; `[skip ci]` for doc-only changes. Databricks CI auto-runs only when the diff touches a `sql-plugin/src/main/…db/` shim dir or a path containing `databricks`; otherwise it does **not** run. Add `[databricks]` manually when a change could behave differently on Databricks without touching those paths — e.g. integration tests that depend on filesystem/path semantics (local vs DBFS/`abfss`, `file://` scheme, `os.walk`/`os.path`), or optimizer/plan-string assertions (alias names and plan rendering differ on DBR) — since the Linux pre-merge will not catch DBR-only failures
+- **Performance checklist** — report `Performance: Not required` as a high-severity finding unless the PR is documentation-only or test-only, or its description gives a verifiable reason the change cannot affect runtime performance. A bug-fix label, small diff, or rarely used path is not by itself an exemption. When uncertain, flag
 
 ## Build Commands
 
@@ -113,7 +114,7 @@ spark-rapids-shim-json-lines ***/
 - When modifying a shim, update ALL related Spark version shims
   (the same logical change may need different adaptations per
   version — do not blindly copy-paste).
-- `db` suffix (e.g., `330db`, `341db`) = Databricks-specific shim.
+- `db` suffix (e.g., `330db`, `350db143`) = Databricks-specific shim.
 - **Scala 2.12 vs 2.13**: `sql-plugin` shims work identically for
   both Scala versions. After modifying any `pom.xml`, run
   `./build/make-scala-version-build-files.sh 2.13` to sync.

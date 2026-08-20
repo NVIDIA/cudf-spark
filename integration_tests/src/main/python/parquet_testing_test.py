@@ -22,7 +22,7 @@ from data_gen import copy_and_update, non_utc_allow
 from marks import allow_non_gpu
 from pathlib import Path
 import pytest
-from spark_session import is_before_spark_330, is_spark_350_or_later, is_spark_411_or_later
+from spark_session import is_spark_350_or_later, is_spark_411_or_later
 import warnings
 
 _rebase_confs = {
@@ -62,9 +62,6 @@ _xfail_files = {
     "hadoop_lz4_compressed_larger.parquet": "cudf does not support Hadoop LZ4 format",
     "nested_structs.rust.parquet": "PySpark cannot handle year 52951",
 }
-if is_before_spark_330():
-    _xfail_files["rle_boolean_encoding.parquet"] = "Spark CPU cannot decode V2 style RLE before 3.3.x"
-
 # Spark 3.5.0 adds support for lz4_raw compression codec, but we do not support that on GPU yet
 if is_spark_350_or_later():
     _xfail_files["lz4_raw_compressed.parquet"] = "https://github.com/NVIDIA/spark-rapids/issues/9156"

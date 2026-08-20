@@ -17,13 +17,11 @@ import pytest
 from private_optimizer_common import (
     assert_rule_fires,
     private_optimizer_conf,
-    require_private_optimizer,
 )
 from spark_session import with_cpu_session
 
 
 @pytest.mark.private_optimizer
-@require_private_optimizer
 def test_optimize_subquery_shared_scan(spark_tmp_path):
     """OptimizeSubquerySharedScanRule merges scalar subqueries that aggregate
     (no grouping, single agg fn) over the same LogicalRelation into one shared

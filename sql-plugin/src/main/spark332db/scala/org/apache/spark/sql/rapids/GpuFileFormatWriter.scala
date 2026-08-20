@@ -18,7 +18,6 @@
 {"spark": "332db"}
 {"spark": "340"}
 {"spark": "341"}
-{"spark": "341db"}
 {"spark": "342"}
 {"spark": "343"}
 {"spark": "344"}
@@ -32,12 +31,19 @@
 {"spark": "356"}
 {"spark": "357"}
 {"spark": "358"}
+{"spark": "359"}
 {"spark": "400"}
 {"spark": "400db173"}
 {"spark": "401"}
 {"spark": "402"}
+{"spark": "403"}
+{"spark": "404"}
 {"spark": "411"}
+{"spark": "412"}
+{"spark": "413"}
+{"spark": "420"}
 spark-rapids-shim-json-lines ***/
+
 package org.apache.spark.sql.rapids
 
 import java.util.{Date, UUID}
@@ -52,7 +58,7 @@ import org.apache.hadoop.mapreduce._
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat
 import org.apache.hadoop.mapreduce.task.TaskAttemptContextImpl
 
-import org.apache.spark.{SparkException, TaskContext}
+import org.apache.spark.{SparkException, TaskContext, TaskOutputFileAlreadyExistException}
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.io.{FileCommitProtocol, SparkHadoopWriterUtils}
 import org.apache.spark.shuffle.FetchFailedException
@@ -494,6 +500,8 @@ trait GpuFileFormatWriterBase extends Serializable with Logging {
         })
       } catch {
         case e: FetchFailedException =>
+          throw e
+        case e: TaskOutputFileAlreadyExistException =>
           throw e
         case t: Throwable =>
           throw new SparkException("Task failed while writing rows.", t)

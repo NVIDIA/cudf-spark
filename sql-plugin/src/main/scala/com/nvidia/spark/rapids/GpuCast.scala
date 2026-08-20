@@ -755,7 +755,7 @@ object GpuCast {
     case DateType => input.asStrings("%Y-%m-%d")
     case TimestampType if options.castToJsonString => castTimestampToJson(input)
     case TimestampType => castTimestampToString(input)
-    case FloatType | DoubleType => CastStrings.fromFloat(input)
+    case FloatType | DoubleType => CastStrings.fromFloat(input, options.castToJsonString)
     case BinaryType => castBinToString(input, options)
     case _: DecimalType => GpuCastShims.CastDecimalToString(input, options.useDecimalPlainString)
     case StructType(fields) => castStructToString(input, fields, options)

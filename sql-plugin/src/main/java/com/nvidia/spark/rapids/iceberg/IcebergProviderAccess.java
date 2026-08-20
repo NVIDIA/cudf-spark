@@ -24,4 +24,13 @@ public final class IcebergProviderAccess {
   public static String detectedVersion() {
     return IcebergProvider$.MODULE$.detectedVersion();
   }
+
+  /**
+   * Exposes the selected shim package to the Py4J integration test in
+   * {@code iceberg_version_detection_test.py}, which verifies that the detected Iceberg version
+   * maps to the expected shim implementation.
+   */
+  public static String shimPackage() {
+    return IcebergProvider$.MODULE$.shimPackage();
+  }
 }

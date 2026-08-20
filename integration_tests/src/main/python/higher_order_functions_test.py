@@ -12,11 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import struct
+
 import pytest
 
-from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect
+from asserts import (assert_cpu_and_gpu_are_equal_collect_with_capture,
+                     assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect)
 from data_gen import *
-from marks import allow_non_gpu, disable_ansi_mode, ignore_order
+from marks import allow_non_gpu, allow_non_gpu_conditional, disable_ansi_mode, ignore_order
+from spark_session import is_before_spark_340, is_databricks_runtime
 
 
 @ignore_order(local=True)
@@ -34,19 +38,85 @@ def test_tiered_project_with_complex_transform():
     assert_gpu_and_cpu_are_equal_collect(do_project, conf=confs)
 
 
-@pytest.mark.parametrize('lambda_sql, init_sql, gen_max', [
-    ('(acc, x) -> acc + CAST(x as BIGINT)', '0L', 100),
-    ('(acc, x) -> acc * CAST(x as BIGINT)', '1L', 3),
-    ('(acc, x) -> greatest(acc, CAST(x as BIGINT))', '-9223372036854775808L', 100),
-    ('(acc, x) -> least(acc, CAST(x as BIGINT))', '9223372036854775807L', 100),
-], ids=['sum', 'product', 'max', 'min'])
+@pytest.mark.parametrize('data_gen, lambda_sql, init_sql', [
+    (ArrayGen(IntegerGen(min_val=-100, max_val=100), max_length=8),
+        '(acc, x) -> acc + CAST(x as BIGINT)', '0L'),
+    (ArrayGen(IntegerGen(min_val=-3, max_val=3), max_length=8),
+        '(acc, x) -> acc * CAST(x as BIGINT)', '1L'),
+    (ArrayGen(IntegerGen(min_val=-100, max_val=100), max_length=8),
+        '(acc, x) -> greatest(acc, CAST(x as BIGINT))', '-9223372036854775808L'),
+    (ArrayGen(IntegerGen(min_val=-100, max_val=100), max_length=8),
+        '(acc, x) -> least(acc, CAST(x as BIGINT))', '9223372036854775807L'),
+    (ArrayGen(
+        ByteGen(special_cases=[BYTE_MIN, BYTE_MAX, 0, 1, -1]),
+        min_length=1, max_length=8),
+        '(acc, x) -> acc + x', 'CAST(0 AS TINYINT)'),
+    (ArrayGen(
+        ShortGen(special_cases=[SHORT_MIN, SHORT_MAX, 0, 1, -1]),
+        min_length=1, max_length=8),
+        '(acc, x) -> acc + x', 'CAST(0 AS SMALLINT)'),
+    (ArrayGen(FloatGen(
+        no_nans=True,
+        special_cases=[FLOAT_MIN, FLOAT_MAX, 0.0, -0.0, float('nan')]),
+        min_length=1, max_length=1),
+        '(acc, x) -> acc + x', 'CAST(0 AS FLOAT)'),
+    (ArrayGen(FloatGen(
+        no_nans=True,
+        special_cases=[FLOAT_MIN, FLOAT_MAX, 0.0, -0.0, float('nan')]),
+        min_length=1, max_length=1),
+        '(acc, x) -> acc * x', 'CAST(1 AS FLOAT)'),
+    (ArrayGen(DoubleGen(
+        no_nans=True,
+        special_cases=[DOUBLE_MIN, DOUBLE_MAX, 0.0, -0.0, float('nan')]),
+        min_length=1, max_length=1),
+        '(acc, x) -> acc + x', 'CAST(0 AS DOUBLE)'),
+    (ArrayGen(DoubleGen(
+        no_nans=True,
+        special_cases=[DOUBLE_MIN, DOUBLE_MAX, 0.0, -0.0, float('nan')]),
+        min_length=1, max_length=1),
+        '(acc, x) -> acc * x', 'CAST(1 AS DOUBLE)'),
+], ids=['sum', 'product', 'max', 'min', 'byte-sum-corners', 'short-sum-corners',
+        'float-sum-corners', 'float-product-corners',
+        'double-sum-corners', 'double-product-corners'])
 @disable_ansi_mode
-def test_array_aggregate_numeric_ops(lambda_sql, init_sql, gen_max):
-    gen = IntegerGen(min_val=-gen_max, max_val=gen_max)
+def test_array_aggregate_numeric_ops(data_gen, lambda_sql, init_sql):
     def do_it(spark):
-        return unary_op_df(spark, ArrayGen(gen, max_length=8)).selectExpr(
+        return unary_op_df(spark, data_gen).selectExpr(
             f'aggregate(a, {init_sql}, {lambda_sql}) as res')
-    assert_gpu_and_cpu_are_equal_collect(do_it)
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it, exist_classes='GpuArrayAggregate',
+        conf={'spark.rapids.sql.variableFloatAgg.enabled': 'true'})
+
+
+@pytest.mark.parametrize('data_type, pack_format', [
+    ('float', '>f'),
+    ('double', '>d'),
+], ids=['float', 'double'])
+@disable_ansi_mode
+def test_array_sort_and_aggregate_signed_zero_bits(data_type, pack_format):
+    conf = {'spark.rapids.sql.variableFloatAgg.enabled': 'true'}
+
+    def do_it(spark):
+        return spark.createDataFrame(
+            [([-0.0, 0.0],)], f'a array<{data_type}>').selectExpr(
+                'array_sort(a) as sorted',
+                f'aggregate(a, CAST(1 AS {data_type}), (acc, x) -> acc * x) as product')
+
+    def canonicalize(cpu, gpu):
+        def to_raw_bits(rows):
+            return [
+                ([struct.pack(pack_format, value) for value in row.sorted],
+                 struct.pack(pack_format, row.product))
+                for row in rows
+            ]
+        return to_raw_bits(cpu), to_raw_bits(gpu)
+
+    # The shared float oracle treats signed zeros as equal. First require both GPU expressions,
+    # then compare the same deterministic results bit-for-bit in a second CPU/GPU run.
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it, exist_classes='GpuArraySort,GpuArrayAggregate', conf=conf)
+    assert_gpu_and_cpu_are_equal_collect(
+        do_it, conf=conf, result_canonicalize_func_before_compare=canonicalize)
 
 
 @pytest.mark.parametrize('gen, lambda_sql, init_sql', [
@@ -95,7 +165,7 @@ def test_array_aggregate_boolean_ops_nullable_zero():
     ('(acc, x) -> acc AND x', 'true'),
     ('(acc, x) -> acc OR x', 'false'),
 ], ids=['all', 'any'])
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('ArrayAggregate', 'LambdaFunction', 'NamedLambdaVariable', 'And', 'Or')
 def test_array_aggregate_boolean_ops_nullable_elements_fallback(lambda_sql, init_sql):
     assert_gpu_fallback_collect(
         lambda spark: unary_op_df(spark, ArrayGen(boolean_gen, max_length=8)).selectExpr(
@@ -109,7 +179,7 @@ def test_array_aggregate_boolean_ops_nullable_elements_fallback(lambda_sql, init
     ('''(acc, x) -> acc OR
           CASE WHEN x THEN CAST(NULL AS BOOLEAN) ELSE true END''', 'false'),
 ], ids=['all', 'any'])
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('ArrayAggregate', 'LambdaFunction', 'NamedLambdaVariable', 'And', 'Or', 'CaseWhen')
 def test_array_aggregate_boolean_ops_nullable_g_fallback(lambda_sql, init_sql):
     non_null_bool = BooleanGen(nullable=False)
     assert_gpu_fallback_collect(
@@ -124,6 +194,78 @@ def test_array_aggregate_count_if_int():
         lambda spark: unary_op_df(spark, ArrayGen(int_gen, max_length=15)).selectExpr(
             'aggregate(a, 0, (acc, x) -> acc + CASE WHEN x > 0 THEN 1 ELSE 0 END) as pos_cnt',
             'aggregate(a, 0L, (acc, x) -> acc + CAST(CASE WHEN x IS NULL THEN 1 ELSE 0 END as BIGINT)) as null_cnt'))
+
+
+@disable_ansi_mode
+def test_array_heterogeneous_elementwise_hof_mixed_project():
+    data_gen = ArrayGen(IntegerGen(min_val=-10, max_val=10), max_length=8)
+    def do_it(spark):
+        outer_gen = IntegerGen(min_val=-5, max_val=5)
+        return three_col_df(spark, data_gen, outer_gen, outer_gen).selectExpr(
+            'a',
+            'b',
+            'c',
+            'transform(a, item -> item + b) as plus_b',
+            'transform(a, item -> item + c) as plus_c',
+            'filter(a, item -> item is not null and item + b >= c) as filtered_b_ge_c',
+            'exists(a, item -> item is not null and item + c < b) as has_c_less_b')
+
+    assert_gpu_and_cpu_are_equal_collect(do_it)
+
+
+@disable_ansi_mode
+def test_array_hof_project_with_disjoint_outer_column_groups():
+    data_gen = ArrayGen(IntegerGen(min_val=-10, max_val=10), max_length=8)
+    def do_it(spark):
+        outer_gen = IntegerGen(min_val=-5, max_val=5)
+        return three_col_df(spark, data_gen, outer_gen, outer_gen).selectExpr(
+            'transform(a, item -> item + b) as plus_b',
+            'transform(a, item -> item + c) as plus_c',
+            'filter(a, item -> item is not null and item + b >= 0) as non_negative_b',
+            'exists(a, item -> item is not null and item + c < 0) as has_negative_c')
+
+    assert_gpu_and_cpu_are_equal_collect(do_it)
+
+
+@disable_ansi_mode
+def test_array_hof_mixed_project_with_aggregate():
+    data_gen = ArrayGen(IntegerGen(min_val=-10, max_val=10), max_length=8)
+    def do_it(spark):
+        return unary_op_df(spark, data_gen).selectExpr(
+            'transform(a, x -> x + 1) as plus_one',
+            'filter(a, x -> x is not null and x >= 0) as non_negative',
+            'exists(a, x -> x is not null and x < 0) as has_negative',
+            '''aggregate(a, 0L,
+                 (acc, x) -> acc + CAST(CASE WHEN x IS NULL THEN 0 ELSE x END AS BIGINT))
+               as sum_or_zero''')
+
+    assert_gpu_and_cpu_are_equal_collect(do_it)
+
+
+@disable_ansi_mode
+def test_array_hof_mixed_project_with_aggregate_outer_state():
+    data_gen = ArrayGen(IntegerGen(min_val=-10, max_val=10), max_length=8)
+    outer_gen = LongGen(min_val=-3, max_val=3, nullable=False)
+    def do_it(spark):
+        return two_col_df(spark, data_gen, outer_gen).selectExpr(
+            'transform(a, x -> coalesce(x, 0) + CAST(b AS INT)) as plus_b',
+            '''aggregate(a, b, (acc, x) -> acc +
+                 CAST(coalesce(x, 0) + CAST(b AS INT) AS BIGINT)) as sum_plus_b''')
+
+    assert_gpu_and_cpu_are_equal_collect(do_it)
+
+
+@disable_ansi_mode
+def test_array_hof_mixed_project_with_indexed_lambdas():
+    data_gen = ArrayGen(IntegerGen(min_val=-10, max_val=10), max_length=8)
+    outer_gen = IntegerGen(min_val=-3, max_val=3, nullable=False)
+    def do_it(spark):
+        return two_col_df(spark, data_gen, outer_gen).selectExpr(
+            'transform(a, (x, i) -> coalesce(x, 0) + i + b) as indexed_add',
+            'filter(a, (x, i) -> x is not null and x + i + b >= 0) as indexed_filter',
+            'transform(a, (x, i) -> i - coalesce(x, 0)) as index_minus_value')
+
+    assert_gpu_and_cpu_are_equal_collect(do_it)
 
 
 # `if(cond, acc + t, acc)` shape — branches lifted via op identity. Same count-if
@@ -177,6 +319,86 @@ def test_array_aggregate_with_filter_and_split():
 
 
 @disable_ansi_mode
+def test_array_aggregate_filtered_struct_with_nested_array_children():
+    element_gen = StructGen([
+        ('product_id', IntegerGen(nullable=False, min_val=0, max_val=2, special_cases=[0, 1, 2])),
+        ('score', IntegerGen(nullable=False, min_val=-100, max_val=100)),
+        ('nums', ArrayGen(IntegerGen(nullable=False), max_length=5, nullable=False)),
+        ('labels', ArrayGen(StringGen('[a-z]{1,3}', nullable=False),
+            max_length=5, nullable=False))
+    ], nullable=False)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: unary_op_df(spark, ArrayGen(element_gen, max_length=8)).selectExpr(
+            '''aggregate(
+                 filter(a, ad -> ad.product_id = 1),
+                 0L,
+                 (acc, ad) -> acc + CAST(ad.score AS BIGINT),
+                 id -> id) as total_score'''))
+
+
+@disable_ansi_mode
+def test_array_aggregate_filtered_struct_with_nested_map_children():
+    element_gen = StructGen([
+        ('product_id', IntegerGen(nullable=False, min_val=0, max_val=2, special_cases=[0, 1, 2])),
+        ('score', IntegerGen(nullable=False, min_val=-100, max_val=100)),
+        ('attrs', MapGen(StringGen('key_[0-9]', nullable=False),
+            IntegerGen(nullable=False), max_length=5, nullable=False))
+    ], nullable=False)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: unary_op_df(spark, ArrayGen(element_gen, max_length=8)).selectExpr(
+            '''aggregate(
+                 filter(a, ad -> ad.product_id = 1),
+                 0L,
+                 (acc, ad) -> acc +
+                   (CAST(ad.score AS BIGINT) + CAST(size(ad.attrs) AS BIGINT)),
+                 id -> id) as score_and_attr_count'''))
+
+
+@pytest.mark.parametrize('element_gen', [
+    ArrayGen(IntegerGen(nullable=False), max_length=5, nullable=False),
+    MapGen(StringGen('key_[0-9]', nullable=False),
+        IntegerGen(nullable=False), max_length=5, nullable=False)
+], ids=['array-element', 'map-element'])
+@disable_ansi_mode
+def test_array_aggregate_direct_nested_collection_elements(element_gen):
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: unary_op_df(spark, ArrayGen(element_gen, max_length=8)).selectExpr(
+            'aggregate(a, 0L, (acc, x) -> acc + CAST(size(x) AS BIGINT), id -> id) '
+            'as total_size'))
+
+
+@disable_ansi_mode
+def test_array_aggregate_nested_filter_and_aggregate_over_struct_array_field():
+    charge_info_gen = StringGen(
+        '[0-9]{1,2}\t[a-z]{2}\t(IGN_ZTC_CPA_CPC|MISS|-)', nullable=False
+    ).with_special_case('', weight=5.0)
+    element_gen = StructGen([
+        ('product_id', IntegerGen(nullable=False, min_val=0, max_val=2, special_cases=[0, 1, 2])),
+        ('im_ad_res_field', StructGen([
+            ('charge_info', ArrayGen(charge_info_gen, max_length=5, nullable=False))
+        ])),
+        ('unused_ids', ArrayGen(IntegerGen(nullable=False), max_length=5, nullable=False))
+    ], nullable=False)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: unary_op_df(spark, ArrayGen(element_gen, max_length=8)).selectExpr("""
+            aggregate(
+              filter(a, ad -> ad.product_id = 1 AND ad.im_ad_res_field IS NOT NULL),
+              0L,
+              (acc, ad) -> acc + coalesce(
+                aggregate(
+                  filter(ad.im_ad_res_field.charge_info, z -> z != ''),
+                  0L,
+                  (acc2, z) -> acc2 + CASE WHEN (
+                    size(split(z, '\t', -1)) > 2
+                    AND split(z, '\t', -1)[2] IN ('-', 'IGN_ZTC_CPA_CPC')
+                  ) THEN CAST(split(z, '\t', -1)[0] AS BIGINT) ELSE 0L END,
+                  id -> id),
+                0L),
+              id -> id
+            ) as charge_sum"""))
+
+
+@disable_ansi_mode
 def test_array_aggregate_non_zero_init():
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: unary_op_df(spark, ArrayGen(int_gen, max_length=10)).selectExpr(
@@ -210,7 +432,7 @@ def test_array_aggregate_extremum_nullable_zero_no_contribution():
     assert_gpu_and_cpu_are_equal_collect(do_it)
 
 
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('ArrayAggregate', 'LambdaFunction', 'NamedLambdaVariable', 'If', 'GreaterThan', 'Greatest', 'LessThan', 'Least')
 def test_array_aggregate_extremum_nullable_zero_bare_acc_fallback():
     def do_it(spark):
         return spark.createDataFrame(
@@ -276,7 +498,7 @@ def test_array_aggregate_long_overflow_wraps():
 
 
 @disable_ansi_mode
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('ArrayAggregate', 'LambdaFunction', 'NamedLambdaVariable', 'Add', 'Ascii')
 def test_array_aggregate_cpu_only_g_fallback():
     str_gen = StringGen(pattern='[A-Za-z]{1,5}', nullable=False)
     assert_gpu_fallback_collect(
@@ -285,8 +507,11 @@ def test_array_aggregate_cpu_only_g_fallback():
         'ArrayAggregate')
 
 
+# Spark 3.3 non-DB wraps decimal lambda arithmetic in CheckOverflow. CheckOverflow
+# blocks CPU bridge optimization, so the containing ProjectExec falls back there.
 @disable_ansi_mode
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu_conditional(is_before_spark_340() and not is_databricks_runtime(), 'ProjectExec')
+@allow_non_gpu('ArrayAggregate', 'LambdaFunction', 'NamedLambdaVariable', 'Add')
 def test_array_aggregate_decimal_sum_overflow_fallback():
     def do_it(spark):
         return spark.sql("""
@@ -306,7 +531,7 @@ def test_array_aggregate_decimal_sum_overflow_fallback():
     ('(acc, x) -> acc + acc * CAST(x as BIGINT)', '0L'),
 ], ids=['subtract', 'divide', 'greatest-3ary', 'g-refs-acc'])
 @disable_ansi_mode
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('ArrayAggregate', 'LambdaFunction', 'NamedLambdaVariable', 'Add', 'Subtract', 'Multiply', 'Divide', 'Greatest', 'Cast')
 def test_array_aggregate_fallback_shapes(lambda_sql, init_sql):
     assert_gpu_fallback_collect(
         lambda spark: unary_op_df(spark, ArrayGen(int_gen, max_length=5)).selectExpr(
@@ -314,7 +539,7 @@ def test_array_aggregate_fallback_shapes(lambda_sql, init_sql):
         'ArrayAggregate')
 
 
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('ArrayAggregate', 'LambdaFunction', 'NamedLambdaVariable', 'Add', 'Multiply', 'Cast')
 def test_array_aggregate_non_identity_finish_fallback():
     assert_gpu_fallback_collect(
         lambda spark: unary_op_df(spark, ArrayGen(int_gen, max_length=5)).selectExpr(
@@ -323,7 +548,7 @@ def test_array_aggregate_non_identity_finish_fallback():
 
 
 @disable_ansi_mode
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('ArrayAggregate', 'LambdaFunction', 'NamedLambdaVariable', 'Add', 'Cast')
 def test_array_aggregate_finish_cast_fallback():
     assert_gpu_fallback_collect(
         lambda spark: unary_op_df(
@@ -336,7 +561,7 @@ def test_array_aggregate_finish_cast_fallback():
     ('(acc, x) -> greatest(acc, x)', 'CAST("-Infinity" as DOUBLE)'),
     ('(acc, x) -> least(acc, x)', 'CAST("Infinity" as DOUBLE)'),
 ], ids=['max', 'min'])
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('ArrayAggregate', 'LambdaFunction', 'NamedLambdaVariable', 'Greatest', 'Least')
 def test_array_aggregate_double_extremum_fallback(lambda_sql, init_sql):
     assert_gpu_fallback_collect(
         lambda spark: unary_op_df(spark, ArrayGen(double_gen, max_length=5)).selectExpr(
@@ -355,7 +580,7 @@ def test_array_aggregate_double_extremum_fallback(lambda_sql, init_sql):
     (float_gen, '(acc, x) -> acc * x', 'CAST(1 as FLOAT)'),
     (double_gen, '(acc, x) -> acc * x', 'CAST(1 as DOUBLE)'),
 ], ids=['float-sum', 'double-sum', 'float-product', 'double-product'])
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu('ArrayAggregate', 'LambdaFunction', 'NamedLambdaVariable', 'Add', 'Multiply')
 def test_array_aggregate_float_sum_product_fallback_when_variable_float_agg_disabled(
         elem_gen, lambda_sql, init_sql):
     assert_gpu_fallback_collect(
@@ -379,7 +604,8 @@ def test_array_aggregate_float_sum_product_fallback_when_variable_float_agg_disa
     (DecimalGen(precision=10, scale=2, nullable=False),
         '(acc, x) -> acc + cast(x as decimal(38,2))', 'cast(0 as decimal(38,2))'),
 ], ids=['int-to-long-sum', 'long-sum', 'long-product', 'decimal-sum'])
-@allow_non_gpu('ProjectExec')
+@allow_non_gpu_conditional(is_before_spark_340() and not is_databricks_runtime(), 'ProjectExec')
+@allow_non_gpu('ArrayAggregate', 'LambdaFunction', 'NamedLambdaVariable', 'Add', 'Multiply', 'Cast')
 def test_array_aggregate_ansi_sum_product_fallback(elem_gen, lambda_sql, init_sql):
     assert_gpu_fallback_collect(
         lambda spark: unary_op_df(spark, ArrayGen(elem_gen, max_length=5)).selectExpr(

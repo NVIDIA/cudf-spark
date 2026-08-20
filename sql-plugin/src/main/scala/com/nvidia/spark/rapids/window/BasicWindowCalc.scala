@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,7 +27,8 @@ import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.shims.GpuWindowUtil
 
-import org.apache.spark.sql.catalyst.expressions.{Expression, FrameType, RangeFrame, RowFrame, SortOrder}
+import org.apache.spark.sql.catalyst.expressions.{CurrentRow, Expression, FrameType, NullsFirst,
+  RangeFrame, RowFrame, SortOrder}
 import org.apache.spark.sql.types.{ByteType, CalendarIntervalType, DataType, Decimal, DecimalType, DoubleType, FloatType, IntegerType, LongType, ShortType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 import org.apache.spark.unsafe.types.CalendarInterval
@@ -169,54 +170,92 @@ object GroupedAggregations {
       case RangeFrame =>
         // This gets to be a little more complicated
 
-        // We only support a single column to order by right now, so just verify that.
-        require(orderSpec.length == 1)
+        require(orderSpec.nonEmpty)
         require(orderPositions.length == orderSpec.length)
-        val orderExpr = orderSpec.head
 
-        // We only support basic types for now too
-        val orderType = GpuColumnVector.getNonNestedRapidsType(orderExpr.dataType)
+        if (orderSpec.length == 1) {
+          val orderExpr = orderSpec.head
 
-        val orderByIndex = orderPositions.head
-        val lower = getRangeBoundaryValue(frame.lower, orderType)
-        val upper = getRangeBoundaryValue(frame.upper, orderType)
+          // We only support basic types for now too
+          val orderType = GpuColumnVector.getNonNestedRapidsType(orderExpr.dataType)
 
-        withResource(asScalarRangeBoundary(orderType, lower)) { preceding =>
-          withResource(asScalarRangeBoundary(orderType, upper)) { following =>
-            val windowOptionBuilder = WindowOptions.builder()
-                .minPeriods(1) // Does not currently support custom minPeriods.
-                .orderByColumnIndex(orderByIndex)
+          val orderByIndex = orderPositions.head
+          val lower = getRangeBoundaryValue(frame.lower, orderType)
+          val upper = getRangeBoundaryValue(frame.upper, orderType)
 
-            if (preceding.isEmpty) {
-              windowOptionBuilder.unboundedPreceding()
-            } else {
-              if (orderType == DType.STRING) { // Bounded STRING bounds can only mean "CURRENT ROW".
-                windowOptionBuilder.currentRowPreceding()
+          withResource(asScalarRangeBoundary(orderType, lower)) { preceding =>
+            withResource(asScalarRangeBoundary(orderType, upper)) { following =>
+              val windowOptionBuilder = WindowOptions.builder()
+                  .minPeriods(1) // Does not currently support custom minPeriods.
+                  .orderByColumnIndex(orderByIndex)
+
+              if (preceding.isEmpty) {
+                windowOptionBuilder.unboundedPreceding()
               } else {
-                windowOptionBuilder.preceding(preceding.get)
+                // Bounded STRING bounds can only mean "CURRENT ROW".
+                if (orderType == DType.STRING) {
+                  windowOptionBuilder.currentRowPreceding()
+                } else {
+                  windowOptionBuilder.preceding(preceding.get)
+                }
               }
-            }
 
-            if (following.isEmpty) {
-              windowOptionBuilder.unboundedFollowing()
-            } else {
-              if (orderType == DType.STRING) { // Bounded STRING bounds can only mean "CURRENT ROW".
-                windowOptionBuilder.currentRowFollowing()
+              if (following.isEmpty) {
+                windowOptionBuilder.unboundedFollowing()
               } else {
-                windowOptionBuilder.following(following.get)
+                // Bounded STRING bounds can only mean "CURRENT ROW".
+                if (orderType == DType.STRING) {
+                  windowOptionBuilder.currentRowFollowing()
+                } else {
+                  windowOptionBuilder.following(following.get)
+                }
               }
-            }
 
-            if (orderExpr.isAscending) {
-              windowOptionBuilder.orderByAscending()
-            } else {
-              windowOptionBuilder.orderByDescending()
-            }
+              if (orderExpr.isAscending) {
+                windowOptionBuilder.orderByAscending()
+              } else {
+                windowOptionBuilder.orderByDescending()
+              }
 
-            windowOptionBuilder.build()
+              windowOptionBuilder.build()
+            }
           }
+        } else {
+          val ascending = orderSpec.map(_.isAscending).toArray
+          val nullsFirst = orderSpec.map(_.nullOrdering == NullsFirst).toArray
+          val windowOptionBuilder = WindowOptions.builder()
+              .minPeriods(1) // Does not currently support custom minPeriods.
+              .orderByColumns(
+                orderPositions.toArray,
+                ascending,
+                nullsFirst)
+
+          if (isUnbounded(frame.lower)) {
+            windowOptionBuilder.unboundedPreceding()
+          } else if (isCurrentRow(frame.lower)) {
+            windowOptionBuilder.currentRowPreceding()
+          } else {
+            throw new UnsupportedOperationException(
+              s"Unsupported multi-column RANGE lower-bound ${frame.lower}")
+          }
+
+          if (isUnbounded(frame.upper)) {
+            windowOptionBuilder.unboundedFollowing()
+          } else if (isCurrentRow(frame.upper)) {
+            windowOptionBuilder.currentRowFollowing()
+          } else {
+            throw new UnsupportedOperationException(
+              s"Unsupported multi-column RANGE upper-bound ${frame.upper}")
+          }
+
+          windowOptionBuilder.build()
         }
     }
+  }
+
+  private def isCurrentRow(boundary: Expression): Boolean = boundary match {
+    case special: GpuSpecialFrameBoundary => special.boundary == CurrentRow
+    case _ => false
   }
 
   private def isUnbounded(boundary: Expression): Boolean = boundary match {

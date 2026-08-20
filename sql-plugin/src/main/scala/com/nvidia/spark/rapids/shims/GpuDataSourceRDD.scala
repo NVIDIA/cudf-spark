@@ -20,10 +20,9 @@ import com.nvidia.spark.rapids.{MetricsBatchIterator, PartitionIterator}
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
 
 import org.apache.spark.{InterruptibleIterator, Partition, SparkContext, SparkException, TaskContext}
+import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.read.{InputPartition, PartitionReaderFactory}
-import org.apache.spark.sql.execution.datasources.v2.{DataSourceRDD, DataSourceRDDPartition}
-import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /**
@@ -37,11 +36,22 @@ class GpuDataSourceRDD(
     sc: SparkContext,
     @transient private val inputPartitions: Seq[Seq[InputPartition]],
     partitionReaderFactory: PartitionReaderFactory
-) extends DataSourceRDD(sc, inputPartitions, partitionReaderFactory, columnarReads = true,
-  Map.empty[String, SQLMetric]) {
-  private def castPartition(split: Partition): DataSourceRDDPartition = split match {
-    case p: DataSourceRDDPartition => p
-    case _ => throw new SparkException(s"[BUG] Not a DataSourceRDDPartition: $split")
+) extends RDD[InternalRow](sc, Nil) {
+  import GpuDataSourceRDD.GpuDataSourceRDDPartition
+
+  override protected def getPartitions: Array[Partition] = {
+    inputPartitions.zipWithIndex.map { case (parts, index) =>
+      GpuDataSourceRDDPartition(index, parts)
+    }.toArray
+  }
+
+  override def getPreferredLocations(split: Partition): Seq[String] = {
+    castPartition(split).inputPartitions.flatMap(_.preferredLocations()).distinct
+  }
+
+  private def castPartition(split: Partition): GpuDataSourceRDDPartition = split match {
+    case p: GpuDataSourceRDDPartition => p
+    case _ => throw new SparkException(s"[BUG] Not a GpuDataSourceRDDPartition: $split")
   }
 
   override def compute(split: Partition, context: TaskContext): Iterator[InternalRow] = {
@@ -85,6 +95,10 @@ class GpuDataSourceRDD(
 }
 
 object GpuDataSourceRDD {
+  private case class GpuDataSourceRDDPartition(
+      override val index: Int,
+      inputPartitions: Seq[InputPartition]) extends Partition
+
   def apply(
       sc: SparkContext,
       inputPartitions: Seq[InputPartition],

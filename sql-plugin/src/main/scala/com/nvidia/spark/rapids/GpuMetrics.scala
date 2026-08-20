@@ -191,7 +191,7 @@ object GpuMetric extends Logging {
   val DESCRIPTION_DELETION_VECTOR_SCATTER_TIME = "deletion vector scatter time"
   val DESCRIPTION_DELETION_VECTOR_SIZE = "deletion vector size"
   val DESCRIPTION_CPU_BRIDGE_PROCESSING_TIME = "CPU bridge processing time"
-  val DESCRIPTION_CPU_BRIDGE_WAIT_TIME = "CPU bridge wait time"
+  val DESCRIPTION_CPU_BRIDGE_WAIT_TIME = "CPU bridge elapsed time"
   val DESCRIPTION_COPY_TO_HOST_TIME = "deviceToHost memory copy time"
   val DESCRIPTION_READ_THROTTLING_TIME = "read throttling time"
 

@@ -905,6 +905,10 @@ object GeneratedInternalRowToCudfRowIterator extends Logging {
          |            input.hasNext());
          |      }
          |    }
+         |    // A cudf LIST column requires a terminal offset equal to the child data size, else
+         |    // offsets-reading consumers (e.g. chunked_pack when the batch spills) see a corrupt
+         |    // child extent. On the pending-row exit the slot already holds dataOffset (no-op).
+         |    offsetsBuffer.setInt((long) currentRow * 4, dataOffset);
          |    return new int[] {dataOffset, currentRow};
          |  }
          |

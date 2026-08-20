@@ -112,31 +112,26 @@ object SparkBenchRunner {
     val resultDir = new File(path).getParentFile
     if (resultDir != null) resultDir.mkdirs()
 
-    try {
-      import java.util.{LinkedHashMap => JLinkedHashMap, Arrays => JArrays}
-      val report = new JLinkedHashMap[String, AnyRef]()
-      report.put("mode", mode)
-      report.put("data_path", dataPath)
-      report.put("status", status)
-      report.put("e2e_runtime", java.lang.Double.valueOf(elapsed))
-      report.put("cli_args", JArrays.asList(cliArgs: _*))
-      errorMessage.foreach { msg =>
-        val error = new JLinkedHashMap[String, String]()
-        error.put("error_message", msg)
-        errorLogFile.foreach(f => error.put("error_log_file", f))
-        report.put("error", error)
-      }
-
-      val mapper = new ObjectMapper()
-      mapper.enable(SerializationFeature.INDENT_OUTPUT)
-      val printer = new DefaultPrettyPrinter()
-      printer.indentArraysWith(DefaultIndenter.SYSTEM_LINEFEED_INSTANCE)
-      mapper.writer(printer).writeValue(new File(path), report)
-      System.err.println(s"Report written to: $path")
-    } catch {
-      case e: Exception =>
-        System.err.println(s"Failed to write report: ${e.getMessage}")
+    import java.util.{LinkedHashMap => JLinkedHashMap, Arrays => JArrays}
+    val report = new JLinkedHashMap[String, AnyRef]()
+    report.put("mode", mode)
+    report.put("data_path", dataPath)
+    report.put("status", status)
+    report.put("e2e_runtime", java.lang.Double.valueOf(elapsed))
+    report.put("cli_args", JArrays.asList(cliArgs: _*))
+    errorMessage.foreach { msg =>
+      val error = new JLinkedHashMap[String, String]()
+      error.put("error_message", msg)
+      errorLogFile.foreach(f => error.put("error_log_file", f))
+      report.put("error", error)
     }
+
+    val mapper = new ObjectMapper()
+    mapper.enable(SerializationFeature.INDENT_OUTPUT)
+    val printer = new DefaultPrettyPrinter()
+    printer.indentArraysWith(DefaultIndenter.SYSTEM_LINEFEED_INSTANCE)
+    mapper.writer(printer).writeValue(new File(path), report)
+    System.err.println(s"Report written to: $path")
   }
 
   /** Write an exception to an error log file. */

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 package com.nvidia.spark.rapids
 
 import java.io.File
+import java.nio.charset.StandardCharsets.UTF_8
 
 import scala.collection.mutable.ListBuffer
 
@@ -24,10 +25,10 @@ import com.nvidia.spark.rapids.Arm.{withResource, withResourceIfAllowed}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.FileUtil.fullyDelete
 import org.apache.hadoop.fs.Path
-import org.apache.orc.{OrcFile, StripeInformation}
+import org.apache.orc.{OrcConf, OrcFile, StripeInformation}
 import org.apache.orc.impl.RecordReaderImpl
 
-import org.apache.spark.{SparkConf, SparkContext}
+import org.apache.spark.{SPARK_VERSION_SHORT, SparkConf, SparkContext}
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.rapids.{ExecutionPlanCaptureCallback, MyDenseVector, MyDenseVectorUDT}
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims._
@@ -72,6 +73,59 @@ class OrcQuerySuite extends SparkQueryCompareTestSuite {
     }
   }
 
+  Seq("orc", "").foreach { v1List =>
+    val sparkConf = new SparkConf().set("spark.sql.sources.useV1SourceList", v1List)
+    Seq(false, true).foreach { prolepticGregorian =>
+      Seq(
+        "struct" -> "named_struct('date', CAST('1001-01-01' AS DATE)) AS value",
+        "array" -> "array(CAST('1001-01-01' AS DATE)) AS value"
+      ).foreach { case (nestedType, selectExpr) =>
+        testGpuWriteFallback(
+          s"ORC date write falls back without calendar metadata, source list is ($v1List), " +
+            s"proleptic=$prolepticGregorian, nested type=$nestedType",
+          "DataWritingCommandExec",
+          spark => spark.range(1).selectExpr(selectExpr),
+          execsAllowedNonGpu = Seq(
+            "DataWritingCommandExec", "WriteFilesExec", "ShuffleExchangeExec"),
+          conf = sparkConf
+        ) { frame =>
+          withTempPath { outputPath =>
+            frame.write.mode("overwrite")
+              .option(OrcConf.PROLEPTIC_GREGORIAN.getAttribute, prolepticGregorian.toString)
+              .orc(outputPath.getCanonicalPath)
+          }
+        }
+      }
+    }
+  }
+
+  Seq("orc", "").foreach { v1List =>
+    val sparkConf = new SparkConf().set("spark.sql.sources.useV1SourceList", v1List)
+    test(s"Write Spark version into ORC file metadata, source list is ($v1List)") {
+      withGpuSparkSession({ spark =>
+        withTempPath { path =>
+          ExecutionPlanCaptureCallback.startCapture()
+          spark.range(1).repartition(1).write.orc(path.getCanonicalPath)
+          val plans = ExecutionPlanCaptureCallback.getResultsWithTimeout()
+          assert(plans.nonEmpty, "Did not capture GPU write plan")
+          ExecutionPlanCaptureCallback.assertContains(plans(0), "GpuDataWritingCommandExec")
+
+          val partFiles = path.listFiles()
+            .filter(f => f.isFile && !f.getName.startsWith(".") && !f.getName.startsWith("_"))
+          assert(partFiles.length === 1)
+
+          val orcFilePath = new Path(partFiles.head.getAbsolutePath)
+          val readerOptions = OrcFile.readerOptions(new Configuration())
+          withResourceIfAllowed(OrcFile.createReader(orcFilePath, readerOptions)) { reader =>
+            val version = UTF_8.decode(
+              reader.getMetadataValue("org.apache.spark.version")).toString
+            assert(version === SPARK_VERSION_SHORT)
+          }
+        }
+      }, sparkConf)
+    }
+  }
+
   /**
    * file meta is: struct<c0:int,c1:array<double>>,
    * The MyDenseVectorUDT type is converted to array<double> in the ORC file.
@@ -88,6 +142,35 @@ class OrcQuerySuite extends SparkQueryCompareTestSuite {
     }
   ) {
     frame => frame
+  }
+
+  Seq("orc", "").foreach { v1List =>
+    val sparkConf = new SparkConf().set("spark.sql.sources.useV1SourceList", v1List)
+    testSparkReadResultsAreEqual(
+      s"SPARK-36663 read numeric-only ORC field names, source list is ($v1List)",
+      (file: File) => (spark: SparkSession) => spark.read.orc(file.getCanonicalPath),
+      (spark: SparkSession, file: File) => {
+        spark.sql(
+          """
+            |SELECT
+            |  'a' AS `1`,
+            |  named_struct('20', 'b', '30', named_struct('40', 'c')) AS `50`,
+            |  array(named_struct('123', 'd')) AS `789`,
+            |  map('key', named_struct('456', 'e')) AS `012`
+          """.stripMargin)
+          .coalesce(1)
+          .write
+          .orc(file.getCanonicalPath)
+      },
+      conf = sparkConf,
+      existClasses = if (v1List == "orc") "GpuFileSourceScanExec" else "GpuBatchScan") { frame =>
+      frame.selectExpr(
+        "`1`",
+        "`50`.`20`",
+        "`50`.`30`.`40`",
+        "`789`[0].`123`",
+        "`012`['key'].`456`")
+    }
   }
 
   /**
