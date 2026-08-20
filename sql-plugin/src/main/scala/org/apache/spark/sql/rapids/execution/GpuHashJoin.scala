@@ -1326,6 +1326,13 @@ abstract class BaseHashJoinIterator(
       joinOptions.sizeEstimateThreshold,
       opTime = opTime,
       joinTime = joinTime) {
+  /**
+   * Initialize any state required when the stream iterator contains no batches.
+   * For regular hash joins no state is required. Stream-side outer joins need to
+   * mark all the build-side rows as unmatched so that the finalization emits them.
+   */
+  protected def onEmptyStream(): Unit = {}
+
   // We can cache the stats within an iterator because the build side is not changing
   protected lazy val buildStats: JoinBuildSideStats = buildStatsOpt
       .orElse(hashBackendProvider.readyStats).getOrElse {
@@ -1637,9 +1644,8 @@ abstract class BaseHashJoinIterator(
       cb: LazySpillableColumnarBatch,
       prepared: Option[PreparedJoinBatch]): Option[JoinGatherer] = {
     if (prepared.isEmpty) {
-      return withResource(prepareJoinBatch(cb)) { emptyBatch =>
-        createGatherer(cb, Some(emptyBatch))
-      }
+      onEmptyStream()
+      return None
     }
     val hashBatch = prepared.get.asInstanceOf[HashJoinBatch]
     // cb will be closed by the caller, so use a spill-only version here
@@ -2238,6 +2244,20 @@ class HashJoinStreamSideIterator(
   }
 
   private[this] var builtSideTracker: Option[SpillableColumnarBatch] = buildSideTrackerInit
+
+  override protected def onEmptyStream(): Unit = {
+    if (builtSideTracker.isEmpty) {
+      // No stream row could have matched, so directly initialize every build row as unmatched.
+      builtSideTracker = Some(withRetryNoSplit {
+        withResource(trueColumnTable(built.numRows)) { trackerTable =>
+          closeOnExcept(GpuColumnVector.from(
+            trackerTable, Array[DataType](DataTypes.BooleanType))) { trackerBatch =>
+            SpillableColumnarBatch(trackerBatch, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+          }
+        }
+      })
+    }
+  }
 
   private def computeUnconditionalDistinctJoin(
       leftKeys: Table,
