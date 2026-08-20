@@ -392,6 +392,28 @@ def test_dynamic_in_mixed_ast_support():
         exist_classes='GpuIn')
 
 
+def test_dynamic_in_allows_nondeterministic_value():
+    # The value is evaluated once before the list, so its nondeterminism does not affect ordering.
+    def do_it(spark):
+        return spark.range(10).selectExpr(
+            'rand(1) IN (id + 2, id + 3) AS result')
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it,
+        exist_classes='GpuIn')
+
+
+def test_dynamic_in_allows_side_effecting_value():
+    def do_it(spark):
+        return spark.createDataFrame([(1, 1, '1')], 'a int, b int, c string') \
+            .selectExpr('CAST(c AS INT) IN (b, a) AS result')
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it,
+        exist_classes='GpuIn',
+        conf={'spark.sql.ansi.enabled': 'true'})
+
+
 @allow_non_gpu('ProjectExec')
 def test_nondeterministic_dynamic_in_fallback():
     # GpuIn groups literals and eagerly projects dynamic candidates, so it cannot preserve
@@ -414,6 +436,33 @@ def test_ansi_side_effecting_dynamic_in_fallback():
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         do_it,
         exist_classes='GpuCpuBridgeExpression',
+        conf={'spark.sql.ansi.enabled': 'true'})
+
+
+@allow_non_gpu('In', 'Cast')
+def test_bridge_only_dynamic_in_candidate_fallback():
+    def do_it(spark):
+        return spark.createDataFrame([(1, 1, 'invalid')], 'a int, b int, c string') \
+            .selectExpr('a IN (b, CAST(c AS INT)) AS result')
+
+    assert_gpu_and_cpu_are_equal_collect(
+        do_it,
+        conf={
+            'spark.sql.ansi.enabled': 'true',
+            'spark.rapids.sql.expression.Cast': 'false'
+        })
+
+
+@allow_non_gpu('ProjectExec', 'In', 'Divide', 'Cast')
+def test_ansi_decimal_side_effecting_dynamic_in_fallback():
+    def do_it(spark):
+        rows = [(Decimal('1.00'), Decimal('1.00'), Decimal('1.00'), Decimal('0.00'))]
+        schema = 'a decimal(10, 2), b decimal(10, 2), c decimal(10, 2), d decimal(10, 2)'
+        return spark.createDataFrame(rows, schema).selectExpr(
+            'a IN (b, c / d) AS result')
+
+    assert_gpu_and_cpu_are_equal_collect(
+        do_it,
         conf={'spark.sql.ansi.enabled': 'true'})
 
 # We avoid testing inset with NaN in Spark < 3.1.3 since it has issue with NaN comparisons.

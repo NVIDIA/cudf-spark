@@ -2082,32 +2082,35 @@ object GpuOverrides extends Logging {
           TypeSig.comparable))),
       (in, conf, p, r) => new ExprMeta[In](in, conf, p, r) {
         private val allListItemsAreLiterals = in.list.forall(_.isInstanceOf[Literal])
+        private lazy val dynamicListItems = in.list.zip(childExprs.tail).filterNot {
+          case (expression, _) => expression.isInstanceOf[Literal]
+        }
 
         override def tagExprForGpu(): Unit = {
           if (!allListItemsAreLiterals) {
-            if (!in.deterministic) {
-              willNotWorkOnGpu("dynamic IN expressions must be deterministic")
-            } else if (childExprs.forall(_.canExprTreeBeReplaced) &&
-                childExprs.iterator.map(_.convertToGpu()).exists {
+            if (!dynamicListItems.forall(_._1.deterministic)) {
+              willNotWorkOnGpu("dynamic IN list expressions must be deterministic")
+            } else if (!dynamicListItems.forall(_._2.canExprTreeBeReplaced)) {
+              willNotWorkOnGpu("dynamic IN list expressions must run entirely on GPU")
+            } else if (dynamicListItems.iterator.map(_._2.convertToGpu()).exists {
                   case gpuExpression: GpuExpression => gpuExpression.hasSideEffects
                   case _ => false
                 }) {
-              willNotWorkOnGpu("dynamic IN expressions with side effects are not supported")
+              willNotWorkOnGpu(
+                "dynamic IN list expressions with side effects are not supported")
             }
           }
         }
 
         override def convertToGpuImpl(): GpuExpression = {
-          val gpuChildren = childExprs.map(_.convertToGpu())
+          val gpuValue = childExprs.head.convertToGpu()
           if (allListItemsAreLiterals) {
-            GpuInSet(gpuChildren.head, in.list.asInstanceOf[Seq[Literal]].map(_.value),
+            GpuInSet(gpuValue, in.list.asInstanceOf[Seq[Literal]].map(_.value),
               useInSetSemantics = false)
           } else {
             val literalValues = in.list.collect { case literal: Literal => literal.value }
-            val dynamicExpressions = in.list.zip(gpuChildren.tail).collect {
-              case (expression, gpuExpression) if !expression.isInstanceOf[Literal] => gpuExpression
-            }
-            GpuIn(gpuChildren.head, literalValues, dynamicExpressions)
+            val dynamicExpressions = dynamicListItems.map(_._2.convertToGpu())
+            GpuIn(gpuValue, literalValues, dynamicExpressions)
           }
         }
       }).note("Non-literal list expressions must be deterministic and side-effect-free"),

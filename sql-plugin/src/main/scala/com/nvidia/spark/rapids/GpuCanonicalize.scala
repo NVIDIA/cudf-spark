@@ -42,6 +42,11 @@ import org.apache.spark.sql.rapids.execution.TrampolineUtil
  *  This is essentially a copy of the Spark `Canonicalize` class but updated for GPU operators
  */
 object GpuCanonicalize {
+
+  private def orderLiteralValues(list: Seq[Any]): Seq[Any] = list.sortBy {
+    case null => 0
+    case nonNull => nonNull.hashCode()
+  }
   def execute(e: Expression): Expression = {
     expressionReorder(ignoreTimeZoneInCast(ignoreNamesTypes(e)))
   }
@@ -115,11 +120,11 @@ object GpuCanonicalize {
 
     // order the list in the In operator
     case GpuInSet(value, list, useInSetSemantics) if list.length > 1 =>
-      val orderedList = list.sortBy {
-        case null => 0
-        case nonNull => nonNull.hashCode()
-      }
-      GpuInSet(value, orderedList, useInSetSemantics)
+      GpuInSet(value, orderLiteralValues(list), useInSetSemantics)
+
+    case GpuIn(value, literals, dynamicList)
+        if literals.length + dynamicList.length > 1 =>
+      GpuIn(value, orderLiteralValues(literals), dynamicList.sortBy(_.hashCode()))
 
     case g: GpuGreatest =>
       val newChildren = orderCommutative(g, { case GpuGreatest(children) => children })
