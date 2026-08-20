@@ -602,6 +602,7 @@
             </activation>
             <properties>
                 <buildver>400</buildver>
+                <delta40x.version>4.0.0</delta40x.version>
                 <spark.version>${spark400.version}</spark.version>
                 <spark.test.version>${spark400.version}</spark.test.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
@@ -1016,7 +1017,7 @@
 
     <properties>
         <delta33x.version>3.3.0</delta33x.version>
-        <delta40x.version>4.0.0</delta40x.version>
+        <delta40x.version>4.0.1</delta40x.version>
         <delta40x.spark.artifactId>delta-spark_${scala.binary.version}</delta40x.spark.artifactId>
         <delta41x.version>4.1.0</delta41x.version>
         <delta41x.spark.artifactId>delta-spark_4.1_${scala.binary.version}</delta41x.spark.artifactId>

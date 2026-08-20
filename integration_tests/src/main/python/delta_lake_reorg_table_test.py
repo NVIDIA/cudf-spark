@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import json
+from urllib.parse import unquote, urlparse
 
 import pytest
 
@@ -249,9 +250,17 @@ def active_file_names(spark, path, predicate=None):
                df.selectExpr("input_file_name() AS file").distinct().collect())
 
 
+def spark_readable_file_name(file_name):
+    parsed = urlparse(file_name)
+    if parsed.scheme == "file" and not parsed.netloc:
+        return unquote(parsed.path)
+    return file_name
+
+
 def parquet_field_names(spark, files):
     assert files
-    return set(spark.read.parquet(*sorted(files)).schema.fieldNames())
+    readable_files = sorted(spark_readable_file_name(file_name) for file_name in files)
+    return set(spark.read.parquet(*readable_files).schema.fieldNames())
 
 
 @pytest.mark.parametrize("partitioned", [False, True], ids=["unpartitioned", "partitioned"])
