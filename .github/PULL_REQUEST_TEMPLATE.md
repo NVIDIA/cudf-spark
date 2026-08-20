@@ -1,8 +1,8 @@
 <!--
 
-Thank you for contributing to RAPIDS Accelerator for Apache Spark!
+Thank you for contributing to the NVIDIA cuDF plugin for Apache Spark!
 
-Please read https://github.com/NVIDIA/spark-rapids/blob/HEAD/CONTRIBUTING.md#creating-a-pull-request before making this PR.
+Please read https://github.com/NVIDIA/cudf-spark/blob/HEAD/CONTRIBUTING.md#creating-a-pull-request before making this PR.
 
 The following are the guidelines to help the review process go smoothly. Please read them carefully and fill out relevant information as much as possible.
 

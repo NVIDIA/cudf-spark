@@ -73,6 +73,15 @@ object GpuParquetFileFormat {
       spark: SparkSession,
       options: Map[String, String],
       schema: StructType): Option[GpuParquetFileFormat] = {
+    tagGpuSupport(meta, spark, options, spark.sparkContext.hadoopConfiguration, schema)
+  }
+
+  def tagGpuSupport(
+      meta: RapidsMeta[_, _, _],
+      spark: SparkSession,
+      options: Map[String, String],
+      hadoopConf: Configuration,
+      schema: StructType): Option[GpuParquetFileFormat] = {
 
     val sqlConf = spark.sessionState.conf
 
@@ -81,9 +90,9 @@ object GpuParquetFileFormat {
     // lookup encryption keys in the options, then Hadoop conf, then Spark runtime conf
     def lookupEncryptionConfig(key: String): String = {
       options.getOrElse(key, {
-        val hadoopConf = spark.sparkContext.hadoopConfiguration.get(key, "")
-        if (hadoopConf.nonEmpty) {
-          hadoopConf
+        val hadoopValue = hadoopConf.get(key, "")
+        if (hadoopValue.nonEmpty) {
+          hadoopValue
         } else {
           spark.conf.get(key, "")
         }
@@ -312,6 +321,11 @@ class GpuParquetFileFormat extends ColumnarFileFormat with Logging {
       RapidsConf.PARQUET_WRITER_ROW_GROUP_SIZE_ROWS.get(sqlConf)
     val parquetWriterRowGroupSizeBytes =
       RapidsConf.PARQUET_WRITER_ROW_GROUP_SIZE_BYTES.get(sqlConf)
+    val parquetWriterMaxDictionarySize =
+      RapidsConf.PARQUET_WRITER_MAX_DICTIONARY_SIZE.get(sqlConf)
+    val parquetWriterDictionaryPolicy =
+      RapidsConf.PARQUET_WRITER_DICTIONARY_POLICY.get(sqlConf)
+        .map(ParquetWriterOptions.DictionaryPolicy.valueOf)
 
     new ColumnarOutputWriterFactory {
         override def newInstance(
@@ -323,7 +337,8 @@ class GpuParquetFileFormat extends ColumnarFileFormat with Logging {
           fileIO: RapidsFileIO): ColumnarOutputWriter = {
         new GpuParquetWriter(path, dataSchema, compressionType, outputTimestampType.toString,
           dateTimeRebaseMode, timestampRebaseMode, context, parquetFieldIdWriteEnabled,
-          parquetWriterRowGroupSizeRows, parquetWriterRowGroupSizeBytes, statsTrackers,
+          parquetWriterRowGroupSizeRows, parquetWriterRowGroupSizeBytes,
+          parquetWriterMaxDictionarySize, parquetWriterDictionaryPolicy, statsTrackers,
           debugOutputPath, holdGpuBetweenBatches, asyncOutputWriteEnabled, fileIO)
       }
 
@@ -350,6 +365,8 @@ class GpuParquetWriter(
     parquetFieldIdEnabled: Boolean,
     parquetWriterRowGroupSizeRows: Option[Integer],
     parquetWriterRowGroupSizeBytes: Option[Long],
+    parquetWriterMaxDictionarySize: Option[Long],
+    parquetWriterDictionaryPolicy: Option[ParquetWriterOptions.DictionaryPolicy],
     statsTrackers: Seq[ColumnarWriteTaskStatsTracker],
     debugDumpPath: Option[String],
     holdGpuBetweenBatches: Boolean,
@@ -448,6 +465,12 @@ class GpuParquetWriter(
     }
     parquetWriterRowGroupSizeBytes.foreach { rowGroupSizeBytes =>
       builder.withRowGroupSizeBytes(rowGroupSizeBytes)
+    }
+    parquetWriterMaxDictionarySize.foreach { maxDictionarySize =>
+      builder.withMaxDictionarySize(maxDictionarySize)
+    }
+    parquetWriterDictionaryPolicy.foreach { dictionaryPolicy =>
+      builder.withDictionaryPolicy(dictionaryPolicy)
     }
     Table.writeParquetChunked(builder.build(), this)
   }

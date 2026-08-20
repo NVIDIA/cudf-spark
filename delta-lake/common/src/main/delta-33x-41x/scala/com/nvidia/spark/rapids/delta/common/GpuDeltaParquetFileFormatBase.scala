@@ -221,7 +221,7 @@ class GpuDeltaParquetFileFormatBase(
       logWarning("Coalescing is not supported when `delta.enableDeletionVectors=true`, " +
         "using the multi-threaded reader. For more details on the Parquet reader types " +
         "please look at 'spark.rapids.sql.format.parquet.reader.type' config at " +
-        "https://nvidia.github.io/spark-rapids/docs/additional-functionality/advanced_configs.html")
+        "https://nvidia.github.io/cudf-spark/docs/additional-functionality/advanced_configs.html")
     }
 
     new DeltaMultiFileReaderFactory(

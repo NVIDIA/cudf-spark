@@ -12,22 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import pyarrow.parquet as pa_pq
+def copy_from_local(spark, local_source, hdfs_target):
+    """Copy a local path onto the Hadoop FS used by spark_tmp_path (e.g. GCS on Dataproc)."""
+    sc = spark.sparkContext
+    Path = sc._jvm.org.apache.hadoop.fs.Path
+    config = sc._jsc.hadoopConfiguration()
+    fs = sc._jvm.org.apache.hadoop.fs.FileSystem.get(config)
+    fs.copyFromLocalFile(Path(local_source), Path(hdfs_target))
 
 
-def parquet_row_group_midpoints(path):
+def parquet_row_group_midpoints(spark, path):
     """Returns an approximate byte midpoint for each Parquet row group."""
-    meta = pa_pq.read_metadata(path)
-    midpoints = []
-    for rg_index in range(meta.num_row_groups):
-        row_group = meta.row_group(rg_index)
-        first_col = row_group.column(0)
-        start = first_col.data_page_offset
-        dict_offset = first_col.dictionary_page_offset
-        if dict_offset is not None and dict_offset > 0:
-            start = min(start, dict_offset)
-        total_size = 0
-        for col_index in range(row_group.num_columns):
-            total_size += row_group.column(col_index).total_compressed_size
-        midpoints.append(start + total_size // 2)
-    return midpoints
+    jvm = spark.sparkContext._jvm
+    hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
+    hadoop_path = jvm.org.apache.hadoop.fs.Path(path)
+    reader = jvm.org.apache.parquet.hadoop.ParquetFileReader.open(
+        hadoop_conf, hadoop_path)
+    try:
+        blocks = reader.getFooter().getBlocks()
+        return [
+            block.getStartingPos() + block.getCompressedSize() // 2
+            for block in blocks
+        ]
+    finally:
+        reader.close()

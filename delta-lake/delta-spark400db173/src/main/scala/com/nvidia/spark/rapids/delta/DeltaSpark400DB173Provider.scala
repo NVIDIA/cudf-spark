@@ -25,15 +25,19 @@ import com.databricks.sql.execution.metric.IncrementMetric
 import com.databricks.sql.transaction.tahoe.{DeltaConfigs, DeltaOptions}
 import com.databricks.sql.transaction.tahoe.DeltaParquetFileFormat
 import com.databricks.sql.transaction.tahoe.commands.{OptimizeTableCommand,
-  OptimizeTableCommandEdge, WriteIntoDeltaEdge}
+  OptimizeTableCommandEdge, WriteIntoDeltaCommand, WriteIntoDeltaEdge}
 import com.databricks.sql.transaction.tahoe.coordinatedcommits.{
   CatalogOwnedTableUtils,
   CoordinatedCommitsUtils
 }
 import com.databricks.sql.transaction.tahoe.rapids.{
+  GpuCheckOverflowInTableWrite,
   GpuDeltaLog,
   GpuDeltaV1Write,
-  GpuWriteIntoDelta
+  GpuLiquidOptimizeWriteContext,
+  GpuLiquidOptimizeWriteIntoDeltaCommandMeta,
+  GpuWriteIntoDelta,
+  GpuWriteIntoDeltaCommandMeta
 }
 import com.databricks.sql.transaction.tahoe.sources.DeltaSQLConf
 import com.nvidia.spark.rapids._
@@ -53,12 +57,23 @@ import org.apache.spark.sql.catalyst.expressions.{
 }
 import org.apache.spark.sql.catalyst.plans.logical.TableSpec
 import org.apache.spark.sql.connector.write.V1Write
-import org.apache.spark.sql.execution.{FileSourceScanExec, FilterExec, ProjectExec, SparkPlan}
-import org.apache.spark.sql.execution.command.RunnableCommand
+import org.apache.spark.sql.execution.{
+  ColumnarToRowExec,
+  FileSourceScanExec,
+  FilterExec,
+  ProjectExec,
+  RowToColumnarExec,
+  SparkPlan
+}
+import org.apache.spark.sql.execution.command.{DataWritingCommand, RunnableCommand}
 import org.apache.spark.sql.execution.datasources.{FileFormat, HadoopFsRelation, LogicalRelation}
 import org.apache.spark.sql.execution.datasources.v2.{
   AtomicCreateTableAsSelectExec,
   AtomicReplaceTableAsSelectExec
+}
+import org.apache.spark.sql.execution.datasources.v2.rapids.{
+  GpuAtomicCreateTableAsSelectExec,
+  GpuAtomicReplaceTableAsSelectExec
 }
 import org.apache.spark.sql.rapids.{GpuAnd, GpuEqualTo, GpuFileSourceScanExec, GpuNot}
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims
@@ -66,6 +81,24 @@ import org.apache.spark.sql.sources.InsertableRelation
 import org.apache.spark.sql.types.StructType
 
 object DeltaSpark400DB173Provider extends DatabricksDeltaProviderBase {
+
+  override def getDataWritingCommandRules: Map[Class[_ <: DataWritingCommand],
+      DataWritingCommandRule[_ <: DataWritingCommand]] = {
+    Seq(
+      GpuOverrides.dataWriteCmd[WriteIntoDeltaCommand](
+        "Write files for a DBR Delta transaction",
+        (a, conf, p, r) => if (GpuLiquidOptimizeWriteContext.isActive) {
+          new GpuLiquidOptimizeWriteIntoDeltaCommandMeta(a, conf, p, r)
+        } else {
+          new GpuWriteIntoDeltaCommandMeta(a, conf, p, r)
+        })
+    ).map(r => (r.getClassFor.asSubclass(classOf[DataWritingCommand]), r)).toMap
+  }
+
+  override def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
+    val rule = GpuCheckOverflowInTableWrite.exprRule
+    super.getExprs + (rule.getClassFor.asSubclass(classOf[Expression]) -> rule)
+  }
 
   override def getRunnableCommandRules: Map[Class[_ <: RunnableCommand],
       RunnableCommandRule[_ <: RunnableCommand]] = {
@@ -89,7 +122,7 @@ object DeltaSpark400DB173Provider extends DatabricksDeltaProviderBase {
   override def getReadFileFormat(
       relation: HadoopFsRelation, rapidsConf: RapidsConf): FileFormat = {
     val fmt = relation.fileFormat.asInstanceOf[DeltaParquetFileFormat]
-    if (canPushDVPredicateDownToScan(rapidsConf)) {
+    if (isPushDVPredicateDownEnabled(rapidsConf)) {
       GpuDeltaParquetFileFormatNativeDV(
         relation = relation,
         protocol = fmt.protocol,
@@ -106,7 +139,7 @@ object DeltaSpark400DB173Provider extends DatabricksDeltaProviderBase {
     }
   }
 
-  override def canPushDVPredicateDownToScan(conf: RapidsConf): Boolean = {
+  override def isPushDVPredicateDownEnabled(conf: RapidsConf): Boolean = {
     val dvConf = DeltaSQLConf.DELETION_VECTORS_USE_METADATA_ROW_INDEX
     val useMetadataRowIndex = conf.getStr(dvConf.key)
       .getOrElse(dvConf.defaultValueString).toBoolean
@@ -116,12 +149,24 @@ object DeltaSpark400DB173Provider extends DatabricksDeltaProviderBase {
     useMetadataRowIndex && conf.isDeltaDeletionVectorPredicatePushdownEnabled
   }
 
-  override def pushDVPredicateDownToScan(plan: SparkPlan): SparkPlan = {
+  override def tryPushDVPredicateDownToScan(plan: SparkPlan): SparkPlan = {
     val pushed = DB173DVPredicatePushdown.pushToScan(plan)
     DB173DVPredicatePushdown.mergeIdenticalProjects(pushed)
   }
 
   override def pruneFileMetadata(plan: SparkPlan): SparkPlan = {
+    def pruneMetadataProject(
+        project: GpuProjectExec,
+        scan: GpuFileSourceScanExec): SparkPlan = {
+      project.copy(projectList = project.projectList.filterNot(_.name == "_metadata"))
+        .withNewChildren(Seq(
+          scan.copy(
+            originalOutput = scan.originalOutput.filterNot(_.name == "_tmp_metadata_row_index"),
+            requiredSchema = StructType(
+              scan.requiredSchema.filterNot(_.name == "_tmp_metadata_row_index")
+            ))(scan.rapidsConf)))
+    }
+
     plan match {
       case dvRoot @ GpuProjectExec(outputList,
       dvFilter @ GpuFilterExec(condition,
@@ -131,14 +176,30 @@ object DeltaSpark400DB173Provider extends DatabricksDeltaProviderBase {
           inputList.exists(_.name == "_metadata") =>
         dvRoot.withNewChildren(Seq(
           dvFilter.withNewChildren(Seq(
-            dvFilterInput.copy(projectList = inputList.filterNot(_.name == "_metadata"))
-              .withNewChildren(Seq(
-                fsse.copy(
-                  originalOutput = fsse.originalOutput
-                    .filterNot(_.name == "_tmp_metadata_row_index"),
-                  requiredSchema = StructType(fsse.requiredSchema
-                    .filterNot(_.name == "_tmp_metadata_row_index"))
-                )(fsse.rapidsConf)))))))
+            pruneMetadataProject(dvFilterInput, fsse)))))
+      // Defensive match for a CPU FilterExec shape before GPU/CPU transitions are inserted.
+      case dvRoot @ GpuProjectExec(outputList,
+      dvFilter @ FilterExec(condition,
+      dvFilterInput @ GpuProjectExec(inputList, fsse: GpuFileSourceScanExec, _)), _)
+          if condition.references.exists(ref => isDeletionVectorSkipRowColumn(ref.name)) &&
+          !outputList.flatMap(_.references).exists(_.name == "_metadata") &&
+          inputList.exists(_.name == "_metadata") =>
+        dvRoot.withNewChildren(Seq(
+          dvFilter.withNewChildren(Seq(
+            pruneMetadataProject(dvFilterInput, fsse)))))
+      case dvRoot @ GpuProjectExec(outputList,
+      rowToCol @ RowToColumnarExec(
+      dvFilter @ FilterExec(condition,
+      colToRow @ ColumnarToRowExec(
+      dvFilterInput @ GpuProjectExec(inputList, fsse: GpuFileSourceScanExec, _)))), _)
+          if condition.references.exists(ref => isDeletionVectorSkipRowColumn(ref.name)) &&
+          !outputList.flatMap(_.references).exists(_.name == "_metadata") &&
+          inputList.exists(_.name == "_metadata") =>
+        dvRoot.withNewChildren(Seq(
+          rowToCol.withNewChildren(Seq(
+            dvFilter.withNewChildren(Seq(
+              colToRow.withNewChildren(Seq(
+                pruneMetadataProject(dvFilterInput, fsse)))))))))
       case _ =>
         plan.withNewChildren(plan.children.map(pruneFileMetadata))
     }
@@ -211,10 +272,20 @@ object DeltaSpark400DB173Provider extends DatabricksDeltaProviderBase {
       meta: AtomicCreateTableAsSelectExecMeta): Unit = {
     tagDB173UnsupportedTableSpec(meta, cpuExec.tableSpec, cpuExec.session)
     super.tagForGpu(cpuExec, meta)
-    if (meta.canThisBeReplaced) {
-      meta.willNotWorkOnGpu(
-        "Delta CTAS is not yet supported on GPU for DB-17.3")
-    }
+  }
+
+  override def convertToGpu(
+      cpuExec: AtomicCreateTableAsSelectExec,
+      meta: AtomicCreateTableAsSelectExecMeta): GpuExec = {
+    GpuAtomicCreateTableAsSelectExec(
+      cpuExec.output,
+      cpuExec.catalog,
+      cpuExec.ident,
+      cpuExec.partitioning,
+      cpuExec.query,
+      cpuExec.tableSpec,
+      cpuExec.writeOptions,
+      cpuExec.ifNotExists)
   }
 
   override def tagForGpu(
@@ -222,15 +293,26 @@ object DeltaSpark400DB173Provider extends DatabricksDeltaProviderBase {
       meta: AtomicReplaceTableAsSelectExecMeta): Unit = {
     tagDB173UnsupportedTableSpec(meta, cpuExec.tableSpec, cpuExec.session)
     super.tagForGpu(cpuExec, meta)
-    if (meta.canThisBeReplaced) {
-      meta.willNotWorkOnGpu(
-        "Delta RTAS is not yet supported on GPU for DB-17.3")
-    }
   }
 
-  // Keep CTAS/RTAS on CPU for DB-17.3 until GpuCreateDeltaTableCommand preserves the new
-  // table-creation semantics. The feature-specific tags below make explain output name the
-  // exact unsupported Delta feature instead of only the broad CTAS/RTAS fallback:
+  override def convertToGpu(
+      cpuExec: AtomicReplaceTableAsSelectExec,
+      meta: AtomicReplaceTableAsSelectExecMeta): GpuExec = {
+    GpuAtomicReplaceTableAsSelectExec(
+      cpuExec.output,
+      cpuExec.catalog,
+      cpuExec.ident,
+      cpuExec.partitioning,
+      cpuExec.query,
+      cpuExec.tableSpec,
+      cpuExec.writeOptions,
+      cpuExec.orCreate,
+      cpuExec.invalidateCache)
+  }
+
+  // The atomic wrappers retain DBR's native catalog and staged table, but these table-creation
+  // features remain fail-closed until their native metadata and catalog paths have dedicated
+  // correctness coverage:
   //   - row filter / column mask             -> https://github.com/NVIDIA/spark-rapids/issues/14601
   //   - catalog-owned / coordinated commits  -> https://github.com/NVIDIA/spark-rapids/issues/14601
   //   - liquid clustering / auto TTL         -> https://github.com/NVIDIA/spark-rapids/issues/14599
@@ -434,7 +516,10 @@ private object DB173DVPredicatePushdown extends ShimPredicateHelper {
       GpuProjectExec(projList2, child, enablePreSplit1), enablePreSplit2) =>
         val projSet1 = projList1.map(_.exprId).toSet
         val projSet2 = projList2.map(_.exprId).toSet
-        if (projSet1 == projSet2) {
+        // An Alias carries the exprId it defines, so equal exprId sets do not imply
+        // identical projections: merging over an alias-computing child would drop the
+        // alias's only producer ("Couldn't find <attr>"). Merge only pure pass-throughs.
+        if (projSet1 == projSet2 && projList2.forall(_.isInstanceOf[AttributeReference])) {
           GpuProjectExec(projList1, child, enablePreSplit1 && enablePreSplit2)
         } else {
           p

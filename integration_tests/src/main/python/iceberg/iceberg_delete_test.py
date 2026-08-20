@@ -19,9 +19,11 @@ from conftest import is_iceberg_remote_catalog
 from data_gen import *
 from iceberg import (create_iceberg_table, get_full_table_name, iceberg_write_enabled_conf,
                      iceberg_base_table_cols, iceberg_gens_list, iceberg_nested_write_gens_list,
-                     iceberg_unsupported_mark, delete_partition_transforms_distributed)
+                     iceberg_unsupported_mark, delete_partition_transforms_distributed,
+                     _build_tblprops, assert_iceberg_files_use_codec,
+                     supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON)
 from marks import allow_non_gpu, allow_non_gpu_conditional, iceberg, ignore_order, datagen_overrides
-from spark_session import is_spark_400_or_later, with_cpu_session, with_gpu_session
+from spark_session import is_spark_35x, is_spark_400_or_later, with_cpu_session, with_gpu_session
 
 pytestmark = iceberg_unsupported_mark
 
@@ -122,6 +124,47 @@ def test_iceberg_delete_unpartitioned_table(spark_tmp_table_factory, delete_mode
         lambda spark, table: spark.sql(f"DELETE FROM {table} WHERE _c2 % 3 = 0"),
         delete_mode=delete_mode
     )
+
+
+@allow_non_gpu(
+    "ReplaceDataExec", "WriteDeltaExec", "BatchScanExec", "ShuffleExchangeExec",
+    "SortExec", "ProjectExec", "ColumnarToRowExec")
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@ignore_order(local=True)
+@pytest.mark.parametrize('delete_mode,fallback_exec', [
+    pytest.param(
+        'copy-on-write',
+        'ReplaceDataExec',
+        marks=pytest.mark.xfail(
+            condition=is_spark_35x(),
+            reason="https://github.com/NVIDIA/cudf-spark/issues/15680"),
+        id='cow'),
+    pytest.param('merge-on-read', 'WriteDeltaExec', id='mor')
+])
+@allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
+def test_iceberg_delete_v3_table_fallback(
+        spark_tmp_table_factory, delete_mode, fallback_exec):
+    base_table_name = get_full_table_name(spark_tmp_table_factory)
+    create_iceberg_table_with_data(
+        f"{base_table_name}_cpu",
+        table_properties={"format-version": "3"},
+        delete_mode=delete_mode)
+    create_iceberg_table_with_data(
+        f"{base_table_name}_gpu",
+        table_properties={"format-version": "3"},
+        delete_mode=delete_mode)
+
+    def delete_data(spark, table_name):
+        spark.sql(f"DELETE FROM {table_name} WHERE _c2 % 3 = 0")
+
+    assert_gpu_fallback_write_sql(
+        delete_data,
+        lambda spark, table_name: spark.sql(f"SELECT * FROM {table_name}"),
+        base_table_name,
+        [fallback_exec],
+        conf=iceberg_delete_cow_enabled_conf)
+
 
 def _do_test_iceberg_delete_partitioned_table(spark_tmp_table_factory, partition_col_sql, delete_mode, table_properties=None):
     """Helper function for partitioned table DELETE tests."""
@@ -314,7 +357,6 @@ def test_iceberg_delete_nested_types(spark_tmp_table_factory, delete_mode):
     pytest.param('copy-on-write', 'ReplaceDataExec', id='cow'),
     pytest.param('merge-on-read', 'WriteDeltaExec', id='mor')
 ])
-@pytest.mark.xfail(reason="https://github.com/NVIDIA/spark-rapids/issues/13649")
 def test_iceberg_delete_fallback_iceberg_disabled(spark_tmp_table_factory, delete_mode, fallback_exec):
     """Test DELETE falls back when Iceberg is completely disabled (both modes)"""
     base_table_name = get_full_table_name(spark_tmp_table_factory)
@@ -486,3 +528,87 @@ def test_iceberg_delete_partitioned_table_fanout_enabled(spark_tmp_table_factory
         partition_col_sql="bucket(2, _c9)",
         delete_mode='copy-on-write',
         table_properties={"write.spark.fanout.enabled": "true"})
+
+
+# Regression for the GpuSparkPositionDeltaWrite branch of issue #14905.
+# `test_insert_into_table_honors_iceberg_compression_codec` covers the append path
+# (`GpuSparkWrite.createDataWriterFactory`); this test covers MoR DELETE which
+# instead goes through `GpuSparkPositionDeltaWrite.createDeltaWriterFactory` and
+# writes position-delete files.
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
+@pytest.mark.parametrize("table_codec,expected_codec", [
+    (None, "zstd"),
+    ("zstd", "zstd"),
+    ("uncompressed", "uncompressed")])
+def test_mor_delete_honors_iceberg_compression_codec(
+        spark_tmp_table_factory, table_codec, expected_codec):
+    table_name = get_full_table_name(spark_tmp_table_factory)
+    extra_props = {"format-version": "2", "write.delete.mode": "merge-on-read"}
+    if table_codec is not None:
+        extra_props["write.parquet.compression-codec"] = table_codec
+
+    def create_and_populate(spark):
+        props = _build_tblprops(extra_props)
+        props_sql = ", ".join(f"'{k}' = '{v}'" for k, v in props.items())
+        spark.sql(f"CREATE TABLE {table_name} (id int, name string) USING ICEBERG "
+                  f"TBLPROPERTIES ({props_sql})")
+        # Enough rows that the position-delete files (one row per deleted record)
+        # cross cuDF's compression threshold — see rapidsai/cudf#14017.
+        spark.sql(f"INSERT INTO {table_name} SELECT id, CAST(id AS STRING) FROM range(40000)")
+
+    with_cpu_session(create_and_populate)
+
+    leaky_codec = "snappy" if expected_codec != "snappy" else "uncompressed"
+    conf = copy_and_update(iceberg_write_enabled_conf,
+                           {"spark.sql.parquet.compression.codec": leaky_codec})
+
+    # `id % 3 = 0` cannot be answered from per-file min/max metadata, so Iceberg must
+    # actually scan rows and emit position-deletes via GpuSparkPositionDeltaWrite (a
+    # range-bound predicate like `id < N` would be served by DeleteFromTableExec).
+    with_gpu_session(
+        lambda spark: spark.sql(f"DELETE FROM {table_name} WHERE id % 3 = 0").collect(),
+        conf=conf)
+
+    with_cpu_session(
+        lambda spark: assert_iceberg_files_use_codec(
+            spark, table_name, expected_codec, files_table="delete_files"))
+
+
+# When the resolved delete codec (write.delete.parquet.compression-codec) differs from the
+# data codec, the GPU position-delta writer cannot honor both — it builds a single
+# ColumnarOutputWriterFactory shared by data and delete files. So it must fall back to CPU
+# rather than silently writing delete files with the data codec. Regression for #14905.
+@allow_non_gpu("WriteDeltaExec", "BatchScanExec", "ShuffleExchangeExec", "SortExec",
+               "ProjectExec", "ColumnarToRowExec")
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.datagen_overrides(seed=DELETE_TEST_SEED, reason=DELETE_TEST_SEED_OVERRIDE_REASON)
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
+def test_mor_delete_falls_back_on_divergent_delete_codec(spark_tmp_table_factory):
+    base_table_name = get_full_table_name(spark_tmp_table_factory)
+    cpu_table_name = f"{base_table_name}_cpu"
+    gpu_table_name = f"{base_table_name}_gpu"
+    # Data codec zstd, delete codec uncompressed — both GPU-supported individually, but
+    # differ, so the single-factory GPU writer cannot reproduce CPU Iceberg's output.
+    divergent_codecs = {
+        "write.parquet.compression-codec": "zstd",
+        "write.delete.parquet.compression-codec": "uncompressed",
+    }
+    create_iceberg_table_with_data(cpu_table_name, delete_mode="merge-on-read",
+                                   table_properties=divergent_codecs)
+    create_iceberg_table_with_data(gpu_table_name, delete_mode="merge-on-read",
+                                   table_properties=divergent_codecs)
+
+    def write_func(spark, table_name):
+        spark.sql(f"DELETE FROM {table_name} WHERE _c2 % 3 = 0")
+
+    def read_func(spark, table_name):
+        return spark.sql(f"SELECT * FROM {table_name}")
+
+    # WriteDeltaExec is enabled by iceberg_delete_mor_enabled_conf, so the divergent-codec
+    # guard is the only reason it can fall back here.
+    assert_gpu_fallback_write_sql(
+        write_func, read_func, base_table_name, ["WriteDeltaExec"],
+        conf=iceberg_delete_mor_enabled_conf)

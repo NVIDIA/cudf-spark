@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -883,13 +883,13 @@ object NvtxRangeDocs {
     println("---")
     MarkdownUtils.printApacheSparkVersion("NvtxRangeDocs.help")
     // scalastyle:off line.size.limit
-    println("""# RAPIDS Accelerator for Apache Spark Nvtx Range Glossary
+    println("""# NVIDIA cuDF plugin for Apache Spark Nvtx Range Glossary
               |The following is the list of Nvtx ranges that are used throughout
               |the plugin. To add your own Nvtx range to the code, create an NvtxId
               |entry in NvtxRangeWithDoc.scala and create an `NvtxRangeWithDoc` in the
               |code location that you want to cover, passing in the newly created NvtxId.
               |
-              |See [nvtx_profiling.md](https://nvidia.github.io/spark-rapids/docs/dev/nvtx_profiling.html) for more info.
+              |See [nvtx_profiling.md](https://nvidia.github.io/cudf-spark/docs/dev/nvtx_profiling.html) for more info.
               |
               |""".stripMargin)
     // scalastyle:on line.size.limit

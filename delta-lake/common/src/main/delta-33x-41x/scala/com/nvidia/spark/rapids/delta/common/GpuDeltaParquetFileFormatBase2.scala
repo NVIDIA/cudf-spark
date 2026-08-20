@@ -214,7 +214,7 @@ class GpuDeltaParquetFileFormatBase2(
       filters: Array[Filter],
       @transient rapidsConf: RapidsConf,
       metrics: Map[String, GpuMetric],
-      params: Map[String, String]
+      @transient params: Map[String, String]
   ) extends GpuParquetPartitionReaderFactoryBase(sqlConf, broadcastedConf, dataSchema,
     readDataSchema, partitionSchema, rapidsConf, metrics = metrics, params = params) {
 
@@ -264,6 +264,29 @@ class GpuDeltaParquetFileFormatBase2(
     readDataSchema, debugDumpPrefix, debugDumpAlways, maxReadBatchSizeRows, maxReadBatchSizeBytes,
     compressCfg, execMetrics, useFieldId) {
 
+    override protected def computeNumRowsAlive(
+        totalNumRows: Long,
+        chunkedBlocks: Seq[BlockMetaData]): Int = {
+      if (totalNumRows == 0 || tablePath.isEmpty) {
+        Math.toIntExact(totalNumRows)
+      } else {
+        val dvDescriptorOpt = split.otherConstantMetadataColumnValues
+          .get(FILE_ROW_INDEX_FILTER_ID_ENCODED).asInstanceOf[Option[String]]
+        val filterTypeOpt = split.otherConstantMetadataColumnValues
+          .get(FILE_ROW_INDEX_FILTER_TYPE).asInstanceOf[Option[RowIndexFilterType]]
+        if (dvDescriptorOpt.isEmpty && filterTypeOpt.isEmpty) {
+          Math.toIntExact(totalNumRows)
+        } else {
+          val scalaBitmap = RapidsDeletionVectors.loadScalaBitmap(
+            conf, dvDescriptorOpt, filterTypeOpt, tablePath.get)
+          val (rowGroupOffsets, rowGroupNumRows) =
+            RapidsDeletionVectors.getRowGroupMetadata(chunkedBlocks)
+          Math.toIntExact(RapidsDeletionVectors.computeNumRowsAlive(
+            totalNumRows, scalaBitmap, filterTypeOpt, rowGroupOffsets, rowGroupNumRows))
+        }
+      }
+    }
+
     override protected def readBuffer(
         parquetOpts: ParquetOptions,
         colTypes: Array[DataType],
@@ -286,7 +309,9 @@ class GpuDeltaParquetFileFormatBase2(
             val (rowGroupOffsets, rowGroupNumRows) =
               RapidsDeletionVectors.getRowGroupMetadata(chunkedBlocks)
             val maybeDvInfo = maybeSerializedDV.map(serializedDV =>
-              new DeletionVector.DeletionVectorInfo(serializedDV, rowGroupOffsets, rowGroupNumRows))
+              new DeletionVector.DeletionVectorInfo(serializedDV,
+                RapidsDeletionVectors.isIfNotContainedRowIndexFilter(filterTypeOpt),
+                rowGroupOffsets, rowGroupNumRows))
 
             val hostBuf = dataBuffer.getDataHostBuffer()
             // Duplicate request is ok, and start to use the GPU just after the host
@@ -337,8 +362,9 @@ class GpuDeltaParquetFileFormatBase2(
    */
   case class SpillableDeletionVectorInfo(
       serializedBitmap: SpillableHostBuffer,
-      // Pre-computed number of deleted rows across all row groups.
-      numRowsDeleted: Long,
+      filterTypeOpt: Option[RowIndexFilterType],
+      // Pre-computed number of rows remaining after applying the deletion vector.
+      numRowsAlive: Long,
       // The offsets and numRows below are the original row group offsets and row counts
       // in the file. The combining process in multi-threaded reader involves re-organizing
       // row groups across files, but the offsets and numRows here are not changed even
@@ -354,45 +380,22 @@ class GpuDeltaParquetFileFormatBase2(
 
   object SpillableDeletionVectorInfo {
 
-    /**
-     * Computes the number of deleted rows within the given row ranges
-     * in the bitmap.
-     */
-    private def countDeletedRows(
-        scalaBitmap: RoaringBitmapArray,
-        rowGroupOffsets: Array[Long],
-        rowGroupNumRows: Array[Int]): Long = {
-      if (scalaBitmap.cardinality == 0) return 0L
-      var count = 0L
-      val rowRanges = rowGroupOffsets.zip(rowGroupNumRows)
-      // Computes the number of deleted rows by iterating only over the set bits
-      // in the bitmap (deleted row indices) and checking which row group each
-      // belongs to. This is O(deleted_rows * num_row_groups) instead of
-      // O(total_rows). The former is usually smaller than the latter.
-      // This is a temporary solution until we add a dedicated API in cuDF.
-      scalaBitmap.forEach { deletedIndex: Long =>
-        rowRanges.find { case (offset, numRows) =>
-          deletedIndex >= offset && deletedIndex < offset + numRows
-        }.foreach { _ =>
-          // If the deleted index falls within this row group, count it as deleted.
-          count += 1L
-        }
-      }
-      count
-    }
-
     def apply(
         serializedBitmap: HostMemoryBuffer,
         scalaBitmap: RoaringBitmapArray,
+        filterTypeOpt: Option[RowIndexFilterType],
         rowGroupOffsets: Array[Long],
         rowGroupNumRows: Array[Int]): SpillableDeletionVectorInfo = {
-      val numRowsDeleted = countDeletedRows(scalaBitmap, rowGroupOffsets, rowGroupNumRows)
+      val totalNumRows = rowGroupNumRows.map(_.toLong).sum
+      val numRowsAlive = RapidsDeletionVectors.computeNumRowsAlive(
+        totalNumRows, scalaBitmap, filterTypeOpt, rowGroupOffsets, rowGroupNumRows)
       new SpillableDeletionVectorInfo(
         SpillableHostBuffer(
           serializedBitmap,
           serializedBitmap.getLength(),
           SpillPriorities.ACTIVE_BATCHING_PRIORITY),
-        numRowsDeleted,
+        filterTypeOpt,
+        numRowsAlive,
         rowGroupOffsets,
         rowGroupNumRows)
     }
@@ -427,8 +430,9 @@ class GpuDeltaParquetFileFormatBase2(
       timestampRebaseMode: DateTimeRebaseMode,
       hasInt96Timestamps: Boolean,
       // Base64-encoded DV descriptor string for this block's source file. None if no DV.
-      // The filter type is always RowIndexFilterType.IF_CONTAINED.
       val dvDescriptor: Option[String],
+      // Controls whether bitmap-marked rows are removed or retained. None if no DV.
+      val filterTypeOpt: Option[RowIndexFilterType],
       // Within-file row-index ordinal of this row group's first row.
       // Captured from BlockMetaData before any merging; invariant to computeBlockMetaData().
       val rowGroupOffset: Long,
@@ -439,12 +443,14 @@ class GpuDeltaParquetFileFormatBase2(
    * Per-file DV entry assembled during [[augmentChunkMeta]].
    *
    * @param dvDescriptor base64-encoded DV descriptor for this file; None if no DV
+   * @param filterTypeOpt controls whether bitmap-marked rows are removed or retained; None if no DV
    * @param rowGroupOffsets within-file row-index ordinals of each row group's first row
    * @param rowGroupNumRows number of rows in each row group
    * @param partitionIndex index into rowsPerPartition / allPartValues this file contributes to
    */
   case class PerFileDVEntry(
       dvDescriptor: Option[String],
+      filterTypeOpt: Option[RowIndexFilterType],
       rowGroupOffsets: Array[Long],
       rowGroupNumRows: Array[Int],
       partitionIndex: Int)
@@ -453,7 +459,7 @@ class GpuDeltaParquetFileFormatBase2(
    * Per-file DV load result produced during [[prepareForDecode]].
    *
    * @param gpuBitmap serialized roaring bitmap buffer for the file's deletion vector
-   * @param aliveCount number of alive (non-deleted) rows in the file
+   * @param aliveCount number of rows remaining after applying the deletion vector
    */
   case class SerializedRoaringBitmap(gpuBitmap: SpillableHostBuffer, aliveCount: Long)
 
@@ -576,7 +582,9 @@ class GpuDeltaParquetFileFormatBase2(
             val filterTypeOpt = metaAndFile.file.otherConstantMetadataColumnValues
               .get(FILE_ROW_INDEX_FILTER_TYPE).asInstanceOf[Option[RowIndexFilterType]]
             filterTypeOpt.foreach { ft =>
-              require(ft == RowIndexFilterType.IF_CONTAINED,
+              require(
+                ft == RowIndexFilterType.IF_CONTAINED ||
+                  ft == RowIndexFilterType.IF_NOT_CONTAINED,
                 s"Unexpected DV filter type for coalescing reader: $ft")
             }
             val singleFileInfo = metaAndFile.meta
@@ -595,6 +603,7 @@ class GpuDeltaParquetFileFormatBase2(
                   singleFileInfo.timestampRebaseMode,
                   singleFileInfo.hasInt96Timestamps,
                   dvDescriptorOpt,
+                  filterTypeOpt,
                   rowGroupOffsets(i),
                   rowGroupNumRows(i)))
             }
@@ -686,6 +695,8 @@ class GpuDeltaParquetFileFormatBase2(
               .map(spillableDvInfo =>
                 new DeletionVector.DeletionVectorInfo(
                   spillableDvInfo.serializedBitmap.getDataHostBuffer(),
+                  RapidsDeletionVectors.isIfNotContainedRowIndexFilter(
+                    spillableDvInfo.filterTypeOpt),
                   spillableDvInfo.rowGroupOffsets,
                   spillableDvInfo.rowGroupNumRows
                 ))
@@ -723,7 +734,7 @@ class GpuDeltaParquetFileFormatBase2(
 
             if (allPartValues.isDefined) {
               val allPartInternalRows = allPartValues.get.map(_._2)
-              // rowsPerPartition has been adjusted already to account only the alive rows.
+              // rowsPerPartition has been adjusted to account for the deletion vectors.
               val rowsPerPartition = allPartValues.get.map(_._1)
               new GpuColumnarBatchWithPartitionValuesIterator(batchIter, allPartInternalRows,
                 rowsPerPartition, partitionSchema, maxGpuColumnSizeBytes)
@@ -746,6 +757,7 @@ class GpuDeltaParquetFileFormatBase2(
      * Deletion vector metadata for a single host memory buffer containing a part of data.
      */
     private case class SingleBufferDVMetadata(
+        // maybeDvInfo is None only when the tablePath is not defined.
         maybeDvInfo: Option[SpillableDeletionVectorInfo]
     )
 
@@ -822,7 +834,7 @@ class GpuDeltaParquetFileFormatBase2(
         numRows: Long,
         blocks: collection.Seq[BlockMetaData]
     ): HostMemoryEmptyMetaData = {
-      val (maybeSerializedDV, maybeScalaBitmap) = if (numRows > 0) {
+      val (maybeSerializedDV, maybeScalaBitmap, filterTypeOpt) = if (numRows > 0) {
         // numRows == 0 means the data is empty because of an empty file,
         // file not found, or a corrupted file. In all these cases, we don't
         // need to load deletion vectors.
@@ -837,9 +849,9 @@ class GpuDeltaParquetFileFormatBase2(
         // clause.
         val maybeSerializedDV = tablePath.map(tp =>
           RapidsDeletionVectors.loadDeletionVector(fileIO, dvDescriptorOpt, filterTypeOpt, tp))
-        (maybeSerializedDV, maybeScalaBitmap)
+        (maybeSerializedDV, maybeScalaBitmap, filterTypeOpt)
       } else {
-        (None, None)
+        (None, None, None)
       }
 
       closeOnExcept(maybeSerializedDV) { _ =>
@@ -850,6 +862,7 @@ class GpuDeltaParquetFileFormatBase2(
             SpillableDeletionVectorInfo(
               serializedDV,
               maybeScalaBitmap.get,
+              filterTypeOpt,
               rowGroupOffsets,
               rowGroupNumRows)}
         )
@@ -918,6 +931,7 @@ class GpuDeltaParquetFileFormatBase2(
               SpillableDeletionVectorInfo(
                 serializedDV,
                 maybeScalaBitmap.get,
+                filterTypeOpt,
                 rowGroupOffsets,
                 rowGroupNumRows)
             })
@@ -972,20 +986,23 @@ class GpuDeltaParquetFileFormatBase2(
         return 0
       }
 
-      val numDeletedRows = metadata match {
+      val dvInfos = metadata match {
         case emptyMeta: DeltaParquetHostMemoryEmptyMetaData =>
           emptyMeta.dvMetadata.flatMap(_.metadatas).flatMap(_.maybeDvInfo)
-            .map(_.numRowsDeleted).sum
         case buffersMeta: DeltaParquetHostMemoryBuffersWithMetaData =>
           buffersMeta.dvMetadata.flatMap(_.metadatas).flatMap(_.maybeDvInfo)
-            .map(_.numRowsDeleted).sum
         case _ =>
           throw new IllegalArgumentException(s"Unexpected metadata type ${metadata.getClass()}")
       }
 
-      require(numDeletedRows <= totalNumRows,
-        s"Deletion vector cardinality ($numDeletedRows) exceeds file row count ($totalNumRows)")
-      Math.toIntExact(totalNumRows - numDeletedRows)
+      val numRowsAlive = if (dvInfos.isEmpty) {
+        totalNumRows
+      } else {
+        dvInfos.map(_.numRowsAlive).sum
+      }
+      require(numRowsAlive <= totalNumRows,
+        s"Alive row count ($numRowsAlive) exceeds file row count ($totalNumRows)")
+      Math.toIntExact(numRowsAlive)
     }
   }
 
@@ -1058,7 +1075,8 @@ class GpuDeltaParquetFileFormatBase2(
    *  - collect per-block DV descriptors during batch assembly ([[augmentChunkMeta]])
    *  - load DV bitmaps concurrently after the copy phase ([[prepareForDecode]])
    *  - pass DV info to the cuDF Parquet reader ([[readBufferToTablesAndClose]])
-   *  - substitute DV-filtered alive row counts for partition routing ([[getRowsPerPartition]])
+   *  - substitute DV-filtered alive row counts for partition routing
+   *    ([[getRowsPerPartition]])
    */
   class MultiFileDeltaCoalescingParquetPartitionReader(
       fileIO: RapidsFileIO,
@@ -1101,6 +1119,7 @@ class GpuDeltaParquetFileFormatBase2(
           require(group.blocks.nonEmpty, s"File group must contain blocks: ${group.filePath}")
           val firstExtra = group.blocks.head.extraInfo.asInstanceOf[DeltaParquetExtraInfo]
           val fileDesc = firstExtra.dvDescriptor
+          val filterTypeOpt = firstExtra.filterTypeOpt
           val fileOffsets = ArrayBuffer[Long]()
           val fileNumRows = ArrayBuffer[Int]()
 
@@ -1113,7 +1132,12 @@ class GpuDeltaParquetFileFormatBase2(
             fileNumRows += extra.rowGroupNumRows
           }
 
-          PerFileDVEntry(fileDesc, fileOffsets.toArray, fileNumRows.toArray, partitionIndex)
+          PerFileDVEntry(
+            fileDesc,
+            filterTypeOpt,
+            fileOffsets.toArray,
+            fileNumRows.toArray,
+            partitionIndex)
       }.toSeq
 
       val batchExtra = new DeltaBatchExtraInfo(
@@ -1124,7 +1148,8 @@ class GpuDeltaParquetFileFormatBase2(
 
     /**
      * Loads DV bitmaps for all files in the batch concurrently after the copy phase.
-     * Also computes per-file alive row counts (used later by [[getRowsPerPartition]]).
+     * Also computes the rows remaining in each file after applying its deletion vector
+     * (used later by [[getRowsPerPartition]]).
      * Fast path: if no file in the batch has a DV, returns meta unchanged.
      */
     override protected def prepareForDecode(meta: CurrentChunkMeta): CurrentChunkMeta = {
@@ -1141,39 +1166,19 @@ class GpuDeltaParquetFileFormatBase2(
         threadPool.submit(new Callable[SerializedRoaringBitmap] {
           override def call(): SerializedRoaringBitmap = {
             val rawBitmap = RapidsDeletionVectors.loadDeletionVector(
-              fileIO, entry.dvDescriptor, tp)
+              fileIO, entry.dvDescriptor, entry.filterTypeOpt, tp)
             // DeltaBatchExtraInfo.close() releases the SpillableHostBuffer when the decode
             // phase completes (via withRetryNoSplit in readBatchData).
             val gpuBitmap = SpillableHostBuffer(rawBitmap, rawBitmap.getLength,
               SpillPriorities.ACTIVE_BATCHING_PRIORITY)
             closeOnExcept(gpuBitmap) { _ =>
-              val filterTypeOpt = entry.dvDescriptor.map(_ => RowIndexFilterType.IF_CONTAINED)
-              val scalaBitmap = RapidsDeletionVectors.loadScalaBitmap(
-                conf, entry.dvDescriptor, filterTypeOpt, tp)
               val totalRows = entry.rowGroupNumRows.map(_.toLong).sum
-              val numDeleted: Long = if (scalaBitmap.cardinality == 0) {
-                0L
-              } else {
-                // Computes the number of rows deleted within given row ranges.
-                // This currently requires iterating through the bitmap and
-                // checking each deleted index against the row ranges.
-                // This is a temporary solution until we add a dedicated API in cuDF.
-                var count = 0L
-                val rowRanges = entry.rowGroupOffsets.zip(entry.rowGroupNumRows)
-                scalaBitmap.forEach { deletedIndex: Long =>
-                  rowRanges.find { case (offset, numRows) =>
-                    deletedIndex >= offset && deletedIndex < offset + numRows
-                  }.foreach { _ =>
-                    // If the deleted index falls within this row group, count it as deleted.
-                    count += 1L
-                  }
-                }
-                count
-              }
-              require(numDeleted <= totalRows,
-                s"Deletion vector cardinality ($numDeleted) exceeds " +
-                  s"file row count ($totalRows)")
-              SerializedRoaringBitmap(gpuBitmap, totalRows - numDeleted)
+              val scalaBitmap = RapidsDeletionVectors.loadScalaBitmap(
+                conf, entry.dvDescriptor, entry.filterTypeOpt, tp)
+              val aliveCount = RapidsDeletionVectors.computeNumRowsAlive(
+                totalRows, scalaBitmap, entry.filterTypeOpt,
+                entry.rowGroupOffsets, entry.rowGroupNumRows)
+              SerializedRoaringBitmap(gpuBitmap, aliveCount)
             }
           }
         })
@@ -1206,7 +1211,9 @@ class GpuDeltaParquetFileFormatBase2(
           .zip(batchExtra.perFileEntries)
           .map { case (loaded, entry) =>
             new DeletionVector.DeletionVectorInfo(
-              loaded.gpuBitmap.getDataHostBuffer(), entry.rowGroupOffsets, entry.rowGroupNumRows)
+              loaded.gpuBitmap.getDataHostBuffer(),
+              RapidsDeletionVectors.isIfNotContainedRowIndexFilter(entry.filterTypeOpt),
+              entry.rowGroupOffsets, entry.rowGroupNumRows)
           }.toArray
         // MakeParquetTableWithDVProducer closes the dataBuffer and the bitmaps in dvInfos.
         MakeParquetTableWithDVProducer(useChunkedReader, maxChunkedReaderMemoryUsageSizeBytes,

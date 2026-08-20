@@ -18,12 +18,47 @@ package com.nvidia.spark.rapids
 
 import org.mockito.Mockito.{mock, when}
 
-import org.apache.spark.sql.catalyst.expressions.{AttributeReference, AttributeSet, Expression}
+import org.apache.spark.sql.catalyst.expressions.{Alias, AttributeReference, AttributeSet, EqualTo,
+  Expression, Literal}
 import org.apache.spark.sql.rapids.{GpuAnd, GpuGreaterThan, GpuLength, GpuLessThan, GpuStringTrim}
-import org.apache.spark.sql.types.{BooleanType, DataType, IntegerType, LongType, StringType}
+import org.apache.spark.sql.types.{BooleanType, DataType, FloatType, IntegerType, LongType,
+  StringType}
 
 
 class AstUtilSuite extends GpuUnitTests {
+
+  private def floatComparisonAliasMeta(): BaseExprMeta[_] = {
+    val attr = AttributeReference("a", FloatType, nullable = false)()
+    val expr = Alias(EqualTo(attr, Literal(1.0f)), "result")()
+    val meta = GpuOverrides.wrapExpr(
+      expr, new RapidsConf(Map.empty[String, String]), None)
+    meta.tagForGpu()
+    meta
+  }
+
+  test("explainAst only prints node-local AST blockers") {
+    val meta = floatComparisonAliasMeta()
+
+    assert(meta.canSelfBeAst)
+    assert(!meta.canThisBeAst)
+    assert(!meta.childExprs.head.canSelfBeAst)
+
+    val explain = meta.explainAst(all = false)
+    assert(!explain.contains("<Alias>"), explain)
+    assert(explain.contains("<EqualTo>"), explain)
+    assert(explain.contains("cannot be converted to GPU AST"), explain)
+  }
+
+  test("explainAst all reports node-local AST compatibility") {
+    val meta = floatComparisonAliasMeta()
+    val explain = meta.explainAst(all = true)
+    val lines = explain.split("\n")
+
+    assert(lines.find(_.contains("<Alias>"))
+      .exists(_.contains("is AST-compatible")), explain)
+    assert(lines.find(_.contains("<EqualTo>"))
+      .exists(_.contains("cannot be converted to GPU AST")), explain)
+  }
 
   private[this] def testSingleNode(containsNonAstAble: Boolean, crossMultiChildPlan: Boolean)
   : Boolean = {

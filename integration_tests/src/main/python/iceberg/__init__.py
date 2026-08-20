@@ -23,12 +23,22 @@ from pyspark.sql.types import FloatType, DoubleType, BinaryType
 
 import pytest
 
+from conftest import is_iceberg_rest_catalog, spark_jvm
 from data_gen import *
 from spark_session import is_iceberg_supported_spark, with_cpu_session
 
 iceberg_unsupported_mark = pytest.mark.skipif(
     not is_iceberg_supported_spark(),
-    reason="Iceberg acceleration requires Spark 3.5.x or 4.0.x")
+    reason="Iceberg acceleration requires Spark 3.5.x, 4.0.x, or 4.1.x")
+
+
+runtime_iceberg_version = os.environ.get("EXPECTED_ICEBERG_VERSION")
+supports_iceberg_v3 = (
+    runtime_iceberg_version is not None and
+    tuple(int(part) for part in runtime_iceberg_version.split(".")[:2]) >= (1, 9) and
+    not is_iceberg_rest_catalog())
+ICEBERG_V3_UNSUPPORTED_REASON = (
+    "Iceberg v3 requires Iceberg 1.9.0 or later and a catalog backend with v3 support")
 
 # iceberg supported types
 iceberg_table_gen = MappingProxyType({
@@ -296,9 +306,18 @@ def schema_to_ddl(spark, schema):
 
 
 # Base table properties applied to every Iceberg test table.
-# Disables the fanout writer to prevent OOM in CI.  S3TablesCatalog does not
+# Disables the fanout writer to prevent OOM in CI. S3TablesCatalog does not
 # honor catalog-level table-default properties, so this must be set per table.
 _BASE_TBLPROPS = {'write.spark.fanout.enabled': False}
+
+# Older Iceberg REST clients, including 1.6.x, do not apply catalog table-default
+# properties when creating a table. Apply supported codecs directly to REST test
+# tables so writes do not fall back to gzip and then to CPU.
+if is_iceberg_rest_catalog():
+    _BASE_TBLPROPS.update({
+        'write.parquet.compression-codec': 'zstd',
+        'write.delete.parquet.compression-codec': 'zstd',
+    })
 
 
 def _to_tblprops_str(props: dict) -> dict:
@@ -318,6 +337,36 @@ def _build_tblprops(extra_props: Optional[Dict[str, str]] = None) -> Dict[str, s
 # SQL fragment for raw CREATE TABLE statements that have no other TBLPROPERTIES.
 _BASE_TBLPROPS_SQL = "TBLPROPERTIES (" + \
     ", ".join(f"'{k}' = '{v}'" for k, v in _build_tblprops().items()) + ")"
+
+
+def read_parquet_codec(spark: SparkSession, path: str) -> str:
+    """Open the Parquet footer of `path` and return the codec name of the first column of
+    the first row group (uppercase, e.g. "ZSTD", "UNCOMPRESSED")."""
+    jvm = spark_jvm()
+    hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
+    hadoop_path = jvm.org.apache.hadoop.fs.Path(path)
+    reader = jvm.org.apache.parquet.hadoop.ParquetFileReader.open(hadoop_conf, hadoop_path)
+    try:
+        blocks = reader.getFooter().getBlocks()
+        assert blocks.size() > 0, f"Parquet file {path} has no row groups"
+        cols = blocks.get(0).getColumns()
+        assert cols.size() > 0, f"Row group 0 in {path} has no column chunks"
+        return cols.get(0).getCodec().name()
+    finally:
+        reader.close()
+
+
+def assert_iceberg_files_use_codec(spark: SparkSession, table_name: str, expected_codec: str,
+                                   files_table: str = "files") -> None:
+    """Assert every Parquet file listed in `{table_name}.{files_table}` uses `expected_codec`.
+    Parquet reports the "uncompressed" Iceberg codec as "UNCOMPRESSED" in the footer."""
+    file_rows = spark.sql(f"SELECT file_path FROM {table_name}.{files_table}").collect()
+    assert len(file_rows) > 0, f"no files found in {table_name}.{files_table}"
+    expected_footer = expected_codec.upper()
+    for row in file_rows:
+        actual = read_parquet_codec(spark, row.file_path)
+        assert actual == expected_footer, \
+            f"expected codec {expected_footer} but file {row.file_path} used {actual}"
 
 
 def create_iceberg_table(table_name: str,

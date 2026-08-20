@@ -20,8 +20,13 @@
 {"spark": "400db173"}
 {"spark": "401"}
 {"spark": "402"}
+{"spark": "403"}
+{"spark": "404"}
 {"spark": "411"}
+{"spark": "412"}
+{"spark": "413"}
 spark-rapids-shim-json-lines ***/
+
 package com.nvidia.spark.rapids.shims
 
 import com.google.common.base.Objects
@@ -132,8 +137,10 @@ case class GpuBatchScanExec(
           case Some(projectionPositions) => projectionPositions.map(i => k.expressions(i))
           case _ => k.expressions
         }
-        k.copy(expressions = expressions, numPartitions = newPartValues.length,
-          partitionValues = newPartValues)
+        KeyGroupedPartitioningShim.copyWithNewPartitionValues(
+          k.copy(expressions = expressions),
+          newPartValues,
+          spjParams.applyPartialClustering)
       case p => p
     }
   }

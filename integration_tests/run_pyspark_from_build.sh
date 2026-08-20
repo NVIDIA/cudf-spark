@@ -260,6 +260,7 @@ else
 
     RUN_TESTS_COMMAND=(
         "$SCRIPTPATH"/runtests.py
+        -c "$LOCAL_ROOTDIR/pytest.ini"
         --rootdir "$LOCAL_ROOTDIR"
     )
     if [[ "${TESTS}" == "" ]]; then
@@ -340,7 +341,16 @@ else
     # we enable the java property in the driver and executor, in case the tests are running in 
     # local mode or in standalone mode.
     ENABLE_TEST_FEATURES="-Dcom.nvidia.spark.rapids.runningTests=true"
-    DRIVER_EXTRA_JAVA_OPTIONS="-ea -Duser.timezone=$TZ -Ddelta.log.cacheSize=$deltaCacheSize"
+    # Opt-in Spark testing mode (driver only). With -Dspark.testing=true Spark's Utils.isTesting
+    # turns on internal-contract guards that are silent in production, e.g. the DSv2
+    # computeStats-before-pushdown check. See NVIDIA/spark-rapids#14950 and #14927. Driver-only is
+    # enough for the planning/optimizer guards and keeps the blast radius off the executors.
+    SPARK_TESTING_OPTS=""
+    if [[ "${SPARK_TESTING_ENABLED:-0}" == "1" ]]; then
+        SPARK_TESTING_OPTS="-Dspark.testing=true"
+        [[ -n "${SPARK_HOME:-}" ]] && SPARK_TESTING_OPTS="$SPARK_TESTING_OPTS -Dspark.test.home=$SPARK_HOME"
+    fi
+    DRIVER_EXTRA_JAVA_OPTIONS="-ea -Duser.timezone=$TZ -Ddelta.log.cacheSize=$deltaCacheSize $SPARK_TESTING_OPTS"
     export PYSP_TEST_spark_driver_extraJavaOptions="$DRIVER_EXTRA_JAVA_OPTIONS $COVERAGE_SUBMIT_FLAGS $ENABLE_TEST_FEATURES"
     export PYSP_TEST_spark_executor_extraJavaOptions="-ea -Duser.timezone=$TZ $ENABLE_TEST_FEATURES"
 
