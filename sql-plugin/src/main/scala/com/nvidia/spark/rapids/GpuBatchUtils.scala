@@ -129,6 +129,8 @@ object GpuBatchUtils {
           estimateGpuMemory(f.dataType, f.nullable, rowCount)
         }.sum
       case dt if GpuColumnVector.isVariantType(dt) =>
+        // Reuse Spark's 2-KiB Variant defaultSize estimate and account separately for both
+        // physical cuDF offset buffers.
         calculateOffsetBufferSize(rowCount) * 2 + dt.defaultSize * rowCount
       case dt =>
         dt.defaultSize * rowCount

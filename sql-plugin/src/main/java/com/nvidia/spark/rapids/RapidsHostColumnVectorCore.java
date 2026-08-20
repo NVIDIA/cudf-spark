@@ -202,6 +202,8 @@ public class RapidsHostColumnVectorCore extends ColumnVector {
   @Override
   public final ColumnVector getChild(int ordinal) {
     if (cachedChildren[ordinal] == null) {
+      // Spark models Variant as an atomic type, while cuDF stores its value and metadata as
+      // STRUCT children. Expose those physical children through Spark's binary accessors.
       if (GpuColumnVector.isVariantType(dataType())) {
         HostColumnVectorCore tmp = cudfCv.getChildColumnView(ordinal);
         cachedChildren[ordinal] = new RapidsHostColumnVectorCore(DataTypes.BinaryType, tmp);
