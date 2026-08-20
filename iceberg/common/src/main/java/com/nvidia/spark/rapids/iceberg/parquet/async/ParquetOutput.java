@@ -17,7 +17,6 @@
 package com.nvidia.spark.rapids.iceberg.parquet.async;
 
 import java.io.IOException;
-import java.nio.channels.SeekableByteChannel;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
@@ -145,21 +144,32 @@ final class ParquetOutput implements AutoCloseable {
     return read.whenComplete((ignored, error) -> endConcurrentWrite(writeStamp));
   }
 
-  /** Copy one cached column chunk from its positioned channel into the synthetic output. */
-  final void copyCachedRange(
-      SeekableByteChannel source,
-      long outputOffset,
-      long length) throws IOException {
-    Objects.requireNonNull(source, "source");
+  /**
+   * Copy one file's cached column chunks into the synthetic output.
+   *
+   * <p>The cache I/O pool submits one job per file, and that job deliberately reuses one
+   * {@link HostMemoryOutputStream}. This matches the base reader's bulk-copy primitive without
+   * constructing a stream or entering the output lifecycle lock once per column chunk.</p>
+   */
+  final void copyCachedRanges(
+      List<ParquetDataReader.CachedRange> ranges) throws IOException {
+    Objects.requireNonNull(ranges, "ranges");
+    if (ranges.isEmpty()) {
+      return;
+    }
     long writeStamp = beginConcurrentWrite();
     try {
-      checkWriteBounds(outputOffset, length);
       // Use the base Parquet reader's cache-copy primitive verbatim. Besides avoiding a second
       // implementation of the channel-to-host loop, this keeps both readers on the same JITted
       // copy path and gives them identical EOF and large-range behavior.
       HostMemoryOutputStream output = new HostMemoryOutputStream(buffer);
-      output.seek(outputOffset);
-      output.copyFromChannel(source, length);
+      for (ParquetDataReader.CachedRange range : ranges) {
+        Objects.requireNonNull(range, "range");
+        Objects.requireNonNull(range.channel, "range.channel");
+        checkWriteBounds(range.fragmentOffset, range.length);
+        output.seek(range.fragmentOffset);
+        output.copyFromChannel(range.channel, range.length);
+      }
     } finally {
       endConcurrentWrite(writeStamp);
     }

@@ -75,13 +75,13 @@ public final class ParquetDataReader {
         throw asCompletionException(error);
       }
     }, executor).thenCompose(pending -> {
-      CompletableFuture<Long> remote;
+      CompletableFuture<Void> reads;
       try {
-        remote = pending.startRemoteRead(executor);
+        reads = pending.startReads(executor);
       } catch (Throwable error) {
-        remote = failedFuture(error);
+        reads = failedFuture(error);
       }
-      return remote.handleAsync((ignored, error) -> {
+      return reads.handleAsync((ignored, error) -> {
         if (error != null) {
           throw pending.cleanupAndWrap(unwrap(error));
         }
@@ -101,6 +101,7 @@ public final class ParquetDataReader {
     private final AtomicBoolean closed;
     private final long startNanos;
     private final long[] blockOffsets;
+    private final List<CachedRange> hits;
     private final List<SourceRange> misses;
     private final List<RapidsInputFile.CopyRange> reads;
     private final long allocNanos;
@@ -109,10 +110,10 @@ public final class ParquetDataReader {
     private final long cacheHitBytes;
     private final long cacheMissCount;
     private final long cacheMissBytes;
-    private final long cacheReadNanos;
 
     private ParquetOutput output;
     private volatile long readWaitNanos;
+    private volatile long cacheReadNanos;
 
     private PendingFileRead(
         FooterResult footer,
@@ -121,6 +122,7 @@ public final class ParquetDataReader {
         long startNanos,
         long[] blockOffsets,
         ParquetOutput output,
+        List<CachedRange> hits,
         List<SourceRange> misses,
         List<RapidsInputFile.CopyRange> reads,
         long allocNanos,
@@ -128,14 +130,14 @@ public final class ParquetDataReader {
         long cacheHitCount,
         long cacheHitBytes,
         long cacheMissCount,
-        long cacheMissBytes,
-        long cacheReadNanos) {
+        long cacheMissBytes) {
       this.footer = footer;
       this.input = input;
       this.closed = closed;
       this.startNanos = startNanos;
       this.blockOffsets = blockOffsets;
       this.output = output;
+      this.hits = hits;
       this.misses = misses;
       this.reads = reads;
       this.allocNanos = allocNanos;
@@ -144,7 +146,6 @@ public final class ParquetDataReader {
       this.cacheHitBytes = cacheHitBytes;
       this.cacheMissCount = cacheMissCount;
       this.cacheMissBytes = cacheMissBytes;
-      this.cacheReadNanos = cacheReadNanos;
     }
 
     static PendingFileRead prepare(
@@ -159,17 +160,17 @@ public final class ParquetDataReader {
       long totalBytes = blockOffsets[blocks.size()];
       if (totalBytes == 0L) {
         return new PendingFileRead(footer, input, closed, startNanos, blockOffsets, null,
-            new ArrayList<>(), new ArrayList<>(), 0L, 0L,
-            0L, 0L, 0L, 0L, 0L);
+            new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), 0L, 0L,
+            0L, 0L, 0L, 0L);
       }
 
+      List<CachedRange> hits = new ArrayList<>();
       List<SourceRange> misses = new ArrayList<>();
       ParquetOutput output = null;
       long cacheHitCount = 0L;
       long cacheHitBytes = 0L;
       long cacheMissCount = 0L;
       long cacheMissBytes = 0L;
-      long cacheReadNanos = 0L;
       long allocStart = System.nanoTime();
       try {
         output = ParquetOutput.create(totalBytes);
@@ -184,17 +185,9 @@ public final class ParquetDataReader {
             Option<SeekableByteChannel> cached = fileCache.getDataRangeChannel(
                 input, sourceOffset, length);
             if (cached.isDefined()) {
-              try (SeekableByteChannel channel = cached.get()) {
-                cacheHitCount++;
-                cacheHitBytes = Math.addExact(cacheHitBytes, length);
-                long cacheStart = System.nanoTime();
-                try {
-                  output.copyCachedRange(channel, fragmentOffset, length);
-                } finally {
-                  cacheReadNanos = Math.addExact(
-                      cacheReadNanos, System.nanoTime() - cacheStart);
-                }
-              }
+              hits.add(new CachedRange(cached.get(), length, fragmentOffset));
+              cacheHitCount++;
+              cacheHitBytes = Math.addExact(cacheHitBytes, length);
             } else {
               SourceRange chunk = new SourceRange(sourceOffset, length, fragmentOffset);
               Option<FileCacheStartedToken> token = fileCache.startDataRangeCache(
@@ -214,10 +207,10 @@ public final class ParquetDataReader {
           requestedBytes = Math.addExact(requestedBytes, read.getLength());
         }
         return new PendingFileRead(footer, input, closed, startNanos, blockOffsets, output,
-            misses, reads, allocNanos, requestedBytes,
-            cacheHitCount, cacheHitBytes, cacheMissCount, cacheMissBytes, cacheReadNanos);
+            hits, misses, reads, allocNanos, requestedBytes,
+            cacheHitCount, cacheHitBytes, cacheMissCount, cacheMissBytes);
       } catch (Throwable error) {
-        Throwable failure = cleanup(error, output, misses);
+        Throwable failure = cleanup(error, output, hits, misses);
         if (failure instanceof Exception) {
           throw (Exception) failure;
         }
@@ -228,7 +221,25 @@ public final class ParquetDataReader {
       }
     }
 
-    CompletableFuture<Long> startRemoteRead(Executor fallbackExecutor) throws IOException {
+    /** Start local-cache and remote reads together and wait until both writers are terminal. */
+    CompletableFuture<Void> startReads(Executor fallbackExecutor) {
+      CompletableFuture<Long> remote;
+      try {
+        remote = startRemoteRead(fallbackExecutor);
+      } catch (Throwable error) {
+        remote = failedFuture(error);
+      }
+      CompletableFuture<Void> cached;
+      try {
+        cached = startCacheRead();
+      } catch (Throwable error) {
+        cached = failedFuture(error);
+      }
+      return CompletableFuture.allOf(remote, cached);
+    }
+
+    private CompletableFuture<Long> startRemoteRead(
+        Executor fallbackExecutor) throws IOException {
       if (output == null || reads.isEmpty()) {
         return CompletableFuture.completedFuture(0L);
       }
@@ -236,6 +247,30 @@ public final class ParquetDataReader {
       long readStart = System.nanoTime();
       return output.copyRangesAsync(input, reads, fallbackExecutor)
           .whenComplete((ignored, error) -> readWaitNanos = System.nanoTime() - readStart);
+    }
+
+    private CompletableFuture<Void> startCacheRead() {
+      if (output == null || hits.isEmpty()) {
+        return CompletableFuture.completedFuture(null);
+      }
+      checkOpen(closed);
+      CompletableFuture<Void> read = FileCache.get().submitDataRead(() -> {
+        checkOpen(closed);
+        long cacheStart = System.nanoTime();
+        try {
+          output.copyCachedRanges(hits);
+        } catch (IOException error) {
+          throw new CompletionException(error);
+        } finally {
+          cacheReadNanos = System.nanoTime() - cacheStart;
+        }
+      });
+      return read.whenComplete((ignored, error) -> {
+        Throwable failure = closeCachedRanges(error, hits);
+        if (error == null && failure != null) {
+          throw asCompletionException(failure);
+        }
+      });
     }
 
     FileFragment finish() throws Exception {
@@ -266,7 +301,7 @@ public final class ParquetDataReader {
     }
 
     CompletionException cleanupAndWrap(Throwable error) {
-      return asCompletionException(cleanup(error, output, misses));
+      return asCompletionException(cleanup(error, output, hits, misses));
     }
   }
 
@@ -279,8 +314,9 @@ public final class ParquetDataReader {
   private static Throwable cleanup(
       Throwable error,
       ParquetOutput output,
+      List<CachedRange> hits,
       List<SourceRange> misses) {
-    Throwable failure = error;
+    Throwable failure = closeCachedRanges(error, hits);
     for (SourceRange chunk : misses) {
       if (chunk.token != null) {
         try {
@@ -305,6 +341,24 @@ public final class ParquetDataReader {
     return failure;
   }
 
+  private static Throwable closeCachedRanges(
+      Throwable error,
+      List<CachedRange> hits) {
+    Throwable failure = error;
+    for (CachedRange hit : hits) {
+      try {
+        hit.channel.close();
+      } catch (Throwable closeError) {
+        if (failure == null) {
+          failure = closeError;
+        } else if (failure != closeError) {
+          failure.addSuppressed(closeError);
+        }
+      }
+    }
+    return failure;
+  }
+
   private static CompletionException asCompletionException(Throwable error) {
     return error instanceof CompletionException
         ? (CompletionException) error
@@ -322,6 +376,22 @@ public final class ParquetDataReader {
   private static void checkOpen(AtomicBoolean closed) {
     if (closed.get()) {
       throw new CancellationException("Parquet reader is closed");
+    }
+  }
+
+  /** One open file-cache channel owned until the per-file cache-copy future is terminal. */
+  static final class CachedRange {
+    final SeekableByteChannel channel;
+    final long length;
+    final long fragmentOffset;
+
+    CachedRange(
+        SeekableByteChannel channel,
+        long length,
+        long fragmentOffset) {
+      this.channel = channel;
+      this.length = length;
+      this.fragmentOffset = fragmentOffset;
     }
   }
 

@@ -25,6 +25,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import ai.rapids.cudf.HostMemoryBuffer;
 import com.nvidia.spark.rapids.filecache.FileCache;
@@ -56,13 +57,45 @@ public final class ParquetFooterLoader {
           "footer prefetch must be at least " + TRAILER_LENGTH + " bytes");
     }
     long startNanos = System.nanoTime();
-    return CompletableFuture.supplyAsync(() -> {
+    FileCache cache = FileCache.get();
+    AtomicReference<HostMemoryBuffer> cachedFooter = new AtomicReference<>();
+
+    // A footer cache hit performs allocation and local-file I/O. Keep both off the compute pool
+    // and account for them in the same executor-wide cache I/O concurrency domain as data reads
+    // and cache writes.
+    CompletableFuture<Void> cacheLookup = cache.submitDataRead(() -> {
+      checkOpen(closed);
+      Option<HostMemoryBuffer> cached = cache.getFooter(input);
+      if (cached.isDefined()) {
+        cachedFooter.set(cached.get());
+      }
+    });
+
+    CompletableFuture<FooterLoadState> prepared = cacheLookup.thenApplyAsync(ignored -> {
+      HostMemoryBuffer cached = cachedFooter.getAndSet(null);
       try {
-        return FooterLoadState.prepare(input, path, closed, prefetchBytes, startNanos);
+        return FooterLoadState.prepare(
+            input, path, closed, prefetchBytes, startNanos, cache, cached);
       } catch (Throwable error) {
         throw asCompletionException(error);
       }
-    }, executor).thenCompose(state -> state.loadAsync(executor));
+    }, executor);
+
+    // If the compute executor rejects the continuation, prepare never takes ownership of the
+    // cached HMB. Close that otherwise-orphaned buffer here.
+    prepared.whenComplete((state, error) -> {
+      if (error != null) {
+        HostMemoryBuffer orphan = cachedFooter.getAndSet(null);
+        if (orphan != null) {
+          try {
+            orphan.close();
+          } catch (Throwable closeError) {
+            unwrap(error).addSuppressed(closeError);
+          }
+        }
+      }
+    });
+    return prepared.thenCompose(state -> state.loadAsync(executor));
   }
 
   /** Owns the cache token and every HMB until a result is transferred or loading fails. */
@@ -102,22 +135,19 @@ public final class ParquetFooterLoader {
         Path path,
         AtomicBoolean closed,
         long prefetchBytes,
-        long startNanos) {
-      checkOpen(closed);
-      FileCache cache = FileCache.get();
-      Option<HostMemoryBuffer> cached = cache.getFooter(input);
-      if (cached.isDefined()) {
-        FooterLoadState state = new FooterLoadState(
-            input, path, closed, prefetchBytes, startNanos, true);
-        state.footer = cached.get();
-        return state;
-      }
-
+        long startNanos,
+        FileCache cache,
+        HostMemoryBuffer cachedFooter) {
       FooterLoadState state = new FooterLoadState(
-          input, path, closed, prefetchBytes, startNanos, false);
-      Option<FileCacheStartedToken> token = cache.startFooterCache(input);
-      state.cacheToken = token.isDefined() ? token.get() : null;
+          input, path, closed, prefetchBytes, startNanos, cachedFooter != null);
+      state.footer = cachedFooter;
       try {
+        checkOpen(closed);
+        if (cachedFooter != null) {
+          return state;
+        }
+        Option<FileCacheStartedToken> token = cache.startFooterCache(input);
+        state.cacheToken = token.isDefined() ? token.get() : null;
         state.prefetch = HostMemoryBuffer.allocate(prefetchBytes);
         return state;
       } catch (Throwable error) {
