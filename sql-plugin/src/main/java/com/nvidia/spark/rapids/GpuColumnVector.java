@@ -18,6 +18,7 @@ package com.nvidia.spark.rapids;
 
 import ai.rapids.cudf.*;
 import com.nvidia.spark.rapids.shims.GpuTypeShims;
+import com.nvidia.spark.rapids.shims.VariantTypeShims;
 import org.apache.arrow.memory.ReferenceManager;
 
 import org.apache.spark.sql.catalyst.expressions.Attribute;
@@ -101,8 +102,9 @@ public class GpuColumnVector extends GpuColumnVectorBase {
     TableDebug.get().debug(name, hostCol);
   }
 
-  public static boolean isVariantType(DataType spark) {
-    return spark != null && "variant".equals(spark.typeName());
+  /** Returns true when the Spark data type is VariantType. */
+  public static boolean isVariantType(DataType sparkType) {
+    return VariantTypeShims.isVariantType(sparkType);
   }
 
   private static HostColumnVector.ListType variantByteListType(boolean nullable) {
@@ -110,14 +112,14 @@ public class GpuColumnVector extends GpuColumnVectorBase {
         nullable, new HostColumnVector.BasicType(false, DType.UINT8));
   }
 
-  public static HostColumnVector.DataType[] variantHostChildren() {
+  static HostColumnVector.DataType[] variantHostChildren() {
     return new HostColumnVector.DataType[] {
         variantByteListType(true),
         variantByteListType(true)
     };
   }
 
-  public static HostColumnVector.StructType variantHostType(boolean nullable) {
+  private static HostColumnVector.StructType variantHostType(boolean nullable) {
     return new HostColumnVector.StructType(nullable, variantHostChildren());
   }
 
@@ -488,7 +490,9 @@ public class GpuColumnVector extends GpuColumnVectorBase {
   }
 
   public static boolean isNonNestedSupportedType(DataType type) {
-    return toRapidsOrNull(type) != null;
+    // Variant is atomic in Spark but nested in cuDF, so callers that require a physical
+    // non-nested type (notably the GPU cache serializer) cannot handle it.
+    return !isVariantType(type) && toRapidsOrNull(type) != null;
   }
 
   public static DType getNonNestedRapidsType(DataType type) {
@@ -690,7 +694,9 @@ public class GpuColumnVector extends GpuColumnVectorBase {
   static boolean typeConversionAllowed(ColumnView cv, DataType colType) {
     DType dt = cv.getType();
     if (isVariantType(colType)) {
-      return isVariantColumn(cv);
+      // The logical-type check above prevents an ordinary two-field Spark struct from being
+      // mistaken for Variant; this helper only validates Variant's physical cuDF layout.
+      return hasVariantPhysicalLayout(cv);
     }
     if (!dt.isNestedType()) {
       return getNonNestedRapidsType(colType).equals(dt);
@@ -756,7 +762,7 @@ public class GpuColumnVector extends GpuColumnVectorBase {
     }
   }
 
-  private static boolean isVariantColumn(ColumnView cv) {
+  private static boolean hasVariantPhysicalLayout(ColumnView cv) {
     if (!cv.getType().equals(DType.STRUCT) || cv.getNumChildren() != 2) {
       return false;
     }
