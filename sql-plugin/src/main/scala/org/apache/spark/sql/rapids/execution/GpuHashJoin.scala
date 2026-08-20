@@ -1084,8 +1084,8 @@ object JoinBuildSideSelection extends Enumeration {
   type JoinBuildSideSelection = Value
   /**
    * AUTO: Use heuristics to automatically determine the best build side.
-   * A reusable build provider may incorporate residency and observed local demand. Without one,
-   * AUTO selects the smaller side.
+   * This will consider whether there is a cached build side and the observed demand.
+   * Without a reusable build provider, AUTO selects the smaller side.
    */
   val AUTO = Value("AUTO")
   /**
@@ -1370,7 +1370,7 @@ abstract class BaseHashJoinIterator(
     }
   }
 
-  /* Prepare hash-specific state for this stream batch. */
+  /* Prepare and resolve the hash join operation that we are going to use for a stream batch. */
   override def prepareJoinBatch(cb: LazySpillableColumnarBatch): PreparedJoinBatch = {
     val fallback = estimateNumJoinRows(cb)
     val (leftRows, rightRows) = buildSide match {
@@ -1379,7 +1379,7 @@ abstract class BaseHashJoinIterator(
     }
     val recipe = selectHashJoinRecipe(leftRows, rightRows)
     val operation = recipe.primitive.map { primitive =>
-      // Resolve the backend once to produce a ResolvedHashJoin.
+      // Decide which backend to use (cached or on-demand) to produce a ResolvedHashJoin.
       val backend = hashBackend(leftRows, rightRows, primitive)
       closeOnExcept(backend) { _ =>
         val exactRows = exactOutputRowCount(cb, backend, primitive)
@@ -1741,7 +1741,7 @@ class HashJoinIterator(
       JoinStrategy.selectStrategy(
         joinOptions.strategy,
         joinType,
-        hasCondition = false,
+        hasCondition = false,  // This is called for unconditional joins
         joinOptions.buildSideSelection,
         leftRowCount,
         rightRowCount) match {
@@ -1773,6 +1773,7 @@ class HashJoinIterator(
         (leftKeys.getRowCount == 0 || rightKeys.getRowCount == 0)) {
         None
       } else {
+        // Dispatch the selected recipe for this batch and return the gatherer.
         val maps = hashBatch.recipe match {
           case _: DistinctHashRecipe =>
             val result = computeDistinctJoin(
@@ -1895,7 +1896,7 @@ class ConditionalHashJoinIterator(
     JoinStrategy.selectStrategy(
       joinOptions.strategy,
       joinType,
-      hasCondition = true,
+      hasCondition = true,  // This is a conditional join
       joinOptions.buildSideSelection,
       leftRowCount,
       rightRowCount) match {
@@ -1930,6 +1931,7 @@ class ConditionalHashJoinIterator(
     NvtxIdWithMetrics(NvtxRegistry.HASH_JOIN_GATHER_MAP, joinTime) {
       withResource(GpuColumnVector.from(leftData.getBatch)) { leftTable =>
         withResource(GpuColumnVector.from(rightData.getBatch)) { rightTable =>
+          // Dispatch the selected recipe for this batch and return the gatherer.
           val maps = hashBatch.recipe match {
             case recipe: InnerHashRecipe =>
               computeInnerHashWithPost(leftKeys, rightKeys, leftTable, rightTable,
