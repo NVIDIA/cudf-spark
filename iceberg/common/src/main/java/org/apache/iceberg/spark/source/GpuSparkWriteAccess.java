@@ -16,7 +16,9 @@
 
 package org.apache.iceberg.spark.source;
 
+import java.io.Serializable;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.Map;
 
 import org.apache.iceberg.DataFile;
@@ -115,6 +117,25 @@ public final class GpuSparkWriteAccess {
     return readField(positionDeltaWrite(write), "context", Object.class);
   }
 
+  /** Returns delete files that Iceberg requires a position-delta write to replace. */
+  public static Serializable rewritableDeletes(DeltaWrite write, boolean useDVs) {
+    Object scan = readField(positionDeltaWrite(write), "scan", Object.class);
+    if (scan == null) {
+      return null;
+    }
+
+    try {
+      Method method = findMethod(scan.getClass(), "rewritableDeletes", Boolean.TYPE);
+      method.setAccessible(true);
+      Map<?, ?> rewritableDeletes = (Map<?, ?>) method.invoke(scan, useDVs);
+      return rewritableDeletes == null || rewritableDeletes.isEmpty()
+          ? null : (Serializable) rewritableDeletes;
+    } catch (ReflectiveOperationException e) {
+      throw new IllegalStateException(
+          "Unable to discover rewritable deletes from " + scan.getClass().getName(), e);
+    }
+  }
+
   public static Schema contextDataSchema(Object context) {
     return readField(context, "dataSchema", Schema.class);
   }
@@ -206,6 +227,19 @@ public final class GpuSparkWriteAccess {
       }
     }
     throw new IllegalStateException("No field " + fieldName + " in " + targetClass.getName());
+  }
+
+  private static Method findMethod(
+      Class<?> targetClass, String methodName, Class<?>... parameterTypes) {
+    Class<?> current = targetClass;
+    while (current != null) {
+      try {
+        return current.getDeclaredMethod(methodName, parameterTypes);
+      } catch (NoSuchMethodException e) {
+        current = current.getSuperclass();
+      }
+    }
+    throw new IllegalStateException("No method " + methodName + " in " + targetClass.getName());
   }
 
 }

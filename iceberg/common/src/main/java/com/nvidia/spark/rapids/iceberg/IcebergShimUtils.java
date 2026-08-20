@@ -24,15 +24,23 @@ import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import org.apache.hadoop.fs.Path;
 import org.apache.iceberg.ContentFile;
 import org.apache.iceberg.DeleteFile;
+import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.deletes.PositionDelete;
+import org.apache.iceberg.io.DataWriteResult;
+import org.apache.iceberg.io.DeleteWriteResult;
 import org.apache.iceberg.io.FileIO;
+import org.apache.iceberg.io.OutputFileFactory;
+import org.apache.iceberg.io.PartitioningWriter;
+import org.apache.iceberg.io.WriteResult;
 import org.apache.iceberg.parquet.GpuParquetIO;
 import org.apache.iceberg.shaded.org.apache.parquet.ParquetReadOptions;
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.iceberg.spark.source.GpuSparkScan;
 import org.apache.spark.sql.connector.read.Scan;
+import org.apache.spark.sql.catalyst.InternalRow;
 import scala.Option;
 
 import java.io.IOException;
@@ -60,6 +68,42 @@ public interface IcebergShimUtils {
 
     /** Returns whether a positional delete is an Iceberg Puffin deletion vector. */
     boolean isDeletionVector(DeleteFile deleteFile);
+
+    /** Returns whether a resolved delete-file format writes Puffin deletion vectors. */
+    default boolean isDeletionVectorFormat(FileFormat fileFormat) {
+        return false;
+    }
+
+    /**
+     * Creates Iceberg's version-specific deletion-vector writer.
+     *
+     * <p>The rewritable-deletes value is intentionally opaque because Iceberg 1.6 does not
+     * contain {@code DeleteFileSet}. Iceberg 1.9+ implementations cast it to the version-local
+     * map type and use it to merge applicable existing deletes.
+     */
+    default PartitioningWriter<PositionDelete<InternalRow>, DeleteWriteResult>
+            newDeletionVectorWriter(
+                    Table table, OutputFileFactory fileFactory, Object rewritableDeletes) {
+        throw new UnsupportedOperationException(
+                "This Iceberg version does not support Puffin deletion vectors");
+    }
+
+    /** Combines data and delete results, including rewritten deletes when supported. */
+    default WriteResult positionDeltaWriteResult(
+            DataWriteResult dataResult, DeleteWriteResult deleteResult) {
+        return WriteResult.builder()
+                .addDataFiles(dataResult.dataFiles())
+                .addDeleteFiles(deleteResult.deleteFiles())
+                .addReferencedDataFiles(deleteResult.referencedDataFiles())
+                .build();
+    }
+
+    /** Populates a reusable position-delete record across Iceberg API versions. */
+    @SuppressWarnings("deprecation")
+    default void setPositionDelete(
+            PositionDelete<InternalRow> delete, CharSequence path, long position) {
+        delete.set(path, position, null);
+    }
 
     /**
      * Reads exactly the recorded deletion-vector byte range and returns its compressed bitmap.

@@ -24,9 +24,19 @@ import com.nvidia.spark.rapids.iceberg.IcebergShimUtils;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import org.apache.hadoop.fs.Path;
 import org.apache.iceberg.*;
+import org.apache.iceberg.data.BaseDeleteLoader;
+import org.apache.iceberg.deletes.PositionDelete;
+import org.apache.iceberg.deletes.PositionDeleteIndex;
+import org.apache.iceberg.encryption.EncryptingFileIO;
 import org.apache.iceberg.io.FileIO;
+import org.apache.iceberg.io.DataWriteResult;
+import org.apache.iceberg.io.DeleteWriteResult;
+import org.apache.iceberg.io.OutputFileFactory;
+import org.apache.iceberg.io.PartitioningDVWriter;
+import org.apache.iceberg.io.PartitioningWriter;
 import org.apache.iceberg.io.StorageCredential;
 import org.apache.iceberg.io.SupportsStorageCredentials;
+import org.apache.iceberg.io.WriteResult;
 import org.apache.iceberg.shaded.org.apache.parquet.ParquetReadOptions;
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.iceberg.spark.SparkUtil;
@@ -34,12 +44,15 @@ import org.apache.iceberg.spark.source.GpuSparkCopyOnWriteV1Scan;
 import org.apache.iceberg.spark.source.GpuSparkScan;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.PartitionUtil;
+import org.apache.iceberg.util.DeleteFileSet;
+import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.read.Scan;
 
 import java.io.IOException;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.function.Function;
 
 /** Iceberg 1.10.x shim: uses {@code SparkUtil::internalToSpark} and a cache-aware footer path. */
 public class ShimUtilsImpl implements IcebergShimUtils {
@@ -56,6 +69,48 @@ public class ShimUtilsImpl implements IcebergShimUtils {
     @Override
     public boolean isDeletionVector(DeleteFile deleteFile) {
         return deleteFile.format() == FileFormat.PUFFIN;
+    }
+
+    @Override
+    public boolean isDeletionVectorFormat(FileFormat fileFormat) {
+        return fileFormat == FileFormat.PUFFIN;
+    }
+
+    @Override
+    public PartitioningWriter<PositionDelete<InternalRow>, DeleteWriteResult>
+            newDeletionVectorWriter(
+                    Table table, OutputFileFactory fileFactory, Object rewritableDeletes) {
+        return new PartitioningDVWriter<>(
+                fileFactory, previousDeleteLoader(table, rewritableDeletes));
+    }
+
+    @Override
+    public WriteResult positionDeltaWriteResult(
+            DataWriteResult dataResult, DeleteWriteResult deleteResult) {
+        return WriteResult.builder()
+                .addDataFiles(dataResult.dataFiles())
+                .addDeleteFiles(deleteResult.deleteFiles())
+                .addReferencedDataFiles(deleteResult.referencedDataFiles())
+                .addRewrittenDeleteFiles(deleteResult.rewrittenDeleteFiles())
+                .build();
+    }
+
+    @SuppressWarnings("unchecked")
+    private Function<CharSequence, PositionDeleteIndex> previousDeleteLoader(
+            Table table, Object rewritableDeletes) {
+        if (rewritableDeletes == null) {
+            return path -> null;
+        }
+
+        Map<String, DeleteFileSet> deleteFiles =
+                (Map<String, DeleteFileSet>) rewritableDeletes;
+        BaseDeleteLoader deleteLoader = new BaseDeleteLoader(
+                deleteFile -> EncryptingFileIO.combine(table.io(), table.encryption())
+                        .newInputFile(deleteFile));
+        return path -> {
+            DeleteFileSet files = deleteFiles.get(path.toString());
+            return files != null ? deleteLoader.loadPositionDeletes(files, path) : null;
+        };
     }
 
     @Override

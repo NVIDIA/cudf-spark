@@ -24,7 +24,7 @@ from iceberg import rapids_reader_types, \
     representative_eq_column_combinations, eq_reader_canary_pairs, \
     iceberg_unsupported_mark, create_iceberg_table, \
     iceberg_base_table_cols, iceberg_gens_list, get_full_table_name, \
-    supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON
+    iceberg_write_enabled_conf, supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON
 from data_gen import gen_df, get_datagen_seed, int_gen, long_gen, string_gen
 from marks import iceberg, ignore_order, validate_execs_in_gpu_plan
 from spark_session import with_gpu_session, with_cpu_session
@@ -203,6 +203,98 @@ def test_iceberg_v3_deletion_vector(spark_tmp_table_factory, reader_type):
         conf=read_conf,
         # Reset the GPU plan-validation config before fixture teardown.
         is_cpu_first=False)
+
+
+def _assert_v3_deletion_vectors(spark, table_name, expected_positions):
+    delete_files = spark.sql(f"""
+        SELECT content, file_format, record_count, referenced_data_file,
+               content_offset, content_size_in_bytes
+        FROM {table_name}.delete_files
+        WHERE content = 1
+    """).collect()
+    assert delete_files, "Expected at least one positional delete file"
+    assert all(row.file_format == 'PUFFIN' for row in delete_files), \
+        f"Expected only Puffin deletion vectors, found {delete_files}"
+    referenced_files = [row.referenced_data_file for row in delete_files]
+    assert all(path is not None for path in referenced_files), \
+        f"Expected every deletion vector to reference a data file, found {delete_files}"
+    assert len(referenced_files) == len(set(referenced_files)), \
+        f"Expected at most one deletion vector per data file, found {delete_files}"
+    assert all(row.content_offset is not None and row.content_offset >= 0 and
+               row.content_size_in_bytes is not None and row.content_size_in_bytes > 0
+               for row in delete_files), \
+        f"Expected valid Puffin ranges, found {delete_files}"
+    actual_positions = sum(row.record_count for row in delete_files)
+    assert actual_positions == expected_positions, \
+        f"Expected {expected_positions} deleted positions, found {actual_positions}"
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@pytest.mark.parametrize('fanout_enabled', [False, True], ids=['clustered', 'fanout'])
+def test_iceberg_v3_gpu_write_and_merge_deletion_vectors(
+        spark_tmp_table_factory, fanout_enabled):
+    table_name = get_full_table_name(spark_tmp_table_factory)
+
+    def setup_table(spark):
+        spark.sql(f"""
+            CREATE TABLE {table_name} (id BIGINT) USING ICEBERG
+            PARTITIONED BY (bucket(2, id))
+            TBLPROPERTIES (
+              'format-version' = '3',
+              'write.delete.mode' = 'merge-on-read',
+              'write.spark.fanout.enabled' = '{str(fanout_enabled).lower()}')
+        """)
+        spark.sql(f"INSERT INTO {table_name} SELECT id FROM range(128)")
+
+    with_cpu_session(setup_table)
+    write_conf = dict(iceberg_write_enabled_conf)
+    write_conf['spark.rapids.sql.format.iceberg.v3.enabled'] = 'true'
+
+    # The second delete must merge with the first DV rather than add another DV for a data file.
+    with_gpu_session(
+        lambda spark: spark.sql(f"DELETE FROM {table_name} WHERE id % 3 = 0").collect(),
+        conf=write_conf)
+    with_gpu_session(
+        lambda spark: spark.sql(f"DELETE FROM {table_name} WHERE id % 5 = 0").collect(),
+        conf=write_conf)
+
+    with_cpu_session(lambda spark: _assert_v3_deletion_vectors(spark, table_name, 60))
+    actual = with_cpu_session(
+        lambda spark: [row.id for row in spark.table(table_name).collect()])
+    expected = [value for value in range(128) if value % 3 != 0 and value % 5 != 0]
+    assert sorted(actual) == expected
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+def test_iceberg_v3_gpu_write_upgrades_position_deletes(spark_tmp_table_factory):
+    table_name = get_full_table_name(spark_tmp_table_factory)
+
+    def setup_table(spark):
+        spark.sql(f"""
+            CREATE TABLE {table_name} (id BIGINT) USING ICEBERG
+            TBLPROPERTIES (
+              'format-version' = '2',
+              'write.delete.mode' = 'merge-on-read')
+        """)
+        spark.sql(f"INSERT INTO {table_name} SELECT id FROM range(64)")
+        spark.sql(f"DELETE FROM {table_name} WHERE id % 4 = 0")
+        spark.sql(
+            f"ALTER TABLE {table_name} SET TBLPROPERTIES ('format-version' = '3')")
+
+    with_cpu_session(setup_table)
+    write_conf = dict(iceberg_write_enabled_conf)
+    write_conf['spark.rapids.sql.format.iceberg.v3.enabled'] = 'true'
+    with_gpu_session(
+        lambda spark: spark.sql(f"DELETE FROM {table_name} WHERE id % 5 = 0").collect(),
+        conf=write_conf)
+
+    with_cpu_session(lambda spark: _assert_v3_deletion_vectors(spark, table_name, 25))
+    actual = with_cpu_session(
+        lambda spark: [row.id for row in spark.table(table_name).collect()])
+    expected = [value for value in range(64) if value % 4 != 0 and value % 5 != 0]
+    assert sorted(actual) == expected
 
 
 @iceberg
