@@ -2109,7 +2109,7 @@ object GpuOverrides extends Logging {
             GpuIn(gpuChildren.head, literalValues, dynamicExpressions)
           }
         }
-      }),
+      }).note("Non-literal list expressions must be deterministic and side-effect-free"),
     expr[InSet](
       "INSET operator",
       ExprChecks.unaryProject(TypeSig.BOOLEAN, TypeSig.BOOLEAN,

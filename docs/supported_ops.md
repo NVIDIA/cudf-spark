@@ -9492,7 +9492,7 @@ are limited.
 <td rowSpan="3">In</td>
 <td rowSpan="3">`in`</td>
 <td rowSpan="3">IN operator</td>
-<td rowSpan="3">None</td>
+<td rowSpan="3">Non-literal list expressions must be deterministic and side-effect-free</td>
 <td rowSpan="3">project</td>
 <td>value</td>
 <td>S</td>
