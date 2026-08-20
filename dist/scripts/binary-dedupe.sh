@@ -53,7 +53,7 @@ SPARK_SHIM_DIRS=()
 if [[ "${UNSHIM_FAST:-0}" == "1" ]]; then
   while IFS= read -r shim_dir; do
     SPARK_SHIM_DIRS+=("$shim_dir")
-  done < <(find ./parallel-world -maxdepth 1 -mindepth 1 -type d -name 'spark[34]*' | sort)
+  done < <(find ./parallel-world -maxdepth 1 -mindepth 1 -type d -name 'spark[345]*' | sort)
 fi
 
 DEDUPE_CACHE_DIR="${UNSHIM_DEDUPE_CACHE_DIR:-}"
@@ -106,7 +106,7 @@ elif [[ "${UNSHIM_FAST:-0}" == "1" && "${#SPARK_SHIM_DIRS[@]}" == "1" ]]; then
     sort | sed 's|^\./parallel-world||' > "$SPARK_SHARED_TXT"
 else
   echo "$((++STEP))/ SHA1 of all non-META files > tmp-sha1-files.txt"
-  find ./parallel-world/spark[34]* -name META-INF -prune -o -name webapps -prune -o \( -type f -print0 \) | \
+  find ./parallel-world/spark[345]* -name META-INF -prune -o -name webapps -prune -o \( -type f -print0 \) | \
     xargs --null $SHASUM > tmp-sha1-files.txt
 
   echo "$((++STEP))/ make shim column 1 > tmp-shim-sha-package-files.txt"
@@ -196,7 +196,7 @@ function retain_single_copy() {
   class_resource="$1"
   # example input: /spark320/com/nvidia/spark/udf/Repr$UnknownCapturedArg$.class
 
-  IFS='/' <<< "$class_resource" read -ra path_parts
+  IFS='/' read -ra path_parts <<< "$class_resource"
   # declare -p path_parts
   # declare -a path_parts='([0]="" [1]="spark320" [2]="com" [3]="nvidia" [4]="spark" [5]="udf" [6]="Repr\$UnknownCapturedArg\$.class")'
   shim="${path_parts[1]}"
@@ -211,7 +211,7 @@ function retain_single_copy() {
   echo "$package_class" >> "from-$shim-to-spark-shared.txt"
   # expanding directories separately because full path
   # glob is broken for class file name including the "$" character
-  for pw in ./parallel-world/spark[34]* ; do
+  for pw in ./parallel-world/spark[345]* ; do
     delete_path="$pw/$package_class"
     [[ -f "$delete_path" ]] && echo "$delete_path" || true
   done >> "$DELETE_DUPLICATES_TXT" || exit 255
@@ -355,7 +355,7 @@ function copy_unshimmed_from_spark_shared() {
 # standalone debugging
 # truncate incremental files
 : > "$DELETE_DUPLICATES_TXT"
-rm -f from-spark[34]*-to-spark-shared.txt
+rm -f from-spark[345]*-to-spark-shared.txt
 rm -rf "$SPARK_SHARED_DIR"
 mkdir -p "$SPARK_SHARED_DIR"
 
@@ -364,24 +364,24 @@ awk -F/ "
   NF >= 3 {
     shim = \$2
     package_class = \$0
-    sub(\"^/spark[34][^/]*/\", \"\", package_class)
+    sub(\"^/spark[345][^/]*/\", \"\", package_class)
     print package_class >> (\"from-\" shim \"-to-spark-shared.txt\")
   }
 " "$SPARK_SHARED_TXT"
-for pw in ./parallel-world/spark[34]* ; do
+for pw in ./parallel-world/spark[345]* ; do
   awk -v pw="$pw" "
     {
       package_class = \$0
-      sub(\"^/spark[34][^/]*/\", \"\", package_class)
+      sub(\"^/spark[345][^/]*/\", \"\", package_class)
       print pw \"/\" package_class
     }
   " "$SPARK_SHARED_TXT"
 done >> "$DELETE_DUPLICATES_TXT"
 
 echo "$((++STEP))/ rsyncing common classes to $SPARK_SHARED_DIR"
-for copy_list in from-spark[34]*-to-spark-shared.txt; do
+for copy_list in from-spark[345]*-to-spark-shared.txt; do
   echo Initializing rsync of "$copy_list"
-  IFS='-' <<< "$copy_list" read -ra copy_list_parts
+  IFS='-' read -ra copy_list_parts <<< "$copy_list"
   # declare -p copy_list_parts
   shim="${copy_list_parts[1]}"
   # use rsync to reduce process forking
@@ -398,9 +398,9 @@ copy_unshimmed_from_spark_shared
 #
 # At this point the duplicate classes have not been removed from version-specific jar
 # locations such as parallel-world/spark321.
-# For each unshimmed class file look for all of its copies inside /spark[34]* and
+# For each unshimmed class file look for all of its copies inside /spark[345]* and
 # and count the number of distinct checksums. There are two representative cases
-# 1) The class is contributed to the unshimmed location via the unshimmed-from-each-spark34 list. These are classes
+# 1) The class is contributed to the unshimmed location via the unshimmed-from-each-spark345 list. These are classes
 #    carrying the shim classifier in their package name such as
 #    com.nvidia.spark.rapids.spark321.RapidsShuffleManager. They are unique by construction,
 #    and will have zero copies in any non-spark321 shims. Although such classes are currently excluded from
@@ -419,7 +419,7 @@ copy_unshimmed_from_spark_shared
 UNSHIMMED_LIST_TXT=unshimmed-result.txt
 echo "$((++STEP))/ creating sorted list of root-layout unshimmed classes > $UNSHIMMED_LIST_TXT"
 find ./parallel-world -name '*.class' \
-  -not -path './parallel-world/spark[34-]*' \
+  -not -path './parallel-world/spark[345-]*' \
   -not -path './parallel-world/spark-shared/*' | \
   cut -d/ -f 3- | sort > "$UNSHIMMED_LIST_TXT"
 
@@ -441,7 +441,7 @@ function unshimmed_class_needs_shared_identity() {
   # Keep this list narrow. Do not add a class here when it can stay in
   # spark-shared without being referenced from root-loaded code.
   class_file_quoted=$(printf "%q" "$class_file")
-  if [[ "$class_file_quoted" =~ com/nvidia/spark/rapids/spark[34].*/.*ShuffleManager.class || \
+  if [[ "$class_file_quoted" =~ com/nvidia/spark/rapids/spark[345].*/.*ShuffleManager.class || \
           "$class_file_quoted" == "com/nvidia/spark/ParquetCachedBatchSerializer.class" || \
           "$class_file_quoted" =~ org/apache/spark/sql/rapids/ProxyRapidsShuffleInternalManagerBase || \
           "$class_file_quoted" =~ com/nvidia/spark/rapids/SparkRapidsBuildInfoEvent.*\.class || \
@@ -485,7 +485,7 @@ fi
 echo "$((++STEP))/ removing duplicates of unshimmed classes"
 {
   sed "s|^|./parallel-world/spark-shared/|" "$UNSHIMMED_LIST_TXT"
-  for pw in ./parallel-world/spark[34-]* ; do
+  for pw in ./parallel-world/spark[345-]* ; do
     awk -v pw="$pw" "{ print pw \"/\" \$0 }" "$UNSHIMMED_LIST_TXT"
   done
 } >> "$DELETE_DUPLICATES_TXT"

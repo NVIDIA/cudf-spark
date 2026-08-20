@@ -896,6 +896,46 @@
                 </pluginManagement>
             </build>
         </profile>
+        <profile>
+            <id>sparkMaster</id>
+            <activation>
+                <property>
+                    <name>buildver</name>
+                    <value>500</value>
+                </property>
+            </activation>
+            <properties>
+                <buildver>500</buildver>
+                <spark.version>${spark500.version}</spark.version>
+                <spark.test.version>${spark500.version}</spark.test.version>
+                <parquet.hadoop.version>1.15.2</parquet.hadoop.version>
+                <maven.compiler.source>17</maven.compiler.source>
+                <java.major.version>17</java.major.version>
+                <rapids.delta.artifactId1>rapids-4-spark-delta-stub</rapids.delta.artifactId1>
+                <iceberg.artifact.suffix>${spark41x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
+                <iceberg.runtime.version>${iceberg.111x.version}</iceberg.runtime.version>
+                <slf4j.version>2.0.7</slf4j.version>
+                <scala.javac.args>-Xlint:all,-serial,-path,-try,-processing,-options|-Werror</scala.javac.args>
+            </properties>
+            <modules>
+                <module>delta-lake/delta-stub</module>
+                <module>iceberg/iceberg-stub</module>
+            </modules>
+            <build>
+                <pluginManagement>
+                    <plugins>
+                        <plugin>
+                            <groupId>net.alchim31.maven</groupId>
+                            <artifactId>scala-maven-plugin</artifactId>
+                            <configuration>
+                                <release combine.self="override"/>
+                                <target>${java.major.version}</target>
+                            </configuration>
+                        </plugin>
+                    </plugins>
+                </pluginManagement>
+            </build>
+        </profile>
         --><!-- #endif scala-2.13 -->
         <profile>
             <id>source-javadoc</id>
@@ -1083,6 +1123,9 @@
         <spark412.version>4.1.2</spark412.version>
         <spark413.version>4.1.3</spark413.version>
         <spark420.version>4.2.0</spark420.version>
+        <!-- TODO: update spark500.version to a GA version and move to a regular
+             shim profile once Spark 5.0.0 is officially released. -->
+        <spark500.version>5.0.0-SNAPSHOT</spark500.version>
         <mockito.version>3.12.4</mockito.version>
         <!-- 4.7.1 required: later versions auto-derive -release from -target,
              preventing JDK 17 boot classpath access with JDK 8 classfile output -->
@@ -1805,8 +1848,8 @@ This will force full Scala code rebuild in downstream modules.
                         <!-- #if scala-2.13 --><!--
                         <requireProperty>
                             <property>buildver</property>
-                            <regex>^(35[0-9]|40[0-4]|41[1-3]|420|400db173)$</regex>
-                            <regexMessage>Unsupported buildver value ${buildver} for a Scala 2.13 build. Supported Scala 2.13 buildver values are: 350, 351, 352, 353, 354, 355, 356, 357, 358, 359, 400, 401, 402, 403, 404, 411, 412, 413, 420, 400db173. Spark 3.3.x and 3.4.x builds use Scala 2.12; for example, build Spark 330 with the root pom.xml instead of scala2.13/pom.xml.</regexMessage>
+                            <regex>^(35[0-9]|40[0-4]|41[1-3]|420|500|400db173)$</regex>
+                            <regexMessage>Unsupported buildver value ${buildver} for a Scala 2.13 build. Supported Scala 2.13 buildver values are: 350, 351, 352, 353, 354, 355, 356, 357, 358, 359, 400, 401, 402, 403, 404, 411, 412, 413, 420, 500, 400db173. Spark 3.3.x and 3.4.x builds use Scala 2.12; for example, build Spark 330 with the root pom.xml instead of scala2.13/pom.xml.</regexMessage>
                         </requireProperty>
                         --><!-- #endif scala-2.13 -->
                         <requireProperty>

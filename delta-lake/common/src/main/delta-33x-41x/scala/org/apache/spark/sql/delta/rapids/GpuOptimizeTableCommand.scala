@@ -25,7 +25,8 @@ import org.apache.spark.sql.{Encoders, Row, SparkSession}
 import org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, Expression}
 import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, UnaryNode}
-import org.apache.spark.sql.delta.{DeltaErrors, Snapshot}
+import org.apache.spark.sql.delta.{DeltaErrors, IcebergCompat, RowTracking, Snapshot,
+  UniversalFormat}
 import org.apache.spark.sql.delta.commands.{DeltaCommand, DeltaOptimizeContext}
 import org.apache.spark.sql.delta.commands.optimize.OptimizeMetrics
 import org.apache.spark.sql.delta.rapids.commands.GpuOptimizeExecutor
@@ -33,8 +34,26 @@ import org.apache.spark.sql.delta.skipping.clustering.{ClusteredTableUtils, Clus
 import org.apache.spark.sql.execution.command.RunnableCommand
 import org.apache.spark.sql.types.StringType
 
+object GpuOptimizeTableCommand {
+  private[rapids] def assertReorgSupported(
+      snapshot: Snapshot,
+      optimizeContext: DeltaOptimizeContext): Unit = {
+    if (optimizeContext.reorg.nonEmpty) {
+      if (IcebergCompat.isAnyEnabled(snapshot.metadata) ||
+          UniversalFormat.icebergEnabled(snapshot.metadata)) {
+        throw new UnsupportedOperationException(
+          "GPU Delta REORG TABLE does not support Iceberg-compatible tables")
+      }
+      if (RowTracking.isEnabled(snapshot.protocol, snapshot.metadata)) {
+        throw new UnsupportedOperationException(
+          "GPU Delta REORG TABLE does not support row-tracking tables")
+      }
+    }
+  }
+}
+
 /**
- * GPU version of Delta Lake OptimizeTableCommand (compaction mode only).
+ * GPU version of Delta Lake OptimizeTableCommand for compaction and REORG PURGE.
  *
  * Mirrors the CPU command's input shape and output schema, but delegates execution
  * to the shared GpuOptimizeExecutor.
@@ -62,6 +81,9 @@ case class GpuOptimizeTableCommand(
     if (snapshot.version == -1) {
       throw DeltaErrors.notADeltaTableException(table.deltaLog.dataPath.toString)
     }
+
+    // REORG was checked during GPU planning, but the table metadata may have changed since then.
+    GpuOptimizeTableCommand.assertReorgSupported(snapshot, optimizeContext)
 
     // Sanity checks
     if (zOrderBy.nonEmpty) {

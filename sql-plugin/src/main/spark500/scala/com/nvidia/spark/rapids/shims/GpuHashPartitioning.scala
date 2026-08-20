@@ -14,12 +14,16 @@
  * limitations under the License.
  */
 
+/*** spark-rapids-shim-json-lines
+{"spark": "500"}
+spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
 import com.nvidia.spark.rapids.{GpuHashPartitioningBase, HashMode, Murmur3Mode}
 
 import org.apache.spark.sql.catalyst.expressions.Expression
-import org.apache.spark.sql.catalyst.plans.physical.{ClusteredDistribution, Distribution, StatefulOpClusteredDistribution}
+import org.apache.spark.sql.catalyst.plans.physical.{ClusteredDistribution, Distribution,
+  StatefulOpClusteredDistribution}
 
 case class GpuHashPartitioning(expressions: Seq[Expression], numPartitions: Int,
     hashMode: HashMode = Murmur3Mode)
@@ -32,12 +36,12 @@ case class GpuHashPartitioning(expressions: Seq[Expression], numPartitions: Int,
           expressions.length == h.expressions.length && expressions.zip(h.expressions).forall {
             case (l, r) => l.semanticEquals(r)
           }
-        case c @ ClusteredDistribution(requiredClustering, requireAllClusterKeys, _) =>
+        case c @ ClusteredDistribution(requiredClustering, requireAllClusterKeys, _, _) =>
           if (requireAllClusterKeys) {
             c.areAllClusterKeysMatched(expressions)
           } else {
             expressions.forall(x => requiredClustering.exists(_.semanticEquals(x)))
-          }          
+          }
         case _ => false
       }
     }
