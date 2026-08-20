@@ -20,8 +20,10 @@ import com.nvidia.spark.rapids.GpuMetric;
 import com.nvidia.spark.rapids.NoopMetric$;
 import com.nvidia.spark.rapids.RapidsConf;
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
+import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import org.apache.hadoop.fs.Path;
 import org.apache.iceberg.ContentFile;
+import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
@@ -55,6 +57,19 @@ public interface IcebergShimUtils {
      * {@code location()} in 1.9.x+).
      */
     String locationOf(ContentFile<?> f);
+
+    /** Returns whether a positional delete is an Iceberg Puffin deletion vector. */
+    boolean isDeletionVector(DeleteFile deleteFile);
+
+    /**
+     * Reads exactly the recorded deletion-vector byte range and returns its compressed bitmap.
+     *
+     * <p>This is version-dispatched because Iceberg 1.6 does not expose the Puffin file format or
+     * deletion-vector manifest fields, and its {@code PositionDeleteIndex} lacks the decode and
+     * iteration APIs available in later releases.
+     */
+    IcebergDeletionVector readDeletionVector(DeleteFile deleteFile, RapidsInputFile inputFile)
+            throws IOException;
 
     /**
      * Builds the constants map for a file scan task. Constants include partition values,

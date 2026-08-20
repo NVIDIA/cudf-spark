@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,14 +20,20 @@ import java.util.{Map => JMap}
 
 import scala.annotation.tailrec
 
-import com.nvidia.spark.rapids.{DateTimeRebaseCorrected, PartitionReaderWithBytesRead}
+import ai.rapids.cudf.ParquetOptions
+import com.nvidia.spark.rapids.{CachedGpuBatchIterator, DateTimeRebaseCorrected, GpuSemaphore,
+  PartitionReaderWithBytesRead, RmmRapidsRetryIterator, SpillableHostBuffer}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
+import com.nvidia.spark.rapids.iceberg.IcebergDeletionVector
 import com.nvidia.spark.rapids.iceberg.data.GpuDeleteFilter
 import com.nvidia.spark.rapids.parquet.{CpuCompressionConfig, ParquetPartitionReader}
 import org.apache.hadoop.fs.Path
+import org.apache.parquet.hadoop.metadata.BlockMetaData
 
+import org.apache.spark.TaskContext
 import org.apache.spark.sql.rapids.InputFileUtils
+import org.apache.spark.sql.types.{DataType, LongType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 class GpuSingleThreadIcebergParquetReader(
@@ -35,6 +41,7 @@ class GpuSingleThreadIcebergParquetReader(
     val files: Seq[IcebergPartitionedFile],
     val constantsProvider: IcebergPartitionedFile => JMap[Integer, _],
     val gpuDeleteProvider: IcebergPartitionedFile => Option[GpuDeleteFilter],
+    val deletionVectorProvider: IcebergPartitionedFile => Option[IcebergDeletionVector],
     override val conf: GpuIcebergParquetReaderConf) extends GpuIcebergParquetReader  {
 
   private val taskIterator = files.iterator
@@ -65,7 +72,7 @@ class GpuSingleThreadIcebergParquetReader(
 
         gpuDeleteFilter = gpuDeleteProvider(file)
         parquetIterator = new SingleFileReader(rapidsFileIO, file, constantsProvider(file),
-          gpuDeleteFilter, conf)
+          gpuDeleteFilter, deletionVectorProvider(file), conf)
         dataIterator = gpuDeleteFilter
           .map(_.filterAndDelete(parquetIterator))
           .getOrElse(parquetIterator)
@@ -102,6 +109,7 @@ private class SingleFileReader(
     val file: IcebergPartitionedFile,
     val idToConstant: JMap[Integer, _],
     val deleteFilter: Option[GpuDeleteFilter],
+    val deletionVector: Option[IcebergDeletionVector],
     override val conf: GpuIcebergParquetReaderConf)
   extends GpuIcebergParquetReader {
 
@@ -109,8 +117,12 @@ private class SingleFileReader(
   private lazy val (reader, postProcessor) = open()
 
   override def close(): Unit = {
-    if (inited) {
-      withResource(reader) { _ => }
+    try {
+      if (inited) {
+        withResource(reader) { _ => }
+      }
+    } finally {
+      withResource(deletionVector) { _ => }
     }
   }
 
@@ -122,8 +134,10 @@ private class SingleFileReader(
 
   private def open() = {
     val requiredSchema = deleteFilter.map(_.requiredSchema).getOrElse(conf.expectedSchema)
+    val readerConf = conf
 
-    val (filteredParquet, shadedFileReadSchema) = super.filterParquetBlocks(file, requiredSchema)
+    val (filteredParquet, shadedFileReadSchema) =
+      super.filterParquetBlocks(file, requiredSchema, deletionVector.isDefined)
 
     val parquetPartReader = new ParquetPartitionReader(
       rapidsFileIO,
@@ -146,7 +160,29 @@ private class SingleFileReader(
       DateTimeRebaseCorrected, // dateRebaseMode
       DateTimeRebaseCorrected, // timestampRebaseMode
       true, // hasInt96Timestamps
-      false) // useFieldId
+      false) { // useFieldId
+      override protected def readBuffer(
+          parquetOpts: ParquetOptions,
+          colTypes: Array[DataType],
+          chunkedBlocks: Seq[BlockMetaData],
+          dataBuffer: SpillableHostBuffer): Iterator[ColumnarBatch] = {
+        deletionVector.map { dv =>
+          RmmRapidsRetryIterator.withRetryNoSplit(dataBuffer) { _ =>
+            val hostBuffer = dataBuffer.getDataHostBuffer()
+            GpuSemaphore.acquireIfNecessary(TaskContext.get())
+            val producer = GpuIcebergDeletionVector.makeProducer(
+              readerConf.useChunkedReader, readerConf.maxChunkedReaderMemoryUsageSizeBytes,
+              readerConf.conf, readerConf.targetBatchSizeBytes, parquetOpts, Array(hostBuffer),
+              readerConf.metrics, DateTimeRebaseCorrected, DateTimeRebaseCorrected,
+              readerConf.caseSensitive,
+              useFieldId = false, filteredParquet.readSchema, filteredParquet.schema,
+              Array(file.sparkPartitionedFile), readerConf.parquetDebugDumpPrefix,
+              readerConf.parquetDebugDumpAlways, dv, chunkedBlocks)
+            CachedGpuBatchIterator(producer, LongType +: colTypes)
+          }
+        }.getOrElse(super.readBuffer(parquetOpts, colTypes, chunkedBlocks, dataBuffer))
+      }
+    }
 
     val parquetReader = new PartitionReaderWithBytesRead(parquetPartReader)
     val postProcessor = new GpuParquetReaderPostProcessor(filteredParquet,

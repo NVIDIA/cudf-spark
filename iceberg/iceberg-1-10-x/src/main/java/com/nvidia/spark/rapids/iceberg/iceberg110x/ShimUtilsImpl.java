@@ -19,7 +19,9 @@ package com.nvidia.spark.rapids.iceberg.iceberg110x;
 import com.nvidia.spark.rapids.GpuMetric;
 import com.nvidia.spark.rapids.RapidsConf;
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
+import com.nvidia.spark.rapids.iceberg.IcebergDeletionVector;
 import com.nvidia.spark.rapids.iceberg.IcebergShimUtils;
+import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import org.apache.hadoop.fs.Path;
 import org.apache.iceberg.*;
 import org.apache.iceberg.io.FileIO;
@@ -49,6 +51,20 @@ public class ShimUtilsImpl implements IcebergShimUtils {
     @Override
     public String locationOf(ContentFile<?> f) {
         return f.location();
+    }
+
+    @Override
+    public boolean isDeletionVector(DeleteFile deleteFile) {
+        return deleteFile.format() == FileFormat.PUFFIN;
+    }
+
+    @Override
+    public IcebergDeletionVector readDeletionVector(
+            DeleteFile deleteFile, RapidsInputFile inputFile)
+            throws IOException {
+        return IcebergDeletionVector.read(
+                inputFile, deleteFile.contentOffset(), deleteFile.contentSizeInBytes(),
+                deleteFile.recordCount());
     }
 
     @Override
