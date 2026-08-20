@@ -718,7 +718,8 @@ case class GpuOrcMultiFilePartitionReaderFactory(
                     OrcSchemaWrapper(orcPartitionReaderContext.updatedReadSchema),
                     readDataSchema,
                     OrcExtraInfo(orcPartitionReaderContext.requestedMapping,
-                      orcPartitionReaderContext.writerTimezone)))
+                      orcPartitionReaderContext.writerTimezone,
+                      orcPartitionReaderContext.writerUsedProlepticGregorian)))
             }
           } catch {
             case e: FileNotFoundException if ignoreMissingFiles =>
@@ -834,6 +835,7 @@ case class OrcOutputStripe(
  * @param blockIterator an iterator over the ORC output stripes
  * @param requestedMapping the optional requested column ids
  * @param writerTimezone the resolved writer timezone from ORC stripe footers
+ * @param writerUsedProlepticGregorian whether the writer used the proleptic Gregorian calendar
  */
 case class OrcPartitionReaderContext(
     filePath: Path,
@@ -847,14 +849,16 @@ case class OrcPartitionReaderContext(
     readerOpts: Reader.Options,
     blockIterator: BufferedIterator[OrcOutputStripe],
     requestedMapping: Option[Array[Int]],
-    writerTimezone: ZoneId = ZoneId.systemDefault())
+    writerTimezone: ZoneId,
+    writerUsedProlepticGregorian: Boolean)
 
 case class OrcBlockMetaForSplitCheck(
     filePath: Path,
     typeDescription: TypeDescription,
     compressionKind: CompressionKind,
     requestedMapping: Option[Array[Int]],
-    writerTimezone: ZoneId) {
+    writerTimezone: ZoneId,
+    writerUsedProlepticGregorian: Boolean) {
 }
 
 object OrcBlockMetaForSplitCheck {
@@ -864,15 +868,17 @@ object OrcBlockMetaForSplitCheck {
       singleBlockMeta.schema.schema,
       singleBlockMeta.dataBlock.stripeMeta.ctx.compressionKind,
       singleBlockMeta.extraInfo.requestedMapping,
-      singleBlockMeta.extraInfo.writerTimezone)
+      singleBlockMeta.extraInfo.writerTimezone,
+      singleBlockMeta.extraInfo.writerUsedProlepticGregorian)
   }
 
   def apply(filePathStr: String, typeDescription: TypeDescription,
       compressionKind: CompressionKind,
       requestedMapping: Option[Array[Int]],
-      writerTimezone: ZoneId): OrcBlockMetaForSplitCheck = {
+      writerTimezone: ZoneId,
+      writerUsedProlepticGregorian: Boolean): OrcBlockMetaForSplitCheck = {
     OrcBlockMetaForSplitCheck(new Path(new URI(filePathStr)), typeDescription,
-      compressionKind, requestedMapping, writerTimezone)
+      compressionKind, requestedMapping, writerTimezone, writerUsedProlepticGregorian)
   }
 }
 
@@ -1029,8 +1035,8 @@ trait OrcCommonFunctions extends OrcCodecWritingHelper { self: FilePartitionRead
       .includeColumn(includedColumns: _*)
       .decimal128Column(decimal128Fields: _*)
       // Read timestamps as UTC, ignoring the writer timezone in stripe footers.
-      // Timezone rebase is done externally via GpuOrcTimezoneUtils.rebaseOrcTimestamps,
-      // which handles both same-TZ and cross-TZ scenarios, including DST.
+      // Date/time rebase is done externally via GpuOrcTimezoneUtils.rebaseOrcDateTime,
+      // which handles legacy dates and both same-TZ and cross-TZ timestamps, including DST.
       .ignoreTimezoneInStripeFooter()
       .build()
     (parseOpts, tableSchema)
@@ -1064,6 +1070,12 @@ trait OrcCommonFunctions extends OrcCodecWritingHelper { self: FilePartitionRead
     if (!ret) {
       logInfo(s"ORC requested column ids for the next file ${nextMeta.filePath}" +
         s" doesn't match current ${curMeta.filePath}, splitting it into another batch!")
+      return true
+    }
+
+    if (nextMeta.writerUsedProlepticGregorian != curMeta.writerUsedProlepticGregorian) {
+      logInfo(s"ORC writer calendar for the next file ${nextMeta.filePath} " +
+        s"doesn't match current ${curMeta.filePath}, splitting it into another batch!")
       return true
     }
 
@@ -1351,7 +1363,7 @@ class GpuOrcPartitionReader(
                 maxChunkedReaderMemoryUsageSizeBytes, conf, targetBatchSizeBytes, parseOpts,
                 dataBuf, 0, dataSize, metrics, isCaseSensitive, readDataSchema,
                 tableSchema, Array(partFile), debugDumpPrefix, debugDumpAlways,
-                ctx.writerTimezone)
+                ctx.writerTimezone, ctx.writerUsedProlepticGregorian)
               CachedGpuBatchIterator(producer, colTypes)
             }
           }
@@ -1548,9 +1560,10 @@ private case class GpuOrcFileFilterHandler(
       // specified by its read schema.
       readerOpts.include(null)
       val evolution = new SchemaEvolution(orcReader.getSchema, updatedReadSchema, readerOpts)
+      val writerUsedProlepticGregorian = orcReader.writerUsedProlepticGregorian()
       val (sargApp, sargColumns) = getSearchApplier(evolution,
         orcFileReaderOpts.getUseUTCTimestamp,
-        orcReader.writerUsedProlepticGregorian(), orcFileReaderOpts.getConvertToProlepticGregorian)
+        writerUsedProlepticGregorian, orcFileReaderOpts.getConvertToProlepticGregorian)
 
       val splitStripes = orcReader.getStripes.asScala.filter( s =>
         s.getOffset >= partFile.start && s.getOffset < partFile.start + partFile.length)
@@ -1560,7 +1573,8 @@ private case class GpuOrcFileFilterHandler(
         resolveMemFileIncluded(fileIncluded, requestedMapping))
       OrcPartitionReaderContext(filePath, conf, orcReader.getSchema, updatedReadSchema, evolution,
         orcReader.getFileTail, orcReader.getCompressionSize, orcReader.getCompressionKind,
-        readerOpts, stripes.iterator.buffered, requestedMapping, writerTz)
+        readerOpts, stripes.iterator.buffered, requestedMapping, writerTz,
+        writerUsedProlepticGregorian)
     }
 
     /**
@@ -2283,7 +2297,8 @@ class MultiFileCloudOrcPartitionReader(
       updatedReadSchema: TypeDescription,
       compressionKind: CompressionKind,
       requestedMapping: Option[Array[Int]],
-      writerTimezone: ZoneId = ZoneId.systemDefault(),
+      writerTimezone: ZoneId,
+      writerUsedProlepticGregorian: Boolean,
       override val allPartValues: Option[Array[(Long, InternalRow)]] = None)
     extends HostMemoryBuffersWithMetaDataBase
 
@@ -2365,7 +2380,7 @@ class MultiFileCloudOrcPartitionReader(
               } else {
                 HostMemoryBuffersWithMetaData(partFile, hostBuffers.toArray, bytesRead,
                   ctx.updatedReadSchema, ctx.compressionKind, ctx.requestedMapping,
-                  ctx.writerTimezone)
+                  ctx.writerTimezone, ctx.writerUsedProlepticGregorian)
               }
             }
           }
@@ -2474,7 +2489,8 @@ class MultiFileCloudOrcPartitionReader(
         require(hmbInfo.hmbs.length == 1)
         val batchIter = readBufferToBatches(hmbInfo.hmbs.head, hmbInfo.bytes,
           buffer.updatedReadSchema, buffer.requestedMapping, filterHandler.isCaseSensitive,
-          buffer.partitionedFile, buffer.allPartValues, buffer.writerTimezone)
+          buffer.partitionedFile, buffer.allPartValues, buffer.writerTimezone,
+          buffer.writerUsedProlepticGregorian)
         if (memBuffersAndSize.length > 1) {
           val updatedBuffers = memBuffersAndSize.drop(1)
           currentFileHostBuffers = Some(buffer.copy(memBuffersAndSizes = updatedBuffers))
@@ -2495,7 +2511,8 @@ class MultiFileCloudOrcPartitionReader(
       isCaseSensitive: Boolean,
       partedFile: PartitionedFile,
       allPartValues: Option[Array[(Long, InternalRow)]],
-      writerTimezone: ZoneId) : Iterator[ColumnarBatch] = {
+      writerTimezone: ZoneId,
+      writerUsedProlepticGregorian: Boolean) : Iterator[ColumnarBatch] = {
     val (parseOpts, tableSchema) = closeOnExcept(hostBuffer) { _ =>
       getORCOptionsAndSchema(memFileSchema, requestedMapping, readDataSchema)
     }
@@ -2510,7 +2527,8 @@ class MultiFileCloudOrcPartitionReader(
       val producer = MakeOrcTableProducer(useChunkedReader,
         maxChunkedReaderMemoryUsageSizeBytes, conf, targetBatchSizeBytes, parseOpts,
         dataBuf, 0, bufferSize, metrics, isCaseSensitive, readDataSchema,
-        tableSchema, files, debugDumpPrefix, debugDumpAlways, writerTimezone)
+        tableSchema, files, debugDumpPrefix, debugDumpAlways, writerTimezone,
+        writerUsedProlepticGregorian)
       val batchIter = CachedGpuBatchIterator(producer, colTypes)
 
       if (allPartValues.isDefined) {
@@ -2645,10 +2663,10 @@ class MultiFileCloudOrcPartitionReader(
     isNeedToSplitDataBlock(
       OrcBlockMetaForSplitCheck(curMeta.partitionedFile.filePath.toString(),
         curMeta.updatedReadSchema, curMeta.compressionKind, curMeta.requestedMapping,
-        curMeta.writerTimezone),
+        curMeta.writerTimezone, curMeta.writerUsedProlepticGregorian),
       OrcBlockMetaForSplitCheck(nextMeta.partitionedFile.filePath.toString(),
         nextMeta.updatedReadSchema, nextMeta.compressionKind, nextMeta.requestedMapping,
-        nextMeta.writerTimezone))
+        nextMeta.writerTimezone, nextMeta.writerUsedProlepticGregorian))
   }
 
   private def computeCombinedHmbMeta(
@@ -2795,7 +2813,8 @@ private[rapids] case class OrcDataStripe(stripeMeta: OrcStripeWithMeta) extends 
 /** Orc extra information containing the requested column ids for the current coalescing stripes */
 case class OrcExtraInfo(
     requestedMapping: Option[Array[Int]],
-    writerTimezone: ZoneId = ZoneId.systemDefault()) extends ExtraInfo
+    writerTimezone: ZoneId,
+    writerUsedProlepticGregorian: Boolean) extends ExtraInfo
 
 // Contains meta about a single stripe of an ORC file
 private case class OrcSingleStripeMeta(
@@ -3012,8 +3031,9 @@ class MultiFileOrcPartitionReader(
       clippedSchema: SchemaBase,
       readSchema: StructType,
       extraInfo: ExtraInfo): GpuDataProducer[Table] = {
+    val orcExtraInfo = extraInfo.asInstanceOf[OrcExtraInfo]
     val (parseOpts, tableSchema) = getORCOptionsAndSchema(clippedSchema,
-      extraInfo.requestedMapping, readDataSchema)
+      orcExtraInfo.requestedMapping, readDataSchema)
 
     // About to start using the GPU
     GpuSemaphore.acquireIfNecessary(TaskContext.get())
@@ -3022,7 +3042,7 @@ class MultiFileOrcPartitionReader(
       maxChunkedReaderMemoryUsageSizeBytes, conf, targetBatchSizeBytes, parseOpts,
       dataBuffer, 0, dataSize, metrics, isCaseSensitive, readDataSchema,
       tableSchema, files, debugDumpPrefix, debugDumpAlways,
-      extraInfo.asInstanceOf[OrcExtraInfo].writerTimezone)
+      orcExtraInfo.writerTimezone, orcExtraInfo.writerUsedProlepticGregorian)
   }
 
   /**
@@ -3087,7 +3107,8 @@ object MakeOrcTableProducer extends Logging {
       splits: Array[PartitionedFile],
       debugDumpPrefix: Option[String],
       debugDumpAlways: Boolean,
-      writerTimezone: ZoneId = ZoneId.systemDefault()
+      writerTimezone: ZoneId,
+      writerUsedProlepticGregorian: Boolean
   ): GpuDataProducer[Table] = {
     debugDumpPrefix.foreach { prefix =>
       if (debugDumpAlways) {
@@ -3098,7 +3119,8 @@ object MakeOrcTableProducer extends Logging {
     if (useChunkedReader) {
       OrcTableReader(conf, chunkSizeByteLimit, maxChunkedReaderMemoryUsageSizeBytes,
         parseOpts, buffer, offset, bufferSize, metrics,  isSchemaCaseSensitive, readDataSchema,
-        tableSchema, splits, debugDumpPrefix, debugDumpAlways, writerTimezone)
+        tableSchema, splits, debugDumpPrefix, debugDumpAlways, writerTimezone,
+        writerUsedProlepticGregorian)
     } else {
       val table = withResource(buffer) { _ =>
         try {
@@ -3127,7 +3149,8 @@ object MakeOrcTableProducer extends Logging {
         }
       }
       metrics(NUM_OUTPUT_BATCHES) += 1
-      val rebased = GpuOrcTimezoneUtils.rebaseOrcTimestamps(table, writerTimezone)
+      val rebased = GpuOrcTimezoneUtils.rebaseOrcDateTime(
+        table, writerTimezone, writerUsedProlepticGregorian)
       val evolvedSchemaTable = SchemaUtils.evolveSchemaIfNeededAndClose(rebased, tableSchema,
         readDataSchema, isSchemaCaseSensitive, Some(GpuOrcScan.castColumnTo))
       new SingleGpuDataProducer(evolvedSchemaTable)
@@ -3150,7 +3173,8 @@ case class OrcTableReader(
     splits: Array[PartitionedFile],
     debugDumpPrefix: Option[String],
     debugDumpAlways: Boolean,
-    writerTimezone: ZoneId = ZoneId.systemDefault()) extends GpuDataProducer[Table] with Logging {
+    writerTimezone: ZoneId,
+    writerUsedProlepticGregorian: Boolean) extends GpuDataProducer[Table] with Logging {
 
   private[this] val reader = new ORCChunkedReader(chunkSizeByteLimit,
     maxChunkedReaderMemoryUsageSizeBytes, parseOpts, buffer, offset, bufferSize)
@@ -3186,7 +3210,8 @@ case class OrcTableReader(
       }
     }
     metrics(NUM_OUTPUT_BATCHES) += 1
-    val rebased = GpuOrcTimezoneUtils.rebaseOrcTimestamps(table, writerTimezone)
+    val rebased = GpuOrcTimezoneUtils.rebaseOrcDateTime(
+      table, writerTimezone, writerUsedProlepticGregorian)
     SchemaUtils.evolveSchemaIfNeededAndClose(rebased, catalystTableSchema,
       readDataSchema, isSchemaCaseSensitive, Some(GpuOrcScan.castColumnTo))
   }

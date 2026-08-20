@@ -1087,30 +1087,14 @@ object GpuRegExpUtils {
    * @param rep replacement string
    * @param numCaptureGroups number of capturing groups in the corresponding pattern; pass a
    *                         negative value to disable greedy-with-backoff
-   * @return A pair consists of a boolean indicating whether containing any backref and the
-   *         converted replacement.
+   * @return A pair containing a boolean that indicates whether a raw numbered `$N`
+   *         back-reference was converted, and the converted replacement.
    */
   def backrefConversion(rep: String, numCaptureGroups: Int): (Boolean, String) = {
     val b = new StringBuilder
     var i = 0
-    var hasBracedBackref = false
     while (i < rep.length) {
-      // Pass through already-braced `${N}` tokens unchanged. The replacement AST uses this
-      // form for backrefs that have already been resolved by the transpiler, so re-parsing
-      // them against the caller-provided group count could change their meaning.
-      if (rep.charAt(i) == '$' && i + 2 < rep.length && rep.charAt(i + 1) == '{') {
-        val close = rep.indexOf('}', i + 2)
-        val allDigits = close > i + 2 &&
-          (i + 2 until close).forall(k => rep.charAt(k).isDigit)
-        if (allDigits) {
-          b.append(rep.substring(i, close + 1))
-          hasBracedBackref = true
-          i = close + 1
-        } else {
-          b.append(rep.charAt(i))
-          i += 1
-        }
-      } else if (rep.charAt(i) == '$' && i + 1 < rep.length && rep.charAt(i + 1).isDigit) {
+      if (rep.charAt(i) == '$' && i + 1 < rep.length && rep.charAt(i + 1).isDigit) {
 
         // Consume digits one at a time. If the running group index would exceed the actual
         // capture-group count, stop and leave the remaining digits as literals. When no digit
@@ -1159,9 +1143,7 @@ object GpuRegExpUtils {
     }
 
     val converted = b.toString
-    // A pass-through `${N}` token does not modify the string, so equality alone would miss
-    // it; treat it as a backref so the caller routes through `stringReplaceWithBackrefs`.
-    (hasBracedBackref || !rep.equals(converted)) -> converted
+    !rep.equals(converted) -> converted
   }
 
   /**
@@ -1368,7 +1350,7 @@ case class GpuContainsAny(input: Expression, targets: Seq[UTF8String])
 
   def multiOrsAst: ast.AstExpression = {
     (1 until targets.length)
-    .foldLeft(new ast.ColumnReference(0).asInstanceOf[ast.AstExpression]) { (acc, id) =>
+    .foldLeft[ast.AstExpression](new ast.ColumnReference(0)) { (acc, id) =>
       new ast.BinaryOperation(ast.BinaryOperator.NULL_LOGICAL_OR, acc, new ast.ColumnReference(id))
     }
   }
