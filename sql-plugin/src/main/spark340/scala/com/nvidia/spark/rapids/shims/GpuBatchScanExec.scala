@@ -73,7 +73,9 @@ case class GpuBatchScanExec(
   }
 
   override def hashCode(): Int = Objects.hashCode(batch, runtimeFilters,
-    commonPartitionValues, replicatePartitions, applyPartialClustering)
+    commonPartitionValues,
+    replicatePartitions.asInstanceOf[java.lang.Boolean],
+    applyPartialClustering.asInstanceOf[java.lang.Boolean])
 
   @transient override lazy val inputPartitions: Seq[InputPartition] = batch.planInputPartitions()
 
