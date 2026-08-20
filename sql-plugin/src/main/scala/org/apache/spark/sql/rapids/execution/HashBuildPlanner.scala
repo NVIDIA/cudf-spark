@@ -76,8 +76,8 @@ object HashBuildPlanner {
   // the build and probe costs scale linearly in the number of rows. There is a difference in
   // numeric vs. non-numeric build keys because numeric keys can go through a faster primitive
   // probe path in cuDF.
-  private[execution] val NumericProbeCost: Double = 0.4
-  private[execution] val NonNumericProbeCost: Double = 1.0
+  private[execution] val NumericProbeCost: Double = 0.12
+  private[execution] val NonNumericProbeCost: Double = 0.4
 
   private[execution] def hasNumericKeys(keys: Seq[GpuExpression]): Boolean = {
     keys.nonEmpty && keys.forall { key =>
@@ -89,8 +89,8 @@ object HashBuildPlanner {
     }
   }
 
-  // Currently probeCost just depends on numericKeys since that was found to be the principal
-  // component of variance, but can depend on other factors (such as distinct vs. non-distinct).
+  // Currently probeCost just depends on numericKeys since that was found to be a good
+  // divider of variance, but can depend on other factors (such as distinct vs. non-distinct).
   private def probeCost(numericKeys: Boolean): Double = {
     if (numericKeys) NumericProbeCost else NonNumericProbeCost
   }
