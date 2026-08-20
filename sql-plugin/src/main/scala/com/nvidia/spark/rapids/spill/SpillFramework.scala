@@ -376,8 +376,8 @@ object SharedRecomputableHandle {
  *
  * When this handle is selected for spilling, it does not copy anything to host or disk. Instead
  * it marks the current device object as evicted and returns `approxSizeInBytes` so the spill
- * framework accounts for the freed device memory. The actual close of the evicted object is
- * deferred to `releaseSpilled` after device synchronization.
+ * framework accounts for the memory expected to be freed. The actual close of the evicted object
+ * is deferred to `releaseSpilled` after device synchronization.
  *
  * The protected device object may not expose cuDF-style reference counts (e.g. cuDF hash tables).
  * Instead we maintain a pin count on the object, and callers must pin the object through `acquire`.
@@ -549,11 +549,14 @@ class SharedRecomputableHandle[T <: AutoCloseable] private[spill] (
       }
     }
     if (shouldWaitForRebuild) {
-      // Wait for an in-flight rebuilt to exit, so that the caller can
+      // Wait for an in-flight rebuild to exit, so that the caller can
       // close input resources captured by the rebuild callback.
       awaitRebuildForClose()
     }
+    // Only the first close() caller initiates doClose().
     if (firstClose) {
+      // If there is an active lease or spill the cleanup will be done by
+      // the final releaseLease() or releaseSpilled().
       val shouldClose = synchronized {
         pinCount == 0 && !spilling
       }
@@ -564,6 +567,9 @@ class SharedRecomputableHandle[T <: AutoCloseable] private[spill] (
   }
 
   override def spill(): Long = {
+    // Logically evict the object under the handle lock but do not free it yet.
+    // The thread that spills removes dev and sets spilling to true so that only
+    // one thread spills.
     var evicted: Option[T] = None
     val thisThreadSpills = synchronized {
       if (!closed && dev.isDefined && pinCount == 0 && !spilling) {
@@ -576,18 +582,14 @@ class SharedRecomputableHandle[T <: AutoCloseable] private[spill] (
         false
       }
     }
+    // spilling remains true until releaseSpilled() so that a newly rebuilt dev
+    // isn't spilled before the pendingRelease passes through post-spill device sync.
     if (thisThreadSpills) {
-      var shouldClose = false
       executeSpill {
         synchronized {
           pendingRelease = pendingRelease ++ evicted.toSeq
-          spilling = false
-          shouldClose = closed && pinCount == 0
         }
         0L
-      }
-      if (shouldClose) {
-        doClose()
       }
       approxSizeInBytes
     } else {
@@ -596,22 +598,26 @@ class SharedRecomputableHandle[T <: AutoCloseable] private[spill] (
   }
 
   override def releaseSpilled(): Unit = {
-    val toClose = synchronized {
+    // For a recomputable handle simply clear the release queue,
+    // mark the spill complete, and then close the detached objects.
+    val (toClose, shouldClose) = synchronized {
       val release = pendingRelease
       pendingRelease = Seq.empty
-      release
+      spilling = false
+      (release, closed && pinCount == 0 && !rebuilding)
     }
     toClose.safeClose()
+    if (shouldClose) {
+      doClose()
+    }
   }
 
   override def doClose(): Unit = {
     SpillFramework.removeFromDeviceStore(this)
     val toClose = synchronized {
       val current = dev
-      val release = pendingRelease
       dev = None
-      pendingRelease = Seq.empty
-      current.toSeq ++ release.toSeq
+      current.toSeq
     }
     toClose.safeClose()
   }

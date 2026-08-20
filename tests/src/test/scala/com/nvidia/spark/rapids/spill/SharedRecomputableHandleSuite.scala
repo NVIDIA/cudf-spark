@@ -96,6 +96,23 @@ class SharedRecomputableHandleSuite extends SpillUnitTestBase {
     assertResult(Seq(1, 2))(closedIds.sorted.toSeq)
   }
 
+  test("close does not release a spilled resource before releaseSpilled") {
+    val closedIds = ArrayBuffer[Int]()
+    val resource = new TestResource(1, closedIds)
+    val handle = new SharedRecomputableHandle(1024L, resource, () =>
+      new TestResource(2, closedIds))
+    SpillFramework.stores.deviceStore.track(handle)
+
+    assertResult(handle.approxSizeInBytes)(handle.spill())
+    handle.close()
+    assert(!resource.isClosed)
+
+    handle.releaseSpilled()
+    assert(resource.isClosed)
+    assertResult(Seq(1))(closedIds.toSeq)
+    assertResult(0)(SpillFramework.stores.deviceStore.numHandles)
+  }
+
   test("close waits for an in-flight rebuild") {
     val closedIds = ArrayBuffer[Int]()
     var buildCount = 0
@@ -196,6 +213,7 @@ class SharedRecomputableHandleSuite extends SpillUnitTestBase {
           assertResult(Seq(2, 2))(ids)
           assertResult(1)(results.count(_._2))
           assertResult(2)(buildCount)
+          handle.releaseSpilled()
         } finally {
           pool.shutdownNow()
           assert(pool.awaitTermination(30, TimeUnit.SECONDS))
