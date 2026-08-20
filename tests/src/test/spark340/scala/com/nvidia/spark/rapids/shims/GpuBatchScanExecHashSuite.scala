@@ -34,11 +34,11 @@ spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
 import com.nvidia.spark.rapids.GpuScan
+import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.read.{Batch, InputPartition, PartitionReaderFactory}
 import org.apache.spark.sql.types.StructType
-import org.scalatest.funsuite.AnyFunSuite
 
 class GpuBatchScanExecHashSuite extends AnyFunSuite {
   private val scan = new GpuScan {
@@ -63,7 +63,8 @@ class GpuBatchScanExecHashSuite extends AnyFunSuite {
 
   test("hashCode includes Spark 3.4 SPJ fields") {
     val base = exec()
-    assert(base.hashCode() != exec(commonPartitionValues = Some(Seq((InternalRow.empty, 1)))).hashCode())
+    assert(base.hashCode() !=
+      exec(commonPartitionValues = Some(Seq((InternalRow.empty, 1)))).hashCode())
     assert(base.hashCode() != exec(replicatePartitions = true).hashCode())
     assert(base.hashCode() != exec(applyPartialClustering = true).hashCode())
   }
