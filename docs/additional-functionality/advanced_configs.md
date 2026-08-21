@@ -494,10 +494,12 @@ Name | Description | Default Value | Notes
 <a name="sql.exec.InMemoryTableScanExec"></a>spark.rapids.sql.exec.InMemoryTableScanExec|Implementation of InMemoryTableScanExec to use GPU accelerated caching|true|None|
 <a name="sql.exec.DataWritingCommandExec"></a>spark.rapids.sql.exec.DataWritingCommandExec|Writing data|true|None|
 <a name="sql.exec.ExecutedCommandExec"></a>spark.rapids.sql.exec.ExecutedCommandExec|Eagerly executed commands|true|None|
+<a name="sql.exec.AppendDataExec"></a>spark.rapids.sql.exec.AppendDataExec|Append data into a datasource V2 table|true|None|
 <a name="sql.exec.AppendDataExecV1"></a>spark.rapids.sql.exec.AppendDataExecV1|Append data into a datasource V2 table using the V1 write interface|true|None|
 <a name="sql.exec.AtomicCreateTableAsSelectExec"></a>spark.rapids.sql.exec.AtomicCreateTableAsSelectExec|Create table as select for datasource V2 tables that support staging table creation|true|None|
 <a name="sql.exec.AtomicReplaceTableAsSelectExec"></a>spark.rapids.sql.exec.AtomicReplaceTableAsSelectExec|Replace table as select for datasource V2 tables that support staging table creation|true|None|
 <a name="sql.exec.BatchScanExec"></a>spark.rapids.sql.exec.BatchScanExec|The backend for most file input|true|None|
+<a name="sql.exec.OverwriteByExpressionExec"></a>spark.rapids.sql.exec.OverwriteByExpressionExec|Overwrite data in a datasource V2 table|true|None|
 <a name="sql.exec.OverwriteByExpressionExecV1"></a>spark.rapids.sql.exec.OverwriteByExpressionExecV1|Overwrite into a datasource V2 table using the V1 write interface|true|None|
 <a name="sql.exec.BroadcastExchangeExec"></a>spark.rapids.sql.exec.BroadcastExchangeExec|The backend for broadcast exchange of data|true|None|
 <a name="sql.exec.ShuffleExchangeExec"></a>spark.rapids.sql.exec.ShuffleExchangeExec|The backend for most data being exchanged between processes|true|None|
