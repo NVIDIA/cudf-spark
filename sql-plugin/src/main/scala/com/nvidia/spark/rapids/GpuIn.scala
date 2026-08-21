@@ -25,6 +25,11 @@ import org.apache.spark.sql.rapids.GpuEqualTo
 import org.apache.spark.sql.types.{BooleanType, DataType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
+object GpuIn {
+  // The left-deep OR AST is stack-sensitive during both JVM conversion and native compilation.
+  private[rapids] val MAX_DYNAMIC_LIST_SIZE: Int = 256
+}
+
 case class GpuIn(value: Expression, literals: Seq[Any], dynamicList: Seq[Expression])
     extends GpuExpression with Predicate with ShimExpression {
   require(dynamicList.nonEmpty, "dynamic list should not be empty")

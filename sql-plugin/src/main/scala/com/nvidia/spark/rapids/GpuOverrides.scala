@@ -2088,9 +2088,15 @@ object GpuOverrides extends Logging {
 
         override def tagExprForGpu(): Unit = {
           if (!allListItemsAreLiterals) {
-            if (!dynamicListItems.forall(_._1.deterministic)) {
+            if (dynamicListItems.length > GpuIn.MAX_DYNAMIC_LIST_SIZE) {
+              willNotWorkOnGpu(
+                s"dynamic IN lists with more than ${GpuIn.MAX_DYNAMIC_LIST_SIZE} " +
+                  "non-literal expressions are not supported")
+            } else if (!dynamicListItems.forall(_._1.deterministic)) {
               willNotWorkOnGpu("dynamic IN list expressions must be deterministic")
             } else if (!dynamicListItems.forall(_._2.canExprTreeBeReplaced)) {
+              // CPU bridges are inserted after tagging, so verify the entire expression tree
+              // before converting it to inspect side effects.
               willNotWorkOnGpu("dynamic IN list expressions must run entirely on GPU")
             } else if (dynamicListItems.iterator.map(_._2.convertToGpu()).exists {
                   case gpuExpression: GpuExpression => gpuExpression.hasSideEffects

@@ -427,6 +427,20 @@ def test_nondeterministic_dynamic_in_fallback():
         'ProjectExec')
 
 
+@allow_non_gpu('In', 'Add')
+def test_large_dynamic_in_fallback():
+    def do_it(spark):
+        # One candidate past the stack-safety limit must remain on CPU.
+        candidate_count = 257
+        candidates = ', '.join(f'id + {i}' for i in range(1, candidate_count + 1))
+        return spark.range(1).selectExpr(f'id IN ({candidates}) AS result')
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it,
+        exist_classes='GpuCpuBridgeExpression',
+        non_exist_classes='GpuIn')
+
+
 @allow_non_gpu('In', 'Cast')
 def test_ansi_side_effecting_dynamic_in_fallback():
     def do_it(spark):
