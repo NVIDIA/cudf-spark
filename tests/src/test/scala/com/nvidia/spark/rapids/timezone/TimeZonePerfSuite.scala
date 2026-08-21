@@ -14,6 +14,9 @@
  * limitations under the License.
  */
 
+// scalastyle:off println
+// Existing console output in this file is intentional. New code should prefer logging.
+
 package com.nvidia.spark.rapids.timezone
 
 import java.io.File
@@ -314,3 +317,4 @@ class TimeZonePerfSuite extends SparkQueryCompareTestSuite with BeforeAndAfterAl
       perfTest)
   }
 }
+// scalastyle:on println

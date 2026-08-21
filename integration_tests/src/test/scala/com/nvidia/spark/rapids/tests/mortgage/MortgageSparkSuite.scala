@@ -14,6 +14,9 @@
  * limitations under the License.
  */
 
+// scalastyle:off println
+// Existing console output in this file is intentional. New code should prefer logging.
+
 package com.nvidia.spark.rapids.tests.mortgage
 
 import com.nvidia.spark.rapids.ShimLoader
@@ -115,3 +118,4 @@ class MortgageSparkSuite extends AnyFunSuite {
   }
 }
 
+// scalastyle:on println

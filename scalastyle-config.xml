@@ -96,6 +96,18 @@ You can also disable only one rule, by specifying its rule id, as specified in:
     <check level="error" class="org.scalastyle.scalariform.NotImplementedErrorUsage"
            enabled="true"/>
 
+    <!-- Direct console output bypasses project logging; intentional uses must be explicit. -->
+    <check customId="println" level="error"
+           class="org.scalastyle.scalariform.TokenChecker" enabled="true">
+        <parameters>
+            <parameter name="regex">^println$</parameter>
+        </parameters>
+        <customMessage><![CDATA[Are you sure you want to println? If yes, wrap the code block with
+          // scalastyle:off println
+          println(...)
+          // scalastyle:on println]]></customMessage>
+    </check>
+
     <check customId="NoScalaDoc" level="error" class="org.scalastyle.file.RegexChecker"
            enabled="true">
         <parameters>

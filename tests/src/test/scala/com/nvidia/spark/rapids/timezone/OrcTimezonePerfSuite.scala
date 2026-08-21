@@ -14,6 +14,9 @@
  * limitations under the License.
  */
 
+// scalastyle:off println
+// Existing console output in this file is intentional. New code should prefer logging.
+
 package com.nvidia.spark.rapids.timezone
 
 import java.io.File
@@ -194,3 +197,4 @@ class OrcTimezonePerfSuite extends SparkQueryCompareTestSuite with BeforeAndAfte
     println(f"TZ conversion overhead - GPU: ${crossGpuMean - baseGpuMean}%.0f ms")
   }
 }
+// scalastyle:on println

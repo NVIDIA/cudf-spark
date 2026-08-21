@@ -26,6 +26,9 @@
 {"spark": "358"}
 {"spark": "359"}
 spark-rapids-shim-json-lines ***/
+// scalastyle:off println
+// Existing console output in this file is intentional. New code should prefer logging.
+
 package com.nvidia.spark.rapids.iceberg
 
 import ai.rapids.cudf.{OrderByArg, Table}
@@ -175,3 +178,4 @@ object GpuIcebergPartitionerSuite {
     }
   }
 }
+// scalastyle:on println

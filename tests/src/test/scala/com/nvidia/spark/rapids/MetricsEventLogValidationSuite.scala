@@ -13,6 +13,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+// scalastyle:off println
+// Existing console output in this file is intentional. New code should prefer logging.
+
 package com.nvidia.spark.rapids
 
 import java.io.{BufferedReader, File, InputStreamReader}
@@ -876,3 +879,4 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
   }
 
 }
+// scalastyle:on println

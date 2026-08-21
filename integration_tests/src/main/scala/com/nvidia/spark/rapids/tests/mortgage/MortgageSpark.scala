@@ -14,6 +14,9 @@
  * limitations under the License.
  */
 
+// scalastyle:off println
+// Existing console output in this file is intentional. New code should prefer logging.
+
 package com.nvidia.spark.rapids.tests.mortgage
 
 import org.apache.spark.sql.{Column, DataFrame, SparkSession}
@@ -451,3 +454,4 @@ object Main {
     0.until(10).foreach( _ => runFunc().write.mode("overwrite").parquet(output))
   }
 }
+// scalastyle:on println

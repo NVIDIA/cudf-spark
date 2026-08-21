@@ -14,6 +14,9 @@
  * limitations under the License.
  */
 
+// scalastyle:off println
+// Existing console output in this file is intentional. New code should prefer logging.
+
 package com.nvidia.spark.rapids.io.async
 
 import java.lang.reflect.InvocationTargetException
@@ -290,3 +293,4 @@ class ThrottlingExecutorRmmSuite extends RmmSparkRetrySuiteBase with TimeLimits 
     }
   }
 }
+// scalastyle:on println

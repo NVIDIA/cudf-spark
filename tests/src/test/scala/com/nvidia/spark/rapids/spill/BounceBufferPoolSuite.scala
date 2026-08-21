@@ -14,6 +14,9 @@
  * limitations under the License.
  */
 
+// scalastyle:off println
+// Existing console output in this file is intentional. New code should prefer logging.
+
 package com.nvidia.spark.rapids.spill
 
 import java.util.concurrent.{CountDownLatch, TimeUnit}
@@ -307,3 +310,4 @@ class BounceBufferPoolSuite extends RmmSparkRetrySuiteBase with TimeLimits {
     override def close(): Unit = {}
   }
 }
+// scalastyle:on println

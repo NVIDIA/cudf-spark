@@ -23,6 +23,9 @@
 {"spark": "333"}
 {"spark": "334"}
 spark-rapids-shim-json-lines ***/
+// scalastyle:off println
+// Existing console output in this file is intentional. New code should prefer logging.
+
 package com.nvidia.spark.rapids.shuffle
 
 import java.nio.ByteBuffer
@@ -299,3 +302,4 @@ class MockClientConnection(mockTransaction: Transaction) extends ClientConnectio
 
   override def registerReceiveHandler(messageType: MessageType.Value): Unit = {}
 }
+// scalastyle:on println

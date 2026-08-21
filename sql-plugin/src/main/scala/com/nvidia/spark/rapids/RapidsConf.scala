@@ -13,6 +13,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+// scalastyle:off println
+// Existing console output in this file is intentional. New code should prefer logging.
+
 package com.nvidia.spark.rapids
 
 import java.io.{File, FileOutputStream}
@@ -4206,3 +4209,4 @@ case class OomInjectionConf(
   withSplit: Boolean,
   oomInjectionFilter: OomInjectionType
 )
+// scalastyle:on println

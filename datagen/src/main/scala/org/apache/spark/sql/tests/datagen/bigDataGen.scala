@@ -14,6 +14,9 @@
  * limitations under the License.
  */
 
+// scalastyle:off println
+// Existing console output in this file is intentional. New code should prefer logging.
+
 package org.apache.spark.sql.tests.datagen
 
 import com.fasterxml.jackson.core.{JsonFactoryBuilder, JsonParser, JsonToken}
@@ -3275,3 +3278,4 @@ class DBGen {
     mappings.insert(0, mapping)
   }
 }
+// scalastyle:on println

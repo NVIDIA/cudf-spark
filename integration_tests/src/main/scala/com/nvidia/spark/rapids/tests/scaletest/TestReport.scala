@@ -14,6 +14,9 @@
  * limitations under the License.
  */
 
+// scalastyle:off println
+// Existing console output in this file is intentional. New code should prefer logging.
+
 package com.nvidia.spark.rapids.tests.scaletest
 
 import java.io.{File, FileOutputStream}
@@ -50,3 +53,4 @@ class TestReport(config: Config, queryMetas: Seq[QueryMeta]) {
     println(s"JSON report file saved at: ${config.reportPath}")
   }
 }
+// scalastyle:on println

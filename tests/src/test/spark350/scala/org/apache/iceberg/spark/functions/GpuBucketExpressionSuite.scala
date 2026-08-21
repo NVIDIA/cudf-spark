@@ -26,6 +26,9 @@
 {"spark": "358"}
 {"spark": "359"}
 spark-rapids-shim-json-lines ***/
+// scalastyle:off println
+// Existing console output in this file is intentional. New code should prefer logging.
+
 package org.apache.iceberg.spark.functions
 
 import ai.rapids.cudf.{DType, HostColumnVector}
@@ -181,3 +184,4 @@ class GpuBucketExpressionSuite extends AnyFunSuite with BeforeAndAfterAll {
     }
   }
 }
+// scalastyle:on println

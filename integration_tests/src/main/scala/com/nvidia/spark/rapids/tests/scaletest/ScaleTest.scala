@@ -14,6 +14,9 @@
  * limitations under the License.
  */
 
+// scalastyle:off println
+// Existing console output in this file is intentional. New code should prefer logging.
+
 package com.nvidia.spark.rapids.tests.scaletest
 
 import java.util.concurrent._
@@ -241,3 +244,4 @@ object ScaleTest {
     }
   }
 }
+// scalastyle:on println

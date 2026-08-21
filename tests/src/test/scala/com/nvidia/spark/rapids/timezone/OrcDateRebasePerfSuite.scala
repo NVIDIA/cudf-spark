@@ -14,6 +14,9 @@
  * limitations under the License.
  */
 
+// scalastyle:off println
+// Existing console output in this file is intentional. New code should prefer logging.
+
 package com.nvidia.spark.rapids.timezone
 
 import java.io.File
@@ -226,3 +229,4 @@ class OrcDateRebasePerfSuite extends SparkQueryCompareTestSuite with BeforeAndAf
     withGpuSparkSession(spark => cases.foreach(runCase(spark, _)), sparkConf())
   }
 }
+// scalastyle:on println

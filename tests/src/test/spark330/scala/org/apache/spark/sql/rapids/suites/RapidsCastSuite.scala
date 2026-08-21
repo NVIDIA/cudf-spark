@@ -17,6 +17,9 @@
 /*** spark-rapids-shim-json-lines
 {"spark": "330"}
 spark-rapids-shim-json-lines ***/
+// scalastyle:off println
+// Existing console output in this file is intentional. New code should prefer logging.
+
 package org.apache.spark.sql.rapids.suites
 
 import java.sql.Timestamp
@@ -86,3 +89,4 @@ class RapidsCastSuite extends CastSuite with RapidsTestsTrait {
     }
   }
 }
+// scalastyle:on println

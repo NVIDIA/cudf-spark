@@ -14,6 +14,9 @@
  * limitations under the License.
  */
 
+// scalastyle:off println
+// Existing console output in this file is intentional. New code should prefer logging.
+
 package com.nvidia.spark.rapids
 
 import java.util.concurrent.{ExecutionException, Future, LinkedBlockingQueue, TimeoutException, TimeUnit}
@@ -768,3 +771,4 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
     }
   }
 }
+// scalastyle:on println
