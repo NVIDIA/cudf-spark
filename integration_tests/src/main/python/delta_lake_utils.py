@@ -60,6 +60,27 @@ if is_databricks173_or_later():
 
 delta_write = ["RapidsDeltaWrite"]
 
+
+def _loaded_delta_lake_version():
+    try:
+        context_class_loader = (
+            spark_jvm().java.lang.Thread.currentThread().getContextClassLoader())
+        delta_log_class = context_class_loader.loadClass(
+            "org.apache.spark.sql.delta.DeltaLog")
+        return delta_log_class.getPackage().getImplementationVersion()
+    except Exception:
+        # Delta Lake is optional for most integration test runs.
+        return None
+
+
+delta_reorg_xfail = pytest.mark.xfail(
+    not is_databricks_runtime()
+    and _loaded_delta_lake_version() in ("4.0.1", "4.1.0"),
+    reason="Delta Lake REORG in 4.0.1 and 4.1.0 calls SparkSession.active on "
+           "executors in distributed mode: "
+           "https://github.com/delta-io/delta/pull/5697#discussion_r2695998447")
+
+
 # Parameterize Deletion Vectors only on runtimes that expose the feature in these tests.
 def deletion_vector_values_with_xfail_reasons(enabled_xfail_reason=None, disabled_xfail_reason=None):
     # Always include the DV-disabled case. On supported Databricks runtimes it can be marked xfail
