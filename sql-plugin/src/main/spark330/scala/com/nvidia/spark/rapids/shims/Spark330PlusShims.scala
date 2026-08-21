@@ -79,22 +79,17 @@ trait Spark330PlusShims extends Spark321PlusShims with Spark320PlusNonDBShims {
       RoundingShims.exprs
 
   override def getExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = {
+    // Source-specific recognizers in ExternalSource apply their own type checks. Keep these
+    // command rules hidden so the generated generic Exec matrix does not claim one signature for
+    // sources with different write contracts.
     val appendDataRule = GpuOverrides.exec[AppendDataExec](
       "Append data into a datasource V2 table",
-      ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 +
-        TypeSig.STRUCT + TypeSig.MAP + TypeSig.ARRAY + TypeSig.BINARY +
-        GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
-        TypeSig.all),
+      ExecChecks.hiddenHack(),
       (p, conf, parent, r) => new AppendDataExecMeta(p, conf, parent, r))
-
     val overwriteByExpressionRule = GpuOverrides.exec[OverwriteByExpressionExec](
       "Overwrite data in a datasource V2 table",
-      ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 +
-        TypeSig.STRUCT + TypeSig.MAP + TypeSig.ARRAY + TypeSig.BINARY +
-        GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
-        TypeSig.all),
+      ExecChecks.hiddenHack(),
       (p, conf, parent, r) => new OverwriteByExpressionExecMeta(p, conf, parent, r))
-
     val v2WriteRules: Seq[(Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan])] = Seq(
       (appendDataRule.getClassFor.asSubclass(classOf[SparkPlan]), appendDataRule),
       (overwriteByExpressionRule.getClassFor.asSubclass(classOf[SparkPlan]),

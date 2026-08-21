@@ -15,23 +15,47 @@
 import pytest
 
 from conftest import is_databricks_runtime
+from data_gen import ansi_enabled_conf
 from marks import validate_execs_in_gpu_plan
 from spark_session import is_spark_330_or_later, with_gpu_session
 
 
 @pytest.mark.skipif(
     not is_spark_330_or_later() or is_databricks_runtime(),
-    reason="GPU noop writes are only supported on Apache Spark 3.3.0 and later")
+    reason="GPU noop writes are supported only on non-Databricks Apache Spark 3.3.0 and later")
 @pytest.mark.parametrize("mode", [
     pytest.param("overwrite",
-                 marks=validate_execs_in_gpu_plan("GpuOverwriteByExpressionExec")),
-    pytest.param("append", marks=validate_execs_in_gpu_plan("GpuAppendDataExec"))
+                 marks=validate_execs_in_gpu_plan("GpuNoopOverwriteByExpressionExec")),
+    pytest.param("append", marks=validate_execs_in_gpu_plan("GpuNoopAppendDataExec"))
 ])
 def test_noop_write(mode):
     def write_noop(spark):
-        df = spark.createDataFrame([(1, "a"), (2, "b")], ["c1", "c2"])
-        df.write.format("noop").mode(mode).save()
+        spark.range(10).selectExpr("id", "null as n") \
+            .write.format("noop").mode(mode).save()
 
-    # There is no output so there is nothing to check, except to make sure
-    # we did not crash and everything is on the GPU.
     with_gpu_session(write_noop)
+
+
+@pytest.mark.skipif(
+    not is_spark_330_or_later() or is_databricks_runtime(),
+    reason="GPU noop writes are supported only on non-Databricks Apache Spark 3.3.0 and later")
+@validate_execs_in_gpu_plan("GpuNoopAppendDataExec")
+def test_noop_write_consumes_input():
+    def successful_write(spark):
+        spark.range(10).selectExpr("id + 5 as v") \
+            .write.format("noop").mode("append").save()
+
+    with_gpu_session(successful_write, conf=ansi_enabled_conf)
+
+
+@pytest.mark.skipif(
+    not is_spark_330_or_later() or is_databricks_runtime(),
+    reason="GPU noop writes are supported only on non-Databricks Apache Spark 3.3.0 and later")
+def test_noop_write_evaluates_input():
+    def failing_write(spark):
+        # The id == 5 row raises only if the noop command actually evaluates its child plan.
+        spark.range(10).selectExpr("id div (id - 5) as v") \
+            .write.format("noop").mode("append").save()
+
+    with pytest.raises(Exception, match="DIVIDE_BY_ZERO"):
+        with_gpu_session(failing_write, conf=ansi_enabled_conf)

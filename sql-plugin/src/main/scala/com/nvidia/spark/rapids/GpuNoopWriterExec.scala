@@ -36,7 +36,13 @@ trait GpuNoopWriterExec extends V2CommandExec with GpuExec with ShimSparkPlan {
 
   override def output: Seq[Attribute] = Nil
 
+  // V2 command transition planning must execute this node through its columnar child. Keep the row
+  // contract explicit because run() deliberately fails instead of silently consuming CPU rows.
+  override def supportsRowBased: Boolean = false
+
   override protected def internalDoExecuteColumnar(): RDD[ColumnarBatch] = {
+    // RDD transformations are lazy, so return one empty batch per input batch to preserve the
+    // child's execution while closing and discarding each GPU input batch.
     child.executeColumnar().map { batch =>
       withResource(batch) { _ =>
         new ColumnarBatch(Array.empty, 0)
@@ -44,19 +50,13 @@ trait GpuNoopWriterExec extends V2CommandExec with GpuExec with ShimSparkPlan {
     }
   }
 
-  override def run(): Seq[InternalRow] = {
-    child match {
-      case g: GpuExec => g.executeColumnar().foreach { batch =>
-        withResource(batch)(_ => ())
-      }
-      case _ => child.execute().foreach(_ => ())
-    }
-    Nil
-  }
+  override def run(): Seq[InternalRow] =
+    throw new IllegalStateException(
+      s"${getClass.getSimpleName} executes columnar; run() is unreachable")
 }
 
-case class GpuOverwriteByExpressionExec(
+case class GpuNoopOverwriteByExpressionExec(
     override val child: SparkPlan) extends GpuNoopWriterExec
 
-case class GpuAppendDataExec(
+case class GpuNoopAppendDataExec(
     override val child: SparkPlan) extends GpuNoopWriterExec

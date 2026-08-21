@@ -734,8 +734,34 @@ plugin supports are described below.
 </tr>
 <tr>
 <td rowspan="1">AppendDataExec</td>
-<td rowspan="1">Append data into a datasource V2 table</td>
-<td rowspan="1">None</td>
+<td rowspan="1">Source-specific GPU support for Spark noop write</td>
+<td rowspan="1">Source: Spark noop write</td>
+<td>Input/Output</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><b>NS</b></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, CALENDAR, UDT</em></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, CALENDAR, UDT</em></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, CALENDAR, UDT</em></td>
+<td><b>NS</b></td>
+<td>S</td>
+<td>S</td>
+</tr>
+<tr>
+<td rowspan="1">AppendDataExec</td>
+<td rowspan="1">Source-specific GPU support for Apache Iceberg write</td>
+<td rowspan="1">Source: Apache Iceberg write</td>
 <td>Input/Output</td>
 <td>S</td>
 <td>S</td>
@@ -864,8 +890,34 @@ plugin supports are described below.
 </tr>
 <tr>
 <td rowspan="1">OverwriteByExpressionExec</td>
-<td rowspan="1">Overwrite data in a datasource V2 table</td>
-<td rowspan="1">None</td>
+<td rowspan="1">Source-specific GPU support for Spark noop write</td>
+<td rowspan="1">Source: Spark noop write</td>
+<td>Input/Output</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><b>NS</b></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, CALENDAR, UDT</em></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, CALENDAR, UDT</em></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, CALENDAR, UDT</em></td>
+<td><b>NS</b></td>
+<td>S</td>
+<td>S</td>
+</tr>
+<tr>
+<td rowspan="1">OverwriteByExpressionExec</td>
+<td rowspan="1">Source-specific GPU support for Apache Iceberg write</td>
+<td rowspan="1">Source: Apache Iceberg write</td>
 <td>Input/Output</td>
 <td>S</td>
 <td>S</td>
@@ -887,6 +939,32 @@ plugin supports are described below.
 <td><b>NS</b></td>
 <td>S</td>
 <td>S</td>
+</tr>
+<tr>
+<th>Executor</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Param(s)</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowspan="1">OverwriteByExpressionExecV1</td>
@@ -939,32 +1017,6 @@ plugin supports are described below.
 <td><b>NS</b></td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
-</tr>
-<tr>
-<th>Executor</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Param(s)</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowspan="1">ShuffleExchangeExec</td>
