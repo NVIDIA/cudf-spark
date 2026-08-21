@@ -370,13 +370,10 @@ def test_re_replace_backrefs():
             'REGEXP_REPLACE(a, "(T)(E)", "$12")',
             'REGEXP_REPLACE(a, "(T)(E)", "x$12y")',
             'REGEXP_REPLACE(a, "(T)(E)", "$123$2")',
-            # 12 user groups plus a trailing line-anchor `$`. Two distinct boundary
-            # checks:
-            # 1. User `$123$2` -> `$12` + literal `3` + `$2`; the user count being 12
-            #    (not the transpiled 13) is enough for the greedy-with-backoff to back off.
-            # 2. User `$13` -> `$1` + literal `3` (NOT a reference to the transpiler's
-            #    internally-generated 13th group, which exists only after line-anchor
-            #    rewriting and must stay invisible to user-replacement parsing).
+            # 12 user groups plus a trailing line-anchor `$`. Replacement parsing preserves
+            # raw `$N` tokens, then conversion uses the 12 Java-visible groups:
+            # 1. User `$123$2` -> `$12` + literal `3` + `$2`.
+            # 2. User `$13` -> `$1` + literal `3`.
             'REGEXP_REPLACE(a, "(T)(E)(S)(T)(T)(E)(S)(T)(T)(E)(S)(T)$", "$123$2")',
             'REGEXP_REPLACE(a, "(T)(E)(S)(T)(T)(E)(S)(T)(T)(E)(S)(T)$", "$13")'
         ),
@@ -403,6 +400,8 @@ def test_re_replace_anchors():
             'REGEXP_REPLACE(a, "(\ud720[A-Z]+)$", "PROD")',
             'REGEXP_REPLACE(a, "(TEST)$", "$1")',
             'REGEXP_REPLACE(a, "^(TEST)$", "$1")',
+            # Issue #15060: line-anchor rewriting must not mutate replacement backref state.
+            'REGEXP_REPLACE(a, "^(TEST)$", "[$1][$0]")',
             'REGEXP_REPLACE(a, "\\\\ATEST\\\\Z", "PROD")',
             'REGEXP_REPLACE(a, "\\\\ATEST$", "PROD")',
             'REGEXP_REPLACE(a, "^TEST\\\\Z", "PROD")',

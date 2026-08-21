@@ -22,8 +22,8 @@ from marks import allow_non_gpu, delta_lake, ignore_order
 from parquet_test import reader_opt_confs_no_native
 from parquet_test_utils import parquet_row_group_midpoints
 from spark_session import with_cpu_session, with_gpu_session, is_databricks_runtime, \
-    is_spark_320_or_later, is_spark_340_or_later, is_spark_40x, \
-    supports_delta_lake_deletion_vectors, is_spark_401_or_later, \
+    is_spark_320_or_later, is_spark_340_or_later, \
+    supports_delta_lake_deletion_vectors, is_spark_412_or_later, \
     gpu_supports_delta_dv_scan, is_before_spark_353, is_databricks173_or_later
 
 _conf = {'spark.rapids.sql.explain': 'ALL'}
@@ -853,9 +853,6 @@ def test_delta_scan_split_with_DV_disabled_with_DVs(spark_tmp_path, pushdown_dv_
                     reason="Deletion vector scan is not supported on Databricks")
 @pytest.mark.skipif(is_before_spark_353(),
                     reason="Spark-RAPIDS supports scan with deletion vectors starting in Spark 3.5.3")
-@pytest.mark.skipif(is_spark_40x() and is_spark_401_or_later(),
-                    reason="Delta 4.0.0 REORG is incompatible with Spark 4.0.1+ in Spark 4.0.x "
-                           "profiles (https://github.com/delta-io/delta/issues/5690)")
 def test_delta_scan_split_with_DV_enabled_after_DVs_materialized(spark_tmp_path):
     def do_delete_and_reorg(spark, data_path):
         num_deleted = spark.sql(f"DELETE FROM delta.`{data_path}` WHERE a = 0").collect()[0][0]
@@ -904,8 +901,8 @@ def test_delta_read_column_mapping(spark_tmp_path, reader_confs, mapping, enable
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
-@pytest.mark.skipif(is_spark_401_or_later(), \
-    reason="Delta Lake 4.0.0 incompatible with Spark 4.0.1 - ParquetToSparkSchemaConverter API changed")
+@pytest.mark.skipif(is_spark_412_or_later(), \
+    reason="Delta Lake 4.1.0 incompatible with Spark 4.1.2+ - ParquetToSparkSchemaConverter API changed")
 @pytest.mark.skipif(not (is_databricks_runtime() or is_spark_340_or_later()), \
                     reason="ParquetToSparkSchemaConverter changes not compatible with Delta Lake")
 @pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_xfail_reasons(
