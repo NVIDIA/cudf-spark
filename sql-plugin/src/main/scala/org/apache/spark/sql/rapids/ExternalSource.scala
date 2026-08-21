@@ -94,6 +94,7 @@ trait ExternalSourceBase extends Logging {
     override def tagForGpu(
         cpuExec: OverwriteByExpressionExec,
         meta: OverwriteByExpressionExecMeta): Unit = {}
+    // NoopWrite does not modify table state, so there is no cache to refresh.
     override def convertToGpu(cpuExec: AppendDataExec, meta: AppendDataExecMeta): GpuExec =
       GpuNoopAppendDataExec(meta.childPlans.head.convertIfNeeded())
     override def convertToGpu(

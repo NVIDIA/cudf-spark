@@ -30,7 +30,10 @@ from spark_session import is_spark_330_or_later, with_gpu_session
 ])
 def test_noop_write(mode):
     def write_noop(spark):
-        spark.range(10).selectExpr("id", "null as n") \
+        spark.range(10).selectExpr(
+            "id", "null as n", "named_struct('id', id) as struct_col",
+            "array(id) as array_col", "map(id, id) as map_col",
+            "cast(null as binary) as binary_col") \
             .write.format("noop").mode(mode).save()
 
     with_gpu_session(write_noop)
