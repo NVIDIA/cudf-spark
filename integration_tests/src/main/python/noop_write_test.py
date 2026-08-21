@@ -17,7 +17,7 @@ import pytest
 from conftest import is_databricks_runtime
 from data_gen import ansi_enabled_conf
 from marks import validate_execs_in_gpu_plan
-from spark_session import is_spark_330_or_later, with_gpu_session
+from spark_session import is_before_spark_340, is_spark_330_or_later, with_gpu_session
 
 
 @pytest.mark.skipif(
@@ -60,5 +60,6 @@ def test_noop_write_evaluates_input():
         spark.range(10).selectExpr("id div (id - 5) as v") \
             .write.format("noop").mode("append").save()
 
-    with pytest.raises(Exception, match="DIVIDE_BY_ZERO"):
+    error_message = "Division by zero" if is_before_spark_340() else "DIVIDE_BY_ZERO"
+    with pytest.raises(Exception, match=error_message):
         with_gpu_session(failing_write, conf=ansi_enabled_conf)
