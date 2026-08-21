@@ -36,5 +36,6 @@ def test_assert_equal_row_count_mismatch_raises_assertion_error(capsys):
     captured = capsys.readouterr()
     assert "--- CPU OUTPUT" in captured.out
     assert "+++ GPU OUTPUT" in captured.out
-    assert "-2" in captured.out
-    assert "+1" in captured.out
+    diff_lines = captured.out.splitlines()
+    assert "-2" in diff_lines
+    assert "+1" in diff_lines
