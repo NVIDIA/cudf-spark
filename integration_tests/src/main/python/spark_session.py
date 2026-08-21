@@ -258,6 +258,9 @@ def is_spark_41x():
 def is_spark_420_or_later():
     return spark_version() >= "4.2.0"
 
+def is_spark_500_or_later():
+    return spark_version() >= "5.0.0"
+
 def is_iceberg_supported_spark():
     return is_spark_35x() or is_spark_40x() or is_spark_41x()
 

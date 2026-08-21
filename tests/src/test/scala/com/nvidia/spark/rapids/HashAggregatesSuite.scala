@@ -323,7 +323,9 @@ class HashAggregatesSuite extends SparkQueryCompareTestSuite {
             if (df.sparkSession.conf.get(RapidsConf.ENABLE_FOLD_LOCAL_AGGREGATE.key) == "true") {
               assert(plan.children.head.isInstanceOf[GpuSortExec])
             } else {
-              assert(plan.children.head.isInstanceOf[GpuHashAggregateExec])
+              val child = plan.children.head
+              assert(child.isInstanceOf[GpuHashAggregateExec] ||
+                (cmpSparkVersion(5, 0, 0) >= 0 && child.isInstanceOf[GpuSortExec]))
             }
             assert(gpuPlan.find(_.isInstanceOf[SortAggregateExec]).isEmpty)
             assert(gpuPlan.children.forall(exec => exec.isInstanceOf[GpuExec]))
