@@ -1646,11 +1646,10 @@ abstract class BaseExprMeta[INPUT <: Expression](
     allGpuInputs.zipWithIndex.foreach { case (gpuInput, index) =>
       gpuInputIndices(GpuExpressionEquals(gpuInput)) = index
     }
-    gpuInputsWithIndex.foreach { case (_, originalIndex) =>
-      gpuInputIndices(GpuExpressionEquals(
-        childExprs(originalIndex).wrapped.asInstanceOf[Expression])) = inputMapping(originalIndex)
-    }
-
+    // Only register expressions in the form consumed by the GPU input list. AttributeReference
+    // is unchanged by GPU conversion, and ancestor lambda variables are converted to
+    // GpuNamedLambdaVariable before registration. Do not register original CPU expressions whose
+    // GPU conversion changes their expression type.
     def registerGpuInput(input: Expression): Int = {
       val inputIndex = gpuInputIndices.getOrElseUpdate(GpuExpressionEquals(input), {
         val newIndex = allGpuInputs.length
