@@ -29,6 +29,7 @@ package com.nvidia.spark.rapids.iceberg.parquet.async
 
 import java.util.Collections
 
+import scala.collection.mutable.ArrayBuffer
 import scala.collection.JavaConverters._
 
 import com.nvidia.spark.rapids.{CombineConf, ThreadPoolConfBuilder}
@@ -141,6 +142,43 @@ class AsyncParquetPlannerSuite extends AnyFunSuite {
     val plan = ParquetDataReader.planRanges(ranges.asJava, 8L * MiB)
     assert(plan.size() == 80)
     assert(plan.asScala.forall(_.getLength == 8L * MiB))
+  }
+
+  test("range completion waits for every split request covering a column chunk") {
+    val chunks = Seq(
+      new ParquetDataReader.SourceRange(0L, 5L * MiB, 0L),
+      new ParquetDataReader.SourceRange(5L * MiB, 7L * MiB, 5L * MiB),
+      new ParquetDataReader.SourceRange(12L * MiB, 6L * MiB, 12L * MiB))
+    val requests = ParquetDataReader.planRanges(chunks.asJava, 8L * MiB).asScala
+    val completed = ArrayBuffer.empty[ParquetDataReader.SourceRange]
+    val tracker = new ParquetDataReader.RangeCompletionTracker(
+      chunks.asJava, requests.asJava, chunk => completed.synchronized(completed += chunk))
+
+    // The middle request contains only partial pieces of the second and third chunks.
+    tracker.requestCompleted(requests(1))
+    assert(completed.isEmpty)
+    assert(!tracker.isComplete)
+
+    // The first request now completes chunks one and two, including the coalesced boundary.
+    tracker.requestCompleted(requests.head)
+    assert(completed.toSeq == Seq(chunks.head, chunks(1)))
+    assert(!tracker.isComplete)
+
+    tracker.requestCompleted(requests(2))
+    assert(completed.toSeq == chunks)
+    assert(tracker.isComplete)
+  }
+
+  test("range completion rejects a duplicate request callback") {
+    val chunks = Seq(new ParquetDataReader.SourceRange(0L, 2L * MiB, 0L))
+    val requests = ParquetDataReader.planRanges(chunks.asJava, 8L * MiB)
+    val tracker = new ParquetDataReader.RangeCompletionTracker(
+      chunks.asJava, requests, _ => ())
+
+    tracker.requestCompleted(requests.get(0))
+    assertThrows[IllegalArgumentException] {
+      tracker.requestCompleted(requests.get(0))
+    }
   }
 
   test("file-pipeline admission is asynchronous and executor-wide") {

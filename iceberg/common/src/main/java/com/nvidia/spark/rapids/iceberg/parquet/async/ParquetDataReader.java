@@ -19,12 +19,15 @@ package com.nvidia.spark.rapids.iceberg.parquet.async;
 import java.io.IOException;
 import java.nio.channels.SeekableByteChannel;
 import java.util.ArrayList;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 
 import ai.rapids.cudf.HostMemoryBuffer;
 import com.nvidia.spark.rapids.filecache.FileCache;
@@ -59,12 +62,16 @@ public final class ParquetDataReader {
       RapidsInputFile input,
       AtomicBoolean closed,
       long requestSizeBytes,
-      Executor executor) {
+      Executor executor,
+      Runnable readsTerminal) {
     if (requestSizeBytes <= 0L) {
       throw new IllegalArgumentException("requestSizeBytes must be positive");
     }
     if (executor == null) {
       throw new NullPointerException("executor");
+    }
+    if (readsTerminal == null) {
+      throw new NullPointerException("readsTerminal");
     }
     long startNanos = System.nanoTime();
     return CompletableFuture.supplyAsync(() -> {
@@ -81,16 +88,19 @@ public final class ParquetDataReader {
       } catch (Throwable error) {
         reads = failedFuture(error);
       }
-      return reads.handleAsync((ignored, error) -> {
-        if (error != null) {
-          throw pending.cleanupAndWrap(unwrap(error));
-        }
-        try {
-          return pending.finish();
-        } catch (Throwable finishError) {
-          throw pending.cleanupAndWrap(finishError);
-        }
-      }, executor);
+      // Admission protects live destination writers, not short finalization or asynchronous cache
+      // writes. Notify the planner as soon as both the remote and cache-hit writers are terminal.
+      return reads.whenComplete((ignored, error) -> readsTerminal.run()).handleAsync(
+          (ignored, error) -> {
+            if (error != null) {
+              throw pending.cleanupAndWrap(unwrap(error));
+            }
+            try {
+              return pending.finish();
+            } catch (Throwable finishError) {
+              throw pending.cleanupAndWrap(finishError);
+            }
+          }, executor);
     });
   }
 
@@ -104,6 +114,7 @@ public final class ParquetDataReader {
     private final List<CachedRange> hits;
     private final List<SourceRange> misses;
     private final List<RapidsInputFile.CopyRange> reads;
+    private final RangeCompletionTracker rangeCompletions;
     private final long allocNanos;
     private final long requestedBytes;
     private final long cacheHitCount;
@@ -140,6 +151,8 @@ public final class ParquetDataReader {
       this.hits = hits;
       this.misses = misses;
       this.reads = reads;
+      this.rangeCompletions = new RangeCompletionTracker(
+          misses, reads, this::offerCompletedChunkToCache);
       this.allocNanos = allocNanos;
       this.requestedBytes = requestedBytes;
       this.cacheHitCount = cacheHitCount;
@@ -245,7 +258,8 @@ public final class ParquetDataReader {
       }
       checkOpen(closed);
       long readStart = System.nanoTime();
-      return output.copyRangesAsync(input, reads, fallbackExecutor)
+      return output.copyRangesAsync(
+              input, reads, fallbackExecutor, rangeCompletions::requestCompleted)
           .whenComplete((ignored, error) -> readWaitNanos = System.nanoTime() - readStart);
     }
 
@@ -281,13 +295,9 @@ public final class ParquetDataReader {
                 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L));
       }
       long finalizeStart = System.nanoTime();
-      for (SourceRange chunk : misses) {
-        FileCacheStartedToken token = chunk.token;
-        if (token != null) {
-          HostMemoryBuffer data = output.sliceForCache(chunk.fragmentOffset, chunk.length);
-          chunk.token = null;
-          token.complete(data);
-        }
+      if (!rangeCompletions.isComplete()) {
+        throw new IllegalStateException(
+            "remote reads completed without completing every source range");
       }
       output.seal();
       ParquetOutput completedOutput = output;
@@ -298,6 +308,26 @@ public final class ParquetDataReader {
               cacheHitCount, cacheHitBytes, cacheMissCount, cacheMissBytes, cacheReadNanos));
       output = null;
       return result;
+    }
+
+    /**
+     * Hand an original column chunk to the cache as soon as every S3 request piece covering it
+     * has completed. File-cache completion only enqueues the physical disk write, so the packed
+     * output and file permit do not wait for that background write.
+     */
+    private void offerCompletedChunkToCache(SourceRange chunk) {
+      FileCacheStartedToken token = chunk.token;
+      if (token == null) {
+        return;
+      }
+      try {
+        HostMemoryBuffer data = output.sliceForCache(chunk.fragmentOffset, chunk.length);
+        // complete() takes ownership of the slice, including when the cache elects not to write it.
+        chunk.token = null;
+        token.complete(data);
+      } catch (IOException error) {
+        throw new CompletionException(error);
+      }
     }
 
     CompletionException cleanupAndWrap(Throwable error) {
@@ -406,6 +436,87 @@ public final class ParquetDataReader {
       this.sourceOffset = sourceOffset;
       this.length = length;
       this.fragmentOffset = fragmentOffset;
+    }
+  }
+
+  /**
+   * Maps split/coalesced S3 requests back to the original filtered column chunks.
+   *
+   * <p>A coalesced request can finish several chunks at once, while a large chunk can require
+   * several requests. This task-local tracker invokes {@code chunkCompleted} exactly once per
+   * chunk, only after all request pieces covering it have succeeded. Request callbacks may arrive
+   * concurrently on AWS completion threads, so the small bookkeeping operation is synchronized;
+   * no network or disk I/O is performed while waiting to enter it.</p>
+   */
+  static final class RangeCompletionTracker {
+    private final IdentityHashMap<RapidsInputFile.CopyRange, List<SourceRange>> chunksByRequest =
+        new IdentityHashMap<>();
+    private final IdentityHashMap<SourceRange, Integer> requestsRemaining =
+        new IdentityHashMap<>();
+    private final Consumer<SourceRange> chunkCompleted;
+
+    RangeCompletionTracker(
+        List<SourceRange> chunks,
+        List<RapidsInputFile.CopyRange> requests,
+        Consumer<SourceRange> chunkCompleted) {
+      this.chunkCompleted = java.util.Objects.requireNonNull(chunkCompleted, "chunkCompleted");
+      for (RapidsInputFile.CopyRange request : requests) {
+        chunksByRequest.put(request, new ArrayList<>());
+      }
+      for (SourceRange chunk : chunks) {
+        long chunkOutputEnd = Math.addExact(chunk.fragmentOffset, chunk.length);
+        long coveredBytes = 0L;
+        int coveringRequests = 0;
+        for (Map.Entry<RapidsInputFile.CopyRange, List<SourceRange>> entry :
+            chunksByRequest.entrySet()) {
+          RapidsInputFile.CopyRange request = entry.getKey();
+          long requestOutputEnd = Math.addExact(
+              request.getOutputOffset(), request.getLength());
+          long overlapStart = Math.max(chunk.fragmentOffset, request.getOutputOffset());
+          long overlapEnd = Math.min(chunkOutputEnd, requestOutputEnd);
+          if (overlapStart < overlapEnd) {
+            long requestSourceAtOverlap = Math.addExact(
+                request.getInputOffset(), overlapStart - request.getOutputOffset());
+            long chunkSourceAtOverlap = Math.addExact(
+                chunk.sourceOffset, overlapStart - chunk.fragmentOffset);
+            if (requestSourceAtOverlap != chunkSourceAtOverlap) {
+              throw new IllegalArgumentException(
+                  "request output range does not map to the source column chunk");
+            }
+            coveredBytes = Math.addExact(coveredBytes, overlapEnd - overlapStart);
+            coveringRequests += 1;
+            entry.getValue().add(chunk);
+          }
+        }
+        if (coveredBytes != chunk.length || coveringRequests == 0) {
+          throw new IllegalArgumentException(
+              "requests do not exactly cover source column chunk at " + chunk.sourceOffset);
+        }
+        requestsRemaining.put(chunk, coveringRequests);
+      }
+    }
+
+    synchronized void requestCompleted(RapidsInputFile.CopyRange request) {
+      List<SourceRange> chunks = chunksByRequest.remove(request);
+      if (chunks == null) {
+        throw new IllegalArgumentException("unknown or duplicate completed request");
+      }
+      for (SourceRange chunk : chunks) {
+        Integer remaining = requestsRemaining.get(chunk);
+        if (remaining == null || remaining <= 0) {
+          throw new IllegalStateException("source range completed more than once");
+        }
+        if (remaining == 1) {
+          requestsRemaining.remove(chunk);
+          chunkCompleted.accept(chunk);
+        } else {
+          requestsRemaining.put(chunk, remaining - 1);
+        }
+      }
+    }
+
+    synchronized boolean isComplete() {
+      return chunksByRequest.isEmpty() && requestsRemaining.isEmpty();
     }
   }
 

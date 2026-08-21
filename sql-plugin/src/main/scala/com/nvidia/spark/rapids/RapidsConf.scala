@@ -1902,9 +1902,9 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
 
   val ICEBERG_ASYNC_READ_MAX_IN_FLIGHT_FILES =
     conf("spark.rapids.sql.format.iceberg.asyncRead.maxInFlightFiles")
-      .doc("Maximum number of footer-to-data file pipelines that the experimental Iceberg " +
-        "reader may have active at once. This bounds destination-buffer admission separately " +
-        "from the CPU worker count and S3 client connection concurrency.")
+      .doc("Maximum number of post-footer data pipelines that the experimental Iceberg reader " +
+        "may have active at once. This bounds destination-buffer admission separately from the " +
+        "CPU worker count and S3 client connection concurrency.")
       .startupOnly()
       .internal()
       .integerConf

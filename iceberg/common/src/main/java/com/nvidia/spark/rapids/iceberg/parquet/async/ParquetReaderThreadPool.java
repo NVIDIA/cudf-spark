@@ -32,13 +32,14 @@ import java.util.concurrent.atomic.AtomicInteger;
  * Executor-wide worker pool for the Iceberg asynchronous reader.
  *
  * <p>Only short CPU or blocking-memory stages use this pool: footer parsing/filtering, read
- * preparation/finalization, cache copies, and combining. An Iceberg S3 request releases its
- * worker immediately and resumes a continuation after the AWS future is terminal.</p>
+ * preparation/finalization, and combining. Iceberg S3 requests and file-cache I/O use their own
+ * asynchronous executors and do not retain these workers while in flight.</p>
  *
  * <p>The old reader's worker width also happened to cap the number of live whole-file reads.
  * Decoupling S3 waits from workers must not remove that memory bound, so this singleton also owns
- * an asynchronous executor-wide file-pipeline admission queue. A {@link FilePermit} spans footer
- * loading through data-read finalization. Waiting for a permit never occupies a worker.</p>
+ * an asynchronous executor-wide file-pipeline admission queue. A {@link FilePermit} is acquired
+ * only after footer filtering and spans output allocation through data-read finalization. Waiting
+ * for a permit never occupies a worker.</p>
  *
  * <p>Pool submission does not transfer Spark task context automatically. Each asynchronous callable is
  * responsible for installing its captured {@code TaskContext} and RAPIDS pool-thread marker once

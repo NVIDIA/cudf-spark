@@ -33,6 +33,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
 
 /**
  * S3-backed {@link RapidsInputFile} that delegates byte-range reads to
@@ -106,6 +107,19 @@ public final class IcebergS3InputFile extends IcebergInputFile {
       List<CopyRange> copyRanges) {
     return IcebergS3RangeCopier.copyToHMBAsync(
         icebergS3Client, output, s3Bucket, s3Key, copyRanges);
+  }
+
+  /**
+   * Submit vectored S3 reads and notify the caller after each request has populated its output
+   * range. The aggregate future remains alive until all submitted requests and callbacks are
+   * terminal, including on failure.
+   */
+  public CompletableFuture<Long> readVectoredAsync(
+      HostMemoryBuffer output,
+      List<CopyRange> copyRanges,
+      Consumer<CopyRange> requestSucceeded) {
+    return IcebergS3RangeCopier.copyToHMBAsync(
+        icebergS3Client, output, s3Bucket, s3Key, copyRanges, requestSucceeded);
   }
 
   /**

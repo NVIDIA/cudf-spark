@@ -23,6 +23,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.locks.StampedLock;
+import java.util.function.Consumer;
 
 import ai.rapids.cudf.HostMemoryBuffer;
 import com.nvidia.spark.rapids.HostAlloc$;
@@ -107,10 +108,12 @@ final class ParquetOutput implements AutoCloseable {
   final CompletableFuture<Long> copyRangesAsync(
       RapidsInputFile input,
       List<RapidsInputFile.CopyRange> ranges,
-      Executor fallbackExecutor) throws IOException {
+      Executor fallbackExecutor,
+      Consumer<RapidsInputFile.CopyRange> requestSucceeded) throws IOException {
     Objects.requireNonNull(input, "input");
     Objects.requireNonNull(ranges, "ranges");
     Objects.requireNonNull(fallbackExecutor, "fallbackExecutor");
+    Objects.requireNonNull(requestSucceeded, "requestSucceeded");
     if (ranges.isEmpty()) {
       return CompletableFuture.completedFuture(0L);
     }
@@ -125,12 +128,14 @@ final class ParquetOutput implements AutoCloseable {
     CompletableFuture<Long> read;
     try {
       if (input instanceof IcebergS3InputFile) {
-        read = ((IcebergS3InputFile) input).readVectoredAsync(buffer, ranges);
+        read = ((IcebergS3InputFile) input).readVectoredAsync(
+            buffer, ranges, requestSucceeded);
       } else {
         final long bytes = expectedBytes;
         read = CompletableFuture.supplyAsync(() -> {
           try {
             input.readVectored(buffer, ranges);
+            ranges.forEach(requestSucceeded);
             return bytes;
           } catch (IOException error) {
             throw new CompletionException(error);

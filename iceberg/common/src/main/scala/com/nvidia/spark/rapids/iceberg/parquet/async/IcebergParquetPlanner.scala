@@ -158,78 +158,76 @@ final class IcebergParquetPlanner(
   override def readFooter(
       file: IcebergPartitionedFile,
       executor: ExecutorService): CompletableFuture[FooterResult] = {
-    readerPool.acquireFilePermit().thenCompose(
-      (permit: ParquetReaderThreadPool.FilePermit) => {
-        val start = System.nanoTime()
-        val footerFuture: CompletableFuture[FooterResult] = file.file match {
-          case s3Input: IcebergS3InputFile =>
-            ParquetFooterLoader.loadAsync(
-              s3Input, file.path, closed, footerPrefetchBytes, taskExecutor)
-              .thenApplyAsync(new java.util.function.Function[FooterBufferResult, FooterResult] {
-                override def apply(loaded: FooterBufferResult): FooterResult = {
-                  try {
-                    checkOpen()
-                    if (loaded.isCacheHit) {
-                      conf.metrics.get(FILECACHE_FOOTER_HITS).foreach(_ += 1)
-                      conf.metrics.get(FILECACHE_FOOTER_HITS_SIZE)
-                        .foreach(_ += loaded.getBufferSize)
-                    } else {
-                      conf.metrics.get(FILECACHE_FOOTER_MISSES).foreach(_ += 1)
-                      conf.metrics.get(FILECACHE_FOOTER_MISSES_SIZE)
-                        .foreach(_ += loaded.getBufferSize)
-                    }
-                    conf.metrics.get(ICEBERG_ASYNC_FOOTER_READ_TIME)
-                      .foreach(_ += loaded.getRemoteReadNanos)
-                    conf.metrics.get(ICEBERG_ASYNC_FOOTER_REQUEST_COUNT)
-                      .foreach(_ += loaded.getRequestCount)
-                    conf.metrics.get(ICEBERG_ASYNC_FOOTER_REQUESTED_BYTES)
-                      .foreach(_ += loaded.getRequestedBytes)
-                    buildFooterResult(file, Some(loaded), permit)
-                  } finally {
-                    loaded.close()
-                    conf.metrics.get(FILTER_TIME).foreach(_ += System.nanoTime() - start)
-                  }
-                }
-              }, taskExecutor)
-          case _ =>
-            CompletableFuture.supplyAsync(() => {
+    val start = System.nanoTime()
+    file.file match {
+      case s3Input: IcebergS3InputFile =>
+        ParquetFooterLoader.loadAsync(
+          s3Input, file.path, closed, footerPrefetchBytes, taskExecutor)
+          .thenApplyAsync(new java.util.function.Function[FooterBufferResult, FooterResult] {
+            override def apply(loaded: FooterBufferResult): FooterResult = {
               try {
                 checkOpen()
-                buildFooterResult(file, None, permit)
+                if (loaded.isCacheHit) {
+                  conf.metrics.get(FILECACHE_FOOTER_HITS).foreach(_ += 1)
+                  conf.metrics.get(FILECACHE_FOOTER_HITS_SIZE)
+                    .foreach(_ += loaded.getBufferSize)
+                } else {
+                  conf.metrics.get(FILECACHE_FOOTER_MISSES).foreach(_ += 1)
+                  conf.metrics.get(FILECACHE_FOOTER_MISSES_SIZE)
+                    .foreach(_ += loaded.getBufferSize)
+                }
+                conf.metrics.get(ICEBERG_ASYNC_FOOTER_READ_TIME)
+                  .foreach(_ += loaded.getRemoteReadNanos)
+                conf.metrics.get(ICEBERG_ASYNC_FOOTER_REQUEST_COUNT)
+                  .foreach(_ += loaded.getRequestCount)
+                conf.metrics.get(ICEBERG_ASYNC_FOOTER_REQUESTED_BYTES)
+                  .foreach(_ += loaded.getRequestedBytes)
+                buildFooterResult(file, Some(loaded))
               } finally {
+                loaded.close()
                 conf.metrics.get(FILTER_TIME).foreach(_ += System.nanoTime() - start)
               }
-            }, taskExecutor)
-        }
-        footerFuture.whenComplete((_: FooterResult, error: Throwable) => {
-          if (error != null) {
-            permit.close()
+            }
+          }, taskExecutor)
+      case _ =>
+        CompletableFuture.supplyAsync(() => {
+          try {
+            checkOpen()
+            buildFooterResult(file, None)
+          } finally {
+            conf.metrics.get(FILTER_TIME).foreach(_ += System.nanoTime() - start)
           }
-        })
-      })
+        }, taskExecutor)
+    }
   }
 
   override def readData(
       file: IcebergPartitionedFile,
       footer: FooterResult,
       executor: ExecutorService): CompletableFuture[FileFragment] = {
-    val result = try {
-      CompletableFuture.supplyAsync(() => {
-        checkOpen()
-        reader.rapidsFileIO.newInputFile(file.file.getDelegate.location())
-      }, taskExecutor).thenCompose(input =>
-        ParquetDataReader.readAsync(
-          footer, input, closed, requestSizeBytes, taskExecutor))
-    } catch {
-      case error: Throwable => failedFuture[FileFragment](error)
-    }
-    result.whenComplete((_: FileFragment, _: Throwable) => footer.releaseFilePermit())
+    // Footer loading and row-group filtering are intentionally outside admission. Only files
+    // ready to allocate a packed output and submit data reads consume the executor-wide permit.
+    readerPool.acquireFilePermit().thenCompose(
+      (permit: ParquetReaderThreadPool.FilePermit) => {
+        val result = try {
+          CompletableFuture.supplyAsync(() => {
+            checkOpen()
+            reader.rapidsFileIO.newInputFile(file.file.getDelegate.location())
+          }, taskExecutor).thenCompose(input =>
+            ParquetDataReader.readAsync(
+              footer, input, closed, requestSizeBytes, taskExecutor, () => permit.close()))
+        } catch {
+          case error: Throwable => failedFuture[FileFragment](error)
+        }
+        // readAsync normally releases when remote and cache-hit writers are terminal. This
+        // idempotent fallback also covers preparation failures before those writers exist.
+        result.whenComplete((_: FileFragment, _: Throwable) => permit.close())
+      })
   }
 
   private def buildFooterResult(
       file: IcebergPartitionedFile,
-      loaded: Option[FooterBufferResult],
-      permit: ParquetReaderThreadPool.FilePermit): FooterResult = {
+      loaded: Option[FooterBufferResult]): FooterResult = {
     val (parquetInfo, shadedFileReadSchema) = loaded match {
       case Some(footer) =>
         reader.filterParquetBlocks(file, conf.expectedSchema, footer.getBuffer)
@@ -250,8 +248,7 @@ final class IcebergParquetPlanner(
       parquetInfo.dateRebaseMode,
       parquetInfo.timestampRebaseMode,
       parquetInfo.hasInt96Timestamps,
-      postProcessor,
-      permit)
+      postProcessor)
   }
 
   override def decode(parquetInput: ParquetCombinedResult): JIterator[ColumnarBatch] = {
