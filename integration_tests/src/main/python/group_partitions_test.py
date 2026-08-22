@@ -17,7 +17,7 @@ import pytest
 from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture
 from marks import allow_non_gpu, ignore_order
 from spark_session import is_spark_35x, is_spark_40x, is_spark_41x, \
-    is_spark_420_or_later, spark_version
+    is_spark_420_or_later, is_spark_500_or_later, spark_version
 
 
 def _is_spark_patch_at_least(version, minimum):
@@ -52,6 +52,7 @@ def _assert_partial_clustering_spj_plan(plan):
     scans = nodes_of_class("BatchScanExec")
     joins = nodes_of_class("GpuShuffledSymmetricHashJoinExec")
     group_partitions = nodes_of_class("GpuGroupPartitionsExec")
+    shuffle_exchanges = nodes_of_class("GpuShuffleExchangeExec")
 
     assert len(scans) == 2, f"Expected two CPU batch scans, found {len(scans)}:\n{plan}"
     assert len(joins) == 1, f"Expected one GPU SPJ join, found {len(joins)}:\n{plan}"
@@ -62,11 +63,11 @@ def _assert_partial_clustering_spj_plan(plan):
         if node.getClass().getSimpleName() == "GpuShuffleExchangeExec"
     ]
     assert not join_exchanges, f"Expected shuffle-free SPJ inputs:\n{plan}"
-    assert not nodes_of_class("GpuShuffleExchangeExec"), \
-        f"Expected keyed partitioning to remain shuffle-free through DISTINCT:\n{plan}"
     assert nodes_of_class("GpuRowToColumnarExec"), \
         f"Expected transitions above the CPU batch scans:\n{plan}"
     if is_spark_420_or_later():
+        assert not shuffle_exchanges, \
+            f"Expected keyed partitioning to remain shuffle-free through DISTINCT:\n{plan}"
         join_group_partitions = [
             node for node in join_nodes
             if node.getClass().getSimpleName() == "GpuGroupPartitionsExec"
@@ -76,6 +77,8 @@ def _assert_partial_clustering_spj_plan(plan):
         assert len(group_partitions) == 3, \
             f"Expected a third GPU group-partitions node below distinct:\n{plan}"
     else:
+        assert len(shuffle_exchanges) == 1, \
+            f"Expected DISTINCT to shuffle partially clustered output once:\n{plan}"
         assert not group_partitions, \
             f"GroupPartitionsExec is not expected before Spark 4.2:\n{plan}"
 
@@ -90,6 +93,10 @@ def _assert_partial_clustering_spj_plan(plan):
         or is_spark_420_or_later()
     ),
     reason="Requires Spark's partial-clustering correctness fix")
+@pytest.mark.xfail(
+    condition=is_spark_500_or_later(),
+    reason="https://github.com/NVIDIA/cudf-spark/issues/15688: Spark 5 requires "
+           "KeyedPartitionings in a PartitioningCollection to share keys")
 def test_group_partitions_partial_clustering_distinct():
     def distinct_after_spj(spark):
         # A JVM V2 source is required to report KeyGroupedPartitioning and per-partition keys.
@@ -114,8 +121,8 @@ def test_group_partitions_partial_clustering_distinct():
         "spark.sql.sources.v2.bucketing.partiallyClusteredDistribution.enabled": "true",
     }
 
-    # The SPJ is shuffle-free, and distinct reuses its keyed partitioning. On Spark 4.2 this
-    # exercises GroupPartitionsExec both below the join and below the aggregate.
+    # The SPJ inputs are shuffle-free. SPARK-55848 requires DISTINCT to shuffle partially
+    # clustered output before Spark 4.2. Spark 4.2 groups matching keys below the aggregate instead.
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         distinct_after_spj,
         conf=conf,

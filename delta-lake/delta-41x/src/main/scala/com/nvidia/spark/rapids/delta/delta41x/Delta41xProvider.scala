@@ -17,7 +17,9 @@
 package com.nvidia.spark.rapids.delta.delta41x
 
 import com.nvidia.spark.rapids._
-import com.nvidia.spark.rapids.delta.common.{DeleteCommandMeta, DeltaDynamicPartitionOverwriteCommandMeta, OptimizeTableCommandMeta, UpdateCommandMeta}
+import com.nvidia.spark.rapids.delta.common.{DeleteCommandMeta,
+  DeltaDynamicPartitionOverwriteCommandMeta, DeltaReorgTableCommandMeta,
+  OptimizeTableCommandMeta, UpdateCommandMeta}
 import com.nvidia.spark.rapids.delta.common.{GpuDelta4xParquetFileFormat, GpuDeltaParquetFileFormat2}
 import com.nvidia.spark.rapids.delta.common.DeltaProviderBase
 
@@ -85,6 +87,7 @@ object Delta41xProvider extends DeltaProviderBase with Logging {
       GpuOverrides.runnableCmd[OptimizeTableCommand](
           "Optimize a Delta Lake table",
           (a, conf, p, r) => new OptimizeTableCommandMeta(a, conf, p, r)),
+      DeltaReorgTableCommandMeta.rule,
       GpuOverrides.runnableCmd[DeltaDynamicPartitionOverwriteCommand](
         "Dynamic partition overwrite to a Delta Lake table",
         (a, conf, p, r) => new DeltaDynamicPartitionOverwriteCommandMeta(a, conf, p, r))

@@ -70,8 +70,8 @@ class RegexParser(pattern: String) {
     ast
   }
 
-  def parseReplacement(numCaptureGroups: Int): RegexReplacement = {
-    val sequence = RegexReplacement(new ListBuffer(), numCaptureGroups)
+  def parseReplacement(): RegexReplacement = {
+    val sequence = RegexReplacement(new ListBuffer())
     while (!eof()) {
       sequence.parts ++= parseReplacementBase()
     }
@@ -182,43 +182,74 @@ class RegexParser(pattern: String) {
     base
   }
 
+  private def parseFlags(): RegexFlagSet = {
+    def parseFlagSet(): Set[RegexFlag] = {
+      var result = Set.empty[RegexFlag]
+      while (!eof() && peek().exists(ch => RegexFlag.allFlagsString.contains(ch))) {
+        result += RegexFlag.fromChar(consume())
+      }
+      result
+    }
+    val flags = parseFlagSet()
+    val negated = if (peek().contains('-')) {
+      consumeExpected('-'); parseFlagSet()
+    } else Set.empty[RegexFlag]
+    RegexFlagSet(flags, negated)
+  }
+
   private def parseGroup(): RegexAST = {
-    val groupType = if (pos + 1 < pattern.length
-        && pattern.charAt(pos) == '?'
-        && ":!=<>".contains(pattern.charAt(pos+1))) {
+    def parseGroupBody(groupType: RegexGroup.Type): RegexGroup = {
+      val term = parseUntil(() => peek().contains(')'))
+      if (eof()) throw new RegexUnsupportedException("Unclosed group", Some(pos))
+      consumeExpected(')')
+      RegexGroup(groupType, term)
+    }
+    if (peek().contains('?')) {
       consumeExpected('?')
-      consume() match {  // guaranteed exhaustive by the contains call above
-        case ':' => RegexGroup.NonCapturing
-        case '!' => RegexGroup.NegativeLookahead
-        case '=' => RegexGroup.PositiveLookahead
-        case '>' => RegexGroup.Independent
-        case '<' if pos < pattern.length => consume() match {
-          case '!' => RegexGroup.NegativeLookbehind
-          case '=' => RegexGroup.PositiveLookbehind
-          case ch if isLetter(ch) =>
-            val nameStart = pos-1
-            while (!eof() && peek().exists(c => isLetter(c) || isAsciiDigit(c))) {
-              skip()
+      peek() match {
+        case None => throw new RegexUnsupportedException("Unterminated inline flags", Some(pos))
+        case Some(ch) if ":!=<>".contains(ch) =>
+          val groupType = consumeExpected(ch) match {
+            // guaranteed exhaustive by the contains call above
+            case ':' => RegexGroup.NonCapturing
+            case '!' => RegexGroup.NegativeLookahead
+            case '=' => RegexGroup.PositiveLookahead
+            case '>' => RegexGroup.Independent
+            case '<' if pos < pattern.length => consume() match {
+              case '!' => RegexGroup.NegativeLookbehind
+              case '=' => RegexGroup.PositiveLookbehind
+              case ch if isLetter(ch) =>
+                val nameStart = pos-1
+                while (!eof() && peek().exists(c => isLetter(c) || isAsciiDigit(c))) {
+                  skip()
+                }
+                val name = pattern.substring(nameStart, pos)
+                if (!peek().contains('>')) {
+                  throw new RegexUnsupportedException(
+                    "Illegal named capture group: malformed <name>", Some(nameStart-1))
+                }
+                consumeExpected('>')
+                RegexGroup.Named(name)
+              case _ => throw new RegexUnsupportedException(
+                "Unexpected character after '<' in group", Some(pos-1))
             }
-            val name = pattern.substring(nameStart, pos)
-            if (!peek().contains('>')) {
-              throw new RegexUnsupportedException(
-                "Illegal named capture group: malformed <name>", Some(nameStart-1))
-            }
-            consumeExpected('>')
-            RegexGroup.Named(name)
-          case _ => throw new RegexUnsupportedException(
-            s"Unexpected character after '<' in group", Some(pos-1))
-        }
-        case '<' => throw new RegexUnsupportedException(
-          s"Pattern may not end with trailing '<' in group", Some(pos-1))
+            case '<' => throw new RegexUnsupportedException(
+              "Pattern may not end with trailing '<' in group", Some(pos-1))
+          }
+          parseGroupBody(groupType)
+        case Some(_) =>
+          val flags = parseFlags()
+          if (eof()) throw new RegexUnsupportedException("Unterminated inline flags", Some(pos))
+          consume() match {
+            case ')' => RegexInlineFlags(flags)
+            case ':' => parseGroupBody(RegexGroup.ScopedFlags(flags))
+            case ch =>
+              throw new RegexUnsupportedException(s"Unexpected inline flag '$ch'", Some(pos-1))
+          }
       }
     } else {
-      RegexGroup.Capturing
+      parseGroupBody(RegexGroup.Capturing)
     }
-    val term = parseUntil(() => peek().contains(')'))
-    consumeExpected(')')
-    RegexGroup(groupType, term)
   }
 
   private def parseCharacterClass(): RegexCharacterClass = {
@@ -257,8 +288,7 @@ class RegexParser(pattern: String) {
               }
           }
         case None =>
-          throw new RegexUnsupportedException(
-                s"Unclosed character class", Some(pos))
+          throw new RegexUnsupportedException("Unclosed character class", Some(pos))
       }
     }
 
@@ -330,7 +360,7 @@ class RegexParser(pattern: String) {
       }
     }
     if (!characterClassComplete) {
-      throw new RegexUnsupportedException(s"Unclosed character class", Some(pos))
+      throw new RegexUnsupportedException("Unclosed character class", Some(pos))
     }
     characterClass
   }
@@ -719,7 +749,15 @@ object RegexFindMode extends RegexMode
 object RegexReplaceMode extends RegexMode
 object RegexSplitMode extends RegexMode
 
-sealed class RegexRewriteFlags(val emptyRepetition: Boolean)
+sealed case class RegexRewriteFlags(
+    emptyRepetition: Boolean,
+    // whether case-insensitive matching (the inline `(?i)` flag) is currently active
+    caseInsensitive: Boolean = false,
+    // whether a choice alternative follows the current position within the enclosing group. An
+    // inline flag toggle here would, in Java, also apply to that following alternative, which we
+    // cannot represent while rewriting branches independently, so we reject and fall back to the
+    // CPU. A flag in the last (right-most) alternative has nothing after it and is fine.
+    choiceAltFollows: Boolean = false)
 
 /**
  * Transpile Java/Spark regular expression to a format that cuDF supports, or throw an exception
@@ -733,15 +771,6 @@ class CudfRegexTranspiler(mode: RegexMode) {
   private val regexPunct = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
   private val escapeChars = Map('n' -> '\n', 'r' -> '\r', 't' -> '\t', 'f' -> '\f', 'a' -> '\u0007',
       'b' -> '\b', 'e' -> '\u001b')
-
-  private def countCaptureGroups(regex: RegexAST): Int = {
-    regex match {
-      case RegexSequence(parts) => parts.foldLeft(0)((c, re) => c + countCaptureGroups(re))
-      case RegexGroup(groupType, base) =>
-        (if (groupType == RegexGroup.Capturing) 1 else 0) + countCaptureGroups(base)
-      case _ => 0
-    }
-  }
 
   /**
    * Parse Java regular expression and translate into cuDF regular expression.
@@ -765,12 +794,12 @@ class CudfRegexTranspiler(mode: RegexMode) {
       extractIndex: Option[Int],
       repl: Option[String]): (RegexAST, Option[RegexReplacement]) = {
 
-    // if we have a replacement, parse the replacement string using the regex parser to account
-    // for backrefs
-    val replacement = repl.map(s => new RegexParser(s).parseReplacement(countCaptureGroups(regex)))
+    // Validate Java Matcher.appendReplacement syntax while preserving raw backreference tokens.
+    // GpuRegExpUtils.backrefConversion translates them to cuDF syntax later.
+    val replacement = repl.map(s => new RegexParser(s).parseReplacement())
 
     // validate that the regex is supported by cuDF
-    val cudfRegex = transpile(regex, extractIndex, replacement, None)
+    val cudfRegex = transpile(regex, extractIndex, None)
 
     (cudfRegex, replacement)
   }
@@ -939,7 +968,6 @@ class CudfRegexTranspiler(mode: RegexMode) {
   }
 
   private def transpile(regex: RegexAST, extractIndex: Option[Int],
-      replacement: Option[RegexReplacement],
       previous: Option[RegexAST]): RegexAST = {
 
     def containsBeginAnchor(regex: RegexAST): Boolean = {
@@ -1037,11 +1065,15 @@ class CudfRegexTranspiler(mode: RegexMode) {
 
     def checkUnsupported(regex: RegexAST): Unit = {
       regex match {
-        case RegexSequence(parts) if mode == RegexSplitMode =>
-          checkEndAnchorContextSplit(parts.toSeq)
         case RegexSequence(parts) =>
-          for (i <- 1 until parts.length) {
-            checkEndAnchorContext(parts(i - 1), parts(i))
+          // zero-width inline flags shouldn't break the adjacency
+          val significant = parts.filterNot(isInlineFlags)
+          if (mode == RegexSplitMode) {
+            checkEndAnchorContextSplit(significant.toSeq)
+          } else {
+            for (i <- 1 until significant.length) {
+              checkEndAnchorContext(significant(i - 1), significant(i))
+            }
           }
         case RegexChoice(l, r) =>
           checkUnsupported(l)
@@ -1061,6 +1093,8 @@ class CudfRegexTranspiler(mode: RegexMode) {
           case QuantifierVariableLength(0, _) => true
           case _ => false
         }
+        case RegexInlineFlags(_) =>
+          true  // zero-width
         case RegexGroup(_, term) =>
           isEmptyRepetition(term)
         case RegexSequence(parts) =>
@@ -1101,13 +1135,65 @@ class CudfRegexTranspiler(mode: RegexMode) {
       case _ => regex
     }
 
-    val flags = new RegexRewriteFlags(isEmptyRepetition(regex))
-
-    rewrite(withUpdatedGroups, replacement, previous, flags)
+    rewrite(withUpdatedGroups, previous, RegexRewriteFlags(isEmptyRepetition(regex)))
   }
 
-  private def rewrite(regex: RegexAST, replacement: Option[RegexReplacement],
-      previous: Option[RegexAST], flags: RegexRewriteFlags): RegexAST = {
+  private def applyInlineFlags(
+      current: RegexRewriteFlags,
+      flagSet: RegexFlagSet,
+      pos: Option[Int]): RegexRewriteFlags = {
+    // Guard only positive flags. All negated flags other than 'i' are no-ops - they default
+    // to off and have no mechanism to enable them.
+    if (flagSet.flags.exists(_ != RegexFlag.CaseInsensitive)) {
+      throw new RegexUnsupportedException(
+        "Only the case-insensitive '(?i)' inline flag is supported", pos)
+    }
+    val caseInsensitive = if (flagSet.negated.contains(RegexFlag.CaseInsensitive)) false
+    else if (flagSet.flags.contains(RegexFlag.CaseInsensitive)) true
+    else current.caseInsensitive
+    if (caseInsensitive == current.caseInsensitive) current
+    else current.copy(caseInsensitive = caseInsensitive)
+  }
+
+  private def isAsciiLetter(cp: Int): Boolean =
+    (cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z')
+
+  // For ASCII case-insensitive matching, expand a character-class element so it also matches
+  // its opposite case. Elements that could denote a letter but cannot be folded safely
+  // (octal/hex escapes, or ranges spanning a case boundary) throw so the expression falls
+  // back to the CPU.
+  private def caseFold(
+      component: RegexCharacterClassComponent): Seq[RegexCharacterClassComponent] =
+    component match {
+      case RegexChar(ch) if isAsciiLetter(ch) =>
+        Seq(component, RegexChar(if (ch.isLower) ch.toUpper else ch.toLower))
+      case RegexCharacterRange(RegexChar(lo), RegexChar(hi)) if lo >= 'a' && hi <= 'z' =>
+        Seq(component, RegexCharacterRange(RegexChar(lo.toUpper), RegexChar(hi.toUpper)))
+      case RegexCharacterRange(RegexChar(lo), RegexChar(hi)) if lo >= 'A' && hi <= 'Z' =>
+        Seq(component, RegexCharacterRange(RegexChar(lo.toLower), RegexChar(hi.toLower)))
+      case r @ RegexCharacterRange(RegexChar(lo), RegexChar(hi))
+          if (lo <= 'z' && hi >= 'a') || (lo <= 'Z' && hi >= 'A') =>
+        // a range that includes ASCII letters but is not wholly within a single case
+        throw new RegexUnsupportedException(
+          "Case-insensitive matching is not supported for character ranges spanning a case " +
+          "boundary", r.position)
+      case RegexCharacterRange(RegexChar(_), RegexChar(_)) =>
+        // a range with no ASCII letters (e.g. [0-9]): unaffected by case
+        Seq(component)
+      case r @ (RegexOctalChar(_) | RegexHexDigit(_) | RegexCharacterRange(_, _)) =>
+        // octal/hex escapes (or ranges with such endpoints) could denote a letter but cannot
+        // be folded reliably yet
+        throw new RegexUnsupportedException(
+          "Case-insensitive matching is not supported for this character-class element",
+          r.position)
+      case _ =>
+        // non-letter literals and other escapes (e.g. \t, \n) are not case-variant
+        Seq(component)
+    }
+
+  private def rewrite(regex: RegexAST, previous: Option[RegexAST],
+      flags: RegexRewriteFlags): RegexAST = {
+
     regex match {
 
       case RegexChar(ch) => ch match {
@@ -1151,11 +1237,20 @@ class CudfRegexTranspiler(mode: RegexMode) {
             case _ =>
               regex
           }
+        case _ if flags.caseInsensitive && isAsciiLetter(ch) =>
+          // case-insensitive literal: match both cases, e.g. `a` -> `[aA]`
+          RegexCharacterClass(negated = false,
+            ListBuffer(RegexChar(ch.toLower), RegexChar(ch.toUpper)))
         case _ =>
           regex
       }
 
       case r @ RegexOctalChar(digits) =>
+        if (flags.caseInsensitive && isAsciiLetter(r.codePoint)) {
+          throw new RegexUnsupportedException(
+            "Case-insensitive matching is not supported for escapes that resolve to a letter",
+            r.position)
+        }
         val octal = if (digits.charAt(0) == '0' && digits.length == 4) {
           digits.substring(1)
         } else  {
@@ -1171,6 +1266,11 @@ class CudfRegexTranspiler(mode: RegexMode) {
         }
 
       case r @ RegexHexDigit(_) =>
+        if (flags.caseInsensitive && isAsciiLetter(r.codePoint)) {
+          throw new RegexUnsupportedException(
+            "Case-insensitive matching is not supported for escapes that resolve to a letter",
+            r.position)
+        }
         if (regexMetaChars.map(_.toInt).contains(r.codePoint)) {
           RegexEscaped(r.codePoint.toChar)
         } else if (r.codePoint >= 128) {
@@ -1236,7 +1336,7 @@ class CudfRegexTranspiler(mode: RegexMode) {
             case Some(RegexEscaped('Z')) =>
               RegexEmpty()
             case _ =>
-              rewrite(RegexChar('$'), replacement, previous, flags)
+              rewrite(RegexChar('$'), previous, flags)
           }
         case 's' | 'S' =>
           // whitespace characters
@@ -1307,10 +1407,13 @@ class CudfRegexTranspiler(mode: RegexMode) {
               "Nested character classes are not supported", r.position)
           case _ =>
         }
-        val components = ListBuffer(characters.toSeq
+        // Rewrite the class components with case folding disabled: a single letter must not be
+        // expanded into a nested class here. Case-insensitivity is instead applied to the class
+        // as a whole below, by adding the opposite-case characters/ranges.
+        val rewrittenComponents = ListBuffer(characters.toSeq
           .map {
             case r @ RegexChar(ch) if "^$.".contains(ch) => r
-            case ch => rewrite(ch, replacement, None, flags) match {
+            case ch => rewrite(ch, None, flags.copy(caseInsensitive = false)) match {
               case valid: RegexCharacterClassComponent => valid
               case _ =>
                 // this can happen when a character class contains a meta-sequence such as
@@ -1320,6 +1423,12 @@ class CudfRegexTranspiler(mode: RegexMode) {
                   ch.position)
             }
           }: _*)
+
+        val components = if (flags.caseInsensitive) {
+          rewrittenComponents.flatMap(caseFold)
+        } else {
+          rewrittenComponents
+        }
 
         if (negated) {
           negateCharacterClass(components)
@@ -1352,78 +1461,99 @@ class CudfRegexTranspiler(mode: RegexMode) {
           throw new RegexUnsupportedException("Token preceding '{' is not quantifiable",
             parts.head.position)
         }
-        if (parts.forall(isBeginOrEndLineAnchor)) {
+        // zero-width inline flags don't affect anchors;
+        // a sequence of only inline flags is rejected separately
+        val anchorParts = parts.filterNot(isInlineFlags)
+        if (anchorParts.nonEmpty && anchorParts.forall(isBeginOrEndLineAnchor)) {
           throw new RegexUnsupportedException(
             "Sequences that only contain '^' or '$' are not supported", sequence.position)
-        }
-
-        def popBackrefIfNecessary(capture: Boolean): Unit = {
-          if (mode == RegexReplaceMode && !capture) {
-            replacement match {
-              case Some(repl) =>
-                repl.popBackref()
-              case _ =>
-            }
-          }
         }
 
         // Special handling for line anchor ($)
         // This code is implemented here because to make it work in cuDF, we have to reorder
         // the items in the regex.
         // In the JVM, regexes like "\n$" and "$\n" have similar treatment
-        RegexSequence(parts.foldLeft((new ListBuffer[RegexAST](),
+        // `currentFlags.caseInsensitive` tracks the inline `(?i)`/`(?-i)` state as we scan the
+        // sequence left-to-right; it starts from the state inherited from any enclosing scope.
+        var currentFlags = flags
+        val rewrittenParts = parts.foldLeft((new ListBuffer[RegexAST](),
           Option.empty[RegexAST]))((m, part) => {
             val (r, last) = m
-            last match {
-              // when the previous character is a line anchor ($), the JVM has special handling
-              // when matching against line terminator characters
-              case Some(RegexChar('$')) | Some(RegexEscaped('Z')) =>
-                part match {
-                  case RegexGroup(groupType, _)
-                      if groupType != RegexGroup.Capturing
-                          && groupType != RegexGroup.NonCapturing =>
-                    throw new RegexUnsupportedException(
-                      "Regex sequence $ followed by a lookaround, independent, or named capture " +
-                      "group is not supported", part.position)
-                  case RegexGroup(groupType, RegexSequence(
-                      ListBuffer(RegexCharacterClass(true, parts))))
-                      if parts.forall(!isBeginOrEndLineAnchor(_)) =>
-                    popBackrefIfNecessary(groupType == RegexGroup.Capturing)
-                  case RegexGroup(groupType, RegexCharacterClass(true, parts))
-                      if parts.forall(!isBeginOrEndLineAnchor(_)) =>
-                    popBackrefIfNecessary(groupType == RegexGroup.Capturing)
-                  case RegexCharacterClass(true, parts)
-                      if parts.forall(!isBeginOrEndLineAnchor(_)) =>
-                    popBackrefIfNecessary(false)
-                  case RegexChar(ch) if lineTerminatorChars.contains(ch) =>
-                    // what's really needed here is negative lookahead, but that is not
-                    // supported by cuDF
-                    // in this case: $\n would transpile to (?!\r)\n$
-                    throw new RegexUnsupportedException(s"Regex sequence $$\\$ch is not supported",
-                      part.position)
-                  case RegexEscaped('z') =>
-                    // since \z is not supported by cudf
-                    // we need to transpile $\z to $(?![\r\n\u0085\u2028\u2029])
-                    // however, cudf doesn't support negative look ahead
-                    throw new RegexUnsupportedException("Regex sequence $\\z is not supported",
-                      part.position)
-                  case RegexEscaped(a) if "bBsSdDwWaAf".contains(a) =>
-                    throw new RegexUnsupportedException(
-                      s"Regex sequences with \\$a are not supported around end-of-line markers " +
-                        "like $ or \\Z at position", part.position)
-                  case _ =>
-                    r.append(rewrite(part, replacement, last, flags))
+            part match {
+              case RegexInlineFlags(flagSet) =>
+                if (flags.choiceAltFollows) {
+                  // In Java a bare `(?i)` applies to the end of the enclosing group, crossing
+                  // `|` into any following alternative. We rewrite choice branches independently,
+                  // so we cannot represent a toggle that leaks into a following alternative;
+                  // fall back to the CPU. (A toggle in the last alternative is fine.)
+                  throw new RegexUnsupportedException(
+                    "Inline flags followed by a choice ('|') alternative are not supported",
+                    part.position)
                 }
-              case _ =>
-                r.append(rewrite(part, replacement, last, flags))
-            }
-            r.last match {
-              case RegexEmpty() =>
+                currentFlags = applyInlineFlags(currentFlags, flagSet, part.position)
+                // inline flags are zero-width directives, so emit nothing and leave `last`
+                // (used by the anchor handling below) unchanged
                 (r, last)
               case _ =>
-                (r, Some(part))
+                last match {
+                  // when the previous character is a line anchor ($), the JVM has special handling
+                  // when matching against line terminator characters
+                  case Some(RegexChar('$')) | Some(RegexEscaped('Z')) =>
+                    part match {
+                      case RegexGroup(groupType, _) if !RegexGroup.isCudfGroupType(groupType) =>
+                        throw new RegexUnsupportedException(
+                          "Regex sequence $ followed by a lookaround, independent, or named " +
+                          "capture group is not supported", part.position)
+                      // These cases intentionally omit the current part. The replacement-side
+                      // backref mutation that used to accompany the drop became dead when the
+                      // synthetic line-anchor capture group was removed by #15023.
+                      case RegexGroup(_, RegexSequence(
+                          ListBuffer(RegexCharacterClass(true, parts))))
+                          if parts.forall(!isBeginOrEndLineAnchor(_)) =>
+                        ()
+                      case RegexGroup(_, RegexCharacterClass(true, parts))
+                          if parts.forall(!isBeginOrEndLineAnchor(_)) =>
+                        ()
+                      case RegexCharacterClass(true, parts)
+                          if parts.forall(!isBeginOrEndLineAnchor(_)) =>
+                        ()
+                      case RegexChar(ch) if lineTerminatorChars.contains(ch) =>
+                        // what's really needed here is negative lookahead, but that is not
+                        // supported by cuDF
+                        // in this case: $\n would transpile to (?!\r)\n$
+                        throw new RegexUnsupportedException(
+                          s"Regex sequence $$\\$ch is not supported", part.position)
+                      case RegexEscaped('z') =>
+                        // since \z is not supported by cudf
+                        // we need to transpile $\z to $(?![\r\n\u0085\u2028\u2029])
+                        // however, cudf doesn't support negative look ahead
+                        throw new RegexUnsupportedException("Regex sequence $\\z is not supported",
+                          part.position)
+                      case RegexEscaped(a) if "bBsSdDwWaAf".contains(a) =>
+                        throw new RegexUnsupportedException(
+                          s"Regex sequences with \\$a are not supported around end-of-line " +
+                            "markers like $ or \\Z at position", part.position)
+                      case _ =>
+                        r.append(rewrite(part, last, currentFlags))
+                    }
+                  case _ =>
+                    r.append(rewrite(part, last, currentFlags))
+                }
+                r.last match {
+                  case RegexEmpty() =>
+                    (r, last)
+                  case _ =>
+                    (r, Some(part))
+                }
             }
-        })._1)
+        })._1
+        if (rewrittenParts.isEmpty) {
+          // the sequence contained only inline flag directives (e.g. `(?i)`), which we drop;
+          // an empty sequence has no cuDF equivalent, so fall back to the CPU
+          throw new RegexUnsupportedException(
+            "Sequence containing only inline flags is not supported", sequence.position)
+        }
+        RegexSequence(rewrittenParts)
 
       case RegexRepetition(base, quantifier) => (base, quantifier) match {
         case (_, SimpleQuantifier(ch)) if mode == RegexSplitMode
@@ -1453,8 +1583,7 @@ class CudfRegexTranspiler(mode: RegexMode) {
             "regex_replace and regex_split on GPU do not support repetition with {0}",
             quantifier.position)
 
-        case (g @ RegexGroup(groupType, _), _)
-            if groupType != RegexGroup.Capturing && groupType != RegexGroup.NonCapturing =>
+        case (g @ RegexGroup(groupType, _), _) if !RegexGroup.isCudfGroupType(groupType) =>
           throw new RegexUnsupportedException(
             "Repetition of lookaround, independent, or named capture groups is not supported",
             g.position)
@@ -1468,7 +1597,7 @@ class CudfRegexTranspiler(mode: RegexMode) {
               // (\A)+ can be transpiled to (\A) (dropping the repetition)
               // we use rewrite(...) here to handle logic regarding modes
               // (\A is not supported in RegexSplitMode)
-              RegexGroup(groupType, rewrite(term, replacement, previous, flags))
+              RegexGroup(groupType, rewrite(term, previous, flags))
             // NOTE: (\A)* can be transpiled to (\A)?
             // however, (\A)? is not supported in libcudf yet
             case _ =>
@@ -1486,7 +1615,7 @@ class CudfRegexTranspiler(mode: RegexMode) {
               // (\A){1,} can be transpiled to (\A) (dropping the repetition)
               // we use rewrite(...) here to handle logic regarding modes
               // (\A is not supported in RegexSplitMode)
-              RegexGroup(groupType, rewrite(term, replacement, previous, flags))
+              RegexGroup(groupType, rewrite(term, previous, flags))
             // NOTE: (\A)* can be transpiled to (\A)?
             // however, (\A)? is not supported in libcudf yet
             case _ =>
@@ -1504,7 +1633,7 @@ class CudfRegexTranspiler(mode: RegexMode) {
               // (\A){1,} can be transpiled to (\A) (dropping the repetition)
               // we use rewrite(...) here to handle logic regarding modes
               // (\A is not supported in RegexSplitMode)
-              RegexGroup(groupType, rewrite(term, replacement, previous, flags))
+              RegexGroup(groupType, rewrite(term, previous, flags))
             // NOTE: (\A)* can be transpiled to (\A)?
             // however, (\A)? is not supported in libcudf yet
             case _ =>
@@ -1518,30 +1647,30 @@ class CudfRegexTranspiler(mode: RegexMode) {
             throw new RegexUnsupportedException(
                 s"cuDF does not support repetition of: ${term.toRegexString}", term.position)
           }
-          RegexRepetition(rewrite(base, replacement, None, flags), quantifier)
+          RegexRepetition(rewrite(base, None, flags), quantifier)
         case (RegexEscaped(ch), SimpleQuantifier('+')) if "AZ".contains(ch) =>
           // \A+ can be transpiled to \A (dropping the repetition)
           // \Z+ can be transpiled to \Z (dropping the repetition)
           // we use rewrite(...) here to handle logic regarding modes
           // (\A and \Z are not supported in RegexSplitMode)
-          rewrite(base, replacement, previous, flags)
+          rewrite(base, previous, flags)
         // NOTE: \A* can be transpiled to \A?
         // however, \A? is not supported in libcudf yet
         case (RegexEscaped(ch), QuantifierFixedLength(n)) if n > 0 && "AZ".contains(ch) =>
           // \A{2} can be transpiled to \A (dropping the repetition)
           // \Z{2} can be transpiled to \Z (dropping the repetition)
-          rewrite(base, replacement, previous, flags)
+          rewrite(base, previous, flags)
         case (RegexEscaped(ch), QuantifierVariableLength(n,_)) if n > 0 && "AZ".contains(ch) =>
           // \A{1,5} can be transpiled to \A (dropping the repetition)
           // \Z{1,} can be transpiled to \Z (dropping the repetition)
-          rewrite(base, replacement, previous, flags)
+          rewrite(base, previous, flags)
         case _ if isSupportedRepetitionBase(base) =>
-          RegexRepetition(rewrite(base, replacement, None, flags), quantifier)
+          RegexRepetition(rewrite(base, None, flags), quantifier)
         case (RegexRepetition(_, SimpleQuantifier('*')), SimpleQuantifier('+')) =>
           throw new RegexUnsupportedException("Possessive quantifier *+ not supported",
             quantifier.position)
         case (RegexRepetition(_, SimpleQuantifier('?' | '*' | '+')), SimpleQuantifier('?')) =>
-          RegexRepetition(rewrite(base, replacement, None, flags), quantifier)
+          RegexRepetition(rewrite(base, None, flags), quantifier)
         case _ =>
           throw new RegexUnsupportedException("Preceding token cannot be quantified",
             quantifier.position)
@@ -1549,8 +1678,11 @@ class CudfRegexTranspiler(mode: RegexMode) {
       }
 
       case RegexChoice(l, r) =>
-        val ll = rewrite(l, replacement, None, flags)
-        val rr = rewrite(r, replacement, None, flags)
+        // The left branch has the right branch as a following alternative, so an inline flag
+        // toggle there would (in Java) also apply across the `|`. The right branch only has a
+        // following alternative if this whole choice does, so it inherits the current flag.
+        val ll = rewrite(l, None, flags.copy(choiceAltFollows = true))
+        val rr = rewrite(r, None, flags)
 
         // cuDF does not support zero-length repetition in replace or split mode
         // cuDF does support +, fixed-length, and variable length with min > 0
@@ -1605,31 +1737,7 @@ class CudfRegexTranspiler(mode: RegexMode) {
         }
         RegexChoice(ll, rr)
 
-      case g @ RegexGroup(RegexGroup.PositiveLookahead |
-                          RegexGroup.NegativeLookahead |
-                          RegexGroup.PositiveLookbehind |
-                          RegexGroup.NegativeLookbehind |
-                          RegexGroup.Independent |
-                          RegexGroup.Named(_), _) =>
-        val msg = g.groupType match {
-          case RegexGroup.PositiveLookahead =>
-            "Positive lookahead groups are not supported"
-          case RegexGroup.NegativeLookahead =>
-            "Negative lookahead groups are not supported"
-          case RegexGroup.PositiveLookbehind =>
-            "Positive lookbehind groups are not supported"
-          case RegexGroup.NegativeLookbehind =>
-            "Negative lookbehind groups are not supported"
-          case RegexGroup.Independent =>
-            "Independent groups are not supported"
-          case RegexGroup.Named(_) =>
-            "Named capture groups are not supported"
-          case _ =>  // unreachable
-            throw new IllegalStateException(s"Unhandled group type: ${g.groupType}")
-        }
-        throw new RegexUnsupportedException(msg, g.position)
-
-      case RegexGroup(groupType, term) =>
+      case g @ RegexGroup(RegexGroup.Capturing | RegexGroup.NonCapturing, term) =>
         term match {
           case RegexSequence(parts) =>
             parts.foreach { part =>
@@ -1655,7 +1763,36 @@ class CudfRegexTranspiler(mode: RegexMode) {
             }
           case _ =>
         }
-        RegexGroup(groupType, rewrite(term, replacement, None, flags))
+        // A group opens a new inline-flag scope: reset `choiceAltFollows` (a `(?i)` inside this
+        // group cannot leak out to an alternative of an enclosing choice) while inheriting the
+        // case state.
+        RegexGroup(g.groupType,
+          rewrite(term, None, flags.copy(choiceAltFollows = false)))
+
+      case g @ RegexGroup(RegexGroup.ScopedFlags(flagSet), term) =>
+        val innerFlags = applyInlineFlags(flags, flagSet, g.position)
+        // a scoped-flags group becomes a non-capturing group with the case state applied to
+        // its contents; the flag can't leak out of the group, so no choice-crossing concern
+        rewrite(RegexGroup(RegexGroup.NonCapturing, term), previous, innerFlags)
+
+      case g @ RegexGroup(_, _) =>
+        val msg = g.groupType match {
+          case RegexGroup.PositiveLookahead =>
+            "Positive lookahead groups are not supported"
+          case RegexGroup.NegativeLookahead =>
+            "Negative lookahead groups are not supported"
+          case RegexGroup.PositiveLookbehind =>
+            "Positive lookbehind groups are not supported"
+          case RegexGroup.NegativeLookbehind =>
+            "Negative lookbehind groups are not supported"
+          case RegexGroup.Independent =>
+            "Independent groups are not supported"
+          case RegexGroup.Named(_) =>
+            "Named capture groups are not supported"
+          case _ =>
+            s"Unknown group type: ${g.groupType}"
+        }
+        throw new RegexUnsupportedException(msg, g.position)
 
       case other =>
         throw new RegexUnsupportedException(s"Unhandled expression in transpiler: $other",
@@ -1761,6 +1898,9 @@ class CudfRegexTranspiler(mode: RegexMode) {
     })
   }
 
+  // Inline flags are zero-width and must be skipped by structural anchor checks.
+  private def isInlineFlags(regex: RegexAST): Boolean = regex.isInstanceOf[RegexInlineFlags]
+
   private def isBeginOrEndLineAnchor(regex: RegexAST): Boolean = regex match {
     case RegexSequence(parts) => parts.nonEmpty && parts.forall(isBeginOrEndLineAnchor)
     case RegexGroup(_, term) => isBeginOrEndLineAnchor(term)
@@ -1798,6 +1938,35 @@ sealed case class RegexSequence(parts: ListBuffer[RegexAST]) extends RegexAST {
   override def toRegexString: String = parts.map(_.toRegexString).mkString
 }
 
+sealed abstract class RegexFlag(val char: Char)
+object RegexFlag {
+  case object CaseInsensitive extends RegexFlag('i')
+  case object UnixLines extends RegexFlag('d')
+  case object Multiline extends RegexFlag('m')
+  case object DotAll extends RegexFlag('s')
+  case object UnicodeCase extends RegexFlag('u')
+  case object Comments extends RegexFlag('x')
+  case object UnicodeClasses extends RegexFlag('U')
+  final val all: Seq[RegexFlag] =
+    Seq(CaseInsensitive, UnixLines, Multiline, DotAll, UnicodeCase, Comments, UnicodeClasses)
+  final val fromChar: Map[Char, RegexFlag] = all.map(f => f.char -> f).toMap
+  final val allFlagsString: String = all.map(_.char).mkString
+}
+
+sealed case class RegexFlagSet(flags: Set[RegexFlag], negated: Set[RegexFlag]) {
+  def isEmpty: Boolean = flags.isEmpty && negated.isEmpty
+  def toRegexString: String = {
+    val flagsString = flags.map(_.char).mkString
+    val negatedString = if (negated.isEmpty) "" else s"-${negated.map(_.char).mkString}"
+    s"${flagsString}${negatedString}"
+  }
+}
+
+sealed case class RegexInlineFlags(flags: RegexFlagSet) extends RegexAST {
+  override def children(): Seq[RegexAST] = Seq.empty
+  override def toRegexString: String = s"(?${flags.toRegexString})"
+}
+
 object RegexGroup {
   sealed trait Type
   case object Capturing extends Type
@@ -1808,6 +1977,13 @@ object RegexGroup {
   case object NegativeLookbehind extends Type
   case class Named(name: String) extends Type
   case object Independent extends Type
+  case class ScopedFlags(flags: RegexFlagSet) extends Type
+
+  // Groups transpiled into cuDF-supported patterns.
+  def isCudfGroupType(groupType: Type): Boolean = groupType match {
+    case Capturing | NonCapturing | ScopedFlags(_) => true
+    case _ => false
+  }
 }
 
 sealed case class RegexGroup(groupType: RegexGroup.Type, term: RegexAST) extends RegexAST {
@@ -1826,6 +2002,7 @@ sealed case class RegexGroup(groupType: RegexGroup.Type, term: RegexAST) extends
     case NegativeLookbehind => s"(?<!${term.toRegexString})"
     case Named(name) => s"(?<$name>${term.toRegexString})"
     case Independent => s"(?>${term.toRegexString})"
+    case ScopedFlags(flags) => s"(?${flags.toRegexString}:${term.toRegexString})"
   }
 }
 
@@ -2013,44 +2190,9 @@ sealed case class RegexCharacterClass(
   }
 }
 
-sealed case class RegexBackref(num: Int, isNew: Boolean = false) extends RegexAST {
-  def this(num: Int, isNew: Boolean, position: Int) = {
-    this(num, isNew)
-    this.position = Some(position)
-  }
-  override def children(): Seq[RegexAST] = Seq.empty
-  // Backrefs marked as internally generated are emitted in braced `${N}` form so
-  // `backrefConversion` can tell them apart from user-authored `$N` tokens and pass them
-  // through verbatim. User-authored backrefs keep the raw `$N` form so the
-  // greedy-with-backoff parser in `backrefConversion` honors the user's pattern group count.
-  override def toRegexString: String = if (isNew) s"$${$num}" else s"$$$num"
-}
-
-sealed case class RegexReplacement(parts: ListBuffer[RegexAST],
-    var numCaptureGroups: Int = 0) extends RegexAST {
-  def this(parts: ListBuffer[RegexAST], numCaptureGroups: Int, position: Int) = {
-    this(parts, numCaptureGroups)
-    this.position = Some(position)
-  }
+sealed case class RegexReplacement(parts: ListBuffer[RegexAST]) extends RegexAST {
   override def children(): Seq[RegexAST] = parts.toSeq
   override def toRegexString: String = parts.map(_.toRegexString).mkString
-
-  def appendBackref(num: Int): Unit = {
-    numCaptureGroups += 1
-    parts += RegexBackref(num, true)
-  }
-
-  def popBackref(): Unit = {
-    parts.last match {
-      case RegexBackref(_, true) => {
-        numCaptureGroups -= 1
-        parts.trimEnd(1)
-      }
-      case _ =>
-    }
-  }
-
-  def hasBackrefs: Boolean = numCaptureGroups > 0
 }
 
 class RegexUnsupportedException(message: String, index: Option[Int])
@@ -2075,12 +2217,19 @@ object RegexOptimizationType {
 
 object RegexRewrite {
 
+  // A scoped flags group is only transparent if it's a no-op.
+  private def isTransparentGroup(groupType: RegexGroup.Type): Boolean = groupType match {
+    case RegexGroup.Capturing | RegexGroup.NonCapturing => true
+    case RegexGroup.ScopedFlags(flagSet) => flagSet.flags.isEmpty
+    case _ => false
+  }
+
   @scala.annotation.tailrec
   private def removeBrackets(astLs: collection.Seq[RegexAST]): collection.Seq[RegexAST] = {
     astLs match {
-      case collection.Seq(RegexGroup(
-        RegexGroup.Capturing | RegexGroup.NonCapturing,
-        RegexSequence(terms))) => removeBrackets(terms)
+      case collection.Seq(RegexGroup(groupType, RegexSequence(terms)))
+          if isTransparentGroup(groupType) =>
+        removeBrackets(terms)
       case _ => astLs
     }
   }
@@ -2142,7 +2291,7 @@ object RegexRewrite {
 
   private def getMultipleContainsLiterals(ast: RegexAST): Seq[UTF8String] = {
     ast match {
-      case RegexGroup(RegexGroup.Capturing | RegexGroup.NonCapturing, term) =>
+      case RegexGroup(groupType, term) if isTransparentGroup(groupType) =>
         getMultipleContainsLiterals(term)
       case RegexChoice(RegexSequence(parts), ls) if isLiteralString(parts) => {
         getMultipleContainsLiterals(ls) match {
@@ -2160,8 +2309,7 @@ object RegexRewrite {
     ast match {
       case RegexRepetition(RegexChar('.'), SimpleQuantifier('*')) => true
       case RegexSequence(parts) if parts.forall(isWildcard) => true
-      case RegexGroup(RegexGroup.Capturing | RegexGroup.NonCapturing, term)
-          if isWildcard(term) => true
+      case RegexGroup(groupType, term) if isTransparentGroup(groupType) && isWildcard(term) => true
       case _ => false
     }
   }

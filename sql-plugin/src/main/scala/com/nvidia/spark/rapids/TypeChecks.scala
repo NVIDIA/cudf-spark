@@ -1758,6 +1758,46 @@ object SupportedOpsDocs {
     println("</tr>")
   }
 
+  private case class ExecSupportDoc(
+      execName: String,
+      description: String,
+      notes: String,
+      checks: ExecChecks)
+
+  private def outputExecSupport(
+      execName: String,
+      description: String,
+      ruleNotes: String,
+      execChecks: ExecChecks): Int = {
+    val allData = allSupportedTypes.toSeq.map { dataType =>
+      (dataType, execChecks.support(dataType))
+    }.toMap
+    val supportNotes = execChecks.supportNotes
+    val totalSpan = allData.values.head.size
+    val inputs = allData.values.head.keys
+
+    println("<tr>")
+    println(s"""<td rowspan="$totalSpan">$execName</td>""")
+    println(s"""<td rowspan="$totalSpan">$description</td>""")
+    println(s"""<td rowspan="$totalSpan">$ruleNotes</td>""")
+    var count = 0
+    inputs.foreach { input =>
+      val named = supportNotes.get(input)
+          .map(notes => input + "<br/>(" + notes.mkString(";<br/>") + ")")
+          .getOrElse(input)
+      println(s"<td>$named</td>")
+      allSupportedTypes.foreach { dataType =>
+        println(allData(dataType)(input).htmlTag)
+      }
+      println("</tr>")
+      count += 1
+      if (count < totalSpan) {
+        println("<tr>")
+      }
+    }
+    totalSpan
+  }
+
   private def exprChecksHeaderLine(): Unit = {
     println("<tr>")
     println("<th>Expression</th>")
@@ -1904,46 +1944,44 @@ object SupportedOpsDocs {
     execChecksHeaderLine()
     var totalCount = 0
     var nextOutputAt = headerEveryNLines
-    GpuOverrides.execs.values.toSeq.sortBy(_.tag.toString).foreach { rule =>
-      val checks = rule.getChecks
-      if (rule.isVisible && checks.forall(_.shown)) {
-        if (totalCount >= nextOutputAt) {
-          execChecksHeaderLine()
-          nextOutputAt = totalCount + headerEveryNLines
-        }
-        println("<tr>")
-        val execChecks = checks.get.asInstanceOf[ExecChecks]
-        val allData = allSupportedTypes.toSeq.map { t =>
-          (t, execChecks.support(t))
-        }.toMap
-
-        val notes = execChecks.supportNotes
-        // Now we should get the same keys for each type, so we are only going to look at the first
-        // type for now
-        val totalSpan = allData.values.head.size
-        val inputs = allData.values.head.keys
-
-        println(s"""<td rowspan="$totalSpan">${rule.tag.runtimeClass.getSimpleName}</td>""")
-        println(s"""<td rowspan="$totalSpan">${rule.description}</td>""")
-        println(s"""<td rowspan="$totalSpan">${rule.notes().getOrElse("None")}</td>""")
-        var count = 0
-        inputs.foreach { input =>
-          val named = notes.get(input)
-              .map(l => input + "<br/>(" + l.mkString(";<br/>") + ")")
-              .getOrElse(input)
-          println(s"<td>$named</td>")
-          allSupportedTypes.foreach { t =>
-            println(allData(t)(input).htmlTag)
-          }
-          println("</tr>")
-          count += 1
-          if (count < totalSpan) {
-            println("<tr>")
-          }
-        }
-
-        totalCount += totalSpan
+    val sourceSpecificExecs = V2WriteCommand.all.flatMap { command =>
+      V2WriteCommandRecognizers.all.filter(_.supports(command)).map { recognizer =>
+        ExecSupportDoc(
+          command.execName,
+          s"Source-specific GPU support for ${recognizer.name}",
+          s"Source: ${recognizer.name}",
+          recognizer.checksFor(command))
       }
+    }
+    val sourceSpecificByName = sourceSpecificExecs.groupBy(_.execName)
+    val registeredRules = GpuOverrides.execs.values.toSeq.sortBy(_.tag.toString)
+    val registeredExecs = registeredRules.flatMap { rule =>
+      val execName = rule.tag.runtimeClass.getSimpleName
+      sourceSpecificByName.get(execName).map { sourceExecs =>
+        sourceExecs.map { exec =>
+          val notes = rule.notes().map(note => s"${exec.notes}; $note").getOrElse(exec.notes)
+          exec.copy(notes = notes)
+        }
+      }.getOrElse {
+        val checks = rule.getChecks
+        if (rule.isVisible && checks.forall(_.shown)) {
+          Seq(ExecSupportDoc(
+            execName,
+            rule.description,
+            rule.notes().getOrElse("None"),
+            checks.get.asInstanceOf[ExecChecks]))
+        } else {
+          Seq.empty
+        }
+      }
+    }
+    registeredExecs.foreach { exec =>
+      if (totalCount >= nextOutputAt) {
+        execChecksHeaderLine()
+        nextOutputAt = totalCount + headerEveryNLines
+      }
+      totalCount += outputExecSupport(
+        exec.execName, exec.description, exec.notes, exec.checks)
     }
     println("</table>")
     println()
@@ -2302,20 +2340,24 @@ object SupportedOpsForTools {
       ("MapInPandasExec", "1.2"),
       ("WindowInPandasExec", "1.2")
     )
-    GpuOverrides.execs.values.toSeq.sortBy(_.tag.toString).foreach { rule =>
-      val checks = rule.getChecks
-      if (rule.isVisible && checks.forall(_.shown)) {
-        val cpuName = rule.tag.runtimeClass.getSimpleName
-        // We have estimated speed up of some of the operators by running various queries. Assign
-        // custom speed up for the operators which are evaluated. For other operators we are
-        // assigning speed up of 2.0
-        val allCols = if (operatorCustomSpeedUp.contains(cpuName)) {
-          Seq(cpuName, operatorCustomSpeedUp(cpuName))
-        } else {
-          Seq(cpuName, "3.0")
-        }
-        println(s"${allCols.mkString(",")}")
+    val sourceSpecificExecs = V2WriteCommand.all.filter { command =>
+      V2WriteCommandRecognizers.all.exists(_.supports(command))
+    }.map(_.execName).toSet
+    val registeredExecs = GpuOverrides.execs.values.toSeq.sortBy(_.tag.toString).flatMap { rule =>
+      val cpuName = rule.tag.runtimeClass.getSimpleName
+      if ((rule.isVisible && rule.getChecks.forall(_.shown)) ||
+          sourceSpecificExecs.contains(cpuName)) {
+        Some(cpuName)
+      } else {
+        None
       }
+    }
+    registeredExecs.distinct.foreach { cpuName =>
+      // We have estimated speed up of some of the operators by running various queries. Assign
+      // custom speed up for the operators which are evaluated. For other operators we are
+      // assigning speed up of 3.0
+      val score = operatorCustomSpeedUp.getOrElse(cpuName, "3.0")
+      println(s"$cpuName,$score")
     }
 
     GpuOverrides.expressions.values.toSeq.sortBy(_.tag.runtimeClass.getSimpleName).foreach { rule =>
@@ -2326,6 +2368,29 @@ object SupportedOpsForTools {
         // adjusted later.
         val allCols = Seq(cpuName, "4")
         println(s"${allCols.mkString(",")}")
+      }
+    }
+  }
+
+  private def outputV2WriteRecognizerSupport(): Unit = {
+    val types = allSupportedTypes.toSeq
+    V2WriteCommand.all.foreach { command =>
+      val registeredRule = GpuOverrides.execs.values.find { rule =>
+        rule.tag.runtimeClass.getSimpleName == command.execName
+      }
+      registeredRule.foreach { rule =>
+        V2WriteCommandRecognizers.all.filter(_.supports(command)).foreach { recognizer =>
+          val typeSupport = types.map { dataType =>
+            recognizer.checksFor(command).support(dataType)("Input/Output").text
+          }
+          val isConfigDisabled = rule.disabledMsg.isDefined
+          val supported =
+            if (typeSupport.forall(_.equals("NS")) || isConfigDisabled) "NS" else "S"
+          val notes = Seq(Some(s"Source: ${recognizer.name}"), rule.notes()).flatten.mkString("; ")
+          val allCols =
+            Seq(command.execName, supported, notes, "Input/Output") ++ typeSupport
+          println(s"${allCols.map(replaceDelimiter(_, ",")).mkString(",")}")
+        }
       }
     }
   }
@@ -2364,6 +2429,7 @@ object SupportedOpsForTools {
         }
       }
     }
+    outputV2WriteRecognizerSupport()
   }
 
   private def outputSupportedExpressions(): Unit = {
