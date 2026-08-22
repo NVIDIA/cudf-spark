@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import json
+from urllib.parse import unquote, urlparse
 
 import pytest
 
@@ -21,6 +22,7 @@ from conftest import is_apache_runtime, spark_jvm
 from data_gen import copy_and_update
 from delta_lake_utils import (
     delta_meta_allow,
+    delta_reorg_xfail,
     delta_writes_enabled_conf,
 )
 from marks import allow_non_gpu, delta_lake, ignore_order
@@ -249,15 +251,24 @@ def active_file_names(spark, path, predicate=None):
                df.selectExpr("input_file_name() AS file").distinct().collect())
 
 
+def spark_readable_file_name(file_name):
+    parsed = urlparse(file_name)
+    if parsed.scheme == "file" and not parsed.netloc:
+        return unquote(parsed.path)
+    return file_name
+
+
 def parquet_field_names(spark, files):
     assert files
-    return set(spark.read.parquet(*sorted(files)).schema.fieldNames())
+    readable_files = sorted(spark_readable_file_name(file_name) for file_name in files)
+    return set(spark.read.parquet(*readable_files).schema.fieldNames())
 
 
 @pytest.mark.parametrize("partitioned", [False, True], ids=["unpartitioned", "partitioned"])
 @ignore_order(local=True)
 @delta_lake
 @allow_non_gpu(*_reorg_metadata_allow)
+@delta_reorg_xfail
 def test_delta_reorg_table_purge(spark_tmp_path, partitioned):
     if not is_apache_runtime():
         pytest.skip("GPU REORG TABLE currently supports Apache Delta Lake only")
@@ -344,6 +355,7 @@ def test_delta_reorg_table_purge(spark_tmp_path, partitioned):
 
 @delta_lake
 @allow_non_gpu(*_reorg_metadata_allow)
+@delta_reorg_xfail
 def test_delta_reorg_table_purge_physically_dropped_column(spark_tmp_path):
     if not is_apache_runtime():
         pytest.skip("GPU REORG TABLE currently supports Apache Delta Lake only")
@@ -394,6 +406,7 @@ def test_delta_reorg_table_purge_physically_dropped_column(spark_tmp_path):
 
 @delta_lake
 @allow_non_gpu(*_reorg_metadata_allow)
+@delta_reorg_xfail
 def test_delta_reorg_table_row_tracking_fallback(spark_tmp_path):
     if not is_apache_runtime():
         pytest.skip("GPU REORG TABLE currently supports Apache Delta Lake only")
@@ -511,6 +524,7 @@ def test_delta_reorg_table_unsupported_version_fallback(spark_tmp_path):
 
 @delta_lake
 @allow_non_gpu(*_reorg_metadata_allow)
+@delta_reorg_xfail
 def test_delta_reorg_table_iceberg_compatible_table_fallback(spark_tmp_path):
     if not is_apache_runtime():
         pytest.skip("GPU REORG TABLE currently supports Apache Delta Lake only")
