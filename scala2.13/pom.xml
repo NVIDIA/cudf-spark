@@ -778,7 +778,12 @@
                             <artifactId>scala-maven-plugin</artifactId>
                             <configuration>
                                 <release combine.self="override"/>
-                                <target>${java.major.version}</target>
+                                <!-- Keep JDK 17 APIs visible while emitting Java 8 bytecode. -->
+                                <target combine.self="override"/>
+                                <args combine.children="append">
+                                    <arg>-target:jvm-1.8</arg>
+                                </args>
+                                <addJavacArgs combine.self="override">${scala.javac.args}|-target|8</addJavacArgs>
                             </configuration>
                         </plugin>
                     </plugins>
@@ -817,7 +822,12 @@
                             <artifactId>scala-maven-plugin</artifactId>
                             <configuration>
                                 <release combine.self="override"/>
-                                <target>${java.major.version}</target>
+                                <!-- Keep JDK 17 APIs visible while emitting Java 8 bytecode. -->
+                                <target combine.self="override"/>
+                                <args combine.children="append">
+                                    <arg>-target:jvm-1.8</arg>
+                                </args>
+                                <addJavacArgs combine.self="override">${scala.javac.args}|-target|8</addJavacArgs>
                             </configuration>
                         </plugin>
                     </plugins>
@@ -856,7 +866,12 @@
                             <artifactId>scala-maven-plugin</artifactId>
                             <configuration>
                                 <release combine.self="override"/>
-                                <target>${java.major.version}</target>
+                                <!-- Keep JDK 17 APIs visible while emitting Java 8 bytecode. -->
+                                <target combine.self="override"/>
+                                <args combine.children="append">
+                                    <arg>-target:jvm-1.8</arg>
+                                </args>
+                                <addJavacArgs combine.self="override">${scala.javac.args}|-target|8</addJavacArgs>
                             </configuration>
                         </plugin>
                     </plugins>
@@ -894,7 +909,12 @@
                             <artifactId>scala-maven-plugin</artifactId>
                             <configuration>
                                 <release combine.self="override"/>
-                                <target>${java.major.version}</target>
+                                <!-- Keep JDK 17 APIs visible while emitting Java 8 bytecode. -->
+                                <target combine.self="override"/>
+                                <args combine.children="append">
+                                    <arg>-target:jvm-1.8</arg>
+                                </args>
+                                <addJavacArgs combine.self="override">${scala.javac.args}|-target|8</addJavacArgs>
                             </configuration>
                         </plugin>
                     </plugins>
@@ -1134,9 +1154,7 @@
              shim profile once Spark 5.0.0 is officially released. -->
         <spark500.version>5.0.0-SNAPSHOT</spark500.version>
         <mockito.version>3.12.4</mockito.version>
-        <!-- 4.7.1 required: later versions auto-derive -release from -target,
-             preventing JDK 17 boot classpath access with JDK 8 classfile output -->
-        <scala.plugin.version>4.7.1</scala.plugin.version>
+        <scala.plugin.version>4.9.10</scala.plugin.version>
         <maven.install.plugin.version>3.1.1</maven.install.plugin.version>
         <maven.jar.plugin.version>3.3.0</maven.jar.plugin.version>
         <scalatest-maven-plugin.version>2.0.2</scalatest-maven-plugin.version>
