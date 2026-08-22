@@ -8,6 +8,7 @@ com/nvidia/spark/rapids/Optimizer.class
 com/nvidia/spark/rapids/optimizer/SQLOptimizerPlugin*
 com/nvidia/spark/rapids/ShimLoaderTemp*
 com/nvidia/spark/rapids/SparkShims*
+com/nvidia/shaded/spark/com/google/flatbuffers/*.class
 com/nvidia/spark/rapids/format/*.class
 com/nvidia/spark/rapids/fileio/iceberg/IcebergInputFile.class
 com/nvidia/spark/rapids/fileio/iceberg/IcebergInputStream.class
