@@ -102,10 +102,8 @@ You can also disable only one rule, by specifying its rule id, as specified in:
         <parameters>
             <parameter name="regex">^println$</parameter>
         </parameters>
-        <customMessage><![CDATA[Are you sure you want to println? If yes, wrap the code block with
-          // scalastyle:off println
-          println(...)
-          // scalastyle:on println]]></customMessage>
+        <customMessage><![CDATA[Direct println is not allowed. Use project logging, ScalaTest
+          info/withClue, or ConsoleOutput for an intentional console interface.]]></customMessage>
     </check>
 
     <check customId="NoScalaDoc" level="error" class="org.scalastyle.file.RegexChecker"

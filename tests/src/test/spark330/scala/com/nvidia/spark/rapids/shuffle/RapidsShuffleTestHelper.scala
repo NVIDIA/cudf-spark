@@ -23,8 +23,6 @@
 {"spark": "333"}
 {"spark": "334"}
 spark-rapids-shim-json-lines ***/
-// scalastyle:off println
-// Existing console output in this file is intentional. New code should prefer logging.
 
 package com.nvidia.spark.rapids.shuffle
 
@@ -108,12 +106,12 @@ abstract class RapidsShuffleTestHelper
         (0 until len by 4).foreach { b =>
           areEqual = areEqual && hmb.getInt(b) == orig.getInt(b)
           if (!areEqual) {
-            println(s"not equal at offset ${b} ${hmb.getInt(b)} -- ${orig.getInt(b)}")
+            info(s"not equal at offset ${b} ${hmb.getInt(b)} -- ${orig.getInt(b)}")
           }
         }
       }
     } else {
-      println(s"NOT EQUAL LENGTH ${orig} vs ${buff}")
+      info(s"NOT EQUAL LENGTH ${orig} vs ${buff}")
     }
     areEqual
   }
@@ -302,4 +300,3 @@ class MockClientConnection(mockTransaction: Transaction) extends ClientConnectio
 
   override def registerReceiveHandler(messageType: MessageType.Value): Unit = {}
 }
-// scalastyle:on println

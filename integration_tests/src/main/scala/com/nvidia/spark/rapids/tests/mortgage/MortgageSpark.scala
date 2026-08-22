@@ -14,10 +14,9 @@
  * limitations under the License.
  */
 
-// scalastyle:off println
-// Existing console output in this file is intentional. New code should prefer logging.
-
 package com.nvidia.spark.rapids.tests.mortgage
+
+import com.nvidia.spark.rapids.ConsoleOutput
 
 import org.apache.spark.sql.{Column, DataFrame, SparkSession}
 import org.apache.spark.sql.functions._
@@ -426,7 +425,7 @@ object AggregatesWithJoin {
 object Main {
   def main(args: Array[String]): Unit = {
     if (args.length < 4 || args.length > 5) {
-        System.err.println("Usage:<sparkversion> <perfpath> <acqpath> <outputpath> [csv|orc|parquet]")
+        ConsoleOutput.writeErrorLine("Usage:<sparkversion> <perfpath> <acqpath> <outputpath> [csv|orc|parquet]")
         System.exit(1)
     }
     val perfPath = args(1)
@@ -446,7 +445,7 @@ object Main {
     val format = args.lift(4).getOrElse("parquet")
     val contains = dataFrameFormatMap.contains(format)
     if (!contains) {
-        System.err.println(s"Invalid input format $format, expected one of csv, orc, parquet")
+        ConsoleOutput.writeErrorLine(s"Invalid input format $format, expected one of csv, orc, parquet")
         System.exit(1)
     }
 
@@ -454,4 +453,3 @@ object Main {
     0.until(10).foreach( _ => runFunc().write.mode("overwrite").parquet(output))
   }
 }
-// scalastyle:on println

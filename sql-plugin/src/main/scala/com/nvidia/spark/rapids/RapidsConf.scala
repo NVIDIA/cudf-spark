@@ -13,8 +13,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-// scalastyle:off println
-// Existing console output in this file is intentional. New code should prefer logging.
 
 package com.nvidia.spark.rapids
 
@@ -158,13 +156,13 @@ class ConfEntryWithDefault[T](key: String, converter: String => T, doc: String,
       val startupOnlyStr = if (isStartupOnly) "Startup" else "Runtime"
       if (asTable) {
         import ConfHelper.makeConfAnchor
-        println(s"${makeConfAnchor(key)}|$doc|$defaultValue|$startupOnlyStr")
+        ConsoleOutput.writeLine(s"${makeConfAnchor(key)}|$doc|$defaultValue|$startupOnlyStr")
       } else {
-        println(s"$key:")
-        println(s"\t$doc")
-        println(s"\tdefault $defaultValue")
-        println(s"\ttype $startupOnlyStr")
-        println()
+        ConsoleOutput.writeLine(s"$key:")
+        ConsoleOutput.writeLine(s"\t$doc")
+        ConsoleOutput.writeLine(s"\tdefault $defaultValue")
+        ConsoleOutput.writeLine(s"\ttype $startupOnlyStr")
+        ConsoleOutput.writeLine()
       }
     }
   }
@@ -193,13 +191,13 @@ class OptionalConfEntry[T](key: String, val rawConverter: String => T, doc: Stri
       val startupOnlyStr = if (isStartupOnly) "Startup" else "Runtime"
       if (asTable) {
         import ConfHelper.makeConfAnchor
-        println(s"${makeConfAnchor(key)}|$doc|None|$startupOnlyStr")
+        ConsoleOutput.writeLine(s"${makeConfAnchor(key)}|$doc|None|$startupOnlyStr")
       } else {
-        println(s"$key:")
-        println(s"\t$doc")
-        println("\tNone")
-        println(s"\ttype $startupOnlyStr")
-        println()
+        ConsoleOutput.writeLine(s"$key:")
+        ConsoleOutput.writeLine(s"\t$doc")
+        ConsoleOutput.writeLine("\tNone")
+        ConsoleOutput.writeLine(s"\ttype $startupOnlyStr")
+        ConsoleOutput.writeLine()
       }
     }
   }
@@ -3156,18 +3154,18 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
   }
 
   private def printSectionHeader(category: String): Unit =
-    println(s"\n### $category")
+    ConsoleOutput.writeLine(s"\n### $category")
 
   private def printToggleHeader(category: String): Unit = {
     printSectionHeader(category)
-    println("Name | Description | Default Value | Notes")
-    println("-----|-------------|---------------|------------------")
+    ConsoleOutput.writeLine("Name | Description | Default Value | Notes")
+    ConsoleOutput.writeLine("-----|-------------|---------------|------------------")
   }
 
   private def printToggleHeaderWithSqlFunction(category: String): Unit = {
     printSectionHeader(category)
-    println("Name | SQL Function(s) | Description | Default Value | Notes")
-    println("-----|-----------------|-------------|---------------|------")
+    ConsoleOutput.writeLine("Name | SQL Function(s) | Description | Default Value | Notes")
+    ConsoleOutput.writeLine("-----|-----------------|-------------|---------------|------")
   }
 
   def help(asTable: Boolean = false): Unit = {
@@ -3177,14 +3175,14 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
 
   def helpCommon(asTable: Boolean = false): Unit = {
     if (asTable) {
-      println("---")
-      println("layout: page")
-      println("title: Configuration")
-      println("nav_order: 4")
-      println("---")
+      ConsoleOutput.writeLine("---")
+      ConsoleOutput.writeLine("layout: page")
+      ConsoleOutput.writeLine("title: Configuration")
+      ConsoleOutput.writeLine("nav_order: 4")
+      ConsoleOutput.writeLine("---")
       MarkdownUtils.printApacheSparkVersion("RapidsConf.helpCommon")
       // scalastyle:off line.size.limit
-      println("""# NVIDIA cuDF plugin for Apache Spark Configuration
+      ConsoleOutput.writeLine("""# NVIDIA cuDF plugin for Apache Spark Configuration
         |The following is the list of options that `rapids-plugin-4-spark` supports.
         |
         |On startup use: `--conf [conf key]=[conf value]`. For example:
@@ -3207,11 +3205,11 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
         | valid on both startup and runtime.
         |""".stripMargin)
       // scalastyle:on line.size.limit
-      println("\n## General Configuration\n")
-      println("Name | Description | Default Value | Applicable at")
-      println("-----|-------------|--------------|--------------")
+      ConsoleOutput.writeLine("\n## General Configuration\n")
+      ConsoleOutput.writeLine("Name | Description | Default Value | Applicable at")
+      ConsoleOutput.writeLine("-----|-------------|--------------|--------------")
     } else {
-      println("Commonly Used cuDF plugin Configs:")
+      ConsoleOutput.writeLine("Commonly Used cuDF plugin Configs:")
     }
     val allConfs = registeredConfs.clone()
     allConfs.append(RapidsPrivateUtil.getPrivateConfigs(): _*)
@@ -3219,7 +3217,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     outputConfs.sortBy(_.key).foreach(_.help(asTable))
     if (asTable) {
       // scalastyle:off line.size.limit
-      println("""
+      ConsoleOutput.writeLine("""
         |For more advanced configs, please refer to the [NVIDIA cuDF plugin for Apache Spark Advanced Configuration](./additional-functionality/advanced_configs.md) page.
         |""".stripMargin)
       // scalastyle:on line.size.limit
@@ -3228,16 +3226,16 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
 
   def helpAdvanced(asTable: Boolean = false): Unit = {
     if (asTable) {
-      println("---")
-      println("layout: page")
+      ConsoleOutput.writeLine("---")
+      ConsoleOutput.writeLine("layout: page")
       // print advanced configuration
-      println("title: Advanced Configuration")
-      println("parent: Additional Functionality")
-      println("nav_order: 10")
-      println("---")
+      ConsoleOutput.writeLine("title: Advanced Configuration")
+      ConsoleOutput.writeLine("parent: Additional Functionality")
+      ConsoleOutput.writeLine("nav_order: 10")
+      ConsoleOutput.writeLine("---")
       MarkdownUtils.printApacheSparkVersion("RapidsConf.helpAdvanced")
       // scalastyle:off line.size.limit
-      println("""# NVIDIA cuDF plugin for Apache Spark Advanced Configuration
+      ConsoleOutput.writeLine("""# NVIDIA cuDF plugin for Apache Spark Advanced Configuration
         |Most users will not need to modify the configuration options listed below.
         |They are documented here for completeness and advanced usage.
         |
@@ -3247,21 +3245,21 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
         |[NVIDIA cuDF plugin for Apache Spark Configuration](../configs.md) page.
         |""".stripMargin)
       // scalastyle:on line.size.limit
-      println("\n## Advanced Configuration\n")
+      ConsoleOutput.writeLine("\n## Advanced Configuration\n")
 
-      println("Name | Description | Default Value | Applicable at")
-      println("-----|-------------|--------------|--------------")
+      ConsoleOutput.writeLine("Name | Description | Default Value | Applicable at")
+      ConsoleOutput.writeLine("-----|-------------|--------------|--------------")
     } else {
-      println("Advanced cuDF Plugin Configs:")
+      ConsoleOutput.writeLine("Advanced cuDF Plugin Configs:")
     }
     val allConfs = registeredConfs.clone()
     allConfs.append(RapidsPrivateUtil.getPrivateConfigs(): _*)
     val outputConfs = allConfs.filterNot(_.isCommonlyUsed)
     outputConfs.sortBy(_.key).foreach(_.help(asTable))
     if (asTable) {
-      println("")
+      ConsoleOutput.writeLine("")
       // scalastyle:off line.size.limit
-      println("""## Supported GPU Operators and Fine Tuning
+      ConsoleOutput.writeLine("""## Supported GPU Operators and Fine Tuning
         |The cuDF plugin can be configured to enable or disable specific
         |GPU accelerated expressions.  Enabled expressions are candidates for GPU execution. If the
         |expression is configured as disabled, the accelerator plugin will not attempt replacement,
@@ -4209,4 +4207,3 @@ case class OomInjectionConf(
   withSplit: Boolean,
   oomInjectionFilter: OomInjectionType
 )
-// scalastyle:on println

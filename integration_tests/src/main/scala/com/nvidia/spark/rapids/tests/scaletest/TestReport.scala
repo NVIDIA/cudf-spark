@@ -14,13 +14,11 @@
  * limitations under the License.
  */
 
-// scalastyle:off println
-// Existing console output in this file is intentional. New code should prefer logging.
-
 package com.nvidia.spark.rapids.tests.scaletest
 
 import java.io.{File, FileOutputStream}
 
+import com.nvidia.spark.rapids.ConsoleOutput
 import com.nvidia.spark.rapids.tests.scaletest.ScaleTest.Config
 import org.json4s._
 import org.json4s.jackson.Serialization.writePretty
@@ -50,7 +48,6 @@ class TestReport(config: Config, queryMetas: Seq[QueryMeta]) {
     val os = new FileOutputStream(config.reportPath)
     os.write(writePretty(queryMetas).getBytes)
     os.close()
-    println(s"JSON report file saved at: ${config.reportPath}")
+    ConsoleOutput.writeLine(s"JSON report file saved at: ${config.reportPath}")
   }
 }
-// scalastyle:on println

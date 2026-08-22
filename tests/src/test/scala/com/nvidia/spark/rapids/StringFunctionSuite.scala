@@ -14,9 +14,6 @@
  * limitations under the License.
  */
 
-// scalastyle:off println
-// Existing console output in this file is intentional. New code should prefer logging.
-
 package com.nvidia.spark.rapids
 
 import org.scalatest.Ignore
@@ -360,50 +357,54 @@ class StringOperatorsDiagnostics extends SparkQueryCompareTestSuite {
       gen: () => (Array[Row], Array[Row])): Unit = {
     val (fromCpu, fromGpu) = gen()
 
-    println(s"$title ----------------------------------------")
+    ConsoleOutput.writeLine(s"$title ----------------------------------------")
 
-    println("\u001b[1;36mSummary of diffs:\u001b[0m")
-    println("\u001b[1;36mCodepoint:\u001b[0m ")
+    ConsoleOutput.writeLine("\u001b[1;36mSummary of diffs:\u001b[0m")
+    ConsoleOutput.writeLine("\u001b[1;36mCodepoint:\u001b[0m ")
     for (i <- fromCpu.indices) {
       if (fromCpu(i) != fromGpu(i)) {
         val codepoint = TestCodepoints.validCodepointIndices(i)
-        print(f"$codepoint%5d, ")
+        ConsoleOutput.write(f"$codepoint%5d, ")
       }
     }
-    print("\n\n")
+    ConsoleOutput.write("\n\n")
 
-    println("\u001b[1;36mDetails:")
-    println("Codepoint       CPU               GPU")
-    println("single -> single mappings\u001b[0m");
+    ConsoleOutput.writeLine("\u001b[1;36mDetails:")
+    ConsoleOutput.writeLine("Codepoint       CPU               GPU")
+    ConsoleOutput.writeLine("single -> single mappings\u001b[0m");
     for (i <- fromCpu.indices) {
       if (fromCpu(i) != fromGpu(i) && fromCpu(i).getString(0).length == 1) {
         val codepoint = TestCodepoints.validCodepointIndices(i)
 
-        print(f"(${codepoint.toChar.toString} $codepoint%5d[$codepoint%04x] " +
+        ConsoleOutput.write(f"(${codepoint.toChar.toString} $codepoint%5d[$codepoint%04x] " +
           f"(${fromCpu(i).getString(0)}")
-        print(f"${fromCpu(i).getString(0)(0).toInt}%5d[${fromCpu(i).getString(0)(0).toInt}%04x]) ")
-        println(f"${fromGpu(i).getString(0)(0).toInt}%5d[${fromGpu(i).getString(0)(0).toInt}%04x])")
+        ConsoleOutput.write(
+          f"${fromCpu(i).getString(0)(0).toInt}%5d" +
+            f"[${fromCpu(i).getString(0)(0).toInt}%04x]) ")
+        ConsoleOutput.writeLine(
+          f"${fromGpu(i).getString(0)(0).toInt}%5d" +
+            f"[${fromGpu(i).getString(0)(0).toInt}%04x])")
       }
     }
-    println("\u001b[1;36msingle -> multi mappings\u001b[0m");
+    ConsoleOutput.writeLine("\u001b[1;36msingle -> multi mappings\u001b[0m");
     for (i <- fromCpu.indices) {
       if (fromCpu(i) != fromGpu(i) && fromCpu(i).getString(0).length > 1) {
         val cpu_str = fromCpu(i).getString(0)
         val gpu_str = fromGpu(i).getString(0)
 
         val codepoint = TestCodepoints.validCodepointIndices(i)
-        print(f"(${codepoint.toChar.toString} $codepoint[$codepoint%04x]) ($cpu_str ")
-        print(f"${cpu_str.map(c => "%d".format(c.toInt)).mkString(",")}")
-        print("[")
-        print(f"${cpu_str.map(c => "%04x".format(c.toInt)).mkString(",")}")
-        print(f"]) ($gpu_str ")
-        print(f"${gpu_str.map(c => "%d".format(c.toInt)).mkString(",")}")
-        print("[");
-        print(f"${gpu_str.map(c => "%04x".format(c.toInt)).mkString(",")}")
-        println("])");
+        ConsoleOutput.write(f"(${codepoint.toChar.toString} $codepoint[$codepoint%04x]) ($cpu_str ")
+        ConsoleOutput.write(f"${cpu_str.map(c => "%d".format(c.toInt)).mkString(",")}")
+        ConsoleOutput.write("[")
+        ConsoleOutput.write(f"${cpu_str.map(c => "%04x".format(c.toInt)).mkString(",")}")
+        ConsoleOutput.write(f"]) ($gpu_str ")
+        ConsoleOutput.write(f"${gpu_str.map(c => "%d".format(c.toInt)).mkString(",")}")
+        ConsoleOutput.write("[");
+        ConsoleOutput.write(f"${gpu_str.map(c => "%04x".format(c.toInt)).mkString(",")}")
+        ConsoleOutput.writeLine("])");
       }
     }
-    println("---------------------------------------------")
+    ConsoleOutput.writeLine("---------------------------------------------")
   }
   // generateUnicodeDiffs("UPPER", () => generateResults(upper))
   // generateUnicodeDiffs("LOWER", () => generateResults(lower))
@@ -443,39 +444,39 @@ class StringOperatorsDiagnostics extends SparkQueryCompareTestSuite {
     }
 
     // struct declaration
-    println("struct special_case_mapping_in {")
-    println("   uint16_t num_upper_chars;")
-    println("   uint16_t upper[3];")
-    println("   uint16_t num_lower_chars;")
-    println("   uint16_t lower[3];")
-    println("};")
+    ConsoleOutput.writeLine("struct special_case_mapping_in {")
+    ConsoleOutput.writeLine("   uint16_t num_upper_chars;")
+    ConsoleOutput.writeLine("   uint16_t upper[3];")
+    ConsoleOutput.writeLine("   uint16_t num_lower_chars;")
+    ConsoleOutput.writeLine("   uint16_t lower[3];")
+    ConsoleOutput.writeLine("};")
 
     // mappings
-    println("constexpr special_case_mapping_in codepoint_mapping_in[] = {")
+    ConsoleOutput.writeLine("constexpr special_case_mapping_in codepoint_mapping_in[] = {")
     for (i <- 0 until 65536) {
       val mc = mapping(i)
       if (mc.num_upper != 0 || mc.num_lower != 0) {
-        println(s"   { ${mc.num_upper} {${mc.upper(0)}, ${mc.upper(1)}, ${mc.upper(2)}}, " +
+        ConsoleOutput.writeLine(
+          s"   { ${mc.num_upper} {${mc.upper(0)}, ${mc.upper(1)}, ${mc.upper(2)}}, " +
           s"${mc.num_lower}, {${mc.lower(0)}, ${mc.lower(1)}, ${mc.lower(2)}} },")
       }
     }
-    println("};")
+    ConsoleOutput.writeLine("};")
 
     // codepoints
-    println("constexpr uint16_t codepoints_in[] = {\n")
+    ConsoleOutput.writeLine("constexpr uint16_t codepoints_in[] = {\n")
     var count = 0
     for (i <- 0 until 65536) {
       val mc = mapping(i)
       if (mc.num_upper != 0 || mc.num_lower != 0) {
-        print(s"   $i,")
+        ConsoleOutput.write(s"   $i,")
         count = count + 1
         if (count > 0 && count % 10 == 0) {
-          println("")
+          ConsoleOutput.writeLine("")
         }
       }
     }
-    println("\n};")
+    ConsoleOutput.writeLine("\n};")
   }
   // generateCharMappings()
 }
-// scalastyle:on println

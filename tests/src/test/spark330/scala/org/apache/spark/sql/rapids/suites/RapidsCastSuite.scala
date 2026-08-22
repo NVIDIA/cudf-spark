@@ -17,8 +17,6 @@
 /*** spark-rapids-shim-json-lines
 {"spark": "330"}
 spark-rapids-shim-json-lines ***/
-// scalastyle:off println
-// Existing console output in this file is intentional. New code should prefer logging.
 
 package org.apache.spark.sql.rapids.suites
 
@@ -65,12 +63,13 @@ class RapidsCastSuite extends CastSuite with RapidsTestsTrait {
 
   testRapids("SPARK-35711: cast timestamp without time zone to timestamp with local time zone") {
     outstandingZoneIds.foreach { zoneId =>
-      println(s"zoneId: $zoneId")
-      withDefaultTimeZone(zoneId) {
-        specialTs.foreach { s =>
-          val input = LocalDateTime.parse(s)
-          val expectedTs = Timestamp.valueOf(s.replace("T", " "))
-          checkEvaluation(cast(input, TimestampType), expectedTs)
+      withClue(s"zoneId: $zoneId") {
+        withDefaultTimeZone(zoneId) {
+          specialTs.foreach { s =>
+            val input = LocalDateTime.parse(s)
+            val expectedTs = Timestamp.valueOf(s.replace("T", " "))
+            checkEvaluation(cast(input, TimestampType), expectedTs)
+          }
         }
       }
     }
@@ -78,15 +77,15 @@ class RapidsCastSuite extends CastSuite with RapidsTestsTrait {
 
   testRapids("SPARK-35719: cast timestamp with local time zone to timestamp without timezone") {
     outstandingZoneIds.foreach { zoneId =>
-      println(s"zoneId: $zoneId")
-      withDefaultTimeZone(zoneId) {
-        specialTs.foreach { s =>
-          val input = Timestamp.valueOf(s.replace("T", " "))
-          val expectedTs = LocalDateTime.parse(s)
-          checkEvaluation(cast(input, TimestampNTZType), expectedTs)
+      withClue(s"zoneId: $zoneId") {
+        withDefaultTimeZone(zoneId) {
+          specialTs.foreach { s =>
+            val input = Timestamp.valueOf(s.replace("T", " "))
+            val expectedTs = LocalDateTime.parse(s)
+            checkEvaluation(cast(input, TimestampNTZType), expectedTs)
+          }
         }
       }
     }
   }
 }
-// scalastyle:on println

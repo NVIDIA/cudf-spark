@@ -14,9 +14,6 @@
  * limitations under the License.
  */
 
-// scalastyle:off println
-// Existing console output in this file is intentional. New code should prefer logging.
-
 package com.nvidia.spark.rapids.spill
 
 import java.util.concurrent.{CountDownLatch, TimeUnit}
@@ -39,7 +36,7 @@ class BounceBufferPoolSuite extends RmmSparkRetrySuiteBase with TimeLimits {
 
   object ThreadDumpSignaler extends Signaler {
     override def apply(testThread: Thread): Unit = {
-      System.err.println("\n\n\t\tTEST THREAD APPEARS TO BE STUCK")
+      info("\n\n\t\tTEST THREAD APPEARS TO BE STUCK")
       Thread.getAllStackTraces.forEach {
         case (thread, trace) =>
           val name = if (thread.getId == testThread.getId) {
@@ -47,7 +44,7 @@ class BounceBufferPoolSuite extends RmmSparkRetrySuiteBase with TimeLimits {
           } else {
             thread.getName
           }
-          System.err.println(name + "\n\t" + trace.mkString("\n\t"))
+          info(name + "\n\t" + trace.mkString("\n\t"))
       }
     }
   }
@@ -310,4 +307,3 @@ class BounceBufferPoolSuite extends RmmSparkRetrySuiteBase with TimeLimits {
     override def close(): Unit = {}
   }
 }
-// scalastyle:on println

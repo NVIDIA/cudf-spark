@@ -14,9 +14,6 @@
  * limitations under the License.
  */
 
-// scalastyle:off println
-// Existing console output in this file is intentional. New code should prefer logging.
-
 package com.nvidia.spark.rapids
 
 import java.util.concurrent.{ExecutionException, Future, LinkedBlockingQueue, TimeoutException, TimeUnit}
@@ -204,7 +201,7 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
         }
       } catch {
         case t: Throwable =>
-          System.err.println("THROWABLE CAUGHT IN " + name)
+          info("THROWABLE CAUGHT IN " + name)
           t.printStackTrace(System.err)
       }
     }
@@ -309,7 +306,7 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
 
   object MyThreadSignaler extends Signaler {
     override def apply(testThread: Thread): Unit = {
-      System.err.println("\n\n\t\tTEST THREAD APPEARS TO BE STUCK")
+      info("\n\n\t\tTEST THREAD APPEARS TO BE STUCK")
       Thread.getAllStackTraces.forEach {
         case (thread, trace) =>
           val name = if (thread.getId == testThread.getId) {
@@ -317,7 +314,7 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
           } else {
             thread.getName
           }
-          System.err.println(name + "\n\t" + trace.mkString("\n\t"))
+          info(name + "\n\t" + trace.mkString("\n\t"))
       }
     }
   }
@@ -367,7 +364,7 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
       case t: Throwable =>
         // if the exception does not have a message set, then scalatest fails in
         // ways that make it so you do not see the exception at all.
-        System.err.println(t)
+        info(t.toString)
         t.printStackTrace(System.err)
         throw t
     }
@@ -771,4 +768,3 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
     }
   }
 }
-// scalastyle:on println

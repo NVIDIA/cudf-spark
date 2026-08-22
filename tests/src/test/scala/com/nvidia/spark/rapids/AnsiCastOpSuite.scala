@@ -14,9 +14,6 @@
  * limitations under the License.
  */
 
-// scalastyle:off println
-// Existing console output in this file is intentional. New code should prefer logging.
-
 package com.nvidia.spark.rapids
 
 import java.sql.Timestamp
@@ -576,8 +573,7 @@ class AnsiCastOpSuite extends GpuExpressionTestSuite {
               .repartition(2)
               .withColumn("c1", col("c0").cast(DataTypes.TimestampType))
 
-          val result = df.collect()
-          result.foreach(println)
+          df.collect()
 
         }, sparkConf)
       }
@@ -942,4 +938,3 @@ class AnsiCastOpSuite extends GpuExpressionTestSuite {
   }
 
 }
-// scalastyle:on println

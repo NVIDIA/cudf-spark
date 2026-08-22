@@ -14,9 +14,6 @@
  * limitations under the License.
  */
 
-// scalastyle:off println
-// Existing console output in this file is intentional. New code should prefer logging.
-
 package com.nvidia.spark.rapids
 
 import java.io.{File, FileOutputStream}
@@ -1750,160 +1747,160 @@ object SupportedOpsDocs {
   private lazy val allSupportedTypes: TypeEnum.ValueSet = TypeEnum.values
 
   private def execChecksHeaderLine(): Unit = {
-    println("<tr>")
-    println("<th>Executor</th>")
-    println("<th>Description</th>")
-    println("<th>Notes</th>")
-    println("<th>Param(s)</th>")
+    ConsoleOutput.writeLine("<tr>")
+    ConsoleOutput.writeLine("<th>Executor</th>")
+    ConsoleOutput.writeLine("<th>Description</th>")
+    ConsoleOutput.writeLine("<th>Notes</th>")
+    ConsoleOutput.writeLine("<th>Param(s)</th>")
     allSupportedTypes.foreach { t =>
-      println(s"<th>$t</th>")
+      ConsoleOutput.writeLine(s"<th>$t</th>")
     }
-    println("</tr>")
+    ConsoleOutput.writeLine("</tr>")
   }
 
   private def exprChecksHeaderLine(): Unit = {
-    println("<tr>")
-    println("<th>Expression</th>")
-    println("<th>SQL Functions(s)</th>")
-    println("<th>Description</th>")
-    println("<th>Notes</th>")
-    println("<th>Context</th>")
-    println("<th>Param/Output</th>")
+    ConsoleOutput.writeLine("<tr>")
+    ConsoleOutput.writeLine("<th>Expression</th>")
+    ConsoleOutput.writeLine("<th>SQL Functions(s)</th>")
+    ConsoleOutput.writeLine("<th>Description</th>")
+    ConsoleOutput.writeLine("<th>Notes</th>")
+    ConsoleOutput.writeLine("<th>Context</th>")
+    ConsoleOutput.writeLine("<th>Param/Output</th>")
     allSupportedTypes.foreach { t =>
-      println(s"<th>$t</th>")
+      ConsoleOutput.writeLine(s"<th>$t</th>")
     }
-    println("</tr>")
+    ConsoleOutput.writeLine("</tr>")
   }
 
   private def partChecksHeaderLine(): Unit = {
-    println("<tr>")
-    println("<th>Partition</th>")
-    println("<th>Description</th>")
-    println("<th>Notes</th>")
-    println("<th>Param</th>")
+    ConsoleOutput.writeLine("<tr>")
+    ConsoleOutput.writeLine("<th>Partition</th>")
+    ConsoleOutput.writeLine("<th>Description</th>")
+    ConsoleOutput.writeLine("<th>Notes</th>")
+    ConsoleOutput.writeLine("<th>Param</th>")
     allSupportedTypes.foreach { t =>
-      println(s"<th>$t</th>")
+      ConsoleOutput.writeLine(s"<th>$t</th>")
     }
-    println("</tr>")
+    ConsoleOutput.writeLine("</tr>")
   }
 
   private def ioChecksHeaderLine(): Unit = {
-    println("<tr>")
-    println("<th>Format</th>")
-    println("<th>Direction</th>")
+    ConsoleOutput.writeLine("<tr>")
+    ConsoleOutput.writeLine("<th>Format</th>")
+    ConsoleOutput.writeLine("<th>Direction</th>")
     allSupportedTypes.foreach { t =>
-      println(s"<th>$t</th>")
+      ConsoleOutput.writeLine(s"<th>$t</th>")
     }
-    println("</tr>")
+    ConsoleOutput.writeLine("</tr>")
   }
 
   def help(): Unit = {
     val headerEveryNLines = 15
     // scalastyle:off line.size.limit
-    println("---")
-    println("layout: page")
-    println("title: Supported Operators")
-    println("nav_order: 6")
-    println("---")
+    ConsoleOutput.writeLine("---")
+    ConsoleOutput.writeLine("layout: page")
+    ConsoleOutput.writeLine("title: Supported Operators")
+    ConsoleOutput.writeLine("nav_order: 6")
+    ConsoleOutput.writeLine("---")
     MarkdownUtils.printApacheSparkVersion("SupportedOpsDocs.help")
-    println("Apache Spark supports processing various types of data. Not all expressions")
-    println("support all data types. The cuDF plugin has further")
-    println("restrictions on what types are supported for processing. This tries")
-    println("to document what operations are supported and what data types each operation supports.")
-    println()
-    println("# General limitations")
-    println("## `Decimal`")
-    println("The `Decimal` type in Spark supports a precision up to 38 digits (128-bits).")
-    println("The cuDF plugin supports 128-bit starting from version 21.12 and decimals are")
-    println("enabled by default.")
-    println("Please check [Decimal Support](compatibility.md#decimal-support) for more details.")
-    println()
-    println("`Decimal` precision and scale follow the same rule as CPU mode in Apache Spark:")
-    println()
-    println("```")
-    println(" * In particular, if we have expressions e1 and e2 with precision/scale p1/s1 and p2/s2")
-    println(" * respectively, then the following operations have the following precision / scale:")
-    println(" *")
-    println(" *   Operation    Result Precision                        Result Scale")
-    println(" *   ------------------------------------------------------------------------")
-    println(" *   e1 + e2      max(s1, s2) + max(p1-s1, p2-s2) + 1     max(s1, s2)")
-    println(" *   e1 - e2      max(s1, s2) + max(p1-s1, p2-s2) + 1     max(s1, s2)")
-    println(" *   e1 * e2      p1 + p2 + 1                             s1 + s2")
-    println(" *   e1 / e2      p1 - s1 + s2 + max(6, s1 + p2 + 1)      max(6, s1 + p2 + 1)")
-    println(" *   e1 % e2      min(p1-s1, p2-s2) + max(s1, s2)         max(s1, s2)")
-    println(" *   e1 union e2  max(s1, s2) + max(p1-s1, p2-s2)         max(s1, s2)")
-    println("```")
-    println()
-    println("However, Spark inserts `PromotePrecision` to CAST both sides to the same type.")
-    println("GPU mode may fall back to CPU even if the result Decimal precision is within 18 digits.")
-    println("For example, `Decimal(8,2)` x `Decimal(6,3)` resulting in `Decimal (15,5)` runs on CPU,")
-    println("because due to `PromotePrecision`, GPU mode assumes the result is `Decimal(19,6)`.")
-    println("There are even extreme cases where Spark can temporarily return a Decimal value")
-    println("larger than what can be stored in 128-bits and then uses the `CheckOverflow`")
-    println("operator to round it to a desired precision and scale. This means that even when")
-    println("the accelerator supports 128-bit decimal, we might not be able to support all")
-    println("operations that Spark can support.")
-    println()
-    println("## `Timestamp`")
-    println("Timestamps in Spark will all be converted to the local time zone before processing")
-    println("and are often converted to UTC before being stored, like in Parquet or ORC.")
-    println("The cuDF plugin only supports UTC as the time zone for timestamps.")
-    println()
-    println("## `CalendarInterval`")
-    println("In Spark `CalendarInterval`s store three values, months, days, and microseconds.")
-    println("Support for this type is still very limited in the accelerator. In some cases")
-    println("only a a subset of the type is supported, like window ranges only support days currently.")
-    println()
-    println("## Configuration")
-    println("There are lots of different configuration values that can impact if an operation")
-    println("is supported or not. Some of these are a part of the cuDF plugin and cover")
-    println("the level of compatibility with Apache Spark.  Those are covered [here](configs.md).")
-    println("Others are a part of Apache Spark itself and those are a bit harder to document.")
-    println("The work of updating this to cover that support is still ongoing.")
-    println()
-    println("In general though if you ever have any question about why an operation is not running")
-    println("on the GPU you may set `spark.rapids.sql.explain` to ALL and it will try to give all of")
-    println("the reasons why this particular operator or expression is on the CPU or GPU.")
-    println()
-    println("# Key")
-    println("## Types")
-    println()
-    println("|Type Name|Type Description|")
-    println("|---------|----------------|")
-    println("|BOOLEAN|Holds true or false values.|")
-    println("|BYTE|Signed 8-bit integer value.|")
-    println("|SHORT|Signed 16-bit integer value.|")
-    println("|INT|Signed 32-bit integer value.|")
-    println("|LONG|Signed 64-bit integer value.|")
-    println("|FLOAT|32-bit floating point value.|")
-    println("|DOUBLE|64-bit floating point value.|")
-    println("|DATE|A date with no time component. Stored as 32-bit integer with days since Jan 1, 1970.|")
-    println("|TIMESTAMP|A date and time. Stored as 64-bit integer with microseconds since Jan 1, 1970 in the current time zone.|")
-    println("|STRING|A text string. Stored as UTF-8 encoded bytes.|")
-    println("|DECIMAL|A fixed point decimal value with configurable precision and scale.|")
-    println("|NULL|Only stores null values and is typically only used when no other type can be determined from the SQL.|")
-    println("|BINARY|An array of non-nullable bytes.|")
-    println("|CALENDAR|Represents a period of time.  Stored as months, days and microseconds.|")
-    println("|ARRAY|A sequence of elements.|")
-    println("|MAP|A set of key value pairs, the keys cannot be null.|")
-    println("|STRUCT|A series of named fields.|")
-    println("|UDT|User defined types and java Objects. These are not standard SQL types.|")
-    println()
-    println("## Support")
-    println()
-    println("|Value|Description|")
-    println("|---------|----------------|")
-    println("|S| (Supported) Both Apache Spark and the cuDF plugin support this type fully.|")
-    println("| | (Not Applicable) Neither Spark nor the cuDF plugin support this type in this situation.|")
-    println("|_PS_| (Partial Support) Apache Spark supports this type, but the cuDF plugin only partially supports it. An explanation for what is missing will be included with this.|")
-    println("|**NS**| (Not Supported) Apache Spark supports this type but the cuDF plugin does not.")
-    println()
-    println("# SparkPlan or Executor Nodes")
-    println("Apache Spark uses a Directed Acyclic Graph(DAG) of processing to build a query.")
-    println("The nodes in this graph are instances of `SparkPlan` and represent various high")
-    println("level operations like doing a filter or project. The operations that the cuDF ")
-    println("plugin supports are described below.")
-    println("<table>")
+    ConsoleOutput.writeLine("Apache Spark supports processing various types of data. Not all expressions")
+    ConsoleOutput.writeLine("support all data types. The cuDF plugin has further")
+    ConsoleOutput.writeLine("restrictions on what types are supported for processing. This tries")
+    ConsoleOutput.writeLine("to document what operations are supported and what data types each operation supports.")
+    ConsoleOutput.writeLine()
+    ConsoleOutput.writeLine("# General limitations")
+    ConsoleOutput.writeLine("## `Decimal`")
+    ConsoleOutput.writeLine("The `Decimal` type in Spark supports a precision up to 38 digits (128-bits).")
+    ConsoleOutput.writeLine("The cuDF plugin supports 128-bit starting from version 21.12 and decimals are")
+    ConsoleOutput.writeLine("enabled by default.")
+    ConsoleOutput.writeLine("Please check [Decimal Support](compatibility.md#decimal-support) for more details.")
+    ConsoleOutput.writeLine()
+    ConsoleOutput.writeLine("`Decimal` precision and scale follow the same rule as CPU mode in Apache Spark:")
+    ConsoleOutput.writeLine()
+    ConsoleOutput.writeLine("```")
+    ConsoleOutput.writeLine(" * In particular, if we have expressions e1 and e2 with precision/scale p1/s1 and p2/s2")
+    ConsoleOutput.writeLine(" * respectively, then the following operations have the following precision / scale:")
+    ConsoleOutput.writeLine(" *")
+    ConsoleOutput.writeLine(" *   Operation    Result Precision                        Result Scale")
+    ConsoleOutput.writeLine(" *   ------------------------------------------------------------------------")
+    ConsoleOutput.writeLine(" *   e1 + e2      max(s1, s2) + max(p1-s1, p2-s2) + 1     max(s1, s2)")
+    ConsoleOutput.writeLine(" *   e1 - e2      max(s1, s2) + max(p1-s1, p2-s2) + 1     max(s1, s2)")
+    ConsoleOutput.writeLine(" *   e1 * e2      p1 + p2 + 1                             s1 + s2")
+    ConsoleOutput.writeLine(" *   e1 / e2      p1 - s1 + s2 + max(6, s1 + p2 + 1)      max(6, s1 + p2 + 1)")
+    ConsoleOutput.writeLine(" *   e1 % e2      min(p1-s1, p2-s2) + max(s1, s2)         max(s1, s2)")
+    ConsoleOutput.writeLine(" *   e1 union e2  max(s1, s2) + max(p1-s1, p2-s2)         max(s1, s2)")
+    ConsoleOutput.writeLine("```")
+    ConsoleOutput.writeLine()
+    ConsoleOutput.writeLine("However, Spark inserts `PromotePrecision` to CAST both sides to the same type.")
+    ConsoleOutput.writeLine("GPU mode may fall back to CPU even if the result Decimal precision is within 18 digits.")
+    ConsoleOutput.writeLine("For example, `Decimal(8,2)` x `Decimal(6,3)` resulting in `Decimal (15,5)` runs on CPU,")
+    ConsoleOutput.writeLine("because due to `PromotePrecision`, GPU mode assumes the result is `Decimal(19,6)`.")
+    ConsoleOutput.writeLine("There are even extreme cases where Spark can temporarily return a Decimal value")
+    ConsoleOutput.writeLine("larger than what can be stored in 128-bits and then uses the `CheckOverflow`")
+    ConsoleOutput.writeLine("operator to round it to a desired precision and scale. This means that even when")
+    ConsoleOutput.writeLine("the accelerator supports 128-bit decimal, we might not be able to support all")
+    ConsoleOutput.writeLine("operations that Spark can support.")
+    ConsoleOutput.writeLine()
+    ConsoleOutput.writeLine("## `Timestamp`")
+    ConsoleOutput.writeLine("Timestamps in Spark will all be converted to the local time zone before processing")
+    ConsoleOutput.writeLine("and are often converted to UTC before being stored, like in Parquet or ORC.")
+    ConsoleOutput.writeLine("The cuDF plugin only supports UTC as the time zone for timestamps.")
+    ConsoleOutput.writeLine()
+    ConsoleOutput.writeLine("## `CalendarInterval`")
+    ConsoleOutput.writeLine("In Spark `CalendarInterval`s store three values, months, days, and microseconds.")
+    ConsoleOutput.writeLine("Support for this type is still very limited in the accelerator. In some cases")
+    ConsoleOutput.writeLine("only a a subset of the type is supported, like window ranges only support days currently.")
+    ConsoleOutput.writeLine()
+    ConsoleOutput.writeLine("## Configuration")
+    ConsoleOutput.writeLine("There are lots of different configuration values that can impact if an operation")
+    ConsoleOutput.writeLine("is supported or not. Some of these are a part of the cuDF plugin and cover")
+    ConsoleOutput.writeLine("the level of compatibility with Apache Spark.  Those are covered [here](configs.md).")
+    ConsoleOutput.writeLine("Others are a part of Apache Spark itself and those are a bit harder to document.")
+    ConsoleOutput.writeLine("The work of updating this to cover that support is still ongoing.")
+    ConsoleOutput.writeLine()
+    ConsoleOutput.writeLine("In general though if you ever have any question about why an operation is not running")
+    ConsoleOutput.writeLine("on the GPU you may set `spark.rapids.sql.explain` to ALL and it will try to give all of")
+    ConsoleOutput.writeLine("the reasons why this particular operator or expression is on the CPU or GPU.")
+    ConsoleOutput.writeLine()
+    ConsoleOutput.writeLine("# Key")
+    ConsoleOutput.writeLine("## Types")
+    ConsoleOutput.writeLine()
+    ConsoleOutput.writeLine("|Type Name|Type Description|")
+    ConsoleOutput.writeLine("|---------|----------------|")
+    ConsoleOutput.writeLine("|BOOLEAN|Holds true or false values.|")
+    ConsoleOutput.writeLine("|BYTE|Signed 8-bit integer value.|")
+    ConsoleOutput.writeLine("|SHORT|Signed 16-bit integer value.|")
+    ConsoleOutput.writeLine("|INT|Signed 32-bit integer value.|")
+    ConsoleOutput.writeLine("|LONG|Signed 64-bit integer value.|")
+    ConsoleOutput.writeLine("|FLOAT|32-bit floating point value.|")
+    ConsoleOutput.writeLine("|DOUBLE|64-bit floating point value.|")
+    ConsoleOutput.writeLine("|DATE|A date with no time component. Stored as 32-bit integer with days since Jan 1, 1970.|")
+    ConsoleOutput.writeLine("|TIMESTAMP|A date and time. Stored as 64-bit integer with microseconds since Jan 1, 1970 in the current time zone.|")
+    ConsoleOutput.writeLine("|STRING|A text string. Stored as UTF-8 encoded bytes.|")
+    ConsoleOutput.writeLine("|DECIMAL|A fixed point decimal value with configurable precision and scale.|")
+    ConsoleOutput.writeLine("|NULL|Only stores null values and is typically only used when no other type can be determined from the SQL.|")
+    ConsoleOutput.writeLine("|BINARY|An array of non-nullable bytes.|")
+    ConsoleOutput.writeLine("|CALENDAR|Represents a period of time.  Stored as months, days and microseconds.|")
+    ConsoleOutput.writeLine("|ARRAY|A sequence of elements.|")
+    ConsoleOutput.writeLine("|MAP|A set of key value pairs, the keys cannot be null.|")
+    ConsoleOutput.writeLine("|STRUCT|A series of named fields.|")
+    ConsoleOutput.writeLine("|UDT|User defined types and java Objects. These are not standard SQL types.|")
+    ConsoleOutput.writeLine()
+    ConsoleOutput.writeLine("## Support")
+    ConsoleOutput.writeLine()
+    ConsoleOutput.writeLine("|Value|Description|")
+    ConsoleOutput.writeLine("|---------|----------------|")
+    ConsoleOutput.writeLine("|S| (Supported) Both Apache Spark and the cuDF plugin support this type fully.|")
+    ConsoleOutput.writeLine("| | (Not Applicable) Neither Spark nor the cuDF plugin support this type in this situation.|")
+    ConsoleOutput.writeLine("|_PS_| (Partial Support) Apache Spark supports this type, but the cuDF plugin only partially supports it. An explanation for what is missing will be included with this.|")
+    ConsoleOutput.writeLine("|**NS**| (Not Supported) Apache Spark supports this type but the cuDF plugin does not.")
+    ConsoleOutput.writeLine()
+    ConsoleOutput.writeLine("# SparkPlan or Executor Nodes")
+    ConsoleOutput.writeLine("Apache Spark uses a Directed Acyclic Graph(DAG) of processing to build a query.")
+    ConsoleOutput.writeLine("The nodes in this graph are instances of `SparkPlan` and represent various high")
+    ConsoleOutput.writeLine("level operations like doing a filter or project. The operations that the cuDF ")
+    ConsoleOutput.writeLine("plugin supports are described below.")
+    ConsoleOutput.writeLine("<table>")
     execChecksHeaderLine()
     var totalCount = 0
     var nextOutputAt = headerEveryNLines
@@ -1914,7 +1911,7 @@ object SupportedOpsDocs {
           execChecksHeaderLine()
           nextOutputAt = totalCount + headerEveryNLines
         }
-        println("<tr>")
+        ConsoleOutput.writeLine("<tr>")
         val execChecks = checks.get.asInstanceOf[ExecChecks]
         val allData = allSupportedTypes.toSeq.map { t =>
           (t, execChecks.support(t))
@@ -1926,65 +1923,65 @@ object SupportedOpsDocs {
         val totalSpan = allData.values.head.size
         val inputs = allData.values.head.keys
 
-        println(s"""<td rowspan="$totalSpan">${rule.tag.runtimeClass.getSimpleName}</td>""")
-        println(s"""<td rowspan="$totalSpan">${rule.description}</td>""")
-        println(s"""<td rowspan="$totalSpan">${rule.notes().getOrElse("None")}</td>""")
+        ConsoleOutput.writeLine(s"""<td rowspan="$totalSpan">${rule.tag.runtimeClass.getSimpleName}</td>""")
+        ConsoleOutput.writeLine(s"""<td rowspan="$totalSpan">${rule.description}</td>""")
+        ConsoleOutput.writeLine(s"""<td rowspan="$totalSpan">${rule.notes().getOrElse("None")}</td>""")
         var count = 0
         inputs.foreach { input =>
           val named = notes.get(input)
               .map(l => input + "<br/>(" + l.mkString(";<br/>") + ")")
               .getOrElse(input)
-          println(s"<td>$named</td>")
+          ConsoleOutput.writeLine(s"<td>$named</td>")
           allSupportedTypes.foreach { t =>
-            println(allData(t)(input).htmlTag)
+            ConsoleOutput.writeLine(allData(t)(input).htmlTag)
           }
-          println("</tr>")
+          ConsoleOutput.writeLine("</tr>")
           count += 1
           if (count < totalSpan) {
-            println("<tr>")
+            ConsoleOutput.writeLine("<tr>")
           }
         }
 
         totalCount += totalSpan
       }
     }
-    println("</table>")
-    println()
-    println("# Expression and SQL Functions")
-    println("Inside each node in the DAG there can be one or more trees of expressions")
-    println("that describe various types of processing that happens in that part of the plan.")
-    println("These can be things like adding two numbers together or checking for null.")
-    println("These expressions can have multiple input parameters and one output value.")
-    println("These expressions also can happen in different contexts. Because of how the")
-    println("accelerator works different contexts have different levels of support.")
-    println()
-    println("The most common expression context is `project`. In this context values from a single")
-    println("input row go through the expression and the result will also be use to produce")
-    println("something in the same row. Be aware that even in the case of aggregation and window")
-    println("operations most of the processing is still done in the project context either before")
-    println("or after the other processing happens.")
-    println()
-    println("Aggregation operations like count or sum can take place in either the `aggregation`,")
-    println("`reduction`, or `window` context. `aggregation` is when the operation was done while")
-    println("grouping the data by one or more keys. `reduction` is when there is no group by and")
-    println("there is a single result for an entire column. `window` is for window operations.")
-    println()
-    println("The final expression context is `AST` or Abstract Syntax Tree.")
-    println("Before explaining AST we first need to explain in detail how project context operations")
-    println("work. Generally for a project context operation the plan Spark developed is read")
-    println("on the CPU and an appropriate set of GPU kernels are selected to do those")
-    println("operations. For example `a >= b + 1`. Would result in calling a GPU kernel to add")
-    println("`1` to `b`, followed by another kernel that is called to compare `a` to that result.")
-    println("The interpretation is happening on the CPU, and the GPU is used to do the processing.")
-    println("For AST the interpretation for some reason cannot happen on the CPU and instead must")
-    println("be done in the GPU kernel itself. An example of this is conditional joins. If you")
-    println("want to join on `A.a >= B.b + 1` where `A` and `B` are separate tables or data")
-    println("frames, the `+` and `>=` operations cannot run as separate independent kernels")
-    println("because it is done on a combination of rows in both `A` and `B`. Instead part of the")
-    println("plan that Spark developed is turned into an abstract syntax tree and sent to the GPU")
-    println("where it can be interpreted. The number and types of operations supported in this")
-    println("are limited.")
-    println("<table>")
+    ConsoleOutput.writeLine("</table>")
+    ConsoleOutput.writeLine()
+    ConsoleOutput.writeLine("# Expression and SQL Functions")
+    ConsoleOutput.writeLine("Inside each node in the DAG there can be one or more trees of expressions")
+    ConsoleOutput.writeLine("that describe various types of processing that happens in that part of the plan.")
+    ConsoleOutput.writeLine("These can be things like adding two numbers together or checking for null.")
+    ConsoleOutput.writeLine("These expressions can have multiple input parameters and one output value.")
+    ConsoleOutput.writeLine("These expressions also can happen in different contexts. Because of how the")
+    ConsoleOutput.writeLine("accelerator works different contexts have different levels of support.")
+    ConsoleOutput.writeLine()
+    ConsoleOutput.writeLine("The most common expression context is `project`. In this context values from a single")
+    ConsoleOutput.writeLine("input row go through the expression and the result will also be use to produce")
+    ConsoleOutput.writeLine("something in the same row. Be aware that even in the case of aggregation and window")
+    ConsoleOutput.writeLine("operations most of the processing is still done in the project context either before")
+    ConsoleOutput.writeLine("or after the other processing happens.")
+    ConsoleOutput.writeLine()
+    ConsoleOutput.writeLine("Aggregation operations like count or sum can take place in either the `aggregation`,")
+    ConsoleOutput.writeLine("`reduction`, or `window` context. `aggregation` is when the operation was done while")
+    ConsoleOutput.writeLine("grouping the data by one or more keys. `reduction` is when there is no group by and")
+    ConsoleOutput.writeLine("there is a single result for an entire column. `window` is for window operations.")
+    ConsoleOutput.writeLine()
+    ConsoleOutput.writeLine("The final expression context is `AST` or Abstract Syntax Tree.")
+    ConsoleOutput.writeLine("Before explaining AST we first need to explain in detail how project context operations")
+    ConsoleOutput.writeLine("work. Generally for a project context operation the plan Spark developed is read")
+    ConsoleOutput.writeLine("on the CPU and an appropriate set of GPU kernels are selected to do those")
+    ConsoleOutput.writeLine("operations. For example `a >= b + 1`. Would result in calling a GPU kernel to add")
+    ConsoleOutput.writeLine("`1` to `b`, followed by another kernel that is called to compare `a` to that result.")
+    ConsoleOutput.writeLine("The interpretation is happening on the CPU, and the GPU is used to do the processing.")
+    ConsoleOutput.writeLine("For AST the interpretation for some reason cannot happen on the CPU and instead must")
+    ConsoleOutput.writeLine("be done in the GPU kernel itself. An example of this is conditional joins. If you")
+    ConsoleOutput.writeLine("want to join on `A.a >= B.b + 1` where `A` and `B` are separate tables or data")
+    ConsoleOutput.writeLine("frames, the `+` and `>=` operations cannot run as separate independent kernels")
+    ConsoleOutput.writeLine("because it is done on a combination of rows in both `A` and `B`. Instead part of the")
+    ConsoleOutput.writeLine("plan that Spark developed is turned into an abstract syntax tree and sent to the GPU")
+    ConsoleOutput.writeLine("where it can be interpreted. The number and types of operations supported in this")
+    ConsoleOutput.writeLine("are limited.")
+    ConsoleOutput.writeLine("<table>")
     exprChecksHeaderLine()
     totalCount = 0
     nextOutputAt = headerEveryNLines
@@ -2008,90 +2005,90 @@ object SupportedOpsDocs {
           case (_, m: Map[String, SupportLevel]) => m.size
         }.sum
         val representative = allData.values.head
-        println("<tr>")
-        println("<td rowSpan=\"" + totalSpan + "\">" +
+        ConsoleOutput.writeLine("<tr>")
+        ConsoleOutput.writeLine("<td rowSpan=\"" + totalSpan + "\">" +
             s"${rule.tag.runtimeClass.getSimpleName}</td>")
-        println("<td rowSpan=\"" + totalSpan + "\">" + s"${sqlFunctions.getOrElse(" ")}</td>")
-        println("<td rowSpan=\"" + totalSpan + "\">" + s"${rule.description}</td>")
-        println("<td rowSpan=\"" + totalSpan + "\">" + s"${rule.notes().getOrElse("None")}</td>")
+        ConsoleOutput.writeLine("<td rowSpan=\"" + totalSpan + "\">" + s"${sqlFunctions.getOrElse(" ")}</td>")
+        ConsoleOutput.writeLine("<td rowSpan=\"" + totalSpan + "\">" + s"${rule.description}</td>")
+        ConsoleOutput.writeLine("<td rowSpan=\"" + totalSpan + "\">" + s"${rule.notes().getOrElse("None")}</td>")
         var count = 0
         representative.foreach {
           case (context, data) =>
             val contextSpan = data.size
-            println("<td rowSpan=\"" + contextSpan + "\">" + s"$context</td>")
+            ConsoleOutput.writeLine("<td rowSpan=\"" + contextSpan + "\">" + s"$context</td>")
             data.keys.foreach { param =>
-              println(s"<td>$param</td>")
+              ConsoleOutput.writeLine(s"<td>$param</td>")
               allSupportedTypes.foreach { t =>
-                println(allData(t)(context)(param).htmlTag)
+                ConsoleOutput.writeLine(allData(t)(context)(param).htmlTag)
               }
-              println("</tr>")
+              ConsoleOutput.writeLine("</tr>")
               count += 1
               if (count < totalSpan) {
-                println("<tr>")
+                ConsoleOutput.writeLine("<tr>")
               }
             }
         }
         totalCount += totalSpan
       }
     }
-    println("</table>")
-    println()
-    println("## Casting")
-    println("The above table does not show what is and is not supported for cast.")
-    println("This table shows the matrix of supported casts.")
-    println("Nested types like MAP, Struct, and Array can only be cast if the child types")
-    println("can be cast.")
-    println()
-    println("Some of the casts to/from string on the GPU are not 100% the same and are disabled")
-    println("by default. Please see the configs for more details on these specific cases.")
-    println()
-    println("Please note that even though casting from one type to another is supported")
-    println("by Spark it does not mean they all produce usable results.  For example casting")
-    println("from a date to a boolean always produces a null. This is for Hive compatibility")
-    println("and the accelerator produces the same result.")
-    println()
+    ConsoleOutput.writeLine("</table>")
+    ConsoleOutput.writeLine()
+    ConsoleOutput.writeLine("## Casting")
+    ConsoleOutput.writeLine("The above table does not show what is and is not supported for cast.")
+    ConsoleOutput.writeLine("This table shows the matrix of supported casts.")
+    ConsoleOutput.writeLine("Nested types like MAP, Struct, and Array can only be cast if the child types")
+    ConsoleOutput.writeLine("can be cast.")
+    ConsoleOutput.writeLine()
+    ConsoleOutput.writeLine("Some of the casts to/from string on the GPU are not 100% the same and are disabled")
+    ConsoleOutput.writeLine("by default. Please see the configs for more details on these specific cases.")
+    ConsoleOutput.writeLine()
+    ConsoleOutput.writeLine("Please note that even though casting from one type to another is supported")
+    ConsoleOutput.writeLine("by Spark it does not mean they all produce usable results.  For example casting")
+    ConsoleOutput.writeLine("from a date to a boolean always produces a null. This is for Hive compatibility")
+    ConsoleOutput.writeLine("and the accelerator produces the same result.")
+    ConsoleOutput.writeLine()
     GpuOverrides.expressions.values.toSeq.sortBy(_.tag.toString).foreach { rule =>
       rule.getChecks match {
         case Some(cc: CastChecks) =>
-          println(s"### `${rule.tag.runtimeClass.getSimpleName}`")
-          println()
-          println("<table>")
+          ConsoleOutput.writeLine(s"### `${rule.tag.runtimeClass.getSimpleName}`")
+          ConsoleOutput.writeLine()
+          ConsoleOutput.writeLine("<table>")
           val numTypes = allSupportedTypes.size
-          println("<tr><th rowSpan=\"2\" colSpan=\"2\"></th><th colSpan=\"" + numTypes + "\">TO</th></tr>")
-          println("<tr>")
+          ConsoleOutput.writeLine("<tr><th rowSpan=\"2\" colSpan=\"2\"></th><th colSpan=\"" + numTypes + "\">TO</th></tr>")
+          ConsoleOutput.writeLine("<tr>")
           allSupportedTypes.foreach { t =>
-            println(s"<th>$t</th>")
+            ConsoleOutput.writeLine(s"<th>$t</th>")
           }
-          println("</tr>")
+          ConsoleOutput.writeLine("</tr>")
 
-          println("<tr><th rowSpan=\"" + numTypes + "\">FROM</th>")
+          ConsoleOutput.writeLine("<tr><th rowSpan=\"" + numTypes + "\">FROM</th>")
           var count = 0
           allSupportedTypes.foreach { from =>
-            println(s"<th>$from</th>")
+            ConsoleOutput.writeLine(s"<th>$from</th>")
             allSupportedTypes.foreach { to =>
-              println(cc.support(from, to).htmlTag)
+              ConsoleOutput.writeLine(cc.support(from, to).htmlTag)
             }
-            println("</tr>")
+            ConsoleOutput.writeLine("</tr>")
             count += 1
             if (count < numTypes) {
-              println("<tr>")
+              ConsoleOutput.writeLine("<tr>")
             }
           }
-          println("</table>")
-          println()
+          ConsoleOutput.writeLine("</table>")
+          ConsoleOutput.writeLine()
         case _ => // Nothing
       }
     }
-    println()
-    println("# Partitioning")
-    println("When transferring data between different tasks the data is partitioned in")
-    println("specific ways depending on requirements in the plan. Be aware that the types")
-    println("included below are only for rows that impact where the data is partitioned.")
-    println("So for example if we are doing a join on the column `a` the data would be")
-    println("hash partitioned on `a`, but all of the other columns in the same data frame")
-    println("as `a` don't show up in the table. They are controlled by the rules for")
-    println("`ShuffleExchangeExec` which uses the `Partitioning`.")
-    println("<table>")
+    ConsoleOutput.writeLine()
+    ConsoleOutput.writeLine("# Partitioning")
+    ConsoleOutput.writeLine("When transferring data between different tasks the data is partitioned in")
+    ConsoleOutput.writeLine("specific ways depending on requirements in the plan. Be aware that the types")
+    ConsoleOutput.writeLine("included below are only for rows that impact where the data is partitioned.")
+    ConsoleOutput.writeLine("So for example if we are doing a join on the column `a` the data would be")
+    ConsoleOutput.writeLine("hash partitioned on `a`, but all of the other columns in the same data frame")
+    ConsoleOutput.writeLine("as `a` don't show up in the table. They are controlled by the rules for")
+    ConsoleOutput.writeLine("`ShuffleExchangeExec` which uses the `Partitioning`.")
+    ConsoleOutput.writeLine("<table>")
     partChecksHeaderLine()
     totalCount = 0
     nextOutputAt = headerEveryNLines
@@ -2111,47 +2108,47 @@ object SupportedOpsDocs {
         val totalSpan = allData.values.head.size
         if (totalSpan > 0) {
           val representative = allData.values.head
-          println("<tr>")
-          println("<td rowSpan=\"" + totalSpan + "\">" +
+          ConsoleOutput.writeLine("<tr>")
+          ConsoleOutput.writeLine("<td rowSpan=\"" + totalSpan + "\">" +
               s"${rule.tag.runtimeClass.getSimpleName}</td>")
-          println("<td rowSpan=\"" + totalSpan + "\">" + s"${rule.description}</td>")
-          println("<td rowSpan=\"" + totalSpan + "\">" + s"${rule.notes().getOrElse("None")}</td>")
+          ConsoleOutput.writeLine("<td rowSpan=\"" + totalSpan + "\">" + s"${rule.description}</td>")
+          ConsoleOutput.writeLine("<td rowSpan=\"" + totalSpan + "\">" + s"${rule.notes().getOrElse("None")}</td>")
           var count = 0
           representative.keys.foreach { param =>
-            println(s"<td>$param</td>")
+            ConsoleOutput.writeLine(s"<td>$param</td>")
             allSupportedTypes.foreach { t =>
-              println(allData(t)(param).htmlTag)
+              ConsoleOutput.writeLine(allData(t)(param).htmlTag)
             }
-            println("</tr>")
+            ConsoleOutput.writeLine("</tr>")
             count += 1
             if (count < totalSpan) {
-              println("<tr>")
+              ConsoleOutput.writeLine("<tr>")
             }
           }
           totalCount += totalSpan
         } else {
           // No arguments...
-          println("<tr>")
-          println(s"<td>${rule.tag.runtimeClass.getSimpleName}</td>")
-          println(s"<td>${rule.description}</td>")
-          println(s"<td>${rule.notes().getOrElse("None")}</td>")
-          println(NotApplicable.htmlTag) // param
+          ConsoleOutput.writeLine("<tr>")
+          ConsoleOutput.writeLine(s"<td>${rule.tag.runtimeClass.getSimpleName}</td>")
+          ConsoleOutput.writeLine(s"<td>${rule.description}</td>")
+          ConsoleOutput.writeLine(s"<td>${rule.notes().getOrElse("None")}</td>")
+          ConsoleOutput.writeLine(NotApplicable.htmlTag) // param
           allSupportedTypes.foreach { _ =>
-            println(NotApplicable.htmlTag)
+            ConsoleOutput.writeLine(NotApplicable.htmlTag)
           }
-          println("</tr>")
+          ConsoleOutput.writeLine("</tr>")
           totalCount += 1
         }
       }
     }
-    println("</table>")
-    println()
-    println("## Input/Output")
-    println("For Input and Output it is not cleanly exposed what types are supported and which are not.")
-    println("This table tries to clarify that. Be aware that some types may be disabled in some")
-    println("cases for either reads or writes because of processing limitations, like rebasing")
-    println("dates or timestamps, or for a lack of type coercion support.")
-    println("<table>")
+    ConsoleOutput.writeLine("</table>")
+    ConsoleOutput.writeLine()
+    ConsoleOutput.writeLine("## Input/Output")
+    ConsoleOutput.writeLine("For Input and Output it is not cleanly exposed what types are supported and which are not.")
+    ConsoleOutput.writeLine("This table tries to clarify that. Be aware that some types may be disabled in some")
+    ConsoleOutput.writeLine("cases for either reads or writes because of processing limitations, like rebasing")
+    ConsoleOutput.writeLine("dates or timestamps, or for a lack of type coercion support.")
+    ConsoleOutput.writeLine("<table>")
     ioChecksHeaderLine()
     totalCount = 0
     nextOutputAt = headerEveryNLines
@@ -2163,26 +2160,26 @@ object SupportedOpsDocs {
         }
         val read = ioMap(ReadFileOp)
         val write = ioMap(WriteFileOp)
-        println("<tr>")
-        println("<th rowSpan=\"2\">" + s"$format</th>")
-        println("<th>Read</th>")
+        ConsoleOutput.writeLine("<tr>")
+        ConsoleOutput.writeLine("<th rowSpan=\"2\">" + s"$format</th>")
+        ConsoleOutput.writeLine("<th>Read</th>")
         allSupportedTypes.foreach { t =>
-          println(read.support(t).htmlTag)
+          ConsoleOutput.writeLine(read.support(t).htmlTag)
         }
-        println("</tr>")
-        println("<tr>")
-        println("<th>Write</th>")
+        ConsoleOutput.writeLine("</tr>")
+        ConsoleOutput.writeLine("<tr>")
+        ConsoleOutput.writeLine("<th>Write</th>")
         allSupportedTypes.foreach { t =>
-          println(write.support(t).htmlTag)
+          ConsoleOutput.writeLine(write.support(t).htmlTag)
         }
-        println("</tr>")
+        ConsoleOutput.writeLine("</tr>")
         totalCount += 2
     }
-    println("</table>")
-    println()
-    println("### Apache Iceberg Support")
-    println("Support for Apache Iceberg has additional limitations. See the")
-    println("[Apache Iceberg Support](https://docs.nvidia.com/spark-rapids/user-guide/latest/additional-functionality/iceberg-support.html) document.")
+    ConsoleOutput.writeLine("</table>")
+    ConsoleOutput.writeLine()
+    ConsoleOutput.writeLine("### Apache Iceberg Support")
+    ConsoleOutput.writeLine("Support for Apache Iceberg has additional limitations. See the")
+    ConsoleOutput.writeLine("[Apache Iceberg Support](https://docs.nvidia.com/spark-rapids/user-guide/latest/additional-functionality/iceberg-support.html) document.")
     // scalastyle:on line.size.limit
   }
 
@@ -2223,7 +2220,7 @@ object SupportedOpsForTools {
     val conf = new RapidsConf(Map.empty[String, String])
     val types = allSupportedTypes.toSeq
     val header = Seq("Format", "Direction") ++ types
-    println(header.mkString(","))
+    ConsoleOutput.writeLine(header.mkString(","))
     GpuOverrides.fileFormats.toSeq.sortBy(_._1.toString).foreach {
       case (format, ioMap) =>
         val formatLowerCase = format.toString.toLowerCase
@@ -2255,7 +2252,7 @@ object SupportedOpsForTools {
         if (!formatEnabled) {
           // Configured off by default.
           // Write CO for all types in the read section.
-          println(s"$format,read,${types.map(_ => "CO").mkString(",")}")
+          ConsoleOutput.writeLine(s"$format,read,${types.map(_ => "CO").mkString(",")}")
         } else {
           // Step-1: fill in the read values.
           val readObj = ioMap(ReadFileOp)
@@ -2269,7 +2266,7 @@ object SupportedOpsForTools {
             }
           }
           // print read formats and types
-          println(s"${(Seq(format, "read") ++ finalReadOps).mkString(",")}")
+          ConsoleOutput.writeLine(s"${(Seq(format, "read") ++ finalReadOps).mkString(",")}")
 
           // Step-2: fill in the write values if any.
           val writeOpObj = ioMap(WriteFileOp)
@@ -2283,7 +2280,7 @@ object SupportedOpsForTools {
                 "CO"
               }
             }
-            println(s"${(Seq(format, "write") ++ finalWriteOps).mkString(",")}")
+            ConsoleOutput.writeLine(s"${(Seq(format, "write") ++ finalWriteOps).mkString(",")}")
           }
         }
     }
@@ -2291,7 +2288,7 @@ object SupportedOpsForTools {
 
   private def operatorMappingWithScore(): Unit = {
     val header = Seq("CPUOperator", "Score")
-    println(header.mkString(","))
+    ConsoleOutput.writeLine(header.mkString(","))
     val operatorCustomSpeedUp =  Map(
       ("BroadcastHashJoinExec", "5.1"),
       ("ShuffleExchangeExec", "4.2"),
@@ -2317,7 +2314,7 @@ object SupportedOpsForTools {
         } else {
           Seq(cpuName, "3.0")
         }
-        println(s"${allCols.mkString(",")}")
+        ConsoleOutput.writeLine(s"${allCols.mkString(",")}")
       }
     }
 
@@ -2328,7 +2325,7 @@ object SupportedOpsForTools {
         // We are assigning speed up of 3 to all the Exprs supported by the plugin. This can be
         // adjusted later.
         val allCols = Seq(cpuName, "4")
-        println(s"${allCols.mkString(",")}")
+        ConsoleOutput.writeLine(s"${allCols.mkString(",")}")
       }
     }
   }
@@ -2338,7 +2335,7 @@ object SupportedOpsForTools {
     // it likely means something isn't completely compatible.
     val types = allSupportedTypes.toSeq
     val header = Seq("Exec", "Supported", "Notes", "Params") ++ types
-    println(header.mkString(","))
+    ConsoleOutput.writeLine(header.mkString(","))
     GpuOverrides.execs.values.toSeq.sortBy(_.tag.toString).foreach { rule =>
       val checks = rule.getChecks
       val isConfigDisabled = rule.disabledMsg.isDefined
@@ -2363,7 +2360,7 @@ object SupportedOpsForTools {
           val isSupportedExec = Seq(
             if (supportLevelOps.forall(_.equals("NS")) || isConfigDisabled) "NS" else "S")
           val allCols = (firstCol ++ isSupportedExec ++ thirdCol ++ Seq(named) ++ supportLevelOps)
-          println(s"${allCols.map(replaceDelimiter(_, ",")).mkString(",")}")
+          ConsoleOutput.writeLine(s"${allCols.map(replaceDelimiter(_, ",")).mkString(",")}")
         }
       }
     }
@@ -2374,7 +2371,7 @@ object SupportedOpsForTools {
     // it likely means something isn't completely compatible.
     val types = allSupportedTypes.toSeq
     val header = Seq("Expression", "Supported", "SQL Func", "Notes", "Context", "Params") ++ types
-    println(header.mkString(","))
+    ConsoleOutput.writeLine(header.mkString(","))
     GpuOverrides.expressions.values.toSeq.sortBy(_.tag.toString).foreach { rule =>
       val checks = rule.getChecks
       val isConfigDisabled = rule.disabledMsg.isDefined
@@ -2400,7 +2397,7 @@ object SupportedOpsForTools {
                 if (supportLevelOps.forall(_.equals("NS")) || isConfigDisabled) "NS" else "S")
               val allCols = (firstCol ++ isSupportedExpr ++ staticCols ++ Seq(context.toString)
                   ++ Seq(param) ++ supportLevelOps)
-              println(s"${allCols.map(replaceDelimiter(_, ",")).mkString(",")}")
+              ConsoleOutput.writeLine(s"${allCols.map(replaceDelimiter(_, ",")).mkString(",")}")
             }
         }
       }
@@ -2432,4 +2429,3 @@ object SupportedOpsForTools {
     }
   }
 }
-// scalastyle:on println

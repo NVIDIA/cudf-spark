@@ -14,15 +14,12 @@
  * limitations under the License.
  */
 
-// scalastyle:off println
-// Existing console output in this file is intentional. New code should prefer logging.
-
 package com.nvidia.spark.rapids.timezone
 
 import java.io.File
 import java.util.TimeZone
 
-import com.nvidia.spark.rapids.SparkQueryCompareTestSuite
+import com.nvidia.spark.rapids.{ConsoleOutput, SparkQueryCompareTestSuite}
 import org.scalatest.BeforeAndAfterAll
 
 import org.apache.spark.SparkConf
@@ -94,7 +91,7 @@ class OrcTimezonePerfSuite extends SparkQueryCompareTestSuite with BeforeAndAfte
       val dir = new File(path)
       val orcFiles = dir.listFiles().filter(_.getName.endsWith(".orc"))
       val totalMB = orcFiles.map(_.length()).sum / 1024 / 1024
-      println(s"ORC data: ${orcFiles.length} files, $totalMB MB, $numRows rows")
+      ConsoleOutput.writeLine(s"ORC data: ${orcFiles.length} files, $totalMB MB, $numRows rows")
     }
   }
 
@@ -129,8 +126,8 @@ class OrcTimezonePerfSuite extends SparkQueryCompareTestSuite with BeforeAndAfte
     val conf = orcConf()
     val totalRounds = warmupRounds + measuredRounds
 
-    println(s"\n=== $testName (writer=$writerTZ, reader=$jvmTZ) ===")
-    println("round,type,elapsedMs")
+    ConsoleOutput.writeLine(s"\n=== $testName (writer=$writerTZ, reader=$jvmTZ) ===")
+    ConsoleOutput.writeLine("round,type,elapsedMs")
 
     val cpuTimes = (1 to totalRounds).map { i =>
       val start = System.nanoTime()
@@ -139,7 +136,7 @@ class OrcTimezonePerfSuite extends SparkQueryCompareTestSuite with BeforeAndAfte
         readOrcAgg(spark).collect()
       }, conf)
       val ms = (System.nanoTime() - start) / 1000000L
-      println(s"$i,CPU,$ms")
+      ConsoleOutput.writeLine(s"$i,CPU,$ms")
       ms
     }.drop(warmupRounds)
 
@@ -150,14 +147,14 @@ class OrcTimezonePerfSuite extends SparkQueryCompareTestSuite with BeforeAndAfte
         readOrcAgg(spark).collect()
       }, conf)
       val ms = (System.nanoTime() - start) / 1000000L
-      println(s"$i,GPU,$ms")
+      ConsoleOutput.writeLine(s"$i,GPU,$ms")
       ms
     }.drop(warmupRounds)
 
     val cpuMean = cpuTimes.sum.toDouble / cpuTimes.length
     val gpuMean = gpuTimes.sum.toDouble / gpuTimes.length
     val speedup = cpuMean / gpuMean
-    println(f"$testName: CPU mean=$cpuMean%.0f ms, GPU mean=$gpuMean%.0f ms, " +
+    ConsoleOutput.writeLine(f"$testName: CPU mean=$cpuMean%.0f ms, GPU mean=$gpuMean%.0f ms, " +
       f"speedup=$speedup%.2fx")
     (cpuMean, gpuMean)
   }
@@ -174,8 +171,8 @@ class OrcTimezonePerfSuite extends SparkQueryCompareTestSuite with BeforeAndAfte
       setSessionTimeZone(spark, readerTZ)
       readOrcSummary(spark).collect()
     }, orcConf())
-    println(s"CPU summary: ${cpuSummary.mkString(", ")}")
-    println(s"GPU summary: ${gpuSummary.mkString(", ")}")
+    ConsoleOutput.writeLine(s"CPU summary: ${cpuSummary.mkString(", ")}")
+    ConsoleOutput.writeLine(s"GPU summary: ${gpuSummary.mkString(", ")}")
     assert(cpuSummary.sameElements(gpuSummary),
       "CPU and GPU ORC summaries did not match")
 
@@ -193,8 +190,7 @@ class OrcTimezonePerfSuite extends SparkQueryCompareTestSuite with BeforeAndAfte
     // Baseline: same-timezone read (no timezone conversion)
     val (baseCpuMean, baseGpuMean) = runAndRecordTime("same-tz-baseline", writerTZ)
 
-    println(f"\nTZ conversion overhead - CPU: ${crossCpuMean - baseCpuMean}%.0f ms")
-    println(f"TZ conversion overhead - GPU: ${crossGpuMean - baseGpuMean}%.0f ms")
+    ConsoleOutput.writeLine(f"\nTZ conversion overhead - CPU: ${crossCpuMean - baseCpuMean}%.0f ms")
+    ConsoleOutput.writeLine(f"TZ conversion overhead - GPU: ${crossGpuMean - baseGpuMean}%.0f ms")
   }
 }
-// scalastyle:on println

@@ -14,9 +14,6 @@
  * limitations under the License.
  */
 
-// scalastyle:off println
-// Existing console output in this file is intentional. New code should prefer logging.
-
 package com.nvidia.spark.rapids.tests.mortgage
 
 import com.nvidia.spark.rapids.ShimLoader
@@ -47,13 +44,13 @@ class MortgageSparkSuite extends AnyFunSuite {
     val rapidsShuffle = ShimLoader.getRapidsShuffleManagerClass
     val prop = System.getProperty("rapids.shuffle.manager.override", "false")
     if (prop.equalsIgnoreCase("true")) {
-      println("RAPIDS SHUFFLE MANAGER ACTIVE")
+      info("RAPIDS SHUFFLE MANAGER ACTIVE")
       // configure the cache-only shuffle manager (disable transport)
       builder = builder
           .config("spark.shuffle.manager", rapidsShuffle)
           .config("spark.rapids.shuffle.mode", "CACHE_ONLY")
     } else {
-      println("RAPIDS SHUFFLE MANAGER INACTIVE")
+      info("RAPIDS SHUFFLE MANAGER INACTIVE")
     }
     builder.getOrCreate()
   }
@@ -117,5 +114,3 @@ class MortgageSparkSuite extends AnyFunSuite {
     assert(df.count() === 177)
   }
 }
-
-// scalastyle:on println

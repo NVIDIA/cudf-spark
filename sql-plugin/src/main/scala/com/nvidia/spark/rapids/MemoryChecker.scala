@@ -14,9 +14,6 @@
  * limitations under the License.
  */
 
-// scalastyle:off println
-// Existing console output in this file is intentional. New code should prefer logging.
-
 package com.nvidia.spark.rapids
 
 import java.lang.management.ManagementFactory
@@ -44,7 +41,7 @@ trait MemoryChecker {
 object MemoryCheckerImpl extends MemoryChecker with Logging {
   def main(args: Array[String]): Unit = {
     val conf = new RapidsConf(new SparkConf())
-    println(s"Available memory: ${getAvailableMemoryBytes(conf)} bytes")
+    ConsoleOutput.writeLine(s"Available memory: ${getAvailableMemoryBytes(conf)} bytes")
   }
 
   def getAvailableMemoryBytes(rapidsConf: RapidsConf): Option[Long] = {
@@ -184,4 +181,3 @@ object MemoryCheckerImpl extends MemoryChecker with Logging {
 
   }
 }
-// scalastyle:on println

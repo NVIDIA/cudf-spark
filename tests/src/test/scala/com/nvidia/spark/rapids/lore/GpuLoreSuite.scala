@@ -14,9 +14,6 @@
  * limitations under the License.
  */
 
-// scalastyle:off println
-// Existing console output in this file is intentional. New code should prefer logging.
-
 package com.nvidia.spark.rapids.lore
 
 import com.nvidia.spark.rapids.{FunSuiteWithTempDir, GpuColumnarToRowExec, GpuProjectExec, RapidsConf, ShimLoader, SparkQueryCompareTestSuite}
@@ -196,9 +193,7 @@ class GpuLoreSuite extends SparkQueryCompareTestSuite with FunSuiteWithTempDir w
       val df = spark.range(0, 1000, 1, 100)
         .selectExpr("id % 10 as key", "id % 100 as value")
 
-      val res = df.collect().length
-      println(s"Length of original: $res")
-
+      df.collect()
 
       val restoredRes = GpuColumnarToRowExec(GpuLore.restoreGpuExec(
         new Path(s"${TEST_FILES_ROOT.getAbsolutePath}/loreId-3"), spark))
@@ -595,4 +590,3 @@ class GpuLoreSuite extends SparkQueryCompareTestSuite with FunSuiteWithTempDir w
     }
   }
 }
-// scalastyle:on println

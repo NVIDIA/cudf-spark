@@ -14,12 +14,11 @@
  * limitations under the License.
  */
 
-// scalastyle:off println
-// Existing console output in this file is intentional. New code should prefer logging.
-
 package com.nvidia.spark.rapids.tests
 
 import java.lang.reflect.Constructor
+
+import com.nvidia.spark.rapids.ConsoleOutput
 
 object DebugRange {
   var color: Option[_] = None
@@ -36,7 +35,7 @@ object DebugRange {
           color = Some(colorCls.getEnumConstants().head)
         } catch {
           case e: ClassNotFoundException =>
-            System.err.println(s"\nCOULD NOT INITIALIZE NVTX RANGE $e")
+            ConsoleOutput.writeErrorLine(s"\nCOULD NOT INITIALIZE NVTX RANGE $e")
         }
         initialized = true
       }
@@ -45,7 +44,7 @@ object DebugRange {
       Some(constructor.get.newInstance(name, color.get.asInstanceOf[Object])
         .asInstanceOf[AutoCloseable])
     } else {
-      System.err.println(s"\nCOULD NOT INITIALIZE NVTX RANGE $name")
+      ConsoleOutput.writeErrorLine(s"\nCOULD NOT INITIALIZE NVTX RANGE $name")
       None
     }
   }
@@ -62,4 +61,3 @@ class DebugRange(val name: String) extends AutoCloseable {
     wrapped.foreach(_.close())
   }
 }
-// scalastyle:on println

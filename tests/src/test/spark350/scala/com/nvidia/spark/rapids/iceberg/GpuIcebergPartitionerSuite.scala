@@ -26,8 +26,6 @@
 {"spark": "358"}
 {"spark": "359"}
 spark-rapids-shim-json-lines ***/
-// scalastyle:off println
-// Existing console output in this file is intentional. New code should prefer logging.
 
 package com.nvidia.spark.rapids.iceberg
 
@@ -57,7 +55,7 @@ class GpuIcebergPartitionerSuite extends AnyFunSuite with BeforeAndAfterAll {
   override def beforeAll(): Unit = {
     SpillFramework.initialize(new RapidsConf(new SparkConf))
     seed = System.currentTimeMillis()
-    println(s"Random seed set to $seed")
+    info(s"Random seed set to $seed")
   }
 
   override def afterAll(): Unit = {
@@ -178,4 +176,3 @@ object GpuIcebergPartitionerSuite {
     }
   }
 }
-// scalastyle:on println

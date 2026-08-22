@@ -26,8 +26,6 @@
 {"spark": "358"}
 {"spark": "359"}
 spark-rapids-shim-json-lines ***/
-// scalastyle:off println
-// Existing console output in this file is intentional. New code should prefer logging.
 
 package org.apache.iceberg.spark.functions
 
@@ -48,7 +46,7 @@ class GpuBucketExpressionSuite extends AnyFunSuite with BeforeAndAfterAll {
 
   override def beforeAll(): Unit = {
     seed = System.currentTimeMillis()
-    println(s"Random seed set to $seed")
+    info(s"Random seed set to $seed")
   }
 
   test("Int bucket function") {
@@ -184,4 +182,3 @@ class GpuBucketExpressionSuite extends AnyFunSuite with BeforeAndAfterAll {
     }
   }
 }
-// scalastyle:on println
