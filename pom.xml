@@ -1848,8 +1848,8 @@ This will force full Scala code rebuild in downstream modules.
                     <configuration>
                       <rules>
                         <requireMavenVersion>
-                          <message>Minimum Maven version 3.6.x required</message>
-                          <version>[3.6,)</version>
+                          <message>Minimum Maven version 3.8.1 required</message>
+                          <version>[3.8.1,)</version>
                         </requireMavenVersion>
                         <requireJavaVersion>
                             <message>To compile, use Java 17 or above (at runtime you can use Java 8+, however, other optional dependencies in your setup such as Iceberg may impose higher lower bound on the JDK runtime version )</message>
