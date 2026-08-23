@@ -778,7 +778,6 @@
                             <artifactId>scala-maven-plugin</artifactId>
                             <configuration>
                                 <release combine.self="override"/>
-                                <!-- Keep JDK 17 APIs visible while emitting Java 8 bytecode. -->
                                 <target combine.self="override"/>
                                 <args combine.children="append">
                                     <arg>-target:jvm-1.8</arg>
@@ -822,7 +821,6 @@
                             <artifactId>scala-maven-plugin</artifactId>
                             <configuration>
                                 <release combine.self="override"/>
-                                <!-- Keep JDK 17 APIs visible while emitting Java 8 bytecode. -->
                                 <target combine.self="override"/>
                                 <args combine.children="append">
                                     <arg>-target:jvm-1.8</arg>
@@ -866,7 +864,6 @@
                             <artifactId>scala-maven-plugin</artifactId>
                             <configuration>
                                 <release combine.self="override"/>
-                                <!-- Keep JDK 17 APIs visible while emitting Java 8 bytecode. -->
                                 <target combine.self="override"/>
                                 <args combine.children="append">
                                     <arg>-target:jvm-1.8</arg>
@@ -909,7 +906,6 @@
                             <artifactId>scala-maven-plugin</artifactId>
                             <configuration>
                                 <release combine.self="override"/>
-                                <!-- Keep JDK 17 APIs visible while emitting Java 8 bytecode. -->
                                 <target combine.self="override"/>
                                 <args combine.children="append">
                                     <arg>-target:jvm-1.8</arg>
@@ -1050,7 +1046,6 @@
         <!-- end dyn.shim properties -->
 
         <rapids.module>.</rapids.module>
-        <rapids.secondaryCacheDir>${spark.rapids.project.basedir}/target/${spark.version.classifier}/.sbt/1.0/zinc/org.scala-sbt</rapids.secondaryCacheDir>
         <allowConventionalDistJar>false</allowConventionalDistJar>
         <rapids.shimplify.skip>false</rapids.shimplify.skip>
         <rapids.build.info.skip>false</rapids.build.info.skip>
@@ -1695,12 +1690,7 @@ This will force full Scala code rebuild in downstream modules.
                             <arg>-Wunused:imports,locals,patvars,privates</arg>
                             --><!-- #endif scala-2.13 -->
                         </args>
-                        <jvmArgs>
-                            <jvmArg>-Xms1024m</jvmArg>
-                            <jvmArg>-Xmx1024m</jvmArg>
-                        </jvmArgs>
                         <addJavacArgs>${scala.javac.args}</addJavacArgs>
-                        <secondaryCacheDir>${rapids.secondaryCacheDir}</secondaryCacheDir>
                         <!-- #if scala-2.13 --><!--
                         <compilerPlugins combine.self="override">
                         </compilerPlugins>
