@@ -154,7 +154,7 @@ trait Spark341PlusDBShims extends Spark332PlusDBShims {
       GpuOverrides.exec[GlobalLimitExec](
         "Limiting of results across partitions",
         ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.NULL +
-          TypeSig.STRUCT + TypeSig.ARRAY + TypeSig.MAP + TypeSig.BINARY).nested(),
+          TypeSig.STRUCT + TypeSig.ARRAY + TypeSig.MAP).nested(),
           TypeSig.all),
         (globalLimit, conf, p, r) =>
           new SparkPlanMeta[GlobalLimitExec](globalLimit, conf, p, r) {
@@ -165,7 +165,7 @@ trait Spark341PlusDBShims extends Spark332PlusDBShims {
       GpuOverrides.exec[CollectLimitExec](
         "Reduce to single partition and apply limit",
         ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.NULL +
-          TypeSig.STRUCT + TypeSig.ARRAY + TypeSig.MAP + TypeSig.BINARY).nested(),
+          TypeSig.STRUCT + TypeSig.ARRAY + TypeSig.MAP).nested(),
           TypeSig.all),
         (collectLimit, conf, p, r) => new GpuCollectLimitMeta(collectLimit, conf, p, r) {
           override def convertToGpu(): GpuExec =

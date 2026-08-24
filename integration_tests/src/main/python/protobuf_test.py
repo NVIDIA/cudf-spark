@@ -1456,7 +1456,7 @@ def test_from_protobuf_pruned_known_scalar_wrong_wire_type(
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @pytest.mark.parametrize("mode", ["PERMISSIVE", "FAILFAST"], ids=idfn)
 @ignore_order(local=True)
-def test_from_protobuf_visible_known_field_wrong_wire_type_is_skipped(
+def test_from_protobuf_visible_known_field_wrong_wire_type_matches_spark_error_policy(
         local_tmp_path, from_protobuf_fn, mode):
     desc_path, desc_bytes = _setup_protobuf_desc(
         local_tmp_path, "simple.desc", _build_simple_descriptor_set_bytes)
@@ -1470,9 +1470,13 @@ def test_from_protobuf_visible_known_field_wrong_wire_type_is_skipped(
         decoded = _call_from_protobuf(
             from_protobuf_fn, f.col("bin"), "test.Simple", desc_path, desc_bytes,
             options={"mode": mode})
-        return df.select(decoded.alias("decoded"))
+        result = df.select(decoded.alias("decoded"))
+        return result.collect() if mode == "FAILFAST" else result
 
-    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+    if mode == "FAILFAST":
+        assert_gpu_and_cpu_error(run_on_spark, conf={}, error_message="Malformed")
+    else:
+        assert_gpu_and_cpu_are_equal_collect(run_on_spark)
 
 
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")

@@ -464,7 +464,7 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
       ProtobufDefaultValue.EnumValue(1, "EN")))
   }
 
-  test("extractor supplies the implicit first-declared enum default") {
+  test("extractor does not synthesize implicit enum defaults") {
     val enumMeta = ProtobufEnumMetadata(Seq(
       ProtobufEnumValue(10, "TEN"),
       ProtobufEnumValue(1, "ONE"),
@@ -484,8 +484,7 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
       schema, msgDesc, enumsAsInts = false, "test.Message")
 
     assert(infos.isRight)
-    assert(infos.toOption.get("status").defaultValue.contains(
-      ProtobufDefaultValue.EnumValue(10, "TEN")))
+    assert(infos.toOption.get("status").defaultValue.isEmpty)
   }
 
   test("enum metadata sorts values and names by number") {
