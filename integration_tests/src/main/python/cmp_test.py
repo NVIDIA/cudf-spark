@@ -459,8 +459,10 @@ def test_bridge_only_dynamic_in_candidate_fallback():
         return spark.createDataFrame([(1, 1, 'invalid')], 'a int, b int, c string') \
             .selectExpr('a IN (b, CAST(c AS INT)) AS result')
 
-    assert_gpu_and_cpu_are_equal_collect(
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
         do_it,
+        exist_classes='GpuCpuBridgeExpression',
+        non_exist_classes='GpuIn',
         conf={
             'spark.sql.ansi.enabled': 'true',
             'spark.rapids.sql.expression.Cast': 'false'
