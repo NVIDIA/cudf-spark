@@ -156,18 +156,13 @@ def test_group_partitions_sorted_merge():
     def sorted_merge_spj(spark):
         source = \
             "com.nvidia.spark.rapids.tests.datasourcev2.GroupPartitionsSortedDataSource"
-        spark.read.format(source) \
-            .option("side", "left") \
-            .option("direction", "asc") \
-            .option("nulls", "first") \
-            .load() \
-            .createOrReplaceTempView("group_partitions_sorted_left")
-        spark.read.format(source) \
-            .option("side", "right") \
-            .option("direction", "asc") \
-            .option("nulls", "first") \
-            .load() \
-            .createOrReplaceTempView("group_partitions_sorted_right")
+        for side in ("left", "right"):
+            spark.read.format(source) \
+                .option("side", side) \
+                .option("direction", "asc") \
+                .option("nulls", "first") \
+                .load() \
+                .createOrReplaceTempView("group_partitions_sorted_" + side)
         return spark.sql(
             """
             SELECT /*+ MERGE(l, r) */ l.id, l.value
