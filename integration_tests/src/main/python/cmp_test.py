@@ -394,9 +394,10 @@ def test_dynamic_in_mixed_ast_support():
 
 def test_dynamic_in_allows_nondeterministic_value():
     # The value is evaluated once before the list, so its nondeterminism does not affect ordering.
+    # Keep the list side-effect-free even when ANSI mode is enabled by default.
     def do_it(spark):
         return spark.range(10).selectExpr(
-            'rand(1) IN (id + 2, id + 3) AS result')
+            'rand(1) IN (CAST(id AS DOUBLE), CAST(id AS FLOAT)) AS result')
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         do_it,
