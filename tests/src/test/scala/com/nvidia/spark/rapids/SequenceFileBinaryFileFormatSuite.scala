@@ -148,21 +148,33 @@ class SequenceFileBinaryFileFormatSuite extends SparkQueryCompareTestSuite {
         assert(bag(keys) == bag(expected.map(_._1)))
         val fileScan = scan(df)
         assert(fileScan.requiredSchema.fieldNames.sameElements(Array("key", "value")))
-        assert(fileScan.allMetrics(GpuMetric.NUM_OUTPUT_BATCHES).value == 4)
+        val outputBatches = fileScan.allMetrics(GpuMetric.NUM_OUTPUT_BATCHES).value
+        assert(outputBatches > 0 && outputBatches <= 2)
+
+        val inputFiles = read(spark, directory)
+          .selectExpr("input_file_name() AS file")
+        val actualFiles = inputFiles.collect().map(row => new Path(row.getString(0)).getName).toSet
+        assert(actualFiles == (0 until 4).map(index => f"part-$index%05d.seq").toSet)
+        assert(scan(inputFiles).allMetrics(GpuMetric.NUM_OUTPUT_BATCHES).value == 4)
       }, gpuConf())
     }
   }
 
   test("count-only projection reads rows without materializing columns") {
-    withTempPath { file =>
-      writeRawFile(file,
-        (0 until 17).map(index => intBytes(index) -> payload(0, index)),
-        CompressionType.BLOCK)
+    withTempPath { directory =>
+      assert(directory.mkdirs())
+      (0 until 3).foreach { fileIndex =>
+        writeRawFile(new File(directory, f"part-$fileIndex%05d.seq"),
+          (0 until 17).map(index => intBytes(index) -> payload(fileIndex, index)),
+          CompressionType.BLOCK)
+      }
 
       withGpuSparkSession({ spark =>
-        val df = read(spark, file).select()
-        assert(df.collect().length == 17)
+        val df = read(spark, directory).select()
+        assert(df.collect().length == 51)
         assert(scan(df).requiredSchema.isEmpty)
+        val outputBatches = scan(df).allMetrics(GpuMetric.NUM_OUTPUT_BATCHES).value
+        assert(outputBatches > 0 && outputBatches <= 2)
       }, gpuConf())
     }
   }

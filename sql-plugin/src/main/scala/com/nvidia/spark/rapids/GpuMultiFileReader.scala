@@ -669,6 +669,7 @@ abstract class MultiFileCloudPartitionReaderBase(
    */
   private def readBuffersToBatch(fileHostBuffers: HostMemoryBuffersWithMetaDataBase,
       addTaskIfNeeded: Boolean): Unit = {
+    val numFilesRead = getNumFilesInHostBuffers(fileHostBuffers)
     if (getNumRowsInHostBuffers(fileHostBuffers) == 0) {
       // Close the currentFileHostBuffers on the deck if it is the fileHostBuffers being passed
       // in, otherwise close the fileHostBuffers passed in. It assumes that we will always handle
@@ -678,7 +679,7 @@ abstract class MultiFileCloudPartitionReaderBase(
       } else {
         fileHostBuffers.close()
       }
-      if (addTaskIfNeeded) addNextTaskIfNeeded()
+      if (addTaskIfNeeded) addNextTasksIfNeeded(numFilesRead)
     } else {
       val file = fileHostBuffers.partitionedFile.filePath
       batchIter = try {
@@ -689,7 +690,7 @@ abstract class MultiFileCloudPartitionReaderBase(
           EmptyGpuColumnarBatchIterator
       }
       // the data is copied to GPU so submit another task if we were limited
-      if (addTaskIfNeeded) addNextTaskIfNeeded()
+      if (addTaskIfNeeded) addNextTasksIfNeeded(numFilesRead)
     }
   }
 
@@ -945,6 +946,17 @@ abstract class MultiFileCloudPartitionReaderBase(
 
   private def getNumRowsInHostBuffers(fileInfo: HostMemoryBuffersWithMetaDataBase): Long = {
     fileInfo.memBuffersAndSizes.map(_.numRows).sum
+  }
+
+  protected def getNumFilesInHostBuffers(
+      fileInfo: HostMemoryBuffersWithMetaDataBase): Int = 1
+
+  private def addNextTasksIfNeeded(numTasks: Int): Unit = {
+    var remaining = numTasks
+    while (remaining > 0) {
+      addNextTaskIfNeeded()
+      remaining -= 1
+    }
   }
 
   private def addNextTaskIfNeeded(): Unit = {

@@ -60,7 +60,8 @@ class GpuReadSequenceFileBinaryFormat extends SequenceFileBinaryFileFormat
       fileScan.readPartitionSchema,
       fileScan.rapidsConf,
       ThreadPoolConfBuilder(fileScan.rapidsConf),
-      fileScan.allMetrics)
+      fileScan.allMetrics,
+      fileScan.queryUsesInputFile)
   }
 }
 

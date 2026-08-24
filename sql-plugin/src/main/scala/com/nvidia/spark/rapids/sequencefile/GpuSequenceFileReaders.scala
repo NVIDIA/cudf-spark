@@ -266,7 +266,8 @@ private[sequencefile] class GpuSequenceFilePartitionReader(
     execMetrics: Map[String, GpuMetric],
     maxReadBatchSizeRows: Int,
     maxReadBatchSizeBytes: Long,
-    maxGpuColumnSizeBytes: Long)
+    maxGpuColumnSizeBytes: Long,
+    queryUsesInputFile: Boolean)
   extends MultiFileCloudPartitionReaderBase(
     conf,
     files,
@@ -275,7 +276,11 @@ private[sequencefile] class GpuSequenceFilePartitionReader(
     Array.empty,
     execMetrics,
     maxReadBatchSizeRows,
-    maxReadBatchSizeBytes) {
+    maxReadBatchSizeBytes,
+    combineConf = CombineConf(Seq(
+      SequenceFileReaderLimits.MAX_FILE_OUTPUT_BYTES,
+      maxReadBatchSizeBytes,
+      maxGpuColumnSizeBytes).min, 0)) {
 
   private val projectedColumns = readDataSchema.length
   private val batchCapacity = Seq(
@@ -312,15 +317,43 @@ private[sequencefile] class GpuSequenceFilePartitionReader(
   private val outputBatchesMetric = execMetrics.getOrElse(NUM_OUTPUT_BATCHES, NoopMetric)
   private val copyMetric = execMetrics.getOrElse(COPY_BUFFER_TIME, NoopMetric)
 
+  private sealed trait SequenceFileBuffers extends HostMemoryBuffersWithMetaDataBase {
+    def sourceBuffers: Array[SequenceFileHostBuffers]
+  }
+
   private final class SequenceFileHostBuffers(
       override val partitionedFile: PartitionedFile,
       override val memBuffersAndSizes: Array[SingleHMBAndMeta],
-      override val bytesRead: Long) extends HostMemoryBuffersWithMetaDataBase {
+      override val bytesRead: Long) extends SequenceFileBuffers {
+
+    override lazy val sourceBuffers: Array[SequenceFileHostBuffers] = Array(this)
 
     override def close(): Unit = {
       tracker.remove(this)
       super.close()
     }
+  }
+
+  private final class CombinedSequenceFileHostBuffers(
+      override val sourceBuffers: Array[SequenceFileHostBuffers]) extends SequenceFileBuffers {
+    require(sourceBuffers.nonEmpty)
+
+    override val partitionedFile: PartitionedFile = sourceBuffers.head.partitionedFile
+    override val memBuffersAndSizes: Array[SingleHMBAndMeta] =
+      sourceBuffers.flatMap(_.memBuffersAndSizes)
+    override val bytesRead: Long = sourceBuffers.foldLeft(0L) { (total, buffers) =>
+      Math.addExact(total, buffers.bytesRead)
+    }
+
+    setExecutionTime(
+      sourceBuffers.foldLeft(0L)((total, buffers) =>
+        Math.addExact(total, buffers.getFilterTime)),
+      sourceBuffers.foldLeft(0L)((total, buffers) =>
+        Math.addExact(total, buffers.getBufferTime)))
+    setScheduleTime(sourceBuffers.foldLeft(0L)((total, buffers) =>
+      Math.addExact(total, buffers.getScheduleTime)))
+
+    override def close(): Unit = sourceBuffers.safeClose()
   }
 
   private final class ResultTracker extends AutoCloseable {
@@ -529,32 +562,93 @@ private[sequencefile] class GpuSequenceFilePartitionReader(
     }
   }
 
+  private def copyAndConcatenate(
+      infos: Array[SingleHMBAndMeta],
+      columnIndex: Int): ColumnVector = {
+    val deviceColumns = new Array[ColumnVector](infos.length)
+    try {
+      var index = 0
+      while (index < infos.length) {
+        val info = infos(index)
+        deviceColumns(index) = copyToDevice(
+          info.hmbs(columnIndex * 2), info.hmbs(columnIndex * 2 + 1), info.numRows.toInt)
+        index += 1
+      }
+      if (deviceColumns.length == 1) {
+        val result = deviceColumns.head
+        deviceColumns(0) = null
+        result
+      } else {
+        ColumnVector.concatenate(deviceColumns: _*)
+      }
+    } finally {
+      deviceColumns.safeClose()
+    }
+  }
+
   override def readBatches(
       fileBufsAndMeta: HostMemoryBuffersWithMetaDataBase): Iterator[ColumnarBatch] = {
-    val buffers = fileBufsAndMeta.asInstanceOf[SequenceFileHostBuffers]
-    tracker.remove(buffers)
+    val buffers = fileBufsAndMeta.asInstanceOf[SequenceFileBuffers]
+    buffers.sourceBuffers.foreach(tracker.remove)
     val batch = withRetryNoSplit(buffers) { current =>
       GpuSemaphore.acquireIfNecessary(TaskContext.get())
-      val info = current.memBuffersAndSizes.head
+      val infos = current.memBuffersAndSizes
+      val rows = Math.toIntExact(infos.foldLeft(0L)((total, info) =>
+        Math.addExact(total, info.numRows)))
       val columns = new Array[SparkVector](projectedColumns)
       closeOnExcept(columns) { _ =>
         copyMetric.ns {
           var index = 0
           while (index < columns.length) {
-            val device = copyToDevice(info.hmbs(index * 2), info.hmbs(index * 2 + 1),
-              info.numRows.toInt)
+            val device = copyAndConcatenate(infos, index)
             columns(index) = closeOnExcept(device) { ownedDevice =>
               GpuColumnVector.from(ownedDevice, BinaryType)
             }
             index += 1
           }
         }
-        new ColumnarBatch(columns, info.numRows.toInt)
+        new ColumnarBatch(columns, rows)
       }
     }
     outputBatchesMetric += 1
     new SingleGpuColumnarBatchIterator(batch)
   }
+
+  override def canUseCombine: Boolean = !queryUsesInputFile
+
+  override def combineHMBs(
+      results: Array[HostMemoryBuffersWithMetaDataBase]): HostMemoryBuffersWithMetaDataBase = {
+    require(results.nonEmpty)
+    val buffers = results.map(_.asInstanceOf[SequenceFileBuffers])
+    var accepted = 0
+    var bytes = 0L
+    var rows = 0L
+    var keepAdding = true
+    while (accepted < buffers.length && keepAdding) {
+      val nextBytes = buffers(accepted).memBuffersAndSizes.foldLeft(0L)((total, info) =>
+        Math.addExact(total, info.bytes))
+      val nextRows = buffers(accepted).memBuffersAndSizes.foldLeft(0L)((total, info) =>
+        Math.addExact(total, info.numRows))
+      require(nextBytes <= batchCapacity && nextRows <= rowCapacity)
+      if (accepted == 0 ||
+          (nextBytes <= batchCapacity - bytes && nextRows <= rowCapacity - rows)) {
+        bytes += nextBytes
+        rows += nextRows
+        accepted += 1
+      } else {
+        keepAdding = false
+      }
+    }
+    if (accepted < results.length) {
+      combineLeftOverFiles = Some(results.drop(accepted))
+    }
+    val sources = buffers.take(accepted).flatMap(_.sourceBuffers)
+    if (sources.length == 1) sources.head else new CombinedSequenceFileHostBuffers(sources)
+  }
+
+  override protected def getNumFilesInHostBuffers(
+      fileInfo: HostMemoryBuffersWithMetaDataBase): Int =
+    fileInfo.asInstanceOf[SequenceFileBuffers].sourceBuffers.length
 
   override def getBatchRunner(
       tc: TaskContext,
@@ -579,7 +673,8 @@ private[rapids] case class GpuSequenceFilePartitionReaderFactory(
     partitionSchema: StructType,
     @transient rapidsConf: RapidsConf,
     poolConfBuilder: ThreadPoolConfBuilder,
-    metrics: Map[String, GpuMetric])
+    metrics: Map[String, GpuMetric],
+    queryUsesInputFile: Boolean)
   extends MultiFilePartitionReaderFactoryBase(sqlConf, broadcastedConf, rapidsConf) {
 
   override protected val canUseCoalesceFilesReader: Boolean = false
@@ -601,7 +696,8 @@ private[rapids] case class GpuSequenceFilePartitionReaderFactory(
       metrics,
       maxReadBatchSizeRows,
       maxReadBatchSizeBytes,
-      maxGpuColumnSizeBytes)
+      maxGpuColumnSizeBytes,
+      queryUsesInputFile)
   }
 
   override protected def buildBaseColumnarReaderForCoalescing(
