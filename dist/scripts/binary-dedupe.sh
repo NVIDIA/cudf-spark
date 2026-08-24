@@ -330,9 +330,22 @@ function copy_unshimmed_from_spark_shared() {
   local sorted_copy_list="$UNSHIMMED_FROM_SPARK_SHARED_COPY_LIST.sorted"
 
   : > "$raw_copy_list"
-  write_root_safe_spark_shared_classes
+  local promote_default_spark_shared=0
   if [[ "${UNSHIM_PROMOTE_DEFAULT_SPARK_SHARED_CLASSES:-0}" == "1" ||
         "${UNSHIM_PROMOTE_DEFAULT_SPARK_SHARED_CLASSES:-0}" == "true" ]]; then
+    promote_default_spark_shared=1
+  fi
+
+  # The dependency analysis is diagnostic-only. Keep it for fast unshim analysis
+  # and promotion experiments, but do not put it on the normal packaging hot path.
+  if [[ "$promote_default_spark_shared" == "1" || "${UNSHIM_FAST:-0}" == "1" ]]; then
+    write_root_safe_spark_shared_classes
+  else
+    echo "$((++STEP))/ skipping diagnostic spark-shared dependency analysis"
+    : > "$ROOT_SAFE_SPARK_SHARED_TXT"
+  fi
+
+  if [[ "$promote_default_spark_shared" == "1" ]]; then
     write_default_unshimmed_spark_shared_classes
     cat "$DEFAULT_UNSHIMMED_SPARK_SHARED_TXT" >> "$raw_copy_list"
   else

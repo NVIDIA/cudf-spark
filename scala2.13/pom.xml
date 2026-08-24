@@ -1150,6 +1150,7 @@
         <maven.clean.plugin.version>3.1.0</maven.clean.plugin.version>
         <maven.scaladoc.skip>false</maven.scaladoc.skip>
         <maven.scalastyle.skip>false</maven.scalastyle.skip>
+        <rapids.shimplify.skip>false</rapids.shimplify.skip>
         <dist.jar.compress>true</dist.jar.compress>
         <!--
         This property is used to in aggregator module to determine the artifactId of iceberg
@@ -1436,12 +1437,64 @@
                         <configuration>
                             <skip>${rapids.shimplify.skip}</skip>
                             <target xmlns:ac="antlib:net.sf.antcontrib">
-                                <property name="dyn.shim.buildver" value="all.buildvers"/>
-                                <script language="jython" src="${spark.rapids.source.basedir}/build/dyn_shim_detection.py"/>
-                                <scriptdef name="shimplify" language="jython" src="${spark.rapids.source.basedir}/build/shimplify.py">
-                                    <attribute name="if"/>
-                                </scriptdef>
-                                <shimplify if="shimplify"/>
+                                <!-- Most modules have no versioned shim sources. Avoid loading Jython. -->
+                                <resourcecount property="rapids.shimplify.sources.count">
+                                    <fileset dir="${shimplify.src.basedir}">
+                                        <include name="src/main/spark*/**"/>
+                                        <include name="src/test/spark*/**"/>
+                                    </fileset>
+                                </resourcecount>
+                                <ac:if>
+                                    <equals arg1="${rapids.shimplify.sources.count}" arg2="0"/>
+                                    <then>
+                                        <echo>No shim sources: skipping Shimplify</echo>
+                                    </then>
+                                    <else>
+                                        <!-- Include paths, contents, and generator scripts in the cache key.
+                                             Keep checksum sidecars under target. -->
+                                        <checksum totalproperty="rapids.shimplify.sources.checksum"
+                                                  forceOverwrite="true"
+                                                  todir="${project.build.directory}/shimplify-checksums">
+                                            <fileset dir="${shimplify.src.basedir}">
+                                                <include name="src/main/spark*/**"/>
+                                                <include name="src/test/spark*/**"/>
+                                            </fileset>
+                                        </checksum>
+                                        <checksum file="${spark.rapids.source.basedir}/build/dyn_shim_detection.py"
+                                                  property="rapids.shimplify.detection.checksum"/>
+                                        <checksum file="${spark.rapids.source.basedir}/build/shimplify.py"
+                                                  property="rapids.shimplify.generator.checksum"/>
+                                        <checksum file="${spark.rapids.source.basedir}/build/get_buildvers.py"
+                                                  property="rapids.shimplify.buildvers.checksum"/>
+                                        <checksum file="${spark.rapids.project.basedir}/pom.xml"
+                                                  property="rapids.shimplify.pom.checksum"/>
+                                        <property name="rapids.shimplify.cache.marker"
+                                                  value="${spark.shim.dest}/.shimplify-${rapids.shimplify.sources.checksum}-${rapids.shimplify.detection.checksum}-${rapids.shimplify.generator.checksum}-${rapids.shimplify.buildvers.checksum}-${rapids.shimplify.pom.checksum}"/>
+                                        <available file="${rapids.shimplify.cache.marker}"
+                                                   property="rapids.shimplify.cache.hit"/>
+                                        <property name="dyn.shim.buildver" value="all.buildvers"/>
+                                        <ac:if>
+                                            <or>
+                                                <equals arg1="${shimplify}" arg2="true"/>
+                                                <not><isset property="rapids.shimplify.cache.hit"/></not>
+                                            </or>
+                                            <then>
+                                                <script language="jython" src="${spark.rapids.source.basedir}/build/dyn_shim_detection.py"/>
+                                                <scriptdef name="shimplify" language="jython" src="${spark.rapids.source.basedir}/build/shimplify.py">
+                                                    <attribute name="if"/>
+                                                </scriptdef>
+                                                <shimplify if="shimplify"/>
+                                                <delete quiet="true">
+                                                    <fileset dir="${spark.shim.dest}" includes=".shimplify-*"/>
+                                                </delete>
+                                                <touch file="${rapids.shimplify.cache.marker}"/>
+                                            </then>
+                                            <else>
+                                                <echo>Shim sources unchanged: skipping Shimplify</echo>
+                                            </else>
+                                        </ac:if>
+                                    </else>
+                                </ac:if>
                             </target>
                         </configuration>
                     </execution>

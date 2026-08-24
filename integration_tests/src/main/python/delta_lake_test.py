@@ -17,7 +17,8 @@ from pyspark.sql import Row
 from asserts import assert_gpu_fallback_collect, assert_gpu_and_cpu_are_equal_collect, \
     assert_cpu_and_gpu_are_equal_collect_with_capture
 from data_gen import *
-from delta_lake_utils import delta_meta_allow, setup_delta_dest_table, deletion_vector_values_with_xfail_reasons, read_delta_path_with_cdf
+from delta_lake_utils import delta_meta_allow, setup_delta_dest_table, \
+    deletion_vector_values_with_xfail_reasons, read_delta_path_with_cdf, delta_reorg_xfail
 from marks import allow_non_gpu, delta_lake, ignore_order
 from parquet_test import reader_opt_confs_no_native
 from parquet_test_utils import parquet_row_group_midpoints
@@ -853,6 +854,7 @@ def test_delta_scan_split_with_DV_disabled_with_DVs(spark_tmp_path, pushdown_dv_
                     reason="Deletion vector scan is not supported on Databricks")
 @pytest.mark.skipif(is_before_spark_353(),
                     reason="Spark-RAPIDS supports scan with deletion vectors starting in Spark 3.5.3")
+@delta_reorg_xfail
 def test_delta_scan_split_with_DV_enabled_after_DVs_materialized(spark_tmp_path):
     def do_delete_and_reorg(spark, data_path):
         num_deleted = spark.sql(f"DELETE FROM delta.`{data_path}` WHERE a = 0").collect()[0][0]

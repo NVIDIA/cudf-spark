@@ -363,6 +363,9 @@ def is_spark_testing_enabled():
     return (_spark.sparkContext._jvm.System.getProperty("spark.testing") is not None
             or _spark.sparkContext._jvm.System.getenv("SPARK_TESTING") is not None)
 
+def is_spark_local_mode():
+    return _spark.sparkContext._jsc.sc().isLocal()
+
 def get_java_major_version():
     ver = _spark.sparkContext._jvm.System.getProperty("java.version")
     # Allow these formats:

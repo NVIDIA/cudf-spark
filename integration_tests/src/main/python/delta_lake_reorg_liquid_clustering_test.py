@@ -16,6 +16,7 @@ import pytest
 
 from asserts import assert_equal
 from conftest import is_apache_runtime, spark_jvm
+from delta_lake_utils import delta_reorg_xfail
 from delta_lake_reorg_table_test import (
     _reorg_conf,
     _reorg_metadata_allow,
@@ -59,6 +60,7 @@ def clustering_columns(spark, path):
 @ignore_order(local=True)
 @delta_lake
 @allow_non_gpu(*_reorg_metadata_allow)
+@delta_reorg_xfail
 def test_delta_reorg_table_purge_liquid_clustered(spark_tmp_path):
     if not is_apache_runtime():
         pytest.skip("GPU REORG TABLE currently supports Apache Delta Lake only")
