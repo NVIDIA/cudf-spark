@@ -53,8 +53,7 @@ pom_artifact="$group_id:$artifact_id:$version:pom"
 $MVN -B dependency:get \
     -DremoteRepositories="$remote_maven_repo" \
     -Dmaven.repo.local="$M2_CACHE" \
-    -Dartifact="$pom_artifact" \
-    -Dtransitive=true
+    -Dartifact="$pom_artifact"
 
 while read -r line; do
     artifact=$line # artifact=groupId:artifactId:version:[[packaging]:classifier]
