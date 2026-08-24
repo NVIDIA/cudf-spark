@@ -15,7 +15,6 @@
 import fnmatch
 import os
 import re
-import shutil
 import subprocess
 import zipfile
 
@@ -79,7 +78,7 @@ for bv in buildver_list:
         art_jar = '-'.join([art_id, project_version, classifier]) + '.jar'
         art_jar_path = os.sep.join([build_dir, art_jar])
         if os.path.isfile(art_jar_path):
-            shutil.copy(art_jar_path, deps_dir)
+            resolved_art_jar_path = art_jar_path
         else:
             mvn_home = project.getProperty('maven.home')
             mvn_cmd = [
@@ -102,8 +101,9 @@ for bv in buildver_list:
             if repo_local:
                 mvn_cmd.append('='.join(['-Dmaven.repo.local', repo_local]))
             shell_exec(mvn_cmd)
+            resolved_art_jar_path = os.sep.join([deps_dir, art_jar])
 
-        with zipfile.ZipFile(os.sep.join([deps_dir, art_jar]), 'r') as zip_handle:
+        with zipfile.ZipFile(resolved_art_jar_path, 'r') as zip_handle:
             if project.getProperty('should.build.conventional.jar'):
                 zip_handle.extractall(path=top_dist_jar_dir)
             else:
