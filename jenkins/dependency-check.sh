@@ -40,10 +40,22 @@ MVN_SETTINGS=${MVN_SETTINGS:-"$SCRIPT_DIR/settings.xml"}
 MVN=${MVN:-"mvn -s $MVN_SETTINGS"}
 rm -rf $DEST_PATH && mkdir -p $DEST_PATH
 
-# Warm up $M2_CACHE by downloading the Maven Dependency Plugin using -s $MVN_SETTINGS to fix intermittent mvn failures caused by timeouts
-# or HTTP 429 errors while do wnloading Maven plugins from Maven Central. See https://github.com/NVIDIA/spark-rapids/pull/14727.
-$MVN -B dependency:get -Dmaven.repo.local=$M2_CACHE -Dartifact=org.apache.maven.plugins:maven-dependency-plugin:2.8
 remote_maven_repo=$SERVER_ID::default::$SERVER_URL
+
+# Warm up $M2_CACHE by downloading the Maven Dependency Plugin using -s $MVN_SETTINGS to fix
+# intermittent mvn failures caused by timeouts or HTTP 429 errors while downloading Maven plugins
+# from Maven Central. See https://github.com/NVIDIA/spark-rapids/pull/14727.
+# 
+# All entries in $ARTIFACT_FILE share this POM, so resolving it transitively also caches common
+# dependencies through the internal Maven repository before validation runs with plain Maven.
+IFS=: read -r group_id artifact_id version _ < "$ARTIFACT_FILE"
+pom_artifact="$group_id:$artifact_id:$version:pom"
+$MVN -B dependency:get \
+    -DremoteRepositories="$remote_maven_repo" \
+    -Dmaven.repo.local="$M2_CACHE" \
+    -Dartifact="$pom_artifact" \
+    -Dtransitive=true
+
 while read -r line; do
     artifact=$line # artifact=groupId:artifactId:version:[[packaging]:classifier]
     # Clean up $M2_CACHE to avoid side-effect of previous dependency:get
