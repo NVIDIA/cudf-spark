@@ -479,6 +479,20 @@ def test_ansi_decimal_side_effecting_dynamic_in_fallback():
         do_it,
         conf={'spark.sql.ansi.enabled': 'true'})
 
+
+@allow_non_gpu('ProjectExec', 'In', 'Multiply', 'Cast')
+def test_ansi_decimal_multiply_side_effecting_dynamic_in_fallback():
+    def do_it(spark):
+        # Spark stops after b matches; eager evaluation of c * d would overflow in ANSI mode.
+        rows = [(Decimal('1'), Decimal('1'), Decimal('9' * 38), Decimal('9'))]
+        schema = 'a decimal(38, 0), b decimal(38, 0), c decimal(38, 0), d decimal(38, 0)'
+        return spark.createDataFrame(rows, schema).selectExpr(
+            'a IN (b, c * d) AS result')
+
+    assert_gpu_and_cpu_are_equal_collect(
+        do_it,
+        conf={'spark.sql.ansi.enabled': 'true'})
+
 # We avoid testing inset with NaN in Spark < 3.1.3 since it has issue with NaN comparisons.
 # See https://github.com/NVIDIA/spark-rapids/issues/9687.
 test_inset_data_gen = [gen for gen in eq_gens_with_decimal_gen if gen != float_gen if gen != double_gen] + \

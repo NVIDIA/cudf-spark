@@ -2085,6 +2085,8 @@ object GpuOverrides extends Logging {
         private lazy val dynamicListItems = in.list.zip(childExprs.tail).filterNot {
           case (expression, _) => expression.isInstanceOf[Literal]
         }
+        private lazy val gpuDynamicExpressions =
+          dynamicListItems.map(_._2.convertToGpu())
 
         override def tagExprForGpu(): Unit = {
           if (!allListItemsAreLiterals) {
@@ -2098,7 +2100,7 @@ object GpuOverrides extends Logging {
               // CPU bridges are inserted after tagging, so verify the entire expression tree
               // before converting it to inspect side effects.
               willNotWorkOnGpu("dynamic IN list expressions must run entirely on GPU")
-            } else if (dynamicListItems.iterator.map(_._2.convertToGpu()).exists {
+            } else if (gpuDynamicExpressions.exists {
                   case gpuExpression: GpuExpression => gpuExpression.hasSideEffects
                   case _ => false
                 }) {
@@ -2115,8 +2117,7 @@ object GpuOverrides extends Logging {
               useInSetSemantics = false)
           } else {
             val literalValues = in.list.collect { case literal: Literal => literal.value }
-            val dynamicExpressions = dynamicListItems.map(_._2.convertToGpu())
-            GpuIn(gpuValue, literalValues, dynamicExpressions)
+            GpuIn(gpuValue, literalValues, gpuDynamicExpressions)
           }
         }
       }).note("Non-literal list expressions must be deterministic and side-effect-free"),
