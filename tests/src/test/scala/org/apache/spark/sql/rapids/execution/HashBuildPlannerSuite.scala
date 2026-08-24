@@ -102,13 +102,16 @@ class HashBuildPlannerSuite extends AnyFunSuite {
       assertResult(GpuBuildLeft)(select(status = status))
     }
     assertResult(GpuBuildLeft) {
-      select(demand = BuildDemand(probeCount = 2L, probeRows = 2L * streamRows))
+      select(demand = BuildDemand(probeCount = 6L, probeRows = 6L * streamRows))
     }
     assertResult(GpuBuildRight) {
-      select(demand = BuildDemand(probeCount = 3L, probeRows = 3L * streamRows))
+      select(demand = BuildDemand(probeCount = 7L, probeRows = 7L * streamRows))
+    }
+    assertResult(GpuBuildLeft) {
+      select(numericKeys = false, demand = BuildDemand(2L, 2L * streamRows))
     }
     assertResult(GpuBuildRight) {
-      select(numericKeys = false, demand = BuildDemand(1L, streamRows))
+      select(numericKeys = false, demand = BuildDemand(3L, 3L * streamRows))
     }
     assertResult(GpuBuildLeft) {
       select(

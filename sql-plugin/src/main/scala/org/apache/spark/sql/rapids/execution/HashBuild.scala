@@ -33,8 +33,7 @@ import com.nvidia.spark.rapids.spill.SharedRecomputableHandle
 
 import org.apache.spark.TaskContext
 import org.apache.spark.sql.catalyst.expressions.Expression
-import org.apache.spark.sql.catalyst.plans.{InnerLike, JoinType, LeftAnti, LeftOuter, LeftSemi,
-  RightOuter}
+import org.apache.spark.sql.catalyst.plans.{InnerLike, JoinType, LeftOuter, RightOuter}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /** Metrics associated with the reusable hash-build lifecycle. */
@@ -71,8 +70,9 @@ object HashBuildKey {
 /**
  * A request to execute one equi-hash join operation through [[HashProbeBackend]].
  * `requiredBuildSide` specifies whether the requested operation has a physical side constraint,
- * e.g. left or right outer/semi/anti. `exactCountJoinType` specifies when the backend can provide
- * an exact output count before execution, and which JoinType requests that count.
+ * e.g. left or right outer/semi/anti or a known-distinct build side. `exactCountJoinType`
+ * specifies when the backend can provide an exact output count before execution, and which
+ * JoinType requests that count.
  */
 sealed trait BackendJoinRequest {
   def requiredBuildSide: Option[GpuBuildSide]
@@ -108,10 +108,47 @@ private[execution] object BackendJoinRequest {
     override val exactCountJoinType: Option[JoinType] = None
   }
 
-  final case class Distinct(joinType: JoinType, planBuildSide: GpuBuildSide)
-      extends BackendJoinRequest {
-    override val requiredBuildSide: Option[GpuBuildSide] = Some(planBuildSide)
-    override val exactCountJoinType: Option[JoinType] = None
+  /** Request that executes using a build side whose join keys are known to be distinct. */
+  sealed trait Distinct extends BackendJoinRequest {
+    final override val exactCountJoinType: Option[JoinType] = None
+  }
+
+  object Distinct {
+    final case class Inner(buildSide: GpuBuildSide) extends Distinct {
+      override val requiredBuildSide: Option[GpuBuildSide] = Some(buildSide)
+    }
+
+    case object LeftOuter extends Distinct {
+      override val requiredBuildSide: Option[GpuBuildSide] = Some(GpuBuildRight)
+    }
+
+    case object RightOuter extends Distinct {
+      override val requiredBuildSide: Option[GpuBuildSide] = Some(GpuBuildLeft)
+    }
+
+    case object LeftSemi extends Distinct {
+      override val requiredBuildSide: Option[GpuBuildSide] = Some(GpuBuildRight)
+    }
+
+    case object LeftAnti extends Distinct {
+      override val requiredBuildSide: Option[GpuBuildSide] = Some(GpuBuildRight)
+    }
+
+    /** Map a Catalyst join type and its known-distinct build side to a backend request. */
+    def apply(joinType: JoinType, planBuildSide: GpuBuildSide): Distinct = {
+      val request = joinType match {
+        case _: InnerLike => Inner(planBuildSide)
+        case org.apache.spark.sql.catalyst.plans.LeftOuter => LeftOuter
+        case org.apache.spark.sql.catalyst.plans.RightOuter => RightOuter
+        case org.apache.spark.sql.catalyst.plans.LeftSemi => LeftSemi
+        case org.apache.spark.sql.catalyst.plans.LeftAnti => LeftAnti
+        case other =>
+          throw new IllegalStateException(s"unsupported distinct backend join request $other")
+      }
+      require(request.requiredBuildSide.contains(planBuildSide),
+        s"$joinType distinct join does not support build side $planBuildSide")
+      request
+    }
   }
 
   /** Map a directly executed Catalyst join type to its backend request. */
@@ -158,17 +195,30 @@ private[execution] final class ResolvedHashJoin(
 
 /**
  * The physical build implementation of a hash probe selected once for a stream batch.
- * The caller owns the backend until `close()`.
+ * The caller owns the backend until `close()`. The `buildSide` is the physical side the
+ * backend will actually use, under the constraints of `BackendJoinRequest.requiredBuildSide`.
  */
 sealed trait HashProbeBackend extends AutoCloseable {
   def buildSide: GpuBuildSide
   def isCached: Boolean
 
-  def execute(
+  final def execute(
       request: BackendJoinRequest,
       leftKeys: Table,
       rightKeys: Table,
-      outputRowCount: Option[Long] = None): GatherMapsResult
+      outputRowCount: Option[Long] = None): GatherMapsResult = {
+    request.requiredBuildSide.foreach { requiredSide =>
+      require(buildSide == requiredSide,
+        s"$request requires build side $requiredSide, but backend builds $buildSide")
+    }
+    doExecute(request, leftKeys, rightKeys, outputRowCount)
+  }
+
+  protected def doExecute(
+      request: BackendJoinRequest,
+      leftKeys: Table,
+      rightKeys: Table,
+      outputRowCount: Option[Long]): GatherMapsResult
 
   /** Exact output size when this backend can reuse its build artifact to compute it. */
   def outputRowCount(joinType: JoinType, probeKeys: Table): Option[Long]
@@ -183,7 +233,7 @@ private final class OnDemandHashProbeBackend(
     compareNullsEqual: Boolean) extends HashProbeBackend {
   override val isCached: Boolean = false
 
-  override def execute(
+  override protected def doExecute(
       request: BackendJoinRequest,
       leftKeys: Table,
       rightKeys: Table,
@@ -193,7 +243,11 @@ private final class OnDemandHashProbeBackend(
     case BackendJoinRequest.RightOuter => rightOuter(leftKeys, rightKeys)
     case BackendJoinRequest.LeftSemi => leftSemi(leftKeys, rightKeys)
     case BackendJoinRequest.LeftAnti => leftAnti(leftKeys, rightKeys)
-    case BackendJoinRequest.Distinct(joinType, _) => distinct(joinType, leftKeys, rightKeys)
+    case _: BackendJoinRequest.Distinct.Inner => innerDistinct(leftKeys, rightKeys)
+    case BackendJoinRequest.Distinct.LeftOuter => leftOuterDistinct(leftKeys, rightKeys)
+    case BackendJoinRequest.Distinct.RightOuter => rightOuterDistinct(leftKeys, rightKeys)
+    case BackendJoinRequest.Distinct.LeftSemi => leftSemi(leftKeys, rightKeys)
+    case BackendJoinRequest.Distinct.LeftAnti => leftAnti(leftKeys, rightKeys)
   }
 
   private def inner(
@@ -223,25 +277,27 @@ private final class OnDemandHashProbeBackend(
     JoinImpl.leftAntiHashJoinBuildRight(leftKeys, rightKeys, compareNullsEqual)
   }
 
-  private def distinct(
-      joinType: JoinType,
+  private def innerDistinct(
       leftKeys: Table,
-      rightKeys: Table): GatherMapsResult = joinType match {
-    case LeftOuter =>
-      GatherMapsResult.makeFromRight(leftKeys.leftDistinctJoinGatherMap(
-        rightKeys, compareNullsEqual))
-    case RightOuter =>
-      GatherMapsResult.makeFromLeft(rightKeys.leftDistinctJoinGatherMap(
-        leftKeys, compareNullsEqual))
-    case _: InnerLike if buildSide == GpuBuildRight =>
-      val maps = leftKeys.innerDistinctJoinGatherMaps(rightKeys, compareNullsEqual)
-      GatherMapsResult(maps(0), maps(1))
-    case _: InnerLike =>
+      rightKeys: Table): GatherMapsResult = buildSide match {
+    case GpuBuildLeft =>
       val maps = rightKeys.innerDistinctJoinGatherMaps(leftKeys, compareNullsEqual)
       GatherMapsResult(maps(1), maps(0))
-    case LeftSemi => leftSemi(leftKeys, rightKeys)
-    case LeftAnti => leftAnti(leftKeys, rightKeys)
-    case _ => throw new IllegalStateException(s"unsupported distinct join type $joinType")
+    case GpuBuildRight =>
+      val maps = leftKeys.innerDistinctJoinGatherMaps(rightKeys, compareNullsEqual)
+      GatherMapsResult(maps(0), maps(1))
+  }
+
+  private def leftOuterDistinct(
+      leftKeys: Table,
+      rightKeys: Table): GatherMapsResult = {
+    GatherMapsResult.makeFromRight(leftKeys.leftDistinctJoinGatherMap(rightKeys, compareNullsEqual))
+  }
+
+  private def rightOuterDistinct(
+      leftKeys: Table,
+      rightKeys: Table): GatherMapsResult = {
+    GatherMapsResult.makeFromLeft(rightKeys.leftDistinctJoinGatherMap(leftKeys, compareNullsEqual))
   }
 
   override def outputRowCount(joinType: JoinType, probeKeys: Table): Option[Long] = None
@@ -279,7 +335,7 @@ private final class HashJoinArtifact(
         metrics.rebuilds += 1
         onRebuild()
       }
-      new CachedHashProbeBackend(physicalBuildSide, Left(lease))
+      new CachedHashProbeBackend(physicalBuildSide, lease)
     }
   }
 
@@ -302,7 +358,7 @@ private final class DistinctHashJoinArtifact(
         metrics.rebuilds += 1
         onRebuild()
       }
-      new CachedHashProbeBackend(physicalBuildSide, Right(lease))
+      new CachedDistinctHashProbeBackend(physicalBuildSide, lease)
     }
   }
 
@@ -311,25 +367,15 @@ private final class DistinctHashJoinArtifact(
 
 /**
  * Backend that holds a lease on a reusable cuDF hash artifact until `close()`. This probes a
- * pre-built native table and can compute exact inner/outer counts for non-distinct artifacts.
+ * pre-built native table and can compute exact inner/outer counts.
  */
 private final class CachedHashProbeBackend(
     override val buildSide: GpuBuildSide,
-    artifact: Either[SharedRecomputableHandle.Lease[CudfHashJoin],
-      SharedRecomputableHandle.Lease[CudfDistinctHashJoin]]) extends HashProbeBackend {
+    lease: SharedRecomputableHandle.Lease[CudfHashJoin])
+    extends HashProbeBackend {
   override val isCached: Boolean = true
 
-  private def withHashJoin[T](f: CudfHashJoin => T): T = artifact match {
-    case Left(lease) => f(lease.resource)
-    case Right(_) => throw new IllegalStateException("expected a non-distinct hash build")
-  }
-
-  private def withDistinctHashJoin[T](f: CudfDistinctHashJoin => T): T = artifact match {
-    case Right(lease) => f(lease.resource)
-    case Left(_) => throw new IllegalStateException("expected a distinct hash build")
-  }
-
-  override def execute(
+  override protected def doExecute(
       request: BackendJoinRequest,
       leftKeys: Table,
       rightKeys: Table,
@@ -339,110 +385,119 @@ private final class CachedHashProbeBackend(
     case BackendJoinRequest.RightOuter => rightOuter(leftKeys, rightKeys, outputRowCount)
     case BackendJoinRequest.LeftSemi => leftSemi(leftKeys, rightKeys)
     case BackendJoinRequest.LeftAnti => leftAnti(leftKeys, rightKeys)
-    case BackendJoinRequest.Distinct(joinType, _) => distinct(joinType, leftKeys, rightKeys)
+    case _: BackendJoinRequest.Distinct =>
+      throw new IllegalStateException("expected a distinct hash build")
   }
 
   private def inner(
       leftKeys: Table,
       rightKeys: Table,
-      outputRowCount: Option[Long] = None): GatherMapsResult = artifact match {
-    case Left(_) => withHashJoin { hashJoin =>
-      buildSide match {
-        case GpuBuildLeft =>
-          JoinImpl.innerHashJoinBuildLeft(rightKeys, hashJoin, outputRowCount)
-        case GpuBuildRight =>
-          JoinImpl.innerHashJoinBuildRight(leftKeys, hashJoin, outputRowCount)
-      }
-    }
-    case Right(_) => withDistinctHashJoin { distinctHashJoin =>
-      buildSide match {
-        case GpuBuildLeft =>
-          JoinImpl.innerDistinctHashJoinBuildLeft(rightKeys, distinctHashJoin)
-        case GpuBuildRight =>
-          JoinImpl.innerDistinctHashJoinBuildRight(leftKeys, distinctHashJoin)
-      }
+      outputRowCount: Option[Long] = None): GatherMapsResult = {
+    buildSide match {
+      case GpuBuildLeft =>
+        JoinImpl.innerHashJoinBuildLeft(rightKeys, lease.resource, outputRowCount)
+      case GpuBuildRight =>
+        JoinImpl.innerHashJoinBuildRight(leftKeys, lease.resource, outputRowCount)
     }
   }
 
   private def leftOuter(
       leftKeys: Table,
       rightKeys: Table,
-      outputRowCount: Option[Long]): GatherMapsResult = withHashJoin { hashJoin =>
-    require(buildSide == GpuBuildRight, "left outer joins must build the right side")
-    JoinImpl.leftOuterHashJoinBuildRight(leftKeys, hashJoin, outputRowCount)
+      outputRowCount: Option[Long]): GatherMapsResult = {
+    JoinImpl.leftOuterHashJoinBuildRight(leftKeys, lease.resource, outputRowCount)
   }
 
   private def rightOuter(
       leftKeys: Table,
       rightKeys: Table,
-      outputRowCount: Option[Long]): GatherMapsResult = withHashJoin { hashJoin =>
-    require(buildSide == GpuBuildLeft, "right outer joins must build the left side")
-    JoinImpl.rightOuterHashJoinBuildLeft(rightKeys, hashJoin, outputRowCount)
+      outputRowCount: Option[Long]): GatherMapsResult = {
+    JoinImpl.rightOuterHashJoinBuildLeft(rightKeys, lease.resource, outputRowCount)
   }
 
   private def leftSemi(leftKeys: Table, rightKeys: Table): GatherMapsResult = {
-    require(buildSide == GpuBuildRight, "left semi joins must build the right side")
     withResource(inner(leftKeys, rightKeys)) { innerMaps =>
       JoinImpl.makeLeftSemi(innerMaps, leftKeys.getRowCount.toInt)
     }
   }
 
   private def leftAnti(leftKeys: Table, rightKeys: Table): GatherMapsResult = {
-    require(buildSide == GpuBuildRight, "left anti joins must build the right side")
     withResource(inner(leftKeys, rightKeys)) { innerMaps =>
       JoinImpl.makeLeftAnti(innerMaps, leftKeys.getRowCount.toInt)
     }
   }
 
-  private def distinct(
-      joinType: JoinType,
-      leftKeys: Table,
-      rightKeys: Table): GatherMapsResult = {
-    joinType match {
-      case LeftOuter | LeftSemi | LeftAnti =>
-        require(buildSide == GpuBuildRight, s"$joinType joins must build the right side")
-      case RightOuter =>
-        require(buildSide == GpuBuildLeft, "right outer joins must build the left side")
-      case _ =>
-    }
-    withDistinctHashJoin { distinctHashJoin =>
-      joinType match {
-        case LeftOuter =>
-          JoinImpl.leftOuterDistinctHashJoinBuildRight(leftKeys, distinctHashJoin)
-        case RightOuter =>
-          JoinImpl.rightOuterDistinctHashJoinBuildLeft(rightKeys, distinctHashJoin)
-        case LeftSemi =>
-          withResource(JoinImpl.innerDistinctHashJoinBuildRight(leftKeys, distinctHashJoin)) {
-            innerMaps => JoinImpl.makeLeftSemi(innerMaps, leftKeys.getRowCount.toInt)
-          }
-        case LeftAnti =>
-          withResource(JoinImpl.innerDistinctHashJoinBuildRight(leftKeys, distinctHashJoin)) {
-            innerMaps => JoinImpl.makeLeftAnti(innerMaps, leftKeys.getRowCount.toInt)
-          }
-        case _: InnerLike if buildSide == GpuBuildRight =>
-          JoinImpl.innerDistinctHashJoinBuildRight(leftKeys, distinctHashJoin)
-        case _: InnerLike =>
-          JoinImpl.innerDistinctHashJoinBuildLeft(rightKeys, distinctHashJoin)
-        case _ => throw new IllegalStateException(s"unsupported distinct join type $joinType")
-      }
-    }
-  }
-
   override def outputRowCount(joinType: JoinType, probeKeys: Table): Option[Long] = {
-    artifact match {
-      case Left(_) => Some(withHashJoin { hashJoin =>
-        joinType match {
-          case _: InnerLike => probeKeys.innerJoinRowCount(hashJoin)
-          case LeftOuter | RightOuter => probeKeys.leftJoinRowCount(hashJoin)
-          case _ => throw new IllegalStateException(
-            s"exact output row count is unsupported for $joinType")
-        }
-      })
-      case Right(_) => None
+    Some(joinType match {
+      case _: InnerLike => probeKeys.innerJoinRowCount(lease.resource)
+      case LeftOuter | RightOuter => probeKeys.leftJoinRowCount(lease.resource)
+      case _ => throw new IllegalStateException(
+        s"exact output row count is unsupported for $joinType")
+    })
+  }
+
+  override def close(): Unit = lease.close()
+}
+
+/**
+ * Backend that holds a lease on a reusable cuDF distinct hash artifact until `close()`. This
+ * probes a pre-built native table.
+ */
+private final class CachedDistinctHashProbeBackend(
+    override val buildSide: GpuBuildSide,
+    lease: SharedRecomputableHandle.Lease[CudfDistinctHashJoin])
+    extends HashProbeBackend {
+  override val isCached: Boolean = true
+
+  override protected def doExecute(
+      request: BackendJoinRequest,
+      leftKeys: Table,
+      rightKeys: Table,
+      outputRowCount: Option[Long]): GatherMapsResult = request match {
+    case BackendJoinRequest.Inner => inner(leftKeys, rightKeys)
+    case BackendJoinRequest.LeftOuter | BackendJoinRequest.RightOuter =>
+      throw new IllegalStateException("expected a non-distinct hash build")
+    case BackendJoinRequest.LeftSemi => leftSemi(leftKeys, rightKeys)
+    case BackendJoinRequest.LeftAnti => leftAnti(leftKeys, rightKeys)
+    case _: BackendJoinRequest.Distinct.Inner => inner(leftKeys, rightKeys)
+    case BackendJoinRequest.Distinct.LeftOuter => leftOuter(leftKeys)
+    case BackendJoinRequest.Distinct.RightOuter => rightOuter(rightKeys)
+    case BackendJoinRequest.Distinct.LeftSemi => leftSemi(leftKeys, rightKeys)
+    case BackendJoinRequest.Distinct.LeftAnti => leftAnti(leftKeys, rightKeys)
+  }
+
+  private def inner(leftKeys: Table, rightKeys: Table): GatherMapsResult = {
+    buildSide match {
+      case GpuBuildLeft =>
+        JoinImpl.innerDistinctHashJoinBuildLeft(rightKeys, lease.resource)
+      case GpuBuildRight =>
+        JoinImpl.innerDistinctHashJoinBuildRight(leftKeys, lease.resource)
     }
   }
 
-  override def close(): Unit = artifact.fold(_.close(), _.close())
+  private def leftSemi(leftKeys: Table, rightKeys: Table): GatherMapsResult = {
+    withResource(inner(leftKeys, rightKeys)) { innerMaps =>
+      JoinImpl.makeLeftSemi(innerMaps, leftKeys.getRowCount.toInt)
+    }
+  }
+
+  private def leftAnti(leftKeys: Table, rightKeys: Table): GatherMapsResult = {
+    withResource(inner(leftKeys, rightKeys)) { innerMaps =>
+      JoinImpl.makeLeftAnti(innerMaps, leftKeys.getRowCount.toInt)
+    }
+  }
+
+  private def leftOuter(leftKeys: Table): GatherMapsResult = {
+    JoinImpl.leftOuterDistinctHashJoinBuildRight(leftKeys, lease.resource)
+  }
+
+  private def rightOuter(rightKeys: Table): GatherMapsResult = {
+    JoinImpl.rightOuterDistinctHashJoinBuildLeft(rightKeys, lease.resource)
+  }
+
+  override def outputRowCount(joinType: JoinType, probeKeys: Table): Option[Long] = None
+
+  override def close(): Unit = lease.close()
 }
 
 /**
@@ -462,32 +517,37 @@ final class HashBuildCache extends AutoCloseable {
   private[this] val demands = mutable.HashMap.empty[(HashBuildKey, HashBuildDemandId), BuildDemand]
   private[this] var closed = false
 
-  private def futureFor(key: HashBuildKey): Option[CompletableFuture[HashArtifact]] = synchronized {
-    builds.get(key)
-  }
-
   /**
-   * Return a snapshot for `key`:
-   *  - `Cold` means no usable cache entry
-   *  - `Bulding` means initial construction is in flight
-   *  - `Ready` means the native artifact is resident
-   *  - `Evicted` means the cached handle exists but must be rebuilt on the next acquisition
+   * Return a snapshot for `key` to be used by the planner:
+   *  - `Cold` means no usable cache entry for the artifact
+   *  - `Building` means initial construction of the artifact is in flight
+   *  - `Ready` means the artifact exists and the native resource is resident in the handle
+   *  - `Evicted` means the artifact exists but its native resource is not resident
+   *
+   * Note that `Ready` and `Evicted` are derived from the artifact's independently synchronized
+   * handle and are therefore best-effort snapshots, since it could be spilled/rebuilt at any time.
    */
-  def status(key: HashBuildKey): BuildStatus = futureFor(key) match {
-    case None => BuildStatus.Cold
-    case Some(future) if !future.isDone => BuildStatus.Building
-    case Some(future) if future.isCompletedExceptionally => BuildStatus.Cold
-    case Some(future) =>
-      if (future.getNow(null).isReady) BuildStatus.Ready else BuildStatus.Evicted
+  def status(key: HashBuildKey): BuildStatus = {
+    val maybeFuture = synchronized { builds.get(key) }
+    maybeFuture match {
+      case None => BuildStatus.Cold
+      case Some(future) if !future.isDone => BuildStatus.Building
+      case Some(future) if future.isCompletedExceptionally => BuildStatus.Cold
+      case Some(future) =>
+        if (future.getNow(null).isReady) BuildStatus.Ready else BuildStatus.Evicted
+    }
   }
 
   /** Return build statistics for a `key` only if it has a resident artifact. */
-  def readyStats(key: HashBuildKey): Option[JoinBuildSideStats] = futureFor(key).flatMap { future =>
-    if (future.isDone && !future.isCompletedExceptionally) {
-      val artifact = future.getNow(null)
-      if (artifact.isReady) Some(artifact.stats) else None
-    } else {
-      None
+  def readyStats(key: HashBuildKey): Option[JoinBuildSideStats] = {
+    val maybeFuture = synchronized { builds.get(key) }
+    maybeFuture.flatMap { future =>
+      if (future.isDone && !future.isCompletedExceptionally) {
+        val artifact = future.getNow(null)
+        if (artifact.isReady) Some(artifact.stats) else None
+      } else {
+        None
+      }
     }
   }
 
@@ -719,23 +779,25 @@ final class CachedHashBackendProvider private[execution] (
       request: BackendJoinRequest): HashProbeBackend = {
     // If the request has a required build side, bypass policy selection.
     val selectedSide = request.requiredBuildSide.getOrElse {
-      val observedStatus = cache.status(key)
       val probeRows = if (offeredSide == GpuBuildLeft) {
         probe.rightRowCount
       } else {
         probe.leftRowCount
       }
-      // Record the probe demand if the build cache is cold or evicted. Otherwise,
-      // get the current demand for this hash build.
-      val recordDemand = probe.selection == JoinBuildSideSelection.AUTO &&
-        (observedStatus == BuildStatus.Cold || observedStatus == BuildStatus.Evicted)
-      val demand = if (recordDemand) {
-        cache.observeProbe(key, demandId, probeRows)
-      } else {
-        cache.demand(key, demandId)
+      val (currentStatus, demand) = cache.synchronized {
+        // Record the probe demand if the build cache is cold or evicted. Otherwise, get the
+        // current demand for this hash build. Do this under the cache lock so that another
+        // thread cannot concurrently change artifact status and reset demand.
+        val observedStatus = cache.status(key)
+        val recordDemand = probe.selection == JoinBuildSideSelection.AUTO &&
+          (observedStatus == BuildStatus.Cold || observedStatus == BuildStatus.Evicted)
+        val demand = if (recordDemand) {
+          cache.observeProbe(key, demandId, probeRows)
+        } else {
+          cache.demand(key, demandId)
+        }
+        (observedStatus, demand)
       }
-      // Re-read after recording rent in case a build was just published.
-      val currentStatus = cache.status(key)
       // Pass the probe context and the accumulated demand for this build to the
       // planner and let it select the build side to use.
       HashBuildPlanner.select(
@@ -765,6 +827,7 @@ final class CachedHashBackendProvider private[execution] (
 
   private def acquireCachedBackend(buildSide: GpuBuildSide): HashProbeBackend = {
     val (artifact, reused) = cache.getOrBuild(key, metrics)(create())
+    // The callback resets demand if acquiring the artifact would reconstruct its native resource.
     val backend = artifact.backend(
       buildSide, metrics, () => cache.resetDemands(key))
     closeOnExcept(backend) { _ =>

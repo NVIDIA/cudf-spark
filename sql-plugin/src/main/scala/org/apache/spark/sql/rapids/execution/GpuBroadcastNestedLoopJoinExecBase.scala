@@ -23,6 +23,7 @@ import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingArray
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{withRestoreOnRetry, withRetry, withRetryNoSplit}
+import com.nvidia.spark.rapids.SplittableJoinIterator.PreparedJoinBatch
 import com.nvidia.spark.rapids.shims.{GpuBroadcastJoinMeta, ShimBinaryExecNode}
 
 import org.apache.spark.TaskContext
@@ -221,7 +222,7 @@ class ConditionalNestedLoopJoinIterator(
     condition: ast.CompiledExpression,
     opTime: GpuMetric,
     joinTime: GpuMetric)
-    extends SplittableJoinIterator(
+    extends SplittableJoinIterator[PreparedJoinBatch](
       NvtxRegistry.JOIN_GATHER,
       stream,
       streamAttributes,
@@ -238,7 +239,7 @@ class ConditionalNestedLoopJoinIterator(
   }
 
   override def prepareJoinBatch(scb: LazySpillableColumnarBatch): PreparedJoinBatch = {
-    EstimatedJoinBatch {
+    PreparedJoinBatch {
       scb.checkpoint()
       builtBatch.checkpoint()
       withRetryNoSplit {

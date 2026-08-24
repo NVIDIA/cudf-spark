@@ -103,6 +103,7 @@ object HashBuildPlanner {
       false
     } else {
       val q = probeCost(numericKeys)
+      // [B + q * sum(S_i) <= sum(S_i + q * B)] ? admit : don't admit
       val storedCost = offeredRows + q * demand.probeRows
       val onDemandCost = demand.probeRows + q * offeredRows * demand.probeCount
       storedCost <= onDemandCost

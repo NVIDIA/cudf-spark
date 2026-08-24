@@ -606,9 +606,12 @@ class SharedRecomputableHandle[T <: AutoCloseable] private[spill] (
       spilling = false
       (release, closed && pinCount == 0 && !rebuilding)
     }
-    toClose.safeClose()
-    if (shouldClose) {
-      doClose()
+    try {
+      toClose.safeClose()
+    } finally {
+      if (shouldClose) {
+        doClose()
+      }
     }
   }
 

@@ -174,8 +174,27 @@ abstract class AbstractGpuJoinIterator(
   }
 }
 
+object SplittableJoinIterator {
+  /**
+   * Holds join state for a single stream-side batch, used for output sizing and join execution.
+   * At the minimum it holds an estimated or exact output row count.
+   */
+  trait PreparedJoinBatch extends AutoCloseable {
+    def numJoinRows: Long
+    override def close(): Unit = {}
+  }
+
+  object PreparedJoinBatch {
+    /** Create a prepared state that just holds a sizing row count. */
+    def apply(rows: Long): PreparedJoinBatch = new PreparedJoinBatch {
+      override val numJoinRows: Long = rows
+    }
+  }
+}
+
 /**
  * Base class for join iterators that split and spill batches to avoid GPU OOM errors.
+ * @tparam P state prepared for one stream-side batch
  * @param gatherNvtxId NvtxId to use for the NVTX range when producing the join gather maps
  * @param stream iterator to produce the batches for the streaming side input of the join
  * @param streamAttributes attributes corresponding to the streaming side input
@@ -185,7 +204,7 @@ abstract class AbstractGpuJoinIterator(
  * @param opTime metric to record time spent for this operation
  * @param joinTime metric to record GPU time spent in join
  */
-abstract class SplittableJoinIterator(
+abstract class SplittableJoinIterator[P <: SplittableJoinIterator.PreparedJoinBatch](
     gatherNvtxId: NvtxId,
     stream: Iterator[LazySpillableColumnarBatch],
     streamAttributes: Seq[Attribute],
@@ -205,19 +224,8 @@ abstract class SplittableJoinIterator(
   // If the join explodes this holds batches from the stream side split into smaller pieces.
   private val pendingSplits = scala.collection.mutable.Queue[LazySpillableColumnarBatch]()
 
-  /**
-   * Holds join state for a single stream-side batch, used for output sizing and join execution.
-   * At the minimum it holds an estimated or exact output row count.
-   */
-  protected trait PreparedJoinBatch extends AutoCloseable {
-    def numJoinRows: Long
-    override def close(): Unit = {}
-  }
-
-  protected case class EstimatedJoinBatch(numJoinRows: Long) extends PreparedJoinBatch
-
   /** Prepare the state for this stream side batch. */
-  protected def prepareJoinBatch(cb: LazySpillableColumnarBatch): PreparedJoinBatch
+  protected def prepareJoinBatch(cb: LazySpillableColumnarBatch): P
 
   /**
    * Create a join gatherer.
@@ -227,7 +235,7 @@ abstract class SplittableJoinIterator(
    *         to build the gatherer again (e.g.: to skip a degenerate join result batch)
    */
   protected def createGatherer(cb: LazySpillableColumnarBatch,
-      prepared: Option[PreparedJoinBatch]): Option[JoinGatherer]
+      prepared: Option[P]): Option[JoinGatherer]
 
   override def hasNextStreamBatch: Boolean = {
     isInitialJoin || pendingSplits.nonEmpty || stream.hasNext

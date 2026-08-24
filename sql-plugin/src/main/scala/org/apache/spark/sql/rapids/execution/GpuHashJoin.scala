@@ -21,6 +21,7 @@ import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{withRestoreOnRetry, withRetryNoSplit}
+import com.nvidia.spark.rapids.SplittableJoinIterator.PreparedJoinBatch
 import com.nvidia.spark.rapids.jni.{GpuOOM, JoinPrimitives}
 import com.nvidia.spark.rapids.shims.ShimBinaryExecNode
 
@@ -1296,6 +1297,17 @@ private[execution] case object MixedJoinPlan extends HashJoinPlan {
 }
 
 /**
+ * Holds hash join state for one stream-side batch. Plans with a [[BackendJoinRequest]] also
+ * include a [[ResolvedHashJoin]] that owns the selected backend.
+ */
+private[execution] final class HashJoinBatch(
+    override val numJoinRows: Long,
+    val plan: HashJoinPlan,
+    val operation: Option[ResolvedHashJoin]) extends PreparedJoinBatch {
+  override def close(): Unit = operation.foreach(_.close())
+}
+
+/**
  * Base iterator for hash joins.
  *
  * @param buildSide the side that was materialized/buffered for this join (data movement decision).
@@ -1317,7 +1329,7 @@ abstract class BaseHashJoinIterator(
     conditionForLogging: Option[Expression],
     opTime: GpuMetric,
     joinTime: GpuMetric)
-    extends SplittableJoinIterator(
+    extends SplittableJoinIterator[HashJoinBatch](
       NvtxRegistry.JOIN_GATHER,
       stream,
       streamAttributes,
@@ -1355,17 +1367,6 @@ abstract class BaseHashJoinIterator(
   }
 
   private[this] var cachedBackendsDisabled = false
-
-  /**
-   * Holds hash join state for one stream-side batch. Plans with a [[BackendJoinRequest]] also
-   * include a [[ResolvedHashJoin]] that owns the selected backend.
-   */
-  protected final class HashJoinBatch(
-      override val numJoinRows: Long,
-      val plan: HashJoinPlan,
-      val operation: Option[ResolvedHashJoin]) extends PreparedJoinBatch {
-    override def close(): Unit = operation.foreach(_.close())
-  }
 
   protected def selectHashJoinPlan(
       leftRowCount: Long,
@@ -1440,7 +1441,7 @@ abstract class BaseHashJoinIterator(
   }
 
   /* Prepare and resolve the hash join operation that we are going to use for a stream batch. */
-  override def prepareJoinBatch(cb: LazySpillableColumnarBatch): PreparedJoinBatch = {
+  override def prepareJoinBatch(cb: LazySpillableColumnarBatch): HashJoinBatch = {
     val fallback = estimateNumJoinRows(cb)
     val (leftRows, rightRows) = buildSide match {
       case GpuBuildLeft => (built.numRows.toLong, cb.numRows.toLong)
@@ -1642,12 +1643,13 @@ abstract class BaseHashJoinIterator(
 
   override def createGatherer(
       cb: LazySpillableColumnarBatch,
-      prepared: Option[PreparedJoinBatch]): Option[JoinGatherer] = {
-    if (prepared.isEmpty) {
-      onEmptyStream()
-      return None
+      prepared: Option[HashJoinBatch]): Option[JoinGatherer] = {
+    val hashBatch = prepared match {
+      case Some(batch) => batch
+      case None =>
+        onEmptyStream()
+        return None
     }
-    val hashBatch = prepared.get.asInstanceOf[HashJoinBatch]
     // cb will be closed by the caller, so use a spill-only version here
     val spillOnlyCb = LazySpillableColumnarBatch.spillOnly(cb)
     val batches = Seq(built, spillOnlyCb)

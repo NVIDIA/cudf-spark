@@ -266,25 +266,27 @@ abstract class GpuBroadcastHashJoinExecBase(
           broadcastRelation,
           buildSchema,
           new CollectTimeIterator(NvtxRegistry.BROADCAST_JOIN_STREAM, it, streamTime))
-      // Check that the broadcast batch is not an empty relation before we pass it to the join.
-      val broadcastBatch = broadcastRelation.value match {
-        case batch: SerializeConcatHostBuffersDeserializeBatch => Some(batch)
-        case _ => None
-      }
-      val hashBackendProvider = if (enableHashTableReuse) {
-        broadcastBatch.map { batch =>
-          val taskContext = TaskContext.get()
-          val demandId = HashBuildDemandId(localJoinId, taskContext.stageId(),
-            taskContext.stageAttemptNumber())
-          val filterOutNulls = GpuHashJoin.buildSideNeedsNullFilter(
-            joinType, compareNullsEqual, buildSide, buildKeys)
-          batch.createCachedHashBackendProvider(buildSide, demandId, cachedPostProjectionKey,
-            cachedBoundBuildKeys, compareNullsEqual, filterOutNulls,
-            cachedPostProjectionAndClose,
-            HashBuildMetrics(hashTableBuilds, hashTableRebuilds, hashTableReuses))
-        }.getOrElse(OnDemandHashBackendProvider)
-      } else {
-        OnDemandHashBackendProvider
+      val hashBackendProvider = closeOnExcept(broadcastBuiltBatch) { _ =>
+        // Check that the broadcast batch is not an empty relation before we pass it to the join.
+        val broadcastBatch = broadcastRelation.value match {
+          case batch: SerializeConcatHostBuffersDeserializeBatch => Some(batch)
+          case _ => None
+        }
+        if (enableHashTableReuse) {
+          broadcastBatch.map { batch =>
+            val taskContext = TaskContext.get()
+            val demandId = HashBuildDemandId(localJoinId, taskContext.stageId(),
+              taskContext.stageAttemptNumber())
+            val filterOutNulls = GpuHashJoin.buildSideNeedsNullFilter(
+              joinType, compareNullsEqual, buildSide, buildKeys)
+            batch.createCachedHashBackendProvider(buildSide, demandId, cachedPostProjectionKey,
+              cachedBoundBuildKeys, compareNullsEqual, filterOutNulls,
+              cachedPostProjectionAndClose,
+              HashBuildMetrics(hashTableBuilds, hashTableRebuilds, hashTableReuses))
+          }.getOrElse(OnDemandHashBackendProvider)
+        } else {
+          OnDemandHashBackendProvider
+        }
       }
       val builtBatch = postProjectionAndClose.map(_(broadcastBuiltBatch))
           .getOrElse(broadcastBuiltBatch)
