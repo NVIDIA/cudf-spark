@@ -201,7 +201,7 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
         }
       } catch {
         case t: Throwable =>
-          info("THROWABLE CAUGHT IN " + name)
+          ConsoleOutput.writeErrorLine("THROWABLE CAUGHT IN " + name)
           t.printStackTrace(System.err)
       }
     }
@@ -306,7 +306,7 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
 
   object MyThreadSignaler extends Signaler {
     override def apply(testThread: Thread): Unit = {
-      info("\n\n\t\tTEST THREAD APPEARS TO BE STUCK")
+      ConsoleOutput.writeErrorLine("\n\n\t\tTEST THREAD APPEARS TO BE STUCK")
       Thread.getAllStackTraces.forEach {
         case (thread, trace) =>
           val name = if (thread.getId == testThread.getId) {
@@ -314,7 +314,7 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
           } else {
             thread.getName
           }
-          info(name + "\n\t" + trace.mkString("\n\t"))
+          ConsoleOutput.writeErrorLine(name + "\n\t" + trace.mkString("\n\t"))
       }
     }
   }
@@ -364,7 +364,7 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
       case t: Throwable =>
         // if the exception does not have a message set, then scalatest fails in
         // ways that make it so you do not see the exception at all.
-        info(t.toString)
+        ConsoleOutput.writeErrorLine(t)
         t.printStackTrace(System.err)
         throw t
     }

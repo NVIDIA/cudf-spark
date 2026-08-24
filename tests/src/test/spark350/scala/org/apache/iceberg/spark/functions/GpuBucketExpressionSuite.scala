@@ -26,7 +26,6 @@
 {"spark": "358"}
 {"spark": "359"}
 spark-rapids-shim-json-lines ***/
-
 package org.apache.iceberg.spark.functions
 
 import ai.rapids.cudf.{DType, HostColumnVector}
@@ -36,17 +35,18 @@ import com.nvidia.spark.rapids.FuzzerUtils.createSchema
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.funsuite.AnyFunSuite
 
+import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.expressions.ExprId
 import org.apache.spark.sql.types.{DataType, DataTypes, Decimal, DecimalType}
 import org.apache.spark.unsafe.types.UTF8String
 
-class GpuBucketExpressionSuite extends AnyFunSuite with BeforeAndAfterAll {
+class GpuBucketExpressionSuite extends AnyFunSuite with BeforeAndAfterAll with Logging {
   private var seed = 2L
   private val numBuckets = Int.MaxValue
 
   override def beforeAll(): Unit = {
     seed = System.currentTimeMillis()
-    info(s"Random seed set to $seed")
+    logWarning(s"Random seed set to $seed")
   }
 
   test("Int bucket function") {

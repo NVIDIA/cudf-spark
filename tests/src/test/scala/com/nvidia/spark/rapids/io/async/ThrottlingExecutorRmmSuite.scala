@@ -22,7 +22,7 @@ import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 
 import ai.rapids.cudf.{DeviceMemoryBuffer, Rmm, RmmAllocationMode, RmmCudaMemoryResource,
   RmmDeviceMemoryResource, RmmEventHandler, RmmLimitingResourceAdaptor, RmmTrackingResourceAdaptor}
-import com.nvidia.spark.rapids.{Arm, RmmSparkRetrySuiteBase, ScalableTaskCompletion,
+import com.nvidia.spark.rapids.{Arm, ConsoleOutput, RmmSparkRetrySuiteBase, ScalableTaskCompletion,
   TaskRegistryTracker}
 import com.nvidia.spark.rapids.jni.{GpuRetryOOM, RmmSpark, TaskPriority}
 import com.nvidia.spark.rapids.spill.SpillFramework
@@ -38,7 +38,7 @@ class ThrottlingExecutorRmmSuite extends RmmSparkRetrySuiteBase with TimeLimits 
 
   object ThreadDumpSignaler extends Signaler {
     override def apply(testThread: Thread): Unit = {
-      info("\n\n\t\tTEST THREAD APPEARS TO BE STUCK")
+      ConsoleOutput.writeErrorLine("\n\n\t\tTEST THREAD APPEARS TO BE STUCK")
       Thread.getAllStackTraces.forEach {
         case (thread, trace) =>
           val name = if (thread.getId == testThread.getId) {
@@ -46,7 +46,7 @@ class ThrottlingExecutorRmmSuite extends RmmSparkRetrySuiteBase with TimeLimits 
           } else {
             thread.getName
           }
-          info(name + "\n\t" + trace.mkString("\n\t"))
+          ConsoleOutput.writeErrorLine(name + "\n\t" + trace.mkString("\n\t"))
       }
     }
   }

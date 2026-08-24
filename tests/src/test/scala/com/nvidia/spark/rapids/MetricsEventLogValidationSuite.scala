@@ -13,7 +13,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package com.nvidia.spark.rapids
 
 import java.io.{BufferedReader, File, InputStreamReader}
@@ -91,7 +90,6 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
 
         // Give a small amount of time for file system operations to complete
         Thread.sleep(10)
-
       } catch {
         case e: Exception =>
           info(s"Warning: Error stopping Spark session: ${e.getMessage}")
@@ -329,9 +327,6 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
         f"total executor run time (${totalTaskExecutionTime / 1000000.0}%.2f ms), " +
         f"but was ${operatorTimeRatio * 100.0}%.1f%%")
 
-    operatorTimeMetrics.foreach { m =>
-      info(f"  ${m.name}: ${m.value / 1000000.0}%.2f ms (stage ${m.stage.getOrElse("unknown")})")
-    }
   }
 
   test("operator time metrics are less when c2r and r2c happened") {
@@ -420,11 +415,6 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
         f"80%% of total executor run time (${totalTaskExecutionTime / 1000000.0}%.2f ms), " +
         f"but was ${operatorTimeRatio * 100.0}%.1f%%")
 
-    operatorTimeMetrics.foreach { m =>
-      info(f"  ${m.name}: ${m.value / 1000000.0}%.2f ms " +
-        f"(stage ${m.stage.getOrElse("unknown")})")
-    }
-    info("Test completed successfully.")
   }
 
   test("operator time metrics are reasonable for parquet write jobs") {
@@ -559,12 +549,6 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
           f"${minExpectedStage5OperatorTimeFraction * 100.0}%.1f%% of " +
           f"$numWritePartitions write partitions and $slowFsWriteDelayMs ms slowfs delay, " +
           f"but was ${stage5OperatorTime / 1000000.0}%.2f ms")
-
-      operatorTimeMetrics.foreach { m =>
-        info(f"  ${m.name}: ${m.value / 1000000.0}%.2f ms " +
-          f"(stage ${m.stage.getOrElse("unknown")})")
-      }
-      info("Parquet write job: Test completed successfully.")
 
     } finally {
 
