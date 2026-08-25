@@ -246,6 +246,47 @@ def test_parquet_read_multithread_flow_ctrl_excessive_req(spark_tmp_path, keep_o
     assert_gpu_and_cpu_are_equal_collect(read_parquet_sql(data_path), conf=tiny_pool_conf)
 
 
+def _scan_output_batches(plan):
+    """Batches the scan produced. Raises if no GPU scan is present, so CPU fallback fails."""
+    nodes = [plan]
+    while nodes:
+        node = nodes.pop()
+        metric = node.metrics().get('numOutputBatches')
+        if 'Scan' in node.nodeName() and metric.isDefined():
+            return metric.get().value()
+        children = node.children()
+        for i in range(children.size()):
+            nodes.append(children.apply(i))
+    raise AssertionError('no scan with numOutputBatches in plan')
+
+
+def test_parquet_read_estimate_limits_output_batches(spark_tmp_path):
+    data_path = spark_tmp_path + '/PARQUET_DATA'
+    # Small row groups so one file holds many blocks for the reader to coalesce.
+    with_cpu_session(
+        lambda spark: gen_df(spark, [('a', long_gen)], length=8192).coalesce(1).write
+            .option('parquet.block.size', 4096).parquet(data_path),
+        conf=rebase_write_corrected_conf)
+
+    batches = {}
+
+    def read_with_estimate(use_estimate):
+        # The estimate is only consulted when there is no chunked reader.
+        assert_cpu_and_gpu_are_equal_collect_with_capture(
+            lambda spark: spark.read.parquet(data_path),
+            conf={
+                'spark.sql.adaptive.enabled': 'false',
+                'spark.rapids.sql.reader.chunked': 'false',
+                'spark.rapids.sql.reader.useReadEstimateFromSchema': use_estimate,
+                'spark.rapids.sql.reader.batchSizeBytes': 4096},
+            gpu_plan_assertion=lambda plan: batches.update(
+                {use_estimate: _scan_output_batches(plan)}))
+
+    read_with_estimate('true')
+    read_with_estimate('false')
+    assert batches['true'] > batches['false']
+
+
 """
 This test case addresses the potential deadlock issue that occurs when multiple Parquet scan operators
 are in the same stage and depend on each other for downstream operations. The test creates a bucketed 

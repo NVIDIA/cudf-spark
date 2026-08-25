@@ -46,6 +46,22 @@ class OrcScanSuite extends SparkQueryCompareTestSuite {
   testSparkResultsAreEqual("Test ORC count chunked by bytes", fileSplitsOrc,
     new SparkConf().set(RapidsConf.MAX_READER_BATCH_SIZE_BYTES.key, "100"))(frameCount)
 
+  // The read estimate is only consulted when there is no chunked reader, so the chunked reader
+  // is turned off here to keep covering the byte limit path.
+  testSparkResultsAreEqual("Test ORC count chunked by bytes using the read estimate",
+    fileSplitsOrc,
+    new SparkConf()
+      .set(RapidsConf.CHUNKED_READER.key, "false")
+      .set(RapidsConf.READER_USE_READ_ESTIMATE_FROM_SCHEMA.key, "true")
+      .set(RapidsConf.MAX_READER_BATCH_SIZE_BYTES.key, "100"))(frameCount)
+
+  testSparkResultsAreEqual("Test ORC count chunked by bytes skipping the read estimate",
+    fileSplitsOrc,
+    new SparkConf()
+      .set(RapidsConf.CHUNKED_READER.key, "false")
+      .set(RapidsConf.READER_USE_READ_ESTIMATE_FROM_SCHEMA.key, "false")
+      .set(RapidsConf.MAX_READER_BATCH_SIZE_BYTES.key, "100"))(frameCount)
+
   testSparkResultsAreEqual("schema evolution with all top-level fields missing",
     frameFromOrcWithSchema("schema-can-prune.orc", StructType(Seq(
       StructField("missing", StringType))))) { frame => frame }

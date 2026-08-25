@@ -97,6 +97,7 @@ class GpuCoalescingIcebergParquetReader(
       conf.maxGpuColumnSizeBytes,
       conf.useChunkedReader,
       conf.maxChunkedReaderMemoryUsageSizeBytes,
+      conf.skipReadEstimate,
       CpuCompressionConfig.disabled(),
       conf.metrics,
       new StructType(), // partitionSchema

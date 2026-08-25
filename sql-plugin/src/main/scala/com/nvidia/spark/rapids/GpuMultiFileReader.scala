@@ -303,6 +303,7 @@ abstract class MultiFilePartitionReaderFactoryBase(
   protected val targetBatchSizeBytes: Long = rapidsConf.gpuTargetBatchSizeBytes
   protected val maxGpuColumnSizeBytes: Long = rapidsConf.maxGpuColumnSizeBytes
   protected val useChunkedReader: Boolean = rapidsConf.chunkedReaderEnabled
+  protected val useReadEstimateFromSchema: Boolean = rapidsConf.useReadEstimateFromSchema
   protected val maxChunkedReaderMemoryUsageSizeBytes: Long =
     if(rapidsConf.limitChunkedReaderMemoryUsage) {
       (rapidsConf.chunkedReaderMemoryUsageRatio * targetBatchSizeBytes).toLong
@@ -1068,6 +1069,8 @@ class BatchContext(
  * @param maxReadBatchSizeRows  soft limit on the maximum number of rows the reader reads per batch
  * @param maxReadBatchSizeBytes soft limit on the maximum number of bytes the reader reads per batch
  * @param maxGpuColumnSizeBytes maximum number of bytes for a GPU column
+ * @param skipReadEstimate      whether to ignore the schema based estimated GPU memory when
+ *                              sizing a batch
  * @param poolConf              the thread pool configuration
  * @param execMetrics           metrics
  */
@@ -1078,6 +1081,7 @@ abstract class MultiFileCoalescingPartitionReaderBase(
     maxReadBatchSizeRows: Integer,
     maxReadBatchSizeBytes: Long,
     maxGpuColumnSizeBytes: Long,
+    skipReadEstimate: Boolean,
     poolConf: ThreadPoolConf,
     execMetrics: Map[String, GpuMetric]) extends FilePartitionReaderBase(conf, execMetrics)
     with MultiFileReaderFunctions {
@@ -1579,7 +1583,11 @@ abstract class MultiFileCoalescingPartitionReaderBase(
         }
 
         if (numRows == 0 || numRows + peekedRowCount <= maxReadBatchSizeRows) {
-          val estimatedBytes = GpuBatchUtils.estimateGpuMemory(currentReadSchema, peekedRowCount)
+          val estimatedBytes = if (skipReadEstimate) {
+            0L
+          } else {
+            GpuBatchUtils.estimateGpuMemory(currentReadSchema, peekedRowCount)
+          }
           if (numBytes == 0 || numBytes + estimatedBytes <= maxReadBatchSizeBytes) {
             // only care to check if we are actually adding in the next chunk
             if (currentFile != blockIterator.head.filePath) {

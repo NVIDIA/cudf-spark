@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2022, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,6 +30,26 @@ class ParquetScanSuite extends SparkQueryCompareTestSuite {
 
   testSparkResultsAreEqual("Test Parquet with byte chunks", fileSplitsParquet,
     conf = new SparkConf().set(RapidsConf.MAX_READER_BATCH_SIZE_BYTES.key, "100")) {
+    frame => frame.select(col("*"))
+  }
+
+  // The read estimate is only consulted when there is no chunked reader, so the chunked reader
+  // is turned off here to keep covering the byte limit path.
+  testSparkResultsAreEqual("Test Parquet with byte chunks using the read estimate",
+    fileSplitsParquet,
+    conf = new SparkConf()
+      .set(RapidsConf.CHUNKED_READER.key, "false")
+      .set(RapidsConf.READER_USE_READ_ESTIMATE_FROM_SCHEMA.key, "true")
+      .set(RapidsConf.MAX_READER_BATCH_SIZE_BYTES.key, "100")) {
+    frame => frame.select(col("*"))
+  }
+
+  testSparkResultsAreEqual("Test Parquet with byte chunks skipping the read estimate",
+    fileSplitsParquet,
+    conf = new SparkConf()
+      .set(RapidsConf.CHUNKED_READER.key, "false")
+      .set(RapidsConf.READER_USE_READ_ESTIMATE_FROM_SCHEMA.key, "false")
+      .set(RapidsConf.MAX_READER_BATCH_SIZE_BYTES.key, "100")) {
     frame => frame.select(col("*"))
   }
 
