@@ -173,10 +173,14 @@ def test_iceberg_v2_mixed_deletes(spark_tmp_table_factory, spark_tmp_path, reade
 
 @iceberg
 @ignore_order(local=True)
-@pytest.mark.parametrize('reader_type', rapids_reader_types)
+@pytest.mark.parametrize(
+    'reader_type,use_chunked_reader',
+    [pytest.param(reader_type, True, id=reader_type) for reader_type in rapids_reader_types] +
+    [pytest.param('PERFILE', False, id='PERFILE-one-shot')])
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @validate_execs_in_gpu_plan('GpuBatchScanExec')
-def test_iceberg_v3_deletion_vector(spark_tmp_table_factory, reader_type):
+def test_iceberg_v3_deletion_vector(
+        spark_tmp_table_factory, reader_type, use_chunked_reader):
     table_name = setup_base_iceberg_table(
         spark_tmp_table_factory,
         table_prop={'format-version': '3'})
@@ -198,6 +202,7 @@ def test_iceberg_v3_deletion_vector(spark_tmp_table_factory, reader_type):
     read_conf = {
         'spark.rapids.sql.format.iceberg.v3.enabled': 'true',
         'spark.rapids.sql.format.parquet.reader.type': reader_type,
+        'spark.rapids.sql.reader.chunked': use_chunked_reader,
     }
 
     assert_gpu_and_cpu_are_equal_collect(
