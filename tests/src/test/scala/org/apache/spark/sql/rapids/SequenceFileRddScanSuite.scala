@@ -19,7 +19,11 @@ package org.apache.spark.sql.rapids
 import java.io.{DataOutputStream, File, RandomAccessFile}
 import java.util.{Arrays, Random}
 
-import com.nvidia.spark.rapids.{GpuMetric, GpuRangeExec, RapidsConf, SparkQueryCompareTestSuite}
+import scala.concurrent.duration._
+
+import com.nvidia.spark.rapids.{GpuMetric, GpuRangeExec, RapidsConf, SparkQueryCompareTestSuite,
+  TestUtils}
+import com.nvidia.spark.rapids.spill.SpillFramework
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{ChecksumFileSystem, Path}
 import org.apache.hadoop.io.{BytesWritable, SequenceFile}
@@ -27,6 +31,7 @@ import org.apache.hadoop.io.SequenceFile.CompressionType
 import org.apache.hadoop.io.compress.{CompressionCodec, DefaultCodec}
 import org.apache.hadoop.mapreduce.lib.input.SequenceFileAsBinaryInputFormat
 import org.apache.hadoop.util.ReflectionUtils
+import org.scalatest.concurrent.Eventually
 
 import org.apache.spark.SparkConf
 import org.apache.spark.rdd.RDD
@@ -34,7 +39,7 @@ import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.execution.SerializeFromObjectExec
 import org.apache.spark.sql.functions.{col, spark_partition_id}
 
-class SequenceFileRddScanSuite extends SparkQueryCompareTestSuite {
+class SequenceFileRddScanSuite extends SparkQueryCompareTestSuite with Eventually {
   private val replaceConfKey = RapidsConf.SEQUENCEFILE_RDD_READ_ENABLED.key
   private val splitMaxSizeKey = "mapreduce.input.fileinputformat.split.maxsize"
   private val compressionTypes =
@@ -397,9 +402,14 @@ class SequenceFileRddScanSuite extends SparkQueryCompareTestSuite {
       writeLzoPartFiles(directory, fileCount = 4, rowCount = 16, payloadSize = 2048)
 
       withGpuSparkSession({ spark =>
+        val initialHostHandles = SpillFramework.stores.hostStore.numHandles
         val df = copiedDataFrame(spark, directory).limit(1)
         assert(df.collect().length == 1)
         assert(gpuScan(df).allMetrics(GpuMetric.NUM_OUTPUT_BATCHES).value > 0)
+        eventually(timeout(10.seconds)) {
+          assert(TestUtils.numRunningMultiFileReaderTasks == 0)
+          assert(SpillFramework.stores.hostStore.numHandles == initialHostHandles)
+        }
       }, replacementConf(batchSize = "32k", keepReadsInOrder = false)
         .set("spark.rapids.sql.exec.CollectLimitExec", "true")
         .set(RapidsConf.TEST_ALLOWED_NONGPU.key, "CollectLimitExec"))
