@@ -104,7 +104,8 @@ class SequenceFileBinaryFileFormatSuite extends SparkQueryCompareTestSuite {
 
   private def gpuConf(
       batchSize: String = "2m",
-      maxRows: Option[Int] = None): SparkConf = {
+      maxRows: Option[Int] = None,
+      keepReadsInOrder: Boolean = true): SparkConf = {
     val conf = new SparkConf()
       .set("spark.sql.files.maxPartitionBytes", "32m")
       .set(RapidsConf.MAX_READER_BATCH_SIZE_BYTES.key, batchSize)
@@ -112,6 +113,7 @@ class SequenceFileBinaryFileFormatSuite extends SparkQueryCompareTestSuite {
       .set(RapidsConf.MULTITHREAD_READ_MEMORY_LIMIT_ENABLED.key, "true")
       .set(RapidsConf.MULTITHREAD_READ_MEMORY_LIMIT_SIZE.key, "16m")
       .set(RapidsConf.MULTITHREAD_READ_MEMORY_LIMIT_TEST_PER_STAGE_POOL.key, "true")
+      .set(RapidsConf.READER_MULTITHREADED_READ_KEEP_ORDER.key, keepReadsInOrder.toString)
     maxRows.foreach(rows => conf.set(RapidsConf.MAX_READER_BATCH_SIZE_ROWS.key, rows.toString))
     conf
   }
@@ -156,7 +158,7 @@ class SequenceFileBinaryFileFormatSuite extends SparkQueryCompareTestSuite {
         val actualFiles = inputFiles.collect().map(row => new Path(row.getString(0)).getName).toSet
         assert(actualFiles == (0 until 4).map(index => f"part-$index%05d.seq").toSet)
         assert(scan(inputFiles).allMetrics(GpuMetric.NUM_OUTPUT_BATCHES).value == 4)
-      }, gpuConf())
+      }, gpuConf(keepReadsInOrder = false))
     }
   }
 

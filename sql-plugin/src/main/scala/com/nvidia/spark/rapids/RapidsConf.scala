@@ -1536,7 +1536,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     conf("spark.rapids.sql.reader.multithreaded.read.keepOrder")
       .doc("When using the MULTITHREADED reader, if this is set to true we read " +
         "the files in the same order Spark does, otherwise the order may not be the same. " +
-        "Now it is supported only for parquet and orc.")
+        "Now it is supported for parquet, orc, and the SequenceFile binary data source.")
       .booleanConf
       .createWithDefault(true)
 

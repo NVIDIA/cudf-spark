@@ -267,6 +267,7 @@ private[sequencefile] class GpuSequenceFilePartitionReader(
     maxReadBatchSizeRows: Int,
     maxReadBatchSizeBytes: Long,
     maxGpuColumnSizeBytes: Long,
+    keepReadsInOrder: Boolean,
     queryUsesInputFile: Boolean)
   extends MultiFileCloudPartitionReaderBase(
     conf,
@@ -277,6 +278,7 @@ private[sequencefile] class GpuSequenceFilePartitionReader(
     execMetrics,
     maxReadBatchSizeRows,
     maxReadBatchSizeBytes,
+    keepReadsInOrder = keepReadsInOrder,
     combineConf = CombineConf(Seq(
       SequenceFileReaderLimits.MAX_FILE_OUTPUT_BYTES,
       maxReadBatchSizeBytes,
@@ -682,6 +684,7 @@ private[rapids] case class GpuSequenceFilePartitionReaderFactory(
   override protected val canUseMultiThreadReader: Boolean = true
 
   private val maxNumFileProcessed = rapidsConf.multiThreadReadNumThreads
+  private val keepReadsInOrder = rapidsConf.getMultithreadedReaderKeepOrder
 
   override protected def buildBaseColumnarReaderForCloud(
       files: Array[PartitionedFile],
@@ -697,6 +700,7 @@ private[rapids] case class GpuSequenceFilePartitionReaderFactory(
       maxReadBatchSizeRows,
       maxReadBatchSizeBytes,
       maxGpuColumnSizeBytes,
+      keepReadsInOrder,
       queryUsesInputFile)
   }
 
