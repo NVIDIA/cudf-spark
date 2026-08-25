@@ -3,4 +3,5 @@
 # The packager reads class paths from these module jars, then promotes the
 # matching classes from the shaded aggregator output so relocated dependencies
 # still resolve at runtime.
+sql-plugin-columnar
 sql-plugin-format
