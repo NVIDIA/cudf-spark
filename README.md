@@ -78,7 +78,7 @@ GPU-accelerated UDFs) we recommend you declare the distribution artifact as a `p
 <dependency>
     <groupId>com.nvidia</groupId>
     <artifactId>rapids-4-spark_2.12</artifactId>
-    <version>26.08.1-SNAPSHOT</version>
+    <version>26.08.1</version>
     <scope>provided</scope>
 </dependency>
 ```
