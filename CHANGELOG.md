@@ -1,5 +1,5 @@
 # Change log
-Generated on 2026-08-14
+Generated on 2026-08-25
 
 ## Release 26.08
 
@@ -16,10 +16,14 @@ Generated on 2026-08-14
 |[#14624](https://github.com/NVIDIA/cudf-spark/issues/14624)|[FEA] Add support for Apache Spark 4.2.0|
 |[#14960](https://github.com/NVIDIA/cudf-spark/issues/14960)|[FEA] Support multiple order-by columns for RANGE window functions|
 |[#14853](https://github.com/NVIDIA/cudf-spark/issues/14853)|[FEA] Add support for Apache Iceberg 1.11|
-|[#14868](https://github.com/NVIDIA/cudf-spark/issues/14868)|[FEA][Follow-up] Emit multiple batches from GpuProjectExec split-retry instead of concatenating|
 |[#13649](https://github.com/NVIDIA/cudf-spark/issues/13649)|[FEA] BinaryType support for HostColumnarToGpu|
 |[#15065](https://github.com/NVIDIA/cudf-spark/issues/15065)|[FEA] Add support for Apache Spark 4.0.3|
 |[#14832](https://github.com/NVIDIA/cudf-spark/issues/14832)|[FEA] Add support for Spark 4.1.2|
+
+### Performance
+|||
+|:---|:---|
+|[#14868](https://github.com/NVIDIA/cudf-spark/issues/14868)|[FEA][Follow-up] Emit multiple batches from GpuProjectExec split-retry instead of concatenating|
 
 ### Bugs Fixed
 |||
@@ -64,6 +68,7 @@ Generated on 2026-08-14
 |[#15118](https://github.com/NVIDIA/cudf-spark/issues/15118)|[BUG] to_json on GPU emits unquoted NaN for float/double values|
 |[#15093](https://github.com/NVIDIA/cudf-spark/issues/15093)|[BUG] Delta Lake integration tests fail with NoClassDefFoundError: Could not initialize class DelegatingLogStore$ (Spark 3.3.0 / Ubuntu 24.04)|
 |[#15098](https://github.com/NVIDIA/cudf-spark/issues/15098)|[BUG] Iceberg REST catalog integration tests fail: java.lang.IllegalArgumentException: 'Part of the plan is not columnar' for V2 write execs|
+|[#15005](https://github.com/NVIDIA/cudf-spark/issues/15005)|[BUG] NDS hang: all task slots on some executors blocked until SparkContext timeout|
 |[#14967](https://github.com/NVIDIA/cudf-spark/issues/14967)|[BUG] Int truncation: GpuPartitioning serialized buffer position/length .toInt (#14471)|
 |[#14926](https://github.com/NVIDIA/cudf-spark/issues/14926)|[BUG] regexp_replace: user $N backrefs not remapped after the synthetic $ line-anchor group ((a$|b)(c), T$|(E) produce wrong output)|
 |[#15020](https://github.com/NVIDIA/cudf-spark/issues/15020)|[BUG] The script build/make-scala-version-build-files.sh fails while regenerating scala2.13/*.pom.xml files|
@@ -78,6 +83,11 @@ Generated on 2026-08-14
 ### PRs
 |||
 |:---|:---|
+|[#15752](https://github.com/NVIDIA/cudf-spark/pull/15752)|Fix class-initialization deadlock between GpuOverrides and SparkShimImpl (26.08)|
+|[#15754](https://github.com/NVIDIA/cudf-spark/pull/15754)|[DOC] Update download links for v26.08.1 [skip ci]|
+|[#15678](https://github.com/NVIDIA/cudf-spark/pull/15678)|Exclude AWS Netty jars from Spark 4.1 S3Tables classpath|
+|[#15673](https://github.com/NVIDIA/cudf-spark/pull/15673)|Update changelog for the v26.08 release [skip ci]|
+|[#15672](https://github.com/NVIDIA/cudf-spark/pull/15672)|Update dependency version private to 26.08.1 [skip ci]|
 |[#15667](https://github.com/NVIDIA/cudf-spark/pull/15667)|Clarify Databricks shuffle config and fix install link [skip ci]|
 |[#15654](https://github.com/NVIDIA/cudf-spark/pull/15654)|Fix Iceberg support for Spark 4.1.2 and 4.1.3 [fast-ut]|
 |[#15548](https://github.com/NVIDIA/cudf-spark/pull/15548)|Update changelog for the v26.08 release [skip ci]|
@@ -305,6 +315,7 @@ Generated on 2026-08-14
 ### Bugs Fixed
 |||
 |:---|:---|
+|[#14867](https://github.com/NVIDIA/cudf-spark/issues/14867)|[BUG] Dataproc Serverless 2.2 IT: test_regexp_choice hits non-columnar ProjectExec|
 |[#12495](https://github.com/NVIDIA/cudf-spark/issues/12495)|[BUG] java.lang.UnsupportedOperationException: Type NullType not supported|
 |[#15120](https://github.com/NVIDIA/cudf-spark/issues/15120)|[BUG] Databricks 17.3 SNAPSHOT (Spark 4.0.0) integration tests fail with NoSuchMethodError CatalogTable.copy in GpuCreateDataSourceTableAsSelectCommand|
 |[#14285](https://github.com/NVIDIA/cudf-spark/issues/14285)|[BUG] KudoGpuSerializer can hang during `assembleFromDeviceRawNative`|
