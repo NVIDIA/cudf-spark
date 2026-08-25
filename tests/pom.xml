@@ -21,13 +21,13 @@
     <parent>
         <groupId>com.nvidia</groupId>
         <artifactId>rapids-4-spark-shim-deps-parent_2.12</artifactId>
-        <version>26.08.1</version>
+        <version>26.08.1-SNAPSHOT</version>
         <relativePath>../shim-deps/pom.xml</relativePath>
     </parent>
     <artifactId>rapids-4-spark-tests_2.12</artifactId>
     <name>RAPIDS Accelerator for Apache Spark Tests</name>
     <description>RAPIDS plugin for Apache Spark integration tests</description>
-    <version>26.08.1</version>
+    <version>26.08.1-SNAPSHOT</version>
 
     <properties>
         <rapids.module>tests</rapids.module>
