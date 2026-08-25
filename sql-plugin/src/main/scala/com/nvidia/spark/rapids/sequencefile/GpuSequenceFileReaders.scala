@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids.sequencefile
 
-import java.io.{DataOutputStream, EOFException}
+import java.io.{DataOutputStream, EOFException, IOException, OutputStream}
 import java.net.URI
 import java.util
 
@@ -48,8 +48,9 @@ import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkVect
 import org.apache.spark.util.SerializableConfiguration
 
 private object SequenceFileReaderLimits {
-  val MAX_FILE_OUTPUT_BYTES: Long = 256L * 1024 * 1024
-  val MAX_FILE_ROWS: Int = 4 * 1024 * 1024
+  val MAX_BATCH_OUTPUT_BYTES: Long = 256L * 1024 * 1024
+  val MAX_BATCH_ROWS: Int = 4 * 1024 * 1024
+  val MAX_BUFFERED_BATCHES: Int = 2
   val MAX_OFFSETS_FRACTION_DENOMINATOR: Int = 4
   val MIN_INITIAL_DATA_BYTES: Long = 64L * 1024
   val MIN_INITIAL_ROWS: Int = 1024
@@ -85,29 +86,34 @@ private final class EofTrackingInputStream(input: FSDataInputStream) extends FSI
 private final class BinaryRecordReader(
     reader: SequenceFile.Reader,
     input: EofTrackingInputStream,
-    file: PartitionedFile) extends AutoCloseable {
+    file: PartitionedFile,
+    splitEnd: Long) extends AutoCloseable {
   private val key = new DataOutputBuffer
   private val value = reader.createValueBytes()
+  private var more = reader.getPosition < splitEnd
 
   def next(): Boolean = {
+    if (!more) {
+      return false
+    }
     key.reset()
+    val position = reader.getPosition
     val hasNext = try {
       reader.nextRaw(key, value) >= 0
     } catch {
       case e: EOFException if input.reachedEof =>
-        val truncated = new EOFException(s"Truncated SequenceFile block in ${file.filePath}")
+        val truncated = new EOFException(s"Truncated SequenceFile in ${file.filePath}")
         truncated.initCause(e)
         throw truncated
     }
     if (!hasNext && input.reachedEof) {
-      throw new EOFException(s"Truncated SequenceFile block in ${file.filePath}")
+      throw new EOFException(s"Truncated SequenceFile in ${file.filePath}")
     }
-    hasNext
+    if (!hasNext || (position >= splitEnd && reader.syncSeen)) {
+      more = false
+    }
+    more
   }
-
-  def keyLength: Int = key.getLength
-
-  def valueLength: Int = value.getSize
 
   def writeKey(out: DataOutputStream): Unit = out.write(key.getData, 0, key.getLength)
 
@@ -118,22 +124,23 @@ private final class BinaryRecordReader(
 
 private object BinaryRecordReader {
   def open(conf: Configuration, file: PartitionedFile): BinaryRecordReader = {
-    require(file.start == 0,
-      s"SequenceFile binary only supports whole files: ${file.filePath}")
     val path = new Path(new URI(file.filePath.toString))
-    val rawInput = path.getFileSystem(conf).open(path)
+    val fileSystem = path.getFileSystem(conf)
+    val rawInput = fileSystem.open(path)
     val input = new EofTrackingInputStream(rawInput)
     var reader: SequenceFile.Reader = null
     try {
+      val fileSize = if (file.fileSize > 0) file.fileSize
+      else fileSystem.getFileStatus(path).getLen
       reader = new SequenceFile.Reader(
         conf,
         SequenceFile.Reader.stream(new FSDataInputStream(input)),
-        SequenceFile.Reader.length(file.length))
-      if (!reader.isBlockCompressed) {
-        throw new UnsupportedOperationException(
-          s"SequenceFile binary requires BLOCK compression: ${file.filePath}")
+        SequenceFile.Reader.length(fileSize))
+      if (file.start > reader.getPosition) {
+        reader.sync(file.start)
       }
-      new BinaryRecordReader(reader, input, file)
+      val splitEnd = math.min(fileSize, Math.addExact(file.start, file.length))
+      new BinaryRecordReader(reader, input, file, splitEnd)
     } catch {
       case t: Throwable =>
         if (reader == null) {
@@ -146,6 +153,8 @@ private object BinaryRecordReader {
   }
 }
 
+private final class BatchCapacityExceeded extends IOException
+
 private final class BinaryHostColumnBuilder(
     maxDataCapacity: Long,
     maxRowCapacity: Int,
@@ -157,6 +166,18 @@ private final class BinaryHostColumnBuilder(
   private var dataOutput: DataOutputStream = null
   private var rows = 0
 
+  private val growableOutput = new OutputStream {
+    override def write(value: Int): Unit = {
+      growData(Math.addExact(hostOutput.getPos, 1L))
+      hostOutput.write(value)
+    }
+
+    override def write(bytes: Array[Byte], offset: Int, length: Int): Unit = {
+      growData(Math.addExact(hostOutput.getPos, length.toLong))
+      hostOutput.write(bytes, offset, length)
+    }
+  }
+
   try {
     require(initialDataCapacity > 0 && initialDataCapacity <= maxDataCapacity)
     require(initialRowCapacity > 0 && initialRowCapacity <= maxRowCapacity)
@@ -164,17 +185,21 @@ private final class BinaryHostColumnBuilder(
     offsets = HostAlloc.alloc(
       (initialRowCapacity.toLong + 1L) * DType.INT32.getSizeInBytes, preferPinned = true)
     hostOutput = new HostMemoryOutputStream(data)
-    dataOutput = new DataOutputStream(hostOutput)
+    dataOutput = new DataOutputStream(growableOutput)
     offsets.setInt(0, 0)
   } catch {
     case t: Throwable =>
       dataOutput.safeClose(t)
+      hostOutput.safeClose(t)
       data.safeClose(t)
       offsets.safeClose(t)
       throw t
   }
 
   private def growData(requiredCapacity: Long): Unit = {
+    if (requiredCapacity > maxDataCapacity) {
+      throw new BatchCapacityExceeded
+    }
     if (requiredCapacity > data.getLength) {
       val newCapacity = math.min(maxDataCapacity,
         math.max(requiredCapacity, Math.multiplyExact(data.getLength, 2L)))
@@ -183,12 +208,10 @@ private final class BinaryHostColumnBuilder(
         newData.copyFromHostBuffer(0, data, 0, oldPosition)
         val newHostOutput = new HostMemoryOutputStream(newData)
         newHostOutput.seek(oldPosition)
-        val newDataOutput = new DataOutputStream(newHostOutput)
-        dataOutput.safeClose(null)
+        hostOutput.safeClose(null)
         data.safeClose(null)
         data = newData
         hostOutput = newHostOutput
-        dataOutput = newDataOutput
       }
     }
   }
@@ -209,20 +232,23 @@ private final class BinaryHostColumnBuilder(
     }
   }
 
-  def append(expectedBytes: Int)(write: DataOutputStream => Unit): Unit = {
+  def mark(): Long = hostOutput.getPos
+
+  def rollback(dataPosition: Long, rowCount: Int): Unit = {
+    hostOutput.seek(dataPosition)
+    rows = rowCount
+  }
+
+  def append(write: DataOutputStream => Unit): Long = {
     require(rows < maxRowCapacity, "SequenceFile binary exceeds the row limit")
-    val requiredDataCapacity = Math.addExact(hostOutput.getPos, expectedBytes.toLong)
-    require(expectedBytes >= 0 && requiredDataCapacity <= maxDataCapacity,
-      "SequenceFile binary exceeds the decompressed output limit")
-    growData(requiredDataCapacity)
     growOffsets(rows + 1)
     val start = hostOutput.getPos
     write(dataOutput)
-    require(hostOutput.getPos - start == expectedBytes,
-      s"SequenceFile field wrote ${hostOutput.getPos - start} bytes, expected $expectedBytes")
+    val written = hostOutput.getPos - start
     rows += 1
     offsets.setInt(rows.toLong * DType.INT32.getSizeInBytes,
       Math.toIntExact(hostOutput.getPos))
+    written
   }
 
   def finish(): Array[SpillableHostBuffer] = {
@@ -250,8 +276,10 @@ private final class BinaryHostColumnBuilder(
 
   override def close(): Unit = {
     dataOutput.safeClose(null)
+    hostOutput.safeClose(null)
     data.safeClose(null)
     offsets.safeClose(null)
+    hostOutput = null
     data = null
     offsets = null
   }
@@ -280,23 +308,23 @@ private[sequencefile] class GpuSequenceFilePartitionReader(
     maxReadBatchSizeBytes,
     keepReadsInOrder = keepReadsInOrder,
     combineConf = CombineConf(Seq(
-      SequenceFileReaderLimits.MAX_FILE_OUTPUT_BYTES,
+      SequenceFileReaderLimits.MAX_BATCH_OUTPUT_BYTES,
       maxReadBatchSizeBytes,
-      maxGpuColumnSizeBytes).min, 0)) {
+      maxGpuColumnSizeBytes).min, 0)) with MultiFileReaderFunctions {
 
   private val projectedColumns = readDataSchema.length
   private val batchCapacity = Seq(
-    SequenceFileReaderLimits.MAX_FILE_OUTPUT_BYTES,
+    SequenceFileReaderLimits.MAX_BATCH_OUTPUT_BYTES,
     maxReadBatchSizeBytes,
     maxGpuColumnSizeBytes).min
   private val rowCapacity = if (projectedColumns == 0) {
-    math.min(maxReadBatchSizeRows, SequenceFileReaderLimits.MAX_FILE_ROWS)
+    math.min(maxReadBatchSizeRows, SequenceFileReaderLimits.MAX_BATCH_ROWS)
   } else {
     val maxRowsForOffsets = batchCapacity /
       (projectedColumns.toLong * DType.INT32.getSizeInBytes *
         SequenceFileReaderLimits.MAX_OFFSETS_FRACTION_DENOMINATOR) - 1L
     math.min(
-      math.min(maxReadBatchSizeRows.toLong, SequenceFileReaderLimits.MAX_FILE_ROWS.toLong),
+      math.min(maxReadBatchSizeRows.toLong, SequenceFileReaderLimits.MAX_BATCH_ROWS.toLong),
       maxRowsForOffsets).toInt
   }
   require(rowCapacity > 0, "SequenceFile binary batch limit is too small")
@@ -307,8 +335,10 @@ private[sequencefile] class GpuSequenceFilePartitionReader(
   }
   require(projectedColumns == 0 || payloadCapacity > 0,
     "SequenceFile binary batch limit leaves no room for payloads")
-  private val requiredHostMemory = math.max(1L,
-    Math.multiplyExact(3L, payloadCapacity + offsetsCapacity))
+  private val requiredHostMemory = if (projectedColumns == 0) 1L else {
+    // This covers one retained batch plus the two-column builder's grow-and-copy peak.
+    Math.multiplyExact(5L, batchCapacity)
+  }
   private val keyIndex = readDataSchema.fieldNames.indexOf(
     SequenceFileBinaryFileFormat.KEY_FIELD)
   private val valueIndex = readDataSchema.fieldNames.indexOf(
@@ -321,17 +351,42 @@ private[sequencefile] class GpuSequenceFilePartitionReader(
 
   private sealed trait SequenceFileBuffers extends HostMemoryBuffersWithMetaDataBase {
     def sourceBuffers: Array[SequenceFileHostBuffers]
+
+    def takeNextBatch(): Array[SingleHMBAndMeta]
+
+    def numRemainingBatches: Int
+
   }
 
   private final class SequenceFileHostBuffers(
       override val partitionedFile: PartitionedFile,
-      override val memBuffersAndSizes: Array[SingleHMBAndMeta],
+      initialBuffers: Array[SingleHMBAndMeta],
       override val bytesRead: Long) extends SequenceFileBuffers {
+    require(initialBuffers.nonEmpty)
+
+    private var remainingBuffers = initialBuffers
+
+    override def memBuffersAndSizes: Array[SingleHMBAndMeta] = synchronized {
+      if (remainingBuffers.isEmpty) Array.empty else Array(remainingBuffers.head)
+    }
 
     override lazy val sourceBuffers: Array[SequenceFileHostBuffers] = Array(this)
 
-    override def close(): Unit = {
+    override def numRemainingBatches: Int = synchronized {
+      remainingBuffers.length
+    }
+
+    override def takeNextBatch(): Array[SingleHMBAndMeta] = synchronized {
+      require(remainingBuffers.nonEmpty)
+      val next = remainingBuffers.head
+      remainingBuffers = remainingBuffers.tail
+      Array(next)
+    }
+
+    override def close(): Unit = synchronized {
       tracker.remove(this)
+      remainingBuffers.safeClose()
+      remainingBuffers = Array.empty
       super.close()
     }
   }
@@ -340,11 +395,25 @@ private[sequencefile] class GpuSequenceFilePartitionReader(
       override val sourceBuffers: Array[SequenceFileHostBuffers]) extends SequenceFileBuffers {
     require(sourceBuffers.nonEmpty)
 
+    private var hasBatch = true
+
     override val partitionedFile: PartitionedFile = sourceBuffers.head.partitionedFile
-    override val memBuffersAndSizes: Array[SingleHMBAndMeta] =
-      sourceBuffers.flatMap(_.memBuffersAndSizes)
+    override def memBuffersAndSizes: Array[SingleHMBAndMeta] = synchronized {
+      if (hasBatch) sourceBuffers.flatMap(_.memBuffersAndSizes) else Array.empty
+    }
     override val bytesRead: Long = sourceBuffers.foldLeft(0L) { (total, buffers) =>
       Math.addExact(total, buffers.bytesRead)
+    }
+
+    override def takeNextBatch(): Array[SingleHMBAndMeta] = synchronized {
+      require(hasBatch)
+      val next = sourceBuffers.flatMap(_.takeNextBatch())
+      hasBatch = false
+      next
+    }
+
+    override def numRemainingBatches: Int = synchronized {
+      if (hasBatch) 1 else 0
     }
 
     setExecutionTime(
@@ -355,7 +424,10 @@ private[sequencefile] class GpuSequenceFilePartitionReader(
     setScheduleTime(sourceBuffers.foldLeft(0L)((total, buffers) =>
       Math.addExact(total, buffers.getScheduleTime)))
 
-    override def close(): Unit = sourceBuffers.safeClose()
+    override def close(): Unit = synchronized {
+      hasBatch = false
+      sourceBuffers.safeClose()
+    }
   }
 
   private final class ResultTracker extends AutoCloseable {
@@ -381,6 +453,15 @@ private[sequencefile] class GpuSequenceFilePartitionReader(
 
     def remove(result: SequenceFileHostBuffers): Unit = synchronized {
       published -= result
+    }
+
+    def claim(results: Array[SequenceFileHostBuffers]): Boolean = synchronized {
+      if (closed || !results.forall(published.contains)) {
+        false
+      } else {
+        results.foreach(published.remove)
+        true
+      }
     }
 
     override def close(): Unit = {
@@ -457,18 +538,14 @@ private[sequencefile] class GpuSequenceFilePartitionReader(
     }
   }
 
-  private def readFile(
-      file: PartitionedFile,
-      config: Configuration): SequenceFileHostBuffers = {
+  private def newBuilders(file: PartitionedFile): Array[BinaryHostColumnBuilder] = {
     val builders = new Array[BinaryHostColumnBuilder](projectedColumns)
     try {
       val cappedFileLength = math.min(file.length, payloadCapacity)
-      val initialDataCapacity = if (projectedColumns == 0) 0L else {
-        val initialPayloadCapacity = math.min(payloadCapacity,
-          math.max(SequenceFileReaderLimits.MIN_INITIAL_DATA_BYTES,
-            Math.multiplyExact(cappedFileLength, 2L)))
-        math.max(1L, initialPayloadCapacity / projectedColumns)
-      }
+      val initialPayloadCapacity = math.min(payloadCapacity,
+        math.max(SequenceFileReaderLimits.MIN_INITIAL_DATA_BYTES,
+          Math.multiplyExact(cappedFileLength, 2L)))
+      val initialDataCapacity = math.max(1L, initialPayloadCapacity / projectedColumns)
       val initialRowCapacity = math.min(rowCapacity.toLong,
         math.max(SequenceFileReaderLimits.MIN_INITIAL_ROWS.toLong,
           file.length / SequenceFileReaderLimits.ESTIMATED_COMPRESSED_BYTES_PER_ROW)).toInt
@@ -478,44 +555,122 @@ private[sequencefile] class GpuSequenceFilePartitionReader(
           payloadCapacity, rowCapacity, initialDataCapacity, initialRowCapacity)
         index += 1
       }
-      val rows = withResource(BinaryRecordReader.open(new Configuration(config), file)) { reader =>
-        var rowCount = 0
-        var payloadBytes = 0L
-        while (reader.next()) {
-          if (rowCount == rowCapacity) {
-            throw new UnsupportedOperationException(
-              s"SequenceFile binary exceeds the $rowCapacity row file limit: ${file.filePath}")
-          }
-          val keyLength = if (wantsKey) reader.keyLength else 0
-          val valueLength = if (wantsValue) reader.valueLength else 0
-          val recordBytes = Math.addExact(keyLength.toLong, valueLength.toLong)
-          payloadBytes = Math.addExact(payloadBytes, recordBytes)
-          if (payloadBytes > payloadCapacity && projectedColumns > 0) {
-            throw new UnsupportedOperationException(
-              s"SequenceFile binary exceeds the $payloadCapacity byte decompressed output " +
-                "limit: " +
-                file.filePath)
-          }
-          if (wantsKey) builders(keyIndex).append(keyLength)(reader.writeKey)
-          if (wantsValue) builders(valueIndex).append(valueLength)(reader.writeValue)
-          rowCount += 1
-        }
-        rowCount
-      }
-      val bufferInfo = if (projectedColumns == 0) {
-        SingleHMBAndMeta.empty(rows)
-      } else {
-        finishBuilders(builders, rows)
-      }
-      closeOnExcept(bufferInfo) { ownedBufferInfo =>
-        new SequenceFileHostBuffers(file, Array(ownedBufferInfo), file.length)
-      }
+      builders
     } catch {
       case t: Throwable =>
         closeBuilders(builders, t)
         throw t
+    }
+  }
+
+  private def rollbackRecord(
+      builders: Array[BinaryHostColumnBuilder],
+      keyMark: Long,
+      valueMark: Long,
+      rowCount: Int): Unit = {
+    if (wantsKey) builders(keyIndex).rollback(keyMark, rowCount)
+    if (wantsValue) builders(valueIndex).rollback(valueMark, rowCount)
+  }
+
+  private def tryAppendRecord(
+      reader: BinaryRecordReader,
+      builders: Array[BinaryHostColumnBuilder],
+      rowCount: Int,
+      payloadBytes: Long): Option[Long] = {
+    if (rowCount == rowCapacity) {
+      return None
+    }
+    if (projectedColumns == 0) {
+      return Some(0L)
+    }
+
+    val keyMark = if (wantsKey) builders(keyIndex).mark() else 0L
+    val valueMark = if (wantsValue) builders(valueIndex).mark() else 0L
+    try {
+      var recordBytes = 0L
+      if (wantsKey) {
+        recordBytes = builders(keyIndex).append(reader.writeKey)
+      }
+      if (wantsValue) {
+        recordBytes = Math.addExact(recordBytes, builders(valueIndex).append(reader.writeValue))
+      }
+      if (recordBytes <= payloadCapacity - payloadBytes) {
+        Some(recordBytes)
+      } else {
+        rollbackRecord(builders, keyMark, valueMark, rowCount)
+        None
+      }
+    } catch {
+      case _: BatchCapacityExceeded =>
+        rollbackRecord(builders, keyMark, valueMark, rowCount)
+        None
+    }
+  }
+
+  private def finishChunk(
+      builders: Array[BinaryHostColumnBuilder],
+      rows: Int): SingleHMBAndMeta = {
+    if (projectedColumns == 0) SingleHMBAndMeta.empty(rows)
+    else finishBuilders(builders, rows)
+  }
+
+  private def readFile(
+      file: PartitionedFile,
+      config: Configuration): SequenceFileHostBuffers = {
+    val startingBytesRead = fileSystemBytesRead()
+    val chunks = new mutable.ArrayBuffer[SingleHMBAndMeta]
+    var builders: Array[BinaryHostColumnBuilder] = null
+    try {
+      builders = if (projectedColumns == 0) Array.empty else newBuilders(file)
+      withResource(BinaryRecordReader.open(new Configuration(config), file)) { reader =>
+        var rowCount = 0
+        var payloadBytes = 0L
+        while (reader.next()) {
+          tryAppendRecord(reader, builders, rowCount, payloadBytes) match {
+            case Some(recordBytes) =>
+              payloadBytes = Math.addExact(payloadBytes, recordBytes)
+              rowCount += 1
+            case None if rowCount == 0 =>
+              throw new UnsupportedOperationException(
+                s"SequenceFile binary record exceeds the $payloadCapacity byte decompressed " +
+                  s"batch limit: ${file.filePath}")
+            case None if projectedColumns > 0 &&
+                chunks.length + 1 >= SequenceFileReaderLimits.MAX_BUFFERED_BATCHES =>
+              throw new UnsupportedOperationException(
+                s"SequenceFile binary split exceeds the " +
+                  s"${SequenceFileReaderLimits.MAX_BUFFERED_BATCHES} buffered batch limit; " +
+                  s"reduce spark.sql.files.maxPartitionBytes: ${file.filePath}")
+            case None =>
+              chunks += finishChunk(builders, rowCount)
+              closeBuilders(builders, null)
+              builders = if (projectedColumns == 0) Array.empty else newBuilders(file)
+              rowCount = 0
+              payloadBytes = 0L
+              val recordBytes = tryAppendRecord(reader, builders, rowCount, payloadBytes)
+                .getOrElse {
+                  throw new UnsupportedOperationException(
+                    s"SequenceFile binary record exceeds the $payloadCapacity byte " +
+                      s"decompressed batch limit: ${file.filePath}")
+                }
+              payloadBytes = recordBytes
+              rowCount = 1
+          }
+        }
+        if (rowCount > 0 || chunks.isEmpty) {
+          chunks += finishChunk(builders, rowCount)
+        }
+      }
+      val measuredBytesRead = Math.max(0L, fileSystemBytesRead() - startingBytesRead)
+      // A zero bytesRead makes the async executor release its budget before these buffers close.
+      val bytesRead = if (measuredBytesRead > 0) measuredBytesRead else math.max(1L, file.length)
+      new SequenceFileHostBuffers(file, chunks.toArray, bytesRead)
+    } catch {
+      case t: Throwable =>
+        if (builders != null) closeBuilders(builders, t)
+        chunks.safeClose(t)
+        throw t
     } finally {
-      closeBuilders(builders, null)
+      if (builders != null) closeBuilders(builders, null)
     }
   }
 
@@ -591,29 +746,47 @@ private[sequencefile] class GpuSequenceFilePartitionReader(
   override def readBatches(
       fileBufsAndMeta: HostMemoryBuffersWithMetaDataBase): Iterator[ColumnarBatch] = {
     val buffers = fileBufsAndMeta.asInstanceOf[SequenceFileBuffers]
-    buffers.sourceBuffers.foreach(tracker.remove)
-    val batch = withRetryNoSplit(buffers) { current =>
-      GpuSemaphore.acquireIfNecessary(TaskContext.get())
-      val infos = current.memBuffersAndSizes
-      val rows = Math.toIntExact(infos.foldLeft(0L)((total, info) =>
-        Math.addExact(total, info.numRows)))
-      val columns = new Array[SparkVector](projectedColumns)
-      closeOnExcept(columns) { _ =>
-        copyMetric.ns {
-          var index = 0
-          while (index < columns.length) {
-            val device = copyAndConcatenate(infos, index)
-            columns(index) = closeOnExcept(device) { ownedDevice =>
-              GpuColumnVector.from(ownedDevice, BinaryType)
-            }
-            index += 1
-          }
-        }
-        new ColumnarBatch(columns, rows)
+    try {
+      if (buffers.numRemainingBatches == 1 && !tracker.claim(buffers.sourceBuffers)) {
+        throw new IllegalStateException("SequenceFile buffers were closed before GPU transfer")
       }
+      val infos = buffers.takeNextBatch()
+      val batch = withRetryNoSplit(infos.toSeq) { current =>
+        GpuSemaphore.acquireIfNecessary(TaskContext.get())
+        val currentInfos = current.toArray
+        val rows = Math.toIntExact(current.foldLeft(0L)((total, info) =>
+          Math.addExact(total, info.numRows)))
+        val columns = new Array[SparkVector](projectedColumns)
+        closeOnExcept(columns) { _ =>
+          copyMetric.ns {
+            var index = 0
+            while (index < columns.length) {
+              val device = copyAndConcatenate(currentInfos, index)
+              columns(index) = closeOnExcept(device) { ownedDevice =>
+                GpuColumnVector.from(ownedDevice, BinaryType)
+              }
+              index += 1
+            }
+          }
+          new ColumnarBatch(columns, rows)
+        }
+      }
+      closeOnExcept(batch) { ownedBatch =>
+        if (buffers.numRemainingBatches > 0) {
+          currentFileHostBuffers = Some(buffers)
+        } else {
+          currentFileHostBuffers = None
+          buffers.close()
+        }
+        outputBatchesMetric += 1
+        new SingleGpuColumnarBatchIterator(ownedBatch)
+      }
+    } catch {
+      case t: Throwable =>
+        currentFileHostBuffers = None
+        buffers.safeClose(t)
+        throw t
     }
-    outputBatchesMetric += 1
-    new SingleGpuColumnarBatchIterator(batch)
   }
 
   override def canUseCombine: Boolean = !queryUsesInputFile
@@ -627,12 +800,16 @@ private[sequencefile] class GpuSequenceFilePartitionReader(
     var rows = 0L
     var keepAdding = true
     while (accepted < buffers.length && keepAdding) {
-      val nextBytes = buffers(accepted).memBuffersAndSizes.foldLeft(0L)((total, info) =>
+      val next = buffers(accepted)
+      val nextBytes = next.memBuffersAndSizes.foldLeft(0L)((total, info) =>
         Math.addExact(total, info.bytes))
-      val nextRows = buffers(accepted).memBuffersAndSizes.foldLeft(0L)((total, info) =>
+      val nextRows = next.memBuffersAndSizes.foldLeft(0L)((total, info) =>
         Math.addExact(total, info.numRows))
       require(nextBytes <= batchCapacity && nextRows <= rowCapacity)
-      if (accepted == 0 ||
+      if (next.numRemainingBatches > 1) {
+        if (accepted == 0) accepted = 1
+        keepAdding = false
+      } else if (accepted == 0 ||
           (nextBytes <= batchCapacity - bytes && nextRows <= rowCapacity - rows)) {
         bytes += nextBytes
         rows += nextRows

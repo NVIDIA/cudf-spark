@@ -26,9 +26,7 @@ import org.apache.spark.sql.execution.datasources.{FileFormat, OutputWriterFacto
 import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.{BinaryType, StructField, StructType}
 
-/**
- * GPU-only internal format exposing serialized keys and values from trusted, bounded BLOCK files.
- */
+/** GPU-only internal format exposing serialized SequenceFile keys and values. */
 class SequenceFileBinaryFileFormat extends FileFormat with Serializable {
   import SequenceFileBinaryFileFormat._
 
@@ -40,7 +38,7 @@ class SequenceFileBinaryFileFormat extends FileFormat with Serializable {
   override def isSplitable(
       sparkSession: SparkSession,
       options: Map[String, String],
-      path: Path): Boolean = false
+      path: Path): Boolean = true
 
   override def buildReaderWithPartitionValues(
       sparkSession: SparkSession,

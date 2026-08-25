@@ -67,6 +67,7 @@ class GpuReadSequenceFileBinaryFormat extends SequenceFileBinaryFileFormat
 
 object GpuReadSequenceFileBinaryFormat {
   def tagSupport(meta: SparkPlanMeta[FileSourceScanExec]): Unit = {
+    meta.mustBeReplaced("SequenceFile binary has no CPU reader")
     val scan = meta.wrapped
     try {
       SequenceFileBinaryFileFormat.validateDataSchema(scan.relation.dataSchema)
