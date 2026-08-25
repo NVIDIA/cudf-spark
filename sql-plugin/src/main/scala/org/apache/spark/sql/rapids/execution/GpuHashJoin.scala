@@ -26,6 +26,7 @@ import com.nvidia.spark.rapids.shims.ShimBinaryExecNode
 
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, Expression, NamedExpression}
 import org.apache.spark.sql.catalyst.plans.{Cross, ExistenceJoin, FullOuter, Inner, InnerLike, JoinType, LeftAnti, LeftExistence, LeftOuter, LeftSemi, RightOuter}
+import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -600,6 +601,95 @@ object JoinImpl {
 }
 
 object GpuHashJoin {
+  /**
+   * Captures the normalized join condition and child plans after extracting any non-AST
+   * expressions that can be safely computed on one side of the join.
+   *
+   * `joinCondition` is evaluated inside the hash join. `filterCondition` is the original
+   * condition when it cannot be rewritten for in-join AST evaluation. `left` and `right`
+   * may include projection wrappers that compute extracted expressions before the join.
+   * `finalProjectList` removes those temporary projected columns from the join output.
+   */
+  case class ExtractedJoinCondition(
+      joinCondition: Option[Expression],
+      filterCondition: Option[Expression],
+      left: SparkPlan,
+      right: SparkPlan,
+      finalProjectList: Option[List[NamedExpression]]) {
+    def projectIfNeeded(joinExec: GpuExec): GpuExec = {
+      finalProjectList.map(GpuProjectExec(_, joinExec)).getOrElse(joinExec)
+    }
+  }
+
+  /**
+   * Computes the visible output attributes for a hash join, including the nullability changes
+   * required by outer joins and the additional marker column produced by existence joins.
+   *
+   * This is shared by join exec nodes and by the final projection used after condition
+   * extraction so that temporary projection columns do not leak into the user-visible schema.
+   */
+  def output(joinType: JoinType, left: Seq[Attribute], right: Seq[Attribute]): Seq[Attribute] = {
+    joinType match {
+      case _: InnerLike =>
+        left ++ right
+      case LeftOuter =>
+        left ++ right.map(_.withNullability(true))
+      case RightOuter =>
+        left.map(_.withNullability(true)) ++ right
+      case j: ExistenceJoin =>
+        left :+ j.exists
+      case LeftExistence(_) =>
+        left
+      case FullOuter =>
+        left.map(_.withNullability(true)) ++ right.map(_.withNullability(true))
+      case x =>
+        throw new IllegalArgumentException(s"GpuHashJoin should not take $x as the JoinType")
+    }
+  }
+
+  private def canConditionBeRewrittenAsAst(
+      conditionMeta: Option[BaseExprMeta[_]],
+      left: Seq[Attribute],
+      right: Seq[Attribute]): Boolean = {
+    conditionMeta.forall { condition =>
+      AstUtil.canExtractNonAstConditionIfNeed(
+        condition, left.map(_.exprId), right.map(_.exprId))
+    }
+  }
+
+  private def canConditionBeRewrittenAsAst(
+      meta: SparkPlanMeta[_],
+      conditionMeta: Option[BaseExprMeta[_]]): Boolean = {
+    val Seq(left, right) = meta.childPlans
+    canConditionBeRewrittenAsAst(conditionMeta, left.outputAttributes, right.outputAttributes)
+  }
+
+  def extractJoinConditionIfNeeded(
+      conditionMeta: Option[BaseExprMeta[_]],
+      joinType: JoinType,
+      left: SparkPlan,
+      right: SparkPlan): ExtractedJoinCondition = {
+    val condition = conditionMeta.map(_.convertToGpu())
+    if (conditionMeta.forall(_.canThisBeAst)) {
+      ExtractedJoinCondition(condition, None, left, right, None)
+    } else if (canConditionBeRewrittenAsAst(conditionMeta, left.output, right.output)) {
+      val (remains, leftExpr, rightExpr) =
+        AstUtil.extractNonAstFromJoinCond(conditionMeta, left.output, right.output)
+      val leftChild =
+        if (leftExpr.nonEmpty) GpuProjectExec(leftExpr ++ left.output.toList, left) else left
+      val rightChild =
+        if (rightExpr.nonEmpty) GpuProjectExec(rightExpr ++ right.output.toList, right) else right
+      val finalProjectList = if (leftExpr.isEmpty && rightExpr.isEmpty) {
+        None
+      } else {
+        Some(output(joinType, left.output, right.output).toList)
+      }
+      ExtractedJoinCondition(remains, None, leftChild, rightChild, finalProjectList)
+    } else {
+      ExtractedJoinCondition(None, condition, left, right, None)
+    }
+  }
+
   // Designed for the null-aware anti-join in GpuBroadcastHashJoin.
   def anyNullInKey(cb: ColumnarBatch, boundKeys: Seq[GpuExpression]): Boolean = {
     withResource(GpuProjectExec.project(cb, boundKeys)) { keysCb =>
@@ -660,12 +750,19 @@ object GpuHashJoin {
         "which is not yet supported on GPU")
     }
 
+    val canConditionBeRewrittenAsAst = GpuHashJoin.canConditionBeRewrittenAsAst(
+      meta, conditionMeta)
+
     joinType match {
       case _: InnerLike =>
       case RightOuter | LeftOuter | LeftSemi | LeftAnti | ExistenceJoin(_) =>
-        conditionMeta.foreach(meta.requireAstForGpuOn)
+        if (!canConditionBeRewrittenAsAst) {
+          conditionMeta.foreach(meta.requireAstForGpuOn)
+        }
       case FullOuter =>
-        conditionMeta.foreach(meta.requireAstForGpuOn)
+        if (!canConditionBeRewrittenAsAst) {
+          conditionMeta.foreach(meta.requireAstForGpuOn)
+        }
         // FullOuter join cannot support with struct keys as two issues below
         //  * https://github.com/NVIDIA/spark-rapids/issues/2126
         //  * https://github.com/rapidsai/cudf/issues/7947
@@ -2448,24 +2545,7 @@ trait GpuHashJoin extends GpuJoinExec {
     }
   }
 
-  override def output: Seq[Attribute] = {
-    joinType match {
-      case _: InnerLike =>
-        left.output ++ right.output
-      case LeftOuter =>
-        left.output ++ right.output.map(_.withNullability(true))
-      case RightOuter =>
-        left.output.map(_.withNullability(true)) ++ right.output
-      case j: ExistenceJoin =>
-        left.output :+ j.exists
-      case LeftExistence(_) =>
-        left.output
-      case FullOuter =>
-        left.output.map(_.withNullability(true)) ++ right.output.map(_.withNullability(true))
-      case x =>
-        throw new IllegalArgumentException(s"GpuHashJoin should not take $x as the JoinType")
-    }
-  }
+  override def output: Seq[Attribute] = GpuHashJoin.output(joinType, left.output, right.output)
 
   // If we have a single batch streamed in then we will produce a single batch of output
   // otherwise it can get smaller or bigger, we just don't know.  When we support out of

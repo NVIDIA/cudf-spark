@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,19 +17,22 @@ package com.nvidia.spark.rapids
 
 import ai.rapids.cudf.{ColumnVector, Scalar}
 
-import org.apache.spark.TaskContext
 import org.apache.spark.sql.types.{DataType, LongType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /**
  * An expression that returns monotonically increasing 64-bit integers just like
- * `org.apache.spark.sql.catalyst.expressions.MonotonicallyIncreasingID`
+ * `org.apache.spark.sql.catalyst.expressions.MonotonicallyIncreasingID`.
  *
  * The generated ID is guaranteed to be monotonically increasing and unique, but not consecutive.
  * This implementations should match what spark does which is to put the partition ID in the upper
  * 31 bits, and the lower 33 bits represent the record number within each partition.
+ *
+ * The partition index is the parent RDD partition index injected by the hosting operator
+ * via [[GpuNondeterministic.initialize]] — NOT `TaskContext.getPartitionId()` — so values
+ * remain stable across `coalesce`/`union` (SPARK-14393, #14156).
  */
-case class GpuMonotonicallyIncreasingID() extends GpuLeafExpression {
+case class GpuMonotonicallyIncreasingID() extends GpuLeafExpression with GpuNondeterministic {
   /**
    * We need to recompute this if something fails.
    */
@@ -42,14 +45,14 @@ case class GpuMonotonicallyIncreasingID() extends GpuLeafExpression {
 
   @transient private[this] var count: Long = _
   @transient private[this] var partitionMask: Long = _
-  @transient private[this] var wasInitialized: Boolean = _
+
+  override protected def initializeInternal(partitionIndex: Int): Unit = {
+    count = 0L
+    partitionMask = partitionIndex.toLong << 33
+  }
 
   override def columnarEval(batch: ColumnarBatch): GpuColumnVector = {
-    if (!wasInitialized) {
-      count = 0
-      partitionMask = TaskContext.getPartitionId().toLong << 33
-      wasInitialized = true
-    }
+    ensureInitialized()
     var start: Scalar = null
     var mask: Scalar = null
     var sequence: ColumnVector = null

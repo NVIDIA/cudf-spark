@@ -33,11 +33,20 @@
 {"spark": "355"}
 {"spark": "356"}
 {"spark": "357"}
+{"spark": "358"}
+{"spark": "359"}
 {"spark": "400"}
 {"spark": "401"}
 {"spark": "402"}
+{"spark": "403"}
+{"spark": "404"}
 {"spark": "411"}
+{"spark": "412"}
+{"spark": "413"}
+{"spark": "420"}
+{"spark": "500"}
 spark-rapids-shim-json-lines ***/
+
 package com.nvidia.spark.rapids.shims
 
 import com.nvidia.spark.rapids._
@@ -48,7 +57,7 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.datasources.{FileFormat, FilePartition, FileScanRDD, PartitionedFile}
-import org.apache.spark.sql.rapids.shims.{GpuDivideYMInterval, GpuMultiplyYMInterval}
+import org.apache.spark.sql.execution.datasources.v2.{AppendDataExec, OverwriteByExpressionExec}
 import org.apache.spark.sql.types.StructType
 
 trait Spark330PlusShims extends Spark321PlusShims with Spark320PlusNonDBShims {
@@ -66,37 +75,29 @@ trait Spark330PlusShims extends Spark321PlusShims with Spark320PlusNonDBShims {
   }
 
   // GPU support ANSI interval types from 330
-  override def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
-    val map: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = Seq(
-      GpuOverrides.expr[MultiplyYMInterval](
-        "Year-month interval * number",
-        ExprChecks.binaryProject(
-          TypeSig.YEARMONTH,
-          TypeSig.YEARMONTH,
-          ("lhs", TypeSig.YEARMONTH, TypeSig.YEARMONTH),
-          ("rhs", TypeSig.gpuNumeric - TypeSig.DECIMAL_128, TypeSig.gpuNumeric)),
-        (a, conf, p, r) => new BinaryExprMeta[MultiplyYMInterval](a, conf, p, r) {
-          override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression =
-            GpuMultiplyYMInterval(lhs, rhs)
-        }),
-      GpuOverrides.expr[DivideYMInterval](
-        "Year-month interval * operator",
-        ExprChecks.binaryProject(
-          TypeSig.YEARMONTH,
-          TypeSig.YEARMONTH,
-          ("lhs", TypeSig.YEARMONTH, TypeSig.YEARMONTH),
-          ("rhs", TypeSig.gpuNumeric - TypeSig.DECIMAL_128, TypeSig.gpuNumeric)),
-        (a, conf, p, r) => new BinaryExprMeta[DivideYMInterval](a, conf, p, r) {
-          override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression =
-            GpuDivideYMInterval(lhs, rhs)
-        })
-    ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
-    super.getExprs ++ map ++ DayTimeIntervalShims.exprs ++ RoundingShims.exprs
-  }
+  override def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] =
+    super.getExprs ++ YearMonthIntervalShims.exprs ++ DayTimeIntervalShims.exprs ++
+      RoundingShims.exprs
 
-  // GPU support ANSI interval types from 330
-  override def getExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] =
-    super.getExecs ++ PythonMapInArrowExecShims.execs
+  override def getExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = {
+    // Source-specific recognizers in ExternalSource apply their own type checks. Keep these
+    // command rules hidden so the generated generic Exec matrix does not claim one signature for
+    // sources with different write contracts.
+    val appendDataRule = GpuOverrides.exec[AppendDataExec](
+      "Append data into a datasource V2 table",
+      ExecChecks.hiddenHack(),
+      (p, conf, parent, r) => new AppendDataExecMeta(p, conf, parent, r))
+    val overwriteByExpressionRule = GpuOverrides.exec[OverwriteByExpressionExec](
+      "Overwrite data in a datasource V2 table",
+      ExecChecks.hiddenHack(),
+      (p, conf, parent, r) => new OverwriteByExpressionExecMeta(p, conf, parent, r))
+    val v2WriteRules: Seq[(Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan])] = Seq(
+      (appendDataRule.getClassFor.asSubclass(classOf[SparkPlan]), appendDataRule),
+      (overwriteByExpressionRule.getClassFor.asSubclass(classOf[SparkPlan]),
+        overwriteByExpressionRule))
+
+    super.getExecs ++ PythonMapInArrowExecShims.execs ++ v2WriteRules.toMap
+  }
 
 }
 

@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2023, NVIDIA CORPORATION.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -224,7 +224,9 @@ def test_generate_outer_fallback():
     assert_gpu_fallback_collect(
         lambda spark: spark.sql("SELECT array(struct(1, 'a'), struct(2, 'b')) as x")\
             .repartition(1).selectExpr("inline_outer(x)"),
-        "GenerateExec")
+        "GenerateExec",
+        # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
+        conf={'spark.sql.adaptive.enabled': 'false'})
 
 # gpu stack not guarantee to produce the same output order as Spark does
 @ignore_order(local=True) 

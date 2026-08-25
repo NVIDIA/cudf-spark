@@ -476,28 +476,53 @@ object GpuDeviceManager extends Logging {
       logWarning("The default cuDF host pool was already configured")
     }
     if (!PinnedMemoryPool.isInitialized && pinnedSize > 0) {
-      logInfo(s"Initializing pinned memory pool (${pinnedSize / 1024 / 1024.0} MiB)")
-      PinnedMemoryPool.initialize(pinnedSize, gpuId, conf.pinnedPoolCuioDefault)
+      val requestedInitThreads = if (conf.pinnedPoolParallelInitThreads == "all") numCores
+        else conf.pinnedPoolParallelInitThreads.toInt
+      val initThreads = math.min(requestedInitThreads, numCores)
+      val logDetails =
+        if (initThreads > 1) s" using ${initThreads} parallel pre-touch threads" else ""
+      logInfo(s"Initializing pinned memory pool (${pinnedSize / 1024 / 1024.0} MiB)${logDetails}")
+      PinnedMemoryPool.initialize(pinnedSize, gpuId, conf.pinnedPoolCuioDefault, initThreads)
     }
     // Host memory limits must be set after the pinned memory pool is initialized
     HostAlloc.initialize(nonPinnedLimit)
-    // Fill the MULTITHREAD_READ_MEMORY_LIMIT_SIZE with the 90% of the total OFF_HEAP memory
-    // if it is not set already.
+    // Fill the MULTITHREAD_READ_MEMORY_LIMIT_SIZE with 90% of the total off-heap memory
+    // if it is not set already. When off-heap limit tracking is disabled (nonPinnedLimit == -1),
+    // falls back to a hardware-derived estimate via computeEffectiveOffHeapLimit.
     if (conf.multiThreadReadMemoryLimit == 0) {
       sparkConf.set(RapidsConf.MULTITHREAD_READ_MEMORY_LIMIT_SIZE.key,
-        (0.9 * (pinnedSize + nonPinnedLimit)).toLong.toString)
+        computeMtReadLimit(pinnedSize, nonPinnedLimit, conf, sparkConf,
+          Cuda.getDeviceCount).toString)
     }
   }
 
   // visible for testing
-  def getPinnedPoolAndOffHeapLimits(conf: RapidsConf, sparkConf: SparkConf, deviceCount: Int,
-      memCheck: MemoryChecker =
-      MemoryCheckerImpl): (Long, Long) = {
-    val perTaskOverhead = conf.perTaskOverhead
-    val totalOverhead = perTaskOverhead * GpuDeviceManager.numCores
-    val confPinnedSize = conf.pinnedPoolSize
+  def computeMtReadLimit(pinnedSize: Long, nonPinnedLimit: Long,
+      conf: RapidsConf, sparkConf: SparkConf, deviceCount: Int,
+      memCheck: MemoryChecker = MemoryCheckerImpl): Long = {
+    val totalOffHeap = if (nonPinnedLimit >= 0) {
+      pinnedSize + nonPinnedLimit
+    } else {
+      // nonPinnedLimit == -1 means off-heap limit tracking is disabled (unlimited).
+      // Derive a concrete total from hardware so the MT read limit is still meaningful.
+      // Note: this feature is off by default
+      // (spark.rapids.sql.multiThreadedRead.memoryLimit.enabled defaults to false), so the risk
+      // of this approximation affecting users is low. The
+      // underlying hardware-derived calculation has known limitations — in particular, it may not
+      // account correctly for spark.memory.offHeap.size in all environments (see
+      // https://github.com/NVIDIA/spark-rapids/issues/13628). For now we reuse the same
+      // best-effort estimate rather than special-casing this path.
+      computeEffectiveOffHeapLimit(conf, sparkConf, deviceCount, memCheck)
+    }
+    val limit = (0.9 * totalOffHeap).toLong
+    logInfo(s"Setting MT read memory limit to ${limit / 1024 / 1024.0} MiB " +
+      s"(90% of ${totalOffHeap / 1024 / 1024.0} MiB total off-heap)")
+    limit
+  }
+
+  private def computeEffectiveOffHeapLimit(conf: RapidsConf, sparkConf: SparkConf,
+      deviceCount: Int, memCheck: MemoryChecker): Long = {
     val confLimit = conf.offHeapLimit
-    val confLimitEnabled = conf.offHeapLimitEnabled
     // This min limit of 4GB is somewhat arbitrary, but based on some testing which showed
     // that the previous minimum of 15 MB * num cores was too little for certain benchmark
     // queries to complete, whereas this limit was sufficient.
@@ -521,68 +546,87 @@ object GpuDeviceManager extends Logging {
       0L
     }
 
-    if (confLimitEnabled) {
-      val memoryLimit = if (confLimit.isDefined) {
-        if (executorOverhead.isEmpty) {
-          logWarning(s"$executorOverheadKey is not set")
-        }
-        logInfo(s"using configured ${RapidsConf.OFF_HEAP_LIMIT_SIZE} of ${confLimit.get}")
-        confLimit.get
+    if (confLimit.isDefined) {
+      if (executorOverhead.isEmpty) {
+        logWarning(s"$executorOverheadKey is not set")
+      }
+      logInfo(s"using configured ${RapidsConf.OFF_HEAP_LIMIT_SIZE} of ${confLimit.get}")
+      confLimit.get
+    } else {
+      // in case we cannot query the host for available memory due to environmental
+      // constraints, getAvailableMemoryBytes returns None and we fall back to 0, which causes
+      // basedOnHostMemory to go negative and trip the minMemoryLimit floor below.
+      lazy val availableHostMemory = if (isIntegratedGpu) {
+        (memCheck.getAvailableMemoryBytes(conf).getOrElse(0L) * (1.0 -
+        conf.integratedGpuMemoryFraction)).toLong
       } else {
-        // in case we cannot query the host for available memory due to environmental
-        // constraints, we can fall back to minMemoryLimit via saying there's no available
-        lazy val availableHostMemory = if (isIntegratedGpu) {
-          (memCheck.getAvailableMemoryBytes(conf).getOrElse(0L) * (1.0 -
-          conf.integratedGpuMemoryFraction)).toLong
+        memCheck.getAvailableMemoryBytes(conf).getOrElse(0L)
+      }
+      val hostMemUsageFraction = .8
+      // Spark calculates the total mem to allocate to the job as
+      // val totalMemMiB =
+      //      executorMemoryMiB + memoryOverheadMiB + memoryOffHeapMiB + pysparkMemToUseMiB
+      // and RAPIDS uses memory from the overhead portion here. Therefore, if the overhead is
+      // set we can just use that, otherwise we can infer it from the above as
+      // val memoryOverheadMiB =
+      //      totalMemMiB - executorMemoryMiB - memoryOffHeapMiB - pysparkMemToUseMiB
+      // where totalMemMiB is instead derived from the actual mem limits we can observe
+      // directly from the system.
+      // Note: subtracting sparkOffHeapSize here is an approximation. In some environments
+      // (e.g. Databricks) spark.memory.offHeap.size is set to a large value and RAPIDS is
+      // expected to operate within that allocation rather than outside it, so subtracting it
+      // double-counts the memory and under-estimates the available limit. Fixing this properly
+      // may require hooking into Spark's MemoryManager. See
+      // https://github.com/NVIDIA/spark-rapids/issues/13628
+      lazy val basedOnHostMemory = (hostMemUsageFraction * ((1.0 * availableHostMemory /
+        deviceCount) - heapSize - pysparkOverhead - sparkOffHeapSize)).toLong
+      if (executorOverhead.isDefined) {
+        val basedOnConfiguredOverhead = executorOverhead.get
+        logWarning(s"${RapidsConf.OFF_HEAP_LIMIT_SIZE} is not set; we derived " +
+          s"a memory limit from ($executorOverheadKey = ${executorOverhead.get}")
+        if (basedOnConfiguredOverhead < minMemoryLimit) {
+          logWarning(s"memory limit $basedOnConfiguredOverhead is less than the minimum of " +
+            s"$minMemoryLimit; using the latter")
+          if (minMemoryLimit > basedOnHostMemory) {
+            logWarning(s"the amount of available memory detected on the host is " +
+              s"$availableHostMemory, based off of which we computed a limit of " +
+              s"$basedOnHostMemory, which is less than the minimum $minMemoryLimit, " +
+              s"so we are using the minimum $minMemoryLimit")
+          }
+          minMemoryLimit
         } else {
-          memCheck.getAvailableMemoryBytes(conf).getOrElse(0L)
+          basedOnConfiguredOverhead
         }
-        val hostMemUsageFraction = .8
-        // Spark calculates the total mem to allocate to the job as
-        // val totalMemMiB =
-        //      executorMemoryMiB + memoryOverheadMiB + memoryOffHeapMiB + pysparkMemToUseMiB
-        // and RAPIDS uses memory from the overhead portion here. Therefore, if the overhead is
-        // set we can just use that, otherwise we can infer it from the above as
-        // val memoryOverheadMiB =
-        //      totalMemMiB - executorMemoryMiB - memoryOffHeapMiB - pysparkMemToUseMiB
-        // where totalMemMiB is instead derived from the actual mem limits we can observe
-        // directly from the system
-        lazy val basedOnHostMemory = (hostMemUsageFraction * ((1.0 * availableHostMemory /
-          deviceCount) - heapSize - pysparkOverhead - sparkOffHeapSize)).toLong
-        if (executorOverhead.isDefined) {
-          val basedOnConfiguredOverhead = executorOverhead.get
-          logWarning(s"${RapidsConf.OFF_HEAP_LIMIT_SIZE} is not set; we derived " +
-            s"a memory limit from ($executorOverheadKey = ${executorOverhead.get}")
-          if (basedOnConfiguredOverhead < minMemoryLimit) {
-            logWarning(s"memory limit $basedOnConfiguredOverhead is less than the minimum of " +
-              s"$minMemoryLimit; using the latter")
-            if (minMemoryLimit > basedOnHostMemory) {
-              logWarning(s"the amount of available memory detected on the host is " +
-                s"$availableHostMemory, based off of which we computed a limit of " +
-                s"$basedOnHostMemory, which is less than the minimum $minMemoryLimit, " +
-                s"so we are using the minimum $minMemoryLimit")
-            }
-            minMemoryLimit
-          } else {
-            basedOnConfiguredOverhead
-          }
+      } else {
+        logWarning(s"${RapidsConf.OFF_HEAP_LIMIT_SIZE} is not set; we used " +
+          s"memory limit derived from ($hostMemUsageFraction * (estimated available " +
+          s"host memory / device count) - $heapSizeKey - $pysparkOverheadKey - " +
+          s"$sparkOffHeapSizeKey) = ($hostMemUsageFraction * ($availableHostMemory / " +
+          s"$deviceCount) - $heapSize - $pysparkOverhead - $sparkOffHeapSize) = " +
+          s"$basedOnHostMemory")
+        if (basedOnHostMemory < minMemoryLimit) {
+          logWarning(s"the memory limit, $basedOnHostMemory, based on the available " +
+            s"host memory of $availableHostMemory, is less than the minimum of " +
+            s"$minMemoryLimit; using the latter $minMemoryLimit")
+          minMemoryLimit
         } else {
-          logWarning(s"${RapidsConf.OFF_HEAP_LIMIT_SIZE} is not set; we used " +
-            s"memory limit derived from ($hostMemUsageFraction * (estimated available " +
-            s"host memory / device count) - $heapSizeKey - $pysparkOverheadKey - " +
-            s"$sparkOffHeapSizeKey) = ($hostMemUsageFraction * ($availableHostMemory / " +
-            s"$deviceCount) - $heapSize - $pysparkOverhead - $sparkOffHeapSize) = " +
-            s"$basedOnHostMemory")
-          if (basedOnHostMemory < minMemoryLimit) {
-            logWarning(s"the memory limit, $basedOnHostMemory, based on the available " +
-              s"host memory of $availableHostMemory, is less than the minimum of " +
-              s"$minMemoryLimit; using the latter $minMemoryLimit")
-            minMemoryLimit
-          } else {
-            basedOnHostMemory
-          }
+          basedOnHostMemory
         }
       }
+    }
+  }
+
+  // visible for testing
+  def getPinnedPoolAndOffHeapLimits(conf: RapidsConf, sparkConf: SparkConf, deviceCount: Int,
+      memCheck: MemoryChecker =
+      MemoryCheckerImpl): (Long, Long) = {
+    val perTaskOverhead = conf.perTaskOverhead
+    val totalOverhead = perTaskOverhead * GpuDeviceManager.numCores
+    val confPinnedSize = conf.pinnedPoolSize
+    val confLimitEnabled = conf.offHeapLimitEnabled
+
+    if (confLimitEnabled) {
+      val memoryLimit = computeEffectiveOffHeapLimit(conf, sparkConf, deviceCount, memCheck)
 
       // Now we need to know the pinned vs non-pinned limits
       val pinnedLimit = if (confPinnedSize + totalOverhead <= memoryLimit) {

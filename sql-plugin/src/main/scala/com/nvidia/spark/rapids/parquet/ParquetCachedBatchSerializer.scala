@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids.parquet
 
-import java.io.{InputStream, IOException}
+import java.io.IOException
 import java.nio.ByteBuffer
 
 import scala.collection.JavaConverters._
@@ -26,7 +26,7 @@ import scala.collection.mutable.ListBuffer
 import ai.rapids.cudf._
 import ai.rapids.cudf.ParquetWriterOptions.StatisticsFrequency
 import com.nvidia.spark.GpuCachedBatchSerializer
-import com.nvidia.spark.rapids.{ColumnCastUtil, DecimalUtil, GpuColumnVector, GpuRowToColumnConverter, GpuSemaphore, RapidsConf, RequireSingleBatch, RowToColumnarIterator, SchemaUtils}
+import com.nvidia.spark.rapids.{ByteBufferInputStream, ColumnCastUtil, DecimalUtil, GpuColumnVector, GpuRowToColumnConverter, GpuSemaphore, RapidsConf, RequireSingleBatch, RowToColumnarIterator, SchemaUtils}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.GpuColumnVector.GpuColumnarBatchBuilder
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
@@ -61,59 +61,6 @@ import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.unsafe.types.CalendarInterval
-
-/**
- * copied from Spark org.apache.spark.util.ByteBufferInputStream
- */
-private class ByteBufferInputStream(private var buffer: ByteBuffer)
-    extends InputStream {
-
-  override def read(): Int = {
-    if (buffer == null || buffer.remaining() == 0) {
-      cleanUp()
-      -1
-    } else {
-      buffer.get() & 0xFF
-    }
-  }
-
-  override def read(dest: Array[Byte]): Int = {
-    read(dest, 0, dest.length)
-  }
-
-  override def read(dest: Array[Byte], offset: Int, length: Int): Int = {
-    if (buffer == null || buffer.remaining() == 0) {
-      cleanUp()
-      -1
-    } else {
-      val amountToGet = math.min(buffer.remaining(), length)
-      buffer.get(dest, offset, amountToGet)
-      amountToGet
-    }
-  }
-
-  override def skip(bytes: Long): Long = {
-    if (buffer != null) {
-      val amountToSkip = math.min(bytes, buffer.remaining).toInt
-      buffer.position(buffer.position() + amountToSkip)
-      if (buffer.remaining() == 0) {
-        cleanUp()
-      }
-      amountToSkip
-    } else {
-      0L
-    }
-  }
-
-  /**
-   * Clean up the buffer, and potentially dispose of it using StorageUtils.dispose().
-   */
-  private def cleanUp(): Unit = {
-    if (buffer != null) {
-      buffer = null
-    }
-  }
-}
 
 class ByteArrayInputFile(buff: Array[Byte]) extends InputFile {
 
@@ -466,19 +413,25 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
       cacheAttributes: Seq[Attribute],
       selectedAttributes: Seq[Attribute],
       conf: SQLConf): RDD[ColumnarBatch] = {
-    // optimize
-    val newSelectedAttributes = if (selectedAttributes.isEmpty) {
-      cacheAttributes
-    } else {
-      selectedAttributes
+    // When no columns are selected (e.g., count-only scan or
+    // cross-join side that needs only row count), return
+    // row-only batches without decoding parquet data.
+    if (selectedAttributes.isEmpty) {
+      return input.map {
+        case parquetCB: ParquetCachedBatch =>
+          new ColumnarBatch(Array.empty, parquetCB.numRows)
+        case other =>
+          throw new IllegalStateException(
+            s"Expected ParquetCachedBatch but got ${other.getClass}")
+      }
     }
     val (cachedSchemaWithNames, selectedSchemaWithNames) =
-      getSupportedSchemaFromUnsupported(cacheAttributes, newSelectedAttributes)
+      getSupportedSchemaFromUnsupported(cacheAttributes, selectedAttributes)
     convertCachedBatchToColumnarInternal(
       input,
       cachedSchemaWithNames,
       selectedSchemaWithNames,
-      newSelectedAttributes)
+      selectedAttributes)
   }
 
   private def convertCachedBatchToColumnarInternal(
@@ -563,19 +516,23 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
       cacheAttributes: Seq[Attribute],
       selectedAttributes: Seq[Attribute],
       conf: SQLConf): RDD[ColumnarBatch] = {
-    // optimize
-    val newSelectedAttributes = if (selectedAttributes.isEmpty) {
-      cacheAttributes
-    } else {
-      selectedAttributes
+    // When no columns are selected, return row-only batches
+    if (selectedAttributes.isEmpty) {
+      return input.map {
+        case parquetCB: ParquetCachedBatch =>
+          new ColumnarBatch(Array.empty, parquetCB.numRows)
+        case other =>
+          throw new IllegalStateException(
+            s"Expected ParquetCachedBatch but got ${other.getClass}")
+      }
     }
     val rapidsConf = new RapidsConf(conf)
     val (cachedSchemaWithNames, selectedSchemaWithNames) =
-      getSupportedSchemaFromUnsupported(cacheAttributes, newSelectedAttributes)
+      getSupportedSchemaFromUnsupported(cacheAttributes, selectedAttributes)
     if (rapidsConf.isSqlEnabled && rapidsConf.isSqlExecuteOnGPU &&
         isSchemaSupportedByCudf(cachedSchemaWithNames)) {
       val batches = convertCachedBatchToColumnarInternal(input, cachedSchemaWithNames,
-        selectedSchemaWithNames, newSelectedAttributes)
+        selectedSchemaWithNames, selectedAttributes)
       val cbRdd = batches.map(batch => {
         withResource(batch) { gpuBatch =>
           val cols = GpuColumnVector.extractColumns(gpuBatch)
@@ -585,7 +542,7 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
       cbRdd.mapPartitions(iter => CloseableColumnBatchIterator(iter))
     } else {
       val origSelectedAttributesWithUnambiguousNames =
-        sanitizeColumnNames(newSelectedAttributes, selectedSchemaWithNames)
+        sanitizeColumnNames(selectedAttributes, selectedSchemaWithNames)
       val broadcastedConf = SparkSession.active.sparkContext.broadcast(conf.getAllConfs)
       input.mapPartitions {
         cbIter => {
@@ -1335,9 +1292,10 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
       val structSchema = schemaWithUnambiguousNames.toStructType
       val converters = new GpuRowToColumnConverter(structSchema)
       val batchSizeBytes = rapidsConf.gpuTargetBatchSizeBytes
+      val enableR2cRetry = rapidsConf.isR2cRetryEnabled
       val columnarBatchRdd = input.mapPartitions(iter => {
         new RowToColumnarIterator(iter, structSchema, RequireSingleBatch, batchSizeBytes,
-        converters)
+        converters, enableR2cRetry)
       })
       columnarBatchRdd.flatMap(cb => {
         withResource(cb)(cb => compressColumnarBatchWithParquet(cb, structSchema,

@@ -21,11 +21,12 @@ package org.apache.spark.sql.rapids.suites
 
 import scala.util.Random
 
+import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{ArrayIntersect, CollectionExpressionsSuite,
-  Literal, Shuffle}
+  Literal, MapFromEntries, Shuffle}
 import org.apache.spark.sql.rapids.utils.RapidsTestsTrait
 import org.apache.spark.sql.types.{ArrayType, BinaryType, BooleanType, ByteType, DoubleType,
-  FloatType, IntegerType, LongType, ShortType, StringType}
+  FloatType, IntegerType, LongType, ShortType, StringType, StructField, StructType}
 
 /**
  * RAPIDS GPU tests for collection expressions (array, map operations).
@@ -248,5 +249,24 @@ class RapidsCollectionExpressionsSuite
     assert(!shuffle.fastEquals(Shuffle(ai0, seed1)))
     assert(!shuffle.fastEquals(shuffle.freshCopy()))
     assert(!shuffle.fastEquals(Shuffle(ai0, seed2)))
+  }
+
+  // Verify GPU matches CPU for the mixed edge case:
+  // array contains BOTH a null struct entry AND a valid struct with a null key.
+  // CPU short-circuits on the first null struct entry and returns null without
+  // ever inspecting the null key in the second entry.
+  // GPU should match this behavior (return null, not throw "Cannot use null as map key").
+  testRapids("MapFromEntries - mixed null struct entry and null key in valid struct") {
+    // arrayType / row are private to CollectionExpressionsSuite, so we inline the construction.
+    val entryType = ArrayType(
+      StructType(Seq(StructField("a", IntegerType), StructField("b", IntegerType))),
+      containsNull = true)
+    // [null_struct, {null_key, 20}]: null struct entry at index 0, null key at index 1.
+    // CPU short-circuits on the first null struct entry and returns null without
+    // evaluating subsequent entries.  GPU must match this (return null, not throw).
+    val mixed = Literal.create(
+      Seq(null, InternalRow.fromSeq(Seq(null, 20))),
+      entryType)
+    checkEvaluation(MapFromEntries(mixed), null)
   }
 }

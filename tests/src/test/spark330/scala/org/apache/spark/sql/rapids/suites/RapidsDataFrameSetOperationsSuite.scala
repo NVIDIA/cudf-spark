@@ -34,7 +34,7 @@ class RapidsDataFrameSetOperationsSuite
   import testImplicits._
 
   testRapids(
-      "SPARK-37371: GPU UnionExec should support columnar if all children support columnar") {
+      "SPARK-37371: UnionExec should support columnar if all children support columnar") {
     def checkGpuPlanExists(
         plan: SparkPlan,
         targetPlan: (SparkPlan) => Boolean): Unit = {

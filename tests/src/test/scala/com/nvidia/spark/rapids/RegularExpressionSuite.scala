@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,9 @@
 package com.nvidia.spark.rapids
 
 import java.nio.charset.Charset
+import java.util.regex.Pattern
+
+import scala.util.Try
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims._
@@ -50,7 +53,7 @@ class RegularExpressionSuite extends SparkQueryCompareTestSuite {
     "RegExpReplace",
     nullableStringsFromCsv,
     execsAllowedNonGpu = Seq("ProjectExec", "Alias",
-      "RegExpReplace", "AttributeReference", "Literal"), conf = conf) {
+      "RegExpReplace", "AttributeReference"), conf = conf) {
     frame => frame.selectExpr("regexp_replace(strings,'a',strings)")
   }
 
@@ -75,8 +78,19 @@ class RegularExpressionSuite extends SparkQueryCompareTestSuite {
   testGpuFallback("String regexp_replace input empty cpu fall back",
     "RegExpReplace",
     nullableStringsFromCsv, execsAllowedNonGpu = Seq("ProjectExec", "Alias",
-      "RegExpReplace", "AttributeReference", "Literal"), conf = conf) {
+      "RegExpReplace", "AttributeReference"), conf = conf) {
     frame => frame.selectExpr("regexp_replace(strings,'','D')")
+  }
+
+  testGpuFallback("String regexp_replace oversized quantifier cpu fall back",
+    "RegExpReplace",
+    nullableStringsFromCsv, execsAllowedNonGpu = Seq("ProjectExec", "Alias",
+      "RegExpReplace", "AttributeReference"), conf = conf) { frame =>
+    // JDK 11 accepts this pattern while newer JDKs reject it before RAPIDS parsing.
+    val pattern = "a{9999999999999999999999999999}"
+    assume(Try(Pattern.compile(pattern)).isSuccess,
+      "Java regex validation rejects the oversized quantifier")
+    frame.selectExpr(s"regexp_replace(strings, '$pattern', 'replacement')")
   }
 
   testSparkResultsAreEqual("String regexp_replace regex 1",
@@ -113,6 +127,17 @@ class RegularExpressionSuite extends SparkQueryCompareTestSuite {
     nullableStringsFromCsv, conf = conf) { frame =>
       assume(isUnicodeEnabled())
       frame.selectExpr("regexp_replace(strings,'\\(foo\\)','D')")
+  }
+
+  // #14856 / revans2: anchored alternation with a backref. The line-anchor rewrite must not
+  // change Java-visible capture numbering, so (E) remains group 1 and GPU must match CPU here.
+  testSparkResultsAreEqual("regexp_replace anchored alternation backref T$|(E)",
+    spark => {
+      import spark.implicits._
+      Seq("T", "E", "TE", "ET", "xExE", "T\r\nE", "E\r\n").toDF("strings")
+    }, conf = conf) { frame =>
+      assume(isUnicodeEnabled())
+      frame.selectExpr("regexp_replace(strings, 'T$|(E)', '[$1]')")
   }
 
   testSparkResultsAreEqual("String regexp_extract regex 1", extractStrings, conf = conf) {

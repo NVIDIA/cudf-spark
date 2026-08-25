@@ -16,7 +16,7 @@ in the cluster but it is not required.
 
 ### Prerequisites
 
-The build requires `OpenJDK 8`, `maven`, and `python`.
+The build requires `OpenJDK 17`, `maven`, and `python`.
 Skip to the next section if you have already installed them.
 
 #### Java Environment
@@ -263,7 +263,7 @@ individually, so you don't risk running unit tests along with the integration te
 http://www.scalatest.org/user_guide/using_the_scalatest_shell
 
 ```shell
-spark-shell --jars rapids-4-spark-tests_2.12-26.04.0-SNAPSHOT-tests.jar,rapids-4-spark-integration-tests_2.12-26.04.0-SNAPSHOT-tests.jar,scalatest_2.12-3.0.5.jar,scalactic_2.12-3.0.5.jar
+spark-shell --jars rapids-4-spark-tests_2.12-26.10.0-SNAPSHOT-tests.jar,rapids-4-spark-integration-tests_2.12-26.10.0-SNAPSHOT-tests.jar,scalatest_2.12-3.0.5.jar,scalactic_2.12-3.0.5.jar
 ```
 
 First you import the `scalatest_shell` and tell the tests where they can find the test files you
@@ -286,7 +286,7 @@ If you just want to verify the SQL replacement is working you will need to add t
 assumes CUDA 12 is being used and the Spark distribution is built with Scala 2.12.
 
 ```
-$SPARK_HOME/bin/spark-submit --jars "rapids-4-spark_2.12-26.04.0-SNAPSHOT-cuda12.jar" ./runtests.py
+$SPARK_HOME/bin/spark-submit --jars "rapids-4-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar" ./runtests.py
 ```
 
 You don't have to enable the plugin for this to work, the test framework will do that for you.
@@ -364,6 +364,19 @@ This marker has the following arguments:
 - `condition`: is used to gate when the override is appropriate, usually used to say that specific shims
                need the special override.
 - `permanent`: forces a test to ignore `DATAGEN_SEED` if True. If False, or if absent, the `DATAGEN_SEED` value always wins.
+
+### Reduced pre-commit parameter combination selection
+
+Add `[reduced-it]` to the pull request title to use deterministic each-choice selection for tests
+with two or more stacked `pytest.mark.parametrize` decorators. The selected combinations include
+every value from every decorator at least once. Tests with zero or one parametrization decorator run
+all cases. Tests whose collected cases do not form the expected Cartesian product also run all
+cases.
+
+Pre-commit runs use the complete Cartesian product by default. Developer and nightly runs are also
+unaffected unless `RANDOM_SELECT` is explicitly configured. `RANDOM_SELECT` is not applied in
+reduced IT mode because a second random selection could remove the only selected occurrence of a
+parameter value.
 
 ### Randomly selecting tests
 
@@ -496,7 +509,7 @@ The tests can be enabled by just appending the option `--cudf_udf` to the comman
 cudf_udf tests needs a couple of different settings, they may need to run separately.
 
 To enable cudf_udf tests, need following pre requirements:
-   * Install cuDF Python library on all the nodes running executors. The instruction could be found at [here](https://rapids.ai/start.html). Please follow the steps to choose the version based on your environment and install the cuDF library via Conda or use other ways like building from source.
+   * Install the cuDF Python library on all executor nodes. Use the [RAPIDS install selector](https://docs.rapids.ai/install#selector) to choose the version for your environment and install cuDF with Conda, or build it from source.
    * Disable the GPU exclusive mode on all the nodes running executors. The sample command is `sudo nvidia-smi -c DEFAULT`
 
 To run cudf_udf tests, need following configuration changes:
@@ -507,7 +520,7 @@ To run cudf_udf tests, need following configuration changes:
 As an example, here is the `spark-submit` command with the cudf_udf parameter on CUDA 12:
 
 ```
-$SPARK_HOME/bin/spark-submit --jars "rapids-4-spark_2.12-26.04.0-SNAPSHOT-cuda12.jar,rapids-4-spark-tests_2.12-26.04.0-SNAPSHOT.jar" --conf spark.rapids.memory.gpu.allocFraction=0.3 --conf spark.rapids.python.memory.gpu.allocFraction=0.3 --conf spark.rapids.python.concurrentPythonWorkers=2 --py-files "rapids-4-spark_2.12-26.04.0-SNAPSHOT-cuda12.jar" --conf spark.executorEnv.PYTHONPATH="rapids-4-spark_2.12-26.04.0-SNAPSHOT-cuda12.jar" ./runtests.py --cudf_udf
+$SPARK_HOME/bin/spark-submit --jars "rapids-4-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar,rapids-4-spark-tests_2.12-26.10.0-SNAPSHOT.jar" --conf spark.rapids.memory.gpu.allocFraction=0.3 --conf spark.rapids.python.memory.gpu.allocFraction=0.3 --conf spark.rapids.python.concurrentPythonWorkers=2 --py-files "rapids-4-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar" --conf spark.executorEnv.PYTHONPATH="rapids-4-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar" ./runtests.py --cudf_udf
 ```
 
 ### Enabling fuzz tests
@@ -525,6 +538,56 @@ Some tests require that Apache Iceberg has been configured in the Spark environm
 properly without it. These tests assume Iceberg is not configured and are disabled by default.
 If Spark has been configured to support Iceberg then these tests can be enabled by adding the
 `--iceberg` option to the command.
+
+When testing Iceberg package-private access paths, load the local Iceberg runtime jar with
+`ICEBERG_EXTRA_CLASSPATH` instead of `PYSP_TEST_spark_jars` or
+`PYSP_TEST_spark_jars_packages`. The test driver will place the RAPIDS, test, and Iceberg
+jars on `spark.driver.extraClassPath` and `spark.executor.extraClassPath`:
+
+```shell
+ICEBERG_EXTRA_CLASSPATH=/path/to/iceberg-spark-runtime-3.5_2.12-1.10.1.jar \
+PYSP_TEST_spark_sql_extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions \
+PYSP_TEST_spark_sql_catalog_spark__catalog=org.apache.iceberg.spark.SparkSessionCatalog \
+PYSP_TEST_spark_sql_catalog_spark__catalog_type=hadoop \
+PYSP_TEST_spark_sql_catalog_spark__catalog_warehouse=/tmp/spark-warehouse-$RANDOM \
+./integration_tests/run_pyspark_from_build.sh -m iceberg --iceberg
+```
+
+#### Disabling Iceberg fanout writer
+
+The Iceberg fanout writer holds all partition writers open simultaneously, which can cause
+executor OOM when writing to tables with many partitions (e.g., bucket or truncate transforms).
+To avoid this, the CI sets the catalog-level table default to disable fanout:
+
+```
+spark.sql.catalog.spark_catalog.table-default.write.spark.fanout.enabled=false
+```
+
+In the `PYSP_TEST_` env var format used by the test scripts:
+
+```shell
+"PYSP_TEST_spark_sql_catalog_spark__catalog_table-default_write_spark_fanout_enabled=false"
+```
+
+With fanout disabled, Iceberg uses the clustered writer which writes one partition at a time
+and releases memory between partitions. Dedicated fanout-enabled test cases
+(e.g., `test_*_fanout_enabled`) still exercise the fanout writer path with a single
+partition type to keep memory usage manageable.
+
+#### Iceberg REST catalog write compression
+
+Older Iceberg REST clients, including 1.6.x, do not apply client-side
+`spark.sql.catalog.*.table-default.*` settings when creating REST tables. The resulting tables
+can use a default Parquet compression codec that is not supported by the RAPIDS GPU writer.
+REST catalog tests therefore add explicit table properties for data and delete files to use
+`zstd`, which is supported by the GPU writer:
+
+```sql
+TBLPROPERTIES (
+  'write.parquet.compression-codec' = 'zstd',
+  'write.delete.parquet.compression-codec' = 'zstd'
+)
+```
 
 ### Run Apache iceberg s3tables tests
 
@@ -673,7 +736,7 @@ It is advised that tests be added for all applicable literal types, for an opera
 
 Note that for most operations, if all inputs are literal values, the Spark Catalyst optimizer will evaluate
 the expression during the logical planning phase of query compilation, via
-[Constant Folding](https://jaceklaskowski.gitbooks.io/mastering-spark-sql/content/spark-sql-Optimizer-ConstantFolding.html)
+[Constant Folding](https://books.japila.pl/spark-sql-internals/logical-optimizations/ConstantFolding/)
 E.g. Consider this query:
 ```sql
 SELECT SUM(1+2+3) FROM ...

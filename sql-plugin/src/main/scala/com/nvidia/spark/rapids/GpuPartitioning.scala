@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -41,6 +41,10 @@ trait GpuPartitioning extends Partitioning {
       rapidsConf.shuffleKudoGpuSerializerEnabled,
       GpuShuffleEnv.useMultiThreadedShuffle(rapidsConf))
   }
+
+  // Lift once GPU shuffle supports long (64-bit) serialized-slice offsets.
+  // protected[rapids] so tests can override it to exercise the guard below.
+  protected[rapids] def maxGpuSerializedSliceBytes: Long = Int.MaxValue
 
   final def columnarEval(batch: ColumnarBatch): GpuColumnVector = {
     throw new IllegalStateException(
@@ -211,6 +215,13 @@ trait GpuPartitioning extends Partitioning {
           partitionIndexes.tail: _*)) { dmbs =>
           val data = dmbs(0)
           val offsets = dmbs(1)
+          // This bound keeps the later Long->Int narrowings lossless:
+          // offsetsHost.getLong(..).toInt and dataHost.getLength.toInt
+          // (dataHost is sized to data.getLength).
+          require(data.getLength <= maxGpuSerializedSliceBytes,
+            s"GPU-serialized shuffle batch is ${data.getLength} bytes, exceeding the " +
+            s"$maxGpuSerializedSliceBytes-byte (2GB) limit addressable by the Int " +
+            s"serialized-slice offsets; reduce spark.rapids.sql.batchSizeBytes")
           closeOnExcept(Seq(HostMemoryBuffer.allocate(data.getLength),
             HostMemoryBuffer.allocate(offsets.getLength))) { seq =>
             val dataHost = seq(0)

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -48,6 +48,85 @@ class RowToColumnarIteratorRetrySuite extends RmmSparkRetrySuiteBase {
     Arm.withResource(row2ColIter.next()) { batch =>
       assertResult(10)(batch.numRows())
     }
+  }
+
+  test("test CPU OOM retry preserves all rows for non-RequireSingleBatch") {
+    val totalRows = 10
+    val rowIter: Iterator[InternalRow] = (1 to totalRows).map(InternalRow(_)).toIterator
+    val goal = TargetSize(batchSize)
+    val row2ColIter = new RowToColumnarIterator(
+      rowIter, schema, goal, batchSize, new GpuRowToColumnConverter(schema))
+    // Inject a CPU OOM during conversion and verify that retry still produces
+    // the complete set of rows when the iterator is allowed to emit multiple batches.
+    RmmSpark.forceRetryOOM(RmmSpark.getCurrentThreadId, 1,
+      RmmSpark.OomInjectionType.CPU.ordinal, 3)
+    var totalRowsSeen = 0
+    while (row2ColIter.hasNext) {
+      Arm.withResource(row2ColIter.next()) { batch =>
+        totalRowsSeen += batch.numRows()
+      }
+    }
+    assertResult(totalRows)(totalRowsSeen)
+  }
+
+  test("test first-row CPU OOM with TargetSize goal falls back to retry") {
+    val totalRows = 10
+    val rowIter: Iterator[InternalRow] = (1 to totalRows).map(InternalRow(_)).toIterator
+    val goal = TargetSize(batchSize)
+    val row2ColIter = new RowToColumnarIterator(
+      rowIter, schema, goal, batchSize, new GpuRowToColumnConverter(schema))
+    // skipCount=1 lets the first CPU allocation (data buffer) succeed, then fires OOM on the
+    // second (validity buffer), so the row is not committed (rowCount == 0). This exercises
+    // the blockUntilMemoryFreed path. skipCount=0 does not work: blockThreadUntilReady() has
+    // nothing to spill and re-throws the OOM when no prior allocations exist.
+    RmmSpark.forceRetryOOM(RmmSpark.getCurrentThreadId, 1,
+      RmmSpark.OomInjectionType.CPU.ordinal, 1)
+    var totalRowsSeen = 0
+    while (row2ColIter.hasNext) {
+      Arm.withResource(row2ColIter.next()) { batch =>
+        totalRowsSeen += batch.numRows()
+      }
+    }
+    assertResult(totalRows)(totalRowsSeen)
+  }
+
+  test("test first-row CPU OOM with RequireSingleBatch falls back to retry") {
+    val rowIter: Iterator[InternalRow] = (1 to 10).map(InternalRow(_)).toIterator
+    val row2ColIter = new RowToColumnarIterator(
+      rowIter, schema, RequireSingleBatch, batchSize, new GpuRowToColumnConverter(schema))
+    // skipCount=1: same reasoning as the TargetSize test above — fires on the validity
+    // buffer allocation during the first row, keeping rowCount == 0 for the OOM.
+    RmmSpark.forceRetryOOM(RmmSpark.getCurrentThreadId, 1,
+      RmmSpark.OomInjectionType.CPU.ordinal, 1)
+    Arm.withResource(row2ColIter.next()) { batch =>
+      assertResult(10)(batch.numRows())
+    }
+  }
+
+  // Note: SplitAndRetryOOM with rowCount == 0 is propagated directly (can't split a single
+  // row). A dedicated CpuSplitAndRetryOOM test for per-row convert() with rowCount == 0 is not
+  // feasible because RMM allocator-level OOM injection cannot reliably target it — it tends to
+  // hit builders.tryBuild() instead. The GPU split-and-retry test below verifies propagation.
+  // SplitAndRetryOOM with rowCount > 0 (emit-early) is covered by the test below.
+
+  test("test CPU SplitAndRetryOOM emit-early for non-RequireSingleBatch") {
+    // Same injection as "test CPU OOM retry preserves all rows" but with SplitAndRetryOOM:
+    // skipCount=3 reliably fires inside convertRows after at least one row is committed,
+    // triggering the emit-early path (rowCount > 0, non-RequireSingleBatch).
+    val totalRows = 10
+    val rowIter: Iterator[InternalRow] = (1 to totalRows).map(InternalRow(_)).toIterator
+    val goal = TargetSize(batchSize)
+    val row2ColIter = new RowToColumnarIterator(
+      rowIter, schema, goal, batchSize, new GpuRowToColumnConverter(schema))
+    RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
+      RmmSpark.OomInjectionType.CPU.ordinal, 3)
+    var totalRowsSeen = 0
+    while (row2ColIter.hasNext) {
+      Arm.withResource(row2ColIter.next()) { batch =>
+        totalRowsSeen += batch.numRows()
+      }
+    }
+    assertResult(totalRows)(totalRowsSeen)
   }
 
   test("test simple OOM split and retry") {

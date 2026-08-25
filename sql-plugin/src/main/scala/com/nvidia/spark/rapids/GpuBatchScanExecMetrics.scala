@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,8 +15,6 @@
  */
 
 package com.nvidia.spark.rapids
-
-import com.nvidia.spark.rapids.parquet.GpuParquetScan
 
 import org.apache.spark.sql.connector.read.Scan
 import org.apache.spark.sql.execution.metric.SQLMetrics
@@ -40,15 +38,13 @@ trait GpuBatchScanExecMetrics extends GpuExec {
     SCHEDULE_TIME_BUBBLE -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_SCHEDULE_TIME_BUBBLE),
     OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY),
     JOIN_TIME -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_JOIN_TIME),
+    ICEBERG_BUILD_ACTION_TIME ->
+      createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_ICEBERG_BUILD_ACTION_TIME),
+    ICEBERG_POST_PROCESS_TIME ->
+      createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_ICEBERG_POST_PROCESS_TIME),
   ) ++ fileCacheMetrics ++ scanCustomMetrics
 
-  lazy val fileCacheMetrics: Map[String, GpuMetric] = {
-    // File cache only supported on Parquet files for now.
-    scan match {
-      case _: GpuParquetScan | _: GpuOrcScan => createFileCacheMetrics()
-      case _ => Map.empty
-    }
-  }
+  lazy val fileCacheMetrics: Map[String, GpuMetric] = createFileCacheMetrics()
 
   private lazy val scanCustomMetrics: Map[String, GpuMetric] = {
     scan.supportedCustomMetrics().map { metric =>

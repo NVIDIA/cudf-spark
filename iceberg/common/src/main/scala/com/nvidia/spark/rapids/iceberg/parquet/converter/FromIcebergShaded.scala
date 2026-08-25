@@ -189,14 +189,18 @@ object FromIcebergShaded {
     if (inner == null) {
       return null
     }
-    val builder = Types.buildGroup(unshade(inner.getRepetition))
+    var builder = Types.buildGroup(unshade(inner.getRepetition))
 
     inner.getFields.forEach { field =>
       builder.addField(unshade(field))
     }
 
+    Option(inner.getLogicalTypeAnnotation).foreach { ann =>
+      builder = builder.as(unshade(ann))
+    }
+
     Option(inner.getId).foreach { id =>
-      builder.id(id.intValue())
+      builder = builder.id(id.intValue())
     }
 
     builder.named(inner.getName)

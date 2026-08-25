@@ -25,6 +25,8 @@ import com.nvidia.spark.rapids.GpuDataWritingCommandExec
 import org.apache.commons.io.FileUtils
 
 import org.apache.spark.sql.{AnalysisException, DataFrame, Row, SQLQuerySuite}
+import org.apache.spark.sql.execution.exchange.ReusedExchangeExec
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.GpuInsertIntoHadoopFsRelationCommand
 import org.apache.spark.sql.rapids.utils.RapidsSQLTestsTrait
 
@@ -246,6 +248,43 @@ class RapidsSQLQuerySuite extends SQLQuerySuite with RapidsSQLTestsTrait {
             Row(2, "2021-06-29") :: Row(2, "2021-06-30") :: Nil)
         checkAnswer(sql("SHOW PARTITIONS t2"),
             Row("CAL_DT=2021-06-29") :: Row("CAL_DT=2021-06-30") :: Nil)
+      }
+    }
+  }
+
+  // Original: SQLQuerySuite.scala lines 4103-4124
+  // Uses V1 parquet (default) instead of V2 to avoid DSv2
+  // computeStats-before-pushdown guard (see #14422).
+  // Disables AQE and broadcast so the static ReuseExchange
+  // rule fires and we can assert ReusedExchangeExec.
+  testRapids(
+    "SPARK-33482: Fix FileScan canonicalization") {
+    withSQLConf(
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "-1") {
+      withTempPath { path =>
+        spark.range(5).toDF().write
+          .mode("overwrite").parquet(path.toString)
+        withTempView("t") {
+          spark.read.parquet(path.toString)
+            .createOrReplaceTempView("t")
+          val df = sql(
+            """SELECT *
+              |FROM t AS t1
+              |JOIN t AS t2 ON t2.id = t1.id
+              |JOIN t AS t3 ON t3.id = t2.id
+            """.stripMargin)
+          df.collect()
+          val reused = collect(
+            df.queryExecution.executedPlan) {
+            case r: ReusedExchangeExec => r
+          }
+          assert(reused.nonEmpty,
+            "Expected ReusedExchangeExec for " +
+              "3 identical scan canonicalization, " +
+              "but found none.\nPlan:\n" +
+              df.queryExecution.executedPlan)
+        }
       }
     }
   }

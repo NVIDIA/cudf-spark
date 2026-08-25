@@ -121,10 +121,8 @@ restored data to console.
    `GpuShuffleExchangeExec`), leaf operator (e.g. `GpuFileSourceScanExec`) are not supported.
 3. **GpuDataWritingCommandExec is not supported for LORE dump on certain Spark versions**.
    The following versions are not supported due to compatibility issues with `GpuWriteFiles`:
-   - Spark 3.3.2 Databricks (`332db`)
    - Spark 3.4.0 (`340`)
    - Spark 3.4.1 (`341`)
-   - Spark 3.4.1 Databricks (`341db`)
    - Spark 3.4.2 (`342`)
    - Spark 3.4.3 (`343`)
    - Spark 3.4.4 (`344`)
@@ -138,6 +136,7 @@ restored data to console.
    - Spark 3.5.6 (`356`)
    - Spark 3.5.7 (`357`)
    - Spark 4.0.0 (`400`)
+   - Spark 4.0.0 Databricks 17.3 (`400db173`)
    - Spark 4.0.1 (`401`)
 
    When attempting to dump a `GpuDataWritingCommandExec` on these versions, LORE will throw an

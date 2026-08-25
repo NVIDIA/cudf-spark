@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 
 package org.apache.spark.sql.rapids.execution
 
-import java.util.concurrent.{ScheduledExecutorService, ThreadPoolExecutor}
+import java.util.concurrent.{ExecutorService, ScheduledExecutorService, ThreadPoolExecutor}
 
 import org.apache.hadoop.conf.Configuration
 import org.json4s.JsonAST
@@ -238,6 +238,10 @@ object TrampolineUtil {
     // which gives us important Hadoop config variables that are needed for the
     // Unity Catalog authentication
     ThreadUtils.newDaemonCachedThreadPool(prefix, maxThreadNumber, keepAliveSeconds)
+  }
+
+  def newDaemonSingleThreadExecutor(threadName: String): ExecutorService = {
+    ThreadUtils.newDaemonSingleThreadExecutor(threadName)
   }
 
   def newDaemonSingleThreadScheduledExecutor(threadName: String): ScheduledExecutorService = {

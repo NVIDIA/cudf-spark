@@ -17,23 +17,25 @@
 package com.nvidia.spark.rapids.delta
 
 import com.nvidia.spark.rapids.{
-  AppendDataExecV1Meta, 
-  AtomicCreateTableAsSelectExecMeta, 
-  AtomicReplaceTableAsSelectExecMeta, 
-  CreatableRelationProviderRule, 
-  ExecRule, 
-  ExprRule, 
-  GpuExec, 
-  OverwriteByExpressionExecV1Meta, 
-  RunnableCommandRule, 
-  ShimLoaderTemp, 
+  AppendDataExecV1Meta,
+  AtomicCreateTableAsSelectExecMeta,
+  AtomicReplaceTableAsSelectExecMeta,
+  CreatableRelationProviderRule,
+  DataWritingCommandRule,
+  ExecRule,
+  ExprRule,
+  GpuExec,
+  OverwriteByExpressionExecV1Meta,
+  RapidsConf,
+  RunnableCommandRule,
+  ShimLoaderTemp,
   SparkPlanMeta
 }
 
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.connector.catalog.{StagingTableCatalog, SupportsWrite}
 import org.apache.spark.sql.execution.{FileSourceScanExec, SparkPlan, SparkStrategy}
-import org.apache.spark.sql.execution.command.RunnableCommand
+import org.apache.spark.sql.execution.command.{DataWritingCommand, RunnableCommand}
 import org.apache.spark.sql.execution.datasources.{FileFormat, HadoopFsRelation}
 import org.apache.spark.sql.execution.datasources.v2.{AppendDataExecV1, AtomicCreateTableAsSelectExec, AtomicReplaceTableAsSelectExec, OverwriteByExpressionExecV1}
 import org.apache.spark.sql.sources.CreatableRelationProvider
@@ -53,6 +55,9 @@ trait DeltaProvider {
   def getRunnableCommandRules: Map[Class[_ <: RunnableCommand],
       RunnableCommandRule[_ <: RunnableCommand]]
 
+  def getDataWritingCommandRules: Map[Class[_ <: DataWritingCommand],
+      DataWritingCommandRule[_ <: DataWritingCommand]] = Map.empty
+
   def getStrategyRules: Seq[SparkStrategy]
 
   def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = Map.empty
@@ -63,7 +68,7 @@ trait DeltaProvider {
 
   def tagSupportForGpuFileSourceScan(meta: SparkPlanMeta[FileSourceScanExec]): Unit
 
-  def getReadFileFormat(relation: HadoopFsRelation): FileFormat
+  def getReadFileFormat(relation: HadoopFsRelation, rapidsConf: RapidsConf): FileFormat
 
   def isSupportedCatalog(catalogClass: Class[_ <: StagingTableCatalog]): Boolean
 
@@ -94,9 +99,14 @@ trait DeltaProvider {
       meta: OverwriteByExpressionExecV1Meta): GpuExec
 
   /**
-   * Pushes down deletion vector predicates to the scan if possible
+   * Returns true if deletion vector predicate pushdown is enabled via configuration.
    */
-  def pushDVPredicateDownToScan(plan: SparkPlan): SparkPlan = plan
+  def isPushDVPredicateDownEnabled(conf: RapidsConf): Boolean = false
+
+  /**
+   * Tries to push down deletion vector predicates to the scan.
+   */
+  def tryPushDVPredicateDownToScan(plan: SparkPlan): SparkPlan = plan
 
   def pruneFileMetadata(plan: SparkPlan): SparkPlan = plan
 
@@ -129,7 +139,7 @@ object NoDeltaProvider extends DeltaProvider {
   override def tagSupportForGpuFileSourceScan(meta: SparkPlanMeta[FileSourceScanExec]): Unit =
     throw new IllegalStateException("unsupported format")
 
-  override def getReadFileFormat(relation: HadoopFsRelation): FileFormat =
+  override def getReadFileFormat(relation: HadoopFsRelation, rapidsConf: RapidsConf): FileFormat =
     throw new IllegalStateException("unsupported format")
 
   override def isSupportedCatalog(catalogClass: Class[_ <: StagingTableCatalog]): Boolean = false

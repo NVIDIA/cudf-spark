@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -147,7 +147,7 @@ object AddEqDeletes extends Logging {
     (parquetFile)))
 
     val tableSchema = table.schema
-    withResource(icebergPartitionedFile.newReader) { reader =>
+    withResource(icebergPartitionedFile.newReader()) { reader =>
       logDebug(s"Reading eq delete parquet file $parquetFile, " +
         s"schema:\n${reader.getFileMetaData.getSchema}")
       val colNames = reader

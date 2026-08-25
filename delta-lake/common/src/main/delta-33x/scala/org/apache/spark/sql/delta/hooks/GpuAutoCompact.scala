@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * This file was derived from OptimisticTransaction.scala and TransactionalWrite.scala
  * in the Delta Lake project at https://github.com/delta-io/delta.
@@ -32,7 +32,7 @@ import org.apache.spark.sql.delta.rapids.GpuOptimisticTransactionBase
  * - OptimisticTransactionImpl instead of DeltaTransaction
  * - Seq[Action] instead of Iterator[Action]
  */
-case object GpuAutoCompact extends GpuAutoCompactBase {
+case object GpuAutoCompact extends GpuTransactionalAutoCompactBase {
 
   override def run(
       spark: SparkSession,
@@ -55,10 +55,18 @@ case object GpuAutoCompact extends GpuAutoCompactBase {
     // Skip Auto Compact if current transaction is not qualified or the table is not qualified
     // based on the value of autoCompactTypeOpt.
     if (shouldSkipAutoCompact(autoCompactTypeOpt, spark, txn)) return
-    compactIfNecessary(
+    val autoCompactRequest = AutoCompactUtils.prepareAutoCompactRequest(
       spark,
       txn,
       postCommitSnapshot,
+      txn.partitionsAddedToOpt.map(_.toSet),
+      OP_TYPE,
+      maxDeletedRowsRatio = None)
+    executeAutoCompactRequest(
+      spark,
+      txn.deltaLog,
+      txn.catalogTable,
+      autoCompactRequest,
       OP_TYPE,
       maxDeletedRowsRatio = None)
   }

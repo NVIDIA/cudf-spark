@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,7 +22,7 @@ import java.util.Objects
 
 import scala.collection.JavaConverters._
 
-import com.nvidia.spark.rapids.{DateTimeRebaseCorrected, GpuMetric, ThreadPoolConfBuilder}
+import com.nvidia.spark.rapids.{CombineConf, DateTimeRebaseCorrected, GpuMetric, ThreadPoolConfBuilder}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile
 import com.nvidia.spark.rapids.iceberg.parquet.converter.FromIcebergShaded._
@@ -30,7 +30,7 @@ import com.nvidia.spark.rapids.parquet.{GpuParquetUtils, ParquetFileInfoWithBloc
 import com.nvidia.spark.rapids.shims.PartitionedFileUtilsShim
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
-import org.apache.iceberg.Schema
+import org.apache.iceberg.{MetadataColumns, Schema}
 import org.apache.iceberg.expressions.Expression
 import org.apache.iceberg.hadoop.HadoopInputFile
 import org.apache.iceberg.io.InputFile
@@ -45,7 +45,8 @@ import org.apache.parquet.hadoop.metadata.BlockMetaData
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.execution.datasources.PartitionedFile
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.execution.datasources.parquet.ParquetToSparkSchemaConverter
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 case class IcebergPartitionedFile(
@@ -60,9 +61,9 @@ case class IcebergPartitionedFile(
     GpuIcebergParquetReader.buildReaderOptions(file.getDelegate, split)
   }
 
-  def newReader: ParquetFileReader = {
+  def newReader(metrics: Map[String, GpuMetric] = Map.empty): ParquetFileReader = {
     try {
-      ParquetFileReader.open(GpuParquetIO.file(file.getDelegate), parquetReadOptions)
+      GpuParquetIO.openReader(file, path, parquetReadOptions, metrics)
     } catch {
       case e: IOException =>
         throw new UncheckedIOException(s"Failed to newInputFile Parquet file: " +
@@ -115,9 +116,16 @@ case object SingleFile extends ThreadConf
 
 case class MultiThread(
     poolConfBuilder: ThreadPoolConfBuilder,
-    maxNumFilesProcessed: Int) extends ThreadConf
+    maxNumFilesProcessed: Int,
+    combineConf: CombineConf,
+    disableCombining: Boolean,
+    hasFilePathMetadata: Boolean,
+    hasRowPositionMetadata: Boolean) extends ThreadConf
 
-case class MultiFile(poolConfBuilder: ThreadPoolConfBuilder) extends ThreadConf
+case class MultiFile(
+    poolConfBuilder: ThreadPoolConfBuilder,
+    hasFilePathMetadata: Boolean,
+    hasRowPositionMetadata: Boolean) extends ThreadConf
 
 
 case class GpuIcebergParquetReaderConf(
@@ -194,26 +202,68 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
   }
 
   def filterParquetBlocks(file: IcebergPartitionedFile,
-      requiredSchema: Schema): ParquetFileInfoWithBlockMeta = {
-    withResource(file.newReader) { reader =>
+      requiredSchema: Schema): (ParquetFileInfoWithBlockMeta, ShadedMessageType) = {
+    withResource(file.newReader(conf.metrics)) { reader =>
       val fileSchema = reader.getFileMetaData.getSchema
-
-      val rowGroupFirstRowIndices = new Array[Long](reader.getRowGroups.size())
-      var accumulatedRowCount = 0L
-      for (i <- 0 until reader.getRowGroups.size()) {
-        rowGroupFirstRowIndices(i) = accumulatedRowCount
-        accumulatedRowCount += reader.getRowGroups.get(i).getRowCount
-      }
       val (typeWithIds, fileReadSchema) = projectSchema(fileSchema, requiredSchema)
       val filteredBlocks = filterRowGroups(reader, requiredSchema, typeWithIds, file.filter)
-      val blockFirstRowIndices = filteredBlocks.map(b => rowGroupFirstRowIndices(b._2))
+      val needsRowPosition =
+        requiredSchema.findField(MetadataColumns.ROW_POSITION.fieldId()) != null
+      val blockFirstRowIndices: Seq[Long] = if (needsRowPosition) {
+        // _pos is file-global. When file.split is set the reader is opened with
+        // ParquetReadOptions.withRange, which makes the footer expose only the row groups
+        // that intersect the range, so the ranged reader's own footer is not usable for
+        // file-global accounting. Open a second reader without the range to enumerate every
+        // row group and map its absolute byte offset to its file-global first-row index.
+        // getStartingPos is stable across filtering, so it remains a valid key when looking
+        // up the ranged reader's filtered blocks.
+        val firstRowIndexByStartingPos =
+          scala.collection.mutable.HashMap.empty[Long, Long]
+        def populateFromAllBlocks(allBlocks: java.util.List[ShadedBlockMetaData]): Unit = {
+          var accumulatedRowCount = 0L
+          var i = 0
+          while (i < allBlocks.size()) {
+            val b = allBlocks.get(i)
+            firstRowIndexByStartingPos(b.getStartingPos) = accumulatedRowCount
+            accumulatedRowCount += b.getRowCount
+            i += 1
+          }
+        }
+        if (file.split.isDefined) {
+          withResource(file.copy(split = None).newReader(conf.metrics)) { fullReader =>
+            populateFromAllBlocks(fullReader.getFooter.getBlocks)
+          }
+        } else {
+          populateFromAllBlocks(reader.getFooter.getBlocks)
+        }
+        filteredBlocks.map { case (block, _) =>
+          firstRowIndexByStartingPos.getOrElse(block.getStartingPos,
+            throw new IllegalStateException(
+              s"Row group at offset ${block.getStartingPos} in ${file.path} was not found " +
+                s"in the full Parquet footer; the footer or reader state may be inconsistent."))
+        }
+      } else {
+        // No _pos projection and no positional deletes — the values are never consumed,
+        // so skip the extra full-file reader open and emit per-task running counts.
+        var acc = 0L
+        filteredBlocks.map { case (block, _) =>
+          val start = acc
+          acc += block.getRowCount
+          start
+        }
+      }
       val blocks = clipBlocksToSchema(fileReadSchema, filteredBlocks.map(_._1))
 
-      val partReaderSparkSchema = TypeWithSchemaVisitor.visit(requiredSchema.asStruct(),
-          fileReadSchema, new SparkSchemaConverter)
-        .asInstanceOf[StructType]
+      val sqlConf = SQLConf.get
+      val partReaderSparkSchema = new ParquetToSparkSchemaConverter(
+        sqlConf.isParquetBinaryAsString,
+        sqlConf.isParquetINT96AsTimestamp,
+        conf.caseSensitive,
+        sqlConf.parquetInferTimestampNTZEnabled,
+        sqlConf.legacyParquetNanosAsLong
+      ).convert(unshade(fileReadSchema))
 
-      ParquetFileInfoWithBlockMeta(file.path,
+      val parquetFileInfo = ParquetFileInfoWithBlockMeta(file.path,
         blocks,
         InternalRow.empty, // Iceberg handles partition values but itself
         unshade(fileReadSchema),
@@ -223,6 +273,8 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
         hasInt96Timestamps = true,
         blockFirstRowIndices,
       )
+      
+      (parquetFileInfo, fileReadSchema)
     }
   }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids.delta.delta23x
 
-import com.nvidia.spark.rapids.{AtomicCreateTableAsSelectExecMeta, AtomicReplaceTableAsSelectExecMeta, GpuExec, GpuOverrides, GpuReadParquetFileFormat, RunnableCommandRule, SparkPlanMeta}
+import com.nvidia.spark.rapids.{AtomicCreateTableAsSelectExecMeta, AtomicReplaceTableAsSelectExecMeta, GpuExec, GpuOverrides, GpuReadParquetFileFormat, RapidsConf, RunnableCommandRule, SparkPlanMeta}
 import com.nvidia.spark.rapids.delta.Delta2xProviderBase
 
 import org.apache.spark.sql.delta.DeltaParquetFileFormat
@@ -72,7 +72,8 @@ object Delta23xProvider extends Delta2xProviderBase {
     }
   }
 
-  override def getReadFileFormat(relation: HadoopFsRelation): FileFormat = {
+  override def getReadFileFormat(
+      relation: HadoopFsRelation, rapidsConf: RapidsConf): FileFormat = {
     val cpuFormat = relation.fileFormat.asInstanceOf[DeltaParquetFileFormat]
     GpuDelta23xParquetFileFormat(cpuFormat.metadata, cpuFormat.isSplittable)
   }

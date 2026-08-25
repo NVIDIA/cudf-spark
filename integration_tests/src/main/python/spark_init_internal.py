@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2025, NVIDIA CORPORATION.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -51,6 +51,9 @@ spark_jars_env = {
     _SPARK_JARS,
     _SPARK_JARS_PACKAGES
 }
+# Initialized in pytest_sessionstart; declared here so pytest_sessionfinish
+# does not raise NameError if session startup fails before assignment.
+_spark = None
 
 def findspark_init():
     import findspark
@@ -123,7 +126,7 @@ def pytest_sessionstart(session):
     # can be reset in the middle of a test if specific operations are done (some types of cast etc)
     _sb = pyspark.sql.SparkSession.builder
     _sb.config('spark.plugins', 'com.nvidia.spark.SQLPlugin') \
-            .config("spark.sql.adaptive.enabled", "false") \
+            .config("spark.sql.adaptive.enabled", "true") \
             .config('spark.sql.queryExecutionListeners', 'org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback')
 
     for key, value in os.environ.items():
@@ -294,4 +297,24 @@ def set_spark_job_timeout(request):
     yield
     # after the test
     _set_job_timeout_and_crash_when_failed(spark_timeout, dump_threads)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_sessionfinish(session, exitstatus):
+    # Shut down SparkSession after all tests and report generation complete.
+    # On Spark 4.0+ / Databricks 17.3+, SparkConnectPlugin starts gRPC/Netty
+    # threads that keep the JVM alive even after Python exits.  An explicit
+    # spark.stop() triggers the plugin shutdown hook which cleans up those threads.
+    if running_with_xdist(session, is_worker=False):
+        logging.info("Skipping SparkSession stop on xdist coordinator")
+        return
+    global _spark
+    if _spark is not None:
+        logging.info("Stopping SparkSession at end of test session")
+        try:
+            _spark.stop()
+        except Exception as e:
+            logging.warning(f"Exception while stopping SparkSession: {e}")
+        finally:
+            _spark = None
 

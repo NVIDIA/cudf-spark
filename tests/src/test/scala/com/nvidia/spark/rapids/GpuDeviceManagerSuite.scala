@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -98,7 +98,11 @@ class GpuDeviceManagerSuite extends AnyFunSuite with BeforeAndAfter {
     val rapidsConf = new RapidsConf(Map(
       RapidsConf.RMM_ALLOC_RESERVE.key -> "0",
       RapidsConf.RMM_ALLOC_FRACTION.key -> "0.3",
-      RapidsConf.RMM_ALLOC_MAX_FRACTION.key -> "0.3"))
+      RapidsConf.RMM_ALLOC_MAX_FRACTION.key -> "0.3",
+      // This test validates that equal allocation and maximum fractions are accepted. Keep the
+      // minimum independent of whole-device capacity so the test also works when other test JVMs
+      // are using the GPU.
+      RapidsConf.RMM_ALLOC_MIN_FRACTION.key -> "0.01"))
     try {
       SparkSession.builder().master("local[1]").getOrCreate()
       GpuDeviceManager.initializeMemory(None, Some(rapidsConf))
@@ -433,6 +437,32 @@ class GpuDeviceManagerSuite extends AnyFunSuite with BeforeAndAfter {
       assertResult(expectedNonPinned)(nonPinnedSize)
     } finally {
       GpuDeviceManager.resetForceIntegratedGpuForTesting()
+      TestMemoryChecker.setAvailableMemoryBytes(None)
+    }
+  }
+
+  test("MT read limit should be 90% of total off heap when off heap limit disabled") {
+    val deviceCount = 1
+    val availableHostMem = 32L * 1024 * 1024 * 1024  // 32 GiB
+    val heapSize = toBytes("1g")  // default spark.executor.memory
+
+    val sparkConf = new SparkConf()
+    val rapidsConf = new RapidsConf(Map(
+      RapidsConf.OFF_HEAP_LIMIT_ENABLED.key -> "false"))
+
+    TestMemoryChecker.setAvailableMemoryBytes(Some(availableHostMem))
+
+    try {
+      val mtLimit = GpuDeviceManager.computeMtReadLimit(
+        pinnedSize = 0L, nonPinnedLimit = -1L,
+        rapidsConf, sparkConf, deviceCount, TestMemoryChecker)
+
+      // When off-heap limit is disabled, the effective total off-heap should be derived
+      // from hardware (same 80% formula used in the enabled path), and MT read limit = 90% of that.
+      val effectiveOffHeap = (0.8 * (availableHostMem - heapSize)).toLong
+      val expectedMtLimit = (0.9 * effectiveOffHeap).toLong
+      assertResult(expectedMtLimit)(mtLimit)
+    } finally {
       TestMemoryChecker.setAvailableMemoryBytes(None)
     }
   }

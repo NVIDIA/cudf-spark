@@ -1,377 +1,524 @@
 # Change log
-Generated on 2026-02-26
+Generated on 2026-08-14
 
-## Release 26.02
-
-### Features
-|||
-|:---|:---|
-|[#13381](https://github.com/NVIDIA/spark-rapids/issues/13381)|[FEA] Add support for iceberg partition calculation.|
-|[#14137](https://github.com/NVIDIA/spark-rapids/issues/14137)|[FEA] Switch from Java 17 release to Java 8 target for Spark 411 shim.|
-|[#14083](https://github.com/NVIDIA/spark-rapids/issues/14083)|[FEA][AUDIT][SPARK-52921][SQL] Specify outputPartitioning for UnionExec for same output partitoning as children operators|
-|[#14056](https://github.com/NVIDIA/spark-rapids/issues/14056)|[FEA] Add support for Spark 4.1.1|
-|[#13388](https://github.com/NVIDIA/spark-rapids/issues/13388)|[FEA] Add support for iceberg void transform.|
-|[#13389](https://github.com/NVIDIA/spark-rapids/issues/13389)|[FEA] Add support for iceberg identity transform.|
-|[#13382](https://github.com/NVIDIA/spark-rapids/issues/13382)|[FEA] Add support for iceberg bucket transform.|
-|[#9080](https://github.com/NVIDIA/spark-rapids/issues/9080)|[FEA] Support sha2|
-|[#13935](https://github.com/NVIDIA/spark-rapids/issues/13935)|[FEA] Add support for iceberg view.|
-|[#14066](https://github.com/NVIDIA/spark-rapids/issues/14066)|[FEA] Set correct iceberg table property for spark rapids.|
-|[#13750](https://github.com/NVIDIA/spark-rapids/issues/13750)|[FEA]Drop Spark 3.2.x support|
-|[#13882](https://github.com/NVIDIA/spark-rapids/issues/13882)|[FEA] Support spark 3.5 + iceberg 1.9.2|
-|[#13794](https://github.com/NVIDIA/spark-rapids/issues/13794)|[FEA] Update rapids JNI, private and hybrid dependency version to 26.02|
-
-### Performance
-|||
-|:---|:---|
-|[#14131](https://github.com/NVIDIA/spark-rapids/issues/14131)|[FEA] Enabled Kudo GPU reads by default|
-|[#13715](https://github.com/NVIDIA/spark-rapids/issues/13715)|[FEA] Expand gpuSpillTime and gpuReadSpillTime metrics to include full spill operations|
-|[#13812](https://github.com/NVIDIA/spark-rapids/issues/13812)|[PERF] Unnecessary data transformation steps in GPU aggregations|
-
-### Bugs Fixed
-|||
-|:---|:---|
-|[#14267](https://github.com/NVIDIA/spark-rapids/issues/14267)|[BUG] Spark 3.5.3 delta reads slower then 3.4.1|
-|[#14262](https://github.com/NVIDIA/spark-rapids/issues/14262)|[BUG] NDS query66 unmatched results error in Spark 4.1.1 + ANSI run|
-|[#14233](https://github.com/NVIDIA/spark-rapids/issues/14233)|[BUG] test_parquet_testing_valid_files for parquet-testing/data/null_list.parquet falls back|
-|[#14197](https://github.com/NVIDIA/spark-rapids/issues/14197)|[BUG] LHA test fails with cudaErrorInvalidResourceHandle during CSV reading on L40S cluster|
-|[#14215](https://github.com/NVIDIA/spark-rapids/issues/14215)|[BUG] Test Failure: SparkNumberFormatException - [CAST_INVALID_INPUT] The value '+1.2' of the type "STRING" cannot be cast to "INT" because it is malformed.|
-|[#14218](https://github.com/NVIDIA/spark-rapids/issues/14218)|[BUG] Build errors on databricks with shuffle v2 phase 2|
-|[#14134](https://github.com/NVIDIA/spark-rapids/issues/14134)|Change calls to cuDF partitioning apis to account for the numRows offset|
-|[#14174](https://github.com/NVIDIA/spark-rapids/issues/14174)|OOM when a single shuffle partition exceeds 2GB in RapidsShuffleThreadedWriter|
-|[#14201](https://github.com/NVIDIA/spark-rapids/issues/14201)|AB-BA deadlock between SpillableHostStore and SpillableHandle during shutdown|
-|[#14196](https://github.com/NVIDIA/spark-rapids/issues/14196)|[BUG] Iceberg identity partition fallback tests failing after GPU support implementation|
-|[#14099](https://github.com/NVIDIA/spark-rapids/issues/14099)|[BUG] IllegalStateException during Shuffle Write when Join result exceeds 2GB string limit.|
-|[#14037](https://github.com/NVIDIA/spark-rapids/issues/14037)|[AUDIT] [SPARK-52962][SQL] BroadcastExchangeExec should not reset metrics|
-|[#14188](https://github.com/NVIDIA/spark-rapids/issues/14188)|[BUG] JDK11 Nightly Build: DatasetSuite test failures for RelationalGroupedDataset toString format|
-|[#7520](https://github.com/NVIDIA/spark-rapids/issues/7520)|[AUDIT][SPARK-42045][SQL] ANSI SQL mode: Round/Bround should return an error on tiny/small/big integer overflow|
-|[#14179](https://github.com/NVIDIA/spark-rapids/issues/14179)|Merger thread can become zombie when task is killed, blocking subsequent tasks|
-|[#14096](https://github.com/NVIDIA/spark-rapids/issues/14096)|[BUG] Window function tests fail with GPU/CPU string value mismatches in min aggregations in cuda13|
-|[#13954](https://github.com/NVIDIA/spark-rapids/issues/13954)|[BUG] gpu kudo does not make its inputs spillable|
-|[#14030](https://github.com/NVIDIA/spark-rapids/issues/14030)|[BUG] Iceberg GPU result is diff from CPU when doing merge|
-|[#13365](https://github.com/NVIDIA/spark-rapids/issues/13365)|[BUG] NDS query57 completed with "IllegalArgumentException : Invalid kudo offset buffer content" error on dataproc|
-|[#14092](https://github.com/NVIDIA/spark-rapids/issues/14092)|[BUG] Fix incorrect Iceberg-write row in supportedDataSource.csv‎|
-|[#14075](https://github.com/NVIDIA/spark-rapids/issues/14075)|[BUG] Iceberg integration tests fail with pyspark.errors.exceptions.captured.UnsupportedOperationException: Creating a view is not supported by catalog: spark_catalog|
-|[#14078](https://github.com/NVIDIA/spark-rapids/issues/14078)|[BUG] SizeInBytes metric display incorrect for data sizes exceeding TB|
-|[#14025](https://github.com/NVIDIA/spark-rapids/issues/14025)|[BUG] Integration tests timeout on Dataproc 2.1-debian11: Job 0 exceeded 3600 second limit|
-|[#13629](https://github.com/NVIDIA/spark-rapids/issues/13629)|[BUG] error using UCX shuffle with Spark 4.0|
-|[#14057](https://github.com/NVIDIA/spark-rapids/issues/14057)|[BUG] Spark 4.0.0 master/worker startup failure: ClassNotFoundException and spark-class script error|
-|[#14043](https://github.com/NVIDIA/spark-rapids/issues/14043)|[BUG] `test_avg_divide_by_zero` failed for OSS Spark 3.3.0  and across all Databricks runtime versions|
-|[#13739](https://github.com/NVIDIA/spark-rapids/issues/13739)|[AutoSparkUT] Read row group containing both dictionary and plain encoded pages - Missing GPU verification test|
-|[#13760](https://github.com/NVIDIA/spark-rapids/issues/13760)|[AutoSparkUT]DATE_FROM_UNIX_DATE test case in RapidsDateExpressionsSuite threw java.lang.ArithmeticException: integer overflow|
-|[#13907](https://github.com/NVIDIA/spark-rapids/issues/13907)|[BUG] `join on` the condition `cast <row> to <boolean>` brings errors on the GPU engines|
-|[#13953](https://github.com/NVIDIA/spark-rapids/issues/13953)|[BUG] Test Failure: SPARK-24788 RelationalGroupedDataset.toString missing 'type: GroupBy' in output spark330 JDK11|
-|[#13914](https://github.com/NVIDIA/spark-rapids/issues/13914)|[BUG] An empty table  `crossJoin`  another table brings errors on the GPU engines|
-|[#13765](https://github.com/NVIDIA/spark-rapids/issues/13765)|[AutoSparkUT] SPARK-38237 shuffle distribution test needs GPU-specific implementation|
-|[#13892](https://github.com/NVIDIA/spark-rapids/issues/13892)|[BUG] CUDF UDF tests fail with kvikio symbol undefined error: _ZN6kvikio12RemoteHandle5preadEPvmmmPN2BS11thread_poolE 26.02 cudf-nightly|
-|[#13899](https://github.com/NVIDIA/spark-rapids/issues/13899)|[BUG] Race condition in host-to-disk spill due to premature disk handle exposure|
-|[#13820](https://github.com/NVIDIA/spark-rapids/issues/13820)|[BUG] NullPointerException - aggregate.TypedImperativeAggregate.merge when final agg on CPU|
-
-### PRs
-|||
-|:---|:---|
-|[#14328](https://github.com/NVIDIA/spark-rapids/pull/14328)|Writing field id when writing iceberg's data file|
-|[#14255](https://github.com/NVIDIA/spark-rapids/pull/14255)|Update changelog for the v26.02 release [skip ci]|
-|[#14254](https://github.com/NVIDIA/spark-rapids/pull/14254)|Update dependency version JNI, private, hybrid to 26.02.0|
-|[#14271](https://github.com/NVIDIA/spark-rapids/pull/14271)|Fix combining small files when reading Delta tables using multi-threaded reader|
-|[#14241](https://github.com/NVIDIA/spark-rapids/pull/14241)|[DOC] update for download page 2602 release [skip ci]|
-|[#14264](https://github.com/NVIDIA/spark-rapids/pull/14264)|Fix GpuHashAggregateExec outputPartitioning for aliased grouping keys|
-|[#14243](https://github.com/NVIDIA/spark-rapids/pull/14243)|[SPARK-54220] Xfail null_list.parquet for Spark 4.1.0+ due to array<void> inference|
-|[#14226](https://github.com/NVIDIA/spark-rapids/pull/14226)|Disable RAPIDS Shuffle Manager when spark.shuffle.checksum.enabled is true|
-|[#14230](https://github.com/NVIDIA/spark-rapids/pull/14230)|Fallback to CPU for hash joins with struct keys having different field names|
-|[#14206](https://github.com/NVIDIA/spark-rapids/pull/14206)|Spark-4.1.1: Resolve integration tests in map_test.py and bloom_filter tests|
-|[#14164](https://github.com/NVIDIA/spark-rapids/pull/14164)|Align GpuUnionExec with Spark 4.1's partitioner-aware union behavior|
-|[#14120](https://github.com/NVIDIA/spark-rapids/pull/14120)|[FEA] Add support for Spark 4.1.1|
-|[#14217](https://github.com/NVIDIA/spark-rapids/pull/14217)|Add tests for dml operations after schema evolution.|
-|[#14175](https://github.com/NVIDIA/spark-rapids/pull/14175)|Fix OOM when shuffle partition exceeds 2GB in threaded writer|
-|[#14202](https://github.com/NVIDIA/spark-rapids/pull/14202)|Fix AB-BA deadlock between SpillableHostStore and SpillableHandle during shutdown|
-|[#14204](https://github.com/NVIDIA/spark-rapids/pull/14204)|Fix iceberg identity test failure.|
-|[#14189](https://github.com/NVIDIA/spark-rapids/pull/14189)|BroadcastExchangeExec should not reset metrics|
-|[#14192](https://github.com/NVIDIA/spark-rapids/pull/14192)|Fix JDK version diff in RelationalGroupedDataset|
-|[#14183](https://github.com/NVIDIA/spark-rapids/pull/14183)|Support for Iceberg identity partitioning|
-|[#14182](https://github.com/NVIDIA/spark-rapids/pull/14182)|Artifactory credentials for wget used in spark-premerge-build.sh|
-|[#14180](https://github.com/NVIDIA/spark-rapids/pull/14180)|Fix merger thread deadlock when task is killed|
-|[#14139](https://github.com/NVIDIA/spark-rapids/pull/14139)|Add withRetry to GpuBatchedBoundedWindowIterator|
-|[#14166](https://github.com/NVIDIA/spark-rapids/pull/14166)|Fix failed cases due to Spark 41x changed the default mode from unsafe to safe|
-|[#14170](https://github.com/NVIDIA/spark-rapids/pull/14170)|Update authorized users|
-|[#14161](https://github.com/NVIDIA/spark-rapids/pull/14161)|Add in the proper output ordering and partitioning to GpuWindowLimitExec|
-|[#13724](https://github.com/NVIDIA/spark-rapids/pull/13724)|rapids shuffle manager V2 phase 1: writer use as much memory as allowed and pipelined write|
-|[#14157](https://github.com/NVIDIA/spark-rapids/pull/14157)|[AutoSparkUT]Add Dataset, DataFrameFunctions and ColumnExpression suites|
-|[#14151](https://github.com/NVIDIA/spark-rapids/pull/14151)|[AutoSparkUT]Enable several Spark UT suites|
-|[#14141](https://github.com/NVIDIA/spark-rapids/pull/14141)|[AutoSparkUT]Enable several UT Suites|
-|[#14125](https://github.com/NVIDIA/spark-rapids/pull/14125)|enable GPU kudo reads by default|
-|[#14003](https://github.com/NVIDIA/spark-rapids/pull/14003)|Add in basic GPU/CPU bridge operation|
-|[#14130](https://github.com/NVIDIA/spark-rapids/pull/14130)|[AutoSparkUT]Add RapidsCollectionExpressionsSuite|
-|[#13995](https://github.com/NVIDIA/spark-rapids/pull/13995)|Add a debug option to check if memory allocation is covered by retry framework|
-|[#14031](https://github.com/NVIDIA/spark-rapids/pull/14031)|Fix Iceberg data corruption when meets null in the condition in merge process|
-|[#14095](https://github.com/NVIDIA/spark-rapids/pull/14095)|Fix Scala 2.13 compilation warnings and enforce stricter checks|
-|[#14035](https://github.com/NVIDIA/spark-rapids/pull/14035)|Allow for AST join build side selection and add some heuristics|
-|[#14089](https://github.com/NVIDIA/spark-rapids/pull/14089)|Add length check for materializing to host memory buffer from DiskHandle.|
-|[#14001](https://github.com/NVIDIA/spark-rapids/pull/14001)|Supports all types for Iceberg bucket transform|
-|[#14093](https://github.com/NVIDIA/spark-rapids/pull/14093)|Fix incorrect Iceberg-write row in supportedDataSource.csv|
-|[#14101](https://github.com/NVIDIA/spark-rapids/pull/14101)|Migrate pre-merge CI image usage to new artifactory instance|
-|[#14100](https://github.com/NVIDIA/spark-rapids/pull/14100)|Add Spark version notice to generated documentation|
-|[#14091](https://github.com/NVIDIA/spark-rapids/pull/14091)|[SparkUT]Fix a from-json case to expect a different exception|
-|[#14094](https://github.com/NVIDIA/spark-rapids/pull/14094)|Fix compile error in `HashFunctions.scala`|
-|[#14038](https://github.com/NVIDIA/spark-rapids/pull/14038)|[FEA] SHA-2 hash support.|
-|[#14087](https://github.com/NVIDIA/spark-rapids/pull/14087)|Delete useless UT suites which run on CPU only|
-|[#14086](https://github.com/NVIDIA/spark-rapids/pull/14086)|Remove the 3rd `DataType` parameter from all the calls to GpuColumnVector.from(GpuScalar, int, DataType)|
-|[#14082](https://github.com/NVIDIA/spark-rapids/pull/14082)|Fix Iceberg view test failures in CICD|
-|[#14070](https://github.com/NVIDIA/spark-rapids/pull/14070)|Kudo supports schema check when serializing batches|
-|[#14080](https://github.com/NVIDIA/spark-rapids/pull/14080)|Set JDK 17 as the default for nightly builds across both scala2.12 and scala2.13|
-|[#14079](https://github.com/NVIDIA/spark-rapids/pull/14079)|Fix metric display for data sizes exceeding TB (#14078)|
-|[#14010](https://github.com/NVIDIA/spark-rapids/pull/14010)|support withRetry with split for GPU shuffle coalesce|
-|[#14071](https://github.com/NVIDIA/spark-rapids/pull/14071)|[DOC] update supported spark versions [skip ci]|
-|[#14033](https://github.com/NVIDIA/spark-rapids/pull/14033)|[BUG] Fix initialization order NPE for RapidsShuffleManager in UCX mode for Spark 4+|
-|[#14042](https://github.com/NVIDIA/spark-rapids/pull/14042)|Add Iceberg view test|
-|[#14058](https://github.com/NVIDIA/spark-rapids/pull/14058)|Update documentation to reflect the shims updates [skip ci]|
-|[#14039](https://github.com/NVIDIA/spark-rapids/pull/14039)|Add support for docs generation in `buildall`|
-|[#13975](https://github.com/NVIDIA/spark-rapids/pull/13975)|support withRetry with split for shuffle exchange exec base|
-|[#14044](https://github.com/NVIDIA/spark-rapids/pull/14044)|Adds ignore_order for groupBy agg test that returns multiple rows|
-|[#14026](https://github.com/NVIDIA/spark-rapids/pull/14026)|Add in the missing RmmSpark calls for the coalescing reader|
-|[#14029](https://github.com/NVIDIA/spark-rapids/pull/14029)|Increase executor memory for iceberg tests to avoid OOM error [skip ci]|
-|[#14022](https://github.com/NVIDIA/spark-rapids/pull/14022)|Add RapidsDateFunctionsSuite|
-|[#13993](https://github.com/NVIDIA/spark-rapids/pull/13993)|Update plugin scala212 to build 330+ only|
-|[#14024](https://github.com/NVIDIA/spark-rapids/pull/14024)|Update actions/setup-java@v5 [skip ci]|
-|[#13986](https://github.com/NVIDIA/spark-rapids/pull/13986)|Add iceberg 1.9.2 support.|
-|[#14008](https://github.com/NVIDIA/spark-rapids/pull/14008)|Fix auto merge conflict 14007 [skip ci]|
-|[#13982](https://github.com/NVIDIA/spark-rapids/pull/13982)|Add parquet mixed-encodings test|
-|[#13994](https://github.com/NVIDIA/spark-rapids/pull/13994)|[SparkUT]Add try-catch on dataframe.collect in UT framework|
-|[#13997](https://github.com/NVIDIA/spark-rapids/pull/13997)|Add pmattione to blossom: Attempt 2  [skip ci]|
-|[#13992](https://github.com/NVIDIA/spark-rapids/pull/13992)|Building scala213 plugin for spark350+|
-|[#13987](https://github.com/NVIDIA/spark-rapids/pull/13987)|Add layer of indirection when converting expressions to the GPU|
-|[#13981](https://github.com/NVIDIA/spark-rapids/pull/13981)|Add in support for getting SQL metrics from expressions|
-|[#13983](https://github.com/NVIDIA/spark-rapids/pull/13983)|Support custom parallelism in non-default test modes [skip ci]|
-|[#13964](https://github.com/NVIDIA/spark-rapids/pull/13964)|Fix a join where only a single column is used as a condition|
-|[#13970](https://github.com/NVIDIA/spark-rapids/pull/13970)|Make the GPU UDF has different name than the CPU one|
-|[#13933](https://github.com/NVIDIA/spark-rapids/pull/13933)|[DOC] fix dead link in testing page [skip ci]|
-|[#13845](https://github.com/NVIDIA/spark-rapids/pull/13845)|Add a non strict mode for lore dump|
-|[#13959](https://github.com/NVIDIA/spark-rapids/pull/13959)|[SparkUT]Check Java version to decide the expected string in one case of DataFrameAggregateSuite|
-|[#13955](https://github.com/NVIDIA/spark-rapids/pull/13955)|[DOC] Update RapidsUDF output types with decimal 128 [skip ci]|
-|[#13938](https://github.com/NVIDIA/spark-rapids/pull/13938)|Fix a special case in limit where it could return an empty batch with the wrong number of columns|
-|[#13945](https://github.com/NVIDIA/spark-rapids/pull/13945)|Set WONT_FIX_ISSUE cases in RadpisDataFrameWindowFunctionsSuite|
-|[#13947](https://github.com/NVIDIA/spark-rapids/pull/13947)|Fix auto merge conflict 13946 [skip ci]|
-|[#13936](https://github.com/NVIDIA/spark-rapids/pull/13936)|Add testRapids case to match GPU execution in RapidsDataFrameWindowFunctionsSuite|
-|[#13905](https://github.com/NVIDIA/spark-rapids/pull/13905)|Refine GpuTaskMetrics over SpillFrameWork|
-|[#13931](https://github.com/NVIDIA/spark-rapids/pull/13931)|Use strict priority in conda process [skip ci]|
-|[#13911](https://github.com/NVIDIA/spark-rapids/pull/13911)|[AutoSparkUT]Enable RapidsCsvExpressionsSuite & RapidsCSVInferSchemaSuite|
-|[#13900](https://github.com/NVIDIA/spark-rapids/pull/13900)|fix race condition due to premature disk handle exposure|
-|[#13902](https://github.com/NVIDIA/spark-rapids/pull/13902)|[AutoSparkUT]Add RapidsCsvSuite|
-|[#13875](https://github.com/NVIDIA/spark-rapids/pull/13875)|Persist the bufConverter of TypedImperativeAggregate into LogicalPlan instead of PhysicalPlan|
-|[#13883](https://github.com/NVIDIA/spark-rapids/pull/13883)|[AutoSparkUT]Enable several Spark UT suites|
-|[#13887](https://github.com/NVIDIA/spark-rapids/pull/13887)|Fix auto merge conflict 13877 [skip ci]|
-|[#13857](https://github.com/NVIDIA/spark-rapids/pull/13857)|Use shim to identify whether DataWriting is supported for LoRe|
-|[#13819](https://github.com/NVIDIA/spark-rapids/pull/13819)|Add the missing spark 357 version to GpuWriteFilesUnsupportedVersions|
-|[#13777](https://github.com/NVIDIA/spark-rapids/pull/13777)|[AutoSparkUT] Migrate DataFrameNaFunctionsSuite tests to RAPIDS|
-|[#13796](https://github.com/NVIDIA/spark-rapids/pull/13796)|Update dependency version JNI, private, hybrid to 26.02.0-SNAPSHOT [skip ci]|
-|[#13767](https://github.com/NVIDIA/spark-rapids/pull/13767)|[AutoSparkUT] Migrate DataFrameComplexTypeSuite tests to RAPIDS|
-|[#13762](https://github.com/NVIDIA/spark-rapids/pull/13762)|[AutoSparkUT]Enable Spark UT DateExpressionsSuite|
-|[#13795](https://github.com/NVIDIA/spark-rapids/pull/13795)|Bump up version to 26.02 [skip ci]|
-|[#13790](https://github.com/NVIDIA/spark-rapids/pull/13790)|Use wildcard mark to import all Rapids test suites migrated from Apache Spark Suites|
-
-## Release 25.12
+## Release 26.08
 
 ### Features
 |||
 |:---|:---|
-|[#13520](https://github.com/NVIDIA/spark-rapids/issues/13520)|[FEA] DML Support for iceberg|
-|[#12229](https://github.com/NVIDIA/spark-rapids/issues/12229)|[FEA] Support insert statement for iceberg table.|
-|[#13419](https://github.com/NVIDIA/spark-rapids/issues/13419)|[FEA] Enable iceberg insert support by default.|
-|[#13383](https://github.com/NVIDIA/spark-rapids/issues/13383)|[FEA] Add support for iceberg truncate transform.|
-|[#12719](https://github.com/NVIDIA/spark-rapids/issues/12719)|[FEA] Run iceberg nds power run tests.|
-|[#13548](https://github.com/NVIDIA/spark-rapids/issues/13548)|[FEA] Accelerate deletes on clustered tables|
-|[#13547](https://github.com/NVIDIA/spark-rapids/issues/13547)|[FEA] Accelerate updating clustered tables|
-|[#13386](https://github.com/NVIDIA/spark-rapids/issues/13386)|[FEA] Add support for iceberg day transform.|
-|[#13387](https://github.com/NVIDIA/spark-rapids/issues/13387)|[FEA] Add support for iceberg hour transform.|
-|[#13384](https://github.com/NVIDIA/spark-rapids/issues/13384)|[FEA] Add support for iceberg year transform.|
-|[#13385](https://github.com/NVIDIA/spark-rapids/issues/13385)|[FEA] Add support for iceberg month transform.|
-|[#13546](https://github.com/NVIDIA/spark-rapids/issues/13546)|[FEA] Accelerate merging clustered tables|
-|[#9079](https://github.com/NVIDIA/spark-rapids/issues/9079)|[FEA] Support map_from_entries|
-|[#13636](https://github.com/NVIDIA/spark-rapids/issues/13636)|[FEA] Support merge command for iceberg's merge on read mode.|
-|[#13635](https://github.com/NVIDIA/spark-rapids/issues/13635)|[FEA] Support update command for iceberg's merge on read mode.|
-|[#13634](https://github.com/NVIDIA/spark-rapids/issues/13634)|[FEA] Support delete command for iceberg's merge on read mode.|
-|[#13705](https://github.com/NVIDIA/spark-rapids/issues/13705)|[FEA] Support GBK encoded data|
-|[#13470](https://github.com/NVIDIA/spark-rapids/issues/13470)|[FEA] Support Spark 3.5.7|
-|[#13468](https://github.com/NVIDIA/spark-rapids/issues/13468)|[FEA] Update rapids JNI, private and hybrid dependency version to 25.12.0-SNAPSHOT|
-|[#13339](https://github.com/NVIDIA/spark-rapids/issues/13339)|[FEA] Support Delta Lake 4.0.0|
-|[#13525](https://github.com/NVIDIA/spark-rapids/issues/13525)|[FEA] Support merge statement for iceberg's copy on write mode.|
-|[#13524](https://github.com/NVIDIA/spark-rapids/issues/13524)|[FEA] Support Update statement for iceberg's copy on write mode.|
-|[#13523](https://github.com/NVIDIA/spark-rapids/issues/13523)|[FEA] Support Delete statement for iceberg's copy on write mode.|
-|[#13522](https://github.com/NVIDIA/spark-rapids/issues/13522)|[FEA] Support RTAS for iceberg.|
-|[#13605](https://github.com/NVIDIA/spark-rapids/issues/13605)|[FEA] Support insert into overwrite static for iceberg.|
-|[#13604](https://github.com/NVIDIA/spark-rapids/issues/13604)|[FEA] Support insert into dynamic overwrite for iceberg.|
-|[#13521](https://github.com/NVIDIA/spark-rapids/issues/13521)|[FEA] Support CTAS in for iceberg.|
-|[#13110](https://github.com/NVIDIA/spark-rapids/issues/13110)|[FEA] Support DeltaDynamicPartitionOverwriteCommand for deltalake 3.3.x|
-
-### Performance
-|||
-|:---|:---|
-|[#13266](https://github.com/NVIDIA/spark-rapids/issues/13266)|[FEA] Upgrade to UCX 1.19|
-|[#13462](https://github.com/NVIDIA/spark-rapids/issues/13462)|[TASK] Add microbenchmarks for Delta|
-|[#12968](https://github.com/NVIDIA/spark-rapids/issues/12968)|[FEA] Use kudo kernels in the plugin|
-|[#12919](https://github.com/NVIDIA/spark-rapids/issues/12919)|[FEA] Triple buffering: traffic control by a customized thread pool|
-|[#13568](https://github.com/NVIDIA/spark-rapids/issues/13568)|[TASK] Analyze Deletion Vector read performance against CPU FileSourceScanExec with Predicate Pushdowns|
+|[#15263](https://github.com/NVIDIA/cudf-spark/issues/15263)|[FEA] Delta Lake DB-17.3: Enable GPU data-file writes for managed CTAS/RTAS|
+|[#10159](https://github.com/NVIDIA/cudf-spark/issues/10159)|[FEA] provide configuration to automatically set spark.shuffle.manager|
+|[#15272](https://github.com/NVIDIA/cudf-spark/issues/15272)|[FEA] Add support for Apache Spark 3.5.9|
+|[#15168](https://github.com/NVIDIA/cudf-spark/issues/15168)|[FEA] Remove shim for Databricks 13.3|
+|[#15270](https://github.com/NVIDIA/cudf-spark/issues/15270)|[FEA] Add support for Apache Spark 4.0.4|
+|[#15271](https://github.com/NVIDIA/cudf-spark/issues/15271)|[FEA] Add support for Apache Spark 4.1.3|
+|[#14599](https://github.com/NVIDIA/cudf-spark/issues/14599)|[FEA] Delta Lake DB-17.3: Enable GPU OPTIMIZE + auto-compaction|
+|[#14624](https://github.com/NVIDIA/cudf-spark/issues/14624)|[FEA] Add support for Apache Spark 4.2.0|
+|[#14960](https://github.com/NVIDIA/cudf-spark/issues/14960)|[FEA] Support multiple order-by columns for RANGE window functions|
+|[#14853](https://github.com/NVIDIA/cudf-spark/issues/14853)|[FEA] Add support for Apache Iceberg 1.11|
+|[#14868](https://github.com/NVIDIA/cudf-spark/issues/14868)|[FEA][Follow-up] Emit multiple batches from GpuProjectExec split-retry instead of concatenating|
+|[#13649](https://github.com/NVIDIA/cudf-spark/issues/13649)|[FEA] BinaryType support for HostColumnarToGpu|
+|[#15065](https://github.com/NVIDIA/cudf-spark/issues/15065)|[FEA] Add support for Apache Spark 4.0.3|
+|[#14832](https://github.com/NVIDIA/cudf-spark/issues/14832)|[FEA] Add support for Spark 4.1.2|
 
 ### Bugs Fixed
 |||
 |:---|:---|
-|[#14009](https://github.com/NVIDIA/spark-rapids/issues/14009)|[BUG] Delta Lake deletion vector tests failing on Spark != 3.5 due to version incompatibilities|
-|[#14004](https://github.com/NVIDIA/spark-rapids/issues/14004)|[BUG] test_delta_deletion_vector_read_drop_row_group fails with https://github.com/NVIDIA/spark-rapids/pull/13980|
-|[#13950](https://github.com/NVIDIA/spark-rapids/issues/13950)|[BUG] Delta parquet files are not split when they can be|
-|[#13873](https://github.com/NVIDIA/spark-rapids/issues/13873)|[BUG]  `join` an empty table brings errors on the GPU engines|
-|[#13917](https://github.com/NVIDIA/spark-rapids/issues/13917)|[BUG] NDS2 Delta Microbenchmark Consistent Test Failures on SPARK2A Cluster|
-|[#13881](https://github.com/NVIDIA/spark-rapids/issues/13881)|[BUG] Iceberg REST catalog integration tests timeout after 5 hours|
-|[#13956](https://github.com/NVIDIA/spark-rapids/issues/13956)|[BUG] iceberg AWS S3 Tables test timeout 24 hours|
-|[#13940](https://github.com/NVIDIA/spark-rapids/issues/13940)|[BUG] [Iceberg] After update MoR run select collect raise column not match|
-|[#13854](https://github.com/NVIDIA/spark-rapids/issues/13854)|[BUG] run_other_join_modes_tests Integration tests: 1121 broadcast join failures and timeout the CI|
-|[#13885](https://github.com/NVIDIA/spark-rapids/issues/13885)|[BUG] New added iceberg cases causes nightly integration tests timeout after 12 hours|
-|[#13788](https://github.com/NVIDIA/spark-rapids/issues/13788)|[BUG] Scala test 'AsyncCpuTask task priority' failed UT|
-|[#13798](https://github.com/NVIDIA/spark-rapids/issues/13798)|[BUG] GpuLoreSuite test failure: GpuInsertIntoHiveTable LoRE replay produces no data (Spark 3.5.7)|
-|[#13848](https://github.com/NVIDIA/spark-rapids/issues/13848)|[BUG] test_delta_merge_sql_liquid_clustering fails with Delta 4|
-|[#13860](https://github.com/NVIDIA/spark-rapids/issues/13860)|[Test] ERROR: Could not find a version that satisfies the requirement pyspark-client==3.5.6  and 3.5.7|
-|[#13852](https://github.com/NVIDIA/spark-rapids/issues/13852)|[BUG] Iceberg merge tests failing after Delta clustered table update support|
-|[#13855](https://github.com/NVIDIA/spark-rapids/issues/13855)|[BUG] Scala test GpuInsertIntoHiveTable with LoRE dump and replay failed in CI|
-|[#13718](https://github.com/NVIDIA/spark-rapids/issues/13718)|[BUG] Spark Connect smoke test uses a  pip package `pyspark[connect]` with jars|
-|[#13731](https://github.com/NVIDIA/spark-rapids/issues/13731)|[BUG]  `.select()` query with `left_outer join()` brings errors when using the GPU engines|
-|[#13824](https://github.com/NVIDIA/spark-rapids/issues/13824)|[BUG] ArrayIndexOutOfBounds when reading iceberg table.|
-|[#13826](https://github.com/NVIDIA/spark-rapids/issues/13826)|[BUG] markdown link check fails 404 of logging_resource_adaptor|
-|[#13660](https://github.com/NVIDIA/spark-rapids/issues/13660)|[BUG] dataproc serverless failed: AssertionError: Assertion should have executed on driver|
-|[#13737](https://github.com/NVIDIA/spark-rapids/issues/13737)|[AutoSparkUT] conv - Base conversion function fails on GPU|
-|[#13738](https://github.com/NVIDIA/spark-rapids/issues/13738)|[AutoSparkUT] log10 - Function has different output on GPU|
-|[#13740](https://github.com/NVIDIA/spark-rapids/issues/13740)|[AutoSparkUT] log2 - Function has different output on GPU|
-|[#13741](https://github.com/NVIDIA/spark-rapids/issues/13741)|[AutoSparkUT] binary log - GPU returns NaN instead of null for negative base|
-|[#13689](https://github.com/NVIDIA/spark-rapids/issues/13689)|[BUG] Failed to authenticate in iceberg rest catalog tests|
-|[#13800](https://github.com/NVIDIA/spark-rapids/issues/13800)|[BUG] test_csv_read_gbk_encoded_data fail Part of the plan is not columnar class of DB 14.3 runtime|
-|[#13779](https://github.com/NVIDIA/spark-rapids/issues/13779)|[BUG] Divide-by-0 exception in Delta optimized write|
-|[#13771](https://github.com/NVIDIA/spark-rapids/issues/13771)|[BUG] RapidsMathExpressionsSuite fails on Spark 330: atanh FAILED|
-|[#13774](https://github.com/NVIDIA/spark-rapids/issues/13774)|[BUG] pool tasks can mistakenly be registered as dedicated|
-|[#13732](https://github.com/NVIDIA/spark-rapids/issues/13732)|[BUG] Small per task leak in RmmSpark task metrics|
-|[#13716](https://github.com/NVIDIA/spark-rapids/issues/13716)|[BUG] A special `select` query with the `where` expression brings inconsistency when using the CPU and GPU engines|
-|[#13708](https://github.com/NVIDIA/spark-rapids/issues/13708)|[BUG] A special `select` query with the `join on` expression brings inconsistency when using the CPU and GPU engines|
-|[#13690](https://github.com/NVIDIA/spark-rapids/issues/13690)|[BUG] java.io.NotSerializableException: com.nvidia.spark.rapids.RapidsConf occurred in iceberg rest catalog tests|
-|[#13664](https://github.com/NVIDIA/spark-rapids/issues/13664)|[BUG] some hash_aggregate integration tests failed with kudo.serializer.mode=GPU|
-|[#13651](https://github.com/NVIDIA/spark-rapids/issues/13651)|[BUG] plugin generate different output from CPU run|
-|[#13694](https://github.com/NVIDIA/spark-rapids/issues/13694)|[BUG] databricks shims failed compile: not found: value StatsExprShim|
-|[#13662](https://github.com/NVIDIA/spark-rapids/issues/13662)|[BUG] GpuRetryOOM in KudoGpuSerializer splitAndSerializeToDevice|
-|[#13661](https://github.com/NVIDIA/spark-rapids/issues/13661)|[BUG] Multiple NDS queries failed due to unmatched results on Dataproc|
-|[#13612](https://github.com/NVIDIA/spark-rapids/issues/13612)|[BUG] Kudo CPU serializer overflows with columns in a customer join query|
-|[#13641](https://github.com/NVIDIA/spark-rapids/issues/13641)|[BUG]  test_delta_overwrite_dynamic_missing_clauses fails with "RapidsDeltaWrite is not found in any captured plan"|
-|[#13648](https://github.com/NVIDIA/spark-rapids/issues/13648)|[BUG] delta_lake_merge_test:test_delta_merge_match_delete_only failed mismatch cpu and gpu outputs|
-|[#13652](https://github.com/NVIDIA/spark-rapids/issues/13652)|[BUG] mortgate_test and dpp_test failure in CI|
-|[#12246](https://github.com/NVIDIA/spark-rapids/issues/12246)|[BUG] The plugin can use a different GPU to validate the GPU architecture when multiple GPUs are equipped|
-|[#13659](https://github.com/NVIDIA/spark-rapids/issues/13659)|[BUG] validateGpuArchitecture sometimes looks at the wrong GPU|
-|[#13647](https://github.com/NVIDIA/spark-rapids/issues/13647)|[BUG] AssertUtils is not a member of package com.nvidia.spark.rapids|
-|[#13623](https://github.com/NVIDIA/spark-rapids/issues/13623)|[BUG] Iceberg s3table cases failed multiple different errors|
-|[#13059](https://github.com/NVIDIA/spark-rapids/issues/13059)|[BUG] Delta Lake writes are not being checked for CPU fallback in integration tests|
-|[#13607](https://github.com/NVIDIA/spark-rapids/issues/13607)|[BUG] DB builds are failing in premerge.|
-|[#13583](https://github.com/NVIDIA/spark-rapids/issues/13583)|[BUG] shuffle dockerfile build failed: UCX has no cuda13 release for rocky/centos|
-|[#12891](https://github.com/NVIDIA/spark-rapids/issues/12891)|[BUG] NullPointerException at ai.rapids.cudf.HostColumnVectorCore.getByte|
+|[#15449](https://github.com/NVIDIA/cudf-spark/issues/15449)|[BUG] ORC timestamp reads produce incorrect results in non-UTC DST timezones|
+|[#15499](https://github.com/NVIDIA/cudf-spark/issues/15499)|[BUG] RapidsShuffleThreadedWriterSuite leaks host buffers in Spark 340 focused run|
+|[#14731](https://github.com/NVIDIA/cudf-spark/issues/14731)|[AUDIT 4.2] [SPARK-54830][CORE] Enable checksum based indeterminate shuffle retry by default|
+|[#15394](https://github.com/NVIDIA/cudf-spark/issues/15394)|[BUG] Spark 4 Delta RTAS fails on GPU because staged table lacks TRUNCATE support|
+|[#14741](https://github.com/NVIDIA/cudf-spark/issues/14741)|[BUG] regexp_replace does not validate replacement backref ranges; out-of-range `$N` silently substitutes empty where Spark CPU throws|
+|[#15390](https://github.com/NVIDIA/cudf-spark/issues/15390)|[BUG] Spark 3.5.9 package build cannot resolve CreateNamedStructShims|
+|[#15234](https://github.com/NVIDIA/cudf-spark/issues/15234)|[BUG] Delta merge into write falls back from GPU due to unsupported CheckOverflowInTableWrite on Databricks 17.3|
+|[#15317](https://github.com/NVIDIA/cudf-spark/issues/15317)|[AI-AUDIT] Harden GPU ORC Reader close under interrupt like SPARK-57958|
+|[#15318](https://github.com/NVIDIA/cudf-spark/issues/15318)|[AI-AUDIT] Mirror SPARK-56045 Parquet UNKNOWN annotation config in GPU schema clipping|
+|[#15293](https://github.com/NVIDIA/cudf-spark/issues/15293)|[BUG] string split anchor fuzz test fails with cuDF Glushkov fast path|
+|[#14744](https://github.com/NVIDIA/cudf-spark/issues/14744)|[BUG] Transpiler truncates supplementary codepoints (`\\x{1F600}` becomes U+F600); silent wrong matches for non-BMP characters|
+|[#15004](https://github.com/NVIDIA/cudf-spark/issues/15004)|[BUG] GPU Parquet writing has a different statistics of the row group when a column has NaN value|
+|[#15316](https://github.com/NVIDIA/cudf-spark/issues/15316)|[AI-AUDIT] Mirror SPARK-57736 null-safe field names in GpuCreateNamedStruct.dataType|
+|[#14484](https://github.com/NVIDIA/cudf-spark/issues/14484)|[AI-AUDIT] Update GPU Python runners for runnerConf protocol change (SPARK-54615)|
+|[#15325](https://github.com/NVIDIA/cudf-spark/issues/15325)|[BUG] Multithreaded shuffle merge fails with IndexOutOfBounds for partial files >2g|
+|[#15226](https://github.com/NVIDIA/cudf-spark/issues/15226)|[BUG] Spark 4 AQE planning can construct GPU scans with a null SparkSession|
+|[#15256](https://github.com/NVIDIA/cudf-spark/issues/15256)|[BUG] test_parquet_interleaved_file_splits_partition_value_alignment fails with OSError: HDFS connection failed (CLASSPATH not set)|
+|[#15274](https://github.com/NVIDIA/cudf-spark/issues/15274)|[BUG] Iceberg REST catalog IT (Spark 3.5.0): 38 write tests fail because Parquet codec 'gzip' is not supported by GPU writer|
+|[#15287](https://github.com/NVIDIA/cudf-spark/issues/15287)|[BUG] test_regexp_replace_trailing_backslash_throws tests failing on premerge-CI on Databricks|
+|[#15122](https://github.com/NVIDIA/cudf-spark/issues/15122)|[non-BMP regex patterns] - GPU Execution Issue|
+|[#15275](https://github.com/NVIDIA/cudf-spark/issues/15275)|[BUG] CsvScanForIntervalSuite: castStringToDTInterval tests fail (sign inversion & null mismatch) across all Spark shims|
+|[#13723](https://github.com/NVIDIA/cudf-spark/issues/13723)|[BUG] cuda illegal memory access error while reading parquet files|
+|[#15266](https://github.com/NVIDIA/cudf-spark/issues/15266)|[Bug] `GpuRowToColumnarExec` omits terminal LIST offset, causing spill to corrupt batch|
+|[#15244](https://github.com/NVIDIA/cudf-spark/issues/15244)|[BUG] Changelog generator excludes PRs when commit messages contain bot co-author trailers|
+|[#14742](https://github.com/NVIDIA/cudf-spark/issues/14742)|[BUG] Replacement-string parser diverges from Java spec in five places: `\\N` as backref, trailing `\\`, bare `$X`, and malformed `${...}`|
+|[#14747](https://github.com/NVIDIA/cudf-spark/issues/14747)|[BUG] GpuRegExpUtils.getChoicesFromRegex flattens mixed sequences; `foo(cat|dog)` is treated as the character set `{f,o,cat,dog}` and replaced character-wise|
+|[#15203](https://github.com/NVIDIA/cudf-spark/issues/15203)|[BUG] test_delta_dv_cpu_bridge_filter_after_native_scan fails: 'Part of the plan is not columnar class FilterExec'|
+|[#14737](https://github.com/NVIDIA/cudf-spark/issues/14737)|[BUG] updateGroupsForExtract misses arms for RegexChoice and non-capturing RegexGroup; regexp_extract on `(a)|(b)` returns the wrong group|
+|[#15231](https://github.com/NVIDIA/cudf-spark/issues/15231)|[BUG] 3 test_from_json_allow_unquoted_control_chars* integration tests failed in pre merge|
+|[#15144](https://github.com/NVIDIA/cudf-spark/issues/15144)|[regex] RegexParser.countCaptureGroups omits RegexChoice — capture-group undercount|
+|[#14735](https://github.com/NVIDIA/cudf-spark/issues/14735)|[BUG] CudfRegexTranspiler.countCaptureGroups misses arms for `RegexChoice` and `RegexRepetition`; replacement-string semantics wrong for very common patterns|
+|[#14745](https://github.com/NVIDIA/cudf-spark/issues/14745)|[BUG] CudfRegexTranspiler.rewrite does not recurse into RegexCharacterRange endpoints; non-BMP / non-ASCII range endpoints get the wrong match|
+|[#15205](https://github.com/NVIDIA/cudf-spark/issues/15205)|[BUG] Nightly Scala 2.13 IT: test_collate_expr_fallback failed on Spark 4.x (ProjectExec not columnar)|
+|[#14739](https://github.com/NVIDIA/cudf-spark/issues/14739)|[BUG] RegexParser.parseHexDigit greedily consumes more than 2 hex digits for non-braced `\\xNN`; valid patterns rejected|
+|[#10350](https://github.com/NVIDIA/cudf-spark/issues/10350)|[BUG] Plugin shutdown should catch exceptions from subcomponent shutdown|
+|[#14748](https://github.com/NVIDIA/cudf-spark/issues/14748)|[BUG] transpileToSplittableString treats top-level `\\b` as literal backspace U+0008 instead of word boundary; `regexp_replace(..., '\\b', ...)` and `split(..., '\\b')` produce wrong results|
+|[#15006](https://github.com/NVIDIA/cudf-spark/issues/15006)|Drop the (\r\n)?$ regex line-anchor workaround in RegexParser once cuDF #22763 (CRLF EOL) lands|
+|[#15118](https://github.com/NVIDIA/cudf-spark/issues/15118)|[BUG] to_json on GPU emits unquoted NaN for float/double values|
+|[#15093](https://github.com/NVIDIA/cudf-spark/issues/15093)|[BUG] Delta Lake integration tests fail with NoClassDefFoundError: Could not initialize class DelegatingLogStore$ (Spark 3.3.0 / Ubuntu 24.04)|
+|[#15098](https://github.com/NVIDIA/cudf-spark/issues/15098)|[BUG] Iceberg REST catalog integration tests fail: java.lang.IllegalArgumentException: 'Part of the plan is not columnar' for V2 write execs|
+|[#14967](https://github.com/NVIDIA/cudf-spark/issues/14967)|[BUG] Int truncation: GpuPartitioning serialized buffer position/length .toInt (#14471)|
+|[#14926](https://github.com/NVIDIA/cudf-spark/issues/14926)|[BUG] regexp_replace: user $N backrefs not remapped after the synthetic $ line-anchor group ((a$|b)(c), T$|(E) produce wrong output)|
+|[#15020](https://github.com/NVIDIA/cudf-spark/issues/15020)|[BUG] The script build/make-scala-version-build-files.sh fails while regenerating scala2.13/*.pom.xml files|
+|[#15062](https://github.com/NVIDIA/cudf-spark/issues/15062)|[BUG] Main branch build fails: GpuJsonToStructs.scala compile error - JSONUtils.FromJSONResult vs ColumnVector type mismatch|
+|[#14996](https://github.com/NVIDIA/cudf-spark/issues/14996)|RTCX failure loading nvJitLink/nvrtc in AST CompiledExpression tests across multiple Spark shims|
+|[#14574](https://github.com/NVIDIA/cudf-spark/issues/14574)|[BUG] PERFILE reader skips deletion vector filtering for zero-column scans|
+|[#14972](https://github.com/NVIDIA/cudf-spark/issues/14972)|[BUG] Spark SQL UI / History Server shows pre-AQE CPU plan for GPU plans (AQE final plan not reflected); GPU V2 write child operators missing|
+|[#14905](https://github.com/NVIDIA/cudf-spark/issues/14905)|[Iceberg][BUG] GPU Iceberg Parquet writer uses spark.sql.parquet.compression.codec; CPU Iceberg does not|
+|[#14582](https://github.com/NVIDIA/cudf-spark/issues/14582)|[BUG] Databricks nightly CI: test_buckets OOM failure (CPU) on DB 17.3|
+|[#14743](https://github.com/NVIDIA/cudf-spark/issues/14743)|[BUG] GpuRegExpUtils.backrefConversion consumes too many digits; `regexp_replace` mishandles `$N` followed by literal digits|
 
 ### PRs
 |||
 |:---|:---|
-|[#14077](https://github.com/NVIDIA/spark-rapids/pull/14077)|[DOC] Update document issue [skip ci]|
-|[#14028](https://github.com/NVIDIA/spark-rapids/pull/14028)|[DOC] update cuda13 related jars in download doc [skip ci]|
-|[#14045](https://github.com/NVIDIA/spark-rapids/pull/14045)|Update version to 25.12.1-SNAPSHOT|
-|[#13968](https://github.com/NVIDIA/spark-rapids/pull/13968)|Update changelog for the v25.12 release [skip ci]|
-|[#14011](https://github.com/NVIDIA/spark-rapids/pull/14011)|[DOC] update for download page 2512 release [skip ci]|
-|[#14013](https://github.com/NVIDIA/spark-rapids/pull/14013)|Fixes various issues in 25.12 release branch|
-|[#13988](https://github.com/NVIDIA/spark-rapids/pull/13988)|Update dependency version JNI, private, hybrid to 25.12.0|
-|[#13980](https://github.com/NVIDIA/spark-rapids/pull/13980)|Delta table scan should be optimized when deletion vectors don't exist|
-|[#14002](https://github.com/NVIDIA/spark-rapids/pull/14002)|Skip test_delta_filter_out_metadata_col on|
-|[#13991](https://github.com/NVIDIA/spark-rapids/pull/13991)|Drop _tmp_metadata_row_index column from the output of Delta Scan on GPU|
-|[#13903](https://github.com/NVIDIA/spark-rapids/pull/13903)|Fix join bug on csv datasources|
-|[#13971](https://github.com/NVIDIA/spark-rapids/pull/13971)|Fix a special case in limit where it could return an empty batch with the wrong number of columns (#13938)|
-|[#13962](https://github.com/NVIDIA/spark-rapids/pull/13962)|Cut iceberg test cases for remote catalogs.|
-|[#13941](https://github.com/NVIDIA/spark-rapids/pull/13941)|Fix Iceberg column not match error when select count after cor update|
-|[#13942](https://github.com/NVIDIA/spark-rapids/pull/13942)|Add null safety guards to the conversion methods in FromIcebergShaded|
-|[#13926](https://github.com/NVIDIA/spark-rapids/pull/13926)|Fix columnar mismatch bug in iceberg dml when aqe enabled.|
-|[#13929](https://github.com/NVIDIA/spark-rapids/pull/13929)|Fix the ordering of join gather maps, and make it harder to break|
-|[#13922](https://github.com/NVIDIA/spark-rapids/pull/13922)|Remove low priority iceberg it test cases to save test time [skip ci]|
-|[#13919](https://github.com/NVIDIA/spark-rapids/pull/13919)|fix race condition due to premature disk handle exposure|
-|[#13891](https://github.com/NVIDIA/spark-rapids/pull/13891)|Enable iceberg write by default, and disable dml iceberg operation on mor table by default.|
-|[#13910](https://github.com/NVIDIA/spark-rapids/pull/13910)|Fix the unstable unit test case: ResourceBoundedExecutorSuite|
-|[#13797](https://github.com/NVIDIA/spark-rapids/pull/13797)|Supports Iceberg truncate transform|
-|[#13886](https://github.com/NVIDIA/spark-rapids/pull/13886)|[WAR] Remove ICEBERG_ONLY tests from default mode [skip ci]|
-|[#13872](https://github.com/NVIDIA/spark-rapids/pull/13872)|[Backport to 25.12] add missing spark 357 to GpuWriteFilesUnsupportedVersions|
-|[#13849](https://github.com/NVIDIA/spark-rapids/pull/13849)|Fix test_delta_merge_sql_liquid_clustering for Delta 4|
-|[#13867](https://github.com/NVIDIA/spark-rapids/pull/13867)|Use pyspark-client only for Spark 4.x [skip ci]|
-|[#13864](https://github.com/NVIDIA/spark-rapids/pull/13864)|[WAR] Move run_other_join_modes_tests out of DEFAULT mode [skip ci]|
-|[#13859](https://github.com/NVIDIA/spark-rapids/pull/13859)|Delete support for clustered tables|
-|[#13856](https://github.com/NVIDIA/spark-rapids/pull/13856)|Fix test cases: Iceberg datetime transforms|
-|[#13778](https://github.com/NVIDIA/spark-rapids/pull/13778)|Use pyspark-client for the Spark Connect smoke test|
-|[#13822](https://github.com/NVIDIA/spark-rapids/pull/13822)|Support update for Delta clustered tables|
-|[#13726](https://github.com/NVIDIA/spark-rapids/pull/13726)|Supports year/month/day/hour partition transforms for Iceberg|
-|[#13830](https://github.com/NVIDIA/spark-rapids/pull/13830)|Fix ArrayIndexOutOfBounds in iceberg reader.|
-|[#13719](https://github.com/NVIDIA/spark-rapids/pull/13719)|Upgrade ucx to 1.19.1-rc2|
-|[#13814](https://github.com/NVIDIA/spark-rapids/pull/13814)|Support merging clustered tables for Delta IO|
-|[#13717](https://github.com/NVIDIA/spark-rapids/pull/13717)|Add different join strategies, join logging, and heuristic confs|
-|[#13806](https://github.com/NVIDIA/spark-rapids/pull/13806)|Support GpuMapFromEntries to prevent fallback|
-|[#13755](https://github.com/NVIDIA/spark-rapids/pull/13755)|Add update/merge command support for iceberg's merge on read mode.|
-|[#13827](https://github.com/NVIDIA/spark-rapids/pull/13827)|Fix broken link to rmm logging_resource_adaptor source code [skip ci]|
-|[#13818](https://github.com/NVIDIA/spark-rapids/pull/13818)|Fixes an issue were we were not properly checking log params and nullable output|
-|[#13803](https://github.com/NVIDIA/spark-rapids/pull/13803)|Fix a GBK test failure on DB 143+|
-|[#13725](https://github.com/NVIDIA/spark-rapids/pull/13725)|Add delete support for iceberg's merge on read mode.|
-|[#13792](https://github.com/NVIDIA/spark-rapids/pull/13792)|Add doc for RANDOM_SELECT and oom_injection_mode in integration tests readme [skip ci]|
-|[#13780](https://github.com/NVIDIA/spark-rapids/pull/13780)|Add missing handling for the 0 input partition count in computing partition count in GpuOptimizeWriteExchangeExec|
-|[#13742](https://github.com/NVIDIA/spark-rapids/pull/13742)|Add Spark 3.5.7 support|
-|[#13773](https://github.com/NVIDIA/spark-rapids/pull/13773)|Add an option to run a random subset of integration tests|
-|[#13786](https://github.com/NVIDIA/spark-rapids/pull/13786)|Return true when comparing 2 variables if both  isNaN in Unit Test|
-|[#13761](https://github.com/NVIDIA/spark-rapids/pull/13761)|[AutoSparkUT] Migrate DataFramePivotSuite tests to RAPIDS|
-|[#13775](https://github.com/NVIDIA/spark-rapids/pull/13775)|Ensure that task threads are the only ones registered as dedicated|
-|[#13733](https://github.com/NVIDIA/spark-rapids/pull/13733)|Calls removeTaskMetrics to remove task metrics in RmmSpark after task completion|
-|[#13688](https://github.com/NVIDIA/spark-rapids/pull/13688)|Use new API to do Iceberg partition.|
-|[#13768](https://github.com/NVIDIA/spark-rapids/pull/13768)|Refactor RapidsTestSettings imports to one suite per line|
-|[#13753](https://github.com/NVIDIA/spark-rapids/pull/13753)|[AutoSparkUT] Add RapidsParquetEncodingSuite migration|
-|[#13748](https://github.com/NVIDIA/spark-rapids/pull/13748)|[AutoSparkUT]Enable Spark UT RapidsMathExpressionsSuite, RapidsMiscFunctionsSuite on 330|
-|[#13735](https://github.com/NVIDIA/spark-rapids/pull/13735)|Align with CPU behavior for the null handling in GpuInSet|
-|[#13656](https://github.com/NVIDIA/spark-rapids/pull/13656)|Add op time metric to Hybrid Scan|
-|[#13721](https://github.com/NVIDIA/spark-rapids/pull/13721)|Enable Delta Lake 4.0.x integration tests in nightly CI/CD jobs|
-|[#13710](https://github.com/NVIDIA/spark-rapids/pull/13710)|Enable Delta Lake 4.0.x support for Spark 4.0.1|
-|[#13489](https://github.com/NVIDIA/spark-rapids/pull/13489)|Support kudo GPU shuffle reads in the plugin|
-|[#13711](https://github.com/NVIDIA/spark-rapids/pull/13711)|define usesKudoGPUSlicing override got GpuSinglePartitioning|
-|[#13691](https://github.com/NVIDIA/spark-rapids/pull/13691)|Support the null-aware anti join in GPU broadcast hash join|
-|[#13413](https://github.com/NVIDIA/spark-rapids/pull/13413)|Fix core dump in MemoryCleaner|
-|[#13707](https://github.com/NVIDIA/spark-rapids/pull/13707)|Refactor DeltaDynamicPartitionOverwriteCommand and enable Delta 4.0 integration tests|
-|[#13701](https://github.com/NVIDIA/spark-rapids/pull/13701)|Add StatsExprShim in databricks shim|
-|[#13700](https://github.com/NVIDIA/spark-rapids/pull/13700)|Support ChangeLog for the new branch model [skip ci]|
-|[#13695](https://github.com/NVIDIA/spark-rapids/pull/13695)|[DOC] update the download doc [skip ci]|
-|[#13692](https://github.com/NVIDIA/spark-rapids/pull/13692)|Add missing javadocs in delta-33x-40x refactored code [skip ci]|
-|[#13666](https://github.com/NVIDIA/spark-rapids/pull/13666)|Add common infrastructure and Spark 4.0 compatibility for Delta Lake 4.0.0 support|
-|[#13663](https://github.com/NVIDIA/spark-rapids/pull/13663)|Add withRetry for gpuSplitAndSerialize in GPU kudo|
-|[#13643](https://github.com/NVIDIA/spark-rapids/pull/13643)|Add allow_non_gpu_delta_write_if to conditionally allow CPU fallback for delta writes|
-|[#13130](https://github.com/NVIDIA/spark-rapids/pull/13130)|Resource-bounded MultiFileCloudPartitionReader|
-|[#13657](https://github.com/NVIDIA/spark-rapids/pull/13657)|Add support for update iceberg table with copy on write mode.|
-|[#13670](https://github.com/NVIDIA/spark-rapids/pull/13670)|Revert "Temporarily disable test_dpp_reuse_broadcast_exchange and mor…|
-|[#13639](https://github.com/NVIDIA/spark-rapids/pull/13639)|Support delete command for iceberg's copy on write mode|
-|[#13658](https://github.com/NVIDIA/spark-rapids/pull/13658)|move validateGpuArch check to after initializeGpuAndMemory|
-|[#13644](https://github.com/NVIDIA/spark-rapids/pull/13644)|Add FileFormat, Catalog, Provider, and RowIndexFilters base classes and refactor delta-33x|
-|[#13654](https://github.com/NVIDIA/spark-rapids/pull/13654)|Move AssertUtils to the api submodule|
-|[#13655](https://github.com/NVIDIA/spark-rapids/pull/13655)|Temporarily disable test_dpp_reuse_broadcast_exchange and mortgage_test given cuDF issue|
-|[#13650](https://github.com/NVIDIA/spark-rapids/pull/13650)|Mitigate mamba hang on Rocky linux [skip ci]|
-|[#13642](https://github.com/NVIDIA/spark-rapids/pull/13642)| Add Create/Optimize table command base classes and refactor delta-33x|
-|[#13584](https://github.com/NVIDIA/spark-rapids/pull/13584)|Use assertInTests for cases with potential side effects, or expensive calls|
-|[#13637](https://github.com/NVIDIA/spark-rapids/pull/13637)|Update automerge pattern to release/* [skip ci]|
-|[#13619](https://github.com/NVIDIA/spark-rapids/pull/13619)|Add replace table as select for iceberg.|
-|[#13614](https://github.com/NVIDIA/spark-rapids/pull/13614)|Migrate most remaining NvtxRanges to use NvtxId/NvtxRangeWithDoc|
-|[#13626](https://github.com/NVIDIA/spark-rapids/pull/13626)|Add Update/Merge command base classes and  refactor delta-33x|
-|[#13620](https://github.com/NVIDIA/spark-rapids/pull/13620)|Add shims layer, Delete command base classes and refactor delta-33x Delete|
-|[#13586](https://github.com/NVIDIA/spark-rapids/pull/13586)|Assert RapidsDeltaWrite in integration tests|
-|[#13613](https://github.com/NVIDIA/spark-rapids/pull/13613)|Add Delta Lake 4.0.x module skeleton and build infrastructure|
-|[#13611](https://github.com/NVIDIA/spark-rapids/pull/13611)|Add insert static overwrite support for iceberg.|
-|[#13606](https://github.com/NVIDIA/spark-rapids/pull/13606)|Add insert overwrite dynamic support for iceberg.|
-|[#13595](https://github.com/NVIDIA/spark-rapids/pull/13595)|Add create table as select support for iceberg.|
-|[#13573](https://github.com/NVIDIA/spark-rapids/pull/13573)|Accelerate DeltaDynamicPartitionOverwriteCommand|
-|[#13608](https://github.com/NVIDIA/spark-rapids/pull/13608)|fix db GpuBroadcastHashJoinExec CollectTimeIterator args|
-|[#13594](https://github.com/NVIDIA/spark-rapids/pull/13594)|Use Cuda 11 ucx build for rocky dockerfiles|
-|[#12900](https://github.com/NVIDIA/spark-rapids/pull/12900)|Migrate CollectTimeIterator to use new NvtxIdWithMetrics class|
-|[#13599](https://github.com/NVIDIA/spark-rapids/pull/13599)|Fix auto merge conflict 13598 [skip ci]|
-|[#13501](https://github.com/NVIDIA/spark-rapids/pull/13501)|Use `RapidsFileIO` for writing data.|
-|[#13572](https://github.com/NVIDIA/spark-rapids/pull/13572)|Upgrade UCX to 1.19-rc1|
-|[#13544](https://github.com/NVIDIA/spark-rapids/pull/13544)|GpuBubbleTime: A new metric recording GPU underutilization wall time|
-|[#13500](https://github.com/NVIDIA/spark-rapids/pull/13500)|Add Spark Connect smoke test in nightly integration tests|
-|[#13399](https://github.com/NVIDIA/spark-rapids/pull/13399)|Add two metrics for the sized join|
-|[#13454](https://github.com/NVIDIA/spark-rapids/pull/13454)|log if maxMem is called twice in a task|
-|[#13475](https://github.com/NVIDIA/spark-rapids/pull/13475)|Update dependency version JNI, private, hybrid to 25.12.0-SNAPSHOT|
+|[#15667](https://github.com/NVIDIA/cudf-spark/pull/15667)|Clarify Databricks shuffle config and fix install link [skip ci]|
+|[#15654](https://github.com/NVIDIA/cudf-spark/pull/15654)|Fix Iceberg support for Spark 4.1.2 and 4.1.3 [fast-ut]|
+|[#15548](https://github.com/NVIDIA/cudf-spark/pull/15548)|Update changelog for the v26.08 release [skip ci]|
+|[#15595](https://github.com/NVIDIA/cudf-spark/pull/15595)|Stabilize AQE SMJ-to-BHJ local-shuffle-reader unit test [fast-ut] [reduced-ci]|
+|[#15547](https://github.com/NVIDIA/cudf-spark/pull/15547)|Update dependency version JNI, private, hybrid to 26.08.0|
+|[#15599](https://github.com/NVIDIA/cudf-spark/pull/15599)|Fix mergeIdenticalProjects dropping alias-producing GpuProjects in DV predicate pushdown|
+|[#15597](https://github.com/NVIDIA/cudf-spark/pull/15597)|Preserve AQE coalesced hash partition boundaries|
+|[#15577](https://github.com/NVIDIA/cudf-spark/pull/15577)|[BUG] Fix Iceberg 1.9 constant conversion IllegalAccessError|
+|[#15450](https://github.com/NVIDIA/cudf-spark/pull/15450)|Fix non-UTC ORC timestamp read correctness  [fast-ut] [reduced-it]|
+|[#15555](https://github.com/NVIDIA/cudf-spark/pull/15555)|[BUG] Preserve GroupPartitionsExec CPU fallback partitioning|
+|[#15544](https://github.com/NVIDIA/cudf-spark/pull/15544)|Fall back to CPU for to_json sortKeys|
+|[#15509](https://github.com/NVIDIA/cudf-spark/pull/15509)|[DOC] update download page for 26.08 release [skip ci]|
+|[#15435](https://github.com/NVIDIA/cudf-spark/pull/15435)|Fix Iceberg S3 PerfIO access with split classloaders|
+|[#15518](https://github.com/NVIDIA/cudf-spark/pull/15518)|Avoid shell command injection in databricks CI scripts [fast-ut][reduced-it]|
+|[#15501](https://github.com/NVIDIA/cudf-spark/pull/15501)|[BUG] Fix SpillablePartialFileHandle host memory leak seen in tests only|
+|[#15397](https://github.com/NVIDIA/cudf-spark/pull/15397)|Preserve partial clustering across Spark versions|
+|[#15429](https://github.com/NVIDIA/cudf-spark/pull/15429)|Pass DSv2 WriteSummary from GPU MERGE commits|
+|[#15476](https://github.com/NVIDIA/cudf-spark/pull/15476)|Fix Scala 2.12 eta-expansion for verifyParquetMagic|
+|[#15378](https://github.com/NVIDIA/cudf-spark/pull/15378)|Checksum enable fallback fixes for Spark 4.2|
+|[#15462](https://github.com/NVIDIA/cudf-spark/pull/15462)|DV read tests with cdf should run with spark 353+|
+|[#15384](https://github.com/NVIDIA/cudf-spark/pull/15384)|Enable optimized S3 tail reads for Iceberg Parquet footers|
+|[#15428](https://github.com/NVIDIA/cudf-spark/pull/15428)|Fix Parquet UNKNOWN annotation IT writes on Dataproc|
+|[#15455](https://github.com/NVIDIA/cudf-spark/pull/15455)|Fix Spark 4.2 collect_set float buffer conversion for mixed aggs|
+|[#15420](https://github.com/NVIDIA/cudf-spark/pull/15420)|Skip Dataproc shuffle manager auto-configuration|
+|[#15416](https://github.com/NVIDIA/cudf-spark/pull/15416)|Match Spark 4.2 date_trunc overflow at Long.MinValue|
+|[#15411](https://github.com/NVIDIA/cudf-spark/pull/15411)|Fix OSS Delta RTAS on Spark 4.x+|
+|[#15368](https://github.com/NVIDIA/cudf-spark/pull/15368)|Support IF_NOT_CONTAINED filter type and loading inline deletion vectors for OSS delta|
+|[#15422](https://github.com/NVIDIA/cudf-spark/pull/15422)|  [skip ci] Fix Iceberg REST S3 path regression coverage|
+|[#15413](https://github.com/NVIDIA/cudf-spark/pull/15413)|Preserve BroadcastHashJoin isSkewJoin in GPU plan display|
+|[#15415](https://github.com/NVIDIA/cudf-spark/pull/15415)|Allow WriteFilesExec fallback for non-UTC ORC writes|
+|[#15366](https://github.com/NVIDIA/cudf-spark/pull/15366)|CheckOverflowInTableWrite Support|
+|[#15114](https://github.com/NVIDIA/cudf-spark/pull/15114)|Documentation updates for RAPIDS for Apache Spark -> NVIDIA cuDF plugin for Apache Spark rename|
+|[#15396](https://github.com/NVIDIA/cudf-spark/pull/15396)|Harden GPU ORC reader close under interrupt|
+|[#15408](https://github.com/NVIDIA/cudf-spark/pull/15408)|Add the missing DeletionVectorInfo constructor parameter|
+|[#15376](https://github.com/NVIDIA/cudf-spark/pull/15376)|Mirror SPARK-56045 Parquet UNKNOWN annotation in GPU schema clipping|
+|[#15360](https://github.com/NVIDIA/cudf-spark/pull/15360)|Fix double escaping of Iceberg S3 input-file URIs|
+|[#15320](https://github.com/NVIDIA/cudf-spark/pull/15320)|Add DBR 17.3 Delta CTAS/RTAS support and fix optimized writes|
+|[#15388](https://github.com/NVIDIA/cudf-spark/pull/15388)|Add Spark 3.5.9 support for CreateNamedStruct shims|
+|[#14544](https://github.com/NVIDIA/cudf-spark/pull/14544)|Support DST timezones conversion for ORC|
+|[#15372](https://github.com/NVIDIA/cudf-spark/pull/15372)|Support collect_set RESPECT NULLS|
+|[#15285](https://github.com/NVIDIA/cudf-spark/pull/15285)|Auto-configure the RAPIDS shuffle manager|
+|[#15286](https://github.com/NVIDIA/cudf-spark/pull/15286)|Add support for Apache Spark 3.5.9|
+|[#15381](https://github.com/NVIDIA/cudf-spark/pull/15381)|Re-enable string split anchor fuzz test|
+|[#14869](https://github.com/NVIDIA/cudf-spark/pull/14869)|[BUG] Fix regex parser truncating supplementary codepoints in \\x{...} escapes|
+|[#15375](https://github.com/NVIDIA/cudf-spark/pull/15375)|Enable unwrap cast max literal test|
+|[#15358](https://github.com/NVIDIA/cudf-spark/pull/15358)|Fix named struct dataType null field names|
+|[#15276](https://github.com/NVIDIA/cudf-spark/pull/15276)|Remove Databricks 13.3 shim support|
+|[#15331](https://github.com/NVIDIA/cudf-spark/pull/15331)|Refactor regex group parsing and explicitly reject unsupported group types|
+|[#15355](https://github.com/NVIDIA/cudf-spark/pull/15355)|Support quantified \D and \W in regex patterns|
+|[#15327](https://github.com/NVIDIA/cudf-spark/pull/15327)|Fix SpillablePartialFileHandle read overflow when written more than 2GB|
+|[#15322](https://github.com/NVIDIA/cudf-spark/pull/15322)|Handle collect_set signed zeros by Scala version|
+|[#15313](https://github.com/NVIDIA/cudf-spark/pull/15313)|Add Spark 4.0.4 shim support|
+|[#15208](https://github.com/NVIDIA/cudf-spark/pull/15208)|Prevent multithreaded shuffle merger deadlock|
+|[#15310](https://github.com/NVIDIA/cudf-spark/pull/15310)|Add Spark 4.1.3 shim support|
+|[#15303](https://github.com/NVIDIA/cudf-spark/pull/15303)|[BUG] Parse Java lookahead groups as (?=) and (?!)|
+|[#15252](https://github.com/NVIDIA/cudf-spark/pull/15252)|[BUG] Trigger liquid clustering in Delta Lake integration tests|
+|[#15278](https://github.com/NVIDIA/cudf-spark/pull/15278)|Add DBR 17.3 Delta liquid clustering support|
+|[#15302](https://github.com/NVIDIA/cudf-spark/pull/15302)|Align opportunistic PerfIO S3 enablement|
+|[#15277](https://github.com/NVIDIA/cudf-spark/pull/15277)|[BUG] Run GPU AQE planning with registered SparkSession|
+|[#15279](https://github.com/NVIDIA/cudf-spark/pull/15279)|Add Spark 4.2 shim support|
+|[#15301](https://github.com/NVIDIA/cudf-spark/pull/15301)|Normalize blossom-ci allowlist [skip ci]|
+|[#15289](https://github.com/NVIDIA/cudf-spark/pull/15289)|Fix test_parquet_interleaved_file_splits_partition_value_alignment on GCS again|
+|[#15153](https://github.com/NVIDIA/cudf-spark/pull/15153)|Add skipped-path coverage for skewed BHJ private optimizer|
+|[#15295](https://github.com/NVIDIA/cudf-spark/pull/15295)|Fix Iceberg REST compression defaults|
+|[#15290](https://github.com/NVIDIA/cudf-spark/pull/15290)|Fix regexp_replace no-op when '+' is the only metacharacter|
+|[#15296](https://github.com/NVIDIA/cudf-spark/pull/15296)|Append new authorized user to blossom-ci allowlist [skip ci]|
+|[#15258](https://github.com/NVIDIA/cudf-spark/pull/15258)|[SkipRecovery] Re-enable Spark 3.5 Hive simple UDF test|
+|[#15297](https://github.com/NVIDIA/cudf-spark/pull/15297)|[DOC] update download page for 26.06.1 release [skip ci]|
+|[#15291](https://github.com/NVIDIA/cudf-spark/pull/15291)|Fix regexp_replace error assertions on Databricks|
+|[#14961](https://github.com/NVIDIA/cudf-spark/pull/14961)|Support for multi orderby columns for RANGE window functions|
+|[#15210](https://github.com/NVIDIA/cudf-spark/pull/15210)|[AutoSparkUT] Fix ORC reads with missing nested fields|
+|[#15280](https://github.com/NVIDIA/cudf-spark/pull/15280)|[BUG] Handle null regex captures in interval and regexp_extract_all|
+|[#15267](https://github.com/NVIDIA/cudf-spark/pull/15267)|Fix missing terminal list offset in `GpuRowToColumnarExec#fillBatch`|
+|[#15260](https://github.com/NVIDIA/cudf-spark/pull/15260)|[AutoSparkUT] Re-enable Iceberg delete fallback test|
+|[#15261](https://github.com/NVIDIA/cudf-spark/pull/15261)|Fix changelog filtering for bot co-author trailers [skip ci]|
+|[#15259](https://github.com/NVIDIA/cudf-spark/pull/15259)|[AutoSparkUT] Re-enable escaped json_tuple test|
+|[#14862](https://github.com/NVIDIA/cudf-spark/pull/14862)|[BUG] Fix regex replacement-string parser Java spec gaps|
+|[#15262](https://github.com/NVIDIA/cudf-spark/pull/15262)|[cudf-udf]: fix conda dependency resolution and CUDA header discovery [skip test]|
+|[#15236](https://github.com/NVIDIA/cudf-spark/pull/15236)|Fix allow_non_gpu_conditional to gate allowances on its condition|
+|[#15196](https://github.com/NVIDIA/cudf-spark/pull/15196)|NVSkills Request CI Workflow [skip ci]|
+|[#15134](https://github.com/NVIDIA/cudf-spark/pull/15134)|Add support for output `MapType[StringType, ArrayType[StringType]]` in `from_json` SQL function|
+|[#15227](https://github.com/NVIDIA/cudf-spark/pull/15227)|Limit collate ProjectExec fallback to Spark 4.0.x|
+|[#15242](https://github.com/NVIDIA/cudf-spark/pull/15242)|Use configured copy buffer for Hadoop vectored reads|
+|[#15246](https://github.com/NVIDIA/cudf-spark/pull/15246)|[AutoSparkUT] Recover JSON timestamp fallback tests|
+|[#15191](https://github.com/NVIDIA/cudf-spark/pull/15191)|[BUG] Validate repeated regex choices|
+|[#15241](https://github.com/NVIDIA/cudf-spark/pull/15241)|Add Skills premerge pipeline|
+|[#14939](https://github.com/NVIDIA/cudf-spark/pull/14939)|[AutoSparkUT] Un-skip approx_percentile tests (#13049 follow-up; isolate #14634)|
+|[#15190](https://github.com/NVIDIA/cudf-spark/pull/15190)|[BUG] Preserve regex sequence semantics in multi-replace|
+|[#15255](https://github.com/NVIDIA/cudf-spark/pull/15255)|Revert "[AutoSparkUT] Fix Parquet reads with empty nested schemas (#15209)"|
+|[#15225](https://github.com/NVIDIA/cudf-spark/pull/15225)|Add FilterExec to the allow_non_gpu list for test_delta_dv_cpu_bridge_filter_after_native_scan|
+|[#15250](https://github.com/NVIDIA/cudf-spark/pull/15250)|[BUG] Enable YearMonthInterval arithmetic on Databricks|
+|[#15209](https://github.com/NVIDIA/cudf-spark/pull/15209)|[AutoSparkUT] Fix Parquet reads with empty nested schemas|
+|[#15229](https://github.com/NVIDIA/cudf-spark/pull/15229)|[AutoSparkUT] Recover repeated JSON array cases|
+|[#15192](https://github.com/NVIDIA/cudf-spark/pull/15192)|[BUG] Preserve regex extract capture-group indexing|
+|[#15249](https://github.com/NVIDIA/cudf-spark/pull/15249)|Revert "[Coverage] Add YearMonthInterval multiply/divide IT parallel to DayTime" [skip ci]|
+|[#15243](https://github.com/NVIDIA/cudf-spark/pull/15243)|Revert "Add protobuf integration-test dependency infrastructure (plugin-0)" [skip ci]|
+|[#15215](https://github.com/NVIDIA/cudf-spark/pull/15215)|Fix test_bloom_filter_join_cpu_probe failures on Dataproc|
+|[#15193](https://github.com/NVIDIA/cudf-spark/pull/15193)|[BUG] Treat anchors in regex character classes as literals|
+|[#14938](https://github.com/NVIDIA/cudf-spark/pull/14938)|[Coverage] Add YearMonthInterval multiply/divide IT parallel to DayTime|
+|[#14940](https://github.com/NVIDIA/cudf-spark/pull/14940)|[Coverage] Exercise uncovered CPU bridge paths|
+|[#14877](https://github.com/NVIDIA/cudf-spark/pull/14877)|Emit multiple batches from GpuProjectExec split-retry instead of concatenating|
+|[#14958](https://github.com/NVIDIA/cudf-spark/pull/14958)|[Coverage] Cover CudfUnsafeRowBase primitive-type getter arms|
+|[#14885](https://github.com/NVIDIA/cudf-spark/pull/14885)|Add protobuf integration-test dependency infrastructure (plugin-0)|
+|[#15158](https://github.com/NVIDIA/cudf-spark/pull/15158)|Remove obsolete is_before_spark_330 integration test guards|
+|[#15214](https://github.com/NVIDIA/cudf-spark/pull/15214)|Allow collate bridge fallback in Spark 4.x tests|
+|[#15207](https://github.com/NVIDIA/cudf-spark/pull/15207)|Fix Spark 4.x JSON ProjectExec test allowlist|
+|[#15140](https://github.com/NVIDIA/cudf-spark/pull/15140)|Add pre-merge CI and Docker image for skill integration tests [skip ci]|
+|[#15188](https://github.com/NVIDIA/cudf-spark/pull/15188)|[AutoSparkUT]Add RAPIDS SQL core migrated suites|
+|[#14860](https://github.com/NVIDIA/cudf-spark/pull/14860)|[BUG] Fix RegexParser.parseHexDigit greedy consumption of non-braced \xNN|
+|[#15198](https://github.com/NVIDIA/cudf-spark/pull/15198)|Fix structs_to_json fallback tests for Spark 4.x|
+|[#15174](https://github.com/NVIDIA/cudf-spark/pull/15174)|Support Iceberg 1.11 on Spark 4.0.2 and 4.0.3|
+|[#15200](https://github.com/NVIDIA/cudf-spark/pull/15200)|Suppress JSON map parsing deprecation warning [skip ci]|
+|[#15061](https://github.com/NVIDIA/cudf-spark/pull/15061)|Fuse array higher-order functions in Project|
+|[#15185](https://github.com/NVIDIA/cudf-spark/pull/15185)|Fix DBR 17.3 build after SessionCatalog partition API change|
+|[#15131](https://github.com/NVIDIA/cudf-spark/pull/15131)|Add integration tests for skill templates [skip ci]|
+|[#15162](https://github.com/NVIDIA/cudf-spark/pull/15162)|[AutoSparkUT] Fix V2 GPU scan sameResult equality|
+|[#15159](https://github.com/NVIDIA/cudf-spark/pull/15159)|Harden plugin shutdown to run all steps on failure|
+|[#15170](https://github.com/NVIDIA/cudf-spark/pull/15170)|Fix legacy timestamp fallback test with CPU bridge|
+|[#15165](https://github.com/NVIDIA/cudf-spark/pull/15165)|[BUG] Fix regex transpiler corner case: split word boundaries (#14748)|
+|[#15175](https://github.com/NVIDIA/cudf-spark/pull/15175)|Update license check for skill source files [skip ci]|
+|[#14883](https://github.com/NVIDIA/cudf-spark/pull/14883)|Iceberg 1.11 support for Spark 411, part (3/3): accelerate SparkIncrementalAppendScan on GPU|
+|[#14132](https://github.com/NVIDIA/cudf-spark/pull/14132)|Add Full GPU CPU Bridge Support|
+|[#15143](https://github.com/NVIDIA/cudf-spark/pull/15143)|Support LEGACY millisecond timestamp formatting|
+|[#15023](https://github.com/NVIDIA/cudf-spark/pull/15023)|Drop the regex line-anchor CRLF workaround now that cuDF #22763 landed|
+|[#15003](https://github.com/NVIDIA/cudf-spark/pull/15003)|[Coverage] Scala UT for RapidsHostColumnBuilder nested-append, restoreState, and GpuExplode elementSchema|
+|[#14993](https://github.com/NVIDIA/cudf-spark/pull/14993)|[Coverage] Scala UT for CoalescedBatchPartitioner, HostByteBufferIterator, GpuSerializableBatch|
+|[#14992](https://github.com/NVIDIA/cudf-spark/pull/14992)|[Coverage] Cover copy shuffle-compression codec in GpuPartitioningSuite|
+|[#15103](https://github.com/NVIDIA/cudf-spark/pull/15103)|[AutoSparkUT] Fix ORC coalescing ignoreMissingFiles|
+|[#15157](https://github.com/NVIDIA/cudf-spark/pull/15157)|Balance Databricks CI test split|
+|[#15151](https://github.com/NVIDIA/cudf-spark/pull/15151)|Add Spark 4.0.3 shim support|
+|[#15160](https://github.com/NVIDIA/cudf-spark/pull/15160)|Fix Iceberg class packaging across shims|
+|[#15149](https://github.com/NVIDIA/cudf-spark/pull/15149)|Support array and map argument in array_aggregate|
+|[#15115](https://github.com/NVIDIA/cudf-spark/pull/15115)|Fix map type alignment and add deep comparison in assertDataFrameEquals [skip ci]|
+|[#15071](https://github.com/NVIDIA/cudf-spark/pull/15071)|Add Spark 4.1.2 shim support|
+|[#15138](https://github.com/NVIDIA/cudf-spark/pull/15138)|Fix PyArrow timestamp inference for Spark 3.3.4|
+|[#15146](https://github.com/NVIDIA/cudf-spark/pull/15146)|Skip skewed BHJ marker test on all Databricks runtimes|
+|[#15148](https://github.com/NVIDIA/cudf-spark/pull/15148)|Enable license header check for Skills [skip ci]|
+|[#15124](https://github.com/NVIDIA/cudf-spark/pull/15124)|Quote non-finite floating point values in to_json|
+|[#15116](https://github.com/NVIDIA/cudf-spark/pull/15116)|Misc cleanups for error handling, naming/signatures, and partitioning in skill templates [skip ci]|
+|[#15121](https://github.com/NVIDIA/cudf-spark/pull/15121)|Allow foldable non-literal `Coalesce` to run on GPU|
+|[#15113](https://github.com/NVIDIA/cudf-spark/pull/15113)|Use supported sort_array expr instead of array_sort in UDF example [skip ci]|
+|[#14882](https://github.com/NVIDIA/cudf-spark/pull/14882)|Iceberg 1.11 support for Spark 411, part (2/3): add iceberg-1-11-x module|
+|[#15126](https://github.com/NVIDIA/cudf-spark/pull/15126)|Fix GPU V2 write AQE metrics|
+|[#15133](https://github.com/NVIDIA/cudf-spark/pull/15133)|Add explicit Delta storage dependency to tests|
+|[#15139](https://github.com/NVIDIA/cudf-spark/pull/15139)|Set Iceberg REST write compression defaults|
+|[#15137](https://github.com/NVIDIA/cudf-spark/pull/15137)|[BUG] Skip skewed BHJ marker test on DB 17.x|
+|[#14907](https://github.com/NVIDIA/cudf-spark/pull/14907)|[Coverage] Widen shim json-lines on 15 existing test suites to cover Spark 3.5+|
+|[#15132](https://github.com/NVIDIA/cudf-spark/pull/15132)|[DOC] update Iceberg scan options wording [skip ci]|
+|[#15104](https://github.com/NVIDIA/cudf-spark/pull/15104)|Fix deadlock of RMM pool waits for task threads|
+|[#15108](https://github.com/NVIDIA/cudf-spark/pull/15108)|Add GPU support for `array_sort` with the default comparator|
+|[#14974](https://github.com/NVIDIA/cudf-spark/pull/14974)|[BUG] Fail fast on >2GB GPU-serialized shuffle batch instead of truncating slice offsets (#14967)|
+|[#15074](https://github.com/NVIDIA/cudf-spark/pull/15074)|Make shared-scan optimizer test use a structural marker|
+|[#15076](https://github.com/NVIDIA/cudf-spark/pull/15076)|Add Greptile rule to flag missing databricks CI tag on test changes|
+|[#15106](https://github.com/NVIDIA/cudf-spark/pull/15106)|Add some RAPIDS migrated SQL core test suites|
+|[#15111](https://github.com/NVIDIA/cudf-spark/pull/15111)|Deduplicate Java/Scala template projects in skills [skip ci]|
+|[#15039](https://github.com/NVIDIA/cudf-spark/pull/15039)|GCS Range Copier|
+|[#15102](https://github.com/NVIDIA/cudf-spark/pull/15102)|Update NVIDIA Pages links [skip ci]|
+|[#15099](https://github.com/NVIDIA/cudf-spark/pull/15099)|Skip test_bit_count[Boolean] under Spark testing mode before Spark 4.0.0 (SPARK-48128)|
+|[#15096](https://github.com/NVIDIA/cudf-spark/pull/15096)|Append my id to blossom-ci list [skip ci]|
+|[#14878](https://github.com/NVIDIA/cudf-spark/pull/14878)|Expose cuDF Parquet writer dictionary configs|
+|[#15058](https://github.com/NVIDIA/cudf-spark/pull/15058)|Publish UDF agent skills [skip ci]|
+|[#15089](https://github.com/NVIDIA/cudf-spark/pull/15089)|Render GPU operator metrics for V2 table writes in the SQL UI|
+|[#15087](https://github.com/NVIDIA/cudf-spark/pull/15087)|Update link check config for cudf-spark rename [skip ci]|
+|[#15070](https://github.com/NVIDIA/cudf-spark/pull/15070)|Add more suites from Spark UT|
+|[#15022](https://github.com/NVIDIA/cudf-spark/pull/15022)|Run nightly integration tests with Spark testing mode enabled|
+|[#15085](https://github.com/NVIDIA/cudf-spark/pull/15085)|Fix auto merge conflict 15081 [skip ci]|
+|[#15021](https://github.com/NVIDIA/cudf-spark/pull/15021)|Avoid Maven when generating Scala 2.13 POMs|
+|[#15012](https://github.com/NVIDIA/cudf-spark/pull/15012)|Fix parquet partition verification on GCS paths|
+|[#15019](https://github.com/NVIDIA/cudf-spark/pull/15019)|Fix flaky iceberg test_v2_write_sql_ui_shows_gpu_child_operators by scoping to its own write execution [skip ci]|
+|[#15067](https://github.com/NVIDIA/cudf-spark/pull/15067)|Fix auto merge conflict 15009 [skip ci]|
+|[#14781](https://github.com/NVIDIA/cudf-spark/pull/14781)|[AutoSparkUT] Add DynamicPartitionPruningSuite coverage|
+|[#15057](https://github.com/NVIDIA/cudf-spark/pull/15057)|Add RapidsUnwrapCastInComparisonEndToEndSuite|
+|[#15001](https://github.com/NVIDIA/cudf-spark/pull/15001)|Allow CPU CreateTableExec in iceberg SQL UI write test [skip ci]|
+|[#15002](https://github.com/NVIDIA/cudf-spark/pull/15002)|Support configurable parent POM deployment [skip ci]|
+|[#14838](https://github.com/NVIDIA/cudf-spark/pull/14838)|[AutoSparkUT] Recover SPARK-10136 nested-list parquet reads (#11589, #11592)|
+|[#14902](https://github.com/NVIDIA/cudf-spark/pull/14902)|[Coverage] Add IT coverage for private optimizer rules|
+|[#14975](https://github.com/NVIDIA/cudf-spark/pull/14975)|Show GPU plan for V2 table writes in the SQL UI / History Server|
+|[#14923](https://github.com/NVIDIA/cudf-spark/pull/14923)|Honor Iceberg-resolved Parquet codec in GPU writer|
+|[#14881](https://github.com/NVIDIA/cudf-spark/pull/14881)|Iceberg 1.11 support for Spark 411, part (1/3): extract version-divergent scan APIs behind a shim|
+|[#14918](https://github.com/NVIDIA/cudf-spark/pull/14918)|Fix AQE transition cleanup for late ensure-requirements shuffles|
+|[#14936](https://github.com/NVIDIA/cudf-spark/pull/14936)|Exclude shuffle-read op time from consumers across AQE query stages|
+|[#14821](https://github.com/NVIDIA/cudf-spark/pull/14821)|[AutoSparkUT] Recover RapidsParquetProtobufCompatibilitySuite single-field repeated group cases|
+|[#14863](https://github.com/NVIDIA/cudf-spark/pull/14863)|[BUG] Fix GpuRegExpUtils.backrefConversion greedy digit consumption (#14743)|
+|[#14872](https://github.com/NVIDIA/cudf-spark/pull/14872)|[AutoSparkUT] Propagate SQL query context for decimal-overflow exceptions (SPARK-39190)|
+|[#14901](https://github.com/NVIDIA/cudf-spark/pull/14901)|Fix op_time / op_time-excl-SemWait accounting on file writes and nested wraps|
+|[#14913](https://github.com/NVIDIA/cudf-spark/pull/14913)|Fall back from /dev/tty to /dev/stdout in buildall single-shim builds|
+|[#14802](https://github.com/NVIDIA/cudf-spark/pull/14802)|[AutoSparkUT] Recover 5 RapidsJsonSuite tests after spark-rapids-jni#4560|
+|[#14888](https://github.com/NVIDIA/cudf-spark/pull/14888)|Remove the regex complexity estimator and GPU-memory gate|
+|[#14932](https://github.com/NVIDIA/cudf-spark/pull/14932)|Use debug bundle upload in premerge CI [skip ci]|
+|[#14837](https://github.com/NVIDIA/cudf-spark/pull/14837)|[BUG] Dedup GpuBroadcastExchange across DPP subqueries in non-AQE mode|
+|[#14891](https://github.com/NVIDIA/cudf-spark/pull/14891)|[AutoSparkUT] regexp_test: raise maxStateMemoryBytes to 3 GiB (#14867)|
+|[#14651](https://github.com/NVIDIA/cudf-spark/pull/14651)|Re-enable accelerated columnar-to-row path after fix in spark-rapids-jni|
+|[#14884](https://github.com/NVIDIA/cudf-spark/pull/14884)|bump up iceberg scala 2.13 [skip ci]|
+|[#14875](https://github.com/NVIDIA/cudf-spark/pull/14875)|Update dependency version JNI, private, hybrid to 26.08.0-SNAPSHOT|
+|[#14871](https://github.com/NVIDIA/cudf-spark/pull/14871)|Bump up version to 26.08 [skip ci]|
+
+## Release 26.06
+
+### Features
+|||
+|:---|:---|
+|[#13927](https://github.com/NVIDIA/cudf-spark/issues/13927)|[FEA] Support GpuMergeIntoCommand notMatchedBySourceClauses on GPU for OSS Delta|
+|[#14601](https://github.com/NVIDIA/cudf-spark/issues/14601)|[FEA] Delta Lake DB-17.3: Enable Delta Lake tests in CI|
+|[#14598](https://github.com/NVIDIA/cudf-spark/issues/14598)|[FEA] Delta Lake DB-17.3: Enable GPU MERGE INTO|
+|[#14054](https://github.com/NVIDIA/cudf-spark/issues/14054)|[FEA] splitTargetSizeInHalfGpu should split the sequence by elements if splitting by byte size is not possible|
+|[#14597](https://github.com/NVIDIA/cudf-spark/issues/14597)|[FEA] Delta Lake DB-17.3: Enable GPU DELETE + UPDATE|
+|[#14600](https://github.com/NVIDIA/cudf-spark/issues/14600)|[FEA] Enable GPU-accelerated Deletion Vector (DV) reads for Delta Lake on Databricks 17.3.|
+|[#14561](https://github.com/NVIDIA/cudf-spark/issues/14561)|[FEA] Support `replace( strCol, searchCol, replCol )`|
+|[#14596](https://github.com/NVIDIA/cudf-spark/issues/14596)|[FEA] Delta Lake DB-17.3: Build system setup and write path|
+|[#14461](https://github.com/NVIDIA/cudf-spark/issues/14461)|[FEA] Add support for Delta Lake 4.1.x|
+|[#14539](https://github.com/NVIDIA/cudf-spark/issues/14539)|[FEA] Support `contains( strCol, expr )`|
+|[#14613](https://github.com/NVIDIA/cudf-spark/issues/14613)|[FEA] Support binary type in higher-order functions|
+|[#12550](https://github.com/NVIDIA/cudf-spark/issues/12550)|[FEA] Support `org.apache.spark.sql.catalyst.expressions.Hex`|
+
+### Performance
+|||
+|:---|:---|
+|[#15163](https://github.com/NVIDIA/cudf-spark/issues/15163)|Parquet Hadoop fallback readVectored uses 128 KiB copies and can regress remote scans|
+|[#14283](https://github.com/NVIDIA/cudf-spark/issues/14283)|[FEA] Support join condition which has "cast to bigint"|
+|[#14068](https://github.com/NVIDIA/cudf-spark/issues/14068)|[FEA] Iceberg planning overhead is larger than parquet planning.|
+|[#14591](https://github.com/NVIDIA/cudf-spark/issues/14591)|[FEA] Support perf io in iceberg.|
+|[#14064](https://github.com/NVIDIA/cudf-spark/issues/14064)|[FEA] Iceberg parquet reader should use file cache for parquet footers.|
+|[#14063](https://github.com/NVIDIA/cudf-spark/issues/14063)|[FEA] Iceberg parquet reader should not blindly disable small combination.|
+
+### Bugs Fixed
+|||
+|:---|:---|
+|[#12495](https://github.com/NVIDIA/cudf-spark/issues/12495)|[BUG] java.lang.UnsupportedOperationException: Type NullType not supported|
+|[#15120](https://github.com/NVIDIA/cudf-spark/issues/15120)|[BUG] Databricks 17.3 SNAPSHOT (Spark 4.0.0) integration tests fail with NoSuchMethodError CatalogTable.copy in GpuCreateDataSourceTableAsSelectCommand|
+|[#14285](https://github.com/NVIDIA/cudf-spark/issues/14285)|[BUG] KudoGpuSerializer can hang during `assembleFromDeviceRawNative`|
+|[#15235](https://github.com/NVIDIA/cudf-spark/issues/15235)|[BUG] cudaErrorIllegalAddress while writing into the Delta table|
+|[#15183](https://github.com/NVIDIA/cudf-spark/issues/15183)|[BUG] DBR 17.3 build fails after SessionCatalog listPartitions APIs added resolvedCatalogTable|
+|[#14864](https://github.com/NVIDIA/cudf-spark/issues/14864)|[BUG] test_parquet_interleaved_file_splits_partition_value_alignment fails on Dataproc Serverless: os.walk cannot see GCS-backed spark_tmp_path|
+|[#14981](https://github.com/NVIDIA/cudf-spark/issues/14981)|[BUG] DBR 14.3 CPU fallback MERGE with NOT MATCHED BY SOURCE can fail with GpuUnionExec|
+|[#14986](https://github.com/NVIDIA/cudf-spark/issues/14986)|[BUG] Delta DELETE on Databricks 14.3 returns num_affected_rows = -1 for metadata-only (partition/whole-table) deletes|
+|[#14976](https://github.com/NVIDIA/cudf-spark/issues/14976)|[BUG] Delta DV predicate pushdown crashes when DV predicate filter remains CPU FilterExec|
+|[#14949](https://github.com/NVIDIA/cudf-spark/issues/14949)|[BUG] Delta DV zero-column PERFILE scans ignore deleted rows and return incorrect counts|
+|[#14944](https://github.com/NVIDIA/cudf-spark/issues/14944)|[BUG] [v26.06.0-SNAPSHOT][DB 17.3] Delta OPTIMIZE DV fallback fails with NPE in GpuOverrides.isDeltaLakeMetadataQuery|
+|[#14807](https://github.com/NVIDIA/cudf-spark/issues/14807)|[BUG] Iceberg _pos is task-local on split data files, causing silent data corruption on MoR reads with positional deletes|
+|[#14726](https://github.com/NVIDIA/cudf-spark/issues/14726)|[BUG] Iceberg 1.10.1 SparkWrite class loader issue when jars in $SPARK_HOME/jars|
+|[#14895](https://github.com/NVIDIA/cudf-spark/issues/14895)|[BUG] DBR 17.3 Delta no-DV read fails with DELTA_SKIP_ROW_COLUMN_NOT_FILLED on GPU|
+|[#14861](https://github.com/NVIDIA/cudf-spark/issues/14861)|[BUG] test_comprehensive_from_utc_timestamp fails on Databricks 14.3 for timezone SystemV/EST5EDT (1-hour GPU/CPU diff) intermittently|
+|[#14813](https://github.com/NVIDIA/cudf-spark/issues/14813)|GpuJsonToStructs fails with token count assertion on multiple malformed open-brace rows|
+|[#14689](https://github.com/NVIDIA/cudf-spark/issues/14689)|[BUG] Replace cuDF regex chain in GpuToTimestamp with a fused JNI kernel|
+|[#14815](https://github.com/NVIDIA/cudf-spark/issues/14815)|[BUG] Dataproc Serverless 2.2 IT: string_test.py Spark job exceeded 3600s timeout, batch FAILED|
+|[#14831](https://github.com/NVIDIA/cudf-spark/issues/14831)|[BUG] Parquet COALESCING reader can return invalid results from partitioned tables|
+|[#11653](https://github.com/NVIDIA/cudf-spark/issues/11653)|[BUG] Spark UT framework: select explode of nested field of array of struct: Encountered an exception applying GPU overrides|
+|[#14790](https://github.com/NVIDIA/cudf-spark/issues/14790)|[BUG] MetricsEventLogValidationSuite parquet write operator time ratio test fails near 10% threshold on Spark 4.1.1 / Scala 2.13|
+|[#14696](https://github.com/NVIDIA/cudf-spark/issues/14696)|[BUG] Queries against Delta tables with deletion vectors may not reuse plan parts that should be reusable|
+|[#14800](https://github.com/NVIDIA/cudf-spark/issues/14800)|[BUG] iceberg parquet shim class-name collision in dist jar: cache-aware 1.10.x shim silently dropped|
+|[#14763](https://github.com/NVIDIA/cudf-spark/issues/14763)|[BUG] [CI] Spark Connect smoke test fails to start server on 127.0.0.1:15002 for multiple jobs|
+|[#14767](https://github.com/NVIDIA/cudf-spark/issues/14767)|[BUG] GitHub mvn verify docgen check no longer validates Spark 330 generated docs|
+|[#14681](https://github.com/NVIDIA/cudf-spark/issues/14681)|[BUG] test_std_variance fails with GPU nan vs CPU inf on Double data with small batchSizeBytes intermittently|
+|[#14758](https://github.com/NVIDIA/cudf-spark/issues/14758)|[BUG] Unsafe close of HostColumnVectors in `GpuColumnVector::extractHostColumns()`|
+|[#14765](https://github.com/NVIDIA/cudf-spark/issues/14765)|[BUG] Nightly IT matrix: delta-core 2.1.1 Ivy resolution fails on Spark 3.3.4 and Spark Connect server fails to start on Spark 3.5.8|
+|[#14766](https://github.com/NVIDIA/cudf-spark/issues/14766)|[BUG] Iceberg S3Tables IT fails: ivy unresolved dependencies (iceberg/AWS SDK v2/netty) -> JAVA_GATEWAY_EXITED, no tests ran|
+|[#14755](https://github.com/NVIDIA/cudf-spark/issues/14755)|[BUG] Nightly dependency-check fails: Non-resolvable parent POM for rapids-4-spark-parent SNAPSHOT|
+|[#14712](https://github.com/NVIDIA/cudf-spark/issues/14712)|[BUG] spark.rapids.sql.optimizer.enabled=true throws NoClassDefFoundError: com/nvidia/spark/rapids/Optimizer|
+|[#14630](https://github.com/NVIDIA/cudf-spark/issues/14630)|[BUG] Fatal cudaErrorIllegalAddress error occurred in CI test job|
+|[#14701](https://github.com/NVIDIA/cudf-spark/issues/14701)|[BUG] Spark 411 unit test fails with NoSuchMethodError RowDeltaUtils.REINSERT_OPERATION in RapidsShuffleIntegrationSuite|
+|[#14705](https://github.com/NVIDIA/cudf-spark/issues/14705)|[BUG] FileCache metrics is missing for iceberg.|
+|[#14699](https://github.com/NVIDIA/cudf-spark/issues/14699)|[BUG] cudf_udf nightly fails: `No module named pip` in newly created conda env (python=3.12, cudf=26.06)|
+|[#14567](https://github.com/NVIDIA/cudf-spark/issues/14567)|[BUG] hash_aggregate_test.py::test_hash_grpby_pivot failed java.lang.ArithmeticException: BigInteger out of long range in DB 17.3 runtime intermittently|
+|[#14614](https://github.com/NVIDIA/cudf-spark/issues/14614)|[BUG] Build failure: `object sketch is not a member of package org.apache.spark.util` in GpuBloomFilterAggregate on Databricks runtimes|
+|[#13816](https://github.com/NVIDIA/cudf-spark/issues/13816)|[AutoSparkUT]MakeDecimal test failed in DecimalExpressSuite from Spark UT|
+|[#14532](https://github.com/NVIDIA/cudf-spark/issues/14532)|[BUG] GPU JSON reader incorrectly returns null/drops rows for non-timestamp values after isTimestamp validation change in incompatible date formats path|
+|[#14581](https://github.com/NVIDIA/cudf-spark/issues/14581)|[BUG] JVM crash (SIGSEGV) in native cuDF code during RapidsDataFrameFunctionsSuite array_repeat (Spark 3.3.0, cuda12)|
+|[#11416](https://github.com/NVIDIA/cudf-spark/issues/11416)|[BUG] Create parquet table with compression|
+|[#14592](https://github.com/NVIDIA/cudf-spark/issues/14592)|arrays_zip crashes with 'Range is out of bounds' when input batch has 0 rows|
+|[#13759](https://github.com/NVIDIA/cudf-spark/issues/13759)|[AutoSparkUT] GetTimestamp Parses Invalid Format Instead of Returning Null|
+|[#14109](https://github.com/NVIDIA/cudf-spark/issues/14109)|[AutoSparkUT]"SPARK-17515: CollectLimit.execute() should perform per-partition limits" in SQLQuerySuite failed|
+|[#12452](https://github.com/NVIDIA/cudf-spark/issues/12452)|[BUG] hyper_log_log_plus_plus_test.test_hllpp_precisions_groupby[0.3] failed in mismatch cpu and gpu result|
+|[#14122](https://github.com/NVIDIA/cudf-spark/issues/14122)|[AutoSparkUT]"SPARK-33482: Fix FileScan canonicalization" in SQLQuerySuite failed|
+
+### PRs
+|||
+|:---|:---|
+|[#15300](https://github.com/NVIDIA/cudf-spark/pull/15300)|Update changelog for the v26.06.1 release [skip ci]|
+|[#15299](https://github.com/NVIDIA/cudf-spark/pull/15299)|Update dependency version JNI to 26.06.1|
+|[#15298](https://github.com/NVIDIA/cudf-spark/pull/15298)|[DOC] update download page for 26.06.1 release [skip ci]|
+|[#15164](https://github.com/NVIDIA/cudf-spark/pull/15164)|Use configured copy buffer for Hadoop vectored reads|
+|[#15228](https://github.com/NVIDIA/cudf-spark/pull/15228)|Update dependency version JNI to 26.06.1-SNAPSHOT|
+|[#15211](https://github.com/NVIDIA/cudf-spark/pull/15211)|Fix DBR 17.3 build after SessionCatalog partition API change|
+|[#15085](https://github.com/NVIDIA/cudf-spark/pull/15085)|Fix auto merge conflict 15081 [skip ci]|
+|[#15084](https://github.com/NVIDIA/cudf-spark/pull/15084)|Update changelog for the v26.06.0 release [skip ci]|
+|[#15079](https://github.com/NVIDIA/cudf-spark/pull/15079)|Update dependency version private to 26.06.1|
+|[#15024](https://github.com/NVIDIA/cudf-spark/pull/15024)|Fall back when Iceberg S3 PerfIO is unsupported|
+|[#15067](https://github.com/NVIDIA/cudf-spark/pull/15067)|Fix auto merge conflict 15009 [skip ci]|
+|[#15066](https://github.com/NVIDIA/cudf-spark/pull/15066)|Use current repository name in GitHub workflows [skip ci]|
+|[#14943](https://github.com/NVIDIA/cudf-spark/pull/14943)|Update changelog for the v26.06.0 release|
+|[#14941](https://github.com/NVIDIA/cudf-spark/pull/14941)|Update dependency version JNI, private, hybrid to 26.06.0|
+|[#14998](https://github.com/NVIDIA/cudf-spark/pull/14998)|Add the missing case for GpuShuffleCoalesceExec for the broadcast hash join on DBR 14.3 [Databricks]|
+|[#14990](https://github.com/NVIDIA/cudf-spark/pull/14990)|[BUG] Keep DBR 14.3 local union source on CPU|
+|[#14987](https://github.com/NVIDIA/cudf-spark/pull/14987)|Fix Delta DELETE num_affected_rows on DBR 13.3 and 14.3 for metadata-only deletes|
+|[#14988](https://github.com/NVIDIA/cudf-spark/pull/14988)|Fix Delta DV predicate pushdown with CPU FilterExec|
+|[#14952](https://github.com/NVIDIA/cudf-spark/pull/14952)|Fix Delta DV zero-column scan row counts|
+|[#14945](https://github.com/NVIDIA/cudf-spark/pull/14945)|Fix Delta OPTIMIZE DV fallback NPE on DBR 17.3|
+|[#14808](https://github.com/NVIDIA/cudf-spark/pull/14808)|Fix Iceberg _pos to be file-global instead of task-local on split files|
+|[#14937](https://github.com/NVIDIA/cudf-spark/pull/14937)|Iceberg integration tests: trim redundant coverage matrices|
+|[#14925](https://github.com/NVIDIA/cudf-spark/pull/14925)|Reduce bucketed parquet test scale|
+|[#14922](https://github.com/NVIDIA/cudf-spark/pull/14922)|[DOC] update download page for 26.06 release [skip ci]|
+|[#14920](https://github.com/NVIDIA/cudf-spark/pull/14920)|Add regression tests for to_timestamp bug fixes|
+|[#14866](https://github.com/NVIDIA/cudf-spark/pull/14866)|Fix Iceberg package-private access after shim isolation|
+|[#14903](https://github.com/NVIDIA/cudf-spark/pull/14903)|[CHERRYPICK] Shuffle bytes double count metric fix + tests to cover shuffle removal at unregister|
+|[#14914](https://github.com/NVIDIA/cudf-spark/pull/14914)|Keep row transition for final AQE exchanges|
+|[#14847](https://github.com/NVIDIA/cudf-spark/pull/14847)|Add DBR 17.3 Delta OPTIMIZE and auto compaction support|
+|[#14904](https://github.com/NVIDIA/cudf-spark/pull/14904)|Fix for delta skip row  exception|
+|[#14880](https://github.com/NVIDIA/cudf-spark/pull/14880)|[BUG FIX] Iceberg: fix Missing required field for newly-added nested MAP/LIST|
+|[#14820](https://github.com/NVIDIA/cudf-spark/pull/14820)|[DeltaLake] Enable GPU Delta MERGE on DBR 17.3|
+|[#14804](https://github.com/NVIDIA/cudf-spark/pull/14804)|ci: declare workflow-level `contents: read` on 4 workflows [skip ci]|
+|[#14859](https://github.com/NVIDIA/cudf-spark/pull/14859)|Fall back to CPU for Iceberg partition transforms sourcing nested fields|
+|[#14839](https://github.com/NVIDIA/cudf-spark/pull/14839)|[AutoSparkUT] CSV: support decimal grouping separator parsing (Locale.US)|
+|[#14706](https://github.com/NVIDIA/cudf-spark/pull/14706)|Replace cuDF regex chain in GpuToTimestamp with fused JNI parser|
+|[#14865](https://github.com/NVIDIA/cudf-spark/pull/14865)|Fix async output write with pipe-backed cloud streams|
+|[#14850](https://github.com/NVIDIA/cudf-spark/pull/14850)|Revert "Skip GBK decode test on Dataproc Serverless (#14816)"|
+|[#14851](https://github.com/NVIDIA/cudf-spark/pull/14851)|Fix concurrent writer fallback with empty caches|
+|[#14845](https://github.com/NVIDIA/cudf-spark/pull/14845)|Optimize null-restore sequence in cast struct to json|
+|[#14835](https://github.com/NVIDIA/cudf-spark/pull/14835)|[AutoSparkUT] Fix invalid numSplits 0 in single-column explode (#11653)|
+|[#14849](https://github.com/NVIDIA/cudf-spark/pull/14849)|[AutoSparkUT] Fix regex complexity estimator overflow|
+|[#14852](https://github.com/NVIDIA/cudf-spark/pull/14852)|Relax parquet write operator time lower bound|
+|[#14841](https://github.com/NVIDIA/cudf-spark/pull/14841)|Fix parquet coalescing reader file grouping alignment|
+|[#14843](https://github.com/NVIDIA/cudf-spark/pull/14843)|Use fused replaceNulls to compute per row repetition in explode|
+|[#14842](https://github.com/NVIDIA/cudf-spark/pull/14842)|Use null-propagating stringConcatenate in cast complex-type-to-string|
+|[#14684](https://github.com/NVIDIA/cudf-spark/pull/14684)|splitTargetSizeInHalfGpu by data size if not target size|
+|[#14844](https://github.com/NVIDIA/cudf-spark/pull/14844)|Port Delta DV predicate pruning fix to DBR 17.3|
+|[#14825](https://github.com/NVIDIA/cudf-spark/pull/14825)|TimeoutSparkListener: dump executor threads in addition to driver threads|
+|[#14830](https://github.com/NVIDIA/cudf-spark/pull/14830)|Use fused mergeAndSetValidity kernel in hypot|
+|[#14817](https://github.com/NVIDIA/cudf-spark/pull/14817)|Use fused replaceNulls for non-nested types in GpuNvl|
+|[#14818](https://github.com/NVIDIA/cudf-spark/pull/14818)|Use fused mergeAndSetValidity kernel in mergeNulls|
+|[#14819](https://github.com/NVIDIA/cudf-spark/pull/14819)|Use scalar extractListElement index instead of column in substring where length is fixed|
+|[#14647](https://github.com/NVIDIA/cudf-spark/pull/14647)|Use scalar extractListElement index instead of column in regex extract|
+|[#14826](https://github.com/NVIDIA/cudf-spark/pull/14826)|Move former shim sources to conventional source code roots|
+|[#14810](https://github.com/NVIDIA/cudf-spark/pull/14810)|Enable Delta DELETE and UPDATE for DBR 17.3|
+|[#14824](https://github.com/NVIDIA/cudf-spark/pull/14824)|[AutoSparkUT] Fix CSV maxCharsPerColumn fallback|
+|[#14770](https://github.com/NVIDIA/cudf-spark/pull/14770)|[DOC] update download page for 26.04.2 hot release [skip ci]|
+|[#14761](https://github.com/NVIDIA/cudf-spark/pull/14761)|Remove deletion vector predicate from dataFilters of scan|
+|[#14787](https://github.com/NVIDIA/cudf-spark/pull/14787)|Enable native Delta DV reads for DBR 17.3|
+|[#14793](https://github.com/NVIDIA/cudf-spark/pull/14793)|Support join condition which has cast|
+|[#14809](https://github.com/NVIDIA/cudf-spark/pull/14809)|[Perf] [bugfix] Fix a Iceberg class collision between Iceberg versions to improve perf|
+|[#14795](https://github.com/NVIDIA/cudf-spark/pull/14795)|Fix flaky parquet write operator time validation|
+|[#14792](https://github.com/NVIDIA/cudf-spark/pull/14792)|[AutoSparkUT] Preserve non-deterministic expression values across coalesce/union (#14156)|
+|[#14778](https://github.com/NVIDIA/cudf-spark/pull/14778)|[AutoSparkUT] URI-decode JSON/CSV file path in GpuTextBasedPartitionReader (#11158, #13898)|
+|[#14754](https://github.com/NVIDIA/cudf-spark/pull/14754)|Add per-table session-level Iceberg scan-option overrides|
+|[#14783](https://github.com/NVIDIA/cudf-spark/pull/14783)|Expose cuDF Parquet writer row group size configs|
+|[#14816](https://github.com/NVIDIA/cudf-spark/pull/14816)|Skip GBK decode test on Dataproc Serverless|
+|[#14814](https://github.com/NVIDIA/cudf-spark/pull/14814)|[integration tests]: extend spark connect startup wait [skip ci]|
+|[#14545](https://github.com/NVIDIA/cudf-spark/pull/14545)|Support StringDecode for GBK encoding|
+|[#14803](https://github.com/NVIDIA/cudf-spark/pull/14803)|Use Spark330 for generated docs [skip ci]|
+|[#14652](https://github.com/NVIDIA/cudf-spark/pull/14652)|Add GPU ArrayAggregate for SUM/PRODUCT/MAX/MIN/ALL/ANY|
+|[#14801](https://github.com/NVIDIA/cudf-spark/pull/14801)|[integration tests]: pass ivy settings to spark connect smoke test [skip ci]|
+|[#14799](https://github.com/NVIDIA/cudf-spark/pull/14799)|[AutoSparkUT] Exclude flaky SPARK-33084 Add jar Ivy URI SQL test (#14777)|
+|[#14772](https://github.com/NVIDIA/cudf-spark/pull/14772)|Avoid to_json fallback for JSON without timestamps on unsupported timezones|
+|[#14796](https://github.com/NVIDIA/cudf-spark/pull/14796)|[AutoSparkUT] Re-enable parquet vectorized schema mismatch test|
+|[#14660](https://github.com/NVIDIA/cudf-spark/pull/14660)|[AutoSparkUT] Add RapidsInjectRuntimeFilterSuite|
+|[#14762](https://github.com/NVIDIA/cudf-spark/pull/14762)|[AutoSparkUT] Fix std variance floating overflow coverage|
+|[#14789](https://github.com/NVIDIA/cudf-spark/pull/14789)|Update premerge CI m2 cache restore [skip ci]|
+|[#14674](https://github.com/NVIDIA/cudf-spark/pull/14674)|optimize iceberg read|
+|[#14798](https://github.com/NVIDIA/cudf-spark/pull/14798)|Fix docs [skip ci]|
+|[#14791](https://github.com/NVIDIA/cudf-spark/pull/14791)|[DeltaLake] Address Delta 4.x follow-up nits and add type widening tests|
+|[#14637](https://github.com/NVIDIA/cudf-spark/pull/14637)|[AutoSparkUT] Fix SPARK-39175 Cast ANSI error query context (#14123)|
+|[#14779](https://github.com/NVIDIA/cudf-spark/pull/14779)|[AutoSparkUT] Reclassify #14106 (Common subexpression elimination) as WONT_FIX_ISSUE|
+|[#14694](https://github.com/NVIDIA/cudf-spark/pull/14694)|[AutoSparkUT] Recover ParquetEncodingSuite v2 tests via ADJUST_UT testRapids (#13745, #13746)|
+|[#14611](https://github.com/NVIDIA/cudf-spark/pull/14611)|Support Iceberg nested and binary GPU writes|
+|[#14759](https://github.com/NVIDIA/cudf-spark/pull/14759)|Fix unsafe close of HostColumnVectors in `GpuColumnVector::extractHostColumns()`|
+|[#14623](https://github.com/NVIDIA/cudf-spark/pull/14623)|Support `replace(col, targetExpr, replExpr)` for strings. (Include  for testing.)|
+|[#14692](https://github.com/NVIDIA/cudf-spark/pull/14692)|[AutoSparkUT] Fix #14172: relax dynamicallySelectedPartitions visibility + recover SPARK-26893 subquery pushdown test|
+|[#14610](https://github.com/NVIDIA/cudf-spark/pull/14610)|[AutoSparkUT] Re-enable Flatten test after cuDF fix (rapidsai/cudf#22147)|
+|[#14724](https://github.com/NVIDIA/cudf-spark/pull/14724)|Add split-and-retry path to GpuProjectExec|
+|[#14716](https://github.com/NVIDIA/cudf-spark/pull/14716)|Add initial Delta lake write support for Databricks-17.3|
+|[#14586](https://github.com/NVIDIA/cudf-spark/pull/14586)|Optimize format number implementation|
+|[#14646](https://github.com/NVIDIA/cudf-spark/pull/14646)|Support Delta Lake 4.1 on Spark 4.1|
+|[#14774](https://github.com/NVIDIA/cudf-spark/pull/14774)|Use ivysettings for spark packages resolution [skip ci]|
+|[#14612](https://github.com/NVIDIA/cudf-spark/pull/14612)|[AutoSparkUT] Fix null struct entry handling in GpuMapFromEntries (issue #14128)|
+|[#14764](https://github.com/NVIDIA/cudf-spark/pull/14764)|Run dependency checks without Jenkins Maven settings [skip ci]|
+|[#14693](https://github.com/NVIDIA/cudf-spark/pull/14693)|[AutoSparkUT] Fix GpuCast decimal-overflow error to match CPU's CheckOverflow message (#14143)|
+|[#14691](https://github.com/NVIDIA/cudf-spark/pull/14691)|[AutoSparkUT] Reclassify #11434 as WONT_FIX_ISSUE: parquet non-vectorized error path is unreachable on GPU|
+|[#14654](https://github.com/NVIDIA/cudf-spark/pull/14654)|[AutoSparkUT] Add RapidsDataFrameJoinSuite + RapidsBloomFilterAggregateQuerySuite|
+|[#14632](https://github.com/NVIDIA/cudf-spark/pull/14632)|[AutoSparkUT] Fix SPARK-39177 map ANSI error query context (#14123)|
+|[#14752](https://github.com/NVIDIA/cudf-spark/pull/14752)|Quick fix of the cannot find settings file issue [skip ci]|
+|[#14702](https://github.com/NVIDIA/cudf-spark/pull/14702)|[AutoSparkUT] Fix binary host columnar copy for SPARK-33593|
+|[#14688](https://github.com/NVIDIA/cudf-spark/pull/14688)|Remove non-Kudo test from integration test|
+|[#14727](https://github.com/NVIDIA/cudf-spark/pull/14727)|Use mirror for internal usage to avoid 429 from maven central [skip ci]|
+|[#14713](https://github.com/NVIDIA/cudf-spark/pull/14713)|Publish Optimizer trait at JAR root to fix NoClassDefFoundError|
+|[#14690](https://github.com/NVIDIA/cudf-spark/pull/14690)|[AutoSparkUT] Fix GpuParquetScan schema-mismatch error message format (#11446)|
+|[#14669](https://github.com/NVIDIA/cudf-spark/pull/14669)|[AutoSparkUT] Fix GpuCreateMap empty-map eval; RowToColumnar NullType (#14140, #14108)|
+|[#14678](https://github.com/NVIDIA/cudf-spark/pull/14678)|Rename URM helpers and credentials to Artifactory naming in CI and build config|
+|[#14538](https://github.com/NVIDIA/cudf-spark/pull/14538)|Support `contains(col, expr)` for strings|
+|[#14723](https://github.com/NVIDIA/cudf-spark/pull/14723)|Fix async profiler output copy to s3 [skip ci]|
+|[#14719](https://github.com/NVIDIA/cudf-spark/pull/14719)|[DOC] update download page for 26.04.1 hot release [skip ci]|
+|[#14717](https://github.com/NVIDIA/cudf-spark/pull/14717)|Update POM files to include Iceberg artifact properties|
+|[#14722](https://github.com/NVIDIA/cudf-spark/pull/14722)|Xfail quoted get_json_object test on Dataproc Serverless|
+|[#14718](https://github.com/NVIDIA/cudf-spark/pull/14718)|Use GpuShuffleBlockResolverBase.wrapped in unregisterShuffle|
+|[#14708](https://github.com/NVIDIA/cudf-spark/pull/14708)|Add file cache metrics for iceberg|
+|[#14707](https://github.com/NVIDIA/cudf-spark/pull/14707)|Temporarily xfail std variance edge case|
+|[#14687](https://github.com/NVIDIA/cudf-spark/pull/14687)|[CHERRY-PICK] Fix unregister/remove path for wrapped shuffle resolver|
+|[#14700](https://github.com/NVIDIA/cudf-spark/pull/14700)|Explicitly install pip for cudf_udf cases [skip ci]|
+|[#14645](https://github.com/NVIDIA/cudf-spark/pull/14645)|Add footer cache for iceberg|
+|[#14520](https://github.com/NVIDIA/cudf-spark/pull/14520)|Reduce pom bloat for easier shim management|
+|[#14639](https://github.com/NVIDIA/cudf-spark/pull/14639)|Add FLOAT/DECIMAL coverage for asinh/atanh/cbrt math functions (#14638)|
+|[#14642](https://github.com/NVIDIA/cudf-spark/pull/14642)|Add DECIMAL value coverage for transform_values (#14641)|
+|[#14672](https://github.com/NVIDIA/cudf-spark/pull/14672)|[AutoSparkUT] Add 7 all-pass Spark suites (batch: SelfJoin / WindowFrames / TimeWindow / SessionWindow / Stat / TypedImperativeAgg / DatasetAggregator)|
+|[#14633](https://github.com/NVIDIA/cudf-spark/pull/14633)|Add FP corner-case coverage for stddev/variance aggregates (#14631)|
+|[#14676](https://github.com/NVIDIA/cudf-spark/pull/14676)|Increase Databricks cluster create wait from 60 to 150 iterations [skip ci]|
+|[#14640](https://github.com/NVIDIA/cudf-spark/pull/14640)|Fix buffer leak in KudoGpuTableOperator.concat under OOM|
+|[#14593](https://github.com/NVIDIA/cudf-spark/pull/14593)|Allow combining of small files in iceberg parquet reader.|
+|[#14636](https://github.com/NVIDIA/cudf-spark/pull/14636)|[AutoSparkUT] Add RapidsApproximatePercentileQuerySuite|
+|[#14605](https://github.com/NVIDIA/cudf-spark/pull/14605)|Fix GpuArrayRemove to fallback for unsupported element types|
+|[#14570](https://github.com/NVIDIA/cudf-spark/pull/14570)|Add aggregate reduction path coverage tests|
+|[#14625](https://github.com/NVIDIA/cudf-spark/pull/14625)|Drop _V2 suffix from URM/Artifactory symbols [skip ci]|
+|[#14580](https://github.com/NVIDIA/cudf-spark/pull/14580)|Add named accumulators to track PerfIO S3 backend usage per executor|
+|[#14618](https://github.com/NVIDIA/cudf-spark/pull/14618)|Support binary type in higher-order functions|
+|[#14617](https://github.com/NVIDIA/cudf-spark/pull/14617)|Fix BloomFilterAggregate buffer conversion on DB runtimes|
+|[#14526](https://github.com/NVIDIA/cudf-spark/pull/14526)|[AutoSparkUT] Fix GpuMakeDecimal bitcast crash for low-precision decimals|
+|[#14575](https://github.com/NVIDIA/cudf-spark/pull/14575)|Support Hex expression|
+|[#14573](https://github.com/NVIDIA/cudf-spark/pull/14573)|Fix BloomFilterAggregate buffer conversion across CPU/GPU stages|
+|[#14604](https://github.com/NVIDIA/cudf-spark/pull/14604)|Enable array_repeat test case|
+|[#14528](https://github.com/NVIDIA/cudf-spark/pull/14528)|[AutoSparkUT] Fix legacy 2-level Parquet LIST schema evolution crash (issue #11454)|
+|[#14527](https://github.com/NVIDIA/cudf-spark/pull/14527)|[AutoSparkUT] Add testRapids for parquet compression codec test (issue #11416)|
+|[#14594](https://github.com/NVIDIA/cudf-spark/pull/14594)|Fix "Range is out of bounds" crash from GpuArraysZip when receiving a 0-row batch|
+|[#14590](https://github.com/NVIDIA/cudf-spark/pull/14590)|Fix auto merge conflict 14589 [skip ci]|
+|[#14587](https://github.com/NVIDIA/cudf-spark/pull/14587)|Append rishic3 to blossom-ci allowlist [skip ci]|
+|[#14584](https://github.com/NVIDIA/cudf-spark/pull/14584)|Exclude array_repeat from auto unit tests while debugging|
+|[#14458](https://github.com/NVIDIA/cudf-spark/pull/14458)|Add AI code review configuration and enhanced PR template [skip ci]|
+|[#14524](https://github.com/NVIDIA/cudf-spark/pull/14524)|Add code review guidelines [skip ci]|
+|[#14550](https://github.com/NVIDIA/cudf-spark/pull/14550)|Explicit check boxes for non-applicable PR checklist items [skip ci]|
+|[#14552](https://github.com/NVIDIA/cudf-spark/pull/14552)|Map snapshots-repo through URM for mirror profile|
+|[#14507](https://github.com/NVIDIA/cudf-spark/pull/14507)|Fix MT read memory limit defaulting to wrong size when off-heap limit is disabled|
+|[#14531](https://github.com/NVIDIA/cudf-spark/pull/14531)|Append patilkishorv to authorized user to blossom-ci whitelist[skip ci]|
+|[#14517](https://github.com/NVIDIA/cudf-spark/pull/14517)|[CI] Use Artifactory v2 for URM and expand Maven settings|
+|[#14529](https://github.com/NVIDIA/cudf-spark/pull/14529)|Fix batched window passthrough for mixed ROWS windows|
+|[#14502](https://github.com/NVIDIA/cudf-spark/pull/14502)|[AutoSparkUT] Add yyyy-MM-dd HH:mm:ss.SSS to CORRECTED_COMPATIBLE_FORMATS (issue #13759)|
+|[#14392](https://github.com/NVIDIA/cudf-spark/pull/14392)|[AutoSparkUT] Fix GpuCollectLimitExec per-partition row-level limits (issue #14109)|
+|[#14440](https://github.com/NVIDIA/cudf-spark/pull/14440)|[AutoSparkUT] Propagate SQL query context to GPU arithmetic overflow exceptions (issue #14123)|
+|[#14500](https://github.com/NVIDIA/cudf-spark/pull/14500)|Remove deprecated GpuTimeZoneDB cache overload usage|
+|[#14496](https://github.com/NVIDIA/cudf-spark/pull/14496)|Update dependency version JNI, private, hybrid to 26.06.0-SNAPSHOT|
+|[#14430](https://github.com/NVIDIA/cudf-spark/pull/14430)|Enable precision 4 for HLLPP|
+|[#14493](https://github.com/NVIDIA/cudf-spark/pull/14493)|Update shared actions to Node 24 for GitHub Actions Node 20 deprecation [skip ci]|
+|[#14479](https://github.com/NVIDIA/cudf-spark/pull/14479)|[AutoSparkUT] Fix AM-PM timestamp parsing when hour field is missing (issue #13758)|
+|[#14463](https://github.com/NVIDIA/cudf-spark/pull/14463)|Delay Parquet reader resource collection until close.|
+|[#14453](https://github.com/NVIDIA/cudf-spark/pull/14453)|Add IcebergProvider$ to dist/unshimmed-from-each-spark3xx.txt to fix classloader issue.|
+|[#14478](https://github.com/NVIDIA/cudf-spark/pull/14478)|Bump up version to 26.06|
 
 ## Older Releases
 Changelog of older releases can be found at [docs/archives](/docs/archives)

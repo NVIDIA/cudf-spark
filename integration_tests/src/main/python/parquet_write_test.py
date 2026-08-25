@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2024, NVIDIA CORPORATION.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -482,7 +482,8 @@ def test_buckets_write_correctness(spark_tmp_path, spark_tmp_table_factory):
         cur_bucket_id += 1
 
 @ignore_order(local=True)
-@allow_non_gpu('DataWritingCommandExec,ExecutedCommandExec,WriteFilesExec, SortExec')
+@allow_non_gpu('DataWritingCommandExec','ExecutedCommandExec','WriteFilesExec', 'SortExec', 
+  'Murmur3Hash', 'CollationAwareMurmur3Hash')
 def test_buckets_write_fallback_unsupported_types(spark_tmp_path, spark_tmp_table_factory):
     data_path = spark_tmp_path + '/PARQUET_DATA'
     gen_list = [["id", binary_gen], ["data", long_gen]]
@@ -650,7 +651,6 @@ def get_nested_parquet_meta_data_for_field_id():
     return schema, data
 
 
-@pytest.mark.skipif(is_before_spark_330(), reason='Field ID is not supported before Spark 330')
 def test_parquet_write_field_id(spark_tmp_path):
     data_path = spark_tmp_path + '/PARQUET_DATA'
     schema, data = get_nested_parquet_meta_data_for_field_id()
@@ -667,7 +667,6 @@ def test_parquet_write_field_id(spark_tmp_path):
         data_path,
         conf=enable_parquet_field_id_read)
 
-@pytest.mark.skipif(is_before_spark_330(), reason='Field ID is not supported before Spark 330')
 def test_parquet_write_field_id_disabled(spark_tmp_path):
     data_path = spark_tmp_path + '/PARQUET_DATA'
     schema, data = get_nested_parquet_meta_data_for_field_id()
@@ -685,7 +684,6 @@ def test_parquet_write_field_id_disabled(spark_tmp_path):
         conf=enable_parquet_field_id_read)
 
 @pytest.mark.order(1) # at the head of xdist worker queue if pytest-order is installed
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_write_daytime_interval(spark_tmp_path):
     gen_list = [('_c1', DayTimeIntervalGen())]
     data_path = spark_tmp_path + '/PARQUET_DATA'
@@ -728,7 +726,9 @@ def test_concurrent_writer(spark_tmp_path):
         data_path,
         copy_and_update(
             # 26 > 25, will not fall back to single writer
-            {"spark.sql.maxConcurrentOutputFileWriters": 26}
+            # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
+            {"spark.sql.maxConcurrentOutputFileWriters": 26,
+             'spark.sql.adaptive.enabled': 'false'}
         ))
 
 
@@ -909,7 +909,8 @@ def test_hive_timestamp_value(spark_tmp_table_factory, spark_tmp_path, ts_rebase
 @pytest.mark.parametrize('max_concurrent_writers', [0, 100, 20])
 def test_write_with_planned_write_enabled(spark_tmp_path, planned_write_enabled, max_concurrent_writers):
     data_path = spark_tmp_path + '/PARQUET_DATA'
-    conf = {}
+    # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
+    conf = {'spark.sql.adaptive.enabled': 'false'}
     if planned_write_enabled != "":
         conf = copy_and_update(conf, {"spark.sql.optimizer.plannedWrite.enabled": planned_write_enabled})
     if max_concurrent_writers != 0:

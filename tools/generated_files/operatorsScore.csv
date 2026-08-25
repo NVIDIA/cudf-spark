@@ -21,18 +21,13 @@ SortAggregateExec,3.0
 InMemoryTableScanExec,3.0
 DataWritingCommandExec,3.0
 ExecutedCommandExec,3.0
-WriteFilesExec,3.0
 AppendDataExec,3.0
 AppendDataExecV1,3.0
 AtomicCreateTableAsSelectExec,3.0
 AtomicReplaceTableAsSelectExec,3.0
 BatchScanExec,3.0
-MergeRowsExec,3.0
 OverwriteByExpressionExec,3.0
 OverwriteByExpressionExecV1,3.0
-OverwritePartitionsDynamicExec,3.0
-ReplaceDataExec,3.0
-WriteDeltaExec,3.0
 BroadcastExchangeExec,3.0
 ShuffleExchangeExec,4.2
 BroadcastHashJoinExec,5.1
@@ -48,7 +43,6 @@ MapInPandasExec,1.2
 PythonMapInArrowExec,3.0
 WindowInPandasExec,1.2
 WindowExec,3.0
-WindowGroupLimitExec,3.0
 HiveTableScanExec,3.0
 Abs,4
 Acos,4
@@ -58,6 +52,7 @@ AggregateExpression,4
 Alias,4
 And,4
 ApproximatePercentile,4
+ArrayAggregate,4
 ArrayContains,4
 ArrayDistinct,4
 ArrayExcept,4
@@ -70,6 +65,7 @@ ArrayMin,4
 ArrayPosition,4
 ArrayRemove,4
 ArrayRepeat,4
+ArraySort,4
 ArrayTransform,4
 ArrayUnion,4
 ArraysOverlap,4
@@ -99,7 +95,7 @@ BoundReference,4
 CaseWhen,4
 Cbrt,4
 Ceil,4
-CheckOverflowInTableInsert,4
+CheckOverflow,4
 Coalesce,4
 CollectList,4
 CollectSet,4
@@ -124,13 +120,11 @@ DayOfMonth,4
 DayOfWeek,4
 DayOfYear,4
 DenseRank,4
-Discard,4
 Divide,4
 DivideDTInterval,4
 DivideYMInterval,4
 DynamicPruningExpression,4
 ElementAt,4
-Empty2Null,4
 EndsWith,4
 EqualNullSafe,4
 EqualTo,4
@@ -152,6 +146,7 @@ GetTimestamp,4
 GreaterThan,4
 GreaterThanOrEqual,4
 Greatest,4
+Hex,4
 HiveGenericUDF,4
 HiveHash,4
 HiveSimpleUDF,4
@@ -172,10 +167,8 @@ IsNotNull,4
 IsNull,4
 JsonToStructs,4
 JsonTuple,4
-Keep,4
 KnownFloatingPointNormalized,4
 KnownNotNull,4
-KnownNullable,4
 Lag,4
 LambdaFunction,4
 Last,4
@@ -217,6 +210,7 @@ Multiply,4
 MultiplyDTInterval,4
 MultiplyYMInterval,4
 Murmur3Hash,4
+NTile,4
 NaNvl,4
 NamedLambdaVariable,4
 NormalizeNaNAndZero,4
@@ -232,7 +226,7 @@ Pmod,4
 PosExplode,4
 Pow,4
 PreciseTimestampConversion,4
-PythonUDAF,4
+PromotePrecision,4
 PythonUDF,4
 Quarter,4
 RLike,4
@@ -269,13 +263,13 @@ SortArray,4
 SortOrder,4
 SparkPartitionID,4
 SpecifiedWindowFrame,4
-Split,4
 Sqrt,4
 Stack,4
 StartsWith,4
 StaticInvoke,4
 StddevPop,4
 StddevSamp,4
+StringDecode,4
 StringInstr,4
 StringLPad,4
 StringLocate,4

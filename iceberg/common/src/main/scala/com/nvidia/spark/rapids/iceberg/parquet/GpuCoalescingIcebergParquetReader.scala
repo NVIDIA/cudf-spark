@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,9 +32,17 @@ class GpuCoalescingIcebergParquetReader(
     val constantsProvider: IcebergPartitionedFile => JMap[Integer, _],
     override val conf: GpuIcebergParquetReaderConf) extends GpuIcebergParquetReader {
 
+  // Class invariant: the parent coalescer can merge multiple Iceberg splits of the same
+  // physical Parquet file under a single per-file post-processor, so file-global `_pos`
+  // values would be wrong for any split past the first. GpuReaderFactory's canUseCoalescing
+  // predicate already excludes `_pos`-projecting scans; this require is a fail-loud
+  // regression guard if that factory gate is ever weakened.
+  require(!conf.threadConf.asInstanceOf[MultiFile].hasRowPositionMetadata,
+    "_pos scans must not use the Iceberg coalescing reader; GpuReaderFactory should have " +
+      "routed this scan to a per-file reader instead")
+
   private var inited = false
   private lazy val reader = createParquetReader()
-  private var curPostProcessor: GpuParquetReaderPostProcessor = _
 
   override def close(): Unit = {
     if (inited) {
@@ -44,21 +52,20 @@ class GpuCoalescingIcebergParquetReader(
 
   override def hasNext: Boolean = reader.next()
 
-  override def next(): ColumnarBatch = {
-    val batch = reader.get()
-    require(curPostProcessor != null,
-      "The post processor should not be null when calling next()")
-    curPostProcessor.process(batch)
-  }
+  override def next(): ColumnarBatch = reader.get()
 
   private def createParquetReader() = {
+    val multiFileConf = conf.threadConf.asInstanceOf[MultiFile]
+    val hasFilePathMetadata = multiFileConf.hasFilePathMetadata
     val clippedBlocks = files.map(f => (f, super.filterParquetBlocks(f, conf.expectedSchema)))
       .flatMap {
-        case (file, info) =>
+        case (file, (info, shadedFileReadSchema)) =>
           val postProcessor = new GpuParquetReaderPostProcessor(
             info,
             constantsProvider(file),
-            conf.expectedSchema)
+            conf.expectedSchema,
+            shadedFileReadSchema,
+            conf.metrics)
 
           info.blocks.map { block =>
             ParquetSingleDataBlockMeta(
@@ -93,25 +100,41 @@ class GpuCoalescingIcebergParquetReader(
       CpuCompressionConfig.disabled(),
       conf.metrics,
       new StructType(), // partitionSchema
-      conf.threadConf.asInstanceOf[MultiFile].poolConfBuilder.build(),
+      multiFileConf.poolConfBuilder.build(),
       false, // ignoreMissingFiles
       false, // ignoreCorruptFiles
       false) // useFieldId
       {
       override def checkIfNeedToSplitDataBlock(currentBlockInfo: SingleDataBlockInfo,
           nextBlockInfo: SingleDataBlockInfo): Boolean = {
-        // Iceberg should always use field id for matching columns, so we should always disable
-        // coalescing.
-        true
+        if (currentBlockInfo.filePath == nextBlockInfo.filePath) {
+          return false
+        }
+        if (hasFilePathMetadata) {
+          return true
+        }
+        if (checkIfNeedToSplitBlocks(
+          currentBlockInfo.extraInfo.dateRebaseMode,
+          nextBlockInfo.extraInfo.dateRebaseMode,
+          currentBlockInfo.extraInfo.timestampRebaseMode,
+          nextBlockInfo.extraInfo.timestampRebaseMode,
+          currentBlockInfo.schema,
+          nextBlockInfo.schema,
+          currentBlockInfo.filePath.toString,
+          nextBlockInfo.filePath.toString)) {
+          return true
+        }
+        val curExtra = currentBlockInfo.extraInfo.asInstanceOf[IcebergParquetExtraInfo]
+        val nextExtra = nextBlockInfo.extraInfo.asInstanceOf[IcebergParquetExtraInfo]
+        !curExtra.postProcessor.compatibleForCombining(nextExtra.postProcessor)
       }
 
       override def finalizeOutputBatch(batch: ColumnarBatch,
           extraInfo: ExtraInfo): ColumnarBatch = {
-        GpuCoalescingIcebergParquetReader.this.curPostProcessor = extraInfo
+        extraInfo
           .asInstanceOf[IcebergParquetExtraInfo]
           .postProcessor
-
-        GpuColumnVector.incRefCounts(batch)
+          .process(GpuColumnVector.incRefCounts(batch))
       }
     }
   }

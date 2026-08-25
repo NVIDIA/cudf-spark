@@ -19,7 +19,6 @@ package org.apache.spark.sql.rapids
 
 import java.util.{Locale, ServiceConfigurationError, ServiceLoader}
 
-import scala.collection.JavaConverters._
 import scala.util.{Failure, Success, Try}
 
 import com.nvidia.spark.rapids.GpuParquetFileFormat
@@ -359,6 +358,19 @@ object GpuDataSourceBase extends Logging {
     "org.apache.spark.sql.sources.HadoopFsRelationProvider",
     "org.apache.spark.Logging")
 
+  private def handleServiceConfigError(e: ServiceConfigurationError, context: String): Unit = {
+    val cause = e.getCause
+    if (cause.isInstanceOf[NoClassDefFoundError]) {
+      val className = cause.getMessage.replaceAll("/", ".")
+      if (spark2RemovedClasses.contains(className)) {
+        throw new ClassNotFoundException(
+          "Detected an incompatible DataSourceRegister. Please remove the " +
+            s"incompatible library from classpath or upgrade it. Error: ${e.getMessage}", e)
+      }
+    }
+    logWarning(s"Skipping broken DataSourceRegister provider$context: ${e.getMessage}")
+  }
+
   def lookupDataSourceWithFallback(className: String, conf: SQLConf): Class[_] = {
     val cls = GpuDataSourceBase.lookupDataSource(className, conf)
     // `providingClass` is used for resolving data source relation for catalog tables.
@@ -392,69 +404,92 @@ object GpuDataSourceBase extends Logging {
     val loader = Utils.getContextOrSparkClassLoader
     val serviceLoader = ServiceLoader.load(classOf[DataSourceRegister], loader)
 
-    try {
-      serviceLoader.asScala.filter(_.shortName().equalsIgnoreCase(provider1)).toList match {
-        // the provider format did not match any given registered aliases
-        case Nil =>
+    // ServiceLoader iteration can throw ServiceConfigurationError if an incompatible
+    // or broken DataSourceRegister provider is on the classpath. Use a manual loop
+    // to skip broken providers and continue iteration.
+    // hasNext() and next() are handled separately because hasNext() can also
+    // throw ServiceConfigurationError.
+    val providers = {
+      val buf = new scala.collection.mutable.ListBuffer[DataSourceRegister]()
+      val iter = serviceLoader.iterator()
+      var done = false
+      while (!done) {
+        val hasMore = try {
+          iter.hasNext
+        } catch {
+          case e: ServiceConfigurationError =>
+            // Assume more entries may exist;
+            // let next() advance past the broken entry.
+            handleServiceConfigError(e, " (hasNext)")
+            true
+        }
+        if (!hasMore) {
+          done = true
+        } else {
           try {
-            Try(loader.loadClass(provider1)).orElse(Try(loader.loadClass(provider2))) match {
-              case Success(dataSource) =>
-                // Found the data source using fully qualified path
-                dataSource
-              case Failure(error) =>
-                if (provider1.startsWith("org.apache.spark.sql.hive.orc")) {
-                  throw RapidsErrorUtils.orcNotUsedWithHiveEnabledError()
-                } else if (provider1.toLowerCase(Locale.ROOT) == "avro" ||
-                  provider1 == "com.databricks.spark.avro" ||
-                  provider1 == "org.apache.spark.sql.avro") {
-                  throw RapidsErrorUtils.failedToFindAvroDataSourceError(provider1)
-                } else if (provider1.toLowerCase(Locale.ROOT) == "kafka") {
-                  throw RapidsErrorUtils.failedToFindKafkaDataSourceError(provider1)
-                } else {
-                  throw new ClassNotFoundException(
-                    s"Failed to find data source: $provider1. Please find packages at " +
-                      "http://spark.apache.org/third-party-projects.html",
-                    error)
-                }
+            val provider = iter.next()
+            if (provider.shortName().equalsIgnoreCase(provider1)) {
+              buf += provider
             }
           } catch {
-            case e: NoClassDefFoundError => // This one won't be caught by Scala NonFatal
-              // NoClassDefFoundError's class name uses "/" rather than "." for packages
-              val className = e.getMessage.replaceAll("/", ".")
-              if (spark2RemovedClasses.contains(className)) {
-                throw new ClassNotFoundException(s"$className was removed in Spark 2.0. " +
-                  "Please check if your library is compatible with Spark 2.0", e)
+            case e: ServiceConfigurationError =>
+              handleServiceConfigError(e, "")
+          }
+        }
+      }
+      buf.toList
+    }
+
+    providers match {
+      // the provider format did not match any given registered aliases
+      case Nil =>
+        try {
+          Try(loader.loadClass(provider1)).orElse(Try(loader.loadClass(provider2))) match {
+            case Success(dataSource) =>
+              // Found the data source using fully qualified path
+              dataSource
+            case Failure(error) =>
+              if (provider1.startsWith("org.apache.spark.sql.hive.orc")) {
+                throw RapidsErrorUtils.orcNotUsedWithHiveEnabledError()
+              } else if (provider1.toLowerCase(Locale.ROOT) == "avro" ||
+                provider1 == "com.databricks.spark.avro" ||
+                provider1 == "org.apache.spark.sql.avro") {
+                throw RapidsErrorUtils.failedToFindAvroDataSourceError(provider1)
+              } else if (provider1.toLowerCase(Locale.ROOT) == "kafka") {
+                throw RapidsErrorUtils.failedToFindKafkaDataSourceError(provider1)
               } else {
-                throw e
+                throw new ClassNotFoundException(
+                  s"Failed to find data source: $provider1. Please find packages at " +
+                    "http://spark.apache.org/third-party-projects.html",
+                  error)
               }
           }
-        case head :: Nil =>
-          // there is exactly one registered alias
-          head.getClass
-        case sources =>
-          // There are multiple registered aliases for the input. If there is single datasource
-          // that has "org.apache.spark" package in the prefix, we use it considering it is an
-          // internal datasource within Spark.
-          val sourceNames = sources.map(_.getClass.getName)
-          val internalSources = sources.filter(_.getClass.getName.startsWith("org.apache.spark"))
-          if (internalSources.size == 1) {
-            logWarning(s"Multiple sources found for $provider1 (${sourceNames.mkString(", ")}), " +
-              s"defaulting to the internal datasource (${internalSources.head.getClass.getName}).")
-            internalSources.head.getClass
-          } else {
-            throw RapidsErrorUtils.findMultipleDataSourceError(provider1, sourceNames)
-          }
-      }
-    } catch {
-      case e: ServiceConfigurationError if e.getCause.isInstanceOf[NoClassDefFoundError] =>
-        // NoClassDefFoundError's class name uses "/" rather than "." for packages
-        val className = e.getCause.getMessage.replaceAll("/", ".")
-        if (spark2RemovedClasses.contains(className)) {
-          throw new ClassNotFoundException(s"Detected an incompatible DataSourceRegister. " +
-            "Please remove the incompatible library from classpath or upgrade it. " +
-            s"Error: ${e.getMessage}", e)
+        } catch {
+          case e: NoClassDefFoundError => // This one won't be caught by Scala NonFatal
+            // NoClassDefFoundError's class name uses "/" rather than "." for packages
+            val className = e.getMessage.replaceAll("/", ".")
+            if (spark2RemovedClasses.contains(className)) {
+              throw new ClassNotFoundException(s"$className was removed in Spark 2.0. " +
+                "Please check if your library is compatible with Spark 2.0", e)
+            } else {
+              throw e
+            }
+        }
+      case head :: Nil =>
+        // there is exactly one registered alias
+        head.getClass
+      case sources =>
+        // There are multiple registered aliases for the input. If there is single datasource
+        // that has "org.apache.spark" package in the prefix, we use it considering it is an
+        // internal datasource within Spark.
+        val sourceNames = sources.map(_.getClass.getName)
+        val internalSources = sources.filter(_.getClass.getName.startsWith("org.apache.spark"))
+        if (internalSources.size == 1) {
+          logWarning(s"Multiple sources found for $provider1 (${sourceNames.mkString(", ")}), " +
+            s"defaulting to the internal datasource (${internalSources.head.getClass.getName}).")
+          internalSources.head.getClass
         } else {
-          throw e
+          throw RapidsErrorUtils.findMultipleDataSourceError(provider1, sourceNames)
         }
     }
   }

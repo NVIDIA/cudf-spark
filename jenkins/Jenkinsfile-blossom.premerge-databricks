@@ -27,7 +27,7 @@
 import ipp.blossom.*
 
 def githubHelper // blossom github helper
-def IMAGE_DB = pod.getCPUYAML("${common.ARTIFACTORY_NAME_V2}/sw-spark-docker/spark:rapids-databricks-ubuntu22")
+def IMAGE_DB = pod.getCPUYAML("${common.ARTIFACTORY_NAME}/sw-spark-docker/spark:rapids-databricks-ubuntu22")
 
 pipeline {
     agent {
@@ -59,7 +59,6 @@ pipeline {
 
     environment {
         GITHUB_TOKEN = credentials("github-token")
-        PVC = credentials("pvc")
         CUSTOM_WORKSPACE = "/home/jenkins/agent/workspace/${BUILD_TAG}"
         // DB related ENVs
         IDLE_TIMEOUT = '390' // 6.5 hours
@@ -80,6 +79,8 @@ pipeline {
                     githubHelper = GithubHelper.getInstance("${GITHUB_TOKEN}", params.GITHUB_DATA)
                     // desc contains the PR ID and can be accessed from different builds
                     currentBuild.description = githubHelper.getBuildDescription() + " | $TEST_MODE"
+                    def title = githubHelper.getIssue().title.toLowerCase()
+                    env.REDUCED_IT = (title ==~ /.*\[reduced-it\].*/).toString()
                     checkoutCode(githubHelper.getCloneUrl(), githubHelper.getMergedSHA())
                 }
             }
@@ -93,7 +94,7 @@ pipeline {
                         // 'name' and 'value' only supprt literal string in the declarative Jenkins
                         // Refer to Jenkins issue https://issues.jenkins.io/browse/JENKINS-62127
                         name 'DB_RUNTIME'
-                        values '12.2', '13.3', '14.3'
+                        values '14.3', '17.3'
                     }
                 }
                 stages {
@@ -103,7 +104,6 @@ pipeline {
                                 label "premerge-ci-${DB_RUNTIME}-${BUILD_NUMBER}"
                                 cloud "${common.CLOUD_NAME}"
                                 yaml "${IMAGE_DB}"
-                                workspaceVolume persistentVolumeClaimWorkspaceVolume(claimName: "${PVC}", readOnly: false)
                                 customWorkspace "${CUSTOM_WORKSPACE}-${DB_RUNTIME}-${BUILD_NUMBER}"
                             }
                         }
@@ -113,14 +113,18 @@ pipeline {
                             BASE_SPARK_VERSION_TO_INSTALL_DATABRICKS_JARS = DbUtils.getInstallVer("$DB_RUNTIME")
                             INIT_SCRIPTS = DbUtils.getInitScripts("$DB_RUNTIME")
                             INIT_SCRIPTS_DIR = "/databricks/init_scripts/${BUILD_TAG}-${DB_RUNTIME}"
-                            EXTRA_ENVS = "TEST_MODE=$TEST_MODE"
+                            EXTRA_ENVS = "TEST_MODE=$TEST_MODE,REDUCED_IT=$REDUCED_IT"
                         }
                         steps {
                             script {
                                 container('cpu') {
-                                    unstash('source_tree')
-                                    databricksBuild()
-                                    deleteDir() // cleanup content if no error
+                                    try {
+                                        unstash('source_tree')
+                                        databricksBuild()
+                                    } catch (e) {
+                                        common.uploadDebugBundle(this, 'spark-rapids', "databricks-${DB_RUNTIME}")
+                                        throw e
+                                    }
                                 }
                             }
                         }
@@ -184,7 +188,7 @@ void databricksBuild() {
             }
         }
 
-        stage("Test agaist $SPARK_MAJOR DB") {
+        stage("Test against $SPARK_MAJOR DB") {
             dbStep = 'TEST'
             withCredentials([file(credentialsId: 'SPARK_DATABRICKS_PRIVKEY', variable: 'DATABRICKS_PRIVKEY')]) {
                 def TEST_PARAMS = DbUtils.getParameters(this, dbStep, "-c $CLUSTER_ID")
@@ -215,7 +219,7 @@ void checkoutCode(String url, String sha) {
                                     credentialsId: 'github-token',
                                     url          : url,
                                     refspec      : '+refs/pull/*/merge:refs/remotes/origin/pr/*']],
-             extensions      : [[$class: 'CloneOption', shallow: true]]
+             extensions      : [[$class: 'CloneOption', shallow: true, depth: 10]]
         ]
     )
     sh "git submodule update --init"

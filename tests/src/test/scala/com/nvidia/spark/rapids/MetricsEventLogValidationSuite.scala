@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,21 +13,23 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package com.nvidia.spark.rapids
 
 import java.io.{BufferedReader, File, InputStreamReader}
+import java.util.concurrent.TimeUnit
 
 import scala.collection.mutable
 import scala.io.Source
 
+import com.nvidia.spark.rapids.shims.EventLogJsonShims
 import org.json4s._
-import org.json4s.jackson.JsonMethods._
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, QueryStageExec, ShuffleQueryStageExec}
+import org.apache.spark.sql.execution.exchange.ReusedExchangeExec
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 
@@ -190,7 +192,7 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
 
         lines.foreach { line =>
           try {
-            val json = parse(line)
+            val json = EventLogJsonShims.parseJson(line)
             val eventType = (json \ "Event").extractOpt[String]
 
             eventType match {
@@ -199,11 +201,12 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
                 val taskInfo = (json \ "Task Info")
 
                 // Extract task execution time from Task Metrics
-                val taskId = (taskInfo \ "Task ID").extractOpt[Long]
+                val taskId = EventLogJsonShims.extractLong(taskInfo \ "Task ID")
                 val taskMetrics = (json \ "Task Metrics")
                 // https://github.com/apache/spark/blob/450b415028c3b00f3a002126cd11318d3932e28f/
                 // core/src/main/scala/org/apache/spark/ui/jobs/StagePage.scala#L151
-                val executorRunTime = (taskMetrics \ "Executor Run Time").extractOpt[Long]
+                val executorRunTime =
+                  EventLogJsonShims.extractLong(taskMetrics \ "Executor Run Time")
 
                 (taskId, executorRunTime) match {
                   case (Some(tId), Some(runTime)) =>
@@ -433,8 +436,14 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
       spark.conf.set("spark.rapids.sql.exec.opTimeTrackingRDD.enabled", "true")
 
       // Configure slow filesystem for testing and disable cache to prevent pollution
+      val slowFsWriteDelayMs = 100L
+      val numWritePartitions = 50
+      val minExpectedStage5OperatorTimeFraction = 0.6
+      // Keep AQE from coalescing the write shuffle partitions used by the slowfs lower bound.
+      spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "false")
       spark.conf.set("fs.slowfs.impl.disable.cache", "true")
       spark.conf.set("fs.slowfs.impl", "com.nvidia.spark.rapids.SlowFileSystem")
+      spark.conf.set("slowfs.write.delay.ms", slowFsWriteDelayMs.toString)
 
       val numRows = 5000000L
       val numTasks = 8
@@ -456,10 +465,9 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
         )
         .filter($"total_count" > 5)
 
-      // Write to slow filesystem Parquet format with repartitioning
-      // and take significant time due to filesystem delays
+      // Use many small output tasks so SlowFileSystem delays are visible in write-stage op time.
       testDataDF
-        .repartition(50) // Repartition to 50 partitions to amplify write time
+        .repartition(numWritePartitions)
         .write
         .mode("overwrite")
         .option("compression", "snappy")
@@ -523,7 +531,6 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
           f"(${totalTaskExecutionTime / 1000000.0}%.2f ms), " +
           f"but was ${operatorTimeRatio * 100.0}%.1f%%")
 
-      // Assert stage 5 (parquet write stage) operator time accounts for > 10% of total
       val stage5Metrics = operatorTimeMetrics.filter(_.stage.contains(5))
       val stage5OperatorTime = stage5Metrics.map(_.value).sum
       val stage5Ratio = if (totalOperatorTime > 0) {
@@ -531,20 +538,27 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
       } else {
         0.0
       }
+      // Allow margin for write path work outside the operator timing boundary.
+      val minExpectedStage5OperatorTime =
+        (TimeUnit.MILLISECONDS.toNanos(numWritePartitions * slowFsWriteDelayMs) *
+          minExpectedStage5OperatorTimeFraction).toLong
 
       println(f"Parquet write job: Stage 5 operator time: " +
         f"${stage5OperatorTime / 1000000.0}%.2f ms")
       println(f"Parquet write job: Stage 5 ratio: ${stage5Ratio * 100.0}%.1f%% " +
         "of total operator time")
+      println(f"Parquet write job: Stage 5 expected minimum operator time: " +
+        f"${minExpectedStage5OperatorTime / 1000000.0}%.2f ms")
 
       assert(stage5Metrics.nonEmpty,
         "Should find operator time metrics for stage 5 (parquet write stage)")
 
-      assert(stage5Ratio > 0.1,
-        f"Stage 5 (parquet write stage) operator time should account for more than 10%% " +
-          f"of total operator time, but was only ${stage5Ratio * 100.0}%.1f%% " +
-          f"(${stage5OperatorTime / 1000000.0}%.2f ms out of " +
-          f"${totalOperatorTime / 1000000.0}%.2f ms)")
+      assert(stage5OperatorTime >= minExpectedStage5OperatorTime,
+        f"Stage 5 (parquet write stage) operator time should be at least " +
+          f"${minExpectedStage5OperatorTime / 1000000.0}%.2f ms based on " +
+          f"${minExpectedStage5OperatorTimeFraction * 100.0}%.1f%% of " +
+          f"$numWritePartitions write partitions and $slowFsWriteDelayMs ms slowfs delay, " +
+          f"but was ${stage5OperatorTime / 1000000.0}%.2f ms")
 
       operatorTimeMetrics.foreach { m =>
         println(f"  ${m.name}: ${m.value / 1000000.0}%.2f ms " +
@@ -630,6 +644,235 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
     assert(totalTaskExecutionTime > 100,
       s"Total task execution time should be substantial to validate the test, " +
         s"got ${totalTaskExecutionTime} ms")
+  }
+
+  /**
+   * Parse event logs into per-stage aggregates
+   * (stageId -> (sum of "op time" in ns, sum of executorRunTime in ms)).
+   *
+   * Aggregating per stage rather than per task is deliberate: "op time" is
+   * recorded in NANOSECONDS while Spark's "Executor Run Time" is truncated to
+   * MILLISECONDS. On a sub-millisecond task that mismatch alone makes
+   * sum(op_time) > executorRunTime (0.1 ms of ns-precision op_time vs a run
+   * time that floors to 0 ms) -- a granularity artifact, not an over-count.
+   * Summing both quantities over all tasks of a stage drowns that per-task
+   * rounding noise (bounded by ~1 ms per empty task) under the stage's real
+   * work (seconds), so the surviving signal is the structural bug-1 over-count
+   * the write-path fixes (#14901) restore.
+   */
+  private def parseEventLogsPerStage(): Map[Int, (Long, Long)] = {
+    implicit val formats: DefaultFormats.type = DefaultFormats
+    val opTimeByStage = mutable.Map[Int, Long]().withDefaultValue(0L)
+    val runTimeByStage = mutable.Map[Int, Long]().withDefaultValue(0L)
+
+    eventLogDir.listFiles()
+      .filter(f => f.getName.endsWith(".inprogress") || !f.getName.contains("_tmp_"))
+      .foreach { file =>
+        readEventLogLines(file).foreach { line =>
+          try {
+            val json = EventLogJsonShims.parseJson(line)
+            if ((json \ "Event").extractOpt[String].contains("SparkListenerTaskEnd")) {
+              val taskInfo = json \ "Task Info"
+              val taskMetrics = json \ "Task Metrics"
+              val stageId = (json \ "Stage ID").extractOpt[Int]
+              val runTime = EventLogJsonShims.extractLong(taskMetrics \ "Executor Run Time")
+              (stageId, runTime) match {
+                case (Some(sId), Some(rt)) =>
+                  runTimeByStage(sId) = runTimeByStage(sId) + rt
+                  (taskInfo \ "Accumulables").extract[List[JObject]].foreach { acc =>
+                    val name = (acc \ "Name").extractOpt[String]
+                    val value = (acc \ "Update").extractOpt[String]
+                    (name, value) match {
+                      // "op time" is the per-operator op_time metric; sum all of
+                      // them (Insert + descendants) across the stage's tasks.
+                      case (Some(n), Some(v)) if n == "op time" =>
+                        opTimeByStage(sId) = opTimeByStage(sId) + v.toLong
+                      case _ =>
+                    }
+                  }
+                case _ =>
+              }
+            }
+          } catch {
+            case _: Exception => // skip malformed lines
+          }
+        }
+      }
+    runTimeByStage.map { case (sId, rt) => sId -> ((opTimeByStage(sId), rt)) }.toMap
+  }
+
+  test("write op_time stays within executorRunTime with empty partitions (#14901)") {
+    // Default write path: WriteFilesExec on Spark 3.4+ (exercises the
+    // GpuWriteFilesExec excludeMetrics forwarding), the direct
+    // GpuFileFormatWriter.write on Spark 3.3.x.
+    assertWriteOpTimeWithinExecRunTime(forceLegacyWritePath = false)
+  }
+
+  test("write op_time stays within executorRunTime on the non-WriteFilesExec path (#14901)") {
+    // Disabling planned-write routes Spark 3.4+ through GpuFileFormatWriter.write
+    // -- the path Hive/Delta/CTAS always take -- so the AdaptiveSparkPlanExec
+    // unwrap in excludeMetrics collection is exercised on those versions too,
+    // not just on Spark 3.3.x.
+    assertWriteOpTimeWithinExecRunTime(forceLegacyWritePath = true)
+  }
+
+  private def assertWriteOpTimeWithinExecRunTime(forceLegacyWritePath: Boolean): Unit = {
+    val sparkSession = spark
+    import sparkSession.implicits._
+
+    spark.conf.set("spark.rapids.sql.exec.opTimeTrackingRDD.enabled", "true")
+    // Keep the write partitions as-is so the empty ones survive to the write stage,
+    // exercising the empty-partition `iterator.hasNext` path in executeTask.
+    spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "false")
+    // Rely on the suite-wide small batch size (64KB, set in beforeEach): it
+    // splits the post-shuffle data into many GPU micro-batches, so the
+    // descendant project's per-batch kernel-launch op_time accumulates and
+    // dominates the write stage -- which is what makes the pre-fix Insert
+    // double-count clear the 1.3x threshold. A modest row count keeps the batch
+    // count (and wall time) small.
+    if (forceLegacyWritePath) {
+      // Spark 3.4+ inserts WriteFilesExec by default; disabling planned-write
+      // routes the command through GpuFileFormatWriter.write instead. The config
+      // is unknown (and harmless) on Spark 3.3.x, which always uses that path.
+      spark.conf.set("spark.sql.optimizer.plannedWrite.enabled", "false")
+    }
+
+    val numRows = 200000L
+    val numWritePartitions = 64
+    val parquetOutputPath = new File(tempDir, "empty_part_write").getAbsolutePath
+
+    // The write stage must carry non-trivial descendant op_time for the bug to
+    // show: hash-repartition on a 4-value key into 64 partitions FIRST (leaving
+    // ~60 partitions EMPTY at the write stage -> exercises the empty-partition
+    // hasNext branch), THEN do heavy GPU compute AFTER the shuffle so it is a
+    // descendant of the Insert inside the write stage. Pre-fix the Insert
+    // op_time fails to exclude that descendant -- via missing excludeMetrics
+    // forwarding on the WriteFilesExec path, or the AdaptiveSparkPlanExec match
+    // gap on the direct write path -- so it double-counts the descendant and
+    // the write stage's sum(op_time) exceeds the 1.3x-of-sum(executorRunTime)
+    // detection threshold; post-fix the descendant is excluded and the ratio
+    // returns to ~1x.
+    //
+    // The project is a chain of UNARY transcendental functions, not nested
+    // binary arithmetic: on Spark 3.4.x BinaryArithmetic.dataType is an uncached
+    // `def` that evaluates BOTH children (SPARK-45071, fixed by a `lazy val` in
+    // 3.5.0), so a deeply nested arithmetic tree (e.g. a many-term
+    // `mkString(" + ")`) makes the analyzer pathologically slow -- never-
+    // completing analysis was observed on 3.4.0 before any GPU work ran. A
+    // unary function resolves its dataType from a single child (linear), so the
+    // chain is cheap to analyze on every shim while still issuing one GPU kernel
+    // per layer. sin/cos keep the value bounded in [-1, 1] so it neither
+    // overflows nor constant-folds.
+    val d = "cast(id AS double)"
+    val heavy = (0 until 24).foldLeft(s"abs($d) * 1.0e-9") { (e, _) => s"sin(cos($e))" }
+    val df = spark.range(0, numRows, 1, 8)
+      .selectExpr("id", "id % 4 as k")
+      .repartition(numWritePartitions, $"k")
+      .selectExpr("id", "k", s"($heavy) as h")
+      .filter($"h" < 1.0e18)
+
+    df.write.mode("overwrite").option("compression", "snappy").parquet(parquetOutputPath)
+    assert(new File(parquetOutputPath).exists())
+
+    flushEventLogsByStoppingSpark()
+
+    val perStage = parseEventLogsPerStage()
+    assert(perStage.nonEmpty, "should find per-stage records in event logs")
+
+    // The accounting invariant the write-path fixes restore: within a stage,
+    // the summed op_time of all operators cannot exceed the stage's summed
+    // executor run time (each operator's op_time is a slice of its task's wall
+    // time). Pre-fix the Insert op_time double-counts the heavy post-shuffle
+    // project/filter that are its descendants -- the write stage's sum(op_time)
+    // lands at ~2x its sum(executorRunTime). Post-fix the descendants are
+    // excluded and the ratio drops to ~1x.
+    //
+    // Only stages that did non-trivial work (summed run time over the floor)
+    // are checked, so we never divide by a stage whose run time is dominated by
+    // millisecond-rounding noise. We additionally assert at least one such
+    // stage exists, so the test fails loudly (rather than vacuously passing) if
+    // the workload ever degrades to all-trivial stages on faster hardware.
+    val marginFactor = 1.3
+    val stageRunTimeFloorMs = 200L
+    val meaningful = perStage.filter { case (_, (_, rtMs)) => rtMs >= stageRunTimeFloorMs }
+    assert(meaningful.nonEmpty,
+      s"expected at least one stage with >= $stageRunTimeFloorMs ms summed executorRunTime " +
+        s"to make the ratio check meaningful; per-stage run times (ms) were " +
+        s"${perStage.map { case (s, (_, rt)) => s -> rt }.toSeq.sorted}")
+
+    val violators = meaningful.filter { case (_, (opNs, rtMs)) =>
+      opNs.toDouble > rtMs.toDouble * 1000000.0 * marginFactor
+    }
+
+    if (violators.nonEmpty) {
+      val sample = violators.toSeq.sortBy(_._1).map { case (sId, (opNs, rtMs)) =>
+        f"stage $sId: sum(op_time)=${opNs / 1e6}%.0f ms vs sum(executorRunTime)=$rtMs ms " +
+          f"(${opNs / 1e6 / math.max(rtMs, 1L)}%.2fx)"
+      }.mkString("; ")
+      fail(s"${violators.size}/${meaningful.size} stages have summed op_time exceeding " +
+        f"$marginFactor%.1fx summed executorRunTime, indicating write-path op_time " +
+        s"over-count (#14901 not fixed). $sample")
+    }
+  }
+
+  test("shuffle-read op time is excluded from consumers across AQE query stages (#14933)") {
+    spark.conf.set("spark.rapids.sql.exec.opTimeTrackingRDD.enabled", "true")
+    // Disable AQE partition coalescing so the reduce stage reads the GpuColumnarExchange
+    // directly instead of through a GpuCustomShuffleReaderExec. AQE then materializes that
+    // exchange as a ShuffleQueryStageExec -- a LeafExecNode whose children are empty -- so
+    // a consumer's descendant-op-time walk only reaches the exchange's
+    // "op time (shuffle read)" metric if it descends through the query stage.
+    spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "false")
+
+    // A group-by forces a shuffle (partial aggregate -> exchange -> final aggregate).
+    // collect() materializes the AQE query stages, so the executed plan contains the
+    // ShuffleQueryStageExec wrapping the reduce-side exchange.
+    val df = spark.range(0, 200000L, 1, 8).selectExpr("id % 1000 as k", "id as v")
+    val resultDF = df.groupBy("k").agg(sum("v").as("sv"))
+    assert(resultDF.collect().nonEmpty, "Query should produce results")
+
+    val executed = resultDF.queryExecution.executedPlan match {
+      case a: AdaptiveSparkPlanExec => a.executedPlan
+      case other => other
+    }
+    // Spark 4.0+ wraps the final stage in a ResultQueryStageExec (a QueryStageExec, i.e.
+    // a LeafExecNode whose children are empty); descend into its `.plan` so the operator
+    // tree below is reachable by the traversal. No-op on Spark 3.3 (no result stage).
+    val finalPlan = executed match {
+      case q: QueryStageExec => q.plan
+      case other => other
+    }
+
+    // The in-stage consumer is the GpuExec whose child is the reduce-side query stage.
+    val consumers = finalPlan.collect {
+      case c: GpuExec if c.children.exists(_.isInstanceOf[ShuffleQueryStageExec]) => c
+    }
+    assert(consumers.nonEmpty,
+      s"expected a GpuExec consuming a ShuffleQueryStageExec; plan was:\n$finalPlan")
+    val consumer = consumers.head
+    val stage = consumer.children.collectFirst { case q: ShuffleQueryStageExec => q }.get
+    val exchange = stage.plan match {
+      case r: ReusedExchangeExec => r.child
+      case p => p
+    }
+    val readMetric = exchange match {
+      case g: GpuExec => g.getOpTimeNewMetric
+      case _ => None
+    }
+    assert(readMetric.isDefined,
+      s"reduce-side exchange (${exchange.nodeName}) should expose an OP_TIME_NEW " +
+        "(\"op time (shuffle read)\") metric")
+
+    // The fix: a consumer's getDescendantOpTimeMetrics must descend through the
+    // ShuffleQueryStageExec and collect the exchange's shuffle-read metric, so the
+    // consumer's op_time excludes it. Pre-fix the walk stops at the (leaf) query stage and
+    // the metric is missing, leaving the shuffle-read time double-counted (#14933).
+    val descendants = consumer.getDescendantOpTimeMetrics
+    assert(descendants.exists(_ eq readMetric.get),
+      s"${consumer.nodeName}.getDescendantOpTimeMetrics must include the reduce-side " +
+        "exchange's \"op time (shuffle read)\" metric (so it is excluded from the consumer's " +
+        "op time); it was missing, so the shuffle-read time would be double-counted. " +
+        s"Collected ${descendants.size} descendant op-time metrics.")
   }
 
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * This file was derived from OptimizeWriteExchange.scala
  * in the Delta Lake project at https://github.com/delta-io/delta
@@ -27,6 +27,7 @@ import scala.concurrent.duration.Duration
 
 import com.databricks.sql.transaction.tahoe.sources.DeltaSQLConf
 import com.nvidia.spark.rapids.delta.RapidsDeltaSQLConf
+import com.nvidia.spark.rapids.delta.shims.ShimShuffledRowRDD
 
 import org.apache.spark.{MapOutputStatistics, ShuffleDependency}
 import org.apache.spark.network.util.ByteUnit
@@ -34,7 +35,7 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.serializer.Serializer
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, RoundRobinPartitioning, UnknownPartitioning}
-import org.apache.spark.sql.execution.{CoalescedPartitionSpec, ShuffledRowRDD, ShufflePartitionSpec, SparkPlan, SQLExecution, UnsafeRowSerializer}
+import org.apache.spark.sql.execution.{CoalescedPartitionSpec, ShufflePartitionSpec, SparkPlan, SQLExecution, UnsafeRowSerializer}
 import org.apache.spark.sql.execution.exchange.{Exchange, ShuffleExchangeExec}
 import org.apache.spark.sql.execution.metric.{SQLMetrics, SQLShuffleReadMetricsReporter, SQLShuffleWriteMetricsReporter}
 import org.apache.spark.util.ThreadUtils
@@ -103,15 +104,15 @@ case class OptimizeWriteExchangeExec(
     // Collect execution statistics, these will be used to adjust/decide how to split files
     val stats = ThreadUtils.awaitResult(mapOutputStatisticsFuture, Duration.Inf)
     if (stats == null) {
-      new ShuffledRowRDD(shuffleDependency, readMetrics)
+      ShimShuffledRowRDD.create(shuffleDependency, readMetrics)
     } else {
       try {
         val partitionSpecs = Some(rebalancePartitions(stats))
-        new ShuffledRowRDD(shuffleDependency, readMetrics, partitionSpecs.get.toArray)
+        ShimShuffledRowRDD.create(shuffleDependency, readMetrics, partitionSpecs.get.toArray)
       } catch {
         case e: Throwable =>
           logWarning("Failed to apply OptimizeWrite.", e)
-          new ShuffledRowRDD(shuffleDependency, readMetrics)
+          ShimShuffledRowRDD.create(shuffleDependency, readMetrics)
       }
     }
   }

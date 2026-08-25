@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * This file was derived from CheckDeltaInvariant.scala in the
  * Delta Lake project at https://github.com/delta-io/delta.
@@ -24,7 +24,7 @@ package com.databricks.sql.transaction.tahoe.rapids
 import ai.rapids.cudf.{ColumnVector, Scalar}
 import com.databricks.sql.transaction.tahoe.constraints.{CheckDeltaInvariant, Constraint}
 import com.databricks.sql.transaction.tahoe.constraints.Constraints.{Check, NotNull}
-import com.nvidia.spark.rapids.{DataFromReplacementRule, ExprChecks, GpuBindReferences, GpuColumnVector, GpuExpression, GpuMetric, GpuOverrides, RapidsConf, RapidsMeta, TypeSig, UnaryExprMeta}
+import com.nvidia.spark.rapids.{BaseExprMeta, DataFromReplacementRule, ExprChecks, ExprMeta, GpuBindReferences, GpuColumnVector, GpuExpression, GpuMetric, GpuOverrides, ParamCheck, RapidsConf, RapidsMeta, TypeSig}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.delta.shims.InvariantViolationExceptionShim
@@ -127,9 +127,16 @@ case class GpuCheckDeltaInvariant(
 }
 
 object GpuCheckDeltaInvariant extends Logging {
+  // Databricks 17.3 changed CheckDeltaInvariant from a unary expression to an expression
+  // whose check child is followed by one extractor per referenced column. The extractor
+  // expressions are only used to populate the CPU-side error message when the check fails,
+  // so the meta below intentionally tags and converts just the actual constraint child.
   private val exprRule = GpuOverrides.expr[CheckDeltaInvariant](
     "checks a Delta Lake invariant expression",
-    ExprChecks.unaryProject(TypeSig.all, TypeSig.all, TypeSig.all, TypeSig.all),
+    ExprChecks.projectOnly(
+      TypeSig.all,
+      TypeSig.all,
+      paramCheck = Seq(ParamCheck("input", TypeSig.all, TypeSig.all))),
     (c, conf, p, r) => new GpuCheckDeltaInvariantMeta(c, conf, p, r))
 
   def maybeConvertToGpu(
@@ -162,7 +169,10 @@ class GpuCheckDeltaInvariantMeta(
     conf: RapidsConf,
     parent: Option[RapidsMeta[_, _, _]],
     rule: DataFromReplacementRule)
-    extends UnaryExprMeta[CheckDeltaInvariant](check, conf, parent, rule) {
+    extends ExprMeta[CheckDeltaInvariant](check, conf, parent, rule) {
+
+  override val childExprs: Seq[BaseExprMeta[_]] =
+    Seq(GpuOverrides.wrapExpr(check.child, conf, Some(this)))
 
   override def tagExprForGpu(): Unit = {
     wrapped.constraint match {
@@ -171,10 +181,12 @@ class GpuCheckDeltaInvariantMeta(
     }
   }
 
-  override def convertToGpu(child: Expression): GpuExpression = {
+  override def convertToGpuImpl(): GpuExpression = {
+    val child = childExprs.head.convertToGpu()
     GpuCheckDeltaInvariant(
       child,
-      wrapped.columnExtractors,  // leave these on CPU
+      // Spark 4.0 exposes columnExtractors as a Seq; the GPU expression keeps the Map shape.
+      wrapped.columnExtractors.toMap,
       wrapped.constraint)
   }
 }

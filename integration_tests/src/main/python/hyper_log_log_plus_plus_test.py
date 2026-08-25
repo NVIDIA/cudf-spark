@@ -1,4 +1,4 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.
+# Copyright (c) 2025-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -40,7 +40,7 @@ def test_hllpp_reduction(data_gen):
 
 # precision = Math.ceil(2.0d * Math.log(1.106d / relativeSD) / Math.log(2.0d)).toInt
 _relativeSD = [
-    pytest.param(0.3, marks=pytest.mark.xfail(reason="https://github.com/NVIDIA/spark-rapids/issues/12452")), #  precision 4
+    0.3,   #  precision 4
     0.25,  #  precision 5
     0.15,  #  precision 6
     0.1,   #  precision 7
@@ -68,11 +68,7 @@ def test_hllpp_precisions_reduce(relativeSD):
 
 @pytest.mark.skipif(is_databricks_runtime(), reason="HyperLogLogPlusPlus does not support Databricks currently(https://github.com/NVIDIA/spark-rapids/issues/12388)")
 @ignore_order(local=True)
-@pytest.mark.parametrize('relativeSD', 
-                         [x if x != 0.3 
-                          else pytest.param(x, marks=pytest.mark.xfail(reason="https://github.com/NVIDIA/spark-rapids/issues/12452")) 
-                          for x in _relativeSD], 
-                         ids=idfn)
+@pytest.mark.parametrize('relativeSD', _relativeSD, ids=idfn)
 def test_hllpp_precisions_groupby(relativeSD):
     assert_gpu_and_cpu_are_equal_sql(
         lambda spark: gen_df(spark, [("c1", int_gen), ("c2", int_gen)]),

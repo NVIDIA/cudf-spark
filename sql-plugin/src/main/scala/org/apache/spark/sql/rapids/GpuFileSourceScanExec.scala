@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -143,7 +143,10 @@ case class GpuFileSourceScanExec(
   // We can only determine the actual partitions at runtime when a dynamic partition filter is
   // present. This is because such a filter relies on information that is only available at run
   // time (for instance the keys used in the other side of a join).
-  @transient private lazy val dynamicallySelectedPartitions: Array[PartitionDirectory] = {
+  // Visible to org.apache.spark.sql.rapids.* so tests can assert on runtime partition pruning,
+  // mirroring CPU's FileSourceScanExec.dynamicallySelectedPartitions (which is package-private
+  // to org.apache.spark.sql.execution).
+  @transient private[rapids] lazy val dynamicallySelectedPartitions: Array[PartitionDirectory] = {
     val dynamicPartitionFilters = partitionFilters.filter(isDynamicPruningFilter)
 
     if (dynamicPartitionFilters.nonEmpty) {
@@ -561,10 +564,10 @@ case class GpuFileSourceScanExec(
       logInfo(s"Planning scan with bin packing, max size: $maxSplitBytes bytes, " +
         s"open cost is considered as scanning $openCostInBytes bytes.")
 
-      val splitFiles = FilePartitionShims.splitFiles(dynamicallySelectedPartitions, relation,
+      val splitFiles = FilePartitionShims.splitFiles(dynamicallySelectedPartitions, fsRelation,
         maxSplitBytes)
 
-      FilePartition.getFilePartitions(relation.sparkSession, splitFiles, maxSplitBytes)
+      FilePartitionShims.getFilePartitions(fsRelation, splitFiles, maxSplitBytes)
     }
     getFinalRDD(readFile, partitions)
   }
@@ -577,19 +580,19 @@ case class GpuFileSourceScanExec(
     val prunedPartitions = requiredPartitionSchema.map { partSchema =>
       val idsAndTypes = partSchema.map(f => (relation.partitionSchema.indexOf(f), f.dataType))
       partitions.map { p =>
-        val partFiles = p.files.map { pf =>
+        val partFiles = FilePartitionShims.getFiles(p).map { pf =>
           val prunedPartValues = idsAndTypes.map { case (id, dType) =>
             pf.partitionValues.get(id, dType)
           }
           pf.copy(partitionValues = InternalRow.fromSeq(prunedPartValues))
         }
-        p.copy(files = partFiles)
+        FilePartitionShims.copyWithFiles(p, partFiles)
       }
     }.getOrElse(partitions)
 
     // Update the preferred locations based on the file cache locality
     val locatedPartitions = prunedPartitions.map { partition =>
-      val newFiles = partition.files.map { partFile =>
+      val newFiles = FilePartitionShims.getFiles(partition).map { partFile =>
         val cacheLocations = FileCacheLocalityManager.get.getLocations(partFile.filePath.toString)
         if (cacheLocations.nonEmpty) {
           val newLocations = cacheLocations ++ partFile.locations
@@ -598,7 +601,7 @@ case class GpuFileSourceScanExec(
           partFile
         }
       }
-      partition.copy(files = newFiles)
+      FilePartitionShims.copyWithFiles(partition, newFiles)
     }
 
     if (isPerFileReadEnabled) {
@@ -607,7 +610,7 @@ case class GpuFileSourceScanExec(
         requiredSchema, fileFormat = Some(relation.fileFormat))
     } else {
       logDebug(s"Using Datasource RDD, files are: " +
-        s"${prunedPartitions.flatMap(_.files).mkString(",")}")
+        s"${prunedPartitions.flatMap(FilePartitionShims.getFiles).mkString(",")}")
       // note we use the v2 DataSourceRDD instead of FileScanRDD so we don't have to copy more code
       GpuDataSourceRDD(relation.sparkSession.sparkContext, locatedPartitions, readerFactory)
     }
@@ -654,34 +657,34 @@ case class GpuFileSourceScanExec(
 object GpuFileSourceScanExec {
   def tagSupport(meta: SparkPlanMeta[FileSourceScanExec]): Unit = {
     val cls = meta.wrapped.relation.fileFormat.getClass
-    if (cls == classOf[CSVFileFormat]) {
+    if (ExternalSource.isSupportedFormat(cls)) {
+      ExternalSource.tagSupportForGpuFileSourceScan(meta)
+    } else if (classOf[CSVFileFormat].isAssignableFrom(cls)) {
       GpuReadCSVFileFormat.tagSupport(meta)
     } else if (GpuOrcFileFormat.isSparkOrcFormat(cls)) {
       GpuReadOrcFileFormat.tagSupport(meta)
-    } else if (cls == classOf[ParquetFileFormat]) {
+    } else if (classOf[ParquetFileFormat].isAssignableFrom(cls)) {
       GpuReadParquetFileFormat.tagSupport(meta)
-    } else if (cls == classOf[JsonFileFormat]) {
+    } else if (classOf[JsonFileFormat].isAssignableFrom(cls)) {
       GpuReadJsonFileFormat.tagSupport(meta)
-    } else if (ExternalSource.isSupportedFormat(cls)) {
-      ExternalSource.tagSupportForGpuFileSourceScan(meta)
     } else {
       meta.willNotWorkOnGpu(s"unsupported file format: ${cls.getCanonicalName}")
     }
   }
 
-  def convertFileFormat(relation: HadoopFsRelation): FileFormat = {
+  def convertFileFormat(relation: HadoopFsRelation, rapidsConf: RapidsConf): FileFormat = {
     val format = relation.fileFormat
     val cls = format.getClass
-    if (cls == classOf[CSVFileFormat]) {
+    if (ExternalSource.isSupportedFormat(cls)) {
+      ExternalSource.getReadFileFormat(relation, rapidsConf)
+    } else if (classOf[CSVFileFormat].isAssignableFrom(cls)) {
       new GpuReadCSVFileFormat
     } else if (GpuOrcFileFormat.isSparkOrcFormat(cls)) {
       new GpuReadOrcFileFormat
-    } else if (cls == classOf[ParquetFileFormat]) {
+    } else if (classOf[ParquetFileFormat].isAssignableFrom(cls)) {
       new GpuReadParquetFileFormat
-    } else if (cls == classOf[JsonFileFormat]) {
+    } else if (classOf[JsonFileFormat].isAssignableFrom(cls)) {
       new GpuReadJsonFileFormat
-    } else if (ExternalSource.isSupportedFormat(cls)) {
-      ExternalSource.getReadFileFormat(relation)
     } else {
       throw new IllegalArgumentException(s"${cls.getCanonicalName} is not supported")
     }

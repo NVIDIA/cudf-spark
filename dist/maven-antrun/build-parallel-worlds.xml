@@ -54,7 +54,7 @@
             project.basedir=${project.basedir}
             project.build.directory=${project.build.directory}
             spark.version.classifier=${spark.version.classifier}
-            URM_URL=${env.URM_URL}
+            ART_URL=${env.ART_URL}
             maven.repo.local=${maven.repo.local}
         </echo>
         <property name="shimServiceRsrc" value="META-INF/services/com.nvidia.spark.rapids.SparkShimServiceProvider"/>
@@ -120,7 +120,16 @@
               dir="${project.build.directory}"
               resultproperty="build-parallel-worlds.dedupeExitCode"
               errorproperty="build-parallel-worlds.dedupeErrorMsg"
-              failonerror="false"/>
+              failonerror="false">
+            <env key="UNSHIMMED_COMMON_FROM_SINGLE_SHIM_TXT"
+                 value="${spark.rapids.source.basedir}/${rapids.module}/unshimmed-common-from-single-shim.txt"/>
+            <env key="KEEP_IN_SPARK_SHARED_TXT"
+                 value="${spark.rapids.source.basedir}/${rapids.module}/keep-in-spark-shared.txt"/>
+            <env key="KEEP_IN_SPARK_SHIM_DIRS_TXT"
+                 value="${spark.rapids.source.basedir}/${rapids.module}/keep-in-spark-shim-dirs.txt"/>
+            <env key="UNSHIM_ANALYZER_SCRIPT"
+                 value="${spark.rapids.source.basedir}/${rapids.module}/scripts/analyze-parallel-world-deps.py"/>
+        </exec>
         <fail message="exec binary-dedupe.sh failed, exit code is ${build-parallel-worlds.dedupeExitCode}, error msg is ${build-parallel-worlds.dedupeErrorMsg}">
             <condition>
                 <not>
@@ -129,13 +138,14 @@
             </condition>
         </fail>
 
-        <!-- Remove the explicily unshimmed files from the common directory -->
+        <!-- Remove explicitly promoted non-class files from the common directory -->
         <delete>
             <fileset dir="${project.build.directory}/parallel-world/spark-shared"
                      includesfile="${spark.rapids.source.basedir}/${rapids.module}/unshimmed-common-from-single-shim.txt"/>
         </delete>
     </target>
-    <target name="remove-dependencies-from-pom" depends="build-parallel-worlds">
+    <target name="remove-dependencies-from-pom" depends="build-parallel-worlds"
+            unless="rapids.parallel.world.skip.reduced.pom">
         <echo level="info">Generating dependency-reduced-pom.xml</echo>
         <resources id="aggregatorDependencyRegexWithoutWhitespace">
             <string>&lt;dependency&gt;</string>

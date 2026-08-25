@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,19 +23,33 @@ import ai.rapids.cudf.Table
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.jni.RmmSpark
-import org.mockito.Mockito.{mock, spy, when}
+import org.mockito.Mockito.{never, spy, verify}
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.Row
-import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Expression, Literal, NamedExpression}
-import org.apache.spark.sql.execution.SparkPlan
+import org.apache.spark.sql.catalyst.expressions.{
+  AttributeReference, Expression, Literal, NamedExpression}
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.rapids.execution.TrampolineUtil
+import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims._
 import org.apache.spark.sql.tests.datagen.DataGenExprShims
 import org.apache.spark.sql.types._
 
 class ProjectExprSuite extends SparkQueryCompareTestSuite {
+  private def astExpressions(expressions: Seq[Expression]): Seq[GpuProjectAstExpression] = {
+    expressions.flatMap(_.collect {
+      case astExpression: GpuProjectAstExpression => astExpression
+    })
+  }
+
+  private def tierReferences(expression: Expression): Seq[GpuBoundReference] = {
+    expression.collect {
+      case reference: GpuBoundReference if reference.name.startsWith("tiered_input_") => reference
+    }
+  }
+
   def forceHostColumnarToGpu(): SparkConf = {
     // turns off BatchScanExec, so we get a CPU BatchScanExec together with a HostColumnarToGpu
     new SparkConf().set("spark.rapids.sql.exec.BatchScanExec", "false")
@@ -72,7 +86,7 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
     try {
       val expr = GpuAlias(GpuAdd(
         GpuBoundReference(0, LongType, true)(NamedExpression.newExprId, "a"),
-        GpuBoundReference(1, LongType, true)(NamedExpression.newExprId, "b"), false),
+        GpuBoundReference(1, LongType, true)(NamedExpression.newExprId, "b"), false)(),
         "ret")()
       val sb = buildProjectBatch()
 
@@ -103,8 +117,8 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
     try {
       val a = AttributeReference("a", LongType)()
       val b = AttributeReference("b", LongType)()
-      val simpleAdd = GpuAdd(a, b, false)
-      val fullAdd = GpuAlias(GpuAdd(simpleAdd, simpleAdd, false), "ret")()
+      val simpleAdd = GpuAdd(a, b, false)()
+      val fullAdd = GpuAlias(GpuAdd(simpleAdd, simpleAdd, false)(), "ret")()
       val tp = GpuBindReferences.bindGpuReferencesTiered(Seq(fullAdd), Seq(a, b), new SQLConf(),
         Map.empty)
       val sb = buildProjectBatch()
@@ -134,46 +148,103 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
   test("AST retry with split") {
     RmmSpark.currentThreadIsDedicatedToTask(0)
     try {
-      val a = AttributeReference("a", LongType)()
-      val b = AttributeReference("b", LongType)()
       val sb = buildProjectBatch()
-      val expr = GpuAlias(GpuAdd(
+      val astExpression = GpuProjectAstExpression(GpuAdd(
         GpuBoundReference(0, LongType, true)(NamedExpression.newExprId, "a"),
-        GpuBoundReference(1, LongType, true)(NamedExpression.newExprId, "b"), false),
-        "ret")()
-      val mockPlan = mock(classOf[SparkPlan])
-      when(mockPlan.output).thenReturn(Seq(a, b))
-      val ast = GpuProjectAstExec(List(expr.asInstanceOf[Expression]), mockPlan)
-      RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
-        RmmSpark.OomInjectionType.GPU.ordinal, 0)
-      withResource(sb) { sb =>
-        withResource(ast.buildRetryableAstIterator(Seq(sb.getColumnarBatch).iterator)) { result =>
-          withResource(result.next()) { cb =>
-            assertResult(2)(cb.numRows)
-            assertResult(1)(cb.numCols)
-            val gcv = cb.column(0).asInstanceOf[GpuColumnVector]
-            withResource(gcv.getBase.copyToHost()) { hcv =>
-              assert(!hcv.isNull(0))
-              assertResult(11L)(hcv.getLong(0))
-              assert(hcv.isNull(1))
-            }
-          }
-
-          withResource(result.next()) { cb =>
-            assertResult(2)(cb.numRows)
-            assertResult(1)(cb.numCols)
-            val gcv = cb.column(0).asInstanceOf[GpuColumnVector]
-            withResource(gcv.getBase.copyToHost()) { hcv =>
-              assert(!hcv.isNull(0))
-              assertResult(11L)(hcv.getLong(0))
-              assert(!hcv.isNull(1))
-              assertResult(10L)(hcv.getLong(1))
-            }
+        GpuBoundReference(1, LongType, true)(NamedExpression.newExprId, "b"), false)())
+      val expr = GpuAlias(astExpression, "ret")()
+      val tieredProject = GpuTieredProject(Seq(Seq(expr)))
+      withResource(astExpression) { _ =>
+        RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
+          RmmSpark.OomInjectionType.GPU.ordinal, 0)
+        val result = tieredProject.projectAndCloseStreamingWithSplitRetry(sb)
+        withResource(result.next()) { cb =>
+          assertResult(2)(cb.numRows)
+          assertResult(1)(cb.numCols)
+          val gcv = cb.column(0).asInstanceOf[GpuColumnVector]
+          withResource(gcv.getBase.copyToHost()) { hcv =>
+            assert(!hcv.isNull(0))
+            assertResult(11L)(hcv.getLong(0))
+            assert(hcv.isNull(1))
           }
         }
+
+        withResource(result.next()) { cb =>
+          assertResult(2)(cb.numRows)
+          assertResult(1)(cb.numCols)
+          val gcv = cb.column(0).asInstanceOf[GpuColumnVector]
+          withResource(gcv.getBase.copyToHost()) { hcv =>
+            assert(!hcv.isNull(0))
+            assertResult(11L)(hcv.getLong(0))
+            assert(!hcv.isNull(1))
+            assertResult(10L)(hcv.getLong(1))
+          }
+        }
+        assert(!result.hasNext)
       }
     } finally {
       RmmSpark.removeCurrentDedicatedThreadAssociation(0)
+    }
+  }
+
+  test("tiered project preserves AST across multi-level shared expressions") {
+    val a = AttributeReference("a", LongType)()
+    val b = AttributeReference("b", LongType)()
+    val c = AttributeReference("c", LongType)()
+    val d = AttributeReference("d", LongType)()
+    val e = AttributeReference("e", LongType)()
+    val f = AttributeReference("f", LongType)()
+    def shared: GpuAdd = GpuAdd(a, b, failOnError = false)()
+    def intermediate: GpuMultiply = GpuMultiply(shared, c)()
+    def ast(expression: GpuExpression, name: String): GpuAlias =
+      GpuAlias(GpuProjectAstExpression(expression), name)()
+    // [AST((a+b)*c+d) AS first, AST((a+b)*c+e) AS second,
+    //  AST(a+b) AS shared_first, AST(a+b) AS shared_second, greatest(a+b, f) AS regular]
+    val expressions = Seq(
+      ast(GpuAdd(intermediate, d, failOnError = false)(), "first"),
+      ast(GpuAdd(intermediate, e, failOnError = false)(), "second"),
+      ast(shared, "shared_first"),
+      ast(shared, "shared_second"),
+      GpuAlias(GpuGreatest(Seq(shared, f)), "regular")())
+
+    val tiered = GpuBindReferences.bindGpuReferencesTieredNoMetrics(
+      expressions, Seq(a, b, c, d, e, f), new SQLConf())
+
+    // After CSE:
+    // tier 0: [AST(a+b) AS t1]
+    // tier 1: [AST(t1*c) AS t2]
+    // tier 2: [AST(t2+d) AS first, AST(t2+e) AS second,
+    //          t1 AS shared_first, t1 AS shared_second, greatest(t1, f) AS regular]
+    assertResult(Seq(1, 1, 2))(tiered.exprTiers.map(astExpressions(_).size))
+    assert(astExpressions(tiered.exprTiers.head).head.child.isInstanceOf[GpuAdd])
+    assert(astExpressions(tiered.exprTiers(1)).head.child.isInstanceOf[GpuMultiply])
+    assertResult(1)(tierReferences(astExpressions(tiered.exprTiers(1)).head).size)
+    // Final references: [t2, t2, t1, t1, t1] (distinct: {t2, t1}).
+    val finalReferences = tiered.exprTiers.last.flatMap(tierReferences)
+    assertResult(5)(finalReferences.size)
+    assertResult(2)(finalReferences.map(_.exprId).distinct.size)
+  }
+
+  test("AST compiled expression closes at task completion") {
+    val context = new MockTaskContext(taskAttemptId = 1, partitionId = 0)
+    val astExpression = spy(GpuProjectAstExpression(GpuAdd(
+      GpuBoundReference(0, LongType, true)(NamedExpression.newExprId, "a"),
+      GpuBoundReference(1, LongType, true)(NamedExpression.newExprId, "b"), false)()))
+    TrampolineUtil.setTaskContext(context)
+    try {
+      withResource(buildProjectBatch()) { spillableBatch =>
+        withResource(spillableBatch.getColumnarBatch()) { inputBatch =>
+          withResource(GpuProjectExec.project(
+            inputBatch, Seq(GpuAlias(astExpression, "sum")()))) { _ => }
+        }
+      }
+      verify(astExpression, never()).close()
+      context.markTaskComplete()
+      verify(astExpression).close()
+    } finally {
+      TrampolineUtil.unsetTaskContext()
+      ScalableTaskCompletion.reset()
+      astExpression.close()
     }
   }
 

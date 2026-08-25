@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,12 +18,12 @@ package com.nvidia.spark.rapids
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.Row
+import org.apache.spark.sql.execution.CollectLimitExec
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims._
 import org.apache.spark.sql.types.DataTypes
 
 class LimitExecSuite extends SparkQueryCompareTestSuite {
 
- /** CollectLimitExec is off by default, turn it on for tests */
   def enableCollectLimitExec(conf: SparkConf = new SparkConf()): SparkConf = {
     enableCsvConf(conf).set("spark.rapids.sql.exec.CollectLimitExec", "true")
   }
@@ -58,8 +58,11 @@ class LimitExecSuite extends SparkQueryCompareTestSuite {
     }
   }
 
+  // The unordered limit result is materialized into a LocalTableScan whose canonicalized plan
+  // includes row data. RAPIDS shuffle can return rows in a different order across runs, so the
+  // canonicalization comparison is not meaningful here; CPU/GPU result comparison still runs.
   IGNORE_ORDER_testSparkResultsAreEqual("collect with limit, repart=4", intCsvDf,
-    conf = enableCollectLimitExec(), repart = 4) {
+    conf = enableCollectLimitExec(), repart = 4, skipCanonicalizationCheck = true) {
     frame => {
       import frame.sparkSession.implicits._
       val results: Array[Row] = frame.limit(16).collect()
@@ -87,5 +90,36 @@ class LimitExecSuite extends SparkQueryCompareTestSuite {
       (7, ("8", Seq(("8", "8")).toMap, Array(7L, 8L)), Array(7)),
       (9, ("10", Seq(("10", "10")).toMap, Array(9L, 10L)), Array(9)))
         .toDF("a", "b", "c")
+  }
+
+  test("collect limit uses GpuLocalLimitExec for columnar child") {
+    val conf = enableCollectLimitExec()
+    withGpuSparkSession(spark => {
+      val df = spark.range(100).limit(5)
+      val plan = df.queryExecution.executedPlan
+      assert(
+        plan.find(_.isInstanceOf[GpuLocalLimitExec]).isDefined,
+        "Expected GpuLocalLimitExec for columnar child" +
+          s"\n${plan.treeString}")
+    }, conf)
+  }
+
+  test("collect limit falls back to CPU for row-based child") {
+    val conf = enableCollectLimitExec()
+      .set("spark.rapids.sql.exec.RangeExec", "false")
+      .set(RapidsConf.TEST_ALLOWED_NONGPU.key,
+        "CollectLimitExec,RangeExec")
+    withGpuSparkSession(spark => {
+      val df = spark.range(100).limit(5)
+      val plan = df.queryExecution.executedPlan
+      assert(
+        plan.find(_.isInstanceOf[CollectLimitExec]).isDefined,
+        "Expected CPU CollectLimitExec when child is row-based" +
+          s"\n${plan.treeString}")
+      assert(
+        plan.find(_.isInstanceOf[GpuLocalLimitExec]).isEmpty,
+        "GpuLocalLimitExec should not appear when " +
+          s"CollectLimitExec falls back to CPU\n${plan.treeString}")
+    }, conf)
   }
 }

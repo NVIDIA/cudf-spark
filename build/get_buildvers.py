@@ -1,4 +1,4 @@
-# Copyright (c) 2024-2025, NVIDIA CORPORATION.
+# Copyright (c) 2024-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -46,12 +46,22 @@ def _get_buildvers(buildvers, pom_file, logger=None, ignore_excluded_shims=False
             no_snapshots.append(release)
     if (not ignore_excluded_shims):
         excluded_shims = pom.find(".//pom:dyn.shim.excluded.releases", ns)
-        if excluded_shims is not None and excluded_shims.text:
+        if excluded_shims is not None and excluded_shims.text and not excluded_shims.text.isspace():
             for removed_shim in [x.strip() for x in excluded_shims.text.split(",")]:
                 if removed_shim in snapshots:
                     snapshots.remove(removed_shim)
                 elif removed_shim in no_snapshots:
                     no_snapshots.remove(removed_shim)
+                elif pom.find(".//pom:spark{}.version".format(removed_shim), ns) is not None:
+                    # Shim profile not found in this POM but the version property
+                    # exists. This is expected when pom.xml and scala2.13/pom.xml
+                    # share the same exclusion list but have different profiles due
+                    # to #if scala-2.12/#if scala-2.13 conditional comments
+                    # (e.g. profile split between pom.xml and scala2.13/pom.xml via #if scala comments).
+                    if logger:
+                        logger.debug(
+                            "Shim %s listed in dyn.shim.excluded.releases not found in "
+                            "releases for %s, skipping", removed_shim, pom_file)
                 else:
                     raise Exception(
                         "Shim {} listed in dyn.shim.excluded.releases in pom.xml not present in releases".format(

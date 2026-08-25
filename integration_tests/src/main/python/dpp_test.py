@@ -1,4 +1,4 @@
-# Copyright (c) 2021-2025, NVIDIA CORPORATION.
+# Copyright (c) 2021-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -288,7 +288,7 @@ def test_dpp_skip(spark_tmp_table_factory, store_format, s_index, aqe_enabled):
         non_exist_classes='DynamicPruningExpression',
         conf=dict(_dpp_fallback_conf + [('spark.sql.adaptive.enabled', aqe_enabled)]))
 
-dpp_like_any_fallback_execs=['FilterExec', 'CollectLimitExec'] if is_databricks_version_or_later(14,3) else ['FilterExec']
+dpp_like_any_fallback_execs=['FilterExec', 'CollectLimitExec', 'LikeAny'] if is_databricks_version_or_later(14,3) else ['FilterExec', 'LikeAny']
 
 # GPU verification on https://issues.apache.org/jira/browse/SPARK-34436
 @ignore_order

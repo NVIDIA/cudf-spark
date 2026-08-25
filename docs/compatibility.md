@@ -4,7 +4,7 @@ title: Compatibility
 nav_order: 5
 ---
 
-# RAPIDS Accelerator for Apache Spark Compatibility with Apache Spark
+# NVIDIA cuDF plugin for Apache Spark Compatibility with Apache Spark
 
 The SQL plugin tries to produce results that are bit for bit identical with Apache Spark.  There are
 a number of cases where there are some differences. In most cases operators that produce different
@@ -12,7 +12,7 @@ results are off by default, and you can look at the [configs](configs.md) for mo
 how to enable them.  In some cases we felt that enabling the incompatibility by default was worth
 the performance gain. All of those operators can be disabled through configs if it becomes a
 problem. Please also look at the current list of
-[bugs](https://github.com/NVIDIA/spark-rapids/issues?q=is%3Aopen+is%3Aissue+label%3Abug) which are
+[bugs](https://github.com/NVIDIA/cudf-spark/issues?q=is%3Aopen+is%3Aissue+label%3Abug) which are
 typically incompatibilities that we have not yet addressed.
 
 ## Ordering of Output
@@ -31,13 +31,13 @@ Spark's sorting is typically a [stable](https://en.wikipedia.org/wiki/Sorting_al
 sort. Sort stability cannot be guaranteed in distributed work loads because the order in which
 upstream data arrives to a task is not guaranteed. Sort stability is only
 guaranteed in one situation which is reading and sorting data from a file using a single
-task/partition. The RAPIDS Accelerator does an unstable
+task/partition. The cuDF plugin does an unstable
 [out of core](https://en.wikipedia.org/wiki/External_memory_algorithm) sort by default. This
 simply means that the sort algorithm allows for spilling parts of the data if it is larger than
 can fit in the GPU's memory, but it does not guarantee ordering of rows when the ordering of the
 keys is ambiguous. If you do rely on a stable sort in your processing you can request this by
 setting [spark.rapids.sql.stableSort.enabled](additional-functionality/advanced_configs.md#sql.stableSort.enabled) to `true` and
-RAPIDS will try to sort all the data for a given task/partition at once on the GPU. This may change
+cuDF will try to sort all the data for a given task/partition at once on the GPU. This may change
 in the future to allow for a spillable stable sort.
 
 ## Floating Point
@@ -54,11 +54,13 @@ difference. This happens in cases where a binary floating-point representation c
 capture a decimal value. For example `1.025` cannot exactly be represented and ends up being closer
 to `1.02499`. The Spark implementation of `round` converts it first to a decimal value with complex
 logic to make it `1.025` and then does the rounding.  This results in `round(1.025, 2)` under pure
-Spark getting a value of `1.03` but under the RAPIDS accelerator it produces `1.02`. As a side note
+Spark getting a value of `1.03` but under the cuDF plugin it produces `1.02`. As a side note
 Python will produce `1.02`, Java does not have the ability to do a round like this built in, but if
 you do the simple operation of `Math.round(1.025 * 100.0)/100.0` you also get `1.02`.
 
-For the `degrees` functions, Spark's implementation relies on Java JDK's built-in functions `Math.toDegrees`. It is `angrad * 180.0 / PI` in Java 8 while `angrad * (180d / PI)` in Java 9+. So their results will differ depending on the JDK runtime versions when considering overflow. The RAPIDS Accelerator follows the behavior of Java 9+. Therefore, with JDK 8 or below, the `degrees` on GPU will not overflow on some very large numbers while the CPU version does.
+For the `degrees` functions, Spark's implementation relies on Java JDK's built-in functions
+`Math.toDegrees`. It is `angrad * 180.0 / PI` in Java 8 while `angrad * (180d / PI)` in Java 9+. So
+their results will differ depending on the JDK runtime versions when considering overflow. The cuDF plugin follows the behavior of Java 9+. Therefore, with JDK 8 or below, the `degrees` on GPU will not overflow on some very large numbers while the CPU version does.
 
 For aggregations the underlying implementation is doing the aggregations in parallel and due to race
 conditions within the computation itself the result may not be the same each time the query is
@@ -67,6 +69,18 @@ joins on a floating point value, which is not wise to do anyways, and the value 
 floating point aggregation then the join may fail to work properly with the plugin but would have
 worked with plain Spark. This is behavior is enabled by default but can be disabled with the config
 [`spark.rapids.sql.variableFloatAgg.enabled`](additional-functionality/advanced_configs.md#sql.variableFloatAgg.enabled).
+This applies to scalar aggregations (`sum`, `avg`, etc.) and to array-level aggregations
+(the `aggregate` / `reduce` higher-order function with SUM or PRODUCT) — both delegate to cuDF
+parallel reductions and are governed by the same config.
+
+For standard deviation and variance aggregations (`stddev`, `stddev_pop`, `stddev_samp`,
+`variance`, `var_pop`, and `var_samp`) on very large finite floating-point values, the exact
+mathematical result can exceed the range of a double. In these overflow cases Spark CPU and the cuDF plugin
+may report different IEEE floating-point sentinels, such as `NaN` versus
+`+Infinity`, because partial aggregate state can be merged in a different order. `-Infinity` is
+not an expected outcome for stddev/variance over finite inputs and is not treated as an accepted
+overflow sentinel. This is limited to overflow behavior for extreme inputs; ordinary finite
+inputs should still match within normal floating-point tolerance.
 
 ### `0.0` vs `-0.0`
 
@@ -76,7 +90,7 @@ does this in some cases but not all as is documented
 [here](https://issues.apache.org/jira/browse/SPARK-32110). The underlying implementation of this
 plugin treats them as the same for essentially all processing. This can result in some differences
 with Spark for operations, prior to Spark 3.1.0, like sorting, and distinct count.  There are still
-differences with [joins, and comparisons](https://github.com/NVIDIA/spark-rapids/issues/294) even
+differences with [joins, and comparisons](https://github.com/NVIDIA/cudf-spark/issues/294) even
 after Spark 3.1.0.
 
 We do not disable operations that produce different results due to `-0.0` in the data because it is
@@ -87,10 +101,10 @@ considered to be a rare occurrence.
 Apache Spark does not have a consistent way to handle `NaN` comparison. Sometimes, all `NaN` are
 considered as one unique value while other times they can be treated as different. The outcome of
 `NaN` comparison can differ in various operations and also changed between Spark versions.
-The RAPIDS Accelerator tries to match its output with Apache Spark except for a few operation(s) listed below:
+The cuDF plugin tries to match its output with Apache Spark except for a few operation(s) listed below:
  - `IN` SQL expression: `NaN` can be treated as different values in Spark 3.1.2 and
  prior versions, see [SPARK-36792](https://issues.apache.org/jira/browse/SPARK-36792) for more details.
-The RAPIDS Accelerator compares `NaN` values as equal for this operation which matches
+The cuDF plugin compares `NaN` values as equal for this operation which matches
 the behavior of Apache Spark 3.1.3 and later versions.
 
 
@@ -101,7 +115,7 @@ When processing the data, in most cases, it is temporarily converted to Java's `
 which allows for effectively unlimited precision. Overflows will be detected whenever the
 `BigDecimal` value is converted back into the Spark decimal type.
 
-The RAPIDS Accelerator does not implement a GPU equivalent of `BigDecimal`, but it does implement
+The cuDF plugin does not implement a GPU equivalent of `BigDecimal`, but it does implement
 computation on 256-bit values to allow the detection of overflows. The points at which overflows
 are detected may differ between the CPU and GPU. Spark gives no guarantees that overflows are
 detected if an intermediate value could overflow the original decimal type during computation
@@ -130,11 +144,11 @@ line deliminators similar to `multiLine` mode.  But there are still a number of 
 it and they should be avoided.
 
 Escaped quote characters `'\"'` are not supported well as described by this
-[issue](https://github.com/NVIDIA/spark-rapids/issues/129).
+[issue](https://github.com/NVIDIA/cudf-spark/issues/129).
 
 The GPU accelerated CSV parser does not replace invalid UTF-8 characters with the Unicode
 replacement character �.  Instead it just passes them through as described in this
-[issue](https://github.com/NVIDIA/spark-rapids/issues/9560).
+[issue](https://github.com/NVIDIA/cudf-spark/issues/9560).
 
 ### CSV Dates
 
@@ -175,7 +189,7 @@ disable itself if it sees a format it cannot support.
 
 Invalid timestamps in Spark, ones that have the correct format, but the numbers produce invalid
 dates or times, can result in an exception by default and how they are parsed can be controlled
-through a config. The RAPIDS Accelerator does not support any of this and will produce an incorrect
+through a config. The cuDF plugin does not support any of this and will produce an incorrect
 date. Typically, one that overflowed.
 
 ### CSV Floating Point
@@ -189,9 +203,9 @@ then results in a number being returned when the CPU would have returned null.
 ### CSV ANSI day time interval
 This type was added in as a part of Spark 3.3.0, and it's not supported on Spark versions before 3.3.0.
 Apache Spark can [overflow](https://issues.apache.org/jira/browse/SPARK-38520) when reading ANSI day time interval values.
-The RAPIDS Accelerator does not overflow and as such is not bug for bug compatible with Spark in this case.
+The cuDF plugin does not overflow and as such is not bug for bug compatible with Spark in this case.
 
-Interval string in csv|Spark reads to|The RAPIDS Accelerator reads to|Comments|
+Interval string in csv|Spark reads to|cuDF plugin reads to|Comments|
 -----|-------------------------|-----------------|-----------|
 interval '106751992' day| INTERVAL '-106751990' DAY | NULL| Spark issue|
 interval '2562047789' hour| INTERVAL '-2562047787' HOUR | NULL| Spark issue|
@@ -211,7 +225,7 @@ INTERVAL MINUTE | INTERVAL '30' MINUTE                      | 30|
 INTERVAL MINUTE TO SECOND | INTERVAL '30:40.999999' MINUTE TO SECOND  | 30:40.999999|
 INTERVAL SECOND | INTERVAL '40.999999' SECOND               | 40.999999|
 
-Currently, the RAPIDS Accelerator only supports the ANSI style.
+Currently, the cuDF plugin only supports ANSI style.
 
 ## Hive Text File
 
@@ -232,17 +246,17 @@ to parse decimal values do not have the same limitations. This means that there 
 when the CPU version would return a null for an input value, but the GPU version will
 return a value. This typically happens for numbers with large negative exponents where
 the GPU will return `0` and Hive will return `null`.
-See https://github.com/NVIDIA/spark-rapids/issues/7246
+See https://github.com/NVIDIA/cudf-spark/issues/7246
 
 ## ORC
 
 The ORC format has fairly complete support for both reads and writes. There are only a few known
 issues. The first is for reading timestamps and dates around the transition between Julian and
-Gregorian calendars as described [here](https://github.com/NVIDIA/spark-rapids/issues/131). A
+Gregorian calendars as described [here](https://github.com/NVIDIA/cudf-spark/issues/131). A
 similar issue exists for writing dates as described
-[here](https://github.com/NVIDIA/spark-rapids/issues/139). Writing timestamps, however only appears
+[here](https://github.com/NVIDIA/cudf-spark/issues/139). Writing timestamps, however only appears
 to work for dates after the epoch as described
-[here](https://github.com/NVIDIA/spark-rapids/issues/140).
+[here](https://github.com/NVIDIA/cudf-spark/issues/140).
 
 The plugin supports reading `uncompressed`, `snappy`, `zlib` and `zstd` ORC files and writing
  `uncompressed`, `snappy` and `zstd` ORC files.  At this point, the plugin does not have the 
@@ -300,13 +314,13 @@ satisfy the query, the ORC read falls back to the CPU as it is a metadata-only q
 The Parquet format has more configs because there are multiple versions with some compatibility
 issues between them. Dates and timestamps are where the known issues exist.  For reads when
 `spark.sql.legacy.parquet.datetimeRebaseModeInWrite` is set to `CORRECTED`
-[timestamps](https://github.com/NVIDIA/spark-rapids/issues/132) before the transition between the
+[timestamps](https://github.com/NVIDIA/cudf-spark/issues/132) before the transition between the
 Julian and Gregorian calendars are wrong, but dates are fine. When
 `spark.sql.legacy.parquet.datetimeRebaseModeInWrite` is set to `LEGACY`, the read may fail for
 values occurring before the transition between the Julian and Gregorian calendars, i.e.: date <= 1582-10-04.
 
 When writing `spark.sql.legacy.parquet.datetimeRebaseModeInWrite` is currently ignored as described
-[here](https://github.com/NVIDIA/spark-rapids/issues/144).
+[here](https://github.com/NVIDIA/cudf-spark/issues/144).
 
 The plugin supports reading `uncompressed`, `snappy`, `gzip` and `zstd` Parquet files and writing
 `uncompressed`, `snappy` and `zstd` Parquet files.  At this point, the plugin does not have the 
@@ -362,7 +376,7 @@ in a quoted string. If it is in a quoted string the local of the JVM is used to 
 If the local is not for the `US`, which is the default we will fall back to the CPU because we do not currently
 parse those numbers correctly. The `US` format removes all commas ',' from the quoted string.
 As a part of this, though, non-arabic numbers are also supported. We do not support parsing these numbers
-see (issue 10532)[https://github.com/NVIDIA/spark-rapids/issues/10532].
+see [issue 10532](https://github.com/NVIDIA/cudf-spark/issues/10532).
 
 ### JSON Date/Timestamp Types 
 
@@ -374,7 +388,7 @@ not support the `TimestampNTZ` type and will fall back to CPU if `spark.sql.time
 to `TIMESTAMP_NTZ` or if an explicit schema is provided that contains the `TimestampNTZ` type.
 
 There is currently no support for reading numeric values as timestamps and null values are returned instead
-([#4940](https://github.com/NVIDIA/spark-rapids/issues/4940)). A workaround would be to read as longs and then cast to timestamp.
+([#4940](https://github.com/NVIDIA/cudf-spark/issues/4940)). A workaround would be to read as longs and then cast to timestamp.
 
 ### JSON Arrays and Structs with Overflowing Numbers
 
@@ -409,7 +423,25 @@ a few differences with it.
 
 The main difference is that `from_json` supports parsing Maps and Arrays directly from a JSON column, whereas
 JSON Scan only supports parsing top level structs. The GPU implementation of `from_json` has support for parsing
-a `MAP<STRING,STRING>` as a top level schema, but does not currently support arrays at the top level.
+a `MAP<STRING,STRING>` or `MAP<STRING,ARRAY<STRING>>` as a top level schema, but does not currently support
+arrays at the top level.
+
+For map schemas the values (and, for `MAP<STRING,ARRAY<STRING>>`, the array elements) are extracted as raw JSON
+text. Three cases can therefore differ from Spark: (1) escape sequences are not normalized or unescaped (see the
+JSON Normalization section above); (2) array elements that are JSON objects or nested arrays are returned as their
+raw JSON substring rather than Spark's re-serialized form; and (3) numeric elements keep their raw JSON token,
+whereas Spark re-renders numbers, so non-canonical spellings differ (`007` -> `"7"` with `allowNumericLeadingZeros`,
+`1.00000` -> `"1.0"`, `1e2` -> `"100.0"`) and non-numeric numbers stay bare while Spark quotes them (`NaN` ->
+`"NaN"`, `Infinity` -> `"Infinity"` with `allowNonNumericNumbers`); tokens already matching Spark's rendering
+(`1`, `1.5`, `true`) are unaffected. All three cases differ from Spark on ALL versions, including 4.0.0+, because
+`from_json` on a string column parses via a Reader (Spark's `CreateJacksonParser.utf8String`): Spark 4.0.0's
+`spark.sql.json.enableExactStringParsing` (default `true`) preserves raw source text only for `Array[Byte]` / file
+sources (e.g. `spark.read.json`), never a Reader, so its raw path is unreachable here and the CPU always
+re-serializes non-string tokens (cases 2 and 3). Case (1) likewise differs on all versions because JSON string
+tokens are always unescaped by Spark. For `MAP<STRING,ARRAY<STRING>>` a map value that is
+neither a JSON array nor the JSON `null` literal (i.e. a scalar or object) makes the entire row null, matching
+Spark's PERMISSIVE bad-record handling. Duplicate keys are kept in document order, which matches Spark 3.5.x
+`from_json`; later Spark versions may de-duplicate per `spark.sql.mapKeyDedupPolicy`.
 
 ### `to_json` Function
 
@@ -422,7 +454,7 @@ Known issues are:
 ### `get_json_object` Function
 
 Known issue:
-- [Floating-point number normalization error](https://github.com/NVIDIA/spark-rapids-jni/issues/1922). `get_json_object` floating-point number normalization on the GPU could sometimes return incorrect results if the string contains high-precision values, see the String to Float and Float to String section for more details.
+- [Floating-point number normalization error](https://github.com/NVIDIA/cudf-spark-jni/issues/1922). `get_json_object` floating-point number normalization on the GPU could sometimes return incorrect results if the string contains high-precision values, see the String to Float and Float to String section for more details.
 
 ## Avro
 
@@ -459,7 +491,7 @@ These are the known edge cases where running on the GPU will produce different r
 
 - Regular expressions that contain an end of line anchor '$' or end of string anchor '\Z' immediately
  next to a newline or a repetition that produces zero or more results
- ([#5610](https://github.com/NVIDIA/spark-rapids/pull/5610))`
+ ([#5610](https://github.com/NVIDIA/cudf-spark/pull/5610))`
 - Word and non-word boundaries, `\b` and `\B`
 
 The following regular expression patterns are not yet supported on the GPU and will fall back to the CPU.
@@ -477,10 +509,90 @@ The following regular expression patterns are not yet supported on the GPU and w
 - Possessive quantifiers, such as `a*+`
 - Character classes that use union, intersection, or subtraction semantics, such as `[a-d[m-p]]`, `[a-z&&[def]]`,
   or `[a-z&&[^bc]]`
+- Lookahead/lookbehind groups: `(?=a)`, `(?!a)`, `(?<=a)`, `(?<!a)`
+- Independent groups: `(?>a)`
+- Named capture groups: `(?<n>a)`
 - Empty groups: `()`
+- Inline flags other than case-insensitive matching, such as `(?m)`, `(?s)`, or `(?x)`
+- Case-insensitive matching (`(?i)`) whose scope would extend across a choice, such as `(?i)a|b`
+  or `a(?i)b|c` (in Java the flag applies to the end of the enclosing group, crossing `|`), or that
+  applies to a letter-valued escape, such as `(?i)\x61`
 - Empty pattern: `""`
 
 Work is ongoing to increase the range of regular expressions that can run on the GPU.
+
+## Array Higher-Order Function `aggregate`
+
+Spark's `aggregate` (also exposed as `reduce`) higher-order function takes any user lambda as
+the merge function:
+
+```sql
+aggregate(arr, zero, (acc, x) -> merge_expr, acc -> finish_expr)
+```
+
+The GPU implementation does not run an arbitrary lambda. Instead, it pattern-matches the merge
+lambda against a fixed set of shapes that map to cuDF segmented reductions, and falls back to
+CPU when the lambda doesn't match. The finish lambda must be the identity (`acc -> acc` or
+omitted).
+
+The merge lambda must reduce to the form `(acc, x) -> op(acc, g(x))` where `op` is associative
+and `g(x)` does not reference `acc`. Supported `op`s and the Catalyst expressions that map to
+each:
+
+| Op       | Catalyst shape         | Element types                     |
+| -------- | ---------------------- | --------------------------------- |
+| SUM      | `Add(acc, g)`          | byte / short / int / long; float / double gated by `spark.rapids.sql.variableFloatAgg.enabled` |
+| PRODUCT  | `Multiply(acc, g)`     | byte / short / int / long; float / double gated by `spark.rapids.sql.variableFloatAgg.enabled` |
+| MAX      | `Greatest(acc, g)` (2 children only) | byte / short / int / long  |
+| MIN      | `Least(acc, g)` (2 children only)    | byte / short / int / long  |
+| ALL      | `And(acc, g)`          | boolean                           |
+| ANY      | `Or(acc, g)`           | boolean                           |
+
+The decomposer also accepts these structural variations:
+
+- **Commuted operands**: `op(g, acc)` is treated the same as `op(acc, g)`.
+- **`Cast` around the acc side**: `Add(Cast(acc, t), g)` and chained casts on the acc side are
+  unwrapped (g must still not reference acc).
+- **`If` branches**: `If(cond, op(acc, t_g), op(acc, f_g))` is lifted to
+  `op(acc, If(cond, t_g, f_g))`. A bare-acc branch (e.g. `If(cond, acc + 1, acc)`) is treated as
+  `op(acc, identity)` and lifted to `op(acc, If(cond, t_g, identity))`. `cond` must not
+  reference acc. For `MAX` / `MIN`, this structural rewrite falls back when the initial zero can
+  be null because a bare-acc branch must preserve the no-contribution null accumulator state.
+- **`CaseWhen` branches**: same handling as `If`, generalized to N branches with a required
+  `else` branch.
+- **Nested `If` / `CaseWhen`**: handled recursively as long as every branch eventually reduces
+  to op-of-acc with `op` consistent across all branches.
+
+The following shapes fall back to CPU:
+
+- Lambdas whose body uses an op that isn't one of the six above (e.g. `Subtract`, `Divide`),
+  or `Greatest`/`Least` with three or more children.
+- Lambdas where `g(x)` references `acc`, or where different `If`/`CaseWhen` branches use
+  different ops.
+- A `CaseWhen` without an `else` branch (the implicit-null fall-through is not modelled).
+- A finish lambda that isn't the identity.
+- `g(x).dataType` that doesn't equal the accumulator/zero type (Spark's
+  `checkInputDataTypes` rule).
+- `MAX` / `MIN` on `float` / `double`: cuDF's `fmax(NaN, x) = x` absorbs NaN, while Spark's
+  `Greatest` / `Least` use `Double.compare` which propagates NaN.
+- `MAX` / `MIN` with a nullable initial zero and a bare-acc branch in `If` / `CaseWhen`: replacing
+  bare acc with an identity value would lose Spark's no-contribution null accumulator state.
+- `ALL` / `ANY` when the input array can contain null elements or the lifted `g(x)` expression
+  can produce nulls: cuDF's INCLUDE-null segmented all/any returns null whenever any element is
+  null, while Spark's 3VL short-circuits (`false AND null = false`,
+  `true OR null = true`).
+- `SUM` / `PRODUCT` on `float` / `double` when
+  `spark.rapids.sql.variableFloatAgg.enabled=false`: cuDF's parallel tree-reduction sums in a
+  different order than Spark's sequential left-fold.
+- `SUM` / `PRODUCT` on decimal types: Spark decimal arithmetic has overflow-specific behavior
+  (`SUM` returns null on overflow in non-ANSI mode and raises in ANSI mode), while cuDF segmented
+  reductions do not currently provide matching overflow handling.
+- `SUM` / `PRODUCT` on integer types under `spark.sql.ansi.enabled=true`: cuDF's segmented reduce
+  wraps on overflow rather than raising `ArithmeticException`. Full ANSI support is tracked as a
+  follow-up.
+
+Each fallback condition produces a self-contained reason in the query's GPU plan explain output,
+so users can see exactly which rule triggered the CPU fallback for their query.
 
 ## URL Parsing
 
@@ -657,6 +769,11 @@ LEGACY timeParserPolicy support has the following limitations when running on th
 When formatting dates and timestamps as strings using functions such as `from_unixtime`, only a
 subset of valid format strings are supported on the GPU.
 
+With timeParserPolicy set to `LEGACY`, `date_format` and `from_unixtime` additionally support
+`yyyy-MM-dd HH:mm:ss.SSS` when
+[`spark.rapids.sql.incompatibleDateFormats.enabled`](additional-functionality/advanced_configs.md#sql.incompatibleDateFormats.enabled)
+is set to `true`. Parsing strings with this format remains unsupported in `LEGACY` mode.
+
 Formats that contain any of the following characters are unsupported and will fall back to CPU:
 
 ```
@@ -707,7 +824,7 @@ to `false`.
 
 ### Float to String
 
-The Rapids Accelerator for Apache Spark uses uses a method based on [ryu](https://github.com/ulfjack/ryu) when converting floating point data type to string. As a result the computed string can differ from the output of Spark in some cases: sometimes the output is shorter (which is arguably more accurate) and sometimes the output may differ in the precise digits output.
+The cuDF plugin uses a method based on [ryu](https://github.com/ulfjack/ryu) when converting floating point data type to string. As a result the computed string can differ from the output of Spark in some cases: sometimes the output is shorter (which is arguably more accurate) and sometimes the output may differ in the precise digits output.
 
 This configuration is enabled by default. To disable this operation on the GPU set
 [`spark.rapids.sql.castFloatToString.enabled`](additional-functionality/advanced_configs.md#sql.castFloatToString.enabled) to `false`.
@@ -755,19 +872,19 @@ The following formats/patterns are supported on the GPU. Timezone of UTC is assu
 
 ### Constant Folding
 
-ConstantFolding is an operator optimization rule in Catalyst that replaces expressions that can
-be statically evaluated with their equivalent literal values. The RAPIDS Accelerator relies
-on constant folding and parts of the query will not be accelerated if
+ConstantFolding is an operator optimization rule in Catalyst that replaces expressions that can be
+statically evaluated with their equivalent literal values. The cuDF plugin relies on constant folding
+and parts of the query will not be accelerated if
 `org.apache.spark.sql.catalyst.optimizer.ConstantFolding` is excluded as a rule.
 
 ### long/double to Timestamp
 Spark 330+ has an issue when casting a big enough long/double as timestamp, refer to https://issues.apache.org/jira/browse/SPARK-39209.
-Spark 330+ throws errors while the RAPIDS Accelerator can handle correctly when casting a big enough long/double as timestamp.
+Spark 330+ throws errors while the cuDF plugin can handle correctly when casting a big enough long/double as timestamp.
 
 ## JSON string handling
 The 0.5 release introduces the `get_json_object` operation.  The JSON specification only allows
 double quotes around strings in JSON data, whereas Spark allows single quotes around strings in JSON
-data.  The RAPIDS Spark `get_json_object` operation on the GPU will return `None` in PySpark or
+data.  The cuDF plugin `get_json_object` operation on the GPU will return `None` in PySpark or
 `Null` in Scala when trying to match a string surrounded by single quotes.  This behavior will be
 updated in a future release to more closely match Spark.
 
@@ -793,9 +910,9 @@ throw exceptions, like for the `Add` expression if an overflow happens. This is 
 UDFs, because by their nature they are user defined and can have side effects like throwing
 exceptions.
 
-Currently, the RAPIDS Accelerator
-[assumes that there are no side effects](https://github.com/NVIDIA/spark-rapids/issues/3849).
-This can result it situations, specifically in ANSI mode, where the RAPIDS Accelerator will
+Currently, the cuDF plugin
+[assumes that there are no side effects](https://github.com/NVIDIA/cudf-spark/issues/3849).
+This can result it situations, specifically in ANSI mode, where the cuDF plugin will
 always throw an exception, but Spark on the CPU will not.  For example:
 
 ```scala
@@ -818,7 +935,7 @@ If the above example is run on the CPU you will get a result like.
 ```
 
 But if it is run on the GPU an overflow exception is thrown. As was explained before this
-is because the RAPIDS Accelerator will evaluate both `val + 1` and `null` regardless of
+is because the cuDF plugin will evaluate both `val + 1` and `null` regardless of
 the result of the condition. In some cases you can work around this. The above example
 could be re-written so the `if` happens before the `Add` operation.
 

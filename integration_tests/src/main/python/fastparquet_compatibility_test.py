@@ -1,4 +1,4 @@
-# Copyright (c) 2023-2025, NVIDIA CORPORATION.
+# Copyright (c) 2023-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,12 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Callable
+
+import numpy as np
+import pandas as pd
 import pytest
+from pyspark.sql import DataFrame, SparkSession
 
 from asserts import assert_gpu_and_cpu_are_equal_collect
 from data_gen import *
 from fastparquet_utils import get_fastparquet_result_canonicalizer
-from spark_session import is_databricks_runtime, is_databricks133_or_later, spark_version, with_cpu_session, with_gpu_session
+from parquet_test_utils import copy_from_local
+from spark_session import spark_version, with_cpu_session, with_gpu_session
 
 
 def fastparquet_unavailable():
@@ -30,6 +36,63 @@ def fastparquet_unavailable():
         return False
     except ImportError:
         return True
+
+
+def pandas_to_spark_preserving_nan(
+        spark: SparkSession, pandas_df: pd.DataFrame) -> DataFrame:
+    """Create a Spark DataFrame without treating non-nullable floating-point NaNs as nulls.
+
+    Databricks converts NaNs to nulls when it converts a pandas DataFrame directly.
+    Infer the same schema from pandas, but pass explicit rows through Spark's schema-aware
+    conversion instead of passing the pandas DataFrame directly. Top-level numpy scalars
+    are materialized as Python values; nested struct dictionaries can retain numpy scalars
+    because the row conversion path, unlike DBR's pandas conversion path, preserves NaN.
+
+    This conversion is only safe for non-nullable data because pandas represents both
+    floating-point NaNs and Parquet nulls as NaN.
+    """
+    schema = spark.createDataFrame(pandas_df).schema
+    rows = [
+        tuple(value.item() if isinstance(value, np.generic) else value for value in row)
+        for row in pandas_df.itertuples(index=False, name=None)
+    ]
+    return spark.createDataFrame(rows, schema=schema)
+
+
+def _is_fully_non_nullable(data_gen: DataGen) -> bool:
+    """Whether data_gen and every nested struct field are non-nullable."""
+    if isinstance(data_gen, StructGen):
+        return (not data_gen.nullable and
+                all(_is_fully_non_nullable(child) for _, child in data_gen.children))
+    return not data_gen.nullable
+
+
+def _contains_nan_capable_float(data_gen: DataGen) -> bool:
+    """Whether data_gen contains a FloatGen or DoubleGen through nested structs."""
+    return (isinstance(data_gen, (FloatGen, DoubleGen)) or
+            (isinstance(data_gen, StructGen) and
+             any(_contains_nan_capable_float(child) for _, child in data_gen.children)))
+
+
+def needs_nan_preserving_conversion(data_gen: DataGen) -> bool:
+    """Whether data_gen is fully non-nullable and contains a NaN-capable float."""
+    return _is_fully_non_nullable(data_gen) and _contains_nan_capable_float(data_gen)
+
+
+@pytest.mark.parametrize("data_gen", [
+    pytest.param(FloatGen(nullable=True), id="nullable-float"),
+    pytest.param(IntegerGen(nullable=False), id="non-float"),
+    pytest.param(
+        StructGen([
+            ("direct", FloatGen(nullable=False)),
+            ("nested", StructGen([
+                ("value", DoubleGen(nullable=True)),
+            ], nullable=False)),
+        ], nullable=False),
+        id="nullable-nested-float-with-direct-float"),
+])
+def test_needs_nan_preserving_conversion_rejects_unsafe_data_gen(data_gen):
+    assert not needs_nan_preserving_conversion(data_gen)
 
 
 rebase_write_corrected_conf = {
@@ -71,17 +134,22 @@ def delete_local_directory(local_path):
             print("Could not clean up local files in {}".format(local_path))
 
 
-def read_parquet(data_path, local_data_path):
+def read_parquet(
+        data_path: str,
+        local_data_path: str,
+        preserve_nans: bool = False) -> Callable[[SparkSession], DataFrame]:
     """
     (Fetches a function that) Reads Parquet from the specified `data_path`.
     If the plugin is enabled, the read is done via Spark APIs, through the plugin.
     If the plugin is disabled, the data is copied to local_data_path, and read via `fastparquet`.
     :param data_path: Location of the (single) Parquet input file.
     :param local_data_path: Location of the Parquet input, on the local filesystem.
+    :param preserve_nans: Use schema-backed row conversion for fully non-nullable,
+        NaN-capable data so the CPU/reference path preserves floating-point NaNs.
     :return: A function that reads Parquet, via the plugin or `fastparquet`.
     """
 
-    def read_with_fastparquet_or_plugin(spark):
+    def read_with_fastparquet_or_plugin(spark: SparkSession) -> DataFrame:
         import fastparquet
         plugin_enabled = spark.conf.get("spark.rapids.sql.enabled", "false") == "true"
         if plugin_enabled:
@@ -89,14 +157,13 @@ def read_parquet(data_path, local_data_path):
         else:
             copy_to_local(spark, data_path, local_data_path)
             df = fastparquet.ParquetFile(local_data_path).to_pandas()
+            if preserve_nans:
+                return pandas_to_spark_preserving_nan(spark, df)
             return spark.createDataFrame(df)
 
     return read_with_fastparquet_or_plugin
 
 
-@pytest.mark.skipif(condition=is_databricks_runtime() and not is_databricks133_or_later(),
-                    reason="Fastparquet is incompatible with Databricks versions < 13.3. "
-                           "(https://github.com/NVIDIA/spark-rapids/issues/13197)")
 @pytest.mark.skipif(condition=fastparquet_unavailable(),
                     reason="fastparquet is required for testing fastparquet compatibility")
 @pytest.mark.skipif(condition=spark_version() < "3.4.0",
@@ -110,12 +177,8 @@ def read_parquet(data_path, local_data_path):
     pytest.param(IntegerGen(nullable=True),
                  marks=pytest.mark.xfail(reason="Nullables cause merge errors, when converting to Spark dataframe")),
     LongGen(nullable=False),
-    pytest.param(FloatGen(nullable=False),
-                 marks=pytest.mark.xfail(is_databricks_runtime(),
-                                         reason="https://github.com/NVIDIA/spark-rapids/issues/9778")),
-    pytest.param(DoubleGen(nullable=False),
-                 marks=pytest.mark.xfail(is_databricks_runtime(),
-                                         reason="https://github.com/NVIDIA/spark-rapids/issues/9778")),
+    FloatGen(nullable=False),
+    DoubleGen(nullable=False),
     StringGen(nullable=False),
     pytest.param(DecimalGen(nullable=False),
                  marks=pytest.mark.xfail(reason="fastparquet reads Decimal columns as Float, as per "
@@ -141,11 +204,8 @@ def read_parquet(data_path, local_data_path):
         marks=pytest.mark.xfail(reason="Conversion from Pandas dataframe (read with fastparquet) to Spark dataframe "
                                        "fails: \"Unable to infer the type of the field a\".")),
 
-    pytest.param(
-        StructGen(children=[("first", IntegerGen(nullable=False)),
-                            ("second", FloatGen(nullable=False))], nullable=False),
-        marks=pytest.mark.xfail(is_databricks_runtime(),
-                                reason="https://github.com/NVIDIA/spark-rapids/issues/9778")),
+    StructGen(children=[("first", IntegerGen(nullable=False)),
+                        ("second", FloatGen(nullable=False))], nullable=False),
 ], ids=idfn)
 def test_reading_file_written_by_spark_cpu(data_gen, spark_tmp_path):
     """
@@ -167,16 +227,14 @@ def test_reading_file_written_by_spark_cpu(data_gen, spark_tmp_path):
 
     try:
         # Read Parquet with CPU (fastparquet) and GPU (plugin), and compare records.
-        assert_gpu_and_cpu_are_equal_collect(read_parquet(data_path, local_data_path),
+        assert_gpu_and_cpu_are_equal_collect(read_parquet(
+            data_path, local_data_path, needs_nan_preserving_conversion(data_gen)),
                                              result_canonicalize_func_before_compare=get_fastparquet_result_canonicalizer())
     finally:
         # Clean up local copy of data.
         delete_local_directory(local_base_path)
 
 
-@pytest.mark.skipif(condition=is_databricks_runtime() and not is_databricks133_or_later(),
-                    reason="Fastparquet is incompatible with Databricks versions < 13.3. "
-                           "(https://github.com/NVIDIA/spark-rapids/issues/13197)")
 @pytest.mark.skipif(condition=fastparquet_unavailable(),
                     reason="fastparquet is required for testing fastparquet compatibility")
 @pytest.mark.skipif(condition=spark_version() < "3.4.0",
@@ -192,12 +250,8 @@ def test_reading_file_written_by_spark_cpu(data_gen, spark_tmp_path):
     LongGen(nullable=False),
     pytest.param(LongGen(nullable=True),
                  marks=pytest.mark.xfail(reason="Nullables cause merge errors, when converting to Spark dataframe")),
-    pytest.param(FloatGen(nullable=False),
-                 marks=pytest.mark.xfail(is_databricks_runtime(),
-                                         reason="https://github.com/NVIDIA/spark-rapids/issues/9778")),
-    pytest.param(DoubleGen(nullable=False),
-                 marks=pytest.mark.xfail(is_databricks_runtime(),
-                                         reason="https://github.com/NVIDIA/spark-rapids/issues/9778")),
+    FloatGen(nullable=False),
+    DoubleGen(nullable=False),
     StringGen(nullable=False),
     pytest.param(DecimalGen(nullable=False),
                  marks=pytest.mark.xfail(reason="fastparquet reads Decimal columns as Float, as per "
@@ -232,35 +286,30 @@ def test_reading_file_written_with_gpu(spark_tmp_path, column_gen):
     gen = StructGen([('a', column_gen),
                      ('part', IntegerGen(nullable=False))
                      ], nullable=False)
+
+    # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
+    conf = copy_and_update(rebase_write_corrected_conf, {'spark.sql.adaptive.enabled': 'false'})
+
     # Write data out with Spark RAPIDS plugin.
     with_gpu_session(
         lambda spark: gen_df(spark, gen, 2048).repartition(1).write.mode('overwrite').parquet(data_path),
-        conf=rebase_write_corrected_conf
+        conf=conf
     )
 
     try:
         # For now, this compares the results of reading back the GPU-written data, via fastparquet and GPU.
-        assert_gpu_and_cpu_are_equal_collect(read_parquet(data_path=data_path, local_data_path=local_data_path),
-                                             conf=rebase_write_corrected_conf)
+        assert_gpu_and_cpu_are_equal_collect(read_parquet(
+            data_path=data_path,
+            local_data_path=local_data_path,
+            preserve_nans=needs_nan_preserving_conversion(column_gen)),
+                                             conf=conf,
+                                             result_canonicalize_func_before_compare=
+                                             get_fastparquet_result_canonicalizer())
     finally:
         # Clean up local copy of data.
         delete_local_directory(local_base_path)
 
 
-def copy_from_local(spark, local_source, hdfs_target):
-    """
-    Copies contents of local_source to hdfs_target.
-    """
-    sc = spark.sparkContext
-    Path = sc._jvm.org.apache.hadoop.fs.Path
-    config = sc._jsc.hadoopConfiguration()
-    fs = sc._jvm.org.apache.hadoop.fs.FileSystem.get(config)
-    fs.copyFromLocalFile(Path(local_source), Path(hdfs_target))
-
-
-@pytest.mark.skipif(condition=is_databricks_runtime() and not is_databricks133_or_later(),
-                    reason="Fastparquet is incompatible with Databricks versions < 13.3. "
-                           "(https://github.com/NVIDIA/spark-rapids/issues/13197)")
 @pytest.mark.skipif(condition=fastparquet_unavailable(),
                     reason="fastparquet is required for testing fastparquet compatibility")
 @pytest.mark.parametrize('column_gen', [
@@ -354,9 +403,6 @@ def test_reading_file_written_with_fastparquet(column_gen, spark_tmp_path):
         rebase_write_corrected_conf)
 
 
-@pytest.mark.skipif(condition=is_databricks_runtime() and not is_databricks133_or_later(),
-                    reason="Fastparquet is incompatible with Databricks versions < 13.3. "
-                           "(https://github.com/NVIDIA/spark-rapids/issues/13197)")
 @pytest.mark.skipif(condition=fastparquet_unavailable(),
                     reason="fastparquet is required for testing fastparquet compatibility")
 @pytest.mark.parametrize('column_gen, time_format', [

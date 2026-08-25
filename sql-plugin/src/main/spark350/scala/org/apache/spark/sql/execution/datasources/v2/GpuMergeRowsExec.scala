@@ -24,11 +24,20 @@
 {"spark": "355"}
 {"spark": "356"}
 {"spark": "357"}
+{"spark": "358"}
+{"spark": "359"}
 {"spark": "400"}
 {"spark": "401"}
 {"spark": "402"}
+{"spark": "403"}
+{"spark": "404"}
 {"spark": "411"}
+{"spark": "412"}
+{"spark": "413"}
+{"spark": "420"}
+{"spark": "500"}
 spark-rapids-shim-json-lines ***/
+
 package org.apache.spark.sql.execution.datasources.v2
 
 import scala.annotation.tailrec
@@ -39,7 +48,7 @@ import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm._
 import com.nvidia.spark.rapids.RapidsPluginImplicits.ReallyAGpuExpression
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
-import com.nvidia.spark.rapids.shims.{ShimExpression, ShimUnaryExecNode}
+import com.nvidia.spark.rapids.shims.{GpuMergeRowMetricsShims, ShimExpression, ShimUnaryExecNode}
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
@@ -79,6 +88,7 @@ case class GpuMergeRowsExec(
     child: SparkPlan) extends ShimUnaryExecNode with GpuExec {
 
   import GpuMetric._
+  import GpuMergeRowsExec._
 
   @transient override lazy val producedAttributes: AttributeSet = {
     AttributeSet(output.filterNot(attr => inputSet.contains(attr)))
@@ -96,11 +106,35 @@ case class GpuMergeRowsExec(
     AttributeSet.fromAttributeSets(usedExprs.map(_.references)) -- producedAttributes
   }
 
-  override lazy val additionalMetrics: Map[String, GpuMetric] = Map(
-    OP_TIME_LEGACY -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_OP_TIME_LEGACY),
-    NUM_OUTPUT_ROWS -> createMetric(ESSENTIAL_LEVEL, DESCRIPTION_NUM_OUTPUT_ROWS),
-    NUM_OUTPUT_BATCHES -> createMetric(MODERATE_LEVEL, DESCRIPTION_NUM_OUTPUT_BATCHES)
-  )
+  override lazy val additionalMetrics: Map[String, GpuMetric] = {
+    val common = Map(
+      OP_TIME_LEGACY -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_OP_TIME_LEGACY),
+      NUM_OUTPUT_ROWS -> createMetric(ESSENTIAL_LEVEL, DESCRIPTION_NUM_OUTPUT_ROWS),
+      NUM_OUTPUT_BATCHES -> createMetric(MODERATE_LEVEL, DESCRIPTION_NUM_OUTPUT_BATCHES))
+    // MergeSummary fields must stay ESSENTIAL: metrics.level must not change committed
+    // table metadata. Skip registration before Spark 4.1 where WriteSummary is unused.
+    if (GpuMergeRowMetricsShims.writeSummaryEnabled) {
+      common ++ Map(
+        NUM_TARGET_ROWS_COPIED -> createMetric(ESSENTIAL_LEVEL,
+          "number of target rows copied unmodified because they did not match any action"),
+        NUM_TARGET_ROWS_INSERTED -> createMetric(ESSENTIAL_LEVEL,
+          "number of target rows inserted"),
+        NUM_TARGET_ROWS_DELETED -> createMetric(ESSENTIAL_LEVEL,
+          "number of target rows deleted"),
+        NUM_TARGET_ROWS_UPDATED -> createMetric(ESSENTIAL_LEVEL,
+          "number of target rows updated"),
+        NUM_TARGET_ROWS_MATCHED_UPDATED -> createMetric(ESSENTIAL_LEVEL,
+          "number of target rows updated by a matched clause"),
+        NUM_TARGET_ROWS_MATCHED_DELETED -> createMetric(ESSENTIAL_LEVEL,
+          "number of target rows deleted by a matched clause"),
+        NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_UPDATED -> createMetric(ESSENTIAL_LEVEL,
+          "number of target rows updated by a not matched by source clause"),
+        NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_DELETED -> createMetric(ESSENTIAL_LEVEL,
+          "number of target rows deleted by a not matched by source clause"))
+    } else {
+      common
+    }
+  }
 
   override def supportsColumnar: Boolean = true
 
@@ -108,6 +142,19 @@ case class GpuMergeRowsExec(
     val numOutputRows = gpuLongMetric(NUM_OUTPUT_ROWS)
     val numOutputBatches = gpuLongMetric(NUM_OUTPUT_BATCHES)
     val opTime = gpuLongMetric(OP_TIME_LEGACY)
+    val mergeMetrics = if (GpuMergeRowMetricsShims.writeSummaryEnabled) {
+      MergeRowMetrics(
+        gpuLongMetric(NUM_TARGET_ROWS_COPIED),
+        gpuLongMetric(NUM_TARGET_ROWS_INSERTED),
+        gpuLongMetric(NUM_TARGET_ROWS_DELETED),
+        gpuLongMetric(NUM_TARGET_ROWS_UPDATED),
+        gpuLongMetric(NUM_TARGET_ROWS_MATCHED_UPDATED),
+        gpuLongMetric(NUM_TARGET_ROWS_MATCHED_DELETED),
+        gpuLongMetric(NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_UPDATED),
+        gpuLongMetric(NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_DELETED))
+    } else {
+      MergeRowMetrics.NOOP
+    }
 
     val dataTypes = GpuColumnVector.extractTypes(child.schema)
 
@@ -136,7 +183,8 @@ case class GpuMergeRowsExec(
         boundMatchedBySourceInsts,
         numOutputRows,
         numOutputBatches,
-        opTime)
+        opTime,
+        mergeMetrics)
     }
   }
 
@@ -149,6 +197,124 @@ case class GpuMergeRowsExec(
 }
 
 object GpuMergeRowsExec {
+
+  // Metric names must match Spark MergeRowsExec / MergeSummaryImpl field names.
+  val NUM_TARGET_ROWS_COPIED = "numTargetRowsCopied"
+  val NUM_TARGET_ROWS_INSERTED = "numTargetRowsInserted"
+  val NUM_TARGET_ROWS_DELETED = "numTargetRowsDeleted"
+  val NUM_TARGET_ROWS_UPDATED = "numTargetRowsUpdated"
+  val NUM_TARGET_ROWS_MATCHED_UPDATED = "numTargetRowsMatchedUpdated"
+  val NUM_TARGET_ROWS_MATCHED_DELETED = "numTargetRowsMatchedDeleted"
+  val NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_UPDATED = "numTargetRowsNotMatchedBySourceUpdated"
+  val NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_DELETED = "numTargetRowsNotMatchedBySourceDeleted"
+
+  /** Action tags used for WriteSummary metrics; values come from version shims. */
+  val ACTION_COPY = "copy"
+  val ACTION_INSERT = "insert"
+  val ACTION_UPDATE = "update"
+  val ACTION_DELETE = "delete"
+  val ACTION_UNKNOWN = "unknown"
+
+  case class MergeRowMetrics(
+      numTargetRowsCopied: GpuMetric,
+      numTargetRowsInserted: GpuMetric,
+      numTargetRowsDeleted: GpuMetric,
+      numTargetRowsUpdated: GpuMetric,
+      numTargetRowsMatchedUpdated: GpuMetric,
+      numTargetRowsMatchedDeleted: GpuMetric,
+      numTargetRowsNotMatchedBySourceUpdated: GpuMetric,
+      numTargetRowsNotMatchedBySourceDeleted: GpuMetric) {
+
+    def incrementCopy(n: Long): Unit = numTargetRowsCopied += n
+
+    def incrementInsert(n: Long): Unit = numTargetRowsInserted += n
+
+    def incrementDelete(n: Long, sourcePresent: Boolean): Unit = {
+      numTargetRowsDeleted += n
+      if (sourcePresent) {
+        numTargetRowsMatchedDeleted += n
+      } else {
+        numTargetRowsNotMatchedBySourceDeleted += n
+      }
+    }
+
+    def incrementUpdate(n: Long, sourcePresent: Boolean): Unit = {
+      numTargetRowsUpdated += n
+      if (sourcePresent) {
+        numTargetRowsMatchedUpdated += n
+      } else {
+        numTargetRowsNotMatchedBySourceUpdated += n
+      }
+    }
+
+    /** Add counts from a successful attempt; used after withRetryNoSplit returns. */
+    def addAll(other: MergeRowMetrics): Unit = {
+      numTargetRowsCopied += other.numTargetRowsCopied.value
+      numTargetRowsInserted += other.numTargetRowsInserted.value
+      numTargetRowsDeleted += other.numTargetRowsDeleted.value
+      numTargetRowsUpdated += other.numTargetRowsUpdated.value
+      numTargetRowsMatchedUpdated += other.numTargetRowsMatchedUpdated.value
+      numTargetRowsMatchedDeleted += other.numTargetRowsMatchedDeleted.value
+      numTargetRowsNotMatchedBySourceUpdated +=
+        other.numTargetRowsNotMatchedBySourceUpdated.value
+      numTargetRowsNotMatchedBySourceDeleted +=
+        other.numTargetRowsNotMatchedBySourceDeleted.value
+    }
+
+    /** Clear staging counters before a retry attempt. */
+    def reset(): Unit = {
+      numTargetRowsCopied.set(0L)
+      numTargetRowsInserted.set(0L)
+      numTargetRowsDeleted.set(0L)
+      numTargetRowsUpdated.set(0L)
+      numTargetRowsMatchedUpdated.set(0L)
+      numTargetRowsMatchedDeleted.set(0L)
+      numTargetRowsNotMatchedBySourceUpdated.set(0L)
+      numTargetRowsNotMatchedBySourceDeleted.set(0L)
+    }
+
+    def record(instruction: GpuInstruction, numRows: Long, sourcePresent: Boolean): Unit = {
+      if (numRows > 0) {
+        instruction match {
+          case keep: GpuKeep =>
+            keep.action match {
+              case ACTION_COPY => incrementCopy(numRows)
+              case ACTION_INSERT => incrementInsert(numRows)
+              case ACTION_UPDATE => incrementUpdate(numRows, sourcePresent)
+              case ACTION_DELETE => incrementDelete(numRows, sourcePresent)
+              case ACTION_UNKNOWN => // Spark < 4.1 Keep has no context; skip ambiguous counts
+              case other =>
+                throw new IllegalArgumentException(s"Unexpected Keep action: $other")
+            }
+          case _: GpuDiscard => incrementDelete(numRows, sourcePresent)
+          case _: GpuSplit => incrementUpdate(numRows, sourcePresent)
+        }
+      }
+    }
+  }
+
+  object MergeRowMetrics {
+    /** Shared no-op metrics when WriteSummary accounting is disabled (Spark < 4.1). */
+    val NOOP: MergeRowMetrics = MergeRowMetrics(
+      NoopMetric, NoopMetric, NoopMetric, NoopMetric,
+      NoopMetric, NoopMetric, NoopMetric, NoopMetric)
+
+    /** Per-iterator staging metrics that are reset on each OOM retry attempt. */
+    def local(): MergeRowMetrics = MergeRowMetrics(
+      new LocalGpuMetric(),
+      new LocalGpuMetric(),
+      new LocalGpuMetric(),
+      new LocalGpuMetric(),
+      new LocalGpuMetric(),
+      new LocalGpuMetric(),
+      new LocalGpuMetric(),
+      new LocalGpuMetric())
+
+    /** Staging metrics for one retry attempt; NOOP when WriteSummary is unused. */
+    def forAttempt(): MergeRowMetrics = {
+      if (GpuMergeRowMetricsShims.writeSummaryEnabled) local() else NOOP
+    }
+  }
 
   sealed trait GpuInstruction extends GpuUnevaluable with ShimExpression {
     def condition: Expression
@@ -167,7 +333,13 @@ object GpuMergeRowsExec {
     override def dataType: DataType = NullType
   }
 
-  case class GpuKeep(condition: Expression, output: Seq[Expression]) extends GpuInstruction {
+  /**
+   * @param action one of ACTION_* tags; on Spark 4.1+ this mirrors Keep.context
+   */
+  case class GpuKeep(
+      condition: Expression,
+      output: Seq[Expression],
+      action: String) extends GpuInstruction {
 
     override def children: Seq[Expression] = Seq(condition) ++ output
     override def outputs: Seq[Seq[Expression]] = Seq(output)
@@ -205,6 +377,7 @@ object GpuMergeRowsExec {
  * @param numOutputRows Metric for output rows
  * @param numOutputBatches Metric for output batches
  * @param opTime Metric for operation time
+ * @param mergeMetrics DML metrics forwarded to WriteSummary on Spark 4.1+
  */
 class GpuMergeBatchIterator(
     inputDataTypes: Array[DataType],
@@ -216,7 +389,15 @@ class GpuMergeBatchIterator(
     notMatchedBySourceInstructionExecs: Seq[GpuInstruction],
     numOutputRows: GpuMetric,
     numOutputBatches: GpuMetric,
-    opTime: GpuMetric) extends Iterator[ColumnarBatch] {
+    opTime: GpuMetric,
+    mergeMetrics: GpuMergeRowsExec.MergeRowMetrics) extends Iterator[ColumnarBatch] {
+
+  import GpuMergeRowsExec.MergeRowMetrics
+
+  // Skip staging/publish work before Spark 4.1 where WriteSummary is unused.
+  private val writeSummaryEnabled: Boolean = GpuMergeRowMetricsShims.writeSummaryEnabled
+  // Reused across batches/attempts; reset() clears counts before each retry attempt.
+  private val attemptMetrics: MergeRowMetrics = MergeRowMetrics.forAttempt()
 
   override def hasNext: Boolean = inputIter.hasNext
 
@@ -233,10 +414,17 @@ class GpuMergeBatchIterator(
 
   /**
    * Process a single columnar batch, applying merge logic.
+   *
+   * MERGE row metrics are staged per attempt and only flushed after
+   * `withRetryNoSplit` succeeds. Recording into the published metrics inside
+   * the retry callback would double-count rows when a retryable GPU OOM
+   * reprocesses the same batch.
    */
   private def processBatch(batch: ColumnarBatch): ColumnarBatch = {
-
-    withRetryNoSplit(batch) { _ =>
+    val result = withRetryNoSplit(batch) { _ =>
+      if (writeSummaryEnabled) {
+        attemptMetrics.reset()
+      }
       // Evaluate presence flags
       val outputs = new ArrayBuffer[SpillableColumnarBatch](
         matchedInstructionExecs.size + notMatchedInstructionExecs.size
@@ -252,19 +440,19 @@ class GpuMergeBatchIterator(
 
             val matchedMask = sourcePresent.getBase.and(targetPresent.getBase)
             processInstructionSet(inputDataTypes, outputs, batch,
-              matchedMask, matchedInstructionExecs)
+              matchedMask, matchedInstructionExecs, sourcePresent = true, attemptMetrics)
 
             val notMatchedMask = withResource(targetPresent.getBase.not()) { noTargetMask =>
               sourcePresent.getBase.and(noTargetMask)
             }
             processInstructionSet(inputDataTypes, outputs, batch, notMatchedMask,
-                notMatchedInstructionExecs)
+                notMatchedInstructionExecs, sourcePresent = true, attemptMetrics)
 
             val notMatchedBySrcMask = withResource(sourcePresent.getBase.not()) { noSourceMask =>
               targetPresent.getBase.and(noSourceMask)
             }
             processInstructionSet(inputDataTypes, outputs, batch, notMatchedBySrcMask,
-                notMatchedBySourceInstructionExecs)
+                notMatchedBySourceInstructionExecs, sourcePresent = false, attemptMetrics)
           }
         }
       }
@@ -276,6 +464,10 @@ class GpuMergeBatchIterator(
         spillable.get.getColumnarBatch()
       }
     }
+    if (writeSummaryEnabled) {
+      mergeMetrics.addAll(attemptMetrics)
+    }
+    result
   }
 
   /**
@@ -287,7 +479,9 @@ class GpuMergeBatchIterator(
      outputs: ArrayBuffer[SpillableColumnarBatch],
      batch: ColumnarBatch,
      mask: ColumnVector,
-     instructionExecs: Seq[GpuInstruction]): Unit = {
+     instructionExecs: Seq[GpuInstruction],
+     sourcePresent: Boolean,
+     attemptMetrics: MergeRowMetrics): Unit = {
 
     if (instructionExecs.isEmpty) {
       mask.close()
@@ -320,15 +514,19 @@ class GpuMergeBatchIterator(
     closeOnExcept(nextMask) { _ =>
       withResource(condMask) { _ =>
         val thisFilteredBatch = GpuColumnVector.filter(batch, dataTypes, condMask)
-        withResource(thisFilteredBatch) { _ =>
-          outputs ++= instructionExec.applyOutputs(thisFilteredBatch)
+        withResource(thisFilteredBatch) { filtered =>
+          if (writeSummaryEnabled) {
+            attemptMetrics.record(instructionExec, filtered.numRows(), sourcePresent)
+          }
+          outputs ++= instructionExec.applyOutputs(filtered)
             .map(SpillableColumnarBatch
               .apply(_, SpillPriorities.ACTIVE_ON_DECK_PRIORITY))
         }
       }
     }
 
-    processInstructionSet(dataTypes, outputs, batch, nextMask, instructionExecs.tail)
+    processInstructionSet(dataTypes, outputs, batch, nextMask, instructionExecs.tail,
+      sourcePresent, attemptMetrics)
   }
 }
 

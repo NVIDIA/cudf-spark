@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2025, NVIDIA CORPORATION.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,7 +27,7 @@ jobs:
     uses: NVIDIA/spark-rapids-common/.github/workflows/auto-merge.yml@main
     with:
       owner: ${{ github.repository_owner }}
-      repo: spark-rapids
+      repo: ${{ github.event.repository.name }}
       branch: ${{ github.event.pull_request.base.ref }}
     secrets:
       token: ${{ secrets.AUTOMERGE_TOKEN }}

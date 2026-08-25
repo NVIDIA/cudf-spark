@@ -1,4 +1,4 @@
-# Copyright (c) 2022, NVIDIA CORPORATION.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,13 +19,16 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
+permissions:
+  contents: read
+
 jobs:
   markdown-link-check:
     runs-on: ubuntu-latest
     steps:
     - name: work around permission issue
       run: git config --global --add safe.directory /github/workspace
-    - uses: actions/checkout@master
+    - uses: NVIDIA/spark-rapids-common/checkout@main
     - uses: gaurav-nelson/github-action-markdown-link-check@v1
       with:
         max-depth: -1

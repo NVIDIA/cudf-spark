@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,7 +33,9 @@ import org.apache.spark.sql.catalyst.analysis.TypeCheckResult
 import org.apache.spark.sql.catalyst.analysis.TypeCheckResult.{TypeCheckFailure, TypeCheckSuccess}
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, AggregateFunction, Average, CollectList, CollectSet, Count, Max, Min, Sum}
-import org.apache.spark.sql.rapids.{AddOverflowChecks, GpuAnsi, GpuCreateNamedStruct, GpuDivide, GpuSubtract}
+import org.apache.spark.sql.rapids.{AddOverflowChecks, GpuAdd, GpuAnsi, GpuCreateNamedStruct,
+  GpuDivide, GpuGreatest, GpuIntegralDivide, GpuLessThanOrEqual, GpuMultiply, GpuRemainder,
+  GpuSubtract}
 import org.apache.spark.sql.rapids.aggregate.{GpuAggregateExpression, GpuAggregateFunction, GpuCount}
 import org.apache.spark.sql.rapids.shims.RapidsErrorUtils
 import org.apache.spark.sql.types._
@@ -117,21 +119,23 @@ abstract class GpuWindowExpressionMetaBase(
             } else {
               // check whether order by column is supported or not
               val orderSpec = wrapped.windowSpec.orderSpec
-              if (orderSpec.length > 1) {
-                // We only support a single order by column
-                willNotWorkOnGpu("only a single date/time or numeric (Boolean exclusive) " +
-                  "based column in window range functions is supported")
+              val hasMultipleOrderByColumns = orderSpec.length > 1
+              if (hasMultipleOrderByColumns && spec.isValueBound) {
+                willNotWorkOnGpu("unexpected plugin path: Spark should be rejecting " +
+                  "value-bounded range window frames with multiple order-by columns")
               }
-              val orderByTypeSupported = orderSpec.forall { so =>
-                so.dataType match {
-                  case ByteType | ShortType | IntegerType | LongType | FloatType | DoubleType |
-                       DateType | TimestampType | StringType | DecimalType() => true
-                  case _ => false
-                }
+              // Order-by types accepted for multi-column RANGE windows; the analogous
+              // single-column gate is GpuWindowUtil.isValidRangeFrameType.
+              def isSupportedOrderType(dt: DataType): Boolean = dt match {
+                case ByteType | ShortType | IntegerType | LongType | FloatType | DoubleType |
+                     DateType | TimestampType | StringType | DecimalType() => true
+                case _ => false
               }
-              if (!orderByTypeSupported) {
-                willNotWorkOnGpu(s"the type of orderBy column is not supported in a window" +
-                  s" range function, found ${orderSpec.head.dataType}")
+              val unsupportedOrderTypes =
+                orderSpec.map(_.dataType).filterNot(isSupportedOrderType).distinct
+              if (unsupportedOrderTypes.nonEmpty) {
+                willNotWorkOnGpu(s"the types of orderBy columns are not supported in a window" +
+                  s" range function, found ${unsupportedOrderTypes.mkString(", ")}")
               }
 
               def checkRangeBoundaryConfig(dt: DataType): Unit = {
@@ -981,8 +985,13 @@ trait GpuUnboundToUnboundWindowWithFixer {
 /**
  * This is used to tag a GpuAggregateFunction that it has been tested to work properly
  * with `GpuUnboundedToUnboundedAggWindowExec`.
+ *
+ * Implementations may opt out when their hash-agg [[GpuAggregateFunction.inputProjection]]
+ * is incompatible with the unbounded-agg shortcut (which only accepts BoundReference/Literal).
  */
-trait GpuUnboundedToUnboundedWindowAgg extends GpuAggregateFunction
+trait GpuUnboundedToUnboundedWindowAgg extends GpuAggregateFunction {
+  def supportsUnboundedToUnboundedWindowExec: Boolean = true
+}
 
 /**
  * Fixes up a count operation for unbounded preceding to unbounded following
@@ -1481,7 +1490,7 @@ class SumBinaryFixer(toType: DataType, isAnsi: Boolean)
             if (needsBasicOverflowCheck) {
               withResource(nullsReplaced.binaryOp(BinaryOp.ADD, prev, prev.getType)) { updated =>
                 closeOnExcept(mask.ifElse(updated, windowedColumnOutput)) { ret =>
-                  AddOverflowChecks.basicOpOverflowCheck(updated, prev, ret, Some(mask))
+                  AddOverflowChecks.basicOpOverflowCheck(updated, prev, ret, mask = Some(mask))
                   ret
                 }
               }
@@ -1603,7 +1612,7 @@ class SumBinaryFixer(toType: DataType, isAnsi: Boolean)
         }
       }
       withResource(outOfBounds) { _ =>
-        closeOnExcept(GpuCast.fixDecimalBounds(ret, outOfBounds, isAnsi)) { replaced =>
+        closeOnExcept(GpuCast.fixDecimalBounds(ret, outOfBounds, dt, isAnsi)) { replaced =>
           updateState(replaced, Some(outOfBounds))
           replaced
         }
@@ -2145,9 +2154,63 @@ case class GpuPercentRank(children: Seq[Expression]) extends GpuReplaceWindowFun
       fullUnboundedFrame)
     val count = GpuWindowExpression(GpuCount(Seq(GpuLiteral(1))), fullUnboundedSpec)
     val rank = GpuWindowExpression(GpuRank(children), spec)
-    val rankMinusOne = GpuCast(GpuSubtract(rank, GpuLiteral(1), isAnsi), DoubleType, isAnsi)
-    val countMinusOne = GpuCast(GpuSubtract(count, GpuLiteral(1L), isAnsi), DoubleType, isAnsi)
-    val divided = GpuDivide(rankMinusOne, countMinusOne, failOnError = isAnsi)
+    val rankMinusOne = GpuCast(GpuSubtract(rank, GpuLiteral(1), isAnsi)(), DoubleType, isAnsi)()
+    val countMinusOne = GpuCast(GpuSubtract(count, GpuLiteral(1L), isAnsi)(), DoubleType, isAnsi)()
+    val divided = GpuDivide(rankMinusOne, countMinusOne, isAnsi)()
     GpuCoalesce(Seq(divided, GpuLiteral(0.0)))
+  }
+}
+
+case class GpuNTileMeta(
+    nTile: NTile,
+    override val conf: RapidsConf,
+    parentMetaOpt: Option[RapidsMeta[_, _, _]],
+    rule: DataFromReplacementRule)
+  extends ExprMeta[NTile](nTile, conf, parentMetaOpt, rule) {
+
+  override def convertToGpuImpl(): GpuExpression = GpuNTile(childExprs.head.convertToGpu())
+}
+
+/**
+ * Rewrites ntile into row_number, a full-partition count, and integer arithmetic.
+ */
+case class GpuNTile(buckets: Expression) extends GpuReplaceWindowFunction {
+  override def children: Seq[Expression] = Seq(buckets)
+  override def nullable: Boolean = false
+  override def dataType: DataType = IntegerType
+
+  override def windowReplacement(spec: GpuWindowSpecDefinition): Expression = {
+    val isAnsi = false
+    val one = GpuLiteral(1L)
+    val fullUnboundedFrame = GpuSpecifiedWindowFrame(RowFrame,
+      GpuSpecialFrameBoundary(UnboundedPreceding),
+      GpuSpecialFrameBoundary(UnboundedFollowing))
+    val fullUnboundedSpec = GpuWindowSpecDefinition(spec.partitionSpec, spec.orderSpec,
+      fullUnboundedFrame)
+    val count = GpuWindowExpression(GpuCount(Seq(GpuLiteral(1))), fullUnboundedSpec)
+    val rowNumber = GpuCast(GpuWindowExpression(GpuRowNumber, spec), LongType, isAnsi)()
+    val numBuckets = GpuCast(buckets, LongType, isAnsi)()
+    val bucketSize = GpuIntegralDivide(count, numBuckets, isAnsi)()
+    val bucketsWithPadding = GpuRemainder(count, numBuckets, isAnsi)
+    val paddedBucketSize = GpuAdd(bucketSize, one, isAnsi)()
+    val bucketThreshold = GpuMultiply(paddedBucketSize, bucketsWithPadding, isAnsi)()
+    val rowIndex = GpuSubtract(rowNumber, one, isAnsi)()
+    val paddedBucket = GpuAdd(
+      GpuIntegralDivide(rowIndex, paddedBucketSize, isAnsi)(), one, isAnsi)()
+    val unpaddedBucketSize = GpuGreatest(Seq(bucketSize, one))
+    val unpaddedBucket = GpuAdd(
+      GpuAdd(bucketsWithPadding, one, isAnsi)(),
+      GpuIntegralDivide(
+        GpuSubtract(rowIndex, bucketThreshold, isAnsi)(),
+        unpaddedBucketSize,
+        isAnsi)(),
+      isAnsi)()
+    GpuCast(
+      GpuIf(
+        GpuLessThanOrEqual(rowNumber, bucketThreshold),
+        paddedBucket,
+        unpaddedBucket),
+      IntegerType,
+      isAnsi)()
   }
 }

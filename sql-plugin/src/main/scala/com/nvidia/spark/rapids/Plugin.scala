@@ -36,6 +36,7 @@ import com.nvidia.spark.rapids.filecache.{FileCache, FileCacheLocalityManager, F
 import com.nvidia.spark.rapids.io.async.TrafficController
 import com.nvidia.spark.rapids.jni.{GpuTimeZoneDB, Hash, JSONUtils, RmmSpark, TaskPriority}
 import com.nvidia.spark.rapids.python.PythonWorkerSemaphore
+import com.nvidia.spark.rapids.shims.ShuffleManagerShimUtils
 import org.apache.commons.lang3.exception.ExceptionUtils
 
 import org.apache.spark.{ExceptionFailure, SparkConf, SparkContext, TaskContext, TaskFailedReason}
@@ -43,6 +44,7 @@ import org.apache.spark.api.plugin.{DriverPlugin, ExecutorPlugin, PluginContext,
 import org.apache.spark.internal.Logging
 import org.apache.spark.rapids.hybrid.HybridExecutionUtils
 import org.apache.spark.serializer.{JavaSerializer, KryoSerializer}
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.internal.StaticSQLConf
@@ -53,9 +55,26 @@ class PluginException(msg: String) extends RuntimeException(msg)
 
 case class CudfVersionMismatchException(errorMsg: String) extends PluginException(errorMsg)
 
-case class ColumnarOverrideRules() extends ColumnarRule with Logging {
-  lazy val overrides: Rule[SparkPlan] = GpuOverrides()
-  lazy val overrideTransitions: Rule[SparkPlan] = new GpuTransitionOverrides()
+object RapidsShuffleManagerAutoConfigurator {
+  private val SHUFFLE_MANAGER_KEY = "spark.shuffle.manager"
+  private val SHUFFLE_DATA_IO_PLUGIN_KEY = "spark.shuffle.sort.io.plugin.class"
+  private val RAPIDS_SHUFFLE_DATA_IO_CLASS_SUFFIX = "RapidsLocalDiskShuffleDataIO"
+  private val DATAPROC_ENGINE_KEY = "spark.dataproc.engine"
+
+  def configure(conf: SparkConf): Unit = {
+    if (ShuffleManagerShimUtils.supportsAutoConfiguration &&
+        !conf.contains(DATAPROC_ENGINE_KEY) &&
+        !conf.contains(SHUFFLE_MANAGER_KEY) &&
+        conf.getOption(SHUFFLE_DATA_IO_PLUGIN_KEY)
+          .forall(_.endsWith(RAPIDS_SHUFFLE_DATA_IO_CLASS_SUFFIX))) {
+      conf.set(SHUFFLE_MANAGER_KEY, ShimLoader.getRapidsShuffleManagerClass)
+    }
+  }
+}
+
+case class ColumnarOverrideRules(sparkSession: SparkSession) extends ColumnarRule with Logging {
+  lazy val overrides: Rule[SparkPlan] = GpuOverrides(sparkSession)
+  lazy val overrideTransitions: Rule[SparkPlan] = new GpuTransitionOverrides(sparkSession)
 
   override def preColumnarTransitions : Rule[SparkPlan] = overrides
 
@@ -137,11 +156,11 @@ object RapidsPluginUtils extends Logging {
     val possibleRapidsJarURLs = classloader.getResources(propName).asScala.toSet.toSeq.filter {
       url => {
         val urlPath = url.toString
-        // Filter out submodule jars, e.g. rapids-4-spark-aggregator_2.12-26.04.0-spark341.jar,
+        // Filter out submodule jars, e.g. rapids-4-spark-aggregator_2.12-26.10.0-spark341.jar,
         // and files stored under subdirs of '!/', e.g.
-        // rapids-4-spark_2.12-26.04.0-cuda12.jar!/spark330/rapids4spark-version-info.properties
+        // rapids-4-spark_2.12-26.10.0-cuda12.jar!/spark330/rapids4spark-version-info.properties
         // We only want to find the main jar, e.g.
-        // rapids-4-spark_2.12-26.04.0-cuda12.jar!/rapids4spark-version-info.properties
+        // rapids-4-spark_2.12-26.10.0-cuda12.jar!/rapids4spark-version-info.properties
         !urlPath.contains("rapids-4-spark-") && urlPath.endsWith("!/" + propName)
       }
     }
@@ -232,6 +251,8 @@ object RapidsPluginUtils extends Logging {
   }
 
   def fixupConfigsOnDriver(conf: SparkConf): Unit = {
+    RapidsShuffleManagerAutoConfigurator.configure(conf)
+
     val plugins = Array(SQL_PLUGIN_NAME, UDF_PLUGIN_NAME, DFUDF_PLUGIN_NAME)
     // First add in the SQL executor plugin because that is what we need at a minimum
     if (conf.contains(SQL_PLUGIN_CONF_KEY)) {
@@ -436,6 +457,25 @@ object RapidsPluginUtils extends Logging {
         s"Binaries available for architectures $supportedMajorArchStr.")
     }
   }
+
+  /**
+   * Runs each shutdown step even if prior steps fail. The first exception is primary; later
+   * exceptions are added as suppressed. Rethrows the primary exception if any step failed.
+   */
+  def safeShutdown(steps: Seq[() => Unit]): Unit = {
+    var shutdownException: Throwable = null
+    steps.foreach { step =>
+      try {
+        step()
+      } catch {
+        case e: Throwable if shutdownException == null => shutdownException = e
+        case e: Throwable => shutdownException.addSuppressed(e)
+      }
+    }
+    if (shutdownException != null) {
+      throw shutdownException
+    }
+  }
 }
 
 /**
@@ -522,12 +562,17 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
 
     if (GpuShuffleEnv.isRapidsShuffleAvailable(conf)) {
       GpuShuffleEnv.initShuffleManager()
-      if (GpuShuffleEnv.isUCXShuffleAndEarlyStart(conf)) {
-        rapidsShuffleHeartbeatManager =
-          new RapidsShuffleHeartbeatManager(
-            conf.shuffleTransportEarlyStartHeartbeatInterval,
-            conf.shuffleTransportEarlyStartHeartbeatTimeout)
-      }
+    }
+    // Use isRapidsShuffleConfigured (SparkConf-only, no SparkEnv dependency) to gate
+    // heartbeat manager creation. On Spark 4.x, DriverPlugin.init is called before SparkEnv
+    // is fully initialized, causing isRapidsShuffleAvailable to return false and leaving
+    // rapidsShuffleHeartbeatManager null while executors still send RapidsExecutorStartupMsg.
+    if (GpuShuffleEnv.isRapidsShuffleConfigured(sparkConf) &&
+        GpuShuffleEnv.isUCXShuffleAndEarlyStart(conf)) {
+      rapidsShuffleHeartbeatManager =
+        new RapidsShuffleHeartbeatManager(
+          conf.shuffleTransportEarlyStartHeartbeatInterval,
+          conf.shuffleTransportEarlyStartHeartbeatTimeout)
     }
 
     FileCacheLocalityManager.init(sc)
@@ -544,11 +589,13 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
   }
 
   override def shutdown(): Unit = {
-    extraDriverPlugins.foreach(_.shutdown())
-    FileCacheLocalityManager.shutdown()
-    // Shutdown listener first to trigger cleanup for any remaining jobs
-    Option(shuffleCleanupListener).foreach(_.shutdown())
-    ShuffleCleanupManager.shutdown()
+    RapidsPluginUtils.safeShutdown(
+      extraDriverPlugins.map(plugin => () => plugin.shutdown()) ++
+        Seq(
+          () => FileCacheLocalityManager.shutdown(),
+          // Shutdown listener first to trigger cleanup for any remaining jobs
+          () => Option(shuffleCleanupListener).foreach(_.shutdown()),
+          () => ShuffleCleanupManager.shutdown()))
   }
 }
 
@@ -643,7 +690,7 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
       }
 
       // Initialize timezone database cache asynchronously on executor startup
-      GpuTimeZoneDB.cacheDatabaseAsync(conf.timestampRulesEndYear)
+      GpuTimeZoneDB.cacheDatabaseAsync()
 
       GpuCoreDumpHandler.executorInit(conf, pluginContext)
 
@@ -655,11 +702,16 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
           numCores)
         if (GpuShuffleEnv.isRapidsShuffleAvailable(conf)) {
           GpuShuffleEnv.initShuffleManager()
-          if (GpuShuffleEnv.isUCXShuffleAndEarlyStart(conf)) {
-            logInfo("Initializing shuffle manager heartbeats")
-            rapidsShuffleHeartbeatEndpoint = new RapidsShuffleHeartbeatEndpoint(pluginContext, conf)
-            rapidsShuffleHeartbeatEndpoint.registerShuffleHeartbeat()
-          }
+        }
+        // Mirror the driver-side fix: use isRapidsShuffleConfigured (SparkConf-only) so
+        // heartbeat endpoint creation does not depend on SparkEnv being initialized.
+        if (GpuShuffleEnv.isRapidsShuffleConfigured(sparkConf) &&
+            GpuShuffleEnv.isUCXShuffleAndEarlyStart(conf)) {
+          logInfo("Initializing shuffle manager heartbeats")
+          rapidsShuffleHeartbeatEndpoint = new RapidsShuffleHeartbeatEndpoint(pluginContext, conf)
+          rapidsShuffleHeartbeatEndpoint.registerShuffleHeartbeat()
+        }
+        if (GpuShuffleEnv.isRapidsShuffleAvailable(conf)) {
           // Initialize ShuffleCleanupEndpoint for MULTITHREADED mode when
           // MultithreadedShuffleBufferCatalog is enabled (skipMerge=true, ESS disabled,
           // off-heap limits on). Uses same condition as GpuShuffleEnv.init.
@@ -794,20 +846,23 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
   }
 
   override def shutdown(): Unit = {
-    GpuTimeZoneDB.shutdown()
-    GpuSemaphore.shutdown()
-    PythonWorkerSemaphore.shutdown()
-    GpuDeviceManager.shutdown()
-    ProfilerOnExecutor.shutdown()
-    if (isAsyncProfilerEnabled) {
-      AsyncProfilerOnExecutor.shutdown()
-    }
-    Option(rapidsShuffleHeartbeatEndpoint).foreach(_.close())
-    Option(shuffleCleanupEndpoint).foreach(_.close())
-    extraExecutorPlugins.foreach(_.shutdown())
-    FileCache.shutdown()
-    GpuCoreDumpHandler.shutdown()
-    TrafficController.shutdown()
+    RapidsPluginUtils.safeShutdown(
+      Seq(
+        () => GpuTimeZoneDB.shutdown(),
+        () => GpuSemaphore.shutdown(),
+        () => PythonWorkerSemaphore.shutdown(),
+        () => GpuDeviceManager.shutdown(),
+        () => ProfilerOnExecutor.shutdown(),
+        () => if (isAsyncProfilerEnabled) {
+          AsyncProfilerOnExecutor.shutdown()
+        },
+        () => Option(rapidsShuffleHeartbeatEndpoint).foreach(_.close()),
+        () => Option(shuffleCleanupEndpoint).foreach(_.close())) ++
+        extraExecutorPlugins.map(plugin => () => plugin.shutdown()) ++
+        Seq(
+          () => FileCache.shutdown(),
+          () => GpuCoreDumpHandler.shutdown(),
+          () => TrafficController.shutdown()))
   }
 
   override def onTaskFailed(failureReason: TaskFailedReason): Unit = {

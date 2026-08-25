@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -106,7 +106,8 @@ trait DatabricksDeltaProviderBase extends DeltaProviderImplBase {
     }
   }
 
-  override def getReadFileFormat(relation: HadoopFsRelation): FileFormat = {
+  override def getReadFileFormat(
+      relation: HadoopFsRelation, rapidsConf: RapidsConf): FileFormat = {
     GpuDeltaParquetFileFormat.convertToGpu(relation)
   }
 
@@ -115,8 +116,8 @@ trait DatabricksDeltaProviderBase extends DeltaProviderImplBase {
   }
 
   private def getWriteOptions(options: Any): Map[String, String] = {
-    // For Databricks 13.3 AtomicCreateTableAsSelectExec writeOptions is a Map[String, String]
-    // while in all the other versions it's a CaseInsensitiveMap
+    // Databricks 14.3 writeOptions is a Map[String, String], while newer supported
+    // Databricks runtimes use CaseInsensitiveStringMap.
     options match {
       case c: CaseInsensitiveStringMap => c.asCaseSensitiveMap().asScala.toMap
       case _ => options.asInstanceOf[Map[String, String]]
@@ -141,6 +142,13 @@ trait DatabricksDeltaProviderBase extends DeltaProviderImplBase {
       getWriteOptions(cpuExec.writeOptions), cpuExec.session)
   }
 
+  override def convertToGpu(
+      cpuExec: AtomicCreateTableAsSelectExec,
+      meta: AtomicCreateTableAsSelectExecMeta): GpuExec = {
+    throw new IllegalStateException(
+      "Delta CTAS was tagged as unsupported and should not be converted to GPU")
+  }
+
   override def tagForGpu(
       cpuExec: AtomicReplaceTableAsSelectExec,
       meta: AtomicReplaceTableAsSelectExecMeta): Unit = {
@@ -157,6 +165,13 @@ trait DatabricksDeltaProviderBase extends DeltaProviderImplBase {
     }
     RapidsDeltaUtils.tagForDeltaWrite(meta, cpuExec.query.schema, None,
       getWriteOptions(cpuExec.writeOptions), cpuExec.session)
+  }
+
+  override def convertToGpu(
+      cpuExec: AtomicReplaceTableAsSelectExec,
+      meta: AtomicReplaceTableAsSelectExecMeta): GpuExec = {
+    throw new IllegalStateException(
+      "Delta RTAS was tagged as unsupported and should not be converted to GPU")
   }
 
   protected case class DeltaWriteV1Config(

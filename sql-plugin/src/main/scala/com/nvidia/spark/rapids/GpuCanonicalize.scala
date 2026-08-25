@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -42,6 +42,11 @@ import org.apache.spark.sql.rapids.execution.TrampolineUtil
  *  This is essentially a copy of the Spark `Canonicalize` class but updated for GPU operators
  */
 object GpuCanonicalize {
+
+  private def orderLiteralValues(list: Seq[Any]): Seq[Any] = list.sortBy {
+    case null => 0
+    case nonNull => nonNull.hashCode()
+  }
   def execute(e: Expression): Expression = {
     expressionReorder(ignoreTimeZoneInCast(ignoreNamesTypes(e)))
   }
@@ -79,9 +84,11 @@ object GpuCanonicalize {
   /** Rearrange expressions that are commutative or associative. */
   private def expressionReorder(e: Expression): Expression = e match {
     case a @ GpuAdd(_, _, f) =>
-      orderCommutative(a, { case GpuAdd(l, r, _) => Seq(l, r) }).reduce(GpuAdd(_, _, f))
+      orderCommutative(a, { case GpuAdd(l, r, _) => Seq(l, r) })
+        .reduce((l, r) => GpuAdd(l, r, f)(a.origin))
     case m @ GpuMultiply(_, _, f) =>
-      orderCommutative(m, { case GpuMultiply(l, r, _) => Seq(l, r) }).reduce(GpuMultiply(_, _, f))
+      orderCommutative(m, { case GpuMultiply(l, r, _) => Seq(l, r) })
+        .reduce((l, r) => GpuMultiply(l, r, f)(m.origin))
     case o: GpuOr =>
       orderCommutative(o, { case GpuOr(l, r) if l.deterministic && r.deterministic => Seq(l, r) })
           .reduce(GpuOr)
@@ -112,12 +119,12 @@ object GpuCanonicalize {
     case GpuNot(GpuLessThanOrEqual(l, r)) => GpuGreaterThan(l, r)
 
     // order the list in the In operator
-    case GpuInSet(value, list) if list.length > 1 =>
-      val orderedList = list.sortBy {
-        case null => 0
-        case nonNull => nonNull.hashCode()
-      }
-      GpuInSet(value, orderedList)
+    case GpuInSet(value, list, useInSetSemantics) if list.length > 1 =>
+      GpuInSet(value, orderLiteralValues(list), useInSetSemantics)
+
+    case GpuIn(value, literals, dynamicList)
+        if literals.length + dynamicList.length > 1 =>
+      GpuIn(value, orderLiteralValues(literals), dynamicList.sortBy(_.hashCode()))
 
     case g: GpuGreatest =>
       val newChildren = orderCommutative(g, { case GpuGreatest(children) => children })

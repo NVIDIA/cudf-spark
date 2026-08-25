@@ -131,6 +131,15 @@ trait RapidsTestsTrait extends RapidsTestsCommonTrait {
         .config("spark.rapids.sql.exec.FlatMapCoGroupsInPandasExec", "true")
         .config("spark.rapids.sql.exec.WindowInPandasExec", "true")
         .config("spark.rapids.sql.hasExtendedYearValues", "false")
+        .config("spark.rapids.memory.gpu.allocFraction",
+          System.getProperty(
+            "rapids.test.gpu.allocFraction", "1"))
+        .config("spark.rapids.memory.gpu.maxAllocFraction",
+          System.getProperty(
+            "rapids.test.gpu.maxAllocFraction", "1"))
+        .config("spark.rapids.memory.gpu.minAllocFraction",
+          System.getProperty(
+            "rapids.test.gpu.minAllocFraction", "0.25"))
         .appName("rapids spark plugin running Vanilla Spark UT")
 
       _spark = sparkBuilder
@@ -321,8 +330,9 @@ trait RapidsTestsTrait extends RapidsTestsCommonTrait {
       try {
         result = resultDF.collect()
       } catch {
-        case e : Exception =>
-          logWarning(s"Exception during resultDF.collect() for $expression: ${e.getMessage}", e)
+        case e: Exception if hasArithmeticCause(e) =>
+          logWarning(
+            s"Exception during resultDF.collect() for $expression: ${e.getMessage}", e)
           isComparedByString = true
           result = resultDF.select(Column(resultDF.columns(0)).cast("string")).collect()
       }
@@ -343,7 +353,15 @@ trait RapidsTestsTrait extends RapidsTestsCommonTrait {
         _spark.createDataFrame(_spark.sparkContext.parallelize(empData), schema)
       }
       resultDF = df.select(Column(expression))
-      result = resultDF.collect()
+      try {
+        result = resultDF.collect()
+      } catch {
+        case e: Exception if hasArithmeticCause(e) =>
+          logWarning(
+            s"Exception during resultDF.collect() for $expression: ${e.getMessage}", e)
+          isComparedByString = true
+          result = resultDF.select(Column(resultDF.columns(0)).cast("string")).collect()
+      }
     }
 
     TestStats.testUnitNumber = TestStats.testUnitNumber + 1
@@ -366,11 +384,30 @@ trait RapidsTestsTrait extends RapidsTestsCommonTrait {
       shouldNotFallback()
     }
     if (isComparedByString) {
-      if (!(checkResult(result.head.get(0), expected.toString, StringType, expression.nullable))) {
+      val actualStr = result.head.get(0)
+      val rawStr = if (expected == null) null else expected.toString
+      val catalystStr = try {
+        if (expected == null) {
+          null
+        } else {
+          val tz = Option(SQLConf.get.sessionLocalTimeZone)
+          val castExpr = Cast(
+            Literal.create(expected, expression.dataType), StringType, tz)
+          val evaluated = castExpr.eval(InternalRow.empty)
+          if (evaluated == null) null else evaluated.toString
+        }
+      } catch {
+        case _: Exception => null
+      }
+      val matched =
+        checkResult(actualStr, rawStr, StringType, expression.nullable) ||
+        checkResult(actualStr, catalystStr, StringType, expression.nullable)
+      if (!matched) {
         fail(
           s"Incorrect evaluation: $expression, " +
-            s"actual: ${result.head.get(0)}, " +
-            s"expected: $expected")
+            s"actual: $actualStr, " +
+            s"catalystExpected: $catalystStr, " +
+            s"rawExpected: $rawStr")
       }
     } else if (
       !(checkResult(result.head.get(0), expected, expression.dataType, expression.nullable)
@@ -389,6 +426,15 @@ trait RapidsTestsTrait extends RapidsTestsCommonTrait {
           s"actual: ${result.head.get(0)}, " +
           s"expected: $expected$input")
     }
+  }
+
+  private def hasArithmeticCause(e: Throwable): Boolean = {
+    var cur: Throwable = e
+    while (cur != null) {
+      if (cur.isInstanceOf[ArithmeticException]) return true
+      cur = cur.getCause
+    }
+    false
   }
 
   def shouldNotFallback(): Unit = {

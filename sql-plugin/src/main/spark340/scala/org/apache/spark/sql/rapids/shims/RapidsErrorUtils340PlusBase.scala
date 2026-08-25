@@ -28,11 +28,21 @@
 {"spark": "355"}
 {"spark": "356"}
 {"spark": "357"}
+{"spark": "358"}
+{"spark": "359"}
 {"spark": "400"}
+{"spark": "400db173"}
 {"spark": "401"}
 {"spark": "402"}
+{"spark": "403"}
+{"spark": "404"}
 {"spark": "411"}
+{"spark": "412"}
+{"spark": "413"}
+{"spark": "420"}
+{"spark": "500"}
 spark-rapids-shim-json-lines ***/
+
 package org.apache.spark.sql.rapids.shims
 
 import org.apache.spark.SparkDateTimeException
@@ -106,5 +116,11 @@ trait RapidsErrorUtils340PlusBase extends RapidsErrorUtilsFor330plus with Rapids
 
   def invalidInputSyntaxForBooleanError(s: UTF8String): RuntimeException = {
     QueryExecutionErrors.invalidInputSyntaxForBooleanError(s, null)
+  }
+
+  def invalidInputSyntaxForBooleanError(
+      s: UTF8String,
+      errorContext: SQLQueryContext): RuntimeException = {
+    QueryExecutionErrors.invalidInputSyntaxForBooleanError(s, errorContext)
   }
 }

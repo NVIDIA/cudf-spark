@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -35,6 +35,9 @@ env:
     -Daether.connector.http.connectionMaxTtl=30
     -Drapids.secondaryCacheDir=$HOME/.m2/repository/.sbt/1.0/zinc/org.scala-sbt
 
+permissions:
+  contents: read
+
 jobs:
   cache-dependencies:
     runs-on: ubuntu-latest
@@ -44,11 +47,11 @@ jobs:
       sparkTailVersions: ${{ steps.all212ShimVersionsStep.outputs.tailVersions }}
       sparkJDKVersions: ${{ steps.all212ShimVersionsStep.outputs.jdkVersions }}
     steps:
-      - uses: actions/checkout@v4 # refs/pull/:prNumber/merge
+      - uses: NVIDIA/spark-rapids-common/checkout@main # refs/pull/:prNumber/merge
       - uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
-          java-version: 8
+          java-version: 17
       - name: Generate daily cache key
         id: generateCacheKey
         run: |
@@ -61,7 +64,7 @@ jobs:
       - name: Cache local Maven repository
         id: cache
         continue-on-error: true
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.m2
           key: ${{ env.dailyCacheKey }}
@@ -96,11 +99,10 @@ jobs:
           echo "tailVersions=$svJsonStr" >> $GITHUB_OUTPUT
           # default version
           echo "defaultSparkVersion=${SPARK_BASE_SHIM_VERSION}" >> $GITHUB_OUTPUT
-          jdkHeadVersionArrBody=$(printf ",{\"spark-version\":\"%s\",\"java-version\":8}" "${SPARK_BASE_SHIM_VERSION}")
-          # jdk11
-          jdk11VersionArrBody=$(printf ",{\"spark-version\":\"%s\",\"java-version\":11}" "${SPARK_SHIM_VERSIONS_JDK11[@]}")
+          # jdk17
+          jdk17VersionArrBody=$(printf ",{\"spark-version\":\"%s\",\"java-version\":17}" "${SPARK_SHIM_VERSIONS_JDK17[@]}")
           # jdk
-          jdkVersionArrBody=$jdkHeadVersionArrBody$jdk11VersionArrBody
+          jdkVersionArrBody=$jdk17VersionArrBody
           jdkVersionArrBody=${jdkVersionArrBody:1}
           jdkVersionJsonStr=$(printf {\"include\":[%s]} $jdkVersionArrBody)
           echo "jdkVersions=$jdkVersionJsonStr" >> $GITHUB_OUTPUT
@@ -114,17 +116,17 @@ jobs:
       fail-fast: false
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4 # refs/pull/:prNumber/merge
+      - uses: NVIDIA/spark-rapids-common/checkout@main # refs/pull/:prNumber/merge
 
       - name: Setup Java and Maven Env
         uses: actions/setup-java@v5
         with:
           distribution: adopt
-          java-version: 8
+          java-version: 17
 
       - name: Cache local Maven repository
         continue-on-error: true
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.m2
           key: ${{ needs.cache-dependencies.outputs.dailyCacheKey }}
@@ -138,7 +140,7 @@ jobs:
         run: |
           # https://github.com/NVIDIA/spark-rapids/issues/8847
           # specify expected versions
-          export JAVA_HOME=${JAVA_HOME_8_X64}
+          export JAVA_HOME=${JAVA_HOME_17_X64}
           export PATH=${JAVA_HOME}/bin:${PATH}
           java -version && mvn --version && echo "ENV JAVA_HOME: $JAVA_HOME, PATH: $PATH"
           # test command, will retry for 3 times if failed.
@@ -163,7 +165,7 @@ jobs:
       scala213Versions: ${{ steps.all213ShimVersionsStep.outputs.scala213Versions }}
       sparkJDK17Versions: ${{ steps.all213ShimVersionsStep.outputs.jdkVersions }}
     steps:
-      - uses: actions/checkout@v4 # refs/pull/:prNumber/merge
+      - uses: NVIDIA/spark-rapids-common/checkout@main # refs/pull/:prNumber/merge
       - uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
@@ -180,7 +182,7 @@ jobs:
       - name: Cache local Maven repository
         id: cache
         continue-on-error: true
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.m2
           key: ${{ env.scala213dailyCacheKey }}
@@ -225,7 +227,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
 
-      - uses: actions/checkout@v4 # refs/pull/:prNumber/merge
+      - uses: NVIDIA/spark-rapids-common/checkout@main # refs/pull/:prNumber/merge
 
       - name: Setup Java and Maven Env
         uses: actions/setup-java@v5
@@ -235,7 +237,7 @@ jobs:
 
       - name: Cache local Maven repository
         continue-on-error: true
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.m2
           key: ${{ needs.cache-dependencies-scala213.outputs.scala213dailyCacheKey }}
@@ -281,7 +283,7 @@ jobs:
     strategy:
       matrix: ${{ fromJSON(needs.cache-dependencies-scala213.outputs.sparkJDK17Versions) }}
     steps:
-      - uses: actions/checkout@v4 # refs/pull/:prNumber/merge
+      - uses: NVIDIA/spark-rapids-common/checkout@main # refs/pull/:prNumber/merge
 
       - name: Setup Java and Maven Env
         uses: actions/setup-java@v5
@@ -291,7 +293,7 @@ jobs:
 
       - name: Cache local Maven repository
         continue-on-error: true
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.m2
           key: ${{ needs.cache-dependencies-scala213.outputs.scala213dailyCacheKey }}
@@ -336,7 +338,7 @@ jobs:
     strategy:
       matrix: ${{ fromJSON(needs.cache-dependencies.outputs.sparkJDKVersions) }}
     steps:
-      - uses: actions/checkout@v4 # refs/pull/:prNumber/merge
+      - uses: NVIDIA/spark-rapids-common/checkout@main # refs/pull/:prNumber/merge
 
       - name: Setup Java and Maven Env
         uses: actions/setup-java@v5
@@ -346,7 +348,7 @@ jobs:
 
       - name: Cache local Maven repository
         continue-on-error: true
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.m2
           key: ${{ needs.cache-dependencies.outputs.dailyCacheKey }}
@@ -382,9 +384,9 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        maven-version: [3.6.3, 3.8.8, 3.9.3]
+        maven-version: [3.8.1, 3.8.8, 3.9.3]
     steps:
-      - uses: actions/checkout@v4 # refs/pull/:prNumber/merge
+      - uses: NVIDIA/spark-rapids-common/checkout@main # refs/pull/:prNumber/merge
 
       - name: Setup Java
         uses: actions/setup-java@v5
@@ -394,7 +396,7 @@ jobs:
 
       - name: Cache local Maven repository
         continue-on-error: true
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.m2
           key: ${{ needs.cache-dependencies.outputs.dailyCacheKey }}
@@ -411,7 +413,7 @@ jobs:
         run: |
           # https://github.com/NVIDIA/spark-rapids/issues/8847
           # specify expected versions
-          export JAVA_HOME=${JAVA_HOME_11_X64}
+          export JAVA_HOME=${JAVA_HOME_17_X64}
           export PATH=${JAVA_HOME}/bin:${PATH}
           java -version && mvn --version && echo "ENV JAVA_HOME: $JAVA_HOME, PATH: $PATH"
           # test command, will retry for 3 times if failed.

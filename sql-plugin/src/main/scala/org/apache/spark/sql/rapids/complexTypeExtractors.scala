@@ -27,6 +27,7 @@ import com.nvidia.spark.rapids.shims._
 
 import org.apache.spark.sql.catalyst.analysis.TypeCheckResult
 import org.apache.spark.sql.catalyst.expressions._
+import org.apache.spark.sql.catalyst.trees.{CurrentOrigin, Origin}
 import org.apache.spark.sql.catalyst.util.{quoteIdentifier, TypeUtils}
 import org.apache.spark.sql.rapids.shims.RapidsErrorUtils
 import org.apache.spark.sql.types.{AbstractDataType, AnyDataType, ArrayType, BooleanType, DataType, IntegralType, LongType, MapType, StructField, StructType}
@@ -200,8 +201,11 @@ case class GpuGetArrayItem(child: Expression, ordinal: Expression, failOnError: 
   }
 }
 
-case class GpuGetMapValue(child: Expression, key: Expression, failOnError: Boolean)
+case class GpuGetMapValue(child: Expression, key: Expression, failOnError: Boolean)(
+    override val origin: Origin = CurrentOrigin.get)
   extends GpuBinaryExpression with ImplicitCastInputTypes with NullIntolerantShim {
+
+  override def otherCopyArgs: Seq[AnyRef] = origin :: Nil
 
   private def keyType = child.dataType.asInstanceOf[MapType].keyType
 

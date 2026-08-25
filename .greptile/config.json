@@ -1,0 +1,149 @@
+{
+  "strictness": 3,
+  "commentTypes": ["logic", "syntax"],
+  "ignoreKeywords": "DO NOT REVIEW\n[bot]",
+  "ignorePatterns": "*.generated.*\n**/target/**\n**/src/test/resources/data/**\n**/*.parquet\n**/*.orc\n**/*.avro",
+
+  "patternRepositories": [
+    "rapidsai/cudf",
+    "NVIDIA/spark-rapids-jni",
+    "apache/spark"
+  ],
+
+  "instructions": "Spark plugin for GPU-accelerated data processing using RAPIDS cuDF. Maven-based, Scala/Java with Python integration tests. Key modules: sql-plugin/, shuffle-plugin/, iceberg/, delta-lake/, tests/, integration_tests/. Version-specific shims at sql-plugin/src/main/spark{VERSION}/. Review rules are in .greptile/rules.md. Key files are listed in .greptile/files.json. Also reference AGENTS.md for build commands, project structure, and coding conventions. IMPORTANT: This project depends on cuDF (rapidsai/cudf) for GPU compute kernels and spark-rapids-jni (NVIDIA/spark-rapids-jni) for JNI bindings. When reviewing code that calls cuDF/JNI APIs, cross-reference the upstream repos to verify API usage correctness, especially for: column operations, memory allocation semantics, stream handling, and error codes. This project also shims against multiple Apache Spark versions (apache/spark). When reviewing shim code or GPU operator implementations, cross-reference apache/spark to verify that the GPU behavior matches the corresponding CPU implementation in the target Spark version, especially for: expression evaluation semantics, null handling, type coercion, and catalog/partition behavior.",
+
+  "rules": [
+    {
+      "id": "gpu-resource-arm",
+      "rule": "GPU resources must use withResource() or closeOnExcept() from Arm.scala. Never use bare .close() on GPU resources.",
+      "scope": ["sql-plugin/src/**", "shuffle-plugin/src/**"],
+      "severity": "high"
+    },
+    {
+      "id": "oom-retry-handling",
+      "rule": "GPU memory-allocating code must be wrapped in withRetry/withRetryNoSplit from RmmRapidsRetryIterator. The retry function must be idempotent. Input should be SpillableColumnarBatch before entering retry.",
+      "scope": ["sql-plugin/src/**", "shuffle-plugin/src/**"],
+      "severity": "high"
+    },
+    {
+      "id": "shuffle-partition-size",
+      "rule": "Enforce the 2GB per-partition size limit in shuffle code. Flag unbounded buffer growth. This is a reliability/crash issue, not just performance.",
+      "scope": ["shuffle-plugin/src/**", "sql-plugin/src/**/shuffle/**"],
+      "severity": "high"
+    },
+    {
+      "id": "host-device-transfer",
+      "rule": "Avoid unnecessary host-device memory copies. Keep data on GPU between consecutive operations.",
+      "scope": ["sql-plugin/src/**", "shuffle-plugin/src/**"],
+      "severity": "medium"
+    },
+    {
+      "id": "null-check-native",
+      "rule": "Null-check cuDF native objects and results from aggregations/joins that may be empty.",
+      "scope": ["sql-plugin/src/**"],
+      "severity": "high"
+    },
+    {
+      "id": "decimal-precision",
+      "rule": "Check decimal precision/scale for overflow. Must match Apache Spark behavior for DECIMAL128.",
+      "scope": ["sql-plugin/src/**"],
+      "severity": "high"
+    },
+    {
+      "id": "timestamp-timezone",
+      "rule": "Maintain TIMESTAMP_NTZ vs TIMESTAMP_LTZ distinction. Verify timezone conversions.",
+      "scope": ["sql-plugin/src/**"],
+      "severity": "high"
+    },
+    {
+      "id": "deadlock-prevention",
+      "rule": "No nested locks without documented ordering. Review synchronization in shuffle writers and GPU semaphore acquisition.",
+      "scope": ["sql-plugin/src/**", "shuffle-plugin/src/**"],
+      "severity": "high"
+    },
+    {
+      "id": "gpu-fallback-declaration",
+      "rule": "New GPU operators must declare fallback behavior in GpuOverrides with a clear log message for unsupported types. Fallback must be covered by integration tests using assert_gpu_fallback_collect.",
+      "scope": ["sql-plugin/src/**/GpuOverrides.scala", "sql-plugin/src/**/rapids/**", "sql-plugin/src/main/spark*/**"],
+      "severity": "high"
+    },
+    {
+      "id": "shim-consistency",
+      "rule": "Spark API changes must be shimmed for all supported versions. Verify shim classes override all required methods. When modifying a shim file, verify that all related shim versions are updated consistently. Cross-reference apache/spark to confirm the shimmed behavior matches the target Spark version's semantics.",
+      "scope": ["sql-plugin/src/**/shims/**", "sql-plugin/src/main/spark*/**"],
+      "severity": "high"
+    },
+    {
+      "id": "shim-json-annotation",
+      "rule": "Every shim-specific source file must have a spark-rapids-shim-json-lines comment block after the copyright header listing supported Spark versions.",
+      "scope": ["sql-plugin/src/main/spark*/**"],
+      "severity": "high"
+    },
+    {
+      "id": "iceberg-correctness",
+      "rule": "Handle schema evolution, partition spec changes, metadata consistency, and merge-on-read delete files correctly.",
+      "scope": ["iceberg/**", "sql-plugin/src/**/iceberg/**"],
+      "severity": "high"
+    },
+    {
+      "id": "delta-dml-correctness",
+      "rule": "Verify row-level change tracking, commit protocol adherence, and conflict resolution in merge/update/delete.",
+      "scope": ["delta-lake/**", "sql-plugin/src/**/delta/**"],
+      "severity": "high"
+    },
+    {
+      "id": "config-documentation",
+      "rule": "New RapidsConf keys must have clear documentation strings, sensible defaults, and be mentioned in the PR description.",
+      "scope": ["sql-plugin/src/**/RapidsConf.scala"],
+      "severity": "medium"
+    },
+    {
+      "id": "test-resource-cleanup",
+      "rule": "Tests must clean up GPU resources and SparkSession in afterAll/afterEach to prevent cascading failures.",
+      "scope": ["tests/**", "integration_tests/**", "shuffle-plugin/src/test/**"],
+      "severity": "medium"
+    },
+    {
+      "id": "no-flaky-test-patterns",
+      "rule": "No hardcoded Thread.sleep, order-dependent tests, or non-deterministic data without fixed seeds.",
+      "scope": ["tests/**", "integration_tests/**", "sql-plugin/src/test/**", "shuffle-plugin/src/test/**"],
+      "severity": "medium"
+    },
+    {
+      "id": "integration-test-gpu-verification",
+      "rule": "Integration tests must verify GPU execution using assert_gpu_and_cpu_are_equal_collect or assert_gpu_fallback_collect. Do not write tests that silently run on CPU only.",
+      "scope": ["integration_tests/**"],
+      "severity": "high"
+    },
+    {
+      "id": "upstream-dependency-boundary",
+      "rule": "Code touching JNI calls (cudf/spark-rapids-jni), private API interfaces (spark-rapids-private), or hybrid execution paths (spark-rapids-hybrid/Gluten) may break from concurrent upstream SNAPSHOT changes. Review for assumptions about upstream behavior. Cross-reference rapidsai/cudf for correct function signatures, null handling semantics, and memory ownership rules at JNI boundaries.",
+      "scope": ["sql-plugin/src/**", "shuffle-plugin/src/**"],
+      "severity": "high"
+    },
+    {
+      "id": "snapshot-dependency-change",
+      "rule": "Changes to upstream SNAPSHOT dependency versions must be highlighted in the PR description with rationale.",
+      "scope": ["pom.xml", "**/pom.xml"],
+      "severity": "medium"
+    },
+    {
+      "id": "dependency-alignment",
+      "rule": "Verify dependency version alignment across all build profiles and shaded JAR consistency.",
+      "scope": ["pom.xml", "**/pom.xml", "build/**"],
+      "severity": "medium"
+    },
+    {
+      "id": "databricks-ci-tag",
+      "rule": "Databricks pre-merge CI auto-runs only when the diff touches a 'sql-plugin/src/main/...db/' shim dir or a path containing 'databricks'. The Databricks pre-merge builds with -DskipTests and runs only the Python integration tests (run_pyspark_from_build.sh); Scala unit tests are never executed on Databricks, so the '[databricks]' tag is only meaningful for integration_tests/** changes (hence this rule's scope). For an integration test or its utilities that could behave differently on Databricks — filesystem/path semantics (local vs DBFS/abfss, file:// scheme, os.walk/os.path.getsize), or optimizer/plan-string assertions (alias names and plan rendering differ on DBR) — where the PR title lacks the '[databricks]' tag, recommend adding it (or confirming Databricks coverage another way), because the standard Linux pre-merge does not run Databricks and DBR-only failures will otherwise surface later on an unrelated PR. Do NOT flag changes that already touch a *db* shim path (auto-covered) or doc-only changes.",
+      "scope": ["integration_tests/**"],
+      "severity": "medium"
+    },
+    {
+      "id": "performance-checklist-required",
+      "rule": "Report `Performance: Not required` as a high-severity finding unless the pull request is documentation-only or test-only, or its description gives a verifiable reason the change cannot affect runtime performance. A bug-fix label, small diff, or rarely used path is not by itself an exemption. When uncertain, flag.",
+      "scope": ["**"],
+      "severity": "high"
+    }
+  ]
+}

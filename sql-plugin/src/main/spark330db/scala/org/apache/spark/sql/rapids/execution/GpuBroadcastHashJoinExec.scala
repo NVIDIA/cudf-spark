@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,8 +17,8 @@
 /*** spark-rapids-shim-json-lines
 {"spark": "330db"}
 {"spark": "332db"}
-{"spark": "341db"}
 {"spark": "350db143"}
+{"spark": "400db173"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.execution
 
@@ -45,13 +45,9 @@ class GpuBroadcastHashJoinMeta(
     rule: DataFromReplacementRule) extends GpuBroadcastHashJoinMetaBase(join, conf, parent, rule) {
 
   override def convertToGpu(): GpuExec = {
-    val condition = conditionMeta.map(_.convertToGpu())
-    val (joinCondition, filterCondition) = if (conditionMeta.forall(_.canThisBeAst)) {
-      (condition, None)
-    } else {
-      (None, condition)
-    }
     val Seq(left, right) = childPlans.map(_.convertIfNeeded())
+    val extractedCondition = GpuHashJoin.extractJoinConditionIfNeeded(
+      conditionMeta, join.joinType, left, right)
     // The broadcast part of this must be a BroadcastExchangeExec
     val buildSideMeta = buildSide match {
       case GpuBuildLeft => left
@@ -63,14 +59,16 @@ class GpuBroadcastHashJoinMeta(
       rightKeys.map(_.convertToGpu()),
       join.joinType,
       buildSide,
-      joinCondition,
-      left,
-      right,
+      extractedCondition.joinCondition,
+      extractedCondition.left,
+      extractedCondition.right,
       join.isNullAwareAntiJoin,
       join.isExecutorBroadcast)
     // For inner joins we can apply a post-join condition for any conditions that cannot be
     // evaluated directly in a mixed join that leverages a cudf AST expression
-    filterCondition.map(c => GpuFilterExec(c, joinExec)()).getOrElse(joinExec)
+    val filteredJoinExec =
+      extractedCondition.filterCondition.map(c => GpuFilterExec(c, joinExec)()).getOrElse(joinExec)
+    extractedCondition.projectIfNeeded(filteredJoinExec)
   }
 }
 
@@ -87,6 +85,8 @@ case class GpuBroadcastHashJoinExec(
       extends GpuBroadcastHashJoinExecBase(
       leftKeys, rightKeys, joinType, buildSide, condition, left, right, isNullAwareAntiJoin) {
   import GpuMetric._
+
+  private type BuildBatchAndStream = (ColumnarBatch, Iterator[ColumnarBatch])
 
   override lazy val additionalMetrics: Map[String, GpuMetric] = Map(
     OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY),
@@ -120,13 +120,21 @@ case class GpuBroadcastHashJoinExec(
       case ReusedExchangeExec(_, g: GpuShuffleExchangeExec) => g
       case _ => throw new IllegalStateException(s"cannot locate GPU shuffle in $p")
     }
-    buildPlan match {
+    getBroadcastPlan(buildPlan) match {
       case gpu: GpuShuffleExchangeExec => gpu
       case sqse: ShuffleQueryStageExec => from(sqse)
       case reused: ReusedExchangeExec => reused.child.asInstanceOf[GpuShuffleExchangeExec]
       case GpuShuffleCoalesceExec(GpuCustomShuffleReaderExec(sqse: ShuffleQueryStageExec, _), _) =>
         from(sqse)
+      // A GpuProjectExec for a bridged/split join condition (extractNonAstFromJoinCond) on the
+      // executor-broadcast build side is peeled off by getBroadcastPlan, leaving the coalesce
+      // directly over the shuffle query stage with no custom shuffle reader in between. The
+      // nested-loop-join path already handles this same shape (added with split-condition
+      // support in #9702); mirror it here.
+      case GpuShuffleCoalesceExec(sqse: ShuffleQueryStageExec, _) => from(sqse)
       case GpuCustomShuffleReaderExec(sqse: ShuffleQueryStageExec, _) => from(sqse)
+      case other => throw new IllegalStateException(
+        s"cannot locate GPU shuffle exchange in build plan: $other")
     }
   }
 
@@ -135,7 +143,8 @@ case class GpuBroadcastHashJoinExec(
       buildSchema: StructType,
       buildOutput: Seq[Attribute],
       streamIter: Iterator[ColumnarBatch],
-      coalesceMetricsMap: Map[String, GpuMetric]): (ColumnarBatch, Iterator[ColumnarBatch]) = {
+      coalesceMetricsMap: Map[String, GpuMetric],
+      postProjectionAndClose: Option[ColumnarBatch => ColumnarBatch]): BuildBatchAndStream = {
     val targetSize = RapidsConf.GPU_BATCH_SIZE_BYTES.get(conf)
     val metricsMap = allMetrics
 
@@ -150,7 +159,8 @@ case class GpuBroadcastHashJoinExec(
       }
       val buildBatch = GpuExecutorBroadcastHelper.getExecutorBroadcastBatch(buildRelation,
           buildSchema, buildOutput, metricsMap, targetSize)
-      (buildBatch, bufferedStreamIter)
+      val projectedBuildBatch = postProjectionAndClose.map(_(buildBatch)).getOrElse(buildBatch)
+      (projectedBuildBatch, bufferedStreamIter)
     }
   }
 
@@ -170,9 +180,10 @@ case class GpuBroadcastHashJoinExec(
         .asInstanceOf[RDD[ColumnarBatch]]
 
     val rdd = streamedPlan.executeColumnar()
-    val localBuildSchema = buildPlan.schema
-    val localBuildOutput = buildPlan.output
+    val localBuildSchema = getBroadcastPlan(buildPlan).schema
+    val localBuildOutput = getBroadcastPlan(buildPlan).output
     val localIsNullAwareAntiJoin = isNullAwareAntiJoin
+    val postProjectionAndClose = buildSidePostProjection
     rdd.mapPartitions { it =>
       val (builtBatch, streamIter) =
         getExecutorBuiltBatchAndStreamIter(
@@ -180,7 +191,8 @@ case class GpuBroadcastHashJoinExec(
           localBuildSchema,
           localBuildOutput,
           new CollectTimeIterator(NvtxRegistry.BROADCAST_JOIN_STREAM, it, streamTime),
-          allMetrics)
+          allMetrics,
+          postProjectionAndClose)
       if (localIsNullAwareAntiJoin) {
         // This is to support the null-aware anti join for the LeftAnti join with
         // BuildRight. See the config "spark.sql.optimizeNullAwareAntiJoin".
@@ -219,4 +231,3 @@ case class GpuBroadcastHashJoinExec(
     }
   }
 }
-

@@ -26,11 +26,12 @@ import com.nvidia.spark.rapids.ArrayIndexUtils.firstIndexAndNumElementUnchecked
 import com.nvidia.spark.rapids.BoolUtils.isAllValidTrue
 import com.nvidia.spark.rapids.GpuListUtils
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
-import com.nvidia.spark.rapids.jni.GpuListSliceUtils
+import com.nvidia.spark.rapids.jni.{GpuListSliceUtils, MapUtils, StringUtils}
 import com.nvidia.spark.rapids.shims.{GetSequenceSize, NullIntolerantShim, ShimExpression}
 
 import org.apache.spark.sql.catalyst.analysis.{TypeCheckResult, TypeCoercion}
-import org.apache.spark.sql.catalyst.expressions.{ElementAt, ExpectsInputTypes, Expression, ImplicitCastInputTypes, NamedExpression, RowOrdering, Sequence, TimeZoneAwareExpression}
+import org.apache.spark.sql.catalyst.expressions.{ArraySort, ElementAt, ExpectsInputTypes, Expression, ImplicitCastInputTypes, LambdaFunction, NamedExpression, RowOrdering, Sequence, TimeZoneAwareExpression}
+import org.apache.spark.sql.catalyst.trees.{CurrentOrigin, Origin}
 import org.apache.spark.sql.catalyst.util.{GenericArrayData, TypeUtils}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.shims.RapidsErrorUtils
@@ -446,14 +447,17 @@ object GpuElementAtMeta {
           } else {
             in.failOnError
           }
-          GpuElementAt(lhs, rhs, failOnError)
+          GpuElementAt(lhs, rhs, failOnError)(in.origin)
         }
       })
   }
 }
 
-case class GpuElementAt(left: Expression, right: Expression, failOnError: Boolean)
+case class GpuElementAt(left: Expression, right: Expression, failOnError: Boolean)(
+    override val origin: Origin = CurrentOrigin.get)
   extends GpuBinaryExpression with ExpectsInputTypes {
+
+  override def otherCopyArgs: Seq[AnyRef] = origin :: Nil
 
   override def hasSideEffects: Boolean = super.hasSideEffects || failOnError || {
     right match {
@@ -670,7 +674,14 @@ case class GpuReverse(child: Expression) extends GpuUnaryExpression {
   override def dataType: DataType = child.dataType
 
   override protected def doColumnar(input: GpuColumnVector): ColumnVector = {
-    input.getBase.reverseStringsOrLists()
+    // Strings use Spark UTF8String.reverse semantics (SPARK-57507): clamp truncated trailing
+    // multi-byte UTF-8 widths to the bytes remaining in each row. libcudf reverse can
+    // over-read into the next row for malformed Spark StringType values.
+    if (child.dataType.isInstanceOf[StringType]) {
+      StringUtils.reverseStrings(input.getBase)
+    } else {
+      input.getBase.reverseStringsOrLists()
+    }
   }
 }
 
@@ -775,31 +786,38 @@ case class GpuMapFromEntries(child: Expression) extends GpuUnaryExpression with 
   // override def stateful: Boolean = true
 
   override protected def doColumnar(input: GpuColumnVector): cudf.ColumnVector = {
-    // Internally the format for a list of key/value structs is the same as a map,
-    // so we can just return the same column with proper validation and deduplication.
+    // MapUtils handles Spark's null-struct-entry semantics and null-key validation.
+    // Valid inputs can be returned zero-copy because Spark MAP<K,V> and
+    // cuDF LIST<STRUCT<K,V>> share the same physical layout.
     val inputBase = input.getBase
-    
-    // Check for null keys
-    GpuMapUtils.assertNoNullKeys(inputBase)
-    
-    // Handle duplicate keys based on the policy.
+    val effective: cudf.ColumnVector =
+      if (MapUtils.isValidMap(inputBase, /*throwOnNullKey=*/true)) {
+        inputBase.incRefCount()
+      } else {
+        MapUtils.mapFromEntries(inputBase, /*throwOnNullKey=*/true)
+      }
+    withResource(effective) { eff =>
+      dedupByPolicy(eff)
+    }
+  }
+
+  private def dedupByPolicy(col: cudf.ColumnVector): cudf.ColumnVector = {
     // Spark 4.1+ returns an enum value instead of String, so use toString first.
     mapKeyDedupPolicy.toString.toUpperCase match {
       case "EXCEPTION" =>
-        // Check if there are any duplicate keys
-        withResource(inputBase.dropListDuplicatesWithKeysValues()) { deduped =>
+        // Check if any duplicate keys were removed
+        withResource(col.dropListDuplicatesWithKeysValues()) { deduped =>
           withResource(deduped.getChildColumnView(0)) { dedupedChild =>
-            withResource(inputBase.getChildColumnView(0)) { originalChild =>
+            withResource(col.getChildColumnView(0)) { originalChild =>
               if (dedupedChild.getRowCount != originalChild.getRowCount) {
                 throw GpuMapUtils.duplicateMapKeyFoundError
               }
             }
           }
         }
-        inputBase.incRefCount()
+        col.incRefCount()
       case "LAST_WIN" =>
-        // Remove duplicates, keeping the last occurrence
-        inputBase.dropListDuplicatesWithKeysValues()
+        col.dropListDuplicatesWithKeysValues()
       case other =>
         throw new IllegalArgumentException(
           s"Unsupported map key deduplication policy: $other")
@@ -851,6 +869,38 @@ case class GpuSortArray(base: Expression, ascendingOrder: Expression)
   private def isDescendingOrder(scalar: GpuScalar): Boolean = scalar.getValue match {
     case ascending: Boolean => !ascending
     case invalidValue => throw new IllegalArgumentException(s"invalid value $invalidValue")
+  }
+}
+
+case class GpuArraySort(child: Expression) extends GpuUnaryExpression with ExpectsInputTypes {
+
+  override def dataType: DataType = child.dataType
+
+  override def inputTypes: Seq[AbstractDataType] = Seq(ArrayType)
+
+  override def checkInputDataTypes(): TypeCheckResult = child.dataType match {
+    case ArrayType(dt, _) if RowOrdering.isOrderable(dt) =>
+      TypeCheckResult.TypeCheckSuccess
+    case ArrayType(dt, _) =>
+      TypeCheckResult.TypeCheckFailure(
+        s"$prettyName does not support sorting array of type ${dt.catalogString} " +
+          "which is not orderable")
+    case dt =>
+      TypeCheckResult.TypeCheckFailure(s"$prettyName only supports array input, but found $dt")
+  }
+
+  override protected def doColumnar(input: GpuColumnVector): cudf.ColumnVector = {
+    // false, false => ascending order with nulls last (array_sort's default comparator)
+    input.getBase.listSortRows(false, false)
+  }
+}
+
+object GpuArraySort {
+  /** True iff the lambda is array_sort's default comparator (ascending, nulls last). */
+  def isDefaultComparator(arraySort: ArraySort): Boolean = arraySort.function match {
+    case LambdaFunction(body, Seq(left, right), _) =>
+      body.canonicalized == ArraySort.comparator(left, right).canonicalized
+    case _ => false
   }
 }
 
@@ -1249,6 +1299,9 @@ case class GpuArraysZip(children: Seq[Expression]) extends GpuExpression with Sh
    * same offsets and the same validity. This assumes that the validity on the inputs all match.
    */
   private def padArraysToMaxLength(inputs: Seq[ColumnVector]): Seq[ColumnVector] = {
+    if (inputs.head.getRowCount == 0) {
+      return inputs.safeMap(_.incRefCount())
+    }
     // Compute max size of input arrays for each row, this is to know how we need to pad things.
     //
     // input1: [[A, B, C], [D, E], null, [G]]
@@ -1794,6 +1847,7 @@ case class GpuFlattenArray(child: Expression) extends GpuUnaryExpression with Nu
   private def childDataType: ArrayType = child.dataType.asInstanceOf[ArrayType]
   override def nullable: Boolean = child.nullable || childDataType.containsNull
   override def dataType: DataType = childDataType.elementType
+
   override def doColumnar(input: GpuColumnVector): ColumnVector = {
     input.getBase.flattenLists
   }

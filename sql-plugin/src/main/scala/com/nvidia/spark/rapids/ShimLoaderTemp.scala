@@ -17,7 +17,7 @@
 package com.nvidia.spark.rapids
 
 import com.nvidia.spark.rapids.delta.DeltaProbe
-import com.nvidia.spark.rapids.iceberg.IcebergProvider
+import com.nvidia.spark.rapids.iceberg.IcebergProbe
 
 import org.apache.spark.sql.rapids.{AdaptiveSparkPlanHelperShim, ExecutionPlanCaptureCallbackBase}
 
@@ -46,8 +46,8 @@ object ShimLoaderTemp {
   def newDeltaProbe(): DeltaProbe = ShimReflectionUtils.newInstanceOf[DeltaProbe](
     "com.nvidia.spark.rapids.delta.DeltaProbeImpl")
 
-  def newIcebergProvider(): IcebergProvider = ShimReflectionUtils.newInstanceOf[IcebergProvider](
-    "com.nvidia.spark.rapids.iceberg.IcebergProviderImpl")
+  def newIcebergProbe(): IcebergProbe = ShimReflectionUtils.newInstanceOf[IcebergProbe](
+    "com.nvidia.spark.rapids.iceberg.IcebergProbeImpl")
 
   def newPlanShims(): PlanShims = ShimReflectionUtils.newInstanceOf[PlanShims](
     "com.nvidia.spark.rapids.shims.PlanShimsImpl"

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -60,8 +60,6 @@ class TimeZonePerfSuite extends SparkQueryCompareTestSuite with BeforeAndAfterAl
   private val zones = timeZoneStrings.split(",")
 
   private val path = "/tmp/tmp_TimeZonePerfSuite"
-
-  private val timestampRulesEndYear = 2200
 
   /**
    * Create a Parquet file to test
@@ -186,7 +184,7 @@ class TimeZonePerfSuite extends SparkQueryCompareTestSuite with BeforeAndAfterAl
     assume(enablePerfTest)
 
     // cache time zone DB in advance
-    GpuTimeZoneDB.cacheDatabase(timestampRulesEndYear)
+    GpuTimeZoneDB.cacheDatabase()
     Thread.sleep(5L)
 
     def perfTest(spark: SparkSession, zone: String): DataFrame = {
@@ -202,7 +200,7 @@ class TimeZonePerfSuite extends SparkQueryCompareTestSuite with BeforeAndAfterAl
     assume(enablePerfTest)
 
     // cache time zone DB in advance
-    GpuTimeZoneDB.cacheDatabase(timestampRulesEndYear)
+    GpuTimeZoneDB.cacheDatabase()
     Thread.sleep(5L)
 
     def perfTest(spark: SparkSession, zone: String): DataFrame = {
@@ -218,7 +216,7 @@ class TimeZonePerfSuite extends SparkQueryCompareTestSuite with BeforeAndAfterAl
     assume(enablePerfTest)
 
     // cache time zone DB in advance
-    GpuTimeZoneDB.cacheDatabase(timestampRulesEndYear)
+    GpuTimeZoneDB.cacheDatabase()
     Thread.sleep(5L)
 
     def perfTest(spark: SparkSession, zone: String): DataFrame = {
@@ -235,7 +233,7 @@ class TimeZonePerfSuite extends SparkQueryCompareTestSuite with BeforeAndAfterAl
     assume(enablePerfTest)
 
     // cache time zone DB in advance
-    GpuTimeZoneDB.cacheDatabase(timestampRulesEndYear)
+    GpuTimeZoneDB.cacheDatabase()
     Thread.sleep(5L)
 
     def perfTest(spark: SparkSession, zone: String): DataFrame = {
@@ -252,7 +250,7 @@ class TimeZonePerfSuite extends SparkQueryCompareTestSuite with BeforeAndAfterAl
     assume(enablePerfTest)
 
     // cache time zone DB in advance
-    GpuTimeZoneDB.cacheDatabase(timestampRulesEndYear)
+    GpuTimeZoneDB.cacheDatabase()
     Thread.sleep(5L)
 
     def perfTest(spark: SparkSession, zone: String): DataFrame = {
@@ -269,7 +267,7 @@ class TimeZonePerfSuite extends SparkQueryCompareTestSuite with BeforeAndAfterAl
     assume(enablePerfTest)
 
     // cache time zone DB in advance
-    GpuTimeZoneDB.cacheDatabase(timestampRulesEndYear)
+    GpuTimeZoneDB.cacheDatabase()
     Thread.sleep(5L)
 
     def perfTest(spark: SparkSession, zone: String): DataFrame = {
@@ -286,7 +284,7 @@ class TimeZonePerfSuite extends SparkQueryCompareTestSuite with BeforeAndAfterAl
     assume(enablePerfTest)
 
     // cache time zone DB in advance
-    GpuTimeZoneDB.cacheDatabase(timestampRulesEndYear)
+    GpuTimeZoneDB.cacheDatabase()
     Thread.sleep(5L)
 
     def perfTest(spark: SparkSession, zone: String): DataFrame = {
@@ -303,7 +301,7 @@ class TimeZonePerfSuite extends SparkQueryCompareTestSuite with BeforeAndAfterAl
     assume(enablePerfTest)
 
     // cache time zone DB in advance
-    GpuTimeZoneDB.cacheDatabase(timestampRulesEndYear)
+    GpuTimeZoneDB.cacheDatabase()
     Thread.sleep(5L)
 
     def perfTest(spark: SparkSession, zone: String): DataFrame = {

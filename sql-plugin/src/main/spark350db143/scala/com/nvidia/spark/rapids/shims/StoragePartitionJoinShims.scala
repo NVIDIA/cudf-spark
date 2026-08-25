@@ -16,22 +16,33 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark": "350db143"}
-{"spark": "400"}
-{"spark": "401"}
-{"spark": "402"}
 spark-rapids-shim-json-lines ***/
+
 package com.nvidia.spark.rapids.shims
 
-// Spark 3.5.0-db143, 4.0.x: StoragePartitionJoinParams is in datasources.v2 package
+import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.expressions.Expression
+import org.apache.spark.sql.catalyst.util.InternalRowComparableWrapper
+// Spark 3.5.0-db143: StoragePartitionJoinParams is in the datasources.v2 package
 import org.apache.spark.sql.execution.datasources.v2.StoragePartitionJoinParams
 
 /**
  * Shim for StoragePartitionJoinParams to handle package location change.
  * In Spark 3.5.0-db143 and 4.0.x, it's in org.apache.spark.sql.execution.datasources.v2
- * In Spark 4.1.0+, it moved to org.apache.spark.sql.execution.joins
+ * In Spark 4.1.0+ and 400db173, it moved to org.apache.spark.sql.execution.joins
  */
 object StoragePartitionJoinShims {
   type SpjParams = StoragePartitionJoinParams
 
   def default(): SpjParams = StoragePartitionJoinParams()
+
+  def fromBatchScan(spjParams: StoragePartitionJoinParams): SpjParams = spjParams
+
+  /**
+   * Reducible partition transforms (SPARK-47094) landed in Spark 4.0, so this build carries no
+   * reducers and scan partition keys are already final.
+   */
+  def partitionValueReducer(
+      spjParams: SpjParams,
+      partExpressions: Seq[Expression]): Option[InternalRow => InternalRowComparableWrapper] = None
 }

@@ -19,10 +19,12 @@ package org.apache.spark.sql.rapids
 import java.util.Locale
 
 import com.nvidia.spark.rapids._
+import com.nvidia.spark.rapids.RowBasedShuffleChecksumConf
 import com.nvidia.spark.rapids.shims.ShuffleManagerShimUtils
 
 import org.apache.spark.{SparkConf, SparkEnv}
 import org.apache.spark.internal.Logging
+import org.apache.spark.sql.internal.SQLConf
 
 class GpuShuffleEnv(rapidsConf: RapidsConf) extends Logging {
   private var shuffleCatalog: ShuffleBufferCatalog = _
@@ -89,6 +91,7 @@ class GpuShuffleEnv(rapidsConf: RapidsConf) extends Logging {
   }
 }
 
+@scala.annotation.nowarn("cat=deprecation&origin=org.apache.spark.SparkEnv.shuffleManager")
 object GpuShuffleEnv extends Logging {
   def isUCXShuffleAndEarlyStart(conf: RapidsConf): Boolean = {
     conf.isUCXShuffleManagerMode &&
@@ -136,14 +139,15 @@ object GpuShuffleEnv extends Logging {
     conf.getBoolean("spark.authenticate", false)
   }
 
-  // Returns true if row-based checksum is enabled, which is not supported
-  // by the RAPIDS Shuffle Manager
+  // Returns true if the order-independent (row-based) checksum feature is enabled.
+  // This Spark 4.1+ feature (SPARK-51756, SPARK-53575) computes row-based checksums
+  // in shuffle writers to detect non-deterministic output across task retries.
+  // Not yet supported by the RAPIDS Shuffle Manager (would require GPU-side checksum).
+  // Note: this is different from the older spark.shuffle.checksum.enabled (since Spark 3.2)
+  // which is for IO-level corruption diagnosis and IS supported by RAPIDS shuffle.
   def isRowBasedChecksumEnabled: Boolean = {
     val conf = SparkEnv.get.conf
-    // Row-based checksum feature was added in Spark 4.1.x (SPARK-51756).
-    // Fully supporting this feature would require kernel development to compute
-    // checksums on the GPU side.
-    conf.getBoolean("spark.shuffle.checksum.enabled", false)
+    RowBasedShuffleChecksumConf.isEnabled(SQLConf.get, conf)
   }
 
   //

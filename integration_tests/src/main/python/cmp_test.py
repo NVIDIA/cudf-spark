@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2023, NVIDIA CORPORATION.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,12 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from decimal import Decimal
+
 import pytest
 
-from asserts import assert_gpu_and_cpu_are_equal_collect
+from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, \
+    assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect
 from conftest import is_not_utc
 from data_gen import *
-from spark_session import with_cpu_session, is_before_spark_313, is_before_spark_330
+from spark_session import with_cpu_session, is_before_spark_313
 from pyspark.sql.types import *
 from marks import datagen_overrides, allow_non_gpu
 import pyspark.sql.functions as f
@@ -35,7 +38,6 @@ def test_eq(data_gen):
                 f.col('b') == f.lit(None).cast(data_type),
                 f.col('a') == f.col('b')))
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_eq_for_interval():
     def test_func(data_gen):
         (s1, s2) = with_cpu_session(
@@ -68,7 +70,6 @@ def test_eq_ns(data_gen):
                 f.col('b').eqNullSafe(f.lit(None).cast(data_type)),
                 f.col('a').eqNullSafe(f.col('b'))))
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_eq_ns_for_interval():
     data_gen = DayTimeIntervalGen()
     (s1, s2) = with_cpu_session(
@@ -95,7 +96,6 @@ def test_ne(data_gen):
                 f.col('b') != f.lit(None).cast(data_type),
                 f.col('a') != f.col('b')))
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_ne_for_interval():
     def test_func(data_gen):
         (s1, s2) = with_cpu_session(
@@ -128,7 +128,6 @@ def test_lt(data_gen):
                 f.col('b') < f.lit(None).cast(data_type),
                 f.col('a') < f.col('b')))
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_lt_for_interval():
     def test_func(data_gen):
         (s1, s2) = with_cpu_session(
@@ -162,7 +161,6 @@ def test_lte(data_gen):
                 f.col('b') <= f.lit(None).cast(data_type),
                 f.col('a') <= f.col('b')))
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_lte_for_interval():
     def test_func(data_gen):
         (s1, s2) = with_cpu_session(
@@ -196,7 +194,6 @@ def test_gt(data_gen):
                 f.col('b') > f.lit(None).cast(data_type),
                 f.col('a') > f.col('b')))
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_gt_interval():
     def test_func(data_gen):
         (s1, s2) = with_cpu_session(
@@ -230,7 +227,6 @@ def test_gte(data_gen):
                 f.col('b') >= f.lit(None).cast(data_type),
                 f.col('a') >= f.col('b')))
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_gte_for_interval():
     def test_func(data_gen):
         (s1, s2) = with_cpu_session(
@@ -256,7 +252,6 @@ def test_isnull(data_gen):
             lambda spark : unary_op_df(spark, data_gen).select(
                 f.isnull(f.col('a'))))
 
-@pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_isnull_for_interval():
     data_gen = DayTimeIntervalGen()
     assert_gpu_and_cpu_are_equal_collect(
@@ -300,6 +295,8 @@ non_utc_allow_for_date_add_interval = ['ProjectExec', 'FilterExec'] if is_not_ut
 @pytest.mark.parametrize('op', ['>', '<'])
 @allow_non_gpu(*non_utc_allow_for_date_add_interval)
 def test_empty_filter(op, spark_tmp_path):
+    # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
+    conf = {'spark.sql.adaptive.enabled': 'false'}
 
     def do_it(spark):
         df = spark.createDataFrame([(14, "Tom"), (23, "Alice"), (16, "Bob")], ["age", "name"])
@@ -313,7 +310,7 @@ def test_empty_filter(op, spark_tmp_path):
         curDate.createOrReplaceTempView("empty_filter_test_curDate")
         spark.sql("select current_date, ((select last(current_date) from empty_filter_test_curDate) + interval 1 day) as test from empty_filter_test_curDate").createOrReplaceTempView("empty_filter_test2")
         return spark.sql(f"select * from empty_filter_test2 where test {op} current_date")
-    assert_gpu_and_cpu_are_equal_collect(do_it)
+    assert_gpu_and_cpu_are_equal_collect(do_it, conf=conf)
 
 def test_nondeterministic_filter():
     assert_gpu_and_cpu_are_equal_collect(
@@ -334,6 +331,170 @@ def test_in(data_gen):
     scalars = with_cpu_session(lambda spark: list(gen_scalars(data_gen, num_entries, force_no_nulls=not isinstance(data_gen, NullGen))))
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : unary_op_df(spark, data_gen).select(f.col('a').isin(scalars)))
+
+@pytest.mark.parametrize('data_type, rows', [
+    ('int', [
+        (1, 1, 7),
+        (2, 1, 2),
+        (3, None, 4),
+        (3, None, None),
+        (None, 1, 2),
+    ]),
+    ('float', [
+        (float('nan'), 1.0, float('nan')),
+        (1.0, float('nan'), 2.0),
+        (3.0, None, 4.0),
+        (None, 1.0, 2.0),
+    ]),
+    ('double', [
+        (float('nan'), float('nan'), 1.0),
+        # In returns NULL when NaN misses every candidate but the list contains NULL.
+        (float('nan'), 2.0, 3.0),
+        (2.0, 1.0, 2.0),
+        (3.0, None, 4.0),
+        (None, 1.0, 2.0),
+    ]),
+    ('decimal(10, 2)', [
+        (Decimal('1.00'), Decimal('1.00'), Decimal('7.00')),
+        (Decimal('2.00'), Decimal('1.00'), Decimal('2.00')),
+        (Decimal('3.00'), None, Decimal('4.00')),
+        (None, Decimal('1.00'), Decimal('2.00')),
+    ]),
+], ids=['int', 'float', 'double', 'decimal'])
+def test_dynamic_in(data_type, rows):
+    def do_it(spark):
+        return spark.createDataFrame(rows, f'a {data_type}, b {data_type}, c {data_type}') \
+            .selectExpr(
+                'a IN (b) AS single_result',
+                'a IN (b, c) AS dynamic_result',
+                'a IN (NULL, 1) AS literal_result',
+                'a IN (-10, -9, -8, -7, -6, -5, -4, -3, -2, -1, 1, b, NULL, c) '
+                'AS mixed_result')
+
+    assert_gpu_and_cpu_are_equal_collect(do_it)
+
+
+def test_dynamic_in_mixed_ast_support():
+    # Integral equality can be fused into the AST, while floating-point equality must be
+    # materialized first to preserve Spark's NaN semantics.
+    def do_it(spark):
+        return spark.createDataFrame([
+            (1, 1, 7, 1.0, 1.0, 7.0),
+            (2, 1, 2, float('nan'), 1.0, float('nan')),
+            (3, None, 4, 3.0, None, 4.0),
+            (None, 1, 2, None, 1.0, 2.0),
+        ], 'a int, b int, c int, x float, y float, z float').selectExpr(
+            'a IN (b, c) AS ast_result',
+            'x IN (y, z) AS regular_result')
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it,
+        exist_classes='GpuIn')
+
+
+def test_dynamic_in_allows_nondeterministic_value():
+    # The value is evaluated once before the list, so its nondeterminism does not affect ordering.
+    # Keep the list side-effect-free even when ANSI mode is enabled by default.
+    def do_it(spark):
+        return spark.range(10).selectExpr(
+            'rand(1) IN (CAST(id AS DOUBLE), CAST(id AS FLOAT)) AS result')
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it,
+        exist_classes='GpuIn')
+
+
+def test_dynamic_in_allows_side_effecting_value():
+    def do_it(spark):
+        return spark.createDataFrame([(1, 1, '1')], 'a int, b int, c string') \
+            .selectExpr('CAST(c AS INT) IN (b, a) AS result')
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it,
+        exist_classes='GpuIn',
+        conf={'spark.sql.ansi.enabled': 'true'})
+
+
+@allow_non_gpu('ProjectExec')
+def test_nondeterministic_dynamic_in_fallback():
+    # GpuIn groups literals and eagerly projects dynamic candidates, so it cannot preserve
+    # Spark's evaluation order for nondeterministic expressions.
+    def do_it(spark):
+        return spark.createDataFrame([(1.0, 2.0)], 'a double, b double') \
+            .selectExpr('a IN (b, rand(1)) AS result')
+
+    assert_gpu_fallback_collect(
+        do_it,
+        'ProjectExec')
+
+
+@allow_non_gpu('In', 'Add')
+def test_large_dynamic_in_fallback():
+    def do_it(spark):
+        # One candidate past the stack-safety limit must remain on CPU.
+        candidate_count = 257
+        candidates = ', '.join(f'id + {i}' for i in range(1, candidate_count + 1))
+        return spark.range(1).selectExpr(f'id IN ({candidates}) AS result')
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it,
+        exist_classes='GpuCpuBridgeExpression',
+        non_exist_classes='GpuIn')
+
+
+@allow_non_gpu('In', 'Cast')
+def test_ansi_side_effecting_dynamic_in_fallback():
+    def do_it(spark):
+        return spark.createDataFrame([(1, 1, 'invalid')], 'a int, b int, c string') \
+            .selectExpr('a IN (b, CAST(c AS INT)) AS result')
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it,
+        exist_classes='GpuCpuBridgeExpression',
+        conf={'spark.sql.ansi.enabled': 'true'})
+
+
+@allow_non_gpu('In', 'Cast')
+def test_bridge_only_dynamic_in_candidate_fallback():
+    def do_it(spark):
+        return spark.createDataFrame([(1, 1, 'invalid')], 'a int, b int, c string') \
+            .selectExpr('a IN (b, CAST(c AS INT)) AS result')
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it,
+        exist_classes='GpuCpuBridgeExpression',
+        non_exist_classes='GpuIn',
+        conf={
+            'spark.sql.ansi.enabled': 'true',
+            'spark.rapids.sql.expression.Cast': 'false'
+        })
+
+
+@allow_non_gpu('ProjectExec', 'In', 'Divide', 'Cast')
+def test_ansi_decimal_side_effecting_dynamic_in_fallback():
+    def do_it(spark):
+        rows = [(Decimal('1.00'), Decimal('1.00'), Decimal('1.00'), Decimal('0.00'))]
+        schema = 'a decimal(10, 2), b decimal(10, 2), c decimal(10, 2), d decimal(10, 2)'
+        return spark.createDataFrame(rows, schema).selectExpr(
+            'a IN (b, c / d) AS result')
+
+    assert_gpu_and_cpu_are_equal_collect(
+        do_it,
+        conf={'spark.sql.ansi.enabled': 'true'})
+
+
+@allow_non_gpu('ProjectExec', 'In', 'Multiply', 'Cast')
+def test_ansi_decimal_multiply_side_effecting_dynamic_in_fallback():
+    def do_it(spark):
+        # Spark stops after b matches; eager evaluation of c * d would overflow in ANSI mode.
+        rows = [(Decimal('1'), Decimal('1'), Decimal('9' * 38), Decimal('9'))]
+        schema = 'a decimal(38, 0), b decimal(38, 0), c decimal(38, 0), d decimal(38, 0)'
+        return spark.createDataFrame(rows, schema).selectExpr(
+            'a IN (b, c * d) AS result')
+
+    assert_gpu_and_cpu_are_equal_collect(
+        do_it,
+        conf={'spark.sql.ansi.enabled': 'true'})
 
 # We avoid testing inset with NaN in Spark < 3.1.3 since it has issue with NaN comparisons.
 # See https://github.com/NVIDIA/spark-rapids/issues/9687.

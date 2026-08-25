@@ -51,6 +51,21 @@ abstract class GpuBroadcastHashJoinMetaBase(
 
   override val childExprs: Seq[BaseExprMeta[_]] = leftKeys ++ rightKeys ++ conditionMeta
 
+  override protected def runChildExprBridgeOptimization(): Unit = {
+    GpuCpuBridgeOptimizer.checkAndOptimizeExpressionMetas(leftKeys ++ rightKeys)
+    conditionMeta.foreach { cond =>
+      val leftExprIds = join.left.output.map(_.exprId)
+      val rightExprIds = join.right.output.map(_.exprId)
+      if (AstUtil.canExtractNonAstConditionIfNeed(cond, leftExprIds, rightExprIds)) {
+        GpuCpuBridgeOptimizer.checkAndOptimizeNonAstSubtrees(cond)
+      } else {
+        // Inner joins can consume a bridged post-filter. Joins that require an AST condition
+        // will call requireAstForGpuOn later and reject GPU execution if the bridge remains.
+        GpuCpuBridgeOptimizer.checkAndOptimizeExpressionMetas(Seq(cond))
+      }
+    }
+  }
+
   override def tagPlanForGpu(): Unit = {
     GpuHashJoin.tagJoin(this, join.joinType, buildSide, join.leftKeys, join.rightKeys,
       conditionMeta)
@@ -105,6 +120,13 @@ abstract class GpuBroadcastHashJoinExecBase(
     isNullAwareAntiJoin: Boolean) extends ShimBinaryExecNode with GpuHashJoin {
   import GpuMetric._
 
+  // Mirror Spark BroadcastHashJoinExec: show skew status in plan strings after AQE
+  // OptimizeSkewedJoin (Spark 4.2+). Subclasses override isSkewJoin when propagating
+  // the CPU flag; older Spark versions keep the GpuHashJoin default of false.
+  override def nodeName: String = {
+    if (isSkewJoin) super.nodeName + "(skew=true)" else super.nodeName
+  }
+
   // Same checks as Spark
   if (isNullAwareAntiJoin) {
     require(leftKeys.length == 1, "leftKeys length should be 1")
@@ -119,7 +141,11 @@ abstract class GpuBroadcastHashJoinExecBase(
   override lazy val additionalMetrics: Map[String, GpuMetric] = Map(
     OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY),
     STREAM_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_STREAM_TIME),
-    JOIN_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_JOIN_TIME))
+    JOIN_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_JOIN_TIME),
+    CPU_BRIDGE_PROCESSING_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
+      DESCRIPTION_CPU_BRIDGE_PROCESSING_TIME),
+    CPU_BRIDGE_WAIT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
+      DESCRIPTION_CPU_BRIDGE_WAIT_TIME))
 
   override def requiredChildDistribution: Seq[Distribution] = {
     val mode = HashedRelationBroadcastMode(buildKeys)
@@ -133,13 +159,43 @@ abstract class GpuBroadcastHashJoinExecBase(
 
   override def outputPartitioning: Partitioning = streamedPlan.outputPartitioning
 
-  def broadcastExchange: GpuBroadcastExchangeExec = buildPlan match {
+  private def splitBroadcastPlan(plan: SparkPlan): (SparkPlan, List[GpuProjectExec]) = plan match {
+    case project: GpuProjectExec =>
+      val (broadcastPlan, projects) = splitBroadcastPlan(project.child)
+      (broadcastPlan, project :: projects)
+    case _ =>
+      (plan, List.empty)
+  }
+
+  protected def getBroadcastPlan(plan: SparkPlan): SparkPlan = splitBroadcastPlan(plan)._1
+
+  def broadcastExchange: GpuBroadcastExchangeExec = getBroadcastPlan(buildPlan) match {
     case bqse: BroadcastQueryStageExec if bqse.plan.isInstanceOf[GpuBroadcastExchangeExec] =>
       bqse.plan.asInstanceOf[GpuBroadcastExchangeExec]
     case bqse: BroadcastQueryStageExec if bqse.plan.isInstanceOf[ReusedExchangeExec] =>
       bqse.plan.asInstanceOf[ReusedExchangeExec].child.asInstanceOf[GpuBroadcastExchangeExec]
     case gpu: GpuBroadcastExchangeExec => gpu
     case reused: ReusedExchangeExec => reused.child.asInstanceOf[GpuBroadcastExchangeExec]
+  }
+
+  protected def buildSidePostProjection: Option[ColumnarBatch => ColumnarBatch] = {
+    val projects = splitBroadcastPlan(buildPlan)._2.reverse
+    if (projects.nonEmpty) {
+      val boundProjects = projects.map { project =>
+        // Match GpuProjectExec's tiered binding so build-side extraction has the same
+        // splitting and retry behavior as a normal project.
+        GpuBindReferences.bindGpuReferencesTiered(
+          project.projectList, project.child.output, conf, allMetrics)
+      }
+      Some((batch: ColumnarBatch) => boundProjects.foldLeft(batch) {
+        case (currentBatch, boundProject) =>
+          val spillableBatch = SpillableColumnarBatch(
+            currentBatch, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+          boundProject.projectAndCloseWithRetrySingleBatch(spillableBatch)
+      })
+    } else {
+      None
+    }
   }
 
   override def doExecute(): RDD[InternalRow] =
@@ -159,14 +215,17 @@ abstract class GpuBroadcastHashJoinExecBase(
     val broadcastRelation = broadcastExchange.executeColumnarBroadcast[Any]()
 
     val rdd = streamedPlan.executeColumnar()
-    val buildSchema = buildPlan.schema
+    val buildSchema = getBroadcastPlan(buildPlan).schema
+    val postProjectionAndClose = buildSidePostProjection
     val localIsNullAwareAntiJoin = isNullAwareAntiJoin
     rdd.mapPartitions { it =>
-      val (builtBatch, streamIter) =
+      val (broadcastBuiltBatch, streamIter) =
         GpuBroadcastHelper.getBroadcastBuiltBatchAndStreamIter(
           broadcastRelation,
           buildSchema,
           new CollectTimeIterator(NvtxRegistry.BROADCAST_JOIN_STREAM, it, streamTime))
+      val builtBatch = postProjectionAndClose.map(_(broadcastBuiltBatch))
+          .getOrElse(broadcastBuiltBatch)
       if (localIsNullAwareAntiJoin) {
         // This is to support the null-aware anti join for the LeftAnti join with
         // BuildRight. See the config "spark.sql.optimizeNullAwareAntiJoin".

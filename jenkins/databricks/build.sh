@@ -74,12 +74,12 @@ initialize()
     sudo apt-get update
     # install rsync to be used for copying onto the databricks nodes
     sudo apt install -y rsync openjdk-17-jdk
-    if [[ ! -d $HOME/apache-maven-3.6.3 ]]; then
+    if [[ ! -d $HOME/apache-maven-3.8.1 ]]; then
         # DBFS cache for Maven
         DBFS_CACHE_DIR=${DBFS_CACHE_DIR:-"/dbfs/cached_jars"}
-        JAR_FILE_NAME=${JAR_FILE_NAME:-"apache-maven-3.6.3-bin.tar.gz"}
+        JAR_FILE_NAME=${JAR_FILE_NAME:-"apache-maven-3.8.1-bin.tar.gz"}
         MAVEN_CACHE_FILE=${MAVEN_CACHE_FILE:-"$DBFS_CACHE_DIR/$JAR_FILE_NAME"}
-        MAVEN_URL=${MAVEN_URL:-"https://archive.apache.org/dist/maven/maven-3/3.6.3/binaries/$JAR_FILE_NAME"}
+        MAVEN_URL=${MAVEN_URL:-"https://archive.apache.org/dist/maven/maven-3/3.8.1/binaries/$JAR_FILE_NAME"}
         # Create cache directory if it doesn't exist
         mkdir -p "$DBFS_CACHE_DIR"        
         # Check if file exists in DBFS cache
@@ -99,7 +99,7 @@ initialize()
         
         tar xf "/tmp/$JAR_FILE_NAME" -C $HOME
         rm -f "/tmp/$JAR_FILE_NAME"
-        sudo ln -s $HOME/apache-maven-3.6.3/bin/mvn /usr/local/bin/mvn
+        sudo ln -s $HOME/apache-maven-3.8.1/bin/mvn /usr/local/bin/mvn
     fi
 
     # Set JDK 17 as the default for nightly builds across both:
@@ -119,11 +119,19 @@ initialize()
     # the version of Spark used when we install the Databricks jars in .m2
     BASE_SPARK_VERSION_TO_INSTALL_DATABRICKS_JARS=${BASE_SPARK_VERSION_TO_INSTALL_DATABRICKS_JARS:-$BASE_SPARK_VERSION}
     SPARK_VERSION_TO_INSTALL_DATABRICKS_JARS=${BASE_SPARK_VERSION_TO_INSTALL_DATABRICKS_JARS}-databricks
+
+     # Determine Scala version based on Spark version
+    # Spark 4.0+ uses Scala 2.13, earlier versions use 2.12
+    if [[ "$BASE_SPARK_VERSION" == 4.* ]]; then
+        export SCALA_BINARY_VER=2.13
+    fi
+
     DBR_VER=$(cat /databricks/DBR_VERSION)
-    if [ $DBR_VER == '14.3' ]; then 
+    if [ $DBR_VER == '14.3' ] || [ $DBR_VER == '17.3' ]; then
         DBR_VER=$(echo $DBR_VER | sed 's/\.//g')
         # We are appending 143 in addition to the base spark version because Databricks 14.3
-        # and Databricks 15.4 are both based on spark version 3.5.0
+        # and Databricks 15.4 are both based on spark version 3.5.0. Similarly, we are appending 173
+        # for Databricks 17.3 based on Spark 4.0.0.
         BUILDVER="$BUILDVER$DBR_VER"
         SPARK_VERSION_TO_INSTALL_DATABRICKS_JARS="$SPARK_VERSION_TO_INSTALL_DATABRICKS_JARS-$DBR_VER"
     fi
@@ -145,10 +153,18 @@ initialize()
     export WORKSPACE=$PWD
     # set the retry count for mvn commands
     MVN_CMD="mvn -Dmaven.wagon.http.retryHandler.count=3"
+
+    # Determine which pom to use based on Scala version
+    if [[ "$SCALA_BINARY_VER" == "2.13" ]]; then
+        POM_FILE="scala2.13/pom.xml"
+    else
+        POM_FILE="pom.xml"
+    fi
+
     # getting the versions of CUDA, SCALA and SPARK_PLUGIN
-    SPARK_PLUGIN_JAR_VERSION=$($MVN_CMD help:evaluate -q -pl dist -Dexpression=project.version -DforceStdout)
-    SCALA_VERSION=$($MVN_CMD help:evaluate -q -pl dist -Dexpression=scala.binary.version -DforceStdout)
-    CUDA_VERSION=$($MVN_CMD help:evaluate -q -pl dist -Dexpression=cuda.version -DforceStdout)
+    SPARK_PLUGIN_JAR_VERSION=$($MVN_CMD help:evaluate -q -f $POM_FILE -pl dist -Dexpression=project.version -DforceStdout)
+    SCALA_VERSION=$($MVN_CMD help:evaluate -q -f $POM_FILE -pl dist -Dexpression=scala.binary.version -DforceStdout)
+    CUDA_VERSION=$($MVN_CMD help:evaluate -q -f $POM_FILE -pl dist -Dexpression=cuda.version -DforceStdout)
     RAPIDS_BUILT_JAR=rapids-4-spark_$SCALA_VERSION-$SPARK_PLUGIN_JAR_VERSION.jar
     # If set to 1, skips installing dependencies into mvn repo.
     SKIP_DEP_INSTALL=${SKIP_DEP_INSTALL:-'0'}
@@ -228,18 +244,24 @@ else
 fi
 
 # Build the RAPIDS plugin by running package command for databricks
-$MVN_CMD -B -Ddatabricks -Dbuildver=$BUILDVER $MVN_PHASES -DskipTests $MVN_OPT
+$MVN_CMD -B -f $POM_FILE -Ddatabricks -Dbuildver=$BUILDVER $MVN_PHASES -DskipTests $MVN_OPT
 
 if [[ "$WITH_DEFAULT_UPSTREAM_SHIM" != "0" ]]; then
     echo "Building the default Spark shim and creating a two-shim dist jar"
-    UPSTREAM_BUILDVER=$($MVN_CMD help:evaluate -q -pl dist -Dexpression=buildver -DforceStdout)
-    $MVN_CMD -B package -pl dist -am -DskipTests -Dmaven.scaladoc.skip $MVN_OPT \
+    UPSTREAM_BUILDVER=$($MVN_CMD help:evaluate -q -f $POM_FILE -pl dist -Dexpression=buildver -DforceStdout)
+    $MVN_CMD -B -f $POM_FILE -Dbuildver=$UPSTREAM_BUILDVER package -pl dist -am -DskipTests -Dmaven.scaladoc.skip $MVN_OPT \
         -Dincluded_buildvers=$UPSTREAM_BUILDVER,$BUILDVER
 fi
 
 # "Delete the unused object files to reduce the size of the Spark Rapids built tar."
-rm -rf dist/target/jni-deps/
-find dist/target/parallel-world/ -mindepth 1 -maxdepth 1 ! -name META-INF -exec rm -rf {} +
+# Determine the correct dist target directory based on which POM was used
+if [[ "$SCALA_BINARY_VER" == "2.13" ]]; then
+    DIST_TARGET="scala2.13/dist/target"
+else
+    DIST_TARGET="dist/target"
+fi
+rm -rf $DIST_TARGET/jni-deps/
+find $DIST_TARGET/parallel-world/ -mindepth 1 -maxdepth 1 ! -name META-INF -exec rm -rf {} +
 
 cd /home/ubuntu
 tar -zcf spark-rapids-built.tgz spark-rapids

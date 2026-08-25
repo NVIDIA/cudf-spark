@@ -16,3 +16,8 @@ pom.xml    @NVIDIA/sparkrapids-cicd-codeowners
 /.github/  @NVIDIA/sparkrapids-cicd-codeowners
 /build/    @NVIDIA/sparkrapids-cicd-codeowners
 /scripts/  @NVIDIA/sparkrapids-cicd-codeowners
+
+# AI review and agent configuration
+/.greptile/  @NVIDIA/sparkrapids-feature-team @NVIDIA/sparkrapids-perf-team
+/.claude/    @NVIDIA/sparkrapids-feature-team @NVIDIA/sparkrapids-perf-team
+/AGENTS.md   @NVIDIA/sparkrapids-feature-team @NVIDIA/sparkrapids-perf-team

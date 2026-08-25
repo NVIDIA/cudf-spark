@@ -1,3 +1,9 @@
+---
+layout: page
+title: RapidsShuffleManager V2 Phase 2 Skip-Merge Design
+nav_order: 17
+parent: Developer Overview
+---
 # RapidsShuffleManager V2 Phase 2: Skip-Merge Design
 
 ## 1. Phase 1 Recap

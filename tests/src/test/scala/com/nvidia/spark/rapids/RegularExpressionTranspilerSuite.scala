@@ -22,7 +22,7 @@ import java.util.regex.{Pattern, PatternSyntaxException}
 import scala.collection.mutable.{HashSet, ListBuffer}
 import scala.util.{Random, Try}
 
-import ai.rapids.cudf.{CaptureGroups, ColumnVector, CudfException, RegexFlag, RegexProgram}
+import ai.rapids.cudf.{CaptureGroups, ColumnVector, CudfException, RegexFlag => CudfRegexFlag, RegexProgram}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RegexParser.toReadableString
 import org.scalatest.funsuite.AnyFunSuite
@@ -158,25 +158,232 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
         "\\z is not supported on GPU")
   }
 
-  test("cuDF does not support positive or negative lookahead") {
-    val negPatterns = Seq("a(!b)", "a(!b)c?")
-    negPatterns.foreach(pattern =>
+  test("cuDF does not support positive or negative lookaround") {
+    val posLookaheadPatterns = Seq("a(?=b)", "a(?=b)c?", "(?=)")
+    posLookaheadPatterns.foreach(pattern =>
+      assertUnsupported(pattern, RegexFindMode,
+        "Positive lookahead groups are not supported")
+    )
+
+    val negLookaheadPatterns = Seq("a(?!b)", "a(?!b)c?", "(?!)")
+    negLookaheadPatterns.foreach(pattern =>
       assertUnsupported(pattern, RegexFindMode,
         "Negative lookahead groups are not supported")
     )
 
-    val posPatterns = Seq("a(=b)", "a(=b)c?")
-    posPatterns.foreach(pattern =>
+    val posLookbehindPatterns = Seq("a(?<=b)", "a(?<=b)c?", "(?<=)")
+    posLookbehindPatterns.foreach(pattern =>
       assertUnsupported(pattern, RegexFindMode,
-        "Positive lookahead groups are not supported")
+        "Positive lookbehind groups are not supported")
+    )
+
+    val negLookbehindPatterns = Seq("a(?<!b)", "a(?<!b)c?", "(?<!)")
+    negLookbehindPatterns.foreach(pattern =>
+      assertUnsupported(pattern, RegexFindMode,
+        "Negative lookbehind groups are not supported")
+    )
+  }
+
+  test("cuDF does not support quantified lookaround, independent, or named capture groups") {
+    val quantifiedPatterns =
+        Seq(raw"a(?>\A)+", raw"a(?=\A)+", raw"a(?!\A)+", raw"a(?<=\A)+", raw"a(?<!\A){2}",
+            raw"a(?<n>\A){1,}")
+    quantifiedPatterns.foreach(pattern =>
+      assertUnsupported(pattern, RegexFindMode,
+        "Repetition of lookaround, independent, or named capture groups is not supported")
+    )
+  }
+
+  test("cuDF does not support independent or named capture groups") {
+    val independentPatterns = Seq("a(?>b)", "a(?>b)c?")
+    independentPatterns.foreach(pattern =>
+      assertUnsupported(pattern, RegexFindMode,
+        "Independent groups are not supported")
+    )
+
+    val namedCapturePatterns = Seq("a(?<name>b)", "a(?<name>b)c?")
+    namedCapturePatterns.foreach(pattern =>
+      assertUnsupported(pattern, RegexFindMode,
+        "Named capture groups are not supported")
     )
   }
 
   test("cuDF does not support empty sequence") {
-    val patterns = Seq("", "a|", "()")
+    // includes empty capturing, non-capturing, and scoped-flags groups. The `(?i:)abc` case
+    // guards against an empty scoped group being mis-parsed as a bare `(?i)` directive, which
+    // would wrongly make the following text case-insensitive instead of rejecting the empty group.
+    val patterns = Seq("", "a|", "()", "(?:)", "(?i:)", "(?i:)abc", "(?-:)", "(?i-:)")
     patterns.foreach(pattern =>
       assertUnsupported(pattern, RegexFindMode, "Empty sequence not supported")
     )
+  }
+
+  test("cuDF does not support $ followed by lookaround, independent, or named groups") {
+    val patterns =
+      Seq("$(?=a)", "$(?!a)", "$(?<=a)", "$(?<!a)", "$(?>a)", "$(?<n>a)",
+          raw"\Z(?=a)", raw"\Z(?>a)")
+    patterns.foreach(pattern =>
+      assertUnsupported(pattern, RegexFindMode,
+        "Regex sequence $ followed by a lookaround, independent, or named capture " +
+        "group is not supported")
+    )
+  }
+
+  test("transpile case-insensitive inline flag") {
+    // (?i) folds ASCII letters so they match either case
+    doTranspileTest("(?i)abc", "[aA][bB][cC]")
+    // (?-i) turns case-insensitivity back off
+    doTranspileTest("(?i)a(?-i)b", "[aA]b")
+    // scoping: (?i) applies only to the rest of the enclosing group
+    doTranspileTest("(a(?i)b)c", "(a[bB])c")
+    // (?i) before a group applies inside both choice branches of that group
+    doTranspileTest("(?i)(a|b)", "([aA]|[bB])")
+    // a flag in the last choice alternative applies only to that alternative
+    doTranspileTest("a|(?i)b", "a|[bB]")
+    // character-class letter ranges gain the opposite-case range
+    doTranspileTest("(?i)[a-c]", "[a-cA-C]")
+    // character-class literal letters gain their opposite case
+    doTranspileTest("(?i)[abc]", "[aAbBcC]")
+    // non-letters are unaffected
+    doTranspileTest("(?i)a1b", "[aA]1[bB]")
+    // a class mixing letter and non-letter ranges folds only the letters
+    doTranspileTest("(?i)[a-c0-9]", "[a-cA-C0-9]")
+    // negated classes fold their contents before negation (the (?:[\r]|...) wrapper is cuDF's
+    // handling of \r in negated classes, unrelated to folding)
+    doTranspileTest("(?i)[^a]", "(?:[\r]|[^aA])")
+    doTranspileTest("(?i)[^a-c]", "(?:[\r]|[^a-cA-C])")
+    // case-insensitivity is inherited by a repetition base
+    doTranspileTest("(?i)a+", "[aA]+")
+    // a negated non-`i` flag is a no-op (the mode is off by default), so it is dropped
+    doTranspileTest("(?-s)abc", "abc")
+    doTranspileTest("(?i-s)abc", "[aA][bB][cC]")
+    // a trailing '-' with an empty negated set is accepted (Java allows `(?i-)`/`(?-)`)
+    doTranspileTest("(?i-)abc", "[aA][bB][cC]")
+    doTranspileTest("(?-)abc", "abc")
+  }
+
+  test("transpile case-insensitive inline flag in replace and split modes") {
+    // case folding is mode-independent, so (?i) must also work outside find mode
+    for (mode <- Seq(RegexReplaceMode, RegexSplitMode)) {
+      doTranspileTest("(?i)abc", "[aA][bB][cC]", mode)
+      doTranspileTest("(?i:abc)", "(?:[aA][bB][cC])", mode)
+    }
+  }
+
+  test("transpile case-insensitive inline flag with group extraction") {
+    // the regexp_extract path renumbers groups (extracted group stays capturing, others become
+    // non-capturing) and must still fold letters under (?i)
+    doTranspileTest("(?i)([a-c]+)([0-9]+)", "([a-cA-C]+)(?:[0-9]+)", 1)
+    doTranspileTest("(?i)([a-c]+)([0-9]+)", "(?:[a-cA-C]+)([0-9]+)", 2)
+  }
+
+  test("compare CPU and GPU: case-insensitive inline flag") {
+    val patterns = Seq("(?i)abc", "(?i)a(?-i)b", "(?i)[a-c]", "a(?i)b", "(?i)(abc)def",
+      "(?i)(a|b)c", "(?i)a+", "(a(?i)b)c", raw"(?i)[\x61-\x7a]", "a|(?i)b", "a|b|(?i)c",
+      "(?i:abc)", "(?i:a|b)", "(?-i:a)", "(?i:[a-c])d", "(?i)a(?-i:b)c",
+      // nested scoped-flags groups
+      "(?i:(?-i:a)b)", "(?-i:a(?i:b)c)", "(?i:a(?-i:b(?i:c))d)",
+      // a bare inline flag inside a scoped-flags group
+      "(?i:a(?-i)b)", "(?-i:a(?i)b)",
+      // a scoped-flags group repeated or placed after `$` (behaves like a non-capturing group)
+      "(?i:a)+", "$(?i:a)",
+      // (?i) folds only ASCII (Java's non-Unicode default): é matches é but not É
+      "(?i)é")
+    val inputs = Seq("", "abc", "ABC", "AbC", "aBc", "abC", "xyz", "ab", "AB", "a", "A", "b",
+      "abcdef", "ABCDEF", "aaa", "def", "abbbc", "abcd", "ABCD", "aBcD", "AbCd", "é", "É", "eé")
+    assertCpuGpuMatchesRegexpFind(patterns, inputs)
+  }
+
+  test("cuDF does not support inline flags other than case-insensitive") {
+    for (flag <- Seq("m", "s", "x", "d", "u", "U")) {
+      assertUnsupported(s"(?$flag)abc", RegexFindMode,
+        "Only the case-insensitive '(?i)' inline flag is supported")
+    }
+    // a positive flag other than i is rejected even when combined with i (a *negated* non-i flag
+    // is a no-op and is handled instead - see the transpile tests above)
+    assertUnsupported("(?is)abc", RegexFindMode,
+      "Only the case-insensitive '(?i)' inline flag is supported")
+  }
+
+  test("cuDF does not support inline flags that precede a choice alternative") {
+    // a flag whose Java scope would cross '|' into a following alternative cannot be represented
+    // when branches are rewritten independently
+    assertUnsupported("(?i)a|b", RegexFindMode,
+      "Inline flags followed by a choice ('|') alternative are not supported")
+    assertUnsupported("a|(?i)b|c", RegexFindMode,
+      "Inline flags followed by a choice ('|') alternative are not supported")
+    // the toggle may appear mid-branch and still leak past '|': in Java `a(?i)b|c` makes both `b`
+    // and `c` case-insensitive (equivalent to `a[bB]|[cC]`), which we cannot fold branch by branch
+    assertUnsupported("a(?i)b|c", RegexFindMode,
+      "Inline flags followed by a choice ('|') alternative are not supported")
+  }
+
+  test("transpile scoped inline flags") {
+    // (?flags:...) becomes a non-capturing group with case folding applied to its contents
+    doTranspileTest("(?i:abc)", "(?:[aA][bB][cC])")
+    doTranspileTest("(?-i:abc)", "(?:abc)")
+    doTranspileTest("(?i:[a-c])", "(?:[a-cA-C])")
+    // the scoped flag covers the whole group, including every choice branch
+    doTranspileTest("(?i:a|b)", "(?:[aA]|[bB])")
+    // scopes nest and revert correctly
+    doTranspileTest("(?i:a(?-i:b)c)", "(?:[aA](?:b)[cC])")
+    // an outer inline flag stays in effect after a scoped group overrode it
+    doTranspileTest("(?i)x(?-i:y)z", "[xX](?:y)[zZ]")
+    // a bare inline flag inside a scoped group toggles the case state to the end of that group
+    doTranspileTest("(?i:a(?-i)b)", "(?:[aA]b)")
+    doTranspileTest("(?-i:a(?i)b)", "(?:a[bB])")
+    // a scoped-flags group behaves like a non-capturing group when repeated or placed after `$`
+    doTranspileTest("(?i:a)+", "(?:[aA])+")
+    doTranspileTest("$(?i:a)", "$(?:[aA])")
+    // a negated non-`i` flag in the scope is a no-op, leaving a plain non-capturing group
+    doTranspileTest("(?-s:abc)", "(?:abc)")
+    doTranspileTest("(?i-s:abc)", "(?:[aA][bB][cC])")
+    // a trailing '-' with an empty negated set is accepted (Java allows `(?i-:x)`/`(?-:x)`)
+    doTranspileTest("(?-:abc)", "(?:abc)")
+    doTranspileTest("(?i-:abc)", "(?:[aA][bB][cC])")
+  }
+
+  test("cuDF does not support scoped inline flags other than case-insensitive") {
+    // only a *positive* non-i flag is rejected; a negated non-i flag is a no-op (see above).
+    // the last two check that a positive-flag scoped group is still rejected when repeated or
+    // placed after `$` (i.e. it is not wrongly accepted via the non-capturing-group path)
+    for (pattern <- Seq("(?m:abc)", "(?s:abc)", "(?is:abc)", "(?s:a)+", "$(?m:a)")) {
+      assertUnsupported(pattern, RegexFindMode,
+        "Only the case-insensitive '(?i)' inline flag is supported")
+    }
+  }
+
+  test("cuDF split does not support inline-flagged empty-match repetition") {
+    // a zero-width (?i)/(?-s) must not disable the split-mode empty-repetition guard that the
+    // equivalent flag-free pattern (e.g. `a*`) hits
+    for (pattern <- Seq("(?i)a*", "(?-s)a?", "(?i)a{0,3}", "a*(?i)")) {
+      assertUnsupported(pattern, RegexSplitMode,
+        "regexp_split on GPU does not support empty match repetition consistently with Spark")
+    }
+  }
+
+  test("inline flags do not bypass end-of-line anchor context checks") {
+    // A zero-width (?i) between a newline/anchor and an end anchor must not hide the adjacency
+    // that makes these unsupported; otherwise they would reach cuDF as \n$, $^ and ^$.
+    for (pattern <- Seq(raw"\n(?i)$$", "$(?i)^", "^(?i)$")) {
+      assertUnsupported(pattern, RegexFindMode,
+        "End of line/string anchor is not supported in this context")
+    }
+    // ...and an anchors-only sequence stays unsupported when a (?i) is interposed, matching the
+    // behavior of the flag-free forms `^` and `$`.
+    for (pattern <- Seq("^(?i)", "(?i)$")) {
+      assertUnsupported(pattern, RegexFindMode,
+        "Sequences that only contain '^' or '$' are not supported")
+    }
+  }
+
+  test("cuDF does not support case-insensitive matching of a top-level hex escape") {
+    // A top-level `\xNN` escape is preserved as a hex node by the parser, so under (?i) it
+    // cannot be folded to both cases and instead falls back to the CPU. (Inside a character
+    // class the parser decodes such escapes to literals, so those still fold - covered by the
+    // CPU/GPU test above with `(?i)[\x61-\x7a]`.)
+    assertUnsupported(raw"(?i)\x61", RegexFindMode,
+      "Case-insensitive matching is not supported for escapes that resolve to a letter")
   }
 
   test("cuDF does not support quantifier syntax when not quantifying anything") {
@@ -202,6 +409,18 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     Seq("(3*)+").foreach(pattern =>
       assertUnsupported(pattern, RegexFindMode,
         "cuDF does not support repetition of group containing: 3*"))
+  }
+
+  test("repetition base validation recurses into choices") {
+    Seq("(3?|a)+", "(a|3?)+").foreach { pattern =>
+      assertUnsupported(pattern, RegexFindMode,
+        "cuDF does not support repetition of group containing: 3?")
+    }
+    Seq(
+      "(3|a)+" -> "(3|a)+",
+      raw"(a|\d)+" -> "(a|[0-9])+").foreach { case (pattern, expected) =>
+      assert(transpile(pattern, RegexFindMode) === expected)
+    }
   }
 
   test("cuDF does not support OR at BOL / EOL") {
@@ -236,9 +455,38 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
 
   test("hex digits - find") {
     val patterns = Seq(raw"\x07", raw"\x3f", raw"\x7F", raw"\x7f", raw"\x{7}", raw"\x{0007f}",
-      raw"\x80", raw"\xff", raw"\x{0008f}", raw"\x{10FFFF}", raw"\x{00eeee}")
+      raw"\x80", raw"\xff", raw"\x{0008f}", raw"\x{00eeee}")
+    // NOTE: supplementary codepoints (cp > U+FFFF) such as `\x{1F600}` are
+    // covered below -- they now throw and fall back to CPU before a `.toChar`
+    // rewrite can truncate them.
     assertCpuGpuMatchesRegexpFind(patterns, Seq("", "\u0007", "a\u0007b",
         "\u0007\u003f\u007f", "\u0080", "a\u00fe\u00ffb", "ab\ueeeecd"))
+  }
+
+  test("supplementary codepoint hex escapes fall back to CPU") {
+    // Before the fix, `\x{1F600}` (U+1F600 grinning-face emoji) was
+    // silently truncated to `RegexChar(0x1F600.toChar)` = `RegexChar('')`,
+    // making the GPU match U+F600 instead of the supplementary codepoint.
+    // The parser now throws RegexUnsupportedException for any hex escape whose
+    // codepoint exceeds U+FFFF, so spark-rapids falls back to
+    // the CPU regex engine (which Java's Pattern handles correctly).
+    val supplementaryHexPatterns = Seq(
+      raw"\x{10000}",             // lowest supplementary codepoint
+      raw"\x{1F600}",             // grinning face emoji
+      raw"\x{10FFFF}",            // highest valid Unicode codepoint
+      raw"a\x{1F600}b",           // embedded in a longer pattern
+      raw"[\x{1F600}abc]",        // inside a character class
+      raw"[\x{10000}-\x{10FFFF}]" // range with supplementary endpoints
+    )
+    supplementaryHexPatterns.foreach { p =>
+      assertUnsupported(p, RegexFindMode,
+        "GPU regex hex escapes do not support supplementary codepoints")
+    }
+
+    // BMP boundary U+FFFF must continue to transpile (regression guard).
+    assertCpuGpuMatchesRegexpFind(
+      Seq(raw"\x{FFFF}", raw"\xff"),
+      Seq("", "a", "x￿y", "xÿy", "￿", "ÿ"))
   }
 
   test("hex digit character classes") {
@@ -339,8 +587,36 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
       "End of line/string anchor is not supported in this context")
   }
 
+  test("issue-14746: anchors inside character classes are literals") {
+    val patterns = Seq(
+      """[$\n]""",
+      """[$^]""",
+      """[$]\n""",
+      """\n[$]""",
+      """(?:[$])\n""",
+      """[a^]$""",
+      """(?:[a^])$""")
+    val inputs = Seq("", "$", "^", "\n", "$\n", "\n$", "a^", "a^\n", "a\nb")
+
+    assertCpuGpuMatchesRegexpFind(patterns, inputs)
+    assertCpuGpuMatchesRegexpReplace(patterns, inputs)
+
+    // Character-class components are alternatives, not a sequence with anchor context.
+    val characterClass = RegexCharacterClass(
+      negated = false, ListBuffer(RegexChar('$'), RegexChar('\n')))
+    val (transpiledClass, _) = new CudfRegexTranspiler(RegexReplaceMode)
+      .getTranspiledAST(characterClass, None, None)
+    assert(transpiledClass === characterClass)
+
+    // Real anchors outside a class must still detect newlines inside the adjacent class.
+    Seq("""[\r\n]$""", """$[\r\n]""").foreach { pattern =>
+      assertUnsupported(pattern, RegexReplaceMode,
+        "End of line/string anchor is not supported in this context")
+    }
+  }
+
   test("line anchor $ - find") {
-    val patterns = Seq("a$", "a$b", "\f$", "$\f","TEST$")
+    val patterns = Seq("a$", "a$b", "\f$", "$\f", "TEST$")
     val inputs = Seq("a", "a\n", "a\r", "a\r\n", "a\f", "\f", "\r", "\u0085", "\u2028",
       "\u2029", "\n", "\r\n", "\r\n\r", "\r\n\u0085", "\n\r",
       "\n\u0085", "\n\u2028", "\n\u2029", "2+|+??wD\n", "a\r\nb",
@@ -432,6 +708,19 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     assertCpuGpuMatchesRegexpReplace(patterns, inputs)
   }
 
+  test("quantified \\D and \\W") {
+    // see https://github.com/NVIDIA/cudf-spark/issues/15306
+    val inputs = Seq("", "abc", "123", "a1b2", "___", "a_b 1", "!!!", "ab12cd",
+        "a\rb", "1\r2", "1\n2", "1\r\n2", " \t\r\n")
+    val findPatterns = Seq(raw"\D+", raw"\W+", raw"\D*", raw"\W*", raw"\D{2,3}", raw"\W{2,3}",
+        raw"(\D+)", raw"(\W+)")
+    // \D* and \W* omitted from replace: empty-match semantics differ (see issue 4884)
+    val replacePatterns =
+        Seq(raw"\D+", raw"\W+", raw"\D{2,3}", raw"\W{2,3}", raw"(\D+)", raw"(\W+)")
+    assertCpuGpuMatchesRegexpFind(findPatterns, inputs)
+    assertCpuGpuMatchesRegexpReplace(replacePatterns, inputs)
+  }
+
   test("dot matches CR on GPU but not on CPU") {
     // see https://github.com/rapidsai/cudf/issues/9619
     val pattern = "1."
@@ -466,7 +755,7 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     doTranspileTest(TIMESTAMP_TRUNCATE_REGEX,
       TIMESTAMP_TRUNCATE_REGEX
         .replaceAll("\\.", "[^\n\r\u0085\u2028\u2029]")
-        .replaceAll("\\\\Z", "(?:\r\n)?\\$"))
+        .replaceAll("\\\\Z", "\\$"))
   }
 
   test("transpile \\A repetitions") {
@@ -479,12 +768,9 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     assertUnsupported("abc\\z", RegexFindMode, "")
   }
 
-  test("transpile $") {
-    doTranspileTest("a$", "a(?:\r\n)?$")
-  }
-
   test("transpile \\Z") {
-    val expected = "a(?:\r\n)?$"
+    val expected = "a$"
+    doTranspileTest("a$", expected)
     doTranspileTest("a\\Z", expected)
     doTranspileTest("a\\Z+", expected)
     doTranspileTest("a\\Z{1}", expected)
@@ -522,6 +808,10 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     doTranspileTest("(ab)+(c)(d)", "(ab)+(?:c)(?:d)", 1)
     doTranspileTest("(ab)+(c)(d)", "(?:ab)+(c)(?:d)", 2)
     doTranspileTest("([a-z0-9]((([abcd](\\d?)))))", "(?:[a-z0-9](?:((?:[abcd](?:[0-9]?)))))", 3)
+    doTranspileTest("(a)|(b)", "(?:a)|(b)", 2)
+    doTranspileTest("(?:(a)(b))", "(?:(?:a)(b))", 2)
+    doTranspileTest("((a)|(b))", "(?:(?:a)|(b))", 3)
+    doTranspileTest("(a)(b)|(c)(d)", "(?:a)(?:b)|(c)(?:d)", 3)
     doTranspileTest("ab", "ab", 1)
   }
 
@@ -769,6 +1059,33 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     }
   }
 
+  test("issue-14746: string split treats anchors in character classes as literals") {
+    val patterns = Set(
+      """[$\n]""",
+      """[$^]""",
+      """[$]\n""",
+      "^a$",
+      """\na$""",
+      """[\r\n]a$""")
+    val data = Seq("", "$", "^", "a", "\na", "\r\na", "$\n", "\n$", "a\nb")
+    doStringSplitTest(patterns, data, -1)
+
+    Seq("""[\r\n]$""", """$[\r\n]""").foreach { pattern =>
+      assertUnsupported(pattern, RegexSplitMode,
+        "End of line/string anchor is not supported in this context")
+    }
+
+    val optionalPrefixError = intercept[RegexUnsupportedException] {
+      transpile("a?bc$", RegexSplitMode)
+    }
+    assert(optionalPrefixError.getMessage.endsWith("near index 4"),
+      s"Unexpected split anchor position: ${optionalPrefixError.getMessage}")
+  }
+
+  test("issue-14748: word boundaries are not literal split delimiters") {
+    assertNoTranspileToSplittableString(Set(raw"\b", raw"\B"))
+  }
+
   test("regexp_split - character class repetition - ? and *") {
     val patterns = Set(raw"[a-z][0-9]?", raw"[a-z][0-9]*")
     val data = Seq("a", "aa", "a1a1", "a1b2", "a1b")
@@ -1004,7 +1321,7 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     val result = new Array[Boolean](input.length)
     withResource(ColumnVector.fromStrings(input: _*)) { cv =>
       val prog = new RegexProgram(cudfPattern,
-        EnumSet.of(RegexFlag.EXT_NEWLINE) ,CaptureGroups.NON_CAPTURE)
+        EnumSet.of(CudfRegexFlag.EXT_NEWLINE) ,CaptureGroups.NON_CAPTURE)
       withResource(cv.containsRe(prog)) { c =>
         withResource(c.copyToHost()) { hv =>
           result.indices.foreach(i => result(i) = hv.getBoolean(i))
@@ -1021,15 +1338,17 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
       input: Seq[String]): Array[String] = {
     val result = new Array[String](input.length)
     val replace = GpuRegExpUtils.unescapeReplaceString(replaceString)
-    val (hasBackrefs, converted) = GpuRegExpUtils.backrefConversion(replace)
+    // Pass -1 to opt out of Java-spec greedy-with-backoff; the REPLACE_STRING used by this
+    // helper contains no `$N` backrefs, so the legacy behavior is sufficient here.
+    val (hasBackrefs, converted) = GpuRegExpUtils.backrefConversion(replace, -1)
     withResource(ColumnVector.fromStrings(input: _*)) { cv =>
       val c = if (hasBackrefs) {
         cv.stringReplaceWithBackrefs(new RegexProgram(cudfPattern,
-          EnumSet.of(RegexFlag.EXT_NEWLINE)), converted)
+          EnumSet.of(CudfRegexFlag.EXT_NEWLINE)), converted)
       } else {
         withResource(GpuScalar.from(converted, DataTypes.StringType)) { replace =>
           val prog = new RegexProgram(cudfPattern,
-            EnumSet.of(RegexFlag.EXT_NEWLINE), CaptureGroups.NON_CAPTURE)
+            EnumSet.of(CudfRegexFlag.EXT_NEWLINE), CaptureGroups.NON_CAPTURE)
           cv.replaceRegex(prog, replace)
         }
       }
@@ -1064,7 +1383,7 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     withResource(ColumnVector.fromStrings(input: _*)) { cv =>
       val x = if (isRegex) {
         cv.stringSplitRecord(new RegexProgram(pattern,
-          EnumSet.of(RegexFlag.EXT_NEWLINE), CaptureGroups.NON_CAPTURE), limit)
+          EnumSet.of(CudfRegexFlag.EXT_NEWLINE), CaptureGroups.NON_CAPTURE), limit)
       } else {
         cv.stringSplitRecord(pattern, limit)
       }
@@ -1079,14 +1398,18 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     }
   }
 
-  private def doTranspileTest(pattern: String, expected: String): Unit = {
-    val transpiled: String = transpile(pattern, RegexFindMode)
-    assert(toReadableString(transpiled) === toReadableString(expected))
-  }
-
   private def doTranspileTest(pattern: String, expected: String, groupIdx: Int): Unit = {
     val transpiled: String = transpile(pattern, groupIdx)
     assert(toReadableString(transpiled) === toReadableString(expected))
+  }
+
+  private def doTranspileTest(pattern: String, expected: String, mode: RegexMode): Unit = {
+    val transpiled: String = transpile(pattern, mode)
+    assert(toReadableString(transpiled) === toReadableString(expected))
+  }
+
+  private def doTranspileTest(pattern: String, expected: String): Unit = {
+    doTranspileTest(pattern, expected, RegexFindMode)
   }
 
   private def transpile(pattern: String, mode: RegexMode): String = {
@@ -1310,7 +1633,9 @@ class FuzzRegExp(suggestedChars: String, skipKnownIssues: Boolean = true,
   }
 
   private def group(depth: Int) = {
-    RegexGroup(capture = rr.nextBoolean(), generate(depth + 1), None)
+    RegexGroup(
+      if (rr.nextBoolean()) RegexGroup.Capturing else RegexGroup.NonCapturing,
+      generate(depth + 1))
   }
 
   private def repetition(depth: Int) = {

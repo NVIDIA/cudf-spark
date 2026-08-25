@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2025, NVIDIA CORPORATION.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -842,20 +842,42 @@ class DayTimeIntervalGen(DataGen):
         self._start(rand, lambda: self._gen_random(rand))
 
 class BinaryGen(DataGen):
-    """Generate BinaryType values"""
-    def __init__(self, min_length=0, max_length=20, nullable=True):
+    """Generate BinaryType values.
+
+    Default mode: random bytes from min_val to max_val.
+    With encoding: generates random Unicode codepoints in [min_val, max_val],
+    encodes them with the given encoding. Useful for generating valid encoded text.
+    E.g. BinaryGen(min_val=0x4E00, max_val=0x9FFF, encoding='gbk') generates
+    random CJK text encoded as GBK.
+    """
+    def __init__(self, min_length=0, max_length=20, nullable=True,
+                 min_val=0, max_val=255, encoding=None):
         super().__init__(BinaryType(), nullable=nullable)
         self._min_length = min_length
         self._max_length = max_length
+        self._min_val = min_val
+        self._max_val = max_val
+        self._encoding = encoding
 
     def _cache_repr(self):
-        return super()._cache_repr() + '(' + str(self._min_length) + ',' + str(self._max_length) + ')'
+        return super()._cache_repr() + '(' + str(self._min_length) + ',' + \
+            str(self._max_length) + ',' + str(self._min_val) + ',' + \
+            str(self._max_val) + ',' + str(self._encoding) + ')'
 
     def start(self, rand):
-        def gen_bytes():
-            length = rand.randint(self._min_length, self._max_length)
-            return bytes([ rand.randint(0, 255) for _ in range(length) ])
-        self._start(rand, gen_bytes)
+        if self._encoding is not None:
+            def gen_encoded():
+                length = rand.randint(self._min_length, self._max_length)
+                chars = [chr(rand.randint(self._min_val, self._max_val))
+                         for _ in range(length)]
+                return ''.join(chars).encode(self._encoding)
+            self._start(rand, gen_encoded)
+        else:
+            def gen_bytes():
+                length = rand.randint(self._min_length, self._max_length)
+                return bytes([rand.randint(self._min_val, self._max_val)
+                              for _ in range(length)])
+            self._start(rand, gen_bytes)
 
 # Note: Current(2023/06/06) maxmium IT data size is 7282688 bytes, so LRU cache with maxsize 128
 # will lead to 7282688 * 128 = 932 MB additional memory usage in edge case, which is acceptable.
@@ -1304,11 +1326,13 @@ def get_25_partitions_df(spark):
 # This will be deprecated and replaced case specified non GPU allow list
 non_utc_allow = ['ProjectExec', 'FilterExec', 'FileSourceScanExec', 'BatchScanExec', 'CollectLimitExec',
                  'DeserializeToObjectExec', 'DataWritingCommandExec', 'WriteFilesExec', 'ShuffleExchangeExec',
-                 'ExecutedCommandExec'] if is_not_utc() else []
+                 'ExecutedCommandExec', 'Cast', 'Sequence', 
+                 'Length', 'TimeAdd', 'DateAddInterval', 'ScalarSubquery', 'JsonToStructs'] if is_not_utc() else []
 
 non_supported_tz_allow = ['ProjectExec', 'FilterExec', 'FileSourceScanExec', 'BatchScanExec', 'CollectLimitExec',
                  'DeserializeToObjectExec', 'DataWritingCommandExec', 'WriteFilesExec', 'ShuffleExchangeExec',
-                 'ExecutedCommandExec'] if not is_supported_time_zone() else []
+                 'ExecutedCommandExec', 'Cast', 'Sequence',
+                 'Length', 'TimeAdd', 'DateAddInterval', 'ScalarSubquery', 'JsonToStructs'] if not is_supported_time_zone() else []
 
 
 # date related regexps for generating date strings within python's range limits

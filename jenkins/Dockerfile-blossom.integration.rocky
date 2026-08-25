@@ -20,7 +20,7 @@
 #    CUDA_VER=11.0+
 #    ROCKY_VER=8
 #    CUDF_VER=<cudf-py version>
-#    URM_URL=<maven repo url>
+#    ART_URL=<maven repo url>
 ###
 
 ARG CUDA_VER=11.8.0
@@ -28,7 +28,7 @@ ARG ROCKY_VER=8
 FROM nvidia/cuda:${CUDA_VER}-runtime-rockylinux${ROCKY_VER}
 ARG CUDA_VER
 ARG CUDF_VER
-ARG URM_URL
+ARG ART_URL
 
 # Install jdk-8, jdk-11, maven, docker image
 RUN yum update -y && \
@@ -36,8 +36,8 @@ RUN yum update -y && \
     yum install -y java-1.8.0-openjdk-devel java-11-openjdk-devel java-17-openjdk-devel wget expect rsync zip unzip procps
 
 # The plugin: net.alchim31.maven requires a higher mvn version.
-ENV MAVEN_HOME "/usr/local/apache-maven-3.6.3"
-RUN wget ${URM_URL}/org/apache/maven/apache-maven/3.6.3/apache-maven-3.6.3-bin.tar.gz -P /usr/local && \
+ENV MAVEN_HOME "/usr/local/apache-maven-3.8.1"
+RUN wget ${ART_URL}/org/apache/maven/apache-maven/3.8.1/apache-maven-3.8.1-bin.tar.gz -P /usr/local && \
     tar xzvf $MAVEN_HOME-bin.tar.gz -C /usr/local && \
     rm -f $MAVEN_HOME-bin.tar.gz
 

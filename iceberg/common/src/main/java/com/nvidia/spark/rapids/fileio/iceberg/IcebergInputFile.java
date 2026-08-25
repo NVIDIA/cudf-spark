@@ -38,6 +38,11 @@ public class IcebergInputFile implements RapidsInputFile {
   }
 
   @Override
+  public String path() {
+    return delegate.location();
+  }
+
+  @Override
   public long getLength() throws IOException {
     return delegate.getLength();
   }

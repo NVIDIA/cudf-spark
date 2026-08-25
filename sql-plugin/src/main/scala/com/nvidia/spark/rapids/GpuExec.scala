@@ -30,7 +30,8 @@ import org.apache.spark.sql.catalyst.expressions.{Alias, AttributeReference, Exp
 import org.apache.spark.sql.catalyst.plans.QueryPlan
 import org.apache.spark.sql.catalyst.trees.TreeNodeTag
 import org.apache.spark.sql.execution.SparkPlan
-import org.apache.spark.sql.execution.exchange.Exchange
+import org.apache.spark.sql.execution.adaptive.ShuffleQueryStageExec
+import org.apache.spark.sql.execution.exchange.{Exchange, ReusedExchangeExec}
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.rapids.GpuTaskMetrics
 import org.apache.spark.sql.rapids.execution.{GpuCustomShuffleReaderExec}
@@ -288,6 +289,18 @@ trait GpuExec extends SparkPlan with Logging {
               }
             }
             currentMetric ++ childMetrics
+          case q: ShuffleQueryStageExec =>
+            // AQE wraps a reduce-side exchange in a ShuffleQueryStageExec, which is a
+            // LeafExecNode (its children are empty). Descend into the wrapped plan so the
+            // exchange's "op time (shuffle read)" metric is collected and excluded from
+            // the consumers in this stage. Without this, the shuffle read time is counted
+            // both in the exchange metric and again inside each consumer's op time,
+            // over-counting the stage's op time. Only shuffle stages carry shuffle-read
+            // op time, so BroadcastQueryStageExec is intentionally not matched.
+            collectChildOpTimeMetricsRecursive(q.plan, newVisited)
+          case r: ReusedExchangeExec =>
+            // A reused exchange similarly hides the real exchange behind a leaf node.
+            collectChildOpTimeMetricsRecursive(r.child, newVisited)
           case other =>
             if (other.isInstanceOf[Exchange]) {
               // Do not recurse into Exchange children

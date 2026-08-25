@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2024, NVIDIA CORPORATION.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -42,8 +42,10 @@ orderable_not_null_gen = [ByteGen(nullable=False), ShortGen(nullable=False), Int
 @pytest.mark.parametrize('order', [f.col('a').cast(BinaryType())], ids=idfn)
 def test_sort_binary_fallback(data_gen, order):
     assert_gpu_fallback_collect(
-            lambda spark : unary_op_df(spark, data_gen).orderBy(order),
-            "SortExec")
+        lambda spark : unary_op_df(spark, data_gen).orderBy(order),
+        "SortExec",
+        # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
+        conf={'spark.sql.adaptive.enabled': 'false'})
 
 @allow_non_gpu('ProjectExec', 'ShuffleExchangeExec', 'RangePartitioning')
 @pytest.mark.parametrize('data_gen', [StringGen(nullable=False)], ids=idfn)
@@ -56,15 +58,19 @@ def test_sort_nonbinary_carry_binary(data_gen):
 @pytest.mark.parametrize('data_gen', orderable_gens + orderable_not_null_gen, ids=idfn)
 @pytest.mark.parametrize('order', [f.col('a').asc(), f.col('a').asc_nulls_last(), f.col('a').desc(), f.col('a').desc_nulls_first()], ids=idfn)
 def test_single_orderby(data_gen, order):
+    # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).orderBy(order))
+            lambda spark : unary_op_df(spark, data_gen).orderBy(order),
+            conf={'spark.sql.adaptive.enabled': 'false'})
 
 @pytest.mark.parametrize('data_gen', single_level_array_gens, ids=idfn)
 @pytest.mark.parametrize('order', [f.col('a').asc(), f.col('a').asc_nulls_first(), f.col('a').asc_nulls_last(),
                                    f.col('a').desc(), f.col('a').desc_nulls_first(), f.col('a').desc_nulls_last()], ids=idfn)
 def test_single_orderby_on_array(data_gen, order):
+    # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).orderBy(order))
+            lambda spark : unary_op_df(spark, data_gen).orderBy(order),
+            conf={'spark.sql.adaptive.enabled': 'false'})
 
 @allow_non_gpu('SortExec', 'ShuffleExchangeExec')
 @pytest.mark.parametrize('data_gen', [ArrayGen(sub_gen) for sub_gen in single_level_array_gens], ids=idfn)
@@ -72,8 +78,10 @@ def test_single_orderby_on_array(data_gen, order):
                                    f.col('a').desc(), f.col('a').desc_nulls_first(), f.col('a').desc_nulls_last()], ids=idfn)
 def test_single_orderby_fallback_for_multilevel_array(data_gen, order):
     assert_gpu_fallback_collect(
-            lambda spark : unary_op_df(spark, data_gen).orderBy(order),
-            "SortExec")
+        lambda spark : unary_op_df(spark, data_gen).orderBy(order),
+        "SortExec",
+        # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
+        conf={'spark.sql.adaptive.enabled': 'false'})
 
 @allow_non_gpu('SortExec', 'ShuffleExchangeExec')
 @pytest.mark.parametrize('data_gen', [ArrayGen(StructGen([('child1', sub_gen)])) for sub_gen in orderable_gens], ids=idfn)
@@ -82,7 +90,9 @@ def test_single_orderby_fallback_for_multilevel_array(data_gen, order):
 def test_single_orderby_fallback_for_array_of_struct(data_gen, order):
     assert_gpu_fallback_collect(
             lambda spark : unary_op_df(spark, data_gen).orderBy(order),
-            "SortExec")
+            "SortExec",
+        # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
+        conf={'spark.sql.adaptive.enabled': 'false'})
 
 @pytest.mark.parametrize('shuffle_parts', [
     pytest.param(1),
@@ -107,11 +117,13 @@ def test_single_orderby_fallback_for_array_of_struct(data_gen, order):
     pytest.param(f.col('a').desc_nulls_last()),
 ], ids=idfn)
 def test_single_nested_orderby_plain(data_gen, order, shuffle_parts, stable_sort):
+    # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : unary_op_df(spark, data_gen).orderBy(order),
             conf = {
                 'spark.sql.shuffle.partitions': shuffle_parts,
-                'spark.rapids.sql.stableSort.enabled': stable_sort == 'STABLE'
+                'spark.rapids.sql.stableSort.enabled': stable_sort == 'STABLE',
+                'spark.sql.adaptive.enabled': 'false'
             })
 
 # only default null ordering for direction is supported for nested types
@@ -127,7 +139,9 @@ def test_single_nested_orderby_plain(data_gen, order, shuffle_parts, stable_sort
 def test_single_nested_orderby_fallback_for_nullorder(data_gen, order):
     assert_gpu_fallback_collect(
             lambda spark : unary_op_df(spark, data_gen).orderBy(order),
-            "SortExec")
+            "SortExec",
+        # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
+        conf={'spark.sql.adaptive.enabled': 'false'})
 
 # SPARK CPU itself has issue with negative scale for take ordered and project
 orderable_without_neg_decimal = [n for n in (orderable_gens + orderable_not_null_gen) if not (isinstance(n, DecimalGen) and n.scale < 0)]
@@ -199,14 +213,18 @@ orderable_gens_sort = [byte_gen, short_gen, int_gen, long_gen, float_gen, double
 @pytest.mark.parametrize('data_gen', orderable_gens_sort, ids=idfn)
 @allow_non_gpu(*non_utc_allow)
 def test_multi_orderby(data_gen):
+    # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : binary_op_df(spark, data_gen).orderBy(f.col('a'), f.col('b').desc()))
+            lambda spark : binary_op_df(spark, data_gen).orderBy(f.col('a'), f.col('b').desc()),
+            conf={'spark.sql.adaptive.enabled': 'false'})
 
 @pytest.mark.parametrize('data_gen', single_level_array_gens, ids=idfn)
 @allow_non_gpu(*non_utc_allow)
 def test_multi_orderby_on_array(data_gen):
+    # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : binary_op_df(spark, data_gen).orderBy(f.col('a'), f.col('b').desc()))
+            lambda spark : binary_op_df(spark, data_gen).orderBy(f.col('a'), f.col('b').desc()),
+            conf={'spark.sql.adaptive.enabled': 'false'})
 
 # SPARK CPU itself has issue with negative scale for take ordered and project
 orderable_gens_sort_without_neg_decimal = [n for n in orderable_gens_sort if not (isinstance(n, DecimalGen) and n.scale < 0)]
@@ -233,7 +251,8 @@ def test_orderby_with_processing(data_gen, is_ansi_enabled):
     Tests the cases where arithmetic overflows don't occur, in ANSI mode.
     Overflow exceptions are tested in test_orderby_with_ansi_overflow_exceptions.
     """
-    conf = {'spark.sql.ansi.enabled': is_ansi_enabled}
+    # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
+    conf = {'spark.sql.ansi.enabled': is_ansi_enabled, 'spark.sql.adaptive.enabled': 'false'}
     gen = data_gen(min_val=0) if (is_ansi_enabled and data_gen != FloatGen) else data_gen()
     assert_gpu_and_cpu_are_equal_collect(
             # avoid ambiguity in the order by statement for floating point by including `a` as a backup ordering column
@@ -250,8 +269,9 @@ def test_orderby_with_ansi_overflow_exceptions(data_gen):
     def test_function(spark):
         return unary_op_df(spark, data_gen).orderBy(f.lit(100) - f.col('a'), f.col('a'))
 
+    # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
     assert_gpu_and_cpu_error(lambda spark: test_function(spark).collect(),
-                             conf=ansi_enabled_conf,
+                             conf=copy_and_update(ansi_enabled_conf, {'spark.sql.adaptive.enabled': 'false'}),
                              error_message='ArithmeticException')
 
 
@@ -323,12 +343,14 @@ def test_single_nested_orderby_with_skew(data_gen, stable_sort):
 @pytest.mark.parametrize('data_gen', [long_gen, StructGen([('child0', long_gen)]), ArrayGen(byte_gen)], ids=idfn)
 @pytest.mark.parametrize('stable_sort', ['STABLE', 'OUTOFCORE'], ids=idfn)
 def test_large_orderby(data_gen, stable_sort):
+    # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : unary_op_df(spark, data_gen, length=1024*128)\
                     .orderBy(f.col('a')),
             conf={
                 'spark.rapids.sql.batchSizeBytes': '16384',
-                'spark.rapids.sql.stableSort.enabled': stable_sort == 'STABLE'
+                'spark.rapids.sql.stableSort.enabled': stable_sort == 'STABLE',
+                'spark.sql.adaptive.enabled': 'false'
             })
 
 # This is similar to test_large_orderby, but here we want to test some types
@@ -350,10 +372,11 @@ def test_large_orderby(data_gen, stable_sort):
 def test_large_orderby_nested_ridealong(data_gen):
     # We use a UniqueLongGen to avoid duplicate keys that can cause ambiguity in the sort
     # results, especially on distributed clusters.
+    # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : two_col_df(spark, UniqueLongGen(), data_gen, length=1024*127)\
                     .orderBy(f.col('a').desc()),
-            conf = {'spark.rapids.sql.batchSizeBytes': '16384'})
+            conf = {'spark.rapids.sql.batchSizeBytes': '16384', 'spark.sql.adaptive.enabled': 'false'})
 
 @pytest.mark.parametrize('data_gen', [byte_gen,
     string_gen,

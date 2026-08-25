@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * This file was derived from CreateDeltaTableCommand.scala in the
  * Delta Lake project at https://github.com/delta-io/delta.
@@ -23,15 +23,14 @@ package org.apache.spark.sql.delta.rapids.delta40x
 
 import com.nvidia.spark.rapids.RapidsConf
 
-import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession}
+import org.apache.spark.sql.{SaveMode, SparkSession}
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.delta.{Snapshot, UniversalFormat}
 import org.apache.spark.sql.delta.actions.Protocol
 import org.apache.spark.sql.delta.commands.TableCreationModes
-import org.apache.spark.sql.delta.rapids.GpuCreateDeltaTableCommandBase
-import org.apache.spark.sql.rapids.shims.TrampolineConnectShims
+import org.apache.spark.sql.delta.rapids.GpuCreateDeltaTableCommand40x41xBase
 
 /**
  * GPU version of Delta 4.0.x CreateDeltaTableCommand.
@@ -46,15 +45,9 @@ case class GpuCreateDeltaTableCommand(
     override val output: Seq[Attribute] = Nil,
     protocol: Option[Protocol] = None,
     createTableFunc: Option[CatalogTable => Unit] = None)(@transient rapidsConf: RapidsConf)
-  extends GpuCreateDeltaTableCommandBase(
+  extends GpuCreateDeltaTableCommand40x41xBase(
     table, existingTableOpt, mode, query, operation, tableByPath, output, protocol,
     createTableFunc, rapidsConf) {
-
-  override protected def createDataFrameFromQuery(
-      sparkSession: SparkSession,
-      query: LogicalPlan): DataFrame = {
-    TrampolineConnectShims.createDataFrame(TrampolineConnectShims.getActiveSession, query)
-  }
 
   override protected def enforceDependenciesInConfiguration(
       sparkSession: SparkSession,

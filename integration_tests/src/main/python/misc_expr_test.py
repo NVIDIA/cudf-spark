@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2025, NVIDIA CORPORATION.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,17 +21,31 @@ from pyspark.sql.types import *
 import pyspark.sql.functions as f
 from spark_session import is_databricks_version_or_later, is_spark_400_or_later
 
-def test_mono_id():
+# post_transform variants exercise SPARK-14393: values from non-deterministic
+# functions must stay stable across coalesce/union. See spark-rapids/#14156.
+@pytest.mark.parametrize('post_transform', [
+    pytest.param(lambda df: df, id='no_transform'),
+    pytest.param(lambda df: df.coalesce(2), id='coalesce_2'),
+    pytest.param(lambda df: df.coalesce(1), id='coalesce_1'),
+])
+def test_mono_id(post_transform):
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, short_gen, num_slices=8).select(
-                f.col('a'),
-                f.monotonically_increasing_id()))
+            lambda spark : post_transform(
+                unary_op_df(spark, short_gen, num_slices=8).select(
+                    f.col('a'),
+                    f.monotonically_increasing_id())))
 
-def test_part_id():
+@pytest.mark.parametrize('post_transform', [
+    pytest.param(lambda df: df, id='no_transform'),
+    pytest.param(lambda df: df.coalesce(2), id='coalesce_2'),
+    pytest.param(lambda df: df.coalesce(1), id='coalesce_1'),
+])
+def test_part_id(post_transform):
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, short_gen, num_slices=8).select(
-                f.col('a'),
-                f.spark_partition_id()))
+            lambda spark : post_transform(
+                unary_op_df(spark, short_gen, num_slices=8).select(
+                    f.col('a'),
+                    f.spark_partition_id())))
 
 # Spark conf key for choosing legacy error semantics.
 legacy_semantics_key = "spark.sql.legacy.raiseErrorWithoutErrorClass"

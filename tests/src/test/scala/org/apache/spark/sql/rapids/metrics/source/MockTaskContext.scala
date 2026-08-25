@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,7 +30,7 @@ import org.apache.spark.scheduler.TaskLocality
 import org.apache.spark.shuffle.FetchFailedException
 import org.apache.spark.util.{AccumulatorV2, TaskCompletionListener, TaskFailureListener}
 
-class MockTaskContext(taskAttemptId: Long, partitionId: Int) extends TaskContext {
+abstract class MockTaskContextBase(taskAttemptId: Long, partitionId: Int) extends TaskContext {
 
   val listeners = new ListBuffer[TaskCompletionListener]
 
@@ -85,7 +85,7 @@ class MockTaskContext(taskAttemptId: Long, partitionId: Int) extends TaskContext
 
   override private[spark] def getLocalProperties = new Properties()
 
-  def cpus(): Int = 2
+  override def cpus(): Int = 2
 
   def numPartitions(): Int = 2
 
@@ -115,4 +115,5 @@ class MockTaskContext(taskAttemptId: Long, partitionId: Int) extends TaskContext
 
   private[spark] def createResourceUninterruptibly[T <: Closeable](
       resourceBuilder: => T): T = resourceBuilder
+
 }

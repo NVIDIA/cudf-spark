@@ -1,4 +1,4 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.
+# Copyright (c) 2025-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,8 +17,8 @@ import pytest
 from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect, \
     assert_gpu_sql_fallback_collect, assert_gpu_and_cpu_are_equal_sql
 from data_gen import *
-from marks import allow_non_gpu
-from spark_session import is_before_spark_400
+from marks import allow_non_gpu, allow_non_gpu_conditional
+from spark_session import is_before_spark_400, is_databricks173_or_later, is_spark_40x
 
 
 ####################################################################################################
@@ -34,7 +34,8 @@ _non_utf8_binary_collations = ["UNICODE", "UTF8_LCASE", "UNICODE_CI"]
 
 # test Collate, currently does not have GPU version for Collate
 @pytest.mark.skipif(is_before_spark_400(), reason="Spark versions before 400 do not support collate")
-@allow_non_gpu("ProjectExec")
+@allow_non_gpu_conditional(is_spark_40x(), "ProjectExec")
+@allow_non_gpu("Collate", "ResolvedCollation")
 def test_collate_expr_fallback():
     data_gen = [("c1", string_gen)]
     assert_gpu_fallback_collect(
@@ -93,7 +94,9 @@ def test_collate_count_fallback(collate_type):
         lambda spark: gen_df(spark, data_gen),
         cpu_fallback_class_name="SortOrder",
         table_name="tab",
-        sql="select c1, count(*) from tab group by c1")
+        sql="select c1, count(*) from tab group by c1",
+        # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
+        conf={'spark.sql.adaptive.enabled': False})
 
 
 @pytest.mark.skipif(is_before_spark_400(), reason="Spark versions before 400 do not support collate")
@@ -162,12 +165,11 @@ def test_constraint_char_varchar_preserve_enabled_fallback(spark_tmp_path, char_
 
 
 # Test `preserveCharVarcharTypeInfo` is false(default value); char type
-# The CPU plan is: Contains(static_invoke(CharVarcharCodegenUtils.readSidePadding(char_col#8, 5)), a)
-# Spark scan treats char as StringType.
-# Contains falls back because the child `static_invoke` is not supported by GPU.
+# Spark scan treats char as StringType and injects read-side padding in ProjectExec.
+# `static_invoke` (readSidePadding) has no GPU implementation, so ProjectExec falls back.
 @pytest.mark.skipif(is_before_spark_400(),
                     reason="Spark 32x, 33x do not support char/varchar type; Spark 34x, 35x throw exception")
-@allow_non_gpu("ProjectExec")
+@allow_non_gpu_conditional(not is_databricks173_or_later(), "ProjectExec")
 def test_constraint_char_preserve_disabled_fallback(spark_tmp_path):
     preserve_char_conf = {"spark.sql.preserveCharVarcharTypeInfo": True}
     file_path = spark_tmp_path + '/PARQUET_DATA'
@@ -181,11 +183,17 @@ def test_constraint_char_preserve_disabled_fallback(spark_tmp_path):
         lambda spark: spark.createDataFrame(data, schema).write.parquet(file_path),
         conf=preserve_char_conf)
 
-    assert_gpu_fallback_collect(
-        # when read from the Parquet file with `preserveCharVarcharTypeInfo,
-        # the char_col is still char/varchar type.
-        lambda spark: spark.read.parquet(file_path).selectExpr("contains(char_col, 'a')"),
-        cpu_fallback_class_name="StaticInvoke")
+    # when read from the Parquet file with `preserveCharVarcharTypeInfo,
+    # the char_col is still char/varchar type.
+    read_func = lambda spark: spark.read.parquet(file_path).selectExpr(
+        "contains(char_col, 'a')")
+
+    if is_databricks173_or_later():
+        # DB 17.3+ no longer injects StaticInvoke for char padding
+        assert_gpu_and_cpu_are_equal_collect(read_func)
+    else:
+        assert_gpu_fallback_collect(read_func,
+            cpu_fallback_class_name="ProjectExec")
 
 
 # Test `preserveCharVarcharTypeInfo` is false(default value); varchar type

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@
 /*** spark-rapids-shim-json-lines
 {"spark": "340"}
 {"spark": "341"}
-{"spark": "341db"}
 {"spark": "342"}
 {"spark": "343"}
 {"spark": "344"}
@@ -29,6 +28,8 @@
 {"spark": "355"}
 {"spark": "356"}
 {"spark": "357"}
+{"spark": "358"}
+{"spark": "359"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
@@ -138,7 +139,8 @@ case class GpuBatchScanExec(
         val newPartValues = commonPartitionValues.get.flatMap { case (partValue, numSplits) =>
           Seq.fill(numSplits)(partValue)
         }
-        k.copy(numPartitions = newPartValues.length, partitionValues = newPartValues)
+        KeyGroupedPartitioningShim.copyWithNewPartitionValues(
+          k, newPartValues, applyPartialClustering)
       case p => p
     }
   }
@@ -235,7 +237,8 @@ case class GpuBatchScanExec(
         case _ =>
       }
 
-      new GpuDataSourceRDD(sparkContext, filteredPartitions, readerFactory)
+      // Use the finalized partitions so padded and replicated inputs match outputPartitioning.
+      new GpuDataSourceRDD(sparkContext, finalPartitions, readerFactory)
     }
     postDriverMetrics()
     rdd

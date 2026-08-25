@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2025, NVIDIA CORPORATION.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@
 import pytest
 
 from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_error, assert_gpu_fallback_collect
-from spark_session import is_before_spark_320, is_before_spark_330
+from spark_session import is_before_spark_320
 from conftest import is_not_utc
 from data_gen import *
 from marks import ignore_order, allow_non_gpu
@@ -57,8 +57,6 @@ map_gens = [simple_string_to_string_map_gen,
 struct_of_maps = StructGen([['child0', BooleanGen()]] + [
     ['child%d' % (i + 1), gen] for i, gen in enumerate(map_gens)])
 
-kudo_enabled_conf_key = "spark.rapids.shuffle.kudo.serializer.enabled"
-
 @pytest.mark.parametrize('data_gen', [pytest.param((StructGen([['child0', DecimalGen(7, 2)]]),
                                                     StructGen([['child1', IntegerGen()]]))),
                                       # left_struct(child0 = 4 level nested struct, child1 = Int)
@@ -80,13 +78,11 @@ kudo_enabled_conf_key = "spark.rapids.shuffle.kudo.serializer.enabled"
                                        StructGen([['child1', MapGen(BooleanGen(nullable=False), boolean_gen)]], nullable=False))], ids=idfn)
 # This tests the union of DF of structs with different types of cols as long as the struct itself
 # isn't null. This is a limitation in cudf because we don't support nested types as literals
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_union_struct_missing_children(data_gen, kudo_enabled):
+def test_union_struct_missing_children(data_gen):
     left_gen, right_gen = data_gen
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark : binary_op_df(spark, left_gen).unionByName(binary_op_df(
-            spark, right_gen), True),
-        conf = {kudo_enabled_conf_key: kudo_enabled})
+            spark, right_gen), True))
 
 @pytest.mark.parametrize('data_gen', all_gen + map_gens + array_gens_sample +
                                      [all_basic_struct_gen,
@@ -94,11 +90,9 @@ def test_union_struct_missing_children(data_gen, kudo_enabled):
                                       nested_struct,
                                       struct_of_maps], ids=idfn)
 # This tests union of two DFs of two cols each. The types of the left col and right col is the same
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_union(data_gen, kudo_enabled):
+def test_union(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : binary_op_df(spark, data_gen).union(binary_op_df(spark, data_gen)),
-        conf = {kudo_enabled_conf_key: kudo_enabled})
+            lambda spark : binary_op_df(spark, data_gen).union(binary_op_df(spark, data_gen)))
 
 @pytest.mark.parametrize('data_gen', all_gen + map_gens + array_gens_sample +
                                      [all_basic_struct_gen,
@@ -106,11 +100,9 @@ def test_union(data_gen, kudo_enabled):
                                       nested_struct,
                                       struct_of_maps], ids=idfn)
 # This tests union of two DFs of two cols each. The types of the left col and right col is the same
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_unionAll(data_gen, kudo_enabled):
+def test_unionAll(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : binary_op_df(spark, data_gen).unionAll(binary_op_df(spark, data_gen)),
-        conf = {kudo_enabled_conf_key: kudo_enabled})
+            lambda spark : binary_op_df(spark, data_gen).unionAll(binary_op_df(spark, data_gen)))
 
 @pytest.mark.parametrize('data_gen', all_gen + map_gens + array_gens_sample +
                                      [all_basic_struct_gen,
@@ -122,13 +114,11 @@ def test_unionAll(data_gen, kudo_enabled):
                                       struct_of_maps], ids=idfn)
 # This tests the union of two DFs of structs with missing child column names. The missing child
 # column will be replaced by nulls in the output DF. This is a feature added in 3.1+
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_union_by_missing_col_name(data_gen, kudo_enabled):
+def test_union_by_missing_col_name(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark : binary_op_df(spark, data_gen).withColumnRenamed("a", "x")
                                 .unionByName(binary_op_df(spark, data_gen).withColumnRenamed("a",
-                                                                                             "y"), True),
-        conf = {kudo_enabled_conf_key: kudo_enabled})
+                                                                                             "y"), True))
 
 
 # the first number ('1' and '2') is the nest level
@@ -143,9 +133,7 @@ nest_2_two = (StructGen([('b', ArrayGen(base_two[0], 1, 1))]), StructGen([('b', 
 @pytest.mark.parametrize('gen_pair', [base_one,   base_two,
                                       nest_1_one, nest_1_two,
                                       nest_2_one, nest_2_two])
-@pytest.mark.skipif(is_before_spark_330(), reason="This is supported only in Spark 3.3.0+")
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_union_by_missing_field_name_in_arrays_structs(gen_pair, kudo_enabled):
+def test_union_by_missing_field_name_in_arrays_structs(gen_pair):
     """
     This tests the union of two DFs of arrays of structs with missing field names.
     The missing field will be replaced be nulls in the output DF. This is a feature added in 3.3+
@@ -154,8 +142,7 @@ def test_union_by_missing_field_name_in_arrays_structs(gen_pair, kudo_enabled):
     """
     def assert_union_equal(gen1, gen2):
         assert_gpu_and_cpu_are_equal_collect(
-            lambda spark: unary_op_df(spark, gen1).unionByName(unary_op_df(spark, gen2), True),
-            conf = {kudo_enabled_conf_key: kudo_enabled})
+            lambda spark: unary_op_df(spark, gen1).unionByName(unary_op_df(spark, gen2), True))
     
     assert_union_equal(gen_pair[0], gen_pair[1])
     assert_union_equal(gen_pair[1], gen_pair[0])
@@ -167,12 +154,10 @@ def test_union_by_missing_field_name_in_arrays_structs(gen_pair, kudo_enabled):
                                       StructGen([['child0', DecimalGen(7, 2)]]),
                                       nested_struct,
                                       struct_of_maps], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_union_by_name(data_gen, kudo_enabled):
+def test_union_by_name(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : binary_op_df(spark, data_gen).unionByName(binary_op_df(spark,
-                                                                                  data_gen)),
-        conf = {kudo_enabled_conf_key: kudo_enabled})
+                                                                                  data_gen)))
 
 
 @pytest.mark.parametrize('data_gen', [
@@ -181,23 +166,19 @@ def test_union_by_name(data_gen, kudo_enabled):
     pytest.param([('array' + str(i), gen) for i, gen in enumerate(array_gens_sample + [ArrayGen(BinaryGen(max_length=5), max_length=5)])]),
     pytest.param([('map' + str(i), gen) for i, gen in enumerate(map_gens_sample)]),
 ], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_coalesce_types(data_gen, kudo_enabled):
+def test_coalesce_types(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: gen_df(spark, data_gen).coalesce(2),
-        conf = {kudo_enabled_conf_key: kudo_enabled})
+        lambda spark: gen_df(spark, data_gen).coalesce(2))
 
 @pytest.mark.parametrize('num_parts', [1, 10, 100, 1000, 2000], ids=idfn)
 @pytest.mark.parametrize('length', [0, 2048, 4096], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_coalesce_df(num_parts, length, kudo_enabled):
+def test_coalesce_df(num_parts, length):
     #This should change eventually to be more than just the basic gens
     gen_list = [('_c' + str(i), gen) for i, gen in enumerate(all_basic_gens + decimal_gens + [binary_gen])]
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : gen_df(spark, gen_list, length=length).coalesce(num_parts),
-        conf = {kudo_enabled_conf_key: kudo_enabled})
+            lambda spark : gen_df(spark, gen_list, length=length).coalesce(num_parts))
 
 @pytest.mark.parametrize('data_gen', [
     pytest.param([('_c' + str(i), gen) for i, gen in enumerate(all_basic_gens + decimal_gens + [binary_gen])]),
@@ -207,17 +188,15 @@ def test_coalesce_df(num_parts, length, kudo_enabled):
 ], ids=idfn)
 @pytest.mark.parametrize('num_parts', [1, 10, 2345], ids=idfn)
 @pytest.mark.parametrize('length', [0, 2048, 4096], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @ignore_order(local=True) # To avoid extra data shuffle by 'sort on Spark' for this repartition test.
 @allow_non_gpu(*non_utc_allow)
-def test_repartition_df(data_gen, num_parts, length, kudo_enabled):
+def test_repartition_df(data_gen, num_parts, length):
     from pyspark.sql.functions import lit
     assert_gpu_and_cpu_are_equal_collect(
             # Add a computed column to avoid shuffle being optimized back to a CPU shuffle
             lambda spark : gen_df(spark, data_gen, length=length).withColumn('x', lit(1)).repartition(num_parts),
             # disable sort before shuffle so round robin works for maps
-            conf = {'spark.sql.execution.sortBeforeRepartition': 'false',
-                    kudo_enabled_conf_key: kudo_enabled})
+            conf = {'spark.sql.execution.sortBeforeRepartition': 'false'})
 
 @pytest.mark.parametrize('data_gen', [
     pytest.param([('_c' + str(i), gen) for i, gen in enumerate(all_basic_gens + decimal_gens)]),
@@ -226,38 +205,36 @@ def test_repartition_df(data_gen, num_parts, length, kudo_enabled):
 ], ids=idfn)
 @pytest.mark.parametrize('num_parts', [1, 10, 2345], ids=idfn)
 @pytest.mark.parametrize('length', [0, 2048, 4096], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @ignore_order(local=True) # To avoid extra data shuffle by 'sort on Spark' for this repartition test.
 @allow_non_gpu(*non_utc_allow)
-def test_repartition_df_for_round_robin(data_gen, num_parts, length, kudo_enabled):
+def test_repartition_df_for_round_robin(data_gen, num_parts, length):
     from pyspark.sql.functions import lit
     assert_gpu_and_cpu_are_equal_collect(
         # Add a computed column to avoid shuffle being optimized back to a CPU shuffle
         lambda spark : gen_df(spark, data_gen, length=length).withColumn('x', lit(1)).repartition(num_parts),
         # Enable sort for round robin partition
-        conf = {'spark.sql.execution.sortBeforeRepartition': 'true',
-                kudo_enabled_conf_key: kudo_enabled}) # default is true
+        conf = {'spark.sql.execution.sortBeforeRepartition': 'true'}) # default is true
 
 @allow_non_gpu('ShuffleExchangeExec', 'RoundRobinPartitioning')
 @pytest.mark.parametrize('data_gen', [[('a', simple_string_to_string_map_gen)]], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @ignore_order(local=True) # To avoid extra data shuffle by 'sort on Spark' for this repartition test.
-def test_round_robin_sort_fallback(data_gen, kudo_enabled):
+def test_round_robin_sort_fallback(data_gen):
     from pyspark.sql.functions import lit
+    # Disable AQE as it can change the shuffle type
     assert_gpu_fallback_collect(
             # Add a computed column to avoid shuffle being optimized back to a CPU shuffle like in test_repartition_df
             lambda spark : gen_df(spark, data_gen).withColumn('extra', lit(1)).repartition(13),
             'ShuffleExchangeExec',
-        conf = {kudo_enabled_conf_key: kudo_enabled})
+        conf = {'spark.sql.adaptive.enabled': 'false'})
 
 @allow_non_gpu("ProjectExec", "ShuffleExchangeExec")
 @ignore_order(local=True) # To avoid extra data shuffle by 'sort on Spark' for this repartition test.
 @pytest.mark.parametrize('num_parts', [2, 10, 17, 19, 32], ids=idfn)
 @pytest.mark.parametrize('gen', [([('ag', ArrayGen(StructGen([('b1', long_gen)])))], ['ag'])], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_hash_repartition_exact_fallback(gen, num_parts, kudo_enabled):
+def test_hash_repartition_exact_fallback(gen, num_parts):
     data_gen = gen[0]
     part_on = gen[1]
+    # Disable AQE as it can change the shuffle type
     assert_gpu_fallback_collect(
         lambda spark : gen_df(spark, data_gen, length=1024) \
             .repartition(num_parts, *part_on) \
@@ -265,16 +242,23 @@ def test_hash_repartition_exact_fallback(gen, num_parts, kudo_enabled):
             .selectExpr('*'), "ShuffleExchangeExec",
         # Force to use murmur3
         conf = {'spark.rapids.sql.partitioning.hashFunction.enabled': False,
-                kudo_enabled_conf_key: kudo_enabled})
+                'spark.sql.adaptive.enabled': 'false'})
+
+@allow_non_gpu("Murmur3Hash")
+@pytest.mark.parametrize('data_gen', [ArrayGen(StructGen([('b1', long_gen)]))], ids=idfn)
+def test_hash_fallback_bridge(data_gen):
+    assert_gpu_fallback_collect(
+        lambda spark : unary_op_df(spark, data_gen, length=1024) \
+            .selectExpr('*', 'hash(a) as h'), "Murmur3Hash",
+        conf = {"spark.rapids.sql.expression.cpuBridge.enabled": True})
 
 @allow_non_gpu("ProjectExec")
 @pytest.mark.parametrize('data_gen', [ArrayGen(StructGen([('b1', long_gen)]))], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_hash_fallback(data_gen, kudo_enabled):
+def test_hash_fallback(data_gen):
     assert_gpu_fallback_collect(
         lambda spark : unary_op_df(spark, data_gen, length=1024) \
-            .selectExpr('*', 'hash(a) as h'), "ProjectExec",
-        conf = {kudo_enabled_conf_key: kudo_enabled})
+            .selectExpr('*', 'hash(a) as h'), "Murmur3Hash",
+        conf = {"spark.rapids.sql.expression.cpuBridge.enabled": False})
 
 @ignore_order(local=True) # To avoid extra data shuffle by 'sort on Spark' for this repartition test.
 @pytest.mark.parametrize('num_parts', [1, 2, 10, 17, 19, 32], ids=idfn)
@@ -310,18 +294,18 @@ def test_hash_fallback(data_gen, kudo_enabled):
     ([('a', decimal_gen_64bit), ('b', decimal_gen_64bit), ('c', decimal_gen_64bit)], ['a', 'b', 'c']),
     ([('a', decimal_gen_128bit), ('b', decimal_gen_128bit), ('c', decimal_gen_128bit)], ['a', 'b', 'c']),
     ], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_hash_repartition_exact(gen, num_parts, kudo_enabled):
+def test_hash_repartition_exact(gen, num_parts):
     data_gen = gen[0]
     part_on = gen[1]
+    # Disable AQE as it can change the shuffle type
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : gen_df(spark, data_gen, length=1024)\
                     .repartition(num_parts, *part_on)\
                     .withColumn('id', f.spark_partition_id())\
                     .withColumn('hashed', f.hash(*part_on))\
                     .selectExpr('*', 'pmod(hashed, {})'.format(num_parts)),
-        conf = {kudo_enabled_conf_key: kudo_enabled})
+        conf = {'spark.sql.adaptive.enabled': 'false'})
 
 
 @ignore_order(local=True)  # To avoid extra data shuffle by 'sort on Spark' for this repartition test.
@@ -332,7 +316,8 @@ def test_hash_repartition_exact_longs_no_overflow(num_parts, is_ansi_mode):
     gen = LongGen(min_val=-1000, max_val=1000, special_cases=[]) if is_ansi_mode else long_gen
     data_gen = [('a', gen)]
     part_on = [f.col('a') + 15]
-    conf = {'spark.sql.ansi.enabled': is_ansi_mode}
+    # Disable AQE as it can change the shuffle type
+    conf = {'spark.sql.ansi.enabled': is_ansi_mode, 'spark.sql.adaptive.enabled': 'false'}
 
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: gen_df(spark, data_gen, length=1024)
@@ -344,10 +329,9 @@ def test_hash_repartition_exact_longs_no_overflow(num_parts, is_ansi_mode):
 
 @ignore_order(local=True)  # To avoid extra data shuffle by 'sort on Spark' for this repartition test.
 @pytest.mark.parametrize('num_parts', [17], ids=idfn)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_hash_repartition_long_overflow_ansi_exception(num_parts, kudo_enabled):
-    conf = copy_and_update(ansi_enabled_conf, {kudo_enabled_conf_key: kudo_enabled})
+def test_hash_repartition_long_overflow_ansi_exception(num_parts):
+    conf = copy_and_update(ansi_enabled_conf, {})
 
     def test_function(spark):
         df = gen_df(spark, [('a', long_gen)], length=1024)
@@ -366,13 +350,11 @@ def test_hash_repartition_long_overflow_ansi_exception(num_parts, kudo_enabled):
 
 # Test a query that should cause Spark to leverage getShuffleRDD
 @ignore_order(local=True)
-@pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
-def test_union_with_filter(kudo_enabled):
+def test_union_with_filter():
     def doit(spark):
         dfa = spark.range(1, 100).withColumn("id2", f.col("id"))
         dfb = dfa.groupBy("id").agg(f.size(f.collect_set("id2")).alias("idc"))
         dfc = dfb.filter(f.col("idc") == 1).select("id")
         return dfc.union(dfc)
-    conf = { "spark.sql.adaptive.enabled": "true",
-             kudo_enabled_conf_key: kudo_enabled}
+    conf = { "spark.sql.adaptive.enabled": "true"}
     assert_gpu_and_cpu_are_equal_collect(doit, conf)
