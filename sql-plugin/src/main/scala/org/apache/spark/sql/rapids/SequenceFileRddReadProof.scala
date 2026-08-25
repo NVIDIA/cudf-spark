@@ -16,7 +16,6 @@
 
 package org.apache.spark.sql.rapids
 
-import java.io.{ByteArrayOutputStream, InputStream}
 import java.lang.invoke.{MethodHandleInfo, SerializedLambda}
 
 import scala.collection.mutable.ArrayBuffer
@@ -41,15 +40,12 @@ object SequenceFileRddReadProof {
   case object Key extends SourceColumn
   case object Value extends SourceColumn
 
-  final case class ClosureMethod(className: String, methodName: String, descriptor: String)
-
   sealed trait Result
   /**
    * Relisting paths is not equivalent to preserving the proven source's configuration and splits.
    */
   final case class Proven(
       columns: Seq[SourceColumn],
-      closure: ClosureMethod,
       sourceRdd: NewHadoopRDD[Any, Any]) extends Result
   final case class Rejected(reason: String) extends Result
 
@@ -62,8 +58,6 @@ object SequenceFileRddReadProof {
   private case object Zero extends Symbol
   private final case class NewTuple(id: Int) extends Symbol
   private final case class OutputTuple(first: SourceColumn, second: SourceColumn) extends Symbol
-
-  private final case class LambdaBody(serialized: SerializedLambda, method: MethodNode)
 
   def inspect(plan: SparkPlan): Result = {
     try {
@@ -84,9 +78,9 @@ object SequenceFileRddReadProof {
             serializerColumns <- inspectSerializer(serialize.serializer)
             rddProof <- inspectRdd(scan.rdd)
           } yield {
-            val (closureColumns, closure, source) = rddProof
+            val (closureColumns, source) = rddProof
             val columns = serializerColumns.map(closureColumns)
-            Proven(columns, closure, source)
+            Proven(columns, source)
           }
         case _: ExternalRDDScanExec[_] => Left("ExternalRDDScanExec subclasses are not supported")
         case other => Left(s"expected ExternalRDDScanExec, found ${other.nodeName}")
@@ -143,8 +137,7 @@ object SequenceFileRddReadProof {
   }
 
   private def inspectRdd(
-      rdd: RDD[_]): Either[String, (IndexedSeq[SourceColumn], ClosureMethod,
-      NewHadoopRDD[Any, Any])] = rdd match {
+      rdd: RDD[_]): Either[String, (IndexedSeq[SourceColumn], NewHadoopRDD[Any, Any])] = rdd match {
     case mapped: MapPartitionsRDD[_, _]
         if mapped.getClass == classOf[MapPartitionsRDD[_, _]] =>
       for {
@@ -160,9 +153,9 @@ object SequenceFileRddReadProof {
         _ <- requireUnmaterialized(source, "source RDD")
         _ <- requireBinaryInputFormat(source)
         function <- extractMapFunction(mapped)
-        body <- loadLambdaBody(function)
-        columns <- verifyLambda(body)
-      } yield (columns, describe(body.serialized), source)
+        method <- loadLambdaMethod(function)
+        columns <- verifyLambda(method)
+      } yield (columns, source)
     case _: MapPartitionsRDD[_, _] => Left("MapPartitionsRDD subclasses are not supported")
     case other => Left(s"expected MapPartitionsRDD, found ${other.getClass.getSimpleName}")
   }
@@ -226,7 +219,7 @@ object SequenceFileRddReadProof {
     }
   }
 
-  private def loadLambdaBody(function: AnyRef): Either[String, LambdaBody] = {
+  private def loadLambdaMethod(function: AnyRef): Either[String, MethodNode] = {
     serializedLambda(function).flatMap { lambda =>
       if (lambda.getImplMethodKind != MethodHandleInfo.REF_invokeStatic) {
         Left("user closure is not a static lambda body")
@@ -249,7 +242,7 @@ object SequenceFileRddReadProof {
                 method.desc == lambda.getImplMethodSignature => method
           }
           if (methods.length == 1) {
-            Right(LambdaBody(lambda, methods.head))
+            Right(methods.head)
           } else {
             Left("cannot uniquely locate the user closure bytecode")
           }
@@ -296,7 +289,7 @@ object SequenceFileRddReadProof {
         Option(implClass.getResourceAsStream(s"/$internalName.class")) match {
           case Some(in) =>
             try {
-              val reader = new ClassReader(readAllBytes(in))
+              val reader = new ClassReader(in)
               if (reader.getClassName == internalName) {
                 Right(reader)
               } else {
@@ -314,26 +307,7 @@ object SequenceFileRddReadProof {
     }
   }
 
-  private def readAllBytes(in: InputStream): Array[Byte] = {
-    val out = new ByteArrayOutputStream()
-    val buffer = new Array[Byte](8192)
-    var count = in.read(buffer)
-    while (count >= 0) {
-      if (count > 0) {
-        out.write(buffer, 0, count)
-      }
-      count = in.read(buffer)
-    }
-    out.toByteArray
-  }
-
-  private def describe(lambda: SerializedLambda): ClosureMethod = ClosureMethod(
-    lambda.getImplClass.replace('/', '.'),
-    lambda.getImplMethodName,
-    lambda.getImplMethodSignature)
-
-  private def verifyLambda(body: LambdaBody): Either[String, IndexedSeq[SourceColumn]] = {
-    val method = body.method
+  private def verifyLambda(method: MethodNode): Either[String, IndexedSeq[SourceColumn]] = {
     val argumentTypes = Type.getArgumentTypes(method.desc)
     val forbiddenFlags = Opcodes.ACC_SYNCHRONIZED | Opcodes.ACC_NATIVE | Opcodes.ACC_ABSTRACT
     if ((method.access & Opcodes.ACC_STATIC) == 0 || (method.access & forbiddenFlags) != 0) {

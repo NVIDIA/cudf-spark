@@ -435,11 +435,6 @@ case class GpuFileSourceScanExec(
               createNanoTimingMetric(ESSENTIAL_LEVEL, "time row index gen")
         }
         bf.result()
-      case _: GpuReadSequenceFileBinaryFormat =>
-        Map(
-          "numPartedFiles" -> createMetric(DEBUG_LEVEL, "number of PartitionedFiles"),
-          COPY_BUFFER_TIME ->
-            createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_COPY_BUFFER_TIME))
       case _ =>
         Map.empty[String, GpuMetric]
     }
@@ -660,10 +655,6 @@ case class GpuFileSourceScanExec(
 }
 
 object GpuFileSourceScanExec {
-  // Spark can load a FileFormat through a different classloader than the plugin.
-  private def isSequenceFileBinaryFormat(cls: Class[_]): Boolean =
-    cls.getName == classOf[SequenceFileBinaryFileFormat].getName
-
   def tagSupport(meta: SparkPlanMeta[FileSourceScanExec]): Unit = {
     val cls = meta.wrapped.relation.fileFormat.getClass
     if (ExternalSource.isSupportedFormat(cls)) {
@@ -676,8 +667,6 @@ object GpuFileSourceScanExec {
       GpuReadParquetFileFormat.tagSupport(meta)
     } else if (classOf[JsonFileFormat].isAssignableFrom(cls)) {
       GpuReadJsonFileFormat.tagSupport(meta)
-    } else if (isSequenceFileBinaryFormat(cls)) {
-      GpuReadSequenceFileBinaryFormat.tagSupport(meta)
     } else {
       meta.willNotWorkOnGpu(s"unsupported file format: ${cls.getCanonicalName}")
     }
@@ -696,8 +685,6 @@ object GpuFileSourceScanExec {
       new GpuReadParquetFileFormat
     } else if (classOf[JsonFileFormat].isAssignableFrom(cls)) {
       new GpuReadJsonFileFormat
-    } else if (isSequenceFileBinaryFormat(cls)) {
-      new GpuReadSequenceFileBinaryFormat
     } else {
       throw new IllegalArgumentException(s"${cls.getCanonicalName} is not supported")
     }

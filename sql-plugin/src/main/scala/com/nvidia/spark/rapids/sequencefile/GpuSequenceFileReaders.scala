@@ -38,12 +38,12 @@ import org.apache.hadoop.io.{DataOutputBuffer, SequenceFile}
 
 import org.apache.spark.TaskContext
 import org.apache.spark.broadcast.Broadcast
-import org.apache.spark.sql.connector.read.PartitionReader
+import org.apache.spark.sql.connector.read.{PartitionReader, PartitionReaderFactory}
 import org.apache.spark.sql.execution.datasources.PartitionedFile
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.sources.Filter
-import org.apache.spark.sql.types.{BinaryType, StructType}
+import org.apache.spark.sql.types.BinaryType
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkVector}
 import org.apache.spark.util.SerializableConfiguration
 
@@ -288,15 +288,14 @@ private final class BinaryHostColumnBuilder(
 private[sequencefile] class GpuSequenceFilePartitionReader(
     conf: Configuration,
     files: Array[PartitionedFile],
-    readDataSchema: StructType,
+    keyFirst: Boolean,
     poolConf: ThreadPoolConf,
     maxNumFileProcessed: Int,
     execMetrics: Map[String, GpuMetric],
     maxReadBatchSizeRows: Int,
     maxReadBatchSizeBytes: Long,
     maxGpuColumnSizeBytes: Long,
-    keepReadsInOrder: Boolean,
-    queryUsesInputFile: Boolean)
+    keepReadsInOrder: Boolean)
   extends MultiFileCloudPartitionReaderBase(
     conf,
     files,
@@ -312,39 +311,26 @@ private[sequencefile] class GpuSequenceFilePartitionReader(
       maxReadBatchSizeBytes,
       maxGpuColumnSizeBytes).min, 0)) with MultiFileReaderFunctions {
 
-  private val projectedColumns = readDataSchema.length
+  private val projectedColumns = 2
   private val batchCapacity = Seq(
     SequenceFileReaderLimits.MAX_BATCH_OUTPUT_BYTES,
     maxReadBatchSizeBytes,
     maxGpuColumnSizeBytes).min
-  private val rowCapacity = if (projectedColumns == 0) {
-    math.min(maxReadBatchSizeRows, SequenceFileReaderLimits.MAX_BATCH_ROWS)
-  } else {
-    val maxRowsForOffsets = batchCapacity /
-      (projectedColumns.toLong * DType.INT32.getSizeInBytes *
-        SequenceFileReaderLimits.MAX_OFFSETS_FRACTION_DENOMINATOR) - 1L
-    math.min(
-      math.min(maxReadBatchSizeRows.toLong, SequenceFileReaderLimits.MAX_BATCH_ROWS.toLong),
-      maxRowsForOffsets).toInt
-  }
+  private val maxRowsForOffsets = batchCapacity /
+    (projectedColumns.toLong * DType.INT32.getSizeInBytes *
+      SequenceFileReaderLimits.MAX_OFFSETS_FRACTION_DENOMINATOR) - 1L
+  private val rowCapacity = math.min(
+    math.min(maxReadBatchSizeRows.toLong, SequenceFileReaderLimits.MAX_BATCH_ROWS.toLong),
+    maxRowsForOffsets).toInt
   require(rowCapacity > 0, "SequenceFile binary batch limit is too small")
   private val offsetsCapacity = projectedColumns.toLong * (rowCapacity.toLong + 1L) *
     DType.INT32.getSizeInBytes
-  private val payloadCapacity = if (projectedColumns == 0) 0L else {
-    batchCapacity - offsetsCapacity
-  }
-  require(projectedColumns == 0 || payloadCapacity > 0,
-    "SequenceFile binary batch limit leaves no room for payloads")
-  private val requiredHostMemory = if (projectedColumns == 0) 1L else {
-    // This covers one retained batch plus the two-column builder's grow-and-copy peak.
-    Math.multiplyExact(5L, batchCapacity)
-  }
-  private val keyIndex = readDataSchema.fieldNames.indexOf(
-    SequenceFileBinaryFileFormat.KEY_FIELD)
-  private val valueIndex = readDataSchema.fieldNames.indexOf(
-    SequenceFileBinaryFileFormat.VALUE_FIELD)
-  private val wantsKey = keyIndex >= 0
-  private val wantsValue = valueIndex >= 0
+  private val payloadCapacity = batchCapacity - offsetsCapacity
+  require(payloadCapacity > 0, "SequenceFile binary batch limit leaves no room for payloads")
+  // This covers one retained batch plus the two-column builder's grow-and-copy peak.
+  private val requiredHostMemory = Math.multiplyExact(5L, batchCapacity)
+  private val keyIndex = if (keyFirst) 0 else 1
+  private val valueIndex = 1 - keyIndex
   private val tracker = new ResultTracker
   private val outputBatchesMetric = execMetrics.getOrElse(NUM_OUTPUT_BATCHES, NoopMetric)
   private val copyMetric = execMetrics.getOrElse(COPY_BUFFER_TIME, NoopMetric)
@@ -568,8 +554,8 @@ private[sequencefile] class GpuSequenceFilePartitionReader(
       keyMark: Long,
       valueMark: Long,
       rowCount: Int): Unit = {
-    if (wantsKey) builders(keyIndex).rollback(keyMark, rowCount)
-    if (wantsValue) builders(valueIndex).rollback(valueMark, rowCount)
+    builders(keyIndex).rollback(keyMark, rowCount)
+    builders(valueIndex).rollback(valueMark, rowCount)
   }
 
   private def tryAppendRecord(
@@ -580,20 +566,12 @@ private[sequencefile] class GpuSequenceFilePartitionReader(
     if (rowCount == rowCapacity) {
       return None
     }
-    if (projectedColumns == 0) {
-      return Some(0L)
-    }
-
-    val keyMark = if (wantsKey) builders(keyIndex).mark() else 0L
-    val valueMark = if (wantsValue) builders(valueIndex).mark() else 0L
+    val keyMark = builders(keyIndex).mark()
+    val valueMark = builders(valueIndex).mark()
     try {
-      var recordBytes = 0L
-      if (wantsKey) {
-        recordBytes = builders(keyIndex).append(reader.writeKey)
-      }
-      if (wantsValue) {
-        recordBytes = Math.addExact(recordBytes, builders(valueIndex).append(reader.writeValue))
-      }
+      val keyBytes = builders(keyIndex).append(reader.writeKey)
+      val recordBytes = Math.addExact(
+        keyBytes, builders(valueIndex).append(reader.writeValue))
       if (recordBytes <= payloadCapacity - payloadBytes) {
         Some(recordBytes)
       } else {
@@ -607,13 +585,6 @@ private[sequencefile] class GpuSequenceFilePartitionReader(
     }
   }
 
-  private def finishChunk(
-      builders: Array[BinaryHostColumnBuilder],
-      rows: Int): SingleHMBAndMeta = {
-    if (projectedColumns == 0) SingleHMBAndMeta.empty(rows)
-    else finishBuilders(builders, rows)
-  }
-
   private def readFile(
       file: PartitionedFile,
       config: Configuration): SequenceFileHostBuffers = {
@@ -621,7 +592,7 @@ private[sequencefile] class GpuSequenceFilePartitionReader(
     val chunks = new mutable.ArrayBuffer[SingleHMBAndMeta]
     var builders: Array[BinaryHostColumnBuilder] = null
     try {
-      builders = if (projectedColumns == 0) Array.empty else newBuilders(file)
+      builders = newBuilders(file)
       withResource(BinaryRecordReader.open(new Configuration(config), file)) { reader =>
         var rowCount = 0
         var payloadBytes = 0L
@@ -634,16 +605,15 @@ private[sequencefile] class GpuSequenceFilePartitionReader(
               throw new UnsupportedOperationException(
                 s"SequenceFile binary record exceeds the $payloadCapacity byte decompressed " +
                   s"batch limit: ${file.filePath}")
-            case None if projectedColumns > 0 &&
-                chunks.length + 1 >= SequenceFileReaderLimits.MAX_BUFFERED_BATCHES =>
+            case None if chunks.length + 1 >= SequenceFileReaderLimits.MAX_BUFFERED_BATCHES =>
               throw new UnsupportedOperationException(
                 s"SequenceFile binary split exceeds the " +
                   s"${SequenceFileReaderLimits.MAX_BUFFERED_BATCHES} buffered batch limit; " +
-                  s"reduce spark.sql.files.maxPartitionBytes: ${file.filePath}")
+                  s"reduce the source RDD's input split size: ${file.filePath}")
             case None =>
-              chunks += finishChunk(builders, rowCount)
+              chunks += finishBuilders(builders, rowCount)
               closeBuilders(builders, null)
-              builders = if (projectedColumns == 0) Array.empty else newBuilders(file)
+              builders = newBuilders(file)
               rowCount = 0
               payloadBytes = 0L
               val recordBytes = tryAppendRecord(reader, builders, rowCount, payloadBytes)
@@ -657,7 +627,7 @@ private[sequencefile] class GpuSequenceFilePartitionReader(
           }
         }
         if (rowCount > 0 || chunks.isEmpty) {
-          chunks += finishChunk(builders, rowCount)
+          chunks += finishBuilders(builders, rowCount)
         }
       }
       val measuredBytesRead = Math.max(0L, fileSystemBytesRead() - startingBytesRead)
@@ -789,7 +759,7 @@ private[sequencefile] class GpuSequenceFilePartitionReader(
     }
   }
 
-  override def canUseCombine: Boolean = !queryUsesInputFile
+  override def canUseCombine: Boolean = true
 
   override def combineHMBs(
       results: Array[HostMemoryBuffersWithMetaDataBase]): HostMemoryBuffersWithMetaDataBase = {
@@ -848,12 +818,10 @@ private[sequencefile] class GpuSequenceFilePartitionReader(
 private[rapids] case class GpuSequenceFilePartitionReaderFactory(
     @transient sqlConf: SQLConf,
     broadcastedConf: Broadcast[SerializableConfiguration],
-    readDataSchema: StructType,
-    partitionSchema: StructType,
+    keyFirst: Boolean,
     @transient rapidsConf: RapidsConf,
     poolConfBuilder: ThreadPoolConfBuilder,
-    metrics: Map[String, GpuMetric],
-    queryUsesInputFile: Boolean)
+    metrics: Map[String, GpuMetric])
   extends MultiFilePartitionReaderFactoryBase(sqlConf, broadcastedConf, rapidsConf) {
 
   override protected val canUseCoalesceFilesReader: Boolean = false
@@ -866,19 +834,17 @@ private[rapids] case class GpuSequenceFilePartitionReaderFactory(
   override protected def buildBaseColumnarReaderForCloud(
       files: Array[PartitionedFile],
       conf: Configuration): PartitionReader[ColumnarBatch] = {
-    require(partitionSchema.isEmpty, "SequenceFile binary does not support partition columns")
     new GpuSequenceFilePartitionReader(
       conf,
       files,
-      readDataSchema,
+      keyFirst,
       poolConfBuilder.build(),
       maxNumFileProcessed,
       metrics,
       maxReadBatchSizeRows,
       maxReadBatchSizeBytes,
       maxGpuColumnSizeBytes,
-      keepReadsInOrder,
-      queryUsesInputFile)
+      keepReadsInOrder)
   }
 
   override protected def buildBaseColumnarReaderForCoalescing(
@@ -888,4 +854,21 @@ private[rapids] case class GpuSequenceFilePartitionReaderFactory(
   }
 
   override protected def getFileFormatShortName: String = "SequenceFileBinary"
+}
+
+object GpuSequenceFileRDDReader {
+  def createReaderFactory(
+      sqlConf: SQLConf,
+      broadcastedConf: Broadcast[SerializableConfiguration],
+      keyFirst: Boolean,
+      rapidsConf: RapidsConf,
+      metrics: Map[String, GpuMetric]): PartitionReaderFactory = {
+    GpuSequenceFilePartitionReaderFactory(
+      sqlConf,
+      broadcastedConf,
+      keyFirst,
+      rapidsConf,
+      ThreadPoolConfBuilder(rapidsConf),
+      metrics)
+  }
 }

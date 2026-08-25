@@ -4810,8 +4810,11 @@ object GpuOverrides extends Logging {
     exec[SerializeFromObjectExec](
       "GPU replacement for exactly proven SequenceFile binary RDD scans",
       ExecChecks(TypeSig.BINARY, TypeSig.all),
-      (sfo, conf, p, r) =>
-        new GpuSequenceFileSerializeFromObjectExecMeta(sfo, conf, p, r)),
+      (sfo, conf, p, r) => if (conf.isSequenceFileRDDReadEnabled) {
+        new GpuSequenceFileSerializeFromObjectExecMeta(sfo, conf, p, r)
+      } else {
+        new RuleNotFoundSparkPlanMeta(sfo, conf, p)
+      }).invisible(),
     exec[InMemoryTableScanExec](
       "Implementation of InMemoryTableScanExec to use GPU accelerated caching",
       ExecChecks((TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128 + TypeSig.STRUCT +

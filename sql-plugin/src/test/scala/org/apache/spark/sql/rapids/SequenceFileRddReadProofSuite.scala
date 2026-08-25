@@ -76,6 +76,21 @@ class SequenceFileRddReadProofSuite extends AnyFunSuite with BeforeAndAfterAll {
     SequenceFileRddReadProof.inspect(serialize)
   }
 
+  private def assertProven(
+      df: DataFrame,
+      expected: Seq[SequenceFileRddReadProof.SourceColumn] =
+        Seq(SequenceFileRddReadProof.Key, SequenceFileRddReadProof.Value)): Unit = {
+    inspect(df) match {
+      case SequenceFileRddReadProof.Proven(columns, _) => assert(columns == expected)
+      case rejected => fail(s"expected proof, found $rejected")
+    }
+  }
+
+  private def assertRejected(df: DataFrame, expectedReason: String = ""): Unit = inspect(df) match {
+    case SequenceFileRddReadProof.Rejected(reason) => assert(reason.contains(expectedReason))
+    case proof => fail(s"expected rejection, found $proof")
+  }
+
   private def canonicalCopyOfRange(): DataFrame = {
     val session = spark
     import session.implicits._
@@ -86,12 +101,7 @@ class SequenceFileRddReadProofSuite extends AnyFunSuite with BeforeAndAfterAll {
   }
 
   test("prove canonical copyOfRange conversion") {
-    inspect(canonicalCopyOfRange()) match {
-      case SequenceFileRddReadProof.Proven(columns, closure, _) =>
-        assert(columns == Seq(SequenceFileRddReadProof.Key, SequenceFileRddReadProof.Value))
-        assert(closure.methodName.contains("canonicalCopyOfRange"))
-      case rejected => fail(s"expected proof, found $rejected")
-    }
+    assertProven(canonicalCopyOfRange())
   }
 
   test("prove copyBytes and copyOf conversions") {
@@ -101,11 +111,7 @@ class SequenceFileRddReadProofSuite extends AnyFunSuite with BeforeAndAfterAll {
       (pair._1.copyBytes(), Arrays.copyOf(pair._2.getBytes, pair._2.getLength))
     }.toDF("key", "value")
 
-    inspect(df) match {
-      case SequenceFileRddReadProof.Proven(columns, _, _) =>
-        assert(columns == Seq(SequenceFileRddReadProof.Key, SequenceFileRddReadProof.Value))
-      case rejected => fail(s"expected proof, found $rejected")
-    }
+    assertProven(df)
   }
 
   test("track key and value provenance") {
@@ -115,11 +121,7 @@ class SequenceFileRddReadProofSuite extends AnyFunSuite with BeforeAndAfterAll {
       (pair._2.copyBytes(), pair._1.copyBytes())
     }.toDF("first", "second")
 
-    inspect(df) match {
-      case SequenceFileRddReadProof.Proven(columns, _, _) =>
-        assert(columns == Seq(SequenceFileRddReadProof.Value, SequenceFileRddReadProof.Key))
-      case rejected => fail(s"expected proof, found $rejected")
-    }
+    assertProven(df, Seq(SequenceFileRddReadProof.Value, SequenceFileRddReadProof.Key))
   }
 
   test("reject partial and mismatched copies") {
@@ -133,8 +135,8 @@ class SequenceFileRddReadProofSuite extends AnyFunSuite with BeforeAndAfterAll {
       (Arrays.copyOf(pair._1.getBytes, pair._2.getLength), pair._2.copyBytes())
     }.toDF("key", "value")
 
-    assert(inspect(partial).isInstanceOf[SequenceFileRddReadProof.Rejected])
-    assert(inspect(mismatched).isInstanceOf[SequenceFileRddReadProof.Rejected])
+    assertRejected(partial)
+    assertRejected(mismatched)
   }
 
   test("reject raw backing arrays and captured state") {
@@ -149,8 +151,8 @@ class SequenceFileRddReadProofSuite extends AnyFunSuite with BeforeAndAfterAll {
       (pair._1.copyBytes(), pair._2.copyBytes())
     }.toDF("key", "value")
 
-    assert(inspect(raw).isInstanceOf[SequenceFileRddReadProof.Rejected])
-    assert(inspect(captured).isInstanceOf[SequenceFileRddReadProof.Rejected])
+    assertRejected(raw)
+    assertRejected(captured)
   }
 
   test("reject casts that change closure failure behavior") {
@@ -162,11 +164,7 @@ class SequenceFileRddReadProofSuite extends AnyFunSuite with BeforeAndAfterAll {
         Arrays.copyOf(pair._2.getBytes, pair._2.getLength + invalid.length))
     }.toDF("key", "value")
 
-    inspect(df) match {
-      case SequenceFileRddReadProof.Rejected(reason) =>
-        assert(reason.contains("unsupported type instruction"))
-      case proof => fail(s"expected rejection, found $proof")
-    }
+    assertRejected(df, "unsupported type instruction")
   }
 
   test("reject a mismatched tuple accessor invocation kind") {
@@ -206,11 +204,7 @@ class SequenceFileRddReadProofSuite extends AnyFunSuite with BeforeAndAfterAll {
       (pair._1.copyBytes(), pair._2.copyBytes())
     }.toDF("key", "value")
 
-    inspect(df) match {
-      case SequenceFileRddReadProof.Rejected(reason) =>
-        assert(reason.contains("expected NewHadoopRDD"))
-      case proof => fail(s"expected rejection, found $proof")
-    }
+    assertRejected(df, "expected NewHadoopRDD")
   }
 
   test("reject NewHadoopRDD subclasses") {
@@ -226,11 +220,7 @@ class SequenceFileRddReadProofSuite extends AnyFunSuite with BeforeAndAfterAll {
       (pair._1.copyBytes(), pair._2.copyBytes())
     }.toDF("key", "value")
 
-    inspect(df) match {
-      case SequenceFileRddReadProof.Rejected(reason) =>
-        assert(reason.contains("NewHadoopRDD subclasses"))
-      case proof => fail(s"expected rejection, found $proof")
-    }
+    assertRejected(df, "NewHadoopRDD subclasses")
   }
 
   test("reject checkpoint requests before materialization") {
@@ -244,11 +234,7 @@ class SequenceFileRddReadProofSuite extends AnyFunSuite with BeforeAndAfterAll {
       }
       mapped.checkpoint()
 
-      inspect(mapped.toDF("key", "value")) match {
-        case SequenceFileRddReadProof.Rejected(reason) =>
-          assert(reason.contains("has checkpoint state"))
-        case proof => fail(s"expected rejection, found $proof")
-      }
+      assertRejected(mapped.toDF("key", "value"), "has checkpoint state")
     } finally {
       Utils.deleteRecursively(checkpointDir)
     }
@@ -263,11 +249,7 @@ class SequenceFileRddReadProofSuite extends AnyFunSuite with BeforeAndAfterAll {
       }
     }.toDF("key", "value")
 
-    inspect(df) match {
-      case SequenceFileRddReadProof.Rejected(reason) =>
-        assert(reason.contains("not the Spark RDD.map wrapper"))
-      case proof => fail(s"expected rejection, found $proof")
-    }
+    assertRejected(df, "not the Spark RDD.map wrapper")
   }
 
   test("reject a non-binary tuple serializer") {
@@ -277,6 +259,6 @@ class SequenceFileRddReadProofSuite extends AnyFunSuite with BeforeAndAfterAll {
       (pair._1.copyBytes(), pair._2.getLength)
     }.toDF("key", "length")
 
-    assert(inspect(df).isInstanceOf[SequenceFileRddReadProof.Rejected])
+    assertRejected(df)
   }
 }

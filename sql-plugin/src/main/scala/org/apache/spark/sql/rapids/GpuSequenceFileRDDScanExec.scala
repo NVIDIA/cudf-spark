@@ -18,6 +18,7 @@ package org.apache.spark.sql.rapids
 
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.GpuMetric._
+import com.nvidia.spark.rapids.sequencefile.GpuSequenceFileRDDReader
 import com.nvidia.spark.rapids.shims.{GpuDataSourceRDD, PartitionedFileUtilsShim, ShimLeafExecNode}
 import org.apache.hadoop.mapreduce.lib.input.FileSplit
 
@@ -26,7 +27,6 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, SortOrder}
 import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, UnknownPartitioning}
 import org.apache.spark.sql.execution.datasources.{FilePartition, PartitionedFile}
-import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.util.SerializableConfiguration
 
@@ -57,12 +57,12 @@ case class GpuSequenceFileRDDScanExec(
     SCAN_TIME -> createNanoTimingMetric(ESSENTIAL_LEVEL, DESCRIPTION_SCAN_TIME),
     "numPartedFiles" -> createMetric(DEBUG_LEVEL, "number of PartitionedFiles"))
 
-  private lazy val readDataSchema = StructType(sourceColumns.map {
-    case SequenceFileRddReadProof.Key =>
-      SequenceFileBinaryFileFormat.DATA_SCHEMA(SequenceFileBinaryFileFormat.KEY_FIELD)
-    case SequenceFileRddReadProof.Value =>
-      SequenceFileBinaryFileFormat.DATA_SCHEMA(SequenceFileBinaryFileFormat.VALUE_FIELD)
-  })
+  private lazy val keyFirst = sourceColumns match {
+    case Seq(SequenceFileRddReadProof.Key, SequenceFileRddReadProof.Value) => true
+    case Seq(SequenceFileRddReadProof.Value, SequenceFileRddReadProof.Key) => false
+    case _ => throw new IllegalStateException(
+      "SequenceFile RDD scan requires key and value exactly once")
+  }
 
   private def toPartitionedFile(partition: org.apache.spark.Partition): PartitionedFile = {
     val hadoopPartition = partition match {
@@ -95,10 +95,10 @@ case class GpuSequenceFileRDDScanExec(
   @transient private lazy val readerFactory = {
     val broadcastedConf = sparkContext.broadcast(
       new SerializableConfiguration(sourceRdd.getConf))
-    GpuReadSequenceFileBinaryFormat.createRddReaderFactory(
+    GpuSequenceFileRDDReader.createReaderFactory(
       sparkSession.sessionState.conf,
       broadcastedConf,
-      readDataSchema,
+      keyFirst,
       rapidsConf,
       allMetrics)
   }

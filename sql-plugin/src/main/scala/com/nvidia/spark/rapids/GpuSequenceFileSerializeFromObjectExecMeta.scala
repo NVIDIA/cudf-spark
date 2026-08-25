@@ -25,20 +25,15 @@ import org.apache.spark.sql.execution.{SerializeFromObjectExec, SparkPlan}
 import org.apache.spark.sql.execution.exchange.Exchange
 import org.apache.spark.sql.rapids.{GpuSequenceFileRDDScanExec, SequenceFileRddReadProof}
 
-class GpuSequenceFileSerializeFromObjectExecMeta(
+private[rapids] final class GpuSequenceFileSerializeFromObjectExecMeta(
     plan: SerializeFromObjectExec,
     conf: RapidsConf,
     parent: Option[RapidsMeta[_, _, _]],
     rule: DataFromReplacementRule)
   extends SparkPlanMeta[SerializeFromObjectExec](plan, conf, parent, rule) {
 
-  private val inspection = if (conf.isSequenceFileRDDPhysicalReplaceEnabled) {
-    Some(SequenceFileRddReadProof.inspect(plan))
-  } else {
-    None
-  }
-  private val isProvenCandidate = inspection.exists(
-    _.isInstanceOf[SequenceFileRddReadProof.Proven])
+  private val inspection = SequenceFileRddReadProof.inspect(plan)
+  private val isProvenCandidate = inspection.isInstanceOf[SequenceFileRddReadProof.Proven]
   private var provenRead: Option[SequenceFileRddReadProof.Proven] = None
 
   // The proof covers both nodes, so exposing the RDD scan as a child would make replacement
@@ -55,12 +50,7 @@ class GpuSequenceFileSerializeFromObjectExecMeta(
   }
 
   override def tagPlanForGpu(): Unit = {
-    if (!conf.isSequenceFileRDDPhysicalReplaceEnabled) {
-      willNotWorkOnGpu("SequenceFile RDD physical replacement is not enabled")
-      return
-    }
-
-    inspection.get match {
+    inspection match {
       case proven: SequenceFileRddReadProof.Proven =>
         if (proven.columns.size != 2 ||
             proven.columns.count(_ == SequenceFileRddReadProof.Key) != 1 ||

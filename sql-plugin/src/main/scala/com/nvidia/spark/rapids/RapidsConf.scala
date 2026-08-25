@@ -1536,7 +1536,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     conf("spark.rapids.sql.reader.multithreaded.read.keepOrder")
       .doc("When using the MULTITHREADED reader, if this is set to true we read " +
         "the files in the same order Spark does, otherwise the order may not be the same. " +
-        "Now it is supported for parquet, orc, and the SequenceFile binary data source.")
+        "Now it is supported for parquet, orc, and accelerated SequenceFile RDD reads.")
       .booleanConf
       .createWithDefault(true)
 
@@ -1796,11 +1796,12 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .booleanConf
     .createWithDefault(false)
 
-  val SEQUENCEFILE_RDD_PHYSICAL_REPLACE_ENABLED =
-    conf("spark.rapids.sql.format.sequencefile.rddScan.physicalReplace.enabled")
+  val SEQUENCEFILE_RDD_READ_ENABLED =
+    conf("spark.rapids.sql.format.sequencefile.rdd.read.enabled")
       .doc("When set to true, replaces exactly proven SequenceFile binary RDD reads with the " +
-        "internal GPU SequenceFile reader. This optimization may regroup the source RDD's " +
+        "GPU SequenceFile reader. This optimization may regroup the source RDD's " +
         "selected input splits and therefore does not preserve its partition identity.")
+      .internal()
       .booleanConf
       .createWithDefault(false)
 
@@ -3817,8 +3818,7 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val isAvroReadEnabled: Boolean = get(ENABLE_AVRO_READ)
 
-  lazy val isSequenceFileRDDPhysicalReplaceEnabled: Boolean =
-    get(SEQUENCEFILE_RDD_PHYSICAL_REPLACE_ENABLED)
+  lazy val isSequenceFileRDDReadEnabled: Boolean = get(SEQUENCEFILE_RDD_READ_ENABLED)
 
   lazy val isAvroPerFileReadEnabled: Boolean =
     RapidsReaderType.withName(get(AVRO_READER_TYPE)) == RapidsReaderType.PERFILE
