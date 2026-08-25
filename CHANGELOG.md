@@ -7,6 +7,7 @@ Generated on 2026-08-25
 |||
 |:---|:---|
 |[#15263](https://github.com/NVIDIA/cudf-spark/issues/15263)|[FEA] Delta Lake DB-17.3: Enable GPU data-file writes for managed CTAS/RTAS|
+|[#10159](https://github.com/NVIDIA/cudf-spark/issues/10159)|[FEA] provide configuration to automatically set spark.shuffle.manager|
 |[#15272](https://github.com/NVIDIA/cudf-spark/issues/15272)|[FEA] Add support for Apache Spark 3.5.9|
 |[#15168](https://github.com/NVIDIA/cudf-spark/issues/15168)|[FEA] Remove shim for Databricks 13.3|
 |[#15270](https://github.com/NVIDIA/cudf-spark/issues/15270)|[FEA] Add support for Apache Spark 4.0.4|
@@ -22,7 +23,6 @@ Generated on 2026-08-25
 ### Performance
 |||
 |:---|:---|
-|[#10159](https://github.com/NVIDIA/cudf-spark/issues/10159)|[FEA] provide configuration to automatically set spark.shuffle.manager|
 |[#14868](https://github.com/NVIDIA/cudf-spark/issues/14868)|[FEA][Follow-up] Emit multiple batches from GpuProjectExec split-retry instead of concatenating|
 
 ### Bugs Fixed
