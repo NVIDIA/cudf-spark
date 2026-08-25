@@ -142,6 +142,7 @@ EqualTo,4
 Exp,4
 Explode,4
 Expm1,4
+FindInSet,4
 First,4
 Flatten,4
 Floor,4

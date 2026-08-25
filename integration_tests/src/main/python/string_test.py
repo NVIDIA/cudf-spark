@@ -334,6 +334,40 @@ def test_unsupported_fallback_instr():
     assert_gpu_did_fallback('instr("a", a)')
 
 
+def test_find_in_set():
+    data = [
+        ('ab', 'abc,b,ab,c,def'),
+        ('abc', 'abc,b,ab,c,def'),
+        ('def', 'abc,b,ab,c,def'),
+        ('missing', 'abc,b,ab,c,def'),
+        ('a,b', 'abc,b,ab,c,def'),
+        ('', ',abc,,def,'),
+        ('a', 'b,a,a'),
+        ('a', 'x'),
+        (None, 'abc,b,ab,c,def'),
+        ('ab', None),
+        (None, None),
+        ('é', 'a,é,中'),
+        ('中', 'a,é,中'),
+    ]
+    schema = StructType([
+        StructField('word', StringType()),
+        StructField('set', StringType())])
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.createDataFrame(data, schema).selectExpr(
+            'find_in_set("ab", set)',
+            'find_in_set("a", set)',
+            'find_in_set("a,b", set)',
+            'find_in_set(word, set)',
+            'find_in_set(word, "abc,b,ab,c,def")',
+            'find_in_set(word, ",abc,,def,")',
+            'find_in_set("a", "b,a,a")',
+            'find_in_set("", "")',
+            'find_in_set("a,b", "a,b")',
+            'find_in_set(CAST(NULL AS STRING), set)',
+            'find_in_set(word, CAST(NULL AS STRING))'))
+
+
 def test_contains():
     gen = mk_str_gen('.{0,3}Z?_Z?.{0,3}A?.{0,3}')
     assert_gpu_and_cpu_are_equal_collect(

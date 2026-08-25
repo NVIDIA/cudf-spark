@@ -16,6 +16,7 @@
 
 package org.apache.spark.sql.rapids
 
+import java.lang.reflect.InvocationTargetException
 import java.nio.charset.Charset
 import java.text.DecimalFormatSymbols
 import java.util.{EnumSet, Locale, Optional}
@@ -24,7 +25,8 @@ import scala.annotation.tailrec
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 
-import ai.rapids.cudf.{ast, BinaryOp, BinaryOperable, CaptureGroups, ColumnVector, ColumnView, DType, PadSide, RegexFlag, RegexProgram, Scalar, Table}
+import ai.rapids.cudf.{ast, BinaryOp, BinaryOperable, CaptureGroups, ColumnVector, ColumnView, DType, NullPolicy, OutOfBoundsPolicy, PadSide, RegexFlag, RegexProgram, Scalar, Table}
+import ai.rapids.cudf.ColumnView.FindOptions
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm._
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
@@ -2215,6 +2217,286 @@ case class GpuStringInstr(str: Expression, substr: Expression)
   override def doColumnar(numRows: Int, lhs: GpuScalar, rhs: GpuScalar): ColumnVector = {
     withResource(GpuColumnVector.from(lhs, numRows)) { expandedLhs =>
       doColumnar(expandedLhs, rhs)
+    }
+  }
+}
+
+object GpuFindInSet {
+  private lazy val nativeFindInSetMethod = try {
+    Some(Class.forName("com.nvidia.spark.rapids.jni.StringUtils").getMethod(
+      "findInSet", classOf[ColumnView], classOf[String]))
+  } catch {
+    case _: ClassNotFoundException | _: NoSuchMethodException => None
+  }
+
+  private lazy val nativeFindInSetRepeatedMethod = try {
+    Some(Class.forName("com.nvidia.spark.rapids.jni.StringUtils").getMethod(
+      "findInSetRepeated", classOf[ColumnView], classOf[String], java.lang.Integer.TYPE))
+  } catch {
+    case _: ClassNotFoundException | _: NoSuchMethodException => None
+  }
+
+  private def nativeFindInSet(word: String, set: ColumnView): Option[ColumnVector] = {
+    nativeFindInSetMethod.map { method =>
+      try {
+        method.invoke(null, set, word).asInstanceOf[ColumnVector]
+      } catch {
+        case e: InvocationTargetException => throw e.getCause
+      }
+    }
+  }
+
+  def hasNativeFindInSetRepeated: Boolean = nativeFindInSetRepeatedMethod.isDefined
+
+  private def nativeFindInSetRepeated(
+      word: String,
+      set: ColumnView,
+      maxDistinctSets: Int): Option[ColumnVector] = {
+    nativeFindInSetRepeatedMethod.flatMap { method =>
+      try {
+        Option(method.invoke(null, set, word, Integer.valueOf(maxDistinctSets))
+          .asInstanceOf[ColumnVector])
+      } catch {
+        case e: InvocationTargetException => throw e.getCause
+      }
+    }
+  }
+}
+
+case class GpuFindInSet(left: Expression, right: Expression)
+  extends GpuBinaryExpression with ImplicitCastInputTypes with NullIntolerantShim {
+  override def dataType: DataType = IntegerType
+  override def inputTypes: Seq[AbstractDataType] = Seq(StringType, StringType)
+  override def prettyName: String = "find_in_set"
+
+  // Prefer the direct native scalar-word path because it scans each RHS row once and avoids
+  // dictionary/distinct/gather setup for short set strings. The repeated-set path remains as a
+  // fallback for JNI builds that do not yet expose the direct native path.
+  private val maxHostDistinctSetsForScalarWord = 4096
+  private val maxNativeDistinctSetsForScalarWord = 65536
+
+  private def stringFromScalar(s: GpuScalar): String = s.getValue match {
+    case utf8: UTF8String => utf8.toString
+    case str: String => str
+    case other =>
+      throw new IllegalArgumentException(s"Unexpected string scalar value: $other")
+  }
+
+  private def nullIntColumn(numRows: Int): ColumnVector = {
+    withResource(Scalar.fromNull(DType.INT32)) { nullScalar =>
+      ColumnVector.fromScalar(nullScalar, numRows)
+    }
+  }
+
+  private def findInSetOnHost(word: String, set: String): Int = {
+    if (word.indexOf(',') >= 0) {
+      0
+    } else {
+      val tokens = set.split(",", -1)
+      var i = 0
+      while (i < tokens.length) {
+        if (tokens(i) == word) {
+          return i + 1
+        }
+        i += 1
+      }
+      0
+    }
+  }
+
+  private def buildPositionColumnForSets(word: String, sets: ColumnView): ColumnVector = {
+    withResource(sets.copyToHost()) { hostSets =>
+      val positions = new Array[java.lang.Integer](hostSets.getRowCount.toInt)
+      var i = 0
+      while (i < positions.length) {
+        if (hostSets.isNull(i.toLong)) {
+          positions(i) = null
+        } else {
+          positions(i) = Integer.valueOf(findInSetOnHost(word, hostSets.getJavaString(i.toLong)))
+        }
+        i += 1
+      }
+      ColumnVector.fromBoxedInts(positions: _*)
+    }
+  }
+
+  private def buildPositionColumnForSingleSet(
+      word: String,
+      sets: ColumnView,
+      numRows: Int): ColumnVector = {
+    withResource(sets.copyToHost()) { hostSets =>
+      if (hostSets.isNull(0)) {
+        nullIntColumn(numRows)
+      } else {
+        val position = findInSetOnHost(word, hostSets.getJavaString(0))
+        withResource(Scalar.fromInt(position)) { positionScalar =>
+          ColumnVector.fromScalar(positionScalar, numRows)
+        }
+      }
+    }
+  }
+
+  private def buildDictionaryColumns(set: String): (ColumnVector, ColumnVector) = {
+    val firstPositions = mutable.LinkedHashMap.empty[String, Int]
+    val tokens = set.split(",", -1)
+    var i = 0
+    while (i < tokens.length) {
+      firstPositions.getOrElseUpdate(tokens(i), i + 1)
+      i += 1
+    }
+
+    closeOnExcept(ColumnVector.fromStrings(firstPositions.keys.toArray: _*)) { tokenCv =>
+      closeOnExcept(ColumnVector.fromInts(firstPositions.values.toArray: _*)) { positionCv =>
+        (tokenCv, positionCv)
+      }
+    }
+  }
+
+  private def zeroOrNullFromSetNulls(set: GpuColumnVector): ColumnVector = {
+    withResource(set.getBase.isNull) { setIsNull =>
+      withResource(Scalar.fromNull(DType.INT32)) { nullInt =>
+        withResource(Scalar.fromInt(0)) { zero =>
+          setIsNull.ifElse(nullInt, zero)
+        }
+      }
+    }
+  }
+
+  private def findInLiteralSet(word: GpuColumnVector, set: String): ColumnVector = {
+    val numRows = word.getRowCount.toInt
+    if (numRows == 0) {
+      nullIntColumn(numRows)
+    } else {
+      val (tokenCv, positionCv) = buildDictionaryColumns(set)
+      withResource(tokenCv) { tokenCv =>
+        withResource(positionCv) { positionCv =>
+          withResource(new Table(word.getBase)) { wordTable =>
+            withResource(new Table(tokenCv)) { tokenTable =>
+              withResource(wordTable.leftDistinctJoinGatherMap(tokenTable, false)) { positionMap =>
+                withResource(positionMap.toColumnView(0, numRows)) { positionMapView =>
+                  val nullablePositions = withResource(new Table(positionCv)) { positionTable =>
+                    withResource(positionTable.gather(positionMapView, OutOfBoundsPolicy.NULLIFY)) {
+                      gatheredTable =>
+                        gatheredTable.getColumn(0).incRefCount()
+                    }
+                  }
+                  withResource(nullablePositions) { nullablePositions =>
+                    withResource(Scalar.fromInt(0)) { zero =>
+                      withResource(nullablePositions.replaceNulls(zero)) { zerosForMissing =>
+                        withResource(word.getBase.isNull) { wordIsNull =>
+                          withResource(Scalar.fromNull(DType.INT32)) { nullInt =>
+                            wordIsNull.ifElse(nullInt, zerosForMissing)
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  private def findInRepeatedSets(word: String, set: GpuColumnVector): Option[ColumnVector] = {
+    val numRows = set.getRowCount.toInt
+    if (numRows == 0) {
+      Some(nullIntColumn(numRows))
+    } else {
+      val distinctSetCount = set.getBase.distinctCount(NullPolicy.INCLUDE)
+      if (distinctSetCount > maxHostDistinctSetsForScalarWord) {
+        None
+      } else {
+        Some(withResource(new Table(set.getBase)) { setTable =>
+          withResource(setTable.dropDuplicates(
+              Array(0), Table.DuplicateKeepOption.KEEP_ANY, true)) { distinctSetsTable =>
+            if (distinctSetCount == 1) {
+              buildPositionColumnForSingleSet(word, distinctSetsTable.getColumn(0), numRows)
+            } else {
+              withResource(buildPositionColumnForSets(word,
+                  distinctSetsTable.getColumn(0))) { positionCv =>
+                withResource(setTable.leftDistinctJoinGatherMap(
+                    distinctSetsTable, true)) { positionMap =>
+                  withResource(positionMap.toColumnView(0, numRows)) { positionMapView =>
+                    withResource(new Table(positionCv)) { positionTable =>
+                      withResource(positionTable.gather(
+                          positionMapView, OutOfBoundsPolicy.NULLIFY)) { gatheredTable =>
+                        gatheredTable.getColumn(0).incRefCount()
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        })
+      }
+    }
+  }
+
+  private def findInSplitSet(set: GpuColumnVector, word: Scalar): ColumnVector = {
+    withResource(set.getBase.stringSplitRecord(",", -1)) { splitSet =>
+      withResource(splitSet.listIndexOf(word, FindOptions.FIND_FIRST)) { zeroBasedPos =>
+        withResource(Scalar.fromInt(1)) { one =>
+          zeroBasedPos.add(one)
+        }
+      }
+    }
+  }
+
+  private def findInSplitSet(set: GpuColumnVector, word: ColumnView): ColumnVector = {
+    withResource(set.getBase.stringSplitRecord(",", -1)) { splitSet =>
+      withResource(splitSet.listIndexOf(word, FindOptions.FIND_FIRST)) { zeroBasedPos =>
+        withResource(Scalar.fromInt(1)) { one =>
+          zeroBasedPos.add(one)
+        }
+      }
+    }
+  }
+
+  override def doColumnar(lhs: GpuColumnVector, rhs: GpuColumnVector): ColumnVector =
+    findInSplitSet(rhs, lhs.getBase)
+
+  override def doColumnar(lhs: GpuScalar, rhs: GpuColumnVector): ColumnVector = {
+    if (!lhs.isValid) {
+      nullIntColumn(rhs.getRowCount.toInt)
+    } else {
+      val word = stringFromScalar(lhs)
+      if (word.indexOf(',') >= 0) {
+        zeroOrNullFromSetNulls(rhs)
+      } else {
+        GpuFindInSet.nativeFindInSet(word, rhs.getBase).getOrElse {
+          GpuFindInSet.nativeFindInSetRepeated(
+            word, rhs.getBase, maxNativeDistinctSetsForScalarWord).orElse {
+            // Preserve compatibility with older 26.08.0-SNAPSHOT JNI jars that do not expose
+            // either native scalar-word path.
+            if (GpuFindInSet.hasNativeFindInSetRepeated) None else findInRepeatedSets(word, rhs)
+          }.getOrElse {
+            findInSplitSet(rhs, lhs.getBase)
+          }
+        }
+      }
+    }
+  }
+
+  override def doColumnar(lhs: GpuColumnVector, rhs: GpuScalar): ColumnVector = {
+    if (!rhs.isValid) {
+      nullIntColumn(lhs.getRowCount.toInt)
+    } else {
+      findInLiteralSet(lhs, stringFromScalar(rhs))
+    }
+  }
+
+  override def doColumnar(numRows: Int, lhs: GpuScalar, rhs: GpuScalar): ColumnVector = {
+    if (!lhs.isValid || !rhs.isValid) {
+      nullIntColumn(numRows)
+    } else {
+      val result = findInSetOnHost(stringFromScalar(lhs), stringFromScalar(rhs))
+      withResource(Scalar.fromInt(result)) { resultScalar =>
+        ColumnVector.fromScalar(resultScalar, numRows)
+      }
     }
   }
 }

@@ -275,6 +275,7 @@ Name | SQL Function(s) | Description | Default Value | Notes
 <a name="sql.expression.Exp"></a>spark.rapids.sql.expression.Exp|`exp`|Euler's number e raised to a power|true|None|
 <a name="sql.expression.Explode"></a>spark.rapids.sql.expression.Explode|`explode_outer`, `explode`|Given an input array produces a sequence of rows for each value in the array|true|None|
 <a name="sql.expression.Expm1"></a>spark.rapids.sql.expression.Expm1|`expm1`|Euler's number e raised to a power minus 1|true|None|
+<a name="sql.expression.FindInSet"></a>spark.rapids.sql.expression.FindInSet|`find_in_set`|Find string in comma-delimited string list|true|None|
 <a name="sql.expression.Flatten"></a>spark.rapids.sql.expression.Flatten|`flatten`|Creates a single array from an array of arrays|true|None|
 <a name="sql.expression.Floor"></a>spark.rapids.sql.expression.Floor| |Floor of a number|true|None|
 <a name="sql.expression.FormatNumber"></a>spark.rapids.sql.expression.FormatNumber|`format_number`|Formats the number x like '#,###,###.##', rounded to d decimal places.|true|None|

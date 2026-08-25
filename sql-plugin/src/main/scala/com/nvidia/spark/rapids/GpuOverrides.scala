@@ -3332,6 +3332,17 @@ object GpuOverrides extends Logging {
             substr: Expression): GpuExpression =
           GpuStringInstr(str, substr)
       }),
+    expr[FindInSet](
+      "Find string in comma-delimited string list",
+      ExprChecks.binaryProject(TypeSig.INT, TypeSig.INT,
+        ("str", TypeSig.STRING, TypeSig.STRING),
+        ("strArray", TypeSig.STRING, TypeSig.STRING)),
+      (in, conf, p, r) => new BinaryExprMeta[FindInSet](in, conf, p, r) {
+        override def convertToGpu(
+            str: Expression,
+            strArray: Expression): GpuExpression =
+          GpuFindInSet(str, strArray)
+      }),
     expr[Substring](
       "Substring operator",
       ExprChecks.projectOnly(TypeSig.STRING, TypeSig.STRING + TypeSig.BINARY,
