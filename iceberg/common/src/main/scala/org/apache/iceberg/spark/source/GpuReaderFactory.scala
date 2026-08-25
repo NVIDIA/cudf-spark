@@ -21,14 +21,12 @@ import scala.collection.JavaConverters._
 import com.nvidia.spark.rapids.{CombineConf, GpuMetric, MultiFileReaderUtils, RapidsConf, ThreadPoolConfBuilder}
 import com.nvidia.spark.rapids.iceberg.ShimUtils.locationOf
 import com.nvidia.spark.rapids.iceberg.parquet.{
-  GpuIcebergParquetReaderConf,
   MultiFile,
   MultiThread,
   SingleFile,
   ThreadConf
 }
-import org.apache.iceberg.{FileFormat, MetadataColumns, TableProperties}
-import org.apache.iceberg.mapping.NameMappingParser
+import org.apache.iceberg.{FileFormat, MetadataColumns}
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.read.{InputPartition, PartitionReader, PartitionReaderFactory}
@@ -50,7 +48,6 @@ class GpuReaderFactory(private val metrics: Map[String, GpuMetric],
   private val poolConfBuilder = ThreadPoolConfBuilder(rapidsConf)
   private val combineThresholdSize = rapidsConf.getMultithreadedCombineThreshold
   private val combineWaitTime = rapidsConf.getMultithreadedCombineWaitTime
-  private val validateDeletionVectorCrc = rapidsConf.validateIcebergDeletionVectorCrc
 
   override def createReader(partition: InputPartition): PartitionReader[InternalRow] =
     throw new UnsupportedOperationException("GpuReaderFactory does not support createReader()")
@@ -59,38 +56,13 @@ class GpuReaderFactory(private val metrics: Map[String, GpuMetric],
     partition match {
       case gpuPartition: GpuSparkInputPartition =>
         val threadConf = calcThreadConf(gpuPartition)
-        new GpuIcebergPartitionReader(gpuPartition, newReaderConf(gpuPartition, threadConf))
+        new GpuIcebergPartitionReader(gpuPartition, threadConf, metrics)
       case _ =>
         throw new IllegalArgumentException(s"Unsupported partition type: ${partition.getClass}")
     }
   }
 
   override def supportColumnarReads(partition: InputPartition) = true
-
-  private def newReaderConf(
-      partition: GpuSparkInputPartition,
-      threadConf: ThreadConf): GpuIcebergParquetReaderConf = {
-    val table = GpuSparkScanAccess.table(partition.cpuPartition)
-    val nameMapping = Option(table.properties().get(TableProperties.DEFAULT_NAME_MAPPING))
-      .map(nm => NameMappingParser.fromJson(nm))
-
-    GpuIcebergParquetReaderConf(
-      caseSensitive = GpuSparkScanAccess.isCaseSensitive(partition.cpuPartition),
-      conf = partition.hadoopConf.value.value,
-      maxBatchSizeRows = partition.maxReadBatchSizeRows,
-      maxBatchSizeBytes = partition.maxReadBatchSizeBytes,
-      targetBatchSizeBytes = partition.gpuTargetBatchSizeBytes,
-      maxGpuColumnSizeBytes = partition.maxGpuColumnSizeBytes,
-      useChunkedReader = partition.chunkedReaderEnabled,
-      maxChunkedReaderMemoryUsageSizeBytes = partition.maxChunkedReaderMemoryUsageSizeBytes,
-      parquetDebugDumpPrefix = partition.parquetDebugDumpPrefix,
-      parquetDebugDumpAlways = partition.parquetDebugDumpAlways,
-      metrics = metrics,
-      threadConf = threadConf,
-      expectedSchema = partition.expectedSchema,
-      nameMapping = nameMapping,
-      validateDeletionVectorCrc = validateDeletionVectorCrc)
-  }
 
   private def calcThreadConf(partition: GpuSparkInputPartition): ThreadConf = {
     val scans = GpuSparkScanAccess

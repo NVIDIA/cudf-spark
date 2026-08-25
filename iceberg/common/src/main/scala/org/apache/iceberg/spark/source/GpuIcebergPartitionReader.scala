@@ -18,6 +18,7 @@ package org.apache.iceberg.spark.source
 
 import scala.collection.JavaConverters._
 
+import com.nvidia.spark.rapids.GpuMetric
 import com.nvidia.spark.rapids.MapUtil.toMapStrict
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
 import com.nvidia.spark.rapids.iceberg.{IcebergDeletionVector, ShimUtils}
@@ -27,6 +28,7 @@ import com.nvidia.spark.rapids.iceberg.data.{DefaultDeleteLoader, GpuDeleteFileI
 import com.nvidia.spark.rapids.iceberg.parquet._
 import org.apache.iceberg._
 import org.apache.iceberg.encryption.EncryptedFiles
+import org.apache.iceberg.mapping.NameMappingParser
 
 import org.apache.spark.sql.connector.read.PartitionReader
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -35,13 +37,15 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 
 class GpuIcebergPartitionReader(
     private val task: GpuSparkInputPartition,
-    private val conf: GpuIcebergParquetReaderConf,
+    private val threadConf: ThreadConf,
+    private val metrics: Map[String, GpuMetric],
 ) extends PartitionReader[ColumnarBatch] {
   private var inited = false
   
   private lazy val table = GpuSparkScanAccess.table(task.cpuPartition)
   private lazy val fileIO = table.io()
   private lazy val rapidsFileIO = new IcebergFileIO(fileIO)
+  private lazy val conf = newConf()
   private lazy val (inputFiles, tasks) = collectFiles()
   private lazy val deleteInfoMap =
     tasks.map { case (file, scanTask) =>
@@ -92,7 +96,7 @@ class GpuIcebergPartitionReader(
 
     inited = true
 
-    conf.threadConf match {
+    threadConf match {
       case SingleFile =>
         new GpuSingleThreadIcebergParquetReader(rapidsFileIO, files, constantsMap,
           gpuDeleteFiterMap, deletionVectorProvider, conf)
@@ -133,6 +137,29 @@ class GpuIcebergPartitionReader(
     }))
 
     (inputFiles, taskMap)
+  }
+
+  private def newConf(): GpuIcebergParquetReaderConf = {
+    val nameMapping = Option(table.properties()
+      .get(TableProperties.DEFAULT_NAME_MAPPING))
+      .map(nm => NameMappingParser.fromJson(nm))
+
+    GpuIcebergParquetReaderConf(
+      GpuSparkScanAccess.isCaseSensitive(task.cpuPartition),
+      task.hadoopConf.value.value,
+      task.maxReadBatchSizeRows,
+      task.maxReadBatchSizeBytes,
+      task.gpuTargetBatchSizeBytes,
+      task.maxGpuColumnSizeBytes,
+      task.chunkedReaderEnabled,
+      task.maxChunkedReaderMemoryUsageSizeBytes,
+      task.parquetDebugDumpPrefix,
+      task.parquetDebugDumpAlways,
+      metrics,
+      threadConf,
+      task.expectedSchema,
+      nameMapping,
+      task.validateDeletionVectorCrc)
   }
 
   private def constantsMap(icebergFile: IcebergPartitionedFile): java.util.Map[Integer, _] = {
