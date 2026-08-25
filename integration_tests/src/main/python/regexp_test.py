@@ -1205,6 +1205,19 @@ def test_rlike_fallback_inline_flags_with_anchors():
             'RLike',
             conf=_regexp_conf)
 
+@allow_non_gpu('ProjectExec', 'RLike')
+def test_rlike_fallback_case_insensitive_predefined_class():
+    # JDK 8/11 do not apply CASE_INSENSITIVE to the named \p{Lower}/\p{Upper} predicates, while
+    # JDK 17+ do, so GPU case-folding would diverge from the CPU there; these fall back to the CPU.
+    # Uses the DataFrame API (single backslash, one escaping layer) like the repro.
+    from pyspark.sql.functions import col
+    gen = mk_str_gen('[a-dA-D]{1,3}')
+    for pattern in [r'(?i)\p{Lower}', r'(?i)\p{Upper}', r'(?i)\P{Lower}', r'(?i)\P{Upper}']:
+        assert_gpu_fallback_collect(
+            lambda spark, pattern=pattern: unary_op_df(spark, gen).select(col('a').rlike(pattern)),
+            'RLike',
+            conf=_regexp_conf)
+
 def test_regexp_extract_all_idx_zero():
     gen = mk_str_gen('[abcd]{0,3}[0-9]{0,3}-[0-9]{0,3}[abcd]{1,3}')
     assert_gpu_and_cpu_are_equal_collect(

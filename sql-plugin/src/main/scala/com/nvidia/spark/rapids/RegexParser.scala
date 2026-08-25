@@ -491,7 +491,8 @@ class RegexParser(pattern: String) {
           case '0' =>
             parseOctalDigit
           case 'p' | 'P' =>
-            parsePredefinedClass
+            consumeExpected(ch)
+            parsePredefinedClass(ch == 'P')
           case _ if escapeChars.contains(ch) =>
             consumeExpected(ch)
             RegexChar(escapeChars(ch))
@@ -508,8 +509,7 @@ class RegexParser(pattern: String) {
     }
   }
 
-  private def parsePredefinedClass: RegexCharacterClass = {
-    val negated = consume().isUpper
+  private def parsePredefinedClass(negated: Boolean): RegexCharacterClass = {
     consumeExpected('{')
     val start = pos
     while(!eof() && pattern.charAt(pos).isLetter) {
@@ -558,7 +558,9 @@ class RegexParser(pattern: String) {
       }
     }
     consumeExpected('}')
-    RegexCharacterClass(negated, characters = getCharacters(className))
+    val res = RegexCharacterClass(negated, characters = getCharacters(className))
+    res.fromPredefined = Some(className)
+    res
   }
 
   private def isHexDigit(ch: Char): Boolean = isAsciiDigit(ch) ||
@@ -1395,7 +1397,13 @@ class CudfRegexTranspiler(mode: RegexMode) {
       case RegexCharacterRange(_, _) =>
         regex
 
-      case RegexCharacterClass(negated, characters) =>
+      case cc @ RegexCharacterClass(negated, characters) =>
+        if (flags.caseInsensitive && cc.fromPredefined.exists(Set("Lower", "Upper"))) {
+          throw new RegexUnsupportedException(
+            "Case-insensitive matching is not supported for Upper/Lower predefined character " +
+            "classes",
+            cc.position)
+        }
         characters.foreach {
           case r @ RegexChar(ch) if ch == '[' || ch == ']' =>
             // examples:
@@ -2186,6 +2194,8 @@ sealed case class RegexCharacterClass(
         false
     }
   }
+
+  var fromPredefined: Option[String] = None
 }
 
 sealed case class RegexReplacement(parts: ListBuffer[RegexAST]) extends RegexAST {

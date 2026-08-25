@@ -386,14 +386,26 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
       "Case-insensitive matching is not supported for escapes that resolve to a letter")
   }
 
+  test("cuDF does not support case-insensitive matching of Lower/Upper predefined classes") {
+    // JDK 8/11 do not apply CASE_INSENSITIVE to named \p{Lower}/\p{Upper} predicates, while
+    // JDK 17+ do, so folding them to [a-zA-Z] would diverge from the CPU on JDK 8/11; fall
+    // back instead. \P shares the code path via its class name.
+    for (p <- Seq(raw"(?i)\p{Lower}", raw"(?i)\p{Upper}", raw"(?i)\P{Lower}", raw"(?i)\P{Upper}")) {
+      assertUnsupported(p, RegexFindMode,
+        "Case-insensitive matching is not supported for Upper/Lower predefined character " +
+        "classes")
+    }
+    // the fallback is specific to Lower/Upper predefined classes: a hand-written range still folds
+    doTranspileTest("(?i)[a-z]", "[a-zA-Z]")
+  }
+
   test("cuDF does not support quantifier syntax when not quantifying anything") {
     // note that we could choose to transpile and escape the '{' and '}' characters
     val patterns = Seq("{1,2}", "{1,}", "{1}")
     patterns.foreach(pattern => {
       assertUnsupported(pattern, RegexFindMode,
         "Token preceding '{' is not quantifiable near index 0")
-        }
-    )
+    })
 
     val e = intercept[PatternSyntaxException] {
       parse("{2,1}")
