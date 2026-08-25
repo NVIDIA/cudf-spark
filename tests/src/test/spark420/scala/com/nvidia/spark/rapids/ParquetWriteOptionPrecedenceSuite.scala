@@ -21,7 +21,6 @@ package com.nvidia.spark.rapids
 
 import java.sql.Timestamp
 
-import com.nvidia.spark.rapids.shims.FileWriteOptionsShims
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
 import org.apache.hadoop.mapreduce.Job
@@ -29,13 +28,17 @@ import org.apache.parquet.hadoop.ParquetFileReader
 import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName
 
 import org.apache.spark.SparkConf
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.execution.datasources.{FileFormatWriter, SQLHadoopMapReduceCommitProtocol}
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+import org.apache.spark.sql.rapids.{ExecutionPlanCaptureCallback, GpuFileFormatWriter}
 import org.apache.spark.sql.types.StructType
 
 @scala.annotation.nowarn("msg=method readFooter in class ParquetFileReader is deprecated")
 class ParquetWriteOptionPrecedenceSuite extends SparkQueryCompareTestSuite {
-  test("prepareWrite preserves merged Parquet options over SQLConf defaults") {
+  private class PrepareWriteReached extends RuntimeException
+
+  test("GpuFileFormatWriter merges Parquet options before prepareWrite") {
     val sparkConf = new SparkConf()
       .set(SQLConf.PARQUET_WRITE_LEGACY_FORMAT.key, "true")
       .set(SQLConf.PARQUET_OUTPUT_TIMESTAMP_TYPE.key, "INT96")
@@ -44,8 +47,6 @@ class ParquetWriteOptionPrecedenceSuite extends SparkQueryCompareTestSuite {
       .set(SQLConf.PARQUET_ANNOTATE_VARIANT_LOGICAL_TYPE.key, "true")
 
     withGpuSparkSession(spark => {
-      val job = Job.getInstance(new Configuration(false))
-      val conf = job.getConfiguration
       val writeOptions = Map(
         SQLConf.PARQUET_WRITE_LEGACY_FORMAT.key -> "false",
         SQLConf.PARQUET_OUTPUT_TIMESTAMP_TYPE.key -> "TIMESTAMP_MICROS",
@@ -53,9 +54,42 @@ class ParquetWriteOptionPrecedenceSuite extends SparkQueryCompareTestSuite {
         SQLConf.LEGACY_PARQUET_NANOS_AS_LONG.key -> "false",
         SQLConf.PARQUET_ANNOTATE_VARIANT_LOGICAL_TYPE.key -> "false")
 
-      FileWriteOptionsShims.mergeWriteOptionsIntoHadoopConf(writeOptions, conf)
-      new GpuParquetFileFormat().prepareWrite(spark, job, Map.empty, new StructType())
+      var preparedConf: Option[Configuration] = None
+      val fileFormat = new GpuParquetFileFormat() {
+        override def prepareWrite(
+            sparkSession: SparkSession,
+            job: Job,
+            options: Map[String, String],
+            dataSchema: StructType): ColumnarOutputWriterFactory = {
+          super.prepareWrite(sparkSession, job, options, dataSchema)
+          preparedConf = Some(new Configuration(job.getConfiguration))
+          throw new PrepareWriteReached
+        }
+      }
 
+      withTempPath { outputPath =>
+        val plan = spark.range(1).queryExecution.executedPlan
+        intercept[PrepareWriteReached] {
+          GpuFileFormatWriter.write(
+            sparkSession = spark,
+            plan = plan,
+            fileFormat = fileFormat,
+            committer = new SQLHadoopMapReduceCommitProtocol(
+              "write-option-precedence", outputPath.getAbsolutePath, false),
+            outputSpec = FileFormatWriter.OutputSpec(
+              outputPath.getAbsolutePath, Map.empty, plan.output),
+            hadoopConf = new Configuration(false),
+            partitionColumns = Seq.empty,
+            bucketSpec = None,
+            statsTrackers = Seq.empty,
+            options = writeOptions,
+            useStableSort = false,
+            concurrentWriterPartitionFlushSize = 0L,
+            baseDebugOutputPath = None)
+        }
+      }
+
+      val conf = preparedConf.getOrElse(fail("GpuParquetFileFormat.prepareWrite was not reached"))
       assert(!conf.getBoolean(SQLConf.PARQUET_WRITE_LEGACY_FORMAT.key, true))
       assert(conf.get(SQLConf.PARQUET_OUTPUT_TIMESTAMP_TYPE.key) === "TIMESTAMP_MICROS")
       assert(!conf.getBoolean(SQLConf.PARQUET_FIELD_ID_WRITE_ENABLED.key, true))
