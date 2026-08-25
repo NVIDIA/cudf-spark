@@ -89,13 +89,6 @@ reader_opt_confs = __reader_opt_confs_no_chunked + __reader_opt_confs_chunked
 # The Count result can not be sorted, so local sort can not be used.
 reader_opt_confs_for_count = __reader_opt_confs_common + [__multithreaded_orc_file_reader_combine_unordered_conf_no_chunked]
 
-def _param_with_reader_conf(*values):
-    """Build a joint parameter while preserving marks attached to a reader configuration."""
-    reader_conf = values[-1]
-    if hasattr(reader_conf, 'values') and hasattr(reader_conf, 'marks'):
-        return pytest.param(*values[:-1], reader_conf.values[0], marks=reader_conf.marks)
-    return values
-
 non_utc_allow_orc_file_source_scan=['ColumnarToRowExec', 'FileSourceScanExec', 'BatchScanExec'] if is_not_utc() else []
 
 @pytest.mark.parametrize('name', ['timestamp-date-test.orc'])
@@ -222,10 +215,13 @@ orc_pred_push_gens = [
         # Once https://github.com/NVIDIA/spark-rapids/issues/140 is fixed replace this with
         # timestamp_gen
         orc_timestamp_gen]
+orc_pred_push_v1_enabled_lists = ["", "orc"]
 
+# Distribute read functions and reader configurations across
+# len(orc_pred_push_gens) * len(orc_pred_push_v1_enabled_lists) = 18 cases.
 @pytest.mark.order(2)
 @pytest.mark.parametrize('orc_gen', orc_pred_push_gens, ids=idfn)
-@pytest.mark.parametrize('v1_enabled_list', ["", "orc"])
+@pytest.mark.parametrize('v1_enabled_list', orc_pred_push_v1_enabled_lists)
 @ignore_order(local=True)
 def test_pred_push_round_trip(spark_tmp_path, orc_gen, v1_enabled_list):
     case_index = orc_pred_push_gens.index(orc_gen) * 2 + (v1_enabled_list == "orc")
@@ -694,24 +690,19 @@ def test_read_struct_without_stream(spark_tmp_path):
             lambda spark : spark.read.orc(data_path))
 
 
-# Exercise every schema type with the default reader, then exercise the full reader/source/case
-# matrix with one representative type. Schema evolution and reader selection are independent code
-# paths, so their full Cartesian product only repeats the same branches.
-read_with_more_columns_params = [
-    _param_with_reader_conf(orc_gen, "", "false", reader_opt_confs[0])
-    for orc_gen in flattened_orc_gens
-] + [
-    _param_with_reader_conf(flattened_orc_gens[0], v1_enabled_list, case_sensitive, reader_confs)
-    for v1_enabled_list in ["", "orc"]
-    for case_sensitive in ["false", "true"]
-    for reader_confs in reader_opt_confs
-    if not (v1_enabled_list == "" and case_sensitive == "false" and
-            reader_confs is reader_opt_confs[0])
-]
+case_sensitive_options = ["false", "true"]
 
-@pytest.mark.parametrize('orc_gen,v1_enabled_list,case_sensitive,reader_confs',
-                         read_with_more_columns_params, ids=idfn)
-def test_read_with_more_columns(spark_tmp_path, orc_gen, reader_confs, v1_enabled_list, case_sensitive):
+# Distribute V1/V2 and reader configurations across
+# len(flattened_orc_gens) * len(case_sensitive_options) = 62 cases.
+@pytest.mark.parametrize('orc_gen', flattened_orc_gens, ids=idfn)
+@pytest.mark.parametrize('case_sensitive', case_sensitive_options)
+@ignore_order(local=True)
+def test_read_with_more_columns(spark_tmp_path, orc_gen, case_sensitive):
+    case_index = flattened_orc_gens.index(orc_gen) * 2 + (case_sensitive == "true")
+    v1_enabled_list = ["", "orc", "orc", ""][case_index % 4]
+    reader_confs = reader_opt_confs[case_index % len(reader_opt_confs)]
+    if hasattr(reader_confs, 'marks'):
+        reader_confs = reader_confs.values[0]
     struct_gen = StructGen([('nested_col', orc_gen)])
     # Map is not supported yet.
     gen_list = [("top_pri", orc_gen),
