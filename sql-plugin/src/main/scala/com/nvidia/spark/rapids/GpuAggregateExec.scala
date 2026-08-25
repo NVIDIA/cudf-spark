@@ -2089,9 +2089,10 @@ case class GpuHashAggregateExec(
 
   // Used in de-duping and optimizer rules
   override def producedAttributes: AttributeSet =
-    AttributeSet(aggregateAttributes) ++
+    (AttributeSet(aggregateAttributes) ++
       AttributeSet(resultExpressions.diff(groupingExpressions).map(_.toAttribute)) ++
-      AttributeSet(aggregateBufferAttributes)
+      AttributeSet(aggregateBufferAttributes) ++
+      AttributeSet(inputAggBufferAttributes)) -- child.outputSet
 
   // AllTuples = distribution with a single partition and all tuples of the dataset are co-located.
   // Clustered = dataset with tuples co-located in the same partition if they share a specific value
