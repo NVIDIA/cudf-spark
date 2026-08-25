@@ -702,6 +702,11 @@ def test_read_with_more_columns(spark_tmp_path, orc_gen, case_sensitive):
     reader_confs = reader_opt_confs[case_index % len(reader_opt_confs)]
     if hasattr(reader_confs, 'marks'):
         reader_confs = reader_confs.values[0]
+    # Dedicated to covering GpuMultiFileReader.getNextBuffersAndMetaAndCombine's unordered
+    # wait path by letting readReadyFiles return an empty result.
+    if case_index == 58:
+        reader_confs = copy_and_update(reader_confs, {
+            'spark.rapids.sql.reader.multithreaded.combine.waitTime': 0})
     struct_gen = StructGen([('nested_col', orc_gen)])
     # Map is not supported yet.
     gen_list = [("top_pri", orc_gen),
