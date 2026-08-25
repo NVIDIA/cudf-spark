@@ -25,6 +25,7 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.read.PartitionReaderFactory
 import org.apache.spark.sql.execution.FileSourceScanExec
 import org.apache.spark.sql.execution.datasources.PartitionedFile
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.GpuFileSourceScanExec
 import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.StructType
@@ -66,6 +67,23 @@ class GpuReadSequenceFileBinaryFormat extends SequenceFileBinaryFileFormat
 }
 
 object GpuReadSequenceFileBinaryFormat {
+  def createRddReaderFactory(
+      sqlConf: SQLConf,
+      broadcastedConf: Broadcast[SerializableConfiguration],
+      readDataSchema: StructType,
+      rapidsConf: RapidsConf,
+      metrics: Map[String, GpuMetric]): PartitionReaderFactory = {
+    GpuSequenceFilePartitionReaderFactory(
+      sqlConf,
+      broadcastedConf,
+      readDataSchema,
+      StructType(Nil),
+      rapidsConf,
+      ThreadPoolConfBuilder(rapidsConf),
+      metrics,
+      queryUsesInputFile = false)
+  }
+
   def tagSupport(meta: SparkPlanMeta[FileSourceScanExec]): Unit = {
     meta.mustBeReplaced("SequenceFile binary has no CPU reader")
     val scan = meta.wrapped

@@ -1796,6 +1796,14 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .booleanConf
     .createWithDefault(false)
 
+  val SEQUENCEFILE_RDD_PHYSICAL_REPLACE_ENABLED =
+    conf("spark.rapids.sql.format.sequencefile.rddScan.physicalReplace.enabled")
+      .doc("When set to true, replaces exactly proven SequenceFile binary RDD reads with the " +
+        "internal GPU SequenceFile reader. This optimization may regroup the source RDD's " +
+        "selected input splits and therefore does not preserve its partition identity.")
+      .booleanConf
+      .createWithDefault(false)
+
   val AVRO_READER_TYPE = conf("spark.rapids.sql.format.avro.reader.type")
     .doc("Sets the Avro reader type. We support different types that are optimized for " +
       "different environments. The original Spark style reader can be selected by setting this " +
@@ -3808,6 +3816,9 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val isAvroEnabled: Boolean = get(ENABLE_AVRO)
 
   lazy val isAvroReadEnabled: Boolean = get(ENABLE_AVRO_READ)
+
+  lazy val isSequenceFileRDDPhysicalReplaceEnabled: Boolean =
+    get(SEQUENCEFILE_RDD_PHYSICAL_REPLACE_ENABLED)
 
   lazy val isAvroPerFileReadEnabled: Boolean =
     RapidsReaderType.withName(get(AVRO_READER_TYPE)) == RapidsReaderType.PERFILE
