@@ -1062,7 +1062,7 @@ def test_from_json_bools(std_input_path, input_file):
 @approximate_float()
 @pytest.mark.parametrize('input_file', [
     "int_formatted.json",
-    pytest.param("float_formatted.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/10481')),
+    "float_formatted.json",
     "sci_formatted.json",
     "int_formatted_strings.json",
     "float_formatted_strings.json",
@@ -1093,7 +1093,7 @@ def test_scan_json_floats(std_input_path, read_func, spark_tmp_table_factory, in
 @approximate_float()
 @pytest.mark.parametrize('input_file', [
     "int_formatted.json",
-    pytest.param("float_formatted.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/10481')),
+    "float_formatted.json",
     "sci_formatted.json",
     "int_formatted_strings.json",
     "float_formatted_strings.json",
@@ -1122,7 +1122,7 @@ def test_from_json_floats(std_input_path, input_file):
 @approximate_float()
 @pytest.mark.parametrize('input_file', [
     "int_formatted.json",
-    pytest.param("float_formatted.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/10481')),
+    "float_formatted.json",
     "sci_formatted.json",
     "int_formatted_strings.json",
     "float_formatted_strings.json",
@@ -1153,7 +1153,7 @@ def test_scan_json_doubles(std_input_path, read_func, spark_tmp_table_factory, i
 @approximate_float()
 @pytest.mark.parametrize('input_file', [
     "int_formatted.json",
-    pytest.param("float_formatted.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/10481')),
+    "float_formatted.json",
     "sci_formatted.json",
     "int_formatted_strings.json",
     "float_formatted_strings.json",
@@ -1549,8 +1549,30 @@ def test_from_json_string_structs(std_input_path, input_file):
         lambda spark : read_json_as_text(spark, std_input_path + '/' + input_file, "json").select(f.col('json'), f.from_json(f.col('json'), schema)),
         conf =_enable_json_to_structs_conf)
 
-@pytest.mark.parametrize('dt', [DecimalType(38,0), DecimalType(10,2)], ids=idfn)
-@pytest.mark.parametrize('input_file', [
+_JSON_DEC_ARRAY_OVERFLOW_XFAILS = {
+    "int_array_formatted.json": pytest.mark.xfail(
+        reason='https://github.com/NVIDIA/spark-rapids/issues/10573'),
+    "int_mixed_array_struct_formatted.json": pytest.mark.xfail(
+        reason='https://github.com/NVIDIA/spark-rapids/issues/11491')
+}
+
+
+def _json_dec_array_params(input_files, overflow_xfails):
+    decimal_types = [DecimalType(38, 0), DecimalType(10, 2)]
+    return [
+        pytest.param(
+            input_file,
+            dt,
+            marks=[overflow_xfails[input_file]]
+                if dt == DecimalType(10, 2) and input_file in overflow_xfails
+                else [],
+            id=f"{input_file}-{idfn(dt)}")
+        for input_file in input_files
+        for dt in decimal_types
+    ]
+
+
+_JSON_DEC_ARRAY_SCAN_PARAMS = _json_dec_array_params([
     "int_formatted.json",
     "float_formatted.json",
     "sci_formatted.json",
@@ -1560,17 +1582,20 @@ def test_from_json_string_structs(std_input_path, input_file):
     "decimal_locale_formatted_strings.json",
     "single_quoted_strings.json",
     "boolean_formatted.json",
-    pytest.param("int_array_formatted.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/10573')), # This does not fail on 38,0
+    "int_array_formatted.json",
     "int_struct_formatted.json",
     "int_struct_formatted_problematic_rows.json",
-    pytest.param("int_mixed_array_struct_formatted.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/11491')),
+    "int_mixed_array_struct_formatted.json",
     "bad_whitespace.json",
     "escaped_strings.json",
     "repeated_columns.json",
     "mixed_objects.json",
     "timestamp_formatted_strings.json",
     "timestamp_tz_formatted_strings.json",
-    "scan_emtpy_lines.json"])
+    "scan_emtpy_lines.json"], _JSON_DEC_ARRAY_OVERFLOW_XFAILS)
+
+
+@pytest.mark.parametrize('input_file,dt', _JSON_DEC_ARRAY_SCAN_PARAMS)
 @pytest.mark.parametrize('read_func', [read_json_df]) # we have done so many tests already that we don't need both read func. They are the same
 def test_scan_json_dec_arrays(std_input_path, read_func, spark_tmp_table_factory, input_file, dt):
     assert_gpu_and_cpu_are_equal_collect(
@@ -1579,8 +1604,7 @@ def test_scan_json_dec_arrays(std_input_path, read_func, spark_tmp_table_factory
         spark_tmp_table_factory),
         conf=_enable_all_types_json_scan_conf)
 
-@pytest.mark.parametrize('dt', [DecimalType(38,0), DecimalType(10,2)], ids=idfn)
-@pytest.mark.parametrize('input_file', [
+_JSON_DEC_ARRAY_FROM_JSON_PARAMS = _json_dec_array_params([
     "int_formatted.json",
     "float_formatted.json",
     "sci_formatted.json",
@@ -1590,17 +1614,20 @@ def test_scan_json_dec_arrays(std_input_path, read_func, spark_tmp_table_factory
     "decimal_locale_formatted_strings.json",
     "single_quoted_strings.json",
     "boolean_formatted.json",
-    pytest.param("int_array_formatted.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/10573')), # This does not fail on 38,0
+    "int_array_formatted.json",
     "int_struct_formatted.json",
     "int_struct_formatted_problematic_rows.json",
-    pytest.param("int_mixed_array_struct_formatted.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/11491')),
+    "int_mixed_array_struct_formatted.json",
     "bad_whitespace.json",
     "escaped_strings.json",
     "nested_escaped_strings.json",
     "repeated_columns.json",
     "mixed_objects.json",
     "timestamp_formatted_strings.json",
-    "timestamp_tz_formatted_strings.json"])
+    "timestamp_tz_formatted_strings.json"], _JSON_DEC_ARRAY_OVERFLOW_XFAILS)
+
+
+@pytest.mark.parametrize('input_file,dt', _JSON_DEC_ARRAY_FROM_JSON_PARAMS)
 @allow_non_gpu(TEXT_INPUT_EXEC, *non_utc_allow) # https://github.com/NVIDIA/spark-rapids/issues/10453
 def test_from_json_dec_arrays(std_input_path, input_file, dt):
     schema = StructType([StructField("data", ArrayType(dt))])

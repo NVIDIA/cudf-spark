@@ -27,6 +27,7 @@ these upstream repositories to verify correctness:
 - [ ] H6: Magic numbers — unexplained numeric literals without named constants or comments
 - [ ] H7: Pre-merge CI gaps — only selected shims run unit tests; [databricks] needed for DB CI; feature-gated tests need explicit enable; limited Scala 2.13 coverage
 - [ ] H8: Upstream dependencies — SNAPSHOT changes from cudf-spark-jni/cudf may break; verify API usage against upstream repos
+- [ ] H10: Performance checklist — report `Performance: Not required` as a high-severity finding unless the PR is documentation-only or test-only, or its description gives a verifiable reason the change cannot affect runtime performance. A bug-fix label, small diff, or rarely used path is not by itself an exemption. When uncertain, flag
 
 ## Do NOT Comment On
 
