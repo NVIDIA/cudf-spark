@@ -643,20 +643,10 @@ final class HashBuildCache extends AutoCloseable {
       }
     }
 
-    val taskContext = TaskContext.get()
-    val shouldReleaseSemaphore = !future.isDone
-    if (shouldReleaseSemaphore) {
-      // The winning builder may need the GPU semaphore currently held by this waiting task.
-      GpuSemaphore.releaseIfNecessary(taskContext)
-    }
     val artifact = try {
       future.get()
     } catch {
       case e: ExecutionException => throw e.getCause
-    } finally {
-      if (shouldReleaseSemaphore) {
-        GpuSemaphore.acquireIfNecessary(taskContext)
-      }
     }
     (artifact, !shouldBuild)
   }
@@ -841,6 +831,14 @@ final class CachedHashBackendProvider private[execution] (
 
 /** Builds a native hash artifact from a source-owned batch. */
 object HashBuildFactory {
+  // cuDF hash tables uses slots containing (hash, row-index) at a 0.5 load factor, resulting in
+  // at least two slots per input row. This is a lower bound on the table size.
+  private val MinHashTableBytesPerRow = 2L * (Integer.BYTES + Integer.BYTES)
+
+  /** Estimated hash table size for spill accounting. */
+  private[execution] def estimateHashTableSizeBytes(numRows: Long): Long =
+    numRows * MinHashTableBytesPerRow
+
   private def withBuildKeys[T](
       buildBatch: SpillableColumnarBatch,
       boundKeys: Seq[GpuExpression],
@@ -889,8 +887,7 @@ object HashBuildFactory {
       prepareBatch: Option[ColumnarBatch => ColumnarBatch]): HashArtifact = {
     withBuildKeys(buildBatch, boundKeys, filterOutNulls, prepareBatch) { keys =>
       val stats = JoinBuildSideStats.fromTable(keys)
-      // cuDF does not expose the hash-table size, so use the projected key size for accounting.
-      val approxSizeInBytes = keys.getDeviceMemorySize
+      val approxSizeInBytes = estimateHashTableSizeBytes(keys.getRowCount)
       if (stats.isDistinct) {
         new DistinctHashJoinArtifact(
           stats,

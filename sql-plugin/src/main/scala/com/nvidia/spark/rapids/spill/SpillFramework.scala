@@ -29,7 +29,7 @@ import scala.collection.mutable
 
 import ai.rapids.cudf._
 import com.nvidia.spark.rapids.{GpuColumnVector, GpuColumnVectorFromBuffer,
-  GpuCompressedColumnVector, GpuDeviceManager, GpuSemaphore, HashedPriorityQueue, HostAlloc,
+  GpuCompressedColumnVector, GpuDeviceManager, HashedPriorityQueue, HostAlloc,
   HostMemoryOutputStream, MemoryBufferToHostByteBufferIterator, NvtxId, NvtxRegistry,
   RapidsConf, RapidsHostColumnVector, SpillPriorities, TaskRegistryTracker}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
@@ -437,25 +437,14 @@ class SharedRecomputableHandle[T <: AutoCloseable] private[spill] (
       case UseResident(resource) =>
         new Lease(this, resource, rebuilt = false)
       case WaitForRebuild =>
-        awaitRebuild()
+        synchronized {
+          while (!closed && rebuilding && dev.isEmpty) {
+            wait()
+          }
+        }
         acquire()
       case Rebuild =>
         rebuildAndAcquire()
-    }
-  }
-
-  private def awaitRebuild(): Unit = {
-    // Release the semaphore while waiting to prevent deadlocks.
-    val taskContext = TaskContext.get()
-    GpuSemaphore.releaseIfNecessary(taskContext)
-    try {
-      synchronized {
-        while (!closed && rebuilding && dev.isEmpty) {
-          wait()
-        }
-      }
-    } finally {
-      GpuSemaphore.acquireIfNecessary(taskContext)
     }
   }
 
@@ -511,33 +500,6 @@ class SharedRecomputableHandle[T <: AutoCloseable] private[spill] (
     }
   }
 
-  private def awaitRebuildForClose(): Unit = {
-    // Wait for an in-flight rebuilt to complete before closing.
-    // Release the semaphore while waiting to prevent deadlocks.
-    val taskContext = TaskContext.get()
-    var interrupted = false
-    GpuSemaphore.releaseIfNecessary(taskContext)
-    try {
-      synchronized {
-        while (rebuilding) {
-          try {
-            wait()
-          } catch {
-            case _: InterruptedException => interrupted = true
-          }
-        }
-      }
-    } finally {
-      try {
-        GpuSemaphore.acquireIfNecessary(taskContext)
-      } finally {
-        if (interrupted) {
-          Thread.currentThread().interrupt()
-        }
-      }
-    }
-  }
-
   override def close(): Unit = {
     val (firstClose, shouldWaitForRebuild) = synchronized {
       if (closed) {
@@ -551,7 +513,19 @@ class SharedRecomputableHandle[T <: AutoCloseable] private[spill] (
     if (shouldWaitForRebuild) {
       // Wait for an in-flight rebuild to exit, so that the caller can
       // close input resources captured by the rebuild callback.
-      awaitRebuildForClose()
+      var interrupted = false
+      synchronized {
+        while (rebuilding) {
+          try {
+            wait()
+          } catch {
+            case _: InterruptedException => interrupted = true
+          }
+        }
+      }
+      if (interrupted) {
+        Thread.currentThread().interrupt()
+      }
     }
     // Only the first close() caller initiates doClose().
     if (firstClose) {
