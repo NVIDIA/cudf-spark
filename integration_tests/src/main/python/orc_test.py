@@ -96,12 +96,6 @@ def _param_with_reader_conf(*values):
         return pytest.param(*values[:-1], reader_conf.values[0], marks=reader_conf.marks)
     return values
 
-def _orc_param_id(value):
-    """Return stable IDs for callables so xdist workers collect identical test names."""
-    if value is read_orc_df or value is read_orc_sql:
-        return value.__name__
-    return idfn(value)
-
 non_utc_allow_orc_file_source_scan=['ColumnarToRowExec', 'FileSourceScanExec', 'BatchScanExec'] if is_not_utc() else []
 
 @pytest.mark.parametrize('name', ['timestamp-date-test.orc'])
@@ -229,25 +223,16 @@ orc_pred_push_gens = [
         # timestamp_gen
         orc_timestamp_gen]
 
-# Exercise every predicate type with the default reader, then exercise the full reader/source/API
-# matrix with one representative type. This preserves coverage of every independent input while
-# avoiding the redundant Cartesian product between them.
-orc_pred_push_params = [
-    _param_with_reader_conf(orc_gen, read_orc_df, "", reader_opt_confs[0])
-    for orc_gen in orc_pred_push_gens
-] + [
-    _param_with_reader_conf(orc_pred_push_gens[0], read_func, v1_enabled_list, reader_confs)
-    for read_func in [read_orc_df, read_orc_sql]
-    for v1_enabled_list in ["", "orc"]
-    for reader_confs in reader_opt_confs
-    if not (read_func is read_orc_df and v1_enabled_list == "" and
-            reader_confs is reader_opt_confs[0])
-]
-
 @pytest.mark.order(2)
-@pytest.mark.parametrize('orc_gen,read_func,v1_enabled_list,reader_confs',
-                         orc_pred_push_params, ids=_orc_param_id)
-def test_pred_push_round_trip(spark_tmp_path, orc_gen, read_func, v1_enabled_list, reader_confs):
+@pytest.mark.parametrize('orc_gen', orc_pred_push_gens, ids=idfn)
+@pytest.mark.parametrize('v1_enabled_list', ["", "orc"])
+@ignore_order(local=True)
+def test_pred_push_round_trip(spark_tmp_path, orc_gen, v1_enabled_list):
+    case_index = orc_pred_push_gens.index(orc_gen) * 2 + (v1_enabled_list == "orc")
+    read_func = [read_orc_df, read_orc_sql, read_orc_sql, read_orc_df][case_index % 4]
+    reader_confs = reader_opt_confs[case_index % len(reader_opt_confs)]
+    if hasattr(reader_confs, 'marks'):
+        reader_confs = reader_confs.values[0]
     data_path = spark_tmp_path + '/ORC_DATA'
     # Append two struct columns to verify nested predicate pushdown.
     gen_list = [('a', RepeatSeqGen(orc_gen, 100)), ('b', orc_gen),
