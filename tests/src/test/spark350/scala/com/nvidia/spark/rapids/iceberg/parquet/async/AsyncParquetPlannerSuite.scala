@@ -104,12 +104,12 @@ class AsyncParquetPlannerSuite extends AnyFunSuite {
       new ParquetDataReader.SourceRange(6L * MiB, 2L * MiB, 5L * MiB),
       new ParquetDataReader.SourceRange(8L * MiB, 1L * MiB, 7L * MiB))
 
-    val plan = ParquetDataReader.planRanges(ranges.asJava, 64L * MiB)
+    val plan = ParquetDataReader.planRanges(ranges.asJava, 64L * MiB, 0L)
     assert(plan.size() == 2)
     assert(plan.asScala.map(_.getInputOffset) == Seq(0L, 6L * MiB))
     assert(plan.asScala.map(_.getLength) == Seq(5L * MiB, 3L * MiB))
-    assert(plan.asScala.map(_.getOutputOffset) == Seq(0L, 5L * MiB))
     assert(plan.asScala.map(_.getLength).sum == 8L * MiB)
+    assert(plan.asScala.map(_.getCopyRanges.get(0).getOutputOffset) == Seq(0L, 5L * MiB))
     assert(plan.get(0).getInputOffset == 0L)
     assert(plan.get(1).getInputOffset == 6L * MiB)
   }
@@ -120,10 +120,33 @@ class AsyncParquetPlannerSuite extends AnyFunSuite {
       new ParquetDataReader.SourceRange(5L * MiB, 7L * MiB, 5L * MiB),
       new ParquetDataReader.SourceRange(12L * MiB, 6L * MiB, 12L * MiB))
 
-    val plan = ParquetDataReader.planRanges(ranges.asJava, 8L * MiB).asScala
+    val plan = ParquetDataReader.planRanges(ranges.asJava, 8L * MiB, 0L).asScala
     assert(plan.map(_.getInputOffset) == Seq(0L, 8L * MiB, 16L * MiB))
     assert(plan.map(_.getLength) == Seq(8L * MiB, 8L * MiB, 2L * MiB))
-    assert(plan.map(_.getOutputOffset) == Seq(0L, 8L * MiB, 16L * MiB))
+    assert(plan.map(_.getCopyRanges.get(0).getOutputOffset) ==
+      Seq(0L, 8L * MiB, 16L * MiB))
+  }
+
+  test("latency range planner fetches small holes but discards them from packed output") {
+    val ranges = Seq(
+      new ParquetDataReader.SourceRange(0L, 4L * MiB, 0L),
+      new ParquetDataReader.SourceRange(5L * MiB, 4L * MiB, 4L * MiB))
+
+    val plan = ParquetDataReader.planRanges(ranges.asJava, 8L * MiB, 1L * MiB).asScala
+    assert(plan.map(_.getInputOffset) == Seq(0L, 8L * MiB))
+    assert(plan.map(_.getLength) == Seq(8L * MiB, 1L * MiB))
+    val copies = plan.flatMap(_.getCopyRanges.asScala)
+    assert(copies.map(_.getInputOffset) == Seq(0L, 5L * MiB, 8L * MiB))
+    assert(copies.map(_.getOutputOffset) == Seq(0L, 4L * MiB, 7L * MiB))
+    assert(copies.map(_.getLength).sum == 8L * MiB)
+  }
+
+  test("latency range planner appends a tiny final fragment to the previous request") {
+    val ranges = Seq(new ParquetDataReader.SourceRange(0L, 17L * MiB - 1L, 0L))
+
+    val plan = ParquetDataReader.planRanges(ranges.asJava, 8L * MiB, 1L * MiB).asScala
+    assert(plan.map(_.getInputOffset) == Seq(0L, 8L * MiB))
+    assert(plan.map(_.getLength) == Seq(8L * MiB, 9L * MiB - 1L))
   }
 
   test("latency range planner preserves footer order instead of sorting") {
@@ -132,14 +155,14 @@ class AsyncParquetPlannerSuite extends AnyFunSuite {
       new ParquetDataReader.SourceRange(0L, 2L * MiB, 2L * MiB))
 
     assertThrows[IllegalArgumentException] {
-      ParquetDataReader.planRanges(ranges.asJava, 8L * MiB)
+      ParquetDataReader.planRanges(ranges.asJava, 8L * MiB, 0L)
     }
   }
 
   test("latency range planner has no request-count limit") {
     val ranges = Seq(new ParquetDataReader.SourceRange(0L, 640L * MiB, 0L))
 
-    val plan = ParquetDataReader.planRanges(ranges.asJava, 8L * MiB)
+    val plan = ParquetDataReader.planRanges(ranges.asJava, 8L * MiB, 0L)
     assert(plan.size() == 80)
     assert(plan.asScala.forall(_.getLength == 8L * MiB))
   }
@@ -149,7 +172,7 @@ class AsyncParquetPlannerSuite extends AnyFunSuite {
       new ParquetDataReader.SourceRange(0L, 5L * MiB, 0L),
       new ParquetDataReader.SourceRange(5L * MiB, 7L * MiB, 5L * MiB),
       new ParquetDataReader.SourceRange(12L * MiB, 6L * MiB, 12L * MiB))
-    val requests = ParquetDataReader.planRanges(chunks.asJava, 8L * MiB).asScala
+    val requests = ParquetDataReader.planRanges(chunks.asJava, 8L * MiB, 0L).asScala
     val completed = ArrayBuffer.empty[ParquetDataReader.SourceRange]
     val tracker = new ParquetDataReader.RangeCompletionTracker(
       chunks.asJava, requests.asJava, chunk => completed.synchronized(completed += chunk))
@@ -171,7 +194,7 @@ class AsyncParquetPlannerSuite extends AnyFunSuite {
 
   test("range completion rejects a duplicate request callback") {
     val chunks = Seq(new ParquetDataReader.SourceRange(0L, 2L * MiB, 0L))
-    val requests = ParquetDataReader.planRanges(chunks.asJava, 8L * MiB)
+    val requests = ParquetDataReader.planRanges(chunks.asJava, 8L * MiB, 0L)
     val tracker = new ParquetDataReader.RangeCompletionTracker(
       chunks.asJava, requests, _ => ())
 

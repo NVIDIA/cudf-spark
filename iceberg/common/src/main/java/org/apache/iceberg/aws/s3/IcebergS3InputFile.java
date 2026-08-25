@@ -19,6 +19,7 @@ package org.apache.iceberg.aws.s3;
 import ai.rapids.cudf.HostMemoryBuffer;
 import com.nvidia.spark.rapids.IcebergS3RangeCopier;
 import com.nvidia.spark.rapids.IcebergS3RangeCopier.IcebergS3Client;
+import com.nvidia.spark.rapids.IcebergS3RangeCopier.ReadRequest;
 import com.nvidia.spark.rapids.fileio.RapidsInputFiles;
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
 import com.nvidia.spark.rapids.iceberg.ShimUtils;
@@ -120,6 +121,18 @@ public final class IcebergS3InputFile extends IcebergInputFile {
       Consumer<CopyRange> requestSucceeded) {
     return IcebergS3RangeCopier.copyToHMBAsync(
         icebergS3Client, output, s3Bucket, s3Key, copyRanges, requestSucceeded);
+  }
+
+  /**
+   * Submit coalesced S3 reads and scatter only the useful portions of each response into the
+   * packed output. Bytes between selected Parquet column chunks are fetched but discarded.
+   */
+  public CompletableFuture<Long> readRangesAsync(
+      HostMemoryBuffer output,
+      List<ReadRequest> readRequests,
+      Consumer<ReadRequest> requestSucceeded) {
+    return IcebergS3RangeCopier.copyRangesToHMBAsync(
+        icebergS3Client, output, s3Bucket, s3Key, readRequests, requestSucceeded);
   }
 
   /**

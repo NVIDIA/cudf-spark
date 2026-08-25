@@ -28,6 +28,7 @@ import java.util.function.Consumer;
 import ai.rapids.cudf.HostMemoryBuffer;
 import com.nvidia.spark.rapids.HostAlloc$;
 import com.nvidia.spark.rapids.HostMemoryOutputStream;
+import com.nvidia.spark.rapids.IcebergS3RangeCopier.ReadRequest;
 import com.nvidia.spark.rapids.SpillPriorities;
 import com.nvidia.spark.rapids.SpillableHostBuffer;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
@@ -107,9 +108,9 @@ final class ParquetOutput implements AutoCloseable {
    */
   final CompletableFuture<Long> copyRangesAsync(
       RapidsInputFile input,
-      List<RapidsInputFile.CopyRange> ranges,
+      List<ReadRequest> ranges,
       Executor fallbackExecutor,
-      Consumer<RapidsInputFile.CopyRange> requestSucceeded) throws IOException {
+      Consumer<ReadRequest> requestSucceeded) throws IOException {
     Objects.requireNonNull(input, "input");
     Objects.requireNonNull(ranges, "ranges");
     Objects.requireNonNull(fallbackExecutor, "fallbackExecutor");
@@ -118,9 +119,11 @@ final class ParquetOutput implements AutoCloseable {
       return CompletableFuture.completedFuture(0L);
     }
     long expectedBytes = 0L;
-    for (RapidsInputFile.CopyRange range : ranges) {
+    for (ReadRequest range : ranges) {
       Objects.requireNonNull(range, "range");
-      checkWriteBounds(range.getOutputOffset(), range.getLength());
+      for (RapidsInputFile.CopyRange copy : range.getCopyRanges()) {
+        checkWriteBounds(copy.getOutputOffset(), copy.getLength());
+      }
       expectedBytes = Math.addExact(expectedBytes, range.getLength());
     }
 
@@ -128,13 +131,19 @@ final class ParquetOutput implements AutoCloseable {
     CompletableFuture<Long> read;
     try {
       if (input instanceof IcebergS3InputFile) {
-        read = ((IcebergS3InputFile) input).readVectoredAsync(
+        read = ((IcebergS3InputFile) input).readRangesAsync(
             buffer, ranges, requestSucceeded);
       } else {
         final long bytes = expectedBytes;
         read = CompletableFuture.supplyAsync(() -> {
           try {
-            input.readVectored(buffer, ranges);
+            // The fallback API cannot represent holes inside one GET. Read only the useful
+            // pieces, preserving correctness without extending the JNI interface for this POC.
+            java.util.ArrayList<RapidsInputFile.CopyRange> useful = new java.util.ArrayList<>();
+            for (ReadRequest range : ranges) {
+              useful.addAll(range.getCopyRanges());
+            }
+            input.readVectored(buffer, useful);
             ranges.forEach(requestSucceeded);
             return bytes;
           } catch (IOException error) {

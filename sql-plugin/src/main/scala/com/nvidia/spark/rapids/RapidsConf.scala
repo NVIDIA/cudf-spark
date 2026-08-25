@@ -1881,13 +1881,24 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
 
   val ICEBERG_ASYNC_READ_REQUEST_SIZE =
     conf("spark.rapids.sql.format.iceberg.asyncRead.range.requestSize")
-      .doc("Maximum size of each exact byte-range request produced by the experimental " +
-        "latency-oriented Iceberg reader. Requests never include unneeded gap bytes.")
+      .doc("Target maximum size of each byte-range request produced by the experimental " +
+        "Iceberg reader. A short final remainder can be appended to the preceding request.")
       .startupOnly()
       .internal()
       .bytesConf(ByteUnit.BYTE)
       .checkValue(_ > 0L, "The request size must be positive.")
       .createWithDefault(ByteUnit.MiB.toBytes(8L))
+
+  val ICEBERG_ASYNC_READ_HOLE_SIZE =
+    conf("spark.rapids.sql.format.iceberg.asyncRead.range.holeSizeLimit")
+      .doc("Maximum number of filtered source bytes between selected Parquet column chunks that " +
+        "the experimental Iceberg reader may fetch to combine them into one S3 request. The " +
+        "extra bytes are discarded and are not written to the packed output or file cache.")
+      .startupOnly()
+      .internal()
+      .bytesConf(ByteUnit.BYTE)
+      .checkValue(_ >= 0L, "The hole size limit must be non-negative.")
+      .createWithDefault(0L)
 
   val ICEBERG_ASYNC_READ_WORKER_THREADS =
     conf("spark.rapids.sql.format.iceberg.asyncRead.workerThreads")
@@ -3877,6 +3888,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val isIcebergAsyncReadEnabled: Boolean = get(ICEBERG_ASYNC_READ_ENABLED)
 
   lazy val icebergAsyncReadRequestSize: Long = get(ICEBERG_ASYNC_READ_REQUEST_SIZE)
+
+  lazy val icebergAsyncReadHoleSize: Long = get(ICEBERG_ASYNC_READ_HOLE_SIZE)
 
   lazy val icebergAsyncReadWorkerThreads: Int = get(ICEBERG_ASYNC_READ_WORKER_THREADS)
 

@@ -30,6 +30,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
 import ai.rapids.cudf.HostMemoryBuffer;
+import com.nvidia.spark.rapids.IcebergS3RangeCopier.ReadRequest;
 import com.nvidia.spark.rapids.filecache.FileCache;
 import com.nvidia.spark.rapids.filecache.FileCache.FileCacheStartedToken;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
@@ -62,10 +63,14 @@ public final class ParquetDataReader {
       RapidsInputFile input,
       AtomicBoolean closed,
       long requestSizeBytes,
+      long holeSizeBytes,
       Executor executor,
       Runnable readsTerminal) {
     if (requestSizeBytes <= 0L) {
       throw new IllegalArgumentException("requestSizeBytes must be positive");
+    }
+    if (holeSizeBytes < 0L) {
+      throw new IllegalArgumentException("holeSizeBytes must be non-negative");
     }
     if (executor == null) {
       throw new NullPointerException("executor");
@@ -77,7 +82,7 @@ public final class ParquetDataReader {
     return CompletableFuture.supplyAsync(() -> {
       try {
         return PendingFileRead.prepare(
-            footer, input, closed, requestSizeBytes, startNanos);
+            footer, input, closed, requestSizeBytes, holeSizeBytes, startNanos);
       } catch (Throwable error) {
         throw asCompletionException(error);
       }
@@ -113,7 +118,7 @@ public final class ParquetDataReader {
     private final long[] blockOffsets;
     private final List<CachedRange> hits;
     private final List<SourceRange> misses;
-    private final List<RapidsInputFile.CopyRange> reads;
+    private final List<ReadRequest> reads;
     private final RangeCompletionTracker rangeCompletions;
     private final long allocNanos;
     private final long requestedBytes;
@@ -135,7 +140,7 @@ public final class ParquetDataReader {
         ParquetOutput output,
         List<CachedRange> hits,
         List<SourceRange> misses,
-        List<RapidsInputFile.CopyRange> reads,
+        List<ReadRequest> reads,
         long allocNanos,
         long requestedBytes,
         long cacheHitCount,
@@ -166,6 +171,7 @@ public final class ParquetDataReader {
         RapidsInputFile input,
         AtomicBoolean closed,
         long requestSizeBytes,
+        long holeSizeBytes,
         long startNanos) throws Exception {
       checkOpen(closed);
       List<BlockMetaData> blocks = footer.getBlocks();
@@ -214,9 +220,9 @@ public final class ParquetDataReader {
           }
         }
 
-        List<RapidsInputFile.CopyRange> reads = planRanges(misses, requestSizeBytes);
+        List<ReadRequest> reads = planRanges(misses, requestSizeBytes, holeSizeBytes);
         long requestedBytes = 0L;
-        for (RapidsInputFile.CopyRange read : reads) {
+        for (ReadRequest read : reads) {
           requestedBytes = Math.addExact(requestedBytes, read.getLength());
         }
         return new PendingFileRead(footer, input, closed, startNanos, blockOffsets, output,
@@ -449,7 +455,7 @@ public final class ParquetDataReader {
    * no network or disk I/O is performed while waiting to enter it.</p>
    */
   static final class RangeCompletionTracker {
-    private final IdentityHashMap<RapidsInputFile.CopyRange, List<SourceRange>> chunksByRequest =
+    private final IdentityHashMap<ReadRequest, List<SourceRange>> chunksByRequest =
         new IdentityHashMap<>();
     private final IdentityHashMap<SourceRange, Integer> requestsRemaining =
         new IdentityHashMap<>();
@@ -457,33 +463,37 @@ public final class ParquetDataReader {
 
     RangeCompletionTracker(
         List<SourceRange> chunks,
-        List<RapidsInputFile.CopyRange> requests,
+        List<ReadRequest> requests,
         Consumer<SourceRange> chunkCompleted) {
       this.chunkCompleted = java.util.Objects.requireNonNull(chunkCompleted, "chunkCompleted");
-      for (RapidsInputFile.CopyRange request : requests) {
+      for (ReadRequest request : requests) {
         chunksByRequest.put(request, new ArrayList<>());
       }
       for (SourceRange chunk : chunks) {
         long chunkOutputEnd = Math.addExact(chunk.fragmentOffset, chunk.length);
         long coveredBytes = 0L;
         int coveringRequests = 0;
-        for (Map.Entry<RapidsInputFile.CopyRange, List<SourceRange>> entry :
+        for (Map.Entry<ReadRequest, List<SourceRange>> entry :
             chunksByRequest.entrySet()) {
-          RapidsInputFile.CopyRange request = entry.getKey();
-          long requestOutputEnd = Math.addExact(
-              request.getOutputOffset(), request.getLength());
-          long overlapStart = Math.max(chunk.fragmentOffset, request.getOutputOffset());
-          long overlapEnd = Math.min(chunkOutputEnd, requestOutputEnd);
-          if (overlapStart < overlapEnd) {
-            long requestSourceAtOverlap = Math.addExact(
-                request.getInputOffset(), overlapStart - request.getOutputOffset());
-            long chunkSourceAtOverlap = Math.addExact(
-                chunk.sourceOffset, overlapStart - chunk.fragmentOffset);
-            if (requestSourceAtOverlap != chunkSourceAtOverlap) {
-              throw new IllegalArgumentException(
-                  "request output range does not map to the source column chunk");
+          boolean requestCoversChunk = false;
+          for (RapidsInputFile.CopyRange copy : entry.getKey().getCopyRanges()) {
+            long copyOutputEnd = Math.addExact(copy.getOutputOffset(), copy.getLength());
+            long overlapStart = Math.max(chunk.fragmentOffset, copy.getOutputOffset());
+            long overlapEnd = Math.min(chunkOutputEnd, copyOutputEnd);
+            if (overlapStart < overlapEnd) {
+              long requestSourceAtOverlap = Math.addExact(
+                  copy.getInputOffset(), overlapStart - copy.getOutputOffset());
+              long chunkSourceAtOverlap = Math.addExact(
+                  chunk.sourceOffset, overlapStart - chunk.fragmentOffset);
+              if (requestSourceAtOverlap != chunkSourceAtOverlap) {
+                throw new IllegalArgumentException(
+                    "request output range does not map to the source column chunk");
+              }
+              coveredBytes = Math.addExact(coveredBytes, overlapEnd - overlapStart);
+              requestCoversChunk = true;
             }
-            coveredBytes = Math.addExact(coveredBytes, overlapEnd - overlapStart);
+          }
+          if (requestCoversChunk) {
             coveringRequests += 1;
             entry.getValue().add(chunk);
           }
@@ -496,7 +506,7 @@ public final class ParquetDataReader {
       }
     }
 
-    synchronized void requestCompleted(RapidsInputFile.CopyRange request) {
+    synchronized void requestCompleted(ReadRequest request) {
       List<SourceRange> chunks = chunksByRequest.remove(request);
       if (chunks == null) {
         throw new IllegalArgumentException("unknown or duplicate completed request");
@@ -521,27 +531,35 @@ public final class ParquetDataReader {
   }
 
   /**
-   * Build exact requests from the selected column chunks in Parquet-footer order.
+   * Build coalesced requests from selected column chunks in Parquet-footer order.
    *
-   * <p>Consecutive column chunks are first coalesced into a maximal useful run. Each run is then
-   * split into requests no larger than {@code requestSizeBytes}. A gap always ends a run, so no
-   * request contains bytes that footer filtering excluded. The footer is expected to retain
-   * physical file order; rejecting overlap or backwards movement is safer than silently sorting
-   * malformed input.</p>
+   * <p>Chunks separated by at most {@code holeSizeBytes} form one maximal source run. The run is
+   * split around {@code requestSizeBytes}; if its final remainder is smaller than the hole limit,
+   * that remainder is appended to the previous request to avoid creating a tiny GET. Therefore
+   * only the last request in a run may be larger than the range-size target, and then by less than
+   * the hole limit. Every request records only useful source-to-output slices, so gap bytes are
+   * fetched from S3 but discarded rather than written into the packed Parquet output.</p>
+   *
+   * <p>The footer is expected to retain physical file order. Rejecting overlap or backwards
+   * movement is safer than silently sorting malformed input.</p>
    */
-  static List<RapidsInputFile.CopyRange> planRanges(
+  static List<ReadRequest> planRanges(
       List<SourceRange> misses,
-      long requestSizeBytes) {
+      long requestSizeBytes,
+      long holeSizeBytes) {
     if (requestSizeBytes <= 0L) {
       throw new IllegalArgumentException("requestSizeBytes must be positive");
     }
-    ArrayList<RapidsInputFile.CopyRange> reads = new ArrayList<>();
-    long runSourceOffset = 0L;
-    long runOutputOffset = 0L;
-    long runLength = 0L;
+    if (holeSizeBytes < 0L) {
+      throw new IllegalArgumentException("holeSizeBytes must be non-negative");
+    }
+    ArrayList<ReadRequest> reads = new ArrayList<>();
+    int runFirstRange = -1;
+    long runSourceOffset = -1L;
     long previousSourceEnd = -1L;
     long previousOutputEnd = -1L;
-    for (SourceRange range : misses) {
+    for (int rangeIndex = 0; rangeIndex < misses.size(); rangeIndex++) {
+      SourceRange range = misses.get(rangeIndex);
       if (range.sourceOffset < 0L || range.length <= 0L || range.fragmentOffset < 0L) {
         throw new IllegalArgumentException(
             "source and output offsets must be non-negative and ranges must be non-empty");
@@ -556,37 +574,61 @@ public final class ParquetDataReader {
         throw new IllegalArgumentException("output ranges must be in packing order");
       }
 
-      if (runLength > 0L
-          && range.sourceOffset == previousSourceEnd
-          && range.fragmentOffset == previousOutputEnd) {
-        runLength = Math.addExact(runLength, range.length);
-      } else {
-        appendSplitRequests(
-            reads, runSourceOffset, runOutputOffset, runLength, requestSizeBytes);
+      if (runFirstRange < 0) {
+        runFirstRange = rangeIndex;
         runSourceOffset = range.sourceOffset;
-        runOutputOffset = range.fragmentOffset;
-        runLength = range.length;
+      } else if (Math.subtractExact(range.sourceOffset, previousSourceEnd) > holeSizeBytes) {
+        appendSplitRequests(reads, misses, runFirstRange, rangeIndex,
+            runSourceOffset, previousSourceEnd, requestSizeBytes, holeSizeBytes);
+        runFirstRange = rangeIndex;
+        runSourceOffset = range.sourceOffset;
       }
       previousSourceEnd = sourceEnd;
       previousOutputEnd = outputEnd;
     }
-    appendSplitRequests(reads, runSourceOffset, runOutputOffset, runLength, requestSizeBytes);
+    if (runFirstRange >= 0) {
+      appendSplitRequests(reads, misses, runFirstRange, misses.size(),
+          runSourceOffset, previousSourceEnd, requestSizeBytes, holeSizeBytes);
+    }
     return reads;
   }
 
   private static void appendSplitRequests(
-      List<RapidsInputFile.CopyRange> reads,
-      long sourceOffset,
-      long outputOffset,
-      long runLength,
-      long requestSizeBytes) {
-    for (long offset = 0L; offset < runLength; ) {
-      long length = Math.min(requestSizeBytes, runLength - offset);
-      reads.add(new RapidsInputFile.CopyRange(
-          Math.addExact(sourceOffset, offset),
-          length,
-          Math.addExact(outputOffset, offset)));
-      offset = Math.addExact(offset, length);
+      List<ReadRequest> reads,
+      List<SourceRange> sourceRanges,
+      int firstRange,
+      int endRange,
+      long runStart,
+      long runEnd,
+      long requestSizeBytes,
+      long holeSizeBytes) {
+    long requestStart = runStart;
+    while (requestStart < runEnd) {
+      long remaining = Math.subtractExact(runEnd, requestStart);
+      long requestLength = Math.min(requestSizeBytes, remaining);
+      long tailLength = Math.subtractExact(remaining, requestLength);
+      if (tailLength > 0L && tailLength < holeSizeBytes) {
+        requestLength = remaining;
+      }
+      long requestEnd = Math.addExact(requestStart, requestLength);
+      ArrayList<RapidsInputFile.CopyRange> copies = new ArrayList<>();
+      for (int rangeIndex = firstRange; rangeIndex < endRange; rangeIndex++) {
+        SourceRange source = sourceRanges.get(rangeIndex);
+        long sourceEnd = Math.addExact(source.sourceOffset, source.length);
+        long copyStart = Math.max(requestStart, source.sourceOffset);
+        long copyEnd = Math.min(requestEnd, sourceEnd);
+        if (copyStart < copyEnd) {
+          copies.add(new RapidsInputFile.CopyRange(
+              copyStart,
+              copyEnd - copyStart,
+              Math.addExact(source.fragmentOffset, copyStart - source.sourceOffset)));
+        }
+      }
+      if (copies.isEmpty()) {
+        throw new IllegalArgumentException("planned request contains no selected column bytes");
+      }
+      reads.add(new ReadRequest(requestStart, requestLength, copies));
+      requestStart = requestEnd;
     }
   }
 }

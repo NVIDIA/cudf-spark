@@ -110,6 +110,7 @@ final class IcebergParquetPlanner(
   private val executor = readerPool.executor()
   private val rapidsConf = new RapidsConf(SparkEnv.get.conf)
   private val requestSizeBytes = rapidsConf.icebergAsyncReadRequestSize
+  private val holeSizeBytes = rapidsConf.icebergAsyncReadHoleSize
   private val footerPrefetchBytes = Math.max(8L,
     SparkEnv.get.conf.getSizeAsBytes("spark.rapids.perfio.suffixPrefetchSize", "16k"))
   private val multiThreadConf = conf.threadConf.asInstanceOf[MultiThread]
@@ -215,7 +216,8 @@ final class IcebergParquetPlanner(
             reader.rapidsFileIO.newInputFile(file.file.getDelegate.location())
           }, taskExecutor).thenCompose(input =>
             ParquetDataReader.readAsync(
-              footer, input, closed, requestSizeBytes, taskExecutor, () => permit.close()))
+              footer, input, closed, requestSizeBytes, holeSizeBytes,
+              taskExecutor, () => permit.close()))
         } catch {
           case error: Throwable => failedFuture[FileFragment](error)
         }
