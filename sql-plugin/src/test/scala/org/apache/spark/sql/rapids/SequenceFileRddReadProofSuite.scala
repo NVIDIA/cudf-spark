@@ -91,78 +91,68 @@ class SequenceFileRddReadProofSuite extends AnyFunSuite with BeforeAndAfterAll {
     case proof => fail(s"expected rejection, found $proof")
   }
 
-  private def canonicalCopyOfRange(): DataFrame = {
+  private def binaryDataFrame(
+      rdd: RDD[(Array[Byte], Array[Byte])],
+      names: (String, String) = "key" -> "value"): DataFrame = {
     val session = spark
     import session.implicits._
-    source().map { case (key, value) =>
+    rdd.toDF(names._1, names._2)
+  }
+
+  test("prove supported binary copies") {
+    val ranges = binaryDataFrame(source().map { case (key, value) =>
       (Arrays.copyOfRange(key.getBytes, 0, key.getLength),
         Arrays.copyOfRange(value.getBytes, 0, value.getLength))
-    }.toDF("key", "value")
-  }
-
-  test("prove canonical copyOfRange conversion") {
-    assertProven(canonicalCopyOfRange())
-  }
-
-  test("prove copyBytes and copyOf conversions") {
-    val session = spark
-    import session.implicits._
-    val df = source().map { pair =>
+    })
+    val copies = binaryDataFrame(source().map { pair =>
       (pair._1.copyBytes(), Arrays.copyOf(pair._2.getBytes, pair._2.getLength))
-    }.toDF("key", "value")
+    })
 
-    assertProven(df)
+    assertProven(ranges)
+    assertProven(copies)
   }
 
   test("track key and value provenance") {
-    val session = spark
-    import session.implicits._
-    val df = source().map { pair =>
+    val df = binaryDataFrame(source().map { pair =>
       (pair._2.copyBytes(), pair._1.copyBytes())
-    }.toDF("first", "second")
+    }, "first" -> "second")
 
     assertProven(df, Seq(SequenceFileRddReadProof.Value, SequenceFileRddReadProof.Key))
   }
 
   test("reject partial and mismatched copies") {
-    val session = spark
-    import session.implicits._
-    val partial = source().map { pair =>
+    val partial = binaryDataFrame(source().map { pair =>
       (pair._1.copyBytes(),
         Arrays.copyOfRange(pair._2.getBytes, 1, pair._2.getLength))
-    }.toDF("key", "value")
-    val mismatched = source().map { pair =>
+    })
+    val mismatched = binaryDataFrame(source().map { pair =>
       (Arrays.copyOf(pair._1.getBytes, pair._2.getLength), pair._2.copyBytes())
-    }.toDF("key", "value")
+    })
 
     assertRejected(partial)
-    assertRejected(mismatched)
+    assertRejected(mismatched, "copyOf does not copy the full writable payload")
   }
 
   test("reject raw backing arrays and captured state") {
-    val session = spark
-    import session.implicits._
-    val raw = source().map { pair =>
+    val raw = binaryDataFrame(source().map { pair =>
       (pair._1.getBytes, pair._2.copyBytes())
-    }.toDF("key", "value")
+    })
     val counter = new AtomicInteger()
-    val captured = source().map { pair =>
+    val captured = binaryDataFrame(source().map { pair =>
       counter.incrementAndGet()
       (pair._1.copyBytes(), pair._2.copyBytes())
-    }.toDF("key", "value")
+    })
 
-    assertRejected(raw)
-    assertRejected(captured)
+    assertRejected(raw, "Tuple2 is not constructed from two proven binary values")
+    assertRejected(captured, "user closure captures state")
   }
 
   test("reject casts that change closure failure behavior") {
-    val session = spark
-    import session.implicits._
-    val df = source().map { pair =>
+    val df = binaryDataFrame(source().map { pair =>
       val invalid = pair._1.asInstanceOf[String]
       (pair._1.copyBytes(),
         Arrays.copyOf(pair._2.getBytes, pair._2.getLength + invalid.length))
-    }.toDF("key", "value")
+    })
 
     assertRejected(df, "unsupported type instruction")
   }
@@ -198,34 +188,28 @@ class SequenceFileRddReadProofSuite extends AnyFunSuite with BeforeAndAfterAll {
   }
 
   test("reject additional RDD transformations") {
-    val session = spark
-    import session.implicits._
-    val df = source().filter(_._1.getLength > 0).map { pair =>
+    val df = binaryDataFrame(source().filter(_._1.getLength > 0).map { pair =>
       (pair._1.copyBytes(), pair._2.copyBytes())
-    }.toDF("key", "value")
+    })
 
     assertRejected(df, "expected NewHadoopRDD")
   }
 
   test("reject NewHadoopRDD subclasses") {
-    val session = spark
-    import session.implicits._
     val derived = new NewHadoopRDD[BytesWritable, BytesWritable](
       spark.sparkContext,
       classOf[SequenceFileAsBinaryInputFormat],
       classOf[BytesWritable],
       classOf[BytesWritable],
       new Configuration(spark.sparkContext.hadoopConfiguration)) {}
-    val df = derived.map { pair =>
+    val df = binaryDataFrame(derived.map { pair =>
       (pair._1.copyBytes(), pair._2.copyBytes())
-    }.toDF("key", "value")
+    })
 
     assertRejected(df, "NewHadoopRDD subclasses")
   }
 
   test("reject checkpoint requests before materialization") {
-    val session = spark
-    import session.implicits._
     val checkpointDir = Files.createTempDirectory("sequence-file-proof-checkpoint").toFile
     try {
       spark.sparkContext.setCheckpointDir(checkpointDir.getAbsolutePath)
@@ -234,20 +218,18 @@ class SequenceFileRddReadProofSuite extends AnyFunSuite with BeforeAndAfterAll {
       }
       mapped.checkpoint()
 
-      assertRejected(mapped.toDF("key", "value"), "has checkpoint state")
+      assertRejected(binaryDataFrame(mapped), "has checkpoint state")
     } finally {
       Utils.deleteRecursively(checkpointDir)
     }
   }
 
   test("reject mapPartitions even when its parent is the source") {
-    val session = spark
-    import session.implicits._
-    val df = source().mapPartitions { records =>
+    val df = binaryDataFrame(source().mapPartitions { records =>
       records.map { pair =>
         (pair._1.copyBytes(), pair._2.copyBytes())
       }
-    }.toDF("key", "value")
+    })
 
     assertRejected(df, "not the Spark RDD.map wrapper")
   }

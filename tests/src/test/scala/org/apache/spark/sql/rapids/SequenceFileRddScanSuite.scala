@@ -37,11 +37,14 @@ import org.apache.spark.sql.functions.{col, spark_partition_id}
 class SequenceFileRddScanSuite extends SparkQueryCompareTestSuite {
   private val replaceConfKey = RapidsConf.SEQUENCEFILE_RDD_READ_ENABLED.key
   private val splitMaxSizeKey = "mapreduce.input.fileinputformat.split.maxsize"
+  private val compressionTypes =
+    Seq(CompressionType.NONE, CompressionType.RECORD, CompressionType.BLOCK)
 
   private val records = Seq(
     Array[Byte](0, 1) -> Array[Byte](10, 11, 12),
     Array.emptyByteArray -> Array[Byte](20),
     Array[Byte](2, 3, 4) -> Array.emptyByteArray)
+  private val recordPairs = records.map { case (key, value) => key.toSeq -> value.toSeq }
 
   private final class RawValueBytes(bytes: Array[Byte]) extends SequenceFile.ValueBytes {
     override def writeUncompressedBytes(out: DataOutputStream): Unit = out.write(bytes)
@@ -65,7 +68,7 @@ class SequenceFileRddScanSuite extends SparkQueryCompareTestSuite {
     (value >>> 8).toByte,
     value.toByte)
 
-  private def payload(fileIndex: Int, rowIndex: Int, size: Int = 512): Array[Byte] = {
+  private def payload(fileIndex: Int, rowIndex: Int, size: Int): Array[Byte] = {
     val bytes = Array.fill[Byte](size)((rowIndex % 251).toByte)
     bytes(0) = fileIndex.toByte
     System.arraycopy(intBytes(rowIndex), 0, bytes, 1, Integer.BYTES)
@@ -105,19 +108,33 @@ class SequenceFileRddScanSuite extends SparkQueryCompareTestSuite {
       compressionOption)
   }
 
+  private def writeFile(
+      file: File,
+      fileRecords: Seq[(Array[Byte], Array[Byte])],
+      compression: CompressionType,
+      useLzo: Boolean,
+      syncEvery: Int)(append: (SequenceFile.Writer, Array[Byte], Array[Byte]) => Unit): Unit = {
+    val writer = createWriter(file, compression, useLzo)
+    try {
+      fileRecords.zipWithIndex.foreach { case ((key, value), index) =>
+        append(writer, key, value)
+        if (syncEvery > 0 && (index + 1) % syncEvery == 0 && index + 1 < fileRecords.length) {
+          writer.sync()
+        }
+      }
+    } finally {
+      writer.close()
+    }
+  }
+
   private def writeRawFile(
       file: File,
       fileRecords: Seq[(Array[Byte], Array[Byte])],
       compression: CompressionType,
       syncEvery: Int = 0): Unit = {
-    val writer = createWriter(file, compression, useLzo = compression == CompressionType.BLOCK)
-    try {
-      fileRecords.zipWithIndex.foreach { case ((key, value), index) =>
-        writer.appendRaw(key, 0, key.length, new RawValueBytes(value))
-        syncIfNeeded(writer, index, fileRecords.length, syncEvery)
-      }
-    } finally {
-      writer.close()
+    writeFile(file, fileRecords, compression,
+      useLzo = compression == CompressionType.BLOCK, syncEvery = syncEvery) {
+      (writer, key, value) => writer.appendRaw(key, 0, key.length, new RawValueBytes(value))
     }
   }
 
@@ -126,29 +143,20 @@ class SequenceFileRddScanSuite extends SparkQueryCompareTestSuite {
       fileRecords: Seq[(Array[Byte], Array[Byte])],
       compression: CompressionType,
       syncEvery: Int = 0): Unit = {
-    val writer = createWriter(file, compression, useLzo = false)
-    try {
-      fileRecords.zipWithIndex.foreach { case ((key, value), index) =>
-        writer.append(new BytesWritable(key), new BytesWritable(value))
-        syncIfNeeded(writer, index, fileRecords.length, syncEvery)
+    writeFile(file, fileRecords, compression, useLzo = false, syncEvery = syncEvery) {
+      (writer, key, value) => writer.append(new BytesWritable(key), new BytesWritable(value))
+    }
+  }
+
+  private def writeLzoPartFiles(
+      directory: File, fileCount: Int, rowCount: Int, payloadSize: Int): Unit = {
+    (0 until fileCount).foreach { fileIndex =>
+      val fileRecords = (0 until rowCount).map { rowIndex =>
+        intBytes(rowIndex) -> payload(fileIndex, rowIndex, payloadSize)
       }
-    } finally {
-      writer.close()
+      writeRawFile(new File(directory, f"part-$fileIndex%05d.seq"),
+        fileRecords, CompressionType.BLOCK)
     }
-  }
-
-  private def syncIfNeeded(
-      writer: SequenceFile.Writer,
-      index: Int,
-      recordCount: Int,
-      syncEvery: Int): Unit = {
-    if (syncEvery > 0 && (index + 1) % syncEvery == 0 && index + 1 < recordCount) {
-      writer.sync()
-    }
-  }
-
-  private def writeSequenceFile(file: File): Unit = {
-    writeRawFile(file, records, CompressionType.BLOCK)
   }
 
   private def source(
@@ -257,7 +265,7 @@ class SequenceFileRddScanSuite extends SparkQueryCompareTestSuite {
   private def withSequenceFileSession(
       conf: SparkConf)(test: (SparkSession, File) => Unit): Unit = {
     withTempPath { file =>
-      writeSequenceFile(file)
+      writeRawFile(file, records, CompressionType.BLOCK)
       withGpuSparkSession(spark => test(spark, file), conf)
     }
   }
@@ -288,31 +296,44 @@ class SequenceFileRddScanSuite extends SparkQueryCompareTestSuite {
   private def bag[T](values: Seq[T]): Map[T, Int] =
     values.groupBy(identity).map { case (value, copies) => value -> copies.size }
 
+  private def assertGpuRead(
+      df: DataFrame,
+      expected: Seq[(Seq[Byte], Seq[Byte])]): GpuSequenceFileRDDScanExec = {
+    val scan = gpuScan(df)
+    assert(bag(collectPairs(df)) == bag(expected))
+    scan
+  }
+
+  private def assertCpuRead(df: DataFrame, expected: Seq[(Seq[Byte], Seq[Byte])]): Unit = {
+    assertCpuRddScan(df)
+    assert(bag(collectPairs(df)) == bag(expected))
+  }
+
+  private def gpuReadFailure(df: DataFrame): Exception = {
+    gpuScan(df)
+    intercept[Exception] {
+      df.collect()
+    }
+  }
+
   test("replace the exact copy closure for BLOCK-LZO multi-file input") {
     withTempPath { directory =>
       assert(directory.mkdirs())
-      val expected = (0 until 3).flatMap { fileIndex =>
-        val fileRecords = (0 until 32).map { rowIndex =>
-          intBytes(rowIndex) -> payload(fileIndex, rowIndex)
-        }
-        writeRawFile(new File(directory, f"part-$fileIndex%05d.seq"),
-          fileRecords, CompressionType.BLOCK)
-        fileRecords.map { case (key, value) => key.toSeq -> value.toSeq }
-      } :+ (Seq.empty[Byte] -> Seq.empty[Byte])
+      writeLzoPartFiles(directory, fileCount = 3, rowCount = 32, payloadSize = 512)
       writeRawFile(new File(directory, "part-00003.seq"),
         Seq(Array.empty[Byte] -> Array.empty[Byte]), CompressionType.BLOCK)
       writeRawFile(new File(directory, "part-00004.seq"), Seq.empty, CompressionType.BLOCK)
 
       withGpuSparkSession({ spark =>
         val df = copiedDataFrame(spark, directory)
-        assert(gpuScan(df).sourceColumns ==
+        val scan = assertGpuRead(df, readWithHadoop(spark, directory))
+        assert(scan.sourceColumns ==
           Seq(SequenceFileRddReadProof.Key, SequenceFileRddReadProof.Value))
-        assert(bag(collectPairs(df)) == bag(expected))
       }, replacementConf(keepReadsInOrder = false))
     }
   }
 
-  Seq(CompressionType.NONE, CompressionType.RECORD, CompressionType.BLOCK).foreach { compression =>
+  compressionTypes.foreach { compression =>
     test(s"replace RDD read preserves $compression key and value bytes") {
       withTempPath { file =>
         val fileRecords = Seq(
@@ -324,14 +345,13 @@ class SequenceFileRddScanSuite extends SparkQueryCompareTestSuite {
         withGpuSparkSession({ spark =>
           val expected = readWithHadoop(spark, file)
           val df = copiedDataFrame(spark, file)
-          gpuScan(df)
-          assert(bag(collectPairs(df)) == bag(expected))
+          assertGpuRead(df, expected)
         }, replacementConf())
       }
     }
   }
 
-  Seq(CompressionType.NONE, CompressionType.RECORD, CompressionType.BLOCK).foreach { compression =>
+  compressionTypes.foreach { compression =>
     test(s"replace RDD read preserves every record across $compression Hadoop splits") {
       withTempPath { file =>
         val fileRecords = (0 until 96).map { index =>
@@ -343,10 +363,7 @@ class SequenceFileRddScanSuite extends SparkQueryCompareTestSuite {
           val splitMaxSize = Some(64 * 1024L)
           val expected = readWithHadoop(spark, file, splitMaxSize)
           val df = copiedDataFrame(spark, file, splitMaxSize)
-          assert(gpuScan(df).sourceRdd.getNumPartitions > 1)
-          val actual = collectPairs(df)
-          assert(actual.length == expected.length)
-          assert(bag(actual) == bag(expected))
+          assert(assertGpuRead(df, expected).sourceRdd.getNumPartitions > 1)
         }, replacementConf())
       }
     }
@@ -358,19 +375,18 @@ class SequenceFileRddScanSuite extends SparkQueryCompareTestSuite {
         intBytes(index) -> payload(0, index, 2048)
       }
       writeRawFile(file, expected, CompressionType.BLOCK)
+      val expectedPairs = expected.map { case (key, value) => key.toSeq -> value.toSeq }
 
       withGpuSparkSession({ spark =>
         val df = copiedDataFrame(spark, file)
-        assert(bag(collectPairs(df)) == bag(expected.map { case (key, value) =>
-          key.toSeq -> value.toSeq
-        }))
-        assert(gpuScan(df).allMetrics(GpuMetric.NUM_OUTPUT_BATCHES).value > 1)
+        val scan = assertGpuRead(df, expectedPairs)
+        assert(scan.allMetrics(GpuMetric.NUM_OUTPUT_BATCHES).value > 1)
       }, replacementConf(batchSize = "8k"))
 
       withGpuSparkSession({ spark =>
         val df = copiedDataFrame(spark, file)
-        assert(collectPairs(df).length == expected.length)
-        assert(gpuScan(df).allMetrics(GpuMetric.NUM_OUTPUT_BATCHES).value >= 2)
+        val scan = assertGpuRead(df, expectedPairs)
+        assert(scan.allMetrics(GpuMetric.NUM_OUTPUT_BATCHES).value >= 2)
       }, replacementConf(maxRows = Some(2)))
     }
   }
@@ -378,13 +394,7 @@ class SequenceFileRddScanSuite extends SparkQueryCompareTestSuite {
   test("early termination closes the completion-order RDD reader") {
     withTempPath { directory =>
       assert(directory.mkdirs())
-      (0 until 4).foreach { fileIndex =>
-        val fileRecords = (0 until 16).map { rowIndex =>
-          intBytes(rowIndex) -> payload(fileIndex, rowIndex, 2048)
-        }
-        writeRawFile(new File(directory, f"part-$fileIndex%05d.seq"),
-          fileRecords, CompressionType.BLOCK)
-      }
+      writeLzoPartFiles(directory, fileCount = 4, rowCount = 16, payloadSize = 2048)
 
       withGpuSparkSession({ spark =>
         val df = copiedDataFrame(spark, directory).limit(1)
@@ -403,10 +413,7 @@ class SequenceFileRddScanSuite extends SparkQueryCompareTestSuite {
 
       withGpuSparkSession({ spark =>
         val df = copiedDataFrame(spark, file)
-        gpuScan(df)
-        val error = intercept[Exception] {
-          df.collect()
-        }
+        val error = gpuReadFailure(df)
         assert(exceptionContains(error, "record exceeds") &&
           exceptionContains(error, "decompressed batch limit"))
       }, replacementConf(batchSize = "64k"))
@@ -419,7 +426,8 @@ class SequenceFileRddScanSuite extends SparkQueryCompareTestSuite {
 
       withGpuSparkSession({ spark =>
         val df = copiedDataFrame(spark, file, splitMaxSize = Some(1024 * 1024L))
-        assert(gpuScan(df).sourceRdd.getNumPartitions == 1)
+        val scan = gpuScan(df)
+        assert(scan.sourceRdd.getNumPartitions == 1)
         val error = intercept[Exception] {
           df.collect()
         }
@@ -428,7 +436,7 @@ class SequenceFileRddScanSuite extends SparkQueryCompareTestSuite {
     }
   }
 
-  Seq(CompressionType.NONE, CompressionType.RECORD, CompressionType.BLOCK).foreach { compression =>
+  compressionTypes.foreach { compression =>
     test(s"replace RDD read fails closed for a truncated $compression file") {
       withTempPath { file =>
         val fileRecords = (0 until 17).map { index =>
@@ -439,10 +447,7 @@ class SequenceFileRddScanSuite extends SparkQueryCompareTestSuite {
 
         withGpuSparkSession({ spark =>
           val df = copiedDataFrame(spark, file)
-          gpuScan(df)
-          val error = intercept[Exception] {
-            df.collect()
-          }
+          val error = gpuReadFailure(df)
           assert(exceptionContains(error, "Truncated SequenceFile"), error.toString)
         }, replacementConf())
       }
@@ -453,41 +458,32 @@ class SequenceFileRddScanSuite extends SparkQueryCompareTestSuite {
     withSequenceFileSession(
         replacementConf(enabled = false, allowCpuPlan = true)) { (spark, file) =>
       val df = copiedDataFrame(spark, file)
-      assertCpuRddScan(df)
-      assert(bag(collectPairs(df)) == bag(records.map { case (key, value) =>
-        key.toSeq -> value.toSeq
-      }))
+      assertCpuRead(df, recordPairs)
     }
   }
 
   test("replace the swapped closure and preserve value/key provenance") {
     withSequenceFileSession(replacementConf()) { (spark, file) =>
       val df = swappedDataFrame(spark, file)
-      assert(gpuScan(df).sourceColumns ==
+      val scan = assertGpuRead(df, recordPairs.map(_.swap))
+      assert(scan.sourceColumns ==
         Seq(SequenceFileRddReadProof.Value, SequenceFileRddReadProof.Key))
-      assert(bag(collectPairs(df)) == bag(records.map { case (key, value) =>
-        value.toSeq -> key.toSeq
-      }))
     }
   }
 
   test("an additional RDD map keeps the CPU path and its result") {
     withSequenceFileSession(replacementConf(allowCpuPlan = true)) { (spark, file) =>
       val df = extraMapDataFrame(spark, file)
-      assertCpuRddScan(df)
-      assert(bag(collectPairs(df)) == bag(records.map { case (key, value) =>
-        key.toSeq -> value.toSeq
-      }))
+      assertCpuRead(df, recordPairs)
     }
   }
 
   test("a captured closure keeps the CPU path and preserves its result") {
     withSequenceFileSession(replacementConf(allowCpuPlan = true)) { (spark, file) =>
       val df = capturedDataFrame(spark, file, extraBytes = 1)
-      assertCpuRddScan(df)
-      assert(bag(collectPairs(df)) == bag(records.map { case (key, value) =>
-        (key.toSeq :+ 0.toByte) -> value.toSeq
-      }))
+      assertCpuRead(df, recordPairs.map { case (key, value) =>
+        (key :+ 0.toByte) -> value
+      })
     }
   }
 
@@ -499,9 +495,7 @@ class SequenceFileRddScanSuite extends SparkQueryCompareTestSuite {
       val actual = df.collect().map { row =>
         ((row.getAs[Array[Byte]](0).toSeq, row.getAs[Array[Byte]](1).toSeq), row.getInt(2))
       }.toSeq
-      assert(bag(actual.map(_._1)) == bag(records.map { case (key, value) =>
-        key.toSeq -> value.toSeq
-      }))
+      assert(bag(actual.map(_._1)) == bag(recordPairs))
       assert(actual.forall(_._2 == 0))
     }
   }
