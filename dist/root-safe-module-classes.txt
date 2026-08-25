@@ -4,3 +4,4 @@
 # matching classes from the shaded aggregator output so relocated dependencies
 # still resolve at runtime.
 sql-plugin-format
+sql-plugin-fileio
