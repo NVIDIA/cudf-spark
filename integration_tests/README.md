@@ -299,6 +299,19 @@ You do need to have access to a compatible GPU with the needed CUDA drivers. The
 `--runtime_env` is used to specify the environment you are running the tests in. Valid values are `databricks`,`emr`,`dataproc`,`dataproc_serverless` and `apache`. This is generally used
 when certain environments have different behavior, and the tests don't have a good way to auto-detect the environment yet.
 
+#### Protobuf tests on Databricks
+
+`INCLUDE_SPARK_PROTOBUF_JAR` controls external `spark-protobuf` jar injection; it does not control
+protobuf test eligibility. Apache Spark runs inject a matching external jar only when exactly one is
+found and this variable is not set to `false`. Databricks runs use the runtime-bundled protobuf
+implementation instead, so `run_pyspark_from_build.sh --runtime_env=databricks` does not inject a
+matching jar from either the build dependencies or `LOCAL_JAR_PATH`, even if the variable is
+explicitly set to `true`.
+
+The protobuf tests detect the bundled runtime independently. Descriptor sets are generated with the
+Python protobuf library, so the full test module remains enabled without relying on Spark's private,
+runtime-specific shaded protobuf classes.
+
 ### timezone
 
 The RAPIDS plugin currently only supports the UTC time zone. Spark uses the default system time zone unless explicitly set otherwise.

@@ -336,20 +336,10 @@ def is_databricks173_or_later():
 
 def is_spark_protobuf_available():
     if is_databricks_runtime():
-        return True
+        return is_databricks122_or_later()
     return (is_spark_340_or_later() and
             os.environ.get('INCLUDE_SPARK_PROTOBUF_JAR', 'true').lower() != 'false')
 
-def is_spark_protobuf_descriptor_runtime_available():
-    if not is_spark_protobuf_available():
-        return False
-    try:
-        loader = (_spark.sparkContext._jvm.java.lang.Thread.currentThread()
-                  .getContextClassLoader())
-        loader.loadClass("org.sparkproject.spark_protobuf.protobuf.DescriptorProtos")
-        return True
-    except Exception:
-        return False
 
 def supports_delta_lake_deletion_vectors():
     """Whether the current Delta Lake runtime provides the deletion-vector feature."""

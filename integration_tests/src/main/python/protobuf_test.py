@@ -16,6 +16,7 @@ import inspect
 import os
 
 import pytest
+from google.protobuf import descriptor_pb2
 
 from asserts import (
     assert_gpu_and_cpu_are_equal_collect,
@@ -31,7 +32,6 @@ from protobuf_data_gen import call_protobuf_function, materialize_protobuf_data
 from spark_session import (
     is_before_spark_340,
     is_spark_protobuf_available,
-    is_spark_protobuf_descriptor_runtime_available,
     with_cpu_session,
 )
 import pyspark.sql.functions as f
@@ -44,6 +44,11 @@ pytestmark = [
         not is_spark_protobuf_available(),
         reason="from_protobuf is unavailable"),
 ]
+
+_requires_jni_repeated_message = pytest.mark.xfail(
+    reason="Requires cudf-spark-jni JNI-3c repeated-message support: "
+           "https://github.com/NVIDIA/cudf-spark/issues/14069",
+    strict=False)
 
 
 # Random data generation configurations for simple scalars
@@ -85,8 +90,6 @@ def from_protobuf_fn():
 
 def _setup_protobuf_desc(local_tmp_path, desc_name, build_fn):
     """Build descriptor bytes and write them to the driver's local filesystem."""
-    if not is_spark_protobuf_descriptor_runtime_available():
-        pytest.skip("Spark protobuf descriptor runtime is unavailable")
     desc_path = os.path.join(local_tmp_path, desc_name)
     desc_bytes = with_cpu_session(build_fn)
     with open(desc_path, "wb") as fp:
@@ -155,17 +158,10 @@ def _build_simple_descriptor_set_bytes(spark):
     ])
 
 
-def _new_proto2_file(spark, name):
-    """Create a descriptor builder without requiring an unshaded protobuf runtime."""
-    D = spark.sparkContext._jvm.org.sparkproject.spark_protobuf.protobuf.DescriptorProtos
-    fd = D.FileDescriptorProto.newBuilder() \
-        .setName(name) \
-        .setPackage("test")
-    try:
-        fd = fd.setSyntax("proto2")
-    except Exception:
-        pass
-    return D, fd
+def _new_proto2_file(_spark, name):
+    """Create a descriptor without depending on Spark's private protobuf package."""
+    return descriptor_pb2.FileDescriptorProto(
+        name=name, package="test", syntax="proto2")
 
 
 def _field(name, number, ftype, label="optional", default=None,
@@ -201,33 +197,20 @@ def _enum(name, values, allow_alias=False):
 def _build_proto2_descriptor(
         spark, filename, messages, file_enums=None, java_string_check_utf8=False):
     """Build FileDescriptorSet bytes from declarative message and enum specs."""
-    D, fd = _new_proto2_file(spark, filename)
+    fd = _new_proto2_file(spark, filename)
     if java_string_check_utf8:
-        fd.setOptions(
-            D.FileOptions.newBuilder().setJavaStringCheckUtf8(True).build())
+        fd.options.java_string_check_utf8 = True
     type_map = {
-        "BOOL": D.FieldDescriptorProto.Type.TYPE_BOOL,
-        "INT32": D.FieldDescriptorProto.Type.TYPE_INT32,
-        "INT64": D.FieldDescriptorProto.Type.TYPE_INT64,
-        "UINT32": D.FieldDescriptorProto.Type.TYPE_UINT32,
-        "UINT64": D.FieldDescriptorProto.Type.TYPE_UINT64,
-        "SINT32": D.FieldDescriptorProto.Type.TYPE_SINT32,
-        "SINT64": D.FieldDescriptorProto.Type.TYPE_SINT64,
-        "FIXED32": D.FieldDescriptorProto.Type.TYPE_FIXED32,
-        "FIXED64": D.FieldDescriptorProto.Type.TYPE_FIXED64,
-        "SFIXED32": D.FieldDescriptorProto.Type.TYPE_SFIXED32,
-        "SFIXED64": D.FieldDescriptorProto.Type.TYPE_SFIXED64,
-        "FLOAT": D.FieldDescriptorProto.Type.TYPE_FLOAT,
-        "DOUBLE": D.FieldDescriptorProto.Type.TYPE_DOUBLE,
-        "STRING": D.FieldDescriptorProto.Type.TYPE_STRING,
-        "BYTES": D.FieldDescriptorProto.Type.TYPE_BYTES,
-        "MESSAGE": D.FieldDescriptorProto.Type.TYPE_MESSAGE,
-        "ENUM": D.FieldDescriptorProto.Type.TYPE_ENUM,
+        name: getattr(descriptor_pb2.FieldDescriptorProto, f"TYPE_{name}")
+        for name in [
+            "BOOL", "INT32", "INT64", "UINT32", "UINT64", "SINT32", "SINT64",
+            "FIXED32", "FIXED64", "SFIXED32", "SFIXED64", "FLOAT", "DOUBLE",
+            "STRING", "BYTES", "MESSAGE", "ENUM",
+        ]
     }
     label_map = {
-        "optional": D.FieldDescriptorProto.Label.LABEL_OPTIONAL,
-        "repeated": D.FieldDescriptorProto.Label.LABEL_REPEATED,
-        "required": D.FieldDescriptorProto.Label.LABEL_REQUIRED,
+        name: getattr(descriptor_pb2.FieldDescriptorProto, f"LABEL_{name.upper()}")
+        for name in ["optional", "repeated", "required"]
     }
 
     def _default_literal(value):
@@ -236,103 +219,73 @@ def _build_proto2_descriptor(
         return str(value)
 
     def _build_enum(enum_spec):
-        enum_builder = D.EnumDescriptorProto.newBuilder().setName(enum_spec["name"])
+        enum_proto = descriptor_pb2.EnumDescriptorProto(name=enum_spec["name"])
         if enum_spec.get("allow_alias", False):
-            enum_builder.setOptions(
-                D.EnumOptions.newBuilder().setAllowAlias(True).build())
+            enum_proto.options.allow_alias = True
         for value_name, value_number in enum_spec["values"]:
-            enum_builder.addValue(
-                D.EnumValueDescriptorProto.newBuilder()
-                    .setName(value_name)
-                    .setNumber(value_number)
-                    .build()
-            )
-        return enum_builder.build()
-
-    packed_options = D.FieldOptions.newBuilder().setPacked(True).build()
+            enum_proto.value.add(name=value_name, number=value_number)
+        return enum_proto
 
     for enum_spec in file_enums or []:
-        fd.addEnumType(_build_enum(enum_spec))
+        fd.enum_type.add().CopyFrom(_build_enum(enum_spec))
 
     for message_spec in messages:
-        message_builder = D.DescriptorProto.newBuilder().setName(message_spec["name"])
+        message_proto = fd.message_type.add(name=message_spec["name"])
         for oneof_name in message_spec.get("oneofs", []):
-            message_builder.addOneofDecl(
-                D.OneofDescriptorProto.newBuilder().setName(oneof_name).build())
+            message_proto.oneof_decl.add(name=oneof_name)
         for enum_spec in message_spec["enums"]:
-            message_builder.addEnumType(_build_enum(enum_spec))
+            message_proto.enum_type.add().CopyFrom(_build_enum(enum_spec))
         for field_spec in message_spec["fields"]:
-            field_builder = (
-                D.FieldDescriptorProto.newBuilder()
-                    .setName(field_spec["name"])
-                    .setNumber(field_spec["number"])
-                    .setLabel(label_map[field_spec["label"]])
-                    .setType(type_map[field_spec["type"]])
-            )
+            field_proto = message_proto.field.add(
+                name=field_spec["name"],
+                number=field_spec["number"],
+                label=label_map[field_spec["label"]],
+                type=type_map[field_spec["type"]])
             if field_spec["type_name"] is not None:
-                field_builder.setTypeName(field_spec["type_name"])
+                field_proto.type_name = field_spec["type_name"]
             if field_spec["default"] is not None:
-                field_builder.setDefaultValue(_default_literal(field_spec["default"]))
+                field_proto.default_value = _default_literal(field_spec["default"])
             if field_spec["packed"]:
-                field_builder.setOptions(packed_options)
+                field_proto.options.packed = True
             if field_spec.get("oneof_index") is not None:
-                field_builder.setOneofIndex(field_spec["oneof_index"])
-            message_builder.addField(field_builder.build())
-        fd.addMessageType(message_builder.build())
+                field_proto.oneof_index = field_spec["oneof_index"]
 
-    fds = D.FileDescriptorSet.newBuilder().addFile(fd.build()).build()
-    return bytes(fds.toByteArray())
+    fds = descriptor_pb2.FileDescriptorSet()
+    fds.file.add().CopyFrom(fd)
+    return fds.SerializeToString()
 
 
 def _build_proto2_root_with_proto3_import(spark, reference_kind):
-    D, root_file = _new_proto2_file(spark, f"proto3_{reference_kind}_root.proto")
-    child_file = (D.FileDescriptorProto.newBuilder()
-                  .setName(f"proto3_{reference_kind}_child.proto")
-                  .setPackage("test")
-                  .setSyntax("proto3"))
-    root_file.addDependency(f"proto3_{reference_kind}_child.proto")
+    root_file = _new_proto2_file(spark, f"proto3_{reference_kind}_root.proto")
+    child_file = descriptor_pb2.FileDescriptorProto(
+        name=f"proto3_{reference_kind}_child.proto", package="test", syntax="proto3")
+    root_file.dependency.append(child_file.name)
 
     if reference_kind == "message":
-        child_file.addMessageType(
-            D.DescriptorProto.newBuilder()
-                .setName("ImportedChild")
-                .addField(D.FieldDescriptorProto.newBuilder()
-                          .setName("value")
-                          .setNumber(1)
-                          .setLabel(D.FieldDescriptorProto.Label.LABEL_OPTIONAL)
-                          .setType(D.FieldDescriptorProto.Type.TYPE_INT32)
-                          .build())
-                .build())
+        child_file.message_type.add(name="ImportedChild").field.add(
+            name="value",
+            number=1,
+            label=descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL,
+            type=descriptor_pb2.FieldDescriptorProto.TYPE_INT32)
         type_name = ".test.ImportedChild"
-        field_type = D.FieldDescriptorProto.Type.TYPE_MESSAGE
+        field_type = descriptor_pb2.FieldDescriptorProto.TYPE_MESSAGE
     else:
-        child_file.addEnumType(
-            D.EnumDescriptorProto.newBuilder()
-                .setName("ImportedStatus")
-                .addValue(D.EnumValueDescriptorProto.newBuilder()
-                          .setName("UNKNOWN").setNumber(0).build())
-                .addValue(D.EnumValueDescriptorProto.newBuilder()
-                          .setName("OK").setNumber(1).build())
-                .build())
+        child_enum = child_file.enum_type.add(name="ImportedStatus")
+        child_enum.value.add(name="UNKNOWN", number=0)
+        child_enum.value.add(name="OK", number=1)
         type_name = ".test.ImportedStatus"
-        field_type = D.FieldDescriptorProto.Type.TYPE_ENUM
+        field_type = descriptor_pb2.FieldDescriptorProto.TYPE_ENUM
 
-    root_file.addMessageType(
-        D.DescriptorProto.newBuilder()
-            .setName("Proto2Root")
-            .addField(D.FieldDescriptorProto.newBuilder()
-                      .setName("value")
-                      .setNumber(1)
-                      .setLabel(D.FieldDescriptorProto.Label.LABEL_OPTIONAL)
-                      .setType(field_type)
-                      .setTypeName(type_name)
-                      .build())
-            .build())
-    fds = (D.FileDescriptorSet.newBuilder()
-           .addFile(child_file.build())
-           .addFile(root_file.build())
-           .build())
-    return bytes(fds.toByteArray())
+    root_file.message_type.add(name="Proto2Root").field.add(
+        name="value",
+        number=1,
+        label=descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL,
+        type=field_type,
+        type_name=type_name)
+    fds = descriptor_pb2.FileDescriptorSet()
+    fds.file.add().CopyFrom(child_file)
+    fds.file.add().CopyFrom(root_file)
+    return fds.SerializeToString()
 
 
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
@@ -427,6 +380,7 @@ def _build_interop_descriptor_set_bytes(spark):
 
 
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
+@_requires_jni_repeated_message
 @ignore_order(local=True)
 def test_from_protobuf_cpu_to_protobuf_interoperability(
         local_tmp_path, from_protobuf_fn):
@@ -931,6 +885,7 @@ def _build_repeated_message_enum_descriptor_set_bytes(spark):
 
 
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
+@_requires_jni_repeated_message
 @ignore_order(local=True)
 def test_from_protobuf_repeated_message_child_enum_string(
         local_tmp_path, from_protobuf_fn):
@@ -964,6 +919,7 @@ def test_from_protobuf_repeated_message_child_enum_string(
 
 
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
+@_requires_jni_repeated_message
 @ignore_order(local=True)
 def test_from_protobuf_repeated_message_child_enum_string_invalid_permissive(
         local_tmp_path, from_protobuf_fn):
@@ -1941,6 +1897,7 @@ def _build_singular_message_merge_descriptor_set_bytes(spark):
 
 
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
+@_requires_jni_repeated_message
 @ignore_order(local=True)
 def test_from_protobuf_duplicate_singular_messages_merge(local_tmp_path, from_protobuf_fn):
     desc_path, desc_bytes = _setup_protobuf_desc(
@@ -2190,6 +2147,7 @@ def test_from_protobuf_deep_nested(
 
 
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
+@_requires_jni_repeated_message
 @ignore_order(local=True)
 def test_from_protobuf_repeated_message(
         local_tmp_path, from_protobuf_fn):
@@ -2262,6 +2220,7 @@ def test_from_protobuf_nested_with_repeated(
 
 
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
+@_requires_jni_repeated_message
 @ignore_order(local=True)
 def test_from_protobuf_repeated_with_nested(
         local_tmp_path, from_protobuf_fn):
@@ -2561,15 +2520,48 @@ _schema_proj_gen = StructGen([
 
 
 _schema_proj_cases = [
-    ("nested_single_field", [("id", ("id",)), ("detail_a", ("detail", "a"))]),
-    ("nested_two_fields", [("detail_a", ("detail", "a")), ("detail_c", ("detail", "c"))]),
-    ("whole_struct_no_pruning", [("id", ("id",)), ("detail", ("detail",))]),
-    ("whole_and_subfield", [("detail", ("detail",)), ("detail_a", ("detail", "a"))]),
-    ("scalar_plus_nested", [("id", ("id",)), ("name", ("name",)), ("detail_a", ("detail", "a"))]),
-    ("repeated_msg_single_subfield", [("id", ("id",)), ("items_a", ("items", "a"))]),
-    ("repeated_msg_two_subfields", [("items_a", ("items", "a")), ("items_c", ("items", "c"))]),
-    ("repeated_whole_no_pruning", [("id", ("id",)), ("items", ("items",))]),
-    ("mix_struct_and_repeated", [("id", ("id",)), ("detail_a", ("detail", "a")), ("items_c", ("items", "c"))]),
+    pytest.param(
+        "nested_single_field",
+        [("id", ("id",)), ("detail_a", ("detail", "a"))],
+        id="nested_single_field"),
+    pytest.param(
+        "nested_two_fields",
+        [("detail_a", ("detail", "a")), ("detail_c", ("detail", "c"))],
+        id="nested_two_fields"),
+    pytest.param(
+        "whole_struct_no_pruning",
+        [("id", ("id",)), ("detail", ("detail",))],
+        id="whole_struct_no_pruning"),
+    pytest.param(
+        "whole_and_subfield",
+        [("detail", ("detail",)), ("detail_a", ("detail", "a"))],
+        id="whole_and_subfield"),
+    pytest.param(
+        "scalar_plus_nested",
+        [("id", ("id",)), ("name", ("name",)),
+         ("detail_a", ("detail", "a"))],
+        id="scalar_plus_nested"),
+    pytest.param(
+        "repeated_msg_single_subfield",
+        [("id", ("id",)), ("items_a", ("items", "a"))],
+        marks=_requires_jni_repeated_message,
+        id="repeated_msg_single_subfield"),
+    pytest.param(
+        "repeated_msg_two_subfields",
+        [("items_a", ("items", "a")), ("items_c", ("items", "c"))],
+        marks=_requires_jni_repeated_message,
+        id="repeated_msg_two_subfields"),
+    pytest.param(
+        "repeated_whole_no_pruning",
+        [("id", ("id",)), ("items", ("items",))],
+        marks=_requires_jni_repeated_message,
+        id="repeated_whole_no_pruning"),
+    pytest.param(
+        "mix_struct_and_repeated",
+        [("id", ("id",)), ("detail_a", ("detail", "a")),
+         ("items_c", ("items", "c"))],
+        marks=_requires_jni_repeated_message,
+        id="mix_struct_and_repeated"),
 ]
 
 
@@ -2672,7 +2664,11 @@ def test_from_protobuf_projection_through_window(
 
 
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
-@pytest.mark.parametrize("boundary", ["alias", "withcolumn"], ids=idfn)
+@pytest.mark.parametrize("boundary", [
+    "alias",
+    pytest.param(
+        "withcolumn", marks=_requires_jni_repeated_message, id="withcolumn"),
+], ids=idfn)
 @ignore_order(local=True)
 def test_from_protobuf_projection_across_plan_boundary(
         local_tmp_path, from_protobuf_fn, boundary):
@@ -2703,6 +2699,7 @@ def test_from_protobuf_projection_across_plan_boundary(
 
 
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
+@_requires_jni_repeated_message
 @pytest.mark.parametrize("terminal", ["project", "sort"], ids=idfn)
 @ignore_order(local=True)
 def test_from_protobuf_terminal_whole_struct_and_field(
@@ -2867,7 +2864,7 @@ def test_from_protobuf_deep_nesting_5_levels(
 
 
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
-@pytest.mark.parametrize("case_id,select_specs", _schema_proj_cases, ids=lambda c: c[0] if isinstance(c, tuple) else str(c))
+@pytest.mark.parametrize("case_id,select_specs", _schema_proj_cases)
 @ignore_order(local=True)
 def test_from_protobuf_schema_projection_cases(
         local_tmp_path, from_protobuf_fn, case_id, select_specs):
@@ -3277,6 +3274,7 @@ def test_from_protobuf_smoke_path_api(simple_desc, from_protobuf_fn):
 
 
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
+@_requires_jni_repeated_message
 def test_from_protobuf_smoke_nested_projection(
         nested_smoke_desc, from_protobuf_fn):
     desc_path, desc_bytes = nested_smoke_desc
@@ -3390,6 +3388,7 @@ def test_from_protobuf_unsigned_boundaries(
 
 
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
+@_requires_jni_repeated_message
 def test_from_protobuf_multilevel_repeated_messages(
         protobuf_semantics_desc, from_protobuf_fn):
     desc_path, desc_bytes = protobuf_semantics_desc

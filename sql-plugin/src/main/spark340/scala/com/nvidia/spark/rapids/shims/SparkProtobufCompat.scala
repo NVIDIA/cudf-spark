@@ -31,13 +31,17 @@
 {"spark": "356"}
 {"spark": "357"}
 {"spark": "358"}
+{"spark": "359"}
 {"spark": "400"}
 {"spark": "400db173"}
 {"spark": "401"}
 {"spark": "402"}
 {"spark": "403"}
+{"spark": "404"}
 {"spark": "411"}
 {"spark": "412"}
+{"spark": "413"}
+{"spark": "420"}
 spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.shims
@@ -207,13 +211,18 @@ private[shims] object SparkProtobufCompat extends Logging {
     val module = cls.getField("MODULE$").get(null)
     val buildMethod = cls.getMethod("buildDescriptor", classOf[String], classOf[scala.Option[_]])
 
-    invokeBuildDescriptor(
+    val built = invokeBuildDescriptor(
       buildMethod,
       module,
       messageName,
       descriptorSource,
       filePath => Files.readAllBytes(Paths.get(filePath)))
+    unwrapMessageDescriptor(built)
   }
+
+  // Spark 4.2 returns a descriptor-and-extensions container even when extensions are disabled.
+  private[shims] def unwrapMessageDescriptor(raw: AnyRef): AnyRef =
+    Try(PbReflect.invoke0[AnyRef](raw, "descriptor")).getOrElse(raw)
 
   private[shims] def invokeBuildDescriptor(
       buildMethod: Method,
