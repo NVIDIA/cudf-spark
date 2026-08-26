@@ -16,6 +16,8 @@
 
 package com.nvidia.spark.rapids
 
+import java.util.{ArrayDeque, IdentityHashMap}
+
 import scala.annotation.tailrec
 import scala.collection.mutable.ArrayBuffer
 
@@ -168,15 +170,45 @@ object GpuProjectExec {
           }
         }
 
-        val hasAstExpressions = boundExprs.exists { expression =>
-          GpuProjectAstExpressionBase.extractTopLevel(expression).isDefined
-        }
-        if (hasAstExpressions) {
+        val astExpressions = boundExprs.flatMap(
+          GpuProjectAstExpressionBase.extractTopLevel)
+        if (astExpressions.nonEmpty) {
           withResource(GpuProjectAstExpressionBase.tableFromBatch(cb)) { table =>
-            projectWithEval { expression =>
-              GpuProjectAstExpressionBase.extractTopLevel(expression) match {
-                case Some(astExpression) => astExpression.computeColumn(table)
-                case None => expression.columnarEval(cb)
+            val jitExpressions = astExpressions.collect {
+              case jitExpression: GpuAstJitExpression => jitExpression
+            }
+            if (jitExpressions.size > 1 &&
+                RapidsConf.ENABLE_PROJECT_AST_JIT_MULTI_OUTPUT.get(SQLConf.get)) {
+              withResource(GpuAstJitExpression.computeColumns(jitExpressions, table)) { jitBatch =>
+                val jitColumnIndexes =
+                  new IdentityHashMap[GpuAstJitExpression, ArrayDeque[Int]]()
+                jitExpressions.zipWithIndex.foreach { case (jitExpression, index) =>
+                  var indexes = jitColumnIndexes.get(jitExpression)
+                  if (indexes == null) {
+                    indexes = new ArrayDeque[Int]()
+                    jitColumnIndexes.put(jitExpression, indexes)
+                  }
+                  indexes.addLast(index)
+                }
+                projectWithEval { expression =>
+                  GpuProjectAstExpressionBase.extractTopLevel(expression) match {
+                    case Some(jitExpression: GpuAstJitExpression) =>
+                      val indexes = jitColumnIndexes.get(jitExpression)
+                      require(indexes != null && !indexes.isEmpty,
+                        s"Missing multi-output AST JIT column for $jitExpression")
+                      jitBatch.column(indexes.removeFirst())
+                          .asInstanceOf[GpuColumnVector].incRefCount()
+                    case Some(astExpression) => astExpression.computeColumn(table)
+                    case None => expression.columnarEval(cb)
+                  }
+                }
+              }
+            } else {
+              projectWithEval { expression =>
+                GpuProjectAstExpressionBase.extractTopLevel(expression) match {
+                  case Some(astExpression) => astExpression.computeColumn(table)
+                  case None => expression.columnarEval(cb)
+                }
               }
             }
           }

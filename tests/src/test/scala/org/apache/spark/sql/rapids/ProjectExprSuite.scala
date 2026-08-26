@@ -233,6 +233,51 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
     }
   }
 
+  test("multi-output AST JIT project retries and preserves output order and nulls") {
+    val left = GpuBoundReference(0, LongType, nullable = true)(
+      NamedExpression.newExprId, "a")
+    val right = GpuBoundReference(1, LongType, nullable = true)(
+      NamedExpression.newExprId, "b")
+    def shared = GpuAdd(left, GpuLiteral(1L, LongType), failOnError = false)()
+    val jitExpressions = Seq(
+      GpuAstJitExpression(GpuMultiply(shared, right, failOnError = false)()),
+      GpuAstJitExpression(GpuMultiply(shared, left, failOnError = false)()))
+    val expressions = Seq(
+      GpuAlias(jitExpressions.head, "right_product")(),
+      GpuAlias(jitExpressions(1), "left_product")())
+
+    RmmSpark.currentThreadIsDedicatedToTask(0)
+    try {
+      withResource(jitExpressions) { _ =>
+        TestUtils.withMockTaskContext(completesTask = true) {
+          val spillableBatch = buildProjectBatch()
+          RmmSpark.forceRetryOOM(RmmSpark.getCurrentThreadId, 1,
+            RmmSpark.OomInjectionType.GPU.ordinal, 0)
+          withResource(GpuProjectExec.projectAndCloseWithRetrySingleBatch(
+              spillableBatch, expressions)) { result =>
+            assertResult(2)(result.numCols())
+            val rightProduct = result.column(0).asInstanceOf[GpuColumnVector]
+            val leftProduct = result.column(1).asInstanceOf[GpuColumnVector]
+            withResource(rightProduct.getBase.copyToHost()) { hostProduct =>
+              assertResult(36L)(hostProduct.getLong(0))
+              assert(hostProduct.isNull(1))
+              assertResult(32L)(hostProduct.getLong(2))
+              assertResult(18L)(hostProduct.getLong(3))
+            }
+            withResource(leftProduct.getBase.copyToHost()) { hostProduct =>
+              assertResult(30L)(hostProduct.getLong(0))
+              assert(hostProduct.isNull(1))
+              assertResult(12L)(hostProduct.getLong(2))
+              assertResult(2L)(hostProduct.getLong(3))
+            }
+          }
+        }
+      }
+    } finally {
+      RmmSpark.removeCurrentDedicatedThreadAssociation(0)
+    }
+  }
+
   testSparkResultsAreEqual("Test literal values in select", mixedFloatDf) {
     frame =>
       frame.select(col("floats"),

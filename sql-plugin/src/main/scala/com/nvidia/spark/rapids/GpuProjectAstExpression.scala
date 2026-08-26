@@ -71,14 +71,17 @@ trait GpuProjectAstExpressionBase
 
   private[rapids] final def computeColumn(table: Table): GpuColumnVector = {
     val compiled = getCompiledExpression
-    NvtxIdWithMetrics(computeNvtxId, opTime) {
+    withComputeMetrics {
       closeOnExcept(evaluate(compiled, table)) { result =>
         GpuColumnVector.from(result, dataType)
       }
     }
   }
 
-  protected final def getCompiledExpression: CompiledExpression = synchronized {
+  private[rapids] final def withComputeMetrics[T](body: => T): T =
+    NvtxIdWithMetrics(computeNvtxId, opTime)(body)
+
+  private[rapids] final def getCompiledExpression: CompiledExpression = synchronized {
     if (compiledExpression == null) {
       val compiled = NvtxIdWithMetrics(compileNvtxId, opTime) {
         // Force every bound reference to the left table; Project AST has one input table.
@@ -142,12 +145,16 @@ object GpuProjectAstExpressionBase {
     } else {
       expressions
     }
-    val replaced = if (RapidsConf.ENABLE_COMBINED_EXPRESSIONS.get(conf)) {
-      GpuEquivalentExpressions.replaceMultiExpressions(unwrapped, conf)
+    val tiers = if (enableProjectAstJit) {
+      GpuAstJitProjectPlanner.buildExprTiers(unwrapped, conf)
     } else {
-      unwrapped
+      val replaced = if (RapidsConf.ENABLE_COMBINED_EXPRESSIONS.get(conf)) {
+        GpuEquivalentExpressions.replaceMultiExpressions(unwrapped, conf)
+      } else {
+        unwrapped
+      }
+      GpuEquivalentExpressions.getExprTiers(replaced)
     }
-    val tiers = GpuEquivalentExpressions.getExprTiers(replaced)
     val astTiers = if (hasAstOutputs) {
       GpuProjectAstExpression.rewrapAstTiers(tiers, astOutputs)
     } else {

@@ -405,12 +405,46 @@ def test_jit_add_multiply(data_gen):
 
 @pytest.mark.parametrize('data_gen', [int_gen, long_gen], ids=idfn)
 @disable_ansi_mode
-def test_jit_does_not_split_unique_unsupported_expression(data_gen):
+def test_jit_partial_project_with_unique_unsupported_expression(data_gen):
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: binary_op_df(spark, data_gen).select(
             (f.col('a') + f.col('b')) - (f.col('a') * f.col('b'))),
         exist_classes="GpuProject",
-        non_exist_classes="AST_JIT,GpuProjectAst",
+        non_exist_classes="GpuProjectAst",
+        conf=_project_ast_jit_enabled_conf)
+
+@pytest.mark.parametrize('data_gen', [int_gen, long_gen], ids=idfn)
+@disable_ansi_mode
+def test_jit_multi_output_shared_subtree(data_gen):
+    def project_shared_expression(spark):
+        df = binary_op_df(spark, data_gen)
+        shared = f.col('a') + f.col('b')
+        return df.select(
+            (shared * f.col('a')).alias('left'),
+            (shared * f.col('b')).alias('right'))
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        project_shared_expression,
+        exist_classes=r"GpuProject.*AST_JIT.*AS left.*AST_JIT.*AS right",
+        non_exist_classes="GpuProjectAst",
+        conf=_project_ast_jit_enabled_conf)
+
+@pytest.mark.parametrize('data_gen', [int_gen, long_gen], ids=idfn)
+@disable_ansi_mode
+def test_jit_regular_jit_waves(data_gen):
+    def project_waves(spark):
+        df = binary_op_df(spark, data_gen)
+        shared = f.col('a') + f.col('b')
+        regular = f.greatest(shared, f.col('a'))
+        return df.select(
+            (shared * f.col('a')).alias('early'),
+            regular.alias('regular'),
+            (regular * f.col('b')).alias('late'))
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        project_waves,
+        exist_classes=r"GpuProject.*AST_JIT.*AS early.*AS regular.*AS late",
+        non_exist_classes="GpuProjectAst",
         conf=_project_ast_jit_enabled_conf)
 
 @pytest.mark.parametrize('data_gen', [int_gen, long_gen], ids=idfn)

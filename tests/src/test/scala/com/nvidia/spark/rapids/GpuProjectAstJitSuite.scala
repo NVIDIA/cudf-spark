@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids
 
 import ai.rapids.cudf.Table
 import ai.rapids.cudf.ast.{AstExpression, CompiledExpression}
-import com.nvidia.spark.rapids.ProjectAstTestUtils.{collectExpressions, tierReferences}
+import com.nvidia.spark.rapids.ProjectAstTestUtils.collectExpressions
 import org.mockito.Mockito.{doThrow, mock, times, verify, when}
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -98,7 +98,7 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     assert(subtract.right.isInstanceOf[GpuMultiply])
   }
 
-  test("project CSE exposes a shared supported expression to JIT") {
+  test("project wave exports a shared supported expression to JIT") {
     val left = reference(0, IntegerType)
     val right = reference(1, IntegerType)
     val third = reference(2, IntegerType)
@@ -113,7 +113,7 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     val tiered = GpuBindReferences.bindGpuProjectReferencesTieredNoMetrics(
       expressions, Seq(left, right, third, fourth), projectConf())
 
-    // after CSE:
+    // after wave planning:
     // tier 0: [AST_JIT(left+right) AS t1]
     // tier 1: [AST(t1-third) AS legacy, greatest(t1, fourth) AS regular]
     val jitExpressionTiers = tiered.exprTiers.map(collectExpressions[GpuAstJitExpression])
@@ -122,9 +122,113 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     assert(GpuProjectAstExpression.extractTopLevel(tiered.exprTiers.last.head).isDefined)
     assert(GpuProjectAstExpression.extractTopLevel(tiered.exprTiers.last(1)).isEmpty)
     // Final references: [t1, t1] (distinct: {t1}).
-    val finalTierReferences = tiered.exprTiers.last.flatMap(tierReferences)
+    val waveExprId = tiered.exprTiers.head.collectFirst {
+      case alias: GpuAlias if GpuAstJitExpression.extractTopLevel(alias).isDefined => alias.exprId
+    }.get
+    val finalTierReferences = collectExpressions[GpuBoundReference](tiered.exprTiers.last)
+        .filter(_.exprId == waveExprId)
     assertResult(2)(finalTierReferences.size)
     assertResult(1)(finalTierReferences.map(_.exprId).distinct.size)
+  }
+
+  test("same-wave JIT roots keep their shared subtree inside one group") {
+    val left = reference(0, IntegerType)
+    val right = reference(1, IntegerType)
+    val third = reference(2, IntegerType)
+    val fourth = reference(3, IntegerType)
+    def shared = GpuAdd(left, right, failOnError = false)()
+    val expressions = Seq(
+      alias(GpuMultiply(shared, third, failOnError = false)(), "first"),
+      alias(GpuMultiply(shared, fourth, failOnError = false)(), "second"))
+
+    val tiered = GpuBindReferences.bindGpuProjectReferencesTieredNoMetrics(
+      expressions, Seq(left, right, third, fourth), projectConf())
+    val jitTiers = tiered.exprTiers.map(_.flatMap(GpuAstJitExpression.extractTopLevel))
+
+    assertResult(1)(tiered.exprTiers.size)
+    assertResult(Seq(2))(jitTiers.map(_.size))
+    assert(jitTiers.head.forall(_.child.isInstanceOf[GpuMultiply]))
+    assert(jitTiers.head.forall(_.child.find(_.isInstanceOf[GpuAdd]).isDefined))
+  }
+
+  test("JIT wave exports a shared subtree only for its regular consumer") {
+    val left = reference(0, IntegerType)
+    val right = reference(1, IntegerType)
+    val third = reference(2, IntegerType)
+    val fourth = reference(3, IntegerType)
+    def shared = GpuAdd(left, right, failOnError = false)()
+    val expressions = Seq(
+      alias(GpuMultiply(shared, third, failOnError = false)(), "jit"),
+      alias(GpuGreatest(Seq(shared, fourth)), "regular"))
+
+    val tiered = GpuBindReferences.bindGpuProjectReferencesTieredNoMetrics(
+      expressions, Seq(left, right, third, fourth), projectConf())
+    val jitTiers = tiered.exprTiers.map(_.flatMap(GpuAstJitExpression.extractTopLevel))
+
+    assertResult(Seq(2, 0))(jitTiers.map(_.size))
+    assertResult(1)(jitTiers.head.count(_.child.isInstanceOf[GpuMultiply]))
+    assertResult(1)(jitTiers.head.count(_.child.isInstanceOf[GpuAdd]))
+    assertResult(2)(tiered.exprTiers.last.size)
+    assert(collectExpressions[GpuGreatest](tiered.exprTiers.last).nonEmpty)
+  }
+
+  test("JIT and regular dependencies form three waves") {
+    val left = reference(0, IntegerType)
+    val right = reference(1, IntegerType)
+    val third = reference(2, IntegerType)
+    val fourth = reference(3, IntegerType)
+    def shared = GpuAdd(left, right, failOnError = false)()
+    def regular = GpuGreatest(Seq(shared, third))
+    val expressions = Seq(
+      alias(GpuMultiply(shared, fourth, failOnError = false)(), "early"),
+      alias(regular, "regular"),
+      alias(GpuMultiply(regular, fourth, failOnError = false)(), "late"))
+
+    val tiered = GpuBindReferences.bindGpuProjectReferencesTieredNoMetrics(
+      expressions, Seq(left, right, third, fourth), projectConf())
+    val jitTiers = tiered.exprTiers.map(_.flatMap(GpuAstJitExpression.extractTopLevel))
+
+    assertResult(3)(tiered.exprTiers.size)
+    assertResult(Seq(2, 0, 1))(jitTiers.map(_.size))
+    assertResult(1)(jitTiers.head.count(_.child.isInstanceOf[GpuAdd]))
+    assertResult(1)(jitTiers.head.count(_.child.isInstanceOf[GpuMultiply]))
+    assert(jitTiers.last.head.child.isInstanceOf[GpuMultiply])
+    assert(collectExpressions[GpuGreatest](tiered.exprTiers(1)).nonEmpty)
+  }
+
+  test("unsupported root uses maximal JIT children in an earlier wave") {
+    val left = reference(0, IntegerType)
+    val right = reference(1, IntegerType)
+    val expression = alias(
+      GpuSubtract(
+        GpuAdd(left, right, failOnError = false)(),
+        GpuMultiply(left, right, failOnError = false)(),
+        failOnError = false)(),
+      "result")
+
+    val tiered = GpuBindReferences.bindGpuProjectReferencesTieredNoMetrics(
+      Seq(expression), Seq(left, right), projectConf())
+    val jitTiers = tiered.exprTiers.map(_.flatMap(GpuAstJitExpression.extractTopLevel))
+
+    assertResult(2)(tiered.exprTiers.size)
+    assertResult(Seq(2, 0))(jitTiers.map(_.size))
+    assert(collectExpressions[GpuSubtract](tiered.exprTiers.last).nonEmpty)
+  }
+
+  test("JIT planner keeps non-deterministic arithmetic on the regular backend") {
+    val expression = alias(
+      GpuAdd(
+        GpuMonotonicallyIncreasingID(),
+        GpuLiteral(1L, LongType),
+        failOnError = false)(),
+      "result")
+
+    val tiered = GpuBindReferences.bindGpuProjectReferencesTieredNoMetrics(
+      Seq(expression), Seq.empty, projectConf())
+
+    assertResult(1)(tiered.exprTiers.size)
+    assert(collectExpressions[GpuAstJitExpression](tiered.exprTiers.head).isEmpty)
+    assert(collectExpressions[GpuMonotonicallyIncreasingID](tiered.exprTiers.head).nonEmpty)
   }
 
   test("final JIT explanation includes a shared expression selected in an earlier tier") {
@@ -195,13 +299,15 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
   test("project JIT remains available when tiered projection is disabled") {
     val left = reference(0, IntegerType)
     val right = reference(1, IntegerType)
-    val expression = alias(GpuAdd(left, right, failOnError = false)(), "result")
+    val expressions = Seq(
+      alias(GpuAdd(left, right, failOnError = false)(), "sum"),
+      alias(GpuMultiply(left, right, failOnError = false)(), "product"))
 
     val project = GpuBindReferences.bindGpuProjectReferencesTieredNoMetrics(
-      Seq(expression), Seq(left, right), projectConf(tiered = false))
+      expressions, Seq(left, right), projectConf(tiered = false))
 
     assertResult(1)(project.exprTiers.size)
-    assertResult(1)(collectExpressions[GpuAstJitExpression](project.exprTiers.head).size)
+    assertResult(2)(collectExpressions[GpuAstJitExpression](project.exprTiers.head).size)
   }
 
   test("project AST JIT excludes ANSI and floating point arithmetic") {

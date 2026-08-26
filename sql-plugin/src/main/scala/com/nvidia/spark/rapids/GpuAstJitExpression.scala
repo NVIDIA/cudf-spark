@@ -19,13 +19,18 @@ package com.nvidia.spark.rapids
 import ai.rapids.cudf.{ColumnVector, Table}
 import ai.rapids.cudf.ast.CompiledExpression
 import com.nvidia.spark.Retryable
+import com.nvidia.spark.rapids.Arm.withResource
 
 import org.apache.spark.sql.catalyst.expressions.{Expression, NamedExpression}
+import org.apache.spark.sql.vectorized.ColumnarBatch
 
 object GpuAstJitExpression {
-  private def canUseAstJit(expression: GpuExpression): Boolean =
-    GpuBatchUtils.isFixedWidth(expression.dataType) &&
-      expression.supportsAstJit && expression.containsAstJitOperator
+  private[rapids] def canUseAstJit(expression: Expression): Boolean = expression match {
+    case gpuExpression: GpuExpression =>
+      GpuBatchUtils.isFixedWidth(expression.dataType) &&
+        gpuExpression.supportsAstJit && gpuExpression.containsAstJitOperator
+    case _ => false
+  }
 
   private def asAstJit(child: GpuExpression): Option[GpuAstJitExpression] = child match {
     case jitExpression: GpuAstJitExpression => Some(jitExpression)
@@ -43,6 +48,18 @@ object GpuAstJitExpression {
   private[rapids] def wrapProjectExpressions(
       expressions: List[NamedExpression]): List[NamedExpression] = {
     expressions.map(wrapTierExpression(_).asInstanceOf[NamedExpression])
+  }
+
+  private[rapids] def computeColumns(
+      expressions: Seq[GpuAstJitExpression],
+      table: Table): ColumnarBatch = {
+    require(expressions.size > 1, "Multi-output AST JIT requires at least two expressions")
+    val compiledExpressions = expressions.map(_.getCompiledExpression).toArray
+    expressions.head.withComputeMetrics {
+      withResource(CompiledExpression.computeTableJit(table, compiledExpressions: _*)) { result =>
+        GpuColumnVector.from(result, expressions.map(_.dataType).toArray)
+      }
+    }
   }
 
   /** Extracts a Project AST JIT wrapper after unwrapping any top-level aliases. */
@@ -85,6 +102,8 @@ object GpuAstJitExpression {
 
 case class GpuAstJitExpression(child: GpuExpression)
     extends GpuProjectAstExpressionBase with Retryable {
+
+  override def disableTieredProjectCombine: Boolean = true
 
   override protected def backendName: String = "AST JIT"
 

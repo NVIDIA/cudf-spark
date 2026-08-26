@@ -1255,6 +1255,13 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       .booleanConf
       .createWithDefault(false)
 
+  val ENABLE_PROJECT_AST_JIT_MULTI_OUTPUT =
+    conf("spark.rapids.sql.projectAstJitMultiOutputEnabled")
+      .doc("Evaluate multiple Project AST JIT expressions in one cuDF call when possible.")
+      .internal()
+      .booleanConf
+      .createWithDefault(true)
+
   val ENABLE_TIERED_PROJECT = conf("spark.rapids.sql.tiered.project.enabled")
       .doc("Enable tiered projections.")
       .internal()
