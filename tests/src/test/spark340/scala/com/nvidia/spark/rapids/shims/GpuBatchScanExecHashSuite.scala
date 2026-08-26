@@ -37,10 +37,16 @@ import com.nvidia.spark.rapids.GpuScan
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.expressions.GenericInternalRow
 import org.apache.spark.sql.connector.read.{Batch, InputPartition, PartitionReaderFactory}
 import org.apache.spark.sql.types.StructType
 
 class GpuBatchScanExecHashSuite extends AnyFunSuite {
+  private object EmptyBatch extends Batch {
+    override def planInputPartitions(): Array[InputPartition] = Array.empty
+    override def createReaderFactory(): PartitionReaderFactory = null
+  }
+
   private val scan = new GpuScan {
     override def readSchema(): StructType = new StructType()
     override def toBatch: Batch = EmptyBatch
@@ -63,14 +69,18 @@ class GpuBatchScanExecHashSuite extends AnyFunSuite {
 
   test("hashCode includes Spark 3.4 SPJ fields") {
     val base = exec()
-    assert(base.hashCode() !=
-      exec(commonPartitionValues = Some(Seq((InternalRow.empty, 1)))).hashCode())
+    assert(base.hashCode() != exec(commonPartitionValues = Some(Seq(
+      (new GenericInternalRow(Array[Any](7, 20260824)).asInstanceOf[InternalRow], 3)))).hashCode())
     assert(base.hashCode() != exec(replicatePartitions = true).hashCode())
     assert(base.hashCode() != exec(applyPartialClustering = true).hashCode())
   }
-}
 
-private object EmptyBatch extends Batch {
-  override def planInputPartitions(): Array[InputPartition] = Array.empty
-  override def createReaderFactory(): PartitionReaderFactory = null
+  test("equal instances hash equally") {
+    def partValues = Some(Seq(
+      (new GenericInternalRow(Array[Any](7, 20260824)).asInstanceOf[InternalRow], 3)))
+    val a = exec(partValues, applyPartialClustering = true, replicatePartitions = true)
+    val b = exec(partValues, applyPartialClustering = true, replicatePartitions = true)
+    assert(a == b)
+    assert(a.hashCode() == b.hashCode())
+  }
 }

@@ -28,20 +28,55 @@
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
+import com.nvidia.spark.rapids.GpuScan
 import org.scalatest.funsuite.AnyFunSuite
 
+import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.expressions.GenericInternalRow
+import org.apache.spark.sql.connector.read.{Batch, InputPartition, PartitionReaderFactory}
+import org.apache.spark.sql.types.StructType
+
 class GpuBatchScanExecHashSuite extends AnyFunSuite {
+  private object EmptyBatch extends Batch {
+    override def planInputPartitions(): Array[InputPartition] = Array.empty
+    override def createReaderFactory(): PartitionReaderFactory = null
+  }
+
+  private val scan = new GpuScan {
+    override def readSchema(): StructType = new StructType()
+    override def toBatch: Batch = EmptyBatch
+    override def withInputFile(): GpuScan = this
+    override def description(): String = "hash-test-scan"
+  }
+
   private def exec(spjParams: StoragePartitionJoinShims.SpjParams): GpuBatchScanExec = {
     GpuBatchScanExec(
       output = Nil,
-      scan = null,
+      scan = scan,
       table = null,
       spjParams = spjParams)
   }
 
   test("hashCode includes spjParams") {
     val base = exec(StoragePartitionJoinShims.default())
-    val other = exec(StoragePartitionJoinShims.default().copy(replicatePartitions = true))
-    assert(base.hashCode() != other.hashCode())
+    assert(base.hashCode() !=
+      exec(StoragePartitionJoinShims.default().copy(replicatePartitions = true)).hashCode())
+    assert(base.hashCode() !=
+      exec(StoragePartitionJoinShims.default().copy(applyPartialClustering = true)).hashCode())
+    assert(base.hashCode() != exec(StoragePartitionJoinShims.default().copy(
+      commonPartitionValues = Some(Seq(
+        (new GenericInternalRow(Array[Any](7)).asInstanceOf[InternalRow], 2))))).hashCode())
+  }
+
+  test("equal instances hash equally") {
+    def params = StoragePartitionJoinShims.default().copy(
+      commonPartitionValues = Some(Seq(
+        (new GenericInternalRow(Array[Any](7)).asInstanceOf[InternalRow], 2))),
+      applyPartialClustering = true,
+      replicatePartitions = true)
+    val a = exec(params)
+    val b = exec(params)
+    assert(a == b)
+    assert(a.hashCode() == b.hashCode())
   }
 }
