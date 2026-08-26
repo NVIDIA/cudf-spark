@@ -239,10 +239,8 @@ def setup_base_iceberg_table(spark_tmp_table_factory,
     table_name = get_full_table_name(spark_tmp_table_factory)
     tmp_view_name = spark_tmp_table_factory.get()
 
-    if table_prop is None:
-        table_prop = {'format-version':'2', 'write.delete.mode': 'merge-on-read'}
-    else:
-        table_prop = {**table_prop, 'format-version': '2', 'write.delete.mode': 'merge-on-read'}
+    default_table_prop = {'format-version': '2', 'write.delete.mode': 'merge-on-read'}
+    table_prop = {**default_table_prop, **(table_prop or {})}
     table_prop = _build_tblprops(table_prop)
 
     table_prop_sql = ", ".join([f"'{k}' = '{v}'" for k, v in table_prop.items()])
