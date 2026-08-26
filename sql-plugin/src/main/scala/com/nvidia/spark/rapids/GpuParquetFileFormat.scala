@@ -74,7 +74,7 @@ object GpuParquetFileFormat {
       spark: SparkSession,
       options: Map[String, String],
       schema: StructType): Option[GpuParquetFileFormat] = {
-    tagGpuSupport(meta, spark, options, spark.sparkContext.hadoopConfiguration, schema)
+    tagGpuSupport(meta, spark, options, spark.sessionState.newHadoopConf(), schema)
   }
 
   def tagGpuSupport(
