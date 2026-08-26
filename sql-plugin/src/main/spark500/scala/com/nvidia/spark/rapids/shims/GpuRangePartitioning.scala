@@ -14,12 +14,16 @@
  * limitations under the License.
  */
 
+/*** spark-rapids-shim-json-lines
+{"spark": "500"}
+spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
 import com.nvidia.spark.rapids.{GpuExpression, GpuPartitioning}
 
 import org.apache.spark.sql.catalyst.expressions.SortOrder
-import org.apache.spark.sql.catalyst.plans.physical.{ClusteredDistribution, Distribution, OrderedDistribution}
+import org.apache.spark.sql.catalyst.plans.physical.{ClusteredDistribution, Distribution,
+  OrderedDistribution}
 import org.apache.spark.sql.types.{DataType, IntegerType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -64,7 +68,7 @@ case class GpuRangePartitioning(
           //   `OrderedDistribution(a, b)`.
           val minSize = Seq(requiredOrdering.size, gpuOrdering.size).min
           requiredOrdering.take(minSize) == gpuOrdering.take(minSize)
-        case c @ ClusteredDistribution(requiredClustering, requireAllClusterKeys, _) =>
+        case c @ ClusteredDistribution(requiredClustering, requireAllClusterKeys, _, _) =>
           val expressions = gpuOrdering.map(_.child)
           if (requireAllClusterKeys) {
             c.areAllClusterKeysMatched(expressions)

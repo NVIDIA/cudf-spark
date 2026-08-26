@@ -67,6 +67,9 @@ object ParquetSchemaUtils {
       caseSensitive: Boolean,
       useFieldId: Boolean): Type = {
     val newParquetType = catalystType match {
+      case t if GpuColumnVector.isVariantType(t) =>
+        normalizeVariantFieldOrder(parquetType)
+
       case t: ArrayType if !isPrimitiveCatalystType(t.elementType) =>
         // Only clips array types with nested type as element type.
         clipParquetListType(parquetType.asGroupType(), t.elementType, caseSensitive, useFieldId)
@@ -93,6 +96,34 @@ object ParquetSchemaUtils {
       newParquetType.withId(parquetType.getId.intValue())
     } else {
       newParquetType
+    }
+  }
+
+  /** Normalize an unshredded Variant group to Spark's value/metadata child order. */
+  private def normalizeVariantFieldOrder(parquetType: Type): Type = {
+    if (isVariantPhysicalType(parquetType)) {
+      val groupType = parquetType.asGroupType()
+      groupType.withNewFields(Seq(
+        groupType.getType("value"),
+        groupType.getType("metadata")).asJava)
+    } else {
+      parquetType
+    }
+  }
+
+  private[rapids] def isVariantPhysicalType(parquetType: Type): Boolean = {
+    if (parquetType.isPrimitive || parquetType.asGroupType().getFieldCount != 2) {
+      false
+    } else {
+      val groupType = parquetType.asGroupType()
+      Seq("value", "metadata").forall { name =>
+        groupType.containsField(name) && {
+          val field = groupType.getType(name)
+          field.isRepetition(Repetition.REQUIRED) &&
+            field.isPrimitive &&
+            field.asPrimitiveType().getPrimitiveTypeName == PrimitiveTypeName.BINARY
+        }
+      }
     }
   }
 
@@ -177,6 +208,7 @@ object ParquetSchemaUtils {
   private def isPrimitiveCatalystType(dataType: DataType): Boolean = {
     dataType match {
       case _: ArrayType | _: MapType | _: StructType => false
+      case dt if GpuColumnVector.isVariantType(dt) => false
       case _ => true
     }
   }
@@ -431,6 +463,9 @@ object ParquetSchemaUtils {
 
       case t: StructType =>
         clipSparkStructType(t, parquetType.asGroupType(), caseSensitive, useFieldId)
+
+      case t if GpuColumnVector.isVariantType(t) =>
+        t
 
       case _ =>
         ParquetSchemaClipShims.convertPrimitiveField(parquetType.asPrimitiveType())

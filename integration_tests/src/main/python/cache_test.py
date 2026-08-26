@@ -21,9 +21,9 @@ from conftest import is_not_utc
 from data_gen import *
 from pyspark import StorageLevel
 import pyspark.sql.functions as f
-from spark_session import with_cpu_session, with_gpu_session, is_spark_350_or_351
+from spark_session import with_cpu_session, with_gpu_session
 from join_test import create_df
-from marks import incompat, allow_non_gpu, allow_non_gpu_conditional, ignore_order, disable_ansi_mode
+from marks import incompat, allow_non_gpu, ignore_order, disable_ansi_mode
 import pyspark.mllib.linalg as mllib
 import pyspark.ml.linalg as ml
 
@@ -374,7 +374,6 @@ def test_batch_no_cols(with_x_session):
 
 @ignore_order(local=True)
 @allow_non_gpu("ShuffleExchangeExec", "ColumnarToRowExec")
-@allow_non_gpu_conditional(is_spark_350_or_351(), "InMemoryTableScanExec")
 @pytest.mark.parametrize("data_gen", integral_gens, ids=idfn)
 @pytest.mark.parametrize('enable_vectorized_conf', enable_vectorized_confs, ids=idfn)
 def test_aqe_cache_version_specific_behavior(data_gen, enable_vectorized_conf):
@@ -397,7 +396,6 @@ def test_aqe_cache_version_specific_behavior(data_gen, enable_vectorized_conf):
 @ignore_order(local=True)
 @allow_non_gpu("CollectLimitExec", "ShuffleExchangeExec", "ColumnarToRowExec")
 @pytest.mark.parametrize('enable_vectorized_conf', enable_vectorized_confs, ids=idfn)
-@allow_non_gpu_conditional(is_spark_350_or_351(), "InMemoryTableScanExec")
 def test_persist_with_groupby_join_version_specific(enable_vectorized_conf):
     """
     Expected behavior:
@@ -433,7 +431,6 @@ def test_persist_with_groupby_join_version_specific(enable_vectorized_conf):
 # Ensure base allow list is a tuple to satisfy pytest hook concatenation
 @allow_non_gpu("")
 @pytest.mark.parametrize('enable_vectorized_conf', enable_vectorized_confs, ids=idfn)
-@allow_non_gpu_conditional(is_spark_350_or_351(), "InMemoryTableScanExec")
 def test_cached_groupby_sum_version_specific(enable_vectorized_conf):
     """
     Validate aggregation on a cached query works without errors across Spark versions.

@@ -87,7 +87,19 @@ public class HadoopInputFile implements RapidsInputFile {
         if (copyRanges.isEmpty()) {
             return;
         }
-        byte[] copyBuffer = new byte[copyBufferSize];
+        byte[] copyBuffer = new byte[getCopyBufferAllocationSize(copyRanges, copyBufferSize)];
         RapidsInputFile.readVectoredUsingCopyBuffer(this, output, copyRanges, copyBuffer);
+    }
+
+    static int getCopyBufferAllocationSize(
+            List<RapidsInputFile.CopyRange> copyRanges, int copyBufferSize) {
+        long maxRangeLength = 0;
+        for (RapidsInputFile.CopyRange copyRange : copyRanges) {
+            maxRangeLength = Math.max(maxRangeLength, copyRange.getLength());
+            if (maxRangeLength >= copyBufferSize) {
+                return copyBufferSize;
+            }
+        }
+        return (int) maxRangeLength;
     }
 }

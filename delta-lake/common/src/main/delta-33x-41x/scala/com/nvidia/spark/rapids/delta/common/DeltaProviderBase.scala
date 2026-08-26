@@ -166,13 +166,32 @@ abstract class DeltaProviderBase extends DeltaIOProvider {
     def pruneMetadataProject(
         project: GpuProjectExec,
         scan: GpuFileSourceScanExec): SparkPlan = {
+      // Data and partition columns precede metadata columns in the scan output.
+      val dataAndPartitionOutput = scan.originalOutput.take(
+        scan.requiredSchema.length + scan.relation.partitionSchema.length)
       project.copy(projectList = project.projectList.filterNot(_.name == "_metadata"))
         .withNewChildren(Seq(
           scan.copy(
-            originalOutput = scan.originalOutput.filterNot(_.name == "_tmp_metadata_row_index"),
+            // Drop the temporary row index along with the unused metadata struct.
+            originalOutput =
+              dataAndPartitionOutput.filterNot(_.name == "_tmp_metadata_row_index"),
             requiredSchema = StructType(
               scan.requiredSchema.filterNot(_.name == "_tmp_metadata_row_index")
             ))(scan.rapidsConf)))
+    }
+
+    // Liquid clustering can insert unary projections and transitions between the output
+    // projection and the deletion-vector metadata projection.
+    def pruneUnusedMetadata(plan: SparkPlan): Option[SparkPlan] = plan match {
+      case project @ GpuProjectExec(inputList, scan: GpuFileSourceScanExec, _)
+        if inputList.exists(_.name == "_metadata") =>
+        Some(pruneMetadataProject(project, scan))
+      case unary: UnaryExecNode
+        if !unary.expressions.flatMap(_.references).exists(_.name == "_metadata") =>
+        pruneUnusedMetadata(unary.child)
+          .map(newChild => unary.withNewChildren(Seq(newChild)).asInstanceOf[SparkPlan])
+      case _ =>
+        None
     }
 
     plan match {
@@ -222,6 +241,13 @@ abstract class DeltaProviderBase extends DeltaIOProvider {
             dvFilter.withNewChildren(Seq(
               colToRow.withNewChildren(Seq(
                 pruneMetadataProject(dvFilterInput, fsse)))))))))
+      // Liquid clustering can leave an outer CPU project in the mixed plan. Preserve it while
+      // pruning unused metadata from the GPU scan subtree.
+      case root @ ProjectExec(outputList, child)
+        if !outputList.flatMap(_.references).exists(_.name == "_metadata") =>
+        pruneUnusedMetadata(child)
+          .map(newChild => root.withNewChildren(Seq(newChild)).asInstanceOf[SparkPlan])
+          .getOrElse(root.withNewChildren(root.children.map(pruneFileMetadata)))
       case _ =>
         plan.withNewChildren(plan.children.map(pruneFileMetadata))
     }
