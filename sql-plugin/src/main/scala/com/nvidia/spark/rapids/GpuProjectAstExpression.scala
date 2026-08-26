@@ -18,8 +18,8 @@ package com.nvidia.spark.rapids
 
 import scala.annotation.tailrec
 
-import ai.rapids.cudf.{ColumnVector, Scalar, Table}
-import ai.rapids.cudf.ast.CompiledExpression
+import ai.rapids.cudf.{Scalar, Table}
+import ai.rapids.cudf.ast.{AstExpression, CompiledExpression}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric.OP_TIME_LEGACY
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
@@ -40,7 +40,7 @@ trait GpuProjectAstExpressionBase
   protected def backendName: String
   protected def compileNvtxId: NvtxId
   protected def computeNvtxId: NvtxId
-  protected def evaluate(compiled: CompiledExpression, table: Table): ColumnVector
+  protected def compileAst(ast: AstExpression): CompiledExpression = ast.compile()
 
   @transient private[this] var compiledExpression: CompiledExpression = _
   private[this] var opTime: GpuMetric = NoopMetric
@@ -72,7 +72,7 @@ trait GpuProjectAstExpressionBase
   private[rapids] final def computeColumn(table: Table): GpuColumnVector = {
     val compiled = getCompiledExpression
     withComputeMetrics {
-      closeOnExcept(evaluate(compiled, table)) { result =>
+      closeOnExcept(compiled.computeColumn(table)) { result =>
         GpuColumnVector.from(result, dataType)
       }
     }
@@ -85,7 +85,7 @@ trait GpuProjectAstExpressionBase
     if (compiledExpression == null) {
       val compiled = NvtxIdWithMetrics(compileNvtxId, opTime) {
         // Force every bound reference to the left table; Project AST has one input table.
-        child.convertToAst(Int.MaxValue).compile()
+        compileAst(child.convertToAst(Int.MaxValue))
       }
       closeOnExcept(compiled) { _ =>
         var completed = false
@@ -253,10 +253,6 @@ case class GpuProjectAstExpression(child: GpuExpression)
   override protected def compileNvtxId: NvtxId = NvtxRegistry.COMPILE_ASTS
 
   override protected def computeNvtxId: NvtxId = NvtxRegistry.PROJECT_AST
-
-  override protected def evaluate(
-      compiled: CompiledExpression,
-      table: Table): ColumnVector = compiled.computeColumn(table)
 
   override def toString: String = s"AST($child)"
 }

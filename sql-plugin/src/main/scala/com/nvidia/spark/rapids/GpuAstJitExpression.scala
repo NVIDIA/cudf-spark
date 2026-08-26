@@ -16,8 +16,8 @@
 
 package com.nvidia.spark.rapids
 
-import ai.rapids.cudf.{ColumnVector, Table}
-import ai.rapids.cudf.ast.CompiledExpression
+import ai.rapids.cudf.Table
+import ai.rapids.cudf.ast.{AstExpression, CompiledExpression}
 import com.nvidia.spark.Retryable
 import com.nvidia.spark.rapids.Arm.withResource
 
@@ -111,9 +111,7 @@ case class GpuAstJitExpression(child: GpuExpression)
 
   override protected def computeNvtxId: NvtxId = NvtxRegistry.PROJECT_AST_JIT
 
-  override protected def evaluate(
-      compiled: CompiledExpression,
-      table: Table): ColumnVector = compiled.computeColumnJit(table)
+  override protected def compileAst(ast: AstExpression): CompiledExpression = ast.compileJit()
 
   override def toString: String = s"AST_JIT($child)"
 

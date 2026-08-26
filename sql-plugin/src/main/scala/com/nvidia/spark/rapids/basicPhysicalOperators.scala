@@ -1093,8 +1093,8 @@ case class GpuProjectExec(
           None
         }
         withResource(sbToClose) { _ =>
-          retryables.foreach(_.checkpoint())
           RmmRapidsRetryIterator.withRetryNoSplit {
+            retryables.foreach(_.checkpoint())
             withResource(sb.getColumnarBatch()) { cb =>
               withRestoreOnRetry(retryables) {
                 project(cb)

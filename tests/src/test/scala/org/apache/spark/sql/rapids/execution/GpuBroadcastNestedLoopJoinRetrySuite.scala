@@ -124,7 +124,7 @@ class GpuBroadcastNestedLoopJoinRetrySuite extends RmmSparkRetrySuiteBase {
       assert(jitExpressions.head.child.find(_.isInstanceOf[GpuAdd]).isDefined)
 
       val projectBuildSide = join.buildSidePostProjection.get
-      // Warm up computeColumnJit so first-use JIT setup cannot consume the injected OOM; the
+      // Warm up AST JIT so first-use setup cannot consume the injected OOM; the
       // next call exercises retry during query execution.
       withResource(projectBuildSide(buildBatch())) { _ => }
 

@@ -36,16 +36,22 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
 
   private def alias(expression: GpuExpression, name: String) = GpuAlias(expression, name)()
 
-  private def mockCompiledChild(compiled: CompiledExpression): GpuExpression = {
+  private def mockCompiledChild(
+      compiled: CompiledExpression,
+      jit: Boolean = false): GpuExpression = {
     val child = mock(classOf[GpuExpression])
     val ast = mock(classOf[AstExpression])
     when(child.convertToAst(Int.MaxValue)).thenReturn(ast)
-    when(ast.compile()).thenReturn(compiled)
+    if (jit) {
+      when(ast.compileJit()).thenReturn(compiled)
+    } else {
+      when(ast.compile()).thenReturn(compiled)
+    }
     child
   }
 
   private def mockJitExpression(compiled: CompiledExpression): GpuAstJitExpression =
-    GpuAstJitExpression(mockCompiledChild(compiled))
+    GpuAstJitExpression(mockCompiledChild(compiled, jit = true))
 
   private def projectConf(
       tiered: Boolean = true,
@@ -368,14 +374,14 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     val ast = mock(classOf[AstExpression])
     val compiled = mock(classOf[CompiledExpression])
     when(child.convertToAst(Int.MaxValue)).thenReturn(ast)
-    when(ast.compile()).thenReturn(compiled)
+    when(ast.compileJit()).thenReturn(compiled)
     val jit = GpuAstJitExpression(child)
 
     TestUtils.withMockTaskContext() {
       jit.checkpoint()
       jit.restore()
       jit.checkpoint()
-      verify(ast, times(1)).compile()
+      verify(ast, times(1)).compileJit()
       verify(compiled, times(0)).close()
     }
     verify(compiled, times(1)).close()
