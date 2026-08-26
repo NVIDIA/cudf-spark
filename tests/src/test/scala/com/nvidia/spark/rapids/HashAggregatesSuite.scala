@@ -43,8 +43,10 @@ class HashAggregatesSuite extends SparkQueryCompareTestSuite {
 
   test("SPARK-55979: GPU aggregate references retain renamed input buffer attributes") {
     val scanAggBufferAttr = AttributeReference("buf", IntegerType, nullable = true)()
+    // withName preserves exprId while changing the display name, matching the Spark regression.
     val inputAggBufferAttr = scanAggBufferAttr.withName("renamed_buf")
 
+    // LocalTableScanExec has version-specific constructors; this keeps the test common-shim safe.
     case class TestLeafExec(override val output: Seq[Attribute]) extends LeafExecNode {
       override protected def doExecute(): RDD[InternalRow] =
         throw new UnsupportedOperationException("TestLeafExec does not execute")
