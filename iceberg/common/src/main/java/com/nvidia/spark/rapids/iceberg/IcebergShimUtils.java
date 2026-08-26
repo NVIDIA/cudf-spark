@@ -112,7 +112,8 @@ public interface IcebergShimUtils {
      * deletion-vector manifest fields, and its {@code PositionDeleteIndex} lacks the decode and
      * iteration APIs available in later releases.
      */
-    IcebergDeletionVector readDeletionVector(DeleteFile deleteFile, RapidsInputFile inputFile)
+    IcebergDeletionVector readDeletionVector(
+            DeleteFile deleteFile, RapidsInputFile inputFile, boolean validateCrc)
             throws IOException;
 
     /**

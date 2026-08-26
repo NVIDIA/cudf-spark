@@ -69,7 +69,7 @@ public class ShimUtilsImpl implements IcebergShimUtils {
 
     @Override
     public IcebergDeletionVector readDeletionVector(
-            DeleteFile deleteFile, RapidsInputFile inputFile)
+            DeleteFile deleteFile, RapidsInputFile inputFile, boolean validateCrc)
             throws IOException {
         throw new UnsupportedOperationException(
                 "Iceberg 1.6 does not support Puffin deletion vectors");

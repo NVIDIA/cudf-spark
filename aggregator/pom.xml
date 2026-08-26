@@ -45,6 +45,7 @@
         <!-- Maven to register attached artifact , which we later replace -->
         <rapids.shim.jar.phase>initialize</rapids.shim.jar.phase>
         <rapids.source.jar.phase>none</rapids.source.jar.phase>
+        <rapids.aggregator.downstream.refresh.skip>false</rapids.aggregator.downstream.refresh.skip>
     </properties>
     <dependencies>
         <dependency>
@@ -196,6 +197,7 @@
                         <goals><goal>run</goal></goals>
                         <phase>process-classes</phase>
                         <configuration>
+                            <skip>${rapids.aggregator.downstream.refresh.skip}</skip>
                             <target>
                                 <taskdef resource="net/sf/antcontrib/antcontrib.properties"/>
                                 <property name="realAggJar"

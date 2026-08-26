@@ -115,11 +115,11 @@ public class ShimUtilsImpl implements IcebergShimUtils {
 
     @Override
     public IcebergDeletionVector readDeletionVector(
-            DeleteFile deleteFile, RapidsInputFile inputFile)
+            DeleteFile deleteFile, RapidsInputFile inputFile, boolean validateCrc)
             throws IOException {
         return IcebergDeletionVector.read(
                 inputFile, deleteFile.contentOffset(), deleteFile.contentSizeInBytes(),
-                deleteFile.recordCount());
+                deleteFile.recordCount(), validateCrc);
     }
 
     @Override

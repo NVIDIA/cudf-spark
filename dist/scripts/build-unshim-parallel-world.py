@@ -18,7 +18,7 @@
 
 This mirrors the analyzer-relevant part of dist/maven-antrun/build-parallel-worlds.xml
 without starting a final Maven dist generate-resources invocation. It assumes buildall
-has already built the per-shim sql-plugin-api and aggregator jars under target/sparkXYZ.
+has already built the per-shim sql-plugin-api, aggregator, and root-safe module jars under target/sparkXYZ.
 """
 
 import argparse
@@ -171,6 +171,24 @@ def link_members(contents_dir, destination, members):
             link_or_copy(src, destination / member)
 
 
+def root_safe_module_class_members(
+        base_dir,
+        scala_binary_version,
+        project_version,
+        buildver,
+        root_safe_modules):
+    members = set()
+    for module in root_safe_modules:
+        jar_path = artifact_jar(
+            base_dir, module, scala_binary_version, project_version, buildver)
+        with zipfile.ZipFile(jar_path) as zip_handle:
+            members.update([
+                name for name in zip_handle.namelist()
+                if name.endswith(".class")
+            ])
+    return members
+
+
 def copy_and_extract_jars(
         base_dir,
         target_dir,
@@ -178,7 +196,8 @@ def copy_and_extract_jars(
         project_version,
         buildvers,
         from_single_shim,
-        from_each):
+        from_each,
+        root_safe_modules):
     parallel_world = target_dir / "parallel-world"
     cache_root = target_dir / "unshim-parallel-world-cache"
     sorted_buildvers = sorted(buildvers, reverse=True)
@@ -197,6 +216,19 @@ def copy_and_extract_jars(
             link_tree_contents(contents_dir, parallel_world / classifier)
             if buildver == root_buildver and artifact == "sql-plugin-api":
                 link_tree_contents(contents_dir, parallel_world)
+            if buildver == root_buildver and artifact == "aggregator":
+                root_safe_members = root_safe_module_class_members(
+                    base_dir,
+                    scala_binary_version,
+                    project_version,
+                    buildver,
+                    root_safe_modules)
+                missing_members = sorted(root_safe_members - set(namelist))
+                if missing_members:
+                    raise RuntimeError(
+                        "root-safe module classes missing from aggregator: %s" %
+                        ", ".join(missing_members))
+                link_members(contents_dir, parallel_world, sorted(root_safe_members))
 
             patterns = from_each
             if buildver == root_buildver:
@@ -280,6 +312,7 @@ def main():
 
     from_single_shim = read_patterns(dist_dir / "unshimmed-common-from-single-shim.txt")
     from_each = read_patterns(dist_dir / "unshimmed-from-each-spark3xx.txt")
+    root_safe_modules = read_patterns(dist_dir / "root-safe-module-classes.txt")
 
     print("Direct unshim parallel-world assembly for Spark versions: %s" %
           ", ".join(buildvers),
@@ -292,7 +325,8 @@ def main():
         args.project_version,
         buildvers,
         from_single_shim,
-        from_each)
+        from_each,
+        root_safe_modules)
 
     revision_check = subprocess.run(
         [str(dist_dir / "scripts" / "check-shims-revisions.sh"), ",".join(buildvers)],

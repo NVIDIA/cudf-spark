@@ -148,6 +148,7 @@ case class GpuIcebergParquetReaderConf(
     threadConf: ThreadConf,
     expectedSchema: Schema,
     nameMapping: Option[NameMapping],
+    validateDeletionVectorCrc: Boolean,
 )
 
 trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable with Logging {
@@ -220,7 +221,7 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
         // the surviving row count; the post-processor drops it from the requested output.
         if (hasDeletionVector && initialProjection._2.getFieldCount == 0 &&
             fileSchema.getFieldCount > 0) {
-          val firstFileField = ParquetSchemaUtil.convert(fileSchema).columns().get(0)
+          val firstFileField = ParquetSchemaUtil.convert(initialProjection._1).columns().get(0)
           val projectionFields = requiredSchema.columns().asScala
             .filterNot(_.fieldId() == firstFileField.fieldId()) :+ firstFileField
           projectSchema(fileSchema, new Schema(projectionFields.asJava))

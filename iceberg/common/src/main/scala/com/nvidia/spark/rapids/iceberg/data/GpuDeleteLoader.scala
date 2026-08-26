@@ -22,7 +22,7 @@ import scala.collection.mutable.ArrayBuffer
 import ai.rapids.cudf.{Table => CudfTable}
 import com.nvidia.spark.rapids.{GpuColumnVector, LazySpillableColumnarBatch, NoopMetric}
 import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.GpuMetric.{ICEBERG_DV_BYTES, ICEBERG_DV_DECODE_TIME,
+import com.nvidia.spark.rapids.GpuMetric.{ICEBERG_DV_BYTES, ICEBERG_DV_LOAD_TIME,
   ICEBERG_DV_POSITIONS}
 import com.nvidia.spark.rapids.fileio.iceberg.{IcebergFileIO, IcebergInputFile}
 import com.nvidia.spark.rapids.iceberg.{IcebergDeletionVector, ShimUtils}
@@ -52,9 +52,9 @@ class DefaultDeleteLoader(
     val inputFile = inputFiles.getOrElse(locationOf(delete),
       throw new IllegalArgumentException(
         s"No decrypted input file was provided for deletion vector ${locationOf(delete)}"))
-    val decodeTime = parquetConf.metrics.getOrElse(ICEBERG_DV_DECODE_TIME, NoopMetric)
-    val deletionVector = decodeTime.ns {
-      ShimUtils.readDeletionVector(delete, inputFile)
+    val loadTime = parquetConf.metrics.getOrElse(ICEBERG_DV_LOAD_TIME, NoopMetric)
+    val deletionVector = loadTime.ns {
+      ShimUtils.readDeletionVector(delete, inputFile, parquetConf.validateDeletionVectorCrc)
     }
 
     parquetConf.metrics.getOrElse(ICEBERG_DV_BYTES, NoopMetric) +=

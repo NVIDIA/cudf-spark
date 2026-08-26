@@ -18,10 +18,13 @@ package com.nvidia.spark.rapids.iceberg;
 
 import ai.rapids.cudf.HostMemoryBuffer;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
-import com.nvidia.spark.rapids.jni.fileio.SeekableInputStream;
-import org.apache.iceberg.io.IOUtil;
+import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile.CopyRange;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.util.Collections;
+import java.util.zip.CRC32;
 
 /**
  * An Iceberg deletion vector kept in its compressed Roaring-bitmap representation.
@@ -30,48 +33,93 @@ import java.io.IOException;
  * owns its host buffer and must be closed after all borrowed references have been released.
  */
 public final class IcebergDeletionVector implements AutoCloseable {
+    private static final int MAGIC_NUMBER = 0x6439D3D1;
+    private static final int LENGTH_SIZE_BYTES = Integer.BYTES;
+    private static final int MAGIC_NUMBER_SIZE_BYTES = Integer.BYTES;
+    private static final int CRC_SIZE_BYTES = Integer.BYTES;
+    private static final int BITMAP_OFFSET_BYTES = LENGTH_SIZE_BYTES + MAGIC_NUMBER_SIZE_BYTES;
+    private static final int ENVELOPE_SIZE_BYTES = BITMAP_OFFSET_BYTES + CRC_SIZE_BYTES;
+    private static final int MINIMUM_SIZE_BYTES = 20;
+
     private final HostMemoryBuffer serializedBitmap;
     private final long serializedSizeInBytes;
     private final long cardinality;
 
-    public IcebergDeletionVector(
-            byte[] serializedIndex,
-            int bitmapOffset,
-            int bitmapLength,
+    IcebergDeletionVector(
+            HostMemoryBuffer serializedBitmap,
+            long serializedSizeInBytes,
             long cardinality) {
-        HostMemoryBuffer bitmap = HostMemoryBuffer.allocate(bitmapLength);
-        try {
-            bitmap.setBytes(0, serializedIndex, bitmapOffset, bitmapLength);
-        } catch (RuntimeException | Error e) {
-            bitmap.close();
-            throw e;
-        }
-        this.serializedBitmap = bitmap;
-        this.serializedSizeInBytes = serializedIndex.length;
+        this.serializedBitmap = serializedBitmap;
+        this.serializedSizeInBytes = serializedSizeInBytes;
         this.cardinality = cardinality;
     }
 
-    /** Reads an Iceberg deletion-vector byte range. */
+    /**
+     * Reads and validates an Iceberg deletion-vector byte range.
+     *
+     * <p>The range contains the bitmap-data length as a 4-byte big-endian integer, a 4-byte
+     * little-endian magic number, the portable Roaring bitmap in little-endian order, and a
+     * 4-byte big-endian CRC-32 of the magic number and bitmap. Only the bitmap is copied into the
+     * returned host buffer because that is the representation expected by cuDF. The checksum is
+     * validated only when {@code validateCrc} is true.
+     */
     public static IcebergDeletionVector read(
             RapidsInputFile inputFile,
             Long offset,
             Long size,
-            long cardinality) throws IOException {
+            long cardinality,
+            boolean validateCrc) throws IOException {
         if (offset == null || offset < 0) {
             throw new IllegalArgumentException("Invalid deletion vector offset: " + offset);
         }
-        if (size == null || size < 20 || size > Integer.MAX_VALUE) {
+        if (size == null || size < MINIMUM_SIZE_BYTES || size > Integer.MAX_VALUE) {
             throw new IllegalArgumentException("Invalid deletion vector size: " + size);
         }
-
-        byte[] bytes = new byte[size.intValue()];
-        try (SeekableInputStream stream = inputFile.open()) {
-            stream.seek(offset);
-            IOUtil.readFully(stream, bytes, 0, bytes.length);
+        if (offset > Long.MAX_VALUE - size) {
+            throw new IllegalArgumentException(
+                    "Invalid deletion vector range: offset=" + offset + ", size=" + size);
         }
 
-        return new IcebergDeletionVector(
-                bytes, 8, bytes.length - 12, cardinality);
+        try (HostMemoryBuffer envelope = HostMemoryBuffer.allocate(size)) {
+            inputFile.readVectored(
+                    envelope,
+                    Collections.singletonList(new CopyRange(offset, size, 0)));
+            ByteBuffer envelopeBuffer = envelope.asByteBuffer().order(ByteOrder.BIG_ENDIAN);
+            int bitmapDataLength = envelopeBuffer.getInt();
+            int expectedBitmapDataLength =
+                    Math.toIntExact(size - LENGTH_SIZE_BYTES - CRC_SIZE_BYTES);
+            if (bitmapDataLength != expectedBitmapDataLength) {
+                throw new IOException("Invalid bitmap data length: " + bitmapDataLength
+                        + ", expected " + expectedBitmapDataLength);
+            }
+            int magicNumber =
+                    envelopeBuffer.order(ByteOrder.LITTLE_ENDIAN).getInt(LENGTH_SIZE_BYTES);
+            if (magicNumber != MAGIC_NUMBER) {
+                throw new IOException("Invalid magic number: " + magicNumber
+                        + ", expected " + MAGIC_NUMBER);
+            }
+
+            int bitmapLength = Math.toIntExact(size - ENVELOPE_SIZE_BYTES);
+            if (validateCrc) {
+                CRC32 crc = new CRC32();
+                crc.update(envelope.asByteBuffer(LENGTH_SIZE_BYTES, expectedBitmapDataLength));
+                int expectedCrc = envelope.asByteBuffer(
+                        size - CRC_SIZE_BYTES, CRC_SIZE_BYTES).order(ByteOrder.BIG_ENDIAN).getInt();
+                int actualCrc = (int) crc.getValue();
+                if (actualCrc != expectedCrc) {
+                    throw new IOException("Invalid CRC: " + actualCrc
+                            + ", expected " + expectedCrc);
+                }
+            }
+
+            HostMemoryBuffer bitmap = envelope.slice(BITMAP_OFFSET_BYTES, bitmapLength);
+            try {
+                return new IcebergDeletionVector(bitmap, size, cardinality);
+            } catch (RuntimeException | Error e) {
+                bitmap.close();
+                throw e;
+            }
+        }
     }
 
     /**

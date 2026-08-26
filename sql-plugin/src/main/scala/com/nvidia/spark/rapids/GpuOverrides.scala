@@ -889,19 +889,19 @@ object GpuOverrides extends Logging {
     (DeltaFormatType, FileFormatChecks(
       cudfRead = (TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.STRUCT +
           TypeSig.ARRAY + TypeSig.MAP + TypeSig.BINARY +
-          GpuTypeShims.additionalParquetSupportedTypes).nested(),
+          GpuTypeShims.additionalParquetCommonSupportedTypes).nested(),
       cudfWrite = (TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.STRUCT +
           TypeSig.ARRAY + TypeSig.MAP + TypeSig.BINARY +
-          GpuTypeShims.additionalParquetSupportedTypes).nested(),
+          GpuTypeShims.additionalParquetCommonSupportedTypes).nested(),
       sparkSig = (TypeSig.cpuAtomics + TypeSig.STRUCT + TypeSig.ARRAY + TypeSig.MAP +
           TypeSig.UDT + GpuTypeShims.additionalParquetSupportedTypes).nested())),
     (ParquetFormatType, FileFormatChecks(
       cudfRead = (TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.STRUCT +
           TypeSig.ARRAY + TypeSig.MAP + TypeSig.BINARY +
-          GpuTypeShims.additionalParquetSupportedTypes).nested(),
+          GpuTypeShims.additionalParquetReadSupportedTypes).nested(),
       cudfWrite = (TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.STRUCT +
           TypeSig.ARRAY + TypeSig.MAP + TypeSig.BINARY +
-          GpuTypeShims.additionalParquetSupportedTypes).nested(),
+          GpuTypeShims.additionalParquetWriteSupportedTypes).nested(),
       sparkSig = (TypeSig.cpuAtomics + TypeSig.STRUCT + TypeSig.ARRAY + TypeSig.MAP +
           TypeSig.UDT + GpuTypeShims.additionalParquetSupportedTypes).nested())),
     (OrcFormatType, FileFormatChecks(
@@ -925,10 +925,11 @@ object GpuOverrides extends Logging {
         TypeSig.UDT).nested())),
     (IcebergFormatType, FileFormatChecks(
       cudfRead = (TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.STRUCT + TypeSig.BINARY +
-          TypeSig.ARRAY + TypeSig.MAP + GpuTypeShims.additionalParquetSupportedTypes).nested(),
+          TypeSig.ARRAY + TypeSig.MAP +
+          GpuTypeShims.additionalParquetCommonSupportedTypes).nested(),
       cudfWrite = (TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.STRUCT +
           TypeSig.ARRAY + TypeSig.MAP + TypeSig.BINARY +
-          GpuTypeShims.additionalParquetSupportedTypes).nested(),
+          GpuTypeShims.additionalParquetCommonSupportedTypes).nested(),
       sparkSig = (TypeSig.cpuAtomics + TypeSig.STRUCT + TypeSig.ARRAY + TypeSig.MAP +
           TypeSig.BINARY + TypeSig.UDT + GpuTypeShims.additionalParquetSupportedTypes).nested())))
 
@@ -980,10 +981,10 @@ object GpuOverrides extends Logging {
     expr[AttributeReference](
       "References an input column",
       ExprChecks.projectAndAst(
-        TypeSig.astTypes + GpuTypeShims.additionalArithmeticSupportedTypes,
+        TypeSig.astTypes + GpuTypeShims.additionalCommonOperatorSupportedTypes,
         (TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.MAP + TypeSig.ARRAY +
             TypeSig.STRUCT + TypeSig.DECIMAL_128 + TypeSig.BINARY +
-            GpuTypeShims.additionalArithmeticSupportedTypes).nested(),
+            GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
         TypeSig.all),
         (att, conf, p, r) => new BaseExprMeta[AttributeReference](att, conf, p, r) {
           // This is the only NOOP operator.  It goes away when things are bound
@@ -2078,12 +2079,49 @@ object GpuOverrides extends Logging {
         Seq(ParamCheck("value", TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128,
           TypeSig.comparable)),
         Some(RepeatingParamCheck("list",
-          (TypeSig.commonCudfTypes + TypeSig.DECIMAL_128).withAllLit(),
+          TypeSig.commonCudfTypes + TypeSig.DECIMAL_128,
           TypeSig.comparable))),
       (in, conf, p, r) => new ExprMeta[In](in, conf, p, r) {
-        override def convertToGpuImpl(): GpuExpression =
-          GpuInSet(childExprs.head.convertToGpu(), in.list.asInstanceOf[Seq[Literal]].map(_.value))
-      }),
+        private val allListItemsAreLiterals = in.list.forall(_.isInstanceOf[Literal])
+        private lazy val dynamicListItems = in.list.zip(childExprs.tail).filterNot {
+          case (expression, _) => expression.isInstanceOf[Literal]
+        }
+        private lazy val gpuDynamicExpressions =
+          dynamicListItems.map(_._2.convertToGpu())
+
+        override def tagExprForGpu(): Unit = {
+          if (!allListItemsAreLiterals) {
+            if (dynamicListItems.length > GpuIn.MAX_DYNAMIC_LIST_SIZE) {
+              willNotWorkOnGpu(
+                s"dynamic IN lists with more than ${GpuIn.MAX_DYNAMIC_LIST_SIZE} " +
+                  "non-literal expressions are not supported")
+            } else if (!dynamicListItems.forall(_._1.deterministic)) {
+              willNotWorkOnGpu("dynamic IN list expressions must be deterministic")
+            } else if (!dynamicListItems.forall(_._2.canExprTreeBeReplaced)) {
+              // CPU bridges are inserted after tagging, so verify the entire expression tree
+              // before converting it to inspect side effects.
+              willNotWorkOnGpu("dynamic IN list expressions must run entirely on GPU")
+            } else if (gpuDynamicExpressions.exists {
+                  case gpuExpression: GpuExpression => gpuExpression.hasSideEffects
+                  case _ => false
+                }) {
+              willNotWorkOnGpu(
+                "dynamic IN list expressions with side effects are not supported")
+            }
+          }
+        }
+
+        override def convertToGpuImpl(): GpuExpression = {
+          val gpuValue = childExprs.head.convertToGpu()
+          if (allListItemsAreLiterals) {
+            GpuInSet(gpuValue, in.list.asInstanceOf[Seq[Literal]].map(_.value),
+              useInSetSemantics = false)
+          } else {
+            val literalValues = in.list.collect { case literal: Literal => literal.value }
+            GpuIn(gpuValue, literalValues, gpuDynamicExpressions)
+          }
+        }
+      }).note("Non-literal list expressions must be deterministic and side-effect-free"),
     expr[InSet](
       "INSET operator",
       ExprChecks.unaryProject(TypeSig.BOOLEAN, TypeSig.BOOLEAN,
@@ -4292,7 +4330,7 @@ object GpuOverrides extends Logging {
   ).collect { case r if r != null => (r.getClassFor.asSubclass(classOf[Expression]), r)}.toMap
 
   // Shim expressions should be last to allow overrides with shim-specific versions
-  val expressions: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] =
+  lazy val expressions: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] =
     commonExpressions ++ TimeStamp.getExprs ++ GpuHiveOverrides.exprs ++
         ZOrderRules.exprs ++ DecimalArithmeticOverrides.exprs ++
         BloomFilterShims.exprs ++ StringDecodeShims.exprs ++
@@ -4345,7 +4383,7 @@ object GpuOverrides extends Logging {
             this.conf.maxGpuColumnSizeBytes)
       })).map(r => (r.getClassFor.asSubclass(classOf[Scan]), r)).toMap
 
-  val scans: Map[Class[_ <: Scan], ScanRule[_ <: Scan]] =
+  lazy val scans: Map[Class[_ <: Scan], ScanRule[_ <: Scan]] =
     commonScans ++ SparkShimImpl.getScans ++ ExternalSource.getScans
 
   def wrapPart[INPUT <: Partitioning](
@@ -4455,7 +4493,7 @@ object GpuOverrides extends Logging {
       (a, conf, p, r) => new InsertIntoHadoopFsRelationCommandMeta(a, conf, p, r))
   ).map(r => (r.getClassFor.asSubclass(classOf[DataWritingCommand]), r)).toMap
 
-  val dataWriteCmds: Map[Class[_ <: DataWritingCommand],
+  lazy val dataWriteCmds: Map[Class[_ <: DataWritingCommand],
       DataWritingCommandRule[_ <: DataWritingCommand]] =
     commonDataWriteCmds ++ GpuHiveOverrides.dataWriteCmds ++ SparkShimImpl.getDataWriteCmds ++
       ExternalSource.dataWriteCmds
@@ -4486,7 +4524,7 @@ object GpuOverrides extends Logging {
         (a, conf, p, r) => new SaveIntoDataSourceCommandMeta(a, conf, p, r))
     ).map(r => (r.getClassFor.asSubclass(classOf[RunnableCommand]), r)).toMap
 
-  val runnableCmds = commonRunnableCmds ++
+  lazy val runnableCmds = commonRunnableCmds ++
     GpuHiveOverrides.runnableCmds ++
       ExternalSource.runnableCmds ++
       SparkShimImpl.getRunnableCmds
@@ -4840,7 +4878,7 @@ object GpuOverrides extends Logging {
       SparkShimImpl.getExecs // Shim execs at the end; shims get the last word in substitutions.
 
   def getTimeParserPolicy: TimeParserPolicy = {
-    val policy = SQLConf.get.getConfString(SQLConf.LEGACY_TIME_PARSER_POLICY.key, "EXCEPTION")
+    val policy = SQLConf.get.legacyTimeParserPolicy.toString
     policy.toUpperCase match {
       case "LEGACY" => LegacyTimeParserPolicy
       case "EXCEPTION" => ExceptionTimeParserPolicy

@@ -23,7 +23,7 @@ import scala.annotation.tailrec
 import ai.rapids.cudf.ParquetOptions
 import com.nvidia.spark.rapids.{CachedGpuBatchIterator, DateTimeRebaseCorrected, GpuSemaphore,
   PartitionReaderWithBytesRead, RmmRapidsRetryIterator, SpillableHostBuffer}
-import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
 import com.nvidia.spark.rapids.iceberg.IcebergDeletionVector
 import com.nvidia.spark.rapids.iceberg.data.GpuDeleteFilter
@@ -167,9 +167,11 @@ private class SingleFileReader(
           chunkedBlocks: Seq[BlockMetaData],
           dataBuffer: SpillableHostBuffer): Iterator[ColumnarBatch] = {
         deletionVector.map { dv =>
-          RmmRapidsRetryIterator.withRetryNoSplit(dataBuffer) { _ =>
-            val hostBuffer = dataBuffer.getDataHostBuffer()
-            GpuSemaphore.acquireIfNecessary(TaskContext.get())
+          RmmRapidsRetryIterator.withRetryNoSplit(dataBuffer) { spillableBuffer =>
+            val hostBuffer = spillableBuffer.getDataHostBuffer()
+            closeOnExcept(hostBuffer) { _ =>
+              GpuSemaphore.acquireIfNecessary(TaskContext.get())
+            }
             val producer = GpuIcebergDeletionVector.makeProducer(
               readerConf.useChunkedReader, readerConf.maxChunkedReaderMemoryUsageSizeBytes,
               readerConf.conf, readerConf.targetBatchSizeBytes, parquetOpts, Array(hostBuffer),

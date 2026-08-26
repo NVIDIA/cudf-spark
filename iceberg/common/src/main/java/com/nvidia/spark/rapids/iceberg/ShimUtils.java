@@ -97,9 +97,10 @@ public class ShimUtils {
     }
 
     public static IcebergDeletionVector readDeletionVector(DeleteFile deleteFile,
-                                                             RapidsInputFile inputFile)
+                                                             RapidsInputFile inputFile,
+                                                             boolean validateCrc)
             throws IOException {
-        return IMPL.readDeletionVector(deleteFile, inputFile);
+        return IMPL.readDeletionVector(deleteFile, inputFile, validateCrc);
     }
 
     public static Map<Integer, ?> constantsMap(FileScanTask task, Schema readSchema,

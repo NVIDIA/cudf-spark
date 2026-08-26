@@ -17,7 +17,7 @@ import pytest
 from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture
 from marks import allow_non_gpu, ignore_order
 from spark_session import is_spark_35x, is_spark_40x, is_spark_41x, \
-    is_spark_420_or_later, spark_version
+    is_spark_420_or_later, is_spark_500_or_later, spark_version
 
 
 def _is_spark_patch_at_least(version, minimum):
@@ -93,6 +93,10 @@ def _assert_partial_clustering_spj_plan(plan):
         or is_spark_420_or_later()
     ),
     reason="Requires Spark's partial-clustering correctness fix")
+@pytest.mark.xfail(
+    condition=is_spark_500_or_later(),
+    reason="https://github.com/NVIDIA/cudf-spark/issues/15688: Spark 5 requires "
+           "KeyedPartitionings in a PartitioningCollection to share keys")
 def test_group_partitions_partial_clustering_distinct():
     def distinct_after_spj(spark):
         # A JVM V2 source is required to report KeyGroupedPartitioning and per-partition keys.

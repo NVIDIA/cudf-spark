@@ -115,6 +115,9 @@ class GpuMultiThreadIcebergParquetReader(
         val curProcessor = postProcessors.get(curFile)
         val nextProcessor = postProcessors.get(nextFile)
         if (curProcessor == null || nextProcessor == null) return true
+        if (deletionVectors.containsKey(curFile) || deletionVectors.containsKey(nextFile)) {
+          return true
+        }
         !curProcessor.compatibleForCombining(nextProcessor)
       }
 
@@ -130,25 +133,25 @@ class GpuMultiThreadIcebergParquetReader(
           }
           val columnTypes = LongType +: buffer.readSchema.fields.map(_.dataType)
 
-          withResource(hostBuffers) { _ =>
-            RmmRapidsRetryIterator.withRetryNoSplit[Iterator[ColumnarBatch]] {
-              val hostBufs = hostBuffers.safeMap(_.getDataHostBuffer())
+          RmmRapidsRetryIterator.withRetryNoSplit(hostBuffers.toSeq) { spillableBuffers =>
+            val hostBufs = spillableBuffers.safeMap(_.getDataHostBuffer()).toArray
+            closeOnExcept(hostBufs) { _ =>
               GpuSemaphore.acquireIfNecessary(TaskContext.get())
-              val producer = GpuIcebergDeletionVector.makeProducer(
-                GpuMultiThreadIcebergParquetReader.this.conf.useChunkedReader,
-                GpuMultiThreadIcebergParquetReader.this.conf.maxChunkedReaderMemoryUsageSizeBytes,
-                GpuMultiThreadIcebergParquetReader.this.conf.conf,
-                GpuMultiThreadIcebergParquetReader.this.conf.targetBatchSizeBytes,
-                parseOptions, hostBufs, GpuMultiThreadIcebergParquetReader.this.conf.metrics,
-                buffer.dateRebaseMode, buffer.timestampRebaseMode,
-                GpuMultiThreadIcebergParquetReader.this.conf.caseSensitive,
-                useFieldId = false, buffer.readSchema, buffer.clippedSchema,
-                Array(buffer.partitionedFile),
-                GpuMultiThreadIcebergParquetReader.this.conf.parquetDebugDumpPrefix,
-                GpuMultiThreadIcebergParquetReader.this.conf.parquetDebugDumpAlways,
-                deletionVector, blocks)
-              CachedGpuBatchIterator(producer, columnTypes)
             }
+            val producer = GpuIcebergDeletionVector.makeProducer(
+              GpuMultiThreadIcebergParquetReader.this.conf.useChunkedReader,
+              GpuMultiThreadIcebergParquetReader.this.conf.maxChunkedReaderMemoryUsageSizeBytes,
+              GpuMultiThreadIcebergParquetReader.this.conf.conf,
+              GpuMultiThreadIcebergParquetReader.this.conf.targetBatchSizeBytes,
+              parseOptions, hostBufs, GpuMultiThreadIcebergParquetReader.this.conf.metrics,
+              buffer.dateRebaseMode, buffer.timestampRebaseMode,
+              GpuMultiThreadIcebergParquetReader.this.conf.caseSensitive,
+              useFieldId = false, buffer.readSchema, buffer.clippedSchema,
+              Array(buffer.partitionedFile),
+              GpuMultiThreadIcebergParquetReader.this.conf.parquetDebugDumpPrefix,
+              GpuMultiThreadIcebergParquetReader.this.conf.parquetDebugDumpAlways,
+              deletionVector, blocks)
+            CachedGpuBatchIterator(producer, columnTypes)
           }
         }.getOrElse(super.readBufferToBatches(buffer))
       }
@@ -189,14 +192,16 @@ class GpuMultiThreadIcebergParquetReader(
         shadedFileReadSchema,
         conf.metrics)
 
-      val oldProcessor = postProcessors.put(icebergFile, postProcessor)
-      require(oldProcessor == null,
-        "Iceberg parquet partition file post processor already exists!")
       deletionVector.foreach { dv =>
         val oldVector = deletionVectors.put(icebergFile, dv)
         require(oldVector == null,
           "Iceberg parquet partition file deletion vector already exists!")
       }
+      // Publish the post-processor last. Its presence tells the combiner that the DV state for
+      // this file is final and can be checked without racing filterBlock initialization.
+      val oldProcessor = postProcessors.put(icebergFile, postProcessor)
+      require(oldProcessor == null,
+        "Iceberg parquet partition file post processor already exists!")
       filteredParquet
     }
   }
