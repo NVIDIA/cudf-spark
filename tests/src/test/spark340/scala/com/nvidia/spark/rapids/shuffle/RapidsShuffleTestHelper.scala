@@ -86,6 +86,8 @@ abstract class RapidsShuffleTestHelper
     extends RmmSparkRetrySuiteBase
       with BeforeAndAfterEach
       with MockitoSugar {
+  private val MAX_BUFFER_MISMATCHES_TO_REPORT = 10
+
   var mockTransaction: Transaction = _
   var mockConnection: MockClientConnection = _
   var mockTransport: RapidsShuffleTransport = _
@@ -123,11 +125,21 @@ abstract class RapidsShuffleTestHelper
       val len = orig.getLength.toInt
       withResource(HostMemoryBuffer.allocate(len)) { hmb =>
         hmb.copyFromDeviceBuffer(buff)
+        var mismatchCount = 0
         (0 until len by 4).foreach { b =>
-          areEqual = areEqual && hmb.getInt(b) == orig.getInt(b)
-          if (!areEqual) {
-            info(s"not equal at offset ${b} ${hmb.getInt(b)} -- ${orig.getInt(b)}")
+          val actual = hmb.getInt(b)
+          val expected = orig.getInt(b)
+          if (actual != expected) {
+            areEqual = false
+            mismatchCount += 1
+            if (mismatchCount <= MAX_BUFFER_MISMATCHES_TO_REPORT) {
+              info(s"not equal at offset $b $actual -- $expected")
+            }
           }
+        }
+        if (mismatchCount > MAX_BUFFER_MISMATCHES_TO_REPORT) {
+          info(s"${mismatchCount - MAX_BUFFER_MISMATCHES_TO_REPORT} additional " +
+            "buffer mismatches not shown")
         }
       }
     } else {
