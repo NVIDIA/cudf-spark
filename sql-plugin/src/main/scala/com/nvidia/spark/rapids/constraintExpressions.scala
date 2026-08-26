@@ -16,6 +16,7 @@
 
 package com.nvidia.spark.rapids
 
+import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.shims.ShimUnaryExpression
 
@@ -69,11 +70,27 @@ case class GpuKnownNotContainsNull(child: Expression) extends ShimTaggingExpress
   override def dataType: ArrayType =
     child.dataType.asInstanceOf[ArrayType].copy(containsNull = false)
 
+  private def retag(cv: GpuColumnVector): GpuColumnVector = {
+    withResource(cv) { input =>
+      GpuColumnVector.from(input.getBase.incRefCount(), dataType)
+    }
+  }
+
+  private def retag(scalar: GpuScalar): GpuScalar = {
+    withResource(scalar) { input =>
+      GpuScalar.wrap(input.getBase.incRefCount(), dataType)
+    }
+  }
+
   override def columnarEvalAny(batch: ColumnarBatch): Any = {
-    child.columnarEvalAny(batch)
+    child.columnarEvalAny(batch) match {
+      case cv: GpuColumnVector => retag(cv)
+      case scalar: GpuScalar => retag(scalar)
+      case other => other
+    }
   }
 
   override def columnarEval(batch: ColumnarBatch): GpuColumnVector = {
-    child.columnarEval(batch)
+    retag(child.columnarEval(batch))
   }
 }
