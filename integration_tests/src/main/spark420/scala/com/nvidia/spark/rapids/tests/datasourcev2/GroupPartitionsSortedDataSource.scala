@@ -16,6 +16,7 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark": "420"}
+{"spark": "500"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.tests.datasourcev2
 
@@ -37,8 +38,8 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 /**
  * A row-based V2 source whose partitions are individually sorted but interleave when partitions
- * with the same key are concatenated. Spark 4.2 can therefore enable sorted merge when it groups
- * the duplicate `id` partitions for a storage-partitioned sort-merge join.
+ * with the same key are concatenated. Spark can therefore enable sorted merge when it groups the
+ * duplicate `id` partitions for a storage-partitioned sort-merge join.
  */
 object GroupPartitionsSortedDataSource {
   val SCHEMA = StructType(Array(
@@ -65,8 +66,8 @@ object GroupPartitionsSortedDataSource {
           rows(3, 15))
       case "right" =>
         Array(
-          rows(1, null, 10, 30),
-          rows(1, null, 20, 40),
+          rows(1, null, 10, 20),
+          rows(1, null, 30, 40),
           rows(2, 5, 25),
           rows(3, 15))
       case other =>

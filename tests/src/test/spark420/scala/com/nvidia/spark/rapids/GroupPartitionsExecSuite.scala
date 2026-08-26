@@ -16,6 +16,7 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark": "420"}
+{"spark": "500"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids
 
@@ -33,7 +34,7 @@ import org.apache.spark.SparkConf
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, AttributeReference,
-  Descending, NullsLast, SortOrder}
+  CurrentDatabase, Descending, NullsLast, SortOrder}
 import org.apache.spark.sql.catalyst.plans.physical.{HashPartitioning, Partitioning,
   UnknownPartitioning}
 import org.apache.spark.sql.connector.catalog.{Column, Identifier, InMemoryCatalog}
@@ -261,16 +262,18 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
     assert(meta.outputAttributes == Seq(convertedAttr))
   }
 
-  test("GroupPartitionsExec fallback keeps the original CPU subtree") {
-    val groupPartitions = GroupPartitionsExec(
+  test("Unsupported sorted-merge ordering keeps the original CPU subtree") {
+    val groupPartitions = spy(GroupPartitionsExec(
       LocalTableScanExec(Nil, Nil, None),
-      enableSortedMerge = false)
+      enableSortedMerge = true))
+    doReturn(Seq(SortOrder(CurrentDatabase(), Ascending)))
+      .when(groupPartitions).outputOrdering
     val meta = GpuOverrides.wrapAndTagPlan(
       groupPartitions,
       new RapidsConf(Map.empty[String, String]))
       .asInstanceOf[GpuGroupPartitionsExecMeta]
 
-    meta.willNotWorkOnGpu("test-only fallback")
+    assert(meta.childExprs.nonEmpty)
     assert(!meta.canThisBeReplaced)
     assert(meta.convertToCpu().eq(groupPartitions))
   }
