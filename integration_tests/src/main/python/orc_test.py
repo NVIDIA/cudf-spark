@@ -227,6 +227,7 @@ def test_pred_push_round_trip(spark_tmp_path, orc_gen, v1_enabled_list):
     read_func = [read_orc_df, read_orc_sql, read_orc_sql, read_orc_df][case_index % 4]
     reader_confs = reader_opt_confs[case_index % len(reader_opt_confs)]
     if hasattr(reader_confs, 'marks'):
+        # Some reader configs are pytest.param(dict, marks=ignore_order); use the dict value.
         reader_confs = reader_confs.values[0]
     data_path = spark_tmp_path + '/ORC_DATA'
     # Append two struct columns to verify nested predicate pushdown.
@@ -701,6 +702,7 @@ def test_read_with_more_columns(spark_tmp_path, orc_gen, case_sensitive):
     v1_enabled_list = ["", "orc", "orc", ""][case_index % 4]
     reader_confs = reader_opt_confs[case_index % len(reader_opt_confs)]
     if hasattr(reader_confs, 'marks'):
+        # Some reader configs are pytest.param(dict, marks=ignore_order); use the dict value.
         reader_confs = reader_confs.values[0]
     # Dedicated to covering GpuMultiFileReader.getNextBuffersAndMetaAndCombine's unordered
     # wait path by letting readReadyFiles return an empty result.
