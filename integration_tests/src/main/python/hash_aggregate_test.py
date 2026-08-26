@@ -2371,12 +2371,14 @@ def test_hash_groupby_approx_percentile_reduction_no_rows(aqe_enabled):
 
 @incompat
 @pytest.mark.skip(reason="https://github.com/NVIDIA/spark-rapids/issues/14634")
+@pytest.mark.parametrize(
+    'data_gen', [ByteGen(), ShortGen(), FloatGen()], ids=idfn)
 @pytest.mark.parametrize('aqe_enabled', ['false', 'true'], ids=idfn)
-def test_hash_groupby_approx_percentile_byte(aqe_enabled):
+def test_hash_groupby_approx_percentile_small_numeric(data_gen, aqe_enabled):
     conf = {'spark.sql.adaptive.enabled': aqe_enabled}
     compare_percentile_approx(
         lambda spark: gen_df(spark, [('k', StringGen(nullable=False)),
-                                     ('v', ByteGen())], length=100),
+                                     ('v', data_gen)], length=100),
         [0.05, 0.25, 0.5, 0.75, 0.95], conf)
 
 @incompat
