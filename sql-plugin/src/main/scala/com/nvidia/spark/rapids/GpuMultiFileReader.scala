@@ -18,7 +18,8 @@ package com.nvidia.spark.rapids
 
 import java.io.{File, IOException}
 import java.net.{URI, URISyntaxException}
-import java.util.concurrent.{CompletionService, ConcurrentLinkedQueue, ExecutorCompletionService, Future, ThreadPoolExecutor, TimeUnit}
+import java.util.concurrent.{CancellationException, CompletionService, ConcurrentLinkedQueue,
+  ExecutionException, ExecutorCompletionService, Future, ThreadPoolExecutor, TimeUnit}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 
 import scala.annotation.tailrec
@@ -257,6 +258,34 @@ object MultiFileReaderThreadPool extends Logging {
 }
 
 object MultiFileReaderUtils {
+
+  private[rapids] def cancelAndGetCompletedResultForCleanup[T](task: Future[T]): Option[T] = {
+    // Interrupting active HDFS reads produces noisy warnings.
+    if (task.cancel(false)) {
+      None
+    } else {
+      var interrupted = false
+      var result: Option[T] = None
+      var done = false
+      try {
+        while (!done) {
+          try {
+            result = Some(task.get())
+            done = true
+          } catch {
+            case _: InterruptedException => interrupted = true
+            // Unconsumed prefetch failures must not mask the task's primary outcome.
+            case _: CancellationException | _: ExecutionException => done = true
+          }
+        }
+        result
+      } finally {
+        if (interrupted) {
+          Thread.currentThread().interrupt()
+        }
+      }
+    }
+  }
 
   private implicit def toURI(path: String): URI = {
     try {
@@ -988,17 +1017,14 @@ abstract class MultiFileCloudPartitionReaderBase(
 
     // clean up Async Readers being left over
     val needToClose = mutable.ArrayBuffer[BufferInfo]()
-    tasks.asScala.foreach {
-      case task if task.isCancelled => // Do nothing if already cancelled
-      case task if task.isDone => // Close all produced hmbs
-        needToClose += convertAsyncResult(task.get())
-      case task => // Task is still running
-        // Note we are not interrupting thread here so it
-        // will finish reading and then just discard. If we
-        // interrupt HDFS logs warnings about being interrupted.
-        task.cancel(false)
+    try {
+      tasks.asScala.foreach { task =>
+        MultiFileReaderUtils.cancelAndGetCompletedResultForCleanup(task)
+          .foreach(result => needToClose += convertAsyncResult(result))
+      }
+    } finally {
+      needToClose.safeClose()
     }
-    needToClose.safeClose()
   }
 }
 

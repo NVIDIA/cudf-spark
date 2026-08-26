@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,8 @@
  */
 
 package com.nvidia.spark.rapids
+
+import java.util.concurrent.{Callable, CompletableFuture, CountDownLatch, Executors, TimeUnit}
 
 import ai.rapids.cudf.HostMemoryBuffer
 import com.nvidia.spark.rapids.Arm.withResource
@@ -79,6 +81,37 @@ class GpuMultiFileReaderSuite extends AnyFunSuite with RmmSparkRetrySuiteBase {
 
     withResource(multiFileReader) { _ =>
       assertResult(false)(multiFileReader.next())
+    }
+  }
+
+  test("cleanup helper classifies completed and cancellable prefetch futures") {
+    val completed = CompletableFuture.completedFuture("completed")
+    assert(MultiFileReaderUtils.cancelAndGetCompletedResultForCleanup(completed)
+      .contains("completed"))
+
+    val failed = new CompletableFuture[String]()
+    assert(failed.completeExceptionally(new IllegalStateException("cancelled")))
+    assert(failed.isDone && !failed.isCancelled)
+    assert(MultiFileReaderUtils.cancelAndGetCompletedResultForCleanup(failed).isEmpty)
+
+    val started = new CountDownLatch(1)
+    val release = new CountDownLatch(1)
+    val executor = Executors.newSingleThreadExecutor()
+    val running = executor.submit(new Callable[String] {
+      override def call(): String = {
+        started.countDown()
+        release.await()
+        "late result"
+      }
+    })
+    try {
+      assert(started.await(10, TimeUnit.SECONDS))
+      assert(MultiFileReaderUtils.cancelAndGetCompletedResultForCleanup(running).isEmpty)
+      assert(running.isCancelled)
+    } finally {
+      release.countDown()
+      executor.shutdownNow()
+      assert(executor.awaitTermination(10, TimeUnit.SECONDS))
     }
   }
 }

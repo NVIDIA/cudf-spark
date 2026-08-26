@@ -22,7 +22,6 @@ import scala.util.control.NonFatal
 import org.apache.spark.rdd.NewHadoopRDD
 import org.apache.spark.sql.catalyst.expressions.Nondeterministic
 import org.apache.spark.sql.execution.{FilterExec, ProjectExec, SerializeFromObjectExec, SparkPlan}
-import org.apache.spark.sql.execution.exchange.Exchange
 import org.apache.spark.sql.rapids.{GpuSequenceFileRDDScanExec, SequenceFileRddReadProof}
 
 private[rapids] final class GpuSequenceFileSerializeFromObjectExecMeta(
@@ -107,7 +106,6 @@ private[rapids] final class GpuSequenceFileSerializeFromObjectExecMeta(
   @tailrec
   private def hasUnprovenPartitionAncestor(
       current: Option[RapidsMeta[_, _, _]]): Boolean = current match {
-    case Some(meta: SparkPlanMeta[_]) if meta.wrapped.isInstanceOf[Exchange] => false
     case Some(meta: SparkPlanMeta[_]) if isPartitionTransparent(meta) =>
       hasUnprovenPartitionAncestor(meta.parent)
     case Some(_) => true

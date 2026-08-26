@@ -538,6 +538,22 @@ class SequenceFileRddScanSuite extends SparkQueryCompareTestSuite with Eventuall
     }
   }
 
+  test("round-robin repartition over multiple source splits keeps the CPU scan") {
+    val conf = replacementConf(allowCpuPlan = true)
+      .set("spark.sql.adaptive.enabled", "false")
+      .set(RapidsConf.TEST_ALLOWED_NONGPU.key,
+        "SerializeFromObjectExec,ExternalRDDScanExec,ProjectExec," +
+          "ShuffleExchangeExec,RoundRobinPartitioning")
+    withMultiSplitDataFrame(conf) { (_, input, _) =>
+      val repartitioned = input.repartition(5)
+        .select(col("key"), col("value"), spark_partition_id().as("partition_id"))
+      assertCpuRddScan(repartitioned)
+      val rows = repartitioned.collect()
+      assert(rows.length == multiSplitRowCount)
+      assert(rows.map(_.getInt(2)).toSet == (0 until 5).toSet)
+    }
+  }
+
   test("Dataset mapPartitions over multiple source splits keeps the CPU scan") {
     val conf = replacementConf(allowCpuPlan = true)
       .set(RapidsConf.TEST_ALLOWED_NONGPU.key,
