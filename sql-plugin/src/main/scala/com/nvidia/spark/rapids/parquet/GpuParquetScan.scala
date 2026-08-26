@@ -273,8 +273,13 @@ object GpuParquetScan {
     if (ranges.isEmpty) {
       0L
     } else {
-      metrics.getOrElse(READ_FS_TIME, NoopMetric).ns {
-        inputFile.readVectored(output, ranges.asJava)
+      val ioWaitStart = System.nanoTime()
+      try {
+        metrics.getOrElse(READ_FS_TIME, NoopMetric).ns {
+          inputFile.readVectored(output, ranges.asJava)
+        }
+      } finally {
+        metrics.getOrElse(IO_WAIT_TIME, NoopMetric) += System.nanoTime() - ioWaitStart
       }
       ranges.map(_.getLength).sum
     }
@@ -2941,7 +2946,8 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
   private class ReadBatchRunner(
       file: PartitionedFile,
       filterFunc: PartitionedFile => ParquetFileInfoWithBlockMeta,
-      taskContext: TaskContext) extends MemoryBoundedAsyncRunner[BufferInfo] with Logging {
+      taskContext: TaskContext)
+    extends MemoryBoundedAsyncRunner[BufferInfo] with Logging {
 
     // Set TaskContext in terms of an AsyncRunner
     override def sparkTaskContext: Option[TaskContext] = Some(taskContext)
@@ -3005,10 +3011,13 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
       val hostBuffers = new ArrayBuffer[SingleHMBAndMeta]
       var filterTime = 0L
       var bufferStartTime = 0L
+      var filteredDataBytes = 0L
       val result = try {
         val filterStartTime = System.nanoTime()
         val fileBlockMeta = filterFunc(file)
         filterTime = System.nanoTime() - filterStartTime
+        filteredDataBytes = fileBlockMeta.blocks.flatMap(
+          _.getColumns.asScala).map(_.getTotalSize).sum
         bufferStartTime = System.nanoTime()
         if (fileBlockMeta.blocks.isEmpty) {
           val bytesRead = fileSystemBytesRead() - startingBytesRead
@@ -3066,6 +3075,7 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
           throw e
       }
       val bufferTime = System.nanoTime() - bufferStartTime
+      PartitionFileReadHistogram.record(filteredDataBytes, bufferTime)
       result.setExecutionTime(filterTime, bufferTime)
       result
     }

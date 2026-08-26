@@ -16,6 +16,7 @@
 
 package com.nvidia.spark.rapids.iceberg;
 
+import ai.rapids.cudf.HostMemoryBuffer;
 import com.nvidia.spark.rapids.GpuMetric;
 import com.nvidia.spark.rapids.NoopMetric$;
 import com.nvidia.spark.rapids.RapidsConf;
@@ -103,6 +104,22 @@ public interface IcebergShimUtils {
         GpuMetric missCounter = opt.isDefined() ? opt.get() : NoopMetric$.MODULE$;
         missCounter.$plus$eq(1L);
         return ParquetFileReader.open(GpuParquetIO.file(inputFile.getDelegate()), options);
+    }
+
+    /**
+     * Open a reader using footer bytes that the caller has already loaded.
+     *
+     * <p>Iceberg 1.10+ shims override this and inject the supplied footer into the shaded
+     * Parquet reader. Older runtimes do not expose a compatible injection API and retain their
+     * normal reader-open path as a correctness fallback.</p>
+     */
+    default ParquetFileReader openParquetReaderWithFooter(
+            IcebergInputFile inputFile,
+            Path filePath,
+            ParquetReadOptions options,
+            scala.collection.immutable.Map<String, GpuMetric> metrics,
+            HostMemoryBuffer footerBuffer) throws IOException {
+        return openParquetReader(inputFile, filePath, options, metrics);
     }
 
     /**

@@ -113,6 +113,8 @@ object GpuMetric extends Logging {
   val FILTER_TIME_BUBBLE = "filterTimeBubble"
   val SCHEDULE_TIME = "scheduleTime"
   val SCHEDULE_TIME_BUBBLE = "scheduleTimeBubble"
+  val DATA_SIZE_AFTER_FILTER = "dataSizeAfterFilter"
+  val IO_WAIT_TIME = "ioWaitTime"
   val BUILD_DATA_SIZE = "buildDataSize"
   val BUILD_TIME = "buildTime"
   val STREAM_TIME = "streamTime"
@@ -143,6 +145,12 @@ object GpuMetric extends Logging {
   val ASYNC_READ_TIME = "shuffleAsyncReadTime"
   val ICEBERG_BUILD_ACTION_TIME = "icebergBuildActionTime"
   val ICEBERG_POST_PROCESS_TIME = "icebergPostProcessTime"
+  val ICEBERG_ASYNC_FILE_READ_TIME = "icebergAsyncFileReadTime"
+  val ICEBERG_ASYNC_REQUEST_COUNT = "icebergAsyncRequestCount"
+  val ICEBERG_ASYNC_REQUESTED_BYTES = "icebergAsyncRequestedBytes"
+  val ICEBERG_ASYNC_FOOTER_READ_TIME = "icebergAsyncFooterReadTime"
+  val ICEBERG_ASYNC_FOOTER_REQUEST_COUNT = "icebergAsyncFooterRequestCount"
+  val ICEBERG_ASYNC_FOOTER_REQUESTED_BYTES = "icebergAsyncFooterRequestedBytes"
 
   // Metric Descriptions.
   val DESCRIPTION_BUFFER_TIME = "buffer time"
@@ -169,6 +177,8 @@ object GpuMetric extends Logging {
   val DESCRIPTION_FILTER_TIME_BUBBLE = "filter time (GPU underloaded)"
   val DESCRIPTION_SCHEDULE_TIME = "I/O schedule time"
   val DESCRIPTION_SCHEDULE_TIME_BUBBLE = "I/O schedule time (GPU underloaded)"
+  val DESCRIPTION_DATA_SIZE_AFTER_FILTER = "data size after footer filtering"
+  val DESCRIPTION_IO_WAIT_TIME = "time waiting for data I/O"
   val DESCRIPTION_SCAN_TIME = "scan time"
   val DESCRIPTION_BUILD_DATA_SIZE = "build side size"
   val DESCRIPTION_BUILD_TIME = "build time"
@@ -201,6 +211,13 @@ object GpuMetric extends Logging {
   val DESCRIPTION_ASYNC_READ_TIME = "async read time"
   val DESCRIPTION_ICEBERG_BUILD_ACTION_TIME = "iceberg build action tree time"
   val DESCRIPTION_ICEBERG_POST_PROCESS_TIME = "iceberg post process time"
+  val DESCRIPTION_ICEBERG_ASYNC_FILE_READ_TIME = "iceberg async file read elapsed time"
+  val DESCRIPTION_ICEBERG_ASYNC_REQUEST_COUNT = "iceberg async S3 range requests"
+  val DESCRIPTION_ICEBERG_ASYNC_REQUESTED_BYTES = "iceberg async S3 requested bytes"
+  val DESCRIPTION_ICEBERG_ASYNC_FOOTER_READ_TIME = "iceberg async footer S3 elapsed time"
+  val DESCRIPTION_ICEBERG_ASYNC_FOOTER_REQUEST_COUNT = "iceberg async footer S3 requests"
+  val DESCRIPTION_ICEBERG_ASYNC_FOOTER_REQUESTED_BYTES =
+    "iceberg async footer S3 requested bytes"
 
   /**
    * Determine if a GpuMetric wraps a TimingMetric or NanoTimingMetric.

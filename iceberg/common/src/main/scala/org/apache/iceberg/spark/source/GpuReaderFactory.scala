@@ -18,9 +18,11 @@ package org.apache.iceberg.spark.source
 
 import scala.collection.JavaConverters._
 
-import com.nvidia.spark.rapids.{CombineConf, GpuMetric, MultiFileReaderUtils, RapidsConf, ThreadPoolConfBuilder}
+import com.nvidia.spark.rapids.{CombineConf, GpuMetric, MultiFileReaderUtils, RapidsConf,
+  ThreadPoolConfBuilder}
 import com.nvidia.spark.rapids.iceberg.ShimUtils.locationOf
 import com.nvidia.spark.rapids.iceberg.parquet.{
+  AsyncMultiThread,
   MultiFile,
   MultiThread,
   SingleFile,
@@ -48,6 +50,7 @@ class GpuReaderFactory(private val metrics: Map[String, GpuMetric],
   private val poolConfBuilder = ThreadPoolConfBuilder(rapidsConf)
   private val combineThresholdSize = rapidsConf.getMultithreadedCombineThreshold
   private val combineWaitTime = rapidsConf.getMultithreadedCombineWaitTime
+  private val icebergAsyncReadEnabled = rapidsConf.isIcebergAsyncReadEnabled
 
   override def createReader(partition: InputPartition): PartitionReader[InternalRow] =
     throw new UnsupportedOperationException("GpuReaderFactory does not support createReader()")
@@ -107,11 +110,21 @@ class GpuReaderFactory(private val metrics: Map[String, GpuMetric],
         val disableCombining =
           queryUsesInputFile || hasFilePathMetadata || hasRowPositionMetadata ||
             !hasNoDeletes
-        MultiThread(poolConfBuilder, partition.maxNumParquetFilesParallel,
+        val multiThread = MultiThread(poolConfBuilder, partition.maxNumParquetFilesParallel,
           CombineConf(combineThresholdSize, combineWaitTime),
           disableCombining,
           hasFilePathMetadata,
           hasRowPositionMetadata)
+
+        // Keep the disabled path identical to upstream. Only an explicitly enabled and eligible
+        // scan gets the asynchronous marker; the encryption traversal is also avoided when
+        // disabled.
+        if (icebergAsyncReadEnabled && hasNoDeletes && !queryUsesInputFile &&
+            !hasRowPositionMetadata && scans.forall(_.file.keyMetadata == null)) {
+          AsyncMultiThread(multiThread)
+        } else {
+          multiThread
+        }
       } else {
         MultiFile(poolConfBuilder, hasFilePathMetadata, hasRowPositionMetadata)
       }

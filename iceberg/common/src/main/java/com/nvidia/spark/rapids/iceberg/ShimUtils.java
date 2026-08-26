@@ -16,6 +16,7 @@
 
 package com.nvidia.spark.rapids.iceberg;
 
+import ai.rapids.cudf.HostMemoryBuffer;
 import com.nvidia.spark.rapids.GpuMetric;
 import com.nvidia.spark.rapids.RapidsConf;
 import com.nvidia.spark.rapids.ShimLoader;
@@ -77,6 +78,16 @@ public class ShimUtils {
             ParquetReadOptions options,
             scala.collection.immutable.Map<String, GpuMetric> metrics) throws IOException {
         return IMPL.openParquetReader(inputFile, filePath, options, metrics);
+    }
+
+    public static ParquetFileReader openParquetReaderWithFooter(
+            IcebergInputFile inputFile,
+            Path filePath,
+            ParquetReadOptions options,
+            scala.collection.immutable.Map<String, GpuMetric> metrics,
+            HostMemoryBuffer footerBuffer) throws IOException {
+        return IMPL.openParquetReaderWithFooter(
+                inputFile, filePath, options, metrics, footerBuffer);
     }
 
     public static GpuSparkScan newCopyOnWriteScan(

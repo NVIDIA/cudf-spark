@@ -35,6 +35,7 @@ import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
 import com.nvidia.spark.rapids.filecache.{FileCache, FileCacheLocalityManager, FileCacheLocalityMsg}
 import com.nvidia.spark.rapids.io.async.TrafficController
 import com.nvidia.spark.rapids.jni.{GpuTimeZoneDB, Hash, JSONUtils, RmmSpark, TaskPriority}
+import com.nvidia.spark.rapids.parquet.PartitionFileReadHistogram
 import com.nvidia.spark.rapids.python.PythonWorkerSemaphore
 import com.nvidia.spark.rapids.shims.ShuffleManagerShimUtils
 import org.apache.commons.lang3.exception.ExceptionUtils
@@ -744,6 +745,7 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
       GpuSemaphore.initialize(conf.maxConcurrentGpuTasks)
       FileCache.init(pluginContext)
       TrafficController.initialize(conf)
+      PartitionFileReadHistogram.initialize(pluginContext.executorID())
     } catch {
       // Exceptions in executor plugin can cause a single thread to die but the executor process
       // sticks around without any useful info until it hearbeat times out. Print what happened
@@ -861,6 +863,7 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
         extraExecutorPlugins.map(plugin => () => plugin.shutdown()) ++
         Seq(
           () => FileCache.shutdown(),
+          () => PartitionFileReadHistogram.shutdown(),
           () => GpuCoreDumpHandler.shutdown(),
           () => TrafficController.shutdown()))
   }

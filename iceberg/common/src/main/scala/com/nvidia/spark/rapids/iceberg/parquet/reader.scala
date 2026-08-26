@@ -22,11 +22,19 @@ import java.util.Objects
 
 import scala.collection.JavaConverters._
 
-import com.nvidia.spark.rapids.{CombineConf, DateTimeRebaseCorrected, GpuMetric, ThreadPoolConfBuilder}
+import ai.rapids.cudf.HostMemoryBuffer
+import com.nvidia.spark.rapids.{
+  CombineConf,
+  DateTimeRebaseCorrected,
+  GpuMetric,
+  ThreadPoolConfBuilder
+}
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.GpuMetric.DATA_SIZE_AFTER_FILTER
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile
 import com.nvidia.spark.rapids.iceberg.parquet.converter.FromIcebergShaded._
 import com.nvidia.spark.rapids.parquet.{GpuParquetUtils, ParquetFileInfoWithBlockMeta}
+import com.nvidia.spark.rapids.reader.ReadSource
 import com.nvidia.spark.rapids.shims.PartitionedFileUtilsShim
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
@@ -52,7 +60,7 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 case class IcebergPartitionedFile(
     file: IcebergInputFile,
     split: Option[(Long, Long)] = None,
-    filter: Option[Expression] = None) {
+    filter: Option[Expression] = None) extends ReadSource {
 
   lazy val urlEncodedPath: String = new Path(file.getDelegate.location()).toUri.toString
   lazy val path: Path = new Path(new URI(urlEncodedPath))
@@ -67,6 +75,20 @@ case class IcebergPartitionedFile(
     } catch {
       case e: IOException =>
         throw new UncheckedIOException(s"Failed to newInputFile Parquet file: " +
+          s"${file.getDelegate.location()}", e)
+    }
+  }
+
+  /** Open a reader using footer bytes that the asynchronous S3 path has already loaded. */
+  def newReader(
+      footerBuffer: HostMemoryBuffer,
+      metrics: Map[String, GpuMetric]): ParquetFileReader = {
+    try {
+      GpuParquetIO.openReaderWithFooter(
+        file, path, parquetReadOptions, metrics, footerBuffer)
+    } catch {
+      case e: IOException =>
+        throw new UncheckedIOException(s"Failed to open preloaded-footer Parquet file: " +
           s"${file.getDelegate.location()}", e)
     }
   }
@@ -121,6 +143,15 @@ case class MultiThread(
     disableCombining: Boolean,
     hasFilePathMetadata: Boolean,
     hasRowPositionMetadata: Boolean) extends ThreadConf
+
+/**
+ * Marks a normal multi-thread configuration for the asynchronous Iceberg reader.
+ *
+ * Keeping the marker separate is intentional: when asynchronous reading is disabled, the reader
+ * factory returns the exact upstream [[MultiThread]] value and the partition reader follows the
+ * exact upstream match arm. No asynchronous fields are added to baseline task objects.
+ */
+case class AsyncMultiThread(delegate: MultiThread) extends ThreadConf
 
 case class MultiFile(
     poolConfBuilder: ThreadPoolConfBuilder,
@@ -203,7 +234,27 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
 
   def filterParquetBlocks(file: IcebergPartitionedFile,
       requiredSchema: Schema): (ParquetFileInfoWithBlockMeta, ShadedMessageType) = {
-    withResource(file.newReader(conf.metrics)) { reader =>
+    filterParquetBlocks(file, requiredSchema, None)
+  }
+
+  /** Filter a file using footer bytes loaded by the asynchronous Iceberg S3 path. */
+  def filterParquetBlocks(
+      file: IcebergPartitionedFile,
+      requiredSchema: Schema,
+      footerBuffer: HostMemoryBuffer): (ParquetFileInfoWithBlockMeta, ShadedMessageType) = {
+    filterParquetBlocks(file, requiredSchema, Some(footerBuffer))
+  }
+
+  private def filterParquetBlocks(
+      file: IcebergPartitionedFile,
+      requiredSchema: Schema,
+      footerBuffer: Option[HostMemoryBuffer])
+  : (ParquetFileInfoWithBlockMeta, ShadedMessageType) = {
+    def openReader(target: IcebergPartitionedFile): ParquetFileReader = {
+      footerBuffer.map(target.newReader(_, conf.metrics)).getOrElse(target.newReader(conf.metrics))
+    }
+
+    withResource(openReader(file)) { reader =>
       val fileSchema = reader.getFileMetaData.getSchema
       val (typeWithIds, fileReadSchema) = projectSchema(fileSchema, requiredSchema)
       val filteredBlocks = filterRowGroups(reader, requiredSchema, typeWithIds, file.filter)
@@ -230,7 +281,7 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
           }
         }
         if (file.split.isDefined) {
-          withResource(file.copy(split = None).newReader(conf.metrics)) { fullReader =>
+          withResource(openReader(file.copy(split = None))) { fullReader =>
             populateFromAllBlocks(fullReader.getFooter.getBlocks)
           }
         } else {
@@ -253,6 +304,11 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
         }
       }
       val blocks = clipBlocksToSchema(fileReadSchema, filteredBlocks.map(_._1))
+      val selectedDataBytes = blocks.iterator
+        .flatMap(_.getColumns.asScala)
+        .map(_.getTotalSize)
+        .sum
+      conf.metrics.get(DATA_SIZE_AFTER_FILTER).foreach(_ += selectedDataBytes)
 
       val sqlConf = SQLConf.get
       val partReaderSparkSchema = new ParquetToSparkSchemaConverter(
