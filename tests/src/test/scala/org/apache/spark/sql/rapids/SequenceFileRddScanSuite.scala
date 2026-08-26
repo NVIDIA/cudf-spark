@@ -33,7 +33,7 @@ import org.apache.hadoop.mapreduce.lib.input.SequenceFileAsBinaryInputFormat
 import org.apache.hadoop.util.ReflectionUtils
 import org.scalatest.concurrent.Eventually
 
-import org.apache.spark.SparkConf
+import org.apache.spark.{SparkConf, TaskContext}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.execution.SerializeFromObjectExec
@@ -42,6 +42,7 @@ import org.apache.spark.sql.functions.{col, spark_partition_id}
 class SequenceFileRddScanSuite extends SparkQueryCompareTestSuite with Eventually {
   private val replaceConfKey = RapidsConf.SEQUENCEFILE_RDD_READ_ENABLED.key
   private val splitMaxSizeKey = "mapreduce.input.fileinputformat.split.maxsize"
+  private val multiSplitRowCount = 96
   private val compressionTypes =
     Seq(CompressionType.NONE, CompressionType.RECORD, CompressionType.BLOCK)
 
@@ -275,6 +276,21 @@ class SequenceFileRddScanSuite extends SparkQueryCompareTestSuite with Eventuall
     }
   }
 
+  private def withMultiSplitDataFrame(
+      conf: SparkConf)(test: (SparkSession, DataFrame, Int) => Unit): Unit = {
+    withTempPath { file =>
+      writeWritableFile(file, (0 until multiSplitRowCount).map { index =>
+        intBytes(index) -> randomPayload(0, index, 4096)
+      }, CompressionType.NONE, syncEvery = 8)
+      withGpuSparkSession({ spark =>
+        val splitMaxSize = Some(64 * 1024L)
+        val sourcePartitions = source(spark, file, splitMaxSize).getNumPartitions
+        assert(sourcePartitions > 1)
+        test(spark, copiedDataFrame(spark, file, splitMaxSize), sourcePartitions)
+      }, conf)
+    }
+  }
+
   private def gpuScan(df: DataFrame): GpuSequenceFileRDDScanExec = {
     val scans = df.queryExecution.executedPlan.collect {
       case scan: GpuSequenceFileRDDScanExec => scan
@@ -381,16 +397,27 @@ class SequenceFileRddScanSuite extends SparkQueryCompareTestSuite with Eventuall
 
       withGpuSparkSession({ spark =>
         val initialHostHandles = SpillFramework.stores.hostStore.numHandles
-        val df = copiedDataFrame(spark, directory).limit(1)
-        assert(df.collect().length == 1)
-        assert(gpuScan(df).allMetrics(GpuMetric.NUM_OUTPUT_BATCHES).value > 0)
+        val scan = gpuScan(copiedDataFrame(spark, directory))
+        val batchRows = scan.executeColumnar().mapPartitions { batches =>
+          if (batches.hasNext) {
+            val batch = batches.next()
+            val rows = try {
+              batch.numRows()
+            } finally {
+              batch.close()
+            }
+            Iterator.single(rows)
+          } else {
+            Iterator.empty
+          }
+        }.collect()
+        assert(batchRows.nonEmpty)
+        assert(scan.allMetrics(GpuMetric.NUM_OUTPUT_BATCHES).value > 0)
         eventually(timeout(10.seconds)) {
           assert(TestUtils.numRunningMultiFileReaderTasks == 0)
           assert(SpillFramework.stores.hostStore.numHandles == initialHostHandles)
         }
-      }, replacementConf(batchSize = "64k", keepReadsInOrder = false)
-        .set("spark.rapids.sql.exec.CollectLimitExec", "true")
-        .set(RapidsConf.TEST_ALLOWED_NONGPU.key, "CollectLimitExec"))
+      }, replacementConf(batchSize = "64k", keepReadsInOrder = false))
     }
   }
 
@@ -497,6 +524,51 @@ class SequenceFileRddScanSuite extends SparkQueryCompareTestSuite with Eventuall
       }.toSeq
       assert(bag(actual.map(_._1)) == bag(recordPairs))
       assert(actual.forall(_._2 == 0))
+    }
+  }
+
+  test("seeded sample over multiple source splits keeps the CPU scan") {
+    val conf = replacementConf(allowCpuPlan = true)
+      .set(RapidsConf.TEST_ALLOWED_NONGPU.key,
+        "SerializeFromObjectExec,ExternalRDDScanExec,ProjectExec,SampleExec")
+    withMultiSplitDataFrame(conf) { (_, input, _) =>
+      val sampled = input.sample(withReplacement = false, fraction = 0.5, seed = 37L)
+      assertCpuRddScan(sampled)
+      assert(sampled.collect().nonEmpty)
+    }
+  }
+
+  test("Dataset mapPartitions over multiple source splits keeps the CPU scan") {
+    val conf = replacementConf(allowCpuPlan = true)
+      .set(RapidsConf.TEST_ALLOWED_NONGPU.key,
+        "SerializeFromObjectExec,ExternalRDDScanExec,ProjectExec," +
+          "MapPartitionsExec,DeserializeToObjectExec")
+    withMultiSplitDataFrame(conf) { (spark, input, sourcePartitions) =>
+      import spark.implicits._
+      val partitionSizes = input.as[(Array[Byte], Array[Byte])]
+        .mapPartitions(records => Iterator.single(records.size))
+        .toDF("rows")
+      assertCpuRddScan(partitionSizes)
+      val sizes = partitionSizes.collect().map(_.getInt(0)).toSeq
+      assert(sizes.length == sourcePartitions)
+      assert(sizes.sum == multiSplitRowCount)
+    }
+  }
+
+  test("Dataset map using TaskContext partition ID keeps the CPU scan") {
+    val conf = replacementConf(allowCpuPlan = true)
+      .set(RapidsConf.TEST_ALLOWED_NONGPU.key,
+        "SerializeFromObjectExec,ExternalRDDScanExec,ProjectExec," +
+          "MapElementsExec,DeserializeToObjectExec")
+    withMultiSplitDataFrame(conf) { (spark, input, sourcePartitions) =>
+      import spark.implicits._
+      val partitionIds = input.as[(Array[Byte], Array[Byte])].map { pair =>
+        (TaskContext.getPartitionId(), pair._1, pair._2)
+      }.toDF("partition_id", "key", "value")
+      assertCpuRddScan(partitionIds)
+      val ids = partitionIds.collect().map(_.getInt(0)).toSet
+      assert(ids.size > 1)
+      assert(ids.forall(id => id >= 0 && id < sourcePartitions))
     }
   }
 

@@ -21,7 +21,7 @@ import scala.util.control.NonFatal
 
 import org.apache.spark.rdd.NewHadoopRDD
 import org.apache.spark.sql.catalyst.expressions.Nondeterministic
-import org.apache.spark.sql.execution.{SerializeFromObjectExec, SparkPlan}
+import org.apache.spark.sql.execution.{FilterExec, ProjectExec, SerializeFromObjectExec, SparkPlan}
 import org.apache.spark.sql.execution.exchange.Exchange
 import org.apache.spark.sql.rapids.{GpuSequenceFileRDDScanExec, SequenceFileRddReadProof}
 
@@ -56,9 +56,9 @@ private[rapids] final class GpuSequenceFileSerializeFromObjectExecMeta(
             proven.columns.count(_ == SequenceFileRddReadProof.Key) != 1 ||
             proven.columns.count(_ == SequenceFileRddReadProof.Value) != 1) {
           willNotWorkOnGpu("SequenceFile RDD replacement requires key and value exactly once")
-        } else if (hasPartitionSensitiveAncestor(parent)) {
+        } else if (hasUnprovenPartitionAncestor(parent)) {
           willNotWorkOnGpu(
-            "SequenceFile RDD replacement cannot preserve input file or partition identity")
+            "SequenceFile RDD replacement cannot prove ancestor partition semantics")
         } else {
           sourceIgnoreFlags(proven.sourceRdd) match {
             case Right(false) => provenRead = Some(proven)
@@ -93,12 +93,24 @@ private[rapids] final class GpuSequenceFileSerializeFromObjectExecMeta(
     })
   }
 
+  private def isPartitionTransparent(meta: SparkPlanMeta[_]): Boolean = {
+    val ancestor = meta.wrapped.asInstanceOf[SparkPlan]
+    val exactRowLocalExec = ancestor match {
+      case project: ProjectExec => project.getClass == classOf[ProjectExec]
+      case filter: FilterExec => filter.getClass == classOf[FilterExec]
+      case _ => false
+    }
+    exactRowLocalExec && meta.canExprTreeBeReplaced &&
+      !meta.hasDirectCpuBridgeExpressions && !hasPartitionSensitiveExpression(ancestor)
+  }
+
   @tailrec
-  private def hasPartitionSensitiveAncestor(
+  private def hasUnprovenPartitionAncestor(
       current: Option[RapidsMeta[_, _, _]]): Boolean = current match {
     case Some(meta: SparkPlanMeta[_]) if meta.wrapped.isInstanceOf[Exchange] => false
-    case Some(meta: SparkPlanMeta[_]) if hasPartitionSensitiveExpression(meta.wrapped) => true
-    case Some(meta) => hasPartitionSensitiveAncestor(meta.parent)
+    case Some(meta: SparkPlanMeta[_]) if isPartitionTransparent(meta) =>
+      hasUnprovenPartitionAncestor(meta.parent)
+    case Some(_) => true
     case None => false
   }
 
