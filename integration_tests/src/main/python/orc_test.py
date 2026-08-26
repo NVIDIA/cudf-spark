@@ -704,7 +704,8 @@ def test_read_with_more_columns(spark_tmp_path, orc_gen, case_sensitive):
         reader_confs = reader_confs.values[0]
     # Dedicated to covering GpuMultiFileReader.getNextBuffersAndMetaAndCombine's unordered
     # wait path by letting readReadyFiles return an empty result.
-    if case_index == 58:
+    _unordered_combine_wait_case_index = 58
+    if case_index == _unordered_combine_wait_case_index:
         reader_confs = copy_and_update(reader_confs, {
             'spark.rapids.sql.reader.multithreaded.combine.waitTime': 0})
     struct_gen = StructGen([('nested_col', orc_gen)])
