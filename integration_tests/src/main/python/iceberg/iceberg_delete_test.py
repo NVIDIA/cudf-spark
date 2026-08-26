@@ -23,7 +23,7 @@ from iceberg import (create_iceberg_table, get_full_table_name, iceberg_write_en
                      _build_tblprops, assert_iceberg_files_use_codec,
                      supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON)
 from marks import allow_non_gpu, allow_non_gpu_conditional, iceberg, ignore_order, datagen_overrides
-from spark_session import is_spark_400_or_later, with_cpu_session, with_gpu_session
+from spark_session import is_spark_35x, is_spark_400_or_later, with_cpu_session, with_gpu_session
 
 pytestmark = iceberg_unsupported_mark
 
@@ -133,7 +133,13 @@ def test_iceberg_delete_unpartitioned_table(spark_tmp_table_factory, delete_mode
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @ignore_order(local=True)
 @pytest.mark.parametrize('delete_mode,fallback_exec', [
-    pytest.param('copy-on-write', 'ReplaceDataExec', id='cow'),
+    pytest.param(
+        'copy-on-write',
+        'ReplaceDataExec',
+        marks=pytest.mark.xfail(
+            condition=is_spark_35x(),
+            reason="https://github.com/NVIDIA/cudf-spark/issues/15680"),
+        id='cow'),
     pytest.param('merge-on-read', 'WriteDeltaExec', id='mor')
 ])
 @allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")

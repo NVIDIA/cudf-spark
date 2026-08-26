@@ -509,7 +509,14 @@ The following regular expression patterns are not yet supported on the GPU and w
 - Possessive quantifiers, such as `a*+`
 - Character classes that use union, intersection, or subtraction semantics, such as `[a-d[m-p]]`, `[a-z&&[def]]`,
   or `[a-z&&[^bc]]`
+- Lookahead/lookbehind groups: `(?=a)`, `(?!a)`, `(?<=a)`, `(?<!a)`
+- Independent groups: `(?>a)`
+- Named capture groups: `(?<n>a)`
 - Empty groups: `()`
+- Inline flags other than case-insensitive matching, such as `(?m)`, `(?s)`, or `(?x)`
+- Case-insensitive matching (`(?i)`) whose scope would extend across a choice, such as `(?i)a|b`
+  or `a(?i)b|c` (in Java the flag applies to the end of the enclosing group, crossing `|`), or that
+  applies to a letter-valued escape, such as `(?i)\x61`
 - Empty pattern: `""`
 
 Work is ongoing to increase the range of regular expressions that can run on the GPU.
