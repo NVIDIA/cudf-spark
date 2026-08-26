@@ -71,6 +71,9 @@ case class GpuIncrementMetric(cpuInc: IncrementMetric, override val child: Expre
 
 abstract class DeltaProviderBase extends DeltaIOProvider {
 
+  override def getStrategyRules: Seq[SparkStrategy] =
+    DeltaCDFRelationStrategy +: super.getStrategyRules
+
   override def getCreatableRelationRules: Map[Class[_ <: CreatableRelationProvider],
       CreatableRelationProviderRule[_ <: CreatableRelationProvider]] = {
     Seq(
