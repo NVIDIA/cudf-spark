@@ -64,7 +64,7 @@ import org.apache.parquet.schema.LogicalTypeAnnotation.{DateLogicalTypeAnnotatio
 import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName
 import org.xerial.snappy.Snappy
 
-import org.apache.spark.TaskContext
+import org.apache.spark.{SparkEnv, TaskContext}
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SparkSession
@@ -1592,6 +1592,43 @@ trait ParquetPartitionReaderBase extends Logging with ScanWithMetrics
 
   val copyBufferSize = conf.getInt("parquet.read.allocation.size", 8 * 1024 * 1024)
 
+  protected def logColumnChunkRanges: Boolean = false
+
+  @scala.annotation.nowarn(
+    "msg=method getPath in class ColumnChunkMetaData is deprecated"
+  )
+  private def logColumnChunkRange(
+      filePath: Path,
+      column: ColumnChunkMetaData,
+      source: String): Unit = {
+    if (logColumnChunkRanges) {
+      val taskContext = TaskContext.get()
+      val queryName = Option(taskContext)
+        .flatMap(tc => Option(tc.getLocalProperty("spark.job.description")))
+        .getOrElse("unknown")
+      val executionId = Option(taskContext)
+        .flatMap(tc => Option(tc.getLocalProperty("spark.sql.execution.id")))
+        .getOrElse("unknown")
+      val rootExecutionId = Option(taskContext)
+        .flatMap(tc => Option(tc.getLocalProperty("spark.sql.execution.root.id")))
+        .getOrElse(executionId)
+      val stageId = Option(taskContext).map(_.stageId()).getOrElse(-1)
+      val taskId = Option(taskContext).map(_.taskAttemptId()).getOrElse(-1L)
+      val taskAttempt = Option(taskContext).map(_.attemptNumber()).getOrElse(-1)
+      val executorId = Option(SparkEnv.get).map(_.executorId).getOrElse("unknown")
+
+      // Tab-separated key/value fields keep the record inexpensive to emit and unambiguous to
+      // parse even when Spark's job description contains spaces. The SQL execution IDs let the
+      // post-processing tool recover the real query name for broadcast-exchange stages.
+      logInfo(s"PARQUET_COLUMN_CHUNK_RANGE\tqueryName=$queryName\t" +
+        s"sqlExecutionId=$executionId\trootExecutionId=$rootExecutionId\t" +
+        s"stageId=$stageId\ttaskId=$taskId\ttaskAttempt=$taskAttempt\t" +
+        s"executorId=$executorId\tfileName=$filePath\t" +
+        s"columnPath=${column.getPath.toDotString}\tstart=${column.getStartingPos}\t" +
+        s"length=${column.getTotalSize}\tsource=$source")
+    }
+  }
+
   def checkIfNeedToSplitBlocks(currentDateRebaseMode: DateTimeRebaseMode,
       nextDateRebaseMode: DateTimeRebaseMode,
       currentTimestampRebaseMode: DateTimeRebaseMode,
@@ -1754,8 +1791,10 @@ trait ParquetPartitionReaderBase extends Logging with ScanWithMetrics
           val channel = FileCache.get.getDataRangeChannel(inputFile,
             column.getStartingPos, columnSize)
           if (channel.isDefined) {
+            logColumnChunkRange(filePath, column, "cache")
             localItems += LocalCopy(channel.get, columnSize, outputOffset)
           } else {
+            logColumnChunkRange(filePath, column, "remote")
             remoteItems += new CopyRange(column.getStartingPos, columnSize, outputOffset)
           }
           totalBytesToCopy += columnSize
@@ -2675,6 +2714,13 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
     execMetrics, maxReadBatchSizeRows, maxReadBatchSizeBytes, ignoreCorruptFiles,
     keepReadsInOrder, combineConf)
   with ParquetPartitionReaderBase {
+
+  override protected lazy val logColumnChunkRanges: Boolean =
+    Option(SparkEnv.get).exists { env =>
+      env.conf.getBoolean(
+        RapidsConf.PARQUET_MULTITHREAD_READ_LOG_COLUMN_CHUNK_RANGES.key,
+        false)
+    }
 
   // TODO: replace the config maxNumFileProcessed with the dynamic resource bounded controller,
   // after the ResourceBoundedThreadPool are supported for all readers.

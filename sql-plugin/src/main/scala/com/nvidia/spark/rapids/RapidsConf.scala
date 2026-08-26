@@ -1608,6 +1608,16 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       .checkValue(v => v > 0, "The maximum number of files must be greater than 0.")
       .createWithDefault(Integer.MAX_VALUE)
 
+  val PARQUET_MULTITHREAD_READ_LOG_COLUMN_CHUNK_RANGES =
+    conf("spark.rapids.sql.format.parquet.multiThreadedRead.logColumnChunkRanges.enabled")
+      .doc("Logs every Parquet column chunk selected by the MULTITHREADED reader, including " +
+        "the Spark query, stage, task, file, source offset, and length. This is an internal " +
+        "diagnostic option and can produce a large volume of executor logs.")
+      .startupOnly()
+      .internal()
+      .booleanConf
+      .createWithDefault(false)
+
   val ENABLE_PARQUET_READ = conf("spark.rapids.sql.format.parquet.read.enabled")
     .doc("When set to false disables parquet input acceleration")
     .booleanConf
