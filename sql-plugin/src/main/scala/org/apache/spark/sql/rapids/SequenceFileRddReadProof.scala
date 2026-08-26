@@ -165,6 +165,8 @@ object SequenceFileRddReadProof {
       Left(s"$name is persisted")
     } else if (rdd.checkpointData.nonEmpty) {
       Left(s"$name has checkpoint state")
+    } else if (rdd.getResourceProfile != null) {
+      Left(s"$name has a resource profile")
     } else {
       Right(())
     }

@@ -393,7 +393,7 @@ private[sequencefile] class GpuSequenceFilePartitionReader(
 
     override def takeNextBatch(): Array[SingleHMBAndMeta] = synchronized {
       require(hasBatch)
-      val next = sourceBuffers.flatMap(_.takeNextBatch())
+      val next = sourceBuffers.safeMap(_.takeNextBatch().head)
       hasBatch = false
       next
     }

@@ -29,6 +29,7 @@ import org.scalatest.BeforeAndAfterAll
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.rdd.{NewHadoopRDD, RDD}
+import org.apache.spark.resource.ResourceProfile
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.execution.SerializeFromObjectExec
 import org.apache.spark.util.Utils
@@ -222,6 +223,19 @@ class SequenceFileRddReadProofSuite extends AnyFunSuite with BeforeAndAfterAll {
     } finally {
       Utils.deleteRecursively(checkpointDir)
     }
+  }
+
+  test("reject resource profiles") {
+    val profile = ResourceProfile.getOrCreateDefaultProfile(spark.sparkContext.getConf)
+    val sourceProfile = source().withResources(profile).map { pair =>
+      (pair._1.copyBytes(), pair._2.copyBytes())
+    }
+    val mappedProfile = source().map { pair =>
+      (pair._1.copyBytes(), pair._2.copyBytes())
+    }.withResources(profile)
+
+    assertRejected(binaryDataFrame(sourceProfile), "source RDD has a resource profile")
+    assertRejected(binaryDataFrame(mappedProfile), "mapped RDD has a resource profile")
   }
 
   test("reject mapPartitions even when its parent is the source") {
