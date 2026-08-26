@@ -208,6 +208,7 @@ def test_array_heterogeneous_elementwise_hof_mixed_project():
             'transform(a, item -> item + b) as plus_b',
             'transform(a, item -> item + c) as plus_c',
             'filter(a, item -> item is not null and item + b >= c) as filtered_b_ge_c',
+            'filter(a, item -> item IN (1, b)) as in_one_or_b',
             'exists(a, item -> item is not null and item + c < b) as has_c_less_b')
 
     assert_gpu_and_cpu_are_equal_collect(do_it)

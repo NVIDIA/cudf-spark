@@ -294,7 +294,7 @@ Name | SQL Function(s) | Description | Default Value | Notes
 <a name="sql.expression.Hour"></a>spark.rapids.sql.expression.Hour|`hour`|Returns the hour component of the string/timestamp|true|None|
 <a name="sql.expression.Hypot"></a>spark.rapids.sql.expression.Hypot|`hypot`|Pythagorean addition (Hypotenuse) of real numbers|true|None|
 <a name="sql.expression.If"></a>spark.rapids.sql.expression.If|`if`|IF expression|true|None|
-<a name="sql.expression.In"></a>spark.rapids.sql.expression.In|`in`|IN operator|true|None|
+<a name="sql.expression.In"></a>spark.rapids.sql.expression.In|`in`|IN operator|true|Non-literal list expressions must be deterministic and side-effect-free|
 <a name="sql.expression.InSet"></a>spark.rapids.sql.expression.InSet| |INSET operator|true|None|
 <a name="sql.expression.InitCap"></a>spark.rapids.sql.expression.InitCap|`initcap`|Returns str with the first letter of each word in uppercase. All other letters are in lowercase|true|This is not 100% compatible with the Spark version because the Unicode version used by cuDF and the JVM may differ, resulting in some corner-case characters not changing case correctly.|
 <a name="sql.expression.InputFileBlockLength"></a>spark.rapids.sql.expression.InputFileBlockLength|`input_file_block_length`|Returns the length of the block being read, or -1 if not available|true|None|
