@@ -374,28 +374,6 @@ class SequenceFileRddScanSuite extends SparkQueryCompareTestSuite with Eventuall
     }
   }
 
-  test("replace RDD read emits multiple byte-bounded and row-bounded batches") {
-    withTempPath { file =>
-      val expected = (0 until 4).map { index =>
-        intBytes(index) -> payload(0, index, 2048)
-      }
-      writeRawFile(file, expected, CompressionType.BLOCK)
-      val expectedPairs = expected.map { case (key, value) => key.toSeq -> value.toSeq }
-
-      withGpuSparkSession({ spark =>
-        val df = copiedDataFrame(spark, file)
-        val scan = assertGpuRead(df, expectedPairs)
-        assert(scan.allMetrics(GpuMetric.NUM_OUTPUT_BATCHES).value > 1)
-      }, replacementConf(batchSize = "8k"))
-
-      withGpuSparkSession({ spark =>
-        val df = copiedDataFrame(spark, file)
-        val scan = assertGpuRead(df, expectedPairs)
-        assert(scan.allMetrics(GpuMetric.NUM_OUTPUT_BATCHES).value >= 2)
-      }, replacementConf(maxRows = Some(2)))
-    }
-  }
-
   test("early termination closes the completion-order RDD reader") {
     withTempPath { directory =>
       assert(directory.mkdirs())
@@ -410,7 +388,7 @@ class SequenceFileRddScanSuite extends SparkQueryCompareTestSuite with Eventuall
           assert(TestUtils.numRunningMultiFileReaderTasks == 0)
           assert(SpillFramework.stores.hostStore.numHandles == initialHostHandles)
         }
-      }, replacementConf(batchSize = "32k", keepReadsInOrder = false)
+      }, replacementConf(batchSize = "64k", keepReadsInOrder = false)
         .set("spark.rapids.sql.exec.CollectLimitExec", "true")
         .set(RapidsConf.TEST_ALLOWED_NONGPU.key, "CollectLimitExec"))
     }
@@ -418,14 +396,14 @@ class SequenceFileRddScanSuite extends SparkQueryCompareTestSuite with Eventuall
 
   test("replace RDD read fails closed for oversized records and splits") {
     withTempPath { file =>
-      writeRawFile(file,
-        Seq(intBytes(0) -> payload(0, 0, 128 * 1024)), CompressionType.BLOCK)
+      writeWritableFile(file,
+        Seq(intBytes(0) -> payload(0, 0, 128 * 1024)), CompressionType.RECORD)
 
       withGpuSparkSession({ spark =>
         val df = copiedDataFrame(spark, file)
         val error = gpuReadFailure(df)
         assert(exceptionContains(error, "record exceeds") &&
-          exceptionContains(error, "decompressed batch limit"))
+          exceptionContains(error, "decompressed single-batch limit"))
       }, replacementConf(batchSize = "64k"))
     }
 
@@ -441,8 +419,20 @@ class SequenceFileRddScanSuite extends SparkQueryCompareTestSuite with Eventuall
         val error = intercept[Exception] {
           df.collect()
         }
-        assert(exceptionContains(error, "split exceeds the 2 buffered batch limit"))
+        assert(exceptionContains(error, "split exceeds") &&
+          exceptionContains(error, "decompressed single-batch limit"))
       }, replacementConf(batchSize = "8k"))
+    }
+
+    withTempPath { file =>
+      writeRawFile(file, (0 until 3).map { index =>
+        intBytes(index) -> payload(0, index, 32)
+      }, CompressionType.BLOCK)
+
+      withGpuSparkSession({ spark =>
+        val error = gpuReadFailure(copiedDataFrame(spark, file))
+        assert(exceptionContains(error, "split exceeds the 2 row single-batch limit"))
+      }, replacementConf(maxRows = Some(2)))
     }
   }
 
