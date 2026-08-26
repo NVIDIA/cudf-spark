@@ -253,6 +253,10 @@
                 <artifactId>maven-antrun-plugin</artifactId>
                 <executions>
                     <execution>
+                        <id>shimplify-shim-sources</id>
+                        <phase>none</phase>
+                    </execution>
+                    <execution>
                         <!-- ensure a phase preceding create-parallel-world and copy-current -->
                         <phase>initialize</phase>
                         <goals>
@@ -438,21 +442,19 @@ self.log("... OK")
                         <configuration>
                             <skip>${rapids.jni.unpack.skip}</skip>
                             <artifactItems>
-                                <!-- if add new artifacts, should set `overWrite` as true -->
+                                <!-- Per-artifact markers refresh unpacked files when a source JAR is newer. -->
                                 <artifactItem>
                                     <groupId>com.nvidia</groupId>
                                     <artifactId>spark-rapids-jni</artifactId>
                                     <classifier>${jni.classifier}</classifier>
                                     <excludes>META-INF/**</excludes>
                                     <outputDirectory>${project.build.directory}/jni-deps</outputDirectory>
-                                    <overWrite>true</overWrite>
                                 </artifactItem>
                                 <artifactItem>
                                     <groupId>org.openucx</groupId>
                                     <artifactId>jucx</artifactId>
                                     <excludes>META-INF/**</excludes>
                                     <outputDirectory>${project.build.directory}/jni-deps</outputDirectory>
-                                    <overWrite>true</overWrite>
                                 </artifactItem>
                             </artifactItems>
                         </configuration>

@@ -136,10 +136,17 @@
                                 </path>
                                 <property environment="env"/>
                                 <ac:if xmlns:ac="antlib:net.sf.antcontrib">
-                                    <or>
-                                      <equals arg1="spark${env.BASE_VER}" arg2="${spark.version.classifier}"/>
-                                      <equals arg1="spark330" arg2="${spark.version.classifier}"/>
-                                    </or>
+                                    <and>
+                                      <!-- Shared docs and top-level generated CSVs are canonicalized
+                                           by the default Scala 2.12 build. Scala 2.13 still generates
+                                           versioned per-buildver files, but must not overwrite the
+                                           shared outputs or the build order becomes significant. -->
+                                      <equals arg1="${scala.binary.version}" arg2="2.12"/>
+                                      <or>
+                                        <equals arg1="spark${env.BASE_VER}" arg2="${spark.version.classifier}"/>
+                                        <equals arg1="spark330" arg2="${spark.version.classifier}"/>
+                                      </or>
+                                    </and>
                                     <ac:then>
                                         <!-- requires Spark jvm args for newer Java versions -->
                                         <java classname="com.nvidia.spark.rapids.RapidsConf"

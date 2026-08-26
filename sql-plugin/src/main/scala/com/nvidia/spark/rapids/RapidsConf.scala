@@ -365,7 +365,7 @@ object RapidsConf extends Logging {
       .transform(_.trim.toLowerCase(java.util.Locale.ROOT))
       .checkValue(value => value == "all" || Try(value.toInt).map(_ > 0).getOrElse(false),
         "Pinned-pool initialization threads must be a positive integer or 'all'.")
-      .createWithDefault("1")
+      .createWithDefault("all")
 
   val OFF_HEAP_LIMIT_ENABLED = conf("spark.rapids.memory.host.offHeapLimit.enabled")
       .doc("Should the off heap limit be enforced or not.")

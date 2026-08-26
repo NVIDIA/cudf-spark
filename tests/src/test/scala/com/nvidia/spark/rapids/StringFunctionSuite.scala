@@ -294,22 +294,31 @@ class RegExpUtilsSuite extends AnyFunSuite {
     }
   }
 
-  test("line-anchor `$` no longer injects a synthetic capture group or generated backref " +
-      "(#15006, cuDF #22763)") {
+  test("issue-15060: replacement conversion only resolves raw user backrefs") {
+    val open = "$" + "{"
+    val raw = GpuRegExpUtils.backrefConversion("$1", 1)
+    val alreadyBraced = GpuRegExpUtils.backrefConversion(open + "1}", 1)
+
+    assert(raw._1)
+    assert(raw._2 == open + "1}")
+    assert(!alreadyBraced._1)
+    assert(alreadyBraced._2 == open + "1}")
+  }
+
+  test("issue-15060: line-anchor replacement has no generated backref state") {
     // cuDF #22763 makes EXT_NEWLINE treat `\r\n` as a single line terminator for `$`, so the
-    // transpiler emits a bare `$` instead of the old synthetic `(\r\n)?$` capture group. With no
-    // synthetic group there is no internally-generated backref appended to the replacement, and a
-    // user pattern ending in `$` no longer shifts backref numbering: user `$N` parses against the
-    // real user group count (Java spec).
+    // transpiler emits a bare `$`. Replacement parsing therefore preserves only the user's raw
+    // `$N` tokens, and conversion resolves them once against the Java-visible group count.
     val open = "$" + "{"
     val userPattern = "(T)(E)(S)(T)(T)(E)(S)(T)(T)(E)(S)(T)$"
     val userNumCaptureGroups =
       java.util.regex.Pattern.compile(userPattern).matcher("").groupCount()
     assert(userNumCaptureGroups == 12)
 
-    // user replacement `$123$2` -> `$12` + literal `3` + `$2`, with no trailing generated group.
+    // user replacement `$123$2` -> `$12` + literal `3` + `$2`, unchanged by transpilation.
     val (_, repl1) = new CudfRegexTranspiler(RegexReplaceMode)
       .getTranspiledAST(userPattern, None, Some("$123$2"))
+    assert(repl1.get.parts.forall(_.isInstanceOf[RegexChar]))
     val (has1, conv1) =
       GpuRegExpUtils.backrefConversion(repl1.get.toRegexString, userNumCaptureGroups)
     assert(has1)

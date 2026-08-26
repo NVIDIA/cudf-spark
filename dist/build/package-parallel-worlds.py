@@ -50,6 +50,66 @@ def select_matching_members(namelist, patterns):
     return matching_members
 
 
+def read_patterns(path):
+    if not os.path.isfile(path):
+        return []
+    with open(path, 'r') as f:
+        return [
+            line.strip()
+            for line in f.read().splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+
+
+def artifact_file_name(art, classifier):
+    art_id = '-'.join(['rapids-4-spark', art + '_' + scala_version])
+    return '-'.join([art_id, project_version, classifier]) + '.jar'
+
+
+def ensure_artifact(art, classifier):
+    build_dir = os.sep.join([project_basedir, art, 'target', classifier])
+    art_jar = artifact_file_name(art, classifier)
+    art_jar_path = os.sep.join([build_dir, art_jar])
+    if os.path.isfile(art_jar_path):
+        shutil.copy(art_jar_path, deps_dir)
+    else:
+        mvn_home = project.getProperty('maven.home')
+        art_id = '-'.join(['rapids-4-spark', art + '_' + scala_version])
+        mvn_cmd = [
+            os.sep.join([mvn_home, 'bin', 'mvn']),
+            # TODO dest property is removed in 3.x, switch to the 'copy' goal
+            # however it does not support overriding local repo via property
+            # need an issue to sort this out better.
+            'org.apache.maven.plugins:maven-dependency-plugin:2.10:get',
+            '-B',
+            '='.join(['-Ddest', deps_dir]),
+            '='.join(['-DgroupId','com.nvidia']),
+            '='.join(['-DartifactId', art_id]),
+            '='.join(['-Dversion', project_version]),
+            '='.join(['-Dpackaging', 'jar']),
+            '='.join(['-Dclassifier', classifier]),
+            '='.join(['-Dtransitive', 'false'])
+        ]
+        if art_url:
+            mvn_cmd.extend(['-s', jenkins_settings])
+        if repo_local:
+            mvn_cmd.append('='.join(['-Dmaven.repo.local', repo_local]))
+        shell_exec(mvn_cmd)
+    return os.sep.join([deps_dir, art_jar])
+
+
+def root_safe_module_class_members(classifier):
+    members = set()
+    for module in root_safe_modules:
+        module_jar_path = ensure_artifact(module, classifier)
+        with zipfile.ZipFile(module_jar_path, 'r') as zip_handle:
+            members.update([
+                name for name in zip_handle.namelist()
+                if name.endswith('.class')
+            ])
+    return members
+
+
 artifacts = attributes.get('artifact_csv').split(',')
 buildver_list = re.sub(r'\s+', '', project.getProperty('included_buildvers'),
                        flags=re.UNICODE).split(',')
@@ -69,41 +129,15 @@ with open(os.sep.join([dist_dir, 'unshimmed-common-from-single-shim.txt']), 'r')
     from_single_shim = f.read().splitlines()
 with open(os.sep.join([dist_dir, 'unshimmed-from-each-spark3xx.txt']), 'r') as f:
     from_each = f.read().splitlines()
+root_safe_modules = read_patterns(os.sep.join([dist_dir, 'root-safe-module-classes.txt']))
 from_single_shim_or_each = from_single_shim + from_each
 
 for bv in buildver_list:
     classifier = 'spark' + bv
     for art in artifacts:
-        build_dir = os.sep.join([project_basedir, art, 'target', classifier])
-        art_id = '-'.join(['rapids-4-spark', art + '_' + scala_version])
-        art_jar = '-'.join([art_id, project_version, classifier]) + '.jar'
-        art_jar_path = os.sep.join([build_dir, art_jar])
-        if os.path.isfile(art_jar_path):
-            shutil.copy(art_jar_path, deps_dir)
-        else:
-            mvn_home = project.getProperty('maven.home')
-            mvn_cmd = [
-                os.sep.join([mvn_home, 'bin', 'mvn']),
-                # TODO dest property is removed in 3.x, switch to the 'copy' goal
-                # however it does not support overriding local repo via property
-                # need an issue to sort this out better.
-                'org.apache.maven.plugins:maven-dependency-plugin:2.10:get',
-                '-B',
-                '='.join(['-Ddest', deps_dir]),
-                '='.join(['-DgroupId','com.nvidia']),
-                '='.join(['-DartifactId', art_id]),
-                '='.join(['-Dversion', project_version]),
-                '='.join(['-Dpackaging', 'jar']),
-                '='.join(['-Dclassifier', classifier]),
-                '='.join(['-Dtransitive', 'false'])
-            ]
-            if art_url:
-                mvn_cmd.extend(['-s', jenkins_settings])
-            if repo_local:
-                mvn_cmd.append('='.join(['-Dmaven.repo.local', repo_local]))
-            shell_exec(mvn_cmd)
+        art_jar_path = ensure_artifact(art, classifier)
 
-        with zipfile.ZipFile(os.sep.join([deps_dir, art_jar]), 'r') as zip_handle:
+        with zipfile.ZipFile(art_jar_path, 'r') as zip_handle:
             if project.getProperty('should.build.conventional.jar'):
                 zip_handle.extractall(path=top_dist_jar_dir)
             else:
@@ -111,6 +145,18 @@ for bv in buildver_list:
                 # IMPORTANT unconditional extract from the highest Spark version to the top
                 if bv == buildver_list[0] and art == 'sql-plugin-api':
                     zip_handle.extractall(path=top_dist_jar_dir)
+                if bv == buildver_list[0] and art == 'aggregator':
+                    namelist = zip_handle.namelist()
+                    namelist_set = set(namelist)
+                    root_safe_members = root_safe_module_class_members(classifier)
+                    missing_members = sorted(root_safe_members - namelist_set)
+                    if missing_members:
+                        raise Exception(
+                            "root-safe module classes missing from aggregator: %s" %
+                            ", ".join(missing_members))
+                    zip_handle.extractall(
+                        path=top_dist_jar_dir,
+                        members=[name for name in namelist if name in root_safe_members])
                 # TODO deprecate
                 namelist = zip_handle.namelist()
                 glob_list = from_single_shim_or_each if bv == buildver_list[0] else from_each
