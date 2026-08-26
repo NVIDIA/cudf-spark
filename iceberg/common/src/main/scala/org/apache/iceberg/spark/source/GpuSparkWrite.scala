@@ -242,7 +242,7 @@ object GpuSparkWrite {
     }
 
     if (deleteFormat.exists(format =>
-        !format.equals(FileFormat.PARQUET) && !ShimUtils.isDeletionVectorFormat(format))) {
+        !format.equals(FileFormat.PARQUET) && !ShimUtils.isPuffinFormat(format))) {
       meta.willNotWorkOnGpu(
         s"GpuSparkWrite only supports Parquet or Puffin deletion vectors, " +
           s"but got: ${deleteFormat.get}")

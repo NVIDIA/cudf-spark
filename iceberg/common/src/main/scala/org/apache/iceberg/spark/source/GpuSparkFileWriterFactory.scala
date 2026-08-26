@@ -47,7 +47,7 @@ class GpuSparkFileWriterFactory(val table: Table,
   require(dataFileFormat == FileFormat.PARQUET,
     s"GpuSparkFileWriterFactory only supports PARQUET file format, but got $dataFileFormat")
   require(deleteFileFormat == FileFormat.PARQUET ||
-      ShimUtils.isDeletionVectorFormat(deleteFileFormat),
+      ShimUtils.isPuffinFormat(deleteFileFormat),
     s"GpuSparkFileWriterFactory only supports PARQUET or Puffin deletion vectors, " +
       s"but got $deleteFileFormat")
 

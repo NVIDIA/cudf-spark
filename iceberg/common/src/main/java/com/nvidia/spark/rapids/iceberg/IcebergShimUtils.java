@@ -70,20 +70,21 @@ public interface IcebergShimUtils {
     boolean isDeletionVector(DeleteFile deleteFile);
 
     /** Returns whether a resolved delete-file format writes Puffin deletion vectors. */
-    default boolean isDeletionVectorFormat(FileFormat fileFormat) {
+    default boolean isPuffinFormat(FileFormat fileFormat) {
         return false;
     }
 
     /**
      * Creates Iceberg's version-specific deletion-vector writer.
      *
-     * <p>The rewritable-deletes value is intentionally opaque because Iceberg 1.6 does not
-     * contain {@code DeleteFileSet}. Iceberg 1.9+ implementations cast it to the version-local
-     * map type and use it to merge applicable existing deletes.
+     * <p>The map value type is intentionally unspecified because Iceberg 1.6 does not contain
+     * {@code DeleteFileSet}. Iceberg 1.9+ implementations cast each value to the version-local
+     * type and use it to merge applicable existing deletes.
      */
     default PartitioningWriter<PositionDelete<InternalRow>, DeleteWriteResult>
             newDeletionVectorWriter(
-                    Table table, OutputFileFactory fileFactory, Object rewritableDeletes) {
+                    Table table, OutputFileFactory fileFactory,
+                    Map<String, ?> rewritableDeletes) {
         throw new UnsupportedOperationException(
                 "This Iceberg version does not support Puffin deletion vectors");
     }

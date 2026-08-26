@@ -16,7 +16,6 @@
 
 package org.apache.iceberg.spark.source;
 
-import java.io.Serializable;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Map;
@@ -29,6 +28,8 @@ import org.apache.iceberg.deletes.DeleteGranularity;
 import org.apache.iceberg.io.DeleteWriteResult;
 import org.apache.iceberg.io.WriteResult;
 import org.apache.spark.api.java.JavaSparkContext;
+import org.apache.spark.broadcast.Broadcast;
+import org.apache.spark.sql.connector.write.DeltaBatchWrite;
 import org.apache.spark.sql.connector.write.DeltaWrite;
 import org.apache.spark.sql.connector.write.RowLevelOperation.Command;
 import org.apache.spark.sql.connector.write.Write;
@@ -117,22 +118,28 @@ public final class GpuSparkWriteAccess {
     return readField(positionDeltaWrite(write), "context", Object.class);
   }
 
-  /** Returns delete files that Iceberg requires a position-delta write to replace. */
-  public static Serializable rewritableDeletes(DeltaWrite write, boolean useDVs) {
-    Object scan = readField(positionDeltaWrite(write), "scan", Object.class);
-    if (scan == null) {
-      return null;
-    }
-
+  /**
+   * Calls Iceberg's private {@code broadcastRewritableDeletes} method.
+   *
+   * <p>In pseudo-code, Iceberg does the following:
+   * <pre>
+   * if (scan exists and deletes should be rewritten) {
+   *   deletes = scan.rewritableDeletes(context.useDVs)
+   *   return deletes.nonEmpty ? broadcast(deletes) : null
+   * }
+   * return null
+   * </pre>
+   * This bridge reuses that logic because both the batch-write class and method are private.
+   */
+  @SuppressWarnings("unchecked")
+  public static Broadcast<Map<String, ?>> broadcastRewritableDeletes(DeltaBatchWrite write) {
     try {
-      Method method = findMethod(scan.getClass(), "rewritableDeletes", Boolean.TYPE);
+      Method method = findMethod(write.getClass(), "broadcastRewritableDeletes");
       method.setAccessible(true);
-      Map<?, ?> rewritableDeletes = (Map<?, ?>) method.invoke(scan, useDVs);
-      return rewritableDeletes == null || rewritableDeletes.isEmpty()
-          ? null : (Serializable) rewritableDeletes;
+      return (Broadcast<Map<String, ?>>) method.invoke(write);
     } catch (ReflectiveOperationException e) {
       throw new IllegalStateException(
-          "Unable to discover rewritable deletes from " + scan.getClass().getName(), e);
+          "Unable to broadcast rewritable deletes from " + write.getClass().getName(), e);
     }
   }
 

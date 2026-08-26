@@ -72,14 +72,15 @@ public class ShimUtilsImpl implements IcebergShimUtils {
     }
 
     @Override
-    public boolean isDeletionVectorFormat(FileFormat fileFormat) {
+    public boolean isPuffinFormat(FileFormat fileFormat) {
         return fileFormat == FileFormat.PUFFIN;
     }
 
     @Override
     public PartitioningWriter<PositionDelete<InternalRow>, DeleteWriteResult>
             newDeletionVectorWriter(
-                    Table table, OutputFileFactory fileFactory, Object rewritableDeletes) {
+                    Table table, OutputFileFactory fileFactory,
+                    Map<String, ?> rewritableDeletes) {
         return new PartitioningDVWriter<>(
                 fileFactory, previousDeleteLoader(table, rewritableDeletes));
     }
@@ -95,20 +96,17 @@ public class ShimUtilsImpl implements IcebergShimUtils {
                 .build();
     }
 
-    @SuppressWarnings("unchecked")
     private Function<CharSequence, PositionDeleteIndex> previousDeleteLoader(
-            Table table, Object rewritableDeletes) {
+            Table table, Map<String, ?> rewritableDeletes) {
         if (rewritableDeletes == null) {
             return path -> null;
         }
 
-        Map<String, DeleteFileSet> deleteFiles =
-                (Map<String, DeleteFileSet>) rewritableDeletes;
         BaseDeleteLoader deleteLoader = new BaseDeleteLoader(
                 deleteFile -> EncryptingFileIO.combine(table.io(), table.encryption())
                         .newInputFile(deleteFile));
         return path -> {
-            DeleteFileSet files = deleteFiles.get(path.toString());
+            DeleteFileSet files = (DeleteFileSet) rewritableDeletes.get(path.toString());
             return files != null ? deleteLoader.loadPositionDeletes(files, path) : null;
         };
     }

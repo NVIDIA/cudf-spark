@@ -76,13 +76,14 @@ public class ShimUtils {
         return IMPL.isDeletionVector(deleteFile);
     }
 
-    public static boolean isDeletionVectorFormat(FileFormat fileFormat) {
-        return IMPL.isDeletionVectorFormat(fileFormat);
+    public static boolean isPuffinFormat(FileFormat fileFormat) {
+        return IMPL.isPuffinFormat(fileFormat);
     }
 
     public static PartitioningWriter<PositionDelete<InternalRow>, DeleteWriteResult>
             newDeletionVectorWriter(
-                    Table table, OutputFileFactory fileFactory, Object rewritableDeletes) {
+                    Table table, OutputFileFactory fileFactory,
+                    Map<String, ?> rewritableDeletes) {
         return IMPL.newDeletionVectorWriter(table, fileFactory, rewritableDeletes);
     }
 
