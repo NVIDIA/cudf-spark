@@ -85,6 +85,18 @@ __reader_opt_confs_chunked = [{**conf, 'spark.rapids.sql.reader.chunked': True,
                              [pytest.param(__multithreaded_orc_file_reader_combine_unordered_conf_chunked_limited_memory,
                                            marks=pytest.mark.ignore_order(local=True))]
 reader_opt_confs = __reader_opt_confs_no_chunked + __reader_opt_confs_chunked
+reader_opt_conf_indices_by_category = [
+    [0, 5, 9],    # PERFILE
+    [1, 6, 10],   # MULTITHREADED without combining
+    [2, 7, 11],   # COALESCING
+    [3, 8, 12],   # MULTITHREADED with ordered combining
+    [4, 13, 14]]  # MULTITHREADED with unordered combining
+reader_opt_conf_category_ids = [
+    'PERFILE',
+    'MULTITHREADED',
+    'COALESCING',
+    'MULTITHREADED_COMBINE_ORDERED',
+    'MULTITHREADED_COMBINE_UNORDERED']
 # The Count result can not be sorted, so local sort can not be used.
 reader_opt_confs_for_count = __reader_opt_confs_common + [__multithreaded_orc_file_reader_combine_unordered_conf_no_chunked]
 
@@ -216,16 +228,21 @@ orc_pred_push_gens = [
         orc_timestamp_gen]
 orc_pred_push_v1_enabled_lists = ["", "orc"]
 
-# Distribute read functions and reader configurations across
-# len(orc_pred_push_gens) * len(orc_pred_push_v1_enabled_lists) = 18 cases.
+# Cover every predicate type with every reader category while distributing V1/V2,
+# read functions, and the three reader configurations within each category across 45 cases.
 @pytest.mark.order(2)
 @pytest.mark.parametrize('orc_gen', orc_pred_push_gens, ids=idfn)
-@pytest.mark.parametrize('v1_enabled_list', orc_pred_push_v1_enabled_lists)
+@pytest.mark.parametrize('reader_category_index',
+                         range(len(reader_opt_conf_indices_by_category)),
+                         ids=reader_opt_conf_category_ids)
 @ignore_order(local=True)
-def test_pred_push_round_trip(spark_tmp_path, orc_gen, v1_enabled_list):
-    case_index = orc_pred_push_gens.index(orc_gen) * 2 + (v1_enabled_list == "orc")
+def test_pred_push_round_trip(spark_tmp_path, orc_gen, reader_category_index):
+    type_index = orc_pred_push_gens.index(orc_gen)
+    case_index = type_index * len(reader_opt_conf_indices_by_category) + reader_category_index
+    v1_enabled_list = orc_pred_push_v1_enabled_lists[case_index % 2]
     read_func = [read_orc_df, read_orc_sql, read_orc_sql, read_orc_df][case_index % 4]
-    reader_confs = reader_opt_confs[case_index % len(reader_opt_confs)]
+    reader_conf_indices = reader_opt_conf_indices_by_category[reader_category_index]
+    reader_confs = reader_opt_confs[reader_conf_indices[type_index % len(reader_conf_indices)]]
     if hasattr(reader_confs, 'marks'):
         # Some reader configs are pytest.param(dict, marks=ignore_order); use the dict value.
         reader_confs = reader_confs.values[0]
@@ -692,21 +709,26 @@ def test_read_struct_without_stream(spark_tmp_path):
 
 case_sensitive_options = ["false", "true"]
 
-# Distribute V1/V2 and reader configurations across
-# len(flattened_orc_gens) * len(case_sensitive_options) = 62 cases.
+# Cover every ORC type with every reader category while distributing V1/V2,
+# case sensitivity, and the three reader configurations within each category across 155 cases.
 @pytest.mark.parametrize('orc_gen', flattened_orc_gens, ids=idfn)
-@pytest.mark.parametrize('case_sensitive', case_sensitive_options)
+@pytest.mark.parametrize('reader_category_index',
+                         range(len(reader_opt_conf_indices_by_category)),
+                         ids=reader_opt_conf_category_ids)
 @ignore_order(local=True)
-def test_read_with_more_columns(spark_tmp_path, orc_gen, case_sensitive):
-    case_index = flattened_orc_gens.index(orc_gen) * 2 + (case_sensitive == "true")
+def test_read_with_more_columns(spark_tmp_path, orc_gen, reader_category_index):
+    type_index = flattened_orc_gens.index(orc_gen)
+    case_index = type_index * len(reader_opt_conf_indices_by_category) + reader_category_index
+    case_sensitive = case_sensitive_options[case_index % 2]
     v1_enabled_list = ["", "orc", "orc", ""][case_index % 4]
-    reader_confs = reader_opt_confs[case_index % len(reader_opt_confs)]
+    reader_conf_indices = reader_opt_conf_indices_by_category[reader_category_index]
+    reader_confs = reader_opt_confs[reader_conf_indices[type_index % len(reader_conf_indices)]]
     if hasattr(reader_confs, 'marks'):
         # Some reader configs are pytest.param(dict, marks=ignore_order); use the dict value.
         reader_confs = reader_confs.values[0]
     # Dedicated to covering GpuMultiFileReader.getNextBuffersAndMetaAndCombine's unordered
     # wait path by letting readReadyFiles return an empty result.
-    _unordered_combine_wait_case_index = 58
+    _unordered_combine_wait_case_index = 59
     if case_index == _unordered_combine_wait_case_index:
         reader_confs = copy_and_update(reader_confs, {
             'spark.rapids.sql.reader.multithreaded.combine.waitTime': 0})
