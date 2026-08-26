@@ -300,6 +300,11 @@ run_delta_lake_tests() {
     DELTA_LAKE_VERSIONS="2.4.0"
   fi
 
+  if [[ "$SPARK_VER" == "3.5.0" && "$TEST_MODE" == "DELTA_LAKE_ONLY" ]]; then
+    # Run Delta 3.0.0 to collect JaCoCo coverage for the shim350 baseline.
+    DELTA_LAKE_VERSIONS="3.0.0"
+  fi
+
   if [[ $SPARK_VER =~ $SPARK_35X_PATTERN ]]; then
     DELTA_LAKE_VERSIONS="3.3.0"
   fi
@@ -333,8 +338,8 @@ run_delta_lake_tests() {
       echo "Running Delta Lake tests for Delta Lake version $v"
       if [[ "$v" == "4.1.0" ]]; then
         DELTA_MAIN_JAR="io.delta:delta-spark_4.1_${SCALA_BINARY_VER}:$v"
-      elif [[ "$v" == "3.3.0" || "$v" == "4.0.0" || \
-          "$v" == "4.0.1" ]]; then
+      elif [[ "$v" == "3.0.0" || "$v" == "3.3.0" || \
+          "$v" == "4.0.0" || "$v" == "4.0.1" ]]; then
         DELTA_MAIN_JAR="io.delta:delta-spark_${SCALA_BINARY_VER}:$v"
       else
         DELTA_MAIN_JAR="io.delta:delta-core_${SCALA_BINARY_VER}:$v"
