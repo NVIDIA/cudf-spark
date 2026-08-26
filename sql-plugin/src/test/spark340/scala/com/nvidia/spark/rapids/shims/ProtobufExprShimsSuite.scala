@@ -218,7 +218,8 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
 
   private case class FakeMessageDescriptor(
       syntax: String,
-      fields: Map[String, ProtobufFieldDescriptor]) extends ProtobufMessageDescriptor {
+      fields: Map[String, ProtobufFieldDescriptor],
+      override val javaStringCheckUtf8: Boolean = false) extends ProtobufMessageDescriptor {
     override def findField(name: String): Option[ProtobufFieldDescriptor] = fields.get(name)
   }
 
@@ -423,6 +424,17 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
 
     val enumResult = SparkProtobufCompat.validateDescriptorGraphSyntax(enumSchema, enumRoot)
     assert(enumResult.left.toOption.exists(_.contains("field 'status'")))
+  }
+
+  test("compat rejects strict proto2 UTF-8 validation") {
+    val schema = StructType(Seq(StructField("value", StringType, nullable = true)))
+    val root = FakeMessageDescriptor(
+      syntax = "PROTO2",
+      fields = Map("value" -> FakeFieldDescriptor("value", 1, "STRING")),
+      javaStringCheckUtf8 = true)
+
+    val result = SparkProtobufCompat.validateDescriptorGraphSyntax(schema, root)
+    assert(result.left.toOption.exists(_.contains("strict protobuf UTF-8 validation")))
   }
 
   test("compat returns Left for unsupported default value types") {

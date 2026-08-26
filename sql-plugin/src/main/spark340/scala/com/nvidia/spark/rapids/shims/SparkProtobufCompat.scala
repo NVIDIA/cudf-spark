@@ -120,6 +120,14 @@ private[shims] object SparkProtobufCompat extends Logging {
         return Left(s"$location uses unsupported ${desc.syntax} syntax; only proto2 is supported")
       }
 
+      if (desc.javaStringCheckUtf8 && schema.fields.exists { field =>
+        desc.findField(field.name).exists(_.protoTypeName == "STRING")
+      }) {
+        val location = if (path.isEmpty) "root message" else s"protobuf field '$path'"
+        return Left(
+          s"$location requires strict protobuf UTF-8 validation, which is not supported on GPU")
+      }
+
       schema.fields.foreach { field =>
         desc.findField(field.name).foreach { fieldDesc =>
           val fieldPath = if (path.isEmpty) field.name else s"$path.${field.name}"
@@ -274,6 +282,10 @@ private[shims] object SparkProtobufCompat extends Logging {
 
   private final class ReflectiveMessageDescriptor(raw: AnyRef) extends ProtobufMessageDescriptor {
     override lazy val syntax: String = readDescriptorSyntax(raw)
+    override lazy val javaStringCheckUtf8: Boolean = Try {
+      val fileOptions = PbReflect.invoke0[AnyRef](PbReflect.getFile(raw), "getOptions")
+      PbReflect.invoke0[java.lang.Boolean](fileOptions, "getJavaStringCheckUtf8").booleanValue()
+    }.getOrElse(true)
 
     override def findField(name: String): Option[ProtobufFieldDescriptor] =
       Option(PbReflect.findFieldByName(raw, name)).map(new ReflectiveFieldDescriptor(_))

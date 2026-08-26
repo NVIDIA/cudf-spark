@@ -83,6 +83,7 @@ final case class ProtobufEnumMetadata(values: Seq[ProtobufEnumValue]) {
 
 trait ProtobufMessageDescriptor {
   def syntax: String
+  def javaStringCheckUtf8: Boolean = false
   def findField(name: String): Option[ProtobufFieldDescriptor]
 }
 

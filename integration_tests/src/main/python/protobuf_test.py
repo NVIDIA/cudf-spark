@@ -198,9 +198,13 @@ def _enum(name, values, allow_alias=False):
     return {"name": name, "values": values, "allow_alias": allow_alias}
 
 
-def _build_proto2_descriptor(spark, filename, messages, file_enums=None):
+def _build_proto2_descriptor(
+        spark, filename, messages, file_enums=None, java_string_check_utf8=False):
     """Build FileDescriptorSet bytes from declarative message and enum specs."""
     D, fd = _new_proto2_file(spark, filename)
+    if java_string_check_utf8:
+        fd.setOptions(
+            D.FileOptions.newBuilder().setJavaStringCheckUtf8(True).build())
     type_map = {
         "BOOL": D.FieldDescriptorProto.Type.TYPE_BOOL,
         "INT32": D.FieldDescriptorProto.Type.TYPE_INT32,
@@ -1501,11 +1505,12 @@ def test_from_protobuf_noncanonical_raw32_tag_and_length(
 
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 @ignore_order(local=True)
-def test_from_protobuf_proto2_invalid_utf8_is_repaired(
+def test_from_protobuf_proto2_invalid_utf8_surrogate_is_repaired_once(
         local_tmp_path, from_protobuf_fn):
     desc_path, desc_bytes = _setup_protobuf_desc(
         local_tmp_path, "simple.desc", _build_simple_descriptor_set_bytes)
-    row = _encode_tag(6, 2) + _encode_varint(1) + b"\xff"
+    invalid_utf8 = b"\xed\xa0\x80"
+    row = _encode_tag(6, 2) + _encode_varint(len(invalid_utf8)) + invalid_utf8
 
     def run_on_spark(spark):
         df = spark.createDataFrame([(row,)], schema="bin binary")
@@ -1514,6 +1519,29 @@ def test_from_protobuf_proto2_invalid_utf8_is_repaired(
         return df.select(decoded.getField("s").alias("s"))
 
     assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+
+
+def _build_strict_utf8_descriptor_set_bytes(spark):
+    return _build_proto2_descriptor(
+        spark,
+        "strict_utf8.proto",
+        [_msg("StrictUtf8", [_field("value", 1, "STRING")])],
+        java_string_check_utf8=True)
+
+
+@pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
+@allow_non_gpu("ProtobufDataToCatalyst")
+def test_from_protobuf_proto2_strict_utf8_falls_back(local_tmp_path, from_protobuf_fn):
+    desc_path, desc_bytes = _setup_protobuf_desc(
+        local_tmp_path, "strict_utf8.desc", _build_strict_utf8_descriptor_set_bytes)
+
+    def run_on_spark(spark):
+        df = spark.createDataFrame([(b"\x0a\x02ok",)], schema="bin binary")
+        decoded = _call_from_protobuf(
+            from_protobuf_fn, f.col("bin"), "test.StrictUtf8", desc_path, desc_bytes)
+        return df.select(decoded.getField("value").alias("value"))
+
+    assert_gpu_fallback_collect(run_on_spark, "ProtobufDataToCatalyst")
 
 
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
