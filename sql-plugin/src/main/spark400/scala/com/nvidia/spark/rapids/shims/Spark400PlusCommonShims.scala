@@ -46,7 +46,7 @@ trait Spark400PlusCommonShims extends Spark350PlusNonDBShims {
         "Tags an array expression as known to not contain null elements (e.g. from array_compact).",
         ExprChecks.unaryProjectInputMatchesOutput(
           TypeSig.ARRAY.nested(TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.NULL +
-            TypeSig.ARRAY + TypeSig.STRUCT + TypeSig.MAP),
+            TypeSig.BINARY + TypeSig.ARRAY + TypeSig.STRUCT + TypeSig.MAP),
           TypeSig.ARRAY.nested(TypeSig.all)),
         (a, conf, p, r) => new UnaryExprMeta[KnownNotContainsNull](a, conf, p, r) {
           override def convertToGpu(child: Expression): GpuExpression =

@@ -14,7 +14,7 @@
 
 import pytest
 
-from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_are_equal_sql, assert_gpu_and_cpu_error, assert_gpu_and_cpu_same_data_or_error, assert_gpu_fallback_collect
+from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_are_equal_sql, assert_gpu_and_cpu_error, assert_gpu_and_cpu_same_data_or_error, assert_gpu_fallback_collect, assert_cpu_and_gpu_are_equal_collect_with_capture
 from data_gen import *
 from conftest import is_databricks_runtime
 from marks import incompat, allow_non_gpu, disable_ansi_mode
@@ -730,6 +730,18 @@ def test_array_filter(data_gen):
 def test_array_compact(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: unary_op_df(spark, data_gen).selectExpr('array_compact(a)'))
+
+
+@pytest.mark.skipif(is_before_spark_400(), reason="KnownNotContainsNull is used from Spark 4.0")
+@pytest.mark.parametrize('data_gen', [
+    ArrayGen(BinaryGen(max_length=10), max_length=10),
+    ArrayGen(ArrayGen(BinaryGen(max_length=10), max_length=5), max_length=5),
+    ArrayGen(StructGen([["A", BinaryGen(max_length=10)]]), max_length=5)], ids=idfn)
+def test_array_compact_binary(data_gen):
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: unary_op_df(spark, data_gen).selectExpr('array_compact(a)'),
+        exist_classes="GpuKnownNotContainsNull",
+        non_exist_classes="GpuCpuBridgeExpression")
 
 
 # Port of Spark DataFrameFunctionsSuite.test("test array_compact") - literal and corner cases.
