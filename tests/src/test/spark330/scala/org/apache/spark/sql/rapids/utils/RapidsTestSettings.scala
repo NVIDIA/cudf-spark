@@ -604,19 +604,19 @@ class RapidsTestSettings extends BackendTestSettings {
   enableSuite[RapidsFilteredScanSuite]
     .excludeByPrefix(
       "PushDown Returns ",
-      KNOWN_ISSUE(
-        "The Spark helper directly executes the CPU RowDataSourceScanExec instead of the " +
-          "query-level plan. See https://github.com/NVIDIA/cudf-spark/issues/15566. " +
-          "Recovery trigger: add query-level RAPIDS coverage for equivalent pushdown and " +
-          "column-pruning assertions; P2."))
+      ADJUST_UT(
+        "Replaced by testRapids coverage that executes the full query plan, requires " +
+          "GpuRowToColumnarExec and GpuProjectExec, and preserves the pushdown, required-column, " +
+          "unhandled-filter, and result-count assertions. See " +
+          "https://github.com/NVIDIA/cudf-spark/issues/15566."))
   enableSuite[RapidsPrunedScanSuite]
     .excludeByPrefix(
       "Columns output ",
-      KNOWN_ISSUE(
-        "The Spark helper directly executes the CPU RowDataSourceScanExec instead of the " +
-          "query-level plan. See https://github.com/NVIDIA/cudf-spark/issues/15567. " +
-          "Recovery trigger: add query-level RAPIDS coverage for equivalent column-pruning " +
-          "assertions; P2."))
+      ADJUST_UT(
+        "Replaced by testRapids coverage that executes the full query plan, requires " +
+          "GpuRowToColumnarExec and GpuProjectExec, and preserves the source-column and " +
+          "runtime row-width assertions. See " +
+          "https://github.com/NVIDIA/cudf-spark/issues/15567."))
   enableSuite[RapidsSupportsCatalogOptionsSuite]
   enableSuite[RapidsLocalTempViewTestSuite]
   enableSuite[RapidsGlobalTempViewTestSuite]

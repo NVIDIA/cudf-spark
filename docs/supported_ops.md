@@ -9596,7 +9596,7 @@ are limited.
 <td rowSpan="3">In</td>
 <td rowSpan="3">`in`</td>
 <td rowSpan="3">IN operator</td>
-<td rowSpan="3">None</td>
+<td rowSpan="3">Non-literal list expressions must be deterministic and side-effect-free</td>
 <td rowSpan="3">project</td>
 <td>value</td>
 <td>S</td>
@@ -9622,17 +9622,17 @@ are limited.
 </tr>
 <tr>
 <td>list</td>
-<td><em>PS<br/>Literal value only</em></td>
-<td><em>PS<br/>Literal value only</em></td>
-<td><em>PS<br/>Literal value only</em></td>
-<td><em>PS<br/>Literal value only</em></td>
-<td><em>PS<br/>Literal value only</em></td>
-<td><em>PS<br/>Literal value only</em></td>
-<td><em>PS<br/>Literal value only</em></td>
-<td><em>PS<br/>Literal value only</em></td>
-<td><em>PS<br/>UTC is only supported TZ for TIMESTAMP;<br/>Literal value only</em></td>
-<td><em>PS<br/>Literal value only</em></td>
-<td><em>PS<br/>Literal value only</em></td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
+<td>S</td>
+<td>S</td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>

@@ -107,6 +107,7 @@ Name | Description | Default Value | Applicable at
 <a name="sql.format.hive.text.read.enabled"></a>spark.rapids.sql.format.hive.text.read.enabled|When set to false disables Hive text table read acceleration. Array/Struct/Map columns are unsupported for read acceleration.|true|Runtime
 <a name="sql.format.hive.text.read.float.enabled"></a>spark.rapids.sql.format.hive.text.read.float.enabled|Hive text file reading is not 100% compatible when reading floats.|true|Runtime
 <a name="sql.format.hive.text.write.enabled"></a>spark.rapids.sql.format.hive.text.write.enabled|When set to false disables Hive text table write acceleration. Array/Struct/Map columns are unsupported for write acceleration.|true|Runtime
+<a name="sql.format.iceberg.deletionVector.crcCheck.enabled"></a>spark.rapids.sql.format.iceberg.deletionVector.crcCheck.enabled|When set to false, skips validation of the CRC-32 checksum of each Iceberg deletion vector. Disabling validation avoids an additional CPU pass over the deletion-vector data, but may allow corrupted deletion vectors to be read.|true|Runtime
 <a name="sql.format.iceberg.enabled"></a>spark.rapids.sql.format.iceberg.enabled|When set to false disables all Iceberg acceleration|true|Runtime
 <a name="sql.format.iceberg.read.enabled"></a>spark.rapids.sql.format.iceberg.read.enabled|When set to false disables Iceberg input acceleration|true|Runtime
 <a name="sql.format.iceberg.write.enabled"></a>spark.rapids.sql.format.iceberg.write.enabled|When set to false disables Iceberg write acceleration|true|Runtime
@@ -294,7 +295,7 @@ Name | SQL Function(s) | Description | Default Value | Notes
 <a name="sql.expression.Hour"></a>spark.rapids.sql.expression.Hour|`hour`|Returns the hour component of the string/timestamp|true|None|
 <a name="sql.expression.Hypot"></a>spark.rapids.sql.expression.Hypot|`hypot`|Pythagorean addition (Hypotenuse) of real numbers|true|None|
 <a name="sql.expression.If"></a>spark.rapids.sql.expression.If|`if`|IF expression|true|None|
-<a name="sql.expression.In"></a>spark.rapids.sql.expression.In|`in`|IN operator|true|None|
+<a name="sql.expression.In"></a>spark.rapids.sql.expression.In|`in`|IN operator|true|Non-literal list expressions must be deterministic and side-effect-free|
 <a name="sql.expression.InSet"></a>spark.rapids.sql.expression.InSet| |INSET operator|true|None|
 <a name="sql.expression.InitCap"></a>spark.rapids.sql.expression.InitCap|`initcap`|Returns str with the first letter of each word in uppercase. All other letters are in lowercase|true|This is not 100% compatible with the Spark version because the Unicode version used by cuDF and the JVM may differ, resulting in some corner-case characters not changing case correctly.|
 <a name="sql.expression.InputFileBlockLength"></a>spark.rapids.sql.expression.InputFileBlockLength|`input_file_block_length`|Returns the length of the block being read, or -1 if not available|true|None|

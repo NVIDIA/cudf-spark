@@ -565,6 +565,30 @@ def test_string_to_timestamp_functions_ansi_valid(parser_policy):
     assert_gpu_and_cpu_are_equal_collect(fun, conf=copy_and_update(parser_policy_dic, ansi_enabled_conf))
 
 
+exception_policy_operators = [
+    "to_unix_timestamp", "unix_timestamp", "to_timestamp", "to_date"]
+if not is_before_spark_350():
+    exception_policy_operators.append("try_to_timestamp")
+
+
+@pytest.mark.parametrize('ansi_enabled', [True, False], ids=['ANSI_ON', 'ANSI_OFF'])
+@pytest.mark.parametrize('operator', exception_policy_operators, ids=idfn)
+def test_string_to_timestamp_functions_exception_policy_disagreement(ansi_enabled, operator):
+    def fun(spark):
+        return spark.createDataFrame([("2024-05-06xxx",)], "a string") \
+            .selectExpr("{}(a, 'yyyy-MM-dd')".format(operator)) \
+            .collect()
+
+    assert_gpu_and_cpu_error(
+        fun,
+        conf={
+            'spark.sql.ansi.enabled': ansi_enabled,
+            'spark.sql.legacy.timeParserPolicy': 'EXCEPTION',
+            'spark.rapids.sql.incompatibleDateFormats.enabled': False,
+        },
+        error_message="different result")
+
+
 @pytest.mark.parametrize('ansi_enabled', [True, False], ids=['ANSI_ON', 'ANSI_OFF'])
 @pytest.mark.parametrize('data_gen', date_n_time_gens, ids=idfn)
 @tz_sensitive_test

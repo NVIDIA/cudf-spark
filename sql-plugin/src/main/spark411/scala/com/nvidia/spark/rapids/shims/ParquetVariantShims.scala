@@ -29,12 +29,13 @@ import org.apache.spark.sql.internal.SQLConf
 
 /**
  * Shim for Parquet variant-related configurations in Spark 4.1.0+.
- * Sets PARQUET_ANNOTATE_VARIANT_LOGICAL_TYPE which is required by ParquetWriteSupport.
+ * Applies PARQUET_ANNOTATE_VARIANT_LOGICAL_TYPE without replacing a Spark 4.2+ per-write option.
  */
 object ParquetVariantShims {
   def setupParquetVariantConfig(conf: Configuration, sqlConf: SQLConf): Unit = {
-    // Set the variant annotation config that SparkToParquetSchemaConverter requires
-    conf.set(
+    // SparkToParquetSchemaConverter requires this value in the Hadoop configuration.
+    FileWriteOptionsShims.setConfWithWriteOptionPrecedence(
+      conf,
       SQLConf.PARQUET_ANNOTATE_VARIANT_LOGICAL_TYPE.key,
       sqlConf.parquetAnnotateVariantLogicalType.toString)
   }
