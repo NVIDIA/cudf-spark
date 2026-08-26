@@ -340,8 +340,7 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
     private case object NotReady extends WorkState
     private case object EmptyPartition extends WorkState
     private case class ReadyRecord(
-        queue: ConcurrentLinkedQueue[Future[CompressedRecord]],
-        future: Future[CompressedRecord]) extends WorkState
+        queue: ConcurrentLinkedQueue[Future[CompressedRecord]]) extends WorkState
     private case object FinishedPartition extends WorkState
 
     def schedule(): Unit = {
@@ -386,12 +385,11 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
               // The producer has advanced beyond this partition without adding records.
               writer.getPartitionWriter(currentPartitionToWrite).openStream().close()
               currentPartitionToWrite += 1
-            case ReadyRecord(recordQueue, future) =>
+            case ReadyRecord(recordQueue) =>
               if (outputStream == null) {
                 outputStream = writer.getPartitionWriter(currentPartitionToWrite).openStream()
               }
-              recordQueue.poll()
-              writeRecord(future.get())
+              writeRecord(recordQueue)
             case FinishedPartition =>
               closeOutputStream()
               partitionRecords.remove(currentPartitionToWrite)
@@ -407,6 +405,7 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
         case _: InterruptedException =>
           Thread.currentThread().interrupt()
           completionFuture.cancel(true)
+          limiter.signalFailure()
         case t: Throwable => fail(t)
       } finally {
         stepFuture.set(null)
@@ -436,7 +435,7 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
           } else {
             val future = recordQueue.peek()
             if (future != null && future.isDone) {
-              ReadyRecord(recordQueue, future)
+              ReadyRecord(recordQueue)
             } else if (future == null && currentPartitionToWrite < maxQueued) {
               FinishedPartition
             } else {
@@ -449,17 +448,25 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
 
     private def hasReadyWork: Boolean = currentWorkState != NotReady
 
-    private def writeRecord(record: CompressedRecord): Unit = {
+    private def writeRecord(queue: ConcurrentLinkedQueue[Future[CompressedRecord]]): Unit = {
+      var record: CompressedRecord = null
+      var buffer: OpenByteArrayOutputStream = null
       try {
-        withResource(record.buffer) { buffer =>
-          if (record.compressedSize > 0) {
-            outputStream.write(buffer.getBuf, 0, record.compressedSize.toInt)
+        record = queue.peek().get()
+        buffer = record.buffer
+        if (record.compressedSize > 0) {
+          outputStream.write(buffer.getBuf, 0, record.compressedSize.toInt)
+        }
+        queue.poll()
+      } finally {
+        if (record != null) {
+          val toRelease = record.quotaToRelease.getAndSet(0)
+          if (toRelease > 0) {
+            limiter.release(toRelease)
           }
         }
-      } finally {
-        val toRelease = record.quotaToRelease.getAndSet(0)
-        if (toRelease > 0) {
-          limiter.release(toRelease)
+        if (buffer != null) {
+          buffer.close()
         }
       }
     }
@@ -487,15 +494,16 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
       limiter.signalFailure()
       // Also release quota for already-completed futures that writeRecord will never see.
       partitionRecords.values().asScala.foreach { recordQueue =>
-        val future = recordQueue.peek()
-        if (future != null && future.isDone && !future.isCancelled) {
-          try {
-            val toRelease = future.get().quotaToRelease.getAndSet(0)
-            if (toRelease > 0) {
-              limiter.release(toRelease)
+        recordQueue.forEach { future =>
+          if (future != null && future.isDone && !future.isCancelled) {
+            try {
+              val toRelease = future.get().quotaToRelease.getAndSet(0)
+              if (toRelease > 0) {
+                limiter.release(toRelease)
+              }
+            } catch {
+              case _: Exception => // quota was released in the compression catch block
             }
-          } catch {
-            case _: Exception => // quota was released in the compression catch block
           }
         }
       }
@@ -1156,7 +1164,7 @@ class BytesInFlightLimiter(maxBytesInFlight: Long) {
       true
     } else {
       synchronized {
-        if (inFlight == 0 || sz + inFlight < maxBytesInFlight) {
+        if (inFlight == 0 || sz + inFlight <= maxBytesInFlight) {
           inFlight += sz
           true
         } else {
@@ -1330,22 +1338,10 @@ abstract class RapidsShuffleThreadedReaderBase[K, C](
     // Register a completion handler to close any queued cbs,
     // pending iterators, or futures
     onTaskCompletion(context) {
-      // remove any materialized batches
-      queued.forEach {
-        case (_, cb:ColumnarBatch) => cb.close()
-      }
-      queued.clear()
-
-      // close any materialized BlockState objects that are holding onto netty buffers or
-      // file descriptors
-      pendingIts.safeClose()
-      pendingIts.clear()
-
-      // we could have futures left that are either done or in flight
-      // we need to cancel them and then close out any `BlockState`
-      // objects that were created (to remove netty buffers or file descriptors)
+      // Cancel/join futures first so that no deserializeTask thread can call
+      // queued.offer() after we drain the queue below.
       val futuresAndCancellations = futures.map { f =>
-        val didCancel = f.cancel(true)
+        val didCancel = try { f.cancel(true) } catch { case _: Exception => false }
         (f, didCancel)
       }
 
@@ -1360,8 +1356,7 @@ abstract class RapidsShuffleThreadedReaderBase[K, C](
             // this could either be a successful future, or it finished with exception
             // the case when it will fail with exception is when the underlying stream is closed
             // as part of the shutdown process of the task.
-            future.get(10, TimeUnit.MILLISECONDS)
-              .foreach(_.close())
+            future.get(10, TimeUnit.MILLISECONDS).foreach(_.close())
           } catch {
             case t: Throwable =>
               // this is going to capture the first exception and not worry about others
@@ -1373,6 +1368,18 @@ abstract class RapidsShuffleThreadedReaderBase[K, C](
           }
         }
       futures.clear()
+
+      // All futures are now done or cancelled — no more queued.offer() calls can arrive.
+      // Safe to drain queued and pendingIts without a race.
+      queued.forEach {
+        case (_, cb:ColumnarBatch) => cb.close()
+      }
+      queued.clear()
+
+      // close any materialized BlockState objects that are holding onto netty buffers or
+      // file descriptors
+      pendingIts.safeClose()
+      pendingIts.clear()
       try {
         if (fallbackIter != null) {
           fallbackIter.close()
@@ -1486,18 +1493,29 @@ abstract class RapidsShuffleThreadedReaderBase[K, C](
           // here while we wait.
           waitTimeStart = System.nanoTime()
           val res = queued.take()
-          val queueWaitThisCall = System.nanoTime() - waitTimeStart
-          // limiter is now released immediately after deserialization in deserializeTask
-          res match {
-            case (_, _: ColumnarBatch) =>
-              popFetchedIfAvailable()
-            case _ => // do nothing
+          var success = false
+          try {
+            val queueWaitThisCall = System.nanoTime() - waitTimeStart
+            // limiter is now released immediately after deserialization in deserializeTask
+            res match {
+              case (_, _: ColumnarBatch) =>
+                popFetchedIfAvailable()
+              case _ => // do nothing
+            }
+            waitTime += queueWaitThisCall
+            deserWaitTimeNs.foreach(_ += queueWaitThisCall)
+            deserializationTimeNs.foreach(_ += waitTime)
+            shuffleReadTimeNs.foreach(_ += waitTime)
+            success = true
+            res
+          } finally {
+            if (!success) {
+              res match {
+                case (_, cb: ColumnarBatch) => cb.close()
+                case _ => // do nothing
+              }
+            }
           }
-          waitTime += queueWaitThisCall
-          deserWaitTimeNs.foreach(_ += queueWaitThisCall)
-          deserializationTimeNs.foreach(_ += waitTime)
-          shuffleReadTimeNs.foreach(_ += waitTime)
-          res
         }
 
         val uncompressedSize = result match {
