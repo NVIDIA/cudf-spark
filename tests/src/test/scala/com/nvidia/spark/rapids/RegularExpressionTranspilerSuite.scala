@@ -386,14 +386,25 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
       "Case-insensitive matching is not supported for escapes that resolve to a letter")
   }
 
-  test("cuDF does not support case-insensitive matching of Lower/Upper predefined classes") {
-    // JDK 8/11 do not apply CASE_INSENSITIVE to named \p{Lower}/\p{Upper} predicates, while
-    // JDK 17+ do, so folding them to [a-zA-Z] would diverge from the CPU on JDK 8/11; fall
-    // back instead. \P shares the code path via its class name.
-    for (p <- Seq(raw"(?i)\p{Lower}", raw"(?i)\p{Upper}", raw"(?i)\P{Lower}", raw"(?i)\P{Upper}")) {
-      assertUnsupported(p, RegexFindMode,
-        "Case-insensitive matching is not supported for Upper/Lower predefined character " +
-        "classes")
+  test("case-insensitive matching of Lower/Upper predefined classes is gated on the Spark " +
+      "version") {
+    // Older JDKs did not apply CASE_INSENSITIVE to the named \p{Lower}/\p{Upper} predicates
+    // (JDK-8214245), so GPU case-folding would diverge from the CPU there. Use the Spark version
+    // as a proxy for the executor JDK version to see if we need to fall back to the CPU.
+    // \P shares the code path via its class name.
+    if (VersionUtils.isSpark400OrLater) {
+      doTranspileTest(raw"(?i)\p{Lower}", "[a-zA-Z]")
+      doTranspileTest(raw"(?i)\p{Upper}", "[A-Za-z]")
+      doTranspileTest(raw"(?i)\P{Lower}", "(?:[\r]|[^a-zA-Z])")
+      doTranspileTest(raw"(?i)\P{Upper}", "(?:[\r]|[^A-Za-z])")
+    } else {
+      val patterns = Seq(raw"(?i)\p{Lower}", raw"(?i)\p{Upper}",
+        raw"(?i)\P{Lower}", raw"(?i)\P{Upper}")
+      patterns.foreach { p =>
+        assertUnsupported(p, RegexFindMode,
+          "Case-insensitive matching is not supported for Upper/Lower predefined character " +
+          "classes on this Spark version")
+      }
     }
     // the fallback is specific to Lower/Upper predefined classes: a hand-written range still folds
     doTranspileTest("(?i)[a-z]", "[a-zA-Z]")

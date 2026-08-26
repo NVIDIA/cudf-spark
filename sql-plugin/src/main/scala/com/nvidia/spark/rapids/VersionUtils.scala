@@ -24,6 +24,8 @@ object VersionUtils extends Logging {
 
   lazy val isSpark320OrLater: Boolean = cmpSparkVersion(3, 2, 0) >= 0
 
+  lazy val isSpark400OrLater: Boolean = cmpSparkVersion(4, 0, 0) >= 0
+
   lazy val isSpark: Boolean = {
     ShimLoader.getShimVersion.isInstanceOf[SparkShimVersion]
   }

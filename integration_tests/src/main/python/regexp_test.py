@@ -1207,15 +1207,29 @@ def test_rlike_fallback_inline_flags_with_anchors():
 
 @allow_non_gpu('ProjectExec', 'RLike')
 def test_rlike_fallback_case_insensitive_predefined_class():
-    # JDK 8/11 do not apply CASE_INSENSITIVE to the named \p{Lower}/\p{Upper} predicates, while
-    # JDK 17+ do, so GPU case-folding would diverge from the CPU there; these fall back to the CPU.
-    # Uses the DataFrame API (single backslash, one escaping layer) like the repro.
+    # Older JDKs did not apply CASE_INSENSITIVE to the named \p{Lower}/\p{Upper} predicates
+    # (JDK-8214245), so GPU case-folding would diverge from the CPU there. Use the Spark version
+    # as a proxy for the executor JDK version to see if we need to fall back to the CPU.
+    if not is_before_spark_400():
+        pytest.skip('Spark 4.0+ (JDK 17+) folds these predefined classes on the GPU')
     from pyspark.sql.functions import col
-    gen = mk_str_gen('[a-dA-D]{1,3}')
+    gen = mk_str_gen('[a-dA-D0-9]{1,4}')
     for pattern in [r'(?i)\p{Lower}', r'(?i)\p{Upper}', r'(?i)\P{Lower}', r'(?i)\P{Upper}']:
         assert_gpu_fallback_collect(
             lambda spark, pattern=pattern: unary_op_df(spark, gen).select(col('a').rlike(pattern)),
             'RLike',
+            conf=_regexp_conf)
+
+def test_rlike_case_insensitive_predefined_class_matches():
+    # Inverse of the above fallback test: on Spark 4.0+ (JDK 17+, past JDK-8214245) the CPU folds
+    # \p{Lower}/\p{Upper} under (?i) the same way the GPU does, so these stay on the GPU and match.
+    if is_before_spark_400():
+        pytest.skip('Spark < 4.0 may run on a pre-15 JDK and falls back for these patterns')
+    from pyspark.sql.functions import col
+    gen = mk_str_gen('[a-dA-D0-9]{1,4}')
+    for pattern in [r'(?i)\p{Lower}', r'(?i)\p{Upper}', r'(?i)\P{Lower}', r'(?i)\P{Upper}']:
+        assert_gpu_and_cpu_are_equal_collect(
+            lambda spark, pattern=pattern: unary_op_df(spark, gen).select(col('a').rlike(pattern)),
             conf=_regexp_conf)
 
 def test_regexp_extract_all_idx_zero():

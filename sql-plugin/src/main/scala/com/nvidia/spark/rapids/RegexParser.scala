@@ -1398,10 +1398,15 @@ class CudfRegexTranspiler(mode: RegexMode) {
         regex
 
       case cc @ RegexCharacterClass(negated, characters) =>
-        if (flags.caseInsensitive && cc.fromPredefined.exists(Set("Lower", "Upper"))) {
+        // java.util.regex did not apply CASE_INSENSITIVE to the named \p{Lower}/\p{Upper}
+        // predicates prior to JDK 15 (JDK-8214245), so folding them to [a-zA-Z] diverges
+        // from the CPU on older JDKs. Use Spark version as a proxy for the executor JDK
+        // version to gate falling back to the CPU. \P shares this path via its class name.
+        if (flags.caseInsensitive && cc.fromPredefined.exists(Set("Lower", "Upper")) &&
+            !VersionUtils.isSpark400OrLater) {
           throw new RegexUnsupportedException(
             "Case-insensitive matching is not supported for Upper/Lower predefined character " +
-            "classes",
+            "classes on this Spark version",
             cc.position)
         }
         characters.foreach {
