@@ -20,9 +20,11 @@ import com.nvidia.spark.rapids.GpuMetric;
 import com.nvidia.spark.rapids.RapidsConf;
 import com.nvidia.spark.rapids.ShimLoader;
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
+import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 
 import org.apache.hadoop.fs.Path;
 import org.apache.iceberg.ContentFile;
+import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
@@ -60,6 +62,17 @@ public class ShimUtils {
 
     public static int formatVersion(Table table) {
         return IMPL.formatVersion(table);
+    }
+
+    public static boolean isDeletionVector(DeleteFile deleteFile) {
+        return IMPL.isDeletionVector(deleteFile);
+    }
+
+    public static IcebergDeletionVector readDeletionVector(DeleteFile deleteFile,
+                                                             RapidsInputFile inputFile,
+                                                             boolean validateCrc)
+            throws IOException {
+        return IMPL.readDeletionVector(deleteFile, inputFile, validateCrc);
     }
 
     public static Map<Integer, ?> constantsMap(FileScanTask task, Schema readSchema,
