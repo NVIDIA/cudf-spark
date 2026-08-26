@@ -18,21 +18,26 @@ package com.nvidia.spark.rapids
 
 import java.io.File
 
+import scala.util.control.NonFatal
+
 import ai.rapids.cudf.{ColumnVector, DType, HostColumnVectorCore, Table}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.shims.SparkShimImpl
 import org.scalatest.Assertions
 
 import org.apache.spark.SparkConf
-import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.{Dataset, SparkSession}
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanExec
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /** A collection of utility methods useful in tests. */
 object TestUtils extends Assertions {
+  private val planValidationTimeoutMillis = 10000L
+
   // Need to set a legacy config to allow clearing the active session
   private val clearSessionConf = {
     val conf = new SQLConf
@@ -50,6 +55,56 @@ object TestUtils extends Assertions {
     val module = Class.forName("org.apache.spark.sql.execution.columnar.InMemoryRelation$")
         .getField("MODULE$").get(null)
     module.getClass.getMethod("clearSerializer").invoke(module)
+  }
+
+  def withFinalPlanValidation[U](f: => U): U = {
+    ExecutionPlanCaptureCallback.startValidation(planValidationTimeoutMillis)
+
+    var result: Option[U] = None
+    var primaryError: Throwable = null
+    try {
+      val callbackResult = f
+      callbackResult match {
+        case _: Dataset[_] =>
+          throw new IllegalStateException(
+            "A Dataset must not be returned from a GPU Spark session callback because its " +
+              "execution would escape final-plan validation. Execute the action inside the " +
+              "callback and return the materialized result instead.")
+        case _ => result = Some(callbackResult)
+      }
+    } catch {
+      case NonFatal(t) => primaryError = t
+    }
+
+    var validationError: String = null
+    try {
+      validationError = ExecutionPlanCaptureCallback.getValidationErrorWithTimeout(
+        planValidationTimeoutMillis)
+    } catch {
+      case NonFatal(validationFailure) if primaryError != null =>
+        primaryError.addSuppressed(validationFailure)
+    }
+
+    if (primaryError != null) {
+      if (validationError != null) {
+        primaryError.addSuppressed(new AssertionError(validationError))
+      }
+      throw primaryError
+    }
+    if (validationError != null) {
+      throw new AssertionError(validationError)
+    }
+    result.get
+  }
+
+  /** Execute a physical plan directly and validate it after successful completion. */
+  def executeAndValidatePlan[U](plan: SparkPlan)(f: => U): U = {
+    val validationContext = TestPlanValidator.resolveValidationContext(plan)
+      .getOrElse(TestPlanValidator.captureValidationContext(plan))
+    val result = f
+    TestPlanValidator.tagForValidation(plan, validationContext)
+    TestPlanValidator.validatePlan(plan)
+    result
   }
 
   /** Compare the equality of two tables */
@@ -142,10 +197,12 @@ object TestUtils extends Assertions {
         .config(conf)
         .config(RapidsConf.SQL_ENABLED.key, "true")
         .config("spark.plugins", "com.nvidia.spark.SQLPlugin")
+        .config("spark.sql.queryExecutionListeners",
+          "org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback")
         .appName(classOf[GpuPartitioningSuite].getSimpleName)
         .getOrCreate()
     try {
-      f(spark)
+      withFinalPlanValidation(f(spark))
     } finally {
       spark.stop()
       SQLConf.withExistingConf(clearSessionConf) {

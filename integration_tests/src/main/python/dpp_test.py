@@ -19,7 +19,7 @@ from pyspark.sql.types import IntegerType
 from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, assert_gpu_and_cpu_are_equal_collect
 from conftest import spark_tmp_table_factory
 from data_gen import *
-from marks import ignore_order, allow_non_gpu, datagen_overrides
+from marks import ignore_order, allow_non_gpu, allow_non_gpu_conditional, datagen_overrides
 from spark_session import is_before_spark_320, with_cpu_session, is_before_spark_312, is_databricks_runtime, is_databricks113_or_later, is_databricks_version_or_later
 
 # non-positive values here can produce a degenerative join, so here we ensure that most values are
@@ -182,8 +182,8 @@ dpp_fallback_execs=["CollectLimitExec"] if is_databricks_version_or_later(14,3) 
 @pytest.mark.parametrize('s_index', list(range(len(_statements))), ids=idfn)
 @pytest.mark.parametrize('aqe_enabled', [
     'false',
-    pytest.param('true', marks=pytest.mark.skipif(is_before_spark_320() and not is_databricks_runtime(),
-                                                  reason='Only in Spark 3.2.0+ AQE and DPP can be both enabled'))
+    pytest.param('true', marks=allow_non_gpu_conditional(
+        is_databricks_runtime(), 'SubqueryBroadcastExec'))
 ], ids=idfn)
 def test_dpp_reuse_broadcast_exchange(spark_tmp_table_factory, store_format, s_index, aqe_enabled):
     fact_table, dim_table = spark_tmp_table_factory.get(), spark_tmp_table_factory.get()
@@ -296,8 +296,8 @@ dpp_like_any_fallback_execs=['FilterExec', 'CollectLimitExec', 'LikeAny'] if is_
 @pytest.mark.parametrize('store_format', ['parquet', 'orc'], ids=idfn)
 @pytest.mark.parametrize('aqe_enabled', [
     'false',
-    pytest.param('true', marks=pytest.mark.skipif(is_before_spark_320() and not is_databricks_runtime(),
-                                                  reason='Only in Spark 3.2.0+ AQE and DPP can be both enabled'))
+    pytest.param('true', marks=allow_non_gpu_conditional(
+        is_databricks_runtime(), 'SubqueryBroadcastExec'))
 ], ids=idfn)
 @pytest.mark.skipif(is_before_spark_312(), reason="DPP over LikeAny/LikeAll filter not enabled until Spark 3.1.2")
 def test_dpp_like_any(spark_tmp_table_factory, store_format, aqe_enabled):
@@ -334,8 +334,9 @@ def test_dpp_like_any(spark_tmp_table_factory, store_format, aqe_enabled):
 # Test handling DPP expressions from a HashedRelation that rearranges columns
 @pytest.mark.parametrize('aqe_enabled', [
     'false',
-    pytest.param('true', marks=pytest.mark.skipif(is_before_spark_320() and not is_databricks_runtime(),
-                                                  reason='Only in Spark 3.2.0+ AQE and DPP can be both enabled'))
+    pytest.param('true', marks=pytest.mark.xfail(
+        condition=is_databricks_runtime(),
+        reason='https://github.com/NVIDIA/cudf-spark/issues/15586'))
 ], ids=idfn)
 def test_dpp_from_swizzled_hash_keys(spark_tmp_table_factory, aqe_enabled):
     dim_table = spark_tmp_table_factory.get()

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,7 @@ package org.apache.spark.sql.rapids
 
 import java.sql.Timestamp
 
-import com.nvidia.spark.rapids.{GpuFilterExec, RapidsConf, SparkQueryCompareTestSuite}
+import com.nvidia.spark.rapids.{GpuFilterExec, RapidsConf, SparkQueryCompareTestSuite, TestUtils}
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.execution.{FilterExec, SparkPlan}
@@ -34,7 +34,9 @@ class OrcFilterSuite extends SparkQueryCompareTestSuite {
       case FilterExec(_, child) => child
       case GpuFilterExec(_, child) => child
     }
-    val actual = spark.internalCreateDataFrame(withoutFilters.execute(), schema, false).count()
+    val actual = TestUtils.executeAndValidatePlan(withoutFilters) {
+      spark.internalCreateDataFrame(withoutFilters.execute(), schema, false).count()
+    }
     assert(0 < actual && actual < numRows)
   }
 

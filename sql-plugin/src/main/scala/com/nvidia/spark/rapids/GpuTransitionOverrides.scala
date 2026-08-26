@@ -28,17 +28,15 @@ import com.nvidia.spark.rapids.shims.{GpuBatchScanExec, SparkShimImpl}
 
 import org.apache.spark.SparkContext
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, AttributeReference, BoundReference, Expression, Literal, SortOrder}
+import org.apache.spark.sql.catalyst.expressions.{Ascending, AttributeReference, Expression, SortOrder}
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.trees.TreeNodeTag
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.adaptive._
-import org.apache.spark.sql.execution.columnar.InMemoryTableScanExec
-import org.apache.spark.sql.execution.command.{DataWritingCommandExec, ExecutedCommandExec}
-import org.apache.spark.sql.execution.datasources.v2.{DataSourceV2ScanExecBase, DropTableExec, ShowTablesExec}
-import org.apache.spark.sql.execution.exchange.{BroadcastExchangeLike, ENSURE_REQUIREMENTS,
-  Exchange, ReusedExchangeExec, ShuffleExchangeLike}
-import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, BroadcastNestedLoopJoinExec}
+import org.apache.spark.sql.execution.command.DataWritingCommandExec
+import org.apache.spark.sql.execution.datasources.v2.DataSourceV2ScanExecBase
+import org.apache.spark.sql.execution.exchange.{ENSURE_REQUIREMENTS, Exchange, ReusedExchangeExec,
+  ShuffleExchangeLike}
 import org.apache.spark.sql.rapids.{GpuDataSourceScanExec, GpuFileSourceScanExec, GpuShuffleEnv, GpuTaskMetrics}
 import org.apache.spark.sql.rapids.execution.{ExchangeMappingCache, GpuBroadcastExchangeExec, GpuBroadcastExchangeExecBase, GpuBroadcastToRowExec, GpuCustomShuffleReaderExec, GpuHashJoin, GpuShuffleExchangeExecBase, GpuSubqueryBroadcastExec}
 import org.apache.spark.sql.types.StructType
@@ -636,157 +634,11 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
     }
   }
 
-  def assertIsOnTheGpu(exp: Expression, conf: RapidsConf): Unit = {
-    // There are no GpuAttributeReference or GpuSortOrder
-    exp match {
-      case _: AttributeReference | _: SortOrder =>
-        // These are always allowed
-      case bridge: GpuCpuBridgeExpression =>
-        // For bridge expressions, validate the CPU expressions inside
-        assertBridgeExpressionsAllowed(bridge, conf)
-      case _: BoundReference | _: Literal =>
-          // These are always allowed, and ignored
-      case _: GpuExpression =>
-        // Regular GPU expressions are allowed
-      case _ =>
-        val classBaseName = PlanUtils.getBaseNameFromClass(exp.getClass.toString)
-        if (!conf.testingAllowedNonGpu.contains(classBaseName)) {
-          throw new IllegalArgumentException(s"The expression $exp is not columnar ${exp.getClass}")
-        }
-    }
-    exp.children.foreach(subExp => assertIsOnTheGpu(subExp, conf))
-  }
+  def assertIsOnTheGpu(exp: Expression, conf: RapidsConf): Unit =
+    TestPlanValidator.assertIsOnTheGpu(exp, conf)
 
-  /**
-   * Validates that all CPU expressions within a GpuCpuBridgeExpression are allowed in test mode.
-   * This function recursively traverses the CPU expression tree inside the bridge and checks
-   * each CPU expression against the testingAllowedNonGpu allowlist.
-   */
-  def assertBridgeExpressionsAllowed(bridge: GpuCpuBridgeExpression, conf: RapidsConf): Unit = {
-    val disallowedExprs = scala.collection.mutable.ListBuffer[String]()
-    val allowedExprs = scala.collection.mutable.ListBuffer[String]()
-
-    def collectCpuExpressions(expr: Expression, path: String = ""): Unit = {
-      val currentPath = if (path.isEmpty) {
-        expr.getClass.getSimpleName
-      } else {
-        s"$path.${expr.getClass.getSimpleName}"
-      }
-
-      expr match {
-        case _: Literal | _: BoundReference => ()
-        case _ =>
-          val classBaseName = PlanUtils.getBaseNameFromClass(expr.getClass.toString)
-          if (conf.testingAllowedNonGpu.contains(classBaseName)) {
-            allowedExprs += s"$currentPath ($classBaseName) [ALLOWED]"
-          } else {
-            disallowedExprs += s"$currentPath ($classBaseName) [NOT ALLOWED]"
-          }
-      }
-
-      expr.children.zipWithIndex.foreach { case (child, index) =>
-        collectCpuExpressions(child, s"$currentPath.child[$index]")
-      }
-    }
-
-    collectCpuExpressions(bridge.cpuExpression)
-
-    if (disallowedExprs.nonEmpty) {
-      val errorMessage = new StringBuilder()
-      errorMessage.append(s"GpuCpuBridgeExpression contains disallowed CPU expressions:\n")
-      errorMessage.append(s"Bridge: ${bridge.toString}\n")
-      errorMessage.append(s"CPU Expression Tree Analysis:\n")
-
-      // Show disallowed expressions first
-      errorMessage.append("  DISALLOWED EXPRESSIONS:\n")
-      disallowedExprs.foreach(expr => errorMessage.append(s"    - $expr\n"))
-
-      // When everything is allowed there is nothing to report; allowed expressions are only
-      // included as context when reporting a disallowed expression.
-      if (allowedExprs.nonEmpty) {
-        errorMessage.append("  ALLOWED EXPRESSIONS (for context):\n")
-        allowedExprs.foreach(expr => errorMessage.append(s"    - $expr\n"))
-      }
-
-      throw new IllegalArgumentException(errorMessage.toString())
-    }
-  }
-
-  def assertIsOnTheGpu(plan: SparkPlan, conf: RapidsConf): Unit = {
-    def isTestExempted(plan: SparkPlan): Boolean = {
-      conf.testingAllowedNonGpu.exists(PlanUtils.sameClass(plan, _))
-    }
-    val isAdaptiveEnabled = plan.conf.adaptiveExecutionEnabled
-    plan match {
-      case _: BroadcastExchangeLike if isAdaptiveEnabled =>
-        // broadcasts are left on CPU for now when AQE is enabled
-      case _: BroadcastHashJoinExec | _: BroadcastNestedLoopJoinExec
-          if isAdaptiveEnabled =>
-        // broadcasts are left on CPU for now when AQE is enabled
-      case p if SparkShimImpl.isAqePlan(p)  =>
-        // we do not yet fully support GPU-acceleration when AQE is enabled, so we skip checking
-        // the plan in this case - https://github.com/NVIDIA/spark-rapids/issues/5
-      case lts: LocalTableScanExec =>
-        if (!lts.expressions.forall(_.isInstanceOf[AttributeReference])) {
-          throw new IllegalArgumentException("It looks like some operations were " +
-            s"pushed down to LocalTableScanExec ${lts.expressions.mkString(",")}")
-        }
-      case imts: InMemoryTableScanExec =>
-        if (!imts.expressions.forall(_.isInstanceOf[AttributeReference])) {
-          throw new IllegalArgumentException("It looks like some operations were " +
-            s"pushed down to InMemoryTableScanExec ${imts.expressions.mkString(",")}")
-        }
-      // some metadata operations, may add more when needed
-      case _: ShowTablesExec =>
-      case _: DropTableExec =>
-      case _: RDDScanExec => () // Ignored
-      case p if SparkShimImpl.skipAssertIsOnTheGpu(p) => () // Ignored
-      case p: ExecutedCommandExec if !isTestExempted(p) =>
-        val meta = GpuOverrides.wrapPlan(p, conf, None)
-        if (!meta.suppressWillWorkOnGpuInfo) {
-          throw new IllegalArgumentException("Part of the plan is not columnar " +
-              s"${p.getClass}\n$p")
-        }
-      case other =>
-        if (!plan.isInstanceOf[GpuExec] &&
-          !isTestExempted(plan) &&
-          !conf.testingAllowedNonGpu.contains(
-            PlanUtils.getBaseNameFromClass(other.getClass.toString))) {
-          throw new IllegalArgumentException(s"Part of the plan is not columnar " +
-            s"${plan.getClass}\n${plan}")
-        }
-        // Check child expressions if this is a GPU node
-        plan match {
-          case gpuExec: GpuExec =>
-            // filter out the output expressions since those are not GPU expressions
-            val planOutput = gpuExec.output.toSet
-            gpuExec.gpuExpressions.filter(_ match {
-                case a: Attribute => !planOutput.contains(a)
-                case _ => true
-            }).foreach(assertIsOnTheGpu(_, conf))
-          case _ =>
-        }
-    }
-    plan.children.foreach(assertIsOnTheGpu(_, conf))
-  }
-
-  /**
-   * This is intended for testing only and this only supports looking for an exec once.
-   */
-  private def validateExecsInGpuPlan(plan: SparkPlan, conf: RapidsConf): Unit = {
-    val validateExecs = conf.validateExecsInGpuPlan.toSet
-    if (validateExecs.nonEmpty) {
-      def planContainsInstanceOf(plan: SparkPlan): Boolean = {
-        validateExecs.contains(plan.getClass.getSimpleName)
-      }
-      // to set to make uniq execs
-      val execsFound = PlanUtils.findOperators(plan, planContainsInstanceOf).toSet
-      val execsNotFound = validateExecs.diff(execsFound.map(_.getClass.getSimpleName))
-      require(execsNotFound.isEmpty,
-        s"Plan ${plan.toString()} does not contain the following execs: " +
-        execsNotFound.mkString(","))
-    }
-  }
+  def assertBridgeExpressionsAllowed(bridge: GpuCpuBridgeExpression, conf: RapidsConf): Unit =
+    TestPlanValidator.assertBridgeExpressionsAllowed(bridge, conf)
 
   def detectAndTagFinalColumnarOutput(plan: SparkPlan): SparkPlan = plan match {
     case d: DeserializeToObjectExec if d.child.isInstanceOf[GpuColumnarToRowExec] =>
@@ -949,6 +801,11 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
     if (rapidsConf.isSqlEnabled && rapidsConf.isSqlExecuteOnGPU) {
       GpuOverrides.logDuration(rapidsConf.shouldExplain,
         t => f"GPU plan transition optimization took $t%.2f ms") {
+        val validationContext = if (rapidsConf.isTestEnabled) {
+          TestPlanValidator.captureValidationContext(plan)
+        } else {
+          TestPlanValidator.validationDisabledContext
+        }
         var updatedPlan = DeltaProvider().pruneFileMetadata(plan)
         if (DeltaProvider().isPushDVPredicateDownEnabled(rapidsConf)) {
           updatedPlan = DeltaProvider().tryPushDVPredicateDownToScan(updatedPlan)
@@ -977,14 +834,6 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
         if (rapidsConf.exportColumnarRdd) {
           updatedPlan = detectAndTagFinalColumnarOutput(updatedPlan)
         }
-        if (rapidsConf.isTestEnabled) {
-          assertIsOnTheGpu(updatedPlan, rapidsConf)
-          // Generate the canonicalized plan to ensure no incompatibilities.
-          // The plan itself is not currently checked.
-          updatedPlan.canonicalized
-          validateExecsInGpuPlan(updatedPlan, rapidsConf)
-        }
-
         // Some distributions of Spark don't properly transform the plan after the
         // plugin performs its final transformations of the plan. In this case, we 
         // need to apply any remaining rules that should have been applied.
@@ -1010,7 +859,7 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
         }
 
         insertStageLevelMetrics(updatedPlan)
-        updatedPlan
+        TestPlanValidator.tagForValidation(updatedPlan, validationContext)
       }
     } else {
       plan

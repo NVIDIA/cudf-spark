@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,9 +18,10 @@ package org.apache.spark.sql.rapids
 
 import java.sql.{Date, Timestamp}
 
-import com.nvidia.spark.rapids.{GpuFilterExec, SparkQueryCompareTestSuite}
+import com.nvidia.spark.rapids.{GpuFilterExec, SparkQueryCompareTestSuite, TestUtils}
 
-import org.apache.spark.sql.{Column, DataFrame}
+import org.apache.spark.SparkConf
+import org.apache.spark.sql.{Column, DataFrame, Row}
 import org.apache.spark.sql.execution.FilterExec
 import org.apache.spark.sql.functions.col
 import org.apache.spark.sql.internal.SQLConf
@@ -28,13 +29,20 @@ import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.SparkSession
 
 class ParquetFilterSuite extends SparkQueryCompareTestSuite {
 
-  def stripSparkFilter(spark: SparkSession, df: DataFrame): DataFrame = {
+  override def withCpuSparkSession[U](f: SparkSession => U, conf: SparkConf): U = {
+    super.withCpuSparkSession(
+      spark => TestUtils.withFinalPlanValidation(f(spark)), conf)
+  }
+
+  def collectWithoutSparkFilter(spark: SparkSession, df: DataFrame): Array[Row] = {
     val schema = df.schema
     val withoutFilters = df.queryExecution.executedPlan.transform {
       case FilterExec(_, child) => child
       case GpuFilterExec(_, child) => child
     }
-    spark.internalCreateDataFrame(withoutFilters.execute(), schema)
+    TestUtils.executeAndValidatePlan(withoutFilters) {
+      spark.internalCreateDataFrame(withoutFilters.execute(), schema).collect()
+    }
   }
 
   def withAllDatasources(code: => Unit): Unit = {
@@ -77,7 +85,7 @@ class ParquetFilterSuite extends SparkQueryCompareTestSuite {
           "spark.rapids.sql.enabled" -> readGpu.toString) {
           val df = spark.read.parquet(path.getAbsolutePath).filter(predicate)
           // Here, we strip the Spark side filter and check the actual results from Parquet.
-          val actual = stripSparkFilter(spark, df).collect().length
+          val actual = collectWithoutSparkFilter(spark, df).length
           assert(actual > 1 && actual < length)
         }
       }
@@ -105,7 +113,7 @@ class ParquetFilterSuite extends SparkQueryCompareTestSuite {
           "spark.rapids.sql.enabled" -> readGpu.toString) {
           val df = spark.read.parquet(path.getAbsolutePath).filter(predicate)
           // Here, we strip the Spark side filter and check the actual results from Parquet.
-          val actual = stripSparkFilter(spark, df).collect().length
+          val actual = collectWithoutSparkFilter(spark, df).length
           assert(actual == 0)
         }
       }

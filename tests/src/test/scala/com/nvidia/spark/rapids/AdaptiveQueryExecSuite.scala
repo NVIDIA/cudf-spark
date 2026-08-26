@@ -109,6 +109,88 @@ class AdaptiveQueryExecSuite
       throw new UnsupportedOperationException("TestLeafExec should not be executed")
   }
 
+  test("completed AQE plans are captured and validated synchronously in action order") {
+    val conf = new SparkConf().set("spark.sql.adaptive.enabled", "true")
+    withGpuSparkSession({ spark =>
+      ExecutionPlanCaptureCallback.startValidation(10000)
+
+      spark.conf.set(RapidsConf.TEST_VALIDATE_EXECS_ONGPU.key, "MissingFromFirstAction")
+      spark.range(10).repartition(2).count()
+      spark.conf.set(RapidsConf.TEST_VALIDATE_EXECS_ONGPU.key, "MissingFromSecondAction")
+      spark.range(20).repartition(2).count()
+
+      val validationError =
+        ExecutionPlanCaptureCallback.getValidationErrorWithTimeout(10000)
+
+      assert(validationError != null)
+      assert(validationError.contains("AdaptiveSparkPlan isFinalPlan=true"))
+      assert(validationError.contains("MissingFromFirstAction"))
+      assert(!validationError.contains("MissingFromSecondAction"))
+
+      spark.conf.set(RapidsConf.TEST_VALIDATE_EXECS_ONGPU.key, "")
+      ExecutionPlanCaptureCallback.startValidation(10000)
+      spark.range(1).collect()
+      assert(ExecutionPlanCaptureCallback.getValidationErrorWithTimeout(10000) == null)
+    }, conf)
+  }
+
+  test("retained query executions are validated without listener state") {
+    val conf = new SparkConf().set("spark.sql.adaptive.enabled", "true")
+    withGpuSparkSession({ spark =>
+      // Close the validation scope installed by withGpuSparkSession so this query is
+      // validated exclusively through the stateless direct API.
+      assert(ExecutionPlanCaptureCallback.getValidationErrorWithTimeout(10000) == null)
+
+      spark.conf.set(RapidsConf.TEST_VALIDATE_EXECS_ONGPU.key, "MissingFromDirectValidation")
+      val df = spark.range(10).repartition(2)
+      val queryExecution = df.queryExecution
+      df.collect()
+
+      val validationError = ExecutionPlanCaptureCallback.validateQueryExecution(
+        "directValidation", queryExecution)
+      assert(validationError != null)
+      assert(validationError.contains("Final GPU plan validation failed for directValidation"))
+      assert(validationError.contains("AdaptiveSparkPlan isFinalPlan=true"))
+      assert(validationError.contains("MissingFromDirectValidation"))
+    }, conf)
+  }
+
+  test("Scala GPU session propagates completed AQE plan validation failures") {
+    val conf = new SparkConf()
+      .set("spark.sql.adaptive.enabled", "true")
+      .set(RapidsConf.TEST_VALIDATE_EXECS_ONGPU.key, "MissingFromScalaHarness")
+
+    val error = intercept[AssertionError] {
+      withGpuSparkSession(_.range(10).repartition(2).count(), conf)
+    }
+    assert(error.getMessage.contains("AdaptiveSparkPlan isFinalPlan=true"))
+    assert(error.getMessage.contains("MissingFromScalaHarness"))
+  }
+
+  test("Scala GPU session rejects a lazy Dataset result") {
+    val error = intercept[IllegalStateException] {
+      withGpuSparkSession(_.range(10))
+    }
+    assert(error.getMessage.contains("Dataset must not be returned"))
+
+    assertResult(1L)(withGpuSparkSession(_.range(1).count()))
+  }
+
+  test("TestUtils GPU session propagates completed AQE plan validation failures") {
+    val conf = new SparkConf()
+      .set("spark.sql.adaptive.enabled", "true")
+      .set(RapidsConf.TEST_CONF.key, "true")
+      .set(RapidsConf.TEST_VALIDATE_EXECS_ONGPU.key, "MissingFromTestUtilsHarness")
+
+    val error = intercept[AssertionError] {
+      TestUtils.withGpuSparkSession(conf) { spark =>
+        spark.range(10).repartition(2).count()
+      }
+    }
+    assert(error.getMessage.contains("AdaptiveSparkPlan isFinalPlan=true"))
+    assert(error.getMessage.contains("MissingFromTestUtilsHarness"))
+  }
+
   test("GPU planning rules use their captured session when no session is active") {
     val conf = new SparkConf().set("spark.sql.adaptive.enabled", "true")
     withGpuSparkSession({ spark =>

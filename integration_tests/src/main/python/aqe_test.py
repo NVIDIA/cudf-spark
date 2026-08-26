@@ -15,17 +15,20 @@
 import pytest
 from pyspark.sql.functions import when, col, current_date, current_timestamp
 from pyspark.sql.types import *
-from asserts import assert_gpu_and_cpu_are_equal_collect, assert_cpu_and_gpu_are_equal_collect_with_capture
+from asserts import assert_gpu_and_cpu_are_equal_collect, \
+    assert_cpu_and_gpu_are_equal_collect_with_capture
 from conftest import is_databricks_runtime, is_not_utc
 from data_gen import *
 from spark_session import is_spark_400_or_later
 from marks import ignore_order, allow_non_gpu
-from spark_session import with_cpu_session, is_databricks113_or_later, is_databricks_version, is_databricks_version_or_later
+from spark_session import with_cpu_session, is_databricks113_or_later, \
+    is_databricks_version, is_databricks_version_or_later
 
 # allow non gpu when time zone is non-UTC because of https://github.com/NVIDIA/spark-rapids/issues/9653'
 not_utc_aqe_allow=['ShuffleExchangeExec', 'HashAggregateExec'] if is_not_utc() else []
 
 _adaptive_conf = { "spark.sql.adaptive.enabled": "true" }
+
 
 def create_skew_df(spark, length):
     root = spark.range(0, length)
@@ -436,6 +439,7 @@ if is_databricks_version_or_later(14, 3):
 # Verify that DPP and AQE can coexist in even some odd cases involving multiple tables
 @ignore_order(local=True)
 @allow_non_gpu(*aqe_join_with_dpp_fallback)
+@pytest.mark.xfail(reason="https://github.com/NVIDIA/cudf-spark/issues/15586")
 def test_aqe_join_with_dpp(spark_tmp_path):
     data_path = spark_tmp_path + '/PARQUET_DATA'
     def write_data(spark):
@@ -489,6 +493,7 @@ def test_aqe_join_with_dpp(spark_tmp_path):
 # Verify that DPP and AQE can coexist in even some odd cases involving 2 tables with multiple columns
 @ignore_order(local=True)
 @allow_non_gpu(*aqe_join_with_dpp_fallback)
+@pytest.mark.xfail(reason="https://github.com/NVIDIA/cudf-spark/issues/15586")
 def test_aqe_join_with_dpp_multi_columns(spark_tmp_path):
     conf = copy_and_update(_adaptive_conf, {
         "spark.rapids.sql.explain": "ALL",

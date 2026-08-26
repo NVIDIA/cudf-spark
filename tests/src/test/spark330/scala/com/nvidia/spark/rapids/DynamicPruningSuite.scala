@@ -178,7 +178,9 @@ class DynamicPruningSuite
 
       val adPlan = df.queryExecution.executedPlan.asInstanceOf[AdaptiveSparkPlanExec]
       val executedPlan = adPlan.executedPlan
-      val oldResult = executedPlan.executeCollect()
+      val oldResult = TestUtils.executeAndValidatePlan(executedPlan) {
+        executedPlan.executeCollect()
+      }
       val newPlan = replaceSubquery(executedPlan)
       // Assert that the SubqueryBroadcastExec is present and that there is a ReusedExchangeExec
       // Also, assert that the GpuBroadcastToRowExec node is now present to handle the re-used
@@ -186,7 +188,9 @@ class DynamicPruningSuite
       ExecutionPlanCaptureCallback.assertContains(newPlan, "SubqueryBroadcastExec")
       ExecutionPlanCaptureCallback.assertContains(newPlan, "ReusedExchangeExec")
       ExecutionPlanCaptureCallback.assertContains(newPlan, "GpuBroadcastToRowExec")
-      val result = newPlan.executeCollect()
+      val result = TestUtils.executeAndValidatePlan(newPlan) {
+        newPlan.executeCollect()
+      }
 
       compare(oldResult, result)
       compare(cpuResult, result)

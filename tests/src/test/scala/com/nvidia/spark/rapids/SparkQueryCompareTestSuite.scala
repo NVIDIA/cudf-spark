@@ -162,6 +162,7 @@ object SparkSessionHolder extends Logging {
  */
 trait SparkQueryCompareTestSuite extends AnyFunSuite with BeforeAndAfterAll {
   import SparkSessionHolder.withSparkSession
+
   def enableCsvConf(): SparkConf = enableCsvConf(new SparkConf())
 
   override def afterAll(): Unit = {
@@ -205,7 +206,7 @@ trait SparkQueryCompareTestSuite extends AnyFunSuite with BeforeAndAfterAll {
       .set(RapidsConf.SQL_ENABLED.key, "true")
       .set(RapidsConf.TEST_CONF.key, "true")
       .set(RapidsConf.EXPLAIN.key, "ALL")
-    withSparkSession(c, f)
+    withSparkSession(c, spark => TestUtils.withFinalPlanValidation(f(spark)))
   }
 
   def withCpuSparkSession[U](f: SparkSession => U, conf: SparkConf = new SparkConf()): U = {
@@ -230,7 +231,7 @@ trait SparkQueryCompareTestSuite extends AnyFunSuite with BeforeAndAfterAll {
         "org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback")
       .appName("Spark Rapids plugin Hive related tests")
       .getOrCreate()
-    f(spark)
+    TestUtils.withFinalPlanValidation(f(spark))
   }
 
   def compare(expected: Any, actual: Any, epsilon: Double = 0.0): Boolean = {

@@ -217,6 +217,25 @@ class _RowCmp(object):
     def __ne__(self, other):
         return self.cmp(other) != 0
 
+
+def _to_local_iterator_with_final_plan_validation(spark, df):
+    query_execution = df._jdf.queryExecution()
+    iterator = df.toLocalIterator()
+    callback = (spark.sparkContext._jvm.org.apache.spark.sql.rapids
+                .ExecutionPlanCaptureCallback)
+
+    def iterator_with_validation():
+        for row in iterator:
+            yield row
+
+        validation_error = callback.validateQueryExecution(
+            "toLocalIterator", query_execution)
+        if validation_error is not None:
+            raise AssertionError(str(validation_error))
+
+    return iterator_with_validation()
+
+
 def _prep_func_for_compare(func, mode):
     sort_locally = should_sort_locally()
     if should_sort_on_spark():
@@ -250,7 +269,9 @@ def _prep_func_for_compare(func, mode):
         collect_type = 'COLLECT'
         return (bring_back, collect_type)
     else:
-        bring_back = lambda spark: limit_func(spark).toLocalIterator()
+        def bring_back(spark):
+            return _to_local_iterator_with_final_plan_validation(
+                spark, limit_func(spark))
         collect_type = 'ITERATOR'
         if sort_locally:
             raise RuntimeError('Local Sort is only supported on a collect')

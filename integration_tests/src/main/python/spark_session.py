@@ -14,6 +14,7 @@
 
 import os
 import calendar, time
+import logging
 from datetime import date, datetime
 from contextlib import contextmanager, ExitStack
 from conftest import is_allowing_any_non_gpu, get_non_gpu_allowed, get_validate_execs_in_gpu_plan, is_databricks_runtime, is_at_least_precommit_run, get_inject_oom_conf, is_per_test_ansi_mode_enabled
@@ -35,6 +36,8 @@ _spark = get_spark_i_know_what_i_am_doing()
 # Have to reach into a private member to get access to the API we need
 _orig_conf = _from_scala_map(_spark.conf._jconf.getAll())
 _orig_conf_keys = _orig_conf.keys()
+
+_PLAN_VALIDATION_TIMEOUT_MS = 10_000
 
 # Default settings that should apply to CPU and GPU sessions.
 # These settings can be overridden by specific tests if necessary.
@@ -163,7 +166,42 @@ def with_gpu_session(func, conf={}):
         copy['spark.rapids.sql.test.allowedNonGpu'] = ','.join(get_non_gpu_allowed())
 
     copy['spark.rapids.sql.test.validateExecsInGpuPlan'] = ','.join(get_validate_execs_in_gpu_plan())
-    return with_spark_session(func, conf=copy)
+
+    def run_with_validation(spark):
+        callback = (spark.sparkContext._jvm.org.apache.spark.sql.rapids
+                    .ExecutionPlanCaptureCallback)
+        callback.startValidation(_PLAN_VALIDATION_TIMEOUT_MS)
+
+        result = None
+        primary_error = None
+        primary_traceback = None
+        try:
+            result = func(spark)
+        except Exception as error:
+            primary_error = error
+            primary_traceback = error.__traceback__
+
+        validation_error = None
+        try:
+            validation_error = callback.getValidationErrorWithTimeout(
+                _PLAN_VALIDATION_TIMEOUT_MS)
+        except Exception:
+            if primary_error is None:
+                raise
+            logging.exception(
+                "Plan-validation listener drain failed after the primary test error")
+
+        if primary_error is not None:
+            if validation_error is not None:
+                logging.error("Final-plan validation also failed: %s", validation_error)
+            raise primary_error.with_traceback(primary_traceback)
+
+        if validation_error is not None:
+            raise AssertionError(str(validation_error))
+
+        return result
+
+    return with_spark_session(run_with_validation, conf=copy)
 
 def is_before_spark_312():
     return spark_version() < "3.1.2"

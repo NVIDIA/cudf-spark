@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2025, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,9 @@ package org.apache.spark.sql.rapids.execution
 
 import scala.collection.mutable
 
-import com.nvidia.spark.rapids.{ColumnarRdd, ColumnarToRowIterator, GpuBatchUtilsSuite, GpuColumnVectorUtils, NoopMetric, RapidsHostColumnVector, RmmSparkRetrySuiteBase, SparkQueryCompareTestSuite, TestResourceFinder}
+import com.nvidia.spark.rapids.{ColumnarRdd, ColumnarToRowIterator, GpuBatchUtilsSuite,
+  GpuColumnVectorUtils, NoopMetric, RapidsHostColumnVector, RmmSparkRetrySuiteBase,
+  SparkQueryCompareTestSuite, TestResourceFinder, TestUtils}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuColumnVector.GpuColumnarBatchBuilder
 import org.scalatest.Assertion
@@ -297,17 +299,20 @@ class InternalColumnarRDDConverterSparkSessionSuite extends SparkQueryCompareTes
 
   test("Extract RapidsHostColumnVector from GpuColumnVectorUtils") {
     withGpuSparkSession(spark => {
-      val rdd = ColumnarRdd(spark.range(10).toDF())
-      val result = rdd.map(table => {
-        val columns = GpuColumnVectorUtils.extractHostColumns(table, Array(LongType))
-        val isRapidsHostColumnVector = columns(0) match {
-          case _: RapidsHostColumnVector => true
-          case _ => false
-        }
-        columns.foreach(_.close())
-        table.close()
-        isRapidsHostColumnVector
-      }).collect()
+      val df = spark.range(10).toDF()
+      val rdd = ColumnarRdd(df)
+      val result = TestUtils.executeAndValidatePlan(df.queryExecution.executedPlan) {
+        rdd.map(table => {
+          val columns = GpuColumnVectorUtils.extractHostColumns(table, Array(LongType))
+          val isRapidsHostColumnVector = columns(0) match {
+            case _: RapidsHostColumnVector => true
+            case _ => false
+          }
+          columns.foreach(_.close())
+          table.close()
+          isRapidsHostColumnVector
+        }).collect()
+      }
       assert(result.forall(_ == true))
     }, new SparkConf().set("spark.rapids.sql.test.allowedNonGpu", "DeserializeToObjectExec"))
   }

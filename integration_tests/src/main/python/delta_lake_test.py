@@ -1616,6 +1616,9 @@ def test_delta_deletion_vector_native_footer_multi_row_group_zero_column_aggrega
     }
     read_conf = {
         "spark.databricks.delta.delete.deletionVectors.persistent": "true",
+        # Force an actual zero-column Parquet scan instead of satisfying COUNT(*) from
+        # Delta metadata, since this test validates the scan's deletion-vector row counts.
+        "spark.databricks.delta.optimizeMetadataQuery.enabled": "false",
         "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true",
         "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
         "spark.rapids.sql.format.parquet.reader.type": parquet_reader_type,

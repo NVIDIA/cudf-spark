@@ -121,7 +121,7 @@ class CostBasedOptimizerSuite extends SparkQueryCompareTestSuite
         .child
         .isInstanceOf[SortMergeJoinExec])
 
-      df
+      ()
     }, conf)
 
   }
@@ -178,7 +178,7 @@ class CostBasedOptimizerSuite extends SparkQueryCompareTestSuite
       assert(cpuSort.nonEmpty)
       assert(gpuSort.isEmpty)
 
-      df
+      ()
     }, conf)
 
   }
@@ -237,7 +237,7 @@ class CostBasedOptimizerSuite extends SparkQueryCompareTestSuite
       assert(cpuSort.nonEmpty)
       assert(gpuSort.isEmpty)
 
-      df
+      ()
     }, conf)
 
   }
@@ -281,7 +281,7 @@ class CostBasedOptimizerSuite extends SparkQueryCompareTestSuite
       finalPlan.asInstanceOf[WholeStageCodegenExec]
           .child.asInstanceOf[SortExec]
 
-      df
+      ()
     }, conf)
 
   }
@@ -325,7 +325,7 @@ class CostBasedOptimizerSuite extends SparkQueryCompareTestSuite
       df.queryExecution.executedPlan.asInstanceOf[WholeStageCodegenExec]
           .child.asInstanceOf[SortExec]
 
-      df
+      ()
     }, conf)
 
   }
@@ -362,7 +362,7 @@ class CostBasedOptimizerSuite extends SparkQueryCompareTestSuite
       assert(cpuProjects.nonEmpty, "No CPU ProjectExec found in the plan")
       assert(gpuProjects.isEmpty, "Found GPU ProjectExec in the plan when it should be on CPU")
 
-      df
+      ()
     }, conf)
 
   }
@@ -411,7 +411,7 @@ class CostBasedOptimizerSuite extends SparkQueryCompareTestSuite
       assert(df.queryExecution.executedPlan.asInstanceOf[WholeStageCodegenExec]
           .child.isInstanceOf[ProjectExec])
 
-      df
+      ()
     }, conf)
   }
 
@@ -435,7 +435,7 @@ class CostBasedOptimizerSuite extends SparkQueryCompareTestSuite
         _.isInstanceOf[GpuShuffleExchangeExecBase])
       assert(gpuExchanges.isEmpty)
 
-      df
+      ()
     }, conf)
   }
 
@@ -461,7 +461,7 @@ class CostBasedOptimizerSuite extends SparkQueryCompareTestSuite
         _.isInstanceOf[GpuShuffleExchangeExecBase])
       assert(gpuExchanges.isEmpty)
 
-      df
+      ()
     }, conf)
   }
 
@@ -489,7 +489,7 @@ class CostBasedOptimizerSuite extends SparkQueryCompareTestSuite
         col("l.more_strings_1").equalTo(col("r.more_strings_2")))
       df.collect()
 
-      df
+      ()
     }, conf)
   }
 

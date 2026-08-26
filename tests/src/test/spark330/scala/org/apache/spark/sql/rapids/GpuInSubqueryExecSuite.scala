@@ -44,8 +44,10 @@ spark-rapids-shim-json-lines ***/
 
 package org.apache.spark.sql.rapids
 
-import com.nvidia.spark.rapids.{GpuOverrides, GpuTransitionOverrides, SparkQueryCompareTestSuite}
+import com.nvidia.spark.rapids.{GpuOverrides, GpuTransitionOverrides, RapidsConf,
+  SparkQueryCompareTestSuite, TestUtils}
 
+import org.apache.spark.SparkConf
 import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.catalyst.expressions.{DynamicPruningExpression, ExprId}
 import org.apache.spark.sql.execution.{FilterExec, InSubqueryExec, LocalTableScanExec, ProjectExec, RowToColumnarExec, SparkPlan, SubqueryExec}
@@ -60,6 +62,13 @@ import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.SparkSession
  * to make sure we're exercising GpuInSubqueryExec.
  */
 class GpuInSubqueryExecSuite extends SparkQueryCompareTestSuite {
+  private def testConf: SparkConf = new SparkConf()
+    .set(RapidsConf.TEST_ALLOWED_NONGPU.key, "ProjectExec,RowToColumnarExec")
+
+  private def executePlan(plan: SparkPlan) = TestUtils.executeAndValidatePlan(plan) {
+    plan.execute().collect()
+  }
+
   private def readToPhysicalPlan(df: DataFrame): SparkPlan = {
     // Since we're building up the low-level plan manually, Spark won't
     // automatically inject the columnar transitions for us. This adds
@@ -100,8 +109,8 @@ class GpuInSubqueryExecSuite extends SparkQueryCompareTestSuite {
         val transitionOverrides = new GpuTransitionOverrides()
         val cpuPlan = buildCpuInSubqueryPlan(spark, shouldBroadcastOrDpp)
         val gpuPlan = transitionOverrides(overrides(cpuPlan))
-        gpuPlan.execute().collect()
-      })
+        executePlan(gpuPlan)
+      }, testConf)
       assertResult(1)(gpuResults.length)
       val row = gpuResults.head
       assertResult(2)(row.numFields)

@@ -95,6 +95,8 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
       .set("spark.plugins", "com.nvidia.spark.SQLPlugin")
       .set("spark.rapids.sql.enabled", "true")
       .set("spark.rapids.sql.test.enabled", "true")
+      .set("spark.sql.queryExecutionListeners",
+        "org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback")
       .set("spark.shuffle.manager", shuffleManagerClass)
       .set("spark.shuffle.sort.io.plugin.class",
         "org.apache.spark.shuffle.sort.io.RapidsLocalDiskShuffleDataIO")
@@ -190,9 +192,11 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
         "concat('right_', cast(id as string)) as right_str"
       )
 
-    val result = df1.join(df2, "key")
-      .selectExpr("key", "value1", "value2")
-      .collect()
+    val result = TestUtils.withFinalPlanValidation {
+      df1.join(df2, "key")
+        .selectExpr("key", "value1", "value2")
+        .collect()
+    }
 
     assert(result.length == 3000000, "Should have 3M joined rows")
 
@@ -229,9 +233,11 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
         "concat('right_', cast(id as string)) as right_str"
       )
 
-    val result = df1.join(df2, "key")
-      .selectExpr("key", "value1", "value2")
-      .collect()
+    val result = TestUtils.withFinalPlanValidation {
+      df1.join(df2, "key")
+        .selectExpr("key", "value1", "value2")
+        .collect()
+    }
 
     assert(result.length == 3000000, "Should have 3M joined rows")
 
@@ -299,10 +305,12 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
       )
 
     // Join triggers shuffle with multiple segments due to small batch size
-    val result = df1.join(df2, "key")
-      .groupBy("str_col")
-      .count()
-      .collect()
+    val result = TestUtils.withFinalPlanValidation {
+      df1.join(df2, "key")
+        .groupBy("str_col")
+        .count()
+        .collect()
+    }
 
     // Verify we got results (correctness check)
     val codecDesc = codec.getOrElse("no compression")

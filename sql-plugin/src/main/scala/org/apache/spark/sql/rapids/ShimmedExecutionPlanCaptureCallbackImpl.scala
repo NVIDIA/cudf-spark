@@ -16,13 +16,18 @@
 
 package org.apache.spark.sql.rapids
 
+import java.io.{PrintWriter, StringWriter}
+
 import scala.collection.convert.ImplicitConversions.`collection AsScalaIterable`
 import scala.collection.mutable.{ArrayBuffer, Map => MutableMap}
 import scala.util.Try
+import scala.util.control.NonFatal
 import scala.util.matching.Regex
 
-import com.nvidia.spark.rapids.{GpuCpuBridgeExpression, PlanShims, PlanUtils, ShimLoaderTemp}
+import com.nvidia.spark.rapids.{GpuCpuBridgeExpression, PlanShims, PlanUtils, ShimLoaderTemp,
+  TestPlanValidator}
 
+import org.apache.spark.internal.Logging
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.execution.{ExecSubqueryExpression, QueryExecution, ReusedSubqueryExec, SparkPlan}
@@ -36,13 +41,42 @@ import org.apache.spark.sql.execution.exchange.{ReusedExchangeExec, ShuffleExcha
  * under unshimmed-common-from-single-shim.txt don't get confused and pick this class to be
  * un-shimmed.
  */
-class ShimmedExecutionPlanCaptureCallbackImpl extends ExecutionPlanCaptureCallbackBase {
+class ShimmedExecutionPlanCaptureCallbackImpl
+    extends ExecutionPlanCaptureCallbackBase with Logging {
   private[this] var shouldCapture: Boolean = false
   private[this] val execPlans: ArrayBuffer[SparkPlan] = ArrayBuffer.empty
+  private[this] var shouldValidate: Boolean = false
+  private[this] val validationPlans: ArrayBuffer[(String, SparkPlan)] = ArrayBuffer.empty
+
+  protected def waitUntilListenerBusEmpty(timeoutMillis: Long): Unit = {
+    SparkSession.active.sparkContext.listenerBus.waitUntilEmpty(timeoutMillis)
+  }
 
   override def captureIfNeeded(qe: QueryExecution): Unit = synchronized {
     if (shouldCapture) {
       execPlans.append(qe.executedPlan)
+    }
+  }
+
+  override def captureForValidationIfNeeded(funcName: String, qe: QueryExecution): Unit =
+      synchronized {
+    if (shouldValidate) {
+      validationPlans.append((funcName, qe.executedPlan))
+    }
+  }
+
+  override def captureForValidationIfNeededOnFailure(
+      funcName: String, qe: QueryExecution): Unit = {
+    try {
+      captureForValidationIfNeeded(funcName, qe)
+    } catch {
+      // row-based_udf_test.py::test_hive_empty_simple_udf is xfailed on Spark 4 for
+      // cudf-spark#15268, which throws NoClassDefFoundError. Capturing the error so
+      // that it won't stop the SparkContext and cascade to other tests.
+      case e: NoClassDefFoundError =>
+        logWarning(s"Unable to capture the query plan for validation after $funcName failed", e)
+      case NonFatal(e) =>
+        logWarning(s"Unable to capture the query plan for validation after $funcName failed", e)
     }
   }
 
@@ -56,6 +90,23 @@ class ShimmedExecutionPlanCaptureCallbackImpl extends ExecutionPlanCaptureCallba
     synchronized {
       execPlans.clear()
       shouldCapture = true
+    }
+  }
+
+  override def startValidation(timeoutMillis: Long): Unit = {
+    try {
+      waitUntilListenerBusEmpty(timeoutMillis)
+      synchronized {
+        validationPlans.clear()
+        shouldValidate = true
+      }
+    } catch {
+      case t: Throwable =>
+        synchronized {
+          shouldValidate = false
+          validationPlans.clear()
+        }
+        throw t
     }
   }
 
@@ -80,6 +131,42 @@ class ShimmedExecutionPlanCaptureCallbackImpl extends ExecutionPlanCaptureCallba
         shouldCapture = false
         execPlans.clear()
       }
+    }
+  }
+
+  override def getValidationErrorWithTimeout(timeoutMillis: Long): String = {
+    try {
+      waitUntilListenerBusEmpty(timeoutMillis)
+      val capturedPlans = synchronized {
+        shouldValidate = false
+        val plans = validationPlans.toArray
+        validationPlans.clear()
+        plans
+      }
+      capturedPlans.iterator.map { case (funcName, plan) =>
+        getValidationError(funcName, plan)
+      }.find(_ != null).orNull
+    } finally {
+      synchronized {
+        shouldValidate = false
+        validationPlans.clear()
+      }
+    }
+  }
+
+  override def validateQueryExecution(funcName: String, qe: QueryExecution): String = {
+    getValidationError(funcName, qe.executedPlan)
+  }
+
+  private def getValidationError(funcName: String, plan: SparkPlan): String = {
+    try {
+      TestPlanValidator.validatePlan(plan)
+      null
+    } catch {
+      case NonFatal(error) =>
+        val writer = new StringWriter()
+        error.printStackTrace(new PrintWriter(writer))
+        s"Final GPU plan validation failed for $funcName:\n$writer\nFinal plan:\n$plan"
     }
   }
 
