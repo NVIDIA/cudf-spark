@@ -110,10 +110,9 @@ def assert_equal_with_local_sort(cpu, gpu):
     _sort_locally(cpu, gpu)
     assert_equal(cpu, gpu)
 
-def assert_equal(cpu, gpu):
-    """Verify that the result from the CPU and the GPU are equal"""
+def _assert_equal_with_float_check(cpu, gpu, float_check):
     try:
-        _assert_equal(cpu, gpu, float_check=get_float_check(), path=[])
+        _assert_equal(cpu, gpu, float_check=float_check, path=[])
     except:
         def to_txt(data):
             try:
@@ -129,6 +128,26 @@ def assert_equal(cpu, gpu):
             fromfile='CPU OUTPUT',
             tofile='GPU OUTPUT'))
         raise
+
+def assert_equal(cpu, gpu):
+    """Verify that the result from the CPU and the GPU are equal"""
+    _assert_equal_with_float_check(cpu, gpu, get_float_check())
+
+def assert_equal_with_signed_zero(cpu, gpu):
+    """Verify equality recursively while distinguishing positive and negative floating zero."""
+    default_float_check = get_float_check()
+
+    def signed_zero_float_check(cpu_value, gpu_value):
+        if cpu_value == 0.0 and gpu_value == 0.0:
+            return math.copysign(1.0, cpu_value) == math.copysign(1.0, gpu_value)
+        return default_float_check(cpu_value, gpu_value)
+
+    _assert_equal_with_float_check(cpu, gpu, signed_zero_float_check)
+
+def assert_contains_ansi_cast(df):
+    """Verify that a DataFrame's executed plan contains a shim-aware ANSI cast."""
+    spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback \
+        .assertContainsAnsiCast(df._jdf)
 
 def _has_incompat_conf(conf):
     return ('spark.rapids.sql.incompatibleOps.enabled' in conf and
@@ -503,7 +522,18 @@ def assert_cpu_and_gpu_are_equal_collect_with_capture(func,
         exist_classes='',
         non_exist_classes='',
         conf={},
-        require_non_empty=False):
+        require_non_empty=False,
+        gpu_plan_assertion=None):
+    """Compare collected CPU/GPU results and validate the executed GPU plan.
+
+    :param func: Function that creates the dataframe to collect in each Spark session.
+    :param exist_classes: Comma-separated class names required in the GPU plan.
+    :param non_exist_classes: Comma-separated class names forbidden in the GPU plan.
+    :param conf: Spark configuration used for both executions.
+    :param require_non_empty: Require the collected CPU result to contain at least one row.
+    :param gpu_plan_assertion: Optional callback invoked after GPU collection with the
+        dataframe's executed JVM plan.
+    """
     (bring_back, collect_type) = _prep_func_for_compare(func, 'COLLECT_WITH_DATAFRAME')
 
     conf = _prep_incompat_conf(conf)
@@ -518,6 +548,8 @@ def assert_cpu_and_gpu_are_equal_collect_with_capture(func,
     gpu_start = time.time()
     from_gpu, gpu_df = with_gpu_session(bring_back, conf=conf)
     gpu_end = time.time()
+    if gpu_plan_assertion:
+        gpu_plan_assertion(gpu_df._jdf.queryExecution().executedPlan())
     jvm = spark_jvm()
     if exist_classes:
         for clz in exist_classes.split(','):
@@ -552,7 +584,8 @@ def assert_cpu_and_gpu_are_equal_sql_with_capture(df_fun,
 
 def assert_gpu_fallback_collect(func,
         cpu_fallback_class_name,
-        conf={}):
+        conf={},
+        result_canonicalize_func_before_compare=None):
     (bring_back, collect_type) = _prep_func_for_compare(func, 'COLLECT_WITH_DATAFRAME')
 
     conf = _prep_incompat_conf(conf)
@@ -571,6 +604,8 @@ def assert_gpu_fallback_collect(func,
         gpu_end - gpu_start, cpu_end - cpu_start))
     if should_sort_locally():
         _sort_locally(from_cpu, from_gpu)
+    if result_canonicalize_func_before_compare is not None:
+        (from_cpu, from_gpu) = result_canonicalize_func_before_compare(from_cpu, from_gpu)
 
     assert_equal(from_cpu, from_gpu)
 

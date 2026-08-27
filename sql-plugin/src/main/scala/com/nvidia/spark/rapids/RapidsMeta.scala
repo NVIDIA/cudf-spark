@@ -24,7 +24,7 @@ import com.nvidia.spark.rapids.GpuTypedImperativeSupportedAggregateExecMeta.{pre
 import com.nvidia.spark.rapids.RapidsMeta.noNeedToReplaceReason
 import com.nvidia.spark.rapids.shims.{AggregateInPandasExecShims, DistributionUtil, SparkShimImpl}
 
-import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, BinaryExpression, BoundReference, Cast, ComplexTypeMergingExpression, Expression, Literal, QuaternaryExpression, RuntimeReplaceable, String2TrimExpression, TernaryExpression, TimeZoneAwareExpression, UnaryExpression, UTCTimestamp, WindowExpression, WindowFunction}
+import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, BinaryExpression, BoundReference, Cast, ComplexTypeMergingExpression, Expression, LambdaFunction, Literal, NamedLambdaVariable, QuaternaryExpression, RuntimeReplaceable, String2TrimExpression, TernaryExpression, TimeZoneAwareExpression, UnaryExpression, UTCTimestamp, WindowExpression, WindowFunction}
 import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, AggregateFunction, ImperativeAggregate, TypedImperativeAggregate}
 import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.catalyst.trees.{CurrentOrigin, TreeNodeTag, UnaryLike}
@@ -417,8 +417,6 @@ abstract class RapidsMeta[INPUT <: BASE, BASE, OUTPUT <: BASE](
         "^"  // Special indicator for CPU bridge expressions
       } else if (cannotRunOnGpuBecauseOfSparkPlan) {
         "@"
-      } else if (cannotRunOnGpuBecauseOfCost) {
-        "$"
       } else {
         "*"
       }
@@ -1291,13 +1289,7 @@ abstract class BaseExprMeta[INPUT <: Expression](
    */
   final def mustBeAstExpression: Boolean = mustBeAst
 
-  final def canThisBeAst: Boolean = {
-    tagForAst()
-    // An expression cannot be AST if it cannot be replaced (disabled), uses CPU bridge,
-    // or has AST-specific issues
-    canThisBeReplaced && !willUseGpuCpuBridge &&
-      childExprs.forall(_.canThisBeAst) && cannotBeAstReasons.isEmpty
-  }
+  final def canThisBeAst: Boolean = canSelfBeAst && childExprs.forall(_.canThisBeAst)
 
   /**
    * Check whether this node itself can be converted to AST. It will not recursively check its
@@ -1307,8 +1299,8 @@ abstract class BaseExprMeta[INPUT <: Expression](
   // undoBridgeOptimization() after a first read, so caching would return a stale answer.
   final def canSelfBeAst: Boolean = {
     tagForAst()
-    // Not AST-able if disabled, bridged (a GpuCpuBridgeExpression has no AST form), or it has
-    // AST-specific issues.
+    // An expression cannot be AST if it cannot be replaced (disabled), uses CPU bridge
+    // (a GpuCpuBridgeExpression has no AST form), or has AST-specific issues.
     canThisBeReplaced && !willUseGpuCpuBridge && cannotBeAstReasons.isEmpty
   }
 
@@ -1350,10 +1342,19 @@ abstract class BaseExprMeta[INPUT <: Expression](
   }
 
   protected def willWorkInAstInfo: String = {
-    if (cannotBeAstReasons.isEmpty) {
-      "will run in AST"
+    if (canSelfBeAst) {
+      "is AST-compatible"
     } else {
-      s"cannot be converted to GPU AST because ${cannotBeAstReasons.mkString(";")}"
+      // These reasons must enumerate exactly the conditions checked by canSelfBeAst.
+      val reason = if (!canThisBeReplaced) {
+        "it cannot run on GPU"
+      } else if (willUseGpuCpuBridge) {
+        "it uses the CPU bridge"
+      } else {
+        assert(cannotBeAstReasons.nonEmpty)
+        cannotBeAstReasons.mkString(";")
+      }
+      s"cannot be converted to GPU AST because $reason"
     }
   }
 
@@ -1364,7 +1365,7 @@ abstract class BaseExprMeta[INPUT <: Expression](
    * @param all should all the data be printed or just what does not work in the AST?
    */
   protected def printAst(strBuilder: StringBuilder, depth: Int, all: Boolean): Unit = {
-    if (all || !canThisBeAst) {
+    if (all || !canSelfBeAst) {
       indent(strBuilder, depth)
       strBuilder.append(operationName)
           .append(" <")
@@ -1638,9 +1639,79 @@ abstract class BaseExprMeta[INPUT <: Expression](
     }
     val boundCpuExpression = expr.withNewChildren(boundChildren)
 
+    // CPU-resident subtrees can contain captured attributes and GPU-ancestor lambda variables.
+    import org.apache.spark.sql.rapids.catalyst.expressions.GpuExpressionEquals
+    val allGpuInputs = mutable.ListBuffer[Expression]() ++= deduplicatedGpuInputs
+    val gpuInputIndices = mutable.Map[GpuExpressionEquals, Int]()
+    allGpuInputs.zipWithIndex.foreach { case (gpuInput, index) =>
+      gpuInputIndices(GpuExpressionEquals(gpuInput)) = index
+    }
+    // Only register expressions in the form consumed by the GPU input list. AttributeReference
+    // is unchanged by GPU conversion, and ancestor lambda variables are converted to
+    // GpuNamedLambdaVariable before registration. Do not register original CPU expressions whose
+    // GPU conversion changes their expression type.
+    def registerGpuInput(input: Expression): Int = {
+      val inputIndex = gpuInputIndices.getOrElseUpdate(GpuExpressionEquals(input), {
+        val newIndex = allGpuInputs.length
+        allGpuInputs += input
+        newIndex
+      })
+      input match {
+        case attr: AttributeReference if attr.nullable && !allGpuInputs(inputIndex).nullable =>
+          // Semantic equality ignores nullability. Conservatively widen bridge inputs for
+          // defensive correctness; valid Spark plans should not disagree for one expression ID.
+          allGpuInputs(inputIndex) match {
+            case existing: AttributeReference =>
+              allGpuInputs(inputIndex) = existing.withNullability(true)
+            case existing: GpuBoundReference =>
+              allGpuInputs(inputIndex) =
+                existing.copy(nullable = true)(existing.exprId, existing.name)
+            case _ =>
+          }
+        case _ =>
+      }
+      inputIndex
+    }
+
+    def bindCapturedAttribute(attribute: AttributeReference): BoundReference = {
+      val inputIndex = registerGpuInput(attribute)
+      BoundReference(inputIndex, attribute.dataType, allGpuInputs(inputIndex).nullable)
+    }
+
+    def bindGpuAncestorLambdaVariables(
+        cpuExpression: Expression,
+        lambdaScope: Set[org.apache.spark.sql.catalyst.expressions.ExprId]): Expression = {
+      cpuExpression match {
+        case lambda: LambdaFunction =>
+          lambda.copy(function = bindGpuAncestorLambdaVariables(
+            lambda.function, lambdaScope ++ lambda.arguments.map(_.exprId)))
+        case variable: NamedLambdaVariable if !lambdaScope.contains(variable.exprId) =>
+          // The enclosing GPU higher-order function provides this lambda's element column.
+          val gpuVariable = GpuNamedLambdaVariable(
+            variable.name, variable.dataType, variable.nullable, variable.exprId)
+          val inputIndex = registerGpuInput(gpuVariable)
+          BoundReference(inputIndex, variable.dataType, allGpuInputs(inputIndex).nullable)
+        case attribute: AttributeReference =>
+          bindCapturedAttribute(attribute)
+        case _ =>
+          cpuExpression.mapChildren(bindGpuAncestorLambdaVariables(_, lambdaScope))
+      }
+    }
+
+    val capturedAttributesBound = boundCpuExpression.transformDown {
+      case attribute: AttributeReference => bindCapturedAttribute(attribute)
+    }
+    val fullyBoundCpuExpression = bindGpuAncestorLambdaVariables(capturedAttributesBound, Set.empty)
+      .transformDown {
+        // Direct children were bound before captured inputs could widen a deduplicated input.
+        case bound: BoundReference =>
+          BoundReference(bound.ordinal, bound.dataType,
+            bound.nullable || allGpuInputs(bound.ordinal).nullable)
+      }
+
     val bridgeExpression = GpuCpuBridgeExpression(
-      gpuInputs = deduplicatedGpuInputs,
-      cpuExpression = boundCpuExpression,
+      gpuInputs = allGpuInputs.toSeq,
+      cpuExpression = fullyBoundCpuExpression,
       outputDataType = expr.dataType,
       outputNullable = expr.nullable)
 

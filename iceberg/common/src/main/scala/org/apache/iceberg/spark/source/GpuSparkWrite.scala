@@ -26,7 +26,7 @@ import com.nvidia.spark.rapids.Arm.closeOnExcept
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableSeq
 import com.nvidia.spark.rapids.SpillPriorities.ACTIVE_ON_DECK_PRIORITY
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
-import com.nvidia.spark.rapids.iceberg.GpuIcebergSpecPartitioner
+import com.nvidia.spark.rapids.iceberg.{GpuIcebergSpecPartitioner, IcebergFormatVersionSupport}
 import com.nvidia.spark.rapids.shims.parquet.ParquetFieldIdShims
 import org.apache.hadoop.mapreduce.Job
 import org.apache.iceberg._
@@ -275,6 +275,8 @@ object GpuSparkWrite {
     val table: Table = GpuSparkWriteAccess.table(cpuWrite)
     val partitionSpec = table.spec()
 
+    IcebergFormatVersionSupport.tagForFormatVersion(table, meta)
+
     val dsSchema = GpuSparkWriteAccess.dsSchema(cpuWrite)
     val writeSchema = GpuSparkWriteAccess.writeSchema(cpuWrite)
 
@@ -299,6 +301,10 @@ object GpuSparkWrite {
     val properties: Map[String, String] = Spark3Util
       .rebuildCreateProperties(cpuExec.tableSpec.properties.asJava)
       .asScala.toMap
+    // Catalog defaults and overrides are applied later when Iceberg stages the table. If they
+    // select v3, the nested append is tagged against that staged table and falls back to CPU, so
+    // only an explicit format version in the statement needs to be checked here.
+    IcebergFormatVersionSupport.tagForFormatVersion(properties, meta)
     val fileFormatStr = properties.getOrElse(TableProperties.DEFAULT_FILE_FORMAT,
       TableProperties.DEFAULT_FILE_FORMAT_DEFAULT)
 
@@ -329,6 +335,10 @@ object GpuSparkWrite {
     val properties: Map[String, String] = Spark3Util
       .rebuildCreateProperties(cpuExec.tableSpec.properties.asJava)
       .asScala.toMap
+    // Existing table metadata and catalog properties are resolved later while Iceberg stages the
+    // replacement. The nested write is then tagged against the resulting table and handles the v3
+    // fallback, so neither the catalog nor the existing table needs to be loaded here.
+    IcebergFormatVersionSupport.tagForFormatVersion(properties, meta)
     val fileFormatStr = properties.getOrElse(TableProperties.DEFAULT_FILE_FORMAT,
       TableProperties.DEFAULT_FILE_FORMAT_DEFAULT)
 

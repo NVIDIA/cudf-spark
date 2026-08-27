@@ -490,6 +490,16 @@ class HMBInputFile(buffer: HostMemoryBuffer) extends InputFile {
     getLength)
 }
 
+private[parquet] object GpuParquetFileFilterHandler {
+  def canUseNativeFooterReader(schema: StructType): Boolean =
+    !TrampolineUtil.dataTypeExistsRecursively(schema, t => GpuColumnVector.isVariantType(t))
+
+  def useNativeFooterReader(
+      configuredReader: ParquetFooterReaderType.Value,
+      schema: StructType): Boolean =
+    configuredReader == ParquetFooterReaderType.NATIVE && canUseNativeFooterReader(schema)
+}
+
 protected case class GpuParquetFileFilterHandler(
     @transient sqlConf: SQLConf,
     metrics: Map[String, GpuMetric]) extends Logging {
@@ -533,6 +543,8 @@ protected case class GpuParquetFileFilterHandler(
           schemaBuilder.addChild(field.name, convertToParquetNative(field.dataType))
         }
         schemaBuilder.build()
+      case dt if GpuColumnVector.isVariantType(dt) =>
+        throw new UnsupportedOperationException("Variant must use the Java Parquet footer reader")
       case _: NumericType | BinaryType | BooleanType | DateType | TimestampType | StringType =>
         new ParquetFooter.ValueElement()
       case at: ArrayType =>
@@ -570,10 +582,17 @@ protected case class GpuParquetFileFilterHandler(
     if (fileIO.isInstanceOf[HadoopFileIO]) {
       // We should remove this after https://github.com/NVIDIA/spark-rapids/issues/13306 is
       // implemented.
-      val result = PerfIO.readParquetFooterBuffer(filePath, conf, verifyParquetMagic)
+      val taskMetrics = GpuTaskMetrics.get
+      val result = PerfIO.readParquetFooterBuffer(
+        filePath,
+        conf,
+        verifyParquetMagic,
+        taskMetrics.perfioS3RequestLimiterMetricsRecorder)
       val scheme = filePath.toUri.getScheme
       if (scheme != null && scheme.startsWith("s3")) {
-        GpuTaskMetrics.get.recordPerfioS3BackendOnce()
+        taskMetrics.recordPerfioS3BackendOnce()
+      } else if (result.isDefined && (scheme == "gs" || scheme == "gcs")) {
+        taskMetrics.recordPerfioGCSBackendOnce()
       }
       result.getOrElse(readFooterBufUsingHadoop(fileIO, filePath))
     } else {
@@ -695,7 +714,8 @@ protected case class GpuParquetFileFilterHandler(
       }
       val footer: ParquetMetadata = try {
         footerReader match {
-          case ParquetFooterReaderType.NATIVE =>
+          case reader
+              if GpuParquetFileFilterHandler.useNativeFooterReader(reader, readDataSchema) =>
             val (serialized, rowIndexOffsets) = withResource(readAndFilterFooter(fileIO, file,
               conf, readDataSchema, filePath)) { tableFooter =>
                 if (tableFooter.getNumColumns <= 0) {
@@ -913,6 +933,11 @@ protected case class GpuParquetFileFilterHandler(
           rootFileType, rootReadType)
         checkSchemaCompat(parquetMapValue, map.valueType, errorCallback, isCaseSensitive,
           useFieldId, rootFileType, rootReadType)
+
+      case dt if GpuColumnVector.isVariantType(dt) =>
+        if (!ParquetSchemaUtils.isVariantPhysicalType(fileType)) {
+          errorCallback(rootFileType.getOrElse(fileType), rootReadType.getOrElse(readType))
+        }
 
       case dt =>
         checkPrimitiveCompat(fileType.asPrimitiveType(),

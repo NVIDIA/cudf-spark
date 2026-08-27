@@ -1,15 +1,15 @@
-# Contributing to RAPIDS Accelerator for Apache Spark
+# Contributing to the NVIDIA cuDF plugin for Apache Spark
 
-Contributions to RAPIDS Accelerator for Apache Spark fall into the following three categories.
+Contributions to the NVIDIA cuDF plugin for Apache Spark fall into the following three categories.
 
 1. To report a bug, request a new feature, or report a problem with
-    documentation, please file an [issue](https://github.com/NVIDIA/spark-rapids/issues/new/choose)
+    documentation, please file an [issue](https://github.com/NVIDIA/cudf-spark/issues/new/choose)
     describing in detail the problem or new feature. The project team evaluates
     and triages issues, and schedules them for a release. If you believe the
     issue needs priority attention, please comment on the issue to notify the
     team.
 2. To propose and implement a new Feature, please file a new feature request
-    [issue](https://github.com/NVIDIA/spark-rapids/issues/new/choose). Describe the
+    [issue](https://github.com/NVIDIA/cudf-spark/issues/new/choose). Describe the
     intended feature and discuss the design and implementation with the team and
     community. Once the team agrees that the plan looks good, go ahead and
     implement it using the [code contributions](#code-contributions) guide below.
@@ -48,7 +48,7 @@ building at least running to the `verify` phase, e.g.:
 mvn verify
 ```
 
-After a successful build, the RAPIDS Accelerator jar will be in the `dist/target/` directory.
+After a successful build, the cuDF plugin jar will be in the `dist/target/` directory.
 This will build the plugin for a single version of Spark.  By default, this is Apache Spark
 3.3.0. To build against other versions of Spark you use the `-Dbuildver=XXX` command line option
 to Maven. For instance to build Spark 3.3.0 you would use:
@@ -83,7 +83,7 @@ build versions. See the next section for more details.
 
 You might see a warning during scala-maven-plugin compile goal invocation.
 ```
-[INFO] Compiling 94 Scala sources and 1 Java source to /home/user/gits/NVIDIA/spark-rapids/tests/target/spark3XY/test-classes ...
+[INFO] Compiling 94 Scala sources and 1 Java source to /home/user/gits/NVIDIA/cudf-spark/tests/target/spark3XY/test-classes ...
 OpenJDK 64-Bit Server VM warning: CodeCache is full. Compiler has been disabled.
 OpenJDK 64-Bit Server VM warning: Try increasing the code cache size using -XX:ReservedCodeCacheSize=
 CodeCache: size=245760Kb used=236139Kb max_used=243799Kb free=9620Kb
@@ -127,15 +127,15 @@ mvn -pl dist -PnoSnapshots package -DskipTests
 Verify that shim-specific classes are hidden from a conventional classloader.
 
 ```bash
-$ javap -cp dist/target/rapids-4-spark_2.12-26.08.0-SNAPSHOT-cuda12.jar com.nvidia.spark.rapids.shims.SparkShimImpl
+$ javap -cp dist/target/rapids-4-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar com.nvidia.spark.rapids.shims.SparkShimImpl
 Error: class not found: com.nvidia.spark.rapids.shims.SparkShimImpl
 ```
 
 However, its bytecode can be loaded if prefixed with `spark3XY` not contained in the package name
 
 ```bash
-$ javap -cp dist/target/rapids-4-spark_2.12-26.08.0-SNAPSHOT-cuda12.jar spark330.com.nvidia.spark.rapids.shims.SparkShimImpl | head -2
-Warning: File dist/target/rapids-4-spark_2.12-26.08.0-SNAPSHOT-cuda12.jar(/spark330/com/nvidia/spark/rapids/shims/SparkShimImpl.class) does not contain class spark330.com.nvidia.spark.rapids.shims.SparkShimImpl
+$ javap -cp dist/target/rapids-4-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar spark330.com.nvidia.spark.rapids.shims.SparkShimImpl | head -2
+Warning: File dist/target/rapids-4-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar(/spark330/com/nvidia/spark/rapids/shims/SparkShimImpl.class) does not contain class spark330.com.nvidia.spark.rapids.shims.SparkShimImpl
 Compiled from "SparkShims.scala"
 public final class com.nvidia.spark.rapids.shims.SparkShimImpl {
 ```
@@ -167,7 +167,7 @@ In many situations the user knows that the Plugin jar will be deployed for a sin
 release. It is most commonly the case when a container image for a cloud or local deployment includes
 Spark binaries as well. In such a case it is advantageous to create a jar with
 a conventional class directory structure avoiding complications such as
-[#3704](https://github.com/NVIDIA/spark-rapids/issues/3704). To this end add
+[#3704](https://github.com/NVIDIA/cudf-spark/issues/3704). To this end add
 `-DallowConventionalDistJar=true` when invoking Maven.
 
 ```bash
@@ -177,7 +177,7 @@ mvn package -pl dist -am -Dbuildver=340 -DallowConventionalDistJar=true
 Verify `com.nvidia.spark.rapids.shims.SparkShimImpl` is conventionally loadable:
 
 ```bash
-$ javap -cp dist/target/rapids-4-spark_2.12-26.08.0-SNAPSHOT-cuda12.jar com.nvidia.spark.rapids.shims.SparkShimImpl | head -2
+$ javap -cp dist/target/rapids-4-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar com.nvidia.spark.rapids.shims.SparkShimImpl | head -2
 Compiled from "SparkShims.scala"
 public final class com.nvidia.spark.rapids.shims.SparkShimImpl {
 ```
@@ -214,7 +214,7 @@ for a single Spark version Shim alone.
 To this end in a pre-production build you can set the Boolean property
 `dist.jar.compress` to `false`, its default value is `true`.
 
-Furthermore, after the first build execution on the clean repository the spark-rapids-jni
+Furthermore, after the first build execution on the clean repository the cudf-spark-jni
 SNAPSHOT dependency typically does not change until the next nightly CI build, or the next install
 to the local Maven repo if you are working on a change to the native code. So you can save
 significant time spent on repeated unpacking these dependencies by adding `-Drapids.jni.unpack.skip`
@@ -222,7 +222,7 @@ to the `dist` build command.
 
 The time saved is more significant if you are merely changing
 the `aggregator` module, or the `dist` module, or just incorporating changes from
-[spark-rapids-jni](https://github.com/NVIDIA/spark-rapids-jni/blob/branch-23.04/CONTRIBUTING.md#local-testing-of-cross-repo-contributions-cudf-spark-rapids-jni-and-spark-rapids)
+[cudf-spark-jni](https://github.com/NVIDIA/cudf-spark-jni/blob/branch-23.04/CONTRIBUTING.md#local-testing-of-cross-repo-contributions-cudf-spark-rapids-jni-and-spark-rapids)
 
 For example, to quickly repackage `rapids-4-spark` after the
 initial `./build/buildall` you can iterate by invoking
@@ -280,7 +280,7 @@ Last tested with IntelliJ IDEA 2023.1.2 (Community Edition)
 
 ##### Manual Maven Install for a target Spark build
 
-Before proceeding with importing spark-rapids into IDEA or switching to a different Spark release
+Before proceeding with importing cudf-spark into IDEA or switching to a different Spark release
 profile, execute the install phase with the corresponding `buildver`, e.g. for Spark 3.4.0:
 
 ```bash
@@ -378,7 +378,7 @@ rm -vf .bloop
 ln -s .bloop-spark330 .bloop
 ```
 
-You can now open the spark-rapids as a
+You can now open the cudf-spark as a
 [BSP project in IDEA](https://www.jetbrains.com/help/idea/bsp-support.html)
 
 Read on for VS Code Scala Metals instructions.
@@ -446,15 +446,15 @@ We welcome pull requests with tips on how to setup your favorite IDE!
 
 ### Your first issue
 
-1. Read the [Developer Overview](docs/dev/README.md) to understand how the RAPIDS Accelerator
+1. Read the [Developer Overview](docs/dev/README.md) to understand how the cuDF
     plugin works.
 2. Find an issue to work on. The best way is to look for the
-    [good first issue](https://github.com/NVIDIA/spark-rapids/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
-    or [help wanted](https://github.com/NVIDIA/spark-rapids/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22)
+    [good first issue](https://github.com/NVIDIA/cudf-spark/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
+    or [help wanted](https://github.com/NVIDIA/cudf-spark/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22)
     labels.
 3. Comment on the issue stating that you are going to work on it.
 4. Code! Make sure to update unit tests and integration tests if needed! [refer to test section](#testing-your-code)
-5. When done, [create your pull request](https://github.com/NVIDIA/spark-rapids/compare).
+5. When done, [create your pull request](https://github.com/NVIDIA/cudf-spark/compare).
 6. Verify that CI passes all [status checks](https://help.github.com/articles/about-status-checks/).
     Fix if needed.
 7. Wait for other developers to review your code and update code as needed.
@@ -464,7 +464,7 @@ Remember, if you are unsure about anything, don't hesitate to comment on issues
 and ask for clarifications!
 
 ### Code Formatting
-RAPIDS Accelerator for Apache Spark follows the same coding style guidelines as the Apache Spark
+The NVIDIA cuDF plugin for Apache Spark follows the same coding style guidelines as the Apache Spark
 project.  For IntelliJ IDEA users, an
 [example code style settings file](docs/dev/idea-code-style-settings.xml) is available in the
 `docs/dev/` directory.
@@ -474,6 +474,13 @@ project.  For IntelliJ IDEA users, an
 This project follows the official
 [Scala style guide](https://docs.scala-lang.org/style/) and the
 [Databricks Scala guide](https://github.com/databricks/scala-style-guide), preferring the latter.
+
+Direct `println` calls should not be used in normal implementation or test code. Use project
+logging for optional diagnostics, ScalaTest `info` for meaningful test metadata, and `withClue`
+for context that should appear only when an assertion fails. `ConsoleOutput` is reserved for
+tools, CLI entry points, report generators, benchmarks, and process protocols where stdout or
+stderr is an intentional interface. If that helper is not available to a module, scope
+`scalastyle:off/on println` tightly around the intentional output block rather than an entire file.
 
 #### Java
 
@@ -598,22 +605,39 @@ export PATH="/usr/local/opt/gnu-sed/libexec/gnubin:$PATH"
 
 Here are some guidelines to follow when creating a pull request:
 
-1. If your pull request is not ready for review but you want to make use of the
-   continuous integration testing facilities, please make it as a draft and label it with `[WIP]`.
+1. Use the [PR template](.github/PULL_REQUEST_TEMPLATE.md): Fill it in rather than replacing it
+   with another format.
 
-2. If your pull request is ready to be reviewed without requiring additional
-   work on top of it, then convert it to a regular pull request and remove the `[WIP]` label
-   (if applicable).
+2. Label your PR. Labels are what make the queue filterable. Changes that touch only tests get the
+   `test` label so reviewers know no production logic changed.
 
-3. Once the review has taken place, please do not add features or make changes
-   out of the scope of those even if the reviewer requests them. Instead, please
-   consider filing new issues for those changes.
+3. If your pull request is not ready for review but you want to make use of the
+   continuous integration testing facilities, please make it as a draft and prefix the title with
+   `[WIP]`. Please do not use other title prefixes that mean the same thing as `[WIP]` such as
+   `[DO NOT REVIEW]` and `[DRAFT]`.
 
-4. Please avoid rebasing your branch during the review process, as this causes the context
-   of any comments made by reviewers to be lost. If conflicts occur during
-   review, then they should be resolved by merging into the branch used for
-   making the pull request.
+   - When the PR is ready to be reviewed without requiring additional work on top of it,
+     then convert it to a regular pull request and remove the `[WIP]` prefix from the title.
 
+   - **Bound draft lifetime**. A draft is for CI runs and early feedback, not for parking work
+     indefinitely: state in the description what makes it a draft (a TODO checklist is preferred,
+     since it also shows how far along the work is), and if it stops progressing,
+     close it and open a new PR when the work resumes.
+
+4. Once the review has taken place:
+
+   - Please do not add features or make changes out of the scope of those even if the reviewer
+     requests them. Instead, please consider filing new issues for those changes.
+
+   - Please avoid rebasing your branch during the review process, as this causes the context
+     of any comments made by reviewers to be lost. If conflicts occur during
+     review, then they should be resolved by merging into the branch used for
+     making the pull request.
+
+5. **Closing a PR**. When closing an unmerged PR, leave a comment saying why, covering which case
+   applies: `superseded` (link the replacement), `abandoned` (say what ruled out the approach),
+   or `deferred` (link the tracking issue). A closed PR with no explanation is a dead end for
+   anyone who reaches it from a design doc or issue link months later.
 
 ### Pull request status checks
 A pull request should pass all status checks before being merged.

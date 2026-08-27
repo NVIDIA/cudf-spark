@@ -28,6 +28,7 @@ import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.expressions.objects.StaticInvoke
 import org.apache.spark.sql.connector.catalog.SupportsWrite
 import org.apache.spark.sql.connector.read.Scan
+import org.apache.spark.sql.connector.write.Write
 import org.apache.spark.sql.execution.{FileSourceScanExec, SparkPlan}
 import org.apache.spark.sql.execution.command.{DataWritingCommand, RunnableCommand}
 import org.apache.spark.sql.execution.datasources.{FileFormat, HadoopFsRelation}
@@ -65,6 +66,94 @@ trait ExternalSourceBase extends Logging {
   }
 
   protected lazy val icebergProvider = IcebergProvider()
+
+  // NoopWrite is a private final Scala object from Spark 3.3 through 4.2. Its class name is
+  // therefore a stable way to recognize it without loading Spark's private implementation class.
+  private val noopWriteClassName = "org.apache.spark.sql.execution.datasources.noop.NoopWrite$"
+
+  private sealed trait V2WriteRecognizer {
+    def support: V2WriteRecognizerSupport
+    def isEnabled: Boolean
+    def recognizes(writeClass: Class[_ <: Write]): Boolean
+    def tagForGpu(cpuExec: AppendDataExec, meta: AppendDataExecMeta): Unit
+    def tagForGpu(
+        cpuExec: OverwriteByExpressionExec,
+        meta: OverwriteByExpressionExecMeta): Unit
+    def convertToGpu(cpuExec: AppendDataExec, meta: AppendDataExecMeta): GpuExec
+    def convertToGpu(
+        cpuExec: OverwriteByExpressionExec,
+        meta: OverwriteByExpressionExecMeta): GpuExec
+  }
+
+  private case object NoopV2WriteRecognizer extends V2WriteRecognizer {
+    override val support: V2WriteRecognizerSupport = V2WriteCommandRecognizers.noop
+    override val isEnabled: Boolean = true
+    override def recognizes(writeClass: Class[_ <: Write]): Boolean =
+      writeClass.getName == noopWriteClassName
+    override def tagForGpu(cpuExec: AppendDataExec, meta: AppendDataExecMeta): Unit = {}
+    override def tagForGpu(
+        cpuExec: OverwriteByExpressionExec,
+        meta: OverwriteByExpressionExecMeta): Unit = {}
+    // NoopWrite does not modify table state, so there is no cache to refresh.
+    override def convertToGpu(cpuExec: AppendDataExec, meta: AppendDataExecMeta): GpuExec =
+      GpuNoopAppendDataExec(meta.childPlans.head.convertIfNeeded())
+    override def convertToGpu(
+        cpuExec: OverwriteByExpressionExec,
+        meta: OverwriteByExpressionExecMeta): GpuExec =
+      GpuNoopOverwriteByExpressionExec(meta.childPlans.head.convertIfNeeded())
+  }
+
+  private case object IcebergV2WriteRecognizer extends V2WriteRecognizer {
+    override val support: V2WriteRecognizerSupport = V2WriteCommandRecognizers.iceberg
+    override def isEnabled: Boolean = hasIcebergJar
+    override def recognizes(writeClass: Class[_ <: Write]): Boolean =
+      icebergProvider.isSupportedWrite(writeClass)
+    override def tagForGpu(cpuExec: AppendDataExec, meta: AppendDataExecMeta): Unit =
+      icebergProvider.tagForGpuPlan(cpuExec, meta)
+    override def tagForGpu(
+        cpuExec: OverwriteByExpressionExec,
+        meta: OverwriteByExpressionExecMeta): Unit =
+      icebergProvider.tagForGpuPlan(cpuExec, meta)
+    override def convertToGpu(cpuExec: AppendDataExec, meta: AppendDataExecMeta): GpuExec =
+      icebergProvider.convertToGpuPlan(cpuExec, meta)
+    override def convertToGpu(
+        cpuExec: OverwriteByExpressionExec,
+        meta: OverwriteByExpressionExecMeta): GpuExec =
+      icebergProvider.convertToGpuPlan(cpuExec, meta)
+  }
+
+  private lazy val v2WriteRecognizers: Seq[V2WriteRecognizer] = {
+    val recognizers = Seq(NoopV2WriteRecognizer, IcebergV2WriteRecognizer)
+    require(
+      recognizers.map(_.support.id).toSet == V2WriteCommandRecognizers.all.map(_.id).toSet,
+      "Runtime and documented V2 write recognizers must match")
+    recognizers
+  }
+
+  private def v2WriteRecognizer(
+      writeClass: Class[_ <: Write],
+      command: V2WriteCommand): Either[String, V2WriteRecognizer] = {
+    val matches = v2WriteRecognizers.filter { recognizer =>
+      recognizer.isEnabled && recognizer.support.supports(command) &&
+        recognizer.recognizes(writeClass)
+    }
+    matches match {
+      case Seq(recognizer) => Right(recognizer)
+      case Seq() => Left(s"${command.execName} write $writeClass is not supported")
+      case _ =>
+        val names = matches.map(_.support.name).mkString(", ")
+        Left(s"${command.execName} write $writeClass matched multiple recognizers: $names")
+    }
+  }
+
+  private def selectedV2WriteRecognizer(meta: HasV2WriteRecognizer): V2WriteRecognizer = {
+    val selected = meta.getV2WriteRecognizer.getOrElse {
+      throw new IllegalStateException("V2 write recognizer was not selected during tagging")
+    }
+    v2WriteRecognizers.find(_.support.id == selected.id).getOrElse {
+      throw new IllegalStateException(s"Unknown V2 write recognizer: ${selected.id}")
+    }
+  }
 
   private lazy val deltaProvider = DeltaProvider()
 
@@ -253,26 +342,20 @@ trait ExternalSourceBase extends Logging {
   def tagForGpu(
     cpuExec: AppendDataExec,
     meta: AppendDataExecMeta): Unit = {
-    val writeClass = cpuExec.write.getClass
-
-    if (hasIcebergJar && icebergProvider.isSupportedWrite(writeClass)) {
-      icebergProvider.tagForGpuPlan(cpuExec, meta)
-    } else {
-      meta.willNotWorkOnGpu(s"Append data $writeClass is not supported")
+    val command = V2WriteCommand.Append
+    v2WriteRecognizer(cpuExec.write.getClass, command) match {
+      case Right(recognizer) =>
+        meta.setV2WriteRecognizer(recognizer.support)
+        recognizer.support.checksFor(command).tag(meta)
+        recognizer.tagForGpu(cpuExec, meta)
+      case Left(reason) => meta.willNotWorkOnGpu(reason)
     }
   }
 
   def convertToGpu(
     cpuExec: AppendDataExec,
-    meta: AppendDataExecMeta): GpuExec = {
-    val writeClass = cpuExec.write.getClass
-
-    if (hasIcebergJar && icebergProvider.isSupportedWrite(writeClass)) {
-      icebergProvider.convertToGpuPlan(cpuExec, meta)
-    } else {
-      throw new IllegalStateException("No GPU conversion")
-    }
-  }
+    meta: AppendDataExecMeta): GpuExec =
+    selectedV2WriteRecognizer(meta).convertToGpu(cpuExec, meta)
 
   def tagForGpu(
     cpuExec: OverwritePartitionsDynamicExec,
@@ -301,26 +384,20 @@ trait ExternalSourceBase extends Logging {
   def tagForGpu(
                  cpuExec: OverwriteByExpressionExec,
                  meta: OverwriteByExpressionExecMeta): Unit = {
-    val writeClass = cpuExec.write.getClass
-
-    if (hasIcebergJar && icebergProvider.isSupportedWrite(writeClass)) {
-      icebergProvider.tagForGpuPlan(cpuExec, meta)
-    } else {
-      meta.willNotWorkOnGpu(s"Overwrite data $writeClass is not supported")
+    val command = V2WriteCommand.OverwriteByExpression
+    v2WriteRecognizer(cpuExec.write.getClass, command) match {
+      case Right(recognizer) =>
+        meta.setV2WriteRecognizer(recognizer.support)
+        recognizer.support.checksFor(command).tag(meta)
+        recognizer.tagForGpu(cpuExec, meta)
+      case Left(reason) => meta.willNotWorkOnGpu(reason)
     }
   }
 
   def convertToGpu(
                     cpuExec: OverwriteByExpressionExec,
-                    meta: OverwriteByExpressionExecMeta): GpuExec = {
-    val writeClass = cpuExec.write.getClass
-
-    if (hasIcebergJar && icebergProvider.isSupportedWrite(writeClass)) {
-      icebergProvider.convertToGpuPlan(cpuExec, meta)
-    } else {
-      throw new IllegalStateException("No GPU conversion")
-    }
-  }
+                    meta: OverwriteByExpressionExecMeta): GpuExec =
+    selectedV2WriteRecognizer(meta).convertToGpu(cpuExec, meta)
 
 
   def tagForGpu(expr: StaticInvoke, meta: StaticInvokeMeta): Unit = {

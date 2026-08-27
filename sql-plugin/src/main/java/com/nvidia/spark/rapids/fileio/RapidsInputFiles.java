@@ -16,10 +16,6 @@
 
 package com.nvidia.spark.rapids.fileio;
 
-import com.nvidia.spark.rapids.PerfIO;
-import com.nvidia.spark.rapids.PerfIOConf;
-import org.apache.spark.SparkEnv;
-
 /**
  * Static helpers shared by {@link com.nvidia.spark.rapids.jni.fileio.RapidsInputFile}
  * implementations.
@@ -28,23 +24,19 @@ public final class RapidsInputFiles {
     private RapidsInputFiles() {}
 
     /**
-     * Returns the executor-resolved PerfIO S3 enablement. This includes opportunistic
-     * enablement when the configuration is unset and the required classes are available.
+     * True iff PerfIO initialized S3 support on this executor. Returns false until
+     * PerfIO is initialized.
      */
     public static boolean isS3PerfEnabled() {
-        return PerfIO.isS3PerfEnabled();
+        return com.nvidia.spark.rapids.PerfIO$.MODULE$.isS3PerfEnabled();
     }
+
     /**
-     * True iff {@code spark.rapids.perfio.gcs.enabled} is set to {@code true} on
-     * the active SparkConf. Returns false when no {@link SparkEnv} is initialized
-     * (e.g. before driver bring-up) so callers default to the non-PerfIO path.
+     * True iff PerfIO initialized GCS support on this executor. Returns false until
+     * PerfIO is initialized.
      */
     public static boolean isGCSPerfEnabled() {
-        SparkEnv env = SparkEnv.get();
-        if (env == null) {
-            return false;
-        }
-        return env.conf().getBoolean(PerfIOConf.GCSPERF_ENABLED().key(), false);
+        return com.nvidia.spark.rapids.PerfIO$.MODULE$.isGCSPerfEnabled();
     }
 
 }

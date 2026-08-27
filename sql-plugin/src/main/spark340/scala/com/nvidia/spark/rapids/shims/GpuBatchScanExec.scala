@@ -72,7 +72,16 @@ case class GpuBatchScanExec(
       false
   }
 
-  override def hashCode(): Int = Objects.hashCode(batch, runtimeFilters)
+  // Hash the same SPJ fields as equals. commonPartitionValues is hashed like Spark's
+  // StoragePartitionJoinParams (raw InternalRow); 0.0/-0.0 can diverge equals vs hashCode
+  // at the row level - same latent issue upstream. Fixing it needs equals to use
+  // InternalRowComparableWrapper too (see #15795).
+  override def hashCode(): Int = Objects.hashCode(
+    batch,
+    runtimeFilters,
+    commonPartitionValues,
+    replicatePartitions: java.lang.Boolean,
+    applyPartialClustering: java.lang.Boolean)
 
   @transient override lazy val inputPartitions: Seq[InputPartition] = batch.planInputPartitions()
 
@@ -237,7 +246,8 @@ case class GpuBatchScanExec(
         case _ =>
       }
 
-      new GpuDataSourceRDD(sparkContext, filteredPartitions, readerFactory)
+      // Use the finalized partitions so padded and replicated inputs match outputPartitioning.
+      new GpuDataSourceRDD(sparkContext, finalPartitions, readerFactory)
     }
     postDriverMetrics()
     rdd
