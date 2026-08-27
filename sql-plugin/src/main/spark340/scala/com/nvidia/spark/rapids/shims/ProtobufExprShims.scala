@@ -50,6 +50,7 @@ import scala.collection.mutable
 
 import ai.rapids.cudf.DType
 import com.nvidia.spark.rapids._
+import com.nvidia.spark.rapids.window.GpuBaseWindowExecMeta
 
 import org.apache.spark.sql.catalyst.expressions.{
   AttributeReference, Expression, GetArrayStructFields, GetStructField, UnaryExpression
@@ -492,12 +493,18 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
                   collectStructFieldReferences(
                     _, fieldReqs, holder, allowSemanticReferenceMatch))
                 advanceToParent()
-              case w: org.apache.spark.sql.execution.window.WindowExec =>
-                val exprs = w.windowExpression
-                exprs.foreach(
-                  collectStructFieldReferences(
-                    _, fieldReqs, holder, allowSemanticReferenceMatch))
-                advanceToParent()
+              case _: org.apache.spark.sql.execution.window.WindowExec =>
+                planMeta match {
+                  case windowMeta: GpuBaseWindowExecMeta[_] =>
+                    windowMeta.getInputWindowExpressions.foreach(
+                      collectStructFieldReferences(
+                        _, fieldReqs, holder, allowSemanticReferenceMatch))
+                    advanceToParent()
+                  case _ =>
+                    logDebug("Schema pruning disabled: WindowExec metadata does not expose " +
+                      "cross-version window expressions")
+                    safeToPrune = false
+                }
               case other =>
                 // Keep schema projection conservative for less common plan shapes above
                 // from_protobuf. Those plans currently fall back to full-schema decode
