@@ -74,8 +74,8 @@ case class GpuBatchScanExec(
 
   // Hash the same SPJ fields as equals. commonPartitionValues is hashed like Spark's
   // StoragePartitionJoinParams (raw InternalRow); 0.0/-0.0 can diverge equals vs hashCode
-  // at the row level — same latent issue upstream. Fixing it needs equals to use
-  // InternalRowComparableWrapper too (separate change).
+  // at the row level - same latent issue upstream. Fixing it needs equals to use
+  // InternalRowComparableWrapper too (see #15795).
   override def hashCode(): Int = Objects.hashCode(
     batch,
     runtimeFilters,
