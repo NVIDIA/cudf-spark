@@ -16,6 +16,8 @@
 
 package com.nvidia.spark.rapids
 
+import java.util.concurrent.TimeUnit
+
 import scala.collection.mutable.ArrayBuffer
 
 import com.nvidia.spark.rapids.jni.RmmSpark
@@ -143,14 +145,25 @@ class GpuMemoryEstimatorSuite extends AnyFunSuite with Tolerance {
   }
 
   test("contract: a task footprint above the seed is adopted immediately, not blended") {
-    // This branch never reads the clock, which is why the expectation can be exact. The
-    // opposite direction -- a footprint below the seed -- blends over a 100 ms window and is
-    // left uncovered rather than tested against wall-clock time.
+    // This branch never reads the clock, which is why the expectation can be exact.
     val observed = HeavyFootprints.max.toLong
     val estimator = new GpuTaskMemoryEstimator(stageId = 1, taskId = 1L,
       defaultEstimate = SeedEstimate, allowDynamicUpdate = true)
     estimator.update(timeLost = 0L, memory = observed)
     assert(estimator.estimate() == observed)
+  }
+
+  test("contract: lost time beyond the elapsed window holds the blend at the seed") {
+    // The opposite direction -- a footprint below the seed -- blends over a 100 ms window, and two
+    // of its three inputs can still be pinned without advancing the clock: subtracting
+    // `totalTimeLost` drives the window position negative, and the lower clamp turns anything
+    // negative into 0.0. So the seed is returned exactly, however long this test takes to get here.
+    // What that leaves uncovered is the interior of the window and the upper clamp, where the
+    // result moves with elapsed time and needs an injectable clock to assert on.
+    val estimator = new GpuTaskMemoryEstimator(stageId = 1, taskId = 1L,
+      defaultEstimate = SeedEstimate, allowDynamicUpdate = true)
+    estimator.update(timeLost = TimeUnit.HOURS.toNanos(1), memory = LightMode.toLong)
+    assert(estimator.estimate() == SeedEstimate)
   }
 
   test("contract: allowDynamicUpdate = false pins the stage estimate to the seed") {
@@ -249,8 +262,10 @@ class GpuMemoryEstimatorSuite extends AnyFunSuite with Tolerance {
   }
 
   test("characterization: the stage estimate holds the light mode with every heavy task live") {
-    // The defect itself, through production wiring rather than percentile arithmetic: this is the
-    // assertion a fix has to flip.
+    // The same blind spot through production wiring rather than percentile arithmetic: four heavy
+    // tasks are live and the stage still estimates the light mode, since P80 over 60 light samples
+    // never reaches them. P80 was a deliberate choice, so this pins the current outcome rather than
+    // asserting a bug; any change that widens the estimate while a heavy tail is live moves it up.
     withMockedStage { stage =>
       LightFootprints.foreach(stage.complete)
       HeavyFootprints.foreach(stage.start)
