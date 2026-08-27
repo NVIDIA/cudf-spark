@@ -2139,7 +2139,7 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
     wrapped.unregisterShuffle(shuffleId)
   }
 
-  override def shuffleBlockResolver: ShuffleBlockResolver = resolver
+  def shuffleBlockResolver: ShuffleBlockResolver = resolver
 
   override def stop(): Unit = synchronized {
     wrapped.stop()

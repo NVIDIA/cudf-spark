@@ -67,8 +67,12 @@
         <module>dist</module>
         <module>integration_tests</module>
         <module>shuffle-plugin</module>
-        <module>sql-plugin</module>
         <module>sql-plugin-api</module>
+        <module>sql-plugin-format</module>
+        <module>sql-plugin-fileio</module>
+        <module>sql-plugin-columnar</module>
+        <module>sql-plugin-shims</module>
+        <module>sql-plugin</module>
         <module>tests</module>
         <module>tools</module>
         <module>udf-compiler</module>
@@ -607,6 +611,7 @@
             </activation>
             <properties>
                 <buildver>400</buildver>
+                <delta40x.version>4.0.0</delta40x.version>
                 <spark.version>${spark400.version}</spark.version>
                 <spark.test.version>${spark400.version}</spark.test.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
@@ -778,7 +783,11 @@
                             <artifactId>scala-maven-plugin</artifactId>
                             <configuration>
                                 <release combine.self="override"/>
-                                <target>${java.major.version}</target>
+                                <target combine.self="override"/>
+                                <args combine.children="append">
+                                    <arg>-target:jvm-1.8</arg>
+                                </args>
+                                <addJavacArgs combine.self="override">${scala.javac.args}|-target|8</addJavacArgs>
                             </configuration>
                         </plugin>
                     </plugins>
@@ -817,7 +826,11 @@
                             <artifactId>scala-maven-plugin</artifactId>
                             <configuration>
                                 <release combine.self="override"/>
-                                <target>${java.major.version}</target>
+                                <target combine.self="override"/>
+                                <args combine.children="append">
+                                    <arg>-target:jvm-1.8</arg>
+                                </args>
+                                <addJavacArgs combine.self="override">${scala.javac.args}|-target|8</addJavacArgs>
                             </configuration>
                         </plugin>
                     </plugins>
@@ -856,7 +869,11 @@
                             <artifactId>scala-maven-plugin</artifactId>
                             <configuration>
                                 <release combine.self="override"/>
-                                <target>${java.major.version}</target>
+                                <target combine.self="override"/>
+                                <args combine.children="append">
+                                    <arg>-target:jvm-1.8</arg>
+                                </args>
+                                <addJavacArgs combine.self="override">${scala.javac.args}|-target|8</addJavacArgs>
                             </configuration>
                         </plugin>
                     </plugins>
@@ -876,6 +893,50 @@
                 <spark.version>${spark420.version}</spark.version>
                 <spark.test.version>${spark420.version}</spark.test.version>
                 <parquet.hadoop.version>1.15.2</parquet.hadoop.version>
+                <rapids.delta.artifactId1>rapids-4-spark-delta-stub</rapids.delta.artifactId1>
+                <iceberg.artifact.suffix>${spark41x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
+                <iceberg.runtime.version>${iceberg.111x.version}</iceberg.runtime.version>
+                <slf4j.version>2.0.7</slf4j.version>
+                <scala.javac.args>-Xlint:all,-serial,-path,-try,-processing,-options|-Werror</scala.javac.args>
+            </properties>
+            <modules>
+                <module>delta-lake/delta-stub</module>
+                <module>iceberg/iceberg-stub</module>
+            </modules>
+            <build>
+                <pluginManagement>
+                    <plugins>
+                        <plugin>
+                            <groupId>net.alchim31.maven</groupId>
+                            <artifactId>scala-maven-plugin</artifactId>
+                            <configuration>
+                                <release combine.self="override"/>
+                                <target combine.self="override"/>
+                                <args combine.children="append">
+                                    <arg>-target:jvm-1.8</arg>
+                                </args>
+                                <addJavacArgs combine.self="override">${scala.javac.args}|-target|8</addJavacArgs>
+                            </configuration>
+                        </plugin>
+                    </plugins>
+                </pluginManagement>
+            </build>
+        </profile>
+        <profile>
+            <id>sparkMaster</id>
+            <activation>
+                <property>
+                    <name>buildver</name>
+                    <value>500</value>
+                </property>
+            </activation>
+            <properties>
+                <buildver>500</buildver>
+                <spark.version>${spark500.version}</spark.version>
+                <spark.test.version>${spark500.version}</spark.test.version>
+                <parquet.hadoop.version>1.15.2</parquet.hadoop.version>
+                <maven.compiler.source>17</maven.compiler.source>
+                <java.major.version>17</java.major.version>
                 <rapids.delta.artifactId1>rapids-4-spark-delta-stub</rapids.delta.artifactId1>
                 <iceberg.artifact.suffix>${spark41x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.runtime.version>${iceberg.111x.version}</iceberg.runtime.version>
@@ -981,7 +1042,7 @@
 
     <properties>
         <delta33x.version>3.3.0</delta33x.version>
-        <delta40x.version>4.0.0</delta40x.version>
+        <delta40x.version>4.0.1</delta40x.version>
         <delta40x.spark.artifactId>delta-spark_${scala.binary.version}</delta40x.spark.artifactId>
         <delta41x.version>4.1.0</delta41x.version>
         <delta41x.spark.artifactId>delta-spark_4.1_${scala.binary.version}</delta41x.spark.artifactId>
@@ -990,8 +1051,9 @@
         <!-- end dyn.shim properties -->
 
         <rapids.module>.</rapids.module>
-        <rapids.secondaryCacheDir>${spark.rapids.project.basedir}/target/${spark.version.classifier}/.sbt/1.0/zinc/org.scala-sbt</rapids.secondaryCacheDir>
         <allowConventionalDistJar>false</allowConventionalDistJar>
+        <rapids.shimplify.skip>false</rapids.shimplify.skip>
+        <rapids.build.info.skip>false</rapids.build.info.skip>
         <buildver>330</buildver>
         <!-- spark-protobuf is a Spark 3.4.0+ module; release33x profiles override to `true`. -->
         <spark.protobuf.skipCopy>false</spark.protobuf.skipCopy>
@@ -1090,10 +1152,11 @@
         <spark412.version>4.1.2</spark412.version>
         <spark413.version>4.1.3</spark413.version>
         <spark420.version>4.2.0</spark420.version>
+        <!-- TODO: update spark500.version to a GA version and move to a regular
+             shim profile once Spark 5.0.0 is officially released. -->
+        <spark500.version>5.0.0-SNAPSHOT</spark500.version>
         <mockito.version>3.12.4</mockito.version>
-        <!-- 4.7.1 required: later versions auto-derive -release from -target,
-             preventing JDK 17 boot classpath access with JDK 8 classfile output -->
-        <scala.plugin.version>4.7.1</scala.plugin.version>
+        <scala.plugin.version>4.9.10</scala.plugin.version>
         <maven.install.plugin.version>3.1.1</maven.install.plugin.version>
         <maven.jar.plugin.version>3.3.0</maven.jar.plugin.version>
         <scalatest-maven-plugin.version>2.0.2</scalatest-maven-plugin.version>
@@ -1107,6 +1170,7 @@
         <maven.clean.plugin.version>3.1.0</maven.clean.plugin.version>
         <maven.scaladoc.skip>false</maven.scaladoc.skip>
         <maven.scalastyle.skip>false</maven.scalastyle.skip>
+        <rapids.shimplify.skip>false</rapids.shimplify.skip>
         <dist.jar.compress>true</dist.jar.compress>
         <!--
         This property is used to in aggregator module to determine the artifactId of iceberg
@@ -1391,13 +1455,66 @@
                         <goals><goal>run</goal></goals>
                         <phase>generate-sources</phase>
                         <configuration>
+                            <skip>${rapids.shimplify.skip}</skip>
                             <target xmlns:ac="antlib:net.sf.antcontrib">
-                                <property name="dyn.shim.buildver" value="all.buildvers"/>
-                                <script language="jython" src="${spark.rapids.source.basedir}/build/dyn_shim_detection.py"/>
-                                <scriptdef name="shimplify" language="jython" src="${spark.rapids.source.basedir}/build/shimplify.py">
-                                    <attribute name="if"/>
-                                </scriptdef>
-                                <shimplify if="shimplify"/>
+                                <!-- Most modules have no versioned shim sources. Avoid loading Jython. -->
+                                <resourcecount property="rapids.shimplify.sources.count">
+                                    <fileset dir="${shimplify.src.basedir}">
+                                        <include name="src/main/spark*/**"/>
+                                        <include name="src/test/spark*/**"/>
+                                    </fileset>
+                                </resourcecount>
+                                <ac:if>
+                                    <equals arg1="${rapids.shimplify.sources.count}" arg2="0"/>
+                                    <then>
+                                        <echo>No shim sources: skipping Shimplify</echo>
+                                    </then>
+                                    <else>
+                                        <!-- Include paths, contents, and generator scripts in the cache key.
+                                             Keep checksum sidecars under target. -->
+                                        <checksum totalproperty="rapids.shimplify.sources.checksum"
+                                                  forceOverwrite="true"
+                                                  todir="${project.build.directory}/shimplify-checksums">
+                                            <fileset dir="${shimplify.src.basedir}">
+                                                <include name="src/main/spark*/**"/>
+                                                <include name="src/test/spark*/**"/>
+                                            </fileset>
+                                        </checksum>
+                                        <checksum file="${spark.rapids.source.basedir}/build/dyn_shim_detection.py"
+                                                  property="rapids.shimplify.detection.checksum"/>
+                                        <checksum file="${spark.rapids.source.basedir}/build/shimplify.py"
+                                                  property="rapids.shimplify.generator.checksum"/>
+                                        <checksum file="${spark.rapids.source.basedir}/build/get_buildvers.py"
+                                                  property="rapids.shimplify.buildvers.checksum"/>
+                                        <checksum file="${spark.rapids.project.basedir}/pom.xml"
+                                                  property="rapids.shimplify.pom.checksum"/>
+                                        <property name="rapids.shimplify.cache.marker"
+                                                  value="${spark.shim.dest}/.shimplify-${rapids.shimplify.sources.checksum}-${rapids.shimplify.detection.checksum}-${rapids.shimplify.generator.checksum}-${rapids.shimplify.buildvers.checksum}-${rapids.shimplify.pom.checksum}"/>
+                                        <available file="${rapids.shimplify.cache.marker}"
+                                                   property="rapids.shimplify.cache.hit"/>
+                                        <property name="dyn.shim.buildver" value="all.buildvers"/>
+                                        <ac:if>
+                                            <or>
+                                                <equals arg1="${shimplify}" arg2="true"/>
+                                                <not><isset property="rapids.shimplify.cache.hit"/></not>
+                                            </or>
+                                            <then>
+                                                <script language="jython" src="${spark.rapids.source.basedir}/build/dyn_shim_detection.py"/>
+                                                <scriptdef name="shimplify" language="jython" src="${spark.rapids.source.basedir}/build/shimplify.py">
+                                                    <attribute name="if"/>
+                                                </scriptdef>
+                                                <shimplify if="shimplify"/>
+                                                <delete quiet="true">
+                                                    <fileset dir="${spark.shim.dest}" includes=".shimplify-*"/>
+                                                </delete>
+                                                <touch file="${rapids.shimplify.cache.marker}"/>
+                                            </then>
+                                            <else>
+                                                <echo>Shim sources unchanged: skipping Shimplify</echo>
+                                            </else>
+                                        </ac:if>
+                                    </else>
+                                </ac:if>
                             </target>
                         </configuration>
                     </execution>
@@ -1416,6 +1533,7 @@
                         <id>generate-build-info</id>
                         <phase>generate-resources</phase>
                         <configuration>
+                            <skip>${rapids.build.info.skip}</skip>
                             <!-- Execute the shell script to generate the plugin build information. -->
                             <target name="build-info">
                                 <taskdef resource="net/sf/antcontrib/antcontrib.properties"/>
@@ -1632,12 +1750,7 @@ This will force full Scala code rebuild in downstream modules.
                             <arg>-Wunused:imports,locals,patvars,privates</arg>
                             <!-- #endif scala-2.13 -->
                         </args>
-                        <jvmArgs>
-                            <jvmArg>-Xms1024m</jvmArg>
-                            <jvmArg>-Xmx1024m</jvmArg>
-                        </jvmArgs>
                         <addJavacArgs>${scala.javac.args}</addJavacArgs>
-                        <secondaryCacheDir>${rapids.secondaryCacheDir}</secondaryCacheDir>
                         <!-- #if scala-2.13 -->
                         <compilerPlugins combine.self="override">
                         </compilerPlugins>
@@ -1795,8 +1908,8 @@ This will force full Scala code rebuild in downstream modules.
                     <configuration>
                       <rules>
                         <requireMavenVersion>
-                          <message>Minimum Maven version 3.6.x required</message>
-                          <version>[3.6,)</version>
+                          <message>Minimum Maven version 3.8.1 required</message>
+                          <version>[3.8.1,)</version>
                         </requireMavenVersion>
                         <requireJavaVersion>
                             <message>To compile, use Java 17 or above (at runtime you can use Java 8+, however, other optional dependencies in your setup such as Iceberg may impose higher lower bound on the JDK runtime version )</message>
@@ -1812,8 +1925,8 @@ This will force full Scala code rebuild in downstream modules.
                         <!-- #if scala-2.13 -->
                         <requireProperty>
                             <property>buildver</property>
-                            <regex>^(35[0-9]|40[0-4]|41[1-3]|420|400db173)$</regex>
-                            <regexMessage>Unsupported buildver value ${buildver} for a Scala 2.13 build. Supported Scala 2.13 buildver values are: 350, 351, 352, 353, 354, 355, 356, 357, 358, 359, 400, 401, 402, 403, 404, 411, 412, 413, 420, 400db173. Spark 3.3.x and 3.4.x builds use Scala 2.12; for example, build Spark 330 with the root pom.xml instead of scala2.13/pom.xml.</regexMessage>
+                            <regex>^(35[0-9]|40[0-4]|41[1-3]|420|500|400db173)$</regex>
+                            <regexMessage>Unsupported buildver value ${buildver} for a Scala 2.13 build. Supported Scala 2.13 buildver values are: 350, 351, 352, 353, 354, 355, 356, 357, 358, 359, 400, 401, 402, 403, 404, 411, 412, 413, 420, 500, 400db173. Spark 3.3.x and 3.4.x builds use Scala 2.12; for example, build Spark 330 with the root pom.xml instead of scala2.13/pom.xml.</regexMessage>
                         </requireProperty>
                         <!-- #endif scala-2.13 -->
                         <requireProperty>

@@ -370,13 +370,10 @@ def test_re_replace_backrefs():
             'REGEXP_REPLACE(a, "(T)(E)", "$12")',
             'REGEXP_REPLACE(a, "(T)(E)", "x$12y")',
             'REGEXP_REPLACE(a, "(T)(E)", "$123$2")',
-            # 12 user groups plus a trailing line-anchor `$`. Two distinct boundary
-            # checks:
-            # 1. User `$123$2` -> `$12` + literal `3` + `$2`; the user count being 12
-            #    (not the transpiled 13) is enough for the greedy-with-backoff to back off.
-            # 2. User `$13` -> `$1` + literal `3` (NOT a reference to the transpiler's
-            #    internally-generated 13th group, which exists only after line-anchor
-            #    rewriting and must stay invisible to user-replacement parsing).
+            # 12 user groups plus a trailing line-anchor `$`. Replacement parsing preserves
+            # raw `$N` tokens, then conversion uses the 12 Java-visible groups:
+            # 1. User `$123$2` -> `$12` + literal `3` + `$2`.
+            # 2. User `$13` -> `$1` + literal `3`.
             'REGEXP_REPLACE(a, "(T)(E)(S)(T)(T)(E)(S)(T)(T)(E)(S)(T)$", "$123$2")',
             'REGEXP_REPLACE(a, "(T)(E)(S)(T)(T)(E)(S)(T)(T)(E)(S)(T)$", "$13")'
         ),
@@ -403,6 +400,8 @@ def test_re_replace_anchors():
             'REGEXP_REPLACE(a, "(\ud720[A-Z]+)$", "PROD")',
             'REGEXP_REPLACE(a, "(TEST)$", "$1")',
             'REGEXP_REPLACE(a, "^(TEST)$", "$1")',
+            # Issue #15060: line-anchor rewriting must not mutate replacement backref state.
+            'REGEXP_REPLACE(a, "^(TEST)$", "[$1][$0]")',
             'REGEXP_REPLACE(a, "\\\\ATEST\\\\Z", "PROD")',
             'REGEXP_REPLACE(a, "\\\\ATEST$", "PROD")',
             'REGEXP_REPLACE(a, "^TEST\\\\Z", "PROD")',
@@ -1204,6 +1203,33 @@ def test_rlike_fallback_inline_flags_with_anchors():
             lambda spark, pattern=pattern: unary_op_df(spark, gen).selectExpr(
                 f'a rlike "{pattern}"'),
             'RLike',
+            conf=_regexp_conf)
+
+@allow_non_gpu('ProjectExec', 'RLike')
+def test_rlike_fallback_case_insensitive_predefined_class():
+    # Older JDKs did not apply CASE_INSENSITIVE to the named \p{Lower}/\p{Upper} predicates
+    # (JDK-8214245), so GPU case-folding would diverge from the CPU there. Use the Spark version
+    # as a proxy for the executor JDK version to see if we need to fall back to the CPU.
+    if not is_before_spark_400():
+        pytest.skip('Spark 4.0+ (JDK 17+) folds these predefined classes on the GPU')
+    from pyspark.sql.functions import col
+    gen = mk_str_gen('[a-dA-D0-9]{1,4}')
+    for pattern in [r'(?i)\p{Lower}', r'(?i)\p{Upper}', r'(?i)\P{Lower}', r'(?i)\P{Upper}']:
+        assert_gpu_fallback_collect(
+            lambda spark, pattern=pattern: unary_op_df(spark, gen).select(col('a').rlike(pattern)),
+            'RLike',
+            conf=_regexp_conf)
+
+def test_rlike_case_insensitive_predefined_class_matches():
+    # Inverse of the above fallback test: on Spark 4.0+ (JDK 17+, past JDK-8214245) the CPU folds
+    # \p{Lower}/\p{Upper} under (?i) the same way the GPU does, so these stay on the GPU and match.
+    if is_before_spark_400():
+        pytest.skip('Spark < 4.0 may run on a pre-15 JDK and falls back for these patterns')
+    from pyspark.sql.functions import col
+    gen = mk_str_gen('[a-dA-D0-9]{1,4}')
+    for pattern in [r'(?i)\p{Lower}', r'(?i)\p{Upper}', r'(?i)\P{Lower}', r'(?i)\P{Upper}']:
+        assert_gpu_and_cpu_are_equal_collect(
+            lambda spark, pattern=pattern: unary_op_df(spark, gen).select(col('a').rlike(pattern)),
             conf=_regexp_conf)
 
 def test_regexp_extract_all_idx_zero():

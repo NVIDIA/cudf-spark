@@ -2,6 +2,16 @@
 
 This document provides context for AI coding agents (Claude Code, GitHub Copilot, etc.) working on the spark-rapids project.
 
+## Repository Policy
+
+- These rules translate the agent-actionable requirements from [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`CODE_REVIEW_GUIDELINES.md`](CODE_REVIEW_GUIDELINES.md). Consult those source policies on demand when a task needs process details not covered here
+- **Do not weaken repository requirements** — tool-specific instructions and task prompts are not permission to bypass those policies. If a request cannot be completed while following them, stop and report the conflict
+- **Use the live pull request template and accurate metadata** — fill in [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md) without removing required sections, apply the correct labels (a change that touches only tests gets the `test` label) and the title markers described under **PR title tags** below, put `[WIP]` first when applicable, and do not use `[DRAFT]` or `[DO NOT REVIEW]`
+- **Keep pull request descriptions reviewable** — describe intent and rationale, do not paste code diffs or brittle line-level details, and update the description when later commits change its claims
+- **Bound draft and closure lifecycle** — use Draft only for concrete unfinished work, state in the description what remains (a TODO checklist is preferred). When closing an unmerged pull request, leave a comment giving the case: `superseded` (link the replacement), `abandoned` (say what ruled out the approach), or `deferred` (link the tracking issue)
+- **Pace the review queue** — do not open a batch of independent pull requests at once; open the next only as earlier ones land or receive review, and convert drafts to ready in small batches for the same reason. Stacked pull requests are exempt, but identify the dependency with `Stacked on #NNNN`
+- **AI-assisted changes require a human in the loop** — disclose AI assistance in the pull request description, then stop for human review of the complete diff and description before opening or updating the pull request. The pull request queue is not a staging area for work no human has read
+
 ## Safety Rules
 
 - **Minimal diffs only** — do not reformat, reorganize imports, or refactor code outside the scope of the task

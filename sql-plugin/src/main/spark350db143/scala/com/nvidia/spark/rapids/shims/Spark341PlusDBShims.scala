@@ -103,7 +103,10 @@ trait Spark341PlusDBShims extends Spark332PlusDBShims {
       ProtobufExprShims.exprs
   }
 
-  private val shimExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = Seq(
+  // Keep this lazy to avoid a class-initialization cycle: building these rules calls
+  // GpuOverrides.exec, while GpuOverrides initialization calls SparkShimImpl.
+  // Eager evaluation can deadlock if the two singleton objects are initialized concurrently.
+  private lazy val shimExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = Seq(
       GpuOverrides.exec[TakeOrderedAndProjectExec](
         "Take the first limit elements after offset as defined by the sortOrder, and do " +
           "projection if needed",

@@ -584,7 +584,8 @@ def assert_cpu_and_gpu_are_equal_sql_with_capture(df_fun,
 
 def assert_gpu_fallback_collect(func,
         cpu_fallback_class_name,
-        conf={}):
+        conf={},
+        result_canonicalize_func_before_compare=None):
     (bring_back, collect_type) = _prep_func_for_compare(func, 'COLLECT_WITH_DATAFRAME')
 
     conf = _prep_incompat_conf(conf)
@@ -603,6 +604,8 @@ def assert_gpu_fallback_collect(func,
         gpu_end - gpu_start, cpu_end - cpu_start))
     if should_sort_locally():
         _sort_locally(from_cpu, from_gpu)
+    if result_canonicalize_func_before_compare is not None:
+        (from_cpu, from_gpu) = result_canonicalize_func_before_compare(from_cpu, from_gpu)
 
     assert_equal(from_cpu, from_gpu)
 
