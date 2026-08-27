@@ -30,9 +30,10 @@ import org.apache.iceberg.io.StorageCredential;
 import org.apache.iceberg.io.SupportsStorageCredentials;
 import org.apache.iceberg.spark.SparkUtil;
 import org.apache.iceberg.spark.source.GpuSparkCopyOnWriteV1Scan;
-import org.apache.iceberg.spark.source.GpuSparkPositionDeltaWriteAccess;
+import org.apache.iceberg.spark.source.iceberg19x.GpuSparkPositionDeltaWriteAccess;
 import org.apache.iceberg.spark.source.GpuSparkScan;
 import org.apache.iceberg.types.Types;
+import org.apache.iceberg.util.DeleteFileSet;
 import org.apache.iceberg.util.PartitionUtil;
 import org.apache.spark.broadcast.Broadcast;
 import org.apache.spark.sql.catalyst.InternalRow;
@@ -69,19 +70,23 @@ public class ShimUtilsImpl implements IcebergShimUtils {
     }
 
     @Override
-    @SuppressWarnings({"rawtypes", "unchecked"})
-    public Broadcast<Map<String, Set<DeleteFile>>> broadcastRewritableDeletes(
+    public RewritableDeletes broadcastRewritableDeletes(
             DeltaBatchWrite write) {
-        return (Broadcast) GpuSparkPositionDeltaWriteAccess.broadcastRewritableDeletes(write);
+        Broadcast<Map<String, DeleteFileSet>> rewritableDeletes =
+                GpuSparkPositionDeltaWriteAccess.broadcastRewritableDeletes(write);
+        return rewritableDeletes != null ? new RewritableDeletesImpl(rewritableDeletes) : null;
     }
 
     @Override
     public PartitioningWriter<PositionDelete<InternalRow>, DeleteWriteResult>
             newDeletionVectorWriter(
                     Table table, OutputFileFactory fileFactory,
-                    Map<String, Set<DeleteFile>> rewritableDeletes) {
+                    RewritableDeletes rewritableDeletes) {
+        Map<String, DeleteFileSet> deleteFiles = rewritableDeletes == null
+                ? null
+                : ((RewritableDeletesImpl) rewritableDeletes).value();
         return new PartitioningDVWriter<>(
-                fileFactory, previousDeleteLoader(table, rewritableDeletes));
+                fileFactory, previousDeleteLoader(table, deleteFiles));
     }
 
     @Override
@@ -96,7 +101,7 @@ public class ShimUtilsImpl implements IcebergShimUtils {
     }
 
     private Function<CharSequence, PositionDeleteIndex> previousDeleteLoader(
-            Table table, Map<String, Set<DeleteFile>> rewritableDeletes) {
+            Table table, Map<String, DeleteFileSet> rewritableDeletes) {
         if (rewritableDeletes == null) {
             return path -> null;
         }
@@ -108,6 +113,18 @@ public class ShimUtilsImpl implements IcebergShimUtils {
             Set<DeleteFile> files = rewritableDeletes.get(path.toString());
             return files != null ? deleteLoader.loadPositionDeletes(files, path) : null;
         };
+    }
+
+    private static final class RewritableDeletesImpl implements RewritableDeletes {
+        private final Broadcast<Map<String, DeleteFileSet>> delegate;
+
+        private RewritableDeletesImpl(Broadcast<Map<String, DeleteFileSet>> delegate) {
+            this.delegate = delegate;
+        }
+
+        private Map<String, DeleteFileSet> value() {
+            return delegate.value();
+        }
     }
 
     @Override

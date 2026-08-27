@@ -39,14 +39,12 @@ import org.apache.iceberg.io.WriteResult;
 import org.apache.iceberg.shaded.org.apache.parquet.ParquetReadOptions;
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.iceberg.spark.source.GpuSparkScan;
-import org.apache.spark.broadcast.Broadcast;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.connector.write.DeltaBatchWrite;
 
 import java.io.IOException;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * Dispatches to the correct version-specific Iceberg shim utilities based on the
@@ -83,7 +81,7 @@ public class ShimUtils {
         return IMPL.isPuffinFormat(fileFormat);
     }
 
-    public static Broadcast<Map<String, Set<DeleteFile>>> broadcastRewritableDeletes(
+    public static IcebergShimUtils.RewritableDeletes broadcastRewritableDeletes(
             DeltaBatchWrite write) {
         return IMPL.broadcastRewritableDeletes(write);
     }
@@ -91,7 +89,7 @@ public class ShimUtils {
     public static PartitioningWriter<PositionDelete<InternalRow>, DeleteWriteResult>
             newDeletionVectorWriter(
                     Table table, OutputFileFactory fileFactory,
-                    Map<String, Set<DeleteFile>> rewritableDeletes) {
+                    IcebergShimUtils.RewritableDeletes rewritableDeletes) {
         return IMPL.newDeletionVectorWriter(table, fileFactory, rewritableDeletes);
     }
 

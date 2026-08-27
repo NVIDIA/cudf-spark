@@ -28,7 +28,7 @@ import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.SpillPriorities.ACTIVE_ON_DECK_PRIORITY
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
 import com.nvidia.spark.rapids.iceberg.{ColumnarBatchWithPartition, GpuIcebergPartitioner,
-  GpuIcebergSpecPartitioner, IcebergFormatVersionSupport, ShimUtils}
+  GpuIcebergSpecPartitioner, IcebergFormatVersionSupport, IcebergShimUtils, ShimUtils}
 import com.nvidia.spark.rapids.iceberg.utils.GpuStructProjection
 import org.apache.hadoop.mapreduce.Job
 import org.apache.iceberg._
@@ -207,8 +207,7 @@ object GpuSparkPositionDeltaWrite {
 
 class GpuPositionDeltaWriterFactory(
   val tableSer: Broadcast[Table],
-  val rewritableDeletesSer:
-    Option[Broadcast[java.util.Map[String, java.util.Set[DeleteFile]]]],
+  val rewritableDeletesSer: Option[IcebergShimUtils.RewritableDeletes],
   val command: Command,
   val context: GpuWriteContext,
   val writeProps: Map[String, String],
@@ -265,11 +264,7 @@ trait GpuDeltaWriter extends DeltaWriter[ColumnarBatch] {
   def context: GpuWriteContext
 
   protected def rewritableDeletesSer:
-    Option[Broadcast[java.util.Map[String, java.util.Set[DeleteFile]]]]
-
-  protected def rewritableDeletes: java.util.Map[String, java.util.Set[DeleteFile]] = {
-    rewritableDeletesSer.map(_.value).orNull
-  }
+    Option[IcebergShimUtils.RewritableDeletes]
 
   protected def buildPartitionProjections(
     partitionType: IcebergTypes.StructType,
@@ -290,7 +285,7 @@ trait GpuDeltaWriter extends DeltaWriter[ColumnarBatch] {
     if (context.useDVs) {
       new GpuBatchPositionDeleteWriter(
         ShimUtils.newDeletionVectorWriter(
-          table, outputFileFactory, rewritableDeletes))
+          table, outputFileFactory, rewritableDeletesSer.orNull))
     } else if (inputOrdered) {
       new GpuClusteredPositionDeleteWriter(writerFactory, outputFileFactory, io, targetFileSize)
     } else {
@@ -587,8 +582,7 @@ trait GpuDeleteAndDataDeltaWriter extends GpuDeltaWriter {
  */
 class GpuDeleteOnlyDeltaWriter(
     table: Table,
-    override protected val rewritableDeletesSer:
-      Option[Broadcast[java.util.Map[String, java.util.Set[DeleteFile]]]],
+    override protected val rewritableDeletesSer: Option[IcebergShimUtils.RewritableDeletes],
     writerFactory: GpuSparkFileWriterFactory,
     deleteFileFactory: OutputFileFactory,
     override val context: GpuWriteContext) extends GpuDeltaWriter {
@@ -708,8 +702,7 @@ class GpuDeleteOnlyDeltaWriter(
  */
 class GpuUnpartitionedDeltaWriter(
     protected val table: Table,
-    override protected val rewritableDeletesSer:
-      Option[Broadcast[java.util.Map[String, java.util.Set[DeleteFile]]]],
+    override protected val rewritableDeletesSer: Option[IcebergShimUtils.RewritableDeletes],
     writerFactory: GpuSparkFileWriterFactory,
     dataFileFactory: OutputFileFactory,
     deleteFileFactory: OutputFileFactory,
@@ -760,8 +753,7 @@ class GpuUnpartitionedDeltaWriter(
  */
 class GpuPartitionedDeltaWriter(
     protected val table: Table,
-    override protected val rewritableDeletesSer:
-      Option[Broadcast[java.util.Map[String, java.util.Set[DeleteFile]]]],
+    override protected val rewritableDeletesSer: Option[IcebergShimUtils.RewritableDeletes],
     writerFactory: GpuSparkFileWriterFactory,
     dataFileFactory: OutputFileFactory,
     deleteFileFactory: OutputFileFactory,

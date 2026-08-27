@@ -34,7 +34,6 @@ import org.apache.iceberg.spark.source.GpuSparkCopyOnWriteV1Scan;
 import org.apache.iceberg.spark.source.GpuSparkScan;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.PartitionUtil;
-import org.apache.spark.broadcast.Broadcast;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.connector.write.DeltaBatchWrite;
@@ -42,7 +41,6 @@ import org.apache.spark.sql.connector.write.DeltaBatchWrite;
 import java.io.IOException;
 import java.util.Collections;
 import java.util.Map;
-import java.util.Set;
 
 /** Iceberg 1.6.x shim: uses {@code ContentFile.path()} and {@code GpuBaseReader::convertConstant}. */
 public class ShimUtilsImpl implements IcebergShimUtils {
@@ -83,7 +81,7 @@ public class ShimUtilsImpl implements IcebergShimUtils {
     }
 
     @Override
-    public Broadcast<Map<String, Set<DeleteFile>>> broadcastRewritableDeletes(
+    public RewritableDeletes broadcastRewritableDeletes(
             DeltaBatchWrite write) {
         throw new UnsupportedOperationException(
                 "Iceberg 1.6 does not support Puffin deletion vectors");
@@ -93,7 +91,7 @@ public class ShimUtilsImpl implements IcebergShimUtils {
     public PartitioningWriter<PositionDelete<InternalRow>, DeleteWriteResult>
             newDeletionVectorWriter(
                     Table table, OutputFileFactory fileFactory,
-                    Map<String, Set<DeleteFile>> rewritableDeletes) {
+                    RewritableDeletes rewritableDeletes) {
         throw new UnsupportedOperationException(
                 "Iceberg 1.6 does not support Puffin deletion vectors");
     }

@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package org.apache.iceberg.spark.source;
+package org.apache.iceberg.spark.source.iceberg19x;
 
 import java.lang.reflect.Method;
 import java.util.Map;
@@ -23,7 +23,7 @@ import org.apache.iceberg.util.DeleteFileSet;
 import org.apache.spark.broadcast.Broadcast;
 import org.apache.spark.sql.connector.write.DeltaBatchWrite;
 
-/** Iceberg-version-specific access to position-delta batch-write internals. */
+/** Iceberg 1.9.x-specific access to position-delta batch-write internals. */
 public final class GpuSparkPositionDeltaWriteAccess {
   private static final ClassValue<Method> BROADCAST_REWRITABLE_DELETES_METHOD =
       new ClassValue<Method>() {

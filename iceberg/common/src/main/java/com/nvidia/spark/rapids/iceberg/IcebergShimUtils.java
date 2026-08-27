@@ -39,15 +39,14 @@ import org.apache.iceberg.parquet.GpuParquetIO;
 import org.apache.iceberg.shaded.org.apache.parquet.ParquetReadOptions;
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.iceberg.spark.source.GpuSparkScan;
-import org.apache.spark.broadcast.Broadcast;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.connector.write.DeltaBatchWrite;
 import scala.Option;
 
 import java.io.IOException;
+import java.io.Serializable;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * Version-specific Iceberg API adapter.
@@ -76,19 +75,25 @@ public interface IcebergShimUtils {
     boolean isPuffinFormat(FileFormat fileFormat);
 
     /** Returns delete files that Iceberg requires a deletion-vector write to replace. */
-    Broadcast<Map<String, Set<DeleteFile>>> broadcastRewritableDeletes(
+    RewritableDeletes broadcastRewritableDeletes(
             DeltaBatchWrite write);
 
     /**
-     * Creates Iceberg's version-specific deletion-vector writer.
+     * Opaque, serializable handle for version-specific rewritable-delete state.
      *
-     * <p>Iceberg 1.9+ supplies {@code DeleteFileSet} values, exposed through the stable
-     * {@link Set} API because Iceberg 1.6 does not contain {@code DeleteFileSet}.
+     * <p>The underlying broadcast value uses Iceberg's {@code DeleteFileSet}, which is absent
+     * from Iceberg 1.6. Each supported shim supplies a concrete implementation so the common
+     * module does not expose an API that is unavailable in older Iceberg versions.
+     */
+    interface RewritableDeletes extends Serializable {}
+
+    /**
+     * Creates Iceberg's version-specific deletion-vector writer.
      */
     PartitioningWriter<PositionDelete<InternalRow>, DeleteWriteResult>
             newDeletionVectorWriter(
                     Table table, OutputFileFactory fileFactory,
-                    Map<String, Set<DeleteFile>> rewritableDeletes);
+                    RewritableDeletes rewritableDeletes);
 
     /** Combines data and delete results, including rewritten deletes when supported. */
     WriteResult positionDeltaWriteResult(
