@@ -33,7 +33,6 @@ import org.apache.iceberg.spark.source.GpuSparkCopyOnWriteV1Scan;
 import org.apache.iceberg.spark.source.GpuSparkScan;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.PartitionUtil;
-import org.apache.iceberg.util.DeleteFileSet;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.read.Scan;
 
@@ -41,6 +40,7 @@ import java.io.IOException;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
 
 /** Iceberg 1.9.x shim: uses {@code SparkUtil::internalToSpark}. */
@@ -69,7 +69,7 @@ public class ShimUtilsImpl implements IcebergShimUtils {
     public PartitioningWriter<PositionDelete<InternalRow>, DeleteWriteResult>
             newDeletionVectorWriter(
                     Table table, OutputFileFactory fileFactory,
-                    Map<String, ?> rewritableDeletes) {
+                    Map<String, Set<DeleteFile>> rewritableDeletes) {
         return new PartitioningDVWriter<>(
                 fileFactory, previousDeleteLoader(table, rewritableDeletes));
     }
@@ -86,7 +86,7 @@ public class ShimUtilsImpl implements IcebergShimUtils {
     }
 
     private Function<CharSequence, PositionDeleteIndex> previousDeleteLoader(
-            Table table, Map<String, ?> rewritableDeletes) {
+            Table table, Map<String, Set<DeleteFile>> rewritableDeletes) {
         if (rewritableDeletes == null) {
             return path -> null;
         }
@@ -95,9 +95,15 @@ public class ShimUtilsImpl implements IcebergShimUtils {
                 deleteFile -> EncryptingFileIO.combine(table.io(), table.encryption())
                         .newInputFile(deleteFile));
         return path -> {
-            DeleteFileSet files = (DeleteFileSet) rewritableDeletes.get(path.toString());
+            Set<DeleteFile> files = rewritableDeletes.get(path.toString());
             return files != null ? deleteLoader.loadPositionDeletes(files, path) : null;
         };
+    }
+
+    @Override
+    public void setPositionDelete(
+            PositionDelete<InternalRow> delete, CharSequence path, long position) {
+        delete.set(path, position);
     }
 
     @Override

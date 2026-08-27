@@ -45,6 +45,7 @@ import scala.Option;
 
 import java.io.IOException;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Version-specific Iceberg API adapter.
@@ -70,41 +71,26 @@ public interface IcebergShimUtils {
     boolean isDeletionVector(DeleteFile deleteFile);
 
     /** Returns whether a resolved delete-file format writes Puffin deletion vectors. */
-    default boolean isPuffinFormat(FileFormat fileFormat) {
-        return false;
-    }
+    boolean isPuffinFormat(FileFormat fileFormat);
 
     /**
      * Creates Iceberg's version-specific deletion-vector writer.
      *
-     * <p>The map value type is intentionally unspecified because Iceberg 1.6 does not contain
-     * {@code DeleteFileSet}. Iceberg 1.9+ implementations cast each value to the version-local
-     * type and use it to merge applicable existing deletes.
+     * <p>Iceberg 1.9+ supplies {@code DeleteFileSet} values, exposed through the stable
+     * {@link Set} API because Iceberg 1.6 does not contain {@code DeleteFileSet}.
      */
-    default PartitioningWriter<PositionDelete<InternalRow>, DeleteWriteResult>
+    PartitioningWriter<PositionDelete<InternalRow>, DeleteWriteResult>
             newDeletionVectorWriter(
                     Table table, OutputFileFactory fileFactory,
-                    Map<String, ?> rewritableDeletes) {
-        throw new UnsupportedOperationException(
-                "This Iceberg version does not support Puffin deletion vectors");
-    }
+                    Map<String, Set<DeleteFile>> rewritableDeletes);
 
     /** Combines data and delete results, including rewritten deletes when supported. */
-    default WriteResult positionDeltaWriteResult(
-            DataWriteResult dataResult, DeleteWriteResult deleteResult) {
-        return WriteResult.builder()
-                .addDataFiles(dataResult.dataFiles())
-                .addDeleteFiles(deleteResult.deleteFiles())
-                .addReferencedDataFiles(deleteResult.referencedDataFiles())
-                .build();
-    }
+    WriteResult positionDeltaWriteResult(
+            DataWriteResult dataResult, DeleteWriteResult deleteResult);
 
     /** Populates a reusable position-delete record across Iceberg API versions. */
-    @SuppressWarnings("deprecation")
-    default void setPositionDelete(
-            PositionDelete<InternalRow> delete, CharSequence path, long position) {
-        delete.set(path, position, null);
-    }
+    void setPositionDelete(
+            PositionDelete<InternalRow> delete, CharSequence path, long position);
 
     /**
      * Reads exactly the recorded deletion-vector byte range and returns its compressed bitmap.

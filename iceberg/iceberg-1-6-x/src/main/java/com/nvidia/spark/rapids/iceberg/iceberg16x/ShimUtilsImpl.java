@@ -21,18 +21,26 @@ import com.nvidia.spark.rapids.iceberg.IcebergDeletionVector;
 import com.nvidia.spark.rapids.iceberg.IcebergShimUtils;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import org.apache.iceberg.*;
+import org.apache.iceberg.deletes.PositionDelete;
+import org.apache.iceberg.io.DataWriteResult;
+import org.apache.iceberg.io.DeleteWriteResult;
 import org.apache.iceberg.io.FileIO;
+import org.apache.iceberg.io.OutputFileFactory;
+import org.apache.iceberg.io.PartitioningWriter;
+import org.apache.iceberg.io.WriteResult;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.spark.source.GpuBaseReader;
 import org.apache.iceberg.spark.source.GpuSparkCopyOnWriteV1Scan;
 import org.apache.iceberg.spark.source.GpuSparkScan;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.PartitionUtil;
+import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.read.Scan;
 
 import java.io.IOException;
 import java.util.Collections;
 import java.util.Map;
+import java.util.Set;
 
 /** Iceberg 1.6.x shim: uses {@code ContentFile.path()} and {@code GpuBaseReader::convertConstant}. */
 public class ShimUtilsImpl implements IcebergShimUtils {
@@ -65,6 +73,37 @@ public class ShimUtilsImpl implements IcebergShimUtils {
     @Override
     public boolean isDeletionVector(DeleteFile deleteFile) {
         return false;
+    }
+
+    @Override
+    public boolean isPuffinFormat(FileFormat fileFormat) {
+        return false;
+    }
+
+    @Override
+    public PartitioningWriter<PositionDelete<InternalRow>, DeleteWriteResult>
+            newDeletionVectorWriter(
+                    Table table, OutputFileFactory fileFactory,
+                    Map<String, Set<DeleteFile>> rewritableDeletes) {
+        throw new UnsupportedOperationException(
+                "Iceberg 1.6 does not support Puffin deletion vectors");
+    }
+
+    @Override
+    public WriteResult positionDeltaWriteResult(
+            DataWriteResult dataResult, DeleteWriteResult deleteResult) {
+        return WriteResult.builder()
+                .addDataFiles(dataResult.dataFiles())
+                .addDeleteFiles(deleteResult.deleteFiles())
+                .addReferencedDataFiles(deleteResult.referencedDataFiles())
+                .build();
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void setPositionDelete(
+            PositionDelete<InternalRow> delete, CharSequence path, long position) {
+        delete.set(path, position, null);
     }
 
     @Override

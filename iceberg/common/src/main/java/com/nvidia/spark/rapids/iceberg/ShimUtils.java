@@ -44,6 +44,7 @@ import org.apache.spark.sql.catalyst.InternalRow;
 
 import java.io.IOException;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Dispatches to the correct version-specific Iceberg shim utilities based on the
@@ -83,7 +84,7 @@ public class ShimUtils {
     public static PartitioningWriter<PositionDelete<InternalRow>, DeleteWriteResult>
             newDeletionVectorWriter(
                     Table table, OutputFileFactory fileFactory,
-                    Map<String, ?> rewritableDeletes) {
+                    Map<String, Set<DeleteFile>> rewritableDeletes) {
         return IMPL.newDeletionVectorWriter(table, fileFactory, rewritableDeletes);
     }
 

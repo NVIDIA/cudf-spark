@@ -19,8 +19,10 @@ package org.apache.iceberg.spark.source;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.iceberg.DataFile;
+import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
@@ -44,6 +46,16 @@ import org.apache.spark.sql.types.StructType;
  * class loader as Iceberg itself.
  */
 public final class GpuSparkWriteAccess {
+  private static final ClassValue<Method> BROADCAST_REWRITABLE_DELETES_METHOD =
+      new ClassValue<Method>() {
+        @Override
+        protected Method computeValue(Class<?> type) {
+          Method method = findMethod(type, "broadcastRewritableDeletes");
+          method.setAccessible(true);
+          return method;
+        }
+      };
+
   private GpuSparkWriteAccess() {
   }
 
@@ -119,24 +131,15 @@ public final class GpuSparkWriteAccess {
   }
 
   /**
-   * Calls Iceberg's private {@code broadcastRewritableDeletes} method.
-   *
-   * <p>In pseudo-code, Iceberg does the following:
-   * <pre>
-   * if (scan exists and deletes should be rewritten) {
-   *   deletes = scan.rewritableDeletes(context.useDVs)
-   *   return deletes.nonEmpty ? broadcast(deletes) : null
-   * }
-   * return null
-   * </pre>
-   * This bridge reuses that logic because both the batch-write class and method are private.
+   * Calls Iceberg's private
+   * {@code SparkPositionDeltaWrite.PositionDeltaBatchWrite.broadcastRewritableDeletes()} method.
    */
   @SuppressWarnings("unchecked")
-  public static Broadcast<Map<String, ?>> broadcastRewritableDeletes(DeltaBatchWrite write) {
+  public static Broadcast<Map<String, Set<DeleteFile>>> broadcastRewritableDeletes(
+      DeltaBatchWrite write) {
     try {
-      Method method = findMethod(write.getClass(), "broadcastRewritableDeletes");
-      method.setAccessible(true);
-      return (Broadcast<Map<String, ?>>) method.invoke(write);
+      Method method = BROADCAST_REWRITABLE_DELETES_METHOD.get(write.getClass());
+      return (Broadcast<Map<String, Set<DeleteFile>>>) method.invoke(write);
     } catch (ReflectiveOperationException e) {
       throw new IllegalStateException(
           "Unable to broadcast rewritable deletes from " + write.getClass().getName(), e);

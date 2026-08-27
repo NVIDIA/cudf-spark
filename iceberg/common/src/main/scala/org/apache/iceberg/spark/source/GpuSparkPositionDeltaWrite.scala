@@ -92,8 +92,11 @@ class GpuSparkPositionDeltaWrite(cpu: DeltaWrite)
     val tableBroadcast = sparkContext.broadcast(SerializableTable.copyOf(table))
     val command = GpuSparkWriteAccess.command(cpu)
     val context = GpuWriteContext(GpuSparkWriteAccess.context(cpu))
-    val rewritableDeletes = Option(
-      GpuSparkWriteAccess.broadcastRewritableDeletes(cpuBatchWrite))
+    val rewritableDeletes = if (context.useDVs) {
+      Option(GpuSparkWriteAccess.broadcastRewritableDeletes(cpuBatchWrite))
+    } else {
+      None
+    }
     val writeProps = GpuSparkWriteAccess.writeProperties(cpu)
       .asScala
       .toMap
@@ -204,7 +207,8 @@ object GpuSparkPositionDeltaWrite {
 
 class GpuPositionDeltaWriterFactory(
   val tableSer: Broadcast[Table],
-  val rewritableDeletesSer: Option[Broadcast[java.util.Map[String, _]]],
+  val rewritableDeletesSer:
+    Option[Broadcast[java.util.Map[String, java.util.Set[DeleteFile]]]],
   val command: Command,
   val context: GpuWriteContext,
   val writeProps: Map[String, String],
@@ -260,6 +264,13 @@ trait GpuDeltaWriter extends DeltaWriter[ColumnarBatch] {
 
   def context: GpuWriteContext
 
+  protected def rewritableDeletesSer:
+    Option[Broadcast[java.util.Map[String, java.util.Set[DeleteFile]]]]
+
+  protected def rewritableDeletes: java.util.Map[String, java.util.Set[DeleteFile]] = {
+    rewritableDeletesSer.map(_.value).orNull
+  }
+
   protected def buildPartitionProjections(
     partitionType: IcebergTypes.StructType,
     specs: collection.Map[Integer, PartitionSpec]): Map[Int, GpuStructProjection] = {
@@ -268,7 +279,6 @@ trait GpuDeltaWriter extends DeltaWriter[ColumnarBatch] {
   }
 
   protected def newDeleteWriter(table: Table,
-    rewritableDeletes: Option[Broadcast[java.util.Map[String, _]]],
     writerFactory: GpuSparkFileWriterFactory,
     outputFileFactory: OutputFileFactory,
     context: GpuWriteContext): PartitioningWriter[SpillableColumnarBatch, DeleteWriteResult] = {
@@ -280,7 +290,7 @@ trait GpuDeltaWriter extends DeltaWriter[ColumnarBatch] {
     if (context.useDVs) {
       new GpuBatchPositionDeleteWriter(
         ShimUtils.newDeletionVectorWriter(
-          table, outputFileFactory, rewritableDeletes.map(_.value).orNull))
+          table, outputFileFactory, rewritableDeletes))
     } else if (inputOrdered) {
       new GpuClusteredPositionDeleteWriter(writerFactory, outputFileFactory, io, targetFileSize)
     } else {
@@ -305,15 +315,13 @@ trait GpuDeltaWriter extends DeltaWriter[ColumnarBatch] {
   }
 
   protected def newPositionDeltaWriter(table: Table,
-    rewritableDeletes: Option[Broadcast[java.util.Map[String, _]]],
     writerFactory: GpuSparkFileWriterFactory,
     dataFileFactory: OutputFileFactory,
     deleteFileFactory: OutputFileFactory,
     context: GpuWriteContext): GpuBasePositionDeltaWriter = {
 
     val dataWriter = newDataWriter(table, writerFactory, dataFileFactory, context)
-    val deleteWriter = newDeleteWriter(
-      table, rewritableDeletes, writerFactory, deleteFileFactory, context)
+    val deleteWriter = newDeleteWriter(table, writerFactory, deleteFileFactory, context)
     new GpuBasePositionDeltaWriter(dataWriter, deleteWriter)
   }
 
@@ -579,7 +587,8 @@ trait GpuDeleteAndDataDeltaWriter extends GpuDeltaWriter {
  */
 class GpuDeleteOnlyDeltaWriter(
     table: Table,
-    rewritableDeletes: Option[Broadcast[java.util.Map[String, _]]],
+    override protected val rewritableDeletesSer:
+      Option[Broadcast[java.util.Map[String, java.util.Set[DeleteFile]]]],
     writerFactory: GpuSparkFileWriterFactory,
     deleteFileFactory: OutputFileFactory,
     override val context: GpuWriteContext) extends GpuDeltaWriter {
@@ -599,7 +608,7 @@ class GpuDeleteOnlyDeltaWriter(
   // Delegate writer based on whether the table uses fanout or clustered writing
   // GPU writers work with SpillableColumnarBatch instead of PositionDelete objects
   private val delegate: PartitioningWriter[SpillableColumnarBatch, DeleteWriteResult] =
-    newDeleteWriter(table, rewritableDeletes, writerFactory, deleteFileFactory, context)
+    newDeleteWriter(table, writerFactory, deleteFileFactory, context)
   
 
   // Partition projections for each spec
@@ -699,7 +708,8 @@ class GpuDeleteOnlyDeltaWriter(
  */
 class GpuUnpartitionedDeltaWriter(
     protected val table: Table,
-    rewritableDeletes: Option[Broadcast[java.util.Map[String, _]]],
+    override protected val rewritableDeletesSer:
+      Option[Broadcast[java.util.Map[String, java.util.Set[DeleteFile]]]],
     writerFactory: GpuSparkFileWriterFactory,
     dataFileFactory: OutputFileFactory,
     deleteFileFactory: OutputFileFactory,
@@ -729,8 +739,7 @@ class GpuUnpartitionedDeltaWriter(
 
   // Create the combined position delta writer
   protected val delegate: GpuBasePositionDeltaWriter =
-    newPositionDeltaWriter(
-      table, rewritableDeletes, writerFactory, dataFileFactory, deleteFileFactory, context)
+    newPositionDeltaWriter(table, writerFactory, dataFileFactory, deleteFileFactory, context)
 
   protected def writeDelete(batch: SpillableColumnarBatch, spec: PartitionSpec,
                            partition: StructLike): Unit = {
@@ -751,7 +760,8 @@ class GpuUnpartitionedDeltaWriter(
  */
 class GpuPartitionedDeltaWriter(
     protected val table: Table,
-    rewritableDeletes: Option[Broadcast[java.util.Map[String, _]]],
+    override protected val rewritableDeletesSer:
+      Option[Broadcast[java.util.Map[String, java.util.Set[DeleteFile]]]],
     writerFactory: GpuSparkFileWriterFactory,
     dataFileFactory: OutputFileFactory,
     deleteFileFactory: OutputFileFactory,
@@ -783,8 +793,7 @@ class GpuPartitionedDeltaWriter(
 
   // Create the combined position delta writer
   protected val delegate: GpuBasePositionDeltaWriter =
-    newPositionDeltaWriter(
-      table, rewritableDeletes, writerFactory, dataFileFactory, deleteFileFactory, context)
+    newPositionDeltaWriter(table, writerFactory, dataFileFactory, deleteFileFactory, context)
 
   protected def writeDelete(batch: SpillableColumnarBatch, spec: PartitionSpec,
                            partition: StructLike): Unit = {
