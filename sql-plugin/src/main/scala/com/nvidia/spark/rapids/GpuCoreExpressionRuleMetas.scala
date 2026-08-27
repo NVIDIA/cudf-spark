@@ -77,7 +77,7 @@ case class AttributeReferenceRuleMeta(
       planMeta <- findParentPlan(parent)
       matched <- planMeta.childPlans.iterator
         .flatMap(_.outputAttributes.iterator)
-        .find(_.exprId == att.exprId)
+        .find(a => a.exprId == att.exprId && a.dataType != att.dataType)
     } yield AttributeReference(
       att.name,
       matched.dataType,

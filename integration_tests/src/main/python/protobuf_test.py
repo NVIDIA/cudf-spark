@@ -16,7 +16,6 @@ import inspect
 import os
 
 import pytest
-from google.protobuf import descriptor_pb2
 
 from asserts import (
     assert_gpu_and_cpu_are_equal_collect,
@@ -37,6 +36,11 @@ from spark_session import (
 import pyspark.sql.functions as f
 from pyspark.sql.window import Window
 from pyspark.sql.types import StringType
+
+if is_spark_protobuf_available():
+    from google.protobuf import descriptor_pb2
+else:
+    descriptor_pb2 = None
 
 pytestmark = [
     pytest.mark.premerge_ci_1,
