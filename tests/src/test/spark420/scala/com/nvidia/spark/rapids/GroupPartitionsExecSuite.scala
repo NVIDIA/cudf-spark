@@ -278,6 +278,29 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
     assert(meta.convertToCpu().eq(groupPartitions))
   }
 
+  test("Sorted-merge GPU ordering drops planner-only sameOrderExpressions") {
+    val attr = AttributeReference("id", IntegerType, nullable = false)()
+    val outputOrdering = Seq(SortOrder(
+      attr,
+      Ascending,
+      sameOrderExpressions = Seq(CurrentDatabase())))
+    val groupPartitions = spy(GroupPartitionsExec(
+      LocalTableScanExec(Seq(attr), Nil, None),
+      enableSortedMerge = true))
+    doReturn(outputOrdering).when(groupPartitions).outputOrdering
+    doReturn(Seq.empty[(InternalRow, Seq[Int])]).when(groupPartitions).groupedPartitions
+    val meta = GpuOverrides.wrapAndTagPlan(
+      groupPartitions,
+      new RapidsConf(Map.empty[String, String]))
+      .asInstanceOf[GpuGroupPartitionsExecMeta]
+
+    assert(meta.canThisBeReplaced)
+    val gpuPlan = meta.convertToGpu().asInstanceOf[GpuGroupPartitionsExec]
+    assert(gpuPlan.groupInfo.outputOrdering == outputOrdering)
+    assert(gpuPlan.groupInfo.gpuOutputOrdering.map(_.child) == Seq(attr))
+    assert(gpuPlan.groupInfo.gpuOutputOrdering.forall(_.sameOrderExpressions.isEmpty))
+  }
+
   Seq(
     (Ascending, (0L until 8L)),
     (Descending, (0L until 8L).reverse)

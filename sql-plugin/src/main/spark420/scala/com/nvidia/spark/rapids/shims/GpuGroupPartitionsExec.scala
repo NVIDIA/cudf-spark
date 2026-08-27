@@ -50,7 +50,9 @@ class GpuGroupPartitionsExecMeta(
 
   private val sortedMergeOrdering: Seq[BaseExprMeta[SortOrder]] =
     if (groupPartitions.enableSortedMerge) {
-      groupPartitions.outputOrdering.map(GpuOverrides.wrapExpr(_, conf, Some(this)))
+      groupPartitions.outputOrdering
+        .map(_.copy(sameOrderExpressions = Seq.empty))
+        .map(GpuOverrides.wrapExpr(_, conf, Some(this)))
     } else {
       Seq.empty
     }
