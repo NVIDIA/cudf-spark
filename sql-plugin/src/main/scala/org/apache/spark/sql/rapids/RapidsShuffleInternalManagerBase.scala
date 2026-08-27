@@ -311,7 +311,7 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
    *
    * @param buffer The compressed data buffer (owned by this record, closed after writing)
    * @param compressedSize The actual size of compressed data in buffer
-   * @param remainingQuota The quota to release after writing to disk
+   * @param quotaToRelease The quota to release after writing to disk
    */
   private case class CompressedRecord(
     buffer: OpenByteArrayOutputStream,
@@ -402,10 +402,10 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
         }
       } catch {
         case ee: ExecutionException => fail(ee.getCause)
-        case _: InterruptedException =>
+        case ie: InterruptedException =>
           Thread.currentThread().interrupt()
           completionFuture.cancel(true)
-          limiter.signalFailure()
+          limiter.signalFailure(ie)
         case t: Throwable => fail(t)
       } finally {
         stepFuture.set(null)
@@ -491,7 +491,7 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
       completionFuture.completeExceptionally(t)
       // Signal the limiter so any producer blocked in acquireOrBlock wakes up and
       // throws, allowing the write loop to exit and cleanupBatch to release all quotas.
-      limiter.signalFailure()
+      limiter.signalFailure(t)
       // Also release quota for already-completed futures that writeRecord will never see.
       partitionRecords.values().asScala.foreach { recordQueue =>
         recordQueue.forEach { future =>
@@ -749,12 +749,8 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
 
         // Acquire limiter and process compression task immediately
         val waitOnLimiterStart = System.nanoTime()
-        try {
+        closeOnExcept(cb) { _ =>
           limiter.acquireOrBlock(recordSize)
-        } catch {
-          case e: Exception =>
-            cb.close()  // prevent ref-count leak from incRefCountAndGetSize
-            throw e
         }
         waitTimeOnLimiterNs += System.nanoTime() - waitOnLimiterStart
 
@@ -838,22 +834,25 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
           }
         }) {
           override def done(): Unit = {
-            // If call() never ran, win the CAS to close cb (prevents the ref-count leak
-            // from incRefCountAndGetSize). Quota is handled separately below.
-            if (cbOwner.compareAndSet(false, true)) {
-              cb.close()
-            }
-            // Release quota when cancelled, or when the merger has already failed (so
-            // writeRecord will never be called for this future's CompressedRecord).
-            // getAndSet(0) is idempotent: fail() may have already claimed it; returns 0.
-            if (isCancelled ||
-                batchForRecord.merger.completionFuture.isCompletedExceptionally) {
-              val toRelease = quotaToRelease.getAndSet(0)
-              if (toRelease > 0) {
-                limiter.release(toRelease)
+            try {
+              // If call() never ran, win the CAS to close cb (prevents the ref-count leak
+              // from incRefCountAndGetSize). Quota is handled separately below.
+              if (cbOwner.compareAndSet(false, true)) {
+                cb.close()
               }
+            } finally {
+              // Release quota when cancelled, or when the merger has already failed (so
+              // writeRecord will never be called for this future's CompressedRecord).
+              // getAndSet(0) is idempotent: fail() may have already claimed it; returns 0.
+              if (isCancelled ||
+                  batchForRecord.merger.completionFuture.isCompletedExceptionally) {
+                val toRelease = quotaToRelease.getAndSet(0)
+                if (toRelease > 0) {
+                  limiter.release(toRelease)
+                }
+              }
+              batchForRecord.scheduleMerger()
             }
-            batchForRecord.scheduleMerger()
           }
         }
         val future = RapidsShuffleInternalManagerBase.queueWriteTask(compressionTask)
@@ -1157,7 +1156,7 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
 
 class BytesInFlightLimiter(maxBytesInFlight: Long) {
   private var inFlight: Long = 0L
-  private var failed: Boolean = false
+  private var failureCause: Throwable = null
 
   def acquire(sz: Long): Boolean = {
     if (sz == 0) {
@@ -1174,27 +1173,17 @@ class BytesInFlightLimiter(maxBytesInFlight: Long) {
     }
   }
 
-  def acquireOrBlock(sz: Long): Unit = {
-    var acquired = acquire(sz)
-    if (!acquired) {
-      synchronized {
-        while (!acquired) {
-          if (failed) {
-            throw new IOException("Compression batch failed; quota acquisition aborted")
-          }
-          acquired = acquire(sz)
-          if (!acquired) {
-            // Use a timeout so the failed flag is rechecked periodically even if
-            // signalFailure()'s notifyAll() arrives before this wait() starts.
-            wait(100)
-          }
-        }
-      }
+  def acquireOrBlock(sz: Long): Unit = synchronized {
+    while (failureCause == null && !acquire(sz)) {
+      wait()
+    }
+    if (failureCause != null) {
+      throw new IOException("Compression batch failed; quota acquisition aborted", failureCause)
     }
   }
 
-  def signalFailure(): Unit = synchronized {
-    failed = true
+  def signalFailure(t: Throwable): Unit = synchronized {
+    failureCause = t
     notifyAll()
   }
 

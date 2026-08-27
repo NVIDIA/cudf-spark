@@ -1093,7 +1093,7 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
 
 
   test("producer unblocks when merger fails and a successful future holds quota") {
-    // Rishi's scenario: record 0 fails (merger dies), record 1 succeeds and holds quota,
+    // Scenario: record 0 fails (merger dies), record 1 succeeds and holds quota,
     // record 2 then blocks on acquireOrBlock because maxBytesInFlight is exhausted.
     // Without a fix the producer hangs forever: it is blocked before reaching
     // mergerFuture.get() and cleanupBatch, so record 1's quota is never released.
