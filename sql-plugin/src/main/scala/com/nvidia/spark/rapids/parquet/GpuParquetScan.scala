@@ -1528,7 +1528,7 @@ abstract class GpuParquetPartitionReaderFactoryBase(
 
   override def buildColumnarReader(
       partitionedFile: PartitionedFile): PartitionReader[ColumnarBatch] = {
-    val reader = new PartitionReaderWithBytesRead(buildBaseColumnarParquetReader(partitionedFile))
+    val reader = buildBaseColumnarParquetReader(partitionedFile)
     ColumnarPartitionReaderWithPartitionValues.newReader(partitionedFile, reader, partitionSchema,
       maxGpuColumnSizeBytes)
   }

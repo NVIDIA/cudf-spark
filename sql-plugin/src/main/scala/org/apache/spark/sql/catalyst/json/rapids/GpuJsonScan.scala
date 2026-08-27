@@ -296,9 +296,9 @@ case class GpuJsonPartitionReaderFactory(
 
   override def buildColumnarReader(partFile: PartitionedFile): PartitionReader[ColumnarBatch] = {
     val conf = broadcastedConf.value.value
-    val reader = new PartitionReaderWithBytesRead(new JsonPartitionReader(conf, partFile,
+    val reader = new JsonPartitionReader(conf, partFile,
       dataSchema, readDataSchema, parsedOptions, maxReaderBatchSizeRows, maxReaderBatchSizeBytes,
-      metrics))
+      metrics)
     ColumnarPartitionReaderWithPartitionValues.newReader(partFile, reader, partitionSchema,
       maxGpuColumnSizeBytes)
   }

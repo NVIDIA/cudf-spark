@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -52,19 +52,42 @@ class MetricsBatchIterator(iter: Iterator[ColumnarBatch]) extends Iterator[Colum
   }
 }
 
+/** Incrementally transfers task-thread Hadoop filesystem bytes into Spark input metrics. */
+class FileSystemBytesReadTracker {
+  private[this] val inputMetrics = TaskContext.get().taskMetrics().inputMetrics
+  private[this] val getBytesRead = TrampolineUtil.getFSBytesReadOnThreadCallback()
+  private[this] var previousBytesRead = 0L
+
+  def update(): Unit = synchronized {
+    val currentBytesRead = getBytesRead()
+    val newBytesRead = currentBytesRead - previousBytesRead
+    if (newBytesRead > 0) {
+      TrampolineUtil.incBytesRead(inputMetrics, newBytesRead)
+    }
+    previousBytesRead = currentBytesRead
+  }
+}
+
 /** Wraps a columnar PartitionReader to update bytes read metric based on filesystem statistics. */
 class PartitionReaderWithBytesRead(reader: PartitionReader[ColumnarBatch])
     extends PartitionReader[ColumnarBatch] {
-  private[this] val inputMetrics = TaskContext.get.taskMetrics().inputMetrics
-  private[this] val getBytesRead = TrampolineUtil.getFSBytesReadOnThreadCallback()
+  private[this] val bytesReadTracker = new FileSystemBytesReadTracker
 
   override def next(): Boolean = {
-    val result = reader.next()
-    TrampolineUtil.incBytesRead(inputMetrics, getBytesRead())
-    result
+    try {
+      reader.next()
+    } finally {
+      bytesReadTracker.update()
+    }
   }
 
   override def get(): ColumnarBatch = reader.get()
 
-  override def close(): Unit = reader.close()
+  override def close(): Unit = {
+    try {
+      reader.close()
+    } finally {
+      bytesReadTracker.update()
+    }
+  }
 }
