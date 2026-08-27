@@ -73,14 +73,6 @@ object GpuOrcFileFormat extends Logging {
           "\"orc.key.provider\" and \"orc.encrypt\" and \"orc.mask\"")
     }
 
-    // Check if bloom filter is enabled. If yes, then disable GPU.
-    // Refer to https://orc.apache.org/docs/spark-config.html for the description of ORC configs.
-    val bloomFilterColumns = options.getOrElse("orc.bloom.filter.columns", "")
-    if (bloomFilterColumns.nonEmpty) {
-      meta.willNotWorkOnGpu("Bloom filter write for ORC is not yet supported on GPU. " +
-        "If bloom filter is not required, unset \"orc.bloom.filter.columns\"")
-    }
-
     val hasBools = schema.exists { field =>
       TrampolineUtil.dataTypeExistsRecursively(field.dataType, t =>
         t.isInstanceOf[BooleanType])
@@ -119,6 +111,7 @@ object GpuOrcFileFormat extends Logging {
     val sqlConf = spark.sessionState.conf
 
     val parameters = CaseInsensitiveMap(options)
+    val hadoopConf = spark.sessionState.newHadoopConfWithOptions(options)
 
     case class ConfDataForTagging(orcConf: OrcConf, defaultValue: Any, message: String)
 
@@ -150,15 +143,40 @@ object GpuOrcFileFormat extends Logging {
       BLOCK_PADDING.ordinal() ->
         ConfDataForTagging(BLOCK_PADDING, true, "Block padding isn't supported"))
 
+    val unsupportedOrcWriterConfs = Set(
+      DICTIONARY_KEY_SIZE_THRESHOLD,
+      DIRECT_ENCODING_COLUMNS,
+      BLOOM_FILTER_COLUMNS)
+
+    def configuredValue(name: String): Option[String] = {
+      Option(hadoopConf.get(name))
+    }
+
     OrcConf.values().foreach(conf => {
       if (supportedConf.contains(conf.ordinal())) {
         tagIfOrcOrHiveConfNotSupported(supportedConf(conf.ordinal()))
       } else {
-        if ((conf.getHiveConfName != null && parameters.contains(conf.getHiveConfName))
-              || parameters.contains(conf.getAttribute)) {
-          // these configurations are implementation specific and don't apply to cudf
-          // The user has set them so we can't run on GPU
-          logInfo(s"${conf.name()} is unsupported configuration")
+        val configuredName = Seq(conf.getAttribute, conf.getHiveConfName)
+          .flatMap(Option(_))
+          .find { name =>
+            configuredValue(name).exists { value =>
+              conf match {
+                case DIRECT_ENCODING_COLUMNS => value.trim.nonEmpty
+                case BLOOM_FILTER_COLUMNS => value.nonEmpty
+                case _ => true
+              }
+            }
+          }
+        configuredName.foreach { name =>
+          if (unsupportedOrcWriterConfs.contains(conf)) {
+            meta.willNotWorkOnGpu(
+              s"ORC writer option $name is not supported on GPU because the GPU writer " +
+                "cannot honor explicit dictionary thresholds, per-column direct encoding, " +
+                "or Bloom filters")
+          } else {
+            // these configurations are implementation specific and don't apply to cudf
+            logInfo(s"${conf.name()} is unsupported configuration")
+          }
         }
       }
     })

@@ -27,7 +27,7 @@ package org.apache.spark.sql.rapids.shims
 import java.net.URI
 
 import com.nvidia.spark.rapids.{ColumnarFileFormat, GpuDataWritingCommand}
-import com.nvidia.spark.rapids.shims.SparkShimImpl
+import com.nvidia.spark.rapids.shims.{CharVarcharUtilsShims, SparkShimImpl}
 
 import org.apache.spark.sql._
 import org.apache.spark.sql.catalyst.catalog._
@@ -87,12 +87,13 @@ case class GpuCreateDataSourceTableAsSelectCommand(
       }
       val result = saveDataIntoTable(
         sparkSession, table, tableLocation, child, SaveMode.Overwrite, tableExists = false)
+      val tableSchema = CharVarcharUtilsShims.getRawSchema(result.schema, sessionState.conf)
       val newTable = table.copy(
         storage = table.storage.copy(locationUri = tableLocation),
         // We will use the schema of resolved.relation as the schema of the table (instead of
         // the schema of df). It is important since the nullability may be changed by the relation
         // provider (for example, see org.apache.spark.sql.parquet.DefaultSource).
-        schema = result.schema)
+        schema = tableSchema)
       // Table location is already validated. No need to check it again during table creation.
       sessionState.catalog.createTable(newTable, ignoreIfExists = false, validateLocation = false)
 

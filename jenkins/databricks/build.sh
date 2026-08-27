@@ -74,12 +74,12 @@ initialize()
     sudo apt-get update
     # install rsync to be used for copying onto the databricks nodes
     sudo apt install -y rsync openjdk-17-jdk
-    if [[ ! -d $HOME/apache-maven-3.6.3 ]]; then
+    if [[ ! -d $HOME/apache-maven-3.8.1 ]]; then
         # DBFS cache for Maven
         DBFS_CACHE_DIR=${DBFS_CACHE_DIR:-"/dbfs/cached_jars"}
-        JAR_FILE_NAME=${JAR_FILE_NAME:-"apache-maven-3.6.3-bin.tar.gz"}
+        JAR_FILE_NAME=${JAR_FILE_NAME:-"apache-maven-3.8.1-bin.tar.gz"}
         MAVEN_CACHE_FILE=${MAVEN_CACHE_FILE:-"$DBFS_CACHE_DIR/$JAR_FILE_NAME"}
-        MAVEN_URL=${MAVEN_URL:-"https://archive.apache.org/dist/maven/maven-3/3.6.3/binaries/$JAR_FILE_NAME"}
+        MAVEN_URL=${MAVEN_URL:-"https://archive.apache.org/dist/maven/maven-3/3.8.1/binaries/$JAR_FILE_NAME"}
         # Create cache directory if it doesn't exist
         mkdir -p "$DBFS_CACHE_DIR"        
         # Check if file exists in DBFS cache
@@ -99,7 +99,7 @@ initialize()
         
         tar xf "/tmp/$JAR_FILE_NAME" -C $HOME
         rm -f "/tmp/$JAR_FILE_NAME"
-        sudo ln -s $HOME/apache-maven-3.6.3/bin/mvn /usr/local/bin/mvn
+        sudo ln -s $HOME/apache-maven-3.8.1/bin/mvn /usr/local/bin/mvn
     fi
 
     # Set JDK 17 as the default for nightly builds across both:

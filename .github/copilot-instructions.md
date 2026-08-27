@@ -1,8 +1,11 @@
 # GitHub Copilot Review Instructions for spark-rapids
 
-cudf-spark is a GPU acceleration plugin for Apache Spark.
-For full project context, coding conventions, and code examples,
-see [AGENTS.md](../AGENTS.md).
+cudf-spark is a GPU acceleration plugin for Apache Spark. Before generating or
+reviewing changes, read and follow [AGENTS.md](../AGENTS.md). It translates the
+agent-actionable requirements from [CONTRIBUTING.md](../CONTRIBUTING.md) and
+[CODE_REVIEW_GUIDELINES.md](../CODE_REVIEW_GUIDELINES.md); consult those source
+documents on demand when more process detail is needed. Tool-specific
+instructions must not weaken the repository policy.
 
 ## Cross-repo References
 

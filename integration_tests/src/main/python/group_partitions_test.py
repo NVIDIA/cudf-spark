@@ -17,7 +17,7 @@ import pytest
 from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture
 from marks import allow_non_gpu, ignore_order
 from spark_session import is_spark_35x, is_spark_40x, is_spark_41x, \
-    is_spark_420_or_later, spark_version
+    is_spark_420_or_later, is_spark_500_or_later, spark_version
 
 
 def _is_spark_patch_at_least(version, minimum):
@@ -83,6 +83,29 @@ def _assert_partial_clustering_spj_plan(plan):
             f"GroupPartitionsExec is not expected before Spark 4.2:\n{plan}"
 
 
+def _assert_sorted_merge_spj_plan(plan):
+    nodes = _collect_plan_nodes(plan)
+    gpu_groups = [
+        node for node in nodes
+        if node.getClass().getSimpleName() == "GpuGroupPartitionsExec"
+    ]
+    sorted_groups = [node for node in gpu_groups if node.enableSortedMerge()]
+
+    sorted_merge_flags = [group.enableSortedMerge() for group in gpu_groups]
+    assert sorted_groups, \
+        f"Expected GPU sorted-merge GroupPartitionsExec, found flags {sorted_merge_flags}:\n{plan}"
+    assert not [
+        node for node in nodes
+        if node.getClass().getSimpleName() == "GroupPartitionsExec"
+    ], f"Expected all GroupPartitionsExec nodes on GPU:\n{plan}"
+    for group in sorted_groups:
+        metrics = group.metrics()
+        assert metrics.contains("sortTime"), \
+            f"Expected a sort metric on sorted-merge GroupPartitionsExec:\n{plan}"
+        assert metrics.apply("sortTime").value() > 0, \
+            f"Expected the sorted-merge path to execute a GPU sort:\n{plan}"
+
+
 @allow_non_gpu("BatchScanExec")
 @ignore_order(local=True)
 @pytest.mark.skipif(
@@ -93,6 +116,10 @@ def _assert_partial_clustering_spj_plan(plan):
         or is_spark_420_or_later()
     ),
     reason="Requires Spark's partial-clustering correctness fix")
+@pytest.mark.xfail(
+    condition=is_spark_500_or_later(),
+    reason="https://github.com/NVIDIA/cudf-spark/issues/15688: Spark 5 requires "
+           "KeyedPartitionings in a PartitioningCollection to share keys")
 def test_group_partitions_partial_clustering_distinct():
     def distinct_after_spj(spark):
         # A JVM V2 source is required to report KeyGroupedPartitioning and per-partition keys.
@@ -124,3 +151,42 @@ def test_group_partitions_partial_clustering_distinct():
         conf=conf,
         require_non_empty=True,
         gpu_plan_assertion=_assert_partial_clustering_spj_plan)
+
+
+@allow_non_gpu("BatchScanExec")
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_spark_420_or_later(), reason="GroupPartitionsExec requires Spark 4.2")
+def test_group_partitions_sorted_merge():
+    def sorted_merge_spj(spark):
+        source = \
+            "com.nvidia.spark.rapids.tests.datasourcev2.GroupPartitionsSortedDataSource"
+        for side in ("left", "right"):
+            spark.read.format(source) \
+                .option("side", side) \
+                .option("direction", "asc") \
+                .option("nulls", "first") \
+                .load() \
+                .createOrReplaceTempView("group_partitions_sorted_" + side)
+        return spark.sql(
+            """
+            SELECT /*+ MERGE(l, r) */ l.id, l.value
+            FROM group_partitions_sorted_left l
+            JOIN group_partitions_sorted_right r
+              ON l.id = r.id AND l.value = r.value
+            """)
+
+    conf = {
+        "spark.sql.adaptive.enabled": "false",
+        "spark.sql.autoBroadcastJoinThreshold": "-1",
+        "spark.sql.requireAllClusterKeysForCoPartition": "false",
+        "spark.sql.sources.v2.bucketing.enabled": "true",
+        "spark.sql.sources.v2.bucketing.pushPartValues.enabled": "true",
+        "spark.sql.sources.v2.bucketing.partiallyClusteredDistribution.enabled": "true",
+        "spark.sql.sources.v2.bucketing.preserveOrderingOnCoalesce.enabled": "true",
+    }
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        sorted_merge_spj,
+        conf=conf,
+        require_non_empty=True,
+        gpu_plan_assertion=_assert_sorted_merge_spj_plan)
