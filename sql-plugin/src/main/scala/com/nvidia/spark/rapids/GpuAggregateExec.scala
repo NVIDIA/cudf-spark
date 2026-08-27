@@ -1510,6 +1510,7 @@ abstract class GpuTypedImperativeSupportedAggregateExecMeta[INPUT <: BaseAggrega
   private def overrideAggBufTypes(): Unit = {
     val desiredAggBufTypes = mutable.HashMap.empty[ExprId, DataType]
     val desiredInputAggBufTypes = mutable.HashMap.empty[ExprId, DataType]
+    val desiredResultOutputTypes = mutable.HashMap.empty[ExprId, DataType]
     // Collects exprId from TypedImperativeAggBufferAttributes, and maps them to the data type
     // of `TypedImperativeAggExprMeta.aggBufferAttribute`.
     aggregateExpressions.map(_.childExprs.head).foreach {
@@ -1523,6 +1524,31 @@ abstract class GpuTypedImperativeSupportedAggregateExecMeta[INPUT <: BaseAggrega
       case _ =>
     }
 
+    // For Partial and PartialMerge, Spark constructs resultExpressions positionally from each
+    // aggregate function's inputAggBufferAttributes.  Those attributes can retain different
+    // expression IDs after the aggregate function is copied (see SPARK-31620), so an ID-only
+    // lookup cannot reliably identify the shuffle-facing result attribute.
+    val allResultsAreAggBuffers = aggregateExpressions.forall { aggExprMeta =>
+      val mode = aggExprMeta.wrapped.asInstanceOf[AggregateExpression].mode
+      mode == Partial || mode == PartialMerge
+    }
+    if (allResultsAreAggBuffers) {
+      var resultOffset = groupingExpressions.length
+      aggregateExpressions.foreach { aggExprMeta =>
+        val aggExpr = aggExprMeta.wrapped.asInstanceOf[AggregateExpression]
+        val bufferCount = aggExpr.aggregateFunction.inputAggBufferAttributes.length
+        aggExprMeta.childExprs.head match {
+          case aggMeta: TypedImperativeAggExprMeta[_] =>
+            resultExpressions.lift(resultOffset).foreach { resultMeta =>
+              val resultExpr = resultMeta.wrapped.asInstanceOf[NamedExpression]
+              desiredResultOutputTypes(resultExpr.exprId) = aggMeta.aggBufferAttribute.dataType
+            }
+          case _ =>
+        }
+        resultOffset += bufferCount
+      }
+    }
+
     // Overrides the data types of typed imperative aggregation buffers for type checking
     aggregateAttributes.foreach { attrMeta =>
       attrMeta.wrapped match {
@@ -1533,8 +1559,11 @@ abstract class GpuTypedImperativeSupportedAggregateExecMeta[INPUT <: BaseAggrega
     }
     resultExpressions.foreach { retMeta =>
       retMeta.wrapped match {
-        case ar: AttributeReference if desiredInputAggBufTypes.contains(ar.exprId) =>
-          retMeta.overrideDataType(desiredInputAggBufTypes(ar.exprId))
+        case ar: AttributeReference =>
+          desiredInputAggBufTypes.get(ar.exprId)
+            .orElse(desiredResultOutputTypes.get(ar.exprId))
+            .orElse(desiredAggBufTypes.get(ar.exprId))
+            .foreach(retMeta.overrideDataType)
         case _ =>
       }
     }

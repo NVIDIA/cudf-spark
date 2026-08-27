@@ -16,6 +16,7 @@
 package com.nvidia.spark.rapids
 
 import java.io.File
+import java.nio.file.Files
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
@@ -50,30 +51,37 @@ class ClassInitializationSuite extends AnyFunSuite with FQSuiteName {
     val java = new File(System.getProperty("java.home"), "bin/java").getAbsolutePath
     val classPath = System.getProperty("java.class.path")
     val mainClass = GpuOverridesClassInitializationReproducer.getClass.getName.stripSuffix("$")
+    // Avoid pipe backpressure while waiting and preserve diagnostics after forced termination,
+    // which closes the Process streams on some JDKs.
+    val outputFile = Files.createTempFile("class-initialization-child-", ".log")
+    try {
+      val process = new ProcessBuilder(
+        java,
+        "-Dcom.nvidia.spark.rapids.runningTests=true",
+        "-cp",
+        classPath,
+        mainClass)
+          .redirectErrorStream(true)
+          .redirectOutput(outputFile.toFile)
+          .start()
 
-    val process = new ProcessBuilder(
-      java,
-      "-Dcom.nvidia.spark.rapids.runningTests=true",
-      "-cp",
-      classPath,
-      mainClass)
-        .redirectErrorStream(true)
-        .start()
+      val finished = process.waitFor(30, TimeUnit.SECONDS)
+      if (!finished) {
+        process.destroyForcibly()
+        process.waitFor()
+      }
 
-    val finished = process.waitFor(30, TimeUnit.SECONDS)
-    if (!finished) {
-      process.destroyForcibly()
-      process.waitFor()
-    }
+      val source = Source.fromFile(outputFile.toFile, "UTF-8")
+      val output = try {
+        source.mkString
+      } finally {
+        source.close()
+      }
 
-    val source = Source.fromInputStream(process.getInputStream, "UTF-8")
-    val output = try {
-      source.mkString
+      ChildResult(finished, process.exitValue(), output)
     } finally {
-      source.close()
+      Files.deleteIfExists(outputFile)
     }
-
-    ChildResult(finished, process.exitValue(), output)
   }
 
   private case class ChildResult(finished: Boolean, exitCode: Int, output: String)

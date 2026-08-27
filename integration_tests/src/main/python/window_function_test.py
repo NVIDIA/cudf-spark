@@ -1826,7 +1826,15 @@ def test_multi_types_window_aggs_for_rows_lead_lag(a_b_gen, c_gen, batch_size, a
 @ignore_order(local=True)
 @approximate_float
 @pytest.mark.parametrize(
-    'data_gen', [ByteGen(), ShortGen(), FloatGen(), DateGen()], ids=idfn)
+    'data_gen', [
+        ByteGen(),
+        ShortGen(),
+        FloatGen(),
+        DateGen(),
+        pytest.param(
+            DateGen(start=date(4, 3, 1), end=date(4, 3, 1)),
+            id='pre-1000-date')],
+    ids=idfn)
 @allow_non_gpu(*non_utc_allow)
 @validate_execs_in_gpu_plan('GpuBatchedBoundedWindowExec')
 def test_lead_lag_byte_short_float_date(data_gen):
