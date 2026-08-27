@@ -19,8 +19,6 @@ package com.nvidia.spark.rapids.delta.common
 import org.apache.spark.sql.catalyst.expressions.{Alias, And, Literal}
 import org.apache.spark.sql.catalyst.planning.PhysicalOperation
 import org.apache.spark.sql.catalyst.plans.logical.{Filter, LogicalPlan, Project}
-import org.apache.spark.sql.delta.BatchCDFSchemaEndVersion
-import org.apache.spark.sql.delta.commands.cdc.CDCReader
 import org.apache.spark.sql.delta.commands.cdc.CDCReader.DeltaCDFRelation
 import org.apache.spark.sql.execution.{SparkPlan, SparkStrategy}
 import org.apache.spark.sql.execution.datasources.LogicalRelation
@@ -43,19 +41,7 @@ object DeltaCDFRelationStrategy extends SparkStrategy {
         Nil
       } else {
         val spark = cdf.sqlContext.sparkSession
-        val snapshot = cdf.snapshotWithSchemaMode.snapshot
-        val readSchemaSnapshot = cdf.snapshotWithSchemaMode.schemaMode match {
-          case BatchCDFSchemaEndVersion =>
-            val version = cdf.endingVersion.map(snapshot.version min _).getOrElse(snapshot.version)
-            snapshot.deltaLog.getSnapshotAt(version)
-          case _ => snapshot
-        }
-        val changes = CDCReader.changesToBatchDF(
-          snapshot.deltaLog,
-          cdf.startingVersion.get,
-          cdf.endingVersion.getOrElse(snapshot.deltaLog.update().version),
-          spark,
-          readSchemaSnapshot = Some(readSchemaSnapshot))
+        val changes = DeltaCDFRelationShim.changesToBatchDF(cdf)
 
         val changesByName = changes.queryExecution.analyzed.output.map(a => a.name -> a).toMap
         val relationOutput = relation.output.map { attr =>
