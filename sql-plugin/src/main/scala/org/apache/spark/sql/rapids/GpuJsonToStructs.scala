@@ -19,13 +19,17 @@ package org.apache.spark.sql.rapids
 import java.util.Locale
 
 import ai.rapids.cudf
-import com.nvidia.spark.rapids.{GpuColumnVector, GpuUnaryExpression, NvtxRegistry}
+import com.nvidia.spark.rapids.{DataFromReplacementRule, GpuColumnVector, GpuExpression,
+  GpuUnaryExpression, NvtxRegistry, RapidsConf, RapidsMeta, UnaryExprMeta}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.jni.JSONUtils
 import com.nvidia.spark.rapids.shims.NullIntolerantShim
 
-import org.apache.spark.sql.catalyst.expressions.{ExpectsInputTypes, Expression, TimeZoneAwareExpression}
+import org.apache.spark.sql.catalyst.expressions.{ExpectsInputTypes, Expression, JsonToStructs,
+  TimeZoneAwareExpression}
 import org.apache.spark.sql.catalyst.json.JSONOptions
+import org.apache.spark.sql.catalyst.json.rapids.GpuJsonScan
+import org.apache.spark.sql.catalyst.json.rapids.GpuJsonScan.JsonToStructsReaderType
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.types._
@@ -116,4 +120,56 @@ case class GpuJsonToStructs(
   override def dataType: DataType = schema.asNullable
 
   override def nullable: Boolean = true
+}
+
+case class GpuJsonToStructsMeta(
+    jsonToStructs: JsonToStructs,
+    override val conf: RapidsConf,
+    parentMeta: Option[RapidsMeta[_, _, _]],
+    rule: DataFromReplacementRule)
+    extends UnaryExprMeta[JsonToStructs](jsonToStructs, conf, parentMeta, rule) {
+
+  private def hasDuplicateFieldNames(dataType: DataType): Boolean =
+    TrampolineUtil.dataTypeExistsRecursively(dataType, {
+      case struct: StructType =>
+        val fieldNames = struct.fieldNames
+        fieldNames.length != fieldNames.distinct.length
+      case _ => false
+    })
+
+  private def hasDateTimeType(dataType: DataType): Boolean =
+    TrampolineUtil.dataTypeExistsRecursively(dataType, dataType =>
+      dataType.isInstanceOf[DateType] || dataType.isInstanceOf[TimestampType])
+
+  override def tagExprForGpu(): Unit = {
+    jsonToStructs.schema match {
+      // from_json to a MAP is a "raw" extraction: values (and, for ARRAY<STRING>, array
+      // elements) are raw JSON text. Verified vs Spark 3.5.5, it diverges on only two cases:
+      // escapes are not unescaped, and object/nested-array elements stay as raw JSON
+      // substrings. Scalar elements, whole-row null on a non-array value, and
+      // document-order duplicate keys all match Spark. See docs/compatibility.md and
+      // GpuJsonToStructs.
+      case MapType(StringType, StringType, _) => ()
+      case MapType(StringType, ArrayType(StringType, _), _) => ()
+      case struct: StructType =>
+        if (hasDuplicateFieldNames(struct)) {
+          willNotWorkOnGpu("from_json on GPU does not support duplicate field names in a struct")
+        }
+        if (hasDateTimeType(struct) && !conf.isJsonDateTimeReadEnabled) {
+          willNotWorkOnGpu("from_json on GPU does not support DateType or TimestampType " +
+            "by default due to compatibility. Set " +
+            "`spark.rapids.sql.json.read.datetime.enabled` to `true` to enable them.")
+        }
+      case _ =>
+        willNotWorkOnGpu("from_json on GPU only supports MapType<StringType, StringType>, " +
+          "MapType<StringType, ArrayType[StringType]>, or StructType schema")
+    }
+    GpuJsonScan.tagSupport(SQLConf.get, JsonToStructsReaderType, jsonToStructs.dataType,
+      jsonToStructs.dataType, jsonToStructs.options, this)
+  }
+
+  override def convertToGpu(child: Expression): GpuExpression =
+    // GPU implementation currently does not support duplicated json key names in input
+    GpuJsonToStructs(
+      jsonToStructs.schema, jsonToStructs.options, child, jsonToStructs.timeZoneId)
 }

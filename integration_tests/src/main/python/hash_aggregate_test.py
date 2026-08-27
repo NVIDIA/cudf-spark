@@ -975,6 +975,27 @@ def test_hash_groupby_collect_set(data_gen):
             .groupby('a')
             .agg(f.sort_array(f.collect_set('b')), f.count('b')))
 
+
+@ignore_order(local=True)
+def test_object_hash_groupby_collect_set_and_max_long_many_groups():
+    """Regression for a list aggregation buffer adjacent to a long scalar buffer."""
+    def do_it(spark):
+        aggregated = spark.range(2_000_000, numPartitions=64) \
+            .selectExpr("id AS key", "IF((id & 1) = 0, 1L, 3L) AS season") \
+            .groupby("key") \
+            .agg(f.collect_set("season").alias("seasons"),
+                 f.max("season").alias("max_season"))
+
+        return aggregated.selectExpr(
+            "sum(max_season) AS max_sum", "sum(size(seasons)) AS size_sum")
+
+    assert_gpu_and_cpu_are_equal_collect(
+        do_it,
+        conf={
+            'spark.sql.adaptive.enabled': 'true',
+            'spark.sql.execution.useObjectHashAggregateExec': 'true'
+        })
+
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', _gen_data_for_collect_set_op, ids=idfn)
 @allow_non_gpu(*non_utc_allow)
