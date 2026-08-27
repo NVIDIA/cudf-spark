@@ -24,6 +24,20 @@ import org.apache.spark.sql.catalyst.expressions.Nondeterministic
 import org.apache.spark.sql.execution.{FilterExec, ProjectExec, SerializeFromObjectExec, SparkPlan}
 import org.apache.spark.sql.rapids.{GpuSequenceFileRDDScanExec, SequenceFileRddReadProof}
 
+private[rapids] object GpuSequenceFileSerializeFromObjectExecMeta {
+  def wrap(
+      plan: SerializeFromObjectExec,
+      conf: RapidsConf,
+      parent: Option[RapidsMeta[_, _, _]],
+      rule: DataFromReplacementRule): SparkPlanMeta[SerializeFromObjectExec] = {
+    if (conf.isSequenceFileRDDReadEnabled) {
+      new GpuSequenceFileSerializeFromObjectExecMeta(plan, conf, parent, rule)
+    } else {
+      new RuleNotFoundSparkPlanMeta(plan, conf, parent)
+    }
+  }
+}
+
 private[rapids] final class GpuSequenceFileSerializeFromObjectExecMeta(
     plan: SerializeFromObjectExec,
     conf: RapidsConf,
