@@ -39,8 +39,10 @@ import org.apache.iceberg.parquet.GpuParquetIO;
 import org.apache.iceberg.shaded.org.apache.parquet.ParquetReadOptions;
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.iceberg.spark.source.GpuSparkScan;
-import org.apache.spark.sql.connector.read.Scan;
+import org.apache.spark.broadcast.Broadcast;
 import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.connector.read.Scan;
+import org.apache.spark.sql.connector.write.DeltaBatchWrite;
 import scala.Option;
 
 import java.io.IOException;
@@ -72,6 +74,10 @@ public interface IcebergShimUtils {
 
     /** Returns whether a resolved delete-file format writes Puffin deletion vectors. */
     boolean isPuffinFormat(FileFormat fileFormat);
+
+    /** Returns delete files that Iceberg requires a deletion-vector write to replace. */
+    Broadcast<Map<String, Set<DeleteFile>>> broadcastRewritableDeletes(
+            DeltaBatchWrite write);
 
     /**
      * Creates Iceberg's version-specific deletion-vector writer.

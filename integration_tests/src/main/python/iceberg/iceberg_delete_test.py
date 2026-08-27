@@ -21,7 +21,8 @@ from iceberg import (create_iceberg_table, get_full_table_name, iceberg_write_en
                      iceberg_base_table_cols, iceberg_gens_list, iceberg_nested_write_gens_list,
                      iceberg_unsupported_mark, delete_partition_transforms_distributed,
                      _build_tblprops, assert_iceberg_files_use_codec,
-                     supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON)
+                     assert_iceberg_v3_deletion_vectors, supports_iceberg_v3,
+                     ICEBERG_V3_UNSUPPORTED_REASON)
 from marks import allow_non_gpu, allow_non_gpu_conditional, iceberg, ignore_order, datagen_overrides
 from spark_session import is_spark_35x, is_spark_400_or_later, with_cpu_session, with_gpu_session
 
@@ -166,30 +167,6 @@ def test_iceberg_delete_v3_table_fallback(
         conf=iceberg_delete_cow_enabled_conf)
 
 
-def _assert_v3_deletion_vectors(spark, table_name, expected_positions):
-    delete_files = spark.sql(f"""
-        SELECT content, file_format, record_count, referenced_data_file,
-               content_offset, content_size_in_bytes
-        FROM {table_name}.delete_files
-        WHERE content = 1
-    """).collect()
-    assert delete_files, "Expected at least one positional delete file"
-    assert all(row.file_format == 'PUFFIN' for row in delete_files), \
-        f"Expected only Puffin deletion vectors, found {delete_files}"
-    referenced_files = [row.referenced_data_file for row in delete_files]
-    assert all(path is not None for path in referenced_files), \
-        f"Expected every deletion vector to reference a data file, found {delete_files}"
-    assert len(referenced_files) == len(set(referenced_files)), \
-        f"Expected at most one deletion vector per data file, found {delete_files}"
-    assert all(row.content_offset is not None and row.content_offset >= 0 and
-               row.content_size_in_bytes is not None and row.content_size_in_bytes > 0
-               for row in delete_files), \
-        f"Expected valid Puffin ranges, found {delete_files}"
-    actual_positions = sum(row.record_count for row in delete_files)
-    assert actual_positions == expected_positions, \
-        f"Expected {expected_positions} deleted positions, found {actual_positions}"
-
-
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @pytest.mark.parametrize('fanout_enabled', [False, True], ids=['clustered', 'fanout'])
@@ -220,7 +197,8 @@ def test_iceberg_delete_v3_gpu_writes_and_merges_deletion_vectors(
         lambda spark: spark.sql(f"DELETE FROM {table_name} WHERE id % 5 = 0").collect(),
         conf=write_conf)
 
-    with_cpu_session(lambda spark: _assert_v3_deletion_vectors(spark, table_name, 60))
+    with_cpu_session(
+        lambda spark: assert_iceberg_v3_deletion_vectors(spark, table_name, 60))
     actual = with_cpu_session(
         lambda spark: [row.id for row in spark.table(table_name).collect()])
     expected = [value for value in range(128) if value % 3 != 0 and value % 5 != 0]
@@ -251,7 +229,8 @@ def test_iceberg_delete_v3_gpu_upgrades_position_deletes(spark_tmp_table_factory
         lambda spark: spark.sql(f"DELETE FROM {table_name} WHERE id % 5 = 0").collect(),
         conf=write_conf)
 
-    with_cpu_session(lambda spark: _assert_v3_deletion_vectors(spark, table_name, 25))
+    with_cpu_session(
+        lambda spark: assert_iceberg_v3_deletion_vectors(spark, table_name, 25))
     actual = with_cpu_session(
         lambda spark: [row.id for row in spark.table(table_name).collect()])
     expected = [value for value in range(64) if value % 4 != 0 and value % 5 != 0]

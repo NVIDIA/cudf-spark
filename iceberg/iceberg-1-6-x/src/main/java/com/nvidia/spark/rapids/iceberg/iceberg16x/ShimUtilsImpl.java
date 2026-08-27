@@ -34,8 +34,10 @@ import org.apache.iceberg.spark.source.GpuSparkCopyOnWriteV1Scan;
 import org.apache.iceberg.spark.source.GpuSparkScan;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.PartitionUtil;
+import org.apache.spark.broadcast.Broadcast;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.read.Scan;
+import org.apache.spark.sql.connector.write.DeltaBatchWrite;
 
 import java.io.IOException;
 import java.util.Collections;
@@ -78,6 +80,13 @@ public class ShimUtilsImpl implements IcebergShimUtils {
     @Override
     public boolean isPuffinFormat(FileFormat fileFormat) {
         return false;
+    }
+
+    @Override
+    public Broadcast<Map<String, Set<DeleteFile>>> broadcastRewritableDeletes(
+            DeltaBatchWrite write) {
+        throw new UnsupportedOperationException(
+                "Iceberg 1.6 does not support Puffin deletion vectors");
     }
 
     @Override

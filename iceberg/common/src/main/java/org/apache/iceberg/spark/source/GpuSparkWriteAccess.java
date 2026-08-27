@@ -17,12 +17,9 @@
 package org.apache.iceberg.spark.source;
 
 import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import java.util.Map;
-import java.util.Set;
 
 import org.apache.iceberg.DataFile;
-import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
@@ -30,8 +27,6 @@ import org.apache.iceberg.deletes.DeleteGranularity;
 import org.apache.iceberg.io.DeleteWriteResult;
 import org.apache.iceberg.io.WriteResult;
 import org.apache.spark.api.java.JavaSparkContext;
-import org.apache.spark.broadcast.Broadcast;
-import org.apache.spark.sql.connector.write.DeltaBatchWrite;
 import org.apache.spark.sql.connector.write.DeltaWrite;
 import org.apache.spark.sql.connector.write.RowLevelOperation.Command;
 import org.apache.spark.sql.connector.write.Write;
@@ -46,16 +41,6 @@ import org.apache.spark.sql.types.StructType;
  * class loader as Iceberg itself.
  */
 public final class GpuSparkWriteAccess {
-  private static final ClassValue<Method> BROADCAST_REWRITABLE_DELETES_METHOD =
-      new ClassValue<Method>() {
-        @Override
-        protected Method computeValue(Class<?> type) {
-          Method method = findMethod(type, "broadcastRewritableDeletes");
-          method.setAccessible(true);
-          return method;
-        }
-      };
-
   private GpuSparkWriteAccess() {
   }
 
@@ -128,22 +113,6 @@ public final class GpuSparkWriteAccess {
 
   public static Object context(DeltaWrite write) {
     return readField(positionDeltaWrite(write), "context", Object.class);
-  }
-
-  /**
-   * Calls Iceberg's private
-   * {@code SparkPositionDeltaWrite.PositionDeltaBatchWrite.broadcastRewritableDeletes()} method.
-   */
-  @SuppressWarnings("unchecked")
-  public static Broadcast<Map<String, Set<DeleteFile>>> broadcastRewritableDeletes(
-      DeltaBatchWrite write) {
-    try {
-      Method method = BROADCAST_REWRITABLE_DELETES_METHOD.get(write.getClass());
-      return (Broadcast<Map<String, Set<DeleteFile>>>) method.invoke(write);
-    } catch (ReflectiveOperationException e) {
-      throw new IllegalStateException(
-          "Unable to broadcast rewritable deletes from " + write.getClass().getName(), e);
-    }
   }
 
   public static Schema contextDataSchema(Object context) {
@@ -237,19 +206,6 @@ public final class GpuSparkWriteAccess {
       }
     }
     throw new IllegalStateException("No field " + fieldName + " in " + targetClass.getName());
-  }
-
-  private static Method findMethod(
-      Class<?> targetClass, String methodName, Class<?>... parameterTypes) {
-    Class<?> current = targetClass;
-    while (current != null) {
-      try {
-        return current.getDeclaredMethod(methodName, parameterTypes);
-      } catch (NoSuchMethodException e) {
-        current = current.getSuperclass();
-      }
-    }
-    throw new IllegalStateException("No method " + methodName + " in " + targetClass.getName());
   }
 
 }

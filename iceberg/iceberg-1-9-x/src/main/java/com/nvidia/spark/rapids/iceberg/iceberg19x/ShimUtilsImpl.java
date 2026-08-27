@@ -30,11 +30,14 @@ import org.apache.iceberg.io.StorageCredential;
 import org.apache.iceberg.io.SupportsStorageCredentials;
 import org.apache.iceberg.spark.SparkUtil;
 import org.apache.iceberg.spark.source.GpuSparkCopyOnWriteV1Scan;
+import org.apache.iceberg.spark.source.GpuSparkPositionDeltaWriteAccess;
 import org.apache.iceberg.spark.source.GpuSparkScan;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.PartitionUtil;
+import org.apache.spark.broadcast.Broadcast;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.read.Scan;
+import org.apache.spark.sql.connector.write.DeltaBatchWrite;
 
 import java.io.IOException;
 import java.util.Collections;
@@ -63,6 +66,13 @@ public class ShimUtilsImpl implements IcebergShimUtils {
     @Override
     public boolean isPuffinFormat(FileFormat fileFormat) {
         return fileFormat == FileFormat.PUFFIN;
+    }
+
+    @Override
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    public Broadcast<Map<String, Set<DeleteFile>>> broadcastRewritableDeletes(
+            DeltaBatchWrite write) {
+        return (Broadcast) GpuSparkPositionDeltaWriteAccess.broadcastRewritableDeletes(write);
     }
 
     @Override

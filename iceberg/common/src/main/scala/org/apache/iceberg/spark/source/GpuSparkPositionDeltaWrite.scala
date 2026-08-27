@@ -93,7 +93,7 @@ class GpuSparkPositionDeltaWrite(cpu: DeltaWrite)
     val command = GpuSparkWriteAccess.command(cpu)
     val context = GpuWriteContext(GpuSparkWriteAccess.context(cpu))
     val rewritableDeletes = if (context.useDVs) {
-      Option(GpuSparkWriteAccess.broadcastRewritableDeletes(cpuBatchWrite))
+      Option(ShimUtils.broadcastRewritableDeletes(cpuBatchWrite))
     } else {
       None
     }

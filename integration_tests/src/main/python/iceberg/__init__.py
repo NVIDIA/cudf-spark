@@ -40,6 +40,31 @@ supports_iceberg_v3 = (
 ICEBERG_V3_UNSUPPORTED_REASON = (
     "Iceberg v3 requires Iceberg 1.9.0 or later and a catalog backend with v3 support")
 
+
+def assert_iceberg_v3_deletion_vectors(spark, table_name, expected_positions):
+    delete_files = spark.sql(f"""
+        SELECT content, file_format, record_count, referenced_data_file,
+               content_offset, content_size_in_bytes
+        FROM {table_name}.delete_files
+        WHERE content = 1
+    """).collect()
+    assert delete_files, "Expected at least one positional delete file"
+    assert all(row.file_format == 'PUFFIN' for row in delete_files), \
+        f"Expected only Puffin deletion vectors, found {delete_files}"
+    referenced_files = [row.referenced_data_file for row in delete_files]
+    assert all(path is not None for path in referenced_files), \
+        f"Expected every deletion vector to reference a data file, found {delete_files}"
+    assert len(referenced_files) == len(set(referenced_files)), \
+        f"Expected at most one deletion vector per data file, found {delete_files}"
+    assert all(row.content_offset is not None and row.content_offset >= 0 and
+               row.content_size_in_bytes is not None and row.content_size_in_bytes > 0
+               for row in delete_files), \
+        f"Expected valid Puffin ranges, found {delete_files}"
+    actual_positions = sum(row.record_count for row in delete_files)
+    assert actual_positions == expected_positions, \
+        f"Expected {expected_positions} deleted positions, found {actual_positions}"
+
+
 # iceberg supported types
 iceberg_table_gen = MappingProxyType({
     '_c0': byte_gen, '_c1': short_gen, '_c2': int_gen,
