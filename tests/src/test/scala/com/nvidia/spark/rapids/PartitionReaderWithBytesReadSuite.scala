@@ -34,10 +34,7 @@ class PartitionReaderMetricsTestFileSystem extends RawLocalFileSystem
 class PartitionReaderWithBytesReadSuite extends AnyFunSuite with MockitoSugar {
 
   private def withTaskContext(testBody: MockTaskContext => Unit): Unit = {
-    val context = new MockTaskContext(taskAttemptId = 1L, partitionId = 0) {
-      private val stableTaskMetrics = super.taskMetrics()
-      override def taskMetrics() = stableTaskMetrics
-    }
+    val context = new MockTaskContext(taskAttemptId = 1L, partitionId = 0)
     TrampolineUtil.setTaskContext(context)
     try {
       testBody(context)
@@ -161,6 +158,55 @@ class PartitionReaderWithBytesReadSuite extends AnyFunSuite with MockitoSugar {
       assert(context.taskMetrics().inputMetrics.bytesRead == 0L)
       context.markTaskComplete()
       assert(context.taskMetrics().inputMetrics.bytesRead == 10L)
+    }
+  }
+
+  test("GPU datasource RDD shares filesystem accounting across compute calls") {
+    withTaskContext { context =>
+      def newRdd(bytesRead: Long) = {
+        val inputPartition = new InputPartition {}
+        val factory = new PartitionReaderFactory {
+          override def createReader(partition: InputPartition) =
+            throw new UnsupportedOperationException
+
+          override def createColumnarReader(partition: InputPartition) =
+            new PartitionReader[ColumnarBatch] {
+              private var hasNext = true
+
+              override def next(): Boolean = {
+                if (hasNext) {
+                  hasNext = false
+                  statistics.incrementBytesRead(bytesRead)
+                  true
+                } else {
+                  false
+                }
+              }
+
+              override def get(): ColumnarBatch = new ColumnarBatch(Array.empty, 1)
+              override def close(): Unit = {}
+            }
+
+          override def supportColumnarReads(partition: InputPartition): Boolean = true
+        }
+        GpuDataSourceRDD(mock[SparkContext], Seq(inputPartition), factory)
+      }
+
+      val firstRdd = newRdd(10L)
+      val secondRdd = newRdd(20L)
+      val first = firstRdd.compute(firstRdd.partitions.head, context)
+      val second = secondRdd.compute(secondRdd.partitions.head, context)
+
+      assert(first.hasNext)
+      assert(second.hasNext)
+      assert(context.taskMetrics().inputMetrics.bytesRead == 0L)
+      first.next()
+      assert(context.taskMetrics().inputMetrics.bytesRead == 30L)
+      second.next()
+      assert(context.taskMetrics().inputMetrics.bytesRead == 30L)
+
+      context.markTaskComplete()
+      assert(context.taskMetrics().inputMetrics.bytesRead == 30L)
     }
   }
 }

@@ -53,8 +53,7 @@ class GpuDataSourceRDD(
   }
 
   override def compute(split: Partition, context: TaskContext): Iterator[InternalRow] = {
-    val bytesReadTracker = new FileSystemBytesReadTracker
-    onTaskCompletion(context)(bytesReadTracker.update())
+    val bytesReadTracker = FileSystemBytesReadTracker.forTask(context)
 
     val iterator = new Iterator[Object] {
       private val inputPartitions = castPartition(split).inputPartitions
@@ -62,22 +61,18 @@ class GpuDataSourceRDD(
       private var currentIndex: Int = 0
 
       override def hasNext: Boolean = {
-        try {
-          val result = currentIter.exists(_.hasNext) || advanceToNextIter()
-          if (!result) {
-            bytesReadTracker.update()
-          }
-          result
-        } catch {
-          case t: Throwable =>
-            bytesReadTracker.update()
-            throw t
+        val result = currentIter.exists(_.hasNext) || advanceToNextIter()
+        if (!result) {
+          bytesReadTracker.update()
         }
+        result
       }
 
       override def next(): Object = {
         try {
-          if (!hasNext) throw new NoSuchElementException("No more elements")
+          if (!hasNext) {
+            throw new NoSuchElementException("No more elements")
+          }
           currentIter.get.next()
         } finally {
           bytesReadTracker.update()
@@ -98,7 +93,13 @@ class GpuDataSourceRDD(
               new PartitionIterator[ColumnarBatch](batchReader))
             (iter, batchReader)
           }
-          onTaskCompletion(reader.close())
+          onTaskCompletion {
+            try {
+              reader.close()
+            } finally {
+              bytesReadTracker.update()
+            }
+          }
 
           currentIter = Some(iter)
           hasNext

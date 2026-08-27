@@ -16,6 +16,8 @@
 
 package com.nvidia.spark.rapids
 
+import java.util.concurrent.ConcurrentHashMap
+
 import org.apache.spark.TaskContext
 import org.apache.spark.sql.connector.read.PartitionReader
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
@@ -52,19 +54,49 @@ class MetricsBatchIterator(iter: Iterator[ColumnarBatch]) extends Iterator[Colum
   }
 }
 
-/** Incrementally transfers task-thread Hadoop filesystem bytes into Spark input metrics. */
-class FileSystemBytesReadTracker {
-  private[this] val inputMetrics = TaskContext.get().taskMetrics().inputMetrics
+/**
+ * Incrementally transfers task-thread Hadoop filesystem bytes into Spark input metrics.
+ * All updates must run on the same task thread that constructed this tracker.
+ */
+class FileSystemBytesReadTracker(context: TaskContext = TaskContext.get()) {
+  private[this] val inputMetrics = context.taskMetrics().inputMetrics
   private[this] val getBytesRead = TrampolineUtil.getFSBytesReadOnThreadCallback()
   private[this] var previousBytesRead = 0L
 
-  def update(): Unit = synchronized {
+  def update(): Unit = {
     val currentBytesRead = getBytesRead()
     val newBytesRead = currentBytesRead - previousBytesRead
     if (newBytesRead > 0) {
       TrampolineUtil.incBytesRead(inputMetrics, newBytesRead)
     }
-    previousBytesRead = currentBytesRead
+    previousBytesRead = math.max(previousBytesRead, currentBytesRead)
+  }
+}
+
+object FileSystemBytesReadTracker {
+  private val taskTrackers = new ConcurrentHashMap[Long, FileSystemBytesReadTracker]()
+
+  private[rapids] def forTask(context: TaskContext): FileSystemBytesReadTracker = {
+    val taskId = context.taskAttemptId()
+    val existing = taskTrackers.get(taskId)
+    if (existing != null) {
+      existing
+    } else {
+      val created = new FileSystemBytesReadTracker(context)
+      val raced = taskTrackers.putIfAbsent(taskId, created)
+      if (raced != null) {
+        raced
+      } else {
+        ScalableTaskCompletion.onTaskCompletion(context) {
+          try {
+            created.update()
+          } finally {
+            taskTrackers.remove(taskId, created)
+          }
+        }
+        created
+      }
+    }
   }
 }
 
