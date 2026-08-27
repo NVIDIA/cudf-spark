@@ -81,7 +81,41 @@ def _create_matrix_case(normalized_dimensions, selected_values):
 
 
 def generate_reduced_test_matrix(dimensions, extra_cases=None):
-    """Build pytest parameters from primary dimensions and distributed secondary dimensions.
+    """Reduce the Cartesian product across all test dimensions.
+
+    Instead of generating the full Cartesian product of every dimension, this function generates
+    the Cartesian product only from primary dimensions. It then distributes all combinations of
+    secondary dimensions across that reduced primary matrix. Every primary combination and every
+    secondary combination is retained, but redundant interactions between them are removed.
+
+    For example, ``a`` and ``b`` below are primary dimensions, while ``c`` and ``d`` are secondary
+    dimensions. The exhaustive Cartesian product would generate ``2 * 4 * 2 * 2 = 32`` cases.
+    Retaining all ``2 * 4 = 8`` primary combinations and distributing the ``2 * 2 = 4``
+    non-primary combinations reduces this to 8 cases, a reduction of 24 (75%)::
+
+        test_matrix = generate_reduced_test_matrix({
+            'a': {
+                'values': ['a1', 'a2'],
+                'is_primary_dimension': True},
+            'b': {
+                'values': ['b1', 'b2', 'b3', 'b4'],
+                'is_primary_dimension': True},
+            'c': {'values': ['c1', 'c2']},
+            'd': {'values': ['d1', 'd2']}})
+
+        for test_case in test_matrix:
+            print(test_case.values)
+
+    The printed tests are::
+
+        ('a1', 'b1', 'c1', 'd1')
+        ('a1', 'b2', 'c1', 'd2')
+        ('a1', 'b3', 'c2', 'd1')
+        ('a1', 'b4', 'c2', 'd2')
+        ('a2', 'b1', 'c1', 'd1')
+        ('a2', 'b2', 'c1', 'd2')
+        ('a2', 'b3', 'c2', 'd1')
+        ('a2', 'b4', 'c2', 'd2')
 
     ``dimensions`` must be a dict whose keys are string dimension names and whose values are
     dimension-config dicts. A dimension config must contain a non-empty list named ``values`` and
@@ -117,35 +151,6 @@ def generate_reduced_test_matrix(dimensions, extra_cases=None):
     ``dimensions`` mapping.
 
     Returns a list of ``pytest.param`` values ready for one multi-argument ``parametrize`` marker.
-
-    For example, ``a`` and ``b`` below are primary dimensions, while ``c`` and ``d`` are secondary
-    dimensions. The exhaustive Cartesian product would generate ``2 * 4 * 2 * 2 = 32`` cases.
-    Retaining all ``2 * 4 = 8`` primary combinations and distributing the ``2 * 2 = 4``
-    non-primary combinations reduces this to 8 cases, a reduction of 24 (75%)::
-
-        test_matrix = generate_reduced_test_matrix({
-            'a': {
-                'values': ['a1', 'a2'],
-                'is_primary_dimension': True},
-            'b': {
-                'values': ['b1', 'b2', 'b3', 'b4'],
-                'is_primary_dimension': True},
-            'c': {'values': ['c1', 'c2']},
-            'd': {'values': ['d1', 'd2']}})
-
-        for test_case in test_matrix:
-            print(test_case.values)
-
-    The printed tests are::
-
-        ('a1', 'b1', 'c1', 'd1')
-        ('a1', 'b2', 'c1', 'd2')
-        ('a1', 'b3', 'c2', 'd1')
-        ('a1', 'b4', 'c2', 'd2')
-        ('a2', 'b1', 'c1', 'd1')
-        ('a2', 'b2', 'c1', 'd2')
-        ('a2', 'b3', 'c2', 'd1')
-        ('a2', 'b4', 'c2', 'd2')
     """
     if not isinstance(dimensions, dict):
         raise ValueError('dimensions must be a dict')
