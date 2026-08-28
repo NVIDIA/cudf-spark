@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids
 
-import java.io.IOException
+import java.util.concurrent.atomic.AtomicLong
 
 import com.nvidia.spark.rapids.shims.GpuDataSourceRDD
 import org.apache.hadoop.fs.{FileSystem, RawLocalFileSystem}
@@ -31,15 +31,38 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 
 class PartitionReaderMetricsTestFileSystem extends RawLocalFileSystem
 
-class PartitionReaderWithBytesReadSuite extends AnyFunSuite with MockitoSugar {
+object FileSystemBytesReadTrackerSuite {
+  private val nextTaskAttemptId = new AtomicLong(1L)
+}
+
+class FileSystemBytesReadTrackerSuite extends AnyFunSuite with MockitoSugar {
+  import FileSystemBytesReadTrackerSuite.nextTaskAttemptId
+
+  private class TestTaskContext(taskAttemptId: Long)
+      extends MockTaskContext(taskAttemptId, partitionId = 0) {
+    private var completed = false
+
+    override def isCompleted(): Boolean = completed
+
+    override def markTaskComplete(): Unit = {
+      if (!completed) {
+        completed = true
+        super.markTaskComplete()
+      }
+    }
+  }
 
   private def withTaskContext(testBody: MockTaskContext => Unit): Unit = {
-    val context = new MockTaskContext(taskAttemptId = 1L, partitionId = 0)
+    val context = new TestTaskContext(nextTaskAttemptId.getAndIncrement())
     TrampolineUtil.setTaskContext(context)
     try {
       testBody(context)
     } finally {
-      TrampolineUtil.unsetTaskContext()
+      try {
+        context.markTaskComplete()
+      } finally {
+        TrampolineUtil.unsetTaskContext()
+      }
     }
   }
 
@@ -49,7 +72,7 @@ class PartitionReaderWithBytesReadSuite extends AnyFunSuite with MockitoSugar {
 
   test("filesystem bytes are added only once and compose with explicit metrics") {
     withTaskContext { context =>
-      val tracker = new FileSystemBytesReadTracker
+      val tracker = FileSystemBytesReadTracker.forTask(context)
       statistics.incrementBytesRead(10L)
 
       tracker.update()
@@ -60,31 +83,6 @@ class PartitionReaderWithBytesReadSuite extends AnyFunSuite with MockitoSugar {
       statistics.incrementBytesRead(7L)
       tracker.update()
       assert(context.taskMetrics().inputMetrics.bytesRead == 22L)
-    }
-  }
-
-  test("partition reader flushes bytes when next or close fails") {
-    withTaskContext { context =>
-      val delegate = new PartitionReader[ColumnarBatch] {
-        override def next(): Boolean = {
-          statistics.incrementBytesRead(9L)
-          throw new IOException("injected next failure")
-        }
-
-        override def get(): ColumnarBatch = null
-
-        override def close(): Unit = {
-          statistics.incrementBytesRead(4L)
-          throw new IOException("injected close failure")
-        }
-      }
-      val reader = new PartitionReaderWithBytesRead(delegate)
-
-      intercept[IOException](reader.next())
-      assert(context.taskMetrics().inputMetrics.bytesRead == 9L)
-
-      intercept[IOException](reader.close())
-      assert(context.taskMetrics().inputMetrics.bytesRead == 13L)
     }
   }
 

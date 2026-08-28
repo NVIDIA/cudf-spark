@@ -58,7 +58,7 @@ class MetricsBatchIterator(iter: Iterator[ColumnarBatch]) extends Iterator[Colum
  * Incrementally transfers task-thread Hadoop filesystem bytes into Spark input metrics.
  * All updates must run on the same task thread that constructed this tracker.
  */
-class FileSystemBytesReadTracker(context: TaskContext = TaskContext.get()) {
+class FileSystemBytesReadTracker private(context: TaskContext) {
   private[this] val inputMetrics = context.taskMetrics().inputMetrics
   private[this] val getBytesRead = TrampolineUtil.getFSBytesReadOnThreadCallback()
   private[this] var previousBytesRead = 0L
@@ -96,30 +96,6 @@ object FileSystemBytesReadTracker {
         }
         created
       }
-    }
-  }
-}
-
-/** Wraps a columnar PartitionReader to update bytes read metric based on filesystem statistics. */
-class PartitionReaderWithBytesRead(reader: PartitionReader[ColumnarBatch])
-    extends PartitionReader[ColumnarBatch] {
-  private[this] val bytesReadTracker = new FileSystemBytesReadTracker
-
-  override def next(): Boolean = {
-    try {
-      reader.next()
-    } finally {
-      bytesReadTracker.update()
-    }
-  }
-
-  override def get(): ColumnarBatch = reader.get()
-
-  override def close(): Unit = {
-    try {
-      reader.close()
-    } finally {
-      bytesReadTracker.update()
     }
   }
 }
