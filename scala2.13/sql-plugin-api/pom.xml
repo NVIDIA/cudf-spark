@@ -22,13 +22,13 @@
     <parent>
         <groupId>com.nvidia</groupId>
         <artifactId>rapids-4-spark-shim-deps-parent_2.13</artifactId>
-        <version>26.08.1-SNAPSHOT</version>
+        <version>26.08.2-SNAPSHOT</version>
         <relativePath>../shim-deps/pom.xml</relativePath>
     </parent>
 
     <artifactId>rapids-4-spark-sql-plugin-api_2.13</artifactId>
     <description>Module for Non-Shimmable API</description>
-    <version>26.08.1-SNAPSHOT</version>
+    <version>26.08.2-SNAPSHOT</version>
     <properties>
         <rapids.module>sql-plugin-api</rapids.module>
         <rapids.compressed.artifact>false</rapids.compressed.artifact>

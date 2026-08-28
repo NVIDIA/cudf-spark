@@ -22,13 +22,13 @@
     <parent>
         <groupId>com.nvidia</groupId>
         <artifactId>rapids-4-spark-parent_2.13</artifactId>
-        <version>26.08.1-SNAPSHOT</version>
+        <version>26.08.2-SNAPSHOT</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
     <artifactId>rapids-4-spark_2.13</artifactId>
     <name>RAPIDS Accelerator for Apache Spark Distribution</name>
     <description>Creates the distribution package of the RAPIDS plugin for Apache Spark</description>
-    <version>26.08.1-SNAPSHOT</version>
+    <version>26.08.2-SNAPSHOT</version>
     <dependencies>
         <dependency>
             <groupId>com.nvidia</groupId>

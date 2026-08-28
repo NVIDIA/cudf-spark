@@ -81,17 +81,17 @@ Using JarURLConnection URLs we create a Parallel World of the current version wi
 Spark 3.3.0's URLs:
 
 ```text
-jar:file:/home/spark/rapids-4-spark_2.12-26.08.1.jar!/
-jar:file:/home/spark/rapids-4-spark_2.12-26.08.1.jar!/spark-shared/
-jar:file:/home/spark/rapids-4-spark_2.12-26.08.1.jar!/spark330/
+jar:file:/home/spark/rapids-4-spark_2.12-26.08.2.jar!/
+jar:file:/home/spark/rapids-4-spark_2.12-26.08.2.jar!/spark-shared/
+jar:file:/home/spark/rapids-4-spark_2.12-26.08.2.jar!/spark330/
 ```
 
 Spark 3.5.1's URLs:
 
 ```text
-jar:file:/home/spark/rapids-4-spark_2.12-26.08.1.jar!/
-jar:file:/home/spark/rapids-4-spark_2.12-26.08.1.jar!/spark-shared/
-jar:file:/home/spark/rapids-4-spark_2.12-26.08.1.jar!/spark351/
+jar:file:/home/spark/rapids-4-spark_2.12-26.08.2.jar!/
+jar:file:/home/spark/rapids-4-spark_2.12-26.08.2.jar!/spark-shared/
+jar:file:/home/spark/rapids-4-spark_2.12-26.08.2.jar!/spark351/
 ```
 
 ### Late Inheritance in Public Classes

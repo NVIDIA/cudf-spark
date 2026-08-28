@@ -23,13 +23,13 @@
     <parent>
         <groupId>com.nvidia</groupId>
         <artifactId>rapids-4-spark-parent_2.13</artifactId>
-        <version>26.08.1-SNAPSHOT</version>
+        <version>26.08.2-SNAPSHOT</version>
         <relativePath>../../pom.xml</relativePath>
     </parent>
 
     <artifactId>rapids-4-spark-delta-41x_2.13</artifactId>
     <name>RAPIDS Accelerator for Apache Spark Delta Lake 4.1.x Support</name>
-    <version>26.08.1-SNAPSHOT</version>
+    <version>26.08.2-SNAPSHOT</version>
 
     <properties>
         <rapids.module>../delta-lake/delta-41x</rapids.module>
