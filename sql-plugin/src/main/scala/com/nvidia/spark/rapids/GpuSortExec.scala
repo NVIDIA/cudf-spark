@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -235,6 +235,41 @@ object GpuSpillableProjectedSortEachBatchIterator {
 }
 
 /**
+ * Create an iterator for batches whose rows already satisfy the sort ordering. Temporary columns
+ * required to evaluate computed sort keys are appended, but the rows are not sorted again.
+ */
+object GpuSpillableProjectedEachBatchIterator {
+  def apply(
+      iter: Iterator[ColumnarBatch],
+      sorter: GpuSorter,
+      opTime: GpuMetric = NoopMetric): Iterator[SpillableColumnarBatch] = {
+    val spillableIter = iter.flatMap { cb =>
+      // Filter out empty batches and make them spillable.
+      if (cb.numRows() > 0) {
+        Some(SpillableColumnarBatch(cb, SpillPriorities.ACTIVE_ON_DECK_PRIORITY))
+      } else {
+        cb.close()
+        None
+      }
+    }
+
+    spillableIter.flatMap { scb =>
+      // Splitting by contiguous row ranges preserves the input ordering on retry.
+      withRetry(scb, splitSpillableInHalfByRows) { attemptScb =>
+        opTime.ns {
+          val projected = withResource(attemptScb.getColumnarBatch()) { attemptCb =>
+            sorter.appendProjectedColumns(attemptCb)
+          }
+          closeOnExcept(projected) { cb =>
+            SpillableColumnarBatch(cb, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+          }
+        }
+      }
+    }
+  }
+}
+
+/**
  * Holds data for the out of core sort. It includes the batch of data and the first row in that
  * batch so we can sort the batches.
  */
@@ -302,14 +337,19 @@ case class GpuOutOfCoreSortIterator(
     opTime: GpuMetric,
     sortTime: GpuMetric,
     outputBatches: GpuMetric,
-    outputRows: GpuMetric) extends Iterator[ColumnarBatch]
+    outputRows: GpuMetric,
+    inputAlreadySorted: Boolean = false) extends Iterator[ColumnarBatch]
     with AutoCloseable {
 
   /**
    * This has already sorted the data, and it still has the projected columns in it that need to
    * be removed before it is returned.
    */
-  val alreadySortedIter = GpuSpillableProjectedSortEachBatchIterator(iter, sorter, opTime, sortTime)
+  val alreadySortedIter = if (inputAlreadySorted) {
+    GpuSpillableProjectedEachBatchIterator(iter, sorter, opTime)
+  } else {
+    GpuSpillableProjectedSortEachBatchIterator(iter, sorter, opTime, sortTime)
+  }
 
   private val cpuOrd = new LazilyGeneratedOrdering(sorter.cpuOrdering)
   // A priority queue of data that is not merged yet.
