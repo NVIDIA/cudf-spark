@@ -246,7 +246,9 @@ object GpuSpillableProjectedEachBatchIterator {
     val spillableIter = iter.flatMap { cb =>
       // Filter out empty batches and make them spillable.
       if (cb.numRows() > 0) {
-        Some(SpillableColumnarBatch(cb, SpillPriorities.ACTIVE_ON_DECK_PRIORITY))
+        Some(closeOnExcept(cb) { cb =>
+          SpillableColumnarBatch(cb, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+        })
       } else {
         cb.close()
         None
