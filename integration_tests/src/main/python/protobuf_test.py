@@ -37,9 +37,9 @@ import pyspark.sql.functions as f
 from pyspark.sql.window import Window
 from pyspark.sql.types import StringType
 
-if is_spark_protobuf_available():
+try:
     from google.protobuf import descriptor_pb2
-else:
+except ModuleNotFoundError:
     descriptor_pb2 = None
 
 pytestmark = [
@@ -94,6 +94,8 @@ def from_protobuf_fn():
 
 def _setup_protobuf_desc(local_tmp_path, desc_name, build_fn):
     """Build descriptor bytes and write them to the driver's local filesystem."""
+    if descriptor_pb2 is None:
+        pytest.skip("Python protobuf package is required to generate descriptors")
     desc_path = os.path.join(local_tmp_path, desc_name)
     desc_bytes = with_cpu_session(build_fn)
     with open(desc_path, "wb") as fp:
@@ -3185,6 +3187,12 @@ _nested_smoke_desc_bytes = bytes.fromhex(
     "320b2e746573742e4368696c64121a0a056974656d7318032003280b320b2e74"
     "6573742e4368696c64620670726f746f32")
 
+_optional_nested_presence_desc_bytes = bytes.fromhex(
+    "0a650a126e65737465645f736d6f6b652e70726f746f120474657374221d0a"
+    "054368696c6412090a016118012001280512090a016218022001280922220a04"
+    "526f6f74121a0a056368696c6418022001280b320b2e746573742e4368696c64"
+    "620670726f746f32")
+
 # Keep these cross-file contracts independent of Spark's shaded descriptor runtime.
 _protobuf_semantics_desc_bytes = bytes.fromhex(
     "0a3f0a0a6c6561662e70726f746f12047465737422230a12496d706f72746564"
@@ -3242,6 +3250,14 @@ def nested_smoke_desc(local_tmp_path):
     with open(desc_path, "wb") as fp:
         fp.write(_nested_smoke_desc_bytes)
     return desc_path, _nested_smoke_desc_bytes
+
+
+@pytest.fixture
+def optional_nested_presence_desc(local_tmp_path):
+    desc_path = os.path.join(local_tmp_path, "optional_nested_presence.desc")
+    with open(desc_path, "wb") as fp:
+        fp.write(_optional_nested_presence_desc_bytes)
+    return desc_path, _optional_nested_presence_desc_bytes
 
 
 @pytest.fixture
@@ -3309,8 +3325,8 @@ def test_from_protobuf_smoke_nested_projection(
 
 @pytest.mark.skipif(is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
 def test_from_protobuf_optional_nested_message_presence(
-        nested_smoke_desc, from_protobuf_fn):
-    desc_path, desc_bytes = nested_smoke_desc
+        optional_nested_presence_desc, from_protobuf_fn):
+    desc_path, desc_bytes = optional_nested_presence_desc
     rows = [
         (0, b""),
         (1, b"\x12\x00"),
