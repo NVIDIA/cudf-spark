@@ -25,20 +25,10 @@ pytestmark = pytest.mark.skipif(
     not is_spark_protobuf_available(), reason="from_protobuf is unavailable")
 
 
-def _try_import_from_protobuf():
-    try:
-        from pyspark.sql.protobuf.functions import from_protobuf
-        return from_protobuf
-    except Exception:
-        return None
-
-
 @pytest.fixture(scope="module")
 def from_protobuf_fn():
-    fn = _try_import_from_protobuf()
-    if fn is None:
-        pytest.skip("from_protobuf not available")
-    return fn
+    from pyspark.sql.protobuf.functions import from_protobuf
+    return from_protobuf
 
 
 def _encode_varint(value):
