@@ -13,20 +13,16 @@
 # limitations under the License.
 
 import inspect
-import os
 
 import pytest
 
 from asserts import assert_gpu_fallback_collect
 from marks import allow_non_gpu
-from spark_session import is_before_spark_340
+from spark_session import is_spark_protobuf_available
 import pyspark.sql.functions as f
 
-if os.environ.get('INCLUDE_SPARK_PROTOBUF_JAR', 'true').lower() == 'false':
-    pytestmark = pytest.mark.skip(reason="INCLUDE_SPARK_PROTOBUF_JAR is disabled")
-else:
-    pytestmark = pytest.mark.skipif(
-        is_before_spark_340(), reason="from_protobuf is Spark 3.4.0+")
+pytestmark = pytest.mark.skipif(
+    not is_spark_protobuf_available(), reason="from_protobuf is unavailable")
 
 
 def _try_import_from_protobuf():
