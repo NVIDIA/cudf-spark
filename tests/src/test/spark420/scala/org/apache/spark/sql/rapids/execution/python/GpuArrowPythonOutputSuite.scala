@@ -16,6 +16,7 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark": "420"}
+{"spark": "500"}
 spark-rapids-shim-json-lines ***/
 
 package org.apache.spark.sql.rapids.execution.python
@@ -58,6 +59,7 @@ class GpuArrowPythonOutputSuite extends RmmSparkRetrySuiteBase {
       pythonOutSchema = schema) {
 
     def newTestReader(stream: DataInputStream): Iterator[ColumnarBatch] = {
+      setMinReadTargetNumRows(1)
       val writer = newWriter(null, null, Iterator.empty, 0, null)
       newReaderIterator(
         stream,
@@ -78,12 +80,18 @@ class GpuArrowPythonOutputSuite extends RmmSparkRetrySuiteBase {
       readerMetric(reader, "totalDataReceived")
     }
 
-    private def readerMetric(reader: Iterator[ColumnarBatch], name: String): Long = {
-      reader.getClass.getMethod(name).invoke(reader).asInstanceOf[java.lang.Long]
+    def totalBytesRead(reader: Iterator[ColumnarBatch]): Long = {
+      val readerMethod = reader.getClass.getDeclaredMethod("gpuArrowReader")
+      readerMethod.setAccessible(true)
+      readerMetric(readerMethod.invoke(reader), "totalBytesRead")
+    }
+
+    private def readerMetric(target: AnyRef, name: String): Long = {
+      target.getClass.getMethod(name).invoke(target).asInstanceOf[java.lang.Long]
     }
   }
 
-  test("Spark 4.2 Arrow reader tracks batch and data metrics through EOF") {
+  test("Spark 4.2+ Arrow reader tracks batch and data metrics through EOF") {
     withTestSparkEnv {
       val runner = new TestRunner
       val reader = runner.newTestReader(new DataInputStream(
@@ -93,13 +101,25 @@ class GpuArrowPythonOutputSuite extends RmmSparkRetrySuiteBase {
       withResource(reader.next()) { batch =>
         assertResult(3)(batch.numRows())
         assertResult(1)(batch.numCols())
-        assertResult(1L)(runner.batchesProcessed(reader))
-        assert(runner.totalDataReceived(reader) > 0)
       }
+      assertResult(1L)(runner.batchesProcessed(reader))
+      val firstBatchBytes = runner.totalDataReceived(reader)
+      assert(firstBatchBytes > 0)
+      val bytesReadAfterFirstBatch = runner.totalBytesRead(reader)
+
+      assert(reader.hasNext)
+      withResource(reader.next()) { batch =>
+        assertResult(2)(batch.numRows())
+        assertResult(1)(batch.numCols())
+      }
+      assertResult(2L)(runner.batchesProcessed(reader))
+      val secondBatchBytes = runner.totalBytesRead(reader) - bytesReadAfterFirstBatch
+      assert(secondBatchBytes > 0)
+      assertResult(firstBatchBytes + secondBatchBytes)(runner.totalDataReceived(reader))
 
       val dataReceived = runner.totalDataReceived(reader)
       assert(!reader.hasNext)
-      assertResult(1L)(runner.batchesProcessed(reader))
+      assertResult(2L)(runner.batchesProcessed(reader))
       assertResult(dataReceived)(runner.totalDataReceived(reader))
     }
   }
@@ -110,11 +130,8 @@ class GpuArrowPythonOutputSuite extends RmmSparkRetrySuiteBase {
     dataOut.writeInt(SpecialLengths.START_ARROW_STREAM)
     withResource(GpuArrowWriter(schema, 1024)) { writer =>
       writer.start(dataOut)
-      withResource(new Table.TestBuilder()
-          .column(Int.box(10), Int.box(20), Int.box(30))
-          .build()) { table =>
-        writer.writeAndClose(GpuColumnVector.from(table, Array(IntegerType)))
-      }
+      writeBatch(writer, Int.box(10), Int.box(20), Int.box(30))
+      writeBatch(writer, Int.box(40), Int.box(50))
     }
 
     val endSignals = new DataOutputStream(output)
@@ -123,6 +140,12 @@ class GpuArrowPythonOutputSuite extends RmmSparkRetrySuiteBase {
     endSignals.writeInt(SpecialLengths.END_OF_STREAM)
     endSignals.flush()
     output.toByteArray
+  }
+
+  private def writeBatch(writer: GpuArrowWriter, values: Integer*): Unit = {
+    withResource(new Table.TestBuilder().column(values: _*).build()) { table =>
+      writer.writeAndClose(GpuColumnVector.from(table, Array(IntegerType)))
+    }
   }
 
   private def withTestSparkEnv(f: => Unit): Unit = {
