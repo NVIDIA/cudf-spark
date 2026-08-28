@@ -319,10 +319,7 @@ object JsonPartitionReader {
       RmmRapidsRetryIterator.withRetryNoSplit(dataBufferer.getBufferAndRelease) { dataBuffer =>
         NvtxIdWithMetrics(NvtxRegistry.JSON_DECODE_SCAN, decodeTime) {
           try {
-            Table.readJSON(cudfSchema, jsonOpts, dataBuffer, 0, dataSize, dataBufferer.getNumLines):
-              @scala.annotation.nowarn(
-                "cat=deprecation&msg=method readJSON in class Table is deprecated"
-              )
+            Table.readJSON(cudfSchema, jsonOpts, dataBuffer, 0, dataSize)
           } catch {
             case e: AssertionError if e.getMessage == "CudfColumns can't be null or empty" =>
               // this happens when every row in a JSON file is invalid (or we are

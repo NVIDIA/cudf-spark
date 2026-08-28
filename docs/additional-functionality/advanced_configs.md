@@ -107,6 +107,7 @@ Name | Description | Default Value | Applicable at
 <a name="sql.format.hive.text.read.enabled"></a>spark.rapids.sql.format.hive.text.read.enabled|When set to false disables Hive text table read acceleration. Array/Struct/Map columns are unsupported for read acceleration.|true|Runtime
 <a name="sql.format.hive.text.read.float.enabled"></a>spark.rapids.sql.format.hive.text.read.float.enabled|Hive text file reading is not 100% compatible when reading floats.|true|Runtime
 <a name="sql.format.hive.text.write.enabled"></a>spark.rapids.sql.format.hive.text.write.enabled|When set to false disables Hive text table write acceleration. Array/Struct/Map columns are unsupported for write acceleration.|true|Runtime
+<a name="sql.format.iceberg.deletionVector.crcCheck.enabled"></a>spark.rapids.sql.format.iceberg.deletionVector.crcCheck.enabled|When set to false, skips validation of the CRC-32 checksum of each Iceberg deletion vector. Disabling validation avoids an additional CPU pass over the deletion-vector data, but may allow corrupted deletion vectors to be read.|true|Runtime
 <a name="sql.format.iceberg.enabled"></a>spark.rapids.sql.format.iceberg.enabled|When set to false disables all Iceberg acceleration|true|Runtime
 <a name="sql.format.iceberg.read.enabled"></a>spark.rapids.sql.format.iceberg.read.enabled|When set to false disables Iceberg input acceleration|true|Runtime
 <a name="sql.format.iceberg.write.enabled"></a>spark.rapids.sql.format.iceberg.write.enabled|When set to false disables Iceberg write acceleration|true|Runtime
@@ -294,7 +295,7 @@ Name | SQL Function(s) | Description | Default Value | Notes
 <a name="sql.expression.Hour"></a>spark.rapids.sql.expression.Hour|`hour`|Returns the hour component of the string/timestamp|true|None|
 <a name="sql.expression.Hypot"></a>spark.rapids.sql.expression.Hypot|`hypot`|Pythagorean addition (Hypotenuse) of real numbers|true|None|
 <a name="sql.expression.If"></a>spark.rapids.sql.expression.If|`if`|IF expression|true|None|
-<a name="sql.expression.In"></a>spark.rapids.sql.expression.In|`in`|IN operator|true|None|
+<a name="sql.expression.In"></a>spark.rapids.sql.expression.In|`in`|IN operator|true|Non-literal list expressions must be deterministic and side-effect-free|
 <a name="sql.expression.InSet"></a>spark.rapids.sql.expression.InSet| |INSET operator|true|None|
 <a name="sql.expression.InitCap"></a>spark.rapids.sql.expression.InitCap|`initcap`|Returns str with the first letter of each word in uppercase. All other letters are in lowercase|true|This is not 100% compatible with the Spark version because the Unicode version used by cuDF and the JVM may differ, resulting in some corner-case characters not changing case correctly.|
 <a name="sql.expression.InputFileBlockLength"></a>spark.rapids.sql.expression.InputFileBlockLength|`input_file_block_length`|Returns the length of the block being read, or -1 if not available|true|None|
@@ -494,10 +495,12 @@ Name | Description | Default Value | Notes
 <a name="sql.exec.InMemoryTableScanExec"></a>spark.rapids.sql.exec.InMemoryTableScanExec|Implementation of InMemoryTableScanExec to use GPU accelerated caching|true|None|
 <a name="sql.exec.DataWritingCommandExec"></a>spark.rapids.sql.exec.DataWritingCommandExec|Writing data|true|None|
 <a name="sql.exec.ExecutedCommandExec"></a>spark.rapids.sql.exec.ExecutedCommandExec|Eagerly executed commands|true|None|
+<a name="sql.exec.AppendDataExec"></a>spark.rapids.sql.exec.AppendDataExec|Append data into a datasource V2 table|true|None|
 <a name="sql.exec.AppendDataExecV1"></a>spark.rapids.sql.exec.AppendDataExecV1|Append data into a datasource V2 table using the V1 write interface|true|None|
 <a name="sql.exec.AtomicCreateTableAsSelectExec"></a>spark.rapids.sql.exec.AtomicCreateTableAsSelectExec|Create table as select for datasource V2 tables that support staging table creation|true|None|
 <a name="sql.exec.AtomicReplaceTableAsSelectExec"></a>spark.rapids.sql.exec.AtomicReplaceTableAsSelectExec|Replace table as select for datasource V2 tables that support staging table creation|true|None|
 <a name="sql.exec.BatchScanExec"></a>spark.rapids.sql.exec.BatchScanExec|The backend for most file input|true|None|
+<a name="sql.exec.OverwriteByExpressionExec"></a>spark.rapids.sql.exec.OverwriteByExpressionExec|Overwrite data in a datasource V2 table|true|None|
 <a name="sql.exec.OverwriteByExpressionExecV1"></a>spark.rapids.sql.exec.OverwriteByExpressionExecV1|Overwrite into a datasource V2 table using the V1 write interface|true|None|
 <a name="sql.exec.BroadcastExchangeExec"></a>spark.rapids.sql.exec.BroadcastExchangeExec|The backend for broadcast exchange of data|true|None|
 <a name="sql.exec.ShuffleExchangeExec"></a>spark.rapids.sql.exec.ShuffleExchangeExec|The backend for most data being exchanged between processes|true|None|

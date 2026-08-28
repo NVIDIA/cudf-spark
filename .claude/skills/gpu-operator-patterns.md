@@ -4,20 +4,42 @@ Common patterns for implementing GPU operators in spark-rapids.
 
 ## GPU Operator Registration
 
-New GPU operators are registered in `GpuOverrides.scala`:
+Add a shared expression rule to the closest domain registry, such as
+`GpuMathAndDateExpressionOverrides` or `GpuCollectionExpressionOverrides`.
+Define its metadata as a named case class in the corresponding
+`Gpu*ExpressionRuleMetas.scala` file, or beside the GPU operator when they are
+tightly coupled:
+
 ```scala
-GpuOverrides.expr[MyExpression](
+case class MyExpressionRuleMeta(
+    expression: MyExpression,
+    override val conf: RapidsConf,
+    parent: Option[RapidsMeta[_, _, _]],
+    rule: DataFromReplacementRule)
+  extends UnaryExprMeta[MyExpression](expression, conf, parent, rule) {
+
+  override def convertToGpu(child: Expression): GpuExpression =
+    GpuMyExpression(child)
+}
+```
+
+Pass the named case class constructor to the registry rule:
+
+```scala
+expr[MyExpression](
   "Description of what this does on GPU",
   ExprChecks.unaryProject(
-    TypeSig.commonCudf,  // output types
-    TypeSig.all,         // Spark output types
-    TypeSig.commonCudf,  // input types
-    TypeSig.all),        // Spark input types
-  (expr, conf, parent, rule) => new UnaryExprMeta[MyExpression](expr, conf, parent, rule) {
-    override def convertToGpu(child: Expression): GpuExpression =
-      GpuMyExpression(child)
-  })
+    TypeSig.commonCudfTypes,  // output types
+    TypeSig.all,              // Spark output types
+    TypeSig.commonCudfTypes,  // input types
+    TypeSig.all),             // Spark input types
+  MyExpressionRuleMeta)
 ```
+
+Do not add shared rules directly to `GpuOverrides` or use a constructor lambda.
+Register Spark-version-specific expressions through the appropriate shim. See
+[`docs/dev/README.md`](../../docs/dev/README.md#registering-a-gpu-expression)
+for the domain registry list and validation guidance.
 
 ## CPU Fallback
 

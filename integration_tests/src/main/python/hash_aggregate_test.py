@@ -975,6 +975,27 @@ def test_hash_groupby_collect_set(data_gen):
             .groupby('a')
             .agg(f.sort_array(f.collect_set('b')), f.count('b')))
 
+
+@ignore_order(local=True)
+def test_object_hash_groupby_collect_set_and_max_long_many_groups():
+    """Regression for a list aggregation buffer adjacent to a long scalar buffer."""
+    def do_it(spark):
+        aggregated = spark.range(2_000_000, numPartitions=64) \
+            .selectExpr("id AS key", "IF((id & 1) = 0, 1L, 3L) AS season") \
+            .groupby("key") \
+            .agg(f.collect_set("season").alias("seasons"),
+                 f.max("season").alias("max_season"))
+
+        return aggregated.selectExpr(
+            "sum(max_season) AS max_sum", "sum(size(seasons)) AS size_sum")
+
+    assert_gpu_and_cpu_are_equal_collect(
+        do_it,
+        conf={
+            'spark.sql.adaptive.enabled': 'true',
+            'spark.sql.execution.useObjectHashAggregateExec': 'true'
+        })
+
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', _gen_data_for_collect_set_op, ids=idfn)
 @allow_non_gpu(*non_utc_allow)
@@ -2371,12 +2392,14 @@ def test_hash_groupby_approx_percentile_reduction_no_rows(aqe_enabled):
 
 @incompat
 @pytest.mark.skip(reason="https://github.com/NVIDIA/spark-rapids/issues/14634")
+@pytest.mark.parametrize(
+    'data_gen', [ByteGen(), ShortGen(), FloatGen()], ids=idfn)
 @pytest.mark.parametrize('aqe_enabled', ['false', 'true'], ids=idfn)
-def test_hash_groupby_approx_percentile_byte(aqe_enabled):
+def test_hash_groupby_approx_percentile_small_numeric(data_gen, aqe_enabled):
     conf = {'spark.sql.adaptive.enabled': aqe_enabled}
     compare_percentile_approx(
         lambda spark: gen_df(spark, [('k', StringGen(nullable=False)),
-                                     ('v', ByteGen())], length=100),
+                                     ('v', data_gen)], length=100),
         [0.05, 0.25, 0.5, 0.75, 0.95], conf)
 
 @incompat

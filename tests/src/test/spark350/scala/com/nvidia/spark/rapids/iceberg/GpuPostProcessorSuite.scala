@@ -32,7 +32,9 @@ import java.util.{HashMap => JHashMap}
 
 import scala.collection.JavaConverters._
 
-import com.nvidia.spark.rapids.RapidsConf
+import ai.rapids.cudf.{ColumnVector => CudfColumnVector}
+import com.nvidia.spark.rapids.{GpuColumnVector, RapidsConf}
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.iceberg.parquet._
 import com.nvidia.spark.rapids.iceberg.parquet.converter.FromIcebergShaded.unshade
 import com.nvidia.spark.rapids.parquet.ParquetFileInfoWithBlockMeta
@@ -55,7 +57,8 @@ import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.types.{LongType, StructType}
+import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /**
  * Unit tests for GpuParquetReaderPostProcessor to verify that the correct
@@ -1002,6 +1005,84 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
     // Batch 4: 150 rows entirely inside block 1 → file-global _pos = 1250..1399.
     withResource(processor.process(emptyBatch(150))) { batch =>
       assertPosRange(batch, 1250L, 1399L)
+    }
+  }
+
+  test("native deletion-vector row index supplies _pos and shifts physical columns") {
+    val dataFieldId = 1
+    val rowPositionFieldId = MetadataColumns.ROW_POSITION.fieldId()
+    val dataField = ShadedTypes
+      .primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
+      .id(dataFieldId)
+      .named("data")
+    val parquetSchema = new ShadedMessageType("test", Seq[ShadedType](dataField).asJava)
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(dataFieldId, "data", Types.LongType.get()),
+      Types.NestedField.optional(rowPositionFieldId, "_pos", Types.LongType.get()))
+    val (parquetInfo, shadedSchema) = createParquetInfo(parquetSchema, rowCount = 6)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo,
+      new JHashMap[Integer, Any](),
+      expectedSchema,
+      GpuIcebergParquetReader.withNativeRowIndex(shadedSchema),
+      Map.empty)
+
+    assert(!processor.displayActionPlan().contains("FetchRowPosition"))
+
+    val rowPositions = closeOnExcept(CudfColumnVector.fromLongs(0L, 2L, 5L)) { column =>
+      GpuColumnVector.from(column, LongType)
+    }
+    val data = closeOnExcept(CudfColumnVector.fromLongs(10L, 12L, 15L)) { column =>
+      GpuColumnVector.from(column, LongType)
+    }
+    val inputBatch = new ColumnarBatch(Array(rowPositions, data), 3)
+
+    withResource(processor.process(inputBatch)) { outputBatch =>
+      assert(outputBatch.numRows() == 3)
+      assert(outputBatch.numCols() == 2)
+      withResource(outputBatch.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { host =>
+        assert((0 until 3).map(i => host.getBase.getLong(i)) == Seq(10L, 12L, 15L))
+      }
+      withResource(outputBatch.column(1).asInstanceOf[GpuColumnVector].copyToHost()) { host =>
+        assert((0 until 3).map(i => host.getBase.getLong(i)) == Seq(0L, 2L, 5L))
+      }
+    }
+  }
+
+  test("native deletion-vector row index is dropped through the root action tree") {
+    val dataFieldId = 1
+    val dataField = ShadedTypes
+      .primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
+      .id(dataFieldId)
+      .named("data")
+    val parquetSchema = new ShadedMessageType("test", Seq[ShadedType](dataField).asJava)
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(dataFieldId, "data", Types.LongType.get()))
+    val (parquetInfo, shadedSchema) = createParquetInfo(parquetSchema, rowCount = 6)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo,
+      new JHashMap[Integer, Any](),
+      expectedSchema,
+      GpuIcebergParquetReader.withNativeRowIndex(shadedSchema),
+      Map.empty)
+
+    assert(processor.displayActionPlan() ==
+      "ProcessStruct\n  data (input[1]):\n    PassThrough")
+
+    val rowPositions = closeOnExcept(CudfColumnVector.fromLongs(0L, 2L, 5L)) { column =>
+      GpuColumnVector.from(column, LongType)
+    }
+    val data = closeOnExcept(CudfColumnVector.fromLongs(10L, 12L, 15L)) { column =>
+      GpuColumnVector.from(column, LongType)
+    }
+    val inputBatch = new ColumnarBatch(Array(rowPositions, data), 3)
+
+    withResource(processor.process(inputBatch)) { outputBatch =>
+      assert(outputBatch.numRows() == 3)
+      assert(outputBatch.numCols() == 1)
+      withResource(outputBatch.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { host =>
+        assert((0 until 3).map(i => host.getBase.getLong(i)) == Seq(10L, 12L, 15L))
+      }
     }
   }
 

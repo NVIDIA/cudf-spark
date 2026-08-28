@@ -179,6 +179,7 @@ JsonToStructs,4
 JsonTuple,4
 Keep,4
 KnownFloatingPointNormalized,4
+KnownNotContainsNull,4
 KnownNotNull,4
 KnownNullable,4
 Lag,4

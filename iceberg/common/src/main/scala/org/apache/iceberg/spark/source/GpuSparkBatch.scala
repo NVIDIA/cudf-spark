@@ -20,7 +20,7 @@ import java.util.Objects
 
 import org.apache.iceberg.SchemaParser
 
-import org.apache.spark.sql.SparkSession
+import org.apache.spark.SparkContext
 import org.apache.spark.sql.connector.read.{Batch, InputPartition, PartitionReaderFactory}
 import org.apache.spark.util.SerializableConfiguration
 
@@ -39,7 +39,9 @@ class GpuSparkBatch(
     val expectedSchema = GpuSparkScanAccess.expectedSchema(cpuBatch)
     val expectedSchemaString = SchemaParser.toJson(expectedSchema)
 
-    val sparkContext = SparkSession.getActiveSession.get.sparkContext
+    // Spark can plan a scan from a background thread where the thread-local active
+    // SparkSession is not set. The application SparkContext is not thread-local.
+    val sparkContext = SparkContext.getOrCreate()
     val hadoopConf = sparkContext.broadcast(
       new SerializableConfiguration(sparkContext.hadoopConfiguration))
 

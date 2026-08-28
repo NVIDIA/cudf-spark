@@ -158,8 +158,8 @@ object GpuSha2 {
     }
   }
 
-  class Meta(e: Sha2,
-              conf: RapidsConf,
+  case class Meta(e: Sha2,
+              override val conf: RapidsConf,
               p: Option[RapidsMeta[_, _, _]],
               r: DataFromReplacementRule)
     extends BinaryExprMeta[Sha2](e, conf, p, r) {
