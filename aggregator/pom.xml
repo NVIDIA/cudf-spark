@@ -45,6 +45,7 @@
         <!-- Maven to register attached artifact , which we later replace -->
         <rapids.shim.jar.phase>initialize</rapids.shim.jar.phase>
         <rapids.source.jar.phase>none</rapids.source.jar.phase>
+        <rapids.aggregator.downstream.refresh.skip>false</rapids.aggregator.downstream.refresh.skip>
     </properties>
     <dependencies>
         <dependency>
@@ -112,6 +113,45 @@
     </dependencies>
     <build>
         <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>ban-conflicting-aggregator-classes</id>
+                        <phase>prepare-package</phase>
+                        <goals>
+                            <goal>enforce</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <!--
+                                  Only direct dependencies are shaded aggregator inputs. Checking
+                                  transitives would report unrelated third-party class conflicts.
+                                  See https://github.com/NVIDIA/cudf-spark/issues/14829.
+                                -->
+                                <banDuplicateClasses>
+                                    <searchTransitive>false</searchTransitive>
+                                    <scopes>
+                                        <scope>compile</scope>
+                                    </scopes>
+                                    <ignoreWhenIdentical>true</ignoreWhenIdentical>
+                                    <findAllDuplicates>true</findAllDuplicates>
+                                    <message>Conflicting classes found in RAPIDS aggregator inputs</message>
+                                </banDuplicateClasses>
+                            </rules>
+                            <fail>true</fail>
+                        </configuration>
+                    </execution>
+                </executions>
+                <dependencies>
+                    <dependency>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>extra-enforcer-rules</artifactId>
+                        <version>1.12.0</version>
+                    </dependency>
+                </dependencies>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-shade-plugin</artifactId>
@@ -196,6 +236,7 @@
                         <goals><goal>run</goal></goals>
                         <phase>process-classes</phase>
                         <configuration>
+                            <skip>${rapids.aggregator.downstream.refresh.skip}</skip>
                             <target>
                                 <taskdef resource="net/sf/antcontrib/antcontrib.properties"/>
                                 <property name="realAggJar"

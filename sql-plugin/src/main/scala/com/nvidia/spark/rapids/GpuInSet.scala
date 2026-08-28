@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,7 +25,8 @@ import org.apache.spark.sql.types.{DoubleType, FloatType}
 
 case class GpuInSet(
     child: Expression,
-    list: Seq[Any]) extends GpuUnaryExpression with Predicate {
+    list: Seq[Any],
+    useInSetSemantics: Boolean = true) extends GpuUnaryExpression with Predicate {
   require(list != null, "list should not be null")
 
   @transient private[this] lazy val hasNull: Boolean = list.contains(null)
@@ -52,7 +53,8 @@ case class GpuInSet(
         val toReplaceFalseFlags = closeOnExcept(ret) { _ =>
           withResource(Scalar.fromBool(false)) { falseS =>
             val falseFlags = ret.equalTo(falseS)
-            if (checkNaN) {
+            // Spark InSet resolves an unmatched NaN before checking for NULL, unlike In.
+            if (checkNaN && useInSetSemantics) {
               withResource(falseFlags) { _ =>
                 withResource(haystack.getBase.isNotNan) { isNotNaNFlags =>
                   falseFlags.and(isNotNaNFlags)

@@ -233,12 +233,15 @@ object GpuTypeShims {
 
   def supportsVariantType: Boolean = VariantTypeShims.supportsVariantType
 
+  def additionalVariantSupportedTypes: TypeSig =
+    VariantTypeShims.additionalCommonOperatorSupportedTypes
+
   /**
    * Get additional common operators supported types for this Shim
    * (filter, sample, project, alias, table scan ...... which GPU supports from 330)
    */
   def additionalCommonOperatorSupportedTypes: TypeSig =
-    TypeSig.ansiIntervals + VariantTypeShims.additionalCommonOperatorSupportedTypes
+    TypeSig.ansiIntervals + additionalVariantSupportedTypes
 
   def hasSideEffectsIfCastIntToYearMonth(ym: DataType): Boolean =
       // if cast(int as interval year), multiplication by 12 can cause overflow

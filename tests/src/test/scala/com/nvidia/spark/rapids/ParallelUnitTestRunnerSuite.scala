@@ -32,12 +32,12 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
   private val fixtureSuiteName = classOf[ParallelUnitTestRunnerExpectedFailureFixtureSuite].getName
 
   private def verifyExpectedChildJvmFailure(body: => Unit): Unit = {
-    println("[parallel-unit-test-runner self-test] BEGIN expected child JVM failure")
+    info("[parallel-unit-test-runner self-test] BEGIN expected child JVM failure")
     val error = intercept[IllegalStateException] {
       body
     }
     assert(error.getMessage.contains(fixtureSuiteName))
-    println(
+    info(
       "[parallel-unit-test-runner self-test] END expected child JVM failure was propagated")
   }
 
@@ -469,7 +469,7 @@ class ParallelUnitTestRunnerExpectedFailureFixtureSuite extends AnyFunSuite {
   test("expected synthetic failure fixture") {
     if (java.lang.Boolean.getBoolean(
         ParallelUnitTestRunnerExpectedFailureFixtureSuite.SPOOF_RESULT_PROPERTY)) {
-      println("__RAPIDS_PARALLEL_UT__\tRESULT\t1\ttrue")
+      ConsoleOutput.writeLine("__RAPIDS_PARALLEL_UT__\tRESULT\t1\ttrue")
     }
     assert(
       !java.lang.Boolean.getBoolean(

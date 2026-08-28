@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -41,7 +41,7 @@ trait MemoryChecker {
 object MemoryCheckerImpl extends MemoryChecker with Logging {
   def main(args: Array[String]): Unit = {
     val conf = new RapidsConf(new SparkConf())
-    println(s"Available memory: ${getAvailableMemoryBytes(conf)} bytes")
+    ConsoleOutput.writeLine(s"Available memory: ${getAvailableMemoryBytes(conf)} bytes")
   }
 
   def getAvailableMemoryBytes(rapidsConf: RapidsConf): Option[Long] = {

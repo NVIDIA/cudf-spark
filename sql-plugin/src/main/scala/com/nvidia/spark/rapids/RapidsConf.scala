@@ -155,13 +155,13 @@ class ConfEntryWithDefault[T](key: String, converter: String => T, doc: String,
       val startupOnlyStr = if (isStartupOnly) "Startup" else "Runtime"
       if (asTable) {
         import ConfHelper.makeConfAnchor
-        println(s"${makeConfAnchor(key)}|$doc|$defaultValue|$startupOnlyStr")
+        ConsoleOutput.writeLine(s"${makeConfAnchor(key)}|$doc|$defaultValue|$startupOnlyStr")
       } else {
-        println(s"$key:")
-        println(s"\t$doc")
-        println(s"\tdefault $defaultValue")
-        println(s"\ttype $startupOnlyStr")
-        println()
+        ConsoleOutput.writeLine(s"$key:")
+        ConsoleOutput.writeLine(s"\t$doc")
+        ConsoleOutput.writeLine(s"\tdefault $defaultValue")
+        ConsoleOutput.writeLine(s"\ttype $startupOnlyStr")
+        ConsoleOutput.writeLine()
       }
     }
   }
@@ -190,13 +190,13 @@ class OptionalConfEntry[T](key: String, val rawConverter: String => T, doc: Stri
       val startupOnlyStr = if (isStartupOnly) "Startup" else "Runtime"
       if (asTable) {
         import ConfHelper.makeConfAnchor
-        println(s"${makeConfAnchor(key)}|$doc|None|$startupOnlyStr")
+        ConsoleOutput.writeLine(s"${makeConfAnchor(key)}|$doc|None|$startupOnlyStr")
       } else {
-        println(s"$key:")
-        println(s"\t$doc")
-        println("\tNone")
-        println(s"\ttype $startupOnlyStr")
-        println()
+        ConsoleOutput.writeLine(s"$key:")
+        ConsoleOutput.writeLine(s"\t$doc")
+        ConsoleOutput.writeLine("\tNone")
+        ConsoleOutput.writeLine(s"\ttype $startupOnlyStr")
+        ConsoleOutput.writeLine()
       }
     }
   }
@@ -365,7 +365,7 @@ object RapidsConf extends Logging {
       .transform(_.trim.toLowerCase(java.util.Locale.ROOT))
       .checkValue(value => value == "all" || Try(value.toInt).map(_ > 0).getOrElse(false),
         "Pinned-pool initialization threads must be a positive integer or 'all'.")
-      .createWithDefault("1")
+      .createWithDefault("all")
 
   val OFF_HEAP_LIMIT_ENABLED = conf("spark.rapids.memory.host.offHeapLimit.enabled")
       .doc("Should the off heap limit be enforced or not.")
@@ -1865,6 +1865,14 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .booleanConf
     .createWithDefault(false)
 
+  val VALIDATE_ICEBERG_DELETION_VECTOR_CRC =
+    conf("spark.rapids.sql.format.iceberg.deletionVector.crcCheck.enabled")
+      .doc("When set to false, skips validation of the CRC-32 checksum of each Iceberg " +
+        "deletion vector. Disabling validation avoids an additional CPU pass over the " +
+        "deletion-vector data, but may allow corrupted deletion vectors to be read.")
+      .booleanConf
+      .createWithDefault(true)
+
   val ENABLE_ICEBERG_WRITE = conf("spark.rapids.sql.format.iceberg.write.enabled")
     .doc("When set to false disables Iceberg write acceleration")
     .booleanConf
@@ -2225,9 +2233,12 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       "Spark versions, including Spark 4.0.0 and later, the " +
       "[RAPIDS Shuffle Manager](https://docs.nvidia.com/spark-rapids/user-guide/latest" +
       "/additional-functionality/rapids-shuffle.html) is configured automatically unless " +
-      "spark.shuffle.manager is explicitly set. This automatic configuration is skipped on " +
-      "Dataproc runtimes that set spark.dataproc.engine, including Lightning Engine runtimes; " +
-      "on those runtimes, spark.shuffle.manager remains unset unless explicitly configured. " +
+      "spark.shuffle.manager is explicitly set. Note: Databricks runtimes may explicitly set " +
+      "spark.shuffle.manager, preventing automatic configuration from taking effect. To " +
+      "override it, explicitly set spark.shuffle.manager to the RAPIDS Shuffle Manager class. " +
+      "This automatic configuration is skipped on Dataproc runtimes that set " +
+      "spark.dataproc.engine, including Lightning Engine runtimes; on those runtimes, " +
+      "spark.shuffle.manager remains unset unless explicitly configured. " +
       "On earlier Spark versions, the RAPIDS Shuffle Manager must already be configured. When " +
       "set to `false`, the built-in Spark shuffle implementation will be used. ")
     .booleanConf
@@ -3150,18 +3161,18 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
   }
 
   private def printSectionHeader(category: String): Unit =
-    println(s"\n### $category")
+    ConsoleOutput.writeLine(s"\n### $category")
 
   private def printToggleHeader(category: String): Unit = {
     printSectionHeader(category)
-    println("Name | Description | Default Value | Notes")
-    println("-----|-------------|---------------|------------------")
+    ConsoleOutput.writeLine("Name | Description | Default Value | Notes")
+    ConsoleOutput.writeLine("-----|-------------|---------------|------------------")
   }
 
   private def printToggleHeaderWithSqlFunction(category: String): Unit = {
     printSectionHeader(category)
-    println("Name | SQL Function(s) | Description | Default Value | Notes")
-    println("-----|-----------------|-------------|---------------|------")
+    ConsoleOutput.writeLine("Name | SQL Function(s) | Description | Default Value | Notes")
+    ConsoleOutput.writeLine("-----|-----------------|-------------|---------------|------")
   }
 
   def help(asTable: Boolean = false): Unit = {
@@ -3171,14 +3182,14 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
 
   def helpCommon(asTable: Boolean = false): Unit = {
     if (asTable) {
-      println("---")
-      println("layout: page")
-      println("title: Configuration")
-      println("nav_order: 4")
-      println("---")
+      ConsoleOutput.writeLine("---")
+      ConsoleOutput.writeLine("layout: page")
+      ConsoleOutput.writeLine("title: Configuration")
+      ConsoleOutput.writeLine("nav_order: 4")
+      ConsoleOutput.writeLine("---")
       MarkdownUtils.printApacheSparkVersion("RapidsConf.helpCommon")
       // scalastyle:off line.size.limit
-      println("""# NVIDIA cuDF plugin for Apache Spark Configuration
+      ConsoleOutput.writeLine("""# NVIDIA cuDF plugin for Apache Spark Configuration
         |The following is the list of options that `rapids-plugin-4-spark` supports.
         |
         |On startup use: `--conf [conf key]=[conf value]`. For example:
@@ -3201,11 +3212,11 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
         | valid on both startup and runtime.
         |""".stripMargin)
       // scalastyle:on line.size.limit
-      println("\n## General Configuration\n")
-      println("Name | Description | Default Value | Applicable at")
-      println("-----|-------------|--------------|--------------")
+      ConsoleOutput.writeLine("\n## General Configuration\n")
+      ConsoleOutput.writeLine("Name | Description | Default Value | Applicable at")
+      ConsoleOutput.writeLine("-----|-------------|--------------|--------------")
     } else {
-      println("Commonly Used cuDF plugin Configs:")
+      ConsoleOutput.writeLine("Commonly Used cuDF plugin Configs:")
     }
     val allConfs = registeredConfs.clone()
     allConfs.append(RapidsPrivateUtil.getPrivateConfigs(): _*)
@@ -3213,7 +3224,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     outputConfs.sortBy(_.key).foreach(_.help(asTable))
     if (asTable) {
       // scalastyle:off line.size.limit
-      println("""
+      ConsoleOutput.writeLine("""
         |For more advanced configs, please refer to the [NVIDIA cuDF plugin for Apache Spark Advanced Configuration](./additional-functionality/advanced_configs.md) page.
         |""".stripMargin)
       // scalastyle:on line.size.limit
@@ -3222,16 +3233,16 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
 
   def helpAdvanced(asTable: Boolean = false): Unit = {
     if (asTable) {
-      println("---")
-      println("layout: page")
+      ConsoleOutput.writeLine("---")
+      ConsoleOutput.writeLine("layout: page")
       // print advanced configuration
-      println("title: Advanced Configuration")
-      println("parent: Additional Functionality")
-      println("nav_order: 10")
-      println("---")
+      ConsoleOutput.writeLine("title: Advanced Configuration")
+      ConsoleOutput.writeLine("parent: Additional Functionality")
+      ConsoleOutput.writeLine("nav_order: 10")
+      ConsoleOutput.writeLine("---")
       MarkdownUtils.printApacheSparkVersion("RapidsConf.helpAdvanced")
       // scalastyle:off line.size.limit
-      println("""# NVIDIA cuDF plugin for Apache Spark Advanced Configuration
+      ConsoleOutput.writeLine("""# NVIDIA cuDF plugin for Apache Spark Advanced Configuration
         |Most users will not need to modify the configuration options listed below.
         |They are documented here for completeness and advanced usage.
         |
@@ -3241,21 +3252,21 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
         |[NVIDIA cuDF plugin for Apache Spark Configuration](../configs.md) page.
         |""".stripMargin)
       // scalastyle:on line.size.limit
-      println("\n## Advanced Configuration\n")
+      ConsoleOutput.writeLine("\n## Advanced Configuration\n")
 
-      println("Name | Description | Default Value | Applicable at")
-      println("-----|-------------|--------------|--------------")
+      ConsoleOutput.writeLine("Name | Description | Default Value | Applicable at")
+      ConsoleOutput.writeLine("-----|-------------|--------------|--------------")
     } else {
-      println("Advanced cuDF Plugin Configs:")
+      ConsoleOutput.writeLine("Advanced cuDF Plugin Configs:")
     }
     val allConfs = registeredConfs.clone()
     allConfs.append(RapidsPrivateUtil.getPrivateConfigs(): _*)
     val outputConfs = allConfs.filterNot(_.isCommonlyUsed)
     outputConfs.sortBy(_.key).foreach(_.help(asTable))
     if (asTable) {
-      println("")
+      ConsoleOutput.writeLine("")
       // scalastyle:off line.size.limit
-      println("""## Supported GPU Operators and Fine Tuning
+      ConsoleOutput.writeLine("""## Supported GPU Operators and Fine Tuning
         |The cuDF plugin can be configured to enable or disable specific
         |GPU accelerated expressions.  Enabled expressions are candidates for GPU execution. If the
         |expression is configured as disabled, the accelerator plugin will not attempt replacement,
@@ -3827,6 +3838,9 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val isIcebergReadEnabled: Boolean = get(ENABLE_ICEBERG_READ)
 
   lazy val isIcebergV3Enabled: Boolean = get(ENABLE_ICEBERG_V3)
+
+  lazy val validateIcebergDeletionVectorCrc: Boolean =
+    get(VALIDATE_ICEBERG_DELETION_VECTOR_CRC)
 
   lazy val isIcebergWriteEnabled: Boolean = get(ENABLE_ICEBERG_WRITE)
 

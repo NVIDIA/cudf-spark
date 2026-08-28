@@ -492,6 +492,7 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                 } else {
                     // upload log only in case of build failure
                     def guardWords = ["gitlab.*?\\.com", "urm.*?\\.com",
+                                      "artifactory.*?\\.com", "sonar.*?\\.com",
                                       "dbc.*?azuredatabricks\\.net", "adb.*?databricks\\.com"]
                     guardWords.add("nvidia-smi(?s)(.*?)(?=jenkins/version-def.sh)") // hide GPU info
                     guardWords.add("sc-ipp*") // hide cloud info

@@ -573,8 +573,7 @@ class AnsiCastOpSuite extends GpuExpressionTestSuite {
               .repartition(2)
               .withColumn("c1", col("c0").cast(DataTypes.TimestampType))
 
-          val result = df.collect()
-          result.foreach(println)
+          df.collect()
 
         }, sparkConf)
       }

@@ -24,6 +24,7 @@
 {"spark": "412"}
 {"spark": "413"}
 {"spark": "420"}
+{"spark": "500"}
 spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.shims
@@ -31,6 +32,7 @@ package com.nvidia.spark.rapids.shims
 import com.nvidia.spark.rapids._
 
 import org.apache.spark.sql.catalyst.expressions.Expression
+import org.apache.spark.sql.catalyst.expressions.KnownNotContainsNull
 import org.apache.spark.sql.catalyst.expressions.objects.Invoke
 import org.apache.spark.sql.catalyst.expressions.variant.VariantGet
 import org.apache.spark.sql.rapids.shims.InvokeExprMeta
@@ -41,6 +43,16 @@ import org.apache.spark.sql.rapids.shims.InvokeExprMeta
 trait Spark400PlusCommonShims extends Spark350PlusNonDBShims {
   override def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
     val shimExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = Seq(
+      GpuOverrides.expr[KnownNotContainsNull](
+        "Tags an array expression as known to not contain null elements (e.g. from array_compact).",
+        ExprChecks.unaryProjectInputMatchesOutput(
+          TypeSig.ARRAY.nested(TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.NULL +
+            TypeSig.BINARY + TypeSig.ARRAY + TypeSig.STRUCT + TypeSig.MAP),
+          TypeSig.ARRAY.nested(TypeSig.all)),
+        (a, conf, p, r) => new UnaryExprMeta[KnownNotContainsNull](a, conf, p, r) {
+          override def convertToGpu(child: Expression): GpuExpression =
+            GpuKnownNotContainsNull(child)
+        }),
       GpuOverrides.expr[Invoke](
         "Calls the specified function on an object. This is a wrapper to other expressions, so " +
           "can not know the details in advance. E.g.: between is replaced by " +
