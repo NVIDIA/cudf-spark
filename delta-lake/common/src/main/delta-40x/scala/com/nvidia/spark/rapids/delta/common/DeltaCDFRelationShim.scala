@@ -28,9 +28,8 @@ private[common] object DeltaCDFRelationShim {
     val snapshot = cdf.snapshotWithSchemaMode.snapshot
     val readSchemaSnapshot = cdf.snapshotWithSchemaMode.schemaMode match {
       case BatchCDFSchemaEndVersion =>
-        val latestVersion = snapshot.deltaLog.update(
-          catalogTableOpt = cdf.catalogTableOpt).version
-        val version = cdf.endingVersion.map(latestVersion min _).getOrElse(latestVersion)
+        // Keep the schema consistent with the relation output that Delta resolved during analysis.
+        val version = cdf.endingVersion.map(snapshot.version min _).getOrElse(snapshot.version)
         snapshot.deltaLog.getSnapshotAt(version, catalogTableOpt = cdf.catalogTableOpt)
       case _ => snapshot
     }
