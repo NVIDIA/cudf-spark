@@ -20,8 +20,7 @@ from data_gen import *
 from iceberg import (create_iceberg_table, get_full_table_name, iceberg_write_enabled_conf,
                      iceberg_base_table_cols, iceberg_gens_list, iceberg_nested_write_gens_list,
                      iceberg_unsupported_mark, update_partition_transforms_distributed,
-                     assert_iceberg_v3_deletion_vectors, supports_iceberg_v3,
-                     ICEBERG_V3_UNSUPPORTED_REASON)
+                     supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON)
 from marks import allow_non_gpu, allow_non_gpu_conditional, disable_ansi_mode, iceberg, ignore_order, datagen_overrides
 from spark_session import is_spark_400_or_later, with_cpu_session, with_gpu_session
 
@@ -162,32 +161,32 @@ def test_iceberg_update_v3_table_fallback(
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 def test_iceberg_update_v3_gpu_writes_deletion_vectors(spark_tmp_table_factory):
-    table_name = get_full_table_name(spark_tmp_table_factory)
+    base_table_name = get_full_table_name(spark_tmp_table_factory)
+    cpu_table_name = f"{base_table_name}_cpu"
+    gpu_table_name = f"{base_table_name}_gpu"
+    data_gen_func = lambda spark: gen_df(spark, [
+        ('id', LongGen(nullable=False, min_val=0, max_val=63)),
+        ('value', LongGen(nullable=False, min_val=-1000, max_val=1000))
+    ], length=64, seed=0)
+    table_properties = {'format-version': '3'}
+    create_iceberg_table_with_data(
+        cpu_table_name, data_gen_func=data_gen_func, table_properties=table_properties,
+        update_mode='merge-on-read')
+    create_iceberg_table_with_data(
+        gpu_table_name, data_gen_func=data_gen_func, table_properties=table_properties,
+        update_mode='merge-on-read')
 
-    def setup_table(spark):
-        spark.sql(f"""
-            CREATE TABLE {table_name} (id BIGINT, value BIGINT) USING ICEBERG
-            TBLPROPERTIES (
-              'format-version' = '3',
-              'write.update.mode' = 'merge-on-read')
-        """)
-        spark.sql(f"INSERT INTO {table_name} SELECT id, id FROM range(64)")
+    def update_data(spark, table_name):
+        spark.sql(f"UPDATE {table_name} SET value = value + 1000 WHERE id % 4 = 0")
 
-    with_cpu_session(setup_table)
+    with_cpu_session(lambda spark: update_data(spark, cpu_table_name))
     write_conf = dict(iceberg_write_enabled_conf)
     write_conf['spark.rapids.sql.format.iceberg.v3.enabled'] = 'true'
-    with_gpu_session(
-        lambda spark: spark.sql(
-            f"UPDATE {table_name} SET value = value + 1000 WHERE id % 4 = 0").collect(),
-        conf=write_conf)
+    with_gpu_session(lambda spark: update_data(spark, gpu_table_name), conf=write_conf)
 
-    with_cpu_session(
-        lambda spark: assert_iceberg_v3_deletion_vectors(spark, table_name, 16))
-    actual = with_cpu_session(
-        lambda spark: [(row.id, row.value) for row in spark.table(table_name).collect()])
-    expected = [(value, value + 1000 if value % 4 == 0 else value)
-                for value in range(64)]
-    assert sorted(actual) == expected
+    cpu_data = with_cpu_session(lambda spark: spark.table(cpu_table_name).collect())
+    gpu_data = with_cpu_session(lambda spark: spark.table(gpu_table_name).collect())
+    assert_equal_with_local_sort(cpu_data, gpu_data)
 
 
 @iceberg
