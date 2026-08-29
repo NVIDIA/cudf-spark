@@ -1024,7 +1024,7 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       parquetInfo,
       new JHashMap[Integer, Any](),
       expectedSchema,
-      GpuIcebergParquetReader.withNativeRowIndex(shadedSchema),
+      GpuIcebergParquetReaderUtils.withNativeRowIndex(shadedSchema),
       Map.empty)
 
     assert(!processor.displayActionPlan().contains("FetchRowPosition"))
@@ -1063,7 +1063,7 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       parquetInfo,
       new JHashMap[Integer, Any](),
       expectedSchema,
-      GpuIcebergParquetReader.withNativeRowIndex(shadedSchema),
+      GpuIcebergParquetReaderUtils.withNativeRowIndex(shadedSchema),
       Map.empty)
 
     assert(processor.displayActionPlan() ==

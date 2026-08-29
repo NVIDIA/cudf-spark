@@ -182,6 +182,12 @@ function filter_keep_in_spark_shim_dirs() {
     path_without_leading_slash="${class_resource#/}"
     class_file="${path_without_leading_slash#*/}"
     if keep_in_spark_shim_dirs "$class_file"; then
+      # Root-layout classes were explicitly selected by the packager and must
+      # remain eligible for shared-identity validation so the later root
+      # de-duplication can remove their shim copies.
+      if [[ -f "./parallel-world/$class_file" ]]; then
+        echo "$class_resource"
+      fi
       continue
     fi
     echo "$class_resource"

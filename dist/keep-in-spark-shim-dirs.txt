@@ -53,3 +53,12 @@ org/apache/spark/sql/rapids/execution/GpuBroadcastExchangeExec*.class
 # exchange execs. Keep the rule and helpers in the selected shim loader.
 com/nvidia/spark/rapids/GpuTransitionOverrides.class
 com/nvidia/spark/rapids/GpuTransitionOverrides$$*.class
+
+# Iceberg implementation classes compile against Spark- and Iceberg-version-specific
+# APIs. Root-selected Iceberg classes are excluded by binary-dedupe.sh; keep every
+# other Iceberg class in the selected shim loader instead of spark-shared.
+com/nvidia/spark/rapids/*Iceberg*.class
+com/nvidia/spark/rapids/fileio/iceberg/*.class
+com/nvidia/spark/rapids/iceberg/*.class
+org/apache/iceberg/*.class
+org/apache/spark/sql/rapids/*Iceberg*.class

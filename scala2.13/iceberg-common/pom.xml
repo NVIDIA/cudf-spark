@@ -41,6 +41,11 @@
 
     <dependencies>
         <dependency>
+            <groupId>com.nvidia</groupId>
+            <artifactId>spark-rapids-jni</artifactId>
+            <classifier>${jni.classifier}</classifier>
+        </dependency>
+        <dependency>
             <groupId>org.apache.iceberg</groupId>
             <artifactId>iceberg-spark-runtime-${iceberg.artifact.suffix}_${scala.binary.version}</artifactId>
             <version>${iceberg.runtime.version}</version>
