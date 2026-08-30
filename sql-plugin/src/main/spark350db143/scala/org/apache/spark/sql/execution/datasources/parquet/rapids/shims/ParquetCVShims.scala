@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,18 +20,26 @@ spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.execution.datasources.parquet
 
 import org.apache.spark.memory.MemoryMode
+import org.apache.spark.sql.catalyst.util.ResolveDefaultColumns.getExistenceDefaultValues
 import org.apache.spark.sql.execution.vectorized.WritableColumnVector
+import org.apache.spark.sql.types.StructType
 
-object ShimParquetColumnVector {
-  def apply(
-    column: ParquetColumn,
-    vector: WritableColumnVector,
-    capacity: Int,
-    memoryMode: MemoryMode,
-    missingColumns: java.util.Set[ParquetColumn],
-    isTopLevel: Boolean,
-    defaultValue: Any): ParquetColumnVector = {
-    new ParquetColumnVector(column, vector, capacity, memoryMode, missingColumns, isTopLevel,
-      defaultValue, "")
+object ParquetCVShims {
+  val bridge: ParquetColumnVectorBridge = ParquetColumnVectorBridge350DB143
+
+  def newParquetCV(
+      sparkSchema: StructType,
+      idx: Int,
+      column: ParquetColumn,
+      vector: WritableColumnVector,
+      capacity: Int,
+      memoryMode: MemoryMode,
+      missingColumns: java.util.Set[ParquetColumn],
+      isTopLevel: Boolean): AnyRef = {
+    val defaultValue = if (sparkSchema != null) {
+      getExistenceDefaultValues(sparkSchema)
+    } else null
+    bridge.newParquetColumnVector(column, vector, capacity, memoryMode, missingColumns,
+      isTopLevel, defaultValue)
   }
 }

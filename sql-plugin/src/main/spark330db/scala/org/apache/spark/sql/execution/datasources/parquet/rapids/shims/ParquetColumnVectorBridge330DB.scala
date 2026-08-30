@@ -28,15 +28,15 @@ package org.apache.spark.sql.execution.datasources.parquet
 import org.apache.spark.memory.MemoryMode
 import org.apache.spark.sql.execution.vectorized.WritableColumnVector
 
-object ShimParquetColumnVector {
-  def apply(
-    column: ParquetColumn,
-    vector: WritableColumnVector,
-    capacity: Int,
-    memoryMode: MemoryMode,
-    missingColumns: java.util.Set[ParquetColumn],
-    isTopLevel: Boolean,
-    defaultValue: Any): ParquetColumnVector = {
+object ParquetColumnVectorBridge330DB extends ParquetColumnVectorBridge {
+  override def newParquetColumnVector(
+      column: ParquetColumn,
+      vector: WritableColumnVector,
+      capacity: Int,
+      memoryMode: MemoryMode,
+      missingColumns: java.util.Set[ParquetColumn],
+      isTopLevel: Boolean,
+      defaultValue: Any): AnyRef = {
     new ParquetColumnVector(column, vector, capacity, memoryMode, missingColumns, isTopLevel,
       defaultValue)
   }

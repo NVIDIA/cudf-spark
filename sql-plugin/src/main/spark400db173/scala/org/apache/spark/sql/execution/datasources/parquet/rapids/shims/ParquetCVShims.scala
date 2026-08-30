@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,20 +15,17 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "330"}
-{"spark": "331"}
-{"spark": "332"}
-{"spark": "333"}
-{"spark": "334"}
+{"spark": "400db173"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.execution.datasources.parquet
 
 import org.apache.spark.memory.MemoryMode
+import org.apache.spark.sql.catalyst.util.ResolveDefaultColumns.getExistenceDefaultValues
 import org.apache.spark.sql.execution.vectorized.WritableColumnVector
 import org.apache.spark.sql.types.StructType
 
 object ParquetCVShims {
-  val bridge: ParquetColumnVectorBridge = ParquetColumnVectorBridge330
+  val bridge: ParquetColumnVectorBridge = ParquetColumnVectorBridge400DB173
 
   def newParquetCV(
       sparkSchema: StructType,
@@ -39,7 +36,10 @@ object ParquetCVShims {
       memoryMode: MemoryMode,
       missingColumns: java.util.Set[ParquetColumn],
       isTopLevel: Boolean): AnyRef = {
+    val defaultValue = if (sparkSchema != null) {
+      getExistenceDefaultValues(sparkSchema)
+    } else null
     bridge.newParquetColumnVector(column, vector, capacity, memoryMode, missingColumns,
-      isTopLevel, null)
+      isTopLevel, defaultValue)
   }
 }

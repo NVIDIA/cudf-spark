@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,23 +15,23 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "400db173"}
+{"spark": "350db143"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.execution.datasources.parquet
 
 import org.apache.spark.memory.MemoryMode
 import org.apache.spark.sql.execution.vectorized.WritableColumnVector
 
-object ShimParquetColumnVector {
-  def apply(
-    column: ParquetColumn,
-    vector: WritableColumnVector,
-    capacity: Int,
-    memoryMode: MemoryMode,
-    missingColumns: java.util.Set[ParquetColumn],
-    isTopLevel: Boolean,
-    defaultValue: Any): ParquetColumnVector = {
-    new ParquetColumnVector(column, vector, capacity, missingColumns, isTopLevel,
+object ParquetColumnVectorBridge350DB143 extends ParquetColumnVectorBridge {
+  override def newParquetColumnVector(
+      column: ParquetColumn,
+      vector: WritableColumnVector,
+      capacity: Int,
+      memoryMode: MemoryMode,
+      missingColumns: java.util.Set[ParquetColumn],
+      isTopLevel: Boolean,
+      defaultValue: Any): AnyRef = {
+    new ParquetColumnVector(column, vector, capacity, memoryMode, missingColumns, isTopLevel,
       defaultValue, "")
   }
 }

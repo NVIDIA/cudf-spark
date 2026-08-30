@@ -9,4 +9,8 @@ com/nvidia/spark/rapids/delta/DeltaProbe.class
 com/nvidia/spark/rapids/delta/DeltaProvider.class
 com/nvidia/spark/rapids/delta/DeltaProvider$.class
 com/nvidia/spark/rapids/PlanShims*
+org/apache/spark/sql/execution/datasources/parquet/ParquetColumnVectorBridge330*
+org/apache/spark/sql/execution/datasources/parquet/ParquetColumnVectorBridge350*
+org/apache/spark/sql/execution/datasources/parquet/ParquetColumnVectorBridge400*
+org/apache/spark/sql/execution/datasources/parquet/ParquetColumnVectorBridge411*
 spark-*-info.properties

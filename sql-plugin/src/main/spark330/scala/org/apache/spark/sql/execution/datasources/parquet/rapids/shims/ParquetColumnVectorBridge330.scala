@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,21 +25,16 @@ package org.apache.spark.sql.execution.datasources.parquet
 
 import org.apache.spark.memory.MemoryMode
 import org.apache.spark.sql.execution.vectorized.WritableColumnVector
-import org.apache.spark.sql.types.StructType
 
-object ParquetCVShims {
-  val bridge: ParquetColumnVectorBridge = ParquetColumnVectorBridge330
-
-  def newParquetCV(
-      sparkSchema: StructType,
-      idx: Int,
+object ParquetColumnVectorBridge330 extends ParquetColumnVectorBridge {
+  override def newParquetColumnVector(
       column: ParquetColumn,
       vector: WritableColumnVector,
       capacity: Int,
       memoryMode: MemoryMode,
       missingColumns: java.util.Set[ParquetColumn],
-      isTopLevel: Boolean): AnyRef = {
-    bridge.newParquetColumnVector(column, vector, capacity, memoryMode, missingColumns,
-      isTopLevel, null)
+      isTopLevel: Boolean,
+      defaultValue: Any): AnyRef = {
+    new ParquetColumnVector(column, vector, capacity, memoryMode, missingColumns)
   }
 }
