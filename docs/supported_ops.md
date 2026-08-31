@@ -65,9 +65,12 @@ the level of compatibility with Apache Spark.  Those are covered [here](configs.
 Others are a part of Apache Spark itself and those are a bit harder to document.
 The work of updating this to cover that support is still ongoing.
 
-In general though if you ever have any question about why an operation is not running
-on the GPU you may set `spark.rapids.sql.explain` to ALL and it will try to give all of
-the reasons why this particular operator or expression is on the CPU or GPU.
+For debugging, set `spark.rapids.sql.explain` to ALL to report why
+operators or expressions run on the CPU or GPU. ALL can generate
+substantial driver log output for complex or high-volume workloads,
+potentially degrading driver performance or making the driver
+unresponsive. Do not enable ALL in production; use NOT_ON_GPU
+(the default) or NONE.
 
 # Key
 ## Types
