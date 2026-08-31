@@ -15,10 +15,11 @@
 import pytest
 
 from asserts import *
-from conftest import generate_reduced_test_matrix, is_not_utc
+from conftest import is_not_utc
 from data_gen import *
 from marks import *
 from pyspark.sql.types import *
+from reduced_test_matrix_helper import generate_reduced_test_matrix
 from spark_init_internal import spark_version
 from spark_session import *
 from parquet_test import _nested_pruning_schemas

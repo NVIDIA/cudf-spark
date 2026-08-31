@@ -14,7 +14,7 @@
 
 import pytest
 
-from conftest import generate_reduced_test_matrix
+from reduced_test_matrix_helper import generate_reduced_test_matrix
 
 
 def _matrix_values(test_matrix):
