@@ -200,7 +200,16 @@ case class GpuBatchScanExec(
                 .get
                 .map(t => (InternalRowComparableWrapper(t._1, partExpressions), t._2))
                 .toMap
-            val nestGroupedPartitions = finalGroupedPartitions.map { case (partValue, splits) =>
+            // SPARK-48949: with `...v2.bucketing.partition.filter.enabled`,
+            // `commonPartitionValues` is the intersection of the two join sides rather than
+            // their union, so this scan can still enumerate groups the planner pruned away.
+            // Dropping them here is what keeps the assert below true.
+            val filteredGroupedPartitions = finalGroupedPartitions.filter {
+              case (partValues, _) =>
+                commonPartValuesMap.keySet.contains(
+                  InternalRowComparableWrapper(partValues, partExpressions))
+            }
+            val nestGroupedPartitions = filteredGroupedPartitions.map { case (partValue, splits) =>
               // `commonPartValuesMap` should contain the part value since it's the super set.
               val numSplits = commonPartValuesMap
                   .get(InternalRowComparableWrapper(partValue, partExpressions))

@@ -186,7 +186,17 @@ case class GpuBatchScanExec(
                 .get
                 .map(t => (InternalRowComparableWrapper(t._1, p.expressions), t._2))
                 .toMap
-              val nestGroupedPartitions = groupedPartitions.map {
+              // SPARK-48949. Inert here: the `...v2.bucketing.partition.filter.enabled` config
+              // that makes `commonPartitionValues` an intersection instead of a union does not
+              // exist before Spark 4.0, so this filter can never drop a group on the versions
+              // this shim serves. Kept identical to the spark350db143 copy so the next SPJ
+              // audit diff between the two stays cheap.
+              val filteredGroupedPartitions = groupedPartitions.filter {
+                case (partValues, _) =>
+                  commonPartValuesMap.keySet.contains(
+                    InternalRowComparableWrapper(partValues, p.expressions))
+              }
+              val nestGroupedPartitions = filteredGroupedPartitions.map {
                 case (partValue, splits) =>
                   // `commonPartValuesMap` should contain the part value since it's the super set.
                   val numSplits = commonPartValuesMap
