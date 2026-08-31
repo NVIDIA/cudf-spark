@@ -29,7 +29,8 @@
 #   - SPARK_HOME: Path to your Apache Spark installation.
 #   - SKIP_TESTS: If set to true, skips running the Python integration tests.
 #   - INCLUDE_SPARK_AVRO_JAR: If set to true, includes Avro tests.
-#   - INCLUDE_SPARK_PROTOBUF_JAR: Controls external spark-protobuf jar injection, not test selection.
+#   - INCLUDE_SPARK_PROTOBUF_JAR: Controls external spark-protobuf jar injection; setting it to
+#                                false also disables protobuf tests on Apache Spark.
 #   - TEST: Specifies a specific test to run.
 #   - TEST_TAGS: Allows filtering tests based on tags.
 #   - TEST_TYPE: Specifies the type of tests to run.

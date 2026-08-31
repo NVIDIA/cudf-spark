@@ -86,6 +86,8 @@ For manual installation, you need to setup your environment:
 - pytest
   : A framework that makes it easy to write small, readable tests, and can scale to support complex
   functional testing for applications and libraries (requires  Python 3.6+).
+- protobuf
+  : Provides Protocol Buffers APIs for protobuf integration-test fixtures.
 - sre_yield
   : Provides a set of APIs to generate string data from a regular expression.
 - pandas
@@ -301,12 +303,12 @@ when certain environments have different behavior, and the tests don't have a go
 
 #### Protobuf tests on Databricks
 
-`INCLUDE_SPARK_PROTOBUF_JAR` controls external `spark-protobuf` jar injection; it does not control
-protobuf test eligibility. Apache Spark runs inject a matching external jar only when exactly one is
-found and this variable is not set to `false`. Databricks runs use the runtime-bundled protobuf
-implementation instead, so `run_pyspark_from_build.sh --runtime_env=databricks` does not inject a
-matching jar from either the build dependencies or `LOCAL_JAR_PATH`, even if the variable is
-explicitly set to `true`.
+On Databricks, `INCLUDE_SPARK_PROTOBUF_JAR` controls only external `spark-protobuf` jar injection; it
+does not control protobuf test eligibility. Apache Spark runs require a matching external jar and
+skip the protobuf tests when this variable is set to `false`. Databricks runs use the runtime-bundled
+protobuf implementation instead, so `run_pyspark_from_build.sh --runtime_env=databricks` does not
+inject a matching jar from either the build dependencies or `LOCAL_JAR_PATH`, even if the variable
+is explicitly set to `true`.
 
 The smoke tests detect the bundled runtime independently and use a static descriptor set, so they do
 not depend on Spark's private, runtime-specific shaded protobuf classes.
