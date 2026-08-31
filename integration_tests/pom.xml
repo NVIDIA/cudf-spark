@@ -174,7 +174,7 @@
                             <goal>copy</goal>
                         </goals>
                         <configuration>
-                            <skip>${spark.protobuf.skipCopy}</skip>
+                            <skip>${spark.protobuf.copy.skip}</skip>
                             <useBaseVersion>true</useBaseVersion>
                             <artifactItems>
                                 <artifactItem>
