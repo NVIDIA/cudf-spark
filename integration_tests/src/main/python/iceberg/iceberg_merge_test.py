@@ -14,7 +14,8 @@
 
 import pytest
 
-from asserts import assert_equal_with_local_sort, assert_gpu_fallback_write_sql
+from asserts import (assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect,
+                     assert_gpu_fallback_write_sql)
 from conftest import is_iceberg_remote_catalog
 from data_gen import *
 from iceberg import (create_iceberg_table, get_full_table_name, iceberg_write_enabled_conf,
@@ -224,6 +225,7 @@ def test_iceberg_merge_v3_table_fallback(
 
 
 @iceberg
+@ignore_order(local=True)
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 def test_iceberg_merge_v3_gpu_writes_deletion_vectors(spark_tmp_table_factory):
     base_table_name = get_full_table_name(spark_tmp_table_factory)
@@ -258,23 +260,21 @@ def test_iceberg_merge_v3_gpu_writes_deletion_vectors(spark_tmp_table_factory):
     with_cpu_session(lambda spark: insert_data(spark, gpu_table_name, target_data_gen))
     with_cpu_session(lambda spark: insert_data(spark, source_table, source_data_gen))
 
-    def merge_data(spark, table_name):
+    def merge_data(spark):
+        is_gpu = spark.conf.get('spark.rapids.sql.enabled') == 'true'
+        table_name = gpu_table_name if is_gpu else cpu_table_name
         spark.sql(f"""
             MERGE INTO {table_name} t
             USING {source_table} s
             ON t.id = s.id
             WHEN MATCHED THEN UPDATE SET value = s.value
         """)
+        return spark.table(table_name)
 
-    with_cpu_session(lambda spark: merge_data(spark, cpu_table_name))
     write_conf = copy_and_update(iceberg_write_enabled_conf, {
         'spark.rapids.sql.format.iceberg.v3.enabled': 'true'
     })
-    with_gpu_session(lambda spark: merge_data(spark, gpu_table_name), conf=write_conf)
-
-    cpu_data = with_cpu_session(lambda spark: spark.table(cpu_table_name).collect())
-    gpu_data = with_cpu_session(lambda spark: spark.table(gpu_table_name).collect())
-    assert_equal_with_local_sort(cpu_data, gpu_data)
+    assert_gpu_and_cpu_are_equal_collect(merge_data, conf=write_conf)
 
 
 @allow_non_gpu("MergeRows$Keep", "MergeRows$Discard", "MergeRows$Split")

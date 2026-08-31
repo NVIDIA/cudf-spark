@@ -14,7 +14,8 @@
 
 import pytest
 
-from asserts import assert_equal_with_local_sort, assert_gpu_fallback_write_sql
+from asserts import (assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect,
+                     assert_gpu_fallback_write_sql)
 from conftest import is_iceberg_remote_catalog
 from data_gen import *
 from iceberg import (create_iceberg_table, get_full_table_name, iceberg_write_enabled_conf,
@@ -167,6 +168,7 @@ def test_iceberg_delete_v3_table_fallback(
 
 
 @iceberg
+@ignore_order(local=True)
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @pytest.mark.parametrize('fanout_enabled', [False, True], ids=['clustered', 'fanout'])
 def test_iceberg_delete_v3_gpu_writes_and_merges_deletion_vectors(
@@ -191,22 +193,21 @@ def test_iceberg_delete_v3_gpu_writes_and_merges_deletion_vectors(
         gpu_table_name, "bucket(2, id)", data_gen_func, table_properties,
         delete_mode='merge-on-read')
 
-    def delete_data(spark, table_name):
+    def delete_data(spark):
+        is_gpu = spark.conf.get('spark.rapids.sql.enabled') == 'true'
+        table_name = gpu_table_name if is_gpu else cpu_table_name
         spark.sql(f"DELETE FROM {table_name} WHERE id % 3 = 0")
         spark.sql(f"DELETE FROM {table_name} WHERE id % 5 = 0")
+        return spark.table(table_name)
 
-    with_cpu_session(lambda spark: delete_data(spark, cpu_table_name))
     write_conf = copy_and_update(iceberg_write_enabled_conf, {
         'spark.rapids.sql.format.iceberg.v3.enabled': 'true'
     })
-    with_gpu_session(lambda spark: delete_data(spark, gpu_table_name), conf=write_conf)
-
-    cpu_data = with_cpu_session(lambda spark: spark.table(cpu_table_name).collect())
-    gpu_data = with_cpu_session(lambda spark: spark.table(gpu_table_name).collect())
-    assert_equal_with_local_sort(cpu_data, gpu_data)
+    assert_gpu_and_cpu_are_equal_collect(delete_data, conf=write_conf)
 
 
 @iceberg
+@ignore_order(local=True)
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 def test_iceberg_delete_v3_gpu_upgrades_position_deletes(spark_tmp_table_factory):
     base_table_name = get_full_table_name(spark_tmp_table_factory)
@@ -236,17 +237,14 @@ def test_iceberg_delete_v3_gpu_upgrades_position_deletes(spark_tmp_table_factory
     write_conf = copy_and_update(iceberg_write_enabled_conf, {
         'spark.rapids.sql.format.iceberg.v3.enabled': 'true'
     })
-    with_cpu_session(
-        lambda spark: spark.sql(
-            f"DELETE FROM {cpu_table_name} WHERE id % 5 = 0").collect())
-    with_gpu_session(
-        lambda spark: spark.sql(
-            f"DELETE FROM {gpu_table_name} WHERE id % 5 = 0").collect(),
-        conf=write_conf)
 
-    cpu_data = with_cpu_session(lambda spark: spark.table(cpu_table_name).collect())
-    gpu_data = with_cpu_session(lambda spark: spark.table(gpu_table_name).collect())
-    assert_equal_with_local_sort(cpu_data, gpu_data)
+    def delete_data(spark):
+        is_gpu = spark.conf.get('spark.rapids.sql.enabled') == 'true'
+        table_name = gpu_table_name if is_gpu else cpu_table_name
+        spark.sql(f"DELETE FROM {table_name} WHERE id % 5 = 0")
+        return spark.table(table_name)
+
+    assert_gpu_and_cpu_are_equal_collect(delete_data, conf=write_conf)
 
 
 def _do_test_iceberg_delete_partitioned_table(spark_tmp_table_factory, partition_col_sql, delete_mode, table_properties=None):
