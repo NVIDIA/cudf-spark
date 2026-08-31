@@ -198,8 +198,15 @@ def test_delta_deletion_vector_read(spark_tmp_path, chunk_size, use_cdf, dv_pred
 @delta_lake
 @ignore_order(local=True)
 @pytest.mark.skipif(is_databricks_runtime(), reason="OSS Delta CDF test")
-def test_delta_cdf_read_stays_columnar(spark_tmp_path):
+@pytest.mark.parametrize("column_mapping", [False, True], ids=["legacy_schema", "end_version_schema"])
+def test_delta_cdf_read_stays_columnar(spark_tmp_path, column_mapping):
     data_path = spark_tmp_path + "/DELTA_DATA"
+    conf = {} if not column_mapping else {
+        "spark.databricks.delta.properties.defaults.columnMapping.mode": "name",
+        "spark.databricks.delta.properties.defaults.minReaderVersion": "2",
+        "spark.databricks.delta.properties.defaults.minWriterVersion": "5",
+        "spark.sql.parquet.fieldId.read.enabled": "true"
+    }
 
     with_cpu_session(
         lambda spark: setup_delta_dest_table(
@@ -207,7 +214,8 @@ def test_delta_cdf_read_stays_columnar(spark_tmp_path):
             data_path,
             dest_table_func=lambda spark: spark.createDataFrame(
                 [(1, "a"), (2, "b"), (3, "a")], ["id", "data"]),
-            use_cdf=True))
+            use_cdf=True),
+        conf=conf)
 
     def read_cdf(spark):
         return spark.read.format("delta") \
@@ -220,7 +228,8 @@ def test_delta_cdf_read_stays_columnar(spark_tmp_path):
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         read_cdf,
         exist_classes="GpuFileSourceScanExec,GpuHashAggregateExec",
-        non_exist_classes="RowDataSourceScanExec")
+        non_exist_classes="RowDataSourceScanExec",
+        conf=conf)
 
 
 def _test_delta_deletion_vector_read_with_cdf(

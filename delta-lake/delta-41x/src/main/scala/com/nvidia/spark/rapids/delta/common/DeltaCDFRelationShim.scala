@@ -17,22 +17,23 @@
 package com.nvidia.spark.rapids.delta.common
 
 import org.apache.spark.sql.DataFrame
-import org.apache.spark.sql.delta.BatchCDFSchemaEndVersion
+import org.apache.spark.sql.delta.Snapshot
 import org.apache.spark.sql.delta.commands.cdc.CDCReader
 import org.apache.spark.sql.delta.commands.cdc.CDCReader.DeltaCDFRelation
 
 private[common] object DeltaCDFRelationShim {
 
+  // Delta 4.1 exposes the analysis-time schema snapshot as protected. This version-pinned shim
+  // accesses the exact snapshot used to build relation.output rather than reconstructing it.
+  private val snapshotForBatchSchemaMethod = {
+    val method = classOf[DeltaCDFRelation].getMethod("snapshotForBatchSchema")
+    method.setAccessible(true)
+    method
+  }
+
   def changesToBatchDF(cdf: DeltaCDFRelation): DataFrame = {
     val spark = cdf.sqlContext.sparkSession
     val snapshot = cdf.snapshotWithSchemaMode.snapshot
-    val readSchemaSnapshot = cdf.snapshotWithSchemaMode.schemaMode match {
-      case BatchCDFSchemaEndVersion =>
-        // Keep the schema consistent with the relation output that Delta resolved during analysis.
-        val version = cdf.endingVersion.map(snapshot.version min _).getOrElse(snapshot.version)
-        snapshot.deltaLog.getSnapshotAt(version, catalogTableOpt = cdf.catalogTableOpt)
-      case _ => snapshot
-    }
     CDCReader.changesToBatchDF(
       snapshot.deltaLog,
       cdf.startingVersion.get,
@@ -41,6 +42,7 @@ private[common] object DeltaCDFRelationShim {
       },
       spark,
       catalogTableOpt = cdf.catalogTableOpt,
-      readSchemaSnapshot = Some(readSchemaSnapshot))
+      readSchemaSnapshot = Some(
+        snapshotForBatchSchemaMethod.invoke(cdf).asInstanceOf[Snapshot]))
   }
 }
