@@ -26,6 +26,9 @@ import com.nvidia.spark.rapids.shims.SparkShimImpl
 import org.scalatest.funsuite.AnyFunSuite
 
 class ClassInitializationSuite extends AnyFunSuite with FQSuiteName {
+  private val JvmOptionEnvironmentVariables =
+    Seq("_JAVA_OPTIONS", "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS")
+
   test("SparkShimImpl and GpuOverrides can be initialized concurrently") {
     assume(VersionUtils.isDataBricks ||
         (VersionUtils.isSpark && VersionUtils.cmpSparkVersion(3, 4, 0) >= 0),
@@ -47,6 +50,17 @@ class ClassInitializationSuite extends AnyFunSuite with FQSuiteName {
         result.output)
   }
 
+  test("class-initialization child does not inherit JVM option environment variables") {
+    val processBuilder = new ProcessBuilder("java")
+    JvmOptionEnvironmentVariables.foreach { variable =>
+      processBuilder.environment().put(variable, "test-options")
+    }
+
+    removeInheritedJvmOptions(processBuilder)
+
+    assert(!JvmOptionEnvironmentVariables.exists(processBuilder.environment().containsKey))
+  }
+
   private def runChild(): ChildResult = {
     val java = new File(System.getProperty("java.home"), "bin/java").getAbsolutePath
     val classPath = System.getProperty("java.class.path")
@@ -55,15 +69,22 @@ class ClassInitializationSuite extends AnyFunSuite with FQSuiteName {
     // which closes the Process streams on some JDKs.
     val outputFile = Files.createTempFile("class-initialization-child-", ".log")
     try {
-      val process = new ProcessBuilder(
+      val processBuilder = new ProcessBuilder(
         java,
         "-Dcom.nvidia.spark.rapids.runningTests=true",
         "-cp",
         classPath,
         mainClass)
-          .redirectErrorStream(true)
-          .redirectOutput(outputFile.toFile)
-          .start()
+
+      // This child deliberately suspends a thread during class initialization. Java agents can
+      // hold process-wide locks at the suspension point and deadlock the reproducer itself, so do
+      // not propagate inherited JVM options that can inject agents into the child.
+      removeInheritedJvmOptions(processBuilder)
+
+      val process = processBuilder
+        .redirectErrorStream(true)
+        .redirectOutput(outputFile.toFile)
+        .start()
 
       val finished = process.waitFor(30, TimeUnit.SECONDS)
       if (!finished) {
@@ -82,6 +103,10 @@ class ClassInitializationSuite extends AnyFunSuite with FQSuiteName {
     } finally {
       Files.deleteIfExists(outputFile)
     }
+  }
+
+  private def removeInheritedJvmOptions(processBuilder: ProcessBuilder): Unit = {
+    JvmOptionEnvironmentVariables.foreach(processBuilder.environment().remove)
   }
 
   private case class ChildResult(finished: Boolean, exitCode: Int, output: String)

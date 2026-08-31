@@ -58,8 +58,6 @@ _xfail_files = {
     "delta_encoding_optional_column.parquet": "https://github.com/rapidsai/cudf/issues/13501",
     "delta_encoding_required_column.parquet": "https://github.com/rapidsai/cudf/issues/13501",
     "delta_length_byte_array.parquet": "https://github.com/rapidsai/cudf/issues/13501",
-    "hadoop_lz4_compressed.parquet": "cudf does not support Hadoop LZ4 format",
-    "hadoop_lz4_compressed_larger.parquet": "cudf does not support Hadoop LZ4 format",
     "nested_structs.rust.parquet": "PySpark cannot handle year 52951",
 }
 # Spark 3.5.0 adds support for lz4_raw compression codec, but we do not support that on GPU yet

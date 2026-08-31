@@ -312,9 +312,6 @@ class RapidsTestSettings extends BackendTestSettings {
   enableSuite[RapidsFileSourceCharVarcharDDLTestSuite]
   enableSuite[RapidsDSV2CharVarcharDDLTestSuite]
   enableSuite[RapidsParquetCodecSuite]
-    .exclude("write and read - file source parquet - codec: lz4",
-      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15550. " +
-        "Recovery trigger: GPU Parquet supports Hadoop LZ4 or safely falls back; P1."))
   enableSuite[RapidsOrcCodecSuite]
     .exclude("write and read - file source orc - codec: lzo",
       KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15551. " +

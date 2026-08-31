@@ -20,7 +20,6 @@ com/nvidia/spark/rapids/iceberg/spark/source/RapidsSparkTable.class
 org/apache/iceberg/io/GpuPositionDeleteFileWriter$.class
 org/apache/iceberg/spark/source/GpuBaseReader.class
 org/apache/iceberg/spark/source/GpuSparkPlanningUtil.class
-org/apache/iceberg/spark/source/GpuSparkWriteAccess.class
 org/apache/spark/sql/rapids/AdaptiveSparkPlanHelperShim*
 org/apache/spark/sql/rapids/ExecutionPlanCaptureCallback*
 rapids/*.py
