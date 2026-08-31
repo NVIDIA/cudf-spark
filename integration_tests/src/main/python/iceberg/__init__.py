@@ -40,7 +40,6 @@ supports_iceberg_v3 = (
 ICEBERG_V3_UNSUPPORTED_REASON = (
     "Iceberg v3 requires Iceberg 1.9.0 or later and a catalog backend with v3 support")
 
-
 # iceberg supported types
 iceberg_table_gen = MappingProxyType({
     '_c0': byte_gen, '_c1': short_gen, '_c2': int_gen,

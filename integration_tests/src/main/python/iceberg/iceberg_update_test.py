@@ -166,8 +166,10 @@ def test_iceberg_update_v3_gpu_writes_deletion_vectors(spark_tmp_table_factory):
     gpu_table_name = f"{base_table_name}_gpu"
     data_gen_func = lambda spark: gen_df(spark, [
         ('id', LongGen(nullable=False, min_val=0, max_val=63)),
-        ('value', LongGen(nullable=False, min_val=-1000, max_val=1000))
-    ], length=64, seed=0)
+        ('value', LongGen(nullable=False, min_val=-1000, max_val=1000)),
+        ('data', StringGen()),
+        ('flag', BooleanGen())
+    ], seed=0)
     table_properties = {'format-version': '3'}
     create_iceberg_table_with_data(
         cpu_table_name, data_gen_func=data_gen_func, table_properties=table_properties,
@@ -180,8 +182,9 @@ def test_iceberg_update_v3_gpu_writes_deletion_vectors(spark_tmp_table_factory):
         spark.sql(f"UPDATE {table_name} SET value = value + 1000 WHERE id % 4 = 0")
 
     with_cpu_session(lambda spark: update_data(spark, cpu_table_name))
-    write_conf = dict(iceberg_write_enabled_conf)
-    write_conf['spark.rapids.sql.format.iceberg.v3.enabled'] = 'true'
+    write_conf = copy_and_update(iceberg_write_enabled_conf, {
+        'spark.rapids.sql.format.iceberg.v3.enabled': 'true'
+    })
     with_gpu_session(lambda spark: update_data(spark, gpu_table_name), conf=write_conf)
 
     cpu_data = with_cpu_session(lambda spark: spark.table(cpu_table_name).collect())

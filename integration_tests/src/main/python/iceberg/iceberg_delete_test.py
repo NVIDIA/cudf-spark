@@ -175,8 +175,11 @@ def test_iceberg_delete_v3_gpu_writes_and_merges_deletion_vectors(
     cpu_table_name = f"{base_table_name}_cpu"
     gpu_table_name = f"{base_table_name}_gpu"
     data_gen_func = lambda spark: gen_df(
-        spark, [('id', LongGen(nullable=False, min_val=0, max_val=127))],
-        length=128, seed=0)
+        spark, [
+            ('id', LongGen(nullable=False, min_val=0, max_val=127)),
+            ('value', LongGen()),
+            ('data', StringGen())
+        ], seed=0)
     table_properties = {
         'format-version': '3',
         'write.spark.fanout.enabled': fanout_enabled
@@ -193,8 +196,9 @@ def test_iceberg_delete_v3_gpu_writes_and_merges_deletion_vectors(
         spark.sql(f"DELETE FROM {table_name} WHERE id % 5 = 0")
 
     with_cpu_session(lambda spark: delete_data(spark, cpu_table_name))
-    write_conf = dict(iceberg_write_enabled_conf)
-    write_conf['spark.rapids.sql.format.iceberg.v3.enabled'] = 'true'
+    write_conf = copy_and_update(iceberg_write_enabled_conf, {
+        'spark.rapids.sql.format.iceberg.v3.enabled': 'true'
+    })
     with_gpu_session(lambda spark: delete_data(spark, gpu_table_name), conf=write_conf)
 
     cpu_data = with_cpu_session(lambda spark: spark.table(cpu_table_name).collect())
@@ -209,8 +213,11 @@ def test_iceberg_delete_v3_gpu_upgrades_position_deletes(spark_tmp_table_factory
     cpu_table_name = f"{base_table_name}_cpu"
     gpu_table_name = f"{base_table_name}_gpu"
     data_gen_func = lambda spark: gen_df(
-        spark, [('id', LongGen(nullable=False, min_val=0, max_val=63))],
-        length=64, seed=0)
+        spark, [
+            ('id', LongGen(nullable=False, min_val=0, max_val=63)),
+            ('value', LongGen()),
+            ('data', StringGen())
+        ], seed=0)
     table_properties = {'format-version': '2'}
     create_iceberg_table_with_data(
         cpu_table_name, data_gen_func=data_gen_func, table_properties=table_properties,
@@ -226,8 +233,9 @@ def test_iceberg_delete_v3_gpu_upgrades_position_deletes(spark_tmp_table_factory
 
     with_cpu_session(lambda spark: create_position_deletes(spark, cpu_table_name))
     with_cpu_session(lambda spark: create_position_deletes(spark, gpu_table_name))
-    write_conf = dict(iceberg_write_enabled_conf)
-    write_conf['spark.rapids.sql.format.iceberg.v3.enabled'] = 'true'
+    write_conf = copy_and_update(iceberg_write_enabled_conf, {
+        'spark.rapids.sql.format.iceberg.v3.enabled': 'true'
+    })
     with_cpu_session(
         lambda spark: spark.sql(
             f"DELETE FROM {cpu_table_name} WHERE id % 5 = 0").collect())

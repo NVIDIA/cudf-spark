@@ -232,12 +232,16 @@ def test_iceberg_merge_v3_gpu_writes_deletion_vectors(spark_tmp_table_factory):
     source_table = f"{base_table_name}_source"
     target_data_gen = lambda spark: gen_df(spark, [
         ('id', LongGen(nullable=False, min_val=0, max_val=63)),
-        ('value', LongGen(nullable=False, min_val=-1000, max_val=1000))
-    ], length=64, seed=0)
+        ('value', LongGen(nullable=False, min_val=-1000, max_val=1000)),
+        ('data', StringGen()),
+        ('flag', BooleanGen())
+    ], seed=0)
     source_data_gen = lambda spark: gen_df(spark, [
         ('id', UniqueLongGen()),
-        ('value', LongGen(nullable=False, min_val=1001, max_val=2000))
-    ], length=64, seed=1)
+        ('value', LongGen(nullable=False, min_val=1001, max_val=2000)),
+        ('data', StringGen()),
+        ('flag', BooleanGen())
+    ], seed=1)
     table_properties = {
         'format-version': '3',
         'write.merge.mode': 'merge-on-read'
@@ -263,8 +267,9 @@ def test_iceberg_merge_v3_gpu_writes_deletion_vectors(spark_tmp_table_factory):
         """)
 
     with_cpu_session(lambda spark: merge_data(spark, cpu_table_name))
-    write_conf = dict(iceberg_write_enabled_conf)
-    write_conf['spark.rapids.sql.format.iceberg.v3.enabled'] = 'true'
+    write_conf = copy_and_update(iceberg_write_enabled_conf, {
+        'spark.rapids.sql.format.iceberg.v3.enabled': 'true'
+    })
     with_gpu_session(lambda spark: merge_data(spark, gpu_table_name), conf=write_conf)
 
     cpu_data = with_cpu_session(lambda spark: spark.table(cpu_table_name).collect())
