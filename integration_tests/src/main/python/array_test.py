@@ -17,7 +17,7 @@ import pytest
 from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_are_equal_sql, assert_gpu_and_cpu_error, assert_gpu_and_cpu_same_data_or_error, assert_gpu_fallback_collect, assert_cpu_and_gpu_are_equal_collect_with_capture
 from data_gen import *
 from conftest import is_databricks_runtime
-from marks import incompat, allow_non_gpu, disable_ansi_mode
+from marks import incompat, allow_non_gpu, disable_ansi_mode, validate_execs_in_gpu_plan
 from spark_session import *
 from pyspark.sql.types import *
 from pyspark.sql.types import IntegralType
@@ -314,7 +314,10 @@ def test_array_contains_for_nans(data_gen):
 orderable_gens_sample = orderable_gens + array_gens_sample + struct_gens_sample_with_decimal128
 orderable_gens_sample_no_null = [g for g in orderable_gens_sample if g != null_gen]
 @pytest.mark.parametrize('data_gen',
-    orderable_gens_sample_no_null if is_spark_340_or_later() or is_databricks_runtime() else orderable_gens_sample, ids=idfn)
+    (orderable_gens_sample_no_null if is_spark_340_or_later() or is_databricks_runtime()
+     else orderable_gens_sample) + [
+        pytest.param(BinaryGen(), marks=validate_execs_in_gpu_plan('GpuProjectExec'))
+    ], ids=idfn)
 def test_array_position(data_gen):
     # min_length=6 to make sure 'a[5]' always works.
     arr_gen = ArrayGen(data_gen, min_length=6)

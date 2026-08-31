@@ -19,9 +19,38 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.suites
 
+import org.apache.parquet.column.ParquetProperties
+import org.apache.parquet.hadoop.ParquetOutputFormat
+
 import org.apache.spark.sql.execution.datasources.{OrcCodecSuite, ParquetCodecSuite}
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.utils.RapidsSQLTestsTrait
 
-class RapidsParquetCodecSuite extends ParquetCodecSuite with RapidsSQLTestsTrait
+class RapidsParquetCodecSuite extends ParquetCodecSuite with RapidsSQLTestsTrait {
+
+  testRapids("write and read - file source parquet - codec: lz4 - v2 small pages no crc") {
+    val activeSpark = spark
+    import activeSpark.implicits._
+
+    val compressibleValue = "a" * 1000
+    val data = Seq.tabulate(512) { i =>
+      if (i % 3 == 0) None else Some(compressibleValue)
+    }.toDF("value")
+    withSQLConf(
+      SQLConf.PARQUET_COMPRESSION.key -> "lz4",
+      ParquetOutputFormat.PAGE_SIZE -> "256",
+      ParquetOutputFormat.MIN_ROW_COUNT_FOR_PAGE_SIZE_CHECK -> "1",
+      ParquetOutputFormat.MAX_ROW_COUNT_FOR_PAGE_SIZE_CHECK -> "1",
+      ParquetOutputFormat.ENABLE_DICTIONARY -> "false",
+      ParquetOutputFormat.PAGE_WRITE_CHECKSUM_ENABLED -> "false",
+      ParquetOutputFormat.WRITER_VERSION ->
+        ParquetProperties.WriterVersion.PARQUET_2_0.toString) {
+      withTempPath { dir =>
+        data.coalesce(1).write.parquet(dir.getCanonicalPath)
+        checkAnswer(activeSpark.read.parquet(dir.getCanonicalPath), data)
+      }
+    }
+  }
+}
 
 class RapidsOrcCodecSuite extends OrcCodecSuite with RapidsSQLTestsTrait

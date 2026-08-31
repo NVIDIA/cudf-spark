@@ -247,8 +247,10 @@ run_iceberg_extra_classpath_tests() {
         PYSP_TEST_spark_sql_catalog_spark__catalog="org.apache.iceberg.spark.SparkSessionCatalog" \
         PYSP_TEST_spark_sql_catalog_spark__catalog_type="hadoop" \
         PYSP_TEST_spark_sql_catalog_spark__catalog_warehouse="/tmp/spark-warehouse-$RANDOM" \
-        ./integration_tests/run_pyspark_from_build.sh -m iceberg --iceberg \
-        -k test_iceberg_read_appended_table
+        TESTS="iceberg/iceberg_test.py::test_iceberg_read_appended_table \
+iceberg/iceberg_append_test.py::test_insert_into_unpartitioned_table \
+noop_write_test.py" \
+        ./integration_tests/run_pyspark_from_build.sh --iceberg
 }
 
 ci_2() {
