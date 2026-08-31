@@ -260,10 +260,10 @@ object GpuOverridesClassInitializationReproducer {
   }
 
   private def printThreads(message: String, threads: Seq[Thread]): Unit = {
-    System.out.println(message)
+    ConsoleOutput.writeErrorLine(message)
     threads.foreach { thread =>
-      System.out.println("\"" + thread.getName + "\" state=" + thread.getState)
-      thread.getStackTrace.foreach(frame => System.out.println(s"\tat $frame"))
+      ConsoleOutput.writeErrorLine("\"" + thread.getName + "\" state=" + thread.getState)
+      thread.getStackTrace.foreach(frame => ConsoleOutput.writeErrorLine(s"\tat $frame"))
     }
   }
 }

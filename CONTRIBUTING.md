@@ -475,6 +475,13 @@ This project follows the official
 [Scala style guide](https://docs.scala-lang.org/style/) and the
 [Databricks Scala guide](https://github.com/databricks/scala-style-guide), preferring the latter.
 
+Direct `println` calls should not be used in normal implementation or test code. Use project
+logging for optional diagnostics, ScalaTest `info` for meaningful test metadata, and `withClue`
+for context that should appear only when an assertion fails. `ConsoleOutput` is reserved for
+tools, CLI entry points, report generators, benchmarks, and process protocols where stdout or
+stderr is an intentional interface. If that helper is not available to a module, scope
+`scalastyle:off/on println` tightly around the intentional output block rather than an entire file.
+
 #### Java
 
 This project follows the

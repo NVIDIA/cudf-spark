@@ -22,12 +22,6 @@ com/nvidia/spark/rapids/iceberg/parquet/GpuIcebergParquetReader$.class
 com/nvidia/spark/rapids/iceberg/parquet/SingleFile.class
 com/nvidia/spark/rapids/iceberg/parquet/SingleFile$.class
 com/nvidia/spark/rapids/iceberg/parquet/ThreadConf.class
-com/nvidia/spark/rapids/iceberg/spark/GpuSparkReadOptions.class
-com/nvidia/spark/rapids/iceberg/spark/GpuSparkReadOptions$.class
-com/nvidia/spark/rapids/iceberg/spark/GpuSparkSQLProperties.class
-com/nvidia/spark/rapids/iceberg/spark/GpuSparkSQLProperties$.class
-com/nvidia/spark/rapids/iceberg/spark/GpuSparkUtil.class
-com/nvidia/spark/rapids/iceberg/spark/GpuSparkUtil$.class
 com/nvidia/spark/rapids/iceberg/spark/RapidsSparkCatalog.class
 com/nvidia/spark/rapids/iceberg/spark/RapidsSparkSessionCatalog.class
 com/nvidia/spark/rapids/iceberg/spark/source/RapidsSparkTable.class
@@ -37,12 +31,6 @@ org/apache/iceberg/io/GpuClusteredWriterBridge.class
 org/apache/iceberg/io/GpuFanoutWriterBridge.class
 org/apache/iceberg/io/GpuPositionDeleteFileWriter$.class
 org/apache/iceberg/parquet/GpuParquetIOAccess.class
-org/apache/iceberg/spark/GpuTypeToSparkType.class
-org/apache/iceberg/spark/GpuTypeToSparkType$.class
-org/apache/iceberg/spark/GpuSparkReadConf.class
-org/apache/iceberg/spark/GpuSparkReadConfAccess.class
-org/apache/iceberg/spark/package.class
-org/apache/iceberg/spark/package$.class
 org/apache/iceberg/spark/source/GpuBaseReader.class
 org/apache/iceberg/spark/source/GpuSparkPlanningUtil.class
 org/apache/iceberg/spark/source/GpuSparkScanAccess.class

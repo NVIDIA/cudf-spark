@@ -385,22 +385,25 @@ object GpuOrcScan {
         // Math.round half up can be implemented in terms of floor
         // Math.round(x) = n iff x is in [n-0.5, n+0.5) iff x+0.5 is in [n,n+1) iff floor(x+0.5) = n
         //
-        val milliseconds = withResource(col.castTo(DType.FLOAT64)) { doubleSeconds =>
-          withResource(convertOrcFloatingPointSeconds(doubleSeconds)) { convertedSeconds =>
-            withResource(Scalar.fromDouble(DateTimeConstants.MILLIS_PER_SECOND)) { thousand =>
-              // ORC applies timezone conversion while the value is still in seconds.
-              withResource(convertedSeconds.mul(thousand, DType.FLOAT64)) { doubleMillis =>
-                withResource(Scalar.fromDouble(0.5)) { half =>
-                  withResource(doubleMillis.add(half)) { doubleMillisPlusHalf =>
-                    withResource(doubleMillisPlusHalf.floor()) { millis =>
-                      withResource(getOverflowFlags(doubleMillis, millis)) { overflowFlags =>
-                        withResource(Scalar.fromNull(millis.getType)) { nullVal =>
-                          overflowFlags.ifElse(millis, nullVal)
-                        }
-                      }
-                    }
-                  }
-                }
+        val convertedSeconds = withResource(col.castTo(DType.FLOAT64)) {
+          convertOrcFloatingPointSeconds
+        }
+        val doubleMillis = withResource(convertedSeconds) { convertedSeconds =>
+          withResource(Scalar.fromDouble(DateTimeConstants.MILLIS_PER_SECOND)) { thousand =>
+            // ORC applies timezone conversion while the value is still in seconds.
+            convertedSeconds.mul(thousand, DType.FLOAT64)
+          }
+        }
+        val milliseconds = withResource(doubleMillis) { doubleMillis =>
+          val millis = withResource(Scalar.fromDouble(0.5)) { half =>
+            withResource(doubleMillis.add(half)) { doubleMillisPlusHalf =>
+              doubleMillisPlusHalf.floor()
+            }
+          }
+          withResource(millis) { millis =>
+            withResource(getOverflowFlags(doubleMillis, millis)) { overflowFlags =>
+              withResource(Scalar.fromNull(millis.getType)) { nullVal =>
+                overflowFlags.ifElse(millis, nullVal)
               }
             }
           }
@@ -414,23 +417,26 @@ object GpuOrcScan {
         withResource(milliseconds) { _ =>
           // Test whether if there is long-overflow towards positive and negative infinity
           withResource(milliseconds.max()) { maxValue =>
-            withResource(milliseconds.min()) { minValue =>
-              Seq(maxValue, minValue).foreach { extremum =>
-                if (extremum.isValid) {
-                  testLongMultiplicationOverflow(extremum.getDouble.toLong,
-                    DateTimeConstants.MICROS_PER_MILLIS)
-                }
-              }
+            if (maxValue.isValid) {
+              testLongMultiplicationOverflow(maxValue.getDouble.toLong,
+                DateTimeConstants.MICROS_PER_MILLIS)
             }
           }
-          withResource(Scalar.fromDouble(DateTimeConstants.MICROS_PER_MILLIS)) { thousand =>
-            withResource(milliseconds.mul(thousand)) { microseconds =>
-              withResource(microseconds.castTo(DType.INT64)) { longVec =>
-                withResource(longVec.castTo(DType.TIMESTAMP_MICROSECONDS)) { timestamp =>
-                  timestamp.incRefCount()
-                }
-              }
+          withResource(milliseconds.min()) { minValue =>
+            if (minValue.isValid) {
+              testLongMultiplicationOverflow(minValue.getDouble.toLong,
+                DateTimeConstants.MICROS_PER_MILLIS)
             }
+          }
+          val microseconds = withResource(
+              Scalar.fromDouble(DateTimeConstants.MICROS_PER_MILLIS)) { thousand =>
+            milliseconds.mul(thousand)
+          }
+          val longVec = withResource(microseconds) { microseconds =>
+            microseconds.castTo(DType.INT64)
+          }
+          withResource(longVec) { longVec =>
+            longVec.castTo(DType.TIMESTAMP_MICROSECONDS)
           }
         }
 
@@ -459,46 +465,50 @@ object GpuOrcScan {
     if (GpuOverrides.isUTCTimezone(ZoneId.systemDefault())) {
       return seconds.incRefCount()
     }
-    withResource(Scalar.fromDouble(DateTimeConstants.MICROS_PER_SECOND)) { microsPerSecond =>
-      val localTimestamp = withResource(
-          Scalar.fromDouble(DateTimeConstants.MILLIS_PER_SECOND)) { millisPerSecond =>
-        withResource(seconds.mul(millisPerSecond, DType.FLOAT64)) { doubleMillis =>
-          withResource(doubleMillis.castTo(DType.INT64)) { localMillis =>
-            withResource(localMillis.bitCastTo(DType.TIMESTAMP_MILLISECONDS)) {
-              localMillisTimestamp =>
-              localMillisTimestamp.castTo(DType.TIMESTAMP_MICROSECONDS)
-            }
+    val doubleMillis = withResource(
+        Scalar.fromDouble(DateTimeConstants.MILLIS_PER_SECOND)) { millisPerSecond =>
+      seconds.mul(millisPerSecond, DType.FLOAT64)
+    }
+    val localMillis = withResource(doubleMillis) { doubleMillis =>
+      doubleMillis.castTo(DType.INT64)
+    }
+    val localTimestamp = withResource(localMillis) { localMillis =>
+      withResource(localMillis.bitCastTo(DType.TIMESTAMP_MILLISECONDS)) {
+        localMillisTimestamp =>
+          localMillisTimestamp.castTo(DType.TIMESTAMP_MICROSECONDS)
+      }
+    }
+    val offsetLookupMicros = withResource(localTimestamp) { localTimestamp =>
+      withResource(localTimestamp.bitCastTo(DType.INT64)) { localMicros =>
+        val rawOffsetMicros = TimeZone.getDefault.getRawOffset.toLong *
+          DateTimeConstants.MICROS_PER_MILLIS
+        withResource(Scalar.fromLong(rawOffsetMicros)) { rawOffset =>
+          localMicros.sub(rawOffset)
+        }
+      }
+    }
+    val offsetSeconds = withResource(offsetLookupMicros) { offsetLookupMicros =>
+      val localAtLookup = withResource(
+          offsetLookupMicros.castTo(DType.TIMESTAMP_MICROSECONDS)) { offsetLookupTimestamp =>
+        GpuTimeZoneDB.fromUtcTimestampToTimestamp(
+          offsetLookupTimestamp, ZoneId.systemDefault().normalized())
+      }
+      val offsetMicros = withResource(localAtLookup) { localAtLookup =>
+        withResource(localAtLookup.bitCastTo(DType.INT64)) { localAtLookupMicros =>
+          localAtLookupMicros.sub(offsetLookupMicros)
+        }
+      }
+      withResource(offsetMicros) { offsetMicros =>
+        withResource(offsetMicros.castTo(DType.FLOAT64)) { doubleOffsetMicros =>
+          withResource(Scalar.fromDouble(DateTimeConstants.MICROS_PER_SECOND)) {
+            microsPerSecond =>
+              doubleOffsetMicros.div(microsPerSecond, DType.FLOAT64)
           }
         }
       }
-      withResource(localTimestamp) { _ =>
-        withResource(localTimestamp.bitCastTo(DType.INT64)) { localMicros =>
-          val rawOffsetMicros = TimeZone.getDefault.getRawOffset.toLong *
-            DateTimeConstants.MICROS_PER_MILLIS
-          withResource(Scalar.fromLong(rawOffsetMicros)) { rawOffset =>
-            withResource(localMicros.sub(rawOffset)) { offsetLookupMicros =>
-              withResource(offsetLookupMicros.castTo(DType.TIMESTAMP_MICROSECONDS)) {
-                offsetLookupTimestamp =>
-                val localAtLookup = GpuTimeZoneDB.fromUtcTimestampToTimestamp(
-                  offsetLookupTimestamp, ZoneId.systemDefault().normalized())
-                withResource(localAtLookup) { _ =>
-                  withResource(localAtLookup.bitCastTo(DType.INT64)) { localAtLookupMicros =>
-                    val offsetSeconds = withResource(
-                        localAtLookupMicros.sub(offsetLookupMicros)) { offsetMicros =>
-                      withResource(offsetMicros.castTo(DType.FLOAT64)) { doubleOffsetMicros =>
-                        doubleOffsetMicros.div(microsPerSecond, DType.FLOAT64)
-                      }
-                    }
-                    withResource(offsetSeconds) { _ =>
-                      seconds.sub(offsetSeconds, DType.FLOAT64)
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
+    }
+    withResource(offsetSeconds) { offsetSeconds =>
+      seconds.sub(offsetSeconds, DType.FLOAT64)
     }
   }
 
@@ -794,11 +804,11 @@ case class GpuOrcPartitionReaderFactory(
     } else {
       val conf = broadcastedConf.value.value
       OrcConf.IS_SCHEMA_EVOLUTION_CASE_SENSITIVE.setBoolean(conf, isCaseSensitive)
-      val reader = new PartitionReaderWithBytesRead(new GpuOrcPartitionReader(conf, partFile, ctx,
+      val reader = new GpuOrcPartitionReader(conf, partFile, ctx,
         readDataSchema, debugDumpPrefix, debugDumpAlways,  maxReadBatchSizeRows,
         maxReadBatchSizeBytes, targetBatchSizeBytes,
         useChunkedReader, maxChunkedReaderMemoryUsageSizeBytes,
-        metrics, filterHandler.isCaseSensitive))
+        metrics, filterHandler.isCaseSensitive)
       ColumnarPartitionReaderWithPartitionValues.newReader(partFile, reader, partitionSchema,
         maxGpuColumnSizeBytes)
     }

@@ -45,6 +45,12 @@
             <classifier>${spark.version.classifier}</classifier>
         </dependency>
         <dependency>
+            <groupId>com.nvidia</groupId>
+            <artifactId>rapids-4-spark-iceberg-common_${scala.binary.version}</artifactId>
+            <version>${project.version}</version>
+            <classifier>${spark.version.classifier}</classifier>
+        </dependency>
+        <dependency>
             <groupId>org.apache.iceberg</groupId>
             <artifactId>iceberg-spark-runtime-${iceberg.artifact.suffix}_${scala.binary.version}</artifactId>
             <version>${iceberg.19x.version}</version>

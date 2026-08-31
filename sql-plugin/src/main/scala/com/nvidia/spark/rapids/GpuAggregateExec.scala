@@ -2116,11 +2116,15 @@ case class GpuHashAggregateExec(
     }
   }
 
-  // Used in de-duping and optimizer rules
+  // Used in de-duping and optimizer rules.
+  // Final/PartialMerge aggregates read input buffer attributes from their child. If those
+  // attrs share exprIds with child output but have different names, keep them out of this
+  // node's produced attributes so QueryPlan.references retains the required inputs.
   override def producedAttributes: AttributeSet =
-    AttributeSet(aggregateAttributes) ++
+    (AttributeSet(aggregateAttributes) ++
       AttributeSet(resultExpressions.diff(groupingExpressions).map(_.toAttribute)) ++
-      AttributeSet(aggregateBufferAttributes)
+      AttributeSet(aggregateBufferAttributes) ++
+      AttributeSet(inputAggBufferAttributes)) -- child.outputSet
 
   // AllTuples = distribution with a single partition and all tuples of the dataset are co-located.
   // Clustered = dataset with tuples co-located in the same partition if they share a specific value

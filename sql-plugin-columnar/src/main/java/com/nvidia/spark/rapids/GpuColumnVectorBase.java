@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2021, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,7 +23,7 @@ import org.apache.spark.sql.vectorized.ColumnarMap;
 import org.apache.spark.unsafe.types.UTF8String;
 
 /** Base class for all GPU column vectors. */
-abstract class GpuColumnVectorBase extends ColumnVector {
+public abstract class GpuColumnVectorBase extends ColumnVector {
   private final static String BAD_ACCESS = "DATA ACCESS MUST BE ON A HOST VECTOR";
 
   private boolean isFinalBatch = false;

@@ -181,32 +181,32 @@ abstract class ReplacementRule[INPUT <: BASE, BASE, WRAP_TYPE <: RapidsMeta[INPU
       val notesMsg = notes()
       if (asTable) {
         import ConfHelper.makeConfAnchor
-        print(s"${makeConfAnchor(confKey)}")
+        ConsoleOutput.write(s"${makeConfAnchor(confKey)}")
         if (sparkSQLFunctions.isDefined) {
-          print(s"|${sparkSQLFunctions.get}")
+          ConsoleOutput.write(s"|${sparkSQLFunctions.get}")
         }
         val incompatOps = RapidsConf.INCOMPATIBLE_OPS.asInstanceOf[ConfEntryWithDefault[Boolean]]
         val expressionEnabled = disabledMsg.isEmpty &&
           (incompatDoc.isEmpty || incompatOps.defaultValue)
-        print(s"|$desc|$expressionEnabled|")
+        ConsoleOutput.write(s"|$desc|$expressionEnabled|")
         if (notesMsg.isDefined) {
-          print(s"${notesMsg.get}")
+          ConsoleOutput.write(s"${notesMsg.get}")
         } else {
-          print("None")
+          ConsoleOutput.write("None")
         }
-        println("|")
+        ConsoleOutput.writeLine("|")
       } else {
-        println(s"$confKey:")
-        println(s"\tEnable (true) or disable (false) the $tag $operationName.")
+        ConsoleOutput.writeLine(s"$confKey:")
+        ConsoleOutput.writeLine(s"\tEnable (true) or disable (false) the $tag $operationName.")
         if (sparkSQLFunctions.isDefined) {
-          println(s"\tsql function: ${sparkSQLFunctions.get}")
+          ConsoleOutput.writeLine(s"\tsql function: ${sparkSQLFunctions.get}")
         }
-        println(s"\t$desc")
+        ConsoleOutput.writeLine(s"\t$desc")
         if (notesMsg.isDefined) {
-          println(s"\t${notesMsg.get}")
+          ConsoleOutput.writeLine(s"\t${notesMsg.get}")
         }
-        println(s"\tdefault: ${notesMsg.isEmpty}")
-        println()
+        ConsoleOutput.writeLine(s"\tdefault: ${notesMsg.isEmpty}")
+        ConsoleOutput.writeLine()
       }
     }
   }
