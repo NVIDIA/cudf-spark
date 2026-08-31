@@ -28,6 +28,7 @@ pytest_plugins = [
 ]
 
 _approximate_float_args = None
+
 def get_float_check():
     if not _approximate_float_args is None:
         return lambda lhs,rhs: lhs == pytest.approx(rhs, **_approximate_float_args)
