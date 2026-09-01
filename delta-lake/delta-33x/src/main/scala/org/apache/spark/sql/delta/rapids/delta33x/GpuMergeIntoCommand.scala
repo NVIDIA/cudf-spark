@@ -23,24 +23,26 @@ package org.apache.spark.sql.delta.rapids.delta33x
 
 import java.util.concurrent.TimeUnit
 
-import scala.collection.JavaConverters._
-
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize
 import com.nvidia.spark.rapids.RapidsConf
 import com.nvidia.spark.rapids.delta._
 
+import org.apache.spark.paths.SparkPath
 import org.apache.spark.sql._
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, Expression, Literal, Or}
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.delta._
+import org.apache.spark.sql.delta.DeltaParquetFileFormat.ROW_INDEX_COLUMN_NAME
 import org.apache.spark.sql.delta.actions.{AddFile, FileAction}
 import org.apache.spark.sql.delta.commands.MergeIntoCommandBase
+import org.apache.spark.sql.delta.commands.MergeIntoCommandBase._
 import org.apache.spark.sql.delta.commands.merge._
 import org.apache.spark.sql.delta.files._
-import org.apache.spark.sql.delta.rapids.{GpuDeltaLog, GpuOptimisticTransactionBase}
+import org.apache.spark.sql.delta.rapids.{DMLWithDeletionVectorsHelperShims,
+  GpuDeletionVectorBitmapGenerator, GpuDeltaLog, GpuOptimisticTransactionBase}
 import org.apache.spark.sql.delta.sources.DeltaSQLConf
-import org.apache.spark.sql.delta.util.SetAccumulator
+import org.apache.spark.sql.delta.util.DeltaFileOperations.absolutePath
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types.{LongType, StructType}
@@ -284,6 +286,53 @@ case class GpuMergeIntoCommand(
     AttributeReference("num_deleted_rows", LongType)(),
     AttributeReference("num_inserted_rows", LongType)())
 
+  override protected def writeDVs(
+      spark: SparkSession,
+      deltaTxn: OptimisticTransaction,
+      filesToRewrite: Seq[AddFile]): Seq[FileAction] = recordMergeOperation(
+        extraOpType = "writeDeletionVectors",
+        status = "MERGE operation - Rewriting Deletion Vectors to " + filesToRewrite.size +
+          " files",
+        sqlMetricName = "rewriteTimeMs") {
+    val fileIndex = new TahoeBatchFileIndex(
+      spark, "merge", filesToRewrite, deltaTxn.deltaLog,
+      deltaTxn.deltaLog.dataPath, deltaTxn.snapshot)
+    val targetFileNameColumn = "__gpu_target_file_name"
+    val targetDf = DMLWithDeletionVectorsHelperShims
+      .createTargetDfForGpuScanningForMatches(spark, target, fileIndex)
+      .withColumn(targetFileNameColumn, input_file_name())
+    val joinType = if (notMatchedBySourceClauses.isEmpty) "inner" else "rightOuter"
+    val joinedDf = getMergeSource.df
+      .withColumn(SOURCE_ROW_PRESENT_COL, lit(true))
+      .join(targetDf, Column(condition), joinType)
+    val nameToAddFileMap = generateCandidateFileMap(targetDeltaLog.dataPath, filesToRewrite)
+    val touchedFilesWithDVs = GpuDeletionVectorBitmapGenerator.findTouchedFiles(
+      spark,
+      deltaTxn,
+      filesToRewrite.exists(_.deletionVector != null),
+      false,
+      joinedDf,
+      filesToRewrite,
+      Column(generateFilterForModifiedRows()),
+      col(targetFileNameColumn),
+      col(ROW_INDEX_COLUMN_NAME),
+      nameToAddFileMap)
+    val (dvActions, metricsMap) = DMLWithDeletionVectorsHelperShims.processUnmodifiedData(
+      spark, touchedFilesWithDVs, deltaTxn)
+    metrics("numTargetDeletionVectorsAdded")
+      .set(metricsMap.getOrElse("numDeletionVectorsAdded", 0L))
+    metrics("numTargetDeletionVectorsRemoved")
+      .set(metricsMap.getOrElse("numDeletionVectorsRemoved", 0L))
+    metrics("numTargetDeletionVectorsUpdated")
+      .set(metricsMap.getOrElse("numDeletionVectorsUpdated", 0L))
+    metrics("numTargetFilesRemoved").set(metricsMap.getOrElse("numRemovedFiles", 0L))
+    val fullyRemovedFiles = touchedFilesWithDVs.filter(_.isFullyReplaced()).map(_.fileLogEntry)
+    val (removedBytes, removedPartitions) = totalBytesAndDistinctPartitionValues(fullyRemovedFiles)
+    metrics("numTargetBytesRemoved").set(removedBytes)
+    metrics("numTargetPartitionsRemovedFrom").set(removedPartitions)
+    dvActions
+  }
+
   protected def runMerge(spark: SparkSession): Seq[Row] = {
     recordDeltaOperation(targetDeltaLog, "delta.dml.merge") {
       val startTime = System.nanoTime()
@@ -337,8 +386,20 @@ case class GpuMergeIntoCommand(
               val shouldWriteDeletionVectors =
                 shouldWritePersistentDeletionVectors(spark, gpuDeltaTxn)
               if (shouldWriteDeletionVectors) {
-                // We should never come here because we should have tagged the Exec to fallback
-                throw new IllegalStateException("Deletion Vectors are not supported on the GPU")
+                val newWrittenFiles = withStatusCode("DELTA", "Writing modified data") {
+                  writeAllChanges(
+                    spark,
+                    gpuDeltaTxn,
+                    filesToRewrite,
+                    deduplicateCDFDeletes,
+                    writeUnmodifiedRows = false)
+                }
+                val dvActions = withStatusCode(
+                    "DELTA",
+                    "Writing Deletion Vectors for modified data") {
+                  writeDVs(spark, gpuDeltaTxn, filesToRewrite)
+                }
+                newWrittenFiles ++ dvActions
               } else {
                 val newWrittenFiles = withStatusCode("DELTA", "Writing modified data") {
                   writeAllChanges(
@@ -468,12 +529,7 @@ case class GpuMergeIntoCommand(
 
     val columnComparator = spark.sessionState.analyzer.resolver
 
-    // Accumulator to collect all the distinct touched files
-    val touchedFilesAccum = new SetAccumulator[String]()
-
     import org.apache.spark.sql.delta.commands.MergeIntoCommandBase._
-
-    spark.sparkContext.register(touchedFilesAccum, TOUCHED_FILES_ACCUM_NAME)
 
     // Prune non-matching files if we don't need to collect them for NOT MATCHED BY SOURCE clauses.
     val dataSkippedFiles =
@@ -525,34 +581,49 @@ case class GpuMergeIntoCommand(
         gpuDeltaTxn,
         dataSkippedFiles,
         columnsToDrop)
-    val targetDF = Dataset.ofRows(spark, targetPlan)
+    val targetFileIdColumn = "__gpu_target_file_id"
+    val fileNameKeyColumn = "__gpu_file_name_key"
+    val candidateFilePaths = dataSkippedFiles.map { addFile =>
+      SparkPath.fromPath(absolutePath(targetDeltaLog.dataPath.toString, addFile.path)).urlEncoded
+    }
+    require(candidateFilePaths.distinct.size == candidateFilePaths.size,
+      "Cannot safely match duplicate MERGE candidate paths")
+    val fileIdToAddFile = dataSkippedFiles.zipWithIndex.map { case (addFile, fileId) =>
+      fileId.toLong -> addFile
+    }.toMap
+    import spark.implicits._
+    val fileDictionaryDf = broadcast(candidateFilePaths.zipWithIndex.map {
+      case (filePath, fileId) => (filePath, fileId.toLong)
+    }.toDF(fileNameKeyColumn, targetFileIdColumn))
+    val targetDFWithFileName = Dataset.ofRows(spark, targetPlan)
       .withColumn(ROW_ID_COL, monotonically_increasing_id())
       .withColumn(FILE_NAME_COL, input_file_name())
+    val dictionaryJoinExpr =
+      fileDictionaryDf(fileNameKeyColumn) === targetDFWithFileName(FILE_NAME_COL)
+    val targetDF = targetDFWithFileName
+      .join(fileDictionaryDf, dictionaryJoinExpr, "inner")
+      .drop(FILE_NAME_COL, fileNameKeyColumn)
 
     val joinToFindTouchedFiles =
       sourceDF.join(targetDF, Column(condition), joinType)
 
-    // UDFs to records touched files names and add them to the accumulator
-    val recordTouchedFileName =
-      DeltaUDF.intFromStringBoolean(
-        new GpuDeltaRecordTouchedFilesStringBoolUDF(touchedFilesAccum)).asNondeterministic()
+    // Keep touched-file discovery and duplicate detection in a single GPU aggregation.
+    // This avoids copying distinct compact file IDs to the host once per input batch from a UDF.
+    val collectTouchedFiles = joinToFindTouchedFiles.select(
+      col(ROW_ID_COL),
+      when(Column(matchedPredicate), col(targetFileIdColumn)).as(targetFileIdColumn),
+      when(Column(matchedPredicate), lit(1L)).otherwise(lit(0L)).as("one"))
 
-    // Process the matches from the inner join to record touched files and find multiple matches
-    val collectTouchedFiles = joinToFindTouchedFiles
-      .select(col(ROW_ID_COL),
-        recordTouchedFileName(col(FILE_NAME_COL), Column(matchedPredicate)).as("one"))
+    val matchedRowCounts = collectTouchedFiles.groupBy(ROW_ID_COL).agg(
+      sum("one").as("count"),
+      first(col(targetFileIdColumn), ignoreNulls = true).as(targetFileIdColumn))
 
-    // Calculate frequency of matches per source row
-    val matchedRowCounts = collectTouchedFiles.groupBy(ROW_ID_COL).agg(sum("one").as("count"))
-
-    // Get multiple matches and simultaneously collect (using touchedFilesAccum) the file names
-    import org.apache.spark.sql.delta.implicits._
-    val (multipleMatchCount, multipleMatchSum) = matchedRowCounts
-      .filter("count > 1")
-      .select(coalesce(count(Column("*")), lit(0)), coalesce(sum("count"), lit(0)))
-      .as[(Long, Long)]
-      .collect()
-      .head
+    val matchSummary = matchedRowCounts.agg(
+      coalesce(sum(when(col("count") > 1L, lit(1L)).otherwise(lit(0L))), lit(0L)),
+      coalesce(sum(when(col("count") > 1L, col("count")).otherwise(lit(0L))), lit(0L)),
+      collect_set(col(targetFileIdColumn))).head()
+    val multipleMatchCount = matchSummary.getLong(0)
+    val multipleMatchSum = matchSummary.getLong(1)
 
     val hasMultipleMatches = multipleMatchCount > 0
     throwErrorOnMultipleMatches(hasMultipleMatches, spark)
@@ -566,13 +637,11 @@ case class GpuMergeIntoCommand(
       multipleMatchDeleteOnlyOvercount = Some(duplicateCount)
     }
 
-    // Get the AddFiles using the touched file names.
-    val touchedFileNames = touchedFilesAccum.value.iterator().asScala.toSeq
-    logTrace(s"findTouchedFiles: matched files:\n\t${touchedFileNames.mkString("\n\t")}")
-
-    val nameToAddFileMap = generateCandidateFileMap(targetDeltaLog.dataPath, dataSkippedFiles)
-    val touchedAddFiles = touchedFileNames.map(
-      getTouchedFile(targetDeltaLog.dataPath, _, nameToAddFileMap))
+    // Convert the compact file IDs back to AddFiles only after GPU aggregation.
+    val touchedFileIds = matchSummary.getSeq[Long](2)
+    val touchedAddFiles = touchedFileIds.map(fileIdToAddFile)
+    logTrace("findTouchedFiles: matched files:\n\t" +
+      touchedAddFiles.map(_.path).mkString("\n\t"))
 
     if (metrics("numSourceRows").value == 0 && (dataSkippedFiles.isEmpty ||
       dataSkippedFiles.forall(_.numLogicalRecords.getOrElse(0) == 0))) {
