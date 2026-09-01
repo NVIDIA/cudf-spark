@@ -44,6 +44,8 @@ trait GpuProjectAstExpressionBase
   @transient private[this] var compiledExpression: CompiledExpression = _
   private[this] var opTime: GpuMetric = NoopMetric
 
+  protected def releaseAdditionalResources(): Seq[AutoCloseable] = Seq.empty
+
   override final def dataType: DataType = child.dataType
 
   override final def nullable: Boolean = child.nullable
@@ -57,9 +59,9 @@ trait GpuProjectAstExpressionBase
     val toClose = synchronized {
       val current = compiledExpression
       compiledExpression = null
-      current
+      releaseAdditionalResources() ++ Option(current)
     }
-    Option(toClose).foreach(_.safeClose())
+    toClose.safeClose()
   }
 
   override final def columnarEval(batch: ColumnarBatch): GpuColumnVector = {
@@ -80,9 +82,12 @@ trait GpuProjectAstExpressionBase
   private[rapids] final def withComputeMetrics[T](body: => T): T =
     NvtxIdWithMetrics(computeNvtxId, opTime)(body)
 
+  private[rapids] final def withCompileMetrics[T](body: => T): T =
+    NvtxIdWithMetrics(compileNvtxId, opTime)(body)
+
   private[rapids] final def getCompiledExpression: CompiledExpression = synchronized {
     if (compiledExpression == null) {
-      val compiled = NvtxIdWithMetrics(compileNvtxId, opTime) {
+      val compiled = withCompileMetrics {
         // Force every bound reference to the left table; Project AST has one input table.
         compileAst(child.convertToAst(Int.MaxValue))
       }

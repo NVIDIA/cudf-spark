@@ -1753,7 +1753,7 @@ case class GpuArrayRemove(left: Expression, right: Expression) extends GpuBinary
       val boolMask = constructBooleanMask(lhsWithNull.getChildColumnView(0), repeatedRhs,
                                           lhsWithNull.getListOffsetsView, lhs.getRowCount)
       withResource(boolMask) { boolMask =>
-        lhsWithNull.applyBooleanMask(boolMask)
+        lhsWithNull.applyRetentionMask(boolMask)
       }
     }
   }
@@ -1823,7 +1823,7 @@ case class GpuArrayRemove(left: Expression, right: Expression) extends GpuBinary
       }
     }
     withResource(boolMask) { boolMask =>
-      lhsBase.applyBooleanMask(boolMask)
+      lhsBase.applyRetentionMask(boolMask)
     }
   }
 

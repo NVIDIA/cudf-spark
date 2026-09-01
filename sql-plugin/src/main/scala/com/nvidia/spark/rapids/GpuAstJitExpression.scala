@@ -18,10 +18,11 @@ package com.nvidia.spark.rapids
 
 import scala.collection.mutable
 
-import ai.rapids.cudf.Table
-import ai.rapids.cudf.ast.{AstExpression, CompiledExpression}
+import ai.rapids.cudf.{DType, Table}
+import ai.rapids.cudf.ast.{AstExpression, AstJitProgram, CompiledExpression}
 import com.nvidia.spark.Retryable
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.RapidsPluginImplicits._
 
 import org.apache.spark.sql.catalyst.expressions.{Expression, NamedExpression}
 import org.apache.spark.sql.internal.SQLConf
@@ -29,6 +30,30 @@ import org.apache.spark.sql.rapids.catalyst.expressions.GpuExpressionEquals
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 object GpuAstJitExpression {
+  private final case class JitInputColumn(
+      ordinal: Int,
+      dataType: DType,
+      nullable: Boolean)
+
+  private final case class JitProgramKey(
+      expressions: Vector[GpuExpression],
+      inputSchema: Vector[JitInputColumn])
+
+  private def programKey(
+      expressions: Seq[GpuAstJitExpression],
+      table: Table): JitProgramKey = {
+    val referencedOrdinals = expressions.iterator.flatMap { expression =>
+      expression.child.collect {
+        case reference: GpuBoundReference => reference.ordinal
+      }
+    }.toSet.toVector.sorted
+    val inputSchema = referencedOrdinals.map { ordinal =>
+      val column = table.getColumn(ordinal)
+      JitInputColumn(ordinal, column.getType, column.hasValidityVector)
+    }
+    JitProgramKey(expressions.map(_.child).toVector, inputSchema)
+  }
+
   private final case class JitRoot(
       index: Int,
       child: GpuExpression,
@@ -215,9 +240,10 @@ object GpuAstJitExpression {
       expressions: Seq[GpuAstJitExpression],
       table: Table): ColumnarBatch = {
     require(expressions.size > 1, "Multi-output AST JIT requires at least two expressions")
-    val compiledExpressions = expressions.map(_.getCompiledExpression).toArray
-    expressions.head.withComputeMetrics {
-      withResource(CompiledExpression.computeTableJit(table, compiledExpressions: _*)) { result =>
+    val owner = expressions.head
+    val program = owner.getJitProgram(expressions, table)
+    owner.withComputeMetrics {
+      withResource(program.computeTable(table)) { result =>
         GpuColumnVector.from(result, expressions.map(_.dataType).toArray)
       }
     }
@@ -258,6 +284,9 @@ object GpuAstJitExpression {
 case class GpuAstJitExpression(child: GpuExpression, groupId: Int = 0)
     extends GpuProjectAstExpressionBase with Retryable {
 
+  @transient private[this] var jitProgram: AstJitProgram = _
+  @transient private[this] var jitProgramKey: GpuAstJitExpression.JitProgramKey = _
+
   override def disableTieredProjectCombine: Boolean = true
 
   override protected def compileNvtxId: NvtxId = NvtxRegistry.COMPILE_AST_JIT
@@ -266,12 +295,43 @@ case class GpuAstJitExpression(child: GpuExpression, groupId: Int = 0)
 
   override protected def compileAst(ast: AstExpression): CompiledExpression = ast.compileJit()
 
+  protected def compileJitProgram(
+      table: Table,
+      expressions: Array[CompiledExpression]): AstJitProgram = {
+    AstJitProgram.compile(table, expressions: _*)
+  }
+
+  private[rapids] def getJitProgram(
+      expressions: Seq[GpuAstJitExpression],
+      table: Table): AstJitProgram = synchronized {
+    require(expressions.head eq this, "The first AST JIT expression must own the group program")
+    val key = GpuAstJitExpression.programKey(expressions, table)
+    if (jitProgram == null || jitProgramKey != key) {
+      val compiledExpressions = expressions.map(_.getCompiledExpression).toArray
+      val replacement = withCompileMetrics {
+        compileJitProgram(table, compiledExpressions)
+      }
+      val previous = jitProgram
+      jitProgram = replacement
+      jitProgramKey = key
+      Option(previous).foreach(_.safeClose())
+    }
+    jitProgram
+  }
+
+  override protected def releaseAdditionalResources(): Seq[AutoCloseable] = {
+    val current = jitProgram
+    jitProgram = null
+    jitProgramKey = null
+    Option(current).toSeq
+  }
+
   override def toString: String = s"AST_JIT($child)"
 
   override def checkpoint(): Unit = {
     getCompiledExpression
   }
 
-  // Compiled ASTs are immutable and remain valid across retry attempts.
+  // Compiled ASTs and schema-matched programs remain valid across retry attempts.
   override def restore(): Unit = ()
 }

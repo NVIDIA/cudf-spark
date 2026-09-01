@@ -16,14 +16,15 @@
 
 package com.nvidia.spark.rapids
 
-import ai.rapids.cudf.Table
-import ai.rapids.cudf.ast.{AstExpression, CompiledExpression}
+import ai.rapids.cudf.{ColumnVector, DType, Table}
+import ai.rapids.cudf.ast.{AstExpression, AstJitProgram, CompiledExpression}
 import com.nvidia.spark.rapids.ProjectAstTestUtils.collectExpressions
 import org.mockito.Mockito.{doThrow, mock, times, verify, when}
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.TaskContext
-import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, Expression}
+import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, Expression,
+  NamedExpression}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.{GpuAdd, GpuGreatest, GpuMultiply, GpuSubtract}
 import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
@@ -52,6 +53,20 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
 
   private def mockJitExpression(compiled: CompiledExpression): GpuAstJitExpression =
     GpuAstJitExpression(mockCompiledChild(compiled, jit = true))
+
+  private def mockTable(nullable: Boolean, otherNullable: Boolean = false): Table = {
+    val referencedColumn = mock(classOf[ColumnVector])
+    when(referencedColumn.getType).thenReturn(DType.INT32)
+    when(referencedColumn.hasValidityVector).thenReturn(nullable)
+    val otherColumn = mock(classOf[ColumnVector])
+    when(otherColumn.getType).thenReturn(DType.INT32)
+    when(otherColumn.hasValidityVector).thenReturn(otherNullable)
+    val table = mock(classOf[Table])
+    when(table.getNumberOfColumns).thenReturn(2)
+    when(table.getColumn(0)).thenReturn(referencedColumn)
+    when(table.getColumn(1)).thenReturn(otherColumn)
+    table
+  }
 
   private def projectConf(
       tiered: Boolean = true,
@@ -459,6 +474,51 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
       verify(compiled, times(0)).close()
     }
     verify(compiled, times(1)).close()
+  }
+
+  test("project AST JIT reuses a schema-compatible program") {
+    val ownerCompiled = mock(classOf[CompiledExpression])
+    val siblingCompiled = mock(classOf[CompiledExpression])
+    val firstProgram = mock(classOf[AstJitProgram])
+    val secondProgram = mock(classOf[AstJitProgram])
+    val programs = Iterator(firstProgram, secondProgram)
+    var compileCount = 0
+    val boundReference = GpuBoundReference(0, IntegerType, nullable = true)(
+      NamedExpression.newExprId, "c0")
+    val owner = new GpuAstJitExpression(boundReference) {
+      override protected def compileAst(ast: AstExpression): CompiledExpression = ownerCompiled
+
+      override protected def compileJitProgram(
+          table: Table,
+          expressions: Array[CompiledExpression]): AstJitProgram = {
+        assertResult(Seq(ownerCompiled, siblingCompiled))(expressions.toSeq)
+        compileCount += 1
+        programs.next()
+      }
+    }
+    val sibling = new GpuAstJitExpression(boundReference) {
+      override protected def compileAst(ast: AstExpression): CompiledExpression = siblingCompiled
+    }
+    val group = Seq(owner, sibling)
+    val firstSchema = mockTable(nullable = false)
+    val compatibleSchema = mockTable(nullable = false)
+    val changedUnreferencedSchema = mockTable(nullable = false, otherNullable = true)
+    val nullableSchema = mockTable(nullable = true)
+
+    TestUtils.withMockTaskContext() {
+      assert(owner.getJitProgram(group, firstSchema) eq firstProgram)
+      assert(owner.getJitProgram(group, compatibleSchema) eq firstProgram)
+      assert(owner.getJitProgram(group, changedUnreferencedSchema) eq firstProgram)
+      assertResult(1)(compileCount)
+
+      assert(owner.getJitProgram(group, nullableSchema) eq secondProgram)
+      assertResult(2)(compileCount)
+      verify(firstProgram, times(1)).close()
+      verify(secondProgram, times(0)).close()
+    }
+    verify(secondProgram, times(1)).close()
+    verify(ownerCompiled, times(1)).close()
+    verify(siblingCompiled, times(1)).close()
   }
 
   test("project AST JIT cleans up when task completion registration fails") {
