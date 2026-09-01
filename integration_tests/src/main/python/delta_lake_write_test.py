@@ -1484,6 +1484,39 @@ def test_delta_write_aqe_join(spark_tmp_path, enable_deletion_vectors):
 
     with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
 
+
+@allow_non_gpu("InMemoryTableScanExec", *delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_databricks_runtime() and is_before_spark_353(),
+                    reason="TableCacheQueryStageExec is supported on Apache Spark 3.5.3+")
+def test_delta_write_from_cached_parquet_with_aqe(spark_tmp_path):
+    parquet_path = spark_tmp_path + "/PARQUET_DATA"
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    confs = copy_and_update(delta_writes_enabled_conf, {
+        "spark.sql.adaptive.enabled": "true",
+        "spark.sql.cache.serializer": "com.nvidia.spark.ParquetCachedBatchSerializer"
+    })
+
+    with_cpu_session(
+        lambda spark: spark.range(1, 1000).write.mode("overwrite").parquet(parquet_path),
+        conf=confs)
+
+    def do_write(spark, path):
+        cached = spark.read.parquet(parquet_path).cache()
+        try:
+            cached.count()
+            cached.write.format("delta").mode("overwrite").save(path)
+        finally:
+            cached.unpersist()
+
+    assert_gpu_and_cpu_writes_are_equal_collect(
+        do_write,
+        read_delta_path,
+        data_path,
+        conf=confs)
+
+
 def do_test_optimize_write(spark_tmp_path, aqe_enabled, do_write, num_chunks):
     confs=copy_and_update(delta_writes_enabled_conf, {
         "spark.sql.adaptive.enabled" : str(aqe_enabled)

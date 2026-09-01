@@ -714,6 +714,10 @@ object GpuOverrides extends Logging {
   def probablyGpuPlan(adaptivePlan: AdaptiveSparkPlanExec, conf: RapidsConf): Boolean = {
     def findRootProcessingNode(plan: SparkPlan): SparkPlan = plan match {
       case p: AdaptiveSparkPlanExec => findRootProcessingNode(p.executedPlan)
+      // A TableCache query stage is already fixed around the plan Spark chose for the cache
+      // read. Keep the wrapper here so we can classify that actual plan below instead of
+      // predicting whether the wrapped CPU plan could be replaced on a new conversion pass.
+      case p if SparkShimImpl.getTableCacheNonQueryStagePlan(p).nonEmpty => p
       case p: QueryStageExec => findRootProcessingNode(p.plan)
       case p: ReusedSubqueryExec => findRootProcessingNode(p.child)
       case p: ReusedExchangeExec => findRootProcessingNode(p.child)
@@ -721,13 +725,15 @@ object GpuOverrides extends Logging {
     }
 
     val aqeSubPlan = findRootProcessingNode(adaptivePlan.executedPlan)
-    aqeSubPlan match {
-      case _: GpuExec =>
+    SparkShimImpl.getTableCacheNonQueryStagePlan(aqeSubPlan) match {
+      case Some(tableCachePlan) =>
+        tableCachePlan.isInstanceOf[GpuExec]
+      case None if aqeSubPlan.isInstanceOf[GpuExec] =>
         // plan is already on the GPU
         true
-      case p =>
+      case None =>
         // see if the root processing node of the current subplan will translate to the GPU
-        val meta = GpuOverrides.wrapAndTagPlan(p, conf)
+        val meta = GpuOverrides.wrapAndTagPlan(aqeSubPlan, conf)
         meta.canThisBeReplaced
     }
   }
