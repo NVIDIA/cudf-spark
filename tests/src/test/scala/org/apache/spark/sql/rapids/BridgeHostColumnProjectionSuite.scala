@@ -19,10 +19,9 @@ package org.apache.spark.sql.rapids
 import java.util.concurrent.ConcurrentLinkedQueue
 
 import ai.rapids.cudf.{DType, HostColumnVector}
-import com.nvidia.spark.rapids.{ClouderaShimVersion, DatabricksShimVersion, GpuColumnVector,
-  RapidsHostColumnBuilder, ShimLoader, SparkShimVersion}
+import com.nvidia.spark.rapids.{GpuColumnVector, RapidsHostColumnBuilder}
 import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.shims.{GpuScalarSubqueryShims, ShimExpression}
+import com.nvidia.spark.rapids.shims.{GpuScalarSubqueryShims, ShimExpression, SparkShimImpl}
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.catalyst.InternalRow
@@ -111,16 +110,6 @@ private case class LambdaVariableReferenceTrackingExpression(
  */
 class BridgeHostColumnProjectionSuite extends AnyFunSuite {
 
-  // SPARK-58204 marked NamedLambdaVariable stateful in Spark 4.3.
-  private def supportsStatefulNamedLambdaVariable: Boolean = {
-    val (major, minor) = ShimLoader.getShimVersion match {
-      case SparkShimVersion(major, minor, _) => (major, minor)
-      case DatabricksShimVersion(major, minor, _, _) => (major, minor)
-      case ClouderaShimVersion(major, minor, _, _) => (major, minor)
-    }
-    major > 4 || (major == 4 && minor >= 3)
-  }
-
   test("projection owns a cloned expression tree") {
     val seenIds = new ConcurrentLinkedQueue[Int]()
     val expr = IdentityTrackingExpression(seenIds)
@@ -161,7 +150,7 @@ class BridgeHostColumnProjectionSuite extends AnyFunSuite {
     val firstValueId = seen.next()
     val secondValueId = seen.next()
     // Before SPARK-58204, references with the same exprId retain the same value reference.
-    if (!supportsStatefulNamedLambdaVariable) {
+    if (!SparkShimImpl.isExpressionStateful(variable)) {
       assert(firstValueId == secondValueId)
     }
     // Spark 4.3+ may fresh-copy each stateful NamedLambdaVariable independently during codegen.
