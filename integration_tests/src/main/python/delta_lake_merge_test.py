@@ -150,7 +150,7 @@ def test_delta_merge_check_overflow_in_table_write_error(
 @ignore_order
 @pytest.mark.parametrize("disable_conf", fallback_test_params, ids=idfn)
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
-@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_xfail_reasons(
+@pytest.mark.parametrize("enable_deletion_vectors", dml_deletion_vector_values_with_xfail_reasons(
                             enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
 def test_delta_merge_disabled_fallback(spark_tmp_path, spark_tmp_table_factory, disable_conf, enable_deletion_vectors):
     def checker(data_path, do_merge):
@@ -191,7 +191,7 @@ def test_delta_merge_fallback_with_deletion_vectors(spark_tmp_path, spark_tmp_ta
 @pytest.mark.skipif((not is_databricks_runtime()) and is_before_spark_340(), reason="NOT MATCHED BY SOURCE added in Delta Lake 2.4")
 @pytest.mark.skipif(is_spark_41x(),
                     reason="NOT MATCHED BY SOURCE is supported on the GPU with OSS Delta 4.1")
-@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_xfail_reasons(
+@pytest.mark.parametrize("enable_deletion_vectors", dml_deletion_vector_values_with_xfail_reasons(
                             enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
 def test_delta_merge_not_matched_by_source_fallback(spark_tmp_path, spark_tmp_table_factory, enable_deletion_vectors):
     def checker(data_path, do_merge):
@@ -340,7 +340,7 @@ def test_delta_merge_not_matched_by_source_union_source_fallback(
 @pytest.mark.parametrize("disable_conf", [
     "spark.rapids.sql.exec.RapidsProcessDeltaMergeJoinExec",
     "spark.rapids.sql.expression.Add"], ids=idfn)
-@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_xfail_reasons(
+@pytest.mark.parametrize("enable_deletion_vectors", dml_deletion_vector_values_with_xfail_reasons(
                             enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
 def test_delta_merge_partial_fallback_via_conf(spark_tmp_path, spark_tmp_table_factory,
                                                use_cdf, partition_columns, num_slices, disable_conf, enable_deletion_vectors):
@@ -369,7 +369,7 @@ def test_delta_merge_partial_fallback_via_conf(spark_tmp_path, spark_tmp_table_f
 @pytest.mark.parametrize("use_cdf", [True, False], ids=idfn)
 @pytest.mark.parametrize("partition_columns", [None, ["a"], ["b"], ["a", "b"]], ids=idfn)
 @pytest.mark.parametrize("num_slices", num_slices_to_test, ids=idfn)
-@pytest.mark.parametrize("enable_deletion_vector", deletion_vector_values_with_xfail_reasons(
+@pytest.mark.parametrize("enable_deletion_vector", dml_deletion_vector_values_with_xfail_reasons(
                             enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
 def test_delta_merge_not_match_insert_only(spark_tmp_path, spark_tmp_table_factory, table_ranges,
                                            use_cdf, partition_columns, num_slices, enable_deletion_vector):
@@ -431,14 +431,18 @@ def test_delta_materialize_merge(spark_tmp_path, spark_tmp_table_factory):
 @pytest.mark.parametrize("use_cdf", [True, False], ids=idfn)
 @pytest.mark.parametrize("partition_columns", [None, ["a"], ["b"], ["a", "b"]], ids=idfn)
 @pytest.mark.parametrize("num_slices", num_slices_to_test, ids=idfn)
-@pytest.mark.parametrize("enable_deletion_vector", deletion_vector_values_with_xfail_reasons(
+@pytest.mark.parametrize("enable_deletion_vector", dml_deletion_vector_values_with_xfail_reasons(
                             enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
 def test_delta_merge_match_delete_only(spark_tmp_path, spark_tmp_table_factory, table_ranges_expect_write,
                                        use_cdf, partition_columns, num_slices, enable_deletion_vector):
     table_ranges, expect_write = table_ranges_expect_write
-    do_test_delta_merge_match_delete_only(spark_tmp_path, spark_tmp_table_factory, table_ranges,
-                                          use_cdf, enable_deletion_vector, partition_columns, num_slices,
-                                          num_slices == 1, delta_merge_enabled_conf, expect_write=expect_write)
+    # A DV-only matched delete preserves the original Parquet file. CDF still writes
+    # change-data files, so only CDF-off DV deletes are command-only operations.
+    expect_parquet_write = expect_write and (not enable_deletion_vector or use_cdf)
+    do_test_delta_merge_match_delete_only(
+        spark_tmp_path, spark_tmp_table_factory, table_ranges,
+        use_cdf, enable_deletion_vector, partition_columns, num_slices,
+        num_slices == 1, delta_merge_enabled_conf, expect_write=expect_parquet_write)
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
@@ -446,7 +450,7 @@ def test_delta_merge_match_delete_only(spark_tmp_path, spark_tmp_table_factory, 
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
 @pytest.mark.parametrize("use_cdf", [True, False], ids=idfn)
 @pytest.mark.parametrize("num_slices", num_slices_to_test, ids=idfn)
-@pytest.mark.parametrize("enable_deletion_vector", deletion_vector_values_with_xfail_reasons(
+@pytest.mark.parametrize("enable_deletion_vector", dml_deletion_vector_values_with_xfail_reasons(
                             enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
 def test_delta_merge_standard_upsert(spark_tmp_path, spark_tmp_table_factory, use_cdf, num_slices, enable_deletion_vector):
     do_test_delta_merge_standard_upsert(spark_tmp_path, spark_tmp_table_factory, use_cdf, enable_deletion_vector,
@@ -595,7 +599,7 @@ def test_delta_merge_schema_evolution_db173_smoke(spark_tmp_path, spark_tmp_tabl
     " WHEN NOT MATCHED AND s.b > 'b' AND s.b < 'f' THEN INSERT *" \
     " WHEN NOT MATCHED AND s.b > 'f' AND s.b < 'z' THEN INSERT (b) VALUES ('not here')" ], ids=idfn)
 @pytest.mark.parametrize("num_slices", num_slices_to_test, ids=idfn)
-@pytest.mark.parametrize("enable_deletion_vector", deletion_vector_values_with_xfail_reasons(
+@pytest.mark.parametrize("enable_deletion_vector", dml_deletion_vector_values_with_xfail_reasons(
                             enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
 def test_delta_merge_upsert_with_condition(spark_tmp_path, spark_tmp_table_factory, use_cdf, merge_sql, num_slices,
                                            enable_deletion_vector):
@@ -609,7 +613,7 @@ def test_delta_merge_upsert_with_condition(spark_tmp_path, spark_tmp_table_facto
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
 @pytest.mark.parametrize("use_cdf", [True, False], ids=idfn)
 @pytest.mark.parametrize("num_slices", num_slices_to_test, ids=idfn)
-@pytest.mark.parametrize("enable_deletion_vector", deletion_vector_values_with_xfail_reasons(
+@pytest.mark.parametrize("enable_deletion_vector", dml_deletion_vector_values_with_xfail_reasons(
                             enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
 def test_delta_merge_upsert_with_unmatchable_match_condition(spark_tmp_path, spark_tmp_table_factory, use_cdf,
                                                              num_slices, enable_deletion_vector):
@@ -624,7 +628,7 @@ def test_delta_merge_upsert_with_unmatchable_match_condition(spark_tmp_path, spa
 @ignore_order
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
 @pytest.mark.parametrize("use_cdf", [True, False], ids=idfn)
-@pytest.mark.parametrize("enable_deletion_vector", deletion_vector_values_with_xfail_reasons(
+@pytest.mark.parametrize("enable_deletion_vector", dml_deletion_vector_values_with_xfail_reasons(
                             enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
 def test_delta_merge_update_with_aggregation(spark_tmp_path, spark_tmp_table_factory, use_cdf, enable_deletion_vector):
     do_test_delta_merge_update_with_aggregation(spark_tmp_path, spark_tmp_table_factory, use_cdf, enable_deletion_vector,
@@ -637,7 +641,7 @@ def test_delta_merge_update_with_aggregation(spark_tmp_path, spark_tmp_table_fac
 @pytest.mark.xfail(not is_databricks_runtime() and is_before_spark_353(), reason="https://github.com/NVIDIA/spark-rapids/issues/7573")
 @pytest.mark.parametrize("use_cdf", [True, False], ids=idfn)
 @pytest.mark.parametrize("num_slices", num_slices_to_test, ids=idfn)
-@pytest.mark.parametrize("enable_deletion_vector", deletion_vector_values_with_xfail_reasons(
+@pytest.mark.parametrize("enable_deletion_vector", dml_deletion_vector_values_with_xfail_reasons(
                             enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
 def test_delta_merge_dataframe_api(spark_tmp_path, use_cdf, num_slices, enable_deletion_vector):
     from delta.tables import DeltaTable

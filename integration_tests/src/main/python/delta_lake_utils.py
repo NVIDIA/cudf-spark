@@ -18,7 +18,7 @@ import pytest
 import re
 
 from spark_session import is_databricks122_or_later, supports_delta_lake_deletion_vectors, \
-    is_databricks173_or_later, is_spark_local_mode, with_cpu_session, with_gpu_session
+    is_databricks173_or_later, is_spark_353_or_later, is_spark_local_mode, with_cpu_session, with_gpu_session
 from asserts import assert_equal
 from conftest import is_databricks_runtime, spark_jvm
 
@@ -84,24 +84,46 @@ delta_reorg_xfail = pytest.mark.xfail(
 
 # Parameterize Deletion Vectors only on runtimes that expose the feature in these tests.
 def deletion_vector_values_with_xfail_reasons(enabled_xfail_reason=None, disabled_xfail_reason=None):
-    # Always include the DV-disabled case. On supported Databricks runtimes it can be marked xfail
-    # when the caller needs to document a runtime-specific expectation.
+    # Preserve the existing Databricks-only parameterization for non-DML Delta suites.
     if is_databricks_runtime() and disabled_xfail_reason is not None:
-        enable_deletion_vector = [pytest.param(False, marks=pytest.mark.xfail(reason=disabled_xfail_reason))]
+        enable_deletion_vector = [
+            pytest.param(False, marks=pytest.mark.xfail(reason=disabled_xfail_reason))]
     else:
         enable_deletion_vector = [False]
 
-    # Add the DV-enabled case on supported Databricks runtimes. This parameterizes the feature;
-    # it does not imply every runtime has GPU DV scan coverage.
     if is_databricks_runtime():
         if enabled_xfail_reason is None:
             enable_deletion_vector.append(True)
         else:
-            enable_deletion_vector.append(pytest.param(True, marks=pytest.mark.xfail(reason=enabled_xfail_reason)))
+            enable_deletion_vector.append(
+                pytest.param(True, marks=pytest.mark.xfail(reason=enabled_xfail_reason)))
 
     return enable_deletion_vector
 
+
+def dml_deletion_vector_values_with_xfail_reasons(
+        enabled_xfail_reason=None, disabled_xfail_reason=None):
+    # DELETE, UPDATE, and MERGE support DVs on OSS Delta 3.3+. Keep Databricks xfails
+    # without suppressing OSS coverage.
+    if is_databricks_runtime() and disabled_xfail_reason is not None:
+        enable_deletion_vector = [
+            pytest.param(False, marks=pytest.mark.xfail(reason=disabled_xfail_reason))]
+    else:
+        enable_deletion_vector = [False]
+
+    if supports_delta_lake_deletion_vectors() and (
+            is_databricks_runtime() or is_spark_353_or_later()):
+        if is_databricks_runtime() and enabled_xfail_reason is not None:
+            enable_deletion_vector.append(
+                pytest.param(True, marks=pytest.mark.xfail(reason=enabled_xfail_reason)))
+        else:
+            enable_deletion_vector.append(True)
+
+    return enable_deletion_vector
+
+
 deletion_vector_values = deletion_vector_values_with_xfail_reasons()
+dml_deletion_vector_values = dml_deletion_vector_values_with_xfail_reasons()
 
 delta_writes_enabled_conf = {"spark.rapids.sql.format.delta.write.enabled": "true"}
 
@@ -220,6 +242,7 @@ def assert_delta_log_json_equivalent(filename, c_json, g_json):
         elif key == "add":
             assert c_val.keys() == g_val.keys(), "Delta log {} 'add' keys mismatch:\nCPU: {}\nGPU: {}".format(filename, c_val, g_val)
             del_keys(("modificationTime", "size"), c_val, g_val)
+            fixup_deletion_vector(c_val, g_val)
             fixup_path(c_val)
             fixup_path(g_val)
         elif key == "cdc":
@@ -401,7 +424,7 @@ def assert_delta_row_tracking_dml(spark_tmp_path, dml_sql, conf,
     with_cpu_session(lambda spark: assert_gpu_and_cpu_latest_delta_log_equivalent(spark, data_path),
                      conf=conf)
 
-def assert_rapids_delta_write(do_test, conf):
+def assert_rapids_delta_write(do_test, conf, expected_command=None):
     """
     Validates that a Delta write operation executed on the GPU produces the expected execution plans.
     This function starts a plan capture mechanism using the Spark JVM's ExecutionPlanCaptureCallback,
@@ -415,6 +438,8 @@ def assert_rapids_delta_write(do_test, conf):
         A function that performs the Delta write operation to be validated.
     conf : dict
         A dictionary of configuration options to be passed to the GPU session.
+    expected_command : str, optional
+        GPU DML command class that must also be present in a captured plan.
 
     Returns
     -------
@@ -425,7 +450,11 @@ def assert_rapids_delta_write(do_test, conf):
     jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.startCapture()
     try:
         result = with_gpu_session(do_test, conf=conf)
-        captured_plans = jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.getResultsWithTimeout(10000)
+        callback = jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+        captured_plans = callback.getResultsWithTimeout(10000)
+        if expected_command is not None:
+            assert any(callback.contains(plan, expected_command) for plan in captured_plans), \
+                f"{expected_command} is not found in any captured plan"
         # Some write functions are no-op. We may not capture any GPU plan.
         if len(captured_plans) > 0:
             for cls in delta_write:
@@ -530,6 +559,21 @@ def assert_db173_gpu_data_writing_command(
         return result
     finally:
         callback.endCapture()
+
+def assert_rapids_gpu_merge_ran(do_test, conf):
+    """Runs a Delta MERGE and asserts that the GPU command did not fall back."""
+    jvm = spark_jvm()
+    callback = jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        result = with_gpu_session(do_test, conf=conf)
+        captured_plans = callback.getResultsWithTimeout(10000)
+        assert any(callback.contains(plan, "GpuMergeIntoCommand") for plan in captured_plans), \
+            "GpuMergeIntoCommand not found in any captured plan; MERGE may have fallen back to CPU"
+        return result
+    finally:
+        callback.endCapture()
+
 
 def assert_rapids_gpu_delete_ran(do_test, conf):
     """
