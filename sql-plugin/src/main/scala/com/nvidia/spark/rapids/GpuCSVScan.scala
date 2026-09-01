@@ -18,12 +18,13 @@ package com.nvidia.spark.rapids
 
 import java.io.IOException
 import java.nio.charset.{Charset, StandardCharsets}
+import java.time.LocalDate
 import java.util.Locale
 
 import scala.collection.JavaConverters._
 
 import ai.rapids.cudf
-import ai.rapids.cudf.{ColumnVector, DType, Scalar, Schema, Table}
+import ai.rapids.cudf.{CaptureGroups, ColumnVector, DType, RegexProgram, Scalar, Schema, Table}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.jni.CastStrings
 import com.nvidia.spark.rapids.shims.{ColumnDefaultValuesShims, ShimFilePartitionReaderFactory}
@@ -436,6 +437,38 @@ abstract class CSVPartitionReaderBase[BUFF <: LineBufferer, FACT <: LineBufferer
 
   override def dateFormat: Option[String] = Some(GpuCsvUtils.dateFormatInRead(parsedOptions))
   override def timestampFormat: String = GpuCsvUtils.timestampFormatInRead(parsedOptions)
+
+  override def castStringToTimestamp(
+      input: ColumnVector,
+      sparkFormat: String,
+      dtype: DType): ColumnVector = {
+    if (parsedOptions.timestampFormatInRead.isEmpty) {
+      // When no timestampFormat is specified Spark falls back to its string-to-timestamp parser.
+      // That parser accepts time-only values by filling in the current date in the configured
+      // timezone. Normalize the time-only forms supported here so the existing GPU timestamp
+      // parser sees the same complete timestamp.
+      val currentDatePrefix = LocalDate.now(parsedOptions.zoneId).toString + "T"
+      val timeOnly = new RegexProgram(
+        raw"\A\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?\Z", CaptureGroups.NON_CAPTURE)
+      withResource(input.strip()) { stripped =>
+        withResource(stripped.matchesRe(timeOnly)) { isTimeOnly =>
+          withResource(Scalar.fromString(currentDatePrefix)) { prefixScalar =>
+            withResource(ColumnVector.fromScalar(prefixScalar, input.getRowCount.toInt)) {
+              prefixColumn =>
+                withResource(ColumnVector.stringConcatenate(Array(prefixColumn, stripped))) {
+                  normalizedTimeOnly =>
+                    withResource(isTimeOnly.ifElse(normalizedTimeOnly, input)) { normalized =>
+                      super.castStringToTimestamp(normalized, sparkFormat, dtype)
+                    }
+                }
+            }
+          }
+        }
+      }
+    } else {
+      super.castStringToTimestamp(input, sparkFormat, dtype)
+    }
+  }
 }
 
 

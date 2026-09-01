@@ -184,6 +184,12 @@ portion followed by one of the following formats:
 * `HH:mm:ss.SSS`
 * `HH:mm:ss[.SSS]`
 
+When `timestampFormat` is not specified, Spark also accepts time-only values in `HH:mm:ss` form
+with an optional 1-6 digit fractional-second part. The GPU CSV reader matches this behavior by
+filling in the current date for the configured CSV timezone before parsing the timestamp (GPU CSV
+timestamp scans currently require UTC). This compatibility handling is not applied when
+`timestampFormat` is explicitly specified.
+
 Just like with dates all timestamp formats are actually supported at the same time.  The plugin will
 disable itself if it sees a format it cannot support.
 

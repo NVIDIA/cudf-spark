@@ -16,7 +16,7 @@ import pytest
 
 from asserts import *
 from conftest import get_non_gpu_allowed, is_not_utc, is_gbk_supported
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from data_gen import *
 from marks import *
 from pyspark.sql.types import *
@@ -441,6 +441,87 @@ def test_ts_formats_round_trip(spark_tmp_path, date_format, ts_part, v1_enabled_
                     .option('timestampFormat', full_format)\
                     .csv(data_path),
             conf=updated_conf)
+
+
+@pytest.mark.skipif(is_before_spark_400(), reason='Issue #13704 reproducer requires Spark 4.0+')
+@pytest.mark.parametrize('v1_enabled_list,gpu_scan,cpu_scan', [
+    ('csv', 'GpuFileSourceScanExec', 'FileSourceScanExec'),
+    ('', 'GpuBatchScanExec', 'BatchScanExec'),
+])
+def test_csv_infer_schema_time_only_timestamp(
+        spark_tmp_path, v1_enabled_list, gpu_scan, cpu_scan):
+    # Spark fills in today's date when timestampFormat is not specified and a timestamp contains
+    # only a time. Avoid a CPU/GPU mismatch if this test happens to span midnight UTC.
+    current_time = datetime.now(timezone.utc)
+    if current_time.date() != (current_time + timedelta(minutes=5)).date():
+        pytest.skip('Too close to UTC midnight for a current-date timestamp test')
+
+    data_path = spark_tmp_path + '/CSV_TIME_ONLY_TIMESTAMP'
+    with_cpu_session(
+        lambda spark: spark.createDataFrame([('23:53:40.392',)], 'c0 string')
+            .coalesce(1)
+            .write
+            .option('header', 'true')
+            .csv(data_path))
+
+    def do_read(spark):
+        df = spark.read \
+            .option('header', 'true') \
+            .option('inferSchema', 'true') \
+            .csv(data_path)
+        assert isinstance(df.schema['c0'].dataType, TimestampType)
+        return df
+
+    conf = copy_and_update(_enable_all_types_conf, {
+        'spark.sql.sources.useV1SourceList': v1_enabled_list,
+        'spark.sql.session.timeZone': 'UTC',
+    })
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_read,
+        exist_classes=gpu_scan,
+        non_exist_classes=cpu_scan,
+        conf=conf,
+        require_non_empty=True)
+
+    invalid_data_path = spark_tmp_path + '/CSV_INVALID_TIME_ONLY_TIMESTAMP'
+    with_cpu_session(
+        lambda spark: spark.createDataFrame([('29:99:99.999',)], 'c0 string')
+            .coalesce(1)
+            .write
+            .option('header', 'true')
+            .csv(invalid_data_path))
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.read
+            .schema(StructType([StructField('c0', TimestampType())]))
+            .option('header', 'true')
+            .csv(invalid_data_path),
+        exist_classes=gpu_scan,
+        non_exist_classes=cpu_scan,
+        conf=conf,
+        require_non_empty=True)
+
+
+@pytest.mark.parametrize('v1_enabled_list', ['', 'csv'])
+def test_csv_time_only_timestamp_with_explicit_format(spark_tmp_path, v1_enabled_list):
+    data_path = spark_tmp_path + '/CSV_TIME_ONLY_TIMESTAMP_EXPLICIT_FORMAT'
+    with_cpu_session(
+        lambda spark: spark.createDataFrame([('23:53:40.392',)], 'c0 string')
+            .coalesce(1)
+            .write
+            .option('header', 'true')
+            .csv(data_path))
+
+    conf = copy_and_update(_enable_all_types_conf, {
+        'spark.sql.sources.useV1SourceList': v1_enabled_list,
+        'spark.sql.session.timeZone': 'UTC',
+    })
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read \
+            .schema(StructType([StructField('c0', TimestampType())])) \
+            .option('header', 'true') \
+            .option('timestampFormat', "yyyy-MM-dd'T'HH:mm:ss[.SSS][XXX]") \
+            .csv(data_path),
+        conf=conf)
 
 @pytest.mark.parametrize('v1_enabled_list', ["", "csv"])
 def test_input_meta(spark_tmp_path, v1_enabled_list):
