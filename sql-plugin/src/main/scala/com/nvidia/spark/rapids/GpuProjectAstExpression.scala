@@ -37,7 +37,6 @@ trait GpuProjectAstExpressionBase
     extends ShimUnaryExpression with GpuExpression with GpuMetricsInjectable with AutoCloseable {
   override def child: GpuExpression
 
-  protected def backendName: String
   protected def compileNvtxId: NvtxId
   protected def computeNvtxId: NvtxId
   protected def compileAst(ast: AstExpression): CompiledExpression = ast.compile()
@@ -97,7 +96,7 @@ trait GpuProjectAstExpressionBase
         }
         if (completed) {
           throw new IllegalStateException(
-            s"Task completed while registering the $backendName cleanup callback")
+            "Task completed while registering compiled expression cleanup callback")
         }
         compiledExpression = compiled
       }
@@ -135,7 +134,7 @@ object GpuProjectAstExpressionBase {
   private[rapids] def buildExprTiers(
       expressions: Seq[Expression],
       conf: SQLConf,
-      enableProjectAstJit: Boolean = false): Seq[Seq[Expression]] = {
+      enableAstJit: Boolean = false): Seq[Seq[Expression]] = {
     val astOutputs = expressions.map(GpuProjectAstExpression.extractTopLevel(_).isDefined)
     val hasAstOutputs = astOutputs.contains(true)
     val hasJitOutputs = expressions.exists(GpuAstJitExpression.extractTopLevel(_).isDefined)
@@ -145,7 +144,7 @@ object GpuProjectAstExpressionBase {
     } else {
       expressions
     }
-    val tiers = if (enableProjectAstJit) {
+    val tiers = if (enableAstJit) {
       GpuAstJitProjectPlanner.buildExprTiers(unwrapped, conf)
     } else {
       val replaced = if (RapidsConf.ENABLE_COMBINED_EXPRESSIONS.get(conf)) {
@@ -160,11 +159,10 @@ object GpuProjectAstExpressionBase {
     } else {
       tiers
     }
-    if (enableProjectAstJit) {
-      // Project binding selects JIT after CSE so newly exposed tiers are eligible.
-      astTiers.map(_.map(GpuAstJitExpression.wrapTierExpression))
+    if (enableAstJit) {
+      // Select JIT after CSE so newly exposed tiers are eligible and can be grouped together.
+      astTiers.map(GpuAstJitExpression.wrapTierExpressions(_, conf))
     } else {
-      // Only the Project-specific binder selects JIT after CSE.
       astTiers
     }
   }
@@ -184,6 +182,11 @@ object GpuProjectAstExpressionBase {
 }
 
 object GpuProjectAstExpression {
+  /** Extracts a legacy Project AST wrapper after unwrapping any top-level aliases. */
+  private[rapids] def extractTopLevel(expression: Expression): Option[GpuProjectAstExpression] =
+    GpuProjectAstExpressionBase.extractTopLevel(expression).collect {
+      case astExpression: GpuProjectAstExpression => astExpression
+    }
 
   private def asAst(child: GpuExpression): GpuProjectAstExpression = child match {
     case astExpression: GpuProjectAstExpression => astExpression
@@ -195,12 +198,6 @@ object GpuProjectAstExpression {
       GpuProjectAstExpressionBase.replaceChild(alias, asAst(child))
     case other => other
   }
-
-  /** Extracts a legacy Project AST wrapper after unwrapping any top-level aliases. */
-  private[rapids] def extractTopLevel(expression: Expression): Option[GpuProjectAstExpression] =
-    GpuProjectAstExpressionBase.extractTopLevel(expression).collect {
-      case astExpression: GpuProjectAstExpression => astExpression
-    }
 
   private def rewrap(expression: Expression): Expression = expression match {
     case namedExpression: NamedExpression => wrap(namedExpression)
@@ -242,13 +239,10 @@ object GpuProjectAstExpression {
       case (expression, false) => expression
     }
   }
-
 }
 
 case class GpuProjectAstExpression(child: GpuExpression)
     extends GpuProjectAstExpressionBase {
-
-  override protected def backendName: String = "Project AST"
 
   override protected def compileNvtxId: NvtxId = NvtxRegistry.COMPILE_ASTS
 

@@ -16,15 +16,48 @@
 
 package com.nvidia.spark.rapids
 
+import scala.collection.mutable
+
 import ai.rapids.cudf.Table
 import ai.rapids.cudf.ast.{AstExpression, CompiledExpression}
 import com.nvidia.spark.Retryable
 import com.nvidia.spark.rapids.Arm.withResource
 
 import org.apache.spark.sql.catalyst.expressions.{Expression, NamedExpression}
+import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.rapids.catalyst.expressions.GpuExpressionEquals
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 object GpuAstJitExpression {
+  private final case class JitRoot(
+      index: Int,
+      child: GpuExpression,
+      operations: Set[GpuExpressionEquals])
+
+  private final class JitGroup(val id: Int) {
+    val roots: mutable.ArrayBuffer[JitRoot] = mutable.ArrayBuffer.empty
+    val operations: mutable.HashSet[GpuExpressionEquals] = mutable.HashSet.empty
+
+    def canAdd(
+        newRoots: Seq[JitRoot],
+        maxOps: Int,
+        maxOutputs: Int): Boolean = {
+      val addedOps = newRoots.iterator.flatMap(_.operations).count(!operations.contains(_))
+      roots.size <= maxOutputs - newRoots.size && operations.size <= maxOps - addedOps
+    }
+
+    def add(newRoots: Seq[JitRoot]): Unit = {
+      roots ++= newRoots
+      newRoots.foreach(root => operations ++= root.operations)
+    }
+  }
+
+  /** Extracts an AST JIT wrapper after unwrapping any top-level aliases. */
+  private[rapids] def extractTopLevel(expression: Expression): Option[GpuAstJitExpression] =
+    GpuProjectAstExpressionBase.extractTopLevel(expression).collect {
+      case jitExpression: GpuAstJitExpression => jitExpression
+    }
+
   private[rapids] def canUseAstJit(expression: Expression): Boolean = expression match {
     case gpuExpression: GpuExpression =>
       GpuBatchUtils.isFixedWidth(expression.dataType) &&
@@ -32,11 +65,16 @@ object GpuAstJitExpression {
     case _ => false
   }
 
+  private def astJitChild(child: GpuExpression): Option[GpuExpression] = child match {
+    case jitExpression: GpuAstJitExpression => Some(jitExpression.child)
+    case astExpression: GpuProjectAstExpression => astJitChild(astExpression.child)
+    case other if canUseAstJit(other) => Some(other)
+    case _ => None
+  }
+
   private def asAstJit(child: GpuExpression): Option[GpuAstJitExpression] = child match {
     case jitExpression: GpuAstJitExpression => Some(jitExpression)
-    case astExpression: GpuProjectAstExpression => asAstJit(astExpression.child)
-    case other if canUseAstJit(other) => Some(GpuAstJitExpression(other))
-    case _ => None
+    case other => astJitChild(other).map(GpuAstJitExpression(_))
   }
 
   private[rapids] def wrapTierExpression(expression: Expression): Expression = expression match {
@@ -50,6 +88,129 @@ object GpuAstJitExpression {
     expressions.map(wrapTierExpression(_).asInstanceOf[NamedExpression])
   }
 
+  private def operationSet(expression: GpuExpression): Set[GpuExpressionEquals] = {
+    expression.collect {
+      case gpuExpression: GpuExpression if gpuExpression.selfIsAstJitOperator =>
+        GpuExpressionEquals(gpuExpression)
+    }.toSet
+  }
+
+  private def connectedComponents(roots: Seq[JitRoot]): Seq[Seq[JitRoot]] = {
+    val parents = roots.indices.toArray
+
+    def find(index: Int): Int = {
+      var root = index
+      while (parents(root) != root) {
+        root = parents(root)
+      }
+      var current = index
+      while (parents(current) != current) {
+        val next = parents(current)
+        parents(current) = root
+        current = next
+      }
+      root
+    }
+
+    def union(left: Int, right: Int): Unit = {
+      val leftRoot = find(left)
+      val rightRoot = find(right)
+      if (leftRoot != rightRoot) {
+        parents(rightRoot) = leftRoot
+      }
+    }
+
+    val operationOwner = mutable.HashMap.empty[GpuExpressionEquals, Int]
+    roots.zipWithIndex.foreach { case (root, index) =>
+      root.operations.foreach { operation =>
+        operationOwner.get(operation) match {
+          case Some(previous) => union(previous, index)
+          case None => operationOwner.put(operation, index)
+        }
+      }
+    }
+
+    val components = mutable.LinkedHashMap.empty[Int, mutable.ArrayBuffer[JitRoot]]
+    roots.indices.foreach { index =>
+      components.getOrElseUpdate(find(index), mutable.ArrayBuffer.empty) += roots(index)
+    }
+    components.values.map(_.toSeq).toSeq
+  }
+
+  private def groupRoots(
+      roots: Seq[JitRoot],
+      maxOps: Int,
+      maxOutputs: Int): Map[Int, Int] = {
+    val groups = mutable.ArrayBuffer.empty[JitGroup]
+
+    def newGroup(): JitGroup = {
+      val group = new JitGroup(groups.size)
+      groups += group
+      group
+    }
+
+    connectedComponents(roots).foreach { component =>
+      val componentOps = component.iterator.flatMap(_.operations).toSet
+      if (component.size <= maxOutputs && componentOps.size <= maxOps) {
+        val group = groups.find(_.canAdd(component, maxOps, maxOutputs)).getOrElse(newGroup())
+        group.add(component)
+      } else {
+        val componentGroups = mutable.ArrayBuffer.empty[JitGroup]
+        component.foreach { root =>
+          val candidates = componentGroups.filter(_.canAdd(Seq(root), maxOps, maxOutputs))
+          val group = if (candidates.nonEmpty) {
+            candidates.maxBy(group => root.operations.count(group.operations.contains))
+          } else {
+            val created = newGroup()
+            componentGroups += created
+            created
+          }
+          group.add(Seq(root))
+        }
+      }
+    }
+
+    groups.iterator.flatMap { group =>
+      group.roots.iterator.map(root => root.index -> group.id)
+    }.toMap
+  }
+
+  private[rapids] def wrapTierExpressions(
+      expressions: Seq[Expression],
+      conf: SQLConf): Seq[Expression] = {
+    val roots = expressions.zipWithIndex.flatMap { case (expression, index) =>
+      expression match {
+        case GpuAlias(child: GpuExpression, _) =>
+          astJitChild(child).map { jitChild =>
+            JitRoot(index, jitChild, operationSet(jitChild))
+          }
+        case _ => None
+      }
+    }
+    val groupIds = groupRoots(
+      roots,
+      RapidsConf.PROJECT_AST_JIT_MAX_GROUP_OPS.get(conf),
+      RapidsConf.PROJECT_AST_JIT_MAX_GROUP_OUTPUTS.get(conf))
+    val rootsByIndex = roots.iterator.map(root => root.index -> root).toMap
+    expressions.zipWithIndex.map { case (expression, index) =>
+      (expression, rootsByIndex.get(index), groupIds.get(index)) match {
+        case (alias: GpuAlias, Some(root), Some(groupId)) =>
+          GpuProjectAstExpressionBase.replaceChild(
+            alias, GpuAstJitExpression(root.child, groupId))
+        case _ => expression
+      }
+    }
+  }
+
+  private[rapids] def outputGroups(
+      expressions: Seq[GpuAstJitExpression]): Seq[Seq[GpuAstJitExpression]] = {
+    val groups = mutable.LinkedHashMap.empty[Int, mutable.ArrayBuffer[GpuAstJitExpression]]
+    expressions.foreach { expression =>
+      groups.getOrElseUpdate(expression.groupId, mutable.ArrayBuffer.empty) += expression
+    }
+    groups.values.map(_.toSeq).toSeq
+  }
+
   private[rapids] def computeColumns(
       expressions: Seq[GpuAstJitExpression],
       table: Table): ColumnarBatch = {
@@ -61,12 +222,6 @@ object GpuAstJitExpression {
       }
     }
   }
-
-  /** Extracts a Project AST JIT wrapper after unwrapping any top-level aliases. */
-  private[rapids] def extractTopLevel(expression: Expression): Option[GpuAstJitExpression] =
-    GpuProjectAstExpressionBase.extractTopLevel(expression).collect {
-      case jitExpression: GpuAstJitExpression => jitExpression
-    }
 
   private def hasJitCandidate(expression: Expression): Boolean = expression.find {
     case gpuExpression: GpuExpression =>
@@ -100,12 +255,10 @@ object GpuAstJitExpression {
   }
 }
 
-case class GpuAstJitExpression(child: GpuExpression)
+case class GpuAstJitExpression(child: GpuExpression, groupId: Int = 0)
     extends GpuProjectAstExpressionBase with Retryable {
 
   override def disableTieredProjectCombine: Boolean = true
-
-  override protected def backendName: String = "AST JIT"
 
   override protected def compileNvtxId: NvtxId = NvtxRegistry.COMPILE_AST_JIT
 

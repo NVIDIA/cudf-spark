@@ -112,8 +112,8 @@ class GpuBroadcastNestedLoopJoinRetrySuite extends RmmSparkRetrySuiteBase {
       TestLeafExec(Seq.empty), buildProject, expressions)
 
     TestUtils.withMockTaskContext(completesTask = true) {
-      val boundProject = GpuBindReferences.bindGpuProjectReferencesTiered(
-        expressions, buildAttributes, conf, Map.empty)
+      val boundProject = GpuBindReferences.bindGpuReferencesTiered(
+        expressions, buildAttributes, conf, Map.empty, enableAstJit = true)
       // after CSE:
       // tier 0: [x, y, z, AST_JIT((x+y)*z) AS t1]
       // tier 1: [t1-x AS shared_minus_x, t1-y AS shared_minus_y, x, y, z]

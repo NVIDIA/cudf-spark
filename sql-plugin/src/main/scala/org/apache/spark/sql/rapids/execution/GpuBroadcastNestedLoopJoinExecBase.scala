@@ -732,8 +732,9 @@ abstract class GpuBroadcastNestedLoopJoinExecBase(
         // Need to manually do project columnar execution other than calling child's
         // internalDoExecuteColumnar. This is to workaround especial handle to build broadcast
         // batch.
-        val proj = GpuBindReferences.bindGpuProjectReferencesTiered(
-          postBuildCondition, p.child.output, conf, allMetrics)
+        val proj = GpuBindReferences.bindGpuReferencesTiered(
+          postBuildCondition, p.child.output, conf, allMetrics,
+          enableAstJit = RapidsConf.ENABLE_PROJECT_AST_JIT.get(conf))
         Some { batch: ColumnarBatch =>
           proj.projectAndCloseWithRetrySingleBatch(
             SpillableColumnarBatch(batch, SpillPriorities.ACTIVE_ON_DECK_PRIORITY))

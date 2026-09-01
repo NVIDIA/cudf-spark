@@ -184,8 +184,9 @@ abstract class GpuBroadcastHashJoinExecBase(
       val boundProjects = projects.map { project =>
         // Match GpuProjectExec's tiered binding so build-side extraction has the same
         // splitting and retry behavior as a normal project.
-        GpuBindReferences.bindGpuProjectReferencesTiered(
-          project.projectList, project.child.output, conf, allMetrics)
+        GpuBindReferences.bindGpuReferencesTiered(
+          project.projectList, project.child.output, conf, allMetrics,
+          enableAstJit = RapidsConf.ENABLE_PROJECT_AST_JIT.get(conf))
       }
       Some((batch: ColumnarBatch) => boundProjects.foldLeft(batch) {
         case (currentBatch, boundProject) =>

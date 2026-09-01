@@ -34,6 +34,7 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims._
 import org.apache.spark.sql.tests.datagen.DataGenExprShims
 import org.apache.spark.sql.types._
+import org.apache.spark.sql.vectorized.ColumnarBatch
 
 class ProjectExprSuite extends SparkQueryCompareTestSuite {
   def forceHostColumnarToGpu(): SparkConf = {
@@ -233,18 +234,33 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
     }
   }
 
-  test("multi-output AST JIT project retries and preserves output order and nulls") {
+  test("multiple multi-output AST JIT groups retry and preserve output order and nulls") {
     val left = GpuBoundReference(0, LongType, nullable = true)(
       NamedExpression.newExprId, "a")
     val right = GpuBoundReference(1, LongType, nullable = true)(
       NamedExpression.newExprId, "b")
     def shared = GpuAdd(left, GpuLiteral(1L, LongType), failOnError = false)()
+    def shiftedRight = GpuAdd(right, GpuLiteral(1L, LongType), failOnError = false)()
     val jitExpressions = Seq(
-      GpuAstJitExpression(GpuMultiply(shared, right, failOnError = false)()),
-      GpuAstJitExpression(GpuMultiply(shared, left, failOnError = false)()))
+      GpuAstJitExpression(GpuMultiply(shared, right, failOnError = false)(), groupId = 0),
+      GpuAstJitExpression(GpuMultiply(shiftedRight, left, failOnError = false)(), groupId = 1),
+      GpuAstJitExpression(GpuMultiply(shared, left, failOnError = false)(), groupId = 0),
+      GpuAstJitExpression(GpuMultiply(shiftedRight, right, failOnError = false)(), groupId = 1))
     val expressions = Seq(
       GpuAlias(jitExpressions.head, "right_product")(),
-      GpuAlias(jitExpressions(1), "left_product")())
+      GpuAlias(jitExpressions(1), "shifted_right_times_left")(),
+      GpuAlias(jitExpressions(2), "left_product")(),
+      GpuAlias(jitExpressions(3), "shifted_right_times_right")())
+
+    def assertColumn(result: ColumnarBatch, index: Int, expected: Seq[Option[Long]]): Unit = {
+      val column = result.column(index).asInstanceOf[GpuColumnVector]
+      withResource(column.getBase.copyToHost()) { hostColumn =>
+        expected.zipWithIndex.foreach {
+          case (None, row) => assert(hostColumn.isNull(row))
+          case (Some(value), row) => assertResult(value)(hostColumn.getLong(row))
+        }
+      }
+    }
 
     RmmSpark.currentThreadIsDedicatedToTask(0)
     try {
@@ -255,21 +271,11 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
             RmmSpark.OomInjectionType.GPU.ordinal, 0)
           withResource(GpuProjectExec.projectAndCloseWithRetrySingleBatch(
               spillableBatch, expressions)) { result =>
-            assertResult(2)(result.numCols())
-            val rightProduct = result.column(0).asInstanceOf[GpuColumnVector]
-            val leftProduct = result.column(1).asInstanceOf[GpuColumnVector]
-            withResource(rightProduct.getBase.copyToHost()) { hostProduct =>
-              assertResult(36L)(hostProduct.getLong(0))
-              assert(hostProduct.isNull(1))
-              assertResult(32L)(hostProduct.getLong(2))
-              assertResult(18L)(hostProduct.getLong(3))
-            }
-            withResource(leftProduct.getBase.copyToHost()) { hostProduct =>
-              assertResult(30L)(hostProduct.getLong(0))
-              assert(hostProduct.isNull(1))
-              assertResult(12L)(hostProduct.getLong(2))
-              assertResult(2L)(hostProduct.getLong(3))
-            }
+            assertResult(4)(result.numCols())
+            assertColumn(result, 0, Seq(Some(36L), None, Some(32L), Some(18L)))
+            assertColumn(result, 1, Seq(Some(35L), None, Some(27L), Some(10L)))
+            assertColumn(result, 2, Seq(Some(30L), None, Some(12L), Some(2L)))
+            assertColumn(result, 3, Seq(Some(42L), Some(56L), Some(72L), Some(90L)))
           }
         }
       }

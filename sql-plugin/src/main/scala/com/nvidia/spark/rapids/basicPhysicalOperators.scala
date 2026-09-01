@@ -177,27 +177,36 @@ object GpuProjectExec {
             val jitExpressions = astExpressions.collect {
               case jitExpression: GpuAstJitExpression => jitExpression
             }
-            if (jitExpressions.size > 1 &&
+            val multiOutputGroups = GpuAstJitExpression.outputGroups(jitExpressions)
+                .filter(_.size > 1)
+            if (multiOutputGroups.nonEmpty &&
                 RapidsConf.ENABLE_PROJECT_AST_JIT_MULTI_OUTPUT.get(SQLConf.get)) {
-              withResource(GpuAstJitExpression.computeColumns(jitExpressions, table)) { jitBatch =>
-                val jitColumnIndexes =
-                  new IdentityHashMap[GpuAstJitExpression, ArrayDeque[Int]]()
-                jitExpressions.zipWithIndex.foreach { case (jitExpression, index) =>
-                  var indexes = jitColumnIndexes.get(jitExpression)
-                  if (indexes == null) {
-                    indexes = new ArrayDeque[Int]()
-                    jitColumnIndexes.put(jitExpression, indexes)
+              val jitBatches = multiOutputGroups.safeMap(
+                GpuAstJitExpression.computeColumns(_, table))
+              withResource(jitBatches) { _ =>
+                val jitColumns = new IdentityHashMap[
+                  GpuAstJitExpression, ArrayDeque[GpuColumnVector]]()
+                multiOutputGroups.zip(jitBatches).foreach { case (group, batch) =>
+                  group.zipWithIndex.foreach { case (jitExpression, index) =>
+                    var columns = jitColumns.get(jitExpression)
+                    if (columns == null) {
+                      columns = new ArrayDeque[GpuColumnVector]()
+                      jitColumns.put(jitExpression, columns)
+                    }
+                    columns.addLast(batch.column(index).asInstanceOf[GpuColumnVector])
                   }
-                  indexes.addLast(index)
                 }
                 projectWithEval { expression =>
                   GpuProjectAstExpressionBase.extractTopLevel(expression) match {
                     case Some(jitExpression: GpuAstJitExpression) =>
-                      val indexes = jitColumnIndexes.get(jitExpression)
-                      require(indexes != null && !indexes.isEmpty,
-                        s"Missing multi-output AST JIT column for $jitExpression")
-                      jitBatch.column(indexes.removeFirst())
-                          .asInstanceOf[GpuColumnVector].incRefCount()
+                      val columns = jitColumns.get(jitExpression)
+                      if (columns == null) {
+                        jitExpression.computeColumn(table)
+                      } else {
+                        require(!columns.isEmpty,
+                          s"Missing multi-output AST JIT column for $jitExpression")
+                        columns.removeFirst().incRefCount()
+                      }
                     case Some(astExpression) => astExpression.computeColumn(table)
                     case None => expression.columnarEval(cb)
                   }
@@ -949,8 +958,9 @@ case class GpuProjectExec(
     val opTime = gpuLongMetric(OP_TIME_LEGACY)
     val numPreSplit = gpuLongMetric(KEY_NUM_PRE_SPLIT)
     
-    val boundProjectList = GpuBindReferences.bindGpuProjectReferencesTiered(
-      projectList, child.output, conf, allMetrics)
+    val boundProjectList = GpuBindReferences.bindGpuReferencesTiered(
+      projectList, child.output, conf, allMetrics,
+      enableAstJit = RapidsConf.ENABLE_PROJECT_AST_JIT.get(conf))
     val localEnablePreSplit = enablePreSplit
 
     val rdd = child.executeColumnar()

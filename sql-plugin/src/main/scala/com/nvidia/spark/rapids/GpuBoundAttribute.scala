@@ -136,20 +136,16 @@ object GpuBindReferences extends Logging {
     expressions.map(GpuBindReferences.bindReferenceNoMetrics(_, input)).toList
   }
 
-  /**
-   * Shared implementation for generic and Project-specific tiered binding.
-   *
-   * @param enableProjectAstJit whether eligible tiers may use Project AST JIT
-   */
+  /** Shared implementation for tiered binding. */
   private def bindGpuReferencesTieredNoMetricsInternal[A <: Expression](
       expressions: Seq[A],
       input: AttributeSeq,
       conf: SQLConf,
-      enableProjectAstJit: Boolean): GpuTieredProject = {
+      enableAstJit: Boolean): GpuTieredProject = {
 
     val tieredProject = if (RapidsConf.ENABLE_TIERED_PROJECT.get(conf)) {
       val exprTiers = GpuProjectAstExpressionBase.buildExprTiers(
-        expressions, conf, enableProjectAstJit)
+        expressions, conf, enableAstJit)
       val inputTiers = GpuEquivalentExpressions.getInputTiers(exprTiers, input)
       // Update ExprTiers to include the columns that are pass through and drop unneeded columns
       val newExprTiers = exprTiers.zipWithIndex.map {
@@ -188,15 +184,15 @@ object GpuBindReferences extends Logging {
       }
       GpuTieredProject(tiered)
     } else {
-      val projectExpressions = if (enableProjectAstJit) {
-        expressions.map(GpuAstJitExpression.wrapTierExpression)
+      val projectExpressions = if (enableAstJit) {
+        GpuAstJitExpression.wrapTierExpressions(expressions, conf)
       } else {
         expressions
       }
       GpuTieredProject(Seq(
         GpuBindReferences.bindGpuReferencesNoMetrics(projectExpressions, input)))
     }
-    if (enableProjectAstJit) {
+    if (enableAstJit) {
       explainFinalProjectAstJitSelection(tieredProject, conf)
     }
     tieredProject
@@ -211,21 +207,10 @@ object GpuBindReferences extends Logging {
   def bindGpuReferencesTieredNoMetrics[A <: Expression](
       expressions: Seq[A],
       input: AttributeSeq,
-      conf: SQLConf): GpuTieredProject = {
+      conf: SQLConf,
+      enableAstJit: Boolean = false): GpuTieredProject = {
     bindGpuReferencesTieredNoMetricsInternal(
-      expressions, input, conf, enableProjectAstJit = false)
-  }
-
-  /**
-   * Project-specific tiered binding without metric injection. Unlike the generic binder,
-   * this path allows configured Project AST JIT selection.
-   */
-  private[rapids] def bindGpuProjectReferencesTieredNoMetrics[A <: Expression](
-      expressions: Seq[A],
-      input: AttributeSeq,
-      conf: SQLConf): GpuTieredProject = {
-    bindGpuReferencesTieredNoMetricsInternal(
-      expressions, input, conf, RapidsConf.ENABLE_PROJECT_AST_JIT.get(conf))
+      expressions, input, conf, enableAstJit)
   }
 
   // ========== Public "Front Door" APIs (for use by SparkPlan nodes) ==========
@@ -297,31 +282,15 @@ object GpuBindReferences extends Logging {
    * @param input The input schema
    * @param conf SQL configuration
    * @param metrics Metrics to inject into the bound expressions
+   * @param enableAstJit Whether eligible expressions may use AST JIT
    */
   def bindGpuReferencesTiered[A <: Expression](
       expressions: Seq[A],
       input: AttributeSeq,
       conf: SQLConf,
-      metrics: Map[String, GpuMetric]): GpuTieredProject = {
-    val bound = bindGpuReferencesTieredNoMetrics(expressions, input, conf)
-    bound.injectMetrics(metrics)
-    bound
-  }
-
-  /**
-   * Bind Project expressions in a tiered manner and inject metrics. Project AST JIT selection is
-   * confined to this entry point so generic tiered binders do not enable it for other operators.
-   * @param expressions The expressions to bind
-   * @param input The input schema
-   * @param conf SQL configuration
-   * @param metrics Metrics to inject into the bound expressions
-   */
-  def bindGpuProjectReferencesTiered[A <: Expression](
-      expressions: Seq[A],
-      input: AttributeSeq,
-      conf: SQLConf,
-      metrics: Map[String, GpuMetric]): GpuTieredProject = {
-    val bound = bindGpuProjectReferencesTieredNoMetrics(expressions, input, conf)
+      metrics: Map[String, GpuMetric],
+      enableAstJit: Boolean = false): GpuTieredProject = {
+    val bound = bindGpuReferencesTieredNoMetrics(expressions, input, conf, enableAstJit)
     bound.injectMetrics(metrics)
     bound
   }

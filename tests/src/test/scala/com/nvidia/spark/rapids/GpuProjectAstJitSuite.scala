@@ -23,7 +23,7 @@ import org.mockito.Mockito.{doThrow, mock, times, verify, when}
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.TaskContext
-import org.apache.spark.sql.catalyst.expressions.AttributeReference
+import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, Expression}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.{GpuAdd, GpuGreatest, GpuMultiply, GpuSubtract}
 import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
@@ -56,16 +56,35 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
   private def projectConf(
       tiered: Boolean = true,
       jit: Boolean = true,
-      legacy: Boolean = false): SQLConf = {
+      legacy: Boolean = false,
+      maxGroupOps: Int = Int.MaxValue,
+      maxGroupOutputs: Int = Int.MaxValue): SQLConf = {
     val conf = new SQLConf()
     conf.setConfString(RapidsConf.ENABLE_TIERED_PROJECT.key, tiered.toString)
     conf.setConfString(RapidsConf.ENABLE_PROJECT_AST_JIT.key, jit.toString)
     conf.setConfString(RapidsConf.ENABLE_PROJECT_AST.key, legacy.toString)
+    conf.setConfString(RapidsConf.PROJECT_AST_JIT_MAX_GROUP_OPS.key, maxGroupOps.toString)
+    conf.setConfString(RapidsConf.PROJECT_AST_JIT_MAX_GROUP_OUTPUTS.key, maxGroupOutputs.toString)
     conf
+  }
+
+  private def bindProject(
+      expressions: Seq[Expression],
+      input: Seq[Attribute],
+      conf: SQLConf): GpuTieredProject = {
+    GpuBindReferences.bindGpuReferencesTieredNoMetrics(
+      expressions, input, conf, enableAstJit = RapidsConf.ENABLE_PROJECT_AST_JIT.get(conf))
   }
 
   test("project AST JIT is disabled by default") {
     assert(!new RapidsConf(Map.empty[String, String]).isProjectAstJitEnabled)
+  }
+
+  test("project AST JIT group safety guards use conservative defaults") {
+    val conf = new SQLConf()
+
+    assertResult(384)(RapidsConf.PROJECT_AST_JIT_MAX_GROUP_OPS.get(conf))
+    assertResult(32)(RapidsConf.PROJECT_AST_JIT_MAX_GROUP_OUTPUTS.get(conf))
   }
 
   test("project AST JIT supports non-ANSI integral add and multiply") {
@@ -116,7 +135,7 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
         alias(GpuSubtract(shared, third, failOnError = false)(), "legacy")),
       alias(GpuGreatest(Seq(shared, fourth)), "regular"))
 
-    val tiered = GpuBindReferences.bindGpuProjectReferencesTieredNoMetrics(
+    val tiered = bindProject(
       expressions, Seq(left, right, third, fourth), projectConf())
 
     // after wave planning:
@@ -147,7 +166,7 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
       alias(GpuMultiply(shared, third, failOnError = false)(), "first"),
       alias(GpuMultiply(shared, fourth, failOnError = false)(), "second"))
 
-    val tiered = GpuBindReferences.bindGpuProjectReferencesTieredNoMetrics(
+    val tiered = bindProject(
       expressions, Seq(left, right, third, fourth), projectConf())
     val jitTiers = tiered.exprTiers.map(_.flatMap(GpuAstJitExpression.extractTopLevel))
 
@@ -155,6 +174,61 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     assertResult(Seq(2))(jitTiers.map(_.size))
     assert(jitTiers.head.forall(_.child.isInstanceOf[GpuMultiply]))
     assert(jitTiers.head.forall(_.child.find(_.isInstanceOf[GpuAdd]).isDefined))
+    assertResult(1)(jitTiers.head.map(_.groupId).distinct.size)
+  }
+
+  test("max outputs splits one JIT wave into multiple groups") {
+    val left = reference(0, IntegerType)
+    val right = reference(1, IntegerType)
+    val expressions = Seq(
+      alias(GpuAdd(left, right, failOnError = false)(), "sum"),
+      alias(GpuMultiply(left, right, failOnError = false)(), "product"))
+
+    val tiered = bindProject(
+      expressions, Seq(left, right), projectConf(maxGroupOutputs = 1))
+    val jitExpressions = tiered.exprTiers.head.flatMap(GpuAstJitExpression.extractTopLevel)
+
+    assertResult(1)(tiered.exprTiers.size)
+    assertResult(2)(jitExpressions.size)
+    assertResult(2)(jitExpressions.map(_.groupId).distinct.size)
+  }
+
+  test("max operations preserves a shared subtree only when the group fits") {
+    val left = reference(0, IntegerType)
+    val right = reference(1, IntegerType)
+    val third = reference(2, IntegerType)
+    val fourth = reference(3, IntegerType)
+    def shared = GpuAdd(left, right, failOnError = false)()
+    val expressions = Seq(
+      alias(GpuMultiply(shared, third, failOnError = false)(), "first"),
+      alias(GpuMultiply(shared, fourth, failOnError = false)(), "second"))
+
+    val together = bindProject(
+      expressions, Seq(left, right, third, fourth), projectConf(maxGroupOps = 3))
+    val split = bindProject(
+      expressions, Seq(left, right, third, fourth), projectConf(maxGroupOps = 2))
+    val togetherJit = together.exprTiers.head.flatMap(GpuAstJitExpression.extractTopLevel)
+    val splitJit = split.exprTiers.head.flatMap(GpuAstJitExpression.extractTopLevel)
+
+    assertResult(1)(togetherJit.map(_.groupId).distinct.size)
+    assertResult(2)(splitJit.map(_.groupId).distinct.size)
+  }
+
+  test("an individually oversized JIT root uses single-output AST JIT") {
+    val left = reference(0, IntegerType)
+    val right = reference(1, IntegerType)
+    val expression = alias(
+      GpuMultiply(
+        GpuAdd(left, right, failOnError = false)(),
+        right,
+        failOnError = false)(),
+      "result")
+
+    val tiered = bindProject(
+      Seq(expression), Seq(left, right), projectConf(maxGroupOps = 1))
+
+    assertResult(1)(tiered.exprTiers.size)
+    assertResult(1)(collectExpressions[GpuAstJitExpression](tiered.exprTiers.head).size)
   }
 
   test("JIT wave exports a shared subtree only for its regular consumer") {
@@ -167,7 +241,7 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
       alias(GpuMultiply(shared, third, failOnError = false)(), "jit"),
       alias(GpuGreatest(Seq(shared, fourth)), "regular"))
 
-    val tiered = GpuBindReferences.bindGpuProjectReferencesTieredNoMetrics(
+    val tiered = bindProject(
       expressions, Seq(left, right, third, fourth), projectConf())
     val jitTiers = tiered.exprTiers.map(_.flatMap(GpuAstJitExpression.extractTopLevel))
 
@@ -190,7 +264,7 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
       alias(regular, "regular"),
       alias(GpuMultiply(regular, fourth, failOnError = false)(), "late"))
 
-    val tiered = GpuBindReferences.bindGpuProjectReferencesTieredNoMetrics(
+    val tiered = bindProject(
       expressions, Seq(left, right, third, fourth), projectConf())
     val jitTiers = tiered.exprTiers.map(_.flatMap(GpuAstJitExpression.extractTopLevel))
 
@@ -212,7 +286,7 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
         failOnError = false)(),
       "result")
 
-    val tiered = GpuBindReferences.bindGpuProjectReferencesTieredNoMetrics(
+    val tiered = bindProject(
       Seq(expression), Seq(left, right), projectConf())
     val jitTiers = tiered.exprTiers.map(_.flatMap(GpuAstJitExpression.extractTopLevel))
 
@@ -229,7 +303,7 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
         failOnError = false)(),
       "result")
 
-    val tiered = GpuBindReferences.bindGpuProjectReferencesTieredNoMetrics(
+    val tiered = bindProject(
       Seq(expression), Seq.empty, projectConf())
 
     assertResult(1)(tiered.exprTiers.size)
@@ -247,7 +321,7 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
       alias(GpuSubtract(shared, third, failOnError = false)(), "first"),
       alias(GpuSubtract(shared, fourth, failOnError = false)(), "second"))
 
-    val tiered = GpuBindReferences.bindGpuProjectReferencesTieredNoMetrics(
+    val tiered = bindProject(
       expressions, Seq(left, right, third, fourth), projectConf())
     val all = GpuAstJitExpression.explainFinalSelections(tiered.exprTiers, all = true)
 
@@ -268,7 +342,7 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     val legacyCandidate = GpuProjectAstExpression.wrap(
       alias(GpuSubtract(left, right, failOnError = false)(), "legacy"))
 
-    val tiered = GpuBindReferences.bindGpuProjectReferencesTieredNoMetrics(
+    val tiered = bindProject(
       Seq(jitCandidate, legacyCandidate), Seq(left, right), projectConf(legacy = true))
     val outputs = tiered.exprTiers.last
 
@@ -276,7 +350,7 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     assert(GpuProjectAstExpression.extractTopLevel(outputs(1)).isDefined)
   }
 
-  test("only the project binder selects the JIT backend") {
+  test("tiered binding only selects JIT when explicitly enabled") {
     val left = reference(0, IntegerType)
     val right = reference(1, IntegerType)
     val expression = alias(GpuAdd(left, right, failOnError = false)(), "result")
@@ -284,19 +358,19 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
 
     val generic = GpuBindReferences.bindGpuReferencesTieredNoMetrics(
       Seq(expression), Seq(left, right), conf)
-    val project = GpuBindReferences.bindGpuProjectReferencesTieredNoMetrics(
+    val project = bindProject(
       Seq(expression), Seq(left, right), conf)
 
     assert(collectExpressions[GpuAstJitExpression](generic.exprTiers.flatten).isEmpty)
     assertResult(1)(collectExpressions[GpuAstJitExpression](project.exprTiers.flatten).size)
   }
 
-  test("the project binder respects a disabled JIT setting") {
+  test("the Project caller respects a disabled JIT setting") {
     val left = reference(0, IntegerType)
     val right = reference(1, IntegerType)
     val expression = alias(GpuAdd(left, right, failOnError = false)(), "result")
 
-    val project = GpuBindReferences.bindGpuProjectReferencesTieredNoMetrics(
+    val project = bindProject(
       Seq(expression), Seq(left, right), projectConf(jit = false))
 
     assert(collectExpressions[GpuAstJitExpression](project.exprTiers.flatten).isEmpty)
@@ -309,7 +383,7 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
       alias(GpuAdd(left, right, failOnError = false)(), "sum"),
       alias(GpuMultiply(left, right, failOnError = false)(), "product"))
 
-    val project = GpuBindReferences.bindGpuProjectReferencesTieredNoMetrics(
+    val project = bindProject(
       expressions, Seq(left, right), projectConf(tiered = false))
 
     assertResult(1)(project.exprTiers.size)
@@ -423,7 +497,7 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
       val thrown = intercept[IllegalStateException] {
         jit.checkpoint()
       }
-      assertResult("Task completed while registering the AST JIT cleanup callback")(
+      assertResult("Task completed while registering compiled expression cleanup callback")(
         thrown.getMessage)
       jit.close()
       verify(compiled, times(1)).close()
@@ -444,7 +518,7 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
       val thrown = intercept[IllegalStateException] {
         astExpression.computeColumn(mock(classOf[Table]))
       }
-      assertResult("Task completed while registering the Project AST cleanup callback")(
+      assertResult("Task completed while registering compiled expression cleanup callback")(
         thrown.getMessage)
       astExpression.close()
       verify(compiled, times(1)).close()
