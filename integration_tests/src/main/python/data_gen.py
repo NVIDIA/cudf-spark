@@ -888,7 +888,10 @@ def gen_df_help(data_gen, length, seed_value):
     data = [data_gen.gen() for index in range(0, length)]
     return data
 
-def gen_df(spark, data_gen, length=2048, seed=None, num_slices=None):
+DEFAULT_DATA_GEN_LENGTH = 2048
+
+
+def gen_df(spark, data_gen, length=DEFAULT_DATA_GEN_LENGTH, seed=None, num_slices=None):
     """Generate a spark dataframe from the given data generators."""
     if seed is None:
         seed_value = get_datagen_seed()

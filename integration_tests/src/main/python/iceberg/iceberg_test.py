@@ -23,7 +23,8 @@ from conftest import is_iceberg_remote_catalog, is_iceberg_rest_catalog
 from data_gen import *
 from iceberg import get_full_table_name, iceberg_unsupported_mark, _build_tblprops, \
     _BASE_TBLPROPS_SQL, create_iceberg_table, supports_iceberg_v3, \
-    ICEBERG_V3_UNSUPPORTED_REASON
+    ICEBERG_V3_UNSUPPORTED_REASON, supports_iceberg_row_lineage_inheritance, \
+    ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, row_lineage_df
 from marks import allow_non_gpu, iceberg, ignore_order
 from spark_session import is_databricks_runtime, is_spark_35x, is_spark_400_or_later, \
     is_spark_40x, is_spark_41x, spark_version, with_cpu_session, with_gpu_session
@@ -422,6 +423,83 @@ def test_iceberg_v3_read_fallback(spark_tmp_table_factory):
     assert_gpu_fallback_collect(
         lambda spark: spark.sql(f"SELECT * FROM {table_name}"),
         "BatchScanExec")
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.skipif(
+    not supports_iceberg_row_lineage_inheritance,
+    reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
+@pytest.mark.parametrize("reader_type", rapids_reader_types)
+def test_iceberg_v3_row_lineage_read(spark_tmp_table_factory, reader_type):
+    full_table = get_full_table_name(spark_tmp_table_factory)
+
+    def setup_iceberg_table(spark):
+        # Snapshots created before a v3 upgrade do not have row lineage. A snapshot created after
+        # the upgrade assigns lineage to both existing and newly-added files.
+        spark.sql(f"CREATE TABLE {full_table} (id BIGINT) USING ICEBERG "
+                  f"TBLPROPERTIES ('format-version' = '2')")
+        row_lineage_df(spark).writeTo(full_table).append()
+        v2_snapshot_id = spark.sql(
+            f"SELECT snapshot_id FROM {full_table}.snapshots ORDER BY committed_at DESC") \
+            .head()[0]
+        spark.sql(
+            f"ALTER TABLE {full_table} SET TBLPROPERTIES ("
+            "'format-version' = '3', "
+            "'write.parquet.row-group-size-bytes' = '4096', "
+            "'read.split.target-size' = '4096', "
+            "'read.split.open-file-cost' = '0')")
+
+        row_lineage_df(spark, start=DEFAULT_DATA_GEN_LENGTH).writeTo(full_table).append()
+        return v2_snapshot_id
+
+    v2_snapshot_id = with_cpu_session(setup_iceberg_table)
+    read_conf = {
+        "spark.rapids.sql.format.iceberg.v3.enabled": "true",
+        "spark.rapids.sql.format.parquet.reader.type": reader_type
+    }
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(
+            f"SELECT id, _row_id, _last_updated_sequence_number FROM {full_table} "
+            f"VERSION AS OF {v2_snapshot_id}"),
+        conf=read_conf)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(
+            f"SELECT id, _row_id, _last_updated_sequence_number FROM {full_table}"),
+        conf=read_conf)
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.skipif(
+    not supports_iceberg_row_lineage_inheritance,
+    reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
+def test_iceberg_v3_row_lineage_rewrite_data_files(spark_tmp_table_factory):
+    full_table = get_full_table_name(spark_tmp_table_factory)
+
+    def setup_iceberg_table(spark):
+        spark.sql(
+            f"CREATE TABLE {full_table} (id BIGINT) USING ICEBERG "
+            "TBLPROPERTIES ('format-version' = '3')")
+        half_length = DEFAULT_DATA_GEN_LENGTH // 2
+        row_lineage_df(spark, length=half_length).writeTo(full_table).append()
+        row_lineage_df(spark, start=half_length, length=half_length) \
+            .writeTo(full_table).append()
+        assert spark.sql(f"SELECT count(*) FROM {full_table}.data_files").head()[0] > 1
+
+        spark.sql(
+            f"CALL spark_catalog.system.rewrite_data_files(table => '{full_table}', "
+            "options => map('min-input-files', '2'))")
+        assert spark.sql(f"SELECT count(*) FROM {full_table}.data_files").head()[0] == 1
+
+    with_cpu_session(setup_iceberg_table)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(
+            f"SELECT id, _pos, _row_id, _last_updated_sequence_number FROM {full_table}"),
+        conf={
+            "spark.rapids.sql.format.iceberg.v3.enabled": "true",
+            "spark.rapids.sql.format.parquet.reader.type": "COALESCING"
+        })
 
 
 @iceberg
