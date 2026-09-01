@@ -254,26 +254,24 @@ private[iceberg] case class ProcessMap(
       val structCol = withResource(col.getChildColumnView(0)) { childView =>
         childView.copyToColumnVector()
       }
-      withResource(structCol) { _ =>
-        val childCols = Seq(0, 1).safeMap { idx =>
+      val transformedCols = withResource(structCol) { _ =>
+        Seq((0, keyAction), (1, valueAction)).safeMap { case (idx, action) =>
           withResource(structCol.getChildColumnView(idx)) { childView =>
-            childView.copyToColumnVector()
+            withResource(childView.copyToColumnVector()) { childCol =>
+              action.execute(ctx.withColumn(childCol))
+            }
           }
         }
-        withResource(childCols) { cols =>
-          val keyCol = cols(0)
-          val valueCol = cols(1)
-          withResource(keyAction.execute(ctx.withColumn(keyCol))) { newKey =>
-            withResource(valueAction.execute(ctx.withColumn(valueCol))) { newValue =>
-              // No validity buffer needed: in Iceberg/cuDF map representation,
-              // key-value struct entries are never null — only individual
-              // keys or values can be null.
-              withResource(CudfColumnVector.makeStruct(newKey, newValue)) { kvStruct =>
-                withResource(col.replaceListChild(kvStruct)) { view =>
-                  view.copyToColumnVector()
-                }
-              }
-            }
+      }
+      withResource(transformedCols) { cols =>
+        val newKey = cols(0)
+        val newValue = cols(1)
+        // No validity buffer needed: in Iceberg/cuDF map representation,
+        // key-value struct entries are never null — only individual
+        // keys or values can be null.
+        withResource(CudfColumnVector.makeStruct(newKey, newValue)) { kvStruct =>
+          withResource(col.replaceListChild(kvStruct)) { view =>
+            view.copyToColumnVector()
           }
         }
       }

@@ -57,7 +57,7 @@ sealed case class NvtxId private(name: String, color: NvtxColor, doc: String) {
   private val isEnabled = java.lang.Boolean.getBoolean("ai.rapids.cudf.nvtx.enabled")
   private val isDebug = java.lang.Boolean.getBoolean("ai.rapids.cudf.nvtx.debug")
 
-  def help(): Unit = println(s"$name|$doc")
+  def help(): Unit = ConsoleOutput.writeLine(s"$name|$doc")
 
   def push(): NvtxId = {
     if (isEnabled) {
@@ -875,15 +875,15 @@ object NvtxRegistry {
 
 object NvtxRangeDocs {
   def helpCommon(): Unit = {
-    println("---")
-    println("layout: page")
-    println("title: NVTX Ranges")
-    println("nav_order: 5")
-    println("parent: Developer Overview")
-    println("---")
+    ConsoleOutput.writeLine("---")
+    ConsoleOutput.writeLine("layout: page")
+    ConsoleOutput.writeLine("title: NVTX Ranges")
+    ConsoleOutput.writeLine("nav_order: 5")
+    ConsoleOutput.writeLine("parent: Developer Overview")
+    ConsoleOutput.writeLine("---")
     MarkdownUtils.printApacheSparkVersion("NvtxRangeDocs.help")
     // scalastyle:off line.size.limit
-    println("""# NVIDIA cuDF plugin for Apache Spark Nvtx Range Glossary
+    ConsoleOutput.writeLine("""# NVIDIA cuDF plugin for Apache Spark Nvtx Range Glossary
               |The following is the list of Nvtx ranges that are used throughout
               |the plugin. To add your own Nvtx range to the code, create an NvtxId
               |entry in NvtxRangeWithDoc.scala and create an `NvtxRangeWithDoc` in the
@@ -893,9 +893,9 @@ object NvtxRangeDocs {
               |
               |""".stripMargin)
     // scalastyle:on line.size.limit
-    println("\n## Nvtx Ranges\n")
-    println("Name | Description")
-    println("-----|-------------")
+    ConsoleOutput.writeLine("\n## Nvtx Ranges\n")
+    ConsoleOutput.writeLine("Name | Description")
+    ConsoleOutput.writeLine("-----|-------------")
   }
 
   def main(args: Array[String]): Unit = {

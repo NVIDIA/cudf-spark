@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, \
@@ -262,6 +264,31 @@ def test_iceberg_fallback_not_unsafe_row(spark_tmp_table_factory):
         lambda spark : spark.sql(f"SELECT COUNT(DISTINCT id) from {full_table}"),
         conf={"spark.rapids.sql.format.iceberg.enabled": "false"}
     )
+
+
+@iceberg
+def test_iceberg_scan_from_background_thread(spark_tmp_table_factory):
+    full_table = get_full_table_name(spark_tmp_table_factory)
+
+    def setup_iceberg_table(spark):
+        spark.sql(f"CREATE TABLE {full_table} (id BIGINT) USING ICEBERG {_NO_FANOUT}")
+        spark.sql(f"INSERT INTO {full_table} VALUES (1), (2), (3)")
+
+    with_cpu_session(setup_iceberg_table)
+
+    def scan_iceberg_table(spark):
+        def run_query():
+            df = spark.sql(f"SELECT SUM(id) FROM {full_table}")
+            return df.collect(), df
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            result, df = executor.submit(run_query).result()
+
+        assert result[0][0] == 6
+        callback = spark._sc._jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+        callback.assertContains(df._jdf, "GpuBatchScanExec")
+
+    with_gpu_session(scan_iceberg_table)
 
 @iceberg
 @ignore_order(local=True)

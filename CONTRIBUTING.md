@@ -475,6 +475,13 @@ This project follows the official
 [Scala style guide](https://docs.scala-lang.org/style/) and the
 [Databricks Scala guide](https://github.com/databricks/scala-style-guide), preferring the latter.
 
+Direct `println` calls should not be used in normal implementation or test code. Use project
+logging for optional diagnostics, ScalaTest `info` for meaningful test metadata, and `withClue`
+for context that should appear only when an assertion fails. `ConsoleOutput` is reserved for
+tools, CLI entry points, report generators, benchmarks, and process protocols where stdout or
+stderr is an intentional interface. If that helper is not available to a module, scope
+`scalastyle:off/on println` tightly around the intentional output block rather than an entire file.
+
 #### Java
 
 This project follows the
@@ -650,8 +657,12 @@ If it fails, you can click the `Details` link of this check, and go to `Upload l
 find the uploaded log.
 
 Options:
-1. Skip tests run by adding `[skip ci]` to title, this should only be used for doc-only change
-2. Run build and tests in databricks runtimes by adding `[databricks]` to title, this would add around 30-40 minutes
+1. Skip tests run by adding `[skip ci]` to the title. This should only be used for doc-only changes.
+2. Run build and tests in Databricks runtimes by adding `[databricks]` to the title. This adds around 30-40 minutes.
+3. Run Scala unit tests in parallel by adding `[fast-ut]` to the title. This does not reduce test coverage, but is opt-in while the parallel runner is still being evaluated. Parallel mode does not support `-Dsuffixes` or `-Dtests`; use `-DwildcardSuites` instead. GPU memory is divided across test forks, and each suite has a 1800-second timeout.
+4. Reduce pre-commit integration-test parameter combinations by adding `[reduced-it]` to the title. This is appropriate for documentation, CI, build, script, and other low-risk localized changes, but should not be used when correctness may depend on parameter combinations such as types, formats, time zones, ANSI mode, code generation, or shims. Nightly runs still exercise the full parameter product.
+
+CI title tags (`[skip ci]`, `[databricks]`, `[fast-ut]`, and `[reduced-it]`) should be placed at the end of the pull request title, separated from the subject and from each other by a single space. Category prefixes such as `[DOC]` remain at the beginning of the title.
 
 
 ### Code Review Guidelines

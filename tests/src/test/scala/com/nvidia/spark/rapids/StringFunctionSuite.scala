@@ -16,11 +16,8 @@
 
 package com.nvidia.spark.rapids
 
-import org.scalatest.Ignore
 import org.scalatest.funsuite.AnyFunSuite
 
-import org.apache.spark.SparkConf
-import org.apache.spark.sql.Row
 import org.apache.spark.sql.functions.{col, lower, upper}
 import org.apache.spark.sql.rapids.GpuRegExpUtils
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims._
@@ -146,8 +143,9 @@ object TestCodepoints {
   }
   // print out a warning if we're on an unsupported version
   if (getActiveUnicodeVersion() == SupportedUnicodeVersion.UNICODE_UNSUPPORTED) {
-    printf("WARNING : Unsupported version of Java (%s). You may encounter unexpected " +
-      "test failures\n", System.getProperties().getProperty("java.specification.version"))
+    val javaVersion = System.getProperty("java.specification.version")
+    ConsoleOutput.writeLine(s"WARNING : Unsupported version of Java ($javaVersion). " +
+      "You may encounter unexpected test failures")
   }
 
   // get the unicode index to use. if we are on an unknown/unsupported version, just
@@ -345,142 +343,4 @@ class RegExpUtilsSuite extends AnyFunSuite {
       assert(GpuOverrides.isSupportedStringReplacePattern(pattern) == expected)
     }
   }
-}
-
-/*
-* This isn't actually a test.  It's just useful to help visualize what's going on when there are
-* differences present.
-*/
-@Ignore
-class StringOperatorsDiagnostics extends SparkQueryCompareTestSuite {
-  def generateResults(gen : org.apache.spark.sql.Column => org.apache.spark.sql.Column):
-      (Array[Row], Array[Row]) = {
-    val (testConf, _) = setupTestConfAndQualifierName("", true, false,
-      new SparkConf(), Seq.empty, 0.0, false)
-    runOnCpuAndGpu(TestCodepoints.validCodepointCharsDF,
-      frame => frame.select(gen(col("strings"))), testConf)
-  }
-
-  // utility function to print out detailed information on differences
-  def generateUnicodeDiffs(title  : String,
-      gen: () => (Array[Row], Array[Row])): Unit = {
-    val (fromCpu, fromGpu) = gen()
-
-    println(s"$title ----------------------------------------")
-
-    println("\u001b[1;36mSummary of diffs:\u001b[0m")
-    println("\u001b[1;36mCodepoint:\u001b[0m ")
-    for (i <- fromCpu.indices) {
-      if (fromCpu(i) != fromGpu(i)) {
-        val codepoint = TestCodepoints.validCodepointIndices(i)
-        print(f"$codepoint%5d, ")
-      }
-    }
-    print("\n\n")
-
-    println("\u001b[1;36mDetails:")
-    println("Codepoint       CPU               GPU")
-    println("single -> single mappings\u001b[0m");
-    for (i <- fromCpu.indices) {
-      if (fromCpu(i) != fromGpu(i) && fromCpu(i).getString(0).length == 1) {
-        val codepoint = TestCodepoints.validCodepointIndices(i)
-
-        print(f"(${codepoint.toChar.toString} $codepoint%5d[$codepoint%04x] " +
-          f"(${fromCpu(i).getString(0)}")
-        print(f"${fromCpu(i).getString(0)(0).toInt}%5d[${fromCpu(i).getString(0)(0).toInt}%04x]) ")
-        println(f"${fromGpu(i).getString(0)(0).toInt}%5d[${fromGpu(i).getString(0)(0).toInt}%04x])")
-      }
-    }
-    println("\u001b[1;36msingle -> multi mappings\u001b[0m");
-    for (i <- fromCpu.indices) {
-      if (fromCpu(i) != fromGpu(i) && fromCpu(i).getString(0).length > 1) {
-        val cpu_str = fromCpu(i).getString(0)
-        val gpu_str = fromGpu(i).getString(0)
-
-        val codepoint = TestCodepoints.validCodepointIndices(i)
-        print(f"(${codepoint.toChar.toString} $codepoint[$codepoint%04x]) ($cpu_str ")
-        print(f"${cpu_str.map(c => "%d".format(c.toInt)).mkString(",")}")
-        print("[")
-        print(f"${cpu_str.map(c => "%04x".format(c.toInt)).mkString(",")}")
-        print(f"]) ($gpu_str ")
-        print(f"${gpu_str.map(c => "%d".format(c.toInt)).mkString(",")}")
-        print("[");
-        print(f"${gpu_str.map(c => "%04x".format(c.toInt)).mkString(",")}")
-        println("])");
-      }
-    }
-    println("---------------------------------------------")
-  }
-  // generateUnicodeDiffs("UPPER", () => generateResults(upper))
-  // generateUnicodeDiffs("LOWER", () => generateResults(lower))
-
-  // generates special case character mapping hash table generation input data.
-  def generateCharMappings(): Unit = {
-    class charMapping {
-      var   num_upper = 0
-      val   upper = Array(0, 0, 0)
-      var   num_lower = 0
-      val   lower = Array(0, 0, 0)
-    }
-    val mapping = Array.fill[charMapping](65536)(new charMapping())
-
-    // upper results
-    val (fromCpuUpper, fromGpuUpper) = generateResults(upper)
-    for (i <- fromCpuUpper.indices) {
-      if (fromCpuUpper(i) != fromGpuUpper(i) && fromGpuUpper(i).getString(0).length == 1) {
-        val codepoint = TestCodepoints.validCodepointIndices(i)
-
-        val cpu_str = fromCpuUpper(i).getString(0)
-        mapping(codepoint).num_upper = cpu_str.length
-        for (c <- 0 until cpu_str.length) { mapping(codepoint).upper(c) = cpu_str(c).toInt }
-      }
-    }
-
-    // lower results
-    val (fromCpuLower, fromGpuLower) = generateResults(lower)
-    for (i <- fromCpuLower.indices) {
-      if (fromCpuLower(i) != fromGpuLower(i) && fromGpuLower(i).getString(0).length == 1) {
-        val codepoint = TestCodepoints.validCodepointIndices(i)
-
-        val cpu_str = fromCpuLower(i).getString(0)
-        mapping(codepoint).num_lower = cpu_str.length
-        for (c <- 0 until cpu_str.length) { mapping(codepoint).lower(c) = cpu_str(c).toInt }
-      }
-    }
-
-    // struct declaration
-    println("struct special_case_mapping_in {")
-    println("   uint16_t num_upper_chars;")
-    println("   uint16_t upper[3];")
-    println("   uint16_t num_lower_chars;")
-    println("   uint16_t lower[3];")
-    println("};")
-
-    // mappings
-    println("constexpr special_case_mapping_in codepoint_mapping_in[] = {")
-    for (i <- 0 until 65536) {
-      val mc = mapping(i)
-      if (mc.num_upper != 0 || mc.num_lower != 0) {
-        println(s"   { ${mc.num_upper} {${mc.upper(0)}, ${mc.upper(1)}, ${mc.upper(2)}}, " +
-          s"${mc.num_lower}, {${mc.lower(0)}, ${mc.lower(1)}, ${mc.lower(2)}} },")
-      }
-    }
-    println("};")
-
-    // codepoints
-    println("constexpr uint16_t codepoints_in[] = {\n")
-    var count = 0
-    for (i <- 0 until 65536) {
-      val mc = mapping(i)
-      if (mc.num_upper != 0 || mc.num_lower != 0) {
-        print(s"   $i,")
-        count = count + 1
-        if (count > 0 && count % 10 == 0) {
-          println("")
-        }
-      }
-    }
-    println("\n};")
-  }
-  // generateCharMappings()
 }

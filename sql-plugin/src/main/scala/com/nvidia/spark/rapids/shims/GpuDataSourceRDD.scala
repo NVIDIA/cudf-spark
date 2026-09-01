@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids.shims
 
-import com.nvidia.spark.rapids.{MetricsBatchIterator, PartitionIterator}
+import com.nvidia.spark.rapids.{FileSystemBytesReadTracker, MetricsBatchIterator, PartitionIterator}
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
 
 import org.apache.spark.{InterruptibleIterator, Partition, SparkContext, SparkException, TaskContext}
@@ -26,11 +26,9 @@ import org.apache.spark.sql.connector.read.{InputPartition, PartitionReaderFacto
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /**
- * A replacement for DataSourceRDD that does NOT compute the bytes read input metric.
- * DataSourceRDD assumes all reads occur on the task thread, and some GPU input sources
- * use multithreaded readers that cannot generate proper metrics with DataSourceRDD.
- * @note It is the responsibility of users of this RDD to generate the bytes read input
- *       metric explicitly!
+ * A replacement for DataSourceRDD that combines task-thread filesystem bytes with explicit
+ * bytes reported by multithreaded GPU readers. Unlike Spark's DataSourceRDD, task-thread bytes
+ * are added as deltas so metric updates do not overwrite bytes reported by worker threads.
  */
 class GpuDataSourceRDD(
     sc: SparkContext,
@@ -55,17 +53,30 @@ class GpuDataSourceRDD(
   }
 
   override def compute(split: Partition, context: TaskContext): Iterator[InternalRow] = {
+    val bytesReadTracker = FileSystemBytesReadTracker.forTask(context)
 
     val iterator = new Iterator[Object] {
       private val inputPartitions = castPartition(split).inputPartitions
       private var currentIter: Option[Iterator[Object]] = None
       private var currentIndex: Int = 0
 
-      override def hasNext: Boolean = currentIter.exists(_.hasNext) || advanceToNextIter()
+      override def hasNext: Boolean = {
+        val result = currentIter.exists(_.hasNext) || advanceToNextIter()
+        if (!result) {
+          bytesReadTracker.update()
+        }
+        result
+      }
 
       override def next(): Object = {
-        if (!hasNext) throw new NoSuchElementException("No more elements")
-        currentIter.get.next()
+        try {
+          if (!hasNext) {
+            throw new NoSuchElementException("No more elements")
+          }
+          currentIter.get.next()
+        } finally {
+          bytesReadTracker.update()
+        }
       }
 
       private def advanceToNextIter(): Boolean = {
@@ -82,7 +93,13 @@ class GpuDataSourceRDD(
               new PartitionIterator[ColumnarBatch](batchReader))
             (iter, batchReader)
           }
-          onTaskCompletion(reader.close())
+          onTaskCompletion {
+            try {
+              reader.close()
+            } finally {
+              bytesReadTracker.update()
+            }
+          }
 
           currentIter = Some(iter)
           hasNext
