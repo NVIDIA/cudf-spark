@@ -22,10 +22,10 @@ To enable Hybrid Execution, please set the following configurations:
 ## Build
 ### Build Gluten bundle and third party jars.
 Hybrid execution targets Gluten v1.2.0 code tag.
-For the Gluten building, please refer to [link](https://github.com/apache/incubator-gluten).
+For the Gluten building, please refer to [link](https://github.com/apache/gluten).
 Start the docker Gluten project provided, then execute the following
 ```bash
-git clone https://github.com/apache/incubator-gluten.git
+git clone https://github.com/apache/gluten.git
 git checkout v1.2.0
 # Cherry pick a fix from main branch: Fix ObjectStore::stores initialized twice issue
 git cherry-pick 2a6a974d6fbaa38869eb9a0b91b2e796a578884c
@@ -56,5 +56,5 @@ the Rapids hybrid jar) in the classpath by specifying:
 - Only tested Java versions: 8, 11, 17
 - Only supports V1 Parquet data source.
 - Only supports Scala 2.12, do not support Scala 2.13.
-- Support Spark 3.2.2, 3.3.1, 3.4.2, and 3.5.1, matching [Gluten](https://github.com/apache/incubator-gluten/releases/tag/v1.2.0).
+- Support Spark 3.2.2, 3.3.1, 3.4.2, and 3.5.1, matching [Gluten](https://github.com/apache/gluten/releases/tag/v1.2.0).
 Other Spark versions 32x, 33x, 34x, 35x may work, but are not fully tested.

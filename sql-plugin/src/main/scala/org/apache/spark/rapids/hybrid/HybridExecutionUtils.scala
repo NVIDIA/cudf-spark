@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -191,7 +191,7 @@ object HybridExecutionUtils extends PredicateHelper {
   }
 
   // scalastyle:off line.size.limit
-  // from https://github.com/apache/incubator-gluten/blob/branch-1.2/docs/velox-backend-support-progress.md
+  // from https://github.com/apache/gluten/blob/branch-1.2/docs/velox-backend-support-progress.md
   // and test_hybrid_parquet_filter_pushdown_more_exprs.py
   // scalastyle:on
   val ansiOn = Seq(
