@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -279,6 +279,19 @@ object GpuSemaphore {
 
   def memToPermitsWithMax(memory: Long): Long = math.min(computeMaxPermits(), memToPermits(memory))
 
+  /**
+   * Number of permits a task needs for a given memory estimate, after applying the adaptive
+   * back-pressure factor (1.0, i.e. no-op, when the feature is disabled). A factor > 1.0 inflates
+   * the estimate so each task consumes more permits, reducing the number of tasks allowed on the
+   * GPU concurrently. The result is still clamped to the max permits by `memToPermitsWithMax`, so
+   * at peak back-pressure a single task can take all permits (concurrency of 1).
+   */
+  def permitsForEstimate(memory: Long): Long = {
+    val factor = PressureMonitor.factor()
+    val adjusted = if (factor > 1.0) (memory.toDouble * factor).toLong else memory
+    memToPermitsWithMax(adjusted)
+  }
+
   private def computeMaxPermits(): Long = memToPermits(GpuDeviceManager.getMemorySize)
 
   private def isDynamicEnabled(conf: SQLConf): Boolean = {
@@ -423,8 +436,8 @@ private final class SemaphoreTaskInfo(val stageId: Int, val taskAttemptId: Long,
         if (!done && shouldBlockOnSemaphore) {
           // We cannot be in a synchronized block and wait on the semaphore
           // so we have to release it and grab it again afterwards.
-          val used = semaphore.acquire(() => 
-              GpuSemaphore.memToPermitsWithMax(memoryEstimator.estimate()),
+          val used = semaphore.acquire(() =>
+              GpuSemaphore.permitsForEstimate(memoryEstimator.estimate()),
             () => lastAcquired > 0,
             TaskPriority.getTaskPriority(taskAttemptId), taskAttemptId)
           synchronized {
@@ -469,7 +482,7 @@ private final class SemaphoreTaskInfo(val stageId: Int, val taskAttemptId: Long,
     } else {
       if (blockedThreads.size() == 0) {
         // No other threads for this task are waiting, so we might be able to grab this directly
-        val numPermits = GpuSemaphore.memToPermitsWithMax(memoryEstimator.estimate())
+        val numPermits = GpuSemaphore.permitsForEstimate(memoryEstimator.estimate())
         val ret = semaphore.tryAcquire(numPermits,
           TaskPriority.getTaskPriority(taskAttemptId),
           () => lastAcquired > 0,

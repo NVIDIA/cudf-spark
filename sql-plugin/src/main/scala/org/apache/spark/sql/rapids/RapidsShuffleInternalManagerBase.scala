@@ -1070,7 +1070,10 @@ class BytesInFlightLimiter(maxBytesInFlight: Long) {
       true
     } else {
       synchronized {
-        if (inFlight == 0 || sz + inFlight < maxBytesInFlight) {
+        // The effective budget is scaled down by the adaptive back-pressure factor (a no-op
+        // when the feature is off). The `inFlight == 0` clause always admits one item, so a
+        // shrunk budget throttles host serialization without deadlocking.
+        if (inFlight == 0 || sz + inFlight < PressureMonitor.scaleHostLimit(maxBytesInFlight)) {
           inFlight += sz
           true
         } else {

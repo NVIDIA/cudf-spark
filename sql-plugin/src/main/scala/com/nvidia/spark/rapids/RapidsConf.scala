@@ -683,6 +683,45 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       .integerConf
       .createWithDefault(0)
 
+  val ADAPTIVE_BACKPRESSURE_ENABLED = conf("spark.rapids.adaptive.backpressure.enabled")
+      .doc("Enable the executor-level adaptive back-pressure monitor that dynamically " +
+        "reduces GPU task concurrency when JVM GC time or GPU device-memory utilization " +
+        "crosses a guard threshold. This adapts the effective concurrentGpuTasks at runtime " +
+        "to avoid GC-driven executor loss, instead of relying on a statically tuned value. " +
+        "Disabled by default.")
+      .internal()
+      .booleanConf
+      .createWithDefault(false)
+
+  val ADAPTIVE_BACKPRESSURE_GC_GUARD = conf("spark.rapids.adaptive.backpressure.gcGuard")
+      .doc("When adaptive back-pressure is enabled, the JVM GC time fraction (GC ms per " +
+        "wall ms, sampled periodically) at or above which back-pressure is increased.")
+      .internal()
+      .doubleConf
+      .createWithDefault(0.12)
+
+  val ADAPTIVE_BACKPRESSURE_DEVICE_GUARD = conf("spark.rapids.adaptive.backpressure.deviceGuard")
+      .doc("When adaptive back-pressure is enabled, the GPU device-memory utilization ratio " +
+        "(RMM allocated / pool size) at or above which back-pressure is increased.")
+      .internal()
+      .doubleConf
+      .createWithDefault(0.9)
+
+  val ADAPTIVE_BACKPRESSURE_SAMPLE_MS = conf("spark.rapids.adaptive.backpressure.sampleMs")
+      .doc("When adaptive back-pressure is enabled, the sampling interval in milliseconds " +
+        "for the GC and device-memory monitor.")
+      .internal()
+      .longConf
+      .createWithDefault(200L)
+
+  val ADAPTIVE_BACKPRESSURE_MAX_FACTOR = conf("spark.rapids.adaptive.backpressure.maxFactor")
+      .doc("When adaptive back-pressure is enabled, the maximum multiplicative factor applied " +
+        "to the per-task GPU memory estimate (higher means fewer concurrent GPU tasks at peak " +
+        "back-pressure).")
+      .internal()
+      .doubleConf
+      .createWithDefault(8.0)
+
   val GPU_BATCH_SIZE_BYTES = conf("spark.rapids.sql.batchSizeBytes")
     .doc("Set the target number of bytes for a GPU batch. Splits sizes for input data " +
       "is covered by separate configs.")
@@ -3475,6 +3514,16 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val concurrentGpuTasks: Option[Integer] = get(CONCURRENT_GPU_TASKS)
 
   lazy val maxConcurrentGpuTasks: Integer = get(MAX_CONCURRENT_GPU_TASKS)
+
+  lazy val adaptiveBackpressureEnabled: Boolean = get(ADAPTIVE_BACKPRESSURE_ENABLED)
+
+  lazy val adaptiveBackpressureGcGuard: Double = get(ADAPTIVE_BACKPRESSURE_GC_GUARD)
+
+  lazy val adaptiveBackpressureDeviceGuard: Double = get(ADAPTIVE_BACKPRESSURE_DEVICE_GUARD)
+
+  lazy val adaptiveBackpressureSampleMs: Long = get(ADAPTIVE_BACKPRESSURE_SAMPLE_MS)
+
+  lazy val adaptiveBackpressureMaxFactor: Double = get(ADAPTIVE_BACKPRESSURE_MAX_FACTOR)
 
   lazy val isTestEnabled: Boolean = get(TEST_CONF)
 

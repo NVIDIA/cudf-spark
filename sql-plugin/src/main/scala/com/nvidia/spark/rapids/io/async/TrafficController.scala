@@ -20,7 +20,7 @@ import java.util.concurrent.Callable
 import java.util.concurrent.locks.ReentrantLock
 import javax.annotation.concurrent.GuardedBy
 
-import com.nvidia.spark.rapids.{RapidsConf, TaskRegistryTracker}
+import com.nvidia.spark.rapids.{PressureMonitor, RapidsConf, TaskRegistryTracker}
 
 /**
  * Simple wrapper around a [[Callable]] that also keeps track of the host memory bytes used by
@@ -66,7 +66,11 @@ class HostMemoryThrottle(val maxInFlightHostMemoryBytes: Long) extends Throttle 
   private var totalHostMemoryBytes: Long = 0
 
   override def canAccept[T](task: Task[T]): Boolean = {
-    totalHostMemoryBytes + task.hostMemoryBytes <= maxInFlightHostMemoryBytes
+    // The effective budget is scaled down by the adaptive back-pressure factor (a no-op when
+    // the feature is off). TrafficController always admits a task when none are in flight, so a
+    // shrunk budget throttles async host IO without deadlocking.
+    totalHostMemoryBytes + task.hostMemoryBytes <= PressureMonitor.scaleHostLimit(
+      maxInFlightHostMemoryBytes)
   }
 
   override def taskScheduled[T](task: Task[T]): Unit = {
