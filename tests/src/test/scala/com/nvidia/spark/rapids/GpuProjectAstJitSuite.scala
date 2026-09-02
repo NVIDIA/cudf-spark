@@ -342,7 +342,7 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
 
     assert(all.contains("TIER 0"), all)
     assert(all.contains("AST_JIT"), all)
-    assert(all.contains("final backend: Project AST JIT"), all)
+    assert(all.contains("final backend: AST JIT"), all)
     assert(all.contains("TIER 1"), all)
     assert(all.contains("final backend: the regular GPU projection"), all)
     assertResult("")(
@@ -446,15 +446,15 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     val selections = Seq(Seq(jit, legacy, subtract))
 
     val all = GpuAstJitExpression.explainFinalSelections(selections, all = true)
-    assert(all.contains("final backend: Project AST JIT"), all)
-    assert(all.contains("final backend: legacy Project AST"), all)
+    assert(all.contains("final backend: AST JIT"), all)
+    assert(all.contains("final backend: AST\n"), all)
     assert(all.contains("final backend: the regular GPU projection"), all)
     assertResult("")(
       GpuAstJitExpression.explainFinalSelections(Seq(Seq(jit)), all = false))
 
     val notOnGpu = GpuAstJitExpression.explainFinalSelections(selections, all = false)
-    assert(!notOnGpu.contains("final backend: Project AST JIT"), notOnGpu)
-    assert(notOnGpu.contains("final backend: legacy Project AST"), notOnGpu)
+    assert(!notOnGpu.contains("final backend: AST JIT"), notOnGpu)
+    assert(notOnGpu.contains("final backend: AST\n"), notOnGpu)
     assert(notOnGpu.contains("final backend: the regular GPU projection"), notOnGpu)
   }
 
@@ -519,6 +519,46 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     verify(secondProgram, times(1)).close()
     verify(ownerCompiled, times(1)).close()
     verify(siblingCompiled, times(1)).close()
+  }
+
+  test("project AST JIT uses singleton programs when multi-output is disabled") {
+    val first = GpuAstJitExpression(mock(classOf[GpuExpression]), groupId = 1)
+    val second = GpuAstJitExpression(mock(classOf[GpuExpression]), groupId = 1)
+    val third = GpuAstJitExpression(mock(classOf[GpuExpression]), groupId = 2)
+    val expressions = Seq(first, second, third)
+
+    val multiOutputGroups = GpuAstJitExpression.executionGroups(
+      expressions, multiOutputEnabled = true)
+    assertResult(Seq(Seq(first, second), Seq(third)))(multiOutputGroups)
+
+    val singletonGroups = GpuAstJitExpression.executionGroups(
+      expressions, multiOutputEnabled = false)
+    assertResult(Seq(Seq(first), Seq(second), Seq(third)))(singletonGroups)
+  }
+
+  test("project AST JIT reuses a singleton program") {
+    val compiled = mock(classOf[CompiledExpression])
+    val program = mock(classOf[AstJitProgram])
+    val boundReference = GpuBoundReference(0, IntegerType, nullable = true)(
+      NamedExpression.newExprId, "c0")
+    val jit = new GpuAstJitExpression(boundReference) {
+      override protected def compileAst(ast: AstExpression): CompiledExpression = compiled
+
+      override protected def compileJitProgram(
+          table: Table,
+          expressions: Array[CompiledExpression]): AstJitProgram = {
+        assertResult(Seq(compiled))(expressions.toSeq)
+        program
+      }
+    }
+
+    TestUtils.withMockTaskContext() {
+      assert(jit.getJitProgram(Seq(jit), mockTable(nullable = false)) eq program)
+      assert(jit.getJitProgram(Seq(jit), mockTable(nullable = false)) eq program)
+      verify(program, times(0)).close()
+    }
+    verify(program, times(1)).close()
+    verify(compiled, times(1)).close()
   }
 
   test("project AST JIT cleans up when task completion registration fails") {

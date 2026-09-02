@@ -177,16 +177,16 @@ object GpuProjectExec {
             val jitExpressions = astExpressions.collect {
               case jitExpression: GpuAstJitExpression => jitExpression
             }
-            val multiOutputGroups = GpuAstJitExpression.outputGroups(jitExpressions)
-                .filter(_.size > 1)
-            if (multiOutputGroups.nonEmpty &&
-                RapidsConf.ENABLE_PROJECT_AST_JIT_MULTI_OUTPUT.get(SQLConf.get)) {
-              val jitBatches = multiOutputGroups.safeMap(
+            val jitGroups = GpuAstJitExpression.executionGroups(
+              jitExpressions,
+              RapidsConf.ENABLE_PROJECT_AST_JIT_MULTI_OUTPUT.get(SQLConf.get))
+            if (jitGroups.nonEmpty) {
+              val jitBatches = jitGroups.safeMap(
                 GpuAstJitExpression.computeColumns(_, table))
               withResource(jitBatches) { _ =>
                 val jitColumns = new IdentityHashMap[
                   GpuAstJitExpression, ArrayDeque[GpuColumnVector]]()
-                multiOutputGroups.zip(jitBatches).foreach { case (group, batch) =>
+                jitGroups.zip(jitBatches).foreach { case (group, batch) =>
                   group.zipWithIndex.foreach { case (jitExpression, index) =>
                     var columns = jitColumns.get(jitExpression)
                     if (columns == null) {
@@ -200,13 +200,9 @@ object GpuProjectExec {
                   GpuProjectAstExpressionBase.extractTopLevel(expression) match {
                     case Some(jitExpression: GpuAstJitExpression) =>
                       val columns = jitColumns.get(jitExpression)
-                      if (columns == null) {
-                        jitExpression.computeColumn(table)
-                      } else {
-                        require(!columns.isEmpty,
-                          s"Missing multi-output AST JIT column for $jitExpression")
-                        columns.removeFirst().incRefCount()
-                      }
+                      require(columns != null && !columns.isEmpty,
+                        s"Missing AST JIT program output for $jitExpression")
+                      columns.removeFirst().incRefCount()
                     case Some(astExpression) => astExpression.computeColumn(table)
                     case None => expression.columnarEval(cb)
                   }

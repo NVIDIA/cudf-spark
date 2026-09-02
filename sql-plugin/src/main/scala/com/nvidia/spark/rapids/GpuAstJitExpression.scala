@@ -35,23 +35,34 @@ object GpuAstJitExpression {
       dataType: DType,
       nullable: Boolean)
 
-  private final case class JitProgramKey(
-      expressions: Vector[GpuExpression],
-      inputSchema: Vector[JitInputColumn])
+  private final class JitProgramGroup(
+      val expressions: Vector[GpuAstJitExpression],
+      val referencedOrdinals: Vector[Int]) {
+    def matches(other: Seq[GpuAstJitExpression]): Boolean = {
+      expressions.size == other.size &&
+        expressions.iterator.zip(other.iterator).forall { case (left, right) => left eq right }
+    }
+  }
 
-  private def programKey(
-      expressions: Seq[GpuAstJitExpression],
-      table: Table): JitProgramKey = {
-    val referencedOrdinals = expressions.iterator.flatMap { expression =>
-      expression.child.collect {
-        case reference: GpuBoundReference => reference.ordinal
-      }
-    }.toSet.toVector.sorted
-    val inputSchema = referencedOrdinals.map { ordinal =>
+  private object JitProgramGroup {
+    def apply(expressions: Seq[GpuAstJitExpression]): JitProgramGroup = {
+      val roots = expressions.toVector
+      val referencedOrdinals = roots.iterator.flatMap { expression =>
+        expression.child.collect {
+          case reference: GpuBoundReference => reference.ordinal
+        }
+      }.toSet.toVector.sorted
+      new JitProgramGroup(roots, referencedOrdinals)
+    }
+  }
+
+  private def inputSchema(
+      group: JitProgramGroup,
+      table: Table): Vector[JitInputColumn] = {
+    group.referencedOrdinals.map { ordinal =>
       val column = table.getColumn(ordinal)
       JitInputColumn(ordinal, column.getType, column.hasValidityVector)
     }
-    JitProgramKey(expressions.map(_.child).toVector, inputSchema)
   }
 
   private final case class JitRoot(
@@ -236,10 +247,20 @@ object GpuAstJitExpression {
     groups.values.map(_.toSeq).toSeq
   }
 
+  private[rapids] def executionGroups(
+      expressions: Seq[GpuAstJitExpression],
+      multiOutputEnabled: Boolean): Seq[Seq[GpuAstJitExpression]] = {
+    if (multiOutputEnabled) {
+      outputGroups(expressions)
+    } else {
+      expressions.map(Seq(_))
+    }
+  }
+
   private[rapids] def computeColumns(
       expressions: Seq[GpuAstJitExpression],
       table: Table): ColumnarBatch = {
-    require(expressions.size > 1, "Multi-output AST JIT requires at least two expressions")
+    require(expressions.nonEmpty, "AST JIT requires at least one expression")
     val owner = expressions.head
     val program = owner.getJitProgram(expressions, table)
     owner.withComputeMetrics {
@@ -257,8 +278,8 @@ object GpuAstJitExpression {
 
   private def finalBackend(expression: Expression): String = {
     GpuProjectAstExpressionBase.extractTopLevel(expression) match {
-      case Some(_: GpuAstJitExpression) => "Project AST JIT"
-      case Some(_: GpuProjectAstExpression) => "legacy Project AST"
+      case Some(_: GpuAstJitExpression) => "AST JIT"
+      case Some(_: GpuProjectAstExpression) => "AST"
       case _ => "the regular GPU projection"
     }
   }
@@ -285,7 +306,8 @@ case class GpuAstJitExpression(child: GpuExpression, groupId: Int = 0)
     extends GpuProjectAstExpressionBase with Retryable {
 
   @transient private[this] var jitProgram: AstJitProgram = _
-  @transient private[this] var jitProgramKey: GpuAstJitExpression.JitProgramKey = _
+  @transient private[this] var jitProgramGroup: GpuAstJitExpression.JitProgramGroup = _
+  @transient private[this] var jitProgramSchema: Vector[GpuAstJitExpression.JitInputColumn] = _
 
   override def disableTieredProjectCombine: Boolean = true
 
@@ -305,15 +327,22 @@ case class GpuAstJitExpression(child: GpuExpression, groupId: Int = 0)
       expressions: Seq[GpuAstJitExpression],
       table: Table): AstJitProgram = synchronized {
     require(expressions.head eq this, "The first AST JIT expression must own the group program")
-    val key = GpuAstJitExpression.programKey(expressions, table)
-    if (jitProgram == null || jitProgramKey != key) {
-      val compiledExpressions = expressions.map(_.getCompiledExpression).toArray
+    val groupMatches = jitProgramGroup != null && jitProgramGroup.matches(expressions)
+    val group = if (groupMatches) {
+      jitProgramGroup
+    } else {
+      GpuAstJitExpression.JitProgramGroup(expressions)
+    }
+    val schema = GpuAstJitExpression.inputSchema(group, table)
+    if (jitProgram == null || !groupMatches || jitProgramSchema != schema) {
+      val compiledExpressions = group.expressions.map(_.getCompiledExpression).toArray
       val replacement = withCompileMetrics {
         compileJitProgram(table, compiledExpressions)
       }
       val previous = jitProgram
       jitProgram = replacement
-      jitProgramKey = key
+      jitProgramGroup = group
+      jitProgramSchema = schema
       Option(previous).foreach(_.safeClose())
     }
     jitProgram
@@ -322,7 +351,8 @@ case class GpuAstJitExpression(child: GpuExpression, groupId: Int = 0)
   override protected def releaseAdditionalResources(): Seq[AutoCloseable] = {
     val current = jitProgram
     jitProgram = null
-    jitProgramKey = null
+    jitProgramGroup = null
+    jitProgramSchema = null
     Option(current).toSeq
   }
 
