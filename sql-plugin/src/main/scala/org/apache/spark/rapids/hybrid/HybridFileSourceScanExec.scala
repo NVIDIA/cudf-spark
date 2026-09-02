@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -137,7 +137,7 @@ case class HybridFileSourceScanExec(originPlan: FileSourceScanExec
 
   override lazy val allMetrics: Map[String, GpuMetric] = {
     val mapBuilder = Map.newBuilder[String, GpuMetric]
-    mapBuilder += OP_TIME_NEW -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_OP_TIME_NEW)
+    mapBuilder += OP_TIME_NEW -> createOpTimeMetric(DESCRIPTION_OP_TIME_NEW)
     mapBuilder += SCAN_TIME -> createNanoTimingMetric(ESSENTIAL_LEVEL, "TotalTime")
     // Add common embedded metrics
     hybridCommonMetrics.foreach { case (key, generator) =>

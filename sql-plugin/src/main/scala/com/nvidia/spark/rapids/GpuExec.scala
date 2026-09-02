@@ -152,6 +152,9 @@ trait GpuExec extends SparkPlan with Logging {
   def createNanoTimingMetric(level: MetricsLevel, name: String): GpuMetric =
     metricFactory.createNanoTiming(level, name)
 
+  def createOpTimeMetric(name: String): GpuMetric =
+    metricFactory.createOpTime(name)
+
   def createSizeMetric(level: MetricsLevel, name: String): GpuMetric =
     metricFactory.createSize(level, name)
 
@@ -196,7 +199,7 @@ trait GpuExec extends SparkPlan with Logging {
   lazy val allMetrics: Map[String, GpuMetric] = Map(
     NUM_OUTPUT_ROWS -> createMetric(outputRowsLevel, DESCRIPTION_NUM_OUTPUT_ROWS),
     NUM_OUTPUT_BATCHES -> createMetric(outputBatchesLevel, DESCRIPTION_NUM_OUTPUT_BATCHES),
-    OP_TIME_NEW -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_OP_TIME_NEW)) ++
+    OP_TIME_NEW -> createOpTimeMetric(DESCRIPTION_OP_TIME_NEW)) ++
       additionalMetrics
 
   def gpuLongMetric(name: String): GpuMetric = allMetrics(name)

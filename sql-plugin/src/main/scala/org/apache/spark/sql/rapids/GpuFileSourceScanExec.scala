@@ -392,7 +392,7 @@ case class GpuFileSourceScanExec(
   }
 
   override lazy val allMetrics = Map(
-    OP_TIME_NEW -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_OP_TIME_NEW),
+    OP_TIME_NEW -> createOpTimeMetric(DESCRIPTION_OP_TIME_NEW),
     NUM_OUTPUT_ROWS -> createMetric(ESSENTIAL_LEVEL, DESCRIPTION_NUM_OUTPUT_ROWS),
     NUM_OUTPUT_BATCHES -> createMetric(MODERATE_LEVEL, DESCRIPTION_NUM_OUTPUT_BATCHES),
     "numFiles" -> createMetric(ESSENTIAL_LEVEL, "number of files read"),

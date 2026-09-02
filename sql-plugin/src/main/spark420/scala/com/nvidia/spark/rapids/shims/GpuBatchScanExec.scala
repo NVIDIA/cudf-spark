@@ -67,7 +67,7 @@ case class GpuBatchScanExec(
     Map(
       NUM_OUTPUT_ROWS -> outputRows,
       NUM_OUTPUT_BATCHES -> createMetric(outputBatchesLevel, DESCRIPTION_NUM_OUTPUT_BATCHES),
-      OP_TIME_NEW -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_OP_TIME_NEW)) ++
+      OP_TIME_NEW -> createOpTimeMetric(DESCRIPTION_OP_TIME_NEW)) ++
       additionalMetrics
   }
 

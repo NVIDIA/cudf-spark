@@ -61,29 +61,36 @@ object MetricsLevel {
 
 class GpuMetricFactory(metricsConf: MetricsLevel, context: SparkContext) {
 
-  private [this] def createInternal(level: MetricsLevel, f: => SQLMetric): GpuMetric = {
+  private [this] def createInternal(
+      level: MetricsLevel,
+      metricsExclSemWaitLevel: MetricsLevel,
+      f: => SQLMetric): GpuMetric = {
     if (level >= metricsConf) {
-      // only enable companion metrics (excluding semaphore wait time) for DEBUG_LEVEL
-      WrappedGpuMetric(f, withMetricsExclSemWait = GpuMetric.DEBUG_LEVEL >= metricsConf)
+      WrappedGpuMetric(f, withMetricsExclSemWait = metricsExclSemWaitLevel >= metricsConf)
     } else {
       NoopMetric
     }
   }
 
   def create(level: MetricsLevel, name: String): GpuMetric =
-    createInternal(level, SQLMetrics.createMetric(context, name))
+    createInternal(level, GpuMetric.DEBUG_LEVEL, SQLMetrics.createMetric(context, name))
 
   def createNanoTiming(level: MetricsLevel, name: String): GpuMetric =
-    createInternal(level, SQLMetrics.createNanoTimingMetric(context, name))
+    createInternal(level, GpuMetric.DEBUG_LEVEL, SQLMetrics.createNanoTimingMetric(context, name))
+
+  /** Create operator timing metrics with semaphore-excluded companions at MODERATE level. */
+  def createOpTime(name: String): GpuMetric =
+    createInternal(GpuMetric.MODERATE_LEVEL, GpuMetric.MODERATE_LEVEL,
+      SQLMetrics.createNanoTimingMetric(context, name))
 
   def createSize(level: MetricsLevel, name: String): GpuMetric =
-    createInternal(level, SQLMetrics.createSizeMetric(context, name))
+    createInternal(level, GpuMetric.DEBUG_LEVEL, SQLMetrics.createSizeMetric(context, name))
 
   def createAverage(level: MetricsLevel, name: String): GpuMetric =
-    createInternal(level, SQLMetrics.createAverageMetric(context, name))
+    createInternal(level, GpuMetric.DEBUG_LEVEL, SQLMetrics.createAverageMetric(context, name))
 
   def createTiming(level: MetricsLevel, name: String): GpuMetric =
-    createInternal(level, SQLMetrics.createTimingMetric(context, name))
+    createInternal(level, GpuMetric.DEBUG_LEVEL, SQLMetrics.createTimingMetric(context, name))
 }
 
 object GpuMetric extends Logging {
