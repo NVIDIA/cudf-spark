@@ -94,7 +94,7 @@ private class ByteArrayOutputFile(stream: ByteArrayOutputStream) extends OutputF
 
       override def write(b: Int): Unit = {
         super.write(b)
-        pos += Integer.BYTES
+        pos += 1
       }
 
       override def write(b: Array[Byte]): Unit = {
