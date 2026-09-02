@@ -38,7 +38,6 @@ import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric._
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
-import com.nvidia.spark.rapids.jni.DeletionVectorUtils
 import com.nvidia.spark.rapids.jni.fileio.RapidsFileIO
 import com.nvidia.spark.rapids.parquet._
 import org.apache.hadoop.conf.Configuration
@@ -193,7 +192,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
       serializedBitmap, false, rowGroupOffsets, rowGroupNumRows)
     GpuSemaphore.acquireIfNecessary(TaskContext.get())
     RmmRapidsRetryIterator.withRetryNoSplit {
-      DeletionVectorUtils.computeNumDeletedRows(dvInfo, maxChunkRows)
+      DeletionVector.computeNumDeletedRows(dvInfo, maxChunkRows)
     }
   }
 
