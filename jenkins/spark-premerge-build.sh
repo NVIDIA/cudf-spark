@@ -184,36 +184,16 @@ run_iceberg_version_detect_tests() {
     local scala_ver=${2:?'scala_ver is required'}
     echo "Running Iceberg version detection tests for Spark $spark_ver (Scala $scala_ver)..."
 
-    local iceberg_spark_ver
-    iceberg_spark_ver=$(echo "$spark_ver" | cut -d. -f1,2)
-    local spark_patch_ver
-    spark_patch_ver=$(echo "$spark_ver" | cut -d. -f3)
-
-    if [[ "$iceberg_spark_ver" != "3.5" && "$iceberg_spark_ver" != "4.0" \
-          && "$iceberg_spark_ver" != "4.1" ]]; then
-        echo "!!!! Skipping Iceberg version detection. Not supported on Spark $iceberg_spark_ver"
+    local iceberg_versions
+    iceberg_versions=$(python jenkins/get_iceberg_versions.py \
+        --spark-version "$spark_ver") || return 1
+    if [[ -z "$iceberg_versions" ]]; then
+        echo "!!!! Skipping Iceberg version detection. No supported Iceberg version for Spark $spark_ver"
         return 0
     fi
 
-    # Supported Iceberg versions per Spark version. The 3.5.x / 4.0.x rows mirror
-    # run_iceberg_tests() in spark-tests.sh. The Spark 4.1 -> 1.11.0 row is kept here
-    # for callers that explicitly test Spark 4.1, while the regular pre-merge job
-    # below runs on Spark 4.0.1. Spark 4.1 is covered by nightly run_iceberg_tests().
-    local iceberg_versions
-    if [[ "$iceberg_spark_ver" == "4.1" ]]; then
-        iceberg_versions="1.11.0"
-    elif [[ "$iceberg_spark_ver" == "4.0" ]]; then
-        if [[ "$spark_patch_ver" -ge 2 ]]; then
-            iceberg_versions="1.10.1 1.11.0"
-        else
-            iceberg_versions="1.10.1"
-        fi
-    elif [[ "$spark_patch_ver" -le 3 ]]; then
-        iceberg_versions="1.6.1"
-    else
-        iceberg_versions="1.9.2 1.10.1"
-    fi
-
+    local iceberg_spark_ver
+    iceberg_spark_ver=$(echo "$spark_ver" | cut -d. -f1,2)
     for ICEBERG_VERSION in $iceberg_versions; do
         echo "!!! Running iceberg version detection test for Iceberg $ICEBERG_VERSION"
         EXPECTED_ICEBERG_VERSION=${ICEBERG_VERSION} \

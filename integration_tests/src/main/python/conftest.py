@@ -119,6 +119,10 @@ def is_iceberg_remote_catalog():
     v = os.environ.get('ICEBERG_TEST_REMOTE_CATALOG')
     return v == "1"
 
+def is_iceberg_test_fast_run():
+    v = os.environ.get('ICEBERG_TEST_FAST_RUN')
+    return v == "1"
+
 def is_iceberg_rest_catalog():
     v = os.environ.get('ICEBERG_TEST_CATALOG_TYPE')
     return v == "rest"

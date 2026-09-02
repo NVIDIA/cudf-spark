@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 pytest
+PyYAML
 sre_yield
 pandas
 pyarrow == 17.0.0 ; python_version == '3.8'

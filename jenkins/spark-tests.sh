@@ -357,73 +357,63 @@ run_iceberg_tests() {
   ICEBERG_SPARK_VER=$(echo "$SPARK_VER" | cut -d. -f1,2)
   # get the patch version of Spark
   SPARK_PATCH_VER=$(echo "$SPARK_VER" | cut -d. -f3)
-
-  if [[ "$ICEBERG_SPARK_VER" != "3.5" && "$ICEBERG_SPARK_VER" != "4.0" \
-        && "$ICEBERG_SPARK_VER" != "4.1" ]]; then
-    echo "!!!! Skipping Iceberg tests. GPU acceleration of Iceberg is not supported on $ICEBERG_SPARK_VER"
-    return 0
-  fi
-
-  # Supported Iceberg versions per Spark patch version:
-  # Spark 3.5.0-3.5.3 -> Iceberg 1.6.1
-  # Spark 3.5.4+       -> Iceberg 1.9.2, 1.10.1
-  # Spark 4.0.0-4.0.1 -> Iceberg 1.10.1
-  # Spark 4.0.2+       -> Iceberg 1.10.1, 1.11.0
-  # Spark 4.1.x        -> Iceberg 1.11.0
-  local supported_versions
-  if [[ "$ICEBERG_SPARK_VER" == "4.1" ]]; then
-    if [[ "$SCALA_BINARY_VER" != "2.13" ]]; then
-      echo "!!!! Skipping Iceberg tests. Spark 4.1 Iceberg tests require Scala 2.13"
-      return 0
-    fi
-    supported_versions="1.11.0"
-  elif [[ "$ICEBERG_SPARK_VER" == "4.0" ]]; then
-    if [[ "$SCALA_BINARY_VER" != "2.13" ]]; then
-      echo "!!!! Skipping Iceberg tests. Spark 4.0 Iceberg tests require Scala 2.13"
-      return 0
-    fi
-    if [[ "$SPARK_PATCH_VER" -ge 2 ]]; then
-      supported_versions="1.10.1 1.11.0"
-    else
-      supported_versions="1.10.1"
-    fi
-  elif [[ "$SPARK_PATCH_VER" -le 3 ]]; then
-    supported_versions="1.6.1"
-  else
-    supported_versions="1.9.2 1.10.1"
-  fi
-
   local test_type=${1:-'default'}
 
-  if [[ -n "$ICEBERG_VERSIONS" ]]; then
-    for ver in $ICEBERG_VERSIONS; do
-      if ! echo "$supported_versions" | grep -qw "$ver"; then
-        echo "!!!! Error: Iceberg version $ver is not supported on Spark $SPARK_VER (supported: $supported_versions)"
-        return 1
-      fi
-    done
-    echo "Using user-specified ICEBERG_VERSIONS=$ICEBERG_VERSIONS"
-  else
-    # Default: test one representative version per Spark patch range
-    if [[ "$ICEBERG_SPARK_VER" == "4.1" ]]; then
-      ICEBERG_VERSIONS="1.11.0"
-    elif [[ "$ICEBERG_SPARK_VER" == "4.0" ]]; then
-      ICEBERG_VERSIONS="1.10.1"
-    elif [[ "$SPARK_PATCH_VER" -le 3 ]]; then
-      ICEBERG_VERSIONS="1.6.1"
-    elif [[ "$SPARK_PATCH_VER" -le 6 ]]; then
-      ICEBERG_VERSIONS="1.9.2"
-    else
-      ICEBERG_VERSIONS="1.10.1"
+  if [[ "$ICEBERG_SPARK_VER" == "4.0" || "$ICEBERG_SPARK_VER" == "4.1" ]]; then
+    if [[ "$SCALA_BINARY_VER" != "2.13" ]]; then
+      echo "!!!! Skipping Iceberg tests. Spark $ICEBERG_SPARK_VER Iceberg tests require Scala 2.13"
+      return 0
     fi
   fi
-  for ICEBERG_VERSION in $ICEBERG_VERSIONS; do
+
+  local matrix_reader="$WORKSPACE/jenkins/get_iceberg_versions.py"
+  local supported_versions
+  supported_versions=$(python "$matrix_reader" --spark-version "$SPARK_VER") || return 1
+
+  local iceberg_versions
+  local user_specified_versions=false
+  if [[ -n "${ICEBERG_VERSIONS:-}" ]]; then
+    iceberg_versions=$(python "$matrix_reader" \
+      --spark-version "$SPARK_VER" --requested-versions "$ICEBERG_VERSIONS") || return 1
+    user_specified_versions=true
+    echo "Using user-specified ICEBERG_VERSIONS=$ICEBERG_VERSIONS"
+  elif [[ -z "$supported_versions" ]]; then
+    echo "!!!! Skipping Iceberg tests. No supported Iceberg version for Spark $SPARK_VER"
+    return 0
+  elif [[ "$test_type" == "default" ]]; then
+    # Exercise every supported local-catalog combination. Fast mode keeps the
+    # expanded matrix practical while retaining tests that require a local catalog.
+    iceberg_versions="$supported_versions"
+  else
+    # Remote catalogs keep one representative version per Spark patch range.
+    if [[ "$ICEBERG_SPARK_VER" == "4.1" ]]; then
+      iceberg_versions="1.11.0"
+    elif [[ "$ICEBERG_SPARK_VER" == "4.0" ]]; then
+      iceberg_versions="1.10.1"
+    elif [[ "$SPARK_PATCH_VER" -le 3 ]]; then
+      iceberg_versions="1.6.1"
+    elif [[ "$SPARK_PATCH_VER" -le 6 ]]; then
+      iceberg_versions="1.9.2"
+    else
+      iceberg_versions="1.10.1"
+    fi
+    iceberg_versions=$(python "$matrix_reader" \
+      --spark-version "$SPARK_VER" --requested-versions "$iceberg_versions") || return 1
+  fi
+
+  local iceberg_test_fast_run=${ICEBERG_TEST_FAST_RUN:-}
+  if [[ "$test_type" == "default" && "$user_specified_versions" == "false" ]]; then
+    iceberg_test_fast_run=1
+  fi
+
+  for ICEBERG_VERSION in $iceberg_versions; do
     echo "Running Iceberg tests for Iceberg version $ICEBERG_VERSION"
     if [[ "$test_type" == "default" ]]; then
       echo "!!! Running iceberg tests"
       env \
         HOST_NAME=$PROJECT_REPO_HOST \
         EXPECTED_ICEBERG_VERSION=${ICEBERG_VERSION} \
+        ICEBERG_TEST_FAST_RUN="${iceberg_test_fast_run}" \
         PYSP_TEST_spark_driver_memory=1G \
         PYSP_TEST_spark_executor_memory=2G \
         PYSP_TEST_spark_jars_packages=org.apache.iceberg:iceberg-spark-runtime-${ICEBERG_SPARK_VER}_${SCALA_BINARY_VER}:${ICEBERG_VERSION} \
@@ -445,6 +435,7 @@ org.apache.iceberg:iceberg-aws-bundle:${ICEBERG_VERSION}"
             EXPECTED_ICEBERG_VERSION=${ICEBERG_VERSION} \
             ICEBERG_EXTRA_CLASSPATH="${ICEBERG_REST_EXTRA_CLASSPATH}" \
             ICEBERG_TEST_CATALOG_TYPE="rest" \
+            ICEBERG_TEST_FAST_RUN="${iceberg_test_fast_run}" \
             ICEBERG_TEST_REMOTE_CATALOG=1 \
             PYSP_TEST_spark_driver_memory=1G \
             PYSP_TEST_spark_executor_memory=2G \
@@ -503,6 +494,7 @@ com.amazonaws:aws-java-sdk-bundle:${AWS_SDK_BUNDLE_VERSION}"
         HOST_NAME=$PROJECT_REPO_HOST \
         EXPECTED_ICEBERG_VERSION=${ICEBERG_VERSION} \
         ICEBERG_EXTRA_CLASSPATH="${ICEBERG_S3TABLES_EXTRA_CLASSPATH}" \
+        ICEBERG_TEST_FAST_RUN="${iceberg_test_fast_run}" \
         ICEBERG_TEST_REMOTE_CATALOG=1 \
         PYSP_TEST_spark_driver_memory=1G \
         PYSP_TEST_spark_executor_memory=2G \

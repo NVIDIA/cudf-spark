@@ -86,6 +86,8 @@ For manual installation, you need to setup your environment:
 - pytest
   : A framework that makes it easy to write small, readable tests, and can scale to support complex
   functional testing for applications and libraries (requires  Python 3.6+).
+- PyYAML
+  : Parses the Iceberg and Spark integration-test compatibility matrix used by CI.
 - sre_yield
   : Provides a set of APIs to generate string data from a regular expression.
 - pandas
@@ -538,6 +540,10 @@ Some tests require that Apache Iceberg has been configured in the Spark environm
 properly without it. These tests assume Iceberg is not configured and are disabled by default.
 If Spark has been configured to support Iceberg then these tests can be enabled by adding the
 `--iceberg` option to the command.
+
+Set `ICEBERG_TEST_FAST_RUN=1` to skip redundant, high-cost cases while retaining tests that
+specifically require a local Hadoop catalog. CI uses this mode when it expands the supported
+Iceberg and Spark combinations from `jenkins/iceberg-test-matrix.yaml`.
 
 When testing Iceberg package-private access paths, load the local Iceberg runtime jar with
 `ICEBERG_EXTRA_CLASSPATH` instead of `PYSP_TEST_spark_jars` or

@@ -17,7 +17,7 @@ import pytest
 
 from asserts import assert_equal_with_local_sort, assert_gpu_fallback_collect, \
     assert_gpu_fallback_write_sql
-from conftest import is_iceberg_remote_catalog
+from conftest import is_iceberg_remote_catalog, is_iceberg_test_fast_run
 from data_gen import gen_df, copy_and_update
 from iceberg import create_iceberg_table, \
     iceberg_base_table_cols, iceberg_gens_list, get_full_table_name, \
@@ -97,7 +97,8 @@ def test_insert_into_v3_table_fallback(spark_tmp_table_factory):
 @iceberg
 @ignore_order(local=True)
 @allow_non_gpu('AppendDataExec')
-@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
+@pytest.mark.skipif(is_iceberg_remote_catalog() or is_iceberg_test_fast_run(),
+                    reason="Skip for remote catalog or fast Iceberg run to reduce test time")
 @pytest.mark.parametrize("partition_table", [True, False], ids=lambda x: f"partition_table={x}")
 def test_insert_into_unpartitioned_table_values(spark_tmp_table_factory,
                                                 partition_table):
@@ -137,7 +138,8 @@ def test_insert_into_unpartitioned_table_values(spark_tmp_table_factory,
 @iceberg
 @ignore_order(local=True)
 @allow_non_gpu('LocalTableScanExec', 'ShuffleExchangeExec')
-@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
+@pytest.mark.skipif(is_iceberg_remote_catalog() or is_iceberg_test_fast_run(),
+                    reason="Skip for remote catalog or fast Iceberg run to reduce test time")
 @pytest.mark.parametrize("partition_table", [True, False], ids=lambda x: f"partition_table={x}")
 def test_insert_into_table_values_aqe(spark_tmp_table_factory, partition_table):
     """Regression test for GPU V2 writes with AQE and a CPU VALUES input plan."""
@@ -175,7 +177,8 @@ def test_insert_into_table_values_aqe(spark_tmp_table_factory, partition_table):
 
 @iceberg
 @ignore_order(local=True)
-@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
+@pytest.mark.skipif(is_iceberg_remote_catalog() or is_iceberg_test_fast_run(),
+                    reason="Skip for remote catalog or fast Iceberg run to reduce test time")
 def test_insert_into_unpartitioned_table_all_cols(spark_tmp_table_factory):
     table_prop = {"format-version": "2"}
     cols = [f"_c{idx}" for idx, _ in enumerate(iceberg_full_gens_list)]
@@ -241,7 +244,8 @@ def test_insert_into_partitioned_table(spark_tmp_table_factory, partition_col_sq
 @iceberg
 @datagen_overrides(seed=0, reason='https://github.com/NVIDIA/spark-rapids-jni/issues/4016')
 @ignore_order(local=True)
-@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
+@pytest.mark.skipif(is_iceberg_remote_catalog() or is_iceberg_test_fast_run(),
+                    reason="Skip for remote catalog or fast Iceberg run to reduce test time")
 @pytest.mark.parametrize("partition_col_sql", full_coverage_partition_transforms)
 def test_insert_into_partitioned_table_full_coverage(spark_tmp_table_factory, partition_col_sql):
     """Partition-transform coverage anchor: this is the single test that exercises
@@ -254,7 +258,8 @@ def test_insert_into_partitioned_table_full_coverage(spark_tmp_table_factory, pa
 
 @iceberg
 @ignore_order(local=True)
-@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
+@pytest.mark.skipif(is_iceberg_remote_catalog() or is_iceberg_test_fast_run(),
+                    reason="Skip for remote catalog or fast Iceberg run to reduce test time")
 def test_insert_into_partitioned_table_all_cols(spark_tmp_table_factory):
     table_prop = {"format-version": "2"}
     cols = [f"_c{idx}" for idx, _ in enumerate(iceberg_full_gens_list)]
@@ -299,7 +304,8 @@ def test_insert_into_partitioned_table_all_cols(spark_tmp_table_factory):
 @iceberg
 @ignore_order(local=True)
 @allow_non_gpu('AppendDataExec', 'ShuffleExchangeExec', 'ProjectExec')
-@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
+@pytest.mark.skipif(is_iceberg_remote_catalog() or is_iceberg_test_fast_run(),
+                    reason="Skip for remote catalog or fast Iceberg run to reduce test time")
 @pytest.mark.parametrize("file_format", ["orc", "avro"], ids=lambda x: f"file_format={x}")
 def test_insert_into_table_unsupported_file_format_fallback(
         spark_tmp_table_factory, file_format):
@@ -322,7 +328,8 @@ def test_insert_into_table_unsupported_file_format_fallback(
 @iceberg
 @ignore_order(local=True)
 @allow_non_gpu('AppendDataExec', 'ShuffleExchangeExec', 'ProjectExec')
-@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
+@pytest.mark.skipif(is_iceberg_remote_catalog() or is_iceberg_test_fast_run(),
+                    reason="Skip for remote catalog or fast Iceberg run to reduce test time")
 @pytest.mark.parametrize("partition_col_sql", [
     pytest.param("bucket(4, contact.email)", id="bucket_nested_struct_field"),
     pytest.param("truncate(3, contact.email)", id="truncate_nested_struct_field"),
@@ -358,7 +365,8 @@ def test_insert_into_table_nested_partition_source_fallback(
 @iceberg
 @ignore_order(local=True)
 @allow_non_gpu('AppendDataExec', 'ShuffleExchangeExec', 'ProjectExec')
-@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
+@pytest.mark.skipif(is_iceberg_remote_catalog() or is_iceberg_test_fast_run(),
+                    reason="Skip for remote catalog or fast Iceberg run to reduce test time")
 @pytest.mark.parametrize("conf_key", ["spark.rapids.sql.format.iceberg.enabled",
                                       "spark.rapids.sql.format.iceberg.write.enabled"],
                          ids=lambda x: f"{x}=False")
@@ -428,7 +436,8 @@ def test_insert_into_aqe(spark_tmp_table_factory, partition_col_sql):
 
 @iceberg
 @ignore_order(local=True)
-@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
+@pytest.mark.skipif(is_iceberg_remote_catalog() or is_iceberg_test_fast_run(),
+                    reason="Skip for remote catalog or fast Iceberg run to reduce test time")
 def test_insert_after_drop_partition_field(spark_tmp_table_factory):
     """Test INSERT on table after dropping a partition field (void transform).
     
@@ -485,7 +494,8 @@ def test_insert_after_drop_partition_field(spark_tmp_table_factory):
 @iceberg
 @datagen_overrides(seed=0, reason='https://github.com/NVIDIA/spark-rapids-jni/issues/4016')
 @ignore_order(local=True)
-@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
+@pytest.mark.skipif(is_iceberg_remote_catalog() or is_iceberg_test_fast_run(),
+                    reason="Skip for remote catalog or fast Iceberg run to reduce test time")
 def test_insert_into_partitioned_table_fanout_enabled(spark_tmp_table_factory):
     # Use bucket(2, ...) to keep partition count low and avoid OOM from Iceberg's FanoutDataWriter.
     _do_test_insert_into_partitioned_table(
@@ -500,7 +510,8 @@ def test_insert_into_partitioned_table_fanout_enabled(spark_tmp_table_factory):
 # GPU would silently use Spark's session codec instead of Iceberg's zstd default.
 @iceberg
 @ignore_order(local=True)
-@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
+@pytest.mark.skipif(is_iceberg_remote_catalog() or is_iceberg_test_fast_run(),
+                    reason="Skip for remote catalog or fast Iceberg run to reduce test time")
 # Restricted to codecs whose footer metadata is reliable on small inputs. cuDF skips
 # compression for tiny row groups (rapidsai/cudf#14017), so codecs like snappy can leave
 # `UNCOMPRESSED` in the footer of small per-task files and make the assertion flaky;
@@ -549,7 +560,8 @@ def test_insert_into_table_honors_iceberg_compression_codec(
 @iceberg
 @ignore_order(local=True)
 @allow_non_gpu('AppendDataExec', 'ShuffleExchangeExec', 'ProjectExec')
-@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
+@pytest.mark.skipif(is_iceberg_remote_catalog() or is_iceberg_test_fast_run(),
+                    reason="Skip for remote catalog or fast Iceberg run to reduce test time")
 @pytest.mark.parametrize("codec", ["gzip", "lz4"])
 def test_insert_into_table_falls_back_on_unsupported_codec(spark_tmp_table_factory, codec):
     table_name = get_full_table_name(spark_tmp_table_factory)
