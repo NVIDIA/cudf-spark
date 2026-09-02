@@ -74,7 +74,11 @@ public interface IcebergShimUtils {
     /** Returns whether a resolved delete-file format writes Puffin deletion vectors. */
     boolean isPuffinFormat(FileFormat fileFormat);
 
-    /** Returns delete files that Iceberg requires a deletion-vector write to replace. */
+    /**
+     * Returns delete files that Iceberg requires a deletion-vector write to replace.
+     *
+     * @return an opaque handle, or {@code null} when there are no existing deletes to rewrite
+     */
     RewritableDeletes broadcastRewritableDeletes(
             DeltaBatchWrite write);
 
@@ -82,13 +86,16 @@ public interface IcebergShimUtils {
      * Opaque, serializable handle for version-specific rewritable-delete state.
      *
      * <p>The underlying broadcast value uses Iceberg's {@code DeleteFileSet}, which is absent
-     * from Iceberg 1.6. Each supported shim supplies a concrete implementation so the common
-     * module does not expose an API that is unavailable in older Iceberg versions.
+     * from Iceberg 1.6. Iceberg 1.9 and later share an implementation outside the common module
+     * so this interface does not expose an API that is unavailable in older Iceberg versions.
      */
     interface RewritableDeletes extends Serializable {}
 
     /**
      * Creates Iceberg's version-specific deletion-vector writer.
+     *
+     * @param rewritableDeletes existing deletes to merge and replace, or {@code null} when the
+     *                          data file has no existing deletes
      */
     PartitioningWriter<PositionDelete<InternalRow>, DeleteWriteResult>
             newDeletionVectorWriter(

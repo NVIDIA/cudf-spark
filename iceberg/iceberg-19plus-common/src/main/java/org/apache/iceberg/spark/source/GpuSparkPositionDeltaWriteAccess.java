@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package org.apache.iceberg.spark.source.iceberg111x;
+package org.apache.iceberg.spark.source;
 
 import java.lang.reflect.Method;
 import java.util.Map;
@@ -23,7 +23,7 @@ import org.apache.iceberg.util.DeleteFileSet;
 import org.apache.spark.broadcast.Broadcast;
 import org.apache.spark.sql.connector.write.DeltaBatchWrite;
 
-/** Iceberg 1.11.x-specific access to position-delta batch-write internals. */
+/** Access to position-delta batch-write internals shared by Iceberg 1.9 and later. */
 public final class GpuSparkPositionDeltaWriteAccess {
   private static final ClassValue<Method> BROADCAST_REWRITABLE_DELETES_METHOD =
       new ClassValue<Method>() {
@@ -39,8 +39,15 @@ public final class GpuSparkPositionDeltaWriteAccess {
   }
 
   /**
-   * Calls
-   * {@code SparkPositionDeltaWrite.PositionDeltaBatchWrite.broadcastRewritableDeletes()}.
+   * Returns the delete files that Iceberg's CPU batch write selected for replacement.
+   *
+   * <p>Iceberg keeps {@code broadcastRewritableDeletes()} private on its position-delta batch
+   * writer, but the GPU deletion-vector writer must use the same selection when merging an
+   * existing deletion vector. Package placement cannot access a private member, so this helper
+   * uses reflection and caches the resolved method per runtime class and class loader.
+   *
+   * @return the broadcast delete-file map, or {@code null} when there are no existing deletes
+   *     to rewrite, such as the first deletion-vector write for a data file
    */
   @SuppressWarnings("unchecked")
   public static Broadcast<Map<String, DeleteFileSet>> broadcastRewritableDeletes(

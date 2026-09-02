@@ -20,46 +20,29 @@ import com.nvidia.spark.rapids.GpuMetric;
 import com.nvidia.spark.rapids.RapidsConf;
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
 import com.nvidia.spark.rapids.iceberg.IcebergDeletionVector;
-import com.nvidia.spark.rapids.iceberg.IcebergShimUtils;
+import com.nvidia.spark.rapids.iceberg.Iceberg19PlusShimUtils;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import org.apache.hadoop.fs.Path;
 import org.apache.iceberg.*;
-import org.apache.iceberg.data.BaseDeleteLoader;
-import org.apache.iceberg.deletes.PositionDelete;
-import org.apache.iceberg.deletes.PositionDeleteIndex;
-import org.apache.iceberg.encryption.EncryptingFileIO;
 import org.apache.iceberg.io.FileIO;
-import org.apache.iceberg.io.DataWriteResult;
-import org.apache.iceberg.io.DeleteWriteResult;
-import org.apache.iceberg.io.OutputFileFactory;
-import org.apache.iceberg.io.PartitioningDVWriter;
-import org.apache.iceberg.io.PartitioningWriter;
 import org.apache.iceberg.io.StorageCredential;
 import org.apache.iceberg.io.SupportsStorageCredentials;
-import org.apache.iceberg.io.WriteResult;
 import org.apache.iceberg.shaded.org.apache.parquet.ParquetReadOptions;
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.iceberg.spark.SparkUtil;
 import org.apache.iceberg.spark.source.GpuSparkCopyOnWriteScan;
-import org.apache.iceberg.spark.source.iceberg111x.GpuSparkPositionDeltaWriteAccess;
 import org.apache.iceberg.spark.source.GpuSparkScan;
 import org.apache.iceberg.types.Types;
-import org.apache.iceberg.util.DeleteFileSet;
 import org.apache.iceberg.util.PartitionUtil;
-import org.apache.spark.broadcast.Broadcast;
-import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.read.Scan;
-import org.apache.spark.sql.connector.write.DeltaBatchWrite;
 
 import java.io.IOException;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.Set;
-import java.util.function.Function;
 
 /** Iceberg 1.11.x shim: uses {@code SparkUtil::internalToSpark} and a cache-aware footer path. */
-public class ShimUtilsImpl implements IcebergShimUtils {
+public class ShimUtilsImpl extends Iceberg19PlusShimUtils {
     @Override
     public int formatVersion(Table table) {
         return TableUtil.formatVersion(table);
@@ -68,80 +51,6 @@ public class ShimUtilsImpl implements IcebergShimUtils {
     @Override
     public String locationOf(ContentFile<?> f) {
         return f.location();
-    }
-
-    @Override
-    public boolean isDeletionVector(DeleteFile deleteFile) {
-        return deleteFile.format() == FileFormat.PUFFIN;
-    }
-
-    @Override
-    public boolean isPuffinFormat(FileFormat fileFormat) {
-        return fileFormat == FileFormat.PUFFIN;
-    }
-
-    @Override
-    public RewritableDeletes broadcastRewritableDeletes(
-            DeltaBatchWrite write) {
-        Broadcast<Map<String, DeleteFileSet>> rewritableDeletes =
-                GpuSparkPositionDeltaWriteAccess.broadcastRewritableDeletes(write);
-        return rewritableDeletes != null ? new RewritableDeletesImpl(rewritableDeletes) : null;
-    }
-
-    @Override
-    public PartitioningWriter<PositionDelete<InternalRow>, DeleteWriteResult>
-            newDeletionVectorWriter(
-                    Table table, OutputFileFactory fileFactory,
-                    RewritableDeletes rewritableDeletes) {
-        Map<String, DeleteFileSet> deleteFiles = rewritableDeletes == null
-                ? null
-                : ((RewritableDeletesImpl) rewritableDeletes).value();
-        return new PartitioningDVWriter<>(
-                fileFactory, previousDeleteLoader(table, deleteFiles));
-    }
-
-    @Override
-    public WriteResult positionDeltaWriteResult(
-            DataWriteResult dataResult, DeleteWriteResult deleteResult) {
-        return WriteResult.builder()
-                .addDataFiles(dataResult.dataFiles())
-                .addDeleteFiles(deleteResult.deleteFiles())
-                .addReferencedDataFiles(deleteResult.referencedDataFiles())
-                .addRewrittenDeleteFiles(deleteResult.rewrittenDeleteFiles())
-                .build();
-    }
-
-    private Function<CharSequence, PositionDeleteIndex> previousDeleteLoader(
-            Table table, Map<String, DeleteFileSet> rewritableDeletes) {
-        if (rewritableDeletes == null) {
-            return path -> null;
-        }
-
-        BaseDeleteLoader deleteLoader = new BaseDeleteLoader(
-                deleteFile -> EncryptingFileIO.combine(table.io(), table.encryption())
-                        .newInputFile(deleteFile));
-        return path -> {
-            Set<DeleteFile> files = rewritableDeletes.get(path.toString());
-            return files != null ? deleteLoader.loadPositionDeletes(files, path) : null;
-        };
-    }
-
-    private static final class RewritableDeletesImpl implements RewritableDeletes {
-        private final Broadcast<Map<String, DeleteFileSet>> delegate;
-
-        private RewritableDeletesImpl(Broadcast<Map<String, DeleteFileSet>> delegate) {
-            this.delegate = delegate;
-        }
-
-        private Map<String, DeleteFileSet> value() {
-            return delegate.value();
-        }
-    }
-
-    @Override
-    public void setPositionDelete(
-            PositionDelete<InternalRow> delete, CharSequence path, long position) {
-        delete.set(path, position);
     }
 
     @Override

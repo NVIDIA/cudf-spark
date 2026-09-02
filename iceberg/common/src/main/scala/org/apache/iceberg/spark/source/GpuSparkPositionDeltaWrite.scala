@@ -483,6 +483,8 @@ class GpuBatchPositionDeleteWriter(
     private val delegate: PartitioningWriter[PositionDelete[InternalRow], DeleteWriteResult])
   extends PartitioningWriter[SpillableColumnarBatch, DeleteWriteResult] {
 
+  require(delegate != null, "delegate must not be null")
+
   private val positionDelete = PositionDelete.create[InternalRow]()
 
   override def write(
@@ -490,14 +492,21 @@ class GpuBatchPositionDeleteWriter(
       spec: PartitionSpec,
       partition: StructLike): Unit = {
     withResource(spillableBatch) { spillable =>
-      withResource(spillable.getColumnarBatch()) { batch =>
-        withResource(batch.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { paths =>
-          withResource(batch.column(1).asInstanceOf[GpuColumnVector].copyToHost()) { positions =>
-            for (row <- 0 until batch.numRows()) {
-              ShimUtils.setPositionDelete(
-                positionDelete, paths.getUTF8String(row).toString, positions.getLong(row))
-              delegate.write(positionDelete, spec, partition)
-            }
+      val (paths, positions, numRows) = withResource(spillable.getColumnarBatch()) { batch =>
+        closeOnExcept(batch.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { paths =>
+          closeOnExcept(batch.column(1).asInstanceOf[GpuColumnVector].copyToHost()) { positions =>
+            (paths, positions, batch.numRows())
+          }
+        }
+      }
+      withResource(paths) { pathColumn =>
+        withResource(positions) { positionColumn =>
+          for (row <- 0 until numRows) {
+            ShimUtils.setPositionDelete(
+              positionDelete,
+              pathColumn.getUTF8String(row).toString,
+              positionColumn.getLong(row))
+            delegate.write(positionDelete, spec, partition)
           }
         }
       }
