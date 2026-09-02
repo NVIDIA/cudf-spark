@@ -272,7 +272,7 @@ trait SparkQueryCompareTestSuite extends AnyFunSuite with BeforeAndAfterAll {
       case (a: Double, b: Double) if epsilon > 0 =>
         val ret = doublesAreEqualWithinPercentage(a, b)
         if (!ret._2) {
-          System.err.println(ret._1 + " (double)")
+          info(ret._1 + " (double)")
         }
         ret._2
       case (a: Float, b: Float) if epsilon <= 0 =>
@@ -280,7 +280,7 @@ trait SparkQueryCompareTestSuite extends AnyFunSuite with BeforeAndAfterAll {
       case (a: Float, b: Float) if epsilon > 0 =>
         val ret = doublesAreEqualWithinPercentage(a, b)
         if (!ret._2) {
-          System.err.println(ret._1 + " (float)")
+          info(ret._1 + " (float)")
         }
         ret._2
       case (a, b) => a == b

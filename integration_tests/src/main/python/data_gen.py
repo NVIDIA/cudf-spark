@@ -888,7 +888,10 @@ def gen_df_help(data_gen, length, seed_value):
     data = [data_gen.gen() for index in range(0, length)]
     return data
 
-def gen_df(spark, data_gen, length=2048, seed=None, num_slices=None):
+DEFAULT_DATA_GEN_LENGTH = 2048
+
+
+def gen_df(spark, data_gen, length=DEFAULT_DATA_GEN_LENGTH, seed=None, num_slices=None):
     """Generate a spark dataframe from the given data generators."""
     if seed is None:
         seed_value = get_datagen_seed()
@@ -910,6 +913,12 @@ def gen_df(spark, data_gen, length=2048, seed=None, num_slices=None):
         SparkContext.getOrCreate().parallelize(data, numSlices=num_slices),
         src.data_type)
 
+def _date_to_iso_string(data):
+    # Due to https://bugs.python.org/issue13305 we need to zero pad for years prior to 1000,
+    # but this works for all of them.
+    return data.strftime("%Y-%m-%d").zfill(10)
+
+
 def _mark_as_lit(data, data_type):
     # To support nested types, 'data_type' is required.
     assert data_type is not None
@@ -927,9 +936,7 @@ def _mark_as_lit(data, data_type):
         children = zip(data, data_type.fields)
         return f.struct([_mark_as_lit(x, fd.dataType).alias(fd.name) for x, fd in children])
     elif isinstance(data_type, DateType):
-        # Due to https://bugs.python.org/issue13305 we need to zero pad for years prior to 1000,
-        # but this works for all of them
-        dateString = data.strftime("%Y-%m-%d").zfill(10)
+        dateString = _date_to_iso_string(data)
         return f.lit(dateString).cast(data_type)
     elif isinstance(data_type, MapType):
         assert isinstance(data, dict)
@@ -972,12 +979,20 @@ def gen_scalar(data_gen, seed=None, force_no_nulls=False):
     return v[0]
 
 def gen_scalar_values(data_gen, count, seed=None, force_no_nulls=False):
-    """Generate scalar values."""
+    """Generate scalar values suitable for PySpark function arguments."""
     src = _gen_scalars_common(data_gen, count, seed=seed)
-    return (src.gen(force_no_nulls=force_no_nulls) for i in range(0, count))
+    data_type = src.data_type
+
+    def gen_value():
+        value = src.gen(force_no_nulls=force_no_nulls)
+        if value is not None and isinstance(data_type, DateType):
+            return _date_to_iso_string(value)
+        return value
+
+    return (gen_value() for i in range(0, count))
 
 def gen_scalar_value(data_gen, seed=None, force_no_nulls=False):
-    """Generate a single scalar value."""
+    """Generate a single scalar value suitable for a PySpark function argument."""
     v = list(gen_scalar_values(data_gen, 1, seed=seed, force_no_nulls=force_no_nulls))
     return v[0]
 

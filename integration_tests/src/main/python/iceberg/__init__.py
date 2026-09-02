@@ -18,7 +18,7 @@ import logging
 from types import MappingProxyType
 from typing import Callable, List, Dict, Optional
 
-from pyspark.sql import SparkSession, DataFrame
+from pyspark.sql import SparkSession, DataFrame, functions as f
 from pyspark.sql.types import FloatType, DoubleType, BinaryType
 
 import pytest
@@ -39,6 +39,11 @@ supports_iceberg_v3 = (
     not is_iceberg_rest_catalog())
 ICEBERG_V3_UNSUPPORTED_REASON = (
     "Iceberg v3 requires Iceberg 1.9.0 or later and a catalog backend with v3 support")
+supports_iceberg_row_lineage_inheritance = (
+    runtime_iceberg_version is not None and
+    tuple(int(part) for part in runtime_iceberg_version.split(".")[:2]) >= (1, 10))
+ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON = \
+    "Iceberg row lineage inheritance requires iceberg 1.10.0 or later"
 
 # iceberg supported types
 iceberg_table_gen = MappingProxyType({
@@ -59,6 +64,20 @@ iceberg_base_table_cols = list(iceberg_table_gen.keys())
 iceberg_gens_list = [iceberg_table_gen[col] for col in iceberg_base_table_cols]
 
 rapids_reader_types = ['PERFILE', 'MULTITHREADED', 'COALESCING']
+
+
+def row_lineage_df(
+        spark, start=0, length=DEFAULT_DATA_GEN_LENGTH, with_value=False, value_start=None):
+    gens = [('id', UniqueLongGen())]
+    if with_value:
+        value_start = start if value_start is None else value_start
+        gens.append(('v', UniqueLongGen()))
+
+    df = gen_df(spark, gens, length=length, num_slices=1)
+    columns = [(f.abs(f.col('id')) - 1 + start).alias('id')]
+    if with_value:
+        columns.append((f.abs(f.col('v')) - 1 + value_start).alias('v'))
+    return df.select(*columns)
 
 # Anchor list used by the single partition-transform coverage test
 # (iceberg_append_test.py::test_insert_into_partitioned_table_full_coverage).
@@ -239,10 +258,8 @@ def setup_base_iceberg_table(spark_tmp_table_factory,
     table_name = get_full_table_name(spark_tmp_table_factory)
     tmp_view_name = spark_tmp_table_factory.get()
 
-    if table_prop is None:
-        table_prop = {'format-version':'2', 'write.delete.mode': 'merge-on-read'}
-    else:
-        table_prop = {**table_prop, 'format-version': '2', 'write.delete.mode': 'merge-on-read'}
+    default_table_prop = {'format-version': '2', 'write.delete.mode': 'merge-on-read'}
+    table_prop = {**default_table_prop, **(table_prop or {})}
     table_prop = _build_tblprops(table_prop)
 
     table_prop_sql = ", ".join([f"'{k}' = '{v}'" for k, v in table_prop.items()])

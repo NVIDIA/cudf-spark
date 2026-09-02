@@ -27,7 +27,6 @@ import org.apache.iceberg.deletes.DeleteGranularity;
 import org.apache.iceberg.io.DeleteWriteResult;
 import org.apache.iceberg.io.WriteResult;
 import org.apache.spark.api.java.JavaSparkContext;
-import org.apache.spark.sql.connector.write.DeltaWrite;
 import org.apache.spark.sql.connector.write.RowLevelOperation.Command;
 import org.apache.spark.sql.connector.write.Write;
 import org.apache.spark.sql.connector.write.WriterCommitMessage;
@@ -36,9 +35,10 @@ import org.apache.spark.sql.types.StructType;
 /**
  * Package-local access to Iceberg Spark write classes.
  *
- * <p>Iceberg keeps SparkWrite and SparkPositionDeltaWrite package-private. Resolve those
- * classes from a conventional-root helper so runtime package access is checked in the same
- * class loader as Iceberg itself.
+ * <p>Iceberg keeps SparkWrite and SparkPositionDeltaWrite package-private. This helper lives
+ * in the conventional root so it can share Iceberg's defining classloader when the cuDF Plugin
+ * and Iceberg runtime jars use the same deployment mechanism. Mixed classloader deployments
+ * remain unsupported for package-private access paths.
  */
 public final class GpuSparkWriteAccess {
   private GpuSparkWriteAccess() {
@@ -94,24 +94,24 @@ public final class GpuSparkWriteAccess {
     return readField(sparkWrite(write), "writeProperties", Map.class);
   }
 
-  public static Table table(DeltaWrite write) {
+  public static Table deltaTable(Write write) {
     return readField(positionDeltaWrite(write), "table", Table.class);
   }
 
-  public static JavaSparkContext sparkContext(DeltaWrite write) {
+  public static JavaSparkContext deltaSparkContext(Write write) {
     return readField(positionDeltaWrite(write), "sparkContext", JavaSparkContext.class);
   }
 
-  public static Command command(DeltaWrite write) {
+  public static Command deltaCommand(Write write) {
     return readField(positionDeltaWrite(write), "command", Command.class);
   }
 
   @SuppressWarnings("unchecked")
-  public static Map<String, String> writeProperties(DeltaWrite write) {
+  public static Map<String, String> deltaWriteProperties(Write write) {
     return readField(positionDeltaWrite(write), "writeProperties", Map.class);
   }
 
-  public static Object context(DeltaWrite write) {
+  public static Object deltaContext(Write write) {
     return readField(positionDeltaWrite(write), "context", Object.class);
   }
 
@@ -181,7 +181,7 @@ public final class GpuSparkWriteAccess {
     return (SparkWrite) write;
   }
 
-  private static SparkPositionDeltaWrite positionDeltaWrite(DeltaWrite write) {
+  private static SparkPositionDeltaWrite positionDeltaWrite(Write write) {
     return (SparkPositionDeltaWrite) write;
   }
 

@@ -67,6 +67,7 @@
         <module>dist</module>
         <module>integration_tests</module>
         <module>shuffle-plugin</module>
+        <module>iceberg-common</module>
         <module>sql-plugin-api</module>
         <module>sql-plugin-format</module>
         <module>sql-plugin-fileio</module>
@@ -778,7 +779,11 @@
                             <artifactId>scala-maven-plugin</artifactId>
                             <configuration>
                                 <release combine.self="override"/>
-                                <target>${java.major.version}</target>
+                                <target combine.self="override"/>
+                                <args combine.children="append">
+                                    <arg>-target:jvm-1.8</arg>
+                                </args>
+                                <addJavacArgs combine.self="override">${scala.javac.args}|-target|8</addJavacArgs>
                             </configuration>
                         </plugin>
                     </plugins>
@@ -817,7 +822,11 @@
                             <artifactId>scala-maven-plugin</artifactId>
                             <configuration>
                                 <release combine.self="override"/>
-                                <target>${java.major.version}</target>
+                                <target combine.self="override"/>
+                                <args combine.children="append">
+                                    <arg>-target:jvm-1.8</arg>
+                                </args>
+                                <addJavacArgs combine.self="override">${scala.javac.args}|-target|8</addJavacArgs>
                             </configuration>
                         </plugin>
                     </plugins>
@@ -856,7 +865,11 @@
                             <artifactId>scala-maven-plugin</artifactId>
                             <configuration>
                                 <release combine.self="override"/>
-                                <target>${java.major.version}</target>
+                                <target combine.self="override"/>
+                                <args combine.children="append">
+                                    <arg>-target:jvm-1.8</arg>
+                                </args>
+                                <addJavacArgs combine.self="override">${scala.javac.args}|-target|8</addJavacArgs>
                             </configuration>
                         </plugin>
                     </plugins>
@@ -894,7 +907,11 @@
                             <artifactId>scala-maven-plugin</artifactId>
                             <configuration>
                                 <release combine.self="override"/>
-                                <target>${java.major.version}</target>
+                                <target combine.self="override"/>
+                                <args combine.children="append">
+                                    <arg>-target:jvm-1.8</arg>
+                                </args>
+                                <addJavacArgs combine.self="override">${scala.javac.args}|-target|8</addJavacArgs>
                             </configuration>
                         </plugin>
                     </plugins>
@@ -1030,7 +1047,6 @@
         <!-- end dyn.shim properties -->
 
         <rapids.module>.</rapids.module>
-        <rapids.secondaryCacheDir>${spark.rapids.project.basedir}/target/${spark.version.classifier}/.sbt/1.0/zinc/org.scala-sbt</rapids.secondaryCacheDir>
         <allowConventionalDistJar>false</allowConventionalDistJar>
         <rapids.shimplify.skip>false</rapids.shimplify.skip>
         <rapids.build.info.skip>false</rapids.build.info.skip>
@@ -1134,9 +1150,7 @@
              shim profile once Spark 5.0.0 is officially released. -->
         <spark500.version>5.0.0-SNAPSHOT</spark500.version>
         <mockito.version>3.12.4</mockito.version>
-        <!-- 4.7.1 required: later versions auto-derive -release from -target,
-             preventing JDK 17 boot classpath access with JDK 8 classfile output -->
-        <scala.plugin.version>4.7.1</scala.plugin.version>
+        <scala.plugin.version>4.9.10</scala.plugin.version>
         <maven.install.plugin.version>3.1.1</maven.install.plugin.version>
         <maven.jar.plugin.version>3.3.0</maven.jar.plugin.version>
         <scalatest-maven-plugin.version>2.0.2</scalatest-maven-plugin.version>
@@ -1730,12 +1744,7 @@ This will force full Scala code rebuild in downstream modules.
                             <arg>-Wunused:imports,locals,patvars,privates</arg>
                             <!-- #endif scala-2.13 -->
                         </args>
-                        <jvmArgs>
-                            <jvmArg>-Xms1024m</jvmArg>
-                            <jvmArg>-Xmx1024m</jvmArg>
-                        </jvmArgs>
                         <addJavacArgs>${scala.javac.args}</addJavacArgs>
-                        <secondaryCacheDir>${rapids.secondaryCacheDir}</secondaryCacheDir>
                         <!-- #if scala-2.13 -->
                         <compilerPlugins combine.self="override">
                         </compilerPlugins>
@@ -1893,8 +1902,8 @@ This will force full Scala code rebuild in downstream modules.
                     <configuration>
                       <rules>
                         <requireMavenVersion>
-                          <message>Minimum Maven version 3.6.x required</message>
-                          <version>[3.6,)</version>
+                          <message>Minimum Maven version 3.8.1 required</message>
+                          <version>[3.8.1,)</version>
                         </requireMavenVersion>
                         <requireJavaVersion>
                             <message>To compile, use Java 17 or above (at runtime you can use Java 8+, however, other optional dependencies in your setup such as Iceberg may impose higher lower bound on the JDK runtime version )</message>
@@ -1945,6 +1954,7 @@ This will force full Scala code rebuild in downstream modules.
                         <exclude>**/.*/**</exclude>
                         <exclude>**/src/main/java/com/nvidia/spark/rapids/format/*</exclude>
                         <exclude>**/*.csv</exclude>
+                        <exclude>scripts/with_resource_nesting_baseline.json</exclude>
                         <exclude>dist/*.txt</exclude>
                         <exclude>**/META-INF/com.nvidia.spark.rapids.SparkShimServiceProvider</exclude>
                         <!-- Apache Rat excludes target folder for projects that are included by
@@ -2020,6 +2030,24 @@ This will force full Scala code rebuild in downstream modules.
                                     <arg line="--xmlEncoding ${project.reporting.outputEncoding}"/>
                                     <arg line="${scalastyle.dirs}"/>
                                 </java>
+                                <exec executable="python3" failonerror="true"
+                                      dir="${spark.rapids.source.basedir}">
+                                    <arg value="-m"/>
+                                    <arg value="unittest"/>
+                                    <arg value="discover"/>
+                                    <arg value="-s"/>
+                                    <arg value="scripts/tests"/>
+                                    <arg value="-p"/>
+                                    <arg value="test_check_with_resource_nesting.py"/>
+                                </exec>
+                                <!-- Existing nesting exceptions are tracked by
+                                     https://github.com/NVIDIA/cudf-spark/issues/11713. -->
+                                <exec executable="python3" failonerror="true"
+                                      dir="${spark.rapids.source.basedir}">
+                                    <arg value="scripts/check_with_resource_nesting.py"/>
+                                    <arg value="--root"/>
+                                    <arg value="${spark.rapids.source.basedir}"/>
+                                </exec>
                             </target>
                         </configuration>
                     </execution>
