@@ -17,6 +17,7 @@
 package com.nvidia.spark.rapids
 
 import com.nvidia.spark.rapids.GpuOverrides._
+import com.nvidia.spark.rapids.shims.GpuTypeShims
 
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.rapids._
@@ -127,10 +128,12 @@ private[rapids] object GpuCollectionExpressionOverrides {
       "Gets the named field of the struct",
       ExprChecks.unaryProject(
         (TypeSig.commonCudfTypes + TypeSig.ARRAY + TypeSig.STRUCT + TypeSig.MAP + TypeSig.NULL +
-            TypeSig.DECIMAL_128 + TypeSig.BINARY).nested(),
+            TypeSig.DECIMAL_128 + TypeSig.BINARY +
+            GpuTypeShims.additionalVariantSupportedTypes).nested(),
         TypeSig.all,
         TypeSig.STRUCT.nested(TypeSig.commonCudfTypes + TypeSig.ARRAY +
-            TypeSig.STRUCT + TypeSig.MAP + TypeSig.NULL + TypeSig.DECIMAL_128 + TypeSig.BINARY),
+            TypeSig.STRUCT + TypeSig.MAP + TypeSig.NULL + TypeSig.DECIMAL_128 + TypeSig.BINARY +
+            GpuTypeShims.additionalVariantSupportedTypes),
         TypeSig.STRUCT.nested(TypeSig.all)),
       GetStructFieldRuleMeta),
     expr[GetArrayItem](

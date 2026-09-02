@@ -30,8 +30,13 @@ spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.shims
 
+import com.nvidia.spark.rapids.TypeSig
+
 import org.apache.spark.sql.types.{DataType, VariantType}
 
 object VariantTypeShims {
   def isVariantType(dataType: DataType): Boolean = dataType == VariantType
+  def additionalParquetReadSupportedTypes: TypeSig = TypeSig.VARIANT
+  def supportsVariantType: Boolean = true
+  def additionalCommonOperatorSupportedTypes: TypeSig = TypeSig.VARIANT
 }
