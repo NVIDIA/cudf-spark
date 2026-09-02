@@ -74,7 +74,8 @@ files, you must run the following command to sync the changes between the Scala 
 
 That way any new dependencies or other changes will also be picked up in the Scala 2.13 build.
 
-See the [scala2.13](scala2.13) directory for more information on how to build against
+See the [scala2.13](https://github.com/NVIDIA/cudf-spark/tree/main/scala2.13) directory
+for more information on how to build against
 Scala 2.13.
 
 To get an uber jar with more than 1 version you have to `mvn package` each version
@@ -107,7 +108,7 @@ If you want to create a jar with multiple versions we have the following options
 
 1. Build for all Apache Spark versions and CDH with no SNAPSHOT versions of Spark, only released. Use `-PnoSnapshots`.
 2. Build for all Apache Spark versions and CDH including SNAPSHOT versions of Spark we have supported for. Use `-Psnapshots`.
-3. Build for all Apache Spark versions, CDH and Databricks with no SNAPSHOT versions of Spark, only released. Use `-PnoSnaphsotsWithDatabricks`.
+3. Build for all Apache Spark versions, CDH and Databricks with no SNAPSHOT versions of Spark, only released. Use `-PnoSnapshotsWithDatabricks`.
 4. Build for all Apache Spark versions, CDH and Databricks including SNAPSHOT versions of Spark we have supported for. Use `-PsnapshotsWithDatabricks`
 5. Build for an arbitrary combination of comma-separated build versions using `-Dincluded_buildvers=<CSV list of build versions>`.
    E.g., `-Dincluded_buildvers=330,331`
@@ -295,7 +296,7 @@ the IDEA Resolve Symlinks plugin via `Marketplace` tab.
 
 To start working with the project in IDEA is as easy as
 [opening](https://blog.jetbrains.com/idea/2008/03/opening-maven-projects-is-easy-as-pie/) the top level (parent)
-[pom.xml](pom.xml).
+[pom.xml](https://github.com/NVIDIA/cudf-spark/blob/main/pom.xml).
 
 In IDEA 2022.3.1 [unselect](https://www.jetbrains.com/help/idea/2022.3/maven-importing.html)
 "Import using the new IntelliJ Workspace Model API (experimental)". After 2023.1.2 the default
@@ -552,7 +553,9 @@ By making a contribution to this project, I certify that:
 ```
 
 ### Testing Your Code
-Please visit the [testing doc](tests/README.md) for details about how to run tests
+Please visit the
+[testing doc](https://github.com/NVIDIA/cudf-spark/blob/main/tests/README.md)
+for details about how to run tests
 
 
 ### Pre-commit hooks

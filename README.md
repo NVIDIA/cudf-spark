@@ -47,7 +47,7 @@ See the [build instructions in the contributing guide](CONTRIBUTING.md#building-
 
 ## Testing
 
-Tests are described [here](tests/README.md).
+Tests are described [here](https://github.com/NVIDIA/cudf-spark/blob/main/tests/README.md).
 
 ## Integration
 The cuDF plugin provides some APIs for doing zero copy data transfer into other GPU enabled
