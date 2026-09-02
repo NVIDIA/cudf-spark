@@ -22,9 +22,12 @@ import java.util.stream.{Stream => JStream}
 
 import com.nvidia.spark.rapids.{GpuParquetWriter, SpillableColumnarBatch}
 import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
+import com.nvidia.spark.rapids.iceberg.parquet.converter.ToIcebergShaded
+import com.nvidia.spark.rapids.parquet.HMBInputFile
 import org.apache.iceberg.{FieldMetrics, Metrics, MetricsConfig}
 import org.apache.iceberg.io.FileAppender
+import org.apache.iceberg.shaded.org.apache.parquet.format.converter.ParquetMetadataConverter
+import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader
 import org.apache.iceberg.parquet.ParquetUtil
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.metadata.ParquetMetadata
 
@@ -39,8 +42,7 @@ import org.apache.iceberg.shaded.org.apache.parquet.hadoop.metadata.ParquetMetad
  */
 class GpuIcebergParquetAppender(
   val inner: GpuParquetWriter,
-  val metricsConfig: MetricsConfig,
-  val fileIO: IcebergFileIO) extends FileAppender[SpillableColumnarBatch] {
+  val metricsConfig: MetricsConfig) extends FileAppender[SpillableColumnarBatch] {
   private var closed = false
   private var footer: ParquetMetadata = _
 
@@ -58,12 +60,10 @@ class GpuIcebergParquetAppender(
 
   override def close(): Unit = {
     if (!closed) {
-      inner.close()
-      footer = withResource(
-          IcebergPartitionedFile(fileIO.newIcebergInputFile(inner.path)).newReader()) {
-        reader =>
-          // TODO: Remove the read after https://github.com/rapidsai/cudf/issues/18886 got fixed.
-          reader.getFooter
+      footer = withResource(inner.closeAndGetFooter()) { footerBuffer =>
+        ParquetFileReader.readFooter(
+          ToIcebergShaded.shade(new HMBInputFile(footerBuffer)),
+          ParquetMetadataConverter.NO_FILTER)
       }
       closed = true
     }
