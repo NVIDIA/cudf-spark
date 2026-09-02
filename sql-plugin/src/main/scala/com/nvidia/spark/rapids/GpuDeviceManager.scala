@@ -39,6 +39,8 @@ private case object Uninitialized extends MemoryState
 private case object Errored extends MemoryState
 
 object GpuDeviceManager extends Logging {
+  private val KUDO_CUDF_PINNED_POOL_SIZE = 1024L * 1024L
+
   // This config controls whether RMM/Pinned memory are initialized from the task
   // or from the executor side plugin. The default is to initialize from the
   // executor plugin.
@@ -465,12 +467,21 @@ object GpuDeviceManager extends Logging {
     }
   }
 
+  private[rapids] def getCudfDefaultPinnedPoolSize(
+      pinnedSize: Long,
+      gpuKudoEnabled: Boolean): Long = {
+    if (pinnedSize == 0 && gpuKudoEnabled) KUDO_CUDF_PINNED_POOL_SIZE else 0L
+  }
+
   private def initializePinnedPoolAndOffHeapLimits(gpuId: Int, conf: RapidsConf,
                                                    sparkConf: SparkConf): Unit = {
     val (pinnedSize, nonPinnedLimit) = getPinnedPoolAndOffHeapLimits(
       conf, sparkConf, Cuda.getDeviceCount)
-    // disable the cuDF provided default pinned pool for now
-    if (!PinnedMemoryPool.configureDefaultCudfPinnedPoolSize(0L)) {
+    // GPU Kudo uses small cuDF host allocations for scalar staging. Keep a small pool for those
+    // allocations when the shared plugin pool is disabled, without restoring cuDF's large default.
+    val cudfDefaultPinnedPoolSize = getCudfDefaultPinnedPoolSize(
+      pinnedSize, conf.shuffleKudoGpuSerializerEnabled)
+    if (!PinnedMemoryPool.configureDefaultCudfPinnedPoolSize(cudfDefaultPinnedPoolSize)) {
       // This is OK in tests because they don't unload/reload our shared
       // library, and in prod it would be nice to know about it.
       logWarning("The default cuDF host pool was already configured")
