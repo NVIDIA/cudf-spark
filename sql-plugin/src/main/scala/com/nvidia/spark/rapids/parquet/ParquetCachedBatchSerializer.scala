@@ -72,7 +72,7 @@ class ByteArrayInputFile(buff: Array[Byte]) extends InputFile {
       override def getPos: Long = byteBuffer.position()
 
       override def seek(newPos: Long): Unit = {
-        if (newPos > Int.MaxValue || newPos < Int.MinValue) {
+        if (newPos < 0 || newPos > buff.length) {
           throw new IllegalStateException("seek value is out of supported range " + newPos)
         }
         byteBuffer.position(newPos.toInt)
