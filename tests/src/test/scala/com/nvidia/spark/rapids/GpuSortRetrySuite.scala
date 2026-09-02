@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -54,6 +54,12 @@ class GpuSortRetrySuite extends RmmSparkRetrySuiteBase with MockitoSugar {
         // only one batch
         assertResult(NUM_ROWS * 2)(cb.numRows())
         assertResult(true)(GpuColumnVector.isTaggedAsFinalBatch(cb))
+        withResource(cb.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { host =>
+          (0 until NUM_ROWS).foreach { value =>
+            assertResult(value)(host.getInt(value * 2))
+            assertResult(value)(host.getInt(value * 2 + 1))
+          }
+        }
       }
     }
   }
