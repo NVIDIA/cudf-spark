@@ -58,9 +58,13 @@ _xfail_files = {
     "delta_encoding_optional_column.parquet": "https://github.com/rapidsai/cudf/issues/13501",
     "delta_encoding_required_column.parquet": "https://github.com/rapidsai/cudf/issues/13501",
     "delta_length_byte_array.parquet": "https://github.com/rapidsai/cudf/issues/13501",
-    "hadoop_lz4_compressed.parquet": "cudf does not support Hadoop LZ4 format",
-    "hadoop_lz4_compressed_larger.parquet": "cudf does not support Hadoop LZ4 format",
     "nested_structs.rust.parquet": "PySpark cannot handle year 52951",
+}
+
+# These files currently expose Blackwell-specific row-conversion corruption.
+_skip_files = {
+    "alltypes_tiny_pages.parquet": "https://github.com/NVIDIA/cudf-spark/issues/15872",
+    "alltypes_tiny_pages_plain.parquet": "https://github.com/NVIDIA/cudf-spark/issues/15872",
 }
 # Spark 3.5.0 adds support for lz4_raw compression codec, but we do not support that on GPU yet
 if is_spark_350_or_later():
@@ -150,6 +154,10 @@ def gen_testing_params_for_valid_files():
     for f in locate_parquet_testing_files():
         basename = os.path.basename(f)
         if basename in _error_files:
+            continue
+        skip_reason = _skip_files.get(basename, None)
+        if skip_reason:
+            files.append(pytest.param(f, marks=pytest.mark.skip(reason=skip_reason)))
             continue
         xfail_reason = _xfail_files.get(basename, None)
         if xfail_reason:

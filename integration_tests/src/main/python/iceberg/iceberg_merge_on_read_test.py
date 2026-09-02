@@ -25,7 +25,9 @@ from iceberg import rapids_reader_types, \
     representative_eq_column_combinations, eq_reader_canary_pairs, \
     iceberg_unsupported_mark, create_iceberg_table, \
     iceberg_base_table_cols, iceberg_gens_list, get_full_table_name, \
-    supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON
+    supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON, \
+    supports_iceberg_row_lineage_inheritance, \
+    ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON
 from data_gen import disable_parquet_field_id_write, gen_df, get_datagen_seed, int_gen, \
     long_gen, string_gen
 from marks import iceberg, ignore_order, validate_execs_in_gpu_plan
@@ -207,6 +209,45 @@ def test_iceberg_v3_deletion_vector(
 
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.table(table_name),
+        conf=read_conf,
+        # Reset the GPU plan-validation config before fixture teardown.
+        is_cpu_first=False)
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.parametrize(
+    'reader_type,use_chunked_reader',
+    [pytest.param(reader_type, True, id=reader_type) for reader_type in rapids_reader_types] +
+    [pytest.param('PERFILE', False, id='PERFILE-one-shot')])
+@pytest.mark.parametrize('project_pos', [True, False], ids=['with-pos', 'without-pos'])
+@pytest.mark.skipif(
+    not supports_iceberg_row_lineage_inheritance,
+    reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
+@validate_execs_in_gpu_plan('GpuBatchScanExec')
+def test_iceberg_v3_deletion_vector_row_lineage(
+        spark_tmp_table_factory, reader_type, use_chunked_reader, project_pos):
+    table_name = setup_base_iceberg_table(
+        spark_tmp_table_factory,
+        table_prop={'format-version': '3'})
+
+    def add_deletion_vector(spark):
+        spark.sql(f"DELETE FROM {table_name} WHERE _c1 < 0")
+        spark.sql(f"REFRESH TABLE {table_name}")
+
+    with_cpu_session(add_deletion_vector)
+
+    read_conf = {
+        'spark.rapids.sql.format.iceberg.v3.enabled': 'true',
+        'spark.rapids.sql.format.parquet.reader.type': reader_type,
+        'spark.rapids.sql.reader.chunked': use_chunked_reader,
+    }
+    metadata_columns = \
+        '_pos, _row_id, _last_updated_sequence_number' if project_pos else \
+        '_row_id, _last_updated_sequence_number'
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(
+            f"SELECT _c0, {metadata_columns} FROM {table_name}"),
         conf=read_conf,
         # Reset the GPU plan-validation config before fixture teardown.
         is_cpu_first=False)

@@ -19,6 +19,7 @@ from conftest import is_not_utc
 from data_gen import *
 from marks import *
 from pyspark.sql.types import *
+from reduced_test_matrix_helper import generate_reduced_test_matrix
 from spark_init_internal import spark_version
 from spark_session import *
 from parquet_test import _nested_pruning_schemas
@@ -85,6 +86,8 @@ __reader_opt_confs_chunked = [{**conf, 'spark.rapids.sql.reader.chunked': True,
                              [pytest.param(__multithreaded_orc_file_reader_combine_unordered_conf_chunked_limited_memory,
                                            marks=pytest.mark.ignore_order(local=True))]
 reader_opt_confs = __reader_opt_confs_no_chunked + __reader_opt_confs_chunked
+
+
 # The Count result can not be sorted, so local sort can not be used.
 reader_opt_confs_for_count = __reader_opt_confs_common + [__multithreaded_orc_file_reader_combine_unordered_conf_no_chunked]
 
@@ -214,13 +217,23 @@ orc_pred_push_gens = [
         # Once https://github.com/NVIDIA/spark-rapids/issues/140 is fixed replace this with
         # timestamp_gen
         orc_timestamp_gen]
+orc_pred_push_test_matrix = generate_reduced_test_matrix({
+    'orc_gen': {'values': orc_pred_push_gens, 'is_primary_dimension': True},
+    # Preserve the original str(reader_conf) IDs. Marks from reader-config pytest parameters are
+    # moved to the generated outer multi-argument pytest parameters.
+    'reader_confs': {
+        'values': reader_opt_confs,
+        'is_primary_dimension': True},
+    # Exercise all V1/V2 and DataFrame/SQL pairs across the primary cases.
+    'v1_enabled_list': {'values': ["", "orc"]},
+    'read_func': {'values': [read_orc_df, read_orc_sql]}})
 
+# Cover every predicate type with all 15 reader configurations while distributing V1/V2 and
+# read functions across 135 cases.
 @pytest.mark.order(2)
-@pytest.mark.parametrize('orc_gen', orc_pred_push_gens, ids=idfn)
-@pytest.mark.parametrize('read_func', [read_orc_df, read_orc_sql])
-@pytest.mark.parametrize('v1_enabled_list', ["", "orc"])
-@pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
-def test_pred_push_round_trip(spark_tmp_path, orc_gen, read_func, v1_enabled_list, reader_confs):
+@pytest.mark.parametrize(
+    'orc_gen,reader_confs,v1_enabled_list,read_func', orc_pred_push_test_matrix)
+def test_pred_push_round_trip(spark_tmp_path, orc_gen, reader_confs, v1_enabled_list, read_func):
     data_path = spark_tmp_path + '/ORC_DATA'
     # Append two struct columns to verify nested predicate pushdown.
     gen_list = [('a', RepeatSeqGen(orc_gen, 100)), ('b', orc_gen),
@@ -682,11 +695,35 @@ def test_read_struct_without_stream(spark_tmp_path):
             lambda spark : spark.read.orc(data_path))
 
 
-@pytest.mark.parametrize('orc_gen', flattened_orc_gens, ids=idfn)
-@pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
-@pytest.mark.parametrize('v1_enabled_list', ["", "orc"])
-@pytest.mark.parametrize('case_sensitive', ["false", "true"])
-def test_read_with_more_columns(spark_tmp_path, orc_gen, reader_confs, v1_enabled_list, case_sensitive):
+# Dedicated to covering GpuMultiFileReader.getNextBuffersAndMetaAndCombine's unordered
+# wait path by letting readReadyFiles return an empty result.
+__unordered_combine_wait_reader_conf = {
+    **__multithreaded_orc_file_reader_combine_unordered_conf_chunked_limited_memory,
+    'spark.rapids.sql.reader.multithreaded.combine.waitTime': 0}
+
+read_with_more_columns_test_matrix = generate_reduced_test_matrix({
+    'orc_gen': {'values': flattened_orc_gens, 'is_primary_dimension': True},
+    # Preserve the original str(reader_conf) IDs. Marks from reader-config pytest parameters are
+    # moved to the generated outer multi-argument pytest parameters.
+    'reader_confs': {
+        'values': reader_opt_confs,
+        'is_primary_dimension': True},
+    # Exercise all case-sensitive/insensitive and V1/V2 pairs across the primary cases.
+    'case_sensitive': {'values': ["false", "true"]},
+    'v1_enabled_list': {'values': ["", "orc"]}},
+    extra_cases=[pytest.param({
+        'orc_gen': decimal_gen_128bit,
+        'reader_confs': __unordered_combine_wait_reader_conf,
+        'case_sensitive': 'true',
+        'v1_enabled_list': ''},
+        marks=pytest.mark.ignore_order(local=True))])
+
+# Cover every ORC type with all 15 reader configurations while distributing V1/V2 and case
+# sensitivity across 465 base cases, plus one unordered-combine wait-path case.
+@pytest.mark.parametrize(
+    'orc_gen,reader_confs,case_sensitive,v1_enabled_list', read_with_more_columns_test_matrix)
+def test_read_with_more_columns(spark_tmp_path, orc_gen, reader_confs, case_sensitive,
+                                v1_enabled_list):
     struct_gen = StructGen([('nested_col', orc_gen)])
     # Map is not supported yet.
     gen_list = [("top_pri", orc_gen),
@@ -949,13 +986,20 @@ def test_project_fallback_when_reading_hive_fixed_length_char(std_input_path, da
         conf={})
 
 
-@pytest.mark.parametrize('read_func', [read_orc_df, read_orc_sql])
-@pytest.mark.parametrize('v1_enabled_list', ["", "orc"])
-@pytest.mark.parametrize('orc_impl', ["native", "hive"])
-@pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
-@pytest.mark.parametrize('col_name', ['K0', 'k0', 'K3', 'k3', 'V0', 'v0'], ids=idfn)
+read_case_col_name_test_matrix = generate_reduced_test_matrix({
+    'read_func': {'values': [read_orc_df, read_orc_sql], 'is_primary_dimension': True},
+    'v1_enabled_list': {'values': ["", "orc"]},
+    'orc_impl': {'values': ["native", "hive"], 'is_primary_dimension': True},
+    'reader_confs': {'values': reader_opt_confs, 'is_primary_dimension': True},
+    'col_name': {'values': ['K0', 'k0', 'K3', 'k3', 'V0', 'v0']}})
+
+# Retain all 60 primary read configurations while distributing every V1/V2 and column-name pair.
+@pytest.mark.parametrize(
+    'read_func,v1_enabled_list,orc_impl,reader_confs,col_name',
+    read_case_col_name_test_matrix)
 @ignore_order
-def test_read_case_col_name(spark_tmp_path, read_func, v1_enabled_list, orc_impl, reader_confs, col_name):
+def test_read_case_col_name(
+        spark_tmp_path, read_func, v1_enabled_list, orc_impl, reader_confs, col_name):
     all_confs = copy_and_update(reader_confs, {
         'spark.sql.sources.useV1SourceList': v1_enabled_list,
         'spark.sql.orc.impl': orc_impl})

@@ -66,7 +66,7 @@ class GpuSparkPositionDeltaWrite(cpu: DeltaWrite)
   extends GpuDeltaWrite with RequiresDistributionAndOrdering {
   private val writeRequirements = cpu.asInstanceOf[RequiresDistributionAndOrdering]
 
-  private[source] val table = GpuSparkWriteAccess.table(cpu)
+  private[source] val table = GpuSparkWriteAccess.deltaTable(cpu)
 
   override def toBatch: DeltaBatchWrite = {
     // Call the CPU version's toBatch to get PositionDeltaBatchWrite
@@ -88,11 +88,11 @@ class GpuSparkPositionDeltaWrite(cpu: DeltaWrite)
     writeRequirements.advisoryPartitionSizeInBytes()
 
   private[source] def createDeltaWriterFactory: DeltaWriterFactory = {
-    val sparkContext: JavaSparkContext = GpuSparkWriteAccess.sparkContext(cpu)
+    val sparkContext: JavaSparkContext = GpuSparkWriteAccess.deltaSparkContext(cpu)
     val tableBroadcast = sparkContext.broadcast(SerializableTable.copyOf(table))
-    val command = GpuSparkWriteAccess.command(cpu)
-    val context = GpuWriteContext(GpuSparkWriteAccess.context(cpu))
-    val writeProps = GpuSparkWriteAccess.writeProperties(cpu)
+    val command = GpuSparkWriteAccess.deltaCommand(cpu)
+    val context = GpuWriteContext(GpuSparkWriteAccess.deltaContext(cpu))
+    val writeProps = GpuSparkWriteAccess.deltaWriteProperties(cpu)
       .asScala
       .toMap
 
@@ -159,7 +159,7 @@ object GpuSparkPositionDeltaWrite {
   }
 
   def tableOf(deltaWrite: DeltaWrite): Table = {
-    GpuSparkWriteAccess.table(deltaWrite)
+    GpuSparkWriteAccess.deltaTable(deltaWrite)
   }
 
   def tagForGpu(deltaWrite: DeltaWrite, meta: SparkPlanMeta[_]): Unit = {
@@ -169,7 +169,7 @@ object GpuSparkPositionDeltaWrite {
         s"but got: ${deltaWrite.getClass.getName}")
       return
     }
-    val context = GpuWriteContext(GpuSparkWriteAccess.context(deltaWrite))
+    val context = GpuWriteContext(GpuSparkWriteAccess.deltaContext(deltaWrite))
 
     val table: Table = tableOf(deltaWrite)
     val partitionSpec = table.spec()
@@ -189,7 +189,8 @@ object GpuSparkPositionDeltaWrite {
 
     // Merge-on-read writes both data files and position-delete files, so the resolved
     // delete codec matters too.
-    GpuSparkWrite.tagParquetCompressionForGpu(GpuSparkWriteAccess.writeProperties(deltaWrite),
+    GpuSparkWrite.tagParquetCompressionForGpu(
+      GpuSparkWriteAccess.deltaWriteProperties(deltaWrite),
       hasDeleteFiles = true, meta)
   }
 
