@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@ import java.util
 
 import scala.collection.JavaConverters._
 
-import org.apache.arrow.memory.RootAllocator
+import org.apache.arrow.memory.{BufferAllocator, RootAllocator}
 import org.apache.arrow.vector._
 import org.apache.arrow.vector.complex.MapVector
 import org.apache.arrow.vector.types.{DateUnit, FloatingPointPrecision, TimeUnit}
@@ -147,6 +147,15 @@ object ColumnarReaderFactory extends PartitionReaderFactory {
   override def createColumnarReader(partition: InputPartition): PartitionReader[ColumnarBatch] = {
     val ArrowInputPartition(dataTypes, numRows, startNum) = partition
     new PartitionReader[ColumnarBatch] {
+      // Spark 4.2 CPU ArrowEvalPythonExec (SPARK-56350) may keep pass-through
+      // ColumnVector references after the next batch is produced. This is CPU
+      // ownership, not the GPU GpuArrowEvalPythonExec path. Do not close earlier
+      // batches or their allocator until the reader itself is closed.
+      // See SPARK-56350 / cudf-spark#15663.
+      private val rootAllocator = new RootAllocator(Long.MaxValue)
+      private val allocator: BufferAllocator =
+        rootAllocator.newChildAllocator(s"arrow-test-reader-$startNum", 0, Long.MaxValue)
+      private val allBatches = new util.ArrayList[ColumnarBatch]()
       private var batch: ColumnarBatch = _
 
       private var current = 0
@@ -167,14 +176,15 @@ object ColumnarReaderFactory extends PartitionReaderFactory {
         } else {
           var dtypeNum = 0
           val vecs = dataTypes.map { dtype =>
-            val vector = setupArrowVector(s"v$current$dtypeNum", dtype)
+            val vector = setupArrowVector(allocator, s"v$current$dtypeNum", dtype)
             val startVal = current + startNum * (dtypeNum + 2)
-            fillArrowVec(dtype, vector, startVal, numRows)
+            fillArrowVec(dtype, vector, startVal, batchSize)
             dtypeNum += 1
             new ArrowColumnVector(vector)
           }
           batch = new ColumnarBatch(vecs.toArray)
           batch.setNumRows(batchSize)
+          allBatches.add(batch)
           current += batchSize
           true
         }
@@ -182,7 +192,13 @@ object ColumnarReaderFactory extends PartitionReaderFactory {
 
       override def get(): ColumnarBatch = batch
 
-      override def close(): Unit = batch.close()
+      override def close(): Unit = {
+        allBatches.asScala.foreach(_.close())
+        allBatches.clear()
+        batch = null
+        allocator.close()
+        rootAllocator.close()
+      }
     }
   }
 
@@ -323,12 +339,11 @@ object ColumnarReaderFactory extends PartitionReaderFactory {
       throw new UnsupportedOperationException(s"Unsupported data type: ${dt.catalogString}")
   }
 
-  private def setupArrowVector(name: String, dataType: DataType): ValueVector = {
-    val rootAllocator = new RootAllocator(Long.MaxValue)
-    val allocator = rootAllocator.newChildAllocator(s"$name", 0, Long.MaxValue)
-    val vector = toArrowField(s"field$name", dataType, nullable = true, "Utc")
-      .createVector(allocator)
-    vector
+  private def setupArrowVector(
+      allocator: BufferAllocator,
+      name: String,
+      dataType: DataType): ValueVector = {
+    toArrowField(s"field$name", dataType, nullable = true, "Utc").createVector(allocator)
   }
 }
 
