@@ -351,11 +351,13 @@ class GpuRapidsProcessDeltaMergeJoinIterator(
     closeOnExcept(new ArrayBuffer[ColumnarBatch]) { results =>
       var leftOverBatch = input
       conditions.zip(outputs).foreach { case (condition, output) =>
-        closeOnExcept(leftOverBatch) { _ =>
-          if (leftOverBatch.numRows() > 0) {
-            val (matchBatch, notMatchBatch) =
-              splitBatchAndClose(leftOverBatch, inputTypes, condition)
-            leftOverBatch = notMatchBatch
+        if (leftOverBatch.numRows() > 0) {
+          // splitBatchAndClose closes the batch it is given, so only the not-matched remainder
+          // is still open if a projection below throws
+          val (matchBatch, notMatchBatch) =
+            splitBatchAndClose(leftOverBatch, inputTypes, condition)
+          leftOverBatch = notMatchBatch
+          closeOnExcept(notMatchBatch) { _ =>
             withResource(matchBatch) { _ =>
               output.foreach { exprs =>
                 results.append(GpuProjectExec.project(matchBatch, exprs))
