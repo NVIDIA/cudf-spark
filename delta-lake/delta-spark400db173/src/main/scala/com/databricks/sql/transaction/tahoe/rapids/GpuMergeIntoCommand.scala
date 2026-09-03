@@ -968,6 +968,10 @@ case class GpuMergeIntoCommand(
         metrics("numTargetRowsDeleted").value - multipleMatchDeleteOnlyOvercount.get
       assert(actualRowsDeleted >= 0)
       metrics("numTargetRowsDeleted").set(actualRowsDeleted)
+      val actualRowsMatchedDeleted =
+        metrics("numTargetRowsMatchedDeleted").value - multipleMatchDeleteOnlyOvercount.get
+      assert(actualRowsMatchedDeleted >= 0)
+      metrics("numTargetRowsMatchedDeleted").set(actualRowsMatchedDeleted)
     }
 
     newFiles

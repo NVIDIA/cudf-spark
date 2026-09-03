@@ -569,6 +569,44 @@ def test_delta_merge_not_matched_by_source_db173(spark_tmp_path, spark_tmp_table
         assert_equal(expected, actual)
 
 
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="Per-clause merge metrics are reported by the Databricks 17.3 GPU merge command")
+def test_delta_merge_delete_only_duplicate_source_metrics_db173(spark_tmp_path, spark_tmp_table_factory):
+    # An unconditional MATCHED DELETE is the only merge that allows several source rows to match
+    # the same target row. The delete counters are incremented once per joined pair and then
+    # compensated, so both numTargetRowsDeleted and numTargetRowsMatchedDeleted must equal the
+    # number of target rows actually deleted, on the CPU and on the GPU.
+    def src_table_func(spark):
+        return spark.createDataFrame(
+            [(a, b) for a in range(0, 50) for b in range(3)], "a INT, b INT")
+
+    def dest_table_func(spark):
+        return spark.createDataFrame([(a, -1) for a in range(0, 100)], "a INT, b INT")
+
+    merge_sql = "MERGE INTO {dest_table} USING {src_table} ON {dest_table}.a == {src_table}.a " \
+                "WHEN MATCHED THEN DELETE"
+    assert_delta_sql_merge_collect(
+        spark_tmp_path, spark_tmp_table_factory,
+        use_cdf=False, enable_deletion_vectors=False,
+        src_table_func=src_table_func, dest_table_func=dest_table_func,
+        merge_sql=merge_sql, compare_logs=False, conf=delta_merge_enabled_conf)
+
+    def merge_metrics(spark, path):
+        row = spark.sql(f"DESCRIBE HISTORY delta.`{path}`") \
+            .where("operation = 'MERGE'").orderBy("version", ascending=False).first()
+        return {k: int(row["operationMetrics"][k])
+                for k in ["numTargetRowsDeleted", "numTargetRowsMatchedDeleted"]}
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    for run in ["CPU", "GPU"]:
+        actual = with_cpu_session(lambda spark: merge_metrics(spark, data_path + "/" + run),
+                                  conf=delta_merge_enabled_conf)
+        assert actual == {"numTargetRowsDeleted": 50, "numTargetRowsMatchedDeleted": 50}, \
+            f"{run}: {actual}"
+
+
 @allow_non_gpu("ExecutedCommandExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
