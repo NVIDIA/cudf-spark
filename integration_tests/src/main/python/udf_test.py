@@ -601,8 +601,12 @@ def test_pandas_udf_cpu_arrow_eval_after_gpu_scan(spark_tmp_path):
         return a + 1
 
     my_udf = f.pandas_udf(add_one, returnType=IntegerType())
+    # Spark 4.x converts pandas UDF output with Arrow's safe checker by default.
+    # int_gen includes Integer.MAX_VALUE, and pandas a+1 becomes float64 2^31
+    # which cannot be cast back to int32. Keep values that stay in int32 after +1.
+    plus_one_int_gen = IntegerGen(min_val=-1000, max_val=1000, special_cases=[0, 1, -1])
     with_cpu_session(
-        lambda spark: unary_op_df(spark, int_gen, length=200).write.parquet(data_path))
+        lambda spark: unary_op_df(spark, plus_one_int_gen, length=200).write.parquet(data_path))
 
     conf = copy_and_update(arrow_udf_conf, {
         'spark.rapids.sql.exec.ArrowEvalPythonExec': 'false',

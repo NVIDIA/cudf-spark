@@ -26,6 +26,7 @@ import org.apache.arrow.vector.types.{DateUnit, FloatingPointPrecision, TimeUnit
 import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType}
 import org.apache.arrow.vector.util.Text;
 
+import org.apache.spark.TaskContext
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.catalog._
 import org.apache.spark.sql.connector.catalog.TableCapability.BATCH_READ
@@ -147,18 +148,32 @@ object ColumnarReaderFactory extends PartitionReaderFactory {
   override def createColumnarReader(partition: InputPartition): PartitionReader[ColumnarBatch] = {
     val ArrowInputPartition(dataTypes, numRows, startNum) = partition
     new PartitionReader[ColumnarBatch] {
-      // Spark 4.2 CPU ArrowEvalPythonExec (SPARK-56350) may keep pass-through
-      // ColumnVector references after the next batch is produced. This is CPU
-      // ownership, not the GPU GpuArrowEvalPythonExec path. Do not close earlier
-      // batches or their allocator until the reader itself is closed.
-      // See SPARK-56350 / cudf-spark#15663.
+      // Spark 4.2 DataSourceRDD closes this reader as soon as next() returns
+      // false, while CPU ArrowEvalPythonExec (SPARK-56350) may still hold
+      // pass-through ArrowColumnVector refs from get(). Do not close batches
+      // here: Spark/GPU consumers close those ColumnarBatches. Close the
+      // allocator only once nothing is allocated. See SPARK-56350 /
+      // cudf-spark#15663.
       private val rootAllocator = new RootAllocator(Long.MaxValue)
       private val allocator: BufferAllocator =
         rootAllocator.newChildAllocator(s"arrow-test-reader-$startNum", 0, Long.MaxValue)
       private val allBatches = new util.ArrayList[ColumnarBatch]()
       private var batch: ColumnarBatch = _
+      private var allocatorsClosed = false
+
+      Option(TaskContext.get()).foreach { ctx =>
+        ctx.addTaskCompletionListener[Unit](_ => tryCloseAllocators())
+      }
 
       private var current = 0
+
+      private def tryCloseAllocators(): Unit = {
+        if (!allocatorsClosed && allocator.getAllocatedMemory == 0) {
+          allocator.close()
+          rootAllocator.close()
+          allocatorsClosed = true
+        }
+      }
 
       override def next(): Boolean = {
         val batchSize = if (current < numRows) {
@@ -193,11 +208,7 @@ object ColumnarReaderFactory extends PartitionReaderFactory {
       override def get(): ColumnarBatch = batch
 
       override def close(): Unit = {
-        allBatches.asScala.foreach(_.close())
-        allBatches.clear()
-        batch = null
-        allocator.close()
-        rootAllocator.close()
+        tryCloseAllocators()
       }
     }
   }
