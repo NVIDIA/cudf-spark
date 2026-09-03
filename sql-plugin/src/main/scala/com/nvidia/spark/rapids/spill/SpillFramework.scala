@@ -473,10 +473,8 @@ class SharedRecomputableHandle[T <: AutoCloseable] private[spill] (
         // Rebuild failed; release and notify waiters before rethrowing
         try {
           if (!published) {
-            candidate.foreach(_.close())
+            candidate.toSeq.safeClose(t)
           }
-        } catch {
-          case closeError: Throwable => t.addSuppressed(closeError)
         } finally {
           synchronized {
             rebuilding = false
