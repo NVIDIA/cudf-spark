@@ -33,11 +33,19 @@ def read_orc_df(data_path):
 def read_orc_sql(data_path):
     return lambda spark : spark.sql('select * from orc.`{}`'.format(data_path))
 
-# Using timestamps from 1590 to work around a cudf ORC bug
-# https://github.com/NVIDIA/spark-rapids/issues/131.
-# Once the bug is fixed we should remove this and use timestamp_gen.
+# Timestamps are limited to 1901 and later for two separate reasons:
+#  * a cudf ORC bug, https://github.com/NVIDIA/spark-rapids/issues/131, which is why this
+#    helper starts at a fixed date at all instead of using timestamp_gen;
+#  * GPU and CPU disagree on Local Mean Time offsets, which apply to a zone before it
+#    adopted standard time. Premerge runs the tz_sensitive_test cases under
+#    America/New_York (LMT until 1883-11-18) and Asia/Shanghai (LMT until 1901), so
+#    starting at 1901-01-01 keeps generated timestamps clear of both windows.
+#    Note this bound does not eliminate the problem for nightly runs, which rotate
+#    through every time zone; a few kept LMT offsets far later, Africa/Monrovia until
+#    1972 being the latest. The real fix is the underlying LMT conversion defect.
+# Once both are fixed we should remove this and use timestamp_gen.
 def get_orc_timestamp_gen(nullable=True):
-    return TimestampGen(start=datetime(1590, 1, 1, tzinfo=timezone.utc), nullable=nullable)
+    return TimestampGen(start=datetime(1901, 1, 1, tzinfo=timezone.utc), nullable=nullable)
 
 orc_timestamp_gen = get_orc_timestamp_gen()
 
