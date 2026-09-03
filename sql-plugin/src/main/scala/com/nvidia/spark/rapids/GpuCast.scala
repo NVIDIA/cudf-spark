@@ -1433,11 +1433,7 @@ object GpuCast {
         if (input.getNullCount == 0) {
           casted.copyToColumnVector()
         } else {
-          withResource(input.isNull) { isNull =>
-            withResource(GpuScalar.from(null, to)) { nullVal =>
-              isNull.ifElse(nullVal, casted)
-            }
-          }
+          casted.mergeAndSetValidity(BinaryOp.BITWISE_AND, input)
         }
       }
     }
