@@ -66,6 +66,9 @@
         <module>datagen</module>
         <module>dist</module>
         <module>integration_tests</module>
+        <module>history-metrics-api</module>
+        <module>history-metrics-tck</module>
+        <module>history-metrics-local</module>
         <module>shuffle-plugin</module>
         <module>iceberg-common</module>
         <module>sql-plugin-api</module>
