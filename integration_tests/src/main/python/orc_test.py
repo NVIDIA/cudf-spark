@@ -49,6 +49,13 @@ def get_orc_timestamp_gen(nullable=True):
 
 orc_timestamp_gen = get_orc_timestamp_gen()
 
+# The range get_orc_timestamp_gen covered before it was bounded to 1901. Kept so the
+# dropped coverage stays visible and is easy to restore: once the Local Mean Time
+# conversion defect is fixed, delete this generator and the skipped test that uses it,
+# and move get_orc_timestamp_gen back to 1590.
+def get_orc_pre_standard_time_timestamp_gen(nullable=True):
+    return TimestampGen(start=datetime(1590, 1, 1, tzinfo=timezone.utc), nullable=nullable)
+
 # test with original orc file reader, the multi-file parallel reader for cloud
 __original_orc_file_reader_conf = {'spark.rapids.sql.format.orc.reader.type': 'PERFILE'}
 __multithreaded_orc_file_reader_conf = {'spark.rapids.sql.format.orc.reader.type': 'MULTITHREADED',
@@ -205,6 +212,27 @@ def test_orc_fallback(spark_tmp_path, read_func, disable_conf):
 @tz_sensitive_test
 def test_read_round_trip(spark_tmp_path, orc_gens, read_func, reader_confs, v1_enabled_list):
     gen_list = [('_c' + str(i), gen) for i, gen in enumerate(orc_gens)]
+    data_path = spark_tmp_path + '/ORC_DATA'
+    with_cpu_session(
+            lambda spark : gen_df(spark, gen_list).write.orc(data_path))
+    all_confs = copy_and_update(reader_confs, {'spark.sql.sources.useV1SourceList': v1_enabled_list})
+    assert_gpu_and_cpu_are_equal_collect(
+            read_func(data_path),
+            conf=all_confs)
+
+# Covers the pre-1901 timestamps that get_orc_timestamp_gen no longer generates.
+# Expected to fail today: GPU and CPU disagree on Local Mean Time offsets, which apply
+# to a time zone before it adopted standard time. Remove the skip once that is fixed.
+@pytest.mark.skip(reason="https://github.com/NVIDIA/cudf-spark/issues/15895")
+@pytest.mark.order(2)
+@pytest.mark.parametrize('read_func', [read_orc_df, read_orc_sql])
+@pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
+@pytest.mark.parametrize('v1_enabled_list', ['', 'orc'])
+@tz_sensitive_test
+def test_read_round_trip_pre_standard_time_timestamps(spark_tmp_path, read_func, reader_confs,
+                                                      v1_enabled_list):
+    gen_list = [('_c0', get_orc_pre_standard_time_timestamp_gen()),
+                ('_c1', ArrayGen(get_orc_pre_standard_time_timestamp_gen()))]
     data_path = spark_tmp_path + '/ORC_DATA'
     with_cpu_session(
             lambda spark : gen_df(spark, gen_list).write.orc(data_path))
