@@ -42,7 +42,6 @@ import org.apache.spark.sql.catalyst.util.{truncatedString, InternalRowComparabl
 import org.apache.spark.sql.connector.catalog.Table
 import org.apache.spark.sql.connector.read._
 import org.apache.spark.sql.execution.datasources.rapids.DataSourceStrategyUtils
-import org.apache.spark.sql.execution.datasources.v2.DataSourceRDD
 
 case class GpuBatchScanExec(
     output: Seq[AttributeReference],
@@ -260,8 +259,11 @@ case class GpuBatchScanExec(
         case _ => filteredPartitions
       }
 
-      new DataSourceRDD(
-        sparkContext, finalPartitions, readerFactory, supportsColumnar, customMetrics)
+      new GpuDataSourceRDD(
+        sparkContext,
+        finalPartitions,
+        readerFactory,
+        new Spark4GpuDataSourceCustomMetricsFactory(scanCustomSQLMetrics))
     }
     postDriverMetrics()
     rdd
