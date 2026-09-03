@@ -277,6 +277,10 @@ private[rapids] object GpuExecOverrides {
       ExecChecks((TypeSig.commonCudfTypes + TypeSig.ARRAY + TypeSig.STRUCT).nested(),
         TypeSig.all),
       MapInPandasExecConstructorRuleMeta),
+    exec[SerializeFromObjectExec](
+      "GPU replacement for exactly proven SequenceFile binary RDD scans",
+      ExecChecks(TypeSig.BINARY, TypeSig.all),
+      GpuSequenceFileSerializeFromObjectExecMeta.wrap).invisible(),
     exec[InMemoryTableScanExec](
       "Implementation of InMemoryTableScanExec to use GPU accelerated caching",
       ExecChecks((TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128 + TypeSig.STRUCT +
