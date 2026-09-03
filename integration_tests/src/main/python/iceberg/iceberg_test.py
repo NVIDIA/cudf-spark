@@ -199,12 +199,16 @@ def test_iceberg_spj_partition_filter(spark_tmp_table_factory, partition_filter,
             f"CREATE TABLE {right_table} (id INT, value STRING) USING ICEBERG "
             f"PARTITIONED BY (id) TBLPROPERTIES ({table_props_sql})")
 
-        # id=3 exists only on the left, so partition filtering prunes it from the left scan
-        # while the union of both sides would have kept it. The two id=1 rows land in separate
-        # files, which is what makes the left scan partially clustered.
+        # Each side gets a key the other lacks (left id=3, right id=4), so partition filtering
+        # has something to prune on both scans. Spark decides which side pads and which
+        # replicates, so covering both branches of that decision means neither side may be a
+        # subset of the intersection. Each side also gets a key split across two files, inside
+        # the intersection, so whichever side pads reports numSplits=2 and partial clustering
+        # stays observable in the partition counts.
         spark.sql(f"INSERT INTO {left_table} VALUES (1, 40.0), (2, 10.0), (3, 15.5)")
         spark.sql(f"INSERT INTO {left_table} VALUES (1, 41.0)")
-        spark.sql(f"INSERT INTO {right_table} VALUES (1, 'a'), (2, 'b')")
+        spark.sql(f"INSERT INTO {right_table} VALUES (1, 'a'), (2, 'b'), (4, 'd')")
+        spark.sql(f"INSERT INTO {right_table} VALUES (2, 'c')")
 
     with_cpu_session(setup_iceberg_tables)
 
@@ -228,12 +232,12 @@ def test_iceberg_spj_partition_filter(spark_tmp_table_factory, partition_filter,
             JOIN {right_table} r ON l.id = r.id
             """)
 
-    # Both scans plan one partition per common partition value. Partition filtering drops id=3,
-    # which only the left side has, and partial clustering adds one back because the two id=1
-    # files get a partition each. KeyGroupedPartitioning.isPartiallyClustered would say this
-    # more directly but only exists on Spark 3.5.9+/4.0.3+/4.1.2+, which is the gate this test
-    # is deliberately avoiding.
-    expected_partitions = (2 if partition_filter else 3) + (1 if partially_clustered else 0)
+    # Both scans plan one partition per common partition value: the intersection {1, 2} when
+    # filtering, otherwise the union {1, 2, 3, 4}. Partial clustering adds one more, for the
+    # second file of the padding side's split key. KeyGroupedPartitioning.isPartiallyClustered
+    # would say this more directly but only exists on Spark 3.5.9+/4.0.3+/4.1.2+, which is the
+    # gate this test is deliberately avoiding.
+    expected_partitions = (2 if partition_filter else 4) + (1 if partially_clustered else 0)
 
     def assert_plan(plan):
         scans = _assert_spj_join_shape(plan, expect_spj=True)
