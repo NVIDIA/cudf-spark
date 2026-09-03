@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -152,11 +152,7 @@ case class GpuRapidsProcessDeltaMergeJoinExec(
     deleteRowOutput: Seq[Expression]) extends UnaryExecNode with GpuExec {
   require(matchedConditions.length == matchedOutputs.length)
   require(notMatchedConditions.length == notMatchedOutputs.length)
-
-  // TODO add support for notMatchedBy*
-  // see https://github.com/NVIDIA/spark-rapids/issues/8415
-  require(notMatchedBySourceConditions.isEmpty)
-  require(notMatchedBySourceOutputs.isEmpty)
+  require(notMatchedBySourceConditions.length == notMatchedBySourceOutputs.length)
 
   private lazy val inputTypes: Array[DataType] = GpuColumnVector.extractTypes(child.schema)
   private lazy val outputExprs: Seq[GpuBoundReference] = output.zipWithIndex.map {
@@ -169,6 +165,10 @@ case class GpuRapidsProcessDeltaMergeJoinExec(
   private lazy val boundMatchedOutputs = matchedOutputs.map(_.map(_.map(bindForGpu)))
   private lazy val boundNotMatchedConditions = notMatchedConditions.map(bindForGpu)
   private lazy val boundNotMatchedOutputs = notMatchedOutputs.map(_.map(_.map(bindForGpu)))
+  private lazy val boundNotMatchedBySourceConditions =
+    notMatchedBySourceConditions.map(bindForGpu)
+  private lazy val boundNotMatchedBySourceOutputs =
+    notMatchedBySourceOutputs.map(_.map(_.map(bindForGpu)))
   private lazy val boundNoopCopyOutput = noopCopyOutput.map(bindForGpu)
   private lazy val boundDeleteRowOutput = deleteRowOutput.map(bindForGpu)
 
@@ -195,6 +195,8 @@ case class GpuRapidsProcessDeltaMergeJoinExec(
     val localMatchedOutputs = boundMatchedOutputs
     val localNotMatchedConditions = boundNotMatchedConditions
     val localNotMatchedOutputs = boundNotMatchedOutputs
+    val localNotMatchedBySourceConditions = boundNotMatchedBySourceConditions
+    val localNotMatchedBySourceOutputs = boundNotMatchedBySourceOutputs
     val localNoopCopyOutput = boundNoopCopyOutput
     val localDeleteRowOutput = boundDeleteRowOutput
     child.executeColumnar().mapPartitions { iter =>
@@ -209,6 +211,8 @@ case class GpuRapidsProcessDeltaMergeJoinExec(
         matchedOutputs = localMatchedOutputs,
         notMatchedConditions = localNotMatchedConditions,
         notMatchedOutputs = localNotMatchedOutputs,
+        notMatchedBySourceConditions = localNotMatchedBySourceConditions,
+        notMatchedBySourceOutputs = localNotMatchedBySourceOutputs,
         noopCopyOutput = localNoopCopyOutput,
         deleteRowOutput = localDeleteRowOutput,
         allMetrics)
@@ -231,6 +235,8 @@ class GpuRapidsProcessDeltaMergeJoinIterator(
     matchedOutputs: Seq[Seq[Seq[GpuExpression]]],
     notMatchedConditions: Seq[GpuExpression],
     notMatchedOutputs: Seq[Seq[Seq[GpuExpression]]],
+    notMatchedBySourceConditions: Seq[GpuExpression],
+    notMatchedBySourceOutputs: Seq[Seq[Seq[GpuExpression]]],
     noopCopyOutput: Seq[GpuExpression],
     deleteRowOutput: Seq[GpuExpression],
     metrics: Map[String, GpuMetric])
@@ -286,10 +292,13 @@ class GpuRapidsProcessDeltaMergeJoinIterator(
   private def processSingleBatch(input: ColumnarBatch): ColumnarBatch = {
     val (targetNoMatchBatch, targetMatchBatch) =
       splitBatchAndClose(input, inputTypes, targetRowHasNoMatch)
-    val noopCopyBatch = closeOnExcept(targetMatchBatch) { _ =>
-      GpuProjectExec.projectAndClose(targetNoMatchBatch, noopCopyOutput, NoopMetric)
+    // Target rows without a source match are handled by the NOT MATCHED BY SOURCE clauses.
+    // A target row that satisfies none of the clause conditions is copied unchanged.
+    val targetNotMatchedBatches = closeOnExcept(targetMatchBatch) { _ =>
+      processProjectionSeries(targetNoMatchBatch,
+        notMatchedBySourceConditions, notMatchedBySourceOutputs, noopCopyOutput)
     }
-    val bigTable = withResource(noopCopyBatch) { _ =>
+    val bigTable = withResource(targetNotMatchedBatches) { _ =>
       val (sourceNoMatchBatch, sourceMatchBatch) =
         splitBatchAndClose(targetMatchBatch, inputTypes, sourceRowHasNoMatch)
       val sourceNotMatchedBatches = closeOnExcept(sourceMatchBatch) { _ =>
@@ -300,9 +309,15 @@ class GpuRapidsProcessDeltaMergeJoinIterator(
         val sourceMatchedBatches = processProjectionSeries(sourceMatchBatch,
           matchedConditions, matchedOutputs, noopCopyOutput)
         withResource(sourceMatchedBatches) { _ =>
-          val allBatches = (noopCopyBatch +: sourceNotMatchedBatches) ++ sourceMatchedBatches
-          // annoyingly Table.concatenate does not gracefully handle the degenerate case
-          if (allBatches.size == 1) {
+          val allBatches = targetNotMatchedBatches ++ sourceNotMatchedBatches ++
+            sourceMatchedBatches
+          // annoyingly Table.concatenate does not gracefully handle the degenerate cases
+          if (allBatches.isEmpty) {
+            // every projection series skips empty inputs, so an empty input batch ends up here
+            withResource(GpuColumnVector.emptyBatchFromTypes(intermediateTypes)) { emptyBatch =>
+              GpuColumnVector.from(emptyBatch)
+            }
+          } else if (allBatches.size == 1) {
             GpuColumnVector.from(allBatches.head)
           } else {
             withResource(allBatches.safeMap(GpuColumnVector.from)) { allTables =>
