@@ -678,7 +678,7 @@ object JoinImpl {
   def innerDistinctHashJoinBuildLeft(
       rightKeys: Table,
       leftHashJoin: CudfDistinctHashJoin): GatherMapsResult = {
-    val arrayRet = rightKeys.innerJoinGatherMaps(leftHashJoin)
+    val arrayRet = rightKeys.innerDistinctJoinGatherMaps(leftHashJoin)
     GatherMapsResult(arrayRet(1), arrayRet(0))
   }
 
@@ -692,7 +692,7 @@ object JoinImpl {
   def innerDistinctHashJoinBuildRight(
       leftKeys: Table,
       rightHashJoin: CudfDistinctHashJoin): GatherMapsResult = {
-    val arrayRet = leftKeys.innerJoinGatherMaps(rightHashJoin)
+    val arrayRet = leftKeys.innerDistinctJoinGatherMaps(rightHashJoin)
     GatherMapsResult(arrayRet(0), arrayRet(1))
   }
 
