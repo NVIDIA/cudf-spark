@@ -333,6 +333,19 @@ abstract class GpuOrcDataReaderBase(
           remoteReadCallsMetric += 1
           remotePerfIOReadCallsMetric += 1
           hostStreamLoader.populateFileCache(baseOffset, first, last, bufferPos)
+        case _ if useGcsPerfIO =>
+          withResource(HostMemoryBuffer.allocate(readSize, false)) { hmb =>
+            remoteReadTimeMetric.ns {
+              val range = new RapidsInputFile.CopyRange(offset, readSize, 0L)
+              inputFile.readVectored(hmb, java.util.Collections.singletonList(range))
+            }
+            remoteReadBytesMetric += readSize
+            remoteReadCallsMetric += 1
+            remotePerfIOReadCallsMetric += 1
+            hostCopyTimeMetric.ns {
+              loader.loadRemoteBlocks(baseOffset, first, last, hmb.asByteBuffer(0L, readSize))
+            }
+          }
         case hostStreamLoader: HostStreamLoader =>
           ensureFile()
           val result = hostStreamLoader.loadRemoteBlocksFromFile(
