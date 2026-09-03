@@ -24,7 +24,7 @@ these upstream repositories to verify correctness:
 - [ ] C5: Resource lifecycle — SpillableColumnarBatch used after close or without retry handling
 - [ ] H1: Performance — unnecessary host-device copies, redundant materializations, avoidable data serialization
 - [ ] H2: Concurrency — missing GpuSemaphore.acquireIfNecessary(context), nested locks without ordering
-- [ ] H3: Fallback gaps — new operator in GpuOverrides without fallback declaration or test
+- [ ] H3: Fallback gaps — new replacement rule without a fallback declaration or test
 - [ ] H4: Test quality — no GPU execution verification, hardcoded sleeps, unseeded random data; GPU resource cleanup in afterAll/afterEach
 - [ ] H5: Configuration — new RapidsConf without docs/defaults; should use .internal() if not user-visible; new features default off
 - [ ] H6: Magic numbers — unexplained numeric literals without named constants or comments

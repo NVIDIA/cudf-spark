@@ -67,6 +67,7 @@
         <module>dist</module>
         <module>integration_tests</module>
         <module>shuffle-plugin</module>
+        <module>iceberg-common</module>
         <module>sql-plugin-api</module>
         <module>sql-plugin-format</module>
         <module>sql-plugin-fileio</module>
@@ -1953,6 +1954,7 @@ This will force full Scala code rebuild in downstream modules.
                         <exclude>**/.*/**</exclude>
                         <exclude>**/src/main/java/com/nvidia/spark/rapids/format/*</exclude>
                         <exclude>**/*.csv</exclude>
+                        <exclude>scripts/with_resource_nesting_baseline.json</exclude>
                         <exclude>dist/*.txt</exclude>
                         <exclude>**/META-INF/com.nvidia.spark.rapids.SparkShimServiceProvider</exclude>
                         <!-- Apache Rat excludes target folder for projects that are included by
@@ -2028,6 +2030,24 @@ This will force full Scala code rebuild in downstream modules.
                                     <arg line="--xmlEncoding ${project.reporting.outputEncoding}"/>
                                     <arg line="${scalastyle.dirs}"/>
                                 </java>
+                                <exec executable="python3" failonerror="true"
+                                      dir="${spark.rapids.source.basedir}">
+                                    <arg value="-m"/>
+                                    <arg value="unittest"/>
+                                    <arg value="discover"/>
+                                    <arg value="-s"/>
+                                    <arg value="scripts/tests"/>
+                                    <arg value="-p"/>
+                                    <arg value="test_check_with_resource_nesting.py"/>
+                                </exec>
+                                <!-- Existing nesting exceptions are tracked by
+                                     https://github.com/NVIDIA/cudf-spark/issues/11713. -->
+                                <exec executable="python3" failonerror="true"
+                                      dir="${spark.rapids.source.basedir}">
+                                    <arg value="scripts/check_with_resource_nesting.py"/>
+                                    <arg value="--root"/>
+                                    <arg value="${spark.rapids.source.basedir}"/>
+                                </exec>
                             </target>
                         </configuration>
                     </execution>
