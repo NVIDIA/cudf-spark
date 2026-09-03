@@ -2576,7 +2576,10 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
   val EXPLAIN = conf("spark.rapids.sql.explain")
     .doc("Explain why some parts of a query were not placed on a GPU or not. Possible " +
       "values are ALL: print everything, NONE: print nothing, NOT_ON_GPU: print only parts of " +
-      "a query that did not go on the GPU")
+      "a query that did not go on the GPU. ALL is intended only for debugging and can generate " +
+      "a large amount of driver log output for complex or high-volume workloads, potentially " +
+      "degrading driver performance or making it unresponsive. Do not use ALL in production; " +
+      "use NOT_ON_GPU (the default) or NONE instead.")
     .commonlyUsed()
     .stringConf
     .createWithDefault("NOT_ON_GPU")
