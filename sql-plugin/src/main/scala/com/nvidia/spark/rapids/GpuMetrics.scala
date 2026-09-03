@@ -131,6 +131,8 @@ object GpuMetric extends Logging {
   val ORC_STRIPE_FOOTER_READ_TIME = "orcStripeFooterReadTime"
   val ORC_STRIPE_FOOTER_READ_BYTES = "orcStripeFooterReadBytes"
   val ORC_STRIPE_FOOTER_READ_CALLS = "orcStripeFooterReadCalls"
+  val ORC_STRIPE_FOOTER_PERFIO_READ_CALLS = "orcStripeFooterPerfIOReadCalls"
+  val ORC_STRIPE_FOOTER_FALLBACK_READ_CALLS = "orcStripeFooterFallbackReadCalls"
   val ORC_STRIPE_FOOTER_PARSE_TIME = "orcStripeFooterParseTime"
   val ORC_OUTPUT_SIZE_TIME = "orcOutputSizeTime"
   val ORC_HOST_BUFFER_ALLOC_TIME = "orcHostBufferAllocTime"
@@ -138,6 +140,8 @@ object GpuMetric extends Logging {
   val ORC_REMOTE_READ_TIME = "orcRemoteReadTime"
   val ORC_REMOTE_READ_BYTES = "orcRemoteReadBytes"
   val ORC_REMOTE_READ_CALLS = "orcRemoteReadCalls"
+  val ORC_REMOTE_PERFIO_READ_CALLS = "orcRemotePerfIOReadCalls"
+  val ORC_REMOTE_FALLBACK_READ_CALLS = "orcRemoteFallbackReadCalls"
   val ORC_HOST_COPY_TIME = "orcHostCopyTime"
   val ORC_FILE_REBUILD_TIME = "orcFileRebuildTime"
   val ORC_SPILLABLE_WRAP_TIME = "orcSpillableWrapTime"
@@ -156,6 +160,8 @@ object GpuMetric extends Logging {
     ORC_STRIPE_FOOTER_READ_TIME,
     ORC_STRIPE_FOOTER_READ_BYTES,
     ORC_STRIPE_FOOTER_READ_CALLS,
+    ORC_STRIPE_FOOTER_PERFIO_READ_CALLS,
+    ORC_STRIPE_FOOTER_FALLBACK_READ_CALLS,
     ORC_STRIPE_FOOTER_PARSE_TIME,
     ORC_OUTPUT_SIZE_TIME,
     ORC_HOST_BUFFER_ALLOC_TIME,
@@ -163,6 +169,8 @@ object GpuMetric extends Logging {
     ORC_REMOTE_READ_TIME,
     ORC_REMOTE_READ_BYTES,
     ORC_REMOTE_READ_CALLS,
+    ORC_REMOTE_PERFIO_READ_CALLS,
+    ORC_REMOTE_FALLBACK_READ_CALLS,
     ORC_HOST_COPY_TIME,
     ORC_FILE_REBUILD_TIME,
     ORC_SPILLABLE_WRAP_TIME)
@@ -274,6 +282,10 @@ object GpuMetric extends Logging {
   val DESCRIPTION_ORC_STRIPE_FOOTER_READ_TIME = "ORC stripe footer remote read time"
   val DESCRIPTION_ORC_STRIPE_FOOTER_READ_BYTES = "ORC stripe footer remote read bytes"
   val DESCRIPTION_ORC_STRIPE_FOOTER_READ_CALLS = "ORC stripe footer remote read calls"
+  val DESCRIPTION_ORC_STRIPE_FOOTER_PERFIO_READ_CALLS =
+    "ORC stripe footer PerfIO read calls"
+  val DESCRIPTION_ORC_STRIPE_FOOTER_FALLBACK_READ_CALLS =
+    "ORC stripe footer fallback read calls"
   val DESCRIPTION_ORC_STRIPE_FOOTER_PARSE_TIME = "ORC stripe footer parse time"
   val DESCRIPTION_ORC_OUTPUT_SIZE_TIME = "ORC output size calculation time"
   val DESCRIPTION_ORC_HOST_BUFFER_ALLOC_TIME = "ORC host buffer allocation time"
@@ -281,6 +293,8 @@ object GpuMetric extends Logging {
   val DESCRIPTION_ORC_REMOTE_READ_TIME = "ORC remote data read time"
   val DESCRIPTION_ORC_REMOTE_READ_BYTES = "ORC remote data read bytes"
   val DESCRIPTION_ORC_REMOTE_READ_CALLS = "ORC remote data read calls"
+  val DESCRIPTION_ORC_REMOTE_PERFIO_READ_CALLS = "ORC remote data PerfIO read calls"
+  val DESCRIPTION_ORC_REMOTE_FALLBACK_READ_CALLS = "ORC remote data fallback read calls"
   val DESCRIPTION_ORC_HOST_COPY_TIME = "ORC host buffer copy time"
   val DESCRIPTION_ORC_FILE_REBUILD_TIME =
     "ORC in-memory file rebuild time including remote reads and host copies"

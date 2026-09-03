@@ -24,7 +24,7 @@ import ai.rapids.cudf.HostMemoryBuffer
 import com.nvidia.spark.rapids.{GpuMetric, HostMemoryOutputStream, NoopMetric}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.filecache.FileCache
-import com.nvidia.spark.rapids.fileio.hadoop.HadoopFileIO
+import com.nvidia.spark.rapids.fileio.hadoop.{GCSInputFile, HadoopFileIO}
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.FSDataInputStream
@@ -42,6 +42,7 @@ abstract class GpuOrcDataReaderBase(
   protected var file: Option[FSDataInputStream] = None
   protected lazy val fileIO = new HadoopFileIO(conf)
   protected lazy val inputFile: RapidsInputFile = fileIO.newInputFile(filePathString)
+  private def useGcsPerfIO: Boolean = inputFile.isInstanceOf[GCSInputFile]
   protected val compression = props.getCompression
   private val hitMetric = getMetric(GpuMetric.FILECACHE_DATA_RANGE_HITS)
   private val hitSizeMetric = getMetric(GpuMetric.FILECACHE_DATA_RANGE_HITS_SIZE)
@@ -65,7 +66,7 @@ abstract class GpuOrcDataReaderBase(
     def loadCachedBlock(block: DiskRangeList, channel: SeekableByteChannel): DiskRangeList
   }
 
-  private class HostStreamLoader(out: HostMemoryOutputStream) extends BlockLoader {
+  private class HostStreamLoader(val out: HostMemoryOutputStream) extends BlockLoader {
     def loadRemoteBlocksFromFile(
         input: FSDataInputStream,
         offset: Long,
@@ -104,7 +105,7 @@ abstract class GpuOrcDataReaderBase(
       populateFileCache(baseOffset, first, last, bufferPos)
     }
 
-    private def populateFileCache(
+    def populateFileCache(
         baseOffset: Long,
         first: DiskRangeList,
         last: DiskRangeList,
@@ -161,9 +162,21 @@ abstract class GpuOrcDataReaderBase(
     } else {
       missMetric += 1
       missSizeMetric += tailLength
-      ensureFile()
-      stripeFooterReadTimeMetric.ns {
-        file.get.readFully(offset, tailBuf.array(), tailBuf.arrayOffset(), tailLength)
+      if (useGcsPerfIO) {
+        stripeFooterReadTimeMetric.ns {
+          withResource(HostMemoryBuffer.allocate(tailLength, false)) { hmb =>
+            val range = new RapidsInputFile.CopyRange(offset, tailLength, 0L)
+            inputFile.readVectored(hmb, java.util.Collections.singletonList(range))
+            hmb.getBytes(tailBuf.array(), tailBuf.arrayOffset(), 0L, tailLength)
+          }
+        }
+        stripeFooterPerfIOReadCallsMetric += 1
+      } else {
+        ensureFile()
+        stripeFooterReadTimeMetric.ns {
+          file.get.readFully(offset, tailBuf.array(), tailBuf.arrayOffset(), tailLength)
+        }
+        stripeFooterFallbackReadCallsMetric += 1
       }
       stripeFooterReadBytesMetric += tailLength
       stripeFooterReadCallsMetric += 1
@@ -204,11 +217,17 @@ abstract class GpuOrcDataReaderBase(
   private val stripeFooterReadTimeMetric = getMetric(GpuMetric.ORC_STRIPE_FOOTER_READ_TIME)
   private val stripeFooterReadBytesMetric = getMetric(GpuMetric.ORC_STRIPE_FOOTER_READ_BYTES)
   private val stripeFooterReadCallsMetric = getMetric(GpuMetric.ORC_STRIPE_FOOTER_READ_CALLS)
+  private val stripeFooterPerfIOReadCallsMetric =
+    getMetric(GpuMetric.ORC_STRIPE_FOOTER_PERFIO_READ_CALLS)
+  private val stripeFooterFallbackReadCallsMetric =
+    getMetric(GpuMetric.ORC_STRIPE_FOOTER_FALLBACK_READ_CALLS)
   private val stripeFooterParseTimeMetric = getMetric(GpuMetric.ORC_STRIPE_FOOTER_PARSE_TIME)
   private val remoteOpenTimeMetric = getMetric(GpuMetric.ORC_REMOTE_OPEN_TIME)
   private val remoteReadTimeMetric = getMetric(GpuMetric.ORC_REMOTE_READ_TIME)
   private val remoteReadBytesMetric = getMetric(GpuMetric.ORC_REMOTE_READ_BYTES)
   private val remoteReadCallsMetric = getMetric(GpuMetric.ORC_REMOTE_READ_CALLS)
+  private val remotePerfIOReadCallsMetric = getMetric(GpuMetric.ORC_REMOTE_PERFIO_READ_CALLS)
+  private val remoteFallbackReadCallsMetric = getMetric(GpuMetric.ORC_REMOTE_FALLBACK_READ_CALLS)
   private val hostCopyTimeMetric = getMetric(GpuMetric.ORC_HOST_COPY_TIME)
 
   private def ensureFile(): Unit = {
@@ -299,20 +318,36 @@ abstract class GpuOrcDataReaderBase(
       first: DiskRangeList,
       last: DiskRangeList,
       readSize: Int): DiskRangeList = {
-    ensureFile()
     val offset = baseOffset + first.getOffset
     try {
       loader match {
+        case hostStreamLoader: HostStreamLoader if useGcsPerfIO =>
+          val bufferPos = hostStreamLoader.out.getPos
+          remoteReadTimeMetric.ns {
+            val range = new RapidsInputFile.CopyRange(offset, readSize, bufferPos)
+            inputFile.readVectored(hostStreamLoader.out.buffer,
+              java.util.Collections.singletonList(range))
+          }
+          hostStreamLoader.out.seek(bufferPos + readSize)
+          remoteReadBytesMetric += readSize
+          remoteReadCallsMetric += 1
+          remotePerfIOReadCallsMetric += 1
+          hostStreamLoader.populateFileCache(baseOffset, first, last, bufferPos)
         case hostStreamLoader: HostStreamLoader =>
-          hostStreamLoader.loadRemoteBlocksFromFile(
+          ensureFile()
+          val result = hostStreamLoader.loadRemoteBlocksFromFile(
             file.get, offset, readSize, baseOffset, first, last)
+          remoteFallbackReadCallsMetric += 1
+          result
         case _ =>
+          ensureFile()
           val buffer = new Array[Byte](readSize)
           remoteReadTimeMetric.ns {
             file.get.readFully(offset, buffer, 0, buffer.length)
           }
           remoteReadBytesMetric += buffer.length
           remoteReadCallsMetric += 1
+          remoteFallbackReadCallsMetric += 1
           hostCopyTimeMetric.ns {
             loader.loadRemoteBlocks(baseOffset, first, last, ByteBuffer.wrap(buffer))
           }
