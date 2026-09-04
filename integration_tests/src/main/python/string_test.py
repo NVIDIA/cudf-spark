@@ -14,6 +14,7 @@
 
 import pytest
 import random
+import re
 
 from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_are_equal_sql, \
     assert_gpu_sql_fallback_collect, assert_gpu_fallback_collect, assert_gpu_and_cpu_error, \
@@ -851,16 +852,60 @@ def test_like():
                 f.col('a').like('_?|}{_%'),
                 f.col('a').like('%a{3}%')))
 
-@allow_non_gpu('Like')
-def test_unsupported_fallback_like():
-    gen = StringGen('[a-z]')
-    def assert_gpu_did_fallback(sql_text):
-        assert_gpu_fallback_collect(lambda spark:
-            unary_op_df(spark, gen, length=10).selectExpr(sql_text),
-            'Like')
+def test_like_column_patterns():
+    def make_df(spark):
+        return spark.createDataFrame([
+            ('azaa', '%a'),
+            ('ababaabba', 'a%b%'),
+            ('aaxa', 'a__a'),
+            ('abc_def', 'abc\\_d%'),
+            ('abc1def', 'abc\\_d%'),
+            ('', ''),
+            ('éclair', 'é%'),
+            (None, '%'),
+            ('x', None),
+        ], 'a string, b string')
 
-    assert_gpu_did_fallback("'lit' like a")
-    assert_gpu_did_fallback("a like a")
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: make_df(spark).selectExpr('a LIKE b', "'azaa' LIKE b"))
+
+
+def test_like_column_patterns_custom_escape():
+    def make_df(spark):
+        return spark.createDataFrame([
+            ('abc_def', 'abc#_d%'),
+            ('abc1def', 'abc#_d%'),
+            ('20%', '20#%'),
+            ('20x', '20#%'),
+            (None, 'bad#x'),
+            ('x', None),
+        ], 'a string, b string')
+
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: make_df(spark).selectExpr("a LIKE b ESCAPE '#'"))
+
+
+@allow_non_gpu('Like')
+def test_like_column_patterns_non_ascii_escape_fallback():
+    def make_df(spark):
+        return spark.createDataFrame([
+            ('abc_def', 'abcé_d%'),
+            ('abc1def', 'abcé_d%'),
+        ], 'a string, b string')
+
+    assert_gpu_fallback_collect(
+        lambda spark: make_df(spark).selectExpr("a LIKE b ESCAPE 'é'"),
+        'Like')
+
+
+def test_like_column_patterns_invalid_escape():
+    def run(spark):
+        return spark.createDataFrame([
+            (None, 'bad\\x'),
+            ('abc', 'bad\\x'),
+        ], 'a string, b string').selectExpr('a LIKE b').collect()
+
+    assert_gpu_and_cpu_error(run, {}, re.compile('escape', re.IGNORECASE))
 
 
 @allow_non_gpu('RLike')

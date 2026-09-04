@@ -1,6 +1,8 @@
 META-INF/DEPENDENCIES
 META-INF/LICENSE
 META-INF/NOTICE
+com/nvidia/spark/rapids/ConsoleOutput.class
+com/nvidia/spark/rapids/ConsoleOutput$.class
 com/nvidia/spark/rapids/ExplainPlan.class
 com/nvidia/spark/rapids/ExplainPlan$.class
 com/nvidia/spark/rapids/ExplainPlanBase.class
