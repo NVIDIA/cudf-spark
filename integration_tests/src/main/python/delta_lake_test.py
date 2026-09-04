@@ -25,7 +25,8 @@ from parquet_test_utils import parquet_row_group_midpoints
 from spark_session import with_cpu_session, with_gpu_session, is_databricks_runtime, \
     is_spark_320_or_later, is_spark_340_or_later, \
     supports_delta_lake_deletion_vectors, is_spark_412_or_later, \
-    gpu_supports_delta_dv_scan, is_before_spark_353, is_databricks173_or_later
+    gpu_supports_delta_dv_scan, is_before_spark_350, is_before_spark_353, \
+    is_databricks173_or_later
 
 _conf = {'spark.rapids.sql.explain': 'ALL'}
 
@@ -195,10 +196,16 @@ def test_delta_deletion_vector_read(spark_tmp_path, chunk_size, use_cdf, dv_pred
         ])
 
 
-@allow_non_gpu(*delta_meta_allow)
+# Direct planning of DeltaCDFRelation is supported by OSS Delta 3.3+, which this project uses with
+# Spark 3.5+. Earlier Delta versions retain the V1 row scan and must allow that CPU fallback.
+cdf_fallback = ["RowDataSourceScanExec"] if is_before_spark_350() else []
+
+
+@allow_non_gpu(*cdf_fallback, *delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
 @pytest.mark.skipif(is_databricks_runtime(), reason="OSS Delta CDF test")
+@pytest.mark.skipif(is_before_spark_350(), reason="GPU CDF reads require OSS Delta 3.3+")
 @pytest.mark.parametrize("column_mapping", [False, True], ids=["legacy_schema", "end_version_schema"])
 def test_delta_cdf_read_stays_columnar(spark_tmp_path, column_mapping):
     data_path = spark_tmp_path + "/DELTA_DATA"
@@ -252,16 +259,19 @@ def _test_delta_deletion_vector_read_with_cdf(
         return read_delta_path_with_cdf(spark, data_path)
 
     if expect_fallback:
-        # The internal CDF scan is exposed, but deletion vectors are not supported on the GPU.
+        # Delta 2.4 hides the internal scan behind a V1 row scan. Delta 3.3+ exposes the internal
+        # file scan, which still falls back when deletion vectors are not supported on the GPU.
+        fallback_class = "RowDataSourceScanExec" if is_before_spark_350() \
+            else "FileSourceScanExec"
         assert_gpu_fallback_collect(
             read_cdf,
-            "FileSourceScanExec",
+            fallback_class,
             conf=conf)
     else:
         assert_gpu_and_cpu_are_equal_collect(read_cdf, conf=conf)
 
 
-@allow_non_gpu(*delta_meta_allow)
+@allow_non_gpu(*cdf_fallback, *delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
 @pytest.mark.parametrize("chunk_size", ["2000", "4000", None], ids=idfn)
@@ -274,7 +284,7 @@ def test_delta_deletion_vector_read_with_cdf(spark_tmp_path, chunk_size, parquet
         spark_tmp_path, chunk_size, parquet_reader_type, expect_fallback=False)
 
 
-@allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
+@allow_non_gpu("ColumnarToRowExec", *cdf_fallback, *delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
 @pytest.mark.parametrize("chunk_size", ["2000", "4000", None], ids=idfn)
