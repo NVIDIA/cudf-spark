@@ -26,8 +26,8 @@ import com.nvidia.spark.rapids.iceberg.parquet.converter.ToIcebergShaded
 import com.nvidia.spark.rapids.parquet.HMBInputFile
 import org.apache.iceberg.{FieldMetrics, Metrics, MetricsConfig}
 import org.apache.iceberg.io.FileAppender
-import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader
 import org.apache.iceberg.parquet.ParquetUtil
+import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.metadata.ParquetMetadata
 
 
