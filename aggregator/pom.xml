@@ -167,7 +167,7 @@
                         <excludes>
                             <exclude>org.slf4j:*</exclude>
                             <!-- excludes spark-rapids-jni and jucx, will package them in the dist submodule -->
-                            <exclude>com.nvidia:spark-rapids-jni:*</exclude>
+                            <exclude>com.nvidia:${cudf-spark-jni.artifactId}:*</exclude>
                             <exclude>org.openucx:jucx:*</exclude>
                         </excludes>
                     </artifactSet>
