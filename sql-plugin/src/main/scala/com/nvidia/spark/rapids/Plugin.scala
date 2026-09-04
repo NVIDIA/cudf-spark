@@ -42,7 +42,6 @@ import org.apache.commons.lang3.exception.ExceptionUtils
 import org.apache.spark.{ExceptionFailure, SparkConf, SparkContext, TaskContext, TaskFailedReason}
 import org.apache.spark.api.plugin.{DriverPlugin, ExecutorPlugin, PluginContext, SparkPlugin}
 import org.apache.spark.internal.Logging
-import org.apache.spark.rapids.hybrid.HybridExecutionUtils
 import org.apache.spark.serializer.{JavaSerializer, KryoSerializer}
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.rules.Rule
@@ -369,7 +368,6 @@ object RapidsPluginUtils extends Logging {
 
   /**
    * Find spark-rapids-extra-plugins files, and create plugin instances by reflection.
-   * Note: If Hybrid jar is not in the classpath, then will not create Hybrid plugin.
    * @return plugin instances defined in spark-rapids-extra-plugins files.
    */
   private def getExtraPlugins: Seq[SparkPlugin] = {
@@ -664,11 +662,6 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
 
       // Fail if there are multiple plugin jars in the classpath.
       RapidsPluginUtils.detectMultipleJars(conf)
-
-      // Check Hybrid jar if needed.
-      if (conf.loadHybridBackend) {
-        HybridExecutionUtils.checkHybridJarInClassPath()
-      }
 
       // Compare if the cudf version mentioned in the classpath is equal to the version which
       // plugin expects. If there is a version mismatch, throw error. This check can be disabled

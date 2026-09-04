@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,16 +15,7 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "350db143"}
-{"spark": "400"}
-{"spark": "400db173"}
-{"spark": "401"}
-{"spark": "402"}
-{"spark": "403"}
-{"spark": "404"}
-{"spark": "411"}
-{"spark": "412"}
-{"spark": "413"}
+{"spark": "420"}
 spark-rapids-shim-json-lines ***/
 
 package org.apache.spark.sql.rapids.execution.python.shims
@@ -70,8 +61,11 @@ trait GpuArrowPythonOutput extends GpuArrowOutput { _: GpuBasePythonRunner[_] =>
           // the semaphore
           GpuSemaphore.releaseIfNecessary(TaskContext.get())
           if (gpuArrowReader.isStarted && gpuArrowReader.mayHasNext) {
+            val bytesReadBefore = gpuArrowReader.totalBytesRead
             val batch = gpuArrowReader.readNext()
             if (batch != null) {
+              batchesProcessed += 1
+              totalDataReceived += gpuArrowReader.totalBytesRead - bytesReadBefore
               batch
             } else {
               gpuArrowReader.close() // reach the end, close the reader
