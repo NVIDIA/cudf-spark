@@ -195,9 +195,42 @@ def test_delta_deletion_vector_read(spark_tmp_path, chunk_size, use_cdf, dv_pred
         ])
 
 
-# Spark generates a RowDataSourceScanExec for the CDF scan, which falls back to CPU.
-# See https://github.com/NVIDIA/cudf-spark/issues/15367 for details.
-cdf_fallback = ["RowDataSourceScanExec"]
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(is_databricks_runtime(), reason="OSS Delta CDF test")
+@pytest.mark.parametrize("column_mapping", [False, True], ids=["legacy_schema", "end_version_schema"])
+def test_delta_cdf_read_stays_columnar(spark_tmp_path, column_mapping):
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    conf = {} if not column_mapping else {
+        "spark.databricks.delta.properties.defaults.columnMapping.mode": "name",
+        "spark.databricks.delta.properties.defaults.minReaderVersion": "2",
+        "spark.databricks.delta.properties.defaults.minWriterVersion": "5",
+        "spark.sql.parquet.fieldId.read.enabled": "true"
+    }
+
+    with_cpu_session(
+        lambda spark: setup_delta_dest_table(
+            spark,
+            data_path,
+            dest_table_func=lambda spark: spark.createDataFrame(
+                [(1, "a"), (2, "b"), (3, "a")], ["id", "data"]),
+            use_cdf=True),
+        conf=conf)
+
+    def read_cdf(spark):
+        return spark.read.format("delta") \
+            .option("readChangeFeed", "true") \
+            .option("startingVersion", 0) \
+            .load(data_path) \
+            .groupBy("_change_type") \
+            .count()
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        read_cdf,
+        exist_classes="GpuFileSourceScanExec,GpuHashAggregateExec",
+        non_exist_classes="RowDataSourceScanExec",
+        conf=conf)
 
 
 def _test_delta_deletion_vector_read_with_cdf(
@@ -219,16 +252,16 @@ def _test_delta_deletion_vector_read_with_cdf(
         return read_delta_path_with_cdf(spark, data_path)
 
     if expect_fallback:
-        # DeltaCDFRelation hides its internal file scan behind this V1 CPU scan.
+        # The internal CDF scan is exposed, but deletion vectors are not supported on the GPU.
         assert_gpu_fallback_collect(
             read_cdf,
-            "RowDataSourceScanExec",
+            "FileSourceScanExec",
             conf=conf)
     else:
         assert_gpu_and_cpu_are_equal_collect(read_cdf, conf=conf)
 
 
-@allow_non_gpu(*cdf_fallback, *delta_meta_allow)
+@allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
 @pytest.mark.parametrize("chunk_size", ["2000", "4000", None], ids=idfn)
@@ -241,7 +274,7 @@ def test_delta_deletion_vector_read_with_cdf(spark_tmp_path, chunk_size, parquet
         spark_tmp_path, chunk_size, parquet_reader_type, expect_fallback=False)
 
 
-@allow_non_gpu("ColumnarToRowExec", *cdf_fallback, *delta_meta_allow)
+@allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
 @pytest.mark.parametrize("chunk_size", ["2000", "4000", None], ids=idfn)
@@ -448,7 +481,7 @@ def _run_delta_cdf_commit_read_test(
         conf=conf)
 
 
-@allow_non_gpu(*cdf_fallback, *delta_meta_allow)
+@allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
 @pytest.mark.parametrize(
@@ -484,7 +517,7 @@ def test_delta_cdf_mixed_row_index_filter_types_different_partitions(
         expected=_delta_cdf_mixed_filter_expected_rows(second_file_partition=1))
 
 
-@allow_non_gpu(*cdf_fallback, *delta_meta_allow)
+@allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
 @pytest.mark.parametrize(
@@ -513,7 +546,7 @@ def test_delta_cdf_mixed_row_index_filter_types_same_delta_partition(
         expected=_delta_cdf_mixed_filter_expected_rows(second_file_partition=0))
 
 
-@allow_non_gpu(*cdf_fallback, *delta_meta_allow)
+@allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
 @pytest.mark.parametrize(
