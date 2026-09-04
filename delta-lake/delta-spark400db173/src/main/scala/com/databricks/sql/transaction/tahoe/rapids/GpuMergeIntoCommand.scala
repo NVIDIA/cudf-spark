@@ -45,7 +45,7 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.catalyst.encoders.{ExpressionEncoder, RowEncoder}
-import org.apache.spark.sql.catalyst.expressions.{Alias, And, Attribute, AttributeReference, BasePredicate, Expression, IsNull, Literal, NamedExpression, PredicateHelper, UnsafeProjection}
+import org.apache.spark.sql.catalyst.expressions.{Alias, And, Attribute, AttributeReference, BasePredicate, Expression, IsNull, Literal, NamedExpression, Or, PredicateHelper, UnsafeProjection}
 import org.apache.spark.sql.catalyst.expressions.codegen.GeneratePredicate
 import org.apache.spark.sql.catalyst.plans.logical.{DeltaMergeIntoClause, DeltaMergeIntoMatchedClause, DeltaMergeIntoMatchedDeleteClause, DeltaMergeIntoMatchedUpdateClause, DeltaMergeIntoNotMatchedBySourceClause, DeltaMergeIntoNotMatchedBySourceDeleteClause, DeltaMergeIntoNotMatchedBySourceUpdateClause, DeltaMergeIntoNotMatchedClause, LogicalPlan, Project}
 import org.apache.spark.sql.catalyst.types.DataTypeUtils.toAttributes
@@ -54,6 +54,7 @@ import org.apache.spark.sql.execution.SQLExecution
 import org.apache.spark.sql.execution.command.LeafRunnableCommand
 import org.apache.spark.sql.execution.datasources.LogicalRelation
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
+import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.nvidia.DFUDFShims
 import org.apache.spark.sql.types.{DataTypes, LongType, StringType, StructType}
@@ -296,6 +297,23 @@ case class GpuMergeIntoCommand(
   // this is the amount of the overcount, so we can subtract it to get a correct final metric.
   private var multipleMatchDeleteOnlyOvercount: Option[Long] = None
 
+  /**
+   * Whether a joined source/target row pair takes a WHEN MATCHED action. Databricks Runtime 16.0
+   * and later report multiple matches only for source rows that satisfy the ON condition and at
+   * least one WHEN MATCHED clause condition (an undefined condition is implicitly true); source
+   * rows that match on ON alone take no action and do not make the target row ambiguous.
+   */
+  private lazy val effectiveMatchPredicate: Expression =
+    if (matchedClauses.isEmpty) {
+      Literal.FalseLiteral
+    } else {
+      matchedClauses.map(_.condition.getOrElse(Literal.TrueLiteral)).reduce((a, b) => Or(a, b))
+    }
+
+  // Set by findTouchedFiles when some target rows match several source rows on the ON condition
+  // of which at most one takes a WHEN MATCHED action; writeAllChanges then keeps one pair per row.
+  private var hasNonEffectiveDuplicateMatches: Boolean = false
+
   private def checkIdentityColumnHighWaterMarks(deltaTxn: OptimisticTransaction): Unit = {
     // DBR implements this in MergeIntoCommandBase, but that method is protected and the trait
     // also requires the full CPU MERGE runMerge contract. Keep this local copy aligned with the
@@ -514,23 +532,33 @@ case class GpuMergeIntoCommand(
     val joinToFindTouchedFiles =
       sourceDF.join(targetDF, DFUDFShims.exprToColumn(condition), joinType)
 
-    // Process the matches from the join to record touched files and find multiple matches
+    // Process the matches from the join to record touched files and find multiple matches. A pair
+    // is an effective match when it takes a WHEN MATCHED action; only effective matches can make a
+    // target row ambiguous (Databricks Runtime 16.0+ semantics, see effectiveMatchPredicate).
     val collectTouchedFiles = joinToFindTouchedFiles
-        .select(col(ROW_ID_COL), recordTouchedFileName(col(FILE_NAME_COL)).as("one"))
+        .select(col(ROW_ID_COL), recordTouchedFileName(col(FILE_NAME_COL)).as("one"),
+          when(DFUDFShims.exprToColumn(effectiveMatchPredicate), lit(1)).otherwise(lit(0))
+              .as("effective"))
 
-    // Calculate frequency of matches per source row
-    val matchedRowCounts = collectTouchedFiles.groupBy(ROW_ID_COL).agg(sum("one").as("count"))
+    // Calculate frequency of matches per target row: all joined pairs and effective pairs
+    val matchedRowCounts = collectTouchedFiles.groupBy(ROW_ID_COL)
+        .agg(sum("one").as("count"), sum("effective").as("effectiveCount"))
 
     // Get multiple matches and simultaneously collect (using touchedFilesAccum) the file names
-    // multipleMatchCount = # of target rows with more than 1 matching source row (duplicate match)
-    // multipleMatchSum = total # of duplicate matched rows
+    // multipleMatchCount = # of target rows with more than 1 effective matching source row
+    // multipleMatchSum = total # of effective matched rows of those target rows
+    // nonEffectiveDuplicates = # of target rows matched by several source rows of which at most
+    //   one takes a WHEN MATCHED action; writeAllChanges keeps one pair for each of them
     val multipleMatchRow = matchedRowCounts
-        .filter("count > 1")
-        .select(coalesce(count("*"), lit(0)), coalesce(sum("count"), lit(0)))
+        .select(
+          coalesce(sum(when(col("effectiveCount") > 1, lit(1L))), lit(0L)),
+          coalesce(sum(when(col("effectiveCount") > 1, col("effectiveCount"))), lit(0L)),
+          coalesce(sum(when(col("count") > 1 && col("effectiveCount") <= 1, lit(1L))), lit(0L)))
         .collect()
         .head
     val multipleMatchCount = multipleMatchRow.getLong(0)
     val multipleMatchSum = multipleMatchRow.getLong(1)
+    hasNonEffectiveDuplicateMatches = multipleMatchRow.getLong(2) > 0
 
     val hasMultipleMatches = multipleMatchCount > 0
 
@@ -750,8 +778,32 @@ case class GpuMergeIntoCommand(
       if (notMatchedClauses.nonEmpty) { // insert clause
         sourceDF = sourceDF.withColumn(SOURCE_ROW_ID_COL, monotonically_increasing_id())
       }
+    } else if (hasNonEffectiveDuplicateMatches) {
+      // Row ids on both sides identify the joined pairs of one target row for de-duplication.
+      targetDF = targetDF.withColumn(TARGET_ROW_ID_COL, monotonically_increasing_id())
+      sourceDF = sourceDF.withColumn(SOURCE_ROW_ID_COL, monotonically_increasing_id())
     }
-    val joinedDF = sourceDF.join(targetDF, DFUDFShims.exprToColumn(condition), joinType)
+    val rawJoinedDF = sourceDF.join(targetDF, DFUDFShims.exprToColumn(condition), joinType)
+    val joinedDF = if (hasNonEffectiveDuplicateMatches) {
+      // Some target rows matched several source rows on the ON condition, of which at most one
+      // takes a WHEN MATCHED action (findTouchedFiles rejected the ambiguous cases). Keep one
+      // joined pair per target row, preferring the pair that takes an action: the dropped pairs
+      // hold source rows that are matched (so they must not be inserted) and take no action, and
+      // when no pair takes an action the surviving one copies the target row unchanged. Source-only
+      // and target-only rows form partitions of their own and pass through.
+      val effective =
+        when(DFUDFShims.exprToColumn(effectiveMatchPredicate), lit(1)).otherwise(lit(0))
+      val onePairPerTargetRow = Window
+          .partitionBy(col(TARGET_ROW_ID_COL),
+            when(col(TARGET_ROW_PRESENT_COL).isNull, col(SOURCE_ROW_ID_COL)))
+          .orderBy(effective.desc)
+      rawJoinedDF
+          .withColumn(DUPLICATE_MATCH_RANK_COL, row_number().over(onePairPerTargetRow))
+          .filter(col(DUPLICATE_MATCH_RANK_COL) === lit(1))
+          .drop(DUPLICATE_MATCH_RANK_COL, TARGET_ROW_ID_COL, SOURCE_ROW_ID_COL)
+    } else {
+      rawJoinedDF
+    }
     val joinedPlan = joinedDF.queryExecution.analyzed
 
     def resolveOnJoinedPlan(exprs: Seq[Expression]): Seq[Expression] = {
@@ -1205,6 +1257,7 @@ object GpuMergeIntoCommand {
   val FILE_NAME_COL = "_file_name_"
   val SOURCE_ROW_PRESENT_COL = "_source_row_present_"
   val TARGET_ROW_PRESENT_COL = "_target_row_present_"
+  val DUPLICATE_MATCH_RANK_COL = "_duplicate_match_rank_"
   val ROW_DROPPED_COL = GpuDeltaMergeConstants.ROW_DROPPED_COL
   val INCR_ROW_COUNT_COL = "_incr_row_count_"
 

@@ -607,6 +607,128 @@ def test_delta_merge_delete_only_duplicate_source_metrics_db173(spark_tmp_path, 
             f"{run}: {actual}"
 
 
+# Databricks Runtime 16.0+ reports a target row as ambiguously matched only when more than one
+# source row satisfies the ON condition AND a WHEN MATCHED clause condition. Source rows that match
+# on ON alone take no action: they are not inserted, they do not flag the target row for the
+# NOT MATCHED BY SOURCE clauses, and they do not make the row ambiguous. The GPU command has to
+# accept the same merges as the CPU, write the same table, and reject the same ambiguous ones.
+_dup_match_target_rows = [(1, "a", True), (2, "b", True), (3, "c", True)]
+_dup_match_sql_full = (
+    "MERGE INTO {dest_table} t USING {src_table} s ON t.k = s.k "
+    "WHEN MATCHED AND s.apply THEN UPDATE SET t.v = s.v "
+    "WHEN NOT MATCHED THEN INSERT (k, v, cur) VALUES (s.k, s.v, true) "
+    "WHEN NOT MATCHED BY SOURCE THEN UPDATE SET t.cur = false")
+_dup_match_sql_plain = (
+    "MERGE INTO {dest_table} t USING {src_table} s ON t.k = s.k "
+    "WHEN MATCHED AND s.apply THEN UPDATE SET t.v = s.v "
+    "WHEN NOT MATCHED THEN INSERT (k, v, cur) VALUES (s.k, s.v, true)")
+_dup_match_sql_no_matched_clause = (
+    "MERGE INTO {dest_table} t USING {src_table} s ON t.k = s.k "
+    "WHEN NOT MATCHED THEN INSERT (k, v, cur) VALUES (s.k, s.v, true) "
+    "WHEN NOT MATCHED BY SOURCE THEN UPDATE SET t.cur = false")
+_dup_match_sql_two_clauses = (
+    "MERGE INTO {dest_table} t USING {src_table} s ON t.k = s.k "
+    "WHEN MATCHED AND s.apply THEN UPDATE SET t.v = s.v "
+    "WHEN MATCHED AND NOT s.apply THEN DELETE "
+    "WHEN NOT MATCHED THEN INSERT (k, v, cur) VALUES (s.k, s.v, true)")
+_dup_match_sql_target_condition = (
+    "MERGE INTO {dest_table} t USING {src_table} s ON t.k = s.k "
+    "WHEN MATCHED AND t.cur THEN UPDATE SET t.v = s.v "
+    "WHEN NOT MATCHED THEN INSERT (k, v, cur) VALUES (s.k, s.v, true)")
+_dup_match_sql_conditional_delete = (
+    "MERGE INTO {dest_table} t USING {src_table} s ON t.k = s.k "
+    "WHEN MATCHED AND s.apply THEN DELETE")
+
+_dup_match_accepted_cases = [
+    pytest.param([(1, "x", True), (1, "y", False), (4, "d", True)], _dup_match_sql_full,
+                 id="one_effective_with_not_matched_by_source"),
+    pytest.param([(1, "x", False), (1, "y", False), (4, "d", True)], _dup_match_sql_full,
+                 id="none_effective_with_not_matched_by_source"),
+    pytest.param([(1, "x", True), (1, "y", True), (4, "d", True)], _dup_match_sql_no_matched_clause,
+                 id="no_matched_clause"),
+    pytest.param([(1, "x", True), (1, "y", False), (4, "d", True)], _dup_match_sql_plain,
+                 id="one_effective_plain"),
+    pytest.param([(1, "x", True), (1, "y", False)], _dup_match_sql_conditional_delete,
+                 id="conditional_delete_one_effective"),
+    pytest.param([(1, "x", False), (1, "y", True), (1, "z", False), (2, "q", False)],
+                 _dup_match_sql_full, id="three_matches_one_effective"),
+]
+_dup_match_rejected_cases = [
+    pytest.param([(1, "x", True), (1, "y", True), (4, "d", True)], _dup_match_sql_full,
+                 id="both_effective"),
+    pytest.param([(1, "x", True), (1, "y", False), (4, "d", True)], _dup_match_sql_two_clauses,
+                 id="each_row_takes_a_different_clause"),
+    pytest.param([(1, "x", True), (1, "y", True), (4, "d", True)], _dup_match_sql_target_condition,
+                 id="target_only_condition"),
+]
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="Databricks 16.0+ applies WHEN MATCHED conditions when detecting multiple matches")
+@pytest.mark.parametrize("src_rows,merge_sql", _dup_match_accepted_cases)
+def test_delta_merge_duplicate_source_rows_matched_conditions_db173(
+        spark_tmp_path, spark_tmp_table_factory, src_rows, merge_sql):
+    def src_table_func(spark):
+        return spark.createDataFrame(src_rows, "k INT, v STRING, apply BOOLEAN")
+
+    def dest_table_func(spark):
+        return spark.createDataFrame(_dup_match_target_rows, "k INT, v STRING, cur BOOLEAN")
+
+    assert_delta_sql_merge_collect(
+        spark_tmp_path, spark_tmp_table_factory,
+        use_cdf=False, enable_deletion_vectors=False,
+        src_table_func=src_table_func, dest_table_func=dest_table_func,
+        merge_sql=merge_sql, compare_logs=False,
+        assert_func=_assert_gpu_merge_processor,
+        conf=delta_merge_no_cpu_bridge_conf)
+
+    # The row counters per clause must agree too: one action per target row, none for the
+    # source rows that matched on ON alone.
+    metric_keys = ["numTargetRowsUpdated", "numTargetRowsInserted", "numTargetRowsDeleted",
+                   "numTargetRowsMatchedUpdated", "numTargetRowsNotMatchedBySourceUpdated"]
+
+    def merge_metrics(spark, path):
+        row = spark.sql(f"DESCRIBE HISTORY delta.`{path}`") \
+            .where("operation = 'MERGE'").orderBy("version", ascending=False).first()
+        return {k: int(row["operationMetrics"].get(k, 0)) for k in metric_keys}
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    cpu_metrics, gpu_metrics = [
+        with_cpu_session(lambda spark, run=run: merge_metrics(spark, data_path + "/" + run),
+                         conf=delta_merge_enabled_conf) for run in ["CPU", "GPU"]]
+    assert cpu_metrics == gpu_metrics, f"CPU {cpu_metrics} vs GPU {gpu_metrics}"
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="Databricks 16.0+ applies WHEN MATCHED conditions when detecting multiple matches")
+@pytest.mark.parametrize("src_rows,merge_sql", _dup_match_rejected_cases)
+def test_delta_merge_duplicate_source_rows_ambiguous_error_db173(
+        spark_tmp_path, spark_tmp_table_factory, src_rows, merge_sql):
+    src_table = spark_tmp_table_factory.get()
+
+    def do_merge(spark):
+        gpu_enabled = str(spark.conf.get("spark.rapids.sql.enabled", "false")).lower() == "true"
+        target_path = spark_tmp_path + ("/GPU" if gpu_enabled else "/CPU")
+        spark.createDataFrame(_dup_match_target_rows, "k INT, v STRING, cur BOOLEAN") \
+            .write.format("delta") \
+            .option("delta.enableDeletionVectors", "false") \
+            .mode("overwrite") \
+            .save(target_path)
+        spark.createDataFrame(src_rows, "k INT, v STRING, apply BOOLEAN") \
+            .createOrReplaceTempView(src_table)
+        return spark.sql(merge_sql.format(
+            dest_table=f"delta.`{target_path}`", src_table=src_table)).collect()
+
+    assert_gpu_and_cpu_error(
+        do_merge,
+        conf=delta_merge_no_cpu_bridge_conf,
+        error_message="DELTA_MULTIPLE_SOURCE_ROW_MATCHING_TARGET_ROW_IN_MERGE")
+
+
 @allow_non_gpu("ExecutedCommandExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
