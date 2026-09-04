@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,55 +16,53 @@
 
 package com.nvidia.spark.rapids
 
+import java.util.concurrent.ConcurrentHashMap
+
 import org.apache.spark.TaskContext
-import org.apache.spark.sql.connector.read.PartitionReader
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
-import org.apache.spark.sql.vectorized.ColumnarBatch
 
-class PartitionIterator[T](reader: PartitionReader[T]) extends Iterator[T] {
-  private[this] var valuePrepared = false
-
-  override def hasNext: Boolean = {
-    if (!valuePrepared) {
-      valuePrepared = reader.next()
-    }
-    valuePrepared
-  }
-
-  override def next(): T = {
-    if (!hasNext) {
-      throw new java.util.NoSuchElementException("End of stream")
-    }
-    valuePrepared = false
-    reader.get()
-  }
-}
-
-class MetricsBatchIterator(iter: Iterator[ColumnarBatch]) extends Iterator[ColumnarBatch] {
-  private[this] val inputMetrics = TaskContext.get().taskMetrics().inputMetrics
-
-  override def hasNext: Boolean = iter.hasNext
-
-  override def next(): ColumnarBatch = {
-    val batch = iter.next()
-    TrampolineUtil.incInputRecordsRows(inputMetrics, batch.numRows())
-    batch
-  }
-}
-
-/** Wraps a columnar PartitionReader to update bytes read metric based on filesystem statistics. */
-class PartitionReaderWithBytesRead(reader: PartitionReader[ColumnarBatch])
-    extends PartitionReader[ColumnarBatch] {
-  private[this] val inputMetrics = TaskContext.get.taskMetrics().inputMetrics
+/**
+ * Incrementally transfers task-thread Hadoop filesystem bytes into Spark input metrics.
+ * All updates must run on the same task thread that constructed this tracker.
+ */
+class FileSystemBytesReadTracker private(context: TaskContext) {
+  private[this] val inputMetrics = context.taskMetrics().inputMetrics
   private[this] val getBytesRead = TrampolineUtil.getFSBytesReadOnThreadCallback()
+  private[this] var previousBytesRead = 0L
 
-  override def next(): Boolean = {
-    val result = reader.next()
-    TrampolineUtil.incBytesRead(inputMetrics, getBytesRead())
-    result
+  def update(): Unit = {
+    val currentBytesRead = getBytesRead()
+    val newBytesRead = currentBytesRead - previousBytesRead
+    if (newBytesRead > 0) {
+      TrampolineUtil.incBytesRead(inputMetrics, newBytesRead)
+    }
+    previousBytesRead = math.max(previousBytesRead, currentBytesRead)
   }
+}
 
-  override def get(): ColumnarBatch = reader.get()
+object FileSystemBytesReadTracker {
+  private val taskTrackers = new ConcurrentHashMap[Long, FileSystemBytesReadTracker]()
 
-  override def close(): Unit = reader.close()
+  private[rapids] def forTask(context: TaskContext): FileSystemBytesReadTracker = {
+    val taskId = context.taskAttemptId()
+    val existing = taskTrackers.get(taskId)
+    if (existing != null) {
+      existing
+    } else {
+      val created = new FileSystemBytesReadTracker(context)
+      val raced = taskTrackers.putIfAbsent(taskId, created)
+      if (raced != null) {
+        raced
+      } else {
+        ScalableTaskCompletion.onTaskCompletion(context) {
+          try {
+            created.update()
+          } finally {
+            taskTrackers.remove(taskId, created)
+          }
+        }
+        created
+      }
+    }
+  }
 }

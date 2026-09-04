@@ -17,7 +17,7 @@
 package com.nvidia.spark.rapids.delta.delta33x
 
 import com.nvidia.spark.rapids._
-import com.nvidia.spark.rapids.delta.common.DeltaProviderBase
+import com.nvidia.spark.rapids.delta.common.{DeltaProviderBase, DeltaReorgTableCommandMeta}
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.connector.catalog.SupportsWrite
@@ -82,6 +82,7 @@ object Delta33xProvider extends DeltaProviderBase with Logging {
       GpuOverrides.runnableCmd[OptimizeTableCommand](
           "Optimize a Delta Lake table",
           (a, conf, p, r) => new OptimizeTableCommandMeta(a, conf, p, r)),
+      DeltaReorgTableCommandMeta.rule,
       GpuOverrides.runnableCmd[DeltaDynamicPartitionOverwriteCommand](
         "Dynamic partition overwrite to a Delta Lake table",
         (a, conf, p, r) => new DeltaDynamicPartitionOverwriteCommandMeta(a, conf, p, r))

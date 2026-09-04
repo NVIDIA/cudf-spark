@@ -106,6 +106,12 @@
             <groupId>org.apache.iceberg</groupId>
             <artifactId>iceberg-spark-runtime-${iceberg.artifact.suffix}_${scala.binary.version}</artifactId>
         </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3</artifactId>
+            <version>2.23.14</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
@@ -304,52 +310,6 @@
                 <property>
                     <name>buildver</name>
                     <value>411</value>
-                </property>
-            </activation>
-            <dependencies>
-                <dependency>
-                    <groupId>io.delta</groupId>
-                    <artifactId>${delta41x.spark.artifactId}</artifactId>
-                    <version>${delta41x.version}</version>
-                    <scope>test</scope>
-                    <exclusions>
-                        <exclusion>
-                            <groupId>io.unitycatalog</groupId>
-                            <artifactId>unitycatalog-client</artifactId>
-                        </exclusion>
-                    </exclusions>
-                </dependency>
-            </dependencies>
-        </profile>
-        <profile>
-            <id>release412</id>
-            <activation>
-                <property>
-                    <name>buildver</name>
-                    <value>412</value>
-                </property>
-            </activation>
-            <dependencies>
-                <dependency>
-                    <groupId>io.delta</groupId>
-                    <artifactId>${delta41x.spark.artifactId}</artifactId>
-                    <version>${delta41x.version}</version>
-                    <scope>test</scope>
-                    <exclusions>
-                        <exclusion>
-                            <groupId>io.unitycatalog</groupId>
-                            <artifactId>unitycatalog-client</artifactId>
-                        </exclusion>
-                    </exclusions>
-                </dependency>
-            </dependencies>
-        </profile>
-        <profile>
-            <id>release413</id>
-            <activation>
-                <property>
-                    <name>buildver</name>
-                    <value>413</value>
                 </property>
             </activation>
             <dependencies>

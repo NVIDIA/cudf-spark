@@ -17,7 +17,9 @@
 package com.nvidia.spark.rapids.iceberg.iceberg19x;
 
 import com.nvidia.spark.rapids.RapidsConf;
+import com.nvidia.spark.rapids.iceberg.IcebergDeletionVector;
 import com.nvidia.spark.rapids.iceberg.IcebergShimUtils;
+import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import org.apache.iceberg.*;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.StorageCredential;
@@ -29,6 +31,7 @@ import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.PartitionUtil;
 import org.apache.spark.sql.connector.read.Scan;
 
+import java.io.IOException;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -36,8 +39,27 @@ import java.util.Map;
 /** Iceberg 1.9.x shim: uses {@code SparkUtil::internalToSpark}. */
 public class ShimUtilsImpl implements IcebergShimUtils {
     @Override
+    public int formatVersion(Table table) {
+        return TableUtil.formatVersion(table);
+    }
+
+    @Override
     public String locationOf(ContentFile<?> f) {
         return f.location();
+    }
+
+    @Override
+    public boolean isDeletionVector(DeleteFile deleteFile) {
+        return deleteFile.format() == FileFormat.PUFFIN;
+    }
+
+    @Override
+    public IcebergDeletionVector readDeletionVector(
+            DeleteFile deleteFile, RapidsInputFile inputFile, boolean validateCrc)
+            throws IOException {
+        return IcebergDeletionVector.read(
+                inputFile, deleteFile.contentOffset(), deleteFile.contentSizeInBytes(),
+                deleteFile.recordCount(), validateCrc);
     }
 
     @Override

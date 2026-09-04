@@ -14,12 +14,17 @@
 
 import pytest
 
-from asserts import assert_equal_with_local_sort, assert_gpu_fallback_write_sql
+from asserts import assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect, \
+    assert_gpu_fallback_write_sql
 from conftest import is_iceberg_remote_catalog
 from data_gen import *
 from iceberg import (create_iceberg_table, get_full_table_name, iceberg_write_enabled_conf,
                      iceberg_base_table_cols, iceberg_gens_list, iceberg_nested_write_gens_list,
-                     iceberg_unsupported_mark, update_partition_transforms_distributed)
+                     iceberg_unsupported_mark, update_partition_transforms_distributed,
+                     supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON,
+                     supports_iceberg_row_lineage_inheritance,
+                     ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, row_lineage_df,
+                     rapids_reader_types)
 from marks import allow_non_gpu, allow_non_gpu_conditional, disable_ansi_mode, iceberg, ignore_order, datagen_overrides
 from spark_session import is_spark_400_or_later, with_cpu_session, with_gpu_session
 
@@ -123,6 +128,65 @@ def test_iceberg_update_unpartitioned_table_single_column(spark_tmp_table_factor
         lambda spark, table: spark.sql(f"UPDATE {table} SET _c2 = _c2 + 100 WHERE _c2 % 3 = 0"),
         update_mode=update_mode
     )
+
+
+@allow_non_gpu("ReplaceDataExec", "WriteDeltaExec", "BatchScanExec", "ColumnarToRowExec")
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@ignore_order(local=True)
+@pytest.mark.parametrize('update_mode,fallback_exec', [
+    pytest.param('copy-on-write', 'ReplaceDataExec', id='cow'),
+    pytest.param('merge-on-read', 'WriteDeltaExec', id='mor')
+])
+@allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
+def test_iceberg_update_v3_table_fallback(
+        spark_tmp_table_factory, update_mode, fallback_exec):
+    base_table_name = get_full_table_name(spark_tmp_table_factory)
+    create_iceberg_table_with_data(
+        f"{base_table_name}_cpu",
+        table_properties={"format-version": "3"},
+        update_mode=update_mode)
+    create_iceberg_table_with_data(
+        f"{base_table_name}_gpu",
+        table_properties={"format-version": "3"},
+        update_mode=update_mode)
+
+    def update_data(spark, table_name):
+        spark.sql(f"UPDATE {table_name} SET _c2 = _c2 + 100 WHERE _c2 % 3 = 0")
+
+    assert_gpu_fallback_write_sql(
+        update_data,
+        lambda spark, table_name: spark.sql(f"SELECT * FROM {table_name}"),
+        base_table_name,
+        [fallback_exec],
+        conf=iceberg_update_cow_enabled_conf)
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.skipif(
+    not supports_iceberg_row_lineage_inheritance,
+    reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
+@pytest.mark.parametrize("reader_type", rapids_reader_types)
+def test_iceberg_v3_row_lineage_update(spark_tmp_table_factory, reader_type):
+    full_table = get_full_table_name(spark_tmp_table_factory)
+
+    def setup_iceberg_table(spark):
+        spark.sql(
+            f"CREATE TABLE {full_table} (id BIGINT, v BIGINT) USING ICEBERG "
+            "TBLPROPERTIES ('format-version' = '3', 'write.update.mode' = 'copy-on-write')")
+        row_lineage_df(spark, with_value=True).writeTo(full_table).append()
+        spark.sql(f"UPDATE {full_table} SET v = v + 1 WHERE id % 2 = 1")
+
+    with_cpu_session(setup_iceberg_table)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(
+            f"SELECT id, v, _pos, _row_id, _last_updated_sequence_number FROM {full_table}"),
+        conf={
+            "spark.rapids.sql.format.iceberg.v3.enabled": "true",
+            "spark.rapids.sql.format.parquet.reader.type": reader_type
+        })
+
 
 @iceberg
 @ignore_order(local=True)

@@ -134,9 +134,21 @@ function build_shim() {
   ( # use flock to prevent maven local repository contention across all parallel builds
     flock -x -w 300 200 || { echo "Lock acquisition failed"; exit 1; }
 
-    echo "Copying sql-plugin-api,aggregator to .m2 repo..."
-    for mod in \
-      "rapids-4-spark-sql-plugin-api_${SCALA_BINARY_VER}" "rapids-4-spark-aggregator_${SCALA_BINARY_VER}"; do
+    local -a copy_modules=("sql-plugin-api" "aggregator")
+    local module mod
+    # The dist packager resolves these module jars for the highest Spark shim, so copy them out
+    # of the isolated shim repository along with the API and aggregator artifacts.
+    while IFS= read -r module || [[ -n "$module" ]]; do
+      module="${module#"${module%%[![:space:]]*}"}"
+      module="${module%"${module##*[![:space:]]}"}"
+      if [[ -n "$module" && "$module" != \#* ]]; then
+        copy_modules+=("$module")
+      fi
+    done < dist/root-safe-module-classes.txt
+
+    echo "Copying ${copy_modules[*]} to .m2 repo..."
+    for module in "${copy_modules[@]}"; do
+      mod="rapids-4-spark-${module}_${SCALA_BINARY_VER}"
       SRC_DIR="${SHIM_M2DIR}/com/nvidia/${mod}/${ART_VER}"
       DEST_DIR="${M2DIR}/com/nvidia/${mod}/${ART_VER}"
 

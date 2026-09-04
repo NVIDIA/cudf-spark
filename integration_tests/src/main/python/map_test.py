@@ -13,12 +13,14 @@
 # limitations under the License.
 
 import pytest
+from py4j.protocol import Py4JJavaError
 
 from asserts import *
 from conftest import is_not_utc
 from data_gen import *
 from conftest import is_databricks_runtime
-from marks import allow_non_gpu, datagen_overrides, disable_ansi_mode, ignore_order
+from marks import allow_non_gpu, datagen_overrides, disable_ansi_mode, ignore_order, \
+    validate_execs_in_gpu_plan
 from spark_session import *
 from pyspark.sql.functions import create_map, col, lit, row_number
 from pyspark.sql.types import *
@@ -43,6 +45,12 @@ maps_with_struct_key = [
     MapGen(StructGen([['child0', IntegerGen()],
                       ['child1', IntegerGen()]], nullable=False),
            IntegerGen())]
+
+
+# Keep the xfail limited to issue #15783 so plan-validation failures still propagate.
+class _MapZipWithDecimalKnownIssue(Exception):
+    pass
+
 
 supported_key_map_gens = \
     map_gens_sample + \
@@ -526,6 +534,20 @@ def test_str_to_map_expr_with_all_regex_delimiters():
             'str_to_map(a, "[,]{1,10}", "[:]{1,10}") as m5'
         ), conf={'spark.sql.mapKeyDedupPolicy': 'LAST_WIN'})
 
+    # test case-insensitive delimiters
+    flag_rows = [
+        ('k1xv1PAIRk2xv2',),
+        ('k1Xv1pairk2xv2',),
+        ('k1Xv1PAIRk2xv2',),
+        (None,),
+    ]
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.createDataFrame(flag_rows, ['a']).selectExpr(
+            'str_to_map(a, "(?i)pair", "x") as inline_pair',
+            'str_to_map(a, "pair", "(?i)x") as inline_key_value',
+            'str_to_map(a, "(?i:pair)", "(?i:x)") as scoped_both'),
+        conf={'spark.sql.mapKeyDedupPolicy': 'LAST_WIN'})
+
 
 @pytest.mark.parametrize('empty_type', all_empty_string_types)
 def test_str_to_map_input_all_empty(empty_type):
@@ -838,7 +860,8 @@ def test_sql_map_scalars(query):
 
 @pytest.mark.parametrize('data_gen', map_gens_sample + maps_with_binary_value \
                          + [MapGen(f(nullable=False, min_val=-10, max_val=10), f(), min_length=10) for f in [ByteGen, ShortGen, IntegerGen, LongGen]] \
-                         + [MapGen(StringGen(pattern='key_[0-9]', nullable=False), StringGen(), min_length=10)], ids=idfn)
+                         + [MapGen(StringGen(pattern='key_[0-9]', nullable=False), StringGen(), min_length=10)],
+                         ids=idfn)
 @allow_non_gpu(*non_utc_allow)
 def test_map_zip_with(data_gen):
     def do_it(spark):
@@ -870,6 +893,67 @@ def test_map_zip_with(data_gen):
     # Exceptions during overflow conditions are tested in the arithmetic-ops tests.
     # Not using @disable_ansi_mode because of https://github.com/NVIDIA/spark-rapids/issues/13214.  Using explicit setting instead.
     assert_gpu_and_cpu_are_equal_collect(do_it, conf={'spark.sql.ansi.enabled': False})
+
+
+@pytest.mark.parametrize('data_gen', [
+    MapGen(DecimalGen(12, 2, nullable=False),
+           DecimalGen(12, 2, nullable=False), nullable=False),
+    MapGen(DecimalGen(20, 2, nullable=False),
+           DecimalGen(20, 2, nullable=False), nullable=False),
+], ids=idfn)
+@validate_execs_in_gpu_plan('GpuProjectExec')
+@allow_non_gpu(*non_utc_allow)
+def test_map_zip_with_decimal_non_identity(data_gen):
+    def do_it(spark):
+        df = two_col_df(spark, data_gen, data_gen)
+        return df.selectExpr(
+            'a',
+            'b',
+            'map_zip_with(a, b, (key, value1, value2) -> null) as n',
+            'map_zip_with(a, b, (key, value1, value2) -> 1) as one',
+            'map_zip_with(a, b, (key, value1, value2) -> key) as indexed')
+
+    assert_gpu_and_cpu_are_equal_collect(do_it, conf={'spark.sql.ansi.enabled': False})
+
+
+@pytest.mark.parametrize('data_gen', [
+    MapGen(DecimalGen(12, 2, nullable=False),
+           DecimalGen(12, 2, nullable=False), nullable=False),
+    MapGen(DecimalGen(20, 2, nullable=False),
+           DecimalGen(20, 2, nullable=False), nullable=False),
+], ids=idfn)
+@pytest.mark.xfail(
+    reason='https://github.com/NVIDIA/cudf-spark/issues/15783',
+    raises=_MapZipWithDecimalKnownIssue,
+    strict=True)
+@validate_execs_in_gpu_plan('GpuProjectExec')
+@allow_non_gpu(*non_utc_allow)
+def test_map_zip_with_decimal_identity(data_gen):
+    def do_it(spark):
+        df = two_col_df(spark, data_gen, data_gen)
+        return df.selectExpr(
+            'map_zip_with(a, b, (key, value1, value2) -> value1) as ident1',
+            'map_zip_with(a, b, (key, value1, value2) -> value2) as ident2')
+
+    try:
+        assert_gpu_and_cpu_are_equal_collect(do_it, conf={'spark.sql.ansi.enabled': False})
+    except AssertionError as error:
+        message = str(error)
+        is_known_decimal_failure = (
+            'CPU (null) values are different at ' in message
+            and ("'ident1'" in message or "'ident2'" in message))
+        if is_known_decimal_failure:
+            raise _MapZipWithDecimalKnownIssue() from error
+        raise
+    except Py4JJavaError as error:
+        message = str(error)
+        is_known_decimal_failure = (
+            'java.lang.AssertionError:' in message
+            and 'value at ' in message
+            and ' is null' in message)
+        if is_known_decimal_failure:
+            raise _MapZipWithDecimalKnownIssue() from error
+        raise
 
 @pytest.mark.parametrize('data_gen', [MapGen(IntegerGen(False, min_val=-5, max_val=5), ArrayGen(int_gen, max_length=5), min_length=7)], ids=idfn)
 @allow_non_gpu(*non_utc_allow)

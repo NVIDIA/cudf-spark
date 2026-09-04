@@ -1363,14 +1363,23 @@ dataproc_bloom_filter_probe_allow = (
     else ()
 )
 
-def check_bloom_filter_join(confs, expected_classes, is_multi_column):
+def check_bloom_filter_join(confs, expected_classes, is_multi_column, probe_gen=None):
     def do_join(spark):
+        left = spark.range(100000)
+        if probe_gen is not None:
+            corner_values = list(probe_gen.list_of_special_cases)
+            if probe_gen.nullable:
+                corner_values.append(None)
+            corner_schema = StructType([
+                StructField("id", probe_gen.data_type, nullable=probe_gen.nullable)])
+            corner_rows = spark.createDataFrame(
+                [(value,) for value in corner_values], schema=corner_schema)
+            left = left.unionByName(corner_rows)
         if is_multi_column:
-            left = spark.range(100000).withColumn("second_id", col("id") % 5)
+            left = left.withColumn("second_id", col("id") % 5)
             right = spark.range(10).withColumn("id2", col("id").cast("string")).withColumn("second_id", col("id") % 5)
             return right.filter("cast(id2 as bigint) % 3 = 0").join(left, (left.id == right.id) & (left.second_id == right.second_id), "inner")
         else:
-            left = spark.range(100000)
             right = spark.range(10).withColumn("id2", col("id").cast("string"))
             return right.filter("cast(id2 as bigint) % 3 = 0").join(left, left.id == right.id, "inner")
     all_confs = copy_and_update(bloom_filter_confs, confs)
@@ -1379,12 +1388,17 @@ def check_bloom_filter_join(confs, expected_classes, is_multi_column):
 @ignore_order(local=True)
 @pytest.mark.parametrize("batch_size", ['1g', '1000'], ids=idfn)
 @pytest.mark.parametrize("is_multi_column", [False, True], ids=idfn)
+@pytest.mark.parametrize("probe_gen", [
+    LongGen(special_cases=[LONG_MIN, LONG_MAX, 0, 1, -1])
+], ids=idfn)
 @pytest.mark.skipif(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/8921")
-def test_bloom_filter_join(batch_size, is_multi_column):
+def test_bloom_filter_join(batch_size, is_multi_column, probe_gen):
+    # Runtime bloom-filter rewriting inserts might_contain(...) on the large probe side.
     conf = {"spark.rapids.sql.batchSizeBytes": batch_size}
     check_bloom_filter_join(confs=conf,
                             expected_classes="GpuBloomFilterMightContain,GpuBloomFilterAggregate",
-                            is_multi_column=is_multi_column)
+                            is_multi_column=is_multi_column,
+                            probe_gen=probe_gen)
 
 @allow_non_gpu(
     "ShuffleExchangeExec", "And", "BloomFilterMightContain", "GetStructField",

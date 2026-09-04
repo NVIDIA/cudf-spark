@@ -42,6 +42,7 @@
 {"spark": "412"}
 {"spark": "413"}
 {"spark": "420"}
+{"spark": "500"}
 spark-rapids-shim-json-lines ***/
 
 package org.apache.spark.sql.rapids
@@ -51,14 +52,14 @@ import java.util.{Date, UUID}
 import com.nvidia.spark.TimingUtils
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.AssertUtils.assertInTests
-import com.nvidia.spark.rapids.shims.{BucketingUtilsShim, RapidsFileSourceMetaUtils}
+import com.nvidia.spark.rapids.shims.{BucketingUtilsShim, FileWriteOptionsShims, RapidsFileSourceMetaUtils}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
 import org.apache.hadoop.mapreduce._
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat
 import org.apache.hadoop.mapreduce.task.TaskAttemptContextImpl
 
-import org.apache.spark.{SparkException, TaskContext}
+import org.apache.spark.{SparkException, TaskContext, TaskOutputFileAlreadyExistException}
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.io.{FileCommitProtocol, SparkHadoopWriterUtils}
 import org.apache.spark.shuffle.FetchFailedException
@@ -122,6 +123,10 @@ trait GpuFileFormatWriterBase extends Serializable with Logging {
     // needs to fallback to the row-based write path.
     job.setOutputValueClass(classOf[InternalRow])
     FileOutputFormat.setOutputPath(job, new Path(outputSpec.outputPath))
+
+    // Spark 4.2+ requires write options in the Job conf before file-format setup.
+    // This shim call is a no-op on older Spark releases to preserve their behavior.
+    FileWriteOptionsShims.mergeWriteOptionsIntoHadoopConf(options, job.getConfiguration)
 
     val partitionSet = AttributeSet(partitionColumns)
     // cleanup the internal metadata information of
@@ -500,6 +505,8 @@ trait GpuFileFormatWriterBase extends Serializable with Logging {
         })
       } catch {
         case e: FetchFailedException =>
+          throw e
+        case e: TaskOutputFileAlreadyExistException =>
           throw e
         case t: Throwable =>
           throw new SparkException("Task failed while writing rows.", t)

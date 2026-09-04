@@ -19,6 +19,7 @@ from conftest import is_not_utc
 from data_gen import *
 from marks import *
 from pyspark.sql.types import *
+from reduced_test_matrix_helper import generate_reduced_test_matrix
 from spark_init_internal import spark_version
 from spark_session import *
 from parquet_test import _nested_pruning_schemas
@@ -32,14 +33,28 @@ def read_orc_df(data_path):
 def read_orc_sql(data_path):
     return lambda spark : spark.sql('select * from orc.`{}`'.format(data_path))
 
-# Using timestamps from 1590 to work around a cudf ORC bug
-# https://github.com/NVIDIA/spark-rapids/issues/131.
-# https://github.com/NVIDIA/spark-rapids/issues/13272
-# Once the bug is fixed we should remove this and use timestamp_gen.
+# Timestamps are limited to 1901 and later for two separate reasons:
+#  * a cudf ORC bug, https://github.com/NVIDIA/spark-rapids/issues/131, which is why this
+#    helper starts at a fixed date at all instead of using timestamp_gen;
+#  * GPU and CPU disagree on Local Mean Time offsets, which apply to a zone before it
+#    adopted standard time. Premerge runs the tz_sensitive_test cases under
+#    America/New_York (LMT until 1883-11-18) and Asia/Shanghai (LMT until 1901), so
+#    starting at 1901-01-01 keeps generated timestamps clear of both windows.
+#    Note this bound does not eliminate the problem for nightly runs, which rotate
+#    through every time zone; a few kept LMT offsets far later, Africa/Monrovia until
+#    1972 being the latest. The real fix is the underlying LMT conversion defect.
+# Once both are fixed we should remove this and use timestamp_gen.
 def get_orc_timestamp_gen(nullable=True):
-    return TimestampGen(start=datetime(1970, 1, 1, tzinfo=timezone.utc), nullable=nullable)
+    return TimestampGen(start=datetime(1901, 1, 1, tzinfo=timezone.utc), nullable=nullable)
 
 orc_timestamp_gen = get_orc_timestamp_gen()
+
+# The range get_orc_timestamp_gen covered before it was bounded to 1901. Kept so the
+# dropped coverage stays visible and is easy to restore: once the Local Mean Time
+# conversion defect is fixed, delete this generator and the skipped test that uses it,
+# and move get_orc_timestamp_gen back to 1590.
+def get_orc_pre_standard_time_timestamp_gen(nullable=True):
+    return TimestampGen(start=datetime(1590, 1, 1, tzinfo=timezone.utc), nullable=nullable)
 
 # test with original orc file reader, the multi-file parallel reader for cloud
 __original_orc_file_reader_conf = {'spark.rapids.sql.format.orc.reader.type': 'PERFILE'}
@@ -86,6 +101,8 @@ __reader_opt_confs_chunked = [{**conf, 'spark.rapids.sql.reader.chunked': True,
                              [pytest.param(__multithreaded_orc_file_reader_combine_unordered_conf_chunked_limited_memory,
                                            marks=pytest.mark.ignore_order(local=True))]
 reader_opt_confs = __reader_opt_confs_no_chunked + __reader_opt_confs_chunked
+
+
 # The Count result can not be sorted, so local sort can not be used.
 reader_opt_confs_for_count = __reader_opt_confs_common + [__multithreaded_orc_file_reader_combine_unordered_conf_no_chunked]
 
@@ -203,6 +220,27 @@ def test_read_round_trip(spark_tmp_path, orc_gens, read_func, reader_confs, v1_e
             read_func(data_path),
             conf=all_confs)
 
+# Covers the pre-1901 timestamps that get_orc_timestamp_gen no longer generates.
+# Expected to fail today: GPU and CPU disagree on Local Mean Time offsets, which apply
+# to a time zone before it adopted standard time. Remove the skip once that is fixed.
+@pytest.mark.skip(reason="https://github.com/NVIDIA/cudf-spark/issues/15895")
+@pytest.mark.order(2)
+@pytest.mark.parametrize('read_func', [read_orc_df, read_orc_sql])
+@pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
+@pytest.mark.parametrize('v1_enabled_list', ['', 'orc'])
+@tz_sensitive_test
+def test_read_round_trip_pre_standard_time_timestamps(spark_tmp_path, read_func, reader_confs,
+                                                      v1_enabled_list):
+    gen_list = [('_c0', get_orc_pre_standard_time_timestamp_gen()),
+                ('_c1', ArrayGen(get_orc_pre_standard_time_timestamp_gen()))]
+    data_path = spark_tmp_path + '/ORC_DATA'
+    with_cpu_session(
+            lambda spark : gen_df(spark, gen_list).write.orc(data_path))
+    all_confs = copy_and_update(reader_confs, {'spark.sql.sources.useV1SourceList': v1_enabled_list})
+    assert_gpu_and_cpu_are_equal_collect(
+            read_func(data_path),
+            conf=all_confs)
+
 # Use every type except boolean, see https://github.com/NVIDIA/spark-rapids/issues/11762 and
 # https://github.com/rapidsai/cudf/issues/6763 .
 # Once the first issue is fixed, add back boolean_gen
@@ -215,13 +253,23 @@ orc_pred_push_gens = [
         # Once https://github.com/NVIDIA/spark-rapids/issues/140 is fixed replace this with
         # timestamp_gen
         orc_timestamp_gen]
+orc_pred_push_test_matrix = generate_reduced_test_matrix({
+    'orc_gen': {'values': orc_pred_push_gens, 'is_primary_dimension': True},
+    # Preserve the original str(reader_conf) IDs. Marks from reader-config pytest parameters are
+    # moved to the generated outer multi-argument pytest parameters.
+    'reader_confs': {
+        'values': reader_opt_confs,
+        'is_primary_dimension': True},
+    # Exercise all V1/V2 and DataFrame/SQL pairs across the primary cases.
+    'v1_enabled_list': {'values': ["", "orc"]},
+    'read_func': {'values': [read_orc_df, read_orc_sql]}})
 
+# Cover every predicate type with all 15 reader configurations while distributing V1/V2 and
+# read functions across 135 cases.
 @pytest.mark.order(2)
-@pytest.mark.parametrize('orc_gen', orc_pred_push_gens, ids=idfn)
-@pytest.mark.parametrize('read_func', [read_orc_df, read_orc_sql])
-@pytest.mark.parametrize('v1_enabled_list', ["", "orc"])
-@pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
-def test_pred_push_round_trip(spark_tmp_path, orc_gen, read_func, v1_enabled_list, reader_confs):
+@pytest.mark.parametrize(
+    'orc_gen,reader_confs,v1_enabled_list,read_func', orc_pred_push_test_matrix)
+def test_pred_push_round_trip(spark_tmp_path, orc_gen, reader_confs, v1_enabled_list, read_func):
     data_path = spark_tmp_path + '/ORC_DATA'
     # Append two struct columns to verify nested predicate pushdown.
     gen_list = [('a', RepeatSeqGen(orc_gen, 100)), ('b', orc_gen),
@@ -683,11 +731,35 @@ def test_read_struct_without_stream(spark_tmp_path):
             lambda spark : spark.read.orc(data_path))
 
 
-@pytest.mark.parametrize('orc_gen', flattened_orc_gens, ids=idfn)
-@pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
-@pytest.mark.parametrize('v1_enabled_list', ["", "orc"])
-@pytest.mark.parametrize('case_sensitive', ["false", "true"])
-def test_read_with_more_columns(spark_tmp_path, orc_gen, reader_confs, v1_enabled_list, case_sensitive):
+# Dedicated to covering GpuMultiFileReader.getNextBuffersAndMetaAndCombine's unordered
+# wait path by letting readReadyFiles return an empty result.
+__unordered_combine_wait_reader_conf = {
+    **__multithreaded_orc_file_reader_combine_unordered_conf_chunked_limited_memory,
+    'spark.rapids.sql.reader.multithreaded.combine.waitTime': 0}
+
+read_with_more_columns_test_matrix = generate_reduced_test_matrix({
+    'orc_gen': {'values': flattened_orc_gens, 'is_primary_dimension': True},
+    # Preserve the original str(reader_conf) IDs. Marks from reader-config pytest parameters are
+    # moved to the generated outer multi-argument pytest parameters.
+    'reader_confs': {
+        'values': reader_opt_confs,
+        'is_primary_dimension': True},
+    # Exercise all case-sensitive/insensitive and V1/V2 pairs across the primary cases.
+    'case_sensitive': {'values': ["false", "true"]},
+    'v1_enabled_list': {'values': ["", "orc"]}},
+    extra_cases=[pytest.param({
+        'orc_gen': decimal_gen_128bit,
+        'reader_confs': __unordered_combine_wait_reader_conf,
+        'case_sensitive': 'true',
+        'v1_enabled_list': ''},
+        marks=pytest.mark.ignore_order(local=True))])
+
+# Cover every ORC type with all 15 reader configurations while distributing V1/V2 and case
+# sensitivity across 465 base cases, plus one unordered-combine wait-path case.
+@pytest.mark.parametrize(
+    'orc_gen,reader_confs,case_sensitive,v1_enabled_list', read_with_more_columns_test_matrix)
+def test_read_with_more_columns(spark_tmp_path, orc_gen, reader_confs, case_sensitive,
+                                v1_enabled_list):
     struct_gen = StructGen([('nested_col', orc_gen)])
     # Map is not supported yet.
     gen_list = [("top_pri", orc_gen),
@@ -950,13 +1022,20 @@ def test_project_fallback_when_reading_hive_fixed_length_char(std_input_path, da
         conf={})
 
 
-@pytest.mark.parametrize('read_func', [read_orc_df, read_orc_sql])
-@pytest.mark.parametrize('v1_enabled_list', ["", "orc"])
-@pytest.mark.parametrize('orc_impl', ["native", "hive"])
-@pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
-@pytest.mark.parametrize('col_name', ['K0', 'k0', 'K3', 'k3', 'V0', 'v0'], ids=idfn)
+read_case_col_name_test_matrix = generate_reduced_test_matrix({
+    'read_func': {'values': [read_orc_df, read_orc_sql], 'is_primary_dimension': True},
+    'v1_enabled_list': {'values': ["", "orc"]},
+    'orc_impl': {'values': ["native", "hive"], 'is_primary_dimension': True},
+    'reader_confs': {'values': reader_opt_confs, 'is_primary_dimension': True},
+    'col_name': {'values': ['K0', 'k0', 'K3', 'k3', 'V0', 'v0']}})
+
+# Retain all 60 primary read configurations while distributing every V1/V2 and column-name pair.
+@pytest.mark.parametrize(
+    'read_func,v1_enabled_list,orc_impl,reader_confs,col_name',
+    read_case_col_name_test_matrix)
 @ignore_order
-def test_read_case_col_name(spark_tmp_path, read_func, v1_enabled_list, orc_impl, reader_confs, col_name):
+def test_read_case_col_name(
+        spark_tmp_path, read_func, v1_enabled_list, orc_impl, reader_confs, col_name):
     all_confs = copy_and_update(reader_confs, {
         'spark.sql.sources.useV1SourceList': v1_enabled_list,
         'spark.sql.orc.impl': orc_impl})
@@ -1151,9 +1230,8 @@ def test_orc_gpu_write_cpu_read_timestamp_in_non_utc_timezone(spark_tmp_path):
 @tz_sensitive_test
 def test_orc_reader_writer_the_same_timezone(reader_confs, spark_tmp_path, v1_enabled_list, timezone_pair):
     d_gen = DateGen(start=date(1590, 1, 1))
-    # Update start year to 1590 when https://github.com/NVIDIA/spark-rapids/issues/13272 is fixed.
     # The default end covers the full timestamp range through year 9999, including years > 2200.
-    ts_gen = TimestampGen(start=datetime(1970, 1, 2, tzinfo=timezone.utc), nullable=True)
+    ts_gen = TimestampGen(start=datetime(1590, 1, 1, tzinfo=timezone.utc), nullable=True)
     date_timestamp_gens = [('c1', d_gen), ('c2', ts_gen)]
 
     (write_timezone, read_timezone) = timezone_pair
@@ -1177,19 +1255,32 @@ def test_orc_reader_writer_the_same_timezone(reader_confs, spark_tmp_path, v1_en
     # read on GPU and CPU
     assert_gpu_and_cpu_are_equal_collect(read_orc_df(cpu_write_path), conf=read_confs)
 
-@pytest.mark.skip(reason='https://github.com/NVIDIA/spark-rapids/issues/13272: CPU can not read ORC file generated by GPU when timestamp is less than 1970 year')
-def test_orc_write_but_cpu_read_fail(spark_tmp_path):
-    """
-    CPU read fails with the following error:
-        Caused by: java.lang.IllegalArgumentException: nanos > 999999999 or < 0
-	        at java.sql/java.sql.Timestamp.setNanos(Timestamp.java:336)
-	        at org.apache.hadoop.hive.ql.exec.vector.TimestampColumnVector.asScratchTimestamp
-	Reproduce: export DATAGEN_SEED=1754555738; export TZ=UTC; then run this test case
-    """
+@pytest.mark.skipif(is_not_utc(), reason="https://github.com/NVIDIA/cudf-spark/issues/15385")
+@ignore_order(local=True)
+def test_orc_gpu_write_cpu_read_timestamp_before_epoch(spark_tmp_path):
     gpu_write_path = spark_tmp_path + "/ORC_DATA_GPU"
-    # If change the start year to 1970, then the test will pass.
-    ts_gen = TimestampGen(start=datetime(1590, 1, 1, tzinfo=timezone.utc), nullable=True)
+    ts_gen = TimestampGen(
+        start=datetime(1590, 1, 1, tzinfo=timezone.utc),
+        end=datetime(1970, 1, 1, tzinfo=timezone.utc) - timedelta(microseconds=1),
+        nullable=True)
     # Write timestamp on GPU
-    with_gpu_session(lambda spark: gen_df(spark, [("c1", ts_gen)]).repartition(1).write.orc(gpu_write_path))
+    with_gpu_session(lambda spark: gen_df(spark, [("c1", ts_gen)]).write.orc(gpu_write_path))
+    # Read timestamp on CPU and GPU
+    assert_gpu_and_cpu_are_equal_collect(read_orc_df(gpu_write_path))
+
+
+@pytest.mark.skipif(is_not_utc(), reason="https://github.com/NVIDIA/cudf-spark/issues/15385")
+@ignore_order(local=True)
+def test_orc_gpu_write_cpu_read_timestamp_near_epoch(spark_tmp_path):
+    gpu_write_path = spark_tmp_path + "/ORC_DATA_GPU_NEAR_EPOCH"
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    # Exercise the negative fractional timestamp encoding fixed by
+    # https://github.com/NVIDIA/cudf/pull/23391 by randomly sampling 16 values from the
+    # inclusive [-1000000 us, 0 us] range around the epoch.
+    ts_gen = TimestampGen(
+        start=epoch - timedelta(microseconds=1000000), end=epoch, nullable=False)
+    # Write timestamp on GPU
+    with_gpu_session(
+        lambda spark: gen_df(spark, [("c1", ts_gen)], length=16).write.orc(gpu_write_path))
     # Read timestamp on CPU and GPU
     assert_gpu_and_cpu_are_equal_collect(read_orc_df(gpu_write_path))

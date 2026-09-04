@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,8 @@
  */
 
 package com.nvidia.spark.rapids.tests.mortgage
+
+import com.nvidia.spark.rapids.ConsoleOutput
 
 import org.apache.spark.sql.{Column, DataFrame, SparkSession}
 import org.apache.spark.sql.functions._
@@ -423,7 +425,7 @@ object AggregatesWithJoin {
 object Main {
   def main(args: Array[String]): Unit = {
     if (args.length < 4 || args.length > 5) {
-        System.err.println("Usage:<sparkversion> <perfpath> <acqpath> <outputpath> [csv|orc|parquet]")
+        ConsoleOutput.writeErrorLine("Usage:<sparkversion> <perfpath> <acqpath> <outputpath> [csv|orc|parquet]")
         System.exit(1)
     }
     val perfPath = args(1)
@@ -443,7 +445,7 @@ object Main {
     val format = args.lift(4).getOrElse("parquet")
     val contains = dataFrameFormatMap.contains(format)
     if (!contains) {
-        System.err.println(s"Invalid input format $format, expected one of csv, orc, parquet")
+        ConsoleOutput.writeErrorLine(s"Invalid input format $format, expected one of csv, orc, parquet")
         System.exit(1)
     }
 

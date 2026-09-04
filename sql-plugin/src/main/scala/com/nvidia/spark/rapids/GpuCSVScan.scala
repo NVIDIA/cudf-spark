@@ -364,8 +364,8 @@ case class GpuCSVPartitionReaderFactory(
 
   override def buildColumnarReader(partFile: PartitionedFile): PartitionReader[ColumnarBatch] = {
     val conf = broadcastedConf.value.value
-    val reader = new PartitionReaderWithBytesRead(new CSVPartitionReader(conf, partFile, dataSchema,
-      readDataSchema, parsedOptions, maxReaderBatchSizeRows, maxReaderBatchSizeBytes, metrics))
+    val reader = new CSVPartitionReader(conf, partFile, dataSchema,
+      readDataSchema, parsedOptions, maxReaderBatchSizeRows, maxReaderBatchSizeBytes, metrics)
     ColumnarPartitionReaderWithPartitionValues.newReader(partFile, reader, partitionSchema,
       maxGpuColumnSizeBytes)
   }
