@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,9 @@
 
 package com.nvidia.spark.rapids
 
+import java.io.{ByteArrayInputStream, ByteArrayOutputStream, ObjectInputStream, ObjectOutputStream}
+
+import com.nvidia.spark.rapids.Arm.withResource
 import org.scalatest.funsuite.AnyFunSuite
 
 class RangeConfMatcherSuite extends AnyFunSuite {
@@ -77,6 +80,27 @@ class RangeConfMatcherSuite extends AnyFunSuite {
       assert(!matcher.contains(0))
       assert(!matcher.contains("70"))
       assert(!matcher.contains(70))
+    }
+  }
+
+  test("RapidsConf enumeration values are serializable") {
+    val values = Seq(
+      RapidsConf.HybridFilterPushdownType.CPU,
+      RapidsConf.RapidsShuffleManagerMode.MULTITHREADED,
+      RapidsConf.ShuffleKudoMode.GPU,
+      RapidsConf.AllowMultipleJars.SAME_REVISION,
+      RapidsConf.ParquetFooterReaderType.AUTO)
+
+    values.foreach { value =>
+      val bytes = new ByteArrayOutputStream()
+      withResource(new ObjectOutputStream(bytes)) { out =>
+        out.writeObject(value)
+      }
+      val roundTripped = withResource(
+          new ObjectInputStream(new ByteArrayInputStream(bytes.toByteArray))) { in =>
+        in.readObject()
+      }
+      assert(roundTripped == value)
     }
   }
 }

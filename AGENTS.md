@@ -37,7 +37,10 @@ spark-rapids/
 │   ├── src/main/scala/            # Main Scala sources
 │   │   └── com/nvidia/spark/rapids/
 │   │       ├── GpuOverrides.scala       # GPU operator registry & fallback rules
-│   │       ├── RapidsConf.scala         # Configuration keys & defaults
+│   │       ├── RapidsConf.scala         # Configuration registry, enums, and accessors
+│   │       ├── RapidsConfEntries.scala  # General, test, and debug configuration entries
+│   │       ├── RapidsConfResourceEntries.scala # Resource and memory configuration entries
+│   │       ├── RapidsConfSqlEntries.scala # SQL and file-format configuration entries
 │   │       ├── Arm.scala                # Resource management (withResource/closeOnExcept)
 │   │       ├── RmmRapidsRetryIterator.scala  # OOM retry framework
 │   │       ├── SpillableColumnarBatch.scala  # Spillable GPU batch wrapper
