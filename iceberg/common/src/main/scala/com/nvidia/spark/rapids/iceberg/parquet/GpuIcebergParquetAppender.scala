@@ -26,7 +26,6 @@ import com.nvidia.spark.rapids.iceberg.parquet.converter.ToIcebergShaded
 import com.nvidia.spark.rapids.parquet.HMBInputFile
 import org.apache.iceberg.{FieldMetrics, Metrics, MetricsConfig}
 import org.apache.iceberg.io.FileAppender
-import org.apache.iceberg.shaded.org.apache.parquet.format.converter.ParquetMetadataConverter
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader
 import org.apache.iceberg.parquet.ParquetUtil
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.metadata.ParquetMetadata
@@ -61,9 +60,10 @@ class GpuIcebergParquetAppender(
   override def close(): Unit = {
     if (!closed) {
       footer = withResource(inner.closeAndGetFooter()) { footerBuffer =>
-        ParquetFileReader.readFooter(
-          ToIcebergShaded.shade(new HMBInputFile(footerBuffer)),
-          ParquetMetadataConverter.NO_FILTER)
+        withResource(ParquetFileReader.open(
+          ToIcebergShaded.shade(new HMBInputFile(footerBuffer)))) { reader =>
+          reader.getFooter
+        }
       }
       closed = true
     }
