@@ -729,6 +729,95 @@ def test_delta_merge_duplicate_source_rows_ambiguous_error_db173(
         error_message="DELTA_MULTIPLE_SOURCE_ROW_MATCHING_TARGET_ROW_IN_MERGE")
 
 
+# A clause condition that evaluates to NULL is false: the row moves on to the next clause or to
+# the default action (copy a target row, skip a source row). The GPU merge processor splits each
+# batch with the condition and its negation, and a NULL passes neither filter, so without
+# nulls-as-false handling such rows silently disappeared. Target rows a = 0..19 have b NULL when
+# a % 5 == 0; source rows are the even a = 0..28 with b = a * 10 and a flag that is NULL when
+# a % 6 == 0, true when a % 4 == 0, false otherwise.
+def _nullable_condition_src(spark):
+    def flag(a):
+        return None if a % 6 == 0 else a % 4 == 0
+    return spark.createDataFrame([(a, a * 10, flag(a)) for a in range(0, 30, 2)],
+                                 "a INT, b INT, flag BOOLEAN")
+
+
+def _nullable_condition_dest(spark):
+    return spark.createDataFrame([(a, None if a % 5 == 0 else a) for a in range(0, 20)],
+                                 "a INT, b INT")
+
+
+_nullable_condition_clauses = (
+    "WHEN MATCHED AND {src_table}.flag THEN UPDATE SET {dest_table}.b = {src_table}.b "
+    "WHEN MATCHED AND NOT {src_table}.flag THEN DELETE "
+    "WHEN NOT MATCHED AND {src_table}.flag THEN INSERT (a, b) VALUES ({src_table}.a, {src_table}.b) ")
+
+
+def _nullable_condition_expected(with_not_matched_by_source):
+    rows = []
+    for a in range(0, 20):
+        b = None if a % 5 == 0 else a
+        if a % 2 == 0:  # matched
+            if a % 6 == 0:  # flag NULL: neither matched clause applies, copied unchanged
+                rows.append((a, b))
+            elif a % 4 == 0:  # flag true: updated
+                rows.append((a, a * 10))
+            # flag false: deleted
+        elif with_not_matched_by_source:  # target only: condition b > 0 is NULL when b is NULL
+            rows.append((a, None if b is None else 0))
+        else:
+            rows.append((a, b))
+    # source only: a = 20..28, inserted only when the flag is true (NULL is not)
+    rows += [(a, a * 10) for a in range(20, 30, 2) if a % 6 != 0 and a % 4 == 0]
+    return rows
+
+
+def _assert_nullable_condition_result(spark_tmp_path, with_not_matched_by_source):
+    expected = sorted(_nullable_condition_expected(with_not_matched_by_source))
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    for run in ["CPU", "GPU"]:
+        actual = with_cpu_session(
+            lambda spark: sorted(tuple(row) for row in
+                                 read_delta_path(spark, data_path + "/" + run).collect()),
+            conf=delta_merge_enabled_conf)
+        assert expected == actual, f"{run}: expected {expected}, got {actual}"
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
+def test_delta_merge_nullable_matched_conditions(spark_tmp_path, spark_tmp_table_factory):
+    merge_sql = "MERGE INTO {dest_table} USING {src_table} ON {dest_table}.a == {src_table}.a " + \
+                _nullable_condition_clauses
+    assert_delta_sql_merge_collect(
+        spark_tmp_path, spark_tmp_table_factory,
+        use_cdf=False, enable_deletion_vectors=False,
+        src_table_func=_nullable_condition_src, dest_table_func=_nullable_condition_dest,
+        merge_sql=merge_sql, compare_logs=False, conf=delta_merge_enabled_conf)
+    _assert_nullable_condition_result(spark_tmp_path, with_not_matched_by_source=False)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not (is_spark_41x() or is_databricks173_or_later()),
+                    reason="NOT MATCHED BY SOURCE is supported on the GPU with OSS Delta 4.1 "
+                           "and Databricks 17.3+")
+def test_delta_merge_nullable_not_matched_by_source_condition(spark_tmp_path, spark_tmp_table_factory):
+    merge_sql = "MERGE INTO {dest_table} USING {src_table} ON {dest_table}.a == {src_table}.a " + \
+                _nullable_condition_clauses + \
+                "WHEN NOT MATCHED BY SOURCE AND {dest_table}.b > 0 THEN UPDATE SET {dest_table}.b = 0"
+    assert_delta_sql_merge_collect(
+        spark_tmp_path, spark_tmp_table_factory,
+        use_cdf=False, enable_deletion_vectors=False,
+        src_table_func=_nullable_condition_src, dest_table_func=_nullable_condition_dest,
+        merge_sql=merge_sql, compare_logs=False,
+        assert_func=_assert_gpu_merge_processor,
+        conf=delta_merge_no_cpu_bridge_conf)
+    _assert_nullable_condition_result(spark_tmp_path, with_not_matched_by_source=True)
+
+
 @allow_non_gpu("ExecutedCommandExec", *delta_meta_allow)
 @delta_lake
 @ignore_order

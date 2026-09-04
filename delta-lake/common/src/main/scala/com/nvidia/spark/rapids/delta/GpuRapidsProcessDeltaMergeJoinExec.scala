@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids.delta
 
 import scala.collection.mutable.ArrayBuffer
 
-import ai.rapids.cudf.{NvtxColor, Table}
+import ai.rapids.cudf.{ColumnVector, NvtxColor, Scalar, Table}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.AssertUtils.assertInTests
@@ -381,15 +381,20 @@ class GpuRapidsProcessDeltaMergeJoinIterator(
       predicate: Expression): (ColumnarBatch, ColumnarBatch) = {
     withResource(input) { _ =>
       withResource(GpuColumnVector.from(input)) { inTable =>
-        val predCol = predicate.columnarEval(input)
+        // A clause condition that evaluates to NULL is false in SQL: the row moves on to the
+        // next clause or to the default output. cuDF's filter drops rows whose mask is NULL, and
+        // NOT NULL is NULL, so without this both halves would lose the row.
+        val predCol = withResource(predicate.columnarEval(input)) { evaluated =>
+          nullsAsFalse(evaluated.getBase)
+        }
         val matchedBatch = closeOnExcept(predCol) { _ =>
-          withResource(inTable.filter(predCol.getBase)) { matchedTable =>
+          withResource(inTable.filter(predCol)) { matchedTable =>
             GpuColumnVector.from(matchedTable, inputTypes)
           }
         }
         closeOnExcept(matchedBatch) { _ =>
           val notPredCol = withResource(predCol) { _ =>
-            predCol.getBase.not()
+            predCol.not()
           }
           val notMatchedBatch = withResource(notPredCol) { _ =>
             withResource(inTable.filter(notPredCol)) { notMatchedTable =>
@@ -399,6 +404,16 @@ class GpuRapidsProcessDeltaMergeJoinIterator(
           (matchedBatch, notMatchedBatch)
         }
       }
+    }
+  }
+
+  private def nullsAsFalse(mask: ColumnVector): ColumnVector = {
+    if (mask.hasNulls) {
+      withResource(Scalar.fromBool(false)) { falseScalar =>
+        mask.replaceNulls(falseScalar)
+      }
+    } else {
+      mask.incRefCount()
     }
   }
 }
