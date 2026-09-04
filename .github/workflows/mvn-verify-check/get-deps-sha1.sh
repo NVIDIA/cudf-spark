@@ -22,7 +22,7 @@ project_jni="spark-rapids-jni"
 project_private="cudf-spark-private_${scala_ver}"
 
 jni_ver=$(mvn help:evaluate -q -pl dist -Dexpression=spark-rapids-jni.version -DforceStdout)
-private_ver=$(mvn help:evaluate -q -pl dist -Dexpression=spark-rapids-private.version -DforceStdout)
+private_ver=$(mvn help:evaluate -q -pl dist -Dexpression=cudf-spark-private.version -DforceStdout)
 
 get_latest_snapshot_version() {
   local project_URL="$1"

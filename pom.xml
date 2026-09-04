@@ -1061,7 +1061,7 @@
         <cuda.version>cuda12</cuda.version>
         <jni.classifier>${cuda.version}</jni.classifier>
         <spark-rapids-jni.version>26.10.0-SNAPSHOT</spark-rapids-jni.version>
-        <spark-rapids-private.version>26.10.0-SNAPSHOT</spark-rapids-private.version>
+        <cudf-spark-private.version>26.10.0-SNAPSHOT</cudf-spark-private.version>
         <scala.binary.version>2.12</scala.binary.version>
         <scala.recompileMode>incremental</scala.recompileMode>
         <scala.version>2.12.21</scala.version>
