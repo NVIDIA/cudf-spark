@@ -83,6 +83,34 @@ Apache Spark 3.3.0 on Scala 2.13 artifacts, issue:
 mvn package -f scala2.13 -pl tests -am -Dbuildver=330 -Dsuffixes='.*CastOpSuite' -Dtests=decimal
 ```
 
+### Parallel Unit Tests
+
+Premerge runs the Scala unit tests in parallel, using
+`ParallelUnitTestRunner` to run suites in separate worker JVMs. Add `[serial ut]` or `[serial-ut]`
+to the PR title to run them serially when debugging a concurrency-only failure, reading a linear
+ScalaTest log, or verifying a fix. Local runs are serial unless parallel execution is enabled
+explicitly:
+
+```bash
+mvn package -pl tests -am -Drapids.parallelUnitTests=true -DparallelForkCount=4
+```
+
+- `-Dsuffixes` and `-Dtests` are not supported; the runner fails fast. Use
+  `-DwildcardSuites`, which matches fully qualified suite-name prefixes.
+- The GPU is shared. Each worker gets
+  `rapids.test.gpu.allocFraction * 0.8 / parallelForkCount`; with the defaults, four workers each
+  get 20% of the GPU memory pool instead of the 100% available to serial execution.
+- Each suite has a watchdog controlled by `-DparallelSuiteTimeout`, which defaults to 1800 seconds.
+  On timeout, the runner captures a `jstack`, kills the worker, and fails the run.
+- The `RapidsDynamicPartitionPruningV1SuiteAEOff` and
+  `RapidsDynamicPartitionPruningV1SuiteAEOn` suites are assigned to the same worker so they execute
+  serially with each other because concurrent execution previously caused GPU broadcast
+  contention. The list is `DPP_SUITES` in `ParallelUnitTestRunner.scala`; the root cause remains
+  tracked in [#15401](https://github.com/NVIDIA/cudf-spark/issues/15401).
+- To debug a parallel failure, follow the `[wave-<run>-worker-<id>]` log prefix for the failing
+  suite. Re-run that suite alone with `-DwildcardSuites=<fully.qualified.Suite>`, both with and
+  without `-Drapids.parallelUnitTests=true`, to determine whether concurrency caused the failure.
+
 ## Integration Tests
 
 Please refer to the integration-tests [README](../integration_tests/README.md)
