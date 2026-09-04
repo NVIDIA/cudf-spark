@@ -12,11 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# The Spark versions published in Apache Iceberg's gradle/libs.versions.toml are
-# treated as the minimum supported patch for each Spark minor release. Every
-# cudf-spark shim at or above that minimum is recorded below. Combinations that
-# Iceberg supports but cudf-spark does not currently package stay in the matrix
-# with an explanation so future support gaps are visible.
+# Each entry describes one Apache Iceberg runtime version tested by cudf-spark.
+# For that Iceberg release, upstream_minimums is copied from the Spark versions
+# in Apache Iceberg's gradle/libs.versions.toml. Each key is a Spark major/minor
+# family and its value is the patch release that Iceberg builds and tests against;
+# cudf-spark treats that patch as the minimum upstream-compatible version.
+#
+# spark_versions is computed from the spark*.version properties in the root
+# pom.xml. For each family in upstream_minimums, it lists every cudf-spark shim
+# whose patch version is greater than or equal to the upstream minimum. A shim is
+# supported when cudf-spark packages the corresponding Iceberg integration module.
+# Upstream-compatible shims that are not packaged remain listed with supported:
+# false and a reason, making current support gaps explicit.
 iceberg_versions:
   - version: "1.6.1"
     upstream_minimums:
