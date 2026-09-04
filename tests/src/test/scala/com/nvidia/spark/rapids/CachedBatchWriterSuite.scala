@@ -20,7 +20,7 @@ import scala.collection.JavaConverters.asScalaIteratorConverter
 import scala.collection.mutable.{ArrayBuffer, ListBuffer}
 import scala.collection.mutable
 
-import ai.rapids.cudf.{ColumnVector, CompressionType, DType, Rmm, Table, TableWriter}
+import ai.rapids.cudf.{ColumnVector, CompressionType, DType, ParquetTableWriter, Rmm, Table}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableFromBatchColumns
 import com.nvidia.spark.rapids.parquet.{ParquetCachedBatchSerializer, ParquetOutputFileFormat}
@@ -355,7 +355,7 @@ class CachedBatchWriterSuite extends SparkQueryCompareTestSuite {
      gpuCols: Array[org.apache.spark.sql.vectorized.ColumnVector], splitAt: Int*): Unit = {
     // mock static method for Table
     val theTableMock = mockStatic(classOf[Table], (_: InvocationOnMock) => {
-      val ret = mock(classOf[TableWriter])
+      val ret = mock(classOf[ParquetTableWriter])
       doAnswer( invocation =>
         checkSize(invocation.getArgument(0, classOf[Table]))
       ).when(ret).write(isA(classOf[Table]))
