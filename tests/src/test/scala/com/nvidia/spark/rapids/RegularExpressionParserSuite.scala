@@ -54,6 +54,35 @@ class RegularExpressionParserSuite extends AnyFunSuite {
       RegexRepetition(RegexChar('a'), QuantifierFixedLength(1)))))
   }
 
+  test("bounded reluctant quantifiers have semantic modes") {
+    val cases = Seq(
+      "a{2}?" -> QuantifierFixedLength(2, RegexQuantifier.Reluctant),
+      "a{2,}?" -> QuantifierVariableLength(2, None, RegexQuantifier.Reluctant),
+      "a{2,3}?" -> QuantifierVariableLength(2, Some(3), RegexQuantifier.Reluctant),
+      "a{0,3}?" -> QuantifierVariableLength(0, Some(3), RegexQuantifier.Reluctant))
+
+    cases.foreach { case (pattern, quantifier) =>
+      val ast = RegexSequence(ListBuffer(RegexRepetition(RegexChar('a'), quantifier)))
+      assert(parse(pattern) === ast)
+      assert(ast.toRegexString === pattern)
+    }
+  }
+
+  test("quantifier diagnostics point at the base or mode modifier") {
+    val cases = Seq(
+      "a*" -> 1,
+      "a*?" -> 2,
+      "a{2,3}" -> 1,
+      "a{2,3}?" -> 6)
+
+    cases.foreach { case (pattern, expectedPosition) =>
+      val RegexSequence(parts) = parse(pattern)
+      val repetition @ RegexRepetition(_, quantifier) = parts.head
+      assert(repetition.position.contains(1), pattern)
+      assert(quantifier.position.contains(expectedPosition), pattern)
+    }
+  }
+
   // Regression test for https://github.com/NVIDIA/cudf-spark/issues/15495
   test("quantifier integer boundaries") {
     val supportedBoundaries: Seq[(String, RegexQuantifier)] = Seq(
@@ -90,12 +119,18 @@ class RegularExpressionParserSuite extends AnyFunSuite {
         RegexChar('{'), RegexChar('1'),RegexEscaped('}'))))
   }
 
-  test("nested repetition") {
+  test("possessive repetition has a semantic mode") {
     assert(parse("a*+") ===
       RegexSequence(ListBuffer(
-        RegexRepetition(
-          RegexRepetition(RegexChar('a'), SimpleQuantifier('*')),
-            SimpleQuantifier('+')))))
+        RegexRepetition(RegexChar('a'),
+          SimpleQuantifier('*', RegexQuantifier.Possessive)))))
+  }
+
+  test("stacked quantifiers are unsupported") {
+    Seq("a*{2,}", "a{2}{3}", "a{2}?{3}").foreach { pattern =>
+      val e = intercept[RegexUnsupportedException] { parse(pattern) }
+      assert(e.getMessage.startsWith("Preceding token cannot be quantified"))
+    }
   }
 
   test("choice") {

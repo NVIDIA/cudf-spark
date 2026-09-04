@@ -18,8 +18,10 @@ package com.nvidia.spark.rapids
 
 import java.util.concurrent.atomic.AtomicLong
 
-import com.nvidia.spark.rapids.shims.GpuDataSourceRDD
+import com.nvidia.spark.rapids.shims.{GpuDataSourceCustomMetrics,
+  GpuDataSourceCustomMetricsFactory, GpuDataSourceRDD}
 import org.apache.hadoop.fs.{FileSystem, RawLocalFileSystem}
+import org.mockito.Mockito.{verify, when}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatestplus.mockito.MockitoSugar
 
@@ -156,6 +158,47 @@ class FileSystemBytesReadTrackerSuite extends AnyFunSuite with MockitoSugar {
       assert(context.taskMetrics().inputMetrics.bytesRead == 0L)
       context.markTaskComplete()
       assert(context.taskMetrics().inputMetrics.bytesRead == 10L)
+    }
+  }
+
+  test("GPU datasource RDD closes a batch when custom metric updates fail") {
+    withTaskContext { context =>
+      val inputPartition = new InputPartition {}
+      val reader = mock[PartitionReader[ColumnarBatch]]
+      val batch = mock[ColumnarBatch]
+      when(reader.next()).thenReturn(true)
+      when(reader.get()).thenReturn(batch)
+      when(batch.numRows()).thenReturn(1)
+
+      val readerFactory = new PartitionReaderFactory {
+        override def createReader(partition: InputPartition) =
+          throw new UnsupportedOperationException
+
+        override def createColumnarReader(partition: InputPartition) = reader
+
+        override def supportColumnarReads(partition: InputPartition): Boolean = true
+      }
+      val customMetricsFactory = new GpuDataSourceCustomMetricsFactory {
+        override def create(): GpuDataSourceCustomMetrics = new GpuDataSourceCustomMetrics {
+          override def readerOpened(reader: PartitionReader[ColumnarBatch]): Unit = {}
+
+          override def readerProgress(reader: PartitionReader[ColumnarBatch]): Unit = {
+            throw new IllegalStateException("metric update failed")
+          }
+
+          override def readerFinished(reader: PartitionReader[ColumnarBatch]): Unit = {}
+        }
+      }
+      val rdd = new GpuDataSourceRDD(
+        mock[SparkContext], Seq(Seq(inputPartition)), readerFactory, customMetricsFactory)
+      val iterator = rdd.compute(rdd.partitions.head, context)
+
+      assert(iterator.hasNext)
+      val error = intercept[IllegalStateException](iterator.next())
+      assert(error.getMessage == "metric update failed")
+      verify(batch).close()
+      verify(reader).close()
+      context.markTaskComplete()
     }
   }
 
