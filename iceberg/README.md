@@ -19,7 +19,7 @@ and the directory that contains the corresponding support code.
 Iceberg GPU acceleration is currently supported on Spark 3.5.x, 4.0.x, and 4.1.x.
 The authoritative integration-test compatibility list, including upstream-compatible
 combinations that are not currently packaged, is maintained in
-[`jenkins/iceberg-test-matrix.yaml`](../jenkins/iceberg-test-matrix.yaml).
+[`iceberg-versions.yml`](iceberg-versions.yml).
 
 For Spark 3.5.4+, both `iceberg-1-9-x` and `iceberg-1-10-x` modules are compiled into the
 build. The integration-test support baseline follows the Spark patch versions used to build

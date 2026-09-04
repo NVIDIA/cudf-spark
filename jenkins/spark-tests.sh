@@ -355,8 +355,6 @@ run_delta_lake_tests() {
 run_iceberg_tests() {
   # get the major/minor version of Spark
   ICEBERG_SPARK_VER=$(echo "$SPARK_VER" | cut -d. -f1,2)
-  # get the patch version of Spark
-  SPARK_PATCH_VER=$(echo "$SPARK_VER" | cut -d. -f3)
   local test_type=${1:-'default'}
 
   if [[ "$ICEBERG_SPARK_VER" == "4.0" || "$ICEBERG_SPARK_VER" == "4.1" ]]; then
@@ -371,39 +369,15 @@ run_iceberg_tests() {
   supported_versions=$(python "$matrix_reader" --spark-version "$SPARK_VER") || return 1
 
   local iceberg_versions
-  local user_specified_versions=false
   if [[ -n "${ICEBERG_VERSIONS:-}" ]]; then
     iceberg_versions=$(python "$matrix_reader" \
       --spark-version "$SPARK_VER" --requested-versions "$ICEBERG_VERSIONS") || return 1
-    user_specified_versions=true
     echo "Using user-specified ICEBERG_VERSIONS=$ICEBERG_VERSIONS"
   elif [[ -z "$supported_versions" ]]; then
     echo "!!!! Skipping Iceberg tests. No supported Iceberg version for Spark $SPARK_VER"
     return 0
-  elif [[ "$test_type" == "default" ]]; then
-    # Exercise every supported local-catalog combination. Fast mode keeps the
-    # expanded matrix practical while retaining tests that require a local catalog.
-    iceberg_versions="$supported_versions"
   else
-    # Remote catalogs keep one representative version per Spark patch range.
-    if [[ "$ICEBERG_SPARK_VER" == "4.1" ]]; then
-      iceberg_versions="1.11.0"
-    elif [[ "$ICEBERG_SPARK_VER" == "4.0" ]]; then
-      iceberg_versions="1.10.1"
-    elif [[ "$SPARK_PATCH_VER" -le 3 ]]; then
-      iceberg_versions="1.6.1"
-    elif [[ "$SPARK_PATCH_VER" -le 6 ]]; then
-      iceberg_versions="1.9.2"
-    else
-      iceberg_versions="1.10.1"
-    fi
-    iceberg_versions=$(python "$matrix_reader" \
-      --spark-version "$SPARK_VER" --requested-versions "$iceberg_versions") || return 1
-  fi
-
-  local iceberg_test_fast_run=${ICEBERG_TEST_FAST_RUN:-}
-  if [[ "$test_type" == "default" && "$user_specified_versions" == "false" ]]; then
-    iceberg_test_fast_run=1
+    iceberg_versions="$supported_versions"
   fi
 
   for ICEBERG_VERSION in $iceberg_versions; do
@@ -413,7 +387,7 @@ run_iceberg_tests() {
       env \
         HOST_NAME=$PROJECT_REPO_HOST \
         EXPECTED_ICEBERG_VERSION=${ICEBERG_VERSION} \
-        ICEBERG_TEST_FAST_RUN="${iceberg_test_fast_run}" \
+        ICEBERG_TEST_FAST_RUN=1 \
         PYSP_TEST_spark_driver_memory=1G \
         PYSP_TEST_spark_executor_memory=2G \
         PYSP_TEST_spark_jars_packages=org.apache.iceberg:iceberg-spark-runtime-${ICEBERG_SPARK_VER}_${SCALA_BINARY_VER}:${ICEBERG_VERSION} \
@@ -435,7 +409,6 @@ org.apache.iceberg:iceberg-aws-bundle:${ICEBERG_VERSION}"
             EXPECTED_ICEBERG_VERSION=${ICEBERG_VERSION} \
             ICEBERG_EXTRA_CLASSPATH="${ICEBERG_REST_EXTRA_CLASSPATH}" \
             ICEBERG_TEST_CATALOG_TYPE="rest" \
-            ICEBERG_TEST_FAST_RUN="${iceberg_test_fast_run}" \
             ICEBERG_TEST_REMOTE_CATALOG=1 \
             PYSP_TEST_spark_driver_memory=1G \
             PYSP_TEST_spark_executor_memory=2G \
@@ -494,7 +467,6 @@ com.amazonaws:aws-java-sdk-bundle:${AWS_SDK_BUNDLE_VERSION}"
         HOST_NAME=$PROJECT_REPO_HOST \
         EXPECTED_ICEBERG_VERSION=${ICEBERG_VERSION} \
         ICEBERG_EXTRA_CLASSPATH="${ICEBERG_S3TABLES_EXTRA_CLASSPATH}" \
-        ICEBERG_TEST_FAST_RUN="${iceberg_test_fast_run}" \
         ICEBERG_TEST_REMOTE_CATALOG=1 \
         PYSP_TEST_spark_driver_memory=1G \
         PYSP_TEST_spark_executor_memory=2G \

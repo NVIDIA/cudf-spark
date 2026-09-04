@@ -543,7 +543,7 @@ If Spark has been configured to support Iceberg then these tests can be enabled 
 
 Set `ICEBERG_TEST_FAST_RUN=1` to skip redundant, high-cost cases while retaining tests that
 specifically require a local Hadoop catalog. CI uses this mode when it expands the supported
-Iceberg and Spark combinations from `jenkins/iceberg-test-matrix.yaml`.
+Iceberg and Spark combinations from `iceberg/iceberg-versions.yml`.
 
 When testing Iceberg package-private access paths, load the local Iceberg runtime jar with
 `ICEBERG_EXTRA_CLASSPATH` instead of `PYSP_TEST_spark_jars` or
