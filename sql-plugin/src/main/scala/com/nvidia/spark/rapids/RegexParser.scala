@@ -938,6 +938,7 @@ class CudfRegexTranspiler(mode: RegexMode) {
   }
 
   private val lineTerminatorChars = Seq('\n', '\r', '\u0085', '\u2028', '\u2029')
+  private val lineTerminatorCodePoints = lineTerminatorChars.map(_.toInt).toSet
 
 
   private def negateCharacterClass(
@@ -1005,9 +1006,10 @@ class CudfRegexTranspiler(mode: RegexMode) {
 
     def containsNewline(regex: RegexAST): Boolean = {
       contains(regex, {
-        case RegexChar('\r') | RegexEscaped('r') => true
-        case RegexChar('\n') | RegexEscaped('n') => true
-        case RegexChar('\u0085') | RegexChar('\u2028') | RegexChar('\u2029') => true
+        case RegexChar(ch) if lineTerminatorChars.contains(ch) => true
+        case r: RegexHexDigit if lineTerminatorCodePoints.contains(r.codePoint) => true
+        case r: RegexOctalChar if lineTerminatorCodePoints.contains(r.codePoint) => true
+        case RegexEscaped('r') | RegexEscaped('n') => true
         case RegexEscaped('s') | RegexEscaped('v') | RegexEscaped('R') => true
         case RegexEscaped('W') | RegexEscaped('D') |
           RegexEscaped('S') | RegexEscaped('V') =>
