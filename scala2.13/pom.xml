@@ -1152,6 +1152,8 @@
         <scala.plugin.version>4.9.10</scala.plugin.version>
         <maven.install.plugin.version>3.1.1</maven.install.plugin.version>
         <maven.jar.plugin.version>3.3.0</maven.jar.plugin.version>
+        <jython.version>2.7.3</jython.version>
+        <deprecation.audit.rawReport>${project.build.directory}/nvidia-deprecation-audit.json</deprecation.audit.rawReport>
         <scalatest-maven-plugin.version>2.0.2</scalatest-maven-plugin.version>
         <guava.cdh.version>30.0-jre</guava.cdh.version>
         <arrow.cdh.version>2.0.0</arrow.cdh.version>
@@ -1618,7 +1620,7 @@ This will force full Scala code rebuild in downstream modules.
                     <dependency>
                         <groupId>org.python</groupId>
                         <artifactId>jython-standalone</artifactId>
-                        <version>2.7.3</version>
+                        <version>${jython.version}</version>
                     </dependency>
                     <dependency>
                         <groupId>net.sourceforge.pmd</groupId>
@@ -1742,6 +1744,18 @@ This will force full Scala code rebuild in downstream modules.
                             <arg>-Wconf:cat=unused-privates:e</arg>
                             <arg>-Wunused:imports,locals,patvars,privates</arg>
                             <!-- #endif scala-2.13 -->
+                            <!-- Wconf arguments are prepended, so keep these last to take
+                                 precedence over the general Scala 2.13 deprecation rule.
+                                 NVIDIA-owned APIs are updated in lockstep with this project, but
+                                 their replacement artifacts are not available before deprecation
+                                 annotations land. Keep these diagnostics visible without letting
+                                 fatal-warning policies break the update window. cudf-spark-private
+                                 does not have a single artifact-specific namespace, so cover its
+                                 NVIDIA-owned package roots and its one Spark-package bridge. -->
+                            <arg>-Wconf:cat=deprecation&amp;origin=ai\.rapids\.cudf\..*:iv</arg>
+                            <arg>-Wconf:cat=deprecation&amp;origin=com\.nvidia\.spark\.rapids\..*:iv</arg>
+                            <arg>-Wconf:cat=deprecation&amp;origin=org\.apache\.spark\.sql\.rapids\..*:iv</arg>
+                            <arg>-Wconf:cat=deprecation&amp;origin=org\.apache\.spark\.sql\.execution\.aggregate\.PartialAggUtils([.$].*|$):iv</arg>
                         </args>
                         <addJavacArgs>${scala.javac.args}</addJavacArgs>
                         <!-- #if scala-2.13 -->
@@ -1992,6 +2006,34 @@ This will force full Scala code rebuild in downstream modules.
                 <!-- parent-pom only executions -->
                 <inherited>false</inherited>
                 <executions>
+                    <!-- Encode option hyphens so this block remains a valid generated XML comment. -->
+                    <!-- #if scala-2.12 --><!--
+                    <execution>
+                        <id>nvidia-deprecation-audit</id>
+                        <phase>none</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <java classname="org.python.util.jython"
+                                      classpathref="maven.plugin.classpath"
+                                      fork="true" failonerror="true" dir="${project.basedir}">
+                                    <arg value="-B"/>
+                                    <arg value="scripts/tests/test_deprecation_audit.py"/>
+                                </java>
+                                <java classname="org.python.util.jython"
+                                      classpathref="maven.plugin.classpath"
+                                      fork="true" failonerror="true" dir="${project.basedir}">
+                                    <arg value="-B"/>
+                                    <arg value="scripts/deprecation_audit.py"/>
+                                    <arg value="&#45;&#45;repo-root"/>
+                                    <arg value="${project.basedir}"/>
+                                    <arg value="&#45;&#45;raw-report"/>
+                                    <arg value="${deprecation.audit.rawReport}"/>
+                                </java>
+                            </target>
+                        </configuration>
+                    </execution>
+                    --><!-- #endif scala-2.12 -->
                     <execution>
                         <!--
                         This is an alternative implementation of the scalastyle check invocation,
@@ -2039,6 +2081,17 @@ This will force full Scala code rebuild in downstream modules.
                                     <arg value="-p"/>
                                     <arg value="test_check_with_resource_nesting.py"/>
                                 </exec>
+                                <java classname="org.python.util.jython"
+                                      classpathref="maven.plugin.classpath"
+                                      fork="true" failonerror="true"
+                                      dir="${spark.rapids.source.basedir}">
+                                    <arg value="-B"/>
+                                    <arg value="scripts/check_deprecation_policy.py"/>
+                                    <arg value="--pom"/>
+                                    <arg value="${project.basedir}/pom.xml"/>
+                                    <arg value="--maven-repo"/>
+                                    <arg value="${settings.localRepository}"/>
+                                </java>
                                 <!-- Existing nesting exceptions are tracked by
                                      https://github.com/NVIDIA/cudf-spark/issues/11713. -->
                                 <exec executable="python3" failonerror="true"
