@@ -16,6 +16,8 @@
 
 package com.nvidia.spark.rapids
 
+import java.util.{ArrayDeque, IdentityHashMap}
+
 import scala.annotation.tailrec
 import scala.collection.mutable.ArrayBuffer
 
@@ -62,35 +64,50 @@ class GpuProjectExecMeta(
     // Force list to avoid recursive Java serialization of lazy list Seq implementation
     val gpuExprs = childExprs.map(_.convertToGpu().asInstanceOf[NamedExpression]).toList
     val gpuChild = childPlans.head.convertIfNeeded()
+    val jitExprs = if (conf.isProjectAstJitEnabled) {
+      GpuAstJitExpression.wrapProjectExpressions(gpuExprs)
+    } else {
+      gpuExprs
+    }
     val projectList = if (conf.isProjectAstEnabled) {
-      val astExprs = childExprs.zip(gpuExprs).map { case (meta, expr) =>
+      childExprs.zip(jitExprs).map { case (meta, expr) =>
         // cuDF requires return column is fixed width
         // Regular projection can reuse its cached null vector across outputs.
-        if (GpuBatchUtils.isFixedWidth(expr.dataType) && meta.canThisBeAst &&
+        if (GpuAstJitExpression.extractTopLevel(expr).isEmpty &&
+            GpuBatchUtils.isFixedWidth(expr.dataType) && meta.canThisBeAst &&
             !isTopLevelNullLiteral(expr)) {
           GpuProjectAstExpression.wrap(expr)
         } else {
           expr
         }
       }.toList
-      // explain AST because this is optional and it is sometimes hard to debug
-      if (conf.shouldExplain) {
-        val explain = (childExprs.iterator.map(_.explainAst(conf.shouldExplainAll))
-            .filter(_.nonEmpty) ++ gpuExprs.iterator.collect {
-          case expr if !GpuBatchUtils.isFixedWidth(expr.dataType) =>
-            s"  $expr cannot be converted to AST because its return type " +
-              s"${expr.dataType} is not fixed-width\n"
-          case expr if isTopLevelNullLiteral(expr) =>
-            s"  $expr will use the regular GPU projection so null outputs can reuse " +
-              "the cached null vector\n"
-        }).mkString
-        if (explain.nonEmpty) {
-          logWarning(s"AST PROJECT\n$explain")
-        }
-      }
-      astExprs
     } else {
-      gpuExprs
+      jitExprs
+    }
+    // Legacy Project AST eligibility is decided here. JIT selection is reported after tiering.
+    if (conf.shouldExplain && conf.isProjectAstEnabled) {
+      val legacyExplain = childExprs.iterator.zip(projectList.iterator).flatMap {
+        case (meta, expression) if GpuAstJitExpression.extractTopLevel(expression).isEmpty =>
+          Some(meta.explainAst(conf.shouldExplainAll)).filter(_.nonEmpty)
+              .map(explanation => s"  Legacy Project AST eligibility:\n$explanation")
+        case _ => None
+      }
+      val regularExplain = gpuExprs.iterator.zip(projectList.iterator).collect {
+        case (expr, expression)
+            if GpuProjectAstExpressionBase.extractTopLevel(expression).isEmpty &&
+              !GpuBatchUtils.isFixedWidth(expr.dataType) =>
+          s"  $expr cannot be converted to legacy Project AST because its return type " +
+            s"${expr.dataType} is not fixed-width\n"
+        case (expr, expression)
+            if GpuProjectAstExpressionBase.extractTopLevel(expression).isEmpty &&
+              isTopLevelNullLiteral(expr) =>
+          s"  $expr will use the regular GPU projection instead of legacy Project AST so " +
+            "null outputs can reuse the cached null vector\n"
+      }
+      val explain = (legacyExplain ++ regularExplain).mkString
+      if (explain.nonEmpty) {
+        logWarning(s"LEGACY PROJECT AST\n$explain")
+      }
     }
     GpuProjectExec(projectList, gpuChild)
   }
@@ -153,15 +170,50 @@ object GpuProjectExec {
           }
         }
 
-        val hasAstExpressions = boundExprs.exists { expression =>
-          GpuProjectAstExpression.extractTopLevel(expression).isDefined
-        }
-        if (hasAstExpressions) {
-          withResource(GpuProjectAstExpression.tableFromBatch(cb)) { table =>
-            projectWithEval { expression =>
-              GpuProjectAstExpression.extractTopLevel(expression) match {
-                case Some(astExpression) => astExpression.computeColumn(table)
-                case None => expression.columnarEval(cb)
+        val astExpressions = boundExprs.flatMap(
+          GpuProjectAstExpressionBase.extractTopLevel)
+        if (astExpressions.nonEmpty) {
+          withResource(GpuProjectAstExpressionBase.tableFromBatch(cb)) { table =>
+            val jitExpressions = astExpressions.collect {
+              case jitExpression: GpuAstJitExpression => jitExpression
+            }
+            val jitGroups = GpuAstJitExpression.executionGroups(
+              jitExpressions,
+              RapidsConf.ENABLE_PROJECT_AST_JIT_MULTI_OUTPUT.get(SQLConf.get))
+            if (jitGroups.nonEmpty) {
+              val jitBatches = jitGroups.safeMap(
+                GpuAstJitExpression.computeColumns(_, table))
+              withResource(jitBatches) { _ =>
+                val jitColumns = new IdentityHashMap[
+                  GpuAstJitExpression, ArrayDeque[GpuColumnVector]]()
+                jitGroups.zip(jitBatches).foreach { case (group, batch) =>
+                  group.zipWithIndex.foreach { case (jitExpression, index) =>
+                    var columns = jitColumns.get(jitExpression)
+                    if (columns == null) {
+                      columns = new ArrayDeque[GpuColumnVector]()
+                      jitColumns.put(jitExpression, columns)
+                    }
+                    columns.addLast(batch.column(index).asInstanceOf[GpuColumnVector])
+                  }
+                }
+                projectWithEval { expression =>
+                  GpuProjectAstExpressionBase.extractTopLevel(expression) match {
+                    case Some(jitExpression: GpuAstJitExpression) =>
+                      val columns = jitColumns.get(jitExpression)
+                      require(columns != null && !columns.isEmpty,
+                        s"Missing AST JIT program output for $jitExpression")
+                      columns.removeFirst().incRefCount()
+                    case Some(astExpression) => astExpression.computeColumn(table)
+                    case None => expression.columnarEval(cb)
+                  }
+                }
+              }
+            } else {
+              projectWithEval { expression =>
+                GpuProjectAstExpressionBase.extractTopLevel(expression) match {
+                  case Some(astExpression) => astExpression.computeColumn(table)
+                  case None => expression.columnarEval(cb)
+                }
               }
             }
           }
@@ -902,8 +954,9 @@ case class GpuProjectExec(
     val opTime = gpuLongMetric(OP_TIME_LEGACY)
     val numPreSplit = gpuLongMetric(KEY_NUM_PRE_SPLIT)
     
-    val boundProjectList = GpuBindReferences.bindGpuReferencesTiered(projectList, child.output,
-      conf, allMetrics)
+    val boundProjectList = GpuBindReferences.bindGpuReferencesTiered(
+      projectList, child.output, conf, allMetrics,
+      enableAstJit = RapidsConf.ENABLE_PROJECT_AST_JIT.get(conf))
     val localEnablePreSplit = enablePreSplit
 
     val rdd = child.executeColumnar()
@@ -1046,8 +1099,8 @@ case class GpuProjectExec(
           None
         }
         withResource(sbToClose) { _ =>
-          retryables.foreach(_.checkpoint())
           RmmRapidsRetryIterator.withRetryNoSplit {
+            retryables.foreach(_.checkpoint())
             withResource(sb.getColumnarBatch()) { cb =>
               withRestoreOnRetry(retryables) {
                 project(cb)

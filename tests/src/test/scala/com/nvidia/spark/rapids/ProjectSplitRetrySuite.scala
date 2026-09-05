@@ -17,9 +17,10 @@
 package com.nvidia.spark.rapids
 
 import ai.rapids.cudf.ColumnVector
+import com.nvidia.spark.Retryable
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingSeq
-import com.nvidia.spark.rapids.jni.{GpuSplitAndRetryOOM, RmmSpark}
+import com.nvidia.spark.rapids.jni.{GpuRetryOOM, GpuSplitAndRetryOOM, RmmSpark}
 
 import org.apache.spark.TaskContext
 import org.apache.spark.rdd.RDD
@@ -94,6 +95,21 @@ class ProjectSplitRetrySuite extends RmmSparkRetrySuiteBase {
       extends GpuLeafExpression {
     override lazy val deterministic: Boolean = false
     override def nullable: Boolean = false
+    override def columnarEval(batch: ColumnarBatch): GpuColumnVector =
+      batch.column(ordinal).asInstanceOf[GpuColumnVector].incRefCount()
+  }
+
+  private case class GpuCheckpointRetryPassthrough(ordinal: Int, dataType: DataType)
+      extends GpuLeafExpression with Retryable {
+    var checkpointCount: Int = 0
+    override def nullable: Boolean = false
+    override def checkpoint(): Unit = {
+      checkpointCount += 1
+      if (checkpointCount == 1) {
+        throw new GpuRetryOOM("in checkpoint")
+      }
+    }
+    override def restore(): Unit = ()
     override def columnarEval(batch: ColumnarBatch): GpuColumnVector =
       batch.column(ordinal).asInstanceOf[GpuColumnVector].incRefCount()
   }
@@ -174,6 +190,20 @@ class ProjectSplitRetrySuite extends RmmSparkRetrySuiteBase {
       assertThrows[GpuSplitAndRetryOOM] {
         GpuProjectExec.projectAndCloseWithRetrySingleBatch(sb, addOneExprs()).close()
       }
+    }
+  }
+
+  test("tiered project retries checkpoint OOM when split retry is disabled") {
+    val sqlConf = new SQLConf()
+    sqlConf.setConfString(RapidsConf.PROJECT_SPLIT_RETRY_ENABLED.key, "false")
+    SQLConf.withExistingConf(sqlConf) {
+      val expression = GpuCheckpointRetryPassthrough(0, IntegerType)
+      val tier = GpuTieredProject(Seq(Seq(expression)))
+      withResource(tier.projectAndCloseWithRetrySingleBatch(newSpillable())) { output =>
+        assertResult(NUM_ROWS)(output.numRows())
+        assertResult((0 until NUM_ROWS).toArray)(collectInts(output, 0))
+      }
+      assertResult(2)(expression.checkpointCount)
     }
   }
 

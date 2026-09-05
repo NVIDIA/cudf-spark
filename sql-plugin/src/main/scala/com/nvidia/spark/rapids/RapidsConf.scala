@@ -1264,6 +1264,38 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       .booleanConf
       .createWithDefault(false)
 
+  val ENABLE_PROJECT_AST_JIT = conf("spark.rapids.sql.projectAstJitEnabled")
+      .doc("Enable the experimental cuDF JIT backend for supported project AST expressions. " +
+        "When both project AST backends are enabled, JIT takes precedence for supported " +
+        "expressions within each projection tier.")
+      .internal()
+      .booleanConf
+      .createWithDefault(false)
+
+  val ENABLE_PROJECT_AST_JIT_MULTI_OUTPUT =
+    conf("spark.rapids.sql.projectAstJitMultiOutputEnabled")
+      .doc("Evaluate multiple Project AST JIT expressions in one cuDF call when possible.")
+      .internal()
+      .booleanConf
+      .createWithDefault(true)
+
+  val PROJECT_AST_JIT_MAX_GROUP_OPS =
+    conf("spark.rapids.sql.projectAstJit.maxGroupOps")
+      .doc("Maximum number of unique AST JIT operations in one multi-output group. " +
+        "An individually oversized expression remains eligible for single-output AST JIT.")
+      .internal()
+      .integerConf
+      .checkValue(_ > 0, "The maximum AST JIT group operation count must be greater than zero.")
+      .createWithDefault(384)
+
+  val PROJECT_AST_JIT_MAX_GROUP_OUTPUTS =
+    conf("spark.rapids.sql.projectAstJit.maxGroupOutputs")
+      .doc("Maximum number of outputs evaluated in one multi-output AST JIT group.")
+      .internal()
+      .integerConf
+      .checkValue(_ > 0, "The maximum AST JIT group output count must be greater than zero.")
+      .createWithDefault(32)
+
   val ENABLE_TIERED_PROJECT = conf("spark.rapids.sql.tiered.project.enabled")
       .doc("Enable tiered projections.")
       .internal()
@@ -2535,6 +2567,12 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .stringConf
     .createWithDefault("NOT_ON_GPU")
 
+  private[rapids] def shouldExplain(explain: String): Boolean =
+    !explain.equalsIgnoreCase("NONE")
+
+  private[rapids] def shouldExplainAll(explain: String): Boolean =
+    explain.equalsIgnoreCase("ALL")
+
   val SHIMS_PROVIDER_OVERRIDE = conf("spark.rapids.shims-provider-override")
     .internal()
     .startupOnly()
@@ -3530,9 +3568,9 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val explain: String = get(EXPLAIN)
 
-  lazy val shouldExplain: Boolean = !explain.equalsIgnoreCase("NONE")
+  lazy val shouldExplain: Boolean = RapidsConf.shouldExplain(explain)
 
-  lazy val shouldExplainAll: Boolean = explain.equalsIgnoreCase("ALL")
+  lazy val shouldExplainAll: Boolean = RapidsConf.shouldExplainAll(explain)
 
   lazy val chunkedReaderEnabled: Boolean = get(CHUNKED_READER)
 
@@ -3615,6 +3653,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val isCastFloatToIntegralTypesEnabled: Boolean = get(ENABLE_CAST_FLOAT_TO_INTEGRAL_TYPES)
 
   lazy val isProjectAstEnabled: Boolean = get(ENABLE_PROJECT_AST)
+
+  lazy val isProjectAstJitEnabled: Boolean = get(ENABLE_PROJECT_AST_JIT)
 
   lazy val isTieredProjectEnabled: Boolean = get(ENABLE_TIERED_PROJECT)
 
