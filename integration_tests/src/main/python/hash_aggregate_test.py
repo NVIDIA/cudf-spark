@@ -680,7 +680,6 @@ _pivot_gens_with_decimals = _init_list + [
 @incompat
 @pytest.mark.parametrize('data_gen', _pivot_gens_with_decimals, ids=idfn)
 @pytest.mark.parametrize('conf', get_params(_confs, params_markers_for_confs), ids=idfn)
-@pytest.mark.skip(reason='https://github.com/NVIDIA/cudf-spark/issues/15872')
 def test_hash_grpby_pivot(data_gen, conf):
     # disable ANSI mode to avoid overflow in some cases of SUM
     assert_gpu_and_cpu_are_equal_collect(
@@ -727,7 +726,6 @@ def test_hash_grpby_pivot_collation_fallback(collation):
 @incompat
 @pytest.mark.parametrize('data_gen', _init_list, ids=idfn)
 @pytest.mark.parametrize('conf', get_params(_confs, params_markers_for_confs), ids=idfn)
-@pytest.mark.skip(reason='https://github.com/NVIDIA/cudf-spark/issues/15872')
 def test_hash_multiple_grpby_pivot(data_gen, conf):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: gen_df(spark, data_gen, length=100)
