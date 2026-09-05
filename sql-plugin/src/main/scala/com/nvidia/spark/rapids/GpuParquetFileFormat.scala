@@ -216,6 +216,8 @@ object GpuParquetFileFormat {
 }
 
 class GpuParquetFileFormat extends ColumnarFileFormat with Logging {
+  override def toString: String = "Parquet"
+
   /**
    * Prepares a write job and returns an [[ColumnarOutputWriterFactory]].  Client side job
    * preparation can be put here.  For example, user defined output committer can be configured

@@ -201,6 +201,8 @@ object GpuHiveFileFormat extends Logging {
 class GpuHiveParquetFileFormat(compType: CompressionType) extends ColumnarFileFormat
     with Logging with Serializable {
 
+  override def toString: String = "Parquet"
+
   override def prepareWrite(sparkSession: SparkSession, job: Job,
       options: Map[String, String], dataSchema: StructType): ColumnarOutputWriterFactory = {
 
@@ -279,6 +281,8 @@ class GpuHiveParquetWriter(override val path: String, dataSchema: StructType,
 }
 
 class GpuHiveTextFileFormat extends ColumnarFileFormat with Logging with Serializable {
+
+  override def toString: String = "HiveText"
 
   override def supportDataType(dataType: DataType): Boolean =
     GpuHiveTextFileUtils.isSupportedType(dataType)
