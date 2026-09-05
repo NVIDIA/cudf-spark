@@ -197,7 +197,7 @@ The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Ho
 		Spark runtime 2.3 LTS
 		Spark runtime 3.0
 
-*Some hardware may have a minimum driver version greater than R470. Check the GPU spec sheet
+*Some hardware may have a minimum driver version greater than R525. Check the GPU spec sheet
 for your hardware's minimum driver version.
 
 *For EMR support, please refer to the
@@ -306,7 +306,7 @@ The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Ho
 		Spark runtime 2.3 LTS
 		Spark runtime 3.0
 
-*Some hardware may have a minimum driver version greater than R470. Check the GPU spec sheet
+*Some hardware may have a minimum driver version greater than R525. Check the GPU spec sheet
 for your hardware's minimum driver version.
 
 *For EMR support, please refer to the
@@ -410,7 +410,7 @@ The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Ho
 		Spark runtime 2.1
 		Spark runtime 2.2
 
-*Some hardware may have a minimum driver version greater than R470. Check the GPU spec sheet
+*Some hardware may have a minimum driver version greater than R525. Check the GPU spec sheet
 for your hardware's minimum driver version.
 
 *For EMR support, please refer to the
@@ -524,7 +524,7 @@ The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Ho
 		Spark runtime 2.1
 		Spark runtime 2.2
 
-*Some hardware may have a minimum driver version greater than R470. Check the GPU spec sheet
+*Some hardware may have a minimum driver version greater than R525. Check the GPU spec sheet
 for your hardware's minimum driver version.
 
 *For EMR support, please refer to the
@@ -633,7 +633,7 @@ The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Ho
 		Spark runtime 2.1
 		Spark runtime 2.2
 
-*Some hardware may have a minimum driver version greater than R470. Check the GPU spec sheet
+*Some hardware may have a minimum driver version greater than R525. Check the GPU spec sheet
 for your hardware's minimum driver version.
 
 *For EMR support, please refer to the
@@ -736,7 +736,7 @@ The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Ho
 		Spark runtime 2.1
 		Spark runtime 2.2
 
-*Some hardware may have a minimum driver version greater than R470. Check the GPU spec sheet
+*Some hardware may have a minimum driver version greater than R525. Check the GPU spec sheet
 for your hardware's minimum driver version.
 
 *For Cloudera and EMR support, please refer to the
@@ -843,7 +843,7 @@ The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Ho
 		Spark runtime 2.1
 		Spark runtime 2.2
 
-*Some hardware may have a minimum driver version greater than R470. Check the GPU spec sheet
+*Some hardware may have a minimum driver version greater than R525. Check the GPU spec sheet
 for your hardware's minimum driver version.
 
 *For Cloudera and EMR support, please refer to the
@@ -934,7 +934,7 @@ The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Ho
 		Spark runtime 2.1
 		Spark runtime 2.2
 
-*Some hardware may have a minimum driver version greater than R470. Check the GPU spec sheet
+*Some hardware may have a minimum driver version greater than R525. Check the GPU spec sheet
 for your hardware's minimum driver version.
 
 *For Cloudera and EMR support, please refer to the
@@ -1020,7 +1020,7 @@ The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Ho
 		Spark runtime 2.1
 		Spark runtime 2.2
 
-*Some hardware may have a minimum driver version greater than R470. Check the GPU spec sheet
+*Some hardware may have a minimum driver version greater than R525. Check the GPU spec sheet
 for your hardware's minimum driver version.
 
 *For Cloudera and EMR support, please refer to the
@@ -1109,7 +1109,7 @@ The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Ho
 		Spark runtime 2.1
 		Spark runtime 2.2
 
-*Some hardware may have a minimum driver version greater than R470. Check the GPU spec sheet
+*Some hardware may have a minimum driver version greater than R525. Check the GPU spec sheet
 for your hardware's minimum driver version.
 
 *For Cloudera and EMR support, please refer to the
@@ -1200,7 +1200,7 @@ The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Ho
 		Spark runtime 2.1
 		Spark runtime 2.2
 
-*Some hardware may have a minimum driver version greater than R470. Check the GPU spec sheet
+*Some hardware may have a minimum driver version greater than R525. Check the GPU spec sheet
 for your hardware's minimum driver version.
 
 *For Cloudera and EMR support, please refer to the
