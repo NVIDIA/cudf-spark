@@ -19,8 +19,7 @@ package com.nvidia.spark.rapids.delta.common
 import com.nvidia.spark.rapids.{DataFromReplacementRule, RapidsConf, RapidsMeta, RunnableCommandMeta}
 import com.nvidia.spark.rapids.delta.RapidsDeltaUtils
 
-import org.apache.spark.sql.delta.commands.{DeletionVectorUtils, UpdateCommand}
-import org.apache.spark.sql.delta.sources.DeltaSQLConf
+import org.apache.spark.sql.delta.commands.UpdateCommand
 
 abstract class UpdateCommandMetaBase(
     updateCmd: UpdateCommand,
@@ -33,15 +32,6 @@ abstract class UpdateCommandMetaBase(
     if (!conf.isDeltaWriteEnabled) {
       willNotWorkOnGpu("Delta Lake output acceleration has been disabled. To enable set " +
         s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
-    }
-
-    val dvFeatureEnabled = DeletionVectorUtils.deletionVectorsWritable(
-      updateCmd.tahoeFileIndex.deltaLog.unsafeVolatileSnapshot)
-
-    if (dvFeatureEnabled && updateCmd.conf.getConf(
-      DeltaSQLConf.DELETE_USE_PERSISTENT_DELETION_VECTORS)) {
-      // https://github.com/NVIDIA/spark-rapids/issues/8554
-      willNotWorkOnGpu("Deletion vectors are not supported on GPU")
     }
 
     RapidsDeltaUtils.tagForDeltaWrite(this, updateCmd.target.schema,

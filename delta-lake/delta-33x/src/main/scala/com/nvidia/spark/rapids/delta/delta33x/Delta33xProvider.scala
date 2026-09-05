@@ -20,6 +20,7 @@ import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.delta.common.{DeltaProviderBase, DeltaReorgTableCommandMeta}
 
 import org.apache.spark.internal.Logging
+import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.connector.catalog.SupportsWrite
 import org.apache.spark.sql.delta.{DeltaDynamicPartitionOverwriteCommand, DeltaParquetFileFormat}
 import org.apache.spark.sql.delta.catalog.DeltaTableV2
@@ -67,6 +68,11 @@ object Delta33xProvider extends DeltaProviderBase with Logging {
     }
   }
 
+  override def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
+    val rule = org.apache.spark.sql.delta.rapids.delta33x.GpuCheckOverflowInTableWrite.exprRule
+    super.getExprs + (rule.getClassFor.asSubclass(classOf[Expression]) -> rule)
+  }
+
   override def getRunnableCommandRules: Map[Class[_ <: RunnableCommand],
       RunnableCommandRule[_ <: RunnableCommand]] = {
     Seq(
@@ -91,7 +97,7 @@ object Delta33xProvider extends DeltaProviderBase with Logging {
 
   override protected def toGpuParquetFileFormat(conf: RapidsConf, fmt: DeltaParquetFileFormat)
   : FileFormat = {
-    if (isPushDVPredicateDownEnabled(conf)) {
+    if (isPushDVPredicateDownEnabled(conf) && fmt.optimizationsEnabled) {
       // Pushing down deletion vector predicates is currently only supported
       // when the metadata row index is enabled.
       GpuDelta33xParquetFileFormat2(fmt.protocol, fmt.metadata, fmt.nullableRowTrackingFields,
