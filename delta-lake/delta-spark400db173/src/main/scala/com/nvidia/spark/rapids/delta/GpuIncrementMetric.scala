@@ -91,7 +91,11 @@ case class GpuConditionalIncrementMetric(
 
   override def columnarEval(batch: ColumnarBatch): GpuColumnVector = {
     val trueRows = withResourceIfAllowed(condition.columnarEvalAny(batch)) {
-      case cond: GpuColumnVector => countTrue(cond)
+      case cond: GpuColumnVector =>
+        // A non-deterministic expression is not retryable, so the projection evaluates it once
+        // before its own retry block. The count allocates on the GPU and is idempotent, so it
+        // gets its own retry; the metric update stays outside it and happens exactly once.
+        RmmRapidsRetryIterator.withRetryNoSplit(countTrue(cond))
       case cond: GpuScalar =>
         if (cond.isValid && cond.getValue == true) batch.numRows().toLong else 0L
       case other =>

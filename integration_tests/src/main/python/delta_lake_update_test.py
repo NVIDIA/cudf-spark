@@ -234,6 +234,7 @@ def test_delta_update_dataframe_api(spark_tmp_path, use_cdf, partition_columns, 
 @allow_non_gpu("ExecutedCommandExec,ColumnarToRowExec,DataWritingCommandExec", delta_write_fallback_allow, *delta_meta_allow)
 @delta_lake
 @ignore_order
+@inject_oom
 @pytest.mark.skipif(not is_databricks173_or_later(),
                     reason="GPU IncrementMetric coverage for Databricks 17.3+")
 def test_delta_update_cpu_command_increment_metric_db173(spark_tmp_path):
@@ -241,7 +242,8 @@ def test_delta_update_cpu_command_increment_metric_db173(spark_tmp_path):
     # ConditionalIncrementMetric in the rewrite job it runs, and the plugin plans that job
     # whenever the command itself stays on the CPU (disabled by conf here, the way any vetoed
     # update runs). The DESCRIBE HISTORY row counts come from those metrics, so they must match
-    # the CPU run.
+    # the CPU run. inject_oom makes the retry around the GPU row count fire, which must not
+    # change the counts.
     conf = copy_and_update(delta_update_enabled_conf,
                            {"spark.rapids.sql.command.UpdateCommand": "false",
                             "spark.rapids.sql.command.UpdateCommandEdge": "false"})
