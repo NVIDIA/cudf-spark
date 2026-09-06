@@ -314,6 +314,19 @@ case class GpuMergeIntoCommand(
   // of which at most one takes a WHEN MATCHED action; writeAllChanges then keeps one pair per row.
   private var hasNonEffectiveDuplicateMatches: Boolean = false
 
+  /**
+   * A helper column name that none of `existing` resolves to under the session's resolver.
+   * `Dataset.withColumn` replaces an existing column of the same name, so a helper attached
+   * under a fixed name would replace a user column that the clause expressions still reference.
+   */
+  private def uniqueColumnName(base: String, existing: Seq[String]): String = {
+    val resolver = conf.resolver
+    Iterator.from(0)
+        .map(i => if (i == 0) base else s"$base$i")
+        .find(candidate => !existing.exists(name => resolver(name, candidate)))
+        .get
+  }
+
   private def checkIdentityColumnHighWaterMarks(deltaTxn: OptimisticTransaction): Unit = {
     // DBR implements this in MergeIntoCommandBase, but that method is protected and the trait
     // also requires the full CPU MERGE runMerge contract. Keep this local copy aligned with the
@@ -773,15 +786,22 @@ case class GpuMergeIntoCommand(
         .withColumn(SOURCE_ROW_PRESENT_COL, makeMetricUpdateUDF("numSourceRowsInSecondScan"))
     var targetDF = Dataset.ofRows(spark, newTarget)
         .withColumn(TARGET_ROW_PRESENT_COL, lit(true))
+    var dedupTargetRowIdCol = TARGET_ROW_ID_COL
+    var dedupSourceRowIdCol = SOURCE_ROW_ID_COL
     if (isDeleteWithDuplicateMatchesAndCdc) {
       targetDF = targetDF.withColumn(TARGET_ROW_ID_COL, monotonically_increasing_id())
       if (notMatchedClauses.nonEmpty) { // insert clause
         sourceDF = sourceDF.withColumn(SOURCE_ROW_ID_COL, monotonically_increasing_id())
       }
     } else if (hasNonEffectiveDuplicateMatches) {
-      // Row ids on both sides identify the joined pairs of one target row for de-duplication.
-      targetDF = targetDF.withColumn(TARGET_ROW_ID_COL, monotonically_increasing_id())
-      sourceDF = sourceDF.withColumn(SOURCE_ROW_ID_COL, monotonically_increasing_id())
+      // Row ids on both sides identify the joined pairs of one target row for de-duplication. The
+      // helper names are chosen to be absent from both sides, so attaching them cannot replace a
+      // user column that the clause expressions still reference.
+      val taken = sourceDF.columns.toSeq ++ targetDF.columns.toSeq
+      dedupTargetRowIdCol = uniqueColumnName(TARGET_ROW_ID_COL, taken)
+      dedupSourceRowIdCol = uniqueColumnName(SOURCE_ROW_ID_COL, taken :+ dedupTargetRowIdCol)
+      targetDF = targetDF.withColumn(dedupTargetRowIdCol, monotonically_increasing_id())
+      sourceDF = sourceDF.withColumn(dedupSourceRowIdCol, monotonically_increasing_id())
     }
     val rawJoinedDF = sourceDF.join(targetDF, DFUDFShims.exprToColumn(condition), joinType)
     val joinedDF = if (hasNonEffectiveDuplicateMatches) {
@@ -793,14 +813,15 @@ case class GpuMergeIntoCommand(
       // and target-only rows form partitions of their own and pass through.
       val effective =
         when(DFUDFShims.exprToColumn(effectiveMatchPredicate), lit(1)).otherwise(lit(0))
+      val rankCol = uniqueColumnName(DUPLICATE_MATCH_RANK_COL, rawJoinedDF.columns.toSeq)
       val onePairPerTargetRow = Window
-          .partitionBy(col(TARGET_ROW_ID_COL),
-            when(col(TARGET_ROW_PRESENT_COL).isNull, col(SOURCE_ROW_ID_COL)))
+          .partitionBy(col(dedupTargetRowIdCol),
+            when(col(TARGET_ROW_PRESENT_COL).isNull, col(dedupSourceRowIdCol)))
           .orderBy(effective.desc)
       rawJoinedDF
-          .withColumn(DUPLICATE_MATCH_RANK_COL, row_number().over(onePairPerTargetRow))
-          .filter(col(DUPLICATE_MATCH_RANK_COL) === lit(1))
-          .drop(DUPLICATE_MATCH_RANK_COL, TARGET_ROW_ID_COL, SOURCE_ROW_ID_COL)
+          .withColumn(rankCol, row_number().over(onePairPerTargetRow))
+          .filter(col(rankCol) === lit(1))
+          .drop(rankCol, dedupTargetRowIdCol, dedupSourceRowIdCol)
     } else {
       rawJoinedDF
     }
