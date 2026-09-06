@@ -488,16 +488,27 @@ def test_delta_merge_preserves_row_tracking(spark_tmp_path):
     before = {run: with_cpu_session(lambda spark, p=data_path + "/" + run: tracked_rows(spark, p),
                                     conf=conf) for run in ["CPU", "GPU"]}
 
-    def do_merge(spark):
-        # One function for both sessions; each engine merges into its own table.
-        gpu = str(spark.conf.get("spark.rapids.sql.enabled", "false")).lower() == "true"
-        return spark.sql(merge_sql.format(path=data_path + ("/GPU" if gpu else "/CPU")))
+    def do_merge(spark, path):
+        return spark.sql(merge_sql.format(path=path)).collect()
 
-    # The merge on both engines. The GPU plan has to carry the GPU merge command, so a fallback to
-    # the CPU command fails here instead of passing on identical results; the merge's own result
-    # row (rows affected, updated, deleted, inserted) is compared between the engines as well.
-    assert_cpu_and_gpu_are_equal_collect_with_capture(
-        do_merge, exist_classes="GpuExecutedCommandExec", conf=conf, require_non_empty=True)
+    # The merge on both engines. The plans captured during the GPU run have to carry the GPU
+    # merge command and the GPU Delta write, so a fallback to the CPU command fails here instead
+    # of passing on identical results. (The command's own DataFrame plan only shows a
+    # CommandResult wrapper, so the check goes through the capture callback, as the REORG tests
+    # do.) The merge's own result row (rows affected, updated, deleted, inserted) is compared
+    # between the engines as well.
+    cpu_result = with_cpu_session(lambda spark: do_merge(spark, data_path + "/CPU"), conf=conf)
+    plan_callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    plan_callback.startCapture()
+    try:
+        gpu_result = with_gpu_session(lambda spark: do_merge(spark, data_path + "/GPU"), conf=conf)
+        captured_plans = plan_callback.getResultsWithTimeout(10000)
+    finally:
+        plan_callback.endCapture()
+    for class_name in ["GpuExecutedCommandExec"] + delta_write:
+        assert any(plan_callback.contains(plan, class_name) for plan in captured_plans), \
+            "{} is not found in the captured MERGE plans".format(class_name)
+    assert_equal(cpu_result, gpu_result)
 
     # The rows that existed before, with their row id and commit version, engine to engine.
     def existing_rows(spark, path):
