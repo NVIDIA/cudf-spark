@@ -26,7 +26,8 @@ import com.nvidia.spark.rapids.shims.DateTimeUtilsShims
 
 import org.apache.spark.sql.catalyst.util.DateTimeUtils.localDateToDays
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.rapids.{GpuToTimestamp, LegacyTimeParserPolicy}
+import org.apache.spark.sql.rapids.{ExceptionTimeParserPolicy, GpuToTimestamp,
+  LegacyTimeParserPolicy}
 
 /**
  * Class for helper functions for Date
@@ -228,8 +229,16 @@ object DateUtils {
     } else {
       GpuToTimestamp.LEGACY_COMPATIBLE_FORMATS
     }
+    val timeParserPolicy = GpuOverrides.getTimeParserPolicy
+    val nonLegacyCompatibleFormats = if (parseString &&
+        timeParserPolicy == ExceptionTimeParserPolicy) {
+      GpuToTimestamp.EXCEPTION_COMPATIBLE_FORMATS
+    } else {
+      // Formatting does not have parser-policy disagreement, so use the CORRECTED set.
+      GpuToTimestamp.CORRECTED_COMPATIBLE_FORMATS
+    }
     var strfFormat: String = null
-    if (GpuOverrides.getTimeParserPolicy == LegacyTimeParserPolicy) {
+    if (timeParserPolicy == LegacyTimeParserPolicy) {
       try {
         // try and convert the format to cuDF format - this will throw an exception if
         // the format contains unsupported characters or words
@@ -261,9 +270,9 @@ object DateUtils {
         // the format contains unsupported characters or words
         strfFormat = toStrf(formatToConvert, parseString)
         // format parsed ok, so it is either compatible (tested/certified) or incompatible
-        if (!GpuToTimestamp.CORRECTED_COMPATIBLE_FORMATS.contains(formatToConvert) &&
+        if (!nonLegacyCompatibleFormats.contains(formatToConvert) &&
           !meta.conf.incompatDateFormats) {
-          meta.willNotWorkOnGpu(s"CORRECTED format '$sparkFormat' on the GPU is not guaranteed " +
+          meta.willNotWorkOnGpu(s"Format '$sparkFormat' on the GPU is not guaranteed " +
             s"to produce the same results as Spark on CPU. Set " +
             s"${RapidsConf.INCOMPATIBLE_DATE_FORMATS.key}=true to force onto GPU.")
         }
