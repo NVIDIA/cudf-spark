@@ -530,6 +530,72 @@ def test_delta_merge_deletion_vector_db173_fallback(spark_tmp_path, spark_tmp_ta
                          check_func=checker)
 
 
+@allow_non_gpu("ExecutedCommandExec,BroadcastHashJoinExec,ColumnarToRowExec,BroadcastExchangeExec,DataWritingCommandExec", delta_write_fallback_allow, *delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="GPU IncrementMetric coverage for Databricks 17.3+")
+def test_delta_merge_cpu_command_increment_metric_db173(spark_tmp_path, spark_tmp_table_factory):
+    # The Databricks merge command counts rows with IncrementMetric inside the filters and
+    # projections of the jobs it runs, and the plugin plans those jobs whenever the command itself
+    # stays on the CPU (disabled by conf here, the way any vetoed merge runs). The merge result and
+    # the DESCRIBE HISTORY row counts come from those metrics, so they must match the CPU run.
+    conf = copy_and_update(delta_merge_enabled_conf,
+                           {"spark.rapids.sql.command.MergeIntoCommand": "false",
+                            "spark.rapids.sql.command.MergeIntoCommandEdge": "false"})
+    merge_sql = "MERGE INTO {dest_table} " \
+                "USING {src_table} " \
+                "ON {src_table}.a == {dest_table}.a " \
+                "WHEN MATCHED AND {src_table}.b > 50 THEN " \
+                "  UPDATE SET {dest_table}.b = {src_table}.b " \
+                "WHEN MATCHED THEN DELETE " \
+                "WHEN NOT MATCHED THEN " \
+                "  INSERT (a, b) VALUES ({src_table}.a, {src_table}.b)"
+
+    def src_table_func(spark):
+        # a = 0..7: 0..3 are inserted, 4 and 5 are deleted, 6 and 7 (b = 60, 70) are updated
+        return spark.createDataFrame([(i, i * 10) for i in range(8)], "a INT, b INT")
+
+    def dest_table_func(spark):
+        # a = 4..11: 8..11 are the untouched rows of the rewritten file
+        return spark.createDataFrame([(i, -i) for i in range(4, 12)], "a INT, b INT").coalesce(1)
+
+    def row_count_metrics(spark, path):
+        row = spark.sql(f"DESCRIBE HISTORY delta.`{path}`") \
+            .where("operation = 'MERGE'").orderBy("version", ascending=False).first()
+        return {k: int(v) for k, v in row["operationMetrics"].items() if "Rows" in k}
+
+    def checker(data_path, do_merge):
+        cpu_path = data_path + "/CPU"
+        gpu_path = data_path + "/GPU"
+        cpu_result = with_cpu_session(lambda spark: do_merge(spark, cpu_path), conf=conf)
+        callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+        callback.startCapture()
+        try:
+            gpu_result = with_gpu_session(lambda spark: do_merge(spark, gpu_path), conf=conf)
+            captured_plans = callback.getResultsWithTimeout(10000)
+        finally:
+            callback.endCapture()
+        assert_equal(cpu_result, gpu_result)
+        assert_equal_with_local_sort(
+            with_cpu_session(lambda spark: read_delta_path(spark, cpu_path).collect()),
+            with_cpu_session(lambda spark: read_delta_path(spark, gpu_path).collect()))
+        cpu_metrics = with_cpu_session(lambda spark: row_count_metrics(spark, cpu_path))
+        gpu_metrics = with_cpu_session(lambda spark: row_count_metrics(spark, gpu_path))
+        assert cpu_metrics == gpu_metrics, f"CPU {cpu_metrics} vs GPU {gpu_metrics}"
+        expected = {"numSourceRows": 8, "numTargetRowsInserted": 4,
+                    "numTargetRowsUpdated": 2, "numTargetRowsDeleted": 2}
+        assert {k: gpu_metrics.get(k) for k in expected} == expected, gpu_metrics
+        plan_strings = [plan.toString() for plan in captured_plans]
+        assert any("gpu_increment_metric" in s for s in plan_strings), \
+            "no GPU IncrementMetric in the captured MERGE plans:\n" + "\n".join(plan_strings)
+
+    delta_sql_merge_test(spark_tmp_path, spark_tmp_table_factory,
+                         use_cdf=False, enable_deletion_vectors=False,
+                         src_table_func=src_table_func, dest_table_func=dest_table_func,
+                         merge_sql=merge_sql, check_func=checker)
+
+
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
