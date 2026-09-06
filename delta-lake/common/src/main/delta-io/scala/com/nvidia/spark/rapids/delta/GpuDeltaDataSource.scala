@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * This file was derived from DeltaDataSource.scala in the
  * Delta Lake project at https://github.com/delta-io/delta.
@@ -26,7 +26,7 @@ import com.nvidia.spark.rapids.{GpuCreatableRelationProvider, RapidsConf}
 import org.apache.spark.sql.{DataFrame, SaveMode, SQLContext}
 import org.apache.spark.sql.delta.{DeltaConfigs, DeltaErrors, DeltaOptions}
 import org.apache.spark.sql.delta.commands.WriteIntoDelta
-import org.apache.spark.sql.delta.rapids.{GpuDeltaLog, GpuWriteIntoDelta}
+import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShim, GpuDeltaLog}
 import org.apache.spark.sql.delta.sources.{DeltaDataSource, DeltaSourceUtils}
 import org.apache.spark.sql.sources.BaseRelation
 
@@ -45,7 +45,7 @@ class GpuDeltaDataSource(rapidsConf: RapidsConf) extends GpuCreatableRelationPro
         .getOrElse(Nil)
 
     val gpuDeltaLog = GpuDeltaLog.forTable(sqlContext.sparkSession, path, parameters, rapidsConf)
-    GpuWriteIntoDelta(
+    DeltaRuntimeShim.createGpuWrite(
       gpuDeltaLog,
       WriteIntoDelta(
         deltaLog = gpuDeltaLog.deltaLog,

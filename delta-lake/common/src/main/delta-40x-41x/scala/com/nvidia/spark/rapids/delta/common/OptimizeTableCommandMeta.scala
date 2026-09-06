@@ -20,8 +20,8 @@ import com.nvidia.spark.rapids.{DataFromReplacementRule, RapidsConf, RapidsMeta}
 import com.nvidia.spark.rapids.delta.common.OptimizeTableCommandMetaBase
 
 import org.apache.spark.sql.delta.DeltaLog
-import org.apache.spark.sql.delta.commands.{DeltaCommand, OptimizeTableCommand}
-import org.apache.spark.sql.delta.rapids.GpuOptimizeTableCommand
+import org.apache.spark.sql.delta.commands.OptimizeTableCommand
+import org.apache.spark.sql.delta.rapids.{GpuDeltaCommandLike, GpuOptimizeTableCommand}
 import org.apache.spark.sql.execution.command.RunnableCommand
 
 class OptimizeTableCommandMeta(
@@ -31,7 +31,7 @@ class OptimizeTableCommandMeta(
     rule: DataFromReplacementRule)
   extends OptimizeTableCommandMetaBase(cmd, conf, parent, rule) {
 
-  private object DeltaCmdProxy extends DeltaCommand
+  private object DeltaCmdProxy extends GpuDeltaCommandLike
 
   override protected def getDeltaLogForOptimize(): DeltaLog = {
     DeltaCmdProxy.getDeltaTable(cmd.child, "OPTIMIZE").deltaLog

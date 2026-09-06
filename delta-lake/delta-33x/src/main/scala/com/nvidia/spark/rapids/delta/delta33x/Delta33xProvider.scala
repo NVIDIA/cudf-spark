@@ -17,7 +17,8 @@
 package com.nvidia.spark.rapids.delta.delta33x
 
 import com.nvidia.spark.rapids._
-import com.nvidia.spark.rapids.delta.common.{DeltaProviderBase, DeltaReorgTableCommandMeta}
+import com.nvidia.spark.rapids.delta.common.{DeltaCDFRelationStrategy, DeltaProviderBase,
+  DeltaReorgTableCommandMeta}
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.connector.catalog.SupportsWrite
@@ -29,6 +30,8 @@ import org.apache.spark.sql.execution.datasources.FileFormat
 import org.apache.spark.sql.execution.datasources.v2.{AppendDataExecV1, OverwriteByExpressionExecV1}
 
 object Delta33xProvider extends DeltaProviderBase with Logging {
+
+  override protected def getCDFRelationStrategy = DeltaCDFRelationStrategy
 
   override def isSupportedWrite(write: Class[_ <: SupportsWrite]): Boolean = {
     write == classOf[DeltaTableV2] || write == classOf[GpuDeltaCatalog#GpuStagedDeltaTableV2]

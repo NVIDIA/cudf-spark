@@ -30,7 +30,7 @@ import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.delta.{Snapshot, UniversalFormat}
 import org.apache.spark.sql.delta.actions.Protocol
 import org.apache.spark.sql.delta.commands.TableCreationModes
-import org.apache.spark.sql.delta.rapids.GpuCreateDeltaTableCommand40x41xBase
+import org.apache.spark.sql.delta.rapids.GpuCreateDeltaTableCommand40x42xBase
 
 /**
  * GPU version of Delta 4.0.x CreateDeltaTableCommand.
@@ -45,7 +45,7 @@ case class GpuCreateDeltaTableCommand(
     override val output: Seq[Attribute] = Nil,
     protocol: Option[Protocol] = None,
     createTableFunc: Option[CatalogTable => Unit] = None)(@transient rapidsConf: RapidsConf)
-  extends GpuCreateDeltaTableCommand40x41xBase(
+  extends GpuCreateDeltaTableCommand40x42xBase(
     table, existingTableOpt, mode, query, operation, tableByPath, output, protocol,
     createTableFunc, rapidsConf) {
 

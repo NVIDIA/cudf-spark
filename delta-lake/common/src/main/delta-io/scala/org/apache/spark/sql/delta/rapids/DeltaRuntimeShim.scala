@@ -21,11 +21,14 @@ import scala.util.Try
 import com.nvidia.spark.rapids.{RapidsConf, ShimLoader, ShimReflectionUtils, VersionUtils}
 import com.nvidia.spark.rapids.delta.{DeltaConfigChecker, DeltaProvider}
 
-import org.apache.spark.sql.SparkSession
+import org.apache.spark.SPARK_VERSION
+import org.apache.spark.sql.{SaveMode, SparkSession}
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.connector.catalog.StagingTableCatalog
-import org.apache.spark.sql.delta.{DeltaLog, DeltaUDF, Snapshot}
+import org.apache.spark.sql.delta.{DeltaLog, DeltaOperations, DeltaOptions, DeltaUDF, Snapshot}
+import org.apache.spark.sql.delta.actions.Metadata
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
+import org.apache.spark.sql.delta.commands.WriteIntoDelta
 import org.apache.spark.sql.execution.datasources.FileFormat
 import org.apache.spark.sql.expressions.UserDefinedFunction
 import org.apache.spark.util.Clock
@@ -45,13 +48,59 @@ trait DeltaRuntimeShim {
   def unsafeVolatileSnapshotFromLog(deltaLog: DeltaLog): Snapshot
   def fileFormatFromLog(deltaLog: DeltaLog): FileFormat
 
+  def createGpuWrite(
+      gpuDeltaLog: GpuDeltaLog,
+      cpuWrite: WriteIntoDelta): GpuWriteIntoDeltaLike
+
+  def buildWriteOperation(
+      mode: SaveMode,
+      partitionColumns: Seq[String],
+      options: DeltaOptions): DeltaOperations.Operation = {
+    throw new UnsupportedOperationException("Write operation metadata is not implemented")
+  }
+
+  def buildReplaceTableOperation(
+      metadata: Metadata,
+      isManaged: Boolean,
+      orCreate: Boolean,
+      asSelect: Boolean,
+      options: Option[DeltaOptions],
+      clusterBy: Option[Seq[String]],
+      isV1SaveAsTableOverwrite: Option[Boolean]): DeltaOperations.Operation = {
+    throw new UnsupportedOperationException("Replace table metadata is not implemented")
+  }
+
   def getTightBoundColumnOnFileInitDisabled(spark: SparkSession): Boolean
 
   def getGpuDeltaCatalog(cpuCatalog: DeltaCatalog, rapidsConf: RapidsConf): StagingTableCatalog
 }
 
 object DeltaRuntimeShim {
-  private def getShimClassName: String = {
+  private val SparkVersion = """^(\d+)\.(\d+)\.(\d+).*""".r
+
+  private def parseSparkVersion(sparkVersion: String): (Int, Int, Int) = sparkVersion match {
+    case SparkVersion(major, minor, patch) => (major.toInt, minor.toInt, patch.toInt)
+    case _ => throw new IllegalStateException(s"Unable to parse Spark version $sparkVersion")
+  }
+
+  private[rapids] def getDelta42ShimClassName(
+      deltaVersion: String,
+      sparkVersion: String): Option[String] = {
+    if (deltaVersion.startsWith("4.2.")) {
+      val parsedSparkVersion = parseSparkVersion(sparkVersion)
+      (deltaVersion, parsedSparkVersion) match {
+        case ("4.2.0", (4, 0, 1) | (4, 1, 1)) =>
+          Some("org.apache.spark.sql.delta.rapids.delta42x.Delta42xRuntimeShim")
+        case _ =>
+          throw new IllegalStateException(
+            s"Unsupported Delta Lake $deltaVersion and Spark $sparkVersion combination")
+      }
+    } else {
+      None
+    }
+  }
+
+  private def getPreDelta42ShimClassName: String = {
     if (VersionUtils.cmpSparkVersion(3, 2, 0) < 0) {
       throw new IllegalStateException("Delta Lake is not supported on Spark < 3.2.x")
     } else if (VersionUtils.cmpSparkVersion(3, 3, 0) < 0) {
@@ -85,6 +134,11 @@ object DeltaRuntimeShim {
     }
   }
 
+  private def getShimClassName: String = {
+    getDelta42ShimClassName(io.delta.VERSION, SPARK_VERSION)
+      .getOrElse(getPreDelta42ShimClassName)
+  }
+
   private lazy val shimInstance = {
     val shimClassName = getShimClassName
     val shimClass = ShimReflectionUtils.loadClass(shimClassName)
@@ -109,6 +163,31 @@ object DeltaRuntimeShim {
 
   def fileFormatFromLog(deltaLog: DeltaLog): FileFormat =
     shimInstance.fileFormatFromLog(deltaLog)
+
+  def createGpuWrite(
+      gpuDeltaLog: GpuDeltaLog,
+      cpuWrite: WriteIntoDelta): GpuWriteIntoDeltaLike = {
+    shimInstance.createGpuWrite(gpuDeltaLog, cpuWrite)
+  }
+
+  def buildWriteOperation(
+      mode: SaveMode,
+      partitionColumns: Seq[String],
+      options: DeltaOptions): DeltaOperations.Operation = {
+    shimInstance.buildWriteOperation(mode, partitionColumns, options)
+  }
+
+  def buildReplaceTableOperation(
+      metadata: Metadata,
+      isManaged: Boolean,
+      orCreate: Boolean,
+      asSelect: Boolean,
+      options: Option[DeltaOptions],
+      clusterBy: Option[Seq[String]],
+      isV1SaveAsTableOverwrite: Option[Boolean]): DeltaOperations.Operation = {
+    shimInstance.buildReplaceTableOperation(
+      metadata, isManaged, orCreate, asSelect, options, clusterBy, isV1SaveAsTableOverwrite)
+  }
 
   def getTightBoundColumnOnFileInitDisabled(spark: SparkSession): Boolean =
     shimInstance.getTightBoundColumnOnFileInitDisabled(spark)
