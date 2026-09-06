@@ -488,12 +488,23 @@ def test_delta_merge_preserves_row_tracking(spark_tmp_path):
     before = {run: with_cpu_session(lambda spark, p=data_path + "/" + run: tracked_rows(spark, p),
                                     conf=conf) for run in ["CPU", "GPU"]}
 
-    # The merge on both engines, then the rows that existed before compared engine to engine
-    # with their row ids and commit versions.
-    assert_gpu_and_cpu_writes_are_equal_collect(
-        lambda spark, path: spark.sql(merge_sql.format(path=path)).collect(),
-        lambda spark, path: spark.sql(tracked_sql.format(path) + " WHERE a <> 9"),
-        data_path, conf=conf)
+    def do_merge(spark):
+        # One function for both sessions; each engine merges into its own table.
+        gpu = str(spark.conf.get("spark.rapids.sql.enabled", "false")).lower() == "true"
+        return spark.sql(merge_sql.format(path=data_path + ("/GPU" if gpu else "/CPU")))
+
+    # The merge on both engines. The GPU plan has to carry the GPU merge command, so a fallback to
+    # the CPU command fails here instead of passing on identical results; the merge's own result
+    # row (rows affected, updated, deleted, inserted) is compared between the engines as well.
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_merge, exist_classes="GpuExecutedCommandExec", conf=conf, require_non_empty=True)
+
+    # The rows that existed before, with their row id and commit version, engine to engine.
+    def existing_rows(spark, path):
+        return sorted(tuple(r) for r in
+                      spark.sql(tracked_sql.format(path) + " WHERE a <> 9").collect())
+    assert_equal(with_cpu_session(lambda spark: existing_rows(spark, data_path + "/CPU"), conf=conf),
+                 with_cpu_session(lambda spark: existing_rows(spark, data_path + "/GPU"), conf=conf))
 
     for run in ["CPU", "GPU"]:
         path = data_path + "/" + run
