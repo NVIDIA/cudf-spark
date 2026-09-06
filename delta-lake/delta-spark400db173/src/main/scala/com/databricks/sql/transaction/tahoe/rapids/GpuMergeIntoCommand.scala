@@ -38,6 +38,7 @@ import com.databricks.sql.transaction.tahoe.util.{AnalysisHelper, SetAccumulator
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize
 import com.nvidia.spark.rapids.{BaseExprMeta, GpuOverrides, RapidsConf}
 import com.nvidia.spark.rapids.delta._
+import com.nvidia.spark.rapids.delta.shims.UpdateCommandShims
 
 import org.apache.spark.SparkContext
 import org.apache.spark.sql._
@@ -57,7 +58,7 @@ import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
 import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.nvidia.DFUDFShims
-import org.apache.spark.sql.types.{DataTypes, LongType, StringType, StructType}
+import org.apache.spark.sql.types.{DataTypes, LongType, StringType, StructField, StructType}
 
 case class GpuMergeDataSizes(
     @JsonDeserialize(contentAs = classOf[java.lang.Long])
@@ -792,7 +793,22 @@ case class GpuMergeIntoCommand(
     // so it cannot replace a user column that the clause expressions still reference and it
     // resolves unambiguously on the joined plan.
     val sourcePlanDF = getMergeSource.df
-    val targetPlanDF = Dataset.ofRows(spark, newTarget)
+    // Row tracking: the target's materialized row id and commit version columns ride along with
+    // the target output columns, so rewritten rows keep their ids as they do on the CPU. Copied
+    // rows keep both, updated rows keep the id and get a null commit version (the writer assigns
+    // the new one), inserted rows get both null. Without row tracking the helper adds nothing.
+    val (targetPlanDF, rowTrackingCols, rowTrackingUpdateExprs) =
+      UpdateCommandShims.preserveRowTrackingColumns(
+        Dataset.ofRows(spark, newTarget), deltaTxn.snapshot, Seq.empty, Seq.empty)
+    targetOutputCols = targetOutputCols ++ rowTrackingCols
+    // The processors rebuild their output attributes from this schema, and the Delta writer
+    // recognises the row tracking columns by the field metadata the helper put on them, so the
+    // metadata has to be carried; the columns are nullable because updates reset the version.
+    outputRowSchema = rowTrackingCols.foldLeft(outputRowSchema) { (schema, attr) =>
+      schema.add(StructField(attr.name, attr.dataType, nullable = true, attr.metadata))
+    }
+    val rowTrackingInsertExprs: Seq[Expression] =
+      rowTrackingCols.map(attr => Literal(null, attr.dataType))
     val userColumns = sourcePlanDF.columns.toSeq ++ targetPlanDF.columns.toSeq
     val sourceRowPresentCol = uniqueColumnName(SOURCE_ROW_PRESENT_COL, userColumns)
     val targetRowPresentCol =
@@ -970,14 +986,15 @@ case class GpuMergeIntoCommand(
 
     def clauseOutput(clause: DeltaMergeIntoClause): Seq[Seq[Expression]] = clause match {
       case u: DeltaMergeIntoMatchedUpdateClause =>
-        updateOutput(u.resolvedActions.map(_.expr),
+        updateOutput(u.resolvedActions.map(_.expr) ++ rowTrackingUpdateExprs,
           And(incrUpdatedCountExpr, incrUpdatedMatchedCountExpr))
       case _: DeltaMergeIntoMatchedDeleteClause =>
         deleteOutput(And(incrDeletedCountExpr, incrDeletedMatchedCountExpr))
       case i: DeltaMergeIntoNotMatchedClause =>
-        insertOutput(i.resolvedActions.map(_.expr), incrInsertedCountExpr)
+        insertOutput(i.resolvedActions.map(_.expr) ++ rowTrackingInsertExprs,
+          incrInsertedCountExpr)
       case u: DeltaMergeIntoNotMatchedBySourceUpdateClause =>
-        updateOutput(u.resolvedActions.map(_.expr),
+        updateOutput(u.resolvedActions.map(_.expr) ++ rowTrackingUpdateExprs,
           And(incrUpdatedCountExpr, incrUpdatedNotMatchedBySourceCountExpr))
       case _: DeltaMergeIntoNotMatchedBySourceDeleteClause =>
         deleteOutput(And(incrDeletedCountExpr, incrDeletedNotMatchedBySourceCountExpr))

@@ -1142,10 +1142,6 @@ def test_delta_merge_not_matched_by_source_schema_evolution_db173(spark_tmp_path
 @ignore_order
 @pytest.mark.skipif(not is_databricks173_or_later(),
                     reason="DBR 17.3 row tracking regression coverage")
-@pytest.mark.xfail(strict=True,
-                   reason="The GPU merge does not carry the row tracking columns through the "
-                          "join, so rewritten rows get fresh row ids while the commit is tagged "
-                          "as preserving them; fixed by the next commit")
 def test_delta_merge_preserves_row_tracking_db173(spark_tmp_path):
     # Every clause type touches a row-tracked target. The row ids of the rows that existed before
     # the merge must survive on both engines, whether the row is updated by a matched clause, by
