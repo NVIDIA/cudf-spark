@@ -463,10 +463,12 @@ def test_delta_merge_preserves_row_tracking(spark_tmp_path):
     # A matched update and an insert touch a row-tracked target. (A NOT MATCHED BY SOURCE clause
     # runs on the GPU only with Delta 4.1 and Databricks 17.3, so it is left out here.) The row
     # ids of the rows that existed before the merge must survive on both engines, whether the row
-    # is updated or copied, and the commit version moves only for the updated row. The inserted
-    # row gets a fresh id that the file layout decides, and the join-based GPU merge lays out
-    # files differently from the CPU, so the ids are checked per row rather than by comparing the
-    # commit logs as the UPDATE and DELETE tests do.
+    # is updated or copied, and the commit version moves only for the updated row. Both tables
+    # start from the same single file, so those rows carry the same ids and versions on the CPU
+    # and on the GPU and are compared engine to engine, row tracking columns included. The
+    # inserted row gets a fresh id that the file layout decides, and the join-based GPU merge
+    # lays out files differently from the CPU, so it is checked per engine for freshness only,
+    # and the commit logs are not compared as the UPDATE and DELETE tests do.
     conf = copy_and_update(delta_merge_enabled_conf, delta_row_tracking_dml_conf)
     data_path = spark_tmp_path + "/DELTA_DATA"
     with_cpu_session(lambda spark: setup_delta_row_tracking_dest_tables(
@@ -476,36 +478,37 @@ def test_delta_merge_preserves_row_tracking(spark_tmp_path):
                  "ON t.a = s.a "
                  "WHEN MATCHED THEN UPDATE SET t.c = s.c "
                  "WHEN NOT MATCHED THEN INSERT *")
+    tracked_sql = ("SELECT a, b, c, _metadata.row_id AS row_id, "
+                   "_metadata.row_commit_version AS row_commit_version FROM delta.`{}`")
 
     def tracked_rows(spark, path):
-        rows = spark.sql("SELECT a, b, c, _metadata.row_id AS row_id, "
-                         "_metadata.row_commit_version AS row_commit_version "
-                         "FROM delta.`{}`".format(path)).collect()
-        return {r["a"]: (r["b"], r["c"], r["row_id"], r["row_commit_version"]) for r in rows}
+        return {r["a"]: (r["b"], r["c"], r["row_id"], r["row_commit_version"])
+                for r in spark.sql(tracked_sql.format(path)).collect()}
 
-    data = {}
+    before = {run: with_cpu_session(lambda spark, p=data_path + "/" + run: tracked_rows(spark, p),
+                                    conf=conf) for run in ["CPU", "GPU"]}
+
+    # The merge on both engines, then the rows that existed before compared engine to engine
+    # with their row ids and commit versions.
+    assert_gpu_and_cpu_writes_are_equal_collect(
+        lambda spark, path: spark.sql(merge_sql.format(path=path)).collect(),
+        lambda spark, path: spark.sql(tracked_sql.format(path) + " WHERE a <> 9"),
+        data_path, conf=conf)
+
     for run in ["CPU", "GPU"]:
         path = data_path + "/" + run
-        before = with_cpu_session(lambda spark: tracked_rows(spark, path), conf=conf)
-        do_merge = lambda spark: spark.sql(merge_sql.format(path=path)).collect()
-        if run == "GPU":
-            assert_rapids_delta_write(do_merge, conf=conf)
-        else:
-            with_cpu_session(do_merge, conf=conf)
         after = with_cpu_session(lambda spark: tracked_rows(spark, path), conf=conf)
         assert sorted(after.keys()) == [1, 2, 3, 4, 9], "{}: {}".format(run, after)
         for a in [1, 2, 3, 4]:
-            assert after[a][2] == before[a][2], \
-                "{}: row id of a={} changed: {} -> {}".format(run, a, before[a], after[a])
+            assert after[a][2] == before[run][a][2], \
+                "{}: row id of a={} changed: {} -> {}".format(run, a, before[run][a], after[a])
         for a in [1, 3, 4]:  # copied unchanged
-            assert after[a][3] == before[a][3], \
-                "{}: commit version of copied a={} changed: {} -> {}".format(run, a, before[a], after[a])
-        assert after[2][3] > before[2][3], \
-            "{}: commit version of updated a=2 did not move: {} -> {}".format(run, before[2], after[2])
-        assert after[9][2] > max(v[2] for v in before.values()), \
+            assert after[a][3] == before[run][a][3], \
+                "{}: commit version of copied a={} changed: {} -> {}".format(run, a, before[run][a], after[a])
+        assert after[2][3] > before[run][2][3], \
+            "{}: commit version of updated a=2 did not move: {} -> {}".format(run, before[run][2], after[2])
+        assert after[9][2] > max(v[2] for v in before[run].values()), \
             "{}: inserted row id is not fresh: {}".format(run, after[9])
-        data[run] = sorted((a,) + v[:2] for a, v in after.items())
-    assert data["CPU"] == data["GPU"], "CPU {} vs GPU {}".format(data["CPU"], data["GPU"])
 
 
 @allow_non_gpu(*delta_meta_allow)
