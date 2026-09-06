@@ -49,7 +49,8 @@ object RapidsProcessDeltaMergeJoinStrategy extends SparkStrategy {
         notMatchedBySourceConditions = p.notMatchedBySourceConditions,
         notMatchedBySourceOutputs = p.notMatchedBySourceOutputs,
         noopCopyOutput = p.noopCopyOutput,
-        deleteRowOutput = p.deleteRowOutput))
+        deleteRowOutput = p.deleteRowOutput,
+        rowDroppedColumnIndex = p.rowDroppedColumnIndex))
     case _ => Nil
   }
 }
@@ -66,7 +67,10 @@ case class RapidsProcessDeltaMergeJoin(
     notMatchedBySourceConditions: Seq[Expression],
     notMatchedBySourceOutputs: Seq[Seq[Seq[Expression]]],
     noopCopyOutput: Seq[Expression],
-    deleteRowOutput: Seq[Expression]) extends UnaryNode {
+    deleteRowOutput: Seq[Expression],
+    // Position of the row-dropped control column in every projected output row. When None, the
+    // column is located by its name in `output`, falling back to the position after `output`.
+    rowDroppedColumnIndex: Option[Int] = None) extends UnaryNode {
 
   @transient
   override lazy val references: AttributeSet = inputSet
@@ -88,7 +92,8 @@ case class RapidsProcessDeltaMergeJoinExec(
     notMatchedConditions: Seq[Expression],
     notMatchedOutputs: Seq[Seq[Seq[Expression]]],
     noopCopyOutput: Seq[Expression],
-    deleteRowOutput: Seq[Expression]) extends UnaryExecNode {
+    deleteRowOutput: Seq[Expression],
+    rowDroppedColumnIndex: Option[Int] = None) extends UnaryExecNode {
 
   override protected def doExecute(): RDD[InternalRow] = {
     throw new IllegalStateException("Should have been replaced by a GpuRapidsProcessMergeJoinExec")
@@ -122,7 +127,8 @@ class RapidsProcessDeltaMergeJoinMeta(
       notMatchedBySourceConditions = p.notMatchedBySourceConditions.map(convertExprToGpu),
       notMatchedBySourceOutputs = p.notMatchedBySourceOutputs.map(_.map(_.map(convertExprToGpu))),
       noopCopyOutput = p.noopCopyOutput.map(convertExprToGpu),
-      deleteRowOutput = p.deleteRowOutput.map(convertExprToGpu))
+      deleteRowOutput = p.deleteRowOutput.map(convertExprToGpu),
+      rowDroppedColumnIndex = p.rowDroppedColumnIndex)
   }
 
   private def convertExprToGpu(e: Expression): Expression = {
@@ -149,7 +155,8 @@ case class GpuRapidsProcessDeltaMergeJoinExec(
     notMatchedBySourceConditions: Seq[Expression],
     notMatchedBySourceOutputs: Seq[Seq[Seq[Expression]]],
     noopCopyOutput: Seq[Expression],
-    deleteRowOutput: Seq[Expression]) extends UnaryExecNode with GpuExec {
+    deleteRowOutput: Seq[Expression],
+    rowDroppedColumnIndex: Option[Int] = None) extends UnaryExecNode with GpuExec {
   require(matchedConditions.length == matchedOutputs.length)
   require(notMatchedConditions.length == notMatchedOutputs.length)
   require(notMatchedBySourceConditions.length == notMatchedBySourceOutputs.length)
@@ -199,6 +206,7 @@ case class GpuRapidsProcessDeltaMergeJoinExec(
     val localNotMatchedBySourceOutputs = boundNotMatchedBySourceOutputs
     val localNoopCopyOutput = boundNoopCopyOutput
     val localDeleteRowOutput = boundDeleteRowOutput
+    val localRowDroppedColumnIndex = rowDroppedColumnIndex
     child.executeColumnar().mapPartitions { iter =>
       new GpuRapidsProcessDeltaMergeJoinIterator(
         iter = iter,
@@ -215,7 +223,8 @@ case class GpuRapidsProcessDeltaMergeJoinExec(
         notMatchedBySourceOutputs = localNotMatchedBySourceOutputs,
         noopCopyOutput = localNoopCopyOutput,
         deleteRowOutput = localDeleteRowOutput,
-        allMetrics)
+        metrics = allMetrics,
+        rowDroppedColumnIndex = localRowDroppedColumnIndex)
     }
   }
 
@@ -239,7 +248,8 @@ class GpuRapidsProcessDeltaMergeJoinIterator(
     notMatchedBySourceOutputs: Seq[Seq[Seq[GpuExpression]]],
     noopCopyOutput: Seq[GpuExpression],
     deleteRowOutput: Seq[GpuExpression],
-    metrics: Map[String, GpuMetric])
+    metrics: Map[String, GpuMetric],
+    rowDroppedColumnIndex: Option[Int] = None)
     extends Iterator[ColumnarBatch] with AutoCloseable {
 
   private[this] val intermediateTypes: Array[DataType] = noopCopyOutput.map(_.dataType).toArray
@@ -328,11 +338,13 @@ class GpuRapidsProcessDeltaMergeJoinIterator(
       }
     }
     val shouldNotDeleteBatch = withResource(bigTable) { _ =>
-      // If ROW_DROPPED_COL is not in output schema
-      // then CDC must be disabled and it's the column after our output cols
-      val shouldDeleteColumnIndex =
+      // The command that built the plan knows where the control column sits. Without that, if
+      // ROW_DROPPED_COL is not in the output schema then CDC must be disabled and it's the column
+      // after our output cols.
+      val shouldDeleteColumnIndex = rowDroppedColumnIndex.getOrElse {
         output.zipWithIndex.find(_._1.name == GpuDeltaMergeConstants.ROW_DROPPED_COL).map(_._2)
             .getOrElse(output.size)
+      }
       val shouldDeleteColumn = bigTable.getColumn(shouldDeleteColumnIndex)
       withResource(shouldDeleteColumn.not()) { notDeleteColumn =>
         withResource(bigTable.filter(notDeleteColumn)) { notDeleteTable =>
