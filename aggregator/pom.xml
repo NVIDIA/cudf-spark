@@ -68,8 +68,8 @@
         </dependency>
         <dependency>
             <groupId>com.nvidia</groupId>
-            <artifactId>rapids-4-spark-private_${scala.binary.version}</artifactId>
-            <version>${spark-rapids-private.version}</version>
+            <artifactId>cudf-spark-private_${scala.binary.version}</artifactId>
+            <version>${cudf-spark-private.version}</version>
             <classifier>${spark.version.classifier}</classifier>
         </dependency>
         <!--
