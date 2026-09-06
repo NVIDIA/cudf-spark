@@ -17,14 +17,17 @@
 package org.apache.iceberg.spark.source;
 
 import java.lang.reflect.Field;
+import java.util.List;
 import java.util.Map;
 
+import org.apache.iceberg.ContentFile;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.deletes.DeleteGranularity;
 import org.apache.iceberg.io.DeleteWriteResult;
+import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.WriteResult;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.sql.connector.write.RowLevelOperation.Command;
@@ -175,6 +178,11 @@ public final class GpuSparkWriteAccess {
 
   public static WriterCommitMessage deltaTaskCommit(DeleteWriteResult result) {
     return new SparkPositionDeltaWrite.DeltaTaskCommit(result);
+  }
+
+  /** Deletes uncommitted task files through Iceberg's package-private cleanup helper. */
+  public static void deleteTaskFiles(FileIO io, List<? extends ContentFile<?>> files) {
+    SparkCleanupUtil.deleteTaskFiles(io, files);
   }
 
   private static SparkWrite sparkWrite(Write write) {

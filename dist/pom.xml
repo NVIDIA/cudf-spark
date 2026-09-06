@@ -53,6 +53,7 @@
         <dist.native.chunking.minimum.size>256M</dist.native.chunking.minimum.size>
         <dist.native.chunking.chunk.size>32M</dist.native.chunking.chunk.size>
         <dist.native.chunking.metadata.dir>${project.build.directory}/native-chunks</dist.native.chunking.metadata.dir>
+        <iceberg.audit.maven.repository>${settings.localRepository}</iceberg.audit.maven.repository>
     </properties>
     <profiles>
         <profile>
@@ -257,6 +258,34 @@
                         <phase>none</phase>
                     </execution>
                     <execution>
+                        <id>check-iceberg-package-private-access</id>
+                        <phase>package</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <java classname="org.python.util.jython"
+                                      classpathref="maven.plugin.classpath"
+                                      fork="true" failonerror="true"
+                                      dir="${spark.rapids.source.basedir}">
+                                    <arg value="-B"/>
+                                    <arg value="${spark.rapids.source.basedir}/${rapids.module}/scripts/tests/test_check_iceberg_package_private_access.py"/>
+                                </java>
+                                <java classname="org.python.util.jython"
+                                      classpathref="maven.plugin.classpath"
+                                      fork="true" failonerror="true"
+                                      dir="${spark.rapids.source.basedir}">
+                                    <arg value="-B"/>
+                                    <arg value="${spark.rapids.source.basedir}/${rapids.module}/scripts/check-iceberg-package-private-access.py"/>
+                                    <arg value="--runtime-manifest"/>
+                                    <arg value="${project.build.directory}/iceberg-audit-runtimes.txt"/>
+                                    <arg value="--expected-build-versions"/>
+                                    <arg value="${included_buildvers}"/>
+                                    <arg value="${project.build.directory}/parallel-world"/>
+                                </java>
+                            </target>
+                        </configuration>
+                    </execution>
+                    <execution>
                         <!-- ensure a phase preceding create-parallel-world and copy-current -->
                         <phase>initialize</phase>
                         <goals>
@@ -289,10 +318,13 @@
                                 <property name="project.version" value="${project.version}"/>
                                 <property name="scala.binary.version" value="${scala.binary.version}"/>
                                 <property name="included_buildvers" value="${included_buildvers}"/>
+                                <property name="maven.local.repository" value="${iceberg.audit.maven.repository}"/>
                                 <ant
                                     antfile="${spark.rapids.source.basedir}/${rapids.module}/maven-antrun/build-parallel-worlds.xml"
                                     target="remove-dependencies-from-pom"
-                                />
+                                >
+                                    <reference refid="maven.project"/>
+                                </ant>
                             </target>
                         </configuration>
                     </execution>
@@ -408,6 +440,11 @@ self.log("... OK")
                         <artifactId>rapids-4-spark-aggregator_${scala.binary.version}</artifactId>
                         <version>${project.version}</version>
                         <classifier>${spark.version.classifier}</classifier>
+                    </dependency>
+                    <dependency>
+                        <groupId>org.javassist</groupId>
+                        <artifactId>javassist</artifactId>
+                        <version>3.30.2-GA</version>
                     </dependency>
                 </dependencies>
             </plugin>

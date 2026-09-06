@@ -1500,6 +1500,7 @@
                                                 <delete quiet="true">
                                                     <fileset dir="${spark.shim.dest}" includes=".shimplify-*"/>
                                                 </delete>
+                                                <mkdir dir="${spark.shim.dest}"/>
                                                 <touch file="${rapids.shimplify.cache.marker}"/>
                                             </then>
                                             <else>
