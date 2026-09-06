@@ -23,6 +23,7 @@ import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingArray
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{withRestoreOnRetry, withRetry, withRetryNoSplit}
+import com.nvidia.spark.rapids.SplittableJoinIterator.PreparedJoinBatch
 import com.nvidia.spark.rapids.shims.{GpuBroadcastJoinMeta, ShimBinaryExecNode}
 
 import org.apache.spark.TaskContext
@@ -221,7 +222,7 @@ class ConditionalNestedLoopJoinIterator(
     condition: ast.CompiledExpression,
     opTime: GpuMetric,
     joinTime: GpuMetric)
-    extends SplittableJoinIterator(
+    extends SplittableJoinIterator[PreparedJoinBatch](
       NvtxRegistry.JOIN_GATHER,
       stream,
       streamAttributes,
@@ -237,24 +238,26 @@ class ConditionalNestedLoopJoinIterator(
     }
   }
 
-  override def computeNumJoinRows(scb: LazySpillableColumnarBatch): Long = {
-    scb.checkpoint()
-    builtBatch.checkpoint()
-    withRetryNoSplit {
-      withRestoreOnRetry(Seq(builtBatch, scb)) {
-        withResource(GpuColumnVector.from(builtBatch.getBatch)) { builtTable =>
-          withResource(GpuColumnVector.from(scb.getBatch)) { streamTable =>
-            val (left, right) = buildSide match {
-              case GpuBuildLeft => (builtTable, streamTable)
-              case GpuBuildRight => (streamTable, builtTable)
-            }
-            joinType match {
-              case _: InnerLike => left.conditionalInnerJoinRowCount(right, condition)
-              case LeftOuter => left.conditionalLeftJoinRowCount(right, condition)
-              case RightOuter => right.conditionalLeftJoinRowCount(left, condition)
-              case LeftSemi => left.conditionalLeftSemiJoinRowCount(right, condition)
-              case LeftAnti => left.conditionalLeftAntiJoinRowCount(right, condition)
-              case _ => throw new IllegalStateException(s"Unsupported join type $joinType")
+  override def prepareJoinBatch(scb: LazySpillableColumnarBatch): PreparedJoinBatch = {
+    PreparedJoinBatch {
+      scb.checkpoint()
+      builtBatch.checkpoint()
+      withRetryNoSplit {
+        withRestoreOnRetry(Seq(builtBatch, scb)) {
+          withResource(GpuColumnVector.from(builtBatch.getBatch)) { builtTable =>
+            withResource(GpuColumnVector.from(scb.getBatch)) { streamTable =>
+              val (left, right) = buildSide match {
+                case GpuBuildLeft => (builtTable, streamTable)
+                case GpuBuildRight => (streamTable, builtTable)
+              }
+              joinType match {
+                case _: InnerLike => left.conditionalInnerJoinRowCount(right, condition)
+                case LeftOuter => left.conditionalLeftJoinRowCount(right, condition)
+                case RightOuter => right.conditionalLeftJoinRowCount(left, condition)
+                case LeftSemi => left.conditionalLeftSemiJoinRowCount(right, condition)
+                case LeftAnti => left.conditionalLeftAntiJoinRowCount(right, condition)
+                case _ => throw new IllegalStateException(s"Unsupported join type $joinType")
+              }
             }
           }
         }
@@ -264,7 +267,8 @@ class ConditionalNestedLoopJoinIterator(
 
   override def createGatherer(
       cb: LazySpillableColumnarBatch,
-      numJoinRows: Option[Long]): Option[JoinGatherer] = {
+      prepared: Option[PreparedJoinBatch]): Option[JoinGatherer] = {
+    val numJoinRows = prepared.map(_.numJoinRows)
     if (numJoinRows.contains(0)) {
       // nothing matched
       return None
