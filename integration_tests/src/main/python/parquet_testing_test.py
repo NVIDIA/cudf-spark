@@ -22,7 +22,7 @@ from data_gen import copy_and_update, non_utc_allow
 from marks import allow_non_gpu
 from pathlib import Path
 import pytest
-from spark_session import is_spark_350_or_later, is_spark_411_or_later
+from spark_session import is_before_spark_340, is_spark_350_or_later, is_spark_411_or_later
 import warnings
 
 _rebase_confs = {
@@ -53,11 +53,6 @@ _xfail_files = {
     "byte_array_decimal.parquet": "https://github.com/NVIDIA/spark-rapids/issues/8629",
     "fixed_length_byte_array.parquet": "https://github.com/rapidsai/cudf/issues/14104",
     "datapage_v2.snappy.parquet": "datapage v2 not supported by cudf",
-    "delta_binary_packed.parquet": "https://github.com/rapidsai/cudf/issues/13501",
-    "delta_byte_array.parquet": "https://github.com/rapidsai/cudf/issues/13501",
-    "delta_encoding_optional_column.parquet": "https://github.com/rapidsai/cudf/issues/13501",
-    "delta_encoding_required_column.parquet": "https://github.com/rapidsai/cudf/issues/13501",
-    "delta_length_byte_array.parquet": "https://github.com/rapidsai/cudf/issues/13501",
     "nested_structs.rust.parquet": "PySpark cannot handle year 52951",
 }
 
@@ -66,6 +61,12 @@ _skip_files = {
     "alltypes_tiny_pages.parquet": "https://github.com/NVIDIA/cudf-spark/issues/15872",
     "alltypes_tiny_pages_plain.parquet": "https://github.com/NVIDIA/cudf-spark/issues/15872",
 }
+
+# Spark's CPU vectorized reader gained standalone DELTA_LENGTH_BYTE_ARRAY support in Spark 3.4.
+if is_before_spark_340():
+    _xfail_files["delta_length_byte_array.parquet"] = (
+        "https://issues.apache.org/jira/browse/SPARK-40128")
+
 # Spark 3.5.0 adds support for lz4_raw compression codec, but we do not support that on GPU yet
 if is_spark_350_or_later():
     _xfail_files["lz4_raw_compressed.parquet"] = "https://github.com/NVIDIA/spark-rapids/issues/9156"
