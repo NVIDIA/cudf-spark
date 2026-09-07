@@ -19,14 +19,17 @@ package org.apache.iceberg.spark
 import scala.collection.JavaConverters._
 import scala.collection.mutable
 
+import com.nvidia.spark.rapids.iceberg.IcebergWriteDefaultAccessor
 import org.apache.iceberg.{MetadataColumns, Schema}
 import org.apache.iceberg.types.{Type, Types, TypeUtil}
 
+import org.apache.spark.sql.catalyst.expressions.Literal
 import org.apache.spark.sql.catalyst.util.METADATA_COL_ATTR_KEY
 import org.apache.spark.sql.execution.datasources.parquet.ParquetUtils.FIELD_ID_METADATA_KEY
 import org.apache.spark.sql.types._
 
 object GpuTypeToSparkType {
+  private[iceberg] val CURRENT_DEFAULT_COLUMN_METADATA_KEY = "CURRENT_DEFAULT"
   private[iceberg] val LIST_ELEMENT_FIELD_ID_METADATA_KEY =
     "rapids.parquet.list.element.field.id"
   private[iceberg] val LIST_ELEMENT_NESTED_IDS_METADATA_KEY =
@@ -42,6 +45,13 @@ object GpuTypeToSparkType {
 
   def toSparkType(schema: Schema): StructType = {
     TypeUtil.visit(schema, new GpuTypeToSparkType).asInstanceOf[StructType]
+  }
+
+  def toSparkType(
+      schema: Schema,
+      writeDefaultAccessor: IcebergWriteDefaultAccessor): StructType = {
+    TypeUtil.visit(schema, new GpuTypeToSparkType(Some(writeDefaultAccessor)))
+      .asInstanceOf[StructType]
   }
 
   def toSparkType(icebergStruct: Types.StructType): StructType = {
@@ -81,7 +91,8 @@ object GpuTypeToSparkType {
  * and naturally handles list/map elements that are themselves structs without a
  * special-case recursion through `Types.StructType`.
  */
-class GpuTypeToSparkType extends TypeToSparkType {
+class GpuTypeToSparkType(
+    writeDefaultAccessor: Option[IcebergWriteDefaultAccessor] = None) extends TypeToSparkType {
   private val nestedIdsStack = mutable.ArrayBuffer.empty[Option[String]]
 
   private def pushNested(nested: Option[String]): Unit = nestedIdsStack += nested
@@ -146,6 +157,12 @@ class GpuTypeToSparkType extends TypeToSparkType {
             .withMetadata(GpuTypeToSparkType.fieldMetadataOf(field.fieldId()))
           nestedJson.foreach(json =>
             metadataBuilder.withMetadata(Metadata.fromJson(json)))
+          writeDefaultAccessor.filter(_.hasWriteDefault(field)).foreach { accessor =>
+            val value = accessor.writeDefaultToSpark(field)
+            metadataBuilder.putString(
+              GpuTypeToSparkType.CURRENT_DEFAULT_COLUMN_METADATA_KEY,
+              Literal.create(value, fieldResult).sql)
+          }
           var sparkField =
             StructField(field.name(), fieldResult, field.isOptional, metadataBuilder.build())
           if (field.doc() != null) {

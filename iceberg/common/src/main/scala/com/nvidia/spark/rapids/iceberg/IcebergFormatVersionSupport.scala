@@ -35,9 +35,16 @@ object IcebergFormatVersionSupport {
     Type.TypeID.DOUBLE, Type.TypeID.DATE, Type.TypeID.TIMESTAMP, Type.TypeID.STRING,
     Type.TypeID.BINARY, Type.TypeID.DECIMAL)
 
-  /** Tag unsupported table versions and initial defaults in the full table schema. */
+  /** Tag unsupported table versions and write defaults in the full table schema. */
   def tagForFormatVersion(table: Table, meta: RapidsMeta[_, _, _]): Unit = {
-    tagForFormatVersion(table, table.schema(), meta)
+    val formatVersion = ShimUtils.formatVersion(table)
+    tagForFormatVersion(formatVersion, meta)
+    if (formatVersion > MaxSupportedFormatVersion && meta.conf.isIcebergV3Enabled) {
+      unsupportedWriteDefault(table.schema()).foreach { case (path, typeName) =>
+        meta.willNotWorkOnGpu(
+          s"Iceberg write default for field '$path' with type $typeName is not supported on GPU")
+      }
+    }
   }
 
   /**
@@ -82,11 +89,21 @@ object IcebergFormatVersionSupport {
   }
 
   private[iceberg] def unsupportedDefault(schema: Schema): Option[(String, String)] = {
+    unsupportedDefault(schema, field => ShimUtils.hasInitialDefault(field))
+  }
+
+  private[iceberg] def unsupportedWriteDefault(schema: Schema): Option[(String, String)] = {
+    unsupportedDefault(schema, field => ShimUtils.hasWriteDefault(field))
+  }
+
+  private def unsupportedDefault(
+      schema: Schema,
+      hasDefault: Types.NestedField => Boolean): Option[(String, String)] = {
     schema.idToName().keySet().asScala.iterator
       .map(id => schema.findField(id.intValue()))
       .find { field =>
         val fieldType = field.`type`()
-        ShimUtils.hasInitialDefault(field) && {
+        hasDefault(field) && {
           if (fieldType.isPrimitiveType) {
             !SupportedDefaultTypeIds.contains(fieldType.typeId()) ||
               fieldType == Types.TimestampType.withoutZone()

@@ -66,7 +66,7 @@ import java.util.function.IntPredicate;
  * this interface. The correct implementation is selected at runtime by
  * {@link ShimUtils} based on the detected Iceberg version.
  */
-public interface IcebergShimUtils {
+public interface IcebergShimUtils extends IcebergWriteDefaultAccessor {
     /**
      * Returns the converter for shaded Parquet schemas and footer metadata.
      * Implementations override only conversions specific to the selected library versions.
@@ -84,6 +84,18 @@ public interface IcebergShimUtils {
     /** Converts an Iceberg v3 initial default to Spark's internal value representation. */
     default Object initialDefaultToSpark(Types.NestedField field) {
         throw new UnsupportedOperationException("Iceberg initial defaults are not supported");
+    }
+
+    /** Returns whether this field has an Iceberg v3 write default. */
+    @Override
+    default boolean hasWriteDefault(Types.NestedField field) {
+        return false;
+    }
+
+    /** Converts an Iceberg v3 write default to Spark's internal value representation. */
+    @Override
+    default Object writeDefaultToSpark(Types.NestedField field) {
+        throw new UnsupportedOperationException("Iceberg write defaults are not supported");
     }
 
     /**

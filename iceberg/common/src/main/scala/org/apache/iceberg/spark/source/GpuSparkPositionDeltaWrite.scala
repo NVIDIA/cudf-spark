@@ -172,7 +172,7 @@ object GpuSparkPositionDeltaWrite {
   private[source] def dataWriterSparkTypeFor(
       command: Command,
       context: GpuWriteContext): StructType = {
-    toSparkType(dataWriterSchemaFor(command, context))
+    toSparkType(dataWriterSchemaFor(command, context), ShimUtils.writeDefaultAccessor())
   }
 
   def tableOf(deltaWrite: DeltaWrite): Table = {

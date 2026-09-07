@@ -20,6 +20,7 @@ spark-rapids-shim-json-lines ***/
 package org.apache.iceberg.spark
 
 import com.nvidia.spark.rapids.SchemaUtils._
+import com.nvidia.spark.rapids.iceberg.ShimUtils
 import org.apache.iceberg.Schema
 import org.apache.iceberg.types.Types
 import org.scalatest.funsuite.AnyFunSuite
@@ -28,6 +29,26 @@ import org.apache.spark.sql.execution.datasources.parquet.ParquetUtils.FIELD_ID_
 import org.apache.spark.sql.types.{ArrayType, IntegerType, MapType, Metadata, StructType}
 
 class GpuTypeToSparkTypeSuite extends AnyFunSuite {
+
+  private def fieldWithWriteDefault(
+      id: Int,
+      name: String,
+      icebergType: org.apache.iceberg.types.Type,
+      writeDefault: AnyRef): Option[Types.NestedField] = {
+    try {
+      val builder = classOf[Types.NestedField].getMethod("optional", classOf[String])
+        .invoke(null, name)
+      val builderClass = builder.getClass
+      builderClass.getMethod("withId", java.lang.Integer.TYPE).invoke(builder, Int.box(id))
+      builderClass.getMethod("ofType", classOf[org.apache.iceberg.types.Type])
+        .invoke(builder, icebergType)
+      builderClass.getMethod("withWriteDefault", classOf[Object])
+        .invoke(builder, writeDefault)
+      Some(builderClass.getMethod("build").invoke(builder).asInstanceOf[Types.NestedField])
+    } catch {
+      case _: NoSuchMethodException => None
+    }
+  }
 
   private def fieldOf(field: Types.NestedField): Metadata = {
     val schema = new Schema(field)
@@ -39,6 +60,23 @@ class GpuTypeToSparkTypeSuite extends AnyFunSuite {
     assert(md.getLong(FIELD_ID_METADATA_KEY) == 1L)
     assert(!md.contains(LIST_ELEMENT_FIELD_ID_METADATA_KEY))
     assert(!md.contains(LIST_ELEMENT_NESTED_IDS_METADATA_KEY))
+  }
+
+  test("toSparkType preserves an Iceberg write default alongside field-id metadata") {
+    val field = fieldWithWriteDefault(
+      1,
+      "value",
+      Types.IntegerType.get(),
+      Int.box(9)).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+    val schema = new Schema(field)
+
+    val metadata = GpuTypeToSparkType
+      .toSparkType(schema, ShimUtils.writeDefaultAccessor())(field.name()).metadata
+    assert(metadata.getLong(FIELD_ID_METADATA_KEY) == 1L)
+    assert(metadata.getString(GpuTypeToSparkType.CURRENT_DEFAULT_COLUMN_METADATA_KEY) == "9")
+    assert(!fieldOf(field).contains(GpuTypeToSparkType.CURRENT_DEFAULT_COLUMN_METADATA_KEY))
   }
 
   test("toSparkType: flat list records only the element id") {

@@ -113,7 +113,8 @@ class GpuSparkWrite(cpu: Write) extends GpuWrite with RequiresDistributionAndOrd
     // the GPU path uses Spark's Parquet infrastructure which requires field IDs in the
     // StructType metadata. Without them, Iceberg's ParquetMetrics cannot extract file-level
     // statistics, causing StrictMetricsEvaluator to fail during overwrite validation.
-    val dsSchema = GpuTypeToSparkType.toSparkType(writeSchema)
+    val dsSchema =
+      GpuTypeToSparkType.toSparkType(writeSchema, ShimUtils.writeDefaultAccessor())
     val useFanout = GpuSparkWriteAccess.useFanoutWriter(cpu)
     val writeProps = GpuSparkWriteAccess.writeProperties(cpu)
 
