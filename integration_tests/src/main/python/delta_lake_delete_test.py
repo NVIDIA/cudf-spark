@@ -14,7 +14,8 @@
 
 import pytest
 
-from asserts import assert_gpu_and_cpu_writes_are_equal_collect, assert_gpu_fallback_write, assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect
+from asserts import assert_gpu_and_cpu_writes_are_equal_collect, assert_gpu_fallback_write, assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect, \
+    assert_equal
 from data_gen import *
 from delta_lake_utils import *
 from marks import *
@@ -461,3 +462,57 @@ def test_delta_delete_dataframe_api(spark_tmp_path, use_cdf, partition_columns, 
     assert_gpu_and_cpu_writes_are_equal_collect(do_delete, read_func, data_path,
                                                 conf=delta_delete_enabled_conf)
     with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
+
+
+@allow_non_gpu("ExecutedCommandExec,ColumnarToRowExec,DataWritingCommandExec", delta_write_fallback_allow, *delta_meta_allow)
+@delta_lake
+@ignore_order
+@allow_non_gpu_delta_write_if(True, reason="the command runs on the CPU by design; its jobs are planned by the plugin")
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="GPU IncrementMetric coverage for Databricks 17.3+")
+def test_delta_delete_cpu_command_increment_metric_db173(spark_tmp_path):
+    # The Databricks DELETE command counts the rows it touches and copies with IncrementMetric
+    # inside the jobs it runs, and the plugin plans those jobs whenever the command itself stays
+    # on the CPU (disabled by conf here, the way any vetoed delete runs). The DESCRIBE HISTORY
+    # row counts come from those metrics, so they must match the CPU run.
+    conf = copy_and_update(delta_delete_enabled_conf,
+                           {"spark.rapids.sql.command.DeleteCommand": "false",
+                            "spark.rapids.sql.command.DeleteCommandEdge": "false"})
+    delete_sql = "DELETE FROM delta.`{path}` WHERE a IN (2, 3)"
+
+    def dest_table_func(spark):
+        # a = 0..7 in one file: 2 and 3 are deleted, the other 6 rows are copied
+        return spark.createDataFrame([(i, i * 10) for i in range(8)], "a INT, b INT").coalesce(1)
+
+    def row_count_metrics(spark, path):
+        row = spark.sql(f"DESCRIBE HISTORY delta.`{path}`") \
+            .where("operation = 'DELETE'").orderBy("version", ascending=False).first()
+        return {k: int(v) for k, v in row["operationMetrics"].items() if "Rows" in k}
+
+    def checker(data_path, do_delete):
+        cpu_path = data_path + "/CPU"
+        gpu_path = data_path + "/GPU"
+        results = {}
+        def write_func(spark, path):
+            results[path] = do_delete(spark, path).collect()
+        # The standard helper runs the delete on the CPU and on the GPU and compares the tables;
+        # the plans are captured across both runs and the GPU expression is looked for below.
+        callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+        callback.startCapture()
+        try:
+            assert_gpu_and_cpu_writes_are_equal_collect(write_func, read_delta_path, data_path, conf=conf)
+            captured_plans = callback.getResultsWithTimeout(10000)
+        finally:
+            callback.endCapture()
+        assert_equal(results[cpu_path], results[gpu_path])
+        cpu_metrics = with_cpu_session(lambda spark: row_count_metrics(spark, cpu_path))
+        gpu_metrics = with_cpu_session(lambda spark: row_count_metrics(spark, gpu_path))
+        assert cpu_metrics == gpu_metrics, f"CPU {cpu_metrics} vs GPU {gpu_metrics}"
+        expected = {"numDeletedRows": 2, "numCopiedRows": 6}
+        assert {k: gpu_metrics.get(k) for k in expected} == expected, gpu_metrics
+        plan_strings = [plan.toString() for plan in captured_plans]
+        assert any("gpu_increment_metric" in s for s in plan_strings), \
+            "no GPU IncrementMetric in the captured DELETE plans:\n" + "\n".join(plan_strings)
+
+    delta_sql_delete_test(spark_tmp_path, use_cdf=False, dest_table_func=dest_table_func,
+                          delete_sql=delete_sql, check_func=checker, enable_deletion_vectors=False)

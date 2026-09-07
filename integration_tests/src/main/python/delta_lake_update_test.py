@@ -14,12 +14,12 @@
 
 import pytest
 
-from asserts import assert_gpu_and_cpu_writes_are_equal_collect, assert_gpu_fallback_write
+from asserts import assert_gpu_and_cpu_writes_are_equal_collect, assert_gpu_fallback_write, assert_equal
 from data_gen import *
 from delta_lake_utils import *
 from marks import *
 from spark_session import is_before_spark_320, is_databricks_runtime, \
-    supports_delta_lake_deletion_vectors, with_cpu_session, is_before_spark_353, \
+    supports_delta_lake_deletion_vectors, with_cpu_session, with_gpu_session, is_before_spark_353, \
     is_databricks173_or_later
 
 delta_update_enabled_conf = copy_and_update(delta_writes_enabled_conf,
@@ -228,3 +228,60 @@ def test_delta_update_dataframe_api(spark_tmp_path, use_cdf, partition_columns, 
     # using partitions
     if not is_databricks_runtime() or not partition_columns:
         with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
+
+
+@allow_non_gpu("ExecutedCommandExec,ColumnarToRowExec,DataWritingCommandExec", delta_write_fallback_allow, *delta_meta_allow)
+@delta_lake
+@ignore_order
+@inject_oom
+@allow_non_gpu_delta_write_if(True, reason="the command runs on the CPU by design; its jobs are planned by the plugin")
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="GPU IncrementMetric coverage for Databricks 17.3+")
+def test_delta_update_cpu_command_increment_metric_db173(spark_tmp_path):
+    # The Databricks UPDATE command counts the rows it updates and copies with
+    # ConditionalIncrementMetric in the rewrite job it runs, and the plugin plans that job
+    # whenever the command itself stays on the CPU (disabled by conf here, the way any vetoed
+    # update runs). The DESCRIBE HISTORY row counts come from those metrics, so they must match
+    # the CPU run. inject_oom makes the retry around the GPU row count fire, which must not
+    # change the counts.
+    conf = copy_and_update(delta_update_enabled_conf,
+                           {"spark.rapids.sql.command.UpdateCommand": "false",
+                            "spark.rapids.sql.command.UpdateCommandEdge": "false"})
+    update_sql = "UPDATE delta.`{path}` SET b = b + 100 WHERE a >= 4"
+
+    def dest_table_func(spark):
+        # a = 0..7 in one file: 4..7 are updated, the other 4 rows are copied
+        return spark.createDataFrame([(i, i * 10) for i in range(8)], "a INT, b INT").coalesce(1)
+
+    def row_count_metrics(spark, path):
+        row = spark.sql(f"DESCRIBE HISTORY delta.`{path}`") \
+            .where("operation = 'UPDATE'").orderBy("version", ascending=False).first()
+        return {k: int(v) for k, v in row["operationMetrics"].items() if "Rows" in k}
+
+    def checker(data_path, do_update):
+        cpu_path = data_path + "/CPU"
+        gpu_path = data_path + "/GPU"
+        results = {}
+        def write_func(spark, path):
+            results[path] = do_update(spark, path).collect()
+        # The standard helper runs the update on the CPU and on the GPU and compares the tables;
+        # the plans are captured across both runs and the GPU expression is looked for below.
+        callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+        callback.startCapture()
+        try:
+            assert_gpu_and_cpu_writes_are_equal_collect(write_func, read_delta_path, data_path, conf=conf)
+            captured_plans = callback.getResultsWithTimeout(10000)
+        finally:
+            callback.endCapture()
+        assert_equal(results[cpu_path], results[gpu_path])
+        cpu_metrics = with_cpu_session(lambda spark: row_count_metrics(spark, cpu_path))
+        gpu_metrics = with_cpu_session(lambda spark: row_count_metrics(spark, gpu_path))
+        assert cpu_metrics == gpu_metrics, f"CPU {cpu_metrics} vs GPU {gpu_metrics}"
+        expected = {"numUpdatedRows": 4, "numCopiedRows": 4}
+        assert {k: gpu_metrics.get(k) for k in expected} == expected, gpu_metrics
+        plan_strings = [plan.toString() for plan in captured_plans]
+        assert any("gpu_conditional_increment_metric" in s for s in plan_strings), \
+            "no GPU ConditionalIncrementMetric in the captured UPDATE plans:\n" + "\n".join(plan_strings)
+
+    delta_sql_update_test(spark_tmp_path, use_cdf=False, dest_table_func=dest_table_func,
+                          update_sql=update_sql, check_func=checker)
