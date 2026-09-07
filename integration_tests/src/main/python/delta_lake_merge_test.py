@@ -568,18 +568,19 @@ def test_delta_merge_cpu_command_increment_metric_db173(spark_tmp_path, spark_tm
     def checker(data_path, do_merge):
         cpu_path = data_path + "/CPU"
         gpu_path = data_path + "/GPU"
-        cpu_result = with_cpu_session(lambda spark: do_merge(spark, cpu_path), conf=conf)
+        results = {}
+        def write_func(spark, path):
+            results[path] = do_merge(spark, path)
+        # The standard helper runs the merge on the CPU and on the GPU and compares the tables;
+        # the plans are captured across both runs and the GPU expression is looked for below.
         callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
         callback.startCapture()
         try:
-            gpu_result = with_gpu_session(lambda spark: do_merge(spark, gpu_path), conf=conf)
+            assert_gpu_and_cpu_writes_are_equal_collect(write_func, read_delta_path, data_path, conf=conf)
             captured_plans = callback.getResultsWithTimeout(10000)
         finally:
             callback.endCapture()
-        assert_equal(cpu_result, gpu_result)
-        assert_equal_with_local_sort(
-            with_cpu_session(lambda spark: read_delta_path(spark, cpu_path).collect()),
-            with_cpu_session(lambda spark: read_delta_path(spark, gpu_path).collect()))
+        assert_equal(results[cpu_path], results[gpu_path])
         cpu_metrics = with_cpu_session(lambda spark: row_count_metrics(spark, cpu_path))
         gpu_metrics = with_cpu_session(lambda spark: row_count_metrics(spark, gpu_path))
         assert cpu_metrics == gpu_metrics, f"CPU {cpu_metrics} vs GPU {gpu_metrics}"
