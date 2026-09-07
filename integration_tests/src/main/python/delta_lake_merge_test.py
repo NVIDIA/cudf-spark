@@ -459,6 +459,8 @@ def test_delta_merge_standard_upsert(spark_tmp_path, spark_tmp_table_factory, us
 @ignore_order
 @pytest.mark.skipif(not supports_delta_lake_row_tracking(),
                     reason="Row tracking needs Delta Lake 3.3 or Databricks 17.3")
+@pytest.mark.skipif(is_databricks_runtime(),
+                    reason="The Databricks 17.3 GPU merge regenerates row ids until #15884 lands; that PR carries the 17.3 test")
 def test_delta_merge_preserves_row_tracking(spark_tmp_path):
     # A matched update and an insert touch a row-tracked target. (A NOT MATCHED BY SOURCE clause
     # runs on the GPU only with Delta 4.1 and Databricks 17.3, so it is left out here.) The row
@@ -491,31 +493,25 @@ def test_delta_merge_preserves_row_tracking(spark_tmp_path):
     def do_merge(spark, path):
         return spark.sql(merge_sql.format(path=path)).collect()
 
-    # The merge on both engines. The plans captured during the GPU run have to carry the GPU
-    # merge command and the GPU Delta write, so a fallback to the CPU command fails here instead
-    # of passing on identical results. (The command's own DataFrame plan only shows a
-    # CommandResult wrapper, so the check goes through the capture callback, as the REORG tests
-    # do.) The merge's own result row (rows affected, updated, deleted, inserted) is compared
-    # between the engines as well.
-    cpu_result = with_cpu_session(lambda spark: do_merge(spark, data_path + "/CPU"), conf=conf)
-    plan_callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
-    plan_callback.startCapture()
-    try:
-        gpu_result = with_gpu_session(lambda spark: do_merge(spark, data_path + "/GPU"), conf=conf)
-        captured_plans = plan_callback.getResultsWithTimeout(10000)
-    finally:
-        plan_callback.endCapture()
-    for class_name in ["GpuExecutedCommandExec"] + delta_write:
-        assert any(plan_callback.contains(plan, class_name) for plan in captured_plans), \
-            "{} is not found in the captured MERGE plans".format(class_name)
-    assert_equal(cpu_result, gpu_result)
+    # The merge on both engines through the standard write helper. For a Delta test it runs the
+    # GPU side under assert_rapids_delta_write, which asserts the GPU Delta write in the plans it
+    # captures, and only the GPU merge command writes that way, so a fallback to the CPU command
+    # fails here instead of passing on identical results. The helper then reads both tables back
+    # on the CPU, tracked columns included, and compares them engine to engine; the inserted
+    # row's id is masked because the file layout decides it and the join-based GPU merge lays
+    # out files differently from the CPU. The merge's own result row (rows affected, updated,
+    # deleted, inserted) is compared between the engines as well.
+    results = {}
 
-    # The rows that existed before, with their row id and commit version, engine to engine.
-    def existing_rows(spark, path):
-        return sorted(tuple(r) for r in
-                      spark.sql(tracked_sql.format(path) + " WHERE a <> 9").collect())
-    assert_equal(with_cpu_session(lambda spark: existing_rows(spark, data_path + "/CPU"), conf=conf),
-                 with_cpu_session(lambda spark: existing_rows(spark, data_path + "/GPU"), conf=conf))
+    def write_func(spark, path):
+        results[path] = do_merge(spark, path)
+
+    def read_tracked(spark, path):
+        return spark.sql("SELECT a, b, c, CASE WHEN a = 9 THEN NULL ELSE _metadata.row_id END AS row_id, "
+                         "_metadata.row_commit_version AS row_commit_version FROM delta.`{}`".format(path))
+
+    assert_gpu_and_cpu_writes_are_equal_collect(write_func, read_tracked, data_path, conf=conf)
+    assert_equal(results[data_path + "/CPU"], results[data_path + "/GPU"])
 
     for run in ["CPU", "GPU"]:
         path = data_path + "/" + run
