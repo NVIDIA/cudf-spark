@@ -157,6 +157,8 @@ object ColumnarReaderFactory extends PartitionReaderFactory {
       private val rootAllocator = new RootAllocator(Long.MaxValue)
       private val allocator: BufferAllocator =
         rootAllocator.newChildAllocator(s"arrow-test-reader-$startNum", 0, Long.MaxValue)
+      // Pin only. Do not close this list in the reader: SPARK-56350 may still
+      // hold pass-through ArrowColumnVector refs after reader.close().
       private val allBatches = new util.ArrayList[ColumnarBatch]()
       private var batch: ColumnarBatch = _
       private var allocatorsClosed = false
