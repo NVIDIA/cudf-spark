@@ -1138,7 +1138,7 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       parquetInfo,
       new JHashMap[Integer, Any](),
       expectedSchema,
-      GpuIcebergParquetReader.withNativeRowIndex(shadedSchema),
+      GpuIcebergParquetReaderUtils.withNativeRowIndex(shadedSchema),
       Map.empty)
 
     assert(!processor.displayActionPlan().contains("FetchRowPosition"))
@@ -1178,7 +1178,7 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       parquetInfo,
       new JHashMap[Integer, Any](),
       expectedSchema,
-      GpuIcebergParquetReader.withNativeRowIndex(shadedSchema),
+      GpuIcebergParquetReaderUtils.withNativeRowIndex(shadedSchema),
       Map.empty)
 
     assert(processor.displayActionPlan() ==
@@ -1215,7 +1215,7 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       parquetInfo,
       constants,
       expectedSchema,
-      GpuIcebergParquetReader.withNativeRowIndex(shadedSchema),
+      GpuIcebergParquetReaderUtils.withNativeRowIndex(shadedSchema),
       Map.empty)
 
     val rowPositions = closeOnExcept(CudfColumnVector.fromLongs(0L, 2L, 5L)) { column =>
@@ -1246,7 +1246,7 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       parquetInfo,
       new JHashMap[Integer, Any](),
       expectedSchema,
-      GpuIcebergParquetReader.withNativeRowIndex(shadedSchema),
+      GpuIcebergParquetReaderUtils.withNativeRowIndex(shadedSchema),
       Map.empty)
 
     assert(processor.displayActionPlan() ==
