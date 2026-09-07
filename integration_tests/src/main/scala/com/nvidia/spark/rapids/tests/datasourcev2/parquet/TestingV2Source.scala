@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,13 +19,14 @@ import java.util
 
 import scala.collection.JavaConverters._
 
-import org.apache.arrow.memory.RootAllocator
+import org.apache.arrow.memory.{BufferAllocator, RootAllocator}
 import org.apache.arrow.vector._
 import org.apache.arrow.vector.complex.MapVector
 import org.apache.arrow.vector.types.{DateUnit, FloatingPointPrecision, TimeUnit}
 import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType}
 import org.apache.arrow.vector.util.Text;
 
+import org.apache.spark.TaskContext
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.catalog._
 import org.apache.spark.sql.connector.catalog.TableCapability.BATCH_READ
@@ -147,9 +148,34 @@ object ColumnarReaderFactory extends PartitionReaderFactory {
   override def createColumnarReader(partition: InputPartition): PartitionReader[ColumnarBatch] = {
     val ArrowInputPartition(dataTypes, numRows, startNum) = partition
     new PartitionReader[ColumnarBatch] {
+      // Spark 4.2 DataSourceRDD closes this reader as soon as next() returns
+      // false, while CPU ArrowEvalPythonExec (SPARK-56350) may still hold
+      // pass-through ArrowColumnVector refs from get(). Do not close batches
+      // here: Spark/GPU consumers close those ColumnarBatches. Close the
+      // allocator only once nothing is allocated. See SPARK-56350 /
+      // cudf-spark#15663.
+      private val rootAllocator = new RootAllocator(Long.MaxValue)
+      private val allocator: BufferAllocator =
+        rootAllocator.newChildAllocator(s"arrow-test-reader-$startNum", 0, Long.MaxValue)
+      // Pin only. Do not close this list in the reader: SPARK-56350 may still
+      // hold pass-through ArrowColumnVector refs after reader.close().
+      private val allBatches = new util.ArrayList[ColumnarBatch]()
       private var batch: ColumnarBatch = _
+      private var allocatorsClosed = false
+
+      Option(TaskContext.get()).foreach { ctx =>
+        ctx.addTaskCompletionListener[Unit](_ => tryCloseAllocators())
+      }
 
       private var current = 0
+
+      private def tryCloseAllocators(): Unit = {
+        if (!allocatorsClosed && allocator.getAllocatedMemory == 0) {
+          allocator.close()
+          rootAllocator.close()
+          allocatorsClosed = true
+        }
+      }
 
       override def next(): Boolean = {
         val batchSize = if (current < numRows) {
@@ -167,14 +193,15 @@ object ColumnarReaderFactory extends PartitionReaderFactory {
         } else {
           var dtypeNum = 0
           val vecs = dataTypes.map { dtype =>
-            val vector = setupArrowVector(s"v$current$dtypeNum", dtype)
+            val vector = setupArrowVector(allocator, s"v$current$dtypeNum", dtype)
             val startVal = current + startNum * (dtypeNum + 2)
-            fillArrowVec(dtype, vector, startVal, numRows)
+            fillArrowVec(dtype, vector, startVal, batchSize)
             dtypeNum += 1
             new ArrowColumnVector(vector)
           }
           batch = new ColumnarBatch(vecs.toArray)
           batch.setNumRows(batchSize)
+          allBatches.add(batch)
           current += batchSize
           true
         }
@@ -182,7 +209,9 @@ object ColumnarReaderFactory extends PartitionReaderFactory {
 
       override def get(): ColumnarBatch = batch
 
-      override def close(): Unit = batch.close()
+      override def close(): Unit = {
+        tryCloseAllocators()
+      }
     }
   }
 
@@ -323,12 +352,11 @@ object ColumnarReaderFactory extends PartitionReaderFactory {
       throw new UnsupportedOperationException(s"Unsupported data type: ${dt.catalogString}")
   }
 
-  private def setupArrowVector(name: String, dataType: DataType): ValueVector = {
-    val rootAllocator = new RootAllocator(Long.MaxValue)
-    val allocator = rootAllocator.newChildAllocator(s"$name", 0, Long.MaxValue)
-    val vector = toArrowField(s"field$name", dataType, nullable = true, "Utc")
-      .createVector(allocator)
-    vector
+  private def setupArrowVector(
+      allocator: BufferAllocator,
+      name: String,
+      dataType: DataType): ValueVector = {
+    toArrowField(s"field$name", dataType, nullable = true, "Utc").createVector(allocator)
   }
 }
 
