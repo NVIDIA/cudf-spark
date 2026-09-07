@@ -257,9 +257,6 @@ class RapidsTestSettings extends BackendTestSettings {
     .exclude("Write Spark version into ORC file metadata",
       KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15468. " +
         "Recovery trigger: GPU ORC files include Spark version metadata; P1."))
-    .exclude("SPARK-31238: compatibility with Spark 2.4 in reading dates",
-      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15470. " +
-        "Recovery trigger: GPU ORC legacy date rebasing matches Spark CPU; P0."))
     .exclude("SPARK-31284: compatibility with Spark 2.4 in reading timestamps",
       KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15471. " +
         "Recovery trigger: GPU ORC legacy timestamp reads match Spark CPU; P0."))
@@ -281,9 +278,6 @@ class RapidsTestSettings extends BackendTestSettings {
     .exclude("Write Spark version into ORC file metadata",
       KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15468. " +
         "Recovery trigger: GPU ORC files include Spark version metadata; P1."))
-    .exclude("SPARK-31238: compatibility with Spark 2.4 in reading dates",
-      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15470. " +
-        "Recovery trigger: GPU ORC legacy date rebasing matches Spark CPU; P0."))
     .exclude("SPARK-31284: compatibility with Spark 2.4 in reading timestamps",
       KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15471. " +
         "Recovery trigger: GPU ORC legacy timestamp reads match Spark CPU; P0."))
