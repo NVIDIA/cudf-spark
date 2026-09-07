@@ -610,35 +610,6 @@ private class ActionBuildingVisitor(
   }
 }
 
-/**
- * Partner accessors to navigate file schema alongside expected schema.
- */
-private class FileSchemaAccessors
-    extends SchemaWithPartnerVisitor.PartnerAccessors[Type] {
-
-  override def fieldPartner(partnerStruct: Type, fieldId: Int, name: String): Type = {
-    if (partnerStruct == null) return null
-    val structType = partnerStruct.asStructType()
-    val field = structType.field(fieldId)
-    if (field == null) null else field.`type`()
-  }
-
-  override def listElementPartner(partnerList: Type): Type = {
-    if (partnerList == null) return null
-    partnerList.asListType().elementType()
-  }
-
-  override def mapKeyPartner(partnerMap: Type): Type = {
-    if (partnerMap == null) return null
-    partnerMap.asMapType().keyType()
-  }
-
-  override def mapValuePartner(partnerMap: Type): Type = {
-    if (partnerMap == null) return null
-    partnerMap.asMapType().valueType()
-  }
-}
-
 /** Processes columnar batch after reading from parquet file.
  *
  * Apache iceberg uses a lazy approach to deal with schema evolution, e.g. when you
