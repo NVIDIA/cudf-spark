@@ -1714,26 +1714,25 @@ class FuzzRegExp(suggestedChars: String, skipKnownIssues: Boolean = true,
   }
 
   private def repetition(depth: Int) = {
-    val modes = Seq[RegexQuantifier.Mode](
-      RegexQuantifier.Greedy,
-      RegexQuantifier.Reluctant,
-      RegexQuantifier.Possessive)
+    import RegexQuantifier._
+    val modes = Seq(Greedy, Reluctant, Possessive)
     val mode = modes(rr.nextInt(modes.length))
-    RegexRepetition(generate(depth + 1), quantifier.withMode(mode))
+    RegexRepetition(generate(depth + 1), RegexQuantifier(quantifierBase, mode))
   }
 
-  private def quantifier: RegexQuantifier = {
-    val generators = Seq[() => RegexQuantifier](
-      () => SimpleQuantifier('+'),
-      () => SimpleQuantifier('*'),
-      () => SimpleQuantifier('?'),
-      () => QuantifierFixedLength(rr.nextInt(3)),
-      () => QuantifierVariableLength(rr.nextInt(3), None),
+  private def quantifierBase: RegexQuantifier.Base = {
+    import RegexQuantifier._
+    val generators = Seq(
+      () => OneOrMore,
+      () => ZeroOrMore,
+      () => ZeroOrOne,
+      () => Fixed(rr.nextInt(3)),
+      () => Variable(rr.nextInt(3), None),
       () => {
         // this intentionally generates some invalid quantifiers where the maxLength
         // is less than the minLength, such as "{2,1}" which should be handled as a
         // literal string match on "{2,1}" rather than as a valid quantifier.
-        QuantifierVariableLength(rr.nextInt(3), Some(rr.nextInt(3)))
+        Variable(rr.nextInt(3), Some(rr.nextInt(3)))
       }
     )
     generators(rr.nextInt(generators.length))()
