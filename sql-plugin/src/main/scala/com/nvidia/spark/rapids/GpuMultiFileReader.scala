@@ -282,6 +282,14 @@ object MultiFileReaderUtils {
       files: Array[String],
       cloudSchemes: Set[String]): Boolean =
     !coalescingEnabled || (multiThreadEnabled && hasPathInCloud(files, cloudSchemes))
+
+  private[rapids] def attachFilePathToMissingFile[T](runner: AsyncRunner[T], file: Path): Unit = {
+    runner.addFailureTransformer {
+      case error: FileNotFoundException =>
+        GpuFileNotFoundException(file.toUri.toString, error)
+      case error => error
+    }
+  }
 }
 
 /**
@@ -1478,11 +1486,7 @@ abstract class MultiFileCoalescingPartitionReaderBase(
             val outLocal = hmb.slice(offset, fileBlockSize)
             // Third, copy the blocks for each file in parallel using background threads
             val runner = getBatchRunner(tc, file, outLocal, blocks, offset, batchContext)
-            runner.addFailureTransformer {
-              case error: FileNotFoundException =>
-                GpuFileNotFoundException(file.toString, error)
-              case error => error
-            }
+            MultiFileReaderUtils.attachFilePathToMissingFile(runner, file)
             tasks.add(threadPool.submit(runner))
             offset += fileBlockSize
           }

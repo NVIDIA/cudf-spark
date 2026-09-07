@@ -43,12 +43,26 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 object MissingFileErrorShim {
   def wrapReaderFactory(readerFactory: PartitionReaderFactory): PartitionReaderFactory =
     new PartitionReaderFactory {
-      override def createReader(partition: InputPartition): PartitionReader[InternalRow] =
-        wrapReader(partition, readerFactory.createReader(partition))
+      override def createReader(partition: InputPartition): PartitionReader[InternalRow] = {
+        val reader = try {
+          readerFactory.createReader(partition)
+        } catch {
+          case error: FileNotFoundException => rethrowMissingFile(partition, error)
+          case error: ExecutionException => rethrowMissingFile(partition, error)
+        }
+        wrapReader(partition, reader)
+      }
 
       override def createColumnarReader(
-          partition: InputPartition): PartitionReader[ColumnarBatch] =
-        wrapReader(partition, readerFactory.createColumnarReader(partition))
+          partition: InputPartition): PartitionReader[ColumnarBatch] = {
+        val reader = try {
+          readerFactory.createColumnarReader(partition)
+        } catch {
+          case error: FileNotFoundException => rethrowMissingFile(partition, error)
+          case error: ExecutionException => rethrowMissingFile(partition, error)
+        }
+        wrapReader(partition, reader)
+      }
 
       override def supportColumnarReads(partition: InputPartition): Boolean =
         readerFactory.supportColumnarReads(partition)
@@ -56,28 +70,37 @@ object MissingFileErrorShim {
 
   private def wrapReader[T](
       partition: InputPartition,
-      createReader: => PartitionReader[T]): PartitionReader[T] = {
-    val reader = withStructuredMissingFile(partition)(createReader)
+      reader: PartitionReader[T]): PartitionReader[T] = {
     new PartitionReader[T] {
-      override def next(): Boolean = withStructuredMissingFile(partition)(reader.next())
+      override def next(): Boolean = try {
+        reader.next()
+      } catch {
+        case error: FileNotFoundException => rethrowMissingFile(partition, error)
+        case error: ExecutionException => rethrowMissingFile(partition, error)
+      }
 
-      override def get(): T = withStructuredMissingFile(partition)(reader.get())
+      override def get(): T = try {
+        reader.get()
+      } catch {
+        case error: FileNotFoundException => rethrowMissingFile(partition, error)
+        case error: ExecutionException => rethrowMissingFile(partition, error)
+      }
 
       override def close(): Unit = reader.close()
     }
   }
 
-  private def withStructuredMissingFile[T](partition: InputPartition)(body: => T): T = {
-    try {
-      body
-    } catch {
-      case error: FileNotFoundException =>
-        throw convertMissingFile(partition, error)
-      case error: ExecutionException =>
-        error.getCause match {
-          case cause: FileNotFoundException => throw convertMissingFile(partition, cause)
-          case _ => throw error
+  private def rethrowMissingFile(partition: InputPartition, error: Throwable): Nothing = {
+    error match {
+      case missingFile: FileNotFoundException =>
+        throw convertMissingFile(partition, missingFile)
+      case wrapped: ExecutionException =>
+        wrapped.getCause match {
+          case missingFile: FileNotFoundException =>
+            throw convertMissingFile(partition, missingFile)
+          case _ => throw wrapped
         }
+      case _ => throw error
     }
   }
 

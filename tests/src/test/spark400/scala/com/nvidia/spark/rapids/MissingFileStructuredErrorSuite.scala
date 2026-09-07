@@ -28,14 +28,17 @@
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids
 
-import java.io.File
+import java.io.{File, FileNotFoundException}
 
-import com.nvidia.spark.rapids.shims.GpuBatchScanExec
+import com.nvidia.spark.rapids.shims.{GpuBatchScanExec, PartitionedFileUtilsShim}
 
 import org.apache.spark.{SparkConf, SparkException, SparkThrowable}
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.execution.datasources.{FilePartition, PartitionedFile}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.GpuFileSourceScanExec
+import org.apache.spark.sql.rapids.shims.GpuFileScanRDD
 
 class MissingFileStructuredErrorSuite extends SparkQueryCompareTestSuite {
   private val missingFileCondition = "FAILED_READ_FILE.FILE_NOT_EXIST"
@@ -86,7 +89,9 @@ class MissingFileStructuredErrorSuite extends SparkQueryCompareTestSuite {
 
   Seq(("V1", true, "orc"), ("V2", false, "")).foreach {
     case (sourceName, useV1, v1Sources) =>
-      Seq(RapidsReaderType.COALESCING, RapidsReaderType.MULTITHREADED).foreach { readerType =>
+      val readerTypes = Seq(RapidsReaderType.COALESCING, RapidsReaderType.MULTITHREADED) ++
+        (if (useV1) Seq(RapidsReaderType.PERFILE) else Seq.empty)
+      readerTypes.foreach { readerType =>
         test(s"Spark 4 missing-file structured error parity - $sourceName - $readerType") {
           val conf = new SparkConf()
             .set(SQLConf.USE_V1_SOURCE_LIST.key, v1Sources)
@@ -102,5 +107,26 @@ class MissingFileStructuredErrorSuite extends SparkQueryCompareTestSuite {
           assert(gpuCondition == missingFileCondition)
         }
       }
+  }
+
+  test("Spark 4 copied V1 per-file RDD attaches the missing-file path") {
+    withCpuSparkSession { spark =>
+      withTempPath { missingFile =>
+        val missingPath = missingFile.toPath.toUri.toString
+        val partitionedFile = PartitionedFileUtilsShim.newPartitionedFile(
+          InternalRow.empty, missingPath, start = 0L, length = 1L)
+        val filePartitions = FilePartition.getFilePartitions(
+          spark, Seq(partitionedFile), maxSplitBytes = Long.MaxValue)
+        val readFunction = (_: PartitionedFile) => new Iterator[InternalRow] {
+          override def hasNext: Boolean =
+            throw new FileNotFoundException("missing ORC file")
+          override def next(): InternalRow = throw new NoSuchElementException
+        }
+        val rdd = new GpuFileScanRDD(spark, readFunction, filePartitions)
+
+        val error = structuredMissingFile(intercept[SparkException](rdd.collect()))
+        assert(error.getMessageParameters.get("path") === missingPath)
+      }
+    }
   }
 }
