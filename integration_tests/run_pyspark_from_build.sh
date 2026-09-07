@@ -29,6 +29,8 @@
 #   - SPARK_HOME: Path to your Apache Spark installation.
 #   - SKIP_TESTS: If set to true, skips running the Python integration tests.
 #   - INCLUDE_SPARK_AVRO_JAR: If set to true, includes Avro tests.
+#   - INCLUDE_SPARK_PROTOBUF_JAR: Controls external spark-protobuf jar injection; setting it to
+#                                false also disables protobuf tests on Apache Spark.
 #   - TEST: Specifies a specific test to run.
 #   - TEST_TAGS: Allows filtering tests based on tags.
 #   - TEST_TYPE: Specifies the type of tests to run.
@@ -48,6 +50,9 @@
 #   To run all tests, including Avro tests:
 #     INCLUDE_SPARK_AVRO_JAR=true ./run_pyspark_from_build.sh
 #
+#   To run without injecting an external spark-protobuf jar:
+#     INCLUDE_SPARK_PROTOBUF_JAR=false ./run_pyspark_from_build.sh
+#
 #   To run a specific test:
 #     TEST=my_test ./run_pyspark_from_build.sh
 #
@@ -59,6 +64,28 @@
 # ============================================================================
 
 set -ex
+
+is_databricks_runtime_arg() {
+    local expect_runtime_env_value=false
+    local runtime_env=""
+    local arg
+    for arg in "$@"; do
+        if [[ "$expect_runtime_env_value" == "true" ]]; then
+            runtime_env="$arg"
+            expect_runtime_env_value=false
+            continue
+        fi
+        case "$arg" in
+            --runtime_env)
+                expect_runtime_env_value=true
+                ;;
+            --runtime_env=*)
+                runtime_env="${arg#*=}"
+                ;;
+        esac
+    done
+    [[ "${runtime_env,,}" == "databricks" ]]
+}
 
 SCRIPTPATH="$( cd "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
 cd "$SCRIPTPATH"
@@ -102,6 +129,7 @@ else
     # support alternate local jars NOT building from the source code
     if [ -d "$LOCAL_JAR_PATH" ]; then
         AVRO_JARS=$(echo "$LOCAL_JAR_PATH"/spark-avro*.jar)
+        PROTOBUF_JARS=$(echo "$LOCAL_JAR_PATH"/spark-protobuf*.jar)
         PLUGIN_JAR=$(echo "$LOCAL_JAR_PATH"/rapids-4-spark_*.jar)
         if [ -f $(echo $LOCAL_JAR_PATH/parquet-hadoop*.jar) ]; then
             export INCLUDE_PARQUET_HADOOP_TEST_JAR=true
@@ -118,6 +146,7 @@ else
     else
         [[ "$SCALA_VERSION" != "2.12"  ]] && TARGET_DIR=${TARGET_DIR/integration_tests/scala$SCALA_VERSION\/integration_tests}
         AVRO_JARS=$(echo "$TARGET_DIR"/dependency/spark-avro*.jar)
+        PROTOBUF_JARS=$(echo "$TARGET_DIR"/dependency/spark-protobuf*.jar)
         PARQUET_HADOOP_TESTS=$(echo "$TARGET_DIR"/dependency/parquet-hadoop*.jar)
         # remove the log4j.properties file so it doesn't conflict with ours, ignore errors
         # if it isn't present or already removed
@@ -143,9 +172,29 @@ else
         AVRO_JARS=""
     fi
 
-    # ALL_JARS includes dist.jar integration-test.jar avro.jar parquet.jar if they exist
+    INCLUDE_SPARK_PROTOBUF_JAR_REQUESTED=$(echo "${INCLUDE_SPARK_PROTOBUF_JAR}" | tr '[:upper:]' '[:lower:]')
+    PROTOBUF_JAR_COUNT=$(readlink -e $PROTOBUF_JARS 2>/dev/null | wc -l)
+    if is_databricks_runtime_arg "$@"; then
+        export INCLUDE_SPARK_PROTOBUF_JAR=false
+        PROTOBUF_JARS=""
+    elif [[ "$INCLUDE_SPARK_PROTOBUF_JAR_REQUESTED" != "false" \
+          && "$PROTOBUF_JAR_COUNT" -eq 1 ]];
+    then
+        export INCLUDE_SPARK_PROTOBUF_JAR=true
+    else
+        if [[ "$INCLUDE_SPARK_PROTOBUF_JAR_REQUESTED" != "false" \
+              && "$PROTOBUF_JAR_COUNT" -gt 1 ]]; then
+            >&2 echo "WARNING: Multiple spark-protobuf jars were found (matched: $PROTOBUF_JARS); not injecting spark-protobuf."
+        elif [[ "$INCLUDE_SPARK_PROTOBUF_JAR_REQUESTED" == "true" ]]; then
+            >&2 echo "WARNING: INCLUDE_SPARK_PROTOBUF_JAR=true was requested but a spark-protobuf jar was not found (searched: $PROTOBUF_JARS)."
+        fi
+        export INCLUDE_SPARK_PROTOBUF_JAR=false
+        PROTOBUF_JARS=""
+    fi
+
+    # ALL_JARS includes dist.jar integration-test.jar avro.jar parquet.jar protobuf.jar if they exist
     # Remove non-existing paths and canonicalize the paths including get rid of links and `..`
-    ALL_JARS=$(readlink -e $PLUGIN_JAR $TEST_JARS $AVRO_JARS $PARQUET_HADOOP_TESTS || true)
+    ALL_JARS=$(readlink -e $PLUGIN_JAR $TEST_JARS $AVRO_JARS $PARQUET_HADOOP_TESTS $PROTOBUF_JARS || true)
     # `:` separated jars
     ALL_JARS="${ALL_JARS//$'\n'/:}"
 
