@@ -23,7 +23,7 @@ import glob
 import pyarrow.parquet as pq
 from spark_session import is_before_spark_320, is_databricks_runtime, supports_delta_lake_deletion_vectors, \
     with_cpu_session, with_gpu_session, is_before_spark_353, is_spark_353_or_later, \
-    is_databricks173_or_later
+    is_databricks173_or_later, supports_delta_lake_row_tracking
 
 delta_delete_enabled_conf = copy_and_update(delta_writes_enabled_conf,
                                             {"spark.rapids.sql.command.DeleteCommand": "true",
@@ -391,9 +391,9 @@ def test_delta_delete_metadata_only_reports_row_count(spark_tmp_path):
 @allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_databricks173_or_later(),
-                    reason="DBR 17.3 row tracking regression coverage")
-def test_delta_delete_preserves_row_tracking_db173(spark_tmp_path):
+@pytest.mark.skipif(not supports_delta_lake_row_tracking(),
+                    reason="Row tracking needs Delta Lake 3.3 or Databricks 17.3")
+def test_delta_delete_preserves_row_tracking(spark_tmp_path):
     conf = copy_and_update(delta_delete_enabled_conf, delta_row_tracking_dml_conf)
     assert_delta_row_tracking_dml(
         spark_tmp_path, "DELETE FROM delta.`{path}` WHERE a IN (2, 3)", conf)

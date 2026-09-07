@@ -354,6 +354,15 @@ def gpu_supports_delta_dv_scan():
     else:
         return is_spark_353_or_later()
 
+def supports_delta_lake_row_tracking():
+    """Whether the current Delta Lake runtime provides row tracking (delta.enableRowTracking and
+    the _metadata.row_id / row_commit_version fields). OSS: Delta Lake 3.3, which the plugin pairs
+    with Spark 3.5.x and later."""
+    if is_databricks_runtime():
+        return is_databricks173_or_later()
+    else:
+        return is_spark_350_or_later()
+
 def is_support_default_values_in_schema():
     # Spark 340 + and Databricks 330 + support
     return is_spark_340_or_later() or is_databricks113_or_later()
