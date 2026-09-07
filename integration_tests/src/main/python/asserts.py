@@ -523,7 +523,8 @@ def assert_cpu_and_gpu_are_equal_collect_with_capture(func,
         non_exist_classes='',
         conf={},
         require_non_empty=False,
-        gpu_plan_assertion=None):
+        gpu_plan_assertion=None,
+        cpu_plan_assertion=None):
     """Compare collected CPU/GPU results and validate the executed GPU plan.
 
     :param func: Function that creates the dataframe to collect in each Spark session.
@@ -532,6 +533,8 @@ def assert_cpu_and_gpu_are_equal_collect_with_capture(func,
     :param conf: Spark configuration used for both executions.
     :param require_non_empty: Require the collected CPU result to contain at least one row.
     :param gpu_plan_assertion: Optional callback invoked after GPU collection with the
+        dataframe's executed JVM plan.
+    :param cpu_plan_assertion: Optional callback invoked after CPU collection with the
         dataframe's executed JVM plan.
     """
     (bring_back, collect_type) = _prep_func_for_compare(func, 'COLLECT_WITH_DATAFRAME')
@@ -544,6 +547,8 @@ def assert_cpu_and_gpu_are_equal_collect_with_capture(func,
     cpu_end = time.time()
     if require_non_empty:
         assert len(from_cpu) > 0, "Expected non-empty result"
+    if cpu_plan_assertion:
+        cpu_plan_assertion(cpu_df._jdf.queryExecution().executedPlan())
     print('### GPU RUN ###')
     gpu_start = time.time()
     from_gpu, gpu_df = with_gpu_session(bring_back, conf=conf)
