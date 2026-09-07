@@ -234,6 +234,7 @@ def test_delta_update_dataframe_api(spark_tmp_path, use_cdf, partition_columns, 
 @delta_lake
 @ignore_order
 @inject_oom
+@allow_non_gpu_delta_write_if(True, reason="the command runs on the CPU by design; its jobs are planned by the plugin")
 @pytest.mark.skipif(not is_databricks173_or_later(),
                     reason="GPU IncrementMetric coverage for Databricks 17.3+")
 def test_delta_update_cpu_command_increment_metric_db173(spark_tmp_path):

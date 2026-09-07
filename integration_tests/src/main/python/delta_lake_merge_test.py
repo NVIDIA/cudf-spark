@@ -533,6 +533,7 @@ def test_delta_merge_deletion_vector_db173_fallback(spark_tmp_path, spark_tmp_ta
 @allow_non_gpu("ExecutedCommandExec,BroadcastHashJoinExec,ColumnarToRowExec,BroadcastExchangeExec,DataWritingCommandExec", delta_write_fallback_allow, *delta_meta_allow)
 @delta_lake
 @ignore_order
+@allow_non_gpu_delta_write_if(True, reason="the command runs on the CPU by design; its jobs are planned by the plugin")
 @pytest.mark.skipif(not is_databricks173_or_later(),
                     reason="GPU IncrementMetric coverage for Databricks 17.3+")
 def test_delta_merge_cpu_command_increment_metric_db173(spark_tmp_path, spark_tmp_table_factory):
