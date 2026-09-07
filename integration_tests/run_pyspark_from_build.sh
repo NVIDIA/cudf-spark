@@ -185,8 +185,8 @@ else
         if [[ "$INCLUDE_SPARK_PROTOBUF_JAR_REQUESTED" != "false" \
               && "$PROTOBUF_JAR_COUNT" -gt 1 ]]; then
             >&2 echo "WARNING: Multiple spark-protobuf jars were found (matched: $PROTOBUF_JARS); not injecting spark-protobuf."
-        elif [[ "$INCLUDE_SPARK_PROTOBUF_JAR_REQUESTED" == "true" ]]; then
-            >&2 echo "WARNING: INCLUDE_SPARK_PROTOBUF_JAR=true was requested but a spark-protobuf jar was not found (searched: $PROTOBUF_JARS)."
+        elif [[ "$INCLUDE_SPARK_PROTOBUF_JAR_REQUESTED" != "false" ]]; then
+            >&2 echo "WARNING: a spark-protobuf jar was not found (searched: $PROTOBUF_JARS); protobuf tests will be skipped."
         fi
         export INCLUDE_SPARK_PROTOBUF_JAR=false
         PROTOBUF_JARS=""
