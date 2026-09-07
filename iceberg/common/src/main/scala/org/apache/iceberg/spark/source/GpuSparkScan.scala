@@ -83,10 +83,12 @@ object GpuSparkScan {
         new GpuSparkBatchQueryScan(cpuScan, rapidsConf, false)
       } else if (GpuSparkScanAccess.isCopyOnWriteScan(cpuScan)) {
         ShimUtils.newCopyOnWriteScan(cpuScan, rapidsConf, false)
+      } else if (GpuSparkScanAccess.isStagedScan(cpuScan)) {
+        new GpuSparkStagedScan(cpuScan, rapidsConf, false)
       } else {
         throw new IllegalArgumentException(
-          s"Currently iceberg support only supports batch query scan and copy-on-write scan, " +
-            s"but got ${cpuScan.getClass.getName}")
+          s"Currently Iceberg support only supports batch query, copy-on-write, and staged " +
+            s"scans, but got ${cpuScan.getClass.getName}")
       }
     }
   }

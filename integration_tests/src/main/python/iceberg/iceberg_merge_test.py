@@ -32,6 +32,9 @@ pytestmark = iceberg_unsupported_mark
 
 # Base configuration for Iceberg MERGE tests
 iceberg_merge_enabled_conf = copy_and_update(iceberg_write_enabled_conf, {})
+iceberg_merge_v3_enabled_conf = copy_and_update(
+    iceberg_merge_enabled_conf,
+    {"spark.rapids.sql.format.iceberg.v3.enabled": "true"})
 
 def create_iceberg_table_with_merge_data(
         table_name: str,
@@ -253,6 +256,62 @@ def test_iceberg_v3_row_lineage_merge_update_insert(
             f"MERGE INTO {full_table} t USING {source_view} s ON t.id = s.id "
             "WHEN MATCHED THEN UPDATE SET v = s.v "
             "WHEN NOT MATCHED THEN INSERT (id, v) VALUES (s.id, s.v)")
+
+    with_cpu_session(setup_iceberg_table)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(
+            f"SELECT id, v, _row_id, _last_updated_sequence_number FROM {full_table}"),
+        conf={
+            "spark.rapids.sql.format.iceberg.v3.enabled": "true",
+            "spark.rapids.sql.format.parquet.reader.type": reader_type
+        })
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.skipif(
+    not supports_iceberg_row_lineage_inheritance,
+    reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
+@pytest.mark.parametrize("reader_type", rapids_reader_types)
+def test_iceberg_v3_row_lineage_gpu_merge_update_insert(
+        spark_tmp_table_factory, reader_type):
+    full_table = get_full_table_name(spark_tmp_table_factory)
+    source_view = spark_tmp_table_factory.get()
+
+    def setup_iceberg_table(spark):
+        spark.sql(
+            f"CREATE TABLE {full_table} (id BIGINT, v BIGINT) USING ICEBERG "
+            "TBLPROPERTIES ('format-version' = '3', 'write.merge.mode' = 'copy-on-write')")
+        with_gpu_session(
+            lambda gpu: gpu.range(0, 3).selectExpr("id", "CAST(0 AS BIGINT) AS v")
+            .coalesce(1).writeTo(full_table).append(),
+            conf=iceberg_merge_v3_enabled_conf)
+
+        def merge(gpu):
+            gpu.range(1, 4, 2).selectExpr("id", "id * 10 AS v") \
+                .createOrReplaceTempView(source_view)
+            gpu.sql(
+                f"MERGE INTO {full_table} t USING {source_view} s ON t.id = s.id "
+                "WHEN MATCHED THEN UPDATE SET v = s.v "
+                "WHEN NOT MATCHED THEN INSERT (id, v) VALUES (s.id, s.v)").collect()
+
+        with_gpu_session(merge, conf=iceberg_merge_v3_enabled_conf)
+        rows = {
+            row.id: row for row in spark.sql(
+                f"SELECT id, v, _row_id, _last_updated_sequence_number FROM {full_table}")
+            .collect()
+        }
+
+        assert rows[0]["_row_id"] == 0
+        assert rows[0]["_last_updated_sequence_number"] == 1
+        assert rows[1]["v"] == 10
+        assert rows[1]["_row_id"] == 1
+        assert rows[1]["_last_updated_sequence_number"] == 2
+        assert rows[2]["_row_id"] == 2
+        assert rows[2]["_last_updated_sequence_number"] == 1
+        assert rows[3]["v"] == 30
+        assert rows[3]["_row_id"] == 6
+        assert rows[3]["_last_updated_sequence_number"] == 2
 
     with_cpu_session(setup_iceberg_table)
     assert_gpu_and_cpu_are_equal_collect(

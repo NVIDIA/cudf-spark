@@ -171,10 +171,18 @@ case class GpuMergeRowsExec(
     val boundMatchedBySourceInsts = GpuBindReferences.bindGpuReferences(
       notMatchedBySourceInstructions, child.output, allMetrics)
       .asInstanceOf[Seq[GpuInstruction]]
+    val instructionOutputs = (boundMatchedInsts ++ boundNotMatchedInsts ++
+      boundMatchedBySourceInsts).flatMap(_.outputs)
+    val outputDataTypes = if (instructionOutputs.nonEmpty) {
+      instructionOutputs.maxBy(_.length).map(_.dataType).toArray
+    } else {
+      GpuColumnVector.extractTypes(schema)
+    }
 
     child.executeColumnar().mapPartitions { iter =>
       new GpuMergeBatchIterator(
         dataTypes,
+        outputDataTypes,
         iter,
         boundTargetRowPresent,
         boundSourceRowPresent,
@@ -325,8 +333,20 @@ object GpuMergeRowsExec {
       condition.columnarEval(batch)
     }
 
-    def applyOutputs(batch: ColumnarBatch): Seq[ColumnarBatch] = {
-      outputs.map(output => GpuProjectExec.project(batch, output))
+    def applyOutputs(
+        batch: ColumnarBatch,
+        outputDataTypes: Array[DataType]): Seq[ColumnarBatch] = {
+      outputs.map { output =>
+        require(output.length <= outputDataTypes.length,
+          s"Merge output has ${output.length} columns, expected at most ${outputDataTypes.length}")
+        // Spark permits merge actions to omit trailing columns from their InternalRow. Iceberg v3
+        // uses this for unchanged rows while update and insert actions append row-lineage fields.
+        // cuDF tables require identical schemas for concatenation, so materialize the omitted
+        // trailing fields as correctly typed null columns.
+        val paddedOutput = output ++ outputDataTypes.drop(output.length)
+          .map(GpuLiteral(null, _))
+        GpuProjectExec.project(batch, paddedOutput)
+      }
     }
 
     override def nullable: Boolean = false
@@ -368,6 +388,7 @@ object GpuMergeRowsExec {
  * Similar to Spark's MergeRowIterator but operates on batches instead of rows.
  *
  * @param inputDataTypes Spark data types of input iterator.
+ * @param outputDataTypes Spark data types of the merge output.
  * @param inputIter Iterator of input columnar batches
  * @param isTargetRowPresent Bound GPU expression to check if target row is present
  * @param isSourceRowPresent Bound GPU expression to check if source row is present
@@ -381,6 +402,7 @@ object GpuMergeRowsExec {
  */
 class GpuMergeBatchIterator(
     inputDataTypes: Array[DataType],
+    outputDataTypes: Array[DataType],
     inputIter: Iterator[ColumnarBatch],
     isTargetRowPresent: GpuExpression,
     isSourceRowPresent: GpuExpression,
@@ -518,7 +540,7 @@ class GpuMergeBatchIterator(
           if (writeSummaryEnabled) {
             attemptMetrics.record(instructionExec, filtered.numRows(), sourcePresent)
           }
-          outputs ++= instructionExec.applyOutputs(filtered)
+          outputs ++= instructionExec.applyOutputs(filtered, outputDataTypes)
             .map(SpillableColumnarBatch
               .apply(_, SpillPriorities.ACTIVE_ON_DECK_PRIORITY))
         }
@@ -529,4 +551,3 @@ class GpuMergeBatchIterator(
       sourcePresent, attemptMetrics)
   }
 }
-

@@ -73,8 +73,9 @@ class GpuMergeBatchIteratorRetrySuite extends RmmSparkRetrySuiteBase {
       Seq(GpuBoundReference(0, IntegerType, nullable = true)(ExprId(0), "id")),
       ACTION_INSERT)
     val it = new GpuMergeBatchIterator(
-      Array(IntegerType),
-      Seq(buildBatch()).iterator,
+      inputDataTypes = Array(IntegerType),
+      outputDataTypes = Array(IntegerType),
+      inputIter = Seq(buildBatch()).iterator,
       isTargetRowPresent = GpuLiteral.create(false, BooleanType),
       isSourceRowPresent = GpuLiteral.create(true, BooleanType),
       matchedInstructionExecs = Nil,

@@ -33,6 +33,9 @@ pytestmark = iceberg_unsupported_mark
 
 # Configuration for copy-on-write DELETE operations
 iceberg_delete_cow_enabled_conf = copy_and_update(iceberg_write_enabled_conf, {})
+iceberg_delete_v3_enabled_conf = copy_and_update(
+    iceberg_delete_cow_enabled_conf,
+    {"spark.rapids.sql.format.iceberg.v3.enabled": "true"})
 
 # Configuration for merge-on-read DELETE operations
 iceberg_delete_mor_enabled_conf = copy_and_update(iceberg_write_enabled_conf, {})
@@ -189,6 +192,69 @@ def test_iceberg_v3_row_lineage_delete_leading_rows(spark_tmp_table_factory, rea
         spark.sql(f"DELETE FROM {full_table} WHERE id = 0")
         row_lineage_df(spark, start=1).writeTo(full_table).append()
         spark.sql(f"DELETE FROM {full_table} WHERE id < {DEFAULT_DATA_GEN_LENGTH // 2}")
+
+    with_cpu_session(setup_iceberg_table)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(
+            f"SELECT id, _pos, _row_id, _last_updated_sequence_number FROM {full_table}"),
+        conf={
+            "spark.rapids.sql.format.iceberg.v3.enabled": "true",
+            "spark.rapids.sql.format.parquet.reader.type": reader_type
+        })
+
+
+@iceberg
+@ignore_order(local=True)
+@allow_non_gpu("BatchScanExec", "DeleteFromTableExec")
+@pytest.mark.skipif(
+    not supports_iceberg_row_lineage_inheritance,
+    reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
+@pytest.mark.parametrize("reader_type", rapids_reader_types)
+def test_iceberg_v3_row_lineage_gpu_delete_leading_rows(
+        spark_tmp_table_factory, reader_type):
+    full_table = get_full_table_name(spark_tmp_table_factory)
+
+    def setup_iceberg_table(spark):
+        spark.sql(
+            f"CREATE TABLE {full_table} (id BIGINT) USING ICEBERG "
+            "TBLPROPERTIES ('format-version' = '3', 'write.delete.mode' = 'copy-on-write')")
+        with_gpu_session(
+            lambda gpu: gpu.range(0, 1).writeTo(full_table).append(),
+            conf=iceberg_delete_v3_enabled_conf)
+        with_gpu_session(
+            lambda gpu: gpu.sql(f"DELETE FROM {full_table} WHERE id = 0").collect(),
+            conf=iceberg_delete_v3_enabled_conf)
+        with_gpu_session(
+            lambda gpu: gpu.range(1, 4).coalesce(1).writeTo(full_table).append(),
+            conf=iceberg_delete_v3_enabled_conf)
+
+        before = {
+            row.id: row for row in spark.sql(
+                f"SELECT id, _pos, _row_id, _last_updated_sequence_number FROM {full_table}")
+            .collect()
+        }
+        assert before[3]["_pos"] == 2
+        assert before[3]["_row_id"] == 3
+        assert before[3]["_last_updated_sequence_number"] == 3
+
+        with_gpu_session(
+            lambda gpu: gpu.sql(f"DELETE FROM {full_table} WHERE id < 3").collect(),
+            conf=iceberg_delete_v3_enabled_conf)
+        after = spark.sql(
+            f"SELECT id, _pos, _row_id, _last_updated_sequence_number FROM {full_table}") \
+            .collect()
+        data_sequence_numbers = [
+            row.sequence_number for row in
+            spark.sql(
+                f"SELECT sequence_number FROM {full_table}.entries WHERE status != 2").collect()
+        ]
+
+        assert len(after) == 1
+        assert after[0]["id"] == 3
+        assert after[0]["_pos"] == 0
+        assert after[0]["_row_id"] == 3
+        assert after[0]["_last_updated_sequence_number"] == 3
+        assert data_sequence_numbers == [4]
 
     with_cpu_session(setup_iceberg_table)
     assert_gpu_and_cpu_are_equal_collect(

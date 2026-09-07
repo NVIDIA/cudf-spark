@@ -43,6 +43,8 @@ abstract class IcebergProviderBase extends IcebergProvider {
       IcebergProvider.cpuBatchQueryScanClassName)
     val cpuCopyOnWriteScanClass = ShimReflectionUtils.loadClass(
       IcebergProvider.cpuCopyOnWriteScanClassName)
+    val cpuStagedScanClass = ShimReflectionUtils.loadClass(
+      IcebergProvider.cpuStagedScanClassName)
 
     Seq(
       new ScanRule[Scan](
@@ -74,6 +76,19 @@ abstract class IcebergProviderBase extends IcebergProvider {
         },
         "Iceberg copy on write scan",
         ClassTag(cpuCopyOnWriteScanClass)
+      ),
+      new ScanRule[Scan](
+        (a, conf, p, r) => new ScanMeta[Scan](a, conf, p, r) {
+          private lazy val convertedScan: Try[GpuSparkScan] = GpuSparkScan.tryConvert(a, this.conf)
+
+          override def tagSelfForGpu(): Unit = {
+            GpuSparkScan.tagForGpu(this, convertedScan)
+          }
+
+          override def convertToGpu(): GpuScan = convertedScan.get
+        },
+        "Iceberg staged scan",
+        ClassTag(cpuStagedScanClass)
       ),
     ).map(r => (r.getClassFor.asSubclass(classOf[Scan]), r)).toMap
   }

@@ -32,6 +32,9 @@ pytestmark = iceberg_unsupported_mark
 
 # Configuration for copy-on-write UPDATE operations
 iceberg_update_cow_enabled_conf = copy_and_update(iceberg_write_enabled_conf, {})
+iceberg_update_v3_enabled_conf = copy_and_update(
+    iceberg_update_cow_enabled_conf,
+    {"spark.rapids.sql.format.iceberg.v3.enabled": "true"})
 
 # Fixed seed for reproducible test data. Iceberg's update test plan will be different with different data and filter.
 UPDATE_TEST_SEED = 42
@@ -177,6 +180,66 @@ def test_iceberg_v3_row_lineage_update(spark_tmp_table_factory, reader_type):
             "TBLPROPERTIES ('format-version' = '3', 'write.update.mode' = 'copy-on-write')")
         row_lineage_df(spark, with_value=True).writeTo(full_table).append()
         spark.sql(f"UPDATE {full_table} SET v = v + 1 WHERE id % 2 = 1")
+
+    with_cpu_session(setup_iceberg_table)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(
+            f"SELECT id, v, _pos, _row_id, _last_updated_sequence_number FROM {full_table}"),
+        conf={
+            "spark.rapids.sql.format.iceberg.v3.enabled": "true",
+            "spark.rapids.sql.format.parquet.reader.type": reader_type
+        })
+
+
+@iceberg
+@ignore_order(local=True)
+@allow_non_gpu("BatchScanExec")
+@pytest.mark.skipif(
+    not supports_iceberg_row_lineage_inheritance,
+    reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
+@pytest.mark.parametrize("reader_type", rapids_reader_types)
+def test_iceberg_v3_row_lineage_gpu_update(spark_tmp_table_factory, reader_type):
+    full_table = get_full_table_name(spark_tmp_table_factory)
+
+    def setup_iceberg_table(spark):
+        spark.sql(
+            f"CREATE TABLE {full_table} (id BIGINT, v BIGINT) USING ICEBERG "
+            "TBLPROPERTIES ('format-version' = '3', 'write.update.mode' = 'copy-on-write')")
+        with_gpu_session(
+            lambda gpu: gpu.range(0, 2).selectExpr("id", "CAST(0 AS BIGINT) AS v")
+            .coalesce(1).writeTo(full_table).append(),
+            conf=iceberg_update_v3_enabled_conf)
+
+        before = {
+            row.id: row for row in spark.sql(
+                f"SELECT id, v, _row_id, _last_updated_sequence_number FROM {full_table}")
+            .collect()
+        }
+        assert before[1]["_row_id"] == 1
+        assert before[1]["_last_updated_sequence_number"] == 1
+
+        with_gpu_session(
+            lambda gpu: gpu.sql(
+                f"UPDATE {full_table} SET v = v + 1 WHERE id = 1").collect(),
+            conf=iceberg_update_v3_enabled_conf)
+        after = {
+            row.id: row for row in spark.sql(
+                f"SELECT id, v, _row_id, _last_updated_sequence_number FROM {full_table}")
+            .collect()
+        }
+        data_sequence_numbers = [
+            row.sequence_number for row in
+            spark.sql(
+                f"SELECT sequence_number FROM {full_table}.entries WHERE status != 2").collect()
+        ]
+
+        assert after[1]["v"] == 1
+        assert after[1]["_row_id"] == before[1]["_row_id"] == 1
+        assert after[1]["_last_updated_sequence_number"] == 2
+        assert after[0]["_row_id"] == before[0]["_row_id"]
+        assert after[0]["_last_updated_sequence_number"] == \
+            before[0]["_last_updated_sequence_number"] == 1
+        assert data_sequence_numbers == [2]
 
     with_cpu_session(setup_iceberg_table)
     assert_gpu_and_cpu_are_equal_collect(

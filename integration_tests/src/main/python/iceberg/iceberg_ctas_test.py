@@ -19,7 +19,7 @@ from pyspark.sql.types import ArrayType, BinaryType
 
 from asserts import (assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect,
                      assert_gpu_fallback_collect)
-from conftest import is_iceberg_remote_catalog
+from conftest import is_iceberg_remote_catalog, spark_jvm
 from data_gen import gen_df, copy_and_update, RepeatSeqGen
 from iceberg import (create_iceberg_table,
                      iceberg_base_table_cols,
@@ -27,8 +27,11 @@ from iceberg import (create_iceberg_table,
                      get_full_table_name, iceberg_write_enabled_conf,
                      iceberg_unsupported_mark, _build_tblprops,
                      ctas_partition_transforms, supports_iceberg_v3,
-                     ICEBERG_V3_UNSUPPORTED_REASON)
-from marks import iceberg, ignore_order, allow_non_gpu, allow_non_gpu_conditional, datagen_overrides
+                     ICEBERG_V3_UNSUPPORTED_REASON,
+                     supports_iceberg_row_lineage_inheritance,
+                     ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
+from marks import (iceberg, ignore_order, allow_non_gpu, allow_non_gpu_conditional,
+                   datagen_overrides)
 from spark_session import with_gpu_session, with_cpu_session, is_spark_400_or_later
 
 pytestmark = [
@@ -131,6 +134,53 @@ def test_ctas_v3_fallback(spark_tmp_table_factory):
         run_ctas,
         "AtomicCreateTableAsSelectExec",
         conf=iceberg_write_enabled_conf)
+
+
+@iceberg
+@pytest.mark.skipif(
+    not supports_iceberg_row_lineage_inheritance,
+    reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
+@ignore_order(local=True)
+def test_ctas_v3_row_lineage(spark_tmp_table_factory):
+    table_name = get_full_table_name(spark_tmp_table_factory)
+    conf = copy_and_update(iceberg_write_enabled_conf, {
+        "spark.rapids.sql.format.iceberg.v3.enabled": "true"
+    })
+
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        with_gpu_session(
+            lambda spark: _execute_ctas(
+                spark,
+                table_name,
+                spark_tmp_table_factory,
+                lambda sp: sp.range(3),
+                {"format-version": "3"},
+                ret=False),
+            conf=conf)
+        captured_plans = callback.getResultsWithTimeout(10000)
+        assert any(
+            callback.contains(plan, "GpuAtomicCreateTableAsSelectExec")
+            for plan in captured_plans
+        ), "GpuAtomicCreateTableAsSelectExec is not found in the captured CTAS plans"
+        assert not any(
+            callback.didFallBack(plan, "AtomicCreateTableAsSelectExec")
+            for plan in captured_plans
+        ), "Captured CTAS plan contains CPU AtomicCreateTableAsSelectExec"
+    finally:
+        callback.endCapture()
+
+    rows = with_cpu_session(
+        lambda spark: spark.sql(
+            f"SELECT id, _row_id, _last_updated_sequence_number FROM {table_name} "
+            "ORDER BY id").collect())
+    assert [(row["id"], row["_row_id"], row["_last_updated_sequence_number"])
+            for row in rows] == [
+        (0, 0, 1),
+        (1, 1, 1),
+        (2, 2, 1)
+    ]
 
 
 @iceberg

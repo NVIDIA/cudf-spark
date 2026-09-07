@@ -74,6 +74,14 @@ class GpuCopyOnWriteOperation(write: GpuSparkWrite, cpuBatchWrite: BatchWrite)
   }
 }
 
+/** GPU version of the batch write used by the rewrite_data_files procedure. */
+class GpuRewriteFiles(write: GpuSparkWrite, cpuBatchWrite: BatchWrite)
+  extends GpuBaseBatchWrite(write, cpuBatchWrite) {
+  override def commit(messages: Array[WriterCommitMessage]): Unit = {
+    cpuBatchWrite.commit(messages)
+  }
+}
+
 /**
  * GPU version of position delta batch write for merge-on-read DELETE operations.
  * This wraps the CPU PositionDeltaBatchWrite to handle position delete files.

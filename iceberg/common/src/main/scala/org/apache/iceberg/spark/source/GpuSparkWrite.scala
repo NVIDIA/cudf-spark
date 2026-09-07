@@ -64,7 +64,8 @@ class GpuSparkWrite(cpu: Write) extends GpuWrite with RequiresDistributionAndOrd
     // Iceberg's SparkWrite returns different implementations based on write mode:
     // - BatchAppend for append operations
     // - DynamicOverwrite for dynamic partition overwrite
-    // - BatchRewrite for copy-on-write operations (DELETE)
+    // - CopyOnWriteOperation for row-level copy-on-write operations
+    // - RewriteFiles for rewrite_data_files
     // Since these are private classes, we check the class name to determine which GPU version
     // to use
     val cpuBatch = cpu.toBatch
@@ -75,6 +76,7 @@ class GpuSparkWrite(cpu: Write) extends GpuWrite with RequiresDistributionAndOrd
       case "DynamicOverwrite" => new GpuDynamicOverwrite(this, cpuBatch)
       case "OverwriteByFilter" => new GpuOverwriteByFilter(this, cpuBatch)
       case "CopyOnWriteOperation" => new GpuCopyOnWriteOperation(this, cpuBatch)
+      case "RewriteFiles" => new GpuRewriteFiles(this, cpuBatch)
       case _ =>
         throw new UnsupportedOperationException(
           s"Unsupported Iceberg batch write type: $cpuBatchClassName")
@@ -446,7 +448,7 @@ class GpuUnpartitionedDataWriter(
     close()
 
     val result = delegate.result()
-    SparkCleanupUtil.deleteTaskFiles(io, result.dataFiles())
+    GpuSparkWriteAccess.deleteTaskFiles(io, result.dataFiles())
   }
 
   override def close(): Unit = {
@@ -494,7 +496,7 @@ class GpuPartitionedDataWriter(
     close()
 
     val result = delegate.result()
-    SparkCleanupUtil.deleteTaskFiles(io, result.dataFiles())
+    GpuSparkWriteAccess.deleteTaskFiles(io, result.dataFiles())
   }
 
   override def close(): Unit = {
