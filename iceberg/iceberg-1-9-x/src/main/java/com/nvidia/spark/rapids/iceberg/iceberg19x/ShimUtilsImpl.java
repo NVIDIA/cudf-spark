@@ -44,6 +44,16 @@ public class ShimUtilsImpl implements IcebergShimUtils {
     }
 
     @Override
+    public boolean hasInitialDefault(Types.NestedField field) {
+        return field.initialDefaultLiteral() != null;
+    }
+
+    @Override
+    public Object initialDefaultToSpark(Types.NestedField field) {
+        return SparkUtil.internalToSpark(field.type(), field.initialDefault());
+    }
+
+    @Override
     public String locationOf(ContentFile<?> f) {
         return f.location();
     }

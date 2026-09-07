@@ -283,15 +283,20 @@ def _add_eq_deletes(spark: SparkSession, eq_delete_cols: List[str], row_count: i
             f"{eq_delete_col} can't be used as eq delete column"
 
 
-    spark_warehouse_dir = spark.conf.get("spark.sql.catalog.spark_catalog.warehouse")
-
-    temp_dir = tempfile.mkdtemp(dir=spark_tmp_path)
     deletes = (spark.table(table_name)
                .select(eq_delete_cols + ["_partition"])
                .distinct()
                .orderBy(eq_delete_cols)
                .limit(row_count)
                .repartition(1))
+
+    _add_eq_deletes_from_df(spark, deletes, table_name, spark_tmp_path)
+
+
+def _add_eq_deletes_from_df(spark: SparkSession, deletes: DataFrame, table_name: str,
+                            spark_tmp_path):
+    spark_warehouse_dir = spark.conf.get("spark.sql.catalog.spark_catalog.warehouse")
+    temp_dir = tempfile.mkdtemp(dir=spark_tmp_path)
     deletes.write.parquet(temp_dir, mode='overwrite')
     parquet_files = [f for f in os.listdir(temp_dir) if f.endswith(".parquet")]
     assert len(parquet_files) == 1, "Only one delete parquet file should be created"
