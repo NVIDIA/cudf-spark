@@ -930,7 +930,6 @@
                 <buildver>500</buildver>
                 <spark.version>${spark500.version}</spark.version>
                 <spark.test.version>${spark500.version}</spark.test.version>
-                <!-- Master private jars are a separate artifactId, still classified spark500. -->
                 <cudf-spark-private.artifactId>cudf-spark-private_${scala.binary.version}-spark-master</cudf-spark-private.artifactId>
                 <parquet.hadoop.version>1.15.2</parquet.hadoop.version>
                 <maven.compiler.source>17</maven.compiler.source>
