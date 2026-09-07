@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import java.util.concurrent.locks.ReentrantLock
 import java.util.function.LongUnaryOperator
 
 import scala.collection.mutable
+import scala.util.control.NonFatal
 
 import com.nvidia.spark.rapids.jni.TaskPriority
 
@@ -195,6 +196,8 @@ trait AsyncRunner[T] extends Callable[AsyncResult[T]] {
     val resultData = try {
       beforeExecuteHooks.foreach { hook => hook() }
       callImpl()
+    } catch {
+      case NonFatal(error) => throw failureTransformer(error)
     } finally {
       afterExecuteHooks.foreach { hook => hook() }
     }
@@ -206,12 +209,22 @@ trait AsyncRunner[T] extends Callable[AsyncResult[T]] {
 
   private val beforeExecuteHooks = mutable.ArrayBuffer.empty[() => Unit]
   private val afterExecuteHooks = mutable.ArrayBuffer.empty[() => Unit]
+  private var failureTransformer: Throwable => Throwable = identity
 
   // Add hook to be executed right before the task execution.
   def addPreHook(hook: () => Unit): Unit = beforeExecuteHooks += hook
 
   // Add hook to be executed right after the task execution.
   def addPostHook(hook: () => Unit): Unit = afterExecuteHooks += hook
+
+  /**
+   * Adds a transformer for failures thrown by the runner body. Transformers are applied in the
+   * order they are added and are not invoked on the successful execution path.
+   */
+  def addFailureTransformer(transformer: Throwable => Throwable): Unit = {
+    val previousTransformer = failureTransformer
+    failureTransformer = error => transformer(previousTransformer(error))
+  }
 
   /**
    * This method is called when the required resource has been just acquired from pool.

@@ -612,7 +612,11 @@ case class GpuFileSourceScanExec(
       logDebug(s"Using Datasource RDD, files are: " +
         s"${prunedPartitions.flatMap(FilePartitionShims.getFiles).mkString(",")}")
       // note we use the v2 DataSourceRDD instead of FileScanRDD so we don't have to copy more code
-      GpuDataSourceRDD(relation.sparkSession.sparkContext, locatedPartitions, readerFactory)
+      GpuDataSourceRDD(
+        relation.sparkSession.sparkContext,
+        locatedPartitions,
+        readerFactory,
+        includeRefreshHint = true)
     }
   }
 

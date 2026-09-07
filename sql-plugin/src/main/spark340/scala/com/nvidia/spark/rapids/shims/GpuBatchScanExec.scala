@@ -247,7 +247,8 @@ case class GpuBatchScanExec(
       }
 
       // Use the finalized partitions so padded and replicated inputs match outputPartitioning.
-      new GpuDataSourceRDD(sparkContext, finalPartitions, readerFactory)
+      new GpuDataSourceRDD(
+        sparkContext, finalPartitions, readerFactory, includeRefreshHint = false)
     }
     postDriverMetrics()
     rdd

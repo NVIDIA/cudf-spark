@@ -16,6 +16,8 @@
 
 package com.nvidia.spark.rapids
 
+import java.io.FileNotFoundException
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.atomic.AtomicLong
 
 import com.nvidia.spark.rapids.shims.{GpuDataSourceCustomMetrics,
@@ -25,7 +27,7 @@ import org.mockito.Mockito.{verify, when}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatestplus.mockito.MockitoSugar
 
-import org.apache.spark.SparkContext
+import org.apache.spark.{SparkContext, SparkException}
 import org.apache.spark.sql.connector.read.{InputPartition, PartitionReader, PartitionReaderFactory}
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
@@ -118,7 +120,8 @@ class FileSystemBytesReadTrackerSuite extends AnyFunSuite with MockitoSugar {
 
         override def supportColumnarReads(partition: InputPartition): Boolean = true
       }
-      val rdd = GpuDataSourceRDD(mock[SparkContext], Seq(inputPartition), factory)
+      val rdd = GpuDataSourceRDD(
+        mock[SparkContext], Seq(inputPartition), factory, includeRefreshHint = false)
       val iterator = rdd.compute(rdd.partitions.head, context)
 
       assert(iterator.hasNext)
@@ -126,6 +129,72 @@ class FileSystemBytesReadTrackerSuite extends AnyFunSuite with MockitoSugar {
       assert(!iterator.hasNext)
       assert(context.taskMetrics().inputMetrics.bytesRead == 15L)
       context.markTaskComplete()
+    }
+  }
+
+  private val missingFilePath = "file:/missing%20ORC.orc"
+
+  Seq(
+    ("direct V2", false,
+      () => GpuFileNotFoundException(
+        missingFilePath, new FileNotFoundException("missing ORC file"))),
+    ("wrapped V1", true,
+      () => new ExecutionException(GpuFileNotFoundException(
+        missingFilePath, new FileNotFoundException("missing ORC file"))))
+  ).foreach { case (name, includeRefreshHint, failure) =>
+    test(s"GPU datasource RDD enriches next() missing-file failures - $name") {
+      withTaskContext { context =>
+        val inputPartition = new InputPartition {}
+        val factory = new PartitionReaderFactory {
+          override def createReader(partition: InputPartition) =
+            throw new UnsupportedOperationException
+
+          override def createColumnarReader(partition: InputPartition) =
+            new PartitionReader[ColumnarBatch] {
+              private var hasNext = true
+
+              override def next(): Boolean = {
+                if (hasNext) {
+                  hasNext = false
+                  true
+                } else {
+                  false
+                }
+              }
+
+              override def get(): ColumnarBatch = {
+                statistics.incrementBytesRead(7L)
+                throw failure()
+              }
+
+              override def close(): Unit = {}
+            }
+
+          override def supportColumnarReads(partition: InputPartition): Boolean = true
+        }
+        val rdd = GpuDataSourceRDD(
+          mock[SparkContext], Seq(inputPartition), factory,
+          includeRefreshHint = includeRefreshHint)
+        val iterator = rdd.compute(rdd.partitions.head, context)
+
+        assert(iterator.hasNext)
+        val error = intercept[Exception](iterator.next())
+        if (VersionUtils.isSpark400OrLater) {
+          val sparkError = error.asInstanceOf[SparkException]
+          val condition = sparkError.getClass.getMethod("getCondition").invoke(sparkError)
+          val parameters = sparkError.getClass.getMethod("getMessageParameters")
+            .invoke(sparkError).asInstanceOf[java.util.Map[String, String]]
+          assert(condition === "FAILED_READ_FILE.FILE_NOT_EXIST")
+          assert(parameters.get("path") === missingFilePath)
+        } else {
+          val fileError = error.asInstanceOf[FileNotFoundException]
+          assert(fileError.getMessage.contains("recreating the Dataset/DataFrame involved"))
+          assert(fileError.getMessage.contains("REFRESH TABLE") === includeRefreshHint)
+        }
+        assert(error.getCause.isInstanceOf[FileNotFoundException])
+        assert(context.taskMetrics().inputMetrics.bytesRead == 7L)
+        context.markTaskComplete()
+      }
     }
   }
 
@@ -151,7 +220,8 @@ class FileSystemBytesReadTrackerSuite extends AnyFunSuite with MockitoSugar {
 
         override def supportColumnarReads(partition: InputPartition): Boolean = true
       }
-      val rdd = GpuDataSourceRDD(mock[SparkContext], Seq(inputPartition), factory)
+      val rdd = GpuDataSourceRDD(
+        mock[SparkContext], Seq(inputPartition), factory, includeRefreshHint = false)
       val iterator = rdd.compute(rdd.partitions.head, context)
 
       assert(iterator.hasNext)
@@ -190,7 +260,8 @@ class FileSystemBytesReadTrackerSuite extends AnyFunSuite with MockitoSugar {
         }
       }
       val rdd = new GpuDataSourceRDD(
-        mock[SparkContext], Seq(Seq(inputPartition)), readerFactory, customMetricsFactory)
+        mock[SparkContext], Seq(Seq(inputPartition)), readerFactory,
+        includeRefreshHint = false, customMetricsFactory = customMetricsFactory)
       val iterator = rdd.compute(rdd.partitions.head, context)
 
       assert(iterator.hasNext)
@@ -230,7 +301,8 @@ class FileSystemBytesReadTrackerSuite extends AnyFunSuite with MockitoSugar {
 
           override def supportColumnarReads(partition: InputPartition): Boolean = true
         }
-        GpuDataSourceRDD(mock[SparkContext], Seq(inputPartition), factory)
+        GpuDataSourceRDD(
+          mock[SparkContext], Seq(inputPartition), factory, includeRefreshHint = false)
       }
 
       val firstRdd = newRdd(10L)

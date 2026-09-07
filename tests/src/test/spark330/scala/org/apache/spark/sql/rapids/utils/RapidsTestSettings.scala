@@ -366,19 +366,7 @@ class RapidsTestSettings extends BackendTestSettings {
   enableSuite[RapidsFileSourceSQLInsertTestSuite]
   enableSuite[RapidsDSV2SQLInsertTestSuite]
   enableSuite[RapidsMetadataCacheV1Suite]
-    .exclude("SPARK-16336,SPARK-27961 Suggest fixing FileNotFoundException",
-      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15511. " +
-        "Recovery trigger: GPU ORC V1 missing-file errors include Spark-equivalent recreate " +
-        "guidance; P1."))
-    .exclude("SPARK-16337 temporary view refresh",
-      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15511. " +
-        "Recovery trigger: GPU ORC V1 missing-file errors include Spark-equivalent REFRESH " +
-        "and recreate guidance; P1."))
   enableSuite[RapidsMetadataCacheV2Suite]
-    .exclude("SPARK-16336,SPARK-27961 Suggest fixing FileNotFoundException",
-      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15511. " +
-        "Recovery trigger: GPU ORC V2 missing-file errors include Spark-equivalent recreate " +
-        "guidance; P1."))
   enableSuite[RapidsFileSourceStrategySuite]
     .exclude("partitioned table - after scan filters", ADJUST_UT("Replaced by testRapids version that checks GpuFilterExec residual filters."))
     .exclude("[SPARK-16818] partition pruned file scans implement sameResult correctly", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15161"))

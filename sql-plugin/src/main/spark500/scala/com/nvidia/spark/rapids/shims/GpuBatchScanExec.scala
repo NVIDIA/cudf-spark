@@ -97,7 +97,8 @@ case class GpuBatchScanExec(
       outputPartitioning,
       inputPartitions)
 
-  override lazy val readerFactory: PartitionReaderFactory = batch.createReaderFactory()
+  override lazy val readerFactory: PartitionReaderFactory =
+    MissingFileErrorShim.wrapReaderFactory(batch.createReaderFactory())
 
   override lazy val inputRDD: RDD[InternalRow] = {
     scan.metrics = allMetrics
@@ -108,7 +109,8 @@ case class GpuBatchScanExec(
         sparkContext,
         filteredPartitions.map(_.toSeq),
         readerFactory,
-        new Spark42GpuDataSourceCustomMetricsFactory(scanCustomSQLMetrics))
+        includeRefreshHint = false,
+        customMetricsFactory = new Spark42GpuDataSourceCustomMetricsFactory(scanCustomSQLMetrics))
     }
     postDriverMetrics(scan.reportDriverMetrics())
     rdd
