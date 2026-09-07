@@ -26,7 +26,8 @@ import com.nvidia.spark.rapids.Arm.closeOnExcept
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableSeq
 import com.nvidia.spark.rapids.SpillPriorities.ACTIVE_ON_DECK_PRIORITY
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
-import com.nvidia.spark.rapids.iceberg.{GpuIcebergSpecPartitioner, IcebergFormatVersionSupport}
+import com.nvidia.spark.rapids.iceberg.{GpuIcebergSpecPartitioner, IcebergFormatVersionSupport,
+  ShimUtils}
 import com.nvidia.spark.rapids.shims.parquet.ParquetFieldIdShims
 import org.apache.hadoop.mapreduce.Job
 import org.apache.iceberg._
@@ -240,8 +241,11 @@ object GpuSparkWrite {
       meta.willNotWorkOnGpu(s"GpuSparkWrite only supports Parquet, but got: ${dataFormat.get}")
     }
 
-    if (deleteFormat.exists(!_.equals(FileFormat.PARQUET))) {
-      meta.willNotWorkOnGpu(s"GpuSparkWrite only supports Parquet, but got: ${deleteFormat.get}")
+    if (deleteFormat.exists(format =>
+        !format.equals(FileFormat.PARQUET) && !ShimUtils.isPuffinFormat(format))) {
+      meta.willNotWorkOnGpu(
+        s"GpuSparkWrite only supports Parquet or Puffin deletion vectors, " +
+          s"but got: ${deleteFormat.get}")
     }
 
     // Check partition transform support
