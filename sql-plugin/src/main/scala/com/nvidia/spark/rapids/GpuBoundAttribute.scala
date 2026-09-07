@@ -71,7 +71,8 @@ object GpuBindReferences extends Logging {
         if (ordinal == -1) {
           sys.error(s"Couldn't find $a in ${input.attrs.mkString("[", ",", "]")}")
         } else {
-          GpuBoundReference(ordinal, a.dataType, input(ordinal).nullable)(a.exprId, a.name)
+          GpuBoundReference(ordinal, input(ordinal).dataType, input(ordinal).nullable)(
+            a.exprId, a.name)
         }
     }
     val matchFunc = regularMatch.orElse(partial)
