@@ -28,7 +28,6 @@ import scala.collection.JavaConverters._
 import scala.collection.mutable
 
 import com.databricks.sql.transaction.tahoe._
-import com.databricks.sql.transaction.tahoe.DeltaOperations.MergePredicate
 import com.databricks.sql.transaction.tahoe.actions.{AddCDCFile, AddFile, FileAction}
 import com.databricks.sql.transaction.tahoe.commands.DeltaCommand
 import com.databricks.sql.transaction.tahoe.commands.merge.MergeIntoMaterializeSource
@@ -39,6 +38,7 @@ import com.databricks.sql.transaction.tahoe.util.{AnalysisHelper, SetAccumulator
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize
 import com.nvidia.spark.rapids.{BaseExprMeta, GpuOverrides, RapidsConf}
 import com.nvidia.spark.rapids.delta._
+import com.nvidia.spark.rapids.delta.shims.UpdateCommandShims
 
 import org.apache.spark.SparkContext
 import org.apache.spark.sql._
@@ -46,18 +46,19 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.catalyst.encoders.{ExpressionEncoder, RowEncoder}
-import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeReference, BasePredicate, Expression, IsNull, Literal, NamedExpression, PredicateHelper, UnsafeProjection}
+import org.apache.spark.sql.catalyst.expressions.{Alias, And, Attribute, AttributeReference, BasePredicate, Expression, IsNull, Literal, NamedExpression, Or, PredicateHelper, UnsafeProjection}
 import org.apache.spark.sql.catalyst.expressions.codegen.GeneratePredicate
-import org.apache.spark.sql.catalyst.plans.logical.{DeltaMergeIntoClause, DeltaMergeIntoMatchedClause, DeltaMergeIntoMatchedDeleteClause, DeltaMergeIntoMatchedUpdateClause, DeltaMergeIntoNotMatchedBySourceClause, DeltaMergeIntoNotMatchedClause, LogicalPlan, Project}
+import org.apache.spark.sql.catalyst.plans.logical.{DeltaMergeIntoClause, DeltaMergeIntoMatchedClause, DeltaMergeIntoMatchedDeleteClause, DeltaMergeIntoMatchedUpdateClause, DeltaMergeIntoNotMatchedBySourceClause, DeltaMergeIntoNotMatchedBySourceDeleteClause, DeltaMergeIntoNotMatchedBySourceUpdateClause, DeltaMergeIntoNotMatchedClause, LogicalPlan, Project}
 import org.apache.spark.sql.catalyst.types.DataTypeUtils.toAttributes
 import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
 import org.apache.spark.sql.execution.SQLExecution
 import org.apache.spark.sql.execution.command.LeafRunnableCommand
 import org.apache.spark.sql.execution.datasources.LogicalRelation
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
+import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.nvidia.DFUDFShims
-import org.apache.spark.sql.types.{DataTypes, LongType, StringType, StructType}
+import org.apache.spark.sql.types.{DataTypes, LongType, StringType, StructField, StructType}
 
 case class GpuMergeDataSizes(
     @JsonDeserialize(contentAs = classOf[java.lang.Long])
@@ -101,9 +102,10 @@ case class GpuMergeStats(
     insertExprs: Seq[String],
     deleteConditionExpr: String,
 
-    // Newer expressions used in MERGE with any number of MATCHED/NOT MATCHED
+    // Newer expressions used in MERGE with any number of MATCHED/NOT MATCHED/NOT MATCHED BY SOURCE
     matchedStats: Seq[GpuMergeClauseStats],
     notMatchedStats: Seq[GpuMergeClauseStats],
+    notMatchedBySourceStats: Seq[GpuMergeClauseStats],
 
     // Data sizes of source and target at different stages of processing
     source: GpuMergeDataSizes,
@@ -129,8 +131,12 @@ case class GpuMergeStats(
     targetPartitionsAddedTo: Option[Long],
     targetRowsCopied: Long,
     targetRowsUpdated: Long,
+    targetRowsMatchedUpdated: Long,
+    targetRowsNotMatchedBySourceUpdated: Long,
     targetRowsInserted: Long,
-    targetRowsDeleted: Long
+    targetRowsDeleted: Long,
+    targetRowsMatchedDeleted: Long,
+    targetRowsNotMatchedBySourceDeleted: Long
 )
 
 object GpuMergeStats {
@@ -140,6 +146,7 @@ object GpuMergeStats {
       condition: Expression,
       matchedClauses: Seq[DeltaMergeIntoMatchedClause],
       notMatchedClauses: Seq[DeltaMergeIntoNotMatchedClause],
+      notMatchedBySourceClauses: Seq[DeltaMergeIntoNotMatchedBySourceClause],
       isPartitioned: Boolean): GpuMergeStats = {
 
     def metricValueIfPartitioned(metricName: String): Option[Long] = {
@@ -150,9 +157,11 @@ object GpuMergeStats {
       // Merge condition expression
       conditionExpr = condition.sql,
 
-      // Newer expressions used in MERGE with any number of MATCHED/NOT MATCHED
+      // Newer expressions used in MERGE with any number of MATCHED/NOT MATCHED/
+      // NOT MATCHED BY SOURCE
       matchedStats = matchedClauses.map(GpuMergeClauseStats(_)),
       notMatchedStats = notMatchedClauses.map(GpuMergeClauseStats(_)),
+      notMatchedBySourceStats = notMatchedBySourceClauses.map(GpuMergeClauseStats(_)),
 
       // Data sizes of source and target at different stages of processing
       source = GpuMergeDataSizes(rows = Some(metrics("numSourceRows").value)),
@@ -179,8 +188,12 @@ object GpuMergeStats {
       targetPartitionsAddedTo = metricValueIfPartitioned("numTargetPartitionsAddedTo"),
       targetRowsCopied = metrics("numTargetRowsCopied").value,
       targetRowsUpdated = metrics("numTargetRowsUpdated").value,
+      targetRowsMatchedUpdated = metrics("numTargetRowsMatchedUpdated").value,
+      targetRowsNotMatchedBySourceUpdated = metrics("numTargetRowsNotMatchedBySourceUpdated").value,
       targetRowsInserted = metrics("numTargetRowsInserted").value,
       targetRowsDeleted = metrics("numTargetRowsDeleted").value,
+      targetRowsMatchedDeleted = metrics("numTargetRowsMatchedDeleted").value,
+      targetRowsNotMatchedBySourceDeleted = metrics("numTargetRowsNotMatchedBySourceDeleted").value,
 
       // Deprecated fields
       updateConditionExpr = null,
@@ -276,13 +289,44 @@ case class GpuMergeIntoCommand(
   }
 
   /** Whether this merge statement has only a single insert (NOT MATCHED) clause. */
-  private def isSingleInsertOnly: Boolean = matchedClauses.isEmpty && notMatchedClauses.length == 1
-  /** Whether this merge statement has only MATCHED clauses. */
-  private def isMatchedOnly: Boolean = notMatchedClauses.isEmpty && matchedClauses.nonEmpty
+  private def isSingleInsertOnly: Boolean =
+    matchedClauses.isEmpty && notMatchedBySourceClauses.isEmpty && notMatchedClauses.length == 1
+  /** Whether this merge statement has no insert (NOT MATCHED) clause. */
+  private def hasNoInserts: Boolean = notMatchedClauses.isEmpty
 
   // We over-count numTargetRowsDeleted when there are multiple matches;
   // this is the amount of the overcount, so we can subtract it to get a correct final metric.
   private var multipleMatchDeleteOnlyOvercount: Option[Long] = None
+
+  /**
+   * Whether a joined source/target row pair takes a WHEN MATCHED action. Databricks Runtime 16.0
+   * and later report multiple matches only for source rows that satisfy the ON condition and at
+   * least one WHEN MATCHED clause condition (an undefined condition is implicitly true); source
+   * rows that match on ON alone take no action and do not make the target row ambiguous.
+   */
+  private lazy val effectiveMatchPredicate: Expression =
+    if (matchedClauses.isEmpty) {
+      Literal.FalseLiteral
+    } else {
+      matchedClauses.map(_.condition.getOrElse(Literal.TrueLiteral)).reduce((a, b) => Or(a, b))
+    }
+
+  // Set by findTouchedFiles when some target rows match several source rows on the ON condition
+  // of which at most one takes a WHEN MATCHED action; writeAllChanges then keeps one pair per row.
+  private var hasNonEffectiveDuplicateMatches: Boolean = false
+
+  /**
+   * A helper column name that none of `existing` resolves to under the session's resolver.
+   * `Dataset.withColumn` replaces an existing column of the same name, so a helper attached
+   * under a fixed name would replace a user column that the clause expressions still reference.
+   */
+  private def uniqueColumnName(base: String, existing: Seq[String]): String = {
+    val resolver = conf.resolver
+    Iterator.from(0)
+        .map(i => if (i == 0) base else s"$base$i")
+        .find(candidate => !existing.exists(name => resolver(name, candidate)))
+        .get
+  }
 
   private def checkIdentityColumnHighWaterMarks(deltaTxn: OptimisticTransaction): Unit = {
     // DBR implements this in MergeIntoCommandBase, but that method is protected and the trait
@@ -316,7 +360,15 @@ case class GpuMergeIntoCommand(
     "numTargetRowsCopied" -> createMetric(sc, "number of target rows rewritten unmodified"),
     "numTargetRowsInserted" -> createMetric(sc, "number of inserted rows"),
     "numTargetRowsUpdated" -> createMetric(sc, "number of updated rows"),
+    "numTargetRowsMatchedUpdated" ->
+        createMetric(sc, "number of rows updated by a matched clause"),
+    "numTargetRowsNotMatchedBySourceUpdated" ->
+        createMetric(sc, "number of rows updated by a not matched by source clause"),
     "numTargetRowsDeleted" -> createMetric(sc, "number of deleted rows"),
+    "numTargetRowsMatchedDeleted" ->
+        createMetric(sc, "number of rows deleted by a matched clause"),
+    "numTargetRowsNotMatchedBySourceDeleted" ->
+        createMetric(sc, "number of rows deleted by a not matched by source clause"),
     "numTargetFilesBeforeSkipping" -> createMetric(sc, "number of target files before skipping"),
     "numTargetFilesAfterSkipping" -> createMetric(sc, "number of target files after skipping"),
     "numTargetFilesRemoved" -> createMetric(sc, "number of files removed to target"),
@@ -414,15 +466,14 @@ case class GpuMergeIntoCommand(
             Option(condition),
             matchedClauses.map(DeltaOperations.MergePredicate(_)),
             notMatchedClauses.map(DeltaOperations.MergePredicate(_)),
-            // We do not support notMatchedBySourcePredicates yet and fall back to CPU
-            // See https://github.com/NVIDIA/spark-rapids/issues/8415
-            notMatchedBySourcePredicates = Seq.empty[MergePredicate]
+            notMatchedBySourcePredicates =
+              notMatchedBySourceClauses.map(DeltaOperations.MergePredicate(_))
           ),
           RowTracking.addPreservedRowTrackingTagIfNotSet(deltaTxn.snapshot))
 
         // Record metrics
         val stats = GpuMergeStats.fromMergeSQLMetrics(
-          metrics, condition, matchedClauses, notMatchedClauses,
+          metrics, condition, matchedClauses, notMatchedClauses, notMatchedBySourceClauses,
           deltaTxn.metadata.partitionColumns.nonEmpty)
         recordDeltaEvent(targetDeltaLog, "delta.dml.merge.stats", data = stats)
 
@@ -450,7 +501,8 @@ case class GpuMergeIntoCommand(
   /**
    * Find the target table files that contain the rows that satisfy the merge condition. This is
    * implemented as an inner-join between the source query/table and the target table using
-   * the merge condition.
+   * the merge condition. When there are NOT MATCHED BY SOURCE clauses a right outer join is used
+   * instead so that target rows without a source match are also collected.
    */
   private def findTouchedFiles(
       spark: SparkSession,
@@ -465,44 +517,68 @@ case class GpuMergeIntoCommand(
     val recordTouchedFileName = udf(new GpuDeltaRecordTouchedFileNameUDF(touchedFilesAccum))
         .asNondeterministic()
 
-    // Skip data based on the merge condition
-    val targetOnlyPredicates =
-      splitConjunctivePredicates(condition).filter(_.references.subsetOf(target.outputSet))
-    val dataSkippedFiles = deltaTxn.filterFiles(targetOnlyPredicates)
+    // Prune non-matching files if we don't need to collect them for NOT MATCHED BY SOURCE clauses.
+    val dataSkippedFiles =
+      if (notMatchedBySourceClauses.isEmpty) {
+        val targetOnlyPredicates =
+          splitConjunctivePredicates(condition).filter(_.references.subsetOf(target.outputSet))
+        deltaTxn.filterFiles(targetOnlyPredicates)
+      } else {
+        deltaTxn.filterFiles(Seq(Literal.TrueLiteral))
+      }
 
     // UDF to increment metrics
     val incrSourceRowCountCol = makeMetricUpdateUDF("numSourceRows")
     val sourceDF = getMergeSource.df
         .filter(incrSourceRowCountCol)
 
-    // Apply inner join to between source and target using the merge condition to find matches
+    // Join the source and target table using the merge condition to find touched files. An inner
+    // join collects all candidate files for MATCHED clauses, a right outer join also includes
+    // candidates for NOT MATCHED BY SOURCE clauses.
     // In addition, we attach two columns
     // - a monotonically increasing row id for target rows to later identify whether the same
     //     target row is modified by multiple user or not
     // - the target file name the row is from to later identify the files touched by matched rows
-    val targetDF = Dataset.ofRows(spark, buildTargetPlanWithFiles(deltaTxn, dataSkippedFiles))
-        .withColumn(ROW_ID_COL, monotonically_increasing_id())
-        .withColumn(FILE_NAME_COL, input_file_name())
+    val joinType = if (notMatchedBySourceClauses.isEmpty) "inner" else "right_outer"
+    val targetPlanDF = Dataset.ofRows(spark, buildTargetPlanWithFiles(deltaTxn, dataSkippedFiles))
+    // The helper names are chosen to be absent from both sides (see uniqueColumnName), so
+    // attaching them cannot replace a user column and they resolve unambiguously after the join.
+    val userColumns = sourceDF.columns.toSeq ++ targetPlanDF.columns.toSeq
+    val rowIdCol = uniqueColumnName(ROW_ID_COL, userColumns)
+    val fileNameCol = uniqueColumnName(FILE_NAME_COL, userColumns :+ rowIdCol)
+    val targetDF = targetPlanDF
+        .withColumn(rowIdCol, monotonically_increasing_id())
+        .withColumn(fileNameCol, input_file_name())
     val joinToFindTouchedFiles =
-      sourceDF.join(targetDF, DFUDFShims.exprToColumn(condition), "inner")
+      sourceDF.join(targetDF, DFUDFShims.exprToColumn(condition), joinType)
 
-    // Process the matches from the inner join to record touched files and find multiple matches
+    // Process the matches from the join to record touched files and find multiple matches. A pair
+    // is an effective match when it takes a WHEN MATCHED action; only effective matches can make a
+    // target row ambiguous (Databricks Runtime 16.0+ semantics, see effectiveMatchPredicate).
     val collectTouchedFiles = joinToFindTouchedFiles
-        .select(col(ROW_ID_COL), recordTouchedFileName(col(FILE_NAME_COL)).as("one"))
+        .select(col(rowIdCol), recordTouchedFileName(col(fileNameCol)).as("one"),
+          when(DFUDFShims.exprToColumn(effectiveMatchPredicate), lit(1)).otherwise(lit(0))
+              .as("effective"))
 
-    // Calculate frequency of matches per source row
-    val matchedRowCounts = collectTouchedFiles.groupBy(ROW_ID_COL).agg(sum("one").as("count"))
+    // Calculate frequency of matches per target row: all joined pairs and effective pairs
+    val matchedRowCounts = collectTouchedFiles.groupBy(rowIdCol)
+        .agg(sum("one").as("count"), sum("effective").as("effectiveCount"))
 
     // Get multiple matches and simultaneously collect (using touchedFilesAccum) the file names
-    // multipleMatchCount = # of target rows with more than 1 matching source row (duplicate match)
-    // multipleMatchSum = total # of duplicate matched rows
+    // multipleMatchCount = # of target rows with more than 1 effective matching source row
+    // multipleMatchSum = total # of effective matched rows of those target rows
+    // nonEffectiveDuplicates = # of target rows matched by several source rows of which at most
+    //   one takes a WHEN MATCHED action; writeAllChanges keeps one pair for each of them
     val multipleMatchRow = matchedRowCounts
-        .filter("count > 1")
-        .select(coalesce(count("*"), lit(0)), coalesce(sum("count"), lit(0)))
+        .select(
+          coalesce(sum(when(col("effectiveCount") > 1, lit(1L))), lit(0L)),
+          coalesce(sum(when(col("effectiveCount") > 1, col("effectiveCount"))), lit(0L)),
+          coalesce(sum(when(col("count") > 1 && col("effectiveCount") <= 1, lit(1L))), lit(0L)))
         .collect()
         .head
     val multipleMatchCount = multipleMatchRow.getLong(0)
     val multipleMatchSum = multipleMatchRow.getLong(1)
+    hasNonEffectiveDuplicateMatches = multipleMatchRow.getLong(2) > 0
 
     val hasMultipleMatches = multipleMatchCount > 0
 
@@ -671,7 +747,7 @@ case class GpuMergeIntoCommand(
     // Generate a new logical plan that has same output attributes exprIds as the target plan.
     // This allows us to apply the existing resolved update/insert expressions.
     val newTarget = buildTargetPlanWithFiles(deltaTxn, filesToRewrite)
-    val joinType = if (isMatchedOnly &&
+    val joinType = if (hasNoInserts &&
         spark.conf.get(DeltaSQLConf.MERGE_MATCHED_ONLY_ENABLED)) {
       "rightOuter"
     } else {
@@ -691,12 +767,20 @@ case class GpuMergeIntoCommand(
     // allowed outside a very specific set of Catalyst nodes (Project, Filter, Window, Aggregate).
     val incrUpdatedCountExpr =
       metricUpdateExpr("numTargetRowsUpdated", deterministic = true)
+    val incrUpdatedMatchedCountExpr =
+      metricUpdateExpr("numTargetRowsMatchedUpdated", deterministic = true)
+    val incrUpdatedNotMatchedBySourceCountExpr =
+      metricUpdateExpr("numTargetRowsNotMatchedBySourceUpdated", deterministic = true)
     val incrInsertedCountExpr =
       metricUpdateExpr("numTargetRowsInserted", deterministic = true)
     val incrNoopCountExpr =
       metricUpdateExpr("numTargetRowsCopied", deterministic = true)
     val incrDeletedCountExpr =
       metricUpdateExpr("numTargetRowsDeleted", deterministic = true)
+    val incrDeletedMatchedCountExpr =
+      metricUpdateExpr("numTargetRowsMatchedDeleted", deterministic = true)
+    val incrDeletedNotMatchedBySourceCountExpr =
+      metricUpdateExpr("numTargetRowsNotMatchedBySourceDeleted", deterministic = true)
 
     // Apply an outer join to find both, matches and non-matches. We are adding two boolean fields
     // with value `true`, one to each side of the join. Whether this field is null or not after
@@ -705,17 +789,68 @@ case class GpuMergeIntoCommand(
     // We add row IDs to the targetDF if we have a delete-when-matched clause with duplicate
     // matches and CDC is enabled, and additionally add row IDs to the source if we also have an
     // insert clause. See above at isDeleteWithDuplicateMatchesAndCdc definition for more details.
-    var sourceDF = getMergeSource.df
-        .withColumn(SOURCE_ROW_PRESENT_COL, makeMetricUpdateUDF("numSourceRowsInSecondScan"))
-    var targetDF = Dataset.ofRows(spark, newTarget)
-        .withColumn(TARGET_ROW_PRESENT_COL, lit(true))
-    if (isDeleteWithDuplicateMatchesAndCdc) {
-      targetDF = targetDF.withColumn(TARGET_ROW_ID_COL, monotonically_increasing_id())
-      if (notMatchedClauses.nonEmpty) { // insert clause
-        sourceDF = sourceDF.withColumn(SOURCE_ROW_ID_COL, monotonically_increasing_id())
-      }
+    // Every helper column is attached under a name absent from both sides (see uniqueColumnName),
+    // so it cannot replace a user column that the clause expressions still reference and it
+    // resolves unambiguously on the joined plan.
+    val sourcePlanDF = getMergeSource.df
+    // Row tracking: the target's materialized row id and commit version columns ride along with
+    // the target output columns, so rewritten rows keep their ids as they do on the CPU. Copied
+    // rows keep both, updated rows keep the id and get a null commit version (the writer assigns
+    // the new one), inserted rows get both null. Without row tracking the helper adds nothing.
+    val (targetPlanDF, rowTrackingCols, rowTrackingUpdateExprs) =
+      UpdateCommandShims.preserveRowTrackingColumns(
+        Dataset.ofRows(spark, newTarget), deltaTxn.snapshot, Seq.empty, Seq.empty)
+    targetOutputCols = targetOutputCols ++ rowTrackingCols
+    // The processors rebuild their output attributes from this schema, and the Delta writer
+    // recognises the row tracking columns by the field metadata the helper put on them, so the
+    // metadata has to be carried; the columns are nullable because updates reset the version.
+    outputRowSchema = rowTrackingCols.foldLeft(outputRowSchema) { (schema, attr) =>
+      schema.add(StructField(attr.name, attr.dataType, nullable = true, attr.metadata))
     }
-    val joinedDF = sourceDF.join(targetDF, DFUDFShims.exprToColumn(condition), joinType)
+    val rowTrackingInsertExprs: Seq[Expression] =
+      rowTrackingCols.map(attr => Literal(null, attr.dataType))
+    val userColumns = sourcePlanDF.columns.toSeq ++ targetPlanDF.columns.toSeq
+    val sourceRowPresentCol = uniqueColumnName(SOURCE_ROW_PRESENT_COL, userColumns)
+    val targetRowPresentCol =
+      uniqueColumnName(TARGET_ROW_PRESENT_COL, userColumns :+ sourceRowPresentCol)
+    val taken = userColumns ++ Seq(sourceRowPresentCol, targetRowPresentCol)
+    val dedupTargetRowIdCol = uniqueColumnName(TARGET_ROW_ID_COL, taken)
+    val dedupSourceRowIdCol = uniqueColumnName(SOURCE_ROW_ID_COL, taken :+ dedupTargetRowIdCol)
+    var sourceDF = sourcePlanDF
+        .withColumn(sourceRowPresentCol, makeMetricUpdateUDF("numSourceRowsInSecondScan"))
+    var targetDF = targetPlanDF.withColumn(targetRowPresentCol, lit(true))
+    if (isDeleteWithDuplicateMatchesAndCdc) {
+      targetDF = targetDF.withColumn(dedupTargetRowIdCol, monotonically_increasing_id())
+      if (notMatchedClauses.nonEmpty) { // insert clause
+        sourceDF = sourceDF.withColumn(dedupSourceRowIdCol, monotonically_increasing_id())
+      }
+    } else if (hasNonEffectiveDuplicateMatches) {
+      // Row ids on both sides identify the joined pairs of one target row for de-duplication.
+      targetDF = targetDF.withColumn(dedupTargetRowIdCol, monotonically_increasing_id())
+      sourceDF = sourceDF.withColumn(dedupSourceRowIdCol, monotonically_increasing_id())
+    }
+    val rawJoinedDF = sourceDF.join(targetDF, DFUDFShims.exprToColumn(condition), joinType)
+    val joinedDF = if (hasNonEffectiveDuplicateMatches) {
+      // Some target rows matched several source rows on the ON condition, of which at most one
+      // takes a WHEN MATCHED action (findTouchedFiles rejected the ambiguous cases). Keep one
+      // joined pair per target row, preferring the pair that takes an action: the dropped pairs
+      // hold source rows that are matched (so they must not be inserted) and take no action, and
+      // when no pair takes an action the surviving one copies the target row unchanged. Source-only
+      // and target-only rows form partitions of their own and pass through.
+      val effective =
+        when(DFUDFShims.exprToColumn(effectiveMatchPredicate), lit(1)).otherwise(lit(0))
+      val rankCol = uniqueColumnName(DUPLICATE_MATCH_RANK_COL, rawJoinedDF.columns.toSeq)
+      val onePairPerTargetRow = Window
+          .partitionBy(col(dedupTargetRowIdCol),
+            when(col(targetRowPresentCol).isNull, col(dedupSourceRowIdCol)))
+          .orderBy(effective.desc)
+      rawJoinedDF
+          .withColumn(rankCol, row_number().over(onePairPerTargetRow))
+          .filter(col(rankCol) === lit(1))
+          .drop(rankCol, dedupTargetRowIdCol, dedupSourceRowIdCol)
+    } else {
+      rawJoinedDF
+    }
     val joinedPlan = joinedDF.queryExecution.analyzed
 
     def resolveOnJoinedPlan(exprs: Seq[Expression]): Seq[Expression] = {
@@ -738,7 +873,7 @@ case class GpuMergeIntoCommand(
     // and rows for the CDC data which will be output to CDCReader.CDC_LOCATION.
     // See [[CDCReader]] for general details on how partitioning on the CDC type column works.
 
-    // In the following two functions `matchedClauseOutput` and `notMatchedClauseOutput`, we
+    // In the following functions `updateOutput`, `deleteOutput` and `insertOutput`, we
     // produce a Seq[Expression] for each intended output row.
     // Depending on the clause and whether CDC is enabled, we output between 0 and 3 rows, as a
     // Seq[Seq[Expression]]
@@ -753,13 +888,21 @@ case class GpuMergeIntoCommand(
     // These ROW_ID_COL will always be dropped before the final write.
 
     if (isDeleteWithDuplicateMatchesAndCdc) {
-      targetOutputCols = targetOutputCols :+ UnresolvedAttribute(TARGET_ROW_ID_COL)
-      outputRowSchema = outputRowSchema.add(TARGET_ROW_ID_COL, DataTypes.LongType)
+      targetOutputCols = targetOutputCols :+ UnresolvedAttribute(dedupTargetRowIdCol)
+      outputRowSchema = outputRowSchema.add(dedupTargetRowIdCol, DataTypes.LongType)
       if (notMatchedClauses.nonEmpty) { // there is an insert clause, make SRC_ROW_ID_COL=null
-        targetOutputCols = targetOutputCols :+ Alias(Literal(null), SOURCE_ROW_ID_COL)()
-        outputRowSchema = outputRowSchema.add(SOURCE_ROW_ID_COL, DataTypes.LongType)
+        // Typed: the GPU processor concatenates this output with the insert output, which
+        // carries the source row id as a long; an untyped null literal makes the types differ.
+        targetOutputCols = targetOutputCols :+ Alias(Literal(null, LongType), dedupSourceRowIdCol)()
+        outputRowSchema = outputRowSchema.add(dedupSourceRowIdCol, DataTypes.LongType)
       }
     }
+
+    // ROW_DROPPED_COL is the first control column every clause output appends after the target
+    // output columns, whether or not it is part of outputRowSchema (it is only with CDC). The
+    // processors read it by this position rather than by name, so a user column that happens to
+    // carry the name cannot be mistaken for it.
+    val rowDroppedColumnIndex = targetOutputCols.size
 
     if (cdcEnabled) {
       outputRowSchema = outputRowSchema
@@ -768,51 +911,54 @@ case class GpuMergeIntoCommand(
           .add(CDC_TYPE_COLUMN_NAME, DataTypes.StringType)
     }
 
-    def matchedClauseOutput(clause: DeltaMergeIntoMatchedClause): Seq[Seq[Expression]] = {
-      val exprs = clause match {
-        case u: DeltaMergeIntoMatchedUpdateClause =>
-          // Generate update expressions and set ROW_DELETED_COL = false and
-          // CDC_TYPE_COLUMN_NAME = CDC_TYPE_NOT_CDC
-          val mainDataOutput = u.resolvedActions.map(_.expr) :+ FalseLiteral :+
-              incrUpdatedCountExpr :+ CDC_TYPE_NOT_CDC_LITERAL
-          if (cdcEnabled) {
-            // For update preimage, we have do a no-op copy with ROW_DELETED_COL = false and
-            // CDC_TYPE_COLUMN_NAME = CDC_TYPE_UPDATE_PREIMAGE and INCR_ROW_COUNT_COL as a no-op
-            // (because the metric will be incremented in `mainDataOutput`)
-            val preImageOutput = targetOutputCols :+ FalseLiteral :+ TrueLiteral :+
-                Literal(CDC_TYPE_UPDATE_PREIMAGE)
-            // For update postimage, we have the same expressions as for mainDataOutput but with
-            // INCR_ROW_COUNT_COL as a no-op (because the metric will be incremented in
-            // `mainDataOutput`), and CDC_TYPE_COLUMN_NAME = CDC_TYPE_UPDATE_POSTIMAGE
-            val postImageOutput = mainDataOutput.dropRight(2) :+ TrueLiteral :+
-                Literal(CDC_TYPE_UPDATE_POSTIMAGE)
-            Seq(mainDataOutput, preImageOutput, postImageOutput)
-          } else {
-            Seq(mainDataOutput)
-          }
-        case _: DeltaMergeIntoMatchedDeleteClause =>
-          // Generate expressions to set the ROW_DELETED_COL = true and CDC_TYPE_COLUMN_NAME =
-          // CDC_TYPE_NOT_CDC
-          val mainDataOutput = targetOutputCols :+ TrueLiteral :+ incrDeletedCountExpr :+
-              CDC_TYPE_NOT_CDC_LITERAL
-          if (cdcEnabled) {
-            // For delete we do a no-op copy with ROW_DELETED_COL = false, INCR_ROW_COUNT_COL as a
-            // no-op (because the metric will be incremented in `mainDataOutput`) and
-            // CDC_TYPE_COLUMN_NAME = CDC_TYPE_DELETE
-            val deleteCdcOutput = targetOutputCols :+ FalseLiteral :+ TrueLiteral :+
-                Literal(CDC_TYPE_DELETE)
-            Seq(mainDataOutput, deleteCdcOutput)
-          } else {
-            Seq(mainDataOutput)
-          }
+    def updateOutput(
+        updateExprs: Seq[Expression],
+        incrMetricExpr: Expression): Seq[Seq[Expression]] = {
+      // Generate update expressions and set ROW_DELETED_COL = false and
+      // CDC_TYPE_COLUMN_NAME = CDC_TYPE_NOT_CDC
+      val mainDataOutput = updateExprs :+ FalseLiteral :+ incrMetricExpr :+
+          CDC_TYPE_NOT_CDC_LITERAL
+      val exprs = if (cdcEnabled) {
+        // For update preimage, we have do a no-op copy with ROW_DELETED_COL = false and
+        // CDC_TYPE_COLUMN_NAME = CDC_TYPE_UPDATE_PREIMAGE and INCR_ROW_COUNT_COL as a no-op
+        // (because the metric will be incremented in `mainDataOutput`)
+        val preImageOutput = targetOutputCols :+ FalseLiteral :+ TrueLiteral :+
+            Literal(CDC_TYPE_UPDATE_PREIMAGE)
+        // For update postimage, we have the same expressions as for mainDataOutput but with
+        // INCR_ROW_COUNT_COL as a no-op (because the metric will be incremented in
+        // `mainDataOutput`), and CDC_TYPE_COLUMN_NAME = CDC_TYPE_UPDATE_POSTIMAGE
+        val postImageOutput = mainDataOutput.dropRight(2) :+ TrueLiteral :+
+            Literal(CDC_TYPE_UPDATE_POSTIMAGE)
+        Seq(mainDataOutput, preImageOutput, postImageOutput)
+      } else {
+        Seq(mainDataOutput)
       }
       exprs.map(resolveOnJoinedPlan)
     }
 
-    def notMatchedClauseOutput(clause: DeltaMergeIntoNotMatchedClause): Seq[Seq[Expression]] = {
+    def deleteOutput(incrMetricExpr: Expression): Seq[Seq[Expression]] = {
+      // Generate expressions to set the ROW_DELETED_COL = true and CDC_TYPE_COLUMN_NAME =
+      // CDC_TYPE_NOT_CDC
+      val mainDataOutput = targetOutputCols :+ TrueLiteral :+ incrMetricExpr :+
+          CDC_TYPE_NOT_CDC_LITERAL
+      val exprs = if (cdcEnabled) {
+        // For delete we do a no-op copy with ROW_DELETED_COL = false, INCR_ROW_COUNT_COL as a
+        // no-op (because the metric will be incremented in `mainDataOutput`) and
+        // CDC_TYPE_COLUMN_NAME = CDC_TYPE_DELETE
+        val deleteCdcOutput = targetOutputCols :+ FalseLiteral :+ TrueLiteral :+
+            Literal(CDC_TYPE_DELETE)
+        Seq(mainDataOutput, deleteCdcOutput)
+      } else {
+        Seq(mainDataOutput)
+      }
+      exprs.map(resolveOnJoinedPlan)
+    }
+
+    def insertOutput(
+        insertExprs: Seq[Expression],
+        incrMetricExpr: Expression): Seq[Seq[Expression]] = {
       // Generate insert expressions and set ROW_DELETED_COL = false and
       // CDC_TYPE_COLUMN_NAME = CDC_TYPE_NOT_CDC
-      val insertExprs = clause.resolvedActions.map(_.expr)
       val mainDataOutput = resolveOnJoinedPlan(
         if (isDeleteWithDuplicateMatchesAndCdc) {
           // Must be delete-when-matched merge with duplicate matches + insert clause
@@ -820,10 +966,11 @@ case class GpuMergeIntoCommand(
           // clause we know the target row-id will be null. See above at
           // isDeleteWithDuplicateMatchesAndCdc definition for more details.
           insertExprs :+
-              Alias(Literal(null), TARGET_ROW_ID_COL)() :+ UnresolvedAttribute(SOURCE_ROW_ID_COL) :+
-              FalseLiteral :+ incrInsertedCountExpr :+ CDC_TYPE_NOT_CDC_LITERAL
+              Alias(Literal(null, LongType), dedupTargetRowIdCol)() :+
+              UnresolvedAttribute(dedupSourceRowIdCol) :+
+              FalseLiteral :+ incrMetricExpr :+ CDC_TYPE_NOT_CDC_LITERAL
         } else {
-          insertExprs :+ FalseLiteral :+ incrInsertedCountExpr :+ CDC_TYPE_NOT_CDC_LITERAL
+          insertExprs :+ FalseLiteral :+ incrMetricExpr :+ CDC_TYPE_NOT_CDC_LITERAL
         }
       )
       if (cdcEnabled) {
@@ -837,6 +984,24 @@ case class GpuMergeIntoCommand(
       }
     }
 
+    def clauseOutput(clause: DeltaMergeIntoClause): Seq[Seq[Expression]] = clause match {
+      case u: DeltaMergeIntoMatchedUpdateClause =>
+        updateOutput(u.resolvedActions.map(_.expr) ++ rowTrackingUpdateExprs,
+          And(incrUpdatedCountExpr, incrUpdatedMatchedCountExpr))
+      case _: DeltaMergeIntoMatchedDeleteClause =>
+        deleteOutput(And(incrDeletedCountExpr, incrDeletedMatchedCountExpr))
+      case i: DeltaMergeIntoNotMatchedClause =>
+        insertOutput(i.resolvedActions.map(_.expr) ++ rowTrackingInsertExprs,
+          incrInsertedCountExpr)
+      case u: DeltaMergeIntoNotMatchedBySourceUpdateClause =>
+        updateOutput(u.resolvedActions.map(_.expr) ++ rowTrackingUpdateExprs,
+          And(incrUpdatedCountExpr, incrUpdatedNotMatchedBySourceCountExpr))
+      case _: DeltaMergeIntoNotMatchedBySourceDeleteClause =>
+        deleteOutput(And(incrDeletedCountExpr, incrDeletedNotMatchedBySourceCountExpr))
+      case other =>
+        throw new IllegalArgumentException(s"Unsupported merge clause: ${other.getClass.getName}")
+    }
+
     def clauseCondition(clause: DeltaMergeIntoClause): Expression = {
       // if condition is None, then expression always evaluates to true
       val condExpr = clause.condition.getOrElse(TrueLiteral)
@@ -844,17 +1009,15 @@ case class GpuMergeIntoCommand(
     }
 
     val targetRowHasNoMatch =
-      resolveOnJoinedPlan(Seq(IsNull(UnresolvedAttribute(SOURCE_ROW_PRESENT_COL)))).head
+      resolveOnJoinedPlan(Seq(IsNull(UnresolvedAttribute(sourceRowPresentCol)))).head
     val sourceRowHasNoMatch =
-      resolveOnJoinedPlan(Seq(IsNull(UnresolvedAttribute(TARGET_ROW_PRESENT_COL)))).head
+      resolveOnJoinedPlan(Seq(IsNull(UnresolvedAttribute(targetRowPresentCol)))).head
     val matchedConditions = matchedClauses.map(clauseCondition)
-    val matchedOutputs = matchedClauses.map(matchedClauseOutput)
+    val matchedOutputs = matchedClauses.map(clauseOutput)
     val notMatchedConditions = notMatchedClauses.map(clauseCondition)
-    val notMatchedOutputs = notMatchedClauses.map(notMatchedClauseOutput)
-    // TODO support notMatchedBySourceClauses which is new in DBR 12.2
-    // https://github.com/NVIDIA/spark-rapids/issues/8415
-    val notMatchedBySourceConditions = Seq.empty
-    val notMatchedBySourceOutputs = Seq.empty
+    val notMatchedOutputs = notMatchedClauses.map(clauseOutput)
+    val notMatchedBySourceConditions = notMatchedBySourceClauses.map(clauseCondition)
+    val notMatchedBySourceOutputs = notMatchedBySourceClauses.map(clauseOutput)
     val noopCopyOutput =
       resolveOnJoinedPlan(targetOutputCols :+ FalseLiteral :+ incrNoopCountExpr :+
           CDC_TYPE_NOT_CDC_LITERAL)
@@ -871,7 +1034,20 @@ case class GpuMergeIntoCommand(
       notMatchedBySourceConditions = notMatchedBySourceConditions,
       notMatchedBySourceOutputs = notMatchedBySourceOutputs,
       noopCopyOutput = noopCopyOutput,
-      deleteRowOutput = deleteRowOutput)
+      deleteRowOutput = deleteRowOutput,
+      rowDroppedColumnIndex = rowDroppedColumnIndex)
+
+    // The two control columns are part of the output only with CDC. They are the last attributes
+    // carrying those names, so dropping them by attribute leaves a user column of the same name in
+    // place, where dropping by name would remove that column as well.
+    def dropControlColumns(df: DataFrame): DataFrame = if (!cdcEnabled) {
+      df
+    } else {
+      val output = df.queryExecution.analyzed.output
+      Seq(ROW_DROPPED_COL, INCR_ROW_COUNT_COL)
+          .flatMap(name => output.reverse.find(_.name == name))
+          .foldLeft(df)((d, attr) => d.drop(DFUDFShims.exprToColumn(attr)))
+    }
 
     if (isDeleteWithDuplicateMatchesAndCdc) {
       // When we have a delete when matched clause with duplicate matches we have to remove
@@ -884,15 +1060,14 @@ case class GpuMergeIntoCommand(
       // SOURCE_ROW_ID_COL and CDC_TYPE_COLUMN_NAME to avoid dropping valid duplicate inserted rows
       // and their corresponding CDC rows.
       val columnsToDedupeBy = if (notMatchedClauses.nonEmpty) { // insert clause
-        Seq(TARGET_ROW_ID_COL, SOURCE_ROW_ID_COL, CDC_TYPE_COLUMN_NAME)
+        Seq(dedupTargetRowIdCol, dedupSourceRowIdCol, CDC_TYPE_COLUMN_NAME)
       } else {
-        Seq(TARGET_ROW_ID_COL)
+        Seq(dedupTargetRowIdCol)
       }
-      outputDF = outputDF
-          .dropDuplicates(columnsToDedupeBy)
-          .drop(ROW_DROPPED_COL, INCR_ROW_COUNT_COL, TARGET_ROW_ID_COL, SOURCE_ROW_ID_COL)
+      outputDF = dropControlColumns(outputDF.dropDuplicates(columnsToDedupeBy))
+          .drop(dedupTargetRowIdCol, dedupSourceRowIdCol)
     } else {
-      outputDF = outputDF.drop(ROW_DROPPED_COL, INCR_ROW_COUNT_COL)
+      outputDF = dropControlColumns(outputDF)
     }
 
     logDebug("writeAllChanges: join output plan:\n" + outputDF.queryExecution)
@@ -914,6 +1089,10 @@ case class GpuMergeIntoCommand(
         metrics("numTargetRowsDeleted").value - multipleMatchDeleteOnlyOvercount.get
       assert(actualRowsDeleted >= 0)
       metrics("numTargetRowsDeleted").set(actualRowsDeleted)
+      val actualRowsMatchedDeleted =
+        metrics("numTargetRowsMatchedDeleted").value - multipleMatchDeleteOnlyOvercount.get
+      assert(actualRowsMatchedDeleted >= 0)
+      metrics("numTargetRowsMatchedDeleted").set(actualRowsMatchedDeleted)
     }
 
     newFiles
@@ -932,7 +1111,8 @@ case class GpuMergeIntoCommand(
       notMatchedBySourceConditions: Seq[Expression],
       notMatchedBySourceOutputs: Seq[Seq[Seq[Expression]]],
       noopCopyOutput: Seq[Expression],
-      deleteRowOutput: Seq[Expression]): Dataset[Row] = {
+      deleteRowOutput: Seq[Expression],
+      rowDroppedColumnIndex: Int): Dataset[Row] = {
     def wrap(e: Expression): BaseExprMeta[Expression] = {
       GpuOverrides.wrapExpr(e, rapidsConf, None)
     }
@@ -979,7 +1159,8 @@ case class GpuMergeIntoCommand(
         notMatchedBySourceConditions = notMatchedBySourceConditions,
         notMatchedBySourceOutputs = notMatchedBySourceOutputs,
         noopCopyOutput = noopCopyOutput,
-        deleteRowOutput = deleteRowOutput)
+        deleteRowOutput = deleteRowOutput,
+        rowDroppedColumnIndex = Some(rowDroppedColumnIndex))
       Dataset.ofRows(spark, processedJoinPlan)
     } else {
       val joinedRowEncoder = ExpressionEncoder(RowEncoder.encoderFor(joinedPlan.schema))
@@ -993,11 +1174,14 @@ case class GpuMergeIntoCommand(
         matchedOutputs = matchedOutputs,
         notMatchedConditions = notMatchedConditions,
         notMatchedOutputs = notMatchedOutputs,
+        notMatchedBySourceConditions = notMatchedBySourceConditions,
+        notMatchedBySourceOutputs = notMatchedBySourceOutputs,
         noopCopyOutput = noopCopyOutput,
         deleteRowOutput = deleteRowOutput,
         joinedAttributes = joinedPlan.output,
         joinedRowEncoder = joinedRowEncoder,
-        outputRowEncoder = outputRowEncoder)
+        outputRowEncoder = outputRowEncoder,
+        rowDroppedColumnIndex = rowDroppedColumnIndex)
 
       Dataset.ofRows(spark, joinedPlan).mapPartitions(processor.processPartition)(outputRowEncoder)
     }
@@ -1145,6 +1329,7 @@ object GpuMergeIntoCommand {
   val FILE_NAME_COL = "_file_name_"
   val SOURCE_ROW_PRESENT_COL = "_source_row_present_"
   val TARGET_ROW_PRESENT_COL = "_target_row_present_"
+  val DUPLICATE_MATCH_RANK_COL = "_duplicate_match_rank_"
   val ROW_DROPPED_COL = GpuDeltaMergeConstants.ROW_DROPPED_COL
   val INCR_ROW_COUNT_COL = "_incr_row_count_"
 
@@ -1166,12 +1351,18 @@ object GpuMergeIntoCommand {
    * @param notMatchedOutputs     corresponding output for each not-matched clause. for each clause,
    *                              we have 1-2 output rows, each of which is a sequence of
    *                              expressions to apply to the joined row
+   * @param notMatchedBySourceConditions  condition for each not-matched-by-source clause
+   * @param notMatchedBySourceOutputs     corresponding output for each not-matched-by-source
+   *                                      clause. for each clause, we have 1-3 output rows, each of
+   *                                      which is a sequence of expressions to apply to the joined
+   *                                      row
    * @param noopCopyOutput        no-op expression to copy a target row to the output
    * @param deleteRowOutput       expression to drop a row from the final output. this is used for
    *                              source rows that don't match any not-matched clauses
    * @param joinedAttributes      schema of our outer-joined dataframe
    * @param joinedRowEncoder      joinedDF row encoder
    * @param outputRowEncoder      final output row encoder
+   * @param rowDroppedColumnIndex position of ROW_DROPPED_COL in every projected output row
    */
   class JoinedRowProcessor(
       targetRowHasNoMatch: Expression,
@@ -1180,11 +1371,14 @@ object GpuMergeIntoCommand {
       matchedOutputs: Seq[Seq[Seq[Expression]]],
       notMatchedConditions: Seq[Expression],
       notMatchedOutputs: Seq[Seq[Seq[Expression]]],
+      notMatchedBySourceConditions: Seq[Expression],
+      notMatchedBySourceOutputs: Seq[Seq[Seq[Expression]]],
       noopCopyOutput: Seq[Expression],
       deleteRowOutput: Seq[Expression],
       joinedAttributes: Seq[Attribute],
       joinedRowEncoder: ExpressionEncoder[Row],
-      outputRowEncoder: ExpressionEncoder[Row]) extends Serializable {
+      outputRowEncoder: ExpressionEncoder[Row],
+      rowDroppedColumnIndex: Int) extends Serializable {
 
     private def generateProjection(exprs: Seq[Expression]): UnsafeProjection = {
       UnsafeProjection.create(exprs, joinedAttributes)
@@ -1202,43 +1396,38 @@ object GpuMergeIntoCommand {
       val matchedProjs = matchedOutputs.map(_.map(generateProjection))
       val notMatchedPreds = notMatchedConditions.map(generatePredicate)
       val notMatchedProjs = notMatchedOutputs.map(_.map(generateProjection))
+      val notMatchedBySourcePreds = notMatchedBySourceConditions.map(generatePredicate)
+      val notMatchedBySourceProjs = notMatchedBySourceOutputs.map(_.map(generateProjection))
       val noopCopyProj = generateProjection(noopCopyOutput)
       val deleteRowProj = generateProjection(deleteRowOutput)
       val outputProj = UnsafeProjection.create(outputRowEncoder.schema)
 
-      // this is accessing ROW_DROPPED_COL. If ROW_DROPPED_COL is not in outputRowEncoder.schema
-      // then CDC must be disabled and it's the column after our output cols
-      def shouldDeleteRow(row: InternalRow): Boolean = {
-        row.getBoolean(
-          outputRowEncoder.schema.getFieldIndex(ROW_DROPPED_COL)
-              .getOrElse(outputRowEncoder.schema.fields.size)
-        )
-      }
+      // ROW_DROPPED_COL sits right after the target output columns in every projected row,
+      // whether or not it is part of outputRowEncoder.schema (it is only with CDC).
+      def shouldDeleteRow(row: InternalRow): Boolean = row.getBoolean(rowDroppedColumnIndex)
 
       def processRow(inputRow: InternalRow): Iterator[InternalRow] = {
-        if (targetRowHasNoMatchPred.eval(inputRow)) {
-          // Target row did not match any source row, so just copy it to the output
-          Iterator(noopCopyProj.apply(inputRow))
+        // Identify which set of clauses to execute: matched, not-matched or not-matched-by-source
+        val (predicates, projections, noopAction) = if (targetRowHasNoMatchPred.eval(inputRow)) {
+          // Target row did not match any source row, so update the target row.
+          (notMatchedBySourcePreds, notMatchedBySourceProjs, noopCopyProj)
+        } else if (sourceRowHasNoMatchPred.eval(inputRow)) {
+          // Source row did not match with any target row, so insert the new source row
+          (notMatchedPreds, notMatchedProjs, deleteRowProj)
         } else {
-          // identify which set of clauses to execute: matched or not-matched ones
-          val (predicates, projections, noopAction) = if (sourceRowHasNoMatchPred.eval(inputRow)) {
-            // Source row did not match with any target row, so insert the new source row
-            (notMatchedPreds, notMatchedProjs, deleteRowProj)
-          } else {
-            // Source row matched with target row, so update the target row
-            (matchedPreds, matchedProjs, noopCopyProj)
-          }
+          // Source row matched with target row, so update the target row
+          (matchedPreds, matchedProjs, noopCopyProj)
+        }
 
-          // find (predicate, projection) pair whose predicate satisfies inputRow
-          val pair = (predicates zip projections).find {
-            case (predicate, _) => predicate.eval(inputRow)
-          }
+        // find (predicate, projection) pair whose predicate satisfies inputRow
+        val pair = (predicates zip projections).find {
+          case (predicate, _) => predicate.eval(inputRow)
+        }
 
-          pair match {
-            case Some((_, projections)) =>
-              projections.map(_.apply(inputRow)).iterator
-            case None => Iterator(noopAction.apply(inputRow))
-          }
+        pair match {
+          case Some((_, projections)) =>
+            projections.map(_.apply(inputRow)).iterator
+          case None => Iterator(noopAction.apply(inputRow))
         }
       }
 
