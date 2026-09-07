@@ -380,8 +380,7 @@ abstract class IcebergProviderBase extends IcebergProvider {
         s"${RapidsConf.ENABLE_ICEBERG_WRITE} to true")
     }
 
-    val outputSchema =
-      toSparkType(tableOf(cpuExec.write).schema(), ShimUtils.defaultValueAccessor())
+    val outputSchema = toSparkType(tableOf(cpuExec.write).schema())
     FileFormatChecks.tag(meta, outputSchema,
       IcebergFormatType, WriteFileOp)
 

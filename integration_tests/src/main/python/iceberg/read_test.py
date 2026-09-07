@@ -13,15 +13,13 @@
 # limitations under the License.
 
 import pytest
-from pyspark.sql import Row
 
 from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect
 from conftest import spark_jvm
-from data_gen import copy_and_update
 from iceberg import _build_tblprops, get_full_table_name, iceberg_unsupported_mark, \
-    iceberg_write_enabled_conf, supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON
+    supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON
 from marks import allow_non_gpu, iceberg, ignore_order
-from spark_session import is_spark_35x, with_cpu_session, with_gpu_session
+from spark_session import with_cpu_session, with_gpu_session
 
 pytestmark = iceberg_unsupported_mark
 
@@ -116,22 +114,6 @@ def test_iceberg_v3_initial_defaults_all_types(spark_tmp_table_factory):
 
     with_gpu_session(assert_gpu_scan, conf=v3_conf)
 
-    # On runtimes newer than Spark 3.5, verify that unmodified Spark/Iceberg applies an omitted
-    # optional write default.
-    if not is_spark_35x():
-        with_cpu_session(
-            lambda spark: spark.sql(
-                f"INSERT INTO {table_name} (id, s, required_added) VALUES "
-                "(4, named_struct('present', 40L, 'nested_added', 11), 7)").collect(),
-            conf=v3_conf)
-        written_rows = with_cpu_session(
-            lambda spark: spark.sql(
-                f"SELECT id, s.present, s.nested_added, required_added, optional_added "
-                f"FROM {table_name} WHERE id = 4").collect(),
-            conf=v3_conf)
-        assert written_rows == [Row(4, 40, 11, 7, "legacy")]
-
-
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @allow_non_gpu("BatchScanExec", "ColumnarToRowExec")
@@ -147,47 +129,3 @@ def test_iceberg_v3_unsupported_initial_defaults_fallback(spark_tmp_table_factor
                 f"SELECT id, {column} FROM {table_name}"),
             "BatchScanExec",
             conf=v3_conf)
-
-
-@iceberg
-@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
-@pytest.mark.skipif(is_spark_35x(), reason="Write-default INSERT coverage requires Spark 4.0 or later")
-@allow_non_gpu("LocalTableScanExec")
-def test_iceberg_v3_write_default_gpu_write_cpu_read(spark_tmp_table_factory):
-    table_name = get_full_table_name(spark_tmp_table_factory)
-    props = _build_tblprops({"format-version": "3"})
-    props_sql = ", ".join(f"'{key}' = '{value}'" for key, value in props.items())
-
-    def setup_table(spark):
-        spark.sql(
-            f"CREATE TABLE {table_name} (id BIGINT) USING ICEBERG "
-            f"TBLPROPERTIES ({props_sql})")
-
-        jvm = spark_jvm()
-        table = jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
-            spark._jsparkSession, table_name)
-        table.updateSchema().addColumn(
-            "optional_added",
-            jvm.org.apache.iceberg.types.Types.StringType.get(),
-            jvm.org.apache.iceberg.expressions.Literal.of("legacy")).commit()
-        spark.sql(f"REFRESH TABLE {table_name}")
-
-    with_cpu_session(setup_table)
-    conf = copy_and_update(iceberg_write_enabled_conf, {
-        "spark.rapids.sql.format.iceberg.v3.enabled": "true",
-        "spark.sql.adaptive.enabled": "false",
-    })
-
-    def write_with_gpu(spark):
-        df = spark.sql(f"INSERT INTO {table_name} (id) VALUES (4)")
-        df.collect()
-        command_plan = df._jdf.queryExecution().executedPlan().commandPhysicalPlan()
-        assert command_plan.getClass().getSimpleName() == "GpuAppendDataExec", command_plan
-
-    with_gpu_session(write_with_gpu, conf=conf)
-
-    written_rows = with_cpu_session(
-        lambda spark: spark.sql(
-            f"SELECT id, optional_added FROM {table_name} WHERE id = 4").collect(),
-        conf=conf)
-    assert written_rows == [Row(4, "legacy")]

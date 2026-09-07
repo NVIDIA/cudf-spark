@@ -72,8 +72,7 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       name: String,
       icebergType: org.apache.iceberg.types.Type,
       required: Boolean,
-      initialDefault: Option[AnyRef],
-      writeDefault: Option[AnyRef] = None): Option[Types.NestedField] = {
+      initialDefault: Option[AnyRef]): Option[Types.NestedField] = {
     try {
       val factory = classOf[Types.NestedField].getMethod(
         if (required) "required" else "optional", classOf[String])
@@ -85,9 +84,6 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
         .invoke(builder, icebergType)
       initialDefault.foreach { value =>
         builderClass.getMethod("withInitialDefault", classOf[Object]).invoke(builder, value)
-      }
-      writeDefault.foreach { value =>
-        builderClass.getMethod("withWriteDefault", classOf[Object]).invoke(builder, value)
       }
       Some(builderClass.getMethod("build").invoke(builder).asInstanceOf[Types.NestedField])
     } catch {

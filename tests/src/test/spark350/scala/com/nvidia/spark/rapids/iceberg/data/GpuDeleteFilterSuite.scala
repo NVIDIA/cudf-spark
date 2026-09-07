@@ -37,7 +37,7 @@ import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.GpuMetric.{JOIN_TIME, OP_TIME_LEGACY}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
-import com.nvidia.spark.rapids.iceberg.{fieldIndex, PooledTableGen, ShimUtils}
+import com.nvidia.spark.rapids.iceberg.{fieldIndex, PooledTableGen}
 import com.nvidia.spark.rapids.iceberg.data.TestGpuDeleteLoader._
 import com.nvidia.spark.rapids.iceberg.parquet.{GpuIcebergParquetReaderConf, SingleFile}
 import com.nvidia.spark.rapids.spill.SpillFramework
@@ -395,8 +395,7 @@ class TestGpuDeleteLoader(private val tableGen: PooledTableGen,
 private object TestGpuDeleteLoader {
   val NUM_ROWS: Int = 1000
   val TABLE_SCHEMA: Schema = tableSchema()
-  val TABLE_SPARK_TYPE: StructType =
-    toSparkType(TABLE_SCHEMA, ShimUtils.defaultValueAccessor())
+  val TABLE_SPARK_TYPE: StructType = toSparkType(TABLE_SCHEMA)
 
   def valueOf(col: HostColumnVectorCore, rowIdx: Int): AnyRef = {
     if (col.isNull(rowIdx)) {

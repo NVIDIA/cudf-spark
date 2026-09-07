@@ -297,7 +297,7 @@ class PooledTableGen(val schema: Schema,
     arr => HostColumnVector.fromBoxedBooleans(arr: _*))
 
 
-  private val sparkType = toSparkType(schema, ShimUtils.defaultValueAccessor())
+  private val sparkType = toSparkType(schema)
   private val columnDataGens = schema
     .columns()
     .asScala

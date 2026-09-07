@@ -74,8 +74,7 @@ object IcebergFormatVersionSupport {
     def find(fields: Seq[Types.NestedField], parent: String): Option[(String, String)] = {
       fields.iterator.map { field =>
         val path = if (parent.isEmpty) field.name() else s"$parent.${field.name()}"
-        val hasDefault =
-          ShimUtils.hasInitialDefault(field) || ShimUtils.hasWriteDefault(field)
+        val hasDefault = ShimUtils.hasInitialDefault(field)
         val fieldType = field.`type`()
 
         val unsupportedTimestampNtz = fieldType == Types.TimestampType.withoutZone()

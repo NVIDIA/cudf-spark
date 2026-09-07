@@ -29,7 +29,7 @@ import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.SpillPriorities.ACTIVE_ON_DECK_PRIORITY
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
 import com.nvidia.spark.rapids.iceberg.{ColumnarBatchWithPartition, GpuIcebergPartitioner,
-  GpuIcebergSpecPartitioner, IcebergFormatVersionSupport, ShimUtils}
+  GpuIcebergSpecPartitioner, IcebergFormatVersionSupport}
 import com.nvidia.spark.rapids.iceberg.utils.GpuStructProjection
 import org.apache.hadoop.mapreduce.Job
 import org.apache.iceberg._
@@ -155,7 +155,7 @@ object GpuSparkPositionDeltaWrite {
   private[source] def dataWriterSparkTypeFor(
       command: Command,
       context: GpuWriteContext): StructType = {
-    toSparkType(dataWriterSchemaFor(command, context), ShimUtils.defaultValueAccessor())
+    toSparkType(dataWriterSchemaFor(command, context))
   }
 
   def tableOf(deltaWrite: DeltaWrite): Table = {
@@ -181,7 +181,7 @@ object GpuSparkPositionDeltaWrite {
     // safe to use normal write tag method
     GpuSparkWrite.tagForGpuWrite(
       Option(context.dataFileFormat),
-      Option(toSparkType(table.schema(), ShimUtils.defaultValueAccessor())),
+      Option(toSparkType(table.schema())),
       Option(table.schema()),
       Option(context.deleteFileFormat),
       partitionSpec,
@@ -578,7 +578,7 @@ class GpuDeleteOnlyDeltaWriter(
   // Ordinals for extracting fields from delete records
   private val tablePartitionType: IcebergTypes.StructType = Partitioning.partitionType(table)
   private val tablePartitionSparkType: StructType = GpuTypeToSparkType
-    .toSparkType(tablePartitionType, ShimUtils.defaultValueAccessor())
+    .toSparkType(tablePartitionType)
   private val tablePartitionDataTypes: Array[DataType] = tablePartitionSparkType
     .fields
     .map(_.dataType)
@@ -688,7 +688,7 @@ class GpuUnpartitionedDeltaWriter(
   // Partition handling
   protected val tablePartitionType: IcebergTypes.StructType = Partitioning.partitionType(table)
   protected val tablePartitionSparkType: StructType = GpuTypeToSparkType
-    .toSparkType(tablePartitionType, ShimUtils.defaultValueAccessor())
+    .toSparkType(tablePartitionType)
   protected val tablePartitionDataTypes: Array[DataType] = tablePartitionSparkType
     .fields
     .map(_.dataType)
@@ -740,7 +740,7 @@ class GpuPartitionedDeltaWriter(
   // Partition handling
   protected val tablePartitionType: IcebergTypes.StructType = Partitioning.partitionType(table)
   protected val tablePartitionSparkType: StructType = GpuTypeToSparkType
-    .toSparkType(tablePartitionType, ShimUtils.defaultValueAccessor())
+    .toSparkType(tablePartitionType)
   protected val tablePartitionDataTypes: Array[DataType] = tablePartitionSparkType
     .fields
     .map(_.dataType)
@@ -814,8 +814,7 @@ case class GpuWriteContext(
 }
 
 object GpuWriteContext {
-  val positionDeleteSparkType: StructType =
-    toSparkType(DeleteSchemaUtil.pathPosSchema(), ShimUtils.defaultValueAccessor())
+  val positionDeleteSparkType: StructType = toSparkType(DeleteSchemaUtil.pathPosSchema())
 
   private[iceberg] val positionDeleteDataTypes = positionDeleteSparkType.fields.map(_.dataType)
   private[iceberg] val emptyPartitionData: PartitionData =

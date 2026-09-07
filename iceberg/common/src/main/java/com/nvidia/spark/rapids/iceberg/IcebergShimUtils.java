@@ -47,32 +47,18 @@ import java.util.Map;
  * this interface. The correct implementation is selected at runtime by
  * {@link ShimUtils} based on the detected Iceberg version.
  */
-public interface IcebergShimUtils extends IcebergDefaultValueAccessor {
+public interface IcebergShimUtils {
     /** Returns the Iceberg table format version from the table's current metadata. */
     int formatVersion(Table table);
 
     /** Returns whether this field has an Iceberg v3 initial default. */
-    @Override
     default boolean hasInitialDefault(Types.NestedField field) {
         return false;
     }
 
     /** Converts an Iceberg v3 initial default to Spark's internal value representation. */
-    @Override
     default Object initialDefaultToSpark(Types.NestedField field) {
         throw new UnsupportedOperationException("Iceberg initial defaults are not supported");
-    }
-
-    /** Returns whether this field has an Iceberg v3 write default. */
-    @Override
-    default boolean hasWriteDefault(Types.NestedField field) {
-        return false;
-    }
-
-    /** Converts an Iceberg v3 write default to Spark's internal value representation. */
-    @Override
-    default Object writeDefaultToSpark(Types.NestedField field) {
-        throw new UnsupportedOperationException("Iceberg write defaults are not supported");
     }
 
     /**

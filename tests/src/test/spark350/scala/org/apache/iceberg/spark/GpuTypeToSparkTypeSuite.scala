@@ -29,7 +29,6 @@ spark-rapids-shim-json-lines ***/
 package org.apache.iceberg.spark
 
 import com.nvidia.spark.rapids.SchemaUtils._
-import com.nvidia.spark.rapids.iceberg.ShimUtils
 import org.apache.iceberg.Schema
 import org.apache.iceberg.types.Types
 import org.scalatest.funsuite.AnyFunSuite
@@ -39,35 +38,9 @@ import org.apache.spark.sql.types.{ArrayType, IntegerType, MapType, Metadata, St
 
 class GpuTypeToSparkTypeSuite extends AnyFunSuite {
 
-  private def fieldWithDefaults(
-      id: Int,
-      name: String,
-      icebergType: org.apache.iceberg.types.Type,
-      initialDefault: Option[AnyRef],
-      writeDefault: Option[AnyRef]): Option[Types.NestedField] = {
-    try {
-      val builder = classOf[Types.NestedField].getMethod("optional", classOf[String])
-        .invoke(null, name)
-      val builderClass = builder.getClass
-      builderClass.getMethod("withId", java.lang.Integer.TYPE).invoke(builder, Int.box(id))
-      builderClass.getMethod("ofType", classOf[org.apache.iceberg.types.Type])
-        .invoke(builder, icebergType)
-      initialDefault.foreach { value =>
-        builderClass.getMethod("withInitialDefault", classOf[Object]).invoke(builder, value)
-      }
-      writeDefault.foreach { value =>
-        builderClass.getMethod("withWriteDefault", classOf[Object]).invoke(builder, value)
-      }
-      Some(builderClass.getMethod("build").invoke(builder).asInstanceOf[Types.NestedField])
-    } catch {
-      case _: NoSuchMethodException => None
-    }
-  }
-
   private def fieldOf(field: Types.NestedField): Metadata = {
     val schema = new Schema(field)
-    GpuTypeToSparkType.toSparkType(schema, ShimUtils.defaultValueAccessor())
-      .apply(field.name()).metadata
+    GpuTypeToSparkType.toSparkType(schema)(field.name()).metadata
   }
 
   test("toSparkType records no nested ids for a primitive top-level field") {
@@ -75,51 +48,6 @@ class GpuTypeToSparkTypeSuite extends AnyFunSuite {
     assert(md.getLong(FIELD_ID_METADATA_KEY) == 1L)
     assert(!md.contains(LIST_ELEMENT_FIELD_ID_METADATA_KEY))
     assert(!md.contains(LIST_ELEMENT_NESTED_IDS_METADATA_KEY))
-  }
-
-  test("toSparkType preserves Iceberg defaults alongside field-id metadata") {
-    val field = fieldWithDefaults(
-      1,
-      "value",
-      Types.IntegerType.get(),
-      initialDefault = Some(Int.box(7)),
-      writeDefault = Some(Int.box(9))).getOrElse {
-      cancel("Iceberg runtime does not expose v3 field defaults")
-    }
-
-    val metadata = fieldOf(field)
-    assert(metadata.getLong(FIELD_ID_METADATA_KEY) == 1L)
-    assert(metadata.getString(GpuTypeToSparkType.EXISTS_DEFAULT_COLUMN_METADATA_KEY) == "7")
-    assert(metadata.getString(GpuTypeToSparkType.CURRENT_DEFAULT_COLUMN_METADATA_KEY) == "9")
-  }
-
-  test("toSparkType keeps initial and write defaults independent") {
-    val initialOnly = fieldWithDefaults(
-      2,
-      "initial_only",
-      Types.IntegerType.get(),
-      initialDefault = Some(Int.box(7)),
-      writeDefault = None).getOrElse {
-      cancel("Iceberg runtime does not expose v3 field defaults")
-    }
-    val writeOnly = fieldWithDefaults(
-      3,
-      "write_only",
-      Types.IntegerType.get(),
-      initialDefault = None,
-      writeDefault = Some(Int.box(9))).getOrElse {
-      cancel("Iceberg runtime does not expose v3 field defaults")
-    }
-
-    val initialMetadata = fieldOf(initialOnly)
-    assert(initialMetadata.getString(
-      GpuTypeToSparkType.EXISTS_DEFAULT_COLUMN_METADATA_KEY) == "7")
-    assert(!initialMetadata.contains(GpuTypeToSparkType.CURRENT_DEFAULT_COLUMN_METADATA_KEY))
-
-    val writeMetadata = fieldOf(writeOnly)
-    assert(!writeMetadata.contains(GpuTypeToSparkType.EXISTS_DEFAULT_COLUMN_METADATA_KEY))
-    assert(writeMetadata.getString(
-      GpuTypeToSparkType.CURRENT_DEFAULT_COLUMN_METADATA_KEY) == "9")
   }
 
   test("toSparkType: flat list records only the element id") {
@@ -190,8 +118,7 @@ class GpuTypeToSparkTypeSuite extends AnyFunSuite {
     assert(!innerListMd.contains(LIST_ELEMENT_NESTED_IDS_METADATA_KEY))
 
     // Instead, they are attached to the inner StructFields:
-    val sparkSchema = GpuTypeToSparkType.toSparkType(
-      new Schema(outerField), ShimUtils.defaultValueAccessor())
+    val sparkSchema = GpuTypeToSparkType.toSparkType(new Schema(outerField))
     val outerArray = sparkSchema("lol").dataType.asInstanceOf[ArrayType]
     val innerArray = outerArray.elementType.asInstanceOf[ArrayType]
     val struct = innerArray.elementType.asInstanceOf[StructType]
@@ -209,8 +136,7 @@ class GpuTypeToSparkTypeSuite extends AnyFunSuite {
     val outerField = Types.NestedField.optional(60, "los",
       Types.ListType.ofOptional(62, innerStruct))
 
-    val sparkSchema = GpuTypeToSparkType.toSparkType(
-      new Schema(outerField), ShimUtils.defaultValueAccessor())
+    val sparkSchema = GpuTypeToSparkType.toSparkType(new Schema(outerField))
     val outerArray = sparkSchema("los").dataType.asInstanceOf[ArrayType]
     val struct = outerArray.elementType.asInstanceOf[StructType]
     val ys = struct("ys")
@@ -226,7 +152,7 @@ class GpuTypeToSparkTypeSuite extends AnyFunSuite {
       Types.NestedField.optional(4, "props",
         Types.MapType.ofOptional(5, 6, Types.StringType.get(), Types.IntegerType.get())))
 
-    val sparkSchema = GpuTypeToSparkType.toSparkType(schema, ShimUtils.defaultValueAccessor())
+    val sparkSchema = GpuTypeToSparkType.toSparkType(schema)
 
     val idField = sparkSchema("id")
     assert(idField.dataType == IntegerType)
@@ -252,7 +178,7 @@ class GpuTypeToSparkTypeSuite extends AnyFunSuite {
     val schema = new Schema(
       Types.NestedField.optional(100, "outer", innerStruct))
 
-    val sparkSchema = GpuTypeToSparkType.toSparkType(schema, ShimUtils.defaultValueAccessor())
+    val sparkSchema = GpuTypeToSparkType.toSparkType(schema)
     val outer = sparkSchema("outer")
     assert(outer.metadata.getLong(FIELD_ID_METADATA_KEY) == 100L)
 

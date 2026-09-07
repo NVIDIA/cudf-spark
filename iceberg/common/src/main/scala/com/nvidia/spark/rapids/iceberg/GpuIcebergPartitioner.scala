@@ -45,10 +45,8 @@ class GpuIcebergPartitioner(
   val keyType: Types.StructType,
   val dataType: Types.StructType) {
 
-  private val keySparkType: StructType =
-    GpuTypeToSparkType.toSparkType(keyType, ShimUtils.defaultValueAccessor())
-  private val dataSparkType: StructType =
-    GpuTypeToSparkType.toSparkType(dataType, ShimUtils.defaultValueAccessor())
+  private val keySparkType: StructType = GpuTypeToSparkType.toSparkType(keyType)
+  private val dataSparkType: StructType = GpuTypeToSparkType.toSparkType(dataType)
   private val valueSparkType: Array[DataType] = dataSparkType.fields.map(_.dataType)
 
   /**
@@ -123,8 +121,7 @@ class GpuIcebergSpecPartitioner(val spec: PartitionSpec,
   val dataType: Types.StructType) {
   require(spec.isPartitioned, "Should not create a partitioner for unpartitioned table")
   private val inputSchema: Schema = spec.schema()
-  private val dataSparkType: StructType =
-    GpuTypeToSparkType.toSparkType(dataType, ShimUtils.defaultValueAccessor())
+  private val dataSparkType: StructType = GpuTypeToSparkType.toSparkType(dataType)
 
   private val partitionExprs: Seq[GpuExpression] = spec.fields().asScala.map(getPartitionExpr).toSeq
 

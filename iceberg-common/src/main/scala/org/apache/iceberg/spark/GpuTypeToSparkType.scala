@@ -19,18 +19,14 @@ package org.apache.iceberg.spark
 import scala.collection.JavaConverters._
 import scala.collection.mutable
 
-import com.nvidia.spark.rapids.iceberg.IcebergDefaultValueAccessor
 import org.apache.iceberg.{MetadataColumns, Schema}
 import org.apache.iceberg.types.{Type, Types, TypeUtil}
 
-import org.apache.spark.sql.catalyst.expressions.Literal
 import org.apache.spark.sql.catalyst.util.METADATA_COL_ATTR_KEY
 import org.apache.spark.sql.execution.datasources.parquet.ParquetUtils.FIELD_ID_METADATA_KEY
 import org.apache.spark.sql.types._
 
 object GpuTypeToSparkType {
-  private[iceberg] val CURRENT_DEFAULT_COLUMN_METADATA_KEY = "CURRENT_DEFAULT"
-  private[iceberg] val EXISTS_DEFAULT_COLUMN_METADATA_KEY = "EXISTS_DEFAULT"
   private[iceberg] val LIST_ELEMENT_FIELD_ID_METADATA_KEY =
     "rapids.parquet.list.element.field.id"
   private[iceberg] val LIST_ELEMENT_NESTED_IDS_METADATA_KEY =
@@ -44,18 +40,12 @@ object GpuTypeToSparkType {
   private[iceberg] val MAP_VALUE_NESTED_IDS_METADATA_KEY =
     "rapids.parquet.map.value.nested.ids"
 
-  def toSparkType(
-      schema: Schema,
-      defaultValueAccessor: IcebergDefaultValueAccessor): StructType = {
-    TypeUtil.visit(schema, new GpuTypeToSparkType(defaultValueAccessor))
-      .asInstanceOf[StructType]
+  def toSparkType(schema: Schema): StructType = {
+    TypeUtil.visit(schema, new GpuTypeToSparkType).asInstanceOf[StructType]
   }
 
-  def toSparkType(
-      icebergStruct: Types.StructType,
-      defaultValueAccessor: IcebergDefaultValueAccessor): StructType = {
-    TypeUtil.visit(icebergStruct, new GpuTypeToSparkType(defaultValueAccessor))
-      .asInstanceOf[StructType]
+  def toSparkType(icebergStruct: Types.StructType): StructType = {
+    TypeUtil.visit(icebergStruct, new GpuTypeToSparkType).asInstanceOf[StructType]
   }
 
   private[iceberg] def fieldMetadataOf(fieldId: Int): Metadata = {
@@ -89,8 +79,7 @@ object GpuTypeToSparkType {
  * and naturally handles list/map elements that are themselves structs without a
  * special-case recursion through `Types.StructType`.
  */
-class GpuTypeToSparkType(defaultValueAccessor: IcebergDefaultValueAccessor)
-    extends TypeToSparkType {
+class GpuTypeToSparkType extends TypeToSparkType {
   private val nestedIdsStack = mutable.ArrayBuffer.empty[Option[String]]
 
   private def pushNested(nested: Option[String]): Unit = nestedIdsStack += nested
@@ -147,20 +136,6 @@ class GpuTypeToSparkType(defaultValueAccessor: IcebergDefaultValueAccessor)
             .withMetadata(GpuTypeToSparkType.fieldMetadataOf(field.fieldId()))
           nestedJson.foreach(json =>
             metadataBuilder.withMetadata(Metadata.fromJson(json)))
-
-          if (defaultValueAccessor.hasWriteDefault(field)) {
-            val value = defaultValueAccessor.writeDefaultToSpark(field)
-            metadataBuilder.putString(
-              GpuTypeToSparkType.CURRENT_DEFAULT_COLUMN_METADATA_KEY,
-              Literal.create(value, fieldResult).sql)
-          }
-          if (defaultValueAccessor.hasInitialDefault(field)) {
-            val value = defaultValueAccessor.initialDefaultToSpark(field)
-            metadataBuilder.putString(
-              GpuTypeToSparkType.EXISTS_DEFAULT_COLUMN_METADATA_KEY,
-              Literal.create(value, fieldResult).sql)
-          }
-
           var sparkField =
             StructField(field.name(), fieldResult, field.isOptional, metadataBuilder.build())
           if (field.doc() != null) {
