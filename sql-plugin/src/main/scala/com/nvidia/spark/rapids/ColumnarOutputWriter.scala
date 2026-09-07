@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -281,18 +281,34 @@ abstract class ColumnarOutputWriter(context: TaskAttemptContext,
    * Closes the [[ColumnarOutputWriter]]. Invoked on the executor side after all columnar batches
    * are persisted, before the task output is committed.
    */
-  def close(): Unit = {
+  private def prepareToClose(): Unit = {
     if (!anythingWritten) {
       // This prevents writing out bad files
       bufferBatchAndClose(GpuColumnVector.emptyBatch(dataSchema))
     }
-    tableWriter.close()
+  }
+
+  private def finishClose(): Unit = {
     GpuSemaphore.releaseIfNecessary(TaskContext.get())
     writeBufferedData()
     outputStream.close()
     debugDumpOutputStream.foreach { os =>
       os.close()
     }
+  }
+
+  protected final def closeAndReturn[T <: AutoCloseable](closeWriter: => T): T = {
+    prepareToClose()
+    closeOnExcept(closeWriter) { result =>
+      finishClose()
+      result
+    }
+  }
+
+  def close(): Unit = {
+    prepareToClose()
+    tableWriter.close()
+    finishClose()
   }
 
   /**
