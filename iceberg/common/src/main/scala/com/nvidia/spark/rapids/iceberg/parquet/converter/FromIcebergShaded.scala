@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,8 +16,6 @@
 
 package com.nvidia.spark.rapids.iceberg.parquet.converter
 
-import java.util.Optional
-
 import scala.collection.JavaConverters._
 
 import org.apache.iceberg.shaded.org.apache.parquet.column.{Encoding => ShadedEncoding, EncodingStats => ShadedEncodingStats}
@@ -25,7 +23,7 @@ import org.apache.iceberg.shaded.org.apache.parquet.column.statistics.{Statistic
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.metadata.{BlockMetaData => ShadedBlockMetaData, ColumnChunkMetaData => ShadedColumnChunkMetaData, ColumnChunkProperties => ShadedColumnChunkProperties, ColumnPath => ShadedColumnPath, CompressionCodecName => ShadedCompressionCodecName}
 import org.apache.iceberg.shaded.org.apache.parquet.internal.hadoop.metadata.{IndexReference => ShadedIndexReference}
 import org.apache.iceberg.shaded.org.apache.parquet.schema.{ColumnOrder => ShadedColumnOrder, GroupType => ShadedGroupType, LogicalTypeAnnotation => ShadedLogicalTypeAnnotation, MessageType => ShadedMessageType, PrimitiveType => ShadedPrimitiveType, Type => ShadedType}
-import org.apache.iceberg.shaded.org.apache.parquet.schema.LogicalTypeAnnotation.{LogicalTypeAnnotationVisitor => ShadedLogicalTypeAnnotationVisitor, TimeUnit => ShadedTimeUnit}
+import org.apache.iceberg.shaded.org.apache.parquet.schema.LogicalTypeAnnotation.{TimeUnit => ShadedTimeUnit}
 import org.apache.iceberg.shaded.org.apache.parquet.schema.PrimitiveType.{PrimitiveTypeName => ShadedPrimitiveTypeName}
 import org.apache.parquet.column.{Encoding, EncodingStats}
 import org.apache.parquet.column.statistics.Statistics
@@ -73,87 +71,39 @@ object FromIcebergShaded {
     if (inner == null) {
       return null
     }
-    inner.accept(new ShadedLogicalTypeAnnotationVisitor[LogicalTypeAnnotation] {
-      override def visit(stringLogicalType: ShadedLogicalTypeAnnotation
-      .StringLogicalTypeAnnotation): Optional[LogicalTypeAnnotation] = {
-        Optional.of(LogicalTypeAnnotation.stringType())
-      }
-
-      override def visit(mapLogicalType: ShadedLogicalTypeAnnotation.MapLogicalTypeAnnotation)
-      : Optional[LogicalTypeAnnotation] = {
-        Optional.of(LogicalTypeAnnotation.mapType())
-      }
-
-      override def visit(listLogicalType: ShadedLogicalTypeAnnotation.ListLogicalTypeAnnotation)
-      : Optional[LogicalTypeAnnotation] = {
-        Optional.of(LogicalTypeAnnotation.listType())
-      }
-
-      override def visit(enumLogicalType: ShadedLogicalTypeAnnotation.EnumLogicalTypeAnnotation)
-      : Optional[LogicalTypeAnnotation] = {
-        Optional.of(LogicalTypeAnnotation.enumType())
-      }
-
-      override def visit(shaded: ShadedLogicalTypeAnnotation
-      .DecimalLogicalTypeAnnotation): Optional[LogicalTypeAnnotation] = {
-        Optional.of(LogicalTypeAnnotation.decimalType(
-          shaded.getScale,
-          shaded.getPrecision))
-      }
-
-      override def visit(dateLogicalType: ShadedLogicalTypeAnnotation.DateLogicalTypeAnnotation)
-      : Optional[LogicalTypeAnnotation] = {
-        Optional.of(LogicalTypeAnnotation.dateType())
-      }
-
-      override def visit(inner: ShadedLogicalTypeAnnotation.TimeLogicalTypeAnnotation)
-      : Optional[LogicalTypeAnnotation] = {
-        Optional.of(LogicalTypeAnnotation.timeType(
-          inner.isAdjustedToUTC,
-          unshade(inner.getUnit)))
-      }
-
-      override def visit(inner: ShadedLogicalTypeAnnotation.TimestampLogicalTypeAnnotation)
-      : Optional[LogicalTypeAnnotation] = {
-        Optional.of(LogicalTypeAnnotation.timestampType(
-          inner.isAdjustedToUTC,
-          unshade(inner.getUnit)))
-      }
-
-      override def visit(inner: ShadedLogicalTypeAnnotation.IntLogicalTypeAnnotation)
-      : Optional[LogicalTypeAnnotation] = {
-        Optional.of(LogicalTypeAnnotation.intType(
-          inner.getBitWidth,
-          inner.isSigned))
-      }
-
-      override def visit(inner: ShadedLogicalTypeAnnotation.JsonLogicalTypeAnnotation)
-      : Optional[LogicalTypeAnnotation] = {
-        Optional.of(LogicalTypeAnnotation.jsonType())
-      }
-
-      override def visit(inner: ShadedLogicalTypeAnnotation.BsonLogicalTypeAnnotation)
-      : Optional[LogicalTypeAnnotation] = {
-        Optional.of(LogicalTypeAnnotation.bsonType())
-      }
-
-      override def visit(inner: ShadedLogicalTypeAnnotation.UUIDLogicalTypeAnnotation)
-      : Optional[LogicalTypeAnnotation] = {
-        Optional.of(LogicalTypeAnnotation.uuidType())
-      }
-
-      override def visit(inner: ShadedLogicalTypeAnnotation.IntervalLogicalTypeAnnotation)
-      : Optional[LogicalTypeAnnotation] = {
-        Optional.of(LogicalTypeAnnotation.IntervalLogicalTypeAnnotation.getInstance())
-      }
-
-      override def visit(inner: ShadedLogicalTypeAnnotation.MapKeyValueTypeAnnotation)
-      : Optional[LogicalTypeAnnotation] = {
-        Optional.of(LogicalTypeAnnotation.MapKeyValueTypeAnnotation.getInstance())
-      }
-    }).orElseGet(() => {
-      throw new IllegalArgumentException(s"Unknown logical type annotation: $inner")
-    })
+    // Iceberg releases can expose different visitor interfaces. Direct dispatch keeps the
+    // generated helper bytecode identical when multiple Iceberg artifacts are aggregated.
+    inner match {
+      case _: ShadedLogicalTypeAnnotation.StringLogicalTypeAnnotation =>
+        LogicalTypeAnnotation.stringType()
+      case _: ShadedLogicalTypeAnnotation.MapLogicalTypeAnnotation =>
+        LogicalTypeAnnotation.mapType()
+      case _: ShadedLogicalTypeAnnotation.ListLogicalTypeAnnotation =>
+        LogicalTypeAnnotation.listType()
+      case _: ShadedLogicalTypeAnnotation.EnumLogicalTypeAnnotation =>
+        LogicalTypeAnnotation.enumType()
+      case shaded: ShadedLogicalTypeAnnotation.DecimalLogicalTypeAnnotation =>
+        LogicalTypeAnnotation.decimalType(shaded.getScale, shaded.getPrecision)
+      case _: ShadedLogicalTypeAnnotation.DateLogicalTypeAnnotation =>
+        LogicalTypeAnnotation.dateType()
+      case shaded: ShadedLogicalTypeAnnotation.TimeLogicalTypeAnnotation =>
+        LogicalTypeAnnotation.timeType(shaded.isAdjustedToUTC, unshade(shaded.getUnit))
+      case shaded: ShadedLogicalTypeAnnotation.TimestampLogicalTypeAnnotation =>
+        LogicalTypeAnnotation.timestampType(shaded.isAdjustedToUTC, unshade(shaded.getUnit))
+      case shaded: ShadedLogicalTypeAnnotation.IntLogicalTypeAnnotation =>
+        LogicalTypeAnnotation.intType(shaded.getBitWidth, shaded.isSigned)
+      case _: ShadedLogicalTypeAnnotation.JsonLogicalTypeAnnotation =>
+        LogicalTypeAnnotation.jsonType()
+      case _: ShadedLogicalTypeAnnotation.BsonLogicalTypeAnnotation =>
+        LogicalTypeAnnotation.bsonType()
+      case _: ShadedLogicalTypeAnnotation.UUIDLogicalTypeAnnotation =>
+        LogicalTypeAnnotation.uuidType()
+      case _: ShadedLogicalTypeAnnotation.IntervalLogicalTypeAnnotation =>
+        LogicalTypeAnnotation.IntervalLogicalTypeAnnotation.getInstance()
+      case _: ShadedLogicalTypeAnnotation.MapKeyValueTypeAnnotation =>
+        LogicalTypeAnnotation.MapKeyValueTypeAnnotation.getInstance()
+      case _ => throw new IllegalArgumentException(s"Unknown logical type annotation: $inner")
+    }
   }
 
 

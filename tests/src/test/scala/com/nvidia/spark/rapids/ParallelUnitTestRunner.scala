@@ -44,7 +44,6 @@ object ParallelUnitTestRunner {
 
   private val UNRESOLVED_PROPERTY = "${"
   private val PARALLEL_GPU_ALLOCATION_RATIO = 0.8
-  private val PARQUET_WRITER_SUITE = "com.nvidia.spark.rapids.ParquetWriterSuite"
   private val DPP_SUITES = Seq(
     "org.apache.spark.sql.rapids.suites.RapidsDynamicPartitionPruningV1SuiteAEOff",
     "org.apache.spark.sql.rapids.suites.RapidsDynamicPartitionPruningV1SuiteAEOn")
@@ -764,10 +763,9 @@ object ParallelUnitTestRunner {
 
   private[rapids] def createSuiteBatches(tasks: Seq[SuiteTask]): Seq[SuiteBatch] = {
     val taskBySuite = tasks.map(task => task.suite -> task).toMap
-    // Submit these first so the long Parquet suite gets one worker while both DPP suites are
-    // pinned to another worker and execute serially. Each worker rejoins the general queue after
-    // completing its special batch.
-    val specialBatches = Seq(Seq(PARQUET_WRITER_SUITE), DPP_SUITES).flatMap { suites =>
+    // Pin both DPP suites to one worker so they execute serially. The worker rejoins the general
+    // queue after completing the special batch.
+    val specialBatches = Seq(DPP_SUITES).flatMap { suites =>
       val batchTasks = suites.flatMap(taskBySuite.get)
       if (batchTasks.nonEmpty) Some(SuiteBatch(batchTasks)) else None
     }

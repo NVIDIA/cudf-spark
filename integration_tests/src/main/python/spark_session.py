@@ -207,6 +207,9 @@ def is_before_spark_350():
 def is_before_spark_351():
     return spark_version() < "3.5.1"
 
+def is_before_spark_352():
+    return spark_version() < "3.5.2"
+
 def is_before_spark_353():
     return spark_version() < "3.5.3"
 
@@ -416,6 +419,3 @@ def is_hive_available():
     if is_at_least_precommit_run():
         return True
     return _spark.conf.get("spark.sql.catalogImplementation") == "hive"
-
-def is_hybrid_backend_loaded():
-    return _spark.conf.get("spark.rapids.sql.hybrid.loadBackend", "false") == "true"

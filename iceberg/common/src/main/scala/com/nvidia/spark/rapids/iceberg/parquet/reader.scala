@@ -25,6 +25,7 @@ import scala.collection.JavaConverters._
 import com.nvidia.spark.rapids.{CombineConf, DateTimeRebaseCorrected, GpuMetric, ThreadPoolConfBuilder}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile
+import com.nvidia.spark.rapids.iceberg.ShimUtils
 import com.nvidia.spark.rapids.iceberg.parquet.converter.FromIcebergShaded._
 import com.nvidia.spark.rapids.parquet.{GpuParquetUtils, ParquetFileInfoWithBlockMeta}
 import com.nvidia.spark.rapids.shims.PartitionedFileUtilsShim
@@ -212,8 +213,10 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
       hasDeletionVector: Boolean = false): (ParquetFileInfoWithBlockMeta, ShadedMessageType) = {
     withResource(file.newReader(conf.metrics)) { reader =>
       val fileSchema = reader.getFileMetaData.getSchema
-      val needsRowPosition =
-        requiredSchema.findField(MetadataColumns.ROW_POSITION.fieldId()) != null
+      val needsRowPosition = {
+        requiredSchema.findField(MetadataColumns.ROW_POSITION.fieldId()) != null ||
+          requiredSchema.findField(ShimUtils.rowIdFieldId()) != null
+      }
       val initialProjection = projectSchema(fileSchema, requiredSchema)
       val (typeWithIds, fileReadSchema) =
         // cuDF's deletion-vector Parquet path needs at least one physical data column. Force one
@@ -230,7 +233,8 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
         }
       val filteredBlocks = filterRowGroups(reader, requiredSchema, typeWithIds, file.filter)
       val blockFirstRowIndices: Seq[Long] = if (needsRowPosition || hasDeletionVector) {
-        // _pos is file-global. When file.split is set the reader is opened with
+        // `_pos` and inherited `_row_id` are file-global. When file.split is set the reader is
+        // opened with
         // ParquetReadOptions.withRange, which makes the footer expose only the row groups
         // that intersect the range, so the ranged reader's own footer is not usable for
         // file-global accounting. Open a second reader without the range to enumerate every
@@ -263,7 +267,7 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
                 s"in the full Parquet footer; the footer or reader state may be inconsistent."))
         }
       } else {
-        // No _pos projection and no positional deletes — the values are never consumed,
+        // No row-position-dependent projection or positional deletes — the values are not used,
         // so skip the extra full-file reader open and emit per-task running counts.
         var acc = 0L
         filteredBlocks.map { case (block, _) =>

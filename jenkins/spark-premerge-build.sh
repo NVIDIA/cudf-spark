@@ -31,7 +31,9 @@ CUDA_CLASSIFIER=${CUDA_CLASSIFIER:-'cuda12'}
 CLASSIFIER=${CLASSIFIER:-"$CUDA_CLASSIFIER"} # default as CUDA_CLASSIFIER for compatibility
 MVN_SETTINGS=${MVN_SETTINGS:-"jenkins/settings.xml"}
 MVN=${MVN:-"mvn -s $MVN_SETTINGS -Dmaven.wagon.http.retryHandler.count=3"}
-# Jenkins enables this when the PR title contains [fast-ut]. Keep local/manual runs serial by default.
+if [[ -z "${PARALLEL_UT:-}" ]]; then
+    echo "NOTE: premerge CI runs unit tests in parallel; this run is serial. Set PARALLEL_UT=true to match CI."
+fi
 PARALLEL_UT=${PARALLEL_UT:-false}
 PARALLEL_UT_FORK_COUNT=${PARALLEL_UT_FORK_COUNT:-}
 
@@ -149,11 +151,6 @@ mvn_verify() {
         TZ=$tz ./integration_tests/run_pyspark_from_build.sh -m tz_sensitive_test
     done
 
-    # test Hybrid feature
-    source "${WORKSPACE}/jenkins/hybrid_execution.sh"
-    if hybrid_prepare ; then
-        LOAD_HYBRID_BACKEND=1 ./integration_tests/run_pyspark_from_build.sh -m hybrid_test
-    fi
 }
 
 rapids_shuffle_smoke_test() {
@@ -247,8 +244,10 @@ run_iceberg_extra_classpath_tests() {
         PYSP_TEST_spark_sql_catalog_spark__catalog="org.apache.iceberg.spark.SparkSessionCatalog" \
         PYSP_TEST_spark_sql_catalog_spark__catalog_type="hadoop" \
         PYSP_TEST_spark_sql_catalog_spark__catalog_warehouse="/tmp/spark-warehouse-$RANDOM" \
-        ./integration_tests/run_pyspark_from_build.sh -m iceberg --iceberg \
-        -k test_iceberg_read_appended_table
+        TESTS="iceberg/iceberg_test.py::test_iceberg_read_appended_table \
+iceberg/iceberg_append_test.py::test_insert_into_unpartitioned_table \
+noop_write_test.py" \
+        ./integration_tests/run_pyspark_from_build.sh --iceberg
 }
 
 ci_2() {

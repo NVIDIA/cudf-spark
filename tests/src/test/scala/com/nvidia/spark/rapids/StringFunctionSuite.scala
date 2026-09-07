@@ -197,6 +197,11 @@ class StringOperatorsSuite extends SparkQueryCompareTestSuite {
 }
 
 class RegExpUtilsSuite extends AnyFunSuite {
+  test("isEmptyRepetition treats inline flags as zero-width") {
+    assert(GpuRegExpUtils.isEmptyRepetition("(?i)a*"))
+    assert(!GpuRegExpUtils.isEmptyRepetition("(?i)a+"))
+  }
+
   test("countGroups ignores non-capturing groups") {
     val cases = Seq(
       "(?:(a))" -> 1,

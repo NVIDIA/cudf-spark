@@ -45,7 +45,7 @@ When reviewing code, ensure that:
 * **User Experience (UX):** Does the change make sense from the user's perspective? Is it consistent with existing UX? Are new user-facing features adequately tested before being enabled?  
 * **Quality/Stability:** No new bugs or regressions are introduced.  
 * **Performance:** Are the benchmark scenarios and test settings representative of common use cases? Is performance acceptable within those results?  
-* **Testing:** Test coverage is sufficient for the modifications.  
+* **Testing:** Test coverage is sufficient for the modifications. If the PR uses `[reduced-it]`, confirm the change is not in a heavily parametrized area where a specific parameter combination could expose a regression.
 * **Follow-up:** Issues are filed for any concerns that are not blocking the current change.
 
 ---

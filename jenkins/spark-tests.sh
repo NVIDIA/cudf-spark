@@ -705,14 +705,6 @@ if [[ "$TEST_MODE" == "NON_UTC_TZ" ]]; then
   run_non_utc_time_zone_tests
 fi
 
-# hybrid execution tests
-if [[ "$TEST_MODE" == "DEFAULT" || "$TEST_MODE" == "HYBRID_EXECUTION" ]]; then
-  source "${WORKSPACE}/jenkins/hybrid_execution.sh"
-  if hybrid_prepare ; then
-    LOAD_HYBRID_BACKEND=1 ./run_pyspark_from_build.sh -m hybrid_test
-  fi
-fi
-
 popd
 stop-worker.sh
 stop-master.sh

@@ -183,9 +183,9 @@ case class GpuAvroPartitionReaderFactory(
     metrics.get(FILTER_TIME).foreach {
       _ += (System.nanoTime() - startTime)
     }
-    val reader = new PartitionReaderWithBytesRead(new GpuAvroPartitionReader(conf, partFile,
+    val reader = new GpuAvroPartitionReader(conf, partFile,
       blockMeta, readDataSchema, debugDumpPrefix, debugDumpAlways, maxReadBatchSizeRows,
-      maxReadBatchSizeBytes, metrics))
+      maxReadBatchSizeBytes, metrics)
     ColumnarPartitionReaderWithPartitionValues.newReader(partFile, reader, partitionSchema,
       maxGpuColumnSizeBytes)
   }

@@ -85,7 +85,7 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
       "suiteTimeoutSeconds=30")
   }
 
-  test("special suites are submitted as serial worker batches") {
+  test("DPP suites are submitted as a serial worker batch") {
     val parquetSuite = "com.nvidia.spark.rapids.ParquetWriterSuite"
     val dppOff =
       "org.apache.spark.sql.rapids.suites.RapidsDynamicPartitionPruningV1SuiteAEOff"
@@ -101,9 +101,9 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
     val batches = ParallelUnitTestRunner.createSuiteBatches(tasks)
 
     assert(batches.map(_.tasks.map(_.suite)) === Seq(
-      Seq(parquetSuite),
       Seq(dppOff, dppOn),
       Seq("example.SuiteOne"),
+      Seq(parquetSuite),
       Seq("example.SuiteTwo")))
   }
 

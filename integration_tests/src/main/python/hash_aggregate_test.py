@@ -27,7 +27,7 @@ from pyspark.sql.types import *
 from marks import *
 import pyspark.sql.functions as f
 from spark_session import is_databricks104_or_later, with_cpu_session, is_spark_340_or_later, \
-    is_spark_420_or_later, is_spark_500_or_later
+    is_spark_420_or_later, is_spark_500_or_later, is_before_spark_352
 
 pytestmark = pytest.mark.nightly_resource_consuming_test
 
@@ -680,6 +680,7 @@ _pivot_gens_with_decimals = _init_list + [
 @incompat
 @pytest.mark.parametrize('data_gen', _pivot_gens_with_decimals, ids=idfn)
 @pytest.mark.parametrize('conf', get_params(_confs, params_markers_for_confs), ids=idfn)
+@pytest.mark.skip(reason='https://github.com/NVIDIA/cudf-spark/issues/15872')
 def test_hash_grpby_pivot(data_gen, conf):
     # disable ANSI mode to avoid overflow in some cases of SUM
     assert_gpu_and_cpu_are_equal_collect(
@@ -726,6 +727,7 @@ def test_hash_grpby_pivot_collation_fallback(collation):
 @incompat
 @pytest.mark.parametrize('data_gen', _init_list, ids=idfn)
 @pytest.mark.parametrize('conf', get_params(_confs, params_markers_for_confs), ids=idfn)
+@pytest.mark.skip(reason='https://github.com/NVIDIA/cudf-spark/issues/15872')
 def test_hash_multiple_grpby_pivot(data_gen, conf):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: gen_df(spark, data_gen, length=100)
@@ -1446,17 +1448,31 @@ def test_hash_groupby_collect_partial_replace_with_distinct_fallback(data_gen,
         conf=conf)
 
 
-exact_percentile_data_gen = [ByteGen(), ShortGen(), IntegerGen(), LongGen(), FloatGen(), DoubleGen(),
-                             RepeatSeqGen(ByteGen(), length=100),
-                             RepeatSeqGen(ShortGen(), length=100),
-                             RepeatSeqGen(IntegerGen(), length=100),
-                             RepeatSeqGen(LongGen(), length=100),
-                             RepeatSeqGen(FloatGen(), length=100),
-                             RepeatSeqGen(DoubleGen(), length=100),
-                             FloatGen().with_special_case(math.nan, 500.0)
-                             .with_special_case(math.inf, 500.0),
-                             DoubleGen().with_special_case(math.nan, 500.0)
-                             .with_special_case(math.inf, 500.0)]
+# Spark before 3.5.2 can lose percentile counts when +0.0 and -0.0 are mixed.
+# See https://issues.apache.org/jira/browse/SPARK-45599 and issue #12886.
+def _normalize_negative_zero(value):
+    return 0.0 if value == 0.0 else value
+
+
+def _exact_percentile_fp_gen(gen_class):
+    if is_before_spark_352():
+        return ConvertGen(gen_class(nullable=False), _normalize_negative_zero)
+    return gen_class()
+
+exact_percentile_data_gen = [
+    ByteGen(), ShortGen(), IntegerGen(), LongGen(),
+    _exact_percentile_fp_gen(FloatGen),
+    _exact_percentile_fp_gen(DoubleGen),
+    RepeatSeqGen(ByteGen(), length=100),
+    RepeatSeqGen(ShortGen(), length=100),
+    RepeatSeqGen(IntegerGen(), length=100),
+    RepeatSeqGen(LongGen(), length=100),
+    RepeatSeqGen(_exact_percentile_fp_gen(FloatGen), length=100),
+    RepeatSeqGen(_exact_percentile_fp_gen(DoubleGen), length=100),
+    _exact_percentile_fp_gen(FloatGen).with_special_case(math.nan, 500.0)
+    .with_special_case(math.inf, 500.0),
+    _exact_percentile_fp_gen(DoubleGen).with_special_case(math.nan, 500.0)
+    .with_special_case(math.inf, 500.0)]
 
 exact_percentile_reduction_data_gen = [
     [('val', data_gen),
@@ -1493,7 +1509,6 @@ _exact_percentile_tolerance_reason = \
 
 @pytest.mark.skipif(is_spark_500_or_later(),
                     reason=_exact_percentile_strict_skip_reason)
-@datagen_overrides(seed=0, reason="https://github.com/NVIDIA/spark-rapids/issues/10233")
 @pytest.mark.parametrize('data_gen', exact_percentile_reduction_data_gen, ids=idfn)
 def test_exact_percentile_reduction(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
@@ -1501,7 +1516,6 @@ def test_exact_percentile_reduction(data_gen):
 
 @pytest.mark.skipif(not is_spark_500_or_later(),
                     reason=_exact_percentile_tolerance_reason)
-@datagen_overrides(seed=0, reason="https://github.com/NVIDIA/spark-rapids/issues/10233")
 @approximate_float
 @pytest.mark.parametrize('data_gen', exact_percentile_reduction_data_gen, ids=idfn)
 def test_exact_percentile_reduction_spark500(data_gen):
@@ -1512,7 +1526,7 @@ exact_percentile_reduction_cpu_fallback_data_gen = [
     [('val', data_gen),
      ('freq', LongGen(min_val=0, max_val=1000000, nullable=False)
       .with_special_case(0, weight=100))]
-    for data_gen in [IntegerGen(), DoubleGen()]]
+    for data_gen in [IntegerGen(), _exact_percentile_fp_gen(DoubleGen)]]
 
 def _assert_exact_percentile_reduction_partial_fallback_to_cpu(
         data_gen, replace_mode, use_obj_hash_agg):
@@ -1657,11 +1671,11 @@ def _exact_percentile_groupby_cpu_fallback_spark500_data_gen(data_gen):
 
 exact_percentile_groupby_cpu_fallback_data_gen = [
     _exact_percentile_groupby_cpu_fallback_gen(data_gen)
-    for data_gen in [IntegerGen(), DoubleGen()]]
+    for data_gen in [IntegerGen(), _exact_percentile_fp_gen(DoubleGen)]]
 
 exact_percentile_groupby_cpu_fallback_spark500_data_gen = [
     _exact_percentile_groupby_cpu_fallback_spark500_data_gen(data_gen)
-    for data_gen in [IntegerGen(), DoubleGen()]]
+    for data_gen in [IntegerGen(), _exact_percentile_fp_gen(DoubleGen)]]
 
 @ignore_order
 @pytest.mark.skipif(is_spark_500_or_later(),
@@ -2015,7 +2029,17 @@ def test_reduction_with_max_by_same(data_gen):
         lambda spark: unary_op_df(spark, data_gen).selectExpr(
             "min_by(a, a)", "max_by(a, a)"))
 
-@pytest.mark.parametrize('data_gen', all_gen + _nested_gens, ids=idfn)
+@pytest.mark.parametrize(
+    'data_gen', all_gen + [
+        pytest.param(
+            DayTimeIntervalGen(),
+            marks=[
+                pytest.mark.xfail(
+                    reason='https://github.com/NVIDIA/cudf-spark/issues/15776',
+                    strict=True),
+                validate_execs_in_gpu_plan('GpuHashAggregateExec')
+            ])
+    ] + _nested_gens, ids=idfn)
 @allow_non_gpu(*non_utc_allow)
 def test_count(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
@@ -2026,6 +2050,16 @@ def test_count(data_gen):
             'count()',
             'count(1)'),
         conf = {'spark.sql.legacy.allowParameterlessCount': 'true'})
+
+@pytest.mark.xfail(
+    reason='https://github.com/NVIDIA/cudf-spark/issues/15776', strict=True)
+@validate_execs_in_gpu_plan('GpuHashAggregateExec')
+def test_count_year_month_interval():
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.range(4).selectExpr(
+            "INTERVAL '0-1' YEAR TO MONTH * "
+            "CASE WHEN id % 2 = 0 THEN 1 END AS a")
+        .selectExpr("count(a)"))
 
 @pytest.mark.parametrize('data_gen', all_basic_gens, ids=idfn)
 @allow_non_gpu(*non_utc_allow)

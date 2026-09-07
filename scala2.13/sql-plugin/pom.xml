@@ -50,8 +50,8 @@
         </dependency>
         <dependency>
             <groupId>com.nvidia</groupId>
-            <artifactId>rapids-4-spark-private_${scala.binary.version}</artifactId>
-            <version>${spark-rapids-private.version}</version>
+            <artifactId>cudf-spark-private_${scala.binary.version}</artifactId>
+            <version>${cudf-spark-private.version}</version>
             <classifier>${spark.version.classifier}</classifier>
         </dependency>
         <dependency>
@@ -114,13 +114,6 @@
             <groupId>org.mockito</groupId>
             <artifactId>mockito-core</artifactId>
             <scope>test</scope>
-        </dependency>
-
-        <dependency>
-            <groupId>com.nvidia</groupId>
-            <artifactId>rapids-4-spark-hybrid_${scala.binary.version}</artifactId>
-            <version>${spark-rapids-hybrid.version}</version>
-            <scope>provided</scope>
         </dependency>
     </dependencies>
     <!-- #if scala-2.13 -->
