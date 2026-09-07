@@ -1152,6 +1152,8 @@
         <scala.plugin.version>4.9.10</scala.plugin.version>
         <maven.install.plugin.version>3.1.1</maven.install.plugin.version>
         <maven.jar.plugin.version>3.3.0</maven.jar.plugin.version>
+        <withResource.audit.rawReport>${project.build.directory}/with-resource-nesting-audit.json</withResource.audit.rawReport>
+        <withResource.audit.summary>${project.build.directory}/with-resource-nesting-summary.md</withResource.audit.summary>
         <scalatest-maven-plugin.version>2.0.2</scalatest-maven-plugin.version>
         <guava.cdh.version>30.0-jre</guava.cdh.version>
         <arrow.cdh.version>2.0.0</arrow.cdh.version>
@@ -1992,6 +1994,37 @@ This will force full Scala code rebuild in downstream modules.
                 <!-- parent-pom only executions -->
                 <inherited>false</inherited>
                 <executions>
+                    <!-- Run this repository-wide audit only from the canonical root reactor.
+                         Encode option hyphens so the generated Scala 2.13 comment stays valid. -->
+                    <!-- #if scala-2.12 --><!--
+                    <execution>
+                        <id>with-resource-nesting-audit</id>
+                        <phase>verify</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <java classname="org.python.util.jython"
+                                      classpathref="maven.plugin.classpath"
+                                      fork="true" failonerror="true" dir="${project.basedir}">
+                                    <arg value="-B"/>
+                                    <arg value="scripts/tests/test_check_with_resource_nesting.py"/>
+                                </java>
+                                <java classname="org.python.util.jython"
+                                      classpathref="maven.plugin.classpath"
+                                      fork="true" failonerror="true" dir="${project.basedir}">
+                                    <arg value="-B"/>
+                                    <arg value="scripts/check_with_resource_nesting.py"/>
+                                    <arg value="&#45;&#45;root"/>
+                                    <arg value="${project.basedir}"/>
+                                    <arg value="&#45;&#45;raw-report"/>
+                                    <arg value="${withResource.audit.rawReport}"/>
+                                    <arg value="&#45;&#45;summary"/>
+                                    <arg value="${withResource.audit.summary}"/>
+                                </java>
+                            </target>
+                        </configuration>
+                    </execution>
+                    --><!-- #endif scala-2.12 -->
                     <execution>
                         <!--
                         This is an alternative implementation of the scalastyle check invocation,
@@ -2029,24 +2062,6 @@ This will force full Scala code rebuild in downstream modules.
                                     <arg line="--xmlEncoding ${project.reporting.outputEncoding}"/>
                                     <arg line="${scalastyle.dirs}"/>
                                 </java>
-                                <exec executable="python3" failonerror="true"
-                                      dir="${spark.rapids.source.basedir}">
-                                    <arg value="-m"/>
-                                    <arg value="unittest"/>
-                                    <arg value="discover"/>
-                                    <arg value="-s"/>
-                                    <arg value="scripts/tests"/>
-                                    <arg value="-p"/>
-                                    <arg value="test_check_with_resource_nesting.py"/>
-                                </exec>
-                                <!-- Existing nesting exceptions are tracked by
-                                     https://github.com/NVIDIA/cudf-spark/issues/11713. -->
-                                <exec executable="python3" failonerror="true"
-                                      dir="${spark.rapids.source.basedir}">
-                                    <arg value="scripts/check_with_resource_nesting.py"/>
-                                    <arg value="--root"/>
-                                    <arg value="${spark.rapids.source.basedir}"/>
-                                </exec>
                             </target>
                         </configuration>
                     </execution>

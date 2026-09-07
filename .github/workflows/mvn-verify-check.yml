@@ -430,3 +430,23 @@ jobs:
             fi
           }
           done
+
+  with-resource-nesting-audit:
+    name: withResource nesting audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: NVIDIA/spark-rapids-common/checkout@main
+
+      - name: Report withResource nesting violations
+        run: |
+          mvn --batch-mode -N antrun:run@with-resource-nesting-audit \
+            -DwithResource.audit.rawReport="$RUNNER_TEMP/with-resource-nesting-audit.json" \
+            -DwithResource.audit.summary="$GITHUB_STEP_SUMMARY"
+
+      - name: Upload withResource nesting report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: with-resource-nesting-audit
+          path: ${{ runner.temp }}/with-resource-nesting-audit.json
+          if-no-files-found: ignore

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 
 # Copyright (c) 2026, NVIDIA CORPORATION.
 #
@@ -16,17 +16,16 @@
 
 """Prevent new deeply nested withResource scopes in production Scala code."""
 
-from __future__ import annotations
+from __future__ import print_function
 
 import argparse
 import collections
-import dataclasses
 import hashlib
+import io
 import json
+import os
 import re
 import sys
-from pathlib import Path
-from typing import Iterable, Sequence
 
 
 DEFAULT_MAX_DEPTH = 4
@@ -39,50 +38,35 @@ ISSUE_PATTERN = re.compile(
     r"(?<!\w)(?:https://github\.com/NVIDIA/cudf-spark/issues/|#)\d+\b")
 
 
-@dataclasses.dataclass(frozen=True)
-class Token:
-    value: str
-    start: int
-    end: int
-    line: int
+try:
+    STRING_TYPES = (basestring,)
+    TEXT_TYPE = unicode
+except NameError:  # Python 3
+    STRING_TYPES = (str,)
+    TEXT_TYPE = str
 
 
-@dataclasses.dataclass(frozen=True)
-class LineComment:
-    text: str
-    start: int
-    end: int
-    line: int
+Token = collections.namedtuple("Token", "value start end line")
+LineComment = collections.namedtuple("LineComment", "text start end line")
+ResourceCall = collections.namedtuple(
+    "ResourceCall", "line fingerprint resource exempt")
 
 
-@dataclasses.dataclass(frozen=True)
-class ResourceCall:
-    line: int
-    fingerprint: str
-    resource: str
-    exempt: bool
-
-
-@dataclasses.dataclass(frozen=True)
-class Violation:
-    path: str
-    line: int
-    depth: int
-    fingerprint: str
-    resource: str
+class Violation(collections.namedtuple(
+        "ViolationBase", "path line depth fingerprint resource")):
+    __slots__ = ()
 
     @property
-    def baseline_key(self) -> tuple[str, str]:
+    def baseline_key(self):
         return (self.path, self.fingerprint)
 
 
-@dataclasses.dataclass(frozen=True)
-class ScanResult:
-    violations: tuple[Violation, ...]
-    directive_errors: tuple[str, ...]
+ScanResult = collections.namedtuple("ScanResult", "violations directive_errors")
+ClassifiedViolation = collections.namedtuple(
+    "ClassifiedViolation", "violation status")
 
 
-def _consume_quoted(source: str, start: int, quote: str) -> int:
+def _consume_quoted(source, start, quote):
     """Return the first offset after a quoted Scala string or character literal."""
     if quote == '"' and source.startswith('"""', start):
         end = source.find('"""', start + 3)
@@ -103,7 +87,7 @@ def _consume_quoted(source: str, start: int, quote: str) -> int:
     return len(source)
 
 
-def _is_interpolated_quote(source: str, quote_start: int) -> bool:
+def _is_interpolated_quote(source, quote_start):
     if quote_start == 0:
         return False
     offset = quote_start - 1
@@ -114,7 +98,7 @@ def _is_interpolated_quote(source: str, quote_start: int) -> bool:
     return source[offset].isalpha() or source[offset] in "_$"
 
 
-def _consume_block_comment(source: str, start: int) -> tuple[int, bool]:
+def _consume_block_comment(source, start):
     depth = 1
     offset = start + 2
     while offset < len(source) and depth:
@@ -129,7 +113,7 @@ def _consume_block_comment(source: str, start: int) -> tuple[int, bool]:
     return offset, depth == 0
 
 
-def _matching_interpolation_brace(source: str, open_brace: int) -> int:
+def _matching_interpolation_brace(source, open_brace):
     depth = 1
     offset = open_brace + 1
     while offset < len(source):
@@ -156,10 +140,10 @@ def _matching_interpolation_brace(source: str, open_brace: int) -> int:
     return len(source)
 
 
-def _consume_interpolated(source: str, start: int) -> tuple[int, list[tuple[int, int]]]:
+def _consume_interpolated(source, start):
     delimiter = '\"\"\"' if source.startswith('\"\"\"', start) else '"'
     offset = start + len(delimiter)
-    expressions: list[tuple[int, int]] = []
+    expressions = []
 
     while offset < len(source):
         if source.startswith(delimiter, offset):
@@ -178,15 +162,15 @@ def _consume_interpolated(source: str, start: int) -> tuple[int, list[tuple[int,
     return len(source), expressions
 
 
-def _tokenize(source: str) -> tuple[list[Token], list[LineComment]]:
+def _tokenize(source):
     """Tokenize enough Scala syntax to match calls and lexical blocks.
 
     Comments and literal contents are deliberately opaque. This avoids counting braces or
     withResource text embedded in comments and literal text. Executable `${...}` expressions
     inside interpolated strings are tokenized recursively.
     """
-    tokens: list[Token] = []
-    line_comments: list[LineComment] = []
+    tokens = []
+    line_comments = []
     offset = 0
     line = 1
     length = len(source)
@@ -209,9 +193,10 @@ def _tokenize(source: str) -> tuple[list[Token], list[LineComment]]:
             offset, closed = _consume_block_comment(source, offset)
             line += source[comment_start:offset].count("\n")
             if not closed:
-                raise ValueError(f"unterminated block comment at offset {comment_start}")
+                raise ValueError(
+                    "unterminated block comment at offset {0}".format(comment_start))
         elif char in "\"'":
-            expressions: list[tuple[int, int]] = []
+            expressions = []
             if char == '"' and _is_interpolated_quote(source, offset):
                 end, expressions = _consume_interpolated(source, offset)
             else:
@@ -259,16 +244,11 @@ def _tokenize(source: str) -> tuple[list[Token], list[LineComment]]:
     return tokens, line_comments
 
 
-def tokenize(source: str) -> list[Token]:
+def tokenize(source):
     return _tokenize(source)[0]
 
 
-def _matching_delimiter(
-    tokens: Sequence[Token],
-    open_index: int,
-    open_value: str,
-    close_value: str,
-) -> int | None:
+def _matching_delimiter(tokens, open_index, open_value, close_value):
     depth = 0
     for index in range(open_index, len(tokens)):
         value = tokens[index].value
@@ -281,18 +261,13 @@ def _matching_delimiter(
     return None
 
 
-def _canonical_call(tokens: Sequence[Token], start: int, end: int) -> str:
+def _canonical_call(tokens, start, end):
     return "".join(token.value for token in tokens[start:end + 1])
 
 
-def _directive_lines(
-    source: str,
-    path: str,
-    tokens: Sequence[Token],
-    line_comments: Sequence[LineComment],
-) -> tuple[set[int], list[str]]:
-    exempt_lines: set[int] = set()
-    errors: list[str] = []
+def _directive_lines(source, path, tokens, line_comments):
+    exempt_lines = set()
+    errors = []
     lines = source.splitlines()
 
     for comment in line_comments:
@@ -302,13 +277,14 @@ def _directive_lines(
         line_number = comment.line
         if match is None or len(match.group(1).strip()) < 10:
             errors.append(
-                f"{path}:{line_number}: {ALLOW_DIRECTIVE} requires a reason of at least "
-                "10 characters after ' -- '")
+                "{0}:{1}: {2} requires a reason of at least "
+                "10 characters after ' -- '".format(
+                    path, line_number, ALLOW_DIRECTIVE))
             continue
         if ISSUE_PATTERN.search(match.group(1)) is None:
             errors.append(
-                f"{path}:{line_number}: {ALLOW_DIRECTIVE} reason must reference an "
-                "NVIDIA/cudf-spark GitHub issue by URL or #number")
+                "{0}:{1}: {2} reason must reference an NVIDIA/cudf-spark GitHub "
+                "issue by URL or #number".format(path, line_number, ALLOW_DIRECTIVE))
             continue
 
         # The directive applies to a withResource call on the same line or the next nonblank line.
@@ -326,15 +302,15 @@ def _directive_lines(
     return exempt_lines, errors
 
 
-def scan_source(path: str, source: str, max_depth: int) -> ScanResult:
+def scan_source(path, source, max_depth):
     try:
         tokens, line_comments = _tokenize(source)
     except ValueError as error:
-        return ScanResult((), (f"{path}: {error}",))
+        return ScanResult((), ("{0}: {1}".format(path, error),))
 
     exempt_lines, directive_errors = _directive_lines(
         source, path, tokens, line_comments)
-    resource_blocks: dict[int, ResourceCall] = {}
+    resource_blocks = {}
 
     for index, token in enumerate(tokens):
         if token.value != "withResource" or index + 1 >= len(tokens):
@@ -363,8 +339,8 @@ def scan_source(path: str, source: str, max_depth: int) -> ScanResult:
             resource=canonical,
             exempt=token.line in exempt_lines)
 
-    violations: list[Violation] = []
-    scope_stack: list[ResourceCall | None] = []
+    violations = []
+    scope_stack = []
     for index, token in enumerate(tokens):
         if token.value in {"{", "("}:
             resource_call = resource_blocks.get(index)
@@ -386,77 +362,90 @@ def scan_source(path: str, source: str, max_depth: int) -> ScanResult:
     return ScanResult(tuple(violations), tuple(directive_errors))
 
 
-def production_scala_files(root: Path) -> Iterable[Path]:
-    for path in root.rglob("*.scala"):
-        relative = path.relative_to(root)
-        parts = relative.parts
-        if "target" in parts or (parts and parts[0] == "scala2.13"):
-            continue
-        if any(parts[index:index + 2] == ("src", "main")
-               for index in range(len(parts) - 1)):
-            yield path
+def production_scala_files(root):
+    for directory, directory_names, file_names in os.walk(root):
+        relative_directory = os.path.relpath(directory, root)
+        parts = (() if relative_directory == "." else
+                 tuple(relative_directory.split(os.sep)))
+        directory_names[:] = sorted(
+            name for name in directory_names
+            if name != "target" and not (not parts and name == "scala2.13"))
+        in_production_source = any(
+            parts[index:index + 2] == ("src", "main")
+            for index in range(len(parts) - 1))
+        if in_production_source:
+            for file_name in sorted(file_names):
+                if file_name.endswith(".scala"):
+                    yield os.path.join(directory, file_name)
 
 
-def scan_tree(root: Path, max_depth: int) -> ScanResult:
-    violations: list[Violation] = []
-    directive_errors: list[str] = []
+def scan_tree(root, max_depth):
+    violations = []
+    directive_errors = []
     for path in sorted(production_scala_files(root)):
-        relative = path.relative_to(root).as_posix()
-        result = scan_source(relative, path.read_text(encoding="utf-8"), max_depth)
+        relative = os.path.relpath(path, root).replace(os.sep, "/")
+        with io.open(path, "r", encoding="utf-8") as source_file:
+            result = scan_source(relative, source_file.read(), max_depth)
         violations.extend(result.violations)
         directive_errors.extend(result.directive_errors)
     return ScanResult(tuple(violations), tuple(directive_errors))
 
 
-def load_baseline(path: Path) -> tuple[int, collections.Counter[tuple[str, str]]]:
-    data = json.loads(path.read_text(encoding="utf-8"))
+def _fullmatch(pattern, value):
+    match = pattern.match(value)
+    return match is not None and match.end() == len(value)
+
+
+def load_baseline(path):
+    with io.open(path, "r", encoding="utf-8") as baseline_file:
+        data = json.loads(baseline_file.read())
     if data.get("version") != BASELINE_VERSION:
         raise ValueError(
-            f"unsupported baseline version {data.get('version')}; expected {BASELINE_VERSION}")
+            "unsupported baseline version {0}; expected {1}".format(
+                data.get("version"), BASELINE_VERSION))
     max_depth = data.get("maxDepth")
     if not isinstance(max_depth, int) or max_depth < 1:
         raise ValueError("baseline maxDepth must be a positive integer")
     tracking_issue = data.get("trackingIssue")
-    if not isinstance(tracking_issue, str) or ISSUE_PATTERN.fullmatch(tracking_issue) is None:
+    if not isinstance(tracking_issue, STRING_TYPES) or not _fullmatch(
+            ISSUE_PATTERN, tracking_issue):
         raise ValueError("baseline trackingIssue must link to an NVIDIA/cudf-spark GitHub issue")
 
-    entries: collections.Counter[tuple[str, str]] = collections.Counter()
+    entries = collections.Counter()
     for entry in data.get("entries", []):
         key = (entry["path"], entry["fingerprint"])
         entries[key] += entry.get("count", 1)
     return max_depth, entries
 
 
-def baseline_json(violations: Sequence[Violation], max_depth: int) -> str:
-    grouped: dict[tuple[str, str], list[Violation]] = collections.defaultdict(list)
+def baseline_json(violations, max_depth):
+    grouped = collections.defaultdict(list)
     for violation in violations:
         grouped[violation.baseline_key].append(violation)
 
     entries = []
     for (path, fingerprint), matches in sorted(grouped.items()):
-        entry = {
-            "path": path,
-            "fingerprint": fingerprint,
-            "resource": matches[0].resource[:160],
-        }
+        entry = collections.OrderedDict((
+            ("path", path),
+            ("fingerprint", fingerprint),
+            ("resource", matches[0].resource[:160]),
+        ))
         if len(matches) > 1:
             entry["count"] = len(matches)
         entries.append(entry)
 
-    return json.dumps({
-        "version": BASELINE_VERSION,
-        "maxDepth": max_depth,
-        "trackingIssue": DEFAULT_TRACKING_ISSUE,
-        "entries": entries,
-    }, indent=2) + "\n"
+    baseline = collections.OrderedDict((
+        ("version", BASELINE_VERSION),
+        ("maxDepth", max_depth),
+        ("trackingIssue", DEFAULT_TRACKING_ISSUE),
+        ("entries", entries),
+    ))
+    return TEXT_TYPE(json.dumps(baseline, indent=2, separators=(",", ": "))) + "\n"
 
 
-def new_violations(
-    violations: Sequence[Violation],
-    baseline: collections.Counter[tuple[str, str]],
-) -> list[Violation]:
+def new_violations(violations, baseline):
     remaining = baseline.copy()
-    result: list[Violation] = []
+    result = []
     for violation in violations:
         key = violation.baseline_key
         if remaining[key] > 0:
@@ -466,43 +455,149 @@ def new_violations(
     return result
 
 
-def stale_baseline_entries(
-    violations: Sequence[Violation],
-    baseline: collections.Counter[tuple[str, str]],
-) -> collections.Counter[tuple[str, str]]:
+def stale_baseline_entries(violations, baseline):
     current = collections.Counter(violation.baseline_key for violation in violations)
     return baseline - current
 
 
-def parse_args(args: Sequence[str]) -> argparse.Namespace:
+def classify_violations(violations, baseline):
+    remaining = baseline.copy()
+    classified = []
+    for violation in violations:
+        key = violation.baseline_key
+        status = "baselined" if remaining[key] > 0 else "new"
+        if remaining[key] > 0:
+            remaining[key] -= 1
+        classified.append(ClassifiedViolation(violation, status))
+    return classified
+
+
+def markdown_escape(value):
+    return (value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            .replace("|", "\\|").replace("\r", " ").replace("\n", " "))
+
+
+def render_summary(classified, stale, directive_errors, max_depth):
+    new_count = sum(1 for item in classified if item.status == "new")
+    baselined_count = len(classified) - new_count
+    lines = [
+        "## withResource nesting audit",
+        "",
+        ("Found {0} scope(s) deeper than {1}: {2} baselined, {3} new.".format(
+            len(classified), max_depth, baselined_count, new_count)),
+        "",
+    ]
+    if classified:
+        lines.extend([
+            "| Status | Depth | Location | Resource |",
+            "| --- | ---: | --- | --- |",
+        ])
+        for item in classified:
+            violation = item.violation
+            lines.append("| {0} | {1} | `{2}:{3}` | {4} |".format(
+                item.status, violation.depth, markdown_escape(violation.path),
+                violation.line, markdown_escape(violation.resource)))
+    else:
+        lines.append("No deep withResource scopes were found.")
+
+    if stale:
+        lines.extend(["", "### Stale baseline entries", ""])
+        for (path, fingerprint), count in sorted(stale.items()):
+            lines.append("- `{0}` (`{1}`), count {2}".format(
+                markdown_escape(path), fingerprint, count))
+    if directive_errors:
+        lines.extend(["", "### Invalid exemption directives", ""])
+        lines.extend("- {0}".format(markdown_escape(error))
+                     for error in directive_errors)
+    lines.extend([
+        "",
+        ("Baselined scopes are reported as existing debt and do not fail this check. "
+         "New scopes, stale baseline entries, and invalid directives fail the audit."),
+        "",
+    ])
+    return "\n".join(lines)
+
+
+def command_escape(value):
+    return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
+def command_property_escape(value):
+    return command_escape(value).replace(":", "%3A").replace(",", "%2C")
+
+
+def emit_annotations(classified):
+    for item in classified[:50]:
+        violation = item.violation
+        level = "error" if item.status == "new" else "warning"
+        message = "depth {0}: {1} ({2})".format(
+            violation.depth, violation.resource, item.status)
+        print("::{0} file={1},line={2},title=withResource nesting::{3}".format(
+            level, command_property_escape(violation.path), violation.line,
+            command_escape(message)))
+    if len(classified) > 50:
+        print("::warning title=withResource nesting::Only 50 of {0} scopes were annotated; "
+              "see the job summary and raw report for all findings".format(len(classified)))
+
+
+def write_raw_report(path, classified, stale, directive_errors, max_depth):
+    report = collections.OrderedDict((
+        ("version", BASELINE_VERSION),
+        ("maxDepth", max_depth),
+        ("violations", [collections.OrderedDict((
+            ("status", item.status),
+            ("path", item.violation.path),
+            ("line", item.violation.line),
+            ("depth", item.violation.depth),
+            ("fingerprint", item.violation.fingerprint),
+            ("resource", item.violation.resource),
+        )) for item in classified]),
+        ("staleBaselineEntries", [collections.OrderedDict((
+            ("path", path),
+            ("fingerprint", fingerprint),
+            ("count", count),
+        )) for (path, fingerprint), count in sorted(stale.items())]),
+        ("directiveErrors", list(directive_errors)),
+    ))
+    with io.open(path, "w", encoding="utf-8") as report_file:
+        report_file.write(TEXT_TYPE(json.dumps(
+            report, indent=2, separators=(",", ": "))) + "\n")
+
+
+def parse_args(args):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, default=Path.cwd(),
+    parser.add_argument("--root", default=os.getcwd(),
                         help="repository root (default: current directory)")
-    parser.add_argument("--baseline", type=Path,
-                        default=Path("scripts/with_resource_nesting_baseline.json"))
+    parser.add_argument("--baseline",
+                        default="scripts/with_resource_nesting_baseline.json")
     parser.add_argument("--max-depth", type=int, default=None,
                         help="override maximum allowed depth")
     parser.add_argument("--print-baseline", action="store_true",
                         help="print a baseline for the current source tree and exit")
     parser.add_argument("--update-baseline", action="store_true",
                         help="replace the baseline with the current source tree")
+    parser.add_argument("--summary", default=os.environ.get("GITHUB_STEP_SUMMARY"),
+                        help="write a Markdown report containing every deep scope")
+    parser.add_argument("--raw-report",
+                        help="write a JSON report containing every deep scope")
     return parser.parse_args(args)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    root = args.root.resolve()
+    root = os.path.abspath(args.root)
     baseline_path = args.baseline
-    if not baseline_path.is_absolute():
-        baseline_path = root / baseline_path
+    if not os.path.isabs(baseline_path):
+        baseline_path = os.path.join(root, baseline_path)
 
-    baseline: collections.Counter[tuple[str, str]] = collections.Counter()
+    baseline = collections.Counter()
     baseline_depth = DEFAULT_MAX_DEPTH
-    if baseline_path.exists():
+    if os.path.exists(baseline_path):
         try:
             baseline_depth, baseline = load_baseline(baseline_path)
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-            print(f"Invalid withResource nesting baseline: {error}", file=sys.stderr)
+        except (KeyError, TypeError, ValueError) as error:
+            print("Invalid withResource nesting baseline: {0}".format(error),
+                  file=sys.stderr)
             return 2
 
     max_depth = args.max_depth if args.max_depth is not None else baseline_depth
@@ -511,41 +606,64 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     scan = scan_tree(root, max_depth)
-    if scan.directive_errors:
-        for error in scan.directive_errors:
-            print(error, file=sys.stderr)
-        return 1
 
     generated_baseline = baseline_json(scan.violations, max_depth)
     if args.print_baseline:
         print(generated_baseline, end="")
         return 0
     if args.update_baseline:
-        baseline_path.write_text(generated_baseline, encoding="utf-8")
-        print(f"Updated {baseline_path} with {len(scan.violations)} violations")
+        with io.open(baseline_path, "w", encoding="utf-8") as baseline_file:
+            baseline_file.write(generated_baseline)
+        print("Updated {0} with {1} violations".format(
+            baseline_path, len(scan.violations)))
         return 0
 
     unexpected = new_violations(scan.violations, baseline)
     stale = stale_baseline_entries(scan.violations, baseline)
+    classified = classify_violations(scan.violations, baseline)
+    report_failed = False
+    if args.summary:
+        try:
+            with io.open(args.summary, "w", encoding="utf-8") as summary_file:
+                summary_file.write(TEXT_TYPE(render_summary(
+                    classified, stale, scan.directive_errors, max_depth)))
+        except (IOError, OSError) as error:
+            report_failed = True
+            print("Could not write withResource summary: {0}".format(error), file=sys.stderr)
+    if args.raw_report:
+        try:
+            write_raw_report(
+                args.raw_report, classified, stale, scan.directive_errors, max_depth)
+        except (IOError, OSError) as error:
+            report_failed = True
+            print("Could not write withResource raw report: {0}".format(error), file=sys.stderr)
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        emit_annotations(classified)
+
+    if scan.directive_errors:
+        for error in scan.directive_errors:
+            print(error, file=sys.stderr)
+        return 1
+
     if not unexpected and not stale:
         print(
-            f"withResource nesting lint passed ({len(scan.violations)} baselined violations, "
-            f"maximum allowed depth {max_depth})")
-        return 0
+            "withResource nesting lint passed ({0} baselined violations, maximum "
+            "allowed depth {1})".format(len(scan.violations), max_depth))
+        return 1 if report_failed else 0
 
     for violation in unexpected:
         resource = violation.resource
         if len(resource) > 120:
             resource = resource[:117] + "..."
         print(
-            f"{violation.path}:{violation.line}: withResource nesting depth "
-            f"{violation.depth} exceeds {max_depth}\n  resource: {resource}",
+            "{0}:{1}: withResource nesting depth {2} exceeds {3}\n  resource: {4}".format(
+                violation.path, violation.line, violation.depth, max_depth, resource),
             file=sys.stderr)
     if unexpected:
         print(
-            f"Found {len(unexpected)} new deep withResource scope(s). Shorten resource lifetimes "
-            f"or place '// {ALLOW_DIRECTIVE} -- <reason and issue reference>' immediately before a "
-            "scope whose overlap is necessary.",
+            "Found {0} new deep withResource scope(s). Shorten resource lifetimes or "
+            "place '// {1} -- <reason and issue reference>' immediately before a scope "
+            "whose overlap is necessary.".format(len(unexpected), ALLOW_DIRECTIVE),
             file=sys.stderr)
     if unexpected and stale:
         print(
@@ -556,8 +674,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if stale:
         stale_count = sum(stale.values())
         print(
-            f"The baseline contains {stale_count} resolved violation(s). Run this check with "
-            "--update-baseline to ratchet it down.",
+            "The baseline contains {0} resolved violation(s). Run this check with "
+            "--update-baseline to ratchet it down.".format(stale_count),
             file=sys.stderr)
     return 1
 
