@@ -959,7 +959,7 @@ def test_from_json_strings(std_input_path, input_file):
     "bad_whitespace.json",
     "escaped_strings.json",
     pytest.param("nested_escaped_strings.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/11387')),
-    pytest.param("repeated_columns.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/11361')),
+    "repeated_columns.json",
     "mixed_objects.json",
     "timestamp_formatted_strings.json",
     "timestamp_tz_formatted_strings.json"])
@@ -989,7 +989,7 @@ def test_get_json_object_formats(std_input_path, input_file):
     "bad_whitespace.json",
     "escaped_strings.json",
     "nested_escaped_strings.json",
-    pytest.param("repeated_columns.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/11361')),
+    "repeated_columns.json",
     "mixed_objects.json",
     "timestamp_formatted_strings.json",
     "timestamp_tz_formatted_strings.json"])
@@ -1029,7 +1029,7 @@ def test_get_json_object_child_formats(std_input_path, input_file):
     "bad_whitespace.json",
     "escaped_strings.json",
     pytest.param("nested_escaped_strings.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/11387')),
-    pytest.param("repeated_columns.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/11361')),
+    "repeated_columns.json",
     "mixed_objects.json",
     "timestamp_formatted_strings.json",
     "timestamp_tz_formatted_strings.json"])
