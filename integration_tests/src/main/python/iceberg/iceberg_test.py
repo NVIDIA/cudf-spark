@@ -172,6 +172,88 @@ def test_iceberg_spj_partial_clustering_distinct(spark_tmp_table_factory):
         gpu_plan_assertion=_assert_partial_clustering_spj_plan)
 
 
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.skipif(
+    not is_spark_400_or_later(),
+    reason="spark.sql.sources.v2.bucketing.partition.filter.enabled was added in Spark 4.0.0")
+@pytest.mark.parametrize("partition_filter", [True, False], ids=["filtered", "unfiltered"])
+@pytest.mark.parametrize("partially_clustered", [True, False],
+                         ids=["partially_clustered", "clustered"])
+def test_iceberg_spj_partition_filter(spark_tmp_table_factory, partition_filter,
+                                      partially_clustered):
+    left_table = get_full_table_name(spark_tmp_table_factory)
+    right_table = get_full_table_name(spark_tmp_table_factory)
+    table_props = _build_tblprops({
+        # Keep separate INSERTs as separate scan splits so that id=1 is partially clustered.
+        "read.split.target-size": "1",
+        "read.split.open-file-cost": "1",
+    })
+    table_props_sql = ", ".join(f"'{k}' = '{v}'" for k, v in table_props.items())
+
+    def setup_iceberg_tables(spark):
+        spark.sql(
+            f"CREATE TABLE {left_table} (id INT, price DOUBLE) USING ICEBERG "
+            f"PARTITIONED BY (id) TBLPROPERTIES ({table_props_sql})")
+        spark.sql(
+            f"CREATE TABLE {right_table} (id INT, value STRING) USING ICEBERG "
+            f"PARTITIONED BY (id) TBLPROPERTIES ({table_props_sql})")
+
+        # Each side gets a key the other lacks (left id=3, right id=4), so partition filtering
+        # has something to prune on both scans. Spark decides which side pads and which
+        # replicates, so covering both branches of that decision means neither side may be a
+        # subset of the intersection. Each side also gets a key split across two files, inside
+        # the intersection, so whichever side pads reports numSplits=2 and partial clustering
+        # stays observable in the partition counts.
+        spark.sql(f"INSERT INTO {left_table} VALUES (1, 40.0), (2, 10.0), (3, 15.5)")
+        spark.sql(f"INSERT INTO {left_table} VALUES (1, 41.0)")
+        spark.sql(f"INSERT INTO {right_table} VALUES (1, 'a'), (2, 'b'), (4, 'd')")
+        spark.sql(f"INSERT INTO {right_table} VALUES (2, 'c')")
+
+    with_cpu_session(setup_iceberg_tables)
+
+    conf = {
+        "spark.sql.adaptive.enabled": "false",
+        "spark.sql.autoBroadcastJoinThreshold": "-1",
+        "spark.sql.sources.v2.bucketing.enabled": "true",
+        "spark.sql.sources.v2.bucketing.pushPartValues.enabled": "true",
+        "spark.sql.sources.v2.bucketing.partition.filter.enabled":
+            str(partition_filter).lower(),
+        "spark.sql.sources.v2.bucketing.partiallyClusteredDistribution.enabled":
+            str(partially_clustered).lower(),
+        "spark.sql.iceberg.planning.preserve-data-grouping": "true",
+    }
+
+    def join_after_spj(spark):
+        return spark.sql(
+            f"""
+            SELECT l.id, l.price, r.value
+            FROM {left_table} l
+            JOIN {right_table} r ON l.id = r.id
+            """)
+
+    # Both scans plan one partition per common partition value: the intersection {1, 2} when
+    # filtering, otherwise the union {1, 2, 3, 4}. Partial clustering adds one more, for the
+    # second file of the padding side's split key. KeyGroupedPartitioning.isPartiallyClustered
+    # would say this more directly but only exists on Spark 3.5.9+/4.0.3+/4.1.2+, which is the
+    # gate this test is deliberately avoiding.
+    expected_partitions = (2 if partition_filter else 4) + (1 if partially_clustered else 0)
+
+    def assert_plan(plan):
+        scans = _assert_spj_join_shape(plan, expect_spj=True)
+        counts = [scan.outputPartitioning().numPartitions() for scan in scans]
+        assert counts == [expected_partitions] * len(scans), \
+            f"Expected {expected_partitions} partitions per scan, found {counts}:\n{plan}"
+
+    # Asserting join output rather than SELECT DISTINCT keeps this off SPARK-55848, which is
+    # what forces the patch-level gate on test_iceberg_spj_partial_clustering_distinct.
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        join_after_spj,
+        conf=conf,
+        require_non_empty=True,
+        gpu_plan_assertion=assert_plan)
+
+
 # Enough rows that every bucket of the wider bucket(4) side is populated, so reducing it to
 # gcd(4, 2) = 2 buckets moves rows into partition values the raw-keyed lookup cannot find.
 _SPJ_REDUCIBLE_ROWS = 64
