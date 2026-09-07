@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -42,6 +42,16 @@ import org.apache.spark.sql.vectorized.{ArrowColumnVector, ColumnarBatch}
 
 class GpuCoalesceBatchesSuite extends SparkQueryCompareTestSuite {
   val rapidsConf = new RapidsConf(Map.empty[String, String])
+
+  test("coalesce preserves child output ordering") {
+    withGpuSparkSession { spark =>
+      val child = spark.range(1000).sort("id").queryExecution.executedPlan
+      assert(child.outputOrdering.nonEmpty)
+
+      val coalesce = GpuCoalesceBatches(child, TargetSize(1024))
+      assertResult(child.outputOrdering)(coalesce.outputOrdering)
+    }
+  }
 
   def getCapturedPlan(): SparkPlan = {
     val capturedPlans = ExecutionPlanCaptureCallback.getResultsWithTimeout()

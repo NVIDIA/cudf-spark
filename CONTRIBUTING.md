@@ -107,7 +107,7 @@ If you want to create a jar with multiple versions we have the following options
 
 1. Build for all Apache Spark versions and CDH with no SNAPSHOT versions of Spark, only released. Use `-PnoSnapshots`.
 2. Build for all Apache Spark versions and CDH including SNAPSHOT versions of Spark we have supported for. Use `-Psnapshots`.
-3. Build for all Apache Spark versions, CDH and Databricks with no SNAPSHOT versions of Spark, only released. Use `-PnoSnaphsotsWithDatabricks`.
+3. Build for all Apache Spark versions, CDH and Databricks with no SNAPSHOT versions of Spark, only released. Use `-PnoSnapshotsWithDatabricks`.
 4. Build for all Apache Spark versions, CDH and Databricks including SNAPSHOT versions of Spark we have supported for. Use `-PsnapshotsWithDatabricks`
 5. Build for an arbitrary combination of comma-separated build versions using `-Dincluded_buildvers=<CSV list of build versions>`.
    E.g., `-Dincluded_buildvers=330,331`
@@ -475,6 +475,13 @@ This project follows the official
 [Scala style guide](https://docs.scala-lang.org/style/) and the
 [Databricks Scala guide](https://github.com/databricks/scala-style-guide), preferring the latter.
 
+Direct `println` calls should not be used in normal implementation or test code. Use project
+logging for optional diagnostics, ScalaTest `info` for meaningful test metadata, and `withClue`
+for context that should appear only when an assertion fails. `ConsoleOutput` is reserved for
+tools, CLI entry points, report generators, benchmarks, and process protocols where stdout or
+stderr is an intentional interface. If that helper is not available to a module, scope
+`scalastyle:off/on println` tightly around the intentional output block rather than an entire file.
+
 #### Java
 
 This project follows the
@@ -598,22 +605,39 @@ export PATH="/usr/local/opt/gnu-sed/libexec/gnubin:$PATH"
 
 Here are some guidelines to follow when creating a pull request:
 
-1. If your pull request is not ready for review but you want to make use of the
-   continuous integration testing facilities, please make it as a draft and label it with `[WIP]`.
+1. Use the [PR template](.github/PULL_REQUEST_TEMPLATE.md): Fill it in rather than replacing it
+   with another format.
 
-2. If your pull request is ready to be reviewed without requiring additional
-   work on top of it, then convert it to a regular pull request and remove the `[WIP]` label
-   (if applicable).
+2. Label your PR. Labels are what make the queue filterable. Changes that touch only tests get the
+   `test` label so reviewers know no production logic changed.
 
-3. Once the review has taken place, please do not add features or make changes
-   out of the scope of those even if the reviewer requests them. Instead, please
-   consider filing new issues for those changes.
+3. If your pull request is not ready for review but you want to make use of the
+   continuous integration testing facilities, please make it as a draft and prefix the title with
+   `[WIP]`. Please do not use other title prefixes that mean the same thing as `[WIP]` such as
+   `[DO NOT REVIEW]` and `[DRAFT]`.
 
-4. Please avoid rebasing your branch during the review process, as this causes the context
-   of any comments made by reviewers to be lost. If conflicts occur during
-   review, then they should be resolved by merging into the branch used for
-   making the pull request.
+   - When the PR is ready to be reviewed without requiring additional work on top of it,
+     then convert it to a regular pull request and remove the `[WIP]` prefix from the title.
 
+   - **Bound draft lifetime**. A draft is for CI runs and early feedback, not for parking work
+     indefinitely: state in the description what makes it a draft (a TODO checklist is preferred,
+     since it also shows how far along the work is), and if it stops progressing,
+     close it and open a new PR when the work resumes.
+
+4. Once the review has taken place:
+
+   - Please do not add features or make changes out of the scope of those even if the reviewer
+     requests them. Instead, please consider filing new issues for those changes.
+
+   - Please avoid rebasing your branch during the review process, as this causes the context
+     of any comments made by reviewers to be lost. If conflicts occur during
+     review, then they should be resolved by merging into the branch used for
+     making the pull request.
+
+5. **Closing a PR**. When closing an unmerged PR, leave a comment saying why, covering which case
+   applies: `superseded` (link the replacement), `abandoned` (say what ruled out the approach),
+   or `deferred` (link the tracking issue). A closed PR with no explanation is a dead end for
+   anyone who reaches it from a design doc or issue link months later.
 
 ### Pull request status checks
 A pull request should pass all status checks before being merged.
@@ -633,8 +657,12 @@ If it fails, you can click the `Details` link of this check, and go to `Upload l
 find the uploaded log.
 
 Options:
-1. Skip tests run by adding `[skip ci]` to title, this should only be used for doc-only change
-2. Run build and tests in databricks runtimes by adding `[databricks]` to title, this would add around 30-40 minutes
+1. Skip tests run by adding `[skip ci]` to the title. This should only be used for doc-only changes.
+2. Run build and tests in Databricks runtimes by adding `[databricks]` to the title. This adds around 30-40 minutes.
+3. Run Scala unit tests in parallel by adding `[fast-ut]` to the title. This does not reduce test coverage, but is opt-in while the parallel runner is still being evaluated. Parallel mode does not support `-Dsuffixes` or `-Dtests`; use `-DwildcardSuites` instead. GPU memory is divided across test forks, and each suite has a 1800-second timeout.
+4. Reduce pre-commit integration-test parameter combinations by adding `[reduced-it]` to the title. This is appropriate for documentation, CI, build, script, and other low-risk localized changes, but should not be used when correctness may depend on parameter combinations such as types, formats, time zones, ANSI mode, code generation, or shims. Nightly runs still exercise the full parameter product.
+
+CI title tags (`[skip ci]`, `[databricks]`, `[fast-ut]`, and `[reduced-it]`) should be placed at the end of the pull request title, separated from the subject and from each other by a single space. Category prefixes such as `[DOC]` remain at the beginning of the title.
 
 
 ### Code Review Guidelines

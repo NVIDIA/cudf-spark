@@ -18,6 +18,7 @@ package com.nvidia.spark.rapids
 import java.util.regex.PatternSyntaxException
 
 import scala.collection.mutable.ListBuffer
+import scala.util.Random
 
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -53,18 +54,83 @@ class RegularExpressionParserSuite extends AnyFunSuite {
       RegexRepetition(RegexChar('a'), QuantifierFixedLength(1)))))
   }
 
+  test("bounded reluctant quantifiers have semantic modes") {
+    val cases = Seq(
+      "a{2}?" -> QuantifierFixedLength(2, RegexQuantifier.Reluctant),
+      "a{2,}?" -> QuantifierVariableLength(2, None, RegexQuantifier.Reluctant),
+      "a{2,3}?" -> QuantifierVariableLength(2, Some(3), RegexQuantifier.Reluctant),
+      "a{0,3}?" -> QuantifierVariableLength(0, Some(3), RegexQuantifier.Reluctant))
+
+    cases.foreach { case (pattern, quantifier) =>
+      val ast = RegexSequence(ListBuffer(RegexRepetition(RegexChar('a'), quantifier)))
+      assert(parse(pattern) === ast)
+      assert(ast.toRegexString === pattern)
+    }
+  }
+
+  test("quantifier diagnostics point at the base or mode modifier") {
+    val cases = Seq(
+      "a*" -> 1,
+      "a*?" -> 2,
+      "a{2,3}" -> 1,
+      "a{2,3}?" -> 6)
+
+    cases.foreach { case (pattern, expectedPosition) =>
+      val RegexSequence(parts) = parse(pattern)
+      val repetition @ RegexRepetition(_, quantifier) = parts.head
+      assert(repetition.position.contains(1), pattern)
+      assert(quantifier.position.contains(expectedPosition), pattern)
+    }
+  }
+
+  // Regression test for https://github.com/NVIDIA/cudf-spark/issues/15495
+  test("quantifier integer boundaries") {
+    val supportedBoundaries: Seq[(String, RegexQuantifier)] = Seq(
+      s"a{${Int.MaxValue}}" -> QuantifierFixedLength(Int.MaxValue),
+      s"a{${Int.MaxValue},}" -> QuantifierVariableLength(Int.MaxValue, None),
+      s"a{1,${Int.MaxValue}}" -> QuantifierVariableLength(1, Some(Int.MaxValue)))
+    supportedBoundaries.foreach { case (pattern, quantifier) =>
+      assert(new RegexParser(pattern).parseUnchecked() ===
+        RegexSequence(ListBuffer(RegexRepetition(RegexChar('a'), quantifier))))
+    }
+
+    val firstUnsupported = (Int.MaxValue.toLong + 1).toString
+    val random = new Random(15495L)
+    val seededOversized = Seq.fill(8) {
+      (random.nextInt(9) + 1).toString + Seq.fill(31)(random.nextInt(10)).mkString
+    }
+    (firstUnsupported +: seededOversized).flatMap { count =>
+      Seq(
+        s"a{$count}" -> 2,
+        s"a{$count,}" -> 2,
+        s"a{1,$count}" -> 4)
+    }.foreach { case (pattern, index) =>
+      val e = intercept[RegexUnsupportedException] {
+        new RegexParser(pattern).parseUnchecked()
+      }
+      assert(e.getMessage ===
+        s"Regex quantifier exceeds supported integer range near index $index")
+    }
+  }
+
   test("not a quantifier") {
     assert(parse("{1}") ===
       RegexSequence(ListBuffer(
         RegexChar('{'), RegexChar('1'),RegexEscaped('}'))))
   }
 
-  test("nested repetition") {
+  test("possessive repetition has a semantic mode") {
     assert(parse("a*+") ===
       RegexSequence(ListBuffer(
-        RegexRepetition(
-          RegexRepetition(RegexChar('a'), SimpleQuantifier('*')),
-            SimpleQuantifier('+')))))
+        RegexRepetition(RegexChar('a'),
+          SimpleQuantifier('*', RegexQuantifier.Possessive)))))
+  }
+
+  test("stacked quantifiers are unsupported") {
+    Seq("a*{2,}", "a{2}{3}", "a{2}?{3}").foreach { pattern =>
+      val e = intercept[RegexUnsupportedException] { parse(pattern) }
+      assert(e.getMessage.startsWith("Preceding token cannot be quantified"))
+    }
   }
 
   test("choice") {
@@ -90,6 +156,37 @@ class RegularExpressionParserSuite extends AnyFunSuite {
           RegexGroup(RegexGroup.NegativeLookbehind, RegexSequence(ListBuffer(RegexChar('d')))),
           RegexGroup(RegexGroup.Independent, RegexSequence(ListBuffer(RegexChar('e')))),
           RegexGroup(RegexGroup.Named("n"), RegexSequence(ListBuffer(RegexChar('f')))))))
+      assert(parse("(:a)(?::b)") ===
+        RegexSequence(ListBuffer(
+          RegexGroup(RegexGroup.Capturing,
+                     RegexSequence(ListBuffer(RegexChar(':'), RegexChar('a')))),
+          RegexGroup(RegexGroup.NonCapturing,
+                     RegexSequence(ListBuffer(RegexChar(':'), RegexChar('b')))))))
+  }
+
+  test("flags") {
+    assert(parse("(?i)(?m-s)(?-duxU)(?)(?i-)(?-)") ===
+      RegexSequence(ListBuffer(
+        RegexInlineFlags(RegexFlagSet(Set(RegexFlag.CaseInsensitive), Set())),
+        RegexInlineFlags(RegexFlagSet(Set(RegexFlag.Multiline), Set(RegexFlag.DotAll))),
+        RegexInlineFlags(RegexFlagSet(Set(),
+          Set(RegexFlag.UnixLines, RegexFlag.UnicodeCase, RegexFlag.Comments,
+            RegexFlag.UnicodeClasses))),
+        RegexInlineFlags(RegexFlagSet(Set(), Set())),
+        RegexInlineFlags(RegexFlagSet(Set(RegexFlag.CaseInsensitive), Set())),
+        RegexInlineFlags(RegexFlagSet(Set(), Set())))))
+  }
+
+  test("scoped inline flags") {
+    assert(parse("(?i:ab)") ===
+      RegexSequence(ListBuffer(
+        RegexGroup(RegexGroup.ScopedFlags(RegexFlagSet(Set(RegexFlag.CaseInsensitive), Set())),
+          RegexSequence(ListBuffer(RegexChar('a'), RegexChar('b')))))))
+    assert(parse("(?i-s:a)") ===
+      RegexSequence(ListBuffer(
+        RegexGroup(RegexGroup.ScopedFlags(
+          RegexFlagSet(Set(RegexFlag.CaseInsensitive), Set(RegexFlag.DotAll))),
+          RegexSequence(ListBuffer(RegexChar('a')))))))
   }
 
   test("character class") {
@@ -126,6 +223,27 @@ class RegularExpressionParserSuite extends AnyFunSuite {
       RegexSequence(ListBuffer(
         RegexCharacterClass(negated = false,
           ListBuffer(RegexChar('a'))), RegexEscaped(']'))))
+  }
+
+  test("character class ranges beginning with ] or ^") {
+    // https://github.com/NVIDIA/cudf-spark/issues/15564
+    val cases = Seq(
+      raw"[]-_]" -> RegexCharacterClass(negated = false,
+        ListBuffer(RegexCharacterRange(RegexChar(']'), RegexChar('_')))),
+      raw"[^]-_]" -> RegexCharacterClass(negated = true,
+        ListBuffer(RegexCharacterRange(RegexChar(']'), RegexChar('_')))),
+      raw"[^^-_]" -> RegexCharacterClass(negated = true,
+        ListBuffer(RegexCharacterRange(RegexChar('^'), RegexChar('_')))),
+      raw"[a^-_]" -> RegexCharacterClass(negated = false,
+        ListBuffer(RegexChar('a'), RegexCharacterRange(RegexChar('^'), RegexChar('_')))),
+      raw"[\^-_]" -> RegexCharacterClass(negated = false,
+        ListBuffer(RegexCharacterRange(RegexEscaped('^'), RegexChar('_')))))
+
+    cases.foreach { case (pattern, expected) =>
+      val ast = parse(pattern)
+      assert(ast === RegexSequence(ListBuffer(expected)))
+      assert(ast.toRegexString === pattern)
+    }
   }
 
   test("escaped brackets") {
@@ -256,14 +374,12 @@ class RegularExpressionParserSuite extends AnyFunSuite {
   }
 
   test("group containing quantifier") {
-    val e = intercept[RegexUnsupportedException] {
-      parse("(?)")
-    }
-    assert(e.getMessage.startsWith("Base expression cannot start with quantifier"))
-
     assert(parse("(?:a?)") === RegexSequence(ListBuffer(
       RegexGroup(RegexGroup.NonCapturing, RegexSequence(ListBuffer(
         RegexRepetition(RegexChar('a'), SimpleQuantifier('?'))))))))
+    assert(parse("(?i:a)") === RegexSequence(ListBuffer(
+      RegexGroup(RegexGroup.ScopedFlags(RegexFlagSet(Set(RegexFlag.CaseInsensitive), Set())),
+        RegexSequence(ListBuffer(RegexChar('a')))))))
   }
 
   test("group not starting with ? is a capturing group") {
@@ -347,46 +463,46 @@ class RegularExpressionParserSuite extends AnyFunSuite {
   }
   
   test("\\1 in replacement is a literal backslash+digit, not a group backref") {
-    val repl = new RegexParser(raw"\1").parseReplacement(numCaptureGroups = 1)
+    val repl = new RegexParser(raw"\1").parseReplacement()
     assert(repl.parts.toList === List(RegexChar('\\'), RegexChar('1')))
   }
 
   test("\\a in replacement is the literal character a") {
-    val repl = new RegexParser(raw"\a").parseReplacement(numCaptureGroups = 0)
+    val repl = new RegexParser(raw"\a").parseReplacement()
     assert(repl.parts.toList === List(RegexChar('\\'), RegexChar('a')))
   }
 
   test("backslash plus non-ASCII Unicode digit is literal in replacement") {
     for (digit <- Seq('١', '१', '۱')) {
-      val repl = new RegexParser(raw"\$digit").parseReplacement(numCaptureGroups = 1)
+      val repl = new RegexParser(raw"\$digit").parseReplacement()
       assert(repl.parts.toList === List(RegexChar('\\'), RegexChar(digit)))
     }
   }
 
   test("trailing \\ in replacement throws") {
     val ex = intercept[RegexUnsupportedException] {
-      new RegexParser("""abc\""").parseReplacement(numCaptureGroups = 0)
+      new RegexParser("""abc\""").parseReplacement()
     }
     assert(ex.getMessage.contains("character to be escaped is missing"))
   }
 
   test("bare $X for non-digit X throws") {
     val ex = intercept[RegexUnsupportedException] {
-      new RegexParser("$x").parseReplacement(numCaptureGroups = 0)
+      new RegexParser("$x").parseReplacement()
     }
     assert(ex.getMessage.contains("Illegal group reference"))
   }
 
   test("trailing bare $ throws") {
     val ex = intercept[RegexUnsupportedException] {
-      new RegexParser("abc$").parseReplacement(numCaptureGroups = 0)
+      new RegexParser("abc$").parseReplacement()
     }
     assert(ex.getMessage.contains("Illegal group reference"))
   }
 
   test("dollar-brace-digit-brace throws") {
     val ex = intercept[RegexUnsupportedException] {
-      new RegexParser("""${1}""").parseReplacement(numCaptureGroups = 1)
+      new RegexParser("""${1}""").parseReplacement()
     }
     assert(ex.getMessage.contains("Illegal group reference"))
     assert(ex.getMessage.contains("digit"))
@@ -395,7 +511,7 @@ class RegularExpressionParserSuite extends AnyFunSuite {
   test("non-ASCII Unicode digit in braced group reference triggers GPU fallback") {
     for (rep <- Seq("""${١}""", """${१}""", """${۱}""")) {
       val e = intercept[RegexUnsupportedException] {
-        new RegexParser(rep).parseReplacement(numCaptureGroups = 4)
+        new RegexParser(rep).parseReplacement()
       }
       assert(e.getMessage.startsWith("Illegal group reference"),
         s"unexpected message for replacement '$rep': ${e.getMessage}")
@@ -404,64 +520,64 @@ class RegularExpressionParserSuite extends AnyFunSuite {
 
   test("dollar-brace-name-brace for named group is not supported on GPU") {
     val ex = intercept[RegexUnsupportedException] {
-      new RegexParser("""${name}""").parseReplacement(numCaptureGroups = 1)
+      new RegexParser("""${name}""").parseReplacement()
     }
     assert(ex.getMessage.contains("Named-group reference"))
   }
 
   test("dollar-brace-name with missing closing brace throws") {
     val ex = intercept[RegexUnsupportedException] {
-      new RegexParser("""${name""").parseReplacement(numCaptureGroups = 0)
+      new RegexParser("""${name""").parseReplacement()
     }
     assert(ex.getMessage.contains("Illegal group reference"))
   }
 
   test("dollar-brace with empty body throws") {
     val ex = intercept[RegexUnsupportedException] {
-      new RegexParser("""${}""").parseReplacement(numCaptureGroups = 0)
+      new RegexParser("""${}""").parseReplacement()
     }
     assert(ex.getMessage.contains("Illegal group reference"))
   }
 
   test("numbered backref $0 still works") {
-    val repl = new RegexParser("$0").parseReplacement(numCaptureGroups = 0)
+    val repl = new RegexParser("$0").parseReplacement()
     assert(repl.parts.toList === List(RegexChar('$'), RegexChar('0')))
   }
 
   test("numbered backref $1 still works") {
-    val repl = new RegexParser("$1").parseReplacement(numCaptureGroups = 1)
+    val repl = new RegexParser("$1").parseReplacement()
     assert(repl.parts.toList === List(RegexChar('$'), RegexChar('1')))
   }
 
   test("numbered backref $12 preserves raw digits for conversion") {
-    val repl = new RegexParser("$12").parseReplacement(numCaptureGroups = 12)
+    val repl = new RegexParser("$12").parseReplacement()
     assert(repl.parts.toList === List(RegexChar('$'), RegexChar('1'), RegexChar('2')))
   }
 
   test("numbered backref with leading zero preserves raw digits for conversion") {
-    val repl = new RegexParser("$09").parseReplacement(numCaptureGroups = 1)
+    val repl = new RegexParser("$09").parseReplacement()
     assert(repl.parts.toList === List(RegexChar('$'), RegexChar('0'), RegexChar('9')))
   }
 
   test("escaped metachar \\$ in replacement keeps the \\ pair") {
-    val repl = new RegexParser("""\$""").parseReplacement(numCaptureGroups = 0)
+    val repl = new RegexParser("""\$""").parseReplacement()
     assert(repl.parts.toList === List(RegexChar('\\'), RegexChar('$')))
   }
 
   test("escaped backslash \\\\ in replacement keeps the \\ pair") {
-    val repl = new RegexParser("""\\""").parseReplacement(numCaptureGroups = 0)
+    val repl = new RegexParser("""\\""").parseReplacement()
     assert(repl.parts.toList === List(RegexChar('\\'), RegexChar('\\')))
   }
 
   test("escaped dollar before digit \\$1 keeps the \\ pair as literals (not a backref)") {
     // Java appendReplacement: `\` escapes the `$`, so `\$1` is the literal text `$1`.
-    val repl = new RegexParser("""\$1""").parseReplacement(numCaptureGroups = 1)
+    val repl = new RegexParser("""\$1""").parseReplacement()
     assert(repl.parts.toList === List(RegexChar('\\'), RegexChar('$'), RegexChar('1')))
   }
 
   test("double backslash before dollar \\\\$1 does NOT escape the $ (real backref)") {
     // `\\` is an escaped backslash; the following `$1` is a genuine group-1 backref.
-    val repl = new RegexParser("""\\$1""").parseReplacement(numCaptureGroups = 1)
+    val repl = new RegexParser("""\\$1""").parseReplacement()
     assert(repl.parts.toList ===
       List(RegexChar('\\'), RegexChar('\\'), RegexChar('$'), RegexChar('1')))
   }
@@ -469,7 +585,7 @@ class RegularExpressionParserSuite extends AnyFunSuite {
   test("non-ASCII Unicode digit after `$` triggers GPU fallback") {
     for (rep <- Seq("$٢", "$१", "$۱")) {
       val e = intercept[RegexUnsupportedException] {
-        new RegexParser(rep).parseReplacement(numCaptureGroups = 4)
+        new RegexParser(rep).parseReplacement()
       }
       assert(e.getMessage.startsWith("Illegal group reference"),
         s"unexpected message for replacement '$rep': ${e.getMessage}")

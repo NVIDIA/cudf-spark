@@ -34,6 +34,7 @@ PROJECT_REPO_HOST=$(sed -E 's#^(.*://)?([^/@]*@)?([^/:]+).*#\3#' <<< "$PROJECT_R
 
 download_maven_jars() {
   local coordinates=$1
+  local exclude_group_ids=${2:-}
   local coordinate
   local group_id
   local artifact_id
@@ -41,6 +42,7 @@ download_maven_jars() {
   local dependency_dir
   local pom_file
   local -a coordinates_array
+  local -a dependency_copy_args
   local -a jars
 
   dependency_dir=$(mktemp -d "$ARTF_ROOT/maven-dependencies-XXXXXX")
@@ -75,12 +77,19 @@ EOF
     echo "</project>"
   } > "$pom_file"
 
+  dependency_copy_args=(
+    -DincludeScope=runtime
+    -DincludeTypes=jar
+    "-DoutputDirectory=$dependency_dir/jars"
+  )
+  if [[ -n "$exclude_group_ids" ]]; then
+    dependency_copy_args+=("-DexcludeGroupIds=$exclude_group_ids")
+  fi
+
   (
     cd "$WORKSPACE"
     $MVN -q -B -f "$pom_file" dependency:copy-dependencies \
-      -DincludeScope=runtime \
-      -DincludeTypes=jar \
-      -DoutputDirectory="$dependency_dir/jars"
+      "${dependency_copy_args[@]}"
   ) >&2 || return 1
 
   mapfile -d '' -t jars < <(
@@ -273,7 +282,9 @@ run_delta_lake_tests() {
   SPARK_34X_PATTERN="(3\.4\.[0-9])"
   SPARK_35X_PATTERN="(3\.5\.[3-9])"
   SPARK_40X_PATTERN="(4\.0\.[0-9])"
-  SPARK_41X_PATTERN="(4\.1\.[0-9])"
+  # Delta 4.1.0 is binary-incompatible with Spark 4.1.2+ after Spark changed internal
+  # Catalyst and Parquet APIs. Keep coverage on the compatible Spark patch releases.
+  SPARK_41_0_1_PATTERN="^(4\.1\.[0-1])$"
 
   if [[ $SPARK_VER =~ $SPARK_32X_PATTERN ]]; then
     # There are multiple versions of deltalake that support SPARK 3.2.X
@@ -296,13 +307,17 @@ run_delta_lake_tests() {
   if [[ $SPARK_VER =~ $SPARK_40X_PATTERN ]]; then
     # Delta 4.0.x only supports Scala 2.13 (Spark 4.0 requirement)
     if [[ "$SCALA_BINARY_VER" == "2.13" ]]; then
-      DELTA_LAKE_VERSIONS="4.0.0"
+      if [[ "$SPARK_VER" == "4.0.0" ]]; then
+        DELTA_LAKE_VERSIONS="4.0.0"
+      else
+        DELTA_LAKE_VERSIONS="4.0.1"
+      fi
     else
       echo "Skipping Delta Lake 4.0.x tests for Scala $SCALA_BINARY_VER (requires Scala 2.13)"
     fi
   fi
 
-  if [[ $SPARK_VER =~ $SPARK_41X_PATTERN ]]; then
+  if [[ $SPARK_VER =~ $SPARK_41_0_1_PATTERN ]]; then
     # Delta 4.1.x only supports Scala 2.13 (Spark 4.1 requirement)
     if [[ "$SCALA_BINARY_VER" == "2.13" ]]; then
       DELTA_LAKE_VERSIONS="4.1.0"
@@ -318,7 +333,8 @@ run_delta_lake_tests() {
       echo "Running Delta Lake tests for Delta Lake version $v"
       if [[ "$v" == "4.1.0" ]]; then
         DELTA_MAIN_JAR="io.delta:delta-spark_4.1_${SCALA_BINARY_VER}:$v"
-      elif [[ "$v" == "3.3.0" || "$v" == "4.0.0" ]]; then
+      elif [[ "$v" == "3.3.0" || "$v" == "4.0.0" || \
+          "$v" == "4.0.1" ]]; then
         DELTA_MAIN_JAR="io.delta:delta-spark_${SCALA_BINARY_VER}:$v"
       else
         DELTA_MAIN_JAR="io.delta:delta-core_${SCALA_BINARY_VER}:$v"
@@ -466,7 +482,16 @@ software.amazon.awssdk:url-connection-client:${AWS_SDK_VERSION},\
 software.amazon.awssdk:s3tables:${AWS_SDK_VERSION},\
 org.apache.hadoop:hadoop-aws:${HADOOP_AWS_VERSION},\
 com.amazonaws:aws-java-sdk-bundle:${AWS_SDK_BUNDLE_VERSION}"
-      ICEBERG_S3TABLES_EXTRA_CLASSPATH=$(download_maven_jars "$ICEBERG_S3TABLES_JARS")
+
+      # Spark 4.1 uses Netty 4.2, which cannot coexist with the Netty 4.1 jars pulled in by
+      # AWS SDK 2.x. Let AWS use the Netty version provided by Spark instead.
+      local exclude_group_ids=""
+      if [[ "$ICEBERG_SPARK_VER" == "4.1" ]]; then
+        exclude_group_ids="io.netty"
+      fi
+      ICEBERG_S3TABLES_EXTRA_CLASSPATH=$(
+        download_maven_jars "$ICEBERG_S3TABLES_JARS" "$exclude_group_ids"
+      )
 
       # Requires to setup s3 buckets and namespaces to run iceberg s3tables tests.
       # These steps are included in the test pipeline.

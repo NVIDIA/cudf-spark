@@ -40,7 +40,8 @@ import org.apache.spark.sql.delta.commands.{Batch, Bin, ClusteringStrategy, Dele
 import org.apache.spark.sql.delta.commands.optimize._
 import org.apache.spark.sql.delta.files.SQLMetricsReporting
 import org.apache.spark.sql.delta.logging.DeltaLogKeys
-import org.apache.spark.sql.delta.rapids.{GpuDeltaLog, GpuOptimisticTransactionBase}
+import org.apache.spark.sql.delta.rapids.{GpuDeltaLog, GpuOptimisticTransactionBase,
+  GpuOptimizeTableCommand}
 import org.apache.spark.sql.delta.rapids.DeltaMdcShims.mdc
 import org.apache.spark.sql.delta.skipping.MultiDimClustering
 import org.apache.spark.sql.delta.skipping.clustering.{ClusteredTableUtils, ClusteringColumnInfo}
@@ -70,10 +71,9 @@ class GpuOptimizeExecutor(
   private def ensureDeletionVectorDisabled(): Unit = {
     val dvFeatureEnabled = DeletionVectorUtils.deletionVectorsWritable(snapshot)
 
-    // Currently optimize executor will only be triggered by auto compaction, and we should
-    // already fallback to cpu when deletion vector enabled. This check ensures that the fallback
-    // actually works.
-    if (dvFeatureEnabled) {
+    // Ordinary OPTIMIZE must fall back when deletion vectors are enabled. REORG PURGE is
+    // different: it reads existing deletion vectors and writes replacement files without them.
+    if (dvFeatureEnabled && optimizeContext.reorg.isEmpty) {
       throw new IllegalStateException("Deletion vector not supported in gpu, we should have " +
         "fallback to cpu in GpuOptimizeExecutor")
     }
@@ -280,6 +280,9 @@ class GpuOptimizeExecutor(
     if (addedFiles.size > 0) {
       val metrics = createMetrics(sparkSession.sparkContext, addedFiles, removedFiles, removedDVs)
       commitAndRetry(txn, getOperation(), updates, metrics) { newTxn =>
+        // The retry reuses files written against the original snapshot. Fail closed if the new
+        // snapshot requires Iceberg compatibility tags that are absent from those files.
+        GpuOptimizeTableCommand.assertReorgSupported(newTxn.snapshot, optimizeContext)
         val newPartitionSchema = newTxn.metadata.partitionSchema
         // Note: When checking if the candidate set is the same, we need to consider (Path, DV)
         //       as the key.

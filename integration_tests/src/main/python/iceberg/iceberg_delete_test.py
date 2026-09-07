@@ -14,15 +14,20 @@
 
 import pytest
 
-from asserts import assert_equal_with_local_sort, assert_gpu_fallback_write_sql
+from asserts import assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect, \
+    assert_gpu_fallback_write_sql
 from conftest import is_iceberg_remote_catalog
 from data_gen import *
 from iceberg import (create_iceberg_table, get_full_table_name, iceberg_write_enabled_conf,
                      iceberg_base_table_cols, iceberg_gens_list, iceberg_nested_write_gens_list,
                      iceberg_unsupported_mark, delete_partition_transforms_distributed,
-                     _build_tblprops, assert_iceberg_files_use_codec)
+                     _build_tblprops, assert_iceberg_files_use_codec,
+                     supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON,
+                     supports_iceberg_row_lineage_inheritance,
+                     ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON,
+                     row_lineage_df, rapids_reader_types)
 from marks import allow_non_gpu, allow_non_gpu_conditional, iceberg, ignore_order, datagen_overrides
-from spark_session import is_spark_400_or_later, with_cpu_session, with_gpu_session
+from spark_session import is_spark_35x, is_spark_400_or_later, with_cpu_session, with_gpu_session
 
 pytestmark = iceberg_unsupported_mark
 
@@ -123,6 +128,77 @@ def test_iceberg_delete_unpartitioned_table(spark_tmp_table_factory, delete_mode
         lambda spark, table: spark.sql(f"DELETE FROM {table} WHERE _c2 % 3 = 0"),
         delete_mode=delete_mode
     )
+
+
+@allow_non_gpu(
+    "ReplaceDataExec", "WriteDeltaExec", "BatchScanExec", "ShuffleExchangeExec",
+    "SortExec", "ProjectExec", "ColumnarToRowExec")
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@ignore_order(local=True)
+@pytest.mark.parametrize('delete_mode,fallback_exec', [
+    pytest.param(
+        'copy-on-write',
+        'ReplaceDataExec',
+        marks=pytest.mark.xfail(
+            condition=is_spark_35x(),
+            reason="https://github.com/NVIDIA/cudf-spark/issues/15680"),
+        id='cow'),
+    pytest.param('merge-on-read', 'WriteDeltaExec', id='mor')
+])
+@allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
+def test_iceberg_delete_v3_table_fallback(
+        spark_tmp_table_factory, delete_mode, fallback_exec):
+    base_table_name = get_full_table_name(spark_tmp_table_factory)
+    create_iceberg_table_with_data(
+        f"{base_table_name}_cpu",
+        table_properties={"format-version": "3"},
+        delete_mode=delete_mode)
+    create_iceberg_table_with_data(
+        f"{base_table_name}_gpu",
+        table_properties={"format-version": "3"},
+        delete_mode=delete_mode)
+
+    def delete_data(spark, table_name):
+        spark.sql(f"DELETE FROM {table_name} WHERE _c2 % 3 = 0")
+
+    assert_gpu_fallback_write_sql(
+        delete_data,
+        lambda spark, table_name: spark.sql(f"SELECT * FROM {table_name}"),
+        base_table_name,
+        [fallback_exec],
+        conf=iceberg_delete_cow_enabled_conf)
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.skipif(
+    not supports_iceberg_row_lineage_inheritance,
+    reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
+@pytest.mark.parametrize("reader_type", rapids_reader_types)
+def test_iceberg_v3_row_lineage_delete_leading_rows(spark_tmp_table_factory, reader_type):
+    full_table = get_full_table_name(spark_tmp_table_factory)
+
+    def setup_iceberg_table(spark):
+        spark.sql(
+            f"CREATE TABLE {full_table} (id BIGINT) USING ICEBERG "
+            "TBLPROPERTIES ('format-version' = '3', 'write.delete.mode' = 'copy-on-write')")
+        # Consume row ID 0 in sequence 1 and delete it in sequence 2. The next append then
+        # assigns row IDs starting at 1 in sequence 3 to one data file.
+        row_lineage_df(spark, length=1).writeTo(full_table).append()
+        spark.sql(f"DELETE FROM {full_table} WHERE id = 0")
+        row_lineage_df(spark, start=1).writeTo(full_table).append()
+        spark.sql(f"DELETE FROM {full_table} WHERE id < {DEFAULT_DATA_GEN_LENGTH // 2}")
+
+    with_cpu_session(setup_iceberg_table)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(
+            f"SELECT id, _pos, _row_id, _last_updated_sequence_number FROM {full_table}"),
+        conf={
+            "spark.rapids.sql.format.iceberg.v3.enabled": "true",
+            "spark.rapids.sql.format.parquet.reader.type": reader_type
+        })
+
 
 def _do_test_iceberg_delete_partitioned_table(spark_tmp_table_factory, partition_col_sql, delete_mode, table_properties=None):
     """Helper function for partitioned table DELETE tests."""

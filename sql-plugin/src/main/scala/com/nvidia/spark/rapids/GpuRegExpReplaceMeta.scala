@@ -57,9 +57,8 @@ class GpuRegExpReplaceMeta(
                   replacement)
           // Use the user's Java pattern group count for the greedy-with-backoff parse so that
           // user-authored backref tokens (e.g. `$13` on a 12-group pattern) follow Java's
-          // `Matcher.appendReplacement` spec. Backrefs already emitted in braced `${N}` form
-          // are treated as resolved by the replacement AST and do not need to be covered by
-          // the user pattern's group count.
+          // `Matcher.appendReplacement` spec. Replacement parsing preserves raw `$N` tokens;
+          // this is the single boundary that resolves them against the user-visible group count.
           val userNumCaptureGroups =
             java.util.regex.Pattern.compile(s.toString).matcher("").groupCount()
           repl.map { r =>

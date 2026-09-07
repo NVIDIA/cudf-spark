@@ -22,7 +22,7 @@ from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_co
 from data_gen import *
 from marks import *
 from pyspark.sql.types import *
-from spark_session import is_before_spark_320, is_before_spark_350, is_before_spark_400, is_jvm_charset_utf8, with_cpu_session, with_gpu_session
+from spark_session import is_before_spark_320, is_before_spark_350, is_before_spark_400, is_databricks_runtime, is_databricks143, is_jvm_charset_utf8, with_cpu_session, with_gpu_session
 
 if not is_jvm_charset_utf8():
     pytestmark = [pytest.mark.regexp, pytest.mark.skip(reason=str("Current locale doesn't support UTF-8, regexp support is disabled"))]
@@ -52,12 +52,14 @@ def test_split_re_negative_limit():
             'split(a, "b[o]+", -1)',
             'split(a, "b[o]*", -1)',
             'split(a, "b[o]?", -1)',
+            'split(a, "o{1,2}?", -1)',
             'split(a, "[o]", -2)'),
             conf=_regexp_conf)
 
 def test_split_re_zero_limit():
     data_gen = mk_str_gen('([bf]o{0,2}:){1,7}') \
-        .with_special_case('boo:and:foo')
+        .with_special_case('boo:and:foo') \
+        .with_special_case('foo:FOO:FoO')
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark : unary_op_df(spark, data_gen).selectExpr(
             'split(a, "[:]", 0)',
@@ -69,7 +71,9 @@ def test_split_re_zero_limit():
             'split(a, "f[o]+", 0)',
             'split(a, "f[o]*", 0)',
             'split(a, "f[o]?", 0)',
-            'split(a, "[o]", 0)'),
+            'split(a, "[o]", 0)',
+            'split(a, "(?i)foo", 0)',
+            'split(a, "(?i:foo)", 0)'),
         conf=_regexp_conf)
 
 def test_split_re_one_limit():
@@ -91,7 +95,8 @@ def test_split_re_one_limit():
 
 def test_split_re_positive_limit():
     data_gen = mk_str_gen('([bf]o{0,2}:){1,7}') \
-        .with_special_case('boo:and:foo')
+        .with_special_case('boo:and:foo') \
+        .with_special_case('foo:FOO:FoO')
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark : unary_op_df(spark, data_gen).selectExpr(
             'split(a, "[:]", 2)',
@@ -103,7 +108,9 @@ def test_split_re_positive_limit():
             'split(a, "f[o]+", 2)',
             'split(a, "f[o]*", 9)',
             'split(a, "f[o]?", 5)',
-            'split(a, "[o]", 5)'),
+            'split(a, "[o]", 5)',
+            'split(a, "(?i)foo", 2)',
+            'split(a, "(?i:foo)", 5)'),
             conf=_regexp_conf)
 
 def test_split_re_no_limit():
@@ -215,6 +222,7 @@ def test_split_unsupported_fallback():
         'string_split_table',
         'select ' +
         'split(a, "o*"),' +
+        'split(a, "o{0,2}?"),' +
         'split(a, "o?") from string_split_table')
     assert_gpu_sql_fallback_collect(
         lambda spark : unary_op_df(spark, data_gen),
@@ -314,7 +322,9 @@ def test_re_replace_repetition():
                 'REGEXP_REPLACE(a, "(A*)", "PROD")',
                 'REGEXP_REPLACE(a, "(((A*)))", "PROD")',
                 'REGEXP_REPLACE(a, "((A*)E?)", "PROD")',
-                'REGEXP_REPLACE(a, "[A-Z]?", "PROD")'
+                'REGEXP_REPLACE(a, "[A-Z]?", "PROD")',
+                'REGEXP_REPLACE(a, "A{1,3}?", "PROD")',
+                'REGEXP_REPLACE(a, "A{0,3}?", "PROD")'
             ),
         conf=_regexp_conf)
 
@@ -364,13 +374,10 @@ def test_re_replace_backrefs():
             'REGEXP_REPLACE(a, "(T)(E)", "$12")',
             'REGEXP_REPLACE(a, "(T)(E)", "x$12y")',
             'REGEXP_REPLACE(a, "(T)(E)", "$123$2")',
-            # 12 user groups plus a trailing line-anchor `$`. Two distinct boundary
-            # checks:
-            # 1. User `$123$2` -> `$12` + literal `3` + `$2`; the user count being 12
-            #    (not the transpiled 13) is enough for the greedy-with-backoff to back off.
-            # 2. User `$13` -> `$1` + literal `3` (NOT a reference to the transpiler's
-            #    internally-generated 13th group, which exists only after line-anchor
-            #    rewriting and must stay invisible to user-replacement parsing).
+            # 12 user groups plus a trailing line-anchor `$`. Replacement parsing preserves
+            # raw `$N` tokens, then conversion uses the 12 Java-visible groups:
+            # 1. User `$123$2` -> `$12` + literal `3` + `$2`.
+            # 2. User `$13` -> `$1` + literal `3`.
             'REGEXP_REPLACE(a, "(T)(E)(S)(T)(T)(E)(S)(T)(T)(E)(S)(T)$", "$123$2")',
             'REGEXP_REPLACE(a, "(T)(E)(S)(T)(T)(E)(S)(T)(T)(E)(S)(T)$", "$13")'
         ),
@@ -397,6 +404,8 @@ def test_re_replace_anchors():
             'REGEXP_REPLACE(a, "(\ud720[A-Z]+)$", "PROD")',
             'REGEXP_REPLACE(a, "(TEST)$", "$1")',
             'REGEXP_REPLACE(a, "^(TEST)$", "$1")',
+            # Issue #15060: line-anchor rewriting must not mutate replacement backref state.
+            'REGEXP_REPLACE(a, "^(TEST)$", "[$1][$0]")',
             'REGEXP_REPLACE(a, "\\\\ATEST\\\\Z", "PROD")',
             'REGEXP_REPLACE(a, "\\\\ATEST$", "PROD")',
             'REGEXP_REPLACE(a, "^TEST\\\\Z", "PROD")',
@@ -470,14 +479,22 @@ def test_re_replace_null():
         conf=_regexp_conf)
 
 def test_regexp_replace():
-    gen = mk_str_gen('[abcd]{0,3}')
+    gen = mk_str_gen('[a-dA-D]{0,4}')
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark: unary_op_df(spark, gen).selectExpr(
-                'regexp_replace(a, "a", "A")',
-                'regexp_replace(a, "[^xyz]", "A")',
-                'regexp_replace(a, "([^x])|([^y])", "A")',
-                'regexp_replace(a, "(?:aa)+", "A")',
-                'regexp_replace(a, "a|b|c", "A")'),
+        lambda spark: unary_op_df(spark, gen).selectExpr(
+            'regexp_replace(a, "a", "A")',
+            'regexp_replace(a, "[^xyz]", "A")',
+            'regexp_replace(a, "([^x])|([^y])", "A")',
+            'regexp_replace(a, "(?:aa)+", "A")',
+            'regexp_replace(a, "a|b|c", "A")',
+            # case folding
+            'regexp_replace(a, "(?i)abc", "X")',
+            'regexp_replace(a, "(?i:abc)", "Y")',
+            'regexp_replace(a, "(?i)a(?-i)b", "Z")',
+            # $1 backref into a case-insensitive capture group
+            'regexp_replace(a, "(?i)(abc)", "[$1]")',
+            'regexp_replace(a, "((?i)abc)", "[$1]")',
+            'regexp_replace(a, "((?i:abc))", "[$1]")'),
         conf=_regexp_conf)
 
 # https://github.com/NVIDIA/spark-rapids/issues/14742
@@ -645,7 +662,7 @@ def test_regexp_replace_character_set_negated():
         conf=_regexp_conf)
 
 def test_regexp_extract():
-    gen = mk_str_gen('[abcd]{1,3}[0-9]{1,3}/?[abcd]{1,3}')
+    gen = mk_str_gen('[a-dA-D]{1,3}[0-9]{1,3}/?[a-dA-D]{1,3}')
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark: unary_op_df(spark, gen).selectExpr(
                 'regexp_extract(a, "([0-9]+)", 1)',
@@ -657,7 +674,13 @@ def test_regexp_extract():
                 'regexp_extract(a, "^([a-d]*)([0-9]*)\\\\/([a-d]*)", 3)',
                 'regexp_extract(a, "^([a-d]*)([0-9]*)\\\\/([a-d]*)$", 3)',
                 'regexp_extract(a, "^([a-d]*)([0-9]*)(\\\\/[a-d]*)", 3)',
-                'regexp_extract(a, "^([a-d]*)([0-9]*)(\\\\/[a-d]*)$", 3)'),
+                'regexp_extract(a, "^([a-d]*)([0-9]*)(\\\\/[a-d]*)$", 3)',
+                # (?i) folds the capture-group contents but does not change group numbering
+                'regexp_extract(a, "(?i)([a-c]+)([0-9]+)", 1)',
+                'regexp_extract(a, "(?i)([a-c]+)([0-9]+)", 2)',
+                # the flag turns on partway through, so only group 2 is case-insensitive
+                'regexp_extract(a, "([a-c]+)(?i)([a-c]+)", 2)',
+                'regexp_extract(a, "(?i)(abc)", 1)'),
         conf=_regexp_conf)
 
     capture_group_gen = mk_str_gen('[abcd]{1,2}')
@@ -752,10 +775,14 @@ def test_word_boundaries():
         conf=_regexp_conf)
 
 def test_character_classes():
-    gen = mk_str_gen('[abcd]{1,3}[0-9]{1,3}[abcd]{1,3}[ \n\t\r]{0,2}')
+    gen = (mk_str_gen('[abcd]{1,3}[0-9]{1,3}[abcd]{1,3}[ \n\t\r]{0,2}')
+        .with_special_case(']^_')
+        .with_special_case('^')
+        .with_special_case('-'))
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark: unary_op_df(spark, gen).selectExpr(
                 'rlike(a, "[abcd]")',
+                'rlike(a, "[]-_]")',
                 'rlike(a, "[^\n\r]")',
                 'rlike(a, "[\n-\\]")',
                 'rlike(a, "[+--]")',
@@ -1024,16 +1051,53 @@ def test_predefined_character_classes():
         conf=_regexp_conf)
 
 def test_rlike():
-    gen = mk_str_gen('[abcd]{1,3}')
+    # deterministic mixed-case inputs so the case-insensitive cases don't rely on the RNG
+    gen = mk_str_gen('[a-dA-D]{1,4}') \
+        .with_special_case('A').with_special_case('AA').with_special_case('ABC')
+    exprs = [
+        'a rlike "a{2}"',
+        'a rlike "a{1,3}"',
+        'a rlike "a{1,}"',
+        'a rlike "a[bc]d"',
+        'a rlike "a[bc]d"',
+        'a rlike "^[a-d]*$"',
+        # case-insensitive inline flag
+        'a rlike "(?i)abc"',
+        'a rlike "(?i)[a-c]"',
+        'a rlike "(?i)a(?-i)b"',
+        'a rlike "(?i)(a|b)c"',
+        'a rlike "(?i:abc)"',
+        'a rlike "(?i:a|b)"',
+        'a rlike "(?-i:a)b"',
+        # nested scoped-flags groups
+        'a rlike "(?i:(?-i:a)b)"',
+        'a rlike "(?-i:a(?i:b)c)"',
+        'a rlike "(?i:a(?-i:b(?i:c))d)"',
+        # a bare inline flag inside a scoped-flags group
+        'a rlike "(?i:a(?-i)b)"',
+        'a rlike "(?-i:a(?i)b)"',
+        # a negated non-case-insensitive flag is a no-op (mode off by default)
+        'a rlike "(?-s:abc)"',
+        'a rlike "(?i-s:abc)"',
+    ]
+    # Databricks 14.3 uses Java 8, which serializes Patterns with position-sensitive inline flags
+    # incorrectly (JDK-8194667), changing the CPU result. Exclude those patterns to avoid the bug.
+    # The bug is fixed in Java 11, so DBR 17.3 and Apache Spark are unaffected.
+    if not is_databricks143():
+        exprs += [
+            'a rlike "a(?i)b"',
+            'a rlike "a|(?i)b"',
+        ]
+    conf = _regexp_conf
+    if is_databricks_runtime():
+        # Databricks' SimplifyRLike optimizer rule rewrites `RLIKE '(?i)<const>'` into
+        # `Contains(lower(...))`, which bridges `Lower` to the CPU instead of exercising the GPU
+        # regex rewrite this change adds. Exclude it so these cases stay on GpuRLike.
+        conf = {**_regexp_conf,
+                'spark.sql.optimizer.excludedRules': 'com.databricks.sql.optimizer.SimplifyRLike'}
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark: unary_op_df(spark, gen).selectExpr(
-                'a rlike "a{2}"',
-                'a rlike "a{1,3}"',
-                'a rlike "a{1,}"',
-                'a rlike "a[bc]d"',
-                'a rlike "a[bc]d"',
-                'a rlike "^[a-d]*$"'),
-        conf=_regexp_conf)
+        lambda spark: unary_op_df(spark, gen).selectExpr(*exprs),
+        conf=conf)
 
 def test_rlike_embedded_null():
     gen = mk_str_gen('[abcd]{1,3}')\
@@ -1118,6 +1182,58 @@ def test_rlike_fallback_lookarounds_independent_named():
             lambda spark, pattern=pattern: unary_op_df(spark, gen).selectExpr(
                 f'a rlike "{pattern}"'),
             'RLike',
+            conf=_regexp_conf)
+
+@allow_non_gpu('ProjectExec', 'RLike')
+def test_rlike_fallback_unsupported_inline_flags():
+    gen = mk_str_gen('[abcd]{1,3}')
+    # (?m)/(?s) are unsupported (positive) flags; (?i) that precedes a choice alternative cannot
+    # be folded (in Java `a(?i)b|c` makes both `b` and `c` case-insensitive); scoped groups with a
+    # positive non-case-insensitive flag are likewise unsupported
+    for pattern in ['(?m)a', '(?s)a', '(?i)a|b', '(?i)a|b|c', 'a(?i)b|c', '(?m:a)', '(?is:a)']:
+        assert_gpu_fallback_collect(
+            lambda spark, pattern=pattern: unary_op_df(spark, gen).selectExpr(
+                f'a rlike "{pattern}"'),
+            'RLike',
+            conf=_regexp_conf)
+
+@allow_non_gpu('ProjectExec', 'RLike')
+def test_rlike_fallback_inline_flags_with_anchors():
+    gen = mk_str_gen('[abcd]{1,3}')
+    # a zero-width (?i) must not let an otherwise-unsupported anchor context (\n$, $^, ^$, or an
+    # anchors-only sequence) reach the GPU; these all fall back like their flag-free forms
+    for pattern in ['$(?i)^', '^(?i)$', '^(?i)', '(?i)$']:
+        assert_gpu_fallback_collect(
+            lambda spark, pattern=pattern: unary_op_df(spark, gen).selectExpr(
+                f'a rlike "{pattern}"'),
+            'RLike',
+            conf=_regexp_conf)
+
+@allow_non_gpu('ProjectExec', 'RLike')
+def test_rlike_fallback_case_insensitive_predefined_class():
+    # Older JDKs did not apply CASE_INSENSITIVE to the named \p{Lower}/\p{Upper} predicates
+    # (JDK-8214245), so GPU case-folding would diverge from the CPU there. Use the Spark version
+    # as a proxy for the executor JDK version to see if we need to fall back to the CPU.
+    if not is_before_spark_400():
+        pytest.skip('Spark 4.0+ (JDK 17+) folds these predefined classes on the GPU')
+    from pyspark.sql.functions import col
+    gen = mk_str_gen('[a-dA-D0-9]{1,4}')
+    for pattern in [r'(?i)\p{Lower}', r'(?i)\p{Upper}', r'(?i)\P{Lower}', r'(?i)\P{Upper}']:
+        assert_gpu_fallback_collect(
+            lambda spark, pattern=pattern: unary_op_df(spark, gen).select(col('a').rlike(pattern)),
+            'RLike',
+            conf=_regexp_conf)
+
+def test_rlike_case_insensitive_predefined_class_matches():
+    # Inverse of the above fallback test: on Spark 4.0+ (JDK 17+, past JDK-8214245) the CPU folds
+    # \p{Lower}/\p{Upper} under (?i) the same way the GPU does, so these stay on the GPU and match.
+    if is_before_spark_400():
+        pytest.skip('Spark < 4.0 may run on a pre-15 JDK and falls back for these patterns')
+    from pyspark.sql.functions import col
+    gen = mk_str_gen('[a-dA-D0-9]{1,4}')
+    for pattern in [r'(?i)\p{Lower}', r'(?i)\p{Upper}', r'(?i)\P{Lower}', r'(?i)\P{Upper}']:
+        assert_gpu_and_cpu_are_equal_collect(
+            lambda spark, pattern=pattern: unary_op_df(spark, gen).select(col('a').rlike(pattern)),
             conf=_regexp_conf)
 
 def test_regexp_extract_all_idx_zero():
@@ -1253,6 +1369,7 @@ def test_unsupported_fallback_regexp_extract():
     assert_gpu_did_fallback('REGEXP_EXTRACT("PROD", "[a-z]+", num)')
     assert_gpu_did_fallback('REGEXP_EXTRACT("PROD", reg_ex, 0)')
     assert_gpu_did_fallback('REGEXP_EXTRACT("PROD", reg_ex, num)')
+    assert_gpu_did_fallback('REGEXP_EXTRACT(a, "(a{1,2}+)", 1)')
     assert_gpu_did_fallback('REGEXP_EXTRACT(a, "(3?|a)+", 0)')
     assert_gpu_did_fallback('REGEXP_EXTRACT(a, "(a|3?)+", 0)')
 
@@ -1399,4 +1516,20 @@ def test_lazy_quantifier():
             'a', r'REGEXP_EXTRACT(a, "(\".??\")")',
             r'REGEXP_EXTRACT(a, "(\".+?\")")',
             r'REGEXP_EXTRACT(a, "(\".*?\")")'),
+        conf=_regexp_conf)
+
+    bounded_reluctant_gen = StringGen('[abc]{0,8}') \
+        .with_special_case('aaaaaacc') \
+        .with_special_case('bbbbcc') \
+        .with_special_case('cc') \
+        .with_special_case('aabbcc')
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: unary_op_df(spark, bounded_reluctant_gen).selectExpr(
+            'regexp_extract(a, "((aa|bb){0,3}?).*cc", 0)',
+            'regexp_extract(a, "((aa|bb){0,3}?).*cc", 1)',
+            'regexp_extract_all(a, "(a{1,3}?)", 0)',
+            'regexp_extract_all(a, "(a{1,3}?)", 1)',
+            'regexp_extract(a, "(2|a*?)", 0)',
+            'regexp_extract(a, "(2|a{1,2}?)", 0)',
+            'rlike(a, "a[a-c]{1,3}?")'),
         conf=_regexp_conf)

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,10 +21,13 @@ on:
   pull_request_target:
     types:
       - opened
+      - closed
 
 jobs:
   Add-to-project:
-    if: github.repository_owner == 'NVIDIA' # avoid adding issues from forks
+    if: >-
+      github.repository_owner == 'NVIDIA' &&
+      (github.event.action == 'opened' || github.event.pull_request.merged == true)
     runs-on: ubuntu-latest
     steps:
       - name: add-to-project

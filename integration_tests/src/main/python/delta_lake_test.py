@@ -17,13 +17,14 @@ from pyspark.sql import Row
 from asserts import assert_gpu_fallback_collect, assert_gpu_and_cpu_are_equal_collect, \
     assert_cpu_and_gpu_are_equal_collect_with_capture
 from data_gen import *
-from delta_lake_utils import delta_meta_allow, setup_delta_dest_table, deletion_vector_values_with_xfail_reasons, read_delta_path_with_cdf
+from delta_lake_utils import delta_meta_allow, setup_delta_dest_table, \
+    deletion_vector_values_with_xfail_reasons, read_delta_path_with_cdf, delta_reorg_xfail
 from marks import allow_non_gpu, delta_lake, ignore_order
 from parquet_test import reader_opt_confs_no_native
 from parquet_test_utils import parquet_row_group_midpoints
 from spark_session import with_cpu_session, with_gpu_session, is_databricks_runtime, \
-    is_spark_320_or_later, is_spark_340_or_later, is_spark_40x, \
-    supports_delta_lake_deletion_vectors, is_spark_401_or_later, \
+    is_spark_320_or_later, is_spark_340_or_later, \
+    supports_delta_lake_deletion_vectors, is_spark_412_or_later, \
     gpu_supports_delta_dv_scan, is_before_spark_353, is_databricks173_or_later
 
 _conf = {'spark.rapids.sql.explain': 'ALL'}
@@ -194,9 +195,42 @@ def test_delta_deletion_vector_read(spark_tmp_path, chunk_size, use_cdf, dv_pred
         ])
 
 
-# Spark generates a RowDataSourceScanExec for the CDF scan, which falls back to CPU.
-# See https://github.com/NVIDIA/cudf-spark/issues/15367 for details.
-cdf_fallback = ["RowDataSourceScanExec"]
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(is_databricks_runtime(), reason="OSS Delta CDF test")
+@pytest.mark.parametrize("column_mapping", [False, True], ids=["legacy_schema", "end_version_schema"])
+def test_delta_cdf_read_stays_columnar(spark_tmp_path, column_mapping):
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    conf = {} if not column_mapping else {
+        "spark.databricks.delta.properties.defaults.columnMapping.mode": "name",
+        "spark.databricks.delta.properties.defaults.minReaderVersion": "2",
+        "spark.databricks.delta.properties.defaults.minWriterVersion": "5",
+        "spark.sql.parquet.fieldId.read.enabled": "true"
+    }
+
+    with_cpu_session(
+        lambda spark: setup_delta_dest_table(
+            spark,
+            data_path,
+            dest_table_func=lambda spark: spark.createDataFrame(
+                [(1, "a"), (2, "b"), (3, "a")], ["id", "data"]),
+            use_cdf=True),
+        conf=conf)
+
+    def read_cdf(spark):
+        return spark.read.format("delta") \
+            .option("readChangeFeed", "true") \
+            .option("startingVersion", 0) \
+            .load(data_path) \
+            .groupBy("_change_type") \
+            .count()
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        read_cdf,
+        exist_classes="GpuFileSourceScanExec,GpuHashAggregateExec",
+        non_exist_classes="RowDataSourceScanExec",
+        conf=conf)
 
 
 def _test_delta_deletion_vector_read_with_cdf(
@@ -218,16 +252,16 @@ def _test_delta_deletion_vector_read_with_cdf(
         return read_delta_path_with_cdf(spark, data_path)
 
     if expect_fallback:
-        # DeltaCDFRelation hides its internal file scan behind this V1 CPU scan.
+        # The internal CDF scan is exposed, but deletion vectors are not supported on the GPU.
         assert_gpu_fallback_collect(
             read_cdf,
-            "RowDataSourceScanExec",
+            "FileSourceScanExec",
             conf=conf)
     else:
         assert_gpu_and_cpu_are_equal_collect(read_cdf, conf=conf)
 
 
-@allow_non_gpu(*cdf_fallback, *delta_meta_allow)
+@allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
 @pytest.mark.parametrize("chunk_size", ["2000", "4000", None], ids=idfn)
@@ -240,7 +274,7 @@ def test_delta_deletion_vector_read_with_cdf(spark_tmp_path, chunk_size, parquet
         spark_tmp_path, chunk_size, parquet_reader_type, expect_fallback=False)
 
 
-@allow_non_gpu("ColumnarToRowExec", *cdf_fallback, *delta_meta_allow)
+@allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
 @pytest.mark.parametrize("chunk_size", ["2000", "4000", None], ids=idfn)
@@ -447,7 +481,7 @@ def _run_delta_cdf_commit_read_test(
         conf=conf)
 
 
-@allow_non_gpu(*cdf_fallback, *delta_meta_allow)
+@allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
 @pytest.mark.parametrize(
@@ -483,7 +517,7 @@ def test_delta_cdf_mixed_row_index_filter_types_different_partitions(
         expected=_delta_cdf_mixed_filter_expected_rows(second_file_partition=1))
 
 
-@allow_non_gpu(*cdf_fallback, *delta_meta_allow)
+@allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
 @pytest.mark.parametrize(
@@ -512,7 +546,7 @@ def test_delta_cdf_mixed_row_index_filter_types_same_delta_partition(
         expected=_delta_cdf_mixed_filter_expected_rows(second_file_partition=0))
 
 
-@allow_non_gpu(*cdf_fallback, *delta_meta_allow)
+@allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
 @pytest.mark.parametrize(
@@ -853,9 +887,7 @@ def test_delta_scan_split_with_DV_disabled_with_DVs(spark_tmp_path, pushdown_dv_
                     reason="Deletion vector scan is not supported on Databricks")
 @pytest.mark.skipif(is_before_spark_353(),
                     reason="Spark-RAPIDS supports scan with deletion vectors starting in Spark 3.5.3")
-@pytest.mark.skipif(is_spark_40x() and is_spark_401_or_later(),
-                    reason="Delta 4.0.0 REORG is incompatible with Spark 4.0.1+ in Spark 4.0.x "
-                           "profiles (https://github.com/delta-io/delta/issues/5690)")
+@delta_reorg_xfail
 def test_delta_scan_split_with_DV_enabled_after_DVs_materialized(spark_tmp_path):
     def do_delete_and_reorg(spark, data_path):
         num_deleted = spark.sql(f"DELETE FROM delta.`{data_path}` WHERE a = 0").collect()[0][0]
@@ -904,8 +936,8 @@ def test_delta_read_column_mapping(spark_tmp_path, reader_confs, mapping, enable
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
-@pytest.mark.skipif(is_spark_401_or_later(), \
-    reason="Delta Lake 4.0.0 incompatible with Spark 4.0.1 - ParquetToSparkSchemaConverter API changed")
+@pytest.mark.skipif(is_spark_412_or_later(), \
+    reason="Delta Lake 4.1.0 incompatible with Spark 4.1.2+ - ParquetToSparkSchemaConverter API changed")
 @pytest.mark.skipif(not (is_databricks_runtime() or is_spark_340_or_later()), \
                     reason="ParquetToSparkSchemaConverter changes not compatible with Delta Lake")
 @pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_xfail_reasons(
@@ -1305,6 +1337,94 @@ def test_delta_filter_out_metadata_col(spark_tmp_path, dv_predicate_pushdown):
         assert_gpu_fallback_collect(read_table, "FileSourceScanExec", conf=conf)
     else:
         assert_gpu_and_cpu_are_equal_collect(read_table, conf=conf)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not supports_delta_lake_deletion_vectors(),
+                    reason="Delta Lake deletion vector support is required")
+@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
+                    reason="Deletion vector scan is not supported on Databricks before 17.3")
+@pytest.mark.skipif(is_before_spark_353(),
+                    reason="Spark-RAPIDS supports scan with deletion vectors starting in Spark 3.5.3")
+def test_delta_dv_pushdown_keeps_alias_producer(spark_tmp_path, spark_tmp_table_factory):
+    """
+    Regression test for https://github.com/NVIDIA/cudf-spark/issues/15598:
+    DVPredicatePushdown.mergeIdenticalProjects treated a pass-through project over an
+    alias-computing project as identical because their exprId sets are equal, and dropped
+    the alias's only producer, failing at execution with "Couldn't find <attr>". A
+    same-name decimal-to-double cast under a reordering aggregate reproduces that shape.
+    """
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    view_name = spark_tmp_table_factory.get()
+    conf = {
+        "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true",
+        "spark.databricks.delta.delete.deletionVectors.persistent": "true",
+        "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true"
+    }
+
+    def create_delta(spark):
+        spark.range(2000).selectExpr(
+            "CAST(id AS INT) AS order_num",
+            "CAST(id % 13 AS INT) AS item_sk",
+            "CAST(id AS DECIMAL(38,6)) AS net_paid",
+            "CAST(id % 500 AS INT) AS ship_date_sk",
+            "id % 7 = 0 AS ingest_deleted"
+        ).coalesce(1).write.format("delta") \
+            .option("delta.enableDeletionVectors", "true") \
+            .save(data_path)
+        count = spark.sql(
+            f"DELETE FROM delta.`{data_path}` WHERE ingest_deleted AND order_num % 2 = 0") \
+            .collect()[0][0]
+        assert count > 100, "Expected enough rows to be deleted to create deletion vectors"
+
+    def read_table(spark):
+        # The view supplies the soft-delete filter and column pruning; its expansion
+        # layers the projects that mergeIdenticalProjects later inspects.
+        spark.sql(f"""
+            CREATE OR REPLACE TEMPORARY VIEW {view_name} AS
+            SELECT order_num, item_sk, net_paid, ship_date_sk
+            FROM delta.`{data_path}`
+            WHERE NOT ingest_deleted
+        """)
+        # The same-name cast-alias with the group keys reordered puts a pass-through
+        # project over the alias-computing project; the aggregate feeds a shuffle where
+        # the unguarded merge caused the bind failure.
+        df = spark.sql(f"""
+            SELECT order_num, item_sk,
+                   SUM(net_paid) AS net_paid,
+                   concat_ws(',', sort_array(collect_list(CAST(ship_date_sk AS STRING))))
+                       AS ship_dates
+            FROM (
+                SELECT ship_date_sk,
+                       CAST(net_paid AS DOUBLE) AS net_paid,
+                       order_num, item_sk
+                FROM {view_name}
+                WHERE order_num IS NOT NULL AND item_sk IS NOT NULL
+            )
+            GROUP BY order_num, item_sk
+        """)
+        return df
+
+    def assert_dv_pushdown_plan(plan):
+        from conftest import spark_jvm
+
+        # Inspect the plan after collection so an adaptive plan has been finalized.
+        # The DV pushdown pass must have run for this test to exercise
+        # mergeIdenticalProjects: the internal skip-row columns are gone.
+        callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+        explain_str = str(callback.extractExecutedPlan(plan))
+        assert "__delta_internal_is_row_deleted" not in explain_str
+        if is_databricks173_or_later():
+            assert "_databricks_internal_edge_computed_column_skip_row" not in explain_str
+
+    with_cpu_session(create_delta, conf=conf)
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        read_table,
+        exist_classes=r"Gpu(FileSourceScanExec|FileGpuScan)",
+        conf=conf,
+        gpu_plan_assertion=assert_dv_pushdown_plan)
 
 
 def _test_delta_dv_filter_after_native_scan(spark_tmp_path, cpu_bridge_enabled):

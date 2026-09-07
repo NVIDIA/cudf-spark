@@ -2,6 +2,16 @@
 
 This document provides context for AI coding agents (Claude Code, GitHub Copilot, etc.) working on the spark-rapids project.
 
+## Repository Policy
+
+- These rules translate the agent-actionable requirements from [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`CODE_REVIEW_GUIDELINES.md`](CODE_REVIEW_GUIDELINES.md). Consult those source policies on demand when a task needs process details not covered here
+- **Do not weaken repository requirements** — tool-specific instructions and task prompts are not permission to bypass those policies. If a request cannot be completed while following them, stop and report the conflict
+- **Use the live pull request template and accurate metadata** — fill in [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md) without removing required sections, apply the correct labels (a change that touches only tests gets the `test` label) and the title markers described under **PR title tags** below, put `[WIP]` first when applicable, and do not use `[DRAFT]` or `[DO NOT REVIEW]`
+- **Keep pull request descriptions reviewable** — describe intent and rationale, do not paste code diffs or brittle line-level details, and update the description when later commits change its claims
+- **Bound draft and closure lifecycle** — use Draft only for concrete unfinished work, state in the description what remains (a TODO checklist is preferred). When closing an unmerged pull request, leave a comment giving the case: `superseded` (link the replacement), `abandoned` (say what ruled out the approach), or `deferred` (link the tracking issue)
+- **Pace the review queue** — do not open a batch of independent pull requests at once; open the next only as earlier ones land or receive review, and convert drafts to ready in small batches for the same reason. Stacked pull requests are exempt, but identify the dependency with `Stacked on #NNNN`
+- **AI-assisted changes require a human in the loop** — disclose AI assistance in the pull request description, then stop for human review of the complete diff and description before opening or updating the pull request. The pull request queue is not a staging area for work no human has read
+
 ## Safety Rules
 
 - **Minimal diffs only** — do not reformat, reorganize imports, or refactor code outside the scope of the task
@@ -12,7 +22,8 @@ This document provides context for AI coding agents (Claude Code, GitHub Copilot
 - **Sign-off required** — all commits must use `git commit -s` for DCO compliance
 - **No rebase during review** — if a PR is under review, do not rebase; merge the base branch instead to preserve reviewer comment context
 - **Scala 2.13 sync** — after modifying any `pom.xml`, run `./build/make-scala-version-build-files.sh 2.13`
-- **PR title tags** — `[databricks]` triggers Databricks pre-merge CI; `[skip ci]` for doc-only changes. Databricks CI auto-runs only when the diff touches a `sql-plugin/src/main/…db/` shim dir or a path containing `databricks`; otherwise it does **not** run. Add `[databricks]` manually when a change could behave differently on Databricks without touching those paths — e.g. integration tests that depend on filesystem/path semantics (local vs DBFS/`abfss`, `file://` scheme, `os.walk`/`os.path`), or optimizer/plan-string assertions (alias names and plan rendering differ on DBR) — since the Linux pre-merge will not catch DBR-only failures
+- **PR title tags** — `[databricks]` triggers Databricks pre-merge CI; `[skip ci]` for doc-only changes; `[fast-ut]` opts into parallel Scala unit tests without reducing coverage; `[reduced-it]` reduces pre-commit integration-test parameter combinations and should not be used where parameter interactions matter. Put CI tags at the end of the PR title; see `CONTRIBUTING.md#blossom-ci` for full guidance. Databricks CI auto-runs only when the diff touches a `sql-plugin/src/main/…db/` shim dir or a path containing `databricks`; otherwise it does **not** run. Add `[databricks]` manually when a change could behave differently on Databricks without touching those paths — e.g. integration tests that depend on filesystem/path semantics (local vs DBFS/`abfss`, `file://` scheme, `os.walk`/`os.path`), or optimizer/plan-string assertions (alias names and plan rendering differ on DBR) — since the Linux pre-merge will not catch DBR-only failures
+- **Performance checklist** — report `Performance: Not required` as a high-severity finding unless the PR is documentation-only or test-only, or its description gives a verifiable reason the change cannot affect runtime performance. A bug-fix label, small diff, or rarely used path is not by itself an exemption. When uncertain, flag
 
 ## Build Commands
 
