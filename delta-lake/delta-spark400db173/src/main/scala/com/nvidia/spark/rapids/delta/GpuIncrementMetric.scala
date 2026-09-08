@@ -24,7 +24,7 @@ import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.shims.{ShimExpression, ShimUnaryExpression}
 
 import org.apache.spark.sql.catalyst.expressions.Expression
-import org.apache.spark.sql.types.{DataType, IntegerType}
+import org.apache.spark.sql.types.DataType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /**
@@ -53,16 +53,22 @@ case class GpuIncrementMetric(cpuInc: IncrementMetric, override val child: Expre
   }
 }
 
+// A named meta class so that its name shows in stack traces (issue #10838).
+case class GpuIncrementMetricMeta(
+    cpuInc: IncrementMetric,
+    override val conf: RapidsConf,
+    p: Option[RapidsMeta[_, _, _]],
+    r: DataFromReplacementRule) extends ExprMeta[IncrementMetric](cpuInc, conf, p, r) {
+  override def convertToGpuImpl(): GpuExpression =
+    GpuIncrementMetric(cpuInc, childExprs.head.convertToGpu())
+}
+
 object GpuIncrementMetric {
   val exprRule: ExprRule[IncrementMetric] =
     GpuOverrides.expr[IncrementMetric](
       "Increments a Delta command metric by the number of rows evaluated",
       ExprChecks.unaryProject(TypeSig.all, TypeSig.all, TypeSig.all, TypeSig.all),
-      (inc, conf, parent, rule) =>
-        new ExprMeta[IncrementMetric](inc, conf, parent, rule) {
-          override def convertToGpuImpl(): GpuExpression =
-            GpuIncrementMetric(inc, childExprs.head.convertToGpu())
-        })
+      (inc, conf, parent, rule) => GpuIncrementMetricMeta(inc, conf, parent, rule))
 }
 
 /**
@@ -106,16 +112,24 @@ case class GpuConditionalIncrementMetric(
   }
 
   private def countTrue(cond: GpuColumnVector): Long = {
-    withResource(GpuScalar.from(1, IntegerType)) { one =>
-      withResource(GpuScalar.from(0, IntegerType)) { zero =>
-        // A null condition becomes a null count entry, which the sum leaves out.
-        withResource(cond.getBase.ifElse(one, zero)) { counts =>
-          withResource(counts.sum(DType.INT64)) { sum =>
-            if (sum.isValid) sum.getLong else 0L
-          }
-        }
-      }
+    // The sum of a boolean column counts its true rows: true is 1, false is 0, and the
+    // reduction leaves nulls out. An empty or all-null column gives an invalid scalar.
+    withResource(cond.getBase.sum(DType.INT64)) { sum =>
+      if (sum.isValid) sum.getLong else 0L
     }
+  }
+}
+
+// A named meta class so that its name shows in stack traces (issue #10838).
+case class GpuConditionalIncrementMetricMeta(
+    cpuInc: ConditionalIncrementMetric,
+    override val conf: RapidsConf,
+    p: Option[RapidsMeta[_, _, _]],
+    r: DataFromReplacementRule)
+  extends ExprMeta[ConditionalIncrementMetric](cpuInc, conf, p, r) {
+  override def convertToGpuImpl(): GpuExpression = {
+    val Seq(child, condition) = childExprs.map(_.convertToGpu())
+    GpuConditionalIncrementMetric(cpuInc, child, condition)
   }
 }
 
@@ -126,11 +140,5 @@ object GpuConditionalIncrementMetric {
       ExprChecks.projectOnly(TypeSig.all, TypeSig.all,
         Seq(ParamCheck("child", TypeSig.all, TypeSig.all),
           ParamCheck("condition", TypeSig.BOOLEAN, TypeSig.BOOLEAN))),
-      (inc, conf, parent, rule) =>
-        new ExprMeta[ConditionalIncrementMetric](inc, conf, parent, rule) {
-          override def convertToGpuImpl(): GpuExpression = {
-            val Seq(child, condition) = childExprs.map(_.convertToGpu())
-            GpuConditionalIncrementMetric(inc, child, condition)
-          }
-        })
+      (inc, conf, parent, rule) => GpuConditionalIncrementMetricMeta(inc, conf, parent, rule))
 }

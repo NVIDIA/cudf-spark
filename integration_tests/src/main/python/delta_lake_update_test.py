@@ -19,7 +19,7 @@ from data_gen import *
 from delta_lake_utils import *
 from marks import *
 from spark_session import is_before_spark_320, is_databricks_runtime, \
-    supports_delta_lake_deletion_vectors, with_cpu_session, with_gpu_session, is_before_spark_353, \
+    supports_delta_lake_deletion_vectors, with_cpu_session, is_before_spark_353, \
     is_databricks173_or_later
 
 delta_update_enabled_conf = copy_and_update(delta_writes_enabled_conf,
@@ -243,15 +243,17 @@ def test_delta_update_cpu_command_increment_metric_db173(spark_tmp_path):
     # whenever the command itself stays on the CPU (disabled by conf here, the way any vetoed
     # update runs). The DESCRIBE HISTORY row counts come from those metrics, so they must match
     # the CPU run. inject_oom makes the retry around the GPU row count fire, which must not
-    # change the counts.
+    # change the counts. The row with a NULL key makes the condition NULL: the CPU counts it
+    # as copied and not as updated, and the GPU sum has to leave it out the same way.
     conf = copy_and_update(delta_update_enabled_conf,
                            {"spark.rapids.sql.command.UpdateCommand": "false",
                             "spark.rapids.sql.command.UpdateCommandEdge": "false"})
     update_sql = "UPDATE delta.`{path}` SET b = b + 100 WHERE a >= 4"
 
     def dest_table_func(spark):
-        # a = 0..7 in one file: 4..7 are updated, the other 4 rows are copied
-        return spark.createDataFrame([(i, i * 10) for i in range(8)], "a INT, b INT").coalesce(1)
+        # a = 0..7 and NULL in one file: 4..7 are updated, the other 5 rows are copied
+        return spark.createDataFrame([(i, i * 10) for i in range(8)] + [(None, 80)],
+                                     "a INT, b INT").coalesce(1)
 
     def row_count_metrics(spark, path):
         row = spark.sql(f"DESCRIBE HISTORY delta.`{path}`") \
@@ -277,7 +279,7 @@ def test_delta_update_cpu_command_increment_metric_db173(spark_tmp_path):
         cpu_metrics = with_cpu_session(lambda spark: row_count_metrics(spark, cpu_path))
         gpu_metrics = with_cpu_session(lambda spark: row_count_metrics(spark, gpu_path))
         assert cpu_metrics == gpu_metrics, f"CPU {cpu_metrics} vs GPU {gpu_metrics}"
-        expected = {"numUpdatedRows": 4, "numCopiedRows": 4}
+        expected = {"numUpdatedRows": 4, "numCopiedRows": 5}
         assert {k: gpu_metrics.get(k) for k in expected} == expected, gpu_metrics
         plan_strings = [plan.toString() for plan in captured_plans]
         assert any("gpu_conditional_increment_metric" in s for s in plan_strings), \
