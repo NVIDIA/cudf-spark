@@ -871,10 +871,16 @@ def test_delta_merge_control_column_names_gpu_db173(spark_tmp_path, spark_tmp_ta
             conf=delta_merge_enabled_conf)
         assert expected == actual, f"expected {expected}, got {actual}"
         if use_cdf:
-            changes = with_cpu_session(
-                lambda spark: [row["_change_type"] for row in
-                               read_delta_path_with_cdf(spark, gpu_path).collect()],
-                conf=delta_merge_enabled_conf)
+            # The change feed is read from version 0, which includes the setup's own inserts,
+            # so only the rows of the MERGE commit are counted.
+            def merge_changes(spark):
+                merge_version = spark.sql(f"DESCRIBE HISTORY delta.`{gpu_path}`") \
+                    .where("operation = 'MERGE'").orderBy("version", ascending=False) \
+                    .first()["version"]
+                return [row["_change_type"] for row in
+                        read_delta_path_with_cdf(spark, gpu_path)
+                        .where(f"_commit_version = {merge_version}").collect()]
+            changes = with_cpu_session(merge_changes, conf=delta_merge_enabled_conf)
             actual_changes = {t: changes.count(t) for t in set(changes)}
             assert expected_changes == actual_changes, \
                 f"expected change rows {expected_changes}, got {actual_changes}"
