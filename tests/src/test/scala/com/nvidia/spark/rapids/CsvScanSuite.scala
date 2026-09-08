@@ -128,5 +128,19 @@ class CsvScanSuite extends SparkQueryCompareTestSuite {
     )))(_)
   }
 
+  test("gpuOutputBatchBytes metric is recorded for CSV scan") {
+    withGpuSparkSession({ spark =>
+      val df = intsFromCsv(spark)
+      val rows = df.collect()
+      val scan = df.queryExecution.executedPlan
+        .find(_.metrics.contains(GpuMetric.GPU_OUTPUT_BATCH_BYTES))
+      assert(scan.isDefined)
+      // Physical device width per row from cudf; variable-width types report 0.
+      val bytesPerRow = df.schema.fields
+        .map(f => GpuColumnVector.getRapidsType(f.dataType).getSizeInBytes).sum
+      val minBytes = rows.length.toLong * bytesPerRow
+      assert(scan.get.metrics(GpuMetric.GPU_OUTPUT_BATCH_BYTES).value >= minBytes)
+    })
+  }
 
 }

@@ -18,6 +18,7 @@ package com.nvidia.spark.rapids
 
 import scala.collection.immutable.TreeMap
 
+import ai.rapids.cudf.Table
 import com.nvidia.spark.rapids.metrics.GpuBubbleTimerManager
 
 import org.apache.spark.{SparkContext, TaskContext}
@@ -143,6 +144,7 @@ object GpuMetric extends Logging {
   val ASYNC_READ_TIME = "shuffleAsyncReadTime"
   val ICEBERG_BUILD_ACTION_TIME = "icebergBuildActionTime"
   val ICEBERG_POST_PROCESS_TIME = "icebergPostProcessTime"
+  val GPU_OUTPUT_BATCH_BYTES = "gpuOutputBatchBytes"
   val ICEBERG_DV_BYTES = "icebergDvBytes"
   val ICEBERG_DV_POSITIONS = "icebergDvPositions"
   val ICEBERG_DV_LOAD_TIME = "icebergDvLoadTime"
@@ -193,6 +195,7 @@ object GpuMetric extends Logging {
   val DESCRIPTION_FILECACHE_DATA_RANGE_READ_TIME = "cached data read time"
   val DESCRIPTION_DELETION_VECTOR_SCATTER_TIME = "deletion vector scatter time"
   val DESCRIPTION_DELETION_VECTOR_SIZE = "deletion vector size"
+  val DESCRIPTION_GPU_OUTPUT_BATCH_BYTES = "decoded batch bytes"
   val DESCRIPTION_CPU_BRIDGE_PROCESSING_TIME = "CPU bridge processing time"
   val DESCRIPTION_CPU_BRIDGE_WAIT_TIME = "CPU bridge elapsed time"
   val DESCRIPTION_COPY_TO_HOST_TIME = "deviceToHost memory copy time"
@@ -238,6 +241,14 @@ object GpuMetric extends Logging {
     }
 
     TreeMap.apply((ret ++ companions).toSeq: _*)
+  }
+
+  /** Records decoded table bytes on the SQL metric and the task accumulator. */
+  def recordOutputBatchBytes(table: Table, metric: Option[GpuMetric]): Long = {
+    val bytes = GpuColumnVector.getTotalDeviceMemoryUsed(table)
+    metric.foreach(_ += bytes)
+    GpuTaskMetrics.get.recordOutputBatchBytes(bytes)
+    bytes
   }
 
   def wrap(input: SQLMetric): GpuMetric = WrappedGpuMetric(input)

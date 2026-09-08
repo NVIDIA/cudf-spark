@@ -24,7 +24,6 @@ import com.nvidia.spark.rapids.shims.GpuBatchScanExec
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.DataFrame
-import org.apache.spark.sql.execution.FileSourceScanExec
 import org.apache.spark.sql.execution.datasources.orc.{OrcV1SchemaPruningSuite, OrcV2SchemaPruningSuite}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.GpuFileSourceScanExec
@@ -38,11 +37,10 @@ class RapidsOrcV1SchemaPruningSuite
   override protected def checkScan(
       df: DataFrame,
       expectedSchemaCatalogStrings: String*): Unit = {
+    df.collect()
     checkScanSchema(df, expectedSchemaCatalogStrings: _*) {
-      case scan: FileSourceScanExec => scan.requiredSchema
       case scan: GpuFileSourceScanExec => scan.requiredSchema
     }
-    df.collect()
   }
 }
 

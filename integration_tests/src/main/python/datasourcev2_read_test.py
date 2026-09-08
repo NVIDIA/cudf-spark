@@ -13,10 +13,16 @@
 # limitations under the License.
 
 import pytest
+import pyspark.sql.functions as f
+from pyspark.sql.types import IntegerType
 
-from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_row_counts_equal
+from asserts import (
+    assert_cpu_and_gpu_are_equal_collect_with_capture,
+    assert_gpu_and_cpu_are_equal_collect,
+    assert_gpu_and_cpu_row_counts_equal)
 from data_gen import non_utc_allow, copy_and_update
 from marks import *
+from spark_session import is_spark_420_or_later
 
 columnarClass = 'com.nvidia.spark.rapids.tests.datasourcev2.parquet.ArrowColumnarDataSourceV2'
 
@@ -65,3 +71,65 @@ def test_read_arrow_off():
     assert_gpu_and_cpu_are_equal_collect(
         readTable("int,bool,byte,short,long,string,float,double,date,timestamp", columnarClass),
             conf=conf)
+
+
+arrow_udf_conf = copy_and_update(aqe_disabled, {
+    'spark.sql.execution.arrow.pyspark.enabled': 'true',
+})
+
+
+def _arrow_int_df(spark):
+    return spark.read.option("arrowTypes", "int").format(columnarClass).load()
+
+
+@allow_non_gpu('BatchScanExec')
+def test_arrow_source_pandas_udf():
+    pytest.importorskip('pandas')
+    pytest.importorskip('pyarrow')
+
+    def add_one(a):
+        return a + 1
+
+    my_udf = f.pandas_udf(add_one, returnType=IntegerType())
+
+    def do_it(spark):
+        return _arrow_int_df(spark).select(
+            f.col('col1'), my_udf(f.col('col1')).alias('u')).orderBy('col1')
+
+    # Spark 4.2 SPARK-56350 can skip ColumnarToRow for Arrow-backed CPU input.
+    # That CPU path is what required the test Arrow source to keep batches alive.
+    # The GPU path does not use Spark's Arrow pass-through; it still ingests
+    # Arrow via HostColumnarToGpu and evaluates the UDF with GpuArrowEvalPythonExec.
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it,
+        exist_classes='HostColumnarToGpu,GpuArrowEvalPythonExec',
+        conf=arrow_udf_conf)
+
+
+@allow_non_gpu('BatchScanExec', 'PythonUDF')
+@pytest.mark.skipif(not is_spark_420_or_later(),
+                    reason='Arrow-optimized regular Python UDFs use ArrowEvalPythonExec from Spark 4.2')
+def test_arrow_source_regular_udf():
+    pytest.importorskip('pandas')
+    pytest.importorskip('pyarrow')
+
+    def add_one(a):
+        return a + 1
+
+    my_udf = f.udf(add_one, returnType=IntegerType())
+
+    def do_it(spark):
+        return _arrow_int_df(spark).select(
+            f.col('col1'), my_udf(f.col('col1')).alias('u')).orderBy('col1')
+
+    # SPARK-58241 is a Spark CPU bug on 4.2.0: evalType=101 hangs when Arrow
+    # columnar input is enabled. It is not a GPU bug. Disable that CPU path
+    # so this test compares GpuArrowEvalPythonExec against a stable row-based
+    # CPU ArrowEvalPythonExec baseline.
+    conf = copy_and_update(arrow_udf_conf, {
+        'spark.sql.execution.arrow.pythonUDF.columnarInput.enabled': 'false',
+    })
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it,
+        exist_classes='HostColumnarToGpu,GpuArrowEvalPythonExec',
+        conf=conf)
