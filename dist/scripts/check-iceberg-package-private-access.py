@@ -22,9 +22,12 @@ import os
 import re
 import sys
 
-from java.io import DataInputStream, FileInputStream, IOException
+from java.io import ByteArrayOutputStream, DataInputStream, DataOutputStream, FileInputStream, IOException
 from java.util.jar import JarFile
-from javassist.bytecode import AccessFlag, ClassFile, ConstPool
+from javassist import ByteArrayClassPath, ClassPool, NotFoundException
+from javassist.bytecode import (
+    AccessFlag, BadBytecode, ClassFile, ConstPool, Descriptor, MethodInfo, Opcode)
+from javassist.bytecode.analysis import Analyzer, Type
 
 
 ICEBERG_PREFIX = "org/apache/iceberg/"
@@ -35,11 +38,60 @@ BUILD_VERSION_RE = re.compile(r"^[0-9][0-9a-z]*$")
 MEMBER_VISIBILITY = AccessFlag.PUBLIC | AccessFlag.PRIVATE | AccessFlag.PROTECTED
 
 Member = collections.namedtuple("Member", "access name descriptor")
-MemberRef = collections.namedtuple("MemberRef", "kind owner name descriptor")
+MemberUse = collections.namedtuple(
+    "MemberUse", "method_name method_descriptor position opcode")
+MemberRef = collections.namedtuple(
+    "MemberRef", "index kind owner name descriptor uses method_handle_kinds")
 ClassInfo = collections.namedtuple(
-    "ClassInfo", "name access super_name interfaces fields methods class_refs member_refs")
+    "ClassInfo",
+    "name access super_name interfaces fields methods class_refs member_refs bytecode")
 Finding = collections.namedtuple("Finding", "entry caller target reason runtime")
 RuntimeSelection = collections.namedtuple("RuntimeSelection", "build_version path")
+
+MEMBER_OPCODES = frozenset((
+    Opcode.GETFIELD, Opcode.GETSTATIC, Opcode.PUTFIELD, Opcode.PUTSTATIC,
+    Opcode.INVOKEINTERFACE, Opcode.INVOKESPECIAL, Opcode.INVOKESTATIC,
+    Opcode.INVOKEVIRTUAL,
+))
+FIELD_OPCODES = frozenset((
+    Opcode.GETFIELD, Opcode.GETSTATIC, Opcode.PUTFIELD, Opcode.PUTSTATIC))
+METHOD_HANDLE_OPCODES = {
+    ConstPool.REF_getField: Opcode.GETFIELD,
+    ConstPool.REF_getStatic: Opcode.GETSTATIC,
+    ConstPool.REF_putField: Opcode.PUTFIELD,
+    ConstPool.REF_putStatic: Opcode.PUTSTATIC,
+    ConstPool.REF_invokeVirtual: Opcode.INVOKEVIRTUAL,
+    ConstPool.REF_invokeStatic: Opcode.INVOKESTATIC,
+    ConstPool.REF_invokeSpecial: Opcode.INVOKESPECIAL,
+    ConstPool.REF_newInvokeSpecial: Opcode.INVOKESPECIAL,
+    ConstPool.REF_invokeInterface: Opcode.INVOKEINTERFACE,
+}
+
+
+def _valid_member_operand(opcode, ref, major_version):
+    if ref is None:
+        return False
+    tag = ref[4]
+    if opcode in FIELD_OPCODES:
+        return tag == ConstPool.CONST_Fieldref
+    if opcode == Opcode.INVOKEINTERFACE:
+        return tag == ConstPool.CONST_InterfaceMethodref
+    if opcode == Opcode.INVOKEVIRTUAL:
+        return tag == ConstPool.CONST_Methodref
+    return (tag == ConstPool.CONST_Methodref or
+            (tag == ConstPool.CONST_InterfaceMethodref and
+             major_version >= ClassFile.JAVA_8))
+
+
+def _valid_method_handle_target(handle_kind, ref, major_version):
+    if major_version < ClassFile.JAVA_7:
+        return False
+    opcode = METHOD_HANDLE_OPCODES.get(handle_kind)
+    if opcode is None or not _valid_member_operand(opcode, ref, major_version):
+        return False
+    if handle_kind == ConstPool.REF_newInvokeSpecial:
+        return ref[4] == ConstPool.CONST_Methodref and ref[2] == MethodInfo.nameInit
+    return ref[2] not in (MethodInfo.nameInit, MethodInfo.nameClinit)
 
 
 def _internal_name(name):
@@ -60,23 +112,26 @@ def _normalized_class_names(name):
 def _parse_class(stream):
     class_file = ClassFile(DataInputStream(stream))
     pool = class_file.getConstPool()
+    major_version = class_file.getMajorVersion()
     class_refs = set()
     for name in pool.getClassNames():
         class_refs.update(_normalized_class_names(name))
-    member_refs = []
+    member_refs_by_index = {}
+    member_uses = collections.defaultdict(list)
+    member_handle_kinds = collections.defaultdict(set)
 
     for index in range(1, pool.getSize()):
         tag = pool.getTag(index)
         if tag == ConstPool.CONST_Fieldref:
-            ref = MemberRef("field", pool.getFieldrefClassName(index),
-                            pool.getFieldrefName(index), pool.getFieldrefType(index))
+            ref = ("field", pool.getFieldrefClassName(index),
+                   pool.getFieldrefName(index), pool.getFieldrefType(index), tag)
         elif tag == ConstPool.CONST_Methodref:
-            ref = MemberRef("method", pool.getMethodrefClassName(index),
-                            pool.getMethodrefName(index), pool.getMethodrefType(index))
+            ref = ("method", pool.getMethodrefClassName(index),
+                   pool.getMethodrefName(index), pool.getMethodrefType(index), tag)
         elif tag == ConstPool.CONST_InterfaceMethodref:
-            ref = MemberRef("method", pool.getInterfaceMethodrefClassName(index),
-                            pool.getInterfaceMethodrefName(index),
-                            pool.getInterfaceMethodrefType(index))
+            ref = ("method", pool.getInterfaceMethodrefClassName(index),
+                   pool.getInterfaceMethodrefName(index),
+                   pool.getInterfaceMethodrefType(index), tag)
         else:
             if tag == ConstPool.CONST_MethodType:
                 class_refs.update(_descriptor_classes(
@@ -86,10 +141,44 @@ def _parse_class(stream):
             elif tag == ConstPool.CONST_InvokeDynamic:
                 class_refs.update(_descriptor_classes(pool.getInvokeDynamicType(index)))
             continue
-        ref = MemberRef(ref.kind, _internal_name(ref.owner), ref.name, ref.descriptor)
-        member_refs.append(ref)
-        class_refs.add(ref.owner)
-        class_refs.update(_descriptor_classes(ref.descriptor))
+        ref = (ref[0], _internal_name(ref[1]), ref[2], ref[3], ref[4])
+        member_refs_by_index[index] = ref
+        class_refs.add(ref[1])
+        class_refs.update(_descriptor_classes(ref[3]))
+
+    for method in class_file.getMethods():
+        code = method.getCodeAttribute()
+        if code:
+            iterator = code.iterator()
+            while iterator.hasNext():
+                position = iterator.next()
+                opcode = iterator.byteAt(position)
+                if opcode in MEMBER_OPCODES:
+                    member_index = iterator.u16bitAt(position + 1)
+                    ref = member_refs_by_index.get(member_index)
+                    if not _valid_member_operand(opcode, ref, major_version):
+                        raise RuntimeError(
+                            "member opcode at bytecode offset %d has an incompatible "
+                            "constant-pool operand %d in %s.%s%s" %
+                            (position, member_index, class_file.getName(),
+                             method.getName(), method.getDescriptor()))
+                    member_uses[member_index].append(MemberUse(
+                        method.getName(), method.getDescriptor(), position, opcode))
+    for index in range(1, pool.getSize()):
+        if pool.getTag(index) == ConstPool.CONST_MethodHandle:
+            target_index = pool.getMethodHandleIndex(index)
+            handle_kind = pool.getMethodHandleKind(index)
+            ref = member_refs_by_index.get(target_index)
+            if not _valid_method_handle_target(handle_kind, ref, major_version):
+                raise RuntimeError(
+                    "method handle %d has an incompatible kind or constant-pool operand "
+                    "in %s" % (index, class_file.getName()))
+            member_handle_kinds[target_index].add(handle_kind)
+
+    member_refs = tuple(
+        MemberRef(index, ref[0], ref[1], ref[2], ref[3],
+                  tuple(member_uses[index]), frozenset(member_handle_kinds[index]))
+        for index, ref in sorted(member_refs_by_index.items()))
 
     fields = tuple(Member(field.getAccessFlags(), field.getName(), field.getDescriptor())
                    for field in class_file.getFields())
@@ -102,10 +191,13 @@ def _parse_class(stream):
     class_refs.discard(name)
     inner_access = class_file.getInnerAccessFlags()
     access = inner_access if inner_access >= 0 else class_file.getAccessFlags()
+    output = ByteArrayOutputStream()
+    class_file.write(DataOutputStream(output))
     return ClassInfo(name, access,
                      _internal_name(class_file.getSuperclass()),
                      tuple(_internal_name(name) for name in class_file.getInterfaces()),
-                     fields, methods, frozenset(class_refs), tuple(member_refs))
+                     fields, methods, frozenset(class_refs), member_refs,
+                     output.toByteArray())
 
 
 def _is_class_entry(entry):
@@ -266,6 +358,85 @@ def _is_subclass(runtime_classes, plugin_classes, class_name, candidate_parent):
     return False
 
 
+class ProtectedAccessAnalyzer(object):
+    """Apply the JVM's protected receiver constraint to plugin member uses."""
+
+    def __init__(self, layout_entries, runtime_classes, plugin_classes):
+        self.layout_entries = layout_entries
+        self.runtime_classes = runtime_classes
+        self.plugin_classes = plugin_classes
+        self.pool = None
+        self.frames = {}
+
+    def _class_pool(self):
+        if self.pool is not None:
+            return self.pool
+        self.pool = ClassPool(False)
+        self.pool.appendSystemPath()
+        runtime_path = (os.path.join(self.runtime_classes.path, ".")
+                        if os.path.isdir(self.runtime_classes.path)
+                        else self.runtime_classes.path)
+        self.pool.insertClassPath(runtime_path)
+        for _, info in self.layout_entries:
+            self.pool.insertClassPath(ByteArrayClassPath(
+                info.name.replace("/", "."), info.bytecode))
+        return self.pool
+
+    def _receiver_type(self, caller, reference, use):
+        key = (caller.name, use.method_name, use.method_descriptor)
+        if key not in self.frames:
+            caller_class = self._class_pool().get(caller.name.replace("/", "."))
+            method = next((candidate for candidate in
+                           caller_class.getClassFile2().getMethods()
+                           if candidate.getName() == use.method_name and
+                           candidate.getDescriptor() == use.method_descriptor), None)
+            if method is None:
+                raise RuntimeError("cannot find bytecode method %s.%s%s" % key)
+            self.frames[key] = (caller_class, Analyzer().analyze(caller_class, method))
+        caller_class, frames = self.frames[key]
+        if frames is None or use.position >= len(frames) or frames[use.position] is None:
+            raise RuntimeError("cannot determine the receiver at bytecode offset %d in "
+                               "%s.%s%s" % (use.position, caller.name,
+                                             use.method_name,
+                                             use.method_descriptor))
+        frame = frames[use.position]
+        if use.opcode == Opcode.GETFIELD:
+            receiver_index = frame.getTopIndex()
+        elif use.opcode == Opcode.PUTFIELD:
+            receiver_index = frame.getTopIndex() - Descriptor.dataSize(reference.descriptor)
+        else:
+            receiver_index = frame.getTopIndex() - Descriptor.paramSize(reference.descriptor)
+        if receiver_index < 0:
+            raise RuntimeError("missing protected receiver at bytecode offset %d in "
+                               "%s.%s%s" % (use.position, caller.name,
+                                             use.method_name,
+                                             use.method_descriptor))
+        return caller_class, frame.getStack(receiver_index)
+
+    def _use_is_safe(self, caller, reference, use):
+        caller_class, receiver_type = self._receiver_type(caller, reference, use)
+        return Type.get(caller_class).isAssignableFrom(receiver_type)
+
+    def _method_handle_is_safe(self, handle_kind):
+        return handle_kind != ConstPool.REF_newInvokeSpecial
+
+    def requires_runtime_package(self, caller, declaring_class, member, reference):
+        if caller.name == declaring_class:
+            return False
+        if not _is_subclass(
+                self.runtime_classes, self.plugin_classes,
+                caller.name, declaring_class):
+            return True
+        if member.access & AccessFlag.STATIC:
+            return False
+        if not reference.uses and not reference.method_handle_kinds:
+            return True
+        return (any(not self._use_is_safe(caller, reference, use)
+                    for use in reference.uses) or
+                any(not self._method_handle_is_safe(kind)
+                    for kind in reference.method_handle_kinds))
+
+
 def _package_name(class_name):
     return class_name.rsplit("/", 1)[0]
 
@@ -305,6 +476,8 @@ def read_runtime_manifest(path):
 
 def find_package_private_access(layout_entries, runtime_classes, runtime_label):
     plugin_classes = _classes_by_name(layout_entries)
+    protected_access = ProtectedAccessAnalyzer(
+        layout_entries, runtime_classes, plugin_classes)
     findings = set()
     callers = set()
     for entry, caller in layout_entries:
@@ -324,8 +497,8 @@ def find_package_private_access(layout_entries, runtime_classes, runtime_label):
                 if not member.access & MEMBER_VISIBILITY:
                     reason = "package-private %s" % reference.kind
                 elif (member.access & AccessFlag.PROTECTED and
-                      not _is_subclass(runtime_classes, plugin_classes,
-                                       caller.name, declaring_class)):
+                      protected_access.requires_runtime_package(
+                          caller, declaring_class, member, reference)):
                     reason = "protected %s requiring same runtime package" % reference.kind
                 if reason:
                     separator = ":" if reference.kind == "field" else ""
@@ -409,7 +582,8 @@ def main(argv=None):
                 findings.update(runtime_findings)
             finally:
                 runtime_classes.close()
-    except (IOError, OSError, IOException, RuntimeError) as error:
+    except (IOError, OSError, IOException, BadBytecode,
+            NotFoundException, RuntimeError) as error:
         print("Iceberg package-private access audit failed: %s" % error, file=sys.stderr)
         return 2
 

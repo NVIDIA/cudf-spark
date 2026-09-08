@@ -23,8 +23,11 @@ import tempfile
 import unittest
 import zipfile
 
-from java.io import DataOutputStream, FileOutputStream
-from javassist.bytecode import AccessFlag, ClassFile, FieldInfo, MethodInfo
+from java.io import DataOutputStream, File, FileOutputStream
+from java.lang import Class, Double, IllegalAccessError, Long, VerifyError
+from java.net import URLClassLoader
+from javassist.bytecode import (
+    AccessFlag, Bytecode, ClassFile, ConstPool, FieldInfo, MethodInfo, Opcode)
 
 
 SCRIPT = os.path.join(os.path.dirname(os.path.dirname(__file__)),
@@ -85,6 +88,30 @@ def captured_stream(name):
         setattr(sys, name, original)
 
 
+def write_class_file(root, entry, class_file):
+    path = os.path.join(root, *entry.split("/"))
+    parent = os.path.dirname(path)
+    if not os.path.isdir(parent):
+        os.makedirs(parent)
+    output = DataOutputStream(FileOutputStream(path))
+    try:
+        class_file.write(output)
+    finally:
+        output.close()
+
+
+@contextlib.contextmanager
+def split_loader(runtime, layout):
+    parent_loader = URLClassLoader.newInstance([File(runtime).toURI().toURL()])
+    child_loader = URLClassLoader.newInstance([
+        File(os.path.join(layout, "spark-shared")).toURI().toURL()], parent_loader)
+    try:
+        yield child_loader
+    finally:
+        child_loader.close()
+        parent_loader.close()
+
+
 def write_class(root, entry, class_name, super_name="java.lang.Object",
                 methods=(), fields=(), references=(), class_references=(),
                 access=AccessFlag.PUBLIC):
@@ -108,20 +135,261 @@ def write_class(root, entry, class_name, super_name="java.lang.Object",
         else:
             pool.addMethodrefInfo(owner_index, name, descriptor)
 
-    path = os.path.join(root, *entry.split("/"))
-    parent = os.path.dirname(path)
-    if not os.path.isdir(parent):
-        os.makedirs(parent)
-    output = DataOutputStream(FileOutputStream(path))
-    try:
-        class_file.write(output)
-    finally:
-        output.close()
+    write_class_file(root, entry, class_file)
+
+
+def write_protected_field_subclass(root, entry, reference_owner, receiver_local):
+    class_name = "org.apache.iceberg.p.GpuChild"
+    class_file = ClassFile(False, class_name, "org.apache.iceberg.p.Base")
+    class_file.setAccessFlags(AccessFlag.PUBLIC)
+    add_constructor(class_file, "org.apache.iceberg.p.Base")
+    pool = class_file.getConstPool()
+    descriptor = "()I" if receiver_local == 0 else "(Lorg/apache/iceberg/p/Base;)I"
+    method = MethodInfo(pool, "read", descriptor)
+    method.setAccessFlags(AccessFlag.PUBLIC)
+    code = Bytecode(pool, 1, receiver_local + 1)
+    code.addAload(receiver_local)
+    code.addGetfield(reference_owner, "hidden", "I")
+    code.addOpcode(Opcode.IRETURN)
+    method.setCodeAttribute(code.toCodeAttribute())
+    class_file.addMethod(method)
+    write_class_file(root, entry, class_file)
+
+
+def write_protected_method_subclass(root, entry, reference_owner, receiver_local):
+    class_file = ClassFile(False, "org.apache.iceberg.p.GpuChild",
+                           "org.apache.iceberg.p.Base")
+    class_file.setAccessFlags(AccessFlag.PUBLIC)
+    add_constructor(class_file, "org.apache.iceberg.p.Base")
+    pool = class_file.getConstPool()
+    descriptor = "()V" if receiver_local == 0 else "(Lorg/apache/iceberg/p/Base;)V"
+    method = MethodInfo(pool, "call", descriptor)
+    method.setAccessFlags(AccessFlag.PUBLIC)
+    code = Bytecode(pool, 1, receiver_local + 1)
+    code.addAload(receiver_local)
+    code.addInvokevirtual(reference_owner, "hidden", "()V")
+    code.addOpcode(Opcode.RETURN)
+    method.setCodeAttribute(code.toCodeAttribute())
+    class_file.addMethod(method)
+    write_class_file(root, entry, class_file)
+
+
+def write_protected_wide_access(root, entry, field_access):
+    class_file = ClassFile(False, "org.apache.iceberg.p.GpuChild",
+                           "org.apache.iceberg.p.Base")
+    class_file.setAccessFlags(AccessFlag.PUBLIC)
+    add_constructor(class_file, "org.apache.iceberg.p.Base")
+    pool = class_file.getConstPool()
+    descriptor = "(J)V" if field_access else "(JD)V"
+    method = MethodInfo(pool, "access", descriptor)
+    method.setAccessFlags(AccessFlag.PUBLIC)
+    code = Bytecode(pool, 5, 5)
+    code.addAload(0)
+    code.addLload(1)
+    if field_access:
+        code.addPutfield("org.apache.iceberg.p.Base", "hidden", "J")
+    else:
+        code.addDload(3)
+        code.addInvokevirtual("org.apache.iceberg.p.Base", "hidden", "(JD)V")
+    code.addOpcode(Opcode.RETURN)
+    method.setCodeAttribute(code.toCodeAttribute())
+    class_file.addMethod(method)
+    write_class_file(root, entry, class_file)
+
+
+def add_constructor(class_file, super_name, access=AccessFlag.PUBLIC):
+    pool = class_file.getConstPool()
+    constructor = MethodInfo(pool, MethodInfo.nameInit, "()V")
+    constructor.setAccessFlags(access)
+    code = Bytecode(pool, 1, 1)
+    code.addAload(0)
+    code.addInvokespecial(super_name, MethodInfo.nameInit, "()V")
+    code.addOpcode(Opcode.RETURN)
+    constructor.setCodeAttribute(code.toCodeAttribute())
+    class_file.addMethod(constructor)
+
+
+def write_protected_super_caller(root, entry):
+    class_file = ClassFile(False, "org.apache.iceberg.p.GpuChild",
+                           "org.apache.iceberg.p.Base")
+    class_file.setAccessFlags(AccessFlag.PUBLIC)
+    add_constructor(class_file, "org.apache.iceberg.p.Base")
+    pool = class_file.getConstPool()
+    method = MethodInfo(pool, "callSuper", "()V")
+    method.setAccessFlags(AccessFlag.PUBLIC)
+    code = Bytecode(pool, 1, 1)
+    code.addAload(0)
+    code.addInvokespecial("org.apache.iceberg.p.Base", "hidden", "()V")
+    code.addOpcode(Opcode.RETURN)
+    method.setCodeAttribute(code.toCodeAttribute())
+    class_file.addMethod(method)
+    write_class_file(root, entry, class_file)
+
+
+def write_protected_static_caller(root, entry):
+    class_file = ClassFile(False, "org.apache.iceberg.p.GpuChild",
+                           "org.apache.iceberg.p.Base")
+    class_file.setAccessFlags(AccessFlag.PUBLIC)
+    add_constructor(class_file, "org.apache.iceberg.p.Base")
+    pool = class_file.getConstPool()
+    method = MethodInfo(pool, "callStatic", "()V")
+    method.setAccessFlags(AccessFlag.PUBLIC | AccessFlag.STATIC)
+    code = Bytecode(pool, 0, 1)
+    code.addInvokestatic("org.apache.iceberg.p.Base", "hidden", "()V")
+    code.addOpcode(Opcode.RETURN)
+    method.setCodeAttribute(code.toCodeAttribute())
+    class_file.addMethod(method)
+    write_class_file(root, entry, class_file)
+
+
+def write_protected_constructor_base(root):
+    class_file = ClassFile(False, "org.apache.iceberg.p.Base", "java.lang.Object")
+    class_file.setAccessFlags(AccessFlag.PUBLIC)
+    pool = class_file.getConstPool()
+    constructor = MethodInfo(pool, MethodInfo.nameInit, "()V")
+    constructor.setAccessFlags(AccessFlag.PROTECTED)
+    code = Bytecode(pool, 1, 1)
+    code.addAload(0)
+    code.addInvokespecial("java.lang.Object", MethodInfo.nameInit, "()V")
+    code.addOpcode(Opcode.RETURN)
+    constructor.setCodeAttribute(code.toCodeAttribute())
+    class_file.addMethod(constructor)
+    write_class_file(root, "org/apache/iceberg/p/Base.class", class_file)
+
+
+def write_protected_constructor_subclass(root, entry, create_base):
+    class_file = ClassFile(False, "org.apache.iceberg.p.GpuChild",
+                           "org.apache.iceberg.p.Base")
+    class_file.setAccessFlags(AccessFlag.PUBLIC)
+    pool = class_file.getConstPool()
+    constructor = MethodInfo(pool, MethodInfo.nameInit, "()V")
+    constructor.setAccessFlags(AccessFlag.PUBLIC)
+    code = Bytecode(pool, 1, 1)
+    code.addAload(0)
+    code.addInvokespecial("org.apache.iceberg.p.Base", MethodInfo.nameInit, "()V")
+    code.addOpcode(Opcode.RETURN)
+    constructor.setCodeAttribute(code.toCodeAttribute())
+    class_file.addMethod(constructor)
+    if create_base:
+        method = MethodInfo(pool, "createBase", "()V")
+        method.setAccessFlags(AccessFlag.PUBLIC | AccessFlag.STATIC)
+        code = Bytecode(pool, 2, 0)
+        code.addNew("org.apache.iceberg.p.Base")
+        code.addOpcode(Opcode.DUP)
+        code.addInvokespecial("org.apache.iceberg.p.Base", MethodInfo.nameInit, "()V")
+        code.addOpcode(Opcode.POP)
+        code.addOpcode(Opcode.RETURN)
+        method.setCodeAttribute(code.toCodeAttribute())
+        class_file.addMethod(method)
+    write_class_file(root, entry, class_file)
+
+
+def write_method_handle_caller(root, entry, handle_kind, reference_owner,
+                               member_name, descriptor,
+                               constructor_access=AccessFlag.PUBLIC):
+    class_file = ClassFile(False, "org.apache.iceberg.p.GpuChild",
+                           "org.apache.iceberg.p.Base")
+    class_file.setAccessFlags(AccessFlag.PUBLIC)
+    class_file.setMajorVersion(ClassFile.JAVA_7)
+    add_constructor(class_file, "org.apache.iceberg.p.Base", constructor_access)
+    pool = class_file.getConstPool()
+    owner = pool.addClassInfo(reference_owner)
+    if handle_kind in (ConstPool.REF_getField, ConstPool.REF_getStatic,
+                       ConstPool.REF_putField, ConstPool.REF_putStatic):
+        target = pool.addFieldrefInfo(owner, member_name, descriptor)
+    else:
+        target = pool.addMethodrefInfo(owner, member_name, descriptor)
+    handle = pool.addMethodHandleInfo(handle_kind, target)
+    method = MethodInfo(pool, "loadHandle", "()V")
+    method.setAccessFlags(AccessFlag.PUBLIC | AccessFlag.STATIC)
+    code = Bytecode(pool, 1, 0)
+    code.addLdc(handle)
+    code.addOpcode(Opcode.POP)
+    code.addOpcode(Opcode.RETURN)
+    method.setCodeAttribute(code.toCodeAttribute())
+    class_file.addMethod(method)
+    write_class_file(root, entry, class_file)
+
+
+def write_invalid_member_operand(root, entry):
+    class_file = ClassFile(False, "org.apache.iceberg.p.Broken", "java.lang.Object")
+    class_file.setAccessFlags(AccessFlag.PUBLIC)
+    pool = class_file.getConstPool()
+    method = MethodInfo(pool, "read", "()I")
+    method.setAccessFlags(AccessFlag.PUBLIC)
+    code = Bytecode(pool, 1, 1)
+    code.addAload(0)
+    code.addOpcode(Opcode.GETFIELD)
+    code.addIndex(pool.addClassInfo("org.apache.iceberg.p.Base"))
+    code.addOpcode(Opcode.IRETURN)
+    method.setCodeAttribute(code.toCodeAttribute())
+    class_file.addMethod(method)
+    write_class_file(root, entry, class_file)
+
+
+def write_invalid_method_handle(root, entry):
+    class_file = ClassFile(False, "org.apache.iceberg.p.Broken", "java.lang.Object")
+    class_file.setAccessFlags(AccessFlag.PUBLIC)
+    class_file.setMajorVersion(ClassFile.JAVA_7)
+    pool = class_file.getConstPool()
+    pool.addMethodHandleInfo(
+        ConstPool.REF_invokeVirtual,
+        pool.addClassInfo("org.apache.iceberg.p.Base"))
+    write_class_file(root, entry, class_file)
+
+
+def write_invalid_legacy_interface_method_handle(root, entry):
+    class_file = ClassFile(False, "org.apache.iceberg.p.Broken", "java.lang.Object")
+    class_file.setAccessFlags(AccessFlag.PUBLIC)
+    class_file.setMajorVersion(ClassFile.JAVA_7)
+    pool = class_file.getConstPool()
+    owner = pool.addClassInfo("org.apache.iceberg.p.Base")
+    target = pool.addInterfaceMethodrefInfo(owner, "hidden", "()V")
+    pool.addMethodHandleInfo(ConstPool.REF_invokeStatic, target)
+    write_class_file(root, entry, class_file)
 
 
 def write_runtime(runtime, method_access=0):
-    write_class(runtime, "org/apache/iceberg/p/Base.class", "org.apache.iceberg.p.Base",
-                methods=((method_access, "hidden", "()V"),))
+    class_file = ClassFile(False, "org.apache.iceberg.p.Base", "java.lang.Object")
+    class_file.setAccessFlags(AccessFlag.PUBLIC)
+    add_constructor(class_file, "java.lang.Object")
+    pool = class_file.getConstPool()
+    method = MethodInfo(pool, "hidden", "()V")
+    method.setAccessFlags(method_access)
+    code = Bytecode(pool, 0, 1)
+    code.addOpcode(Opcode.RETURN)
+    method.setCodeAttribute(code.toCodeAttribute())
+    class_file.addMethod(method)
+    write_class_file(runtime, "org/apache/iceberg/p/Base.class", class_file)
+
+
+def write_protected_wide_runtime(runtime, field_access):
+    class_file = ClassFile(False, "org.apache.iceberg.p.Base", "java.lang.Object")
+    class_file.setAccessFlags(AccessFlag.PUBLIC)
+    add_constructor(class_file, "java.lang.Object")
+    pool = class_file.getConstPool()
+    if field_access:
+        field = FieldInfo(pool, "hidden", "J")
+        field.setAccessFlags(AccessFlag.PROTECTED)
+        class_file.addField(field)
+    else:
+        method = MethodInfo(pool, "hidden", "(JD)V")
+        method.setAccessFlags(AccessFlag.PROTECTED)
+        code = Bytecode(pool, 0, 5)
+        code.addOpcode(Opcode.RETURN)
+        method.setCodeAttribute(code.toCodeAttribute())
+        class_file.addMethod(method)
+    write_class_file(runtime, "org/apache/iceberg/p/Base.class", class_file)
+
+
+def write_protected_field_runtime(runtime):
+    class_file = ClassFile(False, "org.apache.iceberg.p.Base", "java.lang.Object")
+    class_file.setAccessFlags(AccessFlag.PUBLIC)
+    add_constructor(class_file, "java.lang.Object")
+    field = FieldInfo(class_file.getConstPool(), "hidden", "I")
+    field.setAccessFlags(AccessFlag.PROTECTED)
+    class_file.addField(field)
+    write_class_file(runtime, "org/apache/iceberg/p/Base.class", class_file)
 
 
 def write_inherited_caller(layout, prefix):
@@ -297,17 +565,223 @@ class IcebergPackagePrivateAccessTest(unittest.TestCase):
             self.assertEqual(1, result)
             self.assertIn("protected method requiring same runtime package", stderr.getvalue())
 
-    def test_subclass_protected_caller_passes(self):
+    def test_subclass_protected_this_caller_passes(self):
+        with temporary_directory() as root:
+            layout = os.path.join(root, "layout")
+            runtime = os.path.join(root, "runtime")
+            write_protected_field_runtime(runtime)
+            write_protected_field_subclass(
+                layout, "spark-shared/org/apache/iceberg/p/GpuChild.class",
+                "org.apache.iceberg.p.Base", 0)
+            with captured_stream("stdout"):
+                self.assertEqual(0, LINT.main([layout, runtime]))
+            with split_loader(runtime, layout) as loader:
+                child = Class.forName("org.apache.iceberg.p.GpuChild", True, loader)
+                child.getMethod("read", []).invoke(child.newInstance(), [])
+
+    def test_subclass_protected_long_putfield_caller_passes(self):
+        with temporary_directory() as root:
+            layout = os.path.join(root, "layout")
+            runtime = os.path.join(root, "runtime")
+            write_protected_wide_runtime(runtime, True)
+            write_protected_wide_access(
+                layout, "spark-shared/org/apache/iceberg/p/GpuChild.class", True)
+            with captured_stream("stdout"):
+                self.assertEqual(0, LINT.main([layout, runtime]))
+            with split_loader(runtime, layout) as loader:
+                child = Class.forName("org.apache.iceberg.p.GpuChild", True, loader)
+                child.getMethod("access", [Long.TYPE]).invoke(
+                    child.newInstance(), [Long(1)])
+
+    def test_subclass_protected_wide_method_caller_passes(self):
+        with temporary_directory() as root:
+            layout = os.path.join(root, "layout")
+            runtime = os.path.join(root, "runtime")
+            write_protected_wide_runtime(runtime, False)
+            write_protected_wide_access(
+                layout, "spark-shared/org/apache/iceberg/p/GpuChild.class", False)
+            with captured_stream("stdout"):
+                self.assertEqual(0, LINT.main([layout, runtime]))
+            with split_loader(runtime, layout) as loader:
+                child = Class.forName("org.apache.iceberg.p.GpuChild", True, loader)
+                child.getMethod("access", [Long.TYPE, Double.TYPE]).invoke(
+                    child.newInstance(), [Long(1), Double(2.0)])
+
+    def test_subclass_protected_super_caller_passes(self):
         with temporary_directory() as root:
             layout = os.path.join(root, "layout")
             runtime = os.path.join(root, "runtime")
             write_runtime(runtime, AccessFlag.PROTECTED)
-            write_class(layout, "spark-shared/org/apache/iceberg/p/GpuChild.class",
-                        "org.apache.iceberg.p.GpuChild", "org.apache.iceberg.p.Base",
-                        references=(("method", "org.apache.iceberg.p.Base",
-                                     "hidden", "()V"),))
+            write_protected_super_caller(
+                layout, "spark-shared/org/apache/iceberg/p/GpuChild.class")
             with captured_stream("stdout"):
                 self.assertEqual(0, LINT.main([layout, runtime]))
+            with split_loader(runtime, layout) as loader:
+                child = Class.forName("org.apache.iceberg.p.GpuChild", True, loader)
+                child.getMethod("callSuper", []).invoke(child.newInstance(), [])
+
+    def test_subclass_protected_static_caller_passes(self):
+        with temporary_directory() as root:
+            layout = os.path.join(root, "layout")
+            runtime = os.path.join(root, "runtime")
+            write_runtime(runtime, AccessFlag.PROTECTED | AccessFlag.STATIC)
+            write_protected_static_caller(
+                layout, "spark-shared/org/apache/iceberg/p/GpuChild.class")
+            with captured_stream("stdout"):
+                self.assertEqual(0, LINT.main([layout, runtime]))
+            with split_loader(runtime, layout) as loader:
+                child = Class.forName("org.apache.iceberg.p.GpuChild", True, loader)
+                child.getMethod("callStatic", []).invoke(None, [])
+
+    def test_subclass_protected_super_constructor_passes(self):
+        with temporary_directory() as root:
+            layout = os.path.join(root, "layout")
+            runtime = os.path.join(root, "runtime")
+            write_protected_constructor_base(runtime)
+            write_protected_constructor_subclass(
+                layout, "spark-shared/org/apache/iceberg/p/GpuChild.class", False)
+            with captured_stream("stdout"):
+                self.assertEqual(0, LINT.main([layout, runtime]))
+            with split_loader(runtime, layout) as loader:
+                Class.forName("org.apache.iceberg.p.GpuChild", True, loader)
+
+    def test_subclass_protected_new_base_constructor_fails(self):
+        with temporary_directory() as root:
+            layout = os.path.join(root, "layout")
+            runtime = os.path.join(root, "runtime")
+            write_protected_constructor_base(runtime)
+            write_protected_constructor_subclass(
+                layout, "spark-shared/org/apache/iceberg/p/GpuChild.class", True)
+            with captured_stream("stderr") as stderr:
+                self.assertEqual(1, LINT.main([layout, runtime]))
+            self.assertIn("protected method requiring same runtime package", stderr.getvalue())
+            with split_loader(runtime, layout) as loader:
+                with self.assertRaises(VerifyError):
+                    Class.forName("org.apache.iceberg.p.GpuChild", True, loader)
+
+    def test_subclass_protected_base_receiver_fails_verification(self):
+        with temporary_directory() as root:
+            layout = os.path.join(root, "layout")
+            runtime = os.path.join(root, "runtime")
+            write_protected_field_runtime(runtime)
+            write_protected_field_subclass(
+                layout, "spark-shared/org/apache/iceberg/p/GpuChild.class",
+                "org.apache.iceberg.p.Base", 1)
+            with captured_stream("stderr") as stderr:
+                self.assertEqual(1, LINT.main([layout, runtime]))
+            self.assertIn("protected field requiring same runtime package", stderr.getvalue())
+
+            with split_loader(runtime, layout) as loader:
+                with self.assertRaises(VerifyError):
+                    Class.forName("org.apache.iceberg.p.GpuChild", True, loader)
+
+    def test_subclass_protected_base_method_receiver_fails_verification(self):
+        with temporary_directory() as root:
+            layout = os.path.join(root, "layout")
+            runtime = os.path.join(root, "runtime")
+            write_runtime(runtime, AccessFlag.PROTECTED)
+            write_protected_method_subclass(
+                layout, "spark-shared/org/apache/iceberg/p/GpuChild.class",
+                "org.apache.iceberg.p.Base", 1)
+            with captured_stream("stderr") as stderr:
+                self.assertEqual(1, LINT.main([layout, runtime]))
+            self.assertIn("protected method requiring same runtime package", stderr.getvalue())
+            with split_loader(runtime, layout) as loader:
+                with self.assertRaises(VerifyError):
+                    Class.forName("org.apache.iceberg.p.GpuChild", True, loader)
+
+    def test_subclass_protected_static_method_handle_passes(self):
+        with temporary_directory() as root:
+            layout = os.path.join(root, "layout")
+            runtime = os.path.join(root, "runtime")
+            write_runtime(runtime, AccessFlag.PROTECTED | AccessFlag.STATIC)
+            write_method_handle_caller(
+                layout, "spark-shared/org/apache/iceberg/p/GpuChild.class",
+                ConstPool.REF_invokeStatic, "org.apache.iceberg.p.Base", "hidden", "()V")
+            with captured_stream("stdout"):
+                self.assertEqual(0, LINT.main([layout, runtime]))
+            with split_loader(runtime, layout) as loader:
+                child = Class.forName("org.apache.iceberg.p.GpuChild", True, loader)
+                child.getMethod("loadHandle", []).invoke(None, [])
+
+    def test_subclass_protected_base_virtual_method_handle_passes(self):
+        with temporary_directory() as root:
+            layout = os.path.join(root, "layout")
+            runtime = os.path.join(root, "runtime")
+            write_runtime(runtime, AccessFlag.PROTECTED)
+            write_method_handle_caller(
+                layout, "spark-shared/org/apache/iceberg/p/GpuChild.class",
+                ConstPool.REF_invokeVirtual, "org.apache.iceberg.p.Base", "hidden", "()V")
+            with captured_stream("stdout"):
+                self.assertEqual(0, LINT.main([layout, runtime]))
+            with split_loader(runtime, layout) as loader:
+                child = Class.forName("org.apache.iceberg.p.GpuChild", True, loader)
+                child.getMethod("loadHandle", []).invoke(None, [])
+
+    def test_subclass_protected_constructor_method_handle_fails(self):
+        with temporary_directory() as root:
+            layout = os.path.join(root, "layout")
+            runtime = os.path.join(root, "runtime")
+            write_protected_constructor_base(runtime)
+            write_method_handle_caller(
+                layout, "spark-shared/org/apache/iceberg/p/GpuChild.class",
+                ConstPool.REF_newInvokeSpecial, "org.apache.iceberg.p.Base",
+                MethodInfo.nameInit, "()V")
+            with captured_stream("stderr") as stderr:
+                self.assertEqual(1, LINT.main([layout, runtime]))
+            self.assertIn("protected method requiring same runtime package", stderr.getvalue())
+            with split_loader(runtime, layout) as loader:
+                child = Class.forName("org.apache.iceberg.p.GpuChild", True, loader)
+                with self.assertRaises(IllegalAccessError):
+                    child.getMethod("loadHandle", []).invoke(None, [])
+
+    def test_same_class_protected_constructor_method_handle_passes(self):
+        with temporary_directory() as root:
+            layout = os.path.join(root, "layout")
+            runtime = os.path.join(root, "runtime")
+            write_runtime(runtime, AccessFlag.PUBLIC)
+            write_method_handle_caller(
+                layout, "spark-shared/org/apache/iceberg/p/GpuChild.class",
+                ConstPool.REF_newInvokeSpecial, "org.apache.iceberg.p.GpuChild",
+                MethodInfo.nameInit, "()V", AccessFlag.PROTECTED)
+            with captured_stream("stdout"):
+                self.assertEqual(0, LINT.main([layout, runtime]))
+            with split_loader(runtime, layout) as loader:
+                child = Class.forName("org.apache.iceberg.p.GpuChild", True, loader)
+                child.getMethod("loadHandle", []).invoke(None, [])
+
+    def test_invalid_member_operand_fails_closed(self):
+        with temporary_directory() as root:
+            layout = os.path.join(root, "layout")
+            runtime = os.path.join(root, "runtime")
+            write_runtime(runtime)
+            write_invalid_member_operand(
+                layout, "spark-shared/org/apache/iceberg/p/Broken.class")
+            with captured_stream("stderr") as stderr:
+                self.assertEqual(2, LINT.main([layout, runtime]))
+            self.assertIn("incompatible constant-pool operand", stderr.getvalue())
+
+    def test_invalid_method_handle_fails_closed(self):
+        with temporary_directory() as root:
+            layout = os.path.join(root, "layout")
+            runtime = os.path.join(root, "runtime")
+            write_runtime(runtime)
+            write_invalid_method_handle(
+                layout, "spark-shared/org/apache/iceberg/p/Broken.class")
+            with captured_stream("stderr") as stderr:
+                self.assertEqual(2, LINT.main([layout, runtime]))
+            self.assertIn("method handle", stderr.getvalue())
+
+    def test_legacy_interface_method_handle_fails_closed(self):
+        with temporary_directory() as root:
+            layout = os.path.join(root, "layout")
+            runtime = os.path.join(root, "runtime")
+            write_runtime(runtime)
+            write_invalid_legacy_interface_method_handle(
+                layout, "spark-shared/org/apache/iceberg/p/Broken.class")
+            with captured_stream("stderr") as stderr:
+                self.assertEqual(2, LINT.main([layout, runtime]))
+            self.assertIn("method handle", stderr.getvalue())
 
     def test_scala_synthetic_caller_fails(self):
         with temporary_directory() as root:
