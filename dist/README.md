@@ -41,8 +41,8 @@ If you have to change the contents of the uber jar, the packaging flow can optio
 The `dist` package phase runs `scripts/check-iceberg-package-private-access.py` against
 the assembled parallel-world layout and every Iceberg runtime selected by the build. The
 audit fails when a cuDF Plugin class that accesses an Iceberg package-private class or
-member is stored outside the jar root, where a separate classloader would give it a
-different runtime package.
+member, or relies on same-runtime-package access to a protected member, is stored outside
+the jar root. A separate classloader would give that caller a different runtime package.
 
 `build/package-parallel-worlds.py` discovers each Spark aggregator's Iceberg dependency
 with `build/iceberg_runtime.py`, resolves the runtime jars, and writes the generated

@@ -53,6 +53,10 @@ RUNTIME_DEPENDENCY = """\
   <version>${iceberg.111x.version}</version>
 </dependency>
 """
+ICEBERG_411_PROPERTIES = {
+    "iceberg.111x.version": "1.11.0",
+    "spark41x.iceberg.artifact.suffix": "4.1",
+}
 
 
 @contextlib.contextmanager
@@ -438,18 +442,18 @@ class IcebergPackagePrivateAccessTest(unittest.TestCase):
                     ("org.apache.iceberg", "iceberg-spark-runtime-4.1_2.13", "1.11.0")
                 ], RUNTIME_DISCOVERY.coordinates(
                     archive, "413", "2.13",
-                    lambda name: {
-                        "iceberg.111x.version": "1.11.0",
-                        "spark41x.iceberg.artifact.suffix": "4.1",
-                    }.get(name)))
+                    lambda name: ICEBERG_411_PROPERTIES.get(name)))
             finally:
                 archive.close()
 
             write_aggregator(aggregator, [(real_module, "")])
             archive = zipfile.ZipFile(aggregator, "r")
             try:
-                with self.assertRaises(RuntimeError):
-                    RUNTIME_DISCOVERY.coordinates(archive, "413", "2.13", lambda name: None)
+                with self.assertRaises(RuntimeError) as raised:
+                    RUNTIME_DISCOVERY.coordinates(
+                        archive, "413", "2.13",
+                        lambda name: ICEBERG_411_PROPERTIES.get(name))
+                self.assertIn("0 runtime dependencies", str(raised.exception))
             finally:
                 archive.close()
 
@@ -457,8 +461,10 @@ class IcebergPackagePrivateAccessTest(unittest.TestCase):
                 ("rapids-4-spark-iceberg-common_2.13", "")])
             archive = zipfile.ZipFile(aggregator, "r")
             try:
-                with self.assertRaises(RuntimeError):
+                with self.assertRaises(RuntimeError) as raised:
                     RUNTIME_DISCOVERY.coordinates(archive, "413", "2.13", lambda name: None)
+                self.assertIn("must contain real Iceberg module(s) or one stub module",
+                              str(raised.exception))
             finally:
                 archive.close()
 
@@ -497,10 +503,11 @@ class IcebergPackagePrivateAccessTest(unittest.TestCase):
                 real_module, RUNTIME_DEPENDENCY + RUNTIME_DEPENDENCY)])
             archive = zipfile.ZipFile(aggregator, "r")
             try:
-                with self.assertRaises(RuntimeError):
+                with self.assertRaises(RuntimeError) as raised:
                     RUNTIME_DISCOVERY.coordinates(
                         archive, "413", "2.13",
-                        lambda name: {"iceberg.111x.version": "1.11.0"}.get(name))
+                        lambda name: ICEBERG_411_PROPERTIES.get(name))
+                self.assertIn("2 runtime dependencies", str(raised.exception))
             finally:
                 archive.close()
 
@@ -513,10 +520,11 @@ class IcebergPackagePrivateAccessTest(unittest.TestCase):
             ])
             archive = zipfile.ZipFile(aggregator, "r")
             try:
-                with self.assertRaises(RuntimeError):
+                with self.assertRaises(RuntimeError) as raised:
                     RUNTIME_DISCOVERY.coordinates(
                         archive, "413", "2.13",
-                        lambda name: {"iceberg.111x.version": "1.11.0"}.get(name))
+                        lambda name: ICEBERG_411_PROPERTIES.get(name))
+                self.assertIn("both real and stub Iceberg modules", str(raised.exception))
             finally:
                 archive.close()
 
