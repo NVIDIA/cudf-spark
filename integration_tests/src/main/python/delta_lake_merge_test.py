@@ -480,12 +480,11 @@ def test_delta_merge_preserves_row_tracking(spark_tmp_path):
                  "ON t.a = s.a "
                  "WHEN MATCHED THEN UPDATE SET t.c = s.c "
                  "WHEN NOT MATCHED THEN INSERT *")
-    tracked_sql = ("SELECT a, b, c, _metadata.row_id AS row_id, "
-                   "_metadata.row_commit_version AS row_commit_version FROM delta.`{}`")
-
     def tracked_rows(spark, path):
+        rows = spark.sql(f"SELECT a, b, c, _metadata.row_id AS row_id, "
+                         f"_metadata.row_commit_version AS row_commit_version FROM delta.`{path}`")
         return {r["a"]: (r["b"], r["c"], r["row_id"], r["row_commit_version"])
-                for r in spark.sql(tracked_sql.format(path)).collect()}
+                for r in rows.collect()}
 
     before = {run: with_cpu_session(lambda spark, p=data_path + "/" + run: tracked_rows(spark, p),
                                     conf=conf) for run in ["CPU", "GPU"]}
@@ -507,8 +506,8 @@ def test_delta_merge_preserves_row_tracking(spark_tmp_path):
         results[path] = do_merge(spark, path)
 
     def read_tracked(spark, path):
-        return spark.sql("SELECT a, b, c, CASE WHEN a = 9 THEN NULL ELSE _metadata.row_id END AS row_id, "
-                         "_metadata.row_commit_version AS row_commit_version FROM delta.`{}`".format(path))
+        return spark.sql(f"SELECT a, b, c, CASE WHEN a = 9 THEN NULL ELSE _metadata.row_id END AS row_id, "
+                         f"_metadata.row_commit_version AS row_commit_version FROM delta.`{path}`")
 
     assert_gpu_and_cpu_writes_are_equal_collect(write_func, read_tracked, data_path, conf=conf)
     assert_equal(results[data_path + "/CPU"], results[data_path + "/GPU"])
@@ -516,17 +515,21 @@ def test_delta_merge_preserves_row_tracking(spark_tmp_path):
     for run in ["CPU", "GPU"]:
         path = data_path + "/" + run
         after = with_cpu_session(lambda spark: tracked_rows(spark, path), conf=conf)
-        assert sorted(after.keys()) == [1, 2, 3, 4, 9], "{}: {}".format(run, after)
+        assert sorted(after.keys()) == [1, 2, 3, 4, 9], f"{run}: {after}"
         for a in [1, 2, 3, 4]:
             assert after[a][2] == before[run][a][2], \
-                "{}: row id of a={} changed: {} -> {}".format(run, a, before[run][a], after[a])
+                f"{run}: row id of a={a} changed: {before[run][a]} -> {after[a]}"
         for a in [1, 3, 4]:  # copied unchanged
             assert after[a][3] == before[run][a][3], \
-                "{}: commit version of copied a={} changed: {} -> {}".format(run, a, before[run][a], after[a])
+                f"{run}: commit version of copied a={a} changed: {before[run][a]} -> {after[a]}"
         assert after[2][3] > before[run][2][3], \
-            "{}: commit version of updated a=2 did not move: {} -> {}".format(run, before[run][2], after[2])
+            f"{run}: commit version of updated a=2 did not move: {before[run][2]} -> {after[2]}"
+        # The inserted row is new to the table: its id and its commit version are both past
+        # everything the table held before the merge.
         assert after[9][2] > max(v[2] for v in before[run].values()), \
-            "{}: inserted row id is not fresh: {}".format(run, after[9])
+            f"{run}: inserted row id is not fresh: {after[9]}"
+        assert after[9][3] > max(v[3] for v in before[run].values()), \
+            f"{run}: inserted row commit version did not advance: {after[9]}"
 
 
 @allow_non_gpu(*delta_meta_allow)
