@@ -3568,6 +3568,10 @@ abstract class AbstractParquetTableReader(
     debugDumpPrefix: Option[String],
     debugDumpAlways: Boolean) extends GpuDataProducer[Table] with Logging {
 
+  // The chunked reader is invoked synchronously on one task thread. Its idle state may remain open
+  // while the range partitioner releases the semaphore after consuming the previously read table.
+  override private[rapids] def canReleaseSemaphoreBetweenBatches: Boolean = true
+
   protected val reader: ChunkedReader
 
   private[this] lazy val splitsString = splits.mkString("; ")

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ import scala.collection.mutable
 import ai.rapids.cudf.Table
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 
+import org.apache.spark.TaskContext
 import org.apache.spark.sql.types.DataType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -37,6 +38,13 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
  * @tparam T what it is that we are wrapping
  */
 trait GpuDataProducer[T] extends AutoCloseable {
+  /**
+   * Whether this producer can remain open while the GPU semaphore is released between outputs.
+   * Implementations must opt in only when all producer methods are called with the semaphore held
+   * and idle producer state can safely coexist with other GPU tasks.
+   */
+  private[rapids] def canReleaseSemaphoreBetweenBatches: Boolean = false
+
   /**
    * Returns true if there is more data to be read or false if there is not.
    */
@@ -153,6 +161,15 @@ object CachedGpuBatchIterator {
 
   def apply(producer: GpuDataProducer[Table],
       dataTypes: Array[DataType]): GpuColumnarBatchIterator = {
+    if (RangeInputBatching.isActive && producer.canReleaseSemaphoreBetweenBatches) {
+      new RangeGpuDataProducerIterator(producer, dataTypes)
+    } else {
+      cacheProducer(producer, dataTypes)
+    }
+  }
+
+  private def cacheProducer(producer: GpuDataProducer[Table],
+      dataTypes: Array[DataType]): GpuColumnarBatchIterator = {
     withResource(producer) { _ =>
       if (producer.hasNext) {
         // Special case for the first one.
@@ -176,4 +193,41 @@ object CachedGpuBatchIterator {
       }
     }
   }
+}
+
+/**
+ * Streams a GPU producer one batch at a time into a range shuffle.
+ *
+ * [[CachedGpuBatchIterator]] normally drains a chunked file reader eagerly so the producer can be
+ * closed before the GPU semaphore is released. A range shuffle consumes its input synchronously,
+ * and draining a wide reader there materializes several decoded batches before any of them can be
+ * partitioned. Keeping the producer open and reacquiring the semaphore for every interaction
+ * bounds live decoded data to the batch currently being partitioned. Task completion closes a
+ * partially consumed producer.
+ */
+private class RangeGpuDataProducerIterator(
+    producer: GpuDataProducer[Table],
+    dataTypes: Array[DataType]) extends GpuColumnarBatchIterator(true) {
+
+  override def hasNext: Boolean = {
+    GpuSemaphore.acquireIfNecessary(TaskContext.get())
+    closeOnExcept(this) { _ =>
+      val more = producer.hasNext
+      if (!more) {
+        close()
+      }
+      more
+    }
+  }
+
+  override def next(): ColumnarBatch = {
+    GpuSemaphore.acquireIfNecessary(TaskContext.get())
+    closeOnExcept(this) { _ =>
+      withResource(producer.next) { table =>
+        GpuColumnVector.from(table, dataTypes)
+      }
+    }
+  }
+
+  override def doClose(): Unit = producer.close()
 }
