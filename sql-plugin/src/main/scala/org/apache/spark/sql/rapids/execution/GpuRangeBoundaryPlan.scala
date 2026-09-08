@@ -18,14 +18,13 @@ package org.apache.spark.sql.rapids.execution
 
 import scala.annotation.tailrec
 
-import com.nvidia.spark.rapids.{
-  GpuCoalesceBatches, GpuExec, GpuExpression, GpuFilterExec, GpuNondeterministic, GpuProjectExec}
+import com.nvidia.spark.rapids.{GpuCoalesceBatches, GpuExec, GpuFilterExec, GpuProjectExec}
 import com.nvidia.spark.rapids.shims.ShimUnaryExecNode
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{
-  Attribute, ExprId, Expression, NamedExpression, SortOrder}
+  Attribute, Expression, ExprId, NamedExpression, SortOrder}
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.rapids.GpuFileSourceScanExec
 import org.apache.spark.sql.types.StructType
@@ -79,21 +78,6 @@ private[rapids] object GpuRangeBoundaryPlan {
     }
   }
 
-  private def isBoundaryRepeatable(expression: Expression): Boolean = {
-    if (expression.deterministic) {
-      true
-    } else {
-      expression match {
-        case gpu: GpuExpression if gpu.selfNonDeterministic =>
-          gpu.isInstanceOf[GpuNondeterministic] && gpu.children.forall(isBoundaryRepeatable)
-        case _ if expression.children.forall(_.deterministic) =>
-          false
-        case _ =>
-          expression.children.forall(isBoundaryRepeatable)
-      }
-    }
-  }
-
   private def selectProjectExpressions(
       projectList: List[NamedExpression],
       localOutputIds: Set[ExprId],
@@ -111,7 +95,10 @@ private[rapids] object GpuRangeBoundaryPlan {
       }
 
       val selected = dependencyClosure(required)
-      if (selected.forall(isBoundaryRepeatable)) Some(selected) else None
+      // Boundary collection and shuffle input are separate executions of the source plan.
+      // Nondeterministic expressions can produce different keys if the executions use different
+      // batch boundaries, even when their seeds and partition IDs match.
+      if (selected.forall(_.deterministic)) Some(selected) else None
     }
   }
 
