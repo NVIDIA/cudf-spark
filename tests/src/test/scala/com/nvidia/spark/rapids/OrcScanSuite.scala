@@ -277,4 +277,19 @@ class OrcScanSuite extends SparkQueryCompareTestSuite {
     withCpuSparkSession(check, conf)
   }
 
+  test("gpuOutputBatchBytes metric is recorded for ORC scan") {
+    withGpuSparkSession({ spark =>
+      val df = frameFromOrc("file-splits.orc")(spark)
+      val rows = df.collect()
+      val scan = df.queryExecution.executedPlan
+        .find(_.metrics.contains(GpuMetric.GPU_OUTPUT_BATCH_BYTES))
+      assert(scan.isDefined)
+      // Physical device width per row from cudf; variable-width types report 0.
+      val bytesPerRow = df.schema.fields
+        .map(f => GpuColumnVector.getRapidsType(f.dataType).getSizeInBytes).sum
+      val minBytes = rows.length.toLong * bytesPerRow
+      assert(scan.get.metrics(GpuMetric.GPU_OUTPUT_BATCH_BYTES).value >= minBytes)
+    })
+  }
+
 }
