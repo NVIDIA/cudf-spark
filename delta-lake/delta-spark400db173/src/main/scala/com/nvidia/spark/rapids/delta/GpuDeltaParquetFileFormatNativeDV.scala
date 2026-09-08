@@ -1270,52 +1270,57 @@ case class GpuDeltaParquetFileFormatNativeDV(
         })
       }
 
-      // Await results; close all bitmaps (collected + uncollected futures) on failure.
+      // Await all results; on failure continue draining futures so successful bitmaps are closed.
       val loaded = new ArrayBuffer[SerializedRoaringBitmap]()
       var firstFailure: Throwable = null
       var wasInterrupted = false
       def recordFailure(t: Throwable): Unit = {
         if (firstFailure == null) {
           firstFailure = t
-          loadFutures.foreach(_.cancel(true))
         } else {
           firstFailure.addSuppressed(t)
         }
       }
 
       loadFutures.zip(batchExtra.perFileEntries).foreach { case (future, entry) =>
-        try {
-          val gpuBitmap = future.get()
-          if (firstFailure == null) {
-            closeOnExcept(gpuBitmap) { _ =>
-              val totalRows = totalNumRows(entry.rowGroupNumRows)
-              val numDeleted =
-                if (entry.dvDescriptor.isEmpty && entry.rowIndexFilterProvider.isEmpty) {
-                  0L
-                } else {
-                  withResource(gpuBitmap.getDataHostBuffer()) { bitmap =>
-                    computeNumDeletedRows(bitmap, entry.rowGroupOffsets,
-                      entry.rowGroupNumRows, maxReadBatchSizeRows)
-                  }
-                }
-              require(numDeleted <= totalRows,
-                s"Deletion vector cardinality ($numDeleted) exceeds " +
-                  s"file row count ($totalRows)")
-              loaded += SerializedRoaringBitmap(gpuBitmap, totalRows - numDeleted)
-            }
-          } else {
-            gpuBitmap.safeClose(firstFailure)
-          }
-        } catch {
-          case t: InterruptedException =>
-            wasInterrupted = true
-            recordFailure(t)
-          case t: java.util.concurrent.CancellationException =>
+        var finished = false
+        while (!finished) {
+          try {
+            val gpuBitmap = future.get()
+            finished = true
             if (firstFailure == null) {
-              recordFailure(t)
+              closeOnExcept(gpuBitmap) { _ =>
+                val totalRows = totalNumRows(entry.rowGroupNumRows)
+                val numDeleted =
+                  if (entry.dvDescriptor.isEmpty && entry.rowIndexFilterProvider.isEmpty) {
+                    0L
+                  } else {
+                    withResource(gpuBitmap.getDataHostBuffer()) { bitmap =>
+                      computeNumDeletedRows(bitmap, entry.rowGroupOffsets,
+                        entry.rowGroupNumRows, maxReadBatchSizeRows)
+                    }
+                  }
+                require(numDeleted <= totalRows,
+                  s"Deletion vector cardinality ($numDeleted) exceeds " +
+                    s"file row count ($totalRows)")
+                loaded += SerializedRoaringBitmap(gpuBitmap, totalRows - numDeleted)
+              }
+            } else {
+              gpuBitmap.safeClose(firstFailure)
             }
-          case t: Throwable =>
-            recordFailure(t)
+          } catch {
+            case t: InterruptedException =>
+              wasInterrupted = true
+              recordFailure(t)
+            case t: java.util.concurrent.CancellationException =>
+              finished = true
+              if (firstFailure == null) {
+                recordFailure(t)
+              }
+            case t: Throwable =>
+              finished = true
+              recordFailure(t)
+          }
         }
       }
       if (firstFailure != null) {
