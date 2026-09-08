@@ -189,8 +189,10 @@ def _parse_class(stream):
 
     name = _internal_name(class_file.getName())
     class_refs.discard(name)
-    inner_access = class_file.getInnerAccessFlags()
-    access = inner_access if inner_access >= 0 else class_file.getAccessFlags()
+    # JVM class access is controlled by the class access_flags. InnerClasses records
+    # source-level nested-class modifiers, which can be protected even though javac
+    # emits a public class that is accessible across runtime packages.
+    access = class_file.getAccessFlags()
     output = ByteArrayOutputStream()
     class_file.write(DataOutputStream(output))
     return ClassInfo(name, access,

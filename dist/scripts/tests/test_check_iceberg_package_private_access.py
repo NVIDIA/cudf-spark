@@ -27,7 +27,8 @@ from java.io import DataOutputStream, File, FileOutputStream
 from java.lang import Class, Double, IllegalAccessError, Long, VerifyError
 from java.net import URLClassLoader
 from javassist.bytecode import (
-    AccessFlag, Bytecode, ClassFile, ConstPool, FieldInfo, MethodInfo, Opcode)
+    AccessFlag, Bytecode, ClassFile, ConstPool, FieldInfo, InnerClassesAttribute,
+    MethodInfo, Opcode)
 
 
 SCRIPT = os.path.join(os.path.dirname(os.path.dirname(__file__)),
@@ -363,6 +364,20 @@ def write_runtime(runtime, method_access=0):
     write_class_file(runtime, "org/apache/iceberg/p/Base.class", class_file)
 
 
+def write_protected_source_public_nested_class(runtime):
+    class_name = "org.apache.iceberg.p.BaseTaskWriter$RollingFileWriter"
+    class_file = ClassFile(False, class_name, "java.lang.Object")
+    class_file.setAccessFlags(AccessFlag.PUBLIC)
+    add_constructor(class_file, "java.lang.Object")
+    inner_classes = InnerClassesAttribute(class_file.getConstPool())
+    inner_classes.append(
+        class_name, "org.apache.iceberg.p.BaseTaskWriter", "RollingFileWriter",
+        AccessFlag.PROTECTED)
+    class_file.addAttribute(inner_classes)
+    write_class_file(
+        runtime, "org/apache/iceberg/p/BaseTaskWriter$RollingFileWriter.class", class_file)
+
+
 def write_protected_wide_runtime(runtime, field_access):
     class_file = ClassFile(False, "org.apache.iceberg.p.Base", "java.lang.Object")
     class_file.setAccessFlags(AccessFlag.PUBLIC)
@@ -423,7 +438,10 @@ class IcebergPackagePrivateAccessTest(unittest.TestCase):
                     ("org.apache.iceberg", "iceberg-spark-runtime-4.1_2.13", "1.11.0")
                 ], RUNTIME_DISCOVERY.coordinates(
                     archive, "413", "2.13",
-                    lambda name: {"iceberg.111x.version": "1.11.0"}.get(name)))
+                    lambda name: {
+                        "iceberg.111x.version": "1.11.0",
+                        "spark41x.iceberg.artifact.suffix": "4.1",
+                    }.get(name)))
             finally:
                 archive.close()
 
@@ -453,6 +471,21 @@ class IcebergPackagePrivateAccessTest(unittest.TestCase):
             try:
                 self.assertEqual([], RUNTIME_DISCOVERY.coordinates(
                     archive, "330", "2.12", lambda name: None))
+            finally:
+                archive.close()
+
+    def test_real_module_requires_declared_spark_line_artifact_suffix(self):
+        with temporary_directory() as root:
+            aggregator = os.path.join(root, "aggregator.jar")
+            write_aggregator(aggregator, [(
+                "rapids-4-spark-iceberg-1-11-x_2.13", RUNTIME_DEPENDENCY)])
+            archive = zipfile.ZipFile(aggregator, "r")
+            try:
+                with self.assertRaises(RuntimeError) as raised:
+                    RUNTIME_DISCOVERY.coordinates(
+                        archive, "420", "2.13",
+                        lambda name: {"iceberg.111x.version": "1.11.0"}.get(name))
+                self.assertIn("spark42x.iceberg.artifact.suffix", str(raised.exception))
             finally:
                 archive.close()
 
@@ -536,6 +569,20 @@ class IcebergPackagePrivateAccessTest(unittest.TestCase):
                 result = LINT.main([layout, runtime])
             self.assertEqual(1, result)
             self.assertIn("package-private class", stderr.getvalue())
+
+    def test_protected_source_public_nested_class_passes(self):
+        with temporary_directory() as root:
+            layout = os.path.join(root, "layout")
+            runtime = os.path.join(root, "runtime")
+            nested_class = "org.apache.iceberg.p.BaseTaskWriter$RollingFileWriter"
+            write_protected_source_public_nested_class(runtime)
+            write_class(
+                layout, "spark-shared/org/apache/iceberg/p/Caller.class",
+                "org.apache.iceberg.p.Caller", class_references=(nested_class,))
+            with captured_stream("stdout"):
+                self.assertEqual(0, LINT.main([layout, runtime]))
+            with split_loader(runtime, layout) as loader:
+                Class.forName(nested_class, True, loader).newInstance()
 
     def test_package_private_field_fails(self):
         with temporary_directory() as root:

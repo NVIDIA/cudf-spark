@@ -37,10 +37,13 @@ def coordinates(zip_handle, buildver, scala_version, property_lookup):
     """Return exact Iceberg runtimes represented by one sparkXYZ aggregator."""
     if len(buildver) < 2 or not buildver[:2].isdigit():
         raise RuntimeError("cannot derive Spark feature version from build version %s" % buildver)
+    suffix_property = "spark%sx.iceberg.artifact.suffix" % buildver[:2]
+    artifact_suffix = property_lookup(suffix_property)
     overrides = {
-        "iceberg.artifact.suffix": "%s.%s" % (buildver[0], buildver[1]),
         "scala.binary.version": scala_version,
     }
+    if artifact_suffix is not None:
+        overrides["iceberg.artifact.suffix"] = artifact_suffix
     result = set()
     prefix = "META-INF/maven/com.nvidia/rapids-4-spark-iceberg-"
     namespace = {"m": MAVEN_NS}
@@ -59,6 +62,10 @@ def coordinates(zip_handle, buildver, scala_version, property_lookup):
                 module_artifact_id):
             continue
         real_modules.append(module_artifact_id)
+        if artifact_suffix is None:
+            raise RuntimeError(
+                "cannot resolve Iceberg artifact suffix for build version %s: "
+                "Maven property %s is not defined" % (buildver, suffix_property))
         runtime_dependencies = []
         for dependency in root.findall("./m:dependencies/m:dependency", namespace):
             group_id = dependency.findtext("m:groupId", namespaces=namespace)
