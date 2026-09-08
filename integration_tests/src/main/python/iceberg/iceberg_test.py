@@ -254,6 +254,97 @@ def test_iceberg_spj_partition_filter(spark_tmp_table_factory, partition_filter,
         gpu_plan_assertion=assert_plan)
 
 
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.skipif(
+    not (
+        (is_spark_40x() and _is_spark_patch_at_least(spark_version(), 5))
+        or (is_spark_41x() and _is_spark_patch_at_least(spark_version(), 4))
+    ),
+    reason="SPARK-58783 was fixed in Spark 4.0.5 and 4.1.4; Spark 4.2+ is unaffected")
+def test_iceberg_spj_partition_filter_with_runtime_filter(spark_tmp_table_factory):
+    left_table = get_full_table_name(spark_tmp_table_factory)
+    right_table = get_full_table_name(spark_tmp_table_factory)
+    dim_table = get_full_table_name(spark_tmp_table_factory)
+
+    def setup_iceberg_tables(spark):
+        spark.sql(
+            f"CREATE TABLE {left_table} (id INT, price DOUBLE) USING ICEBERG "
+            f"PARTITIONED BY (id) {_NO_FANOUT}")
+        spark.sql(
+            f"CREATE TABLE {right_table} (id INT, value STRING) USING ICEBERG "
+            f"PARTITIONED BY (id) {_NO_FANOUT}")
+        spark.sql(
+            f"CREATE TABLE {dim_table} (id INT, tag STRING) USING ICEBERG {_NO_FANOUT}")
+        spark.sql(f"INSERT INTO {left_table} VALUES (1, 40.0), (2, 10.0), (3, 15.5)")
+        spark.sql(f"INSERT INTO {right_table} VALUES (1, 'a'), (2, 'b')")
+        spark.sql(f"INSERT INTO {dim_table} VALUES (1, 'keep'), (2, 'drop'), (3, 'keep')")
+
+    with_cpu_session(setup_iceberg_tables)
+
+    conf = {
+        "spark.sql.adaptive.enabled": "false",
+        "spark.sql.autoBroadcastJoinThreshold": "-1",
+        "spark.sql.optimizer.dynamicPartitionPruning.enabled": "true",
+        "spark.sql.optimizer.dynamicPartitionPruning.reuseBroadcastOnly": "false",
+        "spark.sql.optimizer.dynamicPartitionPruning.fallbackFilterRatio": "10",
+        "spark.sql.sources.v2.bucketing.enabled": "true",
+        "spark.sql.sources.v2.bucketing.pushPartValues.enabled": "true",
+        "spark.sql.sources.v2.bucketing.partition.filter.enabled": "true",
+        "spark.sql.sources.v2.bucketing.partiallyClusteredDistribution.enabled": "false",
+        "spark.sql.iceberg.planning.preserve-data-grouping": "true",
+    }
+
+    def join_with_runtime_filter(spark):
+        return spark.sql(
+            f"""
+            SELECT /*+ BROADCAST(d) */ l.id, l.price, r.value
+            FROM {left_table} l
+            JOIN {right_table} r ON l.id = r.id
+            JOIN {dim_table} d ON l.id = d.id
+            WHERE d.tag = 'keep'
+            """)
+
+    def assert_plan(plan):
+        spj_joins = _nodes_of_class(plan, "GpuShuffledSymmetricHashJoinExec")
+        assert len(spj_joins) == 1, \
+            f"Expected one GPU storage-partitioned join, found {len(spj_joins)}:\n{plan}"
+        scans = _assert_spj_join_shape(spj_joins[0], expect_spj=True)
+        left_table_name = left_table.rsplit(".", 1)[-1]
+        left_scans = [scan for scan in scans
+                      if str(scan.table().name()).endswith(left_table_name)]
+        assert len(left_scans) == 1, \
+            f"Expected one left-table scan under the SPJ join, found {len(left_scans)}:\n{plan}"
+        runtime_filters = []
+        filters = left_scans[0].runtimeFilters().iterator()
+        while filters.hasNext():
+            runtime_filters.append(filters.next())
+        dpp_filters = [runtime_filter for runtime_filter in runtime_filters
+                       if runtime_filter.getClass().getSimpleName() == "DynamicPruningExpression"
+                       and runtime_filter.child().getClass().getSimpleName() == "InSubqueryExec"]
+        assert len(dpp_filters) == 1, \
+            f"Expected one nontrivial dynamic pruning filter on the left SPJ scan:\n{plan}"
+        values = dpp_filters[0].child().values()
+        assert values.isDefined(), f"Expected the dynamic pruning filter to be evaluated:\n{plan}"
+        assert set(values.get()) == {1, 3}, \
+            f"Expected dynamic pruning values {{1, 3}}, found {list(values.get())}:\n{plan}"
+
+        partitioning = left_scans[0].outputPartitioning()
+        assert partitioning.getClass().getSimpleName() == "KeyGroupedPartitioning", plan
+        partition_values = partitioning.partitionValues()
+        planned_values = {
+            partition_values.apply(i).getInt(0) for i in range(partition_values.size())
+        }
+        assert planned_values == {1, 2}, \
+            f"Expected SPJ intersection {{1, 2}}, found {planned_values}:\n{plan}"
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        join_with_runtime_filter,
+        conf=conf,
+        require_non_empty=True,
+        gpu_plan_assertion=assert_plan)
+
+
 # Enough rows that every bucket of the wider bucket(4) side is populated, so reducing it to
 # gcd(4, 2) = 2 buckets moves rows into partition values the raw-keyed lookup cannot find.
 _SPJ_REDUCIBLE_ROWS = 64
