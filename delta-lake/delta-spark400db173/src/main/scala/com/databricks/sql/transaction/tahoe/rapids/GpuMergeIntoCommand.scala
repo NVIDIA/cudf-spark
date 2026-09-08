@@ -46,7 +46,7 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.catalyst.encoders.{ExpressionEncoder, RowEncoder}
-import org.apache.spark.sql.catalyst.expressions.{Alias, And, Attribute, AttributeReference, BasePredicate, Expression, IsNull, Literal, NamedExpression, Or, PredicateHelper, UnsafeProjection}
+import org.apache.spark.sql.catalyst.expressions.{Alias, And, Attribute, AttributeReference, BasePredicate, EqualNullSafe, Expression, If, IsNull, Literal, NamedExpression, Not, Or, PredicateHelper, UnsafeProjection}
 import org.apache.spark.sql.catalyst.expressions.codegen.GeneratePredicate
 import org.apache.spark.sql.catalyst.plans.logical.{DeltaMergeIntoClause, DeltaMergeIntoMatchedClause, DeltaMergeIntoMatchedDeleteClause, DeltaMergeIntoMatchedUpdateClause, DeltaMergeIntoNotMatchedBySourceClause, DeltaMergeIntoNotMatchedBySourceDeleteClause, DeltaMergeIntoNotMatchedBySourceUpdateClause, DeltaMergeIntoNotMatchedClause, LogicalPlan, Project}
 import org.apache.spark.sql.catalyst.types.DataTypeUtils.toAttributes
@@ -857,6 +857,36 @@ case class GpuMergeIntoCommand(
       tryResolveReferencesForExpressions(spark, exprs, joinedPlan)
     }
 
+    // Databricks 17.0 and later accept non-deterministic expressions in the values of update and
+    // insert actions (not in clause conditions, which the analysis rejects). Catalyst allows
+    // such expressions in a fixed set of operators and the processor node is not one of them,
+    // so each one is evaluated in a projection over the joined rows, under a generated name, and
+    // the clause outputs reference the projected column (the written row and its CDC post-image
+    // share it). The value is guarded by the rows the clause acts on, because the CPU command
+    // evaluates an action value only on those rows: a guarded division under ANSI mode must not
+    // fail on a joined pair that takes no action. The outputs bind against the projection's
+    // output; resolving them on the joined plan passes the projected attribute through.
+    val materializedValues = mutable.ArrayBuffer[NamedExpression]()
+    def materializeNonDeterministic(
+        exprs: Seq[Expression],
+        takesClause: Expression): Seq[Expression] = exprs.map {
+      case e if !e.deterministic =>
+        val resolved = resolveOnJoinedPlan(Seq(e)).head
+        val existing = joinedPlan.output.map(_.name) ++ materializedValues.map(_.name)
+        val alias = Alias(If(takesClause, resolved, Literal(null, resolved.dataType)),
+          uniqueColumnName(NON_DETERMINISTIC_VALUE_COL, existing))()
+        materializedValues += alias
+        alias.toAttribute
+      case e => e
+    }
+
+    // The rows a clause acts on: the row kind, none of the earlier clauses of that kind taken,
+    // and its own condition true. A NULL condition counts as false, as in the processor.
+    def clauseRouting(rowKind: Expression, conditions: Seq[Expression], index: Int): Expression = {
+      val taken = conditions.take(index).map(c => Not(EqualNullSafe(c, TrueLiteral)))
+      (rowKind +: taken :+ EqualNullSafe(conditions(index), TrueLiteral)).reduce(And)
+    }
+
     // ==== Generate the expressions to process full-outer join output and generate target rows ====
     // If there are N columns in the target table, there will be N + 3 columns after processing
     // - N columns for target table
@@ -984,17 +1014,21 @@ case class GpuMergeIntoCommand(
       }
     }
 
-    def clauseOutput(clause: DeltaMergeIntoClause): Seq[Seq[Expression]] = clause match {
+    def clauseOutput(clause: DeltaMergeIntoClause, routing: Expression): Seq[Seq[Expression]] =
+      clause match {
       case u: DeltaMergeIntoMatchedUpdateClause =>
-        updateOutput(u.resolvedActions.map(_.expr) ++ rowTrackingUpdateExprs,
+        updateOutput(materializeNonDeterministic(u.resolvedActions.map(_.expr), routing) ++
+            rowTrackingUpdateExprs,
           And(incrUpdatedCountExpr, incrUpdatedMatchedCountExpr))
       case _: DeltaMergeIntoMatchedDeleteClause =>
         deleteOutput(And(incrDeletedCountExpr, incrDeletedMatchedCountExpr))
       case i: DeltaMergeIntoNotMatchedClause =>
-        insertOutput(i.resolvedActions.map(_.expr) ++ rowTrackingInsertExprs,
+        insertOutput(materializeNonDeterministic(i.resolvedActions.map(_.expr), routing) ++
+            rowTrackingInsertExprs,
           incrInsertedCountExpr)
       case u: DeltaMergeIntoNotMatchedBySourceUpdateClause =>
-        updateOutput(u.resolvedActions.map(_.expr) ++ rowTrackingUpdateExprs,
+        updateOutput(materializeNonDeterministic(u.resolvedActions.map(_.expr), routing) ++
+            rowTrackingUpdateExprs,
           And(incrUpdatedCountExpr, incrUpdatedNotMatchedBySourceCountExpr))
       case _: DeltaMergeIntoNotMatchedBySourceDeleteClause =>
         deleteOutput(And(incrDeletedCountExpr, incrDeletedNotMatchedBySourceCountExpr))
@@ -1012,19 +1046,32 @@ case class GpuMergeIntoCommand(
       resolveOnJoinedPlan(Seq(IsNull(UnresolvedAttribute(sourceRowPresentCol)))).head
     val sourceRowHasNoMatch =
       resolveOnJoinedPlan(Seq(IsNull(UnresolvedAttribute(targetRowPresentCol)))).head
+    val matchedRow = And(Not(targetRowHasNoMatch), Not(sourceRowHasNoMatch))
     val matchedConditions = matchedClauses.map(clauseCondition)
-    val matchedOutputs = matchedClauses.map(clauseOutput)
+    val matchedOutputs = matchedClauses.zipWithIndex.map { case (clause, i) =>
+      clauseOutput(clause, clauseRouting(matchedRow, matchedConditions, i))
+    }
     val notMatchedConditions = notMatchedClauses.map(clauseCondition)
-    val notMatchedOutputs = notMatchedClauses.map(clauseOutput)
+    val notMatchedOutputs = notMatchedClauses.zipWithIndex.map { case (clause, i) =>
+      clauseOutput(clause, clauseRouting(sourceRowHasNoMatch, notMatchedConditions, i))
+    }
     val notMatchedBySourceConditions = notMatchedBySourceClauses.map(clauseCondition)
-    val notMatchedBySourceOutputs = notMatchedBySourceClauses.map(clauseOutput)
+    val notMatchedBySourceOutputs = notMatchedBySourceClauses.zipWithIndex.map {
+      case (clause, i) =>
+        clauseOutput(clause, clauseRouting(targetRowHasNoMatch, notMatchedBySourceConditions, i))
+    }
     val noopCopyOutput =
       resolveOnJoinedPlan(targetOutputCols :+ FalseLiteral :+ incrNoopCountExpr :+
           CDC_TYPE_NOT_CDC_LITERAL)
     val deleteRowOutput =
       resolveOnJoinedPlan(targetOutputCols :+ TrueLiteral :+ TrueLiteral :+
           CDC_TYPE_NOT_CDC_LITERAL)
-    var outputDF = addMergeJoinProcessor(spark, joinedPlan, outputRowSchema,
+    val processorInputPlan = if (materializedValues.isEmpty) {
+      joinedPlan
+    } else {
+      Project(joinedPlan.output ++ materializedValues, joinedPlan)
+    }
+    var outputDF = addMergeJoinProcessor(spark, processorInputPlan, outputRowSchema,
       targetRowHasNoMatch = targetRowHasNoMatch,
       sourceRowHasNoMatch = sourceRowHasNoMatch,
       matchedConditions = matchedConditions,
@@ -1330,6 +1377,7 @@ object GpuMergeIntoCommand {
   val SOURCE_ROW_PRESENT_COL = "_source_row_present_"
   val TARGET_ROW_PRESENT_COL = "_target_row_present_"
   val DUPLICATE_MATCH_RANK_COL = "_duplicate_match_rank_"
+  val NON_DETERMINISTIC_VALUE_COL = "_non_deterministic_value_"
   val ROW_DROPPED_COL = GpuDeltaMergeConstants.ROW_DROPPED_COL
   val INCR_ROW_COUNT_COL = "_incr_row_count_"
 

@@ -893,6 +893,84 @@ def test_delta_merge_control_column_names_gpu_db173(spark_tmp_path, spark_tmp_ta
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="NOT MATCHED BY SOURCE is supported on the GPU with Databricks 17.3+")
+@pytest.mark.parametrize("use_cdf", [False, True], ids=idfn)
+def test_delta_merge_non_deterministic_action_values_db173(spark_tmp_path, spark_tmp_table_factory,
+                                                           use_cdf):
+    # Databricks 17.0 and later accept non-deterministic expressions in the values of update and
+    # insert actions (not in conditions). Catalyst does not allow them in the GPU processor node,
+    # so the GPU command evaluates each one once per joined row in a projection above the join,
+    # guarded by the rows the clause acts on: the matched update divides by a source column that
+    # is zero on the second, non-effective source row of key 1, which under ANSI mode must not be
+    # evaluated (the CPU evaluates an action value only on the rows that take the clause), and
+    # that duplicate match also sends the merge through the de-duplication window. rand() is
+    # seeded so the CPU run is reproducible; its values still cannot equal the GPU's, so the
+    # tables are compared with each value replaced by the range it must fall in, and with CDF on
+    # the change rows of the MERGE commit must carry the same value as the table row.
+    def src_table_func(spark):
+        return spark.createDataFrame([(1, 10, 4, 2), (1, 10, 4, 0), (4, 40, 8, 4)],
+                                     "k INT, s INT, x INT, d INT")
+
+    def dest_table_func(spark):
+        return spark.createDataFrame([(1, 0.5, 0.5), (2, 0.5, 0.5), (3, 0.5, 0.5)],
+                                     "k INT, v DOUBLE, u DOUBLE")
+
+    merge_sql = (
+        "MERGE INTO {dest_table} t USING {src_table} s ON t.k = s.k "
+        "WHEN MATCHED AND s.d <> 0 THEN UPDATE SET t.v = s.x / s.d + rand(7) "
+        "WHEN NOT MATCHED THEN INSERT (k, v, u) VALUES (s.k, rand(7), s.s + rand(7)) "
+        "WHEN NOT MATCHED BY SOURCE AND t.k = 2 THEN UPDATE SET t.u = rand(7) + 10")
+    # k=1 matched by its d=2 row (v = 2 + random), k=2 not matched by source (u random + 10),
+    # k=3 copied, k=4 inserted (v random, u random + 40)
+    expected = [(1, "random+2", "kept"), (2, "kept", "random+10"), (3, "kept", "kept"),
+                (4, "random", "random+40")]
+    ranges = ("CASE WHEN {c} = 0.5 THEN 'kept' WHEN {c} >= 0 AND {c} < 1 THEN 'random' "
+              "WHEN {c} >= 2 AND {c} < 3 THEN 'random+2' "
+              "WHEN {c} >= 10 AND {c} < 11 THEN 'random+10' "
+              "WHEN {c} >= 40 AND {c} < 41 THEN 'random+40' ELSE 'bad' END AS {c}")
+    conf = copy_and_update(delta_merge_no_cpu_bridge_conf, {"spark.sql.ansi.enabled": "true"})
+
+    def read_ranges(spark, path):
+        return read_delta_path(spark, path).selectExpr("k", ranges.format(c="v"),
+                                                       ranges.format(c="u"))
+
+    def check_func(data_path, do_merge):
+        # The merge's result rows are compared between the engines and the GPU processor is
+        # asserted in the plan; then the tables, with each value replaced by its range.
+        _assert_gpu_merge_processor(do_merge, data_path, conf)
+        for run in ["CPU", "GPU"]:
+            actual = with_cpu_session(
+                lambda spark: sorted(tuple(row) for row in
+                                     read_ranges(spark, data_path + "/" + run).collect()),
+                conf=delta_merge_enabled_conf)
+            assert expected == actual, f"{run}: expected {expected}, got {actual}"
+        if use_cdf:
+            def changed_values(spark, path):
+                merge_version = spark.sql(f"DESCRIBE HISTORY delta.`{path}`") \
+                    .where("operation = 'MERGE'").orderBy("version", ascending=False) \
+                    .first()["version"]
+                changes = read_delta_path_with_cdf(spark, path) \
+                    .where(f"_commit_version = {merge_version} AND "
+                           "_change_type IN ('insert', 'update_postimage')")
+                table = {r["k"]: (r["v"], r["u"]) for r in read_delta_path(spark, path).collect()}
+                return {r["k"]: (r["v"], r["u"]) for r in changes.collect()}, table
+            for run in ["CPU", "GPU"]:
+                changed, table = with_cpu_session(
+                    lambda spark: changed_values(spark, data_path + "/" + run),
+                    conf=delta_merge_enabled_conf)
+                assert sorted(changed.keys()) == [1, 2, 4], f"{run}: {changed}"
+                for k, values in changed.items():
+                    assert table[k] == values, \
+                        f"{run}: change row of k={k} carries {values}, the table row {table[k]}"
+
+    delta_sql_merge_test(spark_tmp_path, spark_tmp_table_factory, use_cdf, False,
+                         src_table_func, dest_table_func, merge_sql, check_func)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_databricks173_or_later(),
                     reason="Per-clause merge metrics are reported by the Databricks 17.3 GPU merge command")
 def test_delta_merge_delete_only_duplicate_cdc_internal_column_names_db173(
         spark_tmp_path, spark_tmp_table_factory):
