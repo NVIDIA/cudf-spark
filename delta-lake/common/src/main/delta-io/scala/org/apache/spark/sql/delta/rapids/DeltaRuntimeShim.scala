@@ -21,10 +21,10 @@ import scala.util.Try
 import com.nvidia.spark.rapids.{RapidsConf, ShimLoader, ShimReflectionUtils, VersionUtils}
 import com.nvidia.spark.rapids.delta.{DeltaConfigChecker, DeltaProvider}
 
-import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.{DataFrameWriter, SaveMode, SparkSession}
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.connector.catalog.StagingTableCatalog
-import org.apache.spark.sql.delta.{DeltaLog, DeltaUDF, Snapshot}
+import org.apache.spark.sql.delta.{DeltaLog, DeltaOptions, DeltaUDF, Snapshot}
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
 import org.apache.spark.sql.execution.datasources.FileFormat
 import org.apache.spark.sql.expressions.UserDefinedFunction
@@ -48,6 +48,15 @@ trait DeltaRuntimeShim {
   def getTightBoundColumnOnFileInitDisabled(spark: SparkSession): Boolean
 
   def getGpuDeltaCatalog(cpuCatalog: DeltaCatalog, rapidsConf: RapidsConf): StagingTableCatalog
+
+  /**
+   * Detect a DataFrameWriter V1 mode("overwrite").saveAsTable operation so it retains the
+   * existing table metadata. Delta versions before 4.1 require stack-trace inspection.
+   */
+  def isV1WriterSaveAsTableOverwrite(options: DeltaOptions, mode: SaveMode): Boolean = {
+    mode == SaveMode.Overwrite && Thread.currentThread().getStackTrace.exists(_.toString.contains(
+      classOf[DataFrameWriter[_]].getCanonicalName + "."))
+  }
 }
 
 object DeltaRuntimeShim {
@@ -112,6 +121,9 @@ object DeltaRuntimeShim {
 
   def getTightBoundColumnOnFileInitDisabled(spark: SparkSession): Boolean =
     shimInstance.getTightBoundColumnOnFileInitDisabled(spark)
+
+  def isV1WriterSaveAsTableOverwrite(options: DeltaOptions, mode: SaveMode): Boolean =
+    shimInstance.isV1WriterSaveAsTableOverwrite(options, mode)
 
   def getGpuDeltaCatalog(cpuCatalog: DeltaCatalog, rapidsConf: RapidsConf): StagingTableCatalog = {
     shimInstance.getGpuDeltaCatalog(cpuCatalog, rapidsConf)
