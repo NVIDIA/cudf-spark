@@ -467,6 +467,7 @@ def test_delta_delete_dataframe_api(spark_tmp_path, use_cdf, partition_columns, 
 @allow_non_gpu("ExecutedCommandExec,ColumnarToRowExec,DataWritingCommandExec", delta_write_fallback_allow, *delta_meta_allow)
 @delta_lake
 @ignore_order
+@inject_oom
 @allow_non_gpu_delta_write_if(True, reason="the command runs on the CPU by design; its jobs are planned by the plugin")
 @pytest.mark.skipif(not is_databricks173_or_later(),
                     reason="GPU IncrementMetric coverage for Databricks 17.3+")

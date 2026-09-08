@@ -24,6 +24,7 @@ import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.shims.{ShimExpression, ShimUnaryExpression}
 
 import org.apache.spark.sql.catalyst.expressions.Expression
+import org.apache.spark.sql.rapids.catalyst.expressions.GpuExpressionRetryable
 import org.apache.spark.sql.types.DataType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -33,13 +34,24 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
  * and clause conditions in it to count source, matched, copied and written rows, so without
  * this rule every Filter or Project that carries one stays on the CPU. Mirrors the OSS Delta
  * version in DeltaProviderBase.
+ *
+ * The Databricks classes are Nondeterministic, so the expression is retryable only as a
+ * GpuExpressionRetryable: the hosting operator checkpoints it before an attempt and restores
+ * it when the attempt is retried after an OOM, and the restore takes back the rows the failed
+ * attempt added, so the metric counts each batch exactly once and the child is evaluated
+ * inside the operator's retry.
  */
-case class GpuIncrementMetric(cpuInc: IncrementMetric, override val child: Expression)
-  extends ShimUnaryExpression with GpuExpression {
+case class GpuIncrementMetric(
+    cpuInc: IncrementMetric,
+    override val child: Expression,
+    doContextCheck: Boolean)
+  extends ShimUnaryExpression with GpuExpressionRetryable {
 
   override def dataType: DataType = child.dataType
 
   override lazy val deterministic: Boolean = cpuInc.deterministic
+
+  override val selfNonDeterministic: Boolean = !deterministic
 
   // The metric must only count the rows this expression is evaluated on, which matters when it
   // sits inside a conditional branch or on the right of a short-circuiting AND / OR.
@@ -47,9 +59,22 @@ case class GpuIncrementMetric(cpuInc: IncrementMetric, override val child: Expre
 
   override def prettyName: String = "gpu_" + cpuInc.prettyName
 
-  override def columnarEval(batch: ColumnarBatch): GpuColumnVector = {
-    cpuInc.metric.add(batch.numRows())
-    child.columnarEval(batch)
+  // Rows added to the metric since the last checkpoint, taken back on a restore.
+  @transient private var pendingRows: Long = 0L
+
+  override def doCheckpoint(): Unit = pendingRows = 0L
+
+  override def doRestore(): Unit = {
+    cpuInc.metric.add(-pendingRows)
+    pendingRows = 0L
+  }
+
+  override def doColumnarEval(batch: ColumnarBatch): GpuColumnVector = {
+    val result = child.columnarEval(batch)
+    val rows = batch.numRows().toLong
+    cpuInc.metric.add(rows)
+    pendingRows += rows
+    result
   }
 }
 
@@ -60,7 +85,7 @@ case class GpuIncrementMetricMeta(
     p: Option[RapidsMeta[_, _, _]],
     r: DataFromReplacementRule) extends ExprMeta[IncrementMetric](cpuInc, conf, p, r) {
   override def convertToGpuImpl(): GpuExpression =
-    GpuIncrementMetric(cpuInc, childExprs.head.convertToGpu())
+    GpuIncrementMetric(cpuInc, childExprs.head.convertToGpu(), conf.isRetryContextCheckEnabled)
 }
 
 object GpuIncrementMetric {
@@ -75,13 +100,16 @@ object GpuIncrementMetric {
  * GPU version of the Databricks ConditionalIncrementMetric expression: evaluates its child and
  * adds the number of rows whose condition is true to the wrapped SQL metric (a null condition
  * does not count, as on the CPU). The Databricks UPDATE command counts its updated and copied
- * rows with it.
+ * rows with it. Retryable the same way as GpuIncrementMetric: the condition, the count and the
+ * child are evaluated inside the operator's retry, and a restore takes back the rows a failed
+ * attempt added.
  */
 case class GpuConditionalIncrementMetric(
     cpuInc: ConditionalIncrementMetric,
     child: Expression,
-    condition: Expression)
-  extends ShimExpression with GpuExpression {
+    condition: Expression,
+    doContextCheck: Boolean)
+  extends ShimExpression with GpuExpressionRetryable {
 
   override def children: Seq[Expression] = Seq(child, condition)
 
@@ -91,24 +119,34 @@ case class GpuConditionalIncrementMetric(
 
   override lazy val deterministic: Boolean = cpuInc.deterministic
 
+  override val selfNonDeterministic: Boolean = !deterministic
+
   override def hasSideEffects: Boolean = true
 
   override def prettyName: String = "gpu_" + cpuInc.prettyName
 
-  override def columnarEval(batch: ColumnarBatch): GpuColumnVector = {
+  // Rows added to the metric since the last checkpoint, taken back on a restore.
+  @transient private var pendingRows: Long = 0L
+
+  override def doCheckpoint(): Unit = pendingRows = 0L
+
+  override def doRestore(): Unit = {
+    cpuInc.metric.add(-pendingRows)
+    pendingRows = 0L
+  }
+
+  override def doColumnarEval(batch: ColumnarBatch): GpuColumnVector = {
     val trueRows = withResourceIfAllowed(condition.columnarEvalAny(batch)) {
-      case cond: GpuColumnVector =>
-        // A non-deterministic expression is not retryable, so the projection evaluates it once
-        // before its own retry block. The count allocates on the GPU and is idempotent, so it
-        // gets its own retry; the metric update stays outside it and happens exactly once.
-        RmmRapidsRetryIterator.withRetryNoSplit(countTrue(cond))
+      case cond: GpuColumnVector => countTrue(cond)
       case cond: GpuScalar =>
         if (cond.isValid && cond.getValue == true) batch.numRows().toLong else 0L
       case other =>
         throw new IllegalStateException(s"Unexpected condition value $other (${other.getClass})")
     }
+    val result = child.columnarEval(batch)
     cpuInc.metric.add(trueRows)
-    child.columnarEval(batch)
+    pendingRows += trueRows
+    result
   }
 
   private def countTrue(cond: GpuColumnVector): Long = {
@@ -129,7 +167,7 @@ case class GpuConditionalIncrementMetricMeta(
   extends ExprMeta[ConditionalIncrementMetric](cpuInc, conf, p, r) {
   override def convertToGpuImpl(): GpuExpression = {
     val Seq(child, condition) = childExprs.map(_.convertToGpu())
-    GpuConditionalIncrementMetric(cpuInc, child, condition)
+    GpuConditionalIncrementMetric(cpuInc, child, condition, conf.isRetryContextCheckEnabled)
   }
 }
 

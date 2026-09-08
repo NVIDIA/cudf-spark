@@ -242,8 +242,8 @@ def test_delta_update_cpu_command_increment_metric_db173(spark_tmp_path):
     # ConditionalIncrementMetric in the rewrite job it runs, and the plugin plans that job
     # whenever the command itself stays on the CPU (disabled by conf here, the way any vetoed
     # update runs). The DESCRIBE HISTORY row counts come from those metrics, so they must match
-    # the CPU run. inject_oom makes the retry around the GPU row count fire, which must not
-    # change the counts. The row with a NULL key makes the condition NULL: the CPU counts it
+    # the CPU run. inject_oom makes the operator's retry fire around the expression, so its
+    # checkpoint and restore run and the counts must not change. The row with a NULL key makes the condition NULL: the CPU counts it
     # as copied and not as updated, and the GPU sum has to leave it out the same way.
     conf = copy_and_update(delta_update_enabled_conf,
                            {"spark.rapids.sql.command.UpdateCommand": "false",
