@@ -84,7 +84,7 @@ object RapidsPluginUtils extends Logging {
   val CUDF_PROPS_FILENAME = "cudf-java-version-info.properties"
   val JNI_PROPS_FILENAME = "spark-rapids-jni-version-info.properties"
   val PLUGIN_PROPS_FILENAME = "rapids4spark-version-info.properties"
-  private val PRIVATE_PROPS_FILENAME = "rapids4spark-private-version-info.properties"
+  private val PRIVATE_PROPS_FILENAME = "cudf-spark-private-version-info.properties"
 
   private val SQL_PLUGIN_NAME = classOf[SQLExecPlugin].getName
   private val UDF_PLUGIN_NAME = "com.nvidia.spark.udf.Plugin"

@@ -86,7 +86,7 @@ jobs:
           svArrBodyNoSnapshot=${svArrBodyNoSnapshot:1}
 
           # get private artifact version
-          privateVer=$(mvn help:evaluate -q -pl dist -Dexpression=spark-rapids-private.version -DforceStdout)
+          privateVer=$(mvn help:evaluate -q -pl dist -Dexpression=cudf-spark-private.version -DforceStdout)
           # do not add empty snapshot versions or when private version is released one (does not include snapshot shims)
           if [[ ${#SPARK_SHIM_VERSIONS_SNAPSHOTS_ONLY[@]} -gt 0 && $privateVer == *"-SNAPSHOT" ]]; then
             svArrBodySnapshot=$(printf ",{\"spark-version\":\"%s\",\"isSnapshot\":true}" "${SPARK_SHIM_VERSIONS_SNAPSHOTS_ONLY[@]}")
@@ -204,7 +204,7 @@ jobs:
           svArrBodyNoSnapshot=$(printf ",{\"spark-version\":\"%s\",\"isSnapshot\":false}" "${SPARK_SHIM_VERSIONS_NOSNAPSHOTS[@]}")
           svArrBodyNoSnapshot=${svArrBodyNoSnapshot:1}
           # get private artifact version
-          privateVer=$(mvn help:evaluate -q -pl dist -Dexpression=spark-rapids-private.version -DforceStdout)
+          privateVer=$(mvn help:evaluate -q -pl dist -Dexpression=cudf-spark-private.version -DforceStdout)
           svJsonStr=$(printf {\"include\":[%s]} $svArrBodyNoSnapshot)
 
           echo "scala213Versions=$svJsonStr" >> $GITHUB_OUTPUT
