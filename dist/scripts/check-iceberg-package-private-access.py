@@ -247,6 +247,25 @@ def _find_members(runtime_classes, plugin_classes, owner, reference):
     return set()
 
 
+def _is_subclass(runtime_classes, plugin_classes, class_name, candidate_parent):
+    pending = [class_name]
+    visited = set()
+    while pending:
+        current = pending.pop()
+        if current == candidate_parent:
+            return True
+        if current in visited:
+            continue
+        visited.add(current)
+        infos = (list(runtime_classes.get(current, ())) +
+                 list(plugin_classes.get(current, ())))
+        for info in infos:
+            if info.super_name:
+                pending.append(info.super_name)
+            pending.extend(info.interfaces)
+    return False
+
+
 def _package_name(class_name):
     return class_name.rsplit("/", 1)[0]
 
@@ -299,12 +318,20 @@ def find_package_private_access(layout_entries, runtime_classes, runtime_label):
                 continue
             for declaring_class, member in _find_members(
                     runtime_classes, plugin_classes, reference.owner, reference):
-                if (not member.access & MEMBER_VISIBILITY and
-                        _package_name(caller.name) == _package_name(declaring_class)):
+                if _package_name(caller.name) != _package_name(declaring_class):
+                    continue
+                reason = None
+                if not member.access & MEMBER_VISIBILITY:
+                    reason = "package-private %s" % reference.kind
+                elif (member.access & AccessFlag.PROTECTED and
+                      not _is_subclass(runtime_classes, plugin_classes,
+                                       caller.name, declaring_class)):
+                    reason = "protected %s requiring same runtime package" % reference.kind
+                if reason:
                     separator = ":" if reference.kind == "field" else ""
                     target = "%s.%s%s%s" % (declaring_class, member.name,
                                              separator, member.descriptor)
-                    caller_findings.add((target, "package-private %s" % reference.kind))
+                    caller_findings.add((target, reason))
         if caller_findings:
             callers.add((entry, caller.name))
             for target, reason in caller_findings:

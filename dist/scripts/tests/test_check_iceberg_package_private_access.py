@@ -188,6 +188,37 @@ class IcebergPackagePrivateAccessTest(unittest.TestCase):
             finally:
                 archive.close()
 
+    def test_aggregator_rejects_multiple_runtime_dependencies(self):
+        with temporary_directory() as root:
+            aggregator = os.path.join(root, "aggregator.jar")
+            real_module = "rapids-4-spark-iceberg-1-11-x_2.13"
+            write_aggregator(aggregator, [(
+                real_module, RUNTIME_DEPENDENCY + RUNTIME_DEPENDENCY)])
+            archive = zipfile.ZipFile(aggregator, "r")
+            try:
+                with self.assertRaises(RuntimeError):
+                    RUNTIME_DISCOVERY.coordinates(
+                        archive, "413", "2.13",
+                        lambda name: {"iceberg.111x.version": "1.11.0"}.get(name))
+            finally:
+                archive.close()
+
+    def test_aggregator_rejects_real_and_stub_modules(self):
+        with temporary_directory() as root:
+            aggregator = os.path.join(root, "aggregator.jar")
+            write_aggregator(aggregator, [
+                ("rapids-4-spark-iceberg-1-11-x_2.13", RUNTIME_DEPENDENCY),
+                ("rapids-4-spark-iceberg-stub_2.13", ""),
+            ])
+            archive = zipfile.ZipFile(aggregator, "r")
+            try:
+                with self.assertRaises(RuntimeError):
+                    RUNTIME_DISCOVERY.coordinates(
+                        archive, "413", "2.13",
+                        lambda name: {"iceberg.111x.version": "1.11.0"}.get(name))
+            finally:
+                archive.close()
+
     def test_root_inherited_package_private_caller_passes(self):
         with temporary_directory() as root:
             layout = os.path.join(root, "layout")
@@ -251,6 +282,32 @@ class IcebergPackagePrivateAccessTest(unittest.TestCase):
                 result = LINT.main([layout, runtime])
             self.assertEqual(1, result)
             self.assertIn("package-private field", stderr.getvalue())
+
+    def test_same_package_non_subclass_protected_caller_fails(self):
+        with temporary_directory() as root:
+            layout = os.path.join(root, "layout")
+            runtime = os.path.join(root, "runtime")
+            write_runtime(runtime, AccessFlag.PROTECTED)
+            write_class(layout, "spark-shared/org/apache/iceberg/p/Caller.class",
+                        "org.apache.iceberg.p.Caller",
+                        references=(("method", "org.apache.iceberg.p.Base",
+                                     "hidden", "()V"),))
+            with captured_stream("stderr") as stderr:
+                result = LINT.main([layout, runtime])
+            self.assertEqual(1, result)
+            self.assertIn("protected method requiring same runtime package", stderr.getvalue())
+
+    def test_subclass_protected_caller_passes(self):
+        with temporary_directory() as root:
+            layout = os.path.join(root, "layout")
+            runtime = os.path.join(root, "runtime")
+            write_runtime(runtime, AccessFlag.PROTECTED)
+            write_class(layout, "spark-shared/org/apache/iceberg/p/GpuChild.class",
+                        "org.apache.iceberg.p.GpuChild", "org.apache.iceberg.p.Base",
+                        references=(("method", "org.apache.iceberg.p.Base",
+                                     "hidden", "()V"),))
+            with captured_stream("stdout"):
+                self.assertEqual(0, LINT.main([layout, runtime]))
 
     def test_scala_synthetic_caller_fails(self):
         with temporary_directory() as root:
