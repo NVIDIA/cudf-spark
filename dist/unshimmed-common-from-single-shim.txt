@@ -12,7 +12,6 @@ com/nvidia/spark/rapids/ShimLoaderTemp*
 com/nvidia/spark/rapids/SparkShims*
 com/nvidia/shaded/spark/com/google/flatbuffers/*.class
 com/nvidia/spark/rapids/iceberg/data/GpuDeleteFilter2.class
-com/nvidia/spark/rapids/iceberg/parquet/FileSchemaAccessors.class
 com/nvidia/spark/rapids/iceberg/parquet/GpuIcebergParquetReader$.class
 com/nvidia/spark/rapids/iceberg/parquet/SingleFile.class
 com/nvidia/spark/rapids/iceberg/parquet/SingleFile$.class

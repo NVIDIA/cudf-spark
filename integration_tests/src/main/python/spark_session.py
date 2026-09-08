@@ -412,6 +412,3 @@ def is_hive_available():
     if is_at_least_precommit_run():
         return True
     return _spark.conf.get("spark.sql.catalogImplementation") == "hive"
-
-def is_hybrid_backend_loaded():
-    return _spark.conf.get("spark.rapids.sql.hybrid.loadBackend", "false") == "true"

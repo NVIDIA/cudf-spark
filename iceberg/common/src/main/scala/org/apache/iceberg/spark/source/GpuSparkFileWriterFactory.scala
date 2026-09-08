@@ -107,8 +107,7 @@ class GpuSparkFileWriterFactory(val table: Table,
 
     new GpuIcebergParquetAppender(
       gpuWriter,
-      metricsConfig = MetricsConfig.forTable(table),
-      fileIO = new IcebergFileIO(table.io())
+      metricsConfig = MetricsConfig.forTable(table)
     )
   }
 }

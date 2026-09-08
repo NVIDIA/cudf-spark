@@ -448,19 +448,6 @@ non_utc_allow_for_sequence = ['ProjectExec'] # Update after non-utc time zone is
 test_my_new_added_case_for_sequence_operator()
 ```
 
-### Running with Hybrid execution
-The hybrid tests require extra jars. To enable hybrid tests, the following prerequisites are required::
-- Build Gluten bundle jar, Gluten thirdparty jar, refer to [link](../docs/dev/hybrid-execution.md#build)
-- Download Hybrid jar, refer to [link](../docs/dev/hybrid-execution.md#download-rapids-hybrid-jar-from-maven-repo)
-
-Execute the following command to run Hybrid tests:
-```shell
-$ LOAD_HYBRID_BACKEND=1 \
-  HYBRID_BACKEND_JARS=/path/to/${GLUTEN_BUNDLE_JAR},/path/to/${GLUTEN_THIRD_PARTY_JAR},/path/to/HYBRID_JAR \
-  ./integration_tests/run_pyspark_from_build.sh -m hybrid_test
-```
-For more information about Hybrid feature, refer to [link](../docs/dev/hybrid-execution.md)
-
 ### Reviewing integration tests in Spark History Server
 
 If the integration tests are run using [run_pyspark_from_build.sh](run_pyspark_from_build.sh) we have
