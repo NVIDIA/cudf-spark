@@ -930,6 +930,7 @@
                 <buildver>500</buildver>
                 <spark.version>${spark500.version}</spark.version>
                 <spark.test.version>${spark500.version}</spark.test.version>
+                <cudf-spark-private.artifactId>cudf-spark-private_${scala.binary.version}-spark-master</cudf-spark-private.artifactId>
                 <parquet.hadoop.version>1.15.2</parquet.hadoop.version>
                 <maven.compiler.source>17</maven.compiler.source>
                 <java.major.version>17</java.major.version>
@@ -1062,6 +1063,7 @@
         <jni.classifier>${cuda.version}</jni.classifier>
         <spark-rapids-jni.version>26.10.0-SNAPSHOT</spark-rapids-jni.version>
         <cudf-spark-private.version>26.10.0-SNAPSHOT</cudf-spark-private.version>
+        <cudf-spark-private.artifactId>cudf-spark-private_${scala.binary.version}</cudf-spark-private.artifactId>
         <scala.binary.version>2.13</scala.binary.version>
         <scala.recompileMode>incremental</scala.recompileMode>
         <scala.version>2.13.18</scala.version>
