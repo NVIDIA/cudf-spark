@@ -78,12 +78,18 @@ case class GpuBatchScanExec(
     case other: GpuBatchScanExec =>
       this.batch != null && this.batch == other.batch &&
         this.runtimeFilters == other.runtimeFilters &&
-        this.keyGroupedPartitioning == other.keyGroupedPartitioning
+        this.prunedKeyGroupedPartitioning == other.prunedKeyGroupedPartitioning
     case _ =>
       false
   }
 
-  override def hashCode(): Int = Objects.hashCode(batch, runtimeFilters, keyGroupedPartitioning)
+  override def hashCode(): Int =
+    Objects.hashCode(batch, runtimeFilters, prunedKeyGroupedPartitioning)
+
+  // Keep in sync with Spark BatchScanExec: dangling keys after column pruning are planner
+  // metadata and must not affect equals, hashCode, or canonicalize.
+  @transient lazy val prunedKeyGroupedPartitioning: Option[Seq[Expression]] =
+    keyGroupedPartitioning.map(_.filter(_.references.subsetOf(outputSet)))
 
   @transient override lazy val inputPartitions: Seq[InputPartition] =
     ArraySeq.unsafeWrapArray(batch.planInputPartitions())
@@ -122,7 +128,9 @@ case class GpuBatchScanExec(
       runtimeFilters = QueryPlan.normalizePredicates(
         runtimeFilters.filterNot(_ == DynamicPruningExpression(Literal.TrueLiteral)),
         output),
-      keyGroupedPartitioning = keyGroupedPartitioning.map(QueryPlan.normalizePredicates(_, output)))
+      // SPARK-58120: normalizeExpressions preserves key order; normalizePredicates can reorder.
+      keyGroupedPartitioning = prunedKeyGroupedPartitioning.map(
+        _.map(QueryPlan.normalizeExpressions(_, output))))
   }
 
   override def simpleString(maxFields: Int): String = {
