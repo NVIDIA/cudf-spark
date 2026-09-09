@@ -1217,8 +1217,10 @@ object GpuFilter {
       numOutputRows: GpuMetric,
       numOutputBatches: GpuMetric,
       opTime: GpuMetric): Iterator[ColumnarBatch] = {
-    boundCondition.retryables.foreach(_.checkpoint())
     val ret = withRetry(input, splitSpillableInHalfByRows) { sb =>
+      // Checkpoint before each attempt, as the project's split-retry path does: a split that
+      // succeeded is committed, so a later split's retry must restore only its own attempt.
+      boundCondition.retryables.foreach(_.checkpoint())
       withResource(sb.getColumnarBatch()) { cb =>
         withRestoreOnRetry(boundCondition.retryables) {
           NvtxIdWithMetrics(NvtxRegistry.FILTER_BATCH, opTime) {

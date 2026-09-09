@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+
 import pytest
 from pyspark.sql import Row
 from asserts import assert_gpu_fallback_collect, assert_gpu_and_cpu_are_equal_collect, \
@@ -940,6 +942,125 @@ def test_delta_read_column_mapping(spark_tmp_path, reader_confs, mapping, enable
     with_cpu_session(create_delta, conf=confs)
     assert_gpu_and_cpu_are_equal_collect(lambda spark: spark.read.format("delta").load(data_path),
                                          conf=confs)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(is_databricks_runtime(), reason="OSS Delta column-mapping scan path")
+@pytest.mark.skipif(not gpu_supports_delta_dv_scan(),
+                    reason="GPU Delta deletion vector scan support is required")
+def test_delta_column_mapping_predicate_pushdown_with_deletion_vector(spark_tmp_path):
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    cpu_path = data_path + "/CPU"
+    gpu_path = data_path + "/GPU"
+    conf = {
+        "spark.databricks.delta.properties.defaults.columnMapping.mode": "name",
+        "spark.databricks.delta.properties.defaults.minReaderVersion": "2",
+        "spark.databricks.delta.properties.defaults.minWriterVersion": "5",
+        "spark.databricks.delta.properties.defaults.enableDeletionVectors": "true",
+        "spark.databricks.delta.delete.deletionVectors.persistent": "true",
+        "spark.sql.parquet.fieldId.read.enabled": "true",
+        "spark.rapids.sql.format.parquet.reader.type": "PERFILE",
+    }
+
+    def setup_table(spark, path):
+        spark.createDataFrame(
+            [(0, None), (1, "one"), (2, None), (3, "three"), (4, "four")],
+            ["id", "payload"]) \
+            .write.format("delta").mode("overwrite").save(path)
+        deleted = spark.sql(
+            f"DELETE FROM delta.`{path}` WHERE id = 4").collect()[0][0]
+        assert deleted == 1
+
+    with_cpu_session(lambda spark: setup_table(spark, cpu_path), conf=conf)
+    with_cpu_session(lambda spark: setup_table(spark, gpu_path), conf=conf)
+
+    def assert_column_mapping_and_dv(spark, path):
+        schema_strings = spark.read.text(path + "/_delta_log/*.json") \
+            .selectExpr("get_json_object(value, '$.metaData.schemaString') AS schema") \
+            .where("schema IS NOT NULL") \
+            .collect()
+        assert len(schema_strings) == 1
+        fields = json.loads(schema_strings[0][0])["fields"]
+        physical_names = {
+            field["name"]: field["metadata"]["delta.columnMapping.physicalName"]
+            for field in fields
+        }
+        assert set(physical_names) == {"id", "payload"}
+        assert all(logical_name != physical_name
+                   for logical_name, physical_name in physical_names.items())
+        dv_adds = spark.read.json(path + "/_delta_log/*.json") \
+            .where("add.deletionVector IS NOT NULL").count()
+        assert dv_adds > 0, f"Expected a deletion-vector AddFile in {path}"
+        return physical_names
+
+    with_cpu_session(
+        lambda spark: assert_column_mapping_and_dv(spark, cpu_path), conf=conf)
+    gpu_physical_names = with_cpu_session(
+        lambda spark: assert_column_mapping_and_dv(spark, gpu_path), conf=conf)
+
+    def assert_filter_translation(spark):
+        jvm = spark._jvm
+        quoting_utils = jvm.org.apache.spark.sql.catalyst.util.QuotingUtils
+        java_name_map = jvm.java.util.HashMap()
+        for logical_name, physical_name in gpu_physical_names.items():
+            java_name_map.put(
+                quoting_utils.quoteIfNeeded(logical_name),
+                quoting_utils.quoteIfNeeded(physical_name))
+        physical_name_map = jvm.org.apache.spark.api.python.PythonUtils \
+            .toScalaMap(java_name_map)
+
+        in_values = spark.sparkContext._gateway.new_array(jvm.java.lang.Object, 4)
+        for index, value in enumerate([1, 2, 3, 4]):
+            in_values[index] = value
+        logical_filters = [
+            jvm.org.apache.spark.sql.sources.In("id", in_values),
+            jvm.org.apache.spark.sql.sources.IsNotNull("payload")]
+        translator = jvm.com.nvidia.spark.rapids.delta.common.RapidsDeletionVectors
+        translated_filters = [
+            translator.translateFilterForColumnMapping(filter_, physical_name_map)
+            for filter_ in logical_filters]
+        assert all(filter_.isDefined() for filter_ in translated_filters)
+        translated_attributes = [
+            filter_.get().attribute() for filter_ in translated_filters]
+        expected_attributes = [
+            quoting_utils.quoteIfNeeded(gpu_physical_names["id"]),
+            quoting_utils.quoteIfNeeded(gpu_physical_names["payload"])]
+        assert translated_attributes == expected_attributes
+
+    with_gpu_session(assert_filter_translation, conf=conf)
+
+    def filtered_read(spark):
+        path = gpu_path if spark.conf.get("spark.rapids.sql.enabled") == "true" else cpu_path
+        return spark.read.format("delta").load(path) \
+            .where("id IN (1, 2, 3, 4) AND payload IS NOT NULL") \
+            .select("id", "payload")
+
+    # id=4 satisfies both predicates in the Parquet file but is removed by the
+    # deletion vector. Pin the CPU oracle so CPU/GPU equality cannot pass if both
+    # readers accidentally return the deleted row.
+    expected = [Row(id=1, payload="one"), Row(id=3, payload="three")]
+    cpu_rows = with_cpu_session(
+        lambda spark: filtered_read(spark).orderBy("id").collect(), conf=conf)
+    assert cpu_rows == expected
+
+    def assert_gpu_pushdown(plan):
+        from conftest import spark_jvm
+
+        callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+        explain_str = str(callback.extractExecutedPlan(plan))
+        compact_plan = explain_str.replace(" ", "")
+        assert "PushedFilters:" in explain_str, explain_str
+        assert "IsNotNull(payload)" in compact_plan, explain_str
+        assert "In(id,[1,2,3,4])" in compact_plan, explain_str
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        filtered_read,
+        exist_classes="GpuFileSourceScanExec",
+        conf=conf,
+        require_non_empty=True,
+        gpu_plan_assertion=assert_gpu_pushdown)
 
 
 @allow_non_gpu(*delta_meta_allow)

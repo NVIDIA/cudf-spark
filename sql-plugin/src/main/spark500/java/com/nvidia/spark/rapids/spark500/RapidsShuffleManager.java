@@ -21,10 +21,10 @@ spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.spark500;
 
 import org.apache.spark.SparkConf;
-import org.apache.spark.shuffle.RapidsShuffleManagerBase;
+import org.apache.spark.shuffle.RapidsBlockingShuffleManagerBase;
 
 /** A shuffle manager optimized for the RAPIDS Plugin for Apache Spark. */
-public final class RapidsShuffleManager extends RapidsShuffleManagerBase {
+public final class RapidsShuffleManager extends RapidsBlockingShuffleManagerBase {
   public RapidsShuffleManager(SparkConf conf, boolean isDriver) {
     super(conf, isDriver);
     initialize();

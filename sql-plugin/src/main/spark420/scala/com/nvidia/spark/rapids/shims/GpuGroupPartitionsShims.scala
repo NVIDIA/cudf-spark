@@ -15,21 +15,16 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "500"}
+{"spark": "420"}
 spark-rapids-shim-json-lines ***/
+package com.nvidia.spark.rapids.shims
 
-package org.apache.spark.shuffle;
+import org.apache.spark.sql.execution.datasources.v2.GroupPartitionsExec
 
-import org.apache.spark.SparkConf;
-import org.apache.spark.sql.rapids.ProxyRapidsShuffleInternalManagerBase;
-
-/**
- * Spark 5 requires custom shuffle managers to implement BlockingShuffleManager.
- * Keep that package-private Spark type in Spark's package so Scaladoc can resolve it.
- */
-public abstract class RapidsShuffleManagerBase extends ProxyRapidsShuffleInternalManagerBase
-    implements BlockingShuffleManager {
-  protected RapidsShuffleManagerBase(SparkConf conf, boolean isDriver) {
-    super(conf, isDriver);
+object GpuGroupPartitionsShims {
+  // Spark 4.2.0 stores connector Reducer values. displayName is on Reducer.
+  def reducerNames(groupPartitions: GroupPartitionsExec): Option[Seq[String]] = {
+    groupPartitions.reducers.map(
+      _.map(_.map(_.displayName()).getOrElse("identity")))
   }
 }

@@ -459,6 +459,7 @@ abstract class GpuTextBasedPartitionReader[BUFF <: LineBufferer, FACT <: LineBuf
         }
       } finally {
         metrics(NUM_OUTPUT_BATCHES) += 1
+        table.foreach(GpuMetric.recordOutputBatchBytes(_, metrics.get(GPU_OUTPUT_BATCH_BYTES)))
         table.foreach(_.close())
       }
     }
