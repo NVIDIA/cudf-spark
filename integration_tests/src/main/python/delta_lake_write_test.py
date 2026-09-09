@@ -871,8 +871,6 @@ def test_delta_rtas_truncate_capability(spark_tmp_table_factory):
 @allow_non_gpu('DataWritingCommandExec', 'WriteFilesExec', *delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
-@pytest.mark.skipif(not is_spark_400_or_later(),
-                    reason="Delta Lake 4.x saveAsTable overwrite regression")
 @pytest.mark.xfail(is_databricks_runtime(),
                    reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
 def test_delta_replace_where_save_as_table_preserves_partitioning(spark_tmp_table_factory):
@@ -906,8 +904,8 @@ def test_delta_replace_where_save_as_table_preserves_partitioning(spark_tmp_tabl
     try:
         with_gpu_session(lambda spark: replace_na_partition(spark, gpu_table), conf=confs)
         plans = callback.getResultsWithTimeout(10000)
-        assert any(callback.contains(plan, "GpuOverwriteByExpressionExecV1")
-                   for plan in plans), "GpuOverwriteByExpressionExecV1 was not executed"
+        assert any(callback.contains(plan, "GpuAtomicReplaceTableAsSelectExec")
+                   for plan in plans), "GpuAtomicReplaceTableAsSelectExec was not executed"
     finally:
         callback.endCapture()
 
