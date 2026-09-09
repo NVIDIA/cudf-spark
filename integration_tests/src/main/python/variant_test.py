@@ -23,8 +23,8 @@ from data_gen import idfn
 from marks import allow_non_gpu, incompat
 from spark_session import is_before_spark_400, with_cpu_session
 
-pytestmark = [pytest.mark.premerge_ci_1,
-              pytest.mark.skipif(is_databricks_runtime(), reason='Enabled in a follow-up PR')]
+pytestmark = pytest.mark.skipif(
+    is_databricks_runtime(), reason='Enabled in follow-up PR #15645')
 
 _variant_parquet_conf = {
     'spark.rapids.sql.format.parquet.enabled': 'true',
