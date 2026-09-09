@@ -94,7 +94,9 @@ case class GpuBatchScanExec(
       runtimeFilters,
       table,
       output,
-      outputPartitioning,
+      // Full-width keys as the source reported them. outputPartitioning may project
+      // pruned key columns away and is a Partitioning, not Option[KeyedPartitioning].
+      reportedKeyedPartitioning,
       inputPartitions)
 
   override lazy val readerFactory: PartitionReaderFactory = batch.createReaderFactory()
