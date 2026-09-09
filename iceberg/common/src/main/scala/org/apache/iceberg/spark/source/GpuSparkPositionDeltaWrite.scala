@@ -548,7 +548,7 @@ trait GpuDeleteAndDataDeltaWriter extends GpuDeltaWriter {
     val files = mutable.ListBuffer[ContentFile[_]]()
     files ++= result.dataFiles().map(_.asInstanceOf[ContentFile[_]])
     files ++= result.deleteFiles().map(_.asInstanceOf[ContentFile[_]])
-    SparkCleanupUtil.deleteTaskFiles(io, files.asJava)
+    GpuSparkWriteAccess.deleteTaskFiles(io, files.asJava)
   }
 
   override def close(): Unit = {
@@ -651,7 +651,7 @@ class GpuDeleteOnlyDeltaWriter(
   override def abort(): Unit = {
     close()
     val result = delegate.result()
-    SparkCleanupUtil.deleteTaskFiles(io, result.deleteFiles())
+    GpuSparkWriteAccess.deleteTaskFiles(io, result.deleteFiles())
   }
 
   override def close(): Unit = {
