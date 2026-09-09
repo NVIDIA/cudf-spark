@@ -35,3 +35,18 @@ If you have to change the contents of the uber jar, the packaging flow can optio
 3. `root-safe-module-classes.txt` - Module artifactIds whose classes are safe to promote from the shaded aggregator output into the base jar. Use this for Java-only helper modules whose complete class set should stay root-visible.
 4. `unshimmed-common-from-single-shim.txt` - Files that must go into the base jar from one representative shim, such as root `META-INF` resources and Python worker files. Avoid adding class files here unless they need special root-layout treatment outside optional bitwise-identical promotion or module-level class promotion.
 5. `unshimmed-from-each-spark3xx.txt` - This is applied to all the individual Spark specific version jars to pull any files that need to go into the base of the jar and not into the Spark specific directory. These are per-shim root artifacts rather than common `spark-shared` classes.
+
+## Iceberg package-private access audit
+
+The `dist` package phase runs `scripts/check-iceberg-package-private-access.py` against
+the assembled parallel-world layout and every Iceberg runtime selected by the build. The
+audit fails when a cuDF Plugin class that accesses an Iceberg package-private class or
+member, or relies on same-runtime-package access to a protected member, is stored outside
+the jar root. A separate classloader would give that caller a different runtime package.
+
+`build/package-parallel-worlds.py` discovers each Spark aggregator's Iceberg dependency
+with `build/iceberg_runtime.py`, resolves the runtime jars, and writes the generated
+`target/iceberg-audit-runtimes.txt` manifest consumed by the audit. Do not edit that
+manifest. Fix failures by making the caller root-safe through
+`root-safe-module-classes.txt` or, for exceptional per-class placement, the applicable
+`unshimmed-*.txt` input above.

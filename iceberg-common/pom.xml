@@ -35,7 +35,7 @@
         <rapids.compressed.artifact>false</rapids.compressed.artifact>
         <rapids.default.jar.excludePattern>**/*</rapids.default.jar.excludePattern>
         <rapids.shim.jar.phase>package</rapids.shim.jar.phase>
-        <rapids.shimplify.skip>true</rapids.shimplify.skip>
+        <rapids.shimplify.skip>false</rapids.shimplify.skip>
         <maven.scaladoc.skip>true</maven.scaladoc.skip>
     </properties>
 
