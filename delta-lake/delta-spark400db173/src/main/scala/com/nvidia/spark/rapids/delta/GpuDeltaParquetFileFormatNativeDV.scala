@@ -1290,7 +1290,8 @@ case class GpuDeltaParquetFileFormatNativeDV(
         val numDeleted = if (entriesWithDV.isEmpty) {
           0L
         } else {
-          withResource(entriesWithDV.safeMap(_._1.gpuBitmap.getDataHostBuffer())) { bitmaps =>
+          withResource(entriesWithDV.toSeq.safeMap(
+              _._1.gpuBitmap.getDataHostBuffer())) { bitmaps =>
             val dvInfos = bitmaps.zip(entriesWithDV).map { case (bitmap, (_, entry)) =>
               new DeletionVector.DeletionVectorInfo(
                 bitmap, false, entry.rowGroupOffsets, entry.rowGroupNumRows)
@@ -1363,7 +1364,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
         }
       }
 
-      loadFutures.zip(batchExtra.perFileEntries).foreach { case (future, entry) =>
+      loadFutures.foreach { future =>
         try {
           val gpuBitmap = future.get()
           if (firstFailure == null) {

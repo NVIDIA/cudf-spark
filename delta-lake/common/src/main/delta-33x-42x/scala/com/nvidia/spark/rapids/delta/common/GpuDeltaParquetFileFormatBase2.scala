@@ -1222,7 +1222,8 @@ class GpuDeltaParquetFileFormatBase2(
           entriesWithDV.groupBy { case (_, entry) =>
             RapidsDeletionVectors.isIfNotContainedRowIndexFilter(entry.filterTypeOpt)
           }.map { case (isRetention, sameTypeEntries) =>
-            withResource(sameTypeEntries.safeMap(_._1.gpuBitmap.getDataHostBuffer())) { bitmaps =>
+            withResource(sameTypeEntries.toSeq.safeMap(
+                _._1.gpuBitmap.getDataHostBuffer())) { bitmaps =>
               val dvInfos = bitmaps.zip(sameTypeEntries).map { case (bitmap, (_, entry)) =>
                 new DeletionVector.DeletionVectorInfo(
                   bitmap, isRetention, entry.rowGroupOffsets, entry.rowGroupNumRows)
@@ -1296,7 +1297,7 @@ class GpuDeltaParquetFileFormatBase2(
         }
       }
 
-      loadFutures.zip(batchExtra.perFileEntries).foreach { case (future, entry) =>
+      loadFutures.foreach { future =>
         try {
           val gpuBitmap = future.get()
           if (firstFailure == null) {
