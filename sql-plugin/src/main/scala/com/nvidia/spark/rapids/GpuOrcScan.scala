@@ -650,7 +650,7 @@ case class GpuOrcMultiFilePartitionReaderFactory(
   private val combineThresholdSize = rapidsConf.getMultithreadedCombineThreshold
   private val combineWaitTime = rapidsConf.getMultithreadedCombineWaitTime
   private val keepReadsInOrder = rapidsConf.getMultithreadedReaderKeepOrder
-  private val skipReadEstimate = !useReadEstimateFromSchema.getOrElse(!useChunkedReader)
+  private val skipReadEstimate = rapidsConf.skipReadEstimate(useChunkedReader)
 
   // we can't use the coalescing files reader when InputFileName, InputFileBlockStart,
   // or InputFileBlockLength because we are combining all the files into a single buffer
@@ -774,8 +774,7 @@ case class GpuOrcPartitionReaderFactory(
     } else {
       0L
     }
-  private val skipReadEstimate =
-    !rapidsConf.useReadEstimateFromSchema.getOrElse(!useChunkedReader)
+  private val skipReadEstimate = rapidsConf.skipReadEstimate(useChunkedReader)
   private val filterHandler = GpuOrcFileFilterHandler(sqlConf, metrics, broadcastedConf,
     pushedFilters, rapidsConf.isOrcFloatTypesToStringEnable)
 

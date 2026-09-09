@@ -1204,8 +1204,7 @@ abstract class AbstractGpuParquetMultiFilePartitionReaderFactory(
         deprecatedVal
       }.getOrElse(rapidsConf.getMultithreadedReaderKeepOrder)
   protected val compressCfg = CpuCompressionConfig.forParquet(rapidsConf)
-  // Unset means the chunked reader, which bounds its own memory usage, does not need the estimate.
-  protected val skipReadEstimate = !useReadEstimateFromSchema.getOrElse(!useChunkedReader)
+  protected val skipReadEstimate = rapidsConf.skipReadEstimate(useChunkedReader)
 
   // We can't use the coalescing files reader when InputFileName, InputFileBlockStart,
   // or InputFileBlockLength because we are combining all the files into a single buffer
@@ -1513,8 +1512,7 @@ abstract class GpuParquetPartitionReaderFactoryBase(
   protected val targetSizeBytes = rapidsConf.gpuTargetBatchSizeBytes
   protected val maxGpuColumnSizeBytes = rapidsConf.maxGpuColumnSizeBytes
   protected val useChunkedReader = rapidsConf.chunkedReaderEnabled
-  protected val skipReadEstimate =
-    !rapidsConf.useReadEstimateFromSchema.getOrElse(!useChunkedReader)
+  protected val skipReadEstimate = rapidsConf.skipReadEstimate(useChunkedReader)
   protected val maxChunkedReaderMemoryUsageSizeBytes =
     if(rapidsConf.limitChunkedReaderMemoryUsage) {
       (rapidsConf.chunkedReaderMemoryUsageRatio * targetSizeBytes).toLong

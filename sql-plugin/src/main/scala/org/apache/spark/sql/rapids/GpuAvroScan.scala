@@ -169,8 +169,7 @@ case class GpuAvroPartitionReaderFactory(
   private val maxReadBatchSizeRows = rapidsConf.maxReadBatchSizeRows
   private val maxReadBatchSizeBytes = rapidsConf.maxReadBatchSizeBytes
   private val maxGpuColumnSizeBytes = rapidsConf.maxGpuColumnSizeBytes
-  // Avro has no chunked reader, so unset means the estimate is used.
-  private val skipReadEstimate = !rapidsConf.useReadEstimateFromSchema.getOrElse(true)
+  private val skipReadEstimate = rapidsConf.skipReadEstimate(chunkedReaderEnabled = false)
 
   override def supportColumnarReads(partition: InputPartition): Boolean = true
 
@@ -216,8 +215,7 @@ case class GpuAvroMultiFilePartitionReaderFactory(
   private val ignoreCorruptFiles = sqlConf.ignoreCorruptFiles
 
   private val maxNumFileProcessed = rapidsConf.maxNumAvroFilesParallel
-  // Avro has no chunked reader, so unset means the estimate is used.
-  private val skipReadEstimate = !useReadEstimateFromSchema.getOrElse(true)
+  private val skipReadEstimate = rapidsConf.skipReadEstimate(chunkedReaderEnabled = false)
 
   // we can't use the coalescing files reader when InputFileName, InputFileBlockStart,
   // or InputFileBlockLength because we are combining all the files into a single buffer

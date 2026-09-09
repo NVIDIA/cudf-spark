@@ -268,23 +268,27 @@ def test_parquet_read_estimate_limits_output_batches(spark_tmp_path):
             .option('parquet.block.size', 4096).parquet(data_path),
         conf=rebase_write_corrected_conf)
 
-    batches = {}
-
-    def read_with_estimate(use_estimate):
-        # The estimate is only consulted when there is no chunked reader.
+    def batches_for(chunked, use_estimate):
+        """Batches the scan produced. use_estimate of None leaves the config unset."""
+        conf = {
+            'spark.sql.adaptive.enabled': 'false',
+            'spark.rapids.sql.reader.chunked': chunked,
+            'spark.rapids.sql.reader.batchSizeBytes': 4096}
+        if use_estimate is not None:
+            conf['spark.rapids.sql.reader.useReadEstimateFromSchema'] = use_estimate
+        captured = {}
         assert_cpu_and_gpu_are_equal_collect_with_capture(
             lambda spark: spark.read.parquet(data_path),
-            conf={
-                'spark.sql.adaptive.enabled': 'false',
-                'spark.rapids.sql.reader.chunked': 'false',
-                'spark.rapids.sql.reader.useReadEstimateFromSchema': use_estimate,
-                'spark.rapids.sql.reader.batchSizeBytes': 4096},
-            gpu_plan_assertion=lambda plan: batches.update(
-                {use_estimate: _scan_output_batches(plan)}))
+            conf=conf,
+            gpu_plan_assertion=lambda plan: captured.update(
+                {'batches': _scan_output_batches(plan)}))
+        return captured['batches']
 
-    read_with_estimate('true')
-    read_with_estimate('false')
-    assert batches['true'] > batches['false']
+    # Without a chunked reader the estimate caps a batch before the byte limit is reached.
+    assert batches_for('false', 'true') > batches_for('false', 'false')
+    # Unset uses the estimate only when there is no chunked reader.
+    assert batches_for('false', None) == batches_for('false', 'true')
+    assert batches_for('true', None) == batches_for('true', 'false')
 
 
 """
