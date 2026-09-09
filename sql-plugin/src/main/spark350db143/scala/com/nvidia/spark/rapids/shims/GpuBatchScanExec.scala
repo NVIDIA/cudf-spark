@@ -262,8 +262,9 @@ case class GpuBatchScanExec(
       new GpuDataSourceRDD(
         sparkContext,
         finalPartitions,
-        readerFactory,
-        new Spark4GpuDataSourceCustomMetricsFactory(scanCustomSQLMetrics))
+        MissingFileErrorShim.wrapReaderFactory(readerFactory),
+        includeRefreshHint = false,
+        customMetricsFactory = new Spark4GpuDataSourceCustomMetricsFactory(scanCustomSQLMetrics))
     }
     postDriverMetrics()
     rdd
