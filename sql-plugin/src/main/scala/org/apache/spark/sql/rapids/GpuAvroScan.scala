@@ -406,6 +406,7 @@ trait GpuAvroReaderBase extends Logging { self: FilePartitionReaderBase =>
    *                             reads per batch
    * @param maxReadBatchSizeBytes soft limit on the maximum number of bytes the reader
    *                              reads per batch
+   * @param skipReadEstimate whether to ignore the schema based GPU memory estimate for a batch
    * @return
    */
   protected final def populateCurrentBlockChunk(

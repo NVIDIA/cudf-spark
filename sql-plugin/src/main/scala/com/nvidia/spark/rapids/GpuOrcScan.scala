@@ -1307,6 +1307,7 @@ trait OrcPartitionReaderBase extends OrcCommonFunctions with Logging
  * @param useChunkedReader whether to read Parquet by chunks or read all at once
  * @param maxChunkedReaderMemoryUsageSizeBytes soft limit on the number of bytes of internal memory
  *                                             usage that the reader will use
+ * @param skipReadEstimate whether to ignore the schema based GPU memory estimate for a batch
  * @param execMetrics metrics to update during read
  * @param isCaseSensitive whether the name check should be case sensitive or not
  */
@@ -2260,6 +2261,7 @@ private object GpuOrcFileFilterHandler {
  * @param useChunkedReader whether to read Parquet by chunks or read all at once
  * @param maxChunkedReaderMemoryUsageSizeBytes soft limit on the number of bytes of internal memory
  *                                             usage that the reader will use
+ * @param skipReadEstimate whether to ignore the schema based GPU memory estimate for a batch
  * @param poolConf thread pool configurations
  * @param maxNumFileProcessed threshold to control the maximum file number to be
  *                            submitted to threadpool
@@ -2865,6 +2867,7 @@ private case class OrcSingleStripeMeta(
  * @param useChunkedReader      whether to read Parquet by chunks or read all at once
  * @param maxChunkedReaderMemoryUsageSizeBytes soft limit on the number of bytes of internal memory
  *                                             usage that the reader will use
+ * @param skipReadEstimate      whether to ignore the schema based GPU memory estimate for a batch
  * @param execMetrics           metrics
  * @param partitionSchema       schema of partitions
  * @param poolConf              the thread pool configuration

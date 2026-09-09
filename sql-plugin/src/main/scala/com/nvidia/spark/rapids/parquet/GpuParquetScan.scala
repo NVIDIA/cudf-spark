@@ -2450,6 +2450,7 @@ case class ParquetSingleDataBlockMeta(
  * Both [[MultiFileParquetPartitionReader]] and the Delta-aware coalescing reader extend this
  * class. Neither extends the other.
  *
+ * @param fileIO the file IO interface used to read the files
  * @param conf the Hadoop configuration
  * @param clippedBlocks the block metadata from the original Parquet file that has been clipped
  *                      to only contain the column chunks to be read
@@ -2459,6 +2460,7 @@ case class ParquetSingleDataBlockMeta(
  * @param targetBatchSizeBytes the target size of a batch
  * @param maxGpuColumnSizeBytes the maximum size of a GPU column
  * @param skipReadEstimate whether to ignore the schema based GPU memory estimate for a batch
+ * @param compressCfg which compression codecs to decompress on the CPU
  * @param execMetrics metrics
  * @param partitionSchema Schema of partitions.
  * @param poolConf thread pool configuration.
@@ -2651,6 +2653,7 @@ abstract class MultiFileCoalescingParquetPartitionReaderBase(
  * in memory that contains just the column chunks that are needed. This avoids sending
  * unnecessary data to the GPU and saves GPU memory.
  *
+ * @param fileIO the file IO interface used to read the files
  * @param conf the Hadoop configuration
  * @param splits the partitioned files to read
  * @param clippedBlocks the block metadata from the original Parquet file that has been clipped
@@ -2666,11 +2669,13 @@ abstract class MultiFileCoalescingParquetPartitionReaderBase(
  * @param maxChunkedReaderMemoryUsageSizeBytes soft limit on the number of bytes of internal memory
  *                                             usage that the reader will use
  * @param skipReadEstimate whether to ignore the schema based GPU memory estimate for a batch
+ * @param compressCfg which compression codecs to decompress on the CPU
  * @param execMetrics metrics
  * @param partitionSchema Schema of partitions.
  * @param poolConf thread pool configuration.
  * @param ignoreMissingFiles Whether to ignore missing files
  * @param ignoreCorruptFiles Whether to ignore corrupt files
+ * @param useFieldId Whether to use field id for column matching
  */
 class MultiFileParquetPartitionReader(
     fileIO: RapidsFileIO,
@@ -2773,6 +2778,7 @@ trait HostMemoryBuffersWithMetaData extends HostMemoryBuffersWithMetaDataBase {
  * @param useChunkedReader whether to read Parquet by chunks or read all at once
  * @param maxChunkedReaderMemoryUsageSizeBytes soft limit on the number of bytes of internal memory
  *                                             usage that the reader will use
+ * @param skipReadEstimate whether to ignore the schema based GPU memory estimate for a batch
  * @param execMetrics metrics
  * @param partitionSchema Schema of partitions.
  * @param poolConf thread pool configuration
@@ -3685,6 +3691,7 @@ case class ParquetTableReader(
  * @param readDataSchema the Spark schema describing what will be read
  * @param debugDumpPrefix a path prefix to use for dumping the fabricated Parquet data or null
  * @param debugDumpAlways whether to debug dump always or only on errors
+ * @param skipReadEstimate whether to ignore the schema based GPU memory estimate for a batch
  */
 abstract class AbstractParquetPartitionReader(
     override val fileIO: RapidsFileIO,
