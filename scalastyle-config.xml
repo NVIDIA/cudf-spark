@@ -96,6 +96,16 @@ You can also disable only one rule, by specifying its rule id, as specified in:
     <check level="error" class="org.scalastyle.scalariform.NotImplementedErrorUsage"
            enabled="true"/>
 
+    <!-- Direct console output bypasses project logging; intentional uses must be explicit. -->
+    <check customId="println" level="error"
+           class="org.scalastyle.scalariform.TokenChecker" enabled="true">
+        <parameters>
+            <parameter name="regex">^println$</parameter>
+        </parameters>
+        <customMessage><![CDATA[Direct println is not allowed. Use project logging, ScalaTest
+          info/withClue, or ConsoleOutput for an intentional console interface.]]></customMessage>
+    </check>
+
     <check customId="NoScalaDoc" level="error" class="org.scalastyle.file.RegexChecker"
            enabled="true">
         <parameters>
@@ -105,6 +115,15 @@ You can also disable only one rule, by specifying its rule id, as specified in:
     </check>
 
     
+    <check customId="NoReplacementRuleMetaLambdas" level="error"
+           class="org.scalastyle.file.RegexChecker" enabled="true">
+        <parameters>
+            <parameter name="regex"><![CDATA[(?s)(?:private\[rapids\]\s+)?object\s+Gpu(?:CoreExpression|ComparisonAndAggregateExpression|CollectionExpression|StringAndAggregateExpression|MathAndDateExpression|MiscExpression|Exec)?Overrides\b.*?\([A-Za-z_]\w*,\s*conf,\s*[A-Za-z_]\w*,\s*r\)\s*=>\s*new\s+[A-Za-z_][\w.]*Meta(?:\[[^\]\r\n]+\])?\s*\(]]></parameter>
+            <parameter name="line">false</parameter>
+        </parameters>
+        <customMessage>Replacement rules must use named metadata case class references instead of constructor lambdas</customMessage>
+    </check>
+
     <!-- ================================================================================ -->
     <!--       rules for enforcing cross-build between Scala 2.12 and 2.13                -->
     <!-- ================================================================================ -->
@@ -118,6 +137,17 @@ You can also disable only one rule, by specifying its rule id, as specified in:
         https://docs.scala-lang.org/overviews/core/collections-migration-213.html
 
         If you really need to use scala.collection.Seq or scala.collection.IndexedSeq, please use the fully-qualified name instead.
+        ]]></customMessage>
+    </check>
+
+    <check customId="NoNativeDataSourceRDD" level="error"
+           class="org.scalastyle.scalariform.IllegalImportsChecker" enabled="true">
+        <parameters>
+            <parameter name="illegalImports"><![CDATA[org.apache.spark.sql.execution.datasources.v2.DataSourceRDD]]></parameter>
+        </parameters>
+        <customMessage><![CDATA[
+        GPU scans must use GpuDataSourceRDD. Spark's native DataSourceRDD replaces input bytes
+        with task-thread filesystem statistics and can discard bytes reported by GPU worker threads.
         ]]></customMessage>
     </check>
 

@@ -33,7 +33,7 @@ import org.apache.spark.sql.catalyst.plans.physical.SinglePartition
 import org.apache.spark.sql.catalyst.util.truncatedString
 import org.apache.spark.sql.connector.catalog.Table
 import org.apache.spark.sql.connector.read._
-import org.apache.spark.sql.execution.datasources.v2.{DataSourceRDD, DataSourceV2ScanExecBase,
+import org.apache.spark.sql.execution.datasources.v2.{DataSourceV2ScanExecBase,
   PushDownUtils}
 import org.apache.spark.sql.execution.metric.SQLLastAttemptMetrics
 import org.apache.spark.sql.rapids.shims.RowLevelOperationTableShims
@@ -97,15 +97,20 @@ case class GpuBatchScanExec(
       outputPartitioning,
       inputPartitions)
 
-  override lazy val readerFactory: PartitionReaderFactory = batch.createReaderFactory()
+  override lazy val readerFactory: PartitionReaderFactory =
+    MissingFileErrorShim.wrapReaderFactory(batch.createReaderFactory())
 
   override lazy val inputRDD: RDD[InternalRow] = {
     scan.metrics = allMetrics
     val rdd = if (filteredPartitions.isEmpty && outputPartitioning == SinglePartition) {
       sparkContext.parallelize(Seq.empty[InternalRow], 1)
     } else {
-      new DataSourceRDD(sparkContext, filteredPartitions, readerFactory, supportsColumnar,
-        customMetrics)
+      new GpuDataSourceRDD(
+        sparkContext,
+        filteredPartitions.map(_.toSeq),
+        readerFactory,
+        includeRefreshHint = false,
+        customMetricsFactory = new Spark42GpuDataSourceCustomMetricsFactory(scanCustomSQLMetrics))
     }
     postDriverMetrics(scan.reportDriverMetrics())
     rdd

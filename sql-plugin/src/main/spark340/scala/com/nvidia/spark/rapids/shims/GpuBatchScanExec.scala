@@ -72,7 +72,16 @@ case class GpuBatchScanExec(
       false
   }
 
-  override def hashCode(): Int = Objects.hashCode(batch, runtimeFilters)
+  // Hash the same SPJ fields as equals. commonPartitionValues is hashed like Spark's
+  // StoragePartitionJoinParams (raw InternalRow); 0.0/-0.0 can diverge equals vs hashCode
+  // at the row level - same latent issue upstream. Fixing it needs equals to use
+  // InternalRowComparableWrapper too (see #15795).
+  override def hashCode(): Int = Objects.hashCode(
+    batch,
+    runtimeFilters,
+    commonPartitionValues,
+    replicatePartitions: java.lang.Boolean,
+    applyPartialClustering: java.lang.Boolean)
 
   @transient override lazy val inputPartitions: Seq[InputPartition] = batch.planInputPartitions()
 
@@ -177,7 +186,17 @@ case class GpuBatchScanExec(
                 .get
                 .map(t => (InternalRowComparableWrapper(t._1, p.expressions), t._2))
                 .toMap
-              val nestGroupedPartitions = groupedPartitions.map {
+              // SPARK-48949. Inert here: the `...v2.bucketing.partition.filter.enabled` config
+              // that makes `commonPartitionValues` an intersection instead of a union does not
+              // exist before Spark 4.0, so this filter can never drop a group on the versions
+              // this shim serves. Kept identical to the spark350db143 copy so the next SPJ
+              // audit diff between the two stays cheap.
+              val filteredGroupedPartitions = groupedPartitions.filter {
+                case (partValues, _) =>
+                  commonPartValuesMap.keySet.contains(
+                    InternalRowComparableWrapper(partValues, p.expressions))
+              }
+              val nestGroupedPartitions = filteredGroupedPartitions.map {
                 case (partValue, splits) =>
                   // `commonPartValuesMap` should contain the part value since it's the super set.
                   val numSplits = commonPartValuesMap
@@ -238,7 +257,8 @@ case class GpuBatchScanExec(
       }
 
       // Use the finalized partitions so padded and replicated inputs match outputPartitioning.
-      new GpuDataSourceRDD(sparkContext, finalPartitions, readerFactory)
+      new GpuDataSourceRDD(
+        sparkContext, finalPartitions, readerFactory, includeRefreshHint = false)
     }
     postDriverMetrics()
     rdd

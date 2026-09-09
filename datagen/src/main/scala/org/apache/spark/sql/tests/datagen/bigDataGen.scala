@@ -1571,21 +1571,25 @@ case class JsonPathElement(name: String, is_array: Boolean)
 case class JsonLevel(path: Array[JsonPathElement], data_type: String, length: Int, value: String) {}
 
 object JsonColumnStats {
+  // scalastyle:off println
+  private def writeLine(value: Any = ""): Unit = println(value)
+  // scalastyle:on println
+
   private def printHelp(): Unit = {
-    println("JSON Fingerprinting Tool:")
-    println("PARAMS: <inputPath> <outputPath>")
-    println("  <inputPath> is a path to a Spark dataframe to read in")
-    println("  <outputPath> is a path in a Spark file system to write out fingerprint data to.")
-    println()
-    println("OPTIONS:")
-    println("  --json=<COLUMN>       where <COLUMN> is the name of a top level String column")
-    println("  --anon=<SEED>         where <SEED> is a SEED used to anonymize the JSON keys ")
-    println("                        and column names.")
-    println("  --input_format=<TYPE> where <TYPE> is parquet or ORC. Defaults to parquet.")
-    println("  --overwrite           to enable overwriting the fingerprint output.")
-    println("  --debug               to enable some debug information to be printed out")
-    println("  --help                to print out this help message")
-    println()
+    writeLine("JSON Fingerprinting Tool:")
+    writeLine("PARAMS: <inputPath> <outputPath>")
+    writeLine("  <inputPath> is a path to a Spark dataframe to read in")
+    writeLine("  <outputPath> is a path in a Spark file system to write out fingerprint data to.")
+    writeLine()
+    writeLine("OPTIONS:")
+    writeLine("  --json=<COLUMN>       where <COLUMN> is the name of a top level String column")
+    writeLine("  --anon=<SEED>         where <SEED> is a SEED used to anonymize the JSON keys ")
+    writeLine("                        and column names.")
+    writeLine("  --input_format=<TYPE> where <TYPE> is parquet or ORC. Defaults to parquet.")
+    writeLine("  --overwrite           to enable overwriting the fingerprint output.")
+    writeLine("  --debug               to enable some debug information to be printed out")
+    writeLine("  --help                to print out this help message")
+    writeLine()
   }
 
   def main(args: Array[String]): Unit = {
@@ -1615,7 +1619,7 @@ object JsonColumnStats {
       case "--" if !argsDone =>
         argsDone = true
       case a if !argsDone && a.startsWith("--") => // "--" was covered above already
-        println(s"ERROR $a is not a supported argument")
+        writeLine(s"ERROR $a is not a supported argument")
         printHelp()
         System.exit(-1)
       case a if inputPath.isEmpty =>
@@ -1623,12 +1627,12 @@ object JsonColumnStats {
       case a if outputPath.isEmpty =>
         outputPath = Some(a)
       case a =>
-        println(s"ERROR only two arguments are supported. Found $a")
+        writeLine(s"ERROR only two arguments are supported. Found $a")
         printHelp()
         System.exit(-1)
     }
     if (outputPath.isEmpty) {
-      println("ERROR both an inputPath and an outputPath are required")
+      writeLine("ERROR both an inputPath and an outputPath are required")
       printHelp()
       System.exit(-1)
     }
@@ -1647,11 +1651,11 @@ object JsonColumnStats {
       }
       if (debug) {
         anonSeed.foreach { s =>
-          println(s"Keys and columns will be anonymized with seed $s")
+          writeLine(s"Keys and columns will be anonymized with seed $s")
         }
-        println(s"Writing $column fingerprint to $fullOutPath")
+        writeLine(s"Writing $column fingerprint to $fullOutPath")
         spark.time(writer.parquet(fullOutPath))
-        println(s"Wrote ${spark.read.parquet(fullOutPath).count} rows")
+        writeLine(s"Wrote ${spark.read.parquet(fullOutPath).count} rows")
         spark.read.parquet(fullOutPath).show()
       } else {
         writer.parquet(fullOutPath)
@@ -2031,8 +2035,6 @@ object JsonColumnStats {
     rootNode.setStats(gen.substringGen, None)
   }
 }
-
-
 case class JSONStringGenFunc(lengthGen: LengthGeneratorFunction = null,
                              mapping: LocationToSeedMapping = null) extends GeneratorFunction {
 

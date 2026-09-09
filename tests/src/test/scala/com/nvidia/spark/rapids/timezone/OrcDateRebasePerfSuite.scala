@@ -20,7 +20,8 @@ import java.io.File
 import java.time.LocalDate
 import java.util.UUID
 
-import com.nvidia.spark.rapids.{RapidsConf, RapidsReaderType, SparkQueryCompareTestSuite}
+import com.nvidia.spark.rapids.{ConsoleOutput, RapidsConf, RapidsReaderType,
+  SparkQueryCompareTestSuite}
 import com.nvidia.spark.rapids.Arm.withResourceIfAllowed
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
@@ -184,7 +185,7 @@ class OrcDateRebasePerfSuite extends SparkQueryCompareTestSuite with BeforeAndAf
       val nanos = elapsedNanos(spark, perfCase)
       val elapsedMs = nanos.toDouble / 1000000.0
       val throughput = rowsPerSecond(nanos.toDouble)
-      println(f"ORC_DATE_REBASE_PERF_RUN,case=${perfCase.name},phase=warmup," +
+      ConsoleOutput.writeLine(f"ORC_DATE_REBASE_PERF_RUN,case=${perfCase.name},phase=warmup," +
         f"round=$round,rows=$numRows,elapsed_ms=$elapsedMs%.3f," +
         f"rows_per_sec=$throughput%.3f")
     }
@@ -193,7 +194,7 @@ class OrcDateRebasePerfSuite extends SparkQueryCompareTestSuite with BeforeAndAf
       val nanos = elapsedNanos(spark, perfCase)
       val elapsedMs = nanos.toDouble / 1000000.0
       val throughput = rowsPerSecond(nanos.toDouble)
-      println(f"ORC_DATE_REBASE_PERF_RUN,case=${perfCase.name},phase=measured," +
+      ConsoleOutput.writeLine(f"ORC_DATE_REBASE_PERF_RUN,case=${perfCase.name},phase=measured," +
         f"round=$round,rows=$numRows,elapsed_ms=$elapsedMs%.3f," +
         f"rows_per_sec=$throughput%.3f")
       nanos
@@ -205,7 +206,7 @@ class OrcDateRebasePerfSuite extends SparkQueryCompareTestSuite with BeforeAndAf
     val medianMs = medianNanos / 1000000.0
     val p95Ms = p95Nanos / 1000000.0
     val medianThroughput = rowsPerSecond(medianNanos)
-    println(f"ORC_DATE_REBASE_PERF_SUMMARY,case=${perfCase.name},rows=$numRows," +
+    ConsoleOutput.writeLine(f"ORC_DATE_REBASE_PERF_SUMMARY,case=${perfCase.name},rows=$numRows," +
       f"measured_rounds=$measuredRounds,median_ms=$medianMs%.3f,p95_ms=$p95Ms%.3f," +
       f"rows_per_sec=$medianThroughput%.3f")
   }

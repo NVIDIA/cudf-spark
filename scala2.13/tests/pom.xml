@@ -106,6 +106,12 @@
             <groupId>org.apache.iceberg</groupId>
             <artifactId>iceberg-spark-runtime-${iceberg.artifact.suffix}_${scala.binary.version}</artifactId>
         </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3</artifactId>
+            <version>2.23.14</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

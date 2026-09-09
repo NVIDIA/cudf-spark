@@ -42,7 +42,6 @@ import org.apache.spark.sql.catalyst.util.{truncatedString, InternalRowComparabl
 import org.apache.spark.sql.connector.catalog.Table
 import org.apache.spark.sql.connector.read._
 import org.apache.spark.sql.execution.datasources.rapids.DataSourceStrategyUtils
-import org.apache.spark.sql.execution.datasources.v2.DataSourceRDD
 
 case class GpuBatchScanExec(
     output: Seq[AttributeReference],
@@ -64,7 +63,7 @@ case class GpuBatchScanExec(
       false
   }
 
-  override def hashCode(): Int = Objects.hashCode(batch, runtimeFilters)
+  override def hashCode(): Int = Objects.hashCode(batch, runtimeFilters, spjParams)
 
   @transient override lazy val inputPartitions: Seq[InputPartition] =
     batch.planInputPartitions()
@@ -200,7 +199,16 @@ case class GpuBatchScanExec(
                 .get
                 .map(t => (InternalRowComparableWrapper(t._1, partExpressions), t._2))
                 .toMap
-            val nestGroupedPartitions = finalGroupedPartitions.map { case (partValue, splits) =>
+            // SPARK-48949: with `...v2.bucketing.partition.filter.enabled`,
+            // `commonPartitionValues` is the intersection of the two join sides rather than
+            // their union, so this scan can still enumerate groups the planner pruned away.
+            // Dropping them here is what keeps the assert below true.
+            val filteredGroupedPartitions = finalGroupedPartitions.filter {
+              case (partValues, _) =>
+                commonPartValuesMap.keySet.contains(
+                  InternalRowComparableWrapper(partValues, partExpressions))
+            }
+            val nestGroupedPartitions = filteredGroupedPartitions.map { case (partValue, splits) =>
               // `commonPartValuesMap` should contain the part value since it's the super set.
               val numSplits = commonPartValuesMap
                   .get(InternalRowComparableWrapper(partValue, partExpressions))
@@ -251,8 +259,12 @@ case class GpuBatchScanExec(
         case _ => filteredPartitions
       }
 
-      new DataSourceRDD(
-        sparkContext, finalPartitions, readerFactory, supportsColumnar, customMetrics)
+      new GpuDataSourceRDD(
+        sparkContext,
+        finalPartitions,
+        MissingFileErrorShim.wrapReaderFactory(readerFactory),
+        includeRefreshHint = false,
+        customMetricsFactory = new Spark4GpuDataSourceCustomMetricsFactory(scanCustomSQLMetrics))
     }
     postDriverMetrics()
     rdd

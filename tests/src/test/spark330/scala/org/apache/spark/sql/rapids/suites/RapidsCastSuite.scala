@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -62,12 +62,13 @@ class RapidsCastSuite extends CastSuite with RapidsTestsTrait {
 
   testRapids("SPARK-35711: cast timestamp without time zone to timestamp with local time zone") {
     outstandingZoneIds.foreach { zoneId =>
-      println(s"zoneId: $zoneId")
-      withDefaultTimeZone(zoneId) {
-        specialTs.foreach { s =>
-          val input = LocalDateTime.parse(s)
-          val expectedTs = Timestamp.valueOf(s.replace("T", " "))
-          checkEvaluation(cast(input, TimestampType), expectedTs)
+      withClue(s"zoneId: $zoneId") {
+        withDefaultTimeZone(zoneId) {
+          specialTs.foreach { s =>
+            val input = LocalDateTime.parse(s)
+            val expectedTs = Timestamp.valueOf(s.replace("T", " "))
+            checkEvaluation(cast(input, TimestampType), expectedTs)
+          }
         }
       }
     }
@@ -75,12 +76,13 @@ class RapidsCastSuite extends CastSuite with RapidsTestsTrait {
 
   testRapids("SPARK-35719: cast timestamp with local time zone to timestamp without timezone") {
     outstandingZoneIds.foreach { zoneId =>
-      println(s"zoneId: $zoneId")
-      withDefaultTimeZone(zoneId) {
-        specialTs.foreach { s =>
-          val input = Timestamp.valueOf(s.replace("T", " "))
-          val expectedTs = LocalDateTime.parse(s)
-          checkEvaluation(cast(input, TimestampNTZType), expectedTs)
+      withClue(s"zoneId: $zoneId") {
+        withDefaultTimeZone(zoneId) {
+          specialTs.foreach { s =>
+            val input = Timestamp.valueOf(s.replace("T", " "))
+            val expectedTs = LocalDateTime.parse(s)
+            checkEvaluation(cast(input, TimestampNTZType), expectedTs)
+          }
         }
       }
     }

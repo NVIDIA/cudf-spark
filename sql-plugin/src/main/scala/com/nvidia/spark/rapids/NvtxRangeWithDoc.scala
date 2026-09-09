@@ -57,7 +57,7 @@ sealed case class NvtxId private(name: String, color: NvtxColor, doc: String) {
   private val isEnabled = java.lang.Boolean.getBoolean("ai.rapids.cudf.nvtx.enabled")
   private val isDebug = java.lang.Boolean.getBoolean("ai.rapids.cudf.nvtx.debug")
 
-  def help(): Unit = println(s"$name|$doc")
+  def help(): Unit = ConsoleOutput.writeLine(s"$name|$doc")
 
   def push(): NvtxId = {
     if (isEnabled) {
@@ -672,19 +672,6 @@ object NvtxRegistry {
   val GPU_RANGE: NvtxId = NvtxId("GpuRange", NvtxColor.DARK_GREEN,
     "Generating range of values on GPU")
 
-  // Hybrid CPU/GPU operations
-  val WAIT_FOR_CPU: NvtxId = NvtxId("waitForCPU", NvtxColor.RED,
-    "Waiting for CPU batch in hybrid execution")
-
-  val GPU_ACQUIRE_C2C: NvtxId = NvtxId("gpuAcquireC2C", NvtxColor.GREEN,
-    "Acquiring GPU for coalesce-to-coalesce operation")
-
-  val PINNED_H2D: NvtxId = NvtxId("pinnedH2D", NvtxColor.DARK_GREEN,
-    "Copying from pinned host memory to device")
-
-  val PAGEABLE_H2D: NvtxId = NvtxId("PageableH2D", NvtxColor.GREEN,
-    "Copying from pageable host memory to device")
-
   def init(): Unit = {
     register(ACQUIRE_GPU)
     register(RELEASE_GPU)
@@ -866,24 +853,20 @@ object NvtxRegistry {
     register(DISK_SPILL)
     register(DEVICE_SPILL)
     register(GPU_RANGE)
-    register(WAIT_FOR_CPU)
-    register(GPU_ACQUIRE_C2C)
-    register(PINNED_H2D)
-    register(PAGEABLE_H2D)
   }
 }
 
 object NvtxRangeDocs {
   def helpCommon(): Unit = {
-    println("---")
-    println("layout: page")
-    println("title: NVTX Ranges")
-    println("nav_order: 5")
-    println("parent: Developer Overview")
-    println("---")
+    ConsoleOutput.writeLine("---")
+    ConsoleOutput.writeLine("layout: page")
+    ConsoleOutput.writeLine("title: NVTX Ranges")
+    ConsoleOutput.writeLine("nav_order: 5")
+    ConsoleOutput.writeLine("parent: Developer Overview")
+    ConsoleOutput.writeLine("---")
     MarkdownUtils.printApacheSparkVersion("NvtxRangeDocs.help")
     // scalastyle:off line.size.limit
-    println("""# NVIDIA cuDF plugin for Apache Spark Nvtx Range Glossary
+    ConsoleOutput.writeLine("""# NVIDIA cuDF plugin for Apache Spark Nvtx Range Glossary
               |The following is the list of Nvtx ranges that are used throughout
               |the plugin. To add your own Nvtx range to the code, create an NvtxId
               |entry in NvtxRangeWithDoc.scala and create an `NvtxRangeWithDoc` in the
@@ -893,9 +876,9 @@ object NvtxRangeDocs {
               |
               |""".stripMargin)
     // scalastyle:on line.size.limit
-    println("\n## Nvtx Ranges\n")
-    println("Name | Description")
-    println("-----|-------------")
+    ConsoleOutput.writeLine("\n## Nvtx Ranges\n")
+    ConsoleOutput.writeLine("Name | Description")
+    ConsoleOutput.writeLine("-----|-------------")
   }
 
   def main(args: Array[String]): Unit = {

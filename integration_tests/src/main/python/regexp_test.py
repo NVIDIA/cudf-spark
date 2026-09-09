@@ -52,6 +52,7 @@ def test_split_re_negative_limit():
             'split(a, "b[o]+", -1)',
             'split(a, "b[o]*", -1)',
             'split(a, "b[o]?", -1)',
+            'split(a, "o{1,2}?", -1)',
             'split(a, "[o]", -2)'),
             conf=_regexp_conf)
 
@@ -221,6 +222,7 @@ def test_split_unsupported_fallback():
         'string_split_table',
         'select ' +
         'split(a, "o*"),' +
+        'split(a, "o{0,2}?"),' +
         'split(a, "o?") from string_split_table')
     assert_gpu_sql_fallback_collect(
         lambda spark : unary_op_df(spark, data_gen),
@@ -320,7 +322,9 @@ def test_re_replace_repetition():
                 'REGEXP_REPLACE(a, "(A*)", "PROD")',
                 'REGEXP_REPLACE(a, "(((A*)))", "PROD")',
                 'REGEXP_REPLACE(a, "((A*)E?)", "PROD")',
-                'REGEXP_REPLACE(a, "[A-Z]?", "PROD")'
+                'REGEXP_REPLACE(a, "[A-Z]?", "PROD")',
+                'REGEXP_REPLACE(a, "A{1,3}?", "PROD")',
+                'REGEXP_REPLACE(a, "A{0,3}?", "PROD")'
             ),
         conf=_regexp_conf)
 
@@ -1205,6 +1209,33 @@ def test_rlike_fallback_inline_flags_with_anchors():
             'RLike',
             conf=_regexp_conf)
 
+@allow_non_gpu('ProjectExec', 'RLike')
+def test_rlike_fallback_case_insensitive_predefined_class():
+    # Older JDKs did not apply CASE_INSENSITIVE to the named \p{Lower}/\p{Upper} predicates
+    # (JDK-8214245), so GPU case-folding would diverge from the CPU there. Use the Spark version
+    # as a proxy for the executor JDK version to see if we need to fall back to the CPU.
+    if not is_before_spark_400():
+        pytest.skip('Spark 4.0+ (JDK 17+) folds these predefined classes on the GPU')
+    from pyspark.sql.functions import col
+    gen = mk_str_gen('[a-dA-D0-9]{1,4}')
+    for pattern in [r'(?i)\p{Lower}', r'(?i)\p{Upper}', r'(?i)\P{Lower}', r'(?i)\P{Upper}']:
+        assert_gpu_fallback_collect(
+            lambda spark, pattern=pattern: unary_op_df(spark, gen).select(col('a').rlike(pattern)),
+            'RLike',
+            conf=_regexp_conf)
+
+def test_rlike_case_insensitive_predefined_class_matches():
+    # Inverse of the above fallback test: on Spark 4.0+ (JDK 17+, past JDK-8214245) the CPU folds
+    # \p{Lower}/\p{Upper} under (?i) the same way the GPU does, so these stay on the GPU and match.
+    if is_before_spark_400():
+        pytest.skip('Spark < 4.0 may run on a pre-15 JDK and falls back for these patterns')
+    from pyspark.sql.functions import col
+    gen = mk_str_gen('[a-dA-D0-9]{1,4}')
+    for pattern in [r'(?i)\p{Lower}', r'(?i)\p{Upper}', r'(?i)\P{Lower}', r'(?i)\P{Upper}']:
+        assert_gpu_and_cpu_are_equal_collect(
+            lambda spark, pattern=pattern: unary_op_df(spark, gen).select(col('a').rlike(pattern)),
+            conf=_regexp_conf)
+
 def test_regexp_extract_all_idx_zero():
     gen = mk_str_gen('[abcd]{0,3}[0-9]{0,3}-[0-9]{0,3}[abcd]{1,3}')
     assert_gpu_and_cpu_are_equal_collect(
@@ -1338,6 +1369,7 @@ def test_unsupported_fallback_regexp_extract():
     assert_gpu_did_fallback('REGEXP_EXTRACT("PROD", "[a-z]+", num)')
     assert_gpu_did_fallback('REGEXP_EXTRACT("PROD", reg_ex, 0)')
     assert_gpu_did_fallback('REGEXP_EXTRACT("PROD", reg_ex, num)')
+    assert_gpu_did_fallback('REGEXP_EXTRACT(a, "(a{1,2}+)", 1)')
     assert_gpu_did_fallback('REGEXP_EXTRACT(a, "(3?|a)+", 0)')
     assert_gpu_did_fallback('REGEXP_EXTRACT(a, "(a|3?)+", 0)')
 
@@ -1484,4 +1516,20 @@ def test_lazy_quantifier():
             'a', r'REGEXP_EXTRACT(a, "(\".??\")")',
             r'REGEXP_EXTRACT(a, "(\".+?\")")',
             r'REGEXP_EXTRACT(a, "(\".*?\")")'),
+        conf=_regexp_conf)
+
+    bounded_reluctant_gen = StringGen('[abc]{0,8}') \
+        .with_special_case('aaaaaacc') \
+        .with_special_case('bbbbcc') \
+        .with_special_case('cc') \
+        .with_special_case('aabbcc')
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: unary_op_df(spark, bounded_reluctant_gen).selectExpr(
+            'regexp_extract(a, "((aa|bb){0,3}?).*cc", 0)',
+            'regexp_extract(a, "((aa|bb){0,3}?).*cc", 1)',
+            'regexp_extract_all(a, "(a{1,3}?)", 0)',
+            'regexp_extract_all(a, "(a{1,3}?)", 1)',
+            'regexp_extract(a, "(2|a*?)", 0)',
+            'regexp_extract(a, "(2|a{1,2}?)", 0)',
+            'rlike(a, "a[a-c]{1,3}?")'),
         conf=_regexp_conf)

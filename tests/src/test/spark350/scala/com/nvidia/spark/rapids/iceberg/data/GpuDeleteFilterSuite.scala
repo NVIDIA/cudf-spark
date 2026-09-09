@@ -481,7 +481,8 @@ private object TestGpuDeleteLoader {
         Map(OP_TIME_LEGACY -> NoopMetric, JOIN_TIME -> NoopMetric),
         SingleFile,
         tableSchema,
-        None),
+        None,
+        validateDeletionVectorCrc = false),
       deleteFiles,
       deleteLoader)
   }

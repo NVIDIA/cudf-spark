@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@ import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric.{JOIN_TIME, OP_TIME_LEGACY}
 import com.nvidia.spark.rapids.fileio.iceberg.{IcebergFileIO, IcebergInputFile}
+import com.nvidia.spark.rapids.iceberg.ShimUtils
 import com.nvidia.spark.rapids.iceberg.data.GpuDeleteFilter2._
 import com.nvidia.spark.rapids.iceberg.fieldIndex
 import com.nvidia.spark.rapids.iceberg.parquet.GpuIcebergParquetReaderConf
@@ -37,6 +38,41 @@ import org.apache.spark.sql.catalyst.expressions.ExprId
 import org.apache.spark.sql.rapids.execution.HashedExistenceJoinIterator
 import org.apache.spark.sql.types.{BooleanType, DataType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
+
+/** Delete files split by the phase that applies them. */
+case class GpuDeleteFileInfo(
+    deletionVector: Option[DeleteFile],
+    postReadDeletes: Seq[DeleteFile])
+
+object GpuDeleteFileInfo {
+  /**
+   * Iceberg scan planning produces one of two valid combinations for a data file:
+   *  - no deletion vector, with optional position and equality deletes; or
+   *  - one deletion vector, no position deletes, and optional equality deletes.
+   *
+   * The precedence below also avoids applying legacy position deletes twice if a task ever
+   * contains both representations.
+   */
+  def apply(deletes: Seq[DeleteFile]): GpuDeleteFileInfo = {
+    val equalityDeletes = new ArrayBuffer[DeleteFile]
+    val positionDeletes = new ArrayBuffer[DeleteFile]
+    var deletionVector: Option[DeleteFile] = None
+
+    deletes.foreach { delete =>
+      delete.content() match {
+        case FileContent.EQUALITY_DELETES => equalityDeletes += delete
+        case FileContent.POSITION_DELETES if ShimUtils.isDeletionVector(delete) =>
+          deletionVector = Some(delete)
+        case FileContent.POSITION_DELETES => positionDeletes += delete
+        case content =>
+          throw new UnsupportedOperationException(s"Unsupported delete content: $content")
+      }
+    }
+
+    val effectivePositionDeletes = if (deletionVector.isDefined) Seq.empty else positionDeletes
+    new GpuDeleteFileInfo(deletionVector, equalityDeletes.toSeq ++ effectivePositionDeletes)
+  }
+}
 
 class GpuDeleteFilter(
     private val rapidsFileIO: IcebergFileIO,
@@ -415,4 +451,3 @@ private case class DeleteFilterContext(
       joinTime)
   }
 }
-

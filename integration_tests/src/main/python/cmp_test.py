@@ -22,7 +22,7 @@ from conftest import is_not_utc
 from data_gen import *
 from spark_session import with_cpu_session, is_before_spark_313
 from pyspark.sql.types import *
-from marks import datagen_overrides, allow_non_gpu
+from marks import datagen_overrides, allow_non_gpu, validate_execs_in_gpu_plan
 import pyspark.sql.functions as f
 
 @pytest.mark.parametrize('data_gen', eq_gens_with_decimal_gen + struct_gens_sample_with_decimal128_no_list, ids=idfn)
@@ -252,11 +252,13 @@ def test_isnull(data_gen):
             lambda spark : unary_op_df(spark, data_gen).select(
                 f.isnull(f.col('a'))))
 
-def test_isnull_for_interval():
+@validate_execs_in_gpu_plan('GpuProjectExec')
+def test_isnull_and_isnotnull_for_interval():
     data_gen = DayTimeIntervalGen()
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark : unary_op_df(spark, data_gen).select(
-            f.isnull(f.col('a'))))
+            f.isnull(f.col('a')),
+            f.col('a').isNotNull()))
 
 @pytest.mark.parametrize('data_gen', [FloatGen(), DoubleGen()], ids=idfn)
 def test_isnan(data_gen):

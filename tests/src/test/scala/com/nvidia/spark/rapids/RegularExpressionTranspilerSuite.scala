@@ -99,7 +99,8 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
 
   test("choice with repetition - regexp_find") {
     val patterns = Seq("b?|a", "b*|^\t", "b+|^\t", "a|b+", "a+|b+", "a{2,3}|b+", "a*|b+",
-      "b*?|^\t", "b+?|^\t", "a|b+?", "a+?|b+?", "a{2,3}|b+?", "a*?|b+?", "[cat]{3}|dog")
+      "b*?|^\t", "b+?|^\t", "a|b+?", "a+?|b+?", "a{2,3}|b+?", "a*?|b+?", "(2|a*?)",
+      "(2|a{1,2}?)", "[cat]{3}|dog")
     assertCpuGpuMatchesRegexpFind(patterns, Seq("aaa", "bb", "a\tb", "aaaabbbb", "a\tb\ta\tb"))
   }
 
@@ -146,11 +147,62 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
   }
 
   test("cuDF does not support possessive quantifier") {
-    val patterns = Seq("a*+", "a|(a?|a*+)")
-    patterns.foreach(pattern =>
+    val patterns = Seq(
+      "a*+" -> "*+",
+      "a++" -> "++",
+      "a?+" -> "?+",
+      "a{2}+" -> "{2}+",
+      "a{2,}+" -> "{2,}+",
+      "a{2,3}+" -> "{2,3}+",
+      "a|(a?|a*+)" -> "*+")
+    patterns.foreach { case (pattern, quantifier) =>
       assertUnsupported(pattern, RegexFindMode,
-        "Possessive quantifier *+ not supported")
-    )
+        s"Possessive quantifier $quantifier not supported")
+    }
+  }
+
+  test("cuDF repetition count limit") {
+    Seq("a{1000}", "a{1000}?", "a{1000,}?", "a{1,1000}?").foreach { pattern =>
+      assertUnsupported(pattern, RegexFindMode,
+        "cuDF does not support repetition counts greater than 999")
+    }
+
+    val reluctantError = intercept[RegexUnsupportedException] {
+      transpile("a{1000}?", RegexFindMode)
+    }
+    assert(reluctantError.getMessage.endsWith("near index 1"),
+      s"oversized reluctant quantifier reported the wrong position: $reluctantError")
+
+    assertCpuGpuMatchesRegexpFind(
+      Seq("a{999}?"),
+      Seq("", "a" * 998, "a" * 999, "a" * 1000))
+  }
+
+  test("stacked quantifiers are unsupported") {
+    Seq("a*{2,}", "a{2}{3}", "a{2}?{3}").foreach { pattern =>
+      assertUnsupported(pattern, RegexFindMode,
+        "Preceding token cannot be quantified")
+    }
+  }
+
+  test("issue-14738: bounded reluctant quantifiers") {
+    val issuePattern = "((aa|bb){0,3}?).*cc"
+    val transpiledExtract = transpile(issuePattern, groupIndex = 1)
+    assert(transpiledExtract.contains("{0,3}?"))
+
+    assertCpuGpuMatchesRegexpFind(
+      Seq("a{2}?", "a{2,}?", "a{2,3}?"),
+      Seq("", "a", "aa", "aaa", "baaa"))
+    assertCpuGpuMatchesRegexpReplace(
+      Seq("A{1,3}?"),
+      Seq("", "A", "AA", "AAAA", "BAAAB"))
+    doStringSplitTest(
+      Set("o{1,2}?"),
+      Seq("", "o", "oo", "boo:and:foo", "fooo"),
+      limit = -1)
+
+    assertUnsupported("o{0,2}?", RegexSplitMode,
+      "regexp_split on GPU does not support empty match repetition consistently with Spark")
   }
 
   test("cuDF does not support \\z") {
@@ -386,14 +438,37 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
       "Case-insensitive matching is not supported for escapes that resolve to a letter")
   }
 
+  test("case-insensitive matching of Lower/Upper predefined classes is gated on the Spark " +
+      "version") {
+    // Older JDKs did not apply CASE_INSENSITIVE to the named \p{Lower}/\p{Upper} predicates
+    // (JDK-8214245), so GPU case-folding would diverge from the CPU there. Use the Spark version
+    // as a proxy for the executor JDK version to see if we need to fall back to the CPU.
+    // \P shares the code path via its class name.
+    if (VersionUtils.isSpark400OrLater) {
+      doTranspileTest(raw"(?i)\p{Lower}", "[a-zA-Z]")
+      doTranspileTest(raw"(?i)\p{Upper}", "[A-Za-z]")
+      doTranspileTest(raw"(?i)\P{Lower}", "(?:[\r]|[^a-zA-Z])")
+      doTranspileTest(raw"(?i)\P{Upper}", "(?:[\r]|[^A-Za-z])")
+    } else {
+      val patterns = Seq(raw"(?i)\p{Lower}", raw"(?i)\p{Upper}",
+        raw"(?i)\P{Lower}", raw"(?i)\P{Upper}")
+      patterns.foreach { p =>
+        assertUnsupported(p, RegexFindMode,
+          "Case-insensitive matching is not supported for Upper/Lower predefined character " +
+          "classes on this Spark version")
+      }
+    }
+    // the fallback is specific to Lower/Upper predefined classes: a hand-written range still folds
+    doTranspileTest("(?i)[a-z]", "[a-zA-Z]")
+  }
+
   test("cuDF does not support quantifier syntax when not quantifying anything") {
     // note that we could choose to transpile and escape the '{' and '}' characters
     val patterns = Seq("{1,2}", "{1,}", "{1}")
     patterns.foreach(pattern => {
       assertUnsupported(pattern, RegexFindMode,
         "Token preceding '{' is not quantifiable near index 0")
-        }
-    )
+    })
 
     val e = intercept[PatternSyntaxException] {
       parse("{2,1}")
@@ -1639,20 +1714,12 @@ class FuzzRegExp(suggestedChars: String, skipKnownIssues: Boolean = true,
   }
 
   private def repetition(depth: Int) = {
-    val generators = Seq(
-      () =>
-        // greedy quantifier
-        RegexRepetition(generate(depth + 1), quantifier),
-      () =>
-        // reluctant quantifier
-        RegexRepetition(RegexRepetition(generate(depth + 1), quantifier),
-          SimpleQuantifier('?')),
-      () =>
-        // possessive quantifier
-        RegexRepetition(RegexRepetition(generate(depth + 1), quantifier),
-          SimpleQuantifier('+'))
-    )
-    generators(rr.nextInt(generators.length))()
+    val modes = Seq[RegexQuantifier.Mode](
+      RegexQuantifier.Greedy,
+      RegexQuantifier.Reluctant,
+      RegexQuantifier.Possessive)
+    val mode = modes(rr.nextInt(modes.length))
+    RegexRepetition(generate(depth + 1), quantifier.withMode(mode))
   }
 
   private def quantifier: RegexQuantifier = {

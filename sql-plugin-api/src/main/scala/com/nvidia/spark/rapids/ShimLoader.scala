@@ -352,13 +352,6 @@ object ShimLoader {
     constructor.newInstance(ss).asInstanceOf[Rule[SparkPlan]]
   }
 
-  def newGpuPostHocResolutionOverrides(ss: SparkSession): Rule[LogicalPlan] = {
-    val clz = ShimReflectionUtils.loadClass(
-      "com.nvidia.spark.rapids.GpuPostHocResolutionOverrides")
-    val constructor = clz.getConstructor(classOf[SparkSession])
-    constructor.newInstance(ss).asInstanceOf[Rule[LogicalPlan]]
-  }
-
   def newUdfLogicalPlanRules(): Rule[LogicalPlan] = {
     ShimReflectionUtils.newInstanceOf("com.nvidia.spark.udf.LogicalPlanRules")
   }

@@ -19,7 +19,7 @@ from conftest import is_utc, get_test_tz, is_databricks_runtime
 from data_gen import *
 from datetime import date, datetime, timezone
 from dateutil import tz
-from marks import allow_non_gpu, approximate_float, datagen_overrides, disable_ansi_mode, ignore_order, incompat, tz_sensitive_test
+from marks import allow_non_gpu, approximate_float, disable_ansi_mode, ignore_order, incompat, tz_sensitive_test
 from pyspark.sql.types import *
 from spark_session import with_cpu_session, is_before_spark_350, is_before_spark_400, \
     is_spark_420_or_later, is_spark_500_or_later
@@ -309,13 +309,16 @@ def test_datesub(data_gen):
                 'date_sub(a, cast(null as {}))'.format(string_type),
                 'date_sub(a, cast(24 as {}))'.format(string_type)))
 
-# In order to get a bigger range of values tested for Integer days for date_sub and date_add
-# we are casting the output to unix_timestamp. Even that overflows if the integer value is greater
-# than 103819094 and less than -109684887 for date('9999-12-31') or greater than 107471152 and less
-# than -106032829 for date('0001-01-01') so we have to cap the days values to the lower upper and
-# lower ranges.
-to_unix_timestamp_days_gen=[ByteGen(), ShortGen(), IntegerGen(min_val=-106032829, max_val=103819094, special_cases=[-106032829, 103819094,0,1,-1])]
-@datagen_overrides(seed=0, reason='https://github.com/NVIDIA/spark-rapids/issues/10027')
+# unix_timestamp(DateType) uses the session time zone when converting epoch days to Long micros.
+# Java time zone offsets are bounded by +/-18 hours, so keep the output epoch day within
+# [-106751990, 106751990]. DateGen() spans [-719162, 2932896].
+to_unix_timestamp_days_gen = [
+    ByteGen(),
+    ShortGen(),
+    IntegerGen(
+        min_val=-106032828,
+        max_val=103819094,
+        special_cases=[-106032828, 103819094, 0, 1, -1])]
 @pytest.mark.parametrize('data_gen', to_unix_timestamp_days_gen, ids=idfn)
 @incompat
 @allow_non_gpu(*non_utc_allow)
@@ -329,8 +332,13 @@ def test_dateadd_with_date_overflow(data_gen):
            'unix_timestamp(date_add(a, cast(null as {})))'.format(string_type),
            'unix_timestamp(date_add(a, cast(24 as {})))'.format(string_type)))
 
-to_unix_timestamp_days_gen=[ByteGen(), ShortGen(), IntegerGen(max_val=106032829, min_val=-103819094, special_cases=[106032829, -103819094,0,1,-1])]
-@datagen_overrides(seed=0, reason='https://github.com/NVIDIA/spark-rapids/issues/10027')
+to_unix_timestamp_days_gen = [
+    ByteGen(),
+    ShortGen(),
+    IntegerGen(
+        max_val=106032828,
+        min_val=-103819094,
+        special_cases=[106032828, -103819094, 0, 1, -1])]
 @pytest.mark.parametrize('data_gen', to_unix_timestamp_days_gen, ids=idfn)
 @incompat
 @allow_non_gpu(*non_utc_allow)
