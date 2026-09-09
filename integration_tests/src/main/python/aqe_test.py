@@ -62,29 +62,28 @@ def test_databricks_auto_optimized_shuffle():
                 nodes.extend(collect_plan_nodes(children.next()))
         return nodes
 
-    optimized_partition_counts = {}
-
-    def assert_cpu_auto_optimized_shuffle(plan):
-        exchanges = [
-            node for node in collect_plan_nodes(plan)
+    def assert_auto_optimized_shuffle(cpu_plan, gpu_plan):
+        cpu_exchanges = [
+            node for node in collect_plan_nodes(cpu_plan)
             if node.getClass().getSimpleName() == "ShuffleExchangeExec"
         ]
-        assert len(exchanges) == 1, \
-            f"Expected one CPU shuffle exchange, found {len(exchanges)}:\n{plan}"
-        optimized_partition_counts["cpu"] = \
-            exchanges[0].outputPartitioning().numPartitions()
-        assert optimized_partition_counts["cpu"] > 0, \
-            f"Expected a positive CPU shuffle partition count:\n{plan}"
+        assert len(cpu_exchanges) == 1, \
+            f"Expected one CPU shuffle exchange, found {len(cpu_exchanges)}:\n{cpu_plan}"
+        cpu_partition_count = cpu_exchanges[0].outputPartitioning().numPartitions()
+        assert cpu_partition_count > 0, \
+            f"Expected a positive CPU shuffle partition count:\n{cpu_plan}"
+        assert cpu_partition_count != initial_shuffle_partitions, \
+            f"AutoOptimizedShuffle did not resize the CPU shuffle from " \
+            f"{initial_shuffle_partitions} partitions:\n{cpu_plan}"
 
-    def assert_auto_optimized_shuffle(plan):
-        exchanges = [
-            node for node in collect_plan_nodes(plan)
+        gpu_exchanges = [
+            node for node in collect_plan_nodes(gpu_plan)
             if node.getClass().getSimpleName() == "GpuShuffleExchangeExec"
         ]
-        assert len(exchanges) == 1, \
-            f"Expected one GPU shuffle exchange, found {len(exchanges)}:\n{plan}"
+        assert len(gpu_exchanges) == 1, \
+            f"Expected one GPU shuffle exchange, found {len(gpu_exchanges)}:\n{gpu_plan}"
 
-        exchange = exchanges[0]
+        exchange = gpu_exchanges[0]
         partition_counts = {
             "target": exchange.targetOutputPartitioning().numPartitions(),
             "output": exchange.outputPartitioning().numPartitions(),
@@ -92,20 +91,17 @@ def test_databricks_auto_optimized_shuffle():
             "dependency": exchange.shuffleDependencyColumnar().partitioner().numPartitions(),
         }
         assert len(set(partition_counts.values())) == 1, \
-            f"Inconsistent optimized shuffle partition counts: {partition_counts}\n{plan}"
-        assert "cpu" in optimized_partition_counts, \
-            "CPU AutoOptimizedShuffle partition count was not captured"
-        assert partition_counts["target"] == optimized_partition_counts["cpu"], \
+            f"Inconsistent optimized shuffle partition counts: {partition_counts}\n{gpu_plan}"
+        assert partition_counts["target"] == cpu_partition_count, \
             f"CPU and GPU AutoOptimizedShuffle partition counts differ: " \
-            f"CPU={optimized_partition_counts['cpu']}, GPU={partition_counts['target']}\n{plan}"
+            f"CPU={cpu_partition_count}, GPU={partition_counts['target']}\n{gpu_plan}"
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         do_groupby,
         exist_classes="GpuShuffleExchangeExec",
         conf=conf,
         require_non_empty=True,
-        gpu_plan_assertion=assert_auto_optimized_shuffle,
-        cpu_plan_assertion=assert_cpu_auto_optimized_shuffle)
+        gpu_plan_assertion=assert_auto_optimized_shuffle)
 
 
 def create_skew_df(spark, length):

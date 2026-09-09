@@ -1374,7 +1374,7 @@ def test_delta_dv_pushdown_keeps_alias_producer(spark_tmp_path, spark_tmp_table_
         """)
         return df
 
-    def assert_dv_pushdown_plan(plan):
+    def assert_dv_pushdown_plan(_cpu_plan, plan):
         from conftest import spark_jvm
 
         # Inspect the plan after collection so an adaptive plan has been finalized.
