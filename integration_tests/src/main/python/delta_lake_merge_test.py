@@ -463,7 +463,8 @@ def test_delta_merge_standard_upsert(spark_tmp_path, spark_tmp_table_factory, us
                     reason="The Databricks 17.3 GPU merge regenerates row ids until #15884 lands; that PR carries the 17.3 test")
 def test_delta_merge_preserves_row_tracking(spark_tmp_path):
     # A matched update and an insert touch a row-tracked target. (A NOT MATCHED BY SOURCE clause
-    # runs on the GPU only with Delta 4.1 and Databricks 17.3, so it is left out here.) The row
+    # runs on the GPU only with Delta 4.1 and Databricks 17.3; the Delta 4.1 case is covered by
+    # test_delta_merge_preserves_row_tracking_not_matched_by_source below.) The row
     # ids of the rows that existed before the merge must survive on both engines, whether the row
     # is updated or copied, and the commit version moves only for the updated row. Both tables
     # start from the same single file, so those rows carry the same ids and versions on the CPU
@@ -530,6 +531,66 @@ def test_delta_merge_preserves_row_tracking(spark_tmp_path):
             f"{run}: inserted row id is not fresh: {after[9]}"
         assert after[9][3] > max(v[3] for v in before[run].values()), \
             f"{run}: inserted row commit version did not advance: {after[9]}"
+
+
+@allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_spark_41x(),
+                    reason="NOT MATCHED BY SOURCE runs on the GPU MERGE only with OSS Delta 4.1")
+def test_delta_merge_preserves_row_tracking_not_matched_by_source(spark_tmp_path):
+    # A matched update and a NOT MATCHED BY SOURCE update on a row-tracked target, the clause the
+    # GPU merge accepts only on Delta 4.1. Every row here existed before the merge, so its row id
+    # must survive on both engines whether the row was matched by the source or left to the NOT
+    # MATCHED BY SOURCE update, and every updated row's commit version must advance. Both tables
+    # start from the same single file, so the ids and versions line up engine to engine and the
+    # read back is compared column for column, row tracking included, with no inserted row to mask.
+    conf = copy_and_update(delta_merge_enabled_conf, delta_row_tracking_dml_conf)
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    with_cpu_session(lambda spark: setup_delta_row_tracking_dest_tables(
+        spark, data_path, row_tracking_dml_test_df), conf=conf)
+    # a=2 is matched by the source; a=1, 3 and 4 are not matched by source and take the UPDATE.
+    merge_sql = ("MERGE INTO delta.`{path}` t "
+                 "USING (SELECT * FROM VALUES (2, 'B', 'y') AS s(a, b, c)) s "
+                 "ON t.a = s.a "
+                 "WHEN MATCHED THEN UPDATE SET t.c = s.c "
+                 "WHEN NOT MATCHED BY SOURCE THEN UPDATE SET t.c = 'z'")
+
+    def tracked_rows(spark, path):
+        rows = spark.sql(f"SELECT a, b, c, _metadata.row_id AS row_id, "
+                         f"_metadata.row_commit_version AS row_commit_version FROM delta.`{path}`")
+        return {r["a"]: (r["b"], r["c"], r["row_id"], r["row_commit_version"])
+                for r in rows.collect()}
+
+    before = {run: with_cpu_session(lambda spark, p=data_path + "/" + run: tracked_rows(spark, p),
+                                    conf=conf) for run in ["CPU", "GPU"]}
+
+    def do_merge(spark, path):
+        return spark.sql(merge_sql.format(path=path)).collect()
+
+    results = {}
+
+    def write_func(spark, path):
+        results[path] = do_merge(spark, path)
+
+    def read_tracked(spark, path):
+        return spark.sql(f"SELECT a, b, c, _metadata.row_id AS row_id, "
+                         f"_metadata.row_commit_version AS row_commit_version FROM delta.`{path}`")
+
+    assert_gpu_and_cpu_writes_are_equal_collect(write_func, read_tracked, data_path, conf=conf)
+    assert_equal(results[data_path + "/CPU"], results[data_path + "/GPU"])
+
+    for run in ["CPU", "GPU"]:
+        path = data_path + "/" + run
+        after = with_cpu_session(lambda spark: tracked_rows(spark, path), conf=conf)
+        assert sorted(after.keys()) == [1, 2, 3, 4], f"{run}: {after}"
+        # Every row, the matched one and the three not matched by source, keeps its row id and
+        # advances its commit version.
+        for a in [1, 2, 3, 4]:
+            assert after[a][2] == before[run][a][2], \
+                f"{run}: row id of a={a} changed: {before[run][a]} -> {after[a]}"
+            assert after[a][3] > before[run][a][3], \
+                f"{run}: commit version of a={a} did not advance: {before[run][a]} -> {after[a]}"
 
 
 @allow_non_gpu(*delta_meta_allow)
