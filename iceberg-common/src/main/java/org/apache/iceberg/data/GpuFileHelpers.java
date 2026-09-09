@@ -78,6 +78,17 @@ public class GpuFileHelpers {
       throws IOException {
     int[] equalityFieldIds =
         deleteRowSchema.columns().stream().mapToInt(Types.NestedField::fieldId).toArray();
+    return writeDeleteFile(table, out, partition, deletes, deleteRowSchema, equalityFieldIds);
+  }
+
+  public static DeleteFile writeDeleteFile(
+      Table table,
+      OutputFile out,
+      StructLike partition,
+      List<Record> deletes,
+      Schema deleteRowSchema,
+      int[] equalityFieldIds)
+      throws IOException {
     FileWriterFactory<Record> factory =
         newWriterFactory(table, deleteRowSchema, equalityFieldIds);
 

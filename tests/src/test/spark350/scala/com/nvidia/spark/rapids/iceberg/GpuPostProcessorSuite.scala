@@ -28,7 +28,8 @@
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.iceberg
 
-import java.util.{HashMap => JHashMap}
+import java.nio.ByteBuffer
+import java.util.{HashMap => JHashMap, UUID}
 
 import scala.collection.JavaConverters._
 
@@ -65,6 +66,30 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
  * ColumnAction tree is built based on schema comparison.
  */
 class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
+
+  private def fieldWithDefaults(
+      id: Int,
+      name: String,
+      icebergType: org.apache.iceberg.types.Type,
+      required: Boolean,
+      initialDefault: Option[AnyRef]): Option[Types.NestedField] = {
+    try {
+      val factory = classOf[Types.NestedField].getMethod(
+        if (required) "required" else "optional", classOf[String])
+      val builder = factory.invoke(null, name)
+      val builderClass = builder.getClass
+      builderClass.getMethod("withId", java.lang.Integer.TYPE)
+        .invoke(builder, Int.box(id))
+      builderClass.getMethod("ofType", classOf[org.apache.iceberg.types.Type])
+        .invoke(builder, icebergType)
+      initialDefault.foreach { value =>
+        builderClass.getMethod("withInitialDefault", classOf[Object]).invoke(builder, value)
+      }
+      Some(builderClass.getMethod("build").invoke(builder).asInstanceOf[Types.NestedField])
+    } catch {
+      case _: NoSuchMethodException => None
+    }
+  }
 
   private lazy val supportsRowLineageInheritance = {
     val majorMinor = IcebergProvider.detectedVersion.split("\\.").take(2).mkString(".")
@@ -908,6 +933,205 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
         }
       }
     }
+  }
+
+  test("Missing required primitive is filled with its Iceberg initial default") {
+    import com.nvidia.spark.rapids.Arm.withResource
+    import com.nvidia.spark.rapids.GpuColumnVector
+    import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkColumnVector}
+
+    val fieldId = 1
+    val defaultField = fieldWithDefaults(
+      fieldId,
+      "added",
+      Types.IntegerType.get(),
+      required = true,
+      initialDefault = Some(Int.box(7))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+    val parquetSchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
+    val (parquetInfo, shadedSchema) = createParquetInfo(parquetSchema)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo,
+      new JHashMap[Integer, Any](),
+      new Schema(defaultField),
+      shadedSchema,
+      Map.empty)
+
+    assert(processor.displayActionPlan().contains(
+      s"FillDefault(fieldId=$fieldId, int)"))
+
+    withResource(processor.process(new ColumnarBatch(Array.empty[SparkColumnVector], 3))) {
+      outputBatch =>
+        withResource(outputBatch.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { hostCol =>
+          (0 until outputBatch.numRows()).foreach { row =>
+            assert(hostCol.getBase.getInt(row) == 7)
+          }
+        }
+    }
+  }
+
+  test("Unsupported Iceberg defaults are identified by subtype and nested path") {
+    val timestampNtzField = fieldWithDefaults(
+      3,
+      "created_at",
+      Types.TimestampType.withoutZone(),
+      required = false,
+      initialDefault = Some(Long.box(0L))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+    val timestampField = fieldWithDefaults(
+      4,
+      "updated_at",
+      Types.TimestampType.withZone(),
+      required = false,
+      initialDefault = Some(Long.box(0L))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+    val uuidField = fieldWithDefaults(
+      5,
+      "uuid_value",
+      Types.UUIDType.get(),
+      required = false,
+      initialDefault = Some(UUID.fromString("123e4567-e89b-12d3-a456-426614174000"))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+    val fixedType = Types.FixedType.ofLength(2)
+    val fixedField = fieldWithDefaults(
+      6,
+      "fixed_value",
+      fixedType,
+      required = false,
+      initialDefault = Some(ByteBuffer.wrap(Array[Byte](1, 2)))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+
+    val unsupportedSchema = new Schema(Types.NestedField.optional(
+      1, "payload", Types.StructType.of(timestampNtzField)))
+    val unsupportedListSchema = new Schema(Types.NestedField.optional(
+      1, "events", Types.ListType.ofOptional(
+        2, Types.StructType.of(timestampNtzField))))
+    val unsupportedMapKeySchema = new Schema(Types.NestedField.optional(
+      1, "lookup", Types.MapType.ofOptional(
+        2, 4, Types.StructType.of(timestampNtzField), Types.StringType.get())))
+    val unsupportedMapValueSchema = new Schema(Types.NestedField.optional(
+      1, "lookup", Types.MapType.ofOptional(
+        2, 4, Types.StringType.get(), Types.StructType.of(timestampNtzField))))
+    val supportedSchema = new Schema(timestampField)
+
+    assert(IcebergFormatVersionSupport.unsupportedDefault(unsupportedSchema)
+      .contains("payload.created_at" -> "timestamp"))
+    assert(IcebergFormatVersionSupport.unsupportedDefault(unsupportedListSchema)
+      .contains("events.element.created_at" -> "timestamp"))
+    assert(IcebergFormatVersionSupport.unsupportedDefault(unsupportedMapKeySchema)
+      .contains("lookup.key.created_at" -> "timestamp"))
+    assert(IcebergFormatVersionSupport.unsupportedDefault(unsupportedMapValueSchema)
+      .contains("lookup.value.created_at" -> "timestamp"))
+    assert(IcebergFormatVersionSupport.unsupportedDefault(supportedSchema).isEmpty)
+    assert(IcebergFormatVersionSupport.unsupportedDefault(new Schema(uuidField))
+      .contains("uuid_value" -> Types.UUIDType.get().toString))
+    assert(IcebergFormatVersionSupport.unsupportedDefault(new Schema(fixedField))
+      .contains("fixed_value" -> fixedType.toString))
+  }
+
+  test("Equality-delete required fields are included in the unsupported default check") {
+    val projectedField = Types.NestedField.optional(1, "id", Types.LongType.get())
+    val equalityDeleteField = fieldWithDefaults(
+      2,
+      "delete_key",
+      Types.TimestampType.withoutZone(),
+      required = false,
+      initialDefault = Some(Long.box(0L))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+    val unreferencedField = fieldWithDefaults(
+      3,
+      "unreferenced",
+      Types.TimestampType.withoutZone(),
+      required = false,
+      initialDefault = Some(Long.box(0L))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+    val tableSchema = new Schema(projectedField, equalityDeleteField, unreferencedField)
+    val expectedSchema = new Schema(projectedField)
+
+    val schemaToCheck = IcebergFormatVersionSupport.withRequiredFields(
+      tableSchema, expectedSchema, Seq(equalityDeleteField.fieldId()))
+
+    assert(schemaToCheck.columns().asScala.map(_.fieldId()) == Seq(1, 2))
+    assert(IcebergFormatVersionSupport.unsupportedDefault(schemaToCheck)
+      .contains("delete_key" -> "timestamp"))
+  }
+
+  test("Nested equality-delete required fields fall back whether projected or implicit") {
+    val projectedField = Types.NestedField.optional(1, "id", Types.LongType.get())
+    val equalityDeleteField = fieldWithDefaults(
+      3,
+      "delete_key",
+      Types.StringType.get(),
+      required = false,
+      initialDefault = Some("legacy")).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+    val unreferencedField = fieldWithDefaults(
+      4,
+      "unreferenced",
+      Types.TimestampType.withoutZone(),
+      required = false,
+      initialDefault = Some(Long.box(0L))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+    val payloadField = Types.NestedField.optional(
+      2, "payload", Types.StructType.of(equalityDeleteField))
+    val tableSchema = new Schema(projectedField, payloadField, unreferencedField)
+
+    Seq(
+      new Schema(projectedField),
+      new Schema(projectedField, payloadField)).foreach { expectedSchema =>
+      val error = intercept[UnsupportedOperationException] {
+        IcebergFormatVersionSupport.withRequiredFields(
+          tableSchema, expectedSchema, Seq(equalityDeleteField.fieldId()))
+      }
+
+      assert(error.getMessage.contains(
+        "Nested equality-delete field 'delete_key' with ID 3 is not supported on GPU"))
+    }
+  }
+
+  test("Present struct children take precedence over defaults for missing children") {
+    val structId = 1
+    val presentId = 2
+    val defaultId = 3
+    val defaultField = fieldWithDefaults(
+      defaultId,
+      "added",
+      Types.IntegerType.get(),
+      required = true,
+      initialDefault = Some(Int.box(11))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+
+    val presentParquetField =
+      ShadedTypes.primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
+        .id(presentId).named("present")
+    val parquetStruct = ShadedTypes.optionalGroup().addField(presentParquetField)
+      .id(structId).named("s")
+    val parquetSchema = new ShadedMessageType("test", Seq[ShadedType](parquetStruct).asJava)
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(structId, "s", Types.StructType.of(
+        Types.NestedField.optional(presentId, "present", Types.LongType.get()),
+        defaultField)))
+    val (parquetInfo, shadedSchema) = createParquetInfo(parquetSchema)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo,
+      new JHashMap[Integer, Any](),
+      expectedSchema,
+      shadedSchema,
+      Map.empty)
+
+    val plan = processor.displayActionPlan()
+    assert(plan.contains("field[0] (input[0]):\n        PassThrough"), plan)
+    assert(plan.contains(s"FillDefault(fieldId=$defaultId, int)"), plan)
   }
 
   test("Whole-struct constants build a FetchConstant action") {
