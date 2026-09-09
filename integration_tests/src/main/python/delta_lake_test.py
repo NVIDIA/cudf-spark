@@ -1045,7 +1045,7 @@ def test_delta_column_mapping_predicate_pushdown_with_deletion_vector(spark_tmp_
         lambda spark: filtered_read(spark).orderBy("id").collect(), conf=conf)
     assert cpu_rows == expected
 
-    def assert_gpu_pushdown(plan):
+    def assert_gpu_pushdown(_cpu_plan, plan):
         from conftest import spark_jvm
 
         callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
