@@ -52,6 +52,9 @@ object TestUtils extends Assertions {
     module.getClass.getMethod("clearSerializer").invoke(module)
   }
 
+  def numRunningMultiFileReaderTasks: Int =
+    MultiFileReaderThreadPool.runningTaskNum.get()
+
   /** Compare the equality of two tables */
   def compareTables(expected: Table, actual: Table): Unit = {
     assertResult(expected.getRowCount)(actual.getRowCount)
