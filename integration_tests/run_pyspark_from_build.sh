@@ -185,7 +185,8 @@ else
         if [[ "$INCLUDE_SPARK_PROTOBUF_JAR_REQUESTED" != "false" \
               && "$PROTOBUF_JAR_COUNT" -gt 1 ]]; then
             >&2 echo "WARNING: Multiple spark-protobuf jars were found (matched: $PROTOBUF_JARS); not injecting spark-protobuf."
-        elif [[ "$INCLUDE_SPARK_PROTOBUF_JAR_REQUESTED" != "false" ]]; then
+        elif [[ "$INCLUDE_SPARK_PROTOBUF_JAR_REQUESTED" != "false" ]] \
+             && printf '%s\n' "3.4.0" "$VERSION_STRING" | sort -V | head -1 | grep -qx "3.4.0"; then
             >&2 echo "WARNING: a spark-protobuf jar was not found (searched: $PROTOBUF_JARS); protobuf tests will be skipped."
         fi
         export INCLUDE_SPARK_PROTOBUF_JAR=false
