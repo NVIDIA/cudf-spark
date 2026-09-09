@@ -1297,7 +1297,8 @@ abstract class AbstractGpuParquetMultiFilePartitionReaderFactory(
           hasInt96Timestamps = false)
         BlockMetaWithPartFile(meta, file)
       // Throw FileNotFoundException even if `ignoreCorruptFiles` is true
-      case e: FileNotFoundException if !ignoreMissingFiles => throw e
+      case e: FileNotFoundException if !ignoreMissingFiles =>
+        throw GpuFileNotFoundException(file.filePath.toString, e)
       // If ignoreMissingFiles=true, this case will never be reached. But it's ok
       // to leave this branch here.
       case e@(_: RuntimeException | _: IOException) if ignoreCorruptFiles =>

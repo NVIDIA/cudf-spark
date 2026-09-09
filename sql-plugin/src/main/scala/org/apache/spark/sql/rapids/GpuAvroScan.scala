@@ -281,7 +281,8 @@ case class GpuAvroMultiFilePartitionReaderFactory(
               logWarning(s"Skipped missing file: ${file.filePath}", e)
               AvroBlockMeta(null, 0L, Seq.empty)
             // Throw FileNotFoundException even if `ignoreCorruptFiles` is true
-            case e: FileNotFoundException if !ignoreMissingFiles => throw e
+            case e: FileNotFoundException if !ignoreMissingFiles =>
+              throw GpuFileNotFoundException(file.filePath.toString, e)
             case e@(_: RuntimeException | _: IOException) if ignoreCorruptFiles =>
               logWarning(
                 s"Skipped the rest of the content in the corrupted file: ${file.filePath}", e)
