@@ -38,6 +38,7 @@ import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.expressions.UnsafeProjection
 import org.apache.spark.sql.catalyst.util.QuotingUtils
 import org.apache.spark.sql.connector.read.{PartitionReader, PartitionReaderFactory}
 import org.apache.spark.sql.delta._
@@ -394,8 +395,6 @@ class GpuDeltaParquetFileFormatBase2(
   case class SpillableDeletionVectorInfo(
       serializedBitmap: SpillableHostBuffer,
       filterTypeOpt: Option[RowIndexFilterType],
-      // Pre-computed number of rows remaining after applying the deletion vector.
-      numRowsAlive: Long,
       // The offsets and numRows below are the original row group offsets and row counts
       // in the file. The combining process in multi-threaded reader involves re-organizing
       // row groups across files, but the offsets and numRows here are not changed even
@@ -415,17 +414,13 @@ class GpuDeltaParquetFileFormatBase2(
         serializedBitmap: HostMemoryBuffer,
         filterTypeOpt: Option[RowIndexFilterType],
         rowGroupOffsets: Array[Long],
-        rowGroupNumRows: Array[Int],
-        maxChunkRows: Int): SpillableDeletionVectorInfo = {
-      val numRowsAlive = computeNumRowsAliveWithDeletionVector(
-        serializedBitmap, filterTypeOpt, rowGroupOffsets, rowGroupNumRows, maxChunkRows)
+        rowGroupNumRows: Array[Int]): SpillableDeletionVectorInfo = {
       new SpillableDeletionVectorInfo(
         SpillableHostBuffer(
           serializedBitmap,
           serializedBitmap.getLength(),
           SpillPriorities.ACTIVE_BATCHING_PRIORITY),
         filterTypeOpt,
-        numRowsAlive,
         rowGroupOffsets,
         rowGroupNumRows)
     }
@@ -489,9 +484,8 @@ class GpuDeltaParquetFileFormatBase2(
    * Per-file DV load result produced during [[prepareForDecode]].
    *
    * @param gpuBitmap serialized roaring bitmap buffer for the file's deletion vector
-   * @param aliveCount number of rows remaining after applying the deletion vector
    */
-  case class SerializedRoaringBitmap(gpuBitmap: SpillableHostBuffer, aliveCount: Long)
+  case class SerializedRoaringBitmap(gpuBitmap: SpillableHostBuffer)
 
   /**
    * Per-batch DV info that replaces [[ParquetExtraInfo]] in [[CurrentChunkMeta]] after batch
@@ -506,18 +500,24 @@ class GpuDeltaParquetFileFormatBase2(
       override val hasInt96Timestamps: Boolean,
       val perFileEntries: Seq[PerFileDVEntry],
       // Filled by prepareForDecode() after the copy phase; empty until then.
-      val loadedDVResults: Seq[SerializedRoaringBitmap] = Seq.empty
+      val loadedDVResults: Seq[SerializedRoaringBitmap] = Seq.empty,
+      val aliveRowsPerPartition: Array[Long] = Array.empty[Long]
   ) extends ParquetExtraInfo(dateRebaseMode, timestampRebaseMode, hasInt96Timestamps) {
     /**
      * True if at least one file in this batch carries a deletion vector descriptor.
      */
-    lazy val hasDeletionVectors: Boolean = perFileEntries.exists(_.dvDescriptor.isDefined)
+    lazy val hasDeletionVectors: Boolean = perFileEntries.exists { entry =>
+      entry.dvDescriptor.isDefined || entry.filterTypeOpt.isDefined
+    }
 
     /**
-     * Returns a copy of this instance with [[loadedDVResults]] set.
+     * Returns a copy with the loaded bitmaps and per-partition alive row counts set.
      */
-    def withLoadedDVResults(loadedDVResults: Seq[SerializedRoaringBitmap]): DeltaBatchExtraInfo =
-      this.copy(loadedDVResults = loadedDVResults)
+    def withLoadedDVResults(
+        loadedDVResults: Seq[SerializedRoaringBitmap],
+        aliveRowsPerPartition: Array[Long]): DeltaBatchExtraInfo = {
+      this.copy(loadedDVResults = loadedDVResults, aliveRowsPerPartition = aliveRowsPerPartition)
+    }
 
     /**
      * Closes the DV bitmaps in [[loadedDVResults]].
@@ -888,8 +888,7 @@ class GpuDeltaParquetFileFormatBase2(
               serializedDV,
               filterTypeOpt,
               rowGroupOffsets,
-              rowGroupNumRows,
-              maxReadBatchSizeRows)}
+              rowGroupNumRows)}
         )
         DeltaParquetHostMemoryEmptyMetaData(
           partitionedFile,
@@ -953,8 +952,7 @@ class GpuDeltaParquetFileFormatBase2(
                   bitmap,
                   filterTypeOpt,
                   rowGroupOffsets,
-                  rowGroupNumRows,
-                  maxReadBatchSizeRows)
+                  rowGroupNumRows)
               }
             })
         }
@@ -1017,14 +1015,28 @@ class GpuDeltaParquetFileFormatBase2(
           throw new IllegalArgumentException(s"Unexpected metadata type ${metadata.getClass()}")
       }
 
-      val numRowsAlive = if (dvInfos.isEmpty) {
-        totalNumRows
+      val numDeletedRows = if (dvInfos.isEmpty) {
+        0L
       } else {
-        dvInfos.map(_.numRowsAlive).sum
+        GpuSemaphore.acquireIfNecessary(TaskContext.get())
+        dvInfos.groupBy { info =>
+          RapidsDeletionVectors.isIfNotContainedRowIndexFilter(info.filterTypeOpt)
+        }.map { case (isRetention, sameTypeInfos) =>
+          withResource(sameTypeInfos.safeMap(_.serializedBitmap.getDataHostBuffer())) { bitmaps =>
+            val hostDvInfos = bitmaps.zip(sameTypeInfos).map { case (bitmap, info) =>
+              new DeletionVector.DeletionVectorInfo(
+                bitmap, isRetention, info.rowGroupOffsets, info.rowGroupNumRows)
+            }
+            RmmRapidsRetryIterator.withRetryNoSplit {
+              DeletionVector.computeNumDeletedRows(hostDvInfos, maxReadBatchSizeRows)
+            }
+          }
+        }.sum
       }
-      require(numRowsAlive <= totalNumRows,
-        s"Alive row count ($numRowsAlive) exceeds file row count ($totalNumRows)")
-      Math.toIntExact(numRowsAlive)
+      require(numDeletedRows <= totalNumRows,
+        s"Deletion vector cardinality ($numDeletedRows) exceeds " +
+          s"partition row count ($totalNumRows)")
+      Math.toIntExact(totalNumRows - numDeletedRows)
     }
   }
 
@@ -1073,8 +1085,8 @@ class GpuDeltaParquetFileFormatBase2(
   // │  prepareForDecode()                                                               │
   // │  for each file (concurrent):                                                      │
   // │    loadDeletionVector() → SpillableHostBuffer (gpuBitmap)                         │
-  // │  computeNumDeletedRows() on GPU → compute aliveCount                              │
-  // │    → SerializedRoaringBitmap(gpuBitmap, aliveCount)                               │
+  // │  for each partition:                                                              │
+  // │    computeNumDeletedRows() on GPU for all its files → alive row count             │
   // │  attach results: batchExtra.withLoadedDVResults(loaded)                           │
   // └──────────────────────────────────┬────────────────────────────────────────────────┘
   //                                    │ combined buffer + updated CurrentChunkMeta
@@ -1087,7 +1099,7 @@ class GpuDeltaParquetFileFormatBase2(
   // │    MakeParquetTableWithDVProducer(combinedBuffer, dvInfos) → filtered Table       │
   // │                                                                                   │
   // │  getRowsPerPartition()                                                            │
-  // │    loadedDVResults.map(_.aliveCount) → alive row counts per partition              │
+  // │    return the pre-computed alive row counts                                       │
   // └───────────────────────────────────────────────────────────────────────────────────┘
 
   /**
@@ -1168,10 +1180,71 @@ class GpuDeltaParquetFileFormatBase2(
       meta.copy(extraInfo = batchExtra)
     }
 
+    private def computeAliveRowsPerPartition(
+        batchExtra: DeltaBatchExtraInfo,
+        loaded: Seq[SerializedRoaringBitmap],
+        allPartValues: Array[InternalRow]): Array[Long] = {
+      require(loaded.length == batchExtra.perFileEntries.length,
+        "Loaded DV results must match the per-file entries")
+      require(allPartValues.length == batchExtra.perFileEntries.length,
+        "Partition values must match the per-file entries")
+
+      val partitionProjection = UnsafeProjection.create(partitionSchema)
+      val partitionKeys = allPartValues.map(row => partitionProjection(row).copy())
+      // Only combine adjacent equal partition values so counts stay aligned with decode order.
+      val partitionGroups =
+        ArrayBuffer.empty[ArrayBuffer[(SerializedRoaringBitmap, PerFileDVEntry)]]
+      loaded.zip(batchExtra.perFileEntries).foreach { fileEntry =>
+        val currentIndex = fileEntry._2.partitionIndex
+        val sameAsPrevious = partitionGroups.lastOption.exists { previousGroup =>
+          val previousIndex = previousGroup.head._2.partitionIndex
+          partitionKeys(previousIndex) == partitionKeys(currentIndex)
+        }
+        if (sameAsPrevious) {
+          partitionGroups.last += fileEntry
+        } else {
+          partitionGroups += ArrayBuffer(fileEntry)
+        }
+      }
+
+      val aliveRows = Array.fill(allPartValues.length)(0L)
+      GpuSemaphore.acquireIfNecessary(TaskContext.get())
+      partitionGroups.foreach { partitionEntries =>
+        val totalRows = partitionEntries.foldLeft(0L) { case (sum, (_, entry)) =>
+          sum + totalNumRows(entry.rowGroupNumRows)
+        }
+        val entriesWithDV = partitionEntries.filter { case (_, entry) =>
+          entry.dvDescriptor.isDefined || entry.filterTypeOpt.isDefined
+        }
+        val numDeleted = if (entriesWithDV.isEmpty) {
+          0L
+        } else {
+          entriesWithDV.groupBy { case (_, entry) =>
+            RapidsDeletionVectors.isIfNotContainedRowIndexFilter(entry.filterTypeOpt)
+          }.map { case (isRetention, sameTypeEntries) =>
+            withResource(sameTypeEntries.safeMap(_._1.gpuBitmap.getDataHostBuffer())) { bitmaps =>
+              val dvInfos = bitmaps.zip(sameTypeEntries).map { case (bitmap, (_, entry)) =>
+                new DeletionVector.DeletionVectorInfo(
+                  bitmap, isRetention, entry.rowGroupOffsets, entry.rowGroupNumRows)
+              }.toArray
+              RmmRapidsRetryIterator.withRetryNoSplit {
+                DeletionVector.computeNumDeletedRows(dvInfos, maxReadBatchSizeRows)
+              }
+            }
+          }.sum
+        }
+        require(numDeleted <= totalRows,
+          s"Deletion vector cardinality ($numDeleted) exceeds " +
+            s"partition row count ($totalRows)")
+        aliveRows(partitionEntries.head._2.partitionIndex) = totalRows - numDeleted
+      }
+      aliveRows
+    }
+
     /**
      * Loads DV bitmaps for all files in the batch concurrently after the copy phase.
-     * Also computes the rows remaining in each file after applying its deletion vector
-     * (used later by [[getRowsPerPartition]]).
+     * Also computes the rows remaining in each partition after applying all of its deletion
+     * vectors (used later by [[getRowsPerPartition]]).
      * Fast path: if no file in the batch has a DV, returns meta unchanged.
      */
     override protected def prepareForDecode(meta: CurrentChunkMeta): CurrentChunkMeta = {
@@ -1228,17 +1301,7 @@ class GpuDeltaParquetFileFormatBase2(
           val gpuBitmap = future.get()
           if (firstFailure == null) {
             closeOnExcept(gpuBitmap) { _ =>
-              val totalRows = totalNumRows(entry.rowGroupNumRows)
-              val aliveCount =
-                if (entry.dvDescriptor.isEmpty && entry.filterTypeOpt.isEmpty) {
-                  totalRows
-                } else {
-                  withResource(gpuBitmap.getDataHostBuffer()) { bitmap =>
-                    computeNumRowsAliveWithDeletionVector(bitmap, entry.filterTypeOpt,
-                      entry.rowGroupOffsets, entry.rowGroupNumRows, maxReadBatchSizeRows)
-                  }
-                }
-              loaded += SerializedRoaringBitmap(gpuBitmap, aliveCount)
+              loaded += SerializedRoaringBitmap(gpuBitmap)
             }
           } else {
             gpuBitmap.safeClose(firstFailure)
@@ -1264,7 +1327,10 @@ class GpuDeltaParquetFileFormatBase2(
       }
 
       try {
-        meta.copy(extraInfo = batchExtra.withLoadedDVResults(loaded.toSeq))
+        val aliveRowsPerPartition =
+          computeAliveRowsPerPartition(batchExtra, loaded.toSeq, meta.allPartValues)
+        meta.copy(extraInfo =
+          batchExtra.withLoadedDVResults(loaded.toSeq, aliveRowsPerPartition))
       } catch {
         case t: Throwable =>
           loaded.map(_.gpuBitmap).safeClose(t)
@@ -1314,8 +1380,7 @@ class GpuDeltaParquetFileFormatBase2(
     }
 
     /**
-     * Returns per-partition alive row counts by summing the pre-computed [[aliveCount]] values
-     * from [[prepareForDecode]] for each file's contributing partition.
+     * Returns per-partition alive row counts pre-computed by [[prepareForDecode]].
      * Fast path: if no file has a DV, returns raw row counts unchanged (no I/O).
      */
     override protected def getRowsPerPartition(
@@ -1325,11 +1390,10 @@ class GpuDeltaParquetFileFormatBase2(
       val batchExtra = extraInfo.asInstanceOf[DeltaBatchExtraInfo]
       if (!batchExtra.hasDeletionVectors) return rawRowsPerPartition
 
-      val alivePerPartition = Array.fill(rawRowsPerPartition.length)(0L)
-      batchExtra.loadedDVResults.zip(batchExtra.perFileEntries).foreach { case (result, entry) =>
-        alivePerPartition(entry.partitionIndex) += result.aliveCount
-      }
-      alivePerPartition
+      require(batchExtra.aliveRowsPerPartition.length == rawRowsPerPartition.length,
+        s"Expected ${rawRowsPerPartition.length} partition row counts, found " +
+          s"${batchExtra.aliveRowsPerPartition.length}")
+      batchExtra.aliveRowsPerPartition.clone()
     }
   }
 }
