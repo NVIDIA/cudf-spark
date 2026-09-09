@@ -77,7 +77,7 @@ def is_oss_delta_lake_42():
     return not is_databricks_runtime() and _loaded_delta_lake_version() == "4.2.0"
 
 
-def supports_delta_lake_merge_not_matched_by_source_gpu():
+def is_oss_delta_lake_41_or_42():
     return (not is_databricks_runtime()
             and _loaded_delta_lake_version() in ("4.1.0", "4.2.0"))
 

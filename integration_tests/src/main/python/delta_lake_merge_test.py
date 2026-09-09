@@ -189,7 +189,7 @@ def test_delta_merge_fallback_with_deletion_vectors(spark_tmp_path, spark_tmp_ta
 @ignore_order
 @pytest.mark.skipif(is_databricks_runtime() and spark_version() < "3.3.2", reason="NOT MATCHED BY SOURCE added in DBR 12.2")
 @pytest.mark.skipif((not is_databricks_runtime()) and is_before_spark_340(), reason="NOT MATCHED BY SOURCE added in Delta Lake 2.4")
-@pytest.mark.skipif(supports_delta_lake_merge_not_matched_by_source_gpu(),
+@pytest.mark.skipif(is_oss_delta_lake_41_or_42(),
                     reason="NOT MATCHED BY SOURCE is supported on the GPU with OSS Delta 4.1+")
 @pytest.mark.skipif(is_databricks173_or_later(),
                     reason="NOT MATCHED BY SOURCE is supported on the GPU with Databricks 17.3+")
@@ -218,7 +218,7 @@ def test_delta_merge_not_matched_by_source_fallback(spark_tmp_path, spark_tmp_ta
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not (supports_delta_lake_merge_not_matched_by_source_gpu() or is_databricks173_or_later()),
+@pytest.mark.skipif(not (is_oss_delta_lake_41_or_42() or is_databricks173_or_later()),
                     reason="NOT MATCHED BY SOURCE is supported on the GPU with OSS Delta 4.1+ "
                     "and Databricks 17.3+")
 @pytest.mark.parametrize("use_cdf", [False, True], ids=idfn)
@@ -1078,7 +1078,7 @@ def test_delta_merge_nullable_matched_conditions(spark_tmp_path, spark_tmp_table
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not (supports_delta_lake_merge_not_matched_by_source_gpu() or is_databricks173_or_later()),
+@pytest.mark.skipif(not (is_oss_delta_lake_41_or_42() or is_databricks173_or_later()),
                     reason="NOT MATCHED BY SOURCE is supported on the GPU with OSS Delta 4.1+ "
                     "and Databricks 17.3+")
 @pytest.mark.parametrize("use_cdf", [False, True], ids=idfn)
