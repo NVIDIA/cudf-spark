@@ -204,26 +204,26 @@ object GpuOrcTimezoneUtils {
             GpuTimeZoneDB.convertOrcFromUtc(orcTimestamp, tzCtx)) { utilUtc =>
           utilUtc.castTo(DType.INT64)
         }
-        withResource(utilMicros) { _ =>
-          val ruleCorrection = withResource(GpuTimeZoneDB.fromTimestampToUtcTimestamp(
+        val ruleCorrection = withResource(utilMicros) { utilMicros =>
+          withResource(GpuTimeZoneDB.fromTimestampToUtcTimestamp(
               orcTimestamp, readerZone.normalized())) { zoneUtc =>
             withResource(zoneUtc.castTo(DType.INT64)) { zoneMicros =>
               zoneMicros.sub(utilMicros)
             }
           }
-          withResource(ruleCorrection) { _ =>
-            val correctedTimestamp = withResource(orcTimestamp.castTo(DType.INT64)) { orcMicros =>
-              withResource(orcMicros.add(ruleCorrection)) { corrected =>
-                corrected.castTo(DType.TIMESTAMP_MICROSECONDS)
-              }
+        }
+        val correctedTimestamp = withResource(ruleCorrection) { ruleCorrection =>
+          withResource(orcTimestamp.castTo(DType.INT64)) { orcMicros =>
+            withResource(orcMicros.add(ruleCorrection)) { corrected =>
+              corrected.castTo(DType.TIMESTAMP_MICROSECONDS)
             }
-            withResource(correctedTimestamp) { _ =>
-              withResource(Scalar.timestampFromLong(
-                  DType.TIMESTAMP_MICROSECONDS, firstTransitionUs)) { firstTransition =>
-                withResource(orcTimestamp.lessThan(firstTransition)) { needsCorrection =>
-                  needsCorrection.ifElse(correctedTimestamp, orcTimestamp)
-                }
-              }
+          }
+        }
+        withResource(correctedTimestamp) { _ =>
+          withResource(Scalar.timestampFromLong(
+              DType.TIMESTAMP_MICROSECONDS, firstTransitionUs)) { firstTransition =>
+            withResource(orcTimestamp.lessThan(firstTransition)) { needsCorrection =>
+              needsCorrection.ifElse(correctedTimestamp, orcTimestamp)
             }
           }
         }

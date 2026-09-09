@@ -18,7 +18,8 @@ from asserts import *
 from conftest import is_not_utc
 from data_gen import *
 from conftest import is_databricks_runtime
-from marks import allow_non_gpu, datagen_overrides, disable_ansi_mode, ignore_order
+from marks import allow_non_gpu, datagen_overrides, disable_ansi_mode, ignore_order, \
+    validate_execs_in_gpu_plan
 from spark_session import *
 from pyspark.sql.functions import create_map, col, lit, row_number
 from pyspark.sql.types import *
@@ -43,6 +44,7 @@ maps_with_struct_key = [
     MapGen(StructGen([['child0', IntegerGen()],
                       ['child1', IntegerGen()]], nullable=False),
            IntegerGen())]
+
 
 supported_key_map_gens = \
     map_gens_sample + \
@@ -852,7 +854,8 @@ def test_sql_map_scalars(query):
 
 @pytest.mark.parametrize('data_gen', map_gens_sample + maps_with_binary_value \
                          + [MapGen(f(nullable=False, min_val=-10, max_val=10), f(), min_length=10) for f in [ByteGen, ShortGen, IntegerGen, LongGen]] \
-                         + [MapGen(StringGen(pattern='key_[0-9]', nullable=False), StringGen(), min_length=10)], ids=idfn)
+                         + [MapGen(StringGen(pattern='key_[0-9]', nullable=False), StringGen(), min_length=10)],
+                         ids=idfn)
 @allow_non_gpu(*non_utc_allow)
 def test_map_zip_with(data_gen):
     def do_it(spark):
@@ -883,6 +886,45 @@ def test_map_zip_with(data_gen):
     # ANSI mode is disabled since this test verifies the behaviour of map_zip_with and the evaluation of the associated lambda. 
     # Exceptions during overflow conditions are tested in the arithmetic-ops tests.
     # Not using @disable_ansi_mode because of https://github.com/NVIDIA/spark-rapids/issues/13214.  Using explicit setting instead.
+    assert_gpu_and_cpu_are_equal_collect(do_it, conf={'spark.sql.ansi.enabled': False})
+
+
+@pytest.mark.parametrize('data_gen', [
+    MapGen(DecimalGen(12, 2, nullable=False),
+           DecimalGen(12, 2, nullable=False), nullable=False),
+    MapGen(DecimalGen(20, 2, nullable=False),
+           DecimalGen(20, 2, nullable=False), nullable=False),
+], ids=idfn)
+@validate_execs_in_gpu_plan('GpuProjectExec')
+@allow_non_gpu(*non_utc_allow)
+def test_map_zip_with_decimal_non_identity(data_gen):
+    def do_it(spark):
+        df = two_col_df(spark, data_gen, data_gen)
+        return df.selectExpr(
+            'a',
+            'b',
+            'map_zip_with(a, b, (key, value1, value2) -> null) as n',
+            'map_zip_with(a, b, (key, value1, value2) -> 1) as one',
+            'map_zip_with(a, b, (key, value1, value2) -> key) as indexed')
+
+    assert_gpu_and_cpu_are_equal_collect(do_it, conf={'spark.sql.ansi.enabled': False})
+
+
+@pytest.mark.parametrize('data_gen', [
+    MapGen(DecimalGen(12, 2, nullable=False),
+           DecimalGen(12, 2, nullable=False), nullable=False),
+    MapGen(DecimalGen(20, 2, nullable=False),
+           DecimalGen(20, 2, nullable=False), nullable=False),
+], ids=idfn)
+@validate_execs_in_gpu_plan('GpuProjectExec')
+@allow_non_gpu(*non_utc_allow)
+def test_map_zip_with_decimal_identity(data_gen):
+    def do_it(spark):
+        df = two_col_df(spark, data_gen, data_gen)
+        return df.selectExpr(
+            'map_zip_with(a, b, (key, value1, value2) -> value1) as ident1',
+            'map_zip_with(a, b, (key, value1, value2) -> value2) as ident2')
+
     assert_gpu_and_cpu_are_equal_collect(do_it, conf={'spark.sql.ansi.enabled': False})
 
 @pytest.mark.parametrize('data_gen', [MapGen(IntegerGen(False, min_val=-5, max_val=5), ArrayGen(int_gen, max_length=5), min_length=7)], ids=idfn)

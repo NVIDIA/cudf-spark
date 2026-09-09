@@ -435,20 +435,6 @@ else
         export PYSP_TEST_spark_executorEnv_SPARK_RAPIDS_RETRY_COVERAGE_TRACKING="${SPARK_RAPIDS_RETRY_COVERAGE_TRACKING}"
     fi
 
-    # Turns on $LOAD_HYBRID_BACKEND and setup the filepath of hybrid backend jars, to activate the
-    # hybrid backend while running subsequent integration tests.
-    if [[ "$LOAD_HYBRID_BACKEND" -eq 1 ]]; then
-      if [ -z "${HYBRID_BACKEND_JARS}" ]; then
-        echo "Error: Environment HYBRID_BACKEND_JARS is not set."
-        exit 1
-      fi
-      export PYSP_TEST_spark_jars="${PYSP_TEST_spark_jars},${HYBRID_BACKEND_JARS//:/,}"
-      export PYSP_TEST_spark_rapids_sql_hybrid_loadBackend=true
-      export PYSP_TEST_spark_memory_offHeap_enabled=true
-      export PYSP_TEST_spark_memory_offHeap_size=512M
-      export PYSP_TEST_spark_gluten_loadLibFromJar=true
-    fi
-
     SPARK_SHELL_SMOKE_TEST="${SPARK_SHELL_SMOKE_TEST:-0}"
     EXPLAIN_ONLY_CPU_SMOKE_TEST="${EXPLAIN_ONLY_CPU_SMOKE_TEST:-0}"
     SPARK_CONNECT_SMOKE_TEST="${SPARK_CONNECT_SMOKE_TEST:-0}"

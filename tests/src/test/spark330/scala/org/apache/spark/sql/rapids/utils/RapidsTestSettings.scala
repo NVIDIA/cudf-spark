@@ -191,7 +191,6 @@ class RapidsTestSettings extends BackendTestSettings {
     .exclude("SPARK-37371: UnionExec should support columnar if all children support columnar", ADJUST_UT("CPU test uses CPU-specific node checks (InMemoryTableScanExec, UnionExec); GPU version implemented as testRapids() in RapidsDataFrameSetOperationsSuite"))
   enableSuite[RapidsDataFrameRangeSuite]
   enableSuite[RapidsFileBasedDataSourceSuite]
-    .exclude("Enabling/disabling ignoreMissingFiles using orc", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15100"))
     .exclude("SPARK-25237 compute correct input metrics in FileScanRDD", ADJUST_UT("Replaced by testRapids version that checks GpuFileSourceScanExec file metrics and populated Spark input metrics."))
     .exclude("Option recursiveFileLookup: disable partition inferring", ADJUST_UT("Replaced by testRapids version that uses testFile() to expand Spark test resources from the tests jar before reading with binaryFile."))
     .exclude("SPARK-22790,SPARK-27668: spark.sql.sources.compressionFactor takes effect", ADJUST_UT("Replaced by testRapids version that checks file-compression statistics with GpuBroadcastHashJoinExec and GpuShuffledSymmetricHashJoinExec."))
@@ -254,12 +253,6 @@ class RapidsTestSettings extends BackendTestSettings {
     .exclude("Propagate Hadoop configs from orc options to underlying file system",
       KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/11602. " +
         "Recovery trigger: GPU ORC writes propagate data-source options; P1."))
-    .exclude("Write Spark version into ORC file metadata",
-      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15468. " +
-        "Recovery trigger: GPU ORC files include Spark version metadata; P1."))
-    .exclude("SPARK-31238: compatibility with Spark 2.4 in reading dates",
-      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15470. " +
-        "Recovery trigger: GPU ORC legacy date rebasing matches Spark CPU; P0."))
     .exclude("SPARK-31284: compatibility with Spark 2.4 in reading timestamps",
       KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15471. " +
         "Recovery trigger: GPU ORC legacy timestamp reads match Spark CPU; P0."))
@@ -278,12 +271,6 @@ class RapidsTestSettings extends BackendTestSettings {
     .exclude("Propagate Hadoop configs from orc options to underlying file system",
       KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/11602. " +
         "Recovery trigger: GPU ORC writes propagate data-source options; P1."))
-    .exclude("Write Spark version into ORC file metadata",
-      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15468. " +
-        "Recovery trigger: GPU ORC files include Spark version metadata; P1."))
-    .exclude("SPARK-31238: compatibility with Spark 2.4 in reading dates",
-      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15470. " +
-        "Recovery trigger: GPU ORC legacy date rebasing matches Spark CPU; P0."))
     .exclude("SPARK-31284: compatibility with Spark 2.4 in reading timestamps",
       KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15471. " +
         "Recovery trigger: GPU ORC legacy timestamp reads match Spark CPU; P0."))
@@ -312,9 +299,6 @@ class RapidsTestSettings extends BackendTestSettings {
   enableSuite[RapidsFileSourceCharVarcharDDLTestSuite]
   enableSuite[RapidsDSV2CharVarcharDDLTestSuite]
   enableSuite[RapidsParquetCodecSuite]
-    .exclude("write and read - file source parquet - codec: lz4",
-      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15550. " +
-        "Recovery trigger: GPU Parquet supports Hadoop LZ4 or safely falls back; P1."))
   enableSuite[RapidsOrcCodecSuite]
     .exclude("write and read - file source orc - codec: lzo",
       KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15551. " +
@@ -375,22 +359,9 @@ class RapidsTestSettings extends BackendTestSettings {
   enableSuite[RapidsFileSourceSQLInsertTestSuite]
   enableSuite[RapidsDSV2SQLInsertTestSuite]
   enableSuite[RapidsMetadataCacheV1Suite]
-    .exclude("SPARK-16336,SPARK-27961 Suggest fixing FileNotFoundException",
-      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15511. " +
-        "Recovery trigger: GPU ORC V1 missing-file errors include Spark-equivalent recreate " +
-        "guidance; P1."))
-    .exclude("SPARK-16337 temporary view refresh",
-      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15511. " +
-        "Recovery trigger: GPU ORC V1 missing-file errors include Spark-equivalent REFRESH " +
-        "and recreate guidance; P1."))
   enableSuite[RapidsMetadataCacheV2Suite]
-    .exclude("SPARK-16336,SPARK-27961 Suggest fixing FileNotFoundException",
-      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15511. " +
-        "Recovery trigger: GPU ORC V2 missing-file errors include Spark-equivalent recreate " +
-        "guidance; P1."))
   enableSuite[RapidsFileSourceStrategySuite]
     .exclude("partitioned table - after scan filters", ADJUST_UT("Replaced by testRapids version that checks GpuFilterExec residual filters."))
-    .exclude("[SPARK-16818] partition pruned file scans implement sameResult correctly", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15161"))
   enableSuite[RapidsFileScanSuite]
   enableSuite[RapidsPruneFileSourcePartitionsSuite]
   enableSuite[RapidsDataFrameWindowFunctionsSuite]
@@ -500,44 +471,8 @@ class RapidsTestSettings extends BackendTestSettings {
   enableSuite[RapidsOrcV2AggregatePushDownSuite]
     .exclude("nested column: Count(top level column) push down", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15186"))
 
-  private val orcSchemaPruningModes = Seq(
-    "Spark vectorized reader - without partition data column",
-    "Spark vectorized reader - with partition data column",
-    "Non-vectorized reader - without partition data column",
-    "Non-vectorized reader - with partition data column")
-
-  private val orcComplexReaderFailureReason =
-    KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15179")
-
-  private val orcV1ComplexReaderFailureCases = Seq(
-    "select a single complex field",
-    "select a single complex field and the partition column",
-    "partial schema intersection - select missing subfield",
-    "empty schema intersection",
-    "select one deep nested complex field after join",
-    "select one deep nested complex field after outer join")
-
-  private val orcV1SchemaPruning = enableSuite[RapidsOrcV1SchemaPruningSuite]
-  orcV1ComplexReaderFailureCases.foreach { testName =>
-    orcSchemaPruningModes.foreach { mode =>
-      orcV1SchemaPruning.exclude(s"$mode - $testName", orcComplexReaderFailureReason)
-    }
-  }
-
-  private val orcV2ComplexReaderFailureCases = Seq(
-    "select a single complex field",
-    "select a single complex field and the partition column",
-    "partial schema intersection - select missing subfield",
-    "empty schema intersection",
-    "select one deep nested complex field after join",
-    "select one deep nested complex field after outer join")
-
-  private val orcV2SchemaPruning = enableSuite[RapidsOrcV2SchemaPruningSuite]
-  orcV2ComplexReaderFailureCases.foreach { testName =>
-    orcSchemaPruningModes.foreach { mode =>
-      orcV2SchemaPruning.exclude(s"$mode - $testName", orcComplexReaderFailureReason)
-    }
-  }
+  enableSuite[RapidsOrcV1SchemaPruningSuite]
+  enableSuite[RapidsOrcV2SchemaPruningSuite]
   enableSuite[RapidsRandomSuite]
     .exclude("random", ADJUST_UT("Replaced by testRapids version that considers partitionIndex offset"))
     .exclude("SPARK-9127 codegen with long seed", ADJUST_UT("Replaced by testRapids version that considers partitionIndex offset"))

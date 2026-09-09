@@ -19,40 +19,7 @@ package com.nvidia.spark.rapids
 import java.util.concurrent.ConcurrentHashMap
 
 import org.apache.spark.TaskContext
-import org.apache.spark.sql.connector.read.PartitionReader
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
-import org.apache.spark.sql.vectorized.ColumnarBatch
-
-class PartitionIterator[T](reader: PartitionReader[T]) extends Iterator[T] {
-  private[this] var valuePrepared = false
-
-  override def hasNext: Boolean = {
-    if (!valuePrepared) {
-      valuePrepared = reader.next()
-    }
-    valuePrepared
-  }
-
-  override def next(): T = {
-    if (!hasNext) {
-      throw new java.util.NoSuchElementException("End of stream")
-    }
-    valuePrepared = false
-    reader.get()
-  }
-}
-
-class MetricsBatchIterator(iter: Iterator[ColumnarBatch]) extends Iterator[ColumnarBatch] {
-  private[this] val inputMetrics = TaskContext.get().taskMetrics().inputMetrics
-
-  override def hasNext: Boolean = iter.hasNext
-
-  override def next(): ColumnarBatch = {
-    val batch = iter.next()
-    TrampolineUtil.incInputRecordsRows(inputMetrics, batch.numRows())
-    batch
-  }
-}
 
 /**
  * Incrementally transfers task-thread Hadoop filesystem bytes into Spark input metrics.

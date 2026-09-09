@@ -399,6 +399,7 @@ case class GpuFileSourceScanExec(
     "metadataTime" -> createTimingMetric(ESSENTIAL_LEVEL, "metadata time"),
     "filesSize" -> createSizeMetric(ESSENTIAL_LEVEL, "size of files read"),
     GPU_DECODE_TIME -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_GPU_DECODE_TIME),
+    GPU_OUTPUT_BATCH_BYTES -> createSizeMetric(MODERATE_LEVEL, DESCRIPTION_GPU_OUTPUT_BATCH_BYTES),
     BUFFER_TIME -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_BUFFER_TIME),
     FILTER_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_FILTER_TIME),
     SCHEDULE_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_SCHEDULE_TIME),
@@ -612,7 +613,11 @@ case class GpuFileSourceScanExec(
       logDebug(s"Using Datasource RDD, files are: " +
         s"${prunedPartitions.flatMap(FilePartitionShims.getFiles).mkString(",")}")
       // note we use the v2 DataSourceRDD instead of FileScanRDD so we don't have to copy more code
-      GpuDataSourceRDD(relation.sparkSession.sparkContext, locatedPartitions, readerFactory)
+      GpuDataSourceRDD(
+        relation.sparkSession.sparkContext,
+        locatedPartitions,
+        readerFactory,
+        includeRefreshHint = true)
     }
   }
 

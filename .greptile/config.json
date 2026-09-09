@@ -117,7 +117,7 @@
     },
     {
       "id": "upstream-dependency-boundary",
-      "rule": "Code touching JNI calls (cudf/spark-rapids-jni), private API interfaces (spark-rapids-private), or hybrid execution paths (spark-rapids-hybrid/Gluten) may break from concurrent upstream SNAPSHOT changes. Review for assumptions about upstream behavior. Cross-reference rapidsai/cudf for correct function signatures, null handling semantics, and memory ownership rules at JNI boundaries.",
+      "rule": "Code touching JNI calls (cudf/spark-rapids-jni) or private API interfaces (spark-rapids-private) may break from concurrent upstream SNAPSHOT changes. Review for assumptions about upstream behavior. Cross-reference rapidsai/cudf for correct function signatures, null handling semantics, and memory ownership rules at JNI boundaries.",
       "scope": ["sql-plugin/src/**", "shuffle-plugin/src/**"],
       "severity": "high"
     },

@@ -100,8 +100,7 @@ object GpuGroupPartitionsExecInfo {
       groupPartitions.groupedPartitions.map(_._2),
       groupPartitions.joinKeyPositions,
       groupPartitions.expectedPartitionKeys.map(_.size),
-      groupPartitions.reducers.map(
-        _.map(_.map(_.displayName()).getOrElse("identity"))),
+      GpuGroupPartitionsShims.reducerNames(groupPartitions),
       groupPartitions.distributePartitions,
       groupPartitions.enableSortedMerge)
   }
@@ -190,9 +189,9 @@ case class GpuGroupPartitionsExec(
 
   private def sortCoalescedPartitions(
       coalesced: RDD[ColumnarBatch]): RDD[ColumnarBatch] = {
-    // Concatenate each partition group first and then perform a spillable full GPU sort. This
-    // is a correctness-first implementation of Spark's row-based k-way merge and reuses the
-    // same retry and resource-management path as GpuSortExec.
+    // Coalescing concatenates the ordered parent streams, which can invalidate global ordering.
+    // Each input batch remains sorted, so reuse GpuSortExec's spillable external merge while
+    // skipping its redundant per-batch sort.
     val partitionsNeedingSort = partitionGroups.map(_.size > 1).toArray
     val sorter = new GpuSorter(groupInfo.gpuOutputOrdering, output, allMetrics)
     val targetSize = GpuSortExec.targetSize(conf)
@@ -210,7 +209,8 @@ case class GpuGroupPartitionsExec(
           opTime,
           sortTime,
           outputBatches,
-          outputRows)
+          outputRows,
+          inputAlreadySorted = true)
         onTaskCompletion(sorted.close())
         sorted
       } else {

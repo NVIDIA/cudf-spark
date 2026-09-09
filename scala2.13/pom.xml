@@ -67,6 +67,7 @@
         <module>dist</module>
         <module>integration_tests</module>
         <module>shuffle-plugin</module>
+        <module>iceberg-common</module>
         <module>sql-plugin-api</module>
         <module>sql-plugin-format</module>
         <module>sql-plugin-fileio</module>
@@ -929,6 +930,7 @@
                 <buildver>500</buildver>
                 <spark.version>${spark500.version}</spark.version>
                 <spark.test.version>${spark500.version}</spark.test.version>
+                <cudf-spark-private.artifactId>cudf-spark-private_${scala.binary.version}-spark-master</cudf-spark-private.artifactId>
                 <parquet.hadoop.version>1.15.2</parquet.hadoop.version>
                 <maven.compiler.source>17</maven.compiler.source>
                 <java.major.version>17</java.major.version>
@@ -1060,8 +1062,8 @@
         <cuda.version>cuda12</cuda.version>
         <jni.classifier>${cuda.version}</jni.classifier>
         <spark-rapids-jni.version>26.10.0-SNAPSHOT</spark-rapids-jni.version>
-        <spark-rapids-private.version>26.10.0-SNAPSHOT</spark-rapids-private.version>
-        <spark-rapids-hybrid.version>26.10.0-SNAPSHOT</spark-rapids-hybrid.version>
+        <cudf-spark-private.version>26.10.0-SNAPSHOT</cudf-spark-private.version>
+        <cudf-spark-private.artifactId>cudf-spark-private_${scala.binary.version}</cudf-spark-private.artifactId>
         <scala.binary.version>2.13</scala.binary.version>
         <scala.recompileMode>incremental</scala.recompileMode>
         <scala.version>2.13.18</scala.version>
@@ -1500,6 +1502,7 @@
                                                 <delete quiet="true">
                                                     <fileset dir="${spark.shim.dest}" includes=".shimplify-*"/>
                                                 </delete>
+                                                <mkdir dir="${spark.shim.dest}"/>
                                                 <touch file="${rapids.shimplify.cache.marker}"/>
                                             </then>
                                             <else>
@@ -1953,6 +1956,7 @@ This will force full Scala code rebuild in downstream modules.
                         <exclude>**/.*/**</exclude>
                         <exclude>**/src/main/java/com/nvidia/spark/rapids/format/*</exclude>
                         <exclude>**/*.csv</exclude>
+                        <exclude>scripts/with_resource_nesting_baseline.json</exclude>
                         <exclude>dist/*.txt</exclude>
                         <exclude>**/META-INF/com.nvidia.spark.rapids.SparkShimServiceProvider</exclude>
                         <!-- Apache Rat excludes target folder for projects that are included by
@@ -2028,6 +2032,24 @@ This will force full Scala code rebuild in downstream modules.
                                     <arg line="--xmlEncoding ${project.reporting.outputEncoding}"/>
                                     <arg line="${scalastyle.dirs}"/>
                                 </java>
+                                <exec executable="python3" failonerror="true"
+                                      dir="${spark.rapids.source.basedir}">
+                                    <arg value="-m"/>
+                                    <arg value="unittest"/>
+                                    <arg value="discover"/>
+                                    <arg value="-s"/>
+                                    <arg value="scripts/tests"/>
+                                    <arg value="-p"/>
+                                    <arg value="test_check_with_resource_nesting.py"/>
+                                </exec>
+                                <!-- Existing nesting exceptions are tracked by
+                                     https://github.com/NVIDIA/cudf-spark/issues/11713. -->
+                                <exec executable="python3" failonerror="true"
+                                      dir="${spark.rapids.source.basedir}">
+                                    <arg value="scripts/check_with_resource_nesting.py"/>
+                                    <arg value="--root"/>
+                                    <arg value="${spark.rapids.source.basedir}"/>
+                                </exec>
                             </target>
                         </configuration>
                     </execution>

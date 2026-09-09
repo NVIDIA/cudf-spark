@@ -5,4 +5,5 @@
 # still resolve at runtime.
 sql-plugin-columnar
 sql-plugin-format
+iceberg-common
 sql-plugin-fileio

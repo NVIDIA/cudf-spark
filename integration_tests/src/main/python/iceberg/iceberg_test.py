@@ -23,7 +23,8 @@ from conftest import is_iceberg_remote_catalog, is_iceberg_rest_catalog
 from data_gen import *
 from iceberg import get_full_table_name, iceberg_unsupported_mark, _build_tblprops, \
     _BASE_TBLPROPS_SQL, create_iceberg_table, supports_iceberg_v3, \
-    ICEBERG_V3_UNSUPPORTED_REASON
+    ICEBERG_V3_UNSUPPORTED_REASON, supports_iceberg_row_lineage_inheritance, \
+    ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, row_lineage_df
 from marks import allow_non_gpu, iceberg, ignore_order
 from spark_session import is_databricks_runtime, is_spark_35x, is_spark_400_or_later, \
     is_spark_40x, is_spark_41x, spark_version, with_cpu_session, with_gpu_session
@@ -169,6 +170,88 @@ def test_iceberg_spj_partial_clustering_distinct(spark_tmp_table_factory):
         conf=conf,
         require_non_empty=True,
         gpu_plan_assertion=_assert_partial_clustering_spj_plan)
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.skipif(
+    not is_spark_400_or_later(),
+    reason="spark.sql.sources.v2.bucketing.partition.filter.enabled was added in Spark 4.0.0")
+@pytest.mark.parametrize("partition_filter", [True, False], ids=["filtered", "unfiltered"])
+@pytest.mark.parametrize("partially_clustered", [True, False],
+                         ids=["partially_clustered", "clustered"])
+def test_iceberg_spj_partition_filter(spark_tmp_table_factory, partition_filter,
+                                      partially_clustered):
+    left_table = get_full_table_name(spark_tmp_table_factory)
+    right_table = get_full_table_name(spark_tmp_table_factory)
+    table_props = _build_tblprops({
+        # Keep separate INSERTs as separate scan splits so that id=1 is partially clustered.
+        "read.split.target-size": "1",
+        "read.split.open-file-cost": "1",
+    })
+    table_props_sql = ", ".join(f"'{k}' = '{v}'" for k, v in table_props.items())
+
+    def setup_iceberg_tables(spark):
+        spark.sql(
+            f"CREATE TABLE {left_table} (id INT, price DOUBLE) USING ICEBERG "
+            f"PARTITIONED BY (id) TBLPROPERTIES ({table_props_sql})")
+        spark.sql(
+            f"CREATE TABLE {right_table} (id INT, value STRING) USING ICEBERG "
+            f"PARTITIONED BY (id) TBLPROPERTIES ({table_props_sql})")
+
+        # Each side gets a key the other lacks (left id=3, right id=4), so partition filtering
+        # has something to prune on both scans. Spark decides which side pads and which
+        # replicates, so covering both branches of that decision means neither side may be a
+        # subset of the intersection. Each side also gets a key split across two files, inside
+        # the intersection, so whichever side pads reports numSplits=2 and partial clustering
+        # stays observable in the partition counts.
+        spark.sql(f"INSERT INTO {left_table} VALUES (1, 40.0), (2, 10.0), (3, 15.5)")
+        spark.sql(f"INSERT INTO {left_table} VALUES (1, 41.0)")
+        spark.sql(f"INSERT INTO {right_table} VALUES (1, 'a'), (2, 'b'), (4, 'd')")
+        spark.sql(f"INSERT INTO {right_table} VALUES (2, 'c')")
+
+    with_cpu_session(setup_iceberg_tables)
+
+    conf = {
+        "spark.sql.adaptive.enabled": "false",
+        "spark.sql.autoBroadcastJoinThreshold": "-1",
+        "spark.sql.sources.v2.bucketing.enabled": "true",
+        "spark.sql.sources.v2.bucketing.pushPartValues.enabled": "true",
+        "spark.sql.sources.v2.bucketing.partition.filter.enabled":
+            str(partition_filter).lower(),
+        "spark.sql.sources.v2.bucketing.partiallyClusteredDistribution.enabled":
+            str(partially_clustered).lower(),
+        "spark.sql.iceberg.planning.preserve-data-grouping": "true",
+    }
+
+    def join_after_spj(spark):
+        return spark.sql(
+            f"""
+            SELECT l.id, l.price, r.value
+            FROM {left_table} l
+            JOIN {right_table} r ON l.id = r.id
+            """)
+
+    # Both scans plan one partition per common partition value: the intersection {1, 2} when
+    # filtering, otherwise the union {1, 2, 3, 4}. Partial clustering adds one more, for the
+    # second file of the padding side's split key. KeyGroupedPartitioning.isPartiallyClustered
+    # would say this more directly but only exists on Spark 3.5.9+/4.0.3+/4.1.2+, which is the
+    # gate this test is deliberately avoiding.
+    expected_partitions = (2 if partition_filter else 4) + (1 if partially_clustered else 0)
+
+    def assert_plan(plan):
+        scans = _assert_spj_join_shape(plan, expect_spj=True)
+        counts = [scan.outputPartitioning().numPartitions() for scan in scans]
+        assert counts == [expected_partitions] * len(scans), \
+            f"Expected {expected_partitions} partitions per scan, found {counts}:\n{plan}"
+
+    # Asserting join output rather than SELECT DISTINCT keeps this off SPARK-55848, which is
+    # what forces the patch-level gate on test_iceberg_spj_partial_clustering_distinct.
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        join_after_spj,
+        conf=conf,
+        require_non_empty=True,
+        gpu_plan_assertion=assert_plan)
 
 
 # Enough rows that every bucket of the wider bucket(4) side is populated, so reducing it to
@@ -422,6 +505,83 @@ def test_iceberg_v3_read_fallback(spark_tmp_table_factory):
     assert_gpu_fallback_collect(
         lambda spark: spark.sql(f"SELECT * FROM {table_name}"),
         "BatchScanExec")
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.skipif(
+    not supports_iceberg_row_lineage_inheritance,
+    reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
+@pytest.mark.parametrize("reader_type", rapids_reader_types)
+def test_iceberg_v3_row_lineage_read(spark_tmp_table_factory, reader_type):
+    full_table = get_full_table_name(spark_tmp_table_factory)
+
+    def setup_iceberg_table(spark):
+        # Snapshots created before a v3 upgrade do not have row lineage. A snapshot created after
+        # the upgrade assigns lineage to both existing and newly-added files.
+        spark.sql(f"CREATE TABLE {full_table} (id BIGINT) USING ICEBERG "
+                  f"TBLPROPERTIES ('format-version' = '2')")
+        row_lineage_df(spark).writeTo(full_table).append()
+        v2_snapshot_id = spark.sql(
+            f"SELECT snapshot_id FROM {full_table}.snapshots ORDER BY committed_at DESC") \
+            .head()[0]
+        spark.sql(
+            f"ALTER TABLE {full_table} SET TBLPROPERTIES ("
+            "'format-version' = '3', "
+            "'write.parquet.row-group-size-bytes' = '4096', "
+            "'read.split.target-size' = '4096', "
+            "'read.split.open-file-cost' = '0')")
+
+        row_lineage_df(spark, start=DEFAULT_DATA_GEN_LENGTH).writeTo(full_table).append()
+        return v2_snapshot_id
+
+    v2_snapshot_id = with_cpu_session(setup_iceberg_table)
+    read_conf = {
+        "spark.rapids.sql.format.iceberg.v3.enabled": "true",
+        "spark.rapids.sql.format.parquet.reader.type": reader_type
+    }
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(
+            f"SELECT id, _row_id, _last_updated_sequence_number FROM {full_table} "
+            f"VERSION AS OF {v2_snapshot_id}"),
+        conf=read_conf)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(
+            f"SELECT id, _row_id, _last_updated_sequence_number FROM {full_table}"),
+        conf=read_conf)
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.skipif(
+    not supports_iceberg_row_lineage_inheritance,
+    reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
+def test_iceberg_v3_row_lineage_rewrite_data_files(spark_tmp_table_factory):
+    full_table = get_full_table_name(spark_tmp_table_factory)
+
+    def setup_iceberg_table(spark):
+        spark.sql(
+            f"CREATE TABLE {full_table} (id BIGINT) USING ICEBERG "
+            "TBLPROPERTIES ('format-version' = '3')")
+        half_length = DEFAULT_DATA_GEN_LENGTH // 2
+        row_lineage_df(spark, length=half_length).writeTo(full_table).append()
+        row_lineage_df(spark, start=half_length, length=half_length) \
+            .writeTo(full_table).append()
+        assert spark.sql(f"SELECT count(*) FROM {full_table}.data_files").head()[0] > 1
+
+        spark.sql(
+            f"CALL spark_catalog.system.rewrite_data_files(table => '{full_table}', "
+            "options => map('min-input-files', '2'))")
+        assert spark.sql(f"SELECT count(*) FROM {full_table}.data_files").head()[0] == 1
+
+    with_cpu_session(setup_iceberg_table)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(
+            f"SELECT id, _pos, _row_id, _last_updated_sequence_number FROM {full_table}"),
+        conf={
+            "spark.rapids.sql.format.iceberg.v3.enabled": "true",
+            "spark.rapids.sql.format.parquet.reader.type": "COALESCING"
+        })
 
 
 @iceberg
