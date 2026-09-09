@@ -134,16 +134,25 @@ private[execution] object BackendJoinRequest {
       override val requiredBuildSide: Option[GpuBuildSide] = Some(GpuBuildRight)
     }
 
+    private def requestFor(
+        joinType: JoinType,
+        planBuildSide: GpuBuildSide): Option[Distinct] = joinType match {
+      case _: InnerLike => Some(Inner(planBuildSide))
+      case org.apache.spark.sql.catalyst.plans.LeftOuter => Some(LeftOuter)
+      case org.apache.spark.sql.catalyst.plans.RightOuter => Some(RightOuter)
+      case org.apache.spark.sql.catalyst.plans.LeftSemi => Some(LeftSemi)
+      case org.apache.spark.sql.catalyst.plans.LeftAnti => Some(LeftAnti)
+      case _ => None
+    }
+
+    def supports(joinType: JoinType, planBuildSide: GpuBuildSide): Boolean = {
+      requestFor(joinType, planBuildSide).exists(_.requiredBuildSide.contains(planBuildSide))
+    }
+
     /** Map a Catalyst join type and its known-distinct build side to a backend request. */
     def apply(joinType: JoinType, planBuildSide: GpuBuildSide): Distinct = {
-      val request = joinType match {
-        case _: InnerLike => Inner(planBuildSide)
-        case org.apache.spark.sql.catalyst.plans.LeftOuter => LeftOuter
-        case org.apache.spark.sql.catalyst.plans.RightOuter => RightOuter
-        case org.apache.spark.sql.catalyst.plans.LeftSemi => LeftSemi
-        case org.apache.spark.sql.catalyst.plans.LeftAnti => LeftAnti
-        case other =>
-          throw new IllegalStateException(s"unsupported distinct backend join request $other")
+      val request = requestFor(joinType, planBuildSide).getOrElse {
+        throw new IllegalStateException(s"unsupported distinct backend join request $joinType")
       }
       require(request.requiredBuildSide.contains(planBuildSide),
         s"$joinType distinct join does not support build side $planBuildSide")

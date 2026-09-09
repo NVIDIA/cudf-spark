@@ -1804,8 +1804,8 @@ class HashJoinIterator(
   override protected def selectHashJoinPlan(
       leftRowCount: Long,
       rightRowCount: Long): HashJoinPlan = {
-    // Distinct join optimization takes priority over all other strategies
-    if (buildStats.isDistinct) {
+    // Distinct join optimization takes priority when cuDF supports the materialized build side
+    if (buildStats.isDistinct && BackendJoinRequest.Distinct.supports(joinType, buildSide)) {
       DistinctHashPlan(joinType, buildSide)
     } else {
       JoinStrategy.selectStrategy(
