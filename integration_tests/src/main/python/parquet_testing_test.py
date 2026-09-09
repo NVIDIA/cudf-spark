@@ -56,12 +56,6 @@ _xfail_files = {
     "nested_structs.rust.parquet": "PySpark cannot handle year 52951",
 }
 
-# These files currently expose Blackwell-specific row-conversion corruption.
-_skip_files = {
-    "alltypes_tiny_pages.parquet": "https://github.com/NVIDIA/cudf-spark/issues/15872",
-    "alltypes_tiny_pages_plain.parquet": "https://github.com/NVIDIA/cudf-spark/issues/15872",
-}
-
 # Spark's CPU vectorized reader gained standalone DELTA_LENGTH_BYTE_ARRAY support in Spark 3.4.
 if is_before_spark_340():
     _xfail_files["delta_length_byte_array.parquet"] = (
@@ -155,10 +149,6 @@ def gen_testing_params_for_valid_files():
     for f in locate_parquet_testing_files():
         basename = os.path.basename(f)
         if basename in _error_files:
-            continue
-        skip_reason = _skip_files.get(basename, None)
-        if skip_reason:
-            files.append(pytest.param(f, marks=pytest.mark.skip(reason=skip_reason)))
             continue
         xfail_reason = _xfail_files.get(basename, None)
         if xfail_reason:
