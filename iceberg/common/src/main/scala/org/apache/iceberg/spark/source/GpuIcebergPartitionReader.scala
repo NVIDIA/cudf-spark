@@ -153,6 +153,7 @@ class GpuIcebergPartitionReader(
       task.maxGpuColumnSizeBytes,
       task.chunkedReaderEnabled,
       task.maxChunkedReaderMemoryUsageSizeBytes,
+      task.skipReadEstimate,
       task.parquetDebugDumpPrefix,
       task.parquetDebugDumpAlways,
       metrics,

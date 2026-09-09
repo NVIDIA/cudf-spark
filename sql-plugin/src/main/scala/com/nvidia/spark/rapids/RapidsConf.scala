@@ -752,6 +752,19 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .bytesConf(ByteUnit.BYTE)
     .createWithDefault(Integer.MAX_VALUE)
 
+  val READER_USE_READ_ESTIMATE_FROM_SCHEMA =
+    conf("spark.rapids.sql.reader.useReadEstimateFromSchema")
+      .doc("Use a schema based estimate of GPU memory to limit a read batch. The estimate is a " +
+        s"worst case guess that ignores compression, so it can stop a batch short of " +
+        s"'${MAX_READER_BATCH_SIZE_BYTES.key}'. If unset, the estimate is used only when there " +
+        s"is no chunked reader (see '${CHUNKED_READER.key}'), since a chunked reader already " +
+        s"bounds its own output to '${GPU_BATCH_SIZE_BYTES.key}'. Set to true to use it " +
+        "everywhere, or false to use it nowhere and let batches fill up to the row and byte " +
+        "limits. Text based readers such as CSV and JSON never use it, they measure the bytes " +
+        "they actually read.")
+      .booleanConf
+      .createOptional
+
   val DRIVER_TIMEZONE = conf("spark.rapids.driver.user.timezone")
     .doc("This config is used to inform the executor plugin about the driver's timezone " +
       "and is not intended to be set by the user.")
@@ -3558,6 +3571,20 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val maxReadBatchSizeRows: Int = get(MAX_READER_BATCH_SIZE_ROWS)
 
   lazy val maxReadBatchSizeBytes: Long = get(MAX_READER_BATCH_SIZE_BYTES)
+
+  /**
+   * Whether a reader should ignore the schema based GPU memory estimate when sizing a batch.
+   *
+   * @param chunkedReaderEnabled whether this reader has a chunked reader, which bounds its own
+   *                             GPU memory usage and so does not need the estimate. Pass false
+   *                             for formats that have no chunked reader.
+   */
+  def skipReadEstimate(chunkedReaderEnabled: Boolean): Boolean =
+    get(READER_USE_READ_ESTIMATE_FROM_SCHEMA) match {
+      case Some(true) => false
+      case Some(false) => true
+      case None => chunkedReaderEnabled
+    }
 
   lazy val maxGpuColumnSizeBytes: Long = get(MAX_GPU_COLUMN_SIZE_BYTES)
 

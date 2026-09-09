@@ -475,6 +475,7 @@ private object TestGpuDeleteLoader {
         10000000,
         useChunkedReader = false,
         10000000,
+        skipReadEstimate = true,
         None,
         parquetDebugDumpAlways = false,
         Map(OP_TIME_LEGACY -> NoopMetric, JOIN_TIME -> NoopMetric),

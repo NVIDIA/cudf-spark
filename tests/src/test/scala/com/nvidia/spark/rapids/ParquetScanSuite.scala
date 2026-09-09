@@ -33,6 +33,26 @@ class ParquetScanSuite extends SparkQueryCompareTestSuite {
     frame => frame.select(col("*"))
   }
 
+  // The read estimate is only consulted when there is no chunked reader, so the chunked reader
+  // is turned off here to keep covering the byte limit path.
+  testSparkResultsAreEqual("Test Parquet with byte chunks using the read estimate",
+    fileSplitsParquet,
+    conf = new SparkConf()
+      .set(RapidsConf.CHUNKED_READER.key, "false")
+      .set(RapidsConf.READER_USE_READ_ESTIMATE_FROM_SCHEMA.key, "true")
+      .set(RapidsConf.MAX_READER_BATCH_SIZE_BYTES.key, "100")) {
+    frame => frame.select(col("*"))
+  }
+
+  testSparkResultsAreEqual("Test Parquet with byte chunks skipping the read estimate",
+    fileSplitsParquet,
+    conf = new SparkConf()
+      .set(RapidsConf.CHUNKED_READER.key, "false")
+      .set(RapidsConf.READER_USE_READ_ESTIMATE_FROM_SCHEMA.key, "false")
+      .set(RapidsConf.MAX_READER_BATCH_SIZE_BYTES.key, "100")) {
+    frame => frame.select(col("*"))
+  }
+
   // Eventually it would be nice to move this to the integration tests,
   // but the file it depends on is used in other tests too.
   testSparkResultsAreEqual("Test Parquet timestamps and dates",
