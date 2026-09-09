@@ -38,10 +38,6 @@ object MergeIntoCommandMetaShim {
   private def tagForGpuCommon(
       meta: RapidsMeta[_, _, _],
       mergeCmd: MergeIntoCommandBase): Unit = {
-    // see https://github.com/NVIDIA/spark-rapids/issues/8415 for more information
-    if (mergeCmd.notMatchedBySourceClauses.nonEmpty) {
-      meta.willNotWorkOnGpu("notMatchedBySourceClauses not supported on GPU")
-    }
     tagPersistentDeletionVectorFallback(
       meta,
       mergeCmd.targetFileIndex.deltaLog,
