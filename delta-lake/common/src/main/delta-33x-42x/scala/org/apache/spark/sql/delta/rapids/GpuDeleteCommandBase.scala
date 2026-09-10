@@ -231,7 +231,7 @@ abstract class GpuDeleteCommandBase(
               targetDf,
               candidateFiles,
               exprToColumn(cond),
-              input_file_name(),
+              None,
               col(ROW_INDEX_COLUMN_NAME),
               nameToAddFileMap)
 

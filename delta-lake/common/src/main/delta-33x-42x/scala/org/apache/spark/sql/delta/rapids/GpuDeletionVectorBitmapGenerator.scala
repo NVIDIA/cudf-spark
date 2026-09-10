@@ -28,20 +28,12 @@ import org.apache.spark.sql.delta.commands.{DeletionVectorData, DeletionVectorWr
 import org.apache.spark.sql.delta.deletionvectors.{RoaringBitmapArray, RoaringBitmapArrayFormat}
 import org.apache.spark.sql.delta.util.{Utils => DeltaUtils}
 import org.apache.spark.sql.delta.util.DeltaFileOperations.absolutePath
-import org.apache.spark.sql.functions.{broadcast, col, collect_list}
+import org.apache.spark.sql.functions.{col, collect_list}
 
 private[rapids] object GpuDeletionVectorBitmapGenerator {
-  private val FileNameColumn = "filePath"
   private val FileIdColumn = "fileId"
-  private val FileNameKeyColumn = "fileNameKey"
   private val RowIndexColumn = "rowIndexCol"
   private val RowIndexListColumn = "rowIndexList"
-
-  case class FileDictionaryRow(fileNameKey: String, fileId: Long)
-
-  private object FileDictionaryRow {
-    implicit val encoder: Encoder[FileDictionaryRow] = Encoders.product[FileDictionaryRow]
-  }
 
   case class GroupedRowIndexes(
       fileId: Long,
@@ -59,23 +51,18 @@ private[rapids] object GpuDeletionVectorBitmapGenerator {
       targetDf: DataFrame,
       candidateFiles: Seq[AddFile],
       condition: Column,
-      fileNameColumn: Column,
+      precomputedFileIdColumn: Option[Column],
       rowIndexColumn: Column,
       nameToAddFileMap: Map[String, AddFile]): Seq[TouchedFileWithDV] = {
-    val matchedRows = targetDf
-      .withColumn(FileNameColumn, fileNameColumn)
-      .filter(condition)
-      .withColumn(RowIndexColumn, rowIndexColumn)
-
     val basePath = txn.deltaLog.dataPath.toString
     val candidateFilePaths = candidateFiles.map { addFile =>
       SparkPath.fromPath(absolutePath(basePath, addFile.path)).urlEncoded
     }
     require(candidateFilePaths.distinct.size == candidateFilePaths.size,
       "Cannot safely match duplicate deletion-vector candidate paths")
-    val fileDictionaryRows = candidateFilePaths.zipWithIndex.map { case (filePath, fileId) =>
-      FileDictionaryRow(filePath, fileId.toLong)
-    }
+    val fileIdByPath = candidateFilePaths.zipWithIndex.map { case (filePath, fileId) =>
+      filePath -> fileId.toLong
+    }.toMap
     val fileInfoById = candidateFiles.zipWithIndex.map { case (addFile, fileId) =>
       val canonicalPath = SparkPath.fromPath(absolutePath(basePath, addFile.path)).urlEncoded
       val serializedDv = if (tableHasDVs) {
@@ -87,13 +74,14 @@ private[rapids] object GpuDeletionVectorBitmapGenerator {
     }.toMap
     val fileInfoBroadcast = spark.sparkContext.broadcast(fileInfoById)
 
-    import FileDictionaryRow.encoder
-    val fileDictionaryDf = broadcast(spark.createDataset(fileDictionaryRows))
-    val joinExpr = fileDictionaryDf(FileNameKeyColumn) === matchedRows(FileNameColumn)
-    val matchedRowsWithIndexes = matchedRows
-      .join(fileDictionaryDf, joinExpr, "inner")
+    val rowsWithFileId = precomputedFileIdColumn.fold(
+      targetDf.withColumn(FileIdColumn, new Column(InputFileDictionaryId(fileIdByPath))))(
+      fileId => targetDf.withColumn(FileIdColumn, fileId))
+    val matchedRowsWithIndexes = rowsWithFileId
+      .filter(condition)
+      .withColumn(RowIndexColumn, rowIndexColumn)
       .filter(col(RowIndexColumn).isNotNull)
-      .select(fileDictionaryDf(FileIdColumn), matchedRows(RowIndexColumn))
+      .select(col(FileIdColumn), col(RowIndexColumn))
 
     val prefixLength = DeltaUtils.getRandomPrefixLength(txn.metadata)
     val storeDvs = DeletionVectorWriter.createMapperToStoreDeletionVectors(
