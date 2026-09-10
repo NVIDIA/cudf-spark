@@ -59,6 +59,19 @@ class GpuDeviceManagerSuite extends AnyFunSuite with BeforeAndAfter {
 
   def toBytes: String => Long = ConfHelper.byteFromString(_, ByteUnit.BYTE)
 
+  test("cuDF pinned pool fallback for GPU Kudo") {
+    assertResult(toBytes("1m")) {
+      GpuDeviceManager.getCudfDefaultPinnedPoolSize(pinnedSize = 0L, gpuKudoEnabled = true)
+    }
+    assertResult(0L) {
+      GpuDeviceManager.getCudfDefaultPinnedPoolSize(pinnedSize = toBytes("1m"),
+        gpuKudoEnabled = true)
+    }
+    assertResult(0L) {
+      GpuDeviceManager.getCudfDefaultPinnedPoolSize(pinnedSize = 0L, gpuKudoEnabled = false)
+    }
+  }
+
   test("RMM pool size") {
     val freeGpuSize = Cuda.memGetInfo().free
     val poolFraction = 0.1
