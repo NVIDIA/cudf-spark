@@ -1878,39 +1878,6 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .booleanConf
     .createWithDefault(true)
 
-  val ICEBERG_S3_ASYNC_MAX_CONCURRENCY =
-    conf("spark.rapids.iceberg.s3.async.max-concurrency")
-      .doc("Max concurrent connections for the AwsCrtAsyncHttpClient used by the " +
-        "cuDF plugin Iceberg S3 byte-range reader. Used only when the Iceberg " +
-        "FileIO property `s3.crt.max-concurrency` is not set.")
-      .startupOnly()
-      .integerConf
-      .createWithDefault(200)
-
-  val ICEBERG_S3_ASYNC_CONNECTION_MAX_IDLE_MS =
-    conf("spark.rapids.iceberg.s3.async.connection-max-idle-time-ms")
-      .doc("Connection-max-idle-time (ms) for the AwsCrtAsyncHttpClient used by the " +
-        "cuDF plugin Iceberg S3 byte-range reader. No equivalent Iceberg property.")
-      .startupOnly()
-      .longConf
-      .createWithDefault(5L * 60 * 1000)
-
-  val ICEBERG_S3_ASYNC_TCP_KEEPALIVE_INTERVAL_MS =
-    conf("spark.rapids.iceberg.s3.async.tcp-keepalive-interval-ms")
-      .doc("TCP keep-alive probe interval (ms) for the AwsCrtAsyncHttpClient used by " +
-        "the cuDF plugin Iceberg S3 byte-range reader. No equivalent Iceberg property.")
-      .startupOnly()
-      .longConf
-      .createWithDefault(60L * 1000)
-
-  val ICEBERG_S3_ASYNC_TCP_KEEPALIVE_TIMEOUT_MS =
-    conf("spark.rapids.iceberg.s3.async.tcp-keepalive-timeout-ms")
-      .doc("TCP keep-alive probe timeout (ms) for the AwsCrtAsyncHttpClient used by " +
-        "the cuDF plugin Iceberg S3 byte-range reader. No equivalent Iceberg property.")
-      .startupOnly()
-      .longConf
-      .createWithDefault(30L * 1000)
-
   val ENABLE_HIVE_TEXT: ConfEntryWithDefault[Boolean] =
     conf("spark.rapids.sql.format.hive.text.enabled")
       .doc("When set to false disables Hive text table acceleration. " +
