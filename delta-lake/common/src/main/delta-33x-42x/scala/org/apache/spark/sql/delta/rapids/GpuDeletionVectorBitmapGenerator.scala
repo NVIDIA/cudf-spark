@@ -76,7 +76,9 @@ private[rapids] object GpuDeletionVectorBitmapGenerator {
     val fileInfoBroadcast = spark.sparkContext.broadcast(fileInfoById)
 
     val rowsWithFileId = precomputedFileIdColumn.fold(
-      targetDf.withColumn(FileIdColumn, DFUDFShims.exprToColumn(InputFileDictionaryId(fileIdByPath))))(
+      targetDf.withColumn(
+        FileIdColumn,
+        DFUDFShims.exprToColumn(InputFileDictionaryId(fileIdByPath))))(
       fileId => targetDf.withColumn(FileIdColumn, fileId))
     val matchedRowsWithIndexes = rowsWithFileId
       .filter(condition)
