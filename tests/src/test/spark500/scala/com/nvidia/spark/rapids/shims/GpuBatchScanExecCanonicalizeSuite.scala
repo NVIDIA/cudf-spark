@@ -22,6 +22,7 @@ package com.nvidia.spark.rapids.shims
 import java.util.Collections
 
 import com.nvidia.spark.rapids.{GpuScan, SparkQueryCompareTestSuite}
+import org.mockito.Mockito.when
 import org.scalatestplus.mockito.MockitoSugar
 
 import org.apache.spark.SparkConf
@@ -35,7 +36,6 @@ import org.apache.spark.sql.connector.read.{Batch, HasPartitionKey, InputPartiti
     PartitionReaderFactory, SupportsRuntimeV2Filtering}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.{IntegerType, StringType, StructType}
-import org.mockito.Mockito.when
 
 class GpuBatchScanExecCanonicalizeSuite extends SparkQueryCompareTestSuite with MockitoSugar {
   private object EmptyBatch extends Batch {
