@@ -100,7 +100,7 @@ def _assert_spj_join_shape(plan, expect_spj):
     return scans
 
 
-def _assert_partial_clustering_spj_plan(plan):
+def _assert_partial_clustering_spj_plan(_cpu_plan, plan):
     scans = _assert_spj_join_shape(plan, expect_spj=True)
 
     exchanges = _nodes_of_class(plan, "GpuShuffleExchangeExec")
@@ -239,7 +239,7 @@ def test_iceberg_spj_partition_filter(spark_tmp_table_factory, partition_filter,
     # gate this test is deliberately avoiding.
     expected_partitions = (2 if partition_filter else 4) + (1 if partially_clustered else 0)
 
-    def assert_plan(plan):
+    def assert_plan(_cpu_plan, plan):
         scans = _assert_spj_join_shape(plan, expect_spj=True)
         counts = [scan.outputPartitioning().numPartitions() for scan in scans]
         assert counts == [expected_partitions] * len(scans), \
@@ -330,7 +330,7 @@ def test_iceberg_spj_reducible_transforms(spark_tmp_table_factory, key_ddl, key_
         join_on_reducible_transforms,
         conf=conf,
         require_non_empty=True,
-        gpu_plan_assertion=lambda plan: _assert_spj_join_shape(
+        gpu_plan_assertion=lambda _cpu_plan, plan: _assert_spj_join_shape(
             plan, allow_compatible_transforms))
 
 

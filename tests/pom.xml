@@ -252,6 +252,33 @@
         </profile>
         <!-- #if scala-2.13 --><!--
         <profile>
+            <id>release401</id>
+            <activation>
+                <property>
+                    <name>buildver</name>
+                    <value>401</value>
+                </property>
+            </activation>
+            <properties>
+                <delta.test.spark.artifactId>${delta40x.spark.artifactId}</delta.test.spark.artifactId>
+                <delta.test.version>${delta40x.version}</delta.test.version>
+            </properties>
+            <dependencies>
+                <dependency>
+                    <groupId>io.delta</groupId>
+                    <artifactId>${delta.test.spark.artifactId}</artifactId>
+                    <version>${delta.test.version}</version>
+                    <scope>test</scope>
+                    <exclusions>
+                        <exclusion>
+                            <groupId>io.unitycatalog</groupId>
+                            <artifactId>unitycatalog-client</artifactId>
+                        </exclusion>
+                    </exclusions>
+                </dependency>
+            </dependencies>
+        </profile>
+        <profile>
             <id>release400</id>
             <activation>
                 <property>
@@ -312,11 +339,15 @@
                     <value>411</value>
                 </property>
             </activation>
+            <properties>
+                <delta.test.spark.artifactId>${delta41x.spark.artifactId}</delta.test.spark.artifactId>
+                <delta.test.version>${delta41x.version}</delta.test.version>
+            </properties>
             <dependencies>
                 <dependency>
                     <groupId>io.delta</groupId>
-                    <artifactId>${delta41x.spark.artifactId}</artifactId>
-                    <version>${delta41x.version}</version>
+                    <artifactId>${delta.test.spark.artifactId}</artifactId>
+                    <version>${delta.test.version}</version>
                     <scope>test</scope>
                     <exclusions>
                         <exclusion>

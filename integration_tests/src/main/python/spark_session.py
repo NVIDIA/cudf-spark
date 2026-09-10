@@ -340,6 +340,13 @@ def is_databricks143():
 def is_databricks173_or_later():
     return is_databricks_version_or_later(17, 3)
 
+def is_spark_protobuf_available():
+    if is_databricks_runtime():
+        return is_databricks122_or_later()
+    return (is_spark_340_or_later() and
+            os.environ.get('INCLUDE_SPARK_PROTOBUF_JAR', 'true').lower() != 'false')
+
+
 def supports_delta_lake_deletion_vectors():
     """Whether the current Delta Lake runtime provides the deletion-vector feature."""
     if is_databricks_runtime():
@@ -353,6 +360,15 @@ def gpu_supports_delta_dv_scan():
         return is_databricks173_or_later()
     else:
         return is_spark_353_or_later()
+
+def supports_delta_lake_row_tracking():
+    """Whether the current Delta Lake runtime provides row tracking (delta.enableRowTracking and
+    the _metadata.row_id / row_commit_version fields). OSS: Delta Lake 3.3, which the plugin pairs
+    with Spark 3.5.x and later."""
+    if is_databricks_runtime():
+        return is_databricks173_or_later()
+    else:
+        return is_spark_350_or_later()
 
 def is_support_default_values_in_schema():
     # Spark 340 + and Databricks 330 + support

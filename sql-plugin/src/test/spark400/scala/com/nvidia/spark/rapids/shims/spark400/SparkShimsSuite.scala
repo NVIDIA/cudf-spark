@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,7 +20,10 @@ spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims.spark400
 
 import com.nvidia.spark.rapids._
+import com.nvidia.spark.rapids.shims.GpuTypeShims
 import org.scalatest.funsuite.AnyFunSuite
+
+import org.apache.spark.sql.types.{DayTimeIntervalType, VariantType, YearMonthIntervalType}
 
 class SparkShimsSuite extends AnyFunSuite with FQSuiteName {
   test("spark shims version") {
@@ -30,6 +33,14 @@ class SparkShimsSuite extends AnyFunSuite with FQSuiteName {
   test("shuffle manager class") {
     assert(ShimLoader.getRapidsShuffleManagerClass ===
       classOf[com.nvidia.spark.rapids.spark400.RapidsShuffleManager].getCanonicalName)
+  }
+
+  test("common operator types include Variant and ANSI intervals") {
+    val check = GpuTypeShims.additionalCommonOperatorSupportedTypes
+    assert(GpuTypeShims.supportsVariantType)
+    assert(check.isSupportedByPlugin(VariantType))
+    assert(check.isSupportedByPlugin(DayTimeIntervalType()))
+    assert(check.isSupportedByPlugin(YearMonthIntervalType()))
   }
 
 }

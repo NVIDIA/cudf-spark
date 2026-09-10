@@ -734,6 +734,8 @@ case class GpuOrcMultiFilePartitionReaderFactory(
           } catch {
             case e: FileNotFoundException if ignoreMissingFiles =>
               logWarning(s"Skipped missing file: ${file.filePath}", e)
+            case e: FileNotFoundException =>
+              throw GpuFileNotFoundException(file.filePath.toString, e)
           }
         }
       }

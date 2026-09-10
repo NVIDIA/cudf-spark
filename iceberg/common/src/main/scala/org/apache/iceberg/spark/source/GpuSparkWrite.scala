@@ -446,7 +446,7 @@ class GpuUnpartitionedDataWriter(
     close()
 
     val result = delegate.result()
-    SparkCleanupUtil.deleteTaskFiles(io, result.dataFiles())
+    GpuSparkWriteAccess.deleteTaskFiles(io, result.dataFiles())
   }
 
   override def close(): Unit = {
@@ -494,7 +494,7 @@ class GpuPartitionedDataWriter(
     close()
 
     val result = delegate.result()
-    SparkCleanupUtil.deleteTaskFiles(io, result.dataFiles())
+    GpuSparkWriteAccess.deleteTaskFiles(io, result.dataFiles())
   }
 
   override def close(): Unit = {

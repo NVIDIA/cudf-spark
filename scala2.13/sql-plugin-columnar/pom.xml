@@ -27,7 +27,7 @@
     </parent>
 
     <artifactId>rapids-4-spark-sql-plugin-columnar_2.13</artifactId>
-    <description>Java-only columnar runtime plumbing for the RAPIDS SQL plugin</description>
+    <description>Root-safe columnar runtime plumbing for the cuDF Plugin</description>
     <version>26.10.0-SNAPSHOT</version>
 
     <properties>
