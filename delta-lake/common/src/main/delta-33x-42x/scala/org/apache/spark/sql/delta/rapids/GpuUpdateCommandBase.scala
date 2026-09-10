@@ -167,7 +167,7 @@ abstract class GpuUpdateCommandBase(
           targetDf,
           candidateFiles,
           exprToColumn(updateCondition),
-          input_file_name(),
+          None,
           col(ROW_INDEX_COLUMN_NAME),
           nameToAddFile)
       } else {

@@ -29,7 +29,7 @@ import org.apache.spark.sql.delta.{DeltaLog, DeltaParquetFileFormat}
 import org.apache.spark.sql.delta.DeltaParquetFileFormat.IS_ROW_DELETED_COLUMN_NAME
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
 import org.apache.spark.sql.delta.metric.IncrementMetric
-import org.apache.spark.sql.delta.rapids.DeltaRuntimeShim
+import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShim, InputFileDictionaryId}
 import org.apache.spark.sql.delta.sources.DeltaSQLConf
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.datasources.{FileFormat, HadoopFsRelation, SaveIntoDataSourceCommand}
@@ -94,7 +94,8 @@ abstract class DeltaProviderBase extends DeltaIOProvider {
       "IncrementMetric",
       ExprChecks.unaryProject(TypeSig.all, TypeSig.all, TypeSig.all, TypeSig.all),
       (cpuInc, conf, p, r) => GpuIncrementMetricMeta(cpuInc, conf, p, r)
-    )
+    ),
+    InputFileDictionaryId.exprRule
   ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
 
   override def tagSupportForGpuFileSourceScan(meta: SparkPlanMeta[FileSourceScanExec]): Unit = {
