@@ -55,8 +55,8 @@ IDs are not monotonically increasing.
 Phase 1 handles this by:
 1. **Detecting batch boundaries**: When partition ID decreases (e.g., from N-1 back to 0), 
    we know a new batch has started
-2. **Independent processing per batch**: Each batch gets its own merger thread and 
-   partial file
+2. **Independent processing per batch**: Each batch gets its own `BatchMerger` state and
+   partial file. Short merger steps run on a shared, bounded executor.
 3. **Final merge**: After all batches complete, merge their partial files into one output
 
 This multi-batch mechanism is essential - without it, the pipeline would break when 
@@ -160,7 +160,7 @@ partition ID. This allows us to:
 | Problem | Solution |
 |---------|----------|
 | Write amplification | Write to single output file per batch (no temp files per partition) - possible because data arrives in partition order |
-| No pipeline | 3-stage pipeline: Main Thread -> Writer Threads -> Merger Thread - Merger can write partitions sequentially because they arrive in order |
+| No pipeline | 3-stage pipeline: Main Thread -> Writer Pool -> Merger Pool - Each merger can write partitions sequentially because they arrive in order |
 | 200 partition limit | New architecture works with any number of partitions - no need to open N file handles since we write sequentially |
 | Uncontrolled page cache reliance | Application-controlled memory management with explicit spill decisions |
 
@@ -170,8 +170,8 @@ partition ID. This allows us to:
 
 Phase 1 introduces two major changes:
 
-**1. Three-Stage Pipeline**: Decouple record processing, serialization/compression, and 
-disk I/O into separate threads that run in parallel.
+**1. Three-Stage Pipeline**: Decouple record processing, serialization/compression, and
+disk I/O across the main thread and two bounded executors.
 
 **2. Memory-First Partial Files**: Replace per-partition temp files with a single 
 `SpillablePartialFileHandle` per batch that can reside in memory or on disk.
@@ -197,9 +197,9 @@ Together, these changes address all four problems:
 │                AFTER (Phase 1 Implementation)                               │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  Main Thread          Writer Threads         Merger Thread                  │
-│  (queue tasks)   ──►  (serialize+compress)  ──►  (write to single output)   │
-│  [non-blocking]       [parallel]                 [sequential, pipelined]    │
+│  Main Thread          Writer Pool            Merger Pool                    │
+│  (queue tasks)   ──►  (serialize+compress)  ──►  (cooperative steps)        │
+│  [non-blocking]       [bounded parallelism]      [bounded, non-blocking]    │
 │                                                         │                   │
 │                                                         ▼                   │
 │                                          SpillablePartialFileHandle         │
@@ -265,13 +265,13 @@ based on current memory pressure:
 │  │               RapidsShuffleThreadedWriter (3-stage pipeline)          │  │
 │  │                                                                       │  │
 │  │  ┌─────────────┐    ┌─────────────────┐    ┌───────────────────────┐  │  │
-│  │  │ Main Thread │ ─► │ Writer Threads  │ ─► │    Merger Thread      │  │  │
-│  │  │             │    │     (Pool)      │    │    (per batch)        │  │  │
+│  │  │ Main Thread │ ─► │   Writer Pool   │ ─► │     Merger Pool       │  │  │
+│  │  │             │    │    (bounded)    │    │      (bounded)        │  │  │
 │  │  │ • Process   │    │                 │    │                       │  │  │
-│  │  │   records   │    │ • Serialize     │    │ • Wait for partition  │  │  │
-│  │  │ • Inc ref   │    │ • Compress      │    │   completion          │  │  │
-│  │  │ • Queue     │    │ • Write to      │    │ • Write to output     │  │  │
-│  │  │   tasks     │    │   buffer        │    │   in order            │  │  │
+│  │  │   records   │    │ • Serialize     │    │ • Drain ready records  │  │  │
+│  │  │ • Inc ref   │    │ • Compress      │    │ • Write in partition   │  │  │
+│  │  │ • Queue     │    │ • Write to      │    │   order                │  │  │
+│  │  │   tasks     │    │   buffer        │    │ • Yield if not ready   │  │  │
 │  │  └─────────────┘    └─────────────────┘    └───────────┬───────────┘  │  │
 │  │                                                        │              │  │
 │  └────────────────────────────────────────────────────────┼──────────────┘  │
@@ -390,7 +390,7 @@ The pipeline depends on cudf's partition output being **ordered by partition ID*
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-This ordering enables the Merger Thread to:
+This ordering enables each `BatchMerger` to:
 1. Know that when it sees partition 1 data, ALL of partition 0 data has already arrived
 2. Write partitions sequentially to a single output stream (0, then 1, then 2, ...)
 3. Never need to "go back" and write more data for an earlier partition
@@ -407,15 +407,15 @@ partition is "complete" and ready to write.
 │                                                                             │
 │  Stage 1              Stage 2                    Stage 3                    │
 │  ┌─────────────┐      ┌───────────────────┐      ┌─────────────────────┐    │
-│  │ Main Thread │      │  Writer Threads   │      │   Merger Thread     │    │
-│  │             │      │     (Pool)        │      │   (Per Batch)       │    │
+│  │ Main Thread │      │    Writer Pool    │      │    Merger Pool      │    │
+│  │             │      │     (bounded)     │      │     (bounded)       │    │
 │  │ 1. Process  │      │                   │      │                     │    │
-│  │    records  │ ───► │ 4. Execute        │ ───► │ 6. Wait for         │    │
-│  │ 2. Inc ref  │      │    compression    │      │    completions      │    │
+│  │    records  │ ───► │ 4. Execute        │ ───► │ 6. Drain ready      │    │
+│  │ 2. Inc ref  │      │    compression    │      │    records          │    │
 │  │    count    │      │    (serialize +   │      │ 7. Write to         │    │
 │  │ 3. Queue    │      │     compress)     │      │    OutputStream     │    │
 │  │    task     │      │ 5. Write to       │      │    in partition     │    │
-│  │             │      │    buffer         │      │    order            │    │
+│  │             │      │    buffer         │      │    order, then yield│    │
 │  └─────────────┘      └───────────────────┘      └──────────┬──────────┘    │
 │                                                             │               │
 │                                                             ▼               │
@@ -423,6 +423,12 @@ partition is "complete" and ready to write.
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+Each batch owns its `BatchMerger` state, but not a dedicated thread. A merger step drains
+all currently ready records and returns when it reaches an unfinished compression future or an
+empty queue whose producer is not finished. Record enqueue, compression completion, and batch
+finalization reschedule the merger. The merger pool has the same size as the configured writer
+pool, so waiting batches do not occupy executor threads and merger concurrency remains bounded.
 
 **Multi-Batch Detection and Handling**:
 
@@ -449,11 +455,11 @@ The writer detects batch boundaries by observing partition ID decrease:
 When multi-batch is detected:
 1. Mark current batch as complete (set `maxPartitionIdQueued = numPartitions`)
 2. Add current batch state to pending list
-3. Create new batch state (new writer, new merger thread) - **no blocking!**
+3. Create a new batch state and writer; its merger steps use the shared pool - **no blocking!**
 4. Continue processing the new batch immediately
 
 After all records processed:
-1. Wait for all batch merger threads to complete (they run in **parallel**!)
+1. Wait for all batch merger futures to complete (bounded merger steps may complete out of order)
 2. Extract partial file handles from each batch
 3. Merge all partial files into final output
 
@@ -473,7 +479,7 @@ After all records processed:
 │  │   2. Inc ref count on ColumnarBatch                                 │    │
 │  │   3. Acquire limiter (may block if too much in-flight)              │    │
 │  │   4. Queue compression task to writer thread pool                   │    │
-│  │   5. Notify merger thread (non-blocking)                            │    │
+│  │   5. Schedule a cooperative merger step (non-blocking)             │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                              │                                              │
 │                              ▼                                              │
@@ -488,12 +494,13 @@ After all records processed:
 │                              │                                              │
 │                              ▼                                              │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │ Step 3: Merger Thread (for partitionId from 0 to N)                 │    │
+│  │ Step 3: Shared Merger Pool (for partitionId from 0 to N)            │    │
 │  │                                                                     │    │
-│  │   1. Wait for all futures for this partition to complete            │    │
+│  │   1. Drain ready futures from the head of the partition queue       │    │
 │  │   2. Incrementally write buffer content to OutputStream             │    │
 │  │   3. Release limiter for each completed future                      │    │
-│  │   4. Clean up buffer when partition is fully written                │    │
+│  │   4. Yield when the next future or producer work is not ready       │    │
+│  │   5. Reschedule on enqueue, future completion, or finalization      │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                              │                                              │
 │                              ▼                                              │
@@ -527,17 +534,17 @@ After all records processed:
 │            │ batch state       │ batch state       │                        │
 │            ▼                   ▼                   ▼                        │
 │                                                                             │
-│  Merger Threads (all run in PARALLEL):                                      │
+│  Shared Merger Pool (bounded by configured writer thread count):            │
 │  ┌───────────────────────────────────────────────────────────────────────┐  │
-│  │ Merger Thread 1: ══════════════════════► Write to PartialFile 1       │  │
-│  │ Merger Thread 2:        ═══════════════════════► Write to PartialFile2│  │
-│  │ Merger Thread 3:               ════════════════════► Write to Partial3│  │
+│  │ Batch 1 steps: ═══► yield ─────────► ═══► Write to PartialFile 1     │  │
+│  │ Batch 2 steps:      ═════► yield ─────────► Write to PartialFile 2   │  │
+│  │ Batch 3 steps:             ═══════► Write to PartialFile 3           │  │
 │  └───────────────────────────────────────────────────────────────────────┘  │
 │                                                    │                        │
 │                                                    ▼                        │
 │  After all batches complete:                                                │
 │  ┌───────────────────────────────────────────────────────────────────────┐  │
-│  │ 1. Wait for all merger threads (parallel completion)                  │  │
+│  │ 1. Wait for all merger futures (completion order may differ)          │  │
 │  │ 2. Extract partial file handles                                       │  │
 │  │ 3. Final Merge (into new output file with FILE_ONLY mode):            │  │
 │  │    For each partition 0 to N:                                         │  │
@@ -626,7 +633,7 @@ All configs are `.startupOnly()` and `.internal()`.
 | `RapidsLocalDiskShuffleDataIO.scala` | New | RAPIDS ShuffleDataIO implementation |
 | `RapidsLocalDiskShuffleExecutorComponents.scala` | New | RAPIDS ShuffleExecutorComponents |
 | `RapidsLocalDiskShuffleMapOutputWriter.scala` | New | RAPIDS ShuffleMapOutputWriter |
-| `RapidsShuffleInternalManagerBase.scala` | Modified | Complete rewrite of threaded writer, added merger thread pool |
+| `RapidsShuffleInternalManagerBase.scala` | Modified | Complete rewrite of threaded writer, added bounded writer, reader, and merger pools |
 | `RapidsShuffleWriter.scala` | Modified | Changed from DiskBlockObjectWriter to ShuffleMapOutputWriter tracking |
 | `SpillableHostBuffer.scala` | Modified | Removed mandatory priority parameter |
 | `HostAlloc.scala` | Modified | Added `getUsageRatio()` and `isUsageBelowThreshold()` |
@@ -641,14 +648,14 @@ output in ascending partition order. Without this property, none of these would 
 | Original Problem | Phase 1 Solution | Why cudf Ordering Enables This |
 |------------------|------------------|--------------------------------|
 | **Write Amplification** | Single output file per batch instead of N temp files. Data written once, not twice. | Can write partition 0, then 1, then 2 sequentially to one file |
-| **No Pipeline** | Three-stage pipeline: Main Thread -> Writer Threads -> Merger Thread. All stages run in parallel. | Merger knows partition N is complete when it sees partition N+1 data |
+| **No Pipeline** | Three-stage pipeline: Main Thread -> Writer Pool -> Merger Pool. Ready work runs in parallel without blocking merger workers. | A merger knows partition N is complete when it sees partition N+1 data |
 | **200 Partition Limit** | New architecture works with any number of partitions. | No need to open N file handles; write sequentially to single output |
 | **Uncontrolled Page Cache** | SpillablePartialFileHandle gives application control over memory/disk decisions. | Sequential writes enable single buffer instead of N buffers |
 
 ### Additional Benefits
 
-1. **Multi-Batch Efficiency**: Multiple GPU batches can be processed in pipeline 
-   fashion, with parallel merger threads for each batch.
+1. **Multi-Batch Efficiency**: Multiple GPU batches can be processed in pipeline
+   fashion, with cooperative merger steps sharing a bounded pool.
 
 2. **Foundation for Phase 2**: The `SpillablePartialFileHandle` infrastructure 
    enables the skip-merge optimization in Phase 2, where data can stay in memory 

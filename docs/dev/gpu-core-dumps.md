@@ -15,9 +15,10 @@ triggered the exception. GPU core dumps can provide useful clues when debugging 
 they contain the state of the GPU at the time the exception occurred on the GPU.
 
 The GPU driver can be configured to write a GPU core dump when the GPU segfaults via environment
-variable settings for the process. The challenges for the RAPIDS Accelerator use case are getting
-the environment variables set on the executor processes and then copying the GPU core dump file
-to a distributed filesystem after it is generated on the local filesystem by the driver.
+variable settings for the process. The challenges for the NVIDIA cuDF plugin for Apache Spark use
+case are getting the environment variables set on the executor processes and then copying the GPU
+core dump file to a distributed filesystem after it is generated on the local filesystem by the
+driver.
 
 ## Environment Variables
 
@@ -74,11 +75,11 @@ spark.executorEnv.CUDA_COREDUMP_FILE="<LOG_DIR>/executor-%h-%p.nvcudmp"
 
 ## Simplified Core Dump Handling
 
-There is rudimentary support for simplified setup of GPU core dumps in the RAPIDS Accelerator.
+There is rudimentary support for simplified setup of GPU core dumps in the cuDF plugin.
 This currently only works on Spark standalone clusters, since there is currently no way for a driver
 plugin to programmatically override executor environment variable settings for Spark-on-YARN or
 Spark-on-Kubernetes. In the future with a driver that is compatible with CUDA 12.1 or later,
-the RAPIDS Accelerator could leverage GPU driver APIs to programmatically configure GPU core dump
+the cuDF plugin could leverage GPU driver APIs to programmatically configure GPU core dump
 support on executor startup.
 
 To enable the simplified core dump handling, set `spark.rapids.gpu.coreDump.dir` to a directory to

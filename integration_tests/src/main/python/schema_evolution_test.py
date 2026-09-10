@@ -1,4 +1,4 @@
-# Copyright (c) 2023-2024, NVIDIA CORPORATION.
+# Copyright (c) 2023-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,11 +16,9 @@ from asserts import assert_gpu_and_cpu_are_equal_collect
 from conftest import is_not_utc
 from data_gen import *
 from datetime import date, datetime, timezone
-from marks import ignore_order, allow_non_gpu
+from marks import ignore_order
 import pytest
 from spark_session import is_databricks_runtime, is_databricks113_or_later
-
-_formats = ("parquet", "orc")
 
 _confs = {
     "spark.sql.legacy.parquet.datetimeRebaseModeInRead": "CORRECTED",
@@ -66,9 +64,20 @@ def get_ddl(col_gen_pairs):
     return ', '.join([f"{c} {g.data_type.simpleString()}" for c, g in col_gen_pairs])
 
 non_utc_allow_for_test_column_add_after_partition = ['ColumnarToRowExec', 'DataWritingCommandExec', 'ExecutedCommandExec', 'FileSourceScanExec', 'WriteFilesExec'] if is_not_utc() else []
+# This schema contains dates, so legacy-calendar ORC writes intentionally fall back to CPU.
+_orc_legacy_write_allow = list(dict.fromkeys([
+    'DataWritingCommandExec', 'ExecutedCommandExec', 'WriteFilesExec',
+    *non_utc_allow_for_test_column_add_after_partition]))
+_parquet_format = pytest.param(
+    "parquet",
+    marks=pytest.mark.allow_non_gpu(*non_utc_allow_for_test_column_add_after_partition)) \
+    if non_utc_allow_for_test_column_add_after_partition else "parquet"
+_formats = (
+    _parquet_format,
+    pytest.param("orc", marks=pytest.mark.allow_non_gpu(*_orc_legacy_write_allow)))
+
 @ignore_order(local=True)
 @pytest.mark.parametrize("format", _formats)
-@allow_non_gpu(*non_utc_allow_for_test_column_add_after_partition)
 def test_column_add_after_partition(spark_tmp_table_factory, format):
     # Databricks 10.4 appears to be missing https://issues.apache.org/jira/browse/SPARK-39417
     # so avoid generating nulls for numeric partitions

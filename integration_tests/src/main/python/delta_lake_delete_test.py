@@ -14,7 +14,8 @@
 
 import pytest
 
-from asserts import assert_gpu_and_cpu_writes_are_equal_collect, assert_gpu_fallback_write, assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect
+from asserts import assert_gpu_and_cpu_writes_are_equal_collect, assert_gpu_fallback_write, assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect, \
+    assert_equal
 from data_gen import *
 from delta_lake_utils import *
 from marks import *
@@ -23,7 +24,7 @@ import glob
 import pyarrow.parquet as pq
 from spark_session import is_before_spark_320, is_databricks_runtime, supports_delta_lake_deletion_vectors, \
     with_cpu_session, with_gpu_session, is_before_spark_353, is_spark_353_or_later, \
-    is_databricks173_or_later
+    is_databricks173_or_later, supports_delta_lake_row_tracking
 
 delta_delete_enabled_conf = copy_and_update(delta_writes_enabled_conf,
                                             {"spark.rapids.sql.command.DeleteCommand": "true",
@@ -60,7 +61,8 @@ def assert_delta_sql_delete_collect(spark_tmp_path, use_cdf, dest_table_func, de
                                     partition_columns=None,
                                     conf=delta_delete_enabled_conf,
                                     skip_sql_result_check=False, expect_write=True,
-                                    expected_num_affected_rows=None):
+                                    expected_num_affected_rows=None,
+                                    assert_gpu_delete_command=False):
     def read_data(spark, path):
         read_func = read_delta_path_with_cdf if use_cdf else read_delta_path
         df = read_func(spark, path)
@@ -74,6 +76,9 @@ def assert_delta_sql_delete_collect(spark_tmp_path, use_cdf, dest_table_func, de
             cpu_result = with_cpu_session(lambda spark: do_delete(spark, cpu_path).collect(), conf=conf)
             if expect_write:
                 gpu_result = assert_rapids_delta_write(lambda spark: do_delete(spark, gpu_path).collect(), conf=conf)
+            elif assert_gpu_delete_command:
+                gpu_result = assert_rapids_gpu_delete_ran(
+                    lambda spark: do_delete(spark, gpu_path).collect(), conf=conf)
             else:
                 gpu_result = with_gpu_session(lambda spark: do_delete(spark, gpu_path).collect(), conf=conf)
             assert_equal(cpu_result, gpu_result)
@@ -328,9 +333,8 @@ def test_delta_delete_partitions(spark_tmp_path, use_cdf, partition_columns, ena
 @pytest.mark.parametrize("partition_columns", [None, ["a"]], ids=idfn)
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
 @datagen_overrides(seed=0, permanent=True, reason='https://github.com/NVIDIA/spark-rapids/issues/9884')
-@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_350DB143_xfail_reasons(
-                                        enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12041",
-                                        disabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12047"), ids=idfn)
+@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_xfail_reasons(
+                                        enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12041"), ids=idfn)
 def test_delta_delete_rows(spark_tmp_path, use_cdf, partition_columns, enable_deletion_vectors):
     # Databricks changes the number of files being written, so we cannot compare logs unless there's only one slice
     num_slices_to_test = 1 if is_databricks_runtime() else 10
@@ -346,9 +350,9 @@ def test_delta_delete_rows(spark_tmp_path, use_cdf, partition_columns, enable_de
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_databricks173_or_later(),
-                    reason="DBR 17.3 whole-table DELETE metrics regression coverage")
-def test_delta_delete_entire_table_reports_row_count_db173(spark_tmp_path):
+@pytest.mark.skipif(not is_databricks_runtime(),
+                    reason="Databricks whole-table DELETE row-count regression coverage")
+def test_delta_delete_entire_table_reports_row_count(spark_tmp_path):
     def generate_dest_data(spark):
         return spark.createDataFrame(
             [(1, "a"), (1, "b"), (2, "c"), (3, "d"), (3, "e")],
@@ -362,14 +366,14 @@ def test_delta_delete_entire_table_reports_row_count_db173(spark_tmp_path):
     assert_delta_sql_delete_collect(
         spark_tmp_path, use_cdf=False, dest_table_func=generate_dest_data, delete_sql=delete_sql,
         enable_deletion_vectors=False, conf=conf, expect_write=False,
-        expected_num_affected_rows=5)
+        expected_num_affected_rows=5, assert_gpu_delete_command=True)
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_databricks173_or_later(),
-                    reason="DBR 17.3 metadata-only DELETE metrics regression coverage")
-def test_delta_delete_metadata_only_reports_row_count_db173(spark_tmp_path):
+@pytest.mark.skipif(not is_databricks_runtime(),
+                    reason="Databricks metadata-only DELETE row-count regression coverage")
+def test_delta_delete_metadata_only_reports_row_count(spark_tmp_path):
     def generate_dest_data(spark):
         return spark.createDataFrame(
             [(1, "a"), (1, "b"), (2, "c"), (3, "d"), (3, "e")],
@@ -383,14 +387,14 @@ def test_delta_delete_metadata_only_reports_row_count_db173(spark_tmp_path):
     assert_delta_sql_delete_collect(
         spark_tmp_path, use_cdf=False, dest_table_func=generate_dest_data, delete_sql=delete_sql,
         enable_deletion_vectors=False, partition_columns=["a"], conf=conf, expect_write=False,
-        expected_num_affected_rows=2)
+        expected_num_affected_rows=2, assert_gpu_delete_command=True)
 
 @allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_databricks173_or_later(),
-                    reason="DBR 17.3 row tracking regression coverage")
-def test_delta_delete_preserves_row_tracking_db173(spark_tmp_path):
+@pytest.mark.skipif(not supports_delta_lake_row_tracking(),
+                    reason="Row tracking needs Delta Lake 3.3 or Databricks 17.3")
+def test_delta_delete_preserves_row_tracking(spark_tmp_path):
     conf = copy_and_update(delta_delete_enabled_conf, delta_row_tracking_dml_conf)
     assert_delta_row_tracking_dml(
         spark_tmp_path, "DELETE FROM delta.`{path}` WHERE a IN (2, 3)", conf)
@@ -438,9 +442,8 @@ def test_delta_delete_twice_with_dv(spark_tmp_path):
 @pytest.mark.parametrize("partition_columns", [None, ["a"]], ids=idfn)
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
 @datagen_overrides(seed=0, permanent=True, reason='https://github.com/NVIDIA/spark-rapids/issues/9884')
-@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_350DB143_xfail_reasons(
-                                        enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12041",
-                                        disabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12047"), ids=idfn)
+@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_xfail_reasons(
+                                        enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12041"), ids=idfn)
 def test_delta_delete_dataframe_api(spark_tmp_path, use_cdf, partition_columns, enable_deletion_vectors):
     from delta.tables import DeltaTable
     data_path = spark_tmp_path + "/DELTA_DATA"
@@ -459,3 +462,58 @@ def test_delta_delete_dataframe_api(spark_tmp_path, use_cdf, partition_columns, 
     assert_gpu_and_cpu_writes_are_equal_collect(do_delete, read_func, data_path,
                                                 conf=delta_delete_enabled_conf)
     with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
+
+
+@allow_non_gpu("ExecutedCommandExec,ColumnarToRowExec,DataWritingCommandExec", delta_write_fallback_allow, *delta_meta_allow)
+@delta_lake
+@ignore_order
+@inject_oom
+@allow_non_gpu_delta_write_if(True, reason="the command runs on the CPU by design; its jobs are planned by the plugin")
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="GPU IncrementMetric coverage for Databricks 17.3+")
+def test_delta_delete_cpu_command_increment_metric_db173(spark_tmp_path):
+    # The Databricks DELETE command counts the rows it touches and copies with IncrementMetric
+    # inside the jobs it runs, and the plugin plans those jobs whenever the command itself stays
+    # on the CPU (disabled by conf here, the way any vetoed delete runs). The DESCRIBE HISTORY
+    # row counts come from those metrics, so they must match the CPU run.
+    conf = copy_and_update(delta_delete_enabled_conf,
+                           {"spark.rapids.sql.command.DeleteCommand": "false",
+                            "spark.rapids.sql.command.DeleteCommandEdge": "false"})
+    delete_sql = "DELETE FROM delta.`{path}` WHERE a IN (2, 3)"
+
+    def dest_table_func(spark):
+        # a = 0..7 in one file: 2 and 3 are deleted, the other 6 rows are copied
+        return spark.createDataFrame([(i, i * 10) for i in range(8)], "a INT, b INT").coalesce(1)
+
+    def row_count_metrics(spark, path):
+        row = spark.sql(f"DESCRIBE HISTORY delta.`{path}`") \
+            .where("operation = 'DELETE'").orderBy("version", ascending=False).first()
+        return {k: int(v) for k, v in row["operationMetrics"].items() if "Rows" in k}
+
+    def checker(data_path, do_delete):
+        cpu_path = data_path + "/CPU"
+        gpu_path = data_path + "/GPU"
+        results = {}
+        def write_func(spark, path):
+            results[path] = do_delete(spark, path).collect()
+        # The standard helper runs the delete on the CPU and on the GPU and compares the tables;
+        # the plans are captured across both runs and the GPU expression is looked for below.
+        callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+        callback.startCapture()
+        try:
+            assert_gpu_and_cpu_writes_are_equal_collect(write_func, read_delta_path, data_path, conf=conf)
+            captured_plans = callback.getResultsWithTimeout(10000)
+        finally:
+            callback.endCapture()
+        assert_equal(results[cpu_path], results[gpu_path])
+        cpu_metrics = with_cpu_session(lambda spark: row_count_metrics(spark, cpu_path))
+        gpu_metrics = with_cpu_session(lambda spark: row_count_metrics(spark, gpu_path))
+        assert cpu_metrics == gpu_metrics, f"CPU {cpu_metrics} vs GPU {gpu_metrics}"
+        expected = {"numDeletedRows": 2, "numCopiedRows": 6}
+        assert {k: gpu_metrics.get(k) for k in expected} == expected, gpu_metrics
+        plan_strings = [plan.toString() for plan in captured_plans]
+        assert any("gpu_increment_metric" in s for s in plan_strings), \
+            "no GPU IncrementMetric in the captured DELETE plans:\n" + "\n".join(plan_strings)
+
+    delta_sql_delete_test(spark_tmp_path, use_cdf=False, dest_table_func=dest_table_func,
+                          delete_sql=delete_sql, check_func=checker, enable_deletion_vectors=False)

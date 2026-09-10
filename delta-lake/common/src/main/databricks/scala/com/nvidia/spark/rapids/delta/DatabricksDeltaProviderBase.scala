@@ -116,8 +116,8 @@ trait DatabricksDeltaProviderBase extends DeltaProviderImplBase {
   }
 
   private def getWriteOptions(options: Any): Map[String, String] = {
-    // For Databricks 13.3 AtomicCreateTableAsSelectExec writeOptions is a Map[String, String]
-    // while in all the other versions it's a CaseInsensitiveMap
+    // Databricks 14.3 writeOptions is a Map[String, String], while newer supported
+    // Databricks runtimes use CaseInsensitiveStringMap.
     options match {
       case c: CaseInsensitiveStringMap => c.asCaseSensitiveMap().asScala.toMap
       case _ => options.asInstanceOf[Map[String, String]]

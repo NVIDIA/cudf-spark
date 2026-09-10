@@ -22,18 +22,29 @@ import com.nvidia.spark.rapids.shims.{OperatorsUtilShims, SparkShimImpl}
 
 import org.apache.spark.SparkConf
 import org.apache.spark.internal.Logging
+import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{Dataset, Row, SaveMode}
-import org.apache.spark.sql.execution.{LocalTableScanExec, PartialReducerPartitionSpec, SortExec, SparkPlan}
+import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, NamedExpression}
+import org.apache.spark.sql.catalyst.plans.physical.{SinglePartition, UnknownPartitioning}
+import org.apache.spark.sql.execution.{FilterExec, LeafExecNode, LocalTableScanExec,
+  PartialReducerPartitionSpec, ReusedSubqueryExec, SortExec, SparkPlan, SubqueryExec, UnaryExecNode}
+import org.apache.spark.sql.execution.{InSubqueryExec => SparkInSubqueryExec}
 import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, AdaptiveSparkPlanHelper, ShuffleQueryStageExec}
+import org.apache.spark.sql.execution.columnar.InMemoryRelation
 import org.apache.spark.sql.execution.command.DataWritingCommandExec
-import org.apache.spark.sql.execution.exchange.{BroadcastExchangeLike, Exchange, ReusedExchangeExec, ShuffleExchangeLike}
+import org.apache.spark.sql.execution.exchange.{BroadcastExchangeLike, ENSURE_REQUIREMENTS,
+  Exchange, REPARTITION_BY_NUM, ReusedExchangeExec, ShuffleExchangeExec, ShuffleExchangeLike}
 import org.apache.spark.sql.execution.joins.SortMergeJoinExec
 import org.apache.spark.sql.functions.{col, when}
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.rapids.{ExecutionPlanCaptureCallback, GpuFileSourceScanExec}
-import org.apache.spark.sql.rapids.execution.{GpuCustomShuffleReaderExec, GpuJoinExec}
+import org.apache.spark.sql.rapids.{ExecutionPlanCaptureCallback, GpuFileSourceScanExec,
+  GpuInMemoryTableScanExec}
+import org.apache.spark.sql.rapids.execution.{GpuCustomShuffleReaderExec, GpuJoinExec, GpuShuffleExchangeExecBase}
+import org.apache.spark.sql.rapids.shims.SparkSessionUtils
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.SparkSession
 import org.apache.spark.sql.types.{ArrayType, DataTypes, DecimalType, IntegerType, StringType, StructField, StructType}
+import org.apache.spark.sql.vectorized.ColumnarBatch
 
 class AdaptiveQueryExecSuite
     extends SparkQueryCompareTestSuite
@@ -94,6 +105,135 @@ class AdaptiveQueryExecSuite
 
   private def findReusedExchange(plan: SparkPlan): Seq[ReusedExchangeExec] = {
     collectWithSubqueries(plan)(SparkShimImpl.reusedExchangeExecPfn)
+  }
+
+  private case class TestLeafExec(override val output: Seq[Attribute]) extends LeafExecNode {
+    override protected def doExecute(): RDD[InternalRow] =
+      throw new UnsupportedOperationException("TestLeafExec should not be executed")
+  }
+
+  private case class UnknownPartitioningExec(child: SparkPlan) extends UnaryExecNode {
+    override def output: Seq[Attribute] = child.output
+    override def outputPartitioning: UnknownPartitioning = UnknownPartitioning(0)
+    override def supportsColumnar: Boolean = child.supportsColumnar
+    override protected def doExecute(): RDD[InternalRow] = child.execute()
+    override protected def doExecuteColumnar(): RDD[ColumnarBatch] = child.executeColumnar()
+    override protected def withNewChildInternal(newChild: SparkPlan): UnknownPartitioningExec =
+      copy(child = newChild)
+  }
+
+  test("GPU cache scan preserves the cached RDD partition count when AQE partitioning is unknown") {
+    val conf = new SparkConf()
+      .set("spark.sql.adaptive.enabled", "true")
+      .set("spark.sql.cache.serializer", "com.nvidia.spark.ParquetCachedBatchSerializer")
+    withGpuHiveSparkSession({ spark =>
+      val cached = spark.range(100).repartition(4).cache()
+      try {
+        cached.count()
+        val relation = cached.queryExecution.withCachedData.collectFirst {
+          case r: InMemoryRelation => r
+        }.getOrElse(fail(s"Expected an InMemoryRelation:\n${cached.queryExecution.withCachedData}"))
+        val unknownPlan = UnknownPartitioningExec(relation.cachedPlan)
+        val unknownRelation = relation.copy(
+          cacheBuilder = relation.cacheBuilder.copy(cachedPlan = unknownPlan))
+        val scan = GpuInMemoryTableScanExec(
+          unknownRelation.output, Seq.empty, unknownRelation)
+
+        assert(scan.relation.cachedPlan.outputPartitioning === UnknownPartitioning(0))
+        assert(scan.outputPartitioning === UnknownPartitioning(4))
+      } finally {
+        cached.unpersist()
+      }
+    }, conf)
+  }
+
+  test("GPU planning rules use their captured session when no session is active") {
+    val conf = new SparkConf().set("spark.sql.adaptive.enabled", "true")
+    withGpuSparkSession({ spark =>
+      val scanPath = new File(TEST_FILES_ROOT, "captured-session-scan").getCanonicalPath
+      spark.conf.set(RapidsConf.SQL_ENABLED.key, "false")
+      spark.range(10).write.parquet(scanPath)
+      spark.conf.set(RapidsConf.SQL_ENABLED.key, "true")
+
+      val cpuPlan = spark.read.parquet(scanPath).repartition(2).queryExecution.sparkPlan
+      val previousSession = org.apache.spark.sql.SparkSession.getActiveSession
+      org.apache.spark.sql.SparkSession.clearActiveSession()
+      try {
+        assert(org.apache.spark.sql.SparkSession.getActiveSession.isEmpty)
+
+        val expectedFailure = intercept[RuntimeException] {
+          GpuOverrideUtil.withActiveSession(spark) {
+            assert(org.apache.spark.sql.SparkSession.getActiveSession.contains(spark))
+            throw new RuntimeException("expected test failure")
+          }
+        }
+        assert(expectedFailure.getMessage == "expected test failure")
+        assert(org.apache.spark.sql.SparkSession.getActiveSession.isEmpty)
+
+        // Direct, unregistered conversion remains session-less, but scan construction must not
+        // eagerly dereference that missing session.
+        spark.conf.set(RapidsConf.EXPLAIN.key, "NONE")
+        spark.conf.set(RapidsConf.TEST_CONF.key, "false")
+        spark.conf.set(RapidsConf.TAG_LORE_ID_ENABLED.key, "false")
+        val unscopedPlan = GpuOverrides().apply(cpuPlan)
+        val unscopedScan = unscopedPlan.find(_.isInstanceOf[GpuFileSourceScanExec]).get
+        assert(SparkSessionUtils.sessionFromPlan(unscopedScan) == null)
+
+        spark.conf.set(RapidsConf.TEST_CONF.key, "true")
+        spark.conf.set(RapidsConf.TAG_LORE_ID_ENABLED.key, "true")
+        ShimLoader.newGpuQueryStagePrepOverrides(spark).apply(cpuPlan)
+        assert(org.apache.spark.sql.SparkSession.getActiveSession.isEmpty)
+
+        val columnarRules = ShimLoader.newColumnarOverrideRules(spark)
+        val gpuPlan = columnarRules.preColumnarTransitions.apply(cpuPlan)
+        val gpuScan = gpuPlan.find(_.isInstanceOf[GpuFileSourceScanExec]).get
+        assert(SparkSessionUtils.sessionFromPlan(gpuScan) eq spark)
+        assert(org.apache.spark.sql.SparkSession.getActiveSession.isEmpty)
+
+        val transitionedPlan = columnarRules.postColumnarTransitions.apply(gpuPlan)
+        val transitionedScan = transitionedPlan.find(_.isInstanceOf[GpuFileSourceScanExec]).get
+        assert(SparkSessionUtils.sessionFromPlan(transitionedScan) eq spark)
+        assert(org.apache.spark.sql.SparkSession.getActiveSession.isEmpty)
+      } finally {
+        previousSession.foreach { session =>
+          org.apache.spark.sql.SparkSession.setActiveSession(session)
+        }
+      }
+    }, conf)
+  }
+
+  test("AQE query stage exchange tagging descends into subquery plans") {
+    val attr = AttributeReference("a", IntegerType)()
+    val scan = TestLeafExec(Seq(attr))
+    val mainExchange = ShuffleExchangeExec(SinglePartition, scan, ENSURE_REQUIREMENTS)
+    val subqueryExchange = ShuffleExchangeExec(SinglePartition, scan, ENSURE_REQUIREMENTS)
+    val subquery = SubqueryExec("merged runtime filters", subqueryExchange)
+    val reusedSubquery = ReusedSubqueryExec(subquery)
+    val inSubquery = SparkInSubqueryExec(attr, reusedSubquery, NamedExpression.newExprId)
+    val plan = FilterExec(inSubquery, mainExchange)
+
+    GpuTransitionOverrides.tagAqeQueryStageExchanges(plan)
+
+    assert(mainExchange.getTagValue(GpuTransitionOverrides.aqeQueryStageExchange).contains(true))
+    assert(subqueryExchange.getTagValue(GpuTransitionOverrides.aqeQueryStageExchange)
+        .contains(true))
+  }
+
+  test("AQE can expose untagged parentless ENSURE_REQUIREMENTS shuffle") {
+    val attr = AttributeReference("a", IntegerType)()
+    val scan = TestLeafExec(Seq(attr))
+    val ensureRequirementsExchange = ShuffleExchangeExec(SinglePartition, scan, ENSURE_REQUIREMENTS)
+    val repartitionExchange = ShuffleExchangeExec(SinglePartition, scan, REPARTITION_BY_NUM)
+
+    assert(ensureRequirementsExchange.getTagValue(
+      GpuTransitionOverrides.aqeQueryStageExchange).isEmpty)
+    assert(repartitionExchange.getTagValue(GpuTransitionOverrides.aqeQueryStageExchange).isEmpty)
+    assert(GpuTransitionOverrides.canExposeExchangeForAqeStage(
+      ensureRequirementsExchange, None))
+    assert(!GpuTransitionOverrides.canExposeExchangeForAqeStage(
+      repartitionExchange, None))
+    assert(!GpuTransitionOverrides.canExposeExchangeForAqeStage(
+      ensureRequirementsExchange, Some(scan)))
   }
 
   test("get row counts from executed shuffle query stages") {
@@ -440,6 +580,35 @@ class AdaptiveQueryExecSuite
     }, conf)
   }
 
+  test("Keep transition to row for final AQE repartition exchange") {
+    logError("Keep transition to row for final AQE repartition exchange")
+
+    val conf = new SparkConf()
+        .set(SQLConf.ADAPTIVE_EXECUTION_ENABLED.key, "true")
+        .set(SQLConf.ADAPTIVE_EXECUTION_FORCE_APPLY.key, "true")
+        .set(SQLConf.SORT_BEFORE_REPARTITION.key, "false")
+        .set(RapidsConf.TEST_ALLOWED_NONGPU.key, "ShuffleExchangeExec,RoundRobinPartitioning")
+
+    withGpuSparkSession(spark => {
+      import spark.implicits._
+
+      val df = Seq("a", "b", "c")
+          .toDF("s")
+          .selectExpr("s", "1 AS x")
+          .repartition(10)
+
+      val rows = df.collect()
+      assert(rows.map(_.getAs[String]("s")).toSet === Set("a", "b", "c"))
+
+      val finalPlan = df.queryExecution.executedPlan match {
+        case adaptive: AdaptiveSparkPlanExec => adaptive.executedPlan
+        case other => other
+      }
+      assert(!finalPlan.isInstanceOf[GpuShuffleExchangeExecBase],
+        s"Final plan should not execute a bare GPU exchange as rows: $finalPlan")
+    }, conf)
+  }
+
   // repro case for https://github.com/NVIDIA/spark-rapids/issues/4351
   test("Write parquet from AQE shuffle with limit") {
     logError("Write parquet from AQE shuffle with limit")
@@ -512,10 +681,20 @@ class AdaptiveQueryExecSuite
 
     withGpuSparkSession(spark => {
       setupTestData(spark)
+      // Keep the filtered lowerCaseData side small enough for one SMJ -> BHJ conversion,
+      // but make the third input large enough that AQE cannot also broadcast the second
+      // join. With the tiny shared testData3, both joins can become BHJ depending on
+      // runtime shuffle stats (https://github.com/NVIDIA/cudf-spark/issues/15591).
+      import spark.implicits._
+      val largeThird = (0 until 10000).map(i => (i % 3 + 1, Some(i): Option[Int]))
+        .toDF("a", "b")
+        .repartition(col("a"))
+      registerAsParquetTable(spark, largeThird, "testData3Large")
+
       val (plan, adaptivePlan) = runAdaptiveAndVerifyResult(spark,
         """
           |SELECT * FROM lowerCaseData t1 join testData2 t2
-          |ON t1.n = t2.a join testData3 t3 on t2.a = t3.a
+          |ON t1.n = t2.a join testData3Large t3 on t2.a = t3.a
           |where t1.l = 1
         """.stripMargin)
 

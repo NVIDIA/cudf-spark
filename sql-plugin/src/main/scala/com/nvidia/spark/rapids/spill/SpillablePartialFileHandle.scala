@@ -20,6 +20,9 @@ import java.io.{BufferedInputStream, BufferedOutputStream, File, FileInputStream
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 
+import scala.util.control.NonFatal
+
+import ai.rapids.cudf.HostMemoryBuffer
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.HostAlloc
 
@@ -58,6 +61,7 @@ object PartialFileStorageMode extends Enumeration {
  * @param memoryThreshold Host memory usage threshold for buffer expansion decisions
  * @param priority Spill priority for memory-based mode
  * @param syncWrites Whether to force outstanding writes to disk
+ * @param bufferedOutputStreamFactory Creates buffered streams for file writes
  * @param capacityHintProvider Optional function that provides capacity hints based on
  *                             current bytes written and required capacity. When provided,
  *                             buffer expansion will use this hint instead of simple doubling.
@@ -72,6 +76,7 @@ class SpillablePartialFileHandle private (
     memoryThreshold: Double,
     priority: Long,
     syncWrites: Boolean,
+    bufferedOutputStreamFactory: FileOutputStream => BufferedOutputStream,
     capacityHintProvider: Option[(Long, Long) => Long])
   extends HostSpillableHandle[ai.rapids.cudf.HostMemoryBuffer] with Logging {
 
@@ -93,6 +98,12 @@ class SpillablePartialFileHandle private (
   // Behavior counters for statistics reporting
   @volatile private var expansionCount: Int = 0
   @volatile private var spillCount: Int = 0
+
+  // Shuffle read-lease reference counting. Active consumers (retained buffers, input streams,
+  // Netty file regions) hold leases so the physical close can be deferred until they finish.
+  // Guarded by this handle's monitor; `closed` (from StoreHandle) marks the physical close.
+  private var readRefCount: Int = 0
+  private var closeRequested: Boolean = false
 
   // Write state
   private var writePosition: Long = 0L
@@ -121,7 +132,9 @@ class SpillablePartialFileHandle private (
       case e: Exception =>
         logWarning(s"Failed to allocate initial buffer of $initialCapacity bytes, " +
           s"falling back to file-based storage", e)
-        // Fallback to file-based if allocation fails
+        // Close the buffer if it was allocated before the failure so it isn't leaked.
+        host.foreach(_.close())
+        host = None
         spilledToDisk = true
         currentBufferCapacity = 0L
     }
@@ -239,6 +252,7 @@ class SpillablePartialFileHandle private (
         throw new IllegalStateException("Host buffer is null")
     }
   }
+
 
   /**
    * Spill current buffer content to file and switch to file-based mode.
@@ -405,7 +419,8 @@ class SpillablePartialFileHandle private (
       return -1  // EOF
     }
 
-    val actualLength = math.min(length, (totalBytesWritten - readPosition).toInt)
+    val actualLength = SpillablePartialFileHandle.boundedReadLengthAsInt(
+      length, totalBytesWritten - readPosition)
 
     def readFromFile(): Int = {
       ensureFileInputStreamOpen()
@@ -473,7 +488,8 @@ class SpillablePartialFileHandle private (
       return -1
     }
 
-    val actualLength = math.min(length, (totalBytesWritten - position).toInt)
+    val actualLength = SpillablePartialFileHandle.boundedReadLengthAsInt(
+      length, totalBytesWritten - position)
     if (actualLength <= 0) {
       return -1
     }
@@ -571,13 +587,33 @@ class SpillablePartialFileHandle private (
   private var spillInProgress: Boolean = false
 
   /**
-   * Spill memory buffer to disk.
+   * Spill memory buffer to disk, as part of the shuffle commit
+   */
+  def spillForCommit(): Long = {
+    spillInternal(commit = true)
+  }
+
+  /**
+   * Spill memory buffer to disk, as part of memory pressure
+   */
+  override def spill(): Long = {
+    spillInternal(commit = false)
+  }
+
+  /**
+   * This method spills this handle to disk, and optionally tracks the time
+   * and bytes written as a spill metric given it is caused by memory pressure,
+   * which is signaled by commit = false.
    *
    * Following SpillFramework pattern: all state checks inside synchronized block.
    * IO operations are performed outside the synchronized block to allow
    * concurrent read() access to the buffer during the file write.
+   *
+   * @param commit if true, the spill is happening due to a shuffle commit phase
+   *               do not track the time/bytes in our spill metric.
+   * @return the number of bytes written to disk, or 0 if spilling was skipped
    */
-  override def spill(): Long = {
+  private def spillInternal(commit: Boolean): Long = {
     if (storageMode != PartialFileStorageMode.MEMORY_WITH_SPILL) {
       return 0L  // Nothing to spill for FILE_ONLY mode
     }
@@ -597,32 +633,14 @@ class SpillablePartialFileHandle private (
       }
     }
 
-    // Perform IO outside lock - read() can still access buffer during this time
-    // Wrap with spillToDiskTime to track spill timing metrics
-    GpuTaskMetrics.get.spillToDiskTime {
-      try {
-        val fos = new FileOutputStream(file)
-        try {
-          val channel = fos.getChannel
-          val bb = bufferToSpill.asByteBuffer()
-          bb.limit(totalBytesWritten.toInt)
-          while (bb.hasRemaining) {
-            channel.write(bb)
-          }
-          if (syncWrites) {
-            channel.force(true)
-          }
-        } finally {
-          fos.close()
-        }
-      } catch {
-        case e: Exception =>
-          // IO failed, reset flag and propagate
-          synchronized {
-            spillInProgress = false
-            notifyAll()  // Wake up any waiting doClose()
-          }
-          throw e
+
+    if (commit) {
+      doSpill(bufferToSpill)
+    } else {
+      // we are spilling due to memory pressure. Lets measure the doSpill
+      // time since it's not part of the regular shuffle commit.
+      GpuTaskMetrics.get.spillToDiskTime {
+        doSpill(bufferToSpill)
       }
     }
 
@@ -643,13 +661,46 @@ class SpillablePartialFileHandle private (
       bufferToSpill.close()
       host = None
 
-      // Record spill bytes metric
-      TrampolineUtil.incTaskMetricsDiskBytesSpilled(totalBytesWritten)
+      if (!commit) {
+        // if we are not committing, we want to account for these bytes
+        // in the spill to disk metric, otherwise we are going to account
+        // for them in the shuffle write metric.
+        TrampolineUtil.incTaskMetricsDiskBytesSpilled(totalBytesWritten)
+      }
 
       logDebug(s"Spilled to ${file.getAbsolutePath} " +
         s"($totalBytesWritten bytes)")
 
       totalBytesWritten
+    }
+  }
+
+  // Performs IO outside lock - read() can still access buffer during this time
+  // Only to be called from spillInternal!
+  private def doSpill(bufferToSpill: HostMemoryBuffer): Unit = {
+    try {
+      val fos = new FileOutputStream(file)
+      try {
+        val channel = fos.getChannel
+        val bb = bufferToSpill.asByteBuffer()
+        bb.limit(totalBytesWritten.toInt)
+        while (bb.hasRemaining) {
+          channel.write(bb)
+        }
+        if (syncWrites) {
+          channel.force(true)
+        }
+      } finally {
+        fos.close()
+      }
+    } catch {
+      case e: Exception =>
+        // IO failed, reset flag and propagate
+        synchronized {
+          spillInProgress = false
+          notifyAll() // Wake up any waiting doClose()
+        }
+        throw e
     }
   }
 
@@ -661,7 +712,7 @@ class SpillablePartialFileHandle private (
     if (fileOutputStream.isEmpty) {
       val fos = new FileOutputStream(file, true)  // append mode
       fileOutputStream = Some(fos)
-      bufferedOutputStream = Some(new BufferedOutputStream(fos, 64 * 1024))
+      bufferedOutputStream = Some(bufferedOutputStreamFactory(fos))
     }
   }
 
@@ -688,64 +739,169 @@ class SpillablePartialFileHandle private (
     }
   }
 
+  // ----- Shuffle read-lease lifecycle ----------------------------------------------------------
+  // Shuffle cleanup (`MultithreadedShuffleBufferCatalog.unregisterShuffle`) can request a close
+  // while retained buffers, input streams, or Netty file regions are still reading this handle.
+  // `acquireRead`/`releaseRead` reference-count those active consumers, and `close()` requests the
+  // physical close but defers it until the last lease is released. The physical close is
+  // `doClose()`, which coordinates with an in-progress spill via `spillInProgress` (this handle
+  // does not use the base `spilling` flag).
+
+  /**
+   * Acquire a read lease. Throws if the handle has already been physically closed.
+   */
+  private[rapids] def acquireRead(): Unit = synchronized {
+    if (closed) {
+      throw new IllegalStateException(
+        "Cannot acquire a read lease on a closed partial file handle")
+    }
+    readRefCount += 1
+  }
+
+  /**
+   * Release a read lease, performing the deferred physical close if this was the last one. This
+   * runs on consumer cleanup paths (Netty file-region deallocation, stream close, finally blocks),
+   * so a close failure is logged and swallowed rather than propagated.
+   */
+  private[rapids] def releaseRead(): Unit = {
+    val performClose = synchronized {
+      if (readRefCount <= 0) {
+        throw new IllegalStateException("releaseRead() without a matching acquireRead()")
+      }
+      readRefCount -= 1
+      markCloseIfReady()
+    }
+    if (performClose) {
+      closeQuietly()
+    }
+  }
+
+  /**
+   * True once the handle has been physically closed (distinct from a pending close request).
+   */
+  private[rapids] def isPhysicallyClosed: Boolean = synchronized { closed }
+
+  /**
+   * Request close of this handle. If no read leases are active it closes immediately; otherwise
+   * the physical close is deferred until the last `releaseRead()`. A close failure here
+   * propagates to the caller, per the normal `AutoCloseable` convention (the catalog and
+   * writer/merge call sites wrap it). The quiet path is `releaseRead()`, used on consumer cleanup.
+   */
+  override def close(): Unit = {
+    val performClose = synchronized {
+      closeRequested = true
+      markCloseIfReady()
+    }
+    if (performClose) {
+      doClose()
+    }
+  }
+
+  /**
+   * Decide, under the handle monitor, whether the physical close should run now, setting `closed`
+   * atomically with the decision so a concurrent `acquireRead` cannot slip in after we commit to
+   * closing. Returns true iff the caller should run the physical close outside the lock.
+   */
+  private def markCloseIfReady(): Boolean = {
+    if (closeRequested && readRefCount == 0 && !closed) {
+      closed = true
+      true
+    } else {
+      false
+    }
+  }
+
+  /**
+   * Runs the physical close, swallowing failures so a failed close cannot break a consumer's
+   * release path (Netty file-region deallocation, stream close, finally blocks). Used by
+   * `releaseRead()`; `close()` propagates instead.
+   */
+  private def closeQuietly(): Unit = {
+    try {
+      doClose()
+    } catch {
+      case e: InterruptedException =>
+        // Log while the interrupt flag is clear, then restore it as the last action so the
+        // logging framework's own (possibly interruptible) work isn't disrupted.
+        logError("Interrupted while closing partial file handle", e)
+        Thread.currentThread().interrupt()
+      case NonFatal(e) =>
+        logError("Failed to close partial file handle", e)
+    }
+  }
+
   /**
    * Close and cleanup resources.
    * This is where we record disk write savings: only if data was never spilled to disk
    * throughout the entire lifecycle (write phase + read phase), we count it as saved.
    */
   override private[spill] def doClose(): Unit = {
-    // Collect resources to close under lock, then close them outside lock
-    val (bos, fos, bis, fis, fc, raf) = synchronized {
-      // Wait for any in-progress spill to complete before closing buffer
-      while (spillInProgress) {
-        wait()
+    var interrupted = false
+    try {
+      // Collect resources to close under lock, then close them outside lock
+      val (bos, fos, bis, fis, fc, raf) = synchronized {
+        // Wait for any in-progress spill to complete before closing buffer.
+        // close() has already committed this handle's closed state, so cleanup must finish even
+        // if this thread is interrupted while waiting. Restore the interrupt flag after cleanup.
+        while (spillInProgress) {
+          try {
+            wait()
+          } catch {
+            case _: InterruptedException =>
+              interrupted = true
+          }
+        }
+
+        // Record disk write savings for ESS + multi-batch merge scenario.
+        // When ESS is enabled with multiple batches, partial files are merged into
+        // a final file. If a partial file stayed in memory (not spilled), it avoided
+        // an intermediate disk write. The task is still running during merge, so
+        // GpuTaskMetrics.get is valid.
+        if (storageMode == PartialFileStorageMode.MEMORY_WITH_SPILL &&
+          !spilledToDisk && totalBytesWritten > 0 && !diskWriteSavingsRecorded) {
+          GpuTaskMetrics.get.addDiskWriteSaved(totalBytesWritten)
+          diskWriteSavingsRecorded = true
+          logDebug(s"Recorded disk write savings in doClose: $totalBytesWritten bytes")
+        }
+
+        // Collect streams/channels to close
+        val result = (bufferedOutputStream, fileOutputStream,
+          bufferedInputStream, fileInputStream, fileChannel, randomAccessFile)
+
+        // Clear references
+        bufferedOutputStream = None
+        fileOutputStream = None
+        bufferedInputStream = None
+        fileInputStream = None
+        fileChannel = None
+        randomAccessFile = None
+
+        // Release host buffer (removes from SpillFramework tracking and closes buffer)
+        releaseHostResource()
+
+        result
       }
 
-      // Record disk write savings for ESS + multi-batch merge scenario.
-      // When ESS is enabled with multiple batches, partial files are merged into
-      // a final file. If a partial file stayed in memory (not spilled), it avoided
-      // an intermediate disk write. The task is still running during merge, so
-      // GpuTaskMetrics.get is valid.
-      if (storageMode == PartialFileStorageMode.MEMORY_WITH_SPILL &&
-        !spilledToDisk && totalBytesWritten > 0 && !diskWriteSavingsRecorded) {
-        GpuTaskMetrics.get.addDiskWriteSaved(totalBytesWritten)
-        diskWriteSavingsRecorded = true
-        logDebug(s"Recorded disk write savings in doClose: $totalBytesWritten bytes")
+      // Close streams outside lock (IO operations can be slow)
+      tryClose(bos, "bufferedOutputStream")
+      tryClose(fos, "fileOutputStream")
+      tryClose(bis, "bufferedInputStream")
+      tryClose(fis, "fileInputStream")
+      tryClose(fc, "fileChannel")
+      tryClose(raf, "randomAccessFile")
+
+      // Delete file if it exists
+      if (file != null && file.exists()) {
+        try {
+          file.delete()
+        } catch {
+          case e: Exception =>
+            logWarning(s"Failed to delete file ${file.getAbsolutePath}", e)
+        }
       }
-
-      // Collect streams/channels to close
-      val result = (bufferedOutputStream, fileOutputStream,
-        bufferedInputStream, fileInputStream, fileChannel, randomAccessFile)
-
-      // Clear references
-      bufferedOutputStream = None
-      fileOutputStream = None
-      bufferedInputStream = None
-      fileInputStream = None
-      fileChannel = None
-      randomAccessFile = None
-
-      // Release host buffer (removes from SpillFramework tracking and closes buffer)
-      releaseHostResource()
-
-      result
-    }
-
-    // Close streams outside lock (IO operations can be slow)
-    tryClose(bos, "bufferedOutputStream")
-    tryClose(fos, "fileOutputStream")
-    tryClose(bis, "bufferedInputStream")
-    tryClose(fis, "fileInputStream")
-    tryClose(fc, "fileChannel")
-    tryClose(raf, "randomAccessFile")
-
-    // Delete file if it exists
-    if (file != null && file.exists()) {
-      try {
-        file.delete()
-      } catch {
-        case e: Exception =>
-          logWarning(s"Failed to delete file ${file.getAbsolutePath}", e)
+    } finally {
+      if (interrupted) {
+        Thread.currentThread().interrupt()
       }
     }
   }
@@ -762,6 +918,14 @@ class SpillablePartialFileHandle private (
 }
 
 object SpillablePartialFileHandle extends Logging {
+
+  private val DEFAULT_FILE_BUFFER_SIZE = 64 * 1024
+
+  private[spill] def boundedReadLengthAsInt(requestedLength: Int, remainingBytes: Long): Int = {
+    require(requestedLength >= 0, s"requestedLength must be non-negative: $requestedLength")
+    require(remainingBytes >= 0, s"remainingBytes must be non-negative: $remainingBytes")
+    math.min(requestedLength.toLong, remainingBytes).toInt
+  }
 
   /**
    * Create a file-only handle.
@@ -780,6 +944,24 @@ object SpillablePartialFileHandle extends Logging {
       memoryThreshold = 0.0,
       priority = Long.MinValue,
       syncWrites = syncWrites,
+      bufferedOutputStreamFactory = new BufferedOutputStream(_, DEFAULT_FILE_BUFFER_SIZE),
+      capacityHintProvider = None)
+  }
+
+  private[spill] def createFileOnly(
+      file: File,
+      syncWrites: Boolean,
+      bufferedOutputStreamFactory: FileOutputStream => BufferedOutputStream):
+  SpillablePartialFileHandle = {
+    new SpillablePartialFileHandle(
+      storageMode = PartialFileStorageMode.FILE_ONLY,
+      file = file,
+      initialCapacity = 0L,
+      maxBufferSize = 0L,
+      memoryThreshold = 0.0,
+      priority = Long.MinValue,
+      syncWrites = syncWrites,
+      bufferedOutputStreamFactory = bufferedOutputStreamFactory,
       capacityHintProvider = None)
   }
 
@@ -820,7 +1002,7 @@ object SpillablePartialFileHandle extends Logging {
       memoryThreshold = memoryThreshold,
       priority = priority,
       syncWrites = syncWrites,
+      bufferedOutputStreamFactory = new BufferedOutputStream(_, DEFAULT_FILE_BUFFER_SIZE),
       capacityHintProvider = capacityHintProvider)
   }
 }
-

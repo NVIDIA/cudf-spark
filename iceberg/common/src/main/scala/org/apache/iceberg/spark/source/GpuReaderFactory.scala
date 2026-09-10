@@ -19,6 +19,7 @@ package org.apache.iceberg.spark.source
 import scala.collection.JavaConverters._
 
 import com.nvidia.spark.rapids.{CombineConf, GpuMetric, MultiFileReaderUtils, RapidsConf, ThreadPoolConfBuilder}
+import com.nvidia.spark.rapids.iceberg.ShimUtils
 import com.nvidia.spark.rapids.iceberg.ShimUtils.locationOf
 import com.nvidia.spark.rapids.iceberg.parquet.{
   MultiFile,
@@ -26,7 +27,7 @@ import com.nvidia.spark.rapids.iceberg.parquet.{
   SingleFile,
   ThreadConf
 }
-import org.apache.iceberg.{FileFormat, MetadataColumns, ScanTask, ScanTaskGroup}
+import org.apache.iceberg.{FileFormat, MetadataColumns}
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.read.{InputPartition, PartitionReader, PartitionReaderFactory}
@@ -65,10 +66,8 @@ class GpuReaderFactory(private val metrics: Map[String, GpuMetric],
   override def supportColumnarReads(partition: InputPartition) = true
 
   private def calcThreadConf(partition: GpuSparkInputPartition): ThreadConf = {
-    val scans = partition
-      .cpuPartition
-      .taskGroup()
-      .asInstanceOf[ScanTaskGroup[ScanTask]]
+    val scans = GpuSparkScanAccess
+      .taskGroup(partition.cpuPartition)
       .tasks
       .asScala
       .map(_.asFileScanTask())
@@ -77,7 +76,8 @@ class GpuReaderFactory(private val metrics: Map[String, GpuMetric],
     val hasFilePathMetadata =
       partition.expectedSchema.findField(MetadataColumns.FILE_PATH.fieldId()) != null
     val hasRowPositionMetadata =
-      partition.expectedSchema.findField(MetadataColumns.ROW_POSITION.fieldId()) != null
+      partition.expectedSchema.findField(MetadataColumns.ROW_POSITION.fieldId()) != null ||
+        partition.expectedSchema.findField(ShimUtils.rowIdFieldId()) != null
 
     val allParquet = scans.forall(_.file.format == FileFormat.PARQUET)
 
@@ -88,7 +88,15 @@ class GpuReaderFactory(private val metrics: Map[String, GpuMetric],
       }
 
       val canUseMultiThread = canUseParquetMultiThread
-      val canUseCoalescing = canUseParquetCoalescing && hasNoDeletes && !queryUsesInputFile
+      // `_pos` and inherited `_row_id` must be file-global. The coalescing reader's parent
+      // (MultiFileCoalescingPartitionReaderBase.populateCurrentBlockChunk) can merge blocks
+      // from multiple Iceberg splits of the same physical Parquet file into one chunk and
+      // finalize the whole chunk with the first split's per-file post-processor, which
+      // would emit wrong positions for rows past the first split. Route position-dependent scans
+      // to the multi-thread/single-file readers instead — those finalize batches per
+      // `IcebergPartitionedFile`, so each split's own post-processor handles its own rows.
+      val canUseCoalescing = canUseParquetCoalescing && hasNoDeletes && !queryUsesInputFile &&
+        !hasRowPositionMetadata
 
       val files = scans.map(s => locationOf(s.file)).toArray
 

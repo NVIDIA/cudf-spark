@@ -23,6 +23,8 @@
 {"spark": "355"}
 {"spark": "356"}
 {"spark": "357"}
+{"spark": "358"}
+{"spark": "359"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.iceberg
 
@@ -30,7 +32,9 @@ import java.util.{HashMap => JHashMap}
 
 import scala.collection.JavaConverters._
 
-import com.nvidia.spark.rapids.RapidsConf
+import ai.rapids.cudf.{ColumnVector => CudfColumnVector}
+import com.nvidia.spark.rapids.{GpuColumnVector, RapidsConf}
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.iceberg.parquet._
 import com.nvidia.spark.rapids.iceberg.parquet.converter.FromIcebergShaded.unshade
 import com.nvidia.spark.rapids.parquet.ParquetFileInfoWithBlockMeta
@@ -53,13 +57,19 @@ import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.types.{LongType, StructType}
+import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /**
  * Unit tests for GpuParquetReaderPostProcessor to verify that the correct
  * ColumnAction tree is built based on schema comparison.
  */
 class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
+
+  private lazy val supportsRowLineageInheritance = {
+    val majorMinor = IcebergProvider.detectedVersion.split("\\.").take(2).mkString(".")
+    Set("1.10", "1.11").contains(majorMinor)
+  }
 
   override def beforeAll(): Unit = {
     super.beforeAll()
@@ -94,6 +104,34 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       timestampRebaseMode = null,
       hasInt96Timestamps = false,
       blocksFirstRowIndices = Seq(0L)
+    )
+    (info, shadedSchema)
+  }
+
+  /**
+   * Build a `ParquetFileInfoWithBlockMeta` that simulates a split scan task whose blocks
+   * begin somewhere in the middle of the file (i.e. `blocksFirstRowIndices` does not start
+   * at 0). `firstFileGlobalRowIndex` is the file-global first-row index of the first block
+   * in `blockRowCounts`; subsequent blocks are placed contiguously after it.
+   */
+  private def createMultiBlockParquetInfo(
+      shadedSchema: ShadedMessageType,
+      blockRowCounts: Seq[Long],
+      firstFileGlobalRowIndex: Long): (ParquetFileInfoWithBlockMeta, ShadedMessageType) = {
+    val blocks = blockRowCounts.map(createBlockMetaData)
+    val firstRowIndices = blockRowCounts
+      .scanLeft(firstFileGlobalRowIndex)(_ + _)
+      .dropRight(1)
+    val info = ParquetFileInfoWithBlockMeta(
+      filePath = new Path("/test/file.parquet"),
+      blocks = blocks,
+      partValues = InternalRow.empty,
+      schema = unshade(shadedSchema),
+      readSchema = StructType(Seq.empty),
+      dateRebaseMode = null,
+      timestampRebaseMode = null,
+      hasInt96Timestamps = false,
+      blocksFirstRowIndices = firstRowIndices
     )
     (info, shadedSchema)
   }
@@ -901,6 +939,622 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       s"FetchConstant(fieldId=$structFieldId, struct<"))
   }
 
+  test("FetchRowPosition emits file-global _pos across multiple blocks") {
+    import com.nvidia.spark.rapids.Arm.withResource
+    import com.nvidia.spark.rapids.GpuColumnVector
+    import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkColumnVector}
+
+    val rowPosId = MetadataColumns.ROW_POSITION.fieldId()
+
+    // Empty parquet schema: _pos is a generated metadata column, no input column is read
+    // from parquet for it.
+    val parquetSchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
+
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(rowPosId, "_pos", Types.LongType.get())
+    )
+
+    // Simulate a split task whose first block starts at file-global row 500 (this is the
+    // scenario the reader.scala fix exists for; before that fix the task-local first-row
+    // index would be 0). Two blocks of 500 + 400 rows: file-global rows [500, 999] and
+    // [1000, 1399].
+    val (parquetInfo, shadedSchema) =
+      createMultiBlockParquetInfo(parquetSchema, Seq(500L, 400L), firstFileGlobalRowIndex = 500L)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo,
+      new JHashMap[Integer, Any](),
+      expectedSchema,
+      shadedSchema,
+      Map.empty)
+
+    def emptyBatch(rows: Int): ColumnarBatch =
+      new ColumnarBatch(Array.empty[SparkColumnVector], rows)
+
+    // Check every row, not just first/last — a middle-row off-by-one would otherwise slip
+    // past, and the cross-block batch below relies on knowing the exact transition row.
+    def assertPosRange(batch: ColumnarBatch, expectedStart: Long, expectedEnd: Long): Unit = {
+      assert(batch.numRows() == (expectedEnd - expectedStart + 1).toInt)
+      assert(batch.numCols() == 1)
+      withResource(batch.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { hostCol =>
+        val base = hostCol.getBase
+        var i = 0
+        while (i < batch.numRows()) {
+          val actual = base.getLong(i)
+          val expected = expectedStart + i
+          assert(actual == expected,
+            s"_pos[$i] expected $expected, got $actual")
+          i += 1
+        }
+      }
+    }
+
+    // Batch 1: 300 rows entirely inside block 0 → file-global _pos = 500..799.
+    withResource(processor.process(emptyBatch(300))) { batch =>
+      assertPosRange(batch, 500L, 799L)
+    }
+
+    // Batch 2: 100 rows still inside block 0 (100 rows of block 0 remain after this batch).
+    // → file-global _pos = 800..899.
+    withResource(processor.process(emptyBatch(100))) { batch =>
+      assertPosRange(batch, 800L, 899L)
+    }
+
+    // Batch 3: 350 rows straddle the block 0 → block 1 boundary (100 from block 0 + 250 from
+    // block 1). This exercises the `if (curRowPos >= curBlockRowEnd)` branch inside the
+    // per-row loop in FetchRowPosition.execute — a single process() call that crosses
+    // blocks. → file-global _pos = 900..1249.
+    withResource(processor.process(emptyBatch(350))) { batch =>
+      assertPosRange(batch, 900L, 1249L)
+    }
+
+    // Batch 4: 150 rows entirely inside block 1 → file-global _pos = 1250..1399.
+    withResource(processor.process(emptyBatch(150))) { batch =>
+      assertPosRange(batch, 1250L, 1399L)
+    }
+  }
+
+  test("Row lineage field IDs use Iceberg reserved IDs") {
+    assert(ShimUtils.rowIdFieldId() == 2147483540)
+    assert(ShimUtils.lastUpdatedSequenceNumberFieldId() == 2147483539)
+  }
+
+  test("Row lineage reuses file-global positions and materializes missing columns") {
+    import com.nvidia.spark.rapids.Arm.withResource
+    import com.nvidia.spark.rapids.GpuColumnVector
+    import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkColumnVector}
+
+    assume(supportsRowLineageInheritance,
+      "The selected Iceberg runtime does not support row lineage inheritance")
+    val rowIdFieldId = ShimUtils.rowIdFieldId()
+    val sequenceFieldId = ShimUtils.lastUpdatedSequenceNumberFieldId()
+
+    val rowPosFieldId = MetadataColumns.ROW_POSITION.fieldId()
+    val parquetSchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(rowIdFieldId, "_row_id", Types.LongType.get()),
+      Types.NestedField.optional(rowPosFieldId, "_pos", Types.LongType.get()),
+      Types.NestedField.optional(sequenceFieldId, "_last_updated_sequence_number",
+        Types.LongType.get()))
+    val constants = new JHashMap[Integer, Any]()
+    constants.put(rowIdFieldId, 1000L)
+    constants.put(sequenceFieldId, 7L)
+
+    val (parquetInfo, shadedSchema) =
+      createMultiBlockParquetInfo(parquetSchema, Seq(500L), firstFileGlobalRowIndex = 500L)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo, constants, expectedSchema, shadedSchema, Map.empty)
+
+    assert(processor.displayActionPlan().contains("InheritRowId"))
+    assert(processor.displayActionPlan().contains("InheritLastUpdatedSequenceNumber"))
+
+    withResource(processor.process(
+      new ColumnarBatch(Array.empty[SparkColumnVector], 0))) { output =>
+      assert(output.numRows() == 0)
+      assert(output.numCols() == 3)
+    }
+
+    val emptyBatch = new ColumnarBatch(Array.empty[SparkColumnVector], 4)
+    withResource(processor.process(emptyBatch)) { output =>
+      withResource(output.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { rowIds =>
+        withResource(output.column(1).asInstanceOf[GpuColumnVector].copyToHost()) { positions =>
+          withResource(output.column(2).asInstanceOf[GpuColumnVector].copyToHost()) { sequences =>
+            (0 until output.numRows()).foreach { i =>
+              // `_row_id` is evaluated before `_pos`; sharing the cached vector prevents the
+              // second action from advancing file positions a second time.
+              assert(rowIds.getBase.getLong(i) == 1500L + i)
+              assert(positions.getBase.getLong(i) == 500L + i)
+              assert(sequences.getBase.getLong(i) == 7L)
+            }
+          }
+        }
+      }
+    }
+  }
+
+  test("Row lineage fills physical nulls and preserves physical values") {
+    import ai.rapids.cudf.{ColumnVector => CudfColumnVector}
+    import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+    import com.nvidia.spark.rapids.GpuColumnVector
+    import org.apache.spark.sql.types.LongType
+    import org.apache.spark.sql.vectorized.ColumnarBatch
+
+    assume(supportsRowLineageInheritance,
+      "The selected Iceberg runtime does not support row lineage inheritance")
+    val rowIdFieldId = ShimUtils.rowIdFieldId()
+    val sequenceFieldId = ShimUtils.lastUpdatedSequenceNumberFieldId()
+
+    val rowIdType = ShadedTypes
+      .primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
+      .id(rowIdFieldId).named("_row_id")
+    val sequenceType = ShadedTypes
+      .primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
+      .id(sequenceFieldId).named("_last_updated_sequence_number")
+    val parquetSchema = new ShadedMessageType(
+      "test", Seq[ShadedType](rowIdType, sequenceType).asJava)
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(rowIdFieldId, "_row_id", Types.LongType.get()),
+      Types.NestedField.optional(sequenceFieldId, "_last_updated_sequence_number",
+        Types.LongType.get()))
+    val constants = new JHashMap[Integer, Any]()
+    constants.put(rowIdFieldId, 1000L)
+    constants.put(sequenceFieldId, 7L)
+    val (parquetInfo, shadedSchema) =
+      createMultiBlockParquetInfo(parquetSchema, Seq(3L), firstFileGlobalRowIndex = 500L)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo, constants, expectedSchema, shadedSchema, Map.empty)
+
+    val rowIds = closeOnExcept(CudfColumnVector.fromBoxedLongs(null, 900L, null)) { cudf =>
+      GpuColumnVector.from(cudf, LongType)
+    }
+    val sequences = closeOnExcept(CudfColumnVector.fromBoxedLongs(null, 3L, null)) { cudf =>
+      GpuColumnVector.from(cudf, LongType)
+    }
+    val input = new ColumnarBatch(Array(rowIds, sequences), 3)
+
+    withResource(processor.process(input)) { output =>
+      withResource(output.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { actualRowIds =>
+        withResource(output.column(1).asInstanceOf[GpuColumnVector].copyToHost()) { actualSeqs =>
+          assert((0 until 3).map(i => actualRowIds.getBase.getLong(i)) ==
+            Seq(1500L, 900L, 1502L))
+          assert((0 until 3).map(i => actualSeqs.getBase.getLong(i)) == Seq(7L, 3L, 7L))
+        }
+      }
+    }
+  }
+
+  test("native deletion-vector row index supplies _pos and shifts physical columns") {
+    val dataFieldId = 1
+    val rowPositionFieldId = MetadataColumns.ROW_POSITION.fieldId()
+    val dataField = ShadedTypes
+      .primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
+      .id(dataFieldId)
+      .named("data")
+    val parquetSchema = new ShadedMessageType("test", Seq[ShadedType](dataField).asJava)
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(dataFieldId, "data", Types.LongType.get()),
+      Types.NestedField.optional(rowPositionFieldId, "_pos", Types.LongType.get()))
+    val (parquetInfo, shadedSchema) = createParquetInfo(parquetSchema, rowCount = 6)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo,
+      new JHashMap[Integer, Any](),
+      expectedSchema,
+      GpuIcebergParquetReaderUtils.withNativeRowIndex(shadedSchema),
+      Map.empty)
+
+    assert(!processor.displayActionPlan().contains("FetchRowPosition"))
+
+    val rowPositions = closeOnExcept(CudfColumnVector.fromLongs(0L, 2L, 5L)) { column =>
+      GpuColumnVector.from(column, LongType)
+    }
+    val data = closeOnExcept(CudfColumnVector.fromLongs(10L, 12L, 15L)) { column =>
+      GpuColumnVector.from(column, LongType)
+    }
+    val inputBatch = new ColumnarBatch(Array(rowPositions, data), 3)
+
+    withResource(processor.process(inputBatch)) { outputBatch =>
+      assert(outputBatch.numRows() == 3)
+      assert(outputBatch.numCols() == 2)
+      withResource(outputBatch.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { host =>
+        assert((0 until 3).map(i => host.getBase.getLong(i)) == Seq(10L, 12L, 15L))
+      }
+      withResource(outputBatch.column(1).asInstanceOf[GpuColumnVector].copyToHost()) { host =>
+        assert((0 until 3).map(i => host.getBase.getLong(i)) == Seq(0L, 2L, 5L))
+      }
+    }
+  }
+
+  test("native deletion-vector row index drops forced columns for _pos-only reads") {
+    val dataFieldId = 1
+    val rowPositionFieldId = MetadataColumns.ROW_POSITION.fieldId()
+    val dataField = ShadedTypes
+      .primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
+      .id(dataFieldId)
+      .named("data")
+    val parquetSchema = new ShadedMessageType("test", Seq[ShadedType](dataField).asJava)
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(rowPositionFieldId, "_pos", Types.LongType.get()))
+    val (parquetInfo, shadedSchema) = createParquetInfo(parquetSchema, rowCount = 6)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo,
+      new JHashMap[Integer, Any](),
+      expectedSchema,
+      GpuIcebergParquetReaderUtils.withNativeRowIndex(shadedSchema),
+      Map.empty)
+
+    assert(processor.displayActionPlan() ==
+      "ProcessStruct\n  _pos (input[0]):\n    PassThrough")
+
+    val rowPositions = closeOnExcept(CudfColumnVector.fromLongs(0L, 2L, 5L)) { column =>
+      GpuColumnVector.from(column, LongType)
+    }
+    val forcedData = closeOnExcept(CudfColumnVector.fromLongs(10L, 12L, 15L)) { column =>
+      GpuColumnVector.from(column, LongType)
+    }
+    val inputBatch = new ColumnarBatch(Array(rowPositions, forcedData), 3)
+
+    withResource(processor.process(inputBatch)) { outputBatch =>
+      assert(outputBatch.numRows() == 3)
+      assert(outputBatch.numCols() == 1)
+      withResource(outputBatch.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { host =>
+        assert((0 until 3).map(i => host.getBase.getLong(i)) == Seq(0L, 2L, 5L))
+      }
+    }
+  }
+
+  test("native deletion-vector row index supplies inherited row IDs") {
+    assume(supportsRowLineageInheritance,
+      "The selected Iceberg runtime does not support row lineage inheritance")
+    val rowIdFieldId = ShimUtils.rowIdFieldId()
+    val parquetSchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(rowIdFieldId, "_row_id", Types.LongType.get()))
+    val constants = new JHashMap[Integer, Any]()
+    constants.put(rowIdFieldId, 1000L)
+    val (parquetInfo, shadedSchema) = createParquetInfo(parquetSchema, rowCount = 6)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo,
+      constants,
+      expectedSchema,
+      GpuIcebergParquetReaderUtils.withNativeRowIndex(shadedSchema),
+      Map.empty)
+
+    val rowPositions = closeOnExcept(CudfColumnVector.fromLongs(0L, 2L, 5L)) { column =>
+      GpuColumnVector.from(column, LongType)
+    }
+    val inputBatch = new ColumnarBatch(Array(rowPositions), 3)
+
+    withResource(processor.process(inputBatch)) { outputBatch =>
+      assert(outputBatch.numRows() == 3)
+      assert(outputBatch.numCols() == 1)
+      withResource(outputBatch.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { host =>
+        assert((0 until 3).map(i => host.getBase.getLong(i)) == Seq(1000L, 1002L, 1005L))
+      }
+    }
+  }
+
+  test("native deletion-vector row index is dropped through the root action tree") {
+    val dataFieldId = 1
+    val dataField = ShadedTypes
+      .primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
+      .id(dataFieldId)
+      .named("data")
+    val parquetSchema = new ShadedMessageType("test", Seq[ShadedType](dataField).asJava)
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(dataFieldId, "data", Types.LongType.get()))
+    val (parquetInfo, shadedSchema) = createParquetInfo(parquetSchema, rowCount = 6)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo,
+      new JHashMap[Integer, Any](),
+      expectedSchema,
+      GpuIcebergParquetReaderUtils.withNativeRowIndex(shadedSchema),
+      Map.empty)
+
+    assert(processor.displayActionPlan() ==
+      "ProcessStruct\n  data (input[1]):\n    PassThrough")
+
+    val rowPositions = closeOnExcept(CudfColumnVector.fromLongs(0L, 2L, 5L)) { column =>
+      GpuColumnVector.from(column, LongType)
+    }
+    val data = closeOnExcept(CudfColumnVector.fromLongs(10L, 12L, 15L)) { column =>
+      GpuColumnVector.from(column, LongType)
+    }
+    val inputBatch = new ColumnarBatch(Array(rowPositions, data), 3)
+
+    withResource(processor.process(inputBatch)) { outputBatch =>
+      assert(outputBatch.numRows() == 3)
+      assert(outputBatch.numCols() == 1)
+      withResource(outputBatch.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { host =>
+        assert((0 until 3).map(i => host.getBase.getLong(i)) == Seq(10L, 12L, 15L))
+      }
+    }
+  }
+
+  test("Row lineage preserves fully materialized physical values") {
+    import ai.rapids.cudf.{ColumnVector => CudfColumnVector}
+    import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+    import com.nvidia.spark.rapids.GpuColumnVector
+    import org.apache.spark.sql.types.LongType
+    import org.apache.spark.sql.vectorized.ColumnarBatch
+
+    assume(supportsRowLineageInheritance,
+      "The selected Iceberg runtime does not support row lineage inheritance")
+    val rowIdFieldId = ShimUtils.rowIdFieldId()
+    val sequenceFieldId = ShimUtils.lastUpdatedSequenceNumberFieldId()
+
+    val rowIdType = ShadedTypes
+      .primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
+      .id(rowIdFieldId).named("_row_id")
+    val sequenceType = ShadedTypes
+      .primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
+      .id(sequenceFieldId).named("_last_updated_sequence_number")
+    val parquetSchema = new ShadedMessageType(
+      "test", Seq[ShadedType](rowIdType, sequenceType).asJava)
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(rowIdFieldId, "_row_id", Types.LongType.get()),
+      Types.NestedField.optional(sequenceFieldId, "_last_updated_sequence_number",
+        Types.LongType.get()))
+    val constants = new JHashMap[Integer, Any]()
+    constants.put(rowIdFieldId, 1000L)
+    constants.put(sequenceFieldId, 7L)
+    val (parquetInfo, shadedSchema) = createParquetInfo(parquetSchema, rowCount = 3)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo, constants, expectedSchema, shadedSchema, Map.empty)
+
+    val rowIds = closeOnExcept(CudfColumnVector.fromLongs(10L, 11L, 12L)) { cudf =>
+      GpuColumnVector.from(cudf, LongType)
+    }
+    val sequences = closeOnExcept(CudfColumnVector.fromLongs(3L, 4L, 5L)) { cudf =>
+      GpuColumnVector.from(cudf, LongType)
+    }
+
+    withResource(processor.process(new ColumnarBatch(Array(rowIds, sequences), 3))) { output =>
+      withResource(output.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { actualRowIds =>
+        withResource(output.column(1).asInstanceOf[GpuColumnVector].copyToHost()) { actualSeqs =>
+          assert((0 until 3).map(i => actualRowIds.getBase.getLong(i)) == Seq(10L, 11L, 12L))
+          assert((0 until 3).map(i => actualSeqs.getBase.getLong(i)) == Seq(3L, 4L, 5L))
+        }
+      }
+    }
+  }
+
+  test("Physical row IDs are null when first_row_id is unavailable") {
+    import ai.rapids.cudf.{ColumnVector => CudfColumnVector}
+    import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+    import com.nvidia.spark.rapids.GpuColumnVector
+    import org.apache.spark.sql.types.LongType
+    import org.apache.spark.sql.vectorized.ColumnarBatch
+
+    assume(supportsRowLineageInheritance,
+      "The selected Iceberg runtime does not support row lineage inheritance")
+    val rowIdFieldId = ShimUtils.rowIdFieldId()
+
+    val rowIdType = ShadedTypes
+      .primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
+      .id(rowIdFieldId).named("_row_id")
+    val parquetSchema = new ShadedMessageType("test", Seq[ShadedType](rowIdType).asJava)
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(rowIdFieldId, "_row_id", Types.LongType.get()))
+    val (parquetInfo, shadedSchema) = createParquetInfo(parquetSchema, rowCount = 3)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo, new JHashMap[Integer, Any](), expectedSchema, shadedSchema, Map.empty)
+    val rowIds = closeOnExcept(CudfColumnVector.fromBoxedLongs(10L, null, 12L)) { cudf =>
+      GpuColumnVector.from(cudf, LongType)
+    }
+
+    withResource(processor.process(new ColumnarBatch(Array(rowIds), 3))) { output =>
+      withResource(output.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { actual =>
+        assert((0 until 3).forall(i => actual.getBase.isNull(i)))
+      }
+    }
+  }
+
+  test("Lineage sequence remains null when its inherited constant is unavailable") {
+    import com.nvidia.spark.rapids.Arm.withResource
+    import com.nvidia.spark.rapids.GpuColumnVector
+    import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkColumnVector}
+
+    assume(supportsRowLineageInheritance,
+      "The selected Iceberg runtime does not support row lineage inheritance")
+    val rowIdFieldId = ShimUtils.rowIdFieldId()
+    val sequenceFieldId = ShimUtils.lastUpdatedSequenceNumberFieldId()
+
+    val parquetSchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(sequenceFieldId, "_last_updated_sequence_number",
+        Types.LongType.get()))
+    val constants = new JHashMap[Integer, Any]()
+    constants.put(rowIdFieldId, 1000L)
+    val (parquetInfo, shadedSchema) = createParquetInfo(parquetSchema, rowCount = 3)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo, constants, expectedSchema, shadedSchema, Map.empty)
+
+    withResource(processor.process(
+      new ColumnarBatch(Array.empty[SparkColumnVector], 3))) { output =>
+      withResource(output.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { sequences =>
+        assert((0 until 3).forall(i => sequences.getBase.isNull(i)))
+      }
+    }
+  }
+
+  test("Lineage projection order advances positions once across blocks and batches") {
+    import com.nvidia.spark.rapids.Arm.withResource
+    import com.nvidia.spark.rapids.GpuColumnVector
+    import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkColumnVector}
+
+    assume(supportsRowLineageInheritance,
+      "The selected Iceberg runtime does not support row lineage inheritance")
+    val rowIdFieldId = ShimUtils.rowIdFieldId()
+    val sequenceFieldId = ShimUtils.lastUpdatedSequenceNumberFieldId()
+
+    val rowPosFieldId = MetadataColumns.ROW_POSITION.fieldId()
+    val parquetSchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
+    // Put the sequence first and the row position before the row ID to exercise a different
+    // action order from the other lineage test.
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(sequenceFieldId, "_last_updated_sequence_number",
+        Types.LongType.get()),
+      Types.NestedField.optional(rowPosFieldId, "_pos", Types.LongType.get()),
+      Types.NestedField.optional(rowIdFieldId, "_row_id", Types.LongType.get()))
+    val constants = new JHashMap[Integer, Any]()
+    constants.put(rowIdFieldId, 1000L)
+    constants.put(sequenceFieldId, 7L)
+    val (parquetInfo, shadedSchema) =
+      createMultiBlockParquetInfo(parquetSchema, Seq(3L, 3L), firstFileGlobalRowIndex = 500L)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo, constants, expectedSchema, shadedSchema, Map.empty)
+
+    def assertBatch(numRows: Int, firstPosition: Long): Unit = {
+      withResource(processor.process(
+        new ColumnarBatch(Array.empty[SparkColumnVector], numRows))) { output =>
+        withResource(output.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { sequences =>
+          withResource(output.column(1).asInstanceOf[GpuColumnVector].copyToHost()) { positions =>
+            withResource(output.column(2).asInstanceOf[GpuColumnVector].copyToHost()) { rowIds =>
+              (0 until numRows).foreach { i =>
+                assert(sequences.getBase.getLong(i) == 7L)
+                assert(positions.getBase.getLong(i) == firstPosition + i)
+                assert(rowIds.getBase.getLong(i) == 1000L + firstPosition + i)
+              }
+            }
+          }
+        }
+      }
+    }
+
+    assertBatch(numRows = 2, firstPosition = 500L)
+    assertBatch(numRows = 4, firstPosition = 502L)
+  }
+
+  test("Physical lineage constants prevent incompatible file combining") {
+    assume(supportsRowLineageInheritance,
+      "The selected Iceberg runtime does not support row lineage inheritance")
+    val rowIdFieldId = ShimUtils.rowIdFieldId()
+    val sequenceFieldId = ShimUtils.lastUpdatedSequenceNumberFieldId()
+
+    val rowIdType = ShadedTypes
+      .primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
+      .id(rowIdFieldId).named("_row_id")
+    val sequenceType = ShadedTypes
+      .primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
+      .id(sequenceFieldId).named("_last_updated_sequence_number")
+    val parquetSchema = new ShadedMessageType(
+      "test", Seq[ShadedType](rowIdType, sequenceType).asJava)
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(rowIdFieldId, "_row_id", Types.LongType.get()),
+      Types.NestedField.optional(sequenceFieldId, "_last_updated_sequence_number",
+        Types.LongType.get()))
+    val firstConstants = new JHashMap[Integer, Any]()
+    firstConstants.put(rowIdFieldId, 1000L)
+    firstConstants.put(sequenceFieldId, 7L)
+    val sameConstants = new JHashMap[Integer, Any]()
+    sameConstants.put(rowIdFieldId, 1000L)
+    sameConstants.put(sequenceFieldId, 7L)
+    val differentRowIdConstants = new JHashMap[Integer, Any]()
+    differentRowIdConstants.put(rowIdFieldId, 2000L)
+    differentRowIdConstants.put(sequenceFieldId, 7L)
+    val differentSequenceConstants = new JHashMap[Integer, Any]()
+    differentSequenceConstants.put(rowIdFieldId, 1000L)
+    differentSequenceConstants.put(sequenceFieldId, 8L)
+    val (firstParquetInfo, firstShadedSchema) =
+      createParquetInfo(parquetSchema, rowCount = 3)
+    val (sameParquetInfo, sameShadedSchema) =
+      createParquetInfo(parquetSchema, rowCount = 3)
+    val (differentRowIdParquetInfo, differentRowIdShadedSchema) =
+      createParquetInfo(parquetSchema, rowCount = 3)
+    val (differentSequenceParquetInfo, differentSequenceShadedSchema) =
+      createParquetInfo(parquetSchema, rowCount = 3)
+    val firstProcessor = new GpuParquetReaderPostProcessor(
+      firstParquetInfo, firstConstants, expectedSchema, firstShadedSchema, Map.empty)
+    val sameProcessor = new GpuParquetReaderPostProcessor(
+      sameParquetInfo, sameConstants, expectedSchema, sameShadedSchema, Map.empty)
+    val differentRowIdProcessor = new GpuParquetReaderPostProcessor(
+      differentRowIdParquetInfo, differentRowIdConstants,
+      expectedSchema, differentRowIdShadedSchema, Map.empty)
+    val differentSequenceProcessor = new GpuParquetReaderPostProcessor(
+      differentSequenceParquetInfo, differentSequenceConstants,
+      expectedSchema, differentSequenceShadedSchema, Map.empty)
+
+    assert(firstProcessor.compatibleForCombining(sameProcessor))
+    assert(sameProcessor.compatibleForCombining(firstProcessor))
+    assert(!firstProcessor.compatibleForCombining(differentRowIdProcessor))
+    assert(!differentRowIdProcessor.compatibleForCombining(firstProcessor))
+    assert(!firstProcessor.compatibleForCombining(differentSequenceProcessor))
+    assert(!differentSequenceProcessor.compatibleForCombining(firstProcessor))
+  }
+
+  test("Missing row ID remains null when first_row_id is unavailable") {
+    import com.nvidia.spark.rapids.Arm.withResource
+    import com.nvidia.spark.rapids.GpuColumnVector
+    import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkColumnVector}
+
+    assume(supportsRowLineageInheritance,
+      "The selected Iceberg runtime does not support row lineage inheritance")
+    val rowIdFieldId = ShimUtils.rowIdFieldId()
+
+    val parquetSchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(rowIdFieldId, "_row_id", Types.LongType.get()))
+    val (parquetInfo, shadedSchema) = createParquetInfo(parquetSchema, rowCount = 3)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo, new JHashMap[Integer, Any](), expectedSchema, shadedSchema, Map.empty)
+
+    withResource(processor.process(
+      new ColumnarBatch(Array.empty[SparkColumnVector], 3))) { output =>
+      withResource(output.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { rowIds =>
+        assert((0 until 3).forall(i => rowIds.getBase.isNull(i)))
+      }
+    }
+  }
+
+  test("Missing lineage sequence remains null when first_row_id is unavailable") {
+    import com.nvidia.spark.rapids.Arm.withResource
+    import com.nvidia.spark.rapids.GpuColumnVector
+    import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkColumnVector}
+
+    assume(supportsRowLineageInheritance,
+      "The selected Iceberg runtime does not support row lineage inheritance")
+    val sequenceFieldId = ShimUtils.lastUpdatedSequenceNumberFieldId()
+
+    val parquetSchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(sequenceFieldId, "_last_updated_sequence_number",
+        Types.LongType.get()))
+    val constants = new JHashMap[Integer, Any]()
+    constants.put(sequenceFieldId, 7L)
+    val (parquetInfo, shadedSchema) = createParquetInfo(parquetSchema, rowCount = 3)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo, constants, expectedSchema, shadedSchema, Map.empty)
+
+    withResource(processor.process(
+      new ColumnarBatch(Array.empty[SparkColumnVector], 3))) { output =>
+      withResource(output.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { sequences =>
+        assert((0 until 3).forall(i => sequences.getBase.isNull(i)))
+      }
+    }
+  }
+
+  test("Inherited row ID checks 64-bit overflow") {
+    import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkColumnVector}
+
+    assume(supportsRowLineageInheritance,
+      "The selected Iceberg runtime does not support row lineage inheritance")
+    val rowIdFieldId = ShimUtils.rowIdFieldId()
+
+    val parquetSchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(rowIdFieldId, "_row_id", Types.LongType.get()))
+    val constants = new JHashMap[Integer, Any]()
+    constants.put(rowIdFieldId, Long.MaxValue - 1L)
+    val (parquetInfo, shadedSchema) =
+      createMultiBlockParquetInfo(parquetSchema, Seq(1L), firstFileGlobalRowIndex = 2L)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo, constants, expectedSchema, shadedSchema, Map.empty)
+
+    val error = intercept[ArithmeticException] {
+      processor.process(new ColumnarBatch(Array.empty[SparkColumnVector], 1))
+    }
+    assert(error.getMessage.contains("Iceberg row ID overflow"))
+  }
+
   test("Constant struct with required children does not throw") {
     val structFieldId = 1
     val fieldAId = 2
@@ -933,6 +1587,238 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
     val plan = processor.displayActionPlan()
     assert(plan.contains(
       s"FetchConstant(fieldId=$structFieldId, struct<"))
+  }
+
+  // Regression: ALTER TABLE ADD COLUMN of an optional nested MAP must not
+  // throw when reading old data files that pre-date the ADD. Iceberg map
+  // keys are intrinsically required, so the post-order visitor used to call
+  // MissingFieldActionBuilder for the key with isOptional=false and throw
+  // "Missing required field" before the missing-container's own map() handler
+  // could emit FillNull.
+  test("Missing nested optional map with required key does not throw") {
+    val infoStructId = 1
+    val scoreFieldId = 2
+    val propsMapId = 3  // newly-added MAP, missing from file
+    val propsKeyId = 4
+    val propsValueId = 5
+
+    // Parquet file: info STRUCT<score: BIGINT> — no props
+    val scoreType =
+      ShadedTypes.primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
+      .id(scoreFieldId).named("score")
+    val infoStruct = ShadedTypes.optionalGroup().addField(scoreType)
+      .id(infoStructId).named("info")
+    val parquetSchema = new ShadedMessageType("test",
+      Seq[ShadedType](infoStruct).asJava)
+
+    // Expected: info STRUCT<score, props: MAP<STRING, BIGINT>>
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(infoStructId, "info",
+        Types.StructType.of(
+          Types.NestedField.optional(scoreFieldId, "score", Types.LongType.get()),
+          Types.NestedField.optional(propsMapId, "props",
+            Types.MapType.ofOptional(propsKeyId, propsValueId,
+              Types.StringType.get(), Types.LongType.get()))
+        ))
+    )
+
+    val rowCount = 3
+    val (parquetInfo, shadedSchema) = createParquetInfo(parquetSchema, rowCount.toLong)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo,
+      new JHashMap[Integer, Any](),
+      expectedSchema,
+      shadedSchema,
+      Map.empty)
+
+    val plan = processor.displayActionPlan()
+    // The missing map itself must emit FillNull (it's the only valid behavior
+    // for an optional missing field). Children are discarded by the parent.
+    assert(plan.contains("FillNull(map<"),
+      s"expected FillNull for missing map in plan:\n$plan")
+
+    // Exercise process() too: action-tree construction succeeding is not the
+    // same guarantee as execute() succeeding for FillNull(map<...>).
+    import com.nvidia.spark.rapids.{FuzzerUtils, GpuColumnVector, SpillableColumnarBatch}
+    import com.nvidia.spark.rapids.SpillPriorities
+    import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+    import org.apache.spark.sql.types.{LongType, StructField, StructType => SparkStructType}
+
+    val inputSparkSchema = SparkStructType(Array(StructField(
+      "info",
+      SparkStructType(Seq(StructField("score", LongType, true))),
+      true)))
+    val inputBatch = FuzzerUtils.createColumnarBatch(inputSparkSchema, rowCount, seed = 42)
+    val spillable = closeOnExcept(inputBatch) { batch =>
+      SpillableColumnarBatch(batch, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+    }
+    withResource(spillable) { _ =>
+      withResource(processor.process(spillable.getColumnarBatch())) { outputBatch =>
+        assert(outputBatch.numRows() == rowCount)
+        assert(outputBatch.numCols() == 1)
+        val infoCol = outputBatch.column(0).asInstanceOf[GpuColumnVector].getBase
+        // info struct gains props as a second child.
+        assert(infoCol.getNumChildren == 2,
+          s"expected info struct to have 2 children, got ${infoCol.getNumChildren}")
+        withResource(infoCol.getChildColumnView(1)) { propsCol =>
+          assert(propsCol.getNullCount == rowCount,
+            s"props should be all-null; nullCount=${propsCol.getNullCount} rowCount=$rowCount")
+        }
+      }
+    }
+  }
+
+  // Same defect, with LIST<required element> as the missing container.
+  test("Missing nested optional list with required element does not throw") {
+    val outerStructId = 1
+    val keepFieldId = 2
+    val newListId = 3   // newly-added list, missing from file
+    val newListElementId = 4
+
+    val keepType =
+      ShadedTypes.primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
+      .id(keepFieldId).named("keep")
+    val outerStruct = ShadedTypes.optionalGroup().addField(keepType)
+      .id(outerStructId).named("outer")
+    val parquetSchema = new ShadedMessageType("test",
+      Seq[ShadedType](outerStruct).asJava)
+
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(outerStructId, "outer",
+        Types.StructType.of(
+          Types.NestedField.optional(keepFieldId, "keep", Types.LongType.get()),
+          // List with a REQUIRED element — the bug also fires here because the
+          // required element primitive is visited before the parent list().
+          Types.NestedField.optional(newListId, "new_list",
+            Types.ListType.ofRequired(newListElementId, Types.LongType.get()))
+        ))
+    )
+
+    val (parquetInfo, shadedSchema) = createParquetInfo(parquetSchema)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo,
+      new JHashMap[Integer, Any](),
+      expectedSchema,
+      shadedSchema,
+      Map.empty)
+
+    val plan = processor.displayActionPlan()
+    assert(plan.contains("FillNull(array<"),
+      s"expected FillNull for missing list in plan:\n$plan")
+  }
+
+  // Doubly-nested: a missing struct that itself contains a missing map with
+  // a required key. Exercises strict-ancestor isInsideMissingContainer when
+  // multiple levels above also have partner == null.
+  test("Doubly nested missing container with required descendant does not throw") {
+    val metaStructId = 1   // missing struct
+    val propsMapId = 2     // missing map (inside metaStruct)
+    val propsKeyId = 3
+    val propsValueId = 4
+
+    val parquetSchema = new ShadedMessageType("test",
+      Seq.empty[ShadedType].asJava)
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(metaStructId, "meta",
+        Types.StructType.of(
+          Types.NestedField.optional(propsMapId, "props",
+            Types.MapType.ofOptional(propsKeyId, propsValueId,
+              Types.StringType.get(), Types.LongType.get()))
+        ))
+    )
+
+    val (parquetInfo, shadedSchema) = createParquetInfo(parquetSchema)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo,
+      new JHashMap[Integer, Any](),
+      expectedSchema,
+      shadedSchema,
+      Map.empty)
+
+    val plan = processor.displayActionPlan()
+    // Outer struct is missing; its child map is also missing — only the
+    // outer FillNull(struct<...>) is composed into the plan.
+    assert(plan.contains("FillNull(struct<"),
+      s"expected FillNull for outer missing struct in plan:\n$plan")
+  }
+
+  test("Output batch bytes metric counts a column absent from the file") {
+    import com.nvidia.spark.rapids.LocalGpuMetric
+    import com.nvidia.spark.rapids.GpuMetric.GPU_OUTPUT_BATCH_BYTES
+    import org.apache.spark.sql.vectorized.{ColumnVector => SparkColumnVector}
+
+    val fieldId = 1
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(fieldId, "long_col", Types.LongType.get()))
+    val (parquetInfo, shadedSchema) = createParquetInfo(
+      new ShadedMessageType("test", Seq.empty[ShadedType].asJava))
+    val metric = new LocalGpuMetric
+    val processor = new GpuParquetReaderPostProcessor(parquetInfo, new JHashMap[Integer, Any](),
+      expectedSchema, shadedSchema, Map(GPU_OUTPUT_BATCH_BYTES -> metric))
+
+    // The input batch has no columns, so every output byte is fabricated and none of it was
+    // seen by the parquet reader.
+    val numRows = 100
+    withResource(processor.process(
+      new ColumnarBatch(Array.empty[SparkColumnVector], numRows))) { outputBatch =>
+      assert(outputBatch.numCols() == 1)
+    }
+    // At least the 8-byte long payload for every row, before null mask and buffer padding.
+    assert(metric.value >= numRows * 8L, s"metric ${metric.value} too small for $numRows longs")
+  }
+
+  test("Output batch bytes metric skips a column present in the file") {
+    import com.nvidia.spark.rapids.{FuzzerUtils, LocalGpuMetric, SpillableColumnarBatch,
+      SpillPriorities}
+    import com.nvidia.spark.rapids.GpuMetric.GPU_OUTPUT_BATCH_BYTES
+    import org.apache.spark.sql.types.StructField
+
+    val fieldId = 1
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(fieldId, "long_col", Types.LongType.get()))
+    val (parquetInfo, shadedSchema) = createParquetInfo(
+      new ShadedMessageType("test", Seq[ShadedType](
+        ShadedTypes.primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
+          .id(fieldId).named("long_col")).asJava))
+    val metric = new LocalGpuMetric
+    val processor = new GpuParquetReaderPostProcessor(parquetInfo, new JHashMap[Integer, Any](),
+      expectedSchema, shadedSchema, Map(GPU_OUTPUT_BATCH_BYTES -> metric))
+    // Pass-through columns were already recorded by the parquet reader; recording them here
+    // would double count.
+    assert(processor.displayActionPlan() == "PassThrough")
+
+    val schema = StructType(Array(StructField("long_col", LongType, true)))
+    val inputBatch = FuzzerUtils.createColumnarBatch(schema, rowCount = 3, seed = 42)
+    val spillable = closeOnExcept(inputBatch) { batch =>
+      SpillableColumnarBatch(batch, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+    }
+    withResource(spillable) { _ =>
+      withResource(processor.process(spillable.getColumnarBatch())) { _ => }
+    }
+    assert(metric.value == 0)
+  }
+
+  test("Output batch bytes metric skips the dropped _pos column") {
+    import com.nvidia.spark.rapids.{FuzzerUtils, LocalGpuMetric}
+    import com.nvidia.spark.rapids.GpuMetric.GPU_OUTPUT_BATCH_BYTES
+    import org.apache.spark.sql.types.StructField
+
+    val fieldId = 1
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(fieldId, "long_col", Types.LongType.get()))
+    val (info, shaded) = createParquetInfo(new ShadedMessageType("test", Seq[ShadedType](
+      ShadedTypes.primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
+        .id(fieldId).named("long_col")).asJava))
+    val metric = new LocalGpuMetric
+    // The _pos column the DV path injects is dropped, so it must not count as decoded.
+    val processor = new GpuParquetReaderPostProcessor(info, new JHashMap[Integer, Any](),
+      expectedSchema, GpuIcebergParquetReaderUtils.withNativeRowIndex(shaded),
+      Map(GPU_OUTPUT_BATCH_BYTES -> metric))
+    val withPos = StructType(Array(
+      StructField("_pos", LongType, true), StructField("long_col", LongType, true)))
+    withResource(processor.process(
+      FuzzerUtils.createColumnarBatch(withPos, rowCount = 3, seed = 42))) { _ => }
+    assert(metric.value == 0)
   }
 
 }

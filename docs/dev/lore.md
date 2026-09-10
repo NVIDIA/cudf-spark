@@ -123,7 +123,6 @@ restored data to console.
    The following versions are not supported due to compatibility issues with `GpuWriteFiles`:
    - Spark 3.4.0 (`340`)
    - Spark 3.4.1 (`341`)
-   - Spark 3.4.1 Databricks (`341db`)
    - Spark 3.4.2 (`342`)
    - Spark 3.4.3 (`343`)
    - Spark 3.4.4 (`344`)

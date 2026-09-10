@@ -28,6 +28,7 @@ import com.databricks.sql.transaction.tahoe.files.TahoeBatchFileIndex
 import com.nvidia.spark.rapids.RapidsConf
 
 import org.apache.spark.sql.Dataset
+import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.datasources.{HadoopFsRelation, LogicalRelation}
@@ -35,9 +36,10 @@ import org.apache.spark.util.Clock
 
 abstract class GpuOptimisticTransactionBase(
     deltaLog: DeltaLog,
+    catalogTable: Option[CatalogTable],
     snapshot: Snapshot,
     rapidsConf: RapidsConf)(implicit clock: Clock)
-  extends GpuOptimisticTransactionBaseCommon(deltaLog, snapshot, rapidsConf)(clock) {
+  extends GpuOptimisticTransactionBaseCommon(deltaLog, catalogTable, snapshot, rapidsConf)(clock) {
 
   override protected def getCpuInvariantCheckerExec(
       cpuPlan: SparkPlan,

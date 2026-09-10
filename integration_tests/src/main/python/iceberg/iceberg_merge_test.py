@@ -14,12 +14,17 @@
 
 import pytest
 
-from asserts import assert_equal_with_local_sort, assert_gpu_fallback_write_sql
+from asserts import assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect, \
+    assert_gpu_fallback_write_sql
 from conftest import is_iceberg_remote_catalog
 from data_gen import *
 from iceberg import (create_iceberg_table, get_full_table_name, iceberg_write_enabled_conf,
                      iceberg_base_table_cols, iceberg_gens_list, iceberg_nested_write_gens_list,
-                     iceberg_unsupported_mark)
+                     iceberg_unsupported_mark, merge_partition_transforms_distributed,
+                     supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON,
+                     supports_iceberg_row_lineage_inheritance,
+                     ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON,
+                     row_lineage_df, rapids_reader_types)
 from marks import allow_non_gpu, allow_non_gpu_conditional, iceberg, ignore_order, datagen_overrides
 from spark_session import is_spark_400_or_later, with_gpu_session, with_cpu_session
 
@@ -175,43 +180,102 @@ def test_iceberg_merge(spark_tmp_table_factory, partition_col_sql, merge_mode):
     _do_test_iceberg_merge(spark_tmp_table_factory, partition_col_sql, merge_mode)
 
 
+@allow_non_gpu(
+    "ReplaceDataExec", "WriteDeltaExec", "MergeRowsExec", "BatchScanExec",
+    "ColumnarToRowExec", "ShuffleExchangeExec", "SortExec", "ProjectExec")
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@ignore_order(local=True)
+@pytest.mark.parametrize('merge_mode,fallback_exec', [
+    pytest.param('copy-on-write', 'ReplaceDataExec', id='cow'),
+    pytest.param('merge-on-read', 'WriteDeltaExec', id='mor')
+])
+def test_iceberg_merge_v3_table_fallback(
+        spark_tmp_table_factory, merge_mode, fallback_exec):
+    base_table_name = get_full_table_name(spark_tmp_table_factory)
+    target_base_name = f"{base_table_name}_target"
+    source_table = f"{base_table_name}_source"
+
+    create_iceberg_table_with_merge_data(
+        f"{target_base_name}_cpu",
+        table_properties={"format-version": "3"},
+        merge_mode=merge_mode)
+    create_iceberg_table_with_merge_data(
+        f"{target_base_name}_gpu",
+        table_properties={"format-version": "3"},
+        merge_mode=merge_mode)
+    create_iceberg_table_with_merge_data(
+        source_table,
+        ensure_distinct_key=True,
+        seed=42,
+        merge_mode=merge_mode)
+
+    def merge_data(spark, target_table):
+        spark.sql(f"""
+            MERGE INTO {target_table} t
+            USING {source_table} s
+            ON t._c0 = s._c0
+            WHEN MATCHED THEN UPDATE SET *
+            WHEN NOT MATCHED THEN INSERT *
+        """)
+
+    assert_gpu_fallback_write_sql(
+        merge_data,
+        lambda spark, table_name: spark.sql(f"SELECT * FROM {table_name}"),
+        target_base_name,
+        [fallback_exec],
+        conf=iceberg_merge_enabled_conf)
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.skipif(
+    not supports_iceberg_row_lineage_inheritance,
+    reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
+@pytest.mark.parametrize("reader_type", rapids_reader_types)
+def test_iceberg_v3_row_lineage_merge_update_insert(
+        spark_tmp_table_factory, reader_type):
+    full_table = get_full_table_name(spark_tmp_table_factory)
+    source_view = spark_tmp_table_factory.get()
+
+    def setup_iceberg_table(spark):
+        spark.sql(
+            f"CREATE TABLE {full_table} (id BIGINT, v BIGINT) USING ICEBERG "
+            "TBLPROPERTIES ('format-version' = '3', 'write.merge.mode' = 'copy-on-write')")
+        row_lineage_df(spark, with_value=True).writeTo(full_table).append()
+        row_lineage_df(
+            spark,
+            start=DEFAULT_DATA_GEN_LENGTH // 2,
+            with_value=True,
+            value_start=10_000).createOrReplaceTempView(source_view)
+
+        spark.sql(
+            f"MERGE INTO {full_table} t USING {source_view} s ON t.id = s.id "
+            "WHEN MATCHED THEN UPDATE SET v = s.v "
+            "WHEN NOT MATCHED THEN INSERT (id, v) VALUES (s.id, s.v)")
+
+    with_cpu_session(setup_iceberg_table)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(
+            f"SELECT id, v, _row_id, _last_updated_sequence_number FROM {full_table}"),
+        conf={
+            "spark.rapids.sql.format.iceberg.v3.enabled": "true",
+            "spark.rapids.sql.format.parquet.reader.type": reader_type
+        })
+
+
 @allow_non_gpu("MergeRows$Keep", "MergeRows$Discard", "MergeRows$Split")
 @iceberg
 @datagen_overrides(seed=0, reason='https://github.com/NVIDIA/spark-rapids-jni/issues/4016')
 @ignore_order(local=True)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
-@pytest.mark.parametrize('merge_mode', ['copy-on-write', 'merge-on-read'])
-@pytest.mark.parametrize('partition_col_sql', [
-    pytest.param("year(_c8)", id="year(date_col)"),
-    pytest.param("month(_c8)", id="month(date_col)"),
-    pytest.param("day(_c8)", id="day(date_col)"),
-    pytest.param("month(_c9)", id="month(timestamp_col)"),
-    pytest.param("day(_c9)", id="day(timestamp_col)"),
-    pytest.param("hour(_c9)", id="hour(timestamp_col)"),
-    pytest.param("truncate(10, _c2)", id="truncate(10, int_col)"),
-    pytest.param("truncate(10, _c3)", id="truncate(10, long_col)"),
-    pytest.param("truncate(5, _c6)", id="truncate(5, string_col)"),
-    pytest.param("truncate(10, _c13)", id="truncate(10, decimal32_col)"),
-    pytest.param("truncate(10, _c14)", id="truncate(10, decimal64_col)"),
-    pytest.param("truncate(10, _c15)", id="truncate(10, decimal128_col)"),
-    pytest.param("bucket(16, _c2)", id="bucket(16, int_col)"),
-    pytest.param("bucket(16, _c3)", id="bucket(16, long_col)"),
-    pytest.param("bucket(16, _c8)", id="bucket(16, date_col)"),
-    pytest.param("bucket(16, _c9)", id="bucket(16, timestamp_col)"),
-    pytest.param("bucket(16, _c6)", id="bucket(16, string_col)"),
-    pytest.param("bucket(16, _c13)", id="bucket(16, decimal32_col)"),
-    pytest.param("bucket(16, _c14)", id="bucket(16, decimal64_col)"),
-    pytest.param("bucket(16, _c15)", id="bucket(16, decimal128_col)"),
-    pytest.param("_c0", id="identity(byte)"),
-    pytest.param("_c2", id="identity(int)"),
-    pytest.param("_c3", id="identity(long)"),
-    pytest.param("_c6", id="identity(string)"),
-    pytest.param("_c8", id="identity(date)"),
-    pytest.param("_c10", id="identity(decimal)"),
-])
+@pytest.mark.parametrize("partition_col_sql,merge_mode", merge_partition_transforms_distributed)
 @allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
 def test_iceberg_merge_full_coverage(spark_tmp_table_factory, partition_col_sql, merge_mode):
-    """Full partition coverage test - skipped for remote catalogs."""
+    """Sanity-check MERGE across the two write modes against partition transforms
+    distinct from those picked by other DML ops. The 26-transform partition-writer
+    coverage anchor lives in
+    iceberg_append_test.py::test_insert_into_partitioned_table_full_coverage."""
     _do_test_iceberg_merge(spark_tmp_table_factory, partition_col_sql, merge_mode)
 
 

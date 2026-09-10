@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copyright (c) 2024-2025, NVIDIA CORPORATION.
+# Copyright (c) 2024-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,12 +19,10 @@ set -e
 scala_ver=${1:-"2.12"}
 base_URL="https://central.sonatype.com/repository/maven-snapshots/com/nvidia"
 project_jni="spark-rapids-jni"
-project_private="rapids-4-spark-private_${scala_ver}"
-project_hybrid="rapids-4-spark-hybrid_${scala_ver}"
+project_private="cudf-spark-private_${scala_ver}"
 
 jni_ver=$(mvn help:evaluate -q -pl dist -Dexpression=spark-rapids-jni.version -DforceStdout)
-private_ver=$(mvn help:evaluate -q -pl dist -Dexpression=spark-rapids-private.version -DforceStdout)
-hybrid_ver=$(mvn help:evaluate -q -pl dist -Dexpression=spark-rapids-hybrid.version -DforceStdout)
+private_ver=$(mvn help:evaluate -q -pl dist -Dexpression=cudf-spark-private.version -DforceStdout)
 
 get_latest_snapshot_version() {
   local project_URL="$1"
@@ -58,13 +56,4 @@ else
   private_sha1=$private_ver
 fi
 
-if [[ $hybrid_ver == *SNAPSHOT* ]]; then
-  hybrid_URL="${base_URL}/${project_hybrid}/${hybrid_ver}"
-  hybrid_latest_ver=$(get_latest_snapshot_version "${hybrid_URL}")
-  hybrid_sha1=$(curl -sf "${hybrid_URL}/${project_hybrid}-${hybrid_latest_ver}.jar.sha1" 2>/dev/null) \
-    || hybrid_sha1=$(date +'%Y-%m-%d')
-else
-  hybrid_sha1=$hybrid_ver
-fi
-
-echo -n "${jni_sha1}_${private_sha1}_${hybrid_sha1}"
+echo -n "${jni_sha1}_${private_sha1}"

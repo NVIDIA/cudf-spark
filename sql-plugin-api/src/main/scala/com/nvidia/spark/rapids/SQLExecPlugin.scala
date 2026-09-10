@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@
 package com.nvidia.spark.rapids
 
 import org.apache.spark.sql.{SparkSession, SparkSessionExtensions}
-import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.execution.{ColumnarRule, SparkPlan, SparkStrategy}
 
@@ -31,18 +30,13 @@ class SQLExecPlugin extends (SparkSessionExtensions => Unit) {
     extensions.injectColumnar(columnarOverrides)
     extensions.injectQueryStagePrepRule(queryStagePrepOverrides)
     extensions.injectPlannerStrategy(_ => strategyRules)
-    extensions.injectPostHocResolutionRule(postHocResolutionOverrides)
   }
 
   private def columnarOverrides(sparkSession: SparkSession): ColumnarRule = {
-    ShimLoader.newColumnarOverrideRules()
+    ShimLoader.newColumnarOverrideRules(sparkSession)
   }
 
   private def queryStagePrepOverrides(sparkSession: SparkSession): Rule[SparkPlan] = {
-    ShimLoader.newGpuQueryStagePrepOverrides()
-  }
-
-  private def postHocResolutionOverrides(sparkSession: SparkSession): Rule[LogicalPlan] = {
-    ShimLoader.newGpuPostHocResolutionOverrides(sparkSession)
+    ShimLoader.newGpuQueryStagePrepOverrides(sparkSession)
   }
 }

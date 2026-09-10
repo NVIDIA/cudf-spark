@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,32 +21,33 @@ import java.util.Objects
 import scala.collection.JavaConverters._
 
 import com.nvidia.spark.rapids.{GpuScan, RapidsConf}
-import org.apache.hadoop.shaded.org.apache.commons.lang3.reflect.FieldUtils
 import org.apache.iceberg.PartitionScanTask
 import org.apache.iceberg.expressions.Expression
 
 import org.apache.spark.sql.connector.expressions.NamedReference
 import org.apache.spark.sql.connector.expressions.filter.Predicate
-import org.apache.spark.sql.connector.read.{Statistics, SupportsRuntimeV2Filtering}
+import org.apache.spark.sql.connector.read.{Scan, Statistics, SupportsRuntimeV2Filtering}
 
 class GpuSparkBatchQueryScan(
-    override val cpuScan: SparkBatchQueryScan,
+    override val cpuScan: Scan,
     override val rapidsConf: RapidsConf,
     override val queryUsesInputFile: Boolean) extends
   GpuSparkPartitioningAwareScan[PartitionScanTask](cpuScan, rapidsConf, queryUsesInputFile)
   with SupportsRuntimeV2Filtering {
 
-  private val runtimeFilterExpressions: List[Expression] = FieldUtils.readField(
-      cpuScan, "runtimeFilterExpressions", true)
-    .asInstanceOf[java.util.List[Expression]]
+  private val runtimeFilterExpressions: List[Expression] =
+    GpuSparkScanAccess.runtimeFilterExpressions(cpuScan)
     .asScala
     .toList
 
-  override def filterAttributes(): Array[NamedReference] = cpuScan.filterAttributes()
+  private def runtimeFilterScan: SupportsRuntimeV2Filtering =
+    cpuScan.asInstanceOf[SupportsRuntimeV2Filtering]
 
-  override def filter(predicates: Array[Predicate]): Unit = cpuScan.filter(predicates)
+  override def filterAttributes(): Array[NamedReference] = runtimeFilterScan.filterAttributes()
 
-  override def estimateStatistics(): Statistics = cpuScan.estimateStatistics()
+  override def filter(predicates: Array[Predicate]): Unit = runtimeFilterScan.filter(predicates)
+
+  override def estimateStatistics(): Statistics = GpuSparkScanAccess.estimateStatistics(cpuScan)
 
   override def equals(obj: Any): Boolean = {
     obj match {
@@ -62,12 +63,12 @@ class GpuSparkBatchQueryScan(
   }
 
   override def toString: String = {
-    s"GpuSparkBatchQueryScan(table=${cpuScan.table()}, )" +
-      s"branch=${cpuScan.branch()}, " +
-      s"type=${cpuScan.expectedSchema().asStruct()}, " +
-      s"filters=${cpuScan.filterExpressions()}, " +
+    s"GpuSparkBatchQueryScan(table=${GpuSparkScanAccess.table(cpuScan)}, )" +
+      s"branch=${GpuSparkScanAccess.branch(cpuScan)}, " +
+      s"type=${GpuSparkScanAccess.expectedSchema(cpuScan).asStruct()}, " +
+      s"filters=${GpuSparkScanAccess.filterExpressions(cpuScan)}, " +
       s"runtimeFilters=$runtimeFilterExpressions, " +
-      s"caseSensitive=${cpuScan.caseSensitive()}, " +
+      s"caseSensitive=${GpuSparkScanAccess.caseSensitive(cpuScan)}, " +
       s"queryUseInputFile=$queryUsesInputFile"
   }
 

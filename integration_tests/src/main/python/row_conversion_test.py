@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2022, NVIDIA CORPORATION.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -68,6 +68,83 @@ def test_row_conversions_fixed_width_wide():
         return df
     assert_gpu_and_cpu_are_equal_collect(do_it)
 
+# Wide fixed-width + STRING + DECIMAL128 round trip; toggles the accelerated path.
+@pytest.mark.parametrize('use_fast_path', ['true', 'false'], ids=['fast', 'slow'])
+def test_accelerated_c2r_wide_with_string_and_dec128(use_fast_path):
+    gens = [["l{}".format(i), LongGen(nullable=True)]    for i in range(10)] + \
+           [["d{}".format(i), DoubleGen(nullable=True)]  for i in range(5)]  + \
+           [["i{}".format(i), IntegerGen(nullable=True)] for i in range(5)]  + \
+           [["s{}".format(i), StringGen(nullable=True)]  for i in range(3)]  + \
+           [["dec{}".format(i),
+             DecimalGen(precision=30, scale=4, nullable=True)] for i in range(3)]
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: gen_df(spark, gens).selectExpr("*", "l0 as l_again"),
+        conf={'spark.rapids.sql.acceleratedColumnarToRow.enabled': use_fast_path})
+
+
+# DECIMAL precision boundaries around DECIMAL64 -> DECIMAL128 (= 18 -> 19).
+@pytest.mark.parametrize('use_fast_path', ['true', 'false'], ids=['fast', 'slow'])
+@pytest.mark.parametrize('precision,scale', [(18, 4), (19, 4), (30, 8), (38, 10)])
+def test_accelerated_c2r_decimal128(use_fast_path, precision, scale):
+    gens = [["dec{}".format(i),
+             DecimalGen(precision=precision, scale=scale, nullable=True)] for i in range(8)] + \
+           [["l{}".format(i), LongGen(nullable=True)] for i in range(4)]
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: gen_df(spark, gens).selectExpr("*"),
+        conf={'spark.rapids.sql.acceleratedColumnarToRow.enabled': use_fast_path})
+
+
+@pytest.mark.parametrize('use_fast_path', ['true', 'false'], ids=['fast', 'slow'])
+def test_accelerated_c2r_strings(use_fast_path):
+    gens = [["s{}".format(i), StringGen(nullable=True)] for i in range(6)] + \
+           [["l{}".format(i), LongGen(nullable=True)]   for i in range(4)]
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: gen_df(spark, gens).selectExpr("*"),
+        conf={'spark.rapids.sql.acceleratedColumnarToRow.enabled': use_fast_path})
+
+
+# Multi-tile regression for jni #4590 (tile-boundary write race).
+@pytest.mark.parametrize('use_fast_path', ['true', 'false'], ids=['fast', 'slow'])
+def test_accelerated_c2r_wide_int32(use_fast_path):
+    gens = [["c{}".format(i), IntegerGen(nullable=False)] for i in range(500)]
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: gen_df(spark, gens, length=256).selectExpr("*"),
+        conf={'spark.rapids.sql.acceleratedColumnarToRow.enabled': use_fast_path})
+
+
+# Hand-picked schemas that exercise alignment / tile-boundary edge cases random data_gen
+# is unlikely to hit.
+@pytest.mark.parametrize('schema', [
+    pytest.param([['c0', ByteGen()]] + [['c{}'.format(i), IntegerGen()] for i in range(1, 100)],
+                 id='byte_then_99_int'),
+    pytest.param([['b{}'.format(i), ByteGen()] for i in range(50)] +
+                 [['i{}'.format(i), IntegerGen()] for i in range(50)],
+                 id='50_byte_50_int'),
+    pytest.param([['s{}'.format(i), ShortGen()] for i in range(200)],
+                 id='200_short'),
+    pytest.param([['d', DecimalGen(precision=30, scale=4)]] +
+                 [['i{}'.format(i), IntegerGen()] for i in range(99)],
+                 id='dec128_then_99_int'),
+    pytest.param([['i{}'.format(i), IntegerGen()] for i in range(383)],
+                 id='383_int'),
+])
+def test_accelerated_c2r_dangerous_schemas(schema):
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: gen_df(spark, schema, length=256).selectExpr("*"))
+
+
+# Nested types should fall back through the slow path even with the fast-path conf on.
+def test_accelerated_c2r_falls_back_for_nested():
+    gens = [["s", StringGen(nullable=True)],
+            ["a", ArrayGen(int_gen)],
+            ["st", StructGen([["x", int_gen], ["y", string_gen]])],
+            ["l", LongGen(nullable=True)],
+            ["dec", DecimalGen(precision=30, scale=4, nullable=True)]]
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: gen_df(spark, gens).selectExpr("*"),
+        conf={'spark.rapids.sql.acceleratedColumnarToRow.enabled': 'true'})
+
+
 # Test handling of transitions when the data is already columnar on the host
 # Note that Apache Spark will automatically convert a load of nested types to rows, so
 # the nested types will not test a host columnar transition in that case.
@@ -88,3 +165,25 @@ def test_host_columnar_transition(spark_tmp_path, data_gen):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.parquet(data_path).filter("a IS NOT NULL"),
         conf={ 'spark.rapids.sql.exec.FileSourceScanExec' : 'false'})
+
+
+# BinaryType is intentionally NOT in the gen list: CudfRowTransitions
+# .isC2RSupportedType has no BinaryType branch, so including it would route
+# the scan through the fallback (non-Cudf) ColumnarToRowIterator and
+# contribute 0 LC to the target class.
+def test_cudf_unsafe_row_primitive_sweep(spark_tmp_path):
+    data_path = spark_tmp_path + "/cudf_unsafe_row"
+    gen_list = [(f'c{i}', gen) for i, gen in enumerate(all_gen)]
+    with_cpu_session(lambda spark:
+        gen_df(spark, gen_list, length=200).write.mode("overwrite").parquet(data_path),
+        conf={
+            'spark.sql.parquet.datetimeRebaseModeInWrite': 'CORRECTED',
+            'spark.sql.parquet.int96RebaseModeInWrite': 'CORRECTED',
+        })
+    # Pin acceleratedColumnarToRow so a future default flip or local conf
+    # override cannot silently route the test through the slow CPU
+    # ColumnarToRowIterator (which would still pass the equality check but
+    # contribute 0 LC to CudfUnsafeRowBase).
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.parquet(data_path),
+        conf={'spark.rapids.sql.acceleratedColumnarToRow.enabled': 'true'})

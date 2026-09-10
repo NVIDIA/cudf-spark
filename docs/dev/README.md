@@ -5,7 +5,7 @@ nav_order: 11
 has_children: true
 permalink: /developer-overview/
 ---
-# RAPIDS Plugin for Apache Spark Developer Overview
+# NVIDIA cuDF plugin for Apache Spark Developer Overview
 This document provides a developer overview of the project and covers the
 following topics:
 * [Spark SQL and Query Plans](#spark-sql-and-query-plans)
@@ -79,7 +79,7 @@ turn will need to pull values from the input nodes, chaining all the way down
 the tree until eventually the iterator of the leaf nodes is pulled and causes
 the reading of rows from the raw input data.
 
-## How the RAPIDS Plugin Works
+## How the cuDF Plugin Works
 The plugin leverages two main features in Spark.  The first is a
 plugin interface in [Catalyst](https://databricks.com/glossary/catalyst-optimizer)
 that allows the optimizer to be extended.  The plugin is a Catalyst extension
@@ -90,7 +90,7 @@ which allows extensions to operate on Spark SQL data in a `ColumnarBatch` form.
 Processing columnar data is much more GPU friendly than row-by-row processing.
 
 For example, the same query plan shown above becomes the following plan after
-being processed by the RAPIDS plugin:
+being processed by the cuDF plugin:
 ```
 *(5) Sort [o_orderpriority#5 ASC NULLS FIRST], true, 0
 +- Exchange rangepartitioning(o_orderpriority#5 ASC NULLS FIRST, 200), true, [id=#611]
@@ -130,6 +130,68 @@ The plugin uses a set of rules to update the query plan.  The physical plan is
 walked, node by node, looking up rules based on the type of node (e.g.: scan,
 executor, expression, etc.), and applying the rule that matches.  See the
 `ColumnarOverrideRules` and `GpuOverrides` classes for more details.
+
+#### Registering a GPU Expression
+
+Shared expression replacement rules are grouped by domain. Add a new rule to
+the registry that contains the most closely related expressions:
+
+* `GpuCoreExpressionOverrides`
+* `GpuMathAndDateExpressionOverrides`
+* `GpuComparisonAndAggregateExpressionOverrides`
+* `GpuCollectionExpressionOverrides`
+* `GpuStringAndAggregateExpressionOverrides`
+* `GpuMiscExpressionOverrides`
+
+Do not add shared expression rules directly to `GpuOverrides`. It combines the
+domain registries in `commonExpressions` and then appends shim and external
+provider rules in the required override order.
+
+Define the replacement metadata as a named case class. Small metadata classes
+normally belong in the corresponding `Gpu*ExpressionRuleMetas.scala` file.
+Metadata that is substantial or tightly coupled to its GPU operator can remain
+beside that operator. In either case, pass the named case class constructor to
+the rule instead of creating metadata with a constructor lambda. Keeping the
+registry declaration separate from the metadata implementation reduces the
+Scala sources invalidated by a registry edit, and Scalastyle enforces this
+pattern in the shared registries.
+
+For example, define the metadata class:
+
+```scala
+case class MyExpressionRuleMeta(
+    expression: MyExpression,
+    override val conf: RapidsConf,
+    parent: Option[RapidsMeta[_, _, _]],
+    rule: DataFromReplacementRule)
+  extends UnaryExprMeta[MyExpression](expression, conf, parent, rule) {
+
+  override def convertToGpu(child: Expression): GpuExpression =
+    GpuMyExpression(child)
+}
+```
+
+Then add the rule to the selected domain registry:
+
+```scala
+expr[MyExpression](
+  "Description of what this does on GPU",
+  ExprChecks.unaryProject(
+    TypeSig.commonCudfTypes,  // GPU output types
+    TypeSig.all,              // Spark output types
+    TypeSig.commonCudfTypes,  // GPU input types
+    TypeSig.all),             // Spark input types
+  MyExpressionRuleMeta)
+```
+
+If an expression or its CPU class is Spark-version-specific, register it
+through the appropriate shim instead. See the [shim layer guide](shims.md) for
+placement and cross-version requirements.
+
+Test new expression support against the CPU implementation, including its
+fallback conditions, and verify that the expected GPU expression appears in
+the executed plan. Run Scalastyle, compile both the Scala 2.12 and Scala 2.13
+builds, and run the relevant unit and integration tests.
 
 There is a separate guide for working with
 [Adaptive Query Execution](adaptive-query.md).
@@ -176,7 +238,7 @@ scala> import com.nvidia.spark.rapids.RapidsConf
 import com.nvidia.spark.rapids.RapidsConf
 
 scala> RapidsConf.help(true)
-# Rapids Plugin 4 Spark Configuration
+# cuDF Plugin Configuration
 The following is the list of options that `rapids-plugin-4-spark` supports.
 
 On startup use: `--conf [conf key]=[conf value]`. For example:

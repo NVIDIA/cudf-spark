@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,6 +32,7 @@ import org.apache.spark.TaskContext
 object TaskRegistryTracker {
   private val taskToThread = new util.HashMap[Long, ArrayBuffer[Long]]()
   private val registeredThreads = new util.HashSet[Long]()
+  private val dedicatedTaskThreads = new util.HashSet[Long]()
 
   /**
    * Clear the registry. This is used for tests
@@ -46,7 +47,10 @@ object TaskRegistryTracker {
   private def taskIsDone(taskId: Long): Unit = synchronized {
     val threads = taskToThread.remove(taskId)
     if (threads != null) {
-      threads.foreach(registeredThreads.remove)
+      threads.foreach { threadId =>
+        registeredThreads.remove(threadId)
+        dedicatedTaskThreads.remove(threadId)
+      }
       RmmSpark.taskDone(taskId)
     }
   }
@@ -78,6 +82,7 @@ object TaskRegistryTracker {
       if (registeredThreads.add(threadId)) {
         if (addDedicatedThread) {
           RmmSpark.currentThreadIsDedicatedToTask(taskId)
+          dedicatedTaskThreads.add(threadId)
         }
         if (!taskToThread.containsKey(taskId)) {
           taskToThread.put(taskId, ArrayBuffer(threadId))
@@ -87,7 +92,35 @@ object TaskRegistryTracker {
         } else {
           taskToThread.get(taskId) += threadId
         }
+      } else if (addDedicatedThread && dedicatedTaskThreads.add(threadId)) {
+        RmmSpark.currentThreadIsDedicatedToTask(taskId)
       }
+    }
+  }
+
+  /**
+   * Returns true only when the current thread was registered as Spark's dedicated task thread.
+   */
+  def isCurrentThreadRegisteredAsDedicatedTaskThread: Boolean = synchronized {
+    dedicatedTaskThreads.contains(RmmSpark.getCurrentThreadId)
+  }
+
+  /**
+   * Mark this dedicated task thread as waiting on another pool while executing the body.
+   *
+   * RmmSpark throws if pool-wait APIs are called from a pool thread, so callers that can
+   * run from either task or helper threads should go through this guard.
+   */
+  def withRmmPoolWait[T](body: => T): T = {
+    if (isCurrentThreadRegisteredAsDedicatedTaskThread) {
+      RmmSpark.waitingOnPool()
+      try {
+        body
+      } finally {
+        RmmSpark.doneWaitingOnPool()
+      }
+    } else {
+      body
     }
   }
 }

@@ -17,14 +17,17 @@ from typing import Callable, Dict, Optional
 import pytest
 from pyspark.sql.types import ArrayType, BinaryType
 
-from asserts import assert_equal_with_local_sort, assert_gpu_fallback_collect
+from asserts import (assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect,
+                     assert_gpu_fallback_collect)
 from conftest import is_iceberg_remote_catalog
 from data_gen import gen_df, copy_and_update, RepeatSeqGen
 from iceberg import (create_iceberg_table,
                      iceberg_base_table_cols,
                      iceberg_gens_list, iceberg_full_gens_list,
                      get_full_table_name, iceberg_write_enabled_conf,
-                     iceberg_unsupported_mark, _build_tblprops)
+                     iceberg_unsupported_mark, _build_tblprops,
+                     ctas_partition_transforms, supports_iceberg_v3,
+                     ICEBERG_V3_UNSUPPORTED_REASON)
 from marks import iceberg, ignore_order, allow_non_gpu, allow_non_gpu_conditional, datagen_overrides
 from spark_session import with_gpu_session, with_cpu_session, is_spark_400_or_later
 
@@ -110,6 +113,63 @@ def test_ctas_unpartitioned_table(spark_tmp_table_factory):
     _assert_gpu_equals_cpu_ctas(spark_tmp_table_factory, df_gen, table_prop)
 
 
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@ignore_order(local=True)
+@allow_non_gpu("AtomicCreateTableAsSelectExec", "AppendDataExec")
+def test_ctas_v3_fallback(spark_tmp_table_factory):
+    def run_ctas(spark):
+        target = get_full_table_name(spark_tmp_table_factory)
+        return _execute_ctas(
+            spark,
+            target,
+            spark_tmp_table_factory,
+            lambda sp: gen_df(sp, list(zip(iceberg_base_table_cols, iceberg_gens_list))),
+            {"format-version": "3"})
+
+    assert_gpu_fallback_collect(
+        run_ctas,
+        "AtomicCreateTableAsSelectExec",
+        conf=iceberg_write_enabled_conf)
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Requires a local Hadoop catalog")
+@ignore_order(local=True)
+@allow_non_gpu("AppendDataExec")
+@pytest.mark.parametrize("catalog_id,catalog_property,table_prop", [
+    pytest.param("default", "table-default.format-version", {}, id="catalog_default"),
+    pytest.param("override", "table-override.format-version", {"format-version": "2"},
+                 id="catalog_override"),
+])
+def test_ctas_catalog_v3_fallback(spark_tmp_table_factory,
+                                  catalog_id,
+                                  catalog_property,
+                                  table_prop):
+    catalog_name = f"ctas_v3_{catalog_id}_{spark_tmp_table_factory.get()}"
+    catalog_prefix = f"spark.sql.catalog.{catalog_name}"
+    conf = copy_and_update(iceberg_write_enabled_conf, {
+        catalog_prefix: "org.apache.iceberg.spark.SparkCatalog",
+        f"{catalog_prefix}.type": "hadoop",
+        f"{catalog_prefix}.{catalog_property}": "3",
+    })
+
+    def run_ctas(spark):
+        spark.conf.set(
+            f"{catalog_prefix}.warehouse",
+            spark.conf.get("spark.sql.catalog.spark_catalog.warehouse"))
+        target = f"{catalog_name}.default.{spark_tmp_table_factory.get()}"
+        return _execute_ctas(
+            spark,
+            target,
+            spark_tmp_table_factory,
+            lambda sp: gen_df(sp, list(zip(iceberg_base_table_cols, iceberg_gens_list))),
+            table_prop)
+
+    assert_gpu_and_cpu_are_equal_collect(run_ctas, conf=conf)
+
+
 def _do_test_ctas_partitioned_table(spark_tmp_table_factory, partition_col_sql, table_prop=None):
     """Helper function for partitioned table CTAS tests."""
     if table_prop is None:
@@ -140,37 +200,12 @@ def test_ctas_partitioned_table(spark_tmp_table_factory, partition_col_sql):
 @datagen_overrides(seed=0, reason='https://github.com/NVIDIA/spark-rapids-jni/issues/4016')
 @ignore_order(local=True)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
-@pytest.mark.parametrize("partition_col_sql", [
-    pytest.param("year(_c8)", id="year(date_col)"),
-    pytest.param("month(_c8)", id="month(date_col)"),
-    pytest.param("day(_c8)", id="day(date_col)"),
-    pytest.param("month(_c9)", id="month(timestamp_col)"),
-    pytest.param("day(_c9)", id="day(timestamp_col)"),
-    pytest.param("hour(_c9)", id="hour(timestamp_col)"),
-    pytest.param("truncate(10, _c2)", id="truncate(10, int_col)"),
-    pytest.param("truncate(10, _c3)", id="truncate(10, long_col)"),
-    pytest.param("truncate(5, _c6)", id="truncate(5, string_col)"),
-    pytest.param("truncate(10, _c13)", id="truncate(10, decimal32_col)"),
-    pytest.param("truncate(10, _c14)", id="truncate(10, decimal64_col)"),
-    pytest.param("truncate(10, _c15)", id="truncate(10, decimal128_col)"),
-    pytest.param("bucket(16, _c2)", id="bucket(16, int_col)"),
-    pytest.param("bucket(16, _c3)", id="bucket(16, long_col)"),
-    pytest.param("bucket(16, _c8)", id="bucket(16, date_col)"),
-    pytest.param("bucket(16, _c9)", id="bucket(16, timestamp_col)"),
-    pytest.param("bucket(16, _c6)", id="bucket(16, string_col)"),
-    pytest.param("bucket(16, _c13)", id="bucket(16, decimal32_col)"),
-    pytest.param("bucket(16, _c14)", id="bucket(16, decimal64_col)"),
-    pytest.param("bucket(16, _c15)", id="bucket(16, decimal128_col)"),
-    pytest.param("_c0", id="identity(byte)"),
-    pytest.param("_c2", id="identity(int)"),
-    pytest.param("_c3", id="identity(long)"),
-    pytest.param("_c6", id="identity(string)"),
-    pytest.param("_c8", id="identity(date)"),
-    pytest.param("_c10", id="identity(decimal)"),
-])
+@pytest.mark.parametrize("partition_col_sql", ctas_partition_transforms)
 @allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
 def test_ctas_partitioned_table_full_coverage(spark_tmp_table_factory, partition_col_sql):
-    """Full partition coverage test - skipped for remote catalogs."""
+    """Sanity-check CTAS against a few partition transforms distinct from those
+    picked by other DML ops. The 26-transform partition-writer coverage anchor
+    lives in iceberg_append_test.py::test_insert_into_partitioned_table_full_coverage."""
     _do_test_ctas_partitioned_table(spark_tmp_table_factory, partition_col_sql)
 
 

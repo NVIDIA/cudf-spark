@@ -16,7 +16,6 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark": "332db"}
-{"spark": "341db"}
 {"spark": "350db143"}
 {"spark": "400db173"}
 spark-rapids-shim-json-lines ***/

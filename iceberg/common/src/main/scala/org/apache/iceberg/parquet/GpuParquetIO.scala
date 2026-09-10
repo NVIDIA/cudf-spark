@@ -27,7 +27,7 @@ import org.apache.iceberg.shaded.org.apache.parquet.io.{InputFile => ShadedInput
 
 object GpuParquetIO {
   def file(file: InputFile): ShadedInputFile = {
-    ParquetIO.file(file)
+    GpuParquetIOAccess.file(file)
   }
 
   /**

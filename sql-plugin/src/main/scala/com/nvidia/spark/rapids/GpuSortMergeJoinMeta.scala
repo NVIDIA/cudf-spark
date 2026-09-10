@@ -47,6 +47,21 @@ class GpuSortMergeJoinMeta(
   override val namedChildExprs: Map[String, Seq[BaseExprMeta[_]]] =
     JoinTypeChecks.equiJoinMeta(leftKeys, rightKeys, conditionMeta)
 
+  override protected def runChildExprBridgeOptimization(): Unit = {
+    GpuCpuBridgeOptimizer.checkAndOptimizeExpressionMetas(leftKeys ++ rightKeys)
+    conditionMeta.foreach { cond =>
+      val leftExprIds = join.left.output.map(_.exprId)
+      val rightExprIds = join.right.output.map(_.exprId)
+      if (AstUtil.canExtractNonAstConditionIfNeed(cond, leftExprIds, rightExprIds)) {
+        GpuCpuBridgeOptimizer.checkAndOptimizeNonAstSubtrees(cond)
+      } else {
+        // Inner joins can consume a bridged post-filter. Joins that require an AST condition
+        // will call requireAstForGpuOn later and reject GPU execution if the bridge remains.
+        GpuCpuBridgeOptimizer.checkAndOptimizeExpressionMetas(Seq(cond))
+      }
+    }
+  }
+
   override def tagPlanForGpu(): Unit = {
     // Use conditions from Hash Join
     GpuHashJoin.tagJoin(this, join.joinType, buildSide, join.leftKeys, join.rightKeys,

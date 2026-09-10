@@ -20,6 +20,7 @@ import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.jni.{Arithmetic, RoundMode}
 
 import org.apache.spark.sql.catalyst.expressions.Expression
+import org.apache.spark.sql.catalyst.trees.{CurrentOrigin, Origin}
 import org.apache.spark.sql.types.{DataType, DecimalType, LongType}
 
 /**
@@ -43,23 +44,38 @@ case class GpuCheckOverflow(child: Expression,
     DType.create(DType.DTypeEnum.DECIMAL32, expectedCudfScale)
   }
 
-  override protected def doColumnar(input: GpuColumnVector): ColumnVector = {
-    val base = input.getBase
-    val rounded = if (resultDType.equals(base.getType)) {
-      base.incRefCount()
-    } else {
-      withResource(Arithmetic.round(base, dataType.scale, RoundMode.HALF_UP)) { rounded =>
-        if (resultDType.getTypeId != base.getType.getTypeId) {
-          rounded.castTo(resultDType)
-        } else {
-          rounded.incRefCount()
+  // SPARK-39190: snapshot the Origin at construction so the SQL query context survives the
+  // reflection-based plan reconstruction (e.g. GpuBindReferences → mapChildren → makeCopy)
+  // that otherwise resets `origin` to its default.
+  val capturedOrigin: Origin = origin
+
+  // Defensive: re-enter the captured origin around the case-class copy.  Spark's `mapChildren` /
+  // `withNewChildren` already wrap with `CurrentOrigin.withOrigin(this.origin)`, but if any future
+  // reconstruction path (e.g. direct reflection) bypasses that wrap, this override keeps the
+  // parser-set SQL context attached to the rebound instance.
+  override def withNewChildInternal(newChild: Expression): Expression =
+    CurrentOrigin.withOrigin(capturedOrigin) {
+      copy(child = newChild)
+    }
+
+  override protected def doColumnar(input: GpuColumnVector): ColumnVector =
+    CurrentOrigin.withOrigin(capturedOrigin) {
+      val base = input.getBase
+      val rounded = if (resultDType.equals(base.getType)) {
+        base.incRefCount()
+      } else {
+        withResource(Arithmetic.round(base, dataType.scale, RoundMode.HALF_UP)) { rounded =>
+          if (resultDType.getTypeId != base.getType.getTypeId) {
+            rounded.castTo(resultDType)
+          } else {
+            rounded.incRefCount()
+          }
         }
       }
+      withResource(rounded) { rounded =>
+        GpuCast.checkNFixDecimalBounds(rounded, dataType, !nullOnOverflow)
+      }
     }
-    withResource(rounded) { rounded =>
-      GpuCast.checkNFixDecimalBounds(rounded, dataType, !nullOnOverflow)
-    }
-  }
 
   override def nullable: Boolean = true
 }

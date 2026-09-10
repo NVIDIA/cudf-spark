@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -82,6 +82,36 @@ class WithRetrySuite
         verify(myItems.head, times(1)).close()
         verify(myItems.last, times(0)).close()
         myItems(1).close()
+      }
+    }
+  }
+
+  test("withRetry does not close a caller-owned closeable iterator on failure") {
+    val myItems = Seq(mock[AutoCloseable], mock[AutoCloseable])
+    val underlying = myItems.iterator
+    var inputWasClosed = false
+    val input: Iterator[AutoCloseable] = new Iterator[AutoCloseable] with AutoCloseable {
+      override def hasNext: Boolean = underlying.hasNext
+
+      override def next(): AutoCloseable = underlying.next()
+
+      override def close(): Unit = {
+        inputWasClosed = true
+        underlying.foreach(_.close())
+      }
+    }
+    val splitPolicy: AutoCloseable => Seq[AutoCloseable] = null
+
+    assertThrows[IllegalStateException] {
+      try {
+        withRetry(input, splitPolicy) { _ =>
+          throw new IllegalStateException("unhandled exception")
+        }.toSeq
+      } finally {
+        assert(!inputWasClosed)
+        verify(myItems.head, times(1)).close()
+        verify(myItems.last, times(0)).close()
+        myItems.last.close()
       }
     }
   }
@@ -262,6 +292,56 @@ class WithRetrySuite
     } finally {
       assert(lastSplitSize >= minValue)
       assert(lastSplitSize == (initialValue / (2 * numSplits)))
+    }
+  }
+
+  test("splitTargetSizeInHalfGpu uses dataSize/2 as target when dataSize < targetSize/2") {
+    // When the actual data is smaller than the halved target, halving targetSize is a no-op:
+    // the retry would fetch the same data and OOM again. The fix is to use dataSize/2 instead,
+    // which forces the caller to process roughly half the data per retry.
+    val targetSize = 1000L
+    val minSize = 100L
+    val dataSize = 200L  // less than targetSize/2=500, so halving targetSize is a no-op
+    var doThrow = true
+    var splitTargetUsed = 0L
+    val myTarget = AutoCloseableTargetSize(targetSize, minSize, dataSize)
+    try {
+      withRetry(myTarget, splitTargetSizeInHalfGpu) { attempt =>
+        splitTargetUsed = attempt.targetSize
+        if (doThrow) {
+          doThrow = false
+          throw new GpuSplitAndRetryOOM("first attempt always fails")
+        }
+      }.toSeq
+    } finally {
+      // Should split to dataSize/2=100, not targetSize/2=500
+      assert(splitTargetUsed == dataSize / 2)
+    }
+  }
+
+  test("splitTargetSizeInHalfGpu uses per-child dataSize on second-level split") {
+    // After an uneven first split, the smaller child carries its own dataSize (e.g. 2 bytes)
+    // while its targetSize is the halved parent target (e.g. 100). Without per-child dataSize
+    // the child would see dataSize=200 (the parent total), compute newTarget=50 (targetSize/2),
+    // and fail to split [1-byte, 1-byte] tables. With the correct dataSize=2 the child uses
+    // dataSize/2=1, which is a valid split point.
+    val targetSize = 100L   // newTarget from the first split (parent dataSize/2)
+    val minSize = 1L
+    val childDataSize = 2L  // actual bytes in the smaller child; less than targetSize/2=50
+    var doThrow = true
+    var splitTargetUsed = 0L
+    val myTarget = AutoCloseableTargetSize(targetSize, minSize, childDataSize)
+    try {
+      withRetry(myTarget, splitTargetSizeInHalfGpu) { attempt =>
+        splitTargetUsed = attempt.targetSize
+        if (doThrow) {
+          doThrow = false
+          throw new GpuSplitAndRetryOOM("second-level OOM")
+        }
+      }.toSeq
+    } finally {
+      // Should use childDataSize/2=1, not targetSize/2=50
+      assert(splitTargetUsed == childDataSize / 2)
     }
   }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeMap, Expression, SortOrder}
 import org.apache.spark.sql.catalyst.plans.QueryPlan
-import org.apache.spark.sql.catalyst.plans.physical.Partitioning
+import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, UnknownPartitioning}
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.columnar.{InMemoryRelation, InMemoryTableScanExec}
 import org.apache.spark.sql.internal.{SQLConf, StaticSQLConf}
@@ -127,6 +127,8 @@ case class GpuInMemoryTableScanExec(
   // But the cached version could alias output, so we need to replace output.
   override def outputPartitioning: Partitioning = {
     relation.cachedPlan.outputPartitioning match {
+      case UnknownPartitioning(0) =>
+        UnknownPartitioning(relation.cacheBuilder.cachedColumnBuffers.getNumPartitions)
       case e: Expression => updateAttribute(e).asInstanceOf[Partitioning]
       case other => other
     }

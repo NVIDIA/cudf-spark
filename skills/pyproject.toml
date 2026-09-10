@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aether-agent"
+version = "0.1.0"
+description = "Convert Spark UDFs into GPU implementations"
+authors = [
+    {name = "Rishi Chandra", email = "rishic@nvidia.com"}
+]
+readme = "README.md"
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.4.1",
+    "PyYAML==6.0.3",
+    "isort==6.0.1",
+    "black==25.1.0",
+    "ruff==0.12.8",
+]
+
+[tool.setuptools]
+packages = []
+
+[tool.pyright]
+typeCheckingMode = "standard"
+
+[tool.pytest.ini_options]
+markers = ["slow: integration tests"]

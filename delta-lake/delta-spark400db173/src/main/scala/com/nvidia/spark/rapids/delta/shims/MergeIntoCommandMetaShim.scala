@@ -16,28 +16,77 @@
 
 package com.nvidia.spark.rapids.delta.shims
 
-import com.databricks.sql.transaction.tahoe.commands.{MergeIntoCommand, MergeIntoCommandEdge}
-import com.nvidia.spark.rapids.RapidsConf
+import com.databricks.sql.transaction.tahoe.DeltaLog
+import com.databricks.sql.transaction.tahoe.commands.{DeletionVectorUtils, MergeIntoCommand,
+  MergeIntoCommandBase, MergeIntoCommandEdge}
+import com.databricks.sql.transaction.tahoe.rapids.{GpuDeltaLog, GpuMergeIntoCommand}
+import com.databricks.sql.transaction.tahoe.sources.DeltaSQLConf
+import com.nvidia.spark.rapids.{RapidsConf, RapidsMeta}
 import com.nvidia.spark.rapids.delta.{MergeIntoCommandEdgeMeta, MergeIntoCommandMeta}
 
 import org.apache.spark.sql.execution.command.RunnableCommand
 
-// Keep MERGE on CPU for DB-17.3 until issue #14598 ports both command shapes.
-// The convertToGpu methods throw so a missed tag fails during planning.
 object MergeIntoCommandMetaShim {
-  def tagForGpu(meta: MergeIntoCommandMeta, mergeCmd: MergeIntoCommand): Unit =
-    meta.willNotWorkOnGpu("Delta Lake MERGE INTO is not yet supported on GPU for DB-17.3")
+  def tagForGpu(meta: MergeIntoCommandMeta, mergeCmd: MergeIntoCommand): Unit = {
+    tagForGpuCommon(meta, mergeCmd)
+  }
 
-  def tagForGpu(meta: MergeIntoCommandEdgeMeta, mergeCmd: MergeIntoCommandEdge): Unit =
-    meta.willNotWorkOnGpu("Delta Lake MERGE INTO is not yet supported on GPU for DB-17.3")
+  def tagForGpu(meta: MergeIntoCommandEdgeMeta, mergeCmd: MergeIntoCommandEdge): Unit = {
+    tagForGpuCommon(meta, mergeCmd)
+  }
 
-  def convertToGpu(mergeCmd: MergeIntoCommand, conf: RapidsConf): RunnableCommand =
-    throw new UnsupportedOperationException(
-      "Delta Lake MERGE INTO is not yet supported on GPU for DB-17.3 " +
-        "(tracked in GitHub issue #14598)")
+  private def tagForGpuCommon(
+      meta: RapidsMeta[_, _, _],
+      mergeCmd: MergeIntoCommandBase): Unit = {
+    tagPersistentDeletionVectorFallback(
+      meta,
+      mergeCmd.targetFileIndex.deltaLog,
+      mergeCmd.conf.getConf(DeltaSQLConf.MERGE_USE_PERSISTENT_DELETION_VECTORS))
+  }
 
-  def convertToGpu(mergeCmd: MergeIntoCommandEdge, conf: RapidsConf): RunnableCommand =
-    throw new UnsupportedOperationException(
-      "Delta Lake MERGE INTO is not yet supported on GPU for DB-17.3 " +
-        "(tracked in GitHub issue #14598)")
+  private def tagPersistentDeletionVectorFallback(
+      meta: RapidsMeta[_, _, _],
+      deltaLog: DeltaLog,
+      usePersistentDeletionVectors: Boolean): Unit = {
+    if (DeletionVectorUtils.deletionVectorsWritable(deltaLog.unsafeVolatileSnapshot) &&
+        usePersistentDeletionVectors) {
+      meta.willNotWorkOnGpu("Deletion vectors are not supported on GPU")
+    }
+  }
+
+  def convertToGpu(mergeCmd: MergeIntoCommand, conf: RapidsConf): RunnableCommand = {
+    GpuMergeIntoCommand(
+      mergeCmd.source,
+      mergeCmd.target,
+      mergeCmd.catalogTable,
+      mergeCmd.targetFileIndex,
+      new GpuDeltaLog(mergeCmd.targetFileIndex.deltaLog, conf),
+      mergeCmd.condition,
+      mergeCmd.matchedClauses,
+      mergeCmd.notMatchedClauses,
+      mergeCmd.notMatchedBySourceClauses,
+      mergeCmd.migratedSchema,
+      mergeCmd.trackHighWaterMarks,
+      mergeCmd.schemaEvolutionEnabled)(conf)
+  }
+
+  def convertToGpu(mergeCmd: MergeIntoCommandEdge, conf: RapidsConf): RunnableCommand = {
+    GpuMergeIntoCommand(
+      mergeCmd.source,
+      mergeCmd.target,
+      mergeCmd.catalogTable,
+      mergeCmd.targetFileIndex,
+      new GpuDeltaLog(mergeCmd.targetFileIndex.deltaLog, conf),
+      mergeCmd.condition,
+      mergeCmd.matchedClauses,
+      mergeCmd.notMatchedClauses,
+      mergeCmd.notMatchedBySourceClauses,
+      mergeCmd.migratedSchema,
+      mergeCmd.trackHighWaterMarks,
+      mergeCmd.schemaEvolutionEnabled,
+      // This is safe to forward as-is because DBR analysis has already encoded snapshot reuse
+      // eligibility in this Option: Some(snapshot) means the Edge command may reuse the analyzed
+      // snapshot, while None makes GpuDeltaLog open the transaction on the latest snapshot.
+      mergeCmd.snapshotAtAnalysis)(conf)
+  }
 }

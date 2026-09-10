@@ -98,7 +98,11 @@ class GpuDeviceManagerSuite extends AnyFunSuite with BeforeAndAfter {
     val rapidsConf = new RapidsConf(Map(
       RapidsConf.RMM_ALLOC_RESERVE.key -> "0",
       RapidsConf.RMM_ALLOC_FRACTION.key -> "0.3",
-      RapidsConf.RMM_ALLOC_MAX_FRACTION.key -> "0.3"))
+      RapidsConf.RMM_ALLOC_MAX_FRACTION.key -> "0.3",
+      // This test validates that equal allocation and maximum fractions are accepted. Keep the
+      // minimum independent of whole-device capacity so the test also works when other test JVMs
+      // are using the GPU.
+      RapidsConf.RMM_ALLOC_MIN_FRACTION.key -> "0.01"))
     try {
       SparkSession.builder().master("local[1]").getOrCreate()
       GpuDeviceManager.initializeMemory(None, Some(rapidsConf))

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,7 +27,7 @@ import scala.language.implicitConversions
 import ai.rapids.cudf.{AvroOptions => CudfAvroOptions,HostMemoryBuffer, Table}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
-import com.nvidia.spark.rapids.GpuMetric.{BUFFER_TIME, FILTER_TIME, GPU_DECODE_TIME, NUM_OUTPUT_BATCHES, READ_FS_TIME, SCAN_TIME, WRITE_BUFFER_TIME}
+import com.nvidia.spark.rapids.GpuMetric.{BUFFER_TIME, FILTER_TIME, GPU_DECODE_TIME, GPU_OUTPUT_BATCH_BYTES, NUM_OUTPUT_BATCHES, READ_FS_TIME, SCAN_TIME, WRITE_BUFFER_TIME}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.io.async.{AsyncRunner, UnboundedAsyncRunner}
@@ -137,7 +137,7 @@ case class GpuAvroScan(
   override def equals(obj: Any): Boolean = obj match {
     case a: GpuAvroScan =>
       super.equals(a) && dataSchema == a.dataSchema && options == a.options &&
-          equivalentFilters(pushedFilters, a.pushedFilters) && rapidsConf == a.rapidsConf &&
+          equivalentFilters(pushedFilters, a.pushedFilters) &&
           queryUsesInputFile == a.queryUsesInputFile
     case _ => false
   }
@@ -183,9 +183,9 @@ case class GpuAvroPartitionReaderFactory(
     metrics.get(FILTER_TIME).foreach {
       _ += (System.nanoTime() - startTime)
     }
-    val reader = new PartitionReaderWithBytesRead(new GpuAvroPartitionReader(conf, partFile,
+    val reader = new GpuAvroPartitionReader(conf, partFile,
       blockMeta, readDataSchema, debugDumpPrefix, debugDumpAlways, maxReadBatchSizeRows,
-      maxReadBatchSizeBytes, metrics))
+      maxReadBatchSizeBytes, metrics)
     ColumnarPartitionReaderWithPartitionValues.newReader(partFile, reader, partitionSchema,
       maxGpuColumnSizeBytes)
   }
@@ -281,7 +281,8 @@ case class GpuAvroMultiFilePartitionReaderFactory(
               logWarning(s"Skipped missing file: ${file.filePath}", e)
               AvroBlockMeta(null, 0L, Seq.empty)
             // Throw FileNotFoundException even if `ignoreCorruptFiles` is true
-            case e: FileNotFoundException if !ignoreMissingFiles => throw e
+            case e: FileNotFoundException if !ignoreMissingFiles =>
+              throw GpuFileNotFoundException(file.filePath.toString, e)
             case e@(_: RuntimeException | _: IOException) if ignoreCorruptFiles =>
               logWarning(
                 s"Skipped the rest of the content in the corrupted file: ${file.filePath}", e)
@@ -384,7 +385,8 @@ trait GpuAvroReaderBase extends Logging { self: FilePartitionReaderBase =>
       val dataBuf = withRetryNoSplit(hostBuf)(_.getDataHostBuffer())
       val t = withResource(dataBuf)(sendToGpuUnchecked(_, bufSize, splits))
       withResource(t) { _ =>
-        val batchSizeBytes = GpuColumnVector.getTotalDeviceMemoryUsed(t)
+        val batchSizeBytes =
+          GpuMetric.recordOutputBatchBytes(t, metrics.get(GPU_OUTPUT_BATCH_BYTES))
         logDebug(s"GPU batch size: $batchSizeBytes bytes")
         metrics(NUM_OUTPUT_BATCHES) += 1
         // convert to batch
@@ -985,6 +987,7 @@ class GpuMultiFileAvroPartitionReader(
             s"but read ${table.getNumberOfColumns}")
       }
       metrics(NUM_OUTPUT_BATCHES) += 1
+      GpuMetric.recordOutputBatchBytes(table, metrics.get(GPU_OUTPUT_BATCH_BYTES))
       table
     }
   }

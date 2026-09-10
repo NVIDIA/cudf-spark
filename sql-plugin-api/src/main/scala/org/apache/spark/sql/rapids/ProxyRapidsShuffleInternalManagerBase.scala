@@ -44,6 +44,8 @@ trait ProxyShuffleReaderDelegate {
       endPartition: Int,
       context: TaskContext,
       metrics: ShuffleReadMetricsReporter): ShuffleReader[K, C]
+
+  def shuffleBlockResolver: ShuffleBlockResolver
 }
 
 /**
@@ -128,7 +130,10 @@ class ProxyRapidsShuffleInternalManagerBase(
 
   def unregisterShuffle(shuffleId: Int): Boolean = realImpl.unregisterShuffle(shuffleId)
 
-  def shuffleBlockResolver: ShuffleBlockResolver = realImpl.shuffleBlockResolver
+  private lazy val realShuffleBlockResolver: ShuffleBlockResolver =
+    realImpl.asInstanceOf[ProxyShuffleReaderDelegate].shuffleBlockResolver
+
+  def shuffleBlockResolver: ShuffleBlockResolver = realShuffleBlockResolver
 
   def stop(): Unit = realImpl.stop()
 }

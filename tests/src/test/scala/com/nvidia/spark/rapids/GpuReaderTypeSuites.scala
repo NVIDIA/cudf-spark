@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,7 +20,9 @@ import com.nvidia.spark.rapids.RapidsReaderType._
 import com.nvidia.spark.rapids.shims.GpuBatchScanExec
 
 import org.apache.spark.SparkConf
+import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.connector.read.PartitionReaderFactory
+import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.functions.input_file_name
 import org.apache.spark.sql.rapids.{ExternalSource, GpuFileSourceScanExec}
 
@@ -28,6 +30,7 @@ trait ReaderTypeSuite extends SparkQueryCompareTestSuite {
 
   /** File format */
   protected def format: String
+  protected def expectedV2ScanClassName: String
 
   protected def otherConfs: Iterable[(String, String)] = Seq.empty
   protected def testContextOk: Boolean = true
@@ -148,18 +151,87 @@ trait ReaderTypeSuite extends SparkQueryCompareTestSuite {
       testReaderType(conf, testFile, MULTITHREADED)
     })
   }
+
+  test("[SPARK-16818] V2 GPU partition-pruned scans implement sameResult correctly") {
+    assume(testContextOk)
+    withTempPath { file =>
+      withCpuSparkSession(spark => {
+        import spark.implicits._
+        Seq((1, 10), (2, 20), (3, 30))
+          .toDF("id", "b")
+          .write
+          .partitionBy("id")
+          .format(format)
+          .save(file.getCanonicalPath)
+      })
+
+      val conf = new SparkConf()
+        .set("spark.sql.sources.useV1SourceList", "")
+        .set("spark.sql.adaptive.enabled", "false")
+
+      withGpuSparkSession(spark => {
+        val df = spark.read.format(format).load(file.toString)
+
+        def getPlanAndScan(partition: Int): (DataFrame, SparkPlan, GpuBatchScanExec) = {
+          val filtered = df.where(s"id = $partition")
+          val plan = filtered.queryExecution.executedPlan
+          val scans = plan.collect { case scan: GpuBatchScanExec => scan }
+          assert(scans.length == 1, s"Expected one GPU V2 scan, found ${scans.length}")
+          assert(scans.head.scan.getClass.getName == expectedV2ScanClassName,
+            s"Expected $expectedV2ScanClassName, found ${scans.head.scan.getClass.getName}")
+          (filtered, plan, scans.head)
+        }
+
+        val (df2a, p2a, s2a) = getPlanAndScan(2)
+        val (_, p2b, s2b) = getPlanAndScan(2)
+        val (_, p3, s3) = getPlanAndScan(3)
+
+        val rows = df2a.collect()
+        assert(rows.length == 1)
+        assert(rows.head.getAs[Int]("b") == 20)
+
+        assert(p2a.sameResult(p2b), "Equivalent V2 scan plans should have the same result")
+        assert(s2a.sameResult(s2b), "Equivalent V2 batch scans should have the same result")
+        assert(s2a.scan == s2b.scan, "Equivalent V2 scans should be equal")
+        s2a.scan match {
+          case scan: GpuOrcScan =>
+            def withFloatToString(enabled: Boolean): GpuOrcScan =
+              scan.copy(rapidsConf = new RapidsConf(Map(
+                RapidsConf.ENABLE_ORC_FLOAT_TYPES_TO_STRING.key -> enabled.toString)))
+            val enabled1 = withFloatToString(enabled = true)
+            val enabled2 = withFloatToString(enabled = true)
+            val disabled = withFloatToString(enabled = false)
+            assert(enabled1 == enabled2,
+              "ORC V2 scans with equal float-to-string settings should be equal")
+            assert(enabled1 != disabled,
+              "ORC V2 scans with different float-to-string settings should not be equal")
+          case _ =>
+        }
+        assert(!p2a.sameResult(p3), "Different partition filters should not have the same result")
+        assert(!s2a.sameResult(s3),
+          "V2 batch scans with different partition filters should not have the same result")
+        assert(s2a.scan != s3.scan, "V2 scans with different partition filters should not be equal")
+      }, conf.setAll(otherConfs))
+    }
+  }
 }
 
 class GpuParquetReaderTypeSuites extends ReaderTypeSuite {
   override protected def format: String = "parquet"
+  override protected def expectedV2ScanClassName: String =
+    "com.nvidia.spark.rapids.parquet.GpuParquetScan"
 }
 
 class GpuOrcReaderTypeSuites extends ReaderTypeSuite {
   override protected def format: String = "orc"
+  override protected def expectedV2ScanClassName: String =
+    "com.nvidia.spark.rapids.GpuOrcScan"
 }
 
 class GpuAvroReaderTypeSuites extends ReaderTypeSuite {
   override lazy val format: String = "avro"
+  override protected def expectedV2ScanClassName: String =
+    "org.apache.spark.sql.rapids.GpuAvroScan"
   override lazy val otherConfs: Iterable[(String, String)] = Seq(
     ("spark.rapids.sql.format.avro.read.enabled", "true"),
     ("spark.rapids.sql.format.avro.enabled", "true"))

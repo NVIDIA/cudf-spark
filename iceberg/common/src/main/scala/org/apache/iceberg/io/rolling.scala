@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,9 +24,8 @@ import scala.collection.JavaConverters._
 import com.nvidia.spark.rapids.{GpuColumnVector, SpillableColumnarBatch}
 import com.nvidia.spark.rapids.Arm.withResource
 import org.apache.iceberg._
-import org.apache.iceberg.MetadataColumns.{DELETE_FILE_PATH, DELETE_FILE_POS}
 import org.apache.iceberg.encryption.EncryptedOutputFile
-import org.apache.iceberg.io.GpuPositionDeleteFileWriter.FILE_AND_POS_FIELD_IDS
+import org.apache.iceberg.io.GpuPositionDeleteFieldIds.FILE_AND_POS_FIELD_IDS
 import org.apache.iceberg.relocated.com.google.common.collect.Lists
 import org.apache.iceberg.spark.source.GpuSparkFileWriterFactory
 import org.apache.iceberg.util.CharSequenceSet
@@ -231,9 +230,3 @@ class GpuPositionDeleteFileWriter(
     }
   }
 }
-
-object GpuPositionDeleteFileWriter {
-  private[io] val FILE_AND_POS_FIELD_IDS: Set[Integer] = Set(
-    DELETE_FILE_PATH.fieldId(), DELETE_FILE_POS.fieldId())
-}
-

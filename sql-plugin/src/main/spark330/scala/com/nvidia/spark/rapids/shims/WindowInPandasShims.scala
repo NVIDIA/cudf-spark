@@ -34,10 +34,14 @@
 {"spark": "356"}
 {"spark": "357"}
 {"spark": "358"}
+{"spark": "359"}
 {"spark": "400"}
 {"spark": "401"}
 {"spark": "402"}
+{"spark": "403"}
+{"spark": "404"}
 spark-rapids-shim-json-lines ***/
+
 package com.nvidia.spark.rapids.shims
 
 import org.apache.spark.sql.catalyst.expressions.NamedExpression

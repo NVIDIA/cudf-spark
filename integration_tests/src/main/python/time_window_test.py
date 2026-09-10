@@ -1,4 +1,4 @@
-# Copyright (c) 2021-2025, NVIDIA CORPORATION.
+# Copyright (c) 2021-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,7 +21,6 @@ from marks import ignore_order, allow_non_gpu
 from pyspark.sql.types import *
 import pyspark.sql.functions as f
 from pyspark.sql.window import Window
-from spark_session import is_before_spark_330
 
 # do it over a day so we have more chance of overlapping values
 _restricted_start = datetime(2020, 1, 1, tzinfo=timezone.utc)
@@ -47,15 +46,7 @@ def test_grouped_sliding_window(data_gen):
             lambda spark: gen_df(spark, row_gen).groupBy(f.window('ts', '5 hour', '1 hour')).agg(f.max("data").alias("max_data")))
 
 
-@pytest.mark.parametrize('is_ansi_enabled',
-                         [False,
-                          pytest.param(True,
-                                       marks=pytest.mark.skipif(
-                                        condition=is_before_spark_330(),
-                                        reason="Prior to Spark 3.3.0, time interval calculations included "
-                                               "multiplication/division. This makes interval operations susceptible "
-                                               "to overflow-related exceptions when in ANSI mode. "
-                                               "Spark versions >= 3.3.0 do the same calculations via Mod."))])
+@pytest.mark.parametrize('is_ansi_enabled', [False, True])
 @pytest.mark.parametrize('data_gen', [byte_gen, long_gen, string_gen], ids=idfn)
 @ignore_order
 def test_grouped_sliding_window_array(data_gen, is_ansi_enabled):

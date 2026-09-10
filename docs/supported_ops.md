@@ -11,14 +11,14 @@ nav_order: 6
 
 
 Apache Spark supports processing various types of data. Not all expressions
-support all data types. The RAPIDS Accelerator for Apache Spark has further
+support all data types. The cuDF plugin has further
 restrictions on what types are supported for processing. This tries
 to document what operations are supported and what data types each operation supports.
 
 # General limitations
 ## `Decimal`
-The `Decimal` type in Spark supports a precision up to 38 digits (128-bits). 
-The RAPIDS Accelerator supports 128-bit starting from version 21.12 and decimals are 
+The `Decimal` type in Spark supports a precision up to 38 digits (128-bits).
+The cuDF plugin supports 128-bit starting from version 21.12 and decimals are
 enabled by default.
 Please check [Decimal Support](compatibility.md#decimal-support) for more details.
 
@@ -51,7 +51,7 @@ operations that Spark can support.
 ## `Timestamp`
 Timestamps in Spark will all be converted to the local time zone before processing
 and are often converted to UTC before being stored, like in Parquet or ORC.
-The RAPIDS Accelerator only supports UTC as the time zone for timestamps.
+The cuDF plugin only supports UTC as the time zone for timestamps.
 
 ## `CalendarInterval`
 In Spark `CalendarInterval`s store three values, months, days, and microseconds.
@@ -60,14 +60,17 @@ only a a subset of the type is supported, like window ranges only support days c
 
 ## Configuration
 There are lots of different configuration values that can impact if an operation
-is supported or not. Some of these are a part of the RAPIDS Accelerator and cover
+is supported or not. Some of these are a part of the cuDF plugin and cover
 the level of compatibility with Apache Spark.  Those are covered [here](configs.md).
 Others are a part of Apache Spark itself and those are a bit harder to document.
 The work of updating this to cover that support is still ongoing.
 
-In general though if you ever have any question about why an operation is not running
-on the GPU you may set `spark.rapids.sql.explain` to ALL and it will try to give all of
-the reasons why this particular operator or expression is on the CPU or GPU.
+For debugging, set `spark.rapids.sql.explain` to ALL to report why
+operators or expressions run on the CPU or GPU. ALL can generate
+substantial driver log output for complex or high-volume workloads,
+potentially degrading driver performance or making the driver
+unresponsive. Do not enable ALL in production; use NOT_ON_GPU
+(the default) or NONE.
 
 # Key
 ## Types
@@ -97,16 +100,16 @@ the reasons why this particular operator or expression is on the CPU or GPU.
 
 |Value|Description|
 |---------|----------------|
-|S| (Supported) Both Apache Spark and the RAPIDS Accelerator support this type fully.|
-| | (Not Applicable) Neither Spark not the RAPIDS Accelerator support this type in this situation.|
-|_PS_| (Partial Support) Apache Spark supports this type, but the RAPIDS Accelerator only partially supports it. An explanation for what is missing will be included with this.|
-|**NS**| (Not Supported) Apache Spark supports this type but the RAPIDS Accelerator does not.
+|S| (Supported) Both Apache Spark and the cuDF plugin support this type fully.|
+| | (Not Applicable) Neither Spark nor the cuDF plugin support this type in this situation.|
+|_PS_| (Partial Support) Apache Spark supports this type, but the cuDF plugin only partially supports it. An explanation for what is missing will be included with this.|
+|**NS**| (Not Supported) Apache Spark supports this type but the cuDF plugin does not.
 
 # SparkPlan or Executor Nodes
 Apache Spark uses a Directed Acyclic Graph(DAG) of processing to build a query.
 The nodes in this graph are instances of `SparkPlan` and represent various high
-level operations like doing a filter or project. The operations that the RAPIDS
-Accelerator supports are described below.
+level operations like doing a filter or project. The operations that the cuDF 
+plugin supports are described below.
 <table>
 <tr>
 <th>Executor</th>
@@ -670,12 +673,12 @@ Accelerator supports are described below.
 <td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
 <td>S</td>
 <td>S</td>
+<td>S</td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
-<td><b>NS</b></td>
-<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, BINARY, CALENDAR, UDT</em></td>
-<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, BINARY, CALENDAR, UDT</em></td>
-<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, BINARY, CALENDAR, UDT</em></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types BINARY, CALENDAR, UDT</em></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types BINARY, CALENDAR, UDT</em></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types BINARY, CALENDAR, UDT</em></td>
 <td><b>NS</b></td>
 <td>S</td>
 <td>S</td>
@@ -729,6 +732,58 @@ Accelerator supports are described below.
 <td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP</em></td>
 <td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP</em></td>
 <td>S</td>
+<td>S</td>
+<td>S</td>
+</tr>
+<tr>
+<td rowspan="1">AppendDataExec</td>
+<td rowspan="1">Source-specific GPU support for Spark noop write</td>
+<td rowspan="1">Source: Spark noop write</td>
+<td>Input/Output</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><b>NS</b></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, CALENDAR, UDT</em></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, CALENDAR, UDT</em></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, CALENDAR, UDT</em></td>
+<td><b>NS</b></td>
+<td>S</td>
+<td>S</td>
+</tr>
+<tr>
+<td rowspan="1">AppendDataExec</td>
+<td rowspan="1">Source-specific GPU support for Apache Iceberg write</td>
+<td rowspan="1">Source: Apache Iceberg write</td>
+<td>Input/Output</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
+<td>S</td>
+<td>S</td>
+<td><b>NS</b></td>
+<td>S</td>
+<td><b>NS</b></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, CALENDAR, UDT</em></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, CALENDAR, UDT</em></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, CALENDAR, UDT</em></td>
+<td><b>NS</b></td>
 <td>S</td>
 <td>S</td>
 </tr>
@@ -835,6 +890,84 @@ Accelerator supports are described below.
 <td><b>NS</b></td>
 <td>S</td>
 <td>S</td>
+</tr>
+<tr>
+<td rowspan="1">OverwriteByExpressionExec</td>
+<td rowspan="1">Source-specific GPU support for Spark noop write</td>
+<td rowspan="1">Source: Spark noop write</td>
+<td>Input/Output</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><b>NS</b></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, CALENDAR, UDT</em></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, CALENDAR, UDT</em></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, CALENDAR, UDT</em></td>
+<td><b>NS</b></td>
+<td>S</td>
+<td>S</td>
+</tr>
+<tr>
+<td rowspan="1">OverwriteByExpressionExec</td>
+<td rowspan="1">Source-specific GPU support for Apache Iceberg write</td>
+<td rowspan="1">Source: Apache Iceberg write</td>
+<td>Input/Output</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
+<td>S</td>
+<td>S</td>
+<td><b>NS</b></td>
+<td>S</td>
+<td><b>NS</b></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, CALENDAR, UDT</em></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, CALENDAR, UDT</em></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, CALENDAR, UDT</em></td>
+<td><b>NS</b></td>
+<td>S</td>
+<td>S</td>
+</tr>
+<tr>
+<th>Executor</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Param(s)</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowspan="1">OverwriteByExpressionExecV1</td>
@@ -1008,32 +1141,6 @@ Accelerator supports are described below.
 <td><b>NS</b></td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
-</tr>
-<tr>
-<th>Executor</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Param(s)</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowspan="2">BroadcastNestedLoopJoinExec</td>
@@ -1301,6 +1408,32 @@ Accelerator supports are described below.
 <td><b>NS</b></td>
 </tr>
 <tr>
+<th>Executor</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Param(s)</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
+</tr>
+<tr>
 <td rowspan="1">AggregateInPandasExec</td>
 <td rowspan="1">The backend for an Aggregation Pandas UDF. This accelerates the data transfer between the Java process and the Python process. It also supports scheduling GPU resources for the Python process when enabled.</td>
 <td rowspan="1">None</td>
@@ -1403,32 +1536,6 @@ Accelerator supports are described below.
 <td><b>NS</b></td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
-</tr>
-<tr>
-<th>Executor</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Param(s)</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowspan="1">MapInPandasExec</td>
@@ -2469,7 +2576,7 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types CALENDAR, ARRAY, MAP, UDT, DAYTIME, YEARMONTH</em></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types CALENDAR, UDT, DAYTIME, YEARMONTH</em></td>
 <td> </td>
 <td> </td>
 <td> </td>
@@ -3403,6 +3510,57 @@ are limited.
 <th>YEARMONTH</th>
 </tr>
 <tr>
+<td rowSpan="2">ArraySort</td>
+<td rowSpan="2">`array_sort`</td>
+<td rowSpan="2">Sorts the input array in ascending order with nulls last according to the natural ordering of the elements (the default comparator). A custom comparator, or a nested element type (array or struct), falls back to the CPU</td>
+<td rowSpan="2">None</td>
+<td rowSpan="2">project</td>
+<td>array</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types BINARY, CALENDAR, ARRAY, MAP, STRUCT, UDT, DAYTIME, YEARMONTH</em></td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
+<td>result</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types BINARY, CALENDAR, ARRAY, MAP, STRUCT, UDT, DAYTIME, YEARMONTH</em></td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
 <td rowSpan="3">ArrayTransform</td>
 <td rowSpan="3">`transform`</td>
 <td rowSpan="3">Transform elements in an array using the transform function. This is similar to a `map` in functional programming</td>
@@ -3727,6 +3885,34 @@ are limited.
 <td> </td>
 </tr>
 <tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
+</tr>
+<tr>
 <td rowSpan="4">Asin</td>
 <td rowSpan="4">`asin`</td>
 <td rowSpan="4">Inverse sine</td>
@@ -3823,34 +4009,6 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-</tr>
-<tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="4">Asinh</td>
@@ -4198,6 +4356,34 @@ are limited.
 <td> </td>
 </tr>
 <tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
+</tr>
+<tr>
 <td rowSpan="2">AttributeReference</td>
 <td rowSpan="2"> </td>
 <td rowSpan="2">References an input column</td>
@@ -4248,34 +4434,6 @@ are limited.
 <td><b>NS</b></td>
 <td>S</td>
 <td>S</td>
-</tr>
-<tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="3">BRound</td>
@@ -4598,6 +4756,34 @@ are limited.
 <td> </td>
 </tr>
 <tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
+</tr>
+<tr>
 <td rowSpan="2">BitwiseCount</td>
 <td rowSpan="2">`bit_count`</td>
 <td rowSpan="2">Returns the number of bits that are set in the input as unsigned 64-bit integer</td>
@@ -4647,34 +4833,6 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-</tr>
-<tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="4">BitwiseNot</td>
@@ -7149,7 +7307,7 @@ are limited.
 <tr>
 <td rowSpan="3">DivideYMInterval</td>
 <td rowSpan="3"> </td>
-<td rowSpan="3">Year-month interval * operator</td>
+<td rowSpan="3">Year-month interval / number</td>
 <td rowSpan="3">None</td>
 <td rowSpan="3">project</td>
 <td>lhs</td>
@@ -9441,7 +9599,7 @@ are limited.
 <td rowSpan="3">In</td>
 <td rowSpan="3">`in`</td>
 <td rowSpan="3">IN operator</td>
-<td rowSpan="3">None</td>
+<td rowSpan="3">Non-literal list expressions must be deterministic and side-effect-free</td>
 <td rowSpan="3">project</td>
 <td>value</td>
 <td>S</td>
@@ -9467,17 +9625,17 @@ are limited.
 </tr>
 <tr>
 <td>list</td>
-<td><em>PS<br/>Literal value only</em></td>
-<td><em>PS<br/>Literal value only</em></td>
-<td><em>PS<br/>Literal value only</em></td>
-<td><em>PS<br/>Literal value only</em></td>
-<td><em>PS<br/>Literal value only</em></td>
-<td><em>PS<br/>Literal value only</em></td>
-<td><em>PS<br/>Literal value only</em></td>
-<td><em>PS<br/>Literal value only</em></td>
-<td><em>PS<br/>UTC is only supported TZ for TIMESTAMP;<br/>Literal value only</em></td>
-<td><em>PS<br/>Literal value only</em></td>
-<td><em>PS<br/>Literal value only</em></td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
+<td>S</td>
+<td>S</td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
@@ -10091,7 +10249,7 @@ are limited.
 <td> </td>
 <td> </td>
 <td><b>NS</b></td>
-<td><em>PS<br/>MAP only supports keys and values that are of STRING type and is only supported at the top level;<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, BINARY, CALENDAR, MAP, UDT, DAYTIME, YEARMONTH</em></td>
+<td><em>PS<br/>MAP only supports keys of STRING type and values that are of STRING type or ARRAY of STRING type, and is only supported at the top level;<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, BINARY, CALENDAR, MAP, UDT, DAYTIME, YEARMONTH</em></td>
 <td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, BINARY, CALENDAR, MAP, UDT, DAYTIME, YEARMONTH</em></td>
 <td> </td>
 <td> </td>
@@ -11105,7 +11263,7 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-<td><em>PS<br/>Literal value only</em></td>
+<td>S</td>
 <td> </td>
 <td> </td>
 <td> </td>
@@ -12908,6 +13066,57 @@ are limited.
 <td> </td>
 </tr>
 <tr>
+<td rowSpan="2">NTile</td>
+<td rowSpan="2">`ntile`</td>
+<td rowSpan="2">Window function that divides the rows in each partition into buckets</td>
+<td rowSpan="2">None</td>
+<td rowSpan="2">window</td>
+<td>buckets</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
+<td>result</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td>S</td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+<td> </td>
+</tr>
+<tr>
 <td rowSpan="3">NaNvl</td>
 <td rowSpan="3">`nanvl`</td>
 <td rowSpan="3">Evaluates to `left` iff left is not NaN, `right` otherwise</td>
@@ -13108,6 +13317,34 @@ are limited.
 <td> </td>
 </tr>
 <tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
+</tr>
+<tr>
 <td rowSpan="3">NthValue</td>
 <td rowSpan="3">`nth_value`</td>
 <td rowSpan="3">nth window operator</td>
@@ -13180,34 +13417,6 @@ are limited.
 <td><b>NS</b></td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
-</tr>
-<tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="2">OctetLength</td>
@@ -13502,6 +13711,34 @@ are limited.
 <td> </td>
 </tr>
 <tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
+</tr>
+<tr>
 <td rowSpan="2">PercentRank</td>
 <td rowSpan="2">`percent_rank`</td>
 <td rowSpan="2">Window function that returns the percent rank value within the aggregation window</td>
@@ -13625,34 +13862,6 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-</tr>
-<tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="2">PosExplode</td>
@@ -13901,6 +14110,34 @@ are limited.
 <td> </td>
 </tr>
 <tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
+</tr>
+<tr>
 <td rowSpan="2">PromotePrecision</td>
 <td rowSpan="2"> </td>
 <td rowSpan="2">PromotePrecision before arithmetic operations between DecimalType data</td>
@@ -14144,34 +14381,6 @@ are limited.
 <td> </td>
 </tr>
 <tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
-</tr>
-<tr>
 <td rowSpan="2">Quarter</td>
 <td rowSpan="2">`quarter`</td>
 <td rowSpan="2">Returns the quarter of the year for date, in the range 1 to 4</td>
@@ -14295,6 +14504,34 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
+</tr>
+<tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="2">RaiseError</td>
@@ -14547,34 +14784,6 @@ are limited.
 <td> </td>
 </tr>
 <tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
-</tr>
-<tr>
 <td rowSpan="4">RegExpExtractAll</td>
 <td rowSpan="4">`regexp_extract_all`</td>
 <td rowSpan="4">Extract all strings matching a regular expression corresponding to the regex group index</td>
@@ -14792,6 +15001,34 @@ are limited.
 <td> </td>
 </tr>
 <tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
+</tr>
+<tr>
 <td rowSpan="3">Remainder</td>
 <td rowSpan="3">`%`, `mod`</td>
 <td rowSpan="3">Remainder or modulo</td>
@@ -14966,34 +15203,6 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-</tr>
-<tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="4">Rint</td>
@@ -15242,6 +15451,34 @@ are limited.
 <td> </td>
 </tr>
 <tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
+</tr>
+<tr>
 <td rowSpan="3">RoundFloor</td>
 <td rowSpan="3"> </td>
 <td rowSpan="3">Computes the floor of the given expression to d decimal places</td>
@@ -15365,34 +15602,6 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-</tr>
-<tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="2">ScalaUDF</td>
@@ -15645,6 +15854,34 @@ are limited.
 <td> </td>
 </tr>
 <tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
+</tr>
+<tr>
 <td rowSpan="2">Sha1</td>
 <td rowSpan="2">`sha1`, `sha`</td>
 <td rowSpan="2">Sha1 hash operator</td>
@@ -15768,34 +16005,6 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-</tr>
-<tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="3">ShiftLeft</td>
@@ -16071,6 +16280,34 @@ are limited.
 <td> </td>
 </tr>
 <tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
+</tr>
+<tr>
 <td rowSpan="4">Sin</td>
 <td rowSpan="4">`sin`</td>
 <td rowSpan="4">Sine</td>
@@ -16167,34 +16404,6 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-</tr>
-<tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="4">Sinh</td>
@@ -16517,6 +16726,34 @@ are limited.
 <td> </td>
 </tr>
 <tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
+</tr>
+<tr>
 <td rowSpan="2">SortOrder</td>
 <td rowSpan="2"> </td>
 <td rowSpan="2">Sort order</td>
@@ -16566,34 +16803,6 @@ are limited.
 <td><b>NS</b></td>
 <td> </td>
 <td> </td>
-</tr>
-<tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="1">SparkPartitionID</td>
@@ -16944,6 +17153,34 @@ are limited.
 <td> </td>
 </tr>
 <tr>
+<th>Expression</th>
+<th>SQL Functions(s)</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Context</th>
+<th>Param/Output</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
+</tr>
+<tr>
 <td rowSpan="3">StringDecode</td>
 <td rowSpan="3"> </td>
 <td rowSpan="3">Decodes binary data from a charset to a UTF-8 string</td>
@@ -17016,34 +17253,6 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-</tr>
-<tr>
-<th>Expression</th>
-<th>SQL Functions(s)</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Context</th>
-<th>Param/Output</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowSpan="3">StringInstr</td>

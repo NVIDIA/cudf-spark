@@ -494,6 +494,11 @@ object RmmRapidsRetryIterator extends Logging {
     private def closeInternal(): Unit = {
       attemptStack.safeClose()
       attemptStack.clear()
+      // Only the single-item wrapper owns input that has not been pulled.
+      input match {
+        case single: SingleItemAutoCloseableIteratorInternal[_] => single.close()
+        case _ =>
+      }
     }
 
     // Don't install the callback if in a unit test
@@ -860,7 +865,14 @@ object RmmRapidsRetryIterator extends Logging {
   private def splitTargetSizeInHalfInternal(
       target: AutoCloseableTargetSize, isGpu: Boolean): Seq[AutoCloseableTargetSize] = {
     withResource(target) { _ =>
-      val newTarget = target.targetSize / 2
+      // If dataSize is known and smaller than targetSize/2, halving targetSize would still
+      // exceed the data, making the retry a no-op. Use dataSize/2 instead to force
+      // processing roughly half the data per attempt.
+      val newTarget = if (target.dataSize > 0 && target.dataSize <= target.targetSize / 2) {
+        target.dataSize / 2
+      } else {
+        target.targetSize / 2
+      }
       if (newTarget < target.minSize) {
         if (isGpu) {
           throw new GpuSplitAndRetryOOM(
@@ -872,7 +884,7 @@ object RmmRapidsRetryIterator extends Logging {
                 s" minimum: ${target.minSize}")
         }
       }
-      Seq(AutoCloseableTargetSize(newTarget, target.minSize))
+      Seq(AutoCloseableTargetSize(newTarget, target.minSize, target.dataSize))
     }
   }
 
@@ -969,7 +981,9 @@ object RmmRapidsRetryIterator extends Logging {
  * `CpuSplitAndRetryOOM`, a split policy like `splitTargetSizeInHalfGpu` or
  * `splitTargetSizeInHalfCpu` can be used to retry the block with a smaller target size.
  */
-case class AutoCloseableTargetSize(targetSize: Long, minSize: Long) extends AutoCloseable {
+case class AutoCloseableTargetSize(targetSize: Long, minSize: Long,
+    dataSize: Long = 0) extends AutoCloseable {
+  def this(targetSize: Long, minSize: Long) = this(targetSize, minSize, 0)
   override def close(): Unit = ()
 }
 

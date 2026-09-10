@@ -23,11 +23,16 @@ package com.nvidia.spark.rapids.delta.delta41x
 
 import com.nvidia.spark.rapids.RapidsConf
 
-import org.apache.spark.sql.SaveMode
+import org.apache.spark.sql.{DataFrame, SaveMode}
+import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
+import org.apache.spark.sql.connector.catalog.Identifier
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
 import org.apache.spark.sql.delta.commands.TableCreationModes
-import org.apache.spark.sql.delta.rapids.{GpuCreateDeltaTableCommand40x41xBase, GpuDeltaCatalog4x, GpuWriteIntoDelta}
+import org.apache.spark.sql.delta.rapids.{
+  GpuCreateDeltaTableCommand40x42xBase,
+  GpuDeltaCatalog4x,
+  GpuWriteIntoDeltaLike}
 import org.apache.spark.sql.delta.rapids.delta41x.GpuCreateDeltaTableCommand
 
 class GpuDeltaCatalog(
@@ -35,14 +40,26 @@ class GpuDeltaCatalog(
     rapidsConf: RapidsConf)
   extends GpuDeltaCatalog4x(cpuCatalog, rapidsConf) {
 
+  override protected def getExistingTableIfExists(
+      table: TableIdentifier,
+      ident: Identifier,
+      operation: TableCreationModes.CreationMode): Option[CatalogTable] = {
+    cpuCatalog.getExistingTableIfExists(table)
+  }
+
+  // Delta 4.1 added catalog plugin API support for CTAS.
+  override protected def useCatalogCreateTable(sourceQuery: Option[DataFrame]): Boolean = {
+    isUnityCatalog
+  }
+
   override protected def buildGpuCreateDeltaTableCommand(
       withDb: CatalogTable,
       existingTableOpt: Option[CatalogTable],
       mode: SaveMode,
-      writer: Option[GpuWriteIntoDelta],
+      writer: Option[GpuWriteIntoDeltaLike],
       operation: TableCreationModes.CreationMode,
       isByPath: Boolean,
-      tableCreateFunc: Option[CatalogTable => Unit]): GpuCreateDeltaTableCommand40x41xBase = {
+      tableCreateFunc: Option[CatalogTable => Unit]): GpuCreateDeltaTableCommand40x42xBase = {
     GpuCreateDeltaTableCommand(
       withDb,
       existingTableOpt,

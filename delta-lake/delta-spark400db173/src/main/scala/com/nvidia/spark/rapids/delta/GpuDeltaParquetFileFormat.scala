@@ -226,7 +226,7 @@ object GpuDeltaParquetFileFormat {
         meta.willNotWorkOnGpu(
           "CDC reads with deletion vectors are not yet supported on GPU for DB-17.3")
       }
-      if (!DeltaSpark400DB173Provider.canPushDVPredicateDownToScan(meta.conf)) {
+      if (!DeltaSpark400DB173Provider.isPushDVPredicateDownEnabled(meta.conf)) {
         meta.willNotWorkOnGpu(
           "DB-17.3 deletion vector reads on GPU require native cuDF deletion-vector " +
             "support with spark.databricks.delta.deletionVectors.useMetadataRowIndex " +

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 
 package org.apache.spark.sql.rapids
 
-import com.nvidia.spark.rapids.{GpuDataWritingCommand, GpuMetric, GpuMetricFactory, MetricsLevel, RapidsConf}
+import com.nvidia.spark.rapids.{GpuDataWritingCommand, GpuMetric, GpuMetricFactory, MetricsLevel, NoopMetric, RapidsConf}
 import org.apache.hadoop.conf.Configuration
 
 import org.apache.spark.SparkContext
@@ -82,6 +82,17 @@ class GpuWriteJobStatsTracker(
   override def newTaskInstance(): ColumnarWriteTaskStatsTracker = {
     new GpuWriteTaskStatsTracker(serializableHadoopConf.value, taskMetrics)
   }
+
+  /**
+   * Exposes the Insert command's op_time metric on the job-level stats
+   * tracker. Needed by `GpuFileFormatWriter.executeTask` so it can activate
+   * its `.ns(excludeMetrics)` wrap before constructing the dataWriter --
+   * the dataWriter constructor (or its caller's empty-partition check)
+   * would otherwise consume the iterator outside the wrap and leak
+   * descendant op_time updates.
+   */
+  def opTimeNewMetric: GpuMetric =
+    taskMetrics.getOrElse(GpuWriteJobStatsTracker.OP_TIME_NEW_KEY, NoopMetric)
 }
 
 object GpuWriteJobStatsTracker {

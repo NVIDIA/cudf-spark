@@ -1,10 +1,10 @@
 ---
 layout: page
-title: RAPIDS Cache Serializer
+title: NVIDIA cuDF plugin for Apache Spark Cache Serializer
 parent: Additional Functionality
 nav_order: 2
 ---
-# RAPIDS Cache Serializer  
+# NVIDIA cuDF plugin for Apache Spark Cache Serializer
   Apache Spark provides an important feature to cache intermediate data and provide
   significant performance improvement while running multiple queries on the same data. There
   are two ways to cache a Dataframe or a DataSet i.e. call `persist(storageLevel)` or
@@ -21,7 +21,7 @@ nav_order: 2
   before starting a Spark application and cannot be changed for that application's Spark
   session.
 
-  RAPIDS Accelerator for Apache Spark version 0.4+ has the `ParquetCachedBatchSerializer`
+  The cuDF plugin version 0.4+ has the `ParquetCachedBatchSerializer`
   that is optimized to run on the GPU and uses Parquet to compress data before caching it.
   ParquetCachedBatchSerializer can be used independent of what the value of
   `spark.rapids.sql.enabled` is. If it is set to true then the Parquet compression will run
@@ -39,8 +39,6 @@ nav_order: 2
  
 ##          Supported Types                       
  
- All types are supported on the CPU.
- On the GPU, MapType and BinaryType are not supported. 
- If an unsupported type is encountered the Rapids Accelerator for Apache Spark will fall 
- back to using the CPU for caching. 
+ All types are supported on the CPU.  On the GPU, MapType and BinaryType are not supported.  If an
+ unsupported type is encountered the cuDF plugin will fall back to using the CPU for caching.
 

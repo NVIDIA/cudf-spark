@@ -86,6 +86,8 @@ For manual installation, you need to setup your environment:
 - pytest
   : A framework that makes it easy to write small, readable tests, and can scale to support complex
   functional testing for applications and libraries (requires  Python 3.6+).
+- protobuf
+  : Provides Protocol Buffers APIs for protobuf integration-test fixtures.
 - sre_yield
   : Provides a set of APIs to generate string data from a regular expression.
 - pandas
@@ -263,7 +265,7 @@ individually, so you don't risk running unit tests along with the integration te
 http://www.scalatest.org/user_guide/using_the_scalatest_shell
 
 ```shell
-spark-shell --jars rapids-4-spark-tests_2.12-26.06.0-SNAPSHOT-tests.jar,rapids-4-spark-integration-tests_2.12-26.06.0-SNAPSHOT-tests.jar,scalatest_2.12-3.0.5.jar,scalactic_2.12-3.0.5.jar
+spark-shell --jars rapids-4-spark-tests_2.12-26.10.0-SNAPSHOT-tests.jar,rapids-4-spark-integration-tests_2.12-26.10.0-SNAPSHOT-tests.jar,scalatest_2.12-3.0.5.jar,scalactic_2.12-3.0.5.jar
 ```
 
 First you import the `scalatest_shell` and tell the tests where they can find the test files you
@@ -286,7 +288,7 @@ If you just want to verify the SQL replacement is working you will need to add t
 assumes CUDA 12 is being used and the Spark distribution is built with Scala 2.12.
 
 ```
-$SPARK_HOME/bin/spark-submit --jars "rapids-4-spark_2.12-26.06.0-SNAPSHOT-cuda12.jar" ./runtests.py
+$SPARK_HOME/bin/spark-submit --jars "rapids-4-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar" ./runtests.py
 ```
 
 You don't have to enable the plugin for this to work, the test framework will do that for you.
@@ -298,6 +300,18 @@ You do need to have access to a compatible GPU with the needed CUDA drivers. The
 
 `--runtime_env` is used to specify the environment you are running the tests in. Valid values are `databricks`,`emr`,`dataproc`,`dataproc_serverless` and `apache`. This is generally used
 when certain environments have different behavior, and the tests don't have a good way to auto-detect the environment yet.
+
+#### Protobuf tests on Databricks
+
+On Databricks, `INCLUDE_SPARK_PROTOBUF_JAR` controls only external `spark-protobuf` jar injection; it
+does not control protobuf test eligibility. Apache Spark runs require a matching external jar and
+skip the protobuf tests when this variable is set to `false`. Databricks runs use the runtime-bundled
+protobuf implementation instead, so `run_pyspark_from_build.sh --runtime_env=databricks` does not
+inject a matching jar from either the build dependencies or `LOCAL_JAR_PATH`, even if the variable
+is explicitly set to `true`.
+
+The smoke tests detect the bundled runtime independently and use a static descriptor set, so they do
+not depend on Spark's private, runtime-specific shaded protobuf classes.
 
 ### timezone
 
@@ -364,6 +378,19 @@ This marker has the following arguments:
 - `condition`: is used to gate when the override is appropriate, usually used to say that specific shims
                need the special override.
 - `permanent`: forces a test to ignore `DATAGEN_SEED` if True. If False, or if absent, the `DATAGEN_SEED` value always wins.
+
+### Reduced pre-commit parameter combination selection
+
+Add `[reduced-it]` to the pull request title to use deterministic each-choice selection for tests
+with two or more stacked `pytest.mark.parametrize` decorators. The selected combinations include
+every value from every decorator at least once. Tests with zero or one parametrization decorator run
+all cases. Tests whose collected cases do not form the expected Cartesian product also run all
+cases.
+
+Pre-commit runs use the complete Cartesian product by default. Developer and nightly runs are also
+unaffected unless `RANDOM_SELECT` is explicitly configured. `RANDOM_SELECT` is not applied in
+reduced IT mode because a second random selection could remove the only selected occurrence of a
+parameter value.
 
 ### Randomly selecting tests
 
@@ -435,19 +462,6 @@ non_utc_allow_for_sequence = ['ProjectExec'] # Update after non-utc time zone is
 test_my_new_added_case_for_sequence_operator()
 ```
 
-### Running with Hybrid execution
-The hybrid tests require extra jars. To enable hybrid tests, the following prerequisites are required::
-- Build Gluten bundle jar, Gluten thirdparty jar, refer to [link](../docs/dev/hybrid-execution.md#build)
-- Download Hybrid jar, refer to [link](../docs/dev/hybrid-execution.md#download-rapids-hybrid-jar-from-maven-repo)
-
-Execute the following command to run Hybrid tests:
-```shell
-$ LOAD_HYBRID_BACKEND=1 \
-  HYBRID_BACKEND_JARS=/path/to/${GLUTEN_BUNDLE_JAR},/path/to/${GLUTEN_THIRD_PARTY_JAR},/path/to/HYBRID_JAR \
-  ./integration_tests/run_pyspark_from_build.sh -m hybrid_test
-```
-For more information about Hybrid feature, refer to [link](../docs/dev/hybrid-execution.md)
-
 ### Reviewing integration tests in Spark History Server
 
 If the integration tests are run using [run_pyspark_from_build.sh](run_pyspark_from_build.sh) we have
@@ -496,7 +510,7 @@ The tests can be enabled by just appending the option `--cudf_udf` to the comman
 cudf_udf tests needs a couple of different settings, they may need to run separately.
 
 To enable cudf_udf tests, need following pre requirements:
-   * Install cuDF Python library on all the nodes running executors. The instruction could be found at [here](https://rapids.ai/start.html). Please follow the steps to choose the version based on your environment and install the cuDF library via Conda or use other ways like building from source.
+   * Install the cuDF Python library on all executor nodes. Use the [RAPIDS install selector](https://docs.rapids.ai/install#selector) to choose the version for your environment and install cuDF with Conda, or build it from source.
    * Disable the GPU exclusive mode on all the nodes running executors. The sample command is `sudo nvidia-smi -c DEFAULT`
 
 To run cudf_udf tests, need following configuration changes:
@@ -507,7 +521,7 @@ To run cudf_udf tests, need following configuration changes:
 As an example, here is the `spark-submit` command with the cudf_udf parameter on CUDA 12:
 
 ```
-$SPARK_HOME/bin/spark-submit --jars "rapids-4-spark_2.12-26.06.0-SNAPSHOT-cuda12.jar,rapids-4-spark-tests_2.12-26.06.0-SNAPSHOT.jar" --conf spark.rapids.memory.gpu.allocFraction=0.3 --conf spark.rapids.python.memory.gpu.allocFraction=0.3 --conf spark.rapids.python.concurrentPythonWorkers=2 --py-files "rapids-4-spark_2.12-26.06.0-SNAPSHOT-cuda12.jar" --conf spark.executorEnv.PYTHONPATH="rapids-4-spark_2.12-26.06.0-SNAPSHOT-cuda12.jar" ./runtests.py --cudf_udf
+$SPARK_HOME/bin/spark-submit --jars "rapids-4-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar,rapids-4-spark-tests_2.12-26.10.0-SNAPSHOT.jar" --conf spark.rapids.memory.gpu.allocFraction=0.3 --conf spark.rapids.python.memory.gpu.allocFraction=0.3 --conf spark.rapids.python.concurrentPythonWorkers=2 --py-files "rapids-4-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar" --conf spark.executorEnv.PYTHONPATH="rapids-4-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar" ./runtests.py --cudf_udf
 ```
 
 ### Enabling fuzz tests
@@ -525,6 +539,20 @@ Some tests require that Apache Iceberg has been configured in the Spark environm
 properly without it. These tests assume Iceberg is not configured and are disabled by default.
 If Spark has been configured to support Iceberg then these tests can be enabled by adding the
 `--iceberg` option to the command.
+
+When testing Iceberg package-private access paths, load the local Iceberg runtime jar with
+`ICEBERG_EXTRA_CLASSPATH` instead of `PYSP_TEST_spark_jars` or
+`PYSP_TEST_spark_jars_packages`. The test driver will place the RAPIDS, test, and Iceberg
+jars on `spark.driver.extraClassPath` and `spark.executor.extraClassPath`:
+
+```shell
+ICEBERG_EXTRA_CLASSPATH=/path/to/iceberg-spark-runtime-3.5_2.12-1.10.1.jar \
+PYSP_TEST_spark_sql_extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions \
+PYSP_TEST_spark_sql_catalog_spark__catalog=org.apache.iceberg.spark.SparkSessionCatalog \
+PYSP_TEST_spark_sql_catalog_spark__catalog_type=hadoop \
+PYSP_TEST_spark_sql_catalog_spark__catalog_warehouse=/tmp/spark-warehouse-$RANDOM \
+./integration_tests/run_pyspark_from_build.sh -m iceberg --iceberg
+```
 
 #### Disabling Iceberg fanout writer
 
@@ -546,6 +574,21 @@ With fanout disabled, Iceberg uses the clustered writer which writes one partiti
 and releases memory between partitions. Dedicated fanout-enabled test cases
 (e.g., `test_*_fanout_enabled`) still exercise the fanout writer path with a single
 partition type to keep memory usage manageable.
+
+#### Iceberg REST catalog write compression
+
+Older Iceberg REST clients, including 1.6.x, do not apply client-side
+`spark.sql.catalog.*.table-default.*` settings when creating REST tables. The resulting tables
+can use a default Parquet compression codec that is not supported by the RAPIDS GPU writer.
+REST catalog tests therefore add explicit table properties for data and delete files to use
+`zstd`, which is supported by the GPU writer:
+
+```sql
+TBLPROPERTIES (
+  'write.parquet.compression-codec' = 'zstd',
+  'write.delete.parquet.compression-codec' = 'zstd'
+)
+```
 
 ### Run Apache iceberg s3tables tests
 

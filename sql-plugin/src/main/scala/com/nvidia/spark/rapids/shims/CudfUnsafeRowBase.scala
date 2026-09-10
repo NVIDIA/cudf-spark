@@ -24,8 +24,7 @@ import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.expressions.SpecializedGettersReader
 import org.apache.spark.sql.catalyst.util.ArrayData
 import org.apache.spark.sql.catalyst.util.MapData
-import org.apache.spark.sql.types.DataType
-import org.apache.spark.sql.types.Decimal
+import org.apache.spark.sql.types.{BinaryType, DataType, Decimal, StringType}
 import org.apache.spark.unsafe.Platform
 import org.apache.spark.unsafe.array.ByteArrayMethods
 import org.apache.spark.unsafe.hash.Murmur3_x86_32
@@ -49,9 +48,17 @@ abstract class CudfUnsafeRowBase(
     startOffsets = new Array[Int](attributes.length)
     for (i <- attributes.indices) {
       val attr = attributes(i)
-      val length = GpuColumnVector.getNonNestedRapidsType(attr.dataType).getSizeInBytes
-      assert(length > 0, "Only fixed width types are currently supported.")
-      offset = CudfUnsafeRow.alignOffset(offset, length)
+      // Variable-width columns (STRING, BINARY) occupy an 8-byte (uint32 offset, uint32
+      // length) slot in the fixed-width region of a JCUDF row; the actual character bytes
+      // live at row_start + offset. See row_conversion.cu :: copy_strings_to_rows.
+      val (length, align) = attr.dataType match {
+        case StringType | BinaryType => (8, 4)
+        case _ =>
+          val dtypeSize = GpuColumnVector.getNonNestedRapidsType(attr.dataType).getSizeInBytes
+          assert(dtypeSize > 0, s"Unsupported data type for CudfUnsafeRow: ${attr.dataType}")
+          (dtypeSize, dtypeSize)
+      }
+      offset = CudfUnsafeRow.alignOffset(offset, align)
       startOffsets(i) = offset
       offset += length
     }
@@ -129,16 +136,59 @@ abstract class CudfUnsafeRowBase(
     } else if (precision <= Decimal.MAX_LONG_DIGITS) {
       Decimal.createUnsafe(getLong(ordinal), precision, scale)
     } else {
-      throw new IllegalArgumentException("NOT IMPLEMENTED YET")
+      // DECIMAL128: cudf stores the 128-bit rep in two little-endian 64-bit words. Rebuild
+      // a java BigInteger from the byte representation (big-endian, signed) so the sign is
+      // preserved, then attach the Spark precision/scale.
+      val fieldAddr = getFieldAddressFromOrdinal(ordinal)
+      val low       = Platform.getLong(null, fieldAddr)
+      val high      = Platform.getLong(null, fieldAddr + 8)
+      val bytes     = new Array[Byte](16)
+      var i = 0
+      while (i < 8) {
+        bytes(15 - i) = ((low >>> (i * 8)) & 0xFF).toByte
+        bytes(7 - i)  = ((high >>> (i * 8)) & 0xFF).toByte
+        i += 1
+      }
+      val bi = new java.math.BigInteger(bytes)
+      Decimal(new java.math.BigDecimal(bi, scale), precision, scale)
     }
   }
 
+  // Variable-width columns are laid out in the JCUDF row as an 8-byte slot at startOffsets(i)
+  // holding (uint32 row-relative offset, uint32 byte length); the actual data bytes live at
+  // address + offset. See row_conversion.cu :: copy_strings_to_rows.
+  private def readVariableWidth(ordinal: Int): (Long, Int) = {
+    val fieldAddr = getFieldAddressFromOrdinal(ordinal)
+    val offset    = Platform.getInt(null, fieldAddr)     // uint32; lengths fit signed int
+    val length    = Platform.getInt(null, fieldAddr + 4)
+    (address + offset, length)
+  }
+
   override def getUTF8String(ordinal: Int): UTF8String = {
-    throw new IllegalArgumentException("NOT IMPLEMENTED YET")
+    if (isNullAt(ordinal)) return null
+    val (dataAddr, length) = readVariableWidth(ordinal)
+    UTF8String.fromAddress(null, dataAddr, length)
   }
 
   override def getBinary(ordinal: Int): Array[Byte] = {
-    throw new IllegalArgumentException("NOT IMPLEMENTED YET")
+    if (isNullAt(ordinal)) return null
+    val (dataAddr, length) = readVariableWidth(ordinal)
+    val out                = new Array[Byte](length)
+    Platform.copyMemory(null, dataAddr, out, Platform.BYTE_ARRAY_OFFSET, length)
+    out
+  }
+
+  // These Spark 4.x interface methods are outside the CudfUnsafeRow fast path today.
+  def getVariant(ordinal: Int) = {
+    throw new UnsupportedOperationException("VariantVal is not supported")
+  }
+
+  def getGeography(ordinal: Int) = {
+    throw new UnsupportedOperationException("GeographyVal is not supported")
+  }
+
+  def getGeometry(ordinal: Int) = {
+    throw new UnsupportedOperationException("GeometryVal is not supported")
   }
 
   override def getInterval(ordinal: Int): CalendarInterval = {
@@ -204,11 +254,19 @@ trait CudfUnsafeRowTrait {
 
   def calculateBitSetWidthInBytes(numFields: Int): Int = (numFields + 7) / 8
 
+  // Lower bound estimate of the fixed-width region size; for STRING/BINARY this counts only
+  // the 8-byte offset/length slot, not the variable-length payload, matching the JCUDF row
+  // layout. Callers that need the full row size must add the variable-width bytes themselves.
   def getRowSizeEstimate(attributes: Array[Attribute]): Int = {
     var offset = 0
     for (attr <- attributes) {
-      val length = GpuColumnVector.getNonNestedRapidsType(attr.dataType).getSizeInBytes
-      offset = alignOffset(offset, length)
+      val (length, align) = attr.dataType match {
+        case StringType | BinaryType => (8, 4)
+        case _ =>
+          val sz = GpuColumnVector.getNonNestedRapidsType(attr.dataType).getSizeInBytes
+          (sz, sz)
+      }
+      offset = alignOffset(offset, align)
       offset += length
     }
     val bitSetWidthInBytes = calculateBitSetWidthInBytes(attributes.length)

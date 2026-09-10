@@ -18,7 +18,9 @@ package com.nvidia.spark.rapids
 
 import org.scalatest.funsuite.AnyFunSuite
 
-import org.apache.spark.sql.catalyst.expressions.{Add, AttributeReference, BoundReference, Divide, Expression, Literal, Multiply}
+import org.apache.spark.sql.catalyst.expressions.{
+  Add, And, ArrayExists, ArrayFilter, AttributeReference, BoundReference, Divide, Expression,
+  GreaterThanOrEqual, LambdaFunction, LessThanOrEqual, Literal, Multiply, NamedLambdaVariable, Size}
 import org.apache.spark.sql.types._
 
 /**
@@ -304,6 +306,115 @@ class ConvertForGpuCpuBridgeSuite extends AnyFunSuite {
     validateBoundReferences(bridge.cpuExpression)
   }
 
+  test("convertForGpuCpuBridge - binds distinct attributes captured by a lambda") {
+    val array = AttributeReference(
+      "array", ArrayType(IntegerType), nullable = false)()
+    val lower = AttributeReference("lower", IntegerType, nullable = true)()
+    val upper = AttributeReference("upper", IntegerType, nullable = false)()
+    val element = NamedLambdaVariable("x", IntegerType, nullable = true)
+    val predicate = And(
+      GreaterThanOrEqual(element, lower),
+      LessThanOrEqual(element, upper))
+    val expr = ArrayFilter(array, LambdaFunction(predicate, Seq(element)))
+
+    val exprMeta = createExprMeta(expr)
+    exprMeta.moveToCpuBridge()
+
+    val bridge = exprMeta.convertForGpuCpuBridge().asInstanceOf[GpuCpuBridgeExpression]
+    assert(bridge.gpuInputs.length == 3)
+    assert(bridge.gpuInputs(0).semanticEquals(array))
+    assert(bridge.gpuInputs(1).semanticEquals(lower))
+    assert(bridge.gpuInputs(2).semanticEquals(upper))
+    assert(!bridge.cpuExpression.exists(_.isInstanceOf[AttributeReference]))
+
+    val boundReferences = bridge.cpuExpression.collect {
+      case ref: BoundReference => ref
+    }
+    assert(boundReferences.map(_.ordinal).toSet == Set(0, 1, 2))
+    assert(boundReferences.find(_.ordinal == 1).exists(_.nullable))
+    assert(boundReferences.find(_.ordinal == 2).exists(!_.nullable))
+  }
+
+  test("convertForGpuCpuBridge - reuses and deduplicates captured lambda attributes") {
+    val array = AttributeReference(
+      "array", ArrayType(IntegerType), nullable = false)()
+    val element = NamedLambdaVariable("x", IntegerType, nullable = true)
+    val firstComparison = LessThanOrEqual(element, Size(array))
+    val predicate = And(firstComparison, LessThanOrEqual(element, Size(array)))
+    val expr = ArrayFilter(array, LambdaFunction(predicate, Seq(element)))
+
+    val exprMeta = createExprMeta(expr)
+    exprMeta.moveToCpuBridge()
+
+    val bridge = exprMeta.convertForGpuCpuBridge().asInstanceOf[GpuCpuBridgeExpression]
+    assert(bridge.gpuInputs.length == 1)
+    assert(bridge.gpuInputs.head.semanticEquals(array))
+    assert(!bridge.cpuExpression.exists(_.isInstanceOf[AttributeReference]))
+    assert(bridge.cpuExpression.collect {
+      case ref: BoundReference => ref.ordinal
+    }.forall(_ == 0))
+  }
+
+  test("convertForGpuCpuBridge - widens GPU input nullability for a captured attribute") {
+    val array = AttributeReference(
+      "array", ArrayType(IntegerType), nullable = false)()
+    val nullableCapture = array.withNullability(true)
+    val element = NamedLambdaVariable("x", IntegerType, nullable = true)
+    val predicate = LessThanOrEqual(element, Size(nullableCapture))
+    val expr = ArrayFilter(array, LambdaFunction(predicate, Seq(element)))
+
+    assert(array.exprId == nullableCapture.exprId)
+    assert(array.semanticEquals(nullableCapture))
+    assert(!array.nullable)
+    assert(nullableCapture.nullable)
+    assert(expr.collect {
+      case attr: AttributeReference if attr.exprId == array.exprId => attr.nullable
+    } == Seq(false, true))
+
+    val exprMeta = createExprMeta(expr)
+    assert(exprMeta.wrapped.collect {
+      case attr: AttributeReference if attr.exprId == array.exprId => attr.nullable
+    } == Seq(false, true))
+    exprMeta.moveToCpuBridge()
+
+    val bridge = exprMeta.convertForGpuCpuBridge().asInstanceOf[GpuCpuBridgeExpression]
+    assert(bridge.gpuInputs.length == 1)
+    assert(bridge.gpuInputs.head.semanticEquals(array))
+    assert(bridge.gpuInputs.head.nullable)
+    assert(!bridge.cpuExpression.exists(_.isInstanceOf[AttributeReference]))
+    val boundReferences = bridge.cpuExpression.collect {
+      case ref: BoundReference => ref
+    }
+    assert(boundReferences.length == 2)
+    assert(boundReferences.forall(ref => ref.ordinal == 0 && ref.nullable))
+  }
+
+  test("convertForGpuCpuBridge - binds attributes captured by a nested lambda") {
+    val arrays = AttributeReference(
+      "arrays", ArrayType(ArrayType(IntegerType)), nullable = false)()
+    val limit = AttributeReference("limit", IntegerType, nullable = true)()
+    val outerElement = NamedLambdaVariable(
+      "outer", ArrayType(IntegerType), nullable = true)
+    val innerElement = NamedLambdaVariable("inner", IntegerType, nullable = true)
+    val innerFunction = LambdaFunction(
+      LessThanOrEqual(innerElement, limit), Seq(innerElement))
+    val outerFunction = LambdaFunction(
+      ArrayExists(outerElement, innerFunction), Seq(outerElement))
+    val expr = ArrayFilter(arrays, outerFunction)
+
+    val exprMeta = createExprMeta(expr)
+    exprMeta.moveToCpuBridge()
+
+    val bridge = exprMeta.convertForGpuCpuBridge().asInstanceOf[GpuCpuBridgeExpression]
+    assert(bridge.gpuInputs.length == 2)
+    assert(bridge.gpuInputs.head.semanticEquals(arrays))
+    assert(bridge.gpuInputs(1).semanticEquals(limit))
+    assert(!bridge.cpuExpression.exists(_.isInstanceOf[AttributeReference]))
+    assert(bridge.cpuExpression.collect {
+      case ref: BoundReference => ref.ordinal
+    }.toSet == Set(0, 1))
+  }
+
   // ============================================================================
   // Edge Case Tests
   // ============================================================================
@@ -341,6 +452,37 @@ class ConvertForGpuCpuBridgeSuite extends AnyFunSuite {
     // Non-deterministic expressions should not be allowed to move to bridge
     assert(!exprMeta.canMoveToCpuBridge,
       "Non-deterministic expressions should not be bridge-compatible")
+
+    val moveError = intercept[IllegalStateException] {
+      exprMeta.moveToCpuBridge()
+    }
+    assert(moveError.getMessage.contains("trying to move to bridge when not allowed"))
+
+    val conversionError = intercept[IllegalArgumentException] {
+      exprMeta.convertForGpuCpuBridge()
+    }
+    assert(conversionError.getMessage.contains(
+      "Bridge conversion requires deterministic expressions"))
+  }
+
+  test("requireAstForGpu rolls back CPU bridge state") {
+    val col = AttributeReference("a", IntegerType, nullable = false)()
+    val exprMeta = createExprMeta(Add(col, Literal(10)))
+
+    exprMeta.moveToCpuBridge()
+    assert(exprMeta.willUseGpuCpuBridge)
+    assert(exprMeta.replaceMessage === "run on GPU via CPU bridge")
+
+    exprMeta.willNotWorkInAst("test AST incompatibility")
+    exprMeta.requireAstForGpu()
+
+    assert(exprMeta.mustBeAstExpression)
+    assert(!exprMeta.willUseGpuCpuBridge)
+    assert(!exprMeta.canThisBeReplaced)
+    assert(exprMeta.childExprs.forall(_.mustBeAstExpression))
+
+    exprMeta.undoBridgeOptimization()
+    assert(!exprMeta.willUseGpuCpuBridge)
   }
 
   // ============================================================================

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * This file was derived from WriteIntoDelta.scala
  * in the Delta Lake project at https://github.com/delta-io/delta.
@@ -31,7 +31,7 @@ import org.apache.spark.sql.catalyst.plans.logical.DeleteFromTable
 import org.apache.spark.sql.catalyst.util.{CaseInsensitiveMap, CharVarcharUtils}
 import org.apache.spark.sql.delta.{ColumnWithDefaultExprUtils, DeltaErrors, DeltaLog, DeltaOperations, DeltaOptions, DeltaTableUtils, IdentityColumn, OptimisticTransaction}
 import org.apache.spark.sql.delta.actions.{Action, AddCDCFile, AddFile, FileAction, RemoveFile}
-import org.apache.spark.sql.delta.commands.{DeleteCommand, DeltaCommand, WriteIntoDelta, WriteIntoDeltaLike}
+import org.apache.spark.sql.delta.commands.{DeleteCommand, WriteIntoDelta}
 import org.apache.spark.sql.delta.commands.DMLUtils.TaggedCommitData
 import org.apache.spark.sql.delta.commands.cdc.CDCReader
 import org.apache.spark.sql.delta.rapids.delta33x._
@@ -51,8 +51,7 @@ case class GpuWriteIntoDelta(
     cpuWrite: WriteIntoDelta)
     extends LeafRunnableCommand
       with ImplicitMetadataOperation
-      with DeltaCommand
-      with WriteIntoDeltaLike {
+      with GpuWriteIntoDeltaLike {
 
   override protected val canMergeSchema: Boolean = cpuWrite.options.canMergeSchema
 
@@ -383,7 +382,7 @@ case class GpuWriteIntoDelta(
   }
 
   override def withNewWriterConfiguration(updatedConfiguration: Map[String, String])
-  : WriteIntoDeltaLike = {
+  : GpuWriteIntoDeltaLike = {
     val newCpuWrite = cpuWrite.copy(configuration = updatedConfiguration)
     this.copy(cpuWrite = newCpuWrite)
   }

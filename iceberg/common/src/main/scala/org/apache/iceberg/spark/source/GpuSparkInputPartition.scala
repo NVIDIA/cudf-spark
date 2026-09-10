@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,17 +24,25 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.read.{HasPartitionKey, InputPartition}
 import org.apache.spark.util.SerializableConfiguration
 
-class GpuSparkInputPartition(val cpuPartition: SparkInputPartition,
+class GpuSparkInputPartition(val cpuPartition: InputPartition,
     rapidsConf: RapidsConf,
     val hadoopConf: Broadcast[SerializableConfiguration],
     val expectedSchemaStr: String) extends
   InputPartition with HasPartitionKey with Serializable {
+
+  private val cpuPartitionWithKey: HasPartitionKey = cpuPartition match {
+    case withKey: HasPartitionKey => withKey
+    case other =>
+      throw new IllegalArgumentException(
+        s"Iceberg input partition ${other.getClass.getName} does not provide a partition key")
+  }
 
   val maxReadBatchSizeRows: Int = rapidsConf.maxReadBatchSizeRows
   val maxReadBatchSizeBytes: Long = rapidsConf.maxReadBatchSizeBytes
   val gpuTargetBatchSizeBytes: Long = rapidsConf.gpuTargetBatchSizeBytes
   val maxGpuColumnSizeBytes: Long = rapidsConf.maxGpuColumnSizeBytes
   val chunkedReaderEnabled: Boolean = rapidsConf.chunkedReaderEnabled
+  val validateDeletionVectorCrc: Boolean = rapidsConf.validateIcebergDeletionVectorCrc
   val parquetDebugDumpPrefix: Option[String] = rapidsConf.parquetDebugDumpPrefix
   val parquetDebugDumpAlways: Boolean = rapidsConf.parquetDebugDumpAlways
 
@@ -52,7 +60,7 @@ class GpuSparkInputPartition(val cpuPartition: SparkInputPartition,
 
 
   override def preferredLocations(): Array[String] = cpuPartition.preferredLocations()
-  override def partitionKey(): InternalRow = cpuPartition.partitionKey()
+  override def partitionKey(): InternalRow = cpuPartitionWithKey.partitionKey()
 
   @transient lazy val expectedSchema: Schema = {
     SchemaParser.fromJson(expectedSchemaStr)

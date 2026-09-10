@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -135,12 +135,7 @@ object GpuBindReferences extends Logging {
       conf: SQLConf): GpuTieredProject = {
 
     if (RapidsConf.ENABLE_TIERED_PROJECT.get(conf)) {
-      val replaced = if (RapidsConf.ENABLE_COMBINED_EXPRESSIONS.get(conf)) {
-        GpuEquivalentExpressions.replaceMultiExpressions(expressions, conf)
-      } else {
-        expressions
-      }
-      val exprTiers = GpuEquivalentExpressions.getExprTiers(replaced)
+      val exprTiers = GpuProjectAstExpression.buildExprTiers(expressions, conf)
       val inputTiers = GpuEquivalentExpressions.getInputTiers(exprTiers, input)
       // Update ExprTiers to include the columns that are pass through and drop unneeded columns
       val newExprTiers = exprTiers.zipWithIndex.map {

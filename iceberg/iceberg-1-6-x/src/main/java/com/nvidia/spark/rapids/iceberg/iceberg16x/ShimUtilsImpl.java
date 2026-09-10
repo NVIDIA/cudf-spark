@@ -16,21 +16,63 @@
 
 package com.nvidia.spark.rapids.iceberg.iceberg16x;
 
+import com.nvidia.spark.rapids.RapidsConf;
+import com.nvidia.spark.rapids.iceberg.IcebergDeletionVector;
 import com.nvidia.spark.rapids.iceberg.IcebergShimUtils;
+import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import org.apache.iceberg.*;
 import org.apache.iceberg.io.FileIO;
+import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.spark.source.GpuBaseReader;
+import org.apache.iceberg.spark.source.GpuSparkCopyOnWriteV1Scan;
+import org.apache.iceberg.spark.source.GpuSparkScan;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.PartitionUtil;
+import org.apache.spark.sql.connector.read.Scan;
 
+import java.io.IOException;
 import java.util.Collections;
 import java.util.Map;
 
 /** Iceberg 1.6.x shim: uses {@code ContentFile.path()} and {@code GpuBaseReader::convertConstant}. */
 public class ShimUtilsImpl implements IcebergShimUtils {
     @Override
+    public int formatVersion(Table table) {
+        Preconditions.checkArgument(null != table, "Invalid table: null");
+
+        if (table instanceof SerializableTable) {
+            SerializableTable serializableTable = (SerializableTable) table;
+            return serializableTable.operations().current().formatVersion();
+        } else if (table instanceof HasTableOperations) {
+            HasTableOperations ops = (HasTableOperations) table;
+            return ops.operations().current().formatVersion();
+        } else if (table instanceof BaseMetadataTable) {
+            BaseMetadataTable metadataTable = (BaseMetadataTable) table;
+            return metadataTable.table().operations().current().formatVersion();
+        } else {
+            throw new IllegalArgumentException(
+                    String.format(
+                            "%s does not have a format version",
+                            table.getClass().getSimpleName()));
+        }
+    }
+
+    @Override
     public String locationOf(ContentFile<?> f) {
         return f.path().toString();
+    }
+
+    @Override
+    public boolean isDeletionVector(DeleteFile deleteFile) {
+        return false;
+    }
+
+    @Override
+    public IcebergDeletionVector readDeletionVector(
+            DeleteFile deleteFile, RapidsInputFile inputFile, boolean validateCrc)
+            throws IOException {
+        throw new UnsupportedOperationException(
+                "Iceberg 1.6 does not support Puffin deletion vectors");
     }
 
     @Override
@@ -54,4 +96,12 @@ public class ShimUtilsImpl implements IcebergShimUtils {
     // openParquetReader: inherits the no-cache default from IcebergShimUtils. The shaded
     // ParquetFileReader in 1.6.x has no public API to inject pre-parsed footer metadata,
     // so file-cache routing is not possible here.
+
+    @Override
+    public GpuSparkScan newCopyOnWriteScan(
+            Scan cpuScan,
+            RapidsConf rapidsConf,
+            boolean queryUsesInputFile) {
+        return GpuSparkCopyOnWriteV1Scan.create(cpuScan, rapidsConf, queryUsesInputFile);
+    }
 }

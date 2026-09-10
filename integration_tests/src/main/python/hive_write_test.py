@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@
 import pytest
 
 from asserts import *
-from conftest import spark_jvm, is_utc
+from conftest import is_utc
 from data_gen import *
 from datetime import date, datetime, timezone
 from marks import *
@@ -64,11 +64,19 @@ _map_gens = [simple_string_to_string_map_gen] + [MapGen(f(nullable=False), f()) 
 
 _write_gens = [_basic_gens, _struct_gens, _array_gens, _map_gens]
 
+# Every entry in _write_gens contains a DATE column. Keep PARQUET coverage strict while
+# allowing the expected CPU writer only for the two ORC storage modes.
+_orc_date_write_allow = ['DataWritingCommandExec', 'ExecutedCommandExec', 'WriteFilesExec']
+_storage_formats = [
+    "PARQUET",
+    pytest.param("nativeorc", marks=allow_non_gpu_conditional(True, *_orc_date_write_allow)),
+    pytest.param("hiveorc", marks=allow_non_gpu_conditional(True, *_orc_date_write_allow))]
+
 # There appears to be a race when computing tasks for writing, order can be different even on CPU
 @ignore_order(local=True)
 @pytest.mark.skipif(not is_hive_available(), reason="Hive is missing")
 @pytest.mark.parametrize("gens", _write_gens, ids=idfn)
-@pytest.mark.parametrize("storage", ["PARQUET", "nativeorc", "hiveorc"])
+@pytest.mark.parametrize("storage", _storage_formats)
 @allow_non_gpu(*non_utc_allow)
 def test_optimized_hive_ctas_basic(gens, storage, spark_tmp_table_factory):
     data_table = spark_tmp_table_factory.get()
@@ -84,6 +92,8 @@ def test_optimized_hive_ctas_basic(gens, storage, spark_tmp_table_factory):
         "spark.sql.legacy.parquet.datetimeRebaseModeInWrite": "CORRECTED",
         "spark.sql.legacy.parquet.int96RebaseModeInWrite": "CORRECTED"
     }
+    if storage.endswith("orc"):
+        conf["orc.proleptic.gregorian"] = "true"
     if storage == "nativeorc":
         conf["spark.sql.orc.impl"] = "native"
     elif storage == "hiveorc":
@@ -202,7 +212,6 @@ def do_hive_copy(spark_tmp_table_factory, gen, type1, type2):
             'spark.sql.ansi.enabled': 'true',
             'spark.sql.storeAssignmentPolicy': 'ANSI'})
 
-    jvm = spark_jvm()
-    jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.assertContainsAnsiCast(cpu_df._jdf)
-    jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.assertContainsAnsiCast(gpu_df._jdf)
+    assert_contains_ansi_cast(cpu_df)
+    assert_contains_ansi_cast(gpu_df)
     assert_equal(from_cpu, from_gpu)

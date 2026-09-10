@@ -20,8 +20,13 @@
 {"spark": "400db173"}
 {"spark": "401"}
 {"spark": "402"}
+{"spark": "403"}
+{"spark": "404"}
 {"spark": "411"}
+{"spark": "412"}
+{"spark": "413"}
 spark-rapids-shim-json-lines ***/
+
 package com.nvidia.spark.rapids.shims
 
 import com.google.common.base.Objects
@@ -30,14 +35,13 @@ import com.nvidia.spark.rapids.GpuScan
 import org.apache.spark.SparkException
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.{AttributeReference, DynamicPruningExpression, Expression, Literal, SortOrder}
+import org.apache.spark.sql.catalyst.expressions.{AttributeReference, DynamicPruningExpression, Expression, Literal, RowOrdering, SortOrder}
 import org.apache.spark.sql.catalyst.plans.QueryPlan
 import org.apache.spark.sql.catalyst.plans.physical.{KeyGroupedPartitioning, Partitioning, SinglePartition}
 import org.apache.spark.sql.catalyst.util.{truncatedString, InternalRowComparableWrapper}
 import org.apache.spark.sql.connector.catalog.Table
 import org.apache.spark.sql.connector.read._
 import org.apache.spark.sql.execution.datasources.rapids.DataSourceStrategyUtils
-import org.apache.spark.sql.execution.datasources.v2.DataSourceRDD
 
 case class GpuBatchScanExec(
     output: Seq[AttributeReference],
@@ -59,7 +63,7 @@ case class GpuBatchScanExec(
       false
   }
 
-  override def hashCode(): Int = Objects.hashCode(batch, runtimeFilters)
+  override def hashCode(): Int = Objects.hashCode(batch, runtimeFilters, spjParams)
 
   @transient override lazy val inputPartitions: Seq[InputPartition] =
     batch.planInputPartitions()
@@ -132,8 +136,10 @@ case class GpuBatchScanExec(
           case Some(projectionPositions) => projectionPositions.map(i => k.expressions(i))
           case _ => k.expressions
         }
-        k.copy(expressions = expressions, numPartitions = newPartValues.length,
-          partitionValues = newPartValues)
+        KeyGroupedPartitioningShim.copyWithNewPartitionValues(
+          k.copy(expressions = expressions),
+          newPartValues,
+          spjParams.applyPartialClustering)
       case p => p
     }
   }
@@ -170,6 +176,19 @@ case class GpuBatchScanExec(
               (groupedParts, expressions)
           }
 
+          // Also re-group the partitions if we are reducing compatible partition expressions
+          val finalGroupedPartitions =
+            StoragePartitionJoinShims.partitionValueReducer(spjParams, partExpressions) match {
+              case Some(reducePartitionValue) =>
+                val result = groupedPartitions.groupBy { case (row, _) =>
+                  reducePartitionValue(row)
+                }.map { case (wrapper, splits) => (wrapper.row, splits.flatMap(_._2)) }.toSeq
+                val rowOrdering = RowOrdering.createNaturalAscendingOrdering(
+                  partExpressions.map(_.dataType))
+                result.sorted(rowOrdering.on((t: (InternalRow, _)) => t._1))
+              case _ => groupedPartitions
+            }
+
           // When partially clustered, the input partitions are not grouped by partition
           // values. Here we'll need to check `commonPartitionValues` and decide how to group
           // and replicate splits within a partition.
@@ -180,7 +199,16 @@ case class GpuBatchScanExec(
                 .get
                 .map(t => (InternalRowComparableWrapper(t._1, partExpressions), t._2))
                 .toMap
-            val nestGroupedPartitions = groupedPartitions.map { case (partValue, splits) =>
+            // SPARK-48949: with `...v2.bucketing.partition.filter.enabled`,
+            // `commonPartitionValues` is the intersection of the two join sides rather than
+            // their union, so this scan can still enumerate groups the planner pruned away.
+            // Dropping them here is what keeps the assert below true.
+            val filteredGroupedPartitions = finalGroupedPartitions.filter {
+              case (partValues, _) =>
+                commonPartValuesMap.keySet.contains(
+                  InternalRowComparableWrapper(partValues, partExpressions))
+            }
+            val nestGroupedPartitions = filteredGroupedPartitions.map { case (partValue, splits) =>
               // `commonPartValuesMap` should contain the part value since it's the super set.
               val numSplits = commonPartValuesMap
                   .get(InternalRowComparableWrapper(partValue, partExpressions))
@@ -213,7 +241,7 @@ case class GpuBatchScanExec(
           } else {
             // either `commonPartitionValues` is not defined, or it is defined but
             // `applyPartialClustering` is false.
-            val partitionMapping = groupedPartitions.map { case (partValue, splits) =>
+            val partitionMapping = finalGroupedPartitions.map { case (partValue, splits) =>
               InternalRowComparableWrapper(partValue, partExpressions) -> splits
             }.toMap
 
@@ -231,8 +259,12 @@ case class GpuBatchScanExec(
         case _ => filteredPartitions
       }
 
-      new DataSourceRDD(
-        sparkContext, finalPartitions, readerFactory, supportsColumnar, customMetrics)
+      new GpuDataSourceRDD(
+        sparkContext,
+        finalPartitions,
+        MissingFileErrorShim.wrapReaderFactory(readerFactory),
+        includeRefreshHint = false,
+        customMetricsFactory = new Spark4GpuDataSourceCustomMetricsFactory(scanCustomSQLMetrics))
     }
     postDriverMetrics()
     rdd

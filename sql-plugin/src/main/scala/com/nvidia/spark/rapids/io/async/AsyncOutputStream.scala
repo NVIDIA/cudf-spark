@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,7 @@
 package com.nvidia.spark.rapids.io.async
 
 import java.io.{IOException, OutputStream}
-import java.util.concurrent.{Callable, TimeUnit}
+import java.util.concurrent.{Callable, ExecutionException, TimeUnit}
 import java.util.concurrent.atomic.{AtomicLong, AtomicReference}
 
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
@@ -41,9 +41,13 @@ object AsyncOutputStream {
       openFn: Callable[OutputStream],
       trafficController: TrafficController,
       statsTrackers: Seq[ColumnarWriteTaskStatsTracker]): AsyncOutputStream = {
+    // Use a single writer thread that stays alive until close. Some cloud output streams, such as
+    // the GCS connector, can bridge OutputStream writes to an async uploader through a
+    // PipedOutputStream/PipedInputStream pair, where the reader can report a broken pipe if the
+    // writer thread exits while the stream is still open.
     val executor = new ThrottlingExecutor(
-      TrampolineUtil.newDaemonCachedThreadPool("AsyncOutputStream for "
-        + Thread.currentThread().getName, 1, 1), trafficController,
+      TrampolineUtil.newDaemonSingleThreadExecutor("AsyncOutputStream for "
+        + Thread.currentThread().getName), trafficController,
       new StatsUpdaterForWriteFunc(statsTrackers).func)
     new AsyncOutputStream(openFn, executor)
   }
@@ -91,6 +95,15 @@ class AsyncOutputStream(openFn: Callable[OutputStream], executor: ThrottlingExec
       case Some(t: IOException) => throw t
       case Some(t) => throw new IOException(t)
       case None =>
+    }
+  }
+
+  @throws[IOException]
+  private def throwExecutionExceptionAsIOException(e: ExecutionException): Nothing = {
+    e.getCause match {
+      case t: IOException => throw t
+      case t if t != null => throw new IOException(t)
+      case _ => throw new IOException(e)
     }
   }
 
@@ -172,7 +185,11 @@ class AsyncOutputStream(openFn: Callable[OutputStream], executor: ThrottlingExec
       delegate.flush()
     }, 0)
 
-    f.get()
+    try {
+      f.get()
+    } catch {
+      case e: ExecutionException => throwExecutionExceptionAsIOException(e)
+    }
   }
 
   /**
@@ -191,15 +208,27 @@ class AsyncOutputStream(openFn: Callable[OutputStream], executor: ThrottlingExec
     if (!closed) {
       Seq[AutoCloseable](
         () => {
-          // Wait for all pending writes to complete
-          // This will throw an exception if one of the writes fails
-          flush()
+          // Close on the async executor after all pending writes, before shutting the executor
+          // down. Some cloud streams use a pipe tied to the writing thread and can report a
+          // broken pipe if that thread exits before the stream is closed.
+          try {
+            executor.submit(() => {
+              try {
+                throwIfError()
+                ensureOpen()
+                delegate.flush()
+              } catch {
+                case t: Throwable =>
+                  delegate.safeClose(t)
+                  throw t
+              }
+              delegate.close()
+            }, 0).get()
+          } catch {
+            case e: ExecutionException => throwExecutionExceptionAsIOException(e)
+          }
         },
-        () => {
-          // Give the executor a chance to shutdown gracefully.
-          executor.shutdownNow(10, TimeUnit.SECONDS)
-        },
-        delegate,
+        () => executor.shutdownNow(10, TimeUnit.SECONDS),
         () => closed = true).safeClose()
     }
   }

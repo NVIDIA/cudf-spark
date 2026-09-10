@@ -1,6 +1,6 @@
 ---
 name: Feature request
-about: Suggest an idea for RAPIDS Accelerator for Apache Spark
+about: Suggest an idea for the NVIDIA cuDF plugin for Apache Spark
 title: "[FEA]"
 labels: "? - Needs Triage, feature request"
 assignees: ''

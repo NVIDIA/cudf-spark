@@ -27,16 +27,33 @@ import com.databricks.sql.transaction.tahoe.sources.DeltaSQLConf
 import com.nvidia.spark.rapids.RapidsConf
 
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.util.Clock
 
 class GpuOptimisticTransaction(
     deltaLog: DeltaLog,
+    catalogTable: Option[CatalogTable],
     snapshot: Snapshot,
     rapidsConf: RapidsConf)(implicit clock: Clock)
-    extends GpuOptimisticTransactionWriteBase(deltaLog, snapshot, rapidsConf)(clock) {
+    extends GpuOptimisticTransactionWriteBase(deltaLog, catalogTable, snapshot, rapidsConf)(clock) {
+
+  def this(
+      deltaLog: DeltaLog,
+      snapshot: Snapshot,
+      rapidsConf: RapidsConf)(implicit clock: Clock) = {
+    this(deltaLog, Option.empty[CatalogTable], snapshot, rapidsConf)
+  }
+
+  def this(
+      deltaLog: DeltaLog,
+      catalogTable: Option[CatalogTable],
+      snapshotOpt: Option[Snapshot],
+      rapidsConf: RapidsConf)(implicit clock: Clock) = {
+    this(deltaLog, catalogTable, snapshotOpt.getOrElse(deltaLog.update()), rapidsConf)
+  }
 
   def this(deltaLog: DeltaLog, rapidsConf: RapidsConf)(implicit clock: Clock) = {
-    this(deltaLog, deltaLog.update(), rapidsConf)
+    this(deltaLog, Option.empty[CatalogTable], deltaLog.update(), rapidsConf)
   }
 
   override protected def handlePostWriteAutoCompact(

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,6 +31,9 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 private[rapids] class StreamToBufferProvider(
     inputStream: DataInputStream) extends HostBufferProvider {
   private[this] val tempBuffer = new Array[Byte](128 * 1024)
+  private[this] var totalReadBytes: Long = 0
+
+  private[rapids] def totalBytesRead: Long = totalReadBytes
 
   override def readInto(hostBuffer: HostMemoryBuffer, length: Long): Long = {
     var amountLeft = length
@@ -45,6 +48,7 @@ private[rapids] class StreamToBufferProvider(
         amountLeft -= amountRead
         hostBuffer.setBytes(totalRead, tempBuffer, 0, amountRead)
         totalRead += amountRead
+        totalReadBytes += amountRead
       }
     }
     totalRead
@@ -73,6 +77,7 @@ trait GpuArrowOutput {
 
   class GpuArrowReader extends AutoCloseable {
     private[this] var tableReader: StreamedTableReader = _
+    private[this] var bufferProvider: StreamToBufferProvider = _
     private[this] var batchLoaded: Boolean = true
 
     /** Make the reader ready to read data, should be called before reading any batch */
@@ -80,13 +85,18 @@ trait GpuArrowOutput {
       if (tableReader == null) {
         val builder = ArrowIPCOptions.builder().withCallback(
           () => GpuSemaphore.acquireIfNecessary(TaskContext.get()))
-        tableReader = Table.readArrowIPCChunked(builder.build(), new StreamToBufferProvider(stream))
+        bufferProvider = new StreamToBufferProvider(stream)
+        tableReader = Table.readArrowIPCChunked(builder.build(), bufferProvider)
       }
     }
 
     final def isStarted: Boolean = tableReader != null
 
     final def mayHasNext: Boolean = batchLoaded
+
+    private[rapids] final def totalBytesRead: Long = {
+      if (bufferProvider == null) 0 else bufferProvider.totalBytesRead
+    }
 
     final def readNext(): ColumnarBatch = {
       val table =

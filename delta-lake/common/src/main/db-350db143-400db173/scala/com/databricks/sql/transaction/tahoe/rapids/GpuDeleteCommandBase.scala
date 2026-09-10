@@ -196,7 +196,7 @@ abstract class GpuDeleteCommandBase(
 
           val candidateFiles = txn.filterFiles(
             metadataPredicates ++ otherPredicates,
-            keepNumRecords = RowTracking.isEnabled(txn.protocol, txn.metadata))
+            keepNumRecords = true /* Preserve numRecords in generated RemoveFile actions. */)
 
           numFilesAfterSkipping = candidateFiles.size
           val (numCandidateBytes, numCandidatePartitions) =

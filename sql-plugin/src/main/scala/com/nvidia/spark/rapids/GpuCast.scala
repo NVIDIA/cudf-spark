@@ -755,7 +755,7 @@ object GpuCast {
     case DateType => input.asStrings("%Y-%m-%d")
     case TimestampType if options.castToJsonString => castTimestampToJson(input)
     case TimestampType => castTimestampToString(input)
-    case FloatType | DoubleType => CastStrings.fromFloat(input)
+    case FloatType | DoubleType => CastStrings.fromFloat(input, options.castToJsonString)
     case BinaryType => castBinToString(input, options)
     case _: DecimalType => GpuCastShims.CastDecimalToString(input, options.useDecimalPlainString)
     case StructType(fields) => castStructToString(input, fields, options)
@@ -855,19 +855,15 @@ object GpuCast {
           _.replaceNulls(nullRep)
         }
       } else {
-        // add a space string to each non-null element
-        val (strChild, childNotNull, numElements) =
-          withResource(input.getChildColumnView(0)) { childCol =>
-            closeOnExcept(childCol.replaceNulls(nullRep)) {
-              (_, childCol.isNotNull(), childCol.getRowCount.toInt)
-            }
+        // Prepend a space to each non-null element, letting the concat propagate nulls
+        // from the child column, then fill those nulls with nullRep.
+        withResource(input.getChildColumnView(0)) { childCol =>
+          val numElements = childCol.getRowCount.toInt
+          val withSpaces = withResource(ColumnVector.fromScalar(space, numElements)) { spaceCol =>
+            ColumnVector.stringConcatenate(Array(spaceCol, childCol))
           }
-        withResource(Seq(strChild, childNotNull)) { _ =>
-          val hasSpaces = withResource(ColumnVector.fromScalar(space, numElements)) { spaceCol =>
-            ColumnVector.stringConcatenate(Array(spaceCol, strChild))
-          }
-          withResource(hasSpaces) {
-            childNotNull.ifElse(_, strChild)
+          withResource(withSpaces) { _ =>
+            withSpaces.replaceNulls(nullRep)
           }
         }
       }
@@ -1125,15 +1121,10 @@ object GpuCast {
                   attrColumns += attrValue.incRefCount()
             }
             // now concatenate
-            val jsonAttr = withResource(Scalar.fromString("")) { emptyString =>
-              ColumnVector.stringConcatenate(emptyString, emptyString, attrColumns.toArray)
-            }
             // add an empty string or the attribute
-            withResource(jsonAttr) { _ =>
-              withResource(cv.isNull) { isNull =>
-                withResource(Scalar.fromNull(DType.STRING)) { nullScalar =>
-                  isNull.ifElse(nullScalar, jsonAttr)
-                }
+            withResource(Scalar.fromString("")) { emptyString =>
+              withResource(Scalar.fromNull(DType.STRING)) { nullScalar =>
+                ColumnVector.stringConcatenate(emptyString, nullScalar, attrColumns.toArray)
               }
             }
           } else {
@@ -1176,17 +1167,18 @@ object GpuCast {
             }
           }
           // now wrap the string with `{` and `}`
-          withResource(jsonAttrs) { _ =>
+          val wrapped = withResource(jsonAttrs) { _ =>
             withResource(ArrayBuffer.empty[ColumnVector]) { columns =>
               columns += leftBrace.incRefCount()
               columns += jsonAttrs.incRefCount()
               columns += rightBrace.incRefCount()
-              withResource(ColumnVector.stringConcatenate(emptyScalar,
-                emptyScalar, columns.toArray, false))(
-                _.mergeAndSetValidity(BinaryOp.BITWISE_AND, input) // original whole row is null
-              )
+              ColumnVector.stringConcatenate(emptyScalar,
+                emptyScalar, columns.toArray, false)
             }
           }
+          withResource(wrapped)(
+            _.mergeAndSetValidity(BinaryOp.BITWISE_AND, input) // original whole row is null
+          )
       }
     }
   }

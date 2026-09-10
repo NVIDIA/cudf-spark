@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,11 +21,15 @@ package org.apache.spark.sql.rapids.suites
 
 import java.util.TimeZone
 
-import org.apache.spark.sql.JsonFunctionsSuite
+import org.apache.spark.sql.{JsonFunctionsSuite, Row}
+import org.apache.spark.sql.functions.from_json
 import org.apache.spark.sql.rapids.utils.{RapidsJsonConfTrait, RapidsSQLTestsTrait}
+import org.apache.spark.sql.types.{ArrayType, LongType, StringType, StructType}
 
 class RapidsJsonFunctionsSuite
     extends JsonFunctionsSuite with RapidsSQLTestsTrait with RapidsJsonConfTrait {
+
+  import testImplicits._
 
   val originalTimeZone = TimeZone.getDefault
   
@@ -38,5 +42,19 @@ class RapidsJsonFunctionsSuite
   override def afterAll(): Unit = {
     TimeZone.setDefault(originalTimeZone)
     super.afterAll()
+  }
+
+  testRapids("SPARK-33134: return partial results for root JSON objects on GPU") {
+    val st = new StructType()
+      .add("c1", LongType)
+      .add("c2", ArrayType(new StructType().add("c3", LongType).add("c4", StringType)))
+
+    val df1 = Seq("""{"c2": [19], "c1": 123456}""").toDF("c0")
+    checkAnswer(df1.select(from_json($"c0", st)), Row(Row(123456, null)))
+
+    val df2 = Seq("""{"data": {"c2": [19], "c1": 123456}}""").toDF("c0")
+    checkAnswer(
+      df2.select(from_json($"c0", new StructType().add("data", st))),
+      Row(Row(null)))
   }
 }

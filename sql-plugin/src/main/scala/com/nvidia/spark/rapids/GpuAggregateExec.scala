@@ -1510,6 +1510,7 @@ abstract class GpuTypedImperativeSupportedAggregateExecMeta[INPUT <: BaseAggrega
   private def overrideAggBufTypes(): Unit = {
     val desiredAggBufTypes = mutable.HashMap.empty[ExprId, DataType]
     val desiredInputAggBufTypes = mutable.HashMap.empty[ExprId, DataType]
+    val desiredResultOutputTypes = mutable.HashMap.empty[ExprId, DataType]
     // Collects exprId from TypedImperativeAggBufferAttributes, and maps them to the data type
     // of `TypedImperativeAggExprMeta.aggBufferAttribute`.
     aggregateExpressions.map(_.childExprs.head).foreach {
@@ -1523,6 +1524,31 @@ abstract class GpuTypedImperativeSupportedAggregateExecMeta[INPUT <: BaseAggrega
       case _ =>
     }
 
+    // For Partial and PartialMerge, Spark constructs resultExpressions positionally from each
+    // aggregate function's inputAggBufferAttributes.  Those attributes can retain different
+    // expression IDs after the aggregate function is copied (see SPARK-31620), so an ID-only
+    // lookup cannot reliably identify the shuffle-facing result attribute.
+    val allResultsAreAggBuffers = aggregateExpressions.forall { aggExprMeta =>
+      val mode = aggExprMeta.wrapped.asInstanceOf[AggregateExpression].mode
+      mode == Partial || mode == PartialMerge
+    }
+    if (allResultsAreAggBuffers) {
+      var resultOffset = groupingExpressions.length
+      aggregateExpressions.foreach { aggExprMeta =>
+        val aggExpr = aggExprMeta.wrapped.asInstanceOf[AggregateExpression]
+        val bufferCount = aggExpr.aggregateFunction.inputAggBufferAttributes.length
+        aggExprMeta.childExprs.head match {
+          case aggMeta: TypedImperativeAggExprMeta[_] =>
+            resultExpressions.lift(resultOffset).foreach { resultMeta =>
+              val resultExpr = resultMeta.wrapped.asInstanceOf[NamedExpression]
+              desiredResultOutputTypes(resultExpr.exprId) = aggMeta.aggBufferAttribute.dataType
+            }
+          case _ =>
+        }
+        resultOffset += bufferCount
+      }
+    }
+
     // Overrides the data types of typed imperative aggregation buffers for type checking
     aggregateAttributes.foreach { attrMeta =>
       attrMeta.wrapped match {
@@ -1533,8 +1559,11 @@ abstract class GpuTypedImperativeSupportedAggregateExecMeta[INPUT <: BaseAggrega
     }
     resultExpressions.foreach { retMeta =>
       retMeta.wrapped match {
-        case ar: AttributeReference if desiredInputAggBufTypes.contains(ar.exprId) =>
-          retMeta.overrideDataType(desiredInputAggBufTypes(ar.exprId))
+        case ar: AttributeReference =>
+          desiredInputAggBufTypes.get(ar.exprId)
+            .orElse(desiredResultOutputTypes.get(ar.exprId))
+            .orElse(desiredAggBufTypes.get(ar.exprId))
+            .foreach(retMeta.overrideDataType)
         case _ =>
       }
     }
@@ -1978,7 +2007,11 @@ case class GpuHashAggregateExec(
     "NUM_AGGS" -> createMetric(DEBUG_LEVEL, "num agg operations"),
     "NUM_PRE_SPLITS" -> createMetric(DEBUG_LEVEL, "num pre splits"),
     "NUM_TASKS_SINGLE_PASS" -> createMetric(MODERATE_LEVEL, "number of single pass tasks"),
-    "HEURISTIC_TIME" -> createNanoTimingMetric(DEBUG_LEVEL, "time in heuristic")
+    "HEURISTIC_TIME" -> createNanoTimingMetric(DEBUG_LEVEL, "time in heuristic"),
+    CPU_BRIDGE_PROCESSING_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
+      DESCRIPTION_CPU_BRIDGE_PROCESSING_TIME),
+    CPU_BRIDGE_WAIT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
+      DESCRIPTION_CPU_BRIDGE_WAIT_TIME)
   )
 
   // requiredChildDistributions are CPU expressions, so remove it from the GPU expressions list
@@ -2083,11 +2116,15 @@ case class GpuHashAggregateExec(
     }
   }
 
-  // Used in de-duping and optimizer rules
+  // Used in de-duping and optimizer rules.
+  // Final/PartialMerge aggregates read input buffer attributes from their child. If those
+  // attrs share exprIds with child output but have different names, keep them out of this
+  // node's produced attributes so QueryPlan.references retains the required inputs.
   override def producedAttributes: AttributeSet =
-    AttributeSet(aggregateAttributes) ++
+    (AttributeSet(aggregateAttributes) ++
       AttributeSet(resultExpressions.diff(groupingExpressions).map(_.toAttribute)) ++
-      AttributeSet(aggregateBufferAttributes)
+      AttributeSet(aggregateBufferAttributes) ++
+      AttributeSet(inputAggBufferAttributes)) -- child.outputSet
 
   // AllTuples = distribution with a single partition and all tuples of the dataset are co-located.
   // Clustered = dataset with tuples co-located in the same partition if they share a specific value

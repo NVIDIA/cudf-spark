@@ -220,8 +220,14 @@ object DateUtils {
       meta: RapidsMeta[_, _, _],
       sparkFormat: String,
       parseString: Boolean,
-      inputFormat: Option[String] = None): String = {
+      inputFormat: Option[String] = None,
+      allowLegacyFormattingOnlyFormats: Boolean = false): String = {
     val formatToConvert = inputFormat.getOrElse(sparkFormat)
+    val legacyCompatibleFormats = if (allowLegacyFormattingOnlyFormats) {
+      GpuToTimestamp.LEGACY_FORMATTING_COMPATIBLE_FORMATS
+    } else {
+      GpuToTimestamp.LEGACY_COMPATIBLE_FORMATS
+    }
     var strfFormat: String = null
     if (GpuOverrides.getTimeParserPolicy == LegacyTimeParserPolicy) {
       try {
@@ -229,7 +235,7 @@ object DateUtils {
         // the format contains unsupported characters or words
         strfFormat = toStrf(formatToConvert, parseString)
         // format parsed ok but we have no 100% compatible formats in LEGACY mode
-        if (GpuToTimestamp.LEGACY_COMPATIBLE_FORMATS.contains(formatToConvert)) {
+        if (legacyCompatibleFormats.contains(formatToConvert)) {
           // LEGACY support has a number of issues that mean we cannot guarantee
           // compatibility with CPU
           // - we can only support 4 digit years but Spark supports a wider range

@@ -7,6 +7,12 @@
       "pattern": "https://github.com/NVIDIA/spark-rapids/issues/*"
     },
     {
+      "pattern": "https://github.com/NVIDIA/cudf-spark/pull/*"
+    },
+    {
+      "pattern": "https://github.com/NVIDIA/cudf-spark/issues/*"
+    },
+    {
       "pattern": "/docs/archives"
     },
     {

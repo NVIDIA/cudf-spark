@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.
+# Copyright (c) 2023-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import pytest
+import pyarrow as pa
 
 from asserts import assert_gpu_and_cpu_are_equal_collect
 from data_gen import *
@@ -115,17 +116,21 @@ _common_rebase_conf = {
     'spark.sql.parquet.datetimeRebaseModeInWrite': 'CORRECTED',
     'spark.sql.parquet.datetimeRebaseModeInRead': 'CORRECTED',
 
-    # disable timestampNTZ for parquet for 3.4+ tests to pass
-    # pyarrow write parquet with isAdjustedToUTC = true
-    #   ParquetMetadata parquetMetadata = ParquetFileReader.readFooter(new Configuration(), new Path(filePath));
-    #   MessageType schema = parquetMetadata.getFileMetaData().getSchema();
-    #   Type timestampColumn = schema.getType("_c9");
-    #   System.out.println(timestampColumn);
-    #       optional int64 _c9 (TIMESTAMP(MICROS,false))
-    #       isAdjustedToUTC: true
+    # Disable timestampNTZ inference for timezone-less PyArrow timestamps on
+    # Spark 3.4+.
+    # Spark 3.3.4 can also infer those as TimestampNTZType in testing mode, so
+    # pyarrow_utils writes normal TimestampGen values as UTC-adjusted
+    # timestamps.
     # Refer to Spark link: https://github.com/apache/spark/blob/v3.5.0/sql/catalyst/src/main/scala/org/apache/spark/sql/internal/SQLConf.scala#L1163
     'spark.sql.parquet.inferTimestampNTZ.enabled': 'false'
 }
+
+
+@pyarrow_test
+def test_pyarrow_timestamp_gen_type_preserves_timestamp_and_ntz_metadata():
+    assert get_pyarrow_type(TimestampGen()) == pa.timestamp('us', tz='UTC')
+    assert get_pyarrow_type(TimestampGen(tzinfo=None)) == pa.timestamp('us')
+
 
 #
 # test read/write by pyarrow/GPU

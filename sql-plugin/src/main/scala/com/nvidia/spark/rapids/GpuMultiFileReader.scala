@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids
 
-import java.io.{File, IOException}
+import java.io.{File, FileNotFoundException, IOException}
 import java.net.{URI, URISyntaxException}
 import java.util.concurrent.{CompletionService, ConcurrentLinkedQueue, ExecutorCompletionService, Future, ThreadPoolExecutor, TimeUnit}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
@@ -282,6 +282,14 @@ object MultiFileReaderUtils {
       files: Array[String],
       cloudSchemes: Set[String]): Boolean =
     !coalescingEnabled || (multiThreadEnabled && hasPathInCloud(files, cloudSchemes))
+
+  private[rapids] def attachFilePathToMissingFile[T](runner: AsyncRunner[T], file: Path): Unit = {
+    runner.addFailureTransformer {
+      case error: FileNotFoundException =>
+        GpuFileNotFoundException(file.toUri.toString, error)
+      case error => error
+    }
+  }
 }
 
 /**
@@ -581,6 +589,11 @@ abstract class MultiFileCloudPartitionReaderBase(
     // An AsyncRunner wrapper used to update related metrics
     val newTaskRunner = (file: PartitionedFile) => {
       val runner = getBatchRunner(tc, file, conf, filters)
+      runner.addFailureTransformer {
+        case error: FileNotFoundException =>
+          GpuFileNotFoundException(file.filePath.toString, error)
+        case error => error
+      }
       val metrics = GpuTaskMetrics.get
       val taskId = tc.taskAttemptId()
       runner.addPreHook(() => {
@@ -1086,14 +1099,70 @@ abstract class MultiFileCoalescingPartitionReaderBase(
     clippedBlocks.iterator.buffered
   private[this] val inputMetrics = TaskContext.get.taskMetrics().inputMetrics
 
+  /**
+   * A group of blocks in one coalesced read that have the same file path.
+   * This may be a subset of all blocks in that file.
+   */
+  protected final class FileBlockGroup(
+      val filePath: Path,
+      val blocks: Seq[SingleDataBlockInfo]) {
+    val numRows: Long = blocks.foldLeft(0L)(_ + _.dataBlock.getRowCount)
+  }
+
+  /**
+   * A file block group and the partition value for that group.
+   */
+  protected final class FileBlockGroupWithPartition(
+      val fileBlockGroup: FileBlockGroup,
+      val partitionValue: InternalRow)
+
+  /**
+   * Blocks for one coalesced read, grouped by file path.
+   * rowsPerPartition and allPartValues are derived from groupsByFile values.
+   */
+  protected final class FileMajorBlockChunk private(
+      val groupsByFile: LinkedHashMap[Path, FileBlockGroupWithPartition]) {
+    val rowsPerPartition: Array[Long] =
+      groupsByFile.values.map(_.fileBlockGroup.numRows).toArray
+    val allPartValues: Array[InternalRow] =
+      groupsByFile.values.map(_.partitionValue).toArray
+    def isEmpty: Boolean = groupsByFile.isEmpty
+  }
+
+  protected object FileMajorBlockChunk {
+    /**
+     * Builds a chunk by grouping the given blocks by file path.
+     * rowsPerPartition and allPartValues are computed from the groups.
+     */
+    def fromBlocks(blocks: Seq[SingleDataBlockInfo]): FileMajorBlockChunk = {
+      val blocksByFile = LinkedHashMap[Path, ArrayBuffer[SingleDataBlockInfo]]()
+      blocks.foreach { block =>
+        blocksByFile.getOrElseUpdate(block.filePath, new ArrayBuffer[SingleDataBlockInfo]) += block
+      }
+
+      val groupsByFile = LinkedHashMap[Path, FileBlockGroupWithPartition]()
+
+      blocksByFile.foreach { case (filePath, fileBlocks) =>
+        val groupedBlocks = fileBlocks.toSeq
+        val partitionValue = groupedBlocks.head.partitionValues
+        require(groupedBlocks.forall(_.partitionValues == partitionValue),
+          s"Blocks from the same file must share partition values: $filePath")
+        val group = new FileBlockGroup(filePath, groupedBlocks)
+        groupsByFile += filePath -> new FileBlockGroupWithPartition(group, partitionValue)
+      }
+
+      new FileMajorBlockChunk(groupsByFile)
+    }
+  }
+
   protected case class CurrentChunkMeta(
     clippedSchema: SchemaBase,
     readSchema: StructType,
-    currentChunk: Seq[SingleDataBlockInfo],
-    numTotalRows: Long,
-    rowsPerPartition: Array[Long],
-    allPartValues: Array[InternalRow],
-    extraInfo: ExtraInfo)
+    currentChunk: FileMajorBlockChunk,
+    extraInfo: ExtraInfo) {
+    def rowsPerPartition: Array[Long] = currentChunk.rowsPerPartition
+    def allPartValues: Array[InternalRow] = currentChunk.allPartValues
+  }
 
   /**
    * To check if the next block will be split into another ColumnarBatch
@@ -1376,19 +1445,23 @@ abstract class MultiFileCoalescingPartitionReaderBase(
 
   /**
    * Read all data blocks into HostMemoryBuffer
-   * @param blocks a sequence of data blocks to be read
+   * @param chunk the file-major data blocks to be read
    * @param clippedSchema the clipped schema is used to calculate the estimated output size
    * @return the HostMemoryBuffer
    */
   private def readPartFiles(
-      blocks: Seq[SingleDataBlockInfo],
+      chunk: FileMajorBlockChunk,
       clippedSchema: SchemaBase): SpillableHostBuffer = {
 
     NvtxIdWithMetrics(NvtxRegistry.BUFFER_FILE_SPLIT, metrics("bufferTime")) {
-      // ugly but we want to keep the order
       val filesAndBlocks = LinkedHashMap[Path, ArrayBuffer[DataBlockBase]]()
-      blocks.foreach { b =>
-        filesAndBlocks.getOrElseUpdate(b.filePath, new ArrayBuffer[DataBlockBase]) += b.dataBlock
+      chunk.groupsByFile.foreach { case (file, groupWithPartition) =>
+        val group = groupWithPartition.fileBlockGroup
+        val dataBlocks = new ArrayBuffer[DataBlockBase](group.blocks.size)
+        group.blocks.foreach { block =>
+          dataBlocks += block.dataBlock
+        }
+        filesAndBlocks += file -> dataBlocks
       }
       val tasks = new java.util.ArrayList[Future[AsyncResult[(Seq[DataBlockBase], Long)]]]()
 
@@ -1412,8 +1485,9 @@ abstract class MultiFileCoalescingPartitionReaderBase(
             // use a single buffer and slice it up for different files if we need
             val outLocal = hmb.slice(offset, fileBlockSize)
             // Third, copy the blocks for each file in parallel using background threads
-            tasks.add(threadPool.submit(
-              getBatchRunner(tc, file, outLocal, blocks, offset, batchContext)))
+            val runner = getBatchRunner(tc, file, outLocal, blocks, offset, batchContext)
+            MultiFileReaderUtils.attachFilePathToMissingFile(runner, file)
+            tasks.add(threadPool.submit(runner))
             offset += fileBlockSize
           }
 
@@ -1496,12 +1570,8 @@ abstract class MultiFileCoalescingPartitionReaderBase(
     var numBytes: Long = 0
     var numChunkBytes: Long = 0
     var currentFile: Path = null
-    var currentPartitionValues: InternalRow = null
     var currentClippedSchema: SchemaBase = null
     var currentReadSchema: StructType = null
-    val rowsPerPartition = new ArrayBuffer[Long]()
-    var lastPartRows: Long = 0
-    val allPartValues = new ArrayBuffer[InternalRow]()
     var currentDataBlock: SingleDataBlockInfo = null
     var extraInfo: ExtraInfo = null
 
@@ -1512,8 +1582,6 @@ abstract class MultiFileCoalescingPartitionReaderBase(
           // first time of readNextBatch
           currentDataBlock = blockIterator.head
           currentFile = blockIterator.head.filePath
-          currentPartitionValues = blockIterator.head.partitionValues
-          allPartValues += currentPartitionValues
           currentClippedSchema = blockIterator.head.schema
           currentReadSchema = blockIterator.head.readSchema
           extraInfo = blockIterator.head.extraInfo
@@ -1534,19 +1602,7 @@ abstract class MultiFileCoalescingPartitionReaderBase(
                 logInfo(s"splitting ${blockIterator.head.filePath} into another batch!")
                 return
               }
-              // If the partition values are different we have to track the number of rows that get
-              // each partition value and the partition values themselves so that we can build
-              // the full columns with different partition values later.
-              if (blockIterator.head.partitionValues != currentPartitionValues) {
-                rowsPerPartition += (numRows - lastPartRows)
-                lastPartRows = numRows
-                // we add the actual partition values here but then
-                // the number of rows in that partition at the end or
-                // when the partition changes
-                allPartValues += blockIterator.head.partitionValues
-              }
               currentFile = blockIterator.head.filePath
-              currentPartitionValues = blockIterator.head.partitionValues
               currentClippedSchema = blockIterator.head.schema
               currentReadSchema = blockIterator.head.readSchema
               currentDataBlock = blockIterator.head
@@ -1563,11 +1619,10 @@ abstract class MultiFileCoalescingPartitionReaderBase(
       }
     }
     readNextBatch()
-    rowsPerPartition += (numRows - lastPartRows)
+    val fileMajorChunk = FileMajorBlockChunk.fromBlocks(currentChunk.toSeq)
     logDebug(s"Loaded $numRows rows from ${getFileFormatShortName}. " +
       s"${getFileFormatShortName} bytes read: $numChunkBytes. Estimated GPU bytes: $numBytes. " +
-      s"Number of different partitions: ${allPartValues.size}")
-    CurrentChunkMeta(currentClippedSchema, currentReadSchema, currentChunk.toSeq,
-      numRows, rowsPerPartition.toArray, allPartValues.toArray, extraInfo)
+      s"Number of partition entries: ${fileMajorChunk.allPartValues.length}")
+    CurrentChunkMeta(currentClippedSchema, currentReadSchema, fileMajorChunk, extraInfo)
   }
 }

@@ -21,6 +21,7 @@ import com.nvidia.spark.rapids.{
   AtomicCreateTableAsSelectExecMeta,
   AtomicReplaceTableAsSelectExecMeta,
   CreatableRelationProviderRule,
+  DataWritingCommandRule,
   ExecRule,
   ExprRule,
   GpuExec,
@@ -34,7 +35,7 @@ import com.nvidia.spark.rapids.{
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.connector.catalog.{StagingTableCatalog, SupportsWrite}
 import org.apache.spark.sql.execution.{FileSourceScanExec, SparkPlan, SparkStrategy}
-import org.apache.spark.sql.execution.command.RunnableCommand
+import org.apache.spark.sql.execution.command.{DataWritingCommand, RunnableCommand}
 import org.apache.spark.sql.execution.datasources.{FileFormat, HadoopFsRelation}
 import org.apache.spark.sql.execution.datasources.v2.{AppendDataExecV1, AtomicCreateTableAsSelectExec, AtomicReplaceTableAsSelectExec, OverwriteByExpressionExecV1}
 import org.apache.spark.sql.sources.CreatableRelationProvider
@@ -53,6 +54,9 @@ trait DeltaProvider {
 
   def getRunnableCommandRules: Map[Class[_ <: RunnableCommand],
       RunnableCommandRule[_ <: RunnableCommand]]
+
+  def getDataWritingCommandRules: Map[Class[_ <: DataWritingCommand],
+      DataWritingCommandRule[_ <: DataWritingCommand]] = Map.empty
 
   def getStrategyRules: Seq[SparkStrategy]
 
@@ -95,14 +99,14 @@ trait DeltaProvider {
       meta: OverwriteByExpressionExecV1Meta): GpuExec
 
   /**
-   * Returns true if deletion vector predicates can be pushed down to the scan.
+   * Returns true if deletion vector predicate pushdown is enabled via configuration.
    */
-  def canPushDVPredicateDownToScan(conf: RapidsConf): Boolean = false
+  def isPushDVPredicateDownEnabled(conf: RapidsConf): Boolean = false
 
   /**
-   * Pushes down deletion vector predicates to the scan if possible
+   * Tries to push down deletion vector predicates to the scan.
    */
-  def pushDVPredicateDownToScan(plan: SparkPlan): SparkPlan = plan
+  def tryPushDVPredicateDownToScan(plan: SparkPlan): SparkPlan = plan
 
   def pruneFileMetadata(plan: SparkPlan): SparkPlan = plan
 

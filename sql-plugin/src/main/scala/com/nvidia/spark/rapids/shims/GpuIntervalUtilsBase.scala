@@ -286,7 +286,14 @@ trait GpuIntervalUtilsBase {
       firstSignInTable: ColumnVector, secondSignInTable: ColumnVector): ColumnVector = {
     val negatives = withResource(Scalar.fromString("-")) { negScalar =>
       withResource(Seq(firstSignInTable, secondSignInTable).safeMap(negScalar.equalTo)) {
-        case Seq(neg1, neg2) => neg1.bitXor(neg2)
+        signMatches =>
+          // cuDF returns null for optional capture groups that did not participate in the match.
+          // A missing sign is positive, so normalize those null comparisons to false before XOR.
+          withResource(Scalar.fromBool(false)) { falseScalar =>
+            withResource(signMatches.safeMap(_.replaceNulls(falseScalar))) {
+              case Seq(neg1, neg2) => neg1.bitXor(neg2)
+            }
+          }
       }
     }
 
@@ -307,8 +314,14 @@ trait GpuIntervalUtilsBase {
   protected def getMicrosFromDecimal(sign: ColumnVector, decimal: ColumnVector): ColumnVector = {
     val decimalType64_6 = DType.create(DType.DTypeEnum.DECIMAL64, -6)
     val timesMillion = withResource(Scalar.fromLong(1000000L)) { million =>
-      withResource(decimal.castTo(decimalType64_6)) {
-        _.mul(million)
+      // An absent optional fractional-seconds capture is null. It represents zero micros rather
+      // than a failed parse, so normalize it before the decimal conversion.
+      withResource(Scalar.fromString("0")) { zero =>
+        withResource(decimal.replaceNulls(zero)) { normalizedDecimal =>
+          withResource(normalizedDecimal.castTo(decimalType64_6)) {
+            _.mul(million)
+          }
+        }
       }
     }
     val timesMillionLongs = withResource(timesMillion) {

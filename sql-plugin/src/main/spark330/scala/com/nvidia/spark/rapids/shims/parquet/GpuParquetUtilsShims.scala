@@ -35,6 +35,13 @@ object GpuParquetUtilsShims {
   def setRowIndexOffset(block: BlockMetaData, offset: Long): Unit = {}
 
   /**
+   * Gets the row index offset from the BlockMetaData. Not available in Spark 3.3.x.
+   */
+  def getRowIndexOffset(block: BlockMetaData): Long = {
+    throw new UnsupportedOperationException("Row index offsets are not available in Spark 3.3.x")
+  }
+
+  /**
    * Build a new BlockMetaData from an existing one, but with a new set of column chunks metadata.
    *
    * @param existingMetadata the existing BlockMetaData to copy row index offset from

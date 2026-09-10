@@ -23,7 +23,11 @@
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
+import ai.rapids.cudf.NaNEquality
+
+import org.apache.spark.sql.catalyst.expressions.aggregate.{CollectList, CollectSet}
 import org.apache.spark.sql.catalyst.util.TypeUtils
+import org.apache.spark.sql.types.DataType
 
 /**
  * Reimplement the function `checkForNumericExpr` which has been removed since
@@ -31,4 +35,17 @@ import org.apache.spark.sql.catalyst.util.TypeUtils
  */
 object TypeUtilsShims {
   val checkForNumericExpr = TypeUtils.checkForNumericExpr _
+
+  val collectSetFloatNanEquality: NaNEquality = NaNEquality.UNEQUAL
+
+  // Pre-Spark 4.2 CollectSet stores child values directly in the agg buffer.
+  def collectSetCpuBufferElementType(childType: DataType): DataType = childType
+
+  def collectListIgnoreNulls(_collectList: CollectList): Boolean = true
+
+  def collectSetIgnoreNulls(_collectSet: CollectSet): Boolean = true
+
+  val useImprovedAsinhByDefault: Boolean = false
+
+  def isUnsupportedArrowAggregatePythonEvalType(evalType: Int): Boolean = false
 }

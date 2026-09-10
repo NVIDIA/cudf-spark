@@ -78,6 +78,20 @@ abstract class GpuBroadcastNestedLoopJoinMetaBase(
 
   override val childExprs: Seq[BaseExprMeta[_]] = conditionMeta.toSeq
 
+  override protected def runChildExprBridgeOptimization(): Unit = {
+    conditionMeta.foreach { cond =>
+      val leftExprIds = join.left.output.map(_.exprId)
+      val rightExprIds = join.right.output.map(_.exprId)
+      if (AstUtil.canExtractNonAstConditionIfNeed(cond, leftExprIds, rightExprIds)) {
+        GpuCpuBridgeOptimizer.checkAndOptimizeNonAstSubtrees(cond)
+      } else {
+        // Inner joins can consume a bridged post-filter. Joins that require an AST condition
+        // will call requireAstForGpuOn later and reject GPU execution if the bridge remains.
+        GpuCpuBridgeOptimizer.checkAndOptimizeExpressionMetas(Seq(cond))
+      }
+    }
+  }
+
   override def tagPlanForGpu(): Unit = {
     JoinTypeChecks.tagForGpu(join.joinType, this)
     join.joinType match {
@@ -577,7 +591,11 @@ abstract class GpuBroadcastNestedLoopJoinExecBase(
     OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY),
     BUILD_DATA_SIZE -> createSizeMetric(MODERATE_LEVEL, DESCRIPTION_BUILD_DATA_SIZE),
     BUILD_TIME -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_BUILD_TIME),
-    JOIN_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_JOIN_TIME))
+    JOIN_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_JOIN_TIME),
+    CPU_BRIDGE_PROCESSING_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
+      DESCRIPTION_CPU_BRIDGE_PROCESSING_TIME),
+    CPU_BRIDGE_WAIT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
+      DESCRIPTION_CPU_BRIDGE_WAIT_TIME))
 
   /** BuildRight means the right relation <=> the broadcast relation. */
   val (streamed, buildPlan) = gpuBuildSide match {
