@@ -310,8 +310,9 @@ protobuf implementation instead, so `run_pyspark_from_build.sh --runtime_env=dat
 inject a matching jar from either the build dependencies or `LOCAL_JAR_PATH`, even if the variable
 is explicitly set to `true`.
 
-The smoke tests detect the bundled runtime independently and use a static descriptor set, so they do
-not depend on Spark's private, runtime-specific shaded protobuf classes.
+The protobuf tests detect the bundled runtime independently. Descriptor sets are generated with the
+Python protobuf library or provided as static fixtures, so the tests do not depend on Spark's
+private, runtime-specific shaded protobuf classes.
 
 ### timezone
 
