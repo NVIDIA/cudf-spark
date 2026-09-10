@@ -36,6 +36,7 @@ env:
     -Drapids.secondaryCacheDir=$HOME/.m2/repository/.sbt/1.0/zinc/org.scala-sbt
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -430,3 +431,31 @@ jobs:
             fi
           }
           done
+
+  nvidia-deprecation-audit:
+    name: NVIDIA deprecation audit (optional)
+    if: ${{ always() }}
+    needs:
+      - package-tests
+      - package-tests-scala213
+      - verify-213-modules
+      - verify-all-212-modules
+      - install-modules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: NVIDIA/spark-rapids-common/checkout@main
+
+      - name: Collect compiler deprecations from matrix logs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          mvn --batch-mode -N antrun:run@nvidia-deprecation-audit \
+            -Ddeprecation.audit.rawReport="$RUNNER_TEMP/nvidia-deprecation-audit.json"
+
+      - name: Upload deprecation report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: nvidia-deprecation-audit
+          path: ${{ runner.temp }}/nvidia-deprecation-audit.json
+          if-no-files-found: ignore

@@ -235,6 +235,24 @@ or similarly
  ./build/buildall --rebuild-dist-only --option="-Ddist.jar.compress=false -Drapids.jni.unpack.skip"
 ```
 
+### Cross-repository API deprecations
+
+API replacements in cuDF Java, cudf-spark-jni, and cudf-spark-private must allow cudf-spark time to
+consume a published artifact before the old entry point becomes deprecated. Introduce the
+replacement first while the old method remains supported and delegates to the same implementation.
+After the updated snapshot is available, migrate cudf-spark callers in a separate change. Add the
+deprecation annotation only after known callers have migrated, and retain the compatibility entry
+point for at least one more release before removal.
+
+Scala deprecations originating in NVIDIA-owned `ai.rapids.cudf`, `com.nvidia.spark.rapids`, and
+`org.apache.spark.sql.rapids` APIs are reported as compiler information instead of fatal warnings
+during this migration window. The same applies to cudf-spark-private's
+`org.apache.spark.sql.execution.aggregate.PartialAggUtils` bridge; other APIs in Apache Spark
+namespaces are not exempt. Deprecations from other dependencies remain build errors. The
+optional NVIDIA deprecation audit in pull requests collects these diagnostics across the Maven
+build matrix. Findings or incomplete log collection fail the audit check so contributors inspect
+the result, but the audit is not a required build check; build-job results remain authoritative.
+
 ## Code contributions
 
 ### Source code layout
