@@ -23,7 +23,6 @@ package org.apache.spark.sql.delta.rapids
 
 import java.util.concurrent.TimeUnit
 
-import scala.collection.JavaConverters._
 import com.nvidia.spark.rapids.RapidsConf
 import com.nvidia.spark.rapids.delta._
 

@@ -29,6 +29,7 @@ import org.apache.spark.sql.delta.deletionvectors.{RoaringBitmapArray, RoaringBi
 import org.apache.spark.sql.delta.util.{Utils => DeltaUtils}
 import org.apache.spark.sql.delta.util.DeltaFileOperations.absolutePath
 import org.apache.spark.sql.functions.{col, collect_list}
+import org.apache.spark.sql.nvidia.DFUDFShims
 
 private[rapids] object GpuDeletionVectorBitmapGenerator {
   private val FileIdColumn = "fileId"
@@ -75,7 +76,7 @@ private[rapids] object GpuDeletionVectorBitmapGenerator {
     val fileInfoBroadcast = spark.sparkContext.broadcast(fileInfoById)
 
     val rowsWithFileId = precomputedFileIdColumn.fold(
-      targetDf.withColumn(FileIdColumn, new Column(InputFileDictionaryId(fileIdByPath))))(
+      targetDf.withColumn(FileIdColumn, DFUDFShims.exprToColumn(InputFileDictionaryId(fileIdByPath))))(
       fileId => targetDf.withColumn(FileIdColumn, fileId))
     val matchedRowsWithIndexes = rowsWithFileId
       .filter(condition)

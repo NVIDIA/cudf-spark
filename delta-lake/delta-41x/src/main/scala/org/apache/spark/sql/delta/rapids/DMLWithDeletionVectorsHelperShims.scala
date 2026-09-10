@@ -21,6 +21,8 @@
 
 package org.apache.spark.sql.delta.rapids
 
+import java.lang.reflect.InvocationTargetException
+
 import com.nvidia.spark.rapids.delta.RapidsDeltaWrite
 
 import org.apache.spark.sql.{DataFrame, SparkSession => SqlSparkSession}
@@ -69,16 +71,38 @@ object DMLWithDeletionVectorsHelperShims {
       .withColumn("_metadata", struct(input_file_name().as("file_path")))
   }
 
+  private lazy val processUnmodifiedDataMethod = {
+    val methods = DMLWithDeletionVectorsHelper.getClass.getMethods
+      .filter(_.getName == "processUnmodifiedData")
+    methods.find(_.getParameterCount == 4)
+      .orElse(methods.find(_.getParameterCount == 3))
+      .getOrElse(throw new IllegalStateException(
+        "Delta DMLWithDeletionVectorsHelper.processUnmodifiedData is unavailable"))
+  }
+  private lazy val getDataSkippingStringPrefixLengthMethod =
+    StatsCollectionUtils.getClass.getMethods
+      .find(_.getName == "getDataSkippingStringPrefixLength")
+      .getOrElse(throw new IllegalStateException(
+        "Delta StatsCollectionUtils.getDataSkippingStringPrefixLength is unavailable"))
+
+
   def processUnmodifiedData(
       spark: SparkSession,
       touchedFiles: Seq[TouchedFileWithDV],
       txn: OptimisticTransaction): (Seq[FileAction], Map[String, Long]) = {
-    val stringPrefixLength =
-      StatsCollectionUtils.getDataSkippingStringPrefixLength(spark, txn.metadata)
-    DMLWithDeletionVectorsHelper.processUnmodifiedData(
-      spark,
-      touchedFiles,
-      txn.snapshot,
-      stringPrefixLength)
+    val args: Array[AnyRef] = if (processUnmodifiedDataMethod.getParameterCount == 4) {
+      val stringPrefixLength = getDataSkippingStringPrefixLengthMethod
+        .invoke(StatsCollectionUtils, spark, txn.metadata).asInstanceOf[Int]
+      Array(spark, touchedFiles, txn.snapshot, Int.box(stringPrefixLength))
+    } else {
+      Array(spark, touchedFiles, txn.snapshot)
+    }
+    try {
+      processUnmodifiedDataMethod
+        .invoke(DMLWithDeletionVectorsHelper, args: _*)
+        .asInstanceOf[(Seq[FileAction], Map[String, Long])]
+    } catch {
+      case e: InvocationTargetException => throw e.getCause
+    }
   }
 }
