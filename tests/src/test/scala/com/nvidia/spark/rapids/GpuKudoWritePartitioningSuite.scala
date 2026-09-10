@@ -235,6 +235,7 @@ class GpuKudoWritePartitioningSuite extends AnyFunSuite with BeforeAndAfterEach
       serializer,
       useGPUShuffle = false,
       useMultiThreadedShuffle = false,
+      rangeInputBatchingEnabled = false,
       metrics,
       writeMetrics,
       Map.empty,

@@ -25,10 +25,19 @@ import org.apache.spark.sql.types.DataType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 class RangeInputBatchingSuite extends AnyFunSuite {
-  private class TestCoalesceIterator(input: Iterator[ColumnarBatch])
+  test("range input batching config is disabled by default and can be enabled") {
+    val entry = RapidsConf.RANGE_SHUFFLE_INPUT_BATCHING_ENABLED
+    assert(!entry.defaultValue)
+    assert(!entry.get(Map.empty[String, String]))
+    assert(entry.get(Map(entry.key -> "true")))
+  }
+
+  private class TestCoalesceIterator(
+      input: Iterator[ColumnarBatch],
+      goal: CoalesceSizeGoal = TargetSize(Long.MaxValue))
       extends AbstractGpuCoalesceIterator(
         input,
-        TargetSize(Long.MaxValue),
+        goal,
         NoopMetric,
         NoopMetric,
         NoopMetric,
@@ -76,7 +85,7 @@ class RangeInputBatchingSuite extends AnyFunSuite {
     val coalesce = new TestCoalesceIterator(input)
 
     try {
-      val isLast = RangeInputBatching.withRangeInput {
+      val isLast = RangeInputBatching.withRangeInput(enabled = true) {
         assert(coalesce.hasNext)
         coalesce.collectCandidates()
       }
@@ -111,12 +120,44 @@ class RangeInputBatchingSuite extends AnyFunSuite {
     }
   }
 
+  Seq[CoalesceSizeGoal](RequireSingleBatch, RequireSingleBatchWithFilter(null)).foreach { goal =>
+    test(s"range input retains $goal behavior") {
+      var reads = 0
+      val input = Seq(
+        new ColumnarBatch(Array.empty, 1),
+        new ColumnarBatch(Array.empty, 1),
+        new ColumnarBatch(Array.empty, 1)).iterator.map { batch =>
+        reads += 1
+        batch
+      }
+      val coalesce = new TestCoalesceIterator(input, goal)
+
+      try {
+        val isLast = RangeInputBatching.withRangeInput(enabled = true) {
+          assert(coalesce.hasNext)
+          coalesce.collectCandidates()
+        }
+        assert(isLast)
+        assert(reads == 3)
+        assert(coalesce.candidateCount == 3)
+      } finally {
+        coalesce.closeCandidates()
+        input.foreach(_.close())
+      }
+    }
+  }
+
   test("range input marker restores its scope after nesting and exceptions") {
     assert(!RangeInputBatching.isActive)
+    RangeInputBatching.withRangeInput(enabled = false) {
+      assert(!RangeInputBatching.isActive)
+    }
     intercept[RuntimeException] {
-      RangeInputBatching.withRangeInput {
+      RangeInputBatching.withRangeInput(enabled = true) {
         assert(RangeInputBatching.isActive)
-        RangeInputBatching.withRangeInput(assert(RangeInputBatching.isActive))
+        RangeInputBatching.withRangeInput(enabled = true) {
+          assert(RangeInputBatching.isActive)
+        }
         assert(RangeInputBatching.isActive)
         throw new RuntimeException("test")
       }
@@ -124,27 +165,30 @@ class RangeInputBatchingSuite extends AnyFunSuite {
     assert(!RangeInputBatching.isActive)
   }
 
-  test("range producer is closed when it is exhausted") {
+  test("range input selects and closes a restartable producer lazily") {
     var closed = false
-    val producer = new EmptyGpuDataProducer[Table] {
-      override def canReleaseSemaphoreBetweenBatches: Boolean = true
+    val producer = new RetryableTableProducer {
+      override def hasNext: Boolean = false
+      override def next: Table = throw new NoSuchElementException
+      override def checkpoint(): Unit = ()
+      override def restore(): Unit = ()
       override def close(): Unit = closed = true
     }
-    val iter = RangeInputBatching.withRangeInput {
+    val iter = RangeInputBatching.withRangeInput(enabled = true) {
       CachedGpuBatchIterator(producer, Array.empty[DataType])
     }
 
     assert(!closed)
-    assert(!iter.hasNext)
+    iter.close()
     assert(closed)
   }
 
-  test("range input eagerly caches a producer that cannot release the semaphore") {
+  test("range input eagerly caches a non-restartable producer") {
     var closed = false
     val producer = new EmptyGpuDataProducer[Table] {
       override def close(): Unit = closed = true
     }
-    val iter = RangeInputBatching.withRangeInput {
+    val iter = RangeInputBatching.withRangeInput(enabled = true) {
       CachedGpuBatchIterator(producer, Array.empty[DataType])
     }
 

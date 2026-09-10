@@ -268,15 +268,19 @@ object RangeInputBatching {
 
   def isActive: Boolean = active.get() == java.lang.Boolean.TRUE
 
-  def withRangeInput[T](body: => T): T = {
-    val previous = active.get()
-    active.set(java.lang.Boolean.TRUE)
-    try body finally {
-      if (previous == null) {
-        active.remove()
-      } else {
-        active.set(previous)
+  def withRangeInput[T](enabled: Boolean)(body: => T): T = {
+    if (enabled) {
+      val previous = active.get()
+      active.set(java.lang.Boolean.TRUE)
+      try body finally {
+        if (previous == null) {
+          active.remove()
+        } else {
+          active.set(previous)
+        }
       }
+    } else {
+      body
     }
   }
 }
@@ -494,10 +498,12 @@ abstract class AbstractGpuCoalesceIterator(
     }
 
     // there is a hard limit of 2^31 rows
-    // A range shuffle consumes every input batch independently. Avoid reading and retaining the
-    // next wide batch while the current range-shuffle batch is still live.
+    // A range shuffle consumes every splittable, size-based input batch independently. Avoid
+    // reading and retaining the next wide batch while the current range-shuffle batch is still
+    // live. Single-batch goals must continue reading the complete partition.
     while (numRows < filteringModeRowsThreshold && !hasOnDeck &&
-        !(RangeInputBatching.isActive && hasAnyToConcat) && iter.hasNext) {
+        !(RangeInputBatching.isActive && goal.isInstanceOf[SplittableGoal] && hasAnyToConcat) &&
+        iter.hasNext) {
       val cbFromIter = iter.next()
       numInputBatches += 1
 

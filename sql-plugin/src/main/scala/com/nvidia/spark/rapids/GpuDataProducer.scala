@@ -19,6 +19,7 @@ package com.nvidia.spark.rapids
 import scala.collection.mutable
 
 import ai.rapids.cudf.Table
+import com.nvidia.spark.Retryable
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 
 import org.apache.spark.TaskContext
@@ -38,13 +39,6 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
  * @tparam T what it is that we are wrapping
  */
 trait GpuDataProducer[T] extends AutoCloseable {
-  /**
-   * Whether this producer can remain open while the GPU semaphore is released between outputs.
-   * Implementations must opt in only when all producer methods are called with the semaphore held
-   * and idle producer state can safely coexist with other GPU tasks.
-   */
-  private[rapids] def canReleaseSemaphoreBetweenBatches: Boolean = false
-
   /**
    * Returns true if there is more data to be read or false if there is not.
    */
@@ -66,6 +60,13 @@ trait GpuDataProducer[T] extends AutoCloseable {
     }
   }
 }
+
+/**
+ * A table producer whose state can be checkpointed and restored across an RMM retry.
+ * Implementations must keep their inputs alive until close and reproduce the next table after
+ * restore without skipping or duplicating previously returned data.
+ */
+private[rapids] trait RetryableTableProducer extends GpuDataProducer[Table] with Retryable
 
 object GpuDataProducer {
   /**
@@ -161,10 +162,11 @@ object CachedGpuBatchIterator {
 
   def apply(producer: GpuDataProducer[Table],
       dataTypes: Array[DataType]): GpuColumnarBatchIterator = {
-    if (RangeInputBatching.isActive && producer.canReleaseSemaphoreBetweenBatches) {
-      new RangeGpuDataProducerIterator(producer, dataTypes)
-    } else {
-      cacheProducer(producer, dataTypes)
+    producer match {
+      case retryable: RetryableTableProducer if RangeInputBatching.isActive =>
+        new RangeGpuDataProducerIterator(retryable, dataTypes)
+      case _ =>
+        cacheProducer(producer, dataTypes)
     }
   }
 
@@ -196,33 +198,39 @@ object CachedGpuBatchIterator {
 }
 
 /**
- * Streams a GPU producer one batch at a time into a range shuffle.
+ * Streams a restartable GPU table producer one batch at a time into a range shuffle.
  *
- * [[CachedGpuBatchIterator]] normally drains a chunked file reader eagerly so the producer can be
+ * CachedGpuBatchIterator normally drains a chunked file reader eagerly so the producer can be
  * closed before the GPU semaphore is released. A range shuffle consumes its input synchronously,
  * and draining a wide reader there materializes several decoded batches before any of them can be
- * partitioned. Keeping the producer open and reacquiring the semaphore for every interaction
- * bounds live decoded data to the batch currently being partitioned. Task completion closes a
- * partially consumed producer.
+ * partitioned. The restartable producer keeps native progress retry-safe while this
+ * iterator bounds live decoded data to the batch currently being partitioned.
  */
 private class RangeGpuDataProducerIterator(
-    producer: GpuDataProducer[Table],
+    producer: RetryableTableProducer,
     dataTypes: Array[DataType]) extends GpuColumnarBatchIterator(true) {
 
-  override def hasNext: Boolean = {
-    GpuSemaphore.acquireIfNecessary(TaskContext.get())
-    closeOnExcept(this) { _ =>
-      val more = producer.hasNext
-      if (!more) {
-        close()
-      }
-      more
+  private def retry[T](body: => T): T = {
+    producer.checkpoint()
+    RmmRapidsRetryIterator.withRetryNoSplit {
+      RmmRapidsRetryIterator.withRestoreOnRetry(producer)(body)
     }
   }
 
-  override def next(): ColumnarBatch = {
-    GpuSemaphore.acquireIfNecessary(TaskContext.get())
-    closeOnExcept(this) { _ =>
+  override def hasNext: Boolean = closeOnExcept(this) { _ =>
+    val more = retry {
+      GpuSemaphore.acquireIfNecessary(TaskContext.get())
+      producer.hasNext
+    }
+    if (!more) {
+      close()
+    }
+    more
+  }
+
+  override def next(): ColumnarBatch = closeOnExcept(this) { _ =>
+    retry {
+      GpuSemaphore.acquireIfNecessary(TaskContext.get())
       withResource(producer.next) { table =>
         GpuColumnVector.from(table, dataTypes)
       }

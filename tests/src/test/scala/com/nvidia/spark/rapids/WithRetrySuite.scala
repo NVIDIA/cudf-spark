@@ -178,6 +178,53 @@ class WithRetrySuite
     }
   }
 
+  test("range producer restores native progress before retrying a deferred batch") {
+    var nextIndex = 0
+    var checkpointIndex = 0
+    var failedOnce = false
+    var restoreCount = 0
+    var closed = false
+    val successfulValues = new scala.collection.mutable.ArrayBuffer[Long]
+    val producer = new RetryableTableProducer {
+      override def hasNext: Boolean = nextIndex < 2
+
+      override def next: Table = {
+        val value = nextIndex
+        nextIndex += 1
+        if (!failedOnce) {
+          failedOnce = true
+          throw new GpuRetryOOM("in tests")
+        }
+        successfulValues += value
+        new Table.TestBuilder().column(Array[java.lang.Long](value.toLong): _*).build()
+      }
+
+      override def checkpoint(): Unit = checkpointIndex = nextIndex
+
+      override def restore(): Unit = {
+        restoreCount += 1
+        nextIndex = checkpointIndex
+      }
+
+      override def close(): Unit = closed = true
+    }
+
+    val iter = RangeInputBatching.withRangeInput(enabled = true) {
+      CachedGpuBatchIterator(producer, Array[DataType](LongType))
+    }
+    withResource(iter) { _ =>
+      assert(iter.hasNext)
+      withResource(iter.next())(batch => assert(batch.numRows() == 1))
+      assert(iter.hasNext)
+      withResource(iter.next())(batch => assert(batch.numRows() == 1))
+      assert(!iter.hasNext)
+    }
+
+    assert(restoreCount == 1)
+    assert(successfulValues == Seq(0L, 1L))
+    assert(closed)
+  }
+
   test("withRestoreOnRetry restores state on retry") {
     val initialValue = 5
     val increment = 5
