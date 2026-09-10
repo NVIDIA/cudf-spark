@@ -94,7 +94,7 @@ case class GpuBatchScanExec(
   @transient override lazy val inputPartitions: Seq[InputPartition] =
     ArraySeq.unsafeWrapArray(batch.planInputPartitions())
 
-  @transient protected lazy val filteredPartitions: Seq[Option[InputPartition]] =
+  @transient lazy val filteredPartitions: Seq[Option[InputPartition]] =
     PushDownUtils.replanWithRuntimeFilters(
       scan,
       runtimeFilters,
