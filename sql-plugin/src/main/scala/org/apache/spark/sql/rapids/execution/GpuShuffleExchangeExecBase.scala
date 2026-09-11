@@ -247,7 +247,8 @@ abstract class GpuShuffleExchangeExecBase(
 
   @transient private lazy val rangeBoundaryPlan: Option[GpuRangeBoundaryExec] =
     gpuOutputPartitioning match {
-      case range: GpuRangePartitioning =>
+      case range: GpuRangePartitioning
+          if RapidsConf.RANGE_PARTITIONING_SAMPLE_KEYS_ONLY.get(child.conf) =>
         GpuRangeBoundaryPlan.build(child, range.gpuOrdering)
       case _ =>
         None
@@ -263,7 +264,7 @@ abstract class GpuShuffleExchangeExecBase(
 
   // Boundary collection is an auxiliary query of the exchange. Exposing it through Spark's
   // subquery mechanism makes its physical operators and native metrics part of the SQL plan.
-  override lazy val subqueries: Seq[SparkPlan] =
+  @transient override lazy val subqueries: Seq[SparkPlan] =
     expressions.flatMap(expressionSubqueries) ++ rangeBoundaryPlan.toSeq
 
   /**

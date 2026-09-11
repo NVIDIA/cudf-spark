@@ -16,7 +16,7 @@
 
 package org.apache.spark.sql.rapids.execution
 
-import com.nvidia.spark.rapids.SparkQueryCompareTestSuite
+import com.nvidia.spark.rapids.{RapidsConf, SparkQueryCompareTestSuite}
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.DataFrame
@@ -48,14 +48,33 @@ class GpuRangeBoundaryPlanSuite extends SparkQueryCompareTestSuite {
     }, conf)
   }
 
+  private def assertAscendingRangePartitioning(df: DataFrame): Unit = {
+    val bounds = df.queryExecution.toRdd.mapPartitionsWithIndex { case (index, rows) =>
+      val keys = rows.map(_.getLong(0)).toArray
+      if (keys.isEmpty) Iterator.empty else Iterator.single((index, keys.min, keys.max))
+    }.collect().sortBy(_._1)
+
+    bounds.sliding(2).foreach {
+      case Array((leftIndex, _, leftMax), (rightIndex, rightMin, _)) =>
+        assert(leftMax <= rightMin,
+          s"range partition $leftIndex has maximum key $leftMax greater than " +
+            s"minimum key $rightMin in partition $rightIndex")
+      case _ =>
+    }
+  }
+
+  private def rangeInput(spark: org.apache.spark.sql.SparkSession, path: String): DataFrame = {
+    spark.read.parquet(path)
+      .filter(col("filter_col") > 0)
+      .repartitionByRange(4, col("key"))
+  }
+
   test("range boundary collection reads only keys and filter dependencies") {
     withTempPath { path =>
       writeInput(path.getCanonicalPath)
 
       withGpuSparkSession({ spark =>
-        val result = spark.read.parquet(path.getCanonicalPath)
-          .filter(col("filter_col") > 0)
-          .repartitionByRange(4, col("key"))
+        val result = rangeInput(spark, path.getCanonicalPath)
         val exchange = rangeExchange(result)
         val boundary = exchange.subqueries.collectFirst {
           case plan: GpuRangeBoundaryExec => plan
@@ -71,7 +90,27 @@ class GpuRangeBoundaryPlanSuite extends SparkQueryCompareTestSuite {
         val rows = result.collect().sortBy(_.getLong(0))
         assert(rows.length === 66)
         assert(rows.forall(_.getString(2) == "payload"))
+        assertAscendingRangePartitioning(result)
       }, conf)
+    }
+  }
+
+  test("key-only boundary collection can be disabled") {
+    withTempPath { path =>
+      writeInput(path.getCanonicalPath)
+
+      val fallbackConf = conf.clone()
+        .set(RapidsConf.RANGE_PARTITIONING_SAMPLE_KEYS_ONLY.key, "false")
+      withGpuSparkSession({ spark =>
+        val result = rangeInput(spark, path.getCanonicalPath)
+        val exchange = rangeExchange(result)
+
+        assert(!exchange.subqueries.exists(_.isInstanceOf[GpuRangeBoundaryExec]))
+        assertAscendingRangePartitioning(result)
+        val rows = result.collect()
+        assert(rows.length === 66)
+        assert(rows.forall(_.getString(2) == "payload"))
+      }, fallbackConf)
     }
   }
 
