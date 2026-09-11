@@ -1765,6 +1765,100 @@ def test_delta_write_partial_overwrite_replace_where(spark_tmp_path):
     # Avoid checking delta log equivalence here. Using partition columns involves sorting, and
     # there's no guarantees on the task partitioning due to random sampling.
 
+
+@allow_non_gpu(*delta_meta_allow, delta_write_fallback_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_42(), reason="Delta 4.2 write option")
+@pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
+def test_delta_replace_on_or_using_fallback(spark_tmp_path, option_name):
+    data_path = spark_tmp_path + "/DELTA_DATA"
+
+    def setup_tables(spark):
+        for path in [data_path + "/CPU", data_path + "/GPU"]:
+            spark.range(4).write.format("delta").save(path)
+
+    def overwrite(spark, path):
+        (spark.range(2, 6).write.format("delta").mode("overwrite")
+         .option(option_name, "id").save(path))
+
+    with_cpu_session(setup_tables, conf=_delta_confs)
+    assert_gpu_fallback_write(
+        overwrite, read_delta_path, data_path, delta_write_fallback_check, conf=_delta_confs)
+
+
+@allow_non_gpu(*delta_meta_allow, delta_write_fallback_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_42(), reason="Delta 4.2 write option")
+def test_delta_target_alias_fallback(spark_tmp_path):
+    data_path = spark_tmp_path + "/DELTA_DATA"
+
+    def setup_tables(spark):
+        source = spark.createDataFrame([(1, "x"), (2, "y")], "id LONG, p STRING")
+        for path in [data_path + "/CPU", data_path + "/GPU"]:
+            source.write.format("delta").save(path)
+
+    def overwrite(spark, path):
+        replacement = spark.createDataFrame([(3, "y")], "id LONG, p STRING")
+        (replacement.write.format("delta").mode("overwrite")
+         .option("replaceWhere", "target.p = 'y'")
+         .option("targetAlias", "target")
+         .save(path))
+
+    with_cpu_session(setup_tables, conf=_delta_confs)
+    assert_gpu_fallback_write(
+        overwrite, read_delta_path, data_path, delta_write_fallback_check, conf=_delta_confs)
+
+
+@allow_non_gpu(*delta_meta_allow, delta_write_fallback_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_42(), reason="Delta 4.2 write option")
+def test_delta_42_null_intolerant_dpo_fallback(spark_tmp_path):
+    data_path = spark_tmp_path + "/DELTA_DATA"
+
+    def setup_tables(spark):
+        source = spark.createDataFrame([(1, None), (2, 1)], "id LONG, p INT")
+        for path in [data_path + "/CPU", data_path + "/GPU"]:
+            source.write.format("delta").partitionBy("p").save(path)
+
+    def overwrite(spark, path):
+        replacement = spark.createDataFrame([(3, None)], "id LONG, p INT")
+        (replacement.write.format("delta").mode("overwrite").partitionBy("p")
+         .option("partitionOverwriteMode", "dynamic")
+         .option("useNullIntolerantEqualityWithDPO", "true")
+         .save(path))
+
+    with_cpu_session(setup_tables, conf=_delta_confs)
+    assert_gpu_fallback_write(
+        overwrite, read_delta_path, data_path, delta_write_fallback_check, conf=_delta_confs)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_41_or_42(),
+                    reason="Delta only evaluates DPO in the write commit metadata since 4.1")
+def test_delta_invalid_partition_overwrite_mode_non_partitioned(spark_tmp_path):
+    data_path = spark_tmp_path + "/DELTA_DATA"
+
+    def setup_tables(spark):
+        for path in [data_path + "/CPU", data_path + "/GPU"]:
+            spark.range(4).write.format("delta").save(path)
+
+    # Delta skips dynamic partition overwrite for non-partitioned targets without ever validating
+    # partitionOverwriteMode, but building the commit metadata evaluates it eagerly. The GPU write
+    # must therefore tolerate an invalid value here exactly as the CPU write does.
+    with_cpu_session(setup_tables, conf=_delta_confs)
+    assert_gpu_and_cpu_writes_are_equal_collect(
+        lambda spark, path: spark.range(2, 6).coalesce(1).write.format("delta")
+            .mode("overwrite").option("partitionOverwriteMode", "invalid_mode").save(path),
+        read_delta_path,
+        data_path,
+        conf=_delta_confs)
+    with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
+
 # ID mapping is supported starting in Delta Lake 2.2, but currently cannot distinguish
 # Delta Lake 2.1 from 2.2 in tests. https://github.com/NVIDIA/spark-rapids/issues/9276
 column_mappings = ["name"]
