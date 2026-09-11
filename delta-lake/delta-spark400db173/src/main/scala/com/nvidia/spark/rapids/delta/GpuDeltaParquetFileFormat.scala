@@ -146,7 +146,7 @@ case class GpuDeltaParquetFileFormat(
     tahoeFileIndexOpt.exists { tahoeFileIndex =>
       tahoeFileIndex.rowIndexFilters.exists(_.nonEmpty) ||
         tahoeFileIndex
-          .matchingFiles(partitionFilters = Seq(TrueLiteral), dataFilters = Seq(TrueLiteral))
+          .matchingFiles(partitionFilters = Seq.empty, dataFilters = Seq(TrueLiteral))
           .exists(_.deletionVector != null)
     }
   }
@@ -287,7 +287,7 @@ object GpuDeltaParquetFileFormat {
           filters.values.exists(_.getRowIndexFilterType != RowIndexFilterType.IF_CONTAINED)
         }
         hasUnsupportedCachedFilter || tahoeFileIndex.matchingFiles(
-          Seq(TrueLiteral), Seq(TrueLiteral)).exists { addFile =>
+          Seq.empty, Seq(TrueLiteral)).exists { addFile =>
           val provider = try {
             tahoeFileIndex.getRowIndexFilterForFile(addFile.path)
           } catch {

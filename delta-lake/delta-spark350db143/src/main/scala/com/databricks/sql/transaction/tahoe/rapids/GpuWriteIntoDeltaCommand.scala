@@ -32,7 +32,6 @@ import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.datasources.{BasicWriteJobStatsTracker, GpuWriteFiles,
   HadoopFsRelation, LogicalRelation}
-import org.apache.spark.sql.execution.datasources.v2.rapids.GpuAtomicDeltaWriteContext
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.rapids.{BasicColumnarWriteJobStatsTracker, ColumnarWriteJobStatsTracker,
   GpuFileFormatWriter}
@@ -129,16 +128,15 @@ class GpuWriteIntoDeltaCommandMeta(
   override protected def tagSelfForGpuInternal(): Unit = {
     val isNativeOptimize = cmd.query.collectLeaves() match {
       case Seq(LogicalRelation(HadoopFsRelation(
-          index: TahoeBatchFileIndex, _, _, _, _, _), _, _, _, _, _, _)) =>
+          index: TahoeBatchFileIndex, _, _, _, _, _), _, _, _)) =>
         index.actionType.equalsIgnoreCase("Optimize")
       case _ => false
     }
     val isSupportedNativeOptimize =
       isNativeOptimize && !ClusteredTableUtils.isSupported(cmd.protocol)
-    if (!GpuAtomicDeltaWriteContext.isActive && !isSupportedNativeOptimize) {
+    if (!isSupportedNativeOptimize) {
       willNotWorkOnGpu(
-        "DBR WriteIntoDeltaCommand GPU support is limited to atomic CTAS/RTAS or " +
-          "native non-clustered OPTIMIZE")
+        "DBR WriteIntoDeltaCommand GPU support is limited to native non-clustered OPTIMIZE")
     }
     if (!conf.isDeltaWriteEnabled) {
       willNotWorkOnGpu("Delta Lake output acceleration has been disabled")
@@ -295,7 +293,7 @@ case class GpuWriteIntoDeltaCommand(
     }
     val outputSpec = cpuCmd.outputSpec.copy(outputColumns = outputColumns)
     val writePartitionColumns = WriteIntoDeltaCommand.writePartitionColumns(
-      cpuCmd.protocol, cpuCmd.metadata, sparkSession)
+      cpuCmd.metadata, sparkSession)
     if (partitionColumns.nonEmpty && writePartitionColumns) {
       throw new IllegalStateException(
         "Writing partition columns into Delta Parquet data files is not supported")

@@ -18,13 +18,22 @@ from data_gen import *
 from delta_lake_utils import *
 from marks import *
 from spark_session import with_cpu_session, with_gpu_session, with_spark_session, is_before_spark_353, \
-    supports_delta_lake_deletion_vectors, is_databricks_runtime, is_databricks173_or_later
+    supports_delta_lake_deletion_vectors, is_databricks_runtime, is_databricks143, \
+    is_databricks173_or_later
 from pyspark.sql.types import IntegerType, StringType
 
 _optimize_conf = copy_and_update(delta_writes_enabled_conf, {
     "spark.rapids.sql.command.OptimizeTableCommand": "true",
     "spark.rapids.sql.command.OptimizeTableCommandEdge": "true",
     "spark.databricks.delta.autoCompact.enabled": "false"
+})
+
+_native_optimize_write_conf = copy_and_update(delta_writes_enabled_conf, {
+    "spark.rapids.sql.command.OptimizeTableCommand": "false",
+    "spark.rapids.sql.command.OptimizeTableCommandEdge": "false",
+    "spark.databricks.delta.autoCompact.enabled": "false",
+    "spark.databricks.delta.optimizeWrite.enabled": "false",
+    "spark.sql.adaptive.enabled": "false"
 })
 
 _liquid_optimize_dv_conf = copy_and_update(_optimize_conf, {
@@ -406,6 +415,45 @@ def _assert_liquid_optimize_gpu_write_parity(
         assert_data_and_log_parity()
 
 
+def _assert_native_optimize_gpu_write_parity(spark_tmp_path):
+    data_path = spark_tmp_path + "/DELTA_NATIVE_OPTIMIZE_WRITE"
+    cpu_path = data_path + "/CPU"
+    gpu_path = data_path + "/GPU"
+    conf = _native_optimize_write_conf
+    _setup_tables(False, cpu_path, gpu_path, None, None, conf)
+    files_before = {
+        path: with_cpu_session(
+            lambda spark: len(spark.read.format("delta").load(path).inputFiles()), conf=conf)
+        for path in [cpu_path, gpu_path]
+    }
+
+    cpu_result = with_cpu_session(
+        lambda spark: spark.sql(_optimize_sql(cpu_path)).collect(), conf=conf)
+    gpu_result = assert_rapids_delta_write(
+        lambda spark: spark.sql(_optimize_sql(gpu_path)).collect(), conf=conf,
+        required_gpu_classes=["GpuDataWritingCommandExec", "GpuWriteFilesExec"],
+        require_same_plan=True,
+        forbidden_cpu_fallback_classes=["DataWritingCommandExec", "WriteFilesExec"])
+
+    assert str(cpu_result[0][0]).rstrip('/').endswith('/CPU')
+    assert str(gpu_result[0][0]).rstrip('/').endswith('/GPU')
+    cpu_data = with_cpu_session(lambda spark: _read_sorted(spark, cpu_path).collect(), conf=conf)
+    gpu_data = with_cpu_session(lambda spark: _read_sorted(spark, gpu_path).collect(), conf=conf)
+    assert_equal(cpu_data, gpu_data)
+    for path in [cpu_path, gpu_path]:
+        files_after = with_cpu_session(
+            lambda spark: len(spark.read.format("delta").load(path).inputFiles()), conf=conf)
+        assert files_after < files_before[path], \
+            f"OPTIMIZE did not reduce the file count for {path}"
+        optimize_count = with_cpu_session(lambda spark: spark.sql(
+            f"DESCRIBE HISTORY delta.`{path}`").filter("operation = 'OPTIMIZE'").count(),
+            conf=conf)
+        assert_equal(optimize_count, 1)
+    with_cpu_session(
+        lambda spark: assert_gpu_and_cpu_latest_delta_log_equivalent(spark, data_path),
+        conf=conf)
+
+
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
@@ -415,6 +463,14 @@ def _assert_liquid_optimize_gpu_write_parity(
 @pytest.mark.parametrize("enable_deletion_vectors", _optimize_deletion_vector_values, ids=idfn)
 def test_delta_optimize_unpartitioned_table(spark_tmp_path, enable_deletion_vectors):
     _assert_optimize_parity(enable_deletion_vectors, spark_tmp_path, partition_columns=None)
+
+
+@allow_non_gpu('ExecutedCommandExec', 'HashAggregateExec', *delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(not (is_databricks143() or is_databricks173_or_later()),
+                    reason="Native DBR OPTIMIZE write coverage is for DBR 14.3 and 17.3+")
+def test_delta_native_optimize_gpu_write(spark_tmp_path):
+    _assert_native_optimize_gpu_write_parity(spark_tmp_path)
 
 
 @allow_non_gpu(*delta_meta_allow)

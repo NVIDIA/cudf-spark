@@ -22,20 +22,31 @@
 package com.nvidia.spark.rapids.delta
 
 import com.databricks.sql.transaction.tahoe.DeltaOptions
-import com.databricks.sql.transaction.tahoe.commands.WriteIntoDeltaEdge
-import com.databricks.sql.transaction.tahoe.rapids.{GpuDeltaCatalog, GpuDeltaLog, GpuDeltaV1Write, GpuWriteIntoDelta}
+import com.databricks.sql.transaction.tahoe.commands.{WriteIntoDeltaCommand, WriteIntoDeltaEdge}
+import com.databricks.sql.transaction.tahoe.rapids.{GpuDeltaCatalog, GpuDeltaLog, GpuDeltaV1Write,
+  GpuWriteIntoDelta, GpuWriteIntoDeltaCommandMeta}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.delta.shims.DeltaLogShim
 
 import org.apache.spark.sql.{DataFrame, SaveMode}
 import org.apache.spark.sql.SaveMode
 import org.apache.spark.sql.connector.write.V1Write
+import org.apache.spark.sql.execution.command.DataWritingCommand
 import org.apache.spark.sql.execution.datasources.LogicalRelation
 import org.apache.spark.sql.execution.datasources.v2.{AtomicCreateTableAsSelectExec, AtomicReplaceTableAsSelectExec}
 import org.apache.spark.sql.execution.datasources.v2.rapids.{GpuAtomicCreateTableAsSelectExec, GpuAtomicReplaceTableAsSelectExec}
 import org.apache.spark.sql.sources.InsertableRelation
 
 object DeltaSpark350DB143Provider extends DatabricksDeltaProviderBase {
+
+  override def getDataWritingCommandRules: Map[Class[_ <: DataWritingCommand],
+      DataWritingCommandRule[_ <: DataWritingCommand]] = {
+    Seq(
+      GpuOverrides.dataWriteCmd[WriteIntoDeltaCommand](
+        "Write files for a DBR Delta OPTIMIZE transaction",
+        (a, conf, p, r) => new GpuWriteIntoDeltaCommandMeta(a, conf, p, r))
+    ).map(r => (r.getClassFor.asSubclass(classOf[DataWritingCommand]), r)).toMap
+  }
 
   override protected def toGpuWrite(
      writeConfig: DeltaWriteV1Config,
