@@ -44,7 +44,8 @@ import com.nvidia.spark.rapids.jni.{DateTimeRebase, ParquetFooter, RmmSpark}
 import com.nvidia.spark.rapids.jni.fileio.{RapidsFileIO, RapidsInputFile}
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile.CopyRange
 import com.nvidia.spark.rapids.parquet.ParquetPartitionReader.{LocalCopy, PARQUET_MAGIC}
-import com.nvidia.spark.rapids.shims.{ColumnDefaultValuesShims, GpuParquetCrypto, GpuTypeShims, ShimFilePartitionReaderFactory, SparkShimImpl}
+import com.nvidia.spark.rapids.shims.{ColumnDefaultValuesShims, GpuParquetCrypto, GpuTypeShims,
+  ParquetVariantShims, ShimFilePartitionReaderFactory, SparkShimImpl}
 import com.nvidia.spark.rapids.shims.parquet.{GpuParquetUtilsShims, ParquetLegacyNanoAsLongShims, ParquetSchemaClipShims, ParquetStringPredShims}
 import org.apache.commons.io.output.{CountingOutputStream, NullOutputStream}
 import org.apache.hadoop.conf.Configuration
@@ -73,7 +74,7 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
 import org.apache.spark.sql.connector.read.{InputPartition, PartitionReader, PartitionReaderFactory}
-import org.apache.spark.sql.execution.QueryExecutionException
+import org.apache.spark.sql.execution.{QueryExecutionException, SparkPlan}
 import org.apache.spark.sql.execution.datasources.{DataSourceUtils, PartitionedFile, PartitioningAwareFileIndex, SchemaColumnConvertNotSupportedException}
 import org.apache.spark.sql.execution.datasources.v2.FileScan
 import org.apache.spark.sql.execution.datasources.v2.parquet.ParquetScan
@@ -163,6 +164,33 @@ case class GpuParquetScan(
 }
 
 object GpuParquetScan {
+  private def hasPotentiallyShreddedVariant(
+      dataTypes: Iterable[DataType], sqlConf: SQLConf): Boolean = {
+    dataTypes.exists { dataType =>
+      TrampolineUtil.dataTypeExistsRecursively(
+        dataType, ParquetVariantShims.isPotentiallyShreddedVariant(_, sqlConf))
+    }
+  }
+
+  private def tagVariantScanPrefixForCpu(
+      meta: RapidsMeta[_, _, _], reason: String, sqlConf: SQLConf): Unit = {
+    meta.willNotWorkOnGpu(reason)
+    var ancestor = meta.parent
+    var outputContainsVariant = true
+    while (ancestor.isDefined && outputContainsVariant) {
+      val current = ancestor.get
+      current.wrapped match {
+        case plan: SparkPlan =>
+          plan.setTagValue(RapidsMeta.gpuSupportedTag,
+            plan.getTagValue(RapidsMeta.gpuSupportedTag).getOrElse(Set.empty) + reason)
+          outputContainsVariant = hasPotentiallyShreddedVariant(
+            plan.output.map(_.dataType), sqlConf)
+        case _ =>
+      }
+      ancestor = current.parent
+    }
+  }
+
   def tagSupport(scanMeta: ScanMeta[ParquetScan]): Unit = {
     val scan = scanMeta.wrapped
     val schema = StructType(scan.readDataSchema ++ scan.readPartitionSchema)
@@ -183,6 +211,24 @@ object GpuParquetScan {
     if (!meta.conf.isParquetReadEnabled) {
       meta.willNotWorkOnGpu("Parquet input has been disabled. To enable set" +
         s"${RapidsConf.ENABLE_PARQUET_READ} to true")
+    }
+
+    val schemaHasPushedVariant = readSchema.exists { field =>
+      TrampolineUtil.dataTypeExistsRecursively(
+        field.dataType, ParquetVariantShims.isPushedVariantStruct)
+    }
+    if (schemaHasPushedVariant) {
+      meta.willNotWorkOnGpu("GPU Parquet reader does not support Variant extraction pushdown")
+    }
+
+    val sqlConf = sparkSession.sessionState.conf
+    val schemaHasPotentiallyShreddedVariant =
+      hasPotentiallyShreddedVariant(readSchema.map(_.dataType), sqlConf)
+    if (schemaHasPotentiallyShreddedVariant) {
+      val reason = "GPU Parquet reader cannot safely read Variant columns when Spark allows " +
+        "shredded Variant input"
+      // Keep the scan and its consumers on CPU until an operator no longer outputs Variant.
+      tagVariantScanPrefixForCpu(meta, reason, sqlConf)
     }
 
     FileFormatChecks.tag(meta, readSchema, ParquetFormatType, ReadFileOp)
