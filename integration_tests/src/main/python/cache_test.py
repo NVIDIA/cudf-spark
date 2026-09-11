@@ -23,7 +23,7 @@ from pyspark import StorageLevel
 import pyspark.sql.functions as f
 from spark_session import with_cpu_session, with_gpu_session
 from join_test import create_df
-from marks import incompat, allow_non_gpu, ignore_order, disable_ansi_mode
+from marks import incompat, allow_non_gpu, ignore_order, disable_ansi_mode, inject_oom
 import pyspark.mllib.linalg as mllib
 import pyspark.ml.linalg as ml
 
@@ -493,6 +493,40 @@ def test_cache_nulltype_on_gpu(data_desc, enable_vectorized_conf):
         return cached
     # InMemoryTableScanExec is disabled by default on Spark 3.5.0/3.5.1 (AQE, #10603). Force it on
     # and disable AQE so the scan stays on the GPU across all shims.
+    dyn_conf = copy_and_update(enable_vectorized_conf,
+        {'spark.rapids.sql.exec.InMemoryTableScanExec': 'true',
+         'spark.sql.adaptive.enabled': 'false'})
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        func, exist_classes='GpuInMemoryTableScanExec', conf=dyn_conf)
+
+
+@pytest.mark.skipif(not _pcbs_enabled,
+    reason="requires PCBS lane: "
+           "PYSP_TEST_spark_sql_cache_serializer=com.nvidia.spark.ParquetCachedBatchSerializer")
+@allow_non_gpu('ColumnarToRowExec')
+@inject_oom
+@pytest.mark.parametrize('enable_vectorized_conf', enable_vectorized_confs, ids=idfn)
+def test_cache_binary_on_gpu(enable_vectorized_conf):
+    schema = StructType([
+        StructField('id', IntegerType(), nullable=False),
+        StructField('payload', BinaryType(), nullable=True),
+        StructField('nested', StructType([
+            StructField('nested_payload', BinaryType(), nullable=True)]), nullable=False),
+        StructField('array_payload', ArrayType(BinaryType(), containsNull=True), nullable=True),
+        StructField('map_payload', MapType(IntegerType(), BinaryType(), valueContainsNull=True),
+            nullable=True)])
+    values = [
+        (0, bytes([1]), (bytes([0, 255]),),
+            [bytes([0, 255]), bytes(), None], {1: bytes([0, 255]), 2: bytes(), 3: None}),
+        (1, bytes(), (bytes(),), [], {}),
+        (2, None, (None,), None, None)]
+
+    def func(spark):
+        cached = spark.createDataFrame(
+            spark.sparkContext.parallelize(values, numSlices=1), schema).cache()
+        cached.count()  # populate the cache so the read hits InMemoryTableScanExec
+        return cached
+
     dyn_conf = copy_and_update(enable_vectorized_conf,
         {'spark.rapids.sql.exec.InMemoryTableScanExec': 'true',
          'spark.sql.adaptive.enabled': 'false'})

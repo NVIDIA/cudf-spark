@@ -18,10 +18,10 @@ set -e
 
 scala_ver=${1:-"2.12"}
 base_URL="https://central.sonatype.com/repository/maven-snapshots/com/nvidia"
-project_jni="spark-rapids-jni"
+project_jni=$(mvn help:evaluate -q -pl dist -Dexpression=cudf-spark-jni.artifactId -DforceStdout)
 project_private="cudf-spark-private_${scala_ver}"
 
-jni_ver=$(mvn help:evaluate -q -pl dist -Dexpression=spark-rapids-jni.version -DforceStdout)
+jni_ver=$(mvn help:evaluate -q -pl dist -Dexpression=cudf-spark-jni.version -DforceStdout)
 private_ver=$(mvn help:evaluate -q -pl dist -Dexpression=cudf-spark-private.version -DforceStdout)
 
 get_latest_snapshot_version() {

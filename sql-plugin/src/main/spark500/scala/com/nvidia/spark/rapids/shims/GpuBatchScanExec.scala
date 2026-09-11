@@ -78,23 +78,31 @@ case class GpuBatchScanExec(
     case other: GpuBatchScanExec =>
       this.batch != null && this.batch == other.batch &&
         this.runtimeFilters == other.runtimeFilters &&
-        this.keyGroupedPartitioning == other.keyGroupedPartitioning
+        this.prunedKeyGroupedPartitioning == other.prunedKeyGroupedPartitioning
     case _ =>
       false
   }
 
-  override def hashCode(): Int = Objects.hashCode(batch, runtimeFilters, keyGroupedPartitioning)
+  override def hashCode(): Int =
+    Objects.hashCode(batch, runtimeFilters, prunedKeyGroupedPartitioning)
+
+  // Keep in sync with Spark BatchScanExec: dangling keys after column pruning are planner
+  // metadata and must not affect equals, hashCode, or canonicalize.
+  @transient lazy val prunedKeyGroupedPartitioning: Option[Seq[Expression]] =
+    keyGroupedPartitioning.map(_.filter(_.references.subsetOf(outputSet)))
 
   @transient override lazy val inputPartitions: Seq[InputPartition] =
     ArraySeq.unsafeWrapArray(batch.planInputPartitions())
 
-  @transient protected lazy val filteredPartitions: Seq[Option[InputPartition]] =
+  @transient lazy val filteredPartitions: Seq[Option[InputPartition]] =
     PushDownUtils.replanWithRuntimeFilters(
       scan,
       runtimeFilters,
       table,
       output,
-      outputPartitioning,
+      // Full-width keys as the source reported them. outputPartitioning may project
+      // pruned key columns away and is a Partitioning, not Option[KeyedPartitioning].
+      reportedKeyedPartitioning,
       inputPartitions)
 
   override lazy val readerFactory: PartitionReaderFactory =
@@ -122,7 +130,9 @@ case class GpuBatchScanExec(
       runtimeFilters = QueryPlan.normalizePredicates(
         runtimeFilters.filterNot(_ == DynamicPruningExpression(Literal.TrueLiteral)),
         output),
-      keyGroupedPartitioning = keyGroupedPartitioning.map(QueryPlan.normalizePredicates(_, output)))
+      // SPARK-58120: normalizeExpressions preserves key order; normalizePredicates can reorder.
+      keyGroupedPartitioning = prunedKeyGroupedPartitioning.map(
+        _.map(QueryPlan.normalizeExpressions(_, output))))
   }
 
   override def simpleString(maxFields: Int): String = {

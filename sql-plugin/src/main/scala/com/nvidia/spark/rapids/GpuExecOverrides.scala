@@ -279,8 +279,9 @@ private[rapids] object GpuExecOverrides {
       MapInPandasExecConstructorRuleMeta),
     exec[InMemoryTableScanExec](
       "Implementation of InMemoryTableScanExec to use GPU accelerated caching",
-      ExecChecks((TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128 + TypeSig.STRUCT +
-          TypeSig.ARRAY + TypeSig.MAP + GpuTypeShims.additionalCommonOperatorSupportedTypes)
+      ExecChecks((TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.BINARY + TypeSig.DECIMAL_128 +
+          TypeSig.STRUCT + TypeSig.ARRAY + TypeSig.MAP +
+          GpuTypeShims.additionalCommonOperatorSupportedTypes)
           .nested(), TypeSig.all),
       InMemoryTableScanExecConstructorRuleMeta),
     neverReplaceExec[AlterNamespaceSetPropertiesExec]("Namespace metadata operation"),
