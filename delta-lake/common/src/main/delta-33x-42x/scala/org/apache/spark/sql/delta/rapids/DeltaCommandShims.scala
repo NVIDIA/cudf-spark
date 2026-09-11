@@ -19,6 +19,8 @@ package org.apache.spark.sql.delta.rapids
 import org.apache.spark.sql.{Column, DataFrame, SparkSession}
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
+import org.apache.spark.sql.delta.actions.FileAction
+import org.apache.spark.sql.delta.commands.TouchedFileWithDV
 
 /**
  * Trait to abstract version-specific Spark API differences between Delta 3.3.x and Spark 4.x
@@ -81,6 +83,14 @@ trait DeltaCommandShims {
    * Convert an Expression to a Column (version-specific API).
    */
   def exprToColumn(expr: Expression): Column
+
+  /**
+   * Apply version-specific Delta statistics handling to new deletion-vector actions.
+   */
+  def processUnmodifiedData(
+      spark: OperationSparkSession,
+      touchedFiles: Seq[TouchedFileWithDV],
+      txn: GpuOptimisticTransactionBase): (Seq[FileAction], Map[String, Long])
 
   /**
    * Recache by plan with the correct SparkSession type.

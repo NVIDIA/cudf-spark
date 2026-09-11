@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -40,6 +40,15 @@ trait Delta33xCommandShims extends DeltaCommandShims {
   }
 
   override def exprToColumn(expr: Expression): Column = new Column(expr)
+
+  override def processUnmodifiedData(
+      spark: OperationSparkSession,
+      touchedFiles: Seq[org.apache.spark.sql.delta.commands.TouchedFileWithDV],
+      txn: org.apache.spark.sql.delta.rapids.GpuOptimisticTransactionBase)
+      : (Seq[org.apache.spark.sql.delta.actions.FileAction], Map[String, Long]) = {
+    org.apache.spark.sql.delta.rapids.DMLWithDeletionVectorsHelperShims
+      .processUnmodifiedData(spark, touchedFiles, txn)
+  }
 
   override def recacheByPlan(spark: ShimSparkSession, plan: LogicalPlan): Unit = {
     spark.sharedState.cacheManager.recacheByPlan(spark, plan)
