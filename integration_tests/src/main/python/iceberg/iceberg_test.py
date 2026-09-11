@@ -382,7 +382,7 @@ def test_iceberg_spj_partition_filter_with_runtime_filter(spark_tmp_table_factor
         return _partition_filter_runtime_filter_query(
             spark, left_table, right_table, dim_table)
 
-    def assert_plan(plan):
+    def assert_plan(_cpu_plan, plan):
         _assert_partition_filter_runtime_filter_plan(plan, left_table)
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(
@@ -510,7 +510,7 @@ def test_iceberg_spj_runtime_filter_with_trailing_join_key(spark_tmp_table_facto
             join_with_runtime_filter,
             conf=conf,
             require_non_empty=True,
-            gpu_plan_assertion=assert_plan)
+            gpu_plan_assertion=lambda _cpu_plan, plan: assert_plan(plan))
 
 
 # Enough rows that every bucket of the wider bucket(4) side is populated, so reducing it to
