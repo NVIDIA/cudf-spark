@@ -3715,18 +3715,7 @@ abstract class AbstractParquetPartitionReader(
       val currentChunkedBlocks = populateCurrentBlockChunk(blockIterator,
         maxReadBatchSizeRows, maxReadBatchSizeBytes, readDataSchema)
       if (clippedParquetSchema.getFieldCount == 0) {
-        // not reading any data, so return a degenerate ColumnarBatch with the row count
-        val numRows = computeNumRowsAlive(
-          currentChunkedBlocks.map(_.getRowCount).sum, currentChunkedBlocks)
-        if (numRows == 0) {
-          EmptyGpuColumnarBatchIterator
-        } else {
-          // Someone is going to process this data, even if it is just a row count
-          GpuSemaphore.acquireIfNecessary(TaskContext.get())
-          val nullColumns = readDataSchema.safeMap(f =>
-            GpuColumnVector.fromNull(numRows, f.dataType).asInstanceOf[SparkVector])
-          new SingleGpuColumnarBatchIterator(new ColumnarBatch(nullColumns.toArray, numRows))
-        }
+        readEmptyDataBatch(currentChunkedBlocks.map(_.getRowCount).sum, currentChunkedBlocks)
       } else {
         val colTypes = readDataSchema.fields.map(f => f.dataType)
         val iter = if (currentChunkedBlocks.isEmpty) {
@@ -3758,6 +3747,25 @@ abstract class AbstractParquetPartitionReader(
       chunkedBlocks: Seq[BlockMetaData],
       dataBuffer: SpillableHostBuffer
   ): Iterator[ColumnarBatch]
+
+  /**
+   * Builds a batch when no physical Parquet columns are read. Formats with metadata columns can
+   * override this to materialize those columns while preserving the zero-column fast path.
+   */
+  protected def readEmptyDataBatch(
+      totalNumRows: Long,
+      chunkedBlocks: Seq[BlockMetaData]): Iterator[ColumnarBatch] = {
+    val numRows = computeNumRowsAlive(totalNumRows, chunkedBlocks)
+    if (numRows == 0) {
+      EmptyGpuColumnarBatchIterator
+    } else {
+      // Someone is going to process this data, even if it is just a row count
+      GpuSemaphore.acquireIfNecessary(TaskContext.get())
+      val nullColumns = readDataSchema.safeMap(f =>
+        GpuColumnVector.fromNull(numRows, f.dataType).asInstanceOf[SparkVector])
+      new SingleGpuColumnarBatchIterator(new ColumnarBatch(nullColumns.toArray, numRows))
+    }
+  }
 
   /**
    * Computes the number of rows alive in the output table. This is normally the same as

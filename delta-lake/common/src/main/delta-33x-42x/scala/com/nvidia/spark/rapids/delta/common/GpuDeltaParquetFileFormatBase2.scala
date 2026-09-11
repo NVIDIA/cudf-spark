@@ -16,7 +16,6 @@
 
 package com.nvidia.spark.rapids.delta.common
 
-import java.io.IOException
 import java.util.concurrent.Callable
 
 import scala.collection.mutable.ArrayBuffer
@@ -46,7 +45,6 @@ import org.apache.spark.sql.delta.actions.{Metadata, Protocol}
 import org.apache.spark.sql.delta.deletionvectors.RoaringBitmapArray
 import org.apache.spark.sql.delta.schema.SchemaMergingUtils
 import org.apache.spark.sql.delta.sources.DeltaSQLConf
-import org.apache.spark.sql.execution.QueryExecutionException
 import org.apache.spark.sql.execution.datasources.PartitionedFile
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.GpuFileSourceScanExec
@@ -1250,139 +1248,6 @@ class GpuDeltaParquetFileFormatBase2(
         alivePerPartition(entry.partitionIndex) += result.aliveCount
       }
       alivePerPartition
-    }
-  }
-}
-
-/**
- * A simple wrapper to adapt the DeletionVector.ParquetChunkedReader to the ChunkedReader interface
- * expected by AbstractParquetTableReader.
- */
-case class DeltaParquetChunkedReader(delegate: DeletionVector.ParquetChunkedReader)
-  extends ChunkedReader {
-  override def hasNext: Boolean = delegate.hasNext
-  override def next: Table = delegate.readChunk()
-  override def close(): Unit = delegate.close()
-}
-
-/**
- * A chunked reader for Parquet files with deletion vectors.
- */
-case class DeltaParquetTableReader(
-    conf: Configuration,
-    chunkSizeByteLimit: Long,
-    maxChunkedReaderMemoryUsageSizeBytes: Long,
-    opts: ParquetOptions,
-    buffers: Array[HostMemoryBuffer],
-    metrics : Map[String, GpuMetric],
-    dateRebaseMode: DateTimeRebaseMode,
-    timestampRebaseMode: DateTimeRebaseMode,
-    isSchemaCaseSensitive: Boolean,
-    useFieldId: Boolean,
-    readDataSchema: StructType,
-    clippedParquetSchema: MessageType,
-    splits: Array[PartitionedFile],
-    debugDumpPrefix: Option[String],
-    debugDumpAlways: Boolean,
-    dvInfos: Array[DeletionVector.DeletionVectorInfo]) extends AbstractParquetTableReader(
-  conf, chunkSizeByteLimit, maxChunkedReaderMemoryUsageSizeBytes, opts, buffers, metrics,
-  dateRebaseMode, timestampRebaseMode, isSchemaCaseSensitive, useFieldId, readDataSchema,
-  clippedParquetSchema, splits, debugDumpPrefix, debugDumpAlways
-) {
-
-  logDebug("Using DeltaParquetTableReader for reading Parquet with deletion vectors")
-
-  override protected val reader = DeltaParquetChunkedReader(
-    DeletionVector.newParquetChunkedReader(chunkSizeByteLimit,
-      maxChunkedReaderMemoryUsageSizeBytes, opts, buffers, dvInfos)
-  )
-
-  override protected lazy val resources: Seq[AutoCloseable] =
-    Seq(reader) ++ buffers ++ dvInfos.map(_.serializedBitmap)
-
-  override protected def postProcessChunk(chunk: Table): Table = {
-    // The cuDF reader prepends an extra index column in the output table.
-    // We need to drop it before returning as we don't use it.
-    RapidsDeletionVectors.dropFirstColumn(chunk)
-  }
-}
-
-object MakeParquetTableWithDVProducer extends Logging {
-  def apply(
-      useChunkedReader: Boolean,
-      maxChunkedReaderMemoryUsageSizeBytes: Long,
-      conf: Configuration,
-      chunkSizeByteLimit: Long,
-      opts: ParquetOptions,
-      buffers: Array[HostMemoryBuffer],
-      metrics : Map[String, GpuMetric],
-      dateRebaseMode: DateTimeRebaseMode,
-      timestampRebaseMode: DateTimeRebaseMode,
-      isSchemaCaseSensitive: Boolean,
-      useFieldId: Boolean,
-      readDataSchema: StructType,
-      clippedParquetSchema: MessageType,
-      splits: Array[PartitionedFile],
-      debugDumpPrefix: Option[String],
-      debugDumpAlways: Boolean,
-      deletionVectorInfos: Array[DeletionVector.DeletionVectorInfo]
-  ): GpuDataProducer[Table] = {
-
-    require(deletionVectorInfos.nonEmpty,
-      "MakeParquetTableWithDVProducer should be used only when deletion vectors are present")
-
-    debugDumpPrefix.foreach { prefix =>
-      if (debugDumpAlways) {
-        val p = DumpUtils.dumpBuffer(conf, buffers, prefix, ".parquet")
-        logWarning(s"Wrote data for ${splits.mkString(", ")} to $p")
-      }
-    }
-    if (useChunkedReader) {
-      DeltaParquetTableReader(conf, chunkSizeByteLimit, maxChunkedReaderMemoryUsageSizeBytes,
-        opts, buffers, metrics, dateRebaseMode, timestampRebaseMode,
-        isSchemaCaseSensitive, useFieldId, readDataSchema, clippedParquetSchema,
-        splits, debugDumpPrefix, debugDumpAlways, deletionVectorInfos)
-    } else {
-      val table = withResource(buffers) { _ =>
-        withResource(deletionVectorInfos.map(_.serializedBitmap)) { _ =>
-          try {
-            RmmRapidsRetryIterator.withRetryNoSplit[Table] {
-              NvtxIdWithMetrics(NvtxRegistry.PARQUET_DECODE, metrics(GPU_DECODE_TIME)) {
-                DeletionVector.readParquet(opts, buffers, deletionVectorInfos)
-              }
-            }
-          } catch {
-            case e: Exception =>
-              val dumpMsg = debugDumpPrefix.map { prefix =>
-                if (!debugDumpAlways) {
-                  val p = DumpUtils.dumpBuffer(conf, buffers, prefix, ".parquet")
-                  s", data dumped to $p"
-                } else {
-                  ""
-                }
-              }.getOrElse("")
-              throw new IOException(s"Error when processing ${splits.mkString("; ")}$dumpMsg", e)
-          }
-        }
-      }
-      // The cuDF reader prepends an extra index column in the output table.
-      // We need to drop it before returning as we don't use it.
-      val tableWithoutIndex = RapidsDeletionVectors.dropFirstColumn(table)
-      closeOnExcept(tableWithoutIndex) { _ =>
-        GpuParquetScan.throwIfRebaseNeededInExceptionMode(tableWithoutIndex, dateRebaseMode,
-          timestampRebaseMode)
-        if (readDataSchema.length < tableWithoutIndex.getNumberOfColumns) {
-          throw new QueryExecutionException(s"Expected ${readDataSchema.length} columns " +
-            s"but read ${tableWithoutIndex.getNumberOfColumns} from ${splits.mkString("; ")}")
-        }
-      }
-      metrics(NUM_OUTPUT_BATCHES) += 1
-      val evolvedSchemaTable = ParquetSchemaUtils.evolveSchemaIfNeededAndClose(tableWithoutIndex,
-        clippedParquetSchema, readDataSchema, isSchemaCaseSensitive, useFieldId)
-      val outputTable = GpuParquetScan.rebaseDateTime(evolvedSchemaTable, dateRebaseMode,
-        timestampRebaseMode)
-      GpuMetric.recordOutputBatchBytes(outputTable, metrics.get(GPU_OUTPUT_BATCH_BYTES))
-      new SingleGpuDataProducer(outputTable)
     }
   }
 }
