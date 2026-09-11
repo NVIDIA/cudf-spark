@@ -482,7 +482,7 @@ self.log("... OK")
                                 <!-- Per-artifact markers refresh unpacked files when a source JAR is newer. -->
                                 <artifactItem>
                                     <groupId>com.nvidia</groupId>
-                                    <artifactId>spark-rapids-jni</artifactId>
+                                    <artifactId>${cudf-spark-jni.artifactId}</artifactId>
                                     <classifier>${jni.classifier}</classifier>
                                     <excludes>META-INF/**</excludes>
                                     <outputDirectory>${project.build.directory}/jni-deps</outputDirectory>
