@@ -1424,8 +1424,10 @@ abstract class GpuTypedImperativeSupportedAggregateExecMeta[INPUT <: BaseAggrega
         (expr.mode == Partial || expr.mode == PartialMerge)
     }
 
-  // overriding data types of Aggregation Buffers if necessary
-  if (mayNeedAggBufferConversion) overrideAggBufTypes()
+  // Overriding data types happens before metadata tagging initializes replacement reasons, so
+  // retain any mapping failure and report it from tagPlanForGpu.
+  private val aggBufTypeOverrideFailure: Option[String] =
+    if (mayNeedAggBufferConversion) overrideAggBufTypes() else None
 
   override protected lazy val outputTypeMetas: Option[Seq[DataTypeMeta]] =
     if (mayNeedAggBufferConversion) {
@@ -1442,6 +1444,7 @@ abstract class GpuTypedImperativeSupportedAggregateExecMeta[INPUT <: BaseAggrega
 
   override def tagPlanForGpu(): Unit = {
     super.tagPlanForGpu()
+    aggBufTypeOverrideFailure.foreach(willNotWorkOnGpu)
 
     // If a typedImperativeAggregate function run across CPU and GPU (ex: Partial mode on CPU,
     // Merge mode on GPU), it will lead to a runtime crash. Because aggregation buffers produced
@@ -1507,10 +1510,11 @@ abstract class GpuTypedImperativeSupportedAggregateExecMeta[INPUT <: BaseAggrega
    * At last, we traverse aggregateAttributes and resultExpressions, overriding data type in
    * RapidsMeta if necessary, in order to ensure TypeChecks tagging exact data types in runtime.
    */
-  private def overrideAggBufTypes(): Unit = {
+  private def overrideAggBufTypes(): Option[String] = {
     val desiredAggBufTypes = mutable.HashMap.empty[ExprId, DataType]
     val desiredInputAggBufTypes = mutable.HashMap.empty[ExprId, DataType]
     val desiredResultOutputTypes = mutable.HashMap.empty[ExprId, DataType]
+    var mappingFailure: Option[String] = None
     // Collects exprId from TypedImperativeAggBufferAttributes, and maps them to the data type
     // of `TypedImperativeAggExprMeta.aggBufferAttribute`.
     aggregateExpressions.map(_.childExprs.head).foreach {
@@ -1539,9 +1543,14 @@ abstract class GpuTypedImperativeSupportedAggregateExecMeta[INPUT <: BaseAggrega
         val bufferCount = aggExpr.aggregateFunction.inputAggBufferAttributes.length
         aggExprMeta.childExprs.head match {
           case aggMeta: TypedImperativeAggExprMeta[_] =>
-            resultExpressions.lift(resultOffset).foreach { resultMeta =>
-              val resultExpr = resultMeta.wrapped.asInstanceOf[NamedExpression]
-              desiredResultOutputTypes(resultExpr.exprId) = aggMeta.aggBufferAttribute.dataType
+            resultExpressions.lift(resultOffset) match {
+              case Some(resultMeta) =>
+                val resultExpr = resultMeta.wrapped.asInstanceOf[NamedExpression]
+                desiredResultOutputTypes(resultExpr.exprId) = aggMeta.aggBufferAttribute.dataType
+              case None =>
+                mappingFailure = Some(
+                  s"Typed imperative aggregate buffer result at offset $resultOffset is " +
+                    s"missing from ${resultExpressions.length} result expressions")
             }
           case _ =>
         }
@@ -1567,6 +1576,7 @@ abstract class GpuTypedImperativeSupportedAggregateExecMeta[INPUT <: BaseAggrega
         case _ =>
       }
     }
+    mappingFailure
   }
 }
 
