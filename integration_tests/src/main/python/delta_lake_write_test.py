@@ -868,6 +868,75 @@ def test_delta_rtas_truncate_capability(spark_tmp_table_factory):
     assert [row.id for row in gpu_rows] == list(range(10, 20))
 
 
+@allow_non_gpu('DataWritingCommandExec', 'WriteFilesExec', *delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.xfail(is_databricks_runtime(),
+                   reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
+def test_delta_replace_where_save_as_table_preserves_partitioning(spark_tmp_table_factory):
+    cpu_table = spark_tmp_table_factory.get()
+    gpu_table = spark_tmp_table_factory.get()
+    confs = copy_and_update(writer_confs, delta_writes_enabled_conf)
+
+    def create_initial_tables(spark):
+        initial_values = ", ".join(
+            f"({record_id}L, '{region}', {record_id}.0D)"
+            for record_id, region in enumerate(
+                ["NA", "EMEA", "APAC", "LATAM", "NA", "EMEA", "APAC", "LATAM"]))
+        for table in [cpu_table, gpu_table]:
+            spark.sql(
+                f"CREATE TABLE {table} (record_id BIGINT, region STRING, amount DOUBLE) "
+                f"USING DELTA PARTITIONED BY (region)")
+            spark.sql(f"INSERT INTO {table} VALUES {initial_values}")
+
+    def replace_na_partition(spark, table):
+        replacement = spark.sql(
+            "SELECT 100L AS record_id, 'NA' AS region, 100.0D AS amount")
+        (replacement.write.format("delta").mode("overwrite")
+         .option("replaceWhere", "region = 'NA'")
+         .saveAsTable(table))
+
+    with_cpu_session(create_initial_tables, conf=confs)
+    with_cpu_session(lambda spark: replace_na_partition(spark, cpu_table), conf=confs)
+
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        with_gpu_session(lambda spark: replace_na_partition(spark, gpu_table), conf=confs)
+        plans = callback.getResultsWithTimeout(10000)
+        assert any(callback.contains(plan, "GpuAtomicReplaceTableAsSelectExec")
+                   for plan in plans), "GpuAtomicReplaceTableAsSelectExec was not executed"
+        # The RTAS data write runs as a nested query execution: Spark 4.0+ issues it as
+        # OverwriteByExpression, earlier versions as AppendData.
+        v1_write_node = ("GpuOverwriteByExpressionExecV1" if is_spark_400_or_later()
+                         else "GpuAppendDataExecV1")
+        assert any(callback.contains(plan, v1_write_node)
+                   for plan in plans), f"{v1_write_node} was not executed"
+    finally:
+        callback.endCapture()
+
+    def partition_counts(spark, table):
+        return spark.sql(
+            f"SELECT region, COUNT(*) AS count FROM {table} "
+            f"GROUP BY region ORDER BY region").collect()
+
+    cpu_counts = with_cpu_session(lambda spark: partition_counts(spark, cpu_table), conf=confs)
+    gpu_counts = with_cpu_session(lambda spark: partition_counts(spark, gpu_table), conf=confs)
+    assert_equal(cpu_counts, gpu_counts)
+    assert [(row.region, row["count"]) for row in gpu_counts] == [
+        ("APAC", 2), ("EMEA", 2), ("LATAM", 2), ("NA", 1)]
+
+    def partition_columns(spark, table):
+        return spark.sql(f"DESCRIBE DETAIL {table}").select("partitionColumns").head()[0]
+
+    cpu_partition_columns = with_cpu_session(
+        lambda spark: partition_columns(spark, cpu_table), conf=confs)
+    gpu_partition_columns = with_cpu_session(
+        lambda spark: partition_columns(spark, gpu_table), conf=confs)
+    assert cpu_partition_columns == ["region"]
+    assert gpu_partition_columns == cpu_partition_columns
+
+
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)

@@ -22,6 +22,7 @@ import com.nvidia.spark.rapids.delta.delta40x.Delta40xProvider
 import com.nvidia.spark.rapids.delta.delta40x.GpuDeltaCatalog
 
 import org.apache.spark.sql.SaveMode
+import org.apache.spark.sql.classic.DataFrameWriter
 import org.apache.spark.sql.connector.catalog.StagingTableCatalog
 import org.apache.spark.sql.delta.{DeltaOperations, DeltaOptions}
 import org.apache.spark.sql.delta.actions.Metadata
@@ -41,6 +42,13 @@ class Delta40xRuntimeShim extends DeltaRuntimeShimBase {
 
   override def getDeltaProvider: DeltaProvider = Delta40xProvider
 
+  override def isV1WriterSaveAsTableOverwrite(
+      options: DeltaOptions,
+      mode: SaveMode): Boolean = {
+    mode == SaveMode.Overwrite && Thread.currentThread().getStackTrace.exists(_.toString.contains(
+      classOf[DataFrameWriter[_]].getCanonicalName + "."))
+  }
+  
   override def createGpuWrite(
       gpuDeltaLog: GpuDeltaLog,
       cpuWrite: WriteIntoDelta): GpuWriteIntoDeltaLike = {
