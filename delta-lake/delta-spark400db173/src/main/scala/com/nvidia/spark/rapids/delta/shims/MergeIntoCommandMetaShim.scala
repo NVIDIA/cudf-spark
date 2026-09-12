@@ -19,7 +19,8 @@ package com.nvidia.spark.rapids.delta.shims
 import com.databricks.sql.transaction.tahoe.DeltaLog
 import com.databricks.sql.transaction.tahoe.commands.{DeletionVectorUtils, MergeIntoCommand,
   MergeIntoCommandBase, MergeIntoCommandEdge}
-import com.databricks.sql.transaction.tahoe.rapids.{GpuDeltaLog, GpuMergeIntoCommand}
+import com.databricks.sql.transaction.tahoe.rapids.{GpuDeltaLog, GpuLowShuffleMergeCommand,
+  GpuMergeIntoCommand}
 import com.databricks.sql.transaction.tahoe.sources.DeltaSQLConf
 import com.nvidia.spark.rapids.{RapidsConf, RapidsMeta}
 import com.nvidia.spark.rapids.delta.{MergeIntoCommandEdgeMeta, MergeIntoCommandMeta}
@@ -55,38 +56,73 @@ object MergeIntoCommandMetaShim {
   }
 
   def convertToGpu(mergeCmd: MergeIntoCommand, conf: RapidsConf): RunnableCommand = {
-    GpuMergeIntoCommand(
-      mergeCmd.source,
-      mergeCmd.target,
-      mergeCmd.catalogTable,
-      mergeCmd.targetFileIndex,
-      new GpuDeltaLog(mergeCmd.targetFileIndex.deltaLog, conf),
-      mergeCmd.condition,
-      mergeCmd.matchedClauses,
-      mergeCmd.notMatchedClauses,
-      mergeCmd.notMatchedBySourceClauses,
-      mergeCmd.migratedSchema,
-      mergeCmd.trackHighWaterMarks,
-      mergeCmd.schemaEvolutionEnabled)(conf)
+    if (conf.isDeltaLowShuffleMergeEnabled && conf.isParquetPerFileReadEnabled &&
+        mergeCmd.notMatchedBySourceClauses.isEmpty) {
+      GpuLowShuffleMergeCommand(
+        mergeCmd.source,
+        mergeCmd.target,
+        mergeCmd.catalogTable,
+        mergeCmd.targetFileIndex,
+        new GpuDeltaLog(mergeCmd.targetFileIndex.deltaLog, conf),
+        mergeCmd.condition,
+        mergeCmd.matchedClauses,
+        mergeCmd.notMatchedClauses,
+        mergeCmd.notMatchedBySourceClauses,
+        mergeCmd.migratedSchema,
+        mergeCmd.trackHighWaterMarks,
+        mergeCmd.schemaEvolutionEnabled)(conf)
+    } else {
+      GpuMergeIntoCommand(
+        mergeCmd.source,
+        mergeCmd.target,
+        mergeCmd.catalogTable,
+        mergeCmd.targetFileIndex,
+        new GpuDeltaLog(mergeCmd.targetFileIndex.deltaLog, conf),
+        mergeCmd.condition,
+        mergeCmd.matchedClauses,
+        mergeCmd.notMatchedClauses,
+        mergeCmd.notMatchedBySourceClauses,
+        mergeCmd.migratedSchema,
+        mergeCmd.trackHighWaterMarks,
+        mergeCmd.schemaEvolutionEnabled)(conf)
+    }
   }
 
   def convertToGpu(mergeCmd: MergeIntoCommandEdge, conf: RapidsConf): RunnableCommand = {
-    GpuMergeIntoCommand(
-      mergeCmd.source,
-      mergeCmd.target,
-      mergeCmd.catalogTable,
-      mergeCmd.targetFileIndex,
-      new GpuDeltaLog(mergeCmd.targetFileIndex.deltaLog, conf),
-      mergeCmd.condition,
-      mergeCmd.matchedClauses,
-      mergeCmd.notMatchedClauses,
-      mergeCmd.notMatchedBySourceClauses,
-      mergeCmd.migratedSchema,
-      mergeCmd.trackHighWaterMarks,
-      mergeCmd.schemaEvolutionEnabled,
-      // This is safe to forward as-is because DBR analysis has already encoded snapshot reuse
-      // eligibility in this Option: Some(snapshot) means the Edge command may reuse the analyzed
-      // snapshot, while None makes GpuDeltaLog open the transaction on the latest snapshot.
-      mergeCmd.snapshotAtAnalysis)(conf)
+    if (conf.isDeltaLowShuffleMergeEnabled && conf.isParquetPerFileReadEnabled &&
+        mergeCmd.notMatchedBySourceClauses.isEmpty) {
+      GpuLowShuffleMergeCommand(
+        mergeCmd.source,
+        mergeCmd.target,
+        mergeCmd.catalogTable,
+        mergeCmd.targetFileIndex,
+        new GpuDeltaLog(mergeCmd.targetFileIndex.deltaLog, conf),
+        mergeCmd.condition,
+        mergeCmd.matchedClauses,
+        mergeCmd.notMatchedClauses,
+        mergeCmd.notMatchedBySourceClauses,
+        mergeCmd.migratedSchema,
+        mergeCmd.trackHighWaterMarks,
+        mergeCmd.schemaEvolutionEnabled,
+        mergeCmd.snapshotAtAnalysis)(conf)
+    } else {
+      GpuMergeIntoCommand(
+        mergeCmd.source,
+        mergeCmd.target,
+        mergeCmd.catalogTable,
+        mergeCmd.targetFileIndex,
+        new GpuDeltaLog(mergeCmd.targetFileIndex.deltaLog, conf),
+        mergeCmd.condition,
+        mergeCmd.matchedClauses,
+        mergeCmd.notMatchedClauses,
+        mergeCmd.notMatchedBySourceClauses,
+        mergeCmd.migratedSchema,
+        mergeCmd.trackHighWaterMarks,
+        mergeCmd.schemaEvolutionEnabled,
+        // This is safe to forward as-is because DBR analysis has already encoded snapshot reuse
+        // eligibility in this Option: Some(snapshot) means the Edge command may reuse the analyzed
+        // snapshot, while None makes GpuDeltaLog open the transaction on the latest snapshot.
+        mergeCmd.snapshotAtAnalysis)(conf)
+    }
   }
 }
