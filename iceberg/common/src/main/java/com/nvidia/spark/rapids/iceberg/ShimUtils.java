@@ -25,14 +25,23 @@ import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import org.apache.hadoop.fs.Path;
 import org.apache.iceberg.ContentFile;
 import org.apache.iceberg.DeleteFile;
+import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.deletes.PositionDelete;
+import org.apache.iceberg.io.DataWriteResult;
+import org.apache.iceberg.io.DeleteWriteResult;
 import org.apache.iceberg.io.FileIO;
+import org.apache.iceberg.io.OutputFileFactory;
+import org.apache.iceberg.io.PartitioningWriter;
+import org.apache.iceberg.io.WriteResult;
 import org.apache.iceberg.shaded.org.apache.parquet.ParquetReadOptions;
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.iceberg.spark.source.GpuSparkScan;
+import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.read.Scan;
+import org.apache.spark.sql.connector.write.DeltaBatchWrite;
 
 import java.io.IOException;
 import java.util.Map;
@@ -79,6 +88,32 @@ public class ShimUtils {
 
     public static boolean isDeletionVector(DeleteFile deleteFile) {
         return IMPL.isDeletionVector(deleteFile);
+    }
+
+    public static boolean isPuffinFormat(FileFormat fileFormat) {
+        return IMPL.isPuffinFormat(fileFormat);
+    }
+
+    public static IcebergShimUtils.RewritableDeletes broadcastRewritableDeletes(
+            DeltaBatchWrite write) {
+        return IMPL.broadcastRewritableDeletes(write);
+    }
+
+    public static PartitioningWriter<PositionDelete<InternalRow>, DeleteWriteResult>
+            newDeletionVectorWriter(
+                    Table table, OutputFileFactory fileFactory,
+                    IcebergShimUtils.RewritableDeletes rewritableDeletes) {
+        return IMPL.newDeletionVectorWriter(table, fileFactory, rewritableDeletes);
+    }
+
+    public static WriteResult positionDeltaWriteResult(
+            DataWriteResult dataResult, DeleteWriteResult deleteResult) {
+        return IMPL.positionDeltaWriteResult(dataResult, deleteResult);
+    }
+
+    public static void setPositionDelete(
+            PositionDelete<InternalRow> delete, CharSequence path, long position) {
+        IMPL.setPositionDelete(delete, path, position);
     }
 
     public static IcebergDeletionVector readDeletionVector(DeleteFile deleteFile,
