@@ -204,6 +204,10 @@ with open(os.sep.join([dist_dir, 'unshimmed-from-each-spark3xx.txt']), 'r') as f
 root_safe_modules = read_patterns(os.sep.join([dist_dir, 'root-safe-module-classes.txt']))
 from_single_shim_or_each = from_single_shim + from_each
 iceberg_audit_runtimes = {}
+# Classifiers are processed newest-first. Let older classifiers contribute
+# conditional root-safe classes that are absent from newer classifiers, without
+# overwriting a newer implementation of the same class path.
+promoted_root_safe_members = set()
 
 for bv in buildver_list:
     classifier = 'spark' + bv
@@ -225,7 +229,7 @@ for bv in buildver_list:
                 # IMPORTANT unconditional extract from the highest Spark version to the top
                 if bv == buildver_list[0] and art == 'sql-plugin-api':
                     zip_handle.extractall(path=top_dist_jar_dir)
-                if bv == buildver_list[0] and art == 'aggregator':
+                if art == 'aggregator':
                     namelist = zip_handle.namelist()
                     namelist_set = set(namelist)
                     root_safe_members = root_safe_module_class_members(classifier)
@@ -234,9 +238,13 @@ for bv in buildver_list:
                         raise Exception(
                             "root-safe module classes missing from aggregator: %s" %
                             ", ".join(missing_members))
+                    new_root_safe_members = (
+                        root_safe_members - promoted_root_safe_members)
                     zip_handle.extractall(
                         path=top_dist_jar_dir,
-                        members=[name for name in namelist if name in root_safe_members])
+                        members=[name for name in namelist
+                                 if name in new_root_safe_members])
+                    promoted_root_safe_members.update(root_safe_members)
                 # TODO deprecate
                 namelist = zip_handle.namelist()
                 glob_list = from_single_shim_or_each if bv == buildver_list[0] else from_each

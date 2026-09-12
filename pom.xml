@@ -2057,6 +2057,11 @@ This will force full Scala code rebuild in downstream modules.
                                     <arg value="-p"/>
                                     <arg value="test_check_with_resource_nesting.py"/>
                                 </exec>
+                                <exec executable="python3" failonerror="true"
+                                      dir="${spark.rapids.source.basedir}">
+                                    <arg value="-B"/>
+                                    <arg value="dist/scripts/tests/test_root_safe_provider_selection.py"/>
+                                </exec>
                                 <!-- Existing nesting exceptions are tracked by
                                      https://github.com/NVIDIA/cudf-spark/issues/11713. -->
                                 <exec executable="python3" failonerror="true"
