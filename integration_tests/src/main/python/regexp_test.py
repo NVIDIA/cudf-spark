@@ -1498,12 +1498,18 @@ def test_illegal_regexp_exception():
             assert "INVALID_PARAMETER_VALUE.PATTERN" in cpu_error
             assert "Illegal" in gpu_error # GPU still uses old format
 
-@datagen_overrides(seed=0, reason='https://github.com/NVIDIA/spark-rapids/issues/9731')
 def test_re_replace_all():
     """
     regression test for https://github.com/NVIDIA/spark-rapids/issues/8323
     """
-    gen = mk_str_gen('[a-z]{0,2}\n{0,2}[a-z]{0,2}\n{0,2}')
+    # Retain the NEL regression inputs from https://github.com/NVIDIA/cudf-spark/issues/9731
+    # while allowing the rest of the input to vary with the test seed.
+    gen = mk_str_gen('[a-z]{0,2}\n{0,2}[a-z]{0,2}\n{0,2}') \
+        .with_special_case('a\u0085') \
+        .with_special_case('oNÍ[\x87\x01áe>\u0085') \
+        .with_special_case('a\u2028') \
+        .with_special_case('a\u2029') \
+        .with_special_case('a\r\n')
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: unary_op_df(spark, gen).selectExpr(
             'REGEXP_REPLACE(a, ".*$", "PROD", 1)'),
