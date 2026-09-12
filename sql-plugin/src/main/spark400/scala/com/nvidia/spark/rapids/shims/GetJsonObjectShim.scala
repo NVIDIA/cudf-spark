@@ -30,17 +30,71 @@ spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.shims
 
+import scala.util.parsing.combinator.RegexParsers
+
+import com.nvidia.spark.rapids.PathInstruction
+
+import org.apache.spark.SparkConf
+
 object GetJsonObjectShim {
+  // Copied from Apache Spark 4.0.0 JsonPathParser after SPARK-46761.
+  private object JsonPathParser extends RegexParsers {
+    import com.nvidia.spark.rapids.PathInstruction._
+
+    def root: Parser[Char] = '$'
+
+    def long: Parser[Long] = "\\d+".r ^? {
+      case x => x.toLong
+    }
+
+    // parse `[*]` and `[123]` subscripts
+    def subscript: Parser[List[PathInstruction]] =
+      for {
+        operand <- '[' ~> ('*' ^^^ Wildcard | long ^^ Index) <~ ']'
+      } yield {
+        Subscript :: operand :: Nil
+      }
+
+    // parse `.name` or `['name']` child expressions
+    def named: Parser[List[PathInstruction]] =
+      for {
+        name <- '.' ~> "[^\\.\\[]+".r | "['" ~> "[^\\']+".r <~ "']"
+      } yield {
+        Key :: Named(name) :: Nil
+      }
+
+    // child wildcards: `..`, `.*` or `['*']`
+    def wildcard: Parser[List[PathInstruction]] =
+      (".*" | "['*']") ^^^ List(Wildcard)
+
+    def node: Parser[List[PathInstruction]] =
+      wildcard |
+        named |
+        subscript
+
+    val expression: Parser[List[PathInstruction]] = {
+      phrase(root ~> rep(node) ^^ (x => x.flatten))
+    }
+
+    def parse(str: String): Option[List[PathInstruction]] = {
+      this.parseAll(expression, str) match {
+        case Success(result, _) =>
+          Some(result)
+
+        case _ =>
+          None
+      }
+    }
+  }
+
+  private[rapids] def parse(
+      str: String,
+      _conf: SparkConf): Option[List[PathInstruction]] = {
+    JsonPathParser.parse(str)
+  }
+
   /**
-   * Return a shim string for a part in named Regexp.
-   * For Spark versions before 400, named Regexp is:
-   *   name <- '.' ~> "[^\\.\\[]+".r | "['" ~> "[^\\'\\?]+".r <~ "']"
-   * For Spark versions 400 and 400+, named Regexp is:
-   *   name <- '.' ~> "[^\\.\\[]+".r | "['" ~> "[^\\']+".r <~ "']"
-   * This is the shim to distinct "[^\\'\\?]+" and "[^\\']+"
-   *
-   * "[^\\'\\?]+" : One or more chars which are not: ' or ?
-   * "[^\\']+"    : One or more chars which are not: '
+   * Spark 4 includes SPARK-46761, which accepts question marks in quoted path names.
    */
-  def partRegexpInNamed: String = "[^\\']+"
+  def parse(str: String): Option[List[PathInstruction]] = JsonPathParser.parse(str)
 }

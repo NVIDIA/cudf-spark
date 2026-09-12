@@ -17,7 +17,6 @@
 package com.nvidia.spark.rapids
 
 import scala.collection.mutable
-import scala.util.parsing.combinator.RegexParsers
 
 import ai.rapids.cudf.ColumnVector
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
@@ -46,7 +45,7 @@ object PathInstruction {
   case class Named(name: String) extends PathInstruction
 }
 
-object JsonPathParser extends RegexParsers {
+object JsonPathParser {
   // Mirrors JSONUtils.MAX_PATH_DEPTH from spark-rapids-jni (get_json_object.hpp).
   // Duplicated here to avoid triggering JNI native library loading during
   // Driver-side plan conversion (see github.com/NVIDIA/spark-rapids/issues/14184).
@@ -54,49 +53,8 @@ object JsonPathParser extends RegexParsers {
 
   import PathInstruction._
 
-  def root: Parser[Char] = '$'
-
-  def long: Parser[Long] = "\\d+".r ^? {
-    case x => x.toLong
-  }
-
-  // parse `[*]` and `[123]` subscripts
-  def subscript: Parser[List[PathInstruction]] =
-    for {
-      operand <- '[' ~> ('*' ^^^ Wildcard | long ^^ Index) <~ ']'
-    } yield {
-      Subscript :: operand :: Nil
-    }
-
-  // parse `.name` or `['name']` child expressions
-  def named: Parser[List[PathInstruction]] =
-    for {
-      name <- '.' ~> "[^\\.\\[]+".r | "['" ~> GetJsonObjectShim.partRegexpInNamed.r <~ "']"
-    } yield {
-      Key :: Named(name) :: Nil
-    }
-
-  // child wildcards: `..`, `.*` or `['*']`
-  def wildcard: Parser[List[PathInstruction]] =
-    (".*" | "['*']") ^^^ List(Wildcard)
-
-  def node: Parser[List[PathInstruction]] =
-    wildcard |
-      named |
-      subscript
-
-  val expression: Parser[List[PathInstruction]] = {
-    phrase(root ~> rep(node) ^^ (x => x.flatten))
-  }
-
   def parse(str: String): Option[List[PathInstruction]] = {
-    this.parseAll(expression, str) match {
-      case Success(result, _) =>
-        Some(result)
-
-      case _ =>
-        None
-    }
+    GetJsonObjectShim.parse(str)
   }
 
   def filterInstructionsForJni(instructions: List[PathInstruction]): List[PathInstruction] =
@@ -156,6 +114,14 @@ object JsonPathParser extends RegexParsers {
   }
 }
 
+object GpuGetJsonObjectMeta {
+  private[rapids] def parseLiteralPath(value: Any): Option[List[PathInstruction]] = {
+    Option(value).map(_.asInstanceOf[UTF8String].toString).flatMap { path =>
+      JsonPathParser.parse(path)
+    }
+  }
+}
+
 class GpuGetJsonObjectMeta(
     expr: GetJsonObject,
     conf: RapidsConf,
@@ -166,7 +132,7 @@ class GpuGetJsonObjectMeta(
   override def tagExprForGpu(): Unit = {
     val lit = GpuOverrides.extractLit(expr.right)
     lit.foreach { l =>
-      val instructions = JsonPathParser.parse(l.value.asInstanceOf[UTF8String].toString)
+      val instructions = GpuGetJsonObjectMeta.parseLiteralPath(l.value)
       val updated = instructions.map(JsonPathParser.filterInstructionsForJni)
       if (updated.exists(JsonPathParser.fallbackCheck)) {
         willNotWorkOnGpu(s"get_json_object on GPU does not support more " +
@@ -216,13 +182,15 @@ case class GpuMultiGetJsonObject(json: Expression,
     val validPaths = validPathsWithIndexes.map(_._1)
     withResource(new Array[ColumnVector](validPaths.length)) { validPathColumns =>
       withResource(json.columnarEval(batch)) { input =>
-        // Last argument -1 indicates to use automatically calculated parallelism
-        withResource(JSONUtils.getJsonObjectMultiplePaths(input.getBase,
-          java.util.Arrays.asList(validPaths: _*), 4 * targetBatchSize,
-          -1)) { chunkedResult =>
-          chunkedResult.foreach { cr =>
-            validPathColumns(validPathsIndex) = cr.incRefCount()
-            validPathsIndex += 1
+        if (validPaths.nonEmpty) {
+          // Last argument -1 indicates to use automatically calculated parallelism
+          withResource(JSONUtils.getJsonObjectMultiplePaths(input.getBase,
+            java.util.Arrays.asList(validPaths: _*), 4 * targetBatchSize,
+            -1)) { chunkedResult =>
+            chunkedResult.foreach { cr =>
+              validPathColumns(validPathsIndex) = cr.incRefCount()
+              validPathsIndex += 1
+            }
           }
         }
 
