@@ -39,6 +39,11 @@
 
     <dependencies>
         <dependency>
+            <groupId>com.nvidia</groupId>
+            <artifactId>cudf-spark-history-metrics-api</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
             <groupId>me.bechberger</groupId>
             <artifactId>ap-loader-all</artifactId>
             <version>${ap.loader.version}</version>

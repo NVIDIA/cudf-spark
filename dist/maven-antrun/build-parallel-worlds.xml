@@ -78,6 +78,12 @@
             <attribute name="artifact_csv"/>
         </scriptdef>
         <doCopyDependencies artifact_csv="sql-plugin-api,aggregator"/>
+        <available
+            file="${project.build.directory}/parallel-world/com/nvidia/spark/history/HistoryMetricsProvider.class"
+            property="historyMetricsProviderApiAtRoot"/>
+        <fail
+            unless="historyMetricsProviderApiAtRoot"
+            message="HistoryMetricsProvider.class must be present at the distribution root"/>
     </target>
     <target name="build-parallel-worlds"
             depends="copy-dependencies"

@@ -7,6 +7,8 @@ com/nvidia/spark/rapids/ExplainPlan.class
 com/nvidia/spark/rapids/ExplainPlan$.class
 com/nvidia/spark/rapids/ExplainPlanBase.class
 com/nvidia/spark/rapids/Optimizer.class
+# Public history metrics API shared by application providers and shim implementations.
+com/nvidia/spark/history/*
 com/nvidia/spark/rapids/optimizer/SQLOptimizerPlugin*
 com/nvidia/spark/rapids/ShimLoaderTemp*
 com/nvidia/spark/rapids/SparkShims*

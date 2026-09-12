@@ -691,6 +691,14 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .checkValue(v => v > 0, "Batch size must be positive")
     .createWithDefault(1 * 1024 * 1024 * 1024) // 1 GiB is the default
 
+  val HISTORY_METRICS_PROVIDER = conf("spark.rapids.sql.history.metrics.provider")
+    .doc("Selects the driver-side history metrics provider by name. The default 'none' uses " +
+      "the built-in no-op store. Other providers must be present on the driver classpath.")
+    .startupOnly()
+    .stringConf
+    .checkValue(v => v.trim.nonEmpty, "History metrics provider name must not be empty")
+    .createWithDefault("none")
+
   val CHUNKED_READER = conf("spark.rapids.sql.reader.chunked")
     .doc("Enable a chunked reader where possible. A chunked reader allows " +
       "reading highly compressed data that could not be read otherwise, but at the expense " +
@@ -3528,6 +3536,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val needDecimalGuarantees: Boolean = get(NEED_DECIMAL_OVERFLOW_GUARANTEES)
 
   lazy val gpuTargetBatchSizeBytes: Long = get(GPU_BATCH_SIZE_BYTES)
+
+  lazy val historyMetricsProvider: String = get(HISTORY_METRICS_PROVIDER)
 
   lazy val isWindowCollectListEnabled: Boolean = get(ENABLE_WINDOW_COLLECT_LIST)
 
