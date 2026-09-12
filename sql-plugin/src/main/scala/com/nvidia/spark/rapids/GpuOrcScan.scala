@@ -3134,14 +3134,23 @@ object MakeOrcTableProducer extends Logging {
         tableSchema, splits, debugDumpPrefix, debugDumpAlways, writerTimezone,
         writerUsedProlepticGregorian)
     } else {
-      val table = withResource(buffer) { _ =>
+      val rebased = withResource(buffer) { _ =>
         try {
           RmmRapidsRetryIterator.withRetryNoSplit[Table] {
-            NvtxIdWithMetrics(NvtxRegistry.ORC_DECODE, metrics(GPU_DECODE_TIME)) {
+            val table = NvtxIdWithMetrics(NvtxRegistry.ORC_DECODE, metrics(GPU_DECODE_TIME)) {
               Table.readORC(parseOpts, buffer, offset, bufferSize)
             }
+            closeOnExcept(table) { _ =>
+              if (readDataSchema.length < table.getNumberOfColumns) {
+                throw new QueryExecutionException(s"Expected ${readDataSchema.length} columns " +
+                  s"but read ${table.getNumberOfColumns} from ${splits.mkString("; ")}")
+              }
+            }
+            GpuOrcTimezoneUtils.rebaseOrcDateTime(
+              table, writerTimezone, writerUsedProlepticGregorian)
           }
         } catch {
+          case e: QueryExecutionException => throw e
           case e: Exception =>
             val dumpMsg = debugDumpPrefix.map { prefix =>
               if (!debugDumpAlways) {
@@ -3154,15 +3163,7 @@ object MakeOrcTableProducer extends Logging {
             throw new IOException(s"Error when processing ${splits.mkString("; ")}$dumpMsg", e)
         }
       }
-      closeOnExcept(table) { _ =>
-        if (readDataSchema.length < table.getNumberOfColumns) {
-          throw new QueryExecutionException(s"Expected ${readDataSchema.length} columns " +
-            s"but read ${table.getNumberOfColumns} from ${splits.mkString("; ")}")
-        }
-      }
       metrics(NUM_OUTPUT_BATCHES) += 1
-      val rebased = GpuOrcTimezoneUtils.rebaseOrcDateTime(
-        table, writerTimezone, writerUsedProlepticGregorian)
       val evolvedSchemaTable = SchemaUtils.evolveSchemaIfNeededAndClose(rebased, tableSchema,
         readDataSchema, isSchemaCaseSensitive, Some(GpuOrcScan.castColumnTo))
       GpuMetric.recordOutputBatchBytes(evolvedSchemaTable, metrics.get(GPU_OUTPUT_BATCH_BYTES))
@@ -3223,7 +3224,7 @@ case class OrcTableReader(
       }
     }
     metrics(NUM_OUTPUT_BATCHES) += 1
-    val rebased = GpuOrcTimezoneUtils.rebaseOrcDateTime(
+    val rebased = GpuOrcTimezoneUtils.rebaseOrcDateTimeWithRetry(
       table, writerTimezone, writerUsedProlepticGregorian)
     val evolvedSchemaTable = SchemaUtils.evolveSchemaIfNeededAndClose(rebased, catalystTableSchema,
       readDataSchema, isSchemaCaseSensitive, Some(GpuOrcScan.castColumnTo))
