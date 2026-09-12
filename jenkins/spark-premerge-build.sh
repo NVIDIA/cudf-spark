@@ -245,6 +245,8 @@ run_iceberg_extra_classpath_tests() {
         PYSP_TEST_spark_sql_catalog_spark__catalog_type="hadoop" \
         PYSP_TEST_spark_sql_catalog_spark__catalog_warehouse="/tmp/spark-warehouse-$RANDOM" \
         TESTS="iceberg/iceberg_test.py::test_iceberg_read_appended_table \
+iceberg/iceberg_test.py::test_iceberg_spj_partition_filter_with_runtime_filter_cpu_fails_gpu_succeeds \
+iceberg/iceberg_test.py::test_iceberg_spj_runtime_filter_with_trailing_join_key \
 iceberg/iceberg_append_test.py::test_insert_into_unpartitioned_table \
 noop_write_test.py" \
         ./integration_tests/run_pyspark_from_build.sh --iceberg
