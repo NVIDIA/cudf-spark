@@ -26,12 +26,17 @@ import com.nvidia.spark.rapids.shims.DateTimeUtilsShims
 
 import org.apache.spark.sql.catalyst.util.DateTimeUtils.localDateToDays
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.rapids.{GpuToTimestamp, LegacyTimeParserPolicy}
+import org.apache.spark.sql.rapids.{ExceptionTimeParserPolicy, GpuToTimestamp,
+  LegacyTimeParserPolicy}
 
 /**
  * Class for helper functions for Date
  */
 object DateUtils {
+  sealed trait FormatDirection
+  case object Parsing extends FormatDirection
+  case object Formatting extends FormatDirection
+
   val unsupportedCharacter = Set(
     'k', 'K','z', 'V', 'c', 'F', 'W', 'Q', 'q', 'G', 'A', 'n', 'N',
     'O', 'X', 'p', '\'', '[', ']', '#', '{', '}', 'Z', 'w', 'e', 'E', 'x', 'Z', 'Y')
@@ -220,6 +225,7 @@ object DateUtils {
       meta: RapidsMeta[_, _, _],
       sparkFormat: String,
       parseString: Boolean,
+      formatDirection: FormatDirection = Parsing,
       inputFormat: Option[String] = None,
       allowLegacyFormattingOnlyFormats: Boolean = false): String = {
     val formatToConvert = inputFormat.getOrElse(sparkFormat)
@@ -228,8 +234,15 @@ object DateUtils {
     } else {
       GpuToTimestamp.LEGACY_COMPATIBLE_FORMATS
     }
+    val timeParserPolicy = GpuOverrides.getTimeParserPolicy
+    val nonLegacyCompatibleFormats = formatDirection match {
+      case Formatting => GpuToTimestamp.FORMATTING_COMPATIBLE_FORMATS
+      case Parsing if parseString && timeParserPolicy == ExceptionTimeParserPolicy =>
+        GpuToTimestamp.EXCEPTION_COMPATIBLE_FORMATS
+      case Parsing => GpuToTimestamp.CORRECTED_COMPATIBLE_FORMATS
+    }
     var strfFormat: String = null
-    if (GpuOverrides.getTimeParserPolicy == LegacyTimeParserPolicy) {
+    if (timeParserPolicy == LegacyTimeParserPolicy) {
       try {
         // try and convert the format to cuDF format - this will throw an exception if
         // the format contains unsupported characters or words
@@ -261,9 +274,9 @@ object DateUtils {
         // the format contains unsupported characters or words
         strfFormat = toStrf(formatToConvert, parseString)
         // format parsed ok, so it is either compatible (tested/certified) or incompatible
-        if (!GpuToTimestamp.CORRECTED_COMPATIBLE_FORMATS.contains(formatToConvert) &&
+        if (!nonLegacyCompatibleFormats.contains(formatToConvert) &&
           !meta.conf.incompatDateFormats) {
-          meta.willNotWorkOnGpu(s"CORRECTED format '$sparkFormat' on the GPU is not guaranteed " +
+          meta.willNotWorkOnGpu(s"Format '$sparkFormat' on the GPU is not guaranteed " +
             s"to produce the same results as Spark on CPU. Set " +
             s"${RapidsConf.INCOMPATIBLE_DATE_FORMATS.key}=true to force onto GPU.")
         }
@@ -271,6 +284,12 @@ object DateUtils {
         case e: TimestampFormatConversionException =>
           meta.willNotWorkOnGpu(s"Failed to convert ${e.reason} ${e.getMessage}")
       }
+    }
+    if (formatDirection == Formatting && Option(strfFormat).exists(_.contains("%Y")) &&
+        meta.conf.hasExtendedYearValues && !meta.conf.incompatDateFormats) {
+      meta.willNotWorkOnGpu("Formatting the full range of supported years is not supported. " +
+          "If your years are limited to 4 positive digits set " +
+          s"${RapidsConf.HAS_EXTENDED_YEAR_VALUES} to false.")
     }
     strfFormat
   }

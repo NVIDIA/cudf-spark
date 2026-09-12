@@ -30,7 +30,7 @@ import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.jni.{Arithmetic, CastException, CastStrings, DateTimeUtils,
   GpuTimeZoneDB}
 import com.nvidia.spark.rapids.shims.{NullIntolerantShim, ShimBinaryExpression, ShimExpression,
-  TruncTimestampShims}
+  TruncTimestampShims, YearParseUtil}
 
 import org.apache.spark.sql.catalyst.expressions.{BinaryExpression, ExpectsInputTypes, Expression, FromUnixTime, FromUTCTimestamp, ImplicitCastInputTypes, MonthsBetween, TimeZoneAwareExpression, ToUTCTimestamp, TruncDate, TruncTimestamp}
 import org.apache.spark.sql.catalyst.util.DateTimeConstants
@@ -406,6 +406,7 @@ abstract class UnixTimeExprMeta[A <: BinaryExpression with TimeZoneAwareExpressi
   var strfFormat: String = _
 
   protected def allowLegacyFormattingOnlyFormats: Boolean = false
+  protected def formatDirection: DateUtils.FormatDirection = DateUtils.Parsing
 
   override def tagExprForGpu(): Unit = {
     // Date and Timestamp work too
@@ -416,7 +417,13 @@ abstract class UnixTimeExprMeta[A <: BinaryExpression with TimeZoneAwareExpressi
           strfFormat = DateUtils.tagAndGetCudfFormat(this,
             sparkFormat,
             expr.left.dataType == DataTypes.StringType,
+            formatDirection,
             allowLegacyFormattingOnlyFormats = allowLegacyFormattingOnlyFormats)
+          // The fused parser only accepts an unsigned four-digit year for this packed format.
+          if (expr.left.dataType == DataTypes.StringType && sparkFormat == "yyyyMMdd" &&
+              GpuOverrides.getTimeParserPolicy == CorrectedTimeParserPolicy) {
+            YearParseUtil.tagParseStringAsDate(conf, this)
+          }
         case None =>
           willNotWorkOnGpu("format has to be a string literal")
       }
@@ -599,9 +606,9 @@ object ExceptionTimeParserPolicy extends TimeParserPolicy
 object CorrectedTimeParserPolicy extends TimeParserPolicy
 
 object GpuToTimestamp {
-  // We are compatible with Spark for these formats when the timeParserPolicy is CORRECTED
-  // or EXCEPTION. It is possible that other formats may be supported but these are the only
-  // ones that we have tests for.
+  // We are compatible with Spark for these formats when the timeParserPolicy is CORRECTED.
+  // It is possible that other formats may be supported but these are the only ones that we
+  // have tests for.
   val CORRECTED_COMPATIBLE_FORMATS = Set(
     "yyyy-MM-dd",
     "yyyy/MM/dd",
@@ -617,6 +624,48 @@ object GpuToTimestamp {
     "MM-yyyy",
     "MM/dd/yyyy",
     "MM-dd-yyyy",
+    "yyyyMMdd",
+    "MMyyyy"
+  )
+
+  // EXCEPTION first tries CORRECTED parsing and then probes LEGACY parsing on failure. Formats
+  // in this set must therefore match Spark under both parsers, including success/failure behavior.
+  // TODO(#15977): Re-add MMyyyy after the fused parser preserves parser-policy disagreements.
+  val EXCEPTION_COMPATIBLE_FORMATS = Set(
+    "yyyy-MM-dd",
+    "yyyy/MM/dd",
+    "yyyy-MM",
+    "yyyy/MM",
+    "dd/MM/yyyy",
+    "yyyy-MM-dd HH:mm:ss",
+    "MM-dd",
+    "MM/dd",
+    "dd-MM",
+    "dd/MM",
+    "MM/yyyy",
+    "MM-yyyy",
+    "MM/dd/yyyy",
+    "MM-dd-yyyy"
+  )
+
+  // Formatting compatibility is independent of parser-policy compatibility. Keep this explicit
+  // so certifying a parsing format cannot accidentally certify the reverse direction.
+  val FORMATTING_COMPATIBLE_FORMATS = Set(
+    "yyyy-MM-dd",
+    "yyyy/MM/dd",
+    "yyyy-MM",
+    "yyyy/MM",
+    "dd/MM/yyyy",
+    "yyyy-MM-dd HH:mm:ss",
+    "MM-dd",
+    "MM/dd",
+    "dd-MM",
+    "dd/MM",
+    "MM/yyyy",
+    "MM-yyyy",
+    "MM/dd/yyyy",
+    "MM-dd-yyyy",
+    "yyyyMMdd",
     "MMyyyy"
   )
 
@@ -666,12 +715,13 @@ object GpuToTimestamp {
   }
 
   // True iff the fused JNI parser handles this (sparkFormat, policy) combination.
-  // Today the JNI accepts every entry in CORRECTED_COMPATIBLE_FORMATS / LEGACY_COMPATIBLE_FORMATS.
-  private def isSimpleSparkFormat(sparkFormat: String, isLegacy: Boolean): Boolean = {
-    if (isLegacy) {
-      LEGACY_COMPATIBLE_FORMATS.contains(sparkFormat)
-    } else {
-      CORRECTED_COMPATIBLE_FORMATS.contains(sparkFormat)
+  private def isSimpleSparkFormat(
+      sparkFormat: String,
+      timeParserPolicy: TimeParserPolicy): Boolean = {
+    timeParserPolicy match {
+      case LegacyTimeParserPolicy => LEGACY_COMPATIBLE_FORMATS.contains(sparkFormat)
+      case ExceptionTimeParserPolicy => EXCEPTION_COMPATIBLE_FORMATS.contains(sparkFormat)
+      case CorrectedTimeParserPolicy => CORRECTED_COMPATIBLE_FORMATS.contains(sparkFormat)
     }
   }
 
@@ -717,7 +767,12 @@ object GpuToTimestamp {
       exceptionPolicy: Boolean): ColumnVector = {
 
     // `tsVector` will be closed in replaceSpecialDates
-    val tsVector = if (isSimpleSparkFormat(sparkFormat, isLegacy = false)) {
+    val timeParserPolicy = if (exceptionPolicy) {
+      ExceptionTimeParserPolicy
+    } else {
+      CorrectedTimeParserPolicy
+    }
+    val tsVector = if (isSimpleSparkFormat(sparkFormat, timeParserPolicy)) {
       // Fused kernel skips the regex+length+cuDF-asTimestamp chain.
       val parsed = try {
         val parserPolicy = if (exceptionPolicy) {
@@ -777,7 +832,7 @@ object GpuToTimestamp {
   def parseStringAsTimestampWithLegacyParserPolicy(
       lhs: GpuColumnVector,
       sparkFormat: String): ColumnVector = {
-    if (!isSimpleSparkFormat(sparkFormat, isLegacy = true)) {
+    if (!isSimpleSparkFormat(sparkFormat, LegacyTimeParserPolicy)) {
       throw new IllegalStateException(s"Unsupported format $sparkFormat")
     }
     CastStrings.parseTimestampWithFormat(lhs.getBase, sparkFormat, true)
@@ -966,6 +1021,7 @@ class FromUnixTimeMeta(a: FromUnixTime,
         }
         strfFormat = DateUtils.tagAndGetCudfFormat(this, sparkFormat,
           a.left.dataType == DataTypes.StringType,
+          DateUtils.Formatting,
           inputFormat,
           allowLegacyFormattingOnlyFormats = allowLegacyFormattingOnlyFormats)
       case None =>
