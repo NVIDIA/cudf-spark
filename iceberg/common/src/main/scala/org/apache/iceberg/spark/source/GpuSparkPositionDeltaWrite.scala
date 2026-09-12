@@ -252,7 +252,7 @@ class GpuPositionDeltaWriterFactory(
 }
 
 
-trait GpuDeltaWriter extends DeltaWriter[ColumnarBatch] {
+trait GpuIcebergDeltaWriter extends DeltaWriter[ColumnarBatch] with GpuDeltaBatchWriter {
 
   def context: GpuWriteContext
 
@@ -470,7 +470,7 @@ class GpuBasePositionDeltaWriter(
  * Base trait for delta writers that handle both deletes and data writes.
  * This is the GPU equivalent of Java's DeleteAndDataDeltaWriter.
  */
-trait GpuDeleteAndDataDeltaWriter extends GpuDeltaWriter {
+trait GpuDeleteAndDataDeltaWriter extends GpuIcebergDeltaWriter {
   protected val table: Table
   protected val delegate: GpuBasePositionDeltaWriter
   protected val io: FileIO
@@ -491,6 +491,29 @@ trait GpuDeleteAndDataDeltaWriter extends GpuDeltaWriter {
   private val partitioners: mutable.Map[Int, GpuIcebergPartitioner] = mutable.Map()
 
   private var closed: Boolean = false
+
+  protected def insertData(row: ColumnarBatch): Unit
+
+  override def insert(row: ColumnarBatch): Unit = reinsert(null, row)
+
+  override def reinsert(metadata: ColumnarBatch, row: ColumnarBatch): Unit = {
+    val physicalRow = withResource(Seq(metadata, row)) { _ =>
+      GpuDataWriterWithRowLineage.appendLineage(
+        row, metadata, context.dataSparkType, context.metadataSparkType)
+    }
+    insertData(physicalRow)
+  }
+
+  override def insertAndReinsert(
+      metadata: ColumnarBatch,
+      row: ColumnarBatch,
+      reinsertMask: CudfColumnVector): Unit = {
+    val physicalRow = withResource(Seq(metadata, row, reinsertMask)) { _ =>
+      GpuDataWriterWithRowLineage.appendLineage(
+        row, metadata, context.dataSparkType, context.metadataSparkType, reinsertMask)
+    }
+    insertData(physicalRow)
+  }
 
   override def delete(metadata: ColumnarBatch, rowId: ColumnarBatch): Unit = {
     require(metadata != null, "Metadata batch must be non null")
@@ -569,7 +592,7 @@ class GpuDeleteOnlyDeltaWriter(
     table: Table,
     writerFactory: GpuSparkFileWriterFactory,
     deleteFileFactory: OutputFileFactory,
-    override val context: GpuWriteContext) extends GpuDeltaWriter {
+    override val context: GpuWriteContext) extends GpuIcebergDeltaWriter {
 
   private val io: FileIO = table.io()
   private val specs: mutable.Map[Integer, PartitionSpec] = table.specs().asScala
@@ -642,6 +665,19 @@ class GpuDeleteOnlyDeltaWriter(
     throw new UnsupportedOperationException("Delete-only writer does not support inserts")
   }
 
+  override def insertAndReinsert(
+      metadata: ColumnarBatch,
+      row: ColumnarBatch,
+      reinsertMask: CudfColumnVector): Unit = {
+    withResource(Seq(metadata, row, reinsertMask)) { _ =>
+      throw new UnsupportedOperationException("Delete-only writer does not support inserts")
+    }
+  }
+
+  override def reinsert(metadata: ColumnarBatch, row: ColumnarBatch): Unit = {
+    throw new UnsupportedOperationException("Delete-only writer does not support reinserts")
+  }
+
   override def commit(): WriterCommitMessage = {
     close()
     val result = delegate.result()
@@ -704,7 +740,7 @@ class GpuUnpartitionedDeltaWriter(
     delegate.writeDelete(batch, spec, partition)
   }
 
-  override def insert(row: ColumnarBatch): Unit = {
+  override protected def insertData(row: ColumnarBatch): Unit = {
     val spillBatch = closeOnExcept(row) { _ =>
       SpillableColumnarBatch(row, ACTIVE_ON_DECK_PRIORITY)
     }
@@ -756,7 +792,7 @@ class GpuPartitionedDeltaWriter(
     delegate.writeDelete(batch, spec, partition)
   }
 
-  override def insert(row: ColumnarBatch): Unit = {
+  override protected def insertData(row: ColumnarBatch): Unit = {
     // Partition the data and write each partition
     dataPartitioner.partition(row)
       .safeConsume { part =>

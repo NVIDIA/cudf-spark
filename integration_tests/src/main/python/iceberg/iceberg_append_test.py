@@ -19,12 +19,11 @@ from asserts import assert_equal_with_local_sort, assert_gpu_fallback_collect, \
     assert_gpu_fallback_write_sql
 from conftest import is_iceberg_remote_catalog
 from data_gen import gen_df, copy_and_update
-from iceberg import create_iceberg_table, \
-    iceberg_base_table_cols, iceberg_gens_list, get_full_table_name, \
-    iceberg_full_gens_list, \
-    iceberg_write_enabled_conf, iceberg_unsupported_mark, _build_tblprops, \
-    full_coverage_partition_transforms, assert_iceberg_files_use_codec, \
-    supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON
+from iceberg import (
+    iceberg_format_versions, create_iceberg_table, iceberg_base_table_cols, iceberg_gens_list,
+    get_full_table_name, iceberg_full_gens_list, iceberg_write_enabled_conf,
+    iceberg_unsupported_mark, _build_tblprops, full_coverage_partition_transforms,
+    assert_iceberg_files_use_codec, supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON)
 from marks import iceberg, ignore_order, allow_non_gpu, datagen_overrides
 from spark_session import with_gpu_session, with_cpu_session
 
@@ -58,8 +57,9 @@ def do_test_insert_into_table_sql(spark_tmp_table_factory,
 
 @iceberg
 @ignore_order(local=True)
-def test_insert_into_unpartitioned_table(spark_tmp_table_factory):
-    table_prop = {"format-version": "2"}
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_insert_into_unpartitioned_table(format_version, spark_tmp_table_factory):
+    table_prop = {"format-version": format_version}
 
     do_test_insert_into_table_sql(
         spark_tmp_table_factory,
@@ -91,7 +91,7 @@ def test_insert_into_v3_table_fallback(spark_tmp_table_factory):
         lambda spark, table_name: spark.sql(f"SELECT * FROM {table_name}"),
         base_table_name,
         ["AppendDataExec"],
-        conf=iceberg_write_enabled_conf)
+        conf=copy_and_update(iceberg_write_enabled_conf, {"spark.rapids.sql.format.iceberg.v3.enabled": "false"}))
 
 
 @iceberg
@@ -99,14 +99,15 @@ def test_insert_into_v3_table_fallback(spark_tmp_table_factory):
 @allow_non_gpu('AppendDataExec')
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
 @pytest.mark.parametrize("partition_table", [True, False], ids=lambda x: f"partition_table={x}")
-def test_insert_into_unpartitioned_table_values(spark_tmp_table_factory,
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_insert_into_unpartitioned_table_values(format_version, spark_tmp_table_factory,
                                                 partition_table):
     base_table_name = get_full_table_name(spark_tmp_table_factory)
     cpu_table_name = f"{base_table_name}_cpu"
     gpu_table_name = f"{base_table_name}_gpu"
 
     def create_table(spark, table_name: str):
-        props = _build_tblprops({"format-version": "2"})
+        props = _build_tblprops({"format-version": format_version})
         props_sql = ", ".join(f"'{k}' = '{v}'" for k, v in props.items())
         sql = f"CREATE TABLE {table_name} (id int, name string) USING ICEBERG "
         if partition_table:
@@ -139,14 +140,15 @@ def test_insert_into_unpartitioned_table_values(spark_tmp_table_factory,
 @allow_non_gpu('LocalTableScanExec', 'ShuffleExchangeExec')
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
 @pytest.mark.parametrize("partition_table", [True, False], ids=lambda x: f"partition_table={x}")
-def test_insert_into_table_values_aqe(spark_tmp_table_factory, partition_table):
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_insert_into_table_values_aqe(format_version, spark_tmp_table_factory, partition_table):
     """Regression test for GPU V2 writes with AQE and a CPU VALUES input plan."""
     base_table_name = get_full_table_name(spark_tmp_table_factory)
     cpu_table_name = f"{base_table_name}_cpu"
     gpu_table_name = f"{base_table_name}_gpu"
 
     def create_table(spark, table_name: str):
-        props = _build_tblprops({"format-version": "2"})
+        props = _build_tblprops({"format-version": format_version})
         props_sql = ", ".join(f"'{k}' = '{v}'" for k, v in props.items())
         sql = f"CREATE TABLE {table_name} (id int, name string) USING ICEBERG "
         if partition_table:
@@ -176,8 +178,9 @@ def test_insert_into_table_values_aqe(spark_tmp_table_factory, partition_table):
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
-def test_insert_into_unpartitioned_table_all_cols(spark_tmp_table_factory):
-    table_prop = {"format-version": "2"}
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_insert_into_unpartitioned_table_all_cols(format_version, spark_tmp_table_factory):
+    table_prop = {"format-version": format_version}
     cols = [f"_c{idx}" for idx, _ in enumerate(iceberg_full_gens_list)]
     gen_list = list(zip(cols, iceberg_full_gens_list))
 
@@ -208,10 +211,10 @@ def test_insert_into_unpartitioned_table_all_cols(spark_tmp_table_factory):
 
 
 def _do_test_insert_into_partitioned_table(spark_tmp_table_factory, partition_col_sql,
-                                           table_prop=None):
+                                           table_prop=None, format_version="2"):
     """Helper function for partitioned table insert tests."""
     if table_prop is None:
-        table_prop = {"format-version": "2"}
+        table_prop = {"format-version": format_version}
 
     def create_table_and_set_write_order(table_name: str):
         create_iceberg_table(
@@ -233,9 +236,13 @@ def _do_test_insert_into_partitioned_table(spark_tmp_table_factory, partition_co
 @pytest.mark.parametrize("partition_col_sql", [
     pytest.param("year(_c9)", id="year(timestamp_col)"),
 ])
-def test_insert_into_partitioned_table(spark_tmp_table_factory, partition_col_sql):
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_insert_into_partitioned_table(format_version, spark_tmp_table_factory, partition_col_sql):
     """Basic partition test - runs for all catalogs including remote."""
-    _do_test_insert_into_partitioned_table(spark_tmp_table_factory, partition_col_sql)
+    _do_test_insert_into_partitioned_table(
+        spark_tmp_table_factory,
+        partition_col_sql,
+        format_version=format_version)
 
 
 @iceberg
@@ -243,20 +250,25 @@ def test_insert_into_partitioned_table(spark_tmp_table_factory, partition_col_sq
 @ignore_order(local=True)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
 @pytest.mark.parametrize("partition_col_sql", full_coverage_partition_transforms)
-def test_insert_into_partitioned_table_full_coverage(spark_tmp_table_factory, partition_col_sql):
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_insert_into_partitioned_table_full_coverage(format_version, spark_tmp_table_factory, partition_col_sql):
     """Partition-transform coverage anchor: this is the single test that exercises
     the partition writer against every transform in full_coverage_partition_transforms.
     Every other DML op's _full_coverage test picks only a few distinct transforms
     from this list (via ctas_/rtas_/overwrite_*_/delete_/update_/merge_-prefixed
     constants in iceberg/__init__.py), so the partition writer's coverage of all
     26 transforms lives here. Skipped for remote catalogs."""
-    _do_test_insert_into_partitioned_table(spark_tmp_table_factory, partition_col_sql)
+    _do_test_insert_into_partitioned_table(
+        spark_tmp_table_factory,
+        partition_col_sql,
+        format_version=format_version)
 
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
-def test_insert_into_partitioned_table_all_cols(spark_tmp_table_factory):
-    table_prop = {"format-version": "2"}
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_insert_into_partitioned_table_all_cols(format_version, spark_tmp_table_factory):
+    table_prop = {"format-version": format_version}
     cols = [f"_c{idx}" for idx, _ in enumerate(iceberg_full_gens_list)]
     gen_list = list(zip(cols, iceberg_full_gens_list))
 
@@ -301,9 +313,10 @@ def test_insert_into_partitioned_table_all_cols(spark_tmp_table_factory):
 @allow_non_gpu('AppendDataExec', 'ShuffleExchangeExec', 'ProjectExec')
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
 @pytest.mark.parametrize("file_format", ["orc", "avro"], ids=lambda x: f"file_format={x}")
-def test_insert_into_table_unsupported_file_format_fallback(
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_insert_into_table_unsupported_file_format_fallback(format_version,
         spark_tmp_table_factory, file_format):
-    table_prop = {"format-version": "2",
+    table_prop = {"format-version": format_version,
                   "write.format.default": file_format}
 
     def insert_data(spark, table_name: str):
@@ -328,10 +341,11 @@ def test_insert_into_table_unsupported_file_format_fallback(
     pytest.param("truncate(3, contact.email)", id="truncate_nested_struct_field"),
     pytest.param("contact.email", id="identity_nested_struct_field"),
 ], )
-def test_insert_into_table_nested_partition_source_fallback(
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_insert_into_table_nested_partition_source_fallback(format_version,
         spark_tmp_table_factory, partition_col_sql):
     table_name = get_full_table_name(spark_tmp_table_factory)
-    table_prop = _build_tblprops({"format-version": "2"})
+    table_prop = _build_tblprops({"format-version": format_version})
     props_sql = ", ".join(f"'{k}' = '{v}'" for k, v in table_prop.items())
 
     def create_table(spark):
@@ -362,9 +376,10 @@ def test_insert_into_table_nested_partition_source_fallback(
 @pytest.mark.parametrize("conf_key", ["spark.rapids.sql.format.iceberg.enabled",
                                       "spark.rapids.sql.format.iceberg.write.enabled"],
                          ids=lambda x: f"{x}=False")
-def test_insert_into_iceberg_table_fallback_when_conf_disabled(
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_insert_into_iceberg_table_fallback_when_conf_disabled(format_version,
         spark_tmp_table_factory, conf_key):
-    table_prop = {"format-version": "2"}
+    table_prop = {"format-version": format_version}
 
     def insert_data(spark, table_name: str):
         df = gen_df(spark, list(zip(iceberg_base_table_cols, iceberg_gens_list)))
@@ -387,11 +402,12 @@ def test_insert_into_iceberg_table_fallback_when_conf_disabled(
     pytest.param(None, id="unpartitioned"),
     pytest.param("year(_c9)", id="year_partition"),
 ])
-def test_insert_into_aqe(spark_tmp_table_factory, partition_col_sql):
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_insert_into_aqe(format_version, spark_tmp_table_factory, partition_col_sql):
     """
     Test INSERT INTO with AQE enabled.
     """
-    table_prop = {"format-version": "2"}
+    table_prop = {"format-version": format_version}
 
     # Configuration with AQE enabled
     conf = copy_and_update(iceberg_write_enabled_conf, {
@@ -429,7 +445,8 @@ def test_insert_into_aqe(spark_tmp_table_factory, partition_col_sql):
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
-def test_insert_after_drop_partition_field(spark_tmp_table_factory):
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_insert_after_drop_partition_field(format_version, spark_tmp_table_factory):
     """Test INSERT on table after dropping a partition field (void transform).
     
     When a partition field is dropped, Iceberg creates a 'void transform' - 
@@ -440,7 +457,7 @@ def test_insert_after_drop_partition_field(spark_tmp_table_factory):
     cpu_table_name = f"{base_table_name}_cpu"
     gpu_table_name = f"{base_table_name}_gpu"
     
-    table_prop = {"format-version": "2"}
+    table_prop = {"format-version": format_version}
     # Use two partition columns so after dropping one, we still have at least one
     partition_col_sql = "bucket(8, _c2), bucket(8, _c3)"
     
@@ -486,11 +503,12 @@ def test_insert_after_drop_partition_field(spark_tmp_table_factory):
 @datagen_overrides(seed=0, reason='https://github.com/NVIDIA/spark-rapids-jni/issues/4016')
 @ignore_order(local=True)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
-def test_insert_into_partitioned_table_fanout_enabled(spark_tmp_table_factory):
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_insert_into_partitioned_table_fanout_enabled(format_version, spark_tmp_table_factory):
     # Use bucket(2, ...) to keep partition count low and avoid OOM from Iceberg's FanoutDataWriter.
     _do_test_insert_into_partitioned_table(
         spark_tmp_table_factory, "bucket(2, _c9)",
-        table_prop={"format-version": "2", "write.spark.fanout.enabled": "true"})
+        table_prop={"format-version": format_version, "write.spark.fanout.enabled": "true"}, format_version=format_version)
 
 
 # Regression for https://github.com/NVIDIA/spark-rapids/issues/14905 — the GPU writer
@@ -510,11 +528,12 @@ def test_insert_into_partitioned_table_fanout_enabled(spark_tmp_table_factory):
     (None, "zstd"),     # No override: Iceberg's default (zstd) must win on GPU too.
     ("zstd", "zstd"),
     ("uncompressed", "uncompressed")])
-def test_insert_into_table_honors_iceberg_compression_codec(
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_insert_into_table_honors_iceberg_compression_codec(format_version,
         spark_tmp_table_factory, table_codec, expected_codec):
     table_name = get_full_table_name(spark_tmp_table_factory)
 
-    extra_props = {"format-version": "2"}
+    extra_props = {"format-version": format_version}
     if table_codec is not None:
         extra_props["write.parquet.compression-codec"] = table_codec
 
@@ -551,11 +570,12 @@ def test_insert_into_table_honors_iceberg_compression_codec(
 @allow_non_gpu('AppendDataExec', 'ShuffleExchangeExec', 'ProjectExec')
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
 @pytest.mark.parametrize("codec", ["gzip", "lz4"])
-def test_insert_into_table_falls_back_on_unsupported_codec(spark_tmp_table_factory, codec):
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_insert_into_table_falls_back_on_unsupported_codec(format_version, spark_tmp_table_factory, codec):
     table_name = get_full_table_name(spark_tmp_table_factory)
     create_iceberg_table(
         table_name,
-        table_prop={"format-version": "2", "write.parquet.compression-codec": codec})
+        table_prop={"format-version": format_version, "write.parquet.compression-codec": codec})
 
     def insert_data(spark):
         df = gen_df(spark, list(zip(iceberg_base_table_cols, iceberg_gens_list)))

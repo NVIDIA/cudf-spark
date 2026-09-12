@@ -42,8 +42,8 @@ package org.apache.spark.sql.execution.datasources.v2
 
 import scala.util.control.NonFatal
 
-import ai.rapids.cudf.{ColumnVector => CudfColumnVector, Scalar => CudfScalar}
-import com.nvidia.spark.rapids.{GpuColumnarToRowExec, GpuColumnVector, GpuDeltaWrite, GpuExec, GpuMetric, GpuWrite}
+import ai.rapids.cudf.{ColumnVector => CudfColumnVector, Scalar => CudfScalar, Table => CudfTable}
+import com.nvidia.spark.rapids.{GpuColumnarToRowExec, GpuColumnVector, GpuDeltaBatchWriter, GpuDeltaWrite, GpuExec, GpuMetric, GpuWrite}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.shims.DeltaInsertFilter
@@ -60,7 +60,7 @@ import org.apache.spark.sql.errors.QueryExecutionErrors
 import org.apache.spark.sql.execution.{ExplainMode, QueryExecution, SparkPlan, SparkPlanInfo}
 import org.apache.spark.sql.execution.{SQLExecution, UnaryExecNode}
 import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanExec
-import org.apache.spark.sql.execution.datasources.v2.GpuDelteWritingSparkTask.filterByOperation
+import org.apache.spark.sql.execution.datasources.v2.GpuDelteWritingSparkTask.{filterByOperation, writeInserts}
 import org.apache.spark.sql.execution.metric.{CustomMetrics, SQLMetric, SQLMetrics}
 import org.apache.spark.sql.execution.ui.SparkListenerSQLAdaptiveExecutionUpdate
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
@@ -358,6 +358,13 @@ trait GpuWritingSparkTask[W <: DataWriter[ColumnarBatch]] extends Logging with S
 
   protected def write(writer: W, row: ColumnarBatch): Unit
 
+  protected def createWriter(
+      writerFactory: DataWriterFactory,
+      partitionId: Int,
+      taskId: Long): W = {
+    writerFactory.createWriter(partitionId, taskId).asInstanceOf[W]
+  }
+
   def run(
     writerFactory: DataWriterFactory,
     context: TaskContext,
@@ -369,7 +376,7 @@ trait GpuWritingSparkTask[W <: DataWriter[ColumnarBatch]] extends Logging with S
     val partId = context.partitionId()
     val taskId = context.taskAttemptId()
     val attemptId = context.attemptNumber()
-    val dataWriter = writerFactory.createWriter(partId, taskId).asInstanceOf[W]
+    val dataWriter = createWriter(writerFactory, partId, taskId)
 
     var count = 0L
     // write the data and commit this writer.
@@ -433,7 +440,8 @@ object GpuDataWritingSparkTask extends GpuWritingSparkTask[DataWriter[ColumnarBa
  * Applies projections to extract row data and metadata before writing.
  */
 case class GpuDeltaWritingSparkTask(
-    projs: WriteDeltaProjections) extends GpuWritingSparkTask[DeltaWriter[ColumnarBatch]] {
+    projs: WriteDeltaProjections)
+    extends GpuWritingSparkTask[DeltaWriter[ColumnarBatch] with GpuDeltaBatchWriter] {
 
   private lazy val rowProjection = projs.rowProjection
     .map(GpuProjectingColumnarBatch(_))
@@ -445,7 +453,9 @@ case class GpuDeltaWritingSparkTask(
   private lazy val rowIdProjection = GpuProjectingColumnarBatch(projs.rowIdProjection)
   private lazy val rowIdDataTypes = rowIdProjection.schema.fields.map(_.dataType)
 
-  override protected def write(writer: DeltaWriter[ColumnarBatch], batch: ColumnarBatch): Unit = {
+  override protected def write(
+      writer: DeltaWriter[ColumnarBatch] with GpuDeltaBatchWriter,
+      batch: ColumnarBatch): Unit = {
     withRetryNoSplit(batch) { _ =>
       val deleteFilter = filterByOperation(batch, DELETE_OPERATION)
       withResource(deleteFilter) { _ =>
@@ -479,17 +489,7 @@ case class GpuDeltaWritingSparkTask(
           }
         }
 
-        val insertFilter = DeltaInsertFilter.filterInsertRows(batch)
-        withResource(insertFilter) { _ =>
-          withResource(rowProjection.project(batch)) { rows =>
-            val filteredRows = GpuColumnVector.filter(rows, rowDataTypes, insertFilter)
-            if (filteredRows.numRows() > 0) {
-              writer.insert(filteredRows)
-            } else {
-              filteredRows.close()
-            }
-          }
-        }
+        writeInserts(writer, batch, rowProjection, None)
       }
     }
   }
@@ -500,7 +500,8 @@ case class GpuDeltaWritingSparkTask(
  * Applies both row and metadata projections before writing.
  */
 case class GpuDeltaWithMetadataWritingSparkTask(
-    projs: WriteDeltaProjections) extends GpuWritingSparkTask[DeltaWriter[ColumnarBatch]] {
+    projs: WriteDeltaProjections)
+    extends GpuWritingSparkTask[DeltaWriter[ColumnarBatch] with GpuDeltaBatchWriter] {
 
   private lazy val rowProjection = projs.rowProjection
     .map(GpuProjectingColumnarBatch(_))
@@ -519,7 +520,9 @@ case class GpuDeltaWithMetadataWritingSparkTask(
     .map(_.schema.fields.map(f => f.dataType))
     .orNull
 
-  override protected def write(writer: DeltaWriter[ColumnarBatch], batch: ColumnarBatch): Unit = {
+  override protected def write(
+      writer: DeltaWriter[ColumnarBatch] with GpuDeltaBatchWriter,
+      batch: ColumnarBatch): Unit = {
     withRetryNoSplit(batch) { _ =>
       if (metadataProjection != null) {
         val deleteFilter = filterByOperation(batch, DELETE_OPERATION)
@@ -570,23 +573,101 @@ case class GpuDeltaWithMetadataWritingSparkTask(
       }
 
       if (rowProjection != null) {
-        val insertFilter = DeltaInsertFilter.filterInsertRows(batch)
-        withResource(insertFilter) { _ =>
-          withResource(rowProjection.project(batch)) { rows =>
-            val filterRows = GpuColumnVector.filter(rows, rowDataTypes, insertFilter)
-            if (filterRows.numRows() > 0) {
-              writer.insert(filterRows)
-            } else {
-              filterRows.close()
-            }
-          }
-        }
+        writeInserts(writer, batch, rowProjection, Option(metadataProjection))
       }
     }
   }
 }
 
 object GpuDelteWritingSparkTask {
+  /**
+   * Writes INSERT and REINSERT rows from a mixed-operation batch in their original order.
+   * The operation is in the first column. A combined INSERT-or-REINSERT filter selects both the
+   * projected data rows and optional metadata; applying that same filter to the REINSERT flags
+   * produces a reinsertMask aligned with the selected rows. The writer receives all three inputs
+   * in one insertAndReinsert call. Metadata values are preserved here for the writer to interpret.
+   *
+   * For example, on Spark 4, with other columns omitted:
+   * {{{
+   * batch:
+   *   operation  partition  id  metadata._row_id
+   *   DELETE     A          9   109
+   *   REINSERT   A          1   101
+   *   INSERT     A          2   999
+   *   REINSERT   B          3   103
+   *   INSERT     B          4   888
+   *
+   * insertFilter   = [false, false, true,  false, true]
+   * reinsertFilter = [false, true,  false, true,  false]
+   * dataFilter     = [false, true,  true,  true,  true]
+   *
+   * rows:
+   *   partition  id
+   *   A          1
+   *   A          2
+   *   B          3
+   *   B          4
+   *
+   * metadata._row_id = [101, 999, 103, 888]
+   * reinsertMask     = [true, false, true, false]
+   * writer.insertAndReinsert(metadata, rows, reinsertMask)
+   * }}}
+   * Partition order remains A, A, B, B. Writing all REINSERTs before all INSERTs would instead
+   * produce A, B, A, B, causing clustered writers to revisit a closed partition. For Iceberg, the
+   * downstream appendLineage uses the mask to produce row IDs [101, null, 103, null]; this method
+   * does not clear the INSERT metadata itself.
+   *
+   * Spark 3 has no REINSERT operation; only INSERT rows are selected and passed to writer.insert.
+   * No writer call is made when no rows are selected. This method borrows batch and transfers
+   * ownership of the selected rows, metadata and reinsertMask to the writer.
+   */
+  private[v2] def writeInserts(
+      writer: DeltaWriter[ColumnarBatch] with GpuDeltaBatchWriter,
+      batch: ColumnarBatch,
+      rowProjection: GpuProjectingColumnarBatch,
+      metadataProjection: Option[GpuProjectingColumnarBatch]): Unit = {
+    val reinsertFilter = DeltaInsertFilter.reinsertOperation
+      .map(filterByOperation(batch, _)).orNull
+    withResource(reinsertFilter) { _ =>
+      val dataFilter = withResource(DeltaInsertFilter.filterInsertRows(batch)) { insertFilter =>
+        if (reinsertFilter == null) {
+          insertFilter.incRefCount()
+        } else {
+          insertFilter.or(reinsertFilter)
+        }
+      }
+      withResource(dataFilter) { _ =>
+        val rows = withResource(rowProjection.project(batch)) { projected =>
+          GpuColumnVector.filter(projected, rowProjection.schema.map(_.dataType).toArray,
+            dataFilter)
+        }
+        if (rows.numRows() == 0) {
+          withResource(rows) { _ => () }
+        } else if (reinsertFilter == null) {
+          writer.insert(rows)
+        } else {
+          // Keep INSERT and REINSERT rows together so partition ordering is not disturbed.
+          val metadata = closeOnExcept(rows) { _ =>
+            metadataProjection.map { projection =>
+              withResource(projection.project(batch)) { projected =>
+                GpuColumnVector.filter(projected, projection.schema.map(_.dataType).toArray,
+                  dataFilter)
+              }
+            }.orNull
+          }
+          val reinsertMask = closeOnExcept(Seq(metadata, rows)) { _ =>
+            withResource(new CudfTable(reinsertFilter)) { masks =>
+              withResource(masks.filter(dataFilter)) { filtered =>
+                filtered.getColumn(0).incRefCount()
+              }
+            }
+          }
+          writer.insertAndReinsert(metadata, rows, reinsertMask)
+        }
+      }
+    }
+  }
+
   private[v2] def filterByOperation(batch: ColumnarBatch, op: Int): CudfColumnVector = {
     withResource(CudfScalar.fromInt(op)) { cudfOp =>
       batch.column(0).asInstanceOf[GpuColumnVector].getBase.equalTo(cudfOp)

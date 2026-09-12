@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,24 +13,26 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+/*** spark-rapids-shim-json-lines
+{"spark": "400"}
+{"spark": "401"}
+{"spark": "402"}
+{"spark": "403"}
+{"spark": "404"}
+{"spark": "411"}
+{"spark": "412"}
+{"spark": "413"}
+{"spark": "420"}
+{"spark": "500"}
+spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids
 
-import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.connector.write.{DataWriter, DataWriterFactory, Write}
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.connector.write.DataWriter
+import org.apache.spark.sql.vectorized.ColumnarBatch
 
-trait GpuWrite extends Write {
-  var metrics: Map[String, GpuMetric] = Map.empty
-}
+trait GpuDataWriter extends DataWriter[ColumnarBatch] {
+  override def write(record: ColumnarBatch): Unit
 
-trait GpuDataWriterFactory extends DataWriterFactory {
-  def createWriter(
-      partitionId: Int,
-      taskId: Long,
-      metadataSchema: StructType): DataWriter[InternalRow]
-}
-
-// Allows use of GpuWrite from Java code
-abstract class GpuWriteWrapper extends GpuWrite {
+  override def write(metadata: ColumnarBatch, record: ColumnarBatch): Unit
 }

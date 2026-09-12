@@ -19,14 +19,11 @@ import pytest
 from asserts import assert_equal_with_local_sort, assert_gpu_fallback_collect
 from conftest import is_iceberg_remote_catalog
 from data_gen import gen_df, copy_and_update
-from iceberg import (create_iceberg_table,
-                     iceberg_base_table_cols,
-                     iceberg_gens_list, iceberg_full_gens_list,
-                     iceberg_nested_write_gens_list,
-                     get_full_table_name, iceberg_write_enabled_conf,
-                     iceberg_unsupported_mark, _build_tblprops,
-                     rtas_partition_transforms, supports_iceberg_v3,
-                     ICEBERG_V3_UNSUPPORTED_REASON)
+from iceberg import (
+    iceberg_format_versions, create_iceberg_table, iceberg_base_table_cols, iceberg_gens_list,
+    iceberg_full_gens_list, iceberg_nested_write_gens_list, get_full_table_name,
+    iceberg_write_enabled_conf, iceberg_unsupported_mark, _build_tblprops, rtas_partition_transforms,
+    supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON)
 from marks import iceberg, ignore_order, allow_non_gpu, allow_non_gpu_conditional, datagen_overrides
 from spark_session import with_gpu_session, with_cpu_session, is_spark_400_or_later
 
@@ -100,9 +97,10 @@ def _assert_gpu_equals_cpu_rtas(spark_tmp_table_factory,
 
 @iceberg
 @ignore_order(local=True)
-def test_rtas_unpartitioned_table(spark_tmp_table_factory):
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_rtas_unpartitioned_table(format_version, spark_tmp_table_factory):
     table_prop = {
-        "format-version": "2"
+        "format-version": format_version
     }
 
     df_gen = lambda spark: gen_df(spark, list(zip(iceberg_base_table_cols, iceberg_gens_list)))
@@ -132,14 +130,15 @@ def test_rtas_v3_fallback(spark_tmp_table_factory):
     assert_gpu_fallback_collect(
         run_rtas,
         "AtomicReplaceTableAsSelectExec",
-        conf=iceberg_write_enabled_conf)
+        conf=copy_and_update(iceberg_write_enabled_conf, {"spark.rapids.sql.format.iceberg.v3.enabled": "false"}))
 
 
-def _do_test_rtas_partitioned_table(spark_tmp_table_factory, partition_col_sql, table_prop=None):
+def _do_test_rtas_partitioned_table(
+        spark_tmp_table_factory, partition_col_sql, table_prop=None, format_version="2"):
     """Helper function for partitioned table RTAS tests."""
     if table_prop is None:
         table_prop = {
-            "format-version": "2"
+            "format-version": format_version
         }
 
     df_gen = lambda spark: gen_df(spark, list(zip(iceberg_base_table_cols, iceberg_gens_list)))
@@ -156,9 +155,10 @@ def _do_test_rtas_partitioned_table(spark_tmp_table_factory, partition_col_sql, 
 @pytest.mark.parametrize("partition_col_sql", [
     pytest.param("year(_c9)", id="year(timestamp_col)"),
 ])
-def test_rtas_partitioned_table(spark_tmp_table_factory, partition_col_sql):
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_rtas_partitioned_table(format_version, spark_tmp_table_factory, partition_col_sql):
     """Basic partition test - runs for all catalogs including remote."""
-    _do_test_rtas_partitioned_table(spark_tmp_table_factory, partition_col_sql)
+    _do_test_rtas_partitioned_table(spark_tmp_table_factory, partition_col_sql, format_version=format_version)
 
 
 @iceberg
@@ -167,20 +167,22 @@ def test_rtas_partitioned_table(spark_tmp_table_factory, partition_col_sql):
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
 @pytest.mark.parametrize("partition_col_sql", rtas_partition_transforms)
 @allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
-def test_rtas_partitioned_table_full_coverage(spark_tmp_table_factory, partition_col_sql):
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_rtas_partitioned_table_full_coverage(format_version, spark_tmp_table_factory, partition_col_sql):
     """Sanity-check RTAS against a few partition transforms distinct from those
     picked by other DML ops. The 26-transform partition-writer coverage anchor
     lives in iceberg_append_test.py::test_insert_into_partitioned_table_full_coverage."""
-    _do_test_rtas_partitioned_table(spark_tmp_table_factory, partition_col_sql)
+    _do_test_rtas_partitioned_table(spark_tmp_table_factory, partition_col_sql, format_version=format_version)
 
 
 @iceberg
 @ignore_order(local=True)
 @allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
-def test_create_or_replace_table(spark_tmp_table_factory):
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_create_or_replace_table(format_version, spark_tmp_table_factory):
     """Test CREATE OR REPLACE TABLE AS SELECT when table doesn't exist"""
     table_prop = {
-        "format-version": "2"
+        "format-version": format_version
     }
 
     base_name = get_full_table_name(spark_tmp_table_factory)
@@ -208,10 +210,11 @@ def test_create_or_replace_table(spark_tmp_table_factory):
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
 @pytest.mark.parametrize("file_format", ["orc", "avro"], ids=lambda x: f"file_format={x}")
 @allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
-def test_rtas_unsupported_file_format_fallback(spark_tmp_table_factory,
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_rtas_unsupported_file_format_fallback(format_version, spark_tmp_table_factory,
                                                file_format):
     table_prop = {
-        "format-version": "2",
+        "format-version": format_version,
         "write.format.default": file_format
     }
 
@@ -241,10 +244,11 @@ def test_rtas_unsupported_file_format_fallback(spark_tmp_table_factory,
                                       "spark.rapids.sql.format.iceberg.write.enabled"],
                          ids=lambda x: f"{x}=False")
 @allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
-def test_rtas_fallback_when_conf_disabled(spark_tmp_table_factory,
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_rtas_fallback_when_conf_disabled(format_version, spark_tmp_table_factory,
                                           conf_key):
     table_prop = {
-        "format-version": "2"
+        "format-version": format_version
     }
 
     def run_rtas(spark):
@@ -269,9 +273,10 @@ def test_rtas_fallback_when_conf_disabled(spark_tmp_table_factory,
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
-def test_rtas_unpartitioned_table_nested_types(spark_tmp_table_factory):
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_rtas_unpartitioned_table_nested_types(format_version, spark_tmp_table_factory):
     table_prop = {
-        "format-version": "2"
+        "format-version": format_version
     }
 
     cols = [f"_c{idx}" for idx, _ in enumerate(iceberg_nested_write_gens_list)]
@@ -285,10 +290,11 @@ def test_rtas_unpartitioned_table_nested_types(spark_tmp_table_factory):
 @ignore_order(local=True)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
 @allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
-def test_rtas_unpartitioned_table_all_cols(spark_tmp_table_factory):
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_rtas_unpartitioned_table_all_cols(format_version, spark_tmp_table_factory):
     """Test RTAS on unpartitioned table with all Iceberg write types on GPU."""
     table_prop = {
-        "format-version": "2"
+        "format-version": format_version
     }
 
     cols = [f"_c{idx}" for idx, _ in enumerate(iceberg_full_gens_list)]
@@ -301,9 +307,10 @@ def test_rtas_unpartitioned_table_all_cols(spark_tmp_table_factory):
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
-def test_rtas_partitioned_table_nested_types(spark_tmp_table_factory):
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_rtas_partitioned_table_nested_types(format_version, spark_tmp_table_factory):
     table_prop = {
-        "format-version": "2"
+        "format-version": format_version
     }
 
     cols = [f"_c{idx}" for idx, _ in enumerate(iceberg_nested_write_gens_list)]
@@ -320,10 +327,11 @@ def test_rtas_partitioned_table_nested_types(spark_tmp_table_factory):
 @ignore_order(local=True)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
 @allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
-def test_rtas_partitioned_table_all_cols(spark_tmp_table_factory):
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_rtas_partitioned_table_all_cols(format_version, spark_tmp_table_factory):
     """Test RTAS on partitioned table with all Iceberg write types on GPU."""
     table_prop = {
-        "format-version": "2"
+        "format-version": format_version
     }
 
     cols = [f"_c{idx}" for idx, _ in enumerate(iceberg_full_gens_list)]
@@ -342,10 +350,11 @@ def test_rtas_partitioned_table_all_cols(spark_tmp_table_factory):
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
 @pytest.mark.parametrize("partition_table", [True, False], ids=lambda x: f"partition_table={x}")
 @allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
-def test_rtas_from_values(spark_tmp_table_factory,
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_rtas_from_values(format_version, spark_tmp_table_factory,
                           partition_table):
     table_prop = {
-        "format-version": "2"
+        "format-version": format_version
     }
 
     base_name = get_full_table_name(spark_tmp_table_factory)
@@ -356,7 +365,11 @@ def test_rtas_from_values(spark_tmp_table_factory,
         # Create initial table
         initial_df_gen = lambda sp: gen_df(sp, [("id", iceberg_gens_list[0]), ("name", iceberg_gens_list[1])])
         partition_col_sql = "bucket(8, id)" if partition_table else None
-        create_iceberg_table(target_table, partition_col_sql, table_prop, initial_df_gen)
+        create_iceberg_table(
+            target_table,
+            partition_col_sql,
+            table_prop,
+            initial_df_gen)
         
         # Execute RTAS
         partition_clause = "" if not partition_table else "PARTITIONED BY (bucket(8, id)) "
@@ -383,12 +396,13 @@ def test_rtas_from_values(spark_tmp_table_factory,
     pytest.param(None, id="unpartitioned"),
     pytest.param("year(_c9)", id="year_partition"),
 ])
-def test_rtas_aqe(spark_tmp_table_factory, partition_col_sql):
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_rtas_aqe(format_version, spark_tmp_table_factory, partition_col_sql):
     """
     Test REPLACE TABLE AS SELECT with AQE enabled.
     """
     table_prop = {
-        "format-version": "2",
+        "format-version": format_version,
     }
 
     df_gen = lambda spark: gen_df(spark, list(zip(iceberg_base_table_cols, iceberg_gens_list)))
@@ -411,9 +425,10 @@ def test_rtas_aqe(spark_tmp_table_factory, partition_col_sql):
 @datagen_overrides(seed=0, reason='https://github.com/NVIDIA/spark-rapids-jni/issues/4016')
 @ignore_order(local=True)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
-def test_rtas_partitioned_table_fanout_enabled(spark_tmp_table_factory):
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_rtas_partitioned_table_fanout_enabled(format_version, spark_tmp_table_factory):
     # Use bucket(2, ...) to keep partition count low and avoid OOM from Iceberg's FanoutDataWriter.
     _do_test_rtas_partitioned_table(
         spark_tmp_table_factory,
         "bucket(2, _c9)",
-        table_prop={"format-version": "2", "write.spark.fanout.enabled": "true"})
+        table_prop={"format-version": format_version, "write.spark.fanout.enabled": "true"}, format_version=format_version)

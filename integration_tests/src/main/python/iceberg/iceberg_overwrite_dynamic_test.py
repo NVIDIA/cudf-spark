@@ -18,12 +18,11 @@ import pytest
 from asserts import assert_equal_with_local_sort, assert_gpu_fallback_collect
 from conftest import is_iceberg_remote_catalog
 from data_gen import gen_df, copy_and_update
-from iceberg import create_iceberg_table, \
-    iceberg_base_table_cols, iceberg_gens_list, \
-    get_full_table_name, iceberg_full_gens_list, iceberg_nested_write_gens_list, \
-    iceberg_write_enabled_conf, iceberg_unsupported_mark, \
-    overwrite_dynamic_partition_transforms, supports_iceberg_v3, \
-    ICEBERG_V3_UNSUPPORTED_REASON
+from iceberg import (
+    iceberg_format_versions, create_iceberg_table, iceberg_base_table_cols, iceberg_gens_list,
+    get_full_table_name, iceberg_full_gens_list, iceberg_nested_write_gens_list,
+    iceberg_write_enabled_conf, iceberg_unsupported_mark, overwrite_dynamic_partition_transforms,
+    supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON)
 from marks import iceberg, ignore_order, allow_non_gpu, allow_non_gpu_conditional, datagen_overrides
 from spark_session import with_gpu_session, with_cpu_session, is_spark_400_or_later
 
@@ -84,9 +83,10 @@ def do_test_insert_overwrite_dynamic(spark_tmp_table_factory,
 
 @iceberg
 @ignore_order(local=True)
-def test_insert_overwrite_dynamic_unpartitioned_table(spark_tmp_table_factory):
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_insert_overwrite_dynamic_unpartitioned_table(format_version, spark_tmp_table_factory):
     """Test dynamic overwrite on unpartitioned tables - should run on GPU."""
-    table_prop = {"format-version": "2"}
+    table_prop = {"format-version": format_version}
 
     do_test_insert_overwrite_dynamic(
         spark_tmp_table_factory,
@@ -115,13 +115,14 @@ def test_insert_overwrite_dynamic_v3_table_fallback(spark_tmp_table_factory):
     assert_gpu_fallback_collect(
         lambda spark: insert_data(spark, None),
         "OverwritePartitionsDynamicExec",
-        conf=dynamic_overwrite_conf)
+        conf=copy_and_update(dynamic_overwrite_conf, {"spark.rapids.sql.format.iceberg.v3.enabled": "false"}))
 
 
-def _do_test_insert_overwrite_dynamic_partitioned(spark_tmp_table_factory, partition_col_sql, table_prop=None):
+def _do_test_insert_overwrite_dynamic_partitioned(
+        spark_tmp_table_factory, partition_col_sql, table_prop=None, format_version="2"):
     """Helper function for partitioned table dynamic overwrite tests."""
     if table_prop is None:
-        table_prop = {"format-version": "2"}
+        table_prop = {"format-version": format_version}
 
     def create_table_with_partition(table_name: str):
         create_iceberg_table(
@@ -140,9 +141,13 @@ def _do_test_insert_overwrite_dynamic_partitioned(spark_tmp_table_factory, parti
 @pytest.mark.parametrize("partition_col_sql", [
     pytest.param("year(_c9)", id="year(timestamp_col)"),
 ])
-def test_insert_overwrite_dynamic_bucket_partitioned(spark_tmp_table_factory, partition_col_sql):
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_insert_overwrite_dynamic_bucket_partitioned(format_version, spark_tmp_table_factory, partition_col_sql):
     """Basic partition test - runs for all catalogs including remote."""
-    _do_test_insert_overwrite_dynamic_partitioned(spark_tmp_table_factory, partition_col_sql)
+    _do_test_insert_overwrite_dynamic_partitioned(
+        spark_tmp_table_factory,
+        partition_col_sql,
+        format_version=format_version)
 
 
 @iceberg
@@ -151,20 +156,26 @@ def test_insert_overwrite_dynamic_bucket_partitioned(spark_tmp_table_factory, pa
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
 @pytest.mark.parametrize("partition_col_sql", overwrite_dynamic_partition_transforms)
 @allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
-def test_insert_overwrite_dynamic_bucket_partitioned_full_coverage(spark_tmp_table_factory, partition_col_sql):
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_insert_overwrite_dynamic_bucket_partitioned_full_coverage(
+        format_version, spark_tmp_table_factory, partition_col_sql):
     """Sanity-check dynamic INSERT OVERWRITE against a few partition transforms
     distinct from those picked by other DML ops. The 26-transform partition-writer
     coverage anchor lives in
     iceberg_append_test.py::test_insert_into_partitioned_table_full_coverage."""
-    _do_test_insert_overwrite_dynamic_partitioned(spark_tmp_table_factory, partition_col_sql)
+    _do_test_insert_overwrite_dynamic_partitioned(
+        spark_tmp_table_factory,
+        partition_col_sql,
+        format_version=format_version)
 
 
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
-def test_insert_overwrite_dynamic_nested_types(spark_tmp_table_factory):
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_insert_overwrite_dynamic_nested_types(format_version, spark_tmp_table_factory):
     """Test INSERT OVERWRITE with dynamic mode on Iceberg-native nested types on GPU."""
-    table_prop = {"format-version": "2"}
+    table_prop = {"format-version": format_version}
     cols = [f"_c{idx}" for idx, _ in enumerate(iceberg_nested_write_gens_list)]
     gen_list = list(zip(cols, iceberg_nested_write_gens_list))
 
@@ -209,9 +220,10 @@ def test_insert_overwrite_dynamic_nested_types(spark_tmp_table_factory):
 @ignore_order(local=True)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
 @allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
-def test_insert_overwrite_dynamic_all_cols(spark_tmp_table_factory):
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_insert_overwrite_dynamic_all_cols(format_version, spark_tmp_table_factory):
     """Test INSERT OVERWRITE with dynamic mode on all Iceberg write types on GPU."""
-    table_prop = {"format-version": "2"}
+    table_prop = {"format-version": format_version}
     cols = [f"_c{idx}" for idx, _ in enumerate(iceberg_full_gens_list)]
     gen_list = list(zip(cols, iceberg_full_gens_list))
 
@@ -258,10 +270,11 @@ def test_insert_overwrite_dynamic_all_cols(spark_tmp_table_factory):
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
 @pytest.mark.parametrize("file_format", ["orc", "avro"], ids=lambda x: f"file_format={x}")
 @allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
-def test_insert_overwrite_dynamic_unsupported_file_format_fallback(
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_insert_overwrite_dynamic_unsupported_file_format_fallback(format_version,
         spark_tmp_table_factory, file_format):
     """Test that INSERT OVERWRITE falls back to CPU with unsupported file formats."""
-    table_prop = {"format-version": "2",
+    table_prop = {"format-version": format_version,
                   "write.format.default": file_format}
 
     table_name = get_full_table_name(spark_tmp_table_factory)
@@ -300,10 +313,11 @@ def test_insert_overwrite_dynamic_unsupported_file_format_fallback(
 @pytest.mark.parametrize("conf_key", ["spark.rapids.sql.format.iceberg.enabled",
                                       "spark.rapids.sql.format.iceberg.write.enabled"],
                          ids=lambda x: f"{x}=False")
-def test_insert_overwrite_dynamic_fallback_when_conf_disabled(
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_insert_overwrite_dynamic_fallback_when_conf_disabled(format_version,
         spark_tmp_table_factory, conf_key):
     """Test that INSERT OVERWRITE falls back to CPU when Iceberg write is disabled."""
-    table_prop = {"format-version": "2"}
+    table_prop = {"format-version": format_version}
 
     table_name = get_full_table_name(spark_tmp_table_factory)
 
@@ -340,12 +354,13 @@ def test_insert_overwrite_dynamic_fallback_when_conf_disabled(
 @pytest.mark.parametrize("partition_col_sql", [
     pytest.param("year(_c9)", id="year_partition"),
 ])
-def test_overwrite_dynamic_aqe(spark_tmp_table_factory, partition_col_sql):
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_overwrite_dynamic_aqe(format_version, spark_tmp_table_factory, partition_col_sql):
     """
     Test INSERT OVERWRITE (dynamic partitions) with AQE enabled.
     """
     table_prop = {
-        'format-version': '2',
+        'format-version': format_version,
     }
 
     # Configuration with AQE enabled
@@ -385,7 +400,8 @@ def test_overwrite_dynamic_aqe(spark_tmp_table_factory, partition_col_sql):
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
-def test_insert_overwrite_dynamic_after_drop_partition_field(spark_tmp_table_factory):
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_insert_overwrite_dynamic_after_drop_partition_field(format_version, spark_tmp_table_factory):
     """Test INSERT OVERWRITE (dynamic mode) on table after dropping a partition field (void transform).
     
     When a partition field is dropped, Iceberg creates a 'void transform' - 
@@ -397,7 +413,7 @@ def test_insert_overwrite_dynamic_after_drop_partition_field(spark_tmp_table_fac
     cpu_table_name = f"{base_table_name}_cpu"
     gpu_table_name = f"{base_table_name}_gpu"
     
-    table_prop = {"format-version": "2"}
+    table_prop = {"format-version": format_version}
     # Use two partition columns so after dropping one, we still have at least one
     partition_col_sql = "bucket(8, _c2), bucket(8, _c3)"
     
@@ -450,9 +466,10 @@ def test_insert_overwrite_dynamic_after_drop_partition_field(spark_tmp_table_fac
 @datagen_overrides(seed=0, reason='https://github.com/NVIDIA/spark-rapids-jni/issues/4016')
 @ignore_order(local=True)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
-def test_insert_overwrite_dynamic_partitioned_fanout_enabled(spark_tmp_table_factory):
+@pytest.mark.parametrize("format_version", iceberg_format_versions)
+def test_insert_overwrite_dynamic_partitioned_fanout_enabled(format_version, spark_tmp_table_factory):
     # Use bucket(2, ...) to keep partition count low and avoid OOM from Iceberg's FanoutDataWriter.
     _do_test_insert_overwrite_dynamic_partitioned(
         spark_tmp_table_factory,
         "bucket(2, _c9)",
-        table_prop={"format-version": "2", "write.spark.fanout.enabled": "true"})
+        table_prop={"format-version": format_version, "write.spark.fanout.enabled": "true"}, format_version=format_version)
