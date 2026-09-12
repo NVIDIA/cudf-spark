@@ -167,6 +167,15 @@ def ensure_external_artifact(group_id, artifact_id, version):
     return artifact_path
 
 
+def ensure_system_artifact(path):
+    if not os.path.isabs(path):
+        raise Exception("system Iceberg runtime path is not absolute: %s" % path)
+    resolved_path = os.path.realpath(path)
+    if not os.path.isfile(resolved_path):
+        raise Exception("system Iceberg runtime is missing: %s" % resolved_path)
+    return resolved_path
+
+
 def root_safe_module_class_members(classifier):
     members = set()
     for module in root_safe_modules:
@@ -196,6 +205,10 @@ maven_repository = project.getProperty('maven.local.repository')
 dist_dir = os.sep.join([source_basedir, 'dist'])
 iceberg_runtime = {}
 execfile(os.path.join(dist_dir, 'build', 'iceberg_runtime.py'), iceberg_runtime)
+system_iceberg_runtime = iceberg_runtime["system_runtime_path"](project.getProperty)
+if system_iceberg_runtime and len(buildver_list) != 1:
+    raise Exception("%s is supported only for single-shim builds" %
+                    iceberg_runtime["SYSTEM_RUNTIME_PROPERTY"])
 runtime_manifest = os.path.join(project_build_dir, 'iceberg-audit-runtimes.txt')
 with open(os.sep.join([dist_dir, 'unshimmed-common-from-single-shim.txt']), 'r') as f:
     from_single_shim = f.read().splitlines()
@@ -218,6 +231,9 @@ for bv in buildver_list:
                     ensure_external_artifact(group_id, artifact_id, version)
                     for group_id, artifact_id, version in coordinates
                 ]
+                if system_iceberg_runtime:
+                    iceberg_audit_runtimes[bv].append(
+                        ensure_system_artifact(system_iceberg_runtime))
             if project.getProperty('should.build.conventional.jar'):
                 zip_handle.extractall(path=top_dist_jar_dir)
             else:

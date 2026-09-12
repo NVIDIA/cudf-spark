@@ -50,3 +50,10 @@ with `build/iceberg_runtime.py`, resolves the runtime jars, and writes the gener
 manifest. Fix failures by making the caller root-safe through
 `root-safe-module-classes.txt` or, for exceptional per-class placement, the applicable
 `unshimmed-*.txt` input above.
+
+Single-shim builds where every real Iceberg integration module uses the same non-Maven
+runtime can add its absolute local jar path with
+`-Drapids.iceberg.audit.runtime.path=...`. This replaces Maven-coordinate discovery for
+the selected aggregator: every real Iceberg integration module must declare zero Maven
+Iceberg runtime dependencies, and the supplied path is used to audit all of them. Missing,
+empty, or otherwise ambiguous runtime inputs fail the build.
