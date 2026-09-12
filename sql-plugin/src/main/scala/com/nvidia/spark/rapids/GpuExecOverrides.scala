@@ -161,9 +161,11 @@ private[rapids] object GpuExecOverrides {
     exec[HashAggregateExec](
       "The backend for hash based aggregations",
       ExecChecks(
-        (TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128 + TypeSig.BINARY +
+        ((TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128 + TypeSig.BINARY +
           TypeSig.MAP + TypeSig.ARRAY + TypeSig.STRUCT)
-            .nested()
+            .nested() + TypeSig.ansiIntervals)
+            .withPsNote(Seq(TypeEnum.DAYTIME, TypeEnum.YEARMONTH),
+              "not allowed for grouping expressions")
             .withPsNote(TypeEnum.MAP,
               "not allowed for grouping expressions")
             .withPsNote(TypeEnum.ARRAY,

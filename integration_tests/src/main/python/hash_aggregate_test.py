@@ -2029,35 +2029,53 @@ def test_reduction_with_max_by_same(data_gen):
 
 @pytest.mark.parametrize(
     'data_gen', all_gen + [
-        pytest.param(
-            DayTimeIntervalGen(),
-            marks=[
-                pytest.mark.xfail(
-                    reason='https://github.com/NVIDIA/cudf-spark/issues/15776',
-                    strict=True),
-                validate_execs_in_gpu_plan('GpuHashAggregateExec')
-            ])
+        DayTimeIntervalGen()
     ] + _nested_gens, ids=idfn)
 @allow_non_gpu(*non_utc_allow)
 def test_count(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark : unary_op_df(spark, data_gen) \
-            .selectExpr(
+    conf = {'spark.sql.legacy.allowParameterlessCount': 'true'}
+
+    def do_count(spark):
+        return unary_op_df(spark, data_gen).selectExpr(
             'count(a)',
             'count()',
             'count()',
-            'count(1)'),
-        conf = {'spark.sql.legacy.allowParameterlessCount': 'true'})
+            'count(1)')
 
-@pytest.mark.xfail(
-    reason='https://github.com/NVIDIA/cudf-spark/issues/15776', strict=True)
-@validate_execs_in_gpu_plan('GpuHashAggregateExec')
+    if isinstance(data_gen, DayTimeIntervalGen):
+        assert_cpu_and_gpu_are_equal_collect_with_capture(
+            do_count,
+            exist_classes='GpuHashAggregateExec',
+            conf=conf)
+    else:
+        assert_gpu_and_cpu_are_equal_collect(do_count, conf=conf)
+
+@allow_non_gpu('CaseWhen', 'EqualTo', 'Remainder')
 def test_count_year_month_interval():
-    assert_gpu_and_cpu_are_equal_collect(
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: spark.range(4).selectExpr(
             "INTERVAL '0-1' YEAR TO MONTH * "
             "CASE WHEN id % 2 = 0 THEN 1 END AS a")
-        .selectExpr("count(a)"))
+        .selectExpr("count(a)"),
+        exist_classes='GpuHashAggregateExec')
+
+@allow_non_gpu('HashAggregateExec', 'ShuffleExchangeExec', 'HashPartitioning')
+def test_distinct_count_day_time_interval_fallback():
+    assert_gpu_fallback_collect(
+        lambda spark: unary_op_df(spark, DayTimeIntervalGen())
+            .selectExpr("count(DISTINCT a)"),
+        'HashAggregateExec')
+
+@allow_non_gpu(
+    'HashAggregateExec', 'ShuffleExchangeExec', 'HashPartitioning',
+    'CaseWhen', 'EqualTo', 'Remainder')
+def test_distinct_count_year_month_interval_fallback():
+    assert_gpu_fallback_collect(
+        lambda spark: spark.range(4).selectExpr(
+            "INTERVAL '0-1' YEAR TO MONTH * "
+            "CASE WHEN id % 2 = 0 THEN 1 END AS a")
+        .selectExpr("count(DISTINCT a)"),
+        'HashAggregateExec')
 
 @pytest.mark.parametrize('data_gen', all_basic_gens, ids=idfn)
 @allow_non_gpu(*non_utc_allow)
