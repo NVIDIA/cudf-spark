@@ -1972,6 +1972,7 @@ This will force full Scala code rebuild in downstream modules.
                         <exclude>**/src/main/java/com/nvidia/spark/rapids/format/*</exclude>
                         <exclude>**/*.csv</exclude>
                         <exclude>scripts/with_resource_nesting_baseline.json</exclude>
+                        <exclude>iceberg/iceberg-versions.json</exclude>
                         <exclude>dist/*.txt</exclude>
                         <exclude>**/META-INF/com.nvidia.spark.rapids.SparkShimServiceProvider</exclude>
                         <!-- Apache Rat excludes target folder for projects that are included by
@@ -2055,7 +2056,7 @@ This will force full Scala code rebuild in downstream modules.
                                     <arg value="-s"/>
                                     <arg value="scripts/tests"/>
                                     <arg value="-p"/>
-                                    <arg value="test_check_with_resource_nesting.py"/>
+                                    <arg value="test_*.py"/>
                                 </exec>
                                 <!-- Existing nesting exceptions are tracked by
                                      https://github.com/NVIDIA/cudf-spark/issues/11713. -->

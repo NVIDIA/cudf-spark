@@ -540,6 +540,9 @@ properly without it. These tests assume Iceberg is not configured and are disabl
 If Spark has been configured to support Iceberg then these tests can be enabled by adding the
 `--iceberg` option to the command.
 
+Set `ICEBERG_TEST_FAST_RUN=1` to skip redundant, high-cost cases while retaining tests that
+specifically require a local Hadoop catalog. The flag defaults to `0` when it is not set.
+
 When testing Iceberg package-private access paths, load the local Iceberg runtime jar with
 `ICEBERG_EXTRA_CLASSPATH` instead of `PYSP_TEST_spark_jars` or
 `PYSP_TEST_spark_jars_packages`. The test driver will place the RAPIDS, test, and Iceberg
