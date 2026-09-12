@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,8 +19,10 @@ package com.nvidia.spark.rapids
 import scala.collection.mutable
 
 import ai.rapids.cudf.Table
+import com.nvidia.spark.Retryable
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 
+import org.apache.spark.TaskContext
 import org.apache.spark.sql.types.DataType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -58,6 +60,13 @@ trait GpuDataProducer[T] extends AutoCloseable {
     }
   }
 }
+
+/**
+ * A table producer whose state can be checkpointed and restored across an RMM retry.
+ * Implementations must keep their inputs alive until close and reproduce the next table after
+ * restore without skipping or duplicating previously returned data.
+ */
+private[rapids] trait RetryableTableProducer extends GpuDataProducer[Table] with Retryable
 
 object GpuDataProducer {
   /**
@@ -153,6 +162,16 @@ object CachedGpuBatchIterator {
 
   def apply(producer: GpuDataProducer[Table],
       dataTypes: Array[DataType]): GpuColumnarBatchIterator = {
+    producer match {
+      case retryable: RetryableTableProducer if RangeInputBatching.isActive =>
+        new RangeGpuDataProducerIterator(retryable, dataTypes)
+      case _ =>
+        cacheProducer(producer, dataTypes)
+    }
+  }
+
+  private def cacheProducer(producer: GpuDataProducer[Table],
+      dataTypes: Array[DataType]): GpuColumnarBatchIterator = {
     withResource(producer) { _ =>
       if (producer.hasNext) {
         // Special case for the first one.
@@ -176,4 +195,47 @@ object CachedGpuBatchIterator {
       }
     }
   }
+}
+
+/**
+ * Streams a restartable GPU table producer one batch at a time into a range shuffle.
+ *
+ * CachedGpuBatchIterator normally drains a chunked file reader eagerly so the producer can be
+ * closed before the GPU semaphore is released. A range shuffle consumes its input synchronously,
+ * and draining a wide reader there materializes several decoded batches before any of them can be
+ * partitioned. The restartable producer keeps native progress retry-safe while this
+ * iterator bounds live decoded data to the batch currently being partitioned.
+ */
+private class RangeGpuDataProducerIterator(
+    producer: RetryableTableProducer,
+    dataTypes: Array[DataType]) extends GpuColumnarBatchIterator(true) {
+
+  private def retry[T](body: => T): T = {
+    producer.checkpoint()
+    RmmRapidsRetryIterator.withRetryNoSplit {
+      RmmRapidsRetryIterator.withRestoreOnRetry(producer)(body)
+    }
+  }
+
+  override def hasNext: Boolean = closeOnExcept(this) { _ =>
+    val more = retry {
+      GpuSemaphore.acquireIfNecessary(TaskContext.get())
+      producer.hasNext
+    }
+    if (!more) {
+      close()
+    }
+    more
+  }
+
+  override def next(): ColumnarBatch = closeOnExcept(this) { _ =>
+    retry {
+      GpuSemaphore.acquireIfNecessary(TaskContext.get())
+      withResource(producer.next) { table =>
+        GpuColumnVector.from(table, dataTypes)
+      }
+    }
+  }
+
+  override def doClose(): Unit = producer.close()
 }

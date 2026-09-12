@@ -3566,22 +3566,22 @@ abstract class AbstractParquetTableReader(
     clippedParquetSchema: MessageType,
     splits: Array[PartitionedFile],
     debugDumpPrefix: Option[String],
-    debugDumpAlways: Boolean) extends GpuDataProducer[Table] with Logging {
+    debugDumpAlways: Boolean) extends RetryableTableProducer with Logging {
 
-  protected val reader: ChunkedReader
+  protected def createReader(): ChunkedReader
+
+  protected def additionalResources: Seq[AutoCloseable] = Seq.empty
 
   private[this] lazy val splitsString = splits.mkString("; ")
-
-  // Should be lazy since the reader is not defined. Otherwise in practise, a native
-  // chunk reader will be leaked.
-  protected lazy val resources: Seq[AutoCloseable] = Seq(reader) ++ buffers
-
-  override def hasNext: Boolean = reader.hasNext
+  private var activeReader: ChunkedReader = _
+  private var completedChunks = 0
+  private var checkpointedChunks = 0
+  private var closed = false
 
   protected def postProcessChunk(chunk: Table): Table
 
-  override def next: Table = {
-    val table = NvtxIdWithMetrics(NvtxRegistry.PARQUET_DECODE, metrics(GPU_DECODE_TIME)) {
+  private def decodeNext(reader: ChunkedReader): Table = {
+    NvtxIdWithMetrics(NvtxRegistry.PARQUET_DECODE, metrics(GPU_DECODE_TIME)) {
       try {
         reader.next
       } catch {
@@ -3597,9 +3597,11 @@ abstract class AbstractParquetTableReader(
           throw new IOException(s"Error when processing $splitsString$dumpMsg", e)
       }
     }
+  }
 
-    val postProcessedTable = postProcessChunk(table)
-
+  private def readNext(reader: ChunkedReader): Table = {
+    val table = decodeNext(reader)
+    val postProcessedTable = closeOnExcept(table)(postProcessChunk)
     closeOnExcept(postProcessedTable) { _ =>
       GpuParquetScan.throwIfRebaseNeededInExceptionMode(postProcessedTable, dateRebaseMode,
         timestampRebaseMode)
@@ -3617,8 +3619,54 @@ abstract class AbstractParquetTableReader(
     outputTable
   }
 
+  private def closeReader(): Unit = {
+    val reader = activeReader
+    activeReader = null
+    if (reader != null) {
+      reader.close()
+    }
+  }
+
+  private def getReader: ChunkedReader = {
+    if (activeReader == null) {
+      require(!closed, "Parquet table reader is closed")
+      val reader = createReader()
+      closeOnExcept(reader) { _ =>
+        var replayed = 0
+        while (replayed < completedChunks) {
+          require(reader.hasNext,
+            s"Unable to restore Parquet reader to chunk $completedChunks")
+          withResource(decodeNext(reader))(_ => ())
+          replayed += 1
+        }
+        activeReader = reader
+      }
+    }
+    activeReader
+  }
+
+  override def hasNext: Boolean = getReader.hasNext
+
+  override def next: Table = {
+    val result = readNext(getReader)
+    completedChunks += 1
+    result
+  }
+
+  override def checkpoint(): Unit = checkpointedChunks = completedChunks
+
+  override def restore(): Unit = {
+    completedChunks = checkpointedChunks
+    closeReader()
+  }
+
   override def close(): Unit = {
-    resources.safeClose()
+    if (!closed) {
+      closed = true
+      val reader = Option(activeReader).toSeq
+      activeReader = null
+      (reader ++ buffers ++ additionalResources).safeClose()
+    }
   }
 }
 
@@ -3642,7 +3690,7 @@ case class ParquetTableReader(
   opts, buffers, metrics, dateRebaseMode, timestampRebaseMode, isSchemaCaseSensitive, useFieldId,
   readDataSchema, clippedParquetSchema, splits, debugDumpPrefix, debugDumpAlways) {
 
-  override protected val reader: ChunkedReader = ParquetChunkedReader(
+  override protected def createReader(): ChunkedReader = ParquetChunkedReader(
     new JniParquetChunkedReader(chunkSizeByteLimit, maxChunkedReaderMemoryUsageSizeBytes,
       opts, buffers:_*)
   )
