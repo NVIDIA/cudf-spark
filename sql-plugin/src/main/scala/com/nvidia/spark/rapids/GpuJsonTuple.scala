@@ -82,9 +82,10 @@ case class GpuJsonTuple(children: Seq[Expression]) extends GpuGenerator
 
         var validPathsIndex = 0
         withResource(new Array[ColumnVector](fieldInstructions.length)) { validPathColumns =>
-          // Last argument -1 indicates to use automatically calculated parallelism
+          // A parallel override of -1 uses automatically calculated parallelism.
           withResource(JSONUtils.getJsonObjectMultiplePaths(
-              json, validPaths, 4 * targetBatchSize, -1)) { chunkedResult =>
+              json, validPaths, 4 * targetBatchSize, -1,
+              JSONUtils.NamedFieldMatchPolicy.LAST_NON_NULL)) { chunkedResult =>
               chunkedResult.foreach { cr =>
                 validPathColumns(validPathsIndex) = cr.incRefCount()
                 validPathsIndex += 1
