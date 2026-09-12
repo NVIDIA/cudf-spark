@@ -27,13 +27,20 @@ from iceberg import rapids_reader_types, \
     iceberg_base_table_cols, iceberg_gens_list, get_full_table_name, \
     supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON, \
     supports_iceberg_row_lineage_inheritance, \
-    ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON
+    ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, runtime_iceberg_version
 from data_gen import disable_parquet_field_id_write, gen_df, get_datagen_seed, int_gen, \
     long_gen, string_gen
 from marks import iceberg, ignore_order, validate_execs_in_gpu_plan
-from spark_session import with_gpu_session, with_cpu_session
+from spark_session import with_gpu_session, with_cpu_session, reset_spark_session_conf
 
 pytestmark = iceberg_unsupported_mark
+
+# Iceberg 1.10.2 and 1.11.0 fix cached equality-delete records being interpreted in the wrong
+# field order: https://github.com/apache/iceberg/pull/15514 (backport: #15605).
+# Keep the quarantine for older/unknown runtimes.
+_iceberg_eq_delete_cache_bug = (
+    runtime_iceberg_version is None or
+    tuple(int(part) for part in runtime_iceberg_version.split('.')[:3]) < (1, 10, 2))
 
 
 # Eq-delete pair coverage. All 14 eligible eq-delete columns of iceberg_table_gen
@@ -129,13 +136,13 @@ def test_iceberg_v2_position_delete_with_url_encoded_path(spark_tmp_table_factor
 @ignore_order(local=True)
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason = "S3tables catalog is managed")
-@pytest.mark.xfail(reason = "https://github.com/NVIDIA/spark-rapids/issues/12885")
-# When using this datagen, local run is 784 rows
+@pytest.mark.xfail(condition=_iceberg_eq_delete_cache_bug,
+                   reason="https://github.com/NVIDIA/spark-rapids/issues/12885")
 @pytest.mark.datagen_overrides(seed=1749483297, permanent=True,
+                               condition=_iceberg_eq_delete_cache_bug,
                                reason="Debug https://github.com/NVIDIA/spark-rapids/issues/12885")
 def test_iceberg_v2_mixed_deletes(spark_tmp_table_factory, spark_tmp_path, reader_type,
                                   register_iceberg_add_eq_deletes_udf):
-    # We use a fixed seed here to ensure that data deletion vector has been generated
     table_name = setup_base_iceberg_table(spark_tmp_table_factory)
     # Position deletes
     _change_table(table_name,
@@ -316,9 +323,10 @@ def test_iceberg_v3_deletion_vector_count_with_name_mapping(
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason = "S3tables catalog is managed")
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
-@pytest.mark.xfail(reason = "https://github.com/NVIDIA/spark-rapids/issues/12885")
-# When using this datagen, local run is 784 rows
+@pytest.mark.xfail(condition=_iceberg_eq_delete_cache_bug,
+                   reason="https://github.com/NVIDIA/spark-rapids/issues/12885")
 @pytest.mark.datagen_overrides(seed=1749483297, permanent=True,
+                               condition=_iceberg_eq_delete_cache_bug,
                                reason="Debug https://github.com/NVIDIA/spark-rapids/issues/12885")
 @validate_execs_in_gpu_plan('GpuBatchScanExec')
 def test_iceberg_v3_mixed_deletes(spark_tmp_table_factory, spark_tmp_path, reader_type,
@@ -371,16 +379,23 @@ def test_iceberg_v3_mixed_deletes(spark_tmp_table_factory, spark_tmp_path, reade
         'spark.rapids.sql.format.parquet.reader.type': reader_type,
     }
 
-    gpu_count = with_gpu_session(lambda spark: spark.table(table_name).count(),
-                                 conf=read_conf)
-    cpu_count = with_cpu_session(lambda spark: spark.table(table_name).count(),
-                                 conf=read_conf)
-    assert gpu_count == cpu_count, f"Result count diverges, cpu: {cpu_count}, gpu: {gpu_count}"
-    logging.info(f"Count is {cpu_count}")
+    # The plan validator runs before AQE finalizes this aggregate. Keep the full-row read's
+    # AQE configuration unchanged while validating GpuBatchScanExec for both projections.
+    count_conf = {**read_conf, 'spark.sql.adaptive.enabled': 'false'}
+    try:
+        gpu_count = with_gpu_session(lambda spark: spark.table(table_name).count(),
+                                     conf=count_conf)
+        cpu_count = with_cpu_session(lambda spark: spark.table(table_name).count(),
+                                     conf=count_conf)
+        assert gpu_count == cpu_count, f"Result count diverges, cpu: {cpu_count}, gpu: {gpu_count}"
+        logging.info(f"Count is {cpu_count}")
 
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: spark.table(table_name),
-        conf=read_conf)
+        assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: spark.table(table_name),
+            conf=read_conf)
+    finally:
+        # The table fixture's SHOW TABLES cleanup must not inherit the scan-only plan assertion.
+        reset_spark_session_conf()
 
 
 def _normalize_position_delete_df(df):
