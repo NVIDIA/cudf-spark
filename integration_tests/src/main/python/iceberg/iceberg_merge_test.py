@@ -21,6 +21,7 @@ from data_gen import *
 from iceberg import (create_iceberg_table, get_full_table_name, iceberg_write_enabled_conf,
                      iceberg_base_table_cols, iceberg_gens_list, iceberg_nested_write_gens_list,
                      iceberg_unsupported_mark, merge_partition_transforms_distributed,
+                     iceberg_192_rest_deletion_vector_skip_mark,
                      supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON,
                      supports_iceberg_row_lineage_inheritance,
                      ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON,
@@ -188,7 +189,11 @@ def test_iceberg_merge(spark_tmp_table_factory, partition_col_sql, merge_mode):
 @ignore_order(local=True)
 @pytest.mark.parametrize('merge_mode,fallback_exec', [
     pytest.param('copy-on-write', 'ReplaceDataExec', id='cow'),
-    pytest.param('merge-on-read', 'WriteDeltaExec', id='mor')
+    pytest.param(
+        'merge-on-read',
+        'WriteDeltaExec',
+        marks=iceberg_192_rest_deletion_vector_skip_mark,
+        id='mor')
 ])
 def test_iceberg_merge_v3_table_fallback(
         spark_tmp_table_factory, merge_mode, fallback_exec):

@@ -21,6 +21,7 @@ from data_gen import *
 from iceberg import (create_iceberg_table, get_full_table_name, iceberg_write_enabled_conf,
                      iceberg_base_table_cols, iceberg_gens_list, iceberg_nested_write_gens_list,
                      iceberg_unsupported_mark, update_partition_transforms_distributed,
+                     iceberg_192_rest_deletion_vector_skip_mark,
                      supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON,
                      supports_iceberg_row_lineage_inheritance,
                      ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, row_lineage_df,
@@ -136,7 +137,11 @@ def test_iceberg_update_unpartitioned_table_single_column(spark_tmp_table_factor
 @ignore_order(local=True)
 @pytest.mark.parametrize('update_mode,fallback_exec', [
     pytest.param('copy-on-write', 'ReplaceDataExec', id='cow'),
-    pytest.param('merge-on-read', 'WriteDeltaExec', id='mor')
+    pytest.param(
+        'merge-on-read',
+        'WriteDeltaExec',
+        marks=iceberg_192_rest_deletion_vector_skip_mark,
+        id='mor')
 ])
 @allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
 def test_iceberg_update_v3_table_fallback(

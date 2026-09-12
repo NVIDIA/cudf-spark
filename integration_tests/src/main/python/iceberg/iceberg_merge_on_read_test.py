@@ -25,6 +25,7 @@ from iceberg import rapids_reader_types, \
     representative_eq_column_combinations, eq_reader_canary_pairs, \
     iceberg_unsupported_mark, create_iceberg_table, \
     iceberg_base_table_cols, iceberg_gens_list, get_full_table_name, \
+    iceberg_192_rest_deletion_vector_skip_mark, \
     supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON, \
     supports_iceberg_row_lineage_inheritance, \
     ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON
@@ -180,6 +181,7 @@ def test_iceberg_v2_mixed_deletes(spark_tmp_table_factory, spark_tmp_path, reade
     [pytest.param(reader_type, True, id=reader_type) for reader_type in rapids_reader_types] +
     [pytest.param('PERFILE', False, id='PERFILE-one-shot')])
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@iceberg_192_rest_deletion_vector_skip_mark
 @validate_execs_in_gpu_plan('GpuBatchScanExec')
 def test_iceberg_v3_deletion_vector(
         spark_tmp_table_factory, reader_type, use_chunked_reader):

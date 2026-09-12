@@ -21,6 +21,7 @@ from data_gen import *
 from iceberg import (create_iceberg_table, get_full_table_name, iceberg_write_enabled_conf,
                      iceberg_base_table_cols, iceberg_gens_list, iceberg_nested_write_gens_list,
                      iceberg_unsupported_mark, delete_partition_transforms_distributed,
+                     iceberg_192_rest_deletion_vector_skip_mark,
                      _build_tblprops, assert_iceberg_files_use_codec,
                      supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON,
                      supports_iceberg_row_lineage_inheritance,
@@ -144,7 +145,11 @@ def test_iceberg_delete_unpartitioned_table(spark_tmp_table_factory, delete_mode
             condition=is_spark_35x(),
             reason="https://github.com/NVIDIA/cudf-spark/issues/15680"),
         id='cow'),
-    pytest.param('merge-on-read', 'WriteDeltaExec', id='mor')
+    pytest.param(
+        'merge-on-read',
+        'WriteDeltaExec',
+        marks=iceberg_192_rest_deletion_vector_skip_mark,
+        id='mor')
 ])
 @allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
 def test_iceberg_delete_v3_table_fallback(
