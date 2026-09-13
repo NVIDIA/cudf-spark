@@ -1,0 +1,45 @@
+{
+  "skill_name": "udf-benchmark",
+  "evals": [
+    {
+      "id": "udf-benchmark__array-segment-sum",
+      "prompt": "Benchmark the GPU RapidsUDF at input/array-segment-sum/ArraySegmentSumRapidsUDF.scala against the original CPU UDF at input/array-segment-sum/ArraySegmentSumUDF.scala, and report the speedup. A passing unit test is provided at input/array-segment-sum/UnitTest.scala.",
+      "expected_skill": "udf-benchmark",
+      "expected_script": null,
+      "files": [
+        "evals/files/array-segment-sum/ArraySegmentSumUDF.scala",
+        "evals/files/array-segment-sum/UnitTest.scala",
+        "evals/files/array-segment-sum/ArraySegmentSumRapidsUDF.scala"
+      ],
+      "expected_output": "Benchmarks the GPU RapidsUDF against the CPU UDF on synthetic data at scale and reports the CPU runtime, GPU runtime, and the resulting speedup.",
+      "assertions": [
+        "Loads the udf-benchmark skill",
+        "Generates schema-compatible, representative variable-length synthetic data at scale",
+        "Runs both the CPU UDF and the GPU RapidsUDF on the same data",
+        "Reports the CPU runtime, GPU runtime, and the resulting speedup"
+      ]
+    },
+    {
+      "id": "udf-benchmark__negative-config",
+      "prompt": "What does the spark.sql.shuffle.partitions setting control?",
+      "expected_skill": null,
+      "expected_script": null,
+      "files": [],
+      "expected_output": "A one-line Spark-config answer; not a request to benchmark a UDF, so udf-benchmark should not activate.",
+      "assertions": [
+        "Does not load the udf-benchmark skill"
+      ]
+    },
+    {
+      "id": "udf-benchmark__negative-unrelated",
+      "prompt": "How do I read a Parquet file into a DataFrame in PySpark?",
+      "expected_skill": null,
+      "expected_script": null,
+      "files": [],
+      "expected_output": "Basic Spark I/O question, unrelated to CPU-vs-GPU UDF benchmarking; no UDF skill should activate.",
+      "assertions": [
+        "Does not load the udf-benchmark skill"
+      ]
+    }
+  ]
+}
