@@ -392,16 +392,14 @@ private final class CachedHashProbeBackend(
     case BackendJoinRequest.Inner => inner(leftKeys, rightKeys, outputRowCount)
     case BackendJoinRequest.LeftOuter => leftOuter(leftKeys, rightKeys, outputRowCount)
     case BackendJoinRequest.RightOuter => rightOuter(leftKeys, rightKeys, outputRowCount)
-    case BackendJoinRequest.LeftSemi => leftSemi(leftKeys, rightKeys)
-    case BackendJoinRequest.LeftAnti => leftAnti(leftKeys, rightKeys)
-    case _: BackendJoinRequest.Distinct =>
-      throw new IllegalStateException("expected a distinct hash build")
+    case _ =>
+      throw new IllegalStateException(s"unsupported cached hash join request: $request")
   }
 
   private def inner(
       leftKeys: Table,
       rightKeys: Table,
-      outputRowCount: Option[Long] = None): GatherMapsResult = {
+      outputRowCount: Option[Long]): GatherMapsResult = {
     buildSide match {
       case GpuBuildLeft =>
         JoinImpl.innerHashJoinBuildLeft(rightKeys, lease.resource, outputRowCount)
@@ -422,18 +420,6 @@ private final class CachedHashProbeBackend(
       rightKeys: Table,
       outputRowCount: Option[Long]): GatherMapsResult = {
     JoinImpl.rightOuterHashJoinBuildLeft(rightKeys, lease.resource, outputRowCount)
-  }
-
-  private def leftSemi(leftKeys: Table, rightKeys: Table): GatherMapsResult = {
-    withResource(inner(leftKeys, rightKeys)) { innerMaps =>
-      JoinImpl.makeLeftSemi(innerMaps, leftKeys.getRowCount.toInt)
-    }
-  }
-
-  private def leftAnti(leftKeys: Table, rightKeys: Table): GatherMapsResult = {
-    withResource(inner(leftKeys, rightKeys)) { innerMaps =>
-      JoinImpl.makeLeftAnti(innerMaps, leftKeys.getRowCount.toInt)
-    }
   }
 
   override def outputRowCount(joinType: JoinType, probeKeys: Table): Option[Long] = {
@@ -652,11 +638,7 @@ final class HashBuildCache extends AutoCloseable {
       }
     }
 
-    val artifact = try {
-      future.get()
-    } catch {
-      case e: ExecutionException => throw e.getCause
-    }
+    val artifact = future.get()
     (artifact, !shouldBuild)
   }
 
@@ -809,13 +791,25 @@ final class CachedHashBackendProvider private[execution] (
         numericKeys,
         demand)
     }
-    if (selectedSide == offeredSide) {
+    // Disable the cached path for semi/anti joins, since we need cuDF's native filtered join
+    // to avoid materializing potentially quadratic inner-join maps. Distinct requests can
+    // reuse since their inner-join maps are at most linear in the probe rows.
+    // TODO: Enable reusable filtered joins: https://github.com/NVIDIA/cudf/issues/24144
+    val supportsReuse = request match {
+      case BackendJoinRequest.LeftSemi | BackendJoinRequest.LeftAnti => false
+      case _ => true
+    }
+    if (selectedSide == offeredSide && supportsReuse) {
       try {
         acquireCachedBackend(selectedSide)
       } catch {
         case e: InterruptedException =>
+          // The current thread was interrupted while waiting, propagate the interruption.
           Thread.currentThread().interrupt()
           throw e
+        case e: ExecutionException =>
+          // The builder thread failed, throw with the cause of the build failure.
+          throw new CachedHashBuildUnavailable(e.getCause)
         case e: OutOfMemoryError => throw new CachedHashBuildUnavailable(e)
         case NonFatal(e) => throw new CachedHashBuildUnavailable(e)
       }
@@ -881,9 +875,10 @@ object HashBuildFactory {
       case None => filterAndApply(cb)
     }
 
-    val retainedBatch = buildBatch.incRefCount()
-    withRetryNoSplit(retainedBatch) { attempt =>
-      withResource(attempt.getColumnarBatch())(prepareAndApply)
+    // The source owner closes the cache before the batch, waiting for initial builds and rebuilds.
+    // Here we borrow the source without mutating its reference count across cache keys.
+    withRetryNoSplit {
+      withResource(buildBatch.getColumnarBatch())(prepareAndApply)
     }
   }
 

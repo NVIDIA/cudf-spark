@@ -1340,8 +1340,8 @@ abstract class BaseHashJoinIterator(
       joinTime = joinTime) {
   /**
    * Initialize any state required when the stream iterator contains no batches.
-   * For regular hash joins no state is required. Stream-side outer joins need to
-   * mark all the build-side rows as unmatched so that the finalization emits them.
+   * For regular hash joins no state is required. Outer joins that preserve the build side
+   * need to mark all the build-side rows as unmatched so that the finalization emits them.
    */
   protected def onEmptyStream(): Unit = {}
 
@@ -2213,7 +2213,8 @@ class HashJoinStreamSideIterator(
       leftRowCount: Long,
       rightRowCount: Long): HashJoinPlan = {
     // Optimization for distinct unconditional joins
-    if (buildStats.isDistinct && lazyCompiledCondition.isEmpty) {
+    if (buildStats.isDistinct && lazyCompiledCondition.isEmpty &&
+        BackendJoinRequest.Distinct.supports(subJoinType, buildSide)) {
       DistinctHashPlan(subJoinType, buildSide)
     } else {
       // Select for the subjoin executed against each stream batch, not the original outer join.
@@ -3021,7 +3022,11 @@ trait GpuHashJoin extends GpuJoinExec {
           compareNullsEqual,
           opTime,
           joinTime)
-      case FullOuter =>
+      case FullOuter | LeftOuter | RightOuter if joinType == FullOuter ||
+          (joinType == LeftOuter && buildSide == GpuBuildLeft) ||
+          (joinType == RightOuter && buildSide == GpuBuildRight) =>
+        // Build rows can match any stream batch. Emit unmatched build rows only after all
+        // stream batches have been processed, including when the stream is empty.
         // Create a new LazyCompiledCondition for this iterator (it takes ownership)
         val lazyCond = boundConditionLeftRight.map { cond =>
           LazyCompiledCondition(cond, left.output.size, right.output.size)

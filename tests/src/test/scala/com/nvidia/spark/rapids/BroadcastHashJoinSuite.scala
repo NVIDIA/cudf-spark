@@ -160,6 +160,14 @@ class BroadcastHashJoinSuite extends SparkQueryCompareTestSuite {
   }
 
   IGNORE_ORDER_testSparkResultsAreEqual2(
+    "broadcast hash join reuse distinct inner nullable keys build left",
+    nullableDistinctBuildDf,
+    nullableProbeDf,
+    conf = broadcastReuseConf) {
+    (build, probe) => broadcast(build).join(probe, Seq("join_key"), "inner")
+  }
+
+  IGNORE_ORDER_testSparkResultsAreEqual2(
     "broadcast hash join reuse conditional left outer build right",
     streamedProbeDf,
     nonDistinctBuildDf,

@@ -20,13 +20,15 @@ import java.util.concurrent.{Callable, CountDownLatch, Executors, TimeUnit}
 import java.util.concurrent.atomic.AtomicInteger
 
 import com.nvidia.spark.rapids.{GpuBoundReference, GpuBuildLeft, GpuBuildRight, GpuBuildSide}
+import org.scalatest.concurrent.Eventually
 import org.scalatest.funsuite.AnyFunSuite
+import org.scalatest.time.{Seconds, Span}
 
 import org.apache.spark.sql.catalyst.expressions.ExprId
 import org.apache.spark.sql.types.{BooleanType, ByteType, DateType, DecimalType, DoubleType,
   FloatType, IntegerType, LongType, ShortType, StringType, StructField, StructType, TimestampType}
 
-class HashBuildPlannerSuite extends AnyFunSuite {
+class HashBuildPlannerSuite extends AnyFunSuite with Eventually {
   private class TestArtifact extends HashArtifact {
     @volatile var ready = true
     val closeCount = new AtomicInteger()
@@ -185,7 +187,6 @@ class HashBuildPlannerSuite extends AnyFunSuite {
     val artifact = new TestArtifact
     val buildStarted = new CountDownLatch(1)
     val allowBuild = new CountDownLatch(1)
-    val closeStarted = new CountDownLatch(1)
     val pool = Executors.newFixedThreadPool(2)
 
     try {
@@ -202,11 +203,14 @@ class HashBuildPlannerSuite extends AnyFunSuite {
 
       val close = pool.submit(new Callable[Unit] {
         override def call(): Unit = {
-          closeStarted.countDown()
           cache.close()
         }
       })
-      assert(closeStarted.await(30, TimeUnit.SECONDS))
+      // The blocked builder cannot remove its entry. It disappears only after close has marked
+      // the cache closed and cleared the map, so releasing the builder now cannot publish it.
+      eventually(timeout(Span(30, Seconds))) {
+        assertResult(BuildStatus.Cold)(cache.status(key))
+      }
       assert(!close.isDone)
       allowBuild.countDown()
 
