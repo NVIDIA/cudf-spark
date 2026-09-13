@@ -41,7 +41,7 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.launcher.SparkLauncher
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.Attribute
+import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression}
 import org.apache.spark.sql.catalyst.plans.logical.Statistics
 import org.apache.spark.sql.catalyst.plans.physical.{BroadcastMode, BroadcastPartitioning, Partitioning}
 import org.apache.spark.sql.execution.{SparkPlan, SQLExecution}
@@ -80,8 +80,17 @@ class SerializeConcatHostBuffersDeserializeBatch(
 
   // used for memoization of deserialization to GPU on Executor
   @transient private var batchInternal: SpillableColumnarBatch = null
+  // executor-local cache for build-side hash join state
+  @transient private var hashBuildCacheInternal: HashBuildCache = null
 
   private def maybeGpuBatch: Option[SpillableColumnarBatch] = Option(batchInternal)
+
+  private def hashBuildCache: HashBuildCache = this.synchronized {
+    if (hashBuildCacheInternal == null) {
+      hashBuildCacheInternal = new HashBuildCache
+    }
+    hashBuildCacheInternal
+  }
 
   def batch: SpillableColumnarBatch = this.synchronized {
     maybeGpuBatch.getOrElse {
@@ -146,6 +155,44 @@ class SerializeConcatHostBuffersDeserializeBatch(
         }
       }
     }
+  }
+
+  /**
+   * Create the backend provider that lets a broadcast hash join choose between an on-demand
+   * hash build and a reusable hash table built from this executor's broadcast data.
+   *
+   * Each broadcast hash join task calls this once before processing its stream partition. The
+   * provider identifies reusable state by the build-side projection, join keys, and null semantics.
+   * It records probe demand for the current join and stage attempt, and lazily builds or acquires
+   * the executor-shared native hash table only if the join selects the broadcast side. Creating the
+   * provider resolves the GPU broadcast batch but does not construct the native hash table.
+   *
+   * @param demandId identifies the join and stage attempt whose probe work is accumulated
+   * @return the provider used to select and acquire a hash-probe backend for each stream batch
+   */
+  def createCachedHashBackendProvider(
+      side: GpuBuildSide,
+      demandId: HashBuildDemandId,
+      sourceProjection: Seq[Seq[Expression]],
+      boundBuiltKeys: Seq[GpuExpression],
+      compareNullsEqual: Boolean,
+      filterOutNulls: Boolean,
+      prepareBatch: Option[ColumnarBatch => ColumnarBatch],
+      metrics: HashBuildMetrics): HashBackendProvider = {
+    // Resolve the broadcast batch before capturing it in the build closure. closeInternal holds
+    // the monitor while waiting for builders, so the build must not call batch to avoid deadlock.
+    val buildBatch = batch
+    val key = HashBuildKey.fromExpressions(
+      sourceProjection, boundBuiltKeys, compareNullsEqual, filterOutNulls)
+    new CachedHashBackendProvider(
+      side,
+      HashBuildPlanner.hasNumericKeys(boundBuiltKeys),
+      demandId,
+      hashBuildCache,
+      key,
+      () => HashBuildFactory.create(
+        buildBatch, boundBuiltKeys, compareNullsEqual, filterOutNulls, prepareBatch),
+      metrics)
   }
 
   private def writeObject(out: ObjectOutputStream): Unit = {
@@ -245,9 +292,10 @@ class SerializeConcatHostBuffersDeserializeBatch(
    * Public for tests.
    */
   def closeInternal(): Unit = this.synchronized {
-    Seq(data, batchInternal).safeClose()
+    Seq(hashBuildCacheInternal, data, batchInternal).safeClose()
     data = null
     batchInternal = null
+    hashBuildCacheInternal = null
   }
 
   @scala.annotation.nowarn("msg=method finalize in class Object is deprecated")

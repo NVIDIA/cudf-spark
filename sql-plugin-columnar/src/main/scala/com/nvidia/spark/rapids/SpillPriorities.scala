@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +22,11 @@ package com.nvidia.spark.rapids
  * ranges based on the type of buffer.
  */
 object SpillPriorities {
+  /**
+   * Priority for device objects that can be recomputed instead of copied to host or disk.
+   */
+  val RECOMPUTABLE_CACHE_PRIORITY: Long = Long.MinValue
+
   /**
    * Priorities for task output buffers intended for shuffle.
    */

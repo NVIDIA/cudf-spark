@@ -381,6 +381,25 @@ def test_broadcast_join_right_table(data_gen, join_type):
     conf = {'spark.sql.adaptive.enabled': 'false'}
     assert_gpu_and_cpu_are_equal_collect(do_join, conf = conf)
 
+
+@ignore_order(local=True)
+@validate_execs_in_gpu_plan('GpuBroadcastHashJoinExec')
+def test_broadcast_hash_join_reuses_build_across_stream_partitions():
+    def do_join(spark):
+        stream = spark.range(0, 4096, 1, 8).select(
+            (col('id') % 128).alias('key'), col('id').alias('stream_value'))
+        build = spark.range(0, 256, 1, 1).select(
+            (col('id') % 128).alias('key'), col('id').alias('build_value'))
+        return stream.join(broadcast(build), 'key')
+
+    conf = {
+        'spark.sql.adaptive.enabled': 'false',
+        'spark.rapids.sql.join.buildSide': 'FIXED',
+        'spark.rapids.sql.join.hashTable.reuse': 'true',
+    }
+    assert_gpu_and_cpu_are_equal_collect(do_join, conf=conf)
+
+
 @ignore_order(local=True)
 @pytest.mark.parametrize('rows', ['(1)', '(1), (null)', '()'], ids=['no_nulls', 'has_nulls', 'empty'])
 def test_broadcast_join_null_aware_anti(rows):
@@ -1544,7 +1563,7 @@ def test_broadcast_nested_join_fix_fallback_by_inputfile(spark_tmp_path, disable
     )
 
 @ignore_order(local=True)
-@pytest.mark.parametrize("join_type", ["Inner", "LeftOuter", "RightOuter"], ids=idfn)
+@pytest.mark.parametrize("join_type", ["Inner", "LeftOuter", "RightOuter", "LeftSemi", "LeftAnti"], ids=idfn)
 @pytest.mark.parametrize("batch_size", ["500", "1g"], ids=idfn)
 def test_distinct_join(join_type, batch_size):
     join_conf = {
@@ -1554,6 +1573,42 @@ def test_distinct_join(join_type, batch_size):
         left_df = spark.range(1024).withColumn("x", f.col("id") + 1)
         right_df = spark.range(768).withColumn("x", f.col("id") + f.col("id"))
         return left_df.join(right_df, ["x"], join_type)
+    assert_gpu_and_cpu_are_equal_collect(do_join, conf=join_conf)
+
+@validate_execs_in_gpu_plan("GpuShuffledHashJoinExec")
+@ignore_order(local=True)
+@pytest.mark.parametrize(
+    "build_side", ["left", "right"], ids=["BUILD_LEFT", "BUILD_RIGHT"])
+def test_distinct_full_outer_join(build_side):
+    join_conf = {
+        "spark.sql.adaptive.enabled": "false",
+        "spark.sql.autoBroadcastJoinThreshold": "-1",
+        "spark.sql.join.preferSortMergeJoin": "false",
+        "spark.sql.shuffle.partitions": "2",
+        # Exercise the stream-side iterator across multiple batches.
+        "spark.rapids.sql.batchSizeBytes": "1",
+        "spark.rapids.sql.join.useShuffledSymmetricHashJoin": "false",
+    }
+
+    def do_join(spark):
+        left_df = spark.createDataFrame([
+            (None, "left_null"),
+            (1, "left_match"),
+            (2, "left_only"),
+            (4, "left_match_2"),
+        ], ["join_key", "left_value"])
+        right_df = spark.createDataFrame([
+            (None, "right_null"),
+            (1, "right_match"),
+            (3, "right_only"),
+            (4, "right_match_2"),
+        ], ["join_key", "right_value"])
+        if build_side == "left":
+            left_df = left_df.hint("SHUFFLE_HASH")
+        else:
+            right_df = right_df.hint("SHUFFLE_HASH")
+        return left_df.join(right_df, ["join_key"], "fullouter")
+
     assert_gpu_and_cpu_are_equal_collect(do_join, conf=join_conf)
 
 @ignore_order(local=True)
