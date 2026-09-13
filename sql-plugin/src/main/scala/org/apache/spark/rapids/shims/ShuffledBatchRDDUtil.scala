@@ -63,6 +63,7 @@ object ShuffledBatchRDDUtil {
     }.sum
   }
 
+  @scala.annotation.nowarn("cat=deprecation&origin=org.apache.spark.SparkEnv.shuffleManager")
   def getReaderAndPartSize(
       split: Partition,
       context: TaskContext,

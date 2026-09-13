@@ -86,6 +86,8 @@ For manual installation, you need to setup your environment:
 - pytest
   : A framework that makes it easy to write small, readable tests, and can scale to support complex
   functional testing for applications and libraries (requires  Python 3.6+).
+- protobuf
+  : Provides Protocol Buffers APIs for protobuf integration-test fixtures.
 - sre_yield
   : Provides a set of APIs to generate string data from a regular expression.
 - pandas
@@ -299,6 +301,18 @@ You do need to have access to a compatible GPU with the needed CUDA drivers. The
 `--runtime_env` is used to specify the environment you are running the tests in. Valid values are `databricks`,`emr`,`dataproc`,`dataproc_serverless` and `apache`. This is generally used
 when certain environments have different behavior, and the tests don't have a good way to auto-detect the environment yet.
 
+#### Protobuf tests on Databricks
+
+On Databricks, `INCLUDE_SPARK_PROTOBUF_JAR` controls only external `spark-protobuf` jar injection; it
+does not control protobuf test eligibility. Apache Spark runs require a matching external jar and
+skip the protobuf tests when this variable is set to `false`. Databricks runs use the runtime-bundled
+protobuf implementation instead, so `run_pyspark_from_build.sh --runtime_env=databricks` does not
+inject a matching jar from either the build dependencies or `LOCAL_JAR_PATH`, even if the variable
+is explicitly set to `true`.
+
+The smoke tests detect the bundled runtime independently and use a static descriptor set, so they do
+not depend on Spark's private, runtime-specific shaded protobuf classes.
+
 ### timezone
 
 The RAPIDS plugin currently only supports the UTC time zone. Spark uses the default system time zone unless explicitly set otherwise.
@@ -448,19 +462,6 @@ non_utc_allow_for_sequence = ['ProjectExec'] # Update after non-utc time zone is
 test_my_new_added_case_for_sequence_operator()
 ```
 
-### Running with Hybrid execution
-The hybrid tests require extra jars. To enable hybrid tests, the following prerequisites are required::
-- Build Gluten bundle jar, Gluten thirdparty jar, refer to [link](../docs/dev/hybrid-execution.md#build)
-- Download Hybrid jar, refer to [link](../docs/dev/hybrid-execution.md#download-rapids-hybrid-jar-from-maven-repo)
-
-Execute the following command to run Hybrid tests:
-```shell
-$ LOAD_HYBRID_BACKEND=1 \
-  HYBRID_BACKEND_JARS=/path/to/${GLUTEN_BUNDLE_JAR},/path/to/${GLUTEN_THIRD_PARTY_JAR},/path/to/HYBRID_JAR \
-  ./integration_tests/run_pyspark_from_build.sh -m hybrid_test
-```
-For more information about Hybrid feature, refer to [link](../docs/dev/hybrid-execution.md)
-
 ### Reviewing integration tests in Spark History Server
 
 If the integration tests are run using [run_pyspark_from_build.sh](run_pyspark_from_build.sh) we have
@@ -509,7 +510,7 @@ The tests can be enabled by just appending the option `--cudf_udf` to the comman
 cudf_udf tests needs a couple of different settings, they may need to run separately.
 
 To enable cudf_udf tests, need following pre requirements:
-   * Install cuDF Python library on all the nodes running executors. The instruction could be found at [here](https://rapids.ai/start.html). Please follow the steps to choose the version based on your environment and install the cuDF library via Conda or use other ways like building from source.
+   * Install the cuDF Python library on all executor nodes. Use the [RAPIDS install selector](https://docs.rapids.ai/install#selector) to choose the version for your environment and install cuDF with Conda, or build it from source.
    * Disable the GPU exclusive mode on all the nodes running executors. The sample command is `sudo nvidia-smi -c DEFAULT`
 
 To run cudf_udf tests, need following configuration changes:

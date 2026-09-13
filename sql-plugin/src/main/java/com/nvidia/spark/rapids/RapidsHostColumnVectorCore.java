@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2020-2021, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -185,6 +185,9 @@ public class RapidsHostColumnVectorCore extends ColumnVector {
 
   @Override
   public final byte[] getBinary(int rowId) {
+    if (cudfCv.getType().equals(DType.STRING)) {
+      return cudfCv.getUTF8(rowId);
+    }
     if (cachedChildren[0] == null) {
       // cache the child data
       HostColumnVectorCore data = cudfCv.getChildColumnView(0);
@@ -199,11 +202,18 @@ public class RapidsHostColumnVectorCore extends ColumnVector {
   @Override
   public final ColumnVector getChild(int ordinal) {
     if (cachedChildren[ordinal] == null) {
-      StructType st = (StructType) dataType();
-      StructField[] fields = st.fields();
-      for (int i = 0; i < fields.length; i++) {
-        HostColumnVectorCore tmp = cudfCv.getChildColumnView(i);
-        cachedChildren[i] = new RapidsHostColumnVectorCore(fields[i].dataType(), tmp);
+      // Spark models Variant as an atomic type, while cuDF stores its value and metadata as
+      // STRUCT children. Expose those physical children through Spark's binary accessors.
+      if (GpuColumnVector.isVariantType(dataType())) {
+        HostColumnVectorCore tmp = cudfCv.getChildColumnView(ordinal);
+        cachedChildren[ordinal] = new RapidsHostColumnVectorCore(DataTypes.BinaryType, tmp);
+      } else {
+        StructType st = (StructType) dataType();
+        StructField[] fields = st.fields();
+        for (int i = 0; i < fields.length; i++) {
+          HostColumnVectorCore tmp = cudfCv.getChildColumnView(i);
+          cachedChildren[i] = new RapidsHostColumnVectorCore(fields[i].dataType(), tmp);
+        }
       }
     }
     return cachedChildren[ordinal];

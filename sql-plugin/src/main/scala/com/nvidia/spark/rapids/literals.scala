@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -236,6 +236,10 @@ object GpuScalar extends Logging {
    */
   def from(v: Any, t: DataType): Scalar = t match {
     case nullType if v == null => nullType match {
+      // Typed nulls are required for null-column materialization. Non-null Variant literals are
+      // not registered for GPU execution and require Spark-4-specific VariantVal conversion.
+      case variantType if GpuColumnVector.isVariantType(variantType) =>
+        Scalar.structFromNull(GpuColumnVector.variantHostChildren(): _*)
       case ArrayType(elementType, _) =>
         Scalar.listFromNull(resolveElementType(elementType))
       case StructType(fields) =>

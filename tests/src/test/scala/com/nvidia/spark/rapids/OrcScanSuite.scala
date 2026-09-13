@@ -17,10 +17,9 @@
 package com.nvidia.spark.rapids
 
 import java.io.{File, FileNotFoundException}
-import java.nio.charset.StandardCharsets.UTF_8
 
 import org.apache.hadoop.fs.Path
-import org.apache.hadoop.hive.ql.exec.vector.{BytesColumnVector, StructColumnVector}
+import org.apache.hadoop.hive.ql.exec.vector.StructColumnVector
 import org.apache.orc.{OrcFile, TypeDescription}
 
 import org.apache.spark.SparkConf
@@ -54,8 +53,7 @@ class OrcScanSuite extends SparkQueryCompareTestSuite {
     assert(base.mkdirs())
     val schema = TypeDescription.createStruct().addField("name",
       TypeDescription.createStruct()
-        .addField("empty", TypeDescription.createStruct())
-        .addField("first", TypeDescription.createString()))
+        .addField("empty", TypeDescription.createStruct()))
     val writer = OrcFile.createWriter(new Path(base.getCanonicalPath, "part-00000.orc"),
       OrcFile.writerOptions(spark.sparkContext.hadoopConfiguration).setSchema(schema))
     try {
@@ -64,7 +62,6 @@ class OrcScanSuite extends SparkQueryCompareTestSuite {
       val nameVector = batch.cols(0).asInstanceOf[StructColumnVector]
       nameVector.noNulls = false
       nameVector.isNull(1) = true
-      nameVector.fields(1).asInstanceOf[BytesColumnVector].setVal(0, "Janet".getBytes(UTF_8))
       writer.addRowBatch(batch)
     } finally {
       writer.close()
@@ -75,7 +72,8 @@ class OrcScanSuite extends SparkQueryCompareTestSuite {
     file => spark => spark.read.schema(StructType(Seq(
       StructField("name", StructType(Seq(StructField("missing", StringType)))))))
       .orc(file.getCanonicalPath),
-    writeNestedEmptyStructOrc) { frame => frame }
+    writeNestedEmptyStructOrc,
+    existClasses = "GpuFileSourceScanExec") { frame => frame }
 
   testSparkResultsAreEqual("schema-can-prune dis-order read schema",
     frameFromOrcWithSchema("schema-can-prune.orc", StructType(Seq(
@@ -275,6 +273,21 @@ class OrcScanSuite extends SparkQueryCompareTestSuite {
     // both cpu and gpu should return empty
     withGpuSparkSession(check, conf)
     withCpuSparkSession(check, conf)
+  }
+
+  test("gpuOutputBatchBytes metric is recorded for ORC scan") {
+    withGpuSparkSession({ spark =>
+      val df = frameFromOrc("file-splits.orc")(spark)
+      val rows = df.collect()
+      val scan = df.queryExecution.executedPlan
+        .find(_.metrics.contains(GpuMetric.GPU_OUTPUT_BATCH_BYTES))
+      assert(scan.isDefined)
+      // Physical device width per row from cudf; variable-width types report 0.
+      val bytesPerRow = df.schema.fields
+        .map(f => GpuColumnVector.getRapidsType(f.dataType).getSizeInBytes).sum
+      val minBytes = rows.length.toLong * bytesPerRow
+      assert(scan.get.metrics(GpuMetric.GPU_OUTPUT_BATCH_BYTES).value >= minBytes)
+    })
   }
 
 }

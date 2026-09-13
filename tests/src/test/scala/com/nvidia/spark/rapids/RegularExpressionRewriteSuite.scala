@@ -56,6 +56,7 @@ class RegularExpressionRewriteSuite extends AnyFunSuite {
       "(.*)abc[0-9]{2}.*",
       "((abc))([0-9]{3})",
       "(abc[0-9]{3})",
+      "a[a-c]{1,3}?",
       "^abc[0-9]{1,3}",
       "火花急流[\u4e00-\u9fa5]{1}",
       "^[0-9]{6}",
@@ -69,6 +70,7 @@ class RegularExpressionRewriteSuite extends AnyFunSuite {
       PrefixRange("abc", 2, 48, 57),
       PrefixRange("abc", 3, 48, 57),
       PrefixRange("abc", 3, 48, 57),
+      PrefixRange("a", 1, 97, 99),
       NoOptimization, // starts with PrefixRange not supported
       PrefixRange("火花急流", 1, 19968, 40869),
       NoOptimization, // starts with PrefixRange not supported
@@ -115,6 +117,48 @@ class RegularExpressionRewriteSuite extends AnyFunSuite {
       "(?>.*)abc"
     )
     val excepted = Seq.fill(patterns.length)(NoOptimization)
+    verifyRewritePattern(patterns, excepted)
+  }
+
+  test("regex rewrite case-sensitive scoped inline flags") {
+    import RegexOptimizationType._
+    // A scoped-flags group with no positive flag is a no-op (flags are off by default),
+    // so it is equivalent to a plain group and may be optimized. A positive flag changes
+    // matching, so `(?i:...)`, `(?m:...)` and `(?x:...)` fall through as NoOptimization.
+    val patterns = Seq(
+      "(?-i:abc)",
+      "(?-s:abc)",
+      "(?-m:abc)",
+      "(?-x:abc)",
+      "(?-d:abc)",
+      "(?-u:abc)",
+      "(?-U:abc)",
+      "(?-dimsuxU:abc)",
+      "(?-x:a b c)",
+      ".*(?-i:abc).*",
+      "^(?-i:abc)",
+      "(?-i:abc)|(?-s:def)",
+      "(?i:abc)",
+      "(?m:abc)",
+      "(?x:abc)"
+    )
+    val excepted = Seq(
+      Contains("abc"),
+      Contains("abc"),
+      Contains("abc"),
+      Contains("abc"),
+      Contains("abc"),
+      Contains("abc"),
+      Contains("abc"),
+      Contains("abc"),
+      Contains("a b c"),
+      Contains("abc"),
+      StartsWith("abc"),
+      MultipleContains(Seq("abc", "def").map(UTF8String.fromString)),
+      NoOptimization,
+      NoOptimization,
+      NoOptimization
+    )
     verifyRewritePattern(patterns, excepted)
   }
 }

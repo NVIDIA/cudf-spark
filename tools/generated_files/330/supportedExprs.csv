@@ -296,9 +296,9 @@ If,S,`if`,None,project,predicate,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,
 If,S,`if`,None,project,trueValue,S,S,S,S,S,S,S,S,PS,S,S,S,S,NS,PS,PS,PS,NS,S,S
 If,S,`if`,None,project,falseValue,S,S,S,S,S,S,S,S,PS,S,S,S,S,NS,PS,PS,PS,NS,S,S
 If,S,`if`,None,project,result,S,S,S,S,S,S,S,S,PS,S,S,S,S,NS,PS,PS,PS,NS,S,S
-In,S,`in`,None,project,value,S,S,S,S,S,S,S,S,PS,S,S,S,NS,NS,NS,NA,NS,NS,NA,NA
-In,S,`in`,None,project,list,PS,PS,PS,PS,PS,PS,PS,PS,PS,PS,PS,NS,NS,NS,NS,NA,NS,NS,NA,NA
-In,S,`in`,None,project,result,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
+In,S,`in`,Non-literal list expressions must be deterministic and side-effect-free,project,value,S,S,S,S,S,S,S,S,PS,S,S,S,NS,NS,NS,NA,NS,NS,NA,NA
+In,S,`in`,Non-literal list expressions must be deterministic and side-effect-free,project,list,S,S,S,S,S,S,S,S,PS,S,S,NS,NS,NS,NS,NA,NS,NS,NA,NA
+In,S,`in`,Non-literal list expressions must be deterministic and side-effect-free,project,result,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 InSet,S, ,None,project,input,S,S,S,S,S,S,S,S,PS,S,S,S,NS,NS,NS,NA,NS,NS,NA,NA
 InSet,S, ,None,project,result,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 InitCap,S,`initcap`,This is not 100% compatible with the Spark version because the Unicode version used by cuDF and the JVM may differ; resulting in some corner-case characters not changing case correctly.,project,input,NA,NA,NA,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
@@ -358,7 +358,7 @@ LessThanOrEqual,S,`<=`,None,AST,lhs,S,S,S,S,S,NS,NS,S,PS,S,NS,NS,NS,NS,NS,NA,NS,
 LessThanOrEqual,S,`<=`,None,AST,rhs,S,S,S,S,S,NS,NS,S,PS,S,NS,NS,NS,NS,NS,NA,NS,NS,NA,NA
 LessThanOrEqual,S,`<=`,None,AST,result,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 Like,S,`like`,None,project,src,NA,NA,NA,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
-Like,S,`like`,None,project,search,NA,NA,NA,NA,NA,NA,NA,NA,NA,PS,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
+Like,S,`like`,None,project,search,NA,NA,NA,NA,NA,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 Like,S,`like`,None,project,result,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 Literal,S, ,None,project,result,S,S,S,S,S,S,S,S,PS,S,S,S,S,S,PS,PS,PS,NS,S,S
 Literal,S, ,None,AST,result,S,S,S,S,S,S,S,S,PS,S,NS,NS,NS,NS,NS,NS,NS,NS,NS,NS

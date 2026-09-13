@@ -42,6 +42,7 @@ class GpuSparkInputPartition(val cpuPartition: InputPartition,
   val gpuTargetBatchSizeBytes: Long = rapidsConf.gpuTargetBatchSizeBytes
   val maxGpuColumnSizeBytes: Long = rapidsConf.maxGpuColumnSizeBytes
   val chunkedReaderEnabled: Boolean = rapidsConf.chunkedReaderEnabled
+  val validateDeletionVectorCrc: Boolean = rapidsConf.validateIcebergDeletionVectorCrc
   val parquetDebugDumpPrefix: Option[String] = rapidsConf.parquetDebugDumpPrefix
   val parquetDebugDumpAlways: Boolean = rapidsConf.parquetDebugDumpAlways
 

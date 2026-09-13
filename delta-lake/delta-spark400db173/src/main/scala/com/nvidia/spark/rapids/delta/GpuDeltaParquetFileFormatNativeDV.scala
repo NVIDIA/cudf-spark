@@ -1432,13 +1432,13 @@ case class DeltaParquetTableReader(
 
   logDebug("Using DeltaParquetTableReader for reading Parquet with deletion vectors")
 
-  override protected val reader = DeltaParquetChunkedReader(
+  override protected def createReader(): ChunkedReader = DeltaParquetChunkedReader(
     DeletionVector.newParquetChunkedReader(chunkSizeByteLimit,
       maxChunkedReaderMemoryUsageSizeBytes, opts, buffers, dvInfos)
   )
 
-  override protected lazy val resources: Seq[AutoCloseable] =
-    Seq(reader) ++ buffers ++ dvInfos.map(_.serializedBitmap)
+  override protected def additionalResources: Seq[AutoCloseable] =
+    dvInfos.map(_.serializedBitmap)
 
   private lazy val deletionVectorSkipRowIndexes =
     MakeParquetTableWithDVProducer.deletionVectorSkipRowIndexes(readDataSchema)
@@ -1582,6 +1582,9 @@ object MakeParquetTableWithDVProducer extends Logging {
         clippedParquetSchema, readDataSchema, isSchemaCaseSensitive, useFieldId)
       val outputTable = GpuParquetScan.rebaseDateTime(evolvedSchemaTable, dateRebaseMode,
         timestampRebaseMode)
+      // Recorded before materialization to match the chunked reader, whose next() records in
+      // super.next and materializes afterwards.
+      GpuMetric.recordOutputBatchBytes(outputTable, metrics.get(GPU_OUTPUT_BATCH_BYTES))
       new SingleGpuDataProducer(
         materializeDeletionVectorSkipRowColumnsAsFalseIfNeeded(outputTable, skipRowIndexes))
     }

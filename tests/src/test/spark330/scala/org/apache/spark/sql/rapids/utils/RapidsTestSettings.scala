@@ -191,7 +191,6 @@ class RapidsTestSettings extends BackendTestSettings {
     .exclude("SPARK-37371: UnionExec should support columnar if all children support columnar", ADJUST_UT("CPU test uses CPU-specific node checks (InMemoryTableScanExec, UnionExec); GPU version implemented as testRapids() in RapidsDataFrameSetOperationsSuite"))
   enableSuite[RapidsDataFrameRangeSuite]
   enableSuite[RapidsFileBasedDataSourceSuite]
-    .exclude("Enabling/disabling ignoreMissingFiles using orc", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15100"))
     .exclude("SPARK-25237 compute correct input metrics in FileScanRDD", ADJUST_UT("Replaced by testRapids version that checks GpuFileSourceScanExec file metrics and populated Spark input metrics."))
     .exclude("Option recursiveFileLookup: disable partition inferring", ADJUST_UT("Replaced by testRapids version that uses testFile() to expand Spark test resources from the tests jar before reading with binaryFile."))
     .exclude("SPARK-22790,SPARK-27668: spark.sql.sources.compressionFactor takes effect", ADJUST_UT("Replaced by testRapids version that checks file-compression statistics with GpuBroadcastHashJoinExec and GpuShuffledSymmetricHashJoinExec."))
@@ -217,17 +216,43 @@ class RapidsTestSettings extends BackendTestSettings {
   enableSuite[RapidsDeprecatedAPISuite]
   enableSuite[RapidsDeprecatedDatasetAggregatorSuite]
   enableSuite[RapidsStatisticsCollectionSuite]
+  enableSuite[RapidsDataFrameCallbackSuite]
+    .exclude("get numRows metrics by callback",
+      ADJUST_UT("Replaced by a testRapids version that locates numOutputRows across the GPU " +
+        "plan instead of assuming a CPU WholeStageCodegen root. Original contract: " +
+        "https://github.com/apache/spark/blob/v3.3.0/sql/core/src/test/scala/org/apache/" +
+        "spark/sql/util/DataFrameCallbackSuite.scala#L98-L130; P1."))
+    .exclude("execute callback functions for DataFrameWriter",
+      ADJUST_UT("Replaced by a testRapids version that identifies callback commands by type " +
+        "instead of fixed positions. Original contract: https://github.com/apache/spark/blob/" +
+        "v3.3.0/sql/core/src/test/scala/org/apache/spark/sql/util/" +
+        "DataFrameCallbackSuite.scala#L181-L238; P1."))
+    .exclude("get observable metrics by callback",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/14152. Recovery trigger: " +
+        "CollectMetricsExec aggregation expressions no longer fail GPU override tagging; P0."))
+    .exclude("SPARK-35296: observe should work even if a task contains multiple partitions",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/14152. Recovery trigger: " +
+        "CollectMetricsExec supports multi-partition observation under RAPIDS; P0."))
+    .exclude("SPARK-35695: get observable metrics with persist by callback",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/14152. Recovery trigger: " +
+        "CollectMetricsExec supports persisted observations under RAPIDS; P0."))
+    .exclude("SPARK-35695: get observable metrics with adaptive execution by callback",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/14152. Recovery trigger: " +
+        "CollectMetricsExec supports adaptive observations under RAPIDS; P0."))
+  enableSuite[RapidsInMemoryTableMetricSuite]
+  enableSuite[RapidsOptimizeMetadataOnlyQuerySuite]
+  enableSuite[RapidsQueryExecutionErrorsSuite]
+    .exclude("INCONSISTENT_BEHAVIOR_CROSS_VERSION: " +
+      "compatibility with Spark 2.4/3.2 in reading/writing dates",
+      ADJUST_UT("Replaced by a testRapids version that expands the Spark test resource with " +
+        "testFile() before reading it. Original contract: https://github.com/apache/spark/blob/" +
+        "v3.3.0/sql/core/src/test/scala/org/apache/spark/sql/errors/" +
+        "QueryExecutionErrorsSuite.scala#L171-L232; P1."))
   enableSuite[RapidsWriteDistributionAndOrderingSuite]
   enableSuite[RapidsOrcSourceV1Suite]
     .exclude("Propagate Hadoop configs from orc options to underlying file system",
       KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/11602. " +
         "Recovery trigger: GPU ORC writes propagate data-source options; P1."))
-    .exclude("Write Spark version into ORC file metadata",
-      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15468. " +
-        "Recovery trigger: GPU ORC files include Spark version metadata; P1."))
-    .exclude("SPARK-31238: compatibility with Spark 2.4 in reading dates",
-      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15470. " +
-        "Recovery trigger: GPU ORC legacy date rebasing matches Spark CPU; P0."))
     .exclude("SPARK-31284: compatibility with Spark 2.4 in reading timestamps",
       KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15471. " +
         "Recovery trigger: GPU ORC legacy timestamp reads match Spark CPU; P0."))
@@ -246,12 +271,6 @@ class RapidsTestSettings extends BackendTestSettings {
     .exclude("Propagate Hadoop configs from orc options to underlying file system",
       KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/11602. " +
         "Recovery trigger: GPU ORC writes propagate data-source options; P1."))
-    .exclude("Write Spark version into ORC file metadata",
-      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15468. " +
-        "Recovery trigger: GPU ORC files include Spark version metadata; P1."))
-    .exclude("SPARK-31238: compatibility with Spark 2.4 in reading dates",
-      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15470. " +
-        "Recovery trigger: GPU ORC legacy date rebasing matches Spark CPU; P0."))
     .exclude("SPARK-31284: compatibility with Spark 2.4 in reading timestamps",
       KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15471. " +
         "Recovery trigger: GPU ORC legacy timestamp reads match Spark CPU; P0."))
@@ -277,6 +296,35 @@ class RapidsTestSettings extends BackendTestSettings {
         "Recovery trigger: the Spark test accepts the GPU V1 scan node; P2."))
   enableSuite[RapidsV1ReadFallbackWithDataFrameReaderSuite]
   enableSuite[RapidsV1ReadFallbackWithCatalogSuite]
+  enableSuite[RapidsFileSourceCharVarcharDDLTestSuite]
+  enableSuite[RapidsDSV2CharVarcharDDLTestSuite]
+  enableSuite[RapidsParquetCodecSuite]
+  enableSuite[RapidsOrcCodecSuite]
+    .exclude("write and read - file source orc - codec: lzo",
+      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15551. " +
+        "Recovery trigger: GPU ORC supports LZO or safely falls back; P1."))
+  enableSuite[RapidsSaveLoadSuite]
+  enableSuite[RapidsTableScanSuite]
+  enableSuite[RapidsDataSourceV2DataFrameSessionCatalogSuite]
+  enableSuite[RapidsTextV1Suite]
+  enableSuite[RapidsTextV2Suite]
+  enableSuite[RapidsBinaryFileFormatSuite]
+    .exclude("BinaryFileFormat methods",
+      ADJUST_UT("https://github.com/NVIDIA/cudf-spark/issues/15552. " +
+        "Recovery trigger: add equivalent query-level RAPIDS coverage or a GPU-owned hook; P2."))
+    .exclude("createFilterFunction",
+      ADJUST_UT("https://github.com/NVIDIA/cudf-spark/issues/15552. " +
+        "Recovery trigger: add equivalent query-level RAPIDS coverage or a GPU-owned hook; P2."))
+    .exclude("buildReader",
+      ADJUST_UT("https://github.com/NVIDIA/cudf-spark/issues/15552. " +
+        "Recovery trigger: add equivalent query-level RAPIDS coverage or a GPU-owned hook; P2."))
+    .exclude("column pruning",
+      ADJUST_UT("https://github.com/NVIDIA/cudf-spark/issues/15552. " +
+        "Recovery trigger: add equivalent query-level RAPIDS coverage or a GPU-owned hook; P2."))
+    .exclude("column pruning - non-readable file",
+      ADJUST_UT("https://github.com/NVIDIA/cudf-spark/issues/15552. " +
+        "Recovery trigger: replace the chmod-based unreadability setup with filesystem-independent " +
+        "fault injection while preserving query-level count coverage; P2."))
   enableSuite[RapidsFileMetadataStructSuite]
   enableSuite[RapidsDisableUnnecessaryBucketedScanWithoutHiveSupportSuite]
     .exclude("SPARK-32859: disable unnecessary bucketed table scan - basic test",
@@ -311,22 +359,9 @@ class RapidsTestSettings extends BackendTestSettings {
   enableSuite[RapidsFileSourceSQLInsertTestSuite]
   enableSuite[RapidsDSV2SQLInsertTestSuite]
   enableSuite[RapidsMetadataCacheV1Suite]
-    .exclude("SPARK-16336,SPARK-27961 Suggest fixing FileNotFoundException",
-      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15511. " +
-        "Recovery trigger: GPU ORC V1 missing-file errors include Spark-equivalent recreate " +
-        "guidance; P1."))
-    .exclude("SPARK-16337 temporary view refresh",
-      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15511. " +
-        "Recovery trigger: GPU ORC V1 missing-file errors include Spark-equivalent REFRESH " +
-        "and recreate guidance; P1."))
   enableSuite[RapidsMetadataCacheV2Suite]
-    .exclude("SPARK-16336,SPARK-27961 Suggest fixing FileNotFoundException",
-      KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15511. " +
-        "Recovery trigger: GPU ORC V2 missing-file errors include Spark-equivalent recreate " +
-        "guidance; P1."))
   enableSuite[RapidsFileSourceStrategySuite]
     .exclude("partitioned table - after scan filters", ADJUST_UT("Replaced by testRapids version that checks GpuFilterExec residual filters."))
-    .exclude("[SPARK-16818] partition pruned file scans implement sameResult correctly", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15161"))
   enableSuite[RapidsFileScanSuite]
   enableSuite[RapidsPruneFileSourcePartitionsSuite]
   enableSuite[RapidsDataFrameWindowFunctionsSuite]
@@ -436,44 +471,8 @@ class RapidsTestSettings extends BackendTestSettings {
   enableSuite[RapidsOrcV2AggregatePushDownSuite]
     .exclude("nested column: Count(top level column) push down", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15186"))
 
-  private val orcSchemaPruningModes = Seq(
-    "Spark vectorized reader - without partition data column",
-    "Spark vectorized reader - with partition data column",
-    "Non-vectorized reader - without partition data column",
-    "Non-vectorized reader - with partition data column")
-
-  private val orcComplexReaderFailureReason =
-    KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15179")
-
-  private val orcV1ComplexReaderFailureCases = Seq(
-    "select a single complex field",
-    "select a single complex field and the partition column",
-    "partial schema intersection - select missing subfield",
-    "empty schema intersection",
-    "select one deep nested complex field after join",
-    "select one deep nested complex field after outer join")
-
-  private val orcV1SchemaPruning = enableSuite[RapidsOrcV1SchemaPruningSuite]
-  orcV1ComplexReaderFailureCases.foreach { testName =>
-    orcSchemaPruningModes.foreach { mode =>
-      orcV1SchemaPruning.exclude(s"$mode - $testName", orcComplexReaderFailureReason)
-    }
-  }
-
-  private val orcV2ComplexReaderFailureCases = Seq(
-    "select a single complex field",
-    "select a single complex field and the partition column",
-    "partial schema intersection - select missing subfield",
-    "empty schema intersection",
-    "select one deep nested complex field after join",
-    "select one deep nested complex field after outer join")
-
-  private val orcV2SchemaPruning = enableSuite[RapidsOrcV2SchemaPruningSuite]
-  orcV2ComplexReaderFailureCases.foreach { testName =>
-    orcSchemaPruningModes.foreach { mode =>
-      orcV2SchemaPruning.exclude(s"$mode - $testName", orcComplexReaderFailureReason)
-    }
-  }
+  enableSuite[RapidsOrcV1SchemaPruningSuite]
+  enableSuite[RapidsOrcV2SchemaPruningSuite]
   enableSuite[RapidsRandomSuite]
     .exclude("random", ADJUST_UT("Replaced by testRapids version that considers partitionIndex offset"))
     .exclude("SPARK-9127 codegen with long seed", ADJUST_UT("Replaced by testRapids version that considers partitionIndex offset"))
@@ -529,5 +528,29 @@ class RapidsTestSettings extends BackendTestSettings {
     .exclude("SPARK-33084: Add jar support Ivy URI in SQL -- jar contains udf class", ADJUST_UT("Replaced by testRapids version that uses testFile() to access Spark test resources instead of getContextClassLoader"))
     .exclude("SPARK-33482: Fix FileScan canonicalization", ADJUST_UT("Replaced by testRapids version using V1 sources with AQE and broadcast disabled to assert ReusedExchangeExec directly"))
     .exclude("SPARK-36093: RemoveRedundantAliases should not change expression's name", ADJUST_UT("Replaced by testRapids version that checks the partition column name of the GpuInsertIntoHadoopFsRelationCommand"))
+  enableSuite[RapidsCTEInlineSuiteAEOff]
+  enableSuite[RapidsCTEInlineSuiteAEOn]
+  enableSuite[RapidsFilteredScanSuite]
+    .excludeByPrefix(
+      "PushDown Returns ",
+      ADJUST_UT(
+        "Replaced by testRapids coverage that executes the full query plan, requires " +
+          "GpuRowToColumnarExec and GpuProjectExec, and preserves the pushdown, required-column, " +
+          "unhandled-filter, and result-count assertions. See " +
+          "https://github.com/NVIDIA/cudf-spark/issues/15566."))
+  enableSuite[RapidsPrunedScanSuite]
+    .excludeByPrefix(
+      "Columns output ",
+      ADJUST_UT(
+        "Replaced by testRapids coverage that executes the full query plan, requires " +
+          "GpuRowToColumnarExec and GpuProjectExec, and preserves the source-column and " +
+          "runtime row-width assertions. See " +
+          "https://github.com/NVIDIA/cudf-spark/issues/15567."))
+  enableSuite[RapidsSupportsCatalogOptionsSuite]
+  enableSuite[RapidsLocalTempViewTestSuite]
+  enableSuite[RapidsGlobalTempViewTestSuite]
+  enableSuite[RapidsPersistedViewTestSuite]
+  enableSuite[RapidsRowDataSourceStrategySuite]
+  enableSuite[RapidsConfigBehaviorSuite]
 }
 // scalastyle:on line.size.limit

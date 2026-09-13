@@ -163,7 +163,15 @@ def test_sort_array_lit(data_gen):
 # array_sort runs on the GPU for flat (non-nested) element types. A nested element type (array or
 # struct) falls back to the CPU: cudf's listSortRows applies one null order at every nesting level,
 # but Spark's array_sort needs null elements last and null sub-elements first.
-_array_sort_gens = non_nested_array_gens
+_array_sort_gens = non_nested_array_gens + [
+    ArrayGen(FloatGen(
+        no_nans=True,
+        special_cases=[FLOAT_MIN, FLOAT_MAX, 0.0, -0.0, float('nan')])),
+    ArrayGen(DoubleGen(
+        no_nans=True,
+        special_cases=[DOUBLE_MIN, DOUBLE_MAX, 0.0, -0.0, float('nan')])),
+    ArrayGen(StringGen(pattern='(| |hello|你好|🙂)')),
+]
 
 # array_sort(arr) with the default comparator (ascending, nulls last) must run on GPU.
 # Capture the plan so a silent CPU fallback (which still matches results) fails the test.

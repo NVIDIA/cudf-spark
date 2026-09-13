@@ -262,38 +262,63 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
 
   private case class TimestampSchemaEvolutionCase(sourceType: String, values: Seq[String])
 
-  private val timestampSchemaEvolutionCases = Seq(
-    TimestampSchemaEvolutionCase("timestamp", Seq(
-      "NULL",
-      s"timestamp_micros(${newYorkHistoricalTsUs}L)",
-      s"timestamp_micros(${shanghaiHistoricalTsUs}L)",
-      "timestamp_micros(0L)")),
-    TimestampSchemaEvolutionCase("bigint", Seq(
-      "NULL",
-      "-1",
-      "0",
-      "1",
-      "514952012")),
-    TimestampSchemaEvolutionCase("float", Seq(
-      "NULL",
-      "-0.0015",
-      "-0.0005",
-      "0.0",
-      "0.0005",
-      "0.0015")),
-    TimestampSchemaEvolutionCase("double", Seq(
-      "NULL",
-      "-8589934591.999999",
-      "-7953731124.723491",
-      "1710037800.0", // 2024-03-10 02:30:00, inside the America/New_York DST gap
-      "1730597400.0", // 2024-11-03 01:30:00, inside the America/New_York DST overlap
-      "-0.0015",
-      "-0.0005",
-      "0.0",
-      "0.0005",
-      "0.0015")))
+  private val denseIntegralSeconds = -64L to 64L
+  private val denseEpochSeconds = -32L to 32L
+  private val denseEpochTimestampMicros = denseEpochSeconds.flatMap { seconds =>
+    val micros = TimeUnit.SECONDS.toMicros(seconds)
+    Seq(micros - 1L, micros, micros + 1L)
+  }
+  private val denseFractionalSeconds = denseEpochSeconds.flatMap { seconds =>
+    Seq(s"$seconds.0", s"$seconds.25", s"$seconds.75")
+  }
 
-  // Covers same-zone, same-rules aliases, and both directions between UTC and a DST zone.
+  private val timestampSchemaEvolutionCases = Seq(
+    TimestampSchemaEvolutionCase("timestamp",
+      (Seq("NULL") ++ (ExplicitTimestampMicros ++ denseEpochTimestampMicros)
+        .map(micros => s"timestamp_micros(${micros}L)")).distinct),
+    TimestampSchemaEvolutionCase("bigint",
+      (Seq(
+        "NULL",
+        Math.floorDiv(newYorkHistoricalTsUs, TimeUnit.SECONDS.toMicros(1)).toString,
+        Math.floorDiv(shanghaiHistoricalTsUs, TimeUnit.SECONDS.toMicros(1)).toString,
+        "-2208988800", // 1900-01-01T00:00:00Z, before Asia/Shanghai's first transition
+        Int.MinValue.toString,
+        Int.MaxValue.toString,
+        "514952012",
+        "1710037800", // 2024-03-10 02:30:00, inside the America/New_York DST gap
+        "1730597400") ++ denseIntegralSeconds.map(_.toString)).distinct),
+    TimestampSchemaEvolutionCase("float",
+      (Seq(
+        "NULL",
+        "-2208988800.0",
+        "514952012.0",
+        "1710037800.0",
+        "1730597400.0",
+        "-0.0015",
+        "-0.0005",
+        "0.0005",
+        "0.0015") ++ denseFractionalSeconds).distinct),
+    TimestampSchemaEvolutionCase("double",
+      (Seq(
+        "NULL",
+        "-8589934591.999999",
+        "-7953731124.723491",
+        "-3649379812.521628",
+        "-2957649381.472612",
+        "-2208988800.0",
+        "514952012.0",
+        "1710037799.999999", // America/New_York DST gap - 1 microsecond
+        "1710037800.0",
+        "1710037800.000001",
+        "1730597399.999999", // America/New_York DST overlap - 1 microsecond
+        "1730597400.0",
+        "1730597400.000001",
+        "-0.0015",
+        "-0.0005",
+        "0.0005",
+        "0.0015") ++ denseFractionalSeconds).distinct))
+
+  // Covers same zones, aliases, both UTC directions, and cross-region non-UTC conversions.
   private val timestampSchemaEvolutionZonePairs = Seq(
     "UTC" -> "UTC",
     "America/New_York" -> "America/New_York",
@@ -303,16 +328,20 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
     "US/Pacific" -> "PST",
     "UTC" -> "America/New_York",
     "America/New_York" -> "UTC",
+    "UTC" -> "Asia/Shanghai",
+    "Asia/Shanghai" -> "UTC",
     "UTC" -> "Europe/Paris",
-    "Europe/Paris" -> "UTC")
+    "Europe/Paris" -> "UTC",
+    "America/New_York" -> "Asia/Shanghai",
+    "Asia/Shanghai" -> "America/New_York")
 
   private def timestampSchemaEvolutionDataFrame(
       spark: SparkSession,
       testCase: TimestampSchemaEvolutionCase): DataFrame = {
-    val selects = testCase.values.zipWithIndex.map { case (value, id) =>
-      s"SELECT $id AS id, CAST($value AS ${testCase.sourceType}) AS ts"
-    }
-    spark.sql(selects.mkString(" UNION ALL "))
+    val rows = testCase.values.zipWithIndex.map { case (value, id) => s"($id, $value)" }
+    spark.sql(
+      s"""SELECT id, CAST(value AS ${testCase.sourceType}) AS ts
+         |FROM VALUES ${rows.mkString(", ")} AS t(id, value)""".stripMargin)
   }
 
   Seq(false, true).foreach { useChunkedReader =>

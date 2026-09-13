@@ -34,6 +34,7 @@
 {"spark": "412"}
 {"spark": "413"}
 {"spark": "420"}
+{"spark": "500"}
 spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.shims
@@ -49,7 +50,7 @@ import org.apache.spark.sql.catalyst.plans.logical.MergeRows.{Discard, Keep, Spl
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.adaptive.TableCacheQueryStageExec
 import org.apache.spark.sql.execution.datasources.{FileFormat, FilePartition, FileScanRDD, PartitionedFile}
-import org.apache.spark.sql.execution.datasources.v2.{AppendDataExec, MergeRowsExec, OverwriteByExpressionExec, OverwritePartitionsDynamicExec, ReplaceDataExec, WriteDeltaExec}
+import org.apache.spark.sql.execution.datasources.v2.{MergeRowsExec, OverwritePartitionsDynamicExec, ReplaceDataExec, WriteDeltaExec}
 import org.apache.spark.sql.execution.window.WindowGroupLimitExec
 import org.apache.spark.sql.rapids.execution.python.GpuPythonUDAF
 import org.apache.spark.sql.types.{StringType, StructType}
@@ -192,13 +193,6 @@ trait Spark350PlusNonDBShims extends Spark340PlusNonDBShims {
             TypeSig.STRUCT + TypeSig.ARRAY + TypeSig.MAP).nested(),
           TypeSig.all),
         (limit, conf, p, r) => new GpuWindowGroupLimitExecMeta(limit, conf, p, r)),
-      exec[AppendDataExec](
-        "Append data into a datasource V2 table",
-        ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 +
-          TypeSig.STRUCT + TypeSig.MAP + TypeSig.ARRAY + TypeSig.BINARY +
-          GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
-          TypeSig.all),
-        (p, conf, parent, r) => new AppendDataExecMeta(p, conf, parent, r)),
       exec[OverwritePartitionsDynamicExec](
         "Overwrite partitions dynamically in a datasource V2 table",
         ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 +
@@ -206,13 +200,6 @@ trait Spark350PlusNonDBShims extends Spark340PlusNonDBShims {
           GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
           TypeSig.all),
         (p, conf, parent, r) => new OverwritePartitionsDynamicExecMeta(p, conf, parent, r)),
-      exec[OverwriteByExpressionExec](
-        "Overwrite data in a datasource V2 table",
-        ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 +
-          TypeSig.STRUCT + TypeSig.MAP + TypeSig.ARRAY + TypeSig.BINARY +
-          GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
-          TypeSig.all),
-        (p, conf, parent, r) => new OverwriteByExpressionExecMeta(p, conf, parent, r)),
       exec[ReplaceDataExec](
         "Replace data in a datasource V2 table (for copy-on-write DELETE operations)",
         ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 +

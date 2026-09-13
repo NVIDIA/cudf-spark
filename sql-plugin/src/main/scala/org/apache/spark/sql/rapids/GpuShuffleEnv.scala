@@ -91,6 +91,7 @@ class GpuShuffleEnv(rapidsConf: RapidsConf) extends Logging {
   }
 }
 
+@scala.annotation.nowarn("cat=deprecation&origin=org.apache.spark.SparkEnv.shuffleManager")
 object GpuShuffleEnv extends Logging {
   def isUCXShuffleAndEarlyStart(conf: RapidsConf): Boolean = {
     conf.isUCXShuffleManagerMode &&

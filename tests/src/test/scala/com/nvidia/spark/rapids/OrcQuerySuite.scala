@@ -25,7 +25,7 @@ import com.nvidia.spark.rapids.Arm.{withResource, withResourceIfAllowed}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.FileUtil.fullyDelete
 import org.apache.hadoop.fs.Path
-import org.apache.orc.{OrcFile, StripeInformation}
+import org.apache.orc.{OrcConf, OrcFile, StripeInformation}
 import org.apache.orc.impl.RecordReaderImpl
 
 import org.apache.spark.{SPARK_VERSION_SHORT, SparkConf, SparkContext}
@@ -53,6 +53,39 @@ class OrcQuerySuite extends SparkQueryCompareTestSuite {
       getSchema)
   }
 
+  private def withHadoopConf[T](
+      hadoopConf: Configuration,
+      optionName: String,
+      optionValue: Option[String])(body: => T): T = {
+    val previousValue = Option(hadoopConf.getRaw(optionName))
+    try {
+      optionValue match {
+        case Some(value) => hadoopConf.set(optionName, value)
+        case None => hadoopConf.unset(optionName)
+      }
+      body
+    } finally {
+      previousValue match {
+        case Some(value) => hadoopConf.set(optionName, value)
+        case None => hadoopConf.unset(optionName)
+      }
+    }
+  }
+
+  private def assertGpuOrcWriteWithOptions(
+      spark: SparkSession,
+      options: Map[String, String]): Unit = {
+    withTempPath { outputPath =>
+      ExecutionPlanCaptureCallback.startCapture()
+      spark.range(10).write.mode("overwrite")
+        .options(options)
+        .orc(outputPath.getCanonicalPath)
+      val plans = ExecutionPlanCaptureCallback.getResultsWithTimeout()
+      assert(plans.nonEmpty, "Did not capture GPU write plan")
+      ExecutionPlanCaptureCallback.assertContains(plans(0), "GpuDataWritingCommandExec")
+    }
+  }
+
   Seq("orc", "").foreach { v1List =>
     val sparkConf = new SparkConf().set("spark.sql.sources.useV1SourceList", v1List)
     testGpuWriteFallback(
@@ -69,6 +102,115 @@ class OrcQuerySuite extends SparkQueryCompareTestSuite {
         frame.write.mode("overwrite").orc(tempFile.getAbsolutePath)
       } finally {
         fullyDelete(tempFile)
+      }
+    }
+  }
+
+  private val unsupportedOrcEncodingOptions = Seq(
+    OrcConf.DICTIONARY_KEY_SIZE_THRESHOLD.getAttribute -> "1.0",
+    OrcConf.DICTIONARY_KEY_SIZE_THRESHOLD.getHiveConfName -> "1.0",
+    OrcConf.DIRECT_ENCODING_COLUMNS.getAttribute -> "value",
+    OrcConf.BLOOM_FILTER_COLUMNS.getAttribute -> "value")
+
+  private val nullOrcEncodingOptions = Seq(
+    OrcConf.DICTIONARY_KEY_SIZE_THRESHOLD.getAttribute,
+    OrcConf.DIRECT_ENCODING_COLUMNS.getAttribute)
+
+  Seq("orc" -> "ORC in V1 source list", "" -> "empty V1 source list").foreach {
+    case (v1List, sourceListDescription) =>
+    unsupportedOrcEncodingOptions.foreach { case (optionName, optionValue) =>
+      val sparkConf = new SparkConf().set("spark.sql.sources.useV1SourceList", v1List)
+      testGpuWriteFallback(
+        s"ORC write falls back for per-write option $optionName, $sourceListDescription",
+        "DataWritingCommandExec",
+        spark => spark.range(10).selectExpr("CAST(id AS STRING) AS value"),
+        execsAllowedNonGpu = Seq(
+          "DataWritingCommandExec", "WriteFilesExec", "ShuffleExchangeExec"),
+        conf = sparkConf
+      ) { frame =>
+        withTempPath { outputPath =>
+          frame.write.mode("overwrite")
+            .option(optionName, optionValue)
+            .orc(outputPath.getCanonicalPath)
+        }
+      }
+
+      testGpuWriteFallback(
+        s"ORC write falls back for Hadoop configuration $optionName, " +
+          sourceListDescription,
+        "DataWritingCommandExec",
+        spark => spark.range(10).selectExpr("CAST(id AS STRING) AS value"),
+        execsAllowedNonGpu = Seq(
+          "DataWritingCommandExec", "WriteFilesExec", "ShuffleExchangeExec"),
+        conf = sparkConf
+      ) { frame =>
+        val hadoopConf = frame.sparkSession.sparkContext.hadoopConfiguration
+        withHadoopConf(hadoopConf, optionName, Some(optionValue)) {
+          withTempPath { outputPath =>
+            frame.write.mode("overwrite").orc(outputPath.getCanonicalPath)
+          }
+        }
+      }
+    }
+
+    test(s"ORC write stays on GPU for empty direct-encoding columns, " +
+        sourceListDescription) {
+      val sparkConf = new SparkConf().set("spark.sql.sources.useV1SourceList", v1List)
+      withGpuSparkSession({ spark =>
+        assertGpuOrcWriteWithOptions(spark,
+          Map(OrcConf.DIRECT_ENCODING_COLUMNS.getAttribute -> ""))
+      }, sparkConf)
+    }
+
+    nullOrcEncodingOptions.foreach { optionName =>
+      test(s"ORC write stays on GPU for null per-write option $optionName, " +
+          sourceListDescription) {
+        val sparkConf = new SparkConf().set("spark.sql.sources.useV1SourceList", v1List)
+        withGpuSparkSession({ spark =>
+          val hadoopConf = spark.sparkContext.hadoopConfiguration
+          withHadoopConf(hadoopConf, optionName, None) {
+            assertGpuOrcWriteWithOptions(spark, Map(optionName -> (null: String)))
+          }
+        }, sparkConf)
+      }
+    }
+
+    test(s"ORC write stays on GPU for substituted empty direct-encoding columns, " +
+        sourceListDescription) {
+      val sparkConf = new SparkConf().set("spark.sql.sources.useV1SourceList", v1List)
+      withGpuSparkSession({ spark =>
+        val emptyVariable = "rapids.test.orc.empty"
+        val hadoopConf = spark.sparkContext.hadoopConfiguration
+        withHadoopConf(hadoopConf, emptyVariable, Some("")) {
+          assertGpuOrcWriteWithOptions(spark, Map(
+            OrcConf.DIRECT_ENCODING_COLUMNS.getAttribute -> ("${" + emptyVariable + "}")))
+        }
+      }, sparkConf)
+    }
+  }
+
+  Seq("orc", "").foreach { v1List =>
+    val sparkConf = new SparkConf().set("spark.sql.sources.useV1SourceList", v1List)
+    Seq(false, true).foreach { prolepticGregorian =>
+      Seq(
+        "struct" -> "named_struct('date', CAST('1001-01-01' AS DATE)) AS value",
+        "array" -> "array(CAST('1001-01-01' AS DATE)) AS value"
+      ).foreach { case (nestedType, selectExpr) =>
+        testGpuWriteFallback(
+          s"ORC date write falls back without calendar metadata, source list is ($v1List), " +
+            s"proleptic=$prolepticGregorian, nested type=$nestedType",
+          "DataWritingCommandExec",
+          spark => spark.range(1).selectExpr(selectExpr),
+          execsAllowedNonGpu = Seq(
+            "DataWritingCommandExec", "WriteFilesExec", "ShuffleExchangeExec"),
+          conf = sparkConf
+        ) { frame =>
+          withTempPath { outputPath =>
+            frame.write.mode("overwrite")
+              .option(OrcConf.PROLEPTIC_GREGORIAN.getAttribute, prolepticGregorian.toString)
+              .orc(outputPath.getCanonicalPath)
+          }
+        }
       }
     }
   }

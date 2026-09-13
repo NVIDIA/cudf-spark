@@ -40,7 +40,7 @@ def write_to_delta(enable_deletion_vectors, num_rows=30, is_partitioned=False, n
             else input_data.repartition(1)
         writer = input_data.write.format("delta").mode("append")
         if supports_delta_lake_deletion_vectors():
-           writer.option("delta.enableDeletionVectors", str(enable_deletion_vectors).lower())
+            writer.option("delta.enableDeletionVectors", str(enable_deletion_vectors).lower())
         for _ in range(num_writes):
             writer.save(table_path)
 
@@ -201,10 +201,8 @@ def test_auto_compact_partitioned(spark_tmp_path, auto_compact_conf, enable_dele
 
     def read_metadata(spark, table_path):
         assert_optimized(spark, table_path)
-        """
-        The snapshots might not look alike, in the partitioned case.
-        Ensure that auto compaction has occurred, even if it's not identical.
-        """
+        # The snapshots might not look alike, in the partitioned case.
+        # Ensure that auto compaction has occurred, even if it's not identical.
         input_table = DeltaTable.forPath(spark, table_path)
         table_history = input_table.history()
         return table_history.select(

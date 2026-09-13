@@ -44,17 +44,18 @@ import org.scalatest.BeforeAndAfterAll
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.SparkConf
+import org.apache.spark.internal.Logging
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.types.DataType
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
-class GpuIcebergPartitionerSuite extends AnyFunSuite with BeforeAndAfterAll {
+class GpuIcebergPartitionerSuite extends AnyFunSuite with BeforeAndAfterAll with Logging {
   private var seed = 0L
 
   override def beforeAll(): Unit = {
     SpillFramework.initialize(new RapidsConf(new SparkConf))
     seed = System.currentTimeMillis()
-    println(s"Random seed set to $seed")
+    logWarning(s"Random seed set to $seed")
   }
 
   override def afterAll(): Unit = {

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids.delta
 
 import scala.collection.mutable.ArrayBuffer
 
-import ai.rapids.cudf.{NvtxColor, Table}
+import ai.rapids.cudf.{ColumnVector, NvtxColor, Scalar, Table}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.AssertUtils.assertInTests
@@ -49,7 +49,8 @@ object RapidsProcessDeltaMergeJoinStrategy extends SparkStrategy {
         notMatchedBySourceConditions = p.notMatchedBySourceConditions,
         notMatchedBySourceOutputs = p.notMatchedBySourceOutputs,
         noopCopyOutput = p.noopCopyOutput,
-        deleteRowOutput = p.deleteRowOutput))
+        deleteRowOutput = p.deleteRowOutput,
+        rowDroppedColumnIndex = p.rowDroppedColumnIndex))
     case _ => Nil
   }
 }
@@ -66,7 +67,10 @@ case class RapidsProcessDeltaMergeJoin(
     notMatchedBySourceConditions: Seq[Expression],
     notMatchedBySourceOutputs: Seq[Seq[Seq[Expression]]],
     noopCopyOutput: Seq[Expression],
-    deleteRowOutput: Seq[Expression]) extends UnaryNode {
+    deleteRowOutput: Seq[Expression],
+    // Position of the row-dropped control column in every projected output row. When None, the
+    // column is located by its name in `output`, falling back to the position after `output`.
+    rowDroppedColumnIndex: Option[Int] = None) extends UnaryNode {
 
   @transient
   override lazy val references: AttributeSet = inputSet
@@ -88,7 +92,8 @@ case class RapidsProcessDeltaMergeJoinExec(
     notMatchedConditions: Seq[Expression],
     notMatchedOutputs: Seq[Seq[Seq[Expression]]],
     noopCopyOutput: Seq[Expression],
-    deleteRowOutput: Seq[Expression]) extends UnaryExecNode {
+    deleteRowOutput: Seq[Expression],
+    rowDroppedColumnIndex: Option[Int] = None) extends UnaryExecNode {
 
   override protected def doExecute(): RDD[InternalRow] = {
     throw new IllegalStateException("Should have been replaced by a GpuRapidsProcessMergeJoinExec")
@@ -122,7 +127,8 @@ class RapidsProcessDeltaMergeJoinMeta(
       notMatchedBySourceConditions = p.notMatchedBySourceConditions.map(convertExprToGpu),
       notMatchedBySourceOutputs = p.notMatchedBySourceOutputs.map(_.map(_.map(convertExprToGpu))),
       noopCopyOutput = p.noopCopyOutput.map(convertExprToGpu),
-      deleteRowOutput = p.deleteRowOutput.map(convertExprToGpu))
+      deleteRowOutput = p.deleteRowOutput.map(convertExprToGpu),
+      rowDroppedColumnIndex = p.rowDroppedColumnIndex)
   }
 
   private def convertExprToGpu(e: Expression): Expression = {
@@ -149,14 +155,11 @@ case class GpuRapidsProcessDeltaMergeJoinExec(
     notMatchedBySourceConditions: Seq[Expression],
     notMatchedBySourceOutputs: Seq[Seq[Seq[Expression]]],
     noopCopyOutput: Seq[Expression],
-    deleteRowOutput: Seq[Expression]) extends UnaryExecNode with GpuExec {
+    deleteRowOutput: Seq[Expression],
+    rowDroppedColumnIndex: Option[Int] = None) extends UnaryExecNode with GpuExec {
   require(matchedConditions.length == matchedOutputs.length)
   require(notMatchedConditions.length == notMatchedOutputs.length)
-
-  // TODO add support for notMatchedBy*
-  // see https://github.com/NVIDIA/spark-rapids/issues/8415
-  require(notMatchedBySourceConditions.isEmpty)
-  require(notMatchedBySourceOutputs.isEmpty)
+  require(notMatchedBySourceConditions.length == notMatchedBySourceOutputs.length)
 
   private lazy val inputTypes: Array[DataType] = GpuColumnVector.extractTypes(child.schema)
   private lazy val outputExprs: Seq[GpuBoundReference] = output.zipWithIndex.map {
@@ -169,6 +172,10 @@ case class GpuRapidsProcessDeltaMergeJoinExec(
   private lazy val boundMatchedOutputs = matchedOutputs.map(_.map(_.map(bindForGpu)))
   private lazy val boundNotMatchedConditions = notMatchedConditions.map(bindForGpu)
   private lazy val boundNotMatchedOutputs = notMatchedOutputs.map(_.map(_.map(bindForGpu)))
+  private lazy val boundNotMatchedBySourceConditions =
+    notMatchedBySourceConditions.map(bindForGpu)
+  private lazy val boundNotMatchedBySourceOutputs =
+    notMatchedBySourceOutputs.map(_.map(_.map(bindForGpu)))
   private lazy val boundNoopCopyOutput = noopCopyOutput.map(bindForGpu)
   private lazy val boundDeleteRowOutput = deleteRowOutput.map(bindForGpu)
 
@@ -195,8 +202,11 @@ case class GpuRapidsProcessDeltaMergeJoinExec(
     val localMatchedOutputs = boundMatchedOutputs
     val localNotMatchedConditions = boundNotMatchedConditions
     val localNotMatchedOutputs = boundNotMatchedOutputs
+    val localNotMatchedBySourceConditions = boundNotMatchedBySourceConditions
+    val localNotMatchedBySourceOutputs = boundNotMatchedBySourceOutputs
     val localNoopCopyOutput = boundNoopCopyOutput
     val localDeleteRowOutput = boundDeleteRowOutput
+    val localRowDroppedColumnIndex = rowDroppedColumnIndex
     child.executeColumnar().mapPartitions { iter =>
       new GpuRapidsProcessDeltaMergeJoinIterator(
         iter = iter,
@@ -209,9 +219,12 @@ case class GpuRapidsProcessDeltaMergeJoinExec(
         matchedOutputs = localMatchedOutputs,
         notMatchedConditions = localNotMatchedConditions,
         notMatchedOutputs = localNotMatchedOutputs,
+        notMatchedBySourceConditions = localNotMatchedBySourceConditions,
+        notMatchedBySourceOutputs = localNotMatchedBySourceOutputs,
         noopCopyOutput = localNoopCopyOutput,
         deleteRowOutput = localDeleteRowOutput,
-        allMetrics)
+        metrics = allMetrics,
+        rowDroppedColumnIndex = localRowDroppedColumnIndex)
     }
   }
 
@@ -231,9 +244,12 @@ class GpuRapidsProcessDeltaMergeJoinIterator(
     matchedOutputs: Seq[Seq[Seq[GpuExpression]]],
     notMatchedConditions: Seq[GpuExpression],
     notMatchedOutputs: Seq[Seq[Seq[GpuExpression]]],
+    notMatchedBySourceConditions: Seq[GpuExpression],
+    notMatchedBySourceOutputs: Seq[Seq[Seq[GpuExpression]]],
     noopCopyOutput: Seq[GpuExpression],
     deleteRowOutput: Seq[GpuExpression],
-    metrics: Map[String, GpuMetric])
+    metrics: Map[String, GpuMetric],
+    rowDroppedColumnIndex: Option[Int] = None)
     extends Iterator[ColumnarBatch] with AutoCloseable {
 
   private[this] val intermediateTypes: Array[DataType] = noopCopyOutput.map(_.dataType).toArray
@@ -286,10 +302,13 @@ class GpuRapidsProcessDeltaMergeJoinIterator(
   private def processSingleBatch(input: ColumnarBatch): ColumnarBatch = {
     val (targetNoMatchBatch, targetMatchBatch) =
       splitBatchAndClose(input, inputTypes, targetRowHasNoMatch)
-    val noopCopyBatch = closeOnExcept(targetMatchBatch) { _ =>
-      GpuProjectExec.projectAndClose(targetNoMatchBatch, noopCopyOutput, NoopMetric)
+    // Target rows without a source match are handled by the NOT MATCHED BY SOURCE clauses.
+    // A target row that satisfies none of the clause conditions is copied unchanged.
+    val targetNotMatchedBatches = closeOnExcept(targetMatchBatch) { _ =>
+      processProjectionSeries(targetNoMatchBatch,
+        notMatchedBySourceConditions, notMatchedBySourceOutputs, noopCopyOutput)
     }
-    val bigTable = withResource(noopCopyBatch) { _ =>
+    val bigTable = withResource(targetNotMatchedBatches) { _ =>
       val (sourceNoMatchBatch, sourceMatchBatch) =
         splitBatchAndClose(targetMatchBatch, inputTypes, sourceRowHasNoMatch)
       val sourceNotMatchedBatches = closeOnExcept(sourceMatchBatch) { _ =>
@@ -300,9 +319,15 @@ class GpuRapidsProcessDeltaMergeJoinIterator(
         val sourceMatchedBatches = processProjectionSeries(sourceMatchBatch,
           matchedConditions, matchedOutputs, noopCopyOutput)
         withResource(sourceMatchedBatches) { _ =>
-          val allBatches = (noopCopyBatch +: sourceNotMatchedBatches) ++ sourceMatchedBatches
-          // annoyingly Table.concatenate does not gracefully handle the degenerate case
-          if (allBatches.size == 1) {
+          val allBatches = targetNotMatchedBatches ++ sourceNotMatchedBatches ++
+            sourceMatchedBatches
+          // annoyingly Table.concatenate does not gracefully handle the degenerate cases
+          if (allBatches.isEmpty) {
+            // every projection series skips empty inputs, so an empty input batch ends up here
+            withResource(GpuColumnVector.emptyBatchFromTypes(intermediateTypes)) { emptyBatch =>
+              GpuColumnVector.from(emptyBatch)
+            }
+          } else if (allBatches.size == 1) {
             GpuColumnVector.from(allBatches.head)
           } else {
             withResource(allBatches.safeMap(GpuColumnVector.from)) { allTables =>
@@ -313,11 +338,13 @@ class GpuRapidsProcessDeltaMergeJoinIterator(
       }
     }
     val shouldNotDeleteBatch = withResource(bigTable) { _ =>
-      // If ROW_DROPPED_COL is not in output schema
-      // then CDC must be disabled and it's the column after our output cols
-      val shouldDeleteColumnIndex =
+      // The command that built the plan knows where the control column sits. Without that, if
+      // ROW_DROPPED_COL is not in the output schema then CDC must be disabled and it's the column
+      // after our output cols.
+      val shouldDeleteColumnIndex = rowDroppedColumnIndex.getOrElse {
         output.zipWithIndex.find(_._1.name == GpuDeltaMergeConstants.ROW_DROPPED_COL).map(_._2)
             .getOrElse(output.size)
+      }
       val shouldDeleteColumn = bigTable.getColumn(shouldDeleteColumnIndex)
       withResource(shouldDeleteColumn.not()) { notDeleteColumn =>
         withResource(bigTable.filter(notDeleteColumn)) { notDeleteTable =>
@@ -336,11 +363,13 @@ class GpuRapidsProcessDeltaMergeJoinIterator(
     closeOnExcept(new ArrayBuffer[ColumnarBatch]) { results =>
       var leftOverBatch = input
       conditions.zip(outputs).foreach { case (condition, output) =>
-        closeOnExcept(leftOverBatch) { _ =>
-          if (leftOverBatch.numRows() > 0) {
-            val (matchBatch, notMatchBatch) =
-              splitBatchAndClose(leftOverBatch, inputTypes, condition)
-            leftOverBatch = notMatchBatch
+        if (leftOverBatch.numRows() > 0) {
+          // splitBatchAndClose closes the batch it is given, so only the not-matched remainder
+          // is still open if a projection below throws
+          val (matchBatch, notMatchBatch) =
+            splitBatchAndClose(leftOverBatch, inputTypes, condition)
+          leftOverBatch = notMatchBatch
+          closeOnExcept(notMatchBatch) { _ =>
             withResource(matchBatch) { _ =>
               output.foreach { exprs =>
                 results.append(GpuProjectExec.project(matchBatch, exprs))
@@ -364,15 +393,20 @@ class GpuRapidsProcessDeltaMergeJoinIterator(
       predicate: Expression): (ColumnarBatch, ColumnarBatch) = {
     withResource(input) { _ =>
       withResource(GpuColumnVector.from(input)) { inTable =>
-        val predCol = predicate.columnarEval(input)
+        // A clause condition that evaluates to NULL is false in SQL: the row moves on to the
+        // next clause or to the default output. cuDF's filter drops rows whose mask is NULL, and
+        // NOT NULL is NULL, so without this both halves would lose the row.
+        val predCol = withResource(predicate.columnarEval(input)) { evaluated =>
+          nullsAsFalse(evaluated.getBase)
+        }
         val matchedBatch = closeOnExcept(predCol) { _ =>
-          withResource(inTable.filter(predCol.getBase)) { matchedTable =>
+          withResource(inTable.filter(predCol)) { matchedTable =>
             GpuColumnVector.from(matchedTable, inputTypes)
           }
         }
         closeOnExcept(matchedBatch) { _ =>
           val notPredCol = withResource(predCol) { _ =>
-            predCol.getBase.not()
+            predCol.not()
           }
           val notMatchedBatch = withResource(notPredCol) { _ =>
             withResource(inTable.filter(notPredCol)) { notMatchedTable =>
@@ -382,6 +416,16 @@ class GpuRapidsProcessDeltaMergeJoinIterator(
           (matchedBatch, notMatchedBatch)
         }
       }
+    }
+  }
+
+  private def nullsAsFalse(mask: ColumnVector): ColumnVector = {
+    if (mask.hasNulls) {
+      withResource(Scalar.fromBool(false)) { falseScalar =>
+        mask.replaceNulls(falseScalar)
+      }
+    } else {
+      mask.incRefCount()
     }
   }
 }

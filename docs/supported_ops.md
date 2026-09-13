@@ -65,9 +65,12 @@ the level of compatibility with Apache Spark.  Those are covered [here](configs.
 Others are a part of Apache Spark itself and those are a bit harder to document.
 The work of updating this to cover that support is still ongoing.
 
-In general though if you ever have any question about why an operation is not running
-on the GPU you may set `spark.rapids.sql.explain` to ALL and it will try to give all of
-the reasons why this particular operator or expression is on the CPU or GPU.
+For debugging, set `spark.rapids.sql.explain` to ALL to report why
+operators or expressions run on the CPU or GPU. ALL can generate
+substantial driver log output for complex or high-volume workloads,
+potentially degrading driver performance or making the driver
+unresponsive. Do not enable ALL in production; use NOT_ON_GPU
+(the default) or NONE.
 
 # Key
 ## Types
@@ -671,11 +674,11 @@ plugin supports are described below.
 <td>S</td>
 <td>S</td>
 <td>S</td>
+<td>S</td>
 <td><b>NS</b></td>
-<td><b>NS</b></td>
-<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types BINARY, CALENDAR, UDT</em></td>
-<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types BINARY, CALENDAR, UDT</em></td>
-<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types BINARY, CALENDAR, UDT</em></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types CALENDAR, UDT</em></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types CALENDAR, UDT</em></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types CALENDAR, UDT</em></td>
 <td><b>NS</b></td>
 <td>S</td>
 <td>S</td>
@@ -729,6 +732,58 @@ plugin supports are described below.
 <td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP</em></td>
 <td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP</em></td>
 <td>S</td>
+<td>S</td>
+<td>S</td>
+</tr>
+<tr>
+<td rowspan="1">AppendDataExec</td>
+<td rowspan="1">Source-specific GPU support for Spark noop write</td>
+<td rowspan="1">Source: Spark noop write</td>
+<td>Input/Output</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><b>NS</b></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, CALENDAR, UDT</em></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, CALENDAR, UDT</em></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, CALENDAR, UDT</em></td>
+<td><b>NS</b></td>
+<td>S</td>
+<td>S</td>
+</tr>
+<tr>
+<td rowspan="1">AppendDataExec</td>
+<td rowspan="1">Source-specific GPU support for Apache Iceberg write</td>
+<td rowspan="1">Source: Apache Iceberg write</td>
+<td>Input/Output</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
+<td>S</td>
+<td>S</td>
+<td><b>NS</b></td>
+<td>S</td>
+<td><b>NS</b></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, CALENDAR, UDT</em></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, CALENDAR, UDT</em></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, CALENDAR, UDT</em></td>
+<td><b>NS</b></td>
 <td>S</td>
 <td>S</td>
 </tr>
@@ -835,6 +890,84 @@ plugin supports are described below.
 <td><b>NS</b></td>
 <td>S</td>
 <td>S</td>
+</tr>
+<tr>
+<td rowspan="1">OverwriteByExpressionExec</td>
+<td rowspan="1">Source-specific GPU support for Spark noop write</td>
+<td rowspan="1">Source: Spark noop write</td>
+<td>Input/Output</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><b>NS</b></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, CALENDAR, UDT</em></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, CALENDAR, UDT</em></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, CALENDAR, UDT</em></td>
+<td><b>NS</b></td>
+<td>S</td>
+<td>S</td>
+</tr>
+<tr>
+<td rowspan="1">OverwriteByExpressionExec</td>
+<td rowspan="1">Source-specific GPU support for Apache Iceberg write</td>
+<td rowspan="1">Source: Apache Iceberg write</td>
+<td>Input/Output</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
+<td>S</td>
+<td>S</td>
+<td><b>NS</b></td>
+<td>S</td>
+<td><b>NS</b></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, CALENDAR, UDT</em></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, CALENDAR, UDT</em></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types NULL, CALENDAR, UDT</em></td>
+<td><b>NS</b></td>
+<td>S</td>
+<td>S</td>
+</tr>
+<tr>
+<th>Executor</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Param(s)</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowspan="1">OverwriteByExpressionExecV1</td>
@@ -1008,32 +1141,6 @@ plugin supports are described below.
 <td><b>NS</b></td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
-</tr>
-<tr>
-<th>Executor</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Param(s)</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowspan="2">BroadcastNestedLoopJoinExec</td>
@@ -1301,6 +1408,32 @@ plugin supports are described below.
 <td><b>NS</b></td>
 </tr>
 <tr>
+<th>Executor</th>
+<th>Description</th>
+<th>Notes</th>
+<th>Param(s)</th>
+<th>BOOLEAN</th>
+<th>BYTE</th>
+<th>SHORT</th>
+<th>INT</th>
+<th>LONG</th>
+<th>FLOAT</th>
+<th>DOUBLE</th>
+<th>DATE</th>
+<th>TIMESTAMP</th>
+<th>STRING</th>
+<th>DECIMAL</th>
+<th>NULL</th>
+<th>BINARY</th>
+<th>CALENDAR</th>
+<th>ARRAY</th>
+<th>MAP</th>
+<th>STRUCT</th>
+<th>UDT</th>
+<th>DAYTIME</th>
+<th>YEARMONTH</th>
+</tr>
+<tr>
 <td rowspan="1">AggregateInPandasExec</td>
 <td rowspan="1">The backend for an Aggregation Pandas UDF. This accelerates the data transfer between the Java process and the Python process. It also supports scheduling GPU resources for the Python process when enabled.</td>
 <td rowspan="1">None</td>
@@ -1403,32 +1536,6 @@ plugin supports are described below.
 <td><b>NS</b></td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
-</tr>
-<tr>
-<th>Executor</th>
-<th>Description</th>
-<th>Notes</th>
-<th>Param(s)</th>
-<th>BOOLEAN</th>
-<th>BYTE</th>
-<th>SHORT</th>
-<th>INT</th>
-<th>LONG</th>
-<th>FLOAT</th>
-<th>DOUBLE</th>
-<th>DATE</th>
-<th>TIMESTAMP</th>
-<th>STRING</th>
-<th>DECIMAL</th>
-<th>NULL</th>
-<th>BINARY</th>
-<th>CALENDAR</th>
-<th>ARRAY</th>
-<th>MAP</th>
-<th>STRUCT</th>
-<th>UDT</th>
-<th>DAYTIME</th>
-<th>YEARMONTH</th>
 </tr>
 <tr>
 <td rowspan="1">MapInPandasExec</td>
@@ -9492,7 +9599,7 @@ are limited.
 <td rowSpan="3">In</td>
 <td rowSpan="3">`in`</td>
 <td rowSpan="3">IN operator</td>
-<td rowSpan="3">None</td>
+<td rowSpan="3">Non-literal list expressions must be deterministic and side-effect-free</td>
 <td rowSpan="3">project</td>
 <td>value</td>
 <td>S</td>
@@ -9518,17 +9625,17 @@ are limited.
 </tr>
 <tr>
 <td>list</td>
-<td><em>PS<br/>Literal value only</em></td>
-<td><em>PS<br/>Literal value only</em></td>
-<td><em>PS<br/>Literal value only</em></td>
-<td><em>PS<br/>Literal value only</em></td>
-<td><em>PS<br/>Literal value only</em></td>
-<td><em>PS<br/>Literal value only</em></td>
-<td><em>PS<br/>Literal value only</em></td>
-<td><em>PS<br/>Literal value only</em></td>
-<td><em>PS<br/>UTC is only supported TZ for TIMESTAMP;<br/>Literal value only</em></td>
-<td><em>PS<br/>Literal value only</em></td>
-<td><em>PS<br/>Literal value only</em></td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td>S</td>
+<td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
+<td>S</td>
+<td>S</td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
 <td><b>NS</b></td>
@@ -11156,7 +11263,7 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-<td><em>PS<br/>Literal value only</em></td>
+<td>S</td>
 <td> </td>
 <td> </td>
 <td> </td>

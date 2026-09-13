@@ -129,9 +129,8 @@ class RegularExpressionSuite extends SparkQueryCompareTestSuite {
       frame.selectExpr("regexp_replace(strings,'\\(foo\\)','D')")
   }
 
-  // #14856 / revans2: anchored alternation with a backref. With the old (\r\n)? workaround the
-  // synthetic group shifted (E) to group 2, so [$1] referenced the wrong group; once the
-  // workaround is dropped (cudf #22763) (E) stays group 1 and GPU must match CPU here.
+  // #14856 / revans2: anchored alternation with a backref. The line-anchor rewrite must not
+  // change Java-visible capture numbering, so (E) remains group 1 and GPU must match CPU here.
   testSparkResultsAreEqual("regexp_replace anchored alternation backref T$|(E)",
     spark => {
       import spark.implicits._

@@ -142,12 +142,41 @@ def setup_clustered_table_sql(spark, path, table_name, view_name,
     optimize_liquid_clustered_table(spark, table_name)
 
 
+def assert_db173_gpu_liquid_rtas(spark, replace_sql):
+    callback = spark._sc._jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        spark.sql(replace_sql).collect()
+        captured_plans = callback.getResultsWithTimeout(10000)
+        assert len(captured_plans) > 0, "No execution plans captured for liquid RTAS"
+        for gpu_class in [
+                "GpuAtomicReplaceTableAsSelectExec",
+                "GpuDataWritingCommandExec",
+                "GpuWriteFilesExec"]:
+            assert any(callback.contains(plan, gpu_class) for plan in captured_plans), \
+                f"{gpu_class} is not found in the captured liquid RTAS plans"
+        for cpu_class in [
+                "AtomicReplaceTableAsSelectExec",
+                "DataWritingCommandExec",
+                "WriteFilesExec"]:
+            assert not any(callback.didFallBack(plan, cpu_class) for plan in captured_plans), \
+                f"Captured liquid RTAS plan contains CPU {cpu_class}"
+    finally:
+        callback.endCapture()
+
+
 @allow_non_gpu(*delta_meta_allow, "CreateTableExec")
+@allow_non_gpu_conditional(is_databricks173_or_later(),
+                           f"{delta_write_fallback_allow},AtomicReplaceTableAsSelectExec,"
+                           "AppendDataExecV1")
+@allow_non_gpu_delta_write_if(
+    is_databricks173_or_later(),
+    reason="DBR 17.3 plans Delta liquid RTAS through V2 AtomicReplaceTableAsSelectExec")
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not is_spark_353_or_later(),
                     reason="RTAS with cluster by is only supported on delta 3.3+")
-@pytest.mark.skipif(is_spark_356_or_later(),
+@pytest.mark.skipif(is_spark_356_or_later() and not is_spark_400_or_later(),
                     reason="https://github.com/delta-io/delta/issues/4671")
 def test_delta_rtas_sql_liquid_clustering(spark_tmp_path, spark_tmp_table_factory):
     def write_func(spark, path):
@@ -156,13 +185,19 @@ def test_delta_rtas_sql_liquid_clustering(spark_tmp_path, spark_tmp_table_factor
 
         create_clustered_table_sql(spark, table_name, path)
         gen_df_and_replace_view(spark, view_name)
-        spark.sql(f"""
+        replace_sql = f"""
             REPLACE TABLE {table_name}
             USING DELTA
             LOCATION '{path}'
             CLUSTER BY (a)
             AS SELECT * FROM {view_name}
-        """)
+        """
+        gpu_enabled = str(spark.conf.get(
+            "spark.rapids.sql.enabled", "false")).lower() == "true"
+        if is_databricks173_or_later() and gpu_enabled:
+            assert_db173_gpu_liquid_rtas(spark, replace_sql)
+        else:
+            spark.sql(replace_sql).collect()
         optimize_liquid_clustered_table(spark, table_name)
 
     data_path = spark_tmp_path + "/DELTA_LIQUID_CLUSTER"

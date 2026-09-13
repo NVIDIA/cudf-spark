@@ -16,6 +16,15 @@
 
 package com.nvidia.spark.rapids
 
+import java.io.{File, InputStream}
+import java.nio.channels.ClosedChannelException
+import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, TimeUnit}
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
+
+import scala.collection.mutable.ArrayBuffer
+import scala.util.control.NonFatal
+
+import _root_.io.netty.channel.FileRegion
 import com.nvidia.spark.rapids.spill.SpillablePartialFileHandle
 import org.mockito.ArgumentMatchers._
 import org.mockito.Mockito._
@@ -23,6 +32,7 @@ import org.scalatest.BeforeAndAfterEach
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatestplus.mockito.MockitoSugar
 
+import org.apache.spark.network.buffer.ManagedBuffer
 import org.apache.spark.storage.{ShuffleBlockBatchId, ShuffleBlockId}
 
 class MultithreadedShuffleBufferCatalogSuite
@@ -188,6 +198,86 @@ class MultithreadedShuffleBufferCatalogSuite
     catalog.unregisterShuffle(1)
   }
 
+  // ------------------------------------------------------------------------------------------
+  // Regression test: a retained file-backed (FILE_ONLY) skip-merge shuffle buffer must stay
+  // readable while shuffle cleanup unregisters the catalog entry. The test retains a buffer,
+  // starts concurrent stream readers, unregisters the shuffle while reads are in flight, and
+  // verifies that the active readers do not observe a closed backing channel.
+  //
+  // The race depends on cleanup landing while a reader is using the cached FileChannel, so the
+  // test oversubscribes readers and uses small, frequent reads with bounded retries.
+
+  test("retained skip-merge buffer stays readable across concurrent unregisterShuffle") {
+    val race = MultithreadedShuffleBufferCatalogSuite.RetainedBufferReadRace
+    var bug: Option[Throwable] = None
+    var otherError: Option[Throwable] = None
+    var sawReadsInFlight = false
+    var sawReadsAfterUnregister = false
+    var leakedReaders = 0
+    var iteration = 0
+    while (bug.isEmpty && iteration < race.MaxIterations) {
+      iteration += 1
+      val result = race.attempt(iteration)
+      bug = result.target
+      if (otherError.isEmpty) otherError = result.otherError
+      sawReadsInFlight ||= result.startedOk && result.readsBeforeUnregister > 0
+      sawReadsAfterUnregister ||= result.readsAfterUnregister > 0
+      leakedReaders += result.leakedReaders
+    }
+
+    bug match {
+      case Some(closed) =>
+        // BUG: an active read was closed underneath the reader. Surface the real exception so the
+        // failure is the ClosedChannelException from the read path, not a synthetic assertion.
+        // Expected to FAIL on unmodified `main`.
+        throw closed
+      case None =>
+        // Post-fix expectation: confirm the scenario actually ran and that reads SURVIVED
+        // unregisterShuffle, so a future change cannot make this test pass for the wrong reason.
+        assert(sawReadsInFlight,
+          "reproducer never observed reads before unregisterShuffle; scenario did not run")
+        otherError.foreach(e => throw e)
+        assert(sawReadsAfterUnregister,
+          "no reads completed after unregisterShuffle; the retained buffer was not readable")
+        assert(leakedReaders == 0, s"$leakedReaders reader thread(s) did not stop after the test")
+        info(s"retained reads survived unregisterShuffle across $iteration iterations")
+    }
+  }
+
+  test("convertToNetty release closes retained handle exactly once") {
+    // The handle owns the close deferral, so a mock can't reproduce it: use a real FILE_ONLY
+    // handle and observe the physical close via `isPhysicallyClosed`.
+    val catalog = new MultithreadedShuffleBufferCatalog()
+    val backingFile = File.createTempFile("skipmerge-region-", ".data")
+    val handle = SpillablePartialFileHandle.createFileOnly(backingFile)
+    handle.write(Array.fill[Byte](100)(7.toByte), 0, 100)
+    handle.finishWrite()
+    try {
+      catalog.registerShuffle(1)
+      catalog.addPartition(1, 0L, 0, handle, 0, 100)
+
+      val buffer = catalog.getMergedBuffer(ShuffleBlockId(1, 0L, 0))
+      val region = buffer.convertToNetty().asInstanceOf[FileRegion]
+
+      // Cleanup requests close, but the file region still holds a read lease: close is deferred.
+      catalog.unregisterShuffle(1)
+      assert(!handle.isPhysicallyClosed,
+        "handle must stay open while the file region holds a lease")
+
+      // Releasing the region drops the last lease and runs the deferred physical close.
+      assert(region.release())
+      assert(handle.isPhysicallyClosed, "handle must close once the file region releases its lease")
+
+      // No retained buffer lease here, so releasing the buffer is a no-op and must not re-close.
+      buffer.release()
+      assert(handle.isPhysicallyClosed)
+    } finally {
+      if (backingFile.exists()) {
+        backingFile.delete()
+      }
+    }
+  }
+
   private def createMockHandle(): SpillablePartialFileHandle = {
     val handle = mock[SpillablePartialFileHandle]
     handle
@@ -213,3 +303,201 @@ class MultithreadedShuffleBufferCatalogSuite
   }
 }
 
+object MultithreadedShuffleBufferCatalogSuite {
+  private object RetainedBufferReadRace {
+    // Oversubscribe readers (bounded) so the close reliably lands in a reader's channel-read path.
+    private val ReaderThreads: Int =
+      math.min(128, math.max(64, Runtime.getRuntime.availableProcessors() * 4))
+    private val ReadBufferBytes: Int = 4 * 1024 // small reads => very frequent readAt calls
+    private val BackingFileBytes: Int = 2 * 1024 * 1024 // 2 MB single-segment backing file
+    private val AwaitSeconds: Long = 30L
+    private val PostUnregisterMillis: Long = 200L
+
+    val MaxIterations: Int = 20
+
+    case class Result(
+        target: Option[Throwable],
+        otherError: Option[Throwable],
+        readsBeforeUnregister: Long,
+        readsAfterUnregister: Long,
+        startedOk: Boolean,
+        leakedReaders: Int)
+
+    /** Runs one race iteration and reports what the readers saw. */
+    def attempt(iteration: Int): Result = {
+      val shuffleId = iteration
+      val mapId = 0L
+      val reduceId = 0
+      val backingFile = File.createTempFile("skipmerge-catalog-repro-", ".data")
+
+      val catalog = new MultithreadedShuffleBufferCatalog()
+      val handle = SpillablePartialFileHandle.createFileOnly(backingFile)
+      val stop = new AtomicBoolean(false)
+      val afterUnregister = new AtomicBoolean(false)
+      val started = new CountDownLatch(ReaderThreads)
+      val readsBefore = new AtomicLong(0L)
+      val readsAfter = new AtomicLong(0L)
+      val readerErrors = new ConcurrentLinkedQueue[Throwable]()
+      val readers = new ArrayBuffer[Thread](ReaderThreads)
+      var buffer: ManagedBuffer = null
+      var startedOk = false
+      var leakedReaders = 0
+      var targetBeforeCleanup: Option[Throwable] = None
+      var otherErrorBeforeCleanup: Option[Throwable] = None
+
+      try {
+        // Publish a multi-MB file-only handle as a single whole-file segment, like the writer does.
+        writeBackingData(handle, BackingFileBytes)
+        handle.finishWrite()
+        catalog.registerShuffle(shuffleId)
+        catalog.addPartition(shuffleId, mapId, reduceId, handle, 0L, BackingFileBytes.toLong)
+
+        // A reducer retains the buffer before handing it to readers; this retained lease is the
+        // lifecycle guarantee the regression test protects.
+        buffer = catalog.getMergedBuffer(ShuffleBlockId(shuffleId, mapId, reduceId))
+        buffer.retain()
+        val readBuffer = buffer
+
+        (0 until ReaderThreads).foreach { idx =>
+          // A Runnable (not a Thread subclass) so the local `stop` flag is not shadowed by the
+          // inherited Thread.stop() member.
+          val body = new Runnable {
+            override def run(): Unit = {
+              var in: InputStream = readBuffer.createInputStream()
+              val buf = new Array[Byte](ReadBufferBytes)
+              started.countDown()
+              try {
+                while (!stop.get()) {
+                  val n = in.read(buf, 0, buf.length)
+                  if (n < 0) {
+                    in.close()
+                    in = readBuffer.createInputStream()
+                  } else if (afterUnregister.get()) {
+                    readsAfter.incrementAndGet()
+                  } else {
+                    readsBefore.incrementAndGet()
+                  }
+                }
+              } catch {
+                case NonFatal(t) => readerErrors.add(t)
+              } finally {
+                try { in.close() } catch { case NonFatal(_) => () }
+              }
+            }
+          }
+          val reader = new Thread(body, s"skipmerge-catalog-reader-$iteration-$idx")
+          reader.setDaemon(true)
+          readers += reader
+          reader.start()
+        }
+
+        // Make sure reads are flowing before the close, so it lands in a reader's read path.
+        startedOk = started.await(AwaitSeconds, TimeUnit.SECONDS) &&
+          awaitReadsInFlight(readsBefore, ReaderThreads.toLong)
+
+        // Cleanup thread closes the handle underneath the active readers; then give readers a
+        // short window to read the retained buffer post-unregister (on `main` they hit the
+        // closed channel; once fixed they keep reading, counted in readsAfter).
+        catalog.unregisterShuffle(shuffleId)
+        afterUnregister.set(true)
+        awaitReadsAfterUnregister(readsAfter, readers, ReaderThreads.toLong)
+      } finally {
+        stop.set(true)
+        leakedReaders = joinAll(readers)
+        targetBeforeCleanup = firstMatching(readerErrors, isClosedChannelFromReadPath)
+        otherErrorBeforeCleanup =
+          firstMatching(readerErrors, t => !isClosedChannelFromReadPath(t))
+        // Release the retained buffer before the last-resort handle.close() guard, giving the
+        // catalog's deferred close path the first chance to close the handle.
+        if (buffer != null) {
+          try { buffer.release() } catch { case NonFatal(_) => () }
+        }
+        try { handle.close() } catch { case NonFatal(_) => () }
+        if (backingFile.exists()) {
+          backingFile.delete()
+        }
+      }
+
+      Result(
+        target = targetBeforeCleanup,
+        otherError = otherErrorBeforeCleanup,
+        readsBeforeUnregister = readsBefore.get(),
+        readsAfterUnregister = readsAfter.get(),
+        startedOk = startedOk,
+        leakedReaders = leakedReaders)
+    }
+
+    private def writeBackingData(handle: SpillablePartialFileHandle, totalBytes: Int): Unit = {
+      val chunk = new Array[Byte](1024 * 1024)
+      var i = 0
+      while (i < chunk.length) {
+        chunk(i) = (i & 0xFF).toByte
+        i += 1
+      }
+      var written = 0
+      while (written < totalBytes) {
+        val toWrite = math.min(chunk.length, totalBytes - written)
+        handle.write(chunk, 0, toWrite)
+        written += toWrite
+      }
+    }
+
+    /** Waits until reads are flowing; returns true if the target read count was reached in time. */
+    private def awaitReadsInFlight(reads: AtomicLong, target: Long): Boolean = {
+      val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(AwaitSeconds)
+      while (reads.get() < target && System.nanoTime() < deadline) {
+        Thread.sleep(1L)
+      }
+      reads.get() >= target
+    }
+
+    /** Lets readers attempt reads after unregister; stops early once enough succeed or all exit. */
+    private def awaitReadsAfterUnregister(
+        readsAfter: AtomicLong, readers: ArrayBuffer[Thread], target: Long): Unit = {
+      val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(PostUnregisterMillis)
+      while (readsAfter.get() < target &&
+          System.nanoTime() < deadline && readers.exists(_.isAlive)) {
+        Thread.sleep(1L)
+      }
+    }
+
+    /** Stops/joins all readers under one shared deadline; returns the count still alive. */
+    private def joinAll(readers: ArrayBuffer[Thread]): Int = {
+      val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(AwaitSeconds)
+      readers.foreach { reader =>
+        val remainingMs = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime())
+        if (remainingMs > 0) {
+          try {
+            reader.join(remainingMs)
+          } catch {
+            case _: InterruptedException => Thread.currentThread().interrupt()
+          }
+        }
+      }
+      readers.count(_.isAlive)
+    }
+
+    private def firstMatching(
+        errors: ConcurrentLinkedQueue[Throwable], p: Throwable => Boolean): Option[Throwable] = {
+      var found: Option[Throwable] = None
+      val it = errors.iterator()
+      while (found.isEmpty && it.hasNext) {
+        val t = it.next()
+        if (p(t)) {
+          found = Some(t)
+        }
+      }
+      found
+    }
+
+    private def isClosedChannelFromReadPath(t: Throwable): Boolean = {
+      // AsynchronousCloseException (channel closed while a read is in flight) is a subclass of
+      // ClosedChannelException, so this covers both.
+      t.isInstanceOf[ClosedChannelException] && t.getStackTrace.exists { frame =>
+        frame.getClassName.endsWith("SpillablePartialFileHandle") &&
+          (frame.getMethodName.contains("readFromFileChannel") ||
+            frame.getMethodName.contains("readAt"))
+      }
+    }
+  }
+}

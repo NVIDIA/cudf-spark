@@ -26,22 +26,25 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{Dataset, Row, SaveMode}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, NamedExpression}
-import org.apache.spark.sql.catalyst.plans.physical.SinglePartition
+import org.apache.spark.sql.catalyst.plans.physical.{SinglePartition, UnknownPartitioning}
 import org.apache.spark.sql.execution.{FilterExec, LeafExecNode, LocalTableScanExec,
-  PartialReducerPartitionSpec, ReusedSubqueryExec, SortExec, SparkPlan, SubqueryExec}
+  PartialReducerPartitionSpec, ReusedSubqueryExec, SortExec, SparkPlan, SubqueryExec, UnaryExecNode}
 import org.apache.spark.sql.execution.{InSubqueryExec => SparkInSubqueryExec}
 import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, AdaptiveSparkPlanHelper, ShuffleQueryStageExec}
+import org.apache.spark.sql.execution.columnar.InMemoryRelation
 import org.apache.spark.sql.execution.command.DataWritingCommandExec
 import org.apache.spark.sql.execution.exchange.{BroadcastExchangeLike, ENSURE_REQUIREMENTS,
   Exchange, REPARTITION_BY_NUM, ReusedExchangeExec, ShuffleExchangeExec, ShuffleExchangeLike}
 import org.apache.spark.sql.execution.joins.SortMergeJoinExec
 import org.apache.spark.sql.functions.{col, when}
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.rapids.{ExecutionPlanCaptureCallback, GpuFileSourceScanExec}
+import org.apache.spark.sql.rapids.{ExecutionPlanCaptureCallback, GpuFileSourceScanExec,
+  GpuInMemoryTableScanExec}
 import org.apache.spark.sql.rapids.execution.{GpuCustomShuffleReaderExec, GpuJoinExec, GpuShuffleExchangeExecBase}
 import org.apache.spark.sql.rapids.shims.SparkSessionUtils
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.SparkSession
 import org.apache.spark.sql.types.{ArrayType, DataTypes, DecimalType, IntegerType, StringType, StructField, StructType}
+import org.apache.spark.sql.vectorized.ColumnarBatch
 
 class AdaptiveQueryExecSuite
     extends SparkQueryCompareTestSuite
@@ -107,6 +110,41 @@ class AdaptiveQueryExecSuite
   private case class TestLeafExec(override val output: Seq[Attribute]) extends LeafExecNode {
     override protected def doExecute(): RDD[InternalRow] =
       throw new UnsupportedOperationException("TestLeafExec should not be executed")
+  }
+
+  private case class UnknownPartitioningExec(child: SparkPlan) extends UnaryExecNode {
+    override def output: Seq[Attribute] = child.output
+    override def outputPartitioning: UnknownPartitioning = UnknownPartitioning(0)
+    override def supportsColumnar: Boolean = child.supportsColumnar
+    override protected def doExecute(): RDD[InternalRow] = child.execute()
+    override protected def doExecuteColumnar(): RDD[ColumnarBatch] = child.executeColumnar()
+    override protected def withNewChildInternal(newChild: SparkPlan): UnknownPartitioningExec =
+      copy(child = newChild)
+  }
+
+  test("GPU cache scan preserves the cached RDD partition count when AQE partitioning is unknown") {
+    val conf = new SparkConf()
+      .set("spark.sql.adaptive.enabled", "true")
+      .set("spark.sql.cache.serializer", "com.nvidia.spark.ParquetCachedBatchSerializer")
+    withGpuHiveSparkSession({ spark =>
+      val cached = spark.range(100).repartition(4).cache()
+      try {
+        cached.count()
+        val relation = cached.queryExecution.withCachedData.collectFirst {
+          case r: InMemoryRelation => r
+        }.getOrElse(fail(s"Expected an InMemoryRelation:\n${cached.queryExecution.withCachedData}"))
+        val unknownPlan = UnknownPartitioningExec(relation.cachedPlan)
+        val unknownRelation = relation.copy(
+          cacheBuilder = relation.cacheBuilder.copy(cachedPlan = unknownPlan))
+        val scan = GpuInMemoryTableScanExec(
+          unknownRelation.output, Seq.empty, unknownRelation)
+
+        assert(scan.relation.cachedPlan.outputPartitioning === UnknownPartitioning(0))
+        assert(scan.outputPartitioning === UnknownPartitioning(4))
+      } finally {
+        cached.unpersist()
+      }
+    }, conf)
   }
 
   test("GPU planning rules use their captured session when no session is active") {

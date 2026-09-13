@@ -207,6 +207,9 @@ def is_before_spark_350():
 def is_before_spark_351():
     return spark_version() < "3.5.1"
 
+def is_before_spark_352():
+    return spark_version() < "3.5.2"
+
 def is_before_spark_353():
     return spark_version() < "3.5.3"
 
@@ -257,6 +260,9 @@ def is_spark_41x():
 
 def is_spark_420_or_later():
     return spark_version() >= "4.2.0"
+
+def is_spark_500_or_later():
+    return spark_version() >= "5.0.0"
 
 def is_iceberg_supported_spark():
     return is_spark_35x() or is_spark_40x() or is_spark_41x()
@@ -334,6 +340,13 @@ def is_databricks143():
 def is_databricks173_or_later():
     return is_databricks_version_or_later(17, 3)
 
+def is_spark_protobuf_available():
+    if is_databricks_runtime():
+        return is_databricks122_or_later()
+    return (is_spark_340_or_later() and
+            os.environ.get('INCLUDE_SPARK_PROTOBUF_JAR', 'true').lower() != 'false')
+
+
 def supports_delta_lake_deletion_vectors():
     """Whether the current Delta Lake runtime provides the deletion-vector feature."""
     if is_databricks_runtime():
@@ -348,6 +361,15 @@ def gpu_supports_delta_dv_scan():
     else:
         return is_spark_353_or_later()
 
+def supports_delta_lake_row_tracking():
+    """Whether the current Delta Lake runtime provides row tracking (delta.enableRowTracking and
+    the _metadata.row_id / row_commit_version fields). OSS: Delta Lake 3.3, which the plugin pairs
+    with Spark 3.5.x and later."""
+    if is_databricks_runtime():
+        return is_databricks173_or_later()
+    else:
+        return is_spark_350_or_later()
+
 def is_support_default_values_in_schema():
     # Spark 340 + and Databricks 330 + support
     return is_spark_340_or_later() or is_databricks113_or_later()
@@ -359,6 +381,9 @@ def is_spark_testing_enabled():
     # execution, so latent Spark codegen bugs become hard failures instead of being swallowed.
     return (_spark.sparkContext._jvm.System.getProperty("spark.testing") is not None
             or _spark.sparkContext._jvm.System.getenv("SPARK_TESTING") is not None)
+
+def is_spark_local_mode():
+    return _spark.sparkContext._jsc.sc().isLocal()
 
 def get_java_major_version():
     ver = _spark.sparkContext._jvm.System.getProperty("java.version")
@@ -403,6 +428,3 @@ def is_hive_available():
     if is_at_least_precommit_run():
         return True
     return _spark.conf.get("spark.sql.catalogImplementation") == "hive"
-
-def is_hybrid_backend_loaded():
-    return _spark.conf.get("spark.rapids.sql.hybrid.loadBackend", "false") == "true"
