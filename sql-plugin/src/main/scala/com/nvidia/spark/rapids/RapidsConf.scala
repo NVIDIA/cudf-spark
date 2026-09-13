@@ -770,6 +770,14 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .booleanConf
     .createWithDefault(false)
 
+  val RANGE_SHUFFLE_INPUT_BATCHING_ENABLED =
+    conf("spark.rapids.sql.rangeShuffle.inputBatching.enabled")
+      .doc("Enables experimental one-input-batch-at-a-time consumption for GPU range shuffles " +
+        "to bound the amount of decoded input retained before partitioning.")
+      .internal()
+      .booleanConf
+      .createWithDefault(false)
+
   val EXPORT_COLUMNAR_RDD = conf("spark.rapids.sql.exportColumnarRdd")
     .doc("Spark has no simply way to export columnar RDD data.  This turns on special " +
       "processing/tagging that allows the RDD to be picked back apart into a Columnar RDD.")
