@@ -131,7 +131,6 @@ class RootSafeProviderSelectionTest(unittest.TestCase):
             "def system_runtime_path(get_property):\n"
             "    return None\n"
             "\n"
-            "\n"
             "def coordinates(zip_handle, buildver, scala_version, get_property):\n"
             "    return []\n")
         create_artifacts(self.project_dir)
