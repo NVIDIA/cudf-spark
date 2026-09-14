@@ -58,6 +58,7 @@ import com.nvidia.spark.rapids.{BaseExprMeta, GpuOverrides, RapidsConf, SparkPla
 import com.nvidia.spark.rapids.RapidsConf.DELTA_LOW_SHUFFLE_MERGE_DEL_VECTOR_BROADCAST_THRESHOLD
 import com.nvidia.spark.rapids.delta._
 import com.nvidia.spark.rapids.delta.GpuDeltaParquetFileFormatUtils.METADATA_ROW_IDX_COL
+import com.nvidia.spark.rapids.delta.shims.UpdateCommandShims
 import com.nvidia.spark.rapids.shims.FileSourceScanExecMeta
 import org.apache.hadoop.conf.Configuration
 import org.roaringbitmap.longlong.Roaring64Bitmap
@@ -69,7 +70,8 @@ import org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.catalyst.encoders.{ExpressionEncoder, RowEncoder}
 import org.apache.spark.sql.catalyst.expressions.{Alias, And, Attribute, AttributeReference,
-  CaseWhen, EqualNullSafe, Expression, If, IsNull, Literal, NamedExpression, Not, PredicateHelper}
+  CaseWhen, EqualNullSafe, Expression, If, IsNull, Literal, NamedExpression, Not, Or,
+  PredicateHelper}
 import org.apache.spark.sql.catalyst.expressions.Literal.TrueLiteral
 import org.apache.spark.sql.catalyst.plans.logical.{DeltaMergeAction, DeltaMergeIntoClause,
   DeltaMergeIntoMatchedClause, DeltaMergeIntoMatchedDeleteClause,
@@ -82,6 +84,7 @@ import org.apache.spark.sql.execution.{SparkPlan, SQLExecution}
 import org.apache.spark.sql.execution.command.LeafRunnableCommand
 import org.apache.spark.sql.execution.datasources.{HadoopFsRelation, LogicalRelation}
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
+import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.nvidia.DFUDFShims
 import org.apache.spark.sql.types.{BooleanType, LongType, StringType, StructField, StructType}
@@ -618,6 +621,20 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
   // this is the amount of the overcount, so we can subtract it to get a correct final metric.
   private var multipleMatchDeleteOnlyOvercount: Option[Long] = None
 
+  /** Whether a joined pair takes at least one WHEN MATCHED action. */
+  private lazy val effectiveMatchPredicate: Expression =
+    if (context.cmd.matchedClauses.isEmpty) {
+      Literal.FalseLiteral
+    } else {
+      context.cmd.matchedClauses
+          .map(_.condition.getOrElse(Literal.TrueLiteral))
+          .reduce((a, b) => Or(a, b))
+    }
+
+  // Set when several source rows match one target row on the ON condition but at most one of
+  // those joined pairs takes a WHEN MATCHED action. The write pass must retain one pair.
+  private var hasNonEffectiveDuplicateMatches: Boolean = false
+
   // UDFs to update metrics
   private val incrSourceRowCountExpr: Expression = context.cmd
     .metricUpdateExpr("numSourceRowsInSecondScan", deterministic = false)
@@ -636,80 +653,17 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
   private val incrDeletedNotMatchedBySourceCountExpr: Expression = context.cmd
     .metricUpdateExpr("numTargetRowsNotMatchedBySourceDeleted", deterministic = false)
 
-  private def updateOutput(resolvedActions: Seq[DeltaMergeAction], incrExpr: Expression)
-  : Seq[Expression] = {
-    resolvedActions.map(_.expr) :+
-      Literal.FalseLiteral :+
-      UnresolvedAttribute(TARGET_ROW_PRESENT_COL) :+
-      UnresolvedAttribute(SOURCE_ROW_PRESENT_COL) :+
-      incrExpr
-  }
-
-  private def deleteOutput(incrExpr: Expression): Seq[Expression] = {
-    targetOutputCols :+
-      TrueLiteral :+
-      UnresolvedAttribute(TARGET_ROW_PRESENT_COL) :+
-      UnresolvedAttribute(SOURCE_ROW_PRESENT_COL) :+
-      incrExpr
-  }
-
-  private def insertOutput(resolvedActions: Seq[DeltaMergeAction], incrExpr: Expression)
-  : Seq[Expression] = {
-    resolvedActions.map(_.expr) :+
-      Literal.FalseLiteral :+
-      UnresolvedAttribute(TARGET_ROW_PRESENT_COL) :+
-      UnresolvedAttribute(SOURCE_ROW_PRESENT_COL) :+
-      incrExpr
-  }
-
-  private def clauseOutput(clause: DeltaMergeIntoClause): Seq[Expression] = clause match {
-    case u: DeltaMergeIntoMatchedUpdateClause =>
-      updateOutput(u.resolvedActions, And(incrUpdatedCountExpr, incrUpdatedMatchedCountExpr))
-    case _: DeltaMergeIntoMatchedDeleteClause =>
-      deleteOutput(And(incrDeletedCountExpr, incrDeletedMatchedCountExpr))
-    case i: DeltaMergeIntoNotMatchedInsertClause =>
-      insertOutput(i.resolvedActions, incrInsertedCountExpr)
-    case u: DeltaMergeIntoNotMatchedBySourceUpdateClause =>
-      updateOutput(u.resolvedActions,
-        And(incrUpdatedCountExpr, incrUpdatedNotMatchedBySourceCountExpr))
-    case _: DeltaMergeIntoNotMatchedBySourceDeleteClause =>
-      deleteOutput(And(incrDeletedCountExpr, incrDeletedNotMatchedBySourceCountExpr))
-  }
-
-  private def clauseCondition(clause: DeltaMergeIntoClause): Expression = {
-    // if condition is None, then expression always evaluates to true
-    clause.condition.getOrElse(TrueLiteral)
-  }
-
   /**
    * Though low shuffle merge algorithm performs better than traditional merge algorithm in some
    * cases, there are some case we should fallback to traditional merge executor:
    *
-   * 1. Low shuffle merge requires GPU file scans for both Databricks' metadata row-index scan and
-   * the temporary deletion-vector scan used to retain unmodified rows.
+   * 1. Low shuffle merge requires GPU file scans for both write passes. Touched-file discovery
+   * uses Databricks' native metadata-row-index scan, which intentionally remains on CPU because
+   * it exposes the hidden `_metadata` column.
    * 2. The temporary deletion vectors introduce extra overhead, so it may be better to fall back
    * when the changeset is too large.
    */
   def shouldFallback(): Boolean = {
-    // Trying to detect if we can execute finding touched files.
-    val touchFilePlanOverrideSucceed = verifyGpuPlan(planForFindingTouchedFiles()) { planMeta =>
-      def check(meta: SparkPlanMeta[SparkPlan]): Boolean = {
-        meta match {
-          case scan if scan.isInstanceOf[FileSourceScanExecMeta] &&
-              isLowShuffleTargetScan(scan.asInstanceOf[FileSourceScanExecMeta]) =>
-            scan.asInstanceOf[FileSourceScanExecMeta].canThisBeReplaced
-          case m => m.childPlans.exists(check)
-        }
-      }
-
-      check(planMeta)
-    }
-    if (!touchFilePlanOverrideSucceed) {
-      logWarning("Unable to override file scan for low shuffle merge for finding touched files " +
-        "plan, fallback to tradition merge.")
-      return true
-    }
-
     // Trying to detect if we can execute the merge plan.
     val mergePlanOverrideSucceed = verifyGpuPlan(planForMergeExecution(touchedFiles)) { planMeta =>
       var targetScanCount = 0
@@ -788,6 +742,10 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
         context.cmd.metrics("numTargetRowsDeleted").value - multipleMatchDeleteOnlyOvercount.get
       assert(actualRowsDeleted >= 0)
       context.cmd.metrics("numTargetRowsDeleted").set(actualRowsDeleted)
+      val actualRowsMatchedDeleted = context.cmd.metrics("numTargetRowsMatchedDeleted").value -
+        multipleMatchDeleteOnlyOvercount.get
+      assert(actualRowsMatchedDeleted >= 0)
+      context.cmd.metrics("numTargetRowsMatchedDeleted").set(actualRowsMatchedDeleted)
     }
 
     touchedFiles.values.map(_._2).map(_.remove).toSeq ++ newFiles
@@ -831,29 +789,42 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
   private def findTouchedFiles(): Map[String, (Roaring64Bitmap, AddFile)] =
     context.cmd.recordMergeOperation(sqlMetricName = "scanTimeMs") {
       context.spark.udf.register("row_index_set", udaf(RoaringBitmapUDAF))
-      // Process the matches from the inner join to record touched files and find multiple matches
-      val collectTouchedFiles = planForFindingTouchedFiles()
-        .select(col(FILE_PATH_COL), col(METADATA_ROW_IDX_COL))
+      // DBR 16.0+ considers a duplicate ambiguous only when multiple joined pairs take a
+      // WHEN MATCHED action. Aggregate first by the file-relative target row identity, then by
+      // file, so the same pass produces both the temporary deletion vectors and that decision.
+      val matchedRows = planForFindingTouchedFiles()
+        .select(
+          col(FILE_PATH_COL),
+          col(METADATA_ROW_IDX_COL),
+          when(DFUDFShims.exprToColumn(effectiveMatchPredicate), lit(1L))
+              .otherwise(lit(0L)).as("effective"))
+        .groupBy(FILE_PATH_COL, METADATA_ROW_IDX_COL)
+        .agg(
+          count("*").as("count"),
+          sum("effective").as("effectiveCount"))
+
+      val collectedRows = matchedRows
         .groupBy(FILE_PATH_COL)
         .agg(
           expr(s"row_index_set($METADATA_ROW_IDX_COL) as row_idxes"),
-          count("*").as("count"))
-        .collect().map(row => {
-          val filename = row.getAs[String](FILE_PATH_COL)
-          val rowIdxSet = row.getAs[RoaringBitmapWrapper]("row_idxes").inner
-          val count = row.getAs[Long]("count")
-          (filename, (rowIdxSet, count))
-        })
-        .toMap
+          sum(when(col("effectiveCount") > 1, lit(1L)).otherwise(lit(0L)))
+              .as("multipleMatchCount"),
+          sum(when(col("effectiveCount") > 1, col("effectiveCount")).otherwise(lit(0L)))
+              .as("multipleMatchSum"),
+          max(when(col("count") > 1 && col("effectiveCount") <= 1, lit(1L))
+              .otherwise(lit(0L))).as("hasNonEffectiveDuplicates"))
+        .collect()
 
-      val duplicateCount = {
-        val distinctMatchedRowCounts = collectTouchedFiles.values
-          .map(_._1.getLongCardinality).sum
-        val allMatchedRowCounts = collectTouchedFiles.values.map(_._2).sum
-        allMatchedRowCounts - distinctMatchedRowCounts
-      }
+      val collectTouchedFiles = collectedRows.map { row =>
+        row.getAs[String](FILE_PATH_COL) ->
+          row.getAs[RoaringBitmapWrapper]("row_idxes").inner
+      }.toMap
+      val multipleMatchCount = collectedRows.map(_.getAs[Long]("multipleMatchCount")).sum
+      val multipleMatchSum = collectedRows.map(_.getAs[Long]("multipleMatchSum")).sum
+      hasNonEffectiveDuplicateMatches =
+        collectedRows.exists(_.getAs[Long]("hasNonEffectiveDuplicates") > 0)
 
-      val hasMultipleMatches = duplicateCount > 0
+      val hasMultipleMatches = multipleMatchCount > 0
 
       // Throw error if multiple matches are ambiguous or cannot be computed correctly.
       val canBeComputedUnambiguously = {
@@ -876,7 +847,7 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
         // because we count matches after the join and not just the target rows.
         // We have to compensate for this by subtracting the duplicates later,
         // so we need to record them here.
-        multipleMatchDeleteOnlyOvercount = Some(duplicateCount)
+        multipleMatchDeleteOnlyOvercount = Some(multipleMatchSum - multipleMatchCount)
       }
 
       // Get the AddFiles using the touched file names.
@@ -916,7 +887,7 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
       context.cmd.metrics("numTargetBytesRemoved") += removedBytes
       context.cmd.metrics("numTargetPartitionsRemovedFrom") += removedPartitions
 
-      collectTouchedFiles.map(kv => (kv._1, (kv._2._1, touchedAddFiles(kv._1))))
+      collectTouchedFiles.map(kv => (kv._1, (kv._2, touchedAddFiles(kv._1))))
     }
 
 
@@ -1045,7 +1016,13 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
 
     val isDeleteWithDuplicateMatches = multipleMatchDeleteOnlyOvercount.nonEmpty
     val sourcePlanDF = this.sourceDF
-    val targetPlanDF = buildTargetDFWithFiles(touchedFiles.values.map(_._2).toSeq)
+    val (targetPlanDF, rowTrackingCols, rowTrackingUpdateExprs) =
+      UpdateCommandShims.preserveRowTrackingColumns(
+        buildTargetDFWithFiles(touchedFiles.values.map(_._2).toSeq),
+        context.deltaTxn.snapshot,
+        Seq.empty,
+        Seq.empty)
+    val rowTrackingInsertExprs = rowTrackingCols.map(attr => Literal(null, attr.dataType))
     val userColumns = sourcePlanDF.columns.toSeq ++ targetPlanDF.columns.toSeq
     val sourceRowPresentCol = uniqueColumnName(SOURCE_ROW_PRESENT_COL, userColumns)
     val targetRowPresentCol = uniqueColumnName(
@@ -1063,6 +1040,9 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
       if (context.cmd.notMatchedClauses.nonEmpty) {
         sourceDF = sourceDF.withColumn(sourceRowIdCol, monotonically_increasing_id())
       }
+    } else if (hasNonEffectiveDuplicateMatches) {
+      targetDF = targetDF.withColumn(targetRowIdCol, monotonically_increasing_id())
+      sourceDF = sourceDF.withColumn(sourceRowIdCol, monotonically_increasing_id())
     }
 
     val joinType = if (hasNoInserts &&
@@ -1071,9 +1051,25 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
     } else {
       "leftOuter"
     }
-    val joinedPlan = sourceDF
-        .join(targetDF, DFUDFShims.exprToColumn(context.cmd.condition), joinType)
-        .queryExecution.analyzed
+    val rawJoinedDF =
+      sourceDF.join(targetDF, DFUDFShims.exprToColumn(context.cmd.condition), joinType)
+    val joinedDF = if (hasNonEffectiveDuplicateMatches && !isDeleteWithDuplicateMatches) {
+      val effective =
+        when(DFUDFShims.exprToColumn(effectiveMatchPredicate), lit(1)).otherwise(lit(0))
+      val rankCol = uniqueColumnName(
+        GpuMergeIntoCommand.DUPLICATE_MATCH_RANK_COL, rawJoinedDF.columns.toSeq)
+      val onePairPerTargetRow = Window
+        .partitionBy(col(targetRowIdCol),
+          when(col(targetRowPresentCol).isNull, col(sourceRowIdCol)))
+        .orderBy(effective.desc)
+      rawJoinedDF
+        .withColumn(rankCol, row_number().over(onePairPerTargetRow))
+        .filter(col(rankCol) === lit(1))
+        .drop(rankCol, targetRowIdCol, sourceRowIdCol)
+    } else {
+      rawJoinedDF
+    }
+    val joinedPlan = joinedDF.queryExecution.analyzed
 
     def resolveOnJoinedPlan(exprs: Seq[Expression]): Seq[Expression] = {
       tryResolveReferencesForExpressions(context.spark, exprs, joinedPlan)
@@ -1090,8 +1086,11 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
     val incrDeletedMatchedCount = context.cmd.metricUpdateExpr(
       "numTargetRowsMatchedDeleted", deterministic = true)
 
-    var cdfTargetOutputCols: Seq[Expression] = targetOutputCols
-    var outputRowSchema = context.deltaTxn.metadata.schema
+    var cdfTargetOutputCols: Seq[Expression] = targetOutputCols ++ rowTrackingCols
+    var outputRowSchema = rowTrackingCols.foldLeft(context.deltaTxn.metadata.schema) {
+      (schema, attr) =>
+        schema.add(StructField(attr.name, attr.dataType, nullable = true, attr.metadata))
+    }
     if (isDeleteWithDuplicateMatches) {
       cdfTargetOutputCols = cdfTargetOutputCols :+ UnresolvedAttribute(targetRowIdCol)
       outputRowSchema = outputRowSchema.add(targetRowIdCol, LongType)
@@ -1169,12 +1168,14 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
     def clauseOutput(clause: DeltaMergeIntoClause, routing: Expression)
         : Seq[Seq[Expression]] = clause match {
       case u: DeltaMergeIntoMatchedUpdateClause =>
-        updateOutput(materializeNonDeterministic(u.resolvedActions.map(_.expr), routing),
+        updateOutput(materializeNonDeterministic(u.resolvedActions.map(_.expr), routing) ++
+            rowTrackingUpdateExprs,
           And(incrUpdatedCount, incrUpdatedMatchedCount))
       case _: DeltaMergeIntoMatchedDeleteClause =>
         deleteOutput(And(incrDeletedCount, incrDeletedMatchedCount))
       case i: DeltaMergeIntoNotMatchedInsertClause =>
-        insertOutput(materializeNonDeterministic(i.resolvedActions.map(_.expr), routing),
+        insertOutput(materializeNonDeterministic(i.resolvedActions.map(_.expr), routing) ++
+            rowTrackingInsertExprs,
           incrInsertedCount)
       case other =>
         throw new IllegalArgumentException(s"Unsupported low-shuffle merge clause: " +
@@ -1266,29 +1267,126 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
       return getModifiedDFWithCdf(touchedFiles)
     }
 
-    val sourceDF = this.sourceDF
-      .withColumn(SOURCE_ROW_PRESENT_COL, DFUDFShims.exprToColumn(incrSourceRowCountExpr))
-
     // The join itself selects touched target rows, so this pass can scan the touched files without
     // applying the temporary deletion vectors used by the unmodified-row pass.
-    val targetDF = buildTargetDFWithFiles(touchedFiles.values.map(_._2).toSeq)
-      .withColumn(TARGET_ROW_PRESENT_COL, lit(true))
+    val sourcePlanDF = this.sourceDF
+    val (targetPlanDF, rowTrackingCols, rowTrackingUpdateExprs) =
+      UpdateCommandShims.preserveRowTrackingColumns(
+        buildTargetDFWithFiles(touchedFiles.values.map(_._2).toSeq),
+        context.deltaTxn.snapshot,
+        Seq.empty,
+        Seq.empty)
+    val rowTrackingInsertExprs = rowTrackingCols.map(attr => Literal(null, attr.dataType))
+    val targetOutputWithRowTracking = targetOutputCols ++ rowTrackingCols
 
-    val joinedDF = {
-      val joinType = if (hasNoInserts &&
-        context.spark.conf.get(DeltaSQLConf.MERGE_MATCHED_ONLY_ENABLED)) {
-        "inner"
-      } else {
-        "leftOuter"
-      }
-      sourceDF.join(targetDF, DFUDFShims.exprToColumn(context.cmd.condition), joinType)
+    // Every control column is chosen after inspecting both inputs. withColumn replaces an
+    // existing same-named column, so fixed helper names would corrupt a user schema collision.
+    val userColumns = sourcePlanDF.columns.toSeq ++ targetPlanDF.columns.toSeq
+    val sourceRowPresentCol = uniqueColumnName(SOURCE_ROW_PRESENT_COL, userColumns)
+    val targetRowPresentCol = uniqueColumnName(
+      TARGET_ROW_PRESENT_COL, userColumns :+ sourceRowPresentCol)
+    val rowDroppedCol = uniqueColumnName(
+      ROW_DROPPED_COL, userColumns ++ Seq(sourceRowPresentCol, targetRowPresentCol))
+    val incrMetricsCol = uniqueColumnName(
+      INCR_METRICS_COL,
+      userColumns ++ Seq(sourceRowPresentCol, targetRowPresentCol, rowDroppedCol))
+    val taken = userColumns ++ Seq(
+      sourceRowPresentCol, targetRowPresentCol, rowDroppedCol, incrMetricsCol)
+    val targetRowIdCol = uniqueColumnName(GpuMergeIntoCommand.TARGET_ROW_ID_COL, taken)
+    val sourceRowIdCol = uniqueColumnName(
+      GpuMergeIntoCommand.SOURCE_ROW_ID_COL, taken :+ targetRowIdCol)
+
+    var sourceDF = sourcePlanDF.withColumn(
+      sourceRowPresentCol, DFUDFShims.exprToColumn(incrSourceRowCountExpr))
+    var targetDF = targetPlanDF.withColumn(targetRowPresentCol, lit(true))
+    if (hasNonEffectiveDuplicateMatches) {
+      targetDF = targetDF.withColumn(targetRowIdCol, monotonically_increasing_id())
+      sourceDF = sourceDF.withColumn(sourceRowIdCol, monotonically_increasing_id())
     }
 
-    val modifiedRowsSchema = context.deltaTxn.metadata.schema
-      .add(ROW_DROPPED_FIELD)
-      .add(TARGET_ROW_PRESENT_FIELD.copy(nullable = true))
-      .add(SOURCE_ROW_PRESENT_FIELD.copy(nullable = true))
-      .add(INCR_METRICS_FIELD)
+    val joinType = if (hasNoInserts &&
+      context.spark.conf.get(DeltaSQLConf.MERGE_MATCHED_ONLY_ENABLED)) {
+      "inner"
+    } else {
+      "leftOuter"
+    }
+    val rawJoinedDF =
+      sourceDF.join(targetDF, DFUDFShims.exprToColumn(context.cmd.condition), joinType)
+    val joinedDF = if (hasNonEffectiveDuplicateMatches) {
+      // Keep one joined pair per target row, preferring the pair that takes an action. Source-only
+      // rows partition by source id so distinct rows remain distinct.
+      val effective =
+        when(DFUDFShims.exprToColumn(effectiveMatchPredicate), lit(1)).otherwise(lit(0))
+      val rankCol = uniqueColumnName(
+        GpuMergeIntoCommand.DUPLICATE_MATCH_RANK_COL, rawJoinedDF.columns.toSeq)
+      val onePairPerTargetRow = Window
+        .partitionBy(col(targetRowIdCol),
+          when(col(targetRowPresentCol).isNull, col(sourceRowIdCol)))
+        .orderBy(effective.desc)
+      rawJoinedDF
+        .withColumn(rankCol, row_number().over(onePairPerTargetRow))
+        .filter(col(rankCol) === lit(1))
+        .drop(rankCol, targetRowIdCol, sourceRowIdCol)
+    } else {
+      rawJoinedDF
+    }
+
+    val dataRowsSchema = rowTrackingCols.foldLeft(context.deltaTxn.metadata.schema) {
+      (schema, attr) =>
+        schema.add(StructField(attr.name, attr.dataType, nullable = true, attr.metadata))
+    }
+    val modifiedRowsSchema = dataRowsSchema
+      .add(ROW_DROPPED_FIELD.copy(name = rowDroppedCol))
+      .add(TARGET_ROW_PRESENT_FIELD.copy(name = targetRowPresentCol, nullable = true))
+      .add(SOURCE_ROW_PRESENT_FIELD.copy(name = sourceRowPresentCol, nullable = true))
+      .add(INCR_METRICS_FIELD.copy(name = incrMetricsCol))
+
+    def updateOutput(
+        resolvedActions: Seq[DeltaMergeAction],
+        incrExpr: Expression): Seq[Expression] = {
+      resolvedActions.map(_.expr) ++ rowTrackingUpdateExprs :+
+        Literal.FalseLiteral :+
+        UnresolvedAttribute(targetRowPresentCol) :+
+        UnresolvedAttribute(sourceRowPresentCol) :+
+        incrExpr
+    }
+
+    def deleteOutput(incrExpr: Expression): Seq[Expression] = {
+      targetOutputWithRowTracking :+
+        TrueLiteral :+
+        UnresolvedAttribute(targetRowPresentCol) :+
+        UnresolvedAttribute(sourceRowPresentCol) :+
+        incrExpr
+    }
+
+    def insertOutput(
+        resolvedActions: Seq[DeltaMergeAction],
+        incrExpr: Expression): Seq[Expression] = {
+      resolvedActions.map(_.expr) ++ rowTrackingInsertExprs :+
+        Literal.FalseLiteral :+
+        UnresolvedAttribute(targetRowPresentCol) :+
+        UnresolvedAttribute(sourceRowPresentCol) :+
+        incrExpr
+    }
+
+    def clauseOutput(clause: DeltaMergeIntoClause): Seq[Expression] = clause match {
+      case u: DeltaMergeIntoMatchedUpdateClause =>
+        updateOutput(u.resolvedActions,
+          And(incrUpdatedCountExpr, incrUpdatedMatchedCountExpr))
+      case _: DeltaMergeIntoMatchedDeleteClause =>
+        deleteOutput(And(incrDeletedCountExpr, incrDeletedMatchedCountExpr))
+      case i: DeltaMergeIntoNotMatchedInsertClause =>
+        insertOutput(i.resolvedActions, incrInsertedCountExpr)
+      case u: DeltaMergeIntoNotMatchedBySourceUpdateClause =>
+        updateOutput(u.resolvedActions,
+          And(incrUpdatedCountExpr, incrUpdatedNotMatchedBySourceCountExpr))
+      case _: DeltaMergeIntoNotMatchedBySourceDeleteClause =>
+        deleteOutput(And(incrDeletedCountExpr, incrDeletedNotMatchedBySourceCountExpr))
+    }
+
+    def clauseCondition(clause: DeltaMergeIntoClause): Expression = {
+      clause.condition.getOrElse(TrueLiteral)
+    }
 
     // Here we generate a case when statement to handle all cases:
     // CASE
@@ -1311,7 +1409,7 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
     val notMatchedConditions = context.cmd.notMatchedClauses.map(clauseCondition)
     val notMatchedExpr = {
       val deletedNotMatchedRow = {
-        targetOutputCols :+
+        targetOutputWithRowTracking :+
           Literal.TrueLiteral :+
           Literal.FalseLiteral :+
           Literal(null) :+
@@ -1334,7 +1432,7 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
     val matchedOutputs = context.cmd.matchedClauses.map(clauseOutput)
     val matchedExprs = {
       val notMatchedRow = {
-        targetOutputCols :+
+        targetOutputWithRowTracking :+
           Literal.FalseLiteral :+
           Literal.TrueLiteral :+
           Literal(null) :+
@@ -1352,7 +1450,7 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
       }
     }
 
-    val sourceRowHasNoMatch = IsNull(UnresolvedAttribute(TARGET_ROW_PRESENT_COL))
+    val sourceRowHasNoMatch = IsNull(UnresolvedAttribute(targetRowPresentCol))
 
     val modifiedCols = modifiedRowsSchema.zipWithIndex.map { case (col, idx) =>
       val caseWhen = CaseWhen(
@@ -1361,21 +1459,17 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
       DFUDFShims.exprToColumn(Alias(caseWhen, col.name)())
     }
 
-    val modifiedDF = {
+    // Make this a udf to avoid Catalyst being too aggressive and removing the join.
+    val noopRowDroppedCol = udf(new GpuDeltaNoopUDF()).apply(!col(rowDroppedCol))
+    var modifiedDF = joinedDF.select(modifiedCols: _*)
+      // This does not filter rows: the predicates update metrics and preserve the join.
+      .filter(noopRowDroppedCol && col(incrMetricsCol))
+    val outputAttributes = modifiedDF.queryExecution.analyzed.output
+    modifiedDF = Seq(rowDroppedCol, incrMetricsCol, targetRowPresentCol, sourceRowPresentCol)
+      .flatMap(name => outputAttributes.reverse.find(_.name == name))
+      .foldLeft(modifiedDF)((df, attr) => df.drop(DFUDFShims.exprToColumn(attr)))
 
-      // Make this a udf to avoid catalyst to be too aggressive to even remove the join!
-      val noopRowDroppedCol = udf(new GpuDeltaNoopUDF()).apply(!col(ROW_DROPPED_COL))
-
-      val modifiedDF = joinedDF.select(modifiedCols: _*)
-        // This will not filter anything since they always return true, but we need to avoid
-        // catalyst from optimizing these udf
-        .filter(noopRowDroppedCol && col(INCR_METRICS_COL))
-        .drop(ROW_DROPPED_COL, INCR_METRICS_COL, TARGET_ROW_PRESENT_COL, SOURCE_ROW_PRESENT_COL)
-
-      repartitionIfNeeded(modifiedDF)
-    }
-
-    modifiedDF
+    repartitionIfNeeded(modifiedDF)
   }
 
   private def getUnmodifiedDF(touchedFiles: Map[String, (Roaring64Bitmap, AddFile)]): DataFrame = {
@@ -1388,7 +1482,11 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
         hadoopConf,
         tablePath))
     }.toSeq
-    val unmodifiedDF = buildTargetDFWithFiles(filesWithTemporaryDVs)
+    val (unmodifiedDF, _, _) = UpdateCommandShims.preserveRowTrackingColumns(
+      buildTargetDFWithFiles(filesWithTemporaryDVs),
+      context.deltaTxn.snapshot,
+      Seq.empty,
+      Seq.empty)
     if (DeltaConfigs.CHANGE_DATA_FEED.fromMetaData(context.deltaTxn.metadata)) {
       unmodifiedDF.withColumn(
         CDC_TYPE_COLUMN_NAME, DFUDFShims.exprToColumn(CDC_TYPE_NOT_CDC_LITERAL))
