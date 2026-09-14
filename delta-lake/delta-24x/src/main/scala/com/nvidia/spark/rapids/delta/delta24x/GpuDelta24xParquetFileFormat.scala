@@ -26,8 +26,7 @@ import com.nvidia.spark.rapids.GpuMetric._
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.delta.{GpuDeltaParquetFileFormat,
   RapidsDeletionVectorRowCountUtils}
-import com.nvidia.spark.rapids.delta.GpuDeltaParquetFileFormatUtils.{METADATA_ROW_DEL_COL,
-  METADATA_ROW_IDX_COL}
+import com.nvidia.spark.rapids.delta.GpuDeltaParquetFileFormatUtils.METADATA_ROW_IDX_COL
 import com.nvidia.spark.rapids.delta.common.{DeletionVectorOutputColumns,
   MakeParquetTableWithDVProducer}
 import com.nvidia.spark.rapids.jni.fileio.RapidsFileIO
@@ -92,21 +91,21 @@ private object Delta24xDeletionVectorUtils {
         require(descriptorBytes.length >= DELTA_BITMAP_MAGIC_NUMBER_BYTE_SIZE,
           "Invalid inline deletion vector")
         val bitmap = RoaringBitmapArray.readFrom(descriptorBytes)
-        // cuDF consumes the portable Roaring serialization without Delta's four-byte header.
-        val portableBytes = bitmap.serializeAsByteArray(RoaringBitmapArrayFormat.Portable)
         metrics.foreach(_(DELETION_VECTOR_SIZE) += descriptorBytes.length)
+        // Delta's portable format adds a four-byte header to the Roaring payload expected by cuDF.
+        // Reuse the descriptor payload here instead of serializing the bitmap a second time.
         Delta24xDeletionVectorBitmapInfo(
           bitmap,
-          portableBytes.drop(DELTA_BITMAP_MAGIC_NUMBER_BYTE_SIZE),
+          descriptorBytes.drop(DELTA_BITMAP_MAGIC_NUMBER_BYTE_SIZE),
           filterType == RowIndexFilterType.IF_NOT_CONTAINED)
       case None if delVecs.isDefined =>
         throw new IllegalStateException(
           s"Missing low shuffle merge deletion vector for ${file.filePath}")
       case None =>
-        val deltaBytes = new RoaringBitmapArray()
-          .serializeAsByteArray(RoaringBitmapArrayFormat.Portable)
-        Delta24xDeletionVectorBitmapInfo(new RoaringBitmapArray(),
-          deltaBytes.drop(DELTA_BITMAP_MAGIC_NUMBER_BYTE_SIZE), isRetention = false)
+        val bitmap = new RoaringBitmapArray()
+        val descriptorBytes = bitmap.serializeAsByteArray(RoaringBitmapArrayFormat.Portable)
+        Delta24xDeletionVectorBitmapInfo(bitmap,
+          descriptorBytes.drop(DELTA_BITMAP_MAGIC_NUMBER_BYTE_SIZE), isRetention = false)
     }
   }
 
@@ -192,7 +191,7 @@ private object Delta24xDeletionVectorUtils {
    *
    * @param readDataSchema schema and column order of the returned batch
    * @param selections deletion-vector selections for each input file or chunk, in output order
-   * @param outputColumns positions and values of row-index and row-status metadata columns
+   * @param outputColumns position of the row-index metadata column
    * @return a caller-owned GPU batch containing only rows that survive the selections
    */
   def metadataBatch(
@@ -214,14 +213,6 @@ private object Delta24xDeletionVectorUtils {
         if (outputColumns.rowIndexColumn.contains(index)) {
           GpuColumnVector.from(rowIndexes.incRefCount(), field.dataType)
             .asInstanceOf[SparkVector]
-        } else if (outputColumns.deletedColumn.contains(index)) {
-          withResource(Scalar.fromBool(true)) { value =>
-            GpuColumnVector.from(value, numRows, field.dataType).asInstanceOf[SparkVector]
-          }
-        } else if (outputColumns.keptColumn.contains(index)) {
-          withResource(Scalar.fromBool(false)) { value =>
-            GpuColumnVector.from(value, numRows, field.dataType).asInstanceOf[SparkVector]
-          }
         } else {
           GpuColumnVector.fromNull(numRows, field.dataType).asInstanceOf[SparkVector]
         }
@@ -238,40 +229,18 @@ private object Delta24xDeletionVectorUtils {
   }
 
   /**
-   * Describes how to replace low-shuffle merge metadata fields after cuDF applies a deletion
-   * vector. The row-index field receives cuDF's selected row indexes. A row-deleted field is
-   * marked as deleted when the scan retains marked rows, or kept when it drops marked rows. With
-   * no deletion-vector map, all rows are retained and the field is marked as kept.
+   * Describes how to replace the low-shuffle merge row-index field after cuDF applies a deletion
+   * vector. The field receives cuDF's selected source row indexes.
    *
-   * @param readDataSchema schema whose metadata field positions will be populated
-   * @param delVecs optional per-file deletion vectors and their row-index filter types; `None`
-   *                means no rows are deleted
-   * @return named output positions for row indexes and the selected rows' deletion status
+   * @param readDataSchema schema whose row-index metadata field will be populated
+   * @return output position for row indexes, if requested
    */
-  def outputColumns(
-      readDataSchema: StructType,
-      delVecs: Option[Broadcast[Map[URI, DeletionVectorDescriptorWithFilterType]]])
-  : DeletionVectorOutputColumns = {
+  def outputColumns(readDataSchema: StructType): DeletionVectorOutputColumns = {
     val rowIndex = readDataSchema.fieldNames.indexOf(METADATA_ROW_IDX_COL) match {
       case -1 => None
       case index => Some(index)
     }
-    val (deletedColumn, keptColumn) =
-      readDataSchema.fieldNames.indexOf(METADATA_ROW_DEL_COL) match {
-        case -1 => None -> None
-        case index =>
-          val filterTypes = delVecs.toSeq.flatMap(_.value.values.map(_.filterType)).distinct
-          require(filterTypes.length <= 1,
-            "Low shuffle merge row-deletion scans require at most one " +
-              "deletion-vector filter type")
-          filterTypes.headOption match {
-            case None | Some(RowIndexFilterType.IF_CONTAINED) => None -> Some(index)
-            case Some(RowIndexFilterType.IF_NOT_CONTAINED) => Some(index) -> None
-            case Some(other) => throw new IllegalArgumentException(
-              s"Unexpected low shuffle merge deletion-vector filter type: $other")
-          }
-      }
-    DeletionVectorOutputColumns(rowIndex, deletedColumn, keptColumn)
+    DeletionVectorOutputColumns(rowIndex)
   }
 }
 
@@ -452,7 +421,7 @@ private class Delta24xParquetPartitionReader(
     readDataSchema, debugDumpPrefix, debugDumpAlways, maxReadBatchSizeRows, maxReadBatchSizeBytes,
     compressCfg, execMetrics, useFieldId) {
 
-  private val outputColumns = Delta24xDeletionVectorUtils.outputColumns(readDataSchema, delVecs)
+  private val outputColumns = Delta24xDeletionVectorUtils.outputColumns(readDataSchema)
 
   override protected def readBuffer(
       parquetOptions: ParquetOptions,
@@ -614,8 +583,7 @@ private class MultiFileCloudDelta24xParquetPartitionReader(
     poolConf, maxNumFileProcessed, ignoreMissingFiles, ignoreCorruptFiles, useFieldId,
     queryUsesInputFile, keepReadsInOrder, combineConf) {
 
-  private val outputColumns =
-    Delta24xDeletionVectorUtils.outputColumns(readDataSchema, delVecs)
+  private val outputColumns = Delta24xDeletionVectorUtils.outputColumns(readDataSchema)
 
   override def readBatches(
       fileBuffersAndMetadata: HostMemoryBuffersWithMetaDataBase): Iterator[ColumnarBatch] = {
@@ -830,9 +798,8 @@ case class GpuDelta24xParquetFileFormat(
       options: Map[String, String],
       path: Path): Boolean = isSplittable
 
-  private def isLowShuffleMetadataRead(schema: StructType): Boolean = {
-    schema.fieldNames.exists(name => name == METADATA_ROW_IDX_COL || name == METADATA_ROW_DEL_COL)
-  }
+  private def requiresLowShuffleReader(schema: StructType): Boolean =
+    broadcastDvMap.isDefined || schema.fieldNames.contains(METADATA_ROW_IDX_COL)
 
   override def createPartitionReaderFactory(
       sqlConf: SQLConf,
@@ -844,7 +811,7 @@ case class GpuDelta24xParquetFileFormat(
       rapidsConf: RapidsConf,
       metrics: Map[String, GpuMetric],
       options: Map[String, String]): GpuParquetPartitionReaderFactoryBase = {
-    if (isLowShuffleMetadataRead(readDataSchema)) {
+    if (requiresLowShuffleReader(readDataSchema)) {
       GpuDelta24xParquetPartitionReaderFactory(
         sqlConf, broadcastedConf, dataSchema, readDataSchema, partitionSchema,
         if (disablePushDown) Array.empty else filters.toArray,
@@ -873,7 +840,7 @@ case class GpuDelta24xParquetFileFormat(
       broadcastedConf: Broadcast[SerializableConfiguration],
       pushedFilters: Array[Filter],
       fileScan: GpuFileSourceScanExec): PartitionReaderFactory = {
-    if (isLowShuffleMetadataRead(fileScan.requiredSchema)) {
+    if (requiresLowShuffleReader(fileScan.requiredSchema)) {
       GpuDelta24xParquetMultiFilePartitionReaderFactory(
         fileScan.conf, broadcastedConf, prepareSchema(fileScan.relation.dataSchema),
         prepareSchema(fileScan.requiredSchema), prepareSchema(fileScan.readPartitionSchema),

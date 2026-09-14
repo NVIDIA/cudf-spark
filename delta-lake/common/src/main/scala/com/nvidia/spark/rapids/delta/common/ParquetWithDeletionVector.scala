@@ -18,13 +18,10 @@ package com.nvidia.spark.rapids.delta.common
 
 import java.io.IOException
 
-import scala.collection.mutable.ArrayBuffer
-
 import ai.rapids.cudf._
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric._
-import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.parquet._
 import org.apache.hadoop.conf.Configuration
 import org.apache.parquet.schema.MessageType
@@ -35,26 +32,12 @@ import org.apache.spark.sql.execution.datasources.PartitionedFile
 import org.apache.spark.sql.types.StructType
 
 /**
- * Metadata columns to populate after a cuDF Parquet deletion-vector read.
+ * Metadata column to populate after a cuDF Parquet deletion-vector read.
  *
  * @param rowIndexColumn optional zero-based output position for cuDF's selected row indexes
- * @param deletedColumn optional zero-based output position to fill with `true`, indicating that
- *                      every selected row was marked by the deletion vector
- * @param keptColumn optional zero-based output position to fill with `false`, indicating that
- *                   every selected row was not marked by the deletion vector
  */
 case class DeletionVectorOutputColumns(
-    rowIndexColumn: Option[Int] = None,
-    deletedColumn: Option[Int] = None,
-    keptColumn: Option[Int] = None) {
-
-  require(deletedColumn.isEmpty || keptColumn.isEmpty,
-    "A deletion-vector batch cannot contain both deleted and kept rows")
-
-  private val rowStatusColumn = deletedColumn.map(_ -> true).orElse(keptColumn.map(_ -> false))
-
-  require(rowIndexColumn.forall(index => !rowStatusColumn.exists(_._1 == index)),
-    "The row-index output cannot also be a boolean output")
+    rowIndexColumn: Option[Int] = None) {
 
   private[common] def needsRowIndex: Boolean = rowIndexColumn.isDefined
 
@@ -62,8 +45,8 @@ case class DeletionVectorOutputColumns(
    * Replaces placeholder columns in a decoded table with deletion-vector metadata. cuDF's
    * deletion-vector reader prepends the selected source row indexes to its output. The caller
    * separates that column before schema evolution and supplies it here as `cudfRowIndex`.
-   * This method casts those indexes to Spark's `LongType`, creates the configured constant row
-   * status column, and rebuilds the table with both vectors in their requested output positions.
+   * This method casts those indexes to Spark's `LongType` and rebuilds the table with the vector
+   * in its requested output position.
    *
    * Ownership of both inputs is transferred to this method. When no replacements are requested,
    * `table` is returned unchanged; otherwise it is closed after the rebuilt table takes its
@@ -77,47 +60,31 @@ case class DeletionVectorOutputColumns(
   private[common] def populateAndClose(
       table: Table,
       cudfRowIndex: Option[ColumnVector]): Table = {
-    if (rowIndexColumn.isEmpty && rowStatusColumn.isEmpty) {
+    if (rowIndexColumn.isEmpty) {
       cudfRowIndex.foreach(_.close())
       table
     } else {
-      val replacementColumns = new ArrayBuffer[ColumnVector]()
-      try {
+      withResource(cudfRowIndex) { rowIndexToClose =>
         withResource(table) { tableToClose =>
-          require(rowIndexColumn.isDefined == cudfRowIndex.isDefined,
+          require(rowIndexToClose.isDefined,
             "cuDF row-index output does not match the requested metadata columns")
           val outputColumnCount = tableToClose.getNumberOfColumns
-          val replacementIndexes = rowIndexColumn.toSeq ++ rowStatusColumn.map(_._1)
-          require(replacementIndexes.forall(index => index >= 0 && index < outputColumnCount),
-            s"Metadata column indexes ${replacementIndexes.mkString(",")} are outside " +
+          val outputIndex = rowIndexColumn.get
+          require(outputIndex >= 0 && outputIndex < outputColumnCount,
+            s"Metadata column index $outputIndex is outside " +
               s"the $outputColumnCount-column output")
 
-          val rowIndexReplacement = cudfRowIndex.map { indexColumn =>
-            val replacement = indexColumn.castTo(DType.INT64)
-            replacementColumns += replacement
-            replacement
-          }
-          val rowStatusReplacement = rowStatusColumn.map { case (index, value) =>
-            val replacement = withResource(Scalar.fromBool(value)) { scalar =>
-              ColumnVector.fromScalar(scalar, Math.toIntExact(tableToClose.getRowCount))
+          withResource(rowIndexToClose.get.castTo(DType.INT64)) { rowIndexReplacement =>
+            val columns = (0 until outputColumnCount).map { index =>
+              if (index == outputIndex) {
+                rowIndexReplacement
+              } else {
+                tableToClose.getColumn(index)
+              }
             }
-            replacementColumns += replacement
-            index -> replacement
+            new Table(columns: _*)
           }
-          val columns = (0 until outputColumnCount).map { index =>
-            if (rowIndexColumn.contains(index)) {
-              rowIndexReplacement.get
-            } else {
-              rowStatusReplacement.collect {
-                case (`index`, replacement) => replacement
-              }.getOrElse(tableToClose.getColumn(index))
-            }
-          }
-          new Table(columns: _*)
         }
-      } finally {
-        replacementColumns.safeClose()
-        cudfRowIndex.foreach(_.close())
       }
     }
   }
