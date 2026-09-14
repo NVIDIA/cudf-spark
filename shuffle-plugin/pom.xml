@@ -43,6 +43,12 @@
             <classifier>${jni.classifier}</classifier>
         </dependency>
         <dependency>
+            <groupId>com.nvidia</groupId>
+            <artifactId>rapids-4-spark-sql-plugin-api_${scala.binary.version}</artifactId>
+            <version>${project.version}</version>
+            <classifier>${spark.version.classifier}</classifier>
+        </dependency>
+        <dependency>
             <groupId>org.scala-lang</groupId>
             <artifactId>scala-library</artifactId>
         </dependency>
