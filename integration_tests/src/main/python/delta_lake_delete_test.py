@@ -74,10 +74,12 @@ def assert_delta_sql_delete_collect(spark_tmp_path, use_cdf, dest_table_func, de
         if not skip_sql_result_check:
             # compare resulting dataframe from the delete operation (some older Spark versions return empty here)
             cpu_result = with_cpu_session(lambda spark: do_delete(spark, cpu_path).collect(), conf=conf)
-            if expect_write and not enable_deletion_vectors:
+            if expect_write:
+                expected_command = "GpuDeleteCommand" if assert_gpu_delete_command else None
                 gpu_result = assert_rapids_delta_write(
-                    lambda spark: do_delete(spark, gpu_path).collect(), conf=conf)
-            elif assert_gpu_delete_command or enable_deletion_vectors:
+                    lambda spark: do_delete(spark, gpu_path).collect(), conf=conf,
+                    expected_command=expected_command)
+            elif assert_gpu_delete_command:
                 gpu_result = assert_rapids_gpu_delete_ran(
                     lambda spark: do_delete(spark, gpu_path).collect(), conf=conf)
             else:
@@ -129,12 +131,16 @@ def test_delta_delete_disabled_fallback(spark_tmp_path, disable_conf, enable_del
 @delta_lake
 @ignore_order
 @pytest.mark.parametrize("use_cdf", [True, False], ids=idfn)
+@pytest.mark.parametrize("use_metadata_row_index", [True, False], ids=idfn)
 @pytest.mark.skipif(not supports_delta_lake_deletion_vectors(), \
     reason="Deletion vectors new in Delta Lake 2.4 / Apache Spark 3.4")
-def test_delta_delete_with_deletion_vectors(spark_tmp_path, use_cdf):
+def test_delta_delete_with_deletion_vectors(
+        spark_tmp_path, use_cdf, use_metadata_row_index):
     conf = copy_and_update(
         delta_delete_enabled_conf,
-        {"spark.databricks.delta.delete.deletionVectors.persistent": "true"})
+        {"spark.databricks.delta.delete.deletionVectors.persistent": "true",
+         "spark.databricks.delta.deletionVectors.useMetadataRowIndex":
+             str(use_metadata_row_index).lower()})
     assert_delta_sql_delete_collect(
         spark_tmp_path,
         use_cdf=use_cdf,
@@ -142,7 +148,6 @@ def test_delta_delete_with_deletion_vectors(spark_tmp_path, use_cdf):
         delete_sql="DELETE FROM delta.`{path}` WHERE a = 0",
         enable_deletion_vectors=True,
         conf=conf,
-        expect_write=False,
         assert_gpu_delete_command=True)
 
 @allow_non_gpu("SortExec, ColumnarToRowExec", *delta_meta_allow)

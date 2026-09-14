@@ -69,16 +69,24 @@ def assert_delta_sql_update_collect(spark_tmp_path, use_cdf, enable_deletion_vec
 @pytest.mark.skipif(not supports_delta_lake_deletion_vectors(), reason="Deletion vectors aren't supported")
 @pytest.mark.skipif((not is_databricks_runtime()) and is_before_spark_353(),
                     reason="Update with deletion vector is only supported after delta.io 3.0.0")
-def test_delta_update_with_deletion_vectors(spark_tmp_path):
+@pytest.mark.parametrize("update_sql", [
+    "UPDATE delta.`{path}` SET a = 1 WHERE a = 0",
+    "UPDATE delta.`{path}` SET a = 1"
+], ids=["predicate", "no_predicate"])
+@pytest.mark.parametrize("use_metadata_row_index", [True, False], ids=idfn)
+def test_delta_update_with_deletion_vectors(
+        spark_tmp_path, update_sql, use_metadata_row_index):
     conf = copy_and_update(
         delta_update_enabled_conf,
-        {"spark.databricks.delta.update.deletionVectors.persistent": "true"})
+        {"spark.databricks.delta.update.deletionVectors.persistent": "true",
+         "spark.databricks.delta.deletionVectors.useMetadataRowIndex":
+             str(use_metadata_row_index).lower()})
     assert_delta_sql_update_collect(
         spark_tmp_path,
         use_cdf=False,
         enable_deletion_vectors=True,
         dest_table_func=lambda spark: unary_op_df(spark, int_gen),
-        update_sql="UPDATE delta.`{path}` SET a = 1 WHERE a = 0",
+        update_sql=update_sql,
         conf=conf)
 
 @allow_non_gpu("ExecutedCommandExec", *delta_meta_allow)

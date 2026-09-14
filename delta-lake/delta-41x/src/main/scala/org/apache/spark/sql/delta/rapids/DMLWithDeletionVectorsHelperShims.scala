@@ -21,15 +21,13 @@
 
 package org.apache.spark.sql.delta.rapids
 
-import java.lang.reflect.InvocationTargetException
-
 import com.nvidia.spark.rapids.delta.RapidsDeltaWrite
 
-import org.apache.spark.sql.{DataFrame, SparkSession => SqlSparkSession}
+import org.apache.spark.sql.{Column, DataFrame, SparkSession => SqlSparkSession}
 import org.apache.spark.sql.catalyst.expressions.AttributeReference
 import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, Project}
 import org.apache.spark.sql.classic.{Dataset, SparkSession}
-import org.apache.spark.sql.delta.{DeltaParquetFileFormat, OptimisticTransaction}
+import org.apache.spark.sql.delta.DeltaParquetFileFormat
 import org.apache.spark.sql.delta.DeltaParquetFileFormat.{ROW_INDEX_COLUMN_NAME,
   ROW_INDEX_STRUCT_FIELD}
 import org.apache.spark.sql.delta.actions.FileAction
@@ -37,72 +35,64 @@ import org.apache.spark.sql.delta.commands.{DMLWithDeletionVectorsHelper, Touche
 import org.apache.spark.sql.delta.files.TahoeFileIndex
 import org.apache.spark.sql.delta.stats.StatsCollectionUtils
 import org.apache.spark.sql.execution.datasources.{HadoopFsRelation, LogicalRelationWithTable}
-import org.apache.spark.sql.functions.{input_file_name, struct}
+import org.apache.spark.sql.functions.{col, input_file_name}
 import org.apache.spark.sql.types.StructType
 
+/** Version-specific ports of Delta's DMLWithDeletionVectorsHelper methods used by GPU DML. */
 object DMLWithDeletionVectorsHelperShims {
+
+  private val GpuFilePathColumn = "__delta_internal_gpu_file_path"
+  def rowIndexColumnForGpuScanning(spark: SqlSparkSession): Column = col(ROW_INDEX_COLUMN_NAME)
+
+  def filePathColumnForGpuScanning(spark: SqlSparkSession): Column = col(GpuFilePathColumn)
+
   def withGpuExecutionContext(spark: SqlSparkSession, df: DataFrame): DataFrame = {
-    val classicSpark = spark.asInstanceOf[SparkSession]
-    Dataset.ofRows(classicSpark, RapidsDeltaWrite(df.queryExecution.logical))
+    Dataset.ofRows(spark.asInstanceOf[SparkSession], RapidsDeltaWrite(df.queryExecution.logical))
   }
 
+  /**
+   * GPU equivalent of Delta's createTargetDfForScanningForMatches. Both values of Delta's
+   * useMetadataRowIndex setting use the internal physical row-index column here. Requesting the
+   * hidden metadata struct would force the scan to CPU, while this column contains the same
+   * per-file physical row positions needed to build deletion vectors.
+   */
   def createTargetDfForGpuScanningForMatches(
       spark: SqlSparkSession,
       target: LogicalPlan,
-      fileIndex: TahoeFileIndex): DataFrame = {
+      fileIndex: TahoeFileIndex,
+      candidateFilesHaveDVs: Boolean): DataFrame = {
     val classicSpark = spark.asInstanceOf[SparkSession]
     val rowIndexCol =
       AttributeReference(ROW_INDEX_COLUMN_NAME, ROW_INDEX_STRUCT_FIELD.dataType)()
 
     val newTarget = target.transformUp {
-      case l @ LogicalRelationWithTable(
+      case relation @ LogicalRelationWithTable(
           hfsr @ HadoopFsRelation(_, _, _, _, format: DeltaParquetFileFormat, _), _) =>
         val newDataSchema = StructType(hfsr.dataSchema).add(ROW_INDEX_STRUCT_FIELD)
-        val newFormat = format.copy(optimizationsEnabled = false)
+        val newFormat = if (candidateFilesHaveDVs) {
+          format.copy(optimizationsEnabled = false)
+        } else {
+          format.copy(optimizationsEnabled = false, tablePath = None)
+        }
         val newBaseRelation = hfsr.copy(
           location = fileIndex,
           dataSchema = newDataSchema,
           fileFormat = newFormat)(hfsr.sparkSession)
-        l.copy(relation = newBaseRelation, output = l.output :+ rowIndexCol)
-      case p @ Project(projectList, _) =>
-        p.copy(projectList = projectList :+ rowIndexCol)
+        relation.copy(relation = newBaseRelation, output = relation.output :+ rowIndexCol)
+      case project @ Project(projectList, _) =>
+        project.copy(projectList = projectList :+ rowIndexCol)
     }
     Dataset.ofRows(classicSpark, newTarget)
-      .withColumn("_metadata", struct(input_file_name().as("file_path")))
+      .withColumn(GpuFilePathColumn, input_file_name())
   }
 
-  private lazy val processUnmodifiedDataMethod = {
-    val methods = DMLWithDeletionVectorsHelper.getClass.getMethods
-      .filter(_.getName == "processUnmodifiedData")
-    methods.find(_.getParameterCount == 4)
-      .orElse(methods.find(_.getParameterCount == 3))
-      .getOrElse(throw new IllegalStateException(
-        "Delta DMLWithDeletionVectorsHelper.processUnmodifiedData is unavailable"))
-  }
-  private lazy val getDataSkippingStringPrefixLengthMethod =
-    StatsCollectionUtils.getClass.getMethods
-      .find(_.getName == "getDataSkippingStringPrefixLength")
-      .getOrElse(throw new IllegalStateException(
-        "Delta StatsCollectionUtils.getDataSkippingStringPrefixLength is unavailable"))
-
-
+  /** Port of Delta's processUnmodifiedData for Delta 4.1 and 4.2. */
   def processUnmodifiedData(
       spark: SparkSession,
       touchedFiles: Seq[TouchedFileWithDV],
-      txn: OptimisticTransaction): (Seq[FileAction], Map[String, Long]) = {
-    val args: Array[AnyRef] = if (processUnmodifiedDataMethod.getParameterCount == 4) {
-      val stringPrefixLength = getDataSkippingStringPrefixLengthMethod
-        .invoke(StatsCollectionUtils, spark, txn.metadata).asInstanceOf[Int]
-      Array(spark, touchedFiles, txn.snapshot, Int.box(stringPrefixLength))
-    } else {
-      Array(spark, touchedFiles, txn.snapshot)
-    }
-    try {
-      processUnmodifiedDataMethod
-        .invoke(DMLWithDeletionVectorsHelper, args: _*)
-        .asInstanceOf[(Seq[FileAction], Map[String, Long])]
-    } catch {
-      case e: InvocationTargetException => throw e.getCause
-    }
+      txn: GpuOptimisticTransactionBase): (Seq[FileAction], Map[String, Long]) = {
+    val prefixLength = StatsCollectionUtils.getDataSkippingStringPrefixLength(spark, txn.metadata)
+    DMLWithDeletionVectorsHelper.processUnmodifiedData(
+      spark, touchedFiles, txn.snapshot, prefixLength)
   }
 }

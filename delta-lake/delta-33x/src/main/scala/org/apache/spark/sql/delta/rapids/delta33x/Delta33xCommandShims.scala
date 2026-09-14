@@ -19,7 +19,10 @@ package org.apache.spark.sql.delta.rapids.delta33x
 import org.apache.spark.sql.{Column, DataFrame, Dataset, SparkSession}
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
-import org.apache.spark.sql.delta.rapids.DeltaCommandShims
+import org.apache.spark.sql.delta.actions.FileAction
+import org.apache.spark.sql.delta.commands.TouchedFileWithDV
+import org.apache.spark.sql.delta.rapids.{DeltaCommandShims, DMLWithDeletionVectorsHelperShims,
+  GpuOptimisticTransactionBase}
 
 /**
  * Delta 3.3.x implementation of command shims.
@@ -43,10 +46,10 @@ trait Delta33xCommandShims extends DeltaCommandShims {
 
   override def processUnmodifiedData(
       spark: OperationSparkSession,
-      touchedFiles: Seq[org.apache.spark.sql.delta.commands.TouchedFileWithDV],
-      txn: org.apache.spark.sql.delta.rapids.GpuOptimisticTransactionBase)
-      : (Seq[org.apache.spark.sql.delta.actions.FileAction], Map[String, Long]) = {
-    org.apache.spark.sql.delta.rapids.DMLWithDeletionVectorsHelperShims
+      touchedFiles: Seq[TouchedFileWithDV],
+      txn: GpuOptimisticTransactionBase)
+      : (Seq[FileAction], Map[String, Long]) = {
+    DMLWithDeletionVectorsHelperShims
       .processUnmodifiedData(spark, touchedFiles, txn)
   }
 

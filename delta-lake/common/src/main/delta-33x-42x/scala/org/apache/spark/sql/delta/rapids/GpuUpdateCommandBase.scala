@@ -29,19 +29,21 @@ import org.apache.hadoop.fs.Path
 import org.apache.spark.SparkContext
 import org.apache.spark.sql.{Row, SparkSession}
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
-import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, Expression, Literal}
+import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, Expression,
+  Literal}
 import org.apache.spark.sql.catalyst.plans.QueryPlan
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
-import org.apache.spark.sql.delta.{DeltaLog, DeltaOperations, DeltaTableUtils, DeltaUDF, NumRecordsStats, RowTracking}
-import org.apache.spark.sql.delta.DeltaParquetFileFormat.ROW_INDEX_COLUMN_NAME
+import org.apache.spark.sql.delta.{DeltaLog, DeltaOperations, DeltaTableUtils, DeltaUDF,
+  NumRecordsStats, RowTracking}
 import org.apache.spark.sql.delta.actions.{AddCDCFile, AddFile, FileAction}
-import org.apache.spark.sql.delta.commands.{DeletionVectorUtils, TouchedFileWithDV, UpdateCommand, UpdateMetric}
+import org.apache.spark.sql.delta.commands.{DeletionVectorUtils, TouchedFileWithDV, UpdateCommand,
+  UpdateMetric}
 import org.apache.spark.sql.delta.files.{TahoeBatchFileIndex, TahoeFileIndex}
 import org.apache.spark.sql.delta.sources.DeltaSQLConf
 import org.apache.spark.sql.execution.command.LeafRunnableCommand
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.execution.metric.SQLMetrics.{createMetric, createTimingMetric}
-import org.apache.spark.sql.functions.{col, input_file_name}
+import org.apache.spark.sql.functions.input_file_name
 import org.apache.spark.sql.types.LongType
 
 /**
@@ -158,18 +160,17 @@ abstract class GpuUpdateCommandBase(
 
       val touchedFilesWithDV = if (shouldWriteDeletionVectors) {
         val targetDf = DMLWithDeletionVectorsHelperShims
-          .createTargetDfForGpuScanningForMatches(sparkSession, target, fileIndex)
+          .createTargetDfForGpuScanningForMatches(
+            sparkSession, target, fileIndex, candidateFiles.exists(_.deletionVector != null))
         GpuDeletionVectorBitmapGenerator.findTouchedFiles(
           sparkSession,
           txn,
-          tableHasDVs = candidateFiles.exists(_.deletionVector != null),
-          rowsArePartitionedByFile = true,
+          hasReadableDVs = DeletionVectorUtils.deletionVectorsReadable(txn.snapshot),
           targetDf,
           candidateFiles,
           exprToColumn(updateCondition),
-          None,
-          col(ROW_INDEX_COLUMN_NAME),
-          nameToAddFile)
+          nameToAddFile,
+          operationName = "UPDATE")
       } else {
         // Case 3.2: Find all the affected files using the non-DV path
         // Keep everything from the resolved target except a new TahoeFileIndex
@@ -202,8 +203,6 @@ abstract class GpuUpdateCommandBase(
     }
 
     val totalActions = {
-      // When DV is on, write the updated rows first so the full-width scan can populate the
-      // RAPIDS file cache before the later narrow row-index scan that builds deletion vectors.
       // When DV is on, we write out updated rows only. The return value will be only `add` actions.
       // When DV is off, we write out updated rows plus unmodified rows from the same file, then
       // return `add` and `remove` actions.
@@ -237,7 +236,6 @@ abstract class GpuUpdateCommandBase(
             filesToRewriteWithDV,
             txn)
           metrics("numUpdatedRows").set(metricMap("numModifiedRows"))
-          metrics("numTouchedRows").set(metricMap("numModifiedRows"))
           numDeletionVectorsAdded = metricMap("numDeletionVectorsAdded")
           numDeletionVectorsRemoved = metricMap("numDeletionVectorsRemoved")
           numDeletionVectorsUpdated = metricMap("numDeletionVectorsUpdated")
@@ -341,6 +339,11 @@ abstract class GpuUpdateCommandBase(
       generateRemoveFileActions: Boolean,
       copyUnmodifiedRows: Boolean): Seq[FileAction] = {
 
+    val touchedRowCount = metrics("numTouchedRows")
+    val touchedRowUdf = DeltaUDF.boolean {
+      new GpuDeltaMetricUpdateUDF(touchedRowCount)
+    }.asNondeterministic()
+
     // Containing the map from the relative file path to AddFile
     val baseRelation = buildBaseRelation(
       spark, txn, "update", rootPath, inputLeafFiles.map(_.path), nameToAddFileMap)
@@ -353,16 +356,13 @@ abstract class GpuUpdateCommandBase(
 
     val targetDfWithEvaluatedCondition = {
       val evalDf = targetDf.withColumn(UpdateCommand.CONDITION_COLUMN_NAME, exprToColumn(condition))
-      if (copyUnmodifiedRows) {
-        val touchedRowCount = metrics("numTouchedRows")
-        val touchedRowUdf = DeltaUDF.boolean {
-          new GpuDeltaMetricUpdateUDF(touchedRowCount)
-        }.asNondeterministic()
-        evalDf.filter(touchedRowUdf())
+      val copyAndUpdateRowsDf = if (copyUnmodifiedRows) {
+        evalDf
       } else {
         import org.apache.spark.sql.functions.col
         evalDf.filter(col(UpdateCommand.CONDITION_COLUMN_NAME))
       }
+      copyAndUpdateRowsDf.filter(touchedRowUdf())
     }
 
 

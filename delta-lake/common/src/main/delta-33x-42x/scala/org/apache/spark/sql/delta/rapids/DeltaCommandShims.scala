@@ -23,7 +23,8 @@ import org.apache.spark.sql.delta.actions.FileAction
 import org.apache.spark.sql.delta.commands.TouchedFileWithDV
 
 /**
- * Trait to abstract version-specific Spark API differences between Delta 3.3.x and Spark 4.x
+ * This interface and its version-specific implementations adapt code ported from Delta Lake.
+ * It abstracts version-specific Spark API differences between Delta 3.3.x and Spark 4.x
  * Delta shims.
  *
  * Key API differences handled:

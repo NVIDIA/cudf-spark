@@ -27,19 +27,21 @@ import com.nvidia.spark.rapids.delta.GpuDeltaMetricUpdateUDF
 
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
-import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, EqualNullSafe, Expression, If, Literal, Not}
+import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, EqualNullSafe,
+  Expression, If, Literal, Not}
 import org.apache.spark.sql.catalyst.plans.QueryPlan
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
-import org.apache.spark.sql.delta.{DeltaConfigs, DeltaLog, DeltaOperations, DeltaTableUtils, DeltaUDF, NumRecordsStats, OptimisticTransaction, RowTracking}
-import org.apache.spark.sql.delta.DeltaParquetFileFormat.ROW_INDEX_COLUMN_NAME
+import org.apache.spark.sql.delta.{DeltaConfigs, DeltaLog, DeltaOperations, DeltaTableUtils,
+  DeltaUDF, NumRecordsStats, OptimisticTransaction, RowTracking}
 import org.apache.spark.sql.delta.actions.{Action, AddCDCFile, FileAction}
 import org.apache.spark.sql.delta.commands.{DeleteCommandMetrics, DeleteMetric, DeletionVectorUtils}
-import org.apache.spark.sql.delta.commands.DeleteCommand.{rewritingFilesMsg, FINDING_TOUCHED_FILES_MSG}
+import org.apache.spark.sql.delta.commands.DeleteCommand.{rewritingFilesMsg,
+  FINDING_TOUCHED_FILES_MSG}
 import org.apache.spark.sql.delta.commands.MergeIntoCommandBase.totalBytesAndDistinctPartitionValues
 import org.apache.spark.sql.delta.files.TahoeBatchFileIndex
 import org.apache.spark.sql.delta.sources.DeltaSQLConf
 import org.apache.spark.sql.execution.command.LeafRunnableCommand
-import org.apache.spark.sql.functions.{col, input_file_name}
+import org.apache.spark.sql.functions.input_file_name
 import org.apache.spark.sql.types.LongType
 
 /**
@@ -222,18 +224,17 @@ abstract class GpuDeleteCommandBase(
 
           if (shouldWriteDVs) {
             val targetDf = DMLWithDeletionVectorsHelperShims
-              .createTargetDfForGpuScanningForMatches(sparkSession, target, fileIndex)
+              .createTargetDfForGpuScanningForMatches(
+                sparkSession, target, fileIndex, candidateFiles.exists(_.deletionVector != null))
             val touchedFiles = GpuDeletionVectorBitmapGenerator.findTouchedFiles(
               sparkSession,
               txn,
-              tableHasDVs = candidateFiles.exists(_.deletionVector != null),
-              rowsArePartitionedByFile = true,
+              hasReadableDVs = DeletionVectorUtils.deletionVectorsReadable(txn.snapshot),
               targetDf,
               candidateFiles,
               exprToColumn(cond),
-              None,
-              col(ROW_INDEX_COLUMN_NAME),
-              nameToAddFileMap)
+              nameToAddFileMap,
+              operationName = "DELETE")
 
             if (touchedFiles.nonEmpty) {
               val (actions, metricMap) = processUnmodifiedData(
