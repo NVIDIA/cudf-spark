@@ -182,19 +182,7 @@ private object Delta24xDeletionVectorUtils {
     }
   }
 
-  /**
-   * Builds a batch for a metadata-only Parquet read, where there are no physical columns for
-   * cuDF to decode. For each input selection, it generates the source row indexes covered by its
-   * contiguous row groups and applies the deletion-vector bitmap. It concatenates the surviving
-   * indexes in input order, then materializes the requested synthetic metadata columns; any other
-   * fields are null placeholders that the caller may replace with partition values.
-   *
-   * @param readDataSchema schema and column order of the returned batch
-   * @param selections deletion-vector selections for each input file or chunk, in output order
-   * @param outputColumns position of the row-index metadata column
-   * @return a caller-owned GPU batch containing only rows that survive the selections
-   */
-  def metadataBatch(
+  private def metadataBatchAttempt(
       readDataSchema: StructType,
       selections: Array[Delta24xRowSelection],
       outputColumns: DeletionVectorOutputColumns): ColumnarBatch = {
@@ -218,6 +206,54 @@ private object Delta24xDeletionVectorUtils {
         }
       }
       new ColumnarBatch(columns, numRows)
+    }
+  }
+
+  /**
+   * Builds a batch for a metadata-only Parquet read, where there are no physical columns for
+   * cuDF to decode. For each input selection, it generates the source row indexes covered by its
+   * contiguous row groups and applies the deletion-vector bitmap. It concatenates the surviving
+   * indexes in input order, then materializes the requested synthetic metadata columns; any other
+   * fields are null placeholders that the caller may replace with partition values. All GPU
+   * allocations are retried as one idempotent attempt.
+   *
+   * @param readDataSchema schema and column order of the returned batch
+   * @param selections deletion-vector selections for each input file or chunk, in output order
+   * @param outputColumns position of the row-index metadata column
+   * @return a caller-owned GPU batch containing only rows that survive the selections
+   */
+  def metadataBatch(
+      readDataSchema: StructType,
+      selections: Array[Delta24xRowSelection],
+      outputColumns: DeletionVectorOutputColumns): ColumnarBatch = {
+    RmmRapidsRetryIterator.withRetryNoSplit {
+      GpuSemaphore.acquireIfNecessary(TaskContext.get())
+      metadataBatchAttempt(readDataSchema, selections, outputColumns)
+    }
+  }
+
+  /** Builds and partitions a metadata-only batch within the same retry attempt. */
+  def metadataBatchesWithPartitionValues(
+      readDataSchema: StructType,
+      selections: Array[Delta24xRowSelection],
+      outputColumns: DeletionVectorOutputColumns,
+      allPartValues: Option[Array[(Long, InternalRow)]],
+      singlePartValues: InternalRow,
+      partitionSchema: StructType,
+      maxGpuColumnSizeBytes: Long): Iterator[ColumnarBatch] = {
+    RmmRapidsRetryIterator.withRetryNoSplit {
+      GpuSemaphore.acquireIfNecessary(TaskContext.get())
+      val partitionRowsAndValues = allPartValues.map(_.unzip)
+      val batch = metadataBatchAttempt(readDataSchema, selections, outputColumns)
+      partitionRowsAndValues match {
+        case Some((rowsPerPartition, partitionValues)) =>
+          BatchWithPartitionDataUtils.addPartitionValuesToBatch(
+            batch, rowsPerPartition, partitionValues,
+            partitionSchema, maxGpuColumnSizeBytes)
+        case None =>
+          BatchWithPartitionDataUtils.addSinglePartitionValueToBatch(
+            batch, singlePartValues, partitionSchema, maxGpuColumnSizeBytes)
+      }
     }
   }
 
@@ -473,7 +509,6 @@ private class Delta24xParquetPartitionReader(
       if (selection.numRowsAlive == 0) {
         EmptyGpuColumnarBatchIterator
       } else {
-        GpuSemaphore.acquireIfNecessary(TaskContext.get())
         val batch = Delta24xDeletionVectorUtils.metadataBatch(
           readDataSchema, Array(selection), outputColumns)
         new SingleGpuColumnarBatchIterator(batch)
@@ -598,20 +633,9 @@ private class MultiFileCloudDelta24xParquetPartitionReader(
           if (selections.map(_.numRowsAlive).sum == 0) {
             EmptyGpuColumnarBatchIterator
           } else {
-            GpuSemaphore.acquireIfNecessary(TaskContext.get())
-            val batch = Delta24xDeletionVectorUtils.metadataBatch(
-              meta.readSchema, selections, outputColumns)
-            meta.allPartValues match {
-              case Some(partitionRowsAndValues) =>
-                val (rowsPerPartition, partitionValues) = partitionRowsAndValues.unzip
-                BatchWithPartitionDataUtils.addPartitionValuesToBatch(
-                  batch, rowsPerPartition, partitionValues,
-                  partitionSchema, maxGpuColumnSizeBytes)
-              case None =>
-                BatchWithPartitionDataUtils.addSinglePartitionValueToBatch(
-                  batch, meta.partitionedFile.partitionValues,
-                  partitionSchema, maxGpuColumnSizeBytes)
-            }
+            Delta24xDeletionVectorUtils.metadataBatchesWithPartitionValues(
+              meta.readSchema, selections, outputColumns, meta.allPartValues,
+              meta.partitionedFile.partitionValues, partitionSchema, maxGpuColumnSizeBytes)
           }
         }
       case _ => super.readBatches(fileBuffersAndMetadata)
