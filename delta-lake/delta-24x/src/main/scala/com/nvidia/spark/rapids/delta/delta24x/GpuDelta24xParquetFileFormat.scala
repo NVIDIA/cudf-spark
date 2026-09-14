@@ -229,8 +229,9 @@ private object Delta24xDeletionVectorUtils {
   }
 
   /**
-   * Describes how to replace the low-shuffle merge row-index field after cuDF applies a deletion
-   * vector. The field receives cuDF's selected source row indexes.
+   * Describes where to materialize the low-shuffle merge row-index field after applying a
+   * deletion vector. Physical-column reads use the source row indexes emitted by cuDF; a
+   * metadata-only read reconstructs the same indexes from its selected row groups.
    *
    * @param readDataSchema schema whose row-index metadata field will be populated
    * @return output position for row indexes, if requested
@@ -511,6 +512,8 @@ private case class GpuDelta24xParquetMultiFilePartitionReaderFactory(
     dataSchema, readDataSchema, partitionSchema, filters, rapidsConf, poolConfBuilder,
     metrics, queryUsesInputFile) {
 
+  // Deletion-vector state is aligned with each file or chunk. The coalescing reader cannot
+  // preserve that alignment, so combined-file low-shuffle scans use the multithreaded reader.
   override val canUseCoalesceFilesReader: Boolean = false
   override val canUseMultiThreadReader: Boolean = true
 
@@ -798,6 +801,8 @@ case class GpuDelta24xParquetFileFormat(
       options: Map[String, String],
       path: Path): Boolean = isSplittable
 
+  // The touched-file scan requests row indexes before deletion vectors exist. The later modified
+  // and unmodified scans carry broadcast deletion vectors but do not request the row-index field.
   private def requiresLowShuffleReader(schema: StructType): Boolean =
     broadcastDvMap.isDefined || schema.fieldNames.contains(METADATA_ROW_IDX_COL)
 

@@ -498,12 +498,13 @@ class InsertOnlyMergeExecutor(override val context: MergeExecutorContext) extend
  *
  * The algorithm is as follows:
  * 1. Find touched target files in the target table by joining the source and target data, with
- * collecting joined row identifiers as (`__metadata_file_path`, `__metadata_row_idx`) pairs.
+ * collecting joined row identifiers as (`__metadata_file_path`, `__metadata_row_idx`) pairs and
+ * aggregating each file's row indexes directly into Delta's bitmap representation.
  * 2. Read the touched files again and write new files with updated and/or inserted rows
- * without coping unmodified data from target table, but filtering target table with collected
- * rows mentioned above.
- * 3. Read the touched files again, filtering unmodified rows with collected row identifiers
- * collected in first step, and saving them without shuffle.
+ * without copying unmodified target data. The touched-row bitmap is pushed into cuDF's Parquet
+ * reader as a retention vector so only rows needed by the merge join are decoded.
+ * 3. Read the touched files again with the same bitmap as a deletion vector, so cuDF decodes only
+ * unmodified rows, and save them without a shuffle.
  */
 class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extends MergeExecutor {
 
@@ -575,16 +576,15 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
   }
 
   /**
-   * Though low shuffle merge algorithm performs better than traditional merge algorithm in some
-   * cases, there are some case we should fallback to traditional merge executor:
+   * Although low shuffle merge performs better than the traditional merge algorithm in some
+   * cases, it must fall back to the traditional merge executor when:
    *
    * 1. Finding touched files requires generating [[METADATA_ROW_IDX_COL]] in
    * [[org.apache.spark.sql.rapids.GpuFileSourceScanExec]]. The later modified and unmodified
-   * target scans apply their deletion vectors in the cuDF Parquet reader. We need to fallback to
+   * target scans apply their deletion vectors in the cuDF Parquet reader. We need to fall back to
    * the normal executor when any of these scans cannot run on the GPU.
-   * 2. Low shuffle merge algorithm currently needs to broadcast deletion vector, which may
-   * introduce extra overhead. It maybe better to fallback to this algorithm when the changeset
-   * it too large.
+   * 2. The combined serialized size of the touched-row deletion vectors exceeds the configured
+   * broadcast threshold.
    */
   private[delta] def shouldFallback(): Boolean = {
     // Trying to detect if we can execute finding touched files.
@@ -605,7 +605,7 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
     }
     if (!touchFilePlanOverrideSucceed) {
       logWarning("Unable to override file scan for low shuffle merge for finding touched files " +
-        "plan, fallback to tradition merge.")
+        "plan; falling back to traditional merge.")
       return true
     }
 
@@ -630,8 +630,8 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
     }
 
     if (!mergePlanOverrideSucceed) {
-      logWarning("Unable to override file scan for low shuffle merge for merge plan, fallback to " +
-        "tradition merge.")
+      logWarning("Unable to override file scan for low shuffle merge for merge plan; falling " +
+        "back to traditional merge.")
       return true
     }
 
@@ -641,8 +641,8 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
       .get(DELTA_LOW_SHUFFLE_MERGE_DEL_VECTOR_BROADCAST_THRESHOLD)
     if (deletionVectorSize > maxDelVectorSize) {
       logWarning(
-        s"""Low shuffle merge can't be executed because broadcast deletion vector count
-           |$deletionVectorSize is large than max value $maxDelVectorSize """.stripMargin)
+        s"Low shuffle merge cannot run because the serialized deletion-vector size " +
+          s"$deletionVectorSize exceeds the broadcast threshold $maxDelVectorSize")
       return true
     }
 
@@ -719,7 +719,9 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
   /**
    * Find the target table files that contain the rows that satisfy the merge condition. This is
    * implemented as an inner-join between the source query/table and the target table using
-   * the merge condition.
+   * the merge condition. Row indexes are aggregated per file directly into
+   * [[RoaringBitmapArray]], which is also the representation serialized into Delta's inline
+   * deletion-vector descriptors for the later scans.
    */
   private def findTouchedFiles(): Map[String, (RoaringBitmapArray, AddFile)] =
     context.cmd.recordMergeOperation(sqlMetricName = "scanTimeMs") {
@@ -843,7 +845,12 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
     Dataset.ofRows(context.spark, newPlan)
   }
 
-  /** Scan the touched target files, retaining rows according to `filterType`. */
+  /**
+   * Scans touched target files with their row-index bitmaps pushed into cuDF's Parquet reader.
+   * [[RowIndexFilterType.IF_NOT_CONTAINED]] treats the bitmap as a retention vector for the
+   * modified-row scan; [[RowIndexFilterType.IF_CONTAINED]] treats it as a deletion vector for the
+   * unmodified-row scan.
+   */
   private def getTouchedTargetDF(
       touchedFiles: Map[String, (RoaringBitmapArray, AddFile)],
       filterType: RowIndexFilterType): DataFrame = {

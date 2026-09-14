@@ -32,7 +32,7 @@ import org.apache.spark.sql.execution.datasources.PartitionedFile
 import org.apache.spark.sql.types.StructType
 
 /**
- * Metadata column to populate after a cuDF Parquet deletion-vector read.
+ * Describes optional metadata output from a cuDF Parquet deletion-vector read.
  *
  * @param rowIndexColumn optional zero-based output position for cuDF's selected row indexes
  */
@@ -42,7 +42,7 @@ case class DeletionVectorOutputColumns(
   private[common] def needsRowIndex: Boolean = rowIndexColumn.isDefined
 
   /**
-   * Replaces placeholder columns in a decoded table with deletion-vector metadata. cuDF's
+   * Replaces the row-index placeholder in a decoded table when requested. cuDF's
    * deletion-vector reader prepends the selected source row indexes to its output. The caller
    * separates that column before schema evolution and supplies it here as `cudfRowIndex`.
    * This method casts those indexes to Spark's `LongType` and rebuilds the table with the vector
@@ -186,7 +186,10 @@ private object ParquetWithDeletionVectorUtils {
   }
 }
 
-/** Builds a GPU table producer backed by cuDF's Parquet deletion-vector reader. */
+/**
+ * Builds the GPU table producer used by Delta scans to apply deletion vectors in cuDF's Parquet
+ * reader.
+ */
 object MakeParquetTableWithDVProducer extends Logging {
   def apply(
       useChunkedReader: Boolean,

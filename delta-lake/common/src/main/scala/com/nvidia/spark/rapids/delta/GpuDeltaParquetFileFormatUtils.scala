@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,8 +28,8 @@ import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 object GpuDeltaParquetFileFormatUtils {
   /**
    * Row number of the row in the file. When used with [[FILE_PATH_COL]] together, it can be used
-   * as unique id of a row in file. Currently to correctly calculate this, the caller needs to
-   * set both [[isSplitable]] to false, and [[RapidsConf.PARQUET_READER_TYPE]] to "PERFILE".
+   * as the unique ID of a row in a file. Reader implementations must preserve the absolute source
+   * row position across row groups and any deletion-vector filtering.
    */
   val METADATA_ROW_IDX_COL: String = "__metadata_row_index"
   val METADATA_ROW_IDX_FIELD: StructField = StructField(METADATA_ROW_IDX_COL, LongType,
@@ -47,7 +47,7 @@ object GpuDeltaParquetFileFormatUtils {
   val FILE_PATH_FIELD: StructField = StructField(FILE_PATH_COL, StringType, nullable = false)
 
   /**
-   * Add a metadata column to the iterator. Currently only support [[METADATA_ROW_IDX_COL]].
+   * Adds requested row-index and deletion-vector-membership metadata to per-file reader output.
    */
   def addMetadataColumnToIterator(
       schema: StructType,
