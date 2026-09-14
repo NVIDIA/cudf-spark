@@ -16,13 +16,17 @@
 
 package org.apache.spark.shuffle.rapids
 
-class RapidsShuffleTimeoutException(message: String) extends Exception(message)
+import org.apache.spark.shuffle.FetchFailedException
+import org.apache.spark.storage.BlockManagerId
 
-/**
- * Internal exception thrown by `BufferSendState` in case where it detects
- * an `IOException` when copying buffers into a bounce buffer that it is preparing.
- * @param message - string describing the issue
- * @param cause - causing exception, or null
- */
-class RapidsShuffleSendPrepareException(message: String, cause: Throwable)
-    extends Exception(message, cause)
+class RapidsShuffleFetchFailedException(
+    bmAddress: BlockManagerId,
+    shuffleId: Int,
+    mapId: Long,
+    mapIndex: Int,
+    reduceId: Int,
+    message: String,
+    cause: Throwable)
+    extends FetchFailedException(
+      bmAddress, shuffleId, mapId, mapIndex, reduceId, message, cause) {
+}
