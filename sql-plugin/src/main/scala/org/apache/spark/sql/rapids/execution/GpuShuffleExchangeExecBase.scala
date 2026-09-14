@@ -182,6 +182,8 @@ abstract class GpuShuffleExchangeExecBase(
   private lazy val kudoBufferCopyMeasurementEnabled = RapidsConf
     .SHUFFLE_KUDO_SERIALIZER_MEASURE_BUFFER_COPY_ENABLED
     .get(child.conf)
+  private lazy val rangeInputBatchingEnabled = RapidsConf
+    .RANGE_SHUFFLE_INPUT_BATCHING_ENABLED.get(child.conf)
 
   private lazy val useGPUShuffle = {
     gpuOutputPartitioning match {
@@ -270,6 +272,7 @@ abstract class GpuShuffleExchangeExecBase(
       serializer,
       useGPUShuffle,
       useMultiThreadedShuffle,
+      rangeInputBatchingEnabled,
       allMetrics,
       writeMetrics,
       additionalMetrics,
@@ -400,6 +403,7 @@ object GpuShuffleExchangeExecBase {
       serializer: Serializer,
       useGPUShuffle: Boolean,
       useMultiThreadedShuffle: Boolean,
+      rangeInputBatchingEnabled: Boolean,
       metrics: Map[String, GpuMetric],
       writeMetrics: Map[String, SQLMetric],
       additionalMetrics: Map[String, GpuMetric],
@@ -435,6 +439,8 @@ object GpuShuffleExchangeExecBase {
     }
     val partitioner: GpuExpression = getPartitioner(newRdd, outputAttributes,
       newPartitioning, metrics)
+    val useRangeInputBatching = rangeInputBatchingEnabled &&
+      newPartitioning.isInstanceOf[GpuRangePartitioning]
     // Inject debugging subMetrics, such as D2HTime before SliceOnCpu
     // The injected metrics will be serialized as the members of GpuPartitioning
     partitioner match {
@@ -456,6 +462,8 @@ object GpuShuffleExchangeExecBase {
           private var partitioned: Array[(ColumnarBatch, Int)] = _
           private var at = 0
           private val mutablePair = new MutablePair[Int, ColumnarBatch]()
+          private def rangeInput[T](body: => T): T =
+            RangeInputBatching.withRangeInput(useRangeInputBatching)(body)
           private def partNextBatch(): Unit = {
             if (partitioned != null) {
               partitioned.map(_._1).safeClose()
@@ -463,11 +471,11 @@ object GpuShuffleExchangeExecBase {
               at = 0
             }
             // Try to fill partitionedIter from iter if it's empty
-            if (!partitionedIter.hasNext && iter.hasNext) {
-              var batch = iter.next()
-              while (batch.numRows == 0 && iter.hasNext) {
+            if (!partitionedIter.hasNext && rangeInput(iter.hasNext)) {
+              var batch = rangeInput(iter.next())
+              while (batch.numRows == 0 && rangeInput(iter.hasNext)) {
                 batch.close()
-                batch = iter.next()
+                batch = rangeInput(iter.next())
               }
               // Get a non-empty batch or the last batch. So still need to
               // check if it is empty for the later case.

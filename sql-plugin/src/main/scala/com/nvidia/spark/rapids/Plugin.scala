@@ -82,7 +82,7 @@ case class ColumnarOverrideRules(sparkSession: SparkSession) extends ColumnarRul
 
 object RapidsPluginUtils extends Logging {
   val CUDF_PROPS_FILENAME = "cudf-java-version-info.properties"
-  val JNI_PROPS_FILENAME = "spark-rapids-jni-version-info.properties"
+  val JNI_PROPS_FILENAME = "cudf-spark-jni-version-info.properties"
   val PLUGIN_PROPS_FILENAME = "rapids4spark-version-info.properties"
   private val PRIVATE_PROPS_FILENAME = "cudf-spark-private-version-info.properties"
 
@@ -210,7 +210,7 @@ object RapidsPluginUtils extends Logging {
 
   def detectMultipleJars(conf: RapidsConf): Unit = {
     detectMultipleJar(PLUGIN_PROPS_FILENAME, "rapids-4-spark", conf)
-    detectMultipleJar(JNI_PROPS_FILENAME, "spark-rapids-jni", conf)
+    detectMultipleJar(JNI_PROPS_FILENAME, "cudf-spark-jni", conf)
     detectMultipleJar(CUDF_PROPS_FILENAME, "cudf", conf)
   }
 

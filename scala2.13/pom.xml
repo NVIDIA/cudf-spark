@@ -1075,7 +1075,8 @@
         <spark.version.classifier>spark${buildver}</spark.version.classifier>
         <cuda.version>cuda12</cuda.version>
         <jni.classifier>${cuda.version}</jni.classifier>
-        <spark-rapids-jni.version>26.10.0-SNAPSHOT</spark-rapids-jni.version>
+        <cudf-spark-jni.version>26.10.0-SNAPSHOT</cudf-spark-jni.version>
+        <cudf-spark-jni.artifactId>cudf-spark-jni</cudf-spark-jni.artifactId>
         <cudf-spark-private.version>26.10.0-SNAPSHOT</cudf-spark-private.version>
         <cudf-spark-private.artifactId>cudf-spark-private_${scala.binary.version}</cudf-spark-private.artifactId>
         <scala.binary.version>2.13</scala.binary.version>
@@ -1289,8 +1290,8 @@
             </dependency>
             <dependency>
               <groupId>com.nvidia</groupId>
-              <artifactId>spark-rapids-jni</artifactId>
-              <version>${spark-rapids-jni.version}</version>
+              <artifactId>${cudf-spark-jni.artifactId}</artifactId>
+              <version>${cudf-spark-jni.version}</version>
               <classifier>${jni.classifier}</classifier>
             </dependency>
             <dependency>
@@ -1587,7 +1588,7 @@ This will force full Scala code rebuild in downstream modules.
                                             failonerror="false">
                                             <arg value="${spark.rapids.source.basedir}/build/build-info"/>
                                             <arg value="${project.version}"/>
-                                            <arg value="${spark-rapids-jni.version}"/>
+                                            <arg value="${cudf-spark-jni.version}"/>
                                         </exec>
                                         <fail message="exec build-info.sh failed, exit code is ${build-info.exitCode}, error msg is ${build-info.errorMsg}">
                                             <condition>

@@ -1138,7 +1138,7 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       parquetInfo,
       new JHashMap[Integer, Any](),
       expectedSchema,
-      GpuIcebergParquetReader.withNativeRowIndex(shadedSchema),
+      GpuIcebergParquetReaderUtils.withNativeRowIndex(shadedSchema),
       Map.empty)
 
     assert(!processor.displayActionPlan().contains("FetchRowPosition"))
@@ -1178,7 +1178,7 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       parquetInfo,
       new JHashMap[Integer, Any](),
       expectedSchema,
-      GpuIcebergParquetReader.withNativeRowIndex(shadedSchema),
+      GpuIcebergParquetReaderUtils.withNativeRowIndex(shadedSchema),
       Map.empty)
 
     assert(processor.displayActionPlan() ==
@@ -1215,7 +1215,7 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       parquetInfo,
       constants,
       expectedSchema,
-      GpuIcebergParquetReader.withNativeRowIndex(shadedSchema),
+      GpuIcebergParquetReaderUtils.withNativeRowIndex(shadedSchema),
       Map.empty)
 
     val rowPositions = closeOnExcept(CudfColumnVector.fromLongs(0L, 2L, 5L)) { column =>
@@ -1246,7 +1246,7 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       parquetInfo,
       new JHashMap[Integer, Any](),
       expectedSchema,
-      GpuIcebergParquetReader.withNativeRowIndex(shadedSchema),
+      GpuIcebergParquetReaderUtils.withNativeRowIndex(shadedSchema),
       Map.empty)
 
     assert(processor.displayActionPlan() ==
@@ -1812,7 +1812,7 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
     val metric = new LocalGpuMetric
     // The _pos column the DV path injects is dropped, so it must not count as decoded.
     val processor = new GpuParquetReaderPostProcessor(info, new JHashMap[Integer, Any](),
-      expectedSchema, GpuIcebergParquetReader.withNativeRowIndex(shaded),
+      expectedSchema, GpuIcebergParquetReaderUtils.withNativeRowIndex(shaded),
       Map(GPU_OUTPUT_BATCH_BYTES -> metric))
     val withPos = StructType(Array(
       StructField("_pos", LongType, true), StructField("long_col", LongType, true)))

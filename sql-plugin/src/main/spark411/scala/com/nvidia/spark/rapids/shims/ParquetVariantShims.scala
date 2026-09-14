@@ -25,7 +25,9 @@ package com.nvidia.spark.rapids.shims
 
 import org.apache.hadoop.conf.Configuration
 
+import org.apache.spark.sql.execution.datasources.VariantMetadata
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.types.{DataType, VariantType}
 
 /**
  * Shim for Parquet variant-related configurations in Spark 4.1.0+.
@@ -39,4 +41,10 @@ object ParquetVariantShims {
       SQLConf.PARQUET_ANNOTATE_VARIANT_LOGICAL_TYPE.key,
       sqlConf.parquetAnnotateVariantLogicalType.toString)
   }
+
+  def isPushedVariantStruct(dataType: DataType): Boolean =
+    VariantMetadata.isVariantStruct(dataType)
+
+  def isPotentiallyShreddedVariant(dataType: DataType, sqlConf: SQLConf): Boolean =
+    dataType == VariantType && sqlConf.getConf(SQLConf.VARIANT_ALLOW_READING_SHREDDED)
 }

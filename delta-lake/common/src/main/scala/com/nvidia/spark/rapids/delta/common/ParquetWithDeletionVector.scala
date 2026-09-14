@@ -156,12 +156,12 @@ private case class DeltaParquetTableReader(
 
   logDebug("Using DeltaParquetTableReader for reading Parquet with deletion vectors")
 
-  override protected val reader: ChunkedReader = DeltaParquetChunkedReader(
+  override protected def createReader(): ChunkedReader = DeltaParquetChunkedReader(
     DeletionVector.newParquetChunkedReader(chunkSizeByteLimit,
       maxChunkedReaderMemoryUsageSizeBytes, opts, buffers, dvInfos))
 
-  override protected lazy val resources: Seq[AutoCloseable] =
-    Seq(reader) ++ buffers ++ dvInfos.map(_.serializedBitmap)
+  override protected def additionalResources: Seq[AutoCloseable] =
+    dvInfos.map(_.serializedBitmap)
 
   private var currentRowIndex: Option[ColumnVector] = None
 
