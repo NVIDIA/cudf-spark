@@ -578,9 +578,10 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
    * Though low shuffle merge algorithm performs better than traditional merge algorithm in some
    * cases, there are some case we should fallback to traditional merge executor:
    *
-   * 1. Low shuffle merge requires generating [[METADATA_ROW_IDX_COL]] and applying deletion
-   * vectors in [[org.apache.spark.sql.rapids.GpuFileSourceScanExec]]. That means we need to
-   * fallback to the normal executor when that scan is disabled for some reason.
+   * 1. Finding touched files requires generating [[METADATA_ROW_IDX_COL]] in
+   * [[org.apache.spark.sql.rapids.GpuFileSourceScanExec]]. The later modified and unmodified
+   * target scans apply their deletion vectors in the cuDF Parquet reader. We need to fallback to
+   * the normal executor when any of these scans cannot run on the GPU.
    * 2. Low shuffle merge algorithm currently needs to broadcast deletion vector, which may
    * introduce extra overhead. It maybe better to fallback to this algorithm when the changeset
    * it too large.
