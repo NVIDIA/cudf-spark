@@ -105,7 +105,7 @@ sed_i '/<java\.major\.version>/,/<spark\.version>\${spark[0-9]\+\.version}</s/<s
 
 # Update <scala.binary.version> in parent POM
 # Match any scala binary version to ensure idempotency
-sed_i '/<spark\-rapids\-jni\.version>/,/<scala\.binary\.version>[0-9]*\.[0-9]*</s/<scala\.binary\.version>[0-9]*\.[0-9]*</<scala.binary.version>'$TO_VERSION'</' \
+sed_i '/<cudf\-spark\-jni\.version>/,/<scala\.binary\.version>[0-9]*\.[0-9]*</s/<scala\.binary\.version>[0-9]*\.[0-9]*</<scala.binary.version>'$TO_VERSION'</' \
   "$TO_DIR/pom.xml"
 
 
@@ -126,5 +126,5 @@ if [[ -z "$SCALA_VERSION" ]]; then
   exit 1
 fi
 
-sed_i '/<spark\-rapids\-jni\.version>/,/<scala.version>[0-9]*\.[0-9]*\.[0-9]*</s/<scala\.version>[0-9]*\.[0-9]*\.[0-9]*</<scala.version>'$SCALA_VERSION'</' \
+sed_i '/<cudf\-spark\-jni\.version>/,/<scala.version>[0-9]*\.[0-9]*\.[0-9]*</s/<scala\.version>[0-9]*\.[0-9]*\.[0-9]*</<scala.version>'$SCALA_VERSION'</' \
   "$TO_DIR/pom.xml"

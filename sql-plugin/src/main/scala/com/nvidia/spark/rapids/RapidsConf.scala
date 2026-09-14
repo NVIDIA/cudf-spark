@@ -770,6 +770,14 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .booleanConf
     .createWithDefault(false)
 
+  val RANGE_SHUFFLE_INPUT_BATCHING_ENABLED =
+    conf("spark.rapids.sql.rangeShuffle.inputBatching.enabled")
+      .doc("Enables experimental one-input-batch-at-a-time consumption for GPU range shuffles " +
+        "to bound the amount of decoded input retained before partitioning.")
+      .internal()
+      .booleanConf
+      .createWithDefault(false)
+
   val EXPORT_COLUMNAR_RDD = conf("spark.rapids.sql.exportColumnarRdd")
     .doc("Spark has no simply way to export columnar RDD data.  This turns on special " +
       "processing/tagging that allows the RDD to be picked back apart into a Columnar RDD.")
@@ -2572,8 +2580,8 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
 
   val ALLOW_MULTIPLE_JARS = conf("spark.rapids.sql.allowMultipleJars")
     .startupOnly()
-    .doc("Allow multiple rapids-4-spark, spark-rapids-jni, and cudf jars on the classpath. " +
-      "Spark will take the first one it finds, so the version may not be expected. Possisble " +
+    .doc("Allow multiple rapids-4-spark, cudf-spark-jni, and cudf jars on the classpath. " +
+      "Spark will take the first one it finds, so the version may not be expected. Possible " +
       "values are ALWAYS: allow all jars, SAME_REVISION: only allow jars with the same " +
       "revision, NEVER: do not allow multiple jars at all.")
     .stringConf
