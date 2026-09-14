@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from concurrent.futures import ThreadPoolExecutor
+import re
 
 import pytest
 
@@ -57,6 +58,20 @@ pytestmark = iceberg_unsupported_mark
 def _is_spark_patch_at_least(version, minimum):
     patch = version.split(".")[2].split("-", 1)[0]
     return int(patch) >= minimum
+
+
+def _is_spark_58783_affected():
+    return (
+        (is_spark_40x() and not _is_spark_patch_at_least(spark_version(), 5))
+        or (is_spark_41x() and not _is_spark_patch_at_least(spark_version(), 4))
+    )
+
+
+def _is_spark_58783_fixed():
+    return (
+        (is_spark_40x() and _is_spark_patch_at_least(spark_version(), 5))
+        or (is_spark_41x() and _is_spark_patch_at_least(spark_version(), 4))
+    )
 
 
 @pytest.mark.parametrize("version, minimum, expected", [
@@ -108,6 +123,37 @@ def _assert_partial_clustering_spj_plan(_cpu_plan, plan):
         f"Expected one post-join GPU shuffle, found {len(exchanges)}:\n{plan}"
     assert any(scan.outputPartitioning().isPartiallyClustered() for scan in scans), \
         f"Expected at least one partially clustered GPU batch scan:\n{plan}"
+
+
+def _scan_for_table(scans, table, plan):
+    table_name = table.rsplit(".", 1)[-1]
+    matching_scans = [scan for scan in scans
+                      if str(scan.table().name()).endswith(table_name)]
+    assert len(matching_scans) == 1, \
+        f"Expected one {table_name} scan, found {len(matching_scans)}:\n{plan}"
+    return matching_scans[0]
+
+
+def _evaluated_dynamic_pruning_values(scan, plan):
+    runtime_filters = []
+    filters = scan.runtimeFilters().iterator()
+    while filters.hasNext():
+        runtime_filters.append(filters.next())
+    dpp_filters = [runtime_filter for runtime_filter in runtime_filters
+                   if runtime_filter.getClass().getSimpleName() == "DynamicPruningExpression"
+                   and runtime_filter.child().getClass().getSimpleName() == "InSubqueryExec"]
+    assert len(dpp_filters) == 1, \
+        f"Expected one nontrivial dynamic pruning filter on the scan:\n{plan}"
+    values = dpp_filters[0].child().values()
+    assert values.isDefined(), f"Expected the dynamic pruning filter to be evaluated:\n{plan}"
+    return values.get()
+
+
+def _collect_with_plan_assertion(spark, query, plan_assertion):
+    df = query(spark)
+    result = df.collect()
+    plan_assertion(df._jdf.queryExecution().executedPlan())
+    return result
 
 
 @iceberg
@@ -252,6 +298,219 @@ def test_iceberg_spj_partition_filter(spark_tmp_table_factory, partition_filter,
         conf=conf,
         require_non_empty=True,
         gpu_plan_assertion=assert_plan)
+
+
+def _setup_partition_filter_runtime_filter_tables(spark_tmp_table_factory):
+    left_table = get_full_table_name(spark_tmp_table_factory)
+    right_table = get_full_table_name(spark_tmp_table_factory)
+    dim_table = get_full_table_name(spark_tmp_table_factory)
+
+    def setup_iceberg_tables(spark):
+        spark.sql(
+            f"CREATE TABLE {left_table} (id INT, price DOUBLE) USING ICEBERG "
+            f"PARTITIONED BY (id) {_NO_FANOUT}")
+        spark.sql(
+            f"CREATE TABLE {right_table} (id INT, value STRING) USING ICEBERG "
+            f"PARTITIONED BY (id) {_NO_FANOUT}")
+        spark.sql(
+            f"CREATE TABLE {dim_table} (id INT, tag STRING) USING ICEBERG {_NO_FANOUT}")
+        spark.sql(f"INSERT INTO {left_table} VALUES (1, 40.0), (2, 10.0), (3, 15.5)")
+        spark.sql(f"INSERT INTO {right_table} VALUES (1, 'a'), (2, 'b')")
+        spark.sql(f"INSERT INTO {dim_table} VALUES (1, 'keep'), (2, 'drop'), (3, 'keep')")
+
+    with_cpu_session(setup_iceberg_tables)
+    return left_table, right_table, dim_table
+
+
+def _partition_filter_runtime_filter_conf():
+    return {
+        "spark.sql.adaptive.enabled": "false",
+        "spark.sql.autoBroadcastJoinThreshold": "-1",
+        "spark.sql.optimizer.dynamicPartitionPruning.enabled": "true",
+        "spark.sql.optimizer.dynamicPartitionPruning.reuseBroadcastOnly": "false",
+        "spark.sql.optimizer.dynamicPartitionPruning.fallbackFilterRatio": "10",
+        "spark.sql.sources.v2.bucketing.enabled": "true",
+        "spark.sql.sources.v2.bucketing.pushPartValues.enabled": "true",
+        "spark.sql.sources.v2.bucketing.partition.filter.enabled": "true",
+        "spark.sql.sources.v2.bucketing.partiallyClusteredDistribution.enabled": "false",
+        "spark.sql.iceberg.planning.preserve-data-grouping": "true",
+    }
+
+
+def _partition_filter_runtime_filter_query(spark, left_table, right_table, dim_table):
+    return spark.sql(
+        f"""
+        SELECT /*+ BROADCAST(d) */ l.id, l.price, r.value
+        FROM {left_table} l
+        JOIN {right_table} r ON l.id = r.id
+        JOIN {dim_table} d ON l.id = d.id
+        WHERE d.tag = 'keep'
+        """)
+
+
+def _assert_partition_filter_runtime_filter_plan(plan, left_table):
+    spj_joins = _nodes_of_class(plan, "GpuShuffledSymmetricHashJoinExec")
+    assert len(spj_joins) == 1, \
+        f"Expected one GPU storage-partitioned join, found {len(spj_joins)}:\n{plan}"
+    scans = _assert_spj_join_shape(spj_joins[0], expect_spj=True)
+    left_scan = _scan_for_table(scans, left_table, plan)
+    values = _evaluated_dynamic_pruning_values(left_scan, plan)
+    assert set(values) == {1, 3}, \
+        f"Expected dynamic pruning values {{1, 3}}, found {list(values)}:\n{plan}"
+
+    partitioning = left_scan.outputPartitioning()
+    assert partitioning.getClass().getSimpleName() == "KeyGroupedPartitioning", plan
+    partition_values = partitioning.partitionValues()
+    planned_values = {
+        partition_values.apply(i).getInt(0) for i in range(partition_values.size())
+    }
+    assert planned_values == {1, 2}, \
+        f"Expected SPJ intersection {{1, 2}}, found {planned_values}:\n{plan}"
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.skipif(
+    not _is_spark_58783_fixed(),
+    reason="SPARK-58783 was fixed in Spark 4.0.5 and 4.1.4; Spark 4.2+ is unaffected")
+def test_iceberg_spj_partition_filter_with_runtime_filter(spark_tmp_table_factory):
+    left_table, right_table, dim_table = \
+        _setup_partition_filter_runtime_filter_tables(spark_tmp_table_factory)
+    conf = _partition_filter_runtime_filter_conf()
+
+    def join_with_runtime_filter(spark):
+        return _partition_filter_runtime_filter_query(
+            spark, left_table, right_table, dim_table)
+
+    def assert_plan(_cpu_plan, plan):
+        _assert_partition_filter_runtime_filter_plan(plan, left_table)
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        join_with_runtime_filter,
+        conf=conf,
+        require_non_empty=True,
+        gpu_plan_assertion=assert_plan)
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.skipif(
+    not _is_spark_58783_affected(),
+    reason="Requires an affected Spark 4.0.x or 4.1.x release")
+def test_iceberg_spj_partition_filter_with_runtime_filter_cpu_fails_gpu_succeeds(
+        spark_tmp_table_factory):
+    left_table, right_table, dim_table = \
+        _setup_partition_filter_runtime_filter_tables(spark_tmp_table_factory)
+    conf = _partition_filter_runtime_filter_conf()
+
+    def join_with_runtime_filter(spark):
+        return _partition_filter_runtime_filter_query(
+            spark, left_table, right_table, dim_table)
+
+    def assert_plan(plan):
+        _assert_partition_filter_runtime_filter_plan(plan, left_table)
+
+    assert_spark_exception(
+        lambda: with_cpu_session(lambda spark: join_with_runtime_filter(spark).collect(), conf=conf),
+        "During runtime filtering, data source must not report new partition values")
+    gpu_result = with_gpu_session(
+        lambda spark: _collect_with_plan_assertion(
+            spark, join_with_runtime_filter, assert_plan),
+        conf=conf)
+    assert_equal_with_local_sort([Row(id=1, price=40.0, value="a")], gpu_result)
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.skipif(
+    not (is_spark_40x() or is_spark_41x()),
+    reason="Requires the scan-side join-key projection in Spark 4.0.x and 4.1.x")
+def test_iceberg_spj_runtime_filter_with_trailing_join_key(spark_tmp_table_factory):
+    left_table = get_full_table_name(spark_tmp_table_factory)
+    right_table = get_full_table_name(spark_tmp_table_factory)
+
+    def setup_iceberg_tables(spark):
+        spark.sql(
+            f"CREATE TABLE {left_table} (store_id INT, dept_id INT, data STRING) USING ICEBERG "
+            f"PARTITIONED BY (dept_id, data) {_NO_FANOUT}")
+        spark.sql(
+            f"CREATE TABLE {right_table} (store_id INT, dept_id INT, data STRING) USING ICEBERG "
+            f"PARTITIONED BY (data) {_NO_FANOUT}")
+        spark.sql(
+            f"INSERT INTO {left_table} VALUES "
+            "(100, 1, 'aa'), (200, 2, 'aa'), (300, 3, 'bb')")
+        spark.sql(f"INSERT INTO {right_table} VALUES (500, 1, 'aa'), (500, 2, 'bb')")
+
+    with_cpu_session(setup_iceberg_tables)
+
+    conf = {
+        "spark.sql.adaptive.enabled": "false",
+        "spark.sql.autoBroadcastJoinThreshold": "-1",
+        "spark.sql.optimizer.dynamicPartitionPruning.enabled": "true",
+        "spark.sql.optimizer.dynamicPartitionPruning.reuseBroadcastOnly": "false",
+        "spark.sql.optimizer.dynamicPartitionPruning.fallbackFilterRatio": "10",
+        "spark.sql.requireAllClusterKeysForCoPartition": "false",
+        "spark.sql.sources.v2.bucketing.enabled": "true",
+        "spark.sql.sources.v2.bucketing.allowJoinKeysSubsetOfPartitionKeys.enabled": "true",
+        "spark.sql.sources.v2.bucketing.pushPartValues.enabled": "true",
+        "spark.sql.sources.v2.bucketing.partition.filter.enabled": "false",
+        "spark.sql.sources.v2.bucketing.partiallyClusteredDistribution.enabled": "false",
+        "spark.sql.iceberg.planning.preserve-data-grouping": "true",
+    }
+
+    def join_with_runtime_filter(spark):
+        return spark.sql(
+            f"""
+            SELECT /*+ MERGE(l, r) */
+                l.store_id, l.dept_id, l.data, r.store_id AS right_store_id
+            FROM {left_table} l
+            JOIN {right_table} r ON l.data = r.data
+            WHERE r.dept_id = 1
+            """)
+
+    def assert_plan(plan):
+        scans = _assert_spj_join_shape(plan, expect_spj=True)
+        left_scan = _scan_for_table(scans, left_table, plan)
+        values = _evaluated_dynamic_pruning_values(left_scan, plan)
+        actual_values = {str(value) for value in values}
+        assert actual_values == {"aa"}, \
+            f"Expected dynamic pruning value aa, found {actual_values}:\n{plan}"
+
+        positions_option = left_scan.spjParams().joinKeyPositions()
+        assert positions_option.isDefined(), \
+            f"Expected projected join-key positions on the left scan:\n{plan}"
+        positions = positions_option.get()
+        actual_positions = [positions.apply(i) for i in range(positions.size())]
+        assert actual_positions == [1], \
+            f"Expected trailing join-key position [1], found {actual_positions}:\n{plan}"
+        assert left_scan.spjParams().commonPartitionValues().isDefined(), \
+            f"Expected common partition values on the left SPJ scan:\n{plan}"
+
+    expected = [
+        Row(store_id=100, dept_id=1, data="aa", right_store_id=500),
+        Row(store_id=200, dept_id=2, data="aa", right_store_id=500),
+    ]
+
+    if _is_spark_58783_affected():
+        assert_spark_exception(
+            lambda: with_cpu_session(
+                lambda spark: join_with_runtime_filter(spark).collect(), conf=conf),
+            # Iceberg's partition type check may fail before Spark reaches the projected-key cast.
+            re.compile(
+                r"Wrong class, expected java\.lang\.CharSequence, but was java\.lang\.Integer"
+                r"|java\.lang\.Integer cannot be cast to class "
+                r"org\.apache\.spark\.unsafe\.types\.UTF8String"))
+        gpu_result = with_gpu_session(
+            lambda spark: _collect_with_plan_assertion(
+                spark, join_with_runtime_filter, assert_plan),
+            conf=conf)
+        assert_equal_with_local_sort(expected, gpu_result)
+    else:
+        assert_cpu_and_gpu_are_equal_collect_with_capture(
+            join_with_runtime_filter,
+            conf=conf,
+            require_non_empty=True,
+            gpu_plan_assertion=lambda _cpu_plan, plan: assert_plan(plan))
 
 
 # Enough rows that every bucket of the wider bucket(4) side is populated, so reducing it to

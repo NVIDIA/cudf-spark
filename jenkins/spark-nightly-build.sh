@@ -17,7 +17,7 @@
 
 set -ex
 
-## MVN_OPT : maven options environment, e.g. MVN_OPT='-Dspark-rapids-jni.version=xxx' to specify spark-rapids-jni dependency's version.
+## MVN_OPT : maven options environment, e.g. MVN_OPT='-Dcudf-spark-jni.version=xxx' to specify cudf-spark-jni dependency's version.
 MVN_SETTINGS=${MVN_SETTINGS:-"jenkins/settings.xml"}
 export MVN="mvn -s $MVN_SETTINGS -Dmaven.wagon.http.retryHandler.count=3 -DretryFailedDeploymentCount=3 ${MVN_OPT} -Psource-javadoc"
 

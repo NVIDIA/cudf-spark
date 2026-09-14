@@ -344,7 +344,7 @@ def is_spark_protobuf_available():
     if is_databricks_runtime():
         return is_databricks122_or_later()
     return (is_spark_340_or_later() and
-            os.environ.get('INCLUDE_SPARK_PROTOBUF_JAR', 'true').lower() != 'false')
+            os.environ.get('INCLUDE_SPARK_PROTOBUF_JAR', 'false').lower() != 'false')
 
 
 def supports_delta_lake_deletion_vectors():

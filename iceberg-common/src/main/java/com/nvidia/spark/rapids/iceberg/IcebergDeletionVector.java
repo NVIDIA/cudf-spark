@@ -27,7 +27,8 @@ import java.util.Collections;
 import java.util.zip.CRC32;
 
 /**
- * An Iceberg deletion vector kept in its compressed Roaring-bitmap representation.
+ * An Iceberg deletion vector kept in its compressed Roaring-bitmap representation. This helper
+ * does not depend on Iceberg runtime classes.
  *
  * <p>The serialized bytes use the portable 64-bit Roaring format expected by cuDF. This object
  * owns its host buffer and must be closed after all borrowed references have been released.

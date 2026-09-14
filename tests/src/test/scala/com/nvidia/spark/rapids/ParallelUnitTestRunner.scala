@@ -27,6 +27,7 @@ import java.util.concurrent.atomic.{AtomicLong, AtomicReference}
 import scala.collection.mutable.ArrayBuffer
 import scala.util.control.NonFatal
 
+import ai.rapids.cudf.Cuda
 import com.nvidia.spark.rapids.spill.SpillFramework
 import org.apache.hadoop.fs.FileUtil
 
@@ -44,6 +45,9 @@ object ParallelUnitTestRunner {
 
   private val UNRESOLVED_PROPERTY = "${"
   private val PARALLEL_GPU_ALLOCATION_RATIO = 0.8
+  private val GPU_MEMORY_RESERVE = 1024L * 1024 * 1024
+  private val GPU_MEMORY_PER_WORKER = 4L * 1024 * 1024 * 1024
+  private val MAX_WORKER_COUNT = 4
   private val DPP_SUITES = Seq(
     "org.apache.spark.sql.rapids.suites.RapidsDynamicPartitionPruningV1SuiteAEOff",
     "org.apache.spark.sql.rapids.suites.RapidsDynamicPartitionPruningV1SuiteAEOn")
@@ -64,6 +68,13 @@ object ParallelUnitTestRunner {
       return
     }
 
+    run(args, () => {
+      val memoryInfo = Cuda.memGetInfo()
+      (memoryInfo.free, memoryInfo.total)
+    })
+  }
+
+  private[rapids] def run(args: Array[String], gpuMemoryInfo: () => (Long, Long)): Unit = {
     val config = args.map { arg =>
       val separator = arg.indexOf('=')
       require(separator > 0, s"Invalid argument: $arg")
@@ -116,14 +127,23 @@ object ParallelUnitTestRunner {
         .zipWithIndex
         .map { case (suite, index) => SuiteTask(index + 1, suite) }
     val suiteBatches = createSuiteBatches(suiteTasks)
-    val workerCount = effectiveWorkerCount(requestedForks, suiteBatches)
+    // Sample once, before any test workers start allocating on the shared GPU. The budget
+    // includes each worker's CUDA context and allocations outside its RMM pool.
+    val (freeGpuMemory, totalGpuMemory) = gpuMemoryInfo()
+    val workerCount = effectiveWorkerCount(requestedForks, suiteBatches, freeGpuMemory)
+    // minAllocFraction is relative to total device memory. Scale its test default to the
+    // memory actually available, especially when fewer workers share an already busy GPU.
+    val freeMemoryFraction = freeGpuMemory.toDouble / totalGpuMemory
     val (perForkAllocation, perForkMaxAllocation, perForkMinAllocation) =
       perWorkerGpuAllocations(
         workerCount,
         allocationFraction,
         maxAllocationFraction,
-        minAllocationFraction)
+        minAllocationFraction * freeMemoryFraction)
 
+    ConsoleOutput.writeLine(
+      s"GPU memory: ${freeGpuMemory / (1024 * 1024)} MiB free; " +
+        s"1024 MiB reserved, 4096 MiB budget per worker, at most $MAX_WORKER_COUNT workers")
     ConsoleOutput.writeLine(
       s"Running ${discovered.size} suites with at most $workerCount concurrent processes")
     suiteBatches.filter(_.tasks.size > 1).foreach { batch =>
@@ -776,8 +796,15 @@ object ParallelUnitTestRunner {
 
   private[rapids] def effectiveWorkerCount(
       requestedForks: Int,
-      suiteBatches: Seq[SuiteBatch]): Int = {
-    math.min(requestedForks, suiteBatches.size)
+      suiteBatches: Seq[SuiteBatch],
+      freeGpuMemory: Long): Int = {
+    val memoryLimit = math.max(0L, freeGpuMemory - GPU_MEMORY_RESERVE) /
+        GPU_MEMORY_PER_WORKER
+    require(memoryLimit > 0,
+      s"Insufficient free GPU memory for unit tests: $freeGpuMemory bytes; " +
+        "at least 5 GiB is required for one 4 GiB worker budget and 1 GiB reserve")
+    math.min(math.min(requestedForks, MAX_WORKER_COUNT),
+      math.min(suiteBatches.size.toLong, memoryLimit).toInt)
   }
 
   private[rapids] def perWorkerGpuAllocations(
