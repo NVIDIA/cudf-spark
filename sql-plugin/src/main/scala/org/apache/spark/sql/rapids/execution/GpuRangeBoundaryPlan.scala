@@ -36,6 +36,10 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
  * The range exchange exposes this node as a subquery so Spark includes the narrow scan and its
  * normal GPU metrics in the SQL physical plan. The exchange executes it once while constructing
  * its range partitioner; the full-width exchange child remains the source of shuffled rows.
+ *
+ * This is an internal auxiliary node, not a CPU-to-GPU replacement registered with GpuOverrides.
+ * If the auxiliary plan cannot be built, the range exchange samples its original full-width GPU
+ * child instead.
  */
 private[rapids] case class GpuRangeBoundaryExec(child: SparkPlan)
     extends ShimUnaryExecNode with GpuExec {

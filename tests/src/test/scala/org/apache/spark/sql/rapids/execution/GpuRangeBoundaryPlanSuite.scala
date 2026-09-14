@@ -114,6 +114,23 @@ class GpuRangeBoundaryPlanSuite extends SparkQueryCompareTestSuite {
     }
   }
 
+  test("unsupported boundary input plan uses the original GPU input") {
+    withGpuSparkSession({ spark =>
+      val result = spark.range(100)
+        .select(col("id").as("key"), lit("payload").as("payload"))
+        .repartitionByRange(4, col("key"))
+      val exchange = rangeExchange(result)
+
+      // GpuRangeExec is not in the boundary-plan pruning allowlist, so constructing the
+      // auxiliary plan must fail closed and retain the exchange's original GPU input.
+      assert(!exchange.subqueries.exists(_.isInstanceOf[GpuRangeBoundaryExec]))
+      assertAscendingRangePartitioning(result)
+      val rows = result.collect()
+      assert(rows.length === 100)
+      assert(rows.forall(_.getString(1) == "payload"))
+    }, conf)
+  }
+
   test("nondeterministic range keys use the original boundary collection path") {
     withTempPath { path =>
       writeInput(path.getCanonicalPath)
