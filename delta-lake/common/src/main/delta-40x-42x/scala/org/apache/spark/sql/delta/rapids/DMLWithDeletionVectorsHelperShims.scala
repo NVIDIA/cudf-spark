@@ -33,12 +33,11 @@ import org.apache.spark.sql.delta.DeltaParquetFileFormat.{ROW_INDEX_COLUMN_NAME,
 import org.apache.spark.sql.delta.actions.FileAction
 import org.apache.spark.sql.delta.commands.{DMLWithDeletionVectorsHelper, TouchedFileWithDV}
 import org.apache.spark.sql.delta.files.TahoeFileIndex
-import org.apache.spark.sql.delta.stats.StatsCollectionUtils
 import org.apache.spark.sql.execution.datasources.{HadoopFsRelation, LogicalRelationWithTable}
 import org.apache.spark.sql.functions.{col, input_file_name}
 import org.apache.spark.sql.types.StructType
 
-/** Version-specific ports of Delta's DMLWithDeletionVectorsHelper methods used by GPU DML. */
+/** Delta 4.x ports of DMLWithDeletionVectorsHelper methods used by GPU DML. */
 object DMLWithDeletionVectorsHelperShims {
 
   private val GpuFilePathColumn = "__delta_internal_gpu_file_path"
@@ -86,13 +85,36 @@ object DMLWithDeletionVectorsHelperShims {
       .withColumn(GpuFilePathColumn, input_file_name())
   }
 
-  /** Port of Delta's processUnmodifiedData for Delta 4.1 and 4.2. */
+  /**
+   * Delta 4.0 uses the three-argument overload, while Delta 4.1 and 4.2 add the statistics string
+   * prefix length. Resolve the overload at runtime so this class is identical in the Delta 4.0
+   * and 4.2 plugin artifacts that Spark 4.0.1 packages together.
+   */
   def processUnmodifiedData(
       spark: SparkSession,
       touchedFiles: Seq[TouchedFileWithDV],
       txn: GpuOptimisticTransactionBase): (Seq[FileAction], Map[String, Long]) = {
-    val prefixLength = StatsCollectionUtils.getDataSkippingStringPrefixLength(spark, txn.metadata)
-    DMLWithDeletionVectorsHelper.processUnmodifiedData(
-      spark, touchedFiles, txn.snapshot, prefixLength)
+    val helper = DMLWithDeletionVectorsHelper
+    val methods = helper.getClass.getMethods.filter(_.getName == "processUnmodifiedData")
+    methods.find(_.getParameterCount == 3).map { method =>
+      method.invoke(helper, spark, touchedFiles, txn.snapshot)
+    }.orElse {
+      methods.find(_.getParameterCount == 4).map { method =>
+        val statsUtilsClass = Class.forName(
+          "org.apache.spark.sql.delta.stats.StatsCollectionUtils$")
+        val statsUtils = statsUtilsClass.getField("MODULE$").get(null)
+        val prefixLengthMethod = statsUtilsClass.getMethods.find { candidate =>
+          candidate.getName == "getDataSkippingStringPrefixLength" &&
+            candidate.getParameterCount == 2
+        }.getOrElse {
+          throw new IllegalStateException(
+            "Delta StatsCollectionUtils.getDataSkippingStringPrefixLength is unavailable")
+        }
+        val prefixLength = prefixLengthMethod.invoke(statsUtils, spark, txn.metadata)
+        method.invoke(helper, spark, touchedFiles, txn.snapshot, prefixLength)
+      }
+    }.getOrElse {
+      throw new IllegalStateException("Unsupported Delta processUnmodifiedData signature")
+    }.asInstanceOf[(Seq[FileAction], Map[String, Long])]
   }
 }
