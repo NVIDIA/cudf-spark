@@ -36,7 +36,6 @@ import org.apache.spark.SparkContext
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql._
 import org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute
-import org.apache.spark.sql.catalyst.encoders.ExpressionEncoder
 import org.apache.spark.sql.catalyst.expressions.{Alias, And, Attribute, AttributeReference, CaseWhen, Expression, Literal, NamedExpression, PredicateHelper}
 import org.apache.spark.sql.catalyst.expressions.Literal.TrueLiteral
 import org.apache.spark.sql.catalyst.plans.logical.{DeltaMergeAction, DeltaMergeIntoClause, DeltaMergeIntoMatchedClause, DeltaMergeIntoMatchedDeleteClause, DeltaMergeIntoMatchedUpdateClause, DeltaMergeIntoNotMatchedBySourceClause, DeltaMergeIntoNotMatchedBySourceDeleteClause, DeltaMergeIntoNotMatchedBySourceUpdateClause, DeltaMergeIntoNotMatchedClause, DeltaMergeIntoNotMatchedInsertClause, LogicalPlan, Project}
@@ -56,63 +55,8 @@ import org.apache.spark.sql.execution.{SparkPlan, SQLExecution}
 import org.apache.spark.sql.execution.command.LeafRunnableCommand
 import org.apache.spark.sql.execution.datasources.{HadoopFsRelation, LogicalRelation}
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
-import org.apache.spark.sql.expressions.Aggregator
 import org.apache.spark.sql.functions._
-import org.apache.spark.sql.types.{BinaryType, BooleanType, LongType, SQLUserDefinedType,
-  StringType, StructField, StructType, UserDefinedType}
-
-/**
- * Collects touched row indexes directly in Delta's bitmap representation. This lets the merge
- * serialize deletion vectors without an element-by-element conversion from `Roaring64Bitmap`.
- */
-@SQLUserDefinedType(udt = classOf[Delta24xRoaringBitmapUDT])
-case class Delta24xRoaringBitmapWrapper(inner: RoaringBitmapArray) {
-  def serializeToBytes(): Array[Byte] =
-    inner.serializeAsByteArray(RoaringBitmapArrayFormat.Portable)
-}
-
-object Delta24xRoaringBitmapWrapper {
-  def deserializeFromBytes(bytes: Array[Byte]): Delta24xRoaringBitmapWrapper =
-    Delta24xRoaringBitmapWrapper(RoaringBitmapArray.readFrom(bytes))
-}
-
-class Delta24xRoaringBitmapUDT extends UserDefinedType[Delta24xRoaringBitmapWrapper] {
-  override def sqlType: BinaryType.type = BinaryType
-  override def serialize(obj: Delta24xRoaringBitmapWrapper): Any = obj.serializeToBytes()
-  override def deserialize(datum: Any): Delta24xRoaringBitmapWrapper = datum match {
-    case bytes: Array[Byte] => Delta24xRoaringBitmapWrapper.deserializeFromBytes(bytes)
-    case other => throw new IllegalArgumentException(s"Unexpected bitmap value: ${other.getClass}")
-  }
-  override def userClass: Class[Delta24xRoaringBitmapWrapper] =
-    classOf[Delta24xRoaringBitmapWrapper]
-  override def typeName: String = "Delta24xRoaringBitmap"
-}
-
-object Delta24xRoaringBitmapUDAF extends
-    Aggregator[Long, Delta24xRoaringBitmapWrapper, Delta24xRoaringBitmapWrapper] {
-  override def zero: Delta24xRoaringBitmapWrapper =
-    Delta24xRoaringBitmapWrapper(new RoaringBitmapArray())
-
-  override def reduce(
-      bitmap: Delta24xRoaringBitmapWrapper,
-      rowIndex: Long): Delta24xRoaringBitmapWrapper = {
-    bitmap.inner.add(rowIndex)
-    bitmap
-  }
-
-  override def merge(
-      left: Delta24xRoaringBitmapWrapper,
-      right: Delta24xRoaringBitmapWrapper): Delta24xRoaringBitmapWrapper = {
-    val merged = left.inner.copy()
-    merged.merge(right.inner)
-    Delta24xRoaringBitmapWrapper(merged)
-  }
-
-  override def finish(reduction: Delta24xRoaringBitmapWrapper): Delta24xRoaringBitmapWrapper =
-    reduction
-  override def bufferEncoder: Encoder[Delta24xRoaringBitmapWrapper] = ExpressionEncoder()
-  override def outputEncoder: Encoder[Delta24xRoaringBitmapWrapper] = ExpressionEncoder()
-}
+import org.apache.spark.sql.types.{BooleanType, LongType, StringType, StructField, StructType}
 
 /**
  * GPU version of Delta Lake's low shuffle merge implementation.
