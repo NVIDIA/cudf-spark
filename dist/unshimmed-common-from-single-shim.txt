@@ -11,13 +11,6 @@ com/nvidia/spark/rapids/optimizer/SQLOptimizerPlugin*
 com/nvidia/spark/rapids/ShimLoaderTemp*
 com/nvidia/spark/rapids/SparkShims*
 com/nvidia/shaded/spark/com/google/flatbuffers/*.class
-com/nvidia/spark/rapids/iceberg/parquet/converter/FromIcebergShaded*.class
-com/nvidia/spark/rapids/iceberg/parquet/converter/ToIcebergShaded*.class
-com/nvidia/spark/rapids/iceberg/spark/RapidsSparkCatalog.class
-com/nvidia/spark/rapids/iceberg/spark/RapidsSparkSessionCatalog.class
-com/nvidia/spark/rapids/iceberg/spark/source/RapidsSparkTable.class
-org/apache/iceberg/spark/source/GpuBaseReader.class
-org/apache/iceberg/spark/source/GpuSparkPlanningUtil.class
 org/apache/spark/sql/rapids/AdaptiveSparkPlanHelperShim*
 org/apache/spark/sql/rapids/ExecutionPlanCaptureCallback*
 rapids/*.py

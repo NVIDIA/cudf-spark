@@ -37,6 +37,14 @@
         <rapids.shim.jar.phase>package</rapids.shim.jar.phase>
         <rapids.shimplify.skip>false</rapids.shimplify.skip>
         <maven.scaladoc.skip>true</maven.scaladoc.skip>
+        <!--
+        Spark 4.x catalyst class files carry @Deprecated(since = "...")
+        annotations. Reading them under a Java 8 target makes javac emit
+        classfile warnings, which the project's -Werror promotes to an error.
+        Keep source warnings enabled while excluding dependency classfile
+        warnings for the conditional Java helpers in this module.
+        -->
+        <scala.javac.args>-Xlint:all,-serial,-path,-try,-processing,-options,-classfile|-Werror</scala.javac.args>
     </properties>
 
     <dependencies>
