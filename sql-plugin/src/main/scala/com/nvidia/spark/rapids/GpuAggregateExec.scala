@@ -1857,7 +1857,17 @@ class GpuHashAggregateMeta(
     parent: Option[RapidsMeta[_, _, _]],
     rule: DataFromReplacementRule)
   extends GpuBaseAggregateMeta(agg, agg.requiredChildDistributionExpressions,
-    conf, parent, rule)
+    conf, parent, rule) {
+  override def tagPlanForGpu(): Unit = {
+    // Spark implements distinct aggregations by grouping on the distinct input. Keep stages that
+    // group by an ANSI interval on the CPU because interval grouping is not supported.
+    if (agg.groupingExpressions.exists(e =>
+      TypeSig.ansiIntervals.isSupportedByPlugin(e.dataType))) {
+      willNotWorkOnGpu("ANSI interval types in grouping expressions are not supported")
+    }
+    super.tagPlanForGpu()
+  }
+}
 
 class GpuSortAggregateExecMeta(
     override val agg: SortAggregateExec,
