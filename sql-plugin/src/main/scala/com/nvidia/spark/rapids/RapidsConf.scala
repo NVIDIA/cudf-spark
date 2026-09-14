@@ -2887,9 +2887,9 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
 
   val DELTA_LOW_SHUFFLE_MERGE_DEL_VECTOR_BROADCAST_THRESHOLD =
     conf("spark.rapids.sql.delta.lowShuffleMerge.deletionVector.broadcast.threshold")
-      .doc("Currently we need to broadcast deletion vector to all executors to perform low " +
-        "shuffle merge. When we detect the deletion vector broadcast size is larger than this " +
-        "value, we will fallback to normal shuffle merge.")
+      .doc("Low shuffle merge broadcasts touched-row deletion vectors to all executors. When " +
+        "their combined serialized size exceeds this value, the command falls back to normal " +
+        "shuffle merge.")
       .bytesConf(ByteUnit.BYTE)
       .createWithDefault(20 * 1024 * 1024)
 
@@ -2898,8 +2898,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .doc("Option to turn on the low shuffle merge for Delta Lake. Currently there are some " +
       "limitations for this feature: " +
       "1. We only support Delta Lake 2.4. " +
-      s"2. The file scan mode must be set to ${RapidsReaderType.PERFILE} " +
-      "3. The deletion vector size must be smaller than " +
+      "2. The combined serialized size of the touched-row deletion vectors must be smaller than " +
       s"${DELTA_LOW_SHUFFLE_MERGE_DEL_VECTOR_BROADCAST_THRESHOLD.key} ")
     .booleanConf
     .createWithDefault(false)
