@@ -72,9 +72,9 @@ abstract class GpuDeleteCommandBase(
 
   final override def run(sparkSession: SparkSession): Seq[Row] = {
     val deltaLog = gpuDeltaLog.deltaLog
-    recordDeltaOperation(gpuDeltaLog.deltaLog, "delta.dml.delete") {
+    DeltaRuntimeShim.runDeltaOperation(gpuDeltaLog.deltaLog, "delta.dml.delete") {
       gpuDeltaLog.withNewTransaction(catalogTable) { txn =>
-        DeltaLog.assertRemovable(txn.snapshot)
+        DeltaRuntimeShim.assertRemovable(txn.snapshot)
         if (hasBeenExecuted(txn, sparkSession.asInstanceOf[ShimSparkSession])) {
           sendDriverMetrics(sparkSession, metrics)
           return Seq.empty
@@ -87,7 +87,7 @@ abstract class GpuDeleteCommandBase(
           op = DeltaOperations.Delete(condition.toSeq),
           tags = RowTracking.addPreservedRowTrackingTagIfNotSet(txn.snapshot))
 
-        recordDeltaEvent(
+        DeltaRuntimeShim.emitDeltaEvent(
           deltaLog,
           "delta.dml.delete.stats",
           data = deleteMetrics.copy(commitVersion = commitVersion))
