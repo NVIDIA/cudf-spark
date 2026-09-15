@@ -25,7 +25,7 @@ import pytest
 
 from conftest import is_iceberg_rest_catalog, spark_jvm
 from data_gen import *
-from spark_session import is_iceberg_supported_spark, with_cpu_session
+from spark_session import is_iceberg_supported_spark, with_cpu_session, with_gpu_session
 
 iceberg_unsupported_mark = pytest.mark.skipif(
     not is_iceberg_supported_spark(),
@@ -42,6 +42,73 @@ supports_iceberg_row_lineage_inheritance = (
     tuple(int(part) for part in runtime_iceberg_version.split(".")[:2]) >= (1, 10))
 ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON = \
     "Iceberg row lineage inheritance requires iceberg 1.10.0 or later"
+
+# Keep format versions crossed with every existing semantic test parameter.
+_v3_unsupported_mark = pytest.mark.skipif(
+    not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+_v3_mor_fallback_mark = pytest.mark.allow_non_gpu_conditional(
+    True, "WriteDeltaExec", "MergeRowsExec", "BatchScanExec", "ColumnarToRowExec",
+    "ShuffleExchangeExec", "SortExec", "ProjectExec")
+# Row-level COW planning can retain the CPU scan used for file pruning.
+_v3_cow_scan_mark = pytest.mark.allow_non_gpu_conditional(True, "BatchScanExec")
+iceberg_format_versions = [
+    pytest.param("2", id="v2"),
+    pytest.param("3", marks=_v3_unsupported_mark, id="v3")]
+iceberg_read_format_versions = [pytest.param("1", id="v1"), *iceberg_format_versions]
+iceberg_read_enabled_conf = {"spark.rapids.sql.format.iceberg.v3.enabled": "true"}
+iceberg_mor_format_versions = [
+    pytest.param("2", id="v2"),
+    pytest.param("3", marks=[_v3_unsupported_mark, _v3_mor_fallback_mark], id="v3")]
+iceberg_cow_format_versions = [
+    pytest.param("2", id="v2"),
+    pytest.param("3", marks=[_v3_unsupported_mark, _v3_cow_scan_mark], id="v3")]
+
+
+def with_iceberg_format_versions(parameters):
+    """Cross existing parameter rows with v2/v3, preserving collection-time marks."""
+    result = []
+    for parameter in parameters:
+        if hasattr(parameter, "values"):
+            values, marks, case_id = parameter.values, list(parameter.marks), parameter.id
+        else:
+            values = parameter if isinstance(parameter, tuple) else (parameter,)
+            marks, case_id = [], None
+        for version in ("2", "3"):
+            version_marks = list(marks)
+            if version == "3":
+                version_marks.append(_v3_unsupported_mark)
+                if "merge-on-read" in values:
+                    version_marks.append(_v3_mor_fallback_mark)
+                elif "copy-on-write" in values:
+                    version_marks.append(_v3_cow_scan_mark)
+            result.append(pytest.param(
+                version, *values, marks=version_marks,
+                id=f"v{version}-{case_id}" if case_id is not None else None))
+    return result
+
+
+def with_iceberg_dml_session(func, format_version, mode, conf):
+    """Require the current Puffin fallback specifically for v3 MOR writes."""
+    if format_version != "3" or mode != "merge-on-read":
+        return with_gpu_session(func, conf=conf)
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        result = with_gpu_session(func, conf=conf)
+        plans = callback.getResultsWithTimeout(10000)
+        # Spark rewrites insert-only MERGE to append even on a MOR table.
+        assert any(callback.didFallBack(plan, "WriteDeltaExec") or
+                   callback.contains(plan, "GpuAppendDataExec") for plan in plans), \
+            "Expected v3 MOR fallback or GPU append for insert-only MERGE:\n" + \
+            "\n".join(str(plan) for plan in plans)
+        return result
+    finally:
+        callback.endCapture()
+
+
+def iceberg_table_properties_sql(format_version):
+    props = _build_tblprops({'format-version': format_version})
+    return "TBLPROPERTIES (" + ", ".join(f"'{k}' = '{v}'" for k, v in props.items()) + ")"
 
 # iceberg supported types
 iceberg_table_gen = MappingProxyType({
@@ -204,6 +271,7 @@ iceberg_write_enabled_conf = {
     "spark.sql.parquet.int96RebaseModeInWrite": "CORRECTED",
     "spark.rapids.sql.format.iceberg.enabled": "true",
     "spark.rapids.sql.format.iceberg.write.enabled": "true",
+    "spark.rapids.sql.format.iceberg.v3.enabled": "true",
     # WriteDeltaExec is disabled by default as it's experimental, but we need it enabled
     # for merge-on-read (MOR) DML operations (UPDATE/DELETE/MERGE with write.*.mode='merge-on-read')
     "spark.rapids.sql.exec.WriteDeltaExec": "true",
@@ -387,9 +455,12 @@ def assert_iceberg_files_use_codec(spark: SparkSession, table_name: str, expecte
 def create_iceberg_table(table_name: str,
                          partition_col_sql: Optional[str] = None,
                          table_prop: Optional[Dict[str, str]] = None,
-                         df_gen: Optional[Callable[[SparkSession], DataFrame]] = None) -> str:
+                         df_gen: Optional[Callable[[SparkSession], DataFrame]] = None,
+                         format_version: Optional[str] = None) -> str:
     if table_prop is None:
         table_prop = {'format-version':'1'}
+    if format_version is not None:
+        table_prop = {**table_prop, 'format-version': format_version}
     table_prop = _build_tblprops(table_prop)
 
     if df_gen is None:

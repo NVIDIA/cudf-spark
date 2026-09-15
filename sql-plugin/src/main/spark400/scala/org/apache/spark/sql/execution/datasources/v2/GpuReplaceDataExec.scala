@@ -28,13 +28,13 @@ spark-rapids-shim-json-lines ***/
 
 package org.apache.spark.sql.execution.datasources.v2
 
+import com.nvidia.spark.rapids.{GpuDataWriter, GpuDataWriterFactory, GpuWrite}
 import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.GpuWrite
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.GpuProjectingColumnarBatch
 import org.apache.spark.sql.catalyst.util.ReplaceDataProjections
-import org.apache.spark.sql.connector.write.DataWriter
+import org.apache.spark.sql.connector.write.DataWriterFactory
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -63,14 +63,31 @@ case class GpuReplaceDataExec(
 
 case class GpuReplaceDataWritingSparkTask(
     projs: ReplaceDataProjections)
-  extends GpuWritingSparkTask[DataWriter[ColumnarBatch]] {
+  extends GpuWritingSparkTask[GpuDataWriter] {
 
   private lazy val rowProjection = GpuProjectingColumnarBatch(projs.rowProjection)
+  private lazy val metadataProjection = projs.metadataProjection.map(GpuProjectingColumnarBatch(_))
+
+  override protected def createWriter(
+      writerFactory: DataWriterFactory,
+      partitionId: Int,
+      taskId: Long): GpuDataWriter = {
+    writerFactory.asInstanceOf[GpuDataWriterFactory]
+      .createWriter(partitionId, taskId, metadataProjection.map(_.schema).orNull)
+      .asInstanceOf[GpuDataWriter]
+  }
+
   override protected def write(
-      writer: DataWriter[ColumnarBatch],
+      writer: GpuDataWriter,
       batch: ColumnarBatch): Unit = {
     withResource(rowProjection.project(batch)) { projected =>
-      writer.write(projected)
+      metadataProjection match {
+        case Some(projection) =>
+          withResource(projection.project(batch)) { metadata =>
+            writer.write(metadata, projected)
+          }
+        case None => writer.write(projected)
+      }
     }
   }
 }

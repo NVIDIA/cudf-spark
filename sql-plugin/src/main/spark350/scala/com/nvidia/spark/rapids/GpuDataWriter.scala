@@ -25,21 +25,17 @@
 {"spark": "358"}
 {"spark": "359"}
 spark-rapids-shim-json-lines ***/
-package com.nvidia.spark.rapids.shims
 
-import ai.rapids.cudf.{ColumnVector => CudfColumnVector, Scalar => CudfScalar}
-import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.GpuColumnVector
+package com.nvidia.spark.rapids
 
-import org.apache.spark.sql.catalyst.util.RowDeltaUtils.INSERT_OPERATION
+import org.apache.spark.sql.connector.write.DataWriter
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
-object DeltaInsertFilter {
-  val reinsertOperation: Option[Int] = None
+trait GpuDataWriter extends DataWriter[ColumnarBatch] {
+  override def write(record: ColumnarBatch): Unit
 
-  def filterInsertRows(batch: ColumnarBatch): CudfColumnVector = {
-    withResource(CudfScalar.fromInt(INSERT_OPERATION)) { s =>
-      batch.column(0).asInstanceOf[GpuColumnVector].getBase.equalTo(s)
-    }
+  def write(metadata: ColumnarBatch, record: ColumnarBatch): Unit = {
+    throw new UnsupportedOperationException(
+      "Writing records with metadata is not supported before Spark 4.0")
   }
 }

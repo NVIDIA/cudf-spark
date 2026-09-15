@@ -18,13 +18,13 @@ from asserts import assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_c
     assert_gpu_fallback_write_sql
 from conftest import is_iceberg_remote_catalog
 from data_gen import *
-from iceberg import (create_iceberg_table, get_full_table_name, iceberg_write_enabled_conf,
-                     iceberg_base_table_cols, iceberg_gens_list, iceberg_nested_write_gens_list,
-                     iceberg_unsupported_mark, merge_partition_transforms_distributed,
-                     supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON,
-                     supports_iceberg_row_lineage_inheritance,
-                     ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON,
-                     row_lineage_df, rapids_reader_types)
+from iceberg import (
+    iceberg_cow_format_versions, iceberg_mor_format_versions, with_iceberg_dml_session,
+    with_iceberg_format_versions, create_iceberg_table, get_full_table_name,
+    iceberg_write_enabled_conf, iceberg_base_table_cols, iceberg_gens_list,
+    iceberg_nested_write_gens_list, iceberg_unsupported_mark, merge_partition_transforms_distributed,
+    supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON, supports_iceberg_row_lineage_inheritance,
+    ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, row_lineage_df, rapids_reader_types)
 from marks import allow_non_gpu, allow_non_gpu_conditional, iceberg, ignore_order, datagen_overrides
 from spark_session import is_spark_400_or_later, with_gpu_session, with_cpu_session
 
@@ -32,6 +32,9 @@ pytestmark = iceberg_unsupported_mark
 
 # Base configuration for Iceberg MERGE tests
 iceberg_merge_enabled_conf = copy_and_update(iceberg_write_enabled_conf, {})
+iceberg_merge_v3_enabled_conf = copy_and_update(
+    iceberg_merge_enabled_conf,
+    {"spark.rapids.sql.format.iceberg.v3.enabled": "true"})
 
 def create_iceberg_table_with_merge_data(
         table_name: str,
@@ -41,7 +44,7 @@ def create_iceberg_table_with_merge_data(
         seed=None,
         merge_mode='copy-on-write',
         iceberg_base_table_cols=iceberg_base_table_cols,
-        iceberg_gens_list=iceberg_gens_list):
+        iceberg_gens_list=iceberg_gens_list, format_version="2"):
     """
     Helper function to create and populate an Iceberg table for MERGE tests.
     
@@ -55,7 +58,7 @@ def create_iceberg_table_with_merge_data(
         merge_mode: Merge mode - 'copy-on-write' or 'merge-on-read'
     """
     base_props = {
-        'format-version': '2',
+        'format-version': format_version,
         'write.merge.mode': merge_mode,
         # See https://github.com/NVIDIA/spark-rapids/issues/13698
         'read.parquet.vectorization.enabled': 'false'
@@ -95,6 +98,23 @@ def create_iceberg_table_with_merge_data(
     with_cpu_session(insert_data)
 
 
+def _assert_gpu_and_cpu_merge_writes_are_equal(
+        cpu_table_name, gpu_table_name, merge_func, read_func, conf,
+        format_version="2", merge_mode="copy-on-write"):
+    def run_merge(spark, table_name):
+        merge_func(spark, table_name)
+
+    with_cpu_session(lambda spark: run_merge(spark, cpu_table_name), conf=conf)
+    with_iceberg_dml_session(
+        lambda spark: run_merge(spark, gpu_table_name), format_version, merge_mode, conf=conf)
+
+    cpu_data = with_cpu_session(
+        lambda spark: read_func(spark, cpu_table_name).collect(), conf=conf)
+    gpu_data = with_cpu_session(
+        lambda spark: read_func(spark, gpu_table_name).collect(), conf=conf)
+    assert_equal_with_local_sort(cpu_data, gpu_data)
+
+
 def do_merge_test(
         spark_tmp_table_factory,
         merge_sql_func,
@@ -102,7 +122,7 @@ def do_merge_test(
         table_properties=None,
         merge_mode='copy-on-write',
         iceberg_base_table_cols=iceberg_base_table_cols,
-        iceberg_gens_list=iceberg_gens_list):
+        iceberg_gens_list=iceberg_gens_list, format_version="2"):
     """
     Helper function to test MERGE operations by comparing CPU and GPU results.
     
@@ -122,34 +142,47 @@ def do_merge_test(
     source_table = f"{base_table_name}_source"
     
     # Create identical target tables for CPU and GPU (using runtime seed)
-    create_iceberg_table_with_merge_data(cpu_target_table, partition_col_sql, table_properties, merge_mode=merge_mode, iceberg_base_table_cols=iceberg_base_table_cols, iceberg_gens_list=iceberg_gens_list)
-    create_iceberg_table_with_merge_data(gpu_target_table, partition_col_sql, table_properties, merge_mode=merge_mode, iceberg_base_table_cols=iceberg_base_table_cols, iceberg_gens_list=iceberg_gens_list)
+    create_iceberg_table_with_merge_data(
+        cpu_target_table,
+        partition_col_sql,
+        table_properties,
+        merge_mode=merge_mode,
+        iceberg_base_table_cols=iceberg_base_table_cols,
+        iceberg_gens_list=iceberg_gens_list,
+        format_version=format_version)
+    create_iceberg_table_with_merge_data(
+        gpu_target_table,
+        partition_col_sql,
+        table_properties,
+        merge_mode=merge_mode,
+        iceberg_base_table_cols=iceberg_base_table_cols,
+        iceberg_gens_list=iceberg_gens_list,
+        format_version=format_version)
     
     # Create source table with different seed and distinct keys to satisfy MERGE cardinality constraint
     # (each target row matches at most one source row)
     # Using a fixed different seed ensures source data differs from target data
-    create_iceberg_table_with_merge_data(source_table, partition_col_sql, table_properties,
-                                        ensure_distinct_key=True, seed=42, merge_mode=merge_mode, iceberg_base_table_cols=iceberg_base_table_cols, iceberg_gens_list=iceberg_gens_list)
+    create_iceberg_table_with_merge_data(
+        source_table,
+        partition_col_sql,
+        table_properties,
+        ensure_distinct_key=True,
+        seed=42,
+        merge_mode=merge_mode,
+        iceberg_base_table_cols=iceberg_base_table_cols,
+        iceberg_gens_list=iceberg_gens_list,
+        format_version=format_version)
     
-    # Execute MERGE on GPU
-    def do_gpu_merge(spark):
-        merge_sql_func(spark, gpu_target_table, source_table)
-    
-    with_gpu_session(do_gpu_merge, conf=iceberg_merge_enabled_conf)
-
-    # Execute MERGE on CPU
-    def do_cpu_merge(spark):
-        merge_sql_func(spark, cpu_target_table, source_table)
-
-    with_cpu_session(do_cpu_merge)
-    
-    # Compare results
-    cpu_data = with_cpu_session(lambda spark: spark.table(cpu_target_table).collect())
-    gpu_data = with_cpu_session(lambda spark: spark.table(gpu_target_table).collect())
-    assert_equal_with_local_sort(cpu_data, gpu_data)
+    _assert_gpu_and_cpu_merge_writes_are_equal(
+        cpu_target_table,
+        gpu_target_table,
+        lambda spark, target: merge_sql_func(spark, target, source_table),
+        lambda spark, target: spark.table(target),
+        iceberg_merge_enabled_conf, format_version=format_version, merge_mode=merge_mode)
 
 
-def _do_test_iceberg_merge(spark_tmp_table_factory, partition_col_sql, merge_mode, table_properties=None):
+def _do_test_iceberg_merge(
+        spark_tmp_table_factory, partition_col_sql, merge_mode, table_properties=None, format_version="2"):
     """Helper function for MERGE tests."""
     merge_sql = """
         MERGE INTO {target} t USING {source} s ON t._c0 = s._c0
@@ -161,7 +194,8 @@ def _do_test_iceberg_merge(spark_tmp_table_factory, partition_col_sql, merge_mod
         lambda spark, target, source: spark.sql(merge_sql.format(target=target, source=source)),
         partition_col_sql=partition_col_sql,
         table_properties=table_properties,
-        merge_mode=merge_mode
+        merge_mode=merge_mode,
+        format_version=format_version
     )
 
 
@@ -169,15 +203,17 @@ def _do_test_iceberg_merge(spark_tmp_table_factory, partition_col_sql, merge_mod
 @iceberg
 @datagen_overrides(seed=0, reason='https://github.com/NVIDIA/spark-rapids-jni/issues/4016')
 @ignore_order(local=True)
-@pytest.mark.parametrize('merge_mode', ['copy-on-write', 'merge-on-read'])
+@pytest.mark.parametrize(
+    'format_version,merge_mode',
+    with_iceberg_format_versions(['copy-on-write', 'merge-on-read']))
 @pytest.mark.parametrize('partition_col_sql', [
     None,
     pytest.param("year(_c9)", id="year(timestamp_col)"),
 ])
 @allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
-def test_iceberg_merge(spark_tmp_table_factory, partition_col_sql, merge_mode):
+def test_iceberg_merge(format_version, spark_tmp_table_factory, partition_col_sql, merge_mode):
     """Basic partition test - runs for all catalogs including remote."""
-    _do_test_iceberg_merge(spark_tmp_table_factory, partition_col_sql, merge_mode)
+    _do_test_iceberg_merge(spark_tmp_table_factory, partition_col_sql, merge_mode, format_version=format_version)
 
 
 @allow_non_gpu(
@@ -224,7 +260,7 @@ def test_iceberg_merge_v3_table_fallback(
         lambda spark, table_name: spark.sql(f"SELECT * FROM {table_name}"),
         target_base_name,
         [fallback_exec],
-        conf=iceberg_merge_enabled_conf)
+        conf=copy_and_update(iceberg_merge_enabled_conf, {"spark.rapids.sql.format.iceberg.v3.enabled": "false"}))
 
 
 @iceberg
@@ -264,26 +300,73 @@ def test_iceberg_v3_row_lineage_merge_update_insert(
         })
 
 
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.skipif(
+    not supports_iceberg_row_lineage_inheritance,
+    reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
+def test_iceberg_v3_row_lineage_gpu_merge_update_insert(spark_tmp_table_factory):
+    base_table = get_full_table_name(spark_tmp_table_factory)
+    cpu_table = f"{base_table}_cpu"
+    gpu_table = f"{base_table}_gpu"
+    source_view = spark_tmp_table_factory.get()
+
+    def setup_iceberg_tables(spark):
+        for table in [cpu_table, gpu_table]:
+            spark.sql(
+                f"CREATE TABLE {table} (id BIGINT, v BIGINT) USING ICEBERG "
+                "TBLPROPERTIES ('format-version' = '3', "
+                "'write.merge.mode' = 'copy-on-write')")
+            spark.sql(f"ALTER TABLE {table} WRITE ORDERED BY id").collect()
+            row_lineage_df(spark, with_value=True).writeTo(table).append()
+
+    def merge(spark, table):
+        row_lineage_df(
+            spark,
+            start=DEFAULT_DATA_GEN_LENGTH // 2,
+            with_value=True,
+            value_start=DEFAULT_DATA_GEN_LENGTH).createOrReplaceTempView(source_view)
+        spark.sql(
+            f"MERGE INTO {table} t USING {source_view} s ON t.id = s.id "
+            "WHEN MATCHED THEN UPDATE SET v = s.v "
+            "WHEN NOT MATCHED THEN INSERT (id, v) VALUES (s.id, s.v)").collect()
+
+    with_cpu_session(setup_iceberg_tables)
+    conf = copy_and_update(
+        iceberg_merge_v3_enabled_conf, {"spark.sql.shuffle.partitions": "1"})
+    _assert_gpu_and_cpu_merge_writes_are_equal(
+        cpu_table,
+        gpu_table,
+        merge,
+        lambda spark, table: spark.sql(
+            f"SELECT id, v, _row_id, _last_updated_sequence_number FROM {table}"),
+        conf)
+
+
 @allow_non_gpu("MergeRows$Keep", "MergeRows$Discard", "MergeRows$Split")
 @iceberg
 @datagen_overrides(seed=0, reason='https://github.com/NVIDIA/spark-rapids-jni/issues/4016')
 @ignore_order(local=True)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
-@pytest.mark.parametrize("partition_col_sql,merge_mode", merge_partition_transforms_distributed)
+@pytest.mark.parametrize(
+    'format_version,partition_col_sql,merge_mode',
+    with_iceberg_format_versions(merge_partition_transforms_distributed))
 @allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
-def test_iceberg_merge_full_coverage(spark_tmp_table_factory, partition_col_sql, merge_mode):
+def test_iceberg_merge_full_coverage(format_version, spark_tmp_table_factory, partition_col_sql, merge_mode):
     """Sanity-check MERGE across the two write modes against partition transforms
     distinct from those picked by other DML ops. The 26-transform partition-writer
     coverage anchor lives in
     iceberg_append_test.py::test_insert_into_partitioned_table_full_coverage."""
-    _do_test_iceberg_merge(spark_tmp_table_factory, partition_col_sql, merge_mode)
+    _do_test_iceberg_merge(spark_tmp_table_factory, partition_col_sql, merge_mode, format_version=format_version)
 
 
 @allow_non_gpu("MergeRows$Keep", "MergeRows$Discard", "MergeRows$Split")
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
-@pytest.mark.parametrize('merge_mode', ['copy-on-write', 'merge-on-read'])
+@pytest.mark.parametrize(
+    'format_version,merge_mode',
+    with_iceberg_format_versions(['copy-on-write', 'merge-on-read']))
 @pytest.mark.parametrize('partition_col_sql', [
     pytest.param(None, id="unpartitioned"),
     pytest.param("year(_c9)", id="year(timestamp_col)"),
@@ -333,20 +416,22 @@ def test_iceberg_merge_full_coverage(spark_tmp_table_factory, partition_col_sql,
         id="conditional_not_matched_by_source"),
 ])
 @allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
-def test_iceberg_merge_additional_patterns(spark_tmp_table_factory, partition_col_sql, merge_sql, merge_mode):
+def test_iceberg_merge_additional_patterns(
+        format_version, spark_tmp_table_factory, partition_col_sql, merge_sql, merge_mode):
     """Test additional MERGE patterns (conditional updates, deletes, not matched by source) on Iceberg tables."""
     do_merge_test(
         spark_tmp_table_factory,
         lambda spark, target, source: spark.sql(merge_sql.format(target=target, source=source)),
         partition_col_sql=partition_col_sql,
-        merge_mode=merge_mode
+        merge_mode=merge_mode,
+        format_version=format_version
     )
 
 @allow_non_gpu("MergeRows$Keep", "MergeRows$Discard", "MergeRows$Split")
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
-@pytest.mark.parametrize('merge_mode', ['copy-on-write'])
+@pytest.mark.parametrize('format_version,merge_mode', with_iceberg_format_versions(['copy-on-write']))
 @pytest.mark.parametrize('partition_col_sql', [pytest.param("year(_c9)", id="year(timestamp_col)")])
 @pytest.mark.parametrize('merge_sql', [
     pytest.param(
@@ -359,24 +444,26 @@ def test_iceberg_merge_additional_patterns(spark_tmp_table_factory, partition_co
         id="multiple_matched_clauses"),
 ])
 @allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
-def test_iceberg_merge_additional_patterns_bug(spark_tmp_table_factory, partition_col_sql, merge_sql, merge_mode):
+def test_iceberg_merge_additional_patterns_bug(
+        format_version, spark_tmp_table_factory, partition_col_sql, merge_sql, merge_mode):
     """Test additional MERGE patterns (conditional updates, deletes, not matched by source) on Iceberg tables."""
     do_merge_test(
         spark_tmp_table_factory,
         lambda spark, target, source: spark.sql(merge_sql.format(target=target, source=source)),
         partition_col_sql=partition_col_sql,
-        merge_mode=merge_mode
+        merge_mode=merge_mode,
+        format_version=format_version
     )
 
 @allow_non_gpu("ReplaceDataExec", "WriteDeltaExec", "MergeRowsExec", "BatchScanExec", "ColumnarToRowExec", "ShuffleExchangeExec", "SortExec", "ProjectExec")
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
-@pytest.mark.parametrize('merge_mode,fallback_exec', [
+@pytest.mark.parametrize('format_version,merge_mode,fallback_exec', with_iceberg_format_versions([
     pytest.param('copy-on-write', 'ReplaceDataExec', id='cow'),
     pytest.param('merge-on-read', 'WriteDeltaExec', id='mor')
-])
-def test_iceberg_merge_fallback_write_disabled(spark_tmp_table_factory, merge_mode, fallback_exec):
+]))
+def test_iceberg_merge_fallback_write_disabled(format_version, spark_tmp_table_factory, merge_mode, fallback_exec):
     """Test MERGE falls back when Iceberg write is disabled"""
     base_table_name = get_full_table_name(spark_tmp_table_factory)
     
@@ -385,10 +472,15 @@ def test_iceberg_merge_fallback_write_disabled(spark_tmp_table_factory, merge_mo
     gpu_target_table = f'{base_table_name}_target_gpu'
     source_table = f'{base_table_name}_source'
     
-    create_iceberg_table_with_merge_data(cpu_target_table, merge_mode=merge_mode)
-    create_iceberg_table_with_merge_data(gpu_target_table, merge_mode=merge_mode)
+    create_iceberg_table_with_merge_data(cpu_target_table, merge_mode=merge_mode, format_version=format_version)
+    create_iceberg_table_with_merge_data(gpu_target_table, merge_mode=merge_mode, format_version=format_version)
     # Source table needs distinct keys for MERGE cardinality constraint, with different seed
-    create_iceberg_table_with_merge_data(source_table, ensure_distinct_key=True, seed=42, merge_mode=merge_mode)
+    create_iceberg_table_with_merge_data(
+        source_table,
+        ensure_distinct_key=True,
+        seed=42,
+        merge_mode=merge_mode,
+        format_version=format_version)
     
     # Phase 2: MERGE operation (to be tested with fallback)
     def write_func(spark, target_table_name):
@@ -419,12 +511,13 @@ def test_iceberg_merge_fallback_write_disabled(spark_tmp_table_factory, merge_mo
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
-@pytest.mark.parametrize('merge_mode,fallback_exec', [
+@pytest.mark.parametrize('format_version,merge_mode,fallback_exec', with_iceberg_format_versions([
     pytest.param('copy-on-write', 'ReplaceDataExec', id='cow'),
     pytest.param('merge-on-read', 'WriteDeltaExec', id='mor')
-])
+]))
 @pytest.mark.parametrize("file_format", ["orc", "avro"], ids=lambda x: f"file_format={x}")
-def test_iceberg_merge_fallback_unsupported_file_format(spark_tmp_table_factory, file_format, merge_mode, fallback_exec):
+def test_iceberg_merge_fallback_unsupported_file_format(
+        format_version, spark_tmp_table_factory, file_format, merge_mode, fallback_exec):
     """Test MERGE falls back with unsupported file formats (ORC, Avro)"""
     base_table_name = get_full_table_name(spark_tmp_table_factory)
     
@@ -435,7 +528,7 @@ def test_iceberg_merge_fallback_unsupported_file_format(spark_tmp_table_factory,
     def init_table(table_name, ensure_distinct_key=False):
         # Create table with parquet, insert data, then change format
         table_props = {
-            'format-version': '2',
+            'format-version': format_version,
             'write.merge.mode': merge_mode,
             'write.format.default': 'parquet'
         }
@@ -508,9 +601,11 @@ def test_iceberg_merge_fallback_unsupported_file_format(spark_tmp_table_factory,
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
-@pytest.mark.parametrize('merge_mode', ['copy-on-write', 'merge-on-read'])
+@pytest.mark.parametrize(
+    'format_version,merge_mode',
+    with_iceberg_format_versions(['copy-on-write', 'merge-on-read']))
 @allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
-def test_iceberg_merge_nested_types(spark_tmp_table_factory, merge_mode):
+def test_iceberg_merge_nested_types(format_version, spark_tmp_table_factory, merge_mode):
     """Test MERGE on tables containing supported nested types."""
     nested_cols = [f"_c{idx}" for idx, _ in enumerate(iceberg_nested_write_gens_list)]
     merge_sql = """
@@ -523,7 +618,8 @@ def test_iceberg_merge_nested_types(spark_tmp_table_factory, merge_mode):
         lambda spark, target, source: spark.sql(merge_sql.format(target=target, source=source)),
         merge_mode=merge_mode,
         iceberg_base_table_cols=nested_cols,
-        iceberg_gens_list=iceberg_nested_write_gens_list
+        iceberg_gens_list=iceberg_nested_write_gens_list,
+        format_version=format_version
     )
 
 
@@ -531,11 +627,12 @@ def test_iceberg_merge_nested_types(spark_tmp_table_factory, merge_mode):
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
-@pytest.mark.parametrize('merge_mode,fallback_exec', [
+@pytest.mark.parametrize('format_version,merge_mode,fallback_exec', with_iceberg_format_versions([
     pytest.param('copy-on-write', 'ReplaceDataExec', id='cow'),
     pytest.param('merge-on-read', 'WriteDeltaExec', id='mor')
-])
-def test_iceberg_merge_fallback_iceberg_disabled(spark_tmp_table_factory, merge_mode, fallback_exec):
+]))
+def test_iceberg_merge_fallback_iceberg_disabled(
+        format_version, spark_tmp_table_factory, merge_mode, fallback_exec):
     """Test MERGE falls back when Iceberg is completely disabled"""
     base_table_name = get_full_table_name(spark_tmp_table_factory)
     
@@ -543,10 +640,15 @@ def test_iceberg_merge_fallback_iceberg_disabled(spark_tmp_table_factory, merge_
     gpu_target_table = f'{base_table_name}_target_gpu'
     source_table = f'{base_table_name}_source'
     
-    create_iceberg_table_with_merge_data(cpu_target_table, merge_mode=merge_mode)
-    create_iceberg_table_with_merge_data(gpu_target_table, merge_mode=merge_mode)
+    create_iceberg_table_with_merge_data(cpu_target_table, merge_mode=merge_mode, format_version=format_version)
+    create_iceberg_table_with_merge_data(gpu_target_table, merge_mode=merge_mode, format_version=format_version)
     # Source table needs distinct keys for MERGE cardinality constraint, with different seed
-    create_iceberg_table_with_merge_data(source_table, ensure_distinct_key=True, seed=42, merge_mode=merge_mode)
+    create_iceberg_table_with_merge_data(
+        source_table,
+        ensure_distinct_key=True,
+        seed=42,
+        merge_mode=merge_mode,
+        format_version=format_version)
     
     def write_func(spark, target_table_name):
         spark.sql(f"""
@@ -574,7 +676,8 @@ def test_iceberg_merge_fallback_iceberg_disabled(spark_tmp_table_factory, merge_
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
-def test_iceberg_merge_mor_fallback_writedelta_disabled(spark_tmp_table_factory):
+@pytest.mark.parametrize("format_version", iceberg_mor_format_versions)
+def test_iceberg_merge_mor_fallback_writedelta_disabled(format_version, spark_tmp_table_factory):
     """Test merge-on-read MERGE falls back when WriteDeltaExec is disabled
     
     This test verifies that when WriteDeltaExec is explicitly disabled (it's disabled by default
@@ -586,10 +689,21 @@ def test_iceberg_merge_mor_fallback_writedelta_disabled(spark_tmp_table_factory)
     gpu_target_table = f'{base_table_name}_target_gpu'
     source_table = f'{base_table_name}_source'
     
-    create_iceberg_table_with_merge_data(cpu_target_table, merge_mode='merge-on-read')
-    create_iceberg_table_with_merge_data(gpu_target_table, merge_mode='merge-on-read')
+    create_iceberg_table_with_merge_data(
+        cpu_target_table,
+        merge_mode='merge-on-read',
+        format_version=format_version)
+    create_iceberg_table_with_merge_data(
+        gpu_target_table,
+        merge_mode='merge-on-read',
+        format_version=format_version)
     # Source table needs distinct keys for MERGE cardinality constraint, with different seed
-    create_iceberg_table_with_merge_data(source_table, ensure_distinct_key=True, seed=42, merge_mode='merge-on-read')
+    create_iceberg_table_with_merge_data(
+        source_table,
+        ensure_distinct_key=True,
+        seed=42,
+        merge_mode='merge-on-read',
+        format_version=format_version)
     
     def write_func(spark, target_table_name):
         spark.sql(f"""
@@ -622,12 +736,13 @@ def test_iceberg_merge_mor_fallback_writedelta_disabled(spark_tmp_table_factory)
     pytest.param("year(_c9)", id="year_partition"),
 ])
 @allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
-def test_merge_aqe(spark_tmp_table_factory, partition_col_sql):
+@pytest.mark.parametrize("format_version", iceberg_cow_format_versions)
+def test_merge_aqe(format_version, spark_tmp_table_factory, partition_col_sql):
     """
     Test MERGE INTO with AQE enabled.
     """
     table_prop = {
-        'format-version': '2',
+        'format-version': format_version,
     }
 
     # Configuration with AQE enabled
@@ -658,7 +773,11 @@ def test_merge_aqe(spark_tmp_table_factory, partition_col_sql):
             WHEN NOT MATCHED THEN INSERT *
         """)
 
-    with_gpu_session(lambda spark: merge_table(spark, gpu_target), conf=conf)
+    with_iceberg_dml_session(
+        lambda spark: merge_table(spark, gpu_target),
+        format_version,
+        "copy-on-write",
+        conf=conf)
     with_cpu_session(lambda spark: merge_table(spark, cpu_target), conf=conf)
 
     cpu_data = with_cpu_session(lambda spark: spark.table(cpu_target).collect())
@@ -669,9 +788,11 @@ def test_merge_aqe(spark_tmp_table_factory, partition_col_sql):
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
-@pytest.mark.parametrize('merge_mode', ['copy-on-write', 'merge-on-read'])
+@pytest.mark.parametrize(
+    'format_version,merge_mode',
+    with_iceberg_format_versions(['copy-on-write', 'merge-on-read']))
 @allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
-def test_iceberg_merge_after_drop_partition_field(spark_tmp_table_factory, merge_mode):
+def test_iceberg_merge_after_drop_partition_field(format_version, spark_tmp_table_factory, merge_mode):
     """Test MERGE on table after dropping a partition field (void transform).
     
     When a partition field is dropped, Iceberg creates a 'void transform' - 
@@ -688,12 +809,12 @@ def test_iceberg_merge_after_drop_partition_field(spark_tmp_table_factory, merge
     
     # Create partitioned target tables with data - use same seed for both to ensure same data
     create_iceberg_table_with_merge_data(cpu_target_table, partition_col_sql=partition_col_sql, 
-                                         merge_mode=merge_mode, seed=42)
+                                         merge_mode=merge_mode, seed=42, format_version=format_version)
     create_iceberg_table_with_merge_data(gpu_target_table, partition_col_sql=partition_col_sql, 
-                                         merge_mode=merge_mode, seed=42)
+                                         merge_mode=merge_mode, seed=42, format_version=format_version)
     # Source table needs distinct keys for MERGE cardinality constraint, with different seed
     create_iceberg_table_with_merge_data(source_table, partition_col_sql=partition_col_sql,
-                                         ensure_distinct_key=True, seed=43, merge_mode=merge_mode)
+                                         ensure_distinct_key=True, seed=43, merge_mode=merge_mode, format_version=format_version)
     
     # Drop one partition field on target tables and source table (creates void transform)
     def drop_partition_field(spark, table_name):
@@ -713,8 +834,9 @@ def test_iceberg_merge_after_drop_partition_field(spark_tmp_table_factory, merge
             WHEN NOT MATCHED THEN INSERT *
         """)
     
-    with_gpu_session(lambda spark: do_merge(spark, gpu_target_table), 
-                     conf=iceberg_merge_enabled_conf)
+    with_iceberg_dml_session(
+        lambda spark: do_merge(spark, gpu_target_table),
+        format_version, merge_mode, conf=iceberg_merge_enabled_conf)
     with_cpu_session(lambda spark: do_merge(spark, cpu_target_table))
     
     # Compare results
@@ -728,10 +850,11 @@ def test_iceberg_merge_after_drop_partition_field(spark_tmp_table_factory, merge
 @datagen_overrides(seed=0, reason='https://github.com/NVIDIA/spark-rapids-jni/issues/4016')
 @ignore_order(local=True)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
-def test_iceberg_merge_partitioned_fanout_enabled(spark_tmp_table_factory):
+@pytest.mark.parametrize("format_version", iceberg_cow_format_versions)
+def test_iceberg_merge_partitioned_fanout_enabled(format_version, spark_tmp_table_factory):
     # Use bucket(2, ...) to keep partition count low and avoid OOM from Iceberg's FanoutDataWriter.
     _do_test_iceberg_merge(
         spark_tmp_table_factory,
         "bucket(2, _c9)",
         merge_mode='copy-on-write',
-        table_properties={"write.spark.fanout.enabled": "true"})
+        table_properties={"write.spark.fanout.enabled": "true"}, format_version=format_version)
