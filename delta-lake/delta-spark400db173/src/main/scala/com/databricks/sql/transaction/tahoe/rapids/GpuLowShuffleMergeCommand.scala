@@ -617,12 +617,6 @@ class InsertOnlyMergeExecutor(override val context: MergeExecutorContext) extend
  */
 class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extends MergeExecutor {
 
-  private val scanRegistrationIds = new mutable.ArrayBuffer[String]()
-
-  override def close(): Unit = {
-    scanRegistrationIds.foreach(GpuLowShuffleMergeScanRegistry.remove)
-  }
-
   // We over-count numTargetRowsDeleted when there are multiple matches;
   // this is the amount of the overcount, so we can subtract it to get a correct final metric.
   private var multipleMatchDeleteOnlyOvercount: Option[Long] = None
@@ -953,14 +947,13 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
   private def lowShuffleScanRelation(
       relation: HadoopFsRelation,
       dataSchema: StructType): HadoopFsRelation = {
-    val scanId = GpuLowShuffleMergeScanRegistry.register()
-    scanRegistrationIds += scanId
     val fileFormat = relation.fileFormat.asInstanceOf[DeltaParquetFileFormat]
       .copy(optimizationsEnabled = false)
     relation.copy(
       dataSchema = dataSchema,
       fileFormat = fileFormat,
-      options = relation.options + (GpuLowShuffleMergeScanRegistry.OPTION_KEY -> scanId))(
+      options = relation.options +
+        (GpuDeltaParquetFileFormat.LOW_SHUFFLE_MERGE_SCAN_OPTION -> "true"))(
       context.spark)
   }
 

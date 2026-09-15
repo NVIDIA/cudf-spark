@@ -199,6 +199,12 @@ object GpuDeltaParquetFileFormat {
   private[delta] val EDGE_COMPUTED_COLUMN_SKIP_ROW =
     "_databricks_internal_edge_computed_column_skip_row"
 
+  val LOW_SHUFFLE_MERGE_SCAN_OPTION =
+    "spark.rapids.internal.delta.lowShuffleMerge.scan"
+
+  def isLowShuffleMergeScan(options: Map[String, String]): Boolean =
+    options.get(LOW_SHUFFLE_MERGE_SCAN_OPTION).contains("true")
+
   def isDeletionVectorRead(format: DeltaParquetFileFormat): Boolean =
     isDeletionVectorRead(
       format.generateRowIndexFilterId,
@@ -288,7 +294,7 @@ object GpuDeltaParquetFileFormat {
       optimizationsEnabled = fmt.optimizationsEnabled,
       tablePath = fmt.tablePath,
       isCDCRead = fmt.isCDCRead,
-      lowShuffleMergeScan = GpuLowShuffleMergeScanRegistry.contains(relation.options))
+      lowShuffleMergeScan = isLowShuffleMergeScan(relation.options))
   }
 
   private def hasRowIndexFiltersInTahoeFileIndex(relation: HadoopFsRelation): Boolean = {
