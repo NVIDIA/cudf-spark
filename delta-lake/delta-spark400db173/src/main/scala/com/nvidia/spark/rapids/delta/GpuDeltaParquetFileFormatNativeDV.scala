@@ -1107,7 +1107,9 @@ case class GpuDeltaParquetFileFormatNativeDV(
           }
           GpuSemaphore.acquireIfNecessary(TaskContext.get())
           RmmRapidsRetryIterator.withRetryNoSplit {
-            DeletionVector.computeNumDeletedRows(hostDvInfos, maxReadBatchSizeRows)
+            hostDvInfos.map { info =>
+              DeletionVector.computeNumDeletedRows(info, maxReadBatchSizeRows)
+            }.sum
           }
         }
       }
@@ -1297,7 +1299,9 @@ case class GpuDeltaParquetFileFormatNativeDV(
                 bitmap, false, entry.rowGroupOffsets, entry.rowGroupNumRows)
             }.toArray
             RmmRapidsRetryIterator.withRetryNoSplit {
-              DeletionVector.computeNumDeletedRows(dvInfos, maxReadBatchSizeRows)
+              dvInfos.map { info =>
+                DeletionVector.computeNumDeletedRows(info, maxReadBatchSizeRows)
+              }.sum
             }
           }
         }
