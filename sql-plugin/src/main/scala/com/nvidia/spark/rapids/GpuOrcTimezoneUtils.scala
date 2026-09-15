@@ -22,11 +22,31 @@ import java.util.Optional
 import scala.collection.mutable.ArrayBuffer
 
 import ai.rapids.cudf.{ColumnVector, ColumnView, DType, Scalar, Table}
-import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingSeq
 import com.nvidia.spark.rapids.jni.{DateTimeRebase, GpuTimeZoneDB}
 
 object GpuOrcTimezoneUtils {
+
+  /**
+   * Rebase ORC date/time values inside an idempotent retry scope.
+   *
+   * The decoded table is made spillable before entering the retry block. Each attempt
+   * materializes its own table reference, which [[rebaseOrcDateTime]] consumes, so an OOM
+   * during any of the rebase allocations can safely retry without rereading the ORC chunk.
+   */
+  private[rapids] def rebaseOrcDateTimeWithRetry(
+      input: Table,
+      writerTimezone: ZoneId,
+      writerUsedProlepticGregorian: Boolean): Table = {
+    val spillable = closeOnExcept(input) { _ =>
+      SpillableTable(input, SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+    }
+    RmmRapidsRetryIterator.withRetryNoSplit(spillable) { attempt =>
+      rebaseOrcDateTime(
+        attempt.getTable(), writerTimezone, writerUsedProlepticGregorian)
+    }
+  }
 
   /** Resolve an ORC stripe footer timezone once at the metadata boundary. */
   private[rapids] def resolveWriterTimezone(writerTimezone: String): ZoneId = {
@@ -124,11 +144,19 @@ object GpuOrcTimezoneUtils {
     val readerZone = ZoneId.of(readerTz, ZoneId.SHORT_IDS)
     withResource(input) { _ =>
       if (containsOrcTimestamp(input)) {
-        withResource(GpuTimeZoneDB.buildOrcTimezoneContext(writerTz, readerTz)) { tzCtx =>
-          rebaseColumns(input, Some(tzCtx), readerZone, writerUsedProlepticGregorian)
+        val legacyTimestampRebase = if (writerUsedProlepticGregorian) {
+          None
+        } else {
+          Some(new GpuTimestampRebaseUtils.LazyJulianToGregorianMicrosContext(readerZone.getId))
+        }
+        withResource(legacyTimestampRebase) { legacyRebase =>
+          withResource(GpuTimeZoneDB.buildOrcTimezoneContext(writerTz, readerTz)) { tzCtx =>
+            rebaseColumns(input, Some(tzCtx), readerZone, legacyRebase,
+              writerUsedProlepticGregorian)
+          }
         }
       } else {
-        rebaseColumns(input, None, readerZone, writerUsedProlepticGregorian)
+        rebaseColumns(input, None, readerZone, None, writerUsedProlepticGregorian)
       }
     }
   }
@@ -158,6 +186,8 @@ object GpuOrcTimezoneUtils {
       input: Table,
       tzCtx: Option[GpuTimeZoneDB.OrcTimezoneContext],
       readerZone: ZoneId,
+      legacyTimestampRebase: Option[
+        GpuTimestampRebaseUtils.LazyJulianToGregorianMicrosContext],
       writerUsedProlepticGregorian: Boolean): Table = {
     val newColumns = (0 until input.getNumberOfColumns).safeMap { colIdx =>
       val col = input.getColumn(colIdx)
@@ -165,11 +195,12 @@ object GpuOrcTimezoneUtils {
       if (dType == DType.TIMESTAMP_DAYS && !writerUsedProlepticGregorian) {
         DateTimeRebase.rebaseJulianToGregorian(col)
       } else if (dType.hasTimeResolution) {
-        convertOrcTimestamp(col, tzCtx.get, readerZone)
+        convertOrcTimestamp(col, tzCtx.get, readerZone, legacyTimestampRebase)
       } else if (dType == DType.LIST || dType == DType.STRUCT) {
         withResource(new ArrayBuffer[ColumnView]) { toClose =>
           val rebased = rebaseNestedWithWriterTimezone(
-            col, tzCtx, readerZone, writerUsedProlepticGregorian, toClose)
+            col, tzCtx, readerZone, legacyTimestampRebase,
+            writerUsedProlepticGregorian, toClose)
           if (rebased eq col) {
             col.incRefCount()
           } else {
@@ -187,45 +218,70 @@ object GpuOrcTimezoneUtils {
   }
 
   /**
-   * Match the full Spark ORC timestamp path. Apache ORC uses java.util.TimeZone while decoding,
-   * but Spark materializes the resulting java.sql.Timestamp using java.time rules. Those rule
-   * sets can differ for historical and projected timestamps.
+   * Match the full Spark ORC timestamp path after reconstructing the writer-specific ORC epoch.
+   * Legacy-calendar files use Spark's timezone-specific Julian-to-Gregorian rebase map. Files
+   * already written with the proleptic calendar only need the java.util.TimeZone versus java.time
+   * rule correction from the ORC materialization path.
    */
   private def convertOrcTimestamp(
       col: ColumnView,
       tzCtx: GpuTimeZoneDB.OrcTimezoneContext,
-      readerZone: ZoneId): ai.rapids.cudf.ColumnVector = {
+      readerZone: ZoneId,
+      legacyTimestampRebase: Option[
+        GpuTimestampRebaseUtils.LazyJulianToGregorianMicrosContext]): ColumnVector = {
     withResource(GpuTimeZoneDB.convertOrcTimezones(col, tzCtx)) { orcTimestamp =>
-      val firstTransitionUs = tzCtx.getReaderFirstTransitionUs
-      if (firstTransitionUs == Long.MinValue) {
-        orcTimestamp.incRefCount()
-      } else {
-        val utilMicros = withResource(
-            GpuTimeZoneDB.convertOrcFromUtc(orcTimestamp, tzCtx)) { utilUtc =>
-          utilUtc.castTo(DType.INT64)
-        }
-        val ruleCorrection = withResource(utilMicros) { utilMicros =>
-          withResource(GpuTimeZoneDB.fromTimestampToUtcTimestamp(
-              orcTimestamp, readerZone.normalized())) { zoneUtc =>
-            withResource(zoneUtc.castTo(DType.INT64)) { zoneMicros =>
-              zoneMicros.sub(utilMicros)
-            }
+      legacyTimestampRebase match {
+        case Some(rebase) => rebase.rebase(orcTimestamp)
+        case None => correctOrcTimestampRules(orcTimestamp, tzCtx, readerZone)
+      }
+    }
+  }
+
+  /** Correct only the historical java.util.TimeZone/java.time rule difference. */
+  private def correctOrcTimestampRules(
+      orcTimestamp: ColumnVector,
+      tzCtx: GpuTimeZoneDB.OrcTimezoneContext,
+      readerZone: ZoneId): ColumnVector = {
+    val firstTransitionUs = tzCtx.getReaderFirstTransitionUs
+    if (firstTransitionUs == Long.MinValue) {
+      orcTimestamp.incRefCount()
+    } else {
+      withResource(correctOrcTimestampRulesBeforeTransition(
+          orcTimestamp, tzCtx, readerZone)) { correctedTimestamp =>
+        withResource(Scalar.timestampFromLong(
+            DType.TIMESTAMP_MICROSECONDS, firstTransitionUs)) { firstTransition =>
+          withResource(orcTimestamp.lessThan(firstTransition)) { needsCorrection =>
+            needsCorrection.ifElse(correctedTimestamp, orcTimestamp)
           }
         }
-        val correctedTimestamp = withResource(ruleCorrection) { ruleCorrection =>
-          withResource(orcTimestamp.castTo(DType.INT64)) { orcMicros =>
-            withResource(orcMicros.add(ruleCorrection)) { corrected =>
-              corrected.castTo(DType.TIMESTAMP_MICROSECONDS)
-            }
-          }
+      }
+    }
+  }
+
+  private def correctOrcTimestampRulesBeforeTransition(
+      orcTimestamp: ColumnVector,
+      tzCtx: GpuTimeZoneDB.OrcTimezoneContext,
+      readerZone: ZoneId): ColumnVector = {
+    withResource(computeOrcTimestampRuleCorrection(
+        orcTimestamp, tzCtx, readerZone)) { ruleCorrection =>
+      withResource(orcTimestamp.castTo(DType.INT64)) { orcMicros =>
+        withResource(orcMicros.add(ruleCorrection)) { corrected =>
+          corrected.castTo(DType.TIMESTAMP_MICROSECONDS)
         }
-        withResource(correctedTimestamp) { _ =>
-          withResource(Scalar.timestampFromLong(
-              DType.TIMESTAMP_MICROSECONDS, firstTransitionUs)) { firstTransition =>
-            withResource(orcTimestamp.lessThan(firstTransition)) { needsCorrection =>
-              needsCorrection.ifElse(correctedTimestamp, orcTimestamp)
-            }
-          }
+      }
+    }
+  }
+
+  private def computeOrcTimestampRuleCorrection(
+      orcTimestamp: ColumnVector,
+      tzCtx: GpuTimeZoneDB.OrcTimezoneContext,
+      readerZone: ZoneId): ColumnVector = {
+    withResource(GpuTimeZoneDB.convertOrcFromUtc(orcTimestamp, tzCtx)) { utilUtc =>
+      withResource(GpuTimeZoneDB.fromTimestampToUtcTimestamp(
+          orcTimestamp, readerZone.normalized())) { zoneUtc =>
+        withResource(Seq(utilUtc, zoneUtc).safeMap(_.castTo(DType.INT64))) {
+          case Seq(utilMicros, zoneMicros) =>
+            zoneMicros.sub(utilMicros)
         }
       }
     }
@@ -235,6 +291,8 @@ object GpuOrcTimezoneUtils {
       col: ColumnView,
       tzCtx: Option[GpuTimeZoneDB.OrcTimezoneContext],
       readerZone: ZoneId,
+      legacyTimestampRebase: Option[
+        GpuTimestampRebaseUtils.LazyJulianToGregorianMicrosContext],
       writerUsedProlepticGregorian: Boolean,
       toClose: ArrayBuffer[ColumnView]): ColumnView = {
     val addToClose = (v: ColumnView) => { toClose += v; v }
@@ -243,11 +301,12 @@ object GpuOrcTimezoneUtils {
     if (dType == DType.TIMESTAMP_DAYS && !writerUsedProlepticGregorian) {
       DateTimeRebase.rebaseJulianToGregorian(col)
     } else if (dType.hasTimeResolution) {
-      convertOrcTimestamp(col, tzCtx.get, readerZone)
+      convertOrcTimestamp(col, tzCtx.get, readerZone, legacyTimestampRebase)
     } else if (dType == DType.LIST) {
       val child = addToClose(col.getChildColumnView(0))
       val newChild = rebaseNestedWithWriterTimezone(
-        child, tzCtx, readerZone, writerUsedProlepticGregorian, toClose)
+        child, tzCtx, readerZone, legacyTimestampRebase,
+        writerUsedProlepticGregorian, toClose)
       if (newChild ne child) {
         col.replaceListChild(addToClose(newChild))
       } else {
@@ -258,7 +317,8 @@ object GpuOrcTimezoneUtils {
       val newViews = (0 until col.getNumChildren).map { i =>
         val child = addToClose(col.getChildColumnView(i))
         val newChild = rebaseNestedWithWriterTimezone(
-          child, tzCtx, readerZone, writerUsedProlepticGregorian, toClose)
+          child, tzCtx, readerZone, legacyTimestampRebase,
+          writerUsedProlepticGregorian, toClose)
         if (newChild ne child) {
           childChanged = true
           addToClose(newChild)
