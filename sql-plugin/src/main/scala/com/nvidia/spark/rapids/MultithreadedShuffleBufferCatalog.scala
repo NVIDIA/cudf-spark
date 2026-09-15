@@ -566,15 +566,11 @@ class MultiSegmentFileRegion(
         val bytesRead = segment.handle.readAt(handlePosition, readBuffer, 0, toRead)
 
         if (bytesRead > 0) {
-          // Write to target channel
+          // Write once and let Netty retry this FileRegion when the channel is not writable.
           val writeBuffer = ByteBuffer.wrap(readBuffer, 0, bytesRead)
-          var written = 0
-          while (writeBuffer.hasRemaining) {
-            val w = target.write(writeBuffer)
-            if (w < 0) {
-              throw new IOException("Failed to write to target channel")
-            }
-            written += w
+          val written = target.write(writeBuffer)
+          if (written < 0) {
+            throw new IOException("Failed to write to target channel")
           }
 
           bytesTransferredInCurrentSegment += written
