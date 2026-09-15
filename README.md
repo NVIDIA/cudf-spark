@@ -12,8 +12,8 @@ To get started and try the plugin out use the [getting started guide](https://do
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/NVIDIA/cudf-spark)
 
 Note: The NVIDIA cuDF plugin for Apache Spark was formerly known as the RAPIDS Accelerator for
-Apache Spark.  The RAPIDS name will be sunset over time.  GitHub links from `spark-rapids` will
-redirect to `cudf-spark`.  Artifact names will remain the same for now.
+Apache Spark.  The RAPIDS name will be sunset over time.  This repository now uses the
+`cudf-spark` name for its GitHub location and Maven artifacts.
 
 ## Compatibility
 
@@ -77,7 +77,7 @@ GPU-accelerated UDFs) we recommend you declare the distribution artifact as a `p
 ```xml
 <dependency>
     <groupId>com.nvidia</groupId>
-    <artifactId>rapids-4-spark_2.12</artifactId>
+    <artifactId>cudf-spark_2.12</artifactId>
     <version>26.10.0-SNAPSHOT</version>
     <scope>provided</scope>
 </dependency>

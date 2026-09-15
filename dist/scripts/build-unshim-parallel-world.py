@@ -83,7 +83,7 @@ def clean_output(target_dir):
 
 
 def artifact_jar(base_dir, artifact, scala_binary_version, project_version, buildver):
-    artifact_id = "rapids-4-spark-%s_%s" % (artifact, scala_binary_version)
+    artifact_id = "cudf-spark-%s_%s" % (artifact, scala_binary_version)
     classifier = "spark%s" % buildver
     jar_name = "%s-%s-%s.jar" % (artifact_id, project_version, classifier)
     jar_path = base_dir / artifact / "target" / classifier / jar_name
