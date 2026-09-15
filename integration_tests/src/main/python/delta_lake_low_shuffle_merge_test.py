@@ -124,7 +124,7 @@ def test_delta_merge_match_delete_only(spark_tmp_path, spark_tmp_table_factory, 
                                           use_cdf, False, partition_columns, num_slices, False,
                                           delta_merge_enabled_conf)
 
-@allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
+@allow_non_gpu("ColumnarToRowExec", "FileSourceScanExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not supports_delta_low_shuffle_merge(),
@@ -137,7 +137,7 @@ def test_delta_merge_standard_upsert(spark_tmp_path, spark_tmp_table_factory, us
                                         assert_func=_assert_gpu_low_shuffle_merge)
 
 
-@allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
+@allow_non_gpu("ColumnarToRowExec", "FileSourceScanExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not is_databricks_version(17, 3),
@@ -199,7 +199,7 @@ def test_delta_low_shuffle_merge_rejects_effective_duplicate_matches(
         error_message="DELTA_MULTIPLE_SOURCE_ROW_MATCHING_TARGET_ROW_IN_MERGE")
 
 
-@allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
+@allow_non_gpu("ColumnarToRowExec", "FileSourceScanExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not is_databricks_version(17, 3),
@@ -325,7 +325,7 @@ def test_delta_low_shuffle_merge_preserves_row_tracking(spark_tmp_path):
             "{}: inserted row id is not fresh".format(run)
 
 
-@allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
+@allow_non_gpu("ColumnarToRowExec", "FileSourceScanExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not is_databricks_version(17, 3),
