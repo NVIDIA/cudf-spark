@@ -128,6 +128,9 @@ class RootSafeProviderSelectionTest(unittest.TestCase):
         (self.config_dir / "keep-in-spark-shim-dirs.txt").write_text(
             "org/apache/iceberg/*.class\n")
         (self.config_dir / "build" / "iceberg_runtime.py").write_text(
+            "def system_runtime_path(get_property):\n"
+            "    return None\n"
+            "\n"
             "def coordinates(zip_handle, buildver, scala_version, get_property):\n"
             "    return []\n")
         create_artifacts(self.project_dir)

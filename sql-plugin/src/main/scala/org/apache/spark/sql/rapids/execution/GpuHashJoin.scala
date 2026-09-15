@@ -414,7 +414,7 @@ object JoinImpl {
                              compareNullsEqual: Boolean): GatherMapsResult = {
     // The build table is always the right table, so switch the tables passed in
     val arrayRet = JoinPrimitives.sortMergeInnerJoin(rightKeys, leftKeys,
-      false, false, compareNullsEqual)
+      false, compareNullsEqual)
     // Then switch the gather maps result
     GatherMapsResult(arrayRet(1), arrayRet(0))
   }
@@ -430,7 +430,7 @@ object JoinImpl {
                               compareNullsEqual: Boolean): GatherMapsResult = {
     // The build table is always the right table
     val arrayRet = JoinPrimitives.sortMergeInnerJoin(leftKeys, rightKeys,
-      false, false, compareNullsEqual)
+      false, compareNullsEqual)
     GatherMapsResult(arrayRet(0), arrayRet(1))
   }
 

@@ -46,7 +46,7 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.aggregate.{CudfAggregate, GpuAggregateExpression}
 import org.apache.spark.sql.rapids.execution.{GpuBatchSubPartitioner, GpuShuffleMeta, TrampolineUtil}
 import org.apache.spark.sql.types._
-import org.apache.spark.sql.vectorized.ColumnarBatch
+import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
 object AggregateUtils extends Logging {
 
@@ -713,12 +713,28 @@ object GpuAggregateIterator extends Logging {
             val dataTypes = (0 until numCols).map {
               c => batchesToConcat.head.column(c).dataType
             }.toArray
-            withResource(batchesToConcat.safeMap(GpuColumnVector.from)) { tbl =>
-              withResource(cudf.Table.concatenate(tbl: _*)) { concatenated =>
-                val cb = GpuColumnVector.from(concatenated, dataTypes)
-                SpillableColumnarBatch(cb,
-                  SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+            // A batch can legitimately have zero columns but a non-zero row count: an
+            // aggregate with no grouping keys whose aggregate functions were all pruned
+            // away (e.g. `df.agg(sum(x)).count()`, where only the row count is consumed)
+            // produces row-count-only batches. cuDF cannot build a Table from zero
+            // columns, so `GpuColumnVector.from` would throw here. Carry the row count
+            // forward instead. See NVIDIA/spark-rapids#8618 for the aggregate heuristics
+            // that surface this shape.
+            if (dataTypes.nonEmpty) {
+              withResource(batchesToConcat.safeMap(GpuColumnVector.from)) { tbl =>
+                withResource(cudf.Table.concatenate(tbl: _*)) { concatenated =>
+                  val cb = GpuColumnVector.from(concatenated, dataTypes)
+                  SpillableColumnarBatch(cb,
+                    SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+                }
               }
+            } else {
+              // Row-count-only batches: nothing to concatenate on the GPU, so just sum
+              // the row counts and hand back an equivalent zero-column batch.
+              val totalRowCount = batchesToConcat.map(_.numRows()).sum
+              SpillableColumnarBatch(
+                new ColumnarBatch(Array[ColumnVector](), totalRowCount),
+                SpillPriorities.ACTIVE_BATCHING_PRIORITY)
             }
           }
         }
@@ -1308,7 +1324,14 @@ abstract class GpuBaseAggregateMeta[INPUT <: SparkPlan](
 
   override def convertToGpu(): GpuExec = {
     lazy val aggModes = agg.aggregateExpressions.map(_.mode).toSet
-    lazy val canUsePartialSortAgg = aggModes.forall { mode =>
+    // `aggModes` is empty when there are no aggregate functions at all (a dedup, e.g.
+    // `distinct()` / `GROUP BY` with no aggregates). `forall` is vacuously true on an
+    // empty set, so without the `nonEmpty` check this would report that the aggregate is
+    // a safe Partial one. It is not: single pass partial sort agg deliberately emits
+    // non-fully-aggregated output and relies on a downstream final agg to merge it, which
+    // a terminal dedup does not have -- yielding duplicate rows. This mirrors the
+    // `aggregateExpressions.nonEmpty` guard on `allowNonFullyAggregatedOutput` below.
+    lazy val canUsePartialSortAgg = aggModes.nonEmpty && aggModes.forall { mode =>
       mode == Partial || mode == PartialMerge
     } && agg.groupingExpressions.nonEmpty // Don't do this for a reduce...
 
