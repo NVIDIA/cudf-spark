@@ -16,7 +16,7 @@
 
 package org.apache.spark.sql.rapids.execution
 
-import com.nvidia.spark.rapids.{RapidsConf, SparkQueryCompareTestSuite}
+import com.nvidia.spark.rapids.{GpuProjectExec, RapidsConf, SparkQueryCompareTestSuite}
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.DataFrame
@@ -89,6 +89,86 @@ class GpuRangeBoundaryPlanSuite extends SparkQueryCompareTestSuite {
 
         val rows = result.collect().sortBy(_.getLong(0))
         assert(rows.length === 66)
+        assert(rows.forall(_.getString(2) == "payload"))
+        assertAscendingRangePartitioning(result)
+      }, conf)
+    }
+  }
+
+  test("range boundary collection retains computed key dependencies") {
+    withTempPath { path =>
+      writeInput(path.getCanonicalPath)
+
+      withGpuSparkSession({ spark =>
+        val result = spark.read.parquet(path.getCanonicalPath)
+          .select(
+            (col("key") * 2 + col("filter_col")).as("range_key"),
+            col("key"),
+            col("payload"))
+          .repartitionByRange(4, col("range_key"))
+        val exchange = rangeExchange(result)
+        val boundary = exchange.subqueries.collectFirst {
+          case plan: GpuRangeBoundaryExec => plan
+        }.getOrElse(fail(s"GPU range boundary plan not found in:\n$exchange"))
+
+        assert(boundary.output.map(_.name) === Seq("range_key"))
+        val project = boundary.collectFirst {
+          case gpuProject: GpuProjectExec => gpuProject
+        }.getOrElse(fail(s"GPU project not found in:\n$boundary"))
+        assert(project.output.map(_.name) === Seq("range_key"))
+        val scan = boundary.collectFirst {
+          case fileScan: GpuFileSourceScanExec => fileScan
+        }.getOrElse(fail(s"GPU file scan not found in:\n$boundary"))
+        assert(scan.requiredSchema.fieldNames.toSeq === Seq("key", "filter_col"))
+        assert(!scan.requiredSchema.fieldNames.contains("payload"))
+
+        val rows = result.collect()
+        assert(rows.length === 100)
+        assert(rows.forall { row =>
+          row.getLong(0) == row.getLong(1) * 2 + row.getLong(1) % 3 &&
+            row.getString(2) == "payload"
+        })
+        assertAscendingRangePartitioning(result)
+      }, conf)
+    }
+  }
+
+  test("range boundary collection reads a partition-column-only key") {
+    withTempPath { path =>
+      withCpuSparkSession({ spark =>
+        spark.range(100)
+          .select(
+            (col("id") % 5).as("partition_key"),
+            col("id").as("row_id"),
+            lit("payload").as("payload"))
+          .write
+          .partitionBy("partition_key")
+          .parquet(path.getCanonicalPath)
+      }, conf)
+
+      withGpuSparkSession({ spark =>
+        val result = spark.read
+          .schema("row_id LONG, payload STRING, partition_key LONG")
+          .parquet(path.getCanonicalPath)
+          .select(col("partition_key"), col("row_id"), col("payload"))
+          .repartitionByRange(4, col("partition_key"))
+        val exchange = rangeExchange(result)
+        val boundary = exchange.subqueries.collectFirst {
+          case plan: GpuRangeBoundaryExec => plan
+        }.getOrElse(fail(s"GPU range boundary plan not found in:\n$exchange"))
+
+        assert(boundary.output.map(_.name) === Seq("partition_key"))
+        val scan = boundary.collectFirst {
+          case fileScan: GpuFileSourceScanExec => fileScan
+        }.getOrElse(fail(s"GPU file scan not found in:\n$boundary"))
+        assert(scan.requiredSchema.isEmpty)
+        assert(scan.readPartitionSchema.fieldNames.toSeq === Seq("partition_key"))
+        assert(scan.requiredPartitionSchema.map(_.fieldNames.toSeq) ===
+          Some(Seq("partition_key")))
+
+        val rows = result.collect()
+        assert(rows.length === 100)
+        assert(rows.map(_.getLong(1)).toSet === (0L until 100L).toSet)
         assert(rows.forall(_.getString(2) == "payload"))
         assertAscendingRangePartitioning(result)
       }, conf)
