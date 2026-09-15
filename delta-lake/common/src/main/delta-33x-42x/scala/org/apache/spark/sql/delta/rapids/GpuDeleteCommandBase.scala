@@ -27,13 +27,16 @@ import com.nvidia.spark.rapids.delta.GpuDeltaMetricUpdateUDF
 
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
-import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, EqualNullSafe, Expression, If, Literal, Not}
+import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, EqualNullSafe,
+  Expression, If, Literal, Not}
 import org.apache.spark.sql.catalyst.plans.QueryPlan
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
-import org.apache.spark.sql.delta.{DeltaConfigs, DeltaLog, DeltaOperations, DeltaTableUtils, DeltaUDF, NumRecordsStats, OptimisticTransaction, RowTracking}
+import org.apache.spark.sql.delta.{DeltaConfigs, DeltaLog, DeltaOperations, DeltaTableUtils,
+  DeltaUDF, NumRecordsStats, OptimisticTransaction, RowTracking}
 import org.apache.spark.sql.delta.actions.{Action, AddCDCFile, FileAction}
 import org.apache.spark.sql.delta.commands.{DeleteCommandMetrics, DeleteMetric, DeletionVectorUtils}
-import org.apache.spark.sql.delta.commands.DeleteCommand.{rewritingFilesMsg, FINDING_TOUCHED_FILES_MSG}
+import org.apache.spark.sql.delta.commands.DeleteCommand.{rewritingFilesMsg,
+  FINDING_TOUCHED_FILES_MSG}
 import org.apache.spark.sql.delta.commands.MergeIntoCommandBase.totalBytesAndDistinctPartitionValues
 import org.apache.spark.sql.delta.files.TahoeBatchFileIndex
 import org.apache.spark.sql.delta.sources.DeltaSQLConf
@@ -131,10 +134,9 @@ abstract class GpuDeleteCommandBase(
     var numPartitionsAddedTo: Option[Long] = None
     var numDeletedRows: Option[Long] = None
     var numCopiedRows: Option[Long] = None
-    // Deletion vectors are not supported yet.
-    val numDeletionVectorsAdded: Long = 0
-    val numDeletionVectorsRemoved: Long = 0
-    val numDeletionVectorsUpdated: Long = 0
+    var numDeletionVectorsAdded: Long = 0
+    var numDeletionVectorsRemoved: Long = 0
+    var numDeletionVectorsUpdated: Long = 0
 
     val startTime = System.nanoTime()
     val numFilesTotal = txn.snapshot.numOfFiles
@@ -146,6 +148,7 @@ abstract class GpuDeleteCommandBase(
         val allFiles = txn.filterFiles(Nil, keepNumRecords = reportRowLevelMetrics)
 
         numRemovedFiles = allFiles.size
+        numDeletionVectorsRemoved = allFiles.count(_.deletionVector != null)
         scanTimeMs = (System.nanoTime() - startTime) / 1000 / 1000
         val (numBytes, numPartitions) = totalBytesAndDistinctPartitionValues(allFiles)
         numBytesRemoved = numBytes
@@ -182,6 +185,7 @@ abstract class GpuDeleteCommandBase(
           numRemovedFiles = candidateFiles.size
           numBytesRemoved = candidateFiles.map(_.size).sum
           numFilesAfterSkipping = candidateFiles.size
+          numDeletionVectorsRemoved = candidateFiles.count(_.deletionVector != null)
           val (numCandidateBytes, numCandidatePartitions) =
             totalBytesAndDistinctPartitionValues(candidateFiles)
           numBytesAfterSkipping = numCandidateBytes
@@ -219,11 +223,33 @@ abstract class GpuDeleteCommandBase(
             sparkSession, "delete", candidateFiles, deltaLog, deltaLog.dataPath, txn.snapshot)
 
           if (shouldWriteDVs) {
-            // this should be unreachable because we fall back to CPU
-            // if deletion vectors are enabled. The tracking issue for adding deletion vector
-            // support is https://github.com/NVIDIA/spark-rapids/issues/8554
-            throw new IllegalStateException("Deletion vectors are not supported on GPU")
+            val targetDf = DMLWithDeletionVectorsHelperShims
+              .createTargetDfForGpuScanningForMatches(
+                sparkSession, target, fileIndex, candidateFiles.exists(_.deletionVector != null))
+            val touchedFiles = GpuDeletionVectorBitmapGenerator.findTouchedFiles(
+              sparkSession,
+              txn,
+              hasReadableDVs = DeletionVectorUtils.deletionVectorsReadable(txn.snapshot),
+              targetDf,
+              candidateFiles,
+              exprToColumn(cond),
+              nameToAddFileMap,
+              operationName = "DELETE")
 
+            if (touchedFiles.nonEmpty) {
+              val (actions, metricMap) = processUnmodifiedData(
+                sparkSession,
+                touchedFiles,
+                txn)
+              metrics("numDeletedRows").set(metricMap("numModifiedRows"))
+              numDeletionVectorsAdded = metricMap("numDeletionVectorsAdded")
+              numDeletionVectorsRemoved = metricMap("numDeletionVectorsRemoved")
+              numDeletionVectorsUpdated = metricMap("numDeletionVectorsUpdated")
+              numRemovedFiles = metricMap("numRemovedFiles")
+              actions
+            } else {
+              Nil
+            }
           } else {
             // Keep everything from the resolved target except a new TahoeFileIndex
             // that only involves the affected files instead of all files.
@@ -291,6 +317,7 @@ abstract class GpuDeleteCommandBase(
               numDeletedRows = Some(metrics("numDeletedRows").value)
               numCopiedRows = Some(metrics("numTouchedRows").value -
                 metrics("numDeletedRows").value)
+              numDeletionVectorsRemoved = removedFiles.count(_.deletionVector != null)
 
               val operationTimestamp = System.currentTimeMillis()
               removeFilesFromPaths(deltaLog, nameToAddFileMap, filesToRewrite,
