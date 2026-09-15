@@ -114,6 +114,7 @@ ProjectExec|Executing projection operation on columnar batch
 Columnar batch serialize row only|Serializing row-only batch (no GPU data)
 disk spill|Spilling data from host memory to disk
 Async Shuffle Buffer|Asynchronous shuffle buffering operation
+Compile AST JIT|Compiling an AST expression for JIT evaluation
 CSV decode|Decoding CSV data
 get batch|Getting join batch
 Spark Task|Spark task execution range for stage and task tracking
@@ -186,6 +187,7 @@ GpuGenerateExec|Executing generate operation on GPU
 Join gather|Gathering join results
 parquet get blocks with filter|Retrieving Parquet blocks after applying filters
 dynamic sort heuristic|Applying dynamic sort heuristic for aggregation
+Project AST JIT|Applying JIT-compiled AST projection to batch
 shuffle concat load batch|Concatenating and loading batch in shuffle operation
 parquet read footer bytes|Reading raw footer bytes from Parquet file
 spill batch|Spilling join batch

@@ -185,13 +185,13 @@ abstract class GpuBroadcastHashJoinExecBase(
         // Match GpuProjectExec's tiered binding so build-side extraction has the same
         // splitting and retry behavior as a normal project.
         GpuBindReferences.bindGpuReferencesTiered(
-          project.projectList, project.child.output, conf, allMetrics)
+          project.projectList, project.child.output, conf, allMetrics,
+          enableAstJit = RapidsConf.ENABLE_PROJECT_AST_JIT.get(conf))
       }
       Some((batch: ColumnarBatch) => boundProjects.foldLeft(batch) {
         case (currentBatch, boundProject) =>
-          val spillableBatch = SpillableColumnarBatch(
-            currentBatch, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
-          boundProject.projectAndCloseWithRetrySingleBatch(spillableBatch)
+          boundProject.projectAndCloseWithRetrySingleBatch(
+            SpillableColumnarBatch(currentBatch, SpillPriorities.ACTIVE_ON_DECK_PRIORITY))
       })
     } else {
       None
