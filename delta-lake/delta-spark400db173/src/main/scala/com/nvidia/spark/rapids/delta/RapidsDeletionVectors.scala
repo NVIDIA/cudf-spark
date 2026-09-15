@@ -50,7 +50,7 @@ object RapidsDeletionVectors extends Logging {
   private val MISSING_ROW_INDEX_FILTER_MESSAGE = "Row index filter not found. file="
 
   case class DeletionVectorLookupResult(
-      dvDescriptor: Option[String],
+      dvDescriptor: Option[DeletionVectorDescriptor],
       filterType: Option[RowIndexFilterType],
       rowIndexFilterProvider: Option[RowIndexFilterProvider])
 
@@ -174,13 +174,16 @@ object RapidsDeletionVectors extends Logging {
       partitionedFile: PartitionedFile,
       deletionVectorReadInfo: Option[RapidsDeletionVectorReadInfo])
   : DeletionVectorLookupResult = {
-    val (dvDescriptorOpt, filterTypeOpt) = deletionVectorDescriptorAndFilter(partitionedFile)
+    val (encodedDescriptorOpt, filterTypeOpt) =
+      deletionVectorDescriptorAndFilter(partitionedFile)
     val rowIndexFilterProviderOpt = partitionedFile.getRowIndexFilter.toSeq.headOption
 
-    if (dvDescriptorOpt.isDefined && filterTypeOpt.isDefined) {
+    if (encodedDescriptorOpt.isDefined && filterTypeOpt.isDefined) {
       return DeletionVectorLookupResult(
-        dvDescriptorOpt, filterTypeOpt, rowIndexFilterProviderOpt)
-    } else if (dvDescriptorOpt.isDefined || filterTypeOpt.isDefined) {
+        encodedDescriptorOpt.map(DeletionVectorDescriptor.deserializeFromBase64),
+        filterTypeOpt,
+        rowIndexFilterProviderOpt)
+    } else if (encodedDescriptorOpt.isDefined || filterTypeOpt.isDefined) {
       throw new IllegalStateException(
         s"Both $FILE_ROW_INDEX_FILTER_ID_ENCODED and $FILE_ROW_INDEX_FILTER_TYPE " +
           "should either both have values or no values at all.")
@@ -191,19 +194,22 @@ object RapidsDeletionVectors extends Logging {
       .orElse {
         val lookupKeys = fileLookupKeys(partitionedFile)
         lookupKeys.flatMap(key =>
-          deletionVectorReadInfo.flatMap(_.filePathToDVMap.get(key))).headOption
-          .map { descriptorWithFilterType =>
-            DeletionVectorLookupResult(
-              Some(descriptorWithFilterType.descriptor.serializeToBase64()),
-              Some(descriptorWithFilterType.filterType),
-              None)
-          }
+          deletionVectorReadInfo.flatMap(_.filePathToFilterProvider.get(key))).headOption
+          .map(provider => DeletionVectorLookupResult(None, None, Some(provider)))
       }
       .orElse {
         val lookupKeys = fileLookupKeys(partitionedFile)
         lookupKeys.flatMap(key =>
-          deletionVectorReadInfo.flatMap(_.filePathToFilterProvider.get(key))).headOption
-          .map(provider => DeletionVectorLookupResult(None, None, Some(provider)))
+          deletionVectorReadInfo.flatMap(_.filePathToDVMap.get(key))).headOption
+          .map { descriptorWithFilterType =>
+            // Keep the descriptor object intact. Temporary low-shuffle-merge DVs can exceed
+            // 64 KiB, while DBR's serializeToBase64 uses DataOutput.writeUTF and cannot encode
+            // strings above that limit.
+            DeletionVectorLookupResult(
+              Some(descriptorWithFilterType.descriptor),
+              Some(descriptorWithFilterType.filterType),
+              None)
+          }
       }
       .getOrElse(DeletionVectorLookupResult(None, None, None))
   }
@@ -225,7 +231,7 @@ object RapidsDeletionVectors extends Logging {
       tablePath: String,
       deletionVectorReadInfo: Option[RapidsDeletionVectorReadInfo]): HostMemoryBuffer = {
     val dv = lookupDeletionVector(partitionedFile, deletionVectorReadInfo)
-    loadDeletionVector(
+    loadDeletionVectorDescriptor(
       conf,
       dv.dvDescriptor,
       dv.filterType,
@@ -262,8 +268,22 @@ object RapidsDeletionVectors extends Logging {
       filterTypeOpt: Option[RowIndexFilterType],
       rowIndexFilterProviderOpt: Option[RowIndexFilterProvider],
       tablePath: String): HostMemoryBuffer = {
+    loadDeletionVectorDescriptor(
+      conf,
+      dvDescriptorOpt.map(DeletionVectorDescriptor.deserializeFromBase64),
+      filterTypeOpt,
+      rowIndexFilterProviderOpt,
+      tablePath)
+  }
+
+  def loadDeletionVectorDescriptor(
+      conf: Configuration,
+      dvDescriptorOpt: Option[DeletionVectorDescriptor],
+      filterTypeOpt: Option[RowIndexFilterType],
+      rowIndexFilterProviderOpt: Option[RowIndexFilterProvider],
+      tablePath: String): HostMemoryBuffer = {
     if (dvDescriptorOpt.isDefined && filterTypeOpt.isDefined) {
-      val dvDesc = DeletionVectorDescriptor.deserializeFromBase64(dvDescriptorOpt.get)
+      val dvDesc = dvDescriptorOpt.get
       filterTypeOpt.get match {
         case RowIndexFilterType.IF_CONTAINED =>
           if (dvDesc.cardinality == 0) {
@@ -313,7 +333,7 @@ object RapidsDeletionVectors extends Logging {
       tablePath: String,
       deletionVectorReadInfo: Option[RapidsDeletionVectorReadInfo]): RoaringBitmapArray = {
     val dv = lookupDeletionVector(partitionedFile, deletionVectorReadInfo)
-    loadScalaBitmap(
+    loadScalaBitmapDescriptor(
       conf,
       dv.dvDescriptor,
       dv.filterType,
@@ -327,8 +347,22 @@ object RapidsDeletionVectors extends Logging {
       filterTypeOpt: Option[RowIndexFilterType],
       rowIndexFilterProviderOpt: Option[RowIndexFilterProvider],
       tablePath: String): RoaringBitmapArray = {
+    loadScalaBitmapDescriptor(
+      conf,
+      dvDescriptorOpt.map(DeletionVectorDescriptor.deserializeFromBase64),
+      filterTypeOpt,
+      rowIndexFilterProviderOpt,
+      tablePath)
+  }
+
+  def loadScalaBitmapDescriptor(
+      conf: Configuration,
+      dvDescriptorOpt: Option[DeletionVectorDescriptor],
+      filterTypeOpt: Option[RowIndexFilterType],
+      rowIndexFilterProviderOpt: Option[RowIndexFilterProvider],
+      tablePath: String): RoaringBitmapArray = {
     if (dvDescriptorOpt.isDefined && filterTypeOpt.isDefined) {
-      val dvDesc = DeletionVectorDescriptor.deserializeFromBase64(dvDescriptorOpt.get)
+      val dvDesc = dvDescriptorOpt.get
       filterTypeOpt.get match {
         case RowIndexFilterType.IF_CONTAINED =>
           val dvStore = new com.databricks.sql.transaction.tahoe.storage.dv.HadoopFileSystemDVStore(

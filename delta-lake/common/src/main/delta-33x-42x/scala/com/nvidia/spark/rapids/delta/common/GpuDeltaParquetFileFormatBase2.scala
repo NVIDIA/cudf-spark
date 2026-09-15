@@ -1028,7 +1028,9 @@ class GpuDeltaParquetFileFormatBase2(
                 bitmap, isRetention, info.rowGroupOffsets, info.rowGroupNumRows)
             }
             RmmRapidsRetryIterator.withRetryNoSplit {
-              DeletionVector.computeNumDeletedRows(hostDvInfos, maxReadBatchSizeRows)
+              hostDvInfos.map { info =>
+                DeletionVector.computeNumDeletedRows(info, maxReadBatchSizeRows)
+              }.sum
             }
           }
         }.sum
@@ -1229,7 +1231,9 @@ class GpuDeltaParquetFileFormatBase2(
                   bitmap, isRetention, entry.rowGroupOffsets, entry.rowGroupNumRows)
               }.toArray
               RmmRapidsRetryIterator.withRetryNoSplit {
-                DeletionVector.computeNumDeletedRows(dvInfos, maxReadBatchSizeRows)
+                dvInfos.map { info =>
+                  DeletionVector.computeNumDeletedRows(info, maxReadBatchSizeRows)
+                }.sum
               }
             }
           }.sum

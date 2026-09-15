@@ -31,7 +31,7 @@ import com.databricks.sql.transaction.tahoe.{
   NameMapping,
   NoMapping
 }
-import com.databricks.sql.transaction.tahoe.actions.{Metadata, Protocol}
+import com.databricks.sql.transaction.tahoe.actions.{DeletionVectorDescriptor, Metadata, Protocol}
 import com.databricks.sql.transaction.tahoe.schema.SchemaMergingUtils
 import com.databricks.sql.transaction.tahoe.sources.DeltaSQLConf
 import com.nvidia.spark.rapids._
@@ -477,9 +477,9 @@ case class GpuDeltaParquetFileFormatNativeDV(
       dateRebaseMode: DateTimeRebaseMode,
       timestampRebaseMode: DateTimeRebaseMode,
       hasInt96Timestamps: Boolean,
-      // Base64-encoded DV descriptor string for this block's source file. None if no DV.
+      // DV descriptor for this block's source file. None if no DV.
       // The filter type is always RowIndexFilterType.IF_CONTAINED.
-      val dvDescriptor: Option[String],
+      val dvDescriptor: Option[DeletionVectorDescriptor],
       val rowIndexFilterProvider: Option[RowIndexFilterProvider],
       // Within-file row-index ordinal of this row group's first row.
       // Captured from BlockMetaData before any merging; invariant to computeBlockMetaData().
@@ -490,14 +490,14 @@ case class GpuDeltaParquetFileFormatNativeDV(
   /**
    * Per-file DV entry assembled during [[augmentChunkMeta]].
    *
-   * @param dvDescriptor base64-encoded DV descriptor for this file; None if no DV
+   * @param dvDescriptor DV descriptor for this file; None if no DV
    * @param rowIndexFilterProvider serialized row-index filter provider if no descriptor exists
    * @param rowGroupOffsets within-file row-index ordinals of each row group's first row
    * @param rowGroupNumRows number of rows in each row group
    * @param partitionIndex index into rowsPerPartition / allPartValues this file contributes to
    */
   case class PerFileDVEntry(
-      dvDescriptor: Option[String],
+      dvDescriptor: Option[DeletionVectorDescriptor],
       rowIndexFilterProvider: Option[RowIndexFilterProvider],
       rowGroupOffsets: Array[Long],
       rowGroupNumRows: Array[Int],
@@ -1107,7 +1107,9 @@ case class GpuDeltaParquetFileFormatNativeDV(
           }
           GpuSemaphore.acquireIfNecessary(TaskContext.get())
           RmmRapidsRetryIterator.withRetryNoSplit {
-            DeletionVector.computeNumDeletedRows(hostDvInfos, maxReadBatchSizeRows)
+            hostDvInfos.map { info =>
+              DeletionVector.computeNumDeletedRows(info, maxReadBatchSizeRows)
+            }.sum
           }
         }
       }
@@ -1297,7 +1299,9 @@ case class GpuDeltaParquetFileFormatNativeDV(
                 bitmap, false, entry.rowGroupOffsets, entry.rowGroupNumRows)
             }.toArray
             RmmRapidsRetryIterator.withRetryNoSplit {
-              DeletionVector.computeNumDeletedRows(dvInfos, maxReadBatchSizeRows)
+              dvInfos.map { info =>
+                DeletionVector.computeNumDeletedRows(info, maxReadBatchSizeRows)
+              }.sum
             }
           }
         }
@@ -1328,8 +1332,9 @@ case class GpuDeltaParquetFileFormatNativeDV(
       val loadFutures = batchExtra.perFileEntries.map { entry =>
         val loadTask = new FutureTask[SpillableHostBuffer](new Callable[SpillableHostBuffer] {
           override def call(): SpillableHostBuffer = {
-            val rawBitmap = RapidsDeletionVectors.loadDeletionVector(
-              conf, entry.dvDescriptor, entry.rowIndexFilterProvider, tp)
+            val filterTypeOpt = entry.dvDescriptor.map(_ => RowIndexFilterType.IF_CONTAINED)
+            val rawBitmap = RapidsDeletionVectors.loadDeletionVectorDescriptor(
+              conf, entry.dvDescriptor, filterTypeOpt, entry.rowIndexFilterProvider, tp)
             // DeltaBatchExtraInfo.close() releases the SpillableHostBuffer when the decode
             // phase completes (via withRetryNoSplit in readBatchData).
             closeOnExcept(rawBitmap) { raw =>
