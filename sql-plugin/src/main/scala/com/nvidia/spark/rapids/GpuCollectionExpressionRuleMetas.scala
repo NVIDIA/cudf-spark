@@ -181,10 +181,7 @@ case class GetStructFieldRuleMeta(
     override val conf: RapidsConf,
     p: Option[RapidsMeta[_, _, _]],
     r: DataFromReplacementRule)
-  extends UnaryExprMeta[GetStructField](expr, conf, p, r) {
-  override def convertToGpu(arr: Expression): GpuExpression =
-    GpuGetStructField(arr, expr.ordinal, expr.name)
-}
+  extends GpuGetStructFieldMeta(expr, conf, p, r)
 
 case class GetArrayItemRuleMeta(
     in: GetArrayItem,
