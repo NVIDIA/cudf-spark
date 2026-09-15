@@ -34,7 +34,9 @@ The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Ho
     OS: The cuDF plugin is compatible with any Linux distribution with glibc >= 2.28 (Please check ldd --version output).  glibc 2.28 was released August 1, 2018.
     Tested on Ubuntu 22.04, Ubuntu 24.04, Rocky Linux 8 and Rocky Linux 9
 
-	NVIDIA Driver*: R525+
+	NVIDIA Driver*:
+		CUDA 12: R525+
+		CUDA 13: R580+
 
 	Runtime:
 		Scala 2.12, 2.13
@@ -68,8 +70,10 @@ The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Ho
 		Spark runtime 2.3 LTS
 		Spark runtime 3.0
 
-*Some hardware may have a minimum driver version greater than R525. Check the GPU spec sheet
-for your hardware's minimum driver version.
+*These minimum driver versions follow the
+[NVIDIA CUDA Compatibility documentation](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html).
+Some hardware may require a newer driver; check the GPU spec sheet for your hardware's minimum
+driver version.
 
 *For EMR support, please refer to the
 [Distributions](https://docs.nvidia.com/spark-rapids/user-guide/latest/faq.html#which-distributions-are-supported) section of the FAQ.
@@ -82,8 +86,8 @@ Use the JDK provided by the Databricks runtime.
 
 | Databricks Runtime | Apache Spark | Scala | JDK runtime | CUDA jar variants | Minimum NVIDIA driver |
 |---------------------|--------------|-------|-------------|-------------------|-----------------------|
-| 14.3 ML LTS GPU | 3.5.0 | 2.12 | Databricks runtime default | CUDA 12, CUDA 13 | R525+ |
-| 17.3 ML LTS GPU | 4.0.0 | 2.13 | Databricks runtime default | CUDA 12, CUDA 13 | R525+ |
+| 14.3 ML LTS GPU | 3.5.0 | 2.12 | Databricks runtime default | CUDA 12, CUDA 13 | CUDA 12: R525+; CUDA 13: R580+ |
+| 17.3 ML LTS GPU | 4.0.0 | 2.13 | Databricks runtime default | CUDA 12, CUDA 13 | CUDA 12: R525+; CUDA 13: R580+ |
 
 Use the Scala artifact that matches the runtime's Spark/Scala line. The CUDA
 classifier selects the bundled cuDF native libraries.
