@@ -29,7 +29,7 @@
       "description": "GPU memory spill-to-host/disk framework"
     },
     {
-      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/SpillPriorities.scala",
+      "path": "sql-plugin-columnar/src/main/scala/com/nvidia/spark/rapids/SpillPriorities.scala",
       "description": "Spill priority definitions for GPU memory management"
     },
     {
@@ -44,7 +44,23 @@
     },
     {
       "path": "CONTRIBUTING.md",
-      "description": "Contribution guidelines"
+      "description": "Contribution guidelines and supported CI title-tag policy"
+    },
+    {
+      "path": "jenkins/Jenkinsfile-blossom.premerge",
+      "description": "PR title parsing, parallel unit-test defaults, job selection, and Databricks auto-trigger paths"
+    },
+    {
+      "path": "jenkins/Jenkinsfile-blossom.premerge-databricks",
+      "description": "Databricks premerge integration tests and reduced-IT environment forwarding"
+    },
+    {
+      "path": "integration_tests/README.md",
+      "description": "Reduced-IT selection semantics and parameter-interaction coverage limits"
+    },
+    {
+      "path": "tests/README.md",
+      "description": "Parallel unit-test defaults and serial execution for debugging"
     },
     {
       "path": ".github/PULL_REQUEST_TEMPLATE.md",
