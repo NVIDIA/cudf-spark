@@ -840,6 +840,15 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .checkValue(v => v >= 0.0 && v <= 2.0, "The threshold must be between 0.0 and 2.0.")
     .createWithDefault(0.75)
 
+  val RANGE_PARTITIONING_SAMPLE_KEYS_ONLY =
+    conf("spark.rapids.sql.rangePartitioning.sampleKeysOnly")
+      .doc("When enabled, range partitioning collects range boundaries from only the columns " +
+        "needed to compute the range keys when the input plan can be safely pruned. Disable " +
+        "this to collect boundaries from the original full-width GPU input.")
+      .internal()
+      .booleanConf
+      .createWithDefault(true)
+
   val SHUFFLED_HASH_JOIN_OPTIMIZE_SHUFFLE =
     conf("spark.rapids.sql.shuffledHashJoin.optimizeShuffle")
       .doc("Enable or disable an optimization where shuffled build side batches are kept " +
