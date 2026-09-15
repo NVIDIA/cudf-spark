@@ -31,8 +31,7 @@ import com.databricks.sql.transaction.tahoe._
 import com.databricks.sql.transaction.tahoe.DeltaOperations.MergePredicate
 import com.databricks.sql.transaction.tahoe.actions.{AddCDCFile, AddFile,
   DeletionVectorDescriptor, FileAction}
-import com.databricks.sql.transaction.tahoe.commands.{DeltaCommand,
-  DMLWithDeletionVectorsHelper}
+import com.databricks.sql.transaction.tahoe.commands.DeltaCommand
 import com.databricks.sql.transaction.tahoe.commands.cdc.CDCReader._
 import com.databricks.sql.transaction.tahoe.commands.merge.MergeIntoMaterializeSource
 import com.databricks.sql.transaction.tahoe.deletionvectors.{RoaringBitmapArray,
@@ -57,7 +56,8 @@ import com.databricks.sql.transaction.tahoe.util.{AnalysisHelper, DeltaFileOpera
 import com.nvidia.spark.rapids.{BaseExprMeta, GpuOverrides, RapidsConf, SparkPlanMeta}
 import com.nvidia.spark.rapids.RapidsConf.DELTA_LOW_SHUFFLE_MERGE_DEL_VECTOR_BROADCAST_THRESHOLD
 import com.nvidia.spark.rapids.delta._
-import com.nvidia.spark.rapids.delta.GpuDeltaParquetFileFormatUtils.METADATA_ROW_IDX_COL
+import com.nvidia.spark.rapids.delta.GpuDeltaParquetFileFormatUtils.{METADATA_ROW_IDX_COL,
+  METADATA_ROW_IDX_FIELD}
 import com.nvidia.spark.rapids.delta.shims.UpdateCommandShims
 import com.nvidia.spark.rapids.shims.FileSourceScanExecMeta
 import org.apache.hadoop.conf.Configuration
@@ -617,6 +617,12 @@ class InsertOnlyMergeExecutor(override val context: MergeExecutorContext) extend
  */
 class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extends MergeExecutor {
 
+  private val scanRegistrationIds = new mutable.ArrayBuffer[String]()
+
+  override def close(): Unit = {
+    scanRegistrationIds.foreach(GpuLowShuffleMergeScanRegistry.remove)
+  }
+
   // We over-count numTargetRowsDeleted when there are multiple matches;
   // this is the amount of the overcount, so we can subtract it to get a correct final metric.
   private var multipleMatchDeleteOnlyOvercount: Option[Long] = None
@@ -657,13 +663,32 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
    * Though low shuffle merge algorithm performs better than traditional merge algorithm in some
    * cases, there are some case we should fallback to traditional merge executor:
    *
-   * 1. Low shuffle merge requires GPU file scans for both write passes. Touched-file discovery
-   * uses Databricks' native metadata-row-index scan, which intentionally remains on CPU because
-   * it exposes the hidden `_metadata` column.
+   * 1. Low shuffle merge requires GPU file scans for touched-file discovery and both write passes.
    * 2. The temporary deletion vectors introduce extra overhead, so it may be better to fall back
    * when the changeset is too large.
    */
   def shouldFallback(): Boolean = {
+    // Trying to detect if we can execute finding touched files on the GPU.
+    val touchFilePlanOverrideSucceed = verifyGpuPlan(planForFindingTouchedFiles()) { planMeta =>
+      def check(meta: SparkPlanMeta[SparkPlan]): Boolean = {
+        meta match {
+          case scan if scan.isInstanceOf[FileSourceScanExecMeta] &&
+              isLowShuffleTargetScan(scan.asInstanceOf[FileSourceScanExecMeta]) =>
+            val fileScan = scan.asInstanceOf[FileSourceScanExecMeta]
+            fileScan.wrapped.schema.fieldNames.contains(METADATA_ROW_IDX_COL) &&
+              fileScan.canThisBeReplaced
+          case m => m.childPlans.exists(check)
+        }
+      }
+
+      check(planMeta)
+    }
+    if (!touchFilePlanOverrideSucceed) {
+      logWarning("Unable to override file scan for low shuffle merge for finding touched files " +
+        "plan, fallback to traditional merge.")
+      return true
+    }
+
     // Trying to detect if we can execute the merge plan.
     val mergePlanOverrideSucceed = verifyGpuPlan(planForMergeExecution(touchedFiles)) { planMeta =>
       var targetScanCount = 0
@@ -759,7 +784,7 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
   }
 
   private lazy val dataSkippedTargetDF: DataFrame = {
-    addRowIndexMetaColumn(dataSkippedFiles)
+    addRowIndexMetaColumn(buildTargetDFWithFiles(dataSkippedFiles))
   }
 
   private lazy val touchedFiles: Map[String, (Roaring64Bitmap, AddFile)] = this.findTouchedFiles()
@@ -789,42 +814,55 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
   private def findTouchedFiles(): Map[String, (Roaring64Bitmap, AddFile)] =
     context.cmd.recordMergeOperation(sqlMetricName = "scanTimeMs") {
       context.spark.udf.register("row_index_set", udaf(RoaringBitmapUDAF))
-      // DBR 16.0+ considers a duplicate ambiguous only when multiple joined pairs take a
-      // WHEN MATCHED action. Aggregate first by the file-relative target row identity, then by
-      // file, so the same pass produces both the temporary deletion vectors and that decision.
       val matchedRows = planForFindingTouchedFiles()
         .select(
           col(FILE_PATH_COL),
           col(METADATA_ROW_IDX_COL),
           when(DFUDFShims.exprToColumn(effectiveMatchPredicate), lit(1L))
-              .otherwise(lit(0L)).as("effective"))
-        .groupBy(FILE_PATH_COL, METADATA_ROW_IDX_COL)
-        .agg(
-          count("*").as("count"),
-          sum("effective").as("effectiveCount"))
+            .otherwise(lit(0L)).as("effective"))
 
-      val collectedRows = matchedRows
-        .groupBy(FILE_PATH_COL)
-        .agg(
-          expr(s"row_index_set($METADATA_ROW_IDX_COL) as row_idxes"),
-          sum(when(col("effectiveCount") > 1, lit(1L)).otherwise(lit(0L)))
-              .as("multipleMatchCount"),
-          sum(when(col("effectiveCount") > 1, col("effectiveCount")).otherwise(lit(0L)))
-              .as("multipleMatchSum"),
-          max(when(col("count") > 1 && col("effectiveCount") <= 1, lit(1L))
-              .otherwise(lit(0L))).as("hasNonEffectiveDuplicates"))
-        .collect()
+      // DBR 16.0+ considers a duplicate ambiguous only when multiple joined pairs take a
+      // WHEN MATCHED action. File-level bitmaps provide the distinct all-match and effective-match
+      // row counts without grouping every target row by (file path, row index).
+      val allMatchesAreEffective = context.cmd.matchedClauses.exists(_.condition.isEmpty)
+      val collectedRows = if (allMatchesAreEffective) {
+        matchedRows
+          .groupBy(FILE_PATH_COL)
+          .agg(
+            expr(s"row_index_set($METADATA_ROW_IDX_COL) as row_idxes"),
+            count("*").as("matchCount"))
+          .collect()
+      } else {
+        matchedRows
+          .groupBy(FILE_PATH_COL)
+          .agg(
+            expr(s"row_index_set($METADATA_ROW_IDX_COL) as row_idxes"),
+            count("*").as("matchCount"),
+            expr(s"row_index_set($METADATA_ROW_IDX_COL) " +
+              "FILTER (WHERE effective = 1) as effectiveRowIdxes"),
+            sum("effective").as("effectiveMatchCount"))
+          .collect()
+      }
 
       val collectTouchedFiles = collectedRows.map { row =>
         row.getAs[String](FILE_PATH_COL) ->
           row.getAs[RoaringBitmapWrapper]("row_idxes").inner
       }.toMap
-      val multipleMatchCount = collectedRows.map(_.getAs[Long]("multipleMatchCount")).sum
-      val multipleMatchSum = collectedRows.map(_.getAs[Long]("multipleMatchSum")).sum
-      hasNonEffectiveDuplicateMatches =
-        collectedRows.exists(_.getAs[Long]("hasNonEffectiveDuplicates") > 0)
+      val duplicateMatchCount = collectedRows.map { row =>
+        row.getAs[Long]("matchCount") -
+          row.getAs[RoaringBitmapWrapper]("row_idxes").inner.getLongCardinality
+      }.sum
+      val effectiveDuplicateMatchCount = if (allMatchesAreEffective) {
+        duplicateMatchCount
+      } else {
+        collectedRows.map { row =>
+          row.getAs[Long]("effectiveMatchCount") -
+            row.getAs[RoaringBitmapWrapper]("effectiveRowIdxes").inner.getLongCardinality
+        }.sum
+      }
+      hasNonEffectiveDuplicateMatches = duplicateMatchCount > effectiveDuplicateMatchCount
 
-      val hasMultipleMatches = multipleMatchCount > 0
+      val hasMultipleMatches = effectiveDuplicateMatchCount > 0
 
       // Throw error if multiple matches are ambiguous or cannot be computed correctly.
       val canBeComputedUnambiguously = {
@@ -847,7 +885,7 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
         // because we count matches after the join and not just the target rows.
         // We have to compensate for this by subtracting the duplicates later,
         // so we need to record them here.
-        multipleMatchDeleteOnlyOvercount = Some(multipleMatchSum - multipleMatchCount)
+        multipleMatchDeleteOnlyOvercount = Some(effectiveDuplicateMatchCount)
       }
 
       // Get the AddFiles using the touched file names.
@@ -891,26 +929,39 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
     }
 
 
-  /**
-   * Uses Databricks' deletion-vector scan preparation to expose the file metadata column, then
-   * copies its file-relative row index into
-   * [[GpuDeltaParquetFileFormatUtils.METADATA_ROW_IDX_COL]].
-   */
-  private def addRowIndexMetaColumn(files: Seq[AddFile]): DataFrame = {
-    val fileIndex = context.deltaTxn.deltaLog.createDataFrame(context.deltaTxn.snapshot, files)
-      .queryExecution.analyzed.collectFirst {
-        case relation: LogicalRelation
-            if relation.relation.isInstanceOf[HadoopFsRelation] &&
-              relation.relation.asInstanceOf[HadoopFsRelation]
-                .location.isInstanceOf[TahoeFileIndex] =>
-          relation.relation.asInstanceOf[HadoopFsRelation]
-            .location.asInstanceOf[TahoeFileIndex]
-      }.getOrElse {
-        throw new IllegalStateException("Unable to find the Delta file index for low shuffle merge")
-      }
-    DMLWithDeletionVectorsHelper.createTargetDfForScanningForMatches(
-      context.spark, context.cmd.target, fileIndex)
-      .withColumn(METADATA_ROW_IDX_COL, col("_metadata.row_index"))
+  /** Add a file-relative row-index column that the GPU file reader populates. */
+  private def addRowIndexMetaColumn(baseDF: DataFrame): DataFrame = {
+    val rowIdxAttr = AttributeReference(
+      METADATA_ROW_IDX_COL,
+      METADATA_ROW_IDX_FIELD.dataType,
+      METADATA_ROW_IDX_FIELD.nullable)()
+
+    val newPlan = baseDF.queryExecution.analyzed.transformUp {
+      case r: LogicalRelation if r.relation.isInstanceOf[HadoopFsRelation] =>
+        val fs = r.relation.asInstanceOf[HadoopFsRelation]
+        val newSchema = StructType(fs.dataSchema.fields).add(METADATA_ROW_IDX_FIELD)
+        val newFs = lowShuffleScanRelation(fs, newSchema)
+
+        r.copy(relation = newFs, output = r.output :+ rowIdxAttr)
+      case p@Project(projectList, _) =>
+        p.copy(projectList = projectList :+ rowIdxAttr)
+    }
+
+    Dataset.ofRows(context.spark, newPlan)
+  }
+
+  private def lowShuffleScanRelation(
+      relation: HadoopFsRelation,
+      dataSchema: StructType): HadoopFsRelation = {
+    val scanId = GpuLowShuffleMergeScanRegistry.register()
+    scanRegistrationIds += scanId
+    val fileFormat = relation.fileFormat.asInstanceOf[DeltaParquetFileFormat]
+      .copy(optimizationsEnabled = false)
+    relation.copy(
+      dataSchema = dataSchema,
+      fileFormat = fileFormat,
+      options = relation.options + (GpuLowShuffleMergeScanRegistry.OPTION_KEY -> scanId))(
+      context.spark)
   }
 
   private def uniqueColumnName(base: String, existing: Seq[String]): String = {

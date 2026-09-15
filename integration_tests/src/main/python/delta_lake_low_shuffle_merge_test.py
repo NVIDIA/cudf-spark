@@ -53,6 +53,10 @@ def _assert_gpu_low_shuffle_merge(
     if expect_low_shuffle:
         assert any(callback.contains(plan, "GpuUnionExec") for plan in captured_plans), \
             "GpuUnionExec was not found in the captured low-shuffle MERGE write plans"
+        if is_databricks_version(17, 3):
+            assert any(callback.contains(plan, "GpuFileSourceScanExec") and
+                       "__metadata_row_index" in str(plan) for plan in captured_plans), \
+                "GPU row-index discovery scan was not found in the captured MERGE plans"
 
 
 @allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
@@ -120,7 +124,7 @@ def test_delta_merge_match_delete_only(spark_tmp_path, spark_tmp_table_factory, 
                                           use_cdf, False, partition_columns, num_slices, False,
                                           delta_merge_enabled_conf)
 
-@allow_non_gpu("ColumnarToRowExec", "FileSourceScanExec", *delta_meta_allow)
+@allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not supports_delta_low_shuffle_merge(),
@@ -133,7 +137,7 @@ def test_delta_merge_standard_upsert(spark_tmp_path, spark_tmp_table_factory, us
                                         assert_func=_assert_gpu_low_shuffle_merge)
 
 
-@allow_non_gpu("ColumnarToRowExec", "FileSourceScanExec", *delta_meta_allow)
+@allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not is_databricks_version(17, 3),
@@ -164,7 +168,38 @@ def test_delta_low_shuffle_merge_accepts_non_effective_duplicate_matches(
         assert_func=_assert_gpu_low_shuffle_merge, conf=delta_merge_enabled_conf)
 
 
-@allow_non_gpu("ColumnarToRowExec", "FileSourceScanExec", *delta_meta_allow)
+@allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(not is_databricks_version(17, 3),
+                    reason="DBR 17.3 effective duplicate-match semantics")
+def test_delta_low_shuffle_merge_rejects_effective_duplicate_matches(
+        spark_tmp_path, spark_tmp_table_factory):
+    src_table = spark_tmp_table_factory.get()
+
+    def do_merge(spark):
+        gpu_enabled = \
+            str(spark.conf.get("spark.rapids.sql.enabled", "false")).lower() == "true"
+        target_path = spark_tmp_path + ("/GPU" if gpu_enabled else "/CPU")
+        spark.createDataFrame([(1, "old")], "k INT, v STRING") \
+            .write.format("delta") \
+            .option("delta.enableDeletionVectors", "false") \
+            .mode("overwrite") \
+            .save(target_path)
+        spark.createDataFrame(
+            [(1, "first", True), (1, "second", True)],
+            "k INT, v STRING, apply BOOLEAN").createOrReplaceTempView(src_table)
+        return spark.sql(
+            "MERGE INTO delta.`{}` t USING {} s ON t.k = s.k "
+            "WHEN MATCHED AND s.apply THEN UPDATE SET t.v = s.v".format(
+                target_path, src_table)).collect()
+
+    assert_gpu_and_cpu_error(
+        do_merge,
+        conf=delta_merge_enabled_conf,
+        error_message="DELTA_MULTIPLE_SOURCE_ROW_MATCHING_TARGET_ROW_IN_MERGE")
+
+
+@allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not is_databricks_version(17, 3),
@@ -230,6 +265,9 @@ def test_delta_low_shuffle_merge_internal_column_names(
         (4, "inserted", 40, "source-inserted")]
     assert any(callback.contains(plan, "GpuUnionExec") for plan in captured_plans), \
         "GpuUnionExec was not found in the captured low-shuffle MERGE write plans"
+    assert any(callback.contains(plan, "GpuFileSourceScanExec") and
+               "__metadata_row_index" in str(plan) for plan in captured_plans), \
+        "GPU row-index discovery scan was not found in the captured MERGE plans"
 
 
 @allow_non_gpu("ColumnarToRowExec", "FileSourceScanExec", *delta_meta_allow)
@@ -287,7 +325,7 @@ def test_delta_low_shuffle_merge_preserves_row_tracking(spark_tmp_path):
             "{}: inserted row id is not fresh".format(run)
 
 
-@allow_non_gpu("ColumnarToRowExec", "FileSourceScanExec", *delta_meta_allow)
+@allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not is_databricks_version(17, 3),
