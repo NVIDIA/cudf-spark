@@ -7,7 +7,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 ## Dependency Model
 
-The native build uses the RAPIDS JAR already resolved by Maven. The `cuda-native-udf` profile asks Maven to copy `rapids-4-spark_<scala>-<version>-<cuda>.jar` and `rapids-4-spark_<scala>-<version>.jar` into `target/rapids-jar`. The `native/scripts/extract-cudf-libs.sh` script then extracts `libcudf.so*` and `libnvcomp.so*`, clones matching cuDF headers, builds `librapidsudfjni.so`, and packages it in the UDF JAR for `NativeDepsLoader`.
+The native build uses the RAPIDS JAR already resolved by Maven. The `cuda-native-udf` profile asks Maven to copy `cudf-spark_<scala>-<version>-<cuda>.jar` and `cudf-spark_<scala>-<version>.jar` into `target/rapids-jar`. The `native/scripts/extract-cudf-libs.sh` script then extracts `libcudf.so*` and `libnvcomp.so*`, clones matching cuDF headers, builds `librapidsudfjni.so`, and packages it in the UDF JAR for `NativeDepsLoader`.
 
 No separate manual JAR download is required. Maven should resolve the RAPIDS dependency declared in `pom.xml`; the native profile reuses the same coordinates and copies the resolved JAR into `target/rapids-jar`.
 

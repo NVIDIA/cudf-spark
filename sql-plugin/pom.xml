@@ -21,11 +21,11 @@
 
     <parent>
         <groupId>com.nvidia</groupId>
-        <artifactId>rapids-4-spark-shim-deps-parent_2.12</artifactId>
+        <artifactId>cudf-spark-shim-deps-parent_2.12</artifactId>
         <version>26.10.0-SNAPSHOT</version>
         <relativePath>../shim-deps/pom.xml</relativePath>
     </parent>
-    <artifactId>rapids-4-spark-sql_2.12</artifactId>
+    <artifactId>cudf-spark-sql_2.12</artifactId>
     <name>RAPIDS Accelerator for Apache Spark SQL Plugin</name>
     <description>The RAPIDS SQL plugin for Apache Spark</description>
     <version>26.10.0-SNAPSHOT</version>
@@ -56,31 +56,31 @@
         </dependency>
         <dependency>
             <groupId>com.nvidia</groupId>
-            <artifactId>rapids-4-spark-sql-plugin-format_${scala.binary.version}</artifactId>
+            <artifactId>cudf-spark-sql-plugin-format_${scala.binary.version}</artifactId>
             <version>${project.version}</version>
             <classifier>${spark.version.classifier}</classifier>
         </dependency>
         <dependency>
             <groupId>com.nvidia</groupId>
-            <artifactId>rapids-4-spark-sql-plugin-fileio_${scala.binary.version}</artifactId>
+            <artifactId>cudf-spark-sql-plugin-fileio_${scala.binary.version}</artifactId>
             <version>${project.version}</version>
             <classifier>${spark.version.classifier}</classifier>
         </dependency>
         <dependency>
             <groupId>com.nvidia</groupId>
-            <artifactId>rapids-4-spark-sql-plugin-columnar_${scala.binary.version}</artifactId>
+            <artifactId>cudf-spark-sql-plugin-columnar_${scala.binary.version}</artifactId>
             <version>${project.version}</version>
             <classifier>${spark.version.classifier}</classifier>
         </dependency>
         <dependency>
             <groupId>com.nvidia</groupId>
-            <artifactId>rapids-4-spark-sql-plugin-api_${scala.binary.version}</artifactId>
+            <artifactId>cudf-spark-sql-plugin-api_${scala.binary.version}</artifactId>
             <version>${project.version}</version>
             <classifier>${spark.version.classifier}</classifier>
         </dependency>
         <dependency>
             <groupId>com.nvidia</groupId>
-            <artifactId>rapids-4-spark-sql-shims_${scala.binary.version}</artifactId>
+            <artifactId>cudf-spark-sql-shims_${scala.binary.version}</artifactId>
             <version>${project.version}</version>
             <classifier>${spark.version.classifier}</classifier>
             <scope>provided</scope>
@@ -250,7 +250,7 @@
                         </goals>
                         <configuration>
                             <includeGroupIds>com.nvidia</includeGroupIds>
-                            <includeArtifactIds>rapids-4-spark-sql-shims_${scala.binary.version}</includeArtifactIds>
+                            <includeArtifactIds>cudf-spark-sql-shims_${scala.binary.version}</includeArtifactIds>
                             <excludeTransitive>true</excludeTransitive>
                             <includes>**/*.class</includes>
                             <outputDirectory>${project.build.outputDirectory}</outputDirectory>

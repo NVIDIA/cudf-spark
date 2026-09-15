@@ -246,7 +246,7 @@ For example, `spark.sql.catalog.spark_catalog` is represented by the environment
 
 We also have a large number of integration tests that currently run as a part of the unit tests
 using scala test. Those are in the `src/test/scala` sub-directory and depend on the testing
-framework from the `rapids-4-spark-tests_2.x` test jar.
+framework from the `cudf-spark-tests_2.x` test jar.
 
 You can run these tests against a cluster similar to how you can run `pytests` against an
 existing cluster. To do this you need to launch a cluster with the plugin jars on the
@@ -265,7 +265,7 @@ individually, so you don't risk running unit tests along with the integration te
 http://www.scalatest.org/user_guide/using_the_scalatest_shell
 
 ```shell
-spark-shell --jars rapids-4-spark-tests_2.12-26.10.0-SNAPSHOT-tests.jar,rapids-4-spark-integration-tests_2.12-26.10.0-SNAPSHOT-tests.jar,scalatest_2.12-3.0.5.jar,scalactic_2.12-3.0.5.jar
+spark-shell --jars cudf-spark-tests_2.12-26.10.0-SNAPSHOT-tests.jar,cudf-spark-integration-tests_2.12-26.10.0-SNAPSHOT-tests.jar,scalatest_2.12-3.0.5.jar,scalactic_2.12-3.0.5.jar
 ```
 
 First you import the `scalatest_shell` and tell the tests where they can find the test files you
@@ -284,11 +284,11 @@ durations.run(new com.nvidia.spark.rapids.JoinsSuite)
 
 Most clusters probably will not have the RAPIDS plugin installed in the cluster yet.
 If you just want to verify the SQL replacement is working you will need to add the
-`rapids-4-spark` jar to your `spark-submit` command. Note the following example
+`cudf-spark` jar to your `spark-submit` command. Note the following example
 assumes CUDA 12 is being used and the Spark distribution is built with Scala 2.12.
 
 ```
-$SPARK_HOME/bin/spark-submit --jars "rapids-4-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar" ./runtests.py
+$SPARK_HOME/bin/spark-submit --jars "cudf-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar" ./runtests.py
 ```
 
 You don't have to enable the plugin for this to work, the test framework will do that for you.
@@ -521,7 +521,7 @@ To run cudf_udf tests, need following configuration changes:
 As an example, here is the `spark-submit` command with the cudf_udf parameter on CUDA 12:
 
 ```
-$SPARK_HOME/bin/spark-submit --jars "rapids-4-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar,rapids-4-spark-tests_2.12-26.10.0-SNAPSHOT.jar" --conf spark.rapids.memory.gpu.allocFraction=0.3 --conf spark.rapids.python.memory.gpu.allocFraction=0.3 --conf spark.rapids.python.concurrentPythonWorkers=2 --py-files "rapids-4-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar" --conf spark.executorEnv.PYTHONPATH="rapids-4-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar" ./runtests.py --cudf_udf
+$SPARK_HOME/bin/spark-submit --jars "cudf-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar,cudf-spark-tests_2.12-26.10.0-SNAPSHOT.jar" --conf spark.rapids.memory.gpu.allocFraction=0.3 --conf spark.rapids.python.memory.gpu.allocFraction=0.3 --conf spark.rapids.python.concurrentPythonWorkers=2 --py-files "cudf-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar" --conf spark.executorEnv.PYTHONPATH="cudf-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar" ./runtests.py --cudf_udf
 ```
 
 ### Enabling fuzz tests

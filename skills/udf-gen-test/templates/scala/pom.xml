@@ -161,7 +161,7 @@ SPDX-License-Identifier: Apache-2.0
                                     <artifactItems>
                                         <artifactItem>
                                             <groupId>com.nvidia</groupId>
-                                            <artifactId>rapids-4-spark_${scala.binary.version}</artifactId>
+                                            <artifactId>cudf-spark_${scala.binary.version}</artifactId>
                                             <version>${rapids4spark.version}</version>
                                             <classifier>${cuda.version}</classifier>
                                             <type>jar</type>
@@ -182,7 +182,7 @@ SPDX-License-Identifier: Apache-2.0
                                     <artifactItems>
                                         <artifactItem>
                                             <groupId>com.nvidia</groupId>
-                                            <artifactId>rapids-4-spark_${scala.binary.version}</artifactId>
+                                            <artifactId>cudf-spark_${scala.binary.version}</artifactId>
                                             <version>${rapids4spark.version}</version>
                                             <type>jar</type>
                                             <overWrite>false</overWrite>
@@ -300,7 +300,7 @@ SPDX-License-Identifier: Apache-2.0
         <!-- RAPIDS plugin -->
         <dependency>
             <groupId>com.nvidia</groupId>
-            <artifactId>rapids-4-spark_${scala.binary.version}</artifactId>
+            <artifactId>cudf-spark_${scala.binary.version}</artifactId>
             <version>${rapids4spark.version}</version>
             <scope>provided</scope>
         </dependency>
