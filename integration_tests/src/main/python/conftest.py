@@ -395,6 +395,9 @@ def pytest_runtest_setup(item):
             pytest.skip('tests for pyarrow not configured to run')
 
 def pytest_configure(config):
+    if config.getoption('iceberg') and not os.environ.get('EXPECTED_ICEBERG_VERSION'):
+        raise pytest.UsageError(
+            "EXPECTED_ICEBERG_VERSION must be set when running Iceberg tests")
     global _runtime_env
     _runtime_env = config.getoption('runtime_env')
     global _std_input_path
