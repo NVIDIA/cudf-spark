@@ -194,6 +194,20 @@ jar:file:/home/spark/rapids-4-spark_2.12-26.10.0.jar!/spark-shared/
 jar:file:/home/spark/rapids-4-spark_2.12-26.10.0.jar!/spark351/
 ```
 
+### Classloader Coupling for Package-Private Integrations
+
+The cuDF Plugin directly accesses package-private APIs in some dependency runtimes, including
+Apache Iceberg. The JVM treats classes as members of the same runtime package only when they have
+the same package name and defining classloader. Therefore, the cuDF Plugin distribution jar and the
+dependency runtime jar must be deployed so the relevant classes are defined by the same classloader.
+
+For Iceberg, deploy both jars through `spark.driver.extraClassPath` and
+`spark.executor.extraClassPath`, or deploy both through `spark.jars`/`--jars`/`--packages`. Mixed
+deployment, with one jar on an extra classpath and the other added as a Spark jar, is unsupported for
+package-private access paths and can fail with `IllegalAccessError`. Placing an access bridge in the
+conventional root of the cuDF Plugin jar allows it to share the application classloader when both
+jars use an extra classpath; root placement does not remove the classloader-coupling requirement.
+
 ### Late Inheritance in Public Classes
 
 Most classes needed by the plugin can be disambiguated using Parallel World locations without

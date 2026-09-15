@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,7 +25,8 @@ import com.nvidia.spark.rapids.jni.CaseWhen
 import com.nvidia.spark.rapids.shims.ShimExpression
 
 import org.apache.spark.sql.catalyst.analysis.{TypeCheckResult, TypeCoercion}
-import org.apache.spark.sql.catalyst.expressions.{ComplexTypeMergingExpression, Expression}
+import org.apache.spark.sql.catalyst.expressions.{CaseWhen => CpuCaseWhen,
+  ComplexTypeMergingExpression, Expression, If => CpuIf}
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.unsafe.types.UTF8String
@@ -685,5 +686,39 @@ case class GpuCaseWhen(
     withResource(hcv) { _ =>
       hcv.copyToDevice()
     }
+  }
+}
+
+case class GpuCaseWhenMeta(
+    caseWhen: CpuCaseWhen,
+    override val conf: RapidsConf,
+    parentMeta: Option[RapidsMeta[_, _, _]],
+    rule: DataFromReplacementRule)
+    extends ExprMeta[CpuCaseWhen](caseWhen, conf, parentMeta, rule) {
+
+  override def convertToGpuImpl(): GpuExpression = {
+    val branches = childExprs.grouped(2).flatMap {
+      case Seq(condition, value) => Some((condition.convertToGpu(), value.convertToGpu()))
+      case Seq(_) => None
+    }.toArray.toSeq // force materialization to make the sequence serializable
+    val elseValue = if (childExprs.size % 2 != 0) {
+      Some(childExprs.last.convertToGpu())
+    } else {
+      None
+    }
+    GpuCaseWhen(branches, elseValue, conf.caseWhenFuseEnabled)
+  }
+}
+
+case class GpuIfMeta(
+    ifExpr: CpuIf,
+    override val conf: RapidsConf,
+    parentMeta: Option[RapidsMeta[_, _, _]],
+    rule: DataFromReplacementRule)
+    extends ExprMeta[CpuIf](ifExpr, conf, parentMeta, rule) {
+
+  override def convertToGpuImpl(): GpuExpression = {
+    val Seq(predicate, trueExpr, falseExpr) = childExprs.map(_.convertToGpu())
+    GpuIf(predicate, trueExpr, falseExpr)
   }
 }

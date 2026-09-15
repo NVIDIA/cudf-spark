@@ -28,7 +28,7 @@ import ai.rapids.cudf.{ast, BinaryOp, BinaryOperable, CaptureGroups, ColumnVecto
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm._
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
-import com.nvidia.spark.rapids.jni.{Arithmetic, RoundMode}
+import com.nvidia.spark.rapids.jni.{Arithmetic, ExceptionWithRowIndex, RoundMode, StringUtils}
 import com.nvidia.spark.rapids.jni.CastStrings
 import com.nvidia.spark.rapids.jni.CharsetDecode
 import com.nvidia.spark.rapids.jni.GpuSubstringIndexUtils
@@ -37,7 +37,7 @@ import com.nvidia.spark.rapids.jni.RegexRewriteUtils
 import com.nvidia.spark.rapids.shims.{NullIntolerantShim, ShimExpression, SparkShimImpl}
 
 import org.apache.spark.sql.catalyst.expressions._
-import org.apache.spark.sql.catalyst.util.GenericArrayData
+import org.apache.spark.sql.catalyst.util.{GenericArrayData, StringUtils => CatalystStringUtils}
 import org.apache.spark.sql.errors.ConvUtils
 import org.apache.spark.sql.rapids.catalyst.expressions._
 import org.apache.spark.sql.types._
@@ -1040,7 +1040,7 @@ object CudfRegexp {
 }
 
 case class GpuLike(left: Expression, right: Expression, escapeChar: Char)
-  extends GpuBinaryExpressionArgsAnyScalar
+  extends GpuBinaryExpression
       with ImplicitCastInputTypes
       with NullIntolerantShim {
 
@@ -1054,6 +1054,26 @@ case class GpuLike(left: Expression, right: Expression, escapeChar: Char)
   override def doColumnar(lhs: GpuColumnVector, rhs: GpuScalar): ColumnVector = {
     withResource(Scalar.fromString(Character.toString(escapeChar))) { escapeScalar =>
       lhs.getBase.like(rhs.getBase, escapeScalar)
+    }
+  }
+
+  override def doColumnar(lhs: GpuColumnVector, rhs: GpuColumnVector): ColumnVector = {
+    withResource(Scalar.fromString(Character.toString(escapeChar))) { escapeScalar =>
+      try {
+        StringUtils.like(lhs.getBase, rhs.getBase, escapeScalar)
+      } catch {
+        case rowException: ExceptionWithRowIndex =>
+          withResource(rhs.getBase.getScalarElement(rowException.getRowIndex)) { pattern =>
+            CatalystStringUtils.escapeLikeRegex(pattern.getJavaString, escapeChar)
+          }
+          throw new IllegalStateException("JNI rejected a LIKE pattern that Spark accepted")
+      }
+    }
+  }
+
+  override def doColumnar(lhs: GpuScalar, rhs: GpuColumnVector): ColumnVector = {
+    withResource(GpuColumnVector.from(lhs, rhs.getRowCount.toInt)) { expandedLhs =>
+      doColumnar(expandedLhs, rhs)
     }
   }
 
@@ -1187,12 +1207,8 @@ object GpuRegExpUtils {
   def isEmptyRepetition(pattern: String): Boolean = {
     def isASTEmptyRepetition(regex: RegexAST): Boolean = {
       regex match {
-        case RegexRepetition(_, term) => term match {
-          case SimpleQuantifier('*') | SimpleQuantifier('?') => true
-          case QuantifierFixedLength(0) => true
-          case QuantifierVariableLength(0, _) => true
-          case _ => false
-        }
+        case RegexRepetition(_, quantifier) => quantifier.minLength == 0
+        case RegexInlineFlags(_) => true
         case RegexGroup(_, term) =>
           isASTEmptyRepetition(term)
         case RegexSequence(parts) =>

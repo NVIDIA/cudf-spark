@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,7 +23,8 @@ import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric.{JOIN_TIME, OP_TIME_LEGACY}
 import com.nvidia.spark.rapids.fileio.iceberg.{IcebergFileIO, IcebergInputFile}
-import com.nvidia.spark.rapids.iceberg.data.GpuDeleteFilter2._
+import com.nvidia.spark.rapids.iceberg.ShimUtils
+import com.nvidia.spark.rapids.iceberg.data.GpuDeleteFileInfo._
 import com.nvidia.spark.rapids.iceberg.fieldIndex
 import com.nvidia.spark.rapids.iceberg.parquet.GpuIcebergParquetReaderConf
 import org.apache.iceberg.{DeleteFile, FileContent, MetadataColumns, Schema}
@@ -37,6 +38,103 @@ import org.apache.spark.sql.catalyst.expressions.ExprId
 import org.apache.spark.sql.rapids.execution.HashedExistenceJoinIterator
 import org.apache.spark.sql.types.{BooleanType, DataType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
+
+/** Delete files split by the phase that applies them. */
+case class GpuDeleteFileInfo(
+    deletionVector: Option[DeleteFile],
+    postReadDeletes: Seq[DeleteFile])
+
+object GpuDeleteFileInfo {
+  /**
+   * Iceberg scan planning produces one of two valid combinations for a data file:
+   *  - no deletion vector, with optional position and equality deletes; or
+   *  - one deletion vector, no position deletes, and optional equality deletes.
+   *
+   * The precedence below also avoids applying legacy position deletes twice if a task ever
+   * contains both representations.
+   */
+  def apply(deletes: Seq[DeleteFile]): GpuDeleteFileInfo = {
+    val equalityDeletes = new ArrayBuffer[DeleteFile]
+    val positionDeletes = new ArrayBuffer[DeleteFile]
+    var deletionVector: Option[DeleteFile] = None
+
+    deletes.foreach { delete =>
+      delete.content() match {
+        case FileContent.EQUALITY_DELETES => equalityDeletes += delete
+        case FileContent.POSITION_DELETES if ShimUtils.isDeletionVector(delete) =>
+          deletionVector = Some(delete)
+        case FileContent.POSITION_DELETES => positionDeletes += delete
+        case content =>
+          throw new UnsupportedOperationException(s"Unsupported delete content: $content")
+      }
+    }
+
+    val effectivePositionDeletes = if (deletionVector.isDefined) Seq.empty else positionDeletes
+    new GpuDeleteFileInfo(deletionVector, equalityDeletes.toSeq ++ effectivePositionDeletes)
+  }
+
+  private[iceberg] val DELETE_EXTRA_METADATA_COLUMNS: Seq[NestedField] = Seq(
+    MetadataColumns.FILE_PATH,
+    MetadataColumns.ROW_POSITION)
+
+  private[iceberg] val DELETE_EXTRA_METADATA_COLUMN_IDS: Set[Int] =
+    DELETE_EXTRA_METADATA_COLUMNS
+      .map(_.fieldId())
+      .toSet
+
+  private[iceberg] val POS_DELETE_SCHEMA: Schema = new Schema(
+    MetadataColumns.DELETE_FILE_PATH,
+    MetadataColumns.DELETE_FILE_POS)
+
+
+  private[iceberg] def mergeColumn(
+      batch: ColumnarBatch, srcColIdx: Int, destColIdx: Int)
+    (mergeOp: (GpuColumnVector, GpuColumnVector) => GpuColumnVector): ColumnarBatch = {
+    require(srcColIdx >= 0 && srcColIdx < batch.numCols(),
+      s"Invalid src column index: $srcColIdx, numCols: ${batch.numCols()}")
+    require(destColIdx >= 0 && destColIdx < batch.numCols(),
+      s"Invalid dest column index: $destColIdx, numCols: ${batch.numCols()}")
+    require(srcColIdx != destColIdx, "srcColIdx and destColIdx should be different")
+
+    val srcVec = batch.column(srcColIdx).asInstanceOf[GpuColumnVector]
+    val destVec = batch.column(destColIdx).asInstanceOf[GpuColumnVector]
+
+    withResource(batch) { _ =>
+      closeOnExcept(mergeOp(srcVec, destVec)) { mergeVec =>
+        val newColumns = new Array[ColumnVector](batch.numCols() - 1)
+        for (i <- 0 until batch.numCols() - 1) {
+          if (i == destColIdx) {
+            newColumns(i) = mergeVec
+          } else {
+            newColumns(i) = batch.column(i).asInstanceOf[GpuColumnVector].incRefCount()
+          }
+        }
+        new ColumnarBatch(newColumns, batch.numRows())
+      }
+    }
+  }
+
+  private[iceberg] def filterAndDrop(batch: ColumnarBatch,
+      isDeletedColIdx: Int,
+      outputDataType: Array[DataType],
+      dropMask: Array[Boolean] = Array.empty): ColumnarBatch = {
+    withResource(batch) { _ =>
+      withResource(GpuColumnVector.from(batch)) { table =>
+        withResource(table.getColumn(isDeletedColIdx).not()) { maskCv =>
+          withResource(table.filter(maskCv)) { newTable =>
+            if (dropMask.nonEmpty) {
+              withResource(GpuColumnVector.from(newTable, outputDataType)) { newBatch =>
+                GpuColumnVector.dropColumns(newBatch, dropMask)
+              }
+            } else {
+              GpuColumnVector.from(newTable, outputDataType)
+            }
+          }
+        }
+      }
+    }
+  }
+}
 
 class GpuDeleteFilter(
     private val rapidsFileIO: IcebergFileIO,
@@ -325,70 +423,6 @@ class GpuDeleteFilter(
   }
 }
 
-object GpuDeleteFilter2 {
-  private[iceberg] val DELETE_EXTRA_METADATA_COLUMNS: Seq[NestedField] = Seq(
-    MetadataColumns.FILE_PATH,
-    MetadataColumns.ROW_POSITION)
-
-  private[iceberg] val DELETE_EXTRA_METADATA_COLUMN_IDS: Set[Int] =
-    DELETE_EXTRA_METADATA_COLUMNS
-      .map(_.fieldId())
-      .toSet
-
-  private[iceberg] val POS_DELETE_SCHEMA: Schema = new Schema(
-    MetadataColumns.DELETE_FILE_PATH,
-    MetadataColumns.DELETE_FILE_POS)
-
-
-  private[iceberg] def mergeColumn(
-      batch: ColumnarBatch, srcColIdx: Int, destColIdx: Int)
-    (mergeOp: (GpuColumnVector, GpuColumnVector) => GpuColumnVector): ColumnarBatch = {
-    require(srcColIdx >= 0 && srcColIdx < batch.numCols(),
-      s"Invalid src column index: $srcColIdx, numCols: ${batch.numCols()}")
-    require(destColIdx >= 0 && destColIdx < batch.numCols(),
-      s"Invalid dest column index: $destColIdx, numCols: ${batch.numCols()}")
-    require(srcColIdx != destColIdx, "srcColIdx and destColIdx should be different")
-
-    val srcVec = batch.column(srcColIdx).asInstanceOf[GpuColumnVector]
-    val destVec = batch.column(destColIdx).asInstanceOf[GpuColumnVector]
-
-    withResource(batch) { _ =>
-      closeOnExcept(mergeOp(srcVec, destVec)) { mergeVec =>
-        val newColumns = new Array[ColumnVector](batch.numCols() - 1)
-        for (i <- 0 until batch.numCols() - 1) {
-          if (i == destColIdx) {
-            newColumns(i) = mergeVec
-          } else {
-            newColumns(i) = batch.column(i).asInstanceOf[GpuColumnVector].incRefCount()
-          }
-        }
-        new ColumnarBatch(newColumns, batch.numRows())
-      }
-    }
-  }
-
-  private[iceberg] def filterAndDrop(batch: ColumnarBatch,
-      isDeletedColIdx: Int,
-      outputDataType: Array[DataType],
-      dropMask: Array[Boolean] = Array.empty): ColumnarBatch = {
-    withResource(batch) { _ =>
-      withResource(GpuColumnVector.from(batch)) { table =>
-        withResource(table.getColumn(isDeletedColIdx).not()) { maskCv =>
-          withResource(table.filter(maskCv)) { newTable =>
-            if (dropMask.nonEmpty) {
-              withResource(GpuColumnVector.from(newTable, outputDataType)) { newBatch =>
-                GpuColumnVector.dropColumns(newBatch, dropMask)
-              }
-            } else {
-              GpuColumnVector.from(newTable, outputDataType)
-            }
-          }
-        }
-      }
-    }
-  }
-}
-
 private case class DeleteFilterContext(
     buildBatch: LazySpillableColumnarBatch,
     buildKeys: Seq[GpuExpression],
@@ -415,4 +449,3 @@ private case class DeleteFilterContext(
       joinTime)
   }
 }
-

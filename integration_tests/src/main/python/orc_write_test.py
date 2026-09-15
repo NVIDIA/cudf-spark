@@ -18,9 +18,10 @@ import pyarrow as pa
 import pyarrow.orc as orc
 
 from asserts import assert_gpu_and_cpu_writes_are_equal_collect, assert_gpu_fallback_write
-from spark_session import is_before_spark_320, is_databricks_version_or_later, \
-    is_spark_321cdh, is_spark_400_or_later, is_spark_420_or_later, is_spark_cdh, \
-    with_cpu_session, with_gpu_session
+from spark_session import is_before_spark_320, is_databricks122_or_later, \
+    is_databricks_version_or_later, is_spark_321cdh, is_spark_340_or_later, \
+    is_spark_400_or_later, is_spark_420_or_later, is_spark_cdh, with_cpu_session, \
+    with_gpu_session
 from conftest import is_apache_runtime, is_databricks_runtime
 from datetime import date, datetime, timezone
 from data_gen import *
@@ -83,20 +84,53 @@ orc_write_basic_map_gens = [simple_string_to_string_map_gen] + [MapGen(f(nullabl
     lambda nullable=True: DecimalGen(precision=36, scale=5, nullable=nullable)]] + [MapGen(
     f(nullable=False), f(nullable=False)) for f in [IntegerGen]]
 
-orc_write_gens_list = [orc_write_basic_gens,
+pre_1590_timestamp_gens = [
+    TimestampGen(end=datetime(1589, 12, 31, 23, 59, 59, 999999,
+                              tzinfo=timezone.utc))]
+timestamp_1590_to_1970_gens = [
+    TimestampGen(start=datetime(1590, 1, 1, tzinfo=timezone.utc),
+                 end=datetime(1969, 12, 31, 23, 59, 59, 999999,
+                              tzinfo=timezone.utc))]
+
+orc_write_non_timestamp_gens_list = [orc_write_basic_gens,
         orc_write_struct_gens_sample,
         orc_write_array_gens_sample,
         orc_write_basic_map_gens,
-        pytest.param([date_gen], marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/139')),
-        pytest.param([timestamp_gen], marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/140'))]
+        pytest.param([date_gen], marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/139'))]
 
-# Every supported entry in orc_write_gens_list contains a DATE column. ORC DATE writes
-# intentionally fall back to CPU until cuDF can persist the calendar metadata.
+pre_1590_timestamp_param = pytest.param(
+        pre_1590_timestamp_gens,
+        marks=pytest.mark.xfail(reason='https://github.com/rapidsai/cudf/issues/11691'),
+        id='pre-1590-timestamp')
+timestamp_1590_to_1970_param = pytest.param(
+        timestamp_1590_to_1970_gens, id='1590-to-1970-timestamp')
+timestamp_1590_to_1970_direct_param = pytest.param(
+        timestamp_1590_to_1970_gens,
+        marks=validate_execs_in_gpu_plan('GpuWriteFilesExec')
+        if is_spark_340_or_later() or is_databricks122_or_later() else [],
+        id='1590-to-1970-timestamp-direct')
+
+orc_write_gens_list = [
+        *orc_write_non_timestamp_gens_list,
+        pre_1590_timestamp_param,
+        timestamp_1590_to_1970_param]
+
+orc_write_direct_gens_list = [
+        *orc_write_non_timestamp_gens_list,
+        pre_1590_timestamp_param,
+        timestamp_1590_to_1970_direct_param]
+
+orc_write_empty_gens_list = [
+        *orc_write_non_timestamp_gens_list,
+        timestamp_1590_to_1970_direct_param]
+
+# Date-bearing entries need CPU command wrappers until cuDF can persist ORC calendar
+# metadata. Direct timestamp writes separately require GpuWriteFilesExec.
 orc_date_writer_allow = ['DataWritingCommandExec', 'ExecutedCommandExec', 'WriteFilesExec']
 orc_date_write_allow = list(dict.fromkeys([*orc_date_writer_allow, *non_utc_allow]))
 
 bool_gen = [BooleanGen(nullable=True), BooleanGen(nullable=False)]
-@pytest.mark.parametrize('orc_gens', orc_write_gens_list, ids=idfn)
+@pytest.mark.parametrize('orc_gens', orc_write_direct_gens_list, ids=idfn)
 @pytest.mark.parametrize('orc_impl', ["native", "hive"])
 @allow_non_gpu(*orc_date_write_allow)
 def test_write_round_trip(spark_tmp_path, orc_gens, orc_impl):
@@ -149,7 +183,7 @@ def test_write_round_trip_boolean_two_row_groups(spark_tmp_path, orc_gen, orc_im
             conf={'spark.sql.orc.impl': orc_impl, 'spark.rapids.sql.format.orc.write.enabled': True,
                   'spark.rapids.sql.format.orc.write.boolType.enabled': True})
 
-@pytest.mark.parametrize('orc_gens', orc_write_gens_list, ids=idfn)
+@pytest.mark.parametrize('orc_gens', orc_write_direct_gens_list, ids=idfn)
 @pytest.mark.parametrize('orc_impl', ["native", "hive"])
 @allow_non_gpu(*orc_date_write_allow)
 def test_write_round_trip_two_stripes(spark_tmp_path, orc_gens, orc_impl):
@@ -433,7 +467,7 @@ def test_orc_write_bloom_filter_sql_cpu_fallback(spark_tmp_path, spark_tmp_table
       conf={'spark.rapids.sql.format.orc.write.enabled': True})
 
 
-@pytest.mark.parametrize('orc_gens', orc_write_gens_list, ids=idfn)
+@pytest.mark.parametrize('orc_gens', orc_write_empty_gens_list, ids=idfn)
 @allow_non_gpu(*orc_date_write_allow)
 def test_write_empty_orc_round_trip(spark_tmp_path, orc_gens):
     def create_empty_df(spark, path):

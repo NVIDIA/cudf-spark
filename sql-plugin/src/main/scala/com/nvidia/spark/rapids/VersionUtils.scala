@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,6 +23,8 @@ import org.apache.spark.internal.Logging
 object VersionUtils extends Logging {
 
   lazy val isSpark320OrLater: Boolean = cmpSparkVersion(3, 2, 0) >= 0
+
+  lazy val isSpark400OrLater: Boolean = cmpSparkVersion(4, 0, 0) >= 0
 
   lazy val isSpark: Boolean = {
     ShimLoader.getShimVersion.isInstanceOf[SparkShimVersion]

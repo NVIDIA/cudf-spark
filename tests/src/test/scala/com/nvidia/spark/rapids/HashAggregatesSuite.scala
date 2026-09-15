@@ -21,18 +21,71 @@ import java.sql.Timestamp
 import org.apache.spark
 
 import org.apache.spark.SparkConf
+import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.AnalysisException
-import org.apache.spark.sql.execution.{SparkPlan, WholeStageCodegenExec}
+import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeReference, Expression,
+  ExprId, Literal}
+import org.apache.spark.sql.catalyst.expressions.aggregate.Final
+import org.apache.spark.sql.execution.{LeafExecNode, SparkPlan, WholeStageCodegenExec}
 import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, BroadcastQueryStageExec, QueryStageExec, ShuffleQueryStageExec}
 import org.apache.spark.sql.execution.aggregate.SortAggregateExec
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+import org.apache.spark.sql.rapids.aggregate.{CudfAggregate, GpuAggregateExpression,
+  GpuAggregateFunction}
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims._
-import org.apache.spark.sql.types.{DataType, DataTypes}
+import org.apache.spark.sql.types.{DataType, DataTypes, IntegerType}
 
 class HashAggregatesSuite extends SparkQueryCompareTestSuite {
   private def floatAggConf: SparkConf = enableCsvConf()
       .set(RapidsConf.ENABLE_FLOAT_AGG.key, "true")
+
+  test("SPARK-55979: GPU aggregate references retain renamed input buffer attributes") {
+    val scanAggBufferAttr = AttributeReference("buf", IntegerType, nullable = true)()
+    // withName preserves exprId while changing the display name, matching the Spark regression.
+    val inputAggBufferAttr = scanAggBufferAttr.withName("renamed_buf")
+
+    // LocalTableScanExec has version-specific constructors; this keeps the test common-shim safe.
+    case class TestLeafExec(override val output: Seq[Attribute]) extends LeafExecNode {
+      override protected def doExecute(): RDD[InternalRow] =
+        throw new UnsupportedOperationException("TestLeafExec does not execute")
+    }
+
+    case class MyGpuAggregate() extends GpuAggregateFunction {
+      override def children: Seq[Expression] = Nil
+      override def nullable: Boolean = true
+      override def dataType: DataType = IntegerType
+      override def prettyName: String = "test_gpu_agg"
+      override val initialValues: Seq[Expression] = Seq(Literal(0))
+      override val inputProjection: Seq[Expression] = Nil
+      override val updateAggregates: Seq[CudfAggregate] = Nil
+      override val mergeAggregates: Seq[CudfAggregate] = Nil
+      override val evaluateExpression: Expression = inputAggBufferAttr
+      override def aggBufferAttributes: Seq[AttributeReference] = Seq(inputAggBufferAttr)
+      override def withNewChildrenInternal(
+          newChildren: IndexedSeq[Expression]): Expression = copy()
+    }
+
+    val aggregateExpression = GpuAggregateExpression(
+      MyGpuAggregate(), Final, isDistinct = false, filter = None, resultId = ExprId(1))
+    val aggregateResult = AttributeReference("result", IntegerType, nullable = true)()
+    val aggregate = GpuHashAggregateExec(
+      requiredChildDistributionExpressions = None,
+      groupingExpressions = Nil,
+      aggregateExpressions = Seq(aggregateExpression),
+      aggregateAttributes = Seq(aggregateResult),
+      resultExpressions = Seq(Alias(aggregateExpression, "result")()),
+      child = TestLeafExec(Seq(scanAggBufferAttr)),
+      configuredTargetBatchSize = 1L,
+      estimatedPreProcessGrowth = 1.0,
+      forceSinglePassAgg = false,
+      allowSinglePassAgg = true,
+      allowNonFullyAggregatedOutput = false,
+      skipAggPassReductionRatio = Double.MaxValue)
+
+    assert(aggregate.references.contains(inputAggBufferAttr))
+  }
 
   def replaceHashAggMode(mode: String, conf: SparkConf = new SparkConf()): SparkConf = {
     // configures whether Plugin will replace certain aggregate exec nodes

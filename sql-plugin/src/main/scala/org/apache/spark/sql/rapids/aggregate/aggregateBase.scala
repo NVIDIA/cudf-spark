@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -277,6 +277,39 @@ case class GpuAggregateExpression(origAggregateFunction: GpuAggregateFunction,
   }
 
   override def sql: String = aggregateFunction.sql(isDistinct)
+}
+
+case class GpuAggregateExpressionMeta(
+    aggregateExpression: AggregateExpression,
+    override val conf: RapidsConf,
+    parentMeta: Option[RapidsMeta[_, _, _]],
+    rule: DataFromReplacementRule)
+    extends ExprMeta[AggregateExpression](aggregateExpression, conf, parentMeta, rule) {
+
+  private val filter: Option[BaseExprMeta[_]] =
+    aggregateExpression.filter.map(GpuOverrides.wrapExpr(_, conf, Some(this)))
+  private val childrenExprMeta: Seq[BaseExprMeta[Expression]] =
+    aggregateExpression.children.map(GpuOverrides.wrapExpr(_, conf, Some(this)))
+  override val childExprs: Seq[BaseExprMeta[_]] = childrenExprMeta ++ filter.toSeq
+
+  override def convertToGpuImpl(): GpuExpression = {
+    // Handle the case where AggregateExpression has the resultIds parameter containing a
+    // sequence of ExprIds instead of a single resultId.
+    val resultId = try {
+      val resultMethod = aggregateExpression.getClass.getMethod("resultId")
+      resultMethod.invoke(aggregateExpression).asInstanceOf[ExprId]
+    } catch {
+      case _: Exception =>
+        val resultMethod = aggregateExpression.getClass.getMethod("resultIds")
+        resultMethod.invoke(aggregateExpression).asInstanceOf[Seq[ExprId]].head
+    }
+    GpuAggregateExpression(
+      childExprs.head.convertToGpu().asInstanceOf[GpuAggregateFunction],
+      aggregateExpression.mode,
+      aggregateExpression.isDistinct,
+      filter.map(_.convertToGpu()),
+      resultId)
+  }
 }
 
 trait CudfAggregate extends Serializable {

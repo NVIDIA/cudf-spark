@@ -1341,31 +1341,39 @@ case class GpuMonthsBetween(ts1: Expression,
     }
 
     val zoneId = timeZoneId.map(s => ZoneId.of(s).normalized()).getOrElse(UTC)
-    withResource(convertToZoneAndClose(ts1.columnarEval(batch), zoneId)) { converted1 =>
+    val monthParts = withResource(convertToZoneAndClose(ts1.columnarEval(batch), zoneId)) {
+      converted1 =>
       withResource(convertToZoneAndClose(ts2.columnarEval(batch), zoneId)) { converted2 =>
-        withResource(calcMonthDiff(converted1, converted2)) { monthDiff =>
-          withResource(calcJustMonth(converted1, converted2)) { justMonthDiff =>
-            withResource(calcSecondsDiff(converted1, converted2)) { secondsDiff =>
-              val partialMonth = withResource(Scalar.fromDouble(DAYS.toSeconds(31))) {
-                secondsInMonth =>
+        val monthDiff = calcMonthDiff(converted1, converted2)
+        closeOnExcept(monthDiff) { _ =>
+          val justMonthDiff = calcJustMonth(converted1, converted2)
+          closeOnExcept(justMonthDiff) { _ =>
+            val partialMonth = withResource(calcSecondsDiff(converted1, converted2)) {
+              secondsDiff =>
+                withResource(Scalar.fromDouble(DAYS.toSeconds(31))) { secondsInMonth =>
                   secondsDiff.trueDiv(secondsInMonth)
-              }
-              val roundedPartialMonth = if (needsRoundOff.get) {
-                withResource(partialMonth) { _ =>
-                  Arithmetic.round(partialMonth, 8)
                 }
-              } else {
-                partialMonth
-              }
-              val diff = withResource(roundedPartialMonth) { _ =>
-                roundedPartialMonth.add(monthDiff)
-              }
-              withResource(diff) { _ =>
-                GpuColumnVector.from(justMonthDiff.ifElse(monthDiff, diff), dataType)
-              }
+            }
+            closeOnExcept(partialMonth) { _ =>
+              Seq(monthDiff, justMonthDiff, partialMonth)
             }
           }
         }
+      }
+    }
+    withResource(monthParts) { parts =>
+      val monthDiff = parts(0)
+      val justMonthDiff = parts(1)
+      val partialMonth = parts(2)
+      val diff = if (needsRoundOff.get) {
+        withResource(Arithmetic.round(partialMonth, 8)) { roundedPartialMonth =>
+          roundedPartialMonth.add(monthDiff)
+        }
+      } else {
+        partialMonth.add(monthDiff)
+      }
+      withResource(diff) { _ =>
+        GpuColumnVector.from(justMonthDiff.ifElse(monthDiff, diff), dataType)
       }
     }
   }

@@ -1167,17 +1167,18 @@ object GpuCast {
             }
           }
           // now wrap the string with `{` and `}`
-          withResource(jsonAttrs) { _ =>
+          val wrapped = withResource(jsonAttrs) { _ =>
             withResource(ArrayBuffer.empty[ColumnVector]) { columns =>
               columns += leftBrace.incRefCount()
               columns += jsonAttrs.incRefCount()
               columns += rightBrace.incRefCount()
-              withResource(ColumnVector.stringConcatenate(emptyScalar,
-                emptyScalar, columns.toArray, false))(
-                _.mergeAndSetValidity(BinaryOp.BITWISE_AND, input) // original whole row is null
-              )
+              ColumnVector.stringConcatenate(emptyScalar,
+                emptyScalar, columns.toArray, false)
             }
           }
+          withResource(wrapped)(
+            _.mergeAndSetValidity(BinaryOp.BITWISE_AND, input) // original whole row is null
+          )
       }
     }
   }

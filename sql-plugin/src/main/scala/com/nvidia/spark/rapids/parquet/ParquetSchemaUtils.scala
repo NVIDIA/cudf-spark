@@ -20,7 +20,7 @@ import java.util.{Locale, Optional}
 
 import scala.collection.JavaConverters._
 
-import ai.rapids.cudf.{ColumnView, DType, Table}
+import ai.rapids.cudf.{ColumnVector, ColumnView, DType, Table}
 import com.nvidia.spark.rapids.{CastOptions, GpuCast, GpuColumnVector, SchemaUtils}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.shims.parquet.ParquetSchemaClipShims
@@ -685,6 +685,20 @@ object ParquetSchemaUtils {
     }
   }
 
+  private[parquet] def convertStringToBinary(cv: ColumnView): ColumnVector = {
+    // Ideally we would bitCast the STRING to a LIST, but that does not work.
+    // Instead, pull apart the string and put it back together as a list.
+    val dataBuf = Option(cv.getData)
+    withResource(new ColumnView(DType.UINT8, dataBuf.map(_.getLength).getOrElse(0),
+      Optional.of(0L), dataBuf.orNull, null)) { data =>
+      withResource(new ColumnView(DType.LIST, cv.getRowCount,
+        Optional.of[java.lang.Long](cv.getNullCount),
+        cv.getValid, cv.getOffsets, Array(data))) { everything =>
+        everything.copyToColumnVector()
+      }
+    }
+  }
+
   // Wrap up all required casts for Parquet schema evolution
   //
   // Note: The behavior of unsigned to signed is decided by the Spark,
@@ -705,20 +719,7 @@ object ParquetSchemaUtils {
       needUpcast(cv, dt)) {
       cv.castTo(GpuColumnVector.getNonNestedRapidsType(dt))
     } else if (DType.STRING.equals(cv.getType) && dt == BinaryType) {
-      // Ideally we would bitCast the STRING to a LIST, but that does not work.
-      // Instead, we are going to have to pull apart the string and put it back together
-      // as a list.
-
-      val dataBuf = Option(cv.getData)
-      withResource(new ColumnView(DType.UINT8, dataBuf.map(_.getLength).getOrElse(0),
-        Optional.of(0L),
-        dataBuf.orNull, null)) { data =>
-        withResource(new ColumnView(DType.LIST, cv.getRowCount,
-          Optional.of[java.lang.Long](cv.getNullCount),
-          cv.getValid, cv.getOffsets, Array(data))) { everything =>
-          everything.copyToColumnVector()
-        }
-      }
+      convertStringToBinary(cv)
     } else {
       throw new IllegalStateException("Logical error: no valid casts are found " +
           s"${cv.getType} to $dt")

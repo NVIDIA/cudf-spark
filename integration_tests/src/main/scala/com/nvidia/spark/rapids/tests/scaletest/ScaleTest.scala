@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@ import scala.collection.mutable.ListBuffer
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration.NANOSECONDS
 
+import com.nvidia.spark.rapids.ConsoleOutput
 import com.nvidia.spark.rapids.tests.scaletest.Utils.stackTraceAsString
 import scopt.OptionParser
 
@@ -81,14 +82,14 @@ object ScaleTest {
         // Scala Test aims for stability not performance. And the sleep time will not be calculated
         // into execution time.
         val sleepTime = 1
-        println(s"There are still jobs running, waiting for $sleepTime seconds.")
+        ConsoleOutput.writeLine(s"There are still jobs running, waiting for $sleepTime seconds.")
         Thread.sleep(sleepTime * 1000)
       }
       val taskFailureListener = new TaskFailureListener
       try {
         val future = scala.concurrent.Future {
           spark.sparkContext.setJobGroup(query.name, s"query=${query.name},iteration=$i")
-          println(s"Iteration: $i")
+          ConsoleOutput.writeLine(s"Iteration: $i")
 
           spark.conf.set("spark.sql.shuffle.partitions", query.shufflePartitions)
           spark.sparkContext.addSparkListener(taskFailureListener)
@@ -109,7 +110,7 @@ object ScaleTest {
           scala.concurrent.duration.Duration(query.timeout, TimeUnit.MILLISECONDS))
       } catch {
         case e: java.util.concurrent.TimeoutException =>
-          println(s"Timeout at iteration $i")
+          ConsoleOutput.writeLine(s"Timeout at iteration $i")
           // use "-1" to mark timeout execution
           executionTimes += -1
           spark.sparkContext.cancelAllJobs()
@@ -117,7 +118,7 @@ object ScaleTest {
           exceptions.add(e.getMessage)
         case e: Exception =>
           // We don't want a query failure to fail over the whole test.
-          println(s"Query failed: $query - ${e.getMessage}")
+          ConsoleOutput.writeLine(s"Query failed: $query - ${e.getMessage}")
           executionTimes += -1
           status.append(STATUS_FAILED)
           exceptions.add(stackTraceAsString(e))
@@ -137,9 +138,9 @@ object ScaleTest {
   private def printQueries(spark: SparkSession, queryMap: Map[String, TestQuery]): Unit
   = {
     for ((queryName, query) <- queryMap) {
-      println("*"*80)
-      println(queryName)
-      println(query.content)
+      ConsoleOutput.writeLine("*"*80)
+      ConsoleOutput.writeLine(queryName)
+      ConsoleOutput.writeLine(query.content)
       spark.sql(query.content).explain()
     }
   }
@@ -161,8 +162,8 @@ object ScaleTest {
     var results = Seq[QueryMeta]()
     for ((queryName, query) <- queryMap) {
       val outputPath = s"${config.outputDir}/$queryName"
-      println(s"Running Query: $queryName for ${query.iterations} iterations")
-      println(s"${query.content}")
+      ConsoleOutput.writeLine(s"Running Query: $queryName for ${query.iterations} iterations")
+      ConsoleOutput.writeLine(s"${query.content}")
       // run one query for several iterations in a row
       val queryMeta = runOneQueryForIterations(query, outputPath, config.overwrite, config.format,
         spark, idleSessionListener)

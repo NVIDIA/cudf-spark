@@ -19,9 +19,54 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.suites
 
-import org.apache.spark.sql.{MetadataCacheV1Suite, MetadataCacheV2Suite}
+import com.nvidia.spark.rapids.{RapidsConf, RapidsReaderType}
+
+import org.apache.spark.SparkException
+import org.apache.spark.sql.{MetadataCacheSuite, MetadataCacheV1Suite, MetadataCacheV2Suite}
 import org.apache.spark.sql.rapids.utils.RapidsSQLTestsTrait
 
+private[suites] trait RapidsMetadataCacheRecoveryHintTests {
+  self: MetadataCacheSuite with RapidsSQLTestsTrait =>
+
+  protected def expectRefreshHint: Boolean
+
+  private def exceptionMessages(error: Throwable): String = {
+    val messages = new StringBuilder
+    var current = error
+    while (current != null) {
+      messages.append(current.toString)
+      messages.append('\n')
+      current = current.getCause
+    }
+    messages.toString()
+  }
+
+  Seq(RapidsReaderType.COALESCING, RapidsReaderType.MULTITHREADED).foreach { readerType =>
+    testRapids(s"missing ORC file includes recovery guidance - $readerType") {
+      withSQLConf(RapidsConf.ORC_READER_TYPE.key -> readerType.toString) {
+        withTempPath { location =>
+          spark.range(start = 0, end = 100, step = 1, numPartitions = 3)
+            .write.orc(location.getAbsolutePath)
+
+          val df = spark.read.orc(location.getAbsolutePath)
+          assert(df.count() == 100)
+          deleteOneFileInDirectory(location)
+
+          val messages = exceptionMessages(intercept[SparkException](df.count()))
+          assert(messages.contains("recreating the Dataset/DataFrame involved"))
+          assert(messages.contains("REFRESH TABLE") === expectRefreshHint)
+        }
+      }
+    }
+  }
+}
+
 class RapidsMetadataCacheV1Suite extends MetadataCacheV1Suite with RapidsSQLTestsTrait
+    with RapidsMetadataCacheRecoveryHintTests {
+  override protected val expectRefreshHint: Boolean = true
+}
 
 class RapidsMetadataCacheV2Suite extends MetadataCacheV2Suite with RapidsSQLTestsTrait
+    with RapidsMetadataCacheRecoveryHintTests {
+  override protected val expectRefreshHint: Boolean = false
+}

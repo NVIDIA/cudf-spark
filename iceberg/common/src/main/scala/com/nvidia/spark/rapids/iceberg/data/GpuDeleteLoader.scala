@@ -20,9 +20,12 @@ import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
 
 import ai.rapids.cudf.{Table => CudfTable}
-import com.nvidia.spark.rapids.{GpuColumnVector, LazySpillableColumnarBatch}
+import com.nvidia.spark.rapids.{GpuColumnVector, LazySpillableColumnarBatch, NoopMetric}
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.GpuMetric.{ICEBERG_DV_BYTES, ICEBERG_DV_LOAD_TIME,
+  ICEBERG_DV_POSITIONS}
 import com.nvidia.spark.rapids.fileio.iceberg.{IcebergFileIO, IcebergInputFile}
+import com.nvidia.spark.rapids.iceberg.{IcebergDeletionVector, ShimUtils}
 import com.nvidia.spark.rapids.iceberg.ShimUtils.locationOf
 import com.nvidia.spark.rapids.iceberg.parquet._
 import org.apache.iceberg.{DeleteFile, MetadataColumns, Schema}
@@ -42,7 +45,26 @@ class DefaultDeleteLoader(
     private val inputFiles: Map[String, IcebergInputFile],
     private val parquetConf: GpuIcebergParquetReaderConf) extends GpuDeleteLoader {
 
-  def loadDeletes(deletes: Seq[DeleteFile],
+  def loadDeletionVector(delete: DeleteFile): IcebergDeletionVector = {
+    require(ShimUtils.isDeletionVector(delete),
+      s"Expected a Puffin deletion vector, found ${delete.format()}")
+
+    val inputFile = inputFiles.getOrElse(locationOf(delete),
+      throw new IllegalArgumentException(
+        s"No decrypted input file was provided for deletion vector ${locationOf(delete)}"))
+    val loadTime = parquetConf.metrics.getOrElse(ICEBERG_DV_LOAD_TIME, NoopMetric)
+    val deletionVector = loadTime.ns {
+      ShimUtils.readDeletionVector(delete, inputFile, parquetConf.validateDeletionVectorCrc)
+    }
+
+    parquetConf.metrics.getOrElse(ICEBERG_DV_BYTES, NoopMetric) +=
+      deletionVector.serializedSizeInBytes()
+    parquetConf.metrics.getOrElse(ICEBERG_DV_POSITIONS, NoopMetric) +=
+      deletionVector.cardinality()
+    deletionVector
+  }
+
+  override def loadDeletes(deletes: Seq[DeleteFile],
       schema: Schema,
       sparkTypes: Array[DataType]): LazySpillableColumnarBatch = {
     val files = deletes.map(f => IcebergPartitionedFile(inputFiles(locationOf(f))))
@@ -85,12 +107,14 @@ class DefaultDeleteLoader(
           files,
           _ => Map.empty[Integer, Any].asJava,
           _ => None,
+          _ => None,
           newConf)
       case _: MultiThread =>
         new GpuMultiThreadIcebergParquetReader(
           rapidsFileIO,
           files,
           _ => Map.empty[Integer, Any].asJava,
+          _ => None,
           _ => None,
           newConf)
       case _: MultiFile =>

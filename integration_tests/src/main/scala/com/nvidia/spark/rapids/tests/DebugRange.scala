@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,8 @@ package com.nvidia.spark.rapids.tests
 
 import java.lang.reflect.Constructor
 
+import com.nvidia.spark.rapids.ConsoleOutput
+
 object DebugRange {
   var color: Option[_] = None
   var constructor: Option[Constructor[_]] = None
@@ -33,7 +35,7 @@ object DebugRange {
           color = Some(colorCls.getEnumConstants().head)
         } catch {
           case e: ClassNotFoundException =>
-            System.err.println(s"\nCOULD NOT INITIALIZE NVTX RANGE $e")
+            ConsoleOutput.writeErrorLine(s"\nCOULD NOT INITIALIZE NVTX RANGE $e")
         }
         initialized = true
       }
@@ -42,7 +44,7 @@ object DebugRange {
       Some(constructor.get.newInstance(name, color.get.asInstanceOf[Object])
         .asInstanceOf[AutoCloseable])
     } else {
-      System.err.println(s"\nCOULD NOT INITIALIZE NVTX RANGE $name")
+      ConsoleOutput.writeErrorLine(s"\nCOULD NOT INITIALIZE NVTX RANGE $name")
       None
     }
   }

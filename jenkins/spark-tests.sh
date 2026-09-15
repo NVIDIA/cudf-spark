@@ -277,6 +277,7 @@ mkdir -p $TARGET_DIR
 
 run_delta_lake_tests() {
   echo "run_delta_lake_tests SPARK_VER = $SPARK_VER, SCALA_BINARY_VER = $SCALA_BINARY_VER"
+  DELTA_LAKE_VERSIONS=""
   SPARK_32X_PATTERN="(3\.2\.[0-9])"
   SPARK_33X_PATTERN="(3\.3\.[0-9])"
   SPARK_34X_PATTERN="(3\.4\.[0-9])"
@@ -312,6 +313,9 @@ run_delta_lake_tests() {
       else
         DELTA_LAKE_VERSIONS="4.0.1"
       fi
+      if [[ "$SPARK_VER" == "4.0.1" ]]; then
+        DELTA_LAKE_VERSIONS="$DELTA_LAKE_VERSIONS 4.2.0"
+      fi
     else
       echo "Skipping Delta Lake 4.0.x tests for Scala $SCALA_BINARY_VER (requires Scala 2.13)"
     fi
@@ -321,6 +325,9 @@ run_delta_lake_tests() {
     # Delta 4.1.x only supports Scala 2.13 (Spark 4.1 requirement)
     if [[ "$SCALA_BINARY_VER" == "2.13" ]]; then
       DELTA_LAKE_VERSIONS="4.1.0"
+      if [[ "$SPARK_VER" == "4.1.1" ]]; then
+        DELTA_LAKE_VERSIONS="$DELTA_LAKE_VERSIONS 4.2.0"
+      fi
     else
       echo "Skipping Delta Lake 4.1.x tests for Scala $SCALA_BINARY_VER (requires Scala 2.13)"
     fi
@@ -331,7 +338,10 @@ run_delta_lake_tests() {
   else
     for v in $DELTA_LAKE_VERSIONS; do
       echo "Running Delta Lake tests for Delta Lake version $v"
-      if [[ "$v" == "4.1.0" ]]; then
+      if [[ "$v" == "4.2.0" ]]; then
+        DELTA_SPARK_LINE=${SPARK_VER%.*}
+        DELTA_MAIN_JAR="io.delta:delta-spark_${DELTA_SPARK_LINE}_${SCALA_BINARY_VER}:$v"
+      elif [[ "$v" == "4.1.0" ]]; then
         DELTA_MAIN_JAR="io.delta:delta-spark_4.1_${SCALA_BINARY_VER}:$v"
       elif [[ "$v" == "3.3.0" || "$v" == "4.0.0" || \
           "$v" == "4.0.1" ]]; then
@@ -353,6 +363,17 @@ run_delta_lake_tests() {
 }
 
 run_iceberg_tests() {
+  # Spark 3.5 validates every optimizer rule's output when the spark.testing JVM property is
+  # present. Iceberg V3 COW rewrites temporarily produce an unresolved ReplaceData plan while
+  # GroupBasedRowLevelOperationScanPlanning rewrites row-lineage columns, so the test-only
+  # validation fails CPU setup before physical planning. Because spark.testing is presence-based
+  # (even false enables it) and cannot be disabled through SparkSession configuration, omit it
+  # from every Iceberg test subprocess.
+  # See https://github.com/NVIDIA/cudf-spark/issues/15680
+  # and https://github.com/NVIDIA/cudf-spark/issues/15950.
+  local SPARK_TESTING_ENABLED=0
+  export SPARK_TESTING_ENABLED
+
   # get the major/minor version of Spark
   ICEBERG_SPARK_VER=$(echo "$SPARK_VER" | cut -d. -f1,2)
   # get the patch version of Spark
@@ -703,14 +724,6 @@ fi
 # Non-UTC time zone tests
 if [[ "$TEST_MODE" == "NON_UTC_TZ" ]]; then
   run_non_utc_time_zone_tests
-fi
-
-# hybrid execution tests
-if [[ "$TEST_MODE" == "DEFAULT" || "$TEST_MODE" == "HYBRID_EXECUTION" ]]; then
-  source "${WORKSPACE}/jenkins/hybrid_execution.sh"
-  if hybrid_prepare ; then
-    LOAD_HYBRID_BACKEND=1 ./run_pyspark_from_build.sh -m hybrid_test
-  fi
 fi
 
 popd

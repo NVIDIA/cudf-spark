@@ -20,3 +20,35 @@ steps can be helpful in narrowing down which files in the changeset are directly
    ```
 4. The `audit-plugin.log` shows a SHA-1 value followed by a list of classes which are changed in this 
 commit and are referenced in the Plugin. This should help focus our attention to the relevant changes
+
+## Checking `withResource` nesting
+
+Production Scala code may nest at most four `withResource` scopes. Run the check directly with:
+
+```
+python3 scripts/check_with_resource_nesting.py --root .
+```
+
+Existing violations are recorded in `scripts/with_resource_nesting_baseline.json`. The baseline is a
+ratchet: adding a violation fails the check, and removing one makes the baseline stale. Regenerate it
+after deliberately reducing the current violation set. The remaining exceptions are tracked by
+https://github.com/NVIDIA/cudf-spark/issues/11713:
+
+```
+python3 scripts/check_with_resource_nesting.py --root . --update-baseline
+```
+
+When deeper nesting is necessary, place a justified exemption immediately before its outer scope:
+
+```scala
+// with-resource-lint: allow-deep-nesting -- required by #11713
+withResource(first) { first =>
+  // ...
+}
+```
+
+Only hoist values that own their data. Views returned by methods such as `bitCastTo`,
+`getChildColumnView`, `replaceListChild`, and `splitAsViews` must not outlive their owning parent.
+Copy or convert a view to an owning resource before closing its parent.
+
+The check and its unit tests run with the all-modules Scalastyle execution during `mvn verify`.

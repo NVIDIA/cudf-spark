@@ -13,6 +13,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+/*** spark-rapids-shim-json-lines
+{"spark": "354"}
+{"spark": "355"}
+{"spark": "356"}
+{"spark": "357"}
+{"spark": "358"}
+{"spark": "359"}
+spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.iceberg;
 

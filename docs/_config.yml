@@ -20,8 +20,8 @@ remote_theme: pmarsceill/just-the-docs
 aux_links:
   "NVIDIA cuDF plugin for Apache Spark User Guide":
     - "//docs.nvidia.com/spark-rapids/user-guide/latest/index.html"
-  "NVIDIA cuDF plugin for Apache Spark on Github":
-    - "//github.com/nvidia/cudf-spark"
+  "NVIDIA cuDF plugin for Apache Spark on GitHub":
+    - "//github.com/NVIDIA/cudf-spark"
 
 plugins:
   - jekyll-optional-front-matter # GitHub Pages

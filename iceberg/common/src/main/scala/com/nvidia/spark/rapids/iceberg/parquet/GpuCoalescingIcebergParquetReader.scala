@@ -33,13 +33,14 @@ class GpuCoalescingIcebergParquetReader(
     override val conf: GpuIcebergParquetReaderConf) extends GpuIcebergParquetReader {
 
   // Class invariant: the parent coalescer can merge multiple Iceberg splits of the same
-  // physical Parquet file under a single per-file post-processor, so file-global `_pos`
-  // values would be wrong for any split past the first. GpuReaderFactory's canUseCoalescing
-  // predicate already excludes `_pos`-projecting scans; this require is a fail-loud
+  // physical Parquet file under a single per-file post-processor, so file-global `_pos` and
+  // inherited `_row_id` values would be wrong for any split past the first. GpuReaderFactory's
+  // canUseCoalescing predicate already excludes position-dependent scans; this require is a
+  // fail-loud
   // regression guard if that factory gate is ever weakened.
   require(!conf.threadConf.asInstanceOf[MultiFile].hasRowPositionMetadata,
-    "_pos scans must not use the Iceberg coalescing reader; GpuReaderFactory should have " +
-      "routed this scan to a per-file reader instead")
+    "Position-dependent Iceberg scans must not use the coalescing reader; GpuReaderFactory " +
+      "should have routed this scan to a per-file reader instead")
 
   private var inited = false
   private lazy val reader = createParquetReader()
