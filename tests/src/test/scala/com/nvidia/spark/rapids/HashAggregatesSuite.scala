@@ -26,10 +26,10 @@ import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeReference, Expression,
   ExprId, Literal}
-import org.apache.spark.sql.catalyst.expressions.aggregate.Final
+import org.apache.spark.sql.catalyst.expressions.aggregate.{Final, Partial}
 import org.apache.spark.sql.execution.{LeafExecNode, SparkPlan, WholeStageCodegenExec}
 import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, BroadcastQueryStageExec, QueryStageExec, ShuffleQueryStageExec}
-import org.apache.spark.sql.execution.aggregate.SortAggregateExec
+import org.apache.spark.sql.execution.aggregate.{ObjectHashAggregateExec, SortAggregateExec}
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
 import org.apache.spark.sql.rapids.aggregate.{CudfAggregate, GpuAggregateExpression,
@@ -40,6 +40,31 @@ import org.apache.spark.sql.types.{DataType, DataTypes, IntegerType}
 class HashAggregatesSuite extends SparkQueryCompareTestSuite {
   private def floatAggConf: SparkConf = enableCsvConf()
       .set(RapidsConf.ENABLE_FLOAT_AGG.key, "true")
+
+  test("incomplete positional typed aggregate result mapping fails closed") {
+    withCpuSparkSession({ spark =>
+      val plan = spark.range(10)
+        .groupBy((col("id") % 2).alias("key"))
+        .agg(collect_set(col("id")).alias("values"))
+        .queryExecution.sparkPlan
+
+      val partialAgg = plan.collectFirst {
+        case agg: ObjectHashAggregateExec
+            if agg.aggregateExpressions.exists(_.mode == Partial) => agg
+      }.getOrElse(fail(s"Expected a partial ObjectHashAggregateExec in:\n$plan"))
+
+      // Simulate the inconsistent positional layout from #15808: the typed aggregate still
+      // needs its shuffle-facing result type remapped, but that result expression is absent.
+      val malformedAgg = partialAgg.copy(
+        resultExpressions = partialAgg.resultExpressions.dropRight(1))
+      val meta = GpuOverrides.wrapPlan(
+        malformedAgg, new RapidsConf(Map.empty[String, String]), None)
+      meta.tagForGpu()
+
+      assert(!meta.canThisBeReplaced,
+        "An unresolved positional typed aggregate result must prevent GPU conversion")
+    }, new SparkConf().set("spark.sql.adaptive.enabled", "false"))
+  }
 
   test("SPARK-55979: GPU aggregate references retain renamed input buffer attributes") {
     val scanAggBufferAttr = AttributeReference("buf", IntegerType, nullable = true)()
