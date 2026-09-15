@@ -21,7 +21,6 @@ import org.apache.spark.sql.catalyst.plans.logical.{Command, LogicalPlan, V2Writ
 import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
 import org.apache.spark.sql.delta.DeltaOptions
 import org.apache.spark.sql.delta.catalog.DeltaTableV2
-import org.apache.spark.sql.delta.commands.WriteIntoDelta
 import org.apache.spark.sql.delta.rapids.{DeltaCommandShims, DeltaRuntimeShim, GpuDeltaLog}
 import org.apache.spark.sql.execution.command.RunnableCommand
 
@@ -65,15 +64,14 @@ case class GpuDeltaDynamicPartitionOverwriteCommand(
 
     DeltaRuntimeShim.createGpuWrite(
       gpuDeltaLog,
-      WriteIntoDelta(
+      DeltaRuntimeShim.createCpuWrite(
         gpuDeltaLog.deltaLog,
         SaveMode.Overwrite,
         deltaOptions,
         partitionColumns = Nil,
         deltaTable.deltaLog.unsafeVolatileSnapshot.metadata.configuration,
         shims.createDataFrame(operationSession, query),
-        deltaTable.catalogTable
-      )
-    ).run(sparkSession)
+        deltaTable.catalogTable,
+        schemaInCatalog = None)).run(sparkSession)
   }
 }

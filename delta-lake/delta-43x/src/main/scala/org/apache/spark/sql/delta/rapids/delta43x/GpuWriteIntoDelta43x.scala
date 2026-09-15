@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package org.apache.spark.sql.delta.rapids.delta42x
+package org.apache.spark.sql.delta.rapids.delta43x
 
 import scala.util.Try
 
@@ -25,13 +25,13 @@ import org.apache.spark.sql.delta.commands.WriteIntoDelta
 import org.apache.spark.sql.delta.rapids.{GpuDeltaLog, GpuWriteIntoDeltaBase, GpuWriteIntoDeltaLike}
 
 /**
- * GPU version of Delta 4.2's WriteIntoDelta.
+ * GPU version of Delta 4.3's WriteIntoDelta.
  *
  * This class must have a different FQCN from GpuWriteIntoDelta because aggregate JARs contain both
- * the Delta 4.0/4.1 and Delta 4.2 adapters. Sharing an FQCN would cause one version-linked class to
+ * the Delta 4.0/4.1 and Delta 4.3 adapters. Sharing an FQCN would cause one version-linked class to
  * replace the other during shading.
  */
-case class GpuWriteIntoDelta42x(
+case class GpuWriteIntoDelta43x(
     override val gpuDeltaLog: GpuDeltaLog,
     override val cpuWrite: WriteIntoDelta)
   extends GpuWriteIntoDeltaBase(gpuDeltaLog, cpuWrite)
@@ -42,9 +42,22 @@ case class GpuWriteIntoDelta42x(
       addFiles: Seq[org.apache.spark.sql.delta.actions.AddFile],
       useDynamicPartitionOverwriteMode: Boolean):
       Seq[org.apache.spark.sql.delta.actions.Action] = {
+    if (!useDynamicPartitionOverwriteMode &&
+        cpuWrite.options.useNullIntolerantEqualityWithDPO.isDefined) {
+      throw org.apache.spark.sql.delta.DeltaErrors.illegalDeltaOptionException(
+        name = org.apache.spark.sql.delta.DeltaOptions.USE_NULL_INTOLERANT_EQUALITY_WITH_DPO,
+        input = cpuWrite.options.useNullIntolerantEqualityWithDPO.get.toString,
+        explain = "This option should be specified only in Dynamic Partition Overwrite mode.")
+    }
+
     if (useDynamicPartitionOverwriteMode) {
-      val updatePartitions = addFiles.map(_.partitionValues).toSet
-      txn.filterFiles(updatePartitions).map(_.remove)
+      val filesToFilter =
+        if (cpuWrite.options.useNullIntolerantEqualityWithDPO.contains(true)) {
+          addFiles.filter(_.partitionValues.values.forall(_ != null))
+        } else {
+          addFiles
+        }
+      txn.filterFiles(filesToFilter).map(_.remove)
     } else {
       txn.filterFiles().map(_.remove)
     }
@@ -57,10 +70,18 @@ case class GpuWriteIntoDelta42x(
       deletedFiles: Seq[org.apache.spark.sql.delta.actions.Action],
       replaceWhere: Option[Seq[org.apache.spark.sql.catalyst.expressions.Expression]],
       replaceOnDataColsEnabled: Boolean): Unit = {
-    if (replaceWhere.nonEmpty && replaceOnDataColsEnabled &&
+    val shouldRecordReplaceWhereOpMetrics =
+      replaceWhere.nonEmpty && replaceOnDataColsEnabled &&
         sparkSession.conf.get(
-          org.apache.spark.sql.delta.sources.DeltaSQLConf.REPLACEWHERE_METRICS_ENABLED)) {
-      registerReplaceWhereMetrics(sparkSession, txn, newFiles, deletedFiles)
+          org.apache.spark.sql.delta.sources.DeltaSQLConf.REPLACEWHERE_METRICS_ENABLED)
+    val shouldRecordInsertReplaceOpMetrics =
+      shouldRecordReplaceWhereOpMetrics || cpuWrite.options.isReplaceOnOrUsingDefined
+    if (shouldRecordInsertReplaceOpMetrics) {
+      registerInsertReplaceMetrics(sparkSession, txn, newFiles, deletedFiles)
+    } else if (cpuWrite.mode == org.apache.spark.sql.SaveMode.Overwrite &&
+        sparkSession.conf.get(
+          org.apache.spark.sql.delta.sources.DeltaSQLConf.OVERWRITE_REMOVE_METRICS_ENABLED)) {
+      registerOverwriteRemoveMetrics(sparkSession, txn, deletedFiles)
     }
   }
 
@@ -75,7 +96,12 @@ case class GpuWriteIntoDelta42x(
       toBooleanOption(cpuWrite.options.canMergeSchema))
   }
 
-  override protected def copyWithCpuWrite(newCpuWrite: WriteIntoDelta): GpuWriteIntoDelta42x = {
+  override def withNewWriterConfiguration(
+      updatedConfiguration: Map[String, String]): GpuWriteIntoDeltaLike = {
+    copyWithCpuWrite(cpuWrite.copy(configuration = updatedConfiguration))
+  }
+
+  override protected def copyWithCpuWrite(newCpuWrite: WriteIntoDelta): GpuWriteIntoDelta43x = {
     copy(cpuWrite = newCpuWrite)
   }
 }

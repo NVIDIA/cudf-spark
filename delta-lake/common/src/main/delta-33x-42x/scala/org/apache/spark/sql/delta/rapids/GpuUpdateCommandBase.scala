@@ -88,10 +88,10 @@ abstract class GpuUpdateCommandBase(
   )
 
   final override def run(sparkSession: SparkSession): Seq[Row] = {
-    recordDeltaOperation(tahoeFileIndex.deltaLog, "delta.dml.update") {
+    DeltaRuntimeShim.runDeltaOperation(tahoeFileIndex.deltaLog, "delta.dml.update") {
       val deltaLog = tahoeFileIndex.deltaLog
       gpuDeltaLog.withNewTransaction(catalogTable) { txn =>
-        DeltaLog.assertRemovable(txn.snapshot)
+        DeltaRuntimeShim.assertRemovable(txn.snapshot)
         if (hasBeenExecuted(txn, sparkSession.asInstanceOf[ShimSparkSession])) {
           sendDriverMetrics(sparkSession, metrics)
           return Seq.empty
@@ -277,7 +277,7 @@ abstract class GpuUpdateCommandBase(
       tags = RowTracking.addPreservedRowTrackingTagIfNotSet(txn.snapshot))
     sendDriverMetrics(sparkSession, metrics)
 
-    recordDeltaEvent(
+    DeltaRuntimeShim.emitDeltaEvent(
       deltaLog,
       "delta.dml.update.stats",
       data = UpdateMetric(
@@ -325,7 +325,8 @@ abstract class GpuUpdateCommandBase(
     val baseRelation = buildBaseRelation(
       spark, txn, "update", rootPath, inputLeafFiles.map(_.path), nameToAddFileMap)
     val newTarget = DeltaTableUtils.replaceFileIndex(target, baseRelation.location)
-    val (targetDf, finalOutput, finalUpdateExpressions) = UpdateCommand.preserveRowTrackingColumns(
+    val (targetDf, finalOutput, finalUpdateExpressions) =
+      DeltaRuntimeShim.preserveRowTrackingColumns(
       targetDfWithoutRowTrackingColumns = createDataFrame(spark, newTarget),
       snapshot = txn.snapshot,
       targetOutput = target.output,

@@ -30,7 +30,6 @@ import org.apache.spark.sql.connector.catalog.{StagingTableCatalog, SupportsWrit
 import org.apache.spark.sql.connector.write.V1Write
 import org.apache.spark.sql.delta.{DeltaLog, DeltaOptions, DeltaParquetFileFormat}
 import org.apache.spark.sql.delta.catalog.{DeltaCatalog, DeltaTableV2}
-import org.apache.spark.sql.delta.commands.WriteIntoDelta
 import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShim, GpuDeltaLog}
 import org.apache.spark.sql.delta.sources.{DeltaDataSource, DeltaSourceUtils}
 import org.apache.spark.sql.execution.datasources.{FileFormat, LogicalRelation}
@@ -243,13 +242,15 @@ abstract class DeltaIOProvider extends DeltaProviderImplBase {
           val deltaLog = writeConfig.deltaLog
 
           // TODO: Get the config from WriteIntoDelta's txn.
-          val cpuWrite = WriteIntoDelta(
+          val cpuWrite = DeltaRuntimeShim.createCpuWrite(
             deltaLog,
             if (writeConfig.forceOverwrite) SaveMode.Overwrite else SaveMode.Append,
             new DeltaOptions(writeConfig.options.toMap, session.sessionState.conf),
             Nil,
             DeltaRuntimeShim.unsafeVolatileSnapshotFromLog(deltaLog).metadata.configuration,
-            data)
+            data,
+            catalogTableOpt = None,
+            schemaInCatalog = None)
           val gpuWrite = DeltaRuntimeShim.createGpuWrite(
             new GpuDeltaLog(deltaLog, rapidsConf), cpuWrite)
           gpuWrite.run(session)

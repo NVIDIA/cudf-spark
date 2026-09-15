@@ -22,12 +22,11 @@ import com.nvidia.spark.rapids.delta.delta33x.{Delta33xProvider, GpuDeltaCatalog
 
 import org.apache.spark.sql.{SaveMode, SparkSession}
 import org.apache.spark.sql.connector.catalog.StagingTableCatalog
-import org.apache.spark.sql.delta.{DeltaLog, DeltaOperations, DeltaOptions, DeltaUDF, Snapshot,
-  TransactionExecutionObserver}
+import org.apache.spark.sql.delta.{DeltaLog, DeltaOperations, DeltaOptions, DeltaUDF, Snapshot}
 import org.apache.spark.sql.delta.actions.Metadata
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
 import org.apache.spark.sql.delta.commands.WriteIntoDelta
-import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShim, GpuDeltaLog,
+import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShimBase, GpuDeltaLog,
   GpuOptimisticTransactionBase, GpuWriteIntoDelta, GpuWriteIntoDeltaLike, StartTransactionArg}
 import org.apache.spark.sql.execution.datasources.FileFormat
 import org.apache.spark.sql.expressions.UserDefinedFunction
@@ -37,7 +36,7 @@ import org.apache.spark.sql.expressions.UserDefinedFunction
  *
  * @note This class is instantiated via reflection from DeltaProbeImpl
  */
-class Delta33xRuntimeShim extends DeltaRuntimeShim {
+class Delta33xRuntimeShim extends DeltaRuntimeShimBase {
 
   override def getDeltaConfigChecker: DeltaConfigChecker = AcceptAllConfigChecker
 
@@ -85,11 +84,9 @@ class Delta33xRuntimeShim extends DeltaRuntimeShim {
     new GpuDeltaCatalog(cpuCatalog, rapidsConf)
   }
 
-  def startTransaction(arg: StartTransactionArg): GpuOptimisticTransactionBase = {
-    TransactionExecutionObserver.getObserver.startingTransaction {
-      new GpuOptimisticTransaction(arg.log, arg.catalogTable, arg.snapshot, arg.conf)
-    }.asInstanceOf[GpuOptimisticTransactionBase]
-  }
+  override protected def constructOptimisticTransaction(
+      arg: StartTransactionArg): GpuOptimisticTransactionBase =
+    new GpuOptimisticTransaction(arg.log, arg.catalogTable, arg.snapshot, arg.conf)
 
   override def stringFromStringUdf(f: String => String): UserDefinedFunction = {
     DeltaUDF.stringFromString(f)

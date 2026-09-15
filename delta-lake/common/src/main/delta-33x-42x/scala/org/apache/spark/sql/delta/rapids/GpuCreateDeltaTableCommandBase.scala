@@ -36,7 +36,7 @@ import org.apache.spark.sql.connector.catalog.Identifier
 import org.apache.spark.sql.delta._
 import org.apache.spark.sql.delta.DeltaColumnMapping.{dropColumnMappingMetadata, filterColumnMappingProperties}
 import org.apache.spark.sql.delta.actions.{Action, DomainMetadata, Metadata, Protocol}
-import org.apache.spark.sql.delta.commands.{CloneTableCommand, TableCreationModes, WriteIntoDelta, WriteIntoDeltaLike}
+import org.apache.spark.sql.delta.commands.{CloneTableCommand, TableCreationModes, WriteIntoDeltaLike}
 import org.apache.spark.sql.delta.commands.DMLUtils.TaggedCommitData
 import org.apache.spark.sql.delta.coordinatedcommits.CoordinatedCommitsUtils
 import org.apache.spark.sql.delta.hooks.{HudiConverterHook, IcebergConverterHook, UpdateCatalog, UpdateCatalogFactory}
@@ -232,7 +232,7 @@ abstract class GpuCreateDeltaTableCommandBase(
       sparkSession, gpuDeltaLog.deltaLog.tableExists, query, tableWithLocation.properties)
     validateCatalogManagedTableProperties(sparkSession, gpuDeltaLog, tableWithLocation)
 
-    recordDeltaOperation(gpuDeltaLog.deltaLog, "delta.ddl.createTable") {
+    DeltaRuntimeShim.runDeltaOperation(gpuDeltaLog.deltaLog, "delta.ddl.createTable") {
       val result = handleCommit(sparkSession, gpuDeltaLog, tableWithLocation)
       sendDriverMetrics(sparkSession, metrics)
       result
@@ -291,14 +291,15 @@ abstract class GpuCreateDeltaTableCommandBase(
           val data = createDataFrameFromQuery(sparkSession, query)
           val options = new DeltaOptions(table.storage.properties, sparkSession.sessionState.conf)
           val deltaWriter = {
-            val cpuWriter = WriteIntoDelta(
+            val cpuWriter = DeltaRuntimeShim.createCpuWrite(
               deltaLog = gpuDeltaLog.deltaLog,
               mode = mode,
               options,
               partitionColumns = table.partitionColumnNames,
               configuration = tableWithLocation.properties + ("comment" -> table.comment.orNull),
               data = data,
-              Some(tableWithLocation))
+              catalogTableOpt = Some(tableWithLocation),
+              schemaInCatalog = None)
             DeltaRuntimeShim.createGpuWrite(gpuDeltaLog, cpuWriter)
           }
           handleCreateTableAsSelect(sparkSession, txn, gpuDeltaLog,
