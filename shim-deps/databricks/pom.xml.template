@@ -29,7 +29,7 @@
 
     <parent>
         <groupId>com.nvidia</groupId>
-        <artifactId>rapids-4-spark-parent_@SCALA_BINARY_VERSION@</artifactId>
+        <artifactId>cudf-spark-parent_@SCALA_BINARY_VERSION@</artifactId>
         <version><!--PROJECT_VERSION_PLACEHOLDER--></version>
         <relativePath>../../pom.xml</relativePath>
     </parent>

@@ -22,9 +22,9 @@ JDEST=${JACOCO_DEST:-"./target/jacococli.jar"}
 TMP_CLASS=${TEMP_CLASS_LOC:-"./target/jacoco_classes/"}
 HTML_LOC=${HTML_LOCATION:="./target/jacoco-report/"}
 XML_LOC=${XML_LOCATION:="${HTML_LOC}"}
-DIST_JAR=${RAPIDS_DIST_JAR:-$(ls ./dist/target/rapids-4-spark_2.12-*cuda*.jar | grep -v test | head -1 | xargs readlink -f)}
+DIST_JAR=${RAPIDS_DIST_JAR:-$(ls ./dist/target/cudf-spark_2.12-*cuda*.jar | grep -v test | head -1 | xargs readlink -f)}
 SPK_VER=${JACOCO_SPARK_VER:-"330"}
-UDF_JAR=${RAPIDS_UDF_JAR:-$(ls ./udf-compiler/target/spark${SPK_VER}/rapids-4-spark-udf_2.12-*-SNAPSHOT-spark${SPK_VER}.jar | grep -v test | head -1 | xargs readlink -f)}
+UDF_JAR=${RAPIDS_UDF_JAR:-$(ls ./udf-compiler/target/spark${SPK_VER}/cudf-spark-udf_2.12-*-SNAPSHOT-spark${SPK_VER}.jar | grep -v test | head -1 | xargs readlink -f)}
 SOURCE_DIRS=${SOURCE_DIRS:-"./sql-plugin/src/main/scala/:./sql-plugin/src/main/java/:./shuffle-plugin/src/main/scala/:./udf-compiler/src/main/scala/"}
 
 SOURCE_WITH_ARGS="--sourcefiles "$(echo $SOURCE_DIRS | sed -e 's/:/ --sourcefiles /g')

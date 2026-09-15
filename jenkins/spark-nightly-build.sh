@@ -148,7 +148,7 @@ function build_shim() {
 
     echo "Copying ${copy_modules[*]} to .m2 repo..."
     for module in "${copy_modules[@]}"; do
-      mod="rapids-4-spark-${module}_${SCALA_BINARY_VER}"
+      mod="cudf-spark-${module}_${SCALA_BINARY_VER}"
       SRC_DIR="${SHIM_M2DIR}/com/nvidia/${mod}/${ART_VER}"
       DEST_DIR="${M2DIR}/com/nvidia/${mod}/${ART_VER}"
 
