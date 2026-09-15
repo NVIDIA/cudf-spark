@@ -482,6 +482,7 @@ object RapidsPluginUtils extends Logging {
 class RapidsDriverPlugin extends DriverPlugin with Logging {
   var rapidsShuffleHeartbeatManager: RapidsShuffleHeartbeatManager = null
   var shuffleCleanupListener: ShuffleCleanupListener = null
+  private val historyMetricsManager = new HistoryMetricsManager
   private lazy val extraDriverPlugins =
     RapidsPluginUtils.extraPlugins.map(_.driverPlugin()).filterNot(_ == null)
 
@@ -574,6 +575,7 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
     }
 
     FileCacheLocalityManager.init(sc)
+    historyMetricsManager.initialize(sc, conf.historyMetricsProvider)
 
     logDebug("Loading extra driver plugins: " +
       s"${extraDriverPlugins.map(_.getClass.getName).mkString(",")}")
@@ -588,7 +590,8 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
 
   override def shutdown(): Unit = {
     RapidsPluginUtils.safeShutdown(
-      extraDriverPlugins.map(plugin => () => plugin.shutdown()) ++
+      Seq(() => historyMetricsManager.shutdown()) ++
+        extraDriverPlugins.map(plugin => () => plugin.shutdown()) ++
         Seq(
           () => FileCacheLocalityManager.shutdown(),
           // Shutdown listener first to trigger cleanup for any remaining jobs
