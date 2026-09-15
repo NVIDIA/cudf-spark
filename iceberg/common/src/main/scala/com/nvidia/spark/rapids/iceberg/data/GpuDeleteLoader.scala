@@ -68,7 +68,7 @@ class DefaultDeleteLoader(
       schema: Schema,
       sparkTypes: Array[DataType]): LazySpillableColumnarBatch = {
     val files = deletes.map(f => IcebergPartitionedFile(inputFiles(locationOf(f))))
-    withResource(createReader(schema, files)) { reader =>
+    val deleteBatch = withResource(createReader(schema, files)) { reader =>
       withResource(new ArrayBuffer[ColumnarBatch]()) { batches =>
         while (reader.hasNext) {
           batches += reader.next()
@@ -81,17 +81,16 @@ class DefaultDeleteLoader(
 
           if (tables.size > 1) {
             withResource(CudfTable.concatenate(tables.toArray: _*)) { combined =>
-              withResource(GpuColumnVector.from(combined, sparkTypes)) { combinedBatch =>
-                LazySpillableColumnarBatch(combinedBatch, "Eq deletes")
-              }
+              GpuColumnVector.from(combined, sparkTypes)
             }
           } else {
-            withResource(GpuColumnVector.from(tables.head, sparkTypes)) { singleBatch =>
-              LazySpillableColumnarBatch(singleBatch, "Eq deletes")
-            }
+            GpuColumnVector.from(tables.head, sparkTypes)
           }
         }
       }
+    }
+    withResource(deleteBatch) { _ =>
+      LazySpillableColumnarBatch(deleteBatch, "Eq deletes")
     }
   }
 

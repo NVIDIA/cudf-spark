@@ -4,16 +4,6 @@
   "trackingIssue": "https://github.com/NVIDIA/cudf-spark/issues/11713",
   "entries": [
     {
-      "path": "iceberg/common/src/main/scala/com/nvidia/spark/rapids/iceberg/data/GpuDeleteFilter.scala",
-      "fingerprint": "4415694eea89f25ab795",
-      "resource": "withResource(GpuColumnVector.from(newTable,outputDataType))"
-    },
-    {
-      "path": "iceberg/common/src/main/scala/com/nvidia/spark/rapids/iceberg/data/GpuDeleteLoader.scala",
-      "fingerprint": "155ccf9ad83e60adabb9",
-      "resource": "withResource(GpuColumnVector.from(combined,sparkTypes))"
-    },
-    {
       "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/GpuCast.scala",
       "fingerprint": "27fc2acfeb96c0d4259b",
       "resource": "withResource(Scalar.fromString(<literal>))"

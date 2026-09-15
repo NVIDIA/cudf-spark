@@ -444,11 +444,14 @@ def test_iceberg_small_file_combine_with_position_deletes(
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
+@pytest.mark.parametrize('delete_rounds', [1, 2], ids=['single-delete', 'multiple-deletes'])
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason = "S3tables catalog is managed")
+@validate_execs_in_gpu_plan('GpuBatchScanExec')
 def test_iceberg_small_file_combine_with_eq_deletes(
         spark_tmp_table_factory,
         spark_tmp_path,
         reader_type,
+        delete_rounds,
         register_iceberg_add_eq_deletes_udf):
     table_name = get_full_table_name(spark_tmp_table_factory)
     eq_delete_gens = list(zip(iceberg_base_table_cols, iceberg_gens_list))
@@ -471,12 +474,16 @@ def test_iceberg_small_file_combine_with_eq_deletes(
                 seed=base_seed + seed_offset,
                 num_slices=1).writeTo(table_name).append()
 
-        _add_eq_deletes(
-            spark,
-            ['_c0', '_c2'],
-            40,
-            table_name,
-            spark_tmp_path)
+        # Repeated writes with the same equality fields exercise loading multiple delete files.
+        for _ in range(delete_rounds):
+            _add_eq_deletes(
+                spark,
+                ['_c0', '_c2'],
+                40,
+                table_name,
+                spark_tmp_path)
+        assert spark.table(f'{table_name}.delete_files').select('file_path').distinct().count() \
+            >= delete_rounds
 
         for seed_offset in range(4):
             gen_df(
@@ -494,6 +501,10 @@ def test_iceberg_small_file_combine_with_eq_deletes(
 
     with_cpu_session(setup_table)
 
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: spark.table(table_name),
-        conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
+    try:
+        assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: spark.table(table_name),
+            conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
+    finally:
+        # The table fixture's SHOW TABLES cleanup must not inherit the scan-only plan assertion.
+        reset_spark_session_conf()
