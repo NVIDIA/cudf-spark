@@ -78,6 +78,11 @@ def is_oss_delta_lake_42_or_43():
             and _loaded_delta_lake_version() in ("4.2.0", "4.3.0"))
 
 
+def is_oss_delta_lake_43():
+    return (not is_databricks_runtime()
+            and _loaded_delta_lake_version() == "4.3.0")
+
+
 def is_oss_delta_lake_41_to_43():
     return (not is_databricks_runtime()
             and _loaded_delta_lake_version() in ("4.1.0", "4.2.0", "4.3.0"))

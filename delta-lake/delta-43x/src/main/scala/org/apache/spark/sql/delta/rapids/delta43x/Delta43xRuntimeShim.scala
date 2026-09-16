@@ -35,9 +35,40 @@ import org.apache.spark.sql.delta.commands.{DeltaReorgOperation, UpdateCommand, 
 import org.apache.spark.sql.delta.hooks.GpuAutoCompact43x
 import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShimBase, GpuDeltaLog, GpuOptimisticTransaction,
   GpuOptimisticTransactionBase, GpuWriteIntoDeltaLike, StartTransactionArg}
+import org.apache.spark.sql.delta.sources.DeltaSQLConf
 import org.apache.spark.sql.types.StructType
 
 class Delta43xRuntimeShim extends DeltaRuntimeShimBase {
+
+  override def groupOptimizeFilesByPartition(
+      spark: SparkSession,
+      snapshot: Snapshot,
+      files: Seq[AddFile]): Seq[(Map[String, String], Seq[AddFile])] = {
+    files
+      .groupBy(_.normalizedPartitionValues(
+        spark,
+        snapshot.metadata.physicalPartitionSchema))
+      .map { case (_, partitionFiles) =>
+        (partitionFiles.head.partitionValues, partitionFiles)
+      }
+      .toSeq
+  }
+
+  override def reportSomeZeroMetrics(
+      spark: SparkSession,
+      numCopiedRows: Option[Long],
+      numDeletedRows: Option[Long]): (Option[Long], Option[Long]) = {
+    val alwaysReportSomeZero = spark.sessionState.conf.getConf(
+      DeltaSQLConf.METRICS_ALWAYS_REPORT_SOME_ZERO_METRICS)
+    def reportSomeZero(metric: Option[Long]): Option[Long] = {
+      if (alwaysReportSomeZero) {
+        Some(metric.getOrElse(0L))
+      } else {
+        metric
+      }
+    }
+    (reportSomeZero(numCopiedRows), reportSomeZero(numDeletedRows))
+  }
 
   override def runDeltaOperation[A](
       deltaLog: DeltaLog,
@@ -111,26 +142,6 @@ class Delta43xRuntimeShim extends DeltaRuntimeShimBase {
       gpuDeltaLog: GpuDeltaLog,
       cpuWrite: WriteIntoDelta): GpuWriteIntoDeltaLike = {
     GpuWriteIntoDelta43x(gpuDeltaLog, cpuWrite)
-  }
-
-  override def createGpuWrite(
-      gpuDeltaLog: GpuDeltaLog,
-      mode: SaveMode,
-      options: DeltaOptions,
-      partitionColumns: Seq[String],
-      configuration: Map[String, String],
-      data: DataFrame): GpuWriteIntoDeltaLike = {
-    createGpuWrite(
-      gpuDeltaLog,
-      createCpuWrite(
-        gpuDeltaLog.deltaLog,
-        mode,
-        options,
-        partitionColumns,
-        configuration,
-        data,
-        None,
-        None))
   }
 
   override def buildWriteOperation(

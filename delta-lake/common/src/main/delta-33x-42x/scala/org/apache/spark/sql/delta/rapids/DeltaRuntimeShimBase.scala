@@ -32,10 +32,10 @@ import org.apache.spark.sql.expressions.UserDefinedFunction
 import org.apache.spark.util.Clock
 
 /**
- * Shared base for 3.3.x, 4.0.x, and 4.1.x runtime shims.
+ * Shared base for Delta 3.3 and later runtime shims.
  * Version-specific shims override provider, catalog, and transaction construction.
  */
-abstract class DeltaRuntimeShimBase extends DeltaRuntimeShim with DeltaLogging {
+abstract class DeltaRuntimeShimBase extends DeltaRuntimeShim33x with DeltaLogging {
   override def getDeltaConfigChecker: DeltaConfigChecker = AcceptAllConfigChecker
 
   // Provider is version-specific

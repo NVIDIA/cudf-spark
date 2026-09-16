@@ -132,7 +132,7 @@ abstract class GpuWriteIntoDeltaBase(
       } else if (cpuWrite.mode == SaveMode.Ignore) {
         return TaggedCommitData.empty
       } else if (cpuWrite.mode == SaveMode.Overwrite) {
-        DeltaRuntimeShim.assertRemovable(txn.snapshot)
+        DeltaRuntimeShim33x.assertRemovable(txn.snapshot)
       }
     }
     val isReplaceWhere = cpuWrite.mode == SaveMode.Overwrite &&
@@ -404,7 +404,7 @@ abstract class GpuWriteIntoDeltaBase(
     val deleteActions = deleteResult._1
     val deleteMetrics = deleteResult._2
 
-    DeltaRuntimeShim.emitDeltaEvent(
+    DeltaRuntimeShim33x.emitDeltaEvent(
       deltaLog,
       "delta.dml.write.removeFiles.stats",
       data = deleteMetrics

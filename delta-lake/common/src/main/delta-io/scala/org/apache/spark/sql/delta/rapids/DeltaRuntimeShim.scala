@@ -24,12 +24,11 @@ import com.nvidia.spark.rapids.delta.{DeltaConfigChecker, DeltaProvider}
 import org.apache.spark.SPARK_VERSION
 import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession}
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
-import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression}
 import org.apache.spark.sql.connector.catalog.StagingTableCatalog
 import org.apache.spark.sql.delta.{DeltaLog, DeltaOperations, DeltaOptions, DeltaUDF, Snapshot}
-import org.apache.spark.sql.delta.actions.{AddFile, Metadata}
+import org.apache.spark.sql.delta.actions.Metadata
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
-import org.apache.spark.sql.delta.commands.{DeltaReorgOperation, WriteIntoDelta}
+import org.apache.spark.sql.delta.commands.WriteIntoDelta
 import org.apache.spark.sql.execution.datasources.FileFormat
 import org.apache.spark.sql.expressions.UserDefinedFunction
 import org.apache.spark.sql.types.StructType
@@ -50,29 +49,6 @@ trait DeltaRuntimeShim {
   def unsafeVolatileSnapshotFromLog(deltaLog: DeltaLog): Snapshot
   def fileFormatFromLog(deltaLog: DeltaLog): FileFormat
 
-  def runDeltaOperation[A](
-      deltaLog: DeltaLog,
-      opType: String)(thunk: => A): A
-
-  def emitDeltaEvent(
-      deltaLog: DeltaLog,
-      opType: String,
-      data: AnyRef): Unit
-
-  def assertRemovable(snapshot: Snapshot): Unit
-
-  def filterFilesToReorg(
-      operation: DeltaReorgOperation,
-      spark: SparkSession,
-      snapshot: Snapshot,
-      candidates: Seq[AddFile]): Seq[AddFile]
-
-  def preserveRowTrackingColumns(
-      targetDfWithoutRowTrackingColumns: DataFrame,
-      snapshot: Snapshot,
-      targetOutput: Seq[Attribute],
-      updateExpressions: Seq[Expression]): (DataFrame, Seq[Attribute], Seq[Expression])
-
   def createGpuWrite(
       gpuDeltaLog: GpuDeltaLog,
       cpuWrite: WriteIntoDelta): GpuWriteIntoDeltaLike
@@ -86,6 +62,7 @@ trait DeltaRuntimeShim {
       data: DataFrame,
       catalogTableOpt: Option[CatalogTable],
       schemaInCatalog: Option[StructType]): WriteIntoDelta = {
+    require(catalogTableOpt.isEmpty, "Catalog tables require Delta 3.3 or later")
     WriteIntoDelta(
       deltaLog,
       mode,
@@ -93,28 +70,7 @@ trait DeltaRuntimeShim {
       partitionColumns,
       configuration,
       data,
-      catalogTableOpt,
-      schemaInCatalog)
-  }
-
-  def createGpuWrite(
-      gpuDeltaLog: GpuDeltaLog,
-      mode: SaveMode,
-      options: DeltaOptions,
-      partitionColumns: Seq[String],
-      configuration: Map[String, String],
-      data: DataFrame): GpuWriteIntoDeltaLike = {
-    createGpuWrite(
-      gpuDeltaLog,
-      createCpuWrite(
-        gpuDeltaLog.deltaLog,
-        mode,
-        options,
-        partitionColumns,
-        configuration,
-        data,
-        None,
-        None))
+      schemaInCatalog = schemaInCatalog)
   }
 
   def buildWriteOperation(
@@ -228,6 +184,8 @@ object DeltaRuntimeShim {
     shimClass.getConstructor().newInstance().asInstanceOf[DeltaRuntimeShim]
   }
 
+  private[rapids] def getShimInstance: DeltaRuntimeShim = shimInstance
+
   def getDeltaProvider: DeltaProvider = shimInstance.getDeltaProvider
 
   def getDeltaConfigChecker: DeltaConfigChecker = {
@@ -247,53 +205,10 @@ object DeltaRuntimeShim {
   def fileFormatFromLog(deltaLog: DeltaLog): FileFormat =
     shimInstance.fileFormatFromLog(deltaLog)
 
-  def runDeltaOperation[A](
-      deltaLog: DeltaLog,
-      opType: String)(thunk: => A): A = {
-    shimInstance.runDeltaOperation(deltaLog, opType)(thunk)
-  }
-
-  def emitDeltaEvent(
-      deltaLog: DeltaLog,
-      opType: String,
-      data: AnyRef): Unit = {
-    shimInstance.emitDeltaEvent(deltaLog, opType, data)
-  }
-
-  def assertRemovable(snapshot: Snapshot): Unit = shimInstance.assertRemovable(snapshot)
-
-  def filterFilesToReorg(
-      operation: DeltaReorgOperation,
-      spark: SparkSession,
-      snapshot: Snapshot,
-      candidates: Seq[AddFile]): Seq[AddFile] = {
-    shimInstance.filterFilesToReorg(operation, spark, snapshot, candidates)
-  }
-
-  def preserveRowTrackingColumns(
-      targetDfWithoutRowTrackingColumns: DataFrame,
-      snapshot: Snapshot,
-      targetOutput: Seq[Attribute],
-      updateExpressions: Seq[Expression]): (DataFrame, Seq[Attribute], Seq[Expression]) = {
-    shimInstance.preserveRowTrackingColumns(
-      targetDfWithoutRowTrackingColumns, snapshot, targetOutput, updateExpressions)
-  }
-
   def createGpuWrite(
       gpuDeltaLog: GpuDeltaLog,
       cpuWrite: WriteIntoDelta): GpuWriteIntoDeltaLike = {
     shimInstance.createGpuWrite(gpuDeltaLog, cpuWrite)
-  }
-
-  def createGpuWrite(
-      gpuDeltaLog: GpuDeltaLog,
-      mode: SaveMode,
-      options: DeltaOptions,
-      partitionColumns: Seq[String],
-      configuration: Map[String, String],
-      data: DataFrame): GpuWriteIntoDeltaLike = {
-    shimInstance.createGpuWrite(
-      gpuDeltaLog, mode, options, partitionColumns, configuration, data)
   }
 
   def createCpuWrite(

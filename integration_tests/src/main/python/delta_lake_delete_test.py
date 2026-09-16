@@ -389,6 +389,97 @@ def test_delta_delete_metadata_only_reports_row_count(spark_tmp_path):
         enable_deletion_vectors=False, partition_columns=["a"], conf=conf, expect_write=False,
         expected_num_affected_rows=2, assert_gpu_delete_command=True)
 
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="Delta 4.3 DELETE zero-metric history regression coverage")
+@pytest.mark.parametrize("predicate, expected_metrics", [
+    ("id = 999", None),
+    ("part = 1", {"numCopiedRows": 0, "numDeletedRows": 2}),
+], ids=["no_match", "metadata_only"])
+def test_delta_delete_43_reports_zero_row_count_metrics(
+        spark_tmp_path, predicate, expected_metrics):
+    data_path = spark_tmp_path + "/DELTA_DATA"
+
+    def generate_dest_data(spark):
+        return spark.createDataFrame(
+            [(1, 0), (2, 0), (3, 1), (4, 1)],
+            "id INT, part INT")
+
+    with_cpu_session(lambda spark: setup_delta_dest_tables(
+        spark, data_path, generate_dest_data, use_cdf=False,
+        enable_deletion_vectors=False, partition_columns=["part"]))
+
+    cpu_path = data_path + "/CPU"
+    gpu_path = data_path + "/GPU"
+    delete_sql = "DELETE FROM delta.`{path}` WHERE " + predicate
+    cpu_result = with_cpu_session(
+        lambda spark: spark.sql(delete_sql.format(path=cpu_path)).collect(),
+        conf=delta_delete_enabled_conf)
+    gpu_result = assert_rapids_gpu_delete_ran(
+        lambda spark: spark.sql(delete_sql.format(path=gpu_path)).collect(),
+        conf=delta_delete_enabled_conf)
+    assert_equal(cpu_result, gpu_result)
+
+    metric_names = ("numCopiedRows", "numDeletedRows")
+
+    def latest_delete_row_count_metrics(spark, path):
+        history = spark.sql(f"DESCRIBE HISTORY delta.`{path}`") \
+            .where("operation = 'DELETE'").orderBy("version", ascending=False).first()
+        if history is None:
+            return None
+        operation_metrics = history["operationMetrics"]
+        return {name: int(operation_metrics[name]) for name in metric_names}
+
+    cpu_metrics = with_cpu_session(
+        lambda spark: latest_delete_row_count_metrics(spark, cpu_path),
+        conf=delta_delete_enabled_conf)
+    gpu_metrics = with_cpu_session(
+        lambda spark: latest_delete_row_count_metrics(spark, gpu_path),
+        conf=delta_delete_enabled_conf)
+    assert cpu_metrics == expected_metrics
+    assert gpu_metrics == expected_metrics
+
+    cpu_data = with_cpu_session(
+        lambda spark: spark.read.format("delta").load(cpu_path).sort("id").collect(),
+        conf=delta_delete_enabled_conf)
+    gpu_data = with_cpu_session(
+        lambda spark: spark.read.format("delta").load(gpu_path).sort("id").collect(),
+        conf=delta_delete_enabled_conf)
+    assert_equal(cpu_data, gpu_data)
+
+
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="Delta 4.3 DELETE zero-metric runtime shim coverage")
+@pytest.mark.parametrize("always_report, expected", [
+    (False, None),
+    (True, 0),
+], ids=idfn)
+def test_delta_delete_43_zero_metric_runtime_shim(always_report, expected):
+    conf = copy_and_update(delta_delete_enabled_conf, {
+        "spark.databricks.delta.metrics.alwaysReportSomeZeroMetrics":
+            str(always_report).lower()
+    })
+
+    def assert_zero_metric_conversion(spark):
+        runtime_shim = spark_jvm().org.apache.spark.sql.delta.rapids.delta43x \
+            .Delta43xRuntimeShim()
+        empty = spark_jvm().scala.Option.empty()
+        reported = runtime_shim.reportSomeZeroMetrics(spark._jsparkSession, empty, empty)
+        copied = reported._1()
+        deleted = reported._2()
+        if expected is None:
+            assert copied.isEmpty()
+            assert deleted.isEmpty()
+        else:
+            assert copied.get() == expected
+            assert deleted.get() == expected
+
+    with_cpu_session(assert_zero_metric_conversion, conf=conf)
+
+
 @allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
 @delta_lake
 @ignore_order

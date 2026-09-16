@@ -232,7 +232,7 @@ abstract class GpuCreateDeltaTableCommandBase(
       sparkSession, gpuDeltaLog.deltaLog.tableExists, query, tableWithLocation.properties)
     validateCatalogManagedTableProperties(sparkSession, gpuDeltaLog, tableWithLocation)
 
-    DeltaRuntimeShim.runDeltaOperation(gpuDeltaLog.deltaLog, "delta.ddl.createTable") {
+    DeltaRuntimeShim33x.runDeltaOperation(gpuDeltaLog.deltaLog, "delta.ddl.createTable") {
       val result = handleCommit(sparkSession, gpuDeltaLog, tableWithLocation)
       sendDriverMetrics(sparkSession, metrics)
       result
@@ -291,7 +291,7 @@ abstract class GpuCreateDeltaTableCommandBase(
           val data = createDataFrameFromQuery(sparkSession, query)
           val options = new DeltaOptions(table.storage.properties, sparkSession.sessionState.conf)
           val deltaWriter = {
-            val cpuWriter = DeltaRuntimeShim.createCpuWrite(
+            val cpuWriter = DeltaRuntimeShim33x.createCpuWrite(
               deltaLog = gpuDeltaLog.deltaLog,
               mode = mode,
               options,

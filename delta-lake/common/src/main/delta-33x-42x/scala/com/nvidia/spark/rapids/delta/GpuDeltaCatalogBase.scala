@@ -38,7 +38,7 @@ import org.apache.spark.sql.delta.{ColumnWithDefaultExprUtils, DeltaConfigs, Del
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
 import org.apache.spark.sql.delta.commands.TableCreationModes
 import org.apache.spark.sql.delta.metering.DeltaLogging
-import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShim, DeltaTrampoline, GpuDeltaLog,
+import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShim, DeltaRuntimeShim33x, DeltaTrampoline, GpuDeltaLog,
   GpuWriteIntoDeltaLike}
 import org.apache.spark.sql.delta.sources.{DeltaSourceUtils, DeltaSQLConf}
 import org.apache.spark.sql.delta.stats.StatisticsCollection
@@ -284,7 +284,7 @@ abstract class GpuDeltaCatalogBase(
 
     val writer = sourceQuery.map { df =>
       val deltaLog = DeltaLog.forTable(spark, new Path(loc))
-      val cpuWriter = DeltaRuntimeShim.createCpuWrite(
+      val cpuWriter = DeltaRuntimeShim33x.createCpuWrite(
         deltaLog,
         operation.mode,
         new DeltaOptions(withDb.storage.properties, spark.sessionState.conf),

@@ -246,14 +246,16 @@ case class GpuMergeIntoCommand43x(
 
     val finalActions = createSetTransaction(spark, targetDeltaLog).toSeq ++ mergeActions
     val numRecordsStats = NumRecordsStats.fromActions(finalActions)
+    val operation = DeltaOperations.Merge(
+      predicate = Option(condition),
+      matchedPredicates = matchedClauses.map(DeltaOperations.MergePredicate(_)),
+      notMatchedPredicates = notMatchedClauses.map(DeltaOperations.MergePredicate(_)),
+      notMatchedBySourcePredicates =
+        notMatchedBySourceClauses.map(DeltaOperations.MergePredicate(_)))
+    validateNumRecords(finalActions, numRecordsStats, operation, gpuDeltaTxn.deltaLog)
     val commitVersion = gpuDeltaTxn.commitIfNeeded(
       actions = finalActions,
-      op = DeltaOperations.Merge(
-        predicate = Option(condition),
-        matchedPredicates = matchedClauses.map(DeltaOperations.MergePredicate(_)),
-        notMatchedPredicates = notMatchedClauses.map(DeltaOperations.MergePredicate(_)),
-        notMatchedBySourcePredicates =
-          notMatchedBySourceClauses.map(DeltaOperations.MergePredicate(_))),
+      op = operation,
       tags = RowTracking.addPreservedRowTrackingTagIfNotSet(gpuDeltaTxn.snapshot))
     val stats = collectGpuMergeStats(gpuDeltaTxn, materializeSourceReason, commitVersion,
       numRecordsStats)
