@@ -20,7 +20,8 @@ import com.nvidia.spark.rapids.{DataFromReplacementRule, RapidsConf, RapidsMeta,
 import com.nvidia.spark.rapids.delta.RapidsDeltaUtils
 
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.delta.commands.DeleteCommand
+import org.apache.spark.sql.delta.DeltaParquetFileFormat.ROW_INDEX_COLUMN_NAME
+import org.apache.spark.sql.delta.commands.{DeleteCommand, DeletionVectorUtils}
 
 abstract class DeleteCommandMetaBase(
     deleteCmd: DeleteCommand,
@@ -33,6 +34,10 @@ abstract class DeleteCommandMetaBase(
     if (!conf.isDeltaWriteEnabled) {
       willNotWorkOnGpu("Delta Lake output acceleration has been disabled. To enable set " +
         s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
+    }
+    if (DeletionVectorUtils.deletionVectorsWritable(deleteCmd.deltaLog.unsafeVolatileSnapshot) &&
+        deleteCmd.target.schema.fieldNames.contains(ROW_INDEX_COLUMN_NAME)) {
+      willNotWorkOnGpu(s"user column $ROW_INDEX_COLUMN_NAME conflicts with the DV row index")
     }
     RapidsDeltaUtils.tagForDeltaWrite(this, deleteCmd.target.schema, Some(deleteCmd.deltaLog),
       Map.empty, SparkSession.active)

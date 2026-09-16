@@ -43,7 +43,7 @@ object DMLWithDeletionVectorsHelperShims {
   private val GpuFilePathColumnPrefix = "__delta_internal_gpu_file_path"
 
   def withGpuExecutionContext(spark: SqlSparkSession, df: DataFrame): DataFrame = {
-    Dataset.ofRows(spark.asInstanceOf[SparkSession], RapidsDeltaWrite(df.queryExecution.logical))
+    Dataset.ofRows(spark.asInstanceOf[SparkSession], RapidsDeltaWrite(df.queryExecution.analyzed))
   }
 
   /**

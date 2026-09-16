@@ -19,7 +19,8 @@ package com.nvidia.spark.rapids.delta.common
 import com.nvidia.spark.rapids.{DataFromReplacementRule, RapidsConf, RapidsMeta, RunnableCommandMeta}
 import com.nvidia.spark.rapids.delta.RapidsDeltaUtils
 
-import org.apache.spark.sql.delta.commands.UpdateCommand
+import org.apache.spark.sql.delta.DeltaParquetFileFormat.ROW_INDEX_COLUMN_NAME
+import org.apache.spark.sql.delta.commands.{DeletionVectorUtils, UpdateCommand}
 
 abstract class UpdateCommandMetaBase(
     updateCmd: UpdateCommand,
@@ -33,9 +34,14 @@ abstract class UpdateCommandMetaBase(
       willNotWorkOnGpu("Delta Lake output acceleration has been disabled. To enable set " +
         s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
     }
+    val deltaLog = updateCmd.tahoeFileIndex.deltaLog
+    if (DeletionVectorUtils.deletionVectorsWritable(deltaLog.unsafeVolatileSnapshot) &&
+        updateCmd.target.schema.fieldNames.contains(ROW_INDEX_COLUMN_NAME)) {
+      willNotWorkOnGpu(s"user column $ROW_INDEX_COLUMN_NAME conflicts with the DV row index")
+    }
 
     RapidsDeltaUtils.tagForDeltaWrite(this, updateCmd.target.schema,
-      Some(updateCmd.tahoeFileIndex.deltaLog),
+      Some(deltaLog),
       Map.empty, updateCmd.tahoeFileIndex.spark)
   }
 }

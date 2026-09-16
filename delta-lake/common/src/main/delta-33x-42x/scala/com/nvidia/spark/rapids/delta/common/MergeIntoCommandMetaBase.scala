@@ -21,7 +21,8 @@ import com.nvidia.spark.rapids.delta.RapidsDeltaUtils
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.delta.commands.MergeIntoCommand
+import org.apache.spark.sql.delta.DeltaParquetFileFormat.ROW_INDEX_COLUMN_NAME
+import org.apache.spark.sql.delta.commands.{DeletionVectorUtils, MergeIntoCommand}
 
 abstract class MergeIntoCommandMetaBase(
     mergeCmd: MergeIntoCommand,
@@ -43,6 +44,10 @@ abstract class MergeIntoCommandMetaBase(
     }
     val deltaLog = mergeCmd.targetFileIndex.deltaLog
     val targetSchema = mergeCmd.migratedSchema.getOrElse(mergeCmd.target.schema)
+    if (DeletionVectorUtils.deletionVectorsWritable(deltaLog.unsafeVolatileSnapshot) &&
+        targetSchema.fieldNames.contains(ROW_INDEX_COLUMN_NAME)) {
+      willNotWorkOnGpu(s"user column $ROW_INDEX_COLUMN_NAME conflicts with the DV row index")
+    }
     RapidsDeltaUtils.tagForDeltaWrite(this, targetSchema, Some(deltaLog), Map.empty,
       SparkSession.active)
   }

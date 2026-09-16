@@ -93,6 +93,8 @@ def test_delta_update_with_deletion_vectors(
 
 @allow_non_gpu("ExecutedCommandExec", *delta_meta_allow)
 @delta_lake
+@pytest.mark.skipif(is_databricks_runtime(),
+                    reason="Persistent DV command acceleration is OSS Delta only")
 @pytest.mark.skipif(not supports_delta_lake_deletion_vectors(),
                     reason="Deletion vectors are not supported")
 @pytest.mark.skipif((not is_databricks_runtime()) and is_before_spark_353(),

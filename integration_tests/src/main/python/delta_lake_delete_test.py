@@ -450,7 +450,9 @@ def test_delta_delete_twice_with_dv(spark_tmp_path, use_chunked_reader):
     # Second delete reads the table with existing DV, triggering _metadata nested field access
     second_delete_sql = "DELETE FROM delta.`{path}` WHERE b = 200"
     with_cpu_session(lambda spark: spark.sql(second_delete_sql.format(path=cpu_path)).collect(), conf=conf)
-    with_gpu_session(lambda spark: spark.sql(second_delete_sql.format(path=gpu_path)).collect(), conf=conf)
+    assert_rapids_delta_write(
+        lambda spark: spark.sql(second_delete_sql.format(path=gpu_path)).collect(),
+        conf=conf, expected_command="GpuDeleteCommand")
     # Verify the final table state matches between CPU and GPU
     cpu_result = with_cpu_session(lambda spark:
         spark.sql("SELECT * FROM delta.`{}`".format(cpu_path)).sort("a", "b").collect(), conf=conf)
