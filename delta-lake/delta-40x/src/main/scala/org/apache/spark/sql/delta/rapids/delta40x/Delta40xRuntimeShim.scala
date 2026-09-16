@@ -30,7 +30,7 @@ import org.apache.spark.sql.delta.catalog.DeltaCatalog
 import org.apache.spark.sql.delta.commands.{DMLWithDeletionVectorsHelper, TouchedFileWithDV,
   WriteIntoDelta}
 import org.apache.spark.sql.delta.hooks.GpuAutoCompact40x
-import org.apache.spark.sql.delta.rapids.{DMLWithDeletionVectorsRuntimeShim, DeltaRuntimeShimBase,
+import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShimBase, DMLWithDeletionVectorsRuntimeShim,
   GpuDeltaLog,
   GpuOptimisticTransaction, GpuOptimisticTransactionBase, GpuWriteIntoDelta,
   GpuWriteIntoDeltaLike, StartTransactionArg}
