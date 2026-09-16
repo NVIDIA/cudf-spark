@@ -1233,6 +1233,7 @@ object GpuMergeIntoCommand {
    * @param joinedAttributes      schema of our outer-joined dataframe
    * @param joinedRowEncoder      joinedDF row encoder
    * @param outputRowEncoder      final output row encoder
+   * @param rowDroppedColumnIndex position of ROW_DROPPED_COL in every projected output row
    */
   class JoinedRowProcessor(
       targetRowHasNoMatch: Expression,
@@ -1247,7 +1248,8 @@ object GpuMergeIntoCommand {
       deleteRowOutput: Seq[Expression],
       joinedAttributes: Seq[Attribute],
       joinedRowEncoder: ExpressionEncoder[Row],
-      outputRowEncoder: ExpressionEncoder[Row]) extends Serializable {
+      outputRowEncoder: ExpressionEncoder[Row],
+      rowDroppedColumnIndex: Option[Int] = None) extends Serializable {
 
     private def generateProjection(exprs: Seq[Expression]): UnsafeProjection = {
       UnsafeProjection.create(exprs, joinedAttributes)
@@ -1275,8 +1277,10 @@ object GpuMergeIntoCommand {
       // then CDC must be disabled and it's the column after our output cols
       def shouldDeleteRow(row: InternalRow): Boolean = {
         row.getBoolean(
-          outputRowEncoder.schema.getFieldIndex(ROW_DROPPED_COL)
-            .getOrElse(outputRowEncoder.schema.fields.size)
+          rowDroppedColumnIndex.getOrElse {
+            outputRowEncoder.schema.getFieldIndex(ROW_DROPPED_COL)
+              .getOrElse(outputRowEncoder.schema.fields.size)
+          }
         )
       }
 

@@ -65,6 +65,7 @@ import org.apache.spark.sql.execution.command.LeafRunnableCommand
 import org.apache.spark.sql.execution.datasources.{HadoopFsRelation, LogicalRelation}
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
 import org.apache.spark.sql.functions._
+import org.apache.spark.sql.nvidia.DFUDFShims
 import org.apache.spark.sql.types.{BooleanType, LongType, StringType, StructField, StructType}
 
 /**
@@ -854,7 +855,9 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
    * [[METADATA_ROW_DEL_COL]] to indicate whether filtered by joining with source table in first
    * step.
    */
-  private def getTouchedTargetDF(touchedFiles: Map[String, (Roaring64Bitmap, AddFile)])
+  private def getTouchedTargetDF(
+      touchedFiles: Map[String, (Roaring64Bitmap, AddFile)],
+      targetRowPresentCol: String = TARGET_ROW_PRESENT_COL)
   : DataFrame = {
     // Generate a new target dataframe that has same output attributes exprIds as the target plan.
     // This allows us to apply the existing resolved update/insert expressions.
@@ -894,9 +897,17 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
     }
 
     val df = Dataset.ofRows(context.spark, newPlan)
-      .withColumn(TARGET_ROW_PRESENT_COL, lit(true))
+      .withColumn(targetRowPresentCol, lit(true))
 
     df
+  }
+
+  private def uniqueColumnName(base: String, existing: Seq[String]): String = {
+    val resolver = context.cmd.conf.resolver
+    Iterator.from(0)
+        .map(i => if (i == 0) base else s"$base$i")
+        .find(candidate => !existing.exists(name => resolver(name, candidate)))
+        .get
   }
 
   private def addMergeJoinProcessor(
@@ -911,7 +922,8 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
       notMatchedBySourceConditions: Seq[Expression],
       notMatchedBySourceOutputs: Seq[Seq[Seq[Expression]]],
       noopCopyOutput: Seq[Expression],
-      deleteRowOutput: Seq[Expression]): Dataset[Row] = {
+      deleteRowOutput: Seq[Expression],
+      rowDroppedColumnIndex: Int): Dataset[Row] = {
     def wrap(e: Expression): BaseExprMeta[Expression] = {
       GpuOverrides.wrapExpr(e, context.rapidsConf, None)
     }
@@ -959,7 +971,8 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
         notMatchedBySourceConditions = notMatchedBySourceConditions,
         notMatchedBySourceOutputs = notMatchedBySourceOutputs,
         noopCopyOutput = noopCopyOutput,
-        deleteRowOutput = deleteRowOutput)
+        deleteRowOutput = deleteRowOutput,
+        rowDroppedColumnIndex = Some(rowDroppedColumnIndex))
       Dataset.ofRows(context.spark, processedJoinPlan)
     } else {
       val joinedRowEncoder = RowEncoder(joinedPlan.schema)
@@ -977,7 +990,8 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
         deleteRowOutput = deleteRowOutput,
         joinedAttributes = joinedPlan.output,
         joinedRowEncoder = joinedRowEncoder,
-        outputRowEncoder = outputRowEncoder)
+        outputRowEncoder = outputRowEncoder,
+        rowDroppedColumnIndex = Some(rowDroppedColumnIndex))
       Dataset.ofRows(context.spark, joinedPlan)
           .mapPartitions(processor.processPartition)(outputRowEncoder)
     }
@@ -989,17 +1003,28 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
     import org.apache.spark.sql.catalyst.expressions.Literal.{FalseLiteral, TrueLiteral}
 
     val isDeleteWithDuplicateMatches = multipleMatchDeleteOnlyOvercount.nonEmpty
+    val userColumns = this.sourceDF.columns.toSeq ++ context.deltaTxn.metadata.schema.fieldNames
+    val sourceRowPresentCol = uniqueColumnName(SOURCE_ROW_PRESENT_COL, userColumns)
+    val targetRowPresentCol = uniqueColumnName(
+      TARGET_ROW_PRESENT_COL, userColumns :+ sourceRowPresentCol)
+    val taken = userColumns ++ Seq(sourceRowPresentCol, targetRowPresentCol)
+    val targetRowIdCol = uniqueColumnName(GpuMergeIntoCommand.TARGET_ROW_ID_COL, taken)
+    val sourceRowIdCol = uniqueColumnName(
+      GpuMergeIntoCommand.SOURCE_ROW_ID_COL, taken :+ targetRowIdCol)
+    val rowDroppedCol = uniqueColumnName(
+      ROW_DROPPED_COL, taken ++ Seq(targetRowIdCol, sourceRowIdCol))
+    val incrRowCountCol = uniqueColumnName(
+      INCR_ROW_COUNT_COL, taken ++ Seq(targetRowIdCol, sourceRowIdCol, rowDroppedCol))
+
     var sourceDF = this.sourceDF
-        .withColumn(SOURCE_ROW_PRESENT_COL, new Column(incrSourceRowCountExpr))
-    var targetDF = getTouchedTargetDF(touchedFiles)
+        .withColumn(sourceRowPresentCol, new Column(incrSourceRowCountExpr))
+    var targetDF = getTouchedTargetDF(touchedFiles, targetRowPresentCol)
         .filter(METADATA_ROW_DEL_COL)
         .drop(METADATA_ROW_DEL_COL)
     if (isDeleteWithDuplicateMatches) {
-      targetDF = targetDF.withColumn(
-        GpuMergeIntoCommand.TARGET_ROW_ID_COL, monotonically_increasing_id())
+      targetDF = targetDF.withColumn(targetRowIdCol, monotonically_increasing_id())
       if (context.cmd.notMatchedClauses.nonEmpty) {
-        sourceDF = sourceDF.withColumn(
-          GpuMergeIntoCommand.SOURCE_ROW_ID_COL, monotonically_increasing_id())
+        sourceDF = sourceDF.withColumn(sourceRowIdCol, monotonically_increasing_id())
       }
     }
 
@@ -1035,17 +1060,18 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
     var outputRowSchema = context.deltaTxn.metadata.schema
     if (isDeleteWithDuplicateMatches) {
       cdfTargetOutputCols = cdfTargetOutputCols :+
-          UnresolvedAttribute(GpuMergeIntoCommand.TARGET_ROW_ID_COL)
-      outputRowSchema = outputRowSchema.add(GpuMergeIntoCommand.TARGET_ROW_ID_COL, LongType)
+          UnresolvedAttribute(targetRowIdCol)
+      outputRowSchema = outputRowSchema.add(targetRowIdCol, LongType)
       if (context.cmd.notMatchedClauses.nonEmpty) {
         cdfTargetOutputCols = cdfTargetOutputCols :+
-            Alias(Literal(null, LongType), GpuMergeIntoCommand.SOURCE_ROW_ID_COL)()
-        outputRowSchema = outputRowSchema.add(GpuMergeIntoCommand.SOURCE_ROW_ID_COL, LongType)
+            Alias(Literal(null, LongType), sourceRowIdCol)()
+        outputRowSchema = outputRowSchema.add(sourceRowIdCol, LongType)
       }
     }
+    val rowDroppedColumnIndex = cdfTargetOutputCols.size
     outputRowSchema = outputRowSchema
-        .add(ROW_DROPPED_COL, BooleanType)
-        .add(INCR_ROW_COUNT_COL, BooleanType)
+        .add(rowDroppedCol, BooleanType)
+        .add(incrRowCountCol, BooleanType)
         .add(CDC_TYPE_COLUMN_NAME, StringType)
 
     def updateOutput(
@@ -1074,8 +1100,8 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
       val insertExprs = actions.map(_.expr)
       val outputExprs = if (isDeleteWithDuplicateMatches) {
         insertExprs :+
-            Alias(Literal(null, LongType), GpuMergeIntoCommand.TARGET_ROW_ID_COL)() :+
-            UnresolvedAttribute(GpuMergeIntoCommand.SOURCE_ROW_ID_COL)
+            Alias(Literal(null, LongType), targetRowIdCol)() :+
+            UnresolvedAttribute(sourceRowIdCol)
       } else {
         insertExprs
       }
@@ -1105,9 +1131,9 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
     }
 
     val targetRowHasNoMatch = resolveOnJoinedPlan(
-      Seq(col(SOURCE_ROW_PRESENT_COL).isNull.expr)).head
+      Seq(col(sourceRowPresentCol).isNull.expr)).head
     val sourceRowHasNoMatch = resolveOnJoinedPlan(
-      Seq(col(TARGET_ROW_PRESENT_COL).isNull.expr)).head
+      Seq(col(targetRowPresentCol).isNull.expr)).head
     val matchedConditions = context.cmd.matchedClauses.map(clauseCondition)
     val matchedOutputs = context.cmd.matchedClauses.map(clauseOutput)
     val notMatchedConditions = context.cmd.notMatchedClauses.map(clauseCondition)
@@ -1132,19 +1158,28 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
       notMatchedBySourceConditions,
       notMatchedBySourceOutputs,
       noopCopyOutput,
-      deleteRowOutput)
+      deleteRowOutput,
+      rowDroppedColumnIndex)
 
     if (isDeleteWithDuplicateMatches) {
       val columnsToDedupeBy = if (context.cmd.notMatchedClauses.nonEmpty) {
-        Seq(GpuMergeIntoCommand.TARGET_ROW_ID_COL,
-          GpuMergeIntoCommand.SOURCE_ROW_ID_COL, CDC_TYPE_COLUMN_NAME)
+        Seq(targetRowIdCol, sourceRowIdCol, CDC_TYPE_COLUMN_NAME)
       } else {
-        Seq(GpuMergeIntoCommand.TARGET_ROW_ID_COL)
+        Seq(targetRowIdCol)
       }
       outputDF = outputDF.dropDuplicates(columnsToDedupeBy)
-          .drop(GpuMergeIntoCommand.TARGET_ROW_ID_COL, GpuMergeIntoCommand.SOURCE_ROW_ID_COL)
     }
-    repartitionIfNeeded(outputDF.drop(ROW_DROPPED_COL, INCR_ROW_COUNT_COL))
+
+    // The control columns are appended after the target columns. Drop those generated attributes
+    // precisely so same-named user columns remain in the table and CDF output.
+    val outputAttributes = outputDF.queryExecution.analyzed.output
+    outputDF = Seq(rowDroppedCol, incrRowCountCol)
+        .flatMap(name => outputAttributes.reverse.find(_.name == name))
+        .foldLeft(outputDF)((df, attr) => df.drop(DFUDFShims.exprToColumn(attr)))
+    if (isDeleteWithDuplicateMatches) {
+      outputDF = outputDF.drop(targetRowIdCol, sourceRowIdCol)
+    }
+    repartitionIfNeeded(outputDF)
   }
 
   /**

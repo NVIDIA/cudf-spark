@@ -137,6 +137,49 @@ def test_delta_merge_standard_upsert(spark_tmp_path, spark_tmp_table_factory, us
                                         assert_func=_assert_gpu_low_shuffle_merge)
 
 
+@allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(is_databricks_runtime() or not spark_version().startswith("3.4"),
+                    reason="Delta Lake 2.4 low-shuffle CDF regression")
+def test_delta_24_low_shuffle_merge_cdf_control_column_names(
+        spark_tmp_path, spark_tmp_table_factory):
+    # Low-shuffle CDF appends row-drop and metric control columns to every processor output row.
+    # Same-named user columns must survive the generated controls and their removal before write.
+    def src_table_func(spark):
+        return spark.createDataFrame(
+            [(1, "updated", False, False), (3, "inserted", True, False)],
+            "k INT, v STRING, _row_dropped_ BOOLEAN, _incr_row_count_ BOOLEAN")
+
+    def dest_table_func(spark):
+        return spark.createDataFrame(
+            [(1, "old", True, True), (2, "kept", False, True)],
+            "k INT, v STRING, _row_dropped_ BOOLEAN, _incr_row_count_ BOOLEAN")
+
+    merge_sql = (
+        "MERGE INTO {dest_table} t USING {src_table} s ON t.k = s.k "
+        "WHEN MATCHED THEN UPDATE SET t.v = s.v, "
+        "t._row_dropped_ = s._row_dropped_, "
+        "t._incr_row_count_ = s._incr_row_count_ "
+        "WHEN NOT MATCHED THEN INSERT *")
+    assert_delta_sql_merge_collect(
+        spark_tmp_path, spark_tmp_table_factory,
+        use_cdf=True, enable_deletion_vectors=False,
+        src_table_func=src_table_func, dest_table_func=dest_table_func,
+        merge_sql=merge_sql, compare_logs=False,
+        assert_func=_assert_gpu_low_shuffle_merge, conf=delta_merge_enabled_conf)
+
+    expected = [(1, "updated", False, False), (2, "kept", False, True),
+                (3, "inserted", True, False)]
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    for run in ["CPU", "GPU"]:
+        actual = with_cpu_session(
+            lambda spark, path=data_path + "/" + run: [tuple(row) for row in
+                read_delta_path(spark, path).orderBy("k").collect()],
+            conf=delta_merge_enabled_conf)
+        assert_equal(expected, actual)
+
+
 @allow_non_gpu("ColumnarToRowExec", "FileSourceScanExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
