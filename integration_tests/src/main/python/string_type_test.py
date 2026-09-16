@@ -18,7 +18,8 @@ from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_co
     assert_gpu_sql_fallback_collect, assert_gpu_and_cpu_are_equal_sql
 from data_gen import *
 from marks import allow_non_gpu, allow_non_gpu_conditional
-from spark_session import is_before_spark_400, is_databricks173_or_later, is_spark_40x
+from spark_session import is_before_spark_400, is_databricks173_or_later, is_spark_40x, \
+    is_spark_500_or_later
 
 
 ####################################################################################################
@@ -86,13 +87,16 @@ def test_collate_literal():
 
 
 @pytest.mark.skipif(is_before_spark_400(), reason="Spark versions before 400 do not support collate")
+# Spark 5 plans grouping by collated strings with HashAggregateExec, while earlier versions
+# expose the unsupported collation through SortOrder in a sort aggregate.
+@allow_non_gpu_conditional(is_spark_500_or_later(), "HashAggregateExec")
 @allow_non_gpu("SortAggregateExec", "SortExec", "ShuffleExchangeExec",)
 @pytest.mark.parametrize('collate_type', _non_utf8_binary_collations)
 def test_collate_count_fallback(collate_type):
     data_gen = [("c1", StringGen(collation=collate_type))]
     assert_gpu_sql_fallback_collect(
         lambda spark: gen_df(spark, data_gen),
-        cpu_fallback_class_name="SortOrder",
+        cpu_fallback_class_name="HashAggregateExec" if is_spark_500_or_later() else "SortOrder",
         table_name="tab",
         sql="select c1, count(*) from tab group by c1",
         # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
