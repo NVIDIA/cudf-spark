@@ -129,6 +129,15 @@ orc_write_empty_gens_list = [
 orc_date_writer_allow = ['DataWritingCommandExec', 'ExecutedCommandExec', 'WriteFilesExec']
 orc_date_write_allow = list(dict.fromkeys([*orc_date_writer_allow, *non_utc_allow]))
 
+def assert_gpu_and_cpu_orc_writes_are_equal_collect(
+        orc_gens, write_func, read_func, base_path, conf):
+    if not is_utc() and orc_gens is timestamp_1590_to_1970_gens:
+        assert_gpu_fallback_write(
+            write_func, read_func, base_path, 'DataWritingCommandExec', conf=conf)
+    else:
+        assert_gpu_and_cpu_writes_are_equal_collect(
+            write_func, read_func, base_path, conf=conf)
+
 bool_gen = [BooleanGen(nullable=True), BooleanGen(nullable=False)]
 @pytest.mark.parametrize('orc_gens', orc_write_direct_gens_list, ids=idfn)
 @pytest.mark.parametrize('orc_impl', ["native", "hive"])
@@ -136,7 +145,8 @@ bool_gen = [BooleanGen(nullable=True), BooleanGen(nullable=False)]
 def test_write_round_trip(spark_tmp_path, orc_gens, orc_impl):
     gen_list = [('_c' + str(i), gen) for i, gen in enumerate(orc_gens)]
     data_path = spark_tmp_path + '/ORC_DATA'
-    assert_gpu_and_cpu_writes_are_equal_collect(
+    assert_gpu_and_cpu_orc_writes_are_equal_collect(
+            orc_gens,
             lambda spark, path: gen_df(spark, gen_list).coalesce(1).write.orc(path),
             lambda spark, path: spark.read.orc(path),
             data_path,
@@ -192,7 +202,8 @@ def test_write_round_trip_two_stripes(spark_tmp_path, orc_gens, orc_impl):
     # The minimum `orc_stripe_size_rows` that can be set is 512.
     # See the documentation for the config `spark.rapids.sql.test.orc.write.stripeSizeRows`.
     stripe_size_rows = 512
-    assert_gpu_and_cpu_writes_are_equal_collect(
+    assert_gpu_and_cpu_orc_writes_are_equal_collect(
+            orc_gens,
             # Use only one partition to avoid splitting the data
             lambda spark, path: gen_df(spark, gen_list, stripe_size_rows + 1, num_slices=1).write.orc(path),
             lambda spark, path: spark.read.orc(path),
@@ -474,7 +485,8 @@ def test_write_empty_orc_round_trip(spark_tmp_path, orc_gens):
         gen_list = [('_c' + str(i), gen) for i, gen in enumerate(orc_gens)]
         return gen_df(spark, gen_list, length=0).write.orc(path)
     data_path = spark_tmp_path + '/ORC_DATA'
-    assert_gpu_and_cpu_writes_are_equal_collect(
+    assert_gpu_and_cpu_orc_writes_are_equal_collect(
+        orc_gens,
         create_empty_df,
         lambda spark, path: spark.read.orc(path),
         data_path,
