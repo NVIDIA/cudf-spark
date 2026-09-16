@@ -22,7 +22,7 @@ from spark_session import is_before_spark_320, is_databricks122_or_later, \
     is_databricks_version_or_later, is_spark_321cdh, is_spark_340_or_later, \
     is_spark_400_or_later, is_spark_420_or_later, is_spark_cdh, with_cpu_session, \
     with_gpu_session
-from conftest import is_apache_runtime, is_databricks_runtime
+from conftest import is_apache_runtime, is_databricks_runtime, is_utc
 from datetime import date, datetime, timezone
 from data_gen import *
 from marks import *
@@ -107,7 +107,7 @@ timestamp_1590_to_1970_param = pytest.param(
 timestamp_1590_to_1970_direct_param = pytest.param(
         timestamp_1590_to_1970_gens,
         marks=validate_execs_in_gpu_plan('GpuWriteFilesExec')
-        if is_spark_340_or_later() or is_databricks122_or_later() else [],
+        if is_utc() and (is_spark_340_or_later() or is_databricks122_or_later()) else [],
         id='1590-to-1970-timestamp-direct')
 
 orc_write_gens_list = [
