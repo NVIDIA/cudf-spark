@@ -336,7 +336,7 @@ class MultiBatchManagedBuffer(
 
   private val handles: Seq[SpillablePartialFileHandle] = segments.map(_.handle).distinct
 
-  private def asMissingData[T](body: => T): T = {
+  private def translateClosedHandleToMissingData[T](body: => T): T = {
     try {
       body
     } catch {
@@ -355,7 +355,7 @@ class MultiBatchManagedBuffer(
   override def size(): Long = segments.map(_.length).sum
 
   override def nioByteBuffer(): ByteBuffer = {
-    val lease = asMissingData(ShuffleHandleLease.acquire(handles))
+    val lease = translateClosedHandleToMissingData(ShuffleHandleLease.acquire(handles))
     try {
       // This method loads all data into memory. It's required by the ManagedBuffer interface
       // but is NOT used in the network transfer path - Spark's network layer uses
@@ -390,11 +390,11 @@ class MultiBatchManagedBuffer(
   }
 
   override def createInputStream(): InputStream = {
-    asMissingData(new MultiSegmentInputStream(segments, handles))
+    translateClosedHandleToMissingData(new MultiSegmentInputStream(segments, handles))
   }
 
   override def retain(): ManagedBuffer = {
-    val lease = asMissingData(ShuffleHandleLease.acquire(handles))
+    val lease = translateClosedHandleToMissingData(ShuffleHandleLease.acquire(handles))
     retainLock.synchronized {
       bufferLeases += lease
     }
@@ -416,7 +416,7 @@ class MultiBatchManagedBuffer(
   override def convertToNetty(): AnyRef = {
     // Return a custom FileRegion that streams data in chunks, avoiding loading all
     // data into memory at once. This addresses concerns about large shuffle blocks.
-    asMissingData(new MultiSegmentFileRegion(segments, handles))
+    translateClosedHandleToMissingData(new MultiSegmentFileRegion(segments, handles))
   }
 
   // Spark 4.0+ adds convertToNettyForSsl() abstract method.
