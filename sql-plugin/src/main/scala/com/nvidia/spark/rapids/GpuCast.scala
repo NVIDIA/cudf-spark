@@ -1433,7 +1433,9 @@ object GpuCast {
         if (input.getNullCount == 0) {
           casted.copyToColumnVector()
         } else {
-          casted.mergeAndSetValidity(BinaryOp.BITWISE_AND, input)
+          (casted.mergeAndSetValidity(BinaryOp.BITWISE_AND, input):
+            @scala.annotation.nowarn(
+              "msg=method mergeAndSetValidity in class ColumnView is deprecated"))
         }
       }
     }
