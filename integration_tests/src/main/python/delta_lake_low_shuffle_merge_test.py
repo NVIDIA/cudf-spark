@@ -141,6 +141,46 @@ def test_delta_merge_standard_upsert(spark_tmp_path, spark_tmp_table_factory, us
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not is_databricks_version(17, 3),
+                    reason="DBR 17.3 low-shuffle NOT MATCHED BY SOURCE support")
+@pytest.mark.parametrize("use_cdf", [False, True], ids=idfn)
+def test_delta_low_shuffle_merge_not_matched_by_source(
+        spark_tmp_path, spark_tmp_table_factory, use_cdf):
+    def src_table_func(spark):
+        return spark.createDataFrame([(1, 100), (5, 500)], "a INT, b INT")
+
+    def dest_table_func(spark):
+        # This is deliberately a single input partition. The target-only row which takes no NMBS
+        # action shares a file with updated/deleted rows and catches duplicate preservation output.
+        return spark.createDataFrame(
+            [(1, 10), (2, 20), (3, 30), (4, -1)], "a INT, b INT").coalesce(1)
+
+    merge_sql = ("MERGE INTO {dest_table} d USING {src_table} s ON d.a = s.a "
+                 "WHEN MATCHED THEN UPDATE SET d.b = s.b "
+                 "WHEN NOT MATCHED THEN INSERT (a, b) VALUES (s.a, s.b) "
+                 "WHEN NOT MATCHED BY SOURCE AND d.a = 3 THEN DELETE "
+                 "WHEN NOT MATCHED BY SOURCE AND d.b > 0 THEN UPDATE SET d.b = 0")
+    assert_delta_sql_merge_collect(
+        spark_tmp_path, spark_tmp_table_factory,
+        use_cdf=use_cdf, enable_deletion_vectors=False,
+        src_table_func=src_table_func, dest_table_func=dest_table_func,
+        merge_sql=merge_sql, compare_logs=False,
+        assert_func=_assert_gpu_low_shuffle_merge, conf=delta_merge_enabled_conf)
+
+    expected = [(1, 100), (2, 0), (4, -1), (5, 500)]
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    for run in ["CPU", "GPU"]:
+        actual = with_cpu_session(
+            lambda spark: [tuple(row) for row in
+                           read_delta_path(spark, data_path + "/" + run)
+                           .orderBy("a").collect()],
+            conf=delta_merge_enabled_conf)
+        assert_equal(expected, actual)
+
+
+@allow_non_gpu("ColumnarToRowExec", "FileSourceScanExec", *delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_databricks_version(17, 3),
                     reason="DBR 17.3 effective duplicate-match semantics")
 @pytest.mark.parametrize("use_cdf", [False, True], ids=idfn)
 @pytest.mark.parametrize("src_rows", [
