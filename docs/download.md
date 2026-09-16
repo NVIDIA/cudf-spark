@@ -25,16 +25,18 @@ Note: The NVIDIA cuDF plugin for Apache Spark was formerly known as the RAPIDS A
 ## Release v26.08.1
 ### Hardware Requirements:
 
-The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Hopper and Blackwell generation datacenter GPUs.  The plugin jar is tested on the following GPUs:
+The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Hopper and Blackwell generation GPUs.  The plugin jar is tested on the following GPUs:
 
-	GPU Models: NVIDIA V100, T4, A10, A100, L4, H100 and B100 GPUs
+	GPU Models: NVIDIA V100, T4, A10, A100, L4, H100, B100, RTX PRO 4500 and RTX PRO 6000 GPUs
 
 ### Software Requirements:
 
     OS: The cuDF plugin is compatible with any Linux distribution with glibc >= 2.28 (Please check ldd --version output).  glibc 2.28 was released August 1, 2018.
     Tested on Ubuntu 22.04, Ubuntu 24.04, Rocky Linux 8 and Rocky Linux 9
 
-	NVIDIA Driver*: R525+
+	NVIDIA Driver*:
+		CUDA 12: R525+
+		CUDA 13: R580+
 
 	Runtime:
 		Scala 2.12, 2.13
@@ -68,8 +70,10 @@ The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Ho
 		Spark runtime 2.3 LTS
 		Spark runtime 3.0
 
-*Some hardware may have a minimum driver version greater than R470. Check the GPU spec sheet
-for your hardware's minimum driver version.
+*These minimum driver versions follow the
+[NVIDIA CUDA Compatibility documentation](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html).
+Some hardware may require a newer driver; check the GPU spec sheet for your hardware's minimum
+driver version.
 
 *For EMR support, please refer to the
 [Distributions](https://docs.nvidia.com/spark-rapids/user-guide/latest/faq.html#which-distributions-are-supported) section of the FAQ.
@@ -82,8 +86,8 @@ Use the JDK provided by the Databricks runtime.
 
 | Databricks Runtime | Apache Spark | Scala | JDK runtime | CUDA jar variants | Minimum NVIDIA driver |
 |---------------------|--------------|-------|-------------|-------------------|-----------------------|
-| 14.3 ML LTS GPU | 3.5.0 | 2.12 | Databricks runtime default | CUDA 12, CUDA 13 | R525+ |
-| 17.3 ML LTS GPU | 4.0.0 | 2.13 | Databricks runtime default | CUDA 12, CUDA 13 | R525+ |
+| 14.3 ML LTS GPU | 3.5.0 | 2.12 | Databricks runtime default | CUDA 12, CUDA 13 | CUDA 12: R525+; CUDA 13: R580+ |
+| 17.3 ML LTS GPU | 4.0.0 | 2.13 | Databricks runtime default | CUDA 12, CUDA 13 | CUDA 12: R525+; CUDA 13: R580+ |
 
 Use the Scala artifact that matches the runtime's Spark/Scala line. The CUDA
 classifier selects the bundled cuDF native libraries.
@@ -141,7 +145,7 @@ The cuDF plugin maintains support for Apache Spark versions available for downlo
 | arm64     | Scala 2.13    | [cuDF plugin v26.08.1](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.13/26.08.1/rapids-4-spark_2.13-26.08.1-cuda13-arm64.jar) | [Signature](https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.13/26.08.1/rapids-4-spark_2.13-26.08.1-cuda13-arm64.jar.asc) | <pre>&lt;dependency&gt;<br/>    &lt;groupId&gt;com.nvidia&lt;/groupId&gt;<br/>    &lt;artifactId&gt;rapids-4-spark_2.13&lt;/artifactId&gt;<br/>    &lt;version&gt;26.08.1&lt;/version&gt;<br/>    &lt;classifier&gt;cuda13-arm64&lt;/classifier&gt;<br/>&lt;/dependency&gt;</pre> |
 
 
-The above packages are built against CUDA 12.9 or CUDA 13.1. They are tested on V100, T4, A10, A100, L4, H100 and GB100 GPUs.
+The above packages are built against CUDA 12.9 or CUDA 13.1. They are tested on V100, T4, A10, A100, L4, H100, GB100, RTX PRO 4500 and RTX PRO 6000 GPUs.
 
 ### Verify signature
 * Download the [PUB_KEY](https://keys.openpgp.org/search?q=sw-spark@nvidia.com).
