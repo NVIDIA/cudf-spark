@@ -45,7 +45,8 @@ abstract class MergeIntoCommandMetaBase(
     val deltaLog = mergeCmd.targetFileIndex.deltaLog
     val targetSchema = mergeCmd.migratedSchema.getOrElse(mergeCmd.target.schema)
     if (DeletionVectorUtils.deletionVectorsWritable(deltaLog.unsafeVolatileSnapshot) &&
-        targetSchema.fieldNames.contains(ROW_INDEX_COLUMN_NAME)) {
+        targetSchema.fieldNames.exists(
+          SparkSession.active.sessionState.conf.resolver(_, ROW_INDEX_COLUMN_NAME))) {
       willNotWorkOnGpu(s"user column $ROW_INDEX_COLUMN_NAME conflicts with the DV row index")
     }
     RapidsDeltaUtils.tagForDeltaWrite(this, targetSchema, Some(deltaLog), Map.empty,

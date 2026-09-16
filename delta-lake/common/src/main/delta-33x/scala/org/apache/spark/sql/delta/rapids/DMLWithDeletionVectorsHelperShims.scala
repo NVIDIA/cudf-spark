@@ -22,13 +22,13 @@
 package org.apache.spark.sql.delta.rapids
 
 import com.nvidia.spark.rapids.delta.RapidsDeltaWrite
+import com.nvidia.spark.rapids.delta.common.GpuDeltaParquetFileFormatBase2
 
 import org.apache.spark.sql.{Column, DataFrame, Dataset, SparkSession}
 import org.apache.spark.sql.catalyst.expressions.AttributeReference
 import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, Project}
 import org.apache.spark.sql.delta.DeltaParquetFileFormat
-import org.apache.spark.sql.delta.DeltaParquetFileFormat.{ROW_INDEX_COLUMN_NAME,
-  ROW_INDEX_STRUCT_FIELD}
+import org.apache.spark.sql.delta.DeltaParquetFileFormat.ROW_INDEX_COLUMN_NAME
 import org.apache.spark.sql.delta.actions.FileAction
 import org.apache.spark.sql.delta.commands.{DMLWithDeletionVectorsHelper, TouchedFileWithDV}
 import org.apache.spark.sql.delta.files.TahoeFileIndex
@@ -62,13 +62,14 @@ object DMLWithDeletionVectorsHelperShims {
     val filePathColumnName = Iterator.from(0).map { suffix =>
       if (suffix == 0) GpuFilePathColumnPrefix else s"${GpuFilePathColumnPrefix}_$suffix"
     }.find(name => !usedNames.exists(resolver(_, name))).get
-    val rowIndexCol =
-      AttributeReference(ROW_INDEX_COLUMN_NAME, ROW_INDEX_STRUCT_FIELD.dataType)()
+    val rowIndexField = GpuDeltaParquetFileFormatBase2.GPU_ROW_INDEX_STRUCT_FIELD
+    val rowIndexCol = AttributeReference(
+      ROW_INDEX_COLUMN_NAME, rowIndexField.dataType, metadata = rowIndexField.metadata)()
 
     val newTarget = target.transformUp {
       case relation @ LogicalRelationWithTable(
           hfsr @ HadoopFsRelation(_, _, _, _, format: DeltaParquetFileFormat, _), _) =>
-        val newDataSchema = StructType(hfsr.dataSchema).add(ROW_INDEX_STRUCT_FIELD)
+        val newDataSchema = StructType(hfsr.dataSchema).add(rowIndexField)
         val newFormat = if (candidateFilesHaveDVs) {
           format.copy(optimizationsEnabled = false)
         } else {

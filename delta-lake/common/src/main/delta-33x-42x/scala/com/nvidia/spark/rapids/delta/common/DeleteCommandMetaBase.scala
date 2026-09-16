@@ -36,7 +36,8 @@ abstract class DeleteCommandMetaBase(
         s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
     }
     if (DeletionVectorUtils.deletionVectorsWritable(deleteCmd.deltaLog.unsafeVolatileSnapshot) &&
-        deleteCmd.target.schema.fieldNames.contains(ROW_INDEX_COLUMN_NAME)) {
+        deleteCmd.target.schema.fieldNames.exists(
+          SparkSession.active.sessionState.conf.resolver(_, ROW_INDEX_COLUMN_NAME))) {
       willNotWorkOnGpu(s"user column $ROW_INDEX_COLUMN_NAME conflicts with the DV row index")
     }
     RapidsDeltaUtils.tagForDeltaWrite(this, deleteCmd.target.schema, Some(deleteCmd.deltaLog),

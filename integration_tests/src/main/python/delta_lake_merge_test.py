@@ -1650,8 +1650,8 @@ def test_delta_dml_dv_internal_row_index_column_fallback(
 
     def dest_table_func(spark):
         return spark.createDataFrame(
-            [(0, 1, 10), (1, 2, 20)],
-            "`__delta_internal_row_index` LONG, k INT, v INT")
+            [(101, 1, 10), (202, 2, 20)],
+            "`__DELTA_INTERNAL_ROW_INDEX` LONG, k INT, v INT")
 
     def setup_tables(spark):
         setup_delta_dest_tables(
@@ -1673,6 +1673,49 @@ def test_delta_dml_dv_internal_row_index_column_fallback(
     with_cpu_session(setup_tables)
     assert_gpu_fallback_write(
         write_func, read_delta_path, data_path, "ExecutedCommandExec", conf=conf)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(is_databricks_runtime() or is_before_spark_353(),
+                    reason="OSS persistent-DV reads require Delta 3.3+")
+@pytest.mark.parametrize("use_chunked_reader", [False, True], ids=idfn)
+def test_delta_dv_read_user_internal_row_index_column(
+        spark_tmp_path, use_chunked_reader):
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    conf = copy_and_update(delta_writes_enabled_conf, {
+        "spark.databricks.delta.delete.deletionVectors.persistent": "true",
+        "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
+        "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true",
+        "spark.rapids.sql.reader.chunked": str(use_chunked_reader).lower()})
+
+    def setup_table(spark):
+        spark.createDataFrame(
+            [(101, 1), (202, 2), (303, 3)],
+            "`__delta_internal_row_index` LONG, k INT").coalesce(1) \
+            .write.format("delta") \
+            .option("delta.enableDeletionVectors", "true") \
+            .mode("overwrite").save(data_path)
+        spark.sql(f"DELETE FROM delta.`{data_path}` WHERE k = 2").collect()
+        dv_count = spark.read.json(data_path + "/_delta_log/*.json") \
+            .where("add.deletionVector IS NOT NULL").count()
+        assert dv_count > 0, "Expected DELETE to create a deletion vector"
+
+    with_cpu_session(setup_table, conf=conf)
+
+    def read_table(spark):
+        return spark.read.format("delta").load(data_path) \
+            .select("__delta_internal_row_index", "k")
+
+    cpu_rows = with_cpu_session(
+        lambda spark: read_table(spark).orderBy("k").collect(), conf=conf)
+    assert [(row[0], row[1]) for row in cpu_rows] == [(101, 1), (303, 3)]
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        read_table,
+        exist_classes="GpuFileSourceScanExec",
+        conf=conf,
+        require_non_empty=True)
 
 
 @allow_non_gpu(*delta_meta_allow)

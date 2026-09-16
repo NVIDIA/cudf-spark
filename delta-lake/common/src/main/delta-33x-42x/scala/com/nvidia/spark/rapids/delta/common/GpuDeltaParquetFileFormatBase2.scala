@@ -54,6 +54,19 @@ import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.util.SerializableConfiguration
 
+object GpuDeltaParquetFileFormatBase2 {
+  private val GPU_ROW_INDEX_METADATA_KEY = "rapids.delta.internalRowIndex"
+
+  val GPU_ROW_INDEX_STRUCT_FIELD: StructField = ROW_INDEX_STRUCT_FIELD.copy(
+    metadata = new MetadataBuilder().putBoolean(GPU_ROW_INDEX_METADATA_KEY, true).build())
+
+  private[common] def findGpuRowIndexColumn(schema: StructType): Int =
+    schema.fields.indexWhere { field =>
+      field.metadata.contains(GPU_ROW_INDEX_METADATA_KEY) &&
+        field.metadata.getBoolean(GPU_ROW_INDEX_METADATA_KEY)
+    }
+}
+
 /**
  * This is the version 2 of the Delta Parquet file format implementation, which uses the
  * new deletion vector APIs in cuDF. Unlike the previous version where deletion vectors
@@ -1444,7 +1457,8 @@ case class DeltaParquetTableReader(
   override protected def additionalResources: Seq[AutoCloseable] =
     dvInfos.map(_.serializedBitmap)
 
-  private val rowIndexColumn = readDataSchema.fieldNames.indexOf(ROW_INDEX_COLUMN_NAME)
+  private val rowIndexColumn =
+    GpuDeltaParquetFileFormatBase2.findGpuRowIndexColumn(readDataSchema)
 
   override protected def postProcessChunk(chunk: Table): Table = {
     // Keep the prepended cuDF physical index through schema evolution when Delta requests it.
@@ -1532,7 +1546,8 @@ object MakeParquetTableWithDVProducer extends Logging {
         }
       }
       // Preserve cuDF physical row indexes only for Delta internal row-index scans.
-      val rowIndexColumn = readDataSchema.fieldNames.indexOf(ROW_INDEX_COLUMN_NAME)
+      val rowIndexColumn =
+        GpuDeltaParquetFileFormatBase2.findGpuRowIndexColumn(readDataSchema)
       val physicalRowIndex = if (rowIndexColumn >= 0) {
         Some(castPhysicalRowIndex(table))
       } else {
