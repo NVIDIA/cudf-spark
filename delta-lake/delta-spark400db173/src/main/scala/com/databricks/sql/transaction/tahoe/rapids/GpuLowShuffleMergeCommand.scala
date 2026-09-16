@@ -636,7 +636,9 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
       Literal.FalseLiteral
     } else {
       context.cmd.notMatchedBySourceClauses
-          .map(clause => EqualNullSafe(clause.condition.getOrElse(TrueLiteral), TrueLiteral))
+          .map { clause =>
+            EqualNullSafe(clause.condition.getOrElse(TrueLiteral), TrueLiteral): Expression
+          }
           .reduce((a, b) => Or(a, b))
     }
 
