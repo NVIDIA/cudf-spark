@@ -159,14 +159,14 @@ abstract class GpuUpdateCommandBase(
         sparkSession, "update", candidateFiles, deltaLog, tahoeFileIndex.path, txn.snapshot)
 
       val touchedFilesWithDV = if (shouldWriteDeletionVectors) {
-        val targetDf = DMLWithDeletionVectorsHelperShims
+        val targetScan = DMLWithDeletionVectorsHelperShims
           .createTargetDfForGpuScanningForMatches(
             sparkSession, target, fileIndex, candidateFiles.exists(_.deletionVector != null))
         GpuDeletionVectorBitmapGenerator.findTouchedFiles(
           sparkSession,
           txn,
           hasReadableDVs = DeletionVectorUtils.deletionVectorsReadable(txn.snapshot),
-          targetDf,
+          targetScan,
           candidateFiles,
           exprToColumn(updateCondition),
           nameToAddFile,

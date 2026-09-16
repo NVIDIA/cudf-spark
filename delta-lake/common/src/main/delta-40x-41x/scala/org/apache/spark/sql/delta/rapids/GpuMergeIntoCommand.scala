@@ -114,19 +114,23 @@ case class GpuMergeIntoCommand(
     val fileIndex = new TahoeBatchFileIndex(
       spark, "merge", filesToRewrite, deltaTxn.deltaLog,
       deltaTxn.deltaLog.dataPath, deltaTxn.snapshot)
-    val targetDf = DMLWithDeletionVectorsHelperShims
+    val sourceDf = getMergeSource.df.withColumn(SOURCE_ROW_PRESENT_COL, lit(true))
+    val targetScan = DMLWithDeletionVectorsHelperShims
       .createTargetDfForGpuScanningForMatches(
-        spark, target, fileIndex, filesToRewrite.exists(_.deletionVector != null))
+        spark,
+        target,
+        fileIndex,
+        filesToRewrite.exists(_.deletionVector != null),
+        sourceDf.queryExecution.analyzed.output.map(_.name))
     val joinType = if (notMatchedBySourceClauses.isEmpty) "inner" else "rightOuter"
-    val joinedDf = getMergeSource.df
-      .withColumn(SOURCE_ROW_PRESENT_COL, lit(true))
-      .join(targetDf, DFUDFShims.exprToColumn(condition), joinType)
+    val joinedDf = sourceDf
+      .join(targetScan.dataFrame, DFUDFShims.exprToColumn(condition), joinType)
     val nameToAddFileMap = generateCandidateFileMap(targetDeltaLog.dataPath, filesToRewrite)
     val touchedFilesWithDVs = GpuDeletionVectorBitmapGenerator.findTouchedFiles(
       spark,
       gpuTxn,
       hasReadableDVs = DeletionVectorUtils.deletionVectorsReadable(deltaTxn.snapshot),
-      joinedDf,
+      targetScan.copy(dataFrame = joinedDf),
       filesToRewrite,
       DFUDFShims.exprToColumn(generateFilterForModifiedRows()),
       nameToAddFileMap,
@@ -439,18 +443,22 @@ case class GpuMergeIntoCommand(
     val collectTouchedFiles = joinToFindTouchedFiles.select(
       col(ROW_ID_COL),
       when(matchedPredicateColumn, col(FILE_NAME_COL)).as(FILE_NAME_COL),
-      when(matchedPredicateColumn, lit(1L)).otherwise(lit(0L)).as("one"))
+      lit(1L).as("one"))
 
     val matchedRowCounts = collectTouchedFiles.groupBy(ROW_ID_COL).agg(
       sum("one").as("count"),
       first(col(FILE_NAME_COL), ignoreNulls = true).as(FILE_NAME_COL))
 
-    val matchSummary = matchedRowCounts.agg(
-      coalesce(sum(when(col("count") > 1L, lit(1L)).otherwise(lit(0L))), lit(0L)),
-      coalesce(sum(when(col("count") > 1L, col("count")).otherwise(lit(0L))), lit(0L)),
-      collect_set(col(FILE_NAME_COL))).head()
-    val multipleMatchCount = matchSummary.getLong(0)
-    val multipleMatchSum = matchSummary.getLong(1)
+    // Keep one output row per touched file while calculating duplicate statistics in the same
+    // action. Separate actions would re-run the source and double-count numSourceRows.
+    val matchSummary = matchedRowCounts.groupBy(FILE_NAME_COL).agg(
+      coalesce(sum(when(col("count") > 1L, lit(1L)).otherwise(lit(0L))), lit(0L))
+        .as("multipleMatchCount"),
+      coalesce(sum(when(col("count") > 1L, col("count")).otherwise(lit(0L))), lit(0L))
+        .as("multipleMatchSum"))
+      .collect()
+    val multipleMatchCount = matchSummary.map(_.getAs[Long]("multipleMatchCount")).sum
+    val multipleMatchSum = matchSummary.map(_.getAs[Long]("multipleMatchSum")).sum
 
     val hasMultipleMatches = multipleMatchCount > 0
     throwErrorOnMultipleMatches(hasMultipleMatches, spark)
@@ -464,7 +472,9 @@ case class GpuMergeIntoCommand(
       multipleMatchDeleteOnlyOvercount = Some(duplicateCount)
     }
 
-    val touchedFileNames = matchSummary.getSeq[String](2)
+    val touchedFileNames = matchSummary
+      .filter(!_.isNullAt(0))
+      .map(_.getString(0))
     logTrace("findTouchedFiles: matched files:\n\t" +
       touchedFileNames.mkString("\n\t"))
     val nameToAddFileMap = generateCandidateFileMap(targetDeltaLog.dataPath, dataSkippedFiles)

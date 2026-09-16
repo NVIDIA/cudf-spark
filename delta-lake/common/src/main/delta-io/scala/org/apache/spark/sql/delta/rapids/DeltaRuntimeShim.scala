@@ -139,7 +139,7 @@ object DeltaRuntimeShim {
       .getOrElse(getPreDelta42ShimClassName)
   }
 
-  private lazy val shimInstance = {
+  private[rapids] lazy val shimInstance = {
     val shimClassName = getShimClassName
     val shimClass = ShimReflectionUtils.loadClass(shimClassName)
     shimClass.getConstructor().newInstance().asInstanceOf[DeltaRuntimeShim]

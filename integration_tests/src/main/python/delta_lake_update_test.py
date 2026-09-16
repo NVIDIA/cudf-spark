@@ -66,6 +66,8 @@ def assert_delta_sql_update_collect(spark_tmp_path, use_cdf, enable_deletion_vec
 @allow_non_gpu('ColumnarToRowExec', *delta_meta_allow)
 @delta_lake
 @ignore_order
+@pytest.mark.skipif(is_databricks_runtime(),
+                    reason="Persistent DV command acceleration is OSS Delta only")
 @pytest.mark.skipif(not supports_delta_lake_deletion_vectors(), reason="Deletion vectors aren't supported")
 @pytest.mark.skipif((not is_databricks_runtime()) and is_before_spark_353(),
                     reason="Update with deletion vector is only supported after delta.io 3.0.0")

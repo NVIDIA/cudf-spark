@@ -132,6 +132,8 @@ def test_delta_delete_disabled_fallback(spark_tmp_path, disable_conf, enable_del
 @ignore_order
 @pytest.mark.parametrize("use_cdf", [True, False], ids=idfn)
 @pytest.mark.parametrize("use_metadata_row_index", [True, False], ids=idfn)
+@pytest.mark.skipif(is_databricks_runtime(),
+                    reason="Persistent DV command acceleration is OSS Delta only")
 @pytest.mark.skipif(not supports_delta_lake_deletion_vectors(), \
     reason="Deletion vectors new in Delta Lake 2.4 / Apache Spark 3.4")
 def test_delta_delete_with_deletion_vectors(
@@ -406,9 +408,13 @@ def test_delta_delete_preserves_row_tracking(spark_tmp_path):
 
 @allow_non_gpu("ExecutedCommandExec", *delta_meta_allow)
 @delta_lake
+@inject_oom
+@pytest.mark.parametrize("use_chunked_reader", [True, False], ids=idfn)
+@pytest.mark.skipif(is_databricks_runtime(),
+                    reason="Persistent DV command acceleration is OSS Delta only")
 @pytest.mark.skipif(not supports_delta_lake_deletion_vectors() or is_before_spark_353(),
     reason="Deletion vectors new in Delta Lake 2.4 / Apache Spark 3.4")
-def test_delta_delete_twice_with_dv(spark_tmp_path):
+def test_delta_delete_twice_with_dv(spark_tmp_path, use_chunked_reader):
     """Regression test for https://github.com/NVIDIA/spark-rapids/issues/14442.
     The second DELETE on a DV-enabled table accesses _metadata.file_path and _metadata.row_index
     as nested fields. The plugin must not prune _metadata when its nested fields are still
@@ -419,7 +425,8 @@ def test_delta_delete_twice_with_dv(spark_tmp_path):
                           IntegerGen(special_cases=[100]),
                           IntegerGen(special_cases=[200]))
     conf = copy_and_update(delta_delete_enabled_conf,
-        {"spark.databricks.delta.delete.deletionVectors.persistent": "true"})
+        {"spark.databricks.delta.delete.deletionVectors.persistent": "true",
+         "spark.rapids.sql.reader.chunked": str(use_chunked_reader).lower()})
     # Setup identical tables for CPU and GPU
     with_cpu_session(lambda spark: setup_delta_dest_tables(spark, data_path,
         generate_dest_data, use_cdf=False, enable_deletion_vectors=True))
@@ -427,8 +434,19 @@ def test_delta_delete_twice_with_dv(spark_tmp_path):
     gpu_path = data_path + "/GPU"
     # First delete creates a deletion vector
     first_delete_sql = "DELETE FROM delta.`{path}` WHERE a = 100"
-    with_cpu_session(lambda spark: spark.sql(first_delete_sql.format(path=cpu_path)).collect(), conf=conf)
-    with_gpu_session(lambda spark: spark.sql(first_delete_sql.format(path=gpu_path)).collect(), conf=conf)
+    with_cpu_session(
+        lambda spark: spark.sql(first_delete_sql.format(path=cpu_path)).collect(), conf=conf)
+    assert_rapids_delta_write(
+        lambda spark: spark.sql(first_delete_sql.format(path=gpu_path)).collect(),
+        conf=conf, expected_command="GpuDeleteCommand")
+
+    def assert_has_dv(spark, path):
+        dv_count = spark.read.json(path + "/_delta_log/*.json") \
+            .where("add.deletionVector IS NOT NULL").count()
+        assert dv_count > 0, "Expected the first DELETE to create a deletion vector"
+
+    with_cpu_session(lambda spark: assert_has_dv(spark, cpu_path), conf=conf)
+    with_cpu_session(lambda spark: assert_has_dv(spark, gpu_path), conf=conf)
     # Second delete reads the table with existing DV, triggering _metadata nested field access
     second_delete_sql = "DELETE FROM delta.`{path}` WHERE b = 200"
     with_cpu_session(lambda spark: spark.sql(second_delete_sql.format(path=cpu_path)).collect(), conf=conf)

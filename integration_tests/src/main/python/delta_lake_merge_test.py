@@ -1572,3 +1572,104 @@ def test_delta_merge_dataframe_api(spark_tmp_path, use_cdf, num_slices, enable_d
     # Non-deterministic input for each task means we can only reliably compare record counts when using only one task
     if num_slices == 1:
         with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(is_databricks_runtime() or is_before_spark_353(),
+                    reason="OSS persistent-DV MERGE requires Delta 3.3+")
+@pytest.mark.parametrize("enable_deletion_vectors", [False, True], ids=idfn)
+def test_delta_merge_counts_all_on_matches_for_duplicate_detection(
+        spark_tmp_path, spark_tmp_table_factory, enable_deletion_vectors):
+    src_table = spark_tmp_table_factory.get()
+
+    def do_merge(spark):
+        gpu_enabled = str(spark.conf.get("spark.rapids.sql.enabled", "false")).lower() == "true"
+        target_path = spark_tmp_path + ("/GPU" if gpu_enabled else "/CPU")
+        spark.createDataFrame([(1, 10)], "k INT, v INT").write.format("delta") \
+            .option("delta.enableDeletionVectors", str(enable_deletion_vectors).lower()) \
+            .mode("overwrite").save(target_path)
+        spark.createDataFrame([(1, 20, True), (1, 30, False)],
+                              "k INT, v INT, apply BOOLEAN") \
+            .createOrReplaceTempView(src_table)
+        return spark.sql(
+            f"MERGE INTO delta.`{target_path}` AS target USING {src_table} AS source "
+            "ON target.k = source.k "
+            "WHEN MATCHED AND source.apply THEN UPDATE SET target.v = source.v").collect()
+
+    assert_gpu_and_cpu_error(
+        do_merge,
+        conf=delta_merge_enabled_conf,
+        error_message="DELTA_MULTIPLE_SOURCE_ROW_MATCHING_TARGET_ROW_IN_MERGE")
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(is_databricks_runtime() or is_before_spark_353(),
+                    reason="OSS persistent-DV MERGE requires Delta 3.3+")
+def test_delta_merge_dv_internal_file_path_name_collisions(
+        spark_tmp_path, spark_tmp_table_factory):
+    helper_name = "__delta_internal_gpu_file_path"
+
+    def src_table_func(spark):
+        return spark.createDataFrame([(1, "source", 20)],
+                                     f"k INT, `{helper_name}` STRING, v INT")
+
+    def dest_table_func(spark):
+        return spark.createDataFrame([(1, "target", 10)],
+                                     f"k INT, `{helper_name}` STRING, v INT")
+
+    merge_sql = f"MERGE INTO {{dest_table}} AS target USING {{src_table}} AS source " \
+                "ON target.k = source.k WHEN MATCHED THEN UPDATE SET " \
+                f"target.v = source.v, target.`{helper_name}` = source.`{helper_name}`"
+    assert_delta_sql_merge_collect(
+        spark_tmp_path, spark_tmp_table_factory,
+        use_cdf=False, enable_deletion_vectors=True,
+        src_table_func=src_table_func, dest_table_func=dest_table_func,
+        merge_sql=merge_sql, compare_logs=True, conf=delta_merge_enabled_conf)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(is_databricks_runtime() or is_before_spark_353(),
+                    reason="OSS persistent-DV MERGE requires Delta 3.3+")
+def test_delta_merge_dv_many_touched_files(spark_tmp_path, spark_tmp_table_factory):
+    def src_table_func(spark):
+        return spark.range(0, 640, 10).selectExpr("CAST(id AS INT) AS k", "CAST(-1 AS INT) AS v")
+
+    def dest_table_func(spark):
+        return spark.range(640).selectExpr("CAST(id AS INT) AS k", "CAST(id AS INT) AS v") \
+            .repartition(64, "k")
+
+    merge_sql = "MERGE INTO {dest_table} AS target USING {src_table} AS source " \
+                "ON target.k = source.k WHEN MATCHED THEN UPDATE SET target.v = source.v"
+    assert_delta_sql_merge_collect(
+        spark_tmp_path, spark_tmp_table_factory,
+        use_cdf=False, enable_deletion_vectors=True,
+        src_table_func=src_table_func, dest_table_func=dest_table_func,
+        merge_sql=merge_sql, compare_logs=False, conf=delta_merge_enabled_conf)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(is_databricks_runtime() or not is_oss_delta_lake_41_or_42(),
+                    reason="OSS NOT MATCHED BY SOURCE requires Delta 4.1+")
+def test_delta_merge_not_matched_by_source_with_dv(spark_tmp_path, spark_tmp_table_factory):
+    def src_table_func(spark):
+        return spark.createDataFrame([(1, 100)], "k INT, v INT")
+
+    def dest_table_func(spark):
+        return spark.createDataFrame([(1, 10), (2, 20)], "k INT, v INT")
+
+    merge_sql = "MERGE INTO {dest_table} AS target USING {src_table} AS source " \
+                "ON target.k = source.k " \
+                "WHEN MATCHED THEN UPDATE SET target.v = source.v " \
+                "WHEN NOT MATCHED BY SOURCE THEN DELETE"
+    assert_delta_sql_merge_collect(
+        spark_tmp_path, spark_tmp_table_factory,
+        use_cdf=False, enable_deletion_vectors=True,
+        src_table_func=src_table_func, dest_table_func=dest_table_func,
+        merge_sql=merge_sql, compare_logs=True, conf=delta_merge_enabled_conf)

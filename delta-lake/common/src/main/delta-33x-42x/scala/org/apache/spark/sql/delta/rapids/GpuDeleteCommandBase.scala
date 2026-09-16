@@ -223,14 +223,14 @@ abstract class GpuDeleteCommandBase(
             sparkSession, "delete", candidateFiles, deltaLog, deltaLog.dataPath, txn.snapshot)
 
           if (shouldWriteDVs) {
-            val targetDf = DMLWithDeletionVectorsHelperShims
+            val targetScan = DMLWithDeletionVectorsHelperShims
               .createTargetDfForGpuScanningForMatches(
                 sparkSession, target, fileIndex, candidateFiles.exists(_.deletionVector != null))
             val touchedFiles = GpuDeletionVectorBitmapGenerator.findTouchedFiles(
               sparkSession,
               txn,
               hasReadableDVs = DeletionVectorUtils.deletionVectorsReadable(txn.snapshot),
-              targetDf,
+              targetScan,
               candidateFiles,
               exprToColumn(cond),
               nameToAddFileMap,

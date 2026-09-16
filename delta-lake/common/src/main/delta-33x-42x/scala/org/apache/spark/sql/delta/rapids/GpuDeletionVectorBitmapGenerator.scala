@@ -22,6 +22,11 @@ import org.apache.spark.sql.delta.commands.{DeletionVectorBitmapGenerator,
   DMLWithDeletionVectorsHelper, TouchedFileWithDV}
 import org.apache.spark.sql.nvidia.DFUDFShims
 
+private[rapids] case class GpuTargetScan(
+    dataFrame: DataFrame,
+    filePathColumn: Column,
+    rowIndexColumn: Column)
+
 private[rapids] object GpuDeletionVectorBitmapGenerator extends GpuDeltaCommandLike {
 
   /**
@@ -32,7 +37,7 @@ private[rapids] object GpuDeletionVectorBitmapGenerator extends GpuDeltaCommandL
    * @param spark active Spark session
    * @param txn active GPU Delta transaction
    * @param hasReadableDVs whether existing deletion vectors must be applied and merged
-   * @param targetDf scan of the candidate files with Delta metadata columns
+   * @param targetScan scan and analyzed attributes for Delta's internal metadata columns
    * @param candidateFiles files selected by Delta data skipping
    * @param condition predicate selecting rows to invalidate
    * @param nameToAddFileMap canonical file-path lookup used to construct touched-file results
@@ -43,13 +48,14 @@ private[rapids] object GpuDeletionVectorBitmapGenerator extends GpuDeltaCommandL
       spark: SparkSession,
       txn: GpuOptimisticTransactionBase,
       hasReadableDVs: Boolean,
-      targetDf: DataFrame,
+      targetScan: GpuTargetScan,
       candidateFiles: Seq[AddFile],
       condition: Column,
       nameToAddFileMap: Map[String, AddFile],
       operationName: String): Seq[TouchedFileWithDV] = {
     recordDeltaOperation(txn.deltaLog, s"$operationName.findTouchedFiles") {
-      val gpuTargetDf = DMLWithDeletionVectorsHelperShims.withGpuExecutionContext(spark, targetDf)
+      val gpuTargetDf = DMLWithDeletionVectorsHelperShims.withGpuExecutionContext(
+        spark, targetScan.dataFrame)
       val candidatesHaveDVs =
         hasReadableDVs && candidateFiles.exists(_.deletionVector != null)
       val storedResults = DeletionVectorBitmapGenerator.buildRowIndexSetsForFilesMatchingCondition(
@@ -59,8 +65,8 @@ private[rapids] object GpuDeletionVectorBitmapGenerator extends GpuDeltaCommandL
         gpuTargetDf,
         candidateFiles,
         DFUDFShims.columnToExpr(condition),
-        Some(DMLWithDeletionVectorsHelperShims.filePathColumnForGpuScanning(spark)),
-        Some(DMLWithDeletionVectorsHelperShims.rowIndexColumnForGpuScanning(spark)))
+        Some(targetScan.filePathColumn),
+        Some(targetScan.rowIndexColumn))
 
       DMLWithDeletionVectorsHelper.findFilesWithMatchingRows(txn, nameToAddFileMap, storedResults)
     }

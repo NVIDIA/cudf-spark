@@ -25,13 +25,17 @@ import com.nvidia.spark.rapids.delta.delta41x.Delta41xProvider
 import com.nvidia.spark.rapids.delta.delta41x.GpuDeltaCatalog
 
 import org.apache.spark.sql.SaveMode
+import org.apache.spark.sql.classic.SparkSession
 import org.apache.spark.sql.connector.catalog.StagingTableCatalog
 import org.apache.spark.sql.delta.{DeltaOperations, DeltaOptions}
-import org.apache.spark.sql.delta.actions.Metadata
+import org.apache.spark.sql.delta.actions.{FileAction, Metadata}
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
-import org.apache.spark.sql.delta.commands.WriteIntoDelta
+import org.apache.spark.sql.delta.commands.{DMLWithDeletionVectorsHelper, TouchedFileWithDV,
+  WriteIntoDelta}
+import org.apache.spark.sql.delta.stats.StatsCollectionUtils
 import org.apache.spark.sql.delta.hooks.GpuAutoCompact41x
 import org.apache.spark.sql.delta.rapids.{
+  DMLWithDeletionVectorsRuntimeShim,
   DeltaRuntimeShimBase,
   GpuDeltaLog,
   GpuOptimisticTransaction,
@@ -41,7 +45,17 @@ import org.apache.spark.sql.delta.rapids.{
   StartTransactionArg
 }
 
-class Delta41xRuntimeShim extends DeltaRuntimeShimBase {
+class Delta41xRuntimeShim extends DeltaRuntimeShimBase
+    with DMLWithDeletionVectorsRuntimeShim {
+
+  override def processUnmodifiedData(
+      spark: SparkSession,
+      touchedFiles: Seq[TouchedFileWithDV],
+      txn: GpuOptimisticTransactionBase): (Seq[FileAction], Map[String, Long]) = {
+    val prefixLength = StatsCollectionUtils.getDataSkippingStringPrefixLength(spark, txn.metadata)
+    DMLWithDeletionVectorsHelper.processUnmodifiedData(
+      spark, touchedFiles, txn.snapshot, prefixLength)
+  }
 
   override def getDeltaProvider: DeltaProvider = Delta41xProvider
 

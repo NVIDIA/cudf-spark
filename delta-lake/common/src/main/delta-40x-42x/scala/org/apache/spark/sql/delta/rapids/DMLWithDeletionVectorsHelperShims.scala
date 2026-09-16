@@ -23,7 +23,7 @@ package org.apache.spark.sql.delta.rapids
 
 import com.nvidia.spark.rapids.delta.RapidsDeltaWrite
 
-import org.apache.spark.sql.{Column, DataFrame, SparkSession => SqlSparkSession}
+import org.apache.spark.sql.{DataFrame, SparkSession => SqlSparkSession}
 import org.apache.spark.sql.catalyst.expressions.AttributeReference
 import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, Project}
 import org.apache.spark.sql.classic.{Dataset, SparkSession}
@@ -31,19 +31,16 @@ import org.apache.spark.sql.delta.DeltaParquetFileFormat
 import org.apache.spark.sql.delta.DeltaParquetFileFormat.{ROW_INDEX_COLUMN_NAME,
   ROW_INDEX_STRUCT_FIELD}
 import org.apache.spark.sql.delta.actions.FileAction
-import org.apache.spark.sql.delta.commands.{DMLWithDeletionVectorsHelper, TouchedFileWithDV}
+import org.apache.spark.sql.delta.commands.TouchedFileWithDV
 import org.apache.spark.sql.delta.files.TahoeFileIndex
 import org.apache.spark.sql.execution.datasources.{HadoopFsRelation, LogicalRelationWithTable}
-import org.apache.spark.sql.functions.{col, input_file_name}
+import org.apache.spark.sql.functions.input_file_name
 import org.apache.spark.sql.types.StructType
 
 /** Delta 4.x ports of DMLWithDeletionVectorsHelper methods used by GPU DML. */
 object DMLWithDeletionVectorsHelperShims {
 
-  private val GpuFilePathColumn = "__delta_internal_gpu_file_path"
-  def rowIndexColumnForGpuScanning(spark: SqlSparkSession): Column = col(ROW_INDEX_COLUMN_NAME)
-
-  def filePathColumnForGpuScanning(spark: SqlSparkSession): Column = col(GpuFilePathColumn)
+  private val GpuFilePathColumnPrefix = "__delta_internal_gpu_file_path"
 
   def withGpuExecutionContext(spark: SqlSparkSession, df: DataFrame): DataFrame = {
     Dataset.ofRows(spark.asInstanceOf[SparkSession], RapidsDeltaWrite(df.queryExecution.logical))
@@ -59,8 +56,14 @@ object DMLWithDeletionVectorsHelperShims {
       spark: SqlSparkSession,
       target: LogicalPlan,
       fileIndex: TahoeFileIndex,
-      candidateFilesHaveDVs: Boolean): DataFrame = {
+      candidateFilesHaveDVs: Boolean,
+      reservedColumnNames: Seq[String] = Seq.empty): GpuTargetScan = {
     val classicSpark = spark.asInstanceOf[SparkSession]
+    val resolver = classicSpark.sessionState.conf.resolver
+    val usedNames = target.output.map(_.name) ++ reservedColumnNames
+    val filePathColumnName = Iterator.from(0).map { suffix =>
+      if (suffix == 0) GpuFilePathColumnPrefix else s"${GpuFilePathColumnPrefix}_$suffix"
+    }.find(name => !usedNames.exists(resolver(_, name))).get
     val rowIndexCol =
       AttributeReference(ROW_INDEX_COLUMN_NAME, ROW_INDEX_STRUCT_FIELD.dataType)()
 
@@ -81,40 +84,23 @@ object DMLWithDeletionVectorsHelperShims {
       case project @ Project(projectList, _) =>
         project.copy(projectList = projectList :+ rowIndexCol)
     }
-    Dataset.ofRows(classicSpark, newTarget)
-      .withColumn(GpuFilePathColumn, input_file_name())
+    val targetDf = Dataset.ofRows(classicSpark, newTarget)
+      .withColumn(filePathColumnName, input_file_name())
+    val filePathAttr = targetDf.queryExecution.analyzed.output
+      .find(attr => resolver(attr.name, filePathColumnName)).get
+    GpuTargetScan(
+      targetDf,
+      org.apache.spark.sql.nvidia.DFUDFShims.exprToColumn(filePathAttr),
+      org.apache.spark.sql.nvidia.DFUDFShims.exprToColumn(rowIndexCol))
   }
 
-  /**
-   * Delta 4.0 uses the three-argument overload, while Delta 4.1 and 4.2 add the statistics string
-   * prefix length. Resolve the overload at runtime so this class is identical in the Delta 4.0
-   * and 4.2 plugin artifacts that Spark 4.0.1 packages together.
-   */
+  /** Dispatch through the exact Delta runtime shim without reflective API probing. */
   def processUnmodifiedData(
       spark: SparkSession,
       touchedFiles: Seq[TouchedFileWithDV],
       txn: GpuOptimisticTransactionBase): (Seq[FileAction], Map[String, Long]) = {
-    val helper = DMLWithDeletionVectorsHelper
-    val methods = helper.getClass.getMethods.filter(_.getName == "processUnmodifiedData")
-    methods.find(_.getParameterCount == 3).map { method =>
-      method.invoke(helper, spark, touchedFiles, txn.snapshot)
-    }.orElse {
-      methods.find(_.getParameterCount == 4).map { method =>
-        val statsUtilsClass = Class.forName(
-          "org.apache.spark.sql.delta.stats.StatsCollectionUtils$")
-        val statsUtils = statsUtilsClass.getField("MODULE$").get(null)
-        val prefixLengthMethod = statsUtilsClass.getMethods.find { candidate =>
-          candidate.getName == "getDataSkippingStringPrefixLength" &&
-            candidate.getParameterCount == 2
-        }.getOrElse {
-          throw new IllegalStateException(
-            "Delta StatsCollectionUtils.getDataSkippingStringPrefixLength is unavailable")
-        }
-        val prefixLength = prefixLengthMethod.invoke(statsUtils, spark, txn.metadata)
-        method.invoke(helper, spark, touchedFiles, txn.snapshot, prefixLength)
-      }
-    }.getOrElse {
-      throw new IllegalStateException("Unsupported Delta processUnmodifiedData signature")
-    }.asInstanceOf[(Seq[FileAction], Map[String, Long])]
+    DeltaRuntimeShim.shimInstance
+      .asInstanceOf[DMLWithDeletionVectorsRuntimeShim]
+      .processUnmodifiedData(spark, touchedFiles, txn)
   }
 }

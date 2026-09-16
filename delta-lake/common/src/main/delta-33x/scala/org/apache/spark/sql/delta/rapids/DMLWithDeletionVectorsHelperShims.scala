@@ -33,16 +33,13 @@ import org.apache.spark.sql.delta.actions.FileAction
 import org.apache.spark.sql.delta.commands.{DMLWithDeletionVectorsHelper, TouchedFileWithDV}
 import org.apache.spark.sql.delta.files.TahoeFileIndex
 import org.apache.spark.sql.execution.datasources.{HadoopFsRelation, LogicalRelationWithTable}
-import org.apache.spark.sql.functions.{col, input_file_name}
+import org.apache.spark.sql.functions.input_file_name
 import org.apache.spark.sql.types.StructType
 
 /** Version-specific ports of Delta's DMLWithDeletionVectorsHelper methods used by GPU DML. */
 object DMLWithDeletionVectorsHelperShims {
 
-  private val GpuFilePathColumn = "__delta_internal_gpu_file_path"
-  def rowIndexColumnForGpuScanning(spark: SparkSession): Column = col(ROW_INDEX_COLUMN_NAME)
-
-  def filePathColumnForGpuScanning(spark: SparkSession): Column = col(GpuFilePathColumn)
+  private val GpuFilePathColumnPrefix = "__delta_internal_gpu_file_path"
 
   def withGpuExecutionContext(spark: SparkSession, df: DataFrame): DataFrame = {
     Dataset.ofRows(spark, RapidsDeltaWrite(df.queryExecution.logical))
@@ -58,7 +55,13 @@ object DMLWithDeletionVectorsHelperShims {
       spark: SparkSession,
       target: LogicalPlan,
       fileIndex: TahoeFileIndex,
-      candidateFilesHaveDVs: Boolean): DataFrame = {
+      candidateFilesHaveDVs: Boolean,
+      reservedColumnNames: Seq[String] = Seq.empty): GpuTargetScan = {
+    val resolver = spark.sessionState.conf.resolver
+    val usedNames = target.output.map(_.name) ++ reservedColumnNames
+    val filePathColumnName = Iterator.from(0).map { suffix =>
+      if (suffix == 0) GpuFilePathColumnPrefix else s"${GpuFilePathColumnPrefix}_$suffix"
+    }.find(name => !usedNames.exists(resolver(_, name))).get
     val rowIndexCol =
       AttributeReference(ROW_INDEX_COLUMN_NAME, ROW_INDEX_STRUCT_FIELD.dataType)()
 
@@ -79,8 +82,11 @@ object DMLWithDeletionVectorsHelperShims {
       case project @ Project(projectList, _) =>
         project.copy(projectList = projectList :+ rowIndexCol)
     }
-    Dataset.ofRows(spark, newTarget)
-      .withColumn(GpuFilePathColumn, input_file_name())
+    val targetDf = Dataset.ofRows(spark, newTarget)
+      .withColumn(filePathColumnName, input_file_name())
+    val filePathAttr = targetDf.queryExecution.analyzed.output
+      .find(attr => resolver(attr.name, filePathColumnName)).get
+    GpuTargetScan(targetDf, new Column(filePathAttr), new Column(rowIndexCol))
   }
 
   /** Port of Delta's processUnmodifiedData for Delta 3.3. */

@@ -46,7 +46,6 @@ import org.apache.spark.sql.delta.DeltaParquetFileFormat._
 import org.apache.spark.sql.delta.actions.{Metadata, Protocol}
 import org.apache.spark.sql.delta.schema.SchemaMergingUtils
 import org.apache.spark.sql.delta.sources.DeltaSQLConf
-import org.apache.spark.sql.execution.QueryExecutionException
 import org.apache.spark.sql.execution.datasources.PartitionedFile
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.GpuFileSourceScanExec
@@ -1456,7 +1455,7 @@ case class DeltaParquetTableReader(
     if (rowIndexColumn < 0) {
       super.evolveSchemaAndClose(table)
     } else {
-      withResource(table.getColumn(0).castTo(DType.INT64)) { physicalRowIndex =>
+      withResource(MakeParquetTableWithDVProducer.castPhysicalRowIndex(table)) { physicalRowIndex =>
         val dataTable = RapidsDeletionVectors.dropFirstColumn(table)
         val evolvedTable = super.evolveSchemaAndClose(dataTable)
         RapidsDeletionVectors.replaceColumnAndClose(
@@ -1467,6 +1466,14 @@ case class DeltaParquetTableReader(
 }
 
 object MakeParquetTableWithDVProducer extends Logging {
+  private[common] def castPhysicalRowIndex(table: Table): ColumnVector = {
+    closeOnExcept(table) { _ =>
+      RmmRapidsRetryIterator.withRetryNoSplit[ColumnVector] {
+        table.getColumn(0).castTo(DType.INT64)
+      }
+    }
+  }
+
   def apply(
       useChunkedReader: Boolean,
       maxChunkedReaderMemoryUsageSizeBytes: Long,
@@ -1527,7 +1534,7 @@ object MakeParquetTableWithDVProducer extends Logging {
       // Preserve cuDF physical row indexes only for Delta internal row-index scans.
       val rowIndexColumn = readDataSchema.fieldNames.indexOf(ROW_INDEX_COLUMN_NAME)
       val physicalRowIndex = if (rowIndexColumn >= 0) {
-        Some(table.getColumn(0).castTo(DType.INT64))
+        Some(castPhysicalRowIndex(table))
       } else {
         None
       }
@@ -1537,7 +1544,8 @@ object MakeParquetTableWithDVProducer extends Logging {
           GpuParquetScan.throwIfRebaseNeededInExceptionMode(tableWithoutIndex, dateRebaseMode,
             timestampRebaseMode)
           if (readDataSchema.length < tableWithoutIndex.getNumberOfColumns) {
-            throw new QueryExecutionException(s"Expected ${readDataSchema.length} columns " +
+            throw new org.apache.spark.sql.execution.QueryExecutionException(
+              s"Expected ${readDataSchema.length} columns " +
               s"but read ${tableWithoutIndex.getNumberOfColumns} from ${splits.mkString("; ")}")
           }
         }
