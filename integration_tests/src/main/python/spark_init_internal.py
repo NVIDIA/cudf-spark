@@ -12,12 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 import logging
 import os
 import pytest
 import re
 import stat
 import traceback
+import weakref
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)-8s %(message)s",
@@ -54,6 +56,60 @@ spark_jars_env = {
 # Initialized in pytest_sessionstart; declared here so pytest_sessionfinish
 # does not raise NameError if session startup fails before assignment.
 _spark = None
+
+_PY4J_STRONG_REF_WORKAROUND_MARKER = '_spark_rapids_strong_ref_workaround'
+
+
+def _java_member_uses_weak_container(java_member_class):
+    class _ProbeContainer:
+        pass
+
+    class _ProbeGatewayProperty:
+        pool = None
+
+    class _ProbeGatewayClient:
+        gateway_property = _ProbeGatewayProperty()
+        converters = ()
+
+    container = _ProbeContainer()
+    member = java_member_class(
+        '_spark_rapids_container_lifetime_probe', container, 'o0', _ProbeGatewayClient())
+    return isinstance(member.container, weakref.ReferenceType)
+
+
+def _apply_py4j_strong_ref_workaround_if_needed(java_member_class=None):
+    """Restore upstream JavaMember container lifetime semantics in this IT process."""
+    if java_member_class is None:
+        from py4j.java_gateway import JavaMember
+        java_member_class = JavaMember
+
+    original_init = java_member_class.__init__
+    if getattr(original_init, _PY4J_STRONG_REF_WORKAROUND_MARKER, False):
+        return False
+    try:
+        uses_weak_container = _java_member_uses_weak_container(java_member_class)
+    except Exception:
+        logging.exception(
+            "Could not probe Py4J JavaMember container lifetime; continuing without the "
+            "temporary integration-test workaround")
+        return False
+    if not uses_weak_container:
+        return False
+
+    @functools.wraps(original_init)
+    def strong_ref_init(self, name, container, target_id, gateway_client):
+        original_init(self, name, container, target_id, gateway_client)
+        if isinstance(self.container, weakref.ReferenceType):
+            self.container = container
+
+    setattr(strong_ref_init, _PY4J_STRONG_REF_WORKAROUND_MARKER, True)
+    java_member_class.__init__ = strong_ref_init
+    logging.warning(
+        "Detected weak Py4J JavaMember container references; applying the temporary "
+        "integration-test strong-reference workaround for the missing-target failures in "
+        "https://github.com/NVIDIA/cudf-spark/issues/15805")
+    return True
+
 
 def findspark_init():
     import findspark
@@ -119,6 +175,15 @@ def pytest_sessionstart(session):
 
     import pyspark
     from py4j.java_gateway import java_import
+
+    # Dataproc 2.2.86 can delete temporary JVM targets before chained Py4J calls complete.
+    # Keep this before SparkSession creation. The behavior probe makes it a no-op for upstream Py4J.
+    try:
+        _apply_py4j_strong_ref_workaround_if_needed()
+    except Exception:
+        logging.exception(
+            "Could not initialize the temporary Py4J integration-test workaround; "
+            "continuing without it")
 
     # Force the RapidsPlugin to be enabled, so it blows up if the classpath is not set properly
     # DO NOT SET ANY OTHER CONFIGS HERE!!!

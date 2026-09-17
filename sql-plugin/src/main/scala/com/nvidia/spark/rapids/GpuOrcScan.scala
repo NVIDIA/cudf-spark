@@ -734,6 +734,8 @@ case class GpuOrcMultiFilePartitionReaderFactory(
           } catch {
             case e: FileNotFoundException if ignoreMissingFiles =>
               logWarning(s"Skipped missing file: ${file.filePath}", e)
+            case e: FileNotFoundException =>
+              throw GpuFileNotFoundException(file.filePath.toString, e)
           }
         }
       }
@@ -3163,6 +3165,7 @@ object MakeOrcTableProducer extends Logging {
         table, writerTimezone, writerUsedProlepticGregorian)
       val evolvedSchemaTable = SchemaUtils.evolveSchemaIfNeededAndClose(rebased, tableSchema,
         readDataSchema, isSchemaCaseSensitive, Some(GpuOrcScan.castColumnTo))
+      GpuMetric.recordOutputBatchBytes(evolvedSchemaTable, metrics.get(GPU_OUTPUT_BATCH_BYTES))
       new SingleGpuDataProducer(evolvedSchemaTable)
     }
   }
@@ -3222,8 +3225,10 @@ case class OrcTableReader(
     metrics(NUM_OUTPUT_BATCHES) += 1
     val rebased = GpuOrcTimezoneUtils.rebaseOrcDateTime(
       table, writerTimezone, writerUsedProlepticGregorian)
-    SchemaUtils.evolveSchemaIfNeededAndClose(rebased, catalystTableSchema,
+    val evolvedSchemaTable = SchemaUtils.evolveSchemaIfNeededAndClose(rebased, catalystTableSchema,
       readDataSchema, isSchemaCaseSensitive, Some(GpuOrcScan.castColumnTo))
+    GpuMetric.recordOutputBatchBytes(evolvedSchemaTable, metrics.get(GPU_OUTPUT_BATCH_BYTES))
+    evolvedSchemaTable
   }
 
   override def close(): Unit = {

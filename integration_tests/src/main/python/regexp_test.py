@@ -52,6 +52,7 @@ def test_split_re_negative_limit():
             'split(a, "b[o]+", -1)',
             'split(a, "b[o]*", -1)',
             'split(a, "b[o]?", -1)',
+            'split(a, "o{1,2}?", -1)',
             'split(a, "[o]", -2)'),
             conf=_regexp_conf)
 
@@ -221,6 +222,7 @@ def test_split_unsupported_fallback():
         'string_split_table',
         'select ' +
         'split(a, "o*"),' +
+        'split(a, "o{0,2}?"),' +
         'split(a, "o?") from string_split_table')
     assert_gpu_sql_fallback_collect(
         lambda spark : unary_op_df(spark, data_gen),
@@ -320,7 +322,9 @@ def test_re_replace_repetition():
                 'REGEXP_REPLACE(a, "(A*)", "PROD")',
                 'REGEXP_REPLACE(a, "(((A*)))", "PROD")',
                 'REGEXP_REPLACE(a, "((A*)E?)", "PROD")',
-                'REGEXP_REPLACE(a, "[A-Z]?", "PROD")'
+                'REGEXP_REPLACE(a, "[A-Z]?", "PROD")',
+                'REGEXP_REPLACE(a, "A{1,3}?", "PROD")',
+                'REGEXP_REPLACE(a, "A{0,3}?", "PROD")'
             ),
         conf=_regexp_conf)
 
@@ -788,12 +792,13 @@ def test_character_classes():
             ),
         conf=_regexp_conf)
 
-@datagen_overrides(seed=0, reason="https://github.com/NVIDIA/spark-rapids/issues/10641")
 def test_regexp_choice():
     # These choice patterns transpile to many cuDF states (e.g. `(abc1a$|^ab2ab|a3abc)`
     # is ~21 states). They run on the GPU directly now that the regex complexity gate
     # has been removed (#14887).
-    gen = mk_str_gen('[abcd]{1,3}[0-9]{1,3}[abcd]{1,3}[ \n\t\r]{0,2}')
+    # Exercise the trailing CRLF capture regression from #10641 with randomized seeds.
+    gen = (mk_str_gen('[abcd]{1,3}[0-9]{1,3}[abcd]{1,3}[ \n\t\r]{0,2}')
+        .with_special_case('aab2ab\r\n'))
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark: unary_op_df(spark, gen).selectExpr(
                 'rlike(a, "[abcd]|[123]")',
@@ -1365,6 +1370,7 @@ def test_unsupported_fallback_regexp_extract():
     assert_gpu_did_fallback('REGEXP_EXTRACT("PROD", "[a-z]+", num)')
     assert_gpu_did_fallback('REGEXP_EXTRACT("PROD", reg_ex, 0)')
     assert_gpu_did_fallback('REGEXP_EXTRACT("PROD", reg_ex, num)')
+    assert_gpu_did_fallback('REGEXP_EXTRACT(a, "(a{1,2}+)", 1)')
     assert_gpu_did_fallback('REGEXP_EXTRACT(a, "(3?|a)+", 0)')
     assert_gpu_did_fallback('REGEXP_EXTRACT(a, "(a|3?)+", 0)')
 
@@ -1511,4 +1517,20 @@ def test_lazy_quantifier():
             'a', r'REGEXP_EXTRACT(a, "(\".??\")")',
             r'REGEXP_EXTRACT(a, "(\".+?\")")',
             r'REGEXP_EXTRACT(a, "(\".*?\")")'),
+        conf=_regexp_conf)
+
+    bounded_reluctant_gen = StringGen('[abc]{0,8}') \
+        .with_special_case('aaaaaacc') \
+        .with_special_case('bbbbcc') \
+        .with_special_case('cc') \
+        .with_special_case('aabbcc')
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: unary_op_df(spark, bounded_reluctant_gen).selectExpr(
+            'regexp_extract(a, "((aa|bb){0,3}?).*cc", 0)',
+            'regexp_extract(a, "((aa|bb){0,3}?).*cc", 1)',
+            'regexp_extract_all(a, "(a{1,3}?)", 0)',
+            'regexp_extract_all(a, "(a{1,3}?)", 1)',
+            'regexp_extract(a, "(2|a*?)", 0)',
+            'regexp_extract(a, "(2|a{1,2}?)", 0)',
+            'rlike(a, "a[a-c]{1,3}?")'),
         conf=_regexp_conf)

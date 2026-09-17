@@ -288,6 +288,10 @@ case class LikeRuleMeta(
     r: DataFromReplacementRule)
   extends BinaryExprMeta[Like](a, conf, p, r) {
   override def tagExprForGpu(): Unit = {
+    if (a.escapeChar > 0x7f) {
+      willNotWorkOnGpu("non-ASCII LIKE escape characters are not supported")
+      return
+    }
     a.right match {
       case Literal(v: UTF8String, _) =>
         val pattern = v.toString

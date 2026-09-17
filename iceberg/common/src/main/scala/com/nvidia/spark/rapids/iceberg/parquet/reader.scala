@@ -34,18 +34,12 @@ import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
 import org.apache.iceberg.{MetadataColumns, Schema}
 import org.apache.iceberg.expressions.Expression
-import org.apache.iceberg.hadoop.HadoopInputFile
-import org.apache.iceberg.io.InputFile
 import org.apache.iceberg.mapping.NameMapping
 import org.apache.iceberg.parquet._
-import org.apache.iceberg.shaded.org.apache.parquet.{HadoopReadOptions, ParquetReadOptions}
+import org.apache.iceberg.shaded.org.apache.parquet.ParquetReadOptions
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.metadata.{BlockMetaData => ShadedBlockMetaData}
-import org.apache.iceberg.shaded.org.apache.parquet.schema.{
-  MessageType => ShadedMessageType, Types => ShadedTypes}
-import org.apache.iceberg.shaded.org.apache.parquet.schema.PrimitiveType.{
-  PrimitiveTypeName => ShadedPrimitiveTypeName}
-import org.apache.iceberg.shaded.org.apache.parquet.schema.Type.{Repetition => ShadedRepetition}
+import org.apache.iceberg.shaded.org.apache.parquet.schema.{MessageType => ShadedMessageType}
 import org.apache.parquet.hadoop.metadata.BlockMetaData
 
 import org.apache.spark.internal.Logging
@@ -64,7 +58,7 @@ case class IcebergPartitionedFile(
   lazy val path: Path = new Path(new URI(urlEncodedPath))
 
   def parquetReadOptions: ParquetReadOptions = {
-    GpuIcebergParquetReader.buildReaderOptions(file.getDelegate, split)
+    GpuIcebergParquetReaderUtils.buildReaderOptions(file.getDelegate, split)
   }
 
   def newReader(metrics: Map[String, GpuMetric] = Map.empty): ParquetFileReader = {
@@ -115,10 +109,6 @@ case class IcebergPartitionedFile(
     }
   }
 }
-
-sealed trait ThreadConf
-
-case object SingleFile extends ThreadConf
 
 case class MultiThread(
     poolConfBuilder: ThreadPoolConfBuilder,
@@ -302,53 +292,11 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
       )
 
       val postProcessorReadSchema = if (hasDeletionVector) {
-        GpuIcebergParquetReader.withNativeRowIndex(fileReadSchema)
+        GpuIcebergParquetReaderUtils.withNativeRowIndex(fileReadSchema)
       } else {
         fileReadSchema
       }
       (parquetFileInfo, postProcessorReadSchema)
     }
-  }
-}
-
-object GpuIcebergParquetReader {
-  private val READ_PROPERTIES_TO_REMOVE = Set(
-    "parquet.read.filter",
-    "parquet.private.read.filter.predicate",
-    "parquet.read.support.class")
-
-  /**
-   * Adds the leading file-global row index emitted by the cuDF deletion-vector reader to the
-   * schema consumed by the Iceberg post-processor.
-   */
-  private[iceberg] def withNativeRowIndex(
-      fileReadSchema: ShadedMessageType): ShadedMessageType = {
-    val rowPosition = ShadedTypes
-      .primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.REQUIRED)
-      .id(MetadataColumns.ROW_POSITION.fieldId())
-      .named(MetadataColumns.ROW_POSITION.name())
-    new ShadedMessageType(
-      fileReadSchema.getName,
-      (rowPosition +: fileReadSchema.getFields.asScala).asJava)
-  }
-
-  def buildReaderOptions(file: InputFile, split: Option[(Long, Long)])
-  : ParquetReadOptions = {
-    var optionsBuilder: ParquetReadOptions.Builder = null
-    file match {
-      case hadoop: HadoopInputFile =>
-        // remove read properties already set that may conflict with this read
-        val conf = new Configuration(hadoop.getConf)
-        for (property <- READ_PROPERTIES_TO_REMOVE) {
-          conf.unset(property)
-        }
-        optionsBuilder = HadoopReadOptions.builder(conf)
-      case _ =>
-        optionsBuilder = ParquetReadOptions.builder()
-    }
-    split.foreach { case (start, length) =>
-      optionsBuilder = optionsBuilder.withRange(start, start + length)
-    }
-    optionsBuilder.build
   }
 }

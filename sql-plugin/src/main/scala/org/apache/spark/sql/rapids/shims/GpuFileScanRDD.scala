@@ -18,7 +18,7 @@ package org.apache.spark.sql.rapids.shims
 import java.io.{FileNotFoundException, IOException}
 
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
-import com.nvidia.spark.rapids.shims.SparkShimImpl
+import com.nvidia.spark.rapids.shims.{MissingFileErrorShim, SparkShimImpl}
 import org.apache.parquet.io.ParquetDecodingException
 
 import org.apache.spark.{Partition => RDDPartition, SparkUpgradeException, TaskContext}
@@ -73,11 +73,19 @@ class GpuFileScanRDD(
         // InterruptibleIterator, but we inline it here instead of wrapping the iterator in order
         // to avoid performance overhead.
         context.killTaskIfInterrupted()
-        (currentIterator != null && currentIterator.hasNext) || nextIterator()
+        try {
+          (currentIterator != null && currentIterator.hasNext) || nextIterator()
+        } catch {
+          case e: FileNotFoundException => throw convertMissingFile(e)
+        }
       }
 
       def next(): Object = {
-        val nextElement = currentIterator.next()
+        val nextElement = try {
+          currentIterator.next()
+        } catch {
+          case e: FileNotFoundException => throw convertMissingFile(e)
+        }
         // TODO: we should have a better separation of row based and batch based scan, so that we
         // don't need to run this `if` for every record.
         if (nextElement.isInstanceOf[ColumnarBatch]) {
@@ -94,19 +102,11 @@ class GpuFileScanRDD(
         nextElement
       }
 
-      private def readCurrentFile(): Iterator[InternalRow] = {
-        try {
-          readFunction(currentFile)
-        } catch {
-          case e: FileNotFoundException =>
-            throw new FileNotFoundException(
-              e.getMessage + "\n" +
-                "It is possible the underlying files have been updated. " +
-                "You can explicitly invalidate the cache in Spark by " +
-                "running 'REFRESH TABLE tableName' command in SQL or " +
-                "by recreating the Dataset/DataFrame involved.")
-        }
-      }
+      private def readCurrentFile(): Iterator[InternalRow] = readFunction(currentFile)
+
+      private def convertMissingFile(error: FileNotFoundException): Throwable =
+        MissingFileErrorShim.convert(
+          Some(currentFile.filePath.toString), error, includeRefreshHint = true)
 
       /** Advances to the next file. Returns true if a new non-empty iterator is available. */
       private def nextIterator(): Boolean = {
@@ -201,4 +201,3 @@ class GpuFileScanRDD(
     split.asInstanceOf[FilePartition].preferredLocations()
   }
 }
-

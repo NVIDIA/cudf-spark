@@ -391,7 +391,10 @@ object NvtxRegistry {
     "Processing batch for existence join")
 
   val BUILD_JOIN_TABLE: NvtxId = NvtxId("build join table", NvtxColor.GREEN,
-    "Building hash table for join operation")
+    "Materializing broadcast build-side data for a join")
+
+  val HASH_TABLE_BUILD: NvtxId = NvtxId("hash table build",
+    NvtxColor.GREEN, "Building reusable cuDF hash state for a join")
 
   // Window operations
   val WINDOW: NvtxId = NvtxId("window", NvtxColor.CYAN,
@@ -672,19 +675,6 @@ object NvtxRegistry {
   val GPU_RANGE: NvtxId = NvtxId("GpuRange", NvtxColor.DARK_GREEN,
     "Generating range of values on GPU")
 
-  // Hybrid CPU/GPU operations
-  val WAIT_FOR_CPU: NvtxId = NvtxId("waitForCPU", NvtxColor.RED,
-    "Waiting for CPU batch in hybrid execution")
-
-  val GPU_ACQUIRE_C2C: NvtxId = NvtxId("gpuAcquireC2C", NvtxColor.GREEN,
-    "Acquiring GPU for coalesce-to-coalesce operation")
-
-  val PINNED_H2D: NvtxId = NvtxId("pinnedH2D", NvtxColor.DARK_GREEN,
-    "Copying from pinned host memory to device")
-
-  val PAGEABLE_H2D: NvtxId = NvtxId("PageableH2D", NvtxColor.GREEN,
-    "Copying from pageable host memory to device")
-
   def init(): Unit = {
     register(ACQUIRE_GPU)
     register(RELEASE_GPU)
@@ -780,6 +770,7 @@ object NvtxRegistry {
     register(EXISTENCE_JOIN_SCATTER_MAP)
     register(EXISTENCE_JOIN_BATCH)
     register(BUILD_JOIN_TABLE)
+    register(HASH_TABLE_BUILD)
     register(WINDOW)
     register(RUNNING_WINDOW)
     register(DOUBLE_BATCHED_WINDOW_PRE)
@@ -866,10 +857,6 @@ object NvtxRegistry {
     register(DISK_SPILL)
     register(DEVICE_SPILL)
     register(GPU_RANGE)
-    register(WAIT_FOR_CPU)
-    register(GPU_ACQUIRE_C2C)
-    register(PINNED_H2D)
-    register(PAGEABLE_H2D)
   }
 }
 

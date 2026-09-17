@@ -28,15 +28,21 @@
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
-import com.nvidia.spark.rapids.GpuScan
-import org.scalatest.funsuite.AnyFunSuite
+import com.nvidia.spark.rapids.{GpuScan, SparkQueryCompareTestSuite}
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow
+import org.apache.spark.sql.connector.metric.CustomMetric
 import org.apache.spark.sql.connector.read.{Batch, InputPartition, PartitionReaderFactory}
 import org.apache.spark.sql.types.StructType
 
-class GpuBatchScanExecHashSuite extends AnyFunSuite {
+class GpuBatchScanExecHashSuite extends SparkQueryCompareTestSuite {
+  private object TestCustomMetric extends CustomMetric {
+    override def name(): String = "testCustomMetric"
+    override def description(): String = "test custom metric"
+    override def aggregateTaskMetrics(taskMetrics: Array[Long]): String = taskMetrics.sum.toString
+  }
+
   private object EmptyBatch extends Batch {
     override def planInputPartitions(): Array[InputPartition] = Array.empty
     override def createReaderFactory(): PartitionReaderFactory = null
@@ -47,6 +53,7 @@ class GpuBatchScanExecHashSuite extends AnyFunSuite {
     override def toBatch: Batch = EmptyBatch
     override def withInputFile(): GpuScan = this
     override def description(): String = "hash-test-scan"
+    override def supportedCustomMetrics(): Array[CustomMetric] = Array(TestCustomMetric)
   }
 
   private def exec(spjParams: StoragePartitionJoinShims.SpjParams): GpuBatchScanExec = {
@@ -78,5 +85,13 @@ class GpuBatchScanExecHashSuite extends AnyFunSuite {
     val b = exec(params)
     assert(a == b)
     assert(a.hashCode() == b.hashCode())
+  }
+
+  test("task custom metrics use the accumulators exposed by the plan") {
+    withCpuSparkSession { _ =>
+      val plan = exec(StoragePartitionJoinShims.default())
+      assert(plan.scanCustomSQLMetrics(TestCustomMetric.name()) eq
+        plan.metrics(TestCustomMetric.name()))
+    }
   }
 }

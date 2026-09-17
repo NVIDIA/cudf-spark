@@ -507,6 +507,7 @@ The following regular expression patterns are not yet supported on the GPU and w
 - Line and string anchors are not supported by `string_split` and `str_to_map`
 - Lazy quantifiers within a choice block such as `(2|\u2029??)+` 
 - Possessive quantifiers, such as `a*+`
+- Repetition counts greater than 999, such as `a{1000}`
 - Character classes that use union, intersection, or subtraction semantics, such as `[a-d[m-p]]`, `[a-z&&[def]]`,
   or `[a-z&&[^bc]]`
 - Lookahead/lookbehind groups: `(?=a)`, `(?!a)`, `(?<=a)`, `(?<!a)`

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,7 +24,9 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.connector.catalog.StagingTableCatalog
 import org.apache.spark.sql.delta.{DeltaLog, DeltaUDF, Snapshot}
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
-import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShim, GpuOptimisticTransactionBase, StartTransactionArg}
+import org.apache.spark.sql.delta.commands.WriteIntoDelta
+import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShim, GpuDeltaLog,
+  GpuOptimisticTransactionBase, GpuWriteIntoDelta, GpuWriteIntoDeltaLike, StartTransactionArg}
 import org.apache.spark.sql.delta.sources.DeltaSQLConf
 import org.apache.spark.sql.execution.datasources.FileFormat
 import org.apache.spark.sql.expressions.UserDefinedFunction
@@ -33,6 +35,12 @@ class Delta24xRuntimeShim extends DeltaRuntimeShim {
   override def getDeltaConfigChecker: DeltaConfigChecker = Delta20xConfigChecker
 
   override def getDeltaProvider: DeltaProvider = Delta24xProvider
+
+  override def createGpuWrite(
+      gpuDeltaLog: GpuDeltaLog,
+      cpuWrite: WriteIntoDelta): GpuWriteIntoDeltaLike = {
+    GpuWriteIntoDelta(gpuDeltaLog, cpuWrite)
+  }
 
   override def startTransaction(arg: StartTransactionArg): GpuOptimisticTransactionBase = {
     new GpuOptimisticTransaction(arg.log, arg.conf)(arg.clock)

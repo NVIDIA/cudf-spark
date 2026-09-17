@@ -14,8 +14,8 @@
 
 import pytest
 
-from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_error, assert_gpu_fallback_collect
-from spark_session import is_before_spark_320
+from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_error, assert_gpu_fallback_collect, collect_plan_nodes, plan_metric
+from spark_session import is_before_spark_320, with_cpu_session
 from conftest import is_not_utc
 from data_gen import *
 from marks import ignore_order, allow_non_gpu
@@ -358,3 +358,64 @@ def test_union_with_filter():
         return dfc.union(dfc)
     conf = { "spark.sql.adaptive.enabled": "true"}
     assert_gpu_and_cpu_are_equal_collect(doit, conf)
+
+
+# AQE off: collect_plan_nodes does not descend into AdaptiveSparkPlanExec.
+_zero_column_range_conf = {'spark.sql.adaptive.enabled': False,
+                           'spark.rapids.sql.metrics.level': 'DEBUG'}
+
+def _zero_column_range_exchanges(plan):
+    """gpuOutputPartitioning, not outputPartitioning: the latter is the CPU RangePartitioning."""
+    return [node for node in collect_plan_nodes(plan)
+            if node.getClass().getSimpleName() == "GpuShuffleExchangeExec"
+            and node.gpuOutputPartitioning().getClass().getSimpleName() == "GpuRangePartitioning"
+            and node.children().apply(0).output().isEmpty()]
+
+def _assert_zero_column_range_exchange(cpu_plan, plan):
+    """The rows > 0 check matters: a plan that produces no rows never reaches the sampler."""
+    exchanges = _zero_column_range_exchanges(plan)
+    assert exchanges, \
+        "Expected a GPU range-partitioning exchange over a zero-column child in:\n{}".format(plan)
+    for exchange in exchanges:
+        child = exchange.children().apply(0)
+        rows = plan_metric(child, "numOutputRows")
+        assert rows is not None, \
+            "Expected a numOutputRows metric on {}; is the metrics level high enough?:\n{}".format(
+                child.getClass().getSimpleName(), plan)
+        assert rows > 0, \
+            "Expected the zero-column child of the range exchange to produce rows, got {} in:\n{}".format(
+                rows, plan)
+
+def test_range_partition_zero_column_scan(spark_tmp_path):
+    # payload exists only so the scan has a column for pruning to drop.
+    data_path = spark_tmp_path + '/PARQUET_DATA'
+    with_cpu_session(
+        lambda spark: spark.range(0, 4000).select(
+            f.col('id').alias('key'),
+            f.sha2(f.col('id').cast('string'), 256).alias('payload')
+        ).repartition(4).write.mode('overwrite').parquet(data_path))
+
+    def do_it(spark):
+        return (spark.read.parquet(data_path)
+                .select(f.lit(1).cast('long').alias('k'), f.col('payload'))
+                .repartitionByRange(4, f.col('k'))
+                .agg(f.count(f.lit(1))))
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it,
+        conf = _zero_column_range_conf,
+        gpu_plan_assertion = _assert_zero_column_range_exchange)
+
+def test_range_partition_zero_column_skewed_resample():
+    # Hits randomResample, not reservoirSampleAndCount: createRangeBounds only re-samples a
+    # partition holding more than three quarters of the rows, hence the skewed filter.
+    def do_it(spark):
+        skewed = (spark.range(0, 24000, 1, 4)
+                  .where((f.col('id') < 6000) | (f.col('id') % 1000 == 0))
+                  .select(f.lit(1).cast('long').alias('k')))
+        return skewed.repartitionByRange(4, f.col('k')).agg(f.count(f.lit(1)))
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it,
+        conf = _zero_column_range_conf,
+        gpu_plan_assertion = _assert_zero_column_range_exchange)

@@ -11,7 +11,7 @@ Validation fails when:
 
 # Dependencies
 
-It requires spark-rapids-jni, rapids-4-spark and Spark jars.
+It requires cudf-spark-jni, rapids-4-spark and Spark jars.
 
 # Running the script
 

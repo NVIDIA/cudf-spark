@@ -223,7 +223,7 @@ private[rapids] object GpuStringAndAggregateExpressionOverrides {
       "Like",
       ExprChecks.binaryProject(TypeSig.BOOLEAN, TypeSig.BOOLEAN,
         ("src", TypeSig.STRING, TypeSig.STRING),
-        ("search", TypeSig.lit(TypeEnum.STRING), TypeSig.STRING)),
+        ("search", TypeSig.STRING, TypeSig.STRING)),
       LikeRuleMeta),
     expr[RLike](
       "Regular expression version of Like",

@@ -919,6 +919,31 @@ def _date_to_iso_string(data):
     return data.strftime("%Y-%m-%d").zfill(10)
 
 
+def _normalize_pyspark_scalar(data, data_type):
+    if data is None:
+        return None
+
+    if isinstance(data_type, ArrayType):
+        assert isinstance(data, (list, tuple))
+        return type(data)(_normalize_pyspark_scalar(x, data_type.elementType) for x in data)
+    elif isinstance(data_type, StructType):
+        assert isinstance(data, tuple) and len(data) == len(data_type.fields)
+        return tuple(
+            _normalize_pyspark_scalar(x, field.dataType)
+            for x, field in zip(data, data_type.fields))
+    elif isinstance(data_type, DateType):
+        return _date_to_iso_string(data)
+    elif isinstance(data_type, MapType):
+        assert isinstance(data, dict)
+        return {
+            _normalize_pyspark_scalar(key, data_type.keyType):
+                _normalize_pyspark_scalar(value, data_type.valueType)
+            for key, value in data.items()
+        }
+    else:
+        return data
+
+
 def _mark_as_lit(data, data_type):
     # To support nested types, 'data_type' is required.
     assert data_type is not None
@@ -985,9 +1010,7 @@ def gen_scalar_values(data_gen, count, seed=None, force_no_nulls=False):
 
     def gen_value():
         value = src.gen(force_no_nulls=force_no_nulls)
-        if value is not None and isinstance(data_type, DateType):
-            return _date_to_iso_string(value)
-        return value
+        return _normalize_pyspark_scalar(value, data_type)
 
     return (gen_value() for i in range(0, count))
 

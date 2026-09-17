@@ -140,6 +140,17 @@ You can also disable only one rule, by specifying its rule id, as specified in:
         ]]></customMessage>
     </check>
 
+    <check customId="NoNativeDataSourceRDD" level="error"
+           class="org.scalastyle.scalariform.IllegalImportsChecker" enabled="true">
+        <parameters>
+            <parameter name="illegalImports"><![CDATA[org.apache.spark.sql.execution.datasources.v2.DataSourceRDD]]></parameter>
+        </parameters>
+        <customMessage><![CDATA[
+        GPU scans must use GpuDataSourceRDD. Spark's native DataSourceRDD replaces input bytes
+        with task-thread filesystem statistics and can discard bytes reported by GPU worker threads.
+        ]]></customMessage>
+    </check>
+
     <check level="error" class="org.scalastyle.file.RegexChecker" enabled="true">
         <parameters>
             <parameter name="regex">def this\((.*)\) \{</parameter>
