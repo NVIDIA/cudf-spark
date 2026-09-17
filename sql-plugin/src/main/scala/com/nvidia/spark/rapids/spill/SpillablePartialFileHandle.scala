@@ -37,6 +37,10 @@ object PartialFileStorageMode extends Enumeration {
   val FILE_ONLY, MEMORY_WITH_SPILL = Value
 }
 
+/** Marks only the expected acquire-after-close race; other lease failures must stay visible. */
+private[rapids] final class ClosedPartialFileHandleException
+    extends IllegalStateException("Cannot acquire a read lease on a closed partial file handle")
+
 /**
  * A specialized spillable handle for partial files that provides unified write/read
  * interfaces for both file-based and memory-based (with spill support) storage.
@@ -752,8 +756,7 @@ class SpillablePartialFileHandle private (
    */
   private[rapids] def acquireRead(): Unit = synchronized {
     if (closed) {
-      throw new IllegalStateException(
-        "Cannot acquire a read lease on a closed partial file handle")
+      throw new ClosedPartialFileHandleException
     }
     readRefCount += 1
   }

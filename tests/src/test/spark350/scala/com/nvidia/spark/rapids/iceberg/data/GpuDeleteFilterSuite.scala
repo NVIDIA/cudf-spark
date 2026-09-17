@@ -31,7 +31,7 @@ package com.nvidia.spark.rapids.iceberg.data
 import scala.collection.JavaConverters._
 import scala.language.reflectiveCalls
 
-import ai.rapids.cudf.{DType, HostColumnVector, HostColumnVectorCore}
+import ai.rapids.cudf.{DType, HostColumnVector, HostColumnVectorCore, Rmm, RmmAllocationMode, Table => CudfTable}
 import com.nvidia.spark.rapids.{GpuColumnVector, LazySpillableColumnarBatch, NoopMetric, RapidsConf}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.GpuMetric.{JOIN_TIME, OP_TIME_LEGACY}
@@ -56,16 +56,82 @@ import org.scalatest.prop.TableDrivenPropertyChecks._
 import org.scalatest.prop.Tables.Table
 
 import org.apache.spark.SparkConf
-import org.apache.spark.sql.types.{DataType, LongType, StringType, StructType}
+import org.apache.spark.sql.types.{BooleanType, DataType, LongType, StringType, StructType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
 class GpuDeleteFilterSuite extends AnyFunSuite with BeforeAndAfterAll {
+  private var initializedRmm = false
+
   override def beforeAll(): Unit = {
+    if (!Rmm.isInitialized) {
+      Rmm.initialize(RmmAllocationMode.CUDA_DEFAULT, null, 0)
+      initializedRmm = true
+    }
     SpillFramework.initialize(new RapidsConf(new SparkConf))
   }
 
   override def afterAll(): Unit = {
     SpillFramework.shutdown()
+    if (initializedRmm) {
+      Rmm.shutdown()
+    }
+  }
+
+  private def filterInput(deleted: Seq[Boolean]): ColumnarBatch = {
+    withResource(new CudfTable.TestBuilder()
+        .column(Array[java.lang.Long](10L, 20L, 30L): _*)
+        .column(deleted.map(Boolean.box): _*)
+        .build()) { table =>
+      GpuColumnVector.from(table, Array(LongType, BooleanType))
+    }
+  }
+
+  for (deleted <- Seq(Seq(false, false, false), Seq(true, true, true), Seq(true, false, true));
+      dropDeletedColumn <- Seq(false, true)) {
+    test(s"filterAndDrop owns its output: deleted=$deleted, drop=$dropDeletedColumn") {
+      val expected = Seq(10L, 20L, 30L).zip(deleted).collect {
+        case (value, false) => value
+      }
+      val input = filterInput(deleted)
+      val inputColumns = GpuColumnVector.extractBases(input)
+      val dropMask = if (dropDeletedColumn) Array(false, true) else Array.empty[Boolean]
+      val output = GpuDeleteFileInfo.filterAndDrop(
+        input, 1, Array(LongType, BooleanType), dropMask)
+      val outputColumns = GpuColumnVector.extractBases(output)
+      withResource(output) { _ =>
+        assert(inputColumns.forall(_.getRefCount == 0))
+        assert(outputColumns.forall(_.getRefCount == 1))
+        assert(output.numCols() == (if (dropDeletedColumn) 1 else 2))
+        assert(output.numRows() == expected.size)
+        withResource(outputColumns(0).copyToHost()) { host =>
+          assert(expected.indices.map(i => host.getLong(i)) == expected)
+        }
+      }
+      assert(outputColumns.forall(_.getRefCount == 0))
+    }
+  }
+
+  test("filterAndDrop closes its input when filtering fails") {
+    val input = filterInput(Seq(false, true, false))
+    val inputColumns = GpuColumnVector.extractBases(input)
+    intercept[AssertionError] {
+      GpuDeleteFileInfo.filterAndDrop(input, 2, Array(LongType, BooleanType))
+    }
+    assert(inputColumns.forall(_.getRefCount == 0))
+  }
+
+  test("filterAndDrop closes its input and intermediates when dropping columns fails") {
+    val allocatedBefore = Rmm.getTotalBytesAllocated
+    val input = filterInput(Seq(false, true, false))
+    val inputColumns = GpuColumnVector.extractBases(input)
+    assert(Rmm.getTotalBytesAllocated > allocatedBefore)
+    intercept[AssertionError] {
+      GpuDeleteFileInfo.filterAndDrop(input, 1, Array(LongType, BooleanType), Array(false))
+    }
+    assert(inputColumns.forall(_.getRefCount == 0))
+    // Both the filtered table and its converted batch own the result columns.
+    // Either owner leaking would retain their GPU allocations after the input closes.
+    assert(Rmm.getTotalBytesAllocated == allocatedBefore)
   }
 
   private def fixture(deleteFiles: Seq[DeleteFile], _tableSchema: Schema = TABLE_SCHEMA) = new {

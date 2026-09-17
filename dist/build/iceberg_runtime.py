@@ -18,6 +18,17 @@ import xml.etree.ElementTree as ET
 
 MAVEN_NS = "http://maven.apache.org/POM/4.0.0"
 MAVEN_PROPERTY_RE = re.compile(r"\$\{([^}]+)\}")
+SYSTEM_RUNTIME_PROPERTY = "rapids.iceberg.audit.runtime.path"
+
+
+def system_runtime_path(property_lookup):
+    value = property_lookup(SYSTEM_RUNTIME_PROPERTY)
+    if value is None:
+        return None
+    value = str(value).strip()
+    if not value:
+        raise RuntimeError("%s must not be empty" % SYSTEM_RUNTIME_PROPERTY)
+    return value
 
 
 def resolve_maven_properties(value, overrides, property_lookup):
@@ -49,6 +60,7 @@ def coordinates(zip_handle, buildver, scala_version, property_lookup):
     namespace = {"m": MAVEN_NS}
     real_modules = []
     stub_modules = []
+    system_path = system_runtime_path(property_lookup)
     for entry in zip_handle.namelist():
         if not entry.startswith(prefix) or not entry.endswith("/pom.xml"):
             continue
@@ -77,7 +89,8 @@ def coordinates(zip_handle, buildver, scala_version, property_lookup):
                     group_id,
                     resolve_maven_properties(artifact_id, overrides, property_lookup),
                     resolve_maven_properties(version, overrides, property_lookup)))
-        if len(runtime_dependencies) != 1:
+        if ((system_path is None and len(runtime_dependencies) != 1) or
+                (system_path is not None and len(runtime_dependencies) != 0)):
             raise RuntimeError("Iceberg module %s has %d runtime dependencies" %
                                (module_artifact_id, len(runtime_dependencies)))
         result.update(runtime_dependencies)

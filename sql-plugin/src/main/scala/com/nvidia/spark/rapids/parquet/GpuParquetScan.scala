@@ -44,7 +44,8 @@ import com.nvidia.spark.rapids.jni.{DateTimeRebase, ParquetFooter, RmmSpark}
 import com.nvidia.spark.rapids.jni.fileio.{RapidsFileIO, RapidsInputFile}
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile.CopyRange
 import com.nvidia.spark.rapids.parquet.ParquetPartitionReader.{LocalCopy, PARQUET_MAGIC}
-import com.nvidia.spark.rapids.shims.{ColumnDefaultValuesShims, GpuParquetCrypto, GpuTypeShims, ShimFilePartitionReaderFactory, SparkShimImpl}
+import com.nvidia.spark.rapids.shims.{ColumnDefaultValuesShims, GpuParquetCrypto, GpuTypeShims,
+  ParquetVariantShims, ShimFilePartitionReaderFactory, SparkShimImpl}
 import com.nvidia.spark.rapids.shims.parquet.{GpuParquetUtilsShims, ParquetLegacyNanoAsLongShims, ParquetSchemaClipShims, ParquetStringPredShims}
 import org.apache.commons.io.output.{CountingOutputStream, NullOutputStream}
 import org.apache.hadoop.conf.Configuration
@@ -73,7 +74,7 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
 import org.apache.spark.sql.connector.read.{InputPartition, PartitionReader, PartitionReaderFactory}
-import org.apache.spark.sql.execution.QueryExecutionException
+import org.apache.spark.sql.execution.{QueryExecutionException, SparkPlan}
 import org.apache.spark.sql.execution.datasources.{DataSourceUtils, PartitionedFile, PartitioningAwareFileIndex, SchemaColumnConvertNotSupportedException}
 import org.apache.spark.sql.execution.datasources.v2.FileScan
 import org.apache.spark.sql.execution.datasources.v2.parquet.ParquetScan
@@ -163,6 +164,33 @@ case class GpuParquetScan(
 }
 
 object GpuParquetScan {
+  private def hasPotentiallyShreddedVariant(
+      dataTypes: Iterable[DataType], sqlConf: SQLConf): Boolean = {
+    dataTypes.exists { dataType =>
+      TrampolineUtil.dataTypeExistsRecursively(
+        dataType, ParquetVariantShims.isPotentiallyShreddedVariant(_, sqlConf))
+    }
+  }
+
+  private def tagVariantScanPrefixForCpu(
+      meta: RapidsMeta[_, _, _], reason: String, sqlConf: SQLConf): Unit = {
+    meta.willNotWorkOnGpu(reason)
+    var ancestor = meta.parent
+    var outputContainsVariant = true
+    while (ancestor.isDefined && outputContainsVariant) {
+      val current = ancestor.get
+      current.wrapped match {
+        case plan: SparkPlan =>
+          plan.setTagValue(RapidsMeta.gpuSupportedTag,
+            plan.getTagValue(RapidsMeta.gpuSupportedTag).getOrElse(Set.empty) + reason)
+          outputContainsVariant = hasPotentiallyShreddedVariant(
+            plan.output.map(_.dataType), sqlConf)
+        case _ =>
+      }
+      ancestor = current.parent
+    }
+  }
+
   def tagSupport(scanMeta: ScanMeta[ParquetScan]): Unit = {
     val scan = scanMeta.wrapped
     val schema = StructType(scan.readDataSchema ++ scan.readPartitionSchema)
@@ -183,6 +211,24 @@ object GpuParquetScan {
     if (!meta.conf.isParquetReadEnabled) {
       meta.willNotWorkOnGpu("Parquet input has been disabled. To enable set" +
         s"${RapidsConf.ENABLE_PARQUET_READ} to true")
+    }
+
+    val schemaHasPushedVariant = readSchema.exists { field =>
+      TrampolineUtil.dataTypeExistsRecursively(
+        field.dataType, ParquetVariantShims.isPushedVariantStruct)
+    }
+    if (schemaHasPushedVariant) {
+      meta.willNotWorkOnGpu("GPU Parquet reader does not support Variant extraction pushdown")
+    }
+
+    val sqlConf = sparkSession.sessionState.conf
+    val schemaHasPotentiallyShreddedVariant =
+      hasPotentiallyShreddedVariant(readSchema.map(_.dataType), sqlConf)
+    if (schemaHasPotentiallyShreddedVariant) {
+      val reason = "GPU Parquet reader cannot safely read Variant columns when Spark allows " +
+        "shredded Variant input"
+      // Keep the scan and its consumers on CPU until an operator no longer outputs Variant.
+      tagVariantScanPrefixForCpu(meta, reason, sqlConf)
     }
 
     FileFormatChecks.tag(meta, readSchema, ParquetFormatType, ReadFileOp)
@@ -3566,22 +3612,22 @@ abstract class AbstractParquetTableReader(
     clippedParquetSchema: MessageType,
     splits: Array[PartitionedFile],
     debugDumpPrefix: Option[String],
-    debugDumpAlways: Boolean) extends GpuDataProducer[Table] with Logging {
+    debugDumpAlways: Boolean) extends RetryableTableProducer with Logging {
 
-  protected val reader: ChunkedReader
+  protected def createReader(): ChunkedReader
+
+  protected def additionalResources: Seq[AutoCloseable] = Seq.empty
 
   private[this] lazy val splitsString = splits.mkString("; ")
-
-  // Should be lazy since the reader is not defined. Otherwise in practise, a native
-  // chunk reader will be leaked.
-  protected lazy val resources: Seq[AutoCloseable] = Seq(reader) ++ buffers
-
-  override def hasNext: Boolean = reader.hasNext
+  private var activeReader: ChunkedReader = _
+  private var completedChunks = 0
+  private var checkpointedChunks = 0
+  private var closed = false
 
   protected def postProcessChunk(chunk: Table): Table
 
-  override def next: Table = {
-    val table = NvtxIdWithMetrics(NvtxRegistry.PARQUET_DECODE, metrics(GPU_DECODE_TIME)) {
+  private def decodeNext(reader: ChunkedReader): Table = {
+    NvtxIdWithMetrics(NvtxRegistry.PARQUET_DECODE, metrics(GPU_DECODE_TIME)) {
       try {
         reader.next
       } catch {
@@ -3597,9 +3643,11 @@ abstract class AbstractParquetTableReader(
           throw new IOException(s"Error when processing $splitsString$dumpMsg", e)
       }
     }
+  }
 
-    val postProcessedTable = postProcessChunk(table)
-
+  private def readNext(reader: ChunkedReader): Table = {
+    val table = decodeNext(reader)
+    val postProcessedTable = closeOnExcept(table)(postProcessChunk)
     closeOnExcept(postProcessedTable) { _ =>
       GpuParquetScan.throwIfRebaseNeededInExceptionMode(postProcessedTable, dateRebaseMode,
         timestampRebaseMode)
@@ -3617,8 +3665,54 @@ abstract class AbstractParquetTableReader(
     outputTable
   }
 
+  private def closeReader(): Unit = {
+    val reader = activeReader
+    activeReader = null
+    if (reader != null) {
+      reader.close()
+    }
+  }
+
+  private def getReader: ChunkedReader = {
+    if (activeReader == null) {
+      require(!closed, "Parquet table reader is closed")
+      val reader = createReader()
+      closeOnExcept(reader) { _ =>
+        var replayed = 0
+        while (replayed < completedChunks) {
+          require(reader.hasNext,
+            s"Unable to restore Parquet reader to chunk $completedChunks")
+          withResource(decodeNext(reader))(_ => ())
+          replayed += 1
+        }
+        activeReader = reader
+      }
+    }
+    activeReader
+  }
+
+  override def hasNext: Boolean = getReader.hasNext
+
+  override def next: Table = {
+    val result = readNext(getReader)
+    completedChunks += 1
+    result
+  }
+
+  override def checkpoint(): Unit = checkpointedChunks = completedChunks
+
+  override def restore(): Unit = {
+    completedChunks = checkpointedChunks
+    closeReader()
+  }
+
   override def close(): Unit = {
-    resources.safeClose()
+    if (!closed) {
+      closed = true
+      val reader = Option(activeReader).toSeq
+      activeReader = null
+      (reader ++ buffers ++ additionalResources).safeClose()
+    }
   }
 }
 
@@ -3642,7 +3736,7 @@ case class ParquetTableReader(
   opts, buffers, metrics, dateRebaseMode, timestampRebaseMode, isSchemaCaseSensitive, useFieldId,
   readDataSchema, clippedParquetSchema, splits, debugDumpPrefix, debugDumpAlways) {
 
-  override protected val reader: ChunkedReader = ParquetChunkedReader(
+  override protected def createReader(): ChunkedReader = ParquetChunkedReader(
     new JniParquetChunkedReader(chunkSizeByteLimit, maxChunkedReaderMemoryUsageSizeBytes,
       opts, buffers:_*)
   )

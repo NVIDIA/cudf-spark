@@ -170,10 +170,18 @@ object GpuRangePartitioner {
 
 case class GpuRangePartitioner(
     rangeBounds: Array[InternalRow],
-    sorter: GpuSorter) extends GpuExpression with ShimExpression with GpuPartitioning {
+    sorter: GpuSorter,
+    boundarySorter: Option[GpuSorter] = None,
+    boundaryInputProjection: Option[Seq[Expression]] = None)
+  extends GpuExpression with ShimExpression with GpuPartitioning {
+
+  require(boundarySorter.isDefined == boundaryInputProjection.isDefined,
+    "boundary sorter and input projection must be specified together")
+
+  private lazy val rangeBoundsSorter = boundarySorter.getOrElse(sorter)
 
   private lazy val converters = new GpuRowToColumnConverter(
-    TrampolineUtil.fromAttributes(sorter.projectedBatchSchema))
+    TrampolineUtil.fromAttributes(rangeBoundsSorter.projectedBatchSchema))
 
   override def nullable: Boolean = false
   override def dataType: DataType = IntegerType
@@ -189,9 +197,19 @@ case class GpuRangePartitioner(
     // Don't make this retry-block avoiding nested try-blocks
     // from computeBoundsAndCloseWithRetry
     withResource(converters.convertBatch(rangeBounds,
-      TrampolineUtil.fromAttributes(sorter.projectedBatchSchema))) { ranges =>
-      withResource(sorter.appendProjectedColumns(cb)) { withExtraColumns =>
-        sorter.lowerBound(ranges, withExtraColumns)
+      TrampolineUtil.fromAttributes(rangeBoundsSorter.projectedBatchSchema))) { ranges =>
+      boundaryInputProjection match {
+        case Some(projectList) =>
+          withResource(GpuProjectExec.project(cb, projectList)) { boundaryInput =>
+            withResource(rangeBoundsSorter.appendProjectedColumns(boundaryInput)) {
+              withExtraColumns =>
+                rangeBoundsSorter.lowerBound(ranges, withExtraColumns)
+            }
+          }
+        case None =>
+          withResource(sorter.appendProjectedColumns(cb)) { withExtraColumns =>
+            sorter.lowerBound(ranges, withExtraColumns)
+          }
       }
     }
   }

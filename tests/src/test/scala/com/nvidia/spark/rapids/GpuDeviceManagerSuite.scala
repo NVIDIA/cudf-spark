@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids
 
-import ai.rapids.cudf.{Cuda, DeviceMemoryBuffer}
+import ai.rapids.cudf.{DeviceMemoryBuffer, Rmm}
 import com.nvidia.spark.rapids.Arm.withResource
 import org.scalatest.BeforeAndAfter
 import org.scalatest.funsuite.AnyFunSuite
@@ -59,28 +59,38 @@ class GpuDeviceManagerSuite extends AnyFunSuite with BeforeAndAfter {
 
   def toBytes: String => Long = ConfHelper.byteFromString(_, ByteUnit.BYTE)
 
-  test("RMM pool size") {
-    val freeGpuSize = Cuda.memGetInfo().free
-    val poolFraction = 0.1
-    val maxPoolFraction = 0.2
-    // we need to reduce the minAllocFraction for this test since the
-    // pool allocation here is less than the default minimum
-    val minPoolFraction = 0.01
-    val conf = new SparkConf()
-        .set(RapidsConf.RMM_POOL.key, "ARENA")
-        .set(RapidsConf.RMM_ALLOC_FRACTION.key, poolFraction.toString)
-        .set(RapidsConf.RMM_ALLOC_MIN_FRACTION.key, minPoolFraction.toString)
-        .set(RapidsConf.RMM_ALLOC_MAX_FRACTION.key, maxPoolFraction.toString)
-        .set(RapidsConf.RMM_ALLOC_RESERVE.key, "0")
-    TestUtils.withGpuSparkSession(conf) { _ =>
-      val poolSize = (freeGpuSize * poolFraction).toLong
-      val allocSize = poolSize * 3 / 4
-      assert(allocSize > 0)
-      // initial allocation should fit within pool size
-      withResource(DeviceMemoryBuffer.allocate(allocSize)) { _ =>
-        assertThrows[OutOfMemoryError] {
-          // this should exceed the specified pool size
-          DeviceMemoryBuffer.allocate(allocSize).close()
+  Seq(false, true).foreach { smallPool =>
+    val suffix = if (smallPool) " with startup allocations in a small pool" else ""
+    test(s"RMM pool size$suffix") {
+      val poolFraction = 0.1
+      val maxPoolFraction = 0.2
+      // we need to reduce the minAllocFraction for this test since the
+      // pool allocation here is less than the default minimum
+      val minPoolFraction = 0.01
+      val conf = new SparkConf()
+          .set(RapidsConf.RMM_POOL.key, "ARENA")
+          .set(RapidsConf.RMM_ALLOC_FRACTION.key, poolFraction.toString)
+          .set(RapidsConf.RMM_ALLOC_MIN_FRACTION.key, minPoolFraction.toString)
+          .set(RapidsConf.RMM_ALLOC_MAX_FRACTION.key, maxPoolFraction.toString)
+          .set(RapidsConf.RMM_ALLOC_RESERVE.key, "0")
+      if (smallPool) {
+        // Keep a deterministic regression case where startup allocations consume half the pool.
+        conf.set(RapidsConf.RMM_EXACT_ALLOC.key, "256m")
+            .set(RapidsConf.CHUNKED_PACK_BOUNCE_BUFFER_SIZE.key, "32m")
+            .set(RapidsConf.CHUNKED_PACK_BOUNCE_BUFFER_COUNT.key, "4")
+      }
+      TestUtils.withGpuSparkSession(conf) { _ =>
+        // Other workers can consume GPU memory before this session initializes its pool.
+        // Account for startup allocations, including the chunked-pack bounce buffers.
+        val availablePoolSize = GpuDeviceManager.getMemorySize - Rmm.getTotalBytesAllocated
+        val allocSize = availablePoolSize * 3 / 4
+        assert(allocSize > 0)
+        // initial allocation should fit within pool size
+        withResource(DeviceMemoryBuffer.allocate(allocSize)) { _ =>
+          assertThrows[OutOfMemoryError] {
+            // this should exceed the specified pool size
+            withResource(DeviceMemoryBuffer.allocate(allocSize)) { _ => () }
+          }
         }
       }
     }

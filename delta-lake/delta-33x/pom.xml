@@ -71,6 +71,7 @@
                             <sources>
                                  <source>${spark.rapids.source.basedir}/delta-lake/common/src/main/scala</source>
                                  <source>${spark.rapids.source.basedir}/delta-lake/common/src/main/delta-io/scala</source>
+                                 <source>${spark.rapids.source.basedir}/delta-lake/common/src/main/delta-33x-42x/scala</source>
                                  <source>${spark.rapids.source.basedir}/delta-lake/common/src/main/delta-33x-41x/scala</source>
                                  <source>${spark.rapids.source.basedir}/delta-lake/common/src/main/delta-33x/scala</source>
                             </sources>

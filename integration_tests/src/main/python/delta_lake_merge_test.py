@@ -23,7 +23,8 @@ from pyspark.sql.types import *
 from spark_session import (is_before_spark_320, is_databricks_runtime, spark_version,
                            supports_delta_lake_deletion_vectors, is_before_spark_353,
                            is_spark_400_or_later, is_databricks143,
-                           is_databricks173_or_later, is_spark_41x)
+                           is_databricks173_or_later, is_spark_41x,
+                           supports_delta_lake_row_tracking)
 
 delta_merge_enabled_conf = copy_and_update(delta_writes_enabled_conf,
                                            {"spark.rapids.sql.command.MergeIntoCommand": "true",
@@ -189,8 +190,8 @@ def test_delta_merge_fallback_with_deletion_vectors(spark_tmp_path, spark_tmp_ta
 @ignore_order
 @pytest.mark.skipif(is_databricks_runtime() and spark_version() < "3.3.2", reason="NOT MATCHED BY SOURCE added in DBR 12.2")
 @pytest.mark.skipif((not is_databricks_runtime()) and is_before_spark_340(), reason="NOT MATCHED BY SOURCE added in Delta Lake 2.4")
-@pytest.mark.skipif(is_spark_41x(),
-                    reason="NOT MATCHED BY SOURCE is supported on the GPU with OSS Delta 4.1")
+@pytest.mark.skipif(is_oss_delta_lake_41_or_42(),
+                    reason="NOT MATCHED BY SOURCE is supported on the GPU with OSS Delta 4.1+")
 @pytest.mark.skipif(is_databricks173_or_later(),
                     reason="NOT MATCHED BY SOURCE is supported on the GPU with Databricks 17.3+")
 @pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_xfail_reasons(
@@ -218,9 +219,9 @@ def test_delta_merge_not_matched_by_source_fallback(spark_tmp_path, spark_tmp_ta
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not (is_spark_41x() or is_databricks173_or_later()),
-                    reason="NOT MATCHED BY SOURCE is supported on the GPU with OSS Delta 4.1 "
-                           "and Databricks 17.3+")
+@pytest.mark.skipif(not (is_oss_delta_lake_41_or_42() or is_databricks173_or_later()),
+                    reason="NOT MATCHED BY SOURCE is supported on the GPU with OSS Delta 4.1+ "
+                    "and Databricks 17.3+")
 @pytest.mark.parametrize("use_cdf", [False, True], ids=idfn)
 def test_delta_merge_not_matched_by_source(spark_tmp_path, spark_tmp_table_factory, use_cdf):
     def src_table_func(spark):
@@ -497,6 +498,145 @@ def test_delta_merge_match_delete_only(spark_tmp_path, spark_tmp_table_factory, 
 def test_delta_merge_standard_upsert(spark_tmp_path, spark_tmp_table_factory, use_cdf, num_slices, enable_deletion_vector):
     do_test_delta_merge_standard_upsert(spark_tmp_path, spark_tmp_table_factory, use_cdf, enable_deletion_vector,
                                         num_slices, num_slices == 1, delta_merge_enabled_conf)
+
+
+@allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not supports_delta_lake_row_tracking(),
+                    reason="Row tracking needs Delta Lake 3.3 or Databricks 17.3")
+@pytest.mark.skipif(is_databricks_runtime(),
+                    reason="The Databricks 17.3 GPU merge regenerates row ids until #15884 lands; that PR carries the 17.3 test")
+def test_delta_merge_preserves_row_tracking(spark_tmp_path):
+    # A matched update and an insert touch a row-tracked target. (A NOT MATCHED BY SOURCE clause
+    # runs on the GPU only with Delta 4.1 and Databricks 17.3; the Delta 4.1 case is covered by
+    # test_delta_merge_preserves_row_tracking_not_matched_by_source below.) The row
+    # ids of the rows that existed before the merge must survive on both engines, whether the row
+    # is updated or copied, and the commit version moves only for the updated row. Both tables
+    # start from the same single file, so those rows carry the same ids and versions on the CPU
+    # and on the GPU and are compared engine to engine, row tracking columns included. The
+    # inserted row gets a fresh id that the file layout decides, and the join-based GPU merge
+    # lays out files differently from the CPU, so it is checked per engine for freshness only,
+    # and the commit logs are not compared as the UPDATE and DELETE tests do.
+    conf = copy_and_update(delta_merge_enabled_conf, delta_row_tracking_dml_conf)
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    with_cpu_session(lambda spark: setup_delta_row_tracking_dest_tables(
+        spark, data_path, row_tracking_dml_test_df), conf=conf)
+    merge_sql = ("MERGE INTO delta.`{path}` t "
+                 "USING (SELECT * FROM VALUES (2, 'B', 'y'), (9, 'I', 'y') AS s(a, b, c)) s "
+                 "ON t.a = s.a "
+                 "WHEN MATCHED THEN UPDATE SET t.c = s.c "
+                 "WHEN NOT MATCHED THEN INSERT *")
+    def tracked_rows(spark, path):
+        rows = spark.sql(f"SELECT a, b, c, _metadata.row_id AS row_id, "
+                         f"_metadata.row_commit_version AS row_commit_version FROM delta.`{path}`")
+        return {r["a"]: (r["b"], r["c"], r["row_id"], r["row_commit_version"])
+                for r in rows.collect()}
+
+    before = {run: with_cpu_session(lambda spark, p=data_path + "/" + run: tracked_rows(spark, p),
+                                    conf=conf) for run in ["CPU", "GPU"]}
+
+    def do_merge(spark, path):
+        return spark.sql(merge_sql.format(path=path)).collect()
+
+    # The merge on both engines through the standard write helper. For a Delta test it runs the
+    # GPU side under assert_rapids_delta_write, which asserts the GPU Delta write in the plans it
+    # captures, and only the GPU merge command writes that way, so a fallback to the CPU command
+    # fails here instead of passing on identical results. The helper then reads both tables back
+    # on the CPU, tracked columns included, and compares them engine to engine; the inserted
+    # row's id is masked because the file layout decides it and the join-based GPU merge lays
+    # out files differently from the CPU. The merge's own result row (rows affected, updated,
+    # deleted, inserted) is compared between the engines as well.
+    results = {}
+
+    def write_func(spark, path):
+        results[path] = do_merge(spark, path)
+
+    def read_tracked(spark, path):
+        return spark.sql(f"SELECT a, b, c, CASE WHEN a = 9 THEN NULL ELSE _metadata.row_id END AS row_id, "
+                         f"_metadata.row_commit_version AS row_commit_version FROM delta.`{path}`")
+
+    assert_gpu_and_cpu_writes_are_equal_collect(write_func, read_tracked, data_path, conf=conf)
+    assert_equal(results[data_path + "/CPU"], results[data_path + "/GPU"])
+
+    for run in ["CPU", "GPU"]:
+        path = data_path + "/" + run
+        after = with_cpu_session(lambda spark: tracked_rows(spark, path), conf=conf)
+        assert sorted(after.keys()) == [1, 2, 3, 4, 9], f"{run}: {after}"
+        for a in [1, 2, 3, 4]:
+            assert after[a][2] == before[run][a][2], \
+                f"{run}: row id of a={a} changed: {before[run][a]} -> {after[a]}"
+        for a in [1, 3, 4]:  # copied unchanged
+            assert after[a][3] == before[run][a][3], \
+                f"{run}: commit version of copied a={a} changed: {before[run][a]} -> {after[a]}"
+        assert after[2][3] > before[run][2][3], \
+            f"{run}: commit version of updated a=2 did not move: {before[run][2]} -> {after[2]}"
+        # The inserted row is new to the table: its id and its commit version are both past
+        # everything the table held before the merge.
+        assert after[9][2] > max(v[2] for v in before[run].values()), \
+            f"{run}: inserted row id is not fresh: {after[9]}"
+        assert after[9][3] > max(v[3] for v in before[run].values()), \
+            f"{run}: inserted row commit version did not advance: {after[9]}"
+
+
+@allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_spark_41x(),
+                    reason="NOT MATCHED BY SOURCE runs on the GPU MERGE only with OSS Delta 4.1")
+def test_delta_merge_preserves_row_tracking_not_matched_by_source(spark_tmp_path):
+    # A matched update and a NOT MATCHED BY SOURCE update on a row-tracked target, the clause the
+    # GPU merge accepts only on Delta 4.1. Every row here existed before the merge, so its row id
+    # must survive on both engines whether the row was matched by the source or left to the NOT
+    # MATCHED BY SOURCE update, and every updated row's commit version must advance. Both tables
+    # start from the same single file, so the ids and versions line up engine to engine and the
+    # read back is compared column for column, row tracking included, with no inserted row to mask.
+    conf = copy_and_update(delta_merge_enabled_conf, delta_row_tracking_dml_conf)
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    with_cpu_session(lambda spark: setup_delta_row_tracking_dest_tables(
+        spark, data_path, row_tracking_dml_test_df), conf=conf)
+    # a=2 is matched by the source; a=1, 3 and 4 are not matched by source and take the UPDATE.
+    merge_sql = ("MERGE INTO delta.`{path}` t "
+                 "USING (SELECT * FROM VALUES (2, 'B', 'y') AS s(a, b, c)) s "
+                 "ON t.a = s.a "
+                 "WHEN MATCHED THEN UPDATE SET t.c = s.c "
+                 "WHEN NOT MATCHED BY SOURCE THEN UPDATE SET t.c = 'z'")
+
+    def tracked_rows(spark, path):
+        rows = spark.sql(f"SELECT a, b, c, _metadata.row_id AS row_id, "
+                         f"_metadata.row_commit_version AS row_commit_version FROM delta.`{path}`")
+        return {r["a"]: (r["b"], r["c"], r["row_id"], r["row_commit_version"])
+                for r in rows.collect()}
+
+    before = {run: with_cpu_session(lambda spark, p=data_path + "/" + run: tracked_rows(spark, p),
+                                    conf=conf) for run in ["CPU", "GPU"]}
+
+    def do_merge(spark, path):
+        return spark.sql(merge_sql.format(path=path)).collect()
+
+    results = {}
+
+    def write_func(spark, path):
+        results[path] = do_merge(spark, path)
+
+    def read_tracked(spark, path):
+        return spark.sql(f"SELECT a, b, c, _metadata.row_id AS row_id, "
+                         f"_metadata.row_commit_version AS row_commit_version FROM delta.`{path}`")
+
+    assert_gpu_and_cpu_writes_are_equal_collect(write_func, read_tracked, data_path, conf=conf)
+    assert_equal(results[data_path + "/CPU"], results[data_path + "/GPU"])
+
+    for run in ["CPU", "GPU"]:
+        path = data_path + "/" + run
+        after = with_cpu_session(lambda spark: tracked_rows(spark, path), conf=conf)
+        assert sorted(after.keys()) == [1, 2, 3, 4], f"{run}: {after}"
+        # Every row, the matched one and the three not matched by source, keeps its row id and
+        # advances its commit version.
+        for a in [1, 2, 3, 4]:
+            assert after[a][2] == before[run][a][2], \
+                f"{run}: row id of a={a} changed: {before[run][a]} -> {after[a]}"
+            assert after[a][3] > before[run][a][3], \
+                f"{run}: commit version of a={a} did not advance: {before[run][a]} -> {after[a]}"
 
 
 @allow_non_gpu(*delta_meta_allow)
@@ -1078,9 +1218,9 @@ def test_delta_merge_nullable_matched_conditions(spark_tmp_path, spark_tmp_table
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not (is_spark_41x() or is_databricks173_or_later()),
-                    reason="NOT MATCHED BY SOURCE is supported on the GPU with OSS Delta 4.1 "
-                           "and Databricks 17.3+")
+@pytest.mark.skipif(not (is_oss_delta_lake_41_or_42() or is_databricks173_or_later()),
+                    reason="NOT MATCHED BY SOURCE is supported on the GPU with OSS Delta 4.1+ "
+                    "and Databricks 17.3+")
 @pytest.mark.parametrize("use_cdf", [False, True], ids=idfn)
 def test_delta_merge_nullable_not_matched_by_source_condition(
         spark_tmp_path, spark_tmp_table_factory, use_cdf):
@@ -1092,7 +1232,11 @@ def test_delta_merge_nullable_not_matched_by_source_condition(
         use_cdf=use_cdf, enable_deletion_vectors=False,
         src_table_func=_nullable_condition_src, dest_table_func=_nullable_condition_dest,
         merge_sql=merge_sql, compare_logs=False,
-        assert_func=_assert_gpu_merge_processor,
+        # The merge-join processor exec only exists in the Databricks shims. OSS Delta 4.x
+        # implements NOT MATCHED BY SOURCE with the stock right-outer-join algorithm, so there
+        # the default check (GPU RapidsDeltaWrite plus CPU/GPU result comparison) applies.
+        assert_func=(_assert_gpu_merge_processor if is_databricks173_or_later()
+                     else assert_collect),
         conf=delta_merge_no_cpu_bridge_conf)
     _assert_nullable_condition_result(spark_tmp_path, with_not_matched_by_source=True)
 

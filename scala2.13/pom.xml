@@ -99,6 +99,7 @@
                 <rapids.delta.artifactId1>rapids-4-spark-delta-21x</rapids.delta.artifactId1>
                 <rapids.delta.artifactId2>rapids-4-spark-delta-22x</rapids.delta.artifactId2>
                 <rapids.delta.artifactId3>rapids-4-spark-delta-23x</rapids.delta.artifactId3>
+                <spark.protobuf.copy.skip>true</spark.protobuf.copy.skip>
             </properties>
             <dependencies>
                 <dependency>
@@ -131,6 +132,7 @@
                 <rapids.delta.artifactId1>rapids-4-spark-delta-21x</rapids.delta.artifactId1>
                 <rapids.delta.artifactId2>rapids-4-spark-delta-22x</rapids.delta.artifactId2>
                 <rapids.delta.artifactId3>rapids-4-spark-delta-23x</rapids.delta.artifactId3>
+                <spark.protobuf.copy.skip>true</spark.protobuf.copy.skip>
             </properties>
             <modules>
                 <module>delta-lake/delta-21x</module>
@@ -155,6 +157,7 @@
                 <rapids.delta.artifactId1>rapids-4-spark-delta-21x</rapids.delta.artifactId1>
                 <rapids.delta.artifactId2>rapids-4-spark-delta-22x</rapids.delta.artifactId2>
                 <rapids.delta.artifactId3>rapids-4-spark-delta-23x</rapids.delta.artifactId3>
+                <spark.protobuf.copy.skip>true</spark.protobuf.copy.skip>
             </properties>
             <modules>
                 <module>delta-lake/delta-21x</module>
@@ -179,6 +182,7 @@
                 <rapids.delta.artifactId1>rapids-4-spark-delta-21x</rapids.delta.artifactId1>
                 <rapids.delta.artifactId2>rapids-4-spark-delta-22x</rapids.delta.artifactId2>
                 <rapids.delta.artifactId3>rapids-4-spark-delta-23x</rapids.delta.artifactId3>
+                <spark.protobuf.copy.skip>true</spark.protobuf.copy.skip>
             </properties>
             <modules>
                 <module>delta-lake/delta-21x</module>
@@ -203,6 +207,7 @@
                 <rapids.delta.artifactId1>rapids-4-spark-delta-21x</rapids.delta.artifactId1>
                 <rapids.delta.artifactId2>rapids-4-spark-delta-22x</rapids.delta.artifactId2>
                 <rapids.delta.artifactId3>rapids-4-spark-delta-23x</rapids.delta.artifactId3>
+                <spark.protobuf.copy.skip>true</spark.protobuf.copy.skip>
             </properties>
             <modules>
                 <module>delta-lake/delta-21x</module>
@@ -659,6 +664,8 @@
                 <spark.test.version>${spark401.version}</spark.test.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
                 <rapids.delta.artifactId1>rapids-4-spark-delta-40x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId2>rapids-4-spark-delta-42x</rapids.delta.artifactId2>
+                <delta42x.spark.artifactId>delta-spark_4.0_${scala.binary.version}</delta42x.spark.artifactId>
                 <iceberg.artifact.suffix>${spark40x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.runtime.version>${iceberg.110x.version}</iceberg.runtime.version>
                 <rapids.iceberg.artifactId>rapids-4-spark-iceberg-1-10-x</rapids.iceberg.artifactId>
@@ -666,6 +673,7 @@
             </properties>
             <modules>
                 <module>delta-lake/delta-40x</module>
+                <module>delta-lake/delta-42x</module>
                 <module>iceberg/iceberg-1-10-x</module>
             </modules>
         </profile>
@@ -761,6 +769,8 @@
                 <spark.test.version>${spark411.version}</spark.test.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
                 <rapids.delta.artifactId1>rapids-4-spark-delta-41x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId2>rapids-4-spark-delta-42x</rapids.delta.artifactId2>
+                <delta42x.spark.artifactId>delta-spark_4.1_${scala.binary.version}</delta42x.spark.artifactId>
                 <iceberg.artifact.suffix>${spark41x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.runtime.version>${iceberg.111x.version}</iceberg.runtime.version>
                 <rapids.iceberg.artifactId>rapids-4-spark-iceberg-1-11-x</rapids.iceberg.artifactId>
@@ -769,6 +779,7 @@
             </properties>
             <modules>
                 <module>delta-lake/delta-41x</module>
+                <module>delta-lake/delta-42x</module>
                 <module>iceberg/iceberg-1-11-x</module>
             </modules>
             <build>
@@ -1043,6 +1054,7 @@
         <delta40x.spark.artifactId>delta-spark_${scala.binary.version}</delta40x.spark.artifactId>
         <delta41x.version>4.1.0</delta41x.version>
         <delta41x.spark.artifactId>delta-spark_4.1_${scala.binary.version}</delta41x.spark.artifactId>
+        <delta42x.version>4.2.0</delta42x.version>
         <!-- start dyn.shim properties -->
         <dyn.shim.excluded.releases/>
         <!-- end dyn.shim properties -->
@@ -1052,6 +1064,8 @@
         <rapids.shimplify.skip>false</rapids.shimplify.skip>
         <rapids.build.info.skip>false</rapids.build.info.skip>
         <buildver>330</buildver>
+        <!-- spark-protobuf is a Spark 3.4.0+ module; release33x profiles override to `true`. -->
+        <spark.protobuf.copy.skip>false</spark.protobuf.copy.skip>
         <maven.compiler.source>1.8</maven.compiler.source>
         <java.major.version>8</java.major.version>
         <scala.compiler.release>${java.major.version}</scala.compiler.release>
@@ -1061,7 +1075,8 @@
         <spark.version.classifier>spark${buildver}</spark.version.classifier>
         <cuda.version>cuda12</cuda.version>
         <jni.classifier>${cuda.version}</jni.classifier>
-        <spark-rapids-jni.version>26.10.0-SNAPSHOT</spark-rapids-jni.version>
+        <cudf-spark-jni.version>26.10.0-SNAPSHOT</cudf-spark-jni.version>
+        <cudf-spark-jni.artifactId>cudf-spark-jni</cudf-spark-jni.artifactId>
         <cudf-spark-private.version>26.10.0-SNAPSHOT</cudf-spark-private.version>
         <cudf-spark-private.artifactId>cudf-spark-private_${scala.binary.version}</cudf-spark-private.artifactId>
         <scala.binary.version>2.13</scala.binary.version>
@@ -1154,6 +1169,9 @@
         <scala.plugin.version>4.9.10</scala.plugin.version>
         <maven.install.plugin.version>3.1.1</maven.install.plugin.version>
         <maven.jar.plugin.version>3.3.0</maven.jar.plugin.version>
+        <withResource.audit.rawReport>${project.build.directory}/with-resource-nesting-audit.json</withResource.audit.rawReport>
+        <withResource.audit.summary>${project.build.directory}/with-resource-nesting-summary.md</withResource.audit.summary>
+        <withResource.audit.annotations>${project.build.directory}/with-resource-nesting-annotations.txt</withResource.audit.annotations>
         <scalatest-maven-plugin.version>2.0.2</scalatest-maven-plugin.version>
         <guava.cdh.version>30.0-jre</guava.cdh.version>
         <arrow.cdh.version>2.0.0</arrow.cdh.version>
@@ -1275,8 +1293,8 @@
             </dependency>
             <dependency>
               <groupId>com.nvidia</groupId>
-              <artifactId>spark-rapids-jni</artifactId>
-              <version>${spark-rapids-jni.version}</version>
+              <artifactId>${cudf-spark-jni.artifactId}</artifactId>
+              <version>${cudf-spark-jni.version}</version>
               <classifier>${jni.classifier}</classifier>
             </dependency>
             <dependency>
@@ -1573,7 +1591,7 @@ This will force full Scala code rebuild in downstream modules.
                                             failonerror="false">
                                             <arg value="${spark.rapids.source.basedir}/build/build-info"/>
                                             <arg value="${project.version}"/>
-                                            <arg value="${spark-rapids-jni.version}"/>
+                                            <arg value="${cudf-spark-jni.version}"/>
                                         </exec>
                                         <fail message="exec build-info.sh failed, exit code is ${build-info.exitCode}, error msg is ${build-info.errorMsg}">
                                             <condition>
@@ -1995,6 +2013,38 @@ This will force full Scala code rebuild in downstream modules.
                 <!-- parent-pom only executions -->
                 <inherited>false</inherited>
                 <executions>
+                    <!-- Run this repository-wide audit only from the canonical root reactor.
+                         Encode option hyphens so the generated Scala 2.13 comment stays valid. -->
+                    <!-- #if scala-2.12 --><!--
+                    <execution>
+                        <id>with-resource-nesting-audit</id>
+                        <phase>verify</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <java classname="org.python.util.jython"
+                                      classpathref="maven.plugin.classpath"
+                                      fork="true" failonerror="true" dir="${project.basedir}">
+                                    <arg value="-B"/>
+                                    <arg value="scripts/tests/test_check_with_resource_nesting.py"/>
+                                </java>
+                                <java classname="org.python.util.jython"
+                                      classpathref="maven.plugin.classpath"
+                                      fork="true" failonerror="true" dir="${project.basedir}"
+                                      output="${withResource.audit.annotations}">
+                                    <arg value="-B"/>
+                                    <arg value="scripts/check_with_resource_nesting.py"/>
+                                    <arg value="&#45;&#45;root"/>
+                                    <arg value="${project.basedir}"/>
+                                    <arg value="&#45;&#45;raw-report"/>
+                                    <arg value="${withResource.audit.rawReport}"/>
+                                    <arg value="&#45;&#45;summary"/>
+                                    <arg value="${withResource.audit.summary}"/>
+                                </java>
+                            </target>
+                        </configuration>
+                    </execution>
+                    --><!-- #endif scala-2.12 -->
                     <execution>
                         <!--
                         This is an alternative implementation of the scalastyle check invocation,
@@ -2034,21 +2084,8 @@ This will force full Scala code rebuild in downstream modules.
                                 </java>
                                 <exec executable="python3" failonerror="true"
                                       dir="${spark.rapids.source.basedir}">
-                                    <arg value="-m"/>
-                                    <arg value="unittest"/>
-                                    <arg value="discover"/>
-                                    <arg value="-s"/>
-                                    <arg value="scripts/tests"/>
-                                    <arg value="-p"/>
-                                    <arg value="test_check_with_resource_nesting.py"/>
-                                </exec>
-                                <!-- Existing nesting exceptions are tracked by
-                                     https://github.com/NVIDIA/cudf-spark/issues/11713. -->
-                                <exec executable="python3" failonerror="true"
-                                      dir="${spark.rapids.source.basedir}">
-                                    <arg value="scripts/check_with_resource_nesting.py"/>
-                                    <arg value="--root"/>
-                                    <arg value="${spark.rapids.source.basedir}"/>
+                                    <arg value="-B"/>
+                                    <arg value="dist/scripts/tests/test_root_safe_provider_selection.py"/>
                                 </exec>
                             </target>
                         </configuration>

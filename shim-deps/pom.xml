@@ -38,6 +38,9 @@
                     <value>330cdh</value>
                 </property>
             </activation>
+            <properties>
+                <spark.protobuf.copy.skip>true</spark.protobuf.copy.skip>
+            </properties>
             <dependencies>
                 <dependency>
                     <groupId>com.nvidia</groupId>
@@ -56,6 +59,9 @@
                     <value>332cdh</value>
                 </property>
             </activation>
+            <properties>
+                <spark.protobuf.copy.skip>true</spark.protobuf.copy.skip>
+            </properties>
             <dependencies>
                 <dependency>
                     <groupId>com.nvidia</groupId>
@@ -210,6 +216,9 @@
                     <name>databricks</name>
                 </property>
             </activation>
+            <properties>
+                <spark.protobuf.copy.skip>true</spark.protobuf.copy.skip>
+            </properties>
             <dependencies>
                 <dependency>
                     <groupId>com.nvidia</groupId>

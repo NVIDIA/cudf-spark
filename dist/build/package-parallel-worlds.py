@@ -167,6 +167,15 @@ def ensure_external_artifact(group_id, artifact_id, version):
     return artifact_path
 
 
+def ensure_system_artifact(path):
+    if not os.path.isabs(path):
+        raise Exception("system Iceberg runtime path is not absolute: %s" % path)
+    resolved_path = os.path.realpath(path)
+    if not os.path.isfile(resolved_path):
+        raise Exception("system Iceberg runtime is missing: %s" % resolved_path)
+    return resolved_path
+
+
 def root_safe_module_class_members(classifier):
     members = set()
     for module in root_safe_modules:
@@ -196,6 +205,10 @@ maven_repository = project.getProperty('maven.local.repository')
 dist_dir = os.sep.join([source_basedir, 'dist'])
 iceberg_runtime = {}
 execfile(os.path.join(dist_dir, 'build', 'iceberg_runtime.py'), iceberg_runtime)
+system_iceberg_runtime = iceberg_runtime["system_runtime_path"](project.getProperty)
+if system_iceberg_runtime and len(buildver_list) != 1:
+    raise Exception("%s is supported only for single-shim builds" %
+                    iceberg_runtime["SYSTEM_RUNTIME_PROPERTY"])
 runtime_manifest = os.path.join(project_build_dir, 'iceberg-audit-runtimes.txt')
 with open(os.sep.join([dist_dir, 'unshimmed-common-from-single-shim.txt']), 'r') as f:
     from_single_shim = f.read().splitlines()
@@ -204,6 +217,10 @@ with open(os.sep.join([dist_dir, 'unshimmed-from-each-spark3xx.txt']), 'r') as f
 root_safe_modules = read_patterns(os.sep.join([dist_dir, 'root-safe-module-classes.txt']))
 from_single_shim_or_each = from_single_shim + from_each
 iceberg_audit_runtimes = {}
+# Classifiers are processed newest-first. Let older classifiers contribute
+# conditional root-safe classes that are absent from newer classifiers, without
+# overwriting a newer implementation of the same class path.
+promoted_root_safe_members = set()
 
 for bv in buildver_list:
     classifier = 'spark' + bv
@@ -218,6 +235,9 @@ for bv in buildver_list:
                     ensure_external_artifact(group_id, artifact_id, version)
                     for group_id, artifact_id, version in coordinates
                 ]
+                if system_iceberg_runtime:
+                    iceberg_audit_runtimes[bv].append(
+                        ensure_system_artifact(system_iceberg_runtime))
             if project.getProperty('should.build.conventional.jar'):
                 zip_handle.extractall(path=top_dist_jar_dir)
             else:
@@ -225,7 +245,7 @@ for bv in buildver_list:
                 # IMPORTANT unconditional extract from the highest Spark version to the top
                 if bv == buildver_list[0] and art == 'sql-plugin-api':
                     zip_handle.extractall(path=top_dist_jar_dir)
-                if bv == buildver_list[0] and art == 'aggregator':
+                if art == 'aggregator':
                     namelist = zip_handle.namelist()
                     namelist_set = set(namelist)
                     root_safe_members = root_safe_module_class_members(classifier)
@@ -234,9 +254,13 @@ for bv in buildver_list:
                         raise Exception(
                             "root-safe module classes missing from aggregator: %s" %
                             ", ".join(missing_members))
+                    new_root_safe_members = (
+                        root_safe_members - promoted_root_safe_members)
                     zip_handle.extractall(
                         path=top_dist_jar_dir,
-                        members=[name for name in namelist if name in root_safe_members])
+                        members=[name for name in namelist
+                                 if name in new_root_safe_members])
+                    promoted_root_safe_members.update(root_safe_members)
                 # TODO deprecate
                 namelist = zip_handle.namelist()
                 glob_list = from_single_shim_or_each if bv == buildver_list[0] else from_each

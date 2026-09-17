@@ -16,6 +16,8 @@ import math
 import os
 import pytest
 import random
+import shutil
+import tempfile
 import warnings
 
 # TODO redo _spark stuff using fixtures
@@ -393,6 +395,9 @@ def pytest_runtest_setup(item):
             pytest.skip('tests for pyarrow not configured to run')
 
 def pytest_configure(config):
+    if config.getoption('iceberg') and not os.environ.get('EXPECTED_ICEBERG_VERSION'):
+        raise pytest.UsageError(
+            "EXPECTED_ICEBERG_VERSION must be set when running Iceberg tests")
     global _runtime_env
     _runtime_env = config.getoption('runtime_env')
     global _std_input_path
@@ -714,6 +719,16 @@ def spark_tmp_path(request):
     yield ret
     if not debug:
         fs.delete(path)
+
+# Driver-local counterpart to spark_tmp_path; spark_tmp_path lives in the
+# default Hadoop FS, which is not local on distributed setups.
+@pytest.fixture
+def local_tmp_path(request):
+    debug = request.config.getoption('debug_tmp_path')
+    ret = tempfile.mkdtemp(prefix='pyspark_tests_')
+    yield ret
+    if not debug:
+        shutil.rmtree(ret, ignore_errors=True)
 
 class TmpTableFactory:
   def __init__(self, base_id):
