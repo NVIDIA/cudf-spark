@@ -22,7 +22,7 @@ import scala.annotation.tailrec
 
 import ai.rapids.cudf.ParquetOptions
 import com.nvidia.spark.rapids.{CachedGpuBatchIterator, DateTimeRebaseCorrected, GpuSemaphore,
-  PartitionReaderWithBytesRead, RmmRapidsRetryIterator, SpillableHostBuffer}
+  RmmRapidsRetryIterator, SpillableHostBuffer}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
 import com.nvidia.spark.rapids.iceberg.IcebergDeletionVector
@@ -186,7 +186,6 @@ private class SingleFileReader(
       }
     }
 
-    val parquetReader = new PartitionReaderWithBytesRead(parquetPartReader)
     val postProcessor = new GpuParquetReaderPostProcessor(filteredParquet,
       idToConstant,
       requiredSchema,
@@ -194,6 +193,6 @@ private class SingleFileReader(
       conf.metrics)
 
     inited = true
-    (parquetReader, postProcessor)
+    (parquetPartReader, postProcessor)
   }
 }

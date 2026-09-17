@@ -61,8 +61,11 @@ trait GpuArrowPythonOutput extends GpuArrowOutput { _: GpuBasePythonRunner[_] =>
           // the semaphore
           GpuSemaphore.releaseIfNecessary(TaskContext.get())
           if (gpuArrowReader.isStarted && gpuArrowReader.mayHasNext) {
+            val bytesReadBefore = gpuArrowReader.totalBytesRead
             val batch = gpuArrowReader.readNext()
             if (batch != null) {
+              batchesProcessed += 1
+              totalDataReceived += gpuArrowReader.totalBytesRead - bytesReadBefore
               batch
             } else {
               gpuArrowReader.close() // reach the end, close the reader

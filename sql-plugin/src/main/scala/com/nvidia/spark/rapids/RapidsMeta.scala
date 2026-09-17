@@ -1505,6 +1505,9 @@ abstract class BaseExprMeta[INPUT <: Expression](
       !classOf[NamedLambdaVariable].isAssignableFrom(exprClass) &&
       !classOf[Generator].isAssignableFrom(exprClass)
 
+    // The bridge must materialize its CPU result as a GPU column for the parent expression.
+    def canMaterializeOutput: Boolean = GpuRowToColumnConverter.supportsType(expr.dataType)
+
     // Some expressions carry task/partition-local state whose values cannot be preserved if the
     // bridge splits a batch across worker threads. The shim predicate filters out those correctness
     // blockers while allowing expressions whose mutable state is only cloned worker-local scratch.
@@ -1517,6 +1520,7 @@ abstract class BaseExprMeta[INPUT <: Expression](
       childrenMatch &&
       canExecuteOnCpu &&
       !isStateful &&
+      canMaterializeOutput &&
       expr.deterministic
   }
 

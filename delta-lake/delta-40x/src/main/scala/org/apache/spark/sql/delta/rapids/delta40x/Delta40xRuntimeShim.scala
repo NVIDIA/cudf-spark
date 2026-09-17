@@ -21,10 +21,16 @@ import com.nvidia.spark.rapids.delta.DeltaProvider
 import com.nvidia.spark.rapids.delta.delta40x.Delta40xProvider
 import com.nvidia.spark.rapids.delta.delta40x.GpuDeltaCatalog
 
+import org.apache.spark.sql.SaveMode
 import org.apache.spark.sql.connector.catalog.StagingTableCatalog
+import org.apache.spark.sql.delta.{DeltaOperations, DeltaOptions}
+import org.apache.spark.sql.delta.actions.Metadata
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
-import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShimBase, GpuOptimisticTransaction,
-  GpuOptimisticTransactionBase, StartTransactionArg}
+import org.apache.spark.sql.delta.commands.WriteIntoDelta
+import org.apache.spark.sql.delta.hooks.GpuAutoCompact40x
+import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShimBase, GpuDeltaLog,
+  GpuOptimisticTransaction, GpuOptimisticTransactionBase, GpuWriteIntoDelta,
+  GpuWriteIntoDeltaLike, StartTransactionArg}
 
 /**
  * Delta runtime shim for Delta 4.0.x on Spark 4.0.x.
@@ -35,6 +41,12 @@ class Delta40xRuntimeShim extends DeltaRuntimeShimBase {
 
   override def getDeltaProvider: DeltaProvider = Delta40xProvider
 
+  override def createGpuWrite(
+      gpuDeltaLog: GpuDeltaLog,
+      cpuWrite: WriteIntoDelta): GpuWriteIntoDeltaLike = {
+    GpuWriteIntoDelta(gpuDeltaLog, cpuWrite)
+  }
+
   override def getGpuDeltaCatalog(
      cpuCatalog: DeltaCatalog,
      rapidsConf: RapidsConf): StagingTableCatalog = {
@@ -43,5 +55,26 @@ class Delta40xRuntimeShim extends DeltaRuntimeShimBase {
 
   override protected def constructOptimisticTransaction(
       arg: StartTransactionArg): GpuOptimisticTransactionBase =
-    new GpuOptimisticTransaction(arg.log, arg.catalogTable, arg.snapshot, arg.conf)
+    new GpuOptimisticTransaction(
+      arg.log, arg.catalogTable, arg.snapshot, arg.conf, GpuAutoCompact40x)
+
+  override def buildWriteOperation(
+      mode: SaveMode,
+      partitionColumns: Seq[String],
+      options: DeltaOptions): DeltaOperations.Operation = {
+    DeltaOperations.Write(
+      mode, Option(partitionColumns), options.replaceWhere, options.userMetadata)
+  }
+
+  override def buildReplaceTableOperation(
+      metadata: Metadata,
+      isManaged: Boolean,
+      orCreate: Boolean,
+      asSelect: Boolean,
+      options: Option[DeltaOptions],
+      clusterBy: Option[Seq[String]],
+      isV1SaveAsTableOverwrite: Option[Boolean]): DeltaOperations.Operation = {
+    DeltaOperations.ReplaceTable(
+      metadata, isManaged, orCreate, asSelect, options.flatMap(_.userMetadata), clusterBy)
+  }
 }

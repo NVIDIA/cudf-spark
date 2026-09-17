@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids.delta.delta41x
 
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.delta.common.{DeleteCommandMeta,
-  DeltaDynamicPartitionOverwriteCommandMeta, DeltaReorgTableCommandMeta,
+  DeltaCDFRelationStrategy, DeltaDynamicPartitionOverwriteCommandMeta, DeltaReorgTableCommandMeta,
   OptimizeTableCommandMeta, UpdateCommandMeta}
 import com.nvidia.spark.rapids.delta.common.{GpuDelta4xParquetFileFormat, GpuDeltaParquetFileFormat2}
 import com.nvidia.spark.rapids.delta.common.DeltaProviderBase
@@ -34,6 +34,8 @@ import org.apache.spark.sql.execution.datasources.FileFormat
 import org.apache.spark.sql.execution.datasources.v2.{AppendDataExecV1, OverwriteByExpressionExecV1}
 
 object Delta41xProvider extends DeltaProviderBase with Logging {
+
+  override protected def getCDFRelationStrategy = DeltaCDFRelationStrategy
 
   override def isSupportedWrite(write: Class[_ <: SupportsWrite]): Boolean = {
     write == classOf[DeltaTableV2] || write == classOf[GpuDeltaCatalog4x#GpuStagedDeltaTableV2]

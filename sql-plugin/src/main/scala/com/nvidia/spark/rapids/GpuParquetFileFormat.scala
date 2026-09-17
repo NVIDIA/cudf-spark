@@ -478,7 +478,7 @@ class GpuParquetWriter(
     }
   }
 
-  override val tableWriter: TableWriter = {
+  override val tableWriter: ParquetTableWriter = {
     val writeContext = new ParquetWriteSupport().init(conf)
     // Use the value resolved in prepareWrite. Reading SQLConf here would discard
     // a per-write option.
@@ -502,5 +502,9 @@ class GpuParquetWriter(
       builder.withDictionaryPolicy(dictionaryPolicy)
     }
     Table.writeParquetChunked(builder.build(), this)
+  }
+
+  private[rapids] def closeAndGetFooter(): HostMemoryBuffer = {
+    closeAndReturn(tableWriter.closeAndGetFooter())
   }
 }

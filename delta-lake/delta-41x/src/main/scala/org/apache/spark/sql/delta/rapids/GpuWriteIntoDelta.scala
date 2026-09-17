@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * This file was derived from WriteIntoDelta.scala
  * in the Delta Lake project at https://github.com/delta-io/delta.
@@ -21,6 +21,10 @@
 
 package org.apache.spark.sql.delta.rapids
 
+import scala.util.Try
+
+import com.nvidia.spark.rapids.delta.DeltaWriteUtils.toBooleanOption
+
 import org.apache.spark.sql.delta.DeltaOperations
 import org.apache.spark.sql.delta.commands.WriteIntoDelta
 
@@ -28,7 +32,8 @@ import org.apache.spark.sql.delta.commands.WriteIntoDelta
 case class GpuWriteIntoDelta(
     override val gpuDeltaLog: GpuDeltaLog,
     override val cpuWrite: WriteIntoDelta)
-    extends GpuWriteIntoDeltaBase(gpuDeltaLog, cpuWrite) {
+    extends GpuWriteIntoDeltaBase(gpuDeltaLog, cpuWrite)
+      with GpuWriteIntoDeltaLike {
 
   override protected def buildCommitMetadata: DeltaOperations.Operation = {
     DeltaOperations.Write(
@@ -36,17 +41,12 @@ case class GpuWriteIntoDelta(
       Option(cpuWrite.partitionColumns),
       cpuWrite.options.replaceWhere,
       cpuWrite.options.userMetadata,
-      dynamicPartitionOverwriteForCommitInfo,
-      booleanOption(cpuWrite.options.canOverwriteSchema),
-      booleanOption(cpuWrite.options.canMergeSchema))
+      toBooleanOption(Try(cpuWrite.options.isDynamicPartitionOverwriteMode).getOrElse(false)),
+      toBooleanOption(cpuWrite.options.canOverwriteSchema),
+      toBooleanOption(cpuWrite.options.canMergeSchema))
   }
 
-  override protected def copyWithCpuWrite(newCpuWrite: WriteIntoDelta): GpuWriteIntoDelta =
+  override protected def copyWithCpuWrite(newCpuWrite: WriteIntoDelta): GpuWriteIntoDelta = {
     copy(cpuWrite = newCpuWrite)
-
-  private def dynamicPartitionOverwriteForCommitInfo: Option[Boolean] =
-    booleanOption(cpuWrite.options.isDynamicPartitionOverwriteMode)
-
-  private def booleanOption(enabled: Boolean): Option[Boolean] =
-    if (enabled) Some(true) else None
+  }
 }

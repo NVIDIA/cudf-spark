@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed to the Apache Software Foundation (ASF) under one or more
  * contributor license agreements.  See the NOTICE file distributed with
@@ -34,6 +34,15 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 object SamplingUtils {
+  /**
+   * Column count only, on purpose: a batch with neither rows nor columns breaks
+   * `GpuColumnVector.from` the same way, so do not narrow this to also require rows.
+   *
+   * A cuDF `Table` takes its row count from its first column, so `GpuColumnVector.from`
+   * throws an `ArrayIndexOutOfBoundsException` on one.
+   */
+  private def isRowsOnly(cb: ColumnarBatch): Boolean = cb.numCols() == 0
+
   private def selectWithoutReplacementFrom(count: Int, rand: Random, cb: ColumnarBatch): Table = {
     val rows = cb.numRows()
     assert(count <= rows)
@@ -94,28 +103,32 @@ object SamplingUtils {
         // For each batch we need to know how many rows to select from it
         // and how many to throw away from the existing batch
         val rowsInBatch = cb.numRows()
+        // Counted before the guard: totalRowsWanted below must include this batch.
         totalRowsSeen += rowsInBatch
-        val totalRowsWanted = (totalRowsSeen * fraction).toLong
-        val numRowsToSelectFromBatch = (totalRowsWanted - totalRowsCollected).toInt
-        withResource(selectWithoutReplacementFrom(numRowsToSelectFromBatch, rand, cb)) { selected =>
-          totalRowsCollected += selected.getRowCount
-          if (runningCb == null) {
-            runningCb = SpillableColumnarBatch(
-              GpuColumnVector.from(selected, GpuColumnVector.extractTypes(cb)),
-              SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
-          } else {
-            val concat = withResource(runningCb) { spb =>
-              runningCb = null
-              withResource(spb.getColumnarBatch()) { cb =>
-                withResource(GpuColumnVector.from(cb)) { table =>
-                  Table.concatenate(selected, table)
+        if (!isRowsOnly(cb)) {
+          val totalRowsWanted = (totalRowsSeen * fraction).toLong
+          val numRowsToSelectFromBatch = (totalRowsWanted - totalRowsCollected).toInt
+          withResource(
+            selectWithoutReplacementFrom(numRowsToSelectFromBatch, rand, cb)) { selected =>
+            totalRowsCollected += selected.getRowCount
+            if (runningCb == null) {
+              runningCb = SpillableColumnarBatch(
+                GpuColumnVector.from(selected, GpuColumnVector.extractTypes(cb)),
+                SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+            } else {
+              val concat = withResource(runningCb) { spb =>
+                runningCb = null
+                withResource(spb.getColumnarBatch()) { cb =>
+                  withResource(GpuColumnVector.from(cb)) { table =>
+                    Table.concatenate(selected, table)
+                  }
                 }
               }
-            }
-            withResource(concat) { concat =>
-              runningCb = SpillableColumnarBatch(
-                GpuColumnVector.from(concat, GpuColumnVector.extractTypes(cb)),
-                SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+              withResource(concat) { concat =>
+                runningCb = SpillableColumnarBatch(
+                  GpuColumnVector.from(concat, GpuColumnVector.extractTypes(cb)),
+                  SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+              }
             }
           }
         }
@@ -176,38 +189,43 @@ object SamplingUtils {
         // For each batch we need to know how many rows to select from it
         // and how many to throw away from the existing batch
         val rowsInBatch = cb.numRows()
-        val (numRowsToSelectFromBatch, rowsToDrop) = if (numTotalRows == 0) {
-          (Math.min(k, rowsInBatch), 0)
-        } else if (numTotalRows + rowsInBatch < k) {
-          (rowsInBatch, 0)
+        if (isRowsOnly(cb)) {
+          numTotalRows += rowsInBatch
         } else {
-          val v = (k * rowsInBatch.toDouble / (numTotalRows + rowsInBatch)).toInt
-          (v, v)
-        }
-        numTotalRows += rowsInBatch
-        withResource(selectWithoutReplacementFrom(numRowsToSelectFromBatch, rand, cb)) { selected =>
-          if (runningCb == null) {
-            rowsSaved = selected.getRowCount
-            runningCb = SpillableColumnarBatch(
-              GpuColumnVector.from(selected, GpuColumnVector.extractTypes(cb)),
-              SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+          val (numRowsToSelectFromBatch, rowsToDrop) = if (numTotalRows == 0) {
+            (Math.min(k, rowsInBatch), 0)
+          } else if (numTotalRows + rowsInBatch < k) {
+            (rowsInBatch, 0)
           } else {
-            withResource(runningCb) { spb =>
-              runningCb = null
-              withResource(spb.getColumnarBatch()) { cb =>
-                val filtered = if (rowsToDrop > 0) {
-                  selectWithoutReplacementFrom(cb.numRows() - rowsToDrop, rand, cb)
-                } else {
-                  GpuColumnVector.from(cb)
-                }
-                val concat = withResource(filtered) { filtered =>
-                  Table.concatenate(selected, filtered)
-                }
-                withResource(concat) { concat =>
-                  rowsSaved = concat.getRowCount
-                  runningCb = SpillableColumnarBatch(
-                    GpuColumnVector.from(concat, GpuColumnVector.extractTypes(cb)),
-                    SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+            val v = (k * rowsInBatch.toDouble / (numTotalRows + rowsInBatch)).toInt
+            (v, v)
+          }
+          numTotalRows += rowsInBatch
+          withResource(
+            selectWithoutReplacementFrom(numRowsToSelectFromBatch, rand, cb)) { selected =>
+            if (runningCb == null) {
+              rowsSaved = selected.getRowCount
+              runningCb = SpillableColumnarBatch(
+                GpuColumnVector.from(selected, GpuColumnVector.extractTypes(cb)),
+                SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+            } else {
+              withResource(runningCb) { spb =>
+                runningCb = null
+                withResource(spb.getColumnarBatch()) { cb =>
+                  val filtered = if (rowsToDrop > 0) {
+                    selectWithoutReplacementFrom(cb.numRows() - rowsToDrop, rand, cb)
+                  } else {
+                    GpuColumnVector.from(cb)
+                  }
+                  val concat = withResource(filtered) { filtered =>
+                    Table.concatenate(selected, filtered)
+                  }
+                  withResource(concat) { concat =>
+                    rowsSaved = concat.getRowCount
+                    runningCb = SpillableColumnarBatch(
+                      GpuColumnVector.from(concat, GpuColumnVector.extractTypes(cb)),
+                      SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+                  }
                 }
               }
             }

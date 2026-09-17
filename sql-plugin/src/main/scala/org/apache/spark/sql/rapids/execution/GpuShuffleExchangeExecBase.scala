@@ -31,10 +31,10 @@ import org.apache.spark.rapids.shims.GpuShuffleExchangeExec
 import org.apache.spark.rdd.RDD
 import org.apache.spark.serializer.Serializer
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, SortOrder}
+import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, Expression, SortOrder}
 import org.apache.spark.sql.catalyst.plans.physical.RoundRobinPartitioning
 import org.apache.spark.sql.catalyst.trees.TreeNodeTag
-import org.apache.spark.sql.execution.SparkPlan
+import org.apache.spark.sql.execution.{ExecSubqueryExpression, SparkPlan}
 import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanExec
 import org.apache.spark.sql.execution.exchange.{Exchange, ShuffleExchangeExec}
 import org.apache.spark.sql.execution.metric._
@@ -182,6 +182,8 @@ abstract class GpuShuffleExchangeExecBase(
   private lazy val kudoBufferCopyMeasurementEnabled = RapidsConf
     .SHUFFLE_KUDO_SERIALIZER_MEASURE_BUFFER_COPY_ENABLED
     .get(child.conf)
+  private lazy val rangeInputBatchingEnabled = RapidsConf
+    .RANGE_SHUFFLE_INPUT_BATCHING_ENABLED.get(child.conf)
 
   private lazy val useGPUShuffle = {
     gpuOutputPartitioning match {
@@ -243,6 +245,28 @@ abstract class GpuShuffleExchangeExecBase(
 
   @transient lazy val inputBatchRDD: RDD[ColumnarBatch] = child.executeColumnar()
 
+  @transient private lazy val rangeBoundaryPlan: Option[GpuRangeBoundaryExec] =
+    gpuOutputPartitioning match {
+      case range: GpuRangePartitioning
+          if RapidsConf.RANGE_PARTITIONING_SAMPLE_KEYS_ONLY.get(child.conf) =>
+        GpuRangeBoundaryPlan.build(child, range.gpuOrdering)
+      case _ =>
+        None
+    }
+
+  private def expressionSubqueries(expression: Expression): Seq[SparkPlan] = {
+    val nested = expression.children.flatMap(expressionSubqueries)
+    expression match {
+      case subquery: ExecSubqueryExpression => nested :+ subquery.plan
+      case _ => nested
+    }
+  }
+
+  // Boundary collection is an auxiliary query of the exchange. Exposing it through Spark's
+  // subquery mechanism makes its physical operators and native metrics part of the SQL plan.
+  @transient override lazy val subqueries: Seq[SparkPlan] =
+    expressions.flatMap(expressionSubqueries) ++ rangeBoundaryPlan.toSeq
+
   /**
    * Returns the GPU partitioning used to build the shuffle dependency. Distributions whose
    * physical partition count depends on the input RDD can override this hook.
@@ -270,12 +294,14 @@ abstract class GpuShuffleExchangeExecBase(
       serializer,
       useGPUShuffle,
       useMultiThreadedShuffle,
+      rangeInputBatchingEnabled,
       allMetrics,
       writeMetrics,
       additionalMetrics,
       opTimeNewShuffleWrite,
       descendantOpTimeMetrics,
-      enableOpTimeTrackingRdd)
+      enableOpTimeTrackingRdd,
+      rangeBoundaryPlan)
   }
 
   /**
@@ -400,12 +426,14 @@ object GpuShuffleExchangeExecBase {
       serializer: Serializer,
       useGPUShuffle: Boolean,
       useMultiThreadedShuffle: Boolean,
+      rangeInputBatchingEnabled: Boolean,
       metrics: Map[String, GpuMetric],
       writeMetrics: Map[String, SQLMetric],
       additionalMetrics: Map[String, GpuMetric],
       opTimeNewShuffleWrite: Option[GpuMetric] = None,
       descendantOpTimeMetrics: Seq[GpuMetric] = Seq.empty,
-      enableOpTimeTrackingRdd: Boolean = true)
+      enableOpTimeTrackingRdd: Boolean = true,
+      rangeBoundaryPlan: Option[GpuRangeBoundaryExec] = None)
   : ShuffleDependency[Int, ColumnarBatch, ColumnarBatch] = {
     val isRoundRobin = newPartitioning match {
       case _: GpuRoundRobinPartitioning => true
@@ -434,7 +462,9 @@ object GpuShuffleExchangeExecBase {
       rdd
     }
     val partitioner: GpuExpression = getPartitioner(newRdd, outputAttributes,
-      newPartitioning, metrics)
+      newPartitioning, metrics, rangeBoundaryPlan)
+    val useRangeInputBatching = rangeInputBatchingEnabled &&
+      newPartitioning.isInstanceOf[GpuRangePartitioning]
     // Inject debugging subMetrics, such as D2HTime before SliceOnCpu
     // The injected metrics will be serialized as the members of GpuPartitioning
     partitioner match {
@@ -456,6 +486,8 @@ object GpuShuffleExchangeExecBase {
           private var partitioned: Array[(ColumnarBatch, Int)] = _
           private var at = 0
           private val mutablePair = new MutablePair[Int, ColumnarBatch]()
+          private def rangeInput[T](body: => T): T =
+            RangeInputBatching.withRangeInput(useRangeInputBatching)(body)
           private def partNextBatch(): Unit = {
             if (partitioned != null) {
               partitioned.map(_._1).safeClose()
@@ -463,11 +495,11 @@ object GpuShuffleExchangeExecBase {
               at = 0
             }
             // Try to fill partitionedIter from iter if it's empty
-            if (!partitionedIter.hasNext && iter.hasNext) {
-              var batch = iter.next()
-              while (batch.numRows == 0 && iter.hasNext) {
+            if (!partitionedIter.hasNext && rangeInput(iter.hasNext)) {
+              var batch = rangeInput(iter.next())
+              while (batch.numRows == 0 && rangeInput(iter.hasNext)) {
                 batch.close()
-                batch = iter.next()
+                batch = rangeInput(iter.next())
               }
               // Get a non-empty batch or the last batch. So still need to
               // check if it is empty for the later case.
@@ -549,16 +581,32 @@ object GpuShuffleExchangeExecBase {
     rdd: RDD[ColumnarBatch],
     outputAttributes: Seq[Attribute],
     newPartitioning: GpuPartitioning,
-    metrics: Map[String, GpuMetric]): GpuExpression with GpuPartitioning = {
+    metrics: Map[String, GpuMetric],
+    rangeBoundaryPlan: Option[GpuRangeBoundaryExec]): GpuExpression with GpuPartitioning = {
     newPartitioning match {
       case h: GpuHashPartitioning =>
         GpuBindReferences.bindReference(h, outputAttributes, metrics)
       case r: GpuRangePartitioning =>
         val sorter = new GpuSorter(r.gpuOrdering, outputAttributes, metrics)
-        val bounds = GpuRangePartitioner.createRangeBounds(r.numPartitions, sorter,
-          rdd, SQLConf.get.rangeExchangeSampleSizePerPartition)
+        val (boundaryRdd, boundarySorter, boundaryProjection) = rangeBoundaryPlan match {
+          case Some(plan) =>
+            val projectList = plan.output.map { boundaryAttr =>
+              val ordinal = outputAttributes.indexWhere(_.exprId == boundaryAttr.exprId)
+              require(ordinal >= 0,
+                s"Range boundary attribute $boundaryAttr is missing from the shuffle input")
+              GpuBoundReference(ordinal, boundaryAttr.dataType, boundaryAttr.nullable)(
+                boundaryAttr.exprId, boundaryAttr.name)
+            }
+            (plan.executeColumnar(),
+              new GpuSorter(r.gpuOrdering, plan.output, metrics), Some(projectList))
+          case None =>
+            (rdd, sorter, None)
+        }
+        val bounds = GpuRangePartitioner.createRangeBounds(r.numPartitions, boundarySorter,
+          boundaryRdd, SQLConf.get.rangeExchangeSampleSizePerPartition)
         // No need to bind arguments for the GpuRangePartitioner. The Sorter has already done it
-        new GpuRangePartitioner(bounds, sorter)
+        new GpuRangePartitioner(bounds, sorter,
+          boundaryProjection.map(_ => boundarySorter), boundaryProjection)
       case GpuSinglePartitioning =>
         GpuSinglePartitioning
       case rrp: GpuRoundRobinPartitioning =>
