@@ -27,12 +27,12 @@ import scala.collection.mutable.ArrayBuffer
 import scala.util.control.NonFatal
 
 import _root_.io.netty.handler.stream.ChunkedStream
-import com.nvidia.spark.rapids.spill.SpillablePartialFileHandle
+import com.nvidia.spark.rapids.spill.{ClosedPartialFileHandleException, SpillablePartialFileHandle}
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.network.buffer.ManagedBuffer
 import org.apache.spark.network.util.AbstractFileRegion
-import org.apache.spark.storage.{ShuffleBlockBatchId, ShuffleBlockId}
+import org.apache.spark.storage.{BlockId, ShuffleBlockBatchId, ShuffleBlockId}
 
 /**
  * A segment of data within a SpillablePartialFileHandle.
@@ -109,6 +109,13 @@ private[rapids] object ShuffleHandleLease {
     if (firstFailure != null) {
       throw firstFailure
     }
+  }
+}
+
+private[rapids] object MultithreadedShuffleBufferCatalog {
+  def missingDataMessage(blockId: BlockId): String = blockId match {
+    case _: ShuffleBlockBatchId => s"No data found for batch block $blockId"
+    case _ => s"No data found for block $blockId"
   }
 }
 
@@ -205,10 +212,11 @@ class MultithreadedShuffleBufferCatalog extends Logging {
   def getMergedBuffer(blockId: ShuffleBlockId): ManagedBuffer = {
     val segments = partitionSegments.get(blockId)
     if (segments == null || segments.isEmpty) {
-      throw new IllegalArgumentException(s"No data found for block $blockId")
+      throw new IllegalArgumentException(
+        MultithreadedShuffleBufferCatalog.missingDataMessage(blockId))
     }
 
-    new MultiBatchManagedBuffer(segments.toSeq)
+    new MultiBatchManagedBuffer(segments.toSeq, blockId)
   }
 
   /**
@@ -227,10 +235,11 @@ class MultithreadedShuffleBufferCatalog extends Logging {
     }
 
     if (allSegments.isEmpty) {
-      throw new IllegalArgumentException(s"No data found for batch block $batchId")
+      throw new IllegalArgumentException(
+        MultithreadedShuffleBufferCatalog.missingDataMessage(batchId))
     }
 
-    new MultiBatchManagedBuffer(allSegments.toSeq)
+    new MultiBatchManagedBuffer(allSegments.toSeq, batchId)
   }
 
   /**
@@ -321,9 +330,21 @@ class MultithreadedShuffleBufferCatalog extends Logging {
  * segments when createInputStream() is called. Each segment may be in memory or
  * on disk, and the buffer handles both cases transparently.
  */
-class MultiBatchManagedBuffer(segments: Seq[PartitionSegment]) extends ManagedBuffer {
+class MultiBatchManagedBuffer(
+    segments: Seq[PartitionSegment],
+    blockId: BlockId) extends ManagedBuffer {
 
   private val handles: Seq[SpillablePartialFileHandle] = segments.map(_.handle).distinct
+
+  private def translateClosedHandleToMissingData[T](body: => T): T = {
+    try {
+      body
+    } catch {
+      case e: ClosedPartialFileHandleException =>
+        throw new IllegalArgumentException(
+          MultithreadedShuffleBufferCatalog.missingDataMessage(blockId), e)
+    }
+  }
 
   /** Guards bufferLeases while retain()/release() can be called from different threads. */
   private val retainLock = new Object
@@ -334,7 +355,7 @@ class MultiBatchManagedBuffer(segments: Seq[PartitionSegment]) extends ManagedBu
   override def size(): Long = segments.map(_.length).sum
 
   override def nioByteBuffer(): ByteBuffer = {
-    val lease = ShuffleHandleLease.acquire(handles)
+    val lease = translateClosedHandleToMissingData(ShuffleHandleLease.acquire(handles))
     try {
       // This method loads all data into memory. It's required by the ManagedBuffer interface
       // but is NOT used in the network transfer path - Spark's network layer uses
@@ -369,11 +390,11 @@ class MultiBatchManagedBuffer(segments: Seq[PartitionSegment]) extends ManagedBu
   }
 
   override def createInputStream(): InputStream = {
-    new MultiSegmentInputStream(segments, handles)
+    translateClosedHandleToMissingData(new MultiSegmentInputStream(segments, handles))
   }
 
   override def retain(): ManagedBuffer = {
-    val lease = ShuffleHandleLease.acquire(handles)
+    val lease = translateClosedHandleToMissingData(ShuffleHandleLease.acquire(handles))
     retainLock.synchronized {
       bufferLeases += lease
     }
@@ -395,7 +416,7 @@ class MultiBatchManagedBuffer(segments: Seq[PartitionSegment]) extends ManagedBu
   override def convertToNetty(): AnyRef = {
     // Return a custom FileRegion that streams data in chunks, avoiding loading all
     // data into memory at once. This addresses concerns about large shuffle blocks.
-    new MultiSegmentFileRegion(segments, handles)
+    translateClosedHandleToMissingData(new MultiSegmentFileRegion(segments, handles))
   }
 
   // Spark 4.0+ adds convertToNettyForSsl() abstract method.

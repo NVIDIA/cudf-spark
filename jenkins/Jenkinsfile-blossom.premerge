@@ -109,8 +109,10 @@ pipeline {
                     }
 
                     def title = githubHelper.getIssue().title.toLowerCase()
-                    env.PARALLEL_UT = title.contains('[fast-ut]') ? 'true' : 'false'
-                    echo "Parallel unit tests enabled by PR title: ${env.PARALLEL_UT}"
+                    def serialUt = title.contains('[serial ut]') ||
+                        title.contains('[serial-ut]')
+                    env.PARALLEL_UT = (!serialUt).toString()
+                    echo "Parallel unit tests enabled for premerge: ${env.PARALLEL_UT}"
                     env.REDUCED_IT = (title ==~ /.*\[reduced-it\].*/).toString()
                     if (title ==~ /.*\[skip ci\].*/) {
                         githubHelper.updateCommitStatus("", "Skipped", GitHubCommitState.SUCCESS)

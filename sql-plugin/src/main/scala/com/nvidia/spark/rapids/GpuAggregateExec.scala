@@ -46,7 +46,7 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.aggregate.{CudfAggregate, GpuAggregateExpression}
 import org.apache.spark.sql.rapids.execution.{GpuBatchSubPartitioner, GpuShuffleMeta, TrampolineUtil}
 import org.apache.spark.sql.types._
-import org.apache.spark.sql.vectorized.ColumnarBatch
+import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
 object AggregateUtils extends Logging {
 
@@ -713,12 +713,28 @@ object GpuAggregateIterator extends Logging {
             val dataTypes = (0 until numCols).map {
               c => batchesToConcat.head.column(c).dataType
             }.toArray
-            withResource(batchesToConcat.safeMap(GpuColumnVector.from)) { tbl =>
-              withResource(cudf.Table.concatenate(tbl: _*)) { concatenated =>
-                val cb = GpuColumnVector.from(concatenated, dataTypes)
-                SpillableColumnarBatch(cb,
-                  SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+            // A batch can legitimately have zero columns but a non-zero row count: an
+            // aggregate with no grouping keys whose aggregate functions were all pruned
+            // away (e.g. `df.agg(sum(x)).count()`, where only the row count is consumed)
+            // produces row-count-only batches. cuDF cannot build a Table from zero
+            // columns, so `GpuColumnVector.from` would throw here. Carry the row count
+            // forward instead. See NVIDIA/spark-rapids#8618 for the aggregate heuristics
+            // that surface this shape.
+            if (dataTypes.nonEmpty) {
+              withResource(batchesToConcat.safeMap(GpuColumnVector.from)) { tbl =>
+                withResource(cudf.Table.concatenate(tbl: _*)) { concatenated =>
+                  val cb = GpuColumnVector.from(concatenated, dataTypes)
+                  SpillableColumnarBatch(cb,
+                    SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+                }
               }
+            } else {
+              // Row-count-only batches: nothing to concatenate on the GPU, so just sum
+              // the row counts and hand back an equivalent zero-column batch.
+              val totalRowCount = batchesToConcat.map(_.numRows()).sum
+              SpillableColumnarBatch(
+                new ColumnarBatch(Array[ColumnVector](), totalRowCount),
+                SpillPriorities.ACTIVE_BATCHING_PRIORITY)
             }
           }
         }
@@ -1308,7 +1324,14 @@ abstract class GpuBaseAggregateMeta[INPUT <: SparkPlan](
 
   override def convertToGpu(): GpuExec = {
     lazy val aggModes = agg.aggregateExpressions.map(_.mode).toSet
-    lazy val canUsePartialSortAgg = aggModes.forall { mode =>
+    // `aggModes` is empty when there are no aggregate functions at all (a dedup, e.g.
+    // `distinct()` / `GROUP BY` with no aggregates). `forall` is vacuously true on an
+    // empty set, so without the `nonEmpty` check this would report that the aggregate is
+    // a safe Partial one. It is not: single pass partial sort agg deliberately emits
+    // non-fully-aggregated output and relies on a downstream final agg to merge it, which
+    // a terminal dedup does not have -- yielding duplicate rows. This mirrors the
+    // `aggregateExpressions.nonEmpty` guard on `allowNonFullyAggregatedOutput` below.
+    lazy val canUsePartialSortAgg = aggModes.nonEmpty && aggModes.forall { mode =>
       mode == Partial || mode == PartialMerge
     } && agg.groupingExpressions.nonEmpty // Don't do this for a reduce...
 
@@ -1510,6 +1533,7 @@ abstract class GpuTypedImperativeSupportedAggregateExecMeta[INPUT <: BaseAggrega
   private def overrideAggBufTypes(): Unit = {
     val desiredAggBufTypes = mutable.HashMap.empty[ExprId, DataType]
     val desiredInputAggBufTypes = mutable.HashMap.empty[ExprId, DataType]
+    val desiredResultOutputTypes = mutable.HashMap.empty[ExprId, DataType]
     // Collects exprId from TypedImperativeAggBufferAttributes, and maps them to the data type
     // of `TypedImperativeAggExprMeta.aggBufferAttribute`.
     aggregateExpressions.map(_.childExprs.head).foreach {
@@ -1523,6 +1547,31 @@ abstract class GpuTypedImperativeSupportedAggregateExecMeta[INPUT <: BaseAggrega
       case _ =>
     }
 
+    // For Partial and PartialMerge, Spark constructs resultExpressions positionally from each
+    // aggregate function's inputAggBufferAttributes.  Those attributes can retain different
+    // expression IDs after the aggregate function is copied (see SPARK-31620), so an ID-only
+    // lookup cannot reliably identify the shuffle-facing result attribute.
+    val allResultsAreAggBuffers = aggregateExpressions.forall { aggExprMeta =>
+      val mode = aggExprMeta.wrapped.asInstanceOf[AggregateExpression].mode
+      mode == Partial || mode == PartialMerge
+    }
+    if (allResultsAreAggBuffers) {
+      var resultOffset = groupingExpressions.length
+      aggregateExpressions.foreach { aggExprMeta =>
+        val aggExpr = aggExprMeta.wrapped.asInstanceOf[AggregateExpression]
+        val bufferCount = aggExpr.aggregateFunction.inputAggBufferAttributes.length
+        aggExprMeta.childExprs.head match {
+          case aggMeta: TypedImperativeAggExprMeta[_] =>
+            resultExpressions.lift(resultOffset).foreach { resultMeta =>
+              val resultExpr = resultMeta.wrapped.asInstanceOf[NamedExpression]
+              desiredResultOutputTypes(resultExpr.exprId) = aggMeta.aggBufferAttribute.dataType
+            }
+          case _ =>
+        }
+        resultOffset += bufferCount
+      }
+    }
+
     // Overrides the data types of typed imperative aggregation buffers for type checking
     aggregateAttributes.foreach { attrMeta =>
       attrMeta.wrapped match {
@@ -1533,8 +1582,11 @@ abstract class GpuTypedImperativeSupportedAggregateExecMeta[INPUT <: BaseAggrega
     }
     resultExpressions.foreach { retMeta =>
       retMeta.wrapped match {
-        case ar: AttributeReference if desiredInputAggBufTypes.contains(ar.exprId) =>
-          retMeta.overrideDataType(desiredInputAggBufTypes(ar.exprId))
+        case ar: AttributeReference =>
+          desiredInputAggBufTypes.get(ar.exprId)
+            .orElse(desiredResultOutputTypes.get(ar.exprId))
+            .orElse(desiredAggBufTypes.get(ar.exprId))
+            .foreach(retMeta.overrideDataType)
         case _ =>
       }
     }
@@ -1828,7 +1880,17 @@ class GpuHashAggregateMeta(
     parent: Option[RapidsMeta[_, _, _]],
     rule: DataFromReplacementRule)
   extends GpuBaseAggregateMeta(agg, agg.requiredChildDistributionExpressions,
-    conf, parent, rule)
+    conf, parent, rule) {
+  override def tagPlanForGpu(): Unit = {
+    // Spark implements distinct aggregations by grouping on the distinct input. Keep stages that
+    // group by an ANSI interval on the CPU because interval grouping is not supported.
+    if (agg.groupingExpressions.exists(e =>
+      TypeSig.ansiIntervals.isSupportedByPlugin(e.dataType))) {
+      willNotWorkOnGpu("ANSI interval types in grouping expressions are not supported")
+    }
+    super.tagPlanForGpu()
+  }
+}
 
 class GpuSortAggregateExecMeta(
     override val agg: SortAggregateExec,
@@ -2087,11 +2149,15 @@ case class GpuHashAggregateExec(
     }
   }
 
-  // Used in de-duping and optimizer rules
+  // Used in de-duping and optimizer rules.
+  // Final/PartialMerge aggregates read input buffer attributes from their child. If those
+  // attrs share exprIds with child output but have different names, keep them out of this
+  // node's produced attributes so QueryPlan.references retains the required inputs.
   override def producedAttributes: AttributeSet =
-    AttributeSet(aggregateAttributes) ++
+    (AttributeSet(aggregateAttributes) ++
       AttributeSet(resultExpressions.diff(groupingExpressions).map(_.toAttribute)) ++
-      AttributeSet(aggregateBufferAttributes)
+      AttributeSet(aggregateBufferAttributes) ++
+      AttributeSet(inputAggBufferAttributes)) -- child.outputSet
 
   // AllTuples = distribution with a single partition and all tuples of the dataset are co-located.
   // Clustered = dataset with tuples co-located in the same partition if they share a specific value

@@ -65,9 +65,12 @@ the level of compatibility with Apache Spark.  Those are covered [here](configs.
 Others are a part of Apache Spark itself and those are a bit harder to document.
 The work of updating this to cover that support is still ongoing.
 
-In general though if you ever have any question about why an operation is not running
-on the GPU you may set `spark.rapids.sql.explain` to ALL and it will try to give all of
-the reasons why this particular operator or expression is on the CPU or GPU.
+For debugging, set `spark.rapids.sql.explain` to ALL to report why
+operators or expressions run on the CPU or GPU. ALL can generate
+substantial driver log output for complex or high-volume workloads,
+potentially degrading driver performance or making the driver
+unresponsive. Do not enable ALL in production; use NOT_ON_GPU
+(the default) or NONE.
 
 # Key
 ## Types
@@ -599,8 +602,8 @@ plugin supports are described below.
 <td><em>PS<br/>not allowed for grouping expressions;<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types CALENDAR, UDT, DAYTIME, YEARMONTH</em></td>
 <td><em>PS<br/>not allowed for grouping expressions if containing Array, Map, or Binary as child;<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types CALENDAR, UDT, DAYTIME, YEARMONTH</em></td>
 <td><b>NS</b></td>
-<td><b>NS</b></td>
-<td><b>NS</b></td>
+<td><em>PS<br/>not allowed for grouping expressions</em></td>
+<td><em>PS<br/>not allowed for grouping expressions</em></td>
 </tr>
 <tr>
 <td rowspan="1">ObjectHashAggregateExec</td>
@@ -671,11 +674,11 @@ plugin supports are described below.
 <td>S</td>
 <td>S</td>
 <td>S</td>
+<td>S</td>
 <td><b>NS</b></td>
-<td><b>NS</b></td>
-<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types BINARY, CALENDAR, UDT</em></td>
-<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types BINARY, CALENDAR, UDT</em></td>
-<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types BINARY, CALENDAR, UDT</em></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types CALENDAR, UDT</em></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types CALENDAR, UDT</em></td>
+<td><em>PS<br/>UTC is only supported TZ for child TIMESTAMP;<br/>unsupported child types CALENDAR, UDT</em></td>
 <td><b>NS</b></td>
 <td>S</td>
 <td>S</td>
@@ -11260,7 +11263,7 @@ are limited.
 <td> </td>
 <td> </td>
 <td> </td>
-<td><em>PS<br/>Literal value only</em></td>
+<td>S</td>
 <td> </td>
 <td> </td>
 <td> </td>

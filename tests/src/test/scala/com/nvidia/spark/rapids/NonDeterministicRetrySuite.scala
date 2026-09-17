@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,16 +16,19 @@
 
 package com.nvidia.spark.rapids
 
+import scala.collection.mutable
+
 import ai.rapids.cudf.{ColumnVector, Table}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingSeq
-import com.nvidia.spark.rapids.jni.RmmSpark
+import com.nvidia.spark.rapids.jni.{GpuRetryOOM, GpuSplitAndRetryOOM, RmmSpark}
+import com.nvidia.spark.rapids.shims.ShimUnaryExpression
 
-import org.apache.spark.sql.catalyst.expressions.{AttributeReference, ExprId}
+import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Expression, ExprId}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.GpuGreaterThan
-import org.apache.spark.sql.rapids.catalyst.expressions.GpuRand
-import org.apache.spark.sql.types.{DoubleType, IntegerType}
+import org.apache.spark.sql.rapids.catalyst.expressions.{GpuExpressionRetryable, GpuRand}
+import org.apache.spark.sql.types.{BooleanType, DataType, DoubleType, IntegerType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 class NonDeterministicRetrySuite extends RmmSparkRetrySuiteBase {
@@ -222,5 +225,72 @@ class NonDeterministicRetrySuite extends RmmSparkRetrySuiteBase {
       }
       GpuProjectExec.projectAndCloseWithRetrySingleBatch(scb, boundExprs).close()
     }
+  }
+
+  test("GPU filter split retry checkpoints each attempt") {
+    // A split that succeeded is committed; a later split's retry must restore only its own
+    // attempt. The condition counts the rows it evaluated the way a metric expression does,
+    // then throws a split OOM on the whole batch and a retry OOM on the second half's first
+    // try, so each failed attempt has rows for the restore to take back, and the count must
+    // end at the number of rows. The context check proves every evaluation sits inside a
+    // checkpoint.
+    val failures = mutable.Queue[Option[Throwable]](
+      Some(new GpuSplitAndRetryOOM("test: split the batch")),
+      None,
+      Some(new GpuRetryOOM("test: retry the second half")))
+    val condition = GpuCountingRetryableCondition(GpuLiteral(true, BooleanType), failures)
+    val boundCondition = GpuBindReferences.bindGpuReferencesTiered(Seq(condition),
+      batchAttrs, new SQLConf(), Map.empty)
+    assert(boundCondition.areAllRetryable)
+
+    val rows = withResource(GpuFilter.filterAndClose(buildBatch(), boundCondition,
+        NoopMetric, NoopMetric, NoopMetric).toSeq) { batches =>
+      batches.map(_.numRows()).sum
+    }
+    assert(rows == NUM_ROWS)
+    assert(condition.committedRows == NUM_ROWS,
+      s"a restore took back rows of a committed split: ${condition.committedRows} counted")
+    assert(condition.checkpoints == 4, s"one checkpoint per attempt: ${condition.checkpoints}")
+  }
+}
+
+/**
+ * A retryable condition for the tests above: always true, counts the rows it evaluated like a
+ * metric expression (the pending rows of a failed attempt are taken back on restore), and
+ * throws the queued failure, if any, after counting, so the failed attempt has pending rows.
+ */
+case class GpuCountingRetryableCondition(
+    child: Expression,
+    failures: mutable.Queue[Option[Throwable]])
+  extends ShimUnaryExpression with GpuExpressionRetryable {
+
+  override def dataType: DataType = BooleanType
+  override def nullable: Boolean = false
+  override lazy val deterministic: Boolean = false
+  override val selfNonDeterministic: Boolean = true
+  override def doContextCheck(): Boolean = true
+
+  var committedRows: Long = 0L
+  var checkpoints: Int = 0
+  private var pendingRows: Long = 0L
+
+  override def doCheckpoint(): Unit = {
+    checkpoints += 1
+    pendingRows = 0L
+  }
+
+  override def doRestore(): Unit = {
+    committedRows -= pendingRows
+    pendingRows = 0L
+  }
+
+  override def doColumnarEval(batch: ColumnarBatch): GpuColumnVector = {
+    val rows = batch.numRows()
+    committedRows += rows
+    pendingRows += rows
+    if (failures.nonEmpty) {
+      failures.dequeue().foreach(throw _)
+    }
+    GpuColumnVector.from(ColumnVector.fromBooleans(Array.fill(rows)(true): _*), BooleanType)
   }
 }

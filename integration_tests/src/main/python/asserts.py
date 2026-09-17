@@ -518,13 +518,39 @@ def assert_gpu_fallback_write_sql(write_func,
         jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.endCapture()
 
 
+def collect_plan_nodes(plan):
+    """Flatten a JVM SparkPlan into a list of nodes, parents before children.
+
+    Intended for the gpu_plan_assertion callback of
+    assert_cpu_and_gpu_are_equal_collect_with_capture. This does not descend into
+    AdaptiveSparkPlanExec or QueryStageExec, so a caller that needs the whole tree should
+    disable AQE.
+    """
+    nodes = [plan]
+    children = plan.children().iterator()
+    while children.hasNext():
+        nodes.extend(collect_plan_nodes(children.next()))
+    return nodes
+
+def plan_metric(node, name):
+    """Value of a named metric on a JVM plan node, or None if the node has no such metric.
+
+    Many GPU metrics are only registered at certain values of spark.rapids.sql.metrics.level
+    (numOutputBatches on a non-aggregate exec is DEBUG), so a None here usually means the
+    metrics level is too low rather than that the operator did no work.
+    """
+    metrics = node.metrics()
+    if not metrics.contains(name):
+        return None
+    return metrics.apply(name).value()
+
 def assert_cpu_and_gpu_are_equal_collect_with_capture(func,
         exist_classes='',
         non_exist_classes='',
         conf={},
         require_non_empty=False,
         gpu_plan_assertion=None):
-    """Compare collected CPU/GPU results and validate the executed GPU plan.
+    """Compare collected CPU/GPU results and optionally validate both executed plans.
 
     :param func: Function that creates the dataframe to collect in each Spark session.
     :param exist_classes: Comma-separated class names required in the GPU plan.
@@ -532,7 +558,7 @@ def assert_cpu_and_gpu_are_equal_collect_with_capture(func,
     :param conf: Spark configuration used for both executions.
     :param require_non_empty: Require the collected CPU result to contain at least one row.
     :param gpu_plan_assertion: Optional callback invoked after GPU collection with the
-        dataframe's executed JVM plan.
+        CPU and GPU dataframes' executed JVM plans.
     """
     (bring_back, collect_type) = _prep_func_for_compare(func, 'COLLECT_WITH_DATAFRAME')
 
@@ -544,12 +570,16 @@ def assert_cpu_and_gpu_are_equal_collect_with_capture(func,
     cpu_end = time.time()
     if require_non_empty:
         assert len(from_cpu) > 0, "Expected non-empty result"
+    cpu_plan = None
+    if gpu_plan_assertion:
+        cpu_plan = cpu_df._jdf.queryExecution().executedPlan()
     print('### GPU RUN ###')
     gpu_start = time.time()
     from_gpu, gpu_df = with_gpu_session(bring_back, conf=conf)
     gpu_end = time.time()
     if gpu_plan_assertion:
-        gpu_plan_assertion(gpu_df._jdf.queryExecution().executedPlan())
+        gpu_plan = gpu_df._jdf.queryExecution().executedPlan()
+        gpu_plan_assertion(cpu_plan, gpu_plan)
     jvm = spark_jvm()
     if exist_classes:
         for clz in exist_classes.split(','):

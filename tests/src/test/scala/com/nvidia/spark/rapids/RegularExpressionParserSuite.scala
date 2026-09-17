@@ -25,6 +25,7 @@ import org.scalatest.funsuite.AnyFunSuite
 // Java replacement strings such as ${1} are intentionally not Scala interpolated strings.
 @scala.annotation.nowarn("cat=lint-missing-interpolator")
 class RegularExpressionParserSuite extends AnyFunSuite {
+  import RegexQuantifier._
 
   test("detect regexp strings") {
     // Based on https://docs.oracle.com/javase/8/docs/api/java/util/regex/Pattern.html
@@ -51,15 +52,87 @@ class RegularExpressionParserSuite extends AnyFunSuite {
   test("simple quantifier") {
     assert(parse("a{1}") ===
       RegexSequence(ListBuffer(
-      RegexRepetition(RegexChar('a'), QuantifierFixedLength(1)))))
+      RegexRepetition(RegexChar('a'), RegexQuantifier(Fixed(1), Greedy)))))
+  }
+
+  test("bounded reluctant quantifiers have semantic modes") {
+    val cases = Seq(
+      "a{2}?" -> RegexQuantifier(Fixed(2), Reluctant),
+      "a{2,}?" -> RegexQuantifier(Variable(2, None), Reluctant),
+      "a{2,3}?" -> RegexQuantifier(Variable(2, Some(3)), Reluctant),
+      "a{0,3}?" -> RegexQuantifier(Variable(0, Some(3)), Reluctant))
+
+    cases.foreach { case (pattern, quantifier) =>
+      val ast = RegexSequence(ListBuffer(RegexRepetition(RegexChar('a'), quantifier)))
+      assert(parse(pattern) === ast)
+      assert(ast.toRegexString === pattern)
+    }
+  }
+
+  test("quantifier base and mode are independent semantic dimensions") {
+    val bases = Seq(
+      // base, regex string, minimum match length
+      (ZeroOrOne, "?", 0),
+      (ZeroOrMore, "*", 0),
+      (OneOrMore, "+", 1),
+      (Fixed(2), "{2}", 2),
+      (Variable(2, None), "{2,}", 2),
+      (Variable(2, Some(3)), "{2,3}", 2))
+    val modes = Seq(
+      // mode, regex suffix
+      (Greedy, ""),
+      (Reluctant, "?"),
+      (Possessive, "+"))
+
+    bases.foreach { case (base, baseString, minLength) =>
+      modes.foreach { case (mode, suffix) =>
+        val quantifier = RegexQuantifier(base, mode)
+        assert(quantifier.minLength === minLength)
+        assert(quantifier.toRegexString === s"$baseString$suffix")
+        assert(parse(s"a$baseString$suffix") ===
+          RegexSequence(ListBuffer(RegexRepetition(RegexChar('a'), quantifier))))
+      }
+    }
+
+    val first = new RegexQuantifier(Fixed(2), Greedy, 1)
+    val second = new RegexQuantifier(Fixed(2), Greedy, 9)
+    assert(first === second)
+  }
+
+  test("quantifier diagnostics point at the base or mode modifier") {
+    val cases = Seq(
+      "a*" -> 1,
+      "a*?" -> 2,
+      "a{2,3}" -> 1,
+      "a{2,3}?" -> 6)
+
+    cases.foreach { case (pattern, expectedPosition) =>
+      val RegexSequence(parts) = parse(pattern)
+      val repetition @ RegexRepetition(_, quantifier) = parts.head
+      assert(repetition.position.contains(1), pattern)
+      assert(quantifier.position.contains(expectedPosition), pattern)
+    }
+  }
+
+  test("unchecked parser matches Java errors for malformed counted quantifiers") {
+    Seq("a{3,4!", "a{3,2}").foreach { pattern =>
+      val expected = intercept[PatternSyntaxException] {
+        java.util.regex.Pattern.compile(pattern)
+      }
+      val actual = intercept[PatternSyntaxException] {
+        new RegexParser(pattern).parseUnchecked()
+      }
+      assert(actual.getDescription === expected.getDescription, pattern)
+      assert(actual.getIndex === expected.getIndex, pattern)
+    }
   }
 
   // Regression test for https://github.com/NVIDIA/cudf-spark/issues/15495
   test("quantifier integer boundaries") {
     val supportedBoundaries: Seq[(String, RegexQuantifier)] = Seq(
-      s"a{${Int.MaxValue}}" -> QuantifierFixedLength(Int.MaxValue),
-      s"a{${Int.MaxValue},}" -> QuantifierVariableLength(Int.MaxValue, None),
-      s"a{1,${Int.MaxValue}}" -> QuantifierVariableLength(1, Some(Int.MaxValue)))
+      s"a{${Int.MaxValue}}" -> RegexQuantifier(Fixed(Int.MaxValue), Greedy),
+      s"a{${Int.MaxValue},}" -> RegexQuantifier(Variable(Int.MaxValue, None), Greedy),
+      s"a{1,${Int.MaxValue}}" -> RegexQuantifier(Variable(1, Some(Int.MaxValue)), Greedy))
     supportedBoundaries.foreach { case (pattern, quantifier) =>
       assert(new RegexParser(pattern).parseUnchecked() ===
         RegexSequence(ListBuffer(RegexRepetition(RegexChar('a'), quantifier))))
@@ -90,12 +163,18 @@ class RegularExpressionParserSuite extends AnyFunSuite {
         RegexChar('{'), RegexChar('1'),RegexEscaped('}'))))
   }
 
-  test("nested repetition") {
+  test("possessive repetition has a semantic mode") {
     assert(parse("a*+") ===
       RegexSequence(ListBuffer(
-        RegexRepetition(
-          RegexRepetition(RegexChar('a'), SimpleQuantifier('*')),
-            SimpleQuantifier('+')))))
+        RegexRepetition(RegexChar('a'),
+          RegexQuantifier(ZeroOrMore, Possessive)))))
+  }
+
+  test("stacked quantifiers are unsupported") {
+    Seq("a*{2,}", "a{2}{3}", "a{2}?{3}").foreach { pattern =>
+      val e = intercept[RegexUnsupportedException] { parse(pattern) }
+      assert(e.getMessage.startsWith("Preceding token cannot be quantified"))
+    }
   }
 
   test("choice") {
@@ -169,7 +248,7 @@ class RegularExpressionParserSuite extends AnyFunSuite {
       RegexRepetition(
         RegexCharacterClass(negated = true,
           ListBuffer(RegexChar(']'), RegexChar('+'), RegexChar('d'))),
-        SimpleQuantifier('+')))))
+        RegexQuantifier(OneOrMore, Greedy)))))
   }
 
   test("character classes containing ']'") {
@@ -220,7 +299,7 @@ class RegularExpressionParserSuite extends AnyFunSuite {
             RegexRepetition(
               RegexCharacterClass(negated = false, ListBuffer(
                 RegexCharacterRange(RegexChar('A'), RegexChar('Z')))),
-              SimpleQuantifier('+')
+              RegexQuantifier(OneOrMore, Greedy)
             )
           ))
         ),
@@ -299,28 +378,31 @@ class RegularExpressionParserSuite extends AnyFunSuite {
 
   test("repetition with group containing simple repetition") {
     assert(parse("(3?)+") ===
-      RegexSequence(ListBuffer(RegexRepetition(RegexGroup(RegexGroup.Capturing,
-          RegexSequence(ListBuffer(RegexRepetition(RegexChar('3'), 
-          SimpleQuantifier('?'))))),SimpleQuantifier('+')))))
+      RegexSequence(ListBuffer(
+        RegexRepetition(
+          RegexGroup(RegexGroup.Capturing,
+            RegexSequence(ListBuffer(
+              RegexRepetition(RegexChar('3'), RegexQuantifier(ZeroOrOne, Greedy))))),
+          RegexQuantifier(OneOrMore, Greedy)))))
   }
 
   test("repetition with group containing escape character") {
     assert(parse(raw"(\A)+") ===
       RegexSequence(ListBuffer(RegexRepetition(RegexGroup(RegexGroup.Capturing,
           RegexSequence(ListBuffer(RegexEscaped('A')))),
-          SimpleQuantifier('+'))))
+          RegexQuantifier(OneOrMore, Greedy))))
     )
     assert(parse(raw"(?:\A)+") ===
       RegexSequence(ListBuffer(RegexRepetition(RegexGroup(RegexGroup.NonCapturing,
           RegexSequence(ListBuffer(RegexEscaped('A')))),
-          SimpleQuantifier('+'))))
+          RegexQuantifier(OneOrMore, Greedy))))
     )
   }
 
   test("group containing choice with repetition") {
     assert(parse("(\t+|a)") == RegexSequence(ListBuffer(
       RegexGroup(RegexGroup.Capturing, RegexChoice(RegexSequence(ListBuffer(
-        RegexRepetition(RegexChar('\t'),SimpleQuantifier('+')))),
+        RegexRepetition(RegexChar('\t'),RegexQuantifier(OneOrMore, Greedy)))),
         RegexSequence(ListBuffer(RegexChar('a'))))))))
   }
 
@@ -341,7 +423,7 @@ class RegularExpressionParserSuite extends AnyFunSuite {
   test("group containing quantifier") {
     assert(parse("(?:a?)") === RegexSequence(ListBuffer(
       RegexGroup(RegexGroup.NonCapturing, RegexSequence(ListBuffer(
-        RegexRepetition(RegexChar('a'), SimpleQuantifier('?'))))))))
+        RegexRepetition(RegexChar('a'), RegexQuantifier(ZeroOrOne, Greedy))))))))
     assert(parse("(?i:a)") === RegexSequence(ListBuffer(
       RegexGroup(RegexGroup.ScopedFlags(RegexFlagSet(Set(RegexFlag.CaseInsensitive), Set())),
         RegexSequence(ListBuffer(RegexChar('a')))))))
@@ -378,43 +460,44 @@ class RegularExpressionParserSuite extends AnyFunSuite {
     assert(ast ===
       RegexSequence(ListBuffer(RegexChar('^'),
         RegexRepetition(RegexCharacterClass(negated = false, ListBuffer(
-          RegexChar('+'), RegexEscaped('-'))), SimpleQuantifier('?')),
+          RegexChar('+'), RegexEscaped('-'))), RegexQuantifier(ZeroOrOne, Greedy)),
         RegexGroup(RegexGroup.Capturing, RegexChoice(RegexSequence(ListBuffer(
           RegexGroup(RegexGroup.Capturing, RegexSequence(ListBuffer(
             RegexGroup(RegexGroup.Capturing, RegexChoice(RegexSequence(ListBuffer(
               RegexGroup(RegexGroup.Capturing, RegexSequence(ListBuffer(
                 RegexRepetition(RegexCharacterClass(negated = false, ListBuffer(
                   RegexCharacterRange(RegexChar('0'), RegexChar('9')))), 
-                SimpleQuantifier('+'))))))),
+                RegexQuantifier(OneOrMore, Greedy))))))),
               RegexChoice(RegexSequence(ListBuffer(
                 RegexGroup(RegexGroup.Capturing, RegexSequence(ListBuffer(
                   RegexRepetition(
                     RegexCharacterClass(negated = false, ListBuffer(
                       RegexCharacterRange(RegexChar('0'), RegexChar('9')))), 
-                    SimpleQuantifier('*')), RegexEscaped('.'),
+                    RegexQuantifier(ZeroOrMore, Greedy)), RegexEscaped('.'),
                 RegexRepetition(
                     RegexCharacterClass(negated = false, ListBuffer(
                       RegexCharacterRange(RegexChar('0'), RegexChar('9')))),
-                    SimpleQuantifier('+'))))))), RegexSequence(ListBuffer(
+                    RegexQuantifier(OneOrMore, Greedy))))))), RegexSequence(ListBuffer(
                 RegexGroup(RegexGroup.Capturing, RegexSequence(ListBuffer(
                 RegexRepetition(
                     RegexCharacterClass(negated = false, ListBuffer(
                       RegexCharacterRange(RegexChar('0'), RegexChar('9')))),
-                    SimpleQuantifier('+')), RegexEscaped('.'),
+                    RegexQuantifier(OneOrMore, Greedy)), RegexEscaped('.'),
                 RegexRepetition(RegexCharacterClass(negated = false,
                     ListBuffer(RegexCharacterRange(RegexChar('0'), RegexChar('9')))),
-                    SimpleQuantifier('*')))))))))),
+                    RegexQuantifier(ZeroOrMore, Greedy)))))))))),
                   RegexRepetition(
               RegexGroup(RegexGroup.Capturing, RegexSequence(ListBuffer(
                 RegexCharacterClass(negated = false, ListBuffer(RegexChar('e'), RegexChar('E'))),
                   RegexRepetition(RegexCharacterClass(negated = false,
-                    ListBuffer(RegexChar('+'), RegexEscaped('-'))),SimpleQuantifier('?')),
+                    ListBuffer(RegexChar('+'), RegexEscaped('-'))),
+                    RegexQuantifier(ZeroOrOne, Greedy)),
                   RegexRepetition(RegexCharacterClass(negated = false,
                   ListBuffer(RegexCharacterRange(RegexChar('0'), RegexChar('9')))),
-                  SimpleQuantifier('+'))))), SimpleQuantifier('?')),
+                  RegexQuantifier(OneOrMore, Greedy))))), RegexQuantifier(ZeroOrOne, Greedy)),
             RegexRepetition(RegexCharacterClass(negated = false, ListBuffer(
               RegexChar('f'), RegexChar('F'), RegexChar('d'), RegexChar('D'))),
-              SimpleQuantifier('?'))))))),
+              RegexQuantifier(ZeroOrOne, Greedy))))))),
           RegexChoice(RegexSequence(ListBuffer(
             RegexChar('I'), RegexChar('n'), RegexChar('f'))),
             RegexSequence(ListBuffer(

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -193,9 +193,7 @@ class GpuLoreSuite extends SparkQueryCompareTestSuite with FunSuiteWithTempDir w
       val df = spark.range(0, 1000, 1, 100)
         .selectExpr("id % 10 as key", "id % 100 as value")
 
-      val res = df.collect().length
-      println(s"Length of original: $res")
-
+      df.collect()
 
       val restoredRes = GpuColumnarToRowExec(GpuLore.restoreGpuExec(
         new Path(s"${TEST_FILES_ROOT.getAbsolutePath}/loreId-3"), spark))

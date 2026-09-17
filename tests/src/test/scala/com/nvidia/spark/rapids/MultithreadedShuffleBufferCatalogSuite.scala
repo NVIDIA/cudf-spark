@@ -38,6 +38,15 @@ import org.apache.spark.storage.{ShuffleBlockBatchId, ShuffleBlockId}
 class MultithreadedShuffleBufferCatalogSuite
     extends AnyFunSuite with MockitoSugar with BeforeAndAfterEach {
 
+  private case class FileOnlyPartitionFixture(
+      catalog: MultithreadedShuffleBufferCatalog,
+      handle: SpillablePartialFileHandle,
+      backingFile: File,
+      blockId: ShuffleBlockId,
+      batchId: ShuffleBlockBatchId)
+
+  private case class ConsumerAction(name: String, run: () => (() => Unit))
+
   test("registered shuffles should be active") {
     val catalog = new MultithreadedShuffleBufferCatalog()
     assertResult(false)(catalog.hasActiveShuffle(123))
@@ -247,30 +256,207 @@ class MultithreadedShuffleBufferCatalogSuite
   test("convertToNetty release closes retained handle exactly once") {
     // The handle owns the close deferral, so a mock can't reproduce it: use a real FILE_ONLY
     // handle and observe the physical close via `isPhysicallyClosed`.
+    withFileOnlyPartition("skipmerge-region-") { fixture =>
+      val buffer = fixture.catalog.getMergedBuffer(fixture.blockId)
+      val region = buffer.convertToNetty().asInstanceOf[FileRegion]
+      try {
+        // Cleanup requests close, but the file region still holds a read lease: close is deferred.
+        fixture.catalog.unregisterShuffle(fixture.blockId.shuffleId)
+        assert(!fixture.handle.isPhysicallyClosed,
+          "handle must stay open while the file region holds a lease")
+
+        // Releasing the region drops the last lease and runs the deferred physical close.
+        assert(region.release())
+        assert(fixture.handle.isPhysicallyClosed,
+          "handle must close once the file region releases its lease")
+
+        // No retained buffer lease here, so releasing the buffer is a no-op and must not re-close.
+        buffer.release()
+        assert(fixture.handle.isPhysicallyClosed)
+      } finally {
+        if (region.refCnt() > 0) {
+          region.release()
+        }
+      }
+    }
+  }
+
+  test("handed-off single buffer reports missing data when cleanup wins") {
+    verifyClosedSingleHandoff()
+  }
+
+  test("handed-off batch buffer reports missing data when cleanup wins") {
+    verifyClosedBatchHandoff()
+  }
+
+  test("unrelated lease acquisition failures propagate unchanged") {
     val catalog = new MultithreadedShuffleBufferCatalog()
-    val backingFile = File.createTempFile("skipmerge-region-", ".data")
-    val handle = SpillablePartialFileHandle.createFileOnly(backingFile)
-    handle.write(Array.fill[Byte](100)(7.toByte), 0, 100)
-    handle.finishWrite()
+    val handle = createMockHandle()
+    val blockId = ShuffleBlockId(1, 0L, 0)
+    val failure = new IllegalStateException("unrelated lease failure")
+    doThrow(failure).when(handle).acquireRead()
     try {
       catalog.registerShuffle(1)
       catalog.addPartition(1, 0L, 0, handle, 0, 100)
 
-      val buffer = catalog.getMergedBuffer(ShuffleBlockId(1, 0L, 0))
-      val region = buffer.convertToNetty().asInstanceOf[FileRegion]
-
-      // Cleanup requests close, but the file region still holds a read lease: close is deferred.
+      // Only acquire-after-close means missing data. Other failures can expose broken invariants.
+      val buffer = catalog.getMergedBuffer(blockId)
+      val error = intercept[IllegalStateException](buffer.retain())
+      assert(error eq failure)
+    } finally {
       catalog.unregisterShuffle(1)
-      assert(!handle.isPhysicallyClosed,
-        "handle must stay open while the file region holds a lease")
+    }
+  }
 
-      // Releasing the region drops the last lease and runs the deferred physical close.
-      assert(region.release())
-      assert(handle.isPhysicallyClosed, "handle must close once the file region releases its lease")
+  test("lease acquisition rolls back an earlier handle when a later handle fails") {
+    val first = createMockHandle()
+    val second = createMockHandle()
+    val failure = new IllegalStateException("later acquire failed")
+    doThrow(failure).when(second).acquireRead()
 
-      // No retained buffer lease here, so releasing the buffer is a no-op and must not re-close.
-      buffer.release()
-      assert(handle.isPhysicallyClosed)
+    val error = intercept[IllegalStateException] {
+      ShuffleHandleLease.acquire(Seq(first, second))
+    }
+
+    assert(error eq failure)
+    verify(first).acquireRead()
+    verify(first, times(1)).releaseRead()
+    verify(second).acquireRead()
+    verify(second, never()).releaseRead()
+  }
+
+  test("unconsumed handed-off buffer does not defer cleanup") {
+    withFileOnlyPartition("skipmerge-abandoned-") { fixture =>
+      // Creating but not retaining or consuming the buffer must leave cleanup unblocked.
+      fixture.catalog.getMergedBuffer(fixture.blockId)
+
+      fixture.catalog.unregisterShuffle(fixture.blockId.shuffleId)
+      assert(fixture.handle.isPhysicallyClosed, "an unconsumed buffer pinned the handle")
+      assert(!fixture.backingFile.exists(),
+        "cleanup did not delete the unconsumed buffer's file")
+    }
+  }
+
+  private def verifyClosedSingleHandoff(): Unit = {
+    verifyClosedHandoff { fixture =>
+      val blockId = fixture.blockId
+      (fixture.catalog.getMergedBuffer(blockId), s"No data found for block $blockId")
+    }
+  }
+
+  private def verifyClosedBatchHandoff(): Unit = {
+    verifyClosedHandoff { fixture =>
+      val batchId = fixture.batchId
+      (fixture.catalog.getMergedBatchBuffer(batchId),
+        s"No data found for batch block $batchId")
+    }
+  }
+
+  private def verifyClosedHandoff(
+      getBufferAndMessage: FileOnlyPartitionFixture => (ManagedBuffer, String)): Unit = {
+    withFileOnlyPartition("skipmerge-handoff-") { fixture =>
+      val (buffer, expectedMessage) = getBufferAndMessage(fixture)
+      assert(buffer.size() == 100, "buffer was not handed out before cleanup")
+
+      fixture.catalog.unregisterShuffle(fixture.blockId.shuffleId)
+      assert(fixture.handle.isPhysicallyClosed, "cleanup did not win the hand-off window")
+
+      val consumerActions = Seq(
+        ConsumerAction("retain", () => {
+          val retained = buffer.retain()
+          () => {
+            retained.release()
+            ()
+          }
+        }),
+        ConsumerAction("nioByteBuffer", () => {
+          buffer.nioByteBuffer()
+          () => ()
+        }),
+        ConsumerAction("createInputStream", () => {
+          val input = buffer.createInputStream()
+          () => input.close()
+        }),
+        ConsumerAction("convertToNetty", () => {
+          val region = buffer.convertToNetty().asInstanceOf[FileRegion]
+          () => {
+            region.release()
+            ()
+          }
+        }))
+
+      val attemptedActions = new ArrayBuffer[String](consumerActions.size)
+      val firstActionFailure = runAllCapturingFirstFailure(consumerActions.map { action =>
+        () => {
+          attemptedActions += action.name
+          verifyMissingConsumerAction(action, expectedMessage)
+        }
+      })
+      assertResult(consumerActions.map(_.name))(attemptedActions.toSeq)
+      firstActionFailure.foreach(throw _)
+    }
+  }
+
+  private def verifyMissingConsumerAction(
+      action: ConsumerAction,
+      expectedMessage: String): Unit = withClue(s"${action.name}: ") {
+    val result: Either[IllegalArgumentException, () => Unit] =
+      try {
+        Right(action.run())
+      } catch {
+        case e: IllegalArgumentException => Left(e)
+      }
+
+    result match {
+      case Left(error) =>
+        assertResult(expectedMessage)(error.getMessage)
+        assertResult("com.nvidia.spark.rapids.spill.ClosedPartialFileHandleException")(
+          Option(error.getCause).map(_.getClass.getName).orNull)
+      case Right(cleanup) =>
+        cleanup()
+        fail(s"${action.name} did not report the missing block")
+    }
+  }
+
+  private def runAllCapturingFirstFailure(actions: Seq[() => Unit]): Option[Throwable] = {
+    var firstFailure: Option[Throwable] = None
+    actions.foreach { action =>
+      try {
+        action()
+      } catch {
+        case NonFatal(t) if firstFailure.isEmpty => firstFailure = Some(t)
+        case NonFatal(t) => firstFailure.foreach(_.addSuppressed(t))
+      }
+    }
+    firstFailure
+  }
+
+  private def withFileOnlyPartition[T](
+      filePrefix: String)(body: FileOnlyPartitionFixture => T): T = {
+    val backingFile = File.createTempFile(filePrefix, ".data")
+    try {
+      val shuffleId = 1
+      val catalog = new MultithreadedShuffleBufferCatalog()
+      val handle = SpillablePartialFileHandle.createFileOnly(backingFile)
+      try {
+        handle.write(Array.fill[Byte](100)(7.toByte), 0, 100)
+        handle.finishWrite()
+
+        val blockId = ShuffleBlockId(shuffleId, 0L, 0)
+        val batchId = ShuffleBlockBatchId(shuffleId, 0L, 0, 1)
+        catalog.registerShuffle(shuffleId)
+        catalog.addPartition(shuffleId, 0L, 0, handle, 0, 100)
+
+        body(FileOnlyPartitionFixture(catalog, handle, backingFile, blockId, batchId))
+      } finally {
+        try {
+          if (catalog.hasActiveShuffle(shuffleId)) {
+            catalog.unregisterShuffle(shuffleId)
+          }
+        } finally {
+          handle.close()
+        }
+      }
     } finally {
       if (backingFile.exists()) {
         backingFile.delete()

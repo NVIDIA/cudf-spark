@@ -1,8 +1,8 @@
 # NVIDIA cuDF plugin for Apache Spark
-NOTE: For the latest stable [README.md](https://github.com/nvidia/cudf-spark/blob/main/README.md) ensure you are on the main branch.
+NOTE: For the latest stable [README.md](https://github.com/NVIDIA/cudf-spark/blob/main/README.md) ensure you are on the main branch.
 
 The NVIDIA cuDF plugin for [Apache Spark](https://spark.apache.org) provides a plugin library that
-leverages GPUs to accelerate processing via the [cuDF](https://github.com/rapidsai/cudf) (CUDA
+leverages GPUs to accelerate processing via the [cuDF](https://github.com/NVIDIA/cudf) (CUDA
 DataFrame) libraries.
 
 Documentation on the current release can be found [here](https://nvidia.github.io/cudf-spark/).
@@ -12,7 +12,7 @@ To get started and try the plugin out use the [getting started guide](https://do
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/NVIDIA/cudf-spark)
 
 Note: The NVIDIA cuDF plugin for Apache Spark was formerly known as the RAPIDS Accelerator for
-Apache Spark.  The RAPIDS name will be sunset over time.  Github links from `spark-rapids` will
+Apache Spark.  The RAPIDS name will be sunset over time.  GitHub links from `spark-rapids` will
 redirect to `cudf-spark`.  Artifact names will remain the same for now.
 
 ## Compatibility
@@ -62,8 +62,8 @@ access to any of the memory that RMM is holding.
 
 ## Qualification and Profiling tools
 
-The Qualification and Profiling tools have been moved to
-[nvidia/spark-rapids-tools](https://github.com/NVIDIA/spark-rapids-tools) repo.
+The Qualification and Profiling tools are available in the
+[NVIDIA/cudf-spark-tools](https://github.com/NVIDIA/cudf-spark-tools) repository.
 
 Please refer to [Qualification tool documentation](https://docs.nvidia.com/spark-rapids/user-guide/latest/qualification/overview.html)
 and [Profiling tool documentation](https://docs.nvidia.com/spark-rapids/user-guide/latest/profiling/overview.html)

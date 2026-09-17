@@ -16,15 +16,17 @@ from typing import Callable, Any
 import pytest
 from pyspark.sql import functions as F
 
-from asserts import assert_equal_with_local_sort, assert_gpu_fallback_collect
+from asserts import assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect, \
+    assert_gpu_fallback_collect
 from conftest import is_iceberg_remote_catalog
-from data_gen import gen_df, copy_and_update, StringGen
+from data_gen import DEFAULT_DATA_GEN_LENGTH, StringGen, copy_and_update, gen_df
 from iceberg import create_iceberg_table, \
     iceberg_base_table_cols, iceberg_gens_list, \
     get_full_table_name, iceberg_full_gens_list, iceberg_nested_write_gens_list, \
     iceberg_write_enabled_conf, iceberg_unsupported_mark, _build_tblprops, \
     overwrite_static_partition_transforms, supports_iceberg_v3, \
-    ICEBERG_V3_UNSUPPORTED_REASON
+    ICEBERG_V3_UNSUPPORTED_REASON, supports_iceberg_row_lineage_inheritance, \
+    ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, row_lineage_df
 from marks import iceberg, ignore_order, allow_non_gpu, datagen_overrides
 from spark_session import with_gpu_session, with_cpu_session
 
@@ -114,6 +116,38 @@ def test_insert_overwrite_v3_table_fallback(spark_tmp_table_factory):
         lambda spark: insert_data(spark, None),
         "OverwriteByExpressionExec",
         conf=iceberg_static_overwrite_conf)
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.skipif(
+    not supports_iceberg_row_lineage_inheritance,
+    reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
+def test_iceberg_v3_row_lineage_insert_overwrite(spark_tmp_table_factory):
+    full_table = get_full_table_name(spark_tmp_table_factory)
+    source_view = spark_tmp_table_factory.get()
+
+    def setup_iceberg_table(spark):
+        spark.sql(
+            f"CREATE TABLE {full_table} (id BIGINT, v BIGINT) USING ICEBERG "
+            "TBLPROPERTIES ('format-version' = '3')")
+        row_lineage_df(spark, with_value=True).writeTo(full_table).append()
+        overwrite_df = row_lineage_df(
+            spark,
+            start=DEFAULT_DATA_GEN_LENGTH,
+            with_value=True)
+        overwrite_df.createOrReplaceTempView(source_view)
+        spark.sql(
+            f"INSERT OVERWRITE {full_table} SELECT * FROM {source_view}")
+
+    with_cpu_session(setup_iceberg_table)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(
+            f"SELECT id, v, _row_id, _last_updated_sequence_number FROM {full_table}"),
+        conf={
+            "spark.rapids.sql.format.iceberg.v3.enabled": "true",
+            "spark.rapids.sql.format.parquet.reader.type": "COALESCING"
+        })
 
 
 @iceberg

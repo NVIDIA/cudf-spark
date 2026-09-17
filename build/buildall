@@ -487,15 +487,20 @@ time (
         refresh_fast_aggregator_jar "$bv"
       done
     else
-    # Execute initialize to download a massive jar for spark-rapids-jni in a single thread to
-    # avoid repeating this work in parallel. This is unnecessary in unshim-fast modes that skip
-    # JNI unpacking.
-    if [[ "$UNSHIM_FAST" == "1" && "$MVN_FAST_SKIP_OPTS" == *"-Drapids.jni.unpack.skip=true"* ]]; then
-      echo "Unshim fast: skipping serial Maven initialize preflight"
-    else
-      # Initialize sql-plugin-api only to avoid dealing with missing submodule dependencies.
-      $MVN initialize -pl sql-plugin-api -am
-    fi
+    # Run through process-resources before starting independent Maven JVMs. This downloads and
+    # unpacks spark-rapids-jni serially when needed and populates the shared Scala compiler bridge
+    # cache. scala-maven-plugin's bridge installation lock is JVM-local, so a cold cache must be
+    # populated before xargs starts parallel Maven processes.
+    echo "Prewarming Maven dependencies and the Scala compiler bridge"
+    $MVN $MAVEN_REFRESH_OPT process-resources \
+      -DskipTests \
+      -Dbuildver="$BASE_VER" \
+      -Drat.skip=true \
+      -Dmaven.scaladoc.skip=true \
+      -Dmaven.javadoc.skip=true \
+      -Dmaven.scalastyle.skip=true \
+      $MVN_FAST_SKIP_OPTS \
+      -pl sql-plugin-api -am
 
     printf "%s\n" "${SPARK_SHIM_VERSIONS[@]}" | \
       xargs -t -I% -P "$BUILD_PARALLEL" -n 1 \
