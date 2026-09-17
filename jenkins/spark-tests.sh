@@ -368,6 +368,21 @@ run_iceberg_tests() {
   # get the patch version of Spark
   SPARK_PATCH_VER=$(echo "$SPARK_VER" | cut -d. -f3)
 
+  # Spark 3.5 validates every optimizer rule's output when the spark.testing JVM property is
+  # present. Iceberg V3 COW rewrites temporarily produce an unresolved ReplaceData plan while
+  # GroupBasedRowLevelOperationScanPlanning rewrites row-lineage columns, so the test-only
+  # validation fails CPU setup before physical planning. Because spark.testing is presence-based
+  # (even false enables it) and cannot be disabled through SparkSession configuration, omit it for
+  # Spark 3.5 Iceberg test subprocesses. Spark 4 uses native row-lineage metadata projections and
+  # does not have this issue.
+  # See https://github.com/NVIDIA/cudf-spark/issues/15680
+  # https://github.com/NVIDIA/cudf-spark/issues/15950
+  # and https://github.com/apache/iceberg/issues/18131.
+  if [[ "$ICEBERG_SPARK_VER" == "3.5" ]]; then
+    local SPARK_TESTING_ENABLED=0
+    export SPARK_TESTING_ENABLED
+  fi
+
   if [[ "$ICEBERG_SPARK_VER" != "3.5" && "$ICEBERG_SPARK_VER" != "4.0" \
         && "$ICEBERG_SPARK_VER" != "4.1" ]]; then
     echo "!!!! Skipping Iceberg tests. GPU acceleration of Iceberg is not supported on $ICEBERG_SPARK_VER"

@@ -25,6 +25,7 @@
 {"spark": "412"}
 {"spark": "413"}
 {"spark": "420"}
+{"spark": "500"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids
 
@@ -92,7 +93,7 @@ class MissingFileStructuredErrorSuite extends SparkQueryCompareTestSuite {
       val readerTypes = Seq(RapidsReaderType.COALESCING, RapidsReaderType.MULTITHREADED) ++
         (if (useV1) Seq(RapidsReaderType.PERFILE) else Seq.empty)
       readerTypes.foreach { readerType =>
-        test(s"Spark 4 missing-file structured error parity - $sourceName - $readerType") {
+        test(s"Spark 4+ missing-file structured error parity - $sourceName - $readerType") {
           val conf = new SparkConf()
             .set(SQLConf.USE_V1_SOURCE_LIST.key, v1Sources)
             .set(SQLConf.IGNORE_MISSING_FILES.key, "false")
@@ -109,7 +110,7 @@ class MissingFileStructuredErrorSuite extends SparkQueryCompareTestSuite {
       }
   }
 
-  test("Spark 4 copied V1 per-file RDD attaches the missing-file path") {
+  test("Spark 4+ copied V1 per-file RDD attaches the missing-file path") {
     withCpuSparkSession { spark =>
       withTempPath { missingFile =>
         val missingPath = missingFile.toPath.toUri.toString

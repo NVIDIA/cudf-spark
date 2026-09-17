@@ -35,8 +35,8 @@ iceberg_unsupported_mark = pytest.mark.skipif(
 runtime_iceberg_version = os.environ.get("EXPECTED_ICEBERG_VERSION")
 supports_iceberg_v3 = (
     runtime_iceberg_version is not None and
-    tuple(int(part) for part in runtime_iceberg_version.split(".")[:2]) >= (1, 9))
-ICEBERG_V3_UNSUPPORTED_REASON = "Iceberg v3 requires Iceberg 1.9.0 or later"
+    tuple(int(part) for part in runtime_iceberg_version.split(".")[:2]) >= (1, 10))
+ICEBERG_V3_UNSUPPORTED_REASON = "Iceberg v3 requires Iceberg 1.10.0 or later"
 supports_iceberg_row_lineage_inheritance = (
     runtime_iceberg_version is not None and
     tuple(int(part) for part in runtime_iceberg_version.split(".")[:2]) >= (1, 10))

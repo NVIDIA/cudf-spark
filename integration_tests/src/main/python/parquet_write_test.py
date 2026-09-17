@@ -752,28 +752,36 @@ def test_fallback_to_single_writer_from_concurrent_writer(spark_tmp_path, aqe_en
         ))
 
 
-@pytest.mark.skipif(True, reason="currently not support write emtpy data: https://github.com/NVIDIA/spark-rapids/issues/6453")
+def _assert_write_empty_partitioned_data(spark_tmp_path, max_concurrent_writers):
+    schema = StructType(
+        [StructField("c1", StringType()), StructField("c2", IntegerType()), StructField("c3", IntegerType())])
+    data = []  # empty data
+    data_path = spark_tmp_path + '/PARQUET_DATA'
+
+    def read_empty_data(spark, path):
+        # Empty partitioned output has no data files from which either writer can infer a schema.
+        with pytest.raises(pyspark.sql.utils.AnalysisException, match="Unable to infer schema for Parquet"):
+            spark.read.parquet(path)
+        result = spark.read.schema(schema).parquet(path)
+        assert result.schema == schema
+        return result
+
+    assert_gpu_and_cpu_writes_are_equal_collect(
+        lambda spark, path: spark.createDataFrame(spark.sparkContext.parallelize(data), schema)
+            .write.mode("overwrite").partitionBy('c1', 'c2').parquet(path),
+        read_empty_data,
+        data_path,
+        conf={"spark.sql.maxConcurrentOutputFileWriters": max_concurrent_writers})
+
+
+@validate_execs_in_gpu_plan("GpuDataWritingCommandExec")
 def test_write_empty_data_concurrent_writer(spark_tmp_path):
-    schema = StructType(
-        [StructField("c1", StringType()), StructField("c2", IntegerType()), StructField("c3", IntegerType())])
-    data = []  # empty data
-    data_path = spark_tmp_path + '/PARQUET_DATA'
-    with_gpu_session(lambda spark: spark.createDataFrame(spark.sparkContext.parallelize(data), schema)
-                     .write.mode("overwrite").partitionBy('c1', 'c2').parquet(data_path),
-                     # concurrent writer
-                     {"spark.sql.maxConcurrentOutputFileWriters": 10})
-    with_cpu_session(lambda spark: spark.read.parquet(data_path).collect())
+    _assert_write_empty_partitioned_data(spark_tmp_path, 10)
 
 
-@pytest.mark.skipif(True, reason="currently not support write emtpy data: https://github.com/NVIDIA/spark-rapids/issues/6453")
+@validate_execs_in_gpu_plan("GpuDataWritingCommandExec")
 def test_write_empty_data_single_writer(spark_tmp_path):
-    schema = StructType(
-        [StructField("c1", StringType()), StructField("c2", IntegerType()), StructField("c3", IntegerType())])
-    data = []  # empty data
-    data_path = spark_tmp_path + '/PARQUET_DATA'
-    with_gpu_session(lambda spark: spark.createDataFrame(spark.sparkContext.parallelize(data), schema)
-                     .write.mode("overwrite").partitionBy('c1', 'c2').parquet(data_path))
-    with_cpu_session(lambda spark: spark.read.parquet(data_path).collect())
+    _assert_write_empty_partitioned_data(spark_tmp_path, 0)
 
 
 PartitionWriteMode = Enum('PartitionWriteMode', ['Static', 'Dynamic'])

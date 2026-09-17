@@ -58,6 +58,16 @@ $MVN -B deploy:deploy-file $MVN_URM_MIRROR -Durl=$SERVER_URL -DrepositoryId=$SER
 DB_PLUGIN_API_JAR_PATH=./sql-plugin-api/target/${DB_SHIM_NAME}/rapids-4-spark-sql-plugin-api_$SCALA_VERSION-$SPARK_PLUGIN_JAR_VERSION-${DB_SHIM_NAME}.jar
 $MVN -B deploy:deploy-file $MVN_URM_MIRROR -Durl=$SERVER_URL -DrepositoryId=$SERVER_ID \
     -Dfile=$DB_PLUGIN_API_JAR_PATH -DpomFile=./sql-plugin-api/pom.xml -Dclassifier=$DB_SHIM_NAME
+# The distribution packager inspects these standalone helper jars for every shim.
+# Use its module list so newly extracted helpers are also published for Databricks.
+while read -r MODULE || [[ -n "$MODULE" ]]; do
+    case "$MODULE" in
+        ''|\#*) continue ;;
+    esac
+    DB_HELPER_JAR_PATH=./$MODULE/target/${DB_SHIM_NAME}/rapids-4-spark-${MODULE}_$SCALA_VERSION-$SPARK_PLUGIN_JAR_VERSION-${DB_SHIM_NAME}.jar
+    $MVN -B deploy:deploy-file $MVN_URM_MIRROR -Durl=$SERVER_URL -DrepositoryId=$SERVER_ID \
+        -Dfile=$DB_HELPER_JAR_PATH -DpomFile=./$MODULE/pom.xml -Dclassifier=$DB_SHIM_NAME
+done < dist/root-safe-module-classes.txt
 # Deploy the integration test jar
 DBINTTESTJARFPATH=./integration_tests/target/rapids-4-spark-integration-tests_$SCALA_VERSION-$SPARK_PLUGIN_JAR_VERSION-${DB_SHIM_NAME}.jar
 $MVN -B deploy:deploy-file $MVN_URM_MIRROR -Durl=$SERVER_URL -DrepositoryId=$SERVER_ID \

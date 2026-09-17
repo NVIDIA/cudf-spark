@@ -17,6 +17,8 @@
 
 remote_theme: pmarsceill/just-the-docs
 
+color_scheme: emerald
+
 aux_links:
   "NVIDIA cuDF plugin for Apache Spark User Guide":
     - "//docs.nvidia.com/spark-rapids/user-guide/latest/index.html"
